@@ -11,6 +11,8 @@ const req_checks = @import("req_checks.zig");
 const coverage = @import("coverage.zig");
 const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
+const thermal = @import("eval/thermal.zig");
+const thermal_scenarios = @import("thermal_scenarios.zig");
 const DesignBlock = env_mod.DesignBlock;
 const Section = env_mod.Section;
 const Instance = env_mod.Instance;
@@ -187,6 +189,34 @@ pub const PowerTree = struct {
     edges: []const PowerTreeEdge = &.{},
 };
 
+/// Everything the review says about what the board draws and what that costs
+/// it in heat. Grouped because the four analyses share one subject and render
+/// as one run of engineering tables (the schematic page's dashboards, the
+/// markdown report's tables, the PDF's "Power & Bring-Up" sheet), so a surface
+/// that carries one of them carries all four.
+pub const PowerReport = struct {
+    /// Per-rail source-vs-load current budget, sorted tightest-first.
+    budget: []const power_budget.Rail,
+    /// Topological rail tree. Exposed through the review JSON only.
+    tree: PowerTree = .{},
+    /// Rails in power-up order with their enable dependencies.
+    sequence: []const power_sequencing.SequenceRow,
+    /// Screening-grade steady-state junction temperatures at bench ambient,
+    /// with the board verdict and the ambient window it is good for.
+    thermal: thermal.BoardThermal,
+    /// The layout-aware cooling-scenario ladder, when the caller resolved a
+    /// placement to spread that heat over — else the reason it could not.
+    ///
+    /// Deliberately NOT filled in by `buildReview`: the ladder needs the
+    /// project directory and the design's saved layouts, which are the serve /
+    /// CLI layer's to resolve, and a review of a block held in memory has
+    /// neither. A caller that has them assigns this after building the
+    /// document; one that has not leaves it, and every surface then says the
+    /// scenarios need a layout instead of showing a board that was never
+    /// placed.
+    scenarios: thermal_scenarios.Answer = .{},
+};
+
 pub const ReviewDoc = struct {
     design_name: []const u8,
     title: []const u8,
@@ -196,9 +226,8 @@ pub const ReviewDoc = struct {
     revision: env_mod.Revision = .{},
     summary: Summary,
     sections: []const SectionReport,
-    power_budget: []const power_budget.Rail,
-    power_tree: PowerTree = .{},
-    power_sequence: []const power_sequencing.SequenceRow,
+    /// Rail budget, rail tree, power-up sequence and thermal screening.
+    power: PowerReport,
     test_points: []const TestPointEntry,
     bom: []const BomGroup,
     assertions: []const AssertionReport,
@@ -234,6 +263,10 @@ pub fn buildReview(
     const rails_sorted = try sortRailsByTightness(allocator, rails);
     const power_tree = try buildPowerTree(allocator, block);
     const sequence = try power_sequencing.analyze(allocator, block);
+    // Screened at bench ambient: the review document is a read of the design,
+    // not a parameter sweep. A caller who wants another ambient asks
+    // `GET /api/thermal/:name?ambient=…` for it.
+    const heat = try thermal.analyze(allocator, block, thermal.default_ambient_c);
     const test_points = try buildTestPoints(allocator, block);
     const bom = try buildBom(allocator, block);
     const asserts = try buildAssertionReports(allocator, assertions);
@@ -249,9 +282,12 @@ pub fn buildReview(
         .revision = block.revision,
         .summary = summary,
         .sections = sections,
-        .power_budget = rails_sorted,
-        .power_tree = power_tree,
-        .power_sequence = sequence,
+        .power = .{
+            .budget = rails_sorted,
+            .tree = power_tree,
+            .sequence = sequence,
+            .thermal = heat,
+        },
         .test_points = test_points,
         .bom = bom,
         .assertions = asserts,
@@ -970,7 +1006,7 @@ pub fn isoTimestamp(allocator: std.mem.Allocator, unix_s: i64) std.mem.Allocator
         "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z",
         .{
             @as(u32, yd.year),
-            @intFromEnum(md.month),
+            @backingInt(md.month),
             md.day_index + 1,
             day_secs.getHoursIntoDay(),
             day_secs.getMinutesIntoHour(),

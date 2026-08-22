@@ -30,10 +30,10 @@ const Server = serve_root.Server;
 const edit = @import("edit.zig");
 const HandlerError = edit.HandlerError;
 const paths = @import("../paths.zig");
+const lib_limits = @import("../lib_limits.zig");
 
 const header_cors = "access-control-allow-origin";
 const max_source_bytes: usize = 10 * 1024 * 1024;
-const max_lib_file_bytes: usize = 1024 * 1024;
 const sexp_ext = ".sexp";
 const footprint_open = "(footprint ";
 
@@ -82,8 +82,8 @@ pub fn validateSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response
     }
     const source = source_val.string;
 
-    var out: std.ArrayList(u8) = .empty;
-    const w = out.writer(ctx.allocator);
+    var out: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const w = &out.writer;
 
     // Pre-flight parse so a pure syntax error reports as "syntax error" with
     // a clear name rather than the evaluator's catch-all ImportError. The
@@ -141,7 +141,7 @@ pub fn validateSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response
     }
 
     try w.writeAll("]}");
-    res.body = out.items;
+    res.body = out.written();
 }
 
 /// Emit one diagnostic object into the array, prefixing a comma when it is
@@ -179,15 +179,15 @@ pub fn libIndexApi(ctx: *Server, _: *httpz.Request, res: *httpz.Response) Handle
     res.content_type = .JSON;
     res.header(header_cors, "*");
 
-    var out: std.ArrayList(u8) = .empty;
-    const w = out.writer(ctx.allocator);
+    var out: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const w = &out.writer;
 
     try w.writeAll("{\"components\":[");
     try emitComponents(ctx, w);
     try w.writeAll("],\"modules\":[");
     try emitModules(ctx, w);
     try w.writeAll("]}");
-    res.body = out.items;
+    res.body = out.written();
 }
 
 fn emitComponents(ctx: *Server, w: anytype) HandlerError!void {
@@ -199,7 +199,7 @@ fn emitComponents(ctx: *Server, w: anytype) HandlerError!void {
     while (iter.next() catch null) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, sexp_ext)) continue;
         const base = entry.name[0 .. entry.name.len - sexp_ext.len];
-        const content = dir.readFileAlloc(ctx.allocator, entry.name, max_lib_file_bytes) catch continue;
+        const content = dir.readFileAlloc(ctx.allocator, entry.name, lib_limits.max_lib_file_bytes) catch continue;
         const is_family = std.mem.indexOf(u8, content, "(component-family ") != null;
         const footprint = extractFootprint(content);
         if (!first) try w.writeAll(",");
@@ -246,7 +246,7 @@ fn emitModules(ctx: *Server, w: anytype) HandlerError!void {
     while (iter.next() catch null) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, sexp_ext)) continue;
         const base = entry.name[0 .. entry.name.len - sexp_ext.len];
-        const content = dir.readFileAlloc(ctx.allocator, entry.name, max_lib_file_bytes) catch "";
+        const content = dir.readFileAlloc(ctx.allocator, entry.name, lib_limits.max_lib_file_bytes) catch "";
         const params = extractModuleParams(content, base);
         // A premade layout = the defmodule body carries a (placement …) spec.
         const has_placement = std.mem.indexOf(u8, content, "(placement") != null;
@@ -429,8 +429,8 @@ pub fn saveDiagramLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respo
         return;
     };
 
-    var out: std.ArrayList(u8) = .empty;
-    const w = out.writer(ctx.allocator);
+    var out: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const w = &out.writer;
     if (findLayoutForm(source)) |span| {
         try w.writeAll(source[0..span.start]);
         try w.writeAll(form);
@@ -452,7 +452,7 @@ pub fn saveDiagramLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respo
         return;
     }
 
-    const result = edit.writeDesignCore(ctx.allocator, ctx.project_dir, name, out.items) catch |err| {
+    const result = edit.writeDesignCore(ctx.allocator, ctx.project_dir, name, out.written()) catch |err| {
         res.status = 400;
         res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":false,\"error\":\"{s}\"}}", .{@errorName(err)});
         return;

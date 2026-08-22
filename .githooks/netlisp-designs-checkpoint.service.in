@@ -1,0 +1,8 @@
+[Unit]
+Description=Checkpoint stable live netlisp design changes
+ConditionPathIsDirectory=@TOP@/projects/designs/.git
+
+[Service]
+Type=oneshot
+WorkingDirectory=@TOP@
+ExecStart=/usr/bin/env python3 @TOP@/scripts/checkpoint-designs.py --project-dir @TOP@/projects/designs --quiet-seconds @QUIET_SECONDS@

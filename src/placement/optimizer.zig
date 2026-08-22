@@ -27,10 +27,11 @@
 //!      tightest non-overlapping spot against its pin (the relaxation leaves
 //!      resistors a millimetre loose).
 //!
-//! After a final grid-aware legalization, no two courtyards overlap. A closing
-//! compaction then docks every passive still held off by the snap-safety gap
-//! against its nearest neighbour, so each courtyard abuts at least one other
-//! (hubs stay put as anchors) — the layout is provably as tight as it packs.
+//! After grid-aware legalization and routability repair, a guarded compaction
+//! closes the temporary snap-safety gap wherever a part can move onto a
+//! neighbouring courtyard edge without overlap. It prefers passive rows over
+//! pulling parts against a hub, preserving the IC breakout channel; `route_gap`
+//! remains the explicit way to reserve wider aisles.
 //! Large whole-board layouts skip steps 1–3 (they blob together regardless) and
 //! take a single grid-seeded relax. It is deterministic — seeds derive from the
 //! start index, not an RNG — so a design always yields the same layout.
@@ -38,19 +39,46 @@
 
 const std = @import("std");
 const env = @import("../eval/env.zig");
-const export_kicad = @import("../export_kicad.zig");
-const netlist_mod = @import("../export_kicad_netlist.zig");
+const rails_mod = @import("../eval/rails.zig");
+const net_analysis = @import("../eval/net_analysis.zig");
+const cap_bind = @import("cap_bind.zig");
+const decouple_key = @import("../decouple_key.zig");
+const flat_netlist = @import("../flat_netlist.zig");
+const near_bind = @import("near_bind.zig");
 const geometry = @import("geometry.zig");
 const pin_roles = @import("pin_roles.zig");
 const module_policy = @import("module_policy.zig");
 const router = @import("router.zig");
+const route_grid = @import("route_grid.zig");
+const diff_pairs = @import("diff_pairs.zig");
+const impedance = @import("impedance.zig");
+const impedance_rules = @import("impedance_rules.zig");
+const match_group = @import("match_group.zig");
+const net_rules = @import("net_rules.zig");
+const implicit_plane = @import("implicit_plane.zig");
+const rough_routability = @import("rough_routability.zig");
+const rough_identity = @import("rough_identity.zig");
+const rough_critical = @import("rough_critical.zig");
+const critical_rough = @import("critical_rough.zig");
+const pose_snapshot = @import("pose_snapshot.zig");
+const pose_math = @import("pose_math.zig");
+const edge_rotation = @import("edge_rotation.zig");
+const courtyard_close = @import("courtyard_close.zig");
+const airwire_geometry = @import("airwire_geometry.zig");
+const port_escape = @import("port_escape.zig");
 const drc = @import("drc.zig");
 const outline_mod = @import("outline.zig");
 const parser = @import("../sexpr/parser.zig");
+const power_budget = @import("../eval/power_budget.zig");
+const power_capacity = @import("power_capacity.zig");
 const infra_fs = @import("../infra/fs.zig");
 const numeric = @import("../numeric.zig");
+const board_layers = @import("../board_layers.zig");
+const roughNameMatch = rough_identity.nameMatch;
+const isHub = rough_identity.isHub;
+const isHubForRough = rough_identity.isHubForRough;
 const DesignBlock = env.DesignBlock;
-pub const FlatNet = export_kicad.FlatNet;
+pub const FlatNet = flat_netlist.FlatNet;
 
 // ── Tunables ─────────────────────────────────────────────────────────────
 const k_decouple: f64 = 0.95; // power/decoupling cap hug + ground-return (highest priority)
@@ -75,6 +103,7 @@ const loop_w_default: f64 = 12.0; // weight on the loop *inductance* term (nH; s
 // tpsm84338 −3.1%; worst regression nestedarray +2.1%).
 const k_compact: f64 = 0.10; // pull toward the cluster centroid (keeps HPWL tight)
 const group_force_per_w: f64 = 0.05; // relaxation cohesion-force gain per unit `group_w`
+const critical_loop_span_w: f64 = 6.0; // authored closed-chain bbox perimeter
 // (g_group_force = group_w·this); default group_w=2 ⇒ 0.10, ≈ K_COMPACT.
 const zone_force_per_w: f64 = 0.04; // relaxation zoning-force gain per unit `group_zone_w`
 // Board-size threshold: at/below this a from-scratch seed rings the parts
@@ -144,31 +173,15 @@ const fullroute_unrouted_mm: f64 = 150.0;
 const grid_courtyards_default = true; // round courtyard half-extents to GRID_MM so edges land on-grid
 const compact_eps: f64 = 1e-4; // courtyard-gap tolerance for the "touching" test
 
-// ── Phase-A constraint lowering weights (see docs/constraints_dsl.md) ─────────
-// These weight the *search-only* guidance terms a `(constraints …)` form lowers
-// into `objectiveCost`. They are deliberately kept OUT of the reported/compared
-// objective (`scoreLayout`, `scorePoses`, `routedObjectiveCost`): constraints
-// steer where SA looks, but the result is judged on the unmodified physical
-// objective — so a hand layout and a constrained solve are scored identically
-// and the constraints can't "game" the comparison. All PROVISIONAL (the doc's
-// weight-tuning is an offline sweep, not the LLM's job).
-const prox_w: f64 = 1.5; // proximity pull: cost = PROX_W·priority·(edge gap, mm)
+// Search-only placement-guidance weights. These automatic electrical policies
+// steer where the solver looks without changing the reported physical score.
 const keepout_w: f64 = 4.0; // keep-out hinge: cost = KEEPOUT_W·max(0, min−gap)
 /// Courtyard gap (mm) a synthesized aggressor-avoidance keep-out (Phase 2b)
 /// demands between a feedback passive and a switching/clock/RF passive — a touch
 /// above the `feedback-near-aggressor` lint threshold so a satisfied solve also
 /// clears the lint with margin.
 const aggressor_keepout_mm: f64 = 2.5;
-const deprioritize_scale: f64 = 0.25; // scale a deprioritized part's net wirelength weight
 const zone_gap_mm: f64 = 2.0; // group zoning: cluster centroid sits this far beyond the hub edge on its connecting side
-/// Soft-constraint priority → numeric multiplier (low/med/high).
-fn constraintWeight(p: env.ConstraintPriority) f64 {
-    return switch (p) {
-        .low => 1.0,
-        .med => 2.0,
-        .high => 3.0,
-    };
-}
 
 /// Runtime-tunable weights (the consts above are the defaults). Passed to
 /// `solve` so the UI can adjust placement without a rebuild. Only the steering
@@ -195,8 +208,8 @@ pub const Params = struct {
     bbox_margin: f64 = geometry.bbox_margin_mm,
     /// How much (mm, total) two parts' *drawn* courtyards may overlap in the
     /// collision / legalization test. Default 0: courtyards may **touch** (their
-    /// edges land on the shared `GRID_MM` grid line — grid-rounded extents +
-    /// `compactToContact` dock to exact contact) but never overlap. That is the
+    /// edges land on the shared `GRID_MM` grid line — grid-rounded extents plus
+    /// the guarded safety-gap closer) but never overlap. That is the
     /// densest packing with no courtyard intersection, which is what a board
     /// review expects (KiCad flags overlapping courtyards).
     ///
@@ -209,7 +222,7 @@ pub const Params = struct {
     /// verbatim.
     courtyard_overlap: f64 = 0,
     /// Functional-group cohesion weight: cost = `group_w·(bbox_w + bbox_h)` per
-    /// `(group …)` (constraint-DSL *and* the design's own functional groups), so
+    /// design `(group …)`, so
     /// a declared cluster (e.g. an output filter's caps) packs into one tight
     /// block instead of scattering around the hub. Competes with `loop_w`.
     group_w: f64 = 2.0,
@@ -229,7 +242,7 @@ pub const Params = struct {
     /// each cap to the nearest point on that pad, which on a tall pad scatters the
     /// bank along the pad's full height (top vs bottom of the IC). This knob
     /// removes that fraction of the loop pull for each cap in a ≥2-member same-rail
-    /// bank (a search-only delta in `constraintCost`, never the reported score), so
+    /// bank (a search-only delta in `guidanceCost`, never the reported score), so
     /// the group's cohesion can pack the bank into one tight block. 0 = off.
     group_loop_relief: f64 = 0,
     /// Constructive "zone-then-pack" floorplan (off by default): instead of the
@@ -325,7 +338,7 @@ pub const grid_mm: f64 = 0.1;
 pub const PartKind = enum { hub, passive };
 
 /// One placed part: courtyard half-extents, pads (origin-relative), a solved
-/// centre position (mm), and a rotation (0/90/180/270°, CCW, matching the
+/// centre position (mm), and a rotation in degrees (CCW, matching the
 /// page's `wpt()`). `hw`/`hh` are the *unrotated* half-extents — use `effHw`/
 /// `effHh` for the rotation-aware footprint. `value` is the part value string
 /// (e.g. "100nF") used for value-ordered decoupling.
@@ -342,8 +355,7 @@ pub const Part = struct {
     pads: []const geometry.Pad,
     fallback: bool,
     value: []const u8 = "",
-    silk_lines: []const geometry.SilkLine = &.{},
-    silk_circles: []const geometry.SilkCircle = &.{},
+    features: geometry.FootprintFeatures = .{},
     x: f64 = 0,
     y: f64 = 0,
     rot: f64 = 0,
@@ -401,7 +413,7 @@ const escape_stub_mm: f64 = 2.0;
 pub const RatKind = enum { proximity, ground, signal };
 
 /// A simple point in millimetres.
-const Pt = struct { x: f64, y: f64 };
+const Pt = airwire_geometry.Point;
 
 /// A pad in footprint-local coordinates: centre (mm) + full size (mm).
 pub const PadRect = struct { x: f64, y: f64, w: f64, h: f64 };
@@ -476,7 +488,7 @@ pub const Placement = struct {
     links: []Link,
     loops: []const Loop,
     stubs: []const Stub,
-    instances: []const export_kicad.FlatInstance,
+    instances: []const flat_netlist.FlatInstance,
     nets: []const FlatNet,
     /// Per-part `(placement-order …)` rank (index-aligned with `parts`/
     /// `instances`): 0 = unranked, higher = earlier in the declared list. The
@@ -507,14 +519,36 @@ pub const Placement = struct {
     /// bbox; only exact-shape consumers — DRC, Gerber Edge.Cuts, the
     /// renderers — read the polygon).
     board_poly: ?[]const [2]f64 = null,
+    /// Native circular pieces of `board_poly`, in start/mid/end form. The
+    /// polygon remains the sagitta-bounded DRC/render fallback; fab/KiCad
+    /// writers use these records to emit real arcs instead of chord soup.
+    board_arcs: []const BoardArc = &.{},
+    /// Optional external backing/stiffener artwork from top-level
+    /// `(fabrication-layer …)` forms. Its regions are resolved against this
+    /// placement's exact outline and component poses during fab export.
+    fabrication_layers: []const env.FabricationLayerSpec = &.{},
     /// Board-level routing rules resolved from the design's `(stackup …)` and
     /// `(net-class …)` forms — see `BoardRules`.
     rules: BoardRules = .{},
+    /// Differential pairs (net-index pairs + gap) from `(net-class … (diff-pair …))`
+    /// via `diff_pairs.resolve`. Empty ⇒ the router/DRC diff-pair paths are no-ops.
+    diff_pairs: []const diff_pairs.DiffPair = &.{},
+    /// Length-matching groups (net-index sets + tolerance) from
+    /// `(net-class … (match-group …))` via `match_group.resolve`. Empty ⇒ the
+    /// router ordering tweak, the `length_mismatch` DRC rule and the facts
+    /// endpoint's `match_groups` block are all no-ops.
+    match_groups: []const match_group.Group = &.{},
 };
+
+/// A native board-outline circular arc. Three points make the sweep
+/// unambiguous without a separate clockwise flag and match KiCad's `gr_arc`.
+pub const BoardArc = struct { p1: [2]f64, pm: [2]f64, p2: [2]f64 };
 
 /// Routing rules a design declares for its board, carried on the `Placement`
 /// so the router needs no separate lookup.
 pub const BoardRules = struct {
+    /// Board-derived perimeter via fence and solder-mask opening declaration.
+    perimeter_fence: env.PerimeterFenceSpec = .{},
     /// Net names that have a dedicated copper plane, from `(stackup …)`.
     /// **Null = no stackup declared** — the router keeps its legacy implicit
     /// model (ground nets get plane vias). An **empty slice** is a declared
@@ -529,29 +563,66 @@ pub const BoardRules = struct {
     /// (the legacy implicit 4-layer model). The Gerber export sizes its
     /// copper file set from this.
     copper_layers: u8 = 0,
-    /// Declared `(plane IDX "NET")` entries with their 1-based copper index
-    /// (same data as `plane_nets` but keeping WHERE each plane sits, for the
-    /// Gerber export's inner-layer files).
-    planes: []const PlaneAt = &.{},
+    /// Where this board's copper planes sit — see `Planes`.
+    planes: Planes = .{},
     /// Board-level default design rules from a `(design-rules …)` form,
     /// resolved to concrete millimetre values with the toolchain's built-in
     /// defaults filled in for any rule the form omitted (so `.{}` — the
     /// no-form default — reproduces every legacy constant). Read by the DRC
     /// and Gerber export instead of the old hard-coded constants.
     design: DesignRules = .{},
-    /// Finished board thickness (mm) from `(stackup … (thickness MM))`; 0 ⇒
-    /// unset, and the Gerber job file falls back to the fab-standard 1.6 mm.
-    board_thickness: f64 = 0,
+    /// Physical buildup facts carried off the `(stackup …)` form together.
+    physical: impedance_rules.Physical = .{},
+    /// Which net class sizes the whole-board routing lattice — see
+    /// `route_grid.Mode`. The default (`.widest`) is the historical raster, so
+    /// every existing board rasters exactly as it always has. It lives here
+    /// rather than on `RouteParams` or the route options because it is a
+    /// property of the BOARD's class spread, and every lattice-sizing call
+    /// site already holds the placement these rules ride on.
+    lattice: route_grid.Mode = .widest,
 
     /// True when a DECLARED `(plane IDX "NET")` / `(pour …)` entry carries
     /// `name` (case-insensitive, full flattened name or its `/`-leaf). The
     /// legacy implicit model declares nothing here — its assumed ground
     /// planes are matched by ground NAME in the router, not by this.
     pub fn carriesPlane(self: BoardRules, name: []const u8) bool {
-        for (self.planes) |pl| {
+        for (self.planes.declared) |pl| {
             if (std.ascii.eqlIgnoreCase(pl.net, name) or std.ascii.eqlIgnoreCase(pl.net, shortName(name))) return true;
         }
         return false;
+    }
+
+    /// Maximum-current trace / pour-neck width required on the least capable
+    /// copper layer in this board's declared stackup. This conservative value
+    /// exists before routing topology does, so the maze reserves enough room
+    /// even when the eventual common trunk carries the whole rail. A post-route
+    /// KCL screen may prove that short leaf branches carry less, but it never
+    /// needs copper wider than this envelope.
+    pub fn powerWidthForNet(self: BoardRules, name: []const u8) ?f64 {
+        const amps = power_capacity.routingCurrentA(self.physical.rails, name) orelse return null;
+        const layers = self.physical.stack.layers;
+        if (layers == 0) return null;
+        var required: f64 = 0;
+        var physical: u8 = 1;
+        while (physical <= layers) : (physical += 1) {
+            const outer = physical == 1 or physical == layers;
+            const width = power_capacity.requiredTraceWidthMm(
+                amps,
+                self.physical.stack.foilMm(physical),
+                outer,
+            ) orelse continue;
+            required = @max(required, width);
+        }
+        return if (required > 0) required else null;
+    }
+
+    /// One-barrel drill required by the same conservative rail envelope. The
+    /// router raises its ordinary via geometry to this value; if that enlarged
+    /// barrel cannot clear the board, routing fails honestly rather than
+    /// emitting an under-capacity transition.
+    pub fn powerViaDrillForNet(self: BoardRules, name: []const u8) ?f64 {
+        const amps = power_capacity.routingCurrentA(self.physical.rails, name) orelse return null;
+        return power_capacity.requiredViaDrillMm(amps, self.physical.via_plating_mm);
     }
 
     /// The net a declared plane pours on the OUTER copper face of `side`
@@ -560,9 +631,7 @@ pub const BoardRules = struct {
     /// a single-layer stack has no bottom face to pour.
     pub fn pourNetOnSide(self: BoardRules, side: Side) ?[]const u8 {
         const want: u8 = if (side == .top) 1 else (if (self.copper_layers >= 2) self.copper_layers else return null);
-        for (self.planes) |pl| {
-            if (pl.index == want) return pl.net;
-        }
+        for (self.planes.declared) |pl| if (pl.index == want) return pl.net;
         return null;
     }
 
@@ -570,7 +639,7 @@ pub const BoardRules = struct {
     /// `base`. Negative/out-of-range indices are unclassed and keep `base`.
     /// Shared by DRC, routing obstacles, and copper-pour antipads so all
     /// consumers interpret a class gap identically.
-    pub fn clearanceForNet(self: BoardRules, net: i32, base: f64) f64 {
+    pub fn clearanceForNet(self: *const BoardRules, net: i32, base: f64) f64 {
         if (net < 0) return base;
         const i: usize = @intCast(net);
         if (i >= self.net.len or self.net[i].clearance <= 0) return base;
@@ -579,17 +648,34 @@ pub const BoardRules = struct {
 
     /// Pairwise copper clearance: the maximum of the board base and both nets'
     /// class requirements.
-    pub fn clearanceBetween(self: BoardRules, a: i32, b: i32, base: f64) f64 {
+    pub fn clearanceBetween(self: *const BoardRules, a: i32, b: i32, base: f64) f64 {
         return @max(self.clearanceForNet(a, base), self.clearanceForNet(b, base));
     }
 
-    /// Is copper stack index `idx` (1-based) claimed by a declared
-    /// `(plane …)`/`(pour …)` entry?
-    fn planeAtIndex(self: BoardRules, idx: u8) bool {
-        for (self.planes) |pl| {
-            if (pl.index == idx) return true;
-        }
-        return false;
+    /// True when a `(stackup …)` form DECLARED this board's copper, false for
+    /// the legacy implicit model. The one discriminator every consumer reads
+    /// instead of restating `plane_nets == null` locally.
+    pub fn declaredStackup(self: BoardRules) bool {
+        return self.plane_nets != null;
+    }
+
+    /// This board's stackup as the shared layer model's scalar view — the
+    /// input every layer name / index / colour / Gerber question is answered
+    /// from. Cheap (no allocation, no table): safe in a hot loop.
+    pub fn layerStack(self: BoardRules) board_layers.Stack {
+        return .{
+            .copper_layers = self.copper_layers,
+            .planes = self.planes.declared,
+            .declared = self.declaredStackup(),
+            .implicit_rail = self.planes.implicit_rail,
+        };
+    }
+
+    /// Every physical copper layer of this board, top→bottom, materialized
+    /// with its name, routable index, plane net, colour and Gerber identity.
+    /// See `board_layers.LayerTable`.
+    pub fn layerTable(self: BoardRules) board_layers.LayerTable {
+        return self.layerStack().table();
     }
 
     /// How many ROUTABLE signal layers this board has. Signal-layer index
@@ -600,14 +686,11 @@ pub const BoardRules = struct {
     /// top→bottom stack order. No `(stackup …)` form (`copper_layers == 0`)
     /// keeps the legacy implicit model: exactly 2 (the two inners are assumed
     /// planes), so existing boards and sidecar copper are unchanged.
+    ///
+    /// Thin `u8` wrapper over `board_layers.Stack.signalCount` — the typed
+    /// index space lives there; this keeps the existing call surface.
     pub fn signalLayerCount(self: BoardRules) u8 {
-        if (self.copper_layers <= 2) return 2;
-        var n: u8 = 2;
-        var idx: u8 = 2;
-        while (idx < self.copper_layers) : (idx += 1) {
-            if (!self.planeAtIndex(idx)) n += 1;
-        }
-        return n;
+        return self.layerStack().signalCount();
     }
 
     /// The 1-based copper STACK index signal layer `sig` lives on: 0 → 1
@@ -616,27 +699,27 @@ pub const BoardRules = struct {
     /// indices fall back to the bottom copper (defensive; callers pass
     /// `sig < signalLayerCount()`).
     pub fn signalStackIndex(self: BoardRules, sig: u8) u8 {
-        if (sig == 0) return 1;
-        const bottom: u8 = if (self.copper_layers >= 2) self.copper_layers else if (self.copper_layers == 1) 1 else 4;
-        if (sig == 1) return bottom;
-        var s: u8 = 2;
-        var idx: u8 = 2;
-        while (idx < self.copper_layers) : (idx += 1) {
-            if (self.planeAtIndex(idx)) continue;
-            if (s == sig) return idx;
-            s += 1;
-        }
-        return bottom;
+        return self.layerStack().signalStack(board_layers.SignalIndex.of(sig)).int();
     }
 
     /// Display name of signal layer `sig` ("F.Cu" / "B.Cu" / "In1.Cu" …,
     /// KiCad naming — In<k> is stack index k+1). Inner names are rendered
-    /// into `buf` (needs ~8 bytes).
+    /// into `buf` (needs `board_layers.name_buf_len` bytes).
     pub fn signalLayerName(self: BoardRules, sig: u8, buf: []u8) []const u8 {
-        if (sig == 0) return "F.Cu";
-        if (sig == 1) return "B.Cu";
-        const stack = self.signalStackIndex(sig);
-        return std.fmt.bufPrint(buf, "In{d}.Cu", .{stack - 1}) catch "In?.Cu";
+        return self.layerStack().signalName(board_layers.SignalIndex.of(sig), buf);
+    }
+
+    /// The routable signal-layer index of a KiCad copper-layer name — the
+    /// authoritative inverse of `signalLayerName`, so every consumer that holds
+    /// a zone/track layer STRING ("F.Cu"/"B.Cu"/"In2.Cu") recovers the numeric
+    /// index tracks persist without restating the stackup arithmetic. Returns
+    /// null for a name that names no routable signal layer: junk, or an INNER
+    /// copper layer claimed by a `(plane …)` (it floods that layer, so a zone
+    /// there is a conflict — the fill is skipped). Case-insensitive, matching
+    /// the other name→index lookups across the router/import paths.
+    pub fn signalIndexOfName(self: BoardRules, name: []const u8) ?u8 {
+        const sig = self.layerStack().signalIndexOfName(name) orelse return null;
+        return sig.int();
     }
 };
 
@@ -644,52 +727,63 @@ pub const BoardRules = struct {
 /// surface (viewer blob, page legend, PNG mirrors these hexes) so
 /// inner-layer copper paints identically everywhere: index 0 = top red,
 /// 1 = bottom blue, then the inner palette cycling for 2.. — KiCad pcbnew's
-/// default layer colours (F.Cu/B.Cu/In1..In4).
-pub const signal_layer_colors = [_][]const u8{ "#C83434", "#4D7FC4" };
-pub const inner_layer_colors = [_][]const u8{ "#C2C200", "#C200C2", "#C2C2C2", "#00C2C2" };
+/// default layer colours (F.Cu/B.Cu/In1..In4). Owned by `board_layers` and
+/// re-exported here for the existing render call sites.
+pub const signal_layer_colors = board_layers.signal_layer_colors;
+pub const inner_layer_colors = board_layers.inner_layer_colors;
 
 /// The display colour (hex) of signal layer `sig` — outer pair, then the
 /// inner palette cycling.
 pub fn signalLayerColor(sig: u8) []const u8 {
-    if (sig < signal_layer_colors.len) return signal_layer_colors[sig];
-    return inner_layer_colors[(sig - 2) % inner_layer_colors.len];
+    return board_layers.signalColor(board_layers.SignalIndex.of(sig));
 }
 
 /// Board-level default design rules as concrete millimetre values — the
 /// resolved form of a `(design-rules …)` form (or the built-in defaults when
-/// none is authored). Every field carries the value the toolchain used before
-/// the form existed, so a design with no `(design-rules …)` is byte-identical.
+/// none is authored). Existing routing/fabrication fields retain their legacy
+/// values; the component-edge assembly check adds its JLCPCB-based default.
 pub const DesignRules = struct {
     /// Copper-to-copper spacing (mm) — matches `RouteParams.clearance`.
-    clearance: f64 = 0.127,
+    clearance: f64 = env.default_clearance_mm,
     /// Smallest legal drilled hole (mm). A via/pad drill below this flags
     /// `min_drill`; drill=0 (legacy/synthetic) features are skipped.
     min_drill: f64 = 0.2,
-    /// Solder-mask opening expansion per pad side (mm) — the Gerber margin.
-    mask_margin: f64 = 0.05,
-    /// Copper-pour isolation (mm): how far a solid pour keeps from foreign
-    /// copper (antipads around holes/vias, track/pad halos) AND its pullback
-    /// from the board edge in the Gerber export. Not settable via the form
-    /// directly — a `(design-rules (copper-edge …))` overrides it (that IS the
-    /// copper-to-edge rule), otherwise it stays the fab-safe pour default.
-    pour_clearance: f64 = 0.3,
-    /// Copper-to-board-outline clearance (mm): the copper-edge DRC rule and the
-    /// Gerber pour's edge pullback. 0 ⇒ the DRC falls back to the plain copper
-    /// `clearance` (old `board_edge` behaviour) and the pour uses `pour_clearance`.
-    copper_edge: f64 = 0,
+    /// Solder-mask geometry (mm): the per-side opening expansion the Gerber
+    /// export applies, and the smallest web that may be left between two
+    /// adjacent openings before the strip risks flaking off in fab (the
+    /// `mask_sliver` DRC). One group because the two are always read together.
+    mask: env.MaskRules = .{ .margin = 0.05, .web = 0.2, .relief_corner_radius = 0 },
+    /// Copper-pour isolation (mm) for an INNER plane: the gap a solid pour
+    /// holds off foreign copper (hole/via antipads, track and pad halos) AND
+    /// its Gerber board-edge pullback. A pour on an OUTER copper face resolves
+    /// `pour.clearance_outer` instead, which defaults tighter (see
+    /// `env.default_outer_pour_clearance_mm`); `placement/pour.zig` picks
+    /// between the two per fill, keyed on `LayerSpec.side`.
+    /// `(design-rules (pour-clearance MM))` authors BOTH at once — see
+    /// `env.default_pour_clearance_mm` for this default and its limits.
+    pour_clearance: f64 = env.default_pour_clearance_mm,
+    /// Finished-board edge spacing (mm). Copper 0 ⇒ the DRC falls back to
+    /// the plain copper `clearance` and the pour uses `pour_clearance`.
+    /// Component defaults to JLCPCB Standard PCBA's 2.5 mm body-to-edge rule;
+    /// the courtyard is the placement engine's conservative body proxy.
+    /// https://jlcpcb.com/help/article/terms-and-conditions-of-jlcpcb-assembly-service
+    edge: env.EdgeRules = .{ .copper = 0, .component = 2.5 },
     /// Wall-to-wall spacing between two drilled holes (mm) — the hole-to-hole DRC.
     hole_to_hole: f64 = 0.25,
+    /// Copper spacing between two vias of the SAME net (mm) — the `via_spacing`
+    /// DRC. 0 (the default, and what an absent `(design-rules (via-to-via …))`
+    /// leaves) means "use the pair's resolved copper clearance", which flags a
+    /// redundant via planted beside an existing one without policing a
+    /// legitimate stitch-fence pitch. Same-net vias are exempt from the
+    /// ordinary `via_via` clearance rule (electrically they are one node), so
+    /// before this only the net-blind drill rule covered them at all.
+    via_to_via: f64 = 0,
     /// Minimum via annular ring, copper radius − drill radius (mm).
     min_annular: f64 = 0.1,
-    /// Smallest solder-mask web (mm) between two adjacent mask openings before
-    /// the remaining sliver risks flaking off in fab — the `mask_sliver` DRC.
-    mask_web: f64 = 0.2,
-    /// Narrowest legal track width (mm) — the `track_width` DRC floor. A
-    /// per-net `(net-class (width …))` overrides this for its own nets.
+    /// Narrowest legal track width (mm) — the `track_width` DRC floor; a per-net class overrides it.
     min_width: f64 = 0.1,
-    /// Default routed trace width (mm) — the autorouter's `RouteParams` seed.
-    /// Matches `RouteParams.track_width`, so an absent form seeds the router
-    /// exactly as before. A per-net `(net-class (width …))` still overrides it.
+    pour: env.PourRules = .{},
+    /// Default routed trace width (mm), used as the `RouteParams` seed.
     track_width: f64 = 0.127,
     /// Default via copper diameter (mm) — the `RouteParams` seed (matches
     /// `RouteParams.via_dia`). A per-net `(net-class (via …))` overrides it.
@@ -716,45 +810,61 @@ pub const DesignRules = struct {
     }
 
     /// The effective copper-to-edge clearance for the DRC: the dedicated
-    /// `copper_edge` rule if set, else the plain copper `clearance` (so an
+    /// `edge.copper` rule if set, else the plain copper `clearance` (so an
     /// absent rule reproduces the old `board_edge` check, which measured
     /// against the net clearance).
     pub fn edgeClearance(self: DesignRules) f64 {
-        return if (self.copper_edge > 0) self.copper_edge else self.clearance;
+        return if (self.edge.copper > 0) self.edge.copper else self.clearance;
     }
 
-    /// The Gerber pour's pullback from the board edge: the `copper_edge` rule
+    /// The Gerber pour's pullback from the board edge: the `edge.copper` rule
     /// when set, else the fab-safe `pour_clearance` default (0.3) — so an
     /// absent form keeps the old hard-coded 0.3 mm edge pullback.
     pub fn pourEdge(self: DesignRules) f64 {
-        return if (self.copper_edge > 0) self.copper_edge else self.pour_clearance;
+        return if (self.edge.copper > 0) self.edge.copper else self.pour_clearance;
+    }
+
+    /// Isolation gap used by a buried reference-plane antipad.
+    pub fn referencePlaneClearance(self: DesignRules) f64 {
+        return self.pour_clearance;
     }
 };
 
 /// One declared copper plane: 1-based stack index + the net it carries.
-pub const PlaneAt = struct { index: u8, net: []const u8 };
+/// Defined by `board_layers` (the shared layer model reads plane slices
+/// straight off `BoardRules`, so the two must be the same type).
+pub const PlaneAt = board_layers.PlaneAt;
 
-/// One flattened net's effective class identity and routing geometry in mm.
-/// Zero-valued geometry keeps the corresponding router default.
-pub const NetRule = struct {
-    class: struct {
-        /// Semantic identity after hierarchy/net-tie resolution. Empty means
-        /// the net is not assigned to an authored class.
-        name: []const u8 = "",
-        /// Hierarchy path supplying membership ("" = board root).
-        source: []const u8 = "",
-        /// Equal-precedence child memberships named different classes.
-        conflict: bool = false,
-    } = .{},
-    width: f64 = 0,
-    clearance: f64 = 0,
-    via_dia: f64 = 0,
-    via_drill: f64 = 0,
-    priority: u32 = 0,
+/// Where a board's copper planes sit. The two members are mutually exclusive
+/// by construction, because they answer the same question for the two board
+/// models: `declared` holds the `(plane IDX "NET")` entries a `(stackup …)`
+/// form authored (same nets as `BoardRules.plane_nets`, but keeping WHERE each
+/// one sits, for the Gerber export's inner-layer files); `implicit_rail` is the
+/// supply rail the LEGACY IMPLICIT model plants on its second inner plane when
+/// the design authored no stackup at all — `implicit_plane` owns that choice
+/// and every consumer's reading of it, and null there (no rail qualified) keeps
+/// both implicit inner planes on ground, byte-identically to the older model.
+pub const Planes = struct {
+    declared: []const PlaneAt = &.{},
+    implicit_rail: ?[]const u8 = null,
 };
 
+/// One flattened net's effective class identity and routing geometry (see
+/// `net_rules.NetRule`). Re-exported so `optimizer.NetRule` keeps resolving.
+pub const NetRule = net_rules.NetRule;
+/// Ground via fencing resolved from a `(net-class … (fence …))` declaration
+/// (see `net_rules.FenceRule`).
+pub const FenceRule = net_rules.FenceRule;
+/// The controlled-impedance outcome for a net (see `impedance.Rule`).
+pub const ImpedanceRule = net_rules.ImpedanceRule;
+/// RF discipline resolved from a `(max-freq …)` class (see `net_rules.Rf`).
+pub const Rf = net_rules.Rf;
+/// Every flattened net's resolved class + geometry (see
+/// `net_rules.resolvedNetRules`).
+pub const resolvedNetRules = net_rules.resolvedNetRules;
+
 /// A `(board …)` outline rectangle in world mm (top-left + size).
-pub const BoardRect = struct { minx: f64, miny: f64, w: f64, h: f64 };
+pub const BoardRect = courtyard_close.Rect;
 
 /// Which copper side a part sits on. `top` is the default. A `bottom` part is
 /// drawn/placed mirrored about its own vertical axis (footprint-local x
@@ -816,8 +926,9 @@ pub const Loop = struct {
     /// `classify` can group caps that share a rail (by pointer identity).
     hub_pwr: []const PadRect,
     /// The *one* hub pad the power leg targets (a fixed pad — no per-eval argmin,
-    /// so the cost is continuous in the cap's position). Chosen in `hugToHub`:
-    /// the explicitly-pinned pin (`(near <pin> …)`) if any, else the lowest-
+    /// so the cost is continuous in the cap's position). Chosen in `emitCapLoop`:
+    /// the pad the cap's `(decouples "IC" PIN)` / per-pin key names, when that
+    /// binding is about THIS hub and the pad is on this net, else the lowest-
     /// numbered true-supply pad. Footprint-local.
     hub_pwr_pin: PadRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     hub_gnd: []const PadRect,
@@ -833,10 +944,12 @@ pub const Loop = struct {
     /// a rail toward the pin, and is raised further by a declared
     /// `(placement-order …)` rank. 1 for a lone, unranked cap. Set in `classify`.
     weight: f64 = 1,
-    /// The hub pin the design EXPLICITLY pinned this cap to via `(near <pin> …)`,
-    /// or "" when the target pin was auto-chosen (lowest-numbered supply). Lets a
+    /// The hub pin the design EXPLICITLY pinned this cap to — a `(decouples "IC"
+    /// PIN)` binding or the pad a `(decouple … per-pin …)` child encodes — or ""
+    /// when the target pin was auto-chosen (lowest-numbered supply), which also
+    /// covers a binding that names a different IC than this loop's hub. Lets a
     /// read surface (the PCB sidebar) show the authored decoupling target, not a
-    /// solver default. Set in `hugToHub`.
+    /// solver default. Set in `emitCapLoop`.
     explicit_pin: []const u8 = "",
     /// `(decouples rail)` opt-out: this cap deliberately serves the whole rail,
     /// so the per-pin-decoupling lint must not demand a pad binding for it. Set
@@ -849,6 +962,8 @@ const Built = struct {
     springs: []Spring,
     loops: []Loop,
     series: []SeriesPair = &.{},
+    /// Resolved `(near …)` adjacencies — see `near_bind.zig`.
+    near: []const near_bind.NearPair = &.{},
 };
 
 /// A 2-pad *series* element between two pins of the same hub — the buck-boost
@@ -871,15 +986,7 @@ const SeriesPair = struct {
 /// reach (the centroid of the hub's pads on that leg's net), footprint-local.
 const SeriesLeg = struct { part_pad: PadRect, hub_pad: PadRect };
 
-/// A `(proximity …)` pull lowered to geometry: keep `part`'s pad `part_pad`
-/// within `max_mm` of `hub`'s pad `hub_pad` (both footprint-local). A *hinge*
-/// penalty `w·max(0, gap − max_mm)` (see `constraintCost`): zero once the part is
-/// inside the radius, so it only acts to drag a badly-placed part in, never to
-/// fight HPWL/loop over a part that is already close. `max_mm == 0` ⇒ a plain
-/// linear pull `w·gap` (no declared radius).
-const ProxTerm = struct { part: usize, hub: usize, part_pad: PadRect, hub_pad: PadRect, w: f64, max_mm: f64 };
-
-/// A `(keep-out …)` lowered to a part-vs-part minimum courtyard gap.
+/// An automatically synthesized part-vs-part minimum courtyard gap.
 const KeepTerm = struct { a: usize, b: usize, min_mm: f64 };
 
 /// A `(group …)` lowered to (a) a cohesion penalty on the group's bounding box,
@@ -895,40 +1002,37 @@ const GroupTerm = struct {
     diry: f64 = 0,
 };
 
-/// The resolved + lowered Phase-A constraints for the current solve. Every slice
+/// Automatically derived placement guidance for the current solve. Every slice
 /// defaults empty so a read on a path that didn't go through `prepare` is a
 /// harmless no-op. Slices live in the solve's arena (valid for that solve only).
-/// Consumed by `constraintCost` — a search-only delta added to `objectiveCost`,
-/// never to the reported/compared objective (see `constraintCost`).
-const Lowered = struct {
-    prox: []const ProxTerm = &.{},
+const PlacementGuidance = struct {
     keepouts: []const KeepTerm = &.{},
-    /// Per-net wirelength weight (index-aligned with `nets`); 1.0 = default. >1
-    /// from `(net-length … (priority …))`, <1 from `(deprioritize …)`.
-    net_weight: []const f64 = &.{},
-    /// Per-net "this is a switcher input rail" flag (index-aligned), from
-    /// `(power-rail … (role input))` — fires the input-loop boost even when the
-    /// inductor is integrated (so no discrete L reveals the switcher).
+    /// Per-net "this is a switcher input rail" flag (index-aligned), derived
+    /// from the module topology when no discrete inductor reveals the switcher.
     input_rail: []const bool = &.{},
-    /// Declared `(group …)` clusters (constraint-DSL + the design's functional
-    /// groups) — each penalizes its bounding box (cohesion) and is zoned to a
-    /// side of its hub.
+    /// Design functional groups: each penalizes its bounding box (cohesion) and
+    /// is zoned to a side of its hub.
     groups: []const GroupTerm = &.{},
-    /// True when any term is live — the hot-path `constraintCost` fast-exits when
-    /// false (a design with no constraints and no functional groups).
+    /// True when any term is live — the hot-path `guidanceCost` fast-exits when
+    /// false (a design with no automatic guidance or functional groups).
     active: bool = false,
+    /// Request-scoped geometry/role cache shared with nested solves. Kept on
+    /// the existing thread-local solve state so adding the cache does not add
+    /// another mutable global; `SolveState` already snapshots/restores this
+    /// value around nested module placement.
+    prepare_cache: ?*PrepareCache = null,
 };
 
-/// Thread-local lowered constraints for the current solve — set by `prepare`,
-/// read by `constraintCost`. Threadlocal (like `g_progress`) so the many
+/// Thread-local automatic guidance for the current solve — set by `prepare`,
+/// read by `guidanceCost`. Threadlocal (like `g_progress`) so the many
 /// `objectiveCost` call sites needn't each thread a new parameter, and two
 /// concurrent solves on different threads stay isolated. Default-empty so it is
-/// inert until a design with a `(constraints …)` form sets it.
-threadlocal var g_lowered: Lowered = .{};
+/// inert until `prepare` derives guidance for a design.
+threadlocal var g_guidance: PlacementGuidance = .{};
 
 /// Cohesion-force gain for the relaxation: each `(group …)` member is pulled
 /// toward its group's centroid by `g_group_force·(centroid − pos)`, the
-/// position-space twin of the scalar `group_w` cohesion in `constraintCost`.
+/// position-space twin of the scalar `group_w` cohesion in `guidanceCost`.
 /// Without it cohesion only *selects* among arrangements the spring relaxation
 /// produces — it can't *create* a tight block (the relaxation never proposes
 /// one). Set in `prepare` from `params.group_w`; 0 ⇒ no cohesion force.
@@ -936,7 +1040,7 @@ threadlocal var g_group_force: f64 = 0;
 
 /// Per-loop multiplier on the decoupling-loop *force* (index-aligned with the
 /// solve's `built.loops`), the force-space twin of `group_loop_relief` in
-/// `constraintCost`: 1.0 for a lone cap, `1 − group_loop_relief` for a cap in a
+/// `guidanceCost`: 1.0 for a lone cap, `1 − group_loop_relief` for a cap in a
 /// ≥2-member same-rail bank, so the relaxation stops yanking every bank cap onto
 /// the rail pad and lets cohesion pack them. Set in `prepare`; empty ⇒ all 1.0.
 threadlocal var g_loop_force_scale: []const f64 = &.{};
@@ -951,7 +1055,7 @@ threadlocal var g_zone_force: f64 = 0;
 /// Per-side amount (mm) the collision/legalization keepout boxes are shrunk so
 /// adjacent courtyards may overlap their clearance margins (see
 /// `Params.courtyard_overlap`). Set in `prepare`, read by `keepHw`/`keepHh`/
-/// `keepBoxOf`. Threadlocal (like `g_lowered`) so the hot collision helpers need
+/// `keepBoxOf`. Threadlocal (like `g_guidance`) so the hot collision helpers need
 /// no extra parameter and concurrent solves stay isolated. 0 ⇒ strict no-overlap.
 threadlocal var g_collide_shrink: f64 = 0;
 
@@ -966,7 +1070,7 @@ threadlocal var g_route_gap: f64 = 0;
 /// its sub-blocks' output ports (via their net-ties) plus the summed `(i-typ …)`
 /// consumer pins per rail. Read by `congestPitch` to widen a power net's RUDY
 /// corridor to the IPC-2221 trace width its current needs. Empty ⇒ all nets use
-/// the signal pitch. Set in `prepare`; threadlocal like `g_lowered` so the hot
+/// the signal pitch. Set in `prepare`; threadlocal like `g_guidance` so the hot
 /// objective path needn't thread another parameter through every call site.
 threadlocal var g_net_current: []const f64 = &.{};
 
@@ -976,15 +1080,23 @@ threadlocal var g_net_current: []const f64 = &.{};
 /// reset would change what the parent reads after `runRough`. 0 outside any solve.
 threadlocal var g_solve_depth: usize = 0;
 
+/// Library objects shared by one outer solve and its nested module solves. All
+/// values are allocated in that solve's arena; the pointer is cleared before
+/// the outer frame returns, so nothing survives into another request.
+const PrepareCache = struct {
+    roles: std.StringHashMapUnmanaged(pin_roles.PartRoles) = .empty,
+    geom: std.StringHashMapUnmanaged(geometry.Geom) = .empty,
+};
+
 /// Reset the request-arena-backed threadlocal slices to empty. Called on exit of
 /// the *outermost* solve only, so they never dangle into a freed arena after the
 /// solve returns (latent hardening — a later caller touching
-/// `constraintCost`/`congestPitch`/`accumulateLoops` outside a solve then reads an
+/// `guidanceCost`/`congestPitch`/`accumulateLoops` outside a solve then reads an
 /// empty slice, a harmless no-op, instead of freed memory). Nested solves skip
 /// it, preserving today's exact `runRough` behaviour byte-for-byte.
 fn resetArenaGlobals() void {
     if (g_solve_depth != 0) return;
-    g_lowered = .{};
+    g_guidance = .{};
     g_loop_force_scale = &.{};
     g_net_current = &.{};
 }
@@ -994,7 +1106,7 @@ fn resetArenaGlobals() void {
 /// below the board (the `(board …)` edge-dock path stages anything it can't
 /// place); `auto_filled` = parts `autofillUnlisted` pulled back out of the band;
 /// `unresolved` = names that match no part. Reset in `prepare`. Threadlocal like
-/// `g_lowered` so concurrent solves stay isolated.
+/// `g_guidance` so concurrent solves stay isolated.
 pub const PlacementDiag = struct {
     /// Refs still in the staging band (auto-fill found no collision-free improving
     /// pose, or was gated off).
@@ -1003,6 +1115,9 @@ pub const PlacementDiag = struct {
     auto_filled: []const []const u8 = &.{},
     /// Names that resolve to NO part / sub-block — surfaced by the lint layer.
     unresolved: []const []const u8 = &.{},
+    /// What the rough seed's static-routability repair found and did.
+    /// `ran = false` when this solve ran no rough seed at all.
+    routability: rough_routability.Repair = .{},
 };
 threadlocal var g_placement_diag: PlacementDiag = .{};
 
@@ -1026,7 +1141,9 @@ pub const SeedMode = enum {
 /// The smooth-surrogate objective (the value `scorePoses` reports and the viewer
 /// shows) for the CURRENT poses in `parts`, computed in place — no `prepare()`
 /// rebuild, so it is cheap to call mid-pipeline as a candidate comparator.
-fn surrogateObjective(parts: []const Part, idx_of: *std.StringHashMapUnmanaged(usize), nets: []const FlatNet, loops: []const Loop, params: Params) f64 {
+/// Public so the rough seed's routability repair can price the move it is about
+/// to make against the same objective the solve is minimising.
+pub fn surrogateObjective(parts: []const Part, idx_of: *std.StringHashMapUnmanaged(usize), nets: []const FlatNet, loops: []const Loop, params: Params) f64 {
     const score = scoreLayout(parts, idx_of, nets, loops);
     const lsum = surrogateLoops(parts, loops);
     return breakdownWith(parts, idx_of, nets, params, score, lsum).objective;
@@ -1051,43 +1168,10 @@ fn runPlacement(
     // module's own internal spec (via the nested solve) but ignores the design-level
     // arrangement — the point is a predictable, legible module-clustered start.
     if (params.rough) {
-        if (try runRough(arena, parts, prep, nets, params)) return;
-        // Module (subcircuit) blocks: arbitrate the pin-adjacent seed against
-        // the legacy rough (zone rows / pad ring) and keep the better on the
-        // surrogate objective × important-crossing × overlap rank. Returns
-        // false (fall through unchanged) for design roots, locked parts, or
-        // hubless boards.
-        if (try arbitratePinSeed(arena, parts, prep, nets, built, params)) return;
-        // Discrete switcher module: the hand layout is a VIN│IC│L│VOUT flow
-        // row, which a radial ring structurally can't express. Try the
-        // constructive zone floorplan first — it self-gates on topology
-        // (single-IC group orbit) and returns false for anything it can't lay
-        // out cleanly, so non-switchers fall through to the ring unchanged.
-        if (isSwitcherBoard(parts, nets, &prep.idx_of) and
-            try packZoned(arena, parts, prep, nets, built, params))
-        {
-            tightenPriorityLoops(arena, parts, built.loops, nets, prep.priority);
-            return;
-        }
-        // Flat module/design: ring the anchor IC with each part on the side of the
-        // pad it connects to (GND ignored; cap→VDD pad, R→signal pad), hugging the
-        // edge. This is the pad-anchored hand-layout seed.
-        if (try packPadAnchored(arena, parts, prep, nets, true)) return;
-        // No hub to anchor on (e.g. a passives-only board): fall back to a declumped
-        // fast force relax — kill the alignment term and force courtyard spacing so the
-        // compaction can't collapse everything into one block. A quick relax is all the
-        // degenerate passives-only board needs.
-        var fp = params;
-        fp.fast = true;
-        fp.w_align = 0;
-        if (fp.route_gap < rough_declump_gap_mm) fp.route_gap = rough_declump_gap_mm;
-        // The compaction pass reads the courtyard spacing from the `g_route_gap`
-        // global (set once in `prepare` from the original params), not from `fp` —
-        // so bump the global here, restoring it after, or the spread won't apply.
-        const saved_gap = g_route_gap;
-        g_route_gap = @max(g_route_gap, rough_declump_gap_mm);
-        defer g_route_gap = saved_gap;
-        try runForce(arena, parts, prep, nets, built, fp);
+        try roughSeed(arena, parts, prep, nets, built, params);
+        critical_rough.orientSeries(Part, parts, prep.critical);
+        try repairRoughRoutability(arena, parts, prep, nets, built, params);
+        courtyard_close.close(Part, parts, .{ .grid_mm = grid_mm, .max_move_mm = final_clear, .route_gap_mm = g_route_gap, .overlap_allowance_mm = g_collide_shrink }, worldCourtyard, overlapsAny);
         return;
     }
     // Constructive zone-then-pack floorplan (opt-in): crisp VIN│IC│L│VOUT rows the
@@ -1098,6 +1182,152 @@ fn runPlacement(
         return;
     }
     try runForce(arena, parts, prep, nets, built, params);
+}
+
+/// The rough seed's dispatch ladder, in the order a board is offered to it.
+/// Every rung returns false for the shapes it does not handle, so the fall-
+/// through is always the previous engine's behaviour unchanged.
+fn roughSeed(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    prep: *Prepared,
+    nets: []const FlatNet,
+    built: Built,
+    params: Params,
+) std.mem.Allocator.Error!void {
+    var containment: ?critical_rough.Containment = null;
+    if (prep.block.origin == .design_root and prep.block.board.present and prep.block.board.w > 0 and prep.block.board.h > 0) {
+        const claims = try resolveBoardClaims(arena, prep.block.board, prep.instances, parts.len, false);
+        containment = .{ .width_mm = prep.block.board.w, .height_mm = prep.block.board.h, .edge_clearance_mm = designRulesOf(prep.block).edge.component, .ignored = claims.claimed };
+    }
+    const crit_opts = critical_rough.Options{ .grid_mm = grid_mm, .clearance_mm = final_clear, .collide_shrink_mm = g_collide_shrink, .route_gap_mm = g_route_gap, .containment = containment };
+    if (prep.block.origin == .design_root and try critical_rough.arbitrate(Part, CriticalSeedContext, CriticalSeedContext.legacy, CriticalSeedContext.finish, CriticalSeedContext.cost, arena, parts, prep.critical, nets, crit_opts, .{ .prep = prep, .params = params })) return;
+    if (try runRough(arena, parts, prep, nets, params)) return;
+    // Module (subcircuit) blocks: arbitrate the pin-adjacent seed against
+    // the legacy rough (zone rows / pad ring) and keep the better on the
+    // surrogate objective × important-crossing × overlap rank. Returns
+    // false (fall through unchanged) for design roots, locked parts, or
+    // hubless boards.
+    if (try arbitratePinSeed(arena, parts, prep, nets, built, params)) return;
+    // Discrete switcher module: the hand layout is a VIN│IC│L│VOUT flow
+    // row, which a radial ring structurally can't express. Try the
+    // constructive zone floorplan first — it self-gates on topology
+    // (single-IC group orbit) and returns false for anything it can't lay
+    // out cleanly, so non-switchers fall through to the ring unchanged.
+    if (try runLegacyFlatSeed(arena, parts, prep, nets, built, params)) return;
+    // No hub to anchor on (e.g. a passives-only board): fall back to a declumped
+    // fast force relax — kill the alignment term and force courtyard spacing so the
+    // compaction can't collapse everything into one block. A quick relax is all the
+    // degenerate passives-only board needs.
+    var fp = params;
+    fp.fast = true;
+    fp.w_align = 0;
+    if (fp.route_gap < rough_declump_gap_mm) fp.route_gap = rough_declump_gap_mm;
+    // The compaction pass reads the courtyard spacing from the `g_route_gap`
+    // global (set once in `prepare` from the original params), not from `fp` —
+    // so bump the global here, restoring it after, or the spread won't apply.
+    const saved_gap = g_route_gap;
+    g_route_gap = @max(g_route_gap, rough_declump_gap_mm);
+    defer g_route_gap = saved_gap;
+    try runForce(arena, parts, prep, nets, built, fp);
+}
+
+const CriticalSeedContext = struct {
+    prep: *Prepared,
+    params: Params,
+
+    fn legacy(self: @This(), arena: std.mem.Allocator, parts: []Part) std.mem.Allocator.Error!bool {
+        if (try runRough(arena, parts, self.prep, self.prep.nets, self.params)) return true else return runLegacyFlatSeed(arena, parts, self.prep, self.prep.nets, self.prep.built, self.params);
+    }
+
+    fn finish(self: @This(), arena: std.mem.Allocator, parts: []Part) std.mem.Allocator.Error!void {
+        critical_rough.orientSeries(Part, parts, self.prep.critical);
+        try repairRoughRoutability(arena, parts, self.prep, self.prep.nets, self.prep.built, self.params);
+    }
+
+    fn cost(self: @This(), arena: std.mem.Allocator, parts: []Part) std.mem.Allocator.Error!f64 {
+        return roughRank(arena, parts, self.prep, self.prep.nets, self.prep.built, self.params);
+    }
+};
+
+fn runLegacyFlatSeed(arena: std.mem.Allocator, parts: []Part, prep: *Prepared, nets: []const FlatNet, built: Built, params: Params) std.mem.Allocator.Error!bool {
+    if (isSwitcherBoard(parts, nets, &prep.idx_of) and try packZoned(arena, parts, prep, nets, built, params)) {
+        tightenPriorityLoops(arena, parts, built.loops, nets, prep.priority);
+        return true;
+    }
+    return packPadAnchored(arena, parts, prep, nets, true);
+}
+
+/// Parts past which the rough seed's routability repair is skipped. The pass is
+/// static (no router, no raster) but its pad-sealed gate is quadratic in pads,
+/// and the Rough button's interactive feel is worth more on a whole board than
+/// a nudge the user is about to re-drag anyway.
+const rough_repair_max_parts: usize = 256;
+
+/// Bounded static-routability repair of the rough seed: separate stacked parts,
+/// back a blocker off a sealed pad, stagger a hub side whose escape fan the
+/// corridor cannot seat. See `placement/rough_routability.zig` — the pass moves
+/// nothing on a placement its gates find nothing on, which is most of the corpus.
+fn repairRoughRoutability(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    prep: *Prepared,
+    nets: []const FlatNet,
+    built: Built,
+    params: Params,
+) std.mem.Allocator.Error!void {
+    if (parts.len < 2 or parts.len > rough_repair_max_parts) return;
+    const pl = try roughPlacementView(arena, parts, prep, nets);
+    // The escape reliefs are priced against this solve's own objective, so a
+    // warning-grade fan cannot buy its lanes with wire length (see
+    // `rough_routability.soft_objective_per_seat`). The stacked/sealed/port
+    // rounds fix defects and never consult it.
+    g_placement_diag.routability = try rough_routability.repair(arena, pl, .{
+        .cost = .{
+            .idx_of = &prep.idx_of,
+            .loops = built.loops,
+            .params = params,
+        },
+        // The block's own `(port …)` nets — the only input the port-escape gate
+        // needs and the one thing a `Placement` cannot carry.
+        .port_nets = try port_escape.portNets(arena, prep.block, nets),
+    });
+}
+
+/// A minimal `Placement` over the current poses — exactly the fields the
+/// routability gates read (parts, nets, bounds, board rules). Links, loops and
+/// instances are render-only and stay empty.
+fn roughPlacementView(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    prep: *Prepared,
+    nets: []const FlatNet,
+) std.mem.Allocator.Error!Placement {
+    var minx: f64 = std.math.inf(f64);
+    var miny: f64 = std.math.inf(f64);
+    var maxx: f64 = -std.math.inf(f64);
+    var maxy: f64 = -std.math.inf(f64);
+    for (parts) |p| {
+        minx = @min(minx, keepCx(p) - keepHw(p));
+        miny = @min(miny, keepCy(p) - keepHh(p));
+        maxx = @max(maxx, keepCx(p) + keepHw(p));
+        maxy = @max(maxy, keepCy(p) + keepHh(p));
+    }
+    return .{
+        .parts = parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = minx,
+        .miny = miny,
+        .maxx = maxx,
+        .maxy = maxy,
+        .generated = true,
+        .rules = try boardRulesOf(arena, prep.block, nets),
+    };
 }
 
 /// The bare seeded force relax: ONE seeded relax + legalize. This is the only
@@ -1157,8 +1387,8 @@ const ZoneTopo = struct { ic: usize };
 /// The "one dominant IC + groups" shape gate. Accept only when there is a single
 /// hub whose courtyard dwarfs the next (≥2×), every group orbits it (or has no
 /// hub), and the board is within the finisher band. Null ⇒ use the force path.
-fn analyzeTopology(parts: []const Part, lowered: Lowered) ?ZoneTopo {
-    if (!lowered.active or lowered.groups.len == 0) return null;
+fn analyzeTopology(parts: []const Part, guidance: PlacementGuidance) ?ZoneTopo {
+    if (!guidance.active or guidance.groups.len == 0) return null;
     if (parts.len < 2 or parts.len > polish_max_parts) return null;
     // The IC = largest-area hub.
     var ic: ?usize = null;
@@ -1177,9 +1407,7 @@ fn analyzeTopology(parts: []const Part, lowered: Lowered) ?ZoneTopo {
     // groups whose `hub` is the other IC — that's what disqualifies it, not raw
     // hub area (a power inductor is a big hub but anchors nothing, and may even
     // carry a U-prefix ref-des, so an area/prefix test misfires).
-    for (lowered.groups) |g| {
-        if (g.hub >= 0 and @as(usize, @intCast(g.hub)) != ici) return null;
-    }
+    for (guidance.groups) |g| if (g.hub >= 0 and @as(usize, @intCast(g.hub)) != ici) return null;
     return .{ .ic = ici };
 }
 
@@ -1228,7 +1456,7 @@ fn railDir(members: []const usize, ic: usize, parts: []const Part, nets: []const
         if (!touches) continue;
         for (net.pins) |pp| {
             if (!std.mem.eql(u8, pp.ref_des, ic_ref)) continue;
-            const pad = padLocal(parts[ic], pp.pin);
+            const pad = padLocal(&parts[ic], pp.pin);
             if (pad.w == 0 and pad.h == 0) continue;
             sx += pad.x;
             sy += pad.y;
@@ -1258,7 +1486,7 @@ fn railPadCross(members: []const usize, ic: usize, edge: Edge, parts: []const Pa
         if (!touches) continue;
         for (net.pins) |pp| {
             if (!std.mem.eql(u8, pp.ref_des, ic_ref)) continue;
-            const pad = padLocal(parts[ic], pp.pin);
+            const pad = padLocal(&parts[ic], pp.pin);
             if (pad.w == 0 and pad.h == 0) continue;
             // Area-weighted: the big supply pad dominates over small sense pins on
             // the same net (e.g. VOUT's wide pad vs ISP/ISN), so the bank docks
@@ -1304,14 +1532,13 @@ pub fn faceRotation(pwr: PadRect, edge: Edge) f64 {
 
 /// Rotation-aware half-extents for a part at a given rotation (without mutating it).
 fn extByRot(p: Part, rot: f64) Pt {
-    return if (isQuarter(rot)) .{ .x = p.hh, .y = p.hw } else .{ .x = p.hw, .y = p.hh };
+    const ext = pose_math.aabbHalf(p.hw, p.hh, rot);
+    return .{ .x = ext[0], .y = ext[1] };
 }
 
 /// The decoupling loop whose cap is part index `cap`, if any.
 fn loopForCap(loops: []const Loop, cap: usize) ?Loop {
-    for (loops) |lp| {
-        if (lp.cap == cap) return lp;
-    }
+    for (loops) |lp| if (lp.cap == cap) return lp;
     return null;
 }
 
@@ -1567,7 +1794,7 @@ fn placeSwitchHub(parts: []Part, ic: usize, sec: usize, nets: []const FlatNet, i
         if (!(t_ic and t_sec)) continue;
         for (net.pins) |pp| {
             if (!std.mem.eql(u8, pp.ref_des, ic_ref)) continue;
-            const pad = padLocal(parts[ic], pp.pin);
+            const pad = padLocal(&parts[ic], pp.pin);
             if (pad.w == 0 and pad.h == 0) continue;
             sx += pad.x;
             nsw += 1;
@@ -1608,10 +1835,8 @@ fn packZoned(
     _ = params;
     // The zone floorplan is whole-board constructive — it cannot build around
     // pinned parts, so any lock hands the board to the ring/relax paths instead.
-    for (parts) |p| {
-        if (p.locked) return false;
-    }
-    const topo = analyzeTopology(parts, g_lowered) orelse return false;
+    for (parts) |p| if (p.locked) return false;
+    const topo = analyzeTopology(parts, g_guidance) orelse return false;
     const ic = topo.ic;
     parts[ic].x = 0;
     parts[ic].y = 0;
@@ -1630,7 +1855,7 @@ fn packZoned(
     const gap = @max(g_route_gap, final_clear);
 
     // Functional-group blocks (hub members dropped — IC at origin, inductor below).
-    for (g_lowered.groups) |g| {
+    for (g_guidance.groups) |g| {
         var ml: std.ArrayList(usize) = .empty;
         for (g.members) |m| {
             if (parts[m].kind == .hub or claimed[m]) continue;
@@ -1801,7 +2026,7 @@ fn autofillUnlisted(
     var sweep: usize = 0;
     while (sweep < autofill_sweeps) : (sweep += 1) {
         var improved = false;
-        const sweep_poses = try capturePoses(arena, parts);
+        const sweep_poses = try pose_snapshot.capture(Part, arena, parts);
         var sweep_filled: std.ArrayList(usize) = .empty;
         for (idxs.items) |i| {
             if (!staged[i]) continue; // already filled in an earlier sweep
@@ -1820,7 +2045,7 @@ fn autofillUnlisted(
                 // per-part route check, so only the true culprit stays staged.
                 // (The sweep-level check exists for speed; this slower path only
                 // runs when a sweep actually regresses.)
-                restorePoses(parts, sweep_poses);
+                pose_snapshot.restore(Part, parts, sweep_poses);
                 for (sweep_filled.items) |i| staged[i] = true;
                 for (sweep_filled.items) |i| {
                     const anchors = try autofillAnchors(arena, parts, nets, staged, i);
@@ -1875,9 +2100,7 @@ const SortByLoopThenArea = struct {
     loops: []const Loop,
 
     fn hasLoop(self: SortByLoopThenArea, i: usize) bool {
-        for (self.loops) |L| {
-            if (L.cap == i) return true;
-        }
+        for (self.loops) |L| if (L.cap == i) return true;
         return false;
     }
     fn lessThan(self: SortByLoopThenArea, a: usize, b: usize) bool {
@@ -1921,7 +2144,7 @@ fn autofillAnchors(
                 const j = indexOfRef(parts, op.ref_des) orelse continue;
                 if (staged[j]) continue;
                 const opad = padByNumber(parts[j], op.pin) orelse continue;
-                const wp = worldPt(parts[j], opad.x, opad.y);
+                const wp = worldPt(&parts[j], opad.x, opad.y);
                 try targets.append(arena, .{ wp.x, wp.y });
             }
             if (targets.items.len == 0) continue;
@@ -1942,7 +2165,7 @@ fn anchorCost(parts: []const Part, anchors: []const PadAnchor, i: usize) f64 {
     const p = parts[i];
     var sum: f64 = 0;
     for (anchors) |a| {
-        const wp = worldPt(p, a.lx, a.ly);
+        const wp = worldPt(&p, a.lx, a.ly);
         var best = std.math.floatMax(f64);
         for (a.targets) |t| {
             const d = std.math.hypot(wp.x - t[0], wp.y - t[1]);
@@ -2068,40 +2291,19 @@ fn autofillOne(parts: []Part, anchors: []const PadAnchor, i: usize) bool {
 
 /// `parts[i].pads` entry with the given pad number, or null.
 fn padByNumber(p: Part, number: []const u8) ?geometry.Pad {
-    for (p.pads) |pad| {
-        if (std.mem.eql(u8, pad.number, number)) return pad;
-    }
+    for (p.pads) |pad| if (std.mem.eql(u8, pad.number, number)) return pad;
     return null;
 }
 
 /// Index of the part with this exact ref-des, or null.
 fn indexOfRef(parts: []const Part, ref: []const u8) ?usize {
-    for (parts, 0..) |p, j| {
-        if (std.mem.eql(u8, p.ref_des, ref)) return j;
-    }
+    for (parts, 0..) |p, j| if (std.mem.eql(u8, p.ref_des, ref)) return j;
     return null;
 }
 
 /// Round a millimetre offset to the nearest grid-cell count.
 fn cellOffset(mm: f64) i64 {
     return numeric.checkedInt(i64, @round(mm / grid_mm)) orelse 0;
-}
-
-/// Snapshot every part's pose — the strict/overlap retry in `solve` keeps the
-/// better-routed of the two and restores it with `restorePoses`.
-fn capturePoses(arena: std.mem.Allocator, parts: []const Part) std.mem.Allocator.Error![]Pose {
-    const out = try arena.alloc(Pose, parts.len);
-    for (parts, 0..) |p, i| out[i] = .{ .x = p.x, .y = p.y, .rot = p.rot };
-    return out;
-}
-
-/// Restore poses captured by `capturePoses`.
-fn restorePoses(parts: []Part, poses: []const Pose) void {
-    for (parts, 0..) |*p, i| {
-        p.x = poses[i].x;
-        p.y = poses[i].y;
-        p.rot = poses[i].rot;
-    }
 }
 
 // ── (floorplan …) design-level macro pack ───────────────────────────────────
@@ -2129,10 +2331,10 @@ const Macro = struct {
 
 /// The threadlocal state `prepare` publishes for a solve — snapshotted and
 /// restored around the nested per-sub-block solves the rough hierarchical seed
-/// runs, so the parent solve's own constraints/diagnostics survive. Progress is
+/// runs, so the parent solve's own guidance/diagnostics survive. Progress is
 /// muted during the nested solves (their frames would garble the live-regen view).
 const SolveState = struct {
-    lowered: Lowered,
+    guidance: PlacementGuidance,
     group_force: f64,
     zone_force: f64,
     loop_force_scale: []const f64,
@@ -2143,7 +2345,7 @@ const SolveState = struct {
 
     fn snapshot() SolveState {
         return .{
-            .lowered = g_lowered,
+            .guidance = g_guidance,
             .group_force = g_group_force,
             .zone_force = g_zone_force,
             .loop_force_scale = g_loop_force_scale,
@@ -2155,7 +2357,7 @@ const SolveState = struct {
     }
 
     fn restore(s: SolveState) void {
-        g_lowered = s.lowered;
+        g_guidance = s.guidance;
         g_group_force = s.group_force;
         g_zone_force = s.zone_force;
         g_loop_force_scale = s.loop_force_scale;
@@ -2321,7 +2523,7 @@ fn starredModulePoses(
     project_dir: []const u8,
     source: []const u8,
     slug: []const u8,
-    instances: []const export_kicad.FlatInstance,
+    instances: []const flat_netlist.FlatInstance,
 ) std.mem.Allocator.Error!?[]RefPose {
     if (source.len == 0) return null;
     const rel = if (std.mem.endsWith(u8, source, ".sexp"))
@@ -2418,14 +2620,19 @@ fn buildGlueMacros(
 ) std.mem.Allocator.Error!void {
     const hub_of = try arena.alloc(?usize, parts.len);
     @memset(hub_of, null);
+    // Net identity and classification are fixed while every loose part chooses
+    // a hub. Re-running the full ground-name predicate for each part × net was
+    // a prominent self-hosted Debug cost on large hierarchical boards.
+    const ground_net = try arena.alloc(bool, nets.len);
+    for (nets, ground_net) |net, *ground| ground.* = pin_roles.isGroundFn(shortName(net.name));
     for (parts, 0..) |p, pi| {
         if (macro_of[pi] != null or p.locked or p.kind == .hub) continue;
         var best_hub: ?usize = null;
         var best_pins: usize = std.math.maxInt(usize);
-        for (nets) |net| {
-            if (pin_roles.isGroundFn(shortName(net.name))) continue;
+        for (nets, ground_net) |net, ground| {
+            if (ground) continue;
             if (net.pins.len >= best_pins) continue; // want the most specific net
-            if (!netHasPart(net, pi, &prep.idx_of)) continue;
+            if (!netHasPart(net, parts, pi)) continue;
             for (net.pins) |pin| {
                 const qi = prep.idx_of.get(pin.ref_des) orelse continue;
                 if (qi == pi or parts[qi].kind != .hub) continue;
@@ -2440,9 +2647,7 @@ fn buildGlueMacros(
     for (parts, 0..) |p, hpi| {
         if (macro_of[hpi] != null or p.kind != .hub or p.locked) continue;
         var members: std.ArrayList(usize) = .empty;
-        for (hub_of, 0..) |h, pi| {
-            if (h != null and h.? == hpi) try members.append(arena, pi);
-        }
+        for (hub_of, 0..) |h, pi| if (h != null and h.? == hpi) try members.append(arena, pi);
         if (members.items.len == 0) continue; // a bare hub stays a singleton
         const m = try ringGlueMacro(arena, parts, prep, nets, hpi, members.items);
         macro_of[hpi] = macros.items.len;
@@ -2477,6 +2682,7 @@ fn ringGlueMacro(
         local[k + 1].locked = false;
         try idx_of.put(arena, parts[pi].ref_des, k + 1);
     }
+    const topology = try buildHubTopology(arena, local, 0, nets, &idx_of);
     const hkb = keepBoxOf(local[0]);
     const roles = pin_roles.load(arena, prep.project_dir, if (hpi < prep.instances.len) prep.instances[hpi].component else "");
     var sides = [_]std.ArrayList(SidePart){ .empty, .empty, .empty, .empty };
@@ -2493,16 +2699,8 @@ fn ringGlueMacro(
     const served_pad = try arena.alloc(?[2]f64, n);
     @memset(served_pad, null);
     for (members, 0..) |pi, k| {
-        var tok: []const u8 = "";
-        if (pi < prep.instances.len) {
-            const inst = prep.instances[pi];
-            if (inst.decouple_pin.len > 0) {
-                tok = inst.decouple_pin;
-            } else if (decouplePinFromOrigin(inst.origin_key)) |dp| {
-                tok = dp;
-            }
-        }
-        served_pad[k + 1] = servedPadLocal(local, 0, k + 1, tok, nets, &idx_of);
+        const want: CapTarget = if (pi < prep.instances.len) capTargetOf(prep.instances[pi]) else .{};
+        served_pad[k + 1] = servedPadLocal(local, 0, k + 1, want, nets, &idx_of);
     }
     const saved_ic_gap = g_rough_ic_gap;
     const saved_part_gap = g_rough_part_gap;
@@ -2512,7 +2710,7 @@ fn ringGlueMacro(
         g_rough_ic_gap = saved_ic_gap;
         g_rough_part_gap = saved_part_gap;
     }
-    try assignSides(arena, local, 0, nets, &idx_of, roles, ci, tier_of, sig_side, served_pad, &sides, &leftover);
+    try assignSides(arena, local, 0, topology, roles, ci, tier_of, sig_side, served_pad, &sides, &leftover);
     dockSidesByTier(local, &sides, hkb);
     if (leftover.items.len > 0) {
         var x: f64 = -hkb.hw;
@@ -2525,7 +2723,7 @@ fn ringGlueMacro(
             x += pkb.hw + pad_anchor_part_gap_mm;
         }
     }
-    try refineSidesByPull(arena, local, 0, nets, &idx_of, tier_of, cohere_side, &sides, hkb);
+    try refineSidesByPull(arena, local, 0, topology, tier_of, cohere_side, &sides, hkb);
     orientPadsToIC(local, 0, null, nets, &idx_of);
     legalizeFinal(local);
     const g_members = try arena.alloc(usize, n);
@@ -2780,10 +2978,17 @@ fn leafRefPrefix(ref: []const u8) u8 {
     return if (leaf.len > 0) std.ascii.toUpper(leaf[0]) else 0;
 }
 
-/// True when part index `pi` has a pin on `net`.
-fn netHasPart(net: FlatNet, pi: usize, idx_of: *std.StringHashMapUnmanaged(usize)) bool {
+/// True when part index `pi` has a pin on `net`. The caller already has the
+/// resolved part table, so compare the canonical ref directly instead of
+/// hashing every pin back into the same index map.
+fn netHasPart(net: FlatNet, parts: []const Part, pi: usize) bool {
+    if (pi >= parts.len) return false;
+    return netHasRef(net, parts[pi].ref_des);
+}
+
+fn netHasRef(net: FlatNet, ref: []const u8) bool {
     for (net.pins) |pr| {
-        if ((idx_of.get(pr.ref_des) orelse continue) == pi) return true;
+        if (std.mem.eql(u8, pr.ref_des, ref)) return true;
     }
     return false;
 }
@@ -2798,7 +3003,7 @@ fn hubPinOnNet(net: FlatNet, hi: usize, idx_of: *std.StringHashMapUnmanaged(usiz
 
 /// Footprint-local centres of every hub pad on `net` — a rail lands on many, a
 /// signal on one, so the caller can both rank nets and spread parts across pads.
-fn hubPadsOnNet(arena: std.mem.Allocator, hub: Part, hi: usize, net: FlatNet, idx_of: *std.StringHashMapUnmanaged(usize)) std.mem.Allocator.Error![][2]f64 {
+fn hubPadsOnNet(arena: std.mem.Allocator, hub: *const Part, hi: usize, net: FlatNet, idx_of: *std.StringHashMapUnmanaged(usize)) std.mem.Allocator.Error![][2]f64 {
     var out: std.ArrayList([2]f64) = .empty;
     for (net.pins) |pr| {
         if ((idx_of.get(pr.ref_des) orelse continue) != hi) continue;
@@ -2809,35 +3014,87 @@ fn hubPadsOnNet(arena: std.mem.Allocator, hub: Part, hi: usize, net: FlatNet, id
     return out.toOwnedSlice(arena);
 }
 
-/// Footprint-local centre of the anchor hub's pad named `tok` (a `(decouples "IC"
-/// PIN)` binding or a generator's `value@PAD#replica` origin pad), but ONLY when
-/// that pad lies on one of part `pi`'s own nets. The net scoping rejects a
-/// cross-hub binding: a `(decouples "U2" 8)` cap names U2's pad 8, and the anchor
-/// U1 may carry an unrelated pad 8 on a different net — without the on-net check it
-/// would mis-resolve to U1's pad 8. Null when `tok` is empty or names no on-net hub pad.
-fn servedPadLocal(parts: []const Part, hi: usize, pi: usize, tok: []const u8, nets: []const FlatNet, idx_of: *std.StringHashMapUnmanaged(usize)) ?[2]f64 {
+/// Net topology relative to one anchor hub, prepared once for the ring passes.
+/// `part_nets` preserves the original net order while removing the repeated
+/// all-net scan and ref-des hashing from side assignment and refinement.
+const HubTopology = struct {
+    const Net = struct {
+        pads: []const [2]f64,
+        pin_parts: []const usize,
+        pin: []const u8,
+        pin_count: usize,
+        ground: bool,
+    };
+
+    nets: []const Net,
+    part_nets: []const []const usize,
+};
+
+fn buildHubTopology(
+    arena: std.mem.Allocator,
+    parts: []const Part,
+    hi: usize,
+    nets: []const FlatNet,
+    idx_of: *std.StringHashMapUnmanaged(usize),
+) std.mem.Allocator.Error!HubTopology {
+    const info = try arena.alloc(HubTopology.Net, nets.len);
+    const lists = try arena.alloc(std.ArrayList(usize), parts.len);
+    for (lists) |*list| list.* = .empty;
+    const seen = try arena.alloc(bool, parts.len);
+    for (nets, info, 0..) |net, *dst, ni| {
+        @memset(seen, false);
+        var pads: std.ArrayList([2]f64) = .empty;
+        var pin_parts: std.ArrayList(usize) = .empty;
+        var hub_pin: []const u8 = "";
+        var hub_count: usize = 0;
+        for (net.pins) |pr| {
+            const pi = idx_of.get(pr.ref_des) orelse continue;
+            try pin_parts.append(arena, pi);
+            if (!seen[pi]) {
+                seen[pi] = true;
+                try lists[pi].append(arena, ni);
+            }
+            if (pi != hi) continue;
+            hub_count += 1;
+            if (hub_pin.len == 0) hub_pin = pr.pin;
+            const pad = padLocal(&parts[hi], pr.pin);
+            if (pad.w != 0 or pad.h != 0) try pads.append(arena, .{ pad.x, pad.y });
+        }
+        dst.* = .{
+            .pads = try pads.toOwnedSlice(arena),
+            .pin_parts = try pin_parts.toOwnedSlice(arena),
+            .pin = hub_pin,
+            .pin_count = hub_count,
+            .ground = pin_roles.isGroundFn(shortName(net.name)),
+        };
+    }
+    const part_nets = try arena.alloc([]const usize, parts.len);
+    for (lists, part_nets) |list, *dst| dst.* = list.items;
+    return .{ .nets = info, .part_nets = part_nets };
+}
+
+/// Footprint-local centre of the anchor hub's pad named by `want` (a `(decouples
+/// "IC" PIN)` binding or a generator's `value@PAD#replica` origin pad), but ONLY
+/// when the binding really is about this hub. Two independent guards say so:
+/// the cap must NAME this hub when it names one at all, and the pad must lie on
+/// one of part `pi`'s own nets. Either alone leaves a hole — a `(decouples "U2"
+/// 8)` cap names U2's pad 8, and the anchor U1 may carry a pad 8 of its own on a
+/// net the cap also touches, in which case only the ref check rejects it. Null
+/// when the binding is empty, names another IC, or names no on-net hub pad.
+fn servedPadLocal(parts: []const Part, hi: usize, pi: usize, want: CapTarget, nets: []const FlatNet, idx_of: *std.StringHashMapUnmanaged(usize)) ?[2]f64 {
+    const tok = want.pad;
     if (tok.len == 0) return null;
+    if (want.ic.len > 0 and !std.mem.eql(u8, want.ic, parts[hi].ref_des)) return null;
     for (nets) |net| {
-        if (!netHasPart(net, pi, idx_of)) continue;
+        if (!netHasPart(net, parts, pi)) continue;
         for (net.pins) |pr| {
             if ((idx_of.get(pr.ref_des) orelse continue) != hi) continue;
             if (!std.mem.eql(u8, pr.pin, tok)) continue;
-            const pad = padLocal(parts[hi], pr.pin);
+            const pad = padLocal(&parts[hi], pr.pin);
             if (pad.w != 0 or pad.h != 0) return .{ pad.x, pad.y };
         }
     }
     return null;
-}
-
-/// True when a part's flattened ref-des or module-local origin name matches an
-/// author token from a `(rough …)` anchor/group — exact or by leaf segment, the
-/// same lenient match `(module-policy …)` uses so a token written in a module
-/// file still binds after the part renumbers (e.g. U1→U17) in a parent board.
-fn roughNameMatch(ref: []const u8, origin: []const u8, want: []const u8) bool {
-    if (want.len == 0) return false;
-    if (ref.len > 0 and (std.mem.eql(u8, ref, want) or std.mem.eql(u8, shortName(ref), want))) return true;
-    if (origin.len > 0 and (std.mem.eql(u8, origin, want) or std.mem.eql(u8, shortName(origin), want))) return true;
-    return false;
 }
 
 /// IC edge → first ring of parts (mm) and the spacing between parts along an edge.
@@ -2856,8 +3113,9 @@ const along_pack_seq: f64 = -1e9;
 /// Rough-output ring tightness, set per solve in `packPadAnchored` and consulted
 /// by `dockSidesByTier` (so the value need not thread through `refineSidesByPull`).
 /// The rough OUTPUT packs the ring flush against the IC — gaps at the legalize
-/// floor (`FINAL_CLEAR`), the way a hand layout tucks decoupling parts right at
-/// the pins (measured: median part→IC gap 1–5 mm → ~0.2 mm, loops ≈40 % shorter,
+/// floor (`final_clear`), then guarded closing offers exact passive-row contact
+/// after routability repair (measured: median part→IC gap 1–5 mm → contact where
+/// the pad escape remains open, loops ≈40 % shorter,
 /// side assignment unchanged). The force SEED keeps the looser default so its
 /// tuned solve is unchanged. Defaults equal the loose constants, so any path that
 /// doesn't set them behaves as before.
@@ -3025,7 +3283,7 @@ fn buildClusters(
     @memset(attach_n, 0);
     for (nets) |net| {
         if (pin_roles.isGroundFn(shortName(net.name))) continue;
-        const pads = try hubPadsOnNet(arena, parts[hi], hi, net, idx_of);
+        const pads = try hubPadsOnNet(arena, &parts[hi], hi, net, idx_of);
         if (pads.len == 0 or pads.len > 2) continue; // need a single-ish IC signal pad
         for (net.pins) |pr| {
             const idx = idx_of.get(pr.ref_des) orelse continue;
@@ -3053,8 +3311,7 @@ fn assignSides(
     arena: std.mem.Allocator,
     parts: []Part,
     hi: usize,
-    nets: []const FlatNet,
-    idx_of: *std.StringHashMapUnmanaged(usize),
+    topology: HubTopology,
     roles: pin_roles.PartRoles,
     ci: ClusterInfo,
     tier_of: []const usize,
@@ -3081,34 +3338,29 @@ fn assignSides(
         // and casts no vote in `cohereGroups`.
         var anchor: ?[2]f64 = null;
         var anchor_cnt: usize = 0;
-        for (nets, 0..) |net, ni| {
-            if (!netHasPart(net, pi, idx_of)) continue;
-            if (padOnNet(parts[hi], hi, net, idx_of).w == 0) continue; // hub not on net
+        for (topology.part_nets[pi]) |ni| {
+            const hub_net = topology.nets[ni];
+            if (hub_net.pads.len == 0) continue; // hub not on a physical pad of this net
             // Cohesion anchor (additive — does NOT affect sig/rail bucketing): a
             // ≤2-pad signal net that is ground by neither role NOR name. The name
             // test catches a hub GND pad the role data misses, so a pure VDD/GND
             // bypass cap gets no anchor. A power rail lands on many pads (cnt>2),
             // so it's excluded too. Checked before the role `continue` below so it
             // still runs on nets that pass the (unreliable) role ground-test.
-            var cnt: usize = 0;
-            for (net.pins) |pr| {
-                if ((idx_of.get(pr.ref_des) orelse continue) == hi) cnt += 1;
-            }
-            if (cnt <= 2 and !pin_roles.isGroundFn(shortName(net.name)) and
-                roles.classOf(hubPinOnNet(net, hi, idx_of)) != .ground and
+            const cnt = hub_net.pin_count;
+            if (cnt <= 2 and !hub_net.ground and
+                roles.classOf(hub_net.pin) != .ground and
                 (anchor == null or cnt < anchor_cnt))
             {
-                const apads = try hubPadsOnNet(arena, parts[hi], hi, net, idx_of);
-                if (apads.len > 0) {
-                    anchor = apads[0];
+                if (hub_net.pads.len > 0) {
+                    anchor = hub_net.pads[0];
                     anchor_cnt = cnt;
                 }
             }
-            if (roles.classOf(hubPinOnNet(net, hi, idx_of)) == .ground) continue;
+            if (roles.classOf(hub_net.pin) == .ground) continue;
             if (cnt <= 2 and (sig == null or cnt < sig_cnt)) {
-                const pads = try hubPadsOnNet(arena, parts[hi], hi, net, idx_of);
-                if (pads.len > 0) {
-                    sig = pads[0];
+                if (hub_net.pads.len > 0) {
+                    sig = hub_net.pads[0];
                     sig_cnt = cnt;
                 }
             }
@@ -3134,7 +3386,7 @@ fn assignSides(
         if (is_cap and served_pad[pi] != null) {
             pad = served_pad[pi].?;
         } else if (is_cap and rail != null and rail_cnt >= cluster_max_rail_pads) {
-            pad = (try rrPad(arena, parts, hi, nets, idx_of, &net_next, rail.?)) orelse {
+            pad = (try rrPad(arena, topology, &net_next, rail.?)) orelse {
                 try leftover.append(arena, pi);
                 continue;
             };
@@ -3143,7 +3395,7 @@ fn assignSides(
         } else if (ci.clustered(pi) and ci.attachOf(pi) != null) {
             pad = ci.attachOf(pi).?;
         } else if (rail) |rn| {
-            pad = (try rrPad(arena, parts, hi, nets, idx_of, &net_next, rn)) orelse {
+            pad = (try rrPad(arena, topology, &net_next, rn)) orelse {
                 try leftover.append(arena, pi);
                 continue;
             };
@@ -3182,7 +3434,7 @@ fn cohereGroups(
     parts: []Part,
     hi: usize,
     groups: []const env.Group,
-    instances: []const export_kicad.FlatInstance,
+    instances: []const flat_netlist.FlatInstance,
     tier_of: []const usize,
     sig_side: []const u8,
     cohere_side: []u8,
@@ -3251,14 +3503,11 @@ fn cohereGroups(
 /// rail's many IC pads instead of piling on one. Null when the hub has no pad.
 fn rrPad(
     arena: std.mem.Allocator,
-    parts: []const Part,
-    hi: usize,
-    nets: []const FlatNet,
-    idx_of: *std.StringHashMapUnmanaged(usize),
+    topology: HubTopology,
     net_next: *std.AutoHashMapUnmanaged(usize, usize),
     net: usize,
 ) std.mem.Allocator.Error!?[2]f64 {
-    const pads = try hubPadsOnNet(arena, parts[hi], hi, nets[net], idx_of);
+    const pads = topology.nets[net].pads;
     if (pads.len == 0) return null;
     const gop = try net_next.getOrPut(arena, net);
     const k = if (gop.found_existing) gop.value_ptr.* else 0;
@@ -3287,28 +3536,25 @@ const PullTarget = struct { x: f64, y: f64, dir: bool };
 /// VDD pad). Ground and wide buses are excluded. `dir` is false when the only pull
 /// is the centred rail — the caller then leaves the part on its seeded side.
 fn sidePullTarget(
-    arena: std.mem.Allocator,
     parts: []const Part,
     hi: usize,
     pi: usize,
-    nets: []const FlatNet,
-    idx_of: *std.StringHashMapUnmanaged(usize),
-) std.mem.Allocator.Error!PullTarget {
+    topology: HubTopology,
+) PullTarget {
     var sx: f64 = 0;
     var sy: f64 = 0;
     var sw: f64 = 0;
     var has_dir = false;
-    for (nets) |net| {
-        if (!netHasPart(net, pi, idx_of)) continue;
-        if (pin_roles.isGroundFn(shortName(net.name))) continue;
-        var hubpads: usize = 0;
+    for (topology.part_nets[pi]) |ni| {
+        const hub_net = topology.nets[ni];
+        if (hub_net.ground) continue;
+        const hubpads = hub_net.pin_count;
         var members: usize = 0;
-        for (net.pins) |pr| {
-            const idx = idx_of.get(pr.ref_des) orelse continue;
-            if (idx == hi) hubpads += 1 else members += 1;
+        for (hub_net.pin_parts) |idx| {
+            if (idx != hi) members += 1;
         }
         if (hubpads > 0) {
-            const pads = try hubPadsOnNet(arena, parts[hi], hi, net, idx_of);
+            const pads = hub_net.pads;
             if (hubpads <= 2) {
                 for (pads) |pd| {
                     sx += pd[0] * reside_w_sig;
@@ -3334,8 +3580,7 @@ fn sidePullTarget(
         // matching the clustering rules so VDD/GND don't drag every part toward
         // every other.
         if (hubpads >= cluster_max_rail_pads or members > cluster_max_net_parts) continue;
-        for (net.pins) |pr| {
-            const idx = idx_of.get(pr.ref_des) orelse continue;
+        for (hub_net.pin_parts) |idx| {
             if (idx == hi or idx == pi) continue;
             sx += parts[idx].x * reside_w_nbr;
             sy += parts[idx].y * reside_w_nbr;
@@ -3361,8 +3606,7 @@ fn refineSidesByPull(
     arena: std.mem.Allocator,
     parts: []Part,
     hi: usize,
-    nets: []const FlatNet,
-    idx_of: *std.StringHashMapUnmanaged(usize),
+    topology: HubTopology,
     tier_of: []const usize,
     cohere_side: []const u8,
     sides: *[4]std.ArrayList(SidePart),
@@ -3390,7 +3634,7 @@ fn refineSidesByPull(
             if (pi == hi) continue;
             // Target the pull centroid when it points somewhere; a part with no
             // directional pull keeps its current spot (→ same side, same height).
-            const t = try sidePullTarget(arena, parts, hi, pi, nets, idx_of);
+            const t = sidePullTarget(parts, hi, pi, topology);
             var vert = @abs(t.x) >= @abs(t.y);
             var s: usize = if (vert) (if (t.x < 0) 0 else 1) else (if (t.y < 0) 2 else 3);
             var along: f64 = if (vert) t.y else t.x;
@@ -3420,82 +3664,100 @@ fn refineSidesByPull(
     }
 }
 
-fn orient2(p: [2]f64, q: [2]f64, r: [2]f64) f64 {
-    return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
-}
-fn ptEq(p: [2]f64, q: [2]f64) bool {
-    return @abs(p[0] - q[0]) < 1e-6 and @abs(p[1] - q[1]) < 1e-6;
-}
-/// Interior crossing of segments a1→a2 and b1→b2 — a shared endpoint (two airwires
-/// meeting at the same pad) is not a crossing.
-fn segsCross(a1: [2]f64, a2: [2]f64, b1: [2]f64, b2: [2]f64) bool {
-    if (ptEq(a1, b1) or ptEq(a1, b2) or ptEq(a2, b1) or ptEq(a2, b2)) return false;
-    const d1 = orient2(b1, b2, a1);
-    const d2 = orient2(b1, b2, a2);
-    const d3 = orient2(a1, a2, b1);
-    const d4 = orient2(a1, a2, b2);
-    const opp1 = (d1 > 0 and d2 < 0) or (d1 < 0 and d2 > 0);
-    const opp2 = (d3 > 0 and d4 < 0) or (d3 < 0 and d4 > 0);
-    return opp1 and opp2;
-}
+/// Immutable local-pad topology for the crossing polish. Candidate swaps alter
+/// only poses; ref lookups, net membership, and footprint-local pad coordinates
+/// stay fixed and are expensive to reconstruct in Debug for every candidate.
+const CrossingPoint = struct { part: usize, x: f64, y: f64 };
+const CrossingLoop = struct {
+    cap: usize,
+    cap_pad: PadRect,
+    hub: usize,
+    hub_pads: []const [2]f64,
+};
+const CrossingModel = struct {
+    nets: []const []const CrossingPoint,
+    loops: []const CrossingLoop,
+};
 
-/// Euclidean minimum spanning tree (Prim's) over `pts`, appending its edges as
-/// segments to `out`. An MST is planar, so a net never crosses ITSELF — the
-/// crossing metric then measures only the inter-net tangle that placement controls.
-fn primEdges(arena: std.mem.Allocator, pts: []const [2]f64, out: *std.ArrayList([4]f64)) std.mem.Allocator.Error!void {
-    const n = pts.len;
-    const intree = try arena.alloc(bool, n);
-    @memset(intree, false);
-    intree[0] = true;
-    var added: usize = 1;
-    while (added < n) : (added += 1) {
-        var bi: usize = 0;
-        var bj: usize = 0;
-        var bd: f64 = std.math.inf(f64);
-        for (pts, 0..) |a, i| {
-            if (!intree[i]) continue;
-            for (pts, 0..) |b, j| {
-                if (intree[j]) continue;
-                const dx = a[0] - b[0];
-                const dy = a[1] - b[1];
-                const d = dx * dx + dy * dy;
-                if (d < bd) {
-                    bd = d;
-                    bi = i;
-                    bj = j;
-                }
-            }
-        }
-        intree[bj] = true;
-        try out.append(arena, .{ pts[bi][0], pts[bi][1], pts[bj][0], pts[bj][1] });
-    }
-}
-
-/// Append a decoupling cap's power loop: its power pad → the nearest hub pad on
-/// the same (non-ground) net. Mirrors the orange loop the viewer draws, so the
-/// crossing metric sees the loops that dominate the rough layout's tangle.
-fn appendCapLoop(
+/// Resolve one decoupling cap's power loop into footprint-local coordinates.
+/// Mirrors the orange loop the viewer draws, so the crossing metric sees the
+/// loops that dominate the rough layout's tangle.
+fn capCrossingLoop(
     arena: std.mem.Allocator,
     parts: []const Part,
     hi: usize,
     pi: usize,
     nets: []const FlatNet,
     idx_of: *std.StringHashMapUnmanaged(usize),
-    out: *std.ArrayList([4]f64),
-) std.mem.Allocator.Error!void {
+) std.mem.Allocator.Error!?CrossingLoop {
     for (nets) |net| {
-        if (!netHasPart(net, pi, idx_of)) continue;
+        if (!netHasPart(net, parts, pi)) continue;
         if (pin_roles.isGroundFn(shortName(net.name))) continue;
-        const cap_pad = padOnNet(parts[pi], pi, net, idx_of);
+        const cap_pad = padOnNet(&parts[pi], pi, net, idx_of);
         if (cap_pad.w == 0 and cap_pad.h == 0) continue;
-        const pads = try hubPadsOnNet(arena, parts[hi], hi, net, idx_of);
+        const pads = try hubPadsOnNet(arena, &parts[hi], hi, net, idx_of);
         if (pads.len == 0) continue;
-        const cw = worldPadCenter(parts[pi], cap_pad.x, cap_pad.y);
+        return .{ .cap = pi, .cap_pad = cap_pad, .hub = hi, .hub_pads = pads };
+    }
+    return null;
+}
+
+fn buildCrossingModel(
+    arena: std.mem.Allocator,
+    parts: []const Part,
+    hi: usize,
+    nets: []const FlatNet,
+    idx_of: *std.StringHashMapUnmanaged(usize),
+) std.mem.Allocator.Error!CrossingModel {
+    var model_nets: std.ArrayList([]const CrossingPoint) = .empty;
+    for (nets) |net| {
+        if (pin_roles.isGroundFn(shortName(net.name))) continue;
+        var points: std.ArrayList(CrossingPoint) = .empty;
+        for (net.pins) |pr| {
+            const idx = idx_of.get(pr.ref_des) orelse continue;
+            // Preserve the old metric exactly: for a net with multiple pads on
+            // one part, `padOnNet` selects the first pad for each repeated pin.
+            const pad = padOnNet(&parts[idx], idx, net, idx_of);
+            if (pad.w == 0 and pad.h == 0) continue;
+            try points.append(arena, .{ .part = idx, .x = pad.x, .y = pad.y });
+        }
+        if (points.items.len >= 2) try model_nets.append(arena, try points.toOwnedSlice(arena));
+    }
+
+    var model_loops: std.ArrayList(CrossingLoop) = .empty;
+    for (parts, 0..) |p, pi| {
+        if (pi == hi or p.kind == .hub or leafRefPrefix(p.ref_des) != 'C') continue;
+        if (try capCrossingLoop(arena, parts, hi, pi, nets, idx_of)) |lp| try model_loops.append(arena, lp);
+    }
+    return .{
+        .nets = try model_nets.toOwnedSlice(arena),
+        .loops = try model_loops.toOwnedSlice(arena),
+    };
+}
+
+/// Count airwire crossings of the current placement: a planar per-net MST (ground
+/// skipped — it reaches every part, so its crossings are noise) plus each cap's
+/// decoupling loop. The objective the swap polish minimizes.
+fn crossingMetric(
+    arena: std.mem.Allocator,
+    parts: []const Part,
+    model: CrossingModel,
+) std.mem.Allocator.Error!usize {
+    var segs: std.ArrayList([4]f64) = .empty;
+    for (model.nets) |net| {
+        var pts: std.ArrayList([2]f64) = .empty;
+        for (net) |point| {
+            try pts.append(arena, worldPadCenter(&parts[point.part], point.x, point.y));
+        }
+        try airwire_geometry.primEdges(arena, pts.items, &segs);
+    }
+    for (model.loops) |lp| {
+        const cw = worldPadCenter(&parts[lp.cap], lp.cap_pad.x, lp.cap_pad.y);
         var best: f64 = std.math.inf(f64);
         var bx: f64 = 0;
         var by: f64 = 0;
-        for (pads) |hp| {
-            const w = worldPadCenter(parts[hi], hp[0], hp[1]);
+        for (lp.hub_pads) |hp| {
+            const w = worldPadCenter(&parts[lp.hub], hp[0], hp[1]);
             const dx = w[0] - cw[0];
             const dy = w[1] - cw[1];
             const d = dx * dx + dy * dy;
@@ -3505,41 +3767,12 @@ fn appendCapLoop(
                 by = w[1];
             }
         }
-        try out.append(arena, .{ cw[0], cw[1], bx, by });
-        return; // one loop per cap
-    }
-}
-
-/// Count airwire crossings of the current placement: a planar per-net MST (ground
-/// skipped — it reaches every part, so its crossings are noise) plus each cap's
-/// decoupling loop. The objective the swap polish minimizes.
-fn crossingMetric(
-    arena: std.mem.Allocator,
-    parts: []const Part,
-    hi: usize,
-    nets: []const FlatNet,
-    idx_of: *std.StringHashMapUnmanaged(usize),
-) std.mem.Allocator.Error!usize {
-    var segs: std.ArrayList([4]f64) = .empty;
-    for (nets) |net| {
-        if (pin_roles.isGroundFn(shortName(net.name))) continue;
-        var pts: std.ArrayList([2]f64) = .empty;
-        for (net.pins) |pr| {
-            const idx = idx_of.get(pr.ref_des) orelse continue;
-            const pad = padOnNet(parts[idx], idx, net, idx_of);
-            if (pad.w == 0 and pad.h == 0) continue;
-            try pts.append(arena, worldPadCenter(parts[idx], pad.x, pad.y));
-        }
-        if (pts.items.len >= 2) try primEdges(arena, pts.items, &segs);
-    }
-    for (parts, 0..) |p, pi| {
-        if (pi == hi or p.kind == .hub or leafRefPrefix(p.ref_des) != 'C') continue;
-        try appendCapLoop(arena, parts, hi, pi, nets, idx_of, &segs);
+        try segs.append(arena, .{ cw[0], cw[1], bx, by });
     }
     var n: usize = 0;
     for (segs.items, 0..) |s, i| {
         for (segs.items[i + 1 ..]) |t| {
-            if (segsCross(.{ s[0], s[1] }, .{ s[2], s[3] }, .{ t[0], t[1] }, .{ t[2], t[3] })) n += 1;
+            if (airwire_geometry.segmentsCross(.{ s[0], s[1] }, .{ s[2], s[3] }, .{ t[0], t[1] }, .{ t[2], t[3] })) n += 1;
         }
     }
     return n;
@@ -3574,7 +3807,8 @@ fn polishCrossings(
 ) std.mem.Allocator.Error!void {
     const ax = parts[hi].x;
     const ay = parts[hi].y;
-    var best = try crossingMetric(arena, parts, hi, nets, idx_of);
+    const model = try buildCrossingModel(arena, parts, hi, nets, idx_of);
+    var best = try crossingMetric(arena, parts, model);
     var pass: usize = 0;
     while (best > 0 and pass < rough_polish_passes) : (pass += 1) {
         var improved = false;
@@ -3595,7 +3829,7 @@ fn polishCrossings(
                 parts[j].x = ip[0];
                 parts[j].y = ip[1];
                 parts[j].rot = ip[2];
-                const c = try crossingMetric(arena, parts, hi, nets, idx_of);
+                const c = try crossingMetric(arena, parts, model);
                 if (c < best) {
                     best = c;
                     improved = true;
@@ -3628,7 +3862,7 @@ fn importantPadLocal(
     var best: ?FlatNet = null;
     var best_cnt: usize = std.math.maxInt(usize);
     for (nets) |net| {
-        if (!netHasPart(net, pi, idx_of)) continue;
+        if (!netHasRef(net, part.ref_des)) continue;
         if (pin_roles.isGroundFn(shortName(net.name))) continue;
         var hubpads: usize = 0;
         for (net.pins) |pr| {
@@ -3641,7 +3875,7 @@ fn importantPadLocal(
         }
     }
     const net = best orelse return null;
-    const pad = padOnNet(part, pi, net, idx_of);
+    const pad = padOnNet(&part, pi, net, idx_of);
     if (pad.w == 0 and pad.h == 0) return null;
     return .{ pad.x, pad.y };
 }
@@ -3688,7 +3922,7 @@ fn isSwitcherBoard(parts: []const Part, nets: []const FlatNet, idx_of: *std.Stri
     var has_ind = false;
     var has_hot = false;
     for (nets) |net| {
-        if (!netHasPart(net, hi, idx_of)) continue;
+        if (!netHasPart(net, parts, hi)) continue;
         const cls = module_policy.classifyNetName(net.name);
         if (cls == .ground) continue;
         if (cls == .input_rail or cls == .switch_node) has_hot = true;
@@ -3810,6 +4044,7 @@ fn packPadAnchored(
     // a series R between two local nets) dock at the cluster's attach centroid so
     // connected parts stay together — keeping their airwires short instead of
     // spanning the board, which was the dominant ratsnest-crossing source.
+    const topology = try buildHubTopology(arena, parts, hi, nets, &prep.idx_of);
     const ci = try buildClusters(arena, parts, hi, nets, &prep.idx_of);
     const sig_side = try arena.alloc(u8, parts.len);
     @memset(sig_side, 255);
@@ -3823,19 +4058,11 @@ fn packPadAnchored(
     if (cohere) {
         for (parts, 0..) |_, pi| {
             if (pi == hi) continue;
-            var tok: []const u8 = "";
-            if (pi < prep.instances.len) {
-                const inst = prep.instances[pi];
-                if (inst.decouple_pin.len > 0) {
-                    tok = inst.decouple_pin;
-                } else if (decouplePinFromOrigin(inst.origin_key)) |p| {
-                    tok = p;
-                }
-            }
-            served_pad[pi] = servedPadLocal(parts, hi, pi, tok, nets, &prep.idx_of);
+            const want: CapTarget = if (pi < prep.instances.len) capTargetOf(prep.instances[pi]) else .{};
+            served_pad[pi] = servedPadLocal(parts, hi, pi, want, nets, &prep.idx_of);
         }
     }
-    try assignSides(arena, parts, hi, nets, &prep.idx_of, roles, ci, tier_of, sig_side, served_pad, &sides, &leftover);
+    try assignSides(arena, parts, hi, topology, roles, ci, tier_of, sig_side, served_pad, &sides, &leftover);
 
     // Cohere each authored `(group …)` onto one IC edge (the side its
     // directionally-anchored members vote for) so a functional subsystem stays
@@ -3864,7 +4091,7 @@ fn packPadAnchored(
     // Connectivity-aware re-side: now that everyone has a position, move parts to
     // the IC side their real neighbours pull toward (the initial dock chose by one
     // IC pad, blind to the part's far ends — the main wrong-side source).
-    try refineSidesByPull(arena, parts, hi, nets, &prep.idx_of, tier_of, cohere_side, &sides, hkb);
+    try refineSidesByPull(arena, parts, hi, topology, tier_of, cohere_side, &sides, hkb);
 
     // Freeze each directionally-wired part's correct side so the crossing polish
     // can't undo it; a part with no directional pull (a pure decoupling cap) is
@@ -3879,7 +4106,7 @@ fn packPadAnchored(
             want_side[pi] = cohere_side[pi];
             continue;
         }
-        const t = try sidePullTarget(arena, parts, hi, pi, nets, &prep.idx_of);
+        const t = sidePullTarget(parts, hi, pi, topology);
         if (t.dir) want_side[pi] = posSide(parts[hi].x, parts[hi].y, t.x, t.y);
     }
 
@@ -3936,6 +4163,43 @@ fn transformRingToAnchor(parts: []Part, hi: usize, ax: f64, ay: f64, arot: f64) 
 /// rot 0).
 const PinTarget = struct { edge: u2, along: f64 };
 
+/// The read-only inputs every pin-adjacent pass shares: the flattened netlist,
+/// its ref-des index, the per-net port compass (`portCompass`; null asks for pad
+/// truth alone) and the authored placement grouping (`roughGroupOf`; −1 =
+/// ungrouped). Bundled because each pass needs most of them and the parameter
+/// lists were already at the shape gate's ceiling.
+const PinCtx = struct {
+    nets: []const FlatNet,
+    idx_of: *std.StringHashMapUnmanaged(usize),
+    compass: ?[]const ?u2 = null,
+    group_of: []const i32 = &.{},
+
+    /// Ungrouped (−1) past the map's end, so a caller that built no grouping
+    /// behaves exactly as one whose parts are all ungrouped.
+    fn groupOf(self: PinCtx, pi: usize) i32 {
+        return if (pi < self.group_of.len) self.group_of[pi] else -1;
+    }
+};
+
+/// The one owner a pin-adjacent pass is solving for: the module's parts, which
+/// of them is the owner, and who belongs to it. The three always travel
+/// together, so they travel as one.
+const OwnerScope = struct {
+    parts: []const Part,
+    owner: usize,
+    owner_of: []const usize,
+
+    /// True for a part this owner rings — the owner itself is not one of them.
+    fn owns(self: OwnerScope, pi: usize) bool {
+        return pi != self.owner and self.owner_of[pi] == self.owner;
+    }
+};
+
+/// How many private-net hops a chain may be from the pad that anchors it. A
+/// module chain is a handful of parts (choke → bypass → pull-up → pad), and the
+/// bound keeps the fixpoint terminating on a pathological netlist.
+const chain_max_hops: usize = 6;
+
 /// Classify a footprint-local anchor pad into the edge it sits on + its
 /// along-edge coordinate, normalizing by the package half-extents so wide flat
 /// packages don't read every pad as left/right.
@@ -3985,6 +4249,27 @@ fn sideWordToEdge(word: []const u8) ?u2 {
     return null;
 }
 
+/// True when a net names no single place on the owner's package, so binding a
+/// part to its pad centroid pins the part nowhere in particular. Two
+/// independent signals of that, because each misses cases the other catches:
+///   * the name is a supply class (`(pin 1 "VDD")` — a pull-up belongs at the
+///     signal pin it pulls, never at the supply pin, however few supply pads
+///     the package has), and
+///   * the pads STRADDLE more than one package edge, whatever the name says —
+///     a rail spelled `V_RF_3P3` classifies as RF, and a rule reading only the
+///     name would treat its six supply pads as one signal pin.
+/// A two-pad signal net on one edge is neither, and keeps its real midpoint.
+fn diffuseNet(hkb: KeepBox, name: []const u8, pads: []const [2]f64) bool {
+    const cls = module_policy.classifyNetName(name);
+    if (cls == .power or cls == .input_rail) return true;
+    if (pads.len < 2) return false;
+    const e0 = pinTargetFromPad(hkb, pads[0][0], pads[0][1]).edge;
+    for (pads[1..]) |q| {
+        if (pinTargetFromPad(hkb, q[0], q[1]).edge != e0) return true;
+    }
+    return false;
+}
+
 /// Resolve each part's bound pad on `owner`'s package, most-authoritative
 /// source first: its decoupling loop's target supply pad (`hugToHub` already
 /// resolved the explicit `(decouples …)` / per-pin binding or chose the pad),
@@ -4003,14 +4288,22 @@ fn pinTargets(
     parts: []const Part,
     owner: usize,
     owner_of: []const usize,
-    nets: []const FlatNet,
-    idx_of: *std.StringHashMapUnmanaged(usize),
+    ctx: PinCtx,
     built: Built,
-    compass: ?[]const ?u2,
 ) std.mem.Allocator.Error![]?PinTarget {
+    const scope = OwnerScope{ .parts = parts, .owner = owner, .owner_of = owner_of };
     const hkb = keepBoxOf(parts[owner]);
     const tgt = try arena.alloc(?PinTarget, parts.len);
+    const diffuse = try arena.alloc(bool, parts.len);
     @memset(tgt, null);
+    @memset(diffuse, false);
+    // An authored `(near …)` outranks every inferred rung below: the author
+    // named the pad, so nothing derived from net shape may re-aim the part.
+    for (built.near) |np| {
+        if (np.target != owner or owner_of[np.part] != owner) continue;
+        const pad = padLocal(&parts[owner], np.target_pin);
+        tgt[np.part] = pinTargetFromPad(hkb, pad.x, pad.y);
+    }
     for (built.loops) |lp| {
         if (lp.hub != owner or owner_of[lp.cap] != owner or tgt[lp.cap] != null) continue;
         if (lp.hub_pwr_pin.w == 0 and lp.hub_pwr_pin.h == 0) continue;
@@ -4018,48 +4311,273 @@ fn pinTargets(
     }
     for (built.series) |sp| {
         if (sp.hub != owner or owner_of[sp.part] != owner or tgt[sp.part] != null) continue;
-        const mx = (sp.a.hub_pad.x + sp.b.hub_pad.x) / 2;
-        const my = (sp.a.hub_pad.y + sp.b.hub_pad.y) / 2;
-        tgt[sp.part] = pinTargetFromPad(hkb, mx, my);
+        tgt[sp.part] = try seriesTarget(arena, scope, ctx, sp);
     }
     for (parts, 0..) |_, pi| {
         if (pi == owner or owner_of[pi] != owner or tgt[pi] != null) continue;
-        var best: ?[][2]f64 = null;
-        var best_edge: ?u2 = null;
-        var best_cnt: usize = std.math.maxInt(usize);
-        for (nets, 0..) |net, ni| {
-            if (pin_roles.isGroundFn(shortName(net.name))) continue;
-            if (!netHasPart(net, pi, idx_of)) continue;
-            const pads = try hubPadsOnNet(arena, parts[owner], owner, net, idx_of);
-            if (pads.len == 0 or pads.len >= best_cnt) continue;
-            best = pads;
-            best_cnt = pads.len;
-            best_edge = if (compass) |c| c[ni] else null;
-        }
-        const pads = best orelse continue;
-        var use = pads;
-        if (best_edge) |e| {
-            if (pads.len > 1) {
-                // Flow-edge disambiguation: keep only the rail pads that sit on
-                // the port's edge — when the owner has any there. One pad, or a
-                // rail entirely elsewhere, keeps pad truth untouched.
-                var on_edge: std.ArrayList([2]f64) = .empty;
-                for (pads) |q| {
-                    if (pinTargetFromPad(hkb, q[0], q[1]).edge == e) try on_edge.append(arena, q);
-                }
-                if (on_edge.items.len > 0) use = on_edge.items;
-            }
-        }
+        const b = (try netBinding(arena, scope, ctx, pi)) orelse continue;
+        tgt[pi] = b.target;
+        diffuse[pi] = b.diffuse;
+    }
+    const reach = try chainReach(arena, scope, ctx, tgt, diffuse);
+    for (tgt, 0..) |*t, pi| {
+        // Bound only to a rail while a private net reaches a precisely-bound
+        // sibling: the SIGNAL leg decides. The target is dropped so
+        // `pinChainAttach` hangs the part off that entry, outward, in chain
+        // order — a bias choke belongs beside the pull-ups it feeds, not at the
+        // centroid of six supply pads on the far side of the die.
+        if (t.* != null and diffuse[pi] and reach[pi]) t.* = null;
+    }
+    try groupFallback(arena, scope, ctx, tgt, reach);
+    return tgt;
+}
+
+/// One part's direct owner-pad binding: the owner-pad centroid of its most
+/// signal-like shared net (fewest owner pads, ground skipped) as an edge target,
+/// plus whether that net is a DIFFUSE rail — a supply-class net on ≥2 owner pads,
+/// which pins the part nowhere in particular. Null = no owner pad on any of its
+/// nets. `compass` settles the one genuinely ambiguous case: a rail landing on
+/// several owner pads spread over multiple edges — the part follows the rail's
+/// flow edge when the owner has pads there, so a reservoir cap sits where power
+/// ENTERS instead of at the pad centroid.
+const NetBinding = struct { target: PinTarget, diffuse: bool };
+
+fn netBinding(
+    arena: std.mem.Allocator,
+    scope: OwnerScope,
+    ctx: PinCtx,
+    pi: usize,
+) std.mem.Allocator.Error!?NetBinding {
+    const hkb = keepBoxOf(scope.parts[scope.owner]);
+    var best: ?[][2]f64 = null;
+    var best_edge: ?u2 = null;
+    var best_cnt: usize = std.math.maxInt(usize);
+    var best_diffuse = false;
+    for (ctx.nets, 0..) |net, ni| {
+        if (pin_roles.isGroundFn(shortName(net.name))) continue;
+        if (!netHasPart(net, scope.parts, pi)) continue;
+        const pads = try hubPadsOnNet(arena, &scope.parts[scope.owner], scope.owner, net, ctx.idx_of);
+        if (pads.len == 0 or pads.len >= best_cnt) continue;
+        best = pads;
+        best_cnt = pads.len;
+        best_edge = if (ctx.compass) |c| c[ni] else null;
+        best_diffuse = diffuseNet(hkb, net.name, pads);
+    }
+    const pads = best orelse return null;
+    const use = if (best_edge) |e| try flowEdgePads(arena, hkb, pads, e) else pads;
+    var cx: f64 = 0;
+    var cy: f64 = 0;
+    for (use) |q| {
+        cx += q[0];
+        cy += q[1];
+    }
+    const n: f64 = @floatFromInt(use.len);
+    return .{
+        .target = pinTargetFromPad(hkb, cx / n, cy / n),
+        // Measured on the WHOLE pad set, not the compass-narrowed one: picking
+        // the rail's entry edge is a tiebreak among places it already reaches,
+        // not evidence that it names one.
+        .diffuse = best_diffuse,
+    };
+}
+
+/// Flow-edge disambiguation: keep only the rail pads that sit on the port's
+/// edge — when the owner has any there. One pad, or a rail entirely elsewhere,
+/// keeps pad truth untouched.
+fn flowEdgePads(arena: std.mem.Allocator, hkb: KeepBox, pads: [][2]f64, e: u2) std.mem.Allocator.Error![][2]f64 {
+    if (pads.len <= 1) return pads;
+    var on_edge: std.ArrayList([2]f64) = .empty;
+    for (pads) |q| {
+        if (pinTargetFromPad(hkb, q[0], q[1]).edge == e) try on_edge.append(arena, q);
+    }
+    return if (on_edge.items.len > 0) on_edge.items else pads;
+}
+
+/// Where a series part (two legs to two DIFFERENT owner pads) binds. Pads on ONE
+/// edge keep their midpoint — a buck inductor sits between LX1 and LX2. Pads on
+/// different edges have no midpoint on the package at all: the mean lands in the
+/// die centre and `pinTargetFromPad` projects it onto whichever edge wins a coin
+/// flip, exiling the part from BOTH its nets. One end must win instead, and the
+/// SIGNAL end wins: a leg on a supply rail is reachable all round the package
+/// (a CE pull-up belongs at the CE pin, not at the centroid of six VCC pads),
+/// so a rail leg only decides when both legs are rails. Between two signal legs
+/// the busier node wins — where the rest of the sub-circuit already sits (a
+/// loop-filter series R belongs at CPOUT with C1/C2, not half-way to VTUNE).
+/// Ties keep leg `a`, the first leg `pairSeriesLegs` recorded.
+fn seriesTarget(
+    arena: std.mem.Allocator,
+    scope: OwnerScope,
+    ctx: PinCtx,
+    sp: SeriesPair,
+) std.mem.Allocator.Error!PinTarget {
+    const hkb = keepBoxOf(scope.parts[scope.owner]);
+    const ta = pinTargetFromPad(hkb, sp.a.hub_pad.x, sp.a.hub_pad.y);
+    const tb = pinTargetFromPad(hkb, sp.b.hub_pad.x, sp.b.hub_pad.y);
+    if (ta.edge == tb.edge) {
+        const mx = (sp.a.hub_pad.x + sp.b.hub_pad.x) / 2;
+        const my = (sp.a.hub_pad.y + sp.b.hub_pad.y) / 2;
+        return pinTargetFromPad(hkb, mx, my);
+    }
+    const la = try legInfo(arena, scope, ctx, sp.a.hub_pad, sp.part);
+    const lb = try legInfo(arena, scope, ctx, sp.b.hub_pad, sp.part);
+    if (la.rail != lb.rail) return if (la.rail) tb else ta;
+    return if (lb.siblings > la.siblings) tb else ta;
+}
+
+/// What a series leg's node is worth as a home: whether it names a place at all
+/// (see `diffuseNet` — a supply rail does not) and how many other passives of
+/// this owner sit on it.
+const LegInfo = struct { siblings: usize, rail: bool };
+
+/// Read a series leg's node: the net whose owner-pad centroid is `pad` (the leg
+/// target `hugToHub` recorded), matched by centroid so a leg needs no net index
+/// of its own. A part strapped twice to the node counts once.
+fn legInfo(
+    arena: std.mem.Allocator,
+    scope: OwnerScope,
+    ctx: PinCtx,
+    pad: PadRect,
+    skip: usize,
+) std.mem.Allocator.Error!LegInfo {
+    for (ctx.nets) |net| {
+        const pads = try hubPadsOnNet(arena, &scope.parts[scope.owner], scope.owner, net, ctx.idx_of);
+        if (pads.len == 0) continue;
         var cx: f64 = 0;
         var cy: f64 = 0;
-        for (use) |q| {
+        for (pads) |q| {
             cx += q[0];
             cy += q[1];
         }
-        const n: f64 = @floatFromInt(use.len);
-        tgt[pi] = pinTargetFromPad(hkb, cx / n, cy / n);
+        const n: f64 = @floatFromInt(pads.len);
+        if (@abs(cx / n - pad.x) > 1e-6 or @abs(cy / n - pad.y) > 1e-6) continue;
+        var cnt: usize = 0;
+        for (scope.parts, 0..) |p, qi| {
+            if (qi == scope.owner or qi == skip or p.kind == .hub) continue;
+            if (scope.owner_of[qi] != scope.owner) continue;
+            if (netHasPart(net, scope.parts, qi)) cnt += 1;
+        }
+        return .{ .siblings = cnt, .rail = diffuseNet(keepBoxOf(scope.parts[scope.owner]), net.name, pads) };
     }
-    return tgt;
+    return .{ .siblings = 0, .rail = false };
+}
+
+/// True when `net` binds nothing on the owner's package — a PRIVATE chain node
+/// (the bias node between a choke and its bypass cap, an RC filter's inner
+/// node). Ground is never a chain: every part shares it.
+fn privateNet(
+    arena: std.mem.Allocator,
+    scope: OwnerScope,
+    ctx: PinCtx,
+    net: FlatNet,
+) std.mem.Allocator.Error!bool {
+    if (pin_roles.isGroundFn(shortName(net.name))) return false;
+    const pads = try hubPadsOnNet(arena, &scope.parts[scope.owner], scope.owner, net, ctx.idx_of);
+    return pads.len == 0;
+}
+
+/// Which parts a PRIVATE-net chain links to a precisely-bound one — i.e. whose
+/// chain reaches a real entry pad. Seeded from the parts already at a specific
+/// owner pad (a decoupling loop, a series pairing, a single-pad signal net) and
+/// spread hop by hop to a fixpoint, so a multi-hop chain resolves in as many
+/// passes. Order is the netlist's, so the result is placement-independent.
+fn chainReach(
+    arena: std.mem.Allocator,
+    scope: OwnerScope,
+    ctx: PinCtx,
+    tgt: []const ?PinTarget,
+    diffuse: []const bool,
+) std.mem.Allocator.Error![]bool {
+    const reach = try arena.alloc(bool, scope.parts.len);
+    for (scope.parts, 0..) |_, pi| reach[pi] = tgt[pi] != null and !diffuse[pi];
+    var hop: usize = 0;
+    while (hop < chain_max_hops) : (hop += 1) {
+        var progressed = false;
+        for (ctx.nets) |net| {
+            if (!try privateNet(arena, scope, ctx, net)) continue;
+            if (!anyReaches(net, ctx, reach)) continue;
+            for (net.pins) |pr| {
+                const qi = ctx.idx_of.get(pr.ref_des) orelse continue;
+                if (qi == scope.owner or reach[qi]) continue;
+                if (scope.owner_of[qi] != scope.owner) continue;
+                reach[qi] = true;
+                progressed = true;
+            }
+        }
+        if (!progressed) break;
+    }
+    return reach;
+}
+
+/// True when some part on `net` already reaches an entry pad.
+fn anyReaches(net: FlatNet, ctx: PinCtx, reach: []const bool) bool {
+    for (net.pins) |pr| {
+        const qi = ctx.idx_of.get(pr.ref_des) orelse continue;
+        if (reach[qi]) return true;
+    }
+    return false;
+}
+
+/// Last resort for the members of an authored group that nothing else can
+/// place: no owner pad of their own and no private chain to one (their whole
+/// chain hangs off the module's ports). Rather than the leftover row they join
+/// the group on the edge its BOUND members hold, at those members' mean along —
+/// the author said these parts are one subsystem, so the unbindable ones belong
+/// beside the bindable ones. A group whose members are all directly bound (a
+/// bypass bank, whose caps are already on their own pads) has nothing unbound
+/// and is left exactly as it was.
+fn groupFallback(
+    arena: std.mem.Allocator,
+    scope: OwnerScope,
+    ctx: PinCtx,
+    tgt: []?PinTarget,
+    reach: []const bool,
+) std.mem.Allocator.Error!void {
+    if (ctx.group_of.len == 0) return;
+    var g: i32 = 0;
+    while (g <= maxGroupId(ctx)) : (g += 1) {
+        var homeless: std.ArrayList(usize) = .empty;
+        for (scope.parts, 0..) |_, pi| {
+            if (!scope.owns(pi) or ctx.groupOf(pi) != g) continue;
+            if (tgt[pi] == null and !reach[pi]) try homeless.append(arena, pi);
+        }
+        if (homeless.items.len == 0) continue;
+        const home = groupHome(scope, ctx, tgt, g) orelse continue;
+        for (homeless.items) |pi| tgt[pi] = home;
+    }
+}
+
+/// Highest authored group id in the map (−1 when the map holds none).
+fn maxGroupId(ctx: PinCtx) i32 {
+    var hi_id: i32 = -1;
+    for (ctx.group_of) |g| hi_id = @max(hi_id, g);
+    return hi_id;
+}
+
+/// The edge an authored group holds: the edge most of its BOUND members bind
+/// to (lowest edge index breaks a tie, so the choice never depends on iteration
+/// order), at those members' mean along-coordinate. Null when no member is bound
+/// at all — a group floating free carries no edge to share.
+fn groupHome(
+    scope: OwnerScope,
+    ctx: PinCtx,
+    tgt: []const ?PinTarget,
+    g: i32,
+) ?PinTarget {
+    var cnt = [4]usize{ 0, 0, 0, 0 };
+    var sum = [4]f64{ 0, 0, 0, 0 };
+    for (scope.parts, 0..) |_, pi| {
+        if (!scope.owns(pi) or ctx.groupOf(pi) != g) continue;
+        const t = tgt[pi] orelse continue;
+        cnt[t.edge] += 1;
+        sum[t.edge] += t.along;
+    }
+    var best: ?u2 = null;
+    for (cnt, 0..) |c, e| {
+        if (c == 0) continue;
+        if (best == null or c > cnt[best.?]) best = @intCast(e);
+    }
+    const e = best orelse return null;
+    return .{ .edge = e, .along = sum[e] / @as(f64, @floatFromInt(cnt[e])) };
 }
 
 /// Minimum-motion 1-D packing that PRESERVES the given order: pool-adjacent-
@@ -4116,75 +4634,148 @@ fn freeTwoPad(p: Part) bool {
 /// Attach parts with no direct anchor binding to the placed partner they share
 /// their most local net with (fewest total pins, ground skipped), directly
 /// OUTWARD of that partner on its edge — an RC loop filter or output match
-/// extends away from the IC exactly the way a hand layout chains it. Children
-/// of one parent stack further out in discovery order. Iterates so a chain of
-/// depth k lands in k passes. Anything never reached is left for the caller's
+/// extends away from the IC exactly the way a hand layout chains it, so the
+/// whole chain sits on the edge of the pad that anchors it. Iterates so a chain
+/// of depth k lands in k passes. Anything never reached is left for the caller's
 /// leftover row. With `owner_of` (a satellite group's local solve) both the
 /// child and its parent must belong to `hi`'s group, so a chain never escapes
 /// the group frame or grabs a part that isn't in it.
 fn pinChainAttach(
+    arena: std.mem.Allocator,
     parts: []Part,
     hi: usize,
     owner_of: ?[]const usize,
-    nets: []const FlatNet,
-    idx_of: *std.StringHashMapUnmanaged(usize),
+    ctx: PinCtx,
     placed: []bool,
-    gap: f64,
-) void {
+) std.mem.Allocator.Error!void {
+    // Whatever the ring and the docked groups already placed is a chain ENTRY —
+    // a part standing on a real pad. Children attached below are not.
+    const st = ChainState{ .placed = placed, .entry = try arena.dupe(bool, placed), .kids = try arena.alloc(usize, parts.len) };
+    @memset(st.kids, 0);
+    const scope = ChainScope{ .parts = parts, .hi = hi, .owner_of = owner_of };
     var pass: usize = 0;
     while (pass < parts.len) : (pass += 1) {
         var progressed = false;
-        for (parts, 0..) |*p, pi| {
+        for (parts, 0..) |_, pi| {
             if (placed[pi] or pi == hi) continue;
             if (owner_of) |ow| {
                 if (ow[pi] != hi) continue;
             }
-            var parent: ?usize = null;
-            var best_pins: usize = std.math.maxInt(usize);
-            for (nets) |net| {
-                if (pin_roles.isGroundFn(shortName(net.name))) continue;
-                if (net.pins.len >= best_pins or net.pins.len > cluster_max_net_parts) continue;
-                if (!netHasPart(net, pi, idx_of)) continue;
-                for (net.pins) |pr| {
-                    const qi = idx_of.get(pr.ref_des) orelse continue;
-                    if (qi == pi or qi == hi or !placed[qi]) continue;
-                    if (owner_of) |ow| {
-                        if (ow[qi] != hi) continue;
-                    }
-                    parent = qi;
-                    best_pins = net.pins.len;
-                    break;
-                }
-            }
-            const par = parent orelse continue;
-            const edge = posSide(0, 0, parts[par].x, parts[par].y);
-            const vert = edge < 2;
-            if (freeTwoPad(p.*)) p.rot = if (vert) 0 else 90;
-            const pkb = keepBoxOf(p.*);
-            const kb = keepBoxOf(parts[par]);
-            const step = gap + (if (vert) kb.hw + pkb.hw else kb.hh + pkb.hh);
-            switch (edge) {
-                0 => {
-                    p.x = gridRound(parts[par].x - step);
-                    p.y = parts[par].y;
-                },
-                1 => {
-                    p.x = gridRound(parts[par].x + step);
-                    p.y = parts[par].y;
-                },
-                2 => {
-                    p.y = gridRound(parts[par].y - step);
-                    p.x = parts[par].x;
-                },
-                else => {
-                    p.y = gridRound(parts[par].y + step);
-                    p.x = parts[par].x;
-                },
-            }
+            const par = chainParent(scope, pi, ctx, st) orelse continue;
+            attachOutward(parts, pi, par, final_clear);
+            st.kids[par] += 1;
             placed[pi] = true;
             progressed = true;
         }
         if (!progressed) break;
+    }
+}
+
+/// A candidate chain parent's rank — lower wins, compared field by field: the
+/// shared net's pin count (locality; the most local net decides, as it always
+/// has), then a partner in the same authored group, then a ring-bound ENTRY over
+/// another chain child, then the partner carrying the fewest children so far (so
+/// a bias tee spreads over both of the pull-ups it feeds instead of stacking one
+/// three deep), then flatten order.
+const ParentRank = struct { pins: usize, foreign: u8, not_entry: u8, kids: usize, idx: usize };
+
+/// Who a `pinChainAttach` run may chain: the module's parts, the owner every
+/// chain hangs off, and (for a satellite's local solve) the membership both
+/// child and parent must share.
+const ChainScope = struct { parts: []const Part, hi: usize, owner_of: ?[]const usize };
+
+/// The bookkeeping of one `pinChainAttach` run: who is placed, which of those
+/// stand on a real pad (a ring/dock ENTRY rather than another chain child), and
+/// how many children each has taken so far.
+const ChainState = struct { placed: []bool, entry: []const bool, kids: []usize };
+
+fn rankLess(a: ParentRank, b: ParentRank) bool {
+    if (a.pins != b.pins) return a.pins < b.pins;
+    if (a.foreign != b.foreign) return a.foreign < b.foreign;
+    if (a.not_entry != b.not_entry) return a.not_entry < b.not_entry;
+    if (a.kids != b.kids) return a.kids < b.kids;
+    return a.idx < b.idx;
+}
+
+/// The placed partner part `pi` should hang off. TWO passes: the first picks the
+/// chain's home EDGE from locality alone — never from the child-count spread,
+/// which would cheerfully send one sibling to the opposite side of the package
+/// (a loop filter's two shunt caps belong at the pad that anchors them, not one
+/// at CPOUT and one at VTUNE) — and the second spreads over the parents already
+/// on that edge, so a bias tee's choke and bypass take one pull-up each. Null
+/// when no net of `pi`'s reaches a placed same-owner partner yet.
+fn chainParent(scope: ChainScope, pi: usize, ctx: PinCtx, st: ChainState) ?usize {
+    const primary = bestParent(scope, pi, ctx, st, null) orelse return null;
+    const home = posSide(0, 0, scope.parts[primary].x, scope.parts[primary].y);
+    return bestParent(scope, pi, ctx, st, home) orelse primary;
+}
+
+/// Lowest-`ParentRank` placed partner of `pi`, optionally restricted to parents
+/// sitting on anchor edge `restrict`. The unrestricted pass ignores the
+/// child-count spread (see `chainParent`), so the home edge it reports depends
+/// only on the netlist.
+fn bestParent(scope: ChainScope, pi: usize, ctx: PinCtx, st: ChainState, restrict: ?u8) ?usize {
+    const g = ctx.groupOf(pi);
+    var best: ?ParentRank = null;
+    var best_i: usize = 0;
+    for (ctx.nets) |net| {
+        if (pin_roles.isGroundFn(shortName(net.name))) continue;
+        if (net.pins.len > cluster_max_net_parts) continue;
+        if (!netHasPart(net, scope.parts, pi)) continue;
+        for (net.pins) |pr| {
+            const qi = ctx.idx_of.get(pr.ref_des) orelse continue;
+            if (qi == pi or qi == scope.hi) continue;
+            if (!st.placed[qi] or scope.parts[qi].locked) continue;
+            if (scope.owner_of) |ow| {
+                if (ow[qi] != scope.hi) continue;
+            }
+            if (restrict) |e| {
+                if (posSide(0, 0, scope.parts[qi].x, scope.parts[qi].y) != e) continue;
+            }
+            const r = ParentRank{
+                .pins = net.pins.len,
+                .foreign = if (g >= 0 and ctx.groupOf(qi) == g) 0 else 1,
+                .not_entry = if (st.entry[qi]) 0 else 1,
+                .kids = if (restrict == null) 0 else st.kids[qi],
+                .idx = qi,
+            };
+            if (best == null or rankLess(r, best.?)) {
+                best = r;
+                best_i = qi;
+            }
+        }
+    }
+    return if (best == null) null else best_i;
+}
+
+/// Park `pi` one clearance directly outward of `par` on the anchor edge `par`
+/// sits on — the next rung of the ladder, keeping the edge's rotation
+/// convention for a free 2-pad part.
+fn attachOutward(parts: []Part, pi: usize, par: usize, gap: f64) void {
+    const p = &parts[pi];
+    const edge = posSide(0, 0, parts[par].x, parts[par].y);
+    const vert = edge < 2;
+    if (freeTwoPad(p.*)) p.rot = if (vert) 0 else 90;
+    const pkb = keepBoxOf(p.*);
+    const kb = keepBoxOf(parts[par]);
+    const step = gap + (if (vert) kb.hw + pkb.hw else kb.hh + pkb.hh);
+    switch (edge) {
+        0 => {
+            p.x = gridRound(parts[par].x - step);
+            p.y = parts[par].y;
+        },
+        1 => {
+            p.x = gridRound(parts[par].x + step);
+            p.y = parts[par].y;
+        },
+        2 => {
+            p.y = gridRound(parts[par].y - step);
+            p.x = parts[par].x;
+        },
+        else => {
+            p.y = gridRound(parts[par].y + step);
+            p.x = parts[par].x;
+        },
     }
 }
 
@@ -4210,6 +4801,17 @@ fn pinOwners(
     for (parts, 0..) |p, pi| owner_of[pi] = if (p.kind == .hub) pi else hi;
     const bound = try arena.alloc(bool, parts.len);
     @memset(bound, false);
+    // An authored `(near …)` claims its part ahead of the inferred loop/series
+    // rungs, and is the ONLY rung reaching the cross-hub case the form exists
+    // for: a 2-pad part straddling two hubs gets no series pairing, so without
+    // this the net-locality scan could hand it to the hub the author did NOT
+    // name — and `pinTargets` would then drop the target for an owner mismatch.
+    for (built.near) |np| {
+        if (parts[np.part].kind == .hub or bound[np.part]) continue;
+        if (parts[np.target].kind != .hub) continue;
+        owner_of[np.part] = np.target;
+        bound[np.part] = true;
+    }
     for (built.loops) |lp| {
         if (parts[lp.cap].kind == .hub or bound[lp.cap]) continue;
         owner_of[lp.cap] = lp.hub;
@@ -4228,10 +4830,10 @@ fn pinOwners(
             if (pin_roles.isGroundFn(shortName(net.name))) continue;
             const cls = module_policy.classifyNetName(net.name);
             if (cls == .ground or cls == .power) continue;
-            if (!netHasPart(net, pi, idx_of)) continue;
+            if (!netHasPart(net, parts, pi)) continue;
             for (parts, 0..) |h, hidx| {
                 if (h.kind != .hub) continue;
-                const pads = try hubPadsOnNet(arena, h, hidx, net, idx_of);
+                const pads = try hubPadsOnNet(arena, &h, hidx, net, idx_of);
                 const tie_satellite = pads.len == best_cnt and best == hi and hidx != hi;
                 if (pads.len == 0 or (pads.len >= best_cnt and !tie_satellite)) continue;
                 best = hidx;
@@ -4257,11 +4859,9 @@ fn pinOwners(
 /// (and even the island's core). The origin name the author wrote is the
 /// truth: a member whose origin leaf starts with a passive prefix is not a
 /// hub, whatever its ref-des says.
-fn trueHub(parts: []const Part, instances: []const export_kicad.FlatInstance, pi: usize) bool {
+fn trueHub(parts: []const Part, instances: []const flat_netlist.FlatInstance, pi: usize) bool {
     if (parts[pi].kind != .hub) return false;
-    if (pi < instances.len and instances[pi].origin_key.len > 0) {
-        return isHub(instances[pi].origin_key);
-    }
+    if (pi < instances.len and instances[pi].origin_key.len > 0) return isHub(instances[pi].origin_key);
     return true;
 }
 
@@ -4283,12 +4883,12 @@ fn overlayAuthoredGroups(
     owner_of: []usize,
     hi: usize,
     block: *const DesignBlock,
-    instances: []const export_kicad.FlatInstance,
-    nets: []const FlatNet,
-    idx_of: *std.StringHashMapUnmanaged(usize),
+    instances: []const flat_netlist.FlatInstance,
+    ctx: PinCtx,
 ) std.mem.Allocator.Error!void {
+    const nets = ctx.nets;
     for (block.groups) |vg| {
-        const m = try resolveGroupMembers(arena, instances, vg.members, null);
+        const m = try resolveGroupMembers(arena, instances, vg.members);
         if (m.len < 2) continue;
         var has_anchor = false;
         var has_structure = false;
@@ -4304,7 +4904,7 @@ fn overlayAuthoredGroups(
         for (m) |pi| {
             var deg: usize = 0;
             for (nets) |net| {
-                if (netHasPart(net, pi, idx_of)) deg += 1;
+                if (netHasPart(net, parts, pi)) deg += 1;
             }
             const is_hub = trueHub(parts, instances, pi);
             const wins = (is_hub and !best_hub) or (is_hub == best_hub and deg > best_deg);
@@ -4334,15 +4934,13 @@ fn ringOwner(
     parts: []Part,
     owner: usize,
     owner_of: []const usize,
-    nets: []const FlatNet,
-    idx_of: *std.StringHashMapUnmanaged(usize),
+    ctx: PinCtx,
     built: Built,
-    compass: ?[]const ?u2,
     placed: []bool,
 ) std.mem.Allocator.Error![4]f64 {
     const hkb = keepBoxOf(parts[owner]);
     const gap = final_clear;
-    const tgt = try pinTargets(arena, parts, owner, owner_of, nets, idx_of, built, compass);
+    const tgt = try pinTargets(arena, parts, owner, owner_of, ctx, built);
     var ext = [4]f64{ 0, 0, 0, 0 };
 
     var edges = [_]std.ArrayList(PinItem){ .empty, .empty, .empty, .empty };
@@ -4429,10 +5027,13 @@ fn buildPinGroups(
     parts: []Part,
     owner_of: []usize,
     hi: usize,
-    nets: []const FlatNet,
-    idx_of: *std.StringHashMapUnmanaged(usize),
+    ctx: PinCtx,
     built: Built,
 ) std.mem.Allocator.Error![]PinGroup {
+    // A satellite solves in its OWN frame, where the anchor's port compass says
+    // nothing about which of the satellite's pads face where.
+    var local = ctx;
+    local.compass = null;
     var groups: std.ArrayList(PinGroup) = .empty;
     for (parts, 0..) |_, oi| {
         if (oi == hi or owner_of[oi] != oi) continue;
@@ -4447,9 +5048,9 @@ fn buildPinGroups(
         const placed = try arena.alloc(bool, parts.len);
         @memset(placed, false);
         placed[oi] = true;
-        _ = try ringOwner(arena, parts, oi, owner_of, nets, idx_of, built, null, placed);
-        pinChainAttach(parts, oi, owner_of, nets, idx_of, placed, final_clear);
-        orientPadsToIC(parts, oi, owner_of, nets, idx_of);
+        _ = try ringOwner(arena, parts, oi, owner_of, local, built, placed);
+        try pinChainAttach(arena, parts, oi, owner_of, local, placed);
+        orientPadsToIC(parts, oi, owner_of, ctx.nets, ctx.idx_of);
         var members: std.ArrayList(usize) = .empty;
         var bb = [4]f64{ 1e18, 1e18, -1e18, -1e18 };
         growKeepBBox(&bb, parts[oi]);
@@ -4524,7 +5125,7 @@ fn groupAnchorTarget(
             if (cls == .ground) continue;
             if (pass == 0 and cls == .power) continue;
             if (!netTouchesGroup(net, g.owner, owner_of, idx_of)) continue;
-            const pads = try hubPadsOnNet(arena, parts[hi], hi, net, idx_of);
+            const pads = try hubPadsOnNet(arena, &parts[hi], hi, net, idx_of);
             for (pads) |q| {
                 cx += q[0];
                 cy += q[1];
@@ -4581,7 +5182,7 @@ fn groupDockRot(
             if (pin_roles.isGroundFn(shortName(net.name))) continue;
             const cls = module_policy.classifyNetName(net.name);
             if (cls == .ground or cls == .power) continue;
-            const apads = try hubPadsOnNet(arena, parts[hi], hi, net, idx_of);
+            const apads = try hubPadsOnNet(arena, &parts[hi], hi, net, idx_of);
             if (apads.len == 0) continue;
             var acx: f64 = 0;
             var acy: f64 = 0;
@@ -4595,9 +5196,9 @@ fn groupDockRot(
             for (net.pins) |pr| {
                 const qi = idx_of.get(pr.ref_des) orelse continue;
                 if (qi != g.owner and owner_of[qi] != g.owner) continue;
-                const pad = padLocal(parts[qi], pr.pin);
+                const pad = padLocal(&parts[qi], pr.pin);
                 if (pad.w == 0 and pad.h == 0) continue;
-                const pl = worldPt(parts[qi], pad.x, pad.y); // group-local pad point
+                const pl = worldPt(&parts[qi], pad.x, pad.y); // group-local pad point
                 const rl = rotateLocal(pl.x - c.x, pl.y - c.y, rot);
                 cost += @abs(dock.x + rl.x - acx) + @abs(dock.y + rl.y - acy);
             }
@@ -4745,7 +5346,7 @@ fn mirrorDiffTwins(
     parts: []Part,
     hi: usize,
     owner_of: []const usize,
-    instances: []const export_kicad.FlatInstance,
+    instances: []const flat_netlist.FlatInstance,
     nets: []const FlatNet,
     idx_of: *std.StringHashMapUnmanaged(usize),
 ) std.mem.Allocator.Error!void {
@@ -4755,8 +5356,8 @@ fn mirrorDiffTwins(
         for (nets, 0..) |cand, ni_net| {
             if (ni_net == pi_net or !std.mem.eql(u8, shortName(cand.name), mate)) continue;
             var v: ?Pt = null;
-            const ap = try hubPadsOnNet(arena, parts[hi], hi, net, idx_of);
-            const an = try hubPadsOnNet(arena, parts[hi], hi, cand, idx_of);
+            const ap = try hubPadsOnNet(arena, &parts[hi], hi, net, idx_of);
+            const an = try hubPadsOnNet(arena, &parts[hi], hi, cand, idx_of);
             if (ap.len > 0 and an.len > 0) {
                 v = .{ .x = an[0][0] - ap[0][0], .y = an[0][1] - ap[0][1] };
             }
@@ -4778,7 +5379,7 @@ fn mirrorDiffTwins(
                 var bridged = false;
                 for (nets[q.p].pins) |pp| {
                     const qi = idx_of.get(pp.ref_des) orelse continue;
-                    if (netHasPart(nets[r.p], qi, idx_of)) bridged = true;
+                    if (netHasPart(nets[r.p], parts, qi)) bridged = true;
                 }
                 if (bridged) {
                     q.v = rv;
@@ -4795,12 +5396,12 @@ fn mirrorDiffTwins(
         for (nets[q.p].pins) |pp| {
             const a = idx_of.get(pp.ref_des) orelse continue;
             if (parts[a].kind == .hub or owner_of[a] != hi or parts[a].locked) continue;
-            if (netHasPart(nets[q.n], a, idx_of)) continue; // lane-shared part
+            if (netHasPart(nets[q.n], parts, a)) continue; // lane-shared part
             for (nets[q.n].pins) |np| {
                 const b = idx_of.get(np.ref_des) orelse continue;
                 if (b == a or claimed[b] or parts[b].kind == .hub) continue;
                 if (owner_of[b] != hi or parts[b].locked) continue;
-                if (netHasPart(nets[q.p], b, idx_of)) continue;
+                if (netHasPart(nets[q.p], parts, b)) continue;
                 const same_body = parts[a].pads.len == parts[b].pads.len and
                     @abs(parts[a].hw - parts[b].hw) < 0.01 and @abs(parts[a].hh - parts[b].hh) < 0.01;
                 const same_value = a < instances.len and b < instances.len and
@@ -4833,9 +5434,15 @@ fn runPinAdjacent(
 ) std.mem.Allocator.Error!bool {
     const hi = resolveRoughAnchor(parts, prep, nets) orelse return false;
     const compass = try portCompass(arena, prep.block, nets);
+    const ctx = PinCtx{
+        .nets = nets,
+        .idx_of = &prep.idx_of,
+        .compass = compass,
+        .group_of = try roughGroupOf(arena, prep.instances, prep.block),
+    };
     const owner_of = try pinOwners(arena, parts, hi, nets, &prep.idx_of, built);
-    try overlayAuthoredGroups(arena, parts, owner_of, hi, prep.block, prep.instances, nets, &prep.idx_of);
-    const groups = try buildPinGroups(arena, parts, owner_of, hi, nets, &prep.idx_of, built);
+    try overlayAuthoredGroups(arena, parts, owner_of, hi, prep.block, prep.instances, ctx);
+    const groups = try buildPinGroups(arena, parts, owner_of, hi, ctx, built);
 
     parts[hi].x = 0;
     parts[hi].y = 0;
@@ -4844,10 +5451,11 @@ fn runPinAdjacent(
     const placed = try arena.alloc(bool, parts.len);
     @memset(placed, false);
     placed[hi] = true;
-    const ring_ext = try ringOwner(arena, parts, hi, owner_of, nets, &prep.idx_of, built, compass, placed);
+    const ring_ext = try ringOwner(arena, parts, hi, owner_of, ctx, built, placed);
     try dockGroups(arena, parts, hi, groups, owner_of, nets, &prep.idx_of, compass, ring_ext, placed);
 
-    pinChainAttach(parts, hi, null, nets, &prep.idx_of, placed, final_clear);
+    try pinChainAttach(arena, parts, hi, null, ctx, placed);
+    try rough_critical.cohere(Part, arena, parts, prep.instances, prep.block.rough, hi, placed);
 
     // Ground-only / unconnected leftovers: one row below the board.
     var lx: f64 = -hkb.hw;
@@ -4861,9 +5469,119 @@ fn runPinAdjacent(
     }
 
     orientPadsToIC(parts, hi, owner_of, nets, &prep.idx_of);
+    orientChainPairs(parts, hi, owner_of, ctx);
     try mirrorDiffTwins(arena, parts, hi, owner_of, prep.instances, nets, &prep.idx_of);
     legalizeFinal(parts);
     return true;
+}
+
+/// Authored placement grouping per part (−1 = ungrouped): the `(rough (group …))`
+/// tiers first — the author's own subsystem partition, and the grouping every
+/// module board here carries — then any top-level `(group …)`. First membership
+/// wins, so a part named twice keeps its earlier group and the map stays a
+/// partition. Empty (all −1) when the design authored neither.
+fn roughGroupOf(
+    arena: std.mem.Allocator,
+    instances: []const flat_netlist.FlatInstance,
+    block: *const DesignBlock,
+) std.mem.Allocator.Error![]i32 {
+    const out = try arena.alloc(i32, instances.len);
+    @memset(out, -1);
+    var g: i32 = 0;
+    for (block.rough.groups) |rg| {
+        for (try resolveGroupMembers(arena, instances, rg.members)) |pi| {
+            if (out[pi] < 0) out[pi] = g;
+        }
+        g += 1;
+    }
+    for (block.groups) |vg| {
+        for (try resolveGroupMembers(arena, instances, vg.members)) |pi| {
+            if (out[pi] < 0) out[pi] = g;
+        }
+        g += 1;
+    }
+    return out;
+}
+
+/// Face a free 2-pad part at BOTH of its neighbours: when each pad's net offers
+/// exactly ONE precise partner point, align the part's pad axis with the vector
+/// between them — `seriesPairRot`'s rule for a part whose partners are not the
+/// hub. A 100 R differential termination straddling the two AC-coupling caps of
+/// its pair turns to face them instead of taking its edge's default. A part with
+/// BOTH legs on owner pads is a series pairing and keeps the edge convention
+/// (its position already came from the pads); so does anything with a ground
+/// leg, a rail leg, or a node carrying several partners — an ambiguous leg
+/// carries no axis, which is what leaves the bypass ring alone.
+fn orientChainPairs(parts: []Part, hi: usize, owner_of: []const usize, ctx: PinCtx) void {
+    for (parts, 0..) |*p, pi| {
+        if (pi == hi or owner_of[pi] != hi or !freeTwoPad(p.*)) continue;
+        const na = netOfPartPad(ctx, pi, p.pads[0].number) orelse continue;
+        const nb = netOfPartPad(ctx, pi, p.pads[1].number) orelse continue;
+        if (na == nb) continue;
+        const hub_legs = @as(usize, @intFromBool(netHasPart(ctx.nets[na], parts, hi))) +
+            @as(usize, @intFromBool(netHasPart(ctx.nets[nb], parts, hi)));
+        if (hub_legs > 1) continue;
+        const a = precisePartnerPt(parts, hi, pi, na, ctx) orelse continue;
+        const b = precisePartnerPt(parts, hi, pi, nb, ctx) orelse continue;
+        p.rot = padAxisRot(p.pads[1].x - p.pads[0].x, p.pads[1].y - p.pads[0].y, b.x - a.x, b.y - a.y) orelse p.rot;
+    }
+}
+
+/// The net index carrying part `pi`'s pad `pin`, or null when the pad is unwired.
+fn netOfPartPad(ctx: PinCtx, pi: usize, pin: []const u8) ?usize {
+    for (ctx.nets, 0..) |net, ni| {
+        for (net.pins) |pr| {
+            if (!std.mem.eql(u8, pr.pin, pin)) continue;
+            if ((ctx.idx_of.get(pr.ref_des) orelse continue) == pi) return ni;
+        }
+    }
+    return null;
+}
+
+/// The single precise point net `ni` offers part `pi`, in the anchor-at-origin
+/// frame: the owner's ONE pad on it, else the ONE other part's pad. Null for
+/// ground, for a rail spread over several owner pads, and for a node with more
+/// than one candidate — such a leg names no direction to face.
+fn precisePartnerPt(parts: []const Part, hi: usize, pi: usize, ni: usize, ctx: PinCtx) ?Pt {
+    const net = ctx.nets[ni];
+    if (pin_roles.isGroundFn(shortName(net.name))) return null;
+    var hub_pt: ?Pt = null;
+    var hub_n: usize = 0;
+    var part_pt: ?Pt = null;
+    var part_n: usize = 0;
+    for (net.pins) |pr| {
+        const qi = ctx.idx_of.get(pr.ref_des) orelse continue;
+        if (qi == pi) continue;
+        const pad = padLocal(&parts[qi], pr.pin);
+        if (pad.w == 0 and pad.h == 0) continue;
+        if (qi == hi) {
+            hub_n += 1;
+            hub_pt = .{ .x = pad.x, .y = pad.y };
+        } else {
+            part_n += 1;
+            part_pt = worldPt(&parts[qi], pad.x, pad.y);
+        }
+    }
+    if (hub_n > 0) return if (hub_n == 1) hub_pt else null;
+    return if (part_n == 1) part_pt else null;
+}
+
+/// The quarter rotation that best points a part's pad-1→pad-2 axis (`pdx`,`pdy`,
+/// footprint-local) along the target vector (`tdx`,`tdy`) — so pad 1 faces the
+/// first partner and pad 2 the second. Null when either vector is degenerate.
+fn padAxisRot(pdx: f64, pdy: f64, tdx: f64, tdy: f64) ?f64 {
+    if (@abs(pdx) + @abs(pdy) < 1e-9 or @abs(tdx) + @abs(tdy) < 1e-9) return null;
+    var best: f64 = 0;
+    var best_dot = -std.math.inf(f64);
+    for (rot_cand) |r| {
+        const q = rotateLocal(pdx, pdy, r);
+        const dot = q.x * tdx + q.y * tdy;
+        if (dot > best_dot) {
+            best_dot = dot;
+            best = r;
+        }
+    }
+    return best;
 }
 
 /// Solve `block` with the pin-adjacent seed alone (no force relax, no polish) —
@@ -4915,13 +5633,13 @@ pub fn importantCrossings(arena: std.mem.Allocator, p: Placement) std.mem.Alloca
             const cls = module_policy.classifyNetName(l.net);
             if (cls == .ground or cls == .power) continue;
         }
-        const a = worldPt(p.parts[l.a], l.ax, l.ay);
-        const b = worldPt(p.parts[l.b], l.bx, l.by);
+        const a = worldPt(&p.parts[l.a], l.ax, l.ay);
+        const b = worldPt(&p.parts[l.b], l.bx, l.by);
         try segs.append(arena, .{ a.x, a.y, b.x, b.y });
     }
     for (p.loops) |lp| {
-        const a = worldPt(p.parts[lp.cap], lp.cap_pwr.x, lp.cap_pwr.y);
-        const b = worldPt(p.parts[lp.hub], lp.hub_pwr_pin.x, lp.hub_pwr_pin.y);
+        const a = worldPt(&p.parts[lp.cap], lp.cap_pwr.x, lp.cap_pwr.y);
+        const b = worldPt(&p.parts[lp.hub], lp.hub_pwr_pin.x, lp.hub_pwr_pin.y);
         try segs.append(arena, .{ a.x, a.y, b.x, b.y });
     }
     if (segs.items.len > 2048) return 0; // board-scale: skip the O(S²) sweep
@@ -4929,7 +5647,7 @@ pub fn importantCrossings(arena: std.mem.Allocator, p: Placement) std.mem.Alloca
     for (segs.items, 0..) |s1, i| {
         for (segs.items[i + 1 ..]) |s2| {
             if (sharesEndpoint(s1, s2)) continue;
-            if (segsCross(.{ s1[0], s1[1] }, .{ s1[2], s1[3] }, .{ s2[0], s2[1] }, .{ s2[2], s2[3] })) count += 1;
+            if (airwire_geometry.segmentsCross(.{ s1[0], s1[1] }, .{ s1[2], s1[3] }, .{ s2[0], s2[1] }, .{ s2[2], s2[3] })) count += 1;
         }
     }
     return count;
@@ -4954,13 +5672,13 @@ fn crossingsOfSprings(
             if (cls == .ground or cls == .power) continue;
         }
         const pads = s.kind == .signal;
-        const a = worldPt(parts[s.a], if (pads) s.dax else s.ax, if (pads) s.day else s.ay);
-        const b = worldPt(parts[s.b], if (pads) s.dbx else s.bx, if (pads) s.dby else s.by);
+        const a = worldPt(&parts[s.a], if (pads) s.dax else s.ax, if (pads) s.day else s.ay);
+        const b = worldPt(&parts[s.b], if (pads) s.dbx else s.bx, if (pads) s.dby else s.by);
         try segs.append(arena, .{ a.x, a.y, b.x, b.y });
     }
     for (loops) |lp| {
-        const a = worldPt(parts[lp.cap], lp.cap_pwr.x, lp.cap_pwr.y);
-        const b = worldPt(parts[lp.hub], lp.hub_pwr_pin.x, lp.hub_pwr_pin.y);
+        const a = worldPt(&parts[lp.cap], lp.cap_pwr.x, lp.cap_pwr.y);
+        const b = worldPt(&parts[lp.hub], lp.hub_pwr_pin.x, lp.hub_pwr_pin.y);
         try segs.append(arena, .{ a.x, a.y, b.x, b.y });
     }
     if (segs.items.len > 2048) return 0; // board-scale: skip the O(S²) sweep
@@ -4968,7 +5686,7 @@ fn crossingsOfSprings(
     for (segs.items, 0..) |s1, i| {
         for (segs.items[i + 1 ..]) |s2| {
             if (sharesEndpoint(s1, s2)) continue;
-            if (segsCross(.{ s1[0], s1[1] }, .{ s1[2], s1[3] }, .{ s2[0], s2[1] }, .{ s2[2], s2[3] })) count += 1;
+            if (airwire_geometry.segmentsCross(.{ s1[0], s1[1] }, .{ s1[2], s1[3] }, .{ s2[0], s2[1] }, .{ s2[2], s2[3] })) count += 1;
         }
     }
     return count;
@@ -5004,13 +5722,21 @@ fn roughRank(
     built: Built,
     params: Params,
 ) std.mem.Allocator.Error!f64 {
-    const obj = surrogateObjective(parts, &prep.idx_of, nets, built.loops, params);
+    const obj = surrogateObjective(parts, &prep.idx_of, nets, built.loops, params) +
+        critical_loop_span_w * rough_critical.perimeter(Part, parts, prep.instances, prep.block.rough);
     const cross = try crossingsOfSprings(arena, parts, built.springs, built.loops);
     const ovl = overlapPairs(parts);
     const n: f64 = @floatFromInt(@max(parts.len, 1));
     return obj *
-        (1.0 + @as(f64, @floatFromInt(cross)) / n) *
+        (1.0 + 3.0 * @as(f64, @floatFromInt(cross)) / n) *
         (1.0 + @as(f64, @floatFromInt(ovl)));
+}
+
+/// Physics objective used when authored rough intent is available. Ordinary
+/// designs are byte-for-byte unchanged because an empty critical-loop set adds
+/// zero; feedback-aware candidate selection gets the missing whole-chain term.
+pub fn authoredRoughObjective(p: Placement, rough: env.RoughSpec) f64 {
+    return p.breakdown.objective + critical_loop_span_w * rough_critical.perimeter(Part, p.parts, p.instances, rough);
 }
 
 /// The default-path module arbiter: for an embedded (`defmodule`) block, lay
@@ -5035,7 +5761,7 @@ fn arbitratePinSeed(
     }
     if (resolveRoughAnchor(parts, prep, nets) == null) return false;
 
-    const orig = try capturePoses(arena, parts);
+    const orig = try pose_snapshot.capture(Part, arena, parts);
 
     // Candidate A: pin-adjacent, with escape-stub keepouts suspended — a hand
     // layout packs flush at the pins and routes the escapes afterwards; the
@@ -5047,10 +5773,10 @@ fn arbitratePinSeed(
     var pin_snap: ?[]Pose = null;
     if (try runPinAdjacent(arena, parts, prep, nets, built)) {
         pin_rank = try roughRank(arena, parts, prep, nets, built, params);
-        pin_snap = try capturePoses(arena, parts);
+        pin_snap = try pose_snapshot.capture(Part, arena, parts);
     }
     for (parts, 0..) |*p, i| p.keep = keeps[i];
-    restorePoses(parts, orig);
+    pose_snapshot.restore(Part, parts, orig);
 
     // Candidate B: the legacy rough exactly as the dispatch would have run it.
     var legacy_ok = false;
@@ -5063,11 +5789,11 @@ fn arbitratePinSeed(
     const legacy_rank: f64 = if (legacy_ok) try roughRank(arena, parts, prep, nets, built, params) else std.math.floatMax(f64);
 
     if (pin_snap == null and !legacy_ok) {
-        restorePoses(parts, orig);
+        pose_snapshot.restore(Part, parts, orig);
         return false; // let the caller's declump fallback handle it
     }
     if (pin_snap != null and pin_rank < legacy_rank) {
-        restorePoses(parts, pin_snap.?);
+        pose_snapshot.restore(Part, parts, pin_snap.?);
         // The winning arrangement was legalized flush (no stub keepouts) —
         // keep them suspended so the later polish passes judge collisions the
         // same way this layout was packed.
@@ -5200,34 +5926,45 @@ fn arrangeMacros(
         gx /= nf;
         gy /= nf;
         for (0..n) |a| {
-            force[a][0] += (gx - centers[a][0]) * rough_k_center;
-            force[a][1] += (gy - centers[a][1]) * rough_k_center;
-            for (a + 1..n) |b| {
-                const dx = centers[b][0] - centers[a][0];
-                const dy = centers[b][1] - centers[a][1];
-                const ww = w[a * n + b];
+            const ax = centers[a][0];
+            const ay = centers[a][1];
+            const ahw = hw[a];
+            const ahh = hh[a];
+            const weights = w[a * n ..][0..n];
+            var fax = force[a][0];
+            var fay = force[a][1];
+            fax += (gx - ax) * rough_k_center;
+            fay += (gy - ay) * rough_k_center;
+            // Walk aligned tails directly. Their equal length is established
+            // once by the zipped loop instead of re-checking five independent
+            // `b` indexes for every pair in ReleaseSafe code.
+            for (centers[a + 1 ..], hw[a + 1 ..], hh[a + 1 ..], weights[a + 1 ..], force[a + 1 ..]) |bc, bhw, bhh, ww, *bf| {
+                const dx = bc[0] - ax;
+                const dy = bc[1] - ay;
                 if (ww > 0) { // connectivity spring (linear → equilibrium at contact)
                     const fx = rough_k_att * ww * dx;
                     const fy = rough_k_att * ww * dy;
-                    force[a][0] += fx;
-                    force[a][1] += fy;
-                    force[b][0] -= fx;
-                    force[b][1] -= fy;
+                    fax += fx;
+                    fay += fy;
+                    bf[0] -= fx;
+                    bf[1] -= fy;
                 }
-                const ox = hw[a] + hw[b] + rough_block_gap_mm - @abs(dx);
-                const oy = hh[a] + hh[b] + rough_block_gap_mm - @abs(dy);
+                const ox = ahw + bhw + rough_block_gap_mm - @abs(dx);
+                const oy = ahh + bhh + rough_block_gap_mm - @abs(dy);
                 if (ox > 0 and oy > 0) { // overlapping: push along smaller-overlap axis
                     if (ox <= oy) {
                         const push = rough_k_rep * ox * (if (dx >= 0) @as(f64, 1) else -1);
-                        force[a][0] -= push;
-                        force[b][0] += push;
+                        fax -= push;
+                        bf[0] += push;
                     } else {
                         const push = rough_k_rep * oy * (if (dy >= 0) @as(f64, 1) else -1);
-                        force[a][1] -= push;
-                        force[b][1] += push;
+                        fay -= push;
+                        bf[1] += push;
                     }
                 }
             }
+            force[a][0] = fax;
+            force[a][1] = fay;
         }
         for (0..n) |a| {
             if (pinned[a]) continue; // pinned blocks push others but never move
@@ -5246,22 +5983,23 @@ fn arrangeMacros(
     while (sit < rough_separate_iters) : (sit += 1) {
         var any = false;
         for (0..n) |a| {
-            for (a + 1..n) |b| {
-                const dx = centers[b][0] - centers[a][0];
-                const dy = centers[b][1] - centers[a][1];
-                const ox = hw[a] + hw[b] + rough_block_gap_mm - @abs(dx);
-                const oy = hh[a] + hh[b] + rough_block_gap_mm - @abs(dy);
+            const apinned = pinned[a];
+            for (centers[a + 1 ..], hw[a + 1 ..], hh[a + 1 ..], pinned[a + 1 ..]) |*bc, bhw, bhh, bpinned| {
+                const dx = bc[0] - centers[a][0];
+                const dy = bc[1] - centers[a][1];
+                const ox = hw[a] + bhw + rough_block_gap_mm - @abs(dx);
+                const oy = hh[a] + bhh + rough_block_gap_mm - @abs(dy);
                 if (ox <= 0 or oy <= 0) continue;
                 any = true;
-                const half: f64 = if (pinned[a] or pinned[b]) 1.0 else 0.5;
+                const half: f64 = if (apinned or bpinned) 1.0 else 0.5;
                 if (ox <= oy) {
                     const push = half * ox * (if (dx >= 0) @as(f64, 1) else -1);
-                    if (!pinned[a]) centers[a][0] -= push;
-                    if (!pinned[b]) centers[b][0] += push;
+                    if (!apinned) centers[a][0] -= push;
+                    if (!bpinned) bc[0] += push;
                 } else {
                     const push = half * oy * (if (dy >= 0) @as(f64, 1) else -1);
-                    if (!pinned[a]) centers[a][1] -= push;
-                    if (!pinned[b]) centers[b][1] += push;
+                    if (!apinned) centers[a][1] -= push;
+                    if (!bpinned) bc[1] += push;
                 }
             }
         }
@@ -5298,64 +6036,44 @@ const CornerSlot = enum { tl, tr, br, bl };
 /// overhanging) the edge, the way an edge-launch SMA / USB-C / RJ45 mounts.
 /// Parts whose pads are centred on the footprint (mounting standoffs) keep 0.
 fn edgeInwardRot(p: Part, edge: Edge) f64 {
-    if (p.pads.len == 0) return 0;
-    var cx: f64 = 0;
-    var cy: f64 = 0;
-    for (p.pads) |pad| {
-        cx += pad.x;
-        cy += pad.y;
-    }
-    cx /= @as(f64, @floatFromInt(p.pads.len));
-    cy /= @as(f64, @floatFromInt(p.pads.len));
-    if (cx * cx + cy * cy < 0.01) return 0;
-    // Board-interior direction for each edge (y grows DOWN: top edge = −y).
-    const inx: f64 = switch (edge) {
-        .left => 1,
-        .right => -1,
-        .top, .bottom => 0,
-    };
-    const iny: f64 = switch (edge) {
-        .top => 1,
-        .bottom => -1,
-        .left, .right => 0,
-    };
-    var best_rot: f64 = 0;
-    var best = -std.math.inf(f64);
-    var r: f64 = 0;
-    while (r < 360) : (r += 90) {
-        const off = rotateLocal(cx, cy, r);
-        const dot = off.x * inx + off.y * iny;
-        if (dot > best + 1e-9) {
-            best = dot;
-            best_rot = r;
-        }
-    }
-    return best_rot;
+    return edge_rotation.choose(p.pads, p.hw, p.hh, @backingInt(edge));
 }
 
 /// The attachment centroid of `pi`: mean centre of the other parts it shares a
 /// non-ground net with (ground nets touch everything, pulling every connector
 /// to the board centre). Falls back to ground-net partners, then null. The
 /// docked connector slides along its edge toward this point.
-fn attachCentroid(parts: []const Part, idx_of: *const std.StringHashMapUnmanaged(usize), nets: []const FlatNet, pi: usize) ?Pt {
+const AttachTarget = struct { point: Pt, pad: ?Pt };
+
+fn attachCentroid(parts: []const Part, idx_of: *const std.StringHashMapUnmanaged(usize), nets: []const FlatNet, pi: usize) ?AttachTarget {
     var sx: f64 = 0;
     var sy: f64 = 0;
     var n: f64 = 0;
     var gx: f64 = 0;
     var gy: f64 = 0;
     var gn: f64 = 0;
+    var px: f64 = 0;
+    var py: f64 = 0;
+    var pn: f64 = 0;
     for (nets) |net| {
         var touches = false;
+        var own_pad: ?geometry.Pad = null;
         for (net.pins) |pin| {
             if (idx_of.get(pin.ref_des)) |qi| {
                 if (qi == pi) {
                     touches = true;
+                    own_pad = padLocal(&parts[pi], pin.pin);
                     break;
                 }
             }
         }
         if (!touches) continue;
         const groundy = isGroundName(net.name);
+        if (!groundy and own_pad != null) {
+            px += own_pad.?.x;
+            py += own_pad.?.y;
+            pn += 1;
+        }
         for (net.pins) |pin| {
             const qi = idx_of.get(pin.ref_des) orelse continue;
             if (qi == pi) continue;
@@ -5370,13 +6088,44 @@ fn attachCentroid(parts: []const Part, idx_of: *const std.StringHashMapUnmanaged
             }
         }
     }
-    if (n > 0) return .{ .x = sx / n, .y = sy / n };
-    if (gn > 0) return .{ .x = gx / gn, .y = gy / gn };
+    const pad: ?Pt = if (pn > 0) .{ .x = px / pn, .y = py / pn } else null;
+    if (n > 0) return .{ .point = .{ .x = sx / n, .y = sy / n }, .pad = pad };
+    if (gn > 0) return .{ .point = .{ .x = gx / gn, .y = gy / gn }, .pad = pad };
     return null;
 }
 
 /// One resolved edge-list entry: the part index + its authored rotation.
 const SideRef = struct { pi: usize, rot: ?f64 };
+const EdgeEntry = struct { pi: usize, want: f64, half: f64, signal_pad: ?Pt, auto_rot: bool };
+const BoardDock = struct { rect: BoardRect, inset: f64 = 0 };
+
+fn dockEdgePart(parts: []Part, entry: EdgeEntry, center: f64, edge: Edge, vertical: bool, dock: BoardDock) void {
+    const p = &parts[entry.pi];
+    if (entry.auto_rot) if (entry.signal_pad) |pad| {
+        p.rot = edge_rotation.faceSignalsToward(p.pads, .{ pad.x, pad.y }, vertical, entry.want - center, p.rot);
+    };
+    const kb = keepBoxOf(p.*);
+    const rect = dock.rect;
+    const inset = dock.inset;
+    switch (edge) {
+        .left => {
+            p.x = rect.minx + inset + kb.hw - kb.cxo;
+            p.y = gridRound(center - kb.cyo);
+        },
+        .right => {
+            p.x = rect.minx + rect.w - inset - kb.hw - kb.cxo;
+            p.y = gridRound(center - kb.cyo);
+        },
+        .top => {
+            p.x = gridRound(center - kb.cxo);
+            p.y = rect.miny + inset + kb.hh - kb.cyo;
+        },
+        .bottom => {
+            p.x = gridRound(center - kb.cxo);
+            p.y = rect.miny + rect.h - inset - kb.hh - kb.cyo;
+        },
+    }
+}
 
 /// Resolve the `(board …)` side + corner names against the flattened design.
 /// Unresolved names are appended to the placement diag (the lint layer
@@ -5390,7 +6139,7 @@ const BoardClaims = struct {
 fn resolveBoardClaims(
     arena: std.mem.Allocator,
     spec: env.BoardSpec,
-    instances: []const export_kicad.FlatInstance,
+    instances: []const flat_netlist.FlatInstance,
     nparts: usize,
     record_unresolved: bool,
 ) std.mem.Allocator.Error!BoardClaims {
@@ -5399,7 +6148,7 @@ fn resolveBoardClaims(
     var unresolved: std.ArrayList([]const u8) = .empty;
     var side_lists: [4]std.ArrayList(SideRef) = .{ .empty, .empty, .empty, .empty };
     for (spec.sides) |s| {
-        const ei: usize = @intFromEnum(edgeFromSide(s.side));
+        const ei: usize = @backingInt(edgeFromSide(s.side));
         for (s.items) |it| {
             if (resolvePart(instances, it.ref)) |pi| {
                 if (!claimed[pi]) {
@@ -5462,7 +6211,8 @@ fn scrubClaimed(
 /// TR, BR, BL in authored order), returning each one's world keepout so the
 /// edge lanes dodge it. A locked corner part stays where the hand put it —
 /// its box is still recorded so the edges keep clear.
-fn dockCorners(parts: []Part, corner_parts: []const usize, x0: f64, y0: f64, x1: f64, y1: f64) [4]?Rect {
+fn dockCorners(parts: []Part, corner_parts: []const usize, dock: BoardDock) [4]?Rect {
+    const inset = dock.inset;
     var corner_box = [4]?Rect{ null, null, null, null };
     for (corner_parts, 0..) |pi, k| {
         if (k >= 4) break;
@@ -5470,22 +6220,22 @@ fn dockCorners(parts: []Part, corner_parts: []const usize, x0: f64, y0: f64, x1:
         if (!p.locked) {
             p.rot = 0;
             const kb = keepBoxOf(p.*);
-            switch (@as(CornerSlot, @enumFromInt(k))) {
+            switch (@as(CornerSlot, @fromBackingInt(@intCast(k)))) {
                 .tl => {
-                    p.x = gridRound(x0 + kb.hw - kb.cxo);
-                    p.y = gridRound(y0 + kb.hh - kb.cyo);
+                    p.x = gridRound(dock.rect.minx + inset + kb.hw - kb.cxo);
+                    p.y = gridRound(dock.rect.miny + inset + kb.hh - kb.cyo);
                 },
                 .tr => {
-                    p.x = gridRound(x1 - kb.hw - kb.cxo);
-                    p.y = gridRound(y0 + kb.hh - kb.cyo);
+                    p.x = gridRound(dock.rect.minx + dock.rect.w - inset - kb.hw - kb.cxo);
+                    p.y = gridRound(dock.rect.miny + inset + kb.hh - kb.cyo);
                 },
                 .br => {
-                    p.x = gridRound(x1 - kb.hw - kb.cxo);
-                    p.y = gridRound(y1 - kb.hh - kb.cyo);
+                    p.x = gridRound(dock.rect.minx + dock.rect.w - inset - kb.hw - kb.cxo);
+                    p.y = gridRound(dock.rect.miny + dock.rect.h - inset - kb.hh - kb.cyo);
                 },
                 .bl => {
-                    p.x = gridRound(x0 + kb.hw - kb.cxo);
-                    p.y = gridRound(y1 - kb.hh - kb.cyo);
+                    p.x = gridRound(dock.rect.minx + inset + kb.hw - kb.cxo);
+                    p.y = gridRound(dock.rect.miny + dock.rect.h - inset - kb.hh - kb.cyo);
                 },
             }
         }
@@ -5503,11 +6253,13 @@ fn dockCorners(parts: []Part, corner_parts: []const usize, x0: f64, y0: f64, x1:
 fn packBoard(
     arena: std.mem.Allocator,
     parts: []Part,
-    instances: []const export_kicad.FlatInstance,
+    instances: []const flat_netlist.FlatInstance,
     idx_of: *const std.StringHashMapUnmanaged(usize),
     nets: []const FlatNet,
-    spec: env.BoardSpec,
+    dock_spec: struct { board: env.BoardSpec, edge_inset: f64 = 0 },
 ) std.mem.Allocator.Error!BoardRect {
+    const spec = dock_spec.board;
+    const edge_inset = dock_spec.edge_inset;
     const bc = try resolveBoardClaims(arena, spec, instances, parts.len, true);
 
     // Interior bbox: every part that is neither board-claimed nor staged in
@@ -5538,13 +6290,13 @@ fn packBoard(
     // under a deep connector like a magjack).
     var lane = [4]f64{ 0, 0, 0, 0 };
     for (bc.side_parts, 0..) |list, ei| {
-        const edge: Edge = @enumFromInt(ei);
+        const edge: Edge = @fromBackingInt(@intCast(ei));
         for (list) |sr| {
             var tmp = parts[sr.pi];
-            tmp.rot = if (sr.rot) |r| @mod(@round(r / 90.0) * 90.0, 360.0) else edgeInwardRot(tmp, edge);
+            tmp.rot = if (sr.rot) |r| @mod(@round(r / 45.0) * 45.0, 360.0) else edgeInwardRot(tmp, edge);
             const kb = keepBoxOf(tmp);
             const depth = if (edge == .left or edge == .right) 2 * kb.hw else 2 * kb.hh;
-            lane[ei] = @max(lane[ei], depth + board_edge_gap_mm);
+            lane[ei] = @max(lane[ei], depth + board_edge_gap_mm + edge_inset);
         }
     }
     const rect = BoardRect{
@@ -5560,18 +6312,19 @@ fn packBoard(
 
     // Corners first (TL, TR, BR, BL in authored order) — they bound the edge
     // spans. Track each one's world keepout so the edges dodge it.
-    const corner_box = dockCorners(parts, bc.corner_parts, x0, y0, x1, y1);
+    const dock = BoardDock{ .rect = rect, .inset = edge_inset };
+    const corner_box = dockCorners(parts, bc.corner_parts, dock);
 
     // Each edge: rotation (pads inward unless overridden) → cross-axis flush
     // inside the edge → desired slide position (attachment centroid) → 1-D
     // de-overlap inside the span the adjacent corners leave free.
     for (bc.side_parts, 0..) |list, ei| {
         if (list.len == 0) continue;
-        const edge: Edge = @enumFromInt(ei);
+        const edge: Edge = @fromBackingInt(@intCast(ei));
         const vertical = (edge == .left or edge == .right);
         // Span along the edge, shrunk past any adjacent corner hardware.
-        var span_min = if (vertical) y0 else x0;
-        var span_max = if (vertical) y1 else x1;
+        var span_min = (if (vertical) y0 else x0) + @max(grid_mm, edge_inset);
+        var span_max = (if (vertical) y1 else x1) - @max(grid_mm, edge_inset);
         const corner_at: [2]?Rect = switch (edge) {
             .left => .{ corner_box[0], corner_box[3] }, // TL, BL
             .right => .{ corner_box[1], corner_box[2] }, // TR, BR
@@ -5581,35 +6334,31 @@ fn packBoard(
         if (corner_at[0]) |cb| span_min = @max(span_min, (if (vertical) cb.y1 else cb.x1) + board_edge_gap_mm);
         if (corner_at[1]) |cb| span_max = @min(span_max, (if (vertical) cb.y0 else cb.x0) - board_edge_gap_mm);
 
-        const Entry = struct { pi: usize, want: f64, half: f64 };
-        var entries_buf = try arena.alloc(Entry, list.len);
+        var entries_buf = try arena.alloc(EdgeEntry, list.len);
         var live: usize = 0;
         for (list) |sr| {
             const p = &parts[sr.pi];
             if (p.locked) continue; // a pinned connector keeps its hand-set dock
-            p.rot = if (sr.rot) |r| @mod(@round(r / 90.0) * 90.0, 360.0) else edgeInwardRot(p.*, edge);
+            p.rot = if (sr.rot) |r| @mod(@round(r / 45.0) * 45.0, 360.0) else edgeInwardRot(p.*, edge);
             const kb = keepBoxOf(p.*);
-            switch (edge) {
-                .left => p.x = x0 + kb.hw - kb.cxo,
-                .right => p.x = x1 - kb.hw - kb.cxo,
-                .top => p.y = y0 + kb.hh - kb.cyo,
-                .bottom => p.y = y1 - kb.hh - kb.cyo,
-            }
-            const want = if (attachCentroid(parts, idx_of, nets, sr.pi)) |c|
-                (if (vertical) c.y else c.x)
+            const attach = attachCentroid(parts, idx_of, nets, sr.pi);
+            const want = if (attach) |a|
+                (if (vertical) a.point.y else a.point.x)
             else
                 (span_min + span_max) / 2;
             entries_buf[live] = .{
                 .pi = sr.pi,
                 .want = std.math.clamp(want, span_min, span_max),
                 .half = if (vertical) kb.hh else kb.hw,
+                .signal_pad = if (attach) |a| a.pad else null,
+                .auto_rot = sr.rot == null,
             };
             live += 1;
         }
         const entries = entries_buf[0..live];
         if (entries.len == 0) continue;
-        std.mem.sort(Entry, entries, {}, struct {
-            fn less(_: void, a: Entry, b: Entry) bool {
+        std.mem.sort(EdgeEntry, entries, {}, struct {
+            fn less(_: void, a: EdgeEntry, b: EdgeEntry) bool {
                 return a.want < b.want;
             }
         }.less);
@@ -5633,13 +6382,7 @@ fn packBoard(
             if (i > 0) hi = centers[i] - entries[i].half - entries[i - 1].half - board_edge_gap_mm;
         }
         for (entries, 0..) |e, k| {
-            const p = &parts[e.pi];
-            const kb = keepBoxOf(p.*);
-            if (vertical) {
-                p.y = gridRound(centers[k] - kb.cyo);
-            } else {
-                p.x = gridRound(centers[k] - kb.cxo);
-            }
+            dockEdgePart(parts, e, centers[k], edge, vertical, dock);
         }
     }
 
@@ -5675,12 +6418,15 @@ fn packBoard(
 /// verbatim — nothing re-docks): W×H centered on the board-claimed parts'
 /// bbox when any resolve (they were docked flush to the edges when the cache
 /// was written, so their bbox ≈ the original rectangle), else on the whole
-/// board's bbox.
+/// board's bbox. `covered` (when given) restricts the bbox to seed-covered
+/// parts, so a staged/uncovered part cannot drag the board edge around
+/// between loads.
 fn boardRectFromPoses(
     arena: std.mem.Allocator,
     parts: []const Part,
-    instances: []const export_kicad.FlatInstance,
+    instances: []const flat_netlist.FlatInstance,
     spec: env.BoardSpec,
+    covered: ?[]const bool,
 ) std.mem.Allocator.Error!BoardRect {
     const bc = try resolveBoardClaims(arena, spec, instances, parts.len, false);
     var ix0 = std.math.inf(f64);
@@ -5693,6 +6439,7 @@ fn boardRectFromPoses(
     }
     for (parts, 0..) |p, i| {
         if (any_claimed and !bc.claimed[i]) continue;
+        if (covered) |c| if (!c[i]) continue;
         const kb = keepBoxOf(p);
         ix0 = @min(ix0, p.x + kb.cxo - kb.hw);
         ix1 = @max(ix1, p.x + kb.cxo + kb.hw);
@@ -5713,13 +6460,17 @@ fn boardRectFromPoses(
     };
 }
 
-/// The authored exact outline polygon for a resolved board rectangle:
-/// `(board … (corner-radius R))` yields the rounded-rect polyline, a plain
-/// `(size W H)` yields null (the rectangle IS the outline). Kept next to the
-/// rect derivation so `board_rect`/`board_poly` can never disagree.
-fn authoredBoardPoly(arena: std.mem.Allocator, r: BoardRect, spec: env.BoardSpec) std.mem.Allocator.Error!?[]const [2]f64 {
+/// The authored exact outline for a resolved board rectangle: a corner radius
+/// yields native quarter arcs plus the bounded-sagitta fallback polygon; a
+/// plain size yields null because the rectangle itself is exact.
+fn authoredBoardShape(arena: std.mem.Allocator, r: BoardRect, spec: env.BoardSpec) std.mem.Allocator.Error!?outline_mod.FilletResult {
     if (!(spec.corner_radius > 0)) return null;
-    return try outline_mod.roundedRectPoly(arena, r, spec.corner_radius);
+    const points = [_][2]f64{
+        .{ r.minx, r.miny },             .{ r.minx + r.w, r.miny },
+        .{ r.minx + r.w, r.miny + r.h }, .{ r.minx, r.miny + r.h },
+    };
+    const radii = [_]f64{ spec.corner_radius, spec.corner_radius, spec.corner_radius, spec.corner_radius };
+    return try outline_mod.filletPath(arena, &points, &radii, 0.01);
 }
 
 /// The design's plane-carrying net names per its `(stackup …)` form, in the
@@ -5742,311 +6493,62 @@ fn boardRulesOf(arena: std.mem.Allocator, block: *const DesignBlock, nets: []con
         planes = out;
     }
     return .{
+        .perimeter_fence = block.board.perimeter_fence,
         .plane_nets = try planeNetsOf(arena, block),
-        .net = try netRulesOf(arena, block, nets),
+        .net = try net_rules.resolvedNetRules(arena, block, nets),
         .copper_layers = if (block.stackup.present) block.stackup.layers else 0,
-        .planes = planes,
+        .planes = .{
+            .declared = planes,
+            // The implicit model's own plane, chosen only when the design
+            // authored no `(stackup …)` at all — see `implicit_plane`.
+            .implicit_rail = if (block.stackup.present) null else implicit_plane.dominantRail(nets),
+        },
         .design = designRulesOf(block),
-        .board_thickness = if (block.stackup.present) block.stackup.thickness else 0,
+        .physical = .{
+            .board_thickness = if (block.stackup.present) block.stackup.thickness else 0,
+            .via_plating_mm = if (block.design_rules.via.plating > 0)
+                block.design_rules.via.plating
+            else
+                env.default_via_plating_mm,
+            .stack = try impedance_rules.stackOf(arena, block),
+            .rails = try power_budget.analyze(arena, block),
+            .pdn_intents = block.pdn_intents,
+        },
     };
 }
 
 /// Resolve the design's `(design-rules …)` form into concrete `DesignRules`:
 /// each authored (non-zero) sub-form overrides the matching built-in default,
-/// and any omitted rule keeps its default — so a design with no form (or an
-/// empty `(design-rules)`) reproduces every legacy constant exactly.
+/// and any omitted rule keeps its default.
 fn designRulesOf(block: *const DesignBlock) DesignRules {
-    var d = DesignRules{}; // built-in defaults (the old hard-coded constants)
+    var d = DesignRules{}; // built-in routing, fabrication, and assembly defaults
     const s = block.design_rules;
     if (!s.present) return d;
     if (s.clearance > 0) d.clearance = s.clearance;
     if (s.min_drill > 0) d.min_drill = s.min_drill;
-    if (s.mask_margin > 0) d.mask_margin = s.mask_margin;
-    if (s.copper_edge > 0) d.copper_edge = s.copper_edge;
+    if (s.mask.margin > 0) d.mask.margin = s.mask.margin;
+    if (s.mask.relief_corner_radius > 0) d.mask.relief_corner_radius = s.mask.relief_corner_radius;
+    if (s.edge.copper > 0) d.edge.copper = s.edge.copper;
+    if (s.edge.component > 0) d.edge.component = s.edge.component;
     if (s.hole_to_hole > 0) d.hole_to_hole = s.hole_to_hole;
+    if (s.via_to_via > 0) d.via_to_via = s.via_to_via;
     if (s.min_annular > 0) d.min_annular = s.min_annular;
     if (s.track_width > 0) d.track_width = s.track_width;
-    if (s.via_dia > 0) d.via_dia = s.via_dia;
-    if (s.via_drill > 0) d.via_drill = s.via_drill;
-    if (s.mask_web > 0) d.mask_web = s.mask_web;
+    if (s.via.dia > 0) d.via_dia = s.via.dia;
+    if (s.via.drill > 0) d.via_drill = s.via.drill;
+    if (s.mask.web > 0) d.mask.web = s.mask.web;
     if (s.min_width > 0) d.min_width = s.min_width;
+    // One authored knob governs both layer classes: the built-in defaults
+    // differ (inner plane 0.3, outer face 0.2), but a board that states a pour
+    // gap states it for its whole stack, so an authored value replaces both.
+    if (s.pour_clearance > 0) {
+        d.pour_clearance = s.pour_clearance;
+        d.pour.clearance_outer = s.pour_clearance;
+    }
+    if (s.pour.min_width > 0) d.pour.min_width = s.pour.min_width;
+    if (s.pour.corner_radius > 0) d.pour.corner_radius = s.pour.corner_radius;
+    if (s.pour.ground_via_max > 0) d.pour.ground_via_max = s.pour.ground_via_max;
     return d;
-}
-
-const ClassMemberDecl = struct {
-    class_name: []const u8,
-    net_name: []const u8,
-    source: []const u8,
-    depth: u16,
-    order: u32,
-};
-
-const ClassProfileDecl = struct {
-    spec: env.NetClassSpec,
-    source: []const u8,
-    depth: u16,
-    order: u32,
-};
-
-const WinningClass = struct {
-    class_name: []const u8,
-    source: []const u8,
-    depth: u16,
-    order: u32,
-};
-
-const ClassCollectCtx = struct {
-    arena: std.mem.Allocator,
-    members: *std.ArrayList(ClassMemberDecl),
-    profiles: *std.ArrayList(ClassProfileDecl),
-    order: u32 = 0,
-};
-
-fn classNetName(arena: std.mem.Allocator, prefix: []const u8, name: []const u8) std.mem.Allocator.Error![]const u8 {
-    if (prefix.len == 0) return arena.dupe(u8, name);
-    if (name.len == 0) return arena.dupe(u8, prefix);
-    return std.fmt.allocPrint(arena, "{s}/{s}", .{ prefix, name });
-}
-
-fn collectNetClassDecls(
-    ctx: *ClassCollectCtx,
-    block: *const DesignBlock,
-    prefix: []const u8,
-    depth: u16,
-) std.mem.Allocator.Error!void {
-    for (block.net_classes) |nc| {
-        const decl_order = ctx.order;
-        ctx.order += 1;
-        try ctx.profiles.append(ctx.arena, .{ .spec = nc, .source = prefix, .depth = depth, .order = decl_order });
-        for (nc.nets) |name| try ctx.members.append(ctx.arena, .{
-            .class_name = nc.name,
-            .net_name = try classNetName(ctx.arena, prefix, name),
-            .source = prefix,
-            .depth = depth,
-            .order = decl_order,
-        });
-    }
-    for (block.sub_blocks) |sb| {
-        const child = try classNetName(ctx.arena, prefix, sb.name);
-        try collectNetClassDecls(ctx, sb.block, child, depth + 1);
-    }
-}
-
-fn canonicalAlias(aliases: *const netlist_mod.CanonicalNetMap, name: []const u8) ?[]const u8 {
-    if (aliases.get(name)) |n| return n;
-    var it = aliases.iterator();
-    while (it.next()) |entry| {
-        if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, name)) return entry.value_ptr.*;
-    }
-    return null;
-}
-
-fn netIndexNamed(nets: []const FlatNet, name: []const u8) ?usize {
-    for (nets, 0..) |net, i| if (std.ascii.eqlIgnoreCase(net.name, name)) return i;
-    return null;
-}
-
-fn isAncestorPath(ancestor: []const u8, child: []const u8) bool {
-    if (ancestor.len == 0) return true;
-    if (std.mem.eql(u8, ancestor, child)) return true;
-    return child.len > ancestor.len and child[ancestor.len] == '/' and std.mem.startsWith(u8, child, ancestor);
-}
-
-fn betterProfile(p: ClassProfileDecl, best_depth: u16, best_order: u32) bool {
-    return p.depth < best_depth or (p.depth == best_depth and p.order < best_order);
-}
-
-fn profileRule(profiles: []const ClassProfileDecl, win: WinningClass, conflict: bool) NetRule {
-    var out = NetRule{ .class = .{ .name = win.class_name, .source = win.source, .conflict = conflict } };
-    var wd: u16 = std.math.maxInt(u16);
-    var wo: u32 = std.math.maxInt(u32);
-    var cd = wd;
-    var co = wo;
-    var vdd = wd;
-    var vdo = wo;
-    var vrd = wd;
-    var vro = wo;
-    var pd = wd;
-    var po = wo;
-    for (profiles) |p| {
-        if (!std.ascii.eqlIgnoreCase(p.spec.name, win.class_name)) continue;
-        if (!isAncestorPath(p.source, win.source)) continue;
-        if (p.spec.width > 0 and betterProfile(p, wd, wo)) {
-            out.width = p.spec.width;
-            wd = p.depth;
-            wo = p.order;
-        }
-        if (p.spec.clearance > 0 and betterProfile(p, cd, co)) {
-            out.clearance = p.spec.clearance;
-            cd = p.depth;
-            co = p.order;
-        }
-        if (p.spec.via_dia > 0 and betterProfile(p, vdd, vdo)) {
-            out.via_dia = p.spec.via_dia;
-            vdd = p.depth;
-            vdo = p.order;
-        }
-        if (p.spec.via_drill > 0 and betterProfile(p, vrd, vro)) {
-            out.via_drill = p.spec.via_drill;
-            vrd = p.depth;
-            vro = p.order;
-        }
-        if (p.spec.priority > 0 and betterProfile(p, pd, po)) {
-            out.priority = p.spec.priority;
-            pd = p.depth;
-            po = p.order;
-        }
-    }
-    return out;
-}
-
-/// Resolve hierarchy-aware net-class membership and destination profiles into
-/// index-aligned effective rules. Membership is attached to module-local aliases
-/// before net ties are canonicalized; root profile fields then override module
-/// fallbacks one field at a time. Public so KiCad sync uses the exact same
-/// result as placement/route/DRC.
-pub fn resolvedNetRules(
-    arena: std.mem.Allocator,
-    block: *const DesignBlock,
-    nets: []const FlatNet,
-) std.mem.Allocator.Error![]const NetRule {
-    var members: std.ArrayList(ClassMemberDecl) = .empty;
-    var profiles: std.ArrayList(ClassProfileDecl) = .empty;
-    var collect = ClassCollectCtx{ .arena = arena, .members = &members, .profiles = &profiles };
-    try collectNetClassDecls(&collect, block, "", 0);
-    if (members.items.len == 0) return &.{};
-
-    // Recreate the canonical alias map through the authoritative flattener.
-    // This deliberately avoids any second, class-specific interpretation of
-    // bridge/net-tie semantics.
-    var ignored_nets: std.ArrayList(FlatNet) = .empty;
-    var aliases: netlist_mod.CanonicalNetMap = .empty;
-    try export_kicad.flattenAndMergeNetsMapped(arena, block, &ignored_nets, &aliases);
-
-    const wins = try arena.alloc(?WinningClass, nets.len);
-    const conflicts = try arena.alloc(bool, nets.len);
-    @memset(wins, null);
-    @memset(conflicts, false);
-
-    for (members.items) |m| {
-        const target = canonicalAlias(&aliases, m.net_name);
-        // Preserve the existing root-form convenience: `(nets "SW")` also
-        // matches a unique/repeated flattened `child/SW` leaf.
-        if (target == null and m.depth == 0) {
-            for (nets, 0..) |net, ni| {
-                if (!std.ascii.eqlIgnoreCase(m.net_name, net.name) and
-                    !std.ascii.eqlIgnoreCase(m.net_name, shortName(net.name))) continue;
-                const cand = WinningClass{
-                    .class_name = m.class_name,
-                    .source = m.source,
-                    .depth = m.depth,
-                    .order = m.order,
-                };
-                if (wins[ni]) |old| {
-                    const class_conflict = old.depth == cand.depth and
-                        !std.ascii.eqlIgnoreCase(old.class_name, cand.class_name);
-                    if (class_conflict) conflicts[ni] = true;
-                    if (cand.depth < old.depth or (cand.depth == old.depth and cand.order < old.order)) wins[ni] = cand;
-                } else wins[ni] = cand;
-            }
-            continue;
-        }
-        const canon = target orelse continue;
-        const ni = netIndexNamed(nets, canon) orelse continue;
-        const cand = WinningClass{
-            .class_name = m.class_name,
-            .source = m.source,
-            .depth = m.depth,
-            .order = m.order,
-        };
-        if (wins[ni]) |old| {
-            const class_conflict = old.depth == cand.depth and
-                !std.ascii.eqlIgnoreCase(old.class_name, cand.class_name);
-            if (class_conflict) conflicts[ni] = true;
-            if (cand.depth < old.depth or (cand.depth == old.depth and cand.order < old.order)) wins[ni] = cand;
-        } else wins[ni] = cand;
-    }
-
-    const out = try arena.alloc(NetRule, nets.len);
-    var any = false;
-    for (out, 0..) |*r, i| {
-        if (wins[i]) |win| {
-            r.* = profileRule(profiles.items, win, conflicts[i]);
-            any = true;
-        } else r.* = .{};
-    }
-    return if (any) out else &.{};
-}
-
-fn netRulesOf(
-    arena: std.mem.Allocator,
-    block: *const DesignBlock,
-    nets: []const FlatNet,
-) std.mem.Allocator.Error![]const NetRule {
-    return resolvedNetRules(arena, block, nets);
-}
-
-// spec: placement/optimizer - a bridged subcircuit keeps its class and adopts destination profile fields
-test "inherited net class resolves through canonical bridge names" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    const child_pins = [_]env.PinRef{.{ .ref_des = "U1", .pin = "1" }};
-    const child_nets = [_]env.Net{.{ .name = "RFIN", .pins = &child_pins }};
-    const child_classes = [_]env.NetClassSpec{.{
-        .name = "rf-cpwg-50",
-        .width = 0.20,
-        .clearance = 0.15,
-        .via_dia = 0.45,
-        .nets = &.{"RFIN"},
-    }};
-    var child = DesignBlock{
-        .name = "amp",
-        .instances = &.{},
-        .nets = &child_nets,
-        .ports = &.{},
-        .notes = &.{},
-        .groups = &.{},
-        .sub_blocks = &.{},
-        .net_classes = &child_classes,
-    };
-
-    const root_pins = [_]env.PinRef{.{ .ref_des = "J1", .pin = "1" }};
-    const root_nets = [_]env.Net{.{ .name = "ANT_IN", .pins = &root_pins }};
-    const root_classes = [_]env.NetClassSpec{.{
-        .name = "rf-cpwg-50",
-        .width = 0.38,
-        .clearance = 0.20,
-        .via_drill = 0.30,
-    }};
-    const subs = [_]env.SubBlock{.{ .name = "lna1", .block = &child }};
-    const ties = [_]env.NetTie{.{ .a = "ANT_IN", .b = "lna1/RFIN" }};
-    const root = DesignBlock{
-        .name = "board",
-        .instances = &.{},
-        .nets = &root_nets,
-        .ports = &.{},
-        .notes = &.{},
-        .groups = &.{},
-        .sub_blocks = &subs,
-        .net_ties = &ties,
-        .net_classes = &root_classes,
-    };
-
-    var flat: std.ArrayList(FlatNet) = .empty;
-    try export_kicad.flattenAndMergeNets(arena, &root, &flat);
-    try std.testing.expectEqual(@as(usize, 1), flat.items.len);
-    try std.testing.expectEqualStrings("ANT_IN", flat.items[0].name);
-
-    const rules = try resolvedNetRules(arena, &root, flat.items);
-    try std.testing.expectEqual(@as(usize, 1), rules.len);
-    try std.testing.expectEqualStrings("rf-cpwg-50", rules[0].class.name);
-    try std.testing.expectEqualStrings("lna1", rules[0].class.source);
-    try std.testing.expectEqual(@as(f64, 0.38), rules[0].width);
-    try std.testing.expectEqual(@as(f64, 0.20), rules[0].clearance);
-    try std.testing.expectEqual(@as(f64, 0.45), rules[0].via_dia);
-    try std.testing.expectEqual(@as(f64, 0.30), rules[0].via_drill);
 }
 
 /// Build a placement for `block`. When `cached` covers every part, its poses
@@ -6063,6 +6565,12 @@ pub fn solve(
     params: Params,
     mode: SeedMode,
 ) std.mem.Allocator.Error!Placement {
+    var root_prepare_cache: PrepareCache = .{};
+    const owns_prepare_cache = g_guidance.prepare_cache == null;
+    if (owns_prepare_cache) g_guidance.prepare_cache = &root_prepare_cache;
+    defer {
+        if (owns_prepare_cache) g_guidance.prepare_cache = null;
+    }
     // Don't leave the arena-backed threadlocals dangling once the outermost solve
     // returns and the caller frees the arena (nested solves manage them via
     // SolveState — see resetArenaGlobals).
@@ -6113,17 +6621,20 @@ pub fn solve(
         // term when there are no loops or the board is too large to route).
         if (g_collide_shrink > 0 and parts.len >= 2) {
             const overlap_routed = routedObjectiveCost(arena, parts, &prep.idx_of, nets, built.loops, params);
-            const overlap_poses = try capturePoses(arena, parts);
+            const overlap_poses = try pose_snapshot.capture(Part, arena, parts);
             const saved_shrink = g_collide_shrink;
             g_collide_shrink = 0; // strict regime
             try runPlacement(arena, parts, &prep, nets, built, params);
             const strict_routed = routedObjectiveCost(arena, parts, &prep.idx_of, nets, built.loops, params);
             g_collide_shrink = saved_shrink;
-            if (overlap_routed <= strict_routed) restorePoses(parts, overlap_poses);
+            if (overlap_routed <= strict_routed) pose_snapshot.restore(Part, parts, overlap_poses);
             // else keep the strict arrangement already in `parts`.
         }
         if (board_live) {
-            board_rect = try packBoard(arena, parts, prep.instances, &prep.idx_of, nets, block.board);
+            board_rect = try packBoard(arena, parts, prep.instances, &prep.idx_of, nets, .{
+                .board = block.board,
+                .edge_inset = designRulesOf(block).edge.component,
+            });
             // The dock just landed the connectors; parts whose only anchors
             // are ON those connectors (CC pull-downs, LED resistors) couldn't
             // fill during the spec pass — give them a second pin-hug pass.
@@ -6156,10 +6667,16 @@ pub fn solve(
     emitBest(parts, bd.objective, .refine);
     var pl = try finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, generated);
     pl.rules = try boardRulesOf(arena, block, nets);
+    pl.fabrication_layers = block.fabrication_layers;
+    pl.diff_pairs = try diff_pairs.resolve(arena, nets, pl.rules.net);
+    pl.match_groups = try match_group.resolve(arena, nets, pl.rules.net);
     if (board_live) {
-        if (board_rect == null) board_rect = try boardRectFromPoses(arena, parts, prep.instances, block.board);
+        if (board_rect == null) board_rect = try boardRectFromPoses(arena, parts, prep.instances, block.board, null);
         pl.board_rect = board_rect;
-        pl.board_poly = try authoredBoardPoly(arena, board_rect.?, block.board);
+        if (try authoredBoardShape(arena, board_rect.?, block.board)) |shape| {
+            pl.board_poly = shape.poly;
+            pl.board_arcs = shape.arcs;
+        }
         // The view frame must include the outline even where it reaches past
         // the parts (a sparse board on a big rectangle).
         const r = board_rect.?;
@@ -6220,8 +6737,8 @@ pub fn perPartBlame(p: Placement, params: Params, out: []f64) void {
     if (out.len != p.parts.len) return;
     @memset(out, 0);
     for (p.links) |l| {
-        const a = worldPt(p.parts[l.a], l.ax, l.ay);
-        const b = worldPt(p.parts[l.b], l.bx, l.by);
+        const a = worldPt(&p.parts[l.a], l.ax, l.ay);
+        const b = worldPt(&p.parts[l.b], l.bx, l.by);
         const d = std.math.hypot(a.x - b.x, a.y - b.y);
         out[l.a] += d / 2;
         out[l.b] += d / 2;
@@ -6272,19 +6789,67 @@ pub fn fullRoutedScorePoses(
     return fullRouteCost(arena, prep.parts, prep.nets, prep.built.loops, stubs, prep.priority, params, .{}, lw);
 }
 
-/// Build a `Placement` at exactly `poses` (no optimization — overlaps allowed),
-/// so a caller can route the user's *on-screen* layout verbatim instead of the
-/// auto-generated one. Same design model as `scorePoses` (and it also builds the
-/// escape stubs the router needs), but it returns the full placement with
-/// `generated = false`. The score fields use the cheap fixed-pad surrogate — the
-/// router re-measures real traces itself, so paying for `routedLoops` here would
-/// just route the board twice. Parts not named in `poses` stay at the origin, so
-/// `poses` should cover every part.
+/// Where a poses-built placement's board outline comes from. Every
+/// `placeFromPoses` caller must state this explicitly — the `PoseSeed` field
+/// has no default — because a silently-missing drawn outline disables THREE
+/// board-edge guards at once: the routing maze falls back to the parts bbox
+/// (`pour.boundsRect`), bend-smoothing loses its edge veto, and
+/// `drc.checkBoardEdge` returns early on a null `board_rect`. The result is
+/// copper routed off the board with no DRC error (the barracuda RF1_HPF bug
+/// class, which recurred when a new endpoint skipped the serve-side fold).
+/// Endpoints that route or DRC-check must resolve the design's drawn outline
+/// (a submitted body outline, else the blessed saved layout's — see the serve
+/// layer's `outlineForBody`); `.authored_only` is for scoring / compare /
+/// module-frame paths where the drawn outline plays no part.
+pub const OutlineSource = union(enum) {
+    /// Only the authored `(board …)` form applies (the pre-seed behavior).
+    authored_only,
+    /// Fold this drawn outline (bbox rect + exact polygon when one was drawn)
+    /// onto `board_rect`/`board_poly`, overriding any authored rectangle.
+    drawn: Drawn,
+
+    /// A drawn outline's geometry: the bounding rect, plus the exact closed
+    /// polygon when one was drawn (null for a plain rectangle outline).
+    pub const Drawn = struct {
+        rect: BoardRect,
+        poly: ?[]const [2]f64 = null,
+        arcs: []const BoardArc = &.{},
+    };
+};
+
+/// A `placeFromPoses` seed: the on-screen poses plus the explicit outline
+/// decision. A struct rather than positional args so the outline can never be
+/// forgotten at a new call site — omitting `.outline` is a compile error.
+pub const PoseSeed = struct {
+    poses: []const RefPose,
+    outline: OutlineSource,
+};
+
+/// Lift a placement's (already folded) board outline into an `OutlineSource`,
+/// so a path that REBUILDS a placement from poses (route-review replay, route
+/// sessions) inherits the same board edge instead of silently dropping it.
+pub fn outlineOf(p: *const Placement) OutlineSource {
+    const r = p.board_rect orelse return .authored_only;
+    return .{ .drawn = .{ .rect = r, .poly = p.board_poly, .arcs = p.board_arcs } };
+}
+
+/// Build a `Placement` at exactly `seed.poses` (no optimization — overlaps
+/// allowed), so a caller can route the user's *on-screen* layout verbatim
+/// instead of the auto-generated one. Same design model as `scorePoses` (and it
+/// also builds the escape stubs the router needs), but it returns the full
+/// placement with `generated = false`. The score fields use the cheap fixed-pad
+/// surrogate — the router re-measures real traces itself, so paying for
+/// `routedLoops` here would just route the board twice. Parts not named in
+/// `seed.poses` are staged in a band below the covered parts (never left
+/// stacked at the origin) and reported via the placement diag as `unplaced`;
+/// they are also excluded from the authored board rectangle's centring so an
+/// uncovered part cannot drag the outline. `seed.outline` folds the drawn
+/// board outline (see `OutlineSource`).
 pub fn placeFromPoses(
     arena: std.mem.Allocator,
     block: *const DesignBlock,
     project_dir: []const u8,
-    poses: []const RefPose,
+    seed: PoseSeed,
     params: Params,
 ) std.mem.Allocator.Error!Placement {
     var prep = try prepare(arena, block, project_dir, params);
@@ -6294,23 +6859,56 @@ pub fn placeFromPoses(
     const stubs = try buildEscapeStubs(arena, nets, parts, &prep.idx_of);
     // Apply the poses verbatim; unlike `solve`, never fall back to optimizing —
     // a slightly-overlapping hand-dragged layout must still route as drawn.
-    _ = applyCached(parts, poses);
+    const covered = try arena.alloc(bool, parts.len);
+    @memset(covered, false);
+    _ = applyPoses(parts, seed.poses, covered);
+    // Parts the seed does not cover (the design grew since the layout was
+    // saved) are staged beside the board and reported unplaced — the viewer
+    // draws its red box and pauses its idle autosave on them.
+    g_placement_diag.unplaced = try stageUncovered(arena, parts, covered);
     const score = scoreLayout(parts, &prep.idx_of, nets, built.loops);
     const lsum = surrogateLoops(parts, built.loops);
     const bd = breakdownWith(parts, &prep.idx_of, nets, params, score, lsum);
     var pl = try finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, false);
     pl.rules = try boardRulesOf(arena, block, nets);
+    pl.fabrication_layers = block.fabrication_layers;
+    pl.diff_pairs = try diff_pairs.resolve(arena, nets, pl.rules.net);
+    pl.match_groups = try match_group.resolve(arena, nets, pl.rules.net);
     // Saved/hand layouts of a `(board …)` design keep their outline overlay.
     if (block.board.present and block.board.w > 0 and block.board.h > 0) {
-        const r = try boardRectFromPoses(arena, parts, prep.instances, block.board);
+        const r = try boardRectFromPoses(arena, parts, prep.instances, block.board, covered);
         pl.board_rect = r;
-        pl.board_poly = try authoredBoardPoly(arena, r, block.board);
+        if (try authoredBoardShape(arena, r, block.board)) |shape| {
+            pl.board_poly = shape.poly;
+            pl.board_arcs = shape.arcs;
+        }
         pl.minx = @min(pl.minx, r.minx);
         pl.miny = @min(pl.miny, r.miny);
         pl.maxx = @max(pl.maxx, r.minx + r.w);
         pl.maxy = @max(pl.maxy, r.miny + r.h);
     }
+    foldSeedOutline(&pl, seed.outline);
     return pl;
+}
+
+/// Fold a seed's outline onto the built placement. A drawn outline is the
+/// explicit per-layout edit — it overrides the authored `(board …)` rectangle
+/// and grows the framing bbox so the whole board stays on screen (the same
+/// fold the serve layer's applyShownOutline did post-build before the seed
+/// carried it). `.authored_only` leaves the placement untouched.
+fn foldSeedOutline(pl: *Placement, outline: OutlineSource) void {
+    switch (outline) {
+        .authored_only => {},
+        .drawn => |o| {
+            pl.board_rect = o.rect;
+            pl.board_poly = o.poly;
+            pl.board_arcs = o.arcs;
+            pl.minx = @min(pl.minx, o.rect.minx);
+            pl.miny = @min(pl.miny, o.rect.miny);
+            pl.maxx = @max(pl.maxx, o.rect.minx + o.rect.w);
+            pl.maxy = @max(pl.maxy, o.rect.miny + o.rect.h);
+        },
+    }
 }
 
 /// Place every part on a plain uniform grid (no optimization) — the cheap
@@ -6339,6 +6937,9 @@ pub fn gridPlace(
     const bd = breakdownWith(parts, &prep.idx_of, nets, params, score, lsum);
     var pl = try finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, false);
     pl.rules = try boardRulesOf(arena, block, nets);
+    pl.fabrication_layers = block.fabrication_layers;
+    pl.diff_pairs = try diff_pairs.resolve(arena, nets, pl.rules.net);
+    pl.match_groups = try match_group.resolve(arena, nets, pl.rules.net);
     return pl;
 }
 
@@ -6378,15 +6979,16 @@ fn arrangeGrid(parts: []Part) void {
 const Prepared = struct {
     parts: []Part,
     idx_of: std.StringHashMapUnmanaged(usize),
-    instances: []const export_kicad.FlatInstance,
+    instances: []const flat_netlist.FlatInstance,
     nets: []const FlatNet,
     built: Built,
+    /// Exact-pad ordered RF paths; empty keeps the legacy placer unchanged.
+    critical: critical_rough.Result = .{ .roles = &.{}, .paths = &.{}, .islands = &.{}, .diagnostics = .{} },
     /// Per-part priority rank (always 0 now — `(placement-order …)` was removed),
     /// kept because `tightenPriorityLoops` takes it (it no-ops on an all-zero slice).
     priority: []const u32,
-    /// Resolved + lowered Phase-A constraints. Always inert now (the `(constraints …)`
-    /// form was removed); `prepare` still publishes it to `g_lowered` for the solve.
-    lowered: Lowered,
+    /// Automatic electrical and functional-group guidance published for the solve.
+    guidance: PlacementGuidance,
     /// The design block + project dir this model was prepared from, carried so the
     /// rough hierarchical seed (`runRough`) can iterate `block.sub_blocks` and
     /// nested-solve each one as its own board.
@@ -6446,9 +7048,8 @@ fn netCurrents(arena: std.mem.Allocator, block: *const DesignBlock, nets: []cons
 }
 
 /// The footprint-local pad of part `idx` that sits on net `net`, or a zero-size
-/// pad at the part centre when it has no pin on that net (so a proximity pull
-/// still has a sensible anchor — the part body).
-fn padOnNet(part: Part, idx: usize, net: FlatNet, idx_of: *std.StringHashMapUnmanaged(usize)) PadRect {
+/// pad at the part centre when it has no pin on that net.
+fn padOnNet(part: *const Part, idx: usize, net: FlatNet, idx_of: *std.StringHashMapUnmanaged(usize)) PadRect {
     for (net.pins) |pr| {
         const i = idx_of.get(pr.ref_des) orelse continue;
         if (i != idx) continue;
@@ -6458,192 +7059,59 @@ fn padOnNet(part: Part, idx: usize, net: FlatNet, idx_of: *std.StringHashMapUnma
     return .{ .x = 0, .y = 0, .w = 0, .h = 0 };
 }
 
-/// Resolve + validate the design's Phase-A `(constraints …)` against the
-/// flattened netlist, lowering each form into the geometry/weights `constraintCost`
-/// consumes. Every ref/net is checked; anything that doesn't resolve is appended
-/// to `diags` (a human-readable rejection) and skipped — never silently applied
-/// to a wrong target (the doc's load-bearing safety property). When `diags` is
-/// null, rejections are simply dropped (the hot `prepare` path). All output is in
-/// `arena`. Returns an all-empty `Lowered` when no constraints were authored.
-fn resolveConstraints(
+/// Build the automatic electrical and functional-group guidance used only by
+/// the placement search. All output lives in `arena`.
+fn buildPlacementGuidance(
     arena: std.mem.Allocator,
     block: *const DesignBlock,
-    instances: []const export_kicad.FlatInstance,
+    instances: []const flat_netlist.FlatInstance,
     nets: []const FlatNet,
     parts: []const Part,
     idx_of: *std.StringHashMapUnmanaged(usize),
-    diags: ?*std.ArrayList([]const u8),
-) std.mem.Allocator.Error!Lowered {
-    const c = block.constraints;
-
-    const reject = struct {
-        fn add(a: std.mem.Allocator, d: ?*std.ArrayList([]const u8), comptime fmt: []const u8, args: anytype) void {
-            const dd = d orelse return;
-            const msg = std.fmt.allocPrint(a, fmt, args) catch return;
-            // A dropped diagnostic only loses an authoring hint, never correctness
-            // (the constraint is skipped regardless) — so OOM here just returns.
-            dd.append(a, msg) catch return;
-        }
-    }.add;
-
-    var net_weight = try arena.alloc(f64, nets.len);
-    @memset(net_weight, 1.0);
-    var input_rail = try arena.alloc(bool, nets.len);
+) std.mem.Allocator.Error!PlacementGuidance {
+    const input_rail = try arena.alloc(bool, nets.len);
     @memset(input_rail, false);
-    var prox: std.ArrayList(ProxTerm) = .empty;
     var keepouts: std.ArrayList(KeepTerm) = .empty;
     var groups: std.ArrayList(GroupTerm) = .empty;
 
-    // power-rail (role input) → mark the rail so the input-loop boost fires even
-    // with an integrated inductor (no discrete L to reveal the switcher).
-    for (c.power_rails) |pr| {
-        const ni = resolveNet(nets, pr.net) orelse {
-            reject(arena, diags, "power-rail '{s}': net '{s}' not in netlist", .{ pr.label, pr.net });
-            continue;
-        };
-        if (pr.role == .input) input_rail[ni] = true;
-    }
-
-    // Phase-2a auto hot-loop boost: an INTEGRATED-module switcher (a regulated
+    // An integrated-module switcher (a regulated
     // converter with no discrete inductor — TPSM84338, TPS6299x …) hides its
     // switching loop inside the package, so `classify`'s discrete-inductor test
     // never fires the input-loop boost. When `module_policy` detects an input
     // rail + a feedback net (the regulated-converter tell) and there is no
-    // discrete L, auto-mark the input rail — the same thing a hand-authored
-    // `(power-rail … (role input))` does. (A discrete-L switcher is already
+    // discrete L, auto-mark the input rail. (A discrete-L switcher is already
     // boosted by `classify`, so `autoInputRails` excludes it to avoid a double
-    // boost.) The board always force-solves now, so this auto-policy always runs.
+    // boost.)
     const auto_input = autoInputRails(parts, nets, input_rail);
 
-    // net-length (priority) → raise that net's wirelength weight.
-    for (c.net_lengths) |nl| {
-        const ni = resolveNet(nets, nl.net) orelse {
-            reject(arena, diags, "net-length: net '{s}' not in netlist", .{nl.net});
-            continue;
-        };
-        net_weight[ni] *= constraintWeight(nl.priority);
-    }
-
-    // deprioritize → scale down the wirelength weight of every net the part is on.
-    for (c.deprioritize) |ref| {
-        const pi = resolvePart(instances, ref) orelse {
-            reject(arena, diags, "deprioritize: part '{s}' not found", .{ref});
-            continue;
-        };
-        for (nets, 0..) |net, ni| {
-            for (net.pins) |pp| {
-                if ((idx_of.get(pp.ref_des) orelse continue) == pi) {
-                    net_weight[ni] *= deprioritize_scale;
-                    break;
-                }
-            }
-        }
-    }
-
-    // proximity → a pad-to-pad attraction term. The `pin` token is resolved as a
-    // net name (in these designs the relevant pin's net is named after it, e.g.
-    // U1's VIN pin sits on net VIN); failing that, as a literal hub pad number.
-    for (c.proximity) |p| {
-        const part_i = resolvePart(instances, p.ref) orelse {
-            reject(arena, diags, "proximity: part '{s}' not found", .{p.ref});
-            continue;
-        };
-        const hub_i = resolvePart(instances, p.hub) orelse {
-            reject(arena, diags, "proximity {s}: hub '{s}' not found", .{ p.ref, p.hub });
-            continue;
-        };
-        var part_pad: PadRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
-        var hub_pad: PadRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
-        if (resolveNet(nets, p.pin)) |ni| {
-            // Validate both parts actually touch that net.
-            hub_pad = padOnNet(parts[hub_i], hub_i, nets[ni], idx_of);
-            part_pad = padOnNet(parts[part_i], part_i, nets[ni], idx_of);
-            if (hub_pad.w == 0 and hub_pad.h == 0)
-                reject(arena, diags, "proximity {s}: hub {s} has no pin on net '{s}'", .{ p.ref, p.hub, p.pin });
-        } else {
-            const hp = padLocal(parts[hub_i], p.pin);
-            if (hp.w == 0 and hp.h == 0) {
-                reject(arena, diags, "proximity {s}: '{s}' is neither a net nor a pad of {s}", .{ p.ref, p.pin, p.hub });
-                continue;
-            }
-            hub_pad = .{ .x = hp.x, .y = hp.y, .w = hp.w, .h = hp.h };
-        }
-        try prox.append(arena, .{
-            .part = part_i,
-            .hub = hub_i,
-            .part_pad = part_pad,
-            .hub_pad = hub_pad,
-            .w = prox_w * constraintWeight(p.priority),
-            .max_mm = p.max_mm,
-        });
-    }
-
-    // keep-out (part X) (from Y) → a part-vs-part min courtyard gap. The net-form
-    // keep-out (a net's routing region away from a region) is parsed + validated
-    // but not yet lowered (its region geometry needs the router) — reported so an
-    // author knows it is inert rather than silently honoured.
-    for (c.keep_outs) |k| {
-        const from_i = resolvePart(instances, k.from) orelse {
-            reject(arena, diags, "keep-out: 'from' part '{s}' not found", .{k.from});
-            continue;
-        };
-        if (k.part.len > 0) {
-            const pi = resolvePart(instances, k.part) orelse {
-                reject(arena, diags, "keep-out: part '{s}' not found", .{k.part});
-                continue;
-            };
-            try keepouts.append(arena, .{ .a = pi, .b = from_i, .min_mm = k.min_mm });
-        } else if (k.net.len > 0) {
-            if (resolveNet(nets, k.net) == null)
-                reject(arena, diags, "keep-out: net '{s}' not in netlist", .{k.net});
-            reject(arena, diags, "keep-out (net '{s}'): net-region keep-out not yet lowered (inert)", .{k.net});
-        }
-    }
-
-    // Phase-2b aggressor-avoidance keep-outs: push a feedback/compensation
+    // Push a feedback/compensation
     // passive away from a switching-node / clock / RF passive (the inductor,
     // snubber, crystal, RF match) so the sensitive high-impedance FB node
-    // doesn't couple to the aggressor. Synthesized into the SAME part-vs-part
-    // keep-out machinery a hand `(keep-out …)` lowers to — search-only, so the
-    // reported objective stays comparable. Always runs (the board force-solves).
+    // doesn't couple to the aggressor.
     try synthAggressorKeepouts(arena, parts, nets, idx_of, &keepouts);
     const has_keepouts = keepouts.items.len > 0;
 
-    // Constraint-DSL (group …) clusters. Resolve each ref; skip unresolved
-    // (reported) and groups with <2 resolved members (nothing to cohese).
-    for (c.groups) |g| {
-        const m = try resolveGroupMembers(arena, instances, g.refs, diags);
-        if (m.len >= 2) try groups.append(arena, makeGroupTerm(arena, m, parts, nets, idx_of));
-    }
-
-    // The design's own functional (group "name" (refs)) declarations — the same
-    // groups the schematic/BOM use — are ALSO honoured as placement cohesion, so
-    // an output filter's caps sit as one block with no (constraints) form needed.
-    // (Unresolved refs are skipped silently; these are not authored constraints.)
+    // Functional groups are honoured as placement cohesion so, for example, an
+    // output filter's capacitors sit as one block. Unresolved refs are skipped.
     for (block.groups) |vg| {
-        const m = try resolveGroupMembers(arena, instances, vg.members, null);
+        const m = try resolveGroupMembers(arena, instances, vg.members);
         if (m.len >= 2) try groups.append(arena, makeGroupTerm(arena, m, parts, nets, idx_of));
     }
 
     const has_groups = groups.items.len > 0;
     return .{
-        .prox = try prox.toOwnedSlice(arena),
         .keepouts = try keepouts.toOwnedSlice(arena),
-        .net_weight = net_weight,
         .input_rail = input_rail,
         .groups = try groups.toOwnedSlice(arena),
-        .active = c.present or has_groups or auto_input or has_keepouts,
+        .active = has_groups or auto_input or has_keepouts,
     };
 }
 
-/// Phase-2a: mark every detected input-rail net as a hot rail (so
-/// `constraintCost`'s input-loop boost fires) when the design is an
+/// Mark every detected input-rail net as a hot rail when the design is an
 /// integrated-module switcher — it carries a feedback net (a regulated
 /// converter) but no discrete inductor (a discrete-L switcher is already
 /// boosted by `classify`, so marking here would double-boost). `input_rail` is
-/// index-aligned with `nets`; entries already set by a `(power-rail …)` stay
-/// set. Returns true when it marked at least one rail (so the caller can flip
-/// `Lowered.active` on — else `constraintCost` would fast-exit and skip the boost).
+/// index-aligned with `nets`. Returns true when it marked at least one rail.
 fn autoInputRails(parts: []const Part, nets: []const FlatNet, input_rail: []bool) bool {
     for (parts) |p| {
         if (isInductor(p.ref_des)) return false; // discrete-L switcher → classify handles it
@@ -6682,7 +7150,7 @@ fn synthAggressorKeepouts(
 ) std.mem.Allocator.Error!void {
     const flags = try arena.alloc(std.EnumSet(module_policy.NetClass), parts.len);
     defer arena.free(flags);
-    for (flags) |*f| f.* = std.EnumSet(module_policy.NetClass).initEmpty();
+    for (flags) |*f| f.* = std.EnumSet(module_policy.NetClass).empty;
     for (nets) |net| {
         const cls = module_policy.classifyNetName(net.name);
         for (net.pins) |pin| {
@@ -6711,14 +7179,14 @@ fn memberOf(members: []const usize, p: usize) bool {
 /// `loops`): `1 − relief` for a cap that is in a `(group …)` with ≥2 members on
 /// the *same* power rail (a cap bank), else `1.0`. Position-invariant (membership
 /// + rail are fixed for the solve), so it is computed once in `prepare` and read
-/// by both `accumulateLoops` (force) and `constraintCost` (objective) so the two
+/// by both `accumulateLoops` (force) and `guidanceCost` (objective) so the two
 /// stay consistent. `relief ≤ 0` ⇒ all `1.0` (relief off).
-fn bankLoopScale(arena: std.mem.Allocator, loops: []const Loop, lowered: Lowered, relief: f64) std.mem.Allocator.Error![]const f64 {
+fn bankLoopScale(arena: std.mem.Allocator, loops: []const Loop, guidance: PlacementGuidance, relief: f64) std.mem.Allocator.Error![]const f64 {
     const scale = try arena.alloc(f64, loops.len);
     @memset(scale, 1.0);
-    if (relief <= 0 or !lowered.active) return scale;
+    if (relief <= 0 or !guidance.active) return scale;
     const r = std.math.clamp(relief, 0.0, 1.0);
-    for (lowered.groups) |g| {
+    for (guidance.groups) |g| {
         for (loops, 0..) |lp, li| {
             if (!memberOf(g.members, lp.cap)) continue;
             var bank: usize = 0;
@@ -6731,22 +7199,17 @@ fn bankLoopScale(arena: std.mem.Allocator, loops: []const Loop, lowered: Lowered
     return scale;
 }
 
-/// Resolve a group's member refs to part indices (in the arena). Unresolved refs
-/// are reported via `diags` when provided, else skipped.
+/// Resolve a group's member refs to part indices in the arena. Unresolved refs
+/// are skipped; evaluation and group consumers already tolerate missing members.
 fn resolveGroupMembers(
     arena: std.mem.Allocator,
-    instances: []const export_kicad.FlatInstance,
+    instances: []const flat_netlist.FlatInstance,
     refs: []const []const u8,
-    diags: ?*std.ArrayList([]const u8),
 ) std.mem.Allocator.Error![]usize {
     var members: std.ArrayList(usize) = .empty;
     for (refs) |ref| {
         if (resolvePart(instances, ref)) |pi|
-            try members.append(arena, pi)
-        else if (diags) |d| {
-            const msg = std.fmt.allocPrint(arena, "group: part '{s}' not found", .{ref}) catch continue;
-            d.append(arena, msg) catch continue; // diag is best-effort; OOM just drops the hint
-        }
+            try members.append(arena, pi);
     }
     return members.toOwnedSlice(arena);
 }
@@ -6792,7 +7255,7 @@ fn makeGroupTerm(arena: std.mem.Allocator, members: []usize, parts: []const Part
         if (!touches) continue;
         for (net.pins) |pp| {
             if (!std.mem.eql(u8, pp.ref_des, hub_ref)) continue;
-            const pad = padLocal(parts[h], pp.pin);
+            const pad = padLocal(&parts[h], pp.pin);
             if (pad.w == 0 and pad.h == 0) continue;
             sx += pad.x;
             sy += pad.y;
@@ -6805,28 +7268,12 @@ fn makeGroupTerm(arena: std.mem.Allocator, members: []usize, parts: []const Part
     return .{ .members = members, .hub = hub, .dirx = sx / mag, .diry = sy / mag };
 }
 
-/// Validate a design's Phase-A constraints against its flattened netlist without
-/// running a solve — the deterministic, LLM-free validator the doc requires.
-/// Returns the list of human-readable rejections (empty ⇒ everything resolves).
-/// Builds the same design model `solve` does. All output in `arena`.
-pub fn validateConstraints(
-    arena: std.mem.Allocator,
-    block: *const DesignBlock,
-    project_dir: []const u8,
-    params: Params,
-) std.mem.Allocator.Error![]const []const u8 {
-    var prep = try prepare(arena, block, project_dir, params);
-    var diags: std.ArrayList([]const u8) = .empty;
-    _ = try resolveConstraints(arena, block, prep.instances, prep.nets, prep.parts, &prep.idx_of, &diags);
-    return diags.toOwnedSlice(arena);
-}
-
 /// Resolve a `(placement-order …)` name to a flattened part index. Matches the
 /// name the author wrote — the stable `origin_key` (survives ref-des renumbering,
 /// so "C_VIN" still resolves after it is auto-assigned "C188") or the final
 /// `ref_des` — then a `parent/child` suffix so a bare "C1" finds sub-block
 /// "pwr/C1". Null when no part matches. `instances` is index-aligned with `parts`.
-fn resolvePart(instances: []const export_kicad.FlatInstance, ref: []const u8) ?usize {
+fn resolvePart(instances: []const flat_netlist.FlatInstance, ref: []const u8) ?usize {
     for (instances, 0..) |inst, i| {
         if (std.mem.eql(u8, inst.origin_key, ref) or std.mem.eql(u8, inst.ref_des, ref)) return i;
     }
@@ -6837,16 +7284,21 @@ fn resolvePart(instances: []const export_kicad.FlatInstance, ref: []const u8) ?u
     return null;
 }
 
-/// The IC pad a `(decouple … per-pin …)` cap decouples, read from its structural
-/// origin key `value@PAD#replica` (built in `builders.emitDecoupleItems`). Null
-/// when the key has no `@PAD#` segment — a non-per-pin decouple (`value#replica`)
-/// or any named part (whose origin key is the source name).
-fn decouplePinFromOrigin(origin_key: []const u8) ?[]const u8 {
-    const at = std.mem.indexOfScalar(u8, origin_key, '@') orelse return null;
-    const hash = std.mem.indexOfScalarPos(u8, origin_key, at + 1, '#') orelse return null;
-    const pin = origin_key[at + 1 .. hash];
-    return if (pin.len > 0) pin else null;
-}
+/// The decoupling-binding model — which hub pad each cap serves, and on which
+/// IC. Lives in `cap_bind.zig`; see there for why the two are one value.
+const CapTarget = cap_bind.CapTarget;
+const CapBinds = cap_bind.CapBinds;
+const capTargetOf = cap_bind.targetOf;
+
+/// Every AUTHORED placement binding the spring builder reads: which hub pad each
+/// cap `(decouples …)`, and which pad each passive declares itself `(near …)`.
+/// One value because the two are resolved together and consumed together — and
+/// because they are alternatives for the same part, so a builder handed one
+/// without the other could aim a passive twice.
+const AuthoredBinds = struct {
+    caps: CapBinds,
+    near: []const near_bind.NearPair = &.{},
+};
 
 fn prepare(
     arena: std.mem.Allocator,
@@ -6858,10 +7310,10 @@ fn prepare(
     // `(sub-block …)`s (hierarchical ref-des like "pwr/U1") and their merged
     // nets are included — a buck design is one sub-block, so `block.instances`
     // alone would be empty.
-    var inst_list: std.ArrayList(export_kicad.FlatInstance) = .empty;
-    try netlist_mod.collectInstances(arena, block, "", &inst_list, block.refStyle());
+    var inst_list: std.ArrayList(flat_netlist.FlatInstance) = .empty;
+    try flat_netlist.collectInstances(arena, block, "", &inst_list);
     var net_list: std.ArrayList(FlatNet) = .empty;
-    try export_kicad.flattenAndMergeNets(arena, block, &net_list);
+    try flat_netlist.flattenAndMergeNets(arena, block, &net_list);
     const instances = inst_list.items;
     const nets = net_list.items;
 
@@ -6881,7 +7333,8 @@ fn prepare(
     // once. Only hubs are classified — a passive's pads are always real, and an
     // IC's GND/rail nets are the ones that also carry straps.
     var roles = try arena.alloc(pin_roles.PartRoles, instances.len);
-    var roles_cache = std.StringHashMapUnmanaged(pin_roles.PartRoles).empty;
+    var local_cache: PrepareCache = .{};
+    const prepare_cache = g_guidance.prepare_cache orelse &local_cache;
 
     // Per-footprint geometry cache, keyed by footprint name, mirroring
     // `roles_cache`. A board with 100 cap-0402s used to file-read + parse
@@ -6890,22 +7343,26 @@ fn prepare(
     // margin is constant across a prepare, so caching by name is byte-identical.
     // Fallback geoms (missing file) depend on the per-instance pin-count hint, so
     // they are never cached — `g.fallback` gates the store.
-    var geom_cache = std.StringHashMapUnmanaged(geometry.Geom).empty;
-
     var parts = try arena.alloc(Part, instances.len);
     var idx_of = std.StringHashMapUnmanaged(usize).empty;
     for (instances, 0..) |inst, i| {
         const hint = pin_counts.get(inst.ref_des) orelse 2;
         const g = blk: {
-            if (geom_cache.get(inst.footprint)) |cached| break :blk cached;
+            if (prepare_cache.geom.get(inst.footprint)) |cached| break :blk cached;
             const loaded = geometry.load(arena, project_dir, inst.footprint, hint, params.bbox_margin);
             // Fallback geoms depend on the per-instance pin hint — never cache them.
-            if (!loaded.fallback) try geom_cache.put(arena, inst.footprint, loaded);
+            if (!loaded.fallback) try prepare_cache.geom.put(arena, inst.footprint, loaded);
             break :blk loaded;
         };
-        const is_hub = isHub(inst.ref_des);
+        // An authored rough anchor is authoritative. Ref-des prefixes remain a
+        // useful fallback for unannotated designs, but they cannot veto an
+        // explicit declaration: `DIV1` is an HMC862A prescaler, not a diode,
+        // even though the legacy prefix heuristic reads its leading `D` that
+        // way. Promote the match here, where Part.kind and pin roles are born,
+        // so every downstream seed/arbiter sees one consistent hub identity.
+        const is_hub = isHubForRough(inst.ref_des, inst.origin_key, block.rough);
         if (is_hub) {
-            const gop = try roles_cache.getOrPut(arena, inst.component);
+            const gop = try prepare_cache.roles.getOrPut(arena, inst.component);
             if (!gop.found_existing) gop.value_ptr.* = pin_roles.load(arena, project_dir, inst.component);
             roles[i] = gop.value_ptr.*;
         } else roles[i] = .{};
@@ -6923,8 +7380,7 @@ fn prepare(
             .pads = g.pads,
             .fallback = g.fallback,
             .value = instValue(inst),
-            .silk_lines = g.silk_lines,
-            .silk_circles = g.silk_circles,
+            .features = g.features,
         };
         try idx_of.put(arena, inst.ref_des, i);
     }
@@ -6934,7 +7390,7 @@ fn prepare(
     const priority = try arena.alloc(u32, instances.len);
     @memset(priority, 0);
     const explicit_pin = try arena.alloc([]const u8, instances.len);
-    for (explicit_pin) |*e| e.* = "";
+    const explicit_ic = try arena.alloc([]const u8, instances.len);
     // A (decouple … per-pin N …) cap carries the IC pad it decouples in its
     // structural origin key `value@PAD#replica`; pin its loop to that pad so the
     // bypass loop targets the pin it serves (and the part shows that target on
@@ -6944,31 +7400,40 @@ fn prepare(
     const rail_optout = try arena.alloc(bool, instances.len);
     @memset(rail_optout, false);
     for (instances, 0..) |inst, pi| {
-        if (decouplePinFromOrigin(inst.origin_key)) |pin| explicit_pin[pi] = pin;
-        // A `(decouples "IC" PIN)` instance binding pins the loop to that pad —
-        // more authoritative than the structural-key default.
-        if (inst.decouple_pin.len > 0) explicit_pin[pi] = inst.decouple_pin;
-        if (inst.decouple_rail) rail_optout[pi] = true;
+        // A `(decouples "IC" PIN)` instance binding names both parts of the
+        // target and outranks the structural-key default, which names only a pad.
+        const want = capTargetOf(inst);
+        explicit_pin[pi] = want.pad;
+        explicit_ic[pi] = want.ic;
+        if (inst.bind.decouple.rail) rail_optout[pi] = true;
     }
+    const part_refs = try arena.alloc([]const u8, instances.len);
+    for (instances, 0..) |inst, i| part_refs[i] = inst.ref_des;
+    const binds = CapBinds{ .ref_des = part_refs, .pin = explicit_pin, .ic = explicit_ic, .optout = rail_optout };
 
-    const built = try buildSprings(arena, nets, parts, &idx_of, roles, explicit_pin, rail_optout);
+    // Authored `(near …)` adjacencies, resolved once against the flattened
+    // netlist and shared with the layout lint and `/api/pcb-describe` so the
+    // three can never describe different boards.
+    const near = try near_bind.resolve(arena, instances, nets);
+    const built = try buildSprings(arena, nets, parts, &idx_of, roles, .{ .caps = binds, .near = near.pairs });
+    const critical = try critical_rough.extract(arena, block, parts, nets);
     classify(parts, built.loops, nets, params.cap_w_max, params.input_loop_boost, priority);
     // Declared rail currents (ports' `(current …)`, pins' `(i-typ …)`) → the
     // per-net congestion corridor widths `congestPitch` reads.
     g_net_current = try netCurrents(arena, block, nets);
-    // Resolve + lower any Phase-A `(constraints …)` and publish to the thread's
-    // `g_lowered` so `constraintCost` (the search-only objective delta) sees it.
-    // Inert when the design authored none. Rejections are dropped on this hot
-    // path; `validateConstraints` surfaces them for authoring.
-    const lowered = try resolveConstraints(arena, block, instances, nets, parts, &idx_of, null);
-    g_lowered = lowered;
+    // Derive automatic electrical and functional-group guidance for the
+    // search-only objective delta.
+    const guidance = try buildPlacementGuidance(arena, block, instances, nets, parts, &idx_of);
+    const prepare_cache_ptr = g_guidance.prepare_cache;
+    g_guidance = guidance;
+    g_guidance.prepare_cache = prepare_cache_ptr;
     // Relaxation cohesion- and zoning-force gains (position-space twins of the
-    // scalar `group_w` / `group_zone_w` terms in `constraintCost`).
-    g_group_force = if (lowered.active) @max(0.0, params.group_w) * group_force_per_w else 0;
-    g_zone_force = if (lowered.active) @max(0.0, params.group_zone_w) * zone_force_per_w else 0;
+    // scalar `group_w` / `group_zone_w` terms in `guidanceCost`).
+    g_group_force = if (guidance.active) @max(0.0, params.group_w) * group_force_per_w else 0;
+    g_zone_force = if (guidance.active) @max(0.0, params.group_zone_w) * zone_force_per_w else 0;
     // Per-loop force relief for ≥2-member same-rail banks (twin of the scalar
     // `group_loop_relief`). Precomputed once: bank membership is position-invariant.
-    g_loop_force_scale = try bankLoopScale(arena, built.loops, lowered, params.group_loop_relief);
+    g_loop_force_scale = try bankLoopScale(arena, built.loops, guidance, params.group_loop_relief);
     // Publish the courtyard-overlap allowance for the thread's collision helpers.
     // Capped at `bbox_margin` per side so the collision box stays ≥ the real
     // footprint extent (courtyard = ceilToGrid(extent+margin) ⇒ courtyard−margin
@@ -6991,8 +7456,9 @@ fn prepare(
         .instances = instances,
         .nets = nets,
         .built = built,
+        .critical = critical,
         .priority = priority,
-        .lowered = lowered,
+        .guidance = guidance,
         .block = block,
         .project_dir = project_dir,
     };
@@ -7046,8 +7512,8 @@ fn routedLoops(
     if (!lr.ready) return surrogateLoops(parts, loops);
     var s = LoopSums{ .raw_mm = 0, .weighted_mm = 0, .raw_nh = 0, .weighted_nh = 0 };
     for (loops) |lp| {
-        const cap_c = worldPadCenter(parts[lp.cap], lp.cap_pwr.x, lp.cap_pwr.y);
-        const hub_c = worldPadCenter(parts[lp.hub], lp.hub_pwr_pin.x, lp.hub_pwr_pin.y);
+        const cap_c = worldPadCenter(&parts[lp.cap], lp.cap_pwr.x, lp.cap_pwr.y);
+        const hub_c = worldPadCenter(&parts[lp.hub], lp.hub_pwr_pin.x, lp.hub_pwr_pin.y);
         const routed = lr.legLen(cap_c, hub_c, lp.pwr_net) catch null;
         const pwr = if (routed) |r| r else surrogatePwrLeg(parts, lp) + unroutable_penalty_mm;
         const m = loopMetric(parts, lp, pwr);
@@ -7082,8 +7548,8 @@ fn routedSubsetWeighted(
     for (loops) |lp| {
         if ((lp.cap == cap) != match) continue;
         const pwr = if (ready) blk: {
-            const cap_c = worldPadCenter(parts[lp.cap], lp.cap_pwr.x, lp.cap_pwr.y);
-            const hub_c = worldPadCenter(parts[lp.hub], lp.hub_pwr_pin.x, lp.hub_pwr_pin.y);
+            const cap_c = worldPadCenter(&parts[lp.cap], lp.cap_pwr.x, lp.cap_pwr.y);
+            const hub_c = worldPadCenter(&parts[lp.hub], lp.hub_pwr_pin.x, lp.hub_pwr_pin.y);
             const routed = lr_opt.?.legLen(cap_c, hub_c, lp.pwr_net) catch null;
             break :blk if (routed) |r| r else surrogatePwrLeg(parts, lp) + unroutable_penalty_mm;
         } else surrogatePwrLeg(parts, lp);
@@ -7116,6 +7582,27 @@ fn partialApplyLock(parts: []Part, cached: ?[]const RefPose) usize {
     return matched;
 }
 
+/// Apply `poses` onto `parts` by exact ref-des, marking `covered[i]` (when a
+/// slice is given) for every part some pose named. Returns the matched count.
+fn applyPoses(parts: []Part, poses: []const RefPose, covered: ?[]bool) usize {
+    var matched: usize = 0;
+    for (parts, 0..) |*p, i| {
+        for (poses) |rp| {
+            if (std.mem.eql(u8, rp.ref, p.ref_des)) {
+                p.x = rp.x;
+                p.y = rp.y;
+                p.rot = rp.rot;
+                p.side = rp.side;
+                p.locked = rp.locked;
+                if (covered) |c| c[i] = true;
+                matched += 1;
+                break;
+            }
+        }
+    }
+    return matched;
+}
+
 /// Apply a cached layout to `parts` when it covers every one (matched by
 /// ref-des) *and* the result has no courtyard overlap. Returns true on a clean
 /// hit (positions applied, optimizer skipped); false on a miss, a partial/
@@ -7124,21 +7611,56 @@ fn partialApplyLock(parts: []Part, cached: ?[]const RefPose) usize {
 fn applyCached(parts: []Part, cached: ?[]const RefPose) bool {
     const poses = cached orelse return false;
     if (parts.len == 0) return false;
-    var matched: usize = 0;
-    for (parts) |*p| {
-        for (poses) |rp| {
-            if (std.mem.eql(u8, rp.ref, p.ref_des)) {
-                p.x = rp.x;
-                p.y = rp.y;
-                p.rot = rp.rot;
-                p.side = rp.side;
-                p.locked = rp.locked;
-                matched += 1;
-                break;
-            }
-        }
+    if (applyPoses(parts, poses, null) == parts.len and !anyOverlap(parts)) return true;
+    // A REJECTED cache must not leave its pins behind. `applyPoses` copies each
+    // pose's `locked`, and every downstream pass — the ring seeds, `legalize`,
+    // `legalizeOnGrid` — skips a locked part, so a solve that inherits them
+    // cannot place the board, nor even pull two courtyards off each other: the
+    // very arrangement the cache was rejected FOR survives verbatim. Measured on
+    // `w55rp20`, whose cache slot had all 59 parts locked (a `remaining`-mode
+    // solve's transient pins, written into the slot): its rough seed returned 26
+    // stacked courtyard pairs and 27 sealed pads. Parts arrive here unlocked —
+    // nothing before `prepare` sets the flag — so clearing restores the state
+    // this call found, and `remaining` mode re-applies its own pins straight
+    // after. The POSES are left as they were, as a starting point.
+    for (parts) |*p| p.locked = false;
+    return false;
+}
+
+/// Park every part its pose seed did not cover in a band below the covered
+/// parts' bbox (the same staging idea as the spec band), packed left-to-right,
+/// and return their refs for the placement diag. Leaving them at the origin
+/// would stack them all on one point — several distinct parts on the identical
+/// coordinate — and the viewer's autosave would then write that stack back
+/// into the saved row as if the user had placed it there.
+fn stageUncovered(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    covered: []const bool,
+) std.mem.Allocator.Error![]const []const u8 {
+    var refs: std.ArrayList([]const u8) = .empty;
+    var x0: f64 = std.math.inf(f64);
+    var y1: f64 = -std.math.inf(f64);
+    for (parts, 0..) |p, i| {
+        if (!covered[i]) continue;
+        const kb = keepBoxOf(p);
+        x0 = @min(x0, p.x + kb.cxo - kb.hw);
+        y1 = @max(y1, p.y + kb.cyo + kb.hh);
     }
-    return matched == parts.len and !anyOverlap(parts);
+    if (x0 == std.math.inf(f64)) {
+        x0 = 0;
+        y1 = 0;
+    }
+    var cx = x0;
+    for (parts, 0..) |*p, i| {
+        if (covered[i]) continue;
+        const kb = keepBoxOf(p.*);
+        p.x = gridRound(cx + kb.hw - kb.cxo);
+        p.y = gridRound(y1 + stage_gap_mm + kb.hh - kb.cyo);
+        cx += kb.hw * 2 + 1.0;
+        try refs.append(arena, p.ref_des);
+    }
+    return refs.toOwnedSlice(arena);
 }
 
 /// True if any two parts' keepout boxes overlap (rotation-aware).
@@ -7318,14 +7840,11 @@ fn loopLen(parts: []const Part, lp: Loop) f64 {
 /// one axis with a positive projection overlap on the other. Rendered courtyard
 /// (`effHw`/`effHh` about the centre).
 fn courtyardEdge(a: Part, b: Part) bool {
-    const gx = @abs(a.x - b.x) - (effHw(a) + effHw(b));
-    const gy = @abs(a.y - b.y) - (effHh(a) + effHh(b));
-    return (@abs(gx) <= compact_eps and gy < -compact_eps) or
-        (@abs(gy) <= compact_eps and gx < -compact_eps);
+    return courtyard_close.edgeContact(worldCourtyard(&a), worldCourtyard(&b));
 }
 
 /// A solved pose snapshot (used to retain the best multi-start arrangement).
-const Pose = struct { x: f64, y: f64, rot: f64 };
+const Pose = pose_snapshot.Pose;
 
 /// One placement attempt from seed `s`: seed, relax, then alternately refine
 /// rotations and re-relax, and finally legalize + snap so the result is
@@ -7383,7 +7902,7 @@ fn routedPolish(
     // Only the decoupling caps (parts that own a loop) drive the routed term, so
     // those are the only parts worth the per-candidate route. Resistors/other
     // passives are left where the surrogate polish + compaction placed them.
-    var in_loop = [_]bool{false} ** maxParts;
+    var in_loop: [maxParts]bool = @splat(false);
     for (loops) |lp| in_loop[lp.cap] = true;
     var scratch = std.heap.ArenaAllocator.init(arena);
     defer scratch.deinit();
@@ -7531,9 +8050,8 @@ fn ceilToGrid(v: f64) f64 {
     return @ceil(v / grid_mm - 1e-9) * grid_mm;
 }
 
-/// Extra clearance the final legalization leaves between courtyards, so the
-/// subsequent grid snap (≤ half a cell per axis) cannot push them into
-/// overlap.
+/// Temporary clearance before grid snap. The guarded closer removes this cell
+/// after routability repair where exact courtyard contact remains legal.
 const final_clear: f64 = grid_mm;
 
 // ── Rotation ─────────────────────────────────────────────────────────────
@@ -7544,51 +8062,54 @@ const final_clear: f64 = grid_mm;
 const rot_cand = [_]f64{ 0, 90, 180, 270 };
 
 /// Rotate a footprint-local offset by `rot` (CCW, matching the page's
-/// `wpt()`). Only the four right-angle cases occur, so this is exact.
+/// `wpt()`). Keep exact matrices for the solver's common right-angle poses;
+/// saved/editor poses may also use arbitrary angles (notably 45° increments).
 fn rotateLocal(lx: f64, ly: f64, rot: f64) Pt {
-    return switch (numeric.checkedInt(i64, @round(@mod(rot, 360))) orelse 0) {
-        90 => .{ .x = -ly, .y = lx },
-        180 => .{ .x = -lx, .y = -ly },
-        270 => .{ .x = ly, .y = -lx },
-        else => .{ .x = lx, .y = ly },
-    };
+    const p = pose_math.rotate(lx, ly, rot);
+    return .{ .x = p[0], .y = p[1] };
 }
 
 /// World position of a footprint-local point on `p`, honouring its rotation
 /// and board side (a bottom part mirrors local x before rotating — see `Side`).
-/// Rotation is one of {0,90,180,270}; the `rot == 0` top-side identity is by
-/// far the commonest case (every hub, and unrotated passives) and the inner
-/// loops call this millions of times, so it skips `rotateLocal`'s
-/// `@mod`/`@round`/switch.
-fn worldPt(p: Part, lx: f64, ly: f64) Pt {
+/// The `rot == 0` top-side identity is by far the commonest case (every hub,
+/// and unrotated passives), so the inner loops skip angle normalization.
+fn worldPt(p: *const Part, lx: f64, ly: f64) Pt {
+    return worldPtAt(p, p.x, p.y, lx, ly);
+}
+
+/// `worldPt` with the pose supplied separately. The relaxation keeps x/y in
+/// compact canonical arrays, so its inner loops do not stride across `Part`.
+fn worldPtAt(p: *const Part, x: f64, y: f64, lx: f64, ly: f64) Pt {
     const mlx = if (p.side == .bottom) -lx else lx;
-    if (p.rot == 0) return .{ .x = p.x + mlx, .y = p.y + ly };
+    if (p.rot == 0) return .{ .x = x + mlx, .y = y + ly };
     const r = rotateLocal(mlx, ly, p.rot);
-    return .{ .x = p.x + r.x, .y = p.y + r.y };
+    return .{ .x = x + r.x, .y = y + r.y };
 }
 
 /// World centre (mm) of a footprint-local point on `p`, honouring rotation.
 /// Public so the router can place trace endpoints on pads.
-pub fn worldPadCenter(p: Part, lx: f64, ly: f64) [2]f64 {
+pub fn worldPadCenter(p: *const Part, lx: f64, ly: f64) [2]f64 {
     const w = worldPt(p, lx, ly);
     return .{ w.x, w.y };
 }
 
-/// World-space axis-aligned rectangle of pad `pr` on part `p` (its size swaps
-/// on a quarter turn; right-angle rotation keeps it axis-aligned). The `rot == 0`
+/// Axis-aligned world bounding rectangle of pad `pr` on part `p`. The `rot == 0`
 /// identity is the hot case (hub pads — the loop-leg scan's inner term), so it
-/// bypasses `worldPt`/`isQuarter` entirely.
+/// bypasses the general rotation transform entirely.
 fn worldRect(p: Part, pr: PadRect) Rect {
+    return worldRectAt(&p, p.x, p.y, pr);
+}
+
+fn worldRectAt(p: *const Part, x: f64, y: f64, pr: PadRect) Rect {
     if (p.rot == 0) {
         const mx = if (p.side == .bottom) -pr.x else pr.x;
         const hw0 = pr.w / 2;
         const hh0 = pr.h / 2;
-        return .{ .x0 = p.x + mx - hw0, .y0 = p.y + pr.y - hh0, .x1 = p.x + mx + hw0, .y1 = p.y + pr.y + hh0 };
+        return .{ .x0 = x + mx - hw0, .y0 = y + pr.y - hh0, .x1 = x + mx + hw0, .y1 = y + pr.y + hh0 };
     }
-    const c = worldPt(p, pr.x, pr.y);
-    const hw = if (isQuarter(p.rot)) pr.h / 2 else pr.w / 2;
-    const hh = if (isQuarter(p.rot)) pr.w / 2 else pr.h / 2;
-    return .{ .x0 = c.x - hw, .y0 = c.y - hh, .x1 = c.x + hw, .y1 = c.y + hh };
+    const c = worldPtAt(p, x, y, pr.x, pr.y);
+    const ext = pose_math.aabbHalf(pr.w / 2, pr.h / 2, p.rot);
+    return .{ .x0 = c.x - ext[0], .y0 = c.y - ext[1], .x1 = c.x + ext[0], .y1 = c.y + ext[1] };
 }
 
 /// On one axis, the nearest coordinates on intervals [a0,a1] and [b0,b1]: the
@@ -7618,11 +8139,17 @@ fn rectGap(a: Rect, b: Rect) f64 {
 /// Nearest of `hub_pads` (footprint-local rects on `hub`) to cap rect `cr`
 /// (already in world space): its world rect and the edge-to-edge gap. Used by
 /// the relaxation force (cheap, obstacle-blind).
-fn nearestHubPad(cr: Rect, hub: Part, hub_pads: []const PadRect) struct { rect: Rect, gap: f64 } {
+const NearestHubPad = struct { rect: Rect, gap: f64 };
+
+fn nearestHubPad(cr: Rect, hub: Part, hub_pads: []const PadRect) NearestHubPad {
+    return nearestHubPadAt(cr, &hub, hub.x, hub.y, hub_pads);
+}
+
+fn nearestHubPadAt(cr: Rect, hub: *const Part, x: f64, y: f64, hub_pads: []const PadRect) NearestHubPad {
     var best_gap: f64 = std.math.inf(f64);
     var best: Rect = cr;
     for (hub_pads) |pr| {
-        const hr = worldRect(hub, pr);
+        const hr = worldRectAt(hub, x, y, pr);
         const g = rectGap(cr, hr);
         if (g < best_gap) {
             best_gap = g;
@@ -7659,59 +8186,57 @@ fn pinLess(a: []const u8, b: []const u8) bool {
     return std.mem.lessThan(u8, a, b);
 }
 
-/// True when the part is rotated a quarter turn (its courtyard extents swap).
-fn isQuarter(rot: f64) bool {
-    const r = @mod(@round(rot), 360);
-    return r == 90 or r == 270;
-}
-
-/// Rotation-aware courtyard half-extents (swap on a quarter turn).
+/// Rotation-aware courtyard half-extents.
 fn effHw(p: Part) f64 {
-    return if (isQuarter(p.rot)) p.hh else p.hw;
+    return pose_math.aabbHalf(p.hw, p.hh, p.rot)[0];
 }
 fn effHh(p: Part) f64 {
-    return if (isQuarter(p.rot)) p.hw else p.hh;
+    return pose_math.aabbHalf(p.hw, p.hh, p.rot)[1];
 }
 
 /// World-space centre of the part's courtyard box: the pose plus the rotated
 /// (and side-mirrored) courtyard offset — equal to the pose for the common
 /// origin-centred box.
 fn courtCx(p: Part) f64 {
-    return if (p.ccx == 0 and p.ccy == 0) p.x else worldPt(p, p.ccx, p.ccy).x;
+    return if (p.ccx == 0 and p.ccy == 0) p.x else worldPt(&p, p.ccx, p.ccy).x;
 }
 fn courtCy(p: Part) f64 {
-    return if (p.ccx == 0 and p.ccy == 0) p.y else worldPt(p, p.ccx, p.ccy).y;
+    return if (p.ccx == 0 and p.ccy == 0) p.y else worldPt(&p, p.ccx, p.ccy).y;
 }
 
 /// World-space axis-aligned courtyard rectangle of `p`: its rotation-aware
 /// half-extents about its (rotated, side-mirrored) courtyard centre. Public so
-/// the DRC can flag two parts whose courtyards overlap. The box is symmetric
-/// about its centre and only swaps extents on a quarter turn, so it stays
-/// axis-aligned for the 0/90/180/270° poses the solver produces.
-pub fn worldCourtyard(p: Part) BoardRect {
-    const cx = courtCx(p);
-    const cy = courtCy(p);
-    const hw = effHw(p);
-    const hh = effHh(p);
+/// the DRC can flag two parts whose courtyards overlap. Arbitrary-angle poses
+/// use the exact axis-aligned bound of the rotated courtyard rectangle.
+pub fn worldCourtyard(p: *const Part) BoardRect {
+    const c = if (p.ccx == 0 and p.ccy == 0)
+        Pt{ .x = p.x, .y = p.y }
+    else
+        worldPt(p, p.ccx, p.ccy);
+    const ext = pose_math.aabbHalf(p.hw, p.hh, p.rot);
+    const hw = ext[0];
+    const hh = ext[1];
+    const cx = c.x;
+    const cy = c.y;
     return .{ .minx = cx - hw, .miny = cy - hh, .w = 2 * hw, .h = 2 * hh };
 }
 
 /// Collision-keepout box used by every overlap/repulsion test: the escape-stub
 /// box when set (`khw≥0`), else the courtyard box about its own centre
 /// (sentinel `khw<0` ⇒ identical to the pre-stub behaviour). The centre offset
-/// rotates with the part; the half-extents swap on a quarter turn.
+/// rotates with the part; its half-extents follow the full part rotation.
 fn keepCx(p: Part) f64 {
-    return if (p.keep.hw < 0) courtCx(p) else worldPt(p, p.keep.ox, p.keep.oy).x;
+    return if (p.keep.hw < 0) courtCx(p) else worldPt(&p, p.keep.ox, p.keep.oy).x;
 }
 fn keepCy(p: Part) f64 {
-    return if (p.keep.hw < 0) courtCy(p) else worldPt(p, p.keep.ox, p.keep.oy).y;
+    return if (p.keep.hw < 0) courtCy(p) else worldPt(&p, p.keep.ox, p.keep.oy).y;
 }
 fn keepHw(p: Part) f64 {
-    const base = if (p.keep.hw < 0) effHw(p) else (if (isQuarter(p.rot)) p.keep.hh else p.keep.hw);
+    const base = if (p.keep.hw < 0) effHw(p) else pose_math.aabbHalf(p.keep.hw, p.keep.hh, p.rot)[0];
     return @max(0.0, base - g_collide_shrink) + g_route_gap;
 }
 fn keepHh(p: Part) f64 {
-    const base = if (p.keep.hw < 0) effHh(p) else (if (isQuarter(p.rot)) p.keep.hw else p.keep.hh);
+    const base = if (p.keep.hw < 0) effHh(p) else pose_math.aabbHalf(p.keep.hw, p.keep.hh, p.rot)[1];
     return @max(0.0, base - g_collide_shrink) + g_route_gap;
 }
 
@@ -7745,7 +8270,7 @@ fn buildEscapeStubs(
         for (net.pins) |pr| {
             const i = idx_of.get(pr.ref_des) orelse continue;
             if (i != pi) continue;
-            const pad = padLocal(parts[i], pr.pin);
+            const pad = padLocal(&parts[i], pr.pin);
             const d = escapeDir(parts[i], pad.x, pad.y);
             try list.append(arena, .{
                 .part = i,
@@ -7853,60 +8378,34 @@ fn objectiveCost(
     const cong = if (params.w_congest != 0) params.w_congest * congestionPenalty(parts, idx_of, nets) else 0;
     return hpwl + params.loop_w * weightedLoop(parts, loops) +
         effAlignW(params) * tidinessPenalty(parts) + cong +
-        constraintCost(parts, idx_of, nets, loops, params);
+        guidanceCost(parts, nets, loops, params);
 }
 
-/// The Phase-A constraint contribution to the *search* objective — added to
-/// `objectiveCost` so SA is steered by the authored intent, but deliberately
-/// absent from `scoreLayout`/`scorePoses`/`routedObjectiveCost` (the reported &
-/// compared metrics). That separation is the whole point: constraints change
-/// where the optimizer looks, not how the result is judged, so a hand layout and
-/// a constrained solve are scored on the identical unmodified physical objective.
-/// Reads the thread's `g_lowered` (set by `prepare`); a no-op when none authored.
-/// Five lowered terms:
-///   • proximity — Σ w·(edge gap from part pad to hub pin pad)
+/// Automatic guidance contribution to the *search* objective. It is deliberately
+/// absent from the reported/compared metrics so it changes where the optimizer
+/// looks without changing how the result is judged. Terms:
 ///   • keep-out  — Σ KEEPOUT_W·max(0, min − courtyard gap)
-///   • net weight — Σ (w−1)·net wirelength  (net-length raises, deprioritize lowers)
-///   • input-loop boost — extra loop inductance weight on a declared input rail
-///     (fires even with an integrated inductor, which the auto switcher test misses)
+///   • input-loop boost — extra loop inductance weight on an inferred input rail
 ///   • group cohesion — Σ group_w·(member→centroid distance) per `(group …)`,
 ///     a per-member pull (force on every member, not just the bbox extremes) —
 ///     the scalar twin of the relaxation force in `accumulateGroupCohesion`
 ///   • group zoning — group_zone_w·(centroid → hub's connecting side)
 ///   • bank-loop relief — removes `group_loop_relief` of the per-cap loop pull for
 ///     caps in a ≥2-member same-rail bank (twin of `g_loop_force_scale`)
-fn constraintCost(
+fn guidanceCost(
     parts: []const Part,
-    idx_of: *std.StringHashMapUnmanaged(usize),
     nets: []const FlatNet,
     loops: []const Loop,
     params: Params,
 ) f64 {
-    const L = g_lowered;
-    // Fast exit when nothing is live (no constraints and no functional groups).
+    const L = g_guidance;
+    // Fast exit when no automatic guidance or functional groups are live.
     if (!L.active) return 0;
     var c: f64 = 0;
 
-    for (L.prox) |t| {
-        const gap = rectGap(worldRect(parts[t.part], t.part_pad), worldRect(parts[t.hub], t.hub_pad));
-        // Hinge: only penalise distance beyond the declared radius (so a part
-        // already inside `max_mm` is left alone, not dragged further at the cost
-        // of other nets). A radius of 0 means "no declared max" → plain pull.
-        const over = if (t.max_mm > 0) @max(0.0, gap - t.max_mm) else gap;
-        c += t.w * over;
-    }
     for (L.keepouts) |k| {
         const g = partGap(parts[k.a], parts[k.b]);
         if (g < k.min_mm) c += keepout_w * (k.min_mm - g);
-    }
-    if (L.net_weight.len == nets.len) {
-        var pts: [max_wire_pts]Pt = undefined;
-        for (nets, 0..) |net, ni| {
-            const extra = L.net_weight[ni] - 1.0;
-            if (extra == 0) continue;
-            if (isGroundName(shortName(net.name))) continue;
-            c += extra * netWire(parts, idx_of, net, &pts);
-        }
     }
     if (L.input_rail.len == nets.len) {
         for (loops) |lp| {
@@ -7963,8 +8462,7 @@ fn constraintCost(
     return c;
 }
 
-/// Edge-to-edge gap (mm) between two parts' rotation-aware courtyards — the
-/// distance a `(keep-out (part …) (from …))` penalises below its `min`.
+/// Edge-to-edge gap (mm) between two parts' rotation-aware courtyards.
 fn partGap(a: Part, b: Part) f64 {
     const ar = Rect{ .x0 = courtCx(a) - effHw(a), .y0 = courtCy(a) - effHh(a), .x1 = courtCx(a) + effHw(a), .y1 = courtCy(a) + effHh(a) };
     const br = Rect{ .x0 = courtCx(b) - effHw(b), .y0 = courtCy(b) - effHh(b), .x1 = courtCx(b) + effHw(b), .y1 = courtCy(b) + effHh(b) };
@@ -8201,7 +8699,7 @@ fn congestionPenalty(parts: []const Part, idx_of: *std.StringHashMapUnmanaged(us
     if (binw <= 1e-6 or binh <= 1e-6) return 0;
     const bin_area = binw * binh;
 
-    var dens = [_]f64{0} ** (congest_bins_max * congest_bins_max);
+    var dens: [(congest_bins_max * congest_bins_max)]f64 = @splat(0);
     for (nets, 0..) |net, net_i| {
         if (isGroundName(shortName(net.name))) continue;
         var nminx: f64 = std.math.inf(f64);
@@ -8211,8 +8709,8 @@ fn congestionPenalty(parts: []const Part, idx_of: *std.StringHashMapUnmanaged(us
         var cnt: usize = 0;
         for (net.pins) |pr| {
             const i = idx_of.get(pr.ref_des) orelse continue;
-            const pad = padLocal(parts[i], pr.pin);
-            const w = worldPt(parts[i], pad.x, pad.y);
+            const pad = padLocal(&parts[i], pr.pin);
+            const w = worldPt(&parts[i], pad.x, pad.y);
             nminx = @min(nminx, w.x);
             nminy = @min(nminy, w.y);
             nmaxx = @max(nmaxx, w.x);
@@ -8383,8 +8881,7 @@ fn buildSprings(
     parts: []const Part,
     idx_of: *std.StringHashMapUnmanaged(usize),
     roles: []const pin_roles.PartRoles,
-    explicit_pin: []const []const u8,
-    rail_optout: []const bool,
+    binds: AuthoredBinds,
 ) std.mem.Allocator.Error!Built {
     const gnd = try groundPads(arena, nets, parts, idx_of, roles);
     var springs: std.ArrayList(Spring) = .empty;
@@ -8399,7 +8896,7 @@ fn buildSprings(
         var multi_hub = false;
         for (net.pins) |pr| {
             const i = idx_of.get(pr.ref_des) orelse continue;
-            const pad = padLocal(parts[i], pr.pin);
+            const pad = padLocal(&parts[i], pr.pin);
             const is_hub = parts[i].kind == .hub;
             if (is_hub) {
                 if (hub_idx) |h| {
@@ -8412,18 +8909,45 @@ fn buildSprings(
 
         const single_hub = hub_idx != null and !multi_hub;
         if (single_hub) {
-            try hugToHub(arena, &springs, &loops, &legs, eps.items, hub_idx.?, gnd, roles, explicit_pin, rail_optout, @intCast(net_i), net.name);
+            try hugToHub(arena, &springs, &loops, &legs, eps.items, hub_idx.?, gnd, roles, binds, @intCast(net_i), net.name);
         } else if (multi_hub) {
             // A rail shared by ≥2 ICs: honour each cap's explicit `(decouples …)`
             // pin binding with a real loop to the hub that owns the named pad,
             // instead of collapsing the whole rail into one weak cluster.
-            try clusterMultiHub(arena, &springs, &loops, eps.items, gnd, roles, explicit_pin, rail_optout, @intCast(net_i), net.name);
+            try clusterMultiHub(arena, &springs, &loops, eps.items, gnd, roles, binds.caps, @intCast(net_i), net.name);
         } else {
             try weakCluster(arena, &springs, eps.items, net.name);
         }
     }
+    // One pad-to-pad hug per authored `(near …)`, at the `k_prox` the inferred
+    // single-hub hug already pulls with — so a declared adjacency survives
+    // relaxation as well as the inference it replaces and the tuned force model
+    // gains no new magnitude. A spring and NOT a `Loop`: a near binding has no
+    // ground return, so there is no loop area, and it must stay out of the
+    // inductance score and out of plane stitching. Both ends are the exact pads
+    // the author named, not a centroid — naming the pad is the point of the form.
+    for (binds.near) |np| {
+        const na_ = padLocal(&parts[np.part], np.own_pin);
+        const nb_ = padLocal(&parts[np.target], np.target_pin);
+        try springs.append(arena, .{
+            .a = np.part,
+            .b = np.target,
+            .ax = na_.x,
+            .ay = na_.y,
+            .bx = nb_.x,
+            .by = nb_.y,
+            .k = k_prox,
+            .kind = .proximity,
+            .net = np.net,
+        });
+    }
     const series = try pairSeriesLegs(arena, legs.items, parts);
-    return .{ .springs = try springs.toOwnedSlice(arena), .loops = try loops.toOwnedSlice(arena), .series = series };
+    return .{
+        .springs = try springs.toOwnedSlice(arena),
+        .loops = try loops.toOwnedSlice(arena),
+        .series = series,
+        .near = binds.near,
+    };
 }
 
 /// One non-decoupling passive leg recorded by `hugToHub` — a candidate half of
@@ -8566,8 +9090,7 @@ fn isInputRailName(name: []const u8) bool {
         },
     };
     const s = buf[0..n];
-    const prefixes = [_][]const u8{ "VIN", "PVIN", "VBUS", "VBAT", "VSYS", "VDCIN", "HVIN" };
-    for (prefixes) |p| if (std.mem.startsWith(u8, s, p)) return true;
+    for (rails_mod.input_rail_prefixes) |p| if (std.mem.startsWith(u8, s, p)) return true;
     // Raw-voltage rail: an optional leading 'V' then an integer ≥ 7 V is an input.
     var t = s;
     if (t.len > 0 and t[0] == 'V') t = t[1..];
@@ -8603,14 +9126,21 @@ fn nearestPad(pads: []const PadRect, to: PadRect) PadRect {
     return best;
 }
 
+/// True when `part` declares a `(near …)` adjacency to `hub` — the one authored
+/// claim that outranks this net's inferred hug and series-leg candidates.
+fn nearBound(near: []const near_bind.NearPair, part: usize, hub: usize) bool {
+    for (near) |np| {
+        if (np.part == part and np.target == hub) return true;
+    }
+    return false;
+}
+
 /// The hub pad whose pin matches `want` (a cap's explicitly-named target pin),
 /// as a footprint-local rect, or null when `want` is empty / not on this net.
 fn findHubPin(eps: []const Endpoint, hub: usize, want: []const u8) ?PadRect {
     if (want.len == 0) return null;
     for (eps) |h| {
-        if (h.idx == hub and std.mem.eql(u8, h.pin, want)) {
-            return .{ .x = h.px, .y = h.py, .w = h.pw, .h = h.ph };
-        }
+        if (h.idx == hub and std.mem.eql(u8, h.pin, want)) return .{ .x = h.px, .y = h.py, .w = h.pw, .h = h.ph };
     }
     return null;
 }
@@ -8627,8 +9157,7 @@ fn hugToHub(
     hub: usize,
     gnd: []const []const PadRect,
     roles: []const pin_roles.PartRoles,
-    explicit_pin: []const []const u8,
-    rail_optout: []const bool,
+    binds: AuthoredBinds,
     net_i: i32,
     net_name: []const u8,
 ) std.mem.Allocator.Error!void {
@@ -8636,9 +9165,14 @@ fn hugToHub(
 
     for (eps) |e| {
         if (e.idx == hub or e.is_hub) continue;
+        // An authored `(near …)` to THIS hub already placed a pad-precise hug on
+        // this part, and is a stronger statement than either inference below:
+        // the centroid hug would double the pull toward the same hub, and a
+        // series pairing would claim a rotation the author did not ask for.
+        if (nearBound(binds.near, e.idx, hub)) continue;
         const decouple = gnd[e.idx].len > 0 and gnd[hub].len > 0;
         if (decouple) {
-            try emitCapLoop(arena, loops, eps, e, hub, tgt, gnd, explicit_pin, rail_optout, net_i);
+            try emitCapLoop(arena, loops, eps, e, hub, tgt, gnd, binds.caps, net_i);
         } else {
             // Non-decoupling single-hub passive: hug the hub's pad centroid.
             try springs.append(arena, .{
@@ -8721,8 +9255,9 @@ fn hubTargets(
 }
 
 /// Append one decoupling cap's hot loop against `hub`. The power leg is pinned to
-/// the cap's named pad (`explicit_pin` — e.g. from `(decouples "IC" PIN)` or a
-/// `(near <pin>)`) when that pad is on this net, else to `tgt.default_pin_rect`;
+/// the cap's named pad (from `(decouples "IC" PIN)` or a `(decouple … per-pin …)`
+/// child's structural key) when the cap names THIS hub — or names no IC — and
+/// that pad is on this net, else to `tgt.default_pin_rect`;
 /// the ground return targets the hub GND pad nearest that power pin. Both targets
 /// are fixed (no per-eval argmin), so loop cost stays continuous in the cap's
 /// position. Caller guarantees both the cap and the hub have a ground pad.
@@ -8734,11 +9269,11 @@ fn emitCapLoop(
     hub: usize,
     tgt: HubTarget,
     gnd: []const []const PadRect,
-    explicit_pin: []const []const u8,
-    rail_optout: []const bool,
+    binds: CapBinds,
     net_i: i32,
 ) std.mem.Allocator.Error!void {
-    const named_rect = findHubPin(eps, hub, explicit_pin[e.idx]);
+    const want = binds.pinFor(e.idx, hub);
+    const named_rect = findHubPin(eps, hub, want);
     const pin_rect = named_rect orelse tgt.default_pin_rect;
     const gnd_rect = nearestPad(gnd[hub], pin_rect);
     try loops.append(arena, .{
@@ -8752,15 +9287,29 @@ fn emitCapLoop(
         .hub_gnd_pin = gnd_rect,
         .pwr_net = net_i,
         // Only an authored, on-this-net pin counts as explicit.
-        .explicit_pin = if (named_rect != null) explicit_pin[e.idx] else "",
-        .rail_optout = rail_optout[e.idx],
+        .explicit_pin = if (named_rect != null) want else "",
+        .rail_optout = binds.optout[e.idx],
     });
 }
 
-/// The hub endpoint that owns pad `want` on this net. A physical pad belongs to
-/// exactly one IC, so the named pin disambiguates which hub a `(decouples …)`
-/// cap binds to on a rail shared by several ICs. Null if no hub matches.
-fn hubOwningPin(eps: []const Endpoint, want: []const u8) ?usize {
+/// The hub endpoint a bound cap belongs to on this net.
+///
+/// When the cap NAMES its IC (`(decouples "IC" PIN)`), that name decides — it is
+/// the one authority that survives a rail landing on two ICs that both carry a
+/// pad of the named number, which pad-string matching resolves by whichever
+/// endpoint the net happens to list first. When it names only a pad (a
+/// `(decouple … per-pin …)` child), the owning hub is recovered from the pad as
+/// before. Null when neither resolves — a cap whose named IC is not on this net
+/// must NOT be peeled into a loop against some other hub; it falls through to
+/// the weak cluster and reads as unbound, which is what the lint is for.
+fn hubForBoundCap(eps: []const Endpoint, binds: CapBinds, cap: usize) ?usize {
+    if (binds.ic[cap].len > 0) {
+        for (eps) |h| {
+            if (h.is_hub and binds.namesHub(cap, h.idx)) return h.idx;
+        }
+        return null;
+    }
+    const want = binds.pin[cap];
     if (want.len == 0) return null;
     for (eps) |h| {
         if (h.is_hub and std.mem.eql(u8, h.pin, want)) return h.idx;
@@ -8783,19 +9332,18 @@ fn clusterMultiHub(
     eps: []const Endpoint,
     gnd: []const []const PadRect,
     roles: []const pin_roles.PartRoles,
-    explicit_pin: []const []const u8,
-    rail_optout: []const bool,
+    binds: CapBinds,
     net_i: i32,
     net_name: []const u8,
 ) std.mem.Allocator.Error!void {
     var rest: std.ArrayList(Endpoint) = .empty;
     for (eps) |e| {
-        const bound = !e.is_hub and gnd[e.idx].len > 0 and explicit_pin[e.idx].len > 0;
+        const bound = !e.is_hub and gnd[e.idx].len > 0 and binds.pin[e.idx].len > 0;
         if (bound) {
-            if (hubOwningPin(eps, explicit_pin[e.idx])) |hub| {
+            if (hubForBoundCap(eps, binds, e.idx)) |hub| {
                 if (gnd[hub].len > 0) {
                     if (try hubTargets(arena, eps, hub, roles)) |tgt| {
-                        try emitCapLoop(arena, loops, eps, e, hub, tgt, gnd, explicit_pin, rail_optout, net_i);
+                        try emitCapLoop(arena, loops, eps, e, hub, tgt, gnd, binds, net_i);
                         continue;
                     }
                 }
@@ -8866,7 +9414,7 @@ fn groundPads(
         if (!isGroundName(shortName(net.name))) continue;
         for (net.pins) |pr| {
             const i = idx_of.get(pr.ref_des) orelse continue;
-            const pad = padLocal(parts[i], pr.pin);
+            const pad = padLocal(&parts[i], pr.pin);
             // A passive's ground pad is always real; only a hub's GND net also
             // carries straps, so only hubs consult their pin roles.
             const cls = if (parts[i].kind == .hub) roles[i].classOf(pr.pin) else .ground;
@@ -8894,7 +9442,7 @@ fn selectGroundPads(arena: std.mem.Allocator, tagged: []const TaggedPad) std.mem
 /// Largest net (pin count) `wireScore` builds the explicit point set for; bigger
 /// nets fall back to the cheap bounding-box HPWL (a power/ground-ish rail where
 /// the looser estimate is fine). Bounds the per-net RMST work at O(n²) ≤ 64².
-const max_wire_pts: usize = 64;
+const max_wire_pts = airwire_geometry.max_wire_points;
 
 /// Signal-net wirelength estimate (ground excluded) — the wirelength part of the
 /// inner-loop objective (`objectiveCost`), split out so it's cheap to re-evaluate.
@@ -8927,8 +9475,8 @@ fn netWire(parts: []const Part, idx_of: *std.StringHashMapUnmanaged(usize), net:
     var cnt: usize = 0;
     for (net.pins) |pr| {
         const i = idx_of.get(pr.ref_des) orelse continue;
-        const pad = padLocal(parts[i], pr.pin);
-        const w = worldPt(parts[i], pad.x, pad.y);
+        const pad = padLocal(&parts[i], pr.pin);
+        const w = worldPt(&parts[i], pad.x, pad.y);
         if (cnt < max_wire_pts) pts[cnt] = w;
         minx = @min(minx, w.x);
         miny = @min(miny, w.y);
@@ -8939,45 +9487,7 @@ fn netWire(parts: []const Part, idx_of: *std.StringHashMapUnmanaged(usize), net:
     if (cnt < 2) return 0;
     // HPWL = RSMT for ≤3 pins (keep the fast path); RMST for the rest.
     if (cnt <= 3 or cnt > max_wire_pts) return (maxx - minx) + (maxy - miny);
-    return rmstLen(pts[0..cnt]);
-}
-
-/// Rectilinear minimum spanning tree length (Prim, Manhattan metric) over `pts`
-/// — a tighter routed-wirelength estimate than the bounding-box HPWL, which
-/// under-estimates nets of degree >3. RMST bounds the rectilinear Steiner
-/// minimal tree from above (RSMT ≤ RMST ≤ 1.5·RSMT) where HPWL bounds it from
-/// below (HPWL ≤ RSMT), so it is the better placement-steering proxy. `pts.len`
-/// is in [2, MAX_WIRE_PTS]; full FLUTE LUTs would tighten this toward exact RSMT.
-fn rmstLen(pts: []const Pt) f64 {
-    const n = pts.len;
-    var in_tree = [_]bool{false} ** max_wire_pts;
-    var best: [max_wire_pts]f64 = undefined;
-    in_tree[0] = true;
-    for (1..n) |i| best[i] = manhattan(pts[0], pts[i]);
-    var total: f64 = 0;
-    var added: usize = 1;
-    while (added < n) : (added += 1) {
-        // Nearest not-yet-connected pin to the current tree.
-        var bj: usize = 0;
-        var bd: f64 = std.math.inf(f64);
-        for (1..n) |j| {
-            if (!in_tree[j] and best[j] < bd) {
-                bd = best[j];
-                bj = j;
-            }
-        }
-        in_tree[bj] = true;
-        total += bd;
-        for (1..n) |k| {
-            if (!in_tree[k]) best[k] = @min(best[k], manhattan(pts[bj], pts[k]));
-        }
-    }
-    return total;
-}
-
-/// Manhattan (rectilinear) distance between two points (mm).
-fn manhattan(a: Pt, b: Pt) f64 {
-    return @abs(a.x - b.x) + @abs(a.y - b.y);
+    return airwire_geometry.rectilinearMstLength(pts[0..cnt]);
 }
 
 /// Signal-net wirelength estimate (`wireScore`) + the decoupling loops' length. The loop term here is
@@ -9000,27 +9510,49 @@ fn scoreLayout(
 /// Spring relaxation: springs + edge-aware decoupling-loop pulls + courtyard
 /// repulsion, with a cooling step.
 fn relax(parts: []Part, springs: []const Spring, loops: []const Loop) void {
+    if (parts.len <= small_force_capacity) {
+        return relaxBounded(small_force_capacity, parts, springs, loops);
+    }
+    return relaxBounded(maxParts, parts, springs, loops);
+}
+
+/// Keep the common small-board scratch footprint proportional to the live part
+/// count. A single 4,096-element instantiation makes Debug paint and touch
+/// almost 200 KiB of stack for a board with only a few dozen parts.
+fn relaxBounded(comptime capacity: usize, parts: []Part, springs: []const Spring, loops: []const Loop) void {
     const n = parts.len;
-    if (n == 0 or n > maxParts) return;
+    if (n == 0 or n > capacity) return;
+    // Canonical pose state for this call. A `Part` carries strings, slices,
+    // footprint features, and immutable geometry; the force loops need only
+    // x/y. Gather once, operate on dense arrays, scatter once on return.
+    var px: [capacity]f64 = undefined;
+    var py: [capacity]f64 = undefined;
+    for (0..n) |i| {
+        px[i] = parts[i].x;
+        py[i] = parts[i].y;
+    }
     // Rotation is fixed across the call, so the keepout boxes are too — compute
     // them once instead of re-deriving per pair per iteration.
-    var boxes: [maxParts]KeepBox = undefined;
+    var boxes: [capacity]KeepBox = undefined;
     fillKeepBoxes(parts, boxes[0..n]);
+    // Keep the fixed-capacity scratch outside the iteration. In Debug, an
+    // `undefined` array declared in the loop is repainted over its full 4096
+    // elements on every pass even though only `n` entries are used.
+    var ax: [capacity]f64 = undefined;
+    var ay: [capacity]f64 = undefined;
     var it: usize = 0;
     while (it < relax_iters) : (it += 1) {
         const cool = 1.0 - @as(f64, @floatFromInt(it)) / @as(f64, @floatFromInt(relax_iters));
         const step = 0.1 + 0.7 * cool;
 
-        var ax: [maxParts]f64 = undefined;
-        var ay: [maxParts]f64 = undefined;
         for (0..n) |i| {
             ax[i] = 0;
             ay[i] = 0;
         }
 
         for (springs) |s| {
-            const aw = worldPt(parts[s.a], s.ax, s.ay);
-            const bw = worldPt(parts[s.b], s.bx, s.by);
+            const aw = worldPtAt(&parts[s.a], px[s.a], py[s.a], s.ax, s.ay);
+            const bw = worldPtAt(&parts[s.b], px[s.b], py[s.b], s.bx, s.by);
             const dx = bw.x - aw.x;
             const dy = bw.y - aw.y;
             ax[s.a] += s.k * dx;
@@ -9029,10 +9561,10 @@ fn relax(parts: []Part, springs: []const Spring, loops: []const Loop) void {
             ay[s.b] -= s.k * dy;
         }
 
-        accumulateLoops(parts, loops, &ax, &ay);
-        accumulateCompaction(parts, &ax, &ay);
-        accumulateGroupCohesion(parts, &ax, &ay);
-        _ = accumulateRepulsion(parts, boxes[0..n], &ax, &ay, 0);
+        accumulateLoops(parts, px[0..n], py[0..n], loops, &ax, &ay);
+        accumulateCompaction(px[0..n], py[0..n], &ax, &ay);
+        accumulateGroupCohesion(parts, px[0..n], py[0..n], &ax, &ay);
+        _ = accumulateRepulsion(px[0..n], py[0..n], boxes[0..n], &ax, &ay, 0);
 
         var maxdisp: f64 = 0;
         for (0..n) |i| {
@@ -9040,8 +9572,8 @@ fn relax(parts: []Part, springs: []const Spring, loops: []const Loop) void {
             const mass = if (parts[i].kind == .hub) hub_mass else passive_mass;
             const dx = clampDisp(step * ax[i] / mass);
             const dy = clampDisp(step * ay[i] / mass);
-            parts[i].x += dx;
-            parts[i].y += dy;
+            px[i] += dx;
+            py[i] += dy;
             maxdisp = @max(maxdisp, @max(@abs(dx), @abs(dy)));
         }
         // The relaxation is damped + cooled, so once the largest per-step move
@@ -9051,13 +9583,18 @@ fn relax(parts: []Part, springs: []const Spring, loops: []const Loop) void {
         // keys on the full ITERS, so the early iterations are unchanged.
         if (maxdisp < relax_converge_mm) break;
     }
+    for (0..n) |i| {
+        parts[i].x = px[i];
+        parts[i].y = py[i];
+    }
 }
 
 /// Pull each decoupling cap so its power and ground pads close on the nearest
 /// hub power / ground pad (edge-to-edge). The force acts along the current
 /// gap vector, so it vanishes once the pads touch — repulsion then sets the
 /// final clearance. This replaces the old centroid power/ground springs.
-fn accumulateLoops(parts: []const Part, loops: []const Loop, ax: []f64, ay: []f64) void {
+fn accumulateLoops(parts: []const Part, px: []const f64, py: []const f64, loops: []const Loop, ax: []f64, ay: []f64) void {
+    const force = ForceFields{ .parts = parts, .px = px, .py = py, .ax = ax, .ay = ay };
     for (loops, 0..) |lp, li| {
         // Bank caps (a ≥2-member same-rail group) get their loop force relieved so
         // the relaxation stops yanking each onto the rail pad — cohesion packs them
@@ -9069,18 +9606,18 @@ fn accumulateLoops(parts: []const Part, loops: []const Loop, ax: []f64, ay: []f6
         // supply pin, ground pad to the nearby ground pin — not the nearest of each.
         const pwr_pin = [_]PadRect{lp.hub_pwr_pin};
         const gnd_pin = [_]PadRect{lp.hub_gnd_pin};
-        accumulateLeg(parts, lp.cap, lp.cap_pwr, lp.hub, &pwr_pin, scale, ax, ay);
-        accumulateLeg(parts, lp.cap, lp.cap_gnd, lp.hub, &gnd_pin, scale, ax, ay);
+        accumulateLeg(force, lp.cap, lp.cap_pwr, lp.hub, &pwr_pin, scale);
+        accumulateLeg(force, lp.cap, lp.cap_gnd, lp.hub, &gnd_pin, scale);
     }
 }
 
 /// Cohesion force: pull every `(group …)` member toward its group's centroid,
-/// the position-space twin of the `constraintCost` cohesion term (which alone
+/// the position-space twin of the `guidanceCost` cohesion term (which alone
 /// can only *select*, not *create*, a tight block — see `g_group_force`). No-op
 /// when no groups are live or the gain is zero.
-fn accumulateGroupCohesion(parts: []const Part, ax: []f64, ay: []f64) void {
-    if (g_group_force <= 0 or !g_lowered.active) return;
-    for (g_lowered.groups) |g| {
+fn accumulateGroupCohesion(parts: []const Part, px: []const f64, py: []const f64, ax: []f64, ay: []f64) void {
+    if (g_group_force <= 0 or !g_guidance.active) return;
+    for (g_guidance.groups) |g| {
         if (g.members.len < 2) continue;
         const inv = 1.0 / @as(f64, @floatFromInt(g.members.len));
         var cx: f64 = 0;
@@ -9092,8 +9629,8 @@ fn accumulateGroupCohesion(parts: []const Part, ax: []f64, ay: []f64) void {
         var anchor: usize = g.members[0];
         var anchor_area: f64 = -1;
         for (g.members) |m| {
-            cx += parts[m].x;
-            cy += parts[m].y;
+            cx += px[m];
+            cy += py[m];
             if (parts[m].kind == .hub and parts[m].hw * parts[m].hh > anchor_area) {
                 anchor_area = parts[m].hw * parts[m].hh;
                 anchor = m;
@@ -9109,15 +9646,15 @@ fn accumulateGroupCohesion(parts: []const Part, ax: []f64, ay: []f64) void {
             const hub = parts[@intCast(g.hub)];
             const d = rotateLocal(g.dirx, g.diry, hub.rot);
             const reach = @abs(d.x) * hub.hw + @abs(d.y) * hub.hh + zone_gap_mm;
-            zone = .{ .x = hub.x + d.x * reach, .y = hub.y + d.y * reach };
+            zone = .{ .x = px[@intCast(g.hub)] + d.x * reach, .y = py[@intCast(g.hub)] + d.y * reach };
         }
         for (g.members) |m| {
             if (anchor_area >= 0 and m == anchor) continue; // keep the IC anchored
-            ax[m] += g_group_force * (cx - parts[m].x);
-            ay[m] += g_group_force * (cy - parts[m].y);
+            ax[m] += g_group_force * (cx - px[m]);
+            ay[m] += g_group_force * (cy - py[m]);
             if (zone) |z| {
-                ax[m] += g_zone_force * (z.x - parts[m].x);
-                ay[m] += g_zone_force * (z.y - parts[m].y);
+                ax[m] += g_zone_force * (z.x - px[m]);
+                ay[m] += g_zone_force * (z.y - py[m]);
             }
         }
     }
@@ -9125,50 +9662,75 @@ fn accumulateGroupCohesion(parts: []const Part, ax: []f64, ay: []f64) void {
 
 /// One loop leg: pull `cap`'s pad toward the nearest of `hub`'s `hub_pads`,
 /// along the edge-to-edge gap vector (no force once touching).
-fn accumulateLeg(
+const ForceFields = struct {
     parts: []const Part,
+    px: []const f64,
+    py: []const f64,
+    ax: []f64,
+    ay: []f64,
+};
+
+fn accumulateLeg(
+    force: ForceFields,
     cap: usize,
     cap_pad: PadRect,
     hub: usize,
     hub_pads: []const PadRect,
     scale: f64,
-    ax: []f64,
-    ay: []f64,
 ) void {
-    const cr = worldRect(parts[cap], cap_pad);
-    const near = nearestHubPad(cr, parts[hub], hub_pads);
+    const cr = worldRectAt(&force.parts[cap], force.px[cap], force.py[cap], cap_pad);
+    const near = nearestHubPadAt(cr, &force.parts[hub], force.px[hub], force.py[hub], hub_pads);
     if (near.gap < 1e-6) return; // touching → loop leg already minimal
     const np = nearestPoints(cr, near.rect);
     const dx = scale * k_decouple * (np.b.x - np.a.x);
     const dy = scale * k_decouple * (np.b.y - np.a.y);
-    ax[cap] += dx;
-    ay[cap] += dy;
-    ax[hub] -= dx;
-    ay[hub] -= dy;
+    force.ax[cap] += dx;
+    force.ay[cap] += dy;
+    force.ax[hub] -= dx;
+    force.ay[hub] -= dy;
 }
 
 /// Repulsion-only passes that fully resolve any courtyard overlap, leaving an
 /// extra `clearance` mm gap between every pair.
 fn legalize(parts: []Part, clearance: f64) void {
+    if (parts.len <= small_force_capacity) {
+        return legalizeBounded(small_force_capacity, parts, clearance);
+    }
+    return legalizeBounded(maxParts, parts, clearance);
+}
+
+fn legalizeBounded(comptime capacity: usize, parts: []Part, clearance: f64) void {
     const n = parts.len;
-    if (n == 0 or n > maxParts) return;
-    var boxes: [maxParts]KeepBox = undefined;
+    if (n == 0 or n > capacity) return;
+    var px: [capacity]f64 = undefined;
+    var py: [capacity]f64 = undefined;
+    for (0..n) |i| {
+        px[i] = parts[i].x;
+        py[i] = parts[i].y;
+    }
+    var boxes: [capacity]KeepBox = undefined;
     fillKeepBoxes(parts, boxes[0..n]);
+    // See `relax`: allocate/paint the maximum-capacity buffers once, then
+    // clear only the live prefix on each pass.
+    var ax: [capacity]f64 = undefined;
+    var ay: [capacity]f64 = undefined;
     var it: usize = 0;
     while (it < legalize_iters) : (it += 1) {
-        var ax: [maxParts]f64 = undefined;
-        var ay: [maxParts]f64 = undefined;
         for (0..n) |i| {
             ax[i] = 0;
             ay[i] = 0;
         }
-        const moved = accumulateRepulsion(parts, boxes[0..n], &ax, &ay, clearance);
+        const moved = accumulateRepulsion(px[0..n], py[0..n], boxes[0..n], &ax, &ay, clearance);
         if (!moved) break;
         for (0..n) |i| {
             if (parts[i].locked) continue; // the free side of a pair absorbs the push
-            parts[i].x += ax[i];
-            parts[i].y += ay[i];
+            px[i] += ax[i];
+            py[i] += ay[i];
         }
+    }
+    for (0..n) |i| {
+        parts[i].x = px[i];
+        parts[i].y = py[i];
     }
 }
 
@@ -9209,20 +9771,20 @@ fn legalizeOnGrid(parts: []Part) void {
 /// Gentle pull of every part toward the cluster centroid. Counteracts the
 /// outward drift that repulsion + pin-hugging produce, keeping the bounding
 /// box (and thus HPWL) compact instead of fanning passives around the hub.
-fn accumulateCompaction(parts: []const Part, ax: []f64, ay: []f64) void {
-    const n = parts.len;
+fn accumulateCompaction(px: []const f64, py: []const f64, ax: []f64, ay: []f64) void {
+    const n = px.len;
     if (n < 2) return;
     var cx: f64 = 0;
     var cy: f64 = 0;
-    for (parts) |p| {
-        cx += p.x;
-        cy += p.y;
+    for (px, py) |x, y| {
+        cx += x;
+        cy += y;
     }
     cx /= @floatFromInt(n);
     cy /= @floatFromInt(n);
-    for (parts, 0..) |p, i| {
-        ax[i] += k_compact * (cx - p.x);
-        ay[i] += k_compact * (cy - p.y);
+    for (px, py, 0..) |x, y, i| {
+        ax[i] += k_compact * (cx - x);
+        ay[i] += k_compact * (cy - y);
     }
 }
 
@@ -9230,25 +9792,26 @@ fn accumulateCompaction(parts: []const Part, ax: []f64, ay: []f64) void {
 /// repulsion inner loop is pure arithmetic. `cxo`/`cyo` are the rotated keepout
 /// centre offset (world centre = `part.x + cxo`); `hw`/`hh` the rotation-aware
 /// half-extents. All four depend only on rotation + footprint, which are fixed
-/// across a relax/legalize call — recomputing `keepCx`/`keepHw` (each a branch
-/// + `isQuarter`'s `@mod`/`@round`) for every pair every iteration was the bulk
+/// across a relax/legalize call — recomputing `keepCx`/`keepHw` for every pair
+/// every iteration was the bulk
 /// of the relaxation's cost. Mirrors `keepCx`/`keepCy`/`keepHw`/`keepHh` exactly.
-const KeepBox = struct { cxo: f64, cyo: f64, hw: f64, hh: f64 };
+const KeepBox = struct { cxo: f64, cyo: f64, hw: f64, hh: f64, side: Side = .top };
 
 fn keepBoxOf(p: Part) KeepBox {
-    const q = isQuarter(p.rot);
     const s = g_collide_shrink; // courtyards may overlap their clearance margins
     const r = g_route_gap; // …or leave extra routing room between them
     if (p.keep.hw < 0) {
         const ccx = if (p.side == .bottom) -p.ccx else p.ccx;
         const coff = rotateLocal(ccx, p.ccy, p.rot);
-        return .{ .cxo = coff.x, .cyo = coff.y, .hw = @max(0.0, (if (q) p.hh else p.hw) - s) + r, .hh = @max(0.0, (if (q) p.hw else p.hh) - s) + r };
+        const ext = pose_math.aabbHalf(p.hw, p.hh, p.rot);
+        return .{ .cxo = coff.x, .cyo = coff.y, .hw = @max(0.0, ext[0] - s) + r, .hh = @max(0.0, ext[1] - s) + r, .side = p.side };
     }
     const kox = if (p.side == .bottom) -p.keep.ox else p.keep.ox;
     const off = rotateLocal(kox, p.keep.oy, p.rot);
-    const hw = @max(0.0, (if (q) p.keep.hh else p.keep.hw) - s) + r;
-    const hh = @max(0.0, (if (q) p.keep.hw else p.keep.hh) - s) + r;
-    return .{ .cxo = off.x, .cyo = off.y, .hw = hw, .hh = hh };
+    const ext = pose_math.aabbHalf(p.keep.hw, p.keep.hh, p.rot);
+    const hw = @max(0.0, ext[0] - s) + r;
+    const hh = @max(0.0, ext[1] - s) + r;
+    return .{ .cxo = off.x, .cyo = off.y, .hw = hw, .hh = hh, .side = p.side };
 }
 
 /// Fill `out[0..parts.len]` with each part's precomputed keepout box.
@@ -9260,18 +9823,18 @@ fn fillKeepBoxes(parts: []const Part, out: []KeepBox) void {
 /// extents, plus a `clearance` margin) along the axis of least penetration.
 /// `boxes[i]` is `parts[i]`'s precomputed keepout (see `fillKeepBoxes`).
 /// Returns true if any pair overlapped.
-fn accumulateRepulsion(parts: []const Part, boxes: []const KeepBox, ax: []f64, ay: []f64, clearance: f64) bool {
-    const n = parts.len;
+fn accumulateRepulsion(px: []const f64, py: []const f64, boxes: []const KeepBox, ax: []f64, ay: []f64, clearance: f64) bool {
+    const n = px.len;
     var any = false;
     var i: usize = 0;
     while (i < n) : (i += 1) {
-        const cxi = parts[i].x + boxes[i].cxo;
-        const cyi = parts[i].y + boxes[i].cyo;
+        const cxi = px[i] + boxes[i].cxo;
+        const cyi = py[i] + boxes[i].cyo;
         var j: usize = i + 1;
         while (j < n) : (j += 1) {
-            if (parts[i].side != parts[j].side) continue;
-            const dx = cxi - (parts[j].x + boxes[j].cxo);
-            const dy = cyi - (parts[j].y + boxes[j].cyo);
+            if (boxes[i].side != boxes[j].side) continue;
+            const dx = cxi - (px[j] + boxes[j].cxo);
+            const dy = cyi - (py[j] + boxes[j].cyo);
             const ox = (boxes[i].hw + boxes[j].hw + clearance) - @abs(dx);
             const oy = (boxes[i].hh + boxes[j].hh + clearance) - @abs(dy);
             if (ox <= 0 or oy <= 0) continue;
@@ -9377,7 +9940,7 @@ fn finalize(
     springs: []const Spring,
     loops: []const Loop,
     stubs: []const Stub,
-    instances: []const export_kicad.FlatInstance,
+    instances: []const flat_netlist.FlatInstance,
     nets: []const FlatNet,
     priority: []const u32,
     score: Score,
@@ -9442,11 +10005,12 @@ fn finalize(
 
 /// Upper bound on parts the stack-allocated force accumulators support.
 /// Modules are tiny; whole boards stay well under this.
+const small_force_capacity: usize = 256;
 const maxParts: usize = 4096;
 
 /// Pad position (origin-relative mm) for `pin` on `part`, or the part
 /// centre (0,0) when the pad isn't in the footprint (e.g. fallback boxes).
-fn padLocal(part: Part, pin: []const u8) geometry.Pad {
+pub fn padLocal(part: *const Part, pin: []const u8) geometry.Pad {
     for (part.pads) |p| {
         if (std.mem.eql(u8, p.number, pin)) return p;
     }
@@ -9462,7 +10026,7 @@ fn isInductor(ref: []const u8) bool {
 
 /// Resolve a flat instance's value string (the `value` field, else a `value`
 /// property), used for value-ordered decoupling. Empty when unknown.
-fn instValue(inst: export_kicad.FlatInstance) []const u8 {
+fn instValue(inst: flat_netlist.FlatInstance) []const u8 {
     if (inst.value.len > 0) return inst.value;
     for (inst.properties) |prop| {
         if (std.mem.eql(u8, prop.key, "value") and prop.value.len > 0) return prop.value;
@@ -9470,65 +10034,25 @@ fn instValue(inst: export_kicad.FlatInstance) []const u8 {
     return "";
 }
 
-/// Parse a capacitance value string ("100nF", "4.7uF", "0.47uF") to farads,
-/// or 0 when it has no recognised metric suffix.
-fn capValueFarads(s: []const u8) f64 {
-    var i: usize = 0;
-    while (i < s.len and (std.ascii.isDigit(s[i]) or s[i] == '.')) i += 1;
-    if (i == 0) return 0;
-    const num = std.fmt.parseFloat(f64, s[0..i]) catch return 0;
-    if (i >= s.len) return 0;
-    const mult: f64 = switch (s[i]) {
-        'p', 'P' => 1e-12,
-        'n', 'N' => 1e-9,
-        'u', 'U' => 1e-6,
-        'm' => 1e-3,
-        else => return 0,
-    };
-    return num * mult;
-}
-
-/// A part is a hub unless its ref-des prefix is a passive (R/C/L/F/D),
-/// mirroring the schematic hub/spoke split. Handles `sub/U1` ref-des.
-fn isHub(ref: []const u8) bool {
-    const s = shortName(ref);
-    if (s.len == 0) return true;
-    return switch (s[0]) {
-        // Passives that hang off a hub, never anchor the layout. 'Y' is a crystal/
-        // oscillator: a 2-pin part wired to an IC's XTAL pins with its own load
-        // caps — treating it as a hub strands an extra anchor that pulls the cap
-        // cluster away from the real IC (see bcuda-mcu-w55rp20).
-        'R', 'C', 'L', 'F', 'D', 'Y' => false,
-        else => true,
-    };
-}
+/// Parse a capacitance value string ("100nF", "4.7uF", "10µF") to farads, or 0
+/// when it has no recognised metric suffix — the ONE parser every decoupling
+/// consumer shares (`decouple_key.capFarads`). The hand-rolled copy this
+/// replaces was the last straggler of that consolidation and had never gained
+/// the UTF-8 micro-sign branch, so a `10µF` reservoir read as 0 F: it sorted as
+/// a non-capacitor in the criticality order below and contributed nothing to
+/// the bulk-cap reference the vref scan takes.
+const capValueFarads = decouple_key.capFarads;
 
 /// True when `name` (already leaf-stripped) is a ground rail. Public so the
 /// router (`router.zig`) shares the exact same predicate — the two used to keep
 /// hand-copied lists and the router's drifted, routing numbered/split grounds as
 /// signal copper.
-pub fn isGroundName(name: []const u8) bool {
-    // A ground rail is one of these tokens, optionally with a *numbered* suffix
-    // (GND1, GND2, AGND2, VSS1, PGND_2 on a multi-ground part) — an exact-match list
-    // missed numbered grounds, so on an isolated/split-ground part those nets read
-    // as *signal*, corrupting loop detection, rail direction, and scoring. The
-    // suffix must be (an optional single '_'/'-' then) all digits, so a real signal
-    // like GND_SENSE / GNDSW stays a signal. Longer tokens first so e.g. GNDA isn't
-    // shadowed by GND.
-    const tokens = [_][]const u8{ "GNDA", "GNDD", "AGND", "PGND", "DGND", "VSSA", "GND", "VSS" };
-    for (tokens) |t| {
-        if (!std.mem.startsWith(u8, name, t)) continue;
-        var rest = name[t.len..];
-        if (rest.len == 0) return true;
-        if (rest[0] == '_' or rest[0] == '-') rest = rest[1..];
-        if (rest.len == 0) return false; // bare separator, no number
-        for (rest) |c| {
-            if (!std.ascii.isDigit(c)) return false;
-        }
-        return true;
-    }
-    return false;
-}
+///
+/// The body lives beside its token table in `eval/net_analysis.zig` because the
+/// modules the optimizer itself imports (`critical_rough`, `pin_roles`) cannot
+/// import it back, and one of them was re-deriving the predicate and drifting the
+/// same way the router had. This spelling stays the one every consumer calls.
+pub const isGroundName = net_analysis.isGroundName;
 
 /// Last path segment of a `parent/child` ref-des or net name.
 fn shortName(s: []const u8) []const u8 {
@@ -9568,10 +10092,31 @@ test "isGroundName matches common ground rails" {
     try testing.expect(!isGroundName("VINGND")); // doesn't start with a ground token
 }
 
+// spec: placement/optimizer - decoupling criticality reads capacitance through the shared parser, so a micro-sign value ranks as the bulk cap it is
+test "member order ranks a micro-sign bulk cap ahead of a resistor" {
+    // Three members of one block: an HF bypass, a bulk reservoir spelled with
+    // the UTF-8 micro sign, and a feedback resistor. The hand-rolled parser this
+    // path used had no `µ` branch, so `10µF` read as 0 F — indistinguishable
+    // from the resistor, and sorted behind it on ref-des alone.
+    var parts = [_]Part{
+        .{ .ref_des = "R_FB", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &.{}, .fallback = false, .value = "10k" },
+        .{ .ref_des = "Z_CBULK", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false, .value = "10µF" },
+        .{ .ref_des = "A_CHF", .kind = .passive, .hw = 0.25, .hh = 0.25, .pads = &.{}, .fallback = false, .value = "100nF" },
+    };
+    const members = [_]usize{ 0, 1, 2 };
+    const order = try orderMembers(testing.allocator, &members, &parts, &.{});
+    defer testing.allocator.free(order);
+
+    // Smallest capacitance first (the HF cap owns the pin), then the µF bulk,
+    // and only then the non-capacitor.
+    try testing.expectEqualSlices(usize, &[_]usize{ 2, 1, 0 }, order);
+    try testing.expect(capValueFarads("10µF") >= decouple_key.bulk_farads);
+}
+
 // spec: placement/optimizer - board rules resolve declared pours by outer face and plane membership by net name
 test "BoardRules pour/plane lookups" {
     const planes = [_]PlaneAt{ .{ .index = 2, .net = "GND" }, .{ .index = 3, .net = "PWR" } };
-    const four = BoardRules{ .plane_nets = &.{}, .copper_layers = 4, .planes = &planes };
+    const four = BoardRules{ .plane_nets = &.{}, .copper_layers = 4, .planes = .{ .declared = &planes } };
     // Inner planes carry their nets (leaf + case-insensitive) but pour no outer face.
     try testing.expect(four.carriesPlane("GND"));
     try testing.expect(four.carriesPlane("pwr/gnd"));
@@ -9581,13 +10126,13 @@ test "BoardRules pour/plane lookups" {
 
     // (stackup 2 (pour bottom "GND")): index 2 IS the bottom outer face.
     const bot = [_]PlaneAt{.{ .index = 2, .net = "GND" }};
-    const two = BoardRules{ .plane_nets = &.{}, .copper_layers = 2, .planes = &bot };
+    const two = BoardRules{ .plane_nets = &.{}, .copper_layers = 2, .planes = .{ .declared = &bot } };
     try testing.expect(two.pourNetOnSide(.top) == null);
     try testing.expectEqualStrings("GND", two.pourNetOnSide(.bottom).?);
 
     // Index 1 is the top face; a 1-layer stack has no bottom face at all.
     const top = [_]PlaneAt{.{ .index = 1, .net = "GND" }};
-    const one = BoardRules{ .plane_nets = &.{}, .copper_layers = 1, .planes = &top };
+    const one = BoardRules{ .plane_nets = &.{}, .copper_layers = 1, .planes = .{ .declared = &top } };
     try testing.expectEqualStrings("GND", one.pourNetOnSide(.top).?);
     try testing.expect(one.pourNetOnSide(.bottom) == null);
 }
@@ -9612,13 +10157,13 @@ test "BoardRules signal-layer derivation across stackups" {
 
     // (stackup 4 (plane 2 "GND") (plane 3 "PWR")): both inners are planes — 2 signal.
     const full4 = [_]PlaneAt{ .{ .index = 2, .net = "GND" }, .{ .index = 3, .net = "PWR" } };
-    const four_planes = BoardRules{ .plane_nets = &.{}, .copper_layers = 4, .planes = &full4 };
+    const four_planes = BoardRules{ .plane_nets = &.{}, .copper_layers = 4, .planes = .{ .declared = &full4 } };
     try testing.expectEqual(@as(u8, 2), four_planes.signalLayerCount());
 
     // (stackup 4 (plane 2 "GND")): L3 is a free inner — 3 signal layers, and
     // signal index 2 maps to stack index 3 = In2.Cu.
     const one4 = [_]PlaneAt{.{ .index = 2, .net = "GND" }};
-    const four_one = BoardRules{ .plane_nets = &.{}, .copper_layers = 4, .planes = &one4 };
+    const four_one = BoardRules{ .plane_nets = &.{}, .copper_layers = 4, .planes = .{ .declared = &one4 } };
     try testing.expectEqual(@as(u8, 3), four_one.signalLayerCount());
     try testing.expectEqual(@as(u8, 3), four_one.signalStackIndex(2));
     try testing.expectEqual(@as(u8, 4), four_one.signalStackIndex(1));
@@ -9627,7 +10172,7 @@ test "BoardRules signal-layer derivation across stackups" {
     // (stackup 6 (plane 2 "GND") (plane 5 "3V3")): inners 3+4 free — 4 signal;
     // signal 2 → stack 3 (In2.Cu), signal 3 → stack 4 (In3.Cu).
     const six = [_]PlaneAt{ .{ .index = 2, .net = "GND" }, .{ .index = 5, .net = "3V3" } };
-    const six_two = BoardRules{ .plane_nets = &.{}, .copper_layers = 6, .planes = &six };
+    const six_two = BoardRules{ .plane_nets = &.{}, .copper_layers = 6, .planes = .{ .declared = &six } };
     try testing.expectEqual(@as(u8, 4), six_two.signalLayerCount());
     try testing.expectEqual(@as(u8, 3), six_two.signalStackIndex(2));
     try testing.expectEqual(@as(u8, 4), six_two.signalStackIndex(3));
@@ -9635,7 +10180,7 @@ test "BoardRules signal-layer derivation across stackups" {
 
     // An OUTER pour never removes a routable face: (stackup 2 (pour bottom "GND")).
     const pourb = [_]PlaneAt{.{ .index = 2, .net = "GND" }};
-    const two_pour = BoardRules{ .plane_nets = &.{}, .copper_layers = 2, .planes = &pourb };
+    const two_pour = BoardRules{ .plane_nets = &.{}, .copper_layers = 2, .planes = .{ .declared = &pourb } };
     try testing.expectEqual(@as(u8, 2), two_pour.signalLayerCount());
 
     // Colours: the outer pair stays red/blue (KiCad F.Cu/B.Cu); inners cycle
@@ -9644,6 +10189,33 @@ test "BoardRules signal-layer derivation across stackups" {
     try testing.expectEqualStrings("#4D7FC4", signalLayerColor(1));
     try testing.expectEqualStrings("#C2C200", signalLayerColor(2));
     try testing.expectEqualStrings("#C200C2", signalLayerColor(3));
+}
+
+// spec: placement/optimizer - resolves a copper-layer name to its routable signal-layer index, rejecting junk and plane-claimed inner names
+test "signalIndexOfName inverts signalLayerName and rejects non-signal names" {
+    // The barracuda case: (stackup 4 (plane 2 "GND") (pour top) (pour bottom)) —
+    // In1 (stack 2) is the GND plane, In2 (stack 3) is a free inner signal layer.
+    const planes = [_]PlaneAt{
+        .{ .index = 1, .net = "GND" },
+        .{ .index = 2, .net = "GND" },
+        .{ .index = 4, .net = "GND" },
+    };
+    const rules = BoardRules{ .plane_nets = &.{"GND"}, .copper_layers = 4, .planes = .{ .declared = &planes } };
+    // Outer faces resolve to their sidecar indices; the free inner In2.Cu → 2.
+    try testing.expectEqual(@as(?u8, 0), rules.signalIndexOfName("F.Cu"));
+    try testing.expectEqual(@as(?u8, 1), rules.signalIndexOfName("B.Cu"));
+    try testing.expectEqual(@as(?u8, 2), rules.signalIndexOfName("In2.Cu"));
+    // Case-insensitive, matching the router/import name lookups.
+    try testing.expectEqual(@as(?u8, 2), rules.signalIndexOfName("in2.cu"));
+    // In1.Cu is claimed by the GND plane → not a routable signal layer → null.
+    try testing.expectEqual(@as(?u8, null), rules.signalIndexOfName("In1.Cu"));
+    // A junk / non-copper name → null.
+    try testing.expectEqual(@as(?u8, null), rules.signalIndexOfName("Edge.Cuts"));
+    try testing.expectEqual(@as(?u8, null), rules.signalIndexOfName("In9.Cu"));
+    // A legacy 2-layer board resolves only the outer pair.
+    const two = BoardRules{ .plane_nets = &.{}, .copper_layers = 2 };
+    try testing.expectEqual(@as(?u8, 0), two.signalIndexOfName("F.Cu"));
+    try testing.expectEqual(@as(?u8, null), two.signalIndexOfName("In1.Cu"));
 }
 
 // spec: placement/optimizer - legalization separates two overlapping courtyards
@@ -9659,8 +10231,8 @@ test "legalize removes overlap between two parts" {
     try testing.expect(dx >= (parts[0].hw + parts[1].hw) - 1e-2 or dy >= (parts[0].hh + parts[1].hh) - 1e-2);
 }
 
-// spec: placement/optimizer - rotates footprint-local offsets in right-angle steps matching the page
-test "rotateLocal applies exact right-angle turns" {
+// spec: placement/optimizer - rotates footprint-local offsets at editor-authored 45-degree poses
+test "world transforms support exact right angles and editor 45-degree poses" {
     const r90 = rotateLocal(1, 0, 90);
     try testing.expectApproxEqAbs(@as(f64, 0), r90.x, 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 1), r90.y, 1e-12);
@@ -9670,6 +10242,10 @@ test "rotateLocal applies exact right-angle turns" {
     const p = Part{ .ref_des = "C1", .kind = .passive, .hw = 2, .hh = 1, .pads = &.{}, .fallback = true, .rot = 90 };
     try testing.expectEqual(@as(f64, 1), effHw(p));
     try testing.expectEqual(@as(f64, 2), effHh(p));
+
+    const angled = Part{ .ref_des = "J1", .kind = .hub, .hw = 2, .hh = 1, .pads = &.{}, .fallback = false, .x = 10, .y = 20, .rot = 45 };
+    const pad = worldPadCenter(&angled, 2, 0);
+    try testing.expectApproxEqAbs(@as(f64, 10) + @sqrt(2.0), pad[0], 1e-12);
 }
 
 // spec: placement/optimizer - rotation refine picks the orientation that shortens the decoupling loop
@@ -9724,8 +10300,8 @@ test "buildEscapeStubs reserves a corridor for unaccounted single-component nets
         .{ .ref_des = "R1", .kind = .passive, .hw = 1, .hh = 0.5, .pads = &pads_r, .fallback = false },
         .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false },
     };
-    const rfin = [_]export_kicad.FlatPin{.{ .ref_des = "R1", .pin = "2" }};
-    const sig = [_]export_kicad.FlatPin{ .{ .ref_des = "R1", .pin = "1" }, .{ .ref_des = "U1", .pin = "1" } };
+    const rfin = [_]flat_netlist.FlatPin{.{ .ref_des = "R1", .pin = "2" }};
+    const sig = [_]flat_netlist.FlatPin{ .{ .ref_des = "R1", .pin = "1" }, .{ .ref_des = "U1", .pin = "1" } };
     const nets = [_]FlatNet{ .{ .name = "RFIN", .pins = &rfin }, .{ .name = "SIG", .pins = &sig } };
 
     var idx = std.StringHashMapUnmanaged(usize).empty;
@@ -9770,12 +10346,12 @@ test "buildSprings honours explicit decoupling bindings on a multi-hub rail" {
         .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.3, .pads = &cap_pads, .fallback = false },
         .{ .ref_des = "C2", .kind = .passive, .hw = 0.5, .hh = 0.3, .pads = &cap_pads, .fallback = false },
     };
-    const vdd = [_]export_kicad.FlatPin{
+    const vdd = [_]flat_netlist.FlatPin{
         .{ .ref_des = "U1", .pin = "5" }, .{ .ref_des = "U1", .pin = "15" },
         .{ .ref_des = "U2", .pin = "8" }, .{ .ref_des = "C1", .pin = "1" },
         .{ .ref_des = "C2", .pin = "1" },
     };
-    const gnd_net = [_]export_kicad.FlatPin{
+    const gnd_net = [_]flat_netlist.FlatPin{
         .{ .ref_des = "U1", .pin = "81" }, .{ .ref_des = "U2", .pin = "4" },
         .{ .ref_des = "C1", .pin = "2" },  .{ .ref_des = "C2", .pin = "2" },
     };
@@ -9791,9 +10367,12 @@ test "buildSprings honours explicit decoupling bindings on a multi-hub rail" {
 
     const roles = [_]pin_roles.PartRoles{ .{}, .{}, .{}, .{} };
     const explicit = [_][]const u8{ "", "", "5", "8" };
+    const explicit_ic = [_][]const u8{ "", "", "", "" };
     const optout = [_]bool{ false, false, false, false };
+    const part_refs = [_][]const u8{ "U1", "U2", "C1", "C2" };
+    const binds = CapBinds{ .ref_des = &part_refs, .pin = &explicit, .ic = &explicit_ic, .optout = &optout };
 
-    const built = try buildSprings(arena, &nets, &parts, &idx, &roles, &explicit, &optout);
+    const built = try buildSprings(arena, &nets, &parts, &idx, &roles, .{ .caps = binds });
 
     try testing.expectEqual(@as(usize, 2), built.loops.len);
     var saw_u1 = false;
@@ -9812,6 +10391,84 @@ test "buildSprings honours explicit decoupling bindings on a multi-hub rail" {
         }
     }
     try testing.expect(saw_u1 and saw_u2);
+}
+
+// spec: placement/optimizer - a bypass cap on a rail shared by several ICs loops to the IC its binding names, not the first part carrying that pad number
+test "a decoupling binding selects its hub by ref when two ICs share a pad number" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // VDD lands on U1 and U2, and BOTH carry a pad numbered "5" on it — the
+    // ordinary case for two same-family ICs on one rail. Pad-string matching
+    // alone answers "U1" for every cap, because U1 is listed first.
+    const hub_pads = [_]geometry.Pad{
+        .{ .number = "5", .x = 0, .y = 0, .w = 0.3, .h = 0.3 },
+        .{ .number = "9", .x = 0, .y = -1, .w = 0.3, .h = 0.3 },
+    };
+    const cap_pads = [_]geometry.Pad{
+        .{ .number = "1", .x = -0.4, .y = 0, .w = 0.3, .h = 0.3 },
+        .{ .number = "2", .x = 0.4, .y = 0, .w = 0.3, .h = 0.3 },
+    };
+    const parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &hub_pads, .fallback = false, .x = -10 },
+        .{ .ref_des = "U2", .kind = .hub, .hw = 1, .hh = 1, .pads = &hub_pads, .fallback = false, .x = 10 },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.3, .pads = &cap_pads, .fallback = false },
+    };
+    const vdd = [_]flat_netlist.FlatPin{
+        .{ .ref_des = "U1", .pin = "5" }, .{ .ref_des = "U2", .pin = "5" },
+        .{ .ref_des = "C1", .pin = "1" },
+    };
+    const gnd_net = [_]flat_netlist.FlatPin{
+        .{ .ref_des = "U1", .pin = "9" }, .{ .ref_des = "U2", .pin = "9" },
+        .{ .ref_des = "C1", .pin = "2" },
+    };
+    const nets = [_]FlatNet{
+        .{ .name = "VDD", .pins = &vdd },
+        .{ .name = "GND", .pins = &gnd_net },
+    };
+    var idx = std.StringHashMapUnmanaged(usize).empty;
+    try idx.put(arena, "U1", 0);
+    try idx.put(arena, "U2", 1);
+    try idx.put(arena, "C1", 2);
+    const roles = [_]pin_roles.PartRoles{ .{}, .{}, .{} };
+    const pins = [_][]const u8{ "", "", "5" };
+    const optout = [_]bool{ false, false, false };
+
+    // Named IC = U2, the SECOND hub on the net. The loop must be against U2.
+    const ics_u2 = [_][]const u8{ "", "", "U2" };
+    const built_u2 = try buildSprings(arena, &nets, &parts, &idx, &roles, .{ .caps = .{
+        .ref_des = &[_][]const u8{ "U1", "U2", "C1" },
+        .pin = &pins,
+        .ic = &ics_u2,
+        .optout = &optout,
+    } });
+    try testing.expectEqual(@as(usize, 1), built_u2.loops.len);
+    try testing.expectEqual(@as(usize, 1), built_u2.loops[0].hub);
+    try testing.expectEqualStrings("5", built_u2.loops[0].explicit_pin);
+
+    // Naming no IC keeps the historical pad-only answer (the first hub owning
+    // that pad), so a `(decouple … per-pin …)` child is unaffected.
+    const ics_none = [_][]const u8{ "", "", "" };
+    const built_none = try buildSprings(arena, &nets, &parts, &idx, &roles, .{ .caps = .{
+        .ref_des = &[_][]const u8{ "U1", "U2", "C1" },
+        .pin = &pins,
+        .ic = &ics_none,
+        .optout = &optout,
+    } });
+    try testing.expectEqual(@as(usize, 1), built_none.loops.len);
+    try testing.expectEqual(@as(usize, 0), built_none.loops[0].hub);
+
+    // Naming an IC that is NOT on this rail binds nothing rather than guessing:
+    // the cap weak-clusters and reads as unbound, which the lint reports.
+    const ics_absent = [_][]const u8{ "", "", "U7" };
+    const built_absent = try buildSprings(arena, &nets, &parts, &idx, &roles, .{ .caps = .{
+        .ref_des = &[_][]const u8{ "U1", "U2", "C1" },
+        .pin = &pins,
+        .ic = &ics_absent,
+        .optout = &optout,
+    } });
+    try testing.expectEqual(@as(usize, 0), built_absent.loops.len);
 }
 
 // spec: placement/optimizer - loop legs measure edge-to-edge to the nearest hub pad
@@ -9871,20 +10528,6 @@ test "selectGroundPads prefers real grounds, then non-straps, then anything" {
         defer testing.allocator.free(out);
         try testing.expectEqual(@as(usize, 1), out.len);
     }
-}
-
-// spec: placement/optimizer - multi-pin wirelength uses the rectilinear MST, which equals span when collinear and exceeds HPWL otherwise
-test "rmstLen is exact on collinear pins and tightens above HPWL for a 4-pin net" {
-    // Collinear pins: the MST is just the span, which also equals HPWL.
-    const line = [_]Pt{ .{ .x = 0, .y = 0 }, .{ .x = 1, .y = 0 }, .{ .x = 2, .y = 0 }, .{ .x = 3, .y = 0 } };
-    try testing.expectApproxEqAbs(@as(f64, 3.0), rmstLen(&line), 1e-12);
-
-    // Unit square: MST is 3 edges of length 1 (= 3.0); HPWL is only 2.0, so the
-    // RMST is the strictly larger — and more faithful — multi-pin estimate.
-    const square = [_]Pt{ .{ .x = 0, .y = 0 }, .{ .x = 1, .y = 0 }, .{ .x = 0, .y = 1 }, .{ .x = 1, .y = 1 } };
-    const hpwl: f64 = 2.0; // (maxx-minx) + (maxy-miny)
-    try testing.expectApproxEqAbs(@as(f64, 3.0), rmstLen(&square), 1e-12);
-    try testing.expect(rmstLen(&square) > hpwl);
 }
 
 // spec: placement/optimizer - loop inductance floors at the via mounting inductance and rises with conductor length
@@ -9974,6 +10617,30 @@ test "isInputRailName flags switching input rails, not outputs" {
     try testing.expect(!isInputRailName("GND"));
 }
 
+// spec: placement/power-routing - board rules derive the worst-layer trace width and one-barrel drill from maximum rail load
+test "board power geometry follows stack foil and via plating" {
+    const foils = [_]impedance.Foil{
+        .{ .index = 1, .thickness_mm = 0.035 },
+        .{ .index = 2, .thickness_mm = 0.0152 },
+        .{ .index = 3, .thickness_mm = 0.0152 },
+        .{ .index = 4, .thickness_mm = 0.035 },
+    };
+    const rails = [_]power_budget.Rail{.{
+        .net = "V_3V3_LMX",
+        .load_max_a = 0.34,
+        .any_max_load = true,
+        .status = .no_source,
+    }};
+    const rules = BoardRules{ .physical = .{
+        .via_plating_mm = 0.020,
+        .stack = .{ .layers = 4, .foils = &foils },
+        .rails = &rails,
+    } };
+    const width = rules.powerWidthForNet("V_3V3_LMX").?;
+    try testing.expect(width > 0.40 and width < 0.42);
+    try testing.expect(rules.powerViaDrillForNet("V_3V3_LMX").? < 0.2);
+}
+
 // spec: placement/optimizer - routing congestion is zero with no multi-pin nets and positive when nets pile into one region
 test "congestionPenalty fires only on dense regions" {
     const pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.2, .h = 0.2 }};
@@ -9989,14 +10656,14 @@ test "congestionPenalty fires only on dense regions" {
     for (parts, 0..) |p, i| try idx_of.put(testing.allocator, p.ref_des, i);
 
     // No multi-pin signal net → zero congestion.
-    const lone = [_]export_kicad.FlatPin{.{ .ref_des = "A", .pin = "1" }};
+    const lone = [_]flat_netlist.FlatPin{.{ .ref_des = "A", .pin = "1" }};
     const empty_nets = [_]FlatNet{.{ .name = "NET1", .pins = &lone }};
     try testing.expectEqual(@as(f64, 0), congestionPenalty(&parts, &idx_of, &empty_nets));
 
     // Three nets each spanning the small board overlap in the centre → congested.
-    const ab = [_]export_kicad.FlatPin{ .{ .ref_des = "A", .pin = "1" }, .{ .ref_des = "B", .pin = "1" } };
-    const cd = [_]export_kicad.FlatPin{ .{ .ref_des = "C", .pin = "1" }, .{ .ref_des = "D", .pin = "1" } };
-    const ad = [_]export_kicad.FlatPin{ .{ .ref_des = "A", .pin = "1" }, .{ .ref_des = "B", .pin = "1" } };
+    const ab = [_]flat_netlist.FlatPin{ .{ .ref_des = "A", .pin = "1" }, .{ .ref_des = "B", .pin = "1" } };
+    const cd = [_]flat_netlist.FlatPin{ .{ .ref_des = "C", .pin = "1" }, .{ .ref_des = "D", .pin = "1" } };
+    const ad = [_]flat_netlist.FlatPin{ .{ .ref_des = "A", .pin = "1" }, .{ .ref_des = "B", .pin = "1" } };
     const dense_nets = [_]FlatNet{
         .{ .name = "N1", .pins = &ab },
         .{ .name = "N2", .pins = &cd },
@@ -10024,16 +10691,16 @@ test "bankLoopScale relieves only caps in a >=2-member same-rail bank" {
     };
     const members = [_]usize{ 1, 2, 3 };
     const groups = [_]GroupTerm{.{ .members = &members }};
-    const lowered = Lowered{ .groups = &groups, .active = true };
+    const guidance = PlacementGuidance{ .groups = &groups, .active = true };
 
-    const scale = try bankLoopScale(testing.allocator, &loops, lowered, 0.5);
+    const scale = try bankLoopScale(testing.allocator, &loops, guidance, 0.5);
     defer testing.allocator.free(@constCast(scale));
     try testing.expectApproxEqAbs(@as(f64, 0.5), scale[0], 1e-9); // bank cap
     try testing.expectApproxEqAbs(@as(f64, 0.5), scale[1], 1e-9); // bank cap
     try testing.expectApproxEqAbs(@as(f64, 1.0), scale[2], 1e-9); // lone cap → no relief
 
     // relief = 0 ⇒ every entry stays 1.0 (the feature is off).
-    const off = try bankLoopScale(testing.allocator, &loops, lowered, 0);
+    const off = try bankLoopScale(testing.allocator, &loops, guidance, 0);
     defer testing.allocator.free(@constCast(off));
     for (off) |s| try testing.expectApproxEqAbs(@as(f64, 1.0), s, 1e-9);
 }
@@ -10048,16 +10715,18 @@ test "accumulateGroupCohesion pulls members in and keeps the hub anchored" {
     const members = [_]usize{ 0, 1, 2 };
     const groups = [_]GroupTerm{.{ .members = &members }};
 
-    g_lowered = .{ .groups = &groups, .active = true };
+    g_guidance = .{ .groups = &groups, .active = true };
     g_group_force = 0.4;
     g_zone_force = 0;
     defer {
-        g_lowered = .{};
+        g_guidance = .{};
         g_group_force = 0;
     }
     var ax = [_]f64{ 0, 0, 0 };
     var ay = [_]f64{ 0, 0, 0 };
-    accumulateGroupCohesion(&parts, &ax, &ay);
+    const px = [_]f64{ parts[0].x, parts[1].x, parts[2].x };
+    const py = [_]f64{ parts[0].y, parts[1].y, parts[2].y };
+    accumulateGroupCohesion(&parts, &px, &py, &ax, &ay);
     // Centroid is at x=0 (the IC). The left cap is pulled right (+), the right cap
     // left (−); the IC (largest hub = anchor) gets no force.
     try testing.expect(ax[1] > 0);
@@ -10208,7 +10877,7 @@ test "autofillUnlisted places a staged part beside its net" {
     try idx_of.put(arena, "U1", 0);
     try idx_of.put(arena, "C1", 1);
     try idx_of.put(arena, "C9", 2);
-    const vin_pins = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "C9", .pin = "1" } };
+    const vin_pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "C9", .pin = "1" } };
     const nets = [_]FlatNet{.{ .name = "VIN", .pins = &vin_pins }};
     var springs = [_]Spring{};
     var loops = [_]Loop{};
@@ -10252,12 +10921,12 @@ test "packBoard docks edges and corners on the outline" {
     try idx_of.put(arena, "U1", 0);
     try idx_of.put(arena, "J1", 1);
     try idx_of.put(arena, "MK1", 2);
-    const instances = [_]export_kicad.FlatInstance{
+    const instances = [_]flat_netlist.FlatInstance{
         .{ .ref_des = "U1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
         .{ .ref_des = "J1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
         .{ .ref_des = "MK1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
     };
-    const net_pins = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "J1", .pin = "1" } };
+    const net_pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "J1", .pin = "1" } };
     const nets = [_]FlatNet{.{ .name = "SIG", .pins = &net_pins }};
     const left_items = [_]env.PlacementItem{.{ .ref = "J1" }};
     const sides = [_]env.PlacementSideSpec{.{ .side = .left, .items = &left_items }};
@@ -10265,7 +10934,7 @@ test "packBoard docks edges and corners on the outline" {
     const spec = env.BoardSpec{ .w = 20, .h = 20, .sides = &sides, .corners = &corners, .present = true };
     g_placement_diag = .{};
     defer g_placement_diag = .{};
-    const rect = try packBoard(arena, &parts, &instances, &idx_of, &nets, spec);
+    const rect = try packBoard(arena, &parts, &instances, &idx_of, &nets, .{ .board = spec });
     // The outline shifts left of the interior centre (U1 at the origin) so the
     // interior centres in the region the left edge's dock lane (2*hw(J1) +
     // gap = 5mm) leaves free: minx = -10 - 5/2, grid-rounded (lands exactly
@@ -10275,6 +10944,7 @@ test "packBoard docks edges and corners on the outline" {
     // J1 flush inside the left edge (keepout hw 2 -> centre at minx+2), pads
     // inward (rot 0), slid opposite its attachment (U1 at y 0).
     try testing.expectApproxEqAbs(rect.minx + 2, parts[1].x, 1e-9);
+    try testing.expectApproxEqAbs(rect.minx, parts[1].x - parts[1].hw, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 0), parts[1].y, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 0), parts[1].rot, 1e-9);
     // MK1 pinned at the top-left corner, inset by its keepout extents.
@@ -10283,6 +10953,44 @@ test "packBoard docks edges and corners on the outline" {
     // The corner name that resolves to nothing is reported, not dropped.
     try testing.expectEqual(@as(usize, 1), g_placement_diag.unresolved.len);
     try testing.expectEqualStrings("NOPE", g_placement_diag.unresolved[0]);
+}
+
+test "dockEdgePart keeps every side flush with the board outline" {
+    var parts = [_]Part{.{
+        .ref_des = "J1",
+        .kind = .hub,
+        .hw = 2,
+        .hh = 1.5,
+        .pads = &.{},
+        .fallback = true,
+    }};
+    const entry = EdgeEntry{ .pi = 0, .want = 0, .half = 1.5, .signal_pad = null, .auto_rot = false };
+    const rect = BoardRect{ .minx = -12.5, .miny = -10, .w = 20, .h = 20 };
+
+    dockEdgePart(&parts, entry, 0, .left, true, .{ .rect = rect });
+    var kb = keepBoxOf(parts[0]);
+    try testing.expectApproxEqAbs(rect.minx, parts[0].x + kb.cxo - kb.hw, 1e-9);
+
+    dockEdgePart(&parts, entry, 0, .right, true, .{ .rect = rect });
+    kb = keepBoxOf(parts[0]);
+    try testing.expectApproxEqAbs(rect.minx + rect.w, parts[0].x + kb.cxo + kb.hw, 1e-9);
+
+    dockEdgePart(&parts, entry, 0, .top, false, .{ .rect = rect });
+    kb = keepBoxOf(parts[0]);
+    try testing.expectApproxEqAbs(rect.miny, parts[0].y + kb.cyo - kb.hh, 1e-9);
+
+    dockEdgePart(&parts, entry, 0, .bottom, false, .{ .rect = rect });
+    kb = keepBoxOf(parts[0]);
+    try testing.expectApproxEqAbs(rect.miny + rect.h, parts[0].y + kb.cyo + kb.hh, 1e-9);
+}
+
+test "dockEdgePart honors authored component edge inset" {
+    var parts = [_]Part{.{ .ref_des = "J1", .kind = .hub, .hw = 2, .hh = 1.5, .pads = &.{}, .fallback = true }};
+    const entry = EdgeEntry{ .pi = 0, .want = 0, .half = 1.5, .signal_pad = null, .auto_rot = false };
+    const rect = BoardRect{ .minx = -10, .miny = -10, .w = 20, .h = 20 };
+    dockEdgePart(&parts, entry, 0, .bottom, false, .{ .rect = rect, .inset = 1.0 });
+    const kb = keepBoxOf(parts[0]);
+    try testing.expectApproxEqAbs(rect.miny + rect.h - 1.0, parts[0].y + kb.cyo + kb.hh, 1e-9);
 }
 
 // spec: placement/optimizer - (board ...) edge parts wanting the same spot de-overlap along the edge
@@ -10299,21 +11007,21 @@ test "packBoard de-overlaps edge parts along their edge" {
     try idx_of.put(arena, "U1", 0);
     try idx_of.put(arena, "J1", 1);
     try idx_of.put(arena, "J2", 2);
-    const instances = [_]export_kicad.FlatInstance{
+    const instances = [_]flat_netlist.FlatInstance{
         .{ .ref_des = "U1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
         .{ .ref_des = "J1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
         .{ .ref_des = "J2", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
     };
     // Both connectors attach to U1 (y 0) -> both want the same slide position.
-    const p1 = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "J1", .pin = "1" } };
-    const p2 = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "J2", .pin = "1" } };
+    const p1 = [_]flat_netlist.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "J1", .pin = "1" } };
+    const p2 = [_]flat_netlist.FlatPin{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "J2", .pin = "1" } };
     const nets = [_]FlatNet{ .{ .name = "A", .pins = &p1 }, .{ .name = "B", .pins = &p2 } };
     const left_items = [_]env.PlacementItem{ .{ .ref = "J1" }, .{ .ref = "J2" } };
     const sides = [_]env.PlacementSideSpec{.{ .side = .left, .items = &left_items }};
     const spec = env.BoardSpec{ .w = 20, .h = 20, .sides = &sides, .present = true };
     g_placement_diag = .{};
     defer g_placement_diag = .{};
-    _ = try packBoard(arena, &parts, &instances, &idx_of, &nets, spec);
+    _ = try packBoard(arena, &parts, &instances, &idx_of, &nets, .{ .board = spec });
     // Same edge (same x), separated along it by at least their extents + gap.
     try testing.expectApproxEqAbs(parts[1].x, parts[2].x, 1e-9);
     try testing.expect(@abs(parts[1].y - parts[2].y) >= 1.5 + 1.5 + board_edge_gap_mm - 1e-9);
@@ -10386,8 +11094,8 @@ test "synthAggressorKeepouts pairs a feedback passive with the switching inducto
         .{ .ref_des = "L1", .kind = .passive, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false },
         .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false },
     };
-    const sw = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "L1", .pin = "1" } };
-    const fb = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "R1", .pin = "1" } };
+    const sw = [_]flat_netlist.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "L1", .pin = "1" } };
+    const fb = [_]flat_netlist.FlatPin{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "R1", .pin = "1" } };
     const nets = [_]FlatNet{
         .{ .name = "SW", .pins = &sw },
         .{ .name = "FB", .pins = &fb },
@@ -10443,7 +11151,7 @@ test "arrangeMacros + legalize keep modules intact and disjoint" {
     };
     const macro_of = [_]?usize{ 0, 0, 1, 1 };
     // One net joins the two modules, so the arranger has connectivity to act on.
-    const link = [_]export_kicad.FlatPin{ .{ .ref_des = "a/C1", .pin = "1" }, .{ .ref_des = "b/U1", .pin = "1" } };
+    const link = [_]flat_netlist.FlatPin{ .{ .ref_des = "a/C1", .pin = "1" }, .{ .ref_des = "b/U1", .pin = "1" } };
     const nets = [_]FlatNet{.{ .name = "L", .pins = &link }};
     var idx_of = std.StringHashMapUnmanaged(usize).empty;
     try idx_of.put(arena, "a/U1", 0);
@@ -10452,6 +11160,10 @@ test "arrangeMacros + legalize keep modules intact and disjoint" {
     try idx_of.put(arena, "b/C1", 3);
 
     const origins = try arrangeMacros(arena, &macros, &macro_of, &nets, &idx_of, &parts, &.{ false, false });
+    // The aligned pair walk must retain the original pair order and therefore
+    // produce bit-identical origins when given the same topology and poses.
+    const again = try arrangeMacros(arena, &macros, &macro_of, &nets, &idx_of, &parts, &.{ false, false });
+    try testing.expectEqualDeep(origins, again);
     stampMacros(&parts, &macros, origins, &.{ false, false });
     legalizeComposed(&parts, &macro_of, &.{ false, false, false, false });
 
@@ -10468,16 +11180,6 @@ test "arrangeMacros + legalize keep modules intact and disjoint" {
     const bb = membersBox(&parts, &bm);
     const disjoint = ba[2] <= bb[0] or bb[2] <= ba[0] or ba[3] <= bb[1] or bb[3] <= ba[1];
     try testing.expect(disjoint);
-}
-
-// spec: placement/optimizer - (rough …) anchor/group tokens match by ref-des or origin name
-test "roughNameMatch matches by ref-des or origin, exact or leaf" {
-    try testing.expect(roughNameMatch("U1", "", "U1")); // exact ref
-    try testing.expect(roughNameMatch("clk/U1", "", "U1")); // leaf of a prefixed ref
-    try testing.expect(roughNameMatch("U17", "U1", "U1")); // origin survives renumber
-    try testing.expect(roughNameMatch("a/C5", "C_VDD", "C_VDD")); // origin name
-    try testing.expect(!roughNameMatch("U2", "", "U1")); // no match
-    try testing.expect(!roughNameMatch("U1", "", "")); // empty token never matches
 }
 
 // spec: placement/optimizer - (rough …) priority is the fill order; lower tiers spill to outer lanes
@@ -10502,18 +11204,6 @@ test "dockSidesByTier fills inner lane by priority, spilling lower tiers outward
     // its x is greater (less negative) than the spilled tier-1 part's.
     try testing.expect(parts[0].x > parts[1].x);
     try testing.expect(parts[0].x < 0 and parts[1].x < 0);
-}
-
-// spec: placement/optimizer - segsCross flags interior airwire crossings, not shared endpoints
-test "segsCross flags interior crossings and ignores shared endpoints" {
-    // Diagonals of a unit square cross in the middle.
-    try testing.expect(segsCross(.{ 0, 0 }, .{ 1, 1 }, .{ 0, 1 }, .{ 1, 0 }));
-    // Parallel segments never cross.
-    try testing.expect(!segsCross(.{ 0, 0 }, .{ 1, 0 }, .{ 0, 1 }, .{ 1, 1 }));
-    // Two airwires meeting at the same pad share an endpoint — not a crossing.
-    try testing.expect(!segsCross(.{ 0, 0 }, .{ 1, 1 }, .{ 0, 0 }, .{ 1, -1 }));
-    // Disjoint and far apart.
-    try testing.expect(!segsCross(.{ 0, 0 }, .{ 1, 0 }, .{ 5, 5 }, .{ 6, 6 }));
 }
 
 // spec: placement/optimizer - refineSidesByPull moves a part to the IC side its real connections pull toward
@@ -10545,7 +11235,8 @@ test "refineSidesByPull re-sides a part toward its signal pad" {
     parts[1].y = 0;
     const hkb = KeepBox{ .cxo = 0, .cyo = 0, .hw = 2, .hh = 2 };
 
-    try refineSidesByPull(arena, &parts, 0, &nets, &idx_of, &tier_of, &cohere_side, &sides, hkb);
+    const topology = try buildHubTopology(arena, &parts, 0, &nets, &idx_of);
+    try refineSidesByPull(arena, &parts, 0, topology, &tier_of, &cohere_side, &sides, hkb);
 
     // Moved from the LEFT bucket (s=0) to the RIGHT (s=1), now at positive x.
     try testing.expectEqual(@as(usize, 0), sides[0].items.len);
@@ -10623,23 +11314,19 @@ test "servedPadLocal resolves a bound pad on-net and rejects cross-hub bindings"
     try idx_of.put(arena, "U2", 1);
     try idx_of.put(arena, "C1", 2);
     // Bound to U1 pad 10 on its own net → resolves to that pad's centre (3,0).
-    const got = servedPadLocal(&parts, 0, 2, "10", &nets, &idx_of);
+    const got = servedPadLocal(&parts, 0, 2, .{ .pad = "10" }, &nets, &idx_of);
     try testing.expect(got != null);
     try testing.expectApproxEqAbs(@as(f64, 3), got.?[0], 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 0), got.?[1], 1e-9);
     // A cross-hub token (U2's pad 8, off C1's net at U1) → null, never mis-docked.
-    try testing.expect(servedPadLocal(&parts, 0, 2, "8", &nets, &idx_of) == null);
+    try testing.expect(servedPadLocal(&parts, 0, 2, .{ .pad = "8" }, &nets, &idx_of) == null);
     // Empty token → null.
-    try testing.expect(servedPadLocal(&parts, 0, 2, "", &nets, &idx_of) == null);
-}
-
-// spec: placement/optimizer - decouplePinFromOrigin reads the decoupled pad from a per-pin cap's structural key
-test "decouplePinFromOrigin extracts the pad from value@pad#replica keys" {
-    try testing.expectEqualStrings("3", decouplePinFromOrigin("100nF@3#0").?);
-    try testing.expectEqualStrings("B4", decouplePinFromOrigin("10uF@B4#2").?); // BGA pad name
-    try testing.expect(decouplePinFromOrigin("100nF#0") == null); // non-per-pin decouple
-    try testing.expect(decouplePinFromOrigin("C_AVDD1") == null); // named part
-    try testing.expect(decouplePinFromOrigin("10uF@#0") == null); // empty pad
+    try testing.expect(servedPadLocal(&parts, 0, 2, .{}, &nets, &idx_of) == null);
+    // Naming THIS hub is the same answer as naming none.
+    try testing.expect(servedPadLocal(&parts, 0, 2, .{ .ic = "U1", .pad = "10" }, &nets, &idx_of) != null);
+    // Naming a DIFFERENT hub is rejected even though the pad is on the cap's
+    // own net at this anchor — the ref guard, not just the on-net one.
+    try testing.expect(servedPadLocal(&parts, 0, 2, .{ .ic = "U2", .pad = "10" }, &nets, &idx_of) == null);
 }
 
 // spec: placement/optimizer - orientPadsToIC flips a 2-pad part so its important pad faces the IC
@@ -10713,7 +11400,7 @@ test "polishCrossings honours want_side, refusing a wrong-side swap" {
 
     // Unconstrained polish (all 255) DOES swap R1↔R2 to kill the crossing.
     var free = init;
-    const open = [_]u8{255} ** 5;
+    const open: [5]u8 = @splat(255);
     try polishCrossings(arena, &free, 0, &nets, &idx_of, &open);
     try testing.expect(free[1].x < 0); // R1 moved to the left
 
@@ -10757,12 +11444,12 @@ test "bottom side mirrors worldPt and skips cross-side overlap" {
     var p = Part{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false, .x = 10, .y = 5 };
     p.side = .bottom;
     // rot 0: local (+1, +0.5) mirrors to (−1, +0.5).
-    const w = worldPt(p, 1.0, 0.5);
+    const w = worldPt(&p, 1.0, 0.5);
     try testing.expectEqual(@as(f64, 9.0), w.x);
     try testing.expectEqual(@as(f64, 5.5), w.y);
     // rot 90: mirrored local (−1, 0.5) rotates to (−0.5, −1).
     p.rot = 90;
-    const w2 = worldPt(p, 1.0, 0.5);
+    const w2 = worldPt(&p, 1.0, 0.5);
     try testing.expectEqual(@as(f64, 9.5), w2.x);
     try testing.expectEqual(@as(f64, 4.0), w2.y);
     // Two parts stacked at the same spot: opposite sides never collide,
@@ -10785,6 +11472,23 @@ test "applyCached applies side and locked" {
     try testing.expect(parts[0].locked);
     try testing.expectEqual(@as(f64, 4), parts[0].x);
     try testing.expectEqual(@as(f64, 180), parts[0].rot);
+}
+
+// spec: placement/optimizer - a rejected cache leaves no part pinned
+test "applyCached drops the pins of a cache it refuses" {
+    var parts = [_]Part{
+        .{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "C2", .kind = .passive, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false },
+    };
+    // Both poses on the same point: covered in full, but overlapping, so the
+    // cache is refused — and must not leave the solver a board it cannot move.
+    const poses = [_]RefPose{
+        .{ .ref = "C1", .x = 0, .y = 0, .rot = 0, .locked = true },
+        .{ .ref = "C2", .x = 0, .y = 0, .rot = 0, .locked = true },
+    };
+    try testing.expect(!applyCached(&parts, &poses));
+    try testing.expect(!parts[0].locked);
+    try testing.expect(!parts[1].locked);
 }
 
 // spec: placement/optimizer - anchor pick prefers net degree over courtyard area, area only breaks ties
@@ -10870,17 +11574,17 @@ test "starredModulePoses translates the starred layout into child refs" {
     const arena = arena_state.allocator();
     var td = std.testing.tmpDir(.{});
     defer td.cleanup();
-    try td.dir.makePath("lib/modules");
-    try td.dir.writeFile(.{ .sub_path = "lib/modules/x.layouts.json", .data = 
+    try td.dir.createDirPath(std.testing.io, "lib/modules");
+    try td.dir.writeFile(std.testing.io, .{ .sub_path = "lib/modules/x.layouts.json", .data =
         \\{"default":"hand","layouts":[{"name":"hand","parts":[
         \\ {"ref":"U1","x":3,"y":4,"rot":90,"origin":"U1"},
         \\ {"ref":"C7","x":1,"y":2,"rot":0,"origin":"100nF@5#0"},
         \\ {"ref":"R9","x":8,"y":9,"rot":0}]}]}
     });
-    const project_dir = try td.dir.realpathAlloc(arena, ".");
+    const project_dir = try td.dir.realPathFileAlloc(std.testing.io, ".", arena);
     // Parent flatten renumbered the module: U1→U4, cap→C12; R9 kept its ref
     // but recorded no origin (legacy pose → ref fallback).
-    const instances = [_]export_kicad.FlatInstance{
+    const instances = [_]flat_netlist.FlatInstance{
         .{ .ref_des = "m/U4", .origin_key = "U1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
         .{ .ref_des = "m/C12", .origin_key = "100nF@5#0", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
         .{ .ref_des = "m/R9", .origin_key = "", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
@@ -10974,7 +11678,7 @@ test "pinOwners assigns passives to the hub they serve" {
         .{ .ref_des = "C2", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &.{}, .fallback = false },
         .{ .ref_des = "U3", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false },
     };
-    const rail = [_]export_kicad.FlatPin{
+    const rail = [_]flat_netlist.FlatPin{
         .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "U2", .pin = "8" },
         .{ .ref_des = "C1", .pin = "1" }, .{ .ref_des = "C2", .pin = "1" },
     };
@@ -11036,13 +11740,14 @@ test "buildPinGroups + dockGroups keep a satellite's cap with its owner at the a
     const built = Built{ .springs = &.{}, .loops = &.{}, .series = &.{} };
     const owner_of = try pinOwners(arena, &parts, 0, &nets, &idx_of, built);
     try testing.expectEqual(@as(usize, 1), owner_of[2]); // the load cap belongs to the crystal
-    const groups = try buildPinGroups(arena, &parts, owner_of, 0, &nets, &idx_of, built);
+    const ctx = PinCtx{ .nets = &nets, .idx_of = &idx_of };
+    const groups = try buildPinGroups(arena, &parts, owner_of, 0, ctx, built);
     try testing.expectEqual(@as(usize, 1), groups.len);
     try testing.expectEqual(@as(usize, 1), groups[0].members.len);
     const placed = try arena.alloc(bool, parts.len);
     @memset(placed, false);
     placed[0] = true;
-    const ring_ext = try ringOwner(arena, &parts, 0, owner_of, &nets, &idx_of, built, null, placed);
+    const ring_ext = try ringOwner(arena, &parts, 0, owner_of, ctx, built, placed);
     try dockGroups(arena, &parts, 0, groups, owner_of, &nets, &idx_of, null, ring_ext, placed);
     try testing.expect(placed[1] and placed[2]);
     // The group docked on the anchor's RIGHT edge (where XIN lands), owner outside it.
@@ -11067,7 +11772,7 @@ test "overlayAuthoredGroups makes an authored group one island under its core" {
         .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &.{}, .fallback = false },
         .{ .ref_des = "C9", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &.{}, .fallback = false },
     };
-    const instances = [_]export_kicad.FlatInstance{
+    const instances = [_]flat_netlist.FlatInstance{
         .{ .ref_des = "U1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
         .{ .ref_des = "Q1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
         .{ .ref_des = "Q2", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
@@ -11092,24 +11797,321 @@ test "overlayAuthoredGroups makes an authored group one island under its core" {
     const members = [_][]const u8{ "Q1", "Q2", "R1" };
     const groups = [_]env.Group{.{ .name = "sw", .members = &members }};
     const block = DesignBlock{ .name = "t", .instances = &.{}, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &groups, .sub_blocks = &.{} };
-    try overlayAuthoredGroups(arena, &parts, owner_of, 0, &block, &instances, &nets, &idx_of);
+    try overlayAuthoredGroups(arena, &parts, owner_of, 0, &block, &instances, .{ .nets = &nets, .idx_of = &idx_of });
     try testing.expectEqual(@as(usize, 1), owner_of[1]); // Q1 is the core
     try testing.expectEqual(@as(usize, 1), owner_of[2]); // Q2 absorbed as a member
     try testing.expectEqual(@as(usize, 1), owner_of[3]); // listed passive follows
     try testing.expectEqual(@as(usize, 1), owner_of[4]); // Q2's claimed part follows its hub in
 }
 
+/// A 40-pin-style stand-in: one hub whose pads sit on three different edges, a
+/// rail spread over two of them, and the passives the pin-adjacent tests bind.
+/// `x = ±3` is the left/right edge, `y = +3` the bottom.
+const chain_hub_pads = [_]geometry.Pad{
+    .{ .number = "1", .x = -3, .y = 0, .w = 0.3, .h = 0.3 },
+    .{ .number = "2", .x = 0, .y = 3, .w = 0.3, .h = 0.3 },
+    .{ .number = "3", .x = 3, .y = 0, .w = 0.3, .h = 0.3 },
+};
+
+/// Two pads a millimetre apart on the part's own x axis — enough for
+/// `padLocal`, `freeTwoPad` and the pad-axis rotation.
+const chain_two_pads = [_]geometry.Pad{
+    .{ .number = "1", .x = -0.5, .y = 0, .w = 0.3, .h = 0.3 },
+    .{ .number = "2", .x = 0.5, .y = 0, .w = 0.3, .h = 0.3 },
+};
+
+// spec: placement/optimizer - a part bound only to a supply rail follows its private chain to the pad that anchors it
+test "pinTargets defers a rail-tied chain part and keeps a rail-only part" {
+    var astate = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    const parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 3, .hh = 3, .pads = &chain_hub_pads, .fallback = false },
+        .{ .ref_des = "L1", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &chain_two_pads, .fallback = false },
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &chain_two_pads, .fallback = false },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &chain_two_pads, .fallback = false },
+        .{ .ref_des = "C2", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &chain_two_pads, .fallback = false },
+    };
+    // V3V3 lands on pads 1 and 2 — two different edges, so it names no place.
+    // BIAS is private (no hub pad); SIG is the one pad that anchors the chain.
+    const nets = [_]FlatNet{
+        .{ .name = "V3V3", .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "L1", .pin = "2" }, .{ .ref_des = "C2", .pin = "1" } } },
+        .{ .name = "SIG", .pins = &.{ .{ .ref_des = "U1", .pin = "3" }, .{ .ref_des = "R1", .pin = "1" } } },
+        .{ .name = "BIAS", .pins = &.{ .{ .ref_des = "L1", .pin = "1" }, .{ .ref_des = "R1", .pin = "2" }, .{ .ref_des = "C1", .pin = "1" } } },
+        .{ .name = "GND", .pins = &.{ .{ .ref_des = "C1", .pin = "2" }, .{ .ref_des = "C2", .pin = "2" } } },
+    };
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    for (parts, 0..) |p, i| try idx_of.put(arena, p.ref_des, i);
+    const owner_of = try arena.alloc(usize, parts.len);
+    @memset(owner_of, 0);
+    const ctx = PinCtx{ .nets = &nets, .idx_of = &idx_of };
+    const tgt = try pinTargets(arena, &parts, 0, owner_of, ctx, .{ .springs = &.{}, .loops = &.{}, .series = &.{} });
+    try testing.expectEqual(@as(u2, 1), tgt[2].?.edge); // R1 anchors the chain at pad 3 (right)
+    try testing.expectEqual(@as(?PinTarget, null), tgt[1]); // L1's rail leg yields to the chain
+    try testing.expectEqual(@as(?PinTarget, null), tgt[3]); // C1 never had a binding
+    // C2 rides the rail and nothing else: no chain to follow, so it keeps the
+    // rail target rather than being dropped into the leftover row.
+    try testing.expect(tgt[4] != null);
+}
+
+/// The ref-des -> part-index map every solve path holds, as a test fixture.
+fn refIndexMap(arena: std.mem.Allocator, parts: []const Part) !std.StringHashMapUnmanaged(usize) {
+    var m = std.StringHashMapUnmanaged(usize).empty;
+    for (parts, 0..) |p, i| try m.put(arena, p.ref_des, i);
+    return m;
+}
+
+// spec: placement/optimizer - a near-bound passive is owned by the part it names even when its two legs straddle different hubs
+test "a cross-hub near binding claims its owner and seeds against the named pad" {
+    var astate = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+
+    // The black-canyon R_TAP_* shape: a series resistor with one leg on an MCU
+    // net and the other on a connector net. `pairSeriesLegs` requires BOTH legs
+    // to reach one hub, so this part gets no series pairing at all — without a
+    // `(near …)` the net-locality scan is free to hand it to J1.
+    const parts = [_]Part{
+        .{ .ref_des = "U_MCU", .kind = .hub, .hw = 3, .hh = 3, .pads = &chain_hub_pads, .fallback = false },
+        .{ .ref_des = "J1", .kind = .hub, .hw = 3, .hh = 3, .pads = &chain_hub_pads, .fallback = false, .x = 20 },
+        .{ .ref_des = "R_TAP", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &chain_two_pads, .fallback = false },
+    };
+    const nets = [_]FlatNet{
+        .{ .name = "GPIO10", .pins = &.{ .{ .ref_des = "U_MCU", .pin = "3" }, .{ .ref_des = "R_TAP", .pin = "1" } } },
+        .{ .name = "TAP", .pins = &.{ .{ .ref_des = "J1", .pin = "1" }, .{ .ref_des = "R_TAP", .pin = "2" } } },
+    };
+    const instances = [_]flat_netlist.FlatInstance{
+        .{ .ref_des = "U_MCU", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
+        .{ .ref_des = "J1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
+        .{
+            .ref_des = "R_TAP",
+            .component = "res-0402",
+            .value = "1k",
+            .footprint = "",
+            .properties = &.{},
+            .uuid = "",
+            .bind = .{ .near = .{ .ref = "U_MCU", .pin = "3" } },
+        },
+    };
+    const near = try near_bind.resolve(arena, &instances, &nets);
+    try testing.expectEqual(@as(usize, 1), near.pairs.len);
+    try testing.expectEqualStrings("1", near.pairs[0].own_pin); // the GPIO10 leg
+
+    var idx_of = try refIndexMap(arena, &parts);
+    const built = Built{ .springs = &.{}, .loops = &.{}, .series = &.{}, .near = near.pairs };
+
+    // Ownership follows the NAMED target, not whichever hub the locality scan
+    // would have preferred.
+    const owner_of = try pinOwners(arena, &parts, 0, &nets, &idx_of, built);
+    try testing.expectEqual(@as(usize, 0), owner_of[2]);
+
+    // And within that owner the seed aims at pad 3 — the right edge — which is
+    // the pad the declaration named, not the package centroid.
+    const ctx = PinCtx{ .nets = &nets, .idx_of = &idx_of };
+    const tgt = try pinTargets(arena, &parts, 0, owner_of, ctx, built);
+    try testing.expect(tgt[2] != null);
+    try testing.expectEqual(@as(u2, 1), tgt[2].?.edge);
+
+    // The force list gains one pad-to-pad hug and no `Loop`: adjacency carries
+    // no ground return, so it must never reach the inductance score.
+    const roles = [_]pin_roles.PartRoles{ .{}, .{}, .{} };
+    const refs = [_][]const u8{ "U_MCU", "J1", "R_TAP" };
+    const empty3 = [_][]const u8{ "", "", "" };
+    const optout = [_]bool{ false, false, false };
+    const sprung = try buildSprings(arena, &nets, &parts, &idx_of, &roles, .{
+        .caps = .{
+            .ref_des = &refs,
+            .pin = &empty3,
+            .ic = &empty3,
+            .optout = &optout,
+        },
+        .near = near.pairs,
+    });
+    try testing.expectEqual(@as(usize, 0), sprung.loops.len);
+    var hugs: usize = 0;
+    for (sprung.springs) |sp| {
+        if (sp.a != 2 or sp.b != 0 or sp.kind != .proximity) continue;
+        hugs += 1;
+        // Anchored on the exact pads, not the hub's pad centroid: the authored
+        // hug REPLACES the inferred one rather than stacking with it.
+        try testing.expectApproxEqAbs(@as(f64, 3), sp.bx, 1e-9);
+        try testing.expectApproxEqAbs(@as(f64, -0.5), sp.ax, 1e-9);
+    }
+    try testing.expectEqual(@as(usize, 1), hugs);
+    // And no series pairing claimed the part's rotation.
+    try testing.expectEqual(@as(usize, 0), sprung.series.len);
+}
+
+// spec: placement/optimizer - a series part across two package edges takes its signal end, and the busier node when both are signals
+test "seriesTarget prefers the signal end, then the busier node" {
+    var astate = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    const parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 3, .hh = 3, .pads = &chain_hub_pads, .fallback = false },
+        .{ .ref_des = "R_EN", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &chain_two_pads, .fallback = false },
+        .{ .ref_des = "R_MID", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &chain_two_pads, .fallback = false },
+        .{ .ref_des = "C_A", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &chain_two_pads, .fallback = false },
+        .{ .ref_des = "C_B", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &chain_two_pads, .fallback = false },
+    };
+    // V3V3 = pads 1 (left) + 2 (bottom): a rail. NODE_A = pad 1 alone,
+    // NODE_B = pad 3 plus two caps, which makes it the busier node.
+    const nets = [_]FlatNet{
+        .{ .name = "V3V3", .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "R_EN", .pin = "2" } } },
+        .{ .name = "NODE_A", .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "R_EN", .pin = "1" }, .{ .ref_des = "R_MID", .pin = "1" } } },
+        .{ .name = "NODE_B", .pins = &.{ .{ .ref_des = "U1", .pin = "3" }, .{ .ref_des = "R_MID", .pin = "2" }, .{ .ref_des = "C_A", .pin = "1" }, .{ .ref_des = "C_B", .pin = "1" } } },
+    };
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    for (parts, 0..) |p, i| try idx_of.put(arena, p.ref_des, i);
+    const owner_of = try arena.alloc(usize, parts.len);
+    @memset(owner_of, 0);
+    const ctx = PinCtx{ .nets = &nets, .idx_of = &idx_of };
+    const scope = OwnerScope{ .parts = &parts, .owner = 0, .owner_of = owner_of };
+    const zero = PadRect{ .x = 0, .y = 0, .w = 0, .h = 0 };
+    const rail_mid = PadRect{ .x = -1.5, .y = 1.5, .w = 0, .h = 0 }; // V3V3 pad centroid
+    const pad1 = PadRect{ .x = -3, .y = 0, .w = 0, .h = 0 };
+    const pad3 = PadRect{ .x = 3, .y = 0, .w = 0, .h = 0 };
+    // R_EN straddles the rail and its own signal pad: the SIGNAL pad wins,
+    // however busy the rail is.
+    const en = SeriesPair{ .part = 1, .hub = 0, .a = .{ .part_pad = zero, .hub_pad = rail_mid }, .b = .{ .part_pad = zero, .hub_pad = pad1 } };
+    try testing.expectEqual(@as(u2, 0), (try seriesTarget(arena, scope, ctx, en)).edge);
+    // R_MID straddles two signal pads: the node carrying the other passive wins.
+    const mid = SeriesPair{ .part = 2, .hub = 0, .a = .{ .part_pad = zero, .hub_pad = pad1 }, .b = .{ .part_pad = zero, .hub_pad = pad3 } };
+    try testing.expectEqual(@as(u2, 1), (try seriesTarget(arena, scope, ctx, mid)).edge);
+}
+
+// spec: placement/optimizer - an authored group's unbindable members join the edge its bound members hold, and a bypass bank is untouched
+test "groupFallback homes a chain group's port-only member and leaves a bypass bank alone" {
+    var astate = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    const parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 3, .hh = 3, .pads = &chain_hub_pads, .fallback = false },
+        .{ .ref_des = "R_IN", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &chain_two_pads, .fallback = false },
+        .{ .ref_des = "R_TERM", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &chain_two_pads, .fallback = false },
+        .{ .ref_des = "C_BYP", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &chain_two_pads, .fallback = false },
+    };
+    // R_TERM sits only on the module's own ports — no hub pad, and no private
+    // net reaching one. R_IN (group 0) binds at pad 3, the right edge.
+    const nets = [_]FlatNet{
+        .{ .name = "SIG", .pins = &.{ .{ .ref_des = "U1", .pin = "3" }, .{ .ref_des = "R_IN", .pin = "1" } } },
+        .{ .name = "REF_P", .pins = &.{.{ .ref_des = "R_TERM", .pin = "1" }} },
+        .{ .name = "REF_N", .pins = &.{.{ .ref_des = "R_TERM", .pin = "2" }} },
+        .{ .name = "V3V3", .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C_BYP", .pin = "1" } } },
+        .{ .name = "GND", .pins = &.{.{ .ref_des = "C_BYP", .pin = "2" }} },
+    };
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    for (parts, 0..) |p, i| try idx_of.put(arena, p.ref_des, i);
+    const owner_of = try arena.alloc(usize, parts.len);
+    @memset(owner_of, 0);
+    // Group 0 = the signal chain {R_IN, R_TERM}; group 1 = the bypass bank.
+    const group_of = [_]i32{ -1, 0, 0, 1 };
+    const ctx = PinCtx{ .nets = &nets, .idx_of = &idx_of, .group_of = &group_of };
+    // C_BYP is loop-bound to pad 1 (left) — the bank case the fallback must not touch.
+    const loops = try arena.alloc(Loop, 1);
+    loops[0] = .{ .cap = 3, .hub = 0, .cap_pwr = .{ .x = 0, .y = 0, .w = 0, .h = 0 }, .cap_gnd = .{ .x = 0, .y = 0, .w = 0, .h = 0 }, .hub_pwr = &.{}, .hub_gnd = &.{}, .hub_pwr_pin = .{ .x = -3, .y = 0, .w = 0.3, .h = 0.3 } };
+    const tgt = try pinTargets(arena, &parts, 0, owner_of, ctx, .{ .springs = &.{}, .loops = loops, .series = &.{} });
+    try testing.expectEqual(@as(u2, 1), tgt[1].?.edge); // R_IN at pad 3
+    try testing.expectEqual(@as(u2, 1), tgt[2].?.edge); // R_TERM joins its group's edge
+    try testing.expectEqual(@as(u2, 0), tgt[3].?.edge); // the bank keeps its own pad
+}
+
+// spec: placement/optimizer - a chain child hangs off a ring-bound entry on its chain's home edge, spreading over the entries there
+test "pinChainAttach spreads children over the entries on the chain's home edge" {
+    var astate = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 3, .hh = 3, .pads = &chain_hub_pads, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "E1", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &chain_two_pads, .fallback = false, .x = 4, .y = 0 },
+        .{ .ref_des = "E2", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &chain_two_pads, .fallback = false, .x = 4, .y = 2 },
+        .{ .ref_des = "FAR", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &chain_two_pads, .fallback = false, .x = -4, .y = 0 },
+        .{ .ref_des = "K1", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &chain_two_pads, .fallback = false },
+        .{ .ref_des = "K2", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &chain_two_pads, .fallback = false },
+    };
+    const nets = [_]FlatNet{.{ .name = "CH", .pins = &.{
+        .{ .ref_des = "E1", .pin = "2" }, .{ .ref_des = "E2", .pin = "2" }, .{ .ref_des = "FAR", .pin = "2" },
+        .{ .ref_des = "K1", .pin = "1" }, .{ .ref_des = "K2", .pin = "1" },
+    } }};
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    for (parts, 0..) |p, i| try idx_of.put(arena, p.ref_des, i);
+    const placed = try arena.alloc(bool, parts.len);
+    @memset(placed, false);
+    @memset(placed[0..4], true); // hub + the three ring-bound entries
+    try pinChainAttach(arena, &parts, 0, null, .{ .nets = &nets, .idx_of = &idx_of }, placed);
+    try testing.expect(placed[4] and placed[5]);
+    // Both children stay on the home edge (right) — never on FAR's opposite one —
+    // and take one entry each instead of stacking on the first.
+    try testing.expect(parts[4].x > 0 and parts[5].x > 0);
+    try testing.expectApproxEqAbs(parts[1].y, parts[4].y, 1e-9);
+    try testing.expectApproxEqAbs(parts[2].y, parts[5].y, 1e-9);
+}
+
+// spec: placement/optimizer - a 2-pad part with a precise partner on each leg turns its pad axis to face them
+test "orientChainPairs faces a termination at its two chain neighbours" {
+    var astate = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 3, .hh = 3, .pads = &chain_hub_pads, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "C_P", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &chain_two_pads, .fallback = false, .x = -5, .y = 1 },
+        .{ .ref_des = "C_N", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &chain_two_pads, .fallback = false, .x = -5, .y = 3 },
+        .{ .ref_des = "R_TERM", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &chain_two_pads, .fallback = false, .x = -7, .y = 2 },
+        .{ .ref_des = "C_BYP", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &chain_two_pads, .fallback = false, .x = -5, .y = -2 },
+    };
+    // R_TERM straddles the pair; C_BYP has a ground leg, so it names no axis.
+    const nets = [_]FlatNet{
+        .{ .name = "REF_P", .pins = &.{ .{ .ref_des = "C_P", .pin = "1" }, .{ .ref_des = "R_TERM", .pin = "1" } } },
+        .{ .name = "REF_N", .pins = &.{ .{ .ref_des = "C_N", .pin = "1" }, .{ .ref_des = "R_TERM", .pin = "2" } } },
+        .{ .name = "V3V3", .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C_BYP", .pin = "1" } } },
+        .{ .name = "GND", .pins = &.{.{ .ref_des = "C_BYP", .pin = "2" }} },
+    };
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    for (parts, 0..) |p, i| try idx_of.put(arena, p.ref_des, i);
+    const owner_of = try arena.alloc(usize, parts.len);
+    @memset(owner_of, 0);
+    orientChainPairs(&parts, 0, owner_of, .{ .nets = &nets, .idx_of = &idx_of });
+    // Its neighbours are stacked in y, so its pads must face along y — pad 1
+    // (on REF_P) toward C_P, the −y one, which is what a quarter turn gives.
+    try testing.expectEqual(@as(f64, 90), parts[3].rot);
+    try testing.expectEqual(@as(f64, 0), parts[4].rot); // ground leg → edge convention kept
+}
+
+// spec: placement/optimizer - authored rough groups map to a per-part grouping, first membership winning
+test "roughGroupOf partitions parts by their authored (rough (group ...)) tier" {
+    var astate = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    const instances = [_]flat_netlist.FlatInstance{
+        .{ .ref_des = "C1", .origin_key = "C_LF1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
+        .{ .ref_des = "C2", .origin_key = "C_LF2", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
+        .{ .ref_des = "R1", .origin_key = "R_CE", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
+    };
+    const lf = [_][]const u8{ "C_LF1", "C_LF2" };
+    const both = [_][]const u8{ "C_LF2", "R_CE" }; // C_LF2 named twice: the first tier keeps it
+    const groups = [_]env.RoughGroup{ .{ .name = "loopfilter", .members = &lf }, .{ .name = "ce", .members = &both } };
+    const block = DesignBlock{ .name = "t", .instances = &.{}, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &.{}, .rough = .{ .anchor = "U1", .groups = &groups, .present = true } };
+    const g = try roughGroupOf(arena, &instances, &block);
+    try testing.expectEqual(@as(i32, 0), g[0]);
+    try testing.expectEqual(@as(i32, 0), g[1]);
+    try testing.expectEqual(@as(i32, 1), g[2]);
+}
+
 // spec: placement/optimizer - design-rules resolve authored values over built-in defaults, absent form keeps every default
 test "designRulesOf fills defaults and honours authored overrides" {
-    // No form ⇒ every built-in default (the old hard-coded constants).
+    // No form ⇒ every built-in default.
     const none = DesignBlock{ .name = "t", .instances = &.{}, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &.{} };
     const d0 = designRulesOf(&none);
     try testing.expectEqual(@as(f64, 0.127), d0.clearance);
     try testing.expectEqual(@as(f64, 0.2), d0.min_drill);
-    try testing.expectEqual(@as(f64, 0.05), d0.mask_margin);
+    try testing.expectEqual(@as(f64, 0.05), d0.mask.margin);
+    try testing.expectEqual(@as(f64, 0), d0.mask.relief_corner_radius);
     try testing.expectEqual(@as(f64, 0.25), d0.hole_to_hole);
     try testing.expectEqual(@as(f64, 0.1), d0.min_annular);
-    try testing.expectEqual(@as(f64, 0), d0.copper_edge); // unset ⇒ falls back per-consumer
+    try testing.expectEqual(@as(f64, 0), d0.edge.copper); // unset ⇒ falls back per-consumer
+    try testing.expectEqual(@as(f64, 2.5), d0.edge.component); // JLCPCB Standard PCBA default
+    try testing.expectEqual(@as(f64, 0.3), d0.pour_clearance); // fab-safe inner-plane pour default
+    try testing.expectEqual(@as(f64, 0.2), d0.pour.clearance_outer); // tighter on an outer face
     // Routing-geometry defaults match RouteParams exactly (backward compat).
     try testing.expectEqual(@as(f64, 0.127), d0.track_width);
     try testing.expectEqual(@as(f64, 0.4), d0.via_dia);
@@ -11127,13 +12129,15 @@ test "designRulesOf fills defaults and honours authored overrides" {
         .notes = &.{},
         .groups = &.{},
         .sub_blocks = &.{},
-        .design_rules = .{ .present = true, .hole_to_hole = 0.3, .copper_edge = 0.4, .track_width = 0.2, .via_dia = 0.5, .via_drill = 0.25 },
+        .design_rules = .{ .present = true, .hole_to_hole = 0.3, .edge = .{ .copper = 0.4, .component = 1.25 }, .mask = .{ .margin = 0, .web = 0, .relief_corner_radius = 0.22 }, .track_width = 0.2, .via = .{ .dia = 0.5, .drill = 0.25 }, .pour_clearance = 0.2 },
     };
     const d1 = designRulesOf(&some);
     try testing.expectEqual(@as(f64, 0.3), d1.hole_to_hole); // overridden
-    try testing.expectEqual(@as(f64, 0.4), d1.copper_edge); // overridden
+    try testing.expectEqual(@as(f64, 0.4), d1.edge.copper); // overridden
+    try testing.expectEqual(@as(f64, 1.25), d1.edge.component); // overridden
     try testing.expectEqual(@as(f64, 0.2), d1.min_drill); // still the default
     try testing.expectEqual(@as(f64, 0.127), d1.clearance); // still the default
+    try testing.expectEqual(@as(f64, 0.22), d1.mask.relief_corner_radius);
     // copper_edge set ⇒ both edge accessors now use it.
     try testing.expectEqual(@as(f64, 0.4), d1.edgeClearance());
     try testing.expectEqual(@as(f64, 0.4), d1.pourEdge());
@@ -11141,11 +12145,50 @@ test "designRulesOf fills defaults and honours authored overrides" {
     try testing.expectEqual(@as(f64, 0.2), d1.track_width);
     try testing.expectEqual(@as(f64, 0.5), d1.via_dia);
     try testing.expectEqual(@as(f64, 0.25), d1.via_drill);
+    try testing.expectEqual(@as(f64, 0.2), d1.pour_clearance); // authored base pour gap
     const rp = d1.routeParams();
     try testing.expectEqual(@as(f64, 0.2), rp.track_width);
     try testing.expectEqual(@as(f64, 0.127), rp.clearance); // clearance kept its default
     try testing.expectEqual(@as(f64, 0.5), rp.via_dia);
     try testing.expectEqual(@as(f64, 0.25), rp.via_drill);
+}
+
+// spec: placement/optimizer - one authored pour-clearance sets the outer-face pour gap as well as the inner-plane one
+test "an authored pour clearance overrides both layer classes' defaults" {
+    // The two DEFAULTS differ by layer class — an inner plane's antipad is
+    // etched blind between two foils, an outer pour is photo-defined like a
+    // trace — but the language keeps ONE knob, so a board that states its pour
+    // gap states it for the whole stack rather than half of it.
+    const authored = DesignBlock{
+        .name = "t",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        // 0.45 is neither default, so neither field can pass by keeping its own.
+        .design_rules = .{ .present = true, .pour_clearance = 0.45 },
+    };
+    const d = designRulesOf(&authored);
+    try testing.expectEqual(@as(f64, 0.45), d.pour_clearance);
+    try testing.expectEqual(@as(f64, 0.45), d.pour.clearance_outer);
+
+    // A form that authors something ELSE leaves both at their own defaults —
+    // the outer gap is not quietly pulled to the inner one by an unrelated rule.
+    const other = DesignBlock{
+        .name = "t",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .design_rules = .{ .present = true, .clearance = 0.15 },
+    };
+    const d2 = designRulesOf(&other);
+    try testing.expectEqual(@as(f64, 0.3), d2.pour_clearance);
+    try testing.expectEqual(@as(f64, 0.2), d2.pour.clearance_outer);
 }
 
 // spec: placement/optimizer - port directions are the flow compass: in enters left, out leaves right
@@ -11191,7 +12234,7 @@ test "mirrorDiffTwins places the N-side twin at the P part plus the lane vector"
         .{ .ref_des = "RA", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &r_pads, .fallback = false, .x = 4, .y = -0.5, .rot = 90 },
         .{ .ref_des = "RB", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &r_pads, .fallback = false, .x = 9, .y = 7, .rot = 0 },
     };
-    const instances = [_]export_kicad.FlatInstance{
+    const instances = [_]flat_netlist.FlatInstance{
         .{ .ref_des = "U1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
         .{ .ref_des = "RA", .component = "", .value = "3.3R", .footprint = "", .properties = &.{}, .uuid = "" },
         .{ .ref_des = "RB", .component = "", .value = "3.3R", .footprint = "", .properties = &.{}, .uuid = "" },
@@ -11327,7 +12370,7 @@ test "hubPadsOnNet skips a zero-size pad and keeps the real one" {
         .name = "N",
         .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "U1", .pin = "2" } },
     };
-    const got = try hubPadsOnNet(arena, hub, 0, net, &idx_of);
+    const got = try hubPadsOnNet(arena, &hub, 0, net, &idx_of);
     // The zero-size pad 1 is dropped (w==0 AND h==0); only pad 2 survives. A
     // `==`→`!=` flip on either term would keep the zero pad, giving length 2.
     try testing.expectEqual(@as(usize, 1), got.len);
@@ -11398,7 +12441,7 @@ test "resolveRoughAnchor bounds-checks the instance index past the instance list
         .{ .ref_des = "H0", .kind = .hub, .hw = 4, .hh = 4, .pads = &.{}, .fallback = false },
         .{ .ref_des = "H1", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false },
     };
-    const insts = [_]export_kicad.FlatInstance{
+    const insts = [_]flat_netlist.FlatInstance{
         .{ .ref_des = "H0", .component = "x", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
     };
     const block = env.DesignBlock{
@@ -11418,7 +12461,7 @@ test "resolveRoughAnchor bounds-checks the instance index past the instance list
         .nets = undefined,
         .built = undefined,
         .priority = undefined,
-        .lowered = undefined,
+        .guidance = undefined,
         .block = &block,
         .project_dir = undefined,
     };
@@ -11427,4 +12470,112 @@ test "resolveRoughAnchor bounds-checks the instance index past the instance list
     // origin lookup reads out of bounds; a `<`→`<=` flip does exactly that.
     // Falls back to the biggest-courtyard hub (H0).
     try testing.expectEqual(@as(?usize, 0), resolveRoughAnchor(&parts, &prep, &.{}));
+}
+
+// spec: placement/optimizer - a pose seed's drawn outline overrides the authored board rect and grows the framing bbox; authored-only leaves the placement untouched
+test "foldSeedOutline drawn overrides board_rect/poly and grows the bbox" {
+    const base = Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 2,
+        .miny = 2,
+        .maxx = 5,
+        .maxy = 5,
+        .generated = false,
+    };
+    // .authored_only: byte-for-byte no-op.
+    var p = base;
+    foldSeedOutline(&p, .authored_only);
+    try std.testing.expect(p.board_rect == null);
+    try std.testing.expectEqual(@as(f64, 2), p.minx);
+    // .drawn: rect + polygon land on the placement and the bbox grows to hold them.
+    const poly = [_][2]f64{ .{ 0, 0 }, .{ 10, 0 }, .{ 10, 8 }, .{ 0, 8 } };
+    var p2 = base;
+    foldSeedOutline(&p2, .{ .drawn = .{ .rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 8 }, .poly = &poly } });
+    try std.testing.expectEqual(@as(f64, 10), p2.board_rect.?.w);
+    try std.testing.expectEqual(@as(usize, 4), p2.board_poly.?.len);
+    try std.testing.expectEqual(@as(f64, 0), p2.minx);
+    try std.testing.expectEqual(@as(f64, 10), p2.maxx);
+    try std.testing.expectEqual(@as(f64, 8), p2.maxy);
+}
+
+// spec: placement/optimizer - outlineOf lifts a placement's folded board outline into a pose seed, authored-only when the placement carries none
+test "outlineOf round-trips a folded outline into a seed" {
+    const base = Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 5,
+        .maxy = 5,
+        .generated = false,
+    };
+    // No outline → authored-only (a rebuild keeps the authored derivation).
+    try std.testing.expect(outlineOf(&base) == .authored_only);
+    // A folded outline lifts verbatim, so a poses rebuild (route-review
+    // replay, route session) inherits the exact same board edge.
+    const poly = [_][2]f64{ .{ 0, 0 }, .{ 9, 0 }, .{ 9, 6 }, .{ 0, 6 } };
+    var p = base;
+    foldSeedOutline(&p, .{ .drawn = .{ .rect = .{ .minx = 0, .miny = 0, .w = 9, .h = 6 }, .poly = &poly } });
+    const lifted = outlineOf(&p);
+    try std.testing.expectEqual(@as(f64, 9), lifted.drawn.rect.w);
+    try std.testing.expectEqual(@as(usize, 4), lifted.drawn.poly.?.len);
+}
+
+// spec: placement/optimizer - a pose seed that misses parts stages them in a band below the covered bbox, never stacked at the origin, and reports their refs
+test "stageUncovered parks seed-missed parts below the board without stacking" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 5, .hh = 4, .pads = &.{}, .fallback = false, .x = 30, .y = 20 },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 0.6, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "C2", .kind = .passive, .hw = 1, .hh = 0.6, .pads = &.{}, .fallback = false },
+    };
+    const covered = [_]bool{ true, false, false };
+    const refs = try stageUncovered(arena, &parts, &covered);
+    try testing.expectEqual(@as(usize, 2), refs.len);
+    try testing.expectEqualStrings("C1", refs[0]);
+    try testing.expectEqualStrings("C2", refs[1]);
+    // Both sit in the band below the covered bbox (U1 bottom edge y=24)…
+    try testing.expect(parts[1].y >= 24 + stage_gap_mm - 0.1);
+    try testing.expect(parts[2].y >= 24 + stage_gap_mm - 0.1);
+    // …packed side by side — never stacked on one point (several distinct
+    // parts on the identical coordinate was the corruption signature).
+    try testing.expect(parts[1].x != parts[2].x);
+    // The covered part did not move.
+    try testing.expectEqual(@as(f64, 30), parts[0].x);
+    try testing.expectEqual(@as(f64, 20), parts[0].y);
+}
+
+// spec: placement/optimizer - the authored board rectangle centres on seed-covered parts only, so an uncovered part cannot drag the outline
+test "boardRectFromPoses ignores uncovered parts when centring the authored rect" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 5, .hh = 4, .pads = &.{}, .fallback = false, .x = 30, .y = 20 },
+        // Stranded at the origin (a part the saved row predates).
+        .{ .ref_des = "C9", .kind = .passive, .hw = 1, .hh = 0.6, .pads = &.{}, .fallback = false },
+    };
+    const spec = env.BoardSpec{ .w = 20, .h = 10 };
+    const covered = [_]bool{ true, false };
+    const r_cov = try boardRectFromPoses(arena, &parts, &.{}, spec, &covered);
+    // Centred on U1 alone: (30,20) ± half the authored size.
+    try testing.expectEqual(@as(f64, 20), r_cov.minx);
+    try testing.expectEqual(@as(f64, 15), r_cov.miny);
+    // Without the mask, the stranded part drags the rectangle off-centre —
+    // the "my board outline moved" symptom.
+    const r_all = try boardRectFromPoses(arena, &parts, &.{}, spec, null);
+    try testing.expect(r_all.minx != r_cov.minx or r_all.miny != r_cov.miny);
 }

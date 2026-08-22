@@ -1,42 +1,40 @@
-# guardian-snapshot v1
-src/bench_layout.zig:179: std.debug.print reference outside allowed paths
-src/bench_layout.zig:205: std.debug.print reference outside allowed paths
-src/bench_layout.zig:210: std.debug.print reference outside allowed paths
-src/bench_layout.zig:248: std.debug.print reference outside allowed paths
-src/bench_layout.zig:270: std.debug.print reference outside allowed paths
-src/bench_layout.zig:272: std.debug.print reference outside allowed paths
-src/eval/fmt.zig:294: std.debug.print reference outside allowed paths
-src/export_kicad.zig:298: std.debug.print reference outside allowed paths
-src/export_kicad.zig:311: std.debug.print reference outside allowed paths
-src/export_kicad.zig:329: std.debug.print reference outside allowed paths
-src/export_kicad_footprint.zig:337: std.log.warn reference outside allowed paths
-src/main.zig:184: std.debug.print reference outside allowed paths
-src/main.zig:189: std.debug.print reference outside allowed paths
-src/main.zig:192: std.debug.print reference outside allowed paths
-src/main.zig:197: std.debug.print reference outside allowed paths
-src/main.zig:202: std.debug.print reference outside allowed paths
-src/main.zig:207: std.debug.print reference outside allowed paths
-src/main.zig:216: std.debug.print reference outside allowed paths
-src/main.zig:231: std.debug.print reference outside allowed paths
-src/main.zig:237: std.debug.print reference outside allowed paths
-src/main.zig:248: std.debug.print reference outside allowed paths
-src/main.zig:253: std.debug.print reference outside allowed paths
-src/main.zig:259: std.debug.print reference outside allowed paths
-src/main.zig:270: std.debug.print reference outside allowed paths
-src/main.zig:275: std.debug.print reference outside allowed paths
-src/main.zig:281: std.debug.print reference outside allowed paths
-src/main.zig:285: std.debug.print reference outside allowed paths
-src/main.zig:292: std.debug.print reference outside allowed paths
-src/main.zig:295: std.debug.print reference outside allowed paths
-src/main.zig:304: std.debug.print reference outside allowed paths
-src/main.zig:310: std.debug.print reference outside allowed paths
-src/main.zig:321: std.debug.print reference outside allowed paths
-src/main.zig:327: std.debug.print reference outside allowed paths
-src/query.zig:197: std.debug.print reference outside allowed paths
-src/query.zig:224: std.debug.print reference outside allowed paths
-src/serve.zig:411: std.debug.print reference outside allowed paths
-src/serve.zig:546: std.debug.print reference outside allowed paths
-src/serve/api.zig:111: std.debug.print reference outside allowed paths
-src/serve/edit.zig:1231: std.debug.print reference outside allowed paths
-src/serve/edit.zig:408: std.debug.print reference outside allowed paths
-src/serve/upload_package.zig:224: std.debug.print reference outside allowed paths
+# guardian-snapshot v3
+debug-print-ban|src/bench_layout.zig|std.debug.print
+debug-print-ban|src/bench_layout.zig|std.debug.print
+debug-print-ban|src/bench_layout.zig|std.debug.print
+debug-print-ban|src/bench_layout.zig|std.debug.print
+debug-print-ban|src/eval/fmt.zig|std.debug.print
+debug-print-ban|src/export_kicad.zig|std.debug.print
+debug-print-ban|src/export_kicad.zig|std.debug.print
+debug-print-ban|src/export_kicad.zig|std.debug.print
+debug-print-ban|src/export_kicad_footprint.zig|std.log.warn
+debug-print-ban|src/main.zig|std.debug.print
+debug-print-ban|src/main.zig|std.debug.print
+debug-print-ban|src/main.zig|std.debug.print
+debug-print-ban|src/main.zig|std.debug.print
+debug-print-ban|src/main.zig|std.debug.print
+debug-print-ban|src/main.zig|std.debug.print
+debug-print-ban|src/main.zig|std.debug.print
+debug-print-ban|src/main.zig|std.debug.print
+debug-print-ban|src/main.zig|std.debug.print
+debug-print-ban|src/main.zig|std.debug.print
+debug-print-ban|src/main.zig|std.debug.print
+debug-print-ban|src/main.zig|std.debug.print
+debug-print-ban|src/main.zig|std.debug.print
+debug-print-ban|src/main.zig|std.debug.print
+debug-print-ban|src/main.zig|std.debug.print
+debug-print-ban|src/main.zig|std.debug.print
+debug-print-ban|src/main.zig|std.debug.print
+debug-print-ban|src/main.zig|std.debug.print
+debug-print-ban|src/main.zig|std.debug.print
+debug-print-ban|src/main.zig|std.debug.print
+debug-print-ban|src/main.zig|std.debug.print
+debug-print-ban|src/main.zig|std.debug.print
+debug-print-ban|src/query.zig|std.debug.print
+debug-print-ban|src/query.zig|std.debug.print
+debug-print-ban|src/serve.zig|std.debug.print
+debug-print-ban|src/serve.zig|std.debug.print
+debug-print-ban|src/serve/api.zig|std.debug.print
+debug-print-ban|src/serve/edit.zig|std.debug.print
+debug-print-ban|src/serve/edit.zig|std.debug.print
+debug-print-ban|src/serve/upload_package.zig|std.debug.print

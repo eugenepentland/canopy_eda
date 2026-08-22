@@ -152,14 +152,14 @@ test "enrichPinFunctions fills single-alt pins" {
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("lib/pinouts");
-    try tmp.dir.writeFile(.{ .sub_path = "lib/pinouts/chip.sexp", .data = 
+    try tmp.dir.createDirPath(std.testing.io, "lib/pinouts");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/pinouts/chip.sexp", .data =
         \\(pinout "chip"
         \\  (pin A1 "PA1" (alt "SPI1_MOSI" io))
         \\  (pin A2 "PA2" (alt "TIM1_CH1" io) (alt "GPIO" io))
         \\)
     });
-    const project_dir = try tmp.dir.realpathAlloc(a, ".");
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
 
     const insts = try a.alloc(env_mod.Instance, 1);
     insts[0] = .{
@@ -195,5 +195,64 @@ test "enrichPinFunctions fills single-alt pins" {
 
     try testing.expectEqual(@as(usize, 1), block.nets[0].pins[0].asserted_fns.len);
     try testing.expectEqualStrings("SPI1_MOSI", block.nets[0].pins[0].asserted_fns[0]);
+    try testing.expectEqual(@as(usize, 0), block.nets[1].pins[0].asserted_fns.len);
+}
+
+// spec: eval/pin_enrichment - Fills a bare-integer pad's asserted_fns from its single alt
+test "enrichPinFunctions fills a single-alt bare-integer pad" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "lib/pinouts");
+    // Bare-integer pads — the spelling almost every pinout in projects/designs
+    // uses. `erc.loadPinoutMap` dropped these rows entirely, so this pass had
+    // no entry to read and never filled anything for such a part.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/pinouts/chip.sexp", .data =
+        \\(pinout "chip"
+        \\  (pin 1 "PA1" (alt "SPI1_MOSI" io))
+        \\  (pin 2 "PA2" (alt "TIM1_CH1" io) (alt "GPIO" io))
+        \\)
+    });
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+
+    const insts = try a.alloc(env_mod.Instance, 1);
+    insts[0] = .{
+        .ref_des = "U1",
+        .component = "chip",
+        .value = "",
+        .footprint = "",
+        .symbol = "",
+        .pinout = "chip",
+        .properties = &.{},
+        .attrs = &.{},
+        .source_offset = 0,
+        .id = "00000001",
+    };
+    const pins_1 = try a.alloc(PinRef, 1);
+    pins_1[0] = .{ .ref_des = "U1", .pin = "1" };
+    const pins_2 = try a.alloc(PinRef, 1);
+    pins_2[0] = .{ .ref_des = "U1", .pin = "2" };
+    const nets = try a.alloc(Net, 2);
+    nets[0] = .{ .name = "MOSI", .pins = pins_1 };
+    nets[1] = .{ .name = "AMBIG", .pins = pins_2 };
+
+    var block: DesignBlock = .{
+        .name = "test",
+        .instances = insts,
+        .nets = nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    try enrichPinFunctions(a, &block, project_dir);
+
+    try testing.expectEqual(@as(usize, 1), block.nets[0].pins[0].asserted_fns.len);
+    try testing.expectEqualStrings("SPI1_MOSI", block.nets[0].pins[0].asserted_fns[0]);
+    // Two alts is still genuinely ambiguous — ERC's `pin_function_required`
+    // owns that case, so the auto-fill must leave it alone.
     try testing.expectEqual(@as(usize, 0), block.nets[1].pins[0].asserted_fns.len);
 }

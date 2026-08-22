@@ -134,6 +134,7 @@ A post-build pass over the resolved design block. 12 checks ship today:
 | `missing_value` | An R/C/L instance with no value. |
 | `missing_footprint` | An instance whose component has no footprint assigned. |
 | `missing_decoupling` | A power pin lacking a nearby bypass cap. |
+| `invalid_emi_coupling` | An `(emi-couples …)` capacitor does not bridge its declared domain to ground or conflicts with decoupling intent. |
 | `voltage_mismatch` | A pin's expected voltage doesn't match the net's voltage rating. |
 | `concept_remaining` | A section still marked `concept` — design-readiness reminder. |
 | `power_budget` | A net's current draw exceeds a declared rating. |
@@ -189,7 +190,7 @@ netlisp is a **pure resource server** — it runs no auth of its own. Everything
 - **Browser sessions.** The `ward_session` cookie (domain `.eugenepentland.dev`) is verified against wardd `GET /verify`. No cookie → `302` to `https://ward.eugenepentland.dev/login?rd=<url>`; wardd unreachable → `503` (fail-closed).
 - **MCP / API bearers.** Verified against wardd's LAN-only `POST /oauth/introspect`; the token scope must contain the service name (`eda`). A `401` returns an RFC 9728 `WWW-Authenticate` pointing at `GET /.well-known/oauth-protected-resource`, which names ward as the authorization server.
 - **Roles.** ward member → `writer`, ward admin → `admin`, unknown → `reader` (write access gates the MCP mutation tools). Registration is invite-only through wardd; user/invite/client management lives in ward's admin portal (`/admin`).
-- **Plugin tokens (bearer).** For the KiCad sync agent — minted via `netlisp mint-plugin-token`, stored in `plugin_tokens.json` under the auth dir, checked *before* the ward bearer on `/api/sync-kicad-pcb/*`.
+- **Plugin tokens (bearer).** For KiCad sync API clients — minted via `netlisp mint-plugin-token`, stored in `plugin_tokens.json` under the auth dir, checked *before* the ward bearer on `/api/sync-kicad-pcb/*`.
 - **Config (env / `.env`).** `WARD_VERIFY_URL`, `WARD_LOGIN_URL`, `WARD_INTROSPECT_URL`, `WARD_SERVICE_NAME` (default `eda`), `WARD_CACHE_TTL_SECS` (default `30`, the revocation-lag bound). Unset → fail closed (`503`) outside the dev bypass.
 - **Dev bypass.** `NETLISP_DEV` grants a local admin identity to a loopback, unproxied request (env opt-in) — no wardd needed for local development.
 
@@ -266,19 +267,18 @@ projects/designs/
 │   ├── pinouts/                  # extracted pinouts (pin → function lookups)
 │   └── datasheets/               # uploaded PDFs
 └── auth/
-    └── plugin_tokens.json        # KiCad-agent bearer tokens (eda_p_*)
+    └── plugin_tokens.json        # KiCad-sync bearer tokens (eda_p_*)
 ```
 
 (Post ward-migration this is the only auth sidecar: passkeys, sessions, invites, and OAuth clients/tokens now live in wardd, not on disk here. The old `users.json` / `oauth_clients.json` / `oauth_tokens.json` stores are gone.)
 
-KiCad sync sidecars live next to the `.kicad_pcb` (not in `projects/designs/`):
+KiCad sync writes the declared `.kicad_pcb` directly and does not maintain EDA
+sidecars beside it. KiCad may create transient project lock files while pcbnew
+has the board open:
 
 ```
 <board-dir>/
 ├── Board.kicad_pcb
-├── Board.kicad_pcb.applied_ops.json   # state-asserting op fingerprints
-├── Board.kicad_pcb.stale.json         # orphan-footprint inventory
-├── Board.kicad_pcb.eda-sync.json      # per-board agent config (server URL, design name)
 └── ~Board.kicad_{pcb,pro}.lck         # KiCad's project lock files (transient)
 ```
 
@@ -299,7 +299,7 @@ KiCad sync sidecars live next to the `.kicad_pcb` (not in `projects/designs/`):
 | `netlisp convert-package <sym> <fp> [--name <n>] [--filter <f>]` | Combine a symbol + footprint into a `.sexp` package. |
 | `netlisp convert-pinout <f.kicad_sym> [--filter <n>]` | Extract the pin → function pinout from a KiCad symbol. |
 | `netlisp merge-alt-functions <pinout.sexp> <alts.csv\|.xml> [--write]` | Enrich a pinout with alternate-function metadata. |
-| `netlisp mint-plugin-token [--label <l>] [--auth-dir D]` | Issue a bearer token for the KiCad sync agent. |
+| `netlisp mint-plugin-token [--label <l>] [--auth-dir D]` | Issue a bearer token for KiCad sync API clients. |
 | `netlisp help` | Print usage. |
 
 (User/invite/password management is no longer a netlisp CLI — it moved to wardd's admin portal. The old `mint-invite` and `set-password` commands are gone.)
@@ -354,7 +354,7 @@ netlisp serves no login/account/authorization-server routes — those all live i
 | POST | `/api/upload-datasheet` | Upload a PDF datasheet. |
 | POST | `/api/upload-symbol` | Upload a KiCad symbol to the project library. |
 | POST | `/api/upload-footprint` | Upload a KiCad footprint. |
-| POST | `/api/sync-plan/:name` | KiCad sync orchestration (server-side diff). |
+| POST | `/api/sync-kicad-pcb/:name` | Diff the design against its declared PCB and apply or preview file updates. |
 | PUT | `/api/notes/:name` | Overwrite design notes markdown. |
 | POST | `/api/notes/:name/tasks/add` | Append a TODO entry. |
 | POST | `/api/notes/:name/tasks/complete` | Mark a TODO entry done. |

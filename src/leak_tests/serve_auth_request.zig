@@ -9,6 +9,7 @@
 //! the fail-closed paths return before any verifier is built.
 
 const std = @import("std");
+const clock = @import("../infra/clock.zig");
 const httpz = @import("httpz");
 const ward = @import("ward");
 
@@ -121,7 +122,7 @@ test "auth-request: a non-loopback peer does not receive the dev bypass" {
     var ht = httpz.testing.init(.{});
     defer ht.deinit();
     ht.url("/");
-    ht.req.address = std.net.Address.initIp4([4]u8{ 8, 8, 8, 8 }, 0);
+    ht.req.address = .{ .ip4 = .{ .bytes = .{ 8, 8, 8, 8 }, .port = 0 } };
     var srv = env.server(true); // dev on, not proxied, but public peer
     try std.testing.expect(!try ward_auth.authMiddleware(&srv, ht.req, ht.res));
     try std.testing.expectEqual(@as(u16, 503), ht.res.status);
@@ -149,7 +150,7 @@ test "auth-request: ipv6 loopback bypasses and a non-loopback ipv6 peer does not
         defer ht.deinit();
         ht.url("/schematics/x");
         const v6_loopback = [16]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
-        ht.req.address = std.net.Address.initIp6(v6_loopback, 0, 0, 0);
+        ht.req.address = .{ .ip6 = .{ .bytes = v6_loopback, .port = 0 } };
         var srv = env.server(true);
         try std.testing.expect(try ward_auth.authMiddleware(&srv, ht.req, ht.res));
     }
@@ -161,7 +162,7 @@ test "auth-request: ipv6 loopback bypasses and a non-loopback ipv6 peer does not
         defer ht.deinit();
         ht.url("/");
         const v6_public = [16]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
-        ht.req.address = std.net.Address.initIp6(v6_public, 0, 0, 0);
+        ht.req.address = .{ .ip6 = .{ .bytes = v6_public, .port = 0 } };
         var srv = env.server(true);
         try std.testing.expect(!try ward_auth.authMiddleware(&srv, ht.req, ht.res));
         try std.testing.expectEqual(@as(u16, 503), ht.res.status);
@@ -245,7 +246,7 @@ test "auth-request: mcp admits any valid ward token regardless of scope" {
     var env = TestEnv{ .a = std.testing.allocator };
     defer env.deinit();
     env.initWard("http" ++ "://v", login_url, "http" ++ "://i");
-    const now = std.time.timestamp();
+    const now = clock.timestamp();
 
     // Case A — a scope WITHOUT the service name is still admitted (writes are
     // role-gated, not scope-gated, on the /mcp read path).
@@ -284,7 +285,7 @@ test "auth-request: session write-gate forbids a reader mutation and admits the 
     var env = TestEnv{ .a = std.testing.allocator };
     defer env.deinit();
     env.initWard("http" ++ "://v", login_url, "http" ++ "://i");
-    const now = std.time.timestamp();
+    const now = clock.timestamp();
     const cookie_hdr = "ward_session=sess-token";
 
     // A reader (unknown ward role) POSTing to a mutating endpoint is forbidden.
@@ -342,7 +343,7 @@ test "auth-request: the write-gate exempts pcb-drc compute but not the pcb-drc-r
     var env = TestEnv{ .a = std.testing.allocator };
     defer env.deinit();
     env.initWard("http" ++ "://v", login_url, "http" ++ "://i");
-    const now = std.time.timestamp();
+    const now = clock.timestamp();
     const cookie_hdr = "ward_session=sess-token";
 
     // The mutating POST /api/pcb-drc-rules/:name (persists rules to disk) is NOT
@@ -379,7 +380,7 @@ test "auth-request: the write-gate exempts pcb-drc compute but not the pcb-drc-r
 test "auth-request: a plugin token wins the sync path and a bogus one falls through" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(dir);
 
     // Seed a plugin_tokens.json holding the sha256 of a known raw token so
@@ -393,7 +394,7 @@ test "auth-request: a plugin token wins the sync path and a bogus one falls thro
         .{hash},
     );
     defer std.testing.allocator.free(json);
-    try tmp.dir.writeFile(.{ .sub_path = "plugin_tokens.json", .data = json });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "plugin_tokens.json", .data = json });
 
     // The plugin-token store reads its json file through the Server allocator on
     // the arena contract (production passes the per-request arena, `res.arena`),
@@ -435,7 +436,7 @@ test "auth-request: a cache-seeded ward bearer admits the sync path as the fallb
     // Seed the bearer cache so the verifier (network) is never consulted. The
     // grant must be scoped for this service (wardd is shared) — a foreign scope
     // no longer admits the board write (see the scope-rejection test below).
-    try env.state.ward.bearer.?.cache.put(bearer_token, "ada", .member, "eda", std.time.timestamp());
+    try env.state.ward.bearer.?.cache.put(bearer_token, "ada", .member, "eda", clock.timestamp());
     var ht = httpz.testing.init(.{});
     defer ht.deinit();
     ht.url("/api/sync-kicad-pcb/x");
@@ -443,6 +444,36 @@ test "auth-request: a cache-seeded ward bearer admits the sync path as the fallb
     ht.header("authorization", "Bearer " ++ bearer_token);
     var srv = env.server(false); // no plugin token matches (empty store)
     try std.testing.expect(try ward_auth.authMiddleware(&srv, ht.req, ht.res));
+}
+
+// spec: serve - A ward reader's eda-scoped bearer does not admit the destructive sync write while a member's and an admin's do
+test "auth-request: the sync bearer fallback is role-gated, not scope-only" {
+    // `POST /api/sync-kicad-pcb/:name` rewrites the KiCad board in place, and the
+    // bearer leg returns straight past the session gate's write check — so the
+    // role has to be checked HERE. Each row seeds a live, correctly-scoped grant
+    // and differs only in the ward role behind it.
+    const rows = [_]struct { role: ward.verdict.Role, admitted: bool }{
+        // Reader: a valid eda-scoped token whose holder may not write. Falls
+        // through to the session gate, which (no cookie, /api/ path) answers 401.
+        .{ .role = .unknown, .admitted = false },
+        .{ .role = .member, .admitted = true }, // → writer
+        .{ .role = .admin, .admitted = true },
+    };
+    for (rows) |row| {
+        var env = TestEnv{ .a = std.testing.allocator };
+        defer env.deinit();
+        env.initWard("http" ++ "://v", login_url, "http" ++ "://i");
+        // Seeded so the verifier (network) is never consulted.
+        try env.state.ward.bearer.?.cache.put(bearer_token, "ada", row.role, service, clock.timestamp());
+        var ht = httpz.testing.init(.{});
+        defer ht.deinit();
+        ht.url("/api/sync-kicad-pcb/x");
+        ht.req.method = .POST;
+        ht.header("authorization", "Bearer " ++ bearer_token);
+        var srv = env.server(false); // no plugin token matches (empty store)
+        try std.testing.expectEqual(row.admitted, try ward_auth.authMiddleware(&srv, ht.req, ht.res));
+        if (!row.admitted) try std.testing.expectEqual(@as(u16, 401), ht.res.status);
+    }
 }
 
 // spec: serve - A sync bearer scoped for another service is not admitted and falls through to the session gate
@@ -455,7 +486,7 @@ test "auth-request: a foreign-scoped ward bearer does not admit the sync path" {
     // bearer path returns false, and the request falls through to the session
     // gate, which (no ward_session cookie, an /api/ path) answers 401 — never a
     // sync execution.
-    try env.state.ward.bearer.?.cache.put(bearer_token, "ada", .member, "files", std.time.timestamp());
+    try env.state.ward.bearer.?.cache.put(bearer_token, "ada", .member, "files", clock.timestamp());
     var ht = httpz.testing.init(.{});
     defer ht.deinit();
     ht.url("/api/sync-kicad-pcb/x");
@@ -506,7 +537,7 @@ test "auth-request: oom during the sync bearer fallback errors instead of admitt
     env.initWard("http" ++ "://v", login_url, "http" ++ "://i");
     // Seed a live grant so the request WOULD be admitted if memory allowed —
     // the only thing failing here is allocation, never the credential.
-    try env.state.ward.bearer.?.cache.put(bearer_token, "ada", .member, "files", std.time.timestamp());
+    try env.state.ward.bearer.?.cache.put(bearer_token, "ada", .member, "files", clock.timestamp());
     var ht = httpz.testing.init(.{});
     defer ht.deinit();
     ht.url("/api/sync-kicad-pcb/x");

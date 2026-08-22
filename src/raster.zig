@@ -122,43 +122,55 @@ pub const Canvas = struct {
         }
     }
 
-    /// Filled polygon (final-pixel coords, even-odd rule). Handles arbitrary
-    /// vertex counts: a 64-slot stack scratch covers simple pads/quads, and
-    /// KiCad custom pads (rounded outlines, 100-200+ points) spill to the heap.
+    /// Filled polygon (final-pixel coords, even-odd rule): the one-ring case of
+    /// `fillRings`. Arbitrary vertex counts spill to the heap inside; on that
+    /// rare OOM the polygon is skipped rather than drawn truncated.
     pub fn fillPoly(self: *Canvas, pts: []const [2]f32, c: Rgb, a: f32) void {
-        if (pts.len < 3) return;
+        self.fillRings(&.{pts}, c, a);
+    }
+
+    /// Filled polygon set (final-pixel coords, even-odd across ALL rings):
+    /// ring 0 is the outer contour, later rings cut holes out of it — the
+    /// even-odd parity handles containment without explicit clipping.
+    /// Degenerate rings (<3 points) are skipped, and each scanline only walks
+    /// the rings whose y-range spans it (a hole far from the row costs
+    /// nothing). The crossings scratch is stack-then-heap; a failed spill
+    /// draws nothing: a truncated crossing set would break parity and bleed
+    /// fill across the canvas — worse than skipping a translucent underlay.
+    pub fn fillRings(self: *Canvas, rings: []const []const [2]f32, c: Rgb, a: f32) void {
         const s: f32 = @floatFromInt(self.ss);
-        // `ip` holds the supersampled points; `xs` the per-scanline crossings
-        // (at most one per edge ⇒ sized to the vertex count). Both fall back to
-        // the stack buffers if the heap allocation fails — only the rare big
-        // polygon would then truncate, never the common case.
-        var ip_buf: [64][2]f32 = undefined;
-        var xs_buf: [64]f32 = undefined;
-        var ip: [][2]f32 = &ip_buf;
-        var xs: []f32 = &xs_buf;
-        var heap = false;
-        if (pts.len > ip_buf.len) {
-            if (self.alloc.alloc([2]f32, pts.len)) |b1| {
-                if (self.alloc.alloc(f32, pts.len)) |b2| {
-                    ip = b1;
-                    xs = b2;
-                    heap = true;
-                } else |_| self.alloc.free(b1);
-            } else |_| {}
-        }
-        defer if (heap) {
-            self.alloc.free(ip);
-            self.alloc.free(xs);
-        };
-        const n = @min(pts.len, ip.len);
-        if (n < 3) return;
+        // Per-ring supersampled y-range for the scanline skip. Pour contours
+        // carry one outer ring + a handful of antipad holes; beyond the stack
+        // cap the extra rings are still DRAWN, just without the skip.
+        var yr_buf: [32][2]f32 = undefined;
+        var total: usize = 0;
         var min_y: f32 = std.math.floatMax(f32);
         var max_y: f32 = -std.math.floatMax(f32);
-        for (pts[0..n], 0..) |p, i| {
-            ip[i] = .{ p[0] * s, p[1] * s };
-            min_y = @min(min_y, ip[i][1]);
-            max_y = @max(max_y, ip[i][1]);
+        for (rings, 0..) |rg, ri| {
+            var lo: f32 = std.math.floatMax(f32);
+            var hi: f32 = -std.math.floatMax(f32);
+            if (rg.len >= 3) {
+                total += rg.len;
+                for (rg) |p| {
+                    lo = @min(lo, p[1] * s);
+                    hi = @max(hi, p[1] * s);
+                }
+            }
+            if (ri < yr_buf.len) yr_buf[ri] = .{ lo, hi };
+            min_y = @min(min_y, lo);
+            max_y = @max(max_y, hi);
         }
+        if (total < 3) return;
+        var xs_buf: [64]f32 = undefined;
+        var xs: []f32 = &xs_buf;
+        var heap = false;
+        if (total > xs_buf.len) {
+            if (self.alloc.alloc(f32, total)) |b| {
+                xs = b;
+                heap = true;
+            } else |_| return;
+        }
+        defer if (heap) self.alloc.free(xs);
         const iw: i64 = @intCast(self.iw);
         const ih: i64 = @intCast(self.ih);
         var iy: i64 = pxIndex(@floor(min_y), 0, ih);
@@ -166,16 +178,9 @@ pub const Canvas = struct {
         while (iy < iy_end) : (iy += 1) {
             const yc: f32 = @as(f32, @floatFromInt(iy)) + 0.5;
             var m: usize = 0;
-            var j: usize = 0;
-            while (j < n) : (j += 1) {
-                const k = (j + 1) % n;
-                const y0 = ip[j][1];
-                const y1 = ip[k][1];
-                if ((y0 <= yc and y1 > yc) or (y1 <= yc and y0 > yc)) {
-                    const t = (yc - y0) / (y1 - y0);
-                    xs[m] = ip[j][0] + t * (ip[k][0] - ip[j][0]);
-                    m += 1;
-                }
+            for (rings, 0..) |rg, ri| {
+                if (ri < yr_buf.len and (yc < yr_buf[ri][0] or yc > yr_buf[ri][1])) continue;
+                m = ringCrossings(rg, s, yc, xs, m);
             }
             std.mem.sort(f32, xs[0..m], {}, std.sort.asc(f32));
             var pair: usize = 0;
@@ -185,6 +190,26 @@ pub const Canvas = struct {
                 while (ix < ix_end) : (ix += 1) self.blendPx(ix, iy, c, a);
             }
         }
+    }
+
+    /// Append one ring's scanline crossings (supersampled x) at `xs[m0..]`;
+    /// returns the new count. Skips degenerate rings, matching `fillRings`'
+    /// vertex census so `xs` (sized to the total vertex count) never overflows.
+    fn ringCrossings(rg: []const [2]f32, s: f32, yc: f32, xs: []f32, m0: usize) usize {
+        if (rg.len < 3) return m0;
+        var m = m0;
+        var j: usize = 0;
+        while (j < rg.len) : (j += 1) {
+            const k = (j + 1) % rg.len;
+            const y0 = rg[j][1] * s;
+            const y1 = rg[k][1] * s;
+            if ((y0 <= yc and y1 > yc) or (y1 <= yc and y0 > yc)) {
+                const t = (yc - y0) / (y1 - y0);
+                xs[m] = (rg[j][0] + t * (rg[k][0] - rg[j][0])) * s;
+                m += 1;
+            }
+        }
+        return m;
     }
 
     /// Thick line segment (final-pixel coords) as a filled quad; optional round
@@ -369,6 +394,22 @@ test "fillPoly handles polygons past the 64-vertex stack scratch" {
     cv.fillPoly(&pts, Rgb.hex("#b08d57"), 1.0);
     const o = (20 * cv.iw + 20) * 3; // centre pixel
     try std.testing.expect(cv.buf[o] == 0xb0 and cv.buf[o + 1] == 0x8d and cv.buf[o + 2] == 0x57);
+}
+
+test "fillRings cuts an even-odd hole out of the outer contour" {
+    // A pour face is an outer contour with interior antipad holes; the fill
+    // must cover the annulus and leave every hole pixel untouched.
+    const alloc = std.testing.allocator;
+    var cv = try Canvas.init(alloc, 40, 40, 1, Rgb.hex("#000000"));
+    defer cv.deinit();
+    const outer = [_][2]f32{ .{ 5, 5 }, .{ 35, 5 }, .{ 35, 35 }, .{ 5, 35 } };
+    const hole = [_][2]f32{ .{ 15, 15 }, .{ 25, 15 }, .{ 25, 25 }, .{ 15, 25 } };
+    const rings = [_][]const [2]f32{ &outer, &hole };
+    cv.fillRings(&rings, Rgb.hex("#b08d57"), 1.0);
+    const filled = (10 * cv.iw + 10) * 3; // inside outer, outside the hole
+    try std.testing.expect(cv.buf[filled] == 0xb0 and cv.buf[filled + 1] == 0x8d);
+    const holed = (20 * cv.iw + 20) * 3; // dead centre of the hole — untouched
+    try std.testing.expect(cv.buf[holed] == 0x00 and cv.buf[holed + 2] == 0x00);
 }
 
 test "canvas fills and downscales to a valid png" {

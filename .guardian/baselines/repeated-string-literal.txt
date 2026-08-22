@@ -1,25 +1,18 @@
-# guardian-snapshot v1
-duplicate const Node = "" across 2 files
-duplicate const download_timeout_secs = "60" across 2 files
-duplicate const header_cors_allow_origin = "access-control-allow-origin" across 4 files
-duplicate const name_field_prefix = "{\"name\":" across 2 files
-duplicate const ok_json_true = "{\"ok\":true}" across 3 files
-duplicate const sectionClose = "</section>" across 2 files
-duplicate const sexp_ext_len = ".sexp" across 2 files
-duplicate const sexp_path_template = "{s}/{s}.sexp" across 2 files
-duplicate const style_block = "<style>" across 2 files
-duplicate const u8 = "." across 2 files
-src/import_kicad.zig: string literal {s}/lib/components/{s}.sexp appears 3 times — extract a const
-src/render_json.zig: string literal component appears 3 times — extract a const
-src/serve/bom_html.zig: string literal manufacturer appears 3 times — extract a const
-src/serve/edit.zig: string literal \"section\" appears 3 times — extract a const
-src/serve/edit.zig: string literal missing net appears 3 times — extract a const
-src/serve/edit.zig: string literal missing to appears 3 times — extract a const
-src/serve/edit.zig: string literal not a design-block appears 4 times — extract a const
-src/serve/edit.zig: string literal {{\"ok\":true,\"version\":{d}}} appears 4 times — extract a const
-src/serve/templates/library.zig: string literal  href=\" appears 3 times — extract a const
-src/serve/templates/library.zig: string literal </button> appears 3 times — extract a const
-src/serve/templates/pages.zig: string literal  class=\"design-card-link\" appears 4 times — extract a const
-src/serve/templates/pages.zig: string literal  href=\" appears 5 times — extract a const
-src/serve/templates/pages.zig: string literal <div class=\"design-card-title\"> appears 3 times — extract a const
-src/serve/templates/pages.zig: string literal <span class=\"section-chip-more\"> appears 3 times — extract a const
+# guardian-snapshot v3
+repeated-string-literal|const header_cors_allow_origin = "access-control-allow-origin"
+repeated-string-literal|const name_field_prefix = "{\"name\":"
+repeated-string-literal|const ok_json_true = "{\"ok\":true}"
+repeated-string-literal|const sectionClose = "</section>"
+repeated-string-literal|const sexp_path_template = "{s}/{s}.sexp"
+repeated-string-literal|src/import_kicad.zig|{s}/lib/components/{s}.sexp
+repeated-string-literal|src/render_json.zig|component
+repeated-string-literal|src/serve/bom_html.zig|manufacturer
+repeated-string-literal|src/serve/edit.zig|\"section\"
+repeated-string-literal|src/serve/edit.zig|missing net
+repeated-string-literal|src/serve/edit.zig|missing to
+repeated-string-literal|src/serve/edit.zig|{{\"ok\":true,\"version\":{d}}}
+repeated-string-literal|src/serve/templates/library.zig| href=\"
+repeated-string-literal|src/serve/templates/library.zig|</button>
+repeated-string-literal|src/serve/templates/pages.zig| class=\"design-card-link\"
+repeated-string-literal|src/serve/templates/pages.zig| href=\"
+repeated-string-literal|src/serve/templates/pages.zig|<div class=\"design-card-title\">

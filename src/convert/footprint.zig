@@ -7,19 +7,20 @@ const ast = @import("../sexpr/ast.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const printer_mod = @import("../sexpr/printer.zig");
 const numeric = @import("../numeric.zig");
+const board_layers = @import("../board_layers.zig");
 const Node = ast.Node;
 const Span = ast.Span;
 // ── Constants ─────────────────────────────────────────────────────
 const shape_roundrect = "roundrect";
 const silk_header = "  (silkscreen\n";
 const fab_header = "  (fab\n";
-const layer_silk = "F.SilkS";
-const layer_fab = "F.Fab";
+const layer_silk = board_layers.f_silks;
+const layer_fab = board_layers.f_fab;
+const layer_crtyd = board_layers.f_crtyd;
 const full_turn_deg: f64 = 360.0;
-const rot_45_deg: f64 = 45.0;
-const rot_135_deg: f64 = 135.0;
-const rot_225_deg: f64 = 225.0;
-const rot_315_deg: f64 = 315.0;
+const rot_90_deg: f64 = 90.0;
+const rot_180_deg: f64 = 180.0;
+const rot_270_deg: f64 = 270.0;
 
 /// Convert a KiCad .kicad_mod file to .sexp footprint format.
 pub fn convertFootprint(allocator: std.mem.Allocator, source: []const u8) ConvertError![]const u8 {
@@ -47,9 +48,9 @@ pub fn convertFootprint(allocator: std.mem.Allocator, source: []const u8) Conver
     }
 
     // Build output
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-    const w = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    defer buf.deinit();
+    const w = &buf.writer;
 
     try w.writeAll("(footprint \"");
     try w.writeAll(name);
@@ -78,7 +79,7 @@ pub fn convertFootprint(allocator: std.mem.Allocator, source: []const u8) Conver
     try emitLayerGeom(w, children[2..], layer_fab, fab_header);
 
     try w.writeAll(")\n");
-    return buf.toOwnedSlice(allocator);
+    return buf.toOwnedSlice();
 }
 
 fn emitPad(w: anytype, node: Node) !void {
@@ -171,19 +172,17 @@ fn emitPad(w: anytype, node: Node) !void {
         }
     }
 
-    // Apply pad rotation: 90° or 270° swaps width and height
-    const rot_mod = @mod(rotation, full_turn_deg);
-    const is_rotated = (rot_mod > rot_45_deg and rot_mod < rot_135_deg) or (rot_mod > rot_225_deg and rot_mod < rot_315_deg);
-    const out_sx = if (is_rotated) sy else sx;
-    const out_sy = if (is_rotated) sx else sy;
+    const rot_out = padRotOut(rotation);
+    const out_sx = if (rot_out.swap) sy else sx;
+    const out_sy = if (rot_out.swap) sx else sy;
 
     // {d:.4} matches KiCad's own metric-footprint precision: 0402 pads land
     // at ±0.485, 0.4 mm-pitch BGAs step by 0.1625 — quantising to 0.01 mm
     // shifts every coordinate by up to 5 µm and the error compounds across
     // an import→export round-trip.
-    try w.print("  (pad {s} {s} {s} (pos {d:.4} {d:.4}) (size {d:.4} {d:.4})", .{
-        num_str, out_type, out_shape, x, y, out_sx, out_sy,
-    });
+    try w.print("  (pad {s} {s} {s} (pos {d:.4} {d:.4}", .{ num_str, out_type, out_shape, x, y });
+    if (rot_out.angle != 0) try w.print(" {d:.4}", .{rot_out.angle});
+    try w.print(") (size {d:.4} {d:.4})", .{ out_sx, out_sy });
     if (has_drill) {
         if (is_oval_drill) {
             try w.print(" (drill oval {d:.4} {d:.4})", .{ drill_x, drill_y });
@@ -218,14 +217,44 @@ fn findCustomPolyPts(pad_items: []const Node) ?[]const Node {
     return null;
 }
 
-/// Rotate a pad-local point by `rot_deg` (CCW) and translate by the pad
-/// origin `(tx, ty)`, yielding footprint-absolute coordinates.
-fn rotTranslate(lx: f64, ly: f64, rot_deg: f64, tx: f64, ty: f64) struct { x: f64, y: f64 } {
-    if (rot_deg == 0) return .{ .x = lx + tx, .y = ly + ty };
-    const rad = rot_deg * std.math.pi / 180.0;
+/// How a plain pad's KiCad `at`-angle lands in the emitted `.sexp`. An exact
+/// quarter-turn flattens into the axis-aligned model every consumer reads
+/// natively: 90°/270° swap width and height — identical copper for the 2-fold
+/// symmetric shapes emitted here — and 0°/180° are the identity. That is the
+/// behavior every committed footprint was generated under (stock libraries
+/// rotate pads in quarter turns), so those conversions stay unchanged. Any
+/// other angle used to be dropped on the floor — a 315°-turned square emitted
+/// as axis-aligned copper — and is now preserved as the third `(pos X Y ROT)`
+/// token, converted into netlisp's frame: the two frames turn opposite ways
+/// over the same y-down numbers, so the token is `mod(360 − kicad, 360)`, the
+/// same bridge as `serve/sync.zig`'s `netlispRotToKicad`. `angle` 0 means "no
+/// token" — a preserved angle is never 0 because 0 flattens. `import_kicad`'s
+/// board-pad emitter shares this landing, feeding it the footprint-local
+/// angle it recovers first (board files bake the footprint rotation into
+/// every pad angle) — the two emitters must never disagree about which
+/// angles flatten and which carry a token.
+pub fn padRotOut(kicad_rot_deg: f64) struct { swap: bool, angle: f64 } {
+    const rot_mod = @mod(kicad_rot_deg, full_turn_deg);
+    if (rot_mod == rot_90_deg or rot_mod == rot_270_deg) return .{ .swap = true, .angle = 0 };
+    if (rot_mod == 0 or rot_mod == rot_180_deg) return .{ .swap = false, .angle = 0 };
+    return .{ .swap = false, .angle = @mod(full_turn_deg - rot_mod, full_turn_deg) };
+}
+
+/// Rotate a pad-local point by the pad's KiCad `at`-angle and translate by
+/// the pad origin `(tx, ty)`, yielding footprint-absolute coordinates. KiCad's
+/// angle is counter-clockwise AS DISPLAYED over y-down coordinates — `[[c, s],
+/// [−s, c]]` on the raw numbers — the opposite sense from netlisp's own
+/// `pose_math.rotate` matrix `[[c, −s], [s, c]]`. Baking with netlisp's matrix
+/// on the un-negated angle mirrored every rotated custom pad; this is the same
+/// relation the rest of the KiCad bridge encodes as `mod(360 − rot, 360)`
+/// (`serve/sync.zig` `netlispRotToKicad`, `kicad_pcb/import_layout.zig`
+/// `kicadRotToNetlisp`).
+fn rotTranslate(lx: f64, ly: f64, kicad_rot_deg: f64, tx: f64, ty: f64) struct { x: f64, y: f64 } {
+    if (kicad_rot_deg == 0) return .{ .x = lx + tx, .y = ly + ty };
+    const rad = kicad_rot_deg * std.math.pi / 180.0;
     const c = @cos(rad);
     const s = @sin(rad);
-    return .{ .x = lx * c - ly * s + tx, .y = lx * s + ly * c + ty };
+    return .{ .x = lx * c + ly * s + tx, .y = ly * c - lx * s + ty };
 }
 
 /// Emit a custom pad as its real polygon: a bbox-derived `(pos …)`/`(size …)`
@@ -314,7 +343,7 @@ fn emitCourtyard(w: anytype, children: []const Node) !void {
 fn emitCourtyardCircle(w: anytype, child: Node) !bool {
     if (!child.isForm("fp_circle")) return false;
     const cl = child.asList() orelse return false;
-    if (!std.mem.eql(u8, getLayer(cl[1..]), "F.CrtYd")) return false;
+    if (!std.mem.eql(u8, getLayer(cl[1..]), layer_crtyd)) return false;
     const center = readPair(cl[1..], "center") orelse return false;
     const end = readPair(cl[1..], "end") orelse return false;
     const dx = end.x - center.x;
@@ -327,7 +356,7 @@ fn emitCourtyardCircle(w: anytype, child: Node) !bool {
 fn emitCourtyardRect(w: anytype, child: Node) !bool {
     if (!child.isForm("fp_rect")) return false;
     const cl = child.asList() orelse return false;
-    if (!std.mem.eql(u8, getLayer(cl[1..]), "F.CrtYd")) return false;
+    if (!std.mem.eql(u8, getLayer(cl[1..]), layer_crtyd)) return false;
     const start = readPair(cl[1..], "start") orelse return false;
     const end = readPair(cl[1..], "end") orelse return false;
     try w.print("  (courtyard (rect {d:.2} {d:.2} {d:.2} {d:.2}))\n", .{ start.x, start.y, end.x, end.y });
@@ -351,7 +380,7 @@ fn emitCourtyardLineBBox(w: anytype, children: []const Node) !void {
 fn expandBBoxFromCrtydLine(child: Node, min_x: *f64, min_y: *f64, max_x: *f64, max_y: *f64) !bool {
     if (!child.isForm("fp_line")) return false;
     const cl = child.asList() orelse return false;
-    if (!std.mem.eql(u8, getLayer(cl[1..]), "F.CrtYd")) return false;
+    if (!std.mem.eql(u8, getLayer(cl[1..]), layer_crtyd)) return false;
     if (readPair(cl[1..], "start")) |p| accumulateBBox(p.x, p.y, min_x, min_y, max_x, max_y);
     if (readPair(cl[1..], "end")) |p| accumulateBBox(p.x, p.y, min_x, min_y, max_x, max_y);
     return true;
@@ -496,6 +525,7 @@ pub const ConvertError = error{
     UnterminatedString,
     InvalidNumber,
     TooDeep,
+    WriteFailed,
 };
 
 // spec: convert/footprint - Converts a KiCad footprint file into S-expression format
@@ -596,4 +626,102 @@ test "convert custom pad expands gr_poly into polygon + bbox" {
     try std.testing.expect(std.mem.indexOf(u8, output, "(pad 1 smd custom (pos 1.000 1.000) (size 2.000 2.000)") != null);
     // Outline is preserved in footprint-absolute coordinates.
     try std.testing.expect(std.mem.indexOf(u8, output, "(poly (0.000 0.000) (2.000 0.000) (2.000 2.000) (0.000 2.000))") != null);
+}
+
+// Regression: the footprint converter must preserve EAGLE-derived vendor pads.
+test "convert footprint accepts dollar-sign pad identifiers" {
+    const alloc = std.testing.allocator;
+    const input =
+        \\(footprint "VENDOR_RF"
+        \\  (pad P$1 smd custom (at 0 0) (size 0.5 0.5)
+        \\    (primitives (gr_poly (pts (xy -1 -1) (xy 1 -1) (xy 1 1) (xy -1 1)) (width 0.1))))
+        \\  (pad P$2 smd rect (at 0 2) (size 0.5 1)))
+    ;
+    const output = try convertFootprint(alloc, input);
+    defer alloc.free(output);
+
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad P$1 smd custom") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad P$2 smd rect") != null);
+}
+
+// spec: convert/footprint - Bakes a custom pad's at-angle into the emitted polygon in KiCad's counter-clockwise display sense
+test "convert custom pad bakes at-angle in KiCad's sense" {
+    const alloc = std.testing.allocator;
+    // A right triangle — deliberately asymmetric so a wrong-sense bake cannot
+    // produce the same points — on a pad at (1, 1) turned 30° in KiCad's
+    // frame. KiCad's angle is CCW as displayed over y-down numbers, so each
+    // local (lx, ly) lands at (lx·c + ly·s + 1, −lx·s + ly·c + 1) with
+    // c = cos 30° ≈ 0.8660254, s = sin 30° = 0.5:
+    //   (0, 0) → (1.000, 1.000)
+    //   (2, 0) → (2.732, 0.000)   — netlisp's matrix would put it at (2.732, 2.000)
+    //   (0, 1) → (1.500, 1.866)
+    const input =
+        \\(footprint "X"
+        \\  (pad "1" smd custom
+        \\    (at 1 1 30)
+        \\    (size 0.25 0.25)
+        \\    (layers "F.Cu" "F.Mask" "F.Paste")
+        \\    (options (clearance outline) (anchor rect))
+        \\    (primitives
+        \\      (gr_poly (pts (xy 0 0) (xy 2 0) (xy 0 1)) (width 0))
+        \\    )
+        \\  )
+        \\)
+    ;
+    const output = try convertFootprint(alloc, input);
+    defer alloc.free(output);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(poly (1.000 1.000) (2.732 0.000) (1.500 1.866))") != null);
+    // The mirrored point the un-negated bake produced.
+    try std.testing.expect(std.mem.indexOf(u8, output, "(2.732 2.000)") == null);
+    // bbox of the correctly-rotated points: x ∈ [1.000, 2.732], y ∈ [0.000, 1.866].
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pos 1.866 0.933) (size 1.732 1.866)") != null);
+}
+
+// spec: convert/footprint - Flattens a plain pad's exact quarter-turn at-angle into a width/height swap with no rotation token
+test "convert flattens exact quarter-turn pad at-angle to size swap" {
+    const alloc = std.testing.allocator;
+    const input =
+        \\(footprint "X"
+        \\  (pad "1" smd rect (at -1 0 90) (size 0.5 1.0) (layers "F.Cu"))
+        \\  (pad "2" smd rect (at 1 0 -90) (size 0.6 1.2) (layers "F.Cu"))
+        \\  (pad "3" smd rect (at 0 1 180) (size 0.7 1.4) (layers "F.Cu"))
+        \\  (pad "4" smd rect (at 0 -1 450) (size 0.8 1.6) (layers "F.Cu"))
+        \\)
+    ;
+    const output = try convertFootprint(alloc, input);
+    defer alloc.free(output);
+    // 90° and −90° (= 270°) swap W×H; the two-number (pos …) shows no angle
+    // token — identical copper, and identical output to every conversion the
+    // committed library was generated under.
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad 1 smd rect (pos -1.0000 0.0000) (size 1.0000 0.5000))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad 2 smd rect (pos 1.0000 0.0000) (size 1.2000 0.6000))") != null);
+    // 180° is the identity for the 2-fold-symmetric shapes emitted here.
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad 3 smd rect (pos 0.0000 1.0000) (size 0.7000 1.4000))") != null);
+    // Angles reduce mod 360: 450° is the 90° swap.
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad 4 smd rect (pos 0.0000 -1.0000) (size 1.6000 0.8000))") != null);
+}
+
+// spec: convert/footprint - Preserves a plain pad's non-quarter-turn at-angle as a netlisp-frame pos rotation token
+test "convert preserves non-quarter pad at-angle in netlisp frame" {
+    const alloc = std.testing.allocator;
+    // Pad 1 is the in-tree shape that motivated this: DQN0004A-MFG's centre
+    // pad, a 0.58 mm square at 315° — a diamond the old converter silently
+    // emitted as an axis-aligned square.
+    const input =
+        \\(footprint "X"
+        \\  (pad "1" smd rect (at 0 0 315) (size 0.58 0.58) (layers "F.Cu"))
+        \\  (pad "2" smd rect (at 2 1 30) (size 1.2 0.6) (layers "F.Cu"))
+        \\  (pad "3" smd rect (at -2 1 100) (size 0.9 1.8) (layers "F.Cu"))
+        \\)
+    ;
+    const output = try convertFootprint(alloc, input);
+    defer alloc.free(output);
+    // The token is netlisp's frame — mod(360 − kicad, 360), the same bridge as
+    // serve/sync.zig's netlispRotToKicad — and the size stays the pad's own
+    // unrotated W×H, never swapped.
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad 1 smd rect (pos 0.0000 0.0000 45.0000) (size 0.5800 0.5800))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad 2 smd rect (pos 2.0000 1.0000 330.0000) (size 1.2000 0.6000))") != null);
+    // 100° used to fall in the old near-90° window and flatten to a 90° swap,
+    // 10° wrong; it now keeps its real angle.
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad 3 smd rect (pos -2.0000 1.0000 260.0000) (size 0.9000 1.8000))") != null);
 }

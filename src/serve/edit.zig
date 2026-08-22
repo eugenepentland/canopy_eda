@@ -13,16 +13,15 @@ const render_json = @import("../render_json.zig");
 const bom = @import("../bom.zig");
 const bom_resolve = @import("../bom_resolve.zig");
 const env_mod = @import("../eval/env.zig");
-const eval_modules = @import("../eval/modules.zig");
 const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
 const bom_html = @import("bom_html.zig");
 const history = @import("history.zig");
-const sexpr_parser = @import("../sexpr/parser.zig");
-const erc_mod = @import("../erc.zig");
-const diag_format = @import("diag_format.zig");
-const datasheet_attach = @import("datasheet_attach.zig");
 const id_insert = @import("../id_insert.zig");
+const sexpr_parser = @import("../sexpr/parser.zig");
+const datasheet_attach = @import("datasheet_attach.zig");
+const rebuild_design = @import("rebuild_design.zig");
+const modules_mod = @import("modules.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const http_not_found: u16 = 404;
@@ -60,12 +59,30 @@ const ok_json_true = "{\"ok\":true}";
 /// `std.fmt` template for a `{"error":"<msg>"}` JSON body (msg substituted).
 const err_json_fmt = "{{\"error\":\"{s}\"}}";
 
+/// Adapts an allocating writer's generic `WriteFailed` back to the historical
+/// allocator-only contract. Growing this writer is its only failure mode.
+const AllocatingWriter = struct {
+    writer: *std.Io.Writer,
+
+    fn writeAll(self: AllocatingWriter, bytes: []const u8) std.mem.Allocator.Error!void {
+        self.writer.writeAll(bytes) catch return error.OutOfMemory;
+    }
+
+    fn writeByte(self: AllocatingWriter, byte: u8) std.mem.Allocator.Error!void {
+        self.writer.writeByte(byte) catch return error.OutOfMemory;
+    }
+
+    fn print(self: AllocatingWriter, comptime format: []const u8, args: anytype) std.mem.Allocator.Error!void {
+        self.writer.print(format, args) catch return error.OutOfMemory;
+    }
+};
+
 /// Error set for HTTP handlers in this module. Wide enough to cover
 /// every subsystem error that may bubble through `try`: allocator, writer,
 /// file IO, BOM resolve, sexpr parser, and httpz form/query parsing.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
-    std.fs.File.WriteError || std.fs.File.OpenError || std.fs.File.ReadError ||
-    std.fs.Dir.MakeError || std.fs.Dir.StatFileError ||
+    infra_fs.File.WriteError || infra_fs.File.OpenError || infra_fs.File.ReadError ||
+    infra_fs.Dir.MakeError || infra_fs.Dir.StatFileError ||
     @import("../bom_resolve.zig").ResolveError ||
     @import("../sexpr/parser.zig").ParseError ||
     error{InvalidName} ||
@@ -139,8 +156,8 @@ pub fn editValueApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
     //    part is added with no value) — wrap it into `(cap-0402 "<value>")` so the
     //    value becomes editable instead of permanently stuck;
     //  • a genuinely fixed component (e.g. `204928-0601`) — nothing to edit.
-    var new_source: std.ArrayList(u8) = .empty;
-    const nw = new_source.writer(ctx.allocator);
+    var new_source: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const nw = &new_source.writer;
     if (findInstanceValueRange(source, inst_open, inst_end)) |vr| {
         try nw.writeAll(source[0..vr[0]]);
         try nw.writeAll(new_value);
@@ -159,7 +176,7 @@ pub fn editValueApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
         return;
     }
 
-    infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = new_source.items }) catch {
+    infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = new_source.written() }) catch {
         sendJsonError(ctx, res, 500, err_cannot_write_file);
         return;
     };
@@ -312,6 +329,10 @@ pub fn editFootprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
     // Optional `ref` lets us recover when srcOff points at the instance form
     // (the scene-graph offset) instead of at the component token.
     const ref_des = parseJsonString(body, "\"ref\"") orelse "";
+    // PCB pages can display passives flattened out of a module. Keep the route
+    // name as the open parent design (so its live version gets rebuilt/bumped),
+    // while editing the module file that actually owns the selected instance.
+    const source_name = parseJsonString(body, "\"sourceName\"") orelse name;
 
     // Verify the new component family exists
     const comp_path = std.fmt.allocPrint(ctx.allocator, component_path_template, .{ ctx.project_dir, new_component }) catch {
@@ -326,8 +347,9 @@ pub fn editFootprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
     };
 
     // Read the .sexp file
-    const file_path = paths.designSourcePath(ctx.allocator, ctx.project_dir, name) catch {
-        res.status = 500;
+    const file_path = paths.designSourcePath(ctx.allocator, ctx.project_dir, source_name) catch {
+        res.status = 400;
+        res.body = "invalid source name";
         return;
     };
     defer ctx.allocator.free(file_path);
@@ -353,14 +375,14 @@ pub fn editFootprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
             return;
         };
 
-    var new_source: std.ArrayList(u8) = .empty;
-    const nw = new_source.writer(ctx.allocator);
+    var new_source: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const nw = &new_source.writer;
     try nw.writeAll(source[0..comp_offset]);
     try nw.writeAll(new_component);
     try nw.writeAll(source[comp_offset + old_component.len ..]);
 
     // Ensure new component is in the import statement
-    var final_source = new_source.items;
+    var final_source = new_source.written();
     if (std.mem.indexOf(u8, final_source, import_open)) |import_start| {
         var depth: u32 = 0;
         var import_end: usize = import_start;
@@ -390,13 +412,13 @@ pub fn editFootprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
             break :blk false;
         };
         if (!found_in_import) {
-            var new_final: std.ArrayList(u8) = .empty;
-            const nfw = new_final.writer(ctx.allocator);
+            var new_final: std.Io.Writer.Allocating = .init(ctx.allocator);
+            const nfw = &new_final.writer;
             try nfw.writeAll(final_source[0..import_end]);
             try nfw.writeAll(" ");
             try nfw.writeAll(new_component);
             try nfw.writeAll(final_source[import_end..]);
-            final_source = new_final.items;
+            final_source = new_final.written();
         }
     }
 
@@ -422,17 +444,30 @@ pub fn editFootprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
 
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
-    const result = eval.evalFile(board_path) catch {
-        res.status = 500;
-        res.body = err_rebuild_failed;
-        return;
+    const direct_block: ?*env_mod.DesignBlock = if (eval.evalFile(board_path)) |result|
+        switch (result) {
+            .design_block => |b| b,
+            else => null,
+        }
+    else |_|
+        null;
+    // The new footprint was just written to `board_path`; pin whatever ids that
+    // evaluation minted before the BOM resolve below turns them into uuids.
+    // Only the direct-design branch owns `board_path`'s spans — a module block
+    // resolved below evaluates a different file through its own evaluator.
+    if (direct_block != null) _ = id_insert.persistMintedIds(ctx.allocator, board_path, &eval);
+    var module_res: ?modules_mod.ResolvedBlock = null;
+    defer if (module_res) |mr| {
+        mr.eval.deinit();
+        ctx.allocator.destroy(mr.eval);
     };
-    const block = switch (result) {
-        .design_block => |b| b,
-        else => {
+    const block = direct_block orelse blk: {
+        module_res = modules_mod.resolveModuleBlock(ctx.allocator, ctx.project_dir, name);
+        break :blk if (module_res) |mr| mr.block else {
             res.status = 500;
+            res.body = err_rebuild_failed;
             return;
-        },
+        };
     };
 
     const bom_path = paths.designSiblingPath(ctx.allocator, ctx.project_dir, name, ".bom") catch {
@@ -445,19 +480,19 @@ pub fn editFootprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
     var svg_sym_cache = try bom_html.buildSymbolPinCache(ctx.allocator, ctx.project_dir);
 
     const new_layout = render_json.renderSceneGraph(ctx.allocator, block, ctx.project_dir) catch null;
-    serve_root.setLiveLayoutJson(new_layout);
+    serve_root.setLiveLayoutJson(name, new_layout);
     _ = serve_root.bumpLiveVersion(name);
 
     // Return updated COMPONENTS so the client can refresh srcOff values
-    var comp_json: std.ArrayList(u8) = .empty;
-    const cw = comp_json.writer(ctx.allocator);
+    var comp_json: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const cw = &comp_json.writer;
     try cw.writeAll("{\"ok\":true,\"components\":{");
     _ = try bom_html.writeComponentsJson(cw, block, "", &svg_sym_cache, ctx.allocator, ctx.project_dir);
     try cw.writeAll("}}");
 
     res.header(header_cors_allow_origin, "*");
     res.content_type = .JSON;
-    res.body = comp_json.items;
+    res.body = comp_json.written();
 }
 
 /// POST /api/add-instance/:name
@@ -521,8 +556,8 @@ pub fn addInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
     defer ctx.allocator.free(source);
 
     // Parse pin assignments from body: "pins":{"1":"VDD","2":"GND"}
-    var pin_str: std.ArrayList(u8) = .empty;
-    const pw = pin_str.writer(ctx.allocator);
+    var pin_str: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const pw = &pin_str.writer;
     if (std.mem.indexOf(u8, body, json_pins_key)) |pins_start| {
         // Find the opening brace
         var pos = pins_start + json_pins_key.len;
@@ -555,8 +590,8 @@ pub fn addInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
     }
 
     // Build the form — a (sub-block …) for modules, otherwise an (instance …).
-    var inst_form: std.ArrayList(u8) = .empty;
-    const iw = inst_form.writer(ctx.allocator);
+    var inst_form: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const iw = &inst_form.writer;
     if (is_module) {
         if (mod_args.len > 0) {
             try iw.print("  (sub-block \"{s}\" ({s} {s}))\n", .{ sub_name, component, mod_args });
@@ -569,7 +604,7 @@ pub fn addInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
         } else {
             try iw.print("  (instance \"{s}\" {s}", .{ label, component });
         }
-        try iw.writeAll(pin_str.items);
+        try iw.writeAll(pin_str.written());
         try iw.writeAll(")\n");
     }
 
@@ -578,17 +613,17 @@ pub fn addInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
     // this augmented buffer.
     const eff_source: []const u8 = if (want_import and !hasImport(source, component)) blk: {
         const anchor = std.mem.indexOf(u8, source, "(design-block") orelse break :blk source;
-        var aug: std.ArrayList(u8) = .empty;
-        const aw = aug.writer(ctx.allocator);
+        var aug: std.Io.Writer.Allocating = .init(ctx.allocator);
+        const aw = &aug.writer;
         try aw.writeAll(source[0..anchor]);
         try aw.print("{s}{s})\n", .{ import_open, component });
         try aw.writeAll(source[anchor..]);
-        break :blk aug.items;
+        break :blk aug.written();
     } else source;
 
     // Find insertion point: inside section if specified, otherwise before last closing paren
-    var new_source: std.ArrayList(u8) = .empty;
-    const nw = new_source.writer(ctx.allocator);
+    var new_source: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const nw = &new_source.writer;
 
     if (!is_module and section.len > 0) {
         // Find (section "Name" ...) and insert before its closing paren
@@ -611,21 +646,21 @@ pub fn addInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
             }
             try nw.writeAll(eff_source[0..sec_end]);
             try nw.writeAll("\n");
-            try nw.writeAll(inst_form.items);
+            try nw.writeAll(inst_form.written());
             try nw.writeAll(eff_source[sec_end..]);
         } else {
             // Section not found, insert at end
             const last_paren = std.mem.lastIndexOfScalar(u8, eff_source, ')') orelse eff_source.len;
             try nw.writeAll(eff_source[0..last_paren]);
             try nw.writeAll("\n");
-            try nw.writeAll(inst_form.items);
+            try nw.writeAll(inst_form.written());
             try nw.writeAll(eff_source[last_paren..]);
         }
     } else {
         const last_paren = std.mem.lastIndexOfScalar(u8, eff_source, ')') orelse eff_source.len;
         try nw.writeAll(eff_source[0..last_paren]);
         try nw.writeAll("\n");
-        try nw.writeAll(inst_form.items);
+        try nw.writeAll(inst_form.written());
         try nw.writeAll(eff_source[last_paren..]);
     }
 
@@ -636,7 +671,7 @@ pub fn addInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
         return;
     };
     defer file.close();
-    file.writeAll(new_source.items) catch {
+    file.writeAll(new_source.written()) catch {
         res.status = 500;
         return;
     };
@@ -710,7 +745,7 @@ pub fn newDesignApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
 
     res.status = 200;
     res.content_type = .JSON;
-    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"url\":\"/editor/{s}\"}}", .{name});
+    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"url\":\"/schematics/{s}\"}}", .{name});
 }
 
 // ── Structural authoring (sections, ports, ref-des, DNP) ───────────────────
@@ -791,9 +826,9 @@ pub fn addSectionApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
         return;
     };
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(ctx.allocator);
-    const w = buf.writer(ctx.allocator);
+    var buf: std.Io.Writer.Allocating = .init(ctx.allocator);
+    defer buf.deinit();
+    const w = AllocatingWriter{ .writer = &buf.writer };
     try w.writeAll(source[0..insert_at]);
     try w.writeAll("\n  (section ");
     try writeSexprString(w, section);
@@ -803,7 +838,7 @@ pub fn addSectionApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
     }
     try w.writeAll(")\n");
     try w.writeAll(source[insert_at..]);
-    try finishMutation(ctx, name, buf.items, "add_section", res);
+    try finishMutation(ctx, name, buf.written(), "add_section", res);
 }
 
 /// POST /api/rename-section/:name  Body: {"from":"Power","to":"Power Rails"}
@@ -849,9 +884,9 @@ pub fn renameSectionApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
     // Replace just the quoted name token: `(section "` is needle minus the name+quote.
     const name_start = at + "(section \"".len;
     const name_end = name_start + from.len; // followed by the closing quote
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(ctx.allocator);
-    const w = buf.writer(ctx.allocator);
+    var buf: std.Io.Writer.Allocating = .init(ctx.allocator);
+    defer buf.deinit();
+    const w = AllocatingWriter{ .writer = &buf.writer };
     try w.writeAll(source[0..name_start]);
     for (to) |c| switch (c) {
         '"' => try w.writeAll("\\\""),
@@ -859,7 +894,7 @@ pub fn renameSectionApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
         else => try w.writeByte(c),
     };
     try w.writeAll(source[name_end..]);
-    try finishMutation(ctx, name, buf.items, "rename_section", res);
+    try finishMutation(ctx, name, buf.written(), "rename_section", res);
 }
 
 /// POST /api/remove-section/:name  Body: {"section":"Power"}
@@ -916,12 +951,12 @@ pub fn removeSectionApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
     var cut_end = sec_end;
     if (cut_end < source.len and source[cut_end] == '\n') cut_end += 1;
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(ctx.allocator);
-    const w = buf.writer(ctx.allocator);
+    var buf: std.Io.Writer.Allocating = .init(ctx.allocator);
+    defer buf.deinit();
+    const w = AllocatingWriter{ .writer = &buf.writer };
     try w.writeAll(source[0..cut_start]);
     try w.writeAll(source[cut_end..]);
-    try finishMutation(ctx, name, buf.items, "remove_section", res);
+    try finishMutation(ctx, name, buf.written(), "remove_section", res);
 }
 
 /// POST /api/add-port/:name  Body: {"net":"VDD","dir":"in"}  (dir: in|out|bidi)
@@ -966,9 +1001,9 @@ pub fn addPortApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
         res.body = "not a design-block";
         return;
     };
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(ctx.allocator);
-    const w = buf.writer(ctx.allocator);
+    var buf: std.Io.Writer.Allocating = .init(ctx.allocator);
+    defer buf.deinit();
+    const w = AllocatingWriter{ .writer = &buf.writer };
     try w.writeAll(source[0..insert_at]);
     try w.writeAll("\n  (port ");
     try writeSexprString(w, net);
@@ -976,7 +1011,7 @@ pub fn addPortApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
     try w.writeAll(dir);
     try w.writeAll(")\n");
     try w.writeAll(source[insert_at..]);
-    try finishMutation(ctx, name, buf.items, "add_port", res);
+    try finishMutation(ctx, name, buf.written(), "add_port", res);
 }
 
 /// POST /api/remove-port/:name  Body: {"net":"VDD"}
@@ -1019,12 +1054,12 @@ pub fn removePortApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
     if (cut_start > 0 and source[cut_start - 1] == '\n') cut_start -= 1;
     var cut_end = p_end;
     if (cut_end < source.len and source[cut_end] == '\n') cut_end += 1;
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(ctx.allocator);
-    const w = buf.writer(ctx.allocator);
+    var buf: std.Io.Writer.Allocating = .init(ctx.allocator);
+    defer buf.deinit();
+    const w = &buf.writer;
     try w.writeAll(source[0..cut_start]);
     try w.writeAll(source[cut_end..]);
-    try finishMutation(ctx, name, buf.items, "remove_port", res);
+    try finishMutation(ctx, name, buf.written(), "remove_port", res);
 }
 
 /// POST /api/rename-refdes/:name  Body: {"ref":"C3","to":"C10","srcOff":1234}
@@ -1084,9 +1119,9 @@ pub fn renameRefdesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
         res.body = err_malformed_instance;
         return;
     };
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(ctx.allocator);
-    const w = buf.writer(ctx.allocator);
+    var buf: std.Io.Writer.Allocating = .init(ctx.allocator);
+    defer buf.deinit();
+    const w = &buf.writer;
     try w.writeAll(source[0 .. lq + 1]);
     for (to) |c| switch (c) {
         '"' => try w.writeAll("\\\""),
@@ -1094,7 +1129,7 @@ pub fn renameRefdesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
         else => try w.writeByte(c),
     };
     try w.writeAll(source[rq..]);
-    try finishMutation(ctx, name, buf.items, "rename_refdes", res);
+    try finishMutation(ctx, name, buf.written(), "rename_refdes", res);
 }
 
 /// POST /api/set-dnp/:name  Body: {"ref":"R7","dnp":true,"srcOff":1234}
@@ -1135,9 +1170,9 @@ pub fn setDnpApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
         return;
     };
     const dnp_rel = std.mem.indexOf(u8, source[open..end], "(dnp)");
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(ctx.allocator);
-    const w = buf.writer(ctx.allocator);
+    var buf: std.Io.Writer.Allocating = .init(ctx.allocator);
+    defer buf.deinit();
+    const w = &buf.writer;
     if (want_dnp) {
         if (dnp_rel != null) {
             res.status = 200;
@@ -1162,7 +1197,7 @@ pub fn setDnpApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
         try w.writeAll(source[0..d]);
         try w.writeAll(source[d_end..]);
     }
-    try finishMutation(ctx, name, buf.items, "set_dnp", res);
+    try finishMutation(ctx, name, buf.written(), "set_dnp", res);
 }
 
 /// POST /api/remove-instance/:name
@@ -1218,8 +1253,8 @@ pub fn removeInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response
     var inst_start = inst_pos;
     while (inst_start > 0 and (source[inst_start - 1] == ' ' or source[inst_start - 1] == '\t')) : (inst_start -= 1) {}
 
-    var new_source: std.ArrayList(u8) = .empty;
-    const nw = new_source.writer(ctx.allocator);
+    var new_source: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const nw = &new_source.writer;
     try nw.writeAll(source[0..inst_start]);
     try nw.writeAll(source[inst_end..]);
 
@@ -1229,7 +1264,7 @@ pub fn removeInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response
         return;
     };
     defer file.close();
-    file.writeAll(new_source.items) catch {
+    file.writeAll(new_source.written()) catch {
         res.status = 500;
         return;
     };
@@ -1488,12 +1523,12 @@ pub fn rewirePinApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
         // body. Lets a staged/unwired part (a freshly-added cap with no pins) be
         // connected by dropping it on a net.
         const close = inst_end - 1; // the instance form's closing ')'
-        var ins: std.ArrayList(u8) = .empty;
-        const iw = ins.writer(ctx.allocator);
+        var ins: std.Io.Writer.Allocating = .init(ctx.allocator);
+        const iw = &ins.writer;
         try iw.writeAll(source[0..close]);
         try iw.print("\n    (pin {s} \"{s}\")", .{ pin, new_net });
         try iw.writeAll(source[close..]);
-        infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = ins.items }) catch {
+        infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = ins.written() }) catch {
             sendJsonError(ctx, res, 500, err_cannot_write_file);
             return;
         };
@@ -1504,8 +1539,8 @@ pub fn rewirePinApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
         return;
     };
 
-    var new_source: std.ArrayList(u8) = .empty;
-    const nw = new_source.writer(ctx.allocator);
+    var new_source: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const nw = &new_source.writer;
     if (match_tokens.items.len <= 1) {
         // Single-pin form: replace just the net string, preserving any trailing
         // `(as …)`/`(id …)` annotations.
@@ -1533,7 +1568,7 @@ pub fn rewirePinApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
         try nw.writeAll(source[p.form_end..]);
     }
 
-    infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = new_source.items }) catch {
+    infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = new_source.written() }) catch {
         sendJsonError(ctx, res, 500, err_cannot_write_file);
         return;
     };
@@ -1601,15 +1636,16 @@ pub fn bindDecoupleApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
             break;
         }
     }
-    var form: std.ArrayList(u8) = .empty;
-    defer form.deinit(ctx.allocator);
+    var form: std.Io.Writer.Allocating = .init(ctx.allocator);
+    defer form.deinit();
+    const fw = &form.writer;
     if (numeric)
-        try form.writer(ctx.allocator).print("(decouples \"{s}\" {s})", .{ ic, pad })
+        try fw.print("(decouples \"{s}\" {s})", .{ ic, pad })
     else
-        try form.writer(ctx.allocator).print("(decouples \"{s}\" \"{s}\")", .{ ic, pad });
+        try fw.print("(decouples \"{s}\" \"{s}\")", .{ ic, pad });
 
-    var out: std.ArrayList(u8) = .empty;
-    const ow = out.writer(ctx.allocator);
+    var out: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const ow = &out.writer;
 
     // Replace an existing (decouples …) in this instance (re-binding to a new
     // pin), else insert one before the instance's closing ')'.
@@ -1619,16 +1655,16 @@ pub fn bindDecoupleApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
             return;
         };
         try ow.writeAll(source[0..dpos]);
-        try ow.writeAll(form.items);
+        try ow.writeAll(form.written());
         try ow.writeAll(source[dend..]);
     } else {
         const close = inst_end - 1; // the instance form's closing ')'
         try ow.writeAll(source[0..close]);
-        try ow.print("\n    {s}", .{form.items});
+        try ow.print("\n    {s}", .{form.written()});
         try ow.writeAll(source[close..]);
     }
 
-    infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = out.items }) catch {
+    infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = out.written() }) catch {
         sendJsonError(ctx, res, 500, err_cannot_write_file);
         return;
     };
@@ -1700,32 +1736,32 @@ pub fn duplicateInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respo
     }
 
     // Unique non-standard placeholder label so the clone renumbers to a fresh ref.
-    var label_buf: std.ArrayList(u8) = .empty;
-    defer label_buf.deinit(ctx.allocator);
+    var label_buf: std.Io.Writer.Allocating = .init(ctx.allocator);
+    defer label_buf.deinit();
     var n: usize = 1;
     while (n < 10000) : (n += 1) {
         label_buf.clearRetainingCapacity();
-        const lw = label_buf.writer(ctx.allocator);
+        const lw = &label_buf.writer;
         if (n == 1) try lw.print("{s}-copy", .{ref_des}) else try lw.print("{s}-copy{d}", .{ ref_des, n });
-        const quoted = std.fmt.allocPrint(ctx.allocator, "\"{s}\"", .{label_buf.items}) catch break;
+        const quoted = std.fmt.allocPrint(ctx.allocator, "\"{s}\"", .{label_buf.written()}) catch break;
         defer ctx.allocator.free(quoted);
         if (std.mem.indexOf(u8, source, quoted) == null) break;
     }
 
     // Assemble: source up to (and including) the original, a blank line, then the
     // clone (ref swapped, id removed), then the rest of the file.
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(ctx.allocator);
-    const ow = out.writer(ctx.allocator);
+    var out: std.Io.Writer.Allocating = .init(ctx.allocator);
+    defer out.deinit();
+    const ow = &out.writer;
     try ow.writeAll(source[0..inst_end]);
     try ow.writeAll("\n\n  ");
     try ow.writeAll(source[inst_open .. q1 + 1]); // "(instance \""
-    try ow.writeAll(label_buf.items); // new placeholder ref
+    try ow.writeAll(label_buf.written()); // new placeholder ref
     try ow.writeAll(source[q2..id_lo]); // "\" <component> <pins> …" up to the id
     try ow.writeAll(source[id_hi..inst_end]); // closing ")" (id removed)
     try ow.writeAll(source[inst_end..]);
 
-    infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = out.items }) catch {
+    infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = out.written() }) catch {
         sendJsonError(ctx, res, 500, err_cannot_write_file);
         return;
     };
@@ -1946,7 +1982,9 @@ pub fn swapPinsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
     res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{result.version});
 }
 
-/// Rebuild design, render SVG, and push live update.
+/// Rebuild design, render SVG, and push live update. Every caller has just
+/// written the design source, so this is a write tail like `writeAndRebuild`:
+/// it pins the minted ids before identity resolution derives uuids from them.
 fn rebuildAndPush(ctx: *Server, name: []const u8, res: *httpz.Response) HandlerError!void {
     const board_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
     defer ctx.allocator.free(board_path);
@@ -1954,9 +1992,22 @@ fn rebuildAndPush(ctx: *Server, name: []const u8, res: *httpz.Response) HandlerE
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
     const result = eval.evalFile(board_path) catch return error.RebuildFailed;
+    _ = id_insert.persistMintedIds(ctx.allocator, board_path, &eval);
     const block = switch (result) {
         .design_block => |b| b,
-        else => return error.RebuildFailed,
+        // A standalone `lib/modules/<name>.sexp` evaluates by registering its
+        // defmodule rather than returning a flattened design block. Parsing and
+        // import resolution succeeded, so publish the source mutation exactly
+        // as writeAndRebuild does; the module schematic re-instantiates it on
+        // reload. Rejecting this path after the file was already written made
+        // every structured edit on `/schematics/<module>` report a false 500.
+        else => {
+            _ = serve_root.bumpLiveVersion(name);
+            res.header(header_cors_allow_origin, "*");
+            res.content_type = .JSON;
+            res.body = ok_json_true;
+            return;
+        },
     };
 
     const bom_path = try paths.designSiblingPath(ctx.allocator, ctx.project_dir, name, ".bom");
@@ -1964,7 +2015,7 @@ fn rebuildAndPush(ctx: *Server, name: []const u8, res: *httpz.Response) HandlerE
     bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch |e| warnResolveIdentities(name, e);
 
     const layout_json = render_json.renderSceneGraph(ctx.allocator, block, ctx.project_dir) catch null;
-    serve_root.setLiveLayoutJson(layout_json);
+    serve_root.setLiveLayoutJson(name, layout_json);
     _ = serve_root.bumpLiveVersion(name);
 
     res.header(header_cors_allow_origin, "*");
@@ -2043,171 +2094,13 @@ pub const MutationResult = struct {
     snapshot: ?[]const u8 = null,
 };
 
-/// One assertion failure surfaced from the evaluator. `message` is the
-/// human-readable text (already formatted by the eval), `is_warning`
-/// distinguishes assert-warn from assert.
-pub const AssertionFailure = struct {
-    message: []const u8,
-    is_warning: bool,
-};
-
-/// One non-fatal eval/lint warning surfaced from the evaluator (a
-/// silently-ignored sub-form / enum word — the same list the CLI prints as
-/// `file:line:col: warning: …`). `line`/`col` are the source span; `message`
-/// is the already-formatted text. Distinct from `AssertionFailure` and from
-/// ERC: the design still built, this is authoring lint.
-pub const BuildWarning = struct {
-    line: u32,
-    col: u32,
-    message: []const u8,
-};
-
-/// Result of a `build` MCP call. The `version` and `snapshot` mirror the
-/// existing MutationResult shape; `eval_ok` is false iff the .sexp failed
-/// to parse/evaluate (in which case the JSON viewer state is unchanged).
-/// `assertions` and `erc` are summary + flat lists for the agent to act
-/// on without a follow-up `run_checks` round-trip.
-pub const BuildReport = struct {
-    ok: bool,
-    version: u32,
-    snapshot: ?[]const u8 = null,
-    eval_ok: bool,
-    error_message: ?[]const u8 = null,
-    /// Source-located diagnostic for a failed eval — file:line:col, the
-    /// evaluator's message, and the offending source line. Null on success
-    /// or when no span was recorded.
-    diagnostic: ?diag_format.Diagnostic = null,
-    assertion_failures: []const AssertionFailure = &.{},
-    erc: []const erc_mod.Violation = &.{},
-    /// Non-fatal eval/lint warnings collected during the build (unknown
-    /// sub-forms etc.). Empty on a clean build. Message slices are owned by
-    /// the evaluator's allocator (the same one passed to `rebuildDesign`) and
-    /// are never freed — see the project memory convention.
-    warnings: []const BuildWarning = &.{},
-};
+pub const AssertionFailure = rebuild_design.AssertionFailure;
+pub const BuildWarning = rebuild_design.BuildWarning;
+pub const BuildReport = rebuild_design.BuildReport;
+pub const rebuildDesign = rebuild_design.run;
 
 fn designFilePath(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ![]u8 {
     return paths.designSourcePath(allocator, project_dir, name);
-}
-
-/// Re-evaluate `<name>.sexp`, resolve BOM, render the scene-graph, run
-/// ERC, snapshot the prior state, and bump the live version. This is the
-/// MCP `build` tool's worker — it mirrors `netlisp build --push <name>`
-/// locally. The agent edits files via VFS, then calls this to make
-/// changes visible in the browser viewer.
-pub fn rebuildDesign(
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    name: []const u8,
-) BuildReport {
-    const path = designFilePath(allocator, project_dir, name) catch {
-        return .{
-            .ok = false,
-            .version = serve_root.getLiveVersion(name),
-            .eval_ok = false,
-            .error_message = "out of memory",
-        };
-    };
-    defer allocator.free(path);
-
-    // Snapshot first so the build is undoable via restore_version. Logs
-    // and continues on snapshot errors — undo is a nice-to-have.
-    const snap_id: ?[]const u8 = history.snapshot(allocator, project_dir, name, "build") catch |e| blk: {
-        log.warn("[snapshot] failed for {s}: {s}", .{ name, @errorName(e) });
-        break :blk null;
-    };
-
-    var eval = Evaluator.init(allocator, project_dir);
-    defer eval.deinit();
-    const eval_result = eval.evalFile(path) catch |e| {
-        // Resolve the span into a full diagnostic (re-reads the file so the
-        // shown line matches what the agent just wrote). The human-readable
-        // error_message becomes the compiler-style text when a span exists.
-        const d: ?diag_format.Diagnostic = diag_format.load(allocator, path, @errorName(e), eval.last_error) catch null;
-        const msg: []const u8 = if (d) |dd|
-            (diag_format.formatText(allocator, dd) catch @errorName(e))
-        else
-            @errorName(e);
-        return .{
-            .ok = false,
-            .version = serve_root.getLiveVersion(name),
-            .snapshot = snap_id,
-            .eval_ok = false,
-            .error_message = msg,
-            .diagnostic = d,
-        };
-    };
-    const block = switch (eval_result) {
-        .design_block => |b| b,
-        // Not a top-level design — `name` may be a bare `lib/modules/<name>`
-        // module file (where `evalFile` ran the `(defmodule …)` → .nil and
-        // registered it). Instantiate it standalone via its parameter
-        // defaults so a module rebuilds/pushes the same as a design.
-        else => blk: {
-            const mres = eval_modules.instantiateStandalone(&eval, name) catch {
-                return .{
-                    .ok = false,
-                    .version = serve_root.getLiveVersion(name),
-                    .snapshot = snap_id,
-                    .eval_ok = false,
-                    .error_message = "not a design-block",
-                };
-            };
-            break :blk switch (mres) {
-                .design_block => |b| b,
-                else => return .{
-                    .ok = false,
-                    .version = serve_root.getLiveVersion(name),
-                    .snapshot = snap_id,
-                    .eval_ok = false,
-                    .error_message = "not a design-block",
-                },
-            };
-        },
-    };
-
-    // Persist auto-minted sub-block uuids / pending ids back into source, like the CLI build.
-    _ = id_insert.persistMintedIds(allocator, path, &eval);
-    var failures: std.ArrayList(AssertionFailure) = .empty;
-    for (eval.assertions.items) |a| {
-        if (!a.passed) failures.append(allocator, .{ .message = a.message, .is_warning = a.is_warning }) catch break;
-    }
-    // Copy warnings out before `eval.deinit()` frees the list; the message slices
-    // live in `allocator` (== eval.allocator) and are never freed — see failures.
-    var warnings: std.ArrayList(BuildWarning) = .empty;
-    for (eval.warnings.items) |wn| {
-        warnings.append(allocator, .{ .line = wn.span.line, .col = wn.span.col, .message = wn.message }) catch break;
-    }
-
-    const bom_path = paths.designSiblingPath(allocator, project_dir, name, ".bom") catch {
-        return .{
-            .ok = false,
-            .version = serve_root.getLiveVersion(name),
-            .snapshot = snap_id,
-            .eval_ok = true,
-            .error_message = "out of memory (bom path)",
-            .assertion_failures = failures.items,
-            .warnings = warnings.items,
-        };
-    };
-    defer allocator.free(bom_path);
-    bom.resolveIdentities(allocator, block, bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
-
-    const layout_json = render_json.renderSceneGraph(allocator, block, project_dir) catch null;
-    serve_root.setLiveLayoutJson(layout_json);
-    const version = serve_root.bumpLiveVersion(name);
-
-    const erc_violations = erc_mod.runErc(allocator, block, project_dir) catch &[_]erc_mod.Violation{};
-
-    return .{
-        .ok = true,
-        .version = version,
-        .snapshot = snap_id,
-        .eval_ok = true,
-        .assertion_failures = failures.items,
-        .erc = erc_violations,
-        .warnings = warnings.items,
-    };
 }
 
 fn readDesignSource(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) EditError![]u8 {
@@ -2245,6 +2138,15 @@ pub fn writeAndRebuild(
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
     const result = eval.evalFile(path) catch return error.RebuildFailed;
+    // Pin the identities this evaluation minted back into the source we just
+    // wrote, BEFORE anything derives a uuid from them. `generateId` is process
+    // randomness, so an id that never reaches the file is a different id (and
+    // therefore a different `uuidFromId`, and a missed `.bom` property
+    // carry-forward) on every later evaluation. Identity is persisted at write
+    // time — this is the shared tail of every design mutation, so the read
+    // paths that follow find the ids already in the source and never mutate.
+    // Same call, same best-effort error handling as `rebuild_design.run`.
+    _ = id_insert.persistMintedIds(allocator, path, &eval);
     const block = switch (result) {
         .design_block => |b| b,
         // A `lib/modules/<name>.sexp` file evaluates to a `(defmodule …)`, not
@@ -2261,7 +2163,7 @@ pub fn writeAndRebuild(
     bom.resolveIdentities(allocator, block, bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
 
     const layout_json = render_json.renderSceneGraph(allocator, block, project_dir) catch null;
-    serve_root.setLiveLayoutJson(layout_json);
+    serve_root.setLiveLayoutJson(name, layout_json);
     const version = serve_root.bumpLiveVersion(name);
 
     return .{ .version = version, .snapshot = snap_id };
@@ -2311,10 +2213,10 @@ fn findFormEnd(source: []const u8, open_pos: usize) ?usize {
 /// `EditError` because we don't touch the `.sexp` source or rebuild the
 /// design — just patch the `.bom` sidecar via `bom_resolve.setBomProperty`.
 pub const MpnEditError = std.mem.Allocator.Error ||
-    std.fs.File.OpenError ||
-    std.fs.File.ReadError ||
-    std.fs.File.WriteError ||
-    error{ InvalidName, FileTooBig, StreamTooLong, EndOfStream };
+    infra_fs.File.OpenError ||
+    infra_fs.File.ReadError ||
+    infra_fs.File.WriteError ||
+    error{ InvalidName, FileTooBig, StreamTooLong, EndOfStream, DiskQuota, BrokenPipe, NotOpenForWriting, EntropyUnavailable };
 
 /// Update MPN and/or manufacturer for `ref_des` in the `.bom` sidecar.
 /// Empty string for either field leaves that field untouched (so callers
@@ -2332,8 +2234,14 @@ pub fn editMpnCore(
     const bom_path = try paths.designSiblingPath(allocator, project_dir, name, ".bom");
     defer allocator.free(bom_path);
 
-    if (mpn.len > 0) try bom_resolve.setBomProperty(allocator, bom_path, ref_des, "mpn", mpn);
-    if (manufacturer.len > 0) try bom_resolve.setBomProperty(allocator, bom_path, ref_des, "manufacturer", manufacturer);
+    if (mpn.len > 0) bom_resolve.setBomProperty(allocator, bom_path, ref_des, "mpn", mpn) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+        else => |other| return other,
+    };
+    if (manufacturer.len > 0) bom_resolve.setBomProperty(allocator, bom_path, ref_des, "manufacturer", manufacturer) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+        else => |other| return other,
+    };
 
     return serve_root.bumpLiveVersion(name);
 }
@@ -2453,6 +2361,10 @@ pub fn restoreDesignCore(
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
     const result = eval.evalFile(path) catch return error.RebuildFailed;
+    // A restore REPLACES the source file, so it is a write like any other: an
+    // old revision that predates id minting must gain its ids here rather than
+    // hand a random one to `resolveIdentities` below. See writeAndRebuild.
+    _ = id_insert.persistMintedIds(allocator, path, &eval);
     const block = switch (result) {
         .design_block => |b| b,
         // Module file (`lib/modules/<name>.sexp`) — see writeAndRebuild.
@@ -2464,7 +2376,7 @@ pub fn restoreDesignCore(
     bom.resolveIdentities(allocator, block, bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
 
     const layout_json = render_json.renderSceneGraph(allocator, block, project_dir) catch null;
-    serve_root.setLiveLayoutJson(layout_json);
+    serve_root.setLiveLayoutJson(name, layout_json);
     const version = serve_root.bumpLiveVersion(name);
 
     return .{ .version = version, .snapshot = pre_snap };
@@ -2500,9 +2412,9 @@ pub fn addSectionNoteCore(
     // section body so new notes sit alongside existing forms.
     const indent = detectSectionIndent(source, sec_start);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    defer buf.deinit();
+    const w = AllocatingWriter{ .writer = &buf.writer };
     try w.writeAll(source[0..insert_at]);
     try w.writeByte('\n');
     try w.writeAll(indent);
@@ -2529,7 +2441,7 @@ pub fn addSectionNoteCore(
 
     const desc = try std.fmt.allocPrint(allocator, "add_section_note {s}", .{section_name});
     defer allocator.free(desc);
-    return writeAndRebuild(allocator, project_dir, name, buf.items, desc);
+    return writeAndRebuild(allocator, project_dir, name, buf.written(), desc);
 }
 
 /// Remove the `idx`-th `(note ...)` form inside a named section (0-based,
@@ -2575,15 +2487,15 @@ pub fn removeSectionNoteCore(
                     var trim_end: usize = end;
                     if (trim_end < source.len and source[trim_end] == '\n') trim_end += 1;
 
-                    var buf: std.ArrayList(u8) = .empty;
-                    defer buf.deinit(allocator);
-                    const w = buf.writer(allocator);
+                    var buf: std.Io.Writer.Allocating = .init(allocator);
+                    defer buf.deinit();
+                    const w = AllocatingWriter{ .writer = &buf.writer };
                     try w.writeAll(source[0..trim_start]);
                     try w.writeAll(source[trim_end..]);
 
                     const desc = try std.fmt.allocPrint(allocator, "remove_section_note {s}[{d}]", .{ section_name, idx });
                     defer allocator.free(desc);
-                    return writeAndRebuild(allocator, project_dir, name, buf.items, desc);
+                    return writeAndRebuild(allocator, project_dir, name, buf.written(), desc);
                 }
                 note_idx += 1;
                 cursor = end;
@@ -2676,13 +2588,13 @@ pub fn removeComponentDatasheetCore(
     var trim_end: usize = end;
     if (trim_end < source.len and source[trim_end] == '\n') trim_end += 1;
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    defer buf.deinit();
+    const w = AllocatingWriter{ .writer = &buf.writer };
     try w.writeAll(source[0..trim_start]);
     try w.writeAll(source[trim_end..]);
 
-    try writeLibComponent(path, buf.items);
+    try writeLibComponent(path, buf.written());
     const version = serve_root.bumpLiveVersion(component_name);
     return .{ .version = version, .snapshot = null };
 }
@@ -2864,16 +2776,16 @@ pub fn movePinCore(
     if (findPinTokenInRegions(source, regions.items, new_pin) != null) return error.PinAlreadyAssigned;
     const old_loc = findPinTokenInRegions(source, regions.items, old_pin) orelse return error.PinNotFound;
 
-    var new_source: std.ArrayList(u8) = .empty;
-    defer new_source.deinit(allocator);
-    const nw = new_source.writer(allocator);
+    var new_source: std.Io.Writer.Allocating = .init(allocator);
+    defer new_source.deinit();
+    const nw = AllocatingWriter{ .writer = &new_source.writer };
     try nw.writeAll(source[0..old_loc.start]);
     try nw.writeAll(new_pin);
     try nw.writeAll(source[old_loc.end..]);
 
     const desc = try std.fmt.allocPrint(allocator, "move_pin {s}.{s} → {s}", .{ ref_des, old_pin, new_pin });
     defer allocator.free(desc);
-    return writeAndRebuild(allocator, project_dir, name, new_source.items, desc);
+    return writeAndRebuild(allocator, project_dir, name, new_source.written(), desc);
 }
 
 /// Swap the pin-ID tokens of two pins on the same instance so the nets
@@ -2913,9 +2825,9 @@ pub fn swapPinsCore(
     const second_end = if (a_first) b_loc.end else a_loc.end;
     const second_replace: []const u8 = if (a_first) pin_a else pin_b;
 
-    var new_source: std.ArrayList(u8) = .empty;
-    defer new_source.deinit(allocator);
-    const nw = new_source.writer(allocator);
+    var new_source: std.Io.Writer.Allocating = .init(allocator);
+    defer new_source.deinit();
+    const nw = AllocatingWriter{ .writer = &new_source.writer };
     try nw.writeAll(source[0..first_start]);
     try nw.writeAll(first_replace);
     try nw.writeAll(source[first_end..second_start]);
@@ -2924,7 +2836,7 @@ pub fn swapPinsCore(
 
     const desc = try std.fmt.allocPrint(allocator, "swap_pins {s}.{s} <-> {s}", .{ ref_des, pin_a, pin_b });
     defer allocator.free(desc);
-    return writeAndRebuild(allocator, project_dir, name, new_source.items, desc);
+    return writeAndRebuild(allocator, project_dir, name, new_source.written(), desc);
 }
 
 /// GET /api/source/:name — returns `{"source":"<raw .sexp text>"}`.
@@ -2945,12 +2857,12 @@ pub fn getSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
     };
     defer ctx.allocator.free(source);
 
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(ctx.allocator);
+    var buf: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const w = &buf.writer;
     try w.writeAll("{\"source\":\"");
     try bom_html.writeJsonEscaped(w, source);
     try w.writeAll("\"}");
-    res.body = buf.items;
+    res.body = buf.written();
 }
 
 /// POST /api/source/:name — body `{"source":"<raw .sexp text>"}`. Validates
@@ -3019,8 +2931,8 @@ pub fn saveSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
         }
     };
 
-    var out: std.ArrayList(u8) = .empty;
-    const w = out.writer(ctx.allocator);
+    var out: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const w = &out.writer;
     try w.print("{{\"ok\":true,\"version\":{d},\"snapshot\":", .{result.version});
     if (result.snapshot) |s| {
         try w.writeAll("\"");
@@ -3030,7 +2942,7 @@ pub fn saveSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
         try w.writeAll("null");
     }
     try w.writeAll("}");
-    res.body = out.items;
+    res.body = out.written();
 }
 
 // ── Tests ─────────────────────────────────────────────────────────
@@ -3152,4 +3064,165 @@ test "findPinInForm locates a bareword pin token before any net string" {
     const src = "(pin W12 \"CNV\")";
     const loc = findPinInForm(src, "(pin ".len, src.len, "W12") orelse return error.TestPinNotFound;
     try std.testing.expectEqualStrings("W12", src[loc.start..loc.end]);
+}
+
+/// Read one `.bom` entry by ref-des for the identity tests below. Returns the
+/// entry, or `null` when the sidecar has no row for `ref`.
+fn testBomEntry(
+    allocator: std.mem.Allocator,
+    bom_path: []const u8,
+    ref: []const u8,
+) !?bom.BomEntry {
+    const entries = try bom.loadBom(allocator, bom_path);
+    for (entries) |e| {
+        if (std.mem.eql(u8, e.ref_des, ref)) return e;
+    }
+    return null;
+}
+
+/// Look up a property value on a `.bom` entry.
+fn testBomProp(entry: bom.BomEntry, key: []const u8) ?[]const u8 {
+    for (entry.properties) |p| {
+        if (std.mem.eql(u8, p.key, key)) return p.value;
+    }
+    return null;
+}
+
+// spec: serve/edit - a design saved through writeAndRebuild pins its minted (id …) into the source, so the next save reproduces the same uuid and the .bom's MPN carries forward
+test "writeAndRebuild pins minted ids so uuid and BOM properties survive a second save" {
+    // page_allocator: the evaluator allocates from it and never frees (AST
+    // slices reference source buffers), so testing.allocator would flag those
+    // intentional leaks. Same convention as the id_insert persist test.
+    const alloc = std.heap.page_allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(project_dir);
+
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/cap.sexp",
+        .data =
+        \\(component-family cap
+        \\  (param-type capacitance)
+        \\  (footprint "0402"))
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/0402.sexp",
+        .data = "(component 0402 (footprint \"0402.kicad_mod\"))",
+    });
+
+    const design_path = try std.fmt.allocPrint(alloc, "{s}/src/idpersist.sexp", .{project_dir});
+    defer alloc.free(design_path);
+    const bom_path = try std.fmt.allocPrint(alloc, "{s}/src/idpersist.bom", .{project_dir});
+    defer alloc.free(bom_path);
+
+    // The editor saves a brand-new instance carrying no `(id …)`.
+    const authored =
+        \\(import cap)
+        \\(design-block "Id Persist"
+        \\  (instance "C1" (cap "100nF")
+        \\    (pin 1 "VDD")
+        \\    (pin 2 "GND")))
+    ;
+    _ = try writeAndRebuild(alloc, project_dir, "idpersist", authored, "first save");
+
+    // (a) The id the evaluation minted is now IN the source, not just in RAM.
+    const saved1 = try infra_fs.cwd().readFileAlloc(alloc, design_path, max_source_bytes);
+    defer alloc.free(saved1);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, saved1, "(id "));
+
+    const entry1 = (try testBomEntry(alloc, bom_path, "C1")) orelse return error.TestNoBomEntry;
+    try std.testing.expect(entry1.uuid.len > 0);
+    // The sidecar names a token the source actually carries — the property that
+    // makes every later `uuidFromId(id)` reproduce.
+    const id_token = try std.fmt.allocPrint(alloc, "(id {s})", .{entry1.id});
+    defer alloc.free(id_token);
+    try std.testing.expect(std.mem.indexOf(u8, saved1, id_token) != null);
+
+    // The inline MPN editor writes a property keyed on that identity.
+    try bom_resolve.setBomProperty(alloc, bom_path, "C1", "mpn", "GRM155R71C104KA88D");
+
+    // Second save: read the file back and store it again, exactly as the editor
+    // does. Without the pin, this evaluation mints a FRESH random id and both
+    // the uuid and the id-keyed property carry-forward are lost.
+    _ = try writeAndRebuild(alloc, project_dir, "idpersist", saved1, "second save");
+
+    const saved2 = try infra_fs.cwd().readFileAlloc(alloc, design_path, max_source_bytes);
+    defer alloc.free(saved2);
+    // A pinned design mints nothing, so the source is byte-stable across saves.
+    try std.testing.expectEqualStrings(saved1, saved2);
+
+    const entry2 = (try testBomEntry(alloc, bom_path, "C1")) orelse return error.TestNoBomEntry;
+    // (b) Same instance, same uuid.
+    try std.testing.expectEqualStrings(entry1.id, entry2.id);
+    try std.testing.expectEqualStrings(entry1.uuid, entry2.uuid);
+    // (c) The MPN survived, because carry-forward is keyed on that stable id.
+    const mpn = testBomProp(entry2, "mpn") orelse return error.TestMpnDropped;
+    try std.testing.expectEqualStrings("GRM155R71C104KA88D", mpn);
+}
+
+// spec: serve/edit - restoring a history snapshot pins the restored source's minted ids before identity resolution
+test "restoreDesignCore pins the restored revision's minted ids" {
+    const alloc = std.heap.page_allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(project_dir);
+
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/cap.sexp",
+        .data =
+        \\(component-family cap
+        \\  (param-type capacitance)
+        \\  (footprint "0402"))
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/0402.sexp",
+        .data = "(component 0402 (footprint \"0402.kicad_mod\"))",
+    });
+
+    const design_path = try std.fmt.allocPrint(alloc, "{s}/src/idrestore.sexp", .{project_dir});
+    defer alloc.free(design_path);
+
+    // Both revisions are written straight to disk, so history holds a revision
+    // that predates id minting — the shape a restore has to cope with. (They
+    // are deliberately id-free on BOTH sides: `history.snapshot` ids are
+    // second-granular, so a restore inside the same second re-snapshots over
+    // the entry it is about to read and the test must not depend on which
+    // revision wins that race.)
+    const rev1 =
+        \\(import cap)
+        \\(design-block "Id Restore"
+        \\  (instance "C1" (cap "100nF")
+        \\    (pin 1 "VDD")
+        \\    (pin 2 "GND")))
+    ;
+    try infra_fs.cwd().writeFile(.{ .sub_path = design_path, .data = rev1 });
+    const snap_id = (try history.snapshot(alloc, project_dir, "idrestore", "first revision")) orelse
+        return error.TestNoSnapshot;
+
+    const rev2 =
+        \\(import cap)
+        \\(design-block "Id Restore"
+        \\  (instance "C1" (cap "220nF")
+        \\    (pin 1 "VDD")
+        \\    (pin 2 "GND")))
+    ;
+    try infra_fs.cwd().writeFile(.{ .sub_path = design_path, .data = rev2 });
+
+    _ = try restoreDesignCore(alloc, project_dir, "idrestore", snap_id);
+    const restored = try infra_fs.cwd().readFileAlloc(alloc, design_path, max_source_bytes);
+    defer alloc.free(restored);
+    // The restore's own rebuild minted an id for the id-free revision it put
+    // back, and pinned it — a restored revision is not left identity-less,
+    // whichever of the two id-free revisions the snapshot race hands back.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, restored, "(id "));
 }

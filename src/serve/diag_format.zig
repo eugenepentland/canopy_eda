@@ -107,22 +107,22 @@ pub fn caretLine(allocator: std.mem.Allocator, source_line: []const u8, col: u32
 /// Render the diagnostic as the conventional compiler-style text block:
 /// `file:line:col: message`, then the source line, then the caret line.
 /// Omits the source/caret lines when the source line is unavailable.
-pub fn formatText(allocator: std.mem.Allocator, d: Diagnostic) std.mem.Allocator.Error![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(allocator);
+pub fn formatText(allocator: std.mem.Allocator, d: Diagnostic) (std.mem.Allocator.Error || std.Io.Writer.Error)![]u8 {
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    const w = &buf.writer;
     try w.print("{s}:{d}:{d}: {s}", .{ d.file, d.line, d.col, d.message });
     if (d.source_line.len > 0) {
         const caret = try caretLine(allocator, d.source_line, d.col);
         defer allocator.free(caret);
         try w.print("\n  {s}\n  {s}", .{ d.source_line, caret });
     }
-    return buf.toOwnedSlice(allocator);
+    return buf.toOwnedSlice();
 }
 
 /// Write the diagnostic as a JSON object:
 /// `{"file":…,"line":N,"col":N,"message":…,"source_line":…}`. Callers pass
 /// ArrayList writers, so the error surface is allocation only.
-pub fn writeJson(w: anytype, d: Diagnostic) std.mem.Allocator.Error!void {
+pub fn writeJson(w: anytype, d: Diagnostic) (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
     try w.writeAll("{\"file\":");
     try json_writer.writeString(w, d.file);
     try w.print(",\"line\":{d},\"col\":{d},\"message\":", .{ d.line, d.col });
@@ -139,9 +139,9 @@ pub fn renderErrorPage(
     allocator: std.mem.Allocator,
     design_name: []const u8,
     d: Diagnostic,
-) std.mem.Allocator.Error![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(allocator);
+) (std.mem.Allocator.Error || std.Io.Writer.Error)![]u8 {
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    const w = &buf.writer;
     try w.writeAll(
         "<!DOCTYPE html><html><head><meta charset=\"utf-8\">" ++
             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" ++
@@ -173,7 +173,7 @@ pub fn renderErrorPage(
         try w.writeAll("</span></pre>");
     }
     try w.writeAll("</div></body></html>");
-    return buf.toOwnedSlice(allocator);
+    return buf.toOwnedSlice();
 }
 
 fn writeHtmlEscaped(w: anytype, s: []const u8) !void {

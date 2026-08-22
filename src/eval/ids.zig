@@ -162,14 +162,18 @@ pub fn autoAssignRefDes(self: *Evaluator, block: *DesignBlock) EvalError!void {
 }
 
 /// Remap the label-addressed references the net/note/section passes miss:
-/// a decoupling cap's `(decouples "IC" …)` host ref, `(group …)` members, and
-/// ref-des-addressed `(verifies …)` sign-offs. Without this a `(decouples
-/// "stm32" 24)` keeps the stale "stm32" label after `stm32 → U1`, and a group
-/// member or a verification targeting a label silently orphans on renumber.
+/// a decoupling cap's `(decouples "IC" …)` host ref, a passive's `(near "REF" …)`
+/// adjacency target, `(group …)` members, and ref-des-addressed `(verifies …)`
+/// sign-offs. Without this a `(decouples "stm32" 24)` keeps the stale "stm32"
+/// label after `stm32 → U1`, and a group member or a verification targeting a
+/// label silently orphans on renumber.
 fn renameCrossRefs(block: *DesignBlock, rename_map: *std.StringHashMapUnmanaged([]const u8)) void {
     for (@as([]Instance, @constCast(block.instances))) |*inst| {
-        if (inst.decouple_ic.len > 0) {
-            if (rename_map.get(inst.decouple_ic)) |new_ref| inst.decouple_ic = new_ref;
+        if (inst.bind.decouple.ic.len > 0) {
+            if (rename_map.get(inst.bind.decouple.ic)) |new_ref| inst.bind.decouple.ic = new_ref;
+        }
+        if (inst.bind.near.ref.len > 0) {
+            if (rename_map.get(inst.bind.near.ref)) |new_ref| inst.bind.near.ref = new_ref;
         }
     }
     for (@as([]env_mod.Group, @constCast(block.groups))) |*grp| {
@@ -177,6 +181,9 @@ fn renameCrossRefs(block: *DesignBlock, rename_map: *std.StringHashMapUnmanaged(
         for (members) |*m| {
             if (rename_map.get(m.*)) |new_ref| m.* = new_ref;
         }
+    }
+    for (@as([]env_mod.TestPoint, @constCast(block.test_points))) |*tp| {
+        if (rename_map.get(tp.ref_des)) |new_ref| tp.ref_des = new_ref;
     }
     for (@as([]env_mod.Verification, @constCast(block.verifications))) |*v| {
         if (v.ref_des.len > 0) {
@@ -285,7 +292,10 @@ pub fn prescanRefDes(self: *Evaluator, forms: []const Node) void {
         const children = form.asList() orelse continue;
         if (children.len < 2) continue;
         const name = children[0].asAtom() orelse continue;
-        if (std.mem.eql(u8, name, "instance") or std.mem.eql(u8, name, "series")) {
+        if (std.mem.eql(u8, name, "instance") or
+            std.mem.eql(u8, name, "series") or
+            std.mem.eql(u8, name, "test-point"))
+        {
             const ref_node = children[1];
             const ref_str = ref_node.asAtom() orelse (ref_node.asString() orelse continue);
             registerRefDes(self, ref_str);
@@ -443,7 +453,7 @@ pub fn generateId(self: *Evaluator) EvalError![]const u8 {
     var attempt: usize = 0;
     while (attempt < id_gen_max_attempts) : (attempt += 1) {
         var bytes: [4]u8 = undefined;
-        infra_random.bytes(&bytes);
+        try infra_random.bytes(&bytes);
         const first: u8 = (bytes[0] % id_first_letter_range) + 'a'; // ensure first char is a-f letter
         const id = std.fmt.allocPrint(
             self.allocator,

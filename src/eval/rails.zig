@@ -143,10 +143,17 @@ fn lessThanRail(_: void, a: PowerRail, b: PowerRail) bool {
 
 /// Heuristic: does a net name read like a supply rail? Lets a regulator's bare
 /// `(port "VOUT" out)` (no declared specs) still register as a rail source.
-/// Mirrors the diagram classifier's power-name prefixes; deliberately narrow
-/// (a `V` + prefix or `V` + digit) so signal outputs like NRST/FAULT/MUXOUT —
-/// and V-initial signal names like VSYNC — don't become phantom rails.
-fn looksLikeRail(name: []const u8) bool {
+/// Deliberately narrow (a `V` + prefix or `V` + digit) so signal outputs like
+/// NRST/FAULT/MUXOUT — and V-initial signal names like VSYNC — don't become
+/// phantom rails. Its prefix table is `rail_prefixes` in the vocabulary block
+/// below, beside the wider tables the schematic, diagram and placement
+/// classifiers ask their own questions with.
+///
+/// Public because it is this project's one answer to "does this net name read
+/// like a rail": the KiCad schematic exporter asks it before ganging a cluster
+/// of bypass caps onto a shared rail wire, and a second copy of the rule there
+/// would drift from the rails pass that owns it.
+pub fn looksLikeRail(name: []const u8) bool {
     if (name.len >= 2 and name[0] == 'V' and name[1] >= '0' and name[1] <= '9') return true;
     for (rail_prefixes) |p| {
         if (std.mem.startsWith(u8, name, p)) return true;
@@ -154,8 +161,102 @@ fn looksLikeRail(name: []const u8) bool {
     return false;
 }
 
+// ── Supply-rail name vocabulary ──────────────────────────────────────────
+// Every supply-name spelling this project recognises lives HERE, beside
+// `looksLikeRail`, and nowhere else. Eight other modules used to keep a private
+// prefix array of their own — five of them the same nine-element list, pasted —
+// which is eight chances for the schematic, the placer and the ERC to disagree
+// about whether a net is power.
+//
+// The tables below are those private arrays, transcribed VERBATIM: they are
+// deliberately NOT unified, because each answers a different question and their
+// differences are load-bearing (only `diagram_supply_prefixes` lists the switch
+// node `VLX`; only `module_supply_prefixes` lists `VEXT`/`VANA`; only
+// `schematic_supply_prefixes` lists the *ground* name `VSS`). Naming them side
+// by side is what makes such a divergence visible instead of invisible.
+// Merging two of them is a design decision — make it here, in one edit, with a
+// test; do not fork a ninth copy at a call site.
+
+/// `AVDD` — an analog supply domain, kept apart from the digital one so the
+/// analog block's decoupling and plane assignment can be judged on its own.
+pub const analog_supply = "AVDD";
+
+/// `DVDD` — a digital supply domain (the twin of `analog_supply`).
+pub const digital_supply = "DVDD";
+
+/// `VSYS` — the system rail a battery/charger front end produces and every
+/// downstream regulator draws from.
+pub const system_rail = "VSYS";
+
+/// `PVDD` — a power-stage supply (a driver/amplifier output stage), distinct
+/// from the part's quiet `AVDD`/`DVDD` domains.
+const power_stage_supply = "PVDD";
+
+/// `VREG` — an internally regulated rail a part exposes for its own bypassing.
+const regulated_rail = "VREG";
+
+/// `VPWR` — a generic board power trunk.
+const bulk_rail = "VPWR";
+
+/// `VRAW` — an unregulated input trunk (pre-regulator).
+const raw_rail = "VRAW";
+
+/// `PVIN` — a switching converter's power-stage input, as opposed to its quiet
+/// analog `VIN`.
+const power_stage_input = "PVIN";
+
+/// `VDCIN` — a barrel-jack / DC-input rail.
+const dc_input_rail = "VDCIN";
+
+/// `HVIN` — a high-voltage input trunk.
+const high_voltage_input = "HVIN";
+
+/// `looksLikeRail`'s own prefix set — the narrow "does this net name read like
+/// a rail" answer the rails pass and the KiCad schematic exporter share.
 const rail_prefixes = [_][]const u8{
-    "VDD", "VCC", "VOUT", "VBUS", "VPWR", "VREG", "VBAT", "VSYS", "VRAW", "V_",
+    "VDD", "VCC", "VOUT", "VBUS", bulk_rail, regulated_rail, "VBAT", system_rail, raw_rail, "V_",
+};
+
+/// The prefixes a switching converter's INPUT rail can carry — the high-dI/dt
+/// side whose loop dominates EMI. Read by `placement/module_policy.isInputRail`
+/// and `placement/optimizer.isInputRailName`, which held one copy each; both
+/// also accept a raw numeric rail >= 7 V, which is their own rule, not
+/// vocabulary.
+pub const input_rail_prefixes = [_][]const u8{
+    "VIN", power_stage_input, "VBUS", "VBAT", system_rail, dc_input_rail, high_voltage_input,
+};
+
+/// Pinout FUNCTION-name prefixes that denote a real supply pad. Read by
+/// `placement/pin_roles.isSupplyFn`, which normalises separators/case and
+/// rejects grounds and supply-named straps before consulting this table.
+pub const supply_pad_prefixes = [_][]const u8{
+    "VCC",  "VDD", analog_supply, digital_supply, power_stage_supply, "VBAT",
+    "VBUS", "VIN", "VOUT",        "VEE",          "VPP",              "VREF",
+};
+
+/// The schematic renderer's "this terminal is a supply, not a signal" prefixes,
+/// matched case-insensitively. Held by five call sites as five identical copies
+/// (`render_html` twice, `render_svg/connection`, `hub`, `section_inset`).
+/// Note it lists the GROUND name `VSS`: these sites ask "is this net power-ish
+/// rather than a functional signal", and a ground reference answers yes.
+pub const schematic_supply_prefixes = [_][]const u8{
+    "VDD", "VCC", "VSS", "VIN", "VBAT", analog_supply, digital_supply, power_stage_supply, "V_",
+};
+
+/// The block-diagram classifier's power-rail prefixes (`diagram/classify`),
+/// which also accepts a `V`+digit form. Uniquely lists `VLX` — a buck's switch
+/// node, drawn as a power edge because that is what it looks like on a diagram,
+/// though no other classifier here calls it a rail.
+pub const diagram_supply_prefixes = [_][]const u8{
+    "VDD", "VCC", analog_supply, digital_supply, "VBAT", regulated_rail, "VPOS", "VBUS", "VLX", "V_",
+};
+
+/// The placement module-policy's power-rail prefixes
+/// (`placement/module_policy.isPowerRail`), which also accepts a `V`+digit
+/// form. Uniquely lists the part-local `VEXT`/`VANA` supplies.
+pub const module_supply_prefixes = [_][]const u8{
+    "VDD",  "VCC",  analog_supply, digital_supply, regulated_rail, "VPOS",
+    "VOUT", "VEXT", "VANA",        "VREF",         "VPP",          "V_",
 };
 
 /// Find the top-level net tied to a sub-block path like `"buck/VOUT"`.
@@ -196,6 +297,43 @@ fn sectionVoltage(sec: env_mod.Section, rail_name: []const u8) ?f64 {
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
+
+// The vocabulary tables' independent witness. Each expectation below is the
+// literal array the consuming module held before it started importing the
+// table, transcribed by hand — so a table edited here without its consumer in
+// mind fails HERE, naming the classifier whose answer just changed, instead of
+// silently moving a net between "power" and "signal" on one of five surfaces.
+// Deriving the expectation from the table itself would make the test circular.
+test "the supply-rail vocabulary tables keep the spellings their consumers had" {
+    const S = []const []const u8;
+    try std.testing.expectEqualDeep(
+        @as(S, &.{ "VDD", "VCC", "VOUT", "VBUS", "VPWR", "VREG", "VBAT", "VSYS", "VRAW", "V_" }),
+        @as(S, &rail_prefixes),
+    );
+    try std.testing.expectEqualDeep(
+        @as(S, &.{ "VIN", "PVIN", "VBUS", "VBAT", "VSYS", "VDCIN", "HVIN" }),
+        @as(S, &input_rail_prefixes),
+    );
+    try std.testing.expectEqualDeep(
+        @as(S, &.{ "VCC", "VDD", "AVDD", "DVDD", "PVDD", "VBAT", "VBUS", "VIN", "VOUT", "VEE", "VPP", "VREF" }),
+        @as(S, &supply_pad_prefixes),
+    );
+    try std.testing.expectEqualDeep(
+        @as(S, &.{ "VDD", "VCC", "VSS", "VIN", "VBAT", "AVDD", "DVDD", "PVDD", "V_" }),
+        @as(S, &schematic_supply_prefixes),
+    );
+    try std.testing.expectEqualDeep(
+        @as(S, &.{ "VDD", "VCC", "AVDD", "DVDD", "VBAT", "VREG", "VPOS", "VBUS", "VLX", "V_" }),
+        @as(S, &diagram_supply_prefixes),
+    );
+    try std.testing.expectEqualDeep(
+        @as(S, &.{ "VDD", "VCC", "AVDD", "DVDD", "VREG", "VPOS", "VOUT", "VEXT", "VANA", "VREF", "VPP", "V_" }),
+        @as(S, &module_supply_prefixes),
+    );
+    try std.testing.expectEqualStrings("AVDD", analog_supply);
+    try std.testing.expectEqualStrings("DVDD", digital_supply);
+    try std.testing.expectEqualStrings("VSYS", system_rail);
+}
 
 fn outPort(name: []const u8, nominal: ?f64) Port {
     return .{

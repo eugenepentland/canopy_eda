@@ -7,6 +7,7 @@ const review = @import("review.zig");
 const erc_mod = @import("erc.zig");
 const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
+const review_thermal = @import("review_thermal.zig");
 
 // ── Repeated string literals ──────────────────────────────────────
 const component_key: []const u8 = ",\"component\":";
@@ -17,9 +18,10 @@ const ref_des_open: []const u8 = "{\"ref_des\":";
 /// Serialize a ReviewDoc to JSON. Field names are snake_case. Consumers
 /// (the web UI and the `generate_review` MCP tool) rely on the schema being
 /// stable, so changes should be strictly additive.
-pub fn renderToJson(allocator: std.mem.Allocator, doc: review.ReviewDoc) std.mem.Allocator.Error![]const u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(allocator);
+pub fn renderToJson(allocator: std.mem.Allocator, doc: review.ReviewDoc) (std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8 {
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    defer buf.deinit();
+    const w = &buf.writer;
 
     try w.writeAll("{\"design_name\":");
     try json_writer.writeString(w, doc.design_name);
@@ -59,19 +61,19 @@ pub fn renderToJson(allocator: std.mem.Allocator, doc: review.ReviewDoc) std.mem
     try w.writeAll("]");
 
     try w.writeAll(",\"power_budget\":[");
-    for (doc.power_budget, 0..) |r, i| {
+    for (doc.power.budget, 0..) |r, i| {
         if (i > 0) try w.writeAll(",");
         try writeRail(w, r);
     }
     try w.writeAll("]");
 
     try w.writeAll(",\"power_tree\":{\"nodes\":[");
-    for (doc.power_tree.nodes, 0..) |n, i| {
+    for (doc.power.tree.nodes, 0..) |n, i| {
         if (i > 0) try w.writeAll(",");
         try writePowerTreeNode(w, n);
     }
     try w.writeAll("],\"edges\":[");
-    for (doc.power_tree.edges, 0..) |e, i| {
+    for (doc.power.tree.edges, 0..) |e, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"from\":");
         try json_writer.writeString(w, e.from);
@@ -82,11 +84,16 @@ pub fn renderToJson(allocator: std.mem.Allocator, doc: review.ReviewDoc) std.mem
     try w.writeAll("]}");
 
     try w.writeAll(",\"power_sequence\":[");
-    for (doc.power_sequence, 0..) |r, i| {
+    for (doc.power.sequence, 0..) |r, i| {
         if (i > 0) try w.writeAll(",");
         try writeSequenceRow(w, r);
     }
     try w.writeAll("]");
+
+    // The same object `GET /api/thermal/:name` and the `describe_thermal` MCP
+    // tool return, written by the one shared body so the three cannot disagree.
+    try w.writeAll(",\"thermal\":");
+    try review_thermal.writeFactsJson(w, doc.power.thermal, doc.power.scenarios);
 
     try w.writeAll(",\"test_points\":[");
     for (doc.test_points, 0..) |tp, i| {
@@ -124,7 +131,7 @@ pub fn renderToJson(allocator: std.mem.Allocator, doc: review.ReviewDoc) std.mem
     try writeComponentRequirements(w, doc.subblock_requirements);
 
     try w.writeAll("}");
-    return buf.items;
+    return buf.toOwnedSlice();
 }
 
 fn boolStr(b: bool) []const u8 {

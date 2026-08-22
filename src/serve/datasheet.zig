@@ -15,6 +15,7 @@ const json_writer = @import("../json_writer.zig");
 const log = @import("../infra/log.zig");
 const upload_datasheet = @import("upload_datasheet.zig");
 const subprocess = @import("subprocess.zig");
+const AllocatingWriter = @import("../allocating_writer.zig").AllocatingWriter;
 
 /// Extracted-text byte cap (also the sidecar read ceiling).
 const max_output_bytes: usize = 8 * 1024 * 1024;
@@ -22,6 +23,8 @@ const max_output_bytes: usize = 8 * 1024 * 1024;
 const extract_timeout_ms: u64 = 45_000;
 /// Bytes returned when the caller gives no explicit `limit`.
 const default_limit: u64 = 20_000;
+/// Upper bound for hashing the source PDF returned as review identity.
+const max_pdf_bytes: usize = 256 * 1024 * 1024;
 
 const Loaded = struct {
     /// Owned extracted text, or null on failure.
@@ -49,7 +52,9 @@ pub fn read(
     limit: ?u64,
     out: *std.ArrayList(u8),
 ) std.mem.Allocator.Error!bool {
-    const w = out.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w: AllocatingWriter = .{ .writer = &aw.writer };
 
     const sanitized = upload_datasheet.sanitizeFilename(allocator, name) catch |e| {
         try w.print("{{\"ok\":false,\"error\":\"invalid name: {s}\"}}", .{@errorName(e)});
@@ -63,6 +68,14 @@ pub fn read(
         try w.writeAll("{\"ok\":false,\"error\":\"datasheet not found\"}");
         return false;
     };
+    const pdf = infra_fs.cwd().readFileAlloc(allocator, pdf_path, max_pdf_bytes) catch {
+        try w.writeAll("{\"ok\":false,\"error\":\"datasheet cannot be hashed\"}");
+        return false;
+    };
+    defer allocator.free(pdf);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(pdf, &digest, .{});
+    const sha256 = std.fmt.bytesToHex(digest, .lower);
 
     // Cache sidecar: <stem>.txt — sanitizeFilename guarantees a .pdf suffix.
     const stem = sanitized[0 .. sanitized.len - ".pdf".len];
@@ -77,7 +90,7 @@ pub fn read(
     const text = loaded.text.?;
     defer allocator.free(text);
 
-    return writeResult(w, sanitized, window(text, offset, limit));
+    return writeResult(w, sanitized, &sha256, window(text, offset, limit)) catch return error.OutOfMemory;
 }
 
 /// Return the datasheet's extracted text (owned) from the fresh sidecar cache
@@ -119,7 +132,7 @@ fn extractError(res: subprocess.Result) []const u8 {
 fn cacheFresh(pdf_path: []const u8, txt_path: []const u8) bool {
     const txt_stat = infra_fs.cwd().statFile(txt_path) catch return false;
     const pdf_stat = infra_fs.cwd().statFile(pdf_path) catch return false;
-    return txt_stat.mtime >= pdf_stat.mtime;
+    return txt_stat.mtime.nanoseconds >= pdf_stat.mtime.nanoseconds;
 }
 
 /// Best-effort write of the extraction cache; failure just means no cache, so
@@ -145,9 +158,11 @@ fn window(text: []const u8, offset: ?u64, limit: ?u64) Window {
     };
 }
 
-fn writeResult(w: anytype, name: []const u8, win: Window) !bool {
+fn writeResult(w: anytype, name: []const u8, sha256: []const u8, win: Window) !bool {
     try w.writeAll("{\"ok\":true,\"name\":");
     try json_writer.writeString(w, name);
+    try w.writeAll(",\"sha256\":");
+    try json_writer.writeString(w, sha256);
     try w.print(",\"total_bytes\":{d},\"offset\":{d},\"returned_bytes\":{d},\"truncated\":{s},\"content\":", .{
         win.total, win.offset, win.slice.len, if (win.truncated) "true" else "false",
     });
@@ -176,4 +191,13 @@ test "window clamps offset and limit and flags truncation" {
     const tail = window(text, 5, 100);
     try std.testing.expectEqualStrings("56789", tail.slice);
     try std.testing.expect(!tail.truncated);
+}
+
+// spec: serve/datasheet - read_datasheet result exposes the current PDF digest for datasheet-review provenance
+test "writeResult includes sha256 identity" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    _ = try writeResult(&out.writer, "part.pdf", sha, window("abc", null, null));
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"sha256\":\"0123456789abcdef") != null);
 }

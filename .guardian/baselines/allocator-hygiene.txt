@@ -1,26 +1,28 @@
-# guardian-snapshot v1
-src/render_html.zig:784: hardcoded std.heap.page_allocator outside main/test
-src/serve.zig:145: hardcoded std.heap.page_allocator outside main/test
-src/serve.zig:147: hardcoded std.heap.page_allocator outside main/test
-src/serve.zig:155: hardcoded std.heap.page_allocator outside main/test
-src/serve.zig:170: hardcoded std.heap.page_allocator outside main/test
-src/serve.zig:174: hardcoded std.heap.page_allocator outside main/test
-src/serve.zig:178: hardcoded std.heap.page_allocator outside main/test
-src/serve.zig:181: hardcoded std.heap.page_allocator outside main/test
-src/serve.zig:64: hardcoded std.heap.page_allocator outside main/test
-src/serve.zig:71: hardcoded std.heap.page_allocator outside main/test
-src/serve.zig:84: hardcoded std.heap.page_allocator outside main/test
-src/serve.zig:86: hardcoded std.heap.page_allocator outside main/test
-src/serve/mcp.zig:298: hardcoded std.heap.page_allocator outside main/test
-src/serve/mcp_tools.zig:2244: hardcoded std.heap.page_allocator outside main/test
-src/serve/modules.zig:285: hardcoded std.heap.page_allocator outside main/test
-src/serve/page_cache.zig:25: hardcoded std.heap.page_allocator outside main/test
-src/serve/pcb_layout_page.zig:1452: hardcoded std.heap.page_allocator outside main/test
-src/serve/pcb_layout_page.zig:1470: hardcoded std.heap.page_allocator outside main/test
-src/serve/pcb_layout_page.zig:1523: hardcoded std.heap.page_allocator outside main/test
-src/serve/pcb_layout_page.zig:1528: hardcoded std.heap.page_allocator outside main/test
-src/serve/pcb_layout_page.zig:1529: hardcoded std.heap.page_allocator outside main/test
-src/serve/pcb_layout_page.zig:1538: hardcoded std.heap.page_allocator outside main/test
-src/serve/pcb_layout_page.zig:1539: hardcoded std.heap.page_allocator outside main/test
-src/serve/plugin_tokens.zig:19: hardcoded std.heap.page_allocator outside main/test
-src/serve/schematic_page.zig:43: hardcoded std.heap.page_allocator outside main/test
+# guardian-snapshot v3
+allocator-hygiene|src/render_html.zig|hardcoded std.heap.page_allocator outside main/test
+allocator-hygiene|src/serve.zig|hardcoded std.heap.page_allocator outside main/test
+allocator-hygiene|src/serve.zig|hardcoded std.heap.page_allocator outside main/test
+allocator-hygiene|src/serve.zig|hardcoded std.heap.page_allocator outside main/test
+allocator-hygiene|src/serve.zig|hardcoded std.heap.page_allocator outside main/test
+allocator-hygiene|src/serve.zig|hardcoded std.heap.page_allocator outside main/test
+allocator-hygiene|src/serve.zig|hardcoded std.heap.page_allocator outside main/test
+allocator-hygiene|src/serve.zig|hardcoded std.heap.page_allocator outside main/test
+allocator-hygiene|src/serve.zig|hardcoded std.heap.page_allocator outside main/test
+allocator-hygiene|src/serve.zig|hardcoded std.heap.page_allocator outside main/test
+allocator-hygiene|src/serve.zig|hardcoded std.heap.page_allocator outside main/test
+allocator-hygiene|src/serve.zig|hardcoded std.heap.page_allocator outside main/test
+allocator-hygiene|src/serve/mcp.zig|hardcoded std.heap.page_allocator outside main/test
+allocator-hygiene|src/serve/mcp_tools.zig|hardcoded std.heap.page_allocator outside main/test
+allocator-hygiene|src/serve/modules.zig|hardcoded std.heap.page_allocator outside main/test
+allocator-hygiene|src/serve/page_cache.zig|hardcoded std.heap.page_allocator outside main/test
+allocator-hygiene|src/serve/pcb_layout_page.zig|hardcoded std.heap.page_allocator outside main/test
+allocator-hygiene|src/serve/pcb_layout_page.zig|hardcoded std.heap.page_allocator outside main/test
+allocator-hygiene|src/serve/pcb_layout_page.zig|hardcoded std.heap.page_allocator outside main/test
+allocator-hygiene|src/serve/pcb_layout_page.zig|hardcoded std.heap.page_allocator outside main/test
+allocator-hygiene|src/serve/pcb_layout_page.zig|hardcoded std.heap.page_allocator outside main/test
+allocator-hygiene|src/serve/pcb_layout_page.zig|hardcoded std.heap.page_allocator outside main/test
+allocator-hygiene|src/serve/pcb_layout_page.zig|hardcoded std.heap.page_allocator outside main/test
+allocator-hygiene|src/serve/plugin_tokens.zig|hardcoded std.heap.page_allocator outside main/test
+allocator-hygiene|src/serve/route_live.zig|hardcoded std.heap.page_allocator outside main/test
+allocator-hygiene|src/serve/route_session_api.zig|hardcoded std.heap.page_allocator outside main/test
+allocator-hygiene|src/serve/schematic_page.zig|hardcoded std.heap.page_allocator outside main/test

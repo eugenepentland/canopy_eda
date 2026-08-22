@@ -49,8 +49,8 @@ const endpointEql = draw.endpointEql;
 const Allocator = std.mem.Allocator;
 
 /// Error set for the JSON scene-graph emitter — uses the same
-/// `ArrayListUnmanaged(u8).writer()` (only OOM) plus `*std.Io.Writer`
-/// (adds `WriteFailed`) — `draw.RenderError` propagates the same union
+/// allocation-backed and I/O-backed `std.Io.Writer` implementations —
+/// `draw.RenderError` propagates the same union
 /// up through `mergeAwareHubHeight` → `renderSceneGraph`.
 pub const RenderError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
@@ -100,7 +100,7 @@ const JsonPin = struct {
     net: []const u8 = "",
     /// Electrical role of the pin group — "pwr" (supply), "gnd" (ground), or ""
     /// (signal). From the pinout function name (falling back to the net name),
-    /// so the editor's map can order supplies top / grounds bottom without
+    /// so schematic clients can order supplies top / grounds bottom without
     /// re-deriving the heuristics client-side.
     role: []const u8 = "",
     /// Feature-group label from the enclosing `(pins ref (group "X") …)`
@@ -124,12 +124,12 @@ const JsonHub = struct {
     src_offset: u32 = 0,
     /// Authored sheet this hub files under: its `(section …)` name, with
     /// sub-block hubs folded into the section their sub-block attaches to
-    /// (membership.computeSubBlockAttachments). The editor's map groups
+    /// (membership.computeSubBlockAttachments). Functional views group
     /// cells into bands by this instead of geometric containment, so a
     /// module's parts land on the author's sheet, not a module-title one.
     sec: []const u8 = "",
     /// Section-grid card index this hub renders in — shared with every passive
-    /// the card emits, so the editor pairs a module's caps with its own IC.
+    /// the card emits, so clients pair a module's caps with its own IC.
     slot: ?usize = null,
     left_pins: std.ArrayList(JsonPin),
     right_pins: std.ArrayList(JsonPin),
@@ -158,7 +158,11 @@ fn loadPinoutAlts(allocator: Allocator, map: *PinoutAltMap, project_dir: []const
         if (cl.len < 4) continue;
         const ch = cl[0].asAtom() orelse continue;
         if (!std.mem.eql(u8, ch, "pin")) continue;
-        const pin_id = cl[1].asAtom() orelse cl[1].asString() orelse continue;
+        // `tokenText`, not asAtom/asString: a bare-integer pad (`(pin 1 …)`) is
+        // how 243 of the 265 pinout files spell their pads, and dropping those
+        // left the schematic's alt display disagreeing with ERC, which keys the
+        // same file through `erc.loadPinoutMap`.
+        const pin_id = cl[1].tokenText(allocator) orelse continue;
 
         var alts: std.ArrayList([]const u8) = .empty;
         for (cl[3..]) |alt_node| {
@@ -182,7 +186,7 @@ fn loadPinoutAlts(allocator: Allocator, map: *PinoutAltMap, project_dir: []const
 /// reaches: part-level `(part …)` names (`buildPinNameMap`) cover multi-part
 /// ICs, but flat `(pin …)` instances carry none, so we supplement from the
 /// pinout file — the same source the HTML schematic uses (which is why it
-/// already read "GP11" where the editor read the net "LED2_DRV").
+/// already read "GP11" where the scene graph read the net "LED2_DRV").
 fn loadPinoutNames(allocator: Allocator, path: []const u8) ?std.StringHashMapUnmanaged([]const u8) {
     const content = infra_fs.cwd().readFileAlloc(allocator, path, 1 << 18) catch return null;
     const parser_m = @import("sexpr/parser.zig");
@@ -204,14 +208,126 @@ fn loadPinoutNames(allocator: Allocator, path: []const u8) ?std.StringHashMapUnm
     return map;
 }
 
+/// Complete physical pin-name map for one hub. Flat instances do not carry
+/// `PartPin` records, so supplement them from the component pinout file.
+fn hubPinNameMap(
+    ctx: *RenderCtx,
+    allocator: Allocator,
+    hub: FlatInst,
+    part: ?env_mod.Part,
+) std.StringHashMapUnmanaged([]const u8) {
+    const parts: []const env_mod.Part = if (part) |p| &[_]env_mod.Part{p} else hub.parts;
+    var names = hub_mod.buildPinNameMap(ctx, parts);
+    if (ctx.project_dir.len == 0) return names;
+
+    for ([_][]const u8{ hub.pinout, hub.symbol, hub.component }) |cand| {
+        if (cand.len == 0) continue;
+        const path = std.fmt.allocPrint(allocator, "{s}/lib/pinouts/{s}.sexp", .{ ctx.project_dir, cand }) catch continue;
+        defer allocator.free(path);
+        var pinmap = loadPinoutNames(allocator, path) orelse continue;
+        var it = pinmap.iterator();
+        while (it.next()) |kv| {
+            if (!names.contains(kv.key_ptr.*)) names.put(allocator, kv.key_ptr.*, kv.value_ptr.*) catch break;
+        }
+        if (pinmap.count() > 0) break;
+    }
+    return names;
+}
+
+/// Union the connected netlist pads with explicitly accepted no-connect pads,
+/// then return them in physical pin order. This keeps deliberate gaps visible
+/// without rendering every unused pad from a large IC pinout.
+const HubPinContext = struct {
+    part: ?env_mod.Part,
+    explicit_nc_oks: []const env_mod.NcOk,
+};
+
+fn collectHubPinIds(
+    ctx: *RenderCtx,
+    allocator: Allocator,
+    hub: FlatInst,
+    pin_ctx: HubPinContext,
+) ![]const []const u8 {
+    var pins: std.ArrayList([]const u8) = .empty;
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+
+    if (pin_ctx.part) |p| {
+        for (p.pins) |pp| {
+            if (seen.contains(pp.pin)) continue;
+            try seen.put(allocator, pp.pin, {});
+            try pins.append(allocator, pp.pin);
+        }
+    } else {
+        for (ctx.nets.items) |net| {
+            for (net.pins) |pin| {
+                if (!std.mem.eql(u8, pin.ref_des, hub.ref_des) or seen.contains(pin.pin)) continue;
+                try seen.put(allocator, pin.pin, {});
+                try pins.append(allocator, pin.pin);
+            }
+        }
+    }
+
+    for (pin_ctx.explicit_nc_oks) |nc_ok| {
+        if (nc_ok.reason.len == 0) continue;
+        if (seen.contains(nc_ok.pin)) continue;
+        try seen.put(allocator, nc_ok.pin, {});
+        try pins.append(allocator, nc_ok.pin);
+    }
+
+    std.mem.sortUnstable([]const u8, pins.items, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return draw.pinOrder(a, b);
+        }
+    }.lt);
+    return pins.toOwnedSlice(allocator);
+}
+
+const ExplicitNcMap = std.StringHashMapUnmanaged([]const env_mod.NcOk);
+
+fn standardRefDes(ref: []const u8) bool {
+    if (ref.len < 2) return false;
+    var i: usize = 0;
+    while (i < ref.len and i < 2 and std.ascii.isUpper(ref[i])) : (i += 1) {}
+    if (i == 0) return false;
+    const digit_start = i;
+    while (i < ref.len and std.ascii.isDigit(ref[i])) : (i += 1) {}
+    return i == ref.len and i > digit_start;
+}
+
+/// Index explicit no-connect approvals by the same flattened ref-des scheme as
+/// RenderCtx. Kept beside the JSON render pass instead of widening FlatInst,
+/// because no-connect annotations are scene policy rather than component data.
+fn collectExplicitNcOks(
+    allocator: Allocator,
+    map: *ExplicitNcMap,
+    block: *const DesignBlock,
+    prefix: []const u8,
+) Allocator.Error!void {
+    for (block.instances) |inst| {
+        if (inst.nc_oks.len == 0) continue;
+        const ref_des = if (prefix.len > 0 and !standardRefDes(inst.ref_des))
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, inst.ref_des })
+        else
+            inst.ref_des;
+        try map.put(allocator, ref_des, inst.nc_oks);
+    }
+    for (block.sub_blocks) |sub_block| {
+        const nested_prefix = if (prefix.len > 0)
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, sub_block.name })
+        else
+            sub_block.name;
+        try collectExplicitNcOks(allocator, map, sub_block.block, nested_prefix);
+    }
+}
+
 const JsonWire = struct {
     net: []const u8,
     points: std.ArrayList([2]f64),
     is_bus: bool,
 };
 
-/// A part's actual pin → net binding, read straight from the netlist. The editor
-/// inspector reads nets from this (authoritative) instead of inferring them from
+/// A part's actual pin → net binding, read straight from the netlist. Schematic
+/// clients read nets from this (authoritative) instead of inferring them from
 /// drawn wires — so a pin on a brand-new single-pin net (no wire rendered yet)
 /// still shows its real net instead of appearing blank.
 const PinNet = struct { pin: []const u8, net: []const u8 };
@@ -248,7 +364,7 @@ const JsonPassive = struct {
 };
 
 /// An instance the hub/spoke layout did not place (a floating passive — e.g. a
-/// just-added cap with no hub-reaching net). Reported so the editor can stage it
+/// just-added cap with no hub-reaching net). Reported so clients can stage it
 /// for the user to drag onto a pin. Identity is the source offset, stable across
 /// the build-time ref-des auto-renumber.
 const JsonStaged = struct {
@@ -273,7 +389,7 @@ const JsonLabel = struct {
 
 /// One resolved power-rail entry for the scene JSON: the sub-block-declared
 /// source (from `eval/rails`) resolved down to the concrete IC instance inside
-/// that sub-block, so the editor's connection map can anchor the rail's
+/// that sub-block, so the connection map can anchor the rail's
 /// producer ghost and order the power tree without re-deriving module
 /// structure client-side.
 const ScenePowerRail = struct {
@@ -362,22 +478,22 @@ const SceneGraph = struct {
     labels: std.ArrayList(JsonLabel),
     staged: std.ArrayList(JsonStaged),
     /// Names of the design's authored `(section …)` / sub-block structure, so the
-    /// editor's sheet navigator pages by authored section — and collapses to a
+    /// scene clients page by authored section — and collapses to a
     /// single whole-design sheet when there are none — instead of auto per-IC.
     authored_sections: []const []const u8 = &.{},
-    /// The design's top-level boundary `(port …)` forms, so the editor can list /
-    /// add / remove them (the design-level interface view).
+    /// The design's top-level boundary `(port …)` forms, so schematic clients
+    /// can list / add / remove them (the design-level interface view).
     ports: []const env_mod.Port = &.{},
     /// Authored sheets with their block-diagram category (same classifier as
-    /// the system overview), in authored order. The editor orders its bands
+    /// the system overview), in authored order. The renderer orders its bands
     /// canonically (power → mcu → memory → …) and colors glance chips from
     /// this without duplicating the keyword tables client-side.
     sheet_meta: []const SheetMeta = &.{},
-    /// Hand-authored `(function …)` super-blocks — the editor map's outermost
-    /// zoom level. Borrowed from the DesignBlock.
+    /// Hand-authored `(function …)` super-blocks — the functional schematic's
+    /// outermost grouping. Borrowed from the DesignBlock.
     functions: []const env_mod.FunctionSpec = &.{},
     /// Sub-block-sourced power rails with their producer IC resolved — the
-    /// editor's map draws the power tree from these.
+    /// functional schematic draws the power tree from these.
     power_rails: []const ScenePowerRail = &.{},
 
     fn init(allocator: Allocator) SceneGraph {
@@ -470,6 +586,14 @@ fn mergeAwareGroupHeights(ctx: *RenderCtx, allocator: Allocator, groups: []const
     for (groups, 0..) |group, i| {
         var total_slots: u32 = 0;
 
+        var first_pin_id: []const u8 = "";
+        for (group.conns) |conn| {
+            first_pin_id = conn.pin;
+            break;
+        }
+        const canon_key = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ hub_ref, first_pin_id });
+        const pin_net_name = ctx.pin_canonical_nets.get(canon_key) orelse "";
+
         // Classify connections for this group (same logic as collectGroupConnections)
         var classified: std.ArrayList(Classified) = .empty;
         for (group.conns) |conn| {
@@ -477,6 +601,8 @@ fn mergeAwareGroupHeights(ctx: *RenderCtx, allocator: Allocator, groups: []const
                 .net => |net| {
                     const term = baseNetName(net);
                     if (!ctx.significant_nets.contains(term)) continue;
+                    const own = std.mem.eql(u8, term, baseNetName(pin_net_name));
+                    if (own and !connection.shouldShowOwnNet(ctx, term, hub_ref)) continue;
                     try classified.append(allocator, .{ .conn = conn, .terminal = term });
                 },
                 .pin => |p| {
@@ -566,15 +692,39 @@ fn mergeAwareGroupHeights(ctx: *RenderCtx, allocator: Allocator, groups: []const
     return heights;
 }
 
+// spec: render_svg - Hub pin spacing reserves rows only for connections the scene graph actually draws
+test "merge-aware group height ignores a suppressed own-net label" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    var ctx = RenderCtx.init(allocator);
+    try ctx.significant_nets.put(allocator, "LOCAL", {});
+    try ctx.significant_nets.put(allocator, "VISIBLE", {});
+    try ctx.pin_canonical_nets.put(allocator, "U1.1", "LOCAL");
+
+    const groups = [_]PinGroup{.{
+        .display_name = "IO",
+        .pin_numbers = "1",
+        .conns = &.{
+            .{ .pin = "1", .endpoint = .{ .net = "LOCAL" } },
+            .{ .pin = "1", .endpoint = .{ .net = "VISIBLE" } },
+        },
+    }};
+    const heights = try mergeAwareGroupHeights(&ctx, allocator, &groups, "U1");
+
+    // LOCAL is the pin's implicit own net and does not render. VISIBLE alone
+    // occupies one row, so the group keeps the 40 px base height instead of
+    // reserving an empty second row.
+    try std.testing.expectEqual(@as(f64, 40.0), heights[0]);
+}
+
 /// Mirror of `hub_mod.SplitGroups` for the merge-aware path.
 const MergeAwareSplit = ctx_mod.MergeAwareSplit;
 
-/// Balance hub pin groups into left/right columns by visual height
-/// (merge-aware variant). Mirrors `hub_mod.splitGroupsByHeight` but
-/// uses `mergeAwareGroupHeights` so identical single-passive spokes
-/// (e.g. a row of decoupling caps tied to the same rail) collapse to
-/// one slot. Greedy: walks groups in their `groupHubPins` order and
-/// assigns each to whichever column is currently shorter.
+/// Split ordered hub pin groups into sequential left/right ranges using their
+/// merge-aware visual heights. Identical single-passive spokes (e.g. a row of
+/// decoupling caps tied to the same rail) collapse to one slot before choosing
+/// the balanced prefix boundary.
 /// Content key for the merge-aware split memo: `hub_ref` plus each group's pin
 /// ids. `groupHubPins` is deterministic in (ctx, pins), so identical pin ids ⇒
 /// identical groups ⇒ identical split — a cache hit is only ever returned for
@@ -599,77 +749,50 @@ fn splitGroupsByMergeAwareHeight(
     // (mergeAwareGroupHeights walks findSpokeChain per connection — the
     // expensive part). Key on exact content so the cache is result-identical.
     const cache_key = try splitCacheKey(allocator, all_groups, hub_ref);
-    if (ctx.hub_split_cache.get(cache_key)) |cached| return cached;
+    if (ctx.render_scratch.hub_splits.get(cache_key)) |cached| return cached;
 
     const all_heights = try mergeAwareGroupHeights(ctx, allocator, all_groups, hub_ref);
     defer allocator.free(all_heights);
 
-    var left: std.ArrayList(PinGroup) = .empty;
-    var right: std.ArrayList(PinGroup) = .empty;
-    var left_h: std.ArrayList(f64) = .empty;
-    var right_h: std.ArrayList(f64) = .empty;
-    var left_total: f64 = 0;
-    var right_total: f64 = 0;
-
-    for (all_groups, all_heights) |group, h| {
-        if (left_total <= right_total) {
-            try left.append(allocator, group);
-            try left_h.append(allocator, h);
-            left_total += h;
-        } else {
-            try right.append(allocator, group);
-            try right_h.append(allocator, h);
-            right_total += h;
+    var total: f64 = 0;
+    for (all_heights) |h| total += h;
+    var split_idx: usize = all_groups.len;
+    if (all_groups.len > 1) {
+        var prefix: f64 = 0;
+        var best_delta = std.math.inf(f64);
+        for (all_heights[0 .. all_heights.len - 1], 0..) |h, i| {
+            prefix += h;
+            const delta = @abs(total - 2.0 * prefix);
+            if (delta < best_delta) {
+                best_delta = delta;
+                split_idx = i + 1;
+            }
         }
     }
 
     const result = MergeAwareSplit{
-        .left = try left.toOwnedSlice(allocator),
-        .right = try right.toOwnedSlice(allocator),
-        .left_heights = try left_h.toOwnedSlice(allocator),
-        .right_heights = try right_h.toOwnedSlice(allocator),
+        .left = try allocator.dupe(PinGroup, all_groups[0..split_idx]),
+        .right = try allocator.dupe(PinGroup, all_groups[split_idx..]),
+        .left_heights = try allocator.dupe(f64, all_heights[0..split_idx]),
+        .right_heights = try allocator.dupe(f64, all_heights[split_idx..]),
     };
-    try ctx.hub_split_cache.put(allocator, cache_key, result);
+    try ctx.render_scratch.hub_splits.put(allocator, cache_key, result);
     return result;
 }
 
 /// Compute hub height using merge-aware group heights.
-fn mergeAwareHubHeight(ctx: *RenderCtx, allocator: Allocator, hub: FlatInst, part: ?env_mod.Part) !f64 {
+fn mergeAwareHubHeight(
+    ctx: *RenderCtx,
+    allocator: Allocator,
+    hub: FlatInst,
+    pin_ctx: HubPinContext,
+) !f64 {
     const adj_entries = if (ctx.adjacency.get(hub.ref_des)) |list| list.items else &[_]AdjEntry{};
-
-    var all_pins_list: std.ArrayList([]const u8) = .empty;
-    defer all_pins_list.deinit(allocator);
-
-    if (part) |p| {
-        var seen: std.StringHashMapUnmanaged(void) = .empty;
-        defer seen.deinit(allocator);
-        for (p.pins) |pp| {
-            if (!seen.contains(pp.pin)) {
-                try seen.put(allocator, pp.pin, {});
-                try all_pins_list.append(allocator, pp.pin);
-            }
-        }
-    } else {
-        for (ctx.nets.items) |net| {
-            for (net.pins) |pin| {
-                if (std.mem.eql(u8, pin.ref_des, hub.ref_des)) {
-                    try all_pins_list.append(allocator, pin.pin);
-                }
-            }
-        }
-    }
-
-    std.mem.sortUnstable([]const u8, all_pins_list.items, {}, struct {
-        fn lt(_: void, a: []const u8, b: []const u8) bool {
-            return draw.pinOrder(a, b);
-        }
-    }.lt);
-
-    const parts_for_names: []const env_mod.Part = if (part) |p2| &[_]env_mod.Part{p2} else hub.parts;
-    var pn_map = hub_mod.buildPinNameMap(ctx, parts_for_names);
+    var pn_map = hubPinNameMap(ctx, allocator, hub, pin_ctx.part);
     defer pn_map.deinit(allocator);
+    const all_pins = try collectHubPinIds(ctx, allocator, hub, pin_ctx);
 
-    const all_groups = try hub_mod.groupHubPins(ctx, all_pins_list.items, adj_entries, &pn_map);
+    const all_groups = try hub_mod.groupHubPins(ctx, all_pins, adj_entries, &pn_map);
     const split = try splitGroupsByMergeAwareHeight(ctx, allocator, all_groups, hub.ref_des);
     const left_heights = split.left_heights;
     const right_heights = split.right_heights;
@@ -690,8 +813,8 @@ fn mergeAwareHubHeight(ctx: *RenderCtx, allocator: Allocator, hub: FlatInst, par
 /// emits hub boxes plus the wires/labels needed to render the schematic.
 /// Collect the names of the design's authored structural sections — `(section …)`
 /// forms (and their sub-sections) plus `(sub-block …)`s. These are what the
-/// editor pages by; when the list is empty the design has no explicit sections
-/// and the editor shows a single whole-design sheet.
+/// schematic views use to group the design; when the list is empty the design
+/// has no explicit sections and renders as a single whole-design sheet.
 fn collectAuthoredSections(allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize) ![]const []const u8 {
     var list: std.ArrayList([]const u8) = .empty;
     for (block.sections) |sec| {
@@ -710,7 +833,7 @@ fn collectAuthoredSections(allocator: Allocator, block: *const DesignBlock, sub_
 
 /// Build the scene's `sheet_meta`: one entry per authored sheet (same set and
 /// order as `collectAuthoredSections`), each classified with the system-
-/// overview category heuristics so the editor can order bands canonically.
+/// overview category heuristics so clients can order bands canonically.
 fn buildSheetMeta(allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize) ![]const SheetMeta {
     var list: std.ArrayList(SheetMeta) = .empty;
     for (block.sections) |sec| {
@@ -753,7 +876,7 @@ const SectionGridState = struct {
 /// Build the section grid (one slot per authored section, sub-section, and
 /// sub-block card) plus the instance-ref → slot map. An attached sub-block
 /// keeps its own card but files under the adopting section's sheet, so the
-/// editor's bands match the authored structure.
+/// rendered bands match the authored structure.
 fn buildSectionGrid(allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize) !SectionGridState {
     var st = SectionGridState{ .grid = .empty, .ref_to_section = std.StringHashMapUnmanaged(usize).empty };
     for (block.sections) |sec| {
@@ -841,7 +964,7 @@ fn collectGridCells(
     return cells;
 }
 
-/// Build the editor / live-push scene-graph JSON for `block`: flatten + classify,
+/// Build the live-push scene-graph JSON for `block`: flatten + classify,
 /// lay hubs out into section cells, collect spokes/wires/labels, and serialize.
 pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project_dir: []const u8) RenderError![]const u8 {
     var ctx = RenderCtx.init(allocator);
@@ -852,6 +975,10 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
     // net consistency afterward.
     try ctx.setup(block);
     try ctx.validateNetConsistency();
+
+    var explicit_nc_map: ExplicitNcMap = .empty;
+    defer explicit_nc_map.deinit(allocator);
+    try collectExplicitNcOks(allocator, &explicit_nc_map, block, "");
 
     var scene = SceneGraph.init(allocator);
     scene.design_name = block.name;
@@ -879,7 +1006,10 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
     };
     const n_rows: usize = if (n_sections == 0) 1 else (n_sections + n_cols - 1) / n_cols;
 
-    // Grid layout constants (same as render_svg.zig)
+    // Grid layout constants for the scene-graph section grid. These are
+    // render_json's own — the SVG renderer lives in src/render_svg/ and sizes
+    // its sections from its own measurements, so there is nothing here to keep
+    // in step with it.
     const cell_width: f64 = 850.0;
     const cell_gap_y: f64 = 30.0;
     const cell_gap_x: f64 = 40.0;
@@ -913,7 +1043,9 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
     defer allocator.free(cell_heights);
 
     for (cells.items, 0..) |cell, ci| {
-        cell_heights[ci] = try mergeAwareHubHeight(&ctx, allocator, cell.hub_inst, cell.part);
+        const nc_oks = explicit_nc_map.get(cell.hub_inst.ref_des) orelse &.{};
+        const pin_ctx = HubPinContext{ .part = cell.part, .explicit_nc_oks = nc_oks };
+        cell_heights[ci] = try mergeAwareHubHeight(&ctx, allocator, cell.hub_inst, pin_ctx);
     }
 
     // Compute row heights
@@ -969,19 +1101,21 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
         for (sg.cell_indices.items) |ci| {
             const cell = cells.items[ci];
             const h = cell_heights[ci];
+            const nc_oks = explicit_nc_map.get(cell.hub_inst.ref_des) orelse &.{};
+            const pin_ctx = HubPinContext{ .part = cell.part, .explicit_nc_oks = nc_oks };
 
             // Collect hub data
-            var json_hub = try collectHubData(&ctx, allocator, cell.hub_inst, cell.part, x_offset, content_y, &alt_map, &asserted_fns);
+            var json_hub = try collectHubData(&ctx, allocator, cell.hub_inst, pin_ctx, x_offset, content_y, &alt_map, &asserted_fns);
             json_hub.sec = sg.sheet;
             json_hub.slot = cell.section_idx;
             try scene.hubs.append(allocator, json_hub);
 
             // Collect connections for this hub (writes wires/passives straight
             // into `scene`; it doesn't mutate the JsonHub row appended above).
-            // Everything the card emits gets the card's slot id, so the editor
+            // Everything the card emits gets the card's slot id, so clients
             // can pair a module's decoupling caps with the module's own IC.
             const passives_before = scene.passives.items.len;
-            try collectHubConnections(&ctx, &scene, allocator, cell.hub_inst, cell.part, x_offset, content_y);
+            try collectHubConnections(&ctx, &scene, allocator, cell.hub_inst, pin_ctx, x_offset, content_y);
             for (scene.passives.items[passives_before..]) |*jp| jp.slot = cell.section_idx;
 
             content_y += h + cell_block_gap;
@@ -991,7 +1125,7 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
     // Port blocks (skipped — interface ports not shown in schematic)
 
     // Real pin → net bindings per instance, straight from the netlist. The
-    // editor reads these (authoritative) instead of inferring a pin's net from
+    // clients read these (authoritative) instead of inferring a pin's net from
     // drawn wires, so a pin on a fresh single-pin net (no wire yet) still shows
     // its name. Keyed by full ref_des (nets reference instances by full ref).
     var pinnet_map: std.StringHashMapUnmanaged(std.ArrayList(PinNet)) = .empty;
@@ -1010,7 +1144,7 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
     // Unplaced spokes: a passive the layout never drew or merged (a floating
     // part — e.g. a just-added cap with no hub-reaching net). Hubs are always
     // placed; a spoke is placed once it's drawn or merged into rendered_spokes.
-    // Reported so the editor can stage these for the user to wire by drag.
+    // Reported so clients can stage these for the user to wire by drag.
     for (ctx.instances.items) |inst| {
         if (!ctx.spoke_set.contains(inst.ref_des)) continue;
         if (ctx.rendered_spokes.contains(inst.ref_des)) continue;
@@ -1035,6 +1169,83 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
 const BranchResult = struct { end_x: f64, cy: f64, terminal: []const u8 };
 const Classified = struct { conn: AdjEntry, terminal: []const u8 };
 
+const PlannedSpoke = struct {
+    hub_pin: []const u8,
+    terminal: []const u8,
+    ref_des: []const u8,
+};
+
+fn plannedSpokeContains(planned: []const PlannedSpoke, hub_pin: []const u8, terminal: []const u8, ref_des: []const u8) bool {
+    for (planned) |entry| {
+        if (std.mem.eql(u8, entry.hub_pin, hub_pin) and
+            std.mem.eql(u8, entry.terminal, terminal) and
+            std.mem.eql(u8, entry.ref_des, ref_des)) return true;
+    }
+    return false;
+}
+
+fn rememberPlannedSpoke(
+    allocator: Allocator,
+    planned: *std.ArrayList(PlannedSpoke),
+    hub_pin: []const u8,
+    terminal: []const u8,
+    ref_des: []const u8,
+) !void {
+    if (plannedSpokeContains(planned.items, hub_pin, terminal, ref_des)) return;
+    try planned.append(allocator, .{ .hub_pin = hub_pin, .terminal = terminal, .ref_des = ref_des });
+}
+
+fn reserveGroupedSpoke(
+    ctx: *RenderCtx,
+    planned: *std.ArrayList(PlannedSpoke),
+    spoke_ref: []const u8,
+    hub_ref: []const u8,
+    hub_pin: []const u8,
+    terminal: []const u8,
+) !bool {
+    if (plannedSpokeContains(planned.items, hub_pin, terminal, spoke_ref)) return false;
+    try rememberPlannedSpoke(ctx.allocator, planned, hub_pin, terminal, spoke_ref);
+
+    var visited: std.StringHashMapUnmanaged(void) = .empty;
+    try visited.put(ctx.allocator, spoke_ref, {});
+    const result = try connection.findSpokeChain(ctx, spoke_ref, .{ .pin = .{ .ref_des = hub_ref, .pin = hub_pin } }, &visited);
+    for (result.chain) |inst| try rememberPlannedSpoke(ctx.allocator, planned, hub_pin, terminal, inst.ref_des);
+    for (result.branches) |branch| {
+        for (branch.chain) |inst| try rememberPlannedSpoke(ctx.allocator, planned, hub_pin, terminal, inst.ref_des);
+    }
+    return true;
+}
+
+fn deduplicateGroupedSpokes(
+    ctx: *RenderCtx,
+    allocator: Allocator,
+    classified: *std.ArrayList(Classified),
+    hub_ref: []const u8,
+) !void {
+    var retained: std.ArrayList(Classified) = .empty;
+    var planned: std.ArrayList(PlannedSpoke) = .empty;
+    for (classified.items) |entry| {
+        const keep = switch (entry.conn.endpoint) {
+            .net => true,
+            .pin => |p| !ctx.spoke_set.contains(p.ref_des) or
+                try reserveGroupedSpoke(ctx, &planned, p.ref_des, hub_ref, entry.conn.pin, entry.terminal),
+        };
+        if (keep) try retained.append(allocator, entry);
+    }
+    classified.* = retained;
+}
+
+fn markChainPassivesRendered(
+    ctx: *RenderCtx,
+    allocator: Allocator,
+    result: connection.ChainResult,
+) !void {
+    for (result.chain) |inst| try ctx.rendered_spokes.put(allocator, inst.ref_des, {});
+    for (result.branches) |branch| {
+        for (branch.chain) |inst| try ctx.rendered_spokes.put(allocator, inst.ref_des, {});
+    }
+}
+
 // ── Hub data collection ──────────────────────────────────────────────
 
 /// The canonical (base) net a hub pin group lands on, via `ctx.pin_canonical_nets`
@@ -1051,7 +1262,7 @@ fn collectHubData(
     ctx: *RenderCtx,
     allocator: Allocator,
     hub: FlatInst,
-    part: ?env_mod.Part,
+    pin_ctx: HubPinContext,
     x_offset: f64,
     y_start: f64,
     alt_map: *PinoutAltMap,
@@ -1060,58 +1271,11 @@ fn collectHubData(
     try loadPinoutAlts(allocator, alt_map, ctx.project_dir, hub.symbol);
     // Get pin groups (reuse hub.zig logic)
     const adj_entries = if (ctx.adjacency.get(hub.ref_des)) |list| list.items else &[_]AdjEntry{};
-
-    var all_pins_list: std.ArrayList([]const u8) = .empty;
-    defer all_pins_list.deinit(allocator);
-
-    if (part) |p| {
-        var seen: std.StringHashMapUnmanaged(void) = .empty;
-        defer seen.deinit(allocator);
-        for (p.pins) |pp| {
-            if (!seen.contains(pp.pin)) {
-                try seen.put(allocator, pp.pin, {});
-                try all_pins_list.append(allocator, pp.pin);
-            }
-        }
-    } else {
-        for (ctx.nets.items) |net| {
-            for (net.pins) |pin| {
-                if (std.mem.eql(u8, pin.ref_des, hub.ref_des)) {
-                    try all_pins_list.append(allocator, pin.pin);
-                }
-            }
-        }
-    }
-
-    std.mem.sortUnstable([]const u8, all_pins_list.items, {}, struct {
-        fn lt(_: void, a: []const u8, b: []const u8) bool {
-            return draw.pinOrder(a, b);
-        }
-    }.lt);
-
-    const parts_for_names: []const env_mod.Part = if (part) |p| &[_]env_mod.Part{p} else hub.parts;
-    var pn_map = hub_mod.buildPinNameMap(ctx, parts_for_names);
+    var pn_map = hubPinNameMap(ctx, allocator, hub, pin_ctx.part);
     defer pn_map.deinit(allocator);
-    // Flat `(pin …)` instances carry no part-level pin names, so supplement from
-    // the component's pinout file — hub pins then read by function ("GP11") like
-    // the HTML schematic, not by the net they reach ("LED2_DRV"). First existing
-    // file wins; existing part-level names are never overwritten. Grouping is
-    // net-based, so this only changes labels, never group membership/positions.
-    if (ctx.project_dir.len > 0) {
-        for ([_][]const u8{ hub.pinout, hub.symbol, hub.component }) |cand| {
-            if (cand.len == 0) continue;
-            const path = std.fmt.allocPrint(allocator, "{s}/lib/pinouts/{s}.sexp", .{ ctx.project_dir, cand }) catch continue;
-            defer allocator.free(path);
-            var pinmap = loadPinoutNames(allocator, path) orelse continue;
-            var it = pinmap.iterator();
-            while (it.next()) |kv| {
-                if (!pn_map.contains(kv.key_ptr.*)) pn_map.put(allocator, kv.key_ptr.*, kv.value_ptr.*) catch break;
-            }
-            if (pn_map.count() > 0) break;
-        }
-    }
+    const all_pins = try collectHubPinIds(ctx, allocator, hub, pin_ctx);
 
-    const all_groups = try hub_mod.groupHubPins(ctx, all_pins_list.items, adj_entries, &pn_map);
+    const all_groups = try hub_mod.groupHubPins(ctx, all_pins, adj_entries, &pn_map);
     const split = try splitGroupsByMergeAwareHeight(ctx, allocator, all_groups, hub.ref_des);
     const left_groups = split.left;
     const right_groups = split.right;
@@ -1133,7 +1297,7 @@ fn collectHubData(
         .component = hub.component,
         .value = hub.value,
         .symbol = hub.symbol,
-        .part = if (part) |p| p.name else null,
+        .part = if (pin_ctx.part) |p| p.name else null,
         .label = label,
         .x = x_offset + hub_x,
         .y = y_start,
@@ -1245,45 +1409,16 @@ fn collectHubConnections(
     scene: *SceneGraph,
     allocator: Allocator,
     hub: FlatInst,
-    part: ?env_mod.Part,
+    pin_ctx: HubPinContext,
     x_offset: f64,
     y_start: f64,
 ) !void {
     const adj_entries = if (ctx.adjacency.get(hub.ref_des)) |list| list.items else &[_]AdjEntry{};
-
-    var all_pins_list: std.ArrayList([]const u8) = .empty;
-    defer all_pins_list.deinit(allocator);
-
-    if (part) |p| {
-        var seen: std.StringHashMapUnmanaged(void) = .empty;
-        defer seen.deinit(allocator);
-        for (p.pins) |pp| {
-            if (!seen.contains(pp.pin)) {
-                try seen.put(allocator, pp.pin, {});
-                try all_pins_list.append(allocator, pp.pin);
-            }
-        }
-    } else {
-        for (ctx.nets.items) |net| {
-            for (net.pins) |pin| {
-                if (std.mem.eql(u8, pin.ref_des, hub.ref_des)) {
-                    try all_pins_list.append(allocator, pin.pin);
-                }
-            }
-        }
-    }
-
-    std.mem.sortUnstable([]const u8, all_pins_list.items, {}, struct {
-        fn lt(_: void, a: []const u8, b: []const u8) bool {
-            return draw.pinOrder(a, b);
-        }
-    }.lt);
-
-    const parts_for_names: []const env_mod.Part = if (part) |p| &[_]env_mod.Part{p} else hub.parts;
-    var pn_map = hub_mod.buildPinNameMap(ctx, parts_for_names);
+    var pn_map = hubPinNameMap(ctx, allocator, hub, pin_ctx.part);
     defer pn_map.deinit(allocator);
+    const all_pins = try collectHubPinIds(ctx, allocator, hub, pin_ctx);
 
-    const all_groups = try hub_mod.groupHubPins(ctx, all_pins_list.items, adj_entries, &pn_map);
+    const all_groups = try hub_mod.groupHubPins(ctx, all_pins, adj_entries, &pn_map);
     // Must mirror collectHubData's split exactly. That pass balances groups
     // left/right by merge-aware *height* and places each pin by accumulating
     // those heights; if this pass splits differently (it used to balance by pin
@@ -1344,35 +1479,8 @@ fn collectGroupConnections(
             .net => |net| {
                 const term = baseNetName(net);
                 if (!ctx.significant_nets.contains(term)) continue;
-                if (std.mem.eql(u8, term, baseNetName(pin_net_name))) {
-                    var should_show = false;
-                    if (ctx.port_nets.contains(term)) should_show = true;
-                    if (!should_show) {
-                        if (ctx.net_index.get(term)) |nps| {
-                            const my_section = ctx.section_map.get(hub_ref);
-                            for (nps.items) |np| {
-                                if (ctx.rendered_spokes.contains(np.ref_des)) {
-                                    should_show = true;
-                                    break;
-                                }
-                                if (!ctx.spoke_set.contains(np.ref_des) and !std.mem.eql(u8, np.ref_des, hub_ref)) {
-                                    should_show = true;
-                                    break;
-                                }
-                                // Spoke in a different section: net crosses section boundaries,
-                                // so the label belongs on this side of the crossing too.
-                                if (ctx.spoke_set.contains(np.ref_des)) {
-                                    const other_section = ctx.section_map.get(np.ref_des);
-                                    if (my_section != null and other_section != null and my_section.? != other_section.?) {
-                                        should_show = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if (!should_show) continue;
-                }
+                const own = std.mem.eql(u8, term, baseNetName(pin_net_name));
+                if (own and !connection.shouldShowOwnNet(ctx, term, hub_ref)) continue;
                 try classified.append(allocator, .{ .conn = conn, .terminal = term });
             },
             .pin => |p| {
@@ -1382,6 +1490,8 @@ fn collectGroupConnections(
             },
         }
     }
+
+    try deduplicateGroupedSpokes(ctx, allocator, &classified, hub_ref);
 
     if (classified.items.len == 0) return;
 
@@ -1654,9 +1764,7 @@ fn collectConnBody(
                 try visited.put(allocator, p.ref_des, {});
                 const chain_result = try connection.findSpokeChain(ctx, p.ref_des, .{ .pin = .{ .ref_des = hub_ref, .pin = from_pin } }, &visited);
 
-                for (chain_result.chain) |c| {
-                    try ctx.rendered_spokes.put(allocator, c.ref_des, {});
-                }
+                try markChainPassivesRendered(ctx, allocator, chain_result);
 
                 var all_spokes: std.ArrayList(FlatInst) = .empty;
                 try all_spokes.append(allocator, inst);
@@ -1873,7 +1981,7 @@ fn collectTerminalLabel(ctx: *RenderCtx, scene: *SceneGraph, end_x: f64, cy: f64
     if (isGroundNet(display)) {
         try scene.addLabel(display, end_x, cy, anchor, false, true);
     } else {
-        const is_port = ctx.port_nets.contains(term) or ctx.port_nets.contains(display);
+        const is_port = ctx.isBoundaryPort(term) or ctx.isBoundaryPort(display);
         const label_x: f64 = if (std.mem.eql(u8, anchor, "end")) end_x - net_label_gap else end_x + net_label_gap;
         try scene.addLabel(display, label_x, cy, anchor, is_port, false);
     }
@@ -1882,7 +1990,7 @@ fn collectTerminalLabel(ctx: *RenderCtx, scene: *SceneGraph, end_x: f64, cy: f64
 // ── JSON Serialization ───────────────────────────────────────────────
 
 /// Power rails (sub-block-sourced) with their producer IC resolved — the
-/// editor's map draws the power tree from these (producer ghost on a
+/// scene graph draws the power tree from these (producer ghost on a
 /// regulator's input rail, power-first cell ordering).
 fn writeRailsJson(w: anytype, power_rails: []const ScenePowerRail) !void {
     try w.writeAll(",\"rails\":[");
@@ -1908,8 +2016,9 @@ fn writeRailsJson(w: anytype, power_rails: []const ScenePowerRail) !void {
 }
 
 fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    defer buf.deinit();
+    const w = &buf.writer;
 
     try w.writeAll("{");
 
@@ -2031,7 +2140,7 @@ fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
     }
     try w.writeAll("]");
 
-    // Authored section names (the editor's sheet navigator pages by these).
+    // Authored section names (scene clients page by these).
     try w.writeAll(",\"authored_sections\":[");
     for (scene.authored_sections, 0..) |nm, i| {
         if (i > 0) try w.writeAll(",");
@@ -2043,7 +2152,7 @@ fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
     const obj_name_open = "{\"name\":";
 
     // Sheet categories (same names as authored_sections, classified) — the
-    // editor orders bands canonically and colors glance chips from these.
+    // Clients order bands canonically and color glance chips from these.
     try w.writeAll(",\"sheet_meta\":[");
     for (scene.sheet_meta, 0..) |sm, i| {
         if (i > 0) try w.writeAll(",");
@@ -2082,7 +2191,7 @@ fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
         try w.writeAll("]");
     }
 
-    // Top-level boundary ports (the editor's design-interface list).
+    // Top-level boundary ports (the scene graph's design-interface list).
     try w.writeAll(",\"ports\":[");
     for (scene.ports, 0..) |p, i| {
         if (i > 0) try w.writeAll(",");
@@ -2099,7 +2208,7 @@ fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
     try writeRailsJson(w, scene.power_rails);
 
     try w.writeAll("}");
-    return buf.toOwnedSlice(allocator);
+    return buf.toOwnedSlice();
 }
 
 /// Emit `,"pins":[{"pin":"1","net":"VDD2"},…]` — a part's real pin→net bindings.
@@ -2417,4 +2526,88 @@ test "renderSceneGraph sizes the viewBox to its section's stacked cell height" {
     defer arena.deinit();
     const json = try renderSceneGraph(arena.allocator(), &block, "");
     try std.testing.expect(viewBoxHeight(json) > min_vb_height);
+}
+
+fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
+    var count: usize = 0;
+    var pos: usize = 0;
+    while (std.mem.indexOfPos(u8, haystack, pos, needle)) |idx| {
+        count += 1;
+        pos = idx + needle.len;
+    }
+    return count;
+}
+
+test "renderSceneGraph emits each passive junction member once" {
+    // Pin 1 reaches a three-way passive junction. R2 and R3 are drawn in that
+    // first branch tree, but each also touches another U1 pin's net. Unless the
+    // branch chains enter `rendered_spokes`, those later hub pins walk back into
+    // the same junction and emit R2/R3 a second time (the LMX2595 bias-tee bug).
+    const insts = [_]env_mod.Instance{
+        .{ .ref_des = "U1", .component = "ic", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "R1", .component = "res", .value = "50R", .footprint = "", .symbol = "generic-res" },
+        .{ .ref_des = "R2", .component = "res", .value = "50R", .footprint = "", .symbol = "generic-res" },
+        .{ .ref_des = "R3", .component = "res", .value = "50R", .footprint = "", .symbol = "generic-res" },
+    };
+    const n1_pins = [_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "R1", .pin = "1" } };
+    const junction_pins = [_]env_mod.PinRef{
+        .{ .ref_des = "R1", .pin = "2" },
+        .{ .ref_des = "R2", .pin = "1" },
+        .{ .ref_des = "R3", .pin = "1" },
+    };
+    const vdd_pins = [_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "R3", .pin = "2" } };
+    const gnd_pins = [_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "3" }, .{ .ref_des = "R2", .pin = "2" } };
+    const nets = [_]env_mod.Net{
+        .{ .name = "N1", .pins = &n1_pins },
+        .{ .name = "JUNCTION", .pins = &junction_pins },
+        .{ .name = "VDD", .pins = &vdd_pins },
+        .{ .name = "GND", .pins = &gnd_pins },
+    };
+    var block: DesignBlock = .{
+        .name = "passive-junction-test",
+        .instances = &insts,
+        .nets = &nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const json = try renderSceneGraph(arena.allocator(), &block, "");
+
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(json, "\"ref\":\"R1\""));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(json, "\"ref\":\"R2\""));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(json, "\"ref\":\"R3\""));
+}
+
+// spec: render_svg - A bare-integer pinout pad id carries its alternate functions into the scene graph
+test "loadPinoutAlts reads bare-integer pad ids" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "lib/pinouts");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/pinouts/chip.sexp", .data =
+        \\(pinout "chip"
+        \\  (pin 1 "PA1" (alt "SPI1_MOSI" io) (alt "TIM1_CH1" io))
+        \\  (pin "B1" "PB1" (alt "I2C1_SDA" io))
+        \\)
+    });
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+
+    var map: PinoutAltMap = .empty;
+    try loadPinoutAlts(alloc, &map, project_dir, "chip");
+    const by_pin = map.get("chip") orelse return error.TestUnexpectedResult;
+
+    // The integer pad keys as "1" — the spelling `PinRef.pin` carries and the
+    // one `erc.loadPinoutMap` uses, so the drawn alts agree with ERC's.
+    const alts = by_pin.get("1") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), alts.len);
+    try std.testing.expectEqualStrings("SPI1_MOSI", alts[0]);
+    try std.testing.expectEqualStrings("TIM1_CH1", alts[1]);
+    // A quoted pad in the same file still loads beside it.
+    try std.testing.expect(by_pin.get("B1") != null);
 }

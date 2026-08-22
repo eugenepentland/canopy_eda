@@ -32,6 +32,7 @@ const pcb_layout_page = @import("pcb_layout_page.zig");
 const render_pcb_png = @import("../render_pcb_png.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const modules_mod = @import("modules.zig");
+const env = @import("../eval/env.zig");
 const Server = @import("../serve.zig").Server;
 
 /// One scored candidate in the family.
@@ -82,22 +83,22 @@ fn coverageExclusions(
 
 /// Score `cand` against `star` on the hybrid metric. `star_obj` is the ★'s own
 /// surrogate objective (the reference denominator).
-fn scoreCandidate(
-    alloc: std.mem.Allocator,
-    label: []const u8,
-    cand: optimizer.Placement,
+const ScoreContext = struct {
     star: optimizer.Placement,
     star_obj: f64,
     excluded: *const std.StringHashMapUnmanaged(void),
-) std.mem.Allocator.Error!Candidate {
-    const st = try style_score.compareStyle(alloc, cand, star, excluded);
-    const obj = cand.breakdown.objective;
-    const hyb = style_score.hybridScore(obj, star_obj, st.style_pct, style_score.lambda_default);
+    rough_spec: env.RoughSpec,
+};
+
+fn scoreCandidate(alloc: std.mem.Allocator, label: []const u8, cand: optimizer.Placement, ctx: ScoreContext) std.mem.Allocator.Error!Candidate {
+    const st = try style_score.compareStyle(alloc, cand, ctx.star, ctx.excluded);
+    const obj = optimizer.authoredRoughObjective(cand, ctx.rough_spec);
+    const hyb = style_score.hybridScore(obj, ctx.star_obj, st.style_pct, style_score.lambda_default);
     const crossings = try optimizer.importantCrossings(alloc, cand);
     const overlaps = optimizer.overlapCount(cand);
     const n: f64 = @floatFromInt(@max(cand.parts.len, 1));
     const rank = hyb.hybrid *
-        (1.0 + @as(f64, @floatFromInt(crossings)) / n) *
+        (1.0 + 3.0 * @as(f64, @floatFromInt(crossings)) / n) *
         (1.0 + @as(f64, @floatFromInt(overlaps)));
     return .{
         .name = label,
@@ -184,9 +185,13 @@ fn computeBest(
 
     // Star placement (verbatim) — its own evaluator so block state can't bleed.
     const star = try pcb_layout_page.solveForRequest(alloc, project_dir, name, .{ .layout = saved.?.name }, eval_s, mr_s);
-    const star_obj = star.placement.breakdown.objective;
     var excluded = try coverageExclusions(alloc, star.placement, saved.?);
     defer excluded.deinit(alloc);
+    // A partial ★ is useful as a visual/staleness hint, but it is not a valid
+    // physics denominator: missing parts are staged at the origin and can make
+    // a candidate look arbitrarily good or bad. Require full current coverage.
+    if (excluded.count() != 0) return null;
+    const star_obj = optimizer.authoredRoughObjective(star.placement, star.block.rough);
 
     // Candidate family — one evaluator/block reused for all solves.
     // `.regen` forces a FRESH rough (else `solveForRequest` returns the auto-cache
@@ -196,11 +201,12 @@ fn computeBest(
     const block = rough.block;
     const force_pl = optimizer.solve(alloc, block, project_dir, null, .{ .rough = false }, .place) catch return error.BuildFailed;
     const pin_pl = optimizer.solvePinAdjacent(alloc, block, project_dir, .{}) catch return error.BuildFailed;
+    const score_ctx = ScoreContext{ .star = star.placement, .star_obj = star_obj, .excluded = &excluded, .rough_spec = block.rough };
 
     var cands: std.ArrayList(Candidate) = .empty;
-    cands.append(alloc, try scoreCandidate(alloc, "rough", rough.placement, star.placement, star_obj, &excluded)) catch return error.BuildFailed;
-    cands.append(alloc, try scoreCandidate(alloc, "force", force_pl, star.placement, star_obj, &excluded)) catch return error.BuildFailed;
-    if (pin_pl) |pp| cands.append(alloc, try scoreCandidate(alloc, "pin", pp, star.placement, star_obj, &excluded)) catch return error.BuildFailed;
+    cands.append(alloc, try scoreCandidate(alloc, "rough", rough.placement, score_ctx)) catch return error.BuildFailed;
+    cands.append(alloc, try scoreCandidate(alloc, "force", force_pl, score_ctx)) catch return error.BuildFailed;
+    if (pin_pl) |pp| cands.append(alloc, try scoreCandidate(alloc, "pin", pp, score_ctx)) catch return error.BuildFailed;
 
     // Winner = lowest rank (hybrid × crossing × overlap penalties); rebuild it
     // rigidly rotated to the ★ orientation.
@@ -217,7 +223,8 @@ fn computeBest(
     }
     const winner = cands.items[best];
     const poses = try rotatePoses(alloc, winner.placement, winner.rot_k);
-    const best_pl = optimizer.placeFromPoses(alloc, block, project_dir, poses, .{ .rough = true }) catch return error.BuildFailed;
+    // Rough-seed compare/scoring — the drawn outline plays no part here.
+    const best_pl = optimizer.placeFromPoses(alloc, block, project_dir, .{ .poses = poses, .outline = .authored_only }, .{ .rough = true }) catch return error.BuildFailed;
 
     return .{
         .starred_name = saved.?.name,
@@ -255,8 +262,8 @@ pub fn bestRoughJson(alloc: std.mem.Allocator, project_dir: []const u8, name: []
     if (best == null) {
         w.writeAll("{\"name\":") catch return error.BuildFailed;
         pcb_layout_page.writeJsonStr(w, name) catch return error.BuildFailed;
-        w.writeAll(",\"starred\":null,\"message\":\"best-of-family needs a starred ★ reference to score against — ") catch return error.BuildFailed;
-        w.writeAll("hand-arrange, Save, Set default, and re-run.\"}") catch return error.BuildFailed;
+        w.writeAll(",\"starred\":null,\"message\":\"best-of-family needs a complete current starred ★ reference to score against — ") catch return error.BuildFailed;
+        w.writeAll("save and Set default after every current part is placed, then re-run.\"}") catch return error.BuildFailed;
         return aw.written();
     }
     const b = best.?;
@@ -317,7 +324,7 @@ pub fn bestRoughPngApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
         return;
     } orelse {
         res.status = 404;
-        res.body = "no starred ★ layout to generate against";
+        res.body = "no complete current starred ★ layout to generate against";
         return;
     };
     const png_bytes = render_pcb_png.render(alloc, best.best_pl, .{ .width = 1200, .title = name, .names = .origin }) catch {

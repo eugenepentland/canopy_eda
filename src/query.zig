@@ -33,8 +33,8 @@ const design_block_marker = "(design-block";
 /// `ToolError`/`DescribeError` paths are handled in-line with a message + exit.
 pub const QueryError = std.mem.Allocator.Error ||
     std.Io.Writer.Error ||
-    std.fs.File.WriteError ||
-    std.fs.Dir.Iterator.Error;
+    infra_fs.File.WriteError ||
+    infra_fs.Iterator.Error;
 
 // ── Arg parsing ──────────────────────────────────────────────────────
 
@@ -97,10 +97,10 @@ fn usage(line: []const u8) noreturn {
 }
 
 /// Write `bytes` to stdout followed by a newline.
-fn emit(bytes: []const u8) !void {
-    const stdout = std.fs.File.stdout();
-    try stdout.writeAll(bytes);
-    try stdout.writeAll("\n");
+fn emit(bytes: []const u8) infra_fs.File.WriteError!void {
+    const stdout = std.Io.File.stdout();
+    try stdout.writeStreamingAll(infra_fs.currentIo(), bytes);
+    try stdout.writeStreamingAll(infra_fs.currentIo(), "\n");
 }
 
 // ── Structural queries (delegate to the shared MCP emitters) ─────────
@@ -108,12 +108,12 @@ fn emit(bytes: []const u8) !void {
 /// `netlisp instances <design>` — every placed part as JSON.
 pub fn cmdInstances(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void {
     const name = nthPositional(args, 0) orelse usage("instances [--project-dir <d>] [--top-level] <design>");
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    const w = &buf.writer;
     const ok = mcp_tools.listInstances(allocator, projectDir(args), name, scopeOf(args), w) catch |e| {
         exit.fatal("instances: {s}: {s}\n", .{ name, @errorName(e) });
     };
-    try emit(buf.items);
+    try emit(buf.written());
     if (!ok) exit.failure();
 }
 
@@ -121,12 +121,12 @@ pub fn cmdInstances(allocator: std.mem.Allocator, args: []const []const u8) Quer
 pub fn cmdNet(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void {
     const name = nthPositional(args, 0) orelse usage("net [--project-dir <d>] [--top-level] <design> <net>");
     const net = nthPositional(args, 1) orelse usage("net [--project-dir <d>] [--top-level] <design> <net>");
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    const w = &buf.writer;
     const ok = mcp_tools.getNet(allocator, projectDir(args), name, net, scopeOf(args), w) catch |e| {
         exit.fatal("net: {s}/{s}: {s}\n", .{ name, net, @errorName(e) });
     };
-    try emit(buf.items);
+    try emit(buf.written());
     if (!ok) exit.failure();
 }
 
@@ -137,13 +137,13 @@ pub fn cmdFreePins(allocator: std.mem.Allocator, args: []const []const u8) Query
     const name = nthPositional(args, 0) orelse usage(spec);
     const ref = nthPositional(args, 1) orelse usage(spec);
     const category = optArg(args, "--category");
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    const w = &buf.writer;
     const opts: mcp_tools.FreePinOpts = .{ .filter = category, .scope = scopeOf(args) };
     const ok = mcp_tools.listFreePins(allocator, projectDir(args), name, ref, opts, w) catch |e| {
         exit.fatal("free-pins: {s}/{s}: {s}\n", .{ name, ref, @errorName(e) });
     };
-    try emit(buf.items);
+    try emit(buf.written());
     if (!ok) exit.failure();
 }
 
@@ -175,8 +175,8 @@ pub fn cmdDescribe(allocator: std.mem.Allocator, args: []const []const u8) Query
 pub fn cmdLibrary(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void {
     const query = nthPositional(args, 0);
     const pdir = projectDir(args);
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    const w = &buf.writer;
     try w.writeAll("{\"components\":");
     try mcp_tools.listLibrarySubdir(allocator, pdir, "components", query, null, w);
     try w.writeAll(",\"modules\":");
@@ -186,7 +186,7 @@ pub fn cmdLibrary(allocator: std.mem.Allocator, args: []const []const u8) QueryE
     try w.writeAll(",\"footprints\":");
     try mcp_tools.listLibrarySubdir(allocator, pdir, "footprints", query, null, w);
     try w.writeAll("}");
-    try emit(buf.items);
+    try emit(buf.written());
 }
 
 // ── DSL grammar reference ────────────────────────────────────────────
@@ -293,8 +293,8 @@ pub fn cmdDesigns(allocator: std.mem.Allocator, args: []const []const u8) QueryE
     }
     std.mem.sort(DesignRow, rows.items, {}, designRowLess);
 
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(a);
+    var buf: std.Io.Writer.Allocating = .init(a);
+    const w = &buf.writer;
     try w.writeAll("{\"designs\":[");
     for (rows.items, 0..) |r, i| {
         if (i > 0) try w.writeAll(",");
@@ -305,7 +305,7 @@ pub fn cmdDesigns(allocator: std.mem.Allocator, args: []const []const u8) QueryE
         try w.writeAll("}");
     }
     try w.writeAll("]}");
-    try emit(buf.items);
+    try emit(buf.written());
 }
 
 /// Extract the quoted title immediately after `(design-block` at `db_idx`.

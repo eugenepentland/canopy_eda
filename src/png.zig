@@ -113,7 +113,9 @@ const png_fuzz_corpus = [_][]const u8{
 /// require `encodeRgb` to emit a signature-prefixed PNG without crashing. Sides
 /// are clamped to 1..16 so the pixel buffer stays tiny; `testing.allocator`
 /// leak-checks the encode.
-fn fuzzEncodeRgb(allocator: std.mem.Allocator, input: []const u8) anyerror!void {
+fn fuzzEncodeRgb(allocator: std.mem.Allocator, smith: *std.testing.Smith) anyerror!void {
+    var generated: [64 * 1024]u8 = undefined;
+    const input = smith.in orelse generated[0..smith.slice(&generated)];
     const w: u32 = 1 + @as(u32, if (input.len > 0) input[0] & 0x0f else 0);
     const h: u32 = 1 + @as(u32, if (input.len > 1) input[1] & 0x0f else 0);
     const rgb = try allocator.alloc(u8, @as(usize, w) * h * 3);

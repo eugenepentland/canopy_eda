@@ -1,0 +1,19 @@
+# guardian-snapshot v3
+twin-parity|uncovered build-push
+twin-parity|uncovered designs-list
+twin-parity|uncovered diagnose-net
+twin-parity|uncovered erc-checks
+twin-parity|uncovered history-list
+twin-parity|uncovered import-kicad
+twin-parity|uncovered kicad-sch-export
+twin-parity|uncovered kicad-sch-sync
+twin-parity|uncovered layout-match
+twin-parity|uncovered layout-progress
+twin-parity|uncovered layout-save
+twin-parity|uncovered module-standalone
+twin-parity|uncovered pcb-describe
+twin-parity|uncovered pcb-png
+twin-parity|uncovered query-introspection
+twin-parity|uncovered review-pdf
+twin-parity|uncovered routing
+twin-parity|uncovered schematic-png

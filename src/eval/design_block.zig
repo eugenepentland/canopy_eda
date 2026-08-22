@@ -23,9 +23,12 @@ const builders = @import("builders.zig");
 const special_forms = @import("special_forms.zig");
 const rails_mod = @import("rails.zig");
 const test_point_mod = @import("test_point.zig");
+const micro_forms = @import("micro_forms.zig");
 const pin_enrichment = @import("pin_enrichment.zig");
 const forms_mod = @import("forms.zig");
 const board_role_mod = @import("board_role.zig");
+const section_maturity = @import("section_maturity.zig");
+const stackup_presets = @import("stackup_presets.zig");
 const ScopeForm = forms_mod.ScopeForm;
 
 const Node = ast.Node;
@@ -109,8 +112,11 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     var revision_spec: env_mod.Revision = .{};
     var rough_spec: env_mod.RoughSpec = .{};
     var stackup_spec: env_mod.StackupSpec = .{};
+    var pdn_intents: std.ArrayList(env_mod.PdnIntent) = .empty;
+    var fabrication_layers: std.ArrayList(env_mod.FabricationLayerSpec) = .empty;
     var net_class_specs: std.ArrayList(env_mod.NetClassSpec) = .empty;
     var design_rules_spec: env_mod.DesignRulesSpec = .{};
+    var pcb_plan_spec: ?env_mod.PcbPlanSpec = null;
     var kicad_pcb_path: ?[]const u8 = null;
     var net_form_sources: std.StringHashMapUnmanaged(u32) = .empty;
 
@@ -137,111 +143,47 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     self.decouple_defaults = .{ .ic = "", .bypass = saved_decouple_defaults.bypass };
     defer self.decouple_defaults = saved_decouple_defaults;
 
-    for (body_forms) |form| {
-        const form_children = form.asList() orelse continue;
-        if (form_children.len == 0) continue;
-        const form_name = form_children[0].asAtom() orelse continue;
+    var build = BlockBuildState{
+        .name = name,
+        .instances = &instances,
+        .all_pin_nets = &all_pin_nets,
+        .ports = &ports,
+        .notes = &notes,
+        .groups = &groups,
+        .sections = &sections,
+        .net_ties = &net_ties,
+        .sub_blocks = &sub_blocks,
+        .functions = &functions,
+        .verifications = &verifications,
+        .test_points = &test_points,
+        .parts = &parts,
+        .layout_spec = &layout_spec,
+        .board_spec = &board_spec,
+        .revision_spec = &revision_spec,
+        .rough_spec = &rough_spec,
+        .stackup_spec = &stackup_spec,
+        .pdn_intents = &pdn_intents,
+        .fabrication_layers = &fabrication_layers,
+        .net_class_specs = &net_class_specs,
+        .design_rules_spec = &design_rules_spec,
+        .pcb_plan_spec = &pcb_plan_spec,
+        .kicad_pcb_path = &kicad_pcb_path,
+        .net_form_sources = &net_form_sources,
+    };
+    try evalBlockBodyForms(self, body_forms, env, &build);
+    // Every instance now exists, so a `(decouples "IC" FUNC)` / `(near "REF"
+    // FUNC)` can finally be read against the pinout of the part it names — in
+    // either declaration order.
+    builders.resolveDecoupleTargets(self, instances.items);
+    builders.resolveNearTargets(self, instances.items);
+    if (!build.has_explicit_layout)
+        try seedLayoutFromSectionGrid(self, body_forms, env, &layout_spec);
 
-        // Setup special forms may appear inline in a raw `(block …)` body —
-        // evaluate `(let …)`/`(assert …)`/`(import …)`/`(id …)` for their
-        // binding/effect, then continue. (A `(design-block …)` body never holds
-        // these; in the wrapped form they precede the inner block.)
-        if (forms_mod.SpecialForm.fromAtom(form_name)) |special| switch (special) {
-            .let, .assert_, .assert_range, .import, .id_ => {
-                _ = try self.evalNode(form, env);
-                continue;
-            },
-            else => {},
-        };
-
-        const sf = ScopeForm.fromAtom(form_name) orelse {
-            if (!isInertFormHead(form_name))
-                self.warnFmt(form.span, "unknown sub-form ({s} …) in (design-block …)", .{form_name});
-            continue;
-        };
-        switch (sf) {
-            .instance => {
-                const result = try instance_mod.buildInstance(self, form_children, env);
-                ids.registerRefDes(self, result.instance.ref_des);
-                try instances.append(self.allocator, result.instance);
-                for (result.pin_nets) |pn| try all_pin_nets.append(self.allocator, pn);
-                for (result.inline_notes) |note| try notes.append(self.allocator, note);
-                try appendAutoAliases(self, result.instance, result.pin_nets, &net_ties);
-            },
-            .port => {
-                const port = try builders.buildPort(self, form_children[1..], env);
-                try ports.append(self.allocator, port);
-            },
-            .bus_port => try builders.expandTopLevelBusPort(self, form_children, env, &ports),
-            .note => {
-                const note = try builders.buildNote(self, form_children[1..], env);
-                try notes.append(self.allocator, note);
-            },
-            .group => {
-                const group = try builders.buildGroup(self, form_children[1..], env);
-                try groups.append(self.allocator, group);
-            },
-            .function => {
-                const f = try builders.buildFunction(self, form_children[1..], env);
-                try functions.append(self.allocator, f);
-            },
-            .sub_block => {
-                const sb = try builders.buildSubBlock(self, form_children, env);
-                try evalSubBlockBridges(self, form_children, sb.name, &net_ties);
-                try sub_blocks.append(self.allocator, sb);
-            },
-            .section => try evalSection(self, form_children, env, &instances, &all_pin_nets, &notes, &net_ties, &sections),
-            .net => {
-                try evalNetForm(self, form_children, env, &net_ties);
-                validate.trackNetFormSource(self, form_children, env, &net_form_sources);
-            },
-            .bus_net => try evalBusNetForm(self, form_children, env, &net_ties),
-            .series => try instance_mod.evalSeriesForm(self, form_children, env, &instances, &all_pin_nets, &notes),
-            .fanout => try instance_mod.evalFanoutForm(self, form_children, env, &instances, &all_pin_nets),
-            .decouple => try evalDecoupleForm(self, form_children, env, &instances, &all_pin_nets),
-            .decouple_defaults => try parseDecoupleDefaults(self, form_children, env),
-            .verifies => if (parseVerifies(self, form_children, env)) |v| try verifications.append(self.allocator, v),
-            .test_point => if (try test_point_mod.parse(self.allocator, form_children)) |tp| try test_points.append(self.allocator, tp),
-            .kicad_pcb => {
-                if (parseKicadPcbPath(form_children)) |p| kicad_pcb_path = p;
-            },
-            .stub => if (try parseStub(self, form_children)) |p| {
-                ids.registerRefDes(self, p.part.ref_des);
-                try instances.append(self.allocator, p.instance);
-                for (p.pin_nets) |pn| try all_pin_nets.append(self.allocator, pn);
-                try parts.append(self.allocator, p.part);
-            },
-            .layout => layout_spec = try parseLayout(self, form_children),
-            .board => board_spec = try parseBoard(self, form_children),
-            .board_role => board_spec.role = board_role_mod.parse(self, form_children),
-            .revision => revision_spec = try parseRevision(self, form_children),
-            .rough => rough_spec = try parseRough(self, form_children),
-            .stackup => stackup_spec = try parseStackup(self, form_children),
-            .net_class => if (try parseNetClass(self, form_children)) |nc|
-                net_class_specs.append(self.allocator, nc) catch return EvalError.OutOfMemory,
-            .design_rules => design_rules_spec = parseDesignRules(self, form_children),
-            // Section-only forms are ignored at the top level — a
-            // design-block body shouldn't carry status/description/pins
-            // directly. The exhaustive switch is the contract; the warning
-            // makes the silent skip visible.
-            .pins, .protocol, .calc, .description, .role, .diagram, .hosts, .category => {
-                self.warnFmt(form.span, "({s} …) is section-only — ignored at design-block top level", .{form_name});
-            },
-        }
-    }
-
+    section_maturity.creditSections(sections.items, sub_blocks.items, groups.items, layout_spec.groups, body_forms);
     try validate.warnCombinableNets(self, &net_form_sources);
     const nets_slice = try buildNets(self, &all_pin_nets, &net_ties);
 
-    // Convert net ties to env NetTie format for storage on the block.
-    // Skip auto-aliases: they're block-local helpers (symbol pin-function
-    // matching) and would otherwise bridge unrelated nets in the cross-block
-    // flatten done by export_kicad_netlist.applyNetTies.
-    var block_ties: std.ArrayList(env_mod.NetTie) = .empty;
-    for (net_ties.items) |nt| {
-        if (nt.is_auto) continue;
-        try block_ties.append(self.allocator, .{ .a = nt.a, .b = nt.b });
-    }
+    const block_ties = try collectBlockTies(self, net_ties);
 
     const block = self.allocator.create(DesignBlock) catch return EvalError.OutOfMemory;
     block.* = .{
@@ -254,7 +196,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
         .sub_blocks = sub_blocks.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .sections = sections.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .functions = functions.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
-        .net_ties = block_ties.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
+        .net_ties = block_ties,
         .verifications = verifications.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .test_points = test_points.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .kicad_pcb_path = kicad_pcb_path,
@@ -264,8 +206,11 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
         .revision = revision_spec,
         .rough = rough_spec,
         .stackup = stackup_spec,
+        .pdn_intents = pdn_intents.toOwnedSlice(self.allocator) catch &.{},
+        .fabrication_layers = fabrication_layers.toOwnedSlice(self.allocator) catch &.{},
         .net_classes = net_class_specs.toOwnedSlice(self.allocator) catch &.{},
         .design_rules = design_rules_spec,
+        .pcb_plan = pcb_plan_spec,
     };
 
     // Auto-assign ref_des for instances with descriptive labels
@@ -290,6 +235,254 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     block.rails = rails_mod.build(self.allocator, block) catch return EvalError.OutOfMemory;
 
     return .{ .design_block = block };
+}
+
+/// Mutable accumulator for one design-block materialization. Keeping the bag
+/// in one struct lets `(repeat …)` recursively send each body form through the
+/// exact same builders as a hand-written form without duplicating the large
+/// scope-form dispatch switch.
+const BlockBuildState = struct {
+    name: []const u8,
+    instances: *std.ArrayList(Instance),
+    all_pin_nets: *std.ArrayList(PinNetDecl),
+    ports: *std.ArrayList(Port),
+    notes: *std.ArrayList(Note),
+    groups: *std.ArrayList(Group),
+    sections: *std.ArrayList(env_mod.Section),
+    net_ties: *std.ArrayList(NetTie),
+    sub_blocks: *std.ArrayList(SubBlock),
+    functions: *std.ArrayList(env_mod.FunctionSpec),
+    verifications: *std.ArrayList(env_mod.Verification),
+    test_points: *std.ArrayList(env_mod.TestPoint),
+    parts: *std.ArrayList(env_mod.PlaceholderPart),
+    layout_spec: *env_mod.LayoutSpec,
+    board_spec: *env_mod.BoardSpec,
+    revision_spec: *env_mod.Revision,
+    rough_spec: *env_mod.RoughSpec,
+    stackup_spec: *env_mod.StackupSpec,
+    pdn_intents: *std.ArrayList(env_mod.PdnIntent),
+    fabrication_layers: *std.ArrayList(env_mod.FabricationLayerSpec),
+    net_class_specs: *std.ArrayList(env_mod.NetClassSpec),
+    design_rules_spec: *env_mod.DesignRulesSpec,
+    pcb_plan_spec: *?env_mod.PcbPlanSpec,
+    kicad_pcb_path: *?[]const u8,
+    net_form_sources: *std.StringHashMapUnmanaged(u32),
+    has_explicit_layout: bool = false,
+};
+
+fn evalBlockBodyForms(
+    self: *Evaluator,
+    body_forms: []const Node,
+    env: *Env,
+    build: *BlockBuildState,
+) EvalError!void {
+    for (body_forms) |form| try evalBlockBodyForm(self, form, env, build);
+}
+
+/// Expand a design-scope `(repeat name start end body…)`. Each body form runs
+/// through `evalBlockBodyForm`, so an expanded instance/sub-block/net is
+/// indistinguishable from the same form written out by hand. The repeat owns
+/// one source-resident ID anchor; generated children derive from that anchor,
+/// their normal `origin_key`, and the lexical index, avoiding impossible
+/// per-iteration `(id …)` insertions at one shared source offset. A repeat-level
+/// `(ids ("origin@index" token) …)` sidecar overrides individual derivations so
+/// an unrolled design can migrate without changing its established PCB UUIDs.
+fn evalBlockRepeat(
+    self: *Evaluator,
+    form_children: []const Node,
+    env: *Env,
+    build: *BlockBuildState,
+) EvalError!void {
+    const spec = try special_forms.parseRepeat(self, form_children[1..], env);
+    const repeat_id = try ids.getOrCreateFormId(self, form_children);
+    const sidecar = ids.parseChildIdSidecar(self, form_children);
+    var it = spec.iterator();
+    while (it.next()) |index| {
+        var loop_env = Env.init(self.allocator, env);
+        defer loop_env.deinit();
+        try loop_env.put(spec.name, .{ .number = @floatFromInt(index) });
+
+        const first_instance = build.instances.items.len;
+        const first_sub_block = build.sub_blocks.items.len;
+        const first_section = build.sections.items.len;
+        // Child forms share one source location across every iteration. Drop
+        // their normal pending writes and retain only the repeat form's anchor.
+        const pending_id_len = self.pending_ids.items.len;
+        const pending_child_id_len = self.pending_child_ids.items.len;
+        evalBlockBodyForms(self, spec.body, &loop_env, build) catch |err| {
+            self.pending_ids.items.len = pending_id_len;
+            self.pending_child_ids.items.len = pending_child_id_len;
+            return err;
+        };
+        self.pending_ids.items.len = pending_id_len;
+        self.pending_child_ids.items.len = pending_child_id_len;
+
+        const new_instances = build.instances.items[first_instance..];
+        for (new_instances) |*inst| {
+            const origin = if (inst.origin_key.len > 0) inst.origin_key else inst.ref_des;
+            inst.id = try repeatChildId(self, repeat_id, &sidecar, origin, index);
+        }
+        for (build.sub_blocks.items[first_sub_block..]) |*sb| {
+            const subblock_uuid = try repeatChildId(self, repeat_id, &sidecar, sb.name, index);
+            try ids.reassignSubBlockIdsV4(self, sb.block, subblock_uuid);
+        }
+        // Sections retain value copies of their member instances. Mirror the
+        // freshly-derived IDs into those copies so every renderer/export path
+        // observes the same identity as the top-level instance slice.
+        syncRepeatedSectionIds(build.sections.items[first_section..], new_instances);
+    }
+}
+
+fn repeatChildId(
+    self: *Evaluator,
+    repeat_id: []const u8,
+    sidecar: *const ids.ChildIdSidecar,
+    origin_key: []const u8,
+    index: i64,
+) EvalError![]const u8 {
+    const indexed_key = std.fmt.allocPrint(self.allocator, "{s}@{d}", .{ origin_key, index }) catch
+        return EvalError.OutOfMemory;
+    if (sidecar.map.get(indexed_key)) |migration_id| return migration_id;
+    return ids.deriveChildId(self, repeat_id, indexed_key, 0);
+}
+
+fn syncRepeatedSectionIds(sections: []env_mod.Section, instances: []const Instance) void {
+    for (sections) |*section| {
+        for (@as([]Instance, @constCast(section.instances))) |*copy| {
+            for (instances) |inst| {
+                if (std.mem.eql(u8, copy.ref_des, inst.ref_des)) {
+                    copy.id = inst.id;
+                    break;
+                }
+            }
+        }
+        syncRepeatedSectionIds(@constCast(section.sub_sections), instances);
+    }
+}
+
+fn evalBlockBodyForm(
+    self: *Evaluator,
+    form: Node,
+    env: *Env,
+    build: *BlockBuildState,
+) EvalError!void {
+    const form_children = form.asList() orelse return;
+    if (form_children.len == 0) return;
+    const form_name = form_children[0].asAtom() orelse return;
+
+    // Setup special forms may appear inline in a raw `(block …)` body —
+    // evaluate `(let …)`/`(assert …)`/`(import …)`/`(id …)` for their
+    // binding/effect, then continue. (A `(design-block …)` body never holds
+    // these; in the wrapped form they precede the inner block.)
+    if (forms_mod.SpecialForm.fromAtom(form_name)) |special| switch (special) {
+        .let, .assert_, .assert_range, .import, .id_, .implements => {
+            _ = try self.evalNode(form, env);
+            return;
+        },
+        .repeat => {
+            try evalBlockRepeat(self, form_children, env, build);
+            return;
+        },
+        else => {},
+    };
+
+    const sf = ScopeForm.fromAtom(form_name) orelse {
+        if (!isInertFormHead(form_name))
+            self.warnFmt(form.span, "unknown sub-form ({s} …) in (design-block …)", .{form_name});
+        return;
+    };
+    switch (sf) {
+        .instance => {
+            const result = try instance_mod.buildInstance(self, form_children, env);
+            ids.registerRefDes(self, result.instance.ref_des);
+            try build.instances.append(self.allocator, result.instance);
+            for (result.pin_nets) |pn| try build.all_pin_nets.append(self.allocator, pn);
+            for (result.inline_notes) |note| try build.notes.append(self.allocator, note);
+            try appendAutoAliases(self, result.instance, result.pin_nets, build.net_ties);
+        },
+        .port => {
+            const port = try builders.buildPort(self, form_children[1..], env);
+            try build.ports.append(self.allocator, port);
+        },
+        .bus_port => try builders.expandTopLevelBusPort(self, form_children, env, build.ports),
+        .note => try build.notes.append(self.allocator, try builders.buildNote(self, form_children[1..], env)),
+        .group => {
+            const group = try builders.buildGroup(self, form_children[1..], env);
+            try build.groups.append(self.allocator, group);
+        },
+        .function => {
+            const f = try builders.buildFunction(self, form_children[1..], env);
+            try build.functions.append(self.allocator, f);
+        },
+        .sub_block => {
+            const sb = try builders.buildSubBlock(self, form_children, env);
+            try evalSubBlockBridges(self, form_children, sb.name, build.net_ties);
+            try build.sub_blocks.append(self.allocator, sb);
+        },
+        .section => try evalSection(self, form_children, env, .{
+            .instances = build.instances,
+            .pin_nets = build.all_pin_nets,
+            .notes = build.notes,
+            .test_points = build.test_points,
+        }, build.net_ties, build.sections, build.sub_blocks),
+        .net => {
+            try evalNetForm(self, form_children, env, build.net_ties);
+            validate.trackNetFormSource(self, form_children, env, build.net_form_sources);
+        },
+        .bus_net => try evalBusNetForm(self, form_children, env, build.net_ties),
+        .series => try instance_mod.evalSeriesForm(self, form_children, env, build.instances, build.all_pin_nets, build.notes),
+        .fanout => try instance_mod.evalFanoutForm(self, form_children, env, build.instances, build.all_pin_nets),
+        .decouple => try evalDecoupleForm(self, form_children, env, build.instances, build.all_pin_nets),
+        .decouple_defaults => try parseDecoupleDefaults(self, form_children, env),
+        .verifies => if (parseVerifies(self, form_children, env)) |v| try build.verifications.append(self.allocator, v),
+        .test_point => _ = try test_point_mod.evalForm(self, form_children, env, .{
+            .instances = build.instances,
+            .pin_nets = build.all_pin_nets,
+            .notes = build.notes,
+            .test_points = build.test_points,
+        }),
+        .pullup => try micro_forms.emit(self, .pullup, form_children, env, build.instances, build.all_pin_nets),
+        .pulldown => try micro_forms.emit(self, .pulldown, form_children, env, build.instances, build.all_pin_nets),
+        .divider => try micro_forms.emit(self, .divider, form_children, env, build.instances, build.all_pin_nets),
+        .led => try micro_forms.emit(self, .led, form_children, env, build.instances, build.all_pin_nets),
+        .kicad_pcb => {
+            if (parseKicadPcbPath(form_children)) |p| build.kicad_pcb_path.* = p;
+        },
+        .stub => if (try parseStub(self, form_children)) |p| {
+            ids.registerRefDes(self, p.part.ref_des);
+            try build.instances.append(self.allocator, p.instance);
+            for (p.pin_nets) |pn| try build.all_pin_nets.append(self.allocator, pn);
+            try build.parts.append(self.allocator, p.part);
+        },
+        .layout => {
+            build.layout_spec.* = try parseLayout(self, form_children);
+            build.has_explicit_layout = true;
+        },
+        .board => build.board_spec.* = try parseBoard(self, form_children),
+        .board_role => build.board_spec.role = board_role_mod.parse(self, form_children),
+        .revision => build.revision_spec.* = try parseRevision(self, form_children),
+        .rough => build.rough_spec.* = try parseRough(self, form_children),
+        .stackup => build.stackup_spec.* = try parseStackup(self, form_children),
+        .pdn => if (parsePdnIntent(self, form_children)) |intent|
+            build.pdn_intents.append(self.allocator, intent) catch return EvalError.OutOfMemory,
+        .fabrication_layer => if (try parseFabricationLayer(self, form_children)) |layer|
+            build.fabrication_layers.append(self.allocator, layer) catch return EvalError.OutOfMemory,
+        .net_class => if (try parseNetClass(self, form_children)) |nc|
+            build.net_class_specs.append(self.allocator, nc) catch return EvalError.OutOfMemory,
+        .design_rules => build.design_rules_spec.* = parseDesignRules(self, form_children),
+        .pcb_plan => build.pcb_plan_spec.* = try takeFirstPcbPlan(self, form_children, form.span, build.pcb_plan_spec.*),
+        // Section-only forms are ignored at the top level — a
+        // design-block body shouldn't carry status/description/pins
+        // directly. The exhaustive switch is the contract; the warning
+        // makes the silent skip visible.
+        .pins => {
+            var pin_groups: std.ArrayList(env_mod.PinGroup) = .empty;
+            try evalPinsForm(self, form_children, build.name, env, build.instances, build.all_pin_nets, build.net_ties, &pin_groups);
+        },
+        .protocol, .calc, .description, .role, .diagram, .hosts, .category => {
+            self.warnFmt(form.span, "({s} …) is section-only — ignored at design-block top level", .{form_name});
+        },
+    }
 }
 
 /// Read the path from a `(kicad-pcb "<absolute path>")` form — the on-disk
@@ -429,6 +622,42 @@ fn evalBusNetForm(self: *Evaluator, form_children: []const Node, env: *Env, net_
     if (end < start) return;
     if (end - start >= max_bus_expansion) {
         self.warnFmt(form_children[0].span, "(bus-net …) index range {d}..{d} exceeds the {d}-lane cap — ignored", .{ start, end, max_bus_expansion });
+        return;
+    }
+
+    // Mapped mode names one sub-block plus an indexed child port family:
+    // `(suffix "_MCU") (over "shift" (port-base "B" 1))`.
+    var mapped_suffix: []const u8 = "";
+    var mapped_sub: ?[]const u8 = null;
+    var mapped_port_base: ?[]const u8 = null;
+    var mapped_port_start: usize = 0;
+    for (form_children[4..]) |c| {
+        if (c.isForm("suffix")) {
+            const sc = c.asList().?;
+            if (sc.len >= 2) mapped_suffix = literalText(sc[1]) orelse "";
+        }
+        if (c.isForm("over")) {
+            const oc = c.asList().?;
+            if (oc.len >= 3 and oc[2].isForm("port-base")) {
+                const pc = oc[2].asList().?;
+                if (pc.len >= 3) {
+                    mapped_sub = literalText(oc[1]);
+                    mapped_port_base = literalText(pc[1]);
+                    mapped_port_start = numberAsUsize(try self.evalNode(pc[2], env)) orelse 0;
+                }
+            }
+        }
+    }
+    if (mapped_sub != null and mapped_port_base != null) {
+        var k = start;
+        while (k <= end) : (k += 1) {
+            const parent = std.fmt.allocPrint(self.allocator, "{s}{d}{s}", .{ prefix, k, mapped_suffix }) catch
+                return EvalError.OutOfMemory;
+            const child = std.fmt.allocPrint(self.allocator, "{s}/{s}{d}", .{
+                mapped_sub.?, mapped_port_base.?, mapped_port_start + (k - start),
+            }) catch return EvalError.OutOfMemory;
+            try net_ties.append(self.allocator, .{ .a = parent, .b = child });
+        }
         return;
     }
 
@@ -612,10 +841,13 @@ fn evalDecoupleForm(
     } else {
         const net_name = first_val.asString() orelse return;
 
-        // Check if children are (bulk ...) / (bypass ...) sub-forms
+        // Compact rail form: each `(per-pin COMPONENT FUNCTION…)` emits one
+        // bypass per named pin function, while `(bulk COMPONENT COUNT)` emits
+        // shared rail capacitors. The host is inferred only when every named
+        // function resolves on exactly one already-declared instance.
         var has_sub_forms = false;
         for (form_children[2..]) |sf| {
-            if (sf.isForm("bulk") or sf.isForm("bypass")) {
+            if (sf.isForm("per-pin") or sf.isForm("bulk") or sf.isForm("bypass")) {
                 has_sub_forms = true;
                 break;
             }
@@ -623,8 +855,26 @@ fn evalDecoupleForm(
 
         if (has_sub_forms) {
             for (form_children[2..]) |sf| {
-                if (sf.isForm("bulk") or sf.isForm("bypass")) {
-                    const sub = sf.asList().?;
+                const sub = sf.asList() orelse continue;
+                if (sf.isForm("per-pin")) {
+                    if (sub.len < 3) return EvalError.ArityError;
+                    const host = try inferCompactDecoupleHost(self, sub[2..], net_name, instances.items, all_pin_nets.items, sf.span);
+                    var expanded: std.ArrayList(Node) = .empty;
+                    try expanded.append(self.allocator, sub[1]);
+                    try expanded.append(self.allocator, Node.int(sf.span, 1));
+                    try expanded.append(self.allocator, Node.atom(sf.span, "per-pin"));
+                    try expanded.append(self.allocator, Node.string(sf.span, host));
+                    for (sub[2..]) |pin| try expanded.append(self.allocator, pin);
+                    try builders.emitDecoupleItems(self, expanded.items, net_name, env, instances, all_pin_nets, form_id, &sidecar);
+                } else if (sf.isForm("bulk")) {
+                    if (sub.len < 3) return EvalError.ArityError;
+                    try builders.emitBulkDecouples(self, sub[1], sub[2], net_name, env, .{
+                        .instances = instances,
+                        .pin_nets = all_pin_nets,
+                        .form_id = form_id,
+                        .sidecar = &sidecar,
+                    });
+                } else if (sf.isForm("bypass")) {
                     try builders.emitDecoupleItems(self, sub[1..], net_name, env, instances, all_pin_nets, form_id, &sidecar);
                 }
             }
@@ -632,6 +882,53 @@ fn evalDecoupleForm(
             try builders.emitDecoupleItems(self, form_children[2..], net_name, env, instances, all_pin_nets, form_id, &sidecar);
         }
     }
+}
+
+fn inferCompactDecoupleHost(
+    self: *Evaluator,
+    functions: []const Node,
+    net_name: []const u8,
+    instances: []const Instance,
+    pin_nets: []const PinNetDecl,
+    span: ast.Span,
+) EvalError![]const u8 {
+    if (self.decouple_defaults.ic.len > 0) return self.decouple_defaults.ic;
+    var match: ?[]const u8 = null;
+    for (instances) |inst| {
+        const pinout = builders.findPinFuncMap(self, instances, inst.ref_des) orelse continue;
+        var all_match = true;
+        for (functions) |function_node| {
+            const function = ids.pinId(self, function_node) orelse {
+                all_match = false;
+                break;
+            };
+            const pad = instance_mod.resolvePinName(self, pinout, function, function_node.span) orelse {
+                all_match = false;
+                break;
+            };
+            var declared = false;
+            for (pin_nets) |pn| if (std.mem.eql(u8, pn.ref_des, inst.ref_des) and
+                std.mem.eql(u8, pn.pin, pad) and std.mem.eql(u8, pn.net, net_name))
+            {
+                declared = true;
+                break;
+            };
+            if (!declared) {
+                all_match = false;
+                break;
+            }
+        }
+        if (!all_match) continue;
+        if (match != null) {
+            self.setErrorFmt(span, "compact decouple host is ambiguous for rail '{s}'; add (decouple-defaults (ic \"REF\"))", .{net_name});
+            return EvalError.InvalidForm;
+        }
+        match = inst.ref_des;
+    }
+    return match orelse {
+        self.setErrorFmt(span, "compact decouple could not infer a host for rail '{s}'; declare the IC pins first or add (decouple-defaults (ic \"REF\"))", .{net_name});
+        return EvalError.InvalidForm;
+    };
 }
 
 /// Mutable bag of pointers to the per-section accumulators that
@@ -714,17 +1011,36 @@ fn processSharedSectionForm(
     }
 }
 
+fn parseSectionRole(self: *Evaluator, children: []const Node) env_mod.BlockRole {
+    if (children.len < 2) return .auto;
+    const role = children[1].asAtom() orelse return .auto;
+    if (std.mem.eql(u8, role, "input")) return .input;
+    if (std.mem.eql(u8, role, "output")) return .output;
+    self.warnFmt(children[1].span, "unknown role '{s}' in (role …) — expected input|output", .{role});
+    return .auto;
+}
+
+fn parseDiagramHidden(self: *Evaluator, children: []const Node) bool {
+    if (children.len < 2) return false;
+    const mode = children[1].asAtom() orelse return false;
+    if (std.mem.eql(u8, mode, "hidden")) return true;
+    self.warnFmt(children[1].span, "unknown diagram mode '{s}' in (diagram …) — expected hidden", .{mode});
+    return false;
+}
+
 /// Evaluate a section form and its children.
 fn evalSection(
     self: *Evaluator,
     form_children: []const Node,
     env: *Env,
-    instances: *std.ArrayList(Instance),
-    all_pin_nets: *std.ArrayList(PinNetDecl),
-    notes: *std.ArrayList(Note),
+    test_point_ctx: test_point_mod.EvalContext,
     net_ties: *std.ArrayList(NetTie),
     sections: *std.ArrayList(env_mod.Section),
+    sub_blocks: *std.ArrayList(SubBlock),
 ) EvalError!void {
+    const instances = test_point_ctx.instances;
+    const all_pin_nets = test_point_ctx.pin_nets;
+    const notes = test_point_ctx.notes;
     if (form_children.len < 2) return;
     const sec_name_val = try self.evalNode(form_children[1], env);
     const sec_name = sec_name_val.asString() orelse return;
@@ -770,30 +1086,8 @@ fn evalSection(
         if (try processSharedSectionForm(self, sft, sf_children, env, scope)) continue;
 
         switch (sft) {
-            .role => {
-                if (sf_children.len >= 2) {
-                    if (sf_children[1].asAtom()) |role_str| {
-                        if (std.mem.eql(u8, role_str, "input")) {
-                            block_role = .input;
-                        } else if (std.mem.eql(u8, role_str, "output")) {
-                            block_role = .output;
-                        } else {
-                            self.warnFmt(sf_children[1].span, "unknown role '{s}' in (role …) — expected input|output", .{role_str});
-                        }
-                    }
-                }
-            },
-            .diagram => {
-                if (sf_children.len >= 2) {
-                    if (sf_children[1].asAtom()) |mode| {
-                        if (std.mem.eql(u8, mode, "hidden")) {
-                            diagram_hidden = true;
-                        } else {
-                            self.warnFmt(sf_children[1].span, "unknown diagram mode '{s}' in (diagram …) — expected hidden", .{mode});
-                        }
-                    }
-                }
-            },
+            .role => block_role = parseSectionRole(self, sf_children),
+            .diagram => diagram_hidden = parseDiagramHidden(self, sf_children),
             .hosts => {
                 for (sf_children[1..]) |h| {
                     if (h.asString()) |sub_name| try sec_hosts.append(self.allocator, sub_name);
@@ -830,7 +1124,20 @@ fn evalSection(
             },
             .net => try evalNetForm(self, sf_children, env, net_ties),
             .bus_net => try evalBusNetForm(self, sf_children, env, net_ties),
-            .section => try evalSubSection(self, sf_children, env, instances, all_pin_nets, notes, net_ties, &sec_instances, &sec_sub_sections),
+            .section => try evalSubSection(self, sf_children, env, test_point_ctx, net_ties, &sec_instances, &sec_sub_sections, sub_blocks),
+            .test_point => if (try test_point_mod.evalForm(self, sf_children, env, test_point_ctx)) |inst|
+                try sec_instances.append(self.allocator, inst),
+            .sub_block => {
+                const sb = try builders.buildSubBlock(self, sf_children, env);
+                try evalSubBlockBridges(self, sf_children, sb.name, net_ties);
+                try sec_hosts.append(self.allocator, sb.name);
+                try sub_blocks.append(self.allocator, sb);
+            },
+            .pullup, .pulldown, .divider, .led => {
+                const first = instances.items.len;
+                try evalMicroForm(self, sft, sf_children, env, instances, all_pin_nets);
+                for (instances.items[first..]) |new_inst| try sec_instances.append(self.allocator, new_inst);
+            },
             // Shared-form variants are consumed above by
             // `processSharedSectionForm`; top-level-only forms are
             // ignored inside a section body (with a lint warning so the
@@ -838,9 +1145,7 @@ fn evalSection(
             .description, .note, .port, .protocol, .calc => {},
             .group,
             .function,
-            .sub_block,
             .verifies,
-            .test_point,
             .decouple_defaults,
             .kicad_pcb,
             .stub,
@@ -850,11 +1155,12 @@ fn evalSection(
             .revision,
             .rough,
             .stackup,
+            .pdn,
+            .fabrication_layer,
             .net_class,
             .design_rules,
-            => {
-                self.warnFmt(sf.span, "({s} …) is top-level-only — ignored inside (section …)", .{sf_name});
-            },
+            .pcb_plan,
+            => self.warnFmt(sf.span, "({s} …) is top-level-only — ignored inside (section …)", .{sf_name}),
         }
     }
 
@@ -863,7 +1169,7 @@ fn evalSection(
     const final_sub_sections = sec_sub_sections.toOwnedSlice(self.allocator) catch &.{};
 
     // Infer status: concept if no instances, no pin_groups, and no sub-sections with content
-    const status = if (final_instances.len == 0 and final_pin_groups.len == 0)
+    const status = if (final_instances.len == 0 and final_pin_groups.len == 0 and sec_hosts.items.len == 0)
         env_mod.SectionStatus.concept
     else
         env_mod.SectionStatus.implemented;
@@ -935,13 +1241,15 @@ fn evalSubSection(
     self: *Evaluator,
     sf_children: []const Node,
     env: *Env,
-    instances: *std.ArrayList(Instance),
-    all_pin_nets: *std.ArrayList(PinNetDecl),
-    notes: *std.ArrayList(Note),
+    test_point_ctx: test_point_mod.EvalContext,
     net_ties: *std.ArrayList(NetTie),
     sec_instances: *std.ArrayList(Instance),
     sec_sub_sections: *std.ArrayList(env_mod.Section),
+    sub_blocks: *std.ArrayList(SubBlock),
 ) EvalError!void {
+    const instances = test_point_ctx.instances;
+    const all_pin_nets = test_point_ctx.pin_nets;
+    const notes = test_point_ctx.notes;
     if (sf_children.len < 2) return;
     const sub_name_val = try self.evalNode(sf_children[1], env);
     const sub_name = sub_name_val.asString() orelse return;
@@ -952,6 +1260,7 @@ fn evalSubSection(
     var sub_ports: std.ArrayList(env_mod.SectionPort) = .empty;
     var sub_protocols: std.ArrayList([]const u8) = .empty;
     var sub_calcs: std.ArrayList(env_mod.CalcBlock) = .empty;
+    var sub_hosts: std.ArrayList([]const u8) = .empty;
 
     const sub_scope = SectionScope{
         .description = &sub_description,
@@ -1048,6 +1357,24 @@ fn evalSubSection(
             },
             .net => try evalNetForm(self, ssf_children, env, net_ties),
             .bus_net => try evalBusNetForm(self, ssf_children, env, net_ties),
+            .test_point => if (try test_point_mod.evalForm(self, ssf_children, env, test_point_ctx)) |inst| {
+                try sec_instances.append(self.allocator, inst);
+                try sub_instances.append(self.allocator, inst);
+            },
+            .sub_block => {
+                const sb = try builders.buildSubBlock(self, ssf_children, env);
+                try evalSubBlockBridges(self, ssf_children, sb.name, net_ties);
+                try sub_hosts.append(self.allocator, sb.name);
+                try sub_blocks.append(self.allocator, sb);
+            },
+            .pullup, .pulldown, .divider, .led => {
+                const first = instances.items.len;
+                try evalMicroForm(self, sft, ssf_children, env, instances, all_pin_nets);
+                for (instances.items[first..]) |new_inst| {
+                    try sec_instances.append(self.allocator, new_inst);
+                    try sub_instances.append(self.allocator, new_inst);
+                }
+            },
             // Sub-sections don't recurse, don't carry top-level-only
             // forms, and don't have `role`/`diagram`. Shared-form
             // variants went through `processSharedSectionForm` above;
@@ -1061,7 +1388,7 @@ fn evalSubSection(
     const final_sub_instances = sub_instances.toOwnedSlice(self.allocator) catch &.{};
     const final_sub_pin_groups = sub_pin_groups.toOwnedSlice(self.allocator) catch &.{};
 
-    const status = if (final_sub_instances.len == 0 and final_sub_pin_groups.len == 0)
+    const status = if (final_sub_instances.len == 0 and final_sub_pin_groups.len == 0 and sub_hosts.items.len == 0)
         env_mod.SectionStatus.concept
     else
         env_mod.SectionStatus.implemented;
@@ -1076,7 +1403,25 @@ fn evalSubSection(
         .protocols = sub_protocols.toOwnedSlice(self.allocator) catch &.{},
         .calcs = sub_calcs.toOwnedSlice(self.allocator) catch &.{},
         .status = status,
+        .hosts = sub_hosts.toOwnedSlice(self.allocator) catch &.{},
     });
+}
+
+fn evalMicroForm(
+    self: *Evaluator,
+    form: ScopeForm,
+    children: []const Node,
+    env: *Env,
+    instances: *std.ArrayList(Instance),
+    pin_nets: *std.ArrayList(PinNetDecl),
+) EvalError!void {
+    return switch (form) {
+        .pullup => micro_forms.emit(self, .pullup, children, env, instances, pin_nets),
+        .pulldown => micro_forms.emit(self, .pulldown, children, env, instances, pin_nets),
+        .divider => micro_forms.emit(self, .divider, children, env, instances, pin_nets),
+        .led => micro_forms.emit(self, .led, children, env, instances, pin_nets),
+        else => return EvalError.InvalidForm,
+    };
 }
 
 /// Resolve `name` to the canonical root of its tie-connected component.
@@ -1340,13 +1685,14 @@ fn parseVerifies(self: *Evaluator, form_children: []const Node, env: *Env) ?env_
 }
 
 /// Parse a top-level `(rough …)` form into the design's rough-placement seed:
-/// an optional `(anchor "REF")` and a list of `(group "name" "REF"…)` priority
-/// tiers in authored (descending-priority) order. Member tokens stay raw
+/// an optional `(anchor "REF")`, `(group "name" "REF"…)` priority tiers, and
+/// `(critical-loop "name" "REF"…)` closed-chain sets. Member tokens stay raw
 /// (ref-des or origin name) — `placement/optimizer.zig` matches them leniently.
 /// A `(group …)` with no members is dropped; `(rough)` alone ⇒ `present=false`.
 fn parseRough(self: *Evaluator, form_children: []const Node) EvalError!env_mod.RoughSpec {
     var anchor: []const u8 = "";
     var groups: std.ArrayList(env_mod.RoughGroup) = .empty;
+    var critical_loops: std.ArrayList(env_mod.RoughGroup) = .empty;
     for (form_children[1..]) |child| {
         const cl = child.asList() orelse continue;
         if (cl.len == 0) continue;
@@ -1355,12 +1701,15 @@ fn parseRough(self: *Evaluator, form_children: []const Node) EvalError!env_mod.R
             if (cl.len >= 2) anchor = cl[1].asString() orelse cl[1].asAtom() orelse "";
         } else if (std.mem.eql(u8, head, "group")) {
             try parseRoughGroup(self, cl, &groups);
+        } else if (std.mem.eql(u8, head, "critical-loop")) {
+            try parseRoughMemberSet(env_mod.RoughGroup, self, cl, &critical_loops);
         } else {
-            self.warnFmt(child.span, "unknown (rough …) item ({s} …) — expected (anchor …) or (group …)", .{head});
+            self.warnFmt(child.span, "unknown (rough …) item ({s} …) — expected (anchor …), (group …), or (critical-loop …)", .{head});
         }
     }
     const grp = groups.toOwnedSlice(self.allocator) catch &.{};
-    return .{ .anchor = anchor, .groups = grp, .present = anchor.len > 0 or grp.len > 0 };
+    const loops = critical_loops.toOwnedSlice(self.allocator) catch &.{};
+    return .{ .anchor = anchor, .groups = grp, .critical_loops = loops, .present = anchor.len > 0 or grp.len > 0 or loops.len > 0 };
 }
 
 /// Parse one `(group "name" "REF"…)` child of a `(rough …)` form: the first
@@ -1370,6 +1719,15 @@ fn parseRoughGroup(
     self: *Evaluator,
     cl: []const Node,
     out: *std.ArrayList(env_mod.RoughGroup),
+) EvalError!void {
+    return parseRoughMemberSet(env_mod.RoughGroup, self, cl, out);
+}
+
+fn parseRoughMemberSet(
+    comptime T: type,
+    self: *Evaluator,
+    cl: []const Node,
+    out: *std.ArrayList(T),
 ) EvalError!void {
     if (cl.len < 2) return;
     const name = cl[1].asString() orelse cl[1].asAtom() orelse "";
@@ -1590,6 +1948,57 @@ fn parseLayout(self: *Evaluator, form_children: []const Node) EvalError!env_mod.
     };
 }
 
+const GridSection = struct { row: i32, col: i32, name: []const u8 };
+
+fn lessGridSection(_: void, a: GridSection, b: GridSection) bool {
+    return a.row < b.row or (a.row == b.row and a.col < b.col);
+}
+
+/// Seed an omitted diagram layout from authored section `(row N)` / `(col N)`
+/// hints. Only fully-coordinated, visible sections participate; other diagram
+/// blocks retain the renderer's normal automatic placement.
+fn seedLayoutFromSectionGrid(
+    self: *Evaluator,
+    body_forms: []const Node,
+    env: *Env,
+    layout: *env_mod.LayoutSpec,
+) EvalError!void {
+    var grid: std.ArrayList(GridSection) = .empty;
+    for (body_forms) |form| {
+        const section = form.asList() orelse continue;
+        if (section.len < 2 or !form.isForm("section")) continue;
+        var row: ?i32 = null;
+        var col: ?i32 = null;
+        var hidden = false;
+        for (section[2..]) |child| {
+            const c = child.asList() orelse continue;
+            if (c.len < 2) continue;
+            if (child.isForm("diagram") and std.mem.eql(u8, c[1].asText() orelse "", "hidden")) hidden = true;
+            const value = c[1].asNumber() orelse continue;
+            const coordinate = numeric.checkedInt(i32, value) orelse continue;
+            if (child.isForm("row")) row = coordinate;
+            if (child.isForm("col")) col = coordinate;
+        }
+        if (hidden or row == null or col == null) continue;
+        const name = (try self.evalNode(section[1], env)).asString() orelse continue;
+        try grid.append(self.allocator, .{ .row = row.?, .col = col.?, .name = name });
+    }
+    if (grid.items.len == 0) return;
+    std.mem.sort(GridSection, grid.items, {}, lessGridSection);
+
+    var rows: std.ArrayList(env_mod.LayoutRow) = .empty;
+    var start: usize = 0;
+    while (start < grid.items.len) {
+        var end = start + 1;
+        while (end < grid.items.len and grid.items[end].row == grid.items[start].row) : (end += 1) {}
+        var members: std.ArrayList([]const u8) = .empty;
+        for (grid.items[start..end]) |entry| try members.append(self.allocator, entry.name);
+        try rows.append(self.allocator, .{ .members = members.toOwnedSlice(self.allocator) catch &.{} });
+        start = end;
+    }
+    layout.rows = rows.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
+}
+
 /// Map a `(place …)` relation keyword to a `PlaceRel`. Returns null for an
 /// unrecognised keyword so `parseLayout` can skip the directive.
 fn relFromAtom(atom: []const u8) ?env_mod.PlaceRel {
@@ -1647,6 +2056,87 @@ fn parseBoardSides(self: *Evaluator, form_children: []const Node) EvalError![]co
     return sides.toOwnedSlice(self.allocator) catch &.{};
 }
 
+/// Parse the typed policy nested under `(perimeter-fence … (keepout …))`.
+/// A declaration blocks every supported physical family unless `(blocks …)`
+/// narrows it; `(allow-nets …)` admits named copper through the reserved band.
+fn parsePerimeterKeepout(
+    self: *Evaluator,
+    rule: []const Node,
+    fence: *env_mod.PerimeterFenceSpec,
+) EvalError!void {
+    if (rule.len < 2 or (rule[1].asNumber() orelse 0) <= 0) {
+        self.warnFmt(
+            rule[0].span,
+            "(perimeter-fence … (keepout CLEARANCE …)) needs a positive clearance",
+            .{},
+        );
+        return;
+    }
+    fence.keepout.clearance = rule[1].asNumber().?;
+    fence.keepout.blocks = .{ .components = true, .tracks = true, .vias = true };
+    var allow_nets: std.ArrayList([]const u8) = .empty;
+    for (rule[2..]) |option_node| {
+        const option = option_node.asList() orelse continue;
+        if (option.len < 1) continue;
+        const option_head = option[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, option_head, "blocks")) {
+            fence.keepout.blocks = .{};
+            for (option[1..]) |feature_node| {
+                const feature = feature_node.asString() orelse feature_node.asAtom() orelse continue;
+                if (std.mem.eql(u8, feature, "components")) {
+                    fence.keepout.blocks.components = true;
+                } else if (std.mem.eql(u8, feature, "tracks")) {
+                    fence.keepout.blocks.tracks = true;
+                } else if (std.mem.eql(u8, feature, "vias")) {
+                    fence.keepout.blocks.vias = true;
+                } else {
+                    self.warnFmt(
+                        feature_node.span,
+                        "unknown perimeter keepout feature '{s}' — expected components, tracks, or vias",
+                        .{feature},
+                    );
+                }
+            }
+        } else if (std.mem.eql(u8, option_head, "allow-nets")) {
+            for (option[1..]) |net_node| {
+                const net = net_node.asString() orelse net_node.asAtom() orelse continue;
+                allow_nets.append(self.allocator, net) catch return EvalError.OutOfMemory;
+            }
+        } else {
+            self.warnFmt(option[0].span, "unknown perimeter (keepout …) sub-form ({s} …)", .{option_head});
+        }
+    }
+    fence.keepout.allow_nets = allow_nets.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
+}
+
+/// Parse one board-derived via fence and its optional generic keepout policy.
+fn parsePerimeterFence(
+    self: *Evaluator,
+    children: []const Node,
+) EvalError!env_mod.PerimeterFenceSpec {
+    var fence: env_mod.PerimeterFenceSpec = .{};
+    for (children) |rule_node| {
+        const rule = rule_node.asList() orelse continue;
+        if (rule.len < 1) continue;
+        const head = rule[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "via") and rule.len >= 3) {
+            fence.via_dia = @max(rule[1].asNumber() orelse 0, 0);
+            fence.via_drill = @max(rule[2].asNumber() orelse 0, 0);
+        } else if (std.mem.eql(u8, head, "spacing") and rule.len >= 2) {
+            fence.spacing = @max(rule[1].asNumber() orelse 0, 0);
+        } else if (std.mem.eql(u8, head, "edge-offset") and rule.len >= 2) {
+            fence.edge_offset = @max(rule[1].asNumber() orelse 0, 0);
+        } else if (std.mem.eql(u8, head, "mask-width") and rule.len >= 2) {
+            fence.mask_width = @max(rule[1].asNumber() orelse 0, 0);
+        } else if (std.mem.eql(u8, head, "net") and rule.len >= 2) {
+            fence.net = rule[1].asString() orelse rule[1].asAtom() orelse fence.net;
+        } else if (std.mem.eql(u8, head, "keepout")) {
+            try parsePerimeterKeepout(self, rule, &fence);
+        }
+    }
+    return fence;
+}
+
 /// Parse a top-level `(board …)` form: `(size W H)` outline (mm) + per-edge item
 /// lists (`(left|right|top|bottom …)`, the words naming physical board edges) +
 /// `(corners "REF" …)` mounting hardware. The edge lists are parsed by
@@ -1656,6 +2146,7 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
     var w: f64 = 0;
     var h: f64 = 0;
     var corner_radius: f64 = 0;
+    var perimeter_fence: env_mod.PerimeterFenceSpec = .{};
     var corners: std.ArrayList(env_mod.PlacementItem) = .empty;
     for (form_children[1..]) |child| {
         const c = child.asList() orelse continue;
@@ -1672,6 +2163,10 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
             if (c.len >= 2) corner_radius = @max(c[1].asNumber() orelse 0, 0);
             continue;
         }
+        if (std.mem.eql(u8, head, "perimeter-fence")) {
+            perimeter_fence = try parsePerimeterFence(self, c[1..]);
+            continue;
+        }
         if (std.mem.eql(u8, head, "corners")) {
             for (c[1..]) |item_node| {
                 const ref = item_node.asString() orelse item_node.asAtom() orelse continue;
@@ -1685,32 +2180,206 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
         .corner_radius = corner_radius,
         .sides = board_sides,
         .corners = corners.toOwnedSlice(self.allocator) catch &.{},
+        .perimeter_fence = perimeter_fence,
         .present = true,
     };
 }
 
-/// Parse a top-level `(stackup N (plane IDX "NET")… (thickness MM))` form into
-/// a `StackupSpec`. N (total copper layers) is required and must be ≥1; a
+fn fabricationBasenameSafe(name: []const u8) bool {
+    if (name.len <= 4 or !std.mem.endsWith(u8, name, ".gbr")) return false;
+    for (name) |c| {
+        if (std.ascii.isAlphanumeric(c) or c == '_' or c == '-' or c == '.') continue;
+        return false;
+    }
+    return std.mem.indexOf(u8, name, "..") == null;
+}
+
+fn parseFabricationPolygon(self: *Evaluator, node: Node) EvalError!?[]const [2]f64 {
+    const poly = node.asList() orelse return null;
+    if (poly.len == 0 or !std.mem.eql(u8, poly[0].asAtom() orelse "", "polygon")) return null;
+    var points: std.ArrayList([2]f64) = .empty;
+    for (poly[1..]) |point_node| {
+        const point = point_node.asList() orelse continue;
+        if (point.len != 3 or !std.mem.eql(u8, point[0].asAtom() orelse "", "xy")) continue;
+        const x = point[1].asNumber() orelse continue;
+        const y = point[2].asNumber() orelse continue;
+        points.append(self.allocator, .{ x, y }) catch return EvalError.OutOfMemory;
+    }
+    if (points.items.len < 3) {
+        self.warnFmt(node.span, "fabrication-layer polygon needs at least three (xy X Y) vertices", .{});
+        return null;
+    }
+    return points.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
+}
+
+/// Parse separately fabricated backing artwork. Unlike `(stackup …)`, this
+/// owns positive application regions plus optional courtyard cutouts and an
+/// explicit board face. Geometry stays in world mm so a saved layout and the
+/// fabrication preview/export all see the same result.
+fn parseFabricationLayer(self: *Evaluator, form_children: []const Node) EvalError!?env_mod.FabricationLayerSpec {
+    if (form_children.len < 2) {
+        self.warnFmt(form_children[0].span, "(fabrication-layer …) needs a .gbr basename", .{});
+        return null;
+    }
+    const name = form_children[1].asString() orelse {
+        self.warnFmt(form_children[1].span, "fabrication-layer basename must be a quoted string", .{});
+        return null;
+    };
+    if (!fabricationBasenameSafe(name)) {
+        self.warnFmt(form_children[1].span, "fabrication-layer basename must be a safe filename ending in .gbr", .{});
+        return null;
+    }
+
+    var kind: []const u8 = "adhesive";
+    var material: []const u8 = "";
+    var thickness: f64 = 0;
+    var side: ?env_mod.FabricationSide = null;
+    var regions: std.ArrayList(env_mod.FabricationRegion) = .empty;
+    var exclusion: env_mod.FabricationFootprintExclusion = .{};
+
+    for (form_children[2..]) |child_node| {
+        const child = child_node.asList() orelse continue;
+        if (child.len == 0) continue;
+        const head = child[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "kind") and child.len >= 2) {
+            kind = child[1].asAtom() orelse child[1].asString() orelse kind;
+        } else if (std.mem.eql(u8, head, "side") and child.len >= 2) {
+            const value = child[1].asAtom() orelse "";
+            if (std.mem.eql(u8, value, "top")) side = .top else if (std.mem.eql(u8, value, "bottom")) side = .bottom else self.warnFmt(child[1].span, "fabrication-layer side must be top or bottom", .{});
+        } else if (std.mem.eql(u8, head, "material") and child.len >= 2) {
+            material = child[1].asString() orelse "";
+        } else if (std.mem.eql(u8, head, "thickness") and child.len >= 2) {
+            thickness = @max(child[1].asNumber() orelse 0, 0);
+        } else if (std.mem.eql(u8, head, "region") and child.len >= 2) {
+            if (std.mem.eql(u8, child[1].asAtom() orelse "", "board")) {
+                regions.append(self.allocator, .board) catch return EvalError.OutOfMemory;
+            } else if (try parseFabricationPolygon(self, child[1])) |points| {
+                regions.append(self.allocator, .{ .polygon = points }) catch return EvalError.OutOfMemory;
+            } else {
+                self.warnFmt(child_node.span, "fabrication-layer region must be board or (polygon (xy X Y) …)", .{});
+            }
+        } else if (std.mem.eql(u8, head, "exclude-footprints")) {
+            exclusion.enabled = true;
+            var refs: std.ArrayList([]const u8) = .empty;
+            for (child[1..]) |item| {
+                if (item.asAtom()) |mode| {
+                    if (std.mem.eql(u8, mode, "all-sides")) exclusion.all_sides = true else if (!std.mem.eql(u8, mode, "same-side"))
+                        self.warnFmt(item.span, "exclude-footprints mode must be same-side or all-sides", .{});
+                } else if (item.asString()) |ref| {
+                    refs.append(self.allocator, ref) catch return EvalError.OutOfMemory;
+                } else if (item.asList()) |modifier| {
+                    if (modifier.len >= 2 and std.mem.eql(u8, modifier[0].asAtom() orelse "", "clearance"))
+                        exclusion.clearance = @max(modifier[1].asNumber() orelse 0, 0);
+                }
+            }
+            exclusion.refs = refs.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
+        } else {
+            self.warnFmt(child_node.span, "unknown fabrication-layer option ({s} …)", .{head});
+        }
+    }
+
+    if (side == null) {
+        self.warnFmt(form_children[0].span, "fabrication-layer requires an explicit (side top|bottom)", .{});
+        return null;
+    }
+    if (material.len == 0 or !(thickness > 0) or regions.items.len == 0) {
+        self.warnFmt(form_children[0].span, "fabrication-layer requires material, positive thickness, and at least one region", .{});
+        return null;
+    }
+    const expected_prefix = if (side.? == .bottom) "psb_" else "pst_";
+    if (std.mem.eql(u8, kind, "adhesive") and !std.mem.startsWith(u8, name, expected_prefix))
+        self.warnFmt(form_children[1].span, "{s} adhesive layer names conventionally start with {s}", .{ @tagName(side.?), expected_prefix });
+
+    return .{
+        .name = name,
+        .kind = kind,
+        .side = side.?,
+        .material = material,
+        .thickness = thickness,
+        .regions = regions.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
+        .exclude_footprints = exclusion,
+    };
+}
+
+/// Parse one board-level PDN target. Required positive ripple is what makes a
+/// target-impedance verdict meaningful; all other fields may be inferred by
+/// the post-route screen or left out of the applicable bandwidth.
+fn parsePdnIntent(self: *Evaluator, c: []const Node) ?env_mod.PdnIntent {
+    if (c.len < 3) {
+        self.warnFmt(c[0].span, "(pdn …) needs a net and (ripple-v V)", .{});
+        return null;
+    }
+    const net = c[1].asString() orelse {
+        self.warnFmt(c[1].span, "(pdn …) net must be a string", .{});
+        return null;
+    };
+    var out = env_mod.PdnIntent{ .net = net, .ripple_v = 0 };
+    for (c[2..]) |node| {
+        const sc = node.asList() orelse continue;
+        if (sc.len < 2) continue;
+        const name = sc[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, name, "ripple-v")) out.ripple_v = sc[1].asNumber() orelse 0 else if (std.mem.eql(u8, name, "step-current-a")) out.step_current_a = sc[1].asNumber() else if (std.mem.eql(u8, name, "rise-time-s")) out.rise_time_s = sc[1].asNumber() else if (std.mem.eql(u8, name, "source-resistance-ohm")) out.source_resistance_ohm = sc[1].asNumber() else if (std.mem.eql(u8, name, "source-inductance-h")) out.source_inductance_h = sc[1].asNumber() else if (std.mem.eql(u8, name, "frequency") and sc.len >= 3) {
+            out.f_min_hz = sc[1].asNumber() orelse out.f_min_hz;
+            out.f_max_hz = sc[2].asNumber() orelse out.f_max_hz;
+        } else self.warnFmt(node.span, "unknown (pdn …) sub-form ({s} …)", .{name});
+    }
+    if (!(out.ripple_v > 0)) {
+        self.warnFmt(c[1].span, "(pdn \"{s}\" …) needs a positive (ripple-v V)", .{net});
+        return null;
+    }
+    if (out.step_current_a != null and !(out.step_current_a.? > 0)) out.step_current_a = null;
+    if (out.rise_time_s != null and !(out.rise_time_s.? > 0)) out.rise_time_s = null;
+    if (out.source_resistance_ohm != null and out.source_resistance_ohm.? < 0) out.source_resistance_ohm = null;
+    if (out.source_inductance_h != null and out.source_inductance_h.? < 0) out.source_inductance_h = null;
+    if (!(out.f_min_hz > 0 and out.f_max_hz > out.f_min_hz)) {
+        self.warnFmt(c[1].span, "(pdn \"{s}\" …) frequency range must satisfy 0 < min < max", .{net});
+        return null;
+    }
+    return out;
+}
+
+/// Parse a top-level `(stackup N …)` custom construction or
+/// `(stackup "PRESET" …)` fabricator construction into a `StackupSpec`. N
+/// (total copper layers) is required and must be ≥1 for a custom stack; a
 /// malformed count leaves the spec absent (warned) so a typo can't silently
 /// change the routing model. `(plane …)` entries with a bad index (0 or > N)
 /// are skipped with a warning. An optional `(thickness MM)` sets the finished
 /// board thickness reported in the Gerber `.gbrjob` (default 1.6 mm).
 fn parseStackup(self: *Evaluator, form_children: []const Node) EvalError!env_mod.StackupSpec {
     if (form_children.len < 2) {
-        self.warnFmt(form_children[0].span, "(stackup …) needs a copper layer count, e.g. (stackup 2)", .{});
+        self.warnFmt(form_children[0].span, "(stackup …) needs a copper layer count or preset name", .{});
         return .{};
     }
-    const n_raw = form_children[1].asNumber() orelse {
-        self.warnFmt(form_children[1].span, "(stackup …) layer count must be a number", .{});
-        return .{};
+    var preset_name: []const u8 = "";
+    var preset: ?env_mod.StackupSpec = null;
+    const layers: u8 = if (form_children[1].asString()) |name| blk: {
+        preset = stackup_presets.resolve(self.allocator, name) catch return EvalError.OutOfMemory;
+        const resolved = preset orelse {
+            self.warnFmt(form_children[1].span, "unknown stackup preset \"{s}\"", .{name});
+            return .{};
+        };
+        preset_name = resolved.preset;
+        break :blk resolved.layers;
+    } else blk: {
+        const n_raw = form_children[1].asNumber() orelse {
+            self.warnFmt(form_children[1].span, "(stackup …) first argument must be a layer count or preset string", .{});
+            return .{};
+        };
+        if (n_raw < 1 or n_raw > 32 or n_raw != @floor(n_raw)) {
+            self.warnFmt(form_children[1].span, "(stackup …) layer count must be a whole number 1–32", .{});
+            return .{};
+        }
+        break :blk numeric.checkedInt(u8, n_raw) orelse return .{};
     };
-    if (n_raw < 1 or n_raw > 32 or n_raw != @floor(n_raw)) {
-        self.warnFmt(form_children[1].span, "(stackup …) layer count must be a whole number 1–32", .{});
-        return .{};
-    }
-    const layers: u8 = numeric.checkedInt(u8, n_raw) orelse return .{};
     var thickness: f64 = 0;
     var planes: std.ArrayList(env_mod.StackupPlane) = .empty;
+    var copper: std.ArrayList(env_mod.StackupCopper) = .empty;
+    var dielectrics: std.ArrayList(env_mod.StackupDielectric) = .empty;
+    if (preset) |resolved| {
+        thickness = resolved.thickness;
+        copper.appendSlice(self.allocator, resolved.copper) catch return EvalError.OutOfMemory;
+        dielectrics.appendSlice(self.allocator, resolved.dielectrics) catch return EvalError.OutOfMemory;
+    }
     for (form_children[2..]) |child| {
         const c = child.asList() orelse continue;
         if (c.len < 1) continue;
@@ -1724,12 +2393,50 @@ fn parseStackup(self: *Evaluator, form_children: []const Node) EvalError!env_mod
             } else self.warnFmt(c[0].span, "(thickness …) needs a millimetre value, e.g. (thickness 1.6)", .{});
             continue;
         }
+        if (std.mem.eql(u8, head, "copper")) {
+            if (parseCopperEntry(self, c, layers)) |entry| {
+                var duplicate = false;
+                for (copper.items) |old| if (old.index == entry.index) {
+                    duplicate = true;
+                    break;
+                };
+                if (duplicate) {
+                    self.warnFmt(
+                        c[1].span,
+                        "duplicate physical copper details for layer {d} — first kept",
+                        .{entry.index},
+                    );
+                } else copper.append(self.allocator, entry) catch return EvalError.OutOfMemory;
+            }
+            continue;
+        }
+        if (std.mem.eql(u8, head, dielectric_form)) {
+            if (parseDielectricEntry(self, c, layers)) |entry| {
+                var duplicate = false;
+                for (dielectrics.items) |old| if (old.after_layer == entry.after_layer) {
+                    duplicate = true;
+                    break;
+                };
+                if (duplicate) {
+                    self.warnFmt(
+                        c[1].span,
+                        "duplicate dielectric details after layer {d} — first kept",
+                        .{entry.after_layer},
+                    );
+                } else dielectrics.append(self.allocator, entry) catch return EvalError.OutOfMemory;
+            }
+            continue;
+        }
         const entry = if (std.mem.eql(u8, head, "plane"))
             parsePlaneEntry(self, c, layers)
         else if (std.mem.eql(u8, head, "pour"))
             parsePourEntry(self, c, layers)
         else blk: {
-            self.warnFmt(c[0].span, "unknown (stackup …) sub-form ({s} …) — expected (plane …), (pour …), or (thickness MM)", .{head});
+            self.warnFmt(
+                c[0].span,
+                "unknown (stackup …) sub-form ({s} …) — expected plane, pour, copper, dielectric, or thickness",
+                .{head},
+            );
             break :blk null;
         };
         if (entry) |pl| planes.append(self.allocator, pl) catch return EvalError.OutOfMemory;
@@ -1737,8 +2444,131 @@ fn parseStackup(self: *Evaluator, form_children: []const Node) EvalError!env_mod
     return .{
         .layers = layers,
         .planes = planes.toOwnedSlice(self.allocator) catch &.{},
+        .copper = copper.toOwnedSlice(self.allocator) catch &.{},
+        .dielectrics = dielectrics.toOwnedSlice(self.allocator) catch &.{},
         .present = true,
         .thickness = thickness,
+        .preset = preset_name,
+    };
+}
+
+fn stackIndex(self: *Evaluator, node: Node, layers: u8, what: []const u8, last: u8) ?u8 {
+    const raw = node.asNumber() orelse {
+        self.warnFmt(node.span, "({s} …) layer index must be a number", .{what});
+        return null;
+    };
+    if (raw < 1 or raw > @as(f64, @floatFromInt(last)) or raw != @floor(raw)) {
+        self.warnFmt(node.span, "({s} …) layer index out of range for this {d}-layer stackup", .{ what, layers });
+        return null;
+    }
+    return numeric.checkedInt(u8, raw);
+}
+
+const StackMaterial = struct { thickness: f64 = 0, material: []const u8 = "", er: f64 = 0 };
+const dielectric_form = "dielectric";
+
+fn parseStackMaterial(self: *Evaluator, nodes: []const Node, owner: []const u8) StackMaterial {
+    var result: StackMaterial = .{};
+    for (nodes) |node| {
+        const c = node.asList() orelse continue;
+        if (c.len == 0) continue;
+        const head = c[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "thickness")) {
+            if (c.len < 2) {
+                self.warnFmt(c[0].span, "({s} …) (thickness MM) needs a value", .{owner});
+            } else if (c[1].asNumber()) |value| {
+                if (value > 0) {
+                    result.thickness = value;
+                } else self.warnFmt(c[1].span, "({s} …) thickness must be positive", .{owner});
+            } else self.warnFmt(c[1].span, "({s} …) thickness must be a number (mm)", .{owner});
+        } else if (std.mem.eql(u8, head, "material")) {
+            if (c.len < 2) {
+                self.warnFmt(c[0].span, "({s} …) (material \"NAME\") needs a name", .{owner});
+            } else result.material = c[1].asString() orelse c[1].asAtom() orelse "";
+        } else if (std.mem.eql(u8, head, "er")) {
+            parseStackEr(self, c, owner, &result.er);
+        } else self.warnFmt(
+            c[0].span,
+            "unknown ({s} …) property ({s} …) — expected material, thickness, or er",
+            .{ owner, head },
+        );
+    }
+    return result;
+}
+
+/// `(er X)` — relative permittivity. Bounded by the impedance model's own
+/// published validity range, so an obviously-mistyped value is rejected at
+/// author time rather than producing a plausible-looking width later.
+fn parseStackEr(self: *Evaluator, c: []const Node, owner: []const u8, out: *f64) void {
+    if (c.len < 2) {
+        self.warnFmt(c[0].span, "({s} …) (er X) needs a dielectric constant, e.g. (er 4.4)", .{owner});
+        return;
+    }
+    const value = c[1].asNumber() orelse {
+        self.warnFmt(c[1].span, "({s} …) (er X) must be a number", .{owner});
+        return;
+    };
+    if (value < 1.0 or value > 128.0) {
+        self.warnFmt(c[1].span, "({s} …) (er {d}) is outside 1-128 — FR-4 is about 4.4", .{ owner, value });
+        return;
+    }
+    out.* = value;
+}
+
+fn parseCopperEntry(self: *Evaluator, c: []const Node, layers: u8) ?env_mod.StackupCopper {
+    if (c.len < 2) {
+        self.warnFmt(c[0].span, "(copper …) needs a layer index and (thickness MM)", .{});
+        return null;
+    }
+    const index = stackIndex(self, c[1], layers, "copper", layers) orelse return null;
+    const props = parseStackMaterial(self, c[2..], "copper");
+    if (!(props.thickness > 0)) {
+        self.warnFmt(c[0].span, "(copper …) needs a positive (thickness MM)", .{});
+        return null;
+    }
+    if (props.er > 0) {
+        // Copper is a conductor: (er …) belongs on the (dielectric …) either
+        // side of it. Accepting it silently would put a number in the file
+        // that nothing can ever read.
+        self.warnFmt(c[0].span, "(copper …) has no (er …) — declare it on the (dielectric …) instead", .{});
+    }
+    return .{
+        .index = index,
+        .thickness = props.thickness,
+        .material = if (props.material.len > 0) props.material else "Copper",
+    };
+}
+
+fn parseDielectricEntry(self: *Evaluator, c: []const Node, layers: u8) ?env_mod.StackupDielectric {
+    if (c.len < 3) {
+        self.warnFmt(
+            c[0].span,
+            "(dielectric …) needs an after-layer index, core|prepreg, material, and thickness",
+            .{},
+        );
+        return null;
+    }
+    const last_gap: u8 = if (layers > 0) layers - 1 else 0;
+    const index = stackIndex(self, c[1], layers, dielectric_form, last_gap) orelse return null;
+    const kind_name = c[2].asAtom() orelse {
+        self.warnFmt(c[2].span, "(dielectric …) type must be core or prepreg", .{});
+        return null;
+    };
+    const kind = std.meta.stringToEnum(env_mod.StackupDielectricKind, kind_name) orelse {
+        self.warnFmt(c[2].span, "(dielectric …) type must be core or prepreg, got {s}", .{kind_name});
+        return null;
+    };
+    const props = parseStackMaterial(self, c[3..], dielectric_form);
+    if (!(props.thickness > 0) or props.material.len == 0) {
+        self.warnFmt(c[0].span, "(dielectric …) needs (material \"NAME\") and a positive (thickness MM)", .{});
+        return null;
+    }
+    return .{
+        .after_layer = index,
+        .kind = kind,
+        .material = props.material,
+        .thickness = props.thickness,
+        .er = props.er,
     };
 }
 
@@ -1791,6 +2621,290 @@ fn parsePourEntry(self: *Evaluator, c: []const Node, layers: u8) ?env_mod.Stacku
     return .{ .index = idx, .net = net };
 }
 
+/// Parse a `(fence [(pitch MM)] [(offset MM)] [(via DIA DRILL)] [(net "N")])`
+/// sub-form of a `(net-class …)` into `out`. Presence alone is the opt-in, so a
+/// bare `(fence)` is valid and leaves every field at its derive-me sentinel; a
+/// non-positive number or an unknown child is warned and dropped.
+fn parseClassFence(self: *Evaluator, out: *env_mod.ClassFence, c: []const Node) void {
+    out.declared = true;
+    for (c[1..]) |child| {
+        const f = child.asList() orelse continue;
+        if (f.len < 1) continue;
+        const head = f[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "pitch")) {
+            if (f.len >= 2) out.pitch_mm = f[1].asNumber() orelse 0;
+            if (out.pitch_mm <= 0)
+                self.warnFmt(f[0].span, "(fence (pitch MM)) needs a positive spacing, e.g. (pitch 1.0)", .{});
+        } else if (std.mem.eql(u8, head, "offset")) {
+            if (f.len >= 2) out.offset_mm = f[1].asNumber() orelse 0;
+            if (out.offset_mm <= 0)
+                self.warnFmt(f[0].span, "(fence (offset MM)) needs a positive distance, e.g. (offset 0.65)", .{});
+        } else if (std.mem.eql(u8, head, "via")) {
+            if (f.len >= 2) out.via_dia = f[1].asNumber() orelse 0;
+            if (f.len >= 3) out.via_drill = f[2].asNumber() orelse 0;
+        } else if (std.mem.eql(u8, head, "net")) {
+            if (f.len >= 2) out.net = f[1].asString() orelse f[1].asAtom() orelse "";
+        } else {
+            self.warnFmt(f[0].span, "unknown (fence …) sub-form ({s} …)", .{head});
+        }
+    }
+}
+
+/// Parse a `(keepout MM [(escape MM)])` sub-form of a `(net-class …)` into
+/// `out`. The halo distance is the leading number (not a nested form), so the
+/// child scan skips it naturally — only `(escape MM)` is a recognized child.
+fn parseClassKeepout(self: *Evaluator, out: *env_mod.ClassRf, c: []const Node) void {
+    if (c.len >= 2) out.keepout_mm = c[1].asNumber() orelse 0;
+    if (out.keepout_mm <= 0)
+        self.warnFmt(c[0].span, "(keepout MM …) needs a positive halo, e.g. (keepout 0.5)", .{});
+    for (c[1..]) |child| {
+        const f = child.asList() orelse continue; // the leading MM is not a list
+        if (f.len < 1) continue;
+        const head = f[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "escape")) {
+            if (f.len >= 2) out.keepout_escape_mm = f[1].asNumber() orelse -1;
+            if (out.keepout_escape_mm < 0)
+                self.warnFmt(f[0].span, "(keepout … (escape MM)) needs a non-negative radius, e.g. (escape 1.5)", .{});
+        } else {
+            self.warnFmt(f[0].span, "unknown (keepout …) sub-form ({s} …)", .{head});
+        }
+    }
+}
+
+/// Parse a `(match-group "NAME" [(tolerance MM)])` sub-form of a `(net-class …)`
+/// into `spec`. The group NAME is the leading string (not a nested form), so the
+/// child scan starts past it — `(tolerance MM)` is the only recognized child. A
+/// missing/empty name is warned and leaves the class ungrouped, since a group
+/// with no name is a join key nothing else can name.
+fn parseClassMatchGroup(self: *Evaluator, out: *env_mod.ClassMatch, c: []const Node) void {
+    if (c.len >= 2) out.group = c[1].asString() orelse c[1].asAtom() orelse "";
+    if (out.group.len == 0) {
+        self.warnFmt(c[0].span, "(match-group \"NAME\" …) needs a group name, e.g. (match-group \"ddr-addr\")", .{});
+        return;
+    }
+    for (c[2..]) |child| {
+        const f = child.asList() orelse continue;
+        if (f.len < 1) continue;
+        const head = f[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "tolerance")) {
+            if (f.len >= 2) out.tolerance_mm = f[1].asNumber() orelse 0;
+            if (out.tolerance_mm <= 0)
+                self.warnFmt(f[0].span, "(match-group … (tolerance MM)) needs a positive spread, e.g. (tolerance 0.5)", .{});
+        } else {
+            self.warnFmt(f[0].span, "unknown (match-group …) sub-form ({s} …)", .{head});
+        }
+    }
+}
+
+/// Parse one RF-discipline sub-form of a `(net-class …)` — `(max-freq HZ)`,
+/// `(escape MM)`, `(min-bend-radius N)`, `(fence …)`, `(keepout MM …)` — into
+/// `rf`. Returns false when `head` names none of them, so the caller's ladder
+/// continues to the geometry fields. Split from `parseNetClassField` so the RF
+/// half and the trace-geometry half each stay a readable ladder.
+fn parseNetClassRfField(
+    self: *Evaluator,
+    rf: *env_mod.ClassRf,
+    head: []const u8,
+    c: []const Node,
+) bool {
+    if (std.mem.eql(u8, head, "max-freq")) {
+        // (max-freq HZ) — opts the class into RF bend discipline (routed
+        // corners become arcs with radius >= 3x the trace width).
+        if (c.len >= 2) rf.max_freq_hz = c[1].asNumber() orelse 0;
+        if (rf.max_freq_hz <= 0)
+            self.warnFmt(c[0].span, "(max-freq HZ) needs a positive frequency, e.g. (max-freq 12G)", .{});
+    } else if (std.mem.eql(u8, head, "band")) {
+        // (band MIN_HZ MAX_HZ) — electrical return-loss evaluation range.
+        if (c.len >= 3) {
+            rf.electrical.band_start_hz = c[1].asNumber() orelse 0;
+            rf.max_freq_hz = c[2].asNumber() orelse 0;
+        }
+        if (rf.electrical.band_start_hz <= 0 or rf.max_freq_hz <= rf.electrical.band_start_hz)
+            self.warnFmt(c[0].span, "(band MIN_HZ MAX_HZ) needs positive increasing frequencies, e.g. (band 100M 6G)", .{});
+    } else if (std.mem.eql(u8, head, "return-loss")) {
+        // (return-loss DB) — minimum worst-case RL over the declared band.
+        if (c.len >= 2) rf.electrical.return_loss_target_db = c[1].asNumber() orelse 0;
+        if (rf.electrical.return_loss_target_db <= 0)
+            self.warnFmt(c[0].span, "(return-loss DB) needs a positive target, e.g. (return-loss 20)", .{});
+    } else if (std.mem.eql(u8, head, "escape")) {
+        // (escape MM) — straight pad-escape distance before the first bend.
+        // Explicit 0 disables the max-freq default.
+        if (c.len >= 2) rf.escape_mm = c[1].asNumber() orelse -1;
+        if (rf.escape_mm < 0)
+            self.warnFmt(c[0].span, "(escape MM) needs a non-negative distance, e.g. (escape 1.0)", .{});
+    } else if (std.mem.eql(u8, head, "min-bend-radius")) {
+        // (min-bend-radius N) — bend-radius floor as a multiple of the trace
+        // width (floor = N × width), overriding the 3× default on a max-freq
+        // class. Must be positive; ≤0 is warned and leaves the default.
+        if (c.len >= 2) rf.min_bend_ratio = c[1].asNumber() orelse 0;
+        if (rf.min_bend_ratio <= 0)
+            self.warnFmt(c[0].span, "(min-bend-radius N) needs a positive width multiple, e.g. (min-bend-radius 5)", .{});
+    } else if (std.mem.eql(u8, head, "mask-relief")) {
+        // (mask-relief MM) — per-side solder-mask pullback from this class's
+        // routed copper (bare-copper trace). Explicit 0 keeps a max-freq
+        // class tented; undeclared stays the -1 derive-me sentinel.
+        if (c.len >= 2) rf.mask_relief_mm = c[1].asNumber() orelse -1;
+        if (rf.mask_relief_mm < 0)
+            self.warnFmt(c[0].span, "(mask-relief MM) needs a non-negative pullback, e.g. (mask-relief 0.05)", .{});
+    } else if (std.mem.eql(u8, head, "fence")) {
+        // (fence …) — opt this class's traces into a flanking row of ground
+        // stitching vias, generated on demand (not by the autorouter).
+        parseClassFence(self, &rf.fence, c);
+    } else if (std.mem.eql(u8, head, "keepout")) {
+        // (keepout MM [(escape MM)]) — same-layer halo foreign copper must
+        // respect around this class's copper, relaxed near its own pads.
+        parseClassKeepout(self, rf, c);
+    } else if (std.mem.eql(u8, head, "impedance")) {
+        // (impedance OHMS [(layer N)]) — target single-ended Z0. Alone it
+        // derives the width; alongside (width …) it is a check.
+        parseClassImpedance(self, rf, c, false);
+    } else if (std.mem.eql(u8, head, "diff-impedance")) {
+        // (diff-impedance OHMS [(layer N)]) — impedance across a diff pair.
+        parseClassImpedance(self, rf, c, true);
+    } else if (std.mem.eql(u8, head, "ground-gap")) {
+        // (ground-gap MM [(max MM)]) — edge-to-edge slot between the trace and
+        // same-layer ground copper. A max opts tapered sections into a wider
+        // locally synthesized slot while preserving the backing plane.
+        parseClassGroundGap(self, rf, c);
+    } else {
+        return false;
+    }
+    return true;
+}
+
+fn parseClassGroundGap(self: *Evaluator, rf: *env_mod.ClassRf, c: []const Node) void {
+    if (c.len >= 2) rf.impedance.ground_gap_mm = c[1].asNumber() orelse 0;
+    if (rf.impedance.ground_gap_mm <= 0)
+        self.warnFmt(c[0].span, "(ground-gap MM) needs a positive distance, e.g. (ground-gap 0.127)", .{});
+    for (c[2..]) |child| {
+        const f = child.asList() orelse continue;
+        if (f.len < 1) continue;
+        const head = f[0].asAtom() orelse continue;
+        if (!std.mem.eql(u8, head, "max")) {
+            self.warnFmt(f[0].span, "unknown (ground-gap …) sub-form ({s} …)", .{head});
+            continue;
+        }
+        if (f.len >= 2) rf.impedance.ground_gap_max_mm = f[1].asNumber() orelse 0;
+        if (rf.impedance.ground_gap_max_mm <= 0)
+            self.warnFmt(f[0].span, "(ground-gap … (max MM)) needs a positive upper limit, e.g. (max 1.75)", .{});
+        if (rf.impedance.ground_gap_mm > 0 and rf.impedance.ground_gap_max_mm < rf.impedance.ground_gap_mm)
+            self.warnFmt(f[0].span, "(ground-gap … (max MM)) cannot be smaller than the base gap", .{});
+    }
+}
+
+/// `(impedance OHMS)` — the class's target characteristic impedance. Bounded
+/// to the span a PCB transmission line can plausibly occupy so a typo (a width
+/// in millimetres written here, say) is caught at author time.
+fn parseClassImpedance(self: *Evaluator, rf: *env_mod.ClassRf, c: []const Node, differential: bool) void {
+    const form_name = if (differential) "diff-impedance" else "impedance";
+    if (c.len < 2) {
+        self.warnFmt(c[0].span, "({s} OHMS) needs a target", .{form_name});
+        return;
+    }
+    const value = c[1].asNumber() orelse {
+        self.warnFmt(c[1].span, "({s} OHMS) must be a number", .{form_name});
+        return;
+    };
+    if (value < 10.0 or value > 300.0) {
+        self.warnFmt(c[1].span, "({s} {d}) is outside 10-300 ohms — 50 and 100 are the usual targets", .{ form_name, value });
+        return;
+    }
+    if (differential) {
+        rf.impedance.diff_ohms = value;
+        rf.impedance.ohms = 0;
+    } else {
+        rf.impedance.ohms = value;
+        rf.impedance.diff_ohms = 0;
+    }
+    rf.impedance.layer = 0;
+    for (c[2..]) |child| {
+        const field = child.asList() orelse continue;
+        if (field.len != 2) continue;
+        const head = field[0].asAtom() orelse continue;
+        if (!std.mem.eql(u8, head, "layer")) continue;
+        const raw = field[1].asNumber() orelse {
+            self.warnFmt(field[1].span, "({s} … (layer N)) needs a 1-based copper-layer number", .{form_name});
+            continue;
+        };
+        if (raw < 1 or raw > 32 or @floor(raw) != raw) {
+            self.warnFmt(field[1].span, "({s} … (layer {d})) is outside the supported 1-32 copper-layer range", .{ form_name, raw });
+            continue;
+        }
+        rf.impedance.layer = numeric.checkedInt(u8, raw) orelse 0;
+    }
+}
+
+/// Parse one `(net-class …)` routing-profile sub-form `(head …)` into `spec`.
+/// Returns true when `head` names a known profile field (so the caller marks
+/// the class a profile), false for an unrecognized head (the caller warns) or
+/// `nets` (the caller handles membership). Split out of `parseNetClass` so
+/// neither the loop nor this ladder carries the whole form's complexity; the RF
+/// discipline heads live in `parseNetClassRfField`.
+fn parseNetClassField(
+    self: *Evaluator,
+    spec: *env_mod.NetClassSpec,
+    head: []const u8,
+    c: []const Node,
+) bool {
+    if (std.mem.eql(u8, head, "width")) {
+        if (c.len >= 2) spec.width = c[1].asNumber() orelse 0;
+    } else if (std.mem.eql(u8, head, "clearance")) {
+        if (c.len >= 2) spec.clearance = c[1].asNumber() orelse 0;
+    } else if (std.mem.eql(u8, head, "via")) {
+        if (c.len >= 2) spec.via_dia = c[1].asNumber() orelse 0;
+        if (c.len >= 3) spec.via_drill = c[2].asNumber() orelse 0;
+    } else if (std.mem.eql(u8, head, "priority")) {
+        if (c.len >= 2) {
+            const n = c[1].asNumber() orelse 0;
+            if (n < 0 or n > 7) self.warnFmt(c[1].span, "(net-class …) (priority …) is 0-7; clamping {d}", .{n});
+            spec.priority = numeric.checkedInt(u32, std.math.clamp(n, 0, 7)) orelse 0;
+        }
+    } else if (std.mem.eql(u8, head, "diff-pair")) {
+        // (diff-pair) → couple at the class clearance; (diff-pair GAP) → an
+        // explicit edge-to-edge gap (mm). Marks the class's nets differential.
+        spec.diff_gap = if (c.len >= 2) (c[1].asNumber() orelse 0) else 0;
+    } else if (std.mem.eql(u8, head, "resolution")) {
+        // (resolution MM) — bounded-window raster pitch for this class's nets.
+        if (c.len >= 2) spec.resolution_mm = c[1].asNumber() orelse 0;
+        if (spec.resolution_mm <= 0)
+            self.warnFmt(c[0].span, "(resolution MM) needs a positive pitch, e.g. (resolution 0.05)", .{});
+    } else if (std.mem.eql(u8, head, "match-group")) {
+        // (match-group "NAME" [(tolerance MM)]) — join this class's nets to a
+        // length-matched set measured (and warned about) after routing.
+        parseClassMatchGroup(self, &spec.match, c);
+    } else if (std.mem.eql(u8, head, "return-path")) {
+        parseClassReturnPath(self, &spec.return_path, c);
+    } else {
+        return parseNetClassRfField(self, &spec.rf, head, c);
+    }
+    return true;
+}
+
+/// Parse `(return-path [(reference "NET")] [(stitch-radius MM)]
+/// [(max-loop-area MM2)])`. The form is deliberately independent of RF:
+/// clocks and switching nodes need return-current discipline too.
+fn parseClassReturnPath(self: *Evaluator, out: *env_mod.ClassReturnPath, c: []const Node) void {
+    out.declared = true;
+    for (c[1..]) |child| {
+        const f = child.asList() orelse continue;
+        if (f.len < 1) continue;
+        const head = f[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "reference")) {
+            if (f.len >= 2) out.reference_net = f[1].asString() orelse f[1].asAtom() orelse "";
+            if (out.reference_net.len == 0)
+                self.warnFmt(f[0].span, "(return-path … (reference \"NET\")) needs a net name", .{});
+        } else if (std.mem.eql(u8, head, "stitch-radius")) {
+            if (f.len >= 2) out.stitch_radius_mm = f[1].asNumber() orelse 0;
+            if (out.stitch_radius_mm <= 0)
+                self.warnFmt(f[0].span, "(return-path … (stitch-radius MM)) needs a positive radius", .{});
+        } else if (std.mem.eql(u8, head, "max-loop-area")) {
+            if (f.len >= 2) out.max_loop_area_mm2 = f[1].asNumber() orelse 0;
+            if (out.max_loop_area_mm2 <= 0)
+                self.warnFmt(f[0].span, "(return-path … (max-loop-area MM2)) needs a positive area", .{});
+        } else self.warnFmt(f[0].span, "unknown (return-path …) sub-form ({s} …)", .{head});
+    }
+}
+
 /// Parse one top-level `(net-class "name" (width MM) (clearance MM)
 /// (via DIA DRILL) (priority 0-7) (nets "A" …))` form. Null (with a warning)
 /// when the name or the `(nets …)` list is missing — a class that names no
@@ -1811,28 +2925,13 @@ fn parseNetClass(self: *Evaluator, form_children: []const Node) EvalError!?env_m
         const c = child.asList() orelse continue;
         if (c.len < 1) continue;
         const head = c[0].asAtom() orelse continue;
-        if (std.mem.eql(u8, head, "width")) {
-            has_profile = true;
-            if (c.len >= 2) spec.width = c[1].asNumber() orelse 0;
-        } else if (std.mem.eql(u8, head, "clearance")) {
-            has_profile = true;
-            if (c.len >= 2) spec.clearance = c[1].asNumber() orelse 0;
-        } else if (std.mem.eql(u8, head, "via")) {
-            has_profile = true;
-            if (c.len >= 2) spec.via_dia = c[1].asNumber() orelse 0;
-            if (c.len >= 3) spec.via_drill = c[2].asNumber() orelse 0;
-        } else if (std.mem.eql(u8, head, "priority")) {
-            has_profile = true;
-            if (c.len >= 2) {
-                const n = c[1].asNumber() orelse 0;
-                if (n < 0 or n > 7) self.warnFmt(c[1].span, "(net-class …) (priority …) is 0-7; clamping {d}", .{n});
-                spec.priority = numeric.checkedInt(u32, std.math.clamp(n, 0, 7)) orelse 0;
-            }
-        } else if (std.mem.eql(u8, head, "nets")) {
+        if (std.mem.eql(u8, head, "nets")) {
             for (c[1..]) |net_node| {
                 const net = net_node.asString() orelse net_node.asAtom() orelse continue;
                 nets.append(self.allocator, net) catch return EvalError.OutOfMemory;
             }
+        } else if (parseNetClassField(self, &spec, head, c)) {
+            has_profile = true;
         } else {
             self.warnFmt(c[0].span, "unknown (net-class …) sub-form ({s} …)", .{head});
         }
@@ -1850,8 +2949,12 @@ fn parseNetClass(self: *Evaluator, form_children: []const Node) EvalError!?env_m
 }
 
 /// Parse a top-level `(design-rules (clearance MM) (min-drill MM)
-/// (mask-margin MM) (copper-edge MM) (hole-to-hole MM) (min-annular MM)
-/// (mask-web MM) (min-width MM) (track-width MM) (via DIA DRILL))` form into
+/// (mask-margin MM) (mask-relief-corner-radius MM) (copper-edge MM)
+/// (component-edge MM) (hole-to-hole MM) (via-to-via MM)
+/// (min-annular MM) (mask-web MM) (min-width MM) (pour-min-width MM)
+/// (pour-corner-radius MM) (ground-via-max MM) (track-width MM)
+/// (via-plating MM)
+/// (via DIA DRILL))` form into
 /// a `DesignRulesSpec`. Every sub-form is optional; an unset field stays 0 so
 /// the consumer falls back to its built-in default. `present` is set whenever
 /// the form appears (even empty), so a bare `(design-rules)` is a harmless
@@ -1860,6 +2963,9 @@ fn parseNetClass(self: *Evaluator, form_children: []const Node) EvalError!?env_m
 /// `RouteParams` (clearance/track/via).
 fn parseDesignRules(self: *Evaluator, form_children: []const Node) env_mod.DesignRulesSpec {
     var spec = env_mod.DesignRulesSpec{ .present = true };
+    // Judged after the loop, not inside it: `(pour-clearance …)` is checked
+    // against `(clearance …)`, which may be authored on either side of it.
+    var pour_span: ?ast.Span = null;
     for (form_children[1..]) |child| {
         const c = child.asList() orelse continue;
         if (c.len < 1) continue;
@@ -1870,34 +2976,628 @@ fn parseDesignRules(self: *Evaluator, form_children: []const Node) env_mod.Desig
         } else if (std.mem.eql(u8, head, "min-drill")) {
             spec.min_drill = val orelse 0;
         } else if (std.mem.eql(u8, head, "mask-margin")) {
-            spec.mask_margin = val orelse 0;
+            spec.mask.margin = val orelse 0;
+        } else if (std.mem.eql(u8, head, "mask-relief-corner-radius")) {
+            spec.mask.relief_corner_radius = val orelse 0;
         } else if (std.mem.eql(u8, head, "copper-edge")) {
-            spec.copper_edge = val orelse 0;
+            spec.edge.copper = val orelse 0;
+        } else if (std.mem.eql(u8, head, "component-edge")) {
+            spec.edge.component = val orelse 0;
         } else if (std.mem.eql(u8, head, "hole-to-hole")) {
             spec.hole_to_hole = val orelse 0;
+        } else if (std.mem.eql(u8, head, "via-to-via")) {
+            spec.via_to_via = val orelse 0;
         } else if (std.mem.eql(u8, head, "min-annular")) {
             spec.min_annular = val orelse 0;
         } else if (std.mem.eql(u8, head, "mask-web")) {
-            spec.mask_web = val orelse 0;
+            spec.mask.web = val orelse 0;
         } else if (std.mem.eql(u8, head, "min-width")) {
             spec.min_width = val orelse 0;
+        } else if (std.mem.eql(u8, head, "pour-clearance")) {
+            spec.pour_clearance = val orelse 0;
+            pour_span = c[0].span;
+        } else if (std.mem.eql(u8, head, "pour-min-width")) {
+            spec.pour.min_width = val orelse 0;
+        } else if (std.mem.eql(u8, head, "pour-corner-radius")) {
+            spec.pour.corner_radius = val orelse 0;
+        } else if (std.mem.eql(u8, head, "ground-via-max")) {
+            spec.pour.ground_via_max = val orelse 0;
         } else if (std.mem.eql(u8, head, "track-width")) {
             spec.track_width = val orelse 0;
         } else if (std.mem.eql(u8, head, "via")) {
             // (via DIA DRILL) — the board-default via geometry (both mm).
-            spec.via_dia = val orelse 0;
-            if (c.len >= 3) spec.via_drill = c[2].asNumber() orelse 0;
+            spec.via.dia = val orelse 0;
+            if (c.len >= 3) spec.via.drill = c[2].asNumber() orelse 0;
+        } else if (std.mem.eql(u8, head, "via-plating")) {
+            spec.via.plating = val orelse 0;
         } else {
             self.warnFmt(c[0].span, "unknown (design-rules …) sub-form ({s} …) — expected " ++
-                "clearance/min-drill/mask-margin/copper-edge/hole-to-hole/min-annular/mask-web/min-width/track-width/via", .{head});
+                "clearance/min-drill/mask-margin/mask-relief-corner-radius/copper-edge/component-edge/hole-to-hole/via-to-via/min-annular/mask-web/min-width/pour-clearance/pour-min-width/pour-corner-radius/ground-via-max/track-width/via/via-plating", .{head});
         }
     }
+    warnTightPourClearance(self, spec, pour_span);
     return spec;
+}
+
+/// Warn when an authored pour gap is TIGHTER than the copper clearance the same
+/// form resolves to. A pour is etched to a ragged boundary, so a gap below the
+/// drawn-copper rule buys no isolation and only trades it for DRC failures. The
+/// value is still ACCEPTED as authored — an expert who knows their fab may mean
+/// it — so this says so rather than clamping. `span` is null when the form
+/// authored no `(pour-clearance …)` at all, which is the silent case.
+fn warnTightPourClearance(self: *Evaluator, spec: env_mod.DesignRulesSpec, span: ?ast.Span) void {
+    const at = span orelse return;
+    if (!(spec.pour_clearance > 0)) return;
+    const clearance = if (spec.clearance > 0) spec.clearance else env_mod.default_clearance_mm;
+    if (spec.pour_clearance >= clearance) return;
+    self.warnFmt(at, "(design-rules (pour-clearance {d})) is below the copper clearance ({d}) — " ++
+        "a pour cannot hold a gap the board's own copper rule forbids; accepted as authored", .{ spec.pour_clearance, clearance });
+}
+
+/// Filter block-local auto-aliases out of the collected net ties, returning the
+/// real cross-block ties for storage. Auto-aliases (symbol pin-function matches)
+/// are block-local and would wrongly bridge unrelated nets in the cross-block
+/// flatten (`export_kicad_netlist.applyNetTies`), so they're dropped here.
+fn collectBlockTies(self: *Evaluator, net_ties: std.ArrayList(NetTie)) EvalError![]const env_mod.NetTie {
+    var block_ties: std.ArrayList(env_mod.NetTie) = .empty;
+    for (net_ties.items) |nt| {
+        if (nt.is_auto) continue;
+        try block_ties.append(self.allocator, .{ .a = nt.a, .b = nt.b });
+    }
+    return block_ties.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
+}
+
+/// Store the first `(pcb-plan …)` and warn on any later duplicate — zero or one
+/// plan per design. Returns `prior` unchanged (with a warning) when a plan is
+/// already set, else the newly parsed spec.
+fn takeFirstPcbPlan(
+    self: *Evaluator,
+    form_children: []const Node,
+    span: ast.Span,
+    prior: ?env_mod.PcbPlanSpec,
+) EvalError!?env_mod.PcbPlanSpec {
+    if (prior != null) {
+        self.warnFmt(span, "duplicate (pcb-plan …) — first kept, this one ignored", .{});
+        return prior;
+    }
+    return try parsePcbPlan(self, form_children);
+}
+
+/// The routing-criticality class atoms a `(pcb-plan (route (wave … (classes …))))`
+/// selector accepts — the field names of `placement/module_policy.NetClass`,
+/// mirrored here so the eval layer need not depend on the placement layer. A
+/// `(classes …)` atom outside this set is a typo, warned and dropped.
+const plan_route_classes = [_][]const u8{
+    "ground", "power",    "input_rail", "switch_node", "clock",
+    "rf",     "feedback", "analog",     "control",     "signal",
+};
+
+/// Mutable accumulator for one `(wave …)`'s selector member lists while parsing;
+/// `finalize` freezes them onto the `PlanWave`. Grouping the lists keeps the
+/// per-selector dispatch and the wave parser small.
+const PlanWaveLists = struct {
+    refs: std.ArrayList([]const u8) = .empty,
+    sections: std.ArrayList([]const u8) = .empty,
+    sub_blocks: std.ArrayList([]const u8) = .empty,
+    classes: std.ArrayList([]const u8) = .empty,
+    net_classes: std.ArrayList([]const u8) = .empty,
+    nets: std.ArrayList([]const u8) = .empty,
+    preferred_layers: std.ArrayList([]const u8) = .empty,
+    allowed_layers: std.ArrayList([]const u8) = .empty,
+    waypoints: std.ArrayList(env_mod.PlanWaypoint) = .empty,
+    repair_waypoints: std.ArrayList(env_mod.PlanWaypoint) = .empty,
+    branches: std.ArrayList(env_mod.PlanBranch) = .empty,
+
+    fn finalize(self: *PlanWaveLists, alloc: std.mem.Allocator, wave: *env_mod.PlanWave) void {
+        wave.refs = self.refs.toOwnedSlice(alloc) catch &.{};
+        wave.sections = self.sections.toOwnedSlice(alloc) catch &.{};
+        wave.sub_blocks = self.sub_blocks.toOwnedSlice(alloc) catch &.{};
+        wave.classes = self.classes.toOwnedSlice(alloc) catch &.{};
+        wave.net_classes = self.net_classes.toOwnedSlice(alloc) catch &.{};
+        wave.nets = self.nets.toOwnedSlice(alloc) catch &.{};
+        wave.preferred_layers = self.preferred_layers.toOwnedSlice(alloc) catch &.{};
+        wave.allowed_layers = self.allowed_layers.toOwnedSlice(alloc) catch &.{};
+        wave.corridor.waypoints = self.waypoints.toOwnedSlice(alloc) catch &.{};
+        wave.corridor.repair_waypoints = self.repair_waypoints.toOwnedSlice(alloc) catch &.{};
+        wave.corridor.branches = self.branches.toOwnedSlice(alloc) catch &.{};
+    }
+};
+
+/// True when `atom` names a `placement/module_policy.NetClass` field.
+fn isPlanRouteClass(atom: []const u8) bool {
+    for (plan_route_classes) |c| {
+        if (std.mem.eql(u8, atom, c)) return true;
+    }
+    return false;
+}
+
+/// Append every string/atom member of a selector's children into `out` (used by
+/// refs/sections/sub-blocks/net-classes/nets — free-form name selectors).
+fn collectPlanNames(self: *Evaluator, members: []const Node, out: *std.ArrayList([]const u8)) EvalError!void {
+    for (members) |m| {
+        const name = m.asString() orelse m.asAtom() orelse continue;
+        out.append(self.allocator, name) catch return EvalError.OutOfMemory;
+    }
+}
+
+/// Append the valid `(classes …)` atoms into `out`; an atom that isn't a
+/// module-policy NetClass name is warned and dropped, the rest kept.
+fn collectPlanClasses(self: *Evaluator, members: []const Node, out: *std.ArrayList([]const u8)) EvalError!void {
+    for (members) |m| {
+        const atom = m.asAtom() orelse m.asString() orelse continue;
+        if (!isPlanRouteClass(atom)) {
+            self.warnFmt(m.span, "unknown (classes …) atom '{s}' in (pcb-plan …) — " ++
+                "expected a module-policy net-class name", .{atom});
+            continue;
+        }
+        out.append(self.allocator, atom) catch return EvalError.OutOfMemory;
+    }
+}
+
+fn collectPlanWaypoints(
+    self: *Evaluator,
+    members: []const Node,
+    out: *std.ArrayList(env_mod.PlanWaypoint),
+) EvalError!void {
+    for (members) |member| {
+        const item = member.asList() orelse {
+            self.warnFmt(member.span, "waypoint must be (at X Y \"layer\") — skipped", .{});
+            continue;
+        };
+        const valid_head = item.len > 0 and item[0].asAtom() != null and
+            std.mem.eql(u8, item[0].asAtom().?, "at");
+        if (!valid_head or item.len != 4) {
+            self.warnFmt(member.span, "waypoint must be (at X Y \"layer\") — skipped", .{});
+            continue;
+        }
+        const x = item[1].asNumber() orelse continue;
+        const y = item[2].asNumber() orelse continue;
+        const layer = item[3].asString() orelse item[3].asAtom() orelse continue;
+        out.append(self.allocator, .{ .x = x, .y = y, .layer = layer }) catch return EvalError.OutOfMemory;
+    }
+}
+
+/// Parse `(branches (branch (at X Y "layer")…)…)` — one hard corridor per limb
+/// of a route wave's guide tree. A member that is not a `(branch …)` list, and
+/// a `(branch)` that carries no usable `(at …)` point, are warned and skipped;
+/// the wave survives with the branches that did parse, because a tree that
+/// cannot be matched to a net's terminals is refused whole at route time
+/// rather than half-applied.
+fn collectPlanBranches(
+    self: *Evaluator,
+    members: []const Node,
+    out: *std.ArrayList(env_mod.PlanBranch),
+) EvalError!void {
+    for (members) |member| {
+        const item = member.asList() orelse {
+            self.warnFmt(member.span, "branch must be (branch (at X Y \"layer\")…) — skipped", .{});
+            continue;
+        };
+        const head = if (item.len > 0) item[0].asAtom() else null;
+        if (head == null or !std.mem.eql(u8, head.?, "branch")) {
+            self.warnFmt(member.span, "branch must be (branch (at X Y \"layer\")…) — skipped", .{});
+            continue;
+        }
+        var points: std.ArrayList(env_mod.PlanWaypoint) = .empty;
+        try collectPlanWaypoints(self, item[1..], &points);
+        if (points.items.len == 0) {
+            self.warnFmt(member.span, "(branch …) needs at least one (at X Y \"layer\") point — skipped", .{});
+            continue;
+        }
+        const owned = points.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
+        out.append(self.allocator, .{ .waypoints = owned }) catch return EvalError.OutOfMemory;
+    }
+}
+
+fn collectPlanGuides(
+    self: *Evaluator,
+    members: []const Node,
+    out: *std.ArrayList(env_mod.PlanWaypoint),
+) EvalError!void {
+    for (members) |member| {
+        const item = member.asList() orelse {
+            self.warnFmt(member.span, "guide must be (escape-from …), (between-pins …), or (beside …) — skipped", .{});
+            continue;
+        };
+        const head = if (item.len > 0) item[0].asAtom() else null;
+        if (head == null) {
+            self.warnFmt(member.span, "guide must be (escape-from …), (between-pins …), or (beside …) — skipped", .{});
+            continue;
+        }
+        if (std.mem.eql(u8, head.?, "escape-from") and item.len == 4) {
+            const ref = item[1].asString() orelse item[1].asAtom() orelse continue;
+            const pin = item[2].asString() orelse item[2].asAtom() orelse continue;
+            const layer = item[3].asString() orelse item[3].asAtom() orelse continue;
+            out.append(self.allocator, .{ .guide = .{ .escape_from = .{
+                .ref = ref,
+                .pin = pin,
+                .layer = layer,
+            } } }) catch return EvalError.OutOfMemory;
+            continue;
+        }
+        if (std.mem.eql(u8, head.?, "between-pins") and item.len == 6) {
+            const from_ref = item[1].asString() orelse item[1].asAtom() orelse continue;
+            const from_pin = item[2].asString() orelse item[2].asAtom() orelse continue;
+            const to_ref = item[3].asString() orelse item[3].asAtom() orelse continue;
+            const to_pin = item[4].asString() orelse item[4].asAtom() orelse continue;
+            const layer = item[5].asString() orelse item[5].asAtom() orelse continue;
+            out.append(self.allocator, .{ .guide = .{ .between_pins = .{
+                .from_ref = from_ref,
+                .from_pin = from_pin,
+                .to_ref = to_ref,
+                .to_pin = to_pin,
+                .layer = layer,
+            } } }) catch return EvalError.OutOfMemory;
+            continue;
+        }
+        if (std.mem.eql(u8, head.?, "beside") and item.len == 4) {
+            const ref = item[1].asString() orelse item[1].asAtom() orelse continue;
+            const side_name = item[2].asString() orelse item[2].asAtom() orelse continue;
+            const side = std.meta.stringToEnum(env_mod.PlanGuideSide, side_name) orelse {
+                self.warnFmt(item[2].span, "(beside REF SIDE LAYER) side must be north, south, east, or west — skipped", .{});
+                continue;
+            };
+            const layer = item[3].asString() orelse item[3].asAtom() orelse continue;
+            out.append(self.allocator, .{ .guide = .{ .beside = .{
+                .ref = ref,
+                .side = side,
+                .layer = layer,
+            } } }) catch return EvalError.OutOfMemory;
+            continue;
+        }
+        self.warnFmt(member.span, "guide must be (escape-from REF PIN LAYER), (between-pins REF PIN REF PIN LAYER), or (beside REF SIDE LAYER) — skipped", .{});
+    }
+}
+
+/// Parse `(assign-escapes ["LAYER"] ["HUBREF"] [(reserve)])` — the wave-level
+/// opt-in that hands this wave's nets to the joint escape assigner instead of
+/// letting them contend for the same corridor one at a time. Both positional
+/// strings are optional overrides (layer, then hub ref); a bare `(reserve)`
+/// sub-form makes the assigned lanes hard reservations as well as soft guides.
+/// Extra members are warned and ignored, and the form still applies with its
+/// defaults.
+fn parseAssignEscapes(self: *Evaluator, selector: []const Node) env_mod.PlanEscapeSpec {
+    var spec = env_mod.PlanEscapeSpec{};
+    var names: usize = 0;
+    for (selector[1..]) |member| {
+        if (member.asList()) |sub| {
+            if (sub.len > 0 and std.mem.eql(u8, sub[0].asAtom() orelse "", "reserve")) {
+                spec.reserve = true;
+                continue;
+            }
+        } else {
+            const name = member.asString() orelse member.asAtom() orelse "";
+            if (names == 0) spec.layer = name else if (names == 1) spec.hub = name;
+            names += 1;
+            if (names <= 2) continue;
+        }
+        self.warnFmt(selector[0].span, "(assign-escapes [\"LAYER\"] [\"HUBREF\"] [(reserve)]) takes at most two names — extras ignored", .{});
+    }
+    return spec;
+}
+
+fn setPlanMaxVias(self: *Evaluator, selector: []const Node, wave: *env_mod.PlanWave) void {
+    const value = if (selector.len == 2) selector[1].asNumber() else null;
+    const valid = value != null and std.math.isFinite(value.?) and value.? >= 0 and
+        value.? <= std.math.maxInt(u16) and @floor(value.?) == value.?;
+    if (!valid) {
+        self.warnFmt(selector[0].span, "(max-vias N) requires one integer from 0 to 65535 — skipped", .{});
+        return;
+    }
+    wave.max_vias = @intFromFloat(value.?);
+}
+
+/// The member list a selector `head` targets, or null when the head isn't a
+/// valid selector for this wave's section (place: refs/sections/sub-blocks;
+/// route: classes/net-classes/nets). The vocabulary split is what rejects a
+/// route selector in a place wave (and vice versa).
+fn planSelectorList(head: []const u8, is_route: bool, lists: *PlanWaveLists) ?*std.ArrayList([]const u8) {
+    if (is_route) {
+        if (std.mem.eql(u8, head, "classes")) return &lists.classes;
+        if (std.mem.eql(u8, head, "net-classes")) return &lists.net_classes;
+        if (std.mem.eql(u8, head, "nets")) return &lists.nets;
+        const preferred = std.mem.eql(u8, head, "preferred-layers") or std.mem.eql(u8, head, "prefer-layers");
+        if (preferred) return &lists.preferred_layers;
+        const allowed = std.mem.eql(u8, head, "allowed-layers") or std.mem.eql(u8, head, "allow-layers");
+        if (allowed) return &lists.allowed_layers;
+        return null;
+    }
+    if (std.mem.eql(u8, head, "refs")) return &lists.refs;
+    if (std.mem.eql(u8, head, "sections")) return &lists.sections;
+    if (std.mem.eql(u8, head, "sub-blocks")) return &lists.sub_blocks;
+    return null;
+}
+
+/// Route one selector form inside a `(wave …)` to its member list (or the
+/// wave's `reason` / `rest` flag), enforcing the place/route vocabulary split.
+/// `rest_seen` is the per-section duplicate-`(rest)` guard.
+fn applyPlanSelector(
+    self: *Evaluator,
+    sel: Node,
+    is_route: bool,
+    rest_seen: *bool,
+    wave: *env_mod.PlanWave,
+    lists: *PlanWaveLists,
+) EvalError!void {
+    const sc = sel.asList() orelse return;
+    if (sc.len == 0) return;
+    const head = sc[0].asAtom() orelse return;
+    if (std.mem.eql(u8, head, "reason")) {
+        if (sc.len >= 2) wave.reason = sc[1].asString() orelse sc[1].asAtom();
+        return;
+    }
+    if (std.mem.eql(u8, head, "rest")) {
+        if (rest_seen.*) {
+            self.warnFmt(sc[0].span, "duplicate (rest) in this (pcb-plan …) section — first kept, ignored", .{});
+            return;
+        }
+        rest_seen.* = true;
+        wave.rest = true;
+        return;
+    }
+    if (is_route and std.mem.eql(u8, head, "waypoints")) {
+        try collectPlanWaypoints(self, sc[1..], &lists.waypoints);
+        return;
+    }
+    if (is_route and std.mem.eql(u8, head, "repair-waypoints")) {
+        try collectPlanWaypoints(self, sc[1..], &lists.repair_waypoints);
+        return;
+    }
+    if (is_route and std.mem.eql(u8, head, "branches")) {
+        try collectPlanBranches(self, sc[1..], &lists.branches);
+        return;
+    }
+    if (is_route and std.mem.eql(u8, head, "guides")) {
+        try collectPlanGuides(self, sc[1..], &lists.waypoints);
+        return;
+    }
+    if (is_route and std.mem.eql(u8, head, "max-vias")) {
+        setPlanMaxVias(self, sc, wave);
+        return;
+    }
+    if (is_route and std.mem.eql(u8, head, "assign-escapes")) {
+        wave.corridor.assign_escapes = parseAssignEscapes(self, sc);
+        return;
+    }
+    if (is_route and std.mem.eql(u8, head, "topology")) {
+        wave.corridor.topology = true;
+        return;
+    }
+    if (is_route and std.mem.eql(u8, head, "seed-first")) {
+        wave.corridor.seed_first = true;
+        return;
+    }
+    const dest = planSelectorList(head, is_route, lists) orelse {
+        self.warnFmt(sc[0].span, "({s} …) is not a valid {s}-wave selector in (pcb-plan …) — skipped", .{
+            head, if (is_route) "route" else "place",
+        });
+        return;
+    };
+    if (std.mem.eql(u8, head, "classes")) {
+        try collectPlanClasses(self, sc[1..], dest);
+    } else {
+        try collectPlanNames(self, sc[1..], dest);
+    }
+}
+
+/// Parse one `(wave "name" selector…)` entry into a `PlanWave`, or null when the
+/// wave is malformed enough to drop: a non-`(wave …)` head, or no leading name
+/// string. `is_route` selects the selector vocabulary. Cross-section selectors,
+/// unknown selector heads, and a duplicate `(rest)` are warned and skipped
+/// while the wave survives.
+fn parsePlanWave(self: *Evaluator, wave_node: Node, is_route: bool, rest_seen: *bool) EvalError!?env_mod.PlanWave {
+    const wc = wave_node.asList() orelse return null;
+    if (wc.len == 0) return null;
+    const head = wc[0].asAtom() orelse return null;
+    if (!std.mem.eql(u8, head, "wave")) {
+        self.warnFmt(wc[0].span, "unknown (pcb-plan …) entry ({s} …) — expected (wave \"name\" …)", .{head});
+        return null;
+    }
+    const name = if (wc.len >= 2) wc[1].asString() else null;
+    if (name == null) {
+        self.warnFmt(wave_node.span, "(wave …) must start with a name string — skipped", .{});
+        return null;
+    }
+    var wave = env_mod.PlanWave{ .name = name.? };
+    var lists = PlanWaveLists{};
+    for (wc[2..]) |sel| try applyPlanSelector(self, sel, is_route, rest_seen, &wave, &lists);
+    lists.finalize(self.allocator, &wave);
+    return wave;
+}
+
+/// Parse a top-level `(pcb-plan (place (wave …)…) (route (wave …)…))` form into
+/// a `PcbPlanSpec`. `(place …)`/`(route …)` sections collect their waves in
+/// authored order; a `(rest)` catch-all is tracked per section so a duplicate is
+/// warned. A bare `(topology)` sets the plan-level flag; any other unknown
+/// top-level sub-form (not place/route) is warned. Malformed waves are warned
+/// and skipped, never a hard error.
+/// Recognise `(effort one-shot|standard)` inside `(route …)`, returning null
+/// when `node` is not an effort form at all (so the caller parses it as a wave).
+/// An effort under `(place …)` or an unknown word is a lint warning, never a
+/// hard error — the same forgiving posture the rest of the plan parser takes.
+fn parsePlanEffort(self: *Evaluator, node: Node, is_route: bool) EvalError!?env_mod.PlanEffort {
+    const c = node.asList() orelse return null;
+    if (c.len == 0) return null;
+    const head = c[0].asAtom() orelse return null;
+    if (!std.mem.eql(u8, head, "effort")) return null;
+    if (!is_route) {
+        self.warnFmt(c[0].span, "(effort …) applies to (route …), not (place …)", .{});
+        return null;
+    }
+    const word = if (c.len > 1) c[1].asAtom() orelse "" else "";
+    if (std.mem.eql(u8, word, "one-shot")) return .one_shot;
+    if (std.mem.eql(u8, word, "standard")) return .standard;
+    self.warnFmt(c[0].span, "unknown (effort {s}) — expected one-shot|standard", .{word});
+    return null;
+}
+
+const PlanRouteSecondsArg = union(enum) {
+    not_form,
+    invalid,
+    value: u32,
+};
+
+/// Recognise the route-section wall-clock budget. Invalid or misplaced forms
+/// are consumed after warning so they cannot also fall through as malformed
+/// waves; a missing form is the only `not_form` result.
+fn parsePlanRouteSeconds(self: *Evaluator, node: Node, is_route: bool) PlanRouteSecondsArg {
+    const c = node.asList() orelse return .not_form;
+    if (c.len == 0) return .not_form;
+    const head = c[0].asAtom() orelse return .not_form;
+    if (!std.mem.eql(u8, head, "max-route-seconds")) return .not_form;
+    if (!is_route) {
+        self.warnFmt(c[0].span, "(max-route-seconds …) applies to (route …), not (place …)", .{});
+        return .invalid;
+    }
+    const seconds = if (c.len == 2) c[1].asNumber() else null;
+    const valid = seconds != null and std.math.isFinite(seconds.?) and seconds.? >= 1 and
+        seconds.? <= 86_400 and @floor(seconds.?) == seconds.?;
+    if (!valid) {
+        self.warnFmt(c[0].span, "(max-route-seconds N) requires one integer from 1 to 86400 — skipped", .{});
+        return .invalid;
+    }
+    return .{ .value = @intCast(numeric.toCount(seconds.?)) };
+}
+
+fn parsePcbPlan(self: *Evaluator, form_children: []const Node) EvalError!env_mod.PcbPlanSpec {
+    var place: std.ArrayList(env_mod.PlanWave) = .empty;
+    var route: std.ArrayList(env_mod.PlanWave) = .empty;
+    var place_rest = false;
+    var route_rest = false;
+    var effort: ?env_mod.PlanEffort = null;
+    var max_route_seconds: ?u32 = null;
+    var topology = false;
+    for (form_children[1..]) |child| {
+        const c = child.asList() orelse continue;
+        if (c.len == 0) continue;
+        const head = c[0].asAtom() orelse continue;
+        // Plan-level `(topology)`: the same opt-in every route wave can author
+        // for itself, applied to all of them at once (see `resolveAuthored`).
+        if (std.mem.eql(u8, head, "topology")) {
+            topology = true;
+            continue;
+        }
+        const is_route = std.mem.eql(u8, head, "route");
+        if (!is_route and !std.mem.eql(u8, head, "place")) {
+            self.warnFmt(c[0].span, "unknown (pcb-plan …) sub-form ({s} …) — expected place|route", .{head});
+            continue;
+        }
+        const dest = if (is_route) &route else &place;
+        const rest_seen = if (is_route) &route_rest else &place_rest;
+        for (c[1..]) |wave_node| {
+            switch (parsePlanRouteSeconds(self, wave_node, is_route)) {
+                .not_form => {},
+                .invalid => continue,
+                .value => |seconds| {
+                    max_route_seconds = seconds;
+                    continue;
+                },
+            }
+            if (try parsePlanEffort(self, wave_node, is_route)) |e| {
+                effort = e;
+                continue;
+            }
+            if (try parsePlanWave(self, wave_node, is_route, rest_seen)) |w|
+                dest.append(self.allocator, w) catch return EvalError.OutOfMemory;
+        }
+    }
+    return .{
+        .place = place.toOwnedSlice(self.allocator) catch &.{},
+        .route = route.toOwnedSlice(self.allocator) catch &.{},
+        .effort = effort,
+        .max_route_seconds = max_route_seconds,
+        .topology = topology,
+    };
 }
 
 // ── Tests ─────────────────────────────────────────────────────────
 
 const testing = std.testing;
+
+// spec: eval/design_block - fabrication backing parses an explicit face, editable regions, thickness metadata, and side-scoped footprint cutouts
+test "design-block parses side-aware fabrication backing geometry" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (fabrication-layer "psb_tesa8854.gbr"
+        \\    (kind adhesive)
+        \\    (side bottom)
+        \\    (material "tesa8854")
+        \\    (thickness 0.10)
+        \\    (region board)
+        \\    (region (polygon (xy 1 2) (xy 4 2) (xy 4 6) (xy 1 6)))
+        \\    (exclude-footprints same-side "U1" "U2" (clearance 0.2))))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var scope = env_mod.Env.init(a, null);
+    defer scope.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &scope)).design_block;
+    try testing.expectEqual(@as(usize, 1), block.fabrication_layers.len);
+    const layer = block.fabrication_layers[0];
+    try testing.expectEqualStrings("psb_tesa8854.gbr", layer.name);
+    try testing.expectEqual(env_mod.FabricationSide.bottom, layer.side);
+    try testing.expectEqualStrings("tesa8854", layer.material);
+    try testing.expectApproxEqAbs(@as(f64, 0.10), layer.thickness, 1e-9);
+    try testing.expectEqual(@as(usize, 2), layer.regions.len);
+    try testing.expect(layer.regions[0] == .board);
+    try testing.expectEqual(@as(usize, 4), layer.regions[1].polygon.len);
+    try testing.expect(layer.exclude_footprints.enabled);
+    try testing.expect(!layer.exclude_footprints.all_sides);
+    try testing.expectEqual(@as(usize, 2), layer.exclude_footprints.refs.len);
+    try testing.expectApproxEqAbs(@as(f64, 0.2), layer.exclude_footprints.clearance, 1e-9);
+}
+
+// spec: placement/route-effort - (effort ...) under (place ...) or with an unknown word warns and leaves the default in place
+test "route effort parses one-shot and refuses misplaced or unknown words" {
+    const a = std.heap.page_allocator;
+    // Authored on (route …): taken.
+    try testing.expectEqual(
+        env_mod.PlanEffort.one_shot,
+        (try planFor(a,
+            \\(design-block "t" (pcb-plan (route (effort one-shot) (wave "rest" (rest)))))
+        )).effort.?,
+    );
+    // Authored on (place …): wrong scope, so the default survives.
+    try testing.expect((try planFor(a,
+        \\(design-block "t" (pcb-plan (place (effort one-shot)) (route (wave "rest" (rest)))))
+    )).effort == null);
+    // Unknown word: warned, default survives.
+    try testing.expect((try planFor(a,
+        \\(design-block "t" (pcb-plan (route (effort turbo) (wave "rest" (rest)))))
+    )).effort == null);
+}
+
+// spec: placement/route-deadline - max-route-seconds parses only in the route section and rejects non-positive or fractional budgets
+test "route wall time budget parses only a positive whole second value" {
+    const a = std.heap.page_allocator;
+    try testing.expectEqual(@as(u32, 300), (try planFor(a,
+        \\(design-block "t" (pcb-plan (route (max-route-seconds 300) (wave "rest" (rest)))))
+    )).max_route_seconds.?);
+    try testing.expect((try planFor(a,
+        \\(design-block "t" (pcb-plan (place (max-route-seconds 300)) (route (wave "rest" (rest)))))
+    )).max_route_seconds == null);
+    try testing.expect((try planFor(a,
+        \\(design-block "t" (pcb-plan (route (max-route-seconds 0) (wave "rest" (rest)))))
+    )).max_route_seconds == null);
+    try testing.expect((try planFor(a,
+        \\(design-block "t" (pcb-plan (route (max-route-seconds 1.5) (wave "rest" (rest)))))
+    )).max_route_seconds == null);
+}
+
+/// Evaluate a one-line design source and hand back its parsed `(pcb-plan …)`.
+fn planFor(a: std.mem.Allocator, src: []const u8) !env_mod.PcbPlanSpec {
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const value = try evalDesignBlock(&eval, form_children[1..], &env);
+    return value.design_block.pcb_plan orelse .{};
+}
 
 // spec: eval/design_block - kicad-pcb form captures the literal path on the design block
 test "design-block captures (kicad-pcb path)" {
@@ -1952,6 +3652,183 @@ test "design-block captures (stackup …)" {
     try testing.expectEqualStrings("PWR", block.stackup.planes[1].net);
 }
 
+// spec: eval/design_block - pdn form captures an explicit AC-domain target and source model
+test "design-block captures PDN transient intent" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (pdn "VDD" (ripple-v 0.033) (step-current-a 0.45)
+        \\    (rise-time-s 2n) (source-resistance-ohm 0.02)
+        \\    (source-inductance-h 800p) (frequency 1k 500M)))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var scope = env_mod.Env.init(a, null);
+    defer scope.deinit();
+    const value = try evalDesignBlock(&eval, form_children[1..], &scope);
+    const block = value.design_block;
+    try testing.expectEqual(@as(usize, 1), block.pdn_intents.len);
+    const intent = block.pdn_intents[0];
+    try testing.expectEqualStrings("VDD", intent.net);
+    try testing.expectApproxEqAbs(@as(f64, 0.033), intent.ripple_v, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.45), intent.step_current_a.?, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 5e8), intent.f_max_hz, 1e-3);
+}
+
+// spec: eval/design_block - stackup captures per-layer copper foil and core/prepreg construction details
+test "design-block captures detailed physical stackup construction" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (stackup 4
+        \\    (copper 1 (thickness 0.035))
+        \\    (dielectric 1 prepreg (material "7628*1") (thickness 0.2104))
+        \\    (copper 2 (material "Copper foil") (thickness 0.0152))
+        \\    (dielectric 2 core (material "1.1mm H/H oz with copper") (thickness 1.065))
+        \\    (copper 3 (thickness 0.0152))
+        \\    (dielectric 3 prepreg (material "7628*1") (thickness 0.2104))
+        \\    (copper 4 (thickness 0.035))
+        \\    (thickness 1.6)))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqual(@as(usize, 4), block.stackup.copper.len);
+    try testing.expectEqual(@as(usize, 3), block.stackup.dielectrics.len);
+    try testing.expectEqual(@as(u8, 2), block.stackup.copper[1].index);
+    try testing.expectApproxEqAbs(@as(f64, 0.0152), block.stackup.copper[1].thickness, 1e-9);
+    try testing.expectEqualStrings("Copper foil", block.stackup.copper[1].material);
+    try testing.expectEqual(env_mod.StackupDielectricKind.core, block.stackup.dielectrics[1].kind);
+    try testing.expectEqualStrings("1.1mm H/H oz with copper", block.stackup.dielectrics[1].material);
+    try testing.expectApproxEqAbs(@as(f64, 1.5862), block.stackup.constructionThickness(), 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 1.6), block.stackup.thickness, 1e-9);
+}
+
+// spec: eval/design_block - a named fabricator stackup expands to physical construction while board plane and pour roles remain authored locally
+test "design-block resolves a stackup preset with board electrical roles" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (stackup "JLC04161H-7628"
+        \\    (plane 2 "GND")
+        \\    (plane 3 "GND")
+        \\    (pour top "GND")))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var scope = env_mod.Env.init(a, null);
+    defer scope.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &scope)).design_block;
+    try testing.expectEqualStrings("JLC04161H-7628", block.stackup.preset);
+    try testing.expectEqual(@as(u8, 4), block.stackup.layers);
+    try testing.expectEqual(@as(usize, 4), block.stackup.copper.len);
+    try testing.expectEqual(@as(usize, 3), block.stackup.dielectrics.len);
+    try testing.expectEqual(@as(usize, 3), block.stackup.planes.len);
+    try testing.expectApproxEqAbs(@as(f64, 1.6), block.stackup.thickness, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 4.4), block.stackup.dielectrics[0].er, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 4.6), block.stackup.dielectrics[1].er, 1e-9);
+}
+
+// spec: eval/design_block - a stackup dielectric captures its (er X) permittivity and defaults it when absent
+test "design-block captures (dielectric … (er X))" {
+    const a = std.heap.page_allocator;
+    // Barracuda's real stackup, with (er …) added to two of its three gaps —
+    // the third is left bare to prove an undeclared interval stays 0 (the
+    // sentinel the impedance model reads as "use generic FR-4").
+    const src =
+        \\(design-block "test"
+        \\  (stackup 4
+        \\    (copper 1 (thickness 0.035))
+        \\    (dielectric 1 prepreg (material "7628*1") (thickness 0.2104) (er 4.35))
+        \\    (copper 2 (thickness 0.0152))
+        \\    (dielectric 2 core (material "1.1mm H/H oz with copper") (thickness 1.065) (er 4.5))
+        \\    (copper 3 (thickness 0.0152))
+        \\    (dielectric 3 prepreg (material "7628*1") (thickness 0.2104))
+        \\    (copper 4 (thickness 0.035))
+        \\    (plane 2 "GND")
+        \\    (thickness 1.6)))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqual(@as(usize, 3), block.stackup.dielectrics.len);
+    try testing.expectApproxEqAbs(@as(f64, 4.35), block.stackup.dielectrics[0].er, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 4.5), block.stackup.dielectrics[1].er, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0), block.stackup.dielectrics[2].er, 1e-9);
+    // Everything the form already captured is untouched by the new property.
+    try testing.expectEqualStrings("7628*1", block.stackup.dielectrics[0].material);
+    try testing.expectApproxEqAbs(@as(f64, 1.065), block.stackup.dielectrics[1].thickness, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 1.5862), block.stackup.constructionThickness(), 1e-9);
+}
+
+// spec: eval/design_block - an out-of-range or misplaced (er X) is warned and dropped rather than stored
+test "design-block rejects a nonsense (er …)" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (stackup 2
+        \\    (copper 1 (thickness 0.035) (er 4.4))
+        \\    (dielectric 1 core (material "FR4") (thickness 1.5) (er 900))
+        \\    (copper 2 (thickness 0.035))))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    // The copper foil keeps no permittivity (it is a conductor) and the
+    // out-of-range dielectric value is dropped back to the "unset" sentinel.
+    try testing.expectEqual(@as(usize, 1), block.stackup.dielectrics.len);
+    try testing.expectApproxEqAbs(@as(f64, 0), block.stackup.dielectrics[0].er, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 1.5), block.stackup.dielectrics[0].thickness, 1e-9);
+}
+
+// spec: eval/design_block - a net class captures its impedance target and grounded-coplanar gap while rejecting invalid values
+test "design-block captures impedance and grounded-coplanar gap" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (net-class "rf" (impedance 50) (ground-gap 0.127 (max 1.75)) (max-freq 6G) (nets "RF_IN"))
+        \\  (net-class "usb" (diff-pair 0.2) (diff-impedance 90 (layer 3)) (width 0.2) (nets "USB_DP" "USB_DM"))
+        \\  (net-class "bogus" (impedance 5) (nets "X"))
+        \\  (net-class "words" (impedance ohms) (ground-gap nope) (nets "Y")))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqual(@as(usize, 4), block.net_classes.len);
+    try testing.expectApproxEqAbs(@as(f64, 50), block.net_classes[0].rf.impedance.ohms, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0.127), block.net_classes[0].rf.impedance.ground_gap_mm, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 1.75), block.net_classes[0].rf.impedance.ground_gap_max_mm, 1e-9);
+    // Target AND width may be declared together — the width wins, the target
+    // becomes the check.
+    try testing.expectApproxEqAbs(@as(f64, 90), block.net_classes[1].rf.impedance.diff_ohms, 1e-9);
+    try testing.expectEqual(@as(u8, 3), block.net_classes[1].rf.impedance.layer);
+    try testing.expectApproxEqAbs(@as(f64, 0.2), block.net_classes[1].width, 1e-9);
+    // 5 ohms is not a PCB transmission line, and a non-number is not a target.
+    try testing.expectApproxEqAbs(@as(f64, 0), block.net_classes[2].rf.impedance.ohms, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0), block.net_classes[3].rf.impedance.ohms, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0), block.net_classes[3].rf.impedance.ground_gap_mm, 1e-9);
+}
+
 // spec: eval/design_block - (pour top|bottom "NET") is stackup sugar for a plane on the matching outer layer
 test "design-block maps (pour …) onto outer-layer planes" {
     const a = std.heap.page_allocator;
@@ -2001,6 +3878,65 @@ test "design-block captures a plane-less (stackup 2)" {
     try testing.expect(!block.stackup.hasPlanes());
 }
 
+/// The `DesignBlock` inside an evaluated `(design-block …)` value — a test
+/// helper so a test body needn't unwrap the union itself.
+fn designBlockOf(value: env_mod.Value) !*env_mod.DesignBlock {
+    return switch (value) {
+        .design_block => |b| b,
+        else => error.TestUnexpectedResult,
+    };
+}
+
+// spec: eval/design_block - a net-class match-group sub-form records the group name and its tolerance, warning on a nameless group
+test "design-block captures (net-class … (match-group …))" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (net-class "addr" (match-group "ddr-addr" (tolerance 0.25)) (nets "A0" "A1"))
+        \\  (net-class "data" (match-group "ddr-data") (nets "D0"))
+        \\  (net-class "bad" (match-group) (nets "X")))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = try designBlockOf(try evalDesignBlock(&eval, form_children[1..], &env));
+    try testing.expectEqual(@as(usize, 3), block.net_classes.len);
+    try testing.expectEqualStrings("ddr-addr", block.net_classes[0].match.group);
+    try testing.expectEqual(@as(f64, 0.25), block.net_classes[0].match.tolerance_mm);
+    // A group with no tolerance keeps 0 — the measurement module supplies the
+    // default, so the spec never carries a number the author did not write.
+    try testing.expectEqualStrings("ddr-data", block.net_classes[1].match.group);
+    try testing.expectEqual(@as(f64, 0), block.net_classes[1].match.tolerance_mm);
+    // A nameless group joins nothing and is warned about rather than accepted.
+    try testing.expectEqualStrings("", block.net_classes[2].match.group);
+    try testing.expect(eval.warnings.items.len > 0);
+}
+
+test "design-block captures (net-class … (return-path …))" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (net-class "clock" (return-path (reference "GND") (stitch-radius 1.25) (max-loop-area 4.5)) (nets "CLK"))
+        \\  (net-class "switch" (return-path) (nets "SW")))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    const clock = block.net_classes[0].return_path;
+    try testing.expect(clock.declared);
+    try testing.expectEqualStrings("GND", clock.reference_net);
+    try testing.expectEqual(@as(f64, 1.25), clock.stitch_radius_mm);
+    try testing.expectEqual(@as(f64, 4.5), clock.max_loop_area_mm2);
+    try testing.expect(block.net_classes[1].return_path.declared);
+}
+
 // spec: eval/design_block - net-class profiles and memberships can be declared independently
 test "design-block captures (net-class …) rules" {
     const a = std.heap.page_allocator;
@@ -2040,14 +3976,185 @@ test "design-block captures (net-class …) rules" {
     try testing.expectEqual(@as(usize, 0), block.net_classes[3].nets.len);
 }
 
+// spec: eval/design_block - net-class diff-pair sub-form flags the class and captures an explicit or default gap
+test "design-block captures (net-class … (diff-pair …)) flags" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (net-class "usb" (diff-pair 0.2) (nets "USB_DP" "USB_DM"))
+        \\  (net-class "clk" (diff-pair) (nets "CLK_P" "CLK_N"))
+        \\  (net-class "plain" (width 0.3) (nets "VBUS")))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqual(@as(usize, 3), block.net_classes.len);
+    // (diff-pair GAP) records the explicit gap.
+    try testing.expectEqual(@as(f64, 0.2), block.net_classes[0].diff_gap);
+    // Bare (diff-pair) records 0 → "couple at the class clearance".
+    try testing.expectEqual(@as(f64, 0), block.net_classes[1].diff_gap);
+    // A class with no (diff-pair) stays a non-pair (sentinel < 0).
+    try testing.expect(block.net_classes[2].diff_gap < 0);
+}
+
+// spec: eval/design_block - net-class min-bend-radius sub-form captures the per-class bend-radius floor multiple
+test "design-block captures (net-class … (min-bend-radius N)) floor" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (net-class "gentle" (max-freq 12G) (min-bend-radius 5) (nets "RF_A"))
+        \\  (net-class "tight" (max-freq 12G) (min-bend-radius 2) (nets "RF_B"))
+        \\  (net-class "bad" (max-freq 12G) (min-bend-radius 0) (nets "RF_C"))
+        \\  (net-class "plain" (max-freq 12G) (nets "RF_D")))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqual(@as(usize, 4), block.net_classes.len);
+    // A positive N is captured verbatim (a width multiple, gentler or tighter).
+    try testing.expectEqual(@as(f64, 5), block.net_classes[0].rf.min_bend_ratio);
+    try testing.expectEqual(@as(f64, 2), block.net_classes[1].rf.min_bend_ratio);
+    // N ≤ 0 is warned and ignored → stays the 0 (use-the-default) sentinel.
+    try testing.expectEqual(@as(f64, 0), block.net_classes[2].rf.min_bend_ratio);
+    // A class with no (min-bend-radius) also stays at the 0 sentinel.
+    try testing.expectEqual(@as(f64, 0), block.net_classes[3].rf.min_bend_ratio);
+}
+
+// spec: eval/design_block - net-class mask-relief sub-form captures the pullback and an explicit zero keeps the class tented
+test "design-block captures (net-class … (mask-relief MM))" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (net-class "bare" (max-freq 12G) (mask-relief 0.1) (nets "RF_A"))
+        \\  (net-class "tented" (max-freq 12G) (mask-relief 0) (nets "RF_B"))
+        \\  (net-class "plain" (max-freq 12G) (nets "RF_C")))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqual(@as(usize, 3), block.net_classes.len);
+    // A positive pullback is captured verbatim.
+    try testing.expectEqual(@as(f64, 0.1), block.net_classes[0].rf.mask_relief_mm);
+    // Explicit 0 is a real answer — this max-freq class stays tented.
+    try testing.expectEqual(@as(f64, 0), block.net_classes[1].rf.mask_relief_mm);
+    // Undeclared keeps the -1 derive-me sentinel (max-freq default applies later).
+    try testing.expectEqual(@as(f64, -1), block.net_classes[2].rf.mask_relief_mm);
+}
+
+// spec: placement/rf-port-frame-routing - eval/design_block - RF band and return-loss target are captured by net-class
+test "design-block captures RF band and return-loss target" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (net-class "rf" (band 100M 6G) (return-loss 23) (impedance 50) (nets "RF")))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, children[1..], &env)).design_block;
+    try testing.expectEqual(@as(f64, 100e6), block.net_classes[0].rf.electrical.band_start_hz);
+    try testing.expectEqual(@as(f64, 6e9), block.net_classes[0].rf.max_freq_hz);
+    try testing.expectEqual(@as(f64, 23), block.net_classes[0].rf.electrical.return_loss_target_db);
+}
+
+// spec: eval/design_block - net-class fence sub-form captures its pitch, offset, via and stitch net, and a bare (fence) opts in at every default
+test "design-block captures (net-class … (fence …)) declarations" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (net-class "rf" (width 0.3124) (max-freq 12G)
+        \\    (fence (pitch 1.0) (offset 0.65) (via 0.4 0.2) (net "GND"))
+        \\    (nets "RF1_VCO"))
+        \\  (net-class "rf-bare" (max-freq 12G) (fence) (nets "RF2_VCO"))
+        \\  (net-class "plain" (width 0.3) (nets "VBUS")))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqual(@as(usize, 3), block.net_classes.len);
+    // Every child is captured verbatim — these are measured numbers, not hints.
+    const fenced = block.net_classes[0].rf.fence;
+    try testing.expect(fenced.declared);
+    try testing.expectEqual(@as(f64, 1.0), fenced.pitch_mm);
+    try testing.expectEqual(@as(f64, 0.65), fenced.offset_mm);
+    try testing.expectEqual(@as(f64, 0.4), fenced.via_dia);
+    try testing.expectEqual(@as(f64, 0.2), fenced.via_drill);
+    try testing.expectEqualStrings("GND", fenced.net);
+    // A bare (fence) is the opt-in alone: declared, every number left at its
+    // derive-me sentinel and the stitched net left to the first ground plane.
+    const bare = block.net_classes[1].rf.fence;
+    try testing.expect(bare.declared);
+    try testing.expectEqual(@as(f64, 0), bare.pitch_mm);
+    try testing.expectEqual(@as(f64, 0), bare.offset_mm);
+    try testing.expectEqual(@as(f64, 0), bare.via_dia);
+    try testing.expectEqual(@as(f64, 0), bare.via_drill);
+    try testing.expectEqualStrings("", bare.net);
+    // No (fence …) at all ⇒ the class is never fenced.
+    try testing.expect(!block.net_classes[2].rf.fence.declared);
+}
+
+// spec: eval/design_block - net-class keepout sub-form captures the halo distance and leaves its escape radius at the inherit sentinel unless authored
+test "design-block captures (net-class … (keepout …)) halos" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (net-class "rf" (max-freq 12G) (keepout 0.5 (escape 1.5)) (nets "RF_A"))
+        \\  (net-class "rf-inherit" (max-freq 12G) (keepout 0.4) (nets "RF_B"))
+        \\  (net-class "rf-strict" (max-freq 12G) (keepout 0.4 (escape 0)) (nets "RF_C"))
+        \\  (net-class "plain" (width 0.3) (nets "VBUS")))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqual(@as(usize, 4), block.net_classes.len);
+    // Halo distance + an authored pad-escape exemption radius.
+    try testing.expectEqual(@as(f64, 0.5), block.net_classes[0].rf.keepout_mm);
+    try testing.expectEqual(@as(f64, 1.5), block.net_classes[0].rf.keepout_escape_mm);
+    // No (escape …) ⇒ the −1 "inherit the class's rf escape" sentinel survives.
+    try testing.expectEqual(@as(f64, 0.4), block.net_classes[1].rf.keepout_mm);
+    try testing.expectEqual(@as(f64, -1), block.net_classes[1].rf.keepout_escape_mm);
+    // An explicit (escape 0) is a real value — exempt nothing — not the sentinel.
+    try testing.expectEqual(@as(f64, 0), block.net_classes[2].rf.keepout_escape_mm);
+    // No (keepout …) ⇒ no halo, sentinel untouched.
+    try testing.expectEqual(@as(f64, 0), block.net_classes[3].rf.keepout_mm);
+    try testing.expectEqual(@as(f64, -1), block.net_classes[3].rf.keepout_escape_mm);
+}
+
 // spec: eval/design_block - design-rules form captures the board-level default rules on the design block
+// spec: eval/design_block - design-rules captures an optional ground-via maximum distance for SMD ground-pad plane stitching
+// spec: eval/design_block - design-rules captures an optional finished via-wall plating thickness for power-capacity analysis
 test "design-block captures (design-rules …)" {
     const a = std.heap.page_allocator;
     const src =
         \\(design-block "test"
         \\  (design-rules (clearance 0.15) (min-drill 0.25) (mask-margin 0.06)
-        \\    (copper-edge 0.4) (hole-to-hole 0.3) (min-annular 0.13)
-        \\    (track-width 0.2) (via 0.5 0.25)))
+        \\    (mask-relief-corner-radius 0.22)
+        \\    (copper-edge 0.4) (component-edge 1.25) (hole-to-hole 0.3) (min-annular 0.13)
+        \\    (pour-min-width 0.5) (pour-corner-radius 0.8) (ground-via-max 1.0)
+        \\    (track-width 0.2) (via 0.5 0.25) (via-plating 0.02)))
     ;
     const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
@@ -2064,14 +4171,82 @@ test "design-block captures (design-rules …)" {
     try testing.expect(dr.present);
     try testing.expectEqual(@as(f64, 0.15), dr.clearance);
     try testing.expectEqual(@as(f64, 0.25), dr.min_drill);
-    try testing.expectEqual(@as(f64, 0.06), dr.mask_margin);
-    try testing.expectEqual(@as(f64, 0.4), dr.copper_edge);
+    try testing.expectEqual(@as(f64, 0.06), dr.mask.margin);
+    try testing.expectEqual(@as(f64, 0.22), dr.mask.relief_corner_radius);
+    try testing.expectEqual(@as(f64, 0.4), dr.edge.copper);
+    try testing.expectEqual(@as(f64, 1.25), dr.edge.component);
     try testing.expectEqual(@as(f64, 0.3), dr.hole_to_hole);
     try testing.expectEqual(@as(f64, 0.13), dr.min_annular);
+    try testing.expectEqual(@as(f64, 0.5), dr.pour.min_width);
+    try testing.expectEqual(@as(f64, 0.8), dr.pour.corner_radius);
+    try testing.expectEqual(@as(f64, 1.0), dr.pour.ground_via_max);
     // Board-default routing geometry: (track-width) + (via DIA DRILL).
     try testing.expectEqual(@as(f64, 0.2), dr.track_width);
-    try testing.expectEqual(@as(f64, 0.5), dr.via_dia);
-    try testing.expectEqual(@as(f64, 0.25), dr.via_drill);
+    try testing.expectEqual(@as(f64, 0.5), dr.via.dia);
+    try testing.expectEqual(@as(f64, 0.25), dr.via.drill);
+    try testing.expectEqual(@as(f64, 0.02), dr.via.plating);
+}
+
+/// The `(design-rules …)` a source snippet's design block resolves to — a test
+/// helper, so the `Value` unwrap stays out of the test body.
+fn testDesignRules(a: std.mem.Allocator, eval: *Evaluator, env: *env_mod.Env, src: []const u8) !env_mod.DesignRulesSpec {
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    const value = try evalDesignBlock(eval, form_children[1..], env);
+    return switch (value) {
+        .design_block => |b| b.design_rules,
+        else => error.TestUnexpectedResult,
+    };
+}
+
+// spec: eval/design_block - design-rules via-to-via sub-form captures the same-net via spacing rule
+test "design-block captures (design-rules (via-to-via …))" {
+    const a = std.heap.page_allocator;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const dr = try testDesignRules(a, &eval, &env, "(design-block \"t\" (design-rules (hole-to-hole 0.2) (via-to-via 0.3)))");
+    // The same-net via rule is its OWN number, not the drill wall beside it.
+    try testing.expectEqual(@as(f64, 0.3), dr.via_to_via);
+    try testing.expectEqual(@as(f64, 0.2), dr.hole_to_hole);
+    // Unset, it stays at the zero sentinel, which resolves to "the net's own
+    // clearance" rather than to any hard-coded millimetre value.
+    const bare = try testDesignRules(a, &eval, &env, "(design-block \"t\" (design-rules (clearance 0.1)))");
+    try testing.expectEqual(@as(f64, 0), bare.via_to_via);
+}
+
+// spec: eval/design_block - design-rules pour-clearance sets the base copper-pour isolation gap and warns when it undercuts the copper clearance
+test "design-block captures (design-rules (pour-clearance …))" {
+    const a = std.heap.page_allocator;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    // Authored: the base gap every ordinary pour holds off foreign copper.
+    const authored = try testDesignRules(a, &eval, &env, "(design-block \"t\" (design-rules (pour-clearance 0.2)))");
+    try testing.expectEqual(@as(f64, 0.2), authored.pour_clearance);
+    // 0.2 clears the built-in copper clearance, so nothing is said about it.
+    try testing.expect(!hasWarningContaining(&eval, "pour-clearance"));
+    // Absent ⇒ the zero sentinel, which `optimizer.designRulesOf` resolves to
+    // the fab-safe pour default — 0.3 mm, unchanged for every existing board.
+    const bare = try testDesignRules(a, &eval, &env, "(design-block \"t\" (design-rules (clearance 0.1)))");
+    try testing.expectEqual(@as(f64, 0), bare.pour_clearance);
+    try testing.expectEqual(@as(f64, 0.3), env_mod.default_pour_clearance_mm);
+
+    var warned = Evaluator.init(a, "");
+    defer warned.deinit();
+    var warned_env = env_mod.Env.init(a, null);
+    defer warned_env.deinit();
+    // Below the form's OWN clearance — kept as authored (an expert override
+    // stays possible), but warned, and judged against a (clearance …) written
+    // after it, which is why the check runs once the whole form is parsed.
+    const under = try testDesignRules(a, &warned, &warned_env, "(design-block \"t\" (design-rules (pour-clearance 0.1) (clearance 0.2)))");
+    try testing.expectEqual(@as(f64, 0.1), under.pour_clearance);
+    try testing.expect(hasWarningContaining(&warned, "(pour-clearance 0.1)) is below the copper clearance (0.2)"));
+    // With no (clearance …) the comparison uses the built-in 0.127 default.
+    _ = try testDesignRules(a, &warned, &warned_env, "(design-block \"t\" (design-rules (pour-clearance 0.05)))");
+    try testing.expect(hasWarningContaining(&warned, "(pour-clearance 0.05)) is below the copper clearance (0.127)"));
 }
 
 // spec: eval/design_block - a design with no design-rules form leaves every rule at its zero (default) sentinel
@@ -2096,6 +4271,292 @@ test "design-block without (design-rules …) has no rules present" {
     try testing.expect(!block.design_rules.present);
     try testing.expectEqual(@as(f64, 0), block.design_rules.clearance);
     try testing.expectEqual(@as(f64, 0), block.design_rules.min_drill);
+}
+
+/// Evaluate a bare `(design-block …)` source through the full evaluator and
+/// return its block. Shared by the pcb-plan tests; page_allocator per the
+/// project's never-free evaluator convention.
+fn evalPlanFixture(a: std.mem.Allocator, eval: *Evaluator, src: []const u8) !*DesignBlock {
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    eval.* = Evaluator.init(a, "");
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const value = try evalDesignBlock(eval, form_children[1..], &env);
+    return switch (value) {
+        .design_block => |b| b,
+        else => error.TestUnexpectedResult,
+    };
+}
+
+// spec: placement/optimizer - an authored rough critical-loop parses as a named closed-chain member set and contributes whole-loop compactness to placement ranking
+test "rough captures an authored critical closed chain" {
+    const a = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    const block = try evalPlanFixture(a, &eval,
+        \\(design-block "test"
+        \\  (rough
+        \\    (anchor "U1")
+        \\    (critical-loop "feedback" "R_FB" "C_FB" "C_FF")))
+    );
+    try testing.expect(block.rough.present);
+    try testing.expectEqualStrings("U1", block.rough.anchor);
+    try testing.expectEqual(@as(usize, 1), block.rough.critical_loops.len);
+    try testing.expectEqualStrings("feedback", block.rough.critical_loops[0].name);
+    try testing.expectEqual(@as(usize, 3), block.rough.critical_loops[0].members.len);
+    try testing.expectEqualStrings("C_FB", block.rough.critical_loops[0].members[1]);
+}
+
+// spec: eval/pcb-plan - An (assign-escapes) route selector records its optional layer and hub overrides
+test "a route wave records its (assign-escapes) opt-in" {
+    const a = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    const block = try evalPlanFixture(a, &eval,
+        \\(design-block "test"
+        \\  (pcb-plan
+        \\    (route
+        \\      (wave "bare" (nets "A" "B") (assign-escapes))
+        \\      (wave "aimed" (nets "C" "D") (assign-escapes "B.Cu" "J1"))
+        \\      (wave "none" (nets "E")))))
+    );
+    const plan = block.pcb_plan.?;
+    const bare = plan.route[0].corridor.assign_escapes.?;
+    try testing.expectEqualStrings("", bare.layer);
+    try testing.expectEqualStrings("", bare.hub);
+    const aimed = plan.route[1].corridor.assign_escapes.?;
+    try testing.expectEqualStrings("B.Cu", aimed.layer);
+    try testing.expectEqualStrings("J1", aimed.hub);
+    try testing.expect(plan.route[2].corridor.assign_escapes == null);
+}
+
+// spec: eval/pcb-plan - A pcb-plan form captures each place and route wave's selectors, reason, and rest flag
+// spec: eval/pcb-plan - Relative route guides parse as ordered pin- and part-relative instructions
+test "design-block captures a full (pcb-plan …)" {
+    const a = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    const block = try evalPlanFixture(a, &eval,
+        \\(design-block "test"
+        \\  (pcb-plan
+        \\    (place
+        \\      (wave "Connectors & mechanical"
+        \\        (refs "J1" "J2" "MH1")
+        \\        (sections "USB")
+        \\        (sub-blocks "buck5v")
+        \\        (reason "positions fixed by enclosure ICD"))
+        \\      (wave "Everything else" (rest)))
+        \\    (route
+        \\      (wave "High-speed"
+        \\        (classes rf clock)
+        \\        (net-classes "hs")
+        \\        (nets "USB_DP" "USB_DM")
+        \\        (preferred-layers "F.Cu")
+        \\        (allowed-layers "F.Cu" "B.Cu")
+        \\        (max-vias 1)
+        \\        (waypoints (at 12.5 7.25 "F.Cu") (at 18 7.25 "B.Cu"))
+        \\        (guides
+        \\          (escape-from "U1" "7" "F.Cu")
+        \\          (between-pins "J1" "2" "U1" "7" "B.Cu")
+        \\          (beside "J1" east "F.Cu")))
+        \\      (wave "Signals" (rest)))))
+    );
+    try testing.expect(block.pcb_plan != null);
+    const plan = block.pcb_plan.?;
+    try testing.expectEqual(@as(usize, 2), plan.place.len);
+    const pw = plan.place[0];
+    try testing.expectEqualStrings("Connectors & mechanical", pw.name);
+    try testing.expectEqual(@as(usize, 3), pw.refs.len);
+    try testing.expectEqualStrings("J1", pw.refs[0]);
+    try testing.expectEqualStrings("MH1", pw.refs[2]);
+    try testing.expectEqual(@as(usize, 1), pw.sections.len);
+    try testing.expectEqualStrings("USB", pw.sections[0]);
+    try testing.expectEqualStrings("buck5v", pw.sub_blocks[0]);
+    try testing.expect(pw.reason != null);
+    try testing.expectEqualStrings("positions fixed by enclosure ICD", pw.reason.?);
+    try testing.expect(!pw.rest);
+    try testing.expectEqualStrings("Everything else", plan.place[1].name);
+    try testing.expect(plan.place[1].rest);
+    // Route section: class atoms stored as strings, net-classes + one-off nets.
+    try testing.expectEqual(@as(usize, 2), plan.route.len);
+    const rw = plan.route[0];
+    try testing.expectEqualStrings("High-speed", rw.name);
+    try testing.expectEqual(@as(usize, 2), rw.classes.len);
+    try testing.expectEqualStrings("rf", rw.classes[0]);
+    try testing.expectEqualStrings("clock", rw.classes[1]);
+    try testing.expectEqualStrings("hs", rw.net_classes[0]);
+    try testing.expectEqual(@as(usize, 2), rw.nets.len);
+    try testing.expectEqualStrings("USB_DP", rw.nets[0]);
+    try testing.expectEqual(@as(usize, 1), rw.preferred_layers.len);
+    try testing.expectEqualStrings("F.Cu", rw.preferred_layers[0]);
+    try testing.expectEqual(@as(usize, 2), rw.allowed_layers.len);
+    try testing.expectEqualStrings("F.Cu", rw.allowed_layers[0]);
+    try testing.expectEqualStrings("B.Cu", rw.allowed_layers[1]);
+    try testing.expectEqual(@as(u16, 1), rw.max_vias.?);
+    try testing.expectEqual(@as(usize, 5), rw.corridor.waypoints.len);
+    try testing.expectEqual(@as(f64, 12.5), rw.corridor.waypoints[0].x);
+    try testing.expectEqual(@as(f64, 7.25), rw.corridor.waypoints[0].y);
+    try testing.expectEqualStrings("F.Cu", rw.corridor.waypoints[0].layer);
+    try testing.expectEqualStrings("B.Cu", rw.corridor.waypoints[1].layer);
+    const escape = rw.corridor.waypoints[2].guide.?.escape_from;
+    try testing.expectEqualStrings("U1", escape.ref);
+    try testing.expectEqualStrings("7", escape.pin);
+    const between = rw.corridor.waypoints[3].guide.?.between_pins;
+    try testing.expectEqualStrings("J1", between.from_ref);
+    try testing.expectEqualStrings("U1", between.to_ref);
+    try testing.expectEqualStrings("7", between.to_pin);
+    const beside = rw.corridor.waypoints[4].guide.?.beside;
+    try testing.expectEqual(env_mod.PlanGuideSide.east, beside.side);
+    try testing.expectEqualStrings("F.Cu", beside.layer);
+    try testing.expect(plan.route[1].rest);
+}
+
+test "pcb-plan route layer-policy selectors and aliases" {
+    const a = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    const block = try evalPlanFixture(a, &eval,
+        \\(design-block "test"
+        \\  (pcb-plan
+        \\    (route (wave "RF" (prefer-layers F.Cu) (allow-layers F.Cu In2.Cu)))))
+    );
+    const wave = block.pcb_plan.?.route[0];
+    try testing.expectEqual(@as(usize, 1), wave.preferred_layers.len);
+    try testing.expectEqualStrings("F.Cu", wave.preferred_layers[0]);
+    try testing.expectEqual(@as(usize, 2), wave.allowed_layers.len);
+    try testing.expectEqualStrings("F.Cu", wave.allowed_layers[0]);
+    try testing.expectEqualStrings("In2.Cu", wave.allowed_layers[1]);
+}
+
+// spec: eval/pcb-plan - A design with no pcb-plan form leaves DesignBlock.pcb_plan null
+test "design-block without a (pcb-plan …) has null pcb_plan" {
+    const a = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    const block = try evalPlanFixture(a, &eval, "(design-block \"test\")");
+    try testing.expect(block.pcb_plan == null);
+}
+
+// spec: eval/pcb-plan - A duplicate pcb-plan form keeps the first and warns
+test "design-block keeps the first of two (pcb-plan …) forms and warns" {
+    const a = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    const block = try evalPlanFixture(a, &eval,
+        \\(design-block "test"
+        \\  (pcb-plan (place (wave "First" (refs "J1"))))
+        \\  (pcb-plan (place (wave "Second" (refs "J2")))))
+    );
+    try testing.expect(block.pcb_plan != null);
+    // First wins: the surviving plan is the first form's single "First" wave.
+    try testing.expectEqual(@as(usize, 1), block.pcb_plan.?.place.len);
+    try testing.expectEqualStrings("First", block.pcb_plan.?.place[0].name);
+    try testing.expect(hasWarningContaining(&eval, "duplicate (pcb-plan …) — first kept"));
+}
+
+// spec: eval/pcb-plan - (pcb-plan (topology)) - A wave-level (topology) is a known route selector and is not warned as an unknown word
+test "a route wave's (topology) parses without an unknown-word warning" {
+    const a = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    const block = try evalPlanFixture(a, &eval,
+        \\(design-block "test"
+        \\  (pcb-plan (topology)
+        \\    (route
+        \\      (wave "planned" (nets "A") (topology))
+        \\      (wave "plain" (rest)))))
+    );
+    const plan = block.pcb_plan.?;
+    // Both spellings land, and neither is mistaken for an unknown sub-form.
+    try testing.expect(plan.topology);
+    try testing.expect(plan.route[0].corridor.topology);
+    try testing.expect(!plan.route[1].corridor.topology);
+    try testing.expect(!hasWarningContaining(&eval, "topology"));
+}
+
+// spec: eval/pcb-plan - (pcb-plan (topology)) - A wave-level (seed-first) is a known route selector and records a deferred bounded repair request against frozen completed copper
+test "a route wave's seed-first flag parses without an unknown-word warning" {
+    const a = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    const block = try evalPlanFixture(a, &eval,
+        \\(design-block "test"
+        \\  (pcb-plan (route
+        \\    (wave "seeded" (nets "A") (seed-first)
+        \\      (repair-waypoints (at 1 2 "In2.Cu")))
+        \\    (wave "plain" (rest)))))
+    );
+    const plan = block.pcb_plan.?;
+    try testing.expect(plan.route[0].corridor.seed_first);
+    try testing.expectEqual(@as(usize, 1), plan.route[0].corridor.repair_waypoints.len);
+    try testing.expectEqualStrings("In2.Cu", plan.route[0].corridor.repair_waypoints[0].layer);
+    try testing.expect(!plan.route[1].corridor.seed_first);
+    try testing.expect(!hasWarningContaining(&eval, "seed-first"));
+    try testing.expect(!hasWarningContaining(&eval, "repair-waypoints"));
+}
+
+// spec: eval/pcb-plan - A route wave's (branches) records one ordered corridor per limb and skips a malformed or pointless limb with a warning
+test "a route wave's branches parse one waypoint list per limb" {
+    const a = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    const block = try evalPlanFixture(a, &eval,
+        \\(design-block "test"
+        \\  (pcb-plan (route
+        \\    (wave "clock" (nets "SCK")
+        \\      (branches
+        \\        (branch (at 160.0 100.0 "In2.Cu") (at 170.0 104.0 "B.Cu"))
+        \\        (branch (at 160.0 100.0 "In2.Cu"))
+        \\        (branch)
+        \\        (at 1 2 "F.Cu")))
+        \\    (wave "plain" (rest)))))
+    );
+    const plan = block.pcb_plan.?;
+    const branches = plan.route[0].corridor.branches;
+    try testing.expectEqual(@as(usize, 2), branches.len);
+    try testing.expectEqual(@as(usize, 2), branches[0].waypoints.len);
+    try testing.expectEqualStrings("B.Cu", branches[0].waypoints[1].layer);
+    try testing.expectEqual(@as(f64, 170.0), branches[0].waypoints[1].x);
+    try testing.expectEqual(@as(usize, 1), branches[1].waypoints.len);
+    try testing.expectEqual(@as(usize, 0), plan.route[1].corridor.branches.len);
+    // The pointless and the non-(branch …) members are reported, not silent.
+    try testing.expect(hasWarningContaining(&eval, "at least one (at X Y"));
+    try testing.expect(hasWarningContaining(&eval, "branch must be (branch"));
+    try testing.expect(!hasWarningContaining(&eval, "not a valid route-wave selector"));
+}
+
+// spec: eval/pcb-plan - A wave with no leading name string is skipped with a warning
+test "pcb-plan wave without a name string is skipped with a warning" {
+    const a = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    const block = try evalPlanFixture(a, &eval,
+        \\(design-block "test"
+        \\  (pcb-plan (place (wave (refs "J1")))))
+    );
+    try testing.expect(block.pcb_plan != null);
+    try testing.expectEqual(@as(usize, 0), block.pcb_plan.?.place.len);
+    try testing.expect(hasWarningContaining(&eval, "(wave …) must start with a name string"));
+}
+
+// spec: eval/pcb-plan - A route-only selector inside a place wave is skipped with a warning
+test "pcb-plan route selector inside a place wave is skipped with a warning" {
+    const a = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    const block = try evalPlanFixture(a, &eval,
+        \\(design-block "test"
+        \\  (pcb-plan (place (wave "W" (nets "USB_DP")))))
+    );
+    try testing.expect(block.pcb_plan != null);
+    try testing.expectEqual(@as(usize, 1), block.pcb_plan.?.place.len);
+    // The wave survives but the mis-scoped (nets …) is dropped, not stored.
+    try testing.expectEqual(@as(usize, 0), block.pcb_plan.?.place[0].nets.len);
+    try testing.expect(hasWarningContaining(&eval, "(nets …) is not a valid place-wave selector"));
+}
+
+// spec: eval/pcb-plan - A pcb-plan form inside a section is rejected by the scope table with a warning
+test "pcb-plan inside a (section …) is rejected by the scope table" {
+    const a = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    const block = try evalPlanFixture(a, &eval,
+        \\(design-block "test"
+        \\  (section "S" "desc"
+        \\    (pcb-plan (place (wave "W" (refs "J1"))))))
+    );
+    // The form is top-level-only: dropped inside the section, so no plan lands.
+    try testing.expect(block.pcb_plan == null);
+    try testing.expect(hasWarningContaining(&eval, "(pcb-plan …) is top-level-only — ignored inside (section …)"));
 }
 
 // spec: eval/design_block - net ties merge transitively so a chained tie collapses all three nets into one
@@ -2182,13 +4643,16 @@ test "buildNets renames bypass stubs onto the canonical root" {
     try testing.expect(found_stub);
 }
 
-// spec: eval/design_block - board form parses outline size, corner radius, edge lists, and corners
+// spec: eval/design_block - board form parses outline size, corner radius, edge lists, corners, and typed perimeter keepouts
 test "design-block parses a (board ...) form" {
     const a = std.heap.page_allocator;
     const src =
         \\(design-block "test"
         \\  (board (size 80 55)
         \\    (corner-radius 3)
+        \\    (perimeter-fence (via 0.4 0.2) (spacing 1.0)
+        \\      (edge-offset 0.5) (mask-width 0.7) (net "GND")
+        \\      (keepout 0.3 (blocks components tracks vias) (allow-nets "GND")))
         \\    (left "usbc" "rj45")
         \\    (right (rot 90 "sma1"))
         \\    (corners "MK1" "MK2" "MK3" "MK4")))
@@ -2204,6 +4668,18 @@ test "design-block parses a (board ...) form" {
     try testing.expectApproxEqAbs(@as(f64, 80), block.board.w, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 55), block.board.h, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 3), block.board.corner_radius, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0.4), block.board.perimeter_fence.via_dia, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0.2), block.board.perimeter_fence.via_drill, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 1.0), block.board.perimeter_fence.spacing, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0.5), block.board.perimeter_fence.edge_offset, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0.7), block.board.perimeter_fence.mask_width, 1e-9);
+    try testing.expectEqualStrings("GND", block.board.perimeter_fence.net);
+    try testing.expectApproxEqAbs(@as(f64, 0.3), block.board.perimeter_fence.keepout.clearance, 1e-9);
+    try testing.expect(block.board.perimeter_fence.keepout.blocks.components);
+    try testing.expect(block.board.perimeter_fence.keepout.blocks.tracks);
+    try testing.expect(block.board.perimeter_fence.keepout.blocks.vias);
+    try testing.expectEqual(@as(usize, 1), block.board.perimeter_fence.keepout.allow_nets.len);
+    try testing.expectEqualStrings("GND", block.board.perimeter_fence.keepout.allow_nets[0]);
     try testing.expectEqual(@as(usize, 2), block.board.sides.len);
     try testing.expectEqualStrings("usbc", block.board.sides[0].items[0].ref);
     try testing.expectEqual(@as(f64, 90), block.board.sides[1].items[0].rot.?);
@@ -2606,6 +5082,22 @@ test "evalBusNetForm strided fan-out distributes channels across subs and ports"
     try testing.expectEqualStrings("adc3/AINB_EXT_P", net_ties.items[18].b);
 }
 
+// spec: eval/design_block - bus-net mapped form applies a parent suffix and an offset child port base
+test "evalBusNetForm maps suffixed lanes to offset child ports" {
+    const a = std.heap.page_allocator;
+    const nodes = try sexpr_parser.parse(a, "(bus-net \"DUT_A\" 0 2 (suffix \"_MCU\") (over \"shift\" (port-base \"B\" 1)))");
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    var ties: std.ArrayList(NetTie) = .empty;
+    try evalBusNetForm(&eval, nodes[0].asList().?, &env, &ties);
+    try testing.expectEqual(@as(usize, 3), ties.items.len);
+    try testing.expectEqualStrings("DUT_A0_MCU", ties.items[0].a);
+    try testing.expectEqualStrings("shift/B1", ties.items[0].b);
+    try testing.expectEqualStrings("shift/B3", ties.items[2].b);
+}
+
 // spec: eval/design_block - sub-block bridge ties prefixed board nets to module ports with optional rename
 test "evalSubBlockBridges ties PREFIX+port to sub/port and honours rename" {
     const a = std.heap.page_allocator;
@@ -2795,6 +5287,21 @@ test "ignored instance sub-form records a warning" {
     try testing.expect(hasWarningContaining(&eval, "ignored sub-form (mpn …) in (instance \"C1\" …)"));
 }
 
+// spec: eval/design_block - an unknown child of a net-class fence or keepout records a lint warning naming it
+test "unknown fence and keepout sub-forms record warnings" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    try evalWarningFixture(alloc, &eval,
+        \\(design-block "T"
+        \\  (net-class "rf" (max-freq 12G)
+        \\    (fence (spacing 1.0))
+        \\    (keepout 0.5 (margin 1.5))
+        \\    (nets "RF1_VCO")))
+    );
+    try testing.expect(hasWarningContaining(&eval, "unknown (fence …) sub-form (spacing …)"));
+    try testing.expect(hasWarningContaining(&eval, "unknown (keepout …) sub-form (margin …)"));
+}
+
 // spec: eval/design_block - inert id/ids/hierarchical-ids/row/col heads never draw warnings
 test "inert form heads are warning-free" {
     const alloc = std.heap.page_allocator;
@@ -2813,9 +5320,236 @@ test "inert form heads are warning-free" {
     try testing.expectEqual(@as(usize, 0), eval.warnings.items.len);
 }
 
-/// Source for the replicate tests: a tiny one-cap module replicated 3×
-/// under (hierarchical-ids), with the replicate form's (id …) pinned so
-/// child ids are reproducible across fresh evaluations.
+// spec: eval/design_block - section row and col hints seed diagram-layout rows when no explicit layout exists
+test "section grid seeds the default diagram layout" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    const block = try evalRepeatFixture(alloc, &eval,
+        \\(design-block "Grid"
+        \\  (section "C" (row 1) (col 0))
+        \\  (section "B" (row 0) (col 1))
+        \\  (section "A" (row 0) (col 0)))
+    );
+    defer eval.deinit();
+    try testing.expectEqual(@as(usize, 2), block.layout.rows.len);
+    try testing.expectEqualStrings("A", block.layout.rows[0].members[0]);
+    try testing.expectEqualStrings("B", block.layout.rows[0].members[1]);
+    try testing.expectEqualStrings("C", block.layout.rows[1].members[0]);
+}
+
+fn evalRepeatFixture(alloc: std.mem.Allocator, eval: *Evaluator, source: []const u8) !*DesignBlock {
+    eval.* = Evaluator.init(alloc, ".");
+    try eval.component_cache.put(alloc, test_cap_family, .{
+        .name = test_cap_family,
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = true,
+        .param_type = "",
+    });
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    const nodes = try sexpr_parser.parse(alloc, source);
+    return switch (try eval.evalNodes(nodes, &env)) {
+        .design_block => |block| block,
+        else => error.TestUnexpectedResult,
+    };
+}
+
+fn hasNetNamed(nets: []const Net, name: []const u8) bool {
+    for (nets) |net| if (std.mem.eql(u8, net.name, name)) return true;
+    return false;
+}
+
+// spec: eval/design_block - repeat materializes its design-scope body for every integer in the inclusive range
+// spec: eval/design_block - repeat bodies compose with arithmetic and lowercase fmt generic display
+test "repeat materializes computed instances and nets inclusively" {
+    const alloc = std.heap.page_allocator;
+    const source =
+        \\(design-block "Repeated channels"
+        \\  (hierarchical-ids)
+        \\  (repeat ch 1 3
+        \\    (instance (fmt "C~a" ch) (cap-0402 "100nF")
+        \\      (pin 1 (fmt "RF~a" (+ ch 1)))
+        \\      (pin 2 "GND"))
+        \\    (id abcd1234)))
+    ;
+    var eval: Evaluator = undefined;
+    const block = try evalRepeatFixture(alloc, &eval, source);
+    defer eval.deinit();
+
+    try testing.expectEqual(@as(usize, 3), block.instances.len);
+    try testing.expectEqualStrings("C1", block.instances[0].ref_des);
+    try testing.expectEqualStrings("C3", block.instances[2].ref_des);
+    try testing.expectEqualStrings("C1", block.instances[0].origin_key);
+    try testing.expectEqualStrings("C3", block.instances[2].origin_key);
+    try testing.expect(hasNetNamed(block.nets, "RF2"));
+    try testing.expect(hasNetNamed(block.nets, "RF4"));
+    // Only the repeat's pinned anchor is source-resident; its body must not
+    // queue three impossible `(id …)` writes against one AST offset.
+    try testing.expectEqual(@as(usize, 0), eval.pending_ids.items.len);
+}
+
+// spec: eval/design_block - repeat derives distinct stable child ids from its anchor origin key and lexical index
+test "repeat hierarchical ids are stable across evaluations" {
+    const alloc = std.heap.page_allocator;
+    const source =
+        \\(design-block "Repeated channels"
+        \\  (hierarchical-ids)
+        \\  (repeat ch 1 3
+        \\    (instance (fmt "C~a" ch) (cap-0402 "100nF")
+        \\      (pin 1 (fmt "RF~a" ch)) (pin 2 "GND"))
+        \\    (id bcde2345)))
+    ;
+    var eval_a: Evaluator = undefined;
+    const block_a = try evalRepeatFixture(alloc, &eval_a, source);
+    defer eval_a.deinit();
+    var eval_b: Evaluator = undefined;
+    const block_b = try evalRepeatFixture(alloc, &eval_b, source);
+    defer eval_b.deinit();
+
+    try testing.expectEqual(@as(usize, 3), block_a.instances.len);
+    try testing.expect(!std.mem.eql(u8, block_a.instances[0].id, block_a.instances[1].id));
+    for (block_a.instances, block_b.instances) |a, b| {
+        try testing.expectEqualStrings(a.ref_des, b.ref_des);
+        try testing.expectEqualStrings(a.id, b.id);
+    }
+}
+
+// spec: eval/design_block - repeat ids sidecars override indexed child derivation for UUID-preserving migrations
+test "repeat ids sidecar preserves migrated instance ids" {
+    const alloc = std.heap.page_allocator;
+    const source =
+        \\(design-block "Migrated channels"
+        \\  (hierarchical-ids)
+        \\  (repeat ch 1 2
+        \\    (instance (fmt "C~a" ch) (cap-0402 "100nF")
+        \\      (pin 1 (fmt "RF~a" ch)) (pin 2 "GND"))
+        \\    (id defa4567)
+        \\    (ids ("C1@1" deadbeef) ("C2@2" face1234))))
+    ;
+    var eval: Evaluator = undefined;
+    const block = try evalRepeatFixture(alloc, &eval, source);
+    defer eval.deinit();
+
+    try testing.expectEqual(@as(usize, 2), block.instances.len);
+    try testing.expectEqualStrings("deadbeef", block.instances[0].id);
+    try testing.expectEqualStrings("face1234", block.instances[1].id);
+    try testing.expectEqual(@as(usize, 0), eval.pending_child_ids.items.len);
+}
+
+// spec: eval/design_block - repeat composes with sub-block calls and gives each repeated module a distinct stable hierarchy
+test "repeat materializes sub-block arrays with stable child ids" {
+    const alloc = std.heap.page_allocator;
+    const source =
+        \\(defmodule channel ()
+        \\  (design-block "Channel"
+        \\    (instance "C_LOCAL" (cap-0402 "100nF")
+        \\      (pin 1 "RF") (pin 2 "GND"))))
+        \\(design-block "Repeated modules"
+        \\  (hierarchical-ids)
+        \\  (repeat ch 1 2
+        \\    (sub-block (fmt "channel~a" ch) (channel))
+        \\    (id cdef3456)))
+    ;
+    var eval_a: Evaluator = undefined;
+    const block_a = try evalRepeatFixture(alloc, &eval_a, source);
+    defer eval_a.deinit();
+    var eval_b: Evaluator = undefined;
+    const block_b = try evalRepeatFixture(alloc, &eval_b, source);
+    defer eval_b.deinit();
+
+    try testing.expectEqual(@as(usize, 2), block_a.sub_blocks.len);
+    try testing.expectEqualStrings("channel1", block_a.sub_blocks[0].name);
+    try testing.expectEqualStrings("channel2", block_a.sub_blocks[1].name);
+    const id_a0 = block_a.sub_blocks[0].block.instances[0].id;
+    const id_a1 = block_a.sub_blocks[1].block.instances[0].id;
+    try testing.expect(!std.mem.eql(u8, id_a0, id_a1));
+    try testing.expectEqualStrings(id_a0, block_b.sub_blocks[0].block.instances[0].id);
+    try testing.expectEqualStrings(id_a1, block_b.sub_blocks[1].block.instances[0].id);
+}
+
+// spec: eval/design_block - sub-block inside a section materializes globally and records syntactic section ownership
+test "section owns an inline sub-block" {
+    const alloc = std.heap.page_allocator;
+    const source =
+        \\(defmodule channel ()
+        \\  (design-block "Channel"
+        \\    (instance "C_LOCAL" (cap-0402 "100nF") "RF" "GND")))
+        \\(design-block "Inline module"
+        \\  (section "Channel"
+        \\    (sub-block "ch1" (channel))))
+    ;
+    var eval: Evaluator = undefined;
+    const block = try evalRepeatFixture(alloc, &eval, source);
+    defer eval.deinit();
+    try testing.expectEqual(@as(usize, 1), block.sub_blocks.len);
+    try testing.expectEqual(@as(usize, 1), block.sections.len);
+    try testing.expectEqualStrings("ch1", block.sections[0].hosts[0]);
+    try testing.expectEqual(env_mod.SectionStatus.implemented, block.sections[0].status);
+}
+
+// spec: eval/design_block - compact decouple infers one host from pin functions and mixes per-pin with bulk capacitors
+test "compact decouple emits named per-pin and bulk capacitors" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    try eval.component_cache.put(alloc, "fakeic", .{
+        .name = "fakeic",
+        .symbol_name = "fakepin",
+        .footprint_name = "",
+        .is_family = false,
+        .param_type = "",
+    });
+    inline for (.{ "cap-0201", "cap-0402" }) |family| try eval.component_cache.put(alloc, family, .{
+        .name = family,
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = true,
+        .param_type = "",
+    });
+    var pinout: std.StringHashMapUnmanaged([]const u8) = .empty;
+    try pinout.put(alloc, "7", "VCCDIG");
+    try pinout.put(alloc, "11", "VCCCP");
+    try eval.symbol_pin_cache.put(alloc, "fakepin", pinout);
+    const source =
+        \\(design-block "Compact decouple"
+        \\  (instance "U1" fakeic (pin 7 11 "VDD"))
+        \\  (decouple "VDD"
+        \\    (per-pin (cap-0201 "100nF") VCCDIG VCCCP)
+        \\    (bulk (cap-0402 "10uF") 2)))
+    ;
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    const nodes = try sexpr_parser.parse(alloc, source);
+    const block = try designBlockOf(try eval.evalNodes(nodes, &env));
+    try testing.expectEqual(@as(usize, 5), block.instances.len);
+    try testing.expectEqualStrings("C_VCCDIG", block.instances[1].label);
+    try testing.expectEqualStrings("C_VCCCP", block.instances[2].label);
+    try testing.expect(block.instances[3].bind.decouple.rail);
+    try testing.expect(block.instances[4].bind.decouple.rail);
+}
+
+// spec: eval/design_block - bare top-level pins forms attach electrical pins instead of silently no-oping
+test "top-level pins form attaches pins to its instance" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    try eval.component_cache.put(alloc, "fakeic", .{
+        .name = "fakeic",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = false,
+        .param_type = "",
+    });
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    const nodes = try sexpr_parser.parse(alloc, "(design-block \"Pins\" (instance \"U1\" fakeic) (pins \"U1\" (pin 1 \"SIG\")))");
+    const block = try designBlockOf(try eval.evalNodes(nodes, &env));
+    try testing.expect(hasNetNamed(block.nets, "SIG"));
+    try testing.expectEqual(@as(usize, 1), block.instances[0].parts.len);
+    try testing.expectEqual(@as(usize, 1), block.instances[0].parts[0].pins.len);
+}
+
 /// Find the first cap-0402 instance in a block, or null.
 fn findCapInstance(block: *const DesignBlock) ?Instance {
     for (block.instances) |inst| {
@@ -2902,4 +5636,183 @@ test "bypass default cascades transitively into nested sub-blocks" {
         if (std.mem.indexOf(u8, net.name, "VDD.") != null) found_u1_net = true;
     }
     try testing.expect(found_u1_net);
+}
+
+/// Evaluate a one-block source with a `fakeic` whose pinout maps VIN→4 and
+/// EN→5, returning the block. The shared fixture for the decoupling-binding
+/// resolution tests, which differ only in declaration order.
+fn evalDecoupleBindingFixture(alloc: std.mem.Allocator, eval: *Evaluator, source: []const u8) !*DesignBlock {
+    try eval.component_cache.put(alloc, "fakeic", .{
+        .name = "fakeic",
+        .symbol_name = "fakepin",
+        .footprint_name = "",
+        .is_family = false,
+        .param_type = "",
+    });
+    try eval.component_cache.put(alloc, "cap-0402", .{
+        .name = "cap-0402",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = true,
+        .param_type = "",
+    });
+    // The `(near …)` twin of this fixture declares a resistor rather than a cap,
+    // since adjacency is a passive-wide form while decoupling is a cap's.
+    try eval.component_cache.put(alloc, "res-0402", .{
+        .name = "res-0402",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = true,
+        .param_type = "",
+    });
+    var pinout: std.StringHashMapUnmanaged([]const u8) = .empty;
+    try pinout.put(alloc, "4", "VIN");
+    try pinout.put(alloc, "5", "EN");
+    try pinout.put(alloc, "9", "GND");
+    try eval.symbol_pin_cache.put(alloc, "fakepin", pinout);
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    const nodes = try sexpr_parser.parse(alloc, source);
+    return designBlockOf(try eval.evalNodes(nodes, &env));
+}
+
+/// The cap in a `evalDecoupleBindingFixture` block (the only `cap-0402`).
+fn decoupleFixtureCap(block: *const DesignBlock) !Instance {
+    for (block.instances) |inst| {
+        if (std.mem.eql(u8, inst.component, "cap-0402")) return inst;
+    }
+    return error.TestUnexpectedResult;
+}
+
+// spec: eval/design_block - a decoupling binding resolves its pin through the target IC's pinout whichever of the two is declared first
+test "decouples resolves a function name against the target's pinout in either order" {
+    const alloc = std.heap.page_allocator;
+
+    // IC first — the ordinary spelling. `(decouples "U1" VIN)` must land on the
+    // pad U1's OWN pinout calls VIN (4), not on the raw token: a capacitor has
+    // no pinout, so resolving against the cap could never have found it.
+    var eval_a = Evaluator.init(alloc, ".");
+    defer eval_a.deinit();
+    const ic_first = try evalDecoupleBindingFixture(alloc, &eval_a,
+        \\(design-block "IC first"
+        \\  (instance "U1" fakeic (pin 4 "VIN") (pin 9 "GND"))
+        \\  (instance "C1" (cap-0402 "100nF") (pin 1 "VIN") (pin 2 "GND")
+        \\    (decouples "U1" VIN)))
+    );
+    const cap_a = try decoupleFixtureCap(ic_first);
+    try testing.expectEqualStrings("U1", cap_a.bind.decouple.ic);
+    try testing.expectEqualStrings("4", cap_a.bind.decouple.pin);
+
+    // Cap first — the target does not exist yet when the cap is built, which is
+    // exactly why this cannot be eval-time work. Same answer.
+    var eval_b = Evaluator.init(alloc, ".");
+    defer eval_b.deinit();
+    const cap_first = try evalDecoupleBindingFixture(alloc, &eval_b,
+        \\(design-block "Cap first"
+        \\  (instance "C1" (cap-0402 "100nF") (pin 1 "VIN") (pin 2 "GND")
+        \\    (decouples "U1" VIN))
+        \\  (instance "U1" fakeic (pin 4 "VIN") (pin 9 "GND")))
+    );
+    const cap_b = try decoupleFixtureCap(cap_first);
+    try testing.expectEqualStrings("4", cap_b.bind.decouple.pin);
+
+    // A numeric pad passes through untouched, and an unknown token is left
+    // exactly as written for the ERC validity check to report.
+    var eval_c = Evaluator.init(alloc, ".");
+    defer eval_c.deinit();
+    const literal = try evalDecoupleBindingFixture(alloc, &eval_c,
+        \\(design-block "Literal"
+        \\  (instance "U1" fakeic (pin 4 "VIN") (pin 9 "GND"))
+        \\  (instance "C1" (cap-0402 "100nF") (pin 1 "VIN") (pin 2 "GND")
+        \\    (decouples "U1" 4))
+        \\  (instance "C2" (cap-0402 "100nF") (pin 1 "VIN") (pin 2 "GND")
+        \\    (decouples "U1" VOUT)))
+    );
+    try testing.expectEqualStrings("4", (try decoupleFixtureCap(literal)).bind.decouple.pin);
+    for (literal.instances) |inst| {
+        if (std.mem.eql(u8, inst.ref_des, "C2")) try testing.expectEqualStrings("VOUT", inst.bind.decouple.pin);
+    }
+}
+
+/// The near-bound resistor in a `evalDecoupleBindingFixture` block.
+fn nearFixtureResistor(block: *const DesignBlock) !Instance {
+    for (block.instances) |inst| {
+        if (std.mem.eql(u8, inst.component, "res-0402")) return inst;
+    }
+    return error.TestUnexpectedResult;
+}
+
+// spec: eval/design_block - an adjacency binding resolves its pin through the target's pinout whichever of the two is declared first
+test "near resolves a function name against the target's pinout in either order" {
+    const alloc = std.heap.page_allocator;
+
+    // Target first. `(near "U1" VIN)` must land on the pad U1's OWN pinout calls
+    // VIN (4) — a resistor has no pinout, so resolving against the resistor
+    // could never have found it.
+    var eval_a = Evaluator.init(alloc, ".");
+    defer eval_a.deinit();
+    const ic_first = try evalDecoupleBindingFixture(alloc, &eval_a,
+        \\(design-block "IC first"
+        \\  (instance "U1" fakeic (pin 4 "VIN") (pin 9 "GND"))
+        \\  (instance "R1" (res-0402 "10k") (pin 1 "VIN") (pin 2 "TAP")
+        \\    (near "U1" VIN)))
+    );
+    const r_a = try nearFixtureResistor(ic_first);
+    try testing.expectEqualStrings("U1", r_a.bind.near.ref);
+    try testing.expectEqualStrings("4", r_a.bind.near.pin);
+
+    // Passive first — the target does not exist yet when the resistor is built,
+    // which is exactly why this cannot be eval-time work. Same answer.
+    var eval_b = Evaluator.init(alloc, ".");
+    defer eval_b.deinit();
+    const part_first = try evalDecoupleBindingFixture(alloc, &eval_b,
+        \\(design-block "Passive first"
+        \\  (instance "R1" (res-0402 "10k") (pin 1 "VIN") (pin 2 "TAP")
+        \\    (near "U1" VIN))
+        \\  (instance "U1" fakeic (pin 4 "VIN") (pin 9 "GND")))
+    );
+    try testing.expectEqualStrings("4", (try nearFixtureResistor(part_first)).bind.near.pin);
+
+    // A numeric pad passes through untouched; an unknown token stays exactly as
+    // written for the `invalid_near_binding` ERC check to report.
+    var eval_c = Evaluator.init(alloc, ".");
+    defer eval_c.deinit();
+    const literal_near = try evalDecoupleBindingFixture(alloc, &eval_c,
+        \\(design-block "Literal"
+        \\  (instance "U1" fakeic (pin 4 "VIN") (pin 9 "GND"))
+        \\  (instance "R1" (res-0402 "10k") (pin 1 "VIN") (pin 2 "TAP") (near "U1" 4))
+        \\  (instance "R2" (res-0402 "10k") (pin 1 "VIN") (pin 2 "TAP") (near "U1" VOUT)))
+    );
+    for (literal_near.instances) |inst| {
+        if (std.mem.eql(u8, inst.ref_des, "R1")) try testing.expectEqualStrings("4", inst.bind.near.pin);
+        if (std.mem.eql(u8, inst.ref_des, "R2")) try testing.expectEqualStrings("VOUT", inst.bind.near.pin);
+    }
+}
+
+// spec: eval/design_block - a decouple per-pin child records its host ref and resolved pad as a binding for pad and function-name spellings alike
+test "decouple per-pin children carry a first-class host ref and pad" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    // Two caps on one rail: one declared by PAD (4) and one by FUNCTION (EN).
+    // Only the pad spelling ever reached the placer, because the function
+    // spelling replaces the structural origin key with a readable label.
+    const block = try evalDecoupleBindingFixture(alloc, &eval,
+        \\(design-block "Per-pin"
+        \\  (instance "U1" fakeic (pin 4 "VDD") (pin 5 "VDD") (pin 9 "GND"))
+        \\  (decouple "VDD" (cap-0402 "100nF") 1 per-pin U1 4)
+        \\  (decouple "VDD" (cap-0402 "100nF") 1 per-pin U1 EN))
+    );
+    var by_pad: usize = 0;
+    var by_function: usize = 0;
+    for (block.instances) |inst| {
+        if (!std.mem.eql(u8, inst.component, "cap-0402")) continue;
+        try testing.expectEqualStrings("U1", inst.bind.decouple.ic);
+        if (std.mem.eql(u8, inst.bind.decouple.pin, "4")) by_pad += 1;
+        if (std.mem.eql(u8, inst.bind.decouple.pin, "5")) by_function += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), by_pad);
+    // The function name resolved to EN's pad, and the binding survives even
+    // though this child's origin key is the label `C_EN`, not `100nF@5#0`.
+    try testing.expectEqual(@as(usize, 1), by_function);
 }

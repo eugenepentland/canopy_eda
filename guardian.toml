@@ -16,7 +16,138 @@ spec_file = "SPEC.md"
 [baseline]
 enabled = true
 # A refresh may never grow the spec baseline (fix the debt, or remove "spec" to override).
-deny_growth = ["spec", "completeness"]
+# "concept" joins them: a concept violation is one row per (file, concept), so
+# denying growth means the number of files hand-copying an owned spelling may
+# shrink and never grow — the ratchet the [[concept]] block at the bottom of this
+# file exists to hold.
+#
+# The three relational checks join them for the same reason, each keyed so that
+# growth means a genuinely new disagreement rather than a moved line:
+#   divergent-const   — keyed per NAME, so a third file joining an existing
+#                       disagreement lands on the existing row; a NEW const name
+#                       holding two values is what fails.
+#   twin-referent     — keyed <file>|<referent>, so rewording the sentence around
+#                       a claim keeps its key; a new dangling claim fails.
+#   duplicate-json-key— keyed <file>|<fn>|<key>; a duplicate key is never
+#                       intentional, so this may only ever shrink.
+#
+# NOTE for whoever declares the next [[concept]] rule: a new rule's own rows are
+# themselves growth, and this policy refuses them ("acceptance refused because
+# the configured deny_growth policy would grow recorded debt") — the ratchet
+# cannot tell a newly-declared rule from a newly-appeared hand-copy. Declaring
+# one is therefore a deliberate two-step: drop "concept" here, `guardian-check
+# accept concept .`, put it back, and say in the commit what the new rows are.
+# That is the intended friction, not a bug to route around.
+deny_growth = ["spec", "completeness", "concept", "divergent-const", "twin-referent", "duplicate-json-key",
+    "canonical-idiom", "shadowed-const", "import-layering", "twin-parity"]
+
+# Commit-tier test suite. Current policy keeps this and every other internal
+# EDA test self-hosted Debug; ReleaseSafe is built only by deployment.
+# This gated on `test-fast` from the 2026-07-23 audit
+# until 2026-07-25, when the 1923s figure that justified it was found to be
+# STALE: it measured the Debug test binary before the old configuration began
+# defaulting the suite to ReleaseSafe. Re-measured on that tree: the FULL
+# `zig build test`
+# is 9.55s warm (1406 tests) / ~208s cold.
+#
+# `test-fast` compiles only its 8 hardcoded filters, so it never type-checks the
+# rest of the test binary. That is not a theoretical gap — two commits landed
+# green here on a suite that would not compile (a call site updated in
+# production code but not in its own test). A gate that cannot see a build
+# error in a test is not a gate, and ~9s buys the whole suite.
+#
+# RE-MEASURED 2026-08-04, and the "~9s" above is itself misleading: 9-11s is the
+# NO-OP case (nothing changed, everything cached). A commit by definition has
+# changes, and after a one-file src edit the full suite costs 4m30s here — the
+# ReleaseSafe test binary is re-analyzed, codegen'd and linked before 1930 tests
+# run. That is the true per-commit price, and it is being paid knowingly: the
+# cheaper tiers all trade away coverage.
+#
+# Kept at the full suite anyway. `zig build test-compile` (new 2026-08-04,
+# guardian's addTestCompileProbe: whole test binary at -fno-emit-bin, nothing
+# run) closes exactly the "would not compile" hole above for 10.4s after an edit
+# / 1.5s no-op — but it is strictly REDUNDANT inside this gate, because an
+# unfiltered `zig build test` already analyzes every test. Making test_command
+# `zig build test-compile test-fast` would be ~14s and would stop RUNNING 1930
+# tests; test-compile's value is the local dev loop before the gate, not the
+# gate. Historical measurement: Zig 0.15.1, -Dtest-opt=ReleaseSafe. The pinned
+# Zig 0.17 master suite now defaults to Debug. Final 2026-08-12 measurement:
+# 2,538 tests execute in 65.44 s (versus 154.54 s for 2,527 tests on 0.15.1),
+# while a fixed-seed unchanged rerun is a 2.62 s cached no-op. The prior 120 s
+# wall cap no longer left enough room for measured ~2x cross-session
+# contention, so 180 s gives 2.75x headroom while still stopping the old
+# 200-second-class regression at the commit that introduces it.
+#
+# RE-SCOPED 2026-08-17. GUARDIAN_TEST_MAX_WALL_SECS is read by the test RUNNER,
+# so since the suite became 8 sharded binaries (each its own runner process) it
+# is a PER-SHARD cap, not a cap on the suite. At 180 s that silently became an
+# 8x180 s aggregate ceiling — the runaway-cost guard the number was chosen to be
+# had been diluted away. 60 s restores it: measured per-shard walls are 8-12 s
+# solo and 16-22.1 s under a full-parallel run with all eight shards contending
+# (worst of six full runs: 22.06 s), so 60 s keeps ~2.7x headroom over the
+# loaded worst case while catching a single-shard runaway an order of magnitude
+# sooner than 180 s did.
+#
+# CAVEAT, measured the same day and NOT fixed here: this cap is currently inert
+# in practice. Guardian's runner reads the variable through an 8 KiB
+# FixedBufferAllocator it shares with argv parsing, and
+# `std.process.Environ.getAlloc` allocates against the whole environment block,
+# so any environment over ~2 KB makes the read fail — and `readEnv` maps that
+# failure to `null`, which is indistinguishable from "unset". Bisected on this
+# tree: with `env -i` a 5 s cap correctly fails an 11.05 s shard; add ~2 KB of
+# environment and the identical run passes. Every real shell and CI environment
+# is well past that, so BOTH 180 and 60 have been dead letters. The number here
+# is still the right one for when guardian-zig fixes the read (reported to
+# guardian-zig FEEDBACK.md 2026-08-17) — it is just not load-bearing today, and
+# nobody should read a green gate as evidence that shard cost is bounded.
+# The `env` prefix is REQUIRED: guardian tokenizes test_command into argv with
+# no shell, so a bare NAME=VALUE would be exec'd as the program name.
+[gate]
+test_command = "env GUARDIAN_TEST_MAX_WALL_SECS=60 zig build --seed=1 test"
+
+# Agent policy profile (same audit): demotes the 8 pure-style checks
+# (line-length, boolean-param-ban, magic-number, repeated-string-literal,
+# struct-method-cap, optional-density, stringly-typed-switches,
+# repeated-switch-on-enum) to report-only. The FEEDBACK.md log shows these —
+# line-length ratchet confusion and repeated-switch-on-enum baseline churn
+# especially — cost full gate cycles while catching no defects here; every
+# correctness/safety/spec check still blocks.
+[policy]
+profile = "agent"
+
+# ── Layering (`[[boundary]]`) ─────────────────────────────────────────────
+# An `@import` is the cheapest way to erode a layer and the hardest thing to
+# see in review: nothing in a diff says "this line reaches UP". The two rules
+# below name the two upward edges this tree actually has. Baseline mode freezes
+# today's sites (`.guardian/baselines/boundaries.txt`) so the count can only
+# SHRINK — a new upward import fails the gate naming the rule it broke.
+#
+# `module` is a `walk.matchGlob` pattern over the walker-relative path; a
+# trailing `*` matches the whole subtree. `forbidden` entries are SUBSTRINGS of
+# the RESOLVED import path — a relative import is normalized first, so
+# `@import("../serve/sync.zig")` inside `src/kicad_pcb/` is compared as
+# `src/serve/sync.zig` and matches `serve/`.
+
+# src/kicad_pcb/ is a FILE-FORMAT layer: it parses and emits `.kicad_pcb` and is
+# reachable from the CLI with no server in the process. Three sites reach back
+# up into the web layer today — reader.zig -> serve/sync.zig,
+# import_layout_command.zig -> serve/pcb_layout_import.zig, route_command.zig ->
+# serve/drc_rules.zig — each dragging an HTTP-layer module into a format
+# module for the sake of a shared type. Frozen, not forgiven: the fix is to
+# move the shared type DOWN (under both), not to add a fourth edge.
+[[boundary]]
+module = "src/kicad_pcb/*"
+forbidden = ["serve/"]
+
+# src/placement/ COMPUTES a board; the export layer SERIALIZES one, so the
+# dependency belongs the other way round. Today placement reaches up into
+# export_kicad.zig (for its pad/track geometry types), export_gerber.zig and
+# fab_readiness.zig (the connectivity oracle) across many files. Frozen at
+# today's count; the fix is to lift those shared geometry/tally types beneath
+# both layers rather than to grow the edge.
+[[boundary]]
+module = "src/placement/*"
+forbidden = ["export_kicad.zig", "export_gerber.zig", "fab_readiness.zig"]
 
 # The local Zig cache is intentionally large for this dependency-heavy design;
 # keep doctor advisory below 8 GiB while retaining the tighter Guardian-owned
@@ -33,6 +164,26 @@ name = "pcb-board-js-syntax"
 command = ["node", "--check", "src/serve/assets/pcb_board.js"]
 inputs = ["src/serve/assets/pcb_board.js"]
 
+[[external]]
+name = "pcb-model-sprites-js-syntax"
+command = ["node", "--check", "src/serve/assets/pcb_model_sprites.js"]
+inputs = ["src/serve/assets/pcb_model_sprites.js"]
+
+[[external]]
+name = "pcb-3d-js-syntax"
+command = ["node", "--check", "src/serve/assets/pcb_3d_viewer.js"]
+inputs = ["src/serve/assets/pcb_3d_viewer.js"]
+
+[[external]]
+name = "pcb-3d-surface-js-syntax"
+command = ["node", "--check", "src/serve/assets/pcb_3d_surface.js"]
+inputs = ["src/serve/assets/pcb_3d_surface.js"]
+
+[[external]]
+name = "pcb-3d-surface-geometry"
+command = ["node", "src/serve/assets/pcb_3d_surface.test.js"]
+inputs = ["src/serve/assets/pcb_3d_surface.js", "src/serve/assets/pcb_3d_surface.test.js", "src/serve/assets/three.min.js"]
+
 # Completeness checklist (opt-in). Every SPEC.md `## ` feature section must
 # ADDRESS or explicitly WAIVE all 8 scenario categories (empty inputs, large
 # inputs, unauthorized access, I/O failure, concurrent access, malformed
@@ -42,6 +193,19 @@ inputs = ["src/serve/assets/pcb_board.js"]
 # it as sections become complete; deny_growth prevents new debt after adoption.
 [completeness]
 enabled = true
+
+# Which file the TEST binary is rooted at. Zig only compiles the `test` blocks
+# it can REACH: a module nobody added to the aggregator ships green — its tests
+# are never compiled or run, while its `// spec:` tags still read as covered.
+# This tree's test root is `src/test_root.zig` (build.zig wires it as both the
+# `test` and `test-fast` root_source_file); it is NOT one of the two names the
+# check guesses when `roots` is unset (`src/main.zig`, `src/root.zig`), and the
+# aggregator is not reachable from main.zig — so the check was measuring
+# reachability from the wrong graph and had recorded `src/test_root.zig` itself
+# as debt. Naming the real root retires that entry and makes the answer correct
+# by construction rather than by luck.
+[test_reachability]
+roots = ["src/test_root.zig"]
 
 # Mutation testing. Static checks prove tests EXIST; mutation proves they BITE.
 # `zig build mutate` (fast tier) mutates only lines changed vs HEAD and never
@@ -55,6 +219,13 @@ enabled = true
 # [30,100] range → 100. Projected full-run wall time ≈ 1.7–1.8h. This cap is
 # PERMANENT: deterministic sampling must stay consistent across nightly runs,
 # so changing it re-rolls which mutants are tested. Do not bump it casually.
+#
+# STALE-TIMING WARNING (re-measured 2026-07-23): the full Debug suite is now
+# 1923s (~32 min) per run — 32x the 60.7s above — so the sizing math no longer
+# holds. smoke_step = "test-fast" keeps most mutants cheap, but EACH smoke
+# survivor pays the full-suite price: a mutate-full with even 10 survivors is
+# a multi-hour run. Fix the suite (optimized test binary / solver tests out of
+# the default tier) before trusting the nightly budget again.
 [mutation]
 # measured baseline 2026-07-08: 28%. Survivor campaign 2026-07-09 (commits
 # 5cfefa6/254b685/0d5b34e/ed39d46) killed 50 of 72 sampled survivors; the
@@ -76,6 +247,21 @@ min_mutants   = 4    # below this many viable mutants: informational, not gated
 # toward the snapshot budget. `require_guard` path globs additionally hard-fail
 # ANY raw @intFromFloat under those dirs regardless of the budget — the strict
 # gate for subsystems already fully converted (untrusted eval/import inputs).
+#
+# `require_guard` NEVER ACTUALLY RAN until 2026-08-04. Guardian's config parser
+# aliased multiline array values: a second multiline array (here
+# `[fuzz_presence] modules`) reused the buffer the first one's slices pointed
+# into, so `require_guard` was silently reading fuzz_presence's paths and
+# matched no file in this tree. The guardian fix landed with the [[ban]] check
+# and surfaced 16 real unguarded casts that were never gated — accepted into
+# .guardian/baselines/int-from-float-budget.txt as pre-existing debt so the
+# ratchet starts holding today (a 17th raw cast, or a 7th in router.zig, still
+# fails). The `casts` budget snapshot stays at 0 — untouched by that accept.
+# These are NOT dismissed: two of them (src/eval/design_block.zig:2341 from a
+# DSL value, src/kicad_pcb/project_rules.zig:153 from JSON) narrow UNTRUSTED
+# input and are the reason this list names src/eval/ and src/kicad_pcb/ at all.
+# Burn them down with numeric.checkedInt / numeric.toCount; the baseline
+# auto-prunes as they go.
 [int_from_float]
 guard_fns = ["checkedInt"]
 require_guard = [
@@ -93,9 +279,313 @@ modules = [
   "src/sexpr/printer.zig",
   "src/deflate.zig",
   "src/kicad_pcb/reader.zig",
+  "src/kicad_sym/reader.zig",
   "src/zipfile.zig",
   "src/png.zig",
+  "src/pdf.zig",
+  "src/svg2pdf.zig",
 ]
+# ── [[ban]]: the raw `.layouts.json` writers ──────────────────────────────
+# Rule of thumb first (evaluated 2026-08-04, still true): reach for [[ban]] only
+# when the callee's signature is NOT ours to change. The case this check was
+# built for — banning raw `optimizer.placeFromPoses` in src/serve/ so a new
+# endpoint could not skip the board-outline fold — was solved better in the type
+# system: `PoseSeed.outline` has no default, so omitting it is a COMPILE error,
+# and ~12 src/serve sites legitimately pass an explicit `.outline`. A path ban
+# would fire on all of them. A non-defaulted field beats a commit-time gate.
+#
+# The layout sidecar is the opposite shape, and gets a ban. Nine call sites
+# persist `<design>.layouts.json` through the raw writers in
+# src/serve/pcb_layout_page.zig, and the three guards that write should carry —
+# the optimistic-concurrency `rev` check, the pre-write `history.snapshotLayouts`
+# rollback copy, and outline validation — are applied per call site and
+# INCONSISTENTLY (only three of the nine take a history snapshot). Nothing in a
+# signature says a guard is missing: every writer takes plain data, so a tenth
+# caller compiles and silently skips all three. The structural fix is one
+# `commitLayouts` seam and lands separately; until then these rules pin the
+# status quo, so today's holders stay legal and a NEW file cannot join them.
+#
+# Chains are single tokens on purpose. The matcher does no alias resolution, so
+# `["page", "writeLayoutsFileJsonRev"]` would only catch the conventional import
+# name; a bare identifier matches the call under ANY alias and as a bare
+# same-file call. Scope is the whole tree (no `paths`) with `allow` naming the
+# files that hold a call today.
+#
+# What this can and cannot catch: `writeLayoutsFileJsonRev` is `pub`, so it is
+# the only spelling that can escape the module today and the only rule with
+# external holders. The other four are private to pcb_layout_page.zig — a call
+# from elsewhere is a compile error, not a ban violation. Their rules exist to
+# cover the refactor that WOULD make one reachable: promoting a wrapper to `pub`
+# and calling it from a new file now fails the gate instead of quietly adding a
+# tenth unguarded write path.
+
+[[ban]]
+chain = ["writeLayoutsFileJsonRev"]
+allow = [
+  "src/serve/pcb_layout_page.zig",
+  "src/serve/layout_backfill.zig",
+  "src/serve/pcb_layout_import.zig",
+]
+reason = "the raw sidecar serializer applies no rev check, no history snapshot and no outline validation — persist layouts through the guarded save path in src/serve/pcb_layout_page.zig instead"
+
+[[ban]]
+chain = ["writeLayoutsFile"]
+allow = ["src/serve/pcb_layout_page.zig"]
+reason = "raw `.layouts.json` disk write (no rev check, no history snapshot) — persist layouts through the guarded save path in src/serve/pcb_layout_page.zig instead"
+
+[[ban]]
+chain = ["writeLayoutsSubRev"]
+allow = ["src/serve/pcb_layout_page.zig"]
+reason = "raw per-sub sidecar disk write (no rev check, no history snapshot) — persist layouts through the guarded save path in src/serve/pcb_layout_page.zig instead"
+
+[[ban]]
+chain = ["writeLayoutsSub"]
+allow = ["src/serve/pcb_layout_page.zig"]
+reason = "rev-reading wrapper over the raw per-sub sidecar write — persist layouts through the guarded save path in src/serve/pcb_layout_page.zig instead"
+
+[[ban]]
+chain = ["writeLayouts"]
+allow = ["src/serve/pcb_layout_page.zig"]
+reason = "rev-reading wrapper over the raw sidecar write — persist layouts through the guarded save path in src/serve/pcb_layout_page.zig instead"
+
+# ── Owned concepts ────────────────────────────────────────────────────────
+# A [[concept]] names a set of magic spellings that model ONE domain fact, the
+# module that OWNS them, and the file set to scan. Every other file spelling one
+# is a hand-copy, and hand-copies are how two surfaces come to disagree about the
+# same board. This is the only relational check here — matching is LEXICAL and
+# crosses .zig/.js/.css, which is exactly why the drift it finds is invisible to
+# the type system.
+#
+# All eight rules below were MEASURED before being declared (the first seven on
+# 2026-08-13 at c08c380, `drc-kind-ids` on 2026-08-14 at fcfe245): a family is
+# declared only when the hit profile is dominated by genuine parallel-table
+# sites, and a member whose bare spelling is swamped by domain data (a test net
+# name, a pin function, a KiCad JSON key, a legitimate Zig struct field) is
+# TRIMMED out — each trim is recorded in its rule's note. `files` never names
+# projects/ or lib/: those are user design data, where a board is entitled to
+# call a net whatever it likes.
+#
+# TWO EXPRESSIVENESS LIMITS were recorded here on 2026-08-13 and BOTH are now
+# fixed upstream; re-verified against the current binary on 2026-08-14, because
+# each one decides what CAN be declared:
+#   1. A literal may now contain a double quote. `literals = ["\"track_track\""]`
+#      resolves to the spelling WITH its quotes and so matches only the quoted
+#      form, which makes a vocabulary that is discriminating only when quoted
+#      declarable. This is what `drc-kind-ids` below is built on: bare
+#      `net_open` is typed Zig in 49 files, `"net_open"` is a wire spelling in
+#      one.
+#      Verified by declaring it — the rule scores 1 offender; had the escape not
+#      resolved it would have scored 0, and had it matched bare, 49.
+#   2. `files` IS honored per rule. Each rule is applied only to the files its
+#      own globs name, not to the union of every rule's globs. Verified with a
+#      throwaway `files = ["src/*.js"]` rule whose literal also appears in five
+#      Zig files: it reported the .js file alone. So a rule may legitimately
+#      narrow its own scan set, and the `files` lines below mean what they say.
+#
+# Everything here is FROZEN as baseline debt at declaration time
+# (.guardian/baselines/concept.txt, one `<file>|<concept>` row per offender), so
+# the rules gate the next copy rather than the last one. `deny_growth` includes
+# "concept": the row count may shrink, never grow.
+
+# The copper layer vocabulary. Owner is src/board_layers.zig — the LayerTable
+# that pairs each layer with its index, its palette entry and its Gerber
+# extension. It does not exist on main yet (it lands with the layer-consolidation
+# branch); a rule may name an owner that does not exist yet, and every current
+# speller is baselined, so this ratchets down sharply the moment that branch
+# merges. Frozen: 58 offender files across Zig, JS and CSS; the heaviest are
+# serve/sync.zig (52 spellings), kicad_pcb/writer.zig (51), serve/pcb_layout_page.zig
+# (47), placement/optimizer.zig (35) and assets/pcb_board.js (33).
+[[concept]]
+name = "layer-names"
+literals = ["F.Cu", "B.Cu"]
+patterns = ["In*.Cu"]
+owner = ["src/board_layers.zig"]
+files = ["src/*.zig", "src/*.js", "src/*.css"]
+reason = "copper layer names belong to board_layers.LayerTable — a respelling here is a second table that can disagree with the router's, the pour's and the Gerber's"
+
+# The technical (non-copper) layer vocabulary, same owner plus the KiCad
+# s-expression formatter that reads and writes these exact tokens in board files.
+# Frozen: 21 offender files, led by kicad_pcb/writer.zig (72 spellings),
+# export_kicad_footprint.zig (27) and convert/footprint.zig (21). Edge.Cuts alone
+# is spelled in 18 of the 21. A 22nd file, the generated MCP tool-list fixture
+# serve/assets/tools_list_result.json, is out of scope because no glob here names
+# .json — deliberately, since it is generated output rather than a hand-copy.
+[[concept]]
+name = "kicad-tech-layer-names"
+literals = [
+  "F.SilkS", "B.SilkS", "F.Mask", "B.Mask", "F.Paste", "B.Paste",
+  "F.CrtYd", "B.CrtYd", "F.Fab", "B.Fab", "F.Adhes", "B.Adhes",
+  "Edge.Cuts", "Dwgs.User", "Cmts.User",
+]
+owner = ["src/board_layers.zig", "src/kicad_pcb/format.zig"]
+files = ["src/*.zig", "src/*.js"]
+reason = "silk/mask/paste/courtyard/fab/edge layer names are KiCad's wire format — they belong to board_layers.LayerTable and the kicad_pcb formatter, not to each exporter"
+
+# The hexes the viewer, the PNG renderer and the stylesheet paint those layers
+# with. Three renderers agreeing on the layer NAME and disagreeing on its COLOUR
+# is a board that reads differently in the browser, in an exported PNG and in a
+# screenshot. Measured: 6 offender files, and every one of them is a full
+# per-layer palette rather than an incidental colour.
+[[concept]]
+name = "layer-palette"
+literals = ["#C83434", "#4D7FC4", "#C2C200", "#C200C2", "#C2C2C2", "#00C2C2"]
+owner = ["src/board_layers.zig"]
+files = ["src/*.zig", "src/*.js", "src/*.css"]
+reason = "per-layer colours belong to board_layers.LayerTable — the viewer, the PNG rasterizer and pcb_layout.css must paint one layer one colour"
+
+# Fab-package filename suffixes: the Protel/KiCad extensions the Gerber writer
+# stamps on each layer, plus the Excellon drill and job-file extensions the same
+# package carries. Measured: 4 offenders. src/export_gerber.zig owns the table
+# and is listed as owner; the others each build a fab filename of their own —
+# pcb_layout_page.zig assembles `-job.gbrjob` / `-PTH.drl` / `-NPTH.drl` for the
+# ZIP without consulting it. NOTE the two eval/ hits are documentation prose
+# naming `.gbrjob` in the (thickness MM) DSL help; they are frozen and will stay
+# frozen, which is the honest cost of a lexical rule.
+[[concept]]
+name = "gerber-suffixes"
+literals = [
+  ".gtl", ".gbl", ".gts", ".gbs", ".gtp", ".gbp",
+  ".gto", ".gbo", ".gm1", ".g2", ".g3", ".gbrjob", ".drl",
+]
+owner = ["src/board_layers.zig", "src/export_gerber.zig"]
+files = ["src/*.zig", "src/*.js"]
+reason = "fab-output extensions belong to the Gerber/Excellon writers — a filename built elsewhere is how a package ships a layer the CAM tool then mis-detects"
+
+# Design-rule wire keys: the snake_case JSON field names the rules editor, the
+# board blob, the wasm DRC and the client all exchange. Owner is the
+# key/head table in design_rules_edit.zig. TRIMMED to the compound keys, which
+# is what makes the rule measure anything: `clearance` (12 files), `track_width`,
+# `min_width`, `min_drill`, `min_annular`, `hole_to_hole`, `via_to_via`,
+# `copper_edge`, `component_edge` and especially `via_dia` (41) / `via_drill`
+# (35) are all legitimate Zig struct fields on the rule structs themselves — and
+# `clearance` / `track_width` / `via_drill` are ALSO KiCad's own .kicad_pro
+# spellings, which project_rules.zig must parse verbatim. The five kept keys are
+# carried by every genuine re-list of the table and by nothing else. Frozen: 13
+# offenders — serve/pcb_layout_page.zig (15 spellings, two hand-written JSON
+# emitters), assets/pcb_settings.js (11, the client's editor), static_assets.zig
+# (5, a full key list), and wasm_drc.zig / drc_session.zig (3 each, two
+# hand-written JSON readers).
+[[concept]]
+name = "design-rule-field-names"
+literals = [
+  "pour_clearance", "pour_min_width", "pour_corner_radius",
+  "mask_relief_corner_radius", "mask_web",
+]
+owner = ["src/serve/design_rules_edit.zig"]
+files = ["src/*.zig", "src/*.js"]
+reason = "design-rule wire keys belong to the design_rules_edit key table — the editor, the board blob, the wasm DRC and the fab gate must judge a board by one spelling"
+
+# Supply-rail name prefixes. src/eval/rails.zig documents itself as the place
+# that decides what reads like a rail (looksLikeRail), and then eight other
+# files decide it again with their own inline prefix array — five of them
+# (render_html twice, hub, section_inset, connection) carrying the SAME
+# nine-element list copy-pasted. TRIMMED to the discriminating
+# members: bare "VDD"/"VCC"/"VIN"/"VBAT"/"VBUS" are net names in test fixtures
+# and pinouts across the tree (VBUS alone: 19 files), and gate nothing.
+[[concept]]
+name = "rail-name-prefixes"
+literals = [
+  "AVDD", "DVDD", "PVDD", "VSYS", "VRAW", "VPWR",
+  "VREG", "PVIN", "VDCIN", "HVIN",
+]
+owner = ["src/eval/rails.zig"]
+files = ["src/*.zig", "src/*.js"]
+reason = "what counts as a supply rail is rails.looksLikeRail — nine private prefix lists is nine chances for the schematic, the placer and the ERC to disagree about whether a net is power"
+
+# Ground-net name variants, the same story on the other rail: optimizer.isGroundName
+# owns the token list, and pin_roles, diagram/classify, eval/net_analysis,
+# render_svg/draw, render_svg/context, erc, pcb_layout_page and pcb_board.js each
+# keep their own. A net that is ground to the router and signal to the ERC is a
+# stitch via that never gets planted. Frozen: 21 offenders, of which nine hold a
+# real classifier and the rest are test fixtures (serve/sync.zig alone spells 10
+# in seeded-copper fixtures). TRIMMED: bare "GND" and "VSS" are everywhere, and
+# "VSSA" is a substring of real pin function names (VSSAON, VSSAPM_U) — dropping
+# it removes three pure false positives. "DGND" still matches inside the prose
+# string "GNDGNDGND…" in two kicad_sch files; that is the lexical cost and they
+# freeze.
+[[concept]]
+name = "ground-net-names"
+literals = ["GNDA", "GNDD", "AGND", "PGND", "DGND", "SGND"]
+owner = ["src/placement/optimizer.zig"]
+files = ["src/*.zig", "src/*.js"]
+reason = "the ground-name vocabulary is optimizer.isGroundName — a private copy is how a net becomes ground to the plane stitcher and signal to the ERC"
+
+# The DRC finding vocabulary — the audit's sharpest target, and declarable only
+# because a literal may now carry its own quotes. The names are the `drc.Kind`
+# enum; `src/serve/assets/pcb_settings.js` re-lists all 27 of them by hand in
+# DRC_GROUPS / DRC_HELP, so renaming a kind in Zig silently drops its label, its
+# group and its help text out of the settings drawer — the finding still fires
+# and the drawer stops explaining it.
+#
+# The literals are QUOTED on purpose, and that single character is what makes
+# the rule measurable. A BARE id is legitimate typed use in Zig — a switch
+# prong, a `.kind = .track_pad` field — across 49 files, so a bare rule would
+# freeze 49 files of correct code that can never ratchet down. The quoted form
+# is the WIRE spelling, which only a hand-written table or marshaller writes.
+# Measured 2026-08-14 at the merge of main (fcfe245), non-owner files across
+# src/ Zig + JS: the quoted set scores 13 offenders, but 12 of them come from
+# just four ids, and none of those twelve is the DRC vocabulary:
+#   "courtyard"       6 — the F.CrtYd LAYER (export_kicad_footprint, geometry,
+#                         footprint_editor, footprint_preview, library_3d)
+#   "track_width"     6 — a design-rule key, and one of KiCad's own .kicad_pro
+#                         spellings that project_rules.zig must parse verbatim
+#   "component_edge"  5 — a design-rule clearance key
+#   "min_drill"       5 — likewise; both in wasm_drc, drc_session,
+#                         static_assets and design_rules_edit
+# All four are genuinely BOTH a rule key and a finding kind, which is why the
+# `design-rule-field-names` rule above trims the same words for the mirror-image
+# reason. TRIMMED, and the remaining 23 ids score exactly ONE offender:
+# pcb_settings.js, carrying all 27. That is the whole drift, and the rule now
+# gates the second copy.
+#
+# Deliberately NOT extended to bare ids inside JS, which would score ten more
+# files: every one is PROSE — `sharp_bend` inside a help string in pcb_replay.js
+# and route_review.js ("flagged by the sharp_bend DRC check"), `net_open` in two
+# pcb_board.js line comments, `annular` / `courtyard` as geometry words. Prose
+# naming a check is not a parallel table, and freezing ten files of it would buy
+# nothing that could ever ratchet down.
+[[concept]]
+name = "drc-kind-ids"
+literals = [
+  "\"via_pad\"", "\"via_via\"", "\"via_spacing\"", "\"via_track\"",
+  "\"track_track\"", "\"track_pad\"", "\"pad_pad\"", "\"annular\"",
+  "\"pad_annular\"", "\"board_edge\"", "\"hole_hole\"", "\"copper_stub\"",
+  "\"dangling_copper\"", "\"single_layer_via\"", "\"land_transit\"",
+  "\"mask_sliver\"", "\"silk_over_pad\"", "\"diff_uncoupled\"",
+  "\"diff_skew\"", "\"length_mismatch\"", "\"sharp_bend\"",
+  "\"keepout_violation\"", "\"net_open\"",
+]
+owner = ["src/placement/drc.zig", "src/serve/drc_json.zig"]
+files = ["src/*.zig", "src/*.js"]
+reason = "the DRC finding vocabulary is drc.Kind, marshalled once by drc_json — a hand-listed copy is how renaming a kind drops its label, its group and its help text out of the settings drawer while the finding keeps firing"
+
+# NOT DECLARED, and the reasons are worth keeping because they are requests to
+# the check rather than judgements about the code:
+#
+# `severity-words` — "error"/"warn"/"warning"/"err" as DRC and lint severities.
+# Measured: `"error"` in 40 files, `"warn"` in 10, `"err"` in 11, and the hits are
+# HTTP error envelopes, log levels and message text as often as they are the
+# severity vocabulary. No trim rescues a word that generic. This is a fix wave
+# (one severity enum, marshalled once), not a concept.
+#
+# `refdes-prefix-chars` (single letters: U, J, C, R, L, D, Q, FB, TP) — a
+# one-character literal matches inside every identifier in the tree. Wrong tool
+# by construction.
+#
+# PCB board-blob JSON keys ("x","y","rot","net","w","l") — one- and two-letter
+# keys, same problem, and the real fix is a shared marshal/unmarshal module so
+# the two sides cannot disagree, not a text gate over the spellings.
+#
+# Silk stroke widths (0.15 / 0.12) — bare numbers, so still the wrong shape for
+# a lexical rule. They are no longer unguarded, though: both are now named
+# `silk_stroke_mm`, and `divergent-const` reports that one name holding 0.15 in
+# testpoint_silkscreen/subcircuit_silkscreen and 0.12 in export_kicad_footprint —
+# two silkscreens from one board. That check owns this case; see its baseline.
+#
+# API route strings ("/api/pcb-describe/") — every consumer must spell the route
+# it calls; there is no owner module a fetch() could import from. A route table
+# is a different mechanism (a generated client), not an ownership rule.
+
 # src/exit.zig is netlisp's designated fatal helper (like guardian's own
 # src/reporter.zig): the one place a raw std.process.exit(nonzero) is allowed,
 # so every CLI fatal funnels through fatal()/failure() there.
@@ -105,11 +595,258 @@ paths = ["src/exit.zig"]
 
 # src/serve/templates/*.zig are build-time artifacts the third-party zt template
 # compiler generates from the checked-in .zt sources (the .zig outputs are
-# git-ignored and regenerated every build, banner: "Auto-generated ... do not
-# edit"). zt emits a fixed prelude — a "// Auto-generated" line comment then its
+# committed for fresh-worktree correctness and regenerated by `zig build
+# templates`, banner: "Auto-generated ... do not edit"). zt emits a fixed
+# prelude — a "// Auto-generated" line comment then its
 # imports — as the first lines, with no hook to author a leading `//!` block, so
 # a module-doc header is structurally impossible here, not merely absent. This
 # documents that impossibility; it is not a way to dodge the check on hand code.
 [[allow]]
 check = "module-doc-header"
 paths = ["src/serve/templates/"]
+
+# ═══ System-level checks seeded from the 2026-08-14 audit ═══════════════════
+# Measurement posture: allow-lists point at intended canonical homes (some do
+# not exist yet — a glob matching nothing is legal, so the counts below are the
+# full migration backlog). Frozen baselines follow once the numbers are triaged.
+
+[[idiom]]
+name = "subblock-leaf-split"
+fragments = ["lastIndexOfScalar", "'/'"]
+allow = ["src/net_name.zig"]
+reason = "hand-rolled sub-block leaf split - 29 named copies under 8 spellings (audit 2026-08-14); call the net_name helper"
+
+[[idiom]]
+name = "first-dot-net-collapse"
+fragments = ["indexOfScalar", "'.'"]
+allow = ["src/eval/net_analysis.zig", "src/kicad_sch/stub.zig"]
+reason = "first-dot bypass-stub collapse - 11 naive copies of the +5.0V->+5 corruption class; the structural fold is kicad_sch/stub.zig, the display collapse is net_analysis.baseNetName"
+
+[[idiom]]
+name = "percent-decode-wrapper"
+fragments = ["percentDecodeInPlace"]
+allow = ["src/serve/urlcodec.zig"]
+reason = "private URL-decode wrapper - 6 byte-identical copies + 1 hand-rolled loop; fold into one urlcodec module"
+
+[[idiom]]
+name = "json-escaper-def"
+fragments = ["fn writeJson"]
+allow = ["src/json_writer.zig"]
+reason = "private JSON string writer - 24 escapers in 7 incompatible tiers, one lossy; route through json_writer"
+
+[[idiom]]
+name = "xml-escape-table"
+fragments = ["\"&amp;\""]
+allow = ["src/escape.zig"]
+reason = "hand-rolled XML/HTML entity table - 9 copies with 4 character sets incl. an attribute writer missing the quote; call escape.writeXml"
+
+[[idiom]]
+name = "tmp-rename-write"
+fragments = [".rename("]
+allow = ["src/infra/atomic_write.zig", "src/serve/vfs.zig"]
+reason = "private atomic-write (tmp+rename) - 8 implementations while the design .sexp itself is written non-atomically; one shared writer (vfs move_file is a legitimate rename)"
+
+[[shadow]]
+const = "src/placement/drc.zig.eps"
+ignore = ["src/placement/drc.zig"]
+reason = "clearance slack must be identical in every pre-filter - a stricter epsilon drops geometry the checker would pass"
+
+[[layering]]
+name = "core-no-serve"
+from = ["src/eval/*", "src/placement/*", "src/kicad_pcb/*", "src/kicad_sch/*", "src/kicad_sym/*", "src/sexpr/*", "src/render_svg/*", "src/diagram/*", "src/convert/*", "src/infra/*"]
+to = ["src/serve/*"]
+reason = "the web layer sits on top - a format/eval/placement module importing serve/ is an inverted dependency (known edge: kicad_pcb/import_layout_command -> serve/pcb_layout_import)"
+
+[[layering]]
+name = "serve-placement-internals"
+from = ["src/serve/*"]
+to = ["src/placement/*"]
+allow = ["src/serve/mcp_connector_pinout.zig"]
+reason = "ratchet ahead of the placement/model.zig extraction - serve should depend on placement's data model, not compile against the 12.3k-line solver"
+
+[[twin]]
+name = "generate-fence"
+surfaces = ["http:/api/pcb-fence", "mcp:generate_fence"]
+parity_test = "returns the same body as the fence endpoint"
+
+[[twin]]
+name = "pcb-describe"
+surfaces = ["http:/api/pcb-describe", "mcp:describe_pcb_layout"]
+
+[[twin]]
+name = "layout-progress"
+surfaces = ["http:/api/layout-progress", "mcp:get_layout_progress"]
+
+[[twin]]
+name = "pcb-png"
+surfaces = ["http:/api/pcb-png", "mcp:get_pcb_layout_image"]
+
+[[twin]]
+name = "diagnose-net"
+surfaces = ["http:/api/pcb-route-analyze", "mcp:diagnose_net"]
+
+[[twin]]
+name = "layout-match"
+surfaces = ["http:/api/layout-match", "mcp:compare_layout_to_starred"]
+
+[[twin]]
+name = "kicad-sch-export"
+surfaces = ["cli:export-kicad-sch", "http:/api/kicad-sch", "mcp:export_kicad_sch"]
+
+[[twin]]
+name = "kicad-sch-sync"
+surfaces = ["cli:sync-kicad-sch", "http:/api/sync-kicad-sch", "mcp:sync_kicad_sch"]
+
+[[twin]]
+name = "erc-checks"
+surfaces = ["cli:check", "http:/api/erc", "mcp:run_checks"]
+
+[[twin]]
+name = "build-push"
+surfaces = ["cli:build", "http:/api/push", "mcp:build"]
+
+[[twin]]
+name = "designs-list"
+surfaces = ["cli:designs", "http:/api/designs", "mcp:list_designs"]
+
+[[twin]]
+name = "history-list"
+surfaces = ["http:/api/history", "mcp:list_history"]
+
+[[twin]]
+name = "review-pdf"
+surfaces = ["cli:export-pdf", "http:/api/schematic-pdf"]
+
+[[twin]]
+name = "schematic-png"
+surfaces = ["cli:export-schematic-png", "http:/api/schematic-png", "mcp:get_schematic_image"]
+
+[[twin]]
+name = "import-kicad"
+surfaces = ["cli:import-kicad", "mcp:import_kicad"]
+
+[[twin]]
+name = "routing"
+surfaces = ["http:/api/pcb-route", "mcp:route_pcb"]
+
+[[twin]]
+name = "layout-save"
+surfaces = ["http:/api/pcb-layouts", "mcp:save_pcb_layout"]
+
+[[twin]]
+name = "query-introspection"
+surfaces = ["cli:instances", "mcp:list_instances"]
+
+[[twin]]
+name = "module-standalone"
+surfaces = ["http:/modules", "mcp:preview_module"]
+
+# ── The three require_in rules ────────────────────────────────────────────
+# These name a mirror the project DECIDED to keep and demand it stay in step,
+# which is the direction ownership cannot see (a hand-copied branch that quietly
+# stops matching). All three were tuned against a measured run on 2026-08-14;
+# each note below says what the first draft got wrong, because the mistake is
+# the reusable lesson.
+
+# DRC kind display strings, as `drc_json.kindStr` spells them on the wire.
+#
+# The mirror is the VIEWER's hand-written branch set: `drcMsg`'s per-kind
+# tooltips and the `DRC_BLOCK` copper-commit gate. Both fail PERMISSIVELY on a
+# rename — an unrecognised kind simply falls through to the generic tooltip and
+# stops blocking a commit — which is how the 51bff373 `silk over pad` ->
+# `silkscreen overlap` rename left a dead branch that 531 marker tests missed.
+#
+# NOT `literals_from`, and that is the whole tuning. Extracting `=> "` out of
+# drc_json.zig makes the family total over the enum, but the requirement it then
+# states is FALSE: pcb_board.js is right not to branch on `annular ring`,
+# `pad annular ring`, `min drill`, `component edge`, `perimeter keepout` or
+# `sharp RF bend`, because every one of those carries a real measured-vs-floor
+# pair and the generic `gap X mm < Y mm` fallback renders it correctly. Mirroring
+# them would be padding a lint, not fixing a mirror. (The extraction also swept
+# in `err` / `warn` from `sevStr`, two words that occur in every bundled .js in
+# the tree, which is what made the ownership direction unusable.)
+#
+# So the family is exactly the set the viewer must branch on, and the two
+# reasons a kind is in it are worth stating: a kind whose gap/clearance pair is
+# NOT a shortfall (`copper stub` / `dangling copper` carry 0/0, `single-layer
+# via` carries a use COUNT, `copper on own land` an overlap against a miss,
+# `length mismatch` an excess) needs its own sentence or the generic form lies;
+# and a kind a hand copper edit can dodge by drawing elsewhere belongs in
+# DRC_BLOCK. A NEW kind joins this list in the change that gives it a branch.
+[[concept]]
+name = "drc-kind-strings"
+literals = [
+  # drcMsg branches — kinds the generic "gap X mm < Y mm" form would misread.
+  "net open", "courtyard overlap", "silkscreen overlap", "mask sliver",
+  "track width", "diff skew", "diff uncoupled", "copper stub",
+  "dangling copper", "single-layer via", "copper on own land",
+  "length mismatch",
+  # DRC_BLOCK — the err-severity kinds a copper edit can dodge, so introducing
+  # one rolls the edit back instead of committing it.
+  "via↔pad", "via↔via", "via spacing", "via↔track", "track↔track",
+  "track↔pad", "pad↔pad", "board edge", "hole↔hole",
+]
+owner = ["src/serve/drc_json.zig", "src/serve/assets/pcb_board.js"]
+require_in = ["src/serve/assets/pcb_board.js"]
+# The DRC pipeline's own clients. NOT `assets/*.js`: pcb_settings.js writes
+# "Same-net via spacing" and "Minimum track width" as human rule labels in the
+# design-rules table, and a lexical rule cannot tell those from a kind test.
+files = [
+  "src/serve/assets/pcb_board.js", "src/serve/assets/pcb_replay.js",
+  "src/serve/assets/drc_marshal.js", "src/serve/assets/drc_worker.js",
+]
+reason = "DRC kind display strings come from drc_json.kindStr; the viewer's DRC_BLOCK gate and tooltip branches must spell every one (the 51bff373 silk rename went dead silently)"
+
+# `PCB.theme` keys — the names the browser clients read a board colour by.
+#
+# The mirror is pcb_board.js's TH/PH fallback objects. They are load-bearing
+# twice over: they paint a fixture that loads the script with no `PCB` blob at
+# all, and they fix the object's shape so every `TH.xxx` read site resolves.
+#
+# `literals_from` here is TOTAL and stays that way — a colour added to
+# board_entries enrols itself and the mirror is asked for it with nobody
+# editing this file. That only works because the extraction takes EVERY quoted
+# string on a matching line: while `Entry` carried a `.css` field beside the
+# key, each row enrolled its `--pcb-…` custom property too, and the rule then
+# demanded 23 stylesheet property names of a JS file that has no business
+# knowing any of them. board_theme.zig now derives the property from the key
+# (see `cssProp`), so a row spells one string and the family is the keys.
+#
+# require_in ONLY: `files` names the two mirrors, both of which are owners, so
+# the ownership scan is deliberately empty. Half these keys are `bg`, `sel`,
+# `via`, `drc`, `hole` — three-letter words that occur in every palette in the
+# tree (three.min.js has hundreds), so ownership over `assets/*.js` measures
+# spelling coincidence and nothing else.
+[[concept]]
+name = "theme-keys"
+literals_from = { file = "src/board_theme.zig", fragments = [".key = \""] }
+owner = ["src/board_theme.zig", "src/serve/assets/pcb_board.js", "src/serve/assets/pcb_replay.js"]
+require_in = ["src/serve/assets/pcb_board.js"]
+files = ["src/serve/assets/pcb_board.js", "src/serve/assets/pcb_replay.js"]
+reason = "PCB.theme keys ship from board_theme.board_entries; the JS TH/PH fallback tables must carry every key, both for the no-blob fixture and to keep every TH.xxx read site resolving"
+
+# The cross-probe BroadcastChannel name. Three clients join the channel:
+# pcb_board.js, schematic_viewer.js, and thermal_page.js, which is send-only.
+# All three are owners and all three are required to spell it: a participant that stops
+# matching leaves a window that silently never highlights.
+#
+# The literal keeps its QUOTES, and schematic_viewer.js was moved to double
+# quotes to match the other clients rather than the rule being relaxed to an
+# unquoted stem. Dropping the quotes makes the requirement a substring test, and
+# a substring test cannot see the rename that actually happens: renaming the
+# channel to `netlisp-xprobe-v2` in one window and not the other still contains
+# `netlisp-xprobe`, so the rule would pass while the two halves of the bridge sat
+# on different channels. With the quotes the spelling must be exact.
+[[concept]]
+name = "xprobe-protocol"
+literals = ["\"netlisp-xprobe\""]
+owner = [
+  "src/serve/assets/pcb_board.js", "src/serve/assets/schematic_viewer.js",
+  "src/serve/assets/thermal_page.js",
+]
+require_in = [
+  "src/serve/assets/pcb_board.js", "src/serve/assets/schematic_viewer.js",
+  "src/serve/assets/thermal_page.js",
+]
+files = ["src/*.zig", "src/serve/assets/*.js"]
+reason = "the cross-probe BroadcastChannel name exists only as hand-matched JS literals; all three clients must spell it and nothing else may"

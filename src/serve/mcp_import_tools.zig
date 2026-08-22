@@ -11,18 +11,26 @@ const std = @import("std");
 const json_writer = @import("../json_writer.zig");
 const infra_fs = @import("../infra/fs.zig");
 const import_kicad = @import("../import_kicad.zig");
+const kicad_inspect = @import("../kicad_pcb/inspect.zig");
+const kicad_experiment = @import("../kicad_pcb/experiment.zig");
 const mcp_tools = @import("mcp_tools.zig");
 
 const requireString = mcp_tools.requireString;
 const optionalString = mcp_tools.optionalString;
 const optionalBool = mcp_tools.optionalBool;
 const missingArg = mcp_tools.missingArg;
+const AllocatingWriter = @import("../allocating_writer.zig").AllocatingWriter;
+
+fn writeJsonString(w: anytype, value: []const u8) std.mem.Allocator.Error!void {
+    json_writer.writeString(w, value) catch return error.OutOfMemory;
+}
 
 /// Board files can be large (a routed board is tens of MB); cap the read the
 /// same as the importer's own `importBoard`.
 const max_board_bytes = 64 * 1024 * 1024;
 const board_suffix = ".kicad_pcb";
 const key_board_path = "board_path";
+const invalid_board_suffix = "board_path must end with .kicad_pcb";
 
 /// True when `net` names a real connection — non-empty and not one of KiCad's
 /// `unconnected-*` single-pad stubs (which mark a pad left floating).
@@ -32,9 +40,11 @@ fn isConnected(net: []const u8) bool {
 
 /// Write `{ok:false,error:"<msg>"}` and return false — the shared failure shape.
 fn errorJson(out: *std.ArrayList(u8), allocator: std.mem.Allocator, msg: []const u8) std.mem.Allocator.Error!bool {
-    const w = out.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w: AllocatingWriter = .{ .writer = &aw.writer };
     try w.writeAll("{\"ok\":false,\"error\":");
-    try json_writer.writeString(w, msg);
+    try writeJsonString(w, msg);
     try w.writeAll("}");
     return false;
 }
@@ -65,7 +75,7 @@ pub fn toolParseKicadNetlist(
     const board_path = requireString(args_val, key_board_path) orelse
         return missingArg(out, allocator, key_board_path);
     if (!std.mem.endsWith(u8, board_path, board_suffix))
-        return errorJson(out, allocator, "board_path must end with .kicad_pcb");
+        return errorJson(out, allocator, invalid_board_suffix);
 
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
@@ -87,7 +97,9 @@ pub fn toolParseKicadNetlist(
         }
     }
 
-    const w = out.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w: AllocatingWriter = .{ .writer = &aw.writer };
     try w.print("{{\"ok\":true,\"part_count\":{d},\"net_count\":{d},\"components\":[", .{ parts.len, seen.count() });
     for (parts, 0..) |part, i| {
         if (i > 0) try w.writeAll(",");
@@ -97,27 +109,179 @@ pub fn toolParseKicadNetlist(
     return true;
 }
 
+/// `inspect_kicad_layout` (read-only): retain physical placement/copper/zones,
+/// adjacent project rules, and routing metrics instead of reducing the board
+/// to a netlist. `include_nets` adds per-net copper/via/pad totals.
+pub fn toolInspectKicadLayout(
+    allocator: std.mem.Allocator,
+    args_val: ?std.json.Value,
+    out: *std.ArrayList(u8),
+) std.mem.Allocator.Error!bool {
+    const board_path = requireString(args_val, key_board_path) orelse
+        return missingArg(out, allocator, key_board_path);
+    if (!std.mem.endsWith(u8, board_path, board_suffix))
+        return errorJson(out, allocator, invalid_board_suffix);
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const report = kicad_inspect.load(arena, board_path) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return errorJson(out, allocator, @errorName(err)),
+    };
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w: AllocatingWriter = .{ .writer = &aw.writer };
+    kicad_inspect.writeJson(
+        arena,
+        w,
+        report,
+        if (optionalBool(args_val, "include_nets") orelse false) .nets else .summary,
+    ) catch return error.OutOfMemory;
+    return true;
+}
+
+/// `benchmark_kicad_routing` (read-only): without `candidate_path`, report the
+/// virtual trace/via erasure that seeds an experiment. With a candidate, score
+/// it against fixed reference geometry and the reference project's hard rules.
+pub fn toolBenchmarkKicadRouting(
+    allocator: std.mem.Allocator,
+    args_val: ?std.json.Value,
+    out: *std.ArrayList(u8),
+) std.mem.Allocator.Error!bool {
+    const reference_path = requireString(args_val, "reference_path") orelse
+        return missingArg(out, allocator, "reference_path");
+    if (!std.mem.endsWith(u8, reference_path, board_suffix))
+        return errorJson(out, allocator, "reference_path must end with .kicad_pcb");
+    const candidate_path = optionalString(args_val, "candidate_path");
+    if (candidate_path) |path| if (!std.mem.endsWith(u8, path, board_suffix))
+        return errorJson(out, allocator, "candidate_path must end with .kicad_pcb");
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const reference = kicad_inspect.load(arena, reference_path) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return errorJson(out, allocator, @errorName(err)),
+    };
+    const nets = jsonStringList(arena, args_val, "nets");
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w: AllocatingWriter = .{ .writer = &aw.writer };
+    if (candidate_path == null) {
+        const erased = try kicad_experiment.virtualErase(arena, reference.board, nets);
+        try w.writeAll("{\"ok\":true,\"mode\":\"virtual-erasure\",\"reference_path\":");
+        try writeJsonString(w, reference_path);
+        try writeNameLists(w, erased.selected_nets, erased.unknown_nets);
+        try w.writeAll(",\"removed\":");
+        try writeCopperMetrics(w, erased.removed);
+        try w.writeAll(",\"retained\":");
+        try writeCopperMetrics(w, erased.retained);
+        try w.print(",\"seed\":{{\"segments\":{d},\"arcs\":{d},\"vias\":{d},\"zones_retained\":{d}}}}}", .{
+            erased.seed.segments.len,
+            erased.seed.arcs.len,
+            erased.seed.vias.len,
+            erased.seed.zones.len,
+        });
+        return true;
+    }
+
+    const candidate = kicad_inspect.load(arena, candidate_path.?) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return errorJson(out, allocator, @errorName(err)),
+    };
+    const score = try kicad_experiment.scoreCandidate(
+        arena,
+        reference.board,
+        candidate.board,
+        reference.project,
+        nets,
+    );
+    try w.writeAll("{\"ok\":true,\"mode\":\"score\",\"reference_path\":");
+    try writeJsonString(w, reference_path);
+    try w.writeAll(",\"candidate_path\":");
+    try writeJsonString(w, candidate_path.?);
+    try writeNameLists(w, score.selected_nets, score.unknown_nets);
+    try w.writeAll(",\"missing_nets\":");
+    try writeStringArray(w, score.missing_nets);
+    try w.print(",\"eligible_nets\":{d},\"routed_nets\":{d},\"fixed_geometry_mismatches\":{d}," ++
+        "\"rule_violations\":{d},\"reference_rule_violations\":{d},\"reference\":", .{
+        score.eligible_nets,
+        score.routed_nets,
+        score.fixed_geometry_mismatches,
+        score.rule_violations,
+        score.reference_rule_violations,
+    });
+    try writeCopperMetrics(w, score.reference);
+    try w.writeAll(",\"candidate\":");
+    try writeCopperMetrics(w, score.candidate);
+    try w.print(",\"reference_objective\":{d},\"objective\":{d}}}", .{
+        score.reference_objective,
+        score.objective,
+    });
+    return true;
+}
+
+fn jsonStringList(
+    arena: std.mem.Allocator,
+    args_val: ?std.json.Value,
+    key: []const u8,
+) []const []const u8 {
+    const args = args_val orelse return &.{};
+    if (args != .object) return &.{};
+    const value = args.object.get(key) orelse return &.{};
+    if (value != .array) return &.{};
+    var out: std.ArrayList([]const u8) = .empty;
+    for (value.array.items) |item| {
+        if (item == .string and item.string.len > 0) out.append(arena, item.string) catch return &.{};
+    }
+    return out.toOwnedSlice(arena) catch &.{};
+}
+
+fn writeNameLists(writer: anytype, selected: []const []const u8, unknown: []const []const u8) !void {
+    try writer.writeAll(",\"selected_nets\":");
+    try writeStringArray(writer, selected);
+    try writer.writeAll(",\"unknown_nets\":");
+    try writeStringArray(writer, unknown);
+}
+
+fn writeStringArray(writer: anytype, names: []const []const u8) !void {
+    try writer.writeByte('[');
+    for (names, 0..) |name, i| {
+        if (i > 0) try writer.writeByte(',');
+        try writeJsonString(writer, name);
+    }
+    try writer.writeByte(']');
+}
+
+fn writeCopperMetrics(writer: anytype, metrics: kicad_experiment.CopperMetrics) !void {
+    try writer.print(
+        "{{\"nets\":{d},\"segments\":{d},\"arcs\":{d},\"vias\":{d},\"length_mm\":{d}}}",
+        .{ metrics.nets, metrics.segments, metrics.arcs, metrics.vias, metrics.length_mm },
+    );
+}
+
 /// Emit one `{ref,value,lib,family,dnp,pads:[…]}` object. `family` is the
 /// mapped passive family (e.g. "cap-0402") or null for a custom part; each
 /// pad's `net` is normalized to "" when unconnected.
 fn writePart(w: anytype, part: import_kicad.Part) std.mem.Allocator.Error!void {
     try w.writeAll("{\"ref\":");
-    try json_writer.writeString(w, part.ref);
+    try writeJsonString(w, part.ref);
     try w.writeAll(",\"value\":");
-    try json_writer.writeString(w, part.value);
+    try writeJsonString(w, part.value);
     try w.writeAll(",\"lib\":");
-    try json_writer.writeString(w, part.lib_id);
+    try writeJsonString(w, part.lib_id);
     try w.writeAll(",\"family\":");
-    if (part.family) |fam| try json_writer.writeString(w, fam) else try w.writeAll("null");
+    if (part.family) |fam| try writeJsonString(w, fam) else try w.writeAll("null");
     try w.print(",\"dnp\":{s},\"pads\":[", .{if (part.dnp) "true" else "false"});
     for (part.pads, 0..) |pad, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"pad\":");
-        try json_writer.writeString(w, pad.number);
+        try writeJsonString(w, pad.number);
         try w.writeAll(",\"function\":");
-        try json_writer.writeString(w, pad.func);
+        try writeJsonString(w, pad.func);
         try w.writeAll(",\"net\":");
-        try json_writer.writeString(w, if (isConnected(pad.net)) pad.net else "");
+        try writeJsonString(w, if (isConnected(pad.net)) pad.net else "");
         try w.writeAll("}");
     }
     try w.writeAll("]}");
@@ -138,7 +302,7 @@ pub fn toolImportKicad(
         return missingArg(out, allocator, key_board_path);
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     if (!std.mem.endsWith(u8, board_path, board_suffix))
-        return errorJson(out, allocator, "board_path must end with .kicad_pcb");
+        return errorJson(out, allocator, invalid_board_suffix);
 
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
@@ -159,7 +323,9 @@ pub fn toolImportKicad(
         else => return errorJson(out, allocator, importErrorMessage(err)),
     };
 
-    const w = out.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w: AllocatingWriter = .{ .writer = &aw.writer };
     try w.print("{{\"ok\":true,\"parts\":{d},\"family_mapped\":{d},\"custom_parts\":{d}", .{
         summary.parts, summary.family_mapped, summary.custom_parts,
     });
@@ -167,10 +333,10 @@ pub fn toolImportKicad(
         summary.lib_written, summary.lib_existing, summary.nets, summary.dropped_pins,
     });
     try w.writeAll(",\"design_path\":");
-    try json_writer.writeString(w, summary.design_path);
+    try writeJsonString(w, summary.design_path);
     if (summary.folded_channels > 0) {
         try w.writeAll(",\"fold\":{\"module\":");
-        try json_writer.writeString(w, summary.fold_module);
+        try writeJsonString(w, summary.fold_module);
         try w.print(",\"channels\":{d},\"parts_each\":{d},\"skipped\":{d}}}", .{
             summary.folded_channels, summary.folded_parts_each, summary.fold_skipped,
         });
@@ -210,16 +376,16 @@ const test_board =
 /// Write `test_board` into a tmp dir with a `lib/components/cap-0402.sexp`
 /// family file, returning the tmp dir (caller cleans up) and the board path.
 fn writeTestBoard(tmp: *std.testing.TmpDir, arena: std.mem.Allocator) ![]const u8 {
-    try tmp.dir.makePath("lib/components");
-    try tmp.dir.writeFile(.{ .sub_path = "lib/components/cap-0402.sexp", .data = "(component-family \"cap-0402\")" });
-    try tmp.dir.writeFile(.{ .sub_path = "board.kicad_pcb", .data = test_board });
-    const dir = try tmp.dir.realpathAlloc(arena, ".");
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/cap-0402.sexp", .data = "(component-family \"cap-0402\")" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "board.kicad_pcb", .data = test_board });
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", arena);
     return std.fmt.allocPrint(arena, "{s}/board.kicad_pcb", .{dir});
 }
 
 fn objectArgs(arena: std.mem.Allocator, pairs: []const [2][]const u8) !std.json.Value {
-    var obj = std.json.ObjectMap.init(arena);
-    for (pairs) |p| try obj.put(p[0], .{ .string = p[1] });
+    var obj: std.json.ObjectMap = .empty;
+    for (pairs) |p| try obj.put(arena, p[0], .{ .string = p[1] });
     return .{ .object = obj };
 }
 
@@ -231,7 +397,7 @@ test "parse_kicad_netlist returns components, pads, and connected net count" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const board_path = try writeTestBoard(&tmp, arena);
-    const project_dir = try tmp.dir.realpathAlloc(arena, ".");
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", arena);
 
     const args = try objectArgs(arena, &.{.{ key_board_path, board_path }});
     var out: std.ArrayList(u8) = .empty;
@@ -274,13 +440,13 @@ test "import_kicad dry_run reports counts and writes nothing" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const board_path = try writeTestBoard(&tmp, arena);
-    const project_dir = try tmp.dir.realpathAlloc(arena, ".");
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", arena);
 
     // objectArgs only builds string values, so set dry_run as a real JSON bool.
-    var obj = std.json.ObjectMap.init(arena);
-    try obj.put(key_board_path, .{ .string = board_path });
-    try obj.put("name", .{ .string = "smoketest" });
-    try obj.put("dry_run", .{ .bool = true });
+    var obj: std.json.ObjectMap = .empty;
+    try obj.put(arena, key_board_path, .{ .string = board_path });
+    try obj.put(arena, "name", .{ .string = "smoketest" });
+    try obj.put(arena, "dry_run", .{ .bool = true });
 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
@@ -292,5 +458,8 @@ test "import_kicad dry_run reports counts and writes nothing" {
     try testing.expect(std.mem.indexOf(u8, out.items, "\"family_mapped\":1") != null);
     try testing.expect(std.mem.indexOf(u8, out.items, "\"dry_run\":true") != null);
     // dry_run must not write the design file.
-    try testing.expectError(error.FileNotFound, tmp.dir.access("src/smoketest.sexp", .{}));
+    try testing.expectError(
+        error.FileNotFound,
+        tmp.dir.access(std.testing.io, "src/smoketest.sexp", .{}),
+    );
 }

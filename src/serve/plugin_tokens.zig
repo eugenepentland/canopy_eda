@@ -28,7 +28,7 @@ const ensureAuthDir = auth_store.ensureAuthDir;
 /// (hashes only). Instance state carried on `ServerState` (it used to be a
 /// file-scope global); rows live in `store_alloc` (process lifetime).
 pub const PluginTokenStore = struct {
-    mu: std.Thread.Mutex = .{},
+    mu: infra_fs.Mutex = .{},
     tokens_list: std.ArrayList(Token) = .empty,
     loaded_auth_dir: ?[]const u8 = null,
 
@@ -64,9 +64,9 @@ pub const PluginTokenStore = struct {
         ensureAuthDir(auth_dir);
         const path = tokensPath(allocator, auth_dir) catch return;
         defer allocator.free(path);
-        var bw: std.ArrayList(u8) = .empty;
-        defer bw.deinit(allocator);
-        const w = bw.writer(allocator);
+        var bw: std.Io.Writer.Allocating = .init(allocator);
+        defer bw.deinit();
+        const w = &bw.writer;
         w.writeAll("[") catch return;
         for (self.tokens_list.items, 0..) |t, i| {
             if (i > 0) w.writeAll(",") catch return;
@@ -77,7 +77,7 @@ pub const PluginTokenStore = struct {
             w.print(",\"created_at\":{d}}}", .{t.created_at}) catch return;
         }
         w.writeAll("]") catch return;
-        auth_store.writeFileAtomicWithBackup(allocator, path, bw.items);
+        auth_store.writeFileAtomicWithBackup(allocator, path, bw.written());
     }
 
     /// Mint a new plugin token. Returns the raw token string (prefix `eda_p_`) —
@@ -87,7 +87,7 @@ pub const PluginTokenStore = struct {
         allocator: std.mem.Allocator,
         auth_dir: []const u8,
         label: []const u8,
-    ) std.mem.Allocator.Error![]const u8 {
+    ) (std.mem.Allocator.Error || std.Io.RandomSecureError)![]const u8 {
         self.mu.lock();
         defer self.mu.unlock();
         self.ensureLoaded(allocator, auth_dir);
@@ -128,7 +128,7 @@ fn randomHex(allocator: std.mem.Allocator, n_chars: usize) ![]u8 {
     const n_bytes = (n_chars + 1) / 2;
     const bytes = try allocator.alloc(u8, n_bytes);
     defer allocator.free(bytes);
-    infra_random.bytes(bytes);
+    try infra_random.bytes(bytes);
     var out = try allocator.alloc(u8, n_chars);
     const hex = "0123456789abcdef";
     var i: usize = 0;

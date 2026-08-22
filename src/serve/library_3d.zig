@@ -11,6 +11,7 @@ const footprint_mod = @import("../export_kicad_footprint.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const ast = @import("../sexpr/ast.zig");
 const serve_root = @import("../serve.zig");
+const lib_limits = @import("../lib_limits.zig");
 const Server = serve_root.Server;
 
 /// Percent-decode a URL path param. httpz returns params verbatim, so a
@@ -21,9 +22,13 @@ fn urlDecode(allocator: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Er
     return std.Uri.percentDecodeInPlace(buf);
 }
 
-const max_footprint_bytes: usize = 256 * 1024;
 const max_model_bytes: usize = 64 * 1024 * 1024;
 const max_body_bytes: usize = 16 * 1024;
+const max_sprite_bytes: usize = 8 * 1024 * 1024;
+const max_sprite_meta_bytes: usize = 2048;
+const sprite_render_version = "2";
+const sprite_cache_rel = "lib/models/.sprites";
+const png_signature = "\x89PNG\r\n\x1a\n";
 
 /// Route param name shared by all three handlers (`:footprint`).
 const param_footprint = "footprint";
@@ -71,6 +76,14 @@ fn resolveModelName(allocator: std.mem.Allocator, project_dir: []const u8, footp
 /// browser-side OpenCASCADE (occt-import-js) WASM can parse it. 404 when the
 /// footprint has no model. Served as binary; the viewer fetches it once.
 pub fn modelFileApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    if (std.mem.startsWith(u8, req.url.path, "/api/model-sprite/")) {
+        if (req.method == .POST) return saveModelSpriteApi(ctx, req, res);
+        return modelSpriteApi(ctx, req, res);
+    }
+    return serveModelFile(ctx, req, res);
+}
+
+fn serveModelFile(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const footprint_raw = req.param(param_footprint) orelse return notFound(res);
     const footprint = urlDecode(req.arena, footprint_raw) catch return notFound(res);
     if (!isSafeFootprint(footprint)) return notFound(res);
@@ -80,6 +93,224 @@ pub fn modelFileApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
     res.content_type = .BINARY;
     res.header("Cache-Control", "no-store");
     res.body = bytes;
+}
+
+// ── GET/POST /api/model-sprite/:footprint ────────────────────────
+
+const SpriteBounds = struct { x: f64, y: f64, w: f64, h: f64 };
+
+const SpriteSource = struct {
+    key: u64,
+    offset: [3]f64,
+    rotation: [3]f64,
+};
+
+const CachedSprite = struct {
+    bounds: SpriteBounds,
+    png: []const u8,
+};
+
+/// Resolve the model identity that determines a sprite. File size/mtime avoids
+/// reading a multi-megabyte STEP file on every assembly load; the transform and
+/// renderer version ensure alignment or rendering changes cause a cache miss.
+fn spriteSource(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    footprint: []const u8,
+) ?SpriteSource {
+    const model_name = resolveModelName(allocator, project_dir, footprint) orelse return null;
+    const model_path = std.fmt.allocPrint(allocator, "{s}/lib/models/{s}", .{ project_dir, model_name }) catch return null;
+    const stat = infra_fs.cwd().statFile(model_path) catch return null;
+    const cfg = export_kicad.loadModelConfig(allocator, project_dir);
+    const tf = cfg.get(footprint);
+    const offset = if (tf) |t| t.offset else [3]f64{ 0, 0, 0 };
+    const rotation = if (tf) |t| t.rotation else [3]f64{ 0, 0, 0 };
+
+    var hash = std.hash.Wyhash.init(0x535052495445);
+    hash.update(sprite_render_version);
+    hash.update(model_name);
+    var size = stat.size;
+    var mtime = stat.mtime.nanoseconds;
+    hash.update(std.mem.asBytes(&size));
+    hash.update(std.mem.asBytes(&mtime));
+    var transform_buf: [256]u8 = undefined;
+    const transform = std.fmt.bufPrint(&transform_buf, "{d},{d},{d};{d},{d},{d}", .{
+        offset[0], offset[1], offset[2], rotation[0], rotation[1], rotation[2],
+    }) catch return null;
+    hash.update(transform);
+    return .{ .key = hash.final(), .offset = offset, .rotation = rotation };
+}
+
+fn spriteKeyText(buf: []u8, key: u64) []const u8 {
+    return std.fmt.bufPrint(buf, "{x:0>16}", .{key}) catch "0";
+}
+
+fn spriteCachePath(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    footprint: []const u8,
+    extension: []const u8,
+) std.mem.Allocator.Error![]const u8 {
+    return std.fmt.allocPrint(allocator, "{s}/{s}/{s}.{s}", .{ project_dir, sprite_cache_rel, footprint, extension });
+}
+
+fn jsonFloat(value: std.json.Value) ?f64 {
+    return switch (value) {
+        .float => |n| n,
+        .integer => |n| @floatFromInt(n),
+        else => null,
+    };
+}
+
+fn validBounds(bounds: SpriteBounds) bool {
+    const values = [_]f64{ bounds.x, bounds.y, bounds.w, bounds.h };
+    for (values) |value| if (!std.math.isFinite(value) or @abs(value) > 10_000) return false;
+    return bounds.w > 0 and bounds.h > 0;
+}
+
+/// Read the cache only when its metadata key matches the current model source.
+fn readSpriteCache(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    footprint: []const u8,
+    source: SpriteSource,
+) ?CachedSprite {
+    const meta_path = spriteCachePath(allocator, project_dir, footprint, "json") catch return null;
+    const meta_bytes = infra_fs.cwd().readFileAlloc(allocator, meta_path, max_sprite_meta_bytes) catch return null;
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, allocator, meta_bytes, .{}) catch return null;
+    const object = switch (parsed) {
+        .object => |obj| obj,
+        else => return null,
+    };
+    const key_value = object.get("key") orelse return null;
+    const cached_key = switch (key_value) {
+        .string => |value| value,
+        else => return null,
+    };
+    var key_buf: [16]u8 = undefined;
+    if (!std.mem.eql(u8, cached_key, spriteKeyText(&key_buf, source.key))) return null;
+    const bounds = SpriteBounds{
+        .x = jsonFloat(object.get("x") orelse return null) orelse return null,
+        .y = jsonFloat(object.get("y") orelse return null) orelse return null,
+        .w = jsonFloat(object.get("w") orelse return null) orelse return null,
+        .h = jsonFloat(object.get("h") orelse return null) orelse return null,
+    };
+    if (!validBounds(bounds)) return null;
+    const png_path = spriteCachePath(allocator, project_dir, footprint, "png") catch return null;
+    const png = infra_fs.cwd().readFileAlloc(allocator, png_path, max_sprite_bytes) catch return null;
+    if (!std.mem.startsWith(u8, png, png_signature)) return null;
+    return .{ .bounds = bounds, .png = png };
+}
+
+fn writeAtomic(path: []const u8, bytes: []const u8) !void {
+    var write_buf: [8192]u8 = undefined;
+    var atomic = try infra_fs.cwd().atomicFile(path, .{ .write_buffer = &write_buf });
+    defer atomic.deinit();
+    try atomic.file_writer.interface.writeAll(bytes);
+    try atomic.finish();
+}
+
+/// Store PNG first and metadata second. A crash between them remains a safe
+/// miss because readers trust the picture only after matching the metadata key.
+fn writeSpriteCache(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    footprint: []const u8,
+    key: []const u8,
+    bounds: SpriteBounds,
+    png: []const u8,
+) !void {
+    const dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ project_dir, sprite_cache_rel });
+    try infra_fs.cwd().makePath(dir);
+    const png_path = try spriteCachePath(allocator, project_dir, footprint, "png");
+    try writeAtomic(png_path, png);
+
+    var meta: std.Io.Writer.Allocating = .init(allocator);
+    defer meta.deinit();
+    try meta.writer.print(
+        "{{\"key\":\"{s}\",\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d}}}\n",
+        .{ key, bounds.x, bounds.y, bounds.w, bounds.h },
+    );
+    const meta_path = try spriteCachePath(allocator, project_dir, footprint, "json");
+    try writeAtomic(meta_path, meta.written());
+}
+
+fn headerFloat(res: *httpz.Response, allocator: std.mem.Allocator, name: []const u8, value: f64) !void {
+    res.header(name, try std.fmt.allocPrint(allocator, "{d}", .{value}));
+}
+
+fn sourceHeaders(res: *httpz.Response, allocator: std.mem.Allocator, source: SpriteSource) !void {
+    var key_buf: [16]u8 = undefined;
+    res.header("X-Netlisp-Sprite-Key", try allocator.dupe(u8, spriteKeyText(&key_buf, source.key)));
+    res.header("X-Netlisp-Model-Offset", try std.fmt.allocPrint(allocator, "{d},{d},{d}", .{
+        source.offset[0], source.offset[1], source.offset[2],
+    }));
+    res.header("X-Netlisp-Model-Rotation", try std.fmt.allocPrint(allocator, "{d},{d},{d}", .{
+        source.rotation[0], source.rotation[1], source.rotation[2],
+    }));
+}
+
+/// Serve a persistent transparent component picture. A miss still returns the
+/// current source key and model transform in headers so the browser can render
+/// exactly that version once and POST it back for later assembly loads.
+fn modelSpriteApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const footprint_raw = req.param(param_footprint) orelse return notFound(res);
+    const footprint = urlDecode(req.arena, footprint_raw) catch return notFound(res);
+    if (!isSafeFootprint(footprint)) return notFound(res);
+    const source = spriteSource(req.arena, ctx.project_dir, footprint) orelse return notFound(res);
+    try sourceHeaders(res, req.arena, source);
+    const cached = readSpriteCache(req.arena, ctx.project_dir, footprint, source) orelse return notFound(res);
+    try headerFloat(res, req.arena, "X-Netlisp-Sprite-X", cached.bounds.x);
+    try headerFloat(res, req.arena, "X-Netlisp-Sprite-Y", cached.bounds.y);
+    try headerFloat(res, req.arena, "X-Netlisp-Sprite-W", cached.bounds.w);
+    try headerFloat(res, req.arena, "X-Netlisp-Sprite-H", cached.bounds.h);
+    res.header("Cache-Control", "no-store");
+    res.content_type = .PNG;
+    res.body = cached.png;
+}
+
+fn queryValue(req: *httpz.Request, key: []const u8) ?[]const u8 {
+    const query = req.query() catch return null;
+    return query.get(key);
+}
+
+fn queryFloat(req: *httpz.Request, key: []const u8) ?f64 {
+    return std.fmt.parseFloat(f64, queryValue(req, key) orelse return null) catch null;
+}
+
+/// Accept the one-time browser-rendered PNG for the current STEP identity.
+/// Stale renders are rejected by key, and bounded/signature-checked bodies keep
+/// this generated-file endpoint from becoming an arbitrary upload surface.
+fn saveModelSpriteApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    res.content_type = .JSON;
+    const footprint_raw = req.param(param_footprint) orelse return badRequest(res, "missing footprint");
+    const footprint = urlDecode(req.arena, footprint_raw) catch return badRequest(res, "invalid footprint");
+    if (!isSafeFootprint(footprint)) return badRequest(res, "invalid footprint");
+    const png = req.body() orelse return badRequest(res, "missing body");
+    if (png.len > max_sprite_bytes or !std.mem.startsWith(u8, png, png_signature)) return badRequest(res, "invalid PNG");
+    const source = spriteSource(req.arena, ctx.project_dir, footprint) orelse return notFound(res);
+    const supplied_key = queryValue(req, "key") orelse return badRequest(res, "missing key");
+    var key_buf: [16]u8 = undefined;
+    if (!std.mem.eql(u8, supplied_key, spriteKeyText(&key_buf, source.key))) {
+        res.status = 409;
+        res.body = "{\"ok\":false,\"error\":\"stale model\"}";
+        return;
+    }
+    const bounds = SpriteBounds{
+        .x = queryFloat(req, "x") orelse return badRequest(res, "invalid bounds"),
+        .y = queryFloat(req, "y") orelse return badRequest(res, "invalid bounds"),
+        .w = queryFloat(req, "w") orelse return badRequest(res, "invalid bounds"),
+        .h = queryFloat(req, "h") orelse return badRequest(res, "invalid bounds"),
+    };
+    if (!validBounds(bounds)) return badRequest(res, "invalid bounds");
+    writeSpriteCache(req.arena, ctx.project_dir, footprint, supplied_key, bounds, png) catch |err| {
+        log.warn("model-sprite: write {s} failed: {s}", .{ footprint, @errorName(err) });
+        res.status = 500;
+        res.body = "{\"ok\":false,\"error\":\"write failed\"}";
+        return;
+    };
+    res.status = 201;
+    res.body = "{\"ok\":true}";
 }
 
 // ── GET /library/3d/:footprint ─────────────────────────────────────
@@ -198,7 +429,7 @@ fn writePadsAndCourtyard(
         try w.writeAll(empty_pads_tail);
         return;
     };
-    const source = infra_fs.cwd().readFileAlloc(arena, path, max_footprint_bytes) catch {
+    const source = infra_fs.cwd().readFileAlloc(arena, path, lib_limits.max_footprint_bytes) catch {
         try w.writeAll(empty_pads_tail);
         return;
     };
@@ -428,8 +659,8 @@ fn writeModelConfig(
 ) !void {
     const cfg = export_kicad.loadModelConfig(arena, project_dir);
 
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(arena);
+    var buf: std.Io.Writer.Allocating = .init(arena);
+    const w = &buf.writer;
     try w.writeAll("{\n");
 
     var wrote_target = false;
@@ -451,7 +682,7 @@ fn writeModelConfig(
     const dir = std.fmt.allocPrint(arena, "{s}/lib/models", .{project_dir});
     try infra_fs.cwd().makePath(try dir);
     const path = try std.fmt.allocPrint(arena, "{s}/lib/models/model-config.json", .{project_dir});
-    try writeFileAtomic(arena, path, buf.items);
+    try writeFileAtomic(arena, path, buf.written());
 }
 
 /// Emit one `"footprint":{"offset":[…],"rotation":[…][,"model":"…"]}` entry,
@@ -534,6 +765,44 @@ const controls_html = @embedFile("assets/model_viewer_3d_controls.html");
 
 // ── Tests ──────────────────────────────────────────────────────────
 
+// spec: Web Server - the assembly model-picture cache invalidates when its STEP file or saved alignment changes
+test "model sprite filesystem cache invalidates with model and transform" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "lib/models");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/models/demo.step", .data = "step-v1" });
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", aa);
+
+    const first = spriteSource(aa, project_dir, "demo") orelse return error.TestUnexpectedResult;
+    var first_key_buf: [16]u8 = undefined;
+    const first_key = try aa.dupe(u8, spriteKeyText(&first_key_buf, first.key));
+    const bounds = SpriteBounds{ .x = -1.25, .y = -2.5, .w = 3.75, .h = 4.5 };
+    const png = png_signature ++ "cached-pixels";
+    try writeSpriteCache(aa, project_dir, "demo", first_key, bounds, png);
+    const hit = readSpriteCache(aa, project_dir, "demo", first) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(png, hit.png);
+    try std.testing.expectApproxEqAbs(bounds.x, hit.bounds.x, 1e-9);
+    try std.testing.expectApproxEqAbs(bounds.h, hit.bounds.h, 1e-9);
+
+    // A replaced STEP cannot reuse the old picture even when its filename is
+    // unchanged; changing the byte count makes the source identity distinct.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/models/demo.step", .data = "step-version-two" });
+    const replaced = spriteSource(aa, project_dir, "demo") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(replaced.key != first.key);
+    try std.testing.expect(readSpriteCache(aa, project_dir, "demo", replaced) == null);
+
+    var replaced_key_buf: [16]u8 = undefined;
+    const replaced_key = try aa.dupe(u8, spriteKeyText(&replaced_key_buf, replaced.key));
+    try writeSpriteCache(aa, project_dir, "demo", replaced_key, bounds, png);
+    try writeModelConfig(aa, project_dir, "demo", .{ 1, 0, 0 }, .{ 0, 0, 90 });
+    const realigned = spriteSource(aa, project_dir, "demo") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(realigned.key != replaced.key);
+    try std.testing.expect(readSpriteCache(aa, project_dir, "demo", realigned) == null);
+}
+
 test "writeModelConfig round-trips through loadModelConfig, preserving other entries + model overrides" {
     const alloc = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(alloc);
@@ -542,17 +811,17 @@ test "writeModelConfig round-trips through loadModelConfig, preserving other ent
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("lib/models");
+    try tmp.dir.createDirPath(std.testing.io, "lib/models");
     // Seed an existing config in the exact format loadModelConfig reads
     // (no space after the field colons), with a model override + non-zero
     // transforms — the values a regression must not clobber.
-    try tmp.dir.writeFile(.{ .sub_path = "lib/models/model-config.json", .data = 
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/models/model-config.json", .data =
         \\{
         \\  "withmodel":{"model":"foo.step","offset":[0,0,0.06],"rotation":[90,0,0]},
         \\  "plain":{"offset":[23.75,9.5,-5.25],"rotation":[0,0,0]}
         \\}
     });
-    const proj = try tmp.dir.realpathAlloc(aa, ".");
+    const proj = try tmp.dir.realPathFileAlloc(std.testing.io, ".", aa);
 
     // Add a brand-new entry.
     try writeModelConfig(aa, proj, "newpart", .{ 1, -2, 3 }, .{ 45, 0, 180 });

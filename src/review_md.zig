@@ -2,7 +2,8 @@
 //! twin of what the schematic page shows. One `.md` document with: a status
 //! summary, the block overview (the page's lead grouped-cards diagram), a
 //! validation block (ERC + assertions + per-IC requirement checks), the power
-//! budget/sequencing + test-point tables, and the per-section schematic SVGs.
+//! budget/sequencing + thermal + test-point tables, and the per-section schematic
+//! SVGs.
 //! The verbatim `.sexp` source is NOT embedded — the export zip already ships
 //! every source file separately.
 //!
@@ -18,6 +19,9 @@ const review = @import("review.zig");
 const req_checks = @import("req_checks.zig");
 const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
+const review_thermal = @import("review_thermal.zig");
+const thermal = @import("eval/thermal.zig");
+const thermal_scenarios = @import("thermal_scenarios.zig");
 const block_diagram = @import("diagram/diagram.zig");
 const membership = @import("diagram/membership.zig");
 const render_html = @import("render_html.zig");
@@ -57,8 +61,8 @@ pub fn renderToMarkdown(
     var ctx = try render_html.setupRenderCtx(allocator, block);
     ctx.project_dir = project_dir;
 
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    const w = &buf.writer;
 
     // Title + generation timestamp + build stamp
     try w.print("# Design Review: {s}\n\n", .{design_name});
@@ -94,14 +98,15 @@ pub fn renderToMarkdown(
     try writeErc(w, doc.unresolved);
     try writeAssertions(w, doc.assertions);
     try writeRequirementChecklist(allocator, w, doc);
-    try writePowerBudget(w, doc.power_budget);
-    try writePowerSequence(w, doc.power_sequence);
+    try writePowerBudget(w, doc.power.budget);
+    try writePowerSequence(w, doc.power.sequence);
+    try writeThermal(allocator, w, doc.power.thermal, doc.power.scenarios);
     try writeTestPoints(w, doc.test_points);
     // The detailed visual schematic last — it's the longest part even compacted.
     try writeSchematicSections(allocator, &ctx, w, block);
     try writeBomStub(w, design_name, doc.bom);
 
-    return buf.toOwnedSlice(allocator);
+    return buf.toOwnedSlice();
 }
 
 /// Render the `README.md` that ships at the root of the review-export zip — a
@@ -116,8 +121,8 @@ pub fn renderReadme(
     build_id: []const u8,
     source_names: []const []const u8,
 ) (std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    const w = &buf.writer;
 
     try w.print("# Review package — {s}\n\n", .{design_name});
     try w.print(
@@ -137,7 +142,7 @@ pub fn renderReadme(
             "  - **Block Overview** — grouped-cards system diagram with a concept / schematic / done maturity legend\n" ++
             "  - **Validation** — ERC violations, design assertions, and per-IC requirement checks " ++
             "(pass / fail / verified / pending) with datasheet citations\n" ++
-            "  - **Power Budget / Power Sequencing / Test Points** — the engineering tables\n" ++
+            "  - **Power Budget / Power Sequencing / Thermal / Test Points** — the engineering tables\n" ++
             "  - **Schematic** — per-section hub schematics (collapsed — click each to expand)\n" ++
             "  - **Bill of Materials** — part totals\n",
     );
@@ -194,7 +199,7 @@ pub fn renderReadme(
         );
     }
 
-    return buf.toOwnedSlice(allocator);
+    return buf.toOwnedSlice();
 }
 
 // ── Sections ──────────────────────────────────────────────────────────
@@ -277,6 +282,67 @@ fn writePowerSequence(w: anytype, rows: []const power_sequencing.SequenceRow) !v
             dashIfEmpty(row.depends_on),
             dashIfEmpty(row.via),
             @tagName(row.status),
+        });
+    }
+    try w.writeAll("\n");
+}
+
+/// The Thermal section: the verdict as a sentence, the ambient window, one row
+/// per screened part, and the coverage line. A board with nothing to judge
+/// prints the coverage line and the hint naming the forms to add rather than
+/// an empty table a reader would take for a pass.
+fn writeThermal(
+    allocator: Allocator,
+    w: anytype,
+    bt: thermal.BoardThermal,
+    scenarios: thermal_scenarios.Answer,
+) !void {
+    const lines = try review_thermal.summaryLines(allocator, bt, scenarios);
+    try w.writeAll("## Thermal\n\n");
+    try w.print("**{s}**\n\n", .{lines.verdict});
+    // Kept, demoted and labelled — see review_thermal.summaryLines.
+    if (lines.package.len > 0) try w.print("{s}\n\n", .{lines.package});
+    if (lines.ambient.len > 0) try w.print("Board ambient range: {s}\n\n", .{lines.ambient});
+    if (bt.parts.len > 0) {
+        try w.writeAll("| Ref | Component | P (W) | θJA (°C/W) | Tj (°C) | Margin (°C) | Max ambient (°C) |\n");
+        try w.writeAll("|-----|-----------|-------|------------|---------|-------------|------------------|\n");
+        for (bt.parts) |row| {
+            const c = try review_thermal.cells(allocator, row);
+            try w.print("| `{s}` | {s} | {s} | {s} | {s} | {s} | {s} |\n", .{
+                c.ref_des, c.component, c.power, c.theta, c.tj, c.margin, c.max_ambient,
+            });
+        }
+        try w.writeAll("\n");
+    }
+    try writeCoolingScenarios(allocator, w, scenarios);
+    try w.print("Coverage: {s}.\n\n", .{lines.coverage});
+    if (lines.hint.len > 0) try w.print("{s}\n\n", .{lines.hint});
+}
+
+/// The cooling-scenario table: what still air, forced air and a heatsink each
+/// buy this board once the heat is spread over the placement it actually has.
+/// With no layout to spread over, one line says so rather than a table
+/// describing a board that was never placed.
+fn writeCoolingScenarios(
+    allocator: Allocator,
+    w: anytype,
+    scenarios: thermal_scenarios.Answer,
+) !void {
+    const ladder = scenarios.ladder orelse {
+        try w.print("{s}\n\n", .{review_thermal.scenarioNote(scenarios)});
+        return;
+    };
+    try w.print(
+        "### Cooling scenarios\n\nLayout-aware: each part's heat is spread over the placed " ++
+            "board and read back at {d} °C ambient.\n\n",
+        .{ladder.ambient_c},
+    );
+    try w.writeAll("| Scenario | Hottest part | Tj (°C) | Max ambient (°C) | Limited by |\n");
+    try w.writeAll("|----------|--------------|---------|------------------|------------|\n");
+    for (ladder.rows) |row| {
+        const c = try review_thermal.scenarioCells(allocator, ladder, row);
+        try w.print("| {s} | `{s}` | {s} | {s} | {s} |\n", .{
+            c.scenario, c.hottest, c.tj, c.max_ambient, c.limiting,
         });
     }
     try w.writeAll("\n");
@@ -439,12 +505,12 @@ fn writeHubBlock(
         try escape.writeXml(w, value);
     }
     try w.writeAll("</summary>\n\n");
-    var sub_buf: std.ArrayList(u8) = .empty;
-    defer sub_buf.deinit(allocator);
-    const sw = sub_buf.writer(allocator);
+    var sub_buf: std.Io.Writer.Allocating = .init(allocator);
+    defer sub_buf.deinit();
+    const sw = &sub_buf.writer;
     const rendered = render_html.renderHubSvg(ctx, sw, allocator, pin_groups, ref_des) catch false;
     if (rendered) {
-        try writeCompactSvg(allocator, w, sub_buf.items);
+        try writeCompactSvg(allocator, w, sub_buf.written());
         try w.writeAll("\n");
     } else {
         try w.writeAll("*No schematic body — only passives or no pin groupings declared.*\n");
@@ -693,8 +759,7 @@ test "renderToMarkdown header" {
             .assertion_fail = 0,
         },
         .sections = &.{},
-        .power_budget = &.{},
-        .power_sequence = &.{},
+        .power = .{ .budget = &.{}, .sequence = &.{}, .thermal = .{ .ambient_c = 25 } },
         .test_points = &.{},
         .bom = &.{},
         .assertions = &.{},
@@ -732,4 +797,65 @@ test "writeRequirementEntry badges a verified fail as overridden" {
     // The overridden badge must sit on the verified requirement, not the plain
     // one — a `!=`→`==` flip swaps the two badges.
     try std.testing.expect(std.mem.indexOf(u8, aw.written(), "*(overridden)* — Rail within tolerance") != null);
+}
+
+// spec: review_md - the markdown Thermal section carries the verdict sentence, the ambient range, one row per screened part, and the coverage line
+test "the markdown thermal section carries its verdict, range, row and coverage" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    const parts = [_]thermal.PartThermal{.{
+        .ref_des = "ldo/U1",
+        .component = "ldo-chip",
+        .power = .{ .watts = 0.85, .source = .regulator_loss },
+        .theta = .{ .ja = 60, .estimated = true },
+        .limits = .{ .tj_max = 125, .tj_max_default = true },
+        .result = .{ .rise_c = 51, .tj_at_ambient = 76, .margin_c = 49, .max_ambient_c = 74 },
+    }};
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    try writeThermal(alloc, &aw.writer, .{
+        .ambient_c = 25,
+        .parts = &parts,
+        .verdict = .passive_ok,
+        .limiting_ref = "ldo/U1",
+        .max_ambient = .{ .c = 74, .ref_des = "ldo/U1" },
+        .counts = .{ .with_power = 1 },
+    }, .{});
+    const out = aw.written();
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "## Thermal") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "**Passive cooling OK at 25 °C.**") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Board ambient range: up to 74 °C, hot limit set by ldo/U1") != null);
+    // The row is a markdown table row built from the shared cells.
+    try std.testing.expect(std.mem.indexOf(u8, out, "| `ldo/U1` | ldo-chip | 0.850 (reg-loss) | 60.0 est. | 76.0 | 49.0 | 74.0 |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Coverage: power known for 1 parts") != null);
+    // Nothing to fix here, so no grammar hint is printed.
+    try std.testing.expect(std.mem.indexOf(u8, out, "(power W)") == null);
+}
+
+// spec: review_md - the markdown Thermal section carries the cooling-scenario table with one row per scenario, and prints the missing-layout reason when there is no ladder
+test "the markdown thermal section carries the cooling-scenario table" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    const bt = thermal.BoardThermal{ .ambient_c = 25, .verdict = .needs_airflow, .limiting_ref = "U5" };
+    var with: std.Io.Writer.Allocating = .init(alloc);
+    try writeThermal(alloc, &with.writer, bt, .{ .ladder = review_thermal.testLadder("U5") });
+    const out = with.written();
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "### Cooling scenarios") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "read back at 25 °C ambient") != null);
+    // One markdown row per rung, in ladder order, built from the shared cells.
+    try std.testing.expect(std.mem.indexOf(u8, out, "| Still air | `U5` | 96.0 | 71.0 | U5 |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "| 1 m/s airflow | `U5` | 78.0 | 88.0 | U5 |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "| 2 m/s airflow | `U5` | 70.0 | 95.0 | U5 |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "| Heatsink on U5 (board backside) | `U5` | 64.0 | 85.0 | OSC1 |") != null);
+
+    // With no ladder the section says why, and prints no table at all.
+    var without: std.Io.Writer.Allocating = .init(alloc);
+    try writeThermal(alloc, &without.writer, bt, .{});
+    try std.testing.expect(std.mem.indexOf(u8, without.written(), "### Cooling scenarios") == null);
+    try std.testing.expect(std.mem.indexOf(u8, without.written(), "layout") != null);
 }

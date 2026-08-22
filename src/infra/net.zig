@@ -5,6 +5,7 @@
 //! touching `std.http` directly, so the network boundary stays in one place.
 
 const std = @import("std");
+const infra_fs = @import("fs.zig");
 
 /// HTTP client the ward verifiers borrow to call wardd's verify and token
 /// introspection endpoints. Aliased here so consumers never name `std.http`.
@@ -13,5 +14,5 @@ pub const HttpClient = std.http.Client;
 /// Build an HTTP client bound to `allocator` (process-lifetime in practice, so
 /// the connection pool survives across requests). The caller owns it.
 pub fn initHttpClient(allocator: std.mem.Allocator) HttpClient {
-    return .{ .allocator = allocator };
+    return .{ .allocator = allocator, .io = infra_fs.currentIo() };
 }

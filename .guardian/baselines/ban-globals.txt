@@ -1,31 +1,33 @@
-# guardian-snapshot v1
-src/bench_layout.zig:45: mutable global var outside wiring/main
-src/placement/optimizer.zig:2832: mutable global var outside wiring/main
-src/placement/optimizer.zig:2833: mutable global var outside wiring/main
-src/placement/optimizer.zig:302: mutable global var outside wiring/main
-src/placement/optimizer.zig:895: mutable global var outside wiring/main
-src/placement/optimizer.zig:903: mutable global var outside wiring/main
-src/placement/optimizer.zig:910: mutable global var outside wiring/main
-src/placement/optimizer.zig:917: mutable global var outside wiring/main
-src/placement/optimizer.zig:924: mutable global var outside wiring/main
-src/placement/optimizer.zig:930: mutable global var outside wiring/main
-src/placement/optimizer.zig:939: mutable global var outside wiring/main
-src/placement/optimizer.zig:945: mutable global var outside wiring/main
-src/placement/optimizer.zig:975: mutable global var outside wiring/main
-src/serve.zig:133: mutable global var outside wiring/main
-src/serve.zig:134: mutable global var outside wiring/main
-src/serve.zig:57: mutable global var outside wiring/main
-src/serve.zig:58: mutable global var outside wiring/main
-src/serve.zig:79: mutable global var outside wiring/main
-src/serve.zig:80: mutable global var outside wiring/main
-src/serve/mcp_tools.zig:2252: mutable global var outside wiring/main
-src/serve/mcp_tools.zig:2253: mutable global var outside wiring/main
-src/serve/modules.zig:294: mutable global var outside wiring/main
-src/serve/modules.zig:295: mutable global var outside wiring/main
-src/serve/modules.zig:296: mutable global var outside wiring/main
-src/serve/rate_limiter.zig:64: mutable global var outside wiring/main
-src/serve/rate_limiter.zig:68: mutable global var outside wiring/main
-src/serve/schematic_page.zig:51: mutable global var outside wiring/main
-src/serve/schematic_page.zig:52: mutable global var outside wiring/main
-src/serve/static_assets.zig:106: mutable global var outside wiring/main
-src/serve/upload.zig:31: mutable global var outside wiring/main
+# guardian-snapshot v3
+ban-globals|src/bench_layout.zig|mutable global var outside wiring/main
+ban-globals|src/placement/optimizer.zig|mutable global var outside wiring/main
+ban-globals|src/placement/optimizer.zig|mutable global var outside wiring/main
+ban-globals|src/placement/optimizer.zig|mutable global var outside wiring/main
+ban-globals|src/placement/optimizer.zig|mutable global var outside wiring/main
+ban-globals|src/placement/optimizer.zig|mutable global var outside wiring/main
+ban-globals|src/placement/optimizer.zig|mutable global var outside wiring/main
+ban-globals|src/placement/optimizer.zig|mutable global var outside wiring/main
+ban-globals|src/placement/optimizer.zig|mutable global var outside wiring/main
+ban-globals|src/placement/optimizer.zig|mutable global var outside wiring/main
+ban-globals|src/placement/optimizer.zig|mutable global var outside wiring/main
+ban-globals|src/placement/optimizer.zig|mutable global var outside wiring/main
+ban-globals|src/placement/optimizer.zig|mutable global var outside wiring/main
+ban-globals|src/serve.zig|mutable global var outside wiring/main
+ban-globals|src/serve.zig|mutable global var outside wiring/main
+ban-globals|src/serve.zig|mutable global var outside wiring/main
+ban-globals|src/serve.zig|mutable global var outside wiring/main
+ban-globals|src/serve.zig|mutable global var outside wiring/main
+ban-globals|src/serve.zig|mutable global var outside wiring/main
+ban-globals|src/serve/mcp_tools.zig|mutable global var outside wiring/main
+ban-globals|src/serve/mcp_tools.zig|mutable global var outside wiring/main
+ban-globals|src/serve/modules.zig|mutable global var outside wiring/main
+ban-globals|src/serve/modules.zig|mutable global var outside wiring/main
+ban-globals|src/serve/modules.zig|mutable global var outside wiring/main
+ban-globals|src/serve/rate_limiter.zig|mutable global var outside wiring/main
+ban-globals|src/serve/rate_limiter.zig|mutable global var outside wiring/main
+ban-globals|src/serve/schematic_page.zig|mutable global var outside wiring/main
+ban-globals|src/serve/schematic_page.zig|mutable global var outside wiring/main
+ban-globals|src/serve/static_assets.zig|mutable global var outside wiring/main
+ban-globals|src/serve/thermal_cache.zig|mutable global var outside wiring/main
+ban-globals|src/serve/thermal_cache.zig|mutable global var outside wiring/main
+ban-globals|src/serve/upload.zig|mutable global var outside wiring/main

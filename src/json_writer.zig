@@ -6,9 +6,9 @@
 
 const std = @import("std");
 
-/// Error set covering writers used throughout the renderers — they all wrap an
-/// `ArrayListUnmanaged(u8).writer()` whose `error` is just `Allocator.Error`.
-pub const WriteError = std.mem.Allocator.Error;
+/// Error set covering both allocating and I/O-backed writers used throughout
+/// the renderers.
+pub const WriteError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
 /// Write `s` to `w`, escaping characters that are illegal inside a JSON string
 /// body. Does NOT write the surrounding `"` quotes — use `writeString` for that.
@@ -46,25 +46,25 @@ pub fn writeField(w: anytype, key: []const u8, value: []const u8) WriteError!voi
 }
 
 test "escape quotes and backslashes" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    const w = buf.writer(std.testing.allocator);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const w = &out.writer;
     try writeEscaped(w, "he said \"hi\" and \\");
-    try std.testing.expectEqualStrings("he said \\\"hi\\\" and \\\\", buf.items);
+    try std.testing.expectEqualStrings("he said \\\"hi\\\" and \\\\", out.written());
 }
 
 test "escape control characters" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    const w = buf.writer(std.testing.allocator);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const w = &out.writer;
     try writeEscaped(w, "a\x01b\nc");
-    try std.testing.expectEqualStrings("a\\u0001b\\nc", buf.items);
+    try std.testing.expectEqualStrings("a\\u0001b\\nc", out.written());
 }
 
 test "writeField surrounds value with quotes" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    const w = buf.writer(std.testing.allocator);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const w = &out.writer;
     try writeField(w, "name", "U1");
-    try std.testing.expectEqualStrings("\"name\":\"U1\"", buf.items);
+    try std.testing.expectEqualStrings("\"name\":\"U1\"", out.written());
 }

@@ -3,6 +3,7 @@
 //! `parser.zig`, used by the `parse`/format paths and source rewriting.
 
 const std = @import("std");
+const infra_fs = @import("../infra/fs.zig");
 const ast = @import("ast.zig");
 const Node = ast.Node;
 
@@ -19,15 +20,15 @@ const node_eq_float_tolerance: f64 = 0.0;
 
 /// Pretty-print a list of top-level nodes as S-expression text.
 pub fn print(allocator: std.mem.Allocator, nodes: []const Node) std.mem.Allocator.Error![]const u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-    const writer = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    defer buf.deinit();
+    const writer = &buf.writer;
 
     for (nodes, 0..) |node, i| {
-        if (i > 0) try writer.writeByte('\n');
-        try printNode(writer, node, 0);
+        if (i > 0) writer.writeByte('\n') catch return error.OutOfMemory;
+        printNode(writer, node, 0) catch return error.OutOfMemory;
     }
-    return buf.toOwnedSlice(allocator);
+    return buf.toOwnedSlice();
 }
 
 fn printNode(writer: anytype, node: Node, indent: u32) !void {
@@ -244,9 +245,8 @@ fn expectNodesEqual(a: Node, b: Node) !void {
     }
 }
 
-// spec: sexpr/printer - Round-trips every .sexp and .kicad_pcb file under projects/designs through parse → print → parse with structurally equal AST
+// spec: sexpr/printer - Round-trips every .sexp and .kicad_pcb file in the projects/designs tree, dot-directories excluded, through parse → print → parse with structurally equal AST, failing when the corpus count leaves its expected order of magnitude
 test "round-trip every project .sexp file" {
-    const alloc = std.testing.allocator;
     const parser = @import("parser.zig");
 
     // Tests are normally invoked with the project root as CWD. When
@@ -261,41 +261,58 @@ test "round-trip every project .sexp file" {
     // place; if parse → print → parse loses structure (hex literals like
     // 0x..._..., unit-suffix floats, layer ordering) it would silently
     // corrupt the board.
-    var dir = std.fs.cwd().openDir("projects/designs", .{ .iterate = true }) catch return;
+    //
+    // Two scale rules, both from the 2026-08-10 timing audit (this one
+    // test was 202 s of a 217 s suite run):
+    //  - Dot-directories are pruned. `projects/designs/.claude/worktrees/`
+    //    holds other checkouts of the SAME repo (and `.git` its own
+    //    plumbing), so the walk was round-tripping ~48k files, ~47k of
+    //    them duplicate copies of lib/. The corpus is the ~1k files of
+    //    the real project tree.
+    //  - All per-file work runs in arenas over `std.testing.allocator`.
+    //    The testing allocator captures a 10-frame stack trace on every
+    //    alloc/resize/free (each frame is one process_vm_readv syscall),
+    //    and parsing the corpus makes millions of node-sized allocations —
+    //    this test was syscall-bound, not parse-bound. The arenas batch
+    //    those into page-sized requests while the backing testing
+    //    allocator still leak-checks what the arenas themselves hold.
+    var dir = infra_fs.cwd().openDir("projects/designs", .{ .iterate = true }) catch return;
     defer dir.close();
 
-    var walker = try dir.walk(alloc);
+    var walk_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer walk_arena.deinit();
+    var file_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer file_arena.deinit();
+
+    var walker = try dir.walk(walk_arena.allocator());
     defer walker.deinit();
 
     var count: usize = 0;
     while (try walker.next()) |entry| {
         if (entry.kind != .file) continue;
+        if (underDotDir(entry.path)) continue;
         const is_sexp = std.mem.endsWith(u8, entry.basename, ".sexp");
         const is_pcb = std.mem.endsWith(u8, entry.basename, ".kicad_pcb");
         if (!is_sexp and !is_pcb) continue;
 
-        const file = try dir.openFile(entry.path, .{});
-        defer file.close();
+        _ = file_arena.reset(.retain_capacity);
+        const alloc = file_arena.allocator();
         // 16 MiB cap protects the test from accidentally pointing at a
         // checked-in binary; every real source file in this tree is well
         // under that.
-        const src = try file.readToEndAlloc(alloc, 16 * 1024 * 1024);
-        defer alloc.free(src);
+        const src = try dir.readFileAlloc(alloc, entry.path, 16 * 1024 * 1024);
 
         const nodes1 = parser.parse(alloc, src) catch |err| {
             std.debug.print("parse failed for {s}: {s}\n", .{ entry.path, @errorName(err) });
             return err;
         };
-        defer parser.freeNodes(alloc, nodes1);
 
         const printed = try print(alloc, nodes1);
-        defer alloc.free(printed);
 
         const nodes2 = parser.parse(alloc, printed) catch |err| {
             std.debug.print("re-parse of printed output failed for {s}: {s}\n", .{ entry.path, @errorName(err) });
             return err;
         };
-        defer parser.freeNodes(alloc, nodes2);
 
         try std.testing.expectEqual(nodes1.len, nodes2.len);
         for (nodes1, nodes2) |a, b| {
@@ -307,8 +324,46 @@ test "round-trip every project .sexp file" {
         count += 1;
     }
 
-    // Sanity: the walk should have found at least one file.
-    try std.testing.expect(count > 0);
+    // Sanity: an order-of-magnitude bound, not just `count > 0` — see
+    // `corpus_min` / `corpus_max` below for the census and the reasoning.
+    errdefer std.debug.print(
+        "round-trip corpus is {d} files, outside the expected {d}..{d}\n  hint: {s}\n",
+        .{ count, corpus_min, corpus_max, corpusDriftHint(count) },
+    );
+    try std.testing.expect(count >= corpus_min and count <= corpus_max);
+}
+
+/// Order-of-magnitude bounds on the round-trip corpus, census 2026-08-10:
+/// 985 files — lib/ 873, history/ 76, src/ 36, blocks/ 4.
+///
+/// The sanity check here used to be `count > 0`, which accepts anything from
+/// one file to infinity — which is how the 48x blowup (48_033 files, ~47k of
+/// them duplicate lib/ copies under the designs repo's own worktrees) stayed
+/// invisible for months at 202 s a suite run. The bounds are deliberately an
+/// order of magnitude wide, so ordinary corpus churn never touches them:
+///  - The floor catches a wrong cwd, a moved tree, or an over-aggressive
+///    prune, while tolerating a `history/` that has been swept.
+///  - The ceiling tolerates years of `history/` snapshot growth while catching
+///    a duplicate-checkout descent one order of magnitude before it costs
+///    minutes of suite wall again.
+const corpus_min: usize = 500;
+const corpus_max: usize = 10_000;
+
+/// Which way the corpus drifted, in one line, for the failure above.
+fn corpusDriftHint(count: usize) []const u8 {
+    if (count > corpus_max) return "the walk is descending into duplicate checkouts (dot-dir pruning broken?)";
+    return "corpus not found where expected — wrong cwd or over-pruned walk";
+}
+
+/// True when any component of `path` starts with '.', so the corpus walk skips
+/// the designs repo's own plumbing: `.git`, and `.claude/worktrees/` — whole
+/// sibling checkouts of the same tree whose files are duplicates, not corpus.
+fn underDotDir(path: []const u8) bool {
+    var it = std.mem.splitScalar(u8, path, std.fs.path.sep);
+    while (it.next()) |component| {
+        if (component.len > 0 and component[0] == '.') return true;
+    }
+    return false;
 }
 
 // Real S-expressions seed the round-trip property; the malformed tail makes the
@@ -329,7 +384,9 @@ const roundtrip_fuzz_corpus = [_][]const u8{
 /// identical AST (the printer is round-trip capable — a mismatch is a real
 /// printer bug). Malformed inputs are skipped; their never-crash guarantee is
 /// the parser's own harness. Runs under `testing.allocator` (leak-checked).
-fn fuzzRoundTrip(allocator: std.mem.Allocator, input: []const u8) anyerror!void {
+fn fuzzRoundTrip(allocator: std.mem.Allocator, smith: *std.testing.Smith) anyerror!void {
+    var generated: [64 * 1024]u8 = undefined;
+    const input = smith.in orelse generated[0..smith.slice(&generated)];
     const parser = @import("parser.zig");
     const nodes1 = parser.parse(allocator, input) catch return;
     defer parser.freeNodes(allocator, nodes1);

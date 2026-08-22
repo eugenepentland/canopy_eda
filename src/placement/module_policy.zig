@@ -21,6 +21,8 @@
 //! observability; later phases let the design author override it.
 
 const std = @import("std");
+const rails_mod = @import("../eval/rails.zig");
+const decouple_key = @import("../decouple_key.zig");
 const optimizer = @import("optimizer.zig");
 const pin_roles = @import("pin_roles.zig");
 
@@ -84,7 +86,7 @@ pub const ModulePolicy = struct {
 
 /// A bulk cap is anything ≥ 4.7 µF — the rail-entry reservoir, not the
 /// high-frequency bypass cap that hugs the pin.
-const bulk_farads: f64 = 4.7e-6;
+const bulk_farads: f64 = decouple_key.bulk_farads;
 
 /// Analyse a solved placement. Allocates the three result slices on `alloc`
 /// (caller frees via `ModulePolicy.deinit`); scratch maps are freed internally.
@@ -103,7 +105,7 @@ pub fn analyze(alloc: Allocator, p: Placement) Allocator.Error!ModulePolicy {
     // Per-part set of the net classes touching its pads — the basis for roles.
     const flags = try alloc.alloc(std.EnumSet(NetClass), p.parts.len);
     defer alloc.free(flags);
-    for (flags) |*f| f.* = std.EnumSet(NetClass).initEmpty();
+    for (flags) |*f| f.* = std.EnumSet(NetClass).empty;
     for (p.nets, 0..) |net, ni| {
         for (net.pins) |pin| {
             if (idx.get(pin.ref_des)) |pi| flags[pi].insert(net_class[ni]);
@@ -190,7 +192,7 @@ fn detectModules(alloc: Allocator, p: Placement, net_class: []const NetClass) Al
     errdefer list.deinit(alloc);
     for (p.parts, 0..) |part, hi| {
         if (part.kind != .hub) continue;
-        var cl = std.EnumSet(NetClass).initEmpty();
+        var cl = std.EnumSet(NetClass).empty;
         var has_ind = false;
         for (p.nets, 0..) |net, ni| {
             var hub_on = false;
@@ -229,7 +231,7 @@ fn classifyModule(hub: Part, cl: std.EnumSet(NetClass), has_ind: bool) ModuleCla
 fn isInputRail(lf: []const u8) bool {
     var buf: [48]u8 = undefined;
     const s = stripUpper(&buf, lf);
-    if (anyPrefix(s, &.{ "VIN", "PVIN", "VBUS", "VBAT", "VSYS", "VDCIN", "HVIN" })) return true;
+    if (anyPrefix(s, &rails_mod.input_rail_prefixes)) return true;
     var t = s;
     if (t.len > 0 and t[0] == 'V') t = t[1..];
     var i: usize = 0;
@@ -285,7 +287,7 @@ fn isRf(lf: []const u8) bool {
 fn isPowerRail(lf: []const u8) bool {
     var buf: [48]u8 = undefined;
     const s = upperKeep(&buf, lf);
-    if (anyPrefix(s, &.{ "VDD", "VCC", "AVDD", "DVDD", "VREG", "VPOS", "VOUT", "VEXT", "VANA", "VREF", "VPP", "V_" })) return true;
+    if (anyPrefix(s, &rails_mod.module_supply_prefixes)) return true;
     return s.len >= 2 and s[0] == 'V' and std.ascii.isDigit(s[1]);
 }
 
@@ -305,25 +307,9 @@ fn leafName(s: []const u8) []const u8 {
 }
 
 /// Parse a capacitance string ("100nF", "4.7uF", "4.7µF") to farads; 0 if
-/// unrecognised. The micro prefix is accepted both as ASCII "u/U" and as the
-/// UTF-8 "µ" (U+00B5, bytes 0xC2 0xB5) that footprint/BOM tools emit.
-fn capValueFarads(s: []const u8) f64 {
-    var i: usize = 0;
-    while (i < s.len and (std.ascii.isDigit(s[i]) or s[i] == '.')) i += 1;
-    if (i == 0) return 0;
-    const num = std.fmt.parseFloat(f64, s[0..i]) catch return 0;
-    if (i >= s.len) return 0;
-    // UTF-8 "µ" (0xC2 0xB5) → micro. Match the two-byte sequence explicitly.
-    if (s[i] == 0xC2 and i + 1 < s.len and s[i + 1] == 0xB5) return num * 1e-6;
-    const mult: f64 = switch (s[i]) {
-        'p', 'P' => 1e-12,
-        'n', 'N' => 1e-9,
-        'u', 'U' => 1e-6,
-        'm' => 1e-3,
-        else => return 0,
-    };
-    return num * mult;
-}
+/// unrecognised. One shared rule with the ERC pass and the schematic bank
+/// builder (`decouple_key.capFarads`).
+const capValueFarads = decouple_key.capFarads;
 
 /// Uppercase `s` into `buf`, dropping separators. Truncates past `buf`.
 fn stripUpper(buf: []u8, s: []const u8) []const u8 {
@@ -372,7 +358,7 @@ fn anyContains(s: []const u8, subs: []const []const u8) bool {
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
-const export_kicad = @import("../export_kicad.zig");
+const flat_netlist = @import("../flat_netlist.zig");
 const geometry = @import("geometry.zig");
 
 // spec: placement/module_policy - parses capacitance with ASCII and UTF-8 micro prefixes
@@ -424,10 +410,10 @@ test "analyze detects a buck module and its input cap" {
         .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &c_pads, .fallback = false, .value = "10uF" },
         .{ .ref_des = "C2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &c_pads, .fallback = false, .value = "22uF" },
     };
-    const vin = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } };
-    const sw = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "L1", .pin = "1" } };
-    const vout = [_]export_kicad.FlatPin{ .{ .ref_des = "L1", .pin = "2" }, .{ .ref_des = "C2", .pin = "1" } };
-    const nets = [_]export_kicad.FlatNet{
+    const vin = [_]flat_netlist.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } };
+    const sw = [_]flat_netlist.FlatPin{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "L1", .pin = "1" } };
+    const vout = [_]flat_netlist.FlatPin{ .{ .ref_des = "L1", .pin = "2" }, .{ .ref_des = "C2", .pin = "1" } };
+    const nets = [_]flat_netlist.FlatNet{
         .{ .name = "VIN", .pins = &vin },
         .{ .name = "SW", .pins = &sw },
         .{ .name = "VOUT", .pins = &vout },

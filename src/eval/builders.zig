@@ -33,7 +33,7 @@ const SubBlock = env_mod.SubBlock;
 // ── Constants ─────────────────────────────────────────────────────
 const assert_range_arity: usize = 5;
 /// Sanity cap on the index count a single `(bus-port …)` form may expand to —
-/// mirrors `design_block.MAX_BUS_EXPANSION`. Guards against a design-file typo
+/// mirrors `design_block.max_bus_expansion`. Guards against a design-file typo
 /// (or hostile input) turning a huge index range into a runaway allocation the
 /// HTTP server evaluates on every push/page-load.
 const max_bus_port_expansion: i64 = 4096;
@@ -351,6 +351,81 @@ pub fn findPinFuncMap(self: *Evaluator, inst_items: []const Instance, pins_ref: 
     return null;
 }
 
+/// Resolve every `(decouples "IC" PIN)` binding's PIN against the pinout of the
+/// IC it names, once the whole block's instances exist.
+///
+/// This must be a post-build pass, not instance-time work, for two reasons. The
+/// map that gives a function name meaning belongs to the TARGET, and a capacitor
+/// cannot see it — a cap has no pinout of its own, so resolving the token
+/// against the CAP's map (what `buildInstance` used to do) could never succeed
+/// and every function-name spelling silently degraded to the raw token and then
+/// to the hub's default pad. And the target may be declared *after* the cap in
+/// the block, so at instance time it need not exist yet. Running here makes
+/// declaration order irrelevant: `(decouples "U1" VIN)` finds U1's VIN pad
+/// whether U1 is written above or below the cap.
+///
+/// A token that is already a physical pad passes through untouched — checked
+/// FIRST, so a connector pinout that names contact 4 "4" can never re-point a
+/// pad binding — a function name maps to its pad, and a token that is neither
+/// stays exactly as written: `erc.checkDecouplingBindingValidity` reports those,
+/// and rewriting them here would only hide the typo.
+pub fn resolveDecoupleTargets(self: *Evaluator, instances: []Instance) void {
+    for (instances) |*inst| {
+        const bd = inst.bind.decouple;
+        if (bd.ic.len == 0 or bd.pin.len == 0) continue;
+        inst.bind.decouple.pin = resolveTargetPin(self, instances, inst.ref_des, "decouples", bd.ic, bd.pin);
+    }
+}
+
+/// Resolve every `(near "REF" PIN)` binding's PIN against the pinout of the part
+/// it names — the same post-build pass, for the same reasons, as
+/// `resolveDecoupleTargets` above (which documents them): the map that gives a
+/// function name meaning belongs to the TARGET, a two-terminal passive has no
+/// pinout of its own to resolve it against, and the target may be declared after
+/// the passive in the block. `(own PAD)` is NOT resolved here — it names a pad of
+/// the declaring part, which `buildInstance` already resolved against that part's
+/// own pinout.
+pub fn resolveNearTargets(self: *Evaluator, instances: []Instance) void {
+    for (instances) |*inst| {
+        const nb = inst.bind.near;
+        if (nb.ref.len == 0 or nb.pin.len == 0) continue;
+        inst.bind.near.pin = resolveTargetPin(self, instances, inst.ref_des, "near", nb.ref, nb.pin);
+    }
+}
+
+/// One binding's PIN token resolved against `target_ref`'s pinout, shared by the
+/// `(decouples …)` and `(near …)` passes so the two can never drift.
+///
+/// A token that is already a physical pad passes through untouched — checked
+/// FIRST, so a connector pinout that names contact 4 "4" can never re-point a
+/// pad binding — a function name maps to its pad, and a token that is neither
+/// stays exactly as written: the ERC binding-validity checks report those, and
+/// rewriting them here would only hide the typo. A function name repeated on
+/// several pads resolves to the lowest and warns, naming the duplicates.
+fn resolveTargetPin(
+    self: *Evaluator,
+    instances: []const Instance,
+    ref_des: []const u8,
+    form: []const u8,
+    target_ref: []const u8,
+    token: []const u8,
+) []const u8 {
+    const pinout = findPinFuncMap(self, instances, target_ref) orelse return token;
+    if (pinout.contains(token)) return token; // already a physical pad
+    const m = instance_mod.matchPinName(pinout, token) orelse return token;
+    if (m.matches == 1) return m.pad;
+    // No source span survives to this pass, so the ambiguity goes on the
+    // span-less warning channel (`assertions`, as `validate.warnCombinableNets`
+    // does) and names the parts instead of a line and column.
+    const msg = std.fmt.allocPrint(
+        self.allocator,
+        "({s} \"{s}\" {s}) on {s}: that function names {d} pads on {s} — bound to '{s}'; write the pad id to pick another",
+        .{ form, target_ref, token, ref_des, m.matches, target_ref, m.pad },
+    ) catch return m.pad;
+    self.assertions.append(self.allocator, .{ .passed = false, .message = msg, .is_warning = true }) catch return m.pad;
+    return m.pad;
+}
+
 /// Process a single pin or bus form inside a (pins ...) block.
 pub fn processPinForm(
     self: *Evaluator,
@@ -385,7 +460,7 @@ pub fn processPinForm(
         for (pin_children[1 .. tail - 1]) |pin_node| {
             if (pin_node.isForm("as")) continue;
             const raw = ids.pinId(self, pin_node) orelse continue;
-            const pn = if (pin_func_map) |pm| (instance_mod.resolvePinName(self, pm, raw) orelse raw) else raw;
+            const pn = if (pin_func_map) |pm| (instance_mod.resolvePinName(self, pm, raw, pin_node.span) orelse raw) else raw;
             try all_pin_nets.append(self.allocator, .{
                 .ref_des = pins_ref,
                 .pin = pn,
@@ -461,7 +536,7 @@ fn emitBusLane(
     net_ties: *std.ArrayList(NetTie),
 ) EvalError!void {
     const raw = ids.pinId(self, node) orelse return;
-    const pn = if (pin_func_map) |pm| (instance_mod.resolvePinName(self, pm, raw) orelse raw) else raw;
+    const pn = if (pin_func_map) |pm| (instance_mod.resolvePinName(self, pm, raw, node.span) orelse raw) else raw;
     const bus_net = std.fmt.allocPrint(self.allocator, "{s}{d}", .{ bus_prefix, bus_idx.* }) catch return;
     const asserted: []const []const u8 = if (as_prefix.len > 0) blk: {
         const name = std.fmt.allocPrint(self.allocator, "{s}{d}", .{ as_prefix, bus_idx.* }) catch break :blk &.{};
@@ -611,7 +686,13 @@ pub fn emitDecoupleItems(
         // passes through unchanged. Keeps the decouple pin list consistent with
         // how the IC's own pins are declared.
         const pin_func_map = findPinFuncMap(self, instances.items, ref_str);
-        var target_pins: std.ArrayList([]const u8) = .empty;
+        const DecoupleTarget = struct {
+            pad: []const u8,
+            /// Function-name token from the source when reverse pinout lookup
+            /// succeeded. It becomes the generated cap's readable label.
+            function_name: []const u8 = "",
+        };
+        var target_pins: std.ArrayList(DecoupleTarget) = .empty;
         defer target_pins.deinit(self.allocator);
         var pin_idx = c;
         while (pin_idx < items.len) : (pin_idx += 1) {
@@ -622,13 +703,19 @@ pub fn emitDecoupleItems(
             if (items[pin_idx].asAtom()) |a| {
                 if (std.mem.eql(u8, a, "auto")) {
                     const host = try autoHostRef(self, items[pin_idx].span, net_name);
-                    try expandPinsOf(self, all_pin_nets, host, net_name, items[pin_idx].span, &target_pins);
+                    var expanded: std.ArrayList([]const u8) = .empty;
+                    defer expanded.deinit(self.allocator);
+                    try expandPinsOf(self, all_pin_nets, host, net_name, items[pin_idx].span, &expanded);
+                    for (expanded.items) |pad| try target_pins.append(self.allocator, .{ .pad = pad });
                     continue;
                 }
             }
             const raw = ids.pinId(self, items[pin_idx]) orelse break;
-            const pid = if (pin_func_map) |pm| (instance_mod.resolvePinName(self, pm, raw) orelse raw) else raw;
-            try target_pins.append(self.allocator, pid);
+            const resolved_function = if (pin_func_map) |pm| instance_mod.resolvePinName(self, pm, raw, items[pin_idx].span) else null;
+            try target_pins.append(self.allocator, .{
+                .pad = resolved_function orelse raw,
+                .function_name = if (resolved_function != null) raw else "",
+            });
         }
         if (target_pins.items.len == 0) {
             log.warn("decouple per-pin requires an explicit pin list (net {s}, ref {s})", .{ net_name, ref_str });
@@ -641,7 +728,8 @@ pub fn emitDecoupleItems(
             continue;
         }
 
-        for (target_pins.items) |target_pin| {
+        for (target_pins.items) |target| {
+            const target_pin = target.pad;
             const sub_net = try std.fmt.allocPrint(self.allocator, "{s}.{s}.{s}", .{ net_name, ref_str, target_pin });
 
             var ci: u32 = 0;
@@ -653,20 +741,33 @@ pub fn emitDecoupleItems(
                 // Hierarchical designs derive every child id from the form's own
                 // uuid + this stable key (no sidecar); legacy designs pin the
                 // token in the enumerated (ids …) sidecar.
-                const cap_id = if (self.hierarchical_ids)
-                    try ids.deriveChildId(self, form_id, child_key, 0)
-                else
-                    try ids.getOrCreateChildId(self, sidecar, child_key);
+                const identity = try decoupleIdentity(self, sidecar, form_id, .{
+                    .child_key = child_key,
+                    .function_name = target.function_name,
+                    .replica = ci,
+                    .fallback_ref = ref,
+                });
                 try instances.append(self.allocator, .{
                     .ref_des = ref,
-                    .origin_key = child_key, // stable structural key for hierarchical sub-block ids
+                    .label = identity.label,
+                    .origin_key = identity.origin,
                     .component = resolved.family,
                     .value = resolved.value,
                     .footprint = resolved.footprint,
                     .symbol = resolved.symbol,
                     .attrs = resolved.attrs,
                     .source_offset = dec_comp_offset,
-                    .id = cap_id,
+                    .id = identity.id,
+                    // The binding this shorthand IS — the host ref and the pad
+                    // it resolved — recorded as first-class fields rather than
+                    // left implicit in `origin_key`. The key stays exactly as it
+                    // was (hierarchical child ids derive from it, so any change
+                    // would re-stamp every adopted board), but it can only carry
+                    // the pad when the pin was spelled as a NUMBER: a
+                    // function-name spelling turns the key into the readable
+                    // label (`C_VDD_1`), so the pad vanished and the cap read as
+                    // unbound to the placer, the lint and the exporter alike.
+                    .bind = .{ .decouple = .{ .ic = ref_str, .pin = target_pin } },
                 });
                 try all_pin_nets.append(self.allocator, .{ .ref_des = ref, .pin = "1", .net = sub_net });
                 try all_pin_nets.append(self.allocator, .{ .ref_des = ref, .pin = "2", .net = "GND" });
@@ -695,6 +796,115 @@ pub fn emitDecoupleItems(
             }
         }
         idx = pin_idx;
+    }
+}
+
+const DecoupleIdentity = struct { id: []const u8, label: []const u8, origin: []const u8 };
+const DecoupleIdentitySpec = struct {
+    child_key: []const u8,
+    function_name: []const u8,
+    replica: u32,
+    fallback_ref: []const u8,
+};
+
+fn decoupleIdentity(
+    self: *Evaluator,
+    sidecar: *ids.ChildIdSidecar,
+    form_id: []const u8,
+    spec: DecoupleIdentitySpec,
+) EvalError!DecoupleIdentity {
+    const label = if (spec.function_name.len > 0)
+        try decoupleLabel(self, spec.function_name, spec.replica)
+    else
+        spec.fallback_ref;
+    const id = if (sidecar.map.get(spec.child_key)) |existing|
+        existing
+    else if (self.hierarchical_ids)
+        try ids.deriveChildId(self, form_id, spec.child_key, 0)
+    else
+        try ids.getOrCreateChildId(self, sidecar, spec.child_key);
+    return .{ .id = id, .label = label, .origin = if (spec.function_name.len > 0) label else spec.child_key };
+}
+
+/// Turn a pin-function token into the readable name promised by compact
+/// per-pin decoupling: `VCCCP` -> `C_VCCCP`; replicas gain `_2`, `_3`, ….
+/// Non-refdes punctuation is normalized so generated labels remain portable to
+/// KiCad and every report surface.
+fn decoupleLabel(self: *Evaluator, function_name: []const u8, replica: u32) EvalError![]const u8 {
+    var clean = std.ArrayList(u8).empty;
+    clean.appendSlice(self.allocator, "C_") catch return EvalError.OutOfMemory;
+    for (function_name) |c| {
+        clean.append(self.allocator, if (std.ascii.isAlphanumeric(c)) std.ascii.toUpper(c) else '_') catch
+            return EvalError.OutOfMemory;
+    }
+    if (replica > 0) {
+        const suffix = std.fmt.allocPrint(self.allocator, "_{d}", .{replica + 1}) catch return EvalError.OutOfMemory;
+        clean.appendSlice(self.allocator, suffix) catch return EvalError.OutOfMemory;
+    }
+    return clean.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
+}
+
+/// Emit shared rail-to-ground capacitors for the compact `(bulk (cap …) N)`
+/// clause of `(decouple "RAIL" …)`. Bulk parts deliberately do not split an
+/// IC pad onto a stub net; they are annotated `(decouples rail)` exactly like a
+/// hand-written `(instance … (decouples rail))`.
+pub const DecoupleEmitContext = struct {
+    instances: *std.ArrayList(Instance),
+    pin_nets: *std.ArrayList(PinNetDecl),
+    form_id: []const u8,
+    sidecar: *ids.ChildIdSidecar,
+};
+
+/// Emit the shared rail-to-ground capacitors in one compact `(bulk …)` clause.
+pub fn emitBulkDecouples(
+    self: *Evaluator,
+    component_node: Node,
+    count_node: Node,
+    net_name: []const u8,
+    env: *Env,
+    ctx: DecoupleEmitContext,
+) EvalError!void {
+    const comp_val = try self.evalNode(component_node, env);
+    const resolved = instance_mod.resolveComponent(self, comp_val) orelse {
+        self.setError(component_node.span, "(bulk …) first argument must be a capacitor component");
+        return EvalError.TypeError;
+    };
+    const count_value = (try self.evalNode(count_node, env)).asNumber() orelse {
+        self.setError(count_node.span, "(bulk …) count must be a non-negative integer");
+        return EvalError.TypeError;
+    };
+    const count = numeric.checkedInt(u32, count_value) orelse {
+        self.setError(count_node.span, "(bulk …) count must be a non-negative integer");
+        return EvalError.InvalidForm;
+    };
+    const source_offset = ids.componentSourceOffset(component_node);
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        const ref = try ids.nextRefDes(self, 'C');
+        const label_seed = std.fmt.allocPrint(self.allocator, "{s}_BULK", .{net_name}) catch return EvalError.OutOfMemory;
+        const label = try decoupleLabel(self, label_seed, i);
+        const child_key = std.fmt.allocPrint(self.allocator, "bulk:{s}#{d}", .{ resolved.value, i }) catch return EvalError.OutOfMemory;
+        const cap_id = if (ctx.sidecar.map.get(child_key)) |existing|
+            existing
+        else if (self.hierarchical_ids)
+            try ids.deriveChildId(self, ctx.form_id, child_key, 0)
+        else
+            try ids.getOrCreateChildId(self, ctx.sidecar, child_key);
+        try ctx.instances.append(self.allocator, .{
+            .ref_des = ref,
+            .label = label,
+            .origin_key = label,
+            .component = resolved.family,
+            .value = resolved.value,
+            .footprint = resolved.footprint,
+            .symbol = resolved.symbol,
+            .attrs = resolved.attrs,
+            .source_offset = source_offset,
+            .id = cap_id,
+            .bind = .{ .decouple = .{ .rail = true } },
+        });
+        try ctx.pin_nets.append(self.allocator, .{ .ref_des = ref, .pin = "1", .net = net_name });
+        try ctx.pin_nets.append(self.allocator, .{ .ref_des = ref, .pin = "2", .net = "GND" });
     }
 }
 
@@ -1178,7 +1388,20 @@ pub fn loadFile(self: *Evaluator, path: []const u8) ?[]const Node {
         self.setError(diag.span, diag.message);
         return null;
     };
-    self.loaded_files.put(self.allocator, path, nodes) catch return null;
+    // Key on a dup owned by `self.allocator`, never on the caller's slice: the
+    // read-set outlives the call, and every caller of note frees its path right
+    // afterwards (`resolveBlock` does so in a `defer` inside its own `if`). A
+    // borrowed key therefore left a DANGLING path in `loaded_files` — the one
+    // entry naming the design's own source file — so every mtime-based cache
+    // built from that read-set (`serve/page_cache.zig` and both its users)
+    // stamped poison bytes, recorded them "absent", and then never invalidated
+    // when the design itself was edited. Mirrors the import path's own dup in `eval/modules.zig`.
+    if (self.allocator.dupe(u8, path)) |key| {
+        self.loaded_files.put(self.allocator, key, nodes) catch {
+            self.allocator.free(key);
+            return null;
+        };
+    } else |_| return null;
     return nodes;
 }
 

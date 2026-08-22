@@ -5,19 +5,21 @@
 
 const std = @import("std");
 const parser_mod = @import("sexpr/parser.zig");
+const ast_mod = @import("sexpr/ast.zig");
 const env_mod = @import("eval/env.zig");
 const DesignBlock = env_mod.DesignBlock;
 
-const export_kicad = @import("export_kicad.zig");
-const FlatInstance = export_kicad.FlatInstance;
-const FlatNet = export_kicad.FlatNet;
-const FlatPin = export_kicad.FlatPin;
+const flat_netlist = @import("flat_netlist.zig");
+const FlatInstance = flat_netlist.FlatInstance;
+const FlatNet = flat_netlist.FlatNet;
+const FlatPin = flat_netlist.FlatPin;
 const Property = env_mod.Property;
+const kicad_format = @import("kicad_pcb/format.zig");
 
 /// Error set for the KiCad netlist helpers in this module — covers parser
 /// failures, allocator failures, and the local `InvalidFormat` thrown when
 /// a footprint sexp is missing the expected nodes.
-pub const NetlistError = std.mem.Allocator.Error || parser_mod.ParseError || error{InvalidFormat};
+pub const NetlistError = std.mem.Allocator.Error || std.Io.Writer.Error || parser_mod.ParseError || error{InvalidFormat};
 
 // --- Netlist writer ---
 
@@ -25,6 +27,20 @@ pub const NetlistError = std.mem.Allocator.Error || parser_mod.ParseError || err
 /// section with footprint references and tstamps, then the nets section
 /// where any pad not present on a real net is gathered into the
 /// unconnected (`code "0"`) net so KiCad treats them as NC.
+///
+/// The `design_name` is escaped with `kicad_format.sexprEscape`; every other
+/// quoted field is copied VERBATIM, and the split is the string's provenance,
+/// not a guess. A ref-des, value, footprint name, net name or pad name here is
+/// (built from) a slice of a `.string` token the project's own tokenizer read
+/// out of a `.sexp`, so it is ALREADY in the grammar's escaped form: it cannot
+/// hold a bare `"` and every `\` in it is followed by a byte of the same token.
+/// Copying such a slice between quotes always re-parses to the bytes the source
+/// meant; escaping it a second time doubles every sequence it carries. Property
+/// values round-trip through the `.bom` sidecar, which escapes on write and
+/// decodes on read (`bom.decodeOwned`), so they arrive in that same form. The
+/// design name is the exception — it comes from the CLI or an HTTP path, never
+/// through the tokenizer, so it is the one field a genuinely raw `"` can reach,
+/// and one raw `"` makes the WHOLE `.net` unparseable.
 pub fn writeNetlist(
     allocator: std.mem.Allocator,
     design_name: []const u8,
@@ -32,14 +48,22 @@ pub fn writeNetlist(
     nets: []const FlatNet,
     fp_name_map: *const std.StringHashMapUnmanaged([]const u8),
     fp_pad_map: *const std.StringHashMapUnmanaged([]const []const u8),
-) std.mem.Allocator.Error![]const u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-    const w = buf.writer(allocator);
+) (std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8 {
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    defer buf.deinit();
+    const w = &buf.writer;
+
+    // Scratch for the escaped design name below and for the connected-pin key
+    // set further down.
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const tmp = arena.allocator();
 
     try w.writeAll("(export (version \"E\")\n");
     try w.writeAll("  (design\n");
-    try w.print("    (source \"{s}\")\n", .{design_name});
+    // The design name is a CLI/HTTP-supplied string, not a tokenizer slice, so
+    // it is the one field here that can carry a genuinely raw `"`.
+    try w.print("    (source \"{s}\")\n", .{try kicad_format.sexprEscape(tmp, design_name)});
     try w.writeAll("    (tool \"canopy-eda\"))\n");
 
     // Components
@@ -55,7 +79,9 @@ pub fn writeNetlist(
         if (inst.uuid.len > 0) {
             try w.print("      (tstamp {s})\n", .{inst.uuid});
         }
-        // Properties
+        // Properties. These round-trip through the `.bom` sidecar, which
+        // escapes on write and decodes on read (`bom.decodeOwned`), so what
+        // arrives here is the tokenizer form the library file spelled.
         for (inst.properties) |prop| {
             try w.print("      (property (name \"{s}\") (value \"{s}\"))\n", .{ prop.key, prop.value });
         }
@@ -70,9 +96,6 @@ pub fn writeNetlist(
     try w.writeAll("  )\n");
 
     // Build set of connected pins per component: "REF\x00PIN" -> true
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const tmp = arena.allocator();
     var connected_pins = std.StringHashMapUnmanaged(void).empty;
     for (nets) |net| {
         for (net.pins) |pin| {
@@ -106,7 +129,7 @@ pub fn writeNetlist(
     try w.writeAll("  )\n");
 
     try w.writeAll(")\n");
-    return buf.toOwnedSlice(allocator);
+    return buf.toOwnedSlice();
 }
 
 // --- Footprint pad extraction ---
@@ -164,318 +187,88 @@ pub fn extractFootprintName(allocator: std.mem.Allocator, source: []const u8) Ne
 /// Join `prefix` and `name` with a `/`, or duplicate `name` alone when there
 /// is no prefix. The unit of hierarchy-path qualification for ref-des and net
 /// names as the flattener descends into sub-blocks.
-fn prefixed(allocator: std.mem.Allocator, prefix: []const u8, name: []const u8) std.mem.Allocator.Error![]const u8 {
-    if (prefix.len == 0) return allocator.dupe(u8, name);
-    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, name });
-}
+// ── Design-hierarchy flattening ───────────────────────────────────────────
+//
+// DECLARED in `flat_netlist.zig`. Walking a `(sub-block …)` tree and merging
+// `(net …)` ties is not a KiCad concern — `src/placement/*` needs the same
+// flatten this writer does, and reaching up to an exporter for it was the
+// upward edge `guardian.toml`'s `[[boundary]]` rule freezes. Re-exported here
+// under their historical names so existing callers are untouched.
 
-/// Walk the design tree and append a `FlatInstance` for every component,
-/// joining `prefix` onto each ref-des as it descends into sub-blocks so
-/// references stay unique. Each instance carries the BOM-assigned UUID
-/// when available, falling back to a hash of the stable 8-char id.
-pub fn collectInstances(
-    allocator: std.mem.Allocator,
-    block: *const DesignBlock,
-    prefix: []const u8,
-    list: *std.ArrayList(FlatInstance),
-    ref_style: env_mod.RefStyle,
-) std.mem.Allocator.Error!void {
-    for (block.instances) |inst| {
-        // `(grouped-refdes)` makes ref-deses globally unique, so the sub-block
-        // path prefix is redundant — emit the bare ref (`R1_1`, not `a/R1_1`).
-        const ref = if (ref_style == .flat)
-            try allocator.dupe(u8, inst.ref_des)
-        else
-            try prefixed(allocator, prefix, inst.ref_des);
-
-        // Use BOM-assigned UUID if available, otherwise derive from ID
-        const effective_uuid = if (inst.uuid.len > 0)
-            inst.uuid
-        else if (inst.id.len > 0)
-            (export_kicad.uuidFromId(allocator, inst.id) catch "")
-        else
-            "";
-
-        try list.append(allocator, .{
-            .ref_des = ref,
-            .component = inst.component,
-            .symbol = inst.symbol,
-            .pinout = inst.pinout,
-            .origin_key = inst.origin_key,
-            .value = inst.value,
-            .footprint = inst.footprint,
-            .properties = inst.properties,
-            .uuid = effective_uuid,
-            .dnp = inst.dnp,
-            .decouple_pin = inst.decouple_pin,
-            .decouple_rail = inst.decouple_rail,
-        });
-    }
-    for (block.sub_blocks) |sb| {
-        const sub_prefix = try prefixed(allocator, prefix, sb.name);
-        try collectInstances(allocator, sb.block, sub_prefix, list, ref_style);
-    }
-}
-
-/// Recurse through the design tree and append a `FlatNet` per net, prefixing
-/// both the net name and each pin's ref-des with `prefix` so sub-block-local
-/// nets stay distinct before `applyNetTies` merges them onto the canonical
-/// top-level name.
-pub fn collectNets(
-    allocator: std.mem.Allocator,
-    block: *const DesignBlock,
-    prefix: []const u8,
-    list: *std.ArrayList(FlatNet),
-    ref_style: env_mod.RefStyle,
-) std.mem.Allocator.Error!void {
-    for (block.nets) |net| {
-        // Net names stay prefixed even under grouped-refdes: sub-block-local
-        // nets can share a name and must stay distinct. Only the ref-des part
-        // of each pin goes bare (it is already globally unique when grouped).
-        const net_name = try prefixed(allocator, prefix, net.name);
-
-        var pins = try allocator.alloc(FlatPin, net.pins.len);
-        for (net.pins, 0..) |pin, i| {
-            pins[i] = .{
-                .ref_des = if (ref_style == .flat)
-                    try allocator.dupe(u8, pin.ref_des)
-                else
-                    try prefixed(allocator, prefix, pin.ref_des),
-                .pin = pin.pin,
-            };
-        }
-
-        try list.append(allocator, .{
-            .name = net_name,
-            .pins = pins,
-        });
-    }
-    for (block.sub_blocks) |sb| {
-        const sub_prefix = try prefixed(allocator, prefix, sb.name);
-        try collectNets(allocator, sb.block, sub_prefix, list, ref_style);
-    }
-}
-
-/// One side-to-side net-tie collected from the design hierarchy: `a` and
-/// `b` are net names (already prefixed by sub-block path) that
-/// `applyNetTies` should treat as the same electrical net when merging
-/// the flat netlist.
-pub const FlatTie = struct {
-    a: []const u8,
-    b: []const u8,
-};
-
-/// Every pre-merge net/tie name mapped to the final canonical flattened net
-/// name selected by `applyNetTiesMapped`. Consumers that attach metadata to a
-/// module-local net (for example inherited net-class membership) use this map
-/// to follow that metadata through `(bridge (rename ...))` / `(net ...)` ties.
-pub const CanonicalNetMap = std.StringHashMapUnmanaged([]const u8);
-
-/// Gather (net "A" "B" ...) ties from the block tree, prefixing each side with
-/// the sub-block path so they can be matched against names in the flat net
-/// list produced by `collectNets`.
-pub fn collectNetTies(
-    allocator: std.mem.Allocator,
-    block: *const DesignBlock,
-    prefix: []const u8,
-    list: *std.ArrayList(FlatTie),
-) std.mem.Allocator.Error!void {
-    for (block.net_ties) |t| {
-        const a = try prefixed(allocator, prefix, t.a);
-        const b = try prefixed(allocator, prefix, t.b);
-        try list.append(allocator, .{ .a = a, .b = b });
-    }
-    for (block.sub_blocks) |sb| {
-        const sub_prefix = try prefixed(allocator, prefix, sb.name);
-        try collectNetTies(allocator, sb.block, sub_prefix, list);
-    }
-}
-
-/// Prefer topmost (fewest slashes), then shortest, then lexicographic.
-fn preferName(candidate: []const u8, incumbent: []const u8) bool {
-    const cs = std.mem.count(u8, candidate, "/");
-    const is_ = std.mem.count(u8, incumbent, "/");
-    if (cs != is_) return cs < is_;
-    if (candidate.len != incumbent.len) return candidate.len < incumbent.len;
-    return std.mem.lessThan(u8, candidate, incumbent);
-}
-
-const NetTieSets = struct {
-    allocator: std.mem.Allocator,
-    index: std.StringHashMapUnmanaged(u32) = .empty,
-    names: std.ArrayList([]const u8) = .empty,
-    parent: std.ArrayList(u32) = .empty,
-
-    fn deinit(self: *NetTieSets) void {
-        self.index.deinit(self.allocator);
-        self.names.deinit(self.allocator);
-        self.parent.deinit(self.allocator);
-    }
-
-    fn getOrAdd(self: *NetTieSets, name: []const u8) std.mem.Allocator.Error!u32 {
-        const gop = try self.index.getOrPut(self.allocator, name);
-        if (gop.found_existing) return gop.value_ptr.*;
-        const i: u32 = @intCast(self.names.items.len);
-        try self.names.append(self.allocator, name);
-        try self.parent.append(self.allocator, i);
-        gop.value_ptr.* = i;
-        return i;
-    }
-
-    fn find(self: *NetTieSets, idx: u32) u32 {
-        var i = idx;
-        while (self.parent.items[i] != i) : (i = self.parent.items[i]) {}
-        var j = idx;
-        while (self.parent.items[j] != i) {
-            const next = self.parent.items[j];
-            self.parent.items[j] = i;
-            j = next;
-        }
-        return i;
-    }
-};
-
-fn writeCanonicalAliases(
-    allocator: std.mem.Allocator,
-    out: *CanonicalNetMap,
-    sets: *NetTieSets,
-    canonical: *const std.AutoHashMapUnmanaged(u32, u32),
-    nets: []const FlatNet,
-    per_pin: *const std.StringHashMapUnmanaged([]const u8),
-) std.mem.Allocator.Error!void {
-    for (sets.names.items, 0..) |name, i| {
-        const canon_i = canonical.get(sets.find(@intCast(i))) orelse continue;
-        try out.put(allocator, name, sets.names.items[canon_i]);
-    }
-    for (nets) |net| if (per_pin.get(net.name)) |name| try out.put(allocator, net.name, name);
-}
-
-/// Merge nets in `nets` according to `ties`. A tie `(a, b)` means the two net
-/// names refer to the same electrical net. Per-pin split nets of the form
-/// `<base>.<ref>.<pin>` get renamed alongside their base when the base is
-/// merged, so `buck/VIN.U12.VIN_1` follows `buck/VIN` → `VBATT` to become
-/// `VBATT.U12.VIN_1` (still a separate micro-net for decoupling, but rooted on
-/// the right parent name).
-pub fn applyNetTies(
-    allocator: std.mem.Allocator,
-    nets: *std.ArrayList(FlatNet),
-    ties: []const FlatTie,
-) std.mem.Allocator.Error!void {
-    return applyNetTiesMapped(allocator, nets, ties, null);
-}
-
-/// `applyNetTies` plus an optional old-name → canonical-name result. The map is
-/// arena-friendly and owned by the caller; when supplied it receives entries
-/// for unchanged names too, so a private module net and a bridged port share one
-/// lookup contract.
-pub fn applyNetTiesMapped(
-    allocator: std.mem.Allocator,
-    nets: *std.ArrayList(FlatNet),
-    ties: []const FlatTie,
-    aliases: ?*CanonicalNetMap,
-) std.mem.Allocator.Error!void {
-    if (ties.len == 0 and nets.items.len == 0) return;
-
-    var sets = NetTieSets{ .allocator = allocator };
-    defer sets.deinit();
-
-    // A name is "live" (eligible to be the canonical net name) if either it
-    // has pins, or it's on the LHS of a tie — i.e., the user wrote it as the
-    // preferred name in a `(net "LHS" "rhs" ...)` form. Without this, a tie
-    // LHS like `PG_3V3` (all its pins come in through other nets) would be
-    // dropped from canonical selection and a sub-block-prefixed RHS would
-    // win. RHS names aren't marked live because auto-aliases created by
-    // symbol pin-function lookup can produce junk names like "1" or "5"
-    // that would otherwise hijack shorter-wins preference.
-    var live_names: std.StringHashMapUnmanaged(void) = .empty;
-    defer live_names.deinit(allocator);
-    for (nets.items) |net| {
-        _ = try sets.getOrAdd(net.name);
-        try live_names.put(allocator, net.name, {});
-    }
-    for (ties) |t| {
-        const ai = try sets.getOrAdd(t.a);
-        const bi = try sets.getOrAdd(t.b);
-        try live_names.put(allocator, t.a, {});
-        const ra = sets.find(ai);
-        const rb = sets.find(bi);
-        if (ra != rb) sets.parent.items[rb] = ra;
-    }
-
-    // Canonical name per root — only among names that actually have pins.
-    var canonical: std.AutoHashMapUnmanaged(u32, u32) = .empty;
-    defer canonical.deinit(allocator);
-    for (sets.names.items, 0..) |nm, i| {
-        if (!live_names.contains(nm)) continue;
-        const root = sets.find(@intCast(i));
-        const existing = canonical.get(root);
-        if (existing) |best_i| {
-            if (preferName(nm, sets.names.items[best_i])) {
-                try canonical.put(allocator, root, @intCast(i));
-            }
-        } else {
-            try canonical.put(allocator, root, @intCast(i));
-        }
-    }
-
-    // old_name → canonical_name (only when they differ). If a root has no
-    // live name (all tie-only), skip — nothing to rename.
-    var rename_map: std.StringHashMapUnmanaged([]const u8) = .empty;
-    defer rename_map.deinit(allocator);
-    for (sets.names.items, 0..) |nm, i| {
-        const root = sets.find(@intCast(i));
-        const canon_i = canonical.get(root) orelse continue;
-        const canon_name = sets.names.items[canon_i];
-        if (!std.mem.eql(u8, nm, canon_name)) {
-            try rename_map.put(allocator, nm, canon_name);
-        }
-    }
-
-    // Rename per-pin split nets: <base>.<ref>.<pin> inherits base's new name.
-    var per_pin_renames: std.StringHashMapUnmanaged([]const u8) = .empty;
-    defer per_pin_renames.deinit(allocator);
-    for (nets.items) |net| {
-        const dot = std.mem.indexOfScalar(u8, net.name, '.') orelse continue;
-        const base = net.name[0..dot];
-        const suffix = net.name[dot..];
-        const canon_base = rename_map.get(base) orelse continue;
-        const new_name = try std.fmt.allocPrint(allocator, "{s}{s}", .{ canon_base, suffix });
-        try per_pin_renames.put(allocator, net.name, new_name);
-    }
-
-    if (aliases) |out| try writeCanonicalAliases(allocator, out, &sets, &canonical, nets.items, &per_pin_renames);
-
-    // Rebuild nets list, merging pins by canonical name.
-    var merged: std.StringArrayHashMapUnmanaged(std.ArrayList(FlatPin)) = .empty;
-    defer {
-        var it = merged.iterator();
-        while (it.next()) |e| e.value_ptr.deinit(allocator);
-        merged.deinit(allocator);
-    }
-
-    for (nets.items) |net| {
-        const canon = if (per_pin_renames.get(net.name)) |pn|
-            pn
-        else if (rename_map.get(net.name)) |rn|
-            rn
-        else
-            net.name;
-        const gop = try merged.getOrPut(allocator, canon);
-        if (!gop.found_existing) gop.value_ptr.* = .empty;
-        for (net.pins) |p| try gop.value_ptr.append(allocator, p);
-    }
-
-    nets.clearRetainingCapacity();
-    var mit = merged.iterator();
-    while (mit.next()) |entry| {
-        try nets.append(allocator, .{
-            .name = entry.key_ptr.*,
-            .pins = try entry.value_ptr.toOwnedSlice(allocator),
-        });
-    }
-}
+pub const FlatTie = flat_netlist.FlatTie;
+pub const CanonicalNetMap = flat_netlist.CanonicalNetMap;
+pub const collectInstances = flat_netlist.collectInstances;
+pub const collectNets = flat_netlist.collectNets;
+pub const collectNetTies = flat_netlist.collectNetTies;
+pub const applyNetTies = flat_netlist.applyNetTies;
+pub const applyNetTiesMapped = flat_netlist.applyNetTiesMapped;
 
 // ── Tests ──────────────────────────────────────────────────────────────
+
+/// Depth-first search for the first `(NAME "STRING")` form under `nodes`,
+/// returning the string payload as written (still grammar-escaped). Test
+/// support for the escaping round-trip below, which has to read a field back
+/// out of the emitted document rather than trust a substring match.
+fn findFormString(nodes: []const ast_mod.Node, name: []const u8) ?[]const u8 {
+    for (nodes) |n| {
+        const children = n.asList() orelse continue;
+        if (n.isForm(name) and children.len >= 2) {
+            if (children[1].asString()) |s| return s;
+        }
+        if (findFormString(children, name)) |s| return s;
+    }
+    return null;
+}
+
+// spec: export_kicad - Escapes the netlist's design name, the one field that is not a tokenizer slice, and copies already-escaped design strings through untouched
+test "writeNetlist escapes the raw design name and copies tokenizer slices verbatim" {
+    const alloc = std.testing.allocator;
+    // The design name comes from the CLI or an HTTP path: these bytes are RAW,
+    // and one of them would otherwise close the token and wreck the document.
+    const raw_name = "board \\ \"one\"";
+    // A value/net as the TOKENIZER hands them over — already escaped form, the
+    // spelling a `.sexp` carrying `2.54mm pitch (0.1\")` actually produces.
+    const slice_value = "10\\\"K";
+    const slice_net = "VDD\\\"RAW";
+
+    const fp_names: std.StringHashMapUnmanaged([]const u8) = .empty;
+    const fp_pads: std.StringHashMapUnmanaged([]const []const u8) = .empty;
+    const props = [_]Property{.{ .key = "mpn", .value = "PART\\\"X" }};
+    const instances = [_]FlatInstance{.{
+        .ref_des = "R1",
+        .component = "res-0402",
+        .value = slice_value,
+        .footprint = "r-0402",
+        .properties = &props,
+        .uuid = "",
+    }};
+    const pins = [_]FlatPin{.{ .ref_des = "R1", .pin = "1" }};
+    const nets = [_]FlatNet{.{ .name = slice_net, .pins = &pins }};
+
+    const out = try writeNetlist(alloc, raw_name, &instances, &nets, &fp_names, &fp_pads);
+    defer alloc.free(out);
+
+    // The whole document parses — with the raw name unescaped, its `"` closes
+    // the source token early and everything after it is read as garbage.
+    const nodes = try parser_mod.parse(alloc, out);
+    defer parser_mod.freeNodes(alloc, nodes);
+    try std.testing.expectEqual(@as(usize, 1), nodes.len);
+
+    // The design name decodes back to the exact raw bytes handed in …
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const source_tok = findFormString(nodes, "source") orelse return error.SourceMissing;
+    try std.testing.expectEqualStrings(raw_name, try kicad_format.sexprUnescape(a, source_tok));
+
+    // … while every tokenizer slice reaches the file byte for byte. Escaping
+    // these a second time is what turns the project's own `(0.1\")` pin-header
+    // description into `(0.1\\")` on the KiCad side.
+    const value_tok = findFormString(nodes, "value") orelse return error.ValueMissing;
+    try std.testing.expectEqualStrings(slice_value, value_tok);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(name \"VDD\\\"RAW\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(value \"PART\\\"X\")") != null);
+}
 
 // spec: export_kicad_netlist - extractPadNames reads bare-integer pad numbers so numerically-padded footprints appear in the NC inventory
 test "extractPadNames reads bare-int, quoted, and atom pad numbers" {

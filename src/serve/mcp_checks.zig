@@ -12,6 +12,7 @@ const json_writer = @import("../json_writer.zig");
 const paths = @import("../paths.zig");
 const bom = @import("../bom.zig");
 const erc_mod = @import("../erc.zig");
+const preflight = @import("../preflight.zig");
 const env_mod = @import("../eval/env.zig");
 const edit = @import("edit.zig");
 const diag_format = @import("diag_format.zig");
@@ -26,6 +27,7 @@ const missingArg = mcp_tools.missingArg;
 const evalNamedBlock = mcp_tools.evalNamedBlock;
 const runErcForNamedBlock = mcp_tools.runErcForNamedBlock;
 const warnResolveIdentities = mcp_tools.warnResolveIdentities;
+const NamedBlock = mcp_tools.NamedBlock;
 
 // Shared JSON fragment / error strings live with the dispatcher (single
 // definition — reused here to keep the wire format identical).
@@ -64,6 +66,41 @@ pub fn writeErcViolationJson(w: anytype, v: erc_mod.Violation) !void {
     try w.writeAll("}");
 }
 
+/// Emit one requirement/datasheet-review result. This is the canonical wire
+/// shape shared by `run_checks` and `build`.
+pub fn writePreflightFindingJson(w: anytype, finding: preflight.Finding) !void {
+    try w.writeAll("{\"kind\":\"");
+    try w.writeAll(@tagName(finding.kind));
+    try w.writeAll("\",\"status\":\"");
+    try w.writeAll(@tagName(finding.status));
+    try w.writeAll("\",\"severity\":\"");
+    try w.writeAll(@tagName(finding.severity));
+    try w.writeAll("\",\"ref\":");
+    try json_writer.writeString(w, finding.ref_des);
+    try w.writeAll(",\"component\":");
+    try json_writer.writeString(w, finding.component);
+    try w.writeAll(",\"message\":");
+    try json_writer.writeString(w, finding.message);
+    if (finding.requirement.id.len > 0) {
+        try w.writeAll(",\"requirement_id\":");
+        try json_writer.writeString(w, finding.requirement.id);
+        try w.writeAll(",\"requirement_text\":");
+        try json_writer.writeString(w, finding.requirement.text);
+    }
+    if (finding.requirement.datasheet.len > 0) {
+        try w.writeAll(",\"datasheet\":");
+        try json_writer.writeString(w, finding.requirement.datasheet);
+    }
+    if (finding.requirement.citation) |citation| {
+        try w.writeAll(",\"citation\":{\"pdf\":");
+        try json_writer.writeString(w, citation.pdf);
+        try w.print(",\"page\":{d},\"quote\":", .{citation.page});
+        if (citation.quote) |quote| try json_writer.writeString(w, quote) else try w.writeAll("null");
+        try w.writeAll("}");
+    }
+    try w.writeAll("}");
+}
+
 /// `run_checks` tool handler: run ERC on a design/module (`name`) and stream
 /// the `{filtered,changed_refs,changed_nets,erc}` JSON, honouring the optional
 /// `severity` and `changed_since` filters.
@@ -77,112 +114,222 @@ pub fn toolRunChecks(
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     const severity = optionalString(args_val, "severity");
     const changed_since = optionalString(args_val, "changed_since");
-    return runChecks(allocator, project_dir, name, severity, changed_since, w);
+    const profile_word = optionalString(args_val, "profile");
+    const profile = preflight.parseProfile(profile_word) orelse {
+        try w.writeAll("error: invalid profile (expected authoring or preflight)");
+        return false;
+    };
+    return runChecks(allocator, .{
+        .project_dir = project_dir,
+        .name = name,
+        .severity = severity,
+        .changed_since = changed_since,
+        .profile = profile,
+    }, w);
 }
 
-fn runChecks(
-    allocator: std.mem.Allocator,
+const RunChecksArgs = struct {
     project_dir: []const u8,
     name: []const u8,
-    severity_filter: ?[]const u8,
+    severity: ?[]const u8,
     changed_since: ?[]const u8,
+    profile: preflight.Profile,
+};
+
+const ChangeFilter = struct {
+    refs: std.StringHashMapUnmanaged(void) = .empty,
+    nets: std.StringHashMapUnmanaged(void) = .empty,
+    active: bool = false,
+
+    fn deinit(self: *ChangeFilter, allocator: std.mem.Allocator) void {
+        self.refs.deinit(allocator);
+        self.nets.deinit(allocator);
+    }
+
+    fn filtered(self: ChangeFilter, severity: ?[]const u8) bool {
+        return self.active or severity != null;
+    }
+};
+
+fn loadNamedBlock(
+    allocator: std.mem.Allocator,
+    args: RunChecksArgs,
+    eval: *Evaluator,
     w: anytype,
-) !bool {
-    var eval = Evaluator.init(allocator, project_dir);
-    defer eval.deinit();
-    const nb = evalNamedBlock(allocator, project_dir, name, &eval) catch |e| switch (e) {
+) !?NamedBlock {
+    return evalNamedBlock(allocator, args.project_dir, args.name, eval) catch |err| switch (err) {
         error.NotADesign => {
             try w.writeAll(err_not_design);
-            return false;
+            return null;
         },
         else => {
             try w.writeAll(err_build_failed);
+            return null;
+        },
+    };
+}
+
+fn resolveBom(allocator: std.mem.Allocator, args: RunChecksArgs, nb: NamedBlock) !void {
+    if (!nb.is_module) {
+        const bom_path = try paths.designSiblingPath(allocator, args.project_dir, args.name, ".bom");
+        defer allocator.free(bom_path);
+        bom.resolveIdentities(allocator, nb.block, bom_path, args.project_dir) catch |err|
+            warnResolveIdentities(args.name, err);
+    }
+}
+
+fn validSnapshotId(id: []const u8) bool {
+    if (id.len == 0) return false;
+    if (std.mem.indexOf(u8, id, "..") != null) return false;
+    return std.mem.indexOfAny(u8, id, "/\\") == null;
+}
+
+fn loadChangeFilter(
+    allocator: std.mem.Allocator,
+    args: RunChecksArgs,
+    block: *const env_mod.DesignBlock,
+    changes: *ChangeFilter,
+    w: anytype,
+) !bool {
+    const snapshot = args.changed_since orelse return true;
+    if (!validSnapshotId(snapshot)) {
+        try w.writeAll("error: invalid changed_since id");
+        return false;
+    }
+    const snap_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/history/{s}/{s}/{s}.sexp",
+        .{ args.project_dir, args.name, snapshot, args.name },
+    );
+    defer allocator.free(snap_path);
+    var old_eval = Evaluator.init(allocator, args.project_dir);
+    defer old_eval.deinit();
+    const old_result = old_eval.evalFile(snap_path) catch {
+        try w.writeAll("error: could not load snapshot");
+        return false;
+    };
+    const old_block: *const env_mod.DesignBlock = switch (old_result) {
+        .design_block => |value| value,
+        else => {
+            try w.writeAll("error: snapshot did not evaluate to a design");
             return false;
         },
     };
-    const block = nb.block;
+    try diffSets(allocator, old_block, block, &changes.refs, &changes.nets);
+    changes.active = true;
+    return true;
+}
 
-    if (!nb.is_module) {
-        const bom_path = try paths.designSiblingPath(allocator, project_dir, name, ".bom");
-        defer allocator.free(bom_path);
-        bom.resolveIdentities(allocator, block, bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
-    }
-
-    // If changed_since is set, compute the symmetric-difference sets of
-    // ref_des and net names between the prior snapshot and the current
-    // design. ERC violations are filtered to those touching these sets.
-    var changed_refs: std.StringHashMapUnmanaged(void) = .empty;
-    defer changed_refs.deinit(allocator);
-    var changed_nets: std.StringHashMapUnmanaged(void) = .empty;
-    defer changed_nets.deinit(allocator);
-    var have_change_filter = false;
-    if (changed_since) |cs| {
-        // Validate snapshot id for path traversal.
-        if (cs.len == 0 or std.mem.indexOf(u8, cs, "..") != null or std.mem.indexOfAny(u8, cs, "/\\") != null) {
-            try w.writeAll("error: invalid changed_since id");
-            return false;
-        }
-        const snap_path = try std.fmt.allocPrint(
-            allocator,
-            "{s}/history/{s}/{s}/{s}.sexp",
-            .{ project_dir, name, cs, name },
-        );
-        defer allocator.free(snap_path);
-        var eval_old = Evaluator.init(allocator, project_dir);
-        defer eval_old.deinit();
-        if (eval_old.evalFile(snap_path)) |old_result| {
-            const old_block: *const env_mod.DesignBlock = switch (old_result) {
-                .design_block => |b| b,
-                else => {
-                    try w.writeAll("error: snapshot did not evaluate to a design");
-                    return false;
-                },
-            };
-            try diffSets(allocator, old_block, block, &changed_refs, &changed_nets);
-            have_change_filter = true;
-        } else |_| {
-            try w.writeAll("error: could not load snapshot");
-            return false;
-        }
-    }
-
-    try w.print("{{\"filtered\":{s}", .{if (have_change_filter or severity_filter != null) "true" else "false"});
-
-    if (have_change_filter) {
-        try w.writeAll(",\"changed_refs\":[");
-        var it = changed_refs.iterator();
-        var first = true;
-        while (it.next()) |e| {
-            if (!first) try w.writeAll(",");
-            first = false;
-            try json_writer.writeString(w, e.key_ptr.*);
-        }
-        try w.writeAll("],\"changed_nets\":[");
-        var it2 = changed_nets.iterator();
-        first = true;
-        while (it2.next()) |e| {
-            if (!first) try w.writeAll(",");
-            first = false;
-            try json_writer.writeString(w, e.key_ptr.*);
-        }
-        try w.writeAll("]");
-    }
-
-    try w.writeAll(",\"erc\":[");
-    const erc_all = try runErcForNamedBlock(allocator, nb, project_dir);
+fn writeStringSet(w: anytype, values: *const std.StringHashMapUnmanaged(void)) !void {
+    var iterator = values.iterator();
     var first = true;
-    for (erc_all) |v| {
-        if (!severityPasses(v, severity_filter)) continue;
-        if (have_change_filter) {
-            const ref_hit = v.ref_des.len > 0 and changed_refs.contains(v.ref_des);
-            const net_hit = v.net.len > 0 and changed_nets.contains(v.net);
-            if (!ref_hit and !net_hit) continue;
-        }
+    while (iterator.next()) |entry| {
         if (!first) try w.writeAll(",");
         first = false;
-        try writeErcViolationJson(w, v);
+        try json_writer.writeString(w, entry.key_ptr.*);
     }
-    try w.writeAll("]}");
+}
+
+fn writeChangeFilter(w: anytype, changes: ChangeFilter) !void {
+    if (changes.active) {
+        try w.writeAll(",\"changed_refs\":[");
+        try writeStringSet(w, &changes.refs);
+        try w.writeAll("],\"changed_nets\":[");
+        try writeStringSet(w, &changes.nets);
+        try w.writeAll("]");
+    }
+}
+
+fn writeAssertions(w: anytype, eval: *const Evaluator, severity_filter: ?[]const u8) !usize {
+    try w.writeAll(",\"assertion_failures\":[");
+    var errors: usize = 0;
+    var first = true;
+    for (eval.assertions.items) |assertion| {
+        if (assertion.passed) continue;
+        if (!assertion.is_warning) errors += 1;
+        const assertion_severity: []const u8 = if (assertion.is_warning) "warning" else "error";
+        if (severity_filter) |filter| if (!std.mem.eql(u8, assertion_severity, filter)) continue;
+        if (!first) try w.writeAll(",");
+        first = false;
+        try w.writeAll("{\"kind\":\"assertion\",\"severity\":\"");
+        try w.writeAll(assertion_severity);
+        try w.writeAll("\",\"message\":");
+        try json_writer.writeString(w, assertion.message);
+        try w.writeAll("}");
+    }
+    return errors;
+}
+
+fn touchesChanges(violation: erc_mod.Violation, changes: ChangeFilter) bool {
+    if (!changes.active) return true;
+    if (violation.ref_des.len > 0 and changes.refs.contains(violation.ref_des)) return true;
+    return violation.net.len > 0 and changes.nets.contains(violation.net);
+}
+
+fn writeErcResults(
+    w: anytype,
+    violations: []const erc_mod.Violation,
+    severity_filter: ?[]const u8,
+    changes: ChangeFilter,
+) !usize {
+    try w.writeAll("],\"erc\":[");
+    var errors: usize = 0;
+    var first = true;
+    for (violations) |violation| {
+        if (violation.severity == .@"error") errors += 1;
+        if (!severityPasses(violation, severity_filter)) continue;
+        if (!touchesChanges(violation, changes)) continue;
+        if (!first) try w.writeAll(",");
+        first = false;
+        try writeErcViolationJson(w, violation);
+    }
+    return errors;
+}
+
+fn writeFindings(
+    w: anytype,
+    report: preflight.Report,
+    severity_filter: ?[]const u8,
+    changes: ChangeFilter,
+) !void {
+    try w.writeAll("],\"findings\":[");
+    var first = true;
+    for (report.findings) |finding| {
+        if (severity_filter) |sf| if (!std.mem.eql(u8, @tagName(finding.severity), sf)) continue;
+        if (changes.active and !changes.refs.contains(finding.ref_des)) continue;
+        if (!first) try w.writeAll(",");
+        first = false;
+        try writePreflightFindingJson(w, finding);
+    }
+}
+
+fn runChecks(allocator: std.mem.Allocator, args: RunChecksArgs, w: anytype) !bool {
+    var eval = Evaluator.init(allocator, args.project_dir);
+    defer eval.deinit();
+    const nb = (try loadNamedBlock(allocator, args, &eval, w)) orelse return false;
+    try resolveBom(allocator, args, nb);
+
+    var changes: ChangeFilter = .{};
+    defer changes.deinit(allocator);
+    if (!try loadChangeFilter(allocator, args, nb.block, &changes, w)) return false;
+
+    try w.print("{{\"filtered\":{s},\"profile\":\"{s}\"", .{
+        if (changes.filtered(args.severity)) "true" else "false",
+        @tagName(args.profile),
+    });
+    try writeChangeFilter(w, changes);
+    const assertion_errors = try writeAssertions(w, &eval, args.severity);
+    const erc = try runErcForNamedBlock(allocator, nb, args.project_dir);
+    const erc_errors = try writeErcResults(w, erc, args.severity, changes);
+    const report = try preflight.run(allocator, &eval, nb.block, args.project_dir, args.profile);
+    defer report.deinit(allocator);
+    try writeFindings(w, report, args.severity, changes);
+    const preflight_ok = erc_errors == 0 and assertion_errors == 0 and report.errors == 0;
+    try w.print("],\"preflight_ok\":{s},\"finding_errors\":{d},\"finding_warnings\":{d}}}", .{
+        if (preflight_ok) "true" else "false",
+        report.errors,
+        report.warnings,
+    });
     return true;
 }
 
@@ -226,20 +373,21 @@ fn diffSets(
 pub fn writeBuildReport(w: anytype, report: edit.BuildReport, severity: ?[]const u8) !void {
     try w.writeAll("{\"ok\":");
     try w.writeAll(if (report.ok) "true" else "false");
-    try w.print(",\"version\":{d},\"eval_ok\":{s}", .{
+    try w.print(",\"version\":{d},\"eval_ok\":{s},\"profile\":\"{s}\"", .{
         report.version,
         if (report.eval_ok) "true" else "false",
+        @tagName(report.validation.profile),
     });
     try w.writeAll(",\"snapshot\":");
     if (report.snapshot) |s| try json_writer.writeString(w, s) else try w.writeAll("null");
     try w.writeAll(",\"error\":");
-    if (report.error_message) |m| try json_writer.writeString(w, m) else try w.writeAll("null");
+    if (report.failure.message) |m| try json_writer.writeString(w, m) else try w.writeAll("null");
     // Structured source-located build diagnostic (file/line/col/message/
     // source_line) so an agent can jump straight to the failing form.
     try w.writeAll(",\"diagnostic\":");
-    if (report.diagnostic) |d| try diag_format.writeJson(w, d) else try w.writeAll("null");
+    if (report.failure.diagnostic) |d| try diag_format.writeJson(w, d) else try w.writeAll("null");
     try w.writeAll(",\"assertion_failures\":[");
-    for (report.assertion_failures, 0..) |a, i| {
+    for (report.validation.assertions, 0..) |a, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"message\":");
         try json_writer.writeString(w, a.message);
@@ -247,15 +395,39 @@ pub fn writeBuildReport(w: anytype, report: edit.BuildReport, severity: ?[]const
     }
     try w.writeAll("],\"erc\":[");
     var first = true;
-    for (report.erc) |v| {
+    for (report.validation.erc) |v| {
         if (!severityPasses(v, severity)) continue;
         if (!first) try w.writeAll(",");
         first = false;
         try writeErcViolationJson(w, v);
     }
+    try w.writeAll("],\"findings\":[");
+    first = true;
+    var erc_errors: usize = 0;
+    var assertion_errors: usize = 0;
+    for (report.validation.erc) |violation| if (violation.severity == .@"error") {
+        erc_errors += 1;
+    };
+    for (report.validation.assertions) |assertion| if (!assertion.is_warning) {
+        assertion_errors += 1;
+    };
+    for (report.validation.findings) |finding| {
+        if (severity) |filter| if (!std.mem.eql(u8, @tagName(finding.severity), filter)) continue;
+        if (!first) try w.writeAll(",");
+        first = false;
+        try writePreflightFindingJson(w, finding);
+    }
+    const strict_failed = report.validation.profile == .preflight and !report.ok;
+    const preflight_ok = !strict_failed and
+        report.validation.finding_errors == 0 and erc_errors == 0 and assertion_errors == 0;
+    try w.print("],\"preflight_ok\":{s},\"finding_errors\":{d},\"finding_warnings\":{d}", .{
+        if (preflight_ok) "true" else "false",
+        report.validation.finding_errors,
+        report.validation.finding_warnings,
+    });
     // Non-fatal eval/lint warnings (silently-ignored sub-forms etc.) — a
     // separate array from erc[], and NOT touched by the severity filter.
-    try w.writeAll("],\"warnings\":[");
+    try w.writeAll(",\"warnings\":[");
     for (report.warnings, 0..) |wn, i| {
         if (i > 0) try w.writeAll(",");
         try w.print("{{\"line\":{d},\"col\":{d},\"message\":", .{ wn.line, wn.col });
@@ -278,31 +450,97 @@ test "severityPasses passes everything for a null filter" {
 
 test "writeBuildReport severity filter drops non-matching erc entries" {
     // spec: serve/mcp_tools - build tool severity arg filters the erc[] array to the named severity
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(std.testing.allocator);
-    const w = out.writer(std.testing.allocator);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const w = &out.writer;
     const violations = [_]erc_mod.Violation{
         .{ .kind = .floating_net, .severity = .warning, .message = "warn one", .net = "NETW" },
         .{ .kind = .unconnected_pin, .severity = .@"error", .message = "err one", .ref_des = "U1" },
     };
-    const report = edit.BuildReport{ .ok = true, .version = 1, .eval_ok = true, .erc = &violations };
+    const report = edit.BuildReport{
+        .ok = true,
+        .version = 1,
+        .eval_ok = true,
+        .validation = .{ .erc = &violations },
+    };
     try writeBuildReport(w, report, "error");
     // The error survives; the warning is filtered out of erc[].
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "err one") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "warn one") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "err one") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "warn one") == null);
 }
 
 test "writeBuildReport emits eval warnings in a separate array" {
     // spec: serve/mcp_tools - build response carries eval warnings in a warnings[] array separate from erc[]
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(std.testing.allocator);
-    const w = out.writer(std.testing.allocator);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const w = &out.writer;
     const warns = [_]edit.BuildWarning{
         .{ .line = 12, .col = 3, .message = "unknown sub-form (rolle ...)" },
     };
     const report = edit.BuildReport{ .ok = true, .version = 2, .eval_ok = true, .warnings = &warns };
     try writeBuildReport(w, report, null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"warnings\":[") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "unknown sub-form (rolle ...)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"line\":12") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"warnings\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "unknown sub-form (rolle ...)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"line\":12") != null);
+}
+
+// spec: serve/mcp_checks - build and run_checks share structured requirement/datasheet preflight finding fields
+test "writeBuildReport emits structured preflight findings" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const findings = [_]preflight.Finding{.{
+        .kind = .requirement,
+        .status = .fail,
+        .severity = .@"error",
+        .ref_des = "U1",
+        .component = "regulator",
+        .message = "no capacitor found",
+        .requirement = .{
+            .id = "deadbeef",
+            .text = "VIN must be decoupled",
+            .citation = .{ .pdf = "regulator.pdf", .page = 7, .quote = "Place a capacitor" },
+            .datasheet = "regulator.pdf",
+        },
+    }};
+    const report = edit.BuildReport{
+        .ok = false,
+        .version = 2,
+        .eval_ok = true,
+        .validation = .{
+            .profile = .preflight,
+            .findings = &findings,
+            .finding_errors = 1,
+        },
+    };
+    try writeBuildReport(&out.writer, report, null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"findings\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"requirement_id\":\"deadbeef\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"preflight_ok\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"profile\":\"preflight\"") != null);
+}
+
+// spec: serve/mcp_checks - build preflight_ok includes non-warning assertion failures
+test "writeBuildReport preflight_ok includes assertion errors" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const assertions = [_]edit.AssertionFailure{.{ .message = "rail out of range", .is_warning = false }};
+    const report = edit.BuildReport{
+        .ok = false,
+        .version = 2,
+        .eval_ok = true,
+        .validation = .{ .profile = .preflight, .assertions = &assertions },
+    };
+    try writeBuildReport(&out.writer, report, null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"preflight_ok\":false") != null);
+
+    var failed_out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer failed_out.deinit();
+    const failed_report = edit.BuildReport{
+        .ok = false,
+        .version = 2,
+        .eval_ok = true,
+        .validation = .{ .profile = .preflight },
+    };
+    try writeBuildReport(&failed_out.writer, failed_report, null);
+    try std.testing.expect(std.mem.indexOf(u8, failed_out.written(), "\"preflight_ok\":false") != null);
 }

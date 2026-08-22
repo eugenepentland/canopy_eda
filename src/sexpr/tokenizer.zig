@@ -342,16 +342,18 @@ pub const Tokenizer = struct {
 
     fn isAtomContinue(c: ?u8) bool {
         const ch = c orelse return false;
-        // `+` and `,` are included so KiCad's unquoted model paths tokenize
+        // `+`, `,`, and `$` are included so vendor KiCad exports tokenize
         // as a single atom: `PMA3-24323LN+.stp` from Mini-Circuits part
         // libraries needs `+`; SamacSys/Nexperia exports name the model after
-        // the MPN (e.g. `(model 74AHCT1G125GF,132.stp …)`) and need `,`. Both
-        // are mid-token only — neither is an atom *start* char, so `+`
-        // standalone is still picked up by `readOperator` and a leading `,`
-        // still errors; arithmetic forms like `(+ 1 2)` are unaffected.
+        // the MPN (e.g. `(model 74AHCT1G125GF,132.stp …)`) and need `,`; and
+        // SnapEDA/EAGLE-derived footprints use pad IDs such as `P$1`, which
+        // need `$`. These are mid-token only — none is an atom *start* char,
+        // so `+` standalone is still picked up by `readOperator` and leading
+        // punctuation still errors; arithmetic forms like `(+ 1 2)` are
+        // unaffected.
         return isAtomStart(ch) or isDigit(ch) or ch == '-' or ch == '/' or
             ch == '.' or ch == '*' or ch == '#' or ch == '@' or ch == ':' or
-            ch == '+' or ch == ',';
+            ch == '+' or ch == ',' or ch == '$';
     }
 
     fn isOperatorChar(c: u8) bool {
@@ -379,6 +381,30 @@ test "tokenize parens and atoms" {
     try std.testing.expectEqual(TokenTag.rparen, t5.tag);
     const t6 = try t.next();
     try std.testing.expectEqual(TokenTag.eof, t6.tag);
+}
+
+// Regression: EAGLE-derived vendor pad identifiers must survive tokenization.
+test "tokenize dollar-sign pad identifiers" {
+    var t = Tokenizer.init("(pad P$1 smd custom) (pin P$2 \"RF\")");
+    const expected = [_]struct { tag: TokenTag, text: []const u8 }{
+        .{ .tag = .lparen, .text = "(" },
+        .{ .tag = .atom, .text = "pad" },
+        .{ .tag = .atom, .text = "P$1" },
+        .{ .tag = .atom, .text = "smd" },
+        .{ .tag = .atom, .text = "custom" },
+        .{ .tag = .rparen, .text = ")" },
+        .{ .tag = .lparen, .text = "(" },
+        .{ .tag = .atom, .text = "pin" },
+        .{ .tag = .atom, .text = "P$2" },
+        .{ .tag = .string, .text = "RF" },
+        .{ .tag = .rparen, .text = ")" },
+        .{ .tag = .eof, .text = "" },
+    };
+    for (expected) |want| {
+        const got = try t.next();
+        try std.testing.expectEqual(want.tag, got.tag);
+        try std.testing.expectEqualStrings(want.text, got.text);
+    }
 }
 
 // spec: sexpr/tokenizer - Tokenizes KiCad-style unquoted filenames containing +

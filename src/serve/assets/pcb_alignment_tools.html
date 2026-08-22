@@ -1,0 +1,28 @@
+<div class="align-bar" id="align-bar" hidden>
+  <div class="align-h"><span id="align-n">0 parts selected</span></div>
+  <div class="align-grid">
+    <button class="al-btn" data-align="left" title="Align left edges">⇤</button>
+    <button class="al-btn" data-align="cx" title="Align horizontal centres">↔</button>
+    <button class="al-btn" data-align="right" title="Align right edges">⇥</button>
+    <button class="al-btn" data-align="top" title="Align top edges">⤒</button>
+    <button class="al-btn" data-align="cy" title="Align vertical centres">↕</button>
+    <button class="al-btn" data-align="bottom" title="Align bottom edges">⤓</button>
+  </div>
+  <div class="align-dist">
+    <button class="al-btn wide" data-distribute="h" title="Distribute horizontally — even origin spacing">⇔ H</button>
+    <button class="al-btn wide" data-distribute="v" title="Distribute vertically — even origin spacing">⇕ V</button>
+  </div>
+</div>
+<div class="pad-align-bar" id="pad-align-bar" hidden>
+  <div class="pa-head"><b>Align pads</b><button id="pad-align-cancel" title="Cancel pad alignment">×</button></div>
+  <div class="pa-note" id="pad-align-note">1. Click the pad whose owner should move.</div>
+  <div class="pa-pick"><span>1 · moving</span><strong id="pad-align-source">not selected</strong></div>
+  <div class="pa-pick"><span>2 · fixed target</span><strong id="pad-align-target">not selected</strong></div>
+  <div class="pa-actions">
+    <button class="al-btn wide" data-pad-axis="x" disabled
+      title="Move the first pad's owner so both pad centres have the same X coordinate (vertical alignment)">Same X · vertical</button>
+    <button class="al-btn wide" data-pad-axis="y" disabled
+      title="Move the first pad's owner so both pad centres have the same Y coordinate (horizontal alignment)">Same Y · horizontal</button>
+  </div>
+  <button class="pa-restart" id="pad-align-restart">Start over</button>
+</div>

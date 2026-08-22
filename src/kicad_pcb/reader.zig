@@ -1,15 +1,14 @@
-//! Parse a `.kicad_pcb` file on disk and produce the same `BoardFp` shape
-//! the Go IPC agent posts to `/api/sync-plan`. Replaces the IPC-derived
-//! board state with a direct file read so the new file-based KiCad sync
-//! can reuse `runSyncPlan` without going through a live KiCad session.
+//! Parse a `.kicad_pcb` file on disk into the `BoardFp` snapshot consumed by
+//! the sync planner.
 //!
 //! KiCad's `.kicad_pcb` is the same S-expression dialect this project
 //! already speaks, so parsing and traversal piggyback on `src/sexpr/`.
 
 const std = @import("std");
+const infra_fs = @import("../infra/fs.zig");
 const ast = @import("../sexpr/ast.zig");
 const parser = @import("../sexpr/parser.zig");
-const sync = @import("../serve/sync.zig");
+const board_state = @import("board_state.zig");
 const fmt_const = @import("format.zig");
 const numeric = @import("../numeric.zig");
 
@@ -25,13 +24,13 @@ pub const ReadError = error{InvalidPcbRoot} || std.mem.Allocator.Error || parser
 /// of BoardFp records. All strings are owned by `arena`. Net IDs in pad
 /// records are resolved against the file's top-level `(net N "name")`
 /// table before being attached to each pad.
-pub fn readBoard(arena: std.mem.Allocator, source: []const u8) ReadError![]const sync.BoardFp {
+pub fn readBoard(arena: std.mem.Allocator, source: []const u8) ReadError![]const board_state.BoardFp {
     const nodes = try parser.parse(arena, source);
     if (nodes.len == 0 or !nodes[0].isForm("kicad_pcb")) return error.InvalidPcbRoot;
     const children = nodes[0].asList() orelse return error.InvalidPcbRoot;
 
     var net_table = std.AutoHashMapUnmanaged(i64, []const u8).empty;
-    var fps: std.ArrayList(sync.BoardFp) = .empty;
+    var fps: std.ArrayList(board_state.BoardFp) = .empty;
 
     // Pass 1: build the net-ID → name map. Pads in pass 2 reference it.
     for (children[1..]) |child| {
@@ -58,32 +57,27 @@ fn readFootprint(
     arena: std.mem.Allocator,
     node: Node,
     net_table: *const std.AutoHashMapUnmanaged(i64, []const u8),
-) ReadError!?sync.BoardFp {
+) ReadError!?board_state.BoardFp {
     const cl = node.asList() orelse return null;
     if (cl.len < 2) return null;
     // `(footprint "lib_id" …)` — lib_id is the next element.
     const lib_id = cl[1].asString() orelse return null;
 
-    var fp: sync.BoardFp = .{
+    var fp: board_state.BoardFp = .{
         .uuid = "",
         .kicad_uuid = "",
         .ref = "",
         .value = "",
         .footprint_name = lib_id,
         .fields = .empty,
-        .pads = &[_]sync.PadAssign{},
-        .locked = false,
+        .pads = &[_]board_state.PadAssign{},
     };
 
-    var pads: std.ArrayList(sync.PadAssign) = .empty;
+    var pads: std.ArrayList(board_state.PadAssign) = .empty;
 
     for (cl[2..]) |sub| {
         if (sub.isForm("uuid")) {
             fp.kicad_uuid = formStringChild(sub) orelse "";
-        } else if (sub.isForm("locked")) {
-            // (locked yes) | (locked no). KiCad emits this as a sibling
-            // of (at …) when the user padlocks a footprint in pcbnew.
-            fp.locked = formAtomChildEquals(sub, "yes");
         } else if (sub.isForm("property")) {
             try readProperty(arena, sub, &fp);
         } else if (sub.isForm("pad")) {
@@ -101,7 +95,7 @@ fn readFootprint(
 /// (rotate (xyz RX RY RZ)))` into `has_model`/`model_offset`/`model_rotate`.
 /// Missing offset/rotate sub-forms default to zero (KiCad omits a zero block).
 /// Used by the diff to detect 3D-model orientation drift vs `model-config.json`.
-fn readModel(node: Node, fp: *sync.BoardFp) void {
+fn readModel(node: Node, fp: *board_state.BoardFp) void {
     const cl = node.asList() orelse return;
     if (cl.len < 2) return;
     fp.has_model = true;
@@ -130,7 +124,7 @@ fn readXyz(node: Node) [3]f64 {
     return .{ 0, 0, 0 };
 }
 
-fn readProperty(arena: std.mem.Allocator, node: Node, fp: *sync.BoardFp) std.mem.Allocator.Error!void {
+fn readProperty(arena: std.mem.Allocator, node: Node, fp: *board_state.BoardFp) std.mem.Allocator.Error!void {
     const cl = node.asList() orelse return;
     if (cl.len < 3) return;
     const key = cl[1].asString() orelse return;
@@ -150,7 +144,7 @@ fn readPad(
     arena: std.mem.Allocator,
     node: Node,
     net_table: *const std.AutoHashMapUnmanaged(i64, []const u8),
-    pads: *std.ArrayList(sync.PadAssign),
+    pads: *std.ArrayList(board_state.PadAssign),
 ) std.mem.Allocator.Error!void {
     const cl = node.asList() orelse return;
     if (cl.len < 2) return;
@@ -166,8 +160,8 @@ fn readPad(
         if (nl.len < 2) continue;
         // Standard KiCad format: `(net <id> "<name>")` — slot 1 is the
         // integer net-ID into the top-level table.
-        // Legacy / Go-IPC-agent format: `(net "<name>")` — slot 1 is the
-        // name directly, no top-level table. Older Canopy boards were
+        // Legacy name-only format: `(net "<name>")` — slot 1 is the name
+        // directly, no top-level table. Older Canopy boards were
         // written this way; the file-based sync must read both so an
         // existing board isn't flagged "all pads disconnected" on the
         // first push. The writer always emits the canonical form.
@@ -188,14 +182,6 @@ fn formStringChild(node: Node) ?[]const u8 {
     return cl[1].asString();
 }
 
-/// True when a single-atom form like `(locked yes)` matches `expected`.
-fn formAtomChildEquals(node: Node, expected: []const u8) bool {
-    const cl = node.asList() orelse return false;
-    if (cl.len < 2) return false;
-    const atom = cl[1].asAtom() orelse return false;
-    return std.mem.eql(u8, atom, expected);
-}
-
 // ── Tests ──────────────────────────────────────────────────────────────
 
 const reader_fuzz_corpus = [_][]const u8{
@@ -214,7 +200,9 @@ const reader_fuzz_corpus = [_][]const u8{
 /// crash — `readBoard` either returns a board slice or a `ReadError`. Every
 /// allocation lands in an arena that is unconditionally reclaimed, so the outer
 /// `testing.allocator` stays leak-free regardless of where parsing bails out.
-fn fuzzReadBoard(allocator: std.mem.Allocator, input: []const u8) anyerror!void {
+fn fuzzReadBoard(allocator: std.mem.Allocator, smith: *std.testing.Smith) anyerror!void {
+    var generated: [64 * 1024]u8 = undefined;
+    const input = smith.in orelse generated[0..smith.slice(&generated)];
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     _ = readBoard(arena.allocator(), input) catch return;
@@ -255,7 +243,6 @@ test "readBoard extracts ref/value/uuids from a single footprint" {
     try std.testing.expectEqual(@as(usize, 1), fps[0].pads.len);
     try std.testing.expectEqualStrings("1", fps[0].pads[0].number);
     try std.testing.expectEqualStrings("VDD", fps[0].pads[0].net);
-    try std.testing.expectEqual(false, fps[0].locked);
 }
 
 // spec: kicad_pcb/reader - parses the (model …) offset/rotate so the diff can detect 3D-model drift
@@ -337,24 +324,6 @@ test "readBoard skips a pad net id that overflows the integer range" {
     try std.testing.expectEqualStrings("", fps[0].pads[0].net);
 }
 
-// spec: kicad_pcb/reader - parses (locked yes) as locked footprint
-test "readBoard surfaces footprint lock state" {
-    const a = std.testing.allocator;
-    const src =
-        \\(kicad_pcb
-        \\  (footprint "C_0402"
-        \\    (uuid "u1")
-        \\    (locked yes)
-        \\    (property "Reference" "C9")))
-    ;
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-
-    const fps = try readBoard(arena.allocator(), src);
-    try std.testing.expectEqual(@as(usize, 1), fps.len);
-    try std.testing.expectEqual(true, fps[0].locked);
-}
-
 // spec: kicad_pcb/reader - reads every footprint in a real .kicad_pcb fixture
 test "readBoard walks every footprint in lt3045.kicad_pcb" {
     const a = std.testing.allocator;
@@ -362,9 +331,7 @@ test "readBoard walks every footprint in lt3045.kicad_pcb" {
     defer arena.deinit();
     const ar = arena.allocator();
 
-    var file = std.fs.cwd().openFile("projects/designs/out/lt3045.kicad_pcb", .{}) catch return;
-    defer file.close();
-    const src = try file.readToEndAlloc(ar, 16 * 1024 * 1024);
+    const src = infra_fs.cwd().readFileAlloc(ar, "projects/designs/out/lt3045.kicad_pcb", 16 * 1024 * 1024) catch return;
 
     const fps = try readBoard(ar, src);
     // lt3045.kicad_pcb has ~10 footprints in its current state; the

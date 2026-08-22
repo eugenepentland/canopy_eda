@@ -3,11 +3,10 @@
 //! the HTTP layer (fsync + atomic rename); this module only owns the AST
 //! mutation and pretty-print.
 //!
-//! Op vocabulary mirrors what `serve/sync.zig` emits for the Go IPC
-//! agent: add, swap_footprint, remove, set_field, set_pad_net, set_locked.
-//! `flag_stale` is informational only — KiCad's UI shows the marker
-//! through IPC, but with file-based sync there's nothing to write; the
-//! op is silently skipped.
+//! The operation vocabulary mirrors `serve/sync.zig`: add, swap_footprint,
+//! remove, set_field, set_pad_net, layout seeding, and the explicit
+//! set_footprint_pose/replace_layout/add_outline handoff operations.
+//! `flag_stale` is preview-only and is silently skipped.
 
 const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
@@ -15,6 +14,7 @@ const parser = @import("../sexpr/parser.zig");
 const printer = @import("../sexpr/printer.zig");
 const fmt_const = @import("format.zig");
 const numeric = @import("../numeric.zig");
+const board_layers = @import("../board_layers.zig");
 const Node = ast.Node;
 const Span = ast.Span;
 
@@ -28,11 +28,11 @@ const form_property = "property";
 const form_at = "at";
 const form_uuid = "uuid";
 const form_layer = "layer";
-const form_locked = "locked";
 const form_net = "net";
 const form_pad = "pad";
 const form_via = "via";
 const form_group = "group";
+const form_zone = "zone";
 
 // Two vias within this distance (mm) are treated as the same via, so an
 // `add_via` at an already-stitched position is a no-op on re-sync.
@@ -52,6 +52,7 @@ const uuid_hex_len = 32;
 
 pub const WriteError = error{ InvalidPcbRoot, InvalidOps, InvalidAdd } ||
     std.mem.Allocator.Error ||
+    std.Io.Writer.Error ||
     parser.ParseError ||
     std.json.ParseError(std.json.Scanner);
 
@@ -73,9 +74,23 @@ pub fn applyOpsToSource(arena: std.mem.Allocator, source: []const u8, ops_json: 
     return try printer.print(arena, out_nodes);
 }
 
-/// Copper items inserted from a layout seed this sync (de-duped counts). Nested
-/// inside `ApplyStats` so its two counters read as one concern.
-const CopperStats = struct { vias: u32 = 0, tracks: u32 = 0 };
+/// Destructive/replacement changes made only by an explicit authoritative
+/// layout handoff, nested below the existing copper stats to keep ApplyStats
+/// compact.
+const LayoutStats = struct {
+    footprints_moved: u32 = 0,
+    vias_removed: u32 = 0,
+    tracks_removed: u32 = 0,
+    edge_cuts_removed: u32 = 0,
+    edge_cuts_added: u32 = 0,
+    groups_removed: u32 = 0,
+};
+
+const CopperStats = struct {
+    vias: u32 = 0,
+    tracks: u32 = 0,
+    layout: LayoutStats = .{},
+};
 
 /// Stats returned alongside the rewritten file — Phase 4's UI surfaces
 /// these in the success message so the user sees "added 2, removed 1,
@@ -86,7 +101,6 @@ pub const ApplyStats = struct {
     swapped: u32 = 0,
     fields_set: u32 = 0,
     pad_nets_set: u32 = 0,
-    locked_changed: u32 = 0,
     /// Standalone board graphics written (section staging boxes + labels).
     board_items: u32 = 0,
     /// KiCad `(group …)` forms created this sync (seeded off-board sub-circuits
@@ -96,8 +110,8 @@ pub const ApplyStats = struct {
     /// Copper inserted this sync from a layout seed: GND stitching vias
     /// (`add_via`) and a seeded sub-circuit's routed tracks (`add_track`). Each
     /// counts only the genuinely new items — a via/segment already on the board
-    /// at the same position is a de-duped no-op. Grouped into one nested struct
-    /// so the two counters read as one concern.
+    /// at the same position is a de-duped no-op. Its nested `layout` counters
+    /// describe authoritative placement and replacement removals.
     copper: CopperStats = .{},
     /// Properties hidden this sync — Reference (refdes), Value, Datasheet,
     /// Description, and the canopy_* tags all get `(hide yes)` so F.Fab/F.SilkS
@@ -217,14 +231,31 @@ fn applyBoardItemOp(
 fn applyGroupOp(
     arena: std.mem.Allocator,
     op_obj: std.json.ObjectMap,
+    copper_members: []const []const u8,
     extra_groups: *std.ArrayList(Node),
     groups: *GroupIndex,
     stats: *ApplyStats,
 ) WriteError!void {
-    if (try buildGroupNode(arena, op_obj, groups)) |gnode| {
+    if (try buildGroupNode(arena, op_obj, copper_members, groups)) |gnode| {
         try extra_groups.append(arena, gnode);
         stats.groups_added += 1;
     }
+}
+
+/// Associate a freshly-built copper item's uuid with the named sub-circuit.
+/// Group ops are finalized after the full op batch, so this works even though
+/// sync currently emits each `group` op before its `add_track` / `add_via` ops.
+fn recordCopperGroupMember(
+    arena: std.mem.Allocator,
+    by_group: *std.StringHashMapUnmanaged(std.ArrayList([]const u8)),
+    group_name: []const u8,
+    item: Node,
+) std.mem.Allocator.Error!void {
+    if (group_name.len == 0) return;
+    const uuid = nodeUuid(item) orelse return;
+    const e = try by_group.getOrPut(arena, group_name);
+    if (!e.found_existing) e.value_ptr.* = .empty;
+    try e.value_ptr.append(arena, uuid);
 }
 
 /// Handle one `add_via` op: a through-hole GND stitching via from a
@@ -238,6 +269,7 @@ fn applyAddViaOp(
     op_obj: std.json.ObjectMap,
     existing_vias: *std.ArrayList(Vec2Mm),
     extra_vias: *std.ArrayList(Node),
+    copper_members: *std.StringHashMapUnmanaged(std.ArrayList([]const u8)),
     stats: *ApplyStats,
 ) WriteError!void {
     const vx = jsonNumNm(op_obj.get("x")) / nm_per_mm;
@@ -245,10 +277,13 @@ fn applyAddViaOp(
     const vdia = jsonNumNm(op_obj.get("dia")) / nm_per_mm;
     const vdrill = jsonNumNm(op_obj.get("drill")) / nm_per_mm;
     const vnet = jsonStr(op_obj.get("net"));
+    const vfree = if (op_obj.get("free")) |value| value == .bool and value.bool else false;
     if (vdia <= 0 or vdrill <= 0 or vnet.len == 0) return;
     if (viaExistsAt(existing_vias.items, vx, vy)) return;
     try existing_vias.append(arena, .{ .x = vx, .y = vy });
-    try extra_vias.append(arena, try buildVia(arena, vx, vy, vdia, vdrill, vnet));
+    const via = try buildVia(arena, .{ .x = vx, .y = vy, .dia = vdia, .drill = vdrill, .net = vnet, .free = vfree });
+    try extra_vias.append(arena, via);
+    try recordCopperGroupMember(arena, copper_members, jsonStr(op_obj.get("group")), via);
     stats.copper.vias += 1;
 }
 
@@ -264,6 +299,7 @@ fn applyAddTrackOp(
     op_obj: std.json.ObjectMap,
     existing_tracks: *std.ArrayList(SegKey),
     extra_tracks: *std.ArrayList(Node),
+    copper_members: *std.StringHashMapUnmanaged(std.ArrayList([]const u8)),
     stats: *ApplyStats,
 ) WriteError!void {
     const t = TrackSpec{
@@ -280,7 +316,43 @@ fn applyAddTrackOp(
     const b = Vec2Mm{ .x = t.x2, .y = t.y2 };
     if (segExistsAt(existing_tracks.items, a, b, t.layer)) return;
     try existing_tracks.append(arena, .{ .a = a, .b = b, .layer = t.layer });
-    try extra_tracks.append(arena, try buildSegment(arena, t));
+    const segment = try buildSegment(arena, t);
+    try extra_tracks.append(arena, segment);
+    try recordCopperGroupMember(arena, copper_members, jsonStr(op_obj.get("group")), segment);
+    stats.copper.tracks += 1;
+}
+
+/// Handle a native three-point copper arc. KiCad uses the same start/mid/end
+/// representation, so no curve fitting or tessellation is needed here.
+fn applyAddArcOp(
+    arena: std.mem.Allocator,
+    op_obj: std.json.ObjectMap,
+    existing_tracks: *std.ArrayList(SegKey),
+    extra_tracks: *std.ArrayList(Node),
+    copper_members: *std.StringHashMapUnmanaged(std.ArrayList([]const u8)),
+    stats: *ApplyStats,
+) WriteError!void {
+    const t = TrackSpec{
+        .x1 = jsonNumNm(op_obj.get("x1")) / nm_per_mm,
+        .y1 = jsonNumNm(op_obj.get("y1")) / nm_per_mm,
+        .x2 = jsonNumNm(op_obj.get("x2")) / nm_per_mm,
+        .y2 = jsonNumNm(op_obj.get("y2")) / nm_per_mm,
+        .width = jsonNumNm(op_obj.get("width")) / nm_per_mm,
+        .layer = jsonStr(op_obj.get("layer")),
+        .net = jsonStr(op_obj.get("net")),
+    };
+    const mid = Vec2Mm{
+        .x = jsonNumNm(op_obj.get("xm")) / nm_per_mm,
+        .y = jsonNumNm(op_obj.get("ym")) / nm_per_mm,
+    };
+    if (t.width <= 0 or t.net.len == 0 or t.layer.len == 0) return;
+    const a = Vec2Mm{ .x = t.x1, .y = t.y1 };
+    const b = Vec2Mm{ .x = t.x2, .y = t.y2 };
+    if (segExistsAt(existing_tracks.items, a, b, t.layer)) return;
+    try existing_tracks.append(arena, .{ .a = a, .b = b, .layer = t.layer });
+    const arc = try buildArc(arena, t, mid);
+    try extra_tracks.append(arena, arc);
+    try recordCopperGroupMember(arena, copper_members, jsonStr(op_obj.get("group")), arc);
     stats.copper.tracks += 1;
 }
 
@@ -297,6 +369,8 @@ const AppendOps = struct {
     extra_tracks: std.ArrayList(Node) = .empty,
     extra_graphics: std.ArrayList(Node) = .empty,
     extra_groups: std.ArrayList(Node) = .empty,
+    copper_members: std.StringHashMapUnmanaged(std.ArrayList([]const u8)) = .empty,
+    pending_groups: std.ArrayList(std.json.ObjectMap) = .empty,
     groups: *GroupIndex,
 };
 
@@ -311,30 +385,117 @@ fn applyAppendOp(
     stats: *ApplyStats,
 ) WriteError!bool {
     if (std.mem.eql(u8, op_name, "add_via")) {
-        try applyAddViaOp(arena, op_obj, &a.existing_vias, &a.extra_vias, stats);
+        try applyAddViaOp(arena, op_obj, &a.existing_vias, &a.extra_vias, &a.copper_members, stats);
         return true;
     }
     if (std.mem.eql(u8, op_name, "add_track")) {
-        try applyAddTrackOp(arena, op_obj, &a.existing_tracks, &a.extra_tracks, stats);
+        try applyAddTrackOp(arena, op_obj, &a.existing_tracks, &a.extra_tracks, &a.copper_members, stats);
+        return true;
+    }
+    if (std.mem.eql(u8, op_name, "add_arc")) {
+        try applyAddArcOp(arena, op_obj, &a.existing_tracks, &a.extra_tracks, &a.copper_members, stats);
         return true;
     }
     if (std.mem.eql(u8, op_name, "create_board_item")) {
         try applyBoardItemOp(arena, op_obj, &a.extra_graphics, stats);
         return true;
     }
+    if (std.mem.eql(u8, op_name, "add_zone")) {
+        if (try buildZone(arena, op_obj)) |zone| {
+            try a.extra_graphics.append(arena, zone);
+            stats.board_items += 1;
+        }
+        return true;
+    }
+    if (std.mem.eql(u8, op_name, "add_outline")) {
+        if (try buildOutlineSegment(arena, op_obj)) |outline| {
+            try a.extra_graphics.append(arena, outline);
+            stats.copper.layout.edge_cuts_added += 1;
+        }
+        return true;
+    }
+    if (std.mem.eql(u8, op_name, "add_outline_arc")) {
+        if (try buildOutlineArc(arena, op_obj)) |outline| {
+            try a.extra_graphics.append(arena, outline);
+            stats.copper.layout.edge_cuts_added += 1;
+        }
+        return true;
+    }
     if (std.mem.eql(u8, op_name, "group")) {
-        try applyGroupOp(arena, op_obj, &a.extra_groups, a.groups, stats);
+        try a.pending_groups.append(arena, op_obj);
         return true;
     }
     return false;
+}
+
+/// Finalize delayed group ops after their tagged copper has been built.
+fn finalizeAppendGroups(arena: std.mem.Allocator, a: *AppendOps, stats: *ApplyStats) WriteError!void {
+    for (a.pending_groups.items) |op_obj| {
+        const name = jsonStr(op_obj.get("name"));
+        const copper = if (a.copper_members.get(name)) |items| items.items else &.{};
+        try applyGroupOp(arena, op_obj, copper, &a.extra_groups, a.groups, stats);
+    }
+}
+
+fn hasReplaceLayoutOp(ops: []const std.json.Value) bool {
+    for (ops) |op_val| {
+        if (op_val != .object) continue;
+        const name = jsonStr(op_val.object.get("op"));
+        if (std.mem.eql(u8, name, "replace_layout")) return true;
+    }
+    return false;
+}
+
+fn prepareLayoutReplacement(replace_layout: bool, appends: *AppendOps) void {
+    if (!replace_layout) return;
+    appends.existing_vias.clearRetainingCapacity();
+    appends.existing_tracks.clearRetainingCapacity();
+}
+
+const MutatedFootprints = std.AutoHashMapUnmanaged(usize, Node);
+
+/// Apply pose controls before the main op walk. A following swap_footprint then
+/// reads the new at/layer from `mutated`, which is required to re-bake rotated
+/// and back-side pad geometry correctly.
+fn applyPoseOps(
+    arena: std.mem.Allocator,
+    root_children: []const Node,
+    ops: []const std.json.Value,
+    fp_by_uuid: *const std.StringHashMapUnmanaged(usize),
+    mutated: *MutatedFootprints,
+    stats: *ApplyStats,
+) WriteError!void {
+    for (ops) |op_val| {
+        if (op_val != .object) continue;
+        const op_obj = op_val.object;
+        if (!std.mem.eql(u8, jsonStr(op_obj.get("op")), "set_footprint_pose")) continue;
+        const idx = fp_by_uuid.get(jsonStr(op_obj.get("uuid"))) orelse continue;
+        const current = mutated.get(idx) orelse root_children[idx];
+        const updated = (try setFootprintPose(arena, current, op_obj)) orelse continue;
+        try mutated.put(arena, idx, updated);
+        stats.copper.layout.footprints_moved += 1;
+    }
+}
+
+fn skipExistingChild(
+    arena: std.mem.Allocator,
+    index: usize,
+    child: Node,
+    replace_layout: bool,
+    removed: *const std.AutoHashMapUnmanaged(usize, void),
+    stats: *ApplyStats,
+) bool {
+    if (removed.contains(index)) return true;
+    if (!replace_layout or !layoutOwnedChild(arena, child)) return false;
+    countRemovedLayoutChild(child, stats);
+    return true;
 }
 
 fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: []const std.json.Value, stats: *ApplyStats) WriteError!Node {
     // First: walk the top-level once to:
     //  - record max net-ID for allocating new nets
     //  - build (kicad_uuid → index-of-footprint-in-root) lookup
-    //  - build a set of canopy_uuids already on the board so `add` ops
-    //    targeting an existing canopy can be detected and skipped
+    //  - detect `add` ops targeting canopy_uuids already on the board
     //    (the diff brain emits `add` whenever its by_uuid lookup misses;
     //    duplicate canopy_uuids in the design's .bom make it miss
     //    forever and we'd otherwise grow the board by one fp per push).
@@ -361,11 +522,14 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
     //    when the input file already carries top-level declarations; for
     //    pcbnew-saved boards (KiCad 10 v20260206 onward) the declarations
     //    are omitted and we keep that property by leaving extra_nets empty.
-    var mutated_fp = std.AutoHashMapUnmanaged(usize, Node).empty;
+    var mutated_fp = MutatedFootprints.empty;
     var removed_fp_indices = std.AutoHashMapUnmanaged(usize, void).empty;
     var extra_footprints: std.ArrayList(Node) = .empty;
     var extra_nets: std.ArrayList(Node) = .empty;
     const had_top_level_nets = max_net_id >= 0;
+    const replace_layout = hasReplaceLayoutOp(ops);
+    prepareLayoutReplacement(replace_layout, &appends);
+    try applyPoseOps(arena, root_children, ops, &fp_by_uuid, &mutated_fp, stats);
 
     for (ops) |op_val| {
         if (op_val != .object) continue;
@@ -437,14 +601,6 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
             continue;
         }
 
-        if (std.mem.eql(u8, op_name, "set_locked")) {
-            const locked = jsonBool(op_obj.get("locked"));
-            const updated = try setLocked(arena, current, locked) orelse continue;
-            try mutated_fp.put(arena, idx, updated);
-            stats.locked_changed += 1;
-            continue;
-        }
-
         if (std.mem.eql(u8, op_name, "swap_footprint")) {
             const new_name = jsonStr(op_obj.get("new_footprint_name"));
             const kmod = jsonStr(op_obj.get("kicad_mod"));
@@ -457,6 +613,7 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
         }
     }
 
+    try finalizeAppendGroups(arena, &appends, stats);
     // No canonicalisation pass — KiCad 10 v20260206 saves in-element net
     // references as `(net "name")` (name only). pcbnew's parser rejects
     // `(net <id> "name")` inside segments/vias/zones, so rewriting forms
@@ -466,8 +623,8 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
     // its target pad's net form via makeNetForm (also name-only); every
     // untouched form passes through unchanged.
 
-    // Build the new root child list: skip removed footprints, swap in
-    // mutated ones, append any new top-level (net …) declarations after
+    // Build the new root child list: skip removed footprints, swap in mutated
+    // ones, append any new top-level (net …) declarations after
     // the last existing one (only when the input had them), and append
     // new footprints at the end.
     var new_children: std.ArrayList(Node) = .empty;
@@ -479,7 +636,7 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
         }
     }
     for (root_children, 0..) |child, i| {
-        if (removed_fp_indices.contains(i)) continue;
+        if (skipExistingChild(arena, i, child, replace_layout, &removed_fp_indices, stats)) continue;
         var out_child = mutated_fp.get(i) orelse child;
         // Normalise property visibility on every board footprint: hide the
         // refdes (Reference), Value, and metadata (Datasheet, Description, bare
@@ -527,11 +684,6 @@ fn jsonStr(v: ?std.json.Value) []const u8 {
     return if (val == .string) val.string else "";
 }
 
-fn jsonBool(v: ?std.json.Value) bool {
-    const val = v orelse return false;
-    return val == .bool and val.bool;
-}
-
 /// Read a JSON number (proto nanometre value) as f64; missing/non-number → 0.
 fn jsonNumNm(v: ?std.json.Value) f64 {
     const val = v orelse return 0;
@@ -555,14 +707,141 @@ fn jsonVec2Mm(v: ?std.json.Value) ?Vec2Mm {
     };
 }
 
+/// Replace only a footprint's board pose. Authoritative pushes emit this op
+/// immediately before a forced `swap_footprint`, which rebuilds pad angles and
+/// side-specific geometry from the front-authored library at this new pose.
+fn setFootprintPose(
+    arena: std.mem.Allocator,
+    fp: Node,
+    op_obj: std.json.ObjectMap,
+) std.mem.Allocator.Error!?Node {
+    const cl = fp.asList() orelse return null;
+    const x = jsonNumNm(op_obj.get("x")) / nm_per_mm;
+    const y = jsonNumNm(op_obj.get("y")) / nm_per_mm;
+    const rot = jsonNumNm(op_obj.get("rot"));
+    const layer = if (std.mem.eql(u8, jsonStr(op_obj.get("side")), "bottom"))
+        board_layers.b_cu
+    else
+        board_layers.f_cu;
+    var out: std.ArrayList(Node) = .empty;
+    var saw_at = false;
+    var saw_layer = false;
+    for (cl) |child| {
+        if (child.isForm(form_at)) {
+            try out.append(arena, try makeAtForm(arena, x, y, rot));
+            saw_at = true;
+        } else if (child.isForm(form_layer)) {
+            try out.append(arena, try makeLayerForm(arena, layer));
+            saw_layer = true;
+        } else {
+            try out.append(arena, child);
+        }
+    }
+    if (!saw_at) try out.append(arena, try makeAtForm(arena, x, y, rot));
+    if (!saw_layer) try out.append(arena, try makeLayerForm(arena, layer));
+    return Node.list(Span.zero, try out.toOwnedSlice(arena));
+}
+
+fn itemLayer(node: Node) ?[]const u8 {
+    const cl = node.asList() orelse return null;
+    for (cl[1..]) |child| {
+        if (!child.isForm(form_layer)) continue;
+        const ll = child.asList() orelse continue;
+        if (ll.len < 2) continue;
+        return nodeText(ll[1]);
+    }
+    return null;
+}
+
+fn isEdgeCutsGraphic(node: Node) bool {
+    const heads = [_][]const u8{ "gr_line", "gr_arc", "gr_rect", "gr_poly", "gr_circle", "gr_curve" };
+    var graphic = false;
+    for (heads) |head| {
+        if (node.isForm(head)) {
+            graphic = true;
+            break;
+        }
+    }
+    if (!graphic) return false;
+    const layer = itemLayer(node) orelse return false;
+    return std.mem.eql(u8, layer, board_layers.edge_cuts);
+}
+
+/// Top-level KiCad forms replaced by the EDA layout. Unrelated zones and
+/// drawings remain KiCad-owned during the transition.
+fn layoutOwnedChild(arena: std.mem.Allocator, node: Node) bool {
+    return node.isForm(form_segment) or node.isForm("arc") or
+        node.isForm(form_via) or node.isForm(form_group) or isEdgeCutsGraphic(node) or
+        isCanopyZone(node) or isCanopyText(arena, node);
+}
+
+fn isCanopyZone(node: Node) bool {
+    if (!node.isForm(form_zone)) return false;
+    const cl = node.asList() orelse return false;
+    for (cl[1..]) |sub| {
+        const sl = sub.asList() orelse continue;
+        if (sl.len < 2) continue;
+        if (!std.mem.eql(u8, sl[0].asAtom() orelse "", "name")) continue;
+        return std.mem.startsWith(u8, sl[1].asString() orelse "", "Canopy EDA ");
+    }
+    return false;
+}
+
+fn isCanopyText(arena: std.mem.Allocator, node: Node) bool {
+    if (!node.isForm("gr_text")) return false;
+    const cl = node.asList() orelse return false;
+    if (cl.len < 2) return false;
+    const label = cl[1].asText() orelse return false;
+    var x: f64 = 0;
+    var y: f64 = 0;
+    var layer: []const u8 = "";
+    var uuid: []const u8 = "";
+    for (cl[2..]) |sub| {
+        const sl = sub.asList() orelse continue;
+        if (sl.len < 2) continue;
+        const head = sl[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "at")) {
+            if (sl.len >= 3) {
+                x = sl[1].asNumber() orelse return false;
+                y = sl[2].asNumber() orelse return false;
+            }
+        } else if (std.mem.eql(u8, head, "layer")) {
+            layer = nodeText(sl[1]) orelse "";
+        } else if (std.mem.eql(u8, head, "uuid")) {
+            uuid = nodeText(sl[1]) orelse "";
+        }
+    }
+    const silk_layer = std.mem.eql(u8, layer, board_layers.f_silks) or
+        std.mem.eql(u8, layer, board_layers.b_silks);
+    if (!silk_layer) return false;
+    if (uuid.len == 0) return false;
+    const seed = std.fmt.allocPrint(arena, "text:{s}:{d}:{d}", .{ label, x, y }) catch return false;
+    const expected = boardItemUuid(arena, seed) catch return false;
+    return std.mem.eql(u8, uuid, expected);
+}
+
+fn countRemovedLayoutChild(node: Node, stats: *ApplyStats) void {
+    if (node.isForm(form_via)) {
+        stats.copper.layout.vias_removed += 1;
+    } else if (node.isForm(form_segment) or node.isForm("arc")) {
+        stats.copper.layout.tracks_removed += 1;
+    } else if (node.isForm(form_group)) {
+        stats.copper.layout.groups_removed += 1;
+    } else if (isEdgeCutsGraphic(node)) {
+        stats.copper.layout.edge_cuts_removed += 1;
+    }
+}
+
 /// Map a proto BoardLayer enum string (e.g. "BL_Dwgs_User") to the
 /// `.kicad_pcb` canonical layer name. Section staging graphics only ever
 /// use Dwgs.User; the others are here for completeness.
 fn protoLayerToKicad(proto: []const u8) []const u8 {
-    if (std.mem.eql(u8, proto, "BL_Cmts_User")) return "Cmts.User";
-    if (std.mem.eql(u8, proto, "BL_F_SilkS")) return "F.SilkS";
-    if (std.mem.eql(u8, proto, "BL_B_SilkS")) return "B.SilkS";
-    return "Dwgs.User";
+    if (std.mem.eql(u8, proto, "BL_Cmts_User")) return board_layers.cmts_user;
+    if (std.mem.eql(u8, proto, "BL_F_SilkS")) return board_layers.f_silks;
+    if (std.mem.eql(u8, proto, "BL_B_SilkS")) return board_layers.b_silks;
+    if (std.mem.eql(u8, proto, "BL_F_Mask")) return board_layers.f_mask;
+    if (std.mem.eql(u8, proto, "BL_B_Mask")) return board_layers.b_mask;
+    return board_layers.dwgs_user;
 }
 
 /// Stroke width (mm) from a proto shape's attributes.stroke.width.valueNm,
@@ -614,7 +893,69 @@ fn buildGrRect(arena: std.mem.Allocator, shape: std.json.ObjectMap, layer: []con
         "(gr_rect (start {d} {d}) (end {d} {d}) (stroke (width {d}) (type default)) (fill no) (layer \"{s}\") (uuid \"{s}\"))",
         .{ tl.x, tl.y, br.x, br.y, stroke_mm, layer, try boardItemUuid(arena, seed) },
     );
-    const nodes = try parser.parse(arena, text);
+    const nodes = parser.parse(arena, text) catch return error.InvalidAdd;
+    return if (nodes.len == 0) null else nodes[0];
+}
+
+/// A straight Edge.Cuts segment from the saved EDA outline. The UUID is
+/// geometry-derived, keeping repeated authoritative pushes byte-stable.
+fn buildOutlineSegment(arena: std.mem.Allocator, op_obj: std.json.ObjectMap) WriteError!?Node {
+    const x1 = jsonNumNm(op_obj.get("x1")) / nm_per_mm;
+    const y1 = jsonNumNm(op_obj.get("y1")) / nm_per_mm;
+    const x2 = jsonNumNm(op_obj.get("x2")) / nm_per_mm;
+    const y2 = jsonNumNm(op_obj.get("y2")) / nm_per_mm;
+    if (x1 == x2 and y1 == y2) return null;
+    const seed = try std.fmt.allocPrint(arena, "edge:{d}:{d}:{d}:{d}", .{ x1, y1, x2, y2 });
+    const source = try std.fmt.allocPrint(
+        arena,
+        "(gr_line (start {d} {d}) (end {d} {d}) (stroke (width 0.1) (type default)) (layer \"" ++
+            board_layers.edge_cuts ++ "\") (uuid \"{s}\"))",
+        .{ x1, y1, x2, y2, try boardItemUuid(arena, seed) },
+    );
+    const nodes = try parser.parse(arena, source);
+    return if (nodes.len == 0) null else nodes[0];
+}
+
+/// A native three-point Edge.Cuts arc from the saved EDA outline.
+fn buildOutlineArc(arena: std.mem.Allocator, op_obj: std.json.ObjectMap) WriteError!?Node {
+    const x1 = jsonNumNm(op_obj.get("x1")) / nm_per_mm;
+    const y1 = jsonNumNm(op_obj.get("y1")) / nm_per_mm;
+    const xm = jsonNumNm(op_obj.get("xm")) / nm_per_mm;
+    const ym = jsonNumNm(op_obj.get("ym")) / nm_per_mm;
+    const x2 = jsonNumNm(op_obj.get("x2")) / nm_per_mm;
+    const y2 = jsonNumNm(op_obj.get("y2")) / nm_per_mm;
+    if (x1 == x2 and y1 == y2) return null;
+    if (x1 == xm and y1 == ym) return null;
+    if (xm == x2 and ym == y2) return null;
+    const seed = try std.fmt.allocPrint(arena, "edge-arc:{d}:{d}:{d}:{d}:{d}:{d}", .{ x1, y1, xm, ym, x2, y2 });
+    const source = try std.fmt.allocPrint(
+        arena,
+        "(gr_arc (start {d} {d}) (mid {d} {d}) (end {d} {d}) (stroke (width 0.1) (type default)) (layer \"" ++
+            board_layers.edge_cuts ++ "\") (uuid \"{s}\"))",
+        .{ x1, y1, xm, ym, x2, y2, try boardItemUuid(arena, seed) },
+    );
+    const nodes = try parser.parse(arena, source);
+    return if (nodes.len == 0) null else nodes[0];
+}
+
+/// A `(gr_line …)` node from the proto segment. Perimeter-mask bands use
+/// ordinary board graphics on F.Mask/B.Mask, which KiCad subtracts from the
+/// mask in the same way as an authored graphic line on those layers.
+fn buildGrLine(arena: std.mem.Allocator, shape: std.json.ObjectMap, layer: []const u8) WriteError!?Node {
+    const seg_v = shape.get("segment") orelse return null;
+    if (seg_v != .object) return null;
+    const start = jsonVec2Mm(seg_v.object.get("start")) orelse return null;
+    const end = jsonVec2Mm(seg_v.object.get("end")) orelse return null;
+    const stroke_mm = jsonStrokeWidthMm(shape);
+    const seed = try std.fmt.allocPrint(arena, "line:{s}:{d}:{d}:{d}:{d}:{d}", .{
+        layer, start.x, start.y, end.x, end.y, stroke_mm,
+    });
+    const text = try std.fmt.allocPrint(
+        arena,
+        "(gr_line (start {d} {d}) (end {d} {d}) (stroke (width {d}) (type default)) (layer \"{s}\") (uuid \"{s}\"))",
+        .{ start.x, start.y, end.x, end.y, stroke_mm, layer, try boardItemUuid(arena, seed) },
+    );
+    const nodes = parser.parse(arena, text) catch return error.InvalidAdd;
     return if (nodes.len == 0) null else nodes[0];
 }
 
@@ -624,27 +965,62 @@ fn buildGrText(arena: std.mem.Allocator, text_obj: std.json.ObjectMap, layer: []
     const label = jsonStr(text_obj.get("text"));
     if (label.len == 0) return null;
     const size_mm = jsonTextSizeMm(text_obj);
+    const angle = jsonNum(text_obj.get("angle"));
     const seed = try std.fmt.allocPrint(arena, "text:{s}:{d}:{d}", .{ label, pos.x, pos.y });
     // The label is spliced into parseable s-expr text and reparsed; escape it
     // so an embedded `"` can't close the string early and inject stray
     // top-level nodes (only nodes[0] is kept — the rest would be dropped).
     const text = try std.fmt.allocPrint(
         arena,
-        "(gr_text \"{s}\" (at {d} {d} 0) (layer \"{s}\") (uuid \"{s}\") (effects (font (size {d} {d}) (thickness {d}))))",
-        .{ try fmt_const.sexprEscape(arena, label), pos.x, pos.y, layer, try boardItemUuid(arena, seed), size_mm, size_mm, size_mm * text_thickness_ratio },
+        "(gr_text \"{s}\" (at {d} {d} {d}) (layer \"{s}\") (uuid \"{s}\") (effects (font (size {d} {d}) (thickness {d}))))",
+        .{ try fmt_const.sexprEscape(arena, label), pos.x, pos.y, angle, layer, try boardItemUuid(arena, seed), size_mm, size_mm, size_mm * text_thickness_ratio },
     );
-    const nodes = try parser.parse(arena, text);
+    const nodes = parser.parse(arena, text) catch return error.InvalidAdd;
+    return if (nodes.len == 0) null else nodes[0];
+}
+
+fn jsonNum(v: ?std.json.Value) f64 {
+    const val = v orelse return 0;
+    return switch (val) {
+        .integer => |i| @floatFromInt(i),
+        .float => |f| f,
+        else => 0,
+    };
+}
+
+fn buildZone(arena: std.mem.Allocator, op_obj: std.json.ObjectMap) WriteError!?Node {
+    const net = jsonStr(op_obj.get("net"));
+    const layer = jsonStr(op_obj.get("layer"));
+    const pts_v = op_obj.get("pts") orelse return null;
+    if (net.len == 0 or layer.len == 0 or pts_v != .array or pts_v.array.items.len < 3) return null;
+    const clearance = jsonNum(op_obj.get("clearance")) / nm_per_mm;
+    const priority = jsonNum(op_obj.get("priority"));
+    var text = std.Io.Writer.Allocating.init(arena);
+    const w = &text.writer;
+    const seed = try std.fmt.allocPrint(arena, "zone:{s}:{s}:{d}", .{ net, layer, priority });
+    try w.print("(zone (net \"{s}\") (net_name \"{s}\") (layer \"{s}\") (uuid \"{s}\") (name \"Canopy EDA {s}\") (hatch edge 0.5) (connect_pads (clearance {d})) (min_thickness 0.25) (fill (thermal_gap 0.3) (thermal_bridge_width 0.3)) (polygon (pts", .{
+        try fmt_const.sexprEscape(arena, net), try fmt_const.sexprEscape(arena, net), layer,
+        try boardItemUuid(arena, seed),        layer,                                 clearance,
+    });
+    for (pts_v.array.items) |point| {
+        if (point != .array or point.array.items.len != 2) return null;
+        try w.print(" (xy {d} {d})", .{ jsonNum(point.array.items[0]) / nm_per_mm, jsonNum(point.array.items[1]) / nm_per_mm });
+    }
+    try w.writeAll(")))");
+    const nodes = parser.parse(arena, text.written()) catch return error.InvalidAdd;
     return if (nodes.len == 0) null else nodes[0];
 }
 
 /// Translate a `create_board_item` proto object into a top-level
-/// `(gr_rect …)` / `(gr_text …)` node. Returns null for shapes not drawn on disk.
+/// `(gr_rect …)` / `(gr_line …)` / `(gr_text …)` node. Returns null for
+/// shapes not drawn on disk.
 fn buildBoardGraphic(arena: std.mem.Allocator, item: std.json.ObjectMap) WriteError!?Node {
     const type_url = jsonStr(item.get("@type"));
     const layer = protoLayerToKicad(jsonStr(item.get("layer")));
     if (std.mem.endsWith(u8, type_url, "BoardGraphicShape")) {
         const shape_v = item.get("shape") orelse return null;
         if (shape_v != .object) return null;
+        if (shape_v.object.get("segment") != null) return buildGrLine(arena, shape_v.object, layer);
         return buildGrRect(arena, shape_v.object, layer);
     }
     if (std.mem.endsWith(u8, type_url, "BoardText")) {
@@ -656,7 +1032,13 @@ fn buildBoardGraphic(arena: std.mem.Allocator, item: std.json.ObjectMap) WriteEr
 }
 
 fn footprintKicadUuid(fp: Node) ?[]const u8 {
-    const cl = fp.asList() orelse return null;
+    return nodeUuid(fp);
+}
+
+/// Return the top-level item's `(uuid "…")` value. Footprints, segments, vias,
+/// graphics, and groups all use this same shape in modern KiCad boards.
+fn nodeUuid(item: Node) ?[]const u8 {
+    const cl = item.asList() orelse return null;
     for (cl[1..]) |sub| {
         if (!sub.isForm("uuid")) continue;
         const ul = sub.asList() orelse continue;
@@ -824,7 +1206,7 @@ fn makeNetForm(arena: std.mem.Allocator, id: i64, name: []const u8) std.mem.Allo
 /// Returns null when the existing value already equals `value` (idempotent
 /// no-op) so the caller skips both stats counting and a redundant write.
 fn setProperty(arena: std.mem.Allocator, fp: Node, key: []const u8, value: []const u8) std.mem.Allocator.Error!?Node {
-    // The diff emits the lowercase IPC field names ("reference",
+    // The diff emits lowercase operation field names ("reference",
     // "value") for the well-known KiCad property slots. KiCad's
     // .kicad_pcb stores those as the capitalised "Reference" /
     // "Value" properties. Translate before lookup so a `set_field` op
@@ -877,7 +1259,7 @@ fn setProperty(arena: std.mem.Allocator, fp: Node, key: []const u8, value: []con
     return Node.list(Span.zero, try new_children.toOwnedSlice(arena));
 }
 
-/// Translate the lowercase IPC-style field names the diff emits to the
+/// Translate the lowercase operation field names the diff emits to the
 /// canonical KiCad property keys stored in the .kicad_pcb. Unknown keys
 /// pass through so user-defined fields (canopy_uuid, custom design
 /// properties) still work.
@@ -921,7 +1303,7 @@ fn propertyStaysVisible(key: []const u8) bool {
     return false;
 }
 
-/// `(hide yes)` — mirrors `makeLockedForm`'s `(locked yes)` idiom.
+/// Build a `(hide yes)` form.
 fn makeHideForm(arena: std.mem.Allocator) std.mem.Allocator.Error!Node {
     var children = try arena.alloc(Node, 2);
     children[0] = Node.atom(Span.zero, "hide");
@@ -1019,54 +1401,12 @@ fn propertyNeedsUnhide(sub: Node) ?[]const Node {
     return pl;
 }
 
-/// Toggle a footprint's lock state. KiCad 7+ stores the bit as a
-/// `(locked yes)` sibling of `(at …)` — present when locked, absent
-/// when unlocked. Matches the reader's view of the same form. Returns
-/// null when the existing state already matches `locked` so repeated
-/// pushes don't redundantly rewrite an unchanged footprint.
-fn setLocked(arena: std.mem.Allocator, fp: Node, locked: bool) std.mem.Allocator.Error!?Node {
-    const cl = fp.asList() orelse return fp;
-    // Probe the current state first: an existing `(locked yes)` form
-    // means locked=true; its absence (or `(locked no)`) means false.
-    var current_locked = false;
-    for (cl) |sub| {
-        if (sub.isForm("locked")) {
-            current_locked = formAtomChildEqualsLocal(sub, "yes");
-            break;
-        }
-    }
-    if (current_locked == locked) return null;
-
-    var new_children: std.ArrayList(Node) = .empty;
-    var saw_existing = false;
-    for (cl) |sub| {
-        if (sub.isForm("locked")) {
-            saw_existing = true;
-            if (!locked) continue; // drop the form to "unlock"
-            try new_children.append(arena, try makeLockedForm(arena));
-            continue;
-        }
-        try new_children.append(arena, sub);
-    }
-    if (!saw_existing and locked) try new_children.append(arena, try makeLockedForm(arena));
-    return Node.list(Span.zero, try new_children.toOwnedSlice(arena));
-}
-
-/// Mirror of the reader's `formAtomChildEquals` — true when a form like
-/// `(locked yes)` matches `expected` in its second slot. Inlined here to
-/// keep the writer free of a reader-module dependency cycle.
+/// True when a form's second child is the expected atom.
 fn formAtomChildEqualsLocal(node: Node, expected: []const u8) bool {
     const cl = node.asList() orelse return false;
     if (cl.len < 2) return false;
     const atom = cl[1].asAtom() orelse return false;
     return std.mem.eql(u8, atom, expected);
-}
-
-fn makeLockedForm(arena: std.mem.Allocator) std.mem.Allocator.Error!Node {
-    var children = try arena.alloc(Node, 2);
-    children[0] = Node.atom(Span.zero, "locked");
-    children[1] = Node.atom(Span.zero, "yes");
-    return Node.list(Span.zero, children);
 }
 
 /// Swap/add geometry arrives either as a modern `(footprint …)` form
@@ -1121,19 +1461,7 @@ fn skipKmodChild(sub: Node) bool {
 /// that rewrote a routed board's bottom passives with top-side pads). Names
 /// with no front/back side (`*.Cu`, `Edge.Cuts`) pass through unchanged.
 fn flipLayerToBack(name: []const u8) []const u8 {
-    const pairs = [_][2][]const u8{
-        .{ "F.Cu", "B.Cu" },
-        .{ "F.Paste", "B.Paste" },
-        .{ "F.Mask", "B.Mask" },
-        .{ "F.SilkS", "B.SilkS" },
-        .{ "F.Fab", "B.Fab" },
-        .{ "F.CrtYd", "B.CrtYd" },
-        .{ "F.Adhes", "B.Adhes" },
-    };
-    for (pairs) |p| {
-        if (std.mem.eql(u8, name, p[0])) return p[1];
-    }
-    return name;
+    return board_layers.backSideName(name);
 }
 
 /// Text payload of an atom-or-string node ((layer F.SilkS) vs (layer "F.SilkS")
@@ -1275,6 +1603,24 @@ fn mirrorGeomY(arena: std.mem.Allocator, sub: Node) std.mem.Allocator.Error!Node
     return sub;
 }
 
+/// Mirror every coordinate-bearing form below a custom pad's `(primitives …)`
+/// wrapper. Unlike footprint graphics, pad primitives are nested one level
+/// deeper (`primitives` → `gr_poly` → `pts`), so the top-level graphic pass
+/// cannot see them. pcbnew mirrors these local coordinates when a library
+/// footprint is flipped to B.Cu; the text writer must do the same or a
+/// concave pad is reflected into the wrong corner of the package.
+fn mirrorPadPrimitivesY(arena: std.mem.Allocator, node: Node) std.mem.Allocator.Error!Node {
+    const children = node.asList() orelse return node;
+    if (children.len == 0) return node;
+    const head = children[0].asAtom() orelse return node;
+    if (isVec2Head(head) or std.mem.eql(u8, head, "pts")) return mirrorGeomY(arena, node);
+
+    const out = try arena.alloc(Node, children.len);
+    out[0] = children[0];
+    for (children[1..], 1..) |child, i| out[i] = try mirrorPadPrimitivesY(arena, child);
+    return Node.list(Span.zero, out);
+}
+
 /// Adapt one kmod child to the footprint it's being spliced into:
 ///
 ///  - `to_back`: rename every front layer token to its B.* twin (pad
@@ -1305,6 +1651,8 @@ fn adaptKmodChild(arena: std.mem.Allocator, sub: Node, to_back: bool, fp_rot: f6
                 out[i] = try adaptPadAt(arena, c, to_back, fp_rot);
             } else if (c.isForm("layers") and to_back) {
                 out[i] = try flipLayersList(arena, c);
+            } else if (c.isForm("primitives") and to_back) {
+                out[i] = try mirrorPadPrimitivesY(arena, c);
             }
         }
         return Node.list(Span.zero, out);
@@ -1328,10 +1676,9 @@ fn adaptKmodChild(arena: std.mem.Allocator, sub: Node, to_back: bool, fp_rot: f6
 /// preserving every piece of user state KiCad needs to keep the part on
 /// the board: `(at X Y rot)`, `(uuid …)`, `(layer …)`, `(locked …)`,
 /// and every `(property …)`. The replacement body comes from the swap
-/// op's `kicad_mod`, the same way the agent would CreateItems a new
-/// footprint with the new geometry — adapted to the footprint's side and
-/// rotation (see `adaptKmodChild`) so a bottom-side or rotated part keeps
-/// its physical placement.
+/// operation's `kicad_mod` and is adapted to the footprint's side and rotation
+/// (see `adaptKmodChild`) so a bottom-side or rotated part keeps its physical
+/// placement.
 fn swapFootprint(
     arena: std.mem.Allocator,
     fp: Node,
@@ -1362,7 +1709,7 @@ fn swapFootprint(
             fp_rot = subl[3].asNumber() orelse 0;
         }
         if (std.mem.eql(u8, head, form_layer) and subl.len >= 2) {
-            if (nodeText(subl[1])) |ln| is_back = std.mem.eql(u8, ln, "B.Cu");
+            if (nodeText(subl[1])) |ln| is_back = std.mem.eql(u8, ln, board_layers.b_cu);
         }
         for (preserve_keys) |k| {
             if (std.mem.eql(u8, head, k)) {
@@ -1490,7 +1837,8 @@ fn buildAddFootprint(
     try children.append(arena, Node.atom(Span.zero, form_footprint));
     try children.append(arena, Node.string(Span.zero, lib_id));
     try children.append(arena, try makeAtForm(arena, x_mm, y_mm, rot_deg));
-    try children.append(arena, try makeLayerForm(arena, if (is_back) "B.Cu" else "F.Cu"));
+    const side_layer = if (is_back) board_layers.b_cu else board_layers.f_cu;
+    try children.append(arena, try makeLayerForm(arena, side_layer));
     // KiCad expects a (uuid …) per footprint; use the canopy_uuid as the
     // KiCad-internal uuid for new adds so the next sync's reader links
     // them up via the same handle without needing a second pass.
@@ -1498,9 +1846,8 @@ fn buildAddFootprint(
     if (ref.len > 0) try children.append(arena, try makeProperty(arena, prop_reference, ref));
     if (value.len > 0) try children.append(arena, try makeProperty(arena, prop_value, value));
     if (canopy_uuid.len > 0) try children.append(arena, try makeProperty(arena, prop_canopy_uuid, canopy_uuid));
-    // Bake the canopy_net / canopy_section fields on the first sync (the IPC
-    // path bakes these via footprint_def; the file path reads the top-level
-    // op fields the server now also emits).
+    // Bake the canopy_net / canopy_section fields from the add operation on the
+    // first sync.
     if (canopy_net.len > 0) try children.append(arena, try makeProperty(arena, "canopy_net", canopy_net));
     if (canopy_section.len > 0) try children.append(arena, try makeProperty(arena, "canopy_section", canopy_section));
     // Design properties (MPN, Manufacturer, Datasheet, …) baked on the first
@@ -1603,20 +1950,38 @@ fn viaExistsAt(existing: []const Vec2Mm, x: f64, y: f64) bool {
 /// nets from in-element name references (same form `setPadNet` uses), so an
 /// id-based reference would have nothing to bind to. The uuid is derived from
 /// the position so re-emitting the same via is deterministic.
-fn buildVia(arena: std.mem.Allocator, x: f64, y: f64, dia: f64, drill: f64, net: []const u8) WriteError!Node {
-    var children = try arena.alloc(Node, 7);
+const ViaSpec = struct {
+    x: f64,
+    y: f64,
+    dia: f64,
+    drill: f64,
+    net: []const u8,
+    free: bool,
+};
+
+fn buildVia(arena: std.mem.Allocator, spec: ViaSpec) WriteError!Node {
+    var children = try arena.alloc(Node, if (spec.free) 8 else 7);
     children[0] = Node.atom(Span.zero, form_via);
-    children[1] = try makeAtForm(arena, x, y, 0);
-    children[2] = try makeFloatForm(arena, "size", dia);
-    children[3] = try makeFloatForm(arena, "drill", drill);
+    children[1] = try makeAtForm(arena, spec.x, spec.y, 0);
+    children[2] = try makeFloatForm(arena, "size", spec.dia);
+    children[3] = try makeFloatForm(arena, "drill", spec.drill);
     var layers = try arena.alloc(Node, 3);
     layers[0] = Node.atom(Span.zero, "layers");
-    layers[1] = Node.string(Span.zero, "F.Cu");
-    layers[2] = Node.string(Span.zero, "B.Cu");
+    layers[1] = Node.string(Span.zero, board_layers.f_cu);
+    layers[2] = Node.string(Span.zero, board_layers.b_cu);
     children[4] = Node.list(Span.zero, layers);
-    children[5] = try makeNetForm(arena, 0, net);
-    const seed = try std.fmt.allocPrint(arena, "via:{d}:{d}:{s}", .{ x, y, net });
-    children[6] = try makeStringForm(arena, form_uuid, try boardItemUuid(arena, seed));
+    var next: usize = 5;
+    if (spec.free) {
+        var free_form = try arena.alloc(Node, 2);
+        free_form[0] = Node.atom(Span.zero, "free");
+        free_form[1] = Node.atom(Span.zero, "yes");
+        children[next] = Node.list(Span.zero, free_form);
+        next += 1;
+    }
+    children[next] = try makeNetForm(arena, 0, spec.net);
+    next += 1;
+    const seed = try std.fmt.allocPrint(arena, "via:{d}:{d}:{s}", .{ spec.x, spec.y, spec.net });
+    children[next] = try makeStringForm(arena, form_uuid, try boardItemUuid(arena, seed));
     return Node.list(Span.zero, children);
 }
 
@@ -1684,7 +2049,7 @@ fn indexExistingTracks(
     arena: std.mem.Allocator,
 ) std.mem.Allocator.Error!void {
     for (root_children) |child| {
-        if (!child.isForm(form_segment)) continue;
+        if (!child.isForm(form_segment) and !child.isForm("arc")) continue;
         if (segmentKey(child)) |k| try out.append(arena, k);
     }
 }
@@ -1736,6 +2101,25 @@ fn buildSegment(arena: std.mem.Allocator, t: TrackSpec) WriteError!Node {
     return Node.list(Span.zero, children);
 }
 
+/// Build a native KiCad copper `(arc …)` using the editor's exact midpoint.
+fn buildArc(arena: std.mem.Allocator, t: TrackSpec, mid: Vec2Mm) WriteError!Node {
+    var children = try arena.alloc(Node, 8);
+    children[0] = Node.atom(Span.zero, "arc");
+    children[1] = try makePointForm(arena, form_start, t.x1, t.y1);
+    children[2] = try makePointForm(arena, "mid", mid.x, mid.y);
+    children[3] = try makePointForm(arena, form_end, t.x2, t.y2);
+    children[4] = try makeFloatForm(arena, form_width, t.width);
+    children[5] = try makeLayerForm(arena, t.layer);
+    children[6] = try makeNetForm(arena, 0, t.net);
+    const seed = try std.fmt.allocPrint(
+        arena,
+        "arc:{d}:{d}:{d}:{d}:{d}:{d}:{s}:{s}",
+        .{ t.x1, t.y1, mid.x, mid.y, t.x2, t.y2, t.layer, t.net },
+    );
+    children[7] = try makeStringForm(arena, form_uuid, try boardItemUuid(arena, seed));
+    return Node.list(Span.zero, children);
+}
+
 /// Build a `(group "name" (uuid …) (members "u1" "u2" …))` node from a `group`
 /// op, or null when there's nothing left to group. Members already in an
 /// existing group are dropped (KiCad forbids a footprint in two groups) and
@@ -1746,6 +2130,7 @@ fn buildSegment(arena: std.mem.Allocator, t: TrackSpec) WriteError!Node {
 fn buildGroupNode(
     arena: std.mem.Allocator,
     op_obj: std.json.ObjectMap,
+    copper_members: []const []const u8,
     groups: *GroupIndex,
 ) WriteError!?Node {
     const name = jsonStr(op_obj.get("name"));
@@ -1758,6 +2143,13 @@ fn buildGroupNode(
     for (members_v.array.items) |mv| {
         if (mv != .string) continue;
         const u = mv.string;
+        if (u.len == 0 or groups.members.contains(u)) continue;
+        try groups.members.put(arena, u, {});
+        try members.append(arena, u);
+        try seed.append(arena, '|');
+        try seed.appendSlice(arena, u);
+    }
+    for (copper_members) |u| {
         if (u.len == 0 or groups.members.contains(u)) continue;
         try groups.members.put(arena, u, {});
         try members.append(arena, u);
@@ -1967,25 +2359,6 @@ test "applyOpsToSource leaves already-correct visibility untouched" {
     try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, out, "(hide yes)"));
 }
 
-// spec: kicad_pcb/writer - set_locked toggles (locked yes) on the targeted footprint
-test "applyOpsToSource set_locked adds the locked form" {
-    const a = std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-
-    const src =
-        \\(kicad_pcb
-        \\  (footprint "R_0402"
-        \\    (uuid "fp-1")
-        \\    (property "Reference" "R1")))
-    ;
-    const ops =
-        \\[{"op":"set_locked","uuid":"fp-1","locked":true}]
-    ;
-    const out = try applyOpsToSource(arena.allocator(), src, ops);
-    try std.testing.expect(std.mem.indexOf(u8, out, "(locked yes)") != null);
-}
-
 // spec: kicad_pcb/writer - add wires pad nets from the op's [pin, net] array
 test "applyOpsToSource add assigns pad nets to the new footprint" {
     const a = std.testing.allocator;
@@ -2013,7 +2386,7 @@ test "applyOpsToSource add assigns pad nets to the new footprint" {
 }
 
 // spec: kicad_pcb/writer - add_via inserts a (via …) form stitching the GND net
-test "applyOpsToSource add_via inserts a via" {
+test "applyOpsToSource add_via inserts a free via" {
     const a = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
@@ -2026,13 +2399,14 @@ test "applyOpsToSource add_via inserts a via" {
     ;
     // x/y/dia/drill arrive in nanometres (sync emits mmToNm); 1 mm = 1_000_000 nm.
     const ops =
-        \\[{"op":"add_via","net":"GND","x":1000000,"y":2000000,"dia":400000,"drill":200000}]
+        \\[{"op":"add_via","net":"GND","x":1000000,"y":2000000,"dia":400000,"drill":200000,"free":true}]
     ;
     var stats: ApplyStats = .{};
     const out = try applyOpsToSourceWithStats(arena.allocator(), src, ops, &stats);
     try std.testing.expectEqual(@as(u32, 1), stats.copper.vias);
     try std.testing.expect(std.mem.indexOf(u8, out, "(via") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "(net \"GND\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(free yes)") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "(layers \"F.Cu\" \"B.Cu\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "(drill") != null);
     // The written board must re-parse and carry exactly one top-level via.
@@ -2043,6 +2417,27 @@ test "applyOpsToSource add_via inserts a via" {
         if (child.isForm(form_via)) via_count += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), via_count);
+}
+
+// spec: kicad_pcb/writer - add_zone inserts an EDA-owned refillable copper zone
+test "applyOpsToSource add_zone inserts a canopy zone" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const src =
+        \\(kicad_pcb
+        \\  (footprint "R_0402" (uuid "fp-1") (property "Reference" "R1")))
+    ;
+    const ops =
+        \\[{
+        \\  "op":"add_zone","net":"GND","layer":"F.Cu","clearance":100000,
+        \\  "priority":0,"pts":[[0,0],[30000000,0],[30000000,20000000],[0,20000000]]
+        \\}]
+    ;
+    const out = try applyOpsToSource(arena.allocator(), src, ops);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(zone") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Canopy EDA F.Cu") != null);
+    _ = try parser.parse(arena.allocator(), out);
 }
 
 // spec: kicad_pcb/writer - add_via at an existing via position is a no-op
@@ -2106,6 +2501,44 @@ test "applyOpsToSource add_track inserts a segment" {
         if (child.isForm(form_segment)) seg_count += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), seg_count);
+}
+
+// spec: kicad_pcb/writer - seeded sub-circuit groups include their routed tracks and vias
+test "applyOpsToSource adds tagged sub-circuit copper to its KiCad group" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const src =
+        \\(kicad_pcb
+        \\  (footprint "R_0402" (uuid "fp-1") (property "Reference" "R1")))
+    ;
+    // Sync emits the group before the module copper. The writer must defer the
+    // group until it has the deterministic UUIDs of both routed board items.
+    const ops =
+        \\[{"op":"group","name":"amp","members":["fp-1"]},
+        \\ {"op":"add_track","net":"VCC","x1":1000000,"y1":2000000,"x2":5000000,"y2":2000000,"width":250000,"layer":"F.Cu","group":"amp"},
+        \\ {"op":"add_via","net":"VCC","x":5000000,"y":2000000,"dia":400000,"drill":200000,"group":"amp"}]
+    ;
+    var stats: ApplyStats = .{};
+    const out = try applyOpsToSourceWithStats(a, src, ops, &stats);
+    try std.testing.expectEqual(@as(u32, 1), stats.groups_added);
+
+    const reparsed = try parser.parse(a, out);
+    const root = reparsed[0].asList().?;
+    var segment_uuid: ?[]const u8 = null;
+    var via_uuid: ?[]const u8 = null;
+    var group_count: usize = 0;
+    for (root) |child| {
+        if (child.isForm(form_segment)) segment_uuid = nodeUuid(child);
+        if (child.isForm(form_via)) via_uuid = nodeUuid(child);
+        if (child.isForm(form_group)) group_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), group_count);
+    // Each UUID occurs once on the item and once in the group's members list.
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, out, segment_uuid.?));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, out, via_uuid.?));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, out, "fp-1"));
 }
 
 // spec: kicad_pcb/writer - add_track at an existing segment (order-insensitive endpoints) is a no-op
@@ -2308,6 +2741,35 @@ test "applyOpsToSource swap_footprint folds footprint rotation into pad angles" 
     try std.testing.expect(std.mem.indexOf(u8, out, "(layers \"F.Cu\" \"F.Paste\" \"F.Mask\")") != null);
 }
 
+test "applyOpsToSource mirrors custom-pad primitives on a bottom footprint" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+
+    const src =
+        \\(kicad_pcb
+        \\  (footprint "old"
+        \\    (uuid "fp-1")
+        \\    (at 20 30 -90)
+        \\    (layer "B.Cu")
+        \\    (pad "3" smd custom (at -0.25 0.988 270) (layers "B.Cu") (net "GND"))))
+    ;
+    const ops =
+        \\[{
+        \\  "op":"swap_footprint",
+        \\  "uuid":"fp-1",
+        \\  "new_footprint_name":"concave",
+        \\  "kicad_mod":"(footprint \"concave\" (pad \"3\" smd custom (at -0.25 -0.988) (size 0.125 0.125) (layers \"F.Cu\") (primitives (gr_poly (pts (xy -0.125 -0.612) (xy -0.125 0.177) (xy 0.125 0.177))))))",
+        \\  "pad_nets":[["3","GND"]]
+        \\}]
+    ;
+    const out = try applyOpsToSource(arena.allocator(), src, ops);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(at -0.25 0.988 270)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(xy -0.125 0.612)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(xy -0.125 -0.177)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(layers \"B.Cu\")") != null);
+}
+
 // In-element net forms stay name-only, no top-level declarations invented, header stays first.
 // spec: kicad_pcb/writer - preserves pcbnew-style boards: in-element net forms
 test "applyOpsToSource preserves pcbnew v20260206 format (no header corruption)" {
@@ -2464,6 +2926,33 @@ test "applyOpsToSource create_board_item draws a section box rectangle" {
     try std.testing.expect(std.mem.indexOf(u8, out, "(layer \"Dwgs.User\")") != null);
 }
 
+// spec: kicad_pcb/writer - create_board_item writes a perimeter mask segment as a (gr_line …) on F.Mask
+test "applyOpsToSource create_board_item draws a perimeter mask line" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+
+    const src =
+        \\(kicad_pcb
+        \\  (footprint "R_0402" (uuid "fp-1") (property "Reference" "R1")))
+    ;
+    const ops =
+        \\[{"op":"create_board_item","item":{
+        \\"@type":"type.googleapis.com/kiapi.board.types.BoardGraphicShape",
+        \\"layer":"BL_F_Mask",
+        \\"shape":{"attributes":
+        \\{"stroke":{"width":{"valueNm":1400000},"style":"SLS_DEFAULT"},
+        \\"fill":{"fillType":"GFT_UNFILLED"}},
+        \\"segment":{"start":{"xNm":127500000,"yNm":91600000},
+        \\"end":{"xNm":127728361,"yNm":90451950}}}}}]
+    ;
+    const out = try applyOpsToSource(arena.allocator(), src, ops);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(gr_line") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(start 127.5 91.6)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(stroke (width 1.4)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(layer \"F.Mask\")") != null);
+}
+
 // spec: kicad_pcb/writer - create_board_item writes a section label as a (gr_text …) on Dwgs.User
 test "applyOpsToSource create_board_item draws a section label" {
     const a = std.testing.allocator;
@@ -2538,4 +3027,62 @@ test "applyOpsToSource escapes a set_field value containing a quote and backslas
         try decoded.append(arena.allocator(), raw[i]);
     }
     try std.testing.expectEqualStrings("a\"b\\", decoded.items);
+}
+
+// spec: kicad_pcb/writer - an authoritative layout push moves footprints and replaces tracks vias groups and Edge.Cuts while preserving zones and unrelated drawings
+test "authoritative layout ops replace only EDA-owned board geometry" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+
+    const src =
+        \\(kicad_pcb
+        \\  (version 20240108)
+        \\  (footprint "R_0402" (layer "F.Cu") (at 1 2) (uuid "fp-1")
+        \\    (property "Reference" "R1"))
+        \\  (segment (start 1 2) (end 3 2) (width 0.2) (layer "F.Cu") (net "GND") (uuid "old-track"))
+        \\  (arc (start 3 2) (mid 4 3) (end 5 2) (width 0.2) (layer "F.Cu") (net "GND") (uuid "old-arc"))
+        \\  (via (at 2 2) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net "GND") (uuid "old-via"))
+        \\  (gr_line (start 0 0) (end 5 0) (stroke (width 0.05) (type default)) (layer "Edge.Cuts") (uuid "old-edge"))
+        \\  (gr_line (start 7 7) (end 8 8) (stroke (width 0.15) (type default)) (layer "Dwgs.User") (uuid "keep-drawing"))
+        \\  (zone (net 0) (net_name "GND") (layer "F.Cu") (uuid "keep-zone"))
+        \\  (group "old" (uuid "old-group") (members "fp-1" "old-track")))
+    ;
+    const ops =
+        \\[{"op":"set_footprint_pose","uuid":"fp-1","x":10000000,"y":20000000,"rot":270,"side":"bottom"},
+        \\ {"op":"swap_footprint","uuid":"fp-1","new_footprint_name":"R_NEW","kicad_mod":"(footprint \"R_NEW\" (pad \"1\" smd rect (at 0.5 0) (size 1 1) (layers \"F.Cu\" \"F.Mask\" \"F.Paste\")))","pad_nets":[["1","GND"]]},
+        \\ {"op":"replace_layout"},
+        \\ {"op":"add_track","net":"GND","x1":10000000,"y1":20000000,"x2":12000000,"y2":20000000,"width":250000,"layer":"B.Cu"},
+        \\ {"op":"add_arc","net":"GND","x1":12000000,"y1":20000000,"xm":13000000,"ym":21000000,"x2":14000000,"y2":20000000,"width":250000,"layer":"B.Cu"},
+        \\ {"op":"add_via","net":"GND","x":12000000,"y":20000000,"dia":600000,"drill":300000},
+        \\ {"op":"add_outline","x1":0,"y1":0,"x2":30000000,"y2":0},
+        \\ {"op":"add_outline_arc","x1":30000000,"y1":0,"xm":31000000,"ym":1000000,"x2":30000000,"y2":2000000}]
+    ;
+    var stats: ApplyStats = .{};
+    const out = try applyOpsToSourceWithStats(arena.allocator(), src, ops, &stats);
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "(at 10.0 20.0 270.0)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"R_NEW\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(layer \"B.Cu\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(layers \"B.Cu\" \"B.Mask\" \"B.Paste\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "old-track") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "old-arc") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "old-via") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "old-edge") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "old-group") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "keep-drawing") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "keep-zone") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(end 30 0)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(mid 13.0 21.0)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "gr_arc") != null);
+    try std.testing.expectEqual(@as(u32, 1), stats.copper.layout.footprints_moved);
+    try std.testing.expectEqual(@as(u32, 2), stats.copper.layout.tracks_removed);
+    try std.testing.expectEqual(@as(u32, 1), stats.copper.layout.vias_removed);
+    try std.testing.expectEqual(@as(u32, 1), stats.copper.layout.edge_cuts_removed);
+    try std.testing.expectEqual(@as(u32, 2), stats.copper.layout.edge_cuts_added);
+    try std.testing.expectEqual(@as(u32, 1), stats.copper.layout.groups_removed);
+
+    var second_stats: ApplyStats = .{};
+    const twice = try applyOpsToSourceWithStats(arena.allocator(), out, ops, &second_stats);
+    try std.testing.expectEqualStrings(out, twice);
 }

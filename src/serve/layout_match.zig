@@ -32,7 +32,11 @@ const Side = pcb_describe.Side;
 
 /// `Side` has 5 variants (left, right, top, bottom, center); index a per-edge
 /// tally by `@intFromEnum`.
-const n_sides = @typeInfo(Side).@"enum".fields.len;
+const n_sides = @typeInfo(Side).@"enum".field_names.len;
+
+fn physicsReferenceValid(unmatched: usize) bool {
+    return unmatched == 0;
+}
 
 /// Per-edge tally for one interchangeable class: how many parts the rough seed
 /// and the starred layout each placed on each IC edge, and how many edges agree.
@@ -40,8 +44,8 @@ pub const ClassDist = struct {
     class: []const u8,
     /// Total parts of this class (rough count = starred count for one design).
     n: usize = 0,
-    rough: [n_sides]usize = [_]usize{0} ** n_sides,
-    starred: [n_sides]usize = [_]usize{0} ** n_sides,
+    rough: [n_sides]usize = @splat(0),
+    starred: [n_sides]usize = @splat(0),
     /// Sum over edges of `min(rough, starred)` — parts the rough put where the
     /// starred layout also wanted a same-class part.
     matched: usize = 0,
@@ -92,12 +96,12 @@ pub fn matchInfos(alloc: std.mem.Allocator, rough: []const PInfo, starred: []con
     for (rough) |r| {
         const gop = try map.getOrPut(alloc, r.class);
         if (!gop.found_existing) gop.value_ptr.* = .{ .class = r.class };
-        gop.value_ptr.rough[@intFromEnum(r.side)] += 1;
+        gop.value_ptr.rough[@backingInt(r.side)] += 1;
     }
     for (starred) |s| {
         const gop = try map.getOrPut(alloc, s.class);
         if (!gop.found_existing) gop.value_ptr.* = .{ .class = s.class };
-        gop.value_ptr.starred[@intFromEnum(s.side)] += 1;
+        gop.value_ptr.starred[@backingInt(s.side)] += 1;
     }
     var classes: std.ArrayList(ClassDist) = .empty;
     var total: usize = 0;
@@ -229,24 +233,30 @@ pub fn layoutMatchJson(alloc: std.mem.Allocator, project_dir: []const u8, name: 
         pcb_layout_page.writeJsonStr(w, ref) catch return error.BuildFailed;
     }
     w.writeAll("]}") catch return error.BuildFailed;
+    const physics_reference_valid = physicsReferenceValid(unmatched.items.len);
+    w.print(",\"physics_reference_valid\":{}", .{physics_reference_valid}) catch return error.BuildFailed;
     if (res.n == 0) {
         w.writeAll(",\"note\":\"no anchor hub or no scorable parts — area match not applicable\"") catch return error.BuildFailed;
     }
     w.print(
-        ",\"style_match_pct\":{d:.1},\"style_terms\":{{\"edge\":{d:.1},\"gap\":{d:.1},\"rot_k\":{d}}}",
-        .{ style.style_pct, style.edge_pct, style.gap_pct, style.rot_k },
+        ",\"style_match_pct\":{d:.1},\"style_terms\":{{\"edge\":{d:.1},\"gap\":{d:.1},\"rot\":{d:.1},\"rot_k\":{d}}}",
+        .{ style.style_pct, style.edge_pct, style.gap_pct, style.rot_pct, style.rot_k },
     ) catch return error.BuildFailed;
     // Hybrid: physics objective of the rough relative to the starred layout's own
     // objective, penalized by the style gap. `star_obj` = the hand layout's
     // surrogate objective (its verbatim `breakdown`), so `obj_rel` is unitless.
     // The raw objectives are emitted too so an offline λ sweep can recompute.
-    const rough_obj = rough.placement.breakdown.objective;
-    const star_obj = star.placement.breakdown.objective;
-    const hyb = style_score.hybridScore(rough_obj, star_obj, style.style_pct, style_score.lambda_default);
-    w.print(
-        ",\"rough_obj\":{d:.2},\"star_obj\":{d:.2},\"obj_rel\":{d:.3},\"hybrid\":{d:.3},\"lambda\":{d:.2}",
-        .{ rough_obj, star_obj, hyb.obj_rel, hyb.hybrid, style_score.lambda_default },
-    ) catch return error.BuildFailed;
+    if (physics_reference_valid) {
+        const rough_obj = optimizer.authoredRoughObjective(rough.placement, rough.block.rough);
+        const star_obj = optimizer.authoredRoughObjective(star.placement, star.block.rough);
+        const hyb = style_score.hybridScore(rough_obj, star_obj, style.style_pct, style_score.lambda_default);
+        w.print(
+            ",\"rough_obj\":{d:.2},\"star_obj\":{d:.2},\"obj_rel\":{d:.3},\"hybrid\":{d:.3},\"lambda\":{d:.2}",
+            .{ rough_obj, star_obj, hyb.obj_rel, hyb.hybrid, style_score.lambda_default },
+        ) catch return error.BuildFailed;
+    } else {
+        w.writeAll(",\"rough_obj\":null,\"star_obj\":null,\"obj_rel\":null,\"hybrid\":null") catch return error.BuildFailed;
+    }
     w.print(",\"n\":{d},\"area_match_pct\":{d:.1},\"classes\":[", .{ res.n, res.area_match_pct }) catch return error.BuildFailed;
     for (res.classes, 0..) |cd, i| {
         if (i > 0) w.writeAll(",") catch return error.BuildFailed;
@@ -264,9 +274,9 @@ pub fn layoutMatchJson(alloc: std.mem.Allocator, project_dir: []const u8, name: 
 
 /// Emit a `"left":n,"right":n,…` edge tally object body (no braces).
 fn writeSideTally(w: *std.Io.Writer, counts: [n_sides]usize) pcb_layout_page.PngError!void {
-    inline for (@typeInfo(Side).@"enum".fields, 0..) |f, k| {
+    inline for (@typeInfo(Side).@"enum".field_names, 0..) |f, k| {
         if (k > 0) w.writeAll(",") catch return error.BuildFailed;
-        w.print("\"{s}\":{d}", .{ f.name, counts[k] }) catch return error.BuildFailed;
+        w.print("\"{s}\":{d}", .{ f, counts[k] }) catch return error.BuildFailed;
     }
 }
 
@@ -286,6 +296,12 @@ pub fn layoutMatchApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) p
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
+
+// spec: Web Server - A partial starred layout reports style/coverage but is invalid as a physics-objective reference
+test "partial starred coverage is not a physics reference" {
+    try std.testing.expect(physicsReferenceValid(0));
+    try std.testing.expect(!physicsReferenceValid(1));
+}
 
 // spec: Web Server - layout-match credits interchangeable parts by per-edge count, ignoring which fungible part is where
 test "matchInfos credits interchangeable parts by per-edge count" {

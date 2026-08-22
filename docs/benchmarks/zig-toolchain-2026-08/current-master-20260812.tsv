@@ -1,0 +1,13 @@
+toolchain	mode	run	wall_seconds	user_seconds	system_seconds	max_rss_kib	exit
+0.15.1	Debug	1	134.62	134.42	0.13	252748	0
+0.15.1	Debug	2	134.37	134.13	0.23	252864	0
+0.15.1	Debug	3	134.47	134.28	0.17	252864	0
+0.15.1	ReleaseSafe	1	6.25	6.09	0.15	244800	0
+0.15.1	ReleaseSafe	2	6.21	6.08	0.12	244800	0
+0.15.1	ReleaseSafe	3	6.23	6.10	0.13	244800	0
+0.17.0-dev.1683+5ceec001b	Debug	1	43.53	43.36	0.15	256924	0
+0.17.0-dev.1683+5ceec001b	Debug	2	43.24	43.04	0.19	256920	0
+0.17.0-dev.1683+5ceec001b	Debug	3	43.76	43.60	0.15	256928	0
+0.17.0-dev.1683+5ceec001b	ReleaseSafe	1	6.28	6.12	0.15	246824	0
+0.17.0-dev.1683+5ceec001b	ReleaseSafe	2	6.39	6.22	0.16	246828	0
+0.17.0-dev.1683+5ceec001b	ReleaseSafe	3	6.21	6.03	0.17	246832	0

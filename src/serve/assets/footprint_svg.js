@@ -9,7 +9,7 @@
  *
  * Data shape (from GET /api/footprint/:name):
  *   { bbox:{x,y,w,h}, bounds:{x,y,w,h}, editor:{grid,margin},
- *     pads:[{id,x,y,w,h,shape,poly?,drill?,npth?}],
+ *     pads:[{id,x,y,w,h,shape,rot?,poly?,drill?,npth?}],
  *     silk:{lines:[[x1,y1,x2,y2]…],circles:[[cx,cy,r]…],rects:[[x0,y0,x1,y1]…],polys:[[[x,y]…]…]},
  *     fab:{ …same… },
  *     courtyard:{rects:[[x0,y0,x1,y1]…],circles:[[cx,cy,r]…]} }
@@ -49,6 +49,8 @@ window.FP = (function () {
     if (a.fill === undefined && a["class"] === undefined) a.fill = C.pad;
 
     if (pad.poly && pad.poly.length >= 3) {
+      // A polygon outline is stored footprint-absolute with its own rotation
+      // already baked in (see convert/footprint.zig), so `pad.rot` is spent.
       a.points = pad.poly.map(function (p) { return n3(p[0] * sc) + "," + n3(p[1] * sc); }).join(" ");
       return el("polygon", a);
     }
@@ -60,6 +62,10 @@ window.FP = (function () {
     a.x = n3(pad.x * sc - pw / 2); a.y = n3(pad.y * sc - ph / 2);
     a.width = n3(pw); a.height = n3(ph);
     a.rx = pad.shape === "oval" ? n3(Math.min(pw, ph) / 2) : n3(0.03 * sc);
+    // A pad's own `(pos X Y ROT)` turns it about its centre. SVG's rotate() is
+    // [[cos,-sin],[sin,cos]] on y-down coordinates — the same matrix
+    // placement/pose_math.rotate applies — so the angle passes through as-is.
+    if (pad.rot) a.transform = "rotate(" + n3(pad.rot) + " " + n3(pad.x * sc) + " " + n3(pad.y * sc) + ")";
     return el("rect", a);
   }
 

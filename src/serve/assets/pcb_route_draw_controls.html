@@ -1,0 +1,18 @@
+<label>Draw width <select id="r-dw"
+  title="Width for newly drawn traces; Net class uses the active net's resolved rule">
+  <option value="net">Net class</option>
+  <option value="0.127">0.127 mm (5 mil)</option>
+  <option value="0.1524">0.1524 mm (6 mil)</option>
+  <option value="0.2032">0.2032 mm (8 mil)</option>
+  <option value="0.254">0.254 mm (10 mil)</option>
+  <option value="0.3048">0.3048 mm (12 mil)</option>
+  <option value="0.5">0.5 mm</option>
+  <option value="custom">Custom / router value</option>
+</select></label>
+<label>Bends <select id="r-bend" title="Sharp uses the normal 45° posture; Rounded replaces each corner with a tangent arc">
+  <option value="sharp">Sharp 45°</option>
+  <option value="arc">Rounded arcs</option>
+</select></label>
+<label>Arc radius <input id="r-br" type="number" step="0.05" min="0" value="0"
+  title="Requested tangent-arc centerline radius in mm; 0 automatically uses 3× the active trace width"> mm</label>
+<span class="route-stat" id="r-arc-stat">0 = automatic 3× trace width</span>

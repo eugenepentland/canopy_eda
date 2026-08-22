@@ -242,7 +242,9 @@ const deflate_fuzz_corpus = [_][]const u8{
 /// exactly, for any input bytes. This catches Huffman/bit-packing bugs the
 /// encoder's own tests would miss on adversarial inputs. Runs under
 /// `testing.allocator`, so any leak on the compress/decompress path fails.
-fn fuzzDeflateRoundTrip(allocator: std.mem.Allocator, input: []const u8) anyerror!void {
+fn fuzzDeflateRoundTrip(allocator: std.mem.Allocator, smith: *std.testing.Smith) anyerror!void {
+    var generated: [64 * 1024]u8 = undefined;
+    const input = smith.in orelse generated[0..smith.slice(&generated)];
     const raw = try deflateRaw(allocator, input);
     defer allocator.free(raw);
     var in: std.Io.Reader = .fixed(raw);

@@ -1,18 +1,62 @@
 const std = @import("std");
 const zt = @import("zt");
+const builtin = @import("builtin");
+/// The `zig build test` shard partition. Data only — no imports — so pulling it
+/// into the build script cannot drag src/ into the build graph.
+const test_shards = @import("src/test_shards.zig");
+
+pub const required_zig_version = "0.17.0-dev.1683+5ceec001b";
 
 pub fn build(b: *std.Build) void {
+    if (!std.mem.eql(u8, builtin.zig_version_string, required_zig_version)) {
+        std.debug.panic(
+            "EDA requires Zig {s}; found {s}. See README.md for the pinned toolchain and archive checksum.",
+            .{ required_zig_version, builtin.zig_version_string },
+        );
+    }
     const target = b.standardTargetOptions(.{});
     // Default mode is Debug (unpinned): dev/test/mutation builds stay Debug for
     // fast iteration, so the optimize mode is deliberately NOT pinned globally
     // here. The PRODUCTION build is pinned separately at the deploy point —
-    // `zig build -Doptimize=ReleaseSafe` in systemd/netlisp.service's
-    // ExecStartPre (and the deploy hook). Rationale: the server parses untrusted
+    // `zig build -Doptimize=safe` in the verified release-preparation hook.
+    // Rationale: the server parses untrusted
     // input, so a safety-off build (ReleaseFast/Small) turns any remaining
     // unguarded cast/overflow into silent UB — a wrong board — whereas
-    // ReleaseSafe makes it a panic that systemd `Restart=on-failure` recovers in
+    // ReleaseSafe makes it a panic that systemd `Restart=always` recovers in
     // ~2s. See the cast-safety campaign (numeric.checkedInt / int_from_float).
     const optimize = b.standardOptimizeOption(.{});
+
+    // The full unit-test binary (`zig build test`) gets its OWN optimize mode,
+    // independent of `-Doptimize`, via `-Dtest-opt` (default Debug). Zig
+    // 0.17.0-dev.1683 makes the representative self-hosted Debug optimizer
+    // workload 3.09x faster than Zig 0.15.1 (43.53s vs 134.47s) while keeping
+    // the much cheaper Debug compile. That reverses the old whole-suite
+    // tradeoff which required ReleaseSafe just to keep solver tests usable.
+    // The option remains available as a low-level diagnostic escape hatch, but
+    // repository policy is self-hosted Debug for every internal test; only the
+    // deployment pipeline builds the EDA application with self-hosted ReleaseSafe.
+    // This affects ONLY the `test` binary below; the main artifact, bench,
+    // wasm, and `test-fast` keep honoring `-Doptimize`.
+    const test_opt = b.option(
+        std.builtin.OptimizeMode,
+        "test-opt",
+        "Optimize mode for the full unit-test binary only (repository workflow uses debug)",
+    ) orelse .debug;
+
+    // Ad-hoc subset runner for the full `test` binary: `-Dtest-filter=<substr>`
+    // (repeatable) forwards to the compiler's --test-filter, so only tests whose
+    // name contains one of the substrings are analyzed, compiled, and run.
+    // Verifying a handful of new tests otherwise costs a whole suite wall.
+    // Unset = the empty filter list = today's behaviour exactly: everything runs.
+    // This is a DEVELOPER convenience on the `test` step alone; the mutation
+    // smoke tier below keeps its own hardcoded, stable filter set (Guardian's
+    // per-mutant tier depends on that set not moving), and no gated step passes
+    // this option, so a filtered run can never narrow the gate.
+    const test_filters = b.option(
+        []const []const u8,
+        "test-filter",
+        "Run only unit tests whose name contains this substring (repeatable; `test` step only, default: run all)",
+    ) orelse &.{};
 
     const httpz = b.dependency("httpz", .{
         .target = target,
@@ -32,11 +76,42 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // Version stamp baked into the binary: the short git hash of the checkout
-    // at build time, used to version exported review packages. Falls back to
-    // "unknown" outside a git checkout (or if `git` isn't on PATH).
-    const build_options = b.addOptions();
-    build_options.addOption([]const u8, "git_hash", gitShortHash(b));
+    // Guardian — runs on every build. Baseline mode is configured in
+    // guardian.toml: every check records existing violations once and
+    // only fails when new ones appear, so the full check suite can be
+    // turned on without fixing the back-catalogue first.
+    //
+    // Resolved HERE, above the test modules, because every test binary below is
+    // compiled with Guardian's counting test runner (see `test_runner`).
+    //
+    // Build guardian-check optimized regardless of the design's build mode. It's
+    // a tool we *run* (70 single-pass checks over the whole src/ tree), not code
+    // we ship, so a Debug guardian-check would run ~11s every build vs ~1s here.
+    // ReleaseSafe (not ReleaseFast) keeps bounds/overflow checks in guardian's
+    // parser for ~0.4s more — worth it for a build gate we trust to be correct.
+    //
+    // In practice this compile is usually skipped entirely: `addAllChecks`
+    // reuses the binary a plain `zig build` already left in the guardian
+    // checkout's `zig-out/bin/`, behind a `guardian-selfcheck` step that fails
+    // the build when that binary's embedded source digest doesn't match the
+    // guardian source it is about to gate. That is what keeps a fresh
+    // worktree's first build at ~15s instead of a cold ReleaseSafe compile of
+    // an unchanged tool. `GUARDIAN_PREBUILT=off` forces the compile back on.
+    const guardian = @import("guardian");
+    const guardian_dep = b.dependency("guardian", .{
+        .target = target,
+        .optimize = .safe,
+    });
+    const check_exe = guardian_dep.artifact("guardian-check");
+
+    // Guardian's counting test runner, used by EVERY test binary here.
+    // `-Dtest-filter` and `test-fast`'s hardcoded filter set are both applied by
+    // the COMPILER, so a filter matching nothing produces an empty test binary
+    // that exits 0 — output-identical to a green suite. This runner prints
+    // `guardian/test: N test(s) selected` before the first test and FAILS a run
+    // whose filters named nothing. `.mode = .server` keeps the build system's
+    // progress display, per-test failure attribution, and --fuzz support.
+    const test_runner = guardian.testRunner(guardian_dep);
 
     // Compile .zt → .zig (run before any module that imports them).
     const templates_step = zt.addTemplates(b, zt_dep, &.{
@@ -46,29 +121,86 @@ pub fn build(b: *std.Build) void {
         b.path("src/serve/templates/mcp_docs.zt"),
     });
 
+    // Template generation writes source files, so it must finish formatting
+    // before any compiler or Guardian process can read the tree. Keeping this
+    // as one predecessor fixes fresh-worktree races where those consumers used
+    // to run beside generation/formatting and observe missing or partial files.
+    const templates_fmt = b.addFmt(.{
+        .paths = &.{b.path("src/serve/templates")},
+        .check = false,
+    });
+    templates_fmt.step.dependOn(templates_step);
+    const templates_ready = b.step("templates", "Generate and format the zt templates");
+    templates_ready.dependOn(&templates_fmt.step);
+    const templates_prepared = b.option(
+        bool,
+        "templates-prepared",
+        "Trust the checked-in generated templates (release orchestration only)",
+    ) orelse false;
+    const prepared_templates = b.step(
+        "templates-prepared",
+        "Use templates prepared and cleanliness-checked by release orchestration",
+    );
+    const template_predecessor = if (templates_prepared)
+        prepared_templates
+    else
+        &templates_fmt.step;
+
+    // Client-side WASM DRC. Compiles the SAME placement/drc.zig engine to
+    // wasm32-freestanding (the fs/eval paths in optimizer.zig are lazily skipped
+    // by Zig's analysis) and exposes a JSON bridge (src/wasm_drc.zig) so the
+    // browser can run the design-rule check locally, off the server. Always
+    // ReleaseSmall and target-fixed, independent of the host build mode. The
+    // artifact is embedded into the server binary (the `drc.wasm` anonymous
+    // import on exe_mod/test_mod below) and served at /static/drc.wasm.
+    const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
+    const wasm_mod = b.createModule(.{
+        .root_source_file = b.path("src/wasm_drc.zig"),
+        .target = wasm_target,
+        .optimize = .small,
+    });
+    const wasm_drc = b.addExecutable(.{
+        .name = "drc",
+        .root_module = wasm_mod,
+    });
+    wasm_drc.entry = .disabled; // -fno-entry: a library of exports, not a program
+    wasm_drc.rdynamic = true; // keep the @export'd wasm_alloc/drc_check + memory
+    const wasm_bin = wasm_drc.getEmittedBin();
+    const wasm_install = b.addInstallArtifact(wasm_drc, .{});
+    const wasm_step = b.step("wasm-drc", "Build the client-side WASM DRC (drc.wasm)");
+    wasm_step.dependOn(&wasm_install.step);
+
     // Main executable
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
+    // Deployment is the only ReleaseSafe application build. Strip that
+    // artifact to avoid spending roughly a minute emitting 40 MiB of symbols;
+    // every internal self-hosted Debug artifact keeps its debugging metadata.
+    exe_mod.strip = optimize == .safe;
     exe_mod.addImport("httpz", httpz.module("httpz"));
     exe_mod.addImport("zt", zt_dep.module("zt"));
     exe_mod.addImport("ward", ward_dep.module("ward"));
-    exe_mod.addOptions("build_options", build_options);
+    // Embed the compiled drc.wasm so static_assets.zig can @embedFile it.
+    exe_mod.addAnonymousImport("drc.wasm", .{ .root_source_file = wasm_bin });
 
     const exe = b.addExecutable(.{
         .name = "netlisp",
         .root_module = exe_mod,
+        // The sole production ReleaseSafe artifact uses Zig's self-hosted
+        // x86-64 backend even though the pinned official compiler also ships
+        // LLVM. Debug keeps the compiler default; repository policy reserves
+        // `.safe` for prepare-release.sh.
+        .use_llvm = if (optimize == .safe) false else null,
     });
-    exe.step.dependOn(templates_step);
+    exe.step.dependOn(template_predecessor);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
     const run_step = b.step("run", "Run the netlisp CLI");
     run_step.dependOn(&run_cmd.step);
 
@@ -91,100 +223,141 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench-layout", "Build the slim PCB-layout optimizer benchmark");
     bench_step.dependOn(&bench_install.step);
 
-    // Tests
+    // Tests — compiled at `-Dtest-opt` (default Debug), NOT `-Doptimize`.
     const test_mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = b.path("src/test_root.zig"),
         .target = target,
-        .optimize = optimize,
+        .optimize = test_opt,
     });
     test_mod.addImport("httpz", httpz.module("httpz"));
     test_mod.addImport("zt", zt_dep.module("zt"));
     test_mod.addImport("ward", ward_dep.module("ward"));
-    test_mod.addOptions("build_options", build_options);
+    test_mod.addAnonymousImport("drc.wasm", .{ .root_source_file = wasm_bin });
 
-    const tests = b.addTest(.{
-        .root_module = test_mod,
-    });
-    tests.step.dependOn(templates_step);
-    const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_tests.step);
+    // SHARDED. `test` compiles one test binary per shard in src/test_shards.zig
+    // and runs them concurrently — the build system executes independent steps
+    // in parallel (default `-j` = core count), so the suite's 78s serial test
+    // wall becomes the wall of its slowest shard. Every shard is the SAME
+    // module (src/test_root.zig), the SAME optimize mode and the SAME Guardian
+    // runner; only the compiler's `--test-filter` set differs, and the manifest
+    // partitions the tree so each named test is compiled into exactly one
+    // shard. See src/test_shards.zig for the invariant and the test in
+    // src/test_root.zig that enforces it.
+    //
+    // Sharding is skipped for `-Dtest-filter=...`: the developer subset runner
+    // has to stay one binary whose selection is exactly what the flag said, and
+    // intersecting a hand-typed filter with a shard's filter list is the kind of
+    // silent narrowing this repository does not allow near the test step.
+    if (test_filters.len != 0) {
+        addTestShard(b, test_step, test_mod, test_runner, template_predecessor, test_filters, null);
+    } else {
+        for (test_shards.shards, 0..) |shard_filters, shard_index| {
+            addTestShard(b, test_step, test_mod, test_runner, template_predecessor, shard_filters, shard_index);
+        }
+    }
+
+    // test-compile: the middle tier between a filtered `zig build test` and the
+    // full gate. Compiles the WHOLE test binary (no filters, ever) and runs
+    // none of it, so `-fno-emit-bin` applies and the compiler stops after
+    // semantic analysis. This is the tier whose absence let two commits land on
+    // a suite that would not compile: `test-fast` only ever type-checks the 8
+    // filters below, so a production call site can change and its own stale
+    // test is never analyzed. Deliberately NOT a dependency of `test` — making
+    // it one would re-analyze the whole suite on every filtered run and erase
+    // the reason to filter. It IS part of `[gate] test_command` (guardian.toml).
+    const compile_probe = guardian.addTestCompileProbe(b, .{
+        .root_module = test_mod,
+        .test_runner = test_runner,
+    });
+    // The probe compiles src/test_root.zig, which imports the zt-generated
+    // src/serve/templates/*.zig, so template codegen has to be a true
+    // PREDECESSOR of it — see `orderProbeAfter` below, called once
+    // `templates_fmt` exists. addTestCompileProbe returns the top-level step, so
+    // the ordering has to be applied to its dependencies (the probe's compile
+    // step); hanging it off the top-level step would let codegen and the compile
+    // run as concurrent siblings.
 
     // Mutation smoke tier. Guardian runs this focused set first for each
     // mutant, then still runs the complete test suite for every smoke survivor.
     // A smoke failure therefore saves a full ~70s suite without weakening the
     // final verdict. Keep the filters focused on small fail-closed boundary
     // cases that commonly kill mutants quickly.
+    //
+    // Stays on `-Doptimize` (Debug by default), deliberately NOT `-Dtest-opt`:
+    // the mutation tier REBUILDS this binary for every mutant, so the slower
+    // ReleaseSafe compile would multiply across ~8-100 mutants. Its filtered set
+    // is small fail-closed boundary cases (no solver work) and already runs in
+    // ~2.3s Debug, so it gains nothing from ReleaseSafe at runtime — the
+    // per-mutant incremental compile cost is what matters here.
     const fast_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = b.path("src/test_root.zig"),
         .target = target,
         .optimize = optimize,
     });
     fast_test_mod.addImport("httpz", httpz.module("httpz"));
     fast_test_mod.addImport("zt", zt_dep.module("zt"));
     fast_test_mod.addImport("ward", ward_dep.module("ward"));
-    fast_test_mod.addOptions("build_options", build_options);
+    fast_test_mod.addAnonymousImport("drc.wasm", .{ .root_source_file = wasm_bin });
 
+    //
+    // Hoisted to a named const because the runner is told the same list twice:
+    // once as the compiler's `--test-filter` set, once as the filter texts
+    // `announceFilters` forwards. A rename here that matched nothing would
+    // otherwise produce an empty, silently-green smoke tier — and this tier
+    // gates every mutant.
+    const smoke_filters: []const []const u8 = &.{
+        "parse rejects excessively deep nesting",
+        "fuzz: parser never crashes",
+        "modulo rejects non-positive divisor",
+        "checkedInt rejects",
+        "designSiblingPath rejects",
+        "sanitizeKicadName neutralizes traversal",
+        "route flags grid overflow",
+        "mcpSetPartPoses rejects an empty poses array",
+    };
     const fast_tests = b.addTest(.{
         .name = "mutation-smoke",
         .root_module = fast_test_mod,
-        .filters = &.{
-            "parse rejects excessively deep nesting",
-            "fuzz: parser never crashes",
-            "modulo rejects non-positive divisor",
-            "checkedInt rejects",
-            "designSiblingPath rejects",
-            "sanitizeKicadName neutralizes traversal",
-            "route flags grid overflow",
-            "mcpSetPartPoses rejects an empty poses array",
-        },
+        .filters = smoke_filters,
+        .test_runner = test_runner,
     });
-    fast_tests.step.dependOn(templates_step);
+    fast_tests.step.dependOn(template_predecessor);
     const run_fast_tests = b.addRunArtifact(fast_tests);
+    run_fast_tests.setCwd(b.path("."));
+    guardian.announceFilters(run_fast_tests, smoke_filters);
     const fast_test_step = b.step("test-fast", "Run the mutation smoke-test subset");
     fast_test_step.dependOn(&run_fast_tests.step);
-
-    // Guardian — runs on every build. Baseline mode is configured in
-    // guardian.toml: every check records existing violations once and
-    // only fails when new ones appear, so the full check suite can be
-    // turned on without fixing the back-catalogue first.
-    const guardian = @import("guardian");
-    // Build guardian-check optimized regardless of the design's build mode. It's
-    // a tool we *run* (67 single-pass checks over the whole src/ tree), not code
-    // we ship, so a Debug guardian-check would run ~11s every build vs ~1s here.
-    // ReleaseSafe (not ReleaseFast) keeps bounds/overflow checks in guardian's
-    // parser for ~0.4s more — worth it for a build gate we trust to be correct.
-    const guardian_dep = b.dependency("guardian", .{
-        .target = target,
-        .optimize = .ReleaseSafe,
-    });
-    const check_exe = guardian_dep.artifact("guardian-check");
 
     // Generated template files (src/serve/templates/*.zig) are auto-formatted
     // immediately after compilation by `templates_fmt` below — skip them in the
     // strict --check pass so the build doesn't fail on the brief unformatted
     // window between template codegen and the auto-fmt step.
     const fmt_check = b.addFmt(.{
-        .paths = &.{"src"},
-        .exclude_paths = &.{"src/serve/templates"},
+        .paths = &.{b.path("src")},
+        .exclude_paths = &.{b.path("src/serve/templates")},
         .check = true,
     });
-    fmt_check.step.dependOn(templates_step);
+    fmt_check.step.dependOn(template_predecessor);
     b.getInstallStep().dependOn(&fmt_check.step);
     test_step.dependOn(&fmt_check.step);
 
-    // Auto-format the zt-generated .zig files so a `zig fmt --check` over the
-    // full tree (e.g. by an external CI lint) still passes.
-    const templates_fmt = b.addFmt(.{
-        .paths = &.{"src/serve/templates"},
-        .check = false,
-    });
-    templates_fmt.step.dependOn(templates_step);
-    b.getInstallStep().dependOn(&templates_fmt.step);
-    test_step.dependOn(&templates_fmt.step);
+    b.getInstallStep().dependOn(template_predecessor);
+    test_step.dependOn(template_predecessor);
 
-    guardian.addAllChecks(b, check_exe, b.getInstallStep(), .{});
-    guardian.addAllChecks(b, check_exe, test_step, .{});
+    // Order the compile-only probe behind template codegen AND its auto-fmt.
+    // Behind codegen because the probe compiles src/test_root.zig, which imports the
+    // generated files; behind the fmt because otherwise `zig build test-compile`
+    // regenerates those files and leaves them unformatted in the tree, which
+    // reds Guardian's `formatting` check on the very next gate run — a
+    // standalone tier must leave the tree exactly as it found it.
+    orderProbeAfter(compile_probe, template_predecessor);
+
+    const gate_ordering: guardian.Options = .{
+        .prerequisites = &.{template_predecessor},
+    };
+    guardian.addAllChecks(b, check_exe, b.getInstallStep(), gate_ordering);
+    guardian.addAllChecks(b, check_exe, test_step, gate_ordering);
 
     // Auto-generated language reference (docs/language-forms.md).
     // `zig build docs` regenerates it from the evaluator's dispatch
@@ -211,21 +384,111 @@ pub fn build(b: *std.Build) void {
     spec_init_run.setCwd(b.path("."));
     const spec_init_step = b.step("spec-init", "Generate starter SPEC.md from pub fn signatures");
     spec_init_step.dependOn(&spec_init_run.step);
+
+    // INVARIANT: validating must never write the install prefix. A `zig build
+    // test` (or a filtered subset run) has to be safe to fire while a long
+    // measurement or a live server is executing `zig-out/bin/netlisp`, so the
+    // test steps must not reach an install step — otherwise a 20-second
+    // validation would relink the executable underneath a 13-minute run.
+    //
+    // It holds today by construction: the test steps depend only on compile /
+    // run / fmt steps, `docs_check_run` executes the exe straight out of the
+    // build cache rather than the installed copy, and Guardian's addAllChecks
+    // re-orders artifact installs only when the step it is wired onto IS the
+    // install step. All of that is easy to undo by accident with one
+    // `dependOn(b.getInstallStep())`, so the property is asserted at configure
+    // time rather than left as a comment. See CLAUDE.md > Testing.
+    assertDoesNotInstall(test_step, "test");
+    assertDoesNotInstall(fast_test_step, "test-fast");
+    assertDoesNotInstall(compile_probe, "test-compile");
+    addAffectedTestStep(b);
 }
 
-/// `git rev-parse --short HEAD` at build-config time, for the version stamp.
-/// Returns "unknown" if git isn't available or this isn't a checkout — never
-/// fails the build.
-fn gitShortHash(b: *std.Build) []const u8 {
-    const result = std.process.Child.run(.{
-        .allocator = b.allocator,
-        .argv = &.{ "git", "rev-parse", "--short", "HEAD" },
-        .cwd = b.build_root.path,
-    }) catch return "unknown";
-    switch (result.term) {
-        .Exited => |code| if (code != 0) return "unknown",
-        else => return "unknown",
+/// Compiles and runs ONE shard of the unit-test suite and hangs it off
+/// `test_step`. `filters` is the shard's `--test-filter` set; an empty set is
+/// the whole suite (what a single-binary `zig build test` used to be).
+///
+/// Every shard shares `test_mod`, so a shard cannot drift from the suite's
+/// module graph, optimize mode, or root file: the only per-shard input is the
+/// filter list, and `src/test_shards.zig` is proven to partition the tree.
+fn addTestShard(
+    b: *std.Build,
+    test_step: *std.Build.Step,
+    test_mod: *std.Build.Module,
+    test_runner: std.Build.Step.Compile.TestRunner,
+    template_predecessor: *std.Build.Step,
+    filters: []const []const u8,
+    shard_index: ?usize,
+) void {
+    const guardian = @import("guardian");
+    const tests = b.addTest(.{
+        .root_module = test_mod,
+        .filters = filters,
+        .test_runner = test_runner,
+    });
+    tests.step.dependOn(template_predecessor);
+    const run_tests = b.addRunArtifact(tests);
+    run_tests.setCwd(b.path("."));
+    // Tells the shard which row of the manifest it IS, so the unnamed
+    // integrity block in src/test_root.zig can hold the compiler to that row.
+    // Absent for `-Dtest-filter`, whose selection no manifest row describes.
+    if (shard_index) |index| {
+        run_tests.setEnvironmentVariable("EDA_TEST_SHARD", b.fmt("{d}", .{index}));
     }
-    const trimmed = std.mem.trim(u8, result.stdout, " \t\r\n");
-    return if (trimmed.len == 0) "unknown" else b.dupe(trimmed);
+    // Tell the runner what the filter texts were — Zig never passes them to a
+    // test runner, so without this it can only detect a completely empty binary
+    // and an unnamed `test { }` block would pad the count of a zero-match run.
+    // Per shard this is what turns "my filter matched nothing" from a silent
+    // green run into a failure.
+    guardian.announceFilters(run_tests, filters);
+    test_step.dependOn(&run_tests.step);
+}
+
+/// Developer-only changed-file selector. The script starts a nested filtered
+/// `zig build test` followed by `test-compile`; the release gate never calls
+/// this step and remains unfiltered.
+fn addAffectedTestStep(b: *std.Build) void {
+    const self_test = b.addSystemCommand(&.{ "python3", "scripts/test_affected_test.py" });
+    self_test.setCwd(b.path("."));
+    const run = b.addSystemCommand(&.{ "python3", "scripts/test_affected.py" });
+    run.setCwd(b.path("."));
+    run.step.dependOn(&self_test.step);
+    if (b.option([]const u8, "affected-base", "Git revision test-affected compares against")) |base| {
+        run.addArgs(&.{ "--base", base });
+    }
+    if (b.option(bool, "affected-list", "Print the affected-test plan without running it") orelse false) {
+        run.addArg("--list");
+    }
+    if (b.option(bool, "affected-full", "Force test-affected to run the complete Debug suite") orelse false) {
+        run.addArg("--full");
+    }
+    const step = b.step("test-affected", "Run conservatively affected Debug tests, then analyze the whole suite");
+    step.dependOn(&run.step);
+}
+
+/// Makes `predecessor` run before the compile(s) behind a `test-compile` probe
+/// step. `guardian.addTestCompileProbe` returns the TOP-LEVEL step, and a step
+/// runs after its dependencies but its dependencies run in parallel with each
+/// other — so ordering has to be applied one level down, to the probe's compile
+/// step, or codegen and the compile it feeds become concurrent siblings.
+fn orderProbeAfter(probe_step: *std.Build.Step, predecessor: *std.Build.Step) void {
+    for (probe_step.dependencies.items) |dep| dep.dependOn(predecessor);
+}
+
+/// Panics at configure time if `step`'s dependency closure reaches a step that
+/// writes the install prefix (`zig-out/`). Used to keep the test steps
+/// non-installing, so validating a tree cannot swap the binary underneath a
+/// running measurement. `name` is the user-facing step name for the message.
+fn assertDoesNotInstall(step: *std.Build.Step, name: []const u8) void {
+    for (step.dependencies.items) |dep| {
+        switch (dep.tag) {
+            .install_artifact, .install_file, .install_dir => std.debug.panic(
+                "build.zig: the `{s}` step must not write zig-out/ (it reaches install step '{s}'). " ++
+                    "Validation runs while a measurement or server executes zig-out/bin/netlisp; " ++
+                    "see CLAUDE.md > Testing.",
+                .{ name, dep.name },
+            ),
+            else => assertDoesNotInstall(dep, name),
+        }
+    }
 }

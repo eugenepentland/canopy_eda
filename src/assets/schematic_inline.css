@@ -27,6 +27,15 @@ h3{color:#f0f6fc;font-size:0.95rem;margin:0;}
 .banner-warn{background:#3a2e0d;color:#d29922;border:1px solid #5b4617;}
 .banner-fail{background:#3a0d16;color:#f85149;border:1px solid #5b1e28;}
 .head-links{grid-column:1/-1;display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap;}
+.schematic-mode-switch{display:inline-flex;align-items:center;gap:7px;min-height:30px;padding:0 8px;border:1px solid #30363d;border-radius:6px;background:#161b22;margin-right:4px;box-sizing:border-box;}
+.schematic-mode-label{color:#6e7681;font-size:.78rem;line-height:1;transition:color .15s ease;}
+.schematic-mode-label.active{color:#f0f6fc;font-weight:600;}
+.schematic-mode-slider{position:relative;display:inline-block;flex:none;width:44px;height:24px;border:1px solid #484f58;border-radius:999px;background:#30363d;box-sizing:border-box;transition:background .15s ease,border-color .15s ease;touch-action:manipulation;}
+.schematic-mode-slider:hover{border-color:#58a6ff;text-decoration:none;}
+.schematic-mode-slider:focus-visible{outline:2px solid #58a6ff;outline-offset:2px;}
+.schematic-mode-slider.functional{background:#1f6feb;border-color:#388bfd;}
+.schematic-mode-thumb{position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#f0f6fc;box-shadow:0 1px 3px rgba(0,0,0,.55);transition:transform .15s ease;}
+.schematic-mode-slider.functional .schematic-mode-thumb{transform:translateX(20px);}
 .head-link{padding:5px 12px;border:1px solid #30363d;border-radius:5px;color:#8b949e;font-size:0.85rem;}
 .head-link:hover{border-color:#58a6ff;color:#c9d1d9;text-decoration:none;}
 .head-btn{background:transparent;font-family:inherit;cursor:pointer;}
@@ -148,10 +157,12 @@ svg .component.flash line{stroke:#79c0ff;}
 .sb-insp-msg.is-error{color:#f85149;}
 .sb-insp-del{margin:6px 10px 10px;background:#21262d;color:#f85149;border:1px solid #30363d;border-radius:4px;padding:4px 10px;font-size:0.74rem;cursor:pointer;font-family:inherit;}
 .sb-insp-del:hover{background:#3a1d1d;border-color:#da3633;}
+.sb-pin-edit-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-top:10px;padding:6px 4px;border-bottom:1px solid #30363d;color:#c9d1d9;font-size:0.78rem;}
+.sb-pin-edit-head span{color:#8b949e;font-size:0.68rem;white-space:nowrap;}
 /* Inline pin re-wire affordance on pin rows. The row is a 2-col grid; rows
    that gained an ✎ button get a third auto column so it sits on the right. */
 .sb-pin-row:has(.sb-pin-edit){grid-template-columns:46px 1fr auto;}
-.sb-pin-edit{align-self:center;background:none;border:none;color:#6e7681;cursor:pointer;font-size:0.8rem;padding:0 4px;}
+.sb-pin-edit{align-self:center;background:#161b22;border:1px solid #30363d;border-radius:4px;color:#79c0ff;cursor:pointer;font-size:0.8rem;padding:1px 6px;}
 .sb-pin-edit:hover{color:#58a6ff;}
 .sb-pin-net-input{box-sizing:border-box;width:100%;background:#010409;color:#c9d1d9;border:1px solid #58a6ff;border-radius:4px;padding:2px 6px;font-size:0.78rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}
 .sb-pin-net-input:focus{outline:none;}
@@ -435,7 +446,10 @@ details li{margin:3px 0;font-size:0.88rem;color:#c9d1d9;line-height:1.45;}
 .erc-item[data-nav-ref],.erc-item[data-nav-net]{cursor:pointer;}
 .erc-item[data-nav-ref]:hover,.erc-item[data-nav-net]:hover{filter:brightness(1.2);}
 .erc-tag{color:#8b949e;font-size:0.72rem;font-family:"SF Mono",monospace;}
-@media(max-width:900px){.sch-layout{grid-template-columns:1fr;}.sch-sidebar{position:static;height:auto;max-height:50vh;border-left:none;border-top:1px solid #30363d;}}
+@media(max-width:900px){
+  .sch-layout{display:flex;flex-direction:column;}
+  .sch-sidebar{order:-1;position:static;height:auto;max-height:46vh;border-left:none;border-top:0;border-bottom:1px solid #30363d;}
+}
 
 /* ── Schematic BOM card ─────────────────────────────────────────── */
 .sch-bom-card{background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:14px 18px 18px;margin:14px 16px;}
@@ -508,36 +522,13 @@ details li{margin:3px 0;font-size:0.88rem;color:#c9d1d9;line-height:1.45;}
 .sch-bom-mpn button:hover,.sch-bom-mfr button:hover{background:#30363d;border-color:#58a6ff;}
 .sch-bom-mpn button:disabled,.sch-bom-mfr button:disabled{opacity:0.5;cursor:wait;}
 
-/* ── Global PCB-layout settings bar + per-sub-block PCB preview ───────────── */
-.pcb-globals{margin:0 0 14px;background:#0d1117;border:1px solid #30363d;border-radius:8px;}
-.pcb-globals>summary{cursor:pointer;padding:9px 14px;font-weight:600;color:#c9d1d9;list-style:none;}
-.pcb-globals>summary::-webkit-details-marker{display:none;}
-.pcb-globals>summary::before{content:"\25B8  ";color:#8b949e;}
-.pcb-globals[open]>summary::before{content:"\25BE  ";}
-.pcb-globals-body{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;padding:2px 14px 12px;}
-.pcb-globals-body label{display:inline-flex;align-items:center;gap:6px;font-size:0.78rem;color:#8b949e;}
-.pcb-globals-body input[type=number]{width:74px;background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:3px 6px;font-family:inherit;font-size:0.78rem;}
-.pcb-globals-body input[type=number]:focus{outline:none;border-color:#58a6ff;}
-.pcb-globals-chk{gap:5px!important;cursor:pointer;}
-.pcb-globals-hint{flex-basis:100%;font-size:0.72rem;color:#6e7681;}
-
-/* Sub circuit card: header actions (Copy source + the Schematic⇄PCB toggle)
-   cluster on the right; the toggle is a segmented control flipping the card
-   body between its .subc-sch (schematic hubs) and .subc-pcb (PCB layout) views. */
+/* Sub circuit card: header actions (Copy source + the PCB Layout link) cluster
+   on the right. The layout is a link out, not an embedded view — this page
+   renders the design's .sexp and nothing else. */
 .subc-head-actions{margin-left:auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
 .subc-head-actions .copy-src-btn{margin-left:0;}
-.subc-toggle{display:inline-flex;border:1px solid #30363d;border-radius:6px;overflow:hidden;}
-.subc-tab{background:#0d1117;color:#8b949e;border:0;border-right:1px solid #30363d;padding:4px 12px;font-size:0.75rem;font-weight:600;cursor:pointer;font-family:inherit;}
-.subc-tab:last-child{border-right:0;}
-.subc-tab:hover{background:#161b22;color:#c9d1d9;}
-.subc-tab.active{background:#1f6feb;color:#fff;}
-.subc-view[hidden]{display:none;}
-.subc-pcb{margin-top:6px;}
-.subc-pcb-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px;}
-.subc-pcb-hint{font-size:0.74rem;}
-.subc-pcb-open{margin-left:auto;font-size:0.74rem;}
-.subc-pcb-frame-wrap{border:1px solid #30363d;border-radius:8px;overflow:hidden;background:#010409;}
-.subc-pcb-frame{width:100%;height:600px;border:0;display:block;}
+.subc-pcb-open{font-size:0.75rem;font-weight:600;color:#8b949e;border:1px solid #30363d;border-radius:6px;padding:4px 12px;text-decoration:none;white-space:nowrap;}
+.subc-pcb-open:hover{background:#161b22;color:#c9d1d9;border-color:#58a6ff;}
 
 /* ── KiCad push preview modal + toast ─────────────────────────────────── */
 .kpv-overlay{position:fixed;inset:0;background:rgba(1,4,9,0.72);z-index:300;display:flex;align-items:center;justify-content:center;}
@@ -632,3 +623,60 @@ details li{margin:3px 0;font-size:0.88rem;color:#c9d1d9;line-height:1.45;}
 .sb-src-edit{margin:2px 0 8px;}
 .sb-src-edit a{font-size:0.76rem;color:#58a6ff;text-decoration:none;}
 .sb-src-edit a:hover{text-decoration:underline;}
+
+@media(max-width:600px){
+  .sch-wrap{padding:14px 10px 32px;}
+  .sch-head{grid-template-columns:minmax(0,1fr) auto;gap:8px;padding:12px 2px;}
+  .head-title h1{font-size:1.3rem;line-height:1.25;overflow-wrap:anywhere;}
+  .subtitle{font-size:.78rem;overflow-wrap:anywhere;}
+  .rev-pill,.rev-pill-wrap{margin-left:3px;}
+  .rev-changelog{position:fixed;top:58px;left:10px;right:10px;min-width:0;max-width:none;}
+  .banner{padding:7px 9px;font-size:.68rem;white-space:nowrap;}
+  .head-links{gap:6px;margin-top:4px;overflow:hidden;}
+  .head-links .viewtoggle{display:flex;flex:1 0 100%;width:100%;min-width:0;}
+  .head-links .viewtoggle a{flex:1;justify-content:center;min-width:0;min-height:40px;padding:7px 3px;font-size:.7rem;white-space:nowrap;}
+  .schematic-mode-switch{flex:1 0 100%;justify-content:center;min-height:42px;margin-right:0;}
+  .head-link{display:inline-flex;align-items:center;justify-content:center;min-height:42px;padding:5px 10px;box-sizing:border-box;touch-action:manipulation;}
+  .sch-sidebar{max-height:44dvh;}
+  .sb-toc{padding:8px 10px;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;}
+  .sb-toc::-webkit-scrollbar{display:none;}
+  .sb-toc-btn{display:flex;align-items:center;min-height:36px;padding:3px 11px;flex:none;}
+  .sb-search{padding:9px 10px;}
+  .sb-search input{min-height:44px;font-size:16px;}
+  .sb-results{left:10px;right:10px;max-height:38dvh;}
+  .sb-detail{padding:10px;font-size:.82rem;}
+  .sch-section{padding:12px 10px;margin-bottom:10px;}
+  .sch-subsection{margin-left:0;}
+  .sch-attached-sub{margin:10px 0 3px;padding:9px;}
+  .sec-head{align-items:flex-start;flex-wrap:wrap;gap:7px;}
+  .sec-head h2{min-width:0;flex:1;font-size:1rem;overflow-wrap:anywhere;}
+  .sec-edit-src,.copy-src-btn,.view-src-link{min-height:36px;padding:4px 9px;}
+  .hub-inset-wrap{margin-left:-4px;margin-right:-4px;padding:4px;}
+  .sch-bom-card,.sch-notes-card{margin:10px 0;padding:12px 10px;}
+  .sch-notes-add{flex-direction:column;}
+  .sch-notes-add-text{min-height:44px;font-size:16px;}
+  .sch-notes-add-btn{min-height:44px;}
+  .subc-head-actions{width:100%;margin-left:0;}
+  .subc-pcb-open{flex:1;min-height:38px;display:flex;align-items:center;justify-content:center;}
+  .src-edit-overlay{align-items:stretch;}
+  .src-edit-box{width:100vw;height:100dvh;border:0;border-radius:0;}
+  .src-edit-head,.src-edit-foot{padding:10px;}
+  .src-edit-hint{display:none;}
+  .src-edit-find,.src-edit-tools{padding:6px 10px;overflow-x:auto;flex-wrap:nowrap;}
+  .src-find-input{flex:1 0 180px;min-width:0;font-size:16px;}
+  .src-split-panel{display:none;}
+  .kpv-box{width:calc(100vw - 20px);max-height:92dvh;}
+  .kbd-box{min-width:0;width:calc(100vw - 20px);padding:16px;box-sizing:border-box;}
+}
+
+/* ---- Embedded pane (?embed=1) ----
+   The assembly workspace hosts this page in an iframe under the board, where
+   the site navbar, the page header (its own view switcher and download links)
+   and the 320px sidebar are all chrome the host surface already provides. The
+   drawing itself is untouched — only the frame around it is dropped, so a
+   click on the board lands on exactly the card the full page would scroll to. */
+body.sch-embed .navbar{display:none;}
+body.sch-embed .sch-head{display:none;}
+body.sch-embed .sch-sidebar{display:none;}
+body.sch-embed .sch-layout{display:block;}
+body.sch-embed .sch-wrap{padding:12px 14px 32px;max-width:none;}

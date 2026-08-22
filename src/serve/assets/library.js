@@ -207,6 +207,11 @@
       edit.type='button';edit.className='fp-court-edit';edit.textContent='Edit courtyard';
       edit.addEventListener('click',function(e){e.stopPropagation();openCourt(fp,data,box);});
       box.appendChild(edit);
+      var fullEdit=document.createElement('a');
+      fullEdit.className='fp-full-edit';fullEdit.textContent='Open footprint editor ↗';
+      fullEdit.href='/library/footprint/'+encodeURIComponent(fp);
+      fullEdit.addEventListener('click',function(e){e.stopPropagation();});
+      box.appendChild(fullEdit);
       box.appendChild(s);
     }).catch(function(){
       box.innerHTML='<span class="fp-empty">No footprint preview available.</span>';

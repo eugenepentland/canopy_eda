@@ -67,4 +67,21 @@
   .hint { color: var(--muted); font-size: 11px; line-height: 1.5; margin-top: 4px; }
   .toggles { display: flex; flex-wrap: wrap; gap: 10px; }
   .toggles label { display: flex; align-items: center; gap: 5px; color: var(--text); cursor: pointer; }
+  /* Align-by-points toggles: quiet buttons that flip to the accent fill while
+     that pick mode is armed (the .active class the viewer JS adds/removes). */
+  .align-btns { display: flex; gap: 5px; }
+  .align-btn {
+    flex: 1; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 5px;
+    padding: 6px 8px; cursor: pointer; font: inherit; font-weight: 600;
+  }
+  .align-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .align-btn.active {
+    background: var(--accent); color: #08111f; border-color: var(--accent);
+  }
+  .align-btn.active:hover { filter: brightness(1.1); color: #08111f; }
+  kbd {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 3px;
+    padding: 0 4px; font: 11px ui-monospace, monospace; color: var(--text);
+  }
 </style>

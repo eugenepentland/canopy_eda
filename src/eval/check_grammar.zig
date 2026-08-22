@@ -18,6 +18,8 @@ const pullup_range_min_children: usize = 5;
 const decoupling_per_pin_min_children: usize = 5;
 const series_element_min_children: usize = 6;
 const series_element_max_index: usize = 5;
+const feedback_divider_min_children: usize = 5;
+const set_resistor_output_min_children: usize = 6;
 
 /// One row of the requirement-check grammar: the source template a human
 /// writes, a one-line description, and the parser that turns the inner
@@ -61,7 +63,19 @@ fn parseDecoupling(_: std.mem.Allocator, bc: []const ast.Node) ?Check {
     const a = pinArg(bc[1]) orelse return null;
     const b = pinArg(bc[2]) orelse return null;
     const min_uf = namedNumberArg(bc[3], "min-uf") orelse return null;
-    return .{ .decoupling = .{ .pin_a = a, .pin_b = b, .min_uf = min_uf } };
+    if (!std.math.isFinite(min_uf) or min_uf < 0) return null;
+    var max_uf: ?f64 = null;
+    if (bc.len >= 5) {
+        const parsed_max = namedNumberArg(bc[4], "max-uf") orelse return null;
+        if (!std.math.isFinite(parsed_max) or parsed_max < min_uf) return null;
+        max_uf = parsed_max;
+    }
+    return .{ .decoupling = .{
+        .pin_a = a,
+        .pin_b = b,
+        .min_uf = min_uf,
+        .max_uf = max_uf,
+    } };
 }
 
 fn parsePullupRange(_: std.mem.Allocator, bc: []const ast.Node) ?Check {
@@ -84,6 +98,21 @@ fn parseVoltageRange(_: std.mem.Allocator, bc: []const ast.Node) ?Check {
     const lo = namedNumberArg(bc[2], "min") orelse return null;
     const hi = namedNumberArg(bc[3], "max") orelse return null;
     return .{ .voltage_range = .{ .pin = p, .min_v = lo, .max_v = hi } };
+}
+
+fn parseVoltageNotAbove(_: std.mem.Allocator, bc: []const ast.Node) ?Check {
+    if (bc.len < 4) return null;
+    const a = pinArg(bc[1]) orelse return null;
+    const b = pinArg(bc[2]) orelse return null;
+    const margin = namedNumberArg(bc[3], "margin") orelse return null;
+    if (!std.math.isFinite(margin) or margin < 0) return null;
+    return .{ .voltage_range = .{
+        .pin = a,
+        .min_v = 0,
+        .max_v = 0,
+        .not_above_pin = b,
+        .margin_v = margin,
+    } };
 }
 
 fn parseTiedToNet(_: std.mem.Allocator, bc: []const ast.Node) ?Check {
@@ -184,73 +213,116 @@ fn parseSeriesElement(_: std.mem.Allocator, bc: []const ast.Node) ?Check {
     } };
 }
 
-/// Doc + parse-dispatch table, one row per `Check` variant, indexed by the
-/// union's tag. The comptime unwrap turns a newly-added variant with no row
-/// into a compile error naming it — the checker's grammar cannot gain a case
-/// that is undocumented or undispatched.
+fn parseFeedbackDivider(_: std.mem.Allocator, bc: []const ast.Node) ?Check {
+    if (bc.len < feedback_divider_min_children) return null;
+    const reference_v = positiveNumberArg(bc[3], "reference-v") orelse return null;
+    const tolerance_pct = nonNegativeNumberArg(bc[4], "tolerance-pct") orelse return null;
+    return .{ .feedback_divider = .{
+        .pin = pinArg(bc[1]) orelse return null,
+        .return_net = namedTextArg(bc[2], "return-net") orelse return null,
+        .reference_v = reference_v,
+        .tolerance_pct = tolerance_pct,
+    } };
+}
+
+fn parseSetResistorOutput(_: std.mem.Allocator, bc: []const ast.Node) ?Check {
+    if (bc.len < set_resistor_output_min_children) return null;
+    const current_ua = positiveNumberArg(bc[4], "current-ua") orelse return null;
+    const tolerance_pct = nonNegativeNumberArg(bc[5], "tolerance-pct") orelse return null;
+    return .{ .set_resistor_output = .{
+        .pin = pinArg(bc[1]) orelse return null,
+        .return_net = namedTextArg(bc[2], "return-net") orelse return null,
+        .output_pin = namedTextArg(bc[3], "output-pin") orelse return null,
+        .current_ua = current_ua,
+        .tolerance_pct = tolerance_pct,
+    } };
+}
+
+/// Doc + parse-dispatch table. The first row for each `Check` variant is
+/// indexed by the union tag; closely-related grammar aliases follow those
+/// core rows and may share a variant implementation.
 pub const check_docs = blk: {
     const Tag = std.meta.Tag(Check);
-    const N = @typeInfo(Tag).@"enum".fields.len;
-    var t: [N]?CheckDoc = @splat(null);
-    t[@intFromEnum(Tag.connected)] = .{
+    const N = @typeInfo(Tag).@"enum".field_names.len;
+    var t: [N + 1]?CheckDoc = @splat(null);
+    t[@backingInt(Tag.connected)] = .{
         .syntax = "(connected (pin \"A\") (pin \"B\"))",
         .summary = "Both named pins of this instance must resolve to the same net.",
         .parse = parseConnected,
     };
-    t[@intFromEnum(Tag.decoupling)] = .{
-        .syntax = "(decoupling (pin \"A\") (pin \"B\") (min-uf F))",
-        .summary = "At least one capacitor of value ≥ F µF must bridge the nets on pins A and B.",
+    t[@backingInt(Tag.decoupling)] = .{
+        .syntax = "(decoupling (pin \"A\") (pin \"B\") (min-uf F) [(max-uf H)])",
+        .summary = "A capacitor of value ≥ F µF, and ≤ H when supplied, must bridge the nets on pins A and B.",
         .parse = parseDecoupling,
     };
-    t[@intFromEnum(Tag.pullup_range)] = .{
+    t[@backingInt(Tag.pullup_range)] = .{
         .syntax = "(pullup-range (pin \"P\") (net \"N\") (min-ohms L) (max-ohms H))",
         .summary = "A resistor of value in [L, H] Ω must bridge pin P's net and net N.",
         .parse = parsePullupRange,
     };
-    t[@intFromEnum(Tag.voltage_range)] = .{
+    t[@backingInt(Tag.voltage_range)] = .{
         .syntax = "(voltage-range (pin \"V\") (min L) (max H))",
         .summary = "The voltage declared on pin V's net (via ports, walking " ++
             "DC-equivalent series parts) must lie in [L, H] V; a rated range " ++
             "must be a subset of it.",
         .parse = parseVoltageRange,
     };
-    t[@intFromEnum(Tag.tied_to_net)] = .{
+    t[@backingInt(Tag.tied_to_net)] = .{
         .syntax = "(tied-to-net (pin \"P\") (net \"N\"))",
         .summary = "Pin P must resolve to net N (alias-aware) — a datasheet fixed-rail tie.",
         .parse = parseTiedToNet,
     };
-    t[@intFromEnum(Tag.not_connected)] = .{
+    t[@backingInt(Tag.not_connected)] = .{
         .syntax = "(not-connected (pin \"P\"))",
         .summary = "Pin P must be left unconnected (no foreign co-pin, not a block port).",
         .parse = parseNotConnected,
     };
-    t[@intFromEnum(Tag.pin_not_floating)] = .{
+    t[@backingInt(Tag.pin_not_floating)] = .{
         .syntax = "(pin-not-floating (pin \"P\"))",
         .summary = "Pin P must be tied to a defined level: a net with a co-pin or a block port.",
         .parse = parsePinNotFloating,
     };
-    t[@intFromEnum(Tag.pins_on_same_net)] = .{
+    t[@backingInt(Tag.pins_on_same_net)] = .{
         .syntax = "(pins-on-same-net (pins \"A\" \"B\" …))",
         .summary = "Every listed pin function must resolve to the same net (N-pin connected).",
         .parse = parsePinsOnSameNet,
     };
-    t[@intFromEnum(Tag.decoupling_per_pin)] = .{
+    t[@backingInt(Tag.decoupling_per_pin)] = .{
         .syntax = "(decoupling-per-pin (return-pin \"GND\") (pins \"VDD_1\" …) (min-uf F) (count N))",
         .summary = "At least N of the listed pins must each have a ≥ F µF cap to the return net.",
         .parse = parseDecouplingPerPin,
     };
-    t[@intFromEnum(Tag.series_element)] = .{
+    t[@backingInt(Tag.series_element)] = .{
         .syntax = "(series-element (kind R|L|C) (pin \"P\") (target-net \"N\") (min X) (max Y))",
         .summary = "An R/L/C of value in [X, Y] (Ω/µH/µF by kind) must bridge pin P's net and N.",
         .parse = parseSeriesElement,
     };
+    t[@backingInt(Tag.feedback_divider)] = .{
+        .syntax = "(feedback-divider (pin \"FB\") (return-net \"GND\") (reference-v V) (tolerance-pct P))",
+        .summary = "Calculate VOUT=VREF*(1+Rtop/Rbottom) and compare it " ++
+            "with the declared or rail-named output voltage.",
+        .parse = parseFeedbackDivider,
+    };
+    t[@backingInt(Tag.set_resistor_output)] = .{
+        .syntax = "(set-resistor-output (pin \"SET\") (return-net \"GND\") " ++
+            "(output-pin \"OUT\") (current-ua I) (tolerance-pct P))",
+        .summary = "Calculate VOUT=ISET*RSET and compare it with the declared or rail-named output voltage.",
+        .parse = parseSetResistorOutput,
+    };
+    t[N] = .{
+        .syntax = "(voltage-not-above (pin \"A\") (pin \"B\") (margin M))",
+        .summary = "The highest declared voltage on pin A's net must be no greater than " ++
+            "the lowest declared voltage on pin B's net plus M volts.",
+        .parse = parseVoltageNotAbove,
+    };
     // Exhaustiveness by construction: a variant with no row is a compile error.
-    var out: [N]CheckDoc = undefined;
-    for (t, 0..) |entry, i| {
+    var out: [N + 1]CheckDoc = undefined;
+    for (t[0..N], 0..) |entry, i| {
         out[i] = entry orelse @compileError("missing check_docs row for Check." ++
-            @typeInfo(Tag).@"enum".fields[i].name ++
+            @typeInfo(Tag).@"enum".field_names[i] ++
             " — every requirement-check variant must be documented");
     }
+    out[N] = t[N].?;
     break :blk out;
 };
 
@@ -258,10 +330,10 @@ pub const check_docs = blk: {
 /// `connected, decoupling, …`. Comptime-derived from the tag enum so the
 /// "recognized checks" a rejection surfaces can never drift from `parseCheck`.
 pub const check_keyword_list: []const u8 = blk: {
-    const Tag = std.meta.Tag(Check);
     var s: []const u8 = "";
-    for (@typeInfo(Tag).@"enum".fields, 0..) |f, i| {
-        s = s ++ (if (i > 0) ", " else "") ++ kebab(f.name);
+    for (check_docs, 0..) |doc, i| {
+        const end = std.mem.indexOfScalar(u8, doc.syntax, ' ') orelse doc.syntax.len - 1;
+        s = s ++ (if (i > 0) ", " else "") ++ doc.syntax[1..end];
     }
     break :blk s;
 };
@@ -283,9 +355,15 @@ pub fn parseCheck(allocator: std.mem.Allocator, node: ast.Node) ?Check {
     const kind = body_children[0].asAtom() orelse return null;
 
     const Tag = std.meta.Tag(Check);
-    inline for (@typeInfo(Tag).@"enum".fields) |f| {
-        if (std.mem.eql(u8, kind, comptime kebab(f.name))) {
-            return check_docs[@intFromEnum(@field(Tag, f.name))].parse(allocator, body_children);
+    const core_count = @typeInfo(Tag).@"enum".field_names.len;
+    inline for (check_docs[core_count..]) |doc| {
+        const end = comptime std.mem.indexOfScalar(u8, doc.syntax, ' ') orelse doc.syntax.len - 1;
+        if (std.mem.eql(u8, kind, doc.syntax[1..end])) return doc.parse(allocator, body_children);
+    }
+
+    inline for (@typeInfo(Tag).@"enum".field_names) |f| {
+        if (std.mem.eql(u8, kind, comptime kebab(f))) {
+            return check_docs[@backingInt(@field(Tag, f))].parse(allocator, body_children);
         }
     }
     return null;
@@ -315,6 +393,24 @@ fn namedNumberArg(node: ast.Node, name: []const u8) ?f64 {
     return c[1].asNumber();
 }
 
+fn positiveNumberArg(node: ast.Node, name: []const u8) ?f64 {
+    const value = namedNumberArg(node, name) orelse return null;
+    return if (std.math.isFinite(value) and value > 0) value else null;
+}
+
+fn nonNegativeNumberArg(node: ast.Node, name: []const u8) ?f64 {
+    const value = namedNumberArg(node, name) orelse return null;
+    return if (std.math.isFinite(value) and value >= 0) value else null;
+}
+
+fn namedTextArg(node: ast.Node, name: []const u8) ?[]const u8 {
+    const c = node.asList() orelse return null;
+    if (c.len < 2) return null;
+    const h = c[0].asAtom() orelse return null;
+    if (!std.mem.eql(u8, h, name)) return null;
+    return c[1].asText();
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 const parser_mod = @import("../sexpr/parser.zig");
@@ -329,12 +425,60 @@ test "parseCheck accepts a two-child not-connected body" {
     try std.testing.expectEqualStrings("5", chk.not_connected.pin);
 }
 
+// spec: eval/check_grammar - decoupling max-uf prevents bulk capacitors satisfying HF bypass rules
+test "parseCheck decoupling accepts optional max-uf" {
+    const alloc = std.testing.allocator;
+    const nodes = try parser_mod.parse(
+        alloc,
+        "(check (decoupling (pin \"VIN\") (pin \"GND\") (min-uf 0.09) (max-uf 0.11)))",
+    );
+    defer parser_mod.freeNodes(alloc, nodes);
+    const chk = parseCheck(alloc, nodes[0]).?;
+    try std.testing.expectApproxEqAbs(@as(f64, 0.11), chk.decoupling.max_uf.?, 1e-9);
+}
+
+// spec: eval/check_grammar - decoupling rejects malformed or inverted capacitor bounds
+test "parseCheck decoupling rejects invalid max-uf" {
+    const alloc = std.testing.allocator;
+    const malformed = try parser_mod.parse(
+        alloc,
+        "(check (decoupling (pin \"VIN\") (pin \"GND\") (min-uf 0.09) (maximum 0.11)))",
+    );
+    defer parser_mod.freeNodes(alloc, malformed);
+    try std.testing.expect(parseCheck(alloc, malformed[0]) == null);
+    const inverted = try parser_mod.parse(
+        alloc,
+        "(check (decoupling (pin \"VIN\") (pin \"GND\") (min-uf 1) (max-uf 0.1)))",
+    );
+    defer parser_mod.freeNodes(alloc, inverted);
+    try std.testing.expect(parseCheck(alloc, inverted[0]) == null);
+}
+
+test "derived regulator checks reject non-physical numeric parameters" {
+    const alloc = std.testing.allocator;
+    const divider = try parser_mod.parse(
+        alloc,
+        "(check (feedback-divider (pin \"FB\") (return-net \"GND\") " ++
+            "(reference-v 0) (tolerance-pct 2)))",
+    );
+    defer parser_mod.freeNodes(alloc, divider);
+    try std.testing.expect(parseCheck(alloc, divider[0]) == null);
+
+    const set = try parser_mod.parse(
+        alloc,
+        "(check (set-resistor-output (pin \"SET\") (return-net \"GND\") " ++
+            "(output-pin \"OUT\") (current-ua 100) (tolerance-pct -1)))",
+    );
+    defer parser_mod.freeNodes(alloc, set);
+    try std.testing.expect(parseCheck(alloc, set[0]) == null);
+}
+
 // spec: eval/check_grammar - every check_docs row's syntax leads with the kebab-case keyword parseCheck dispatches on
 test "check_docs syntax keyword matches the tag dispatch" {
     const Tag = std.meta.Tag(Check);
-    inline for (@typeInfo(Tag).@"enum".fields) |f| {
-        const doc = check_docs[@intFromEnum(@field(Tag, f.name))];
-        const kw = comptime kebab(f.name);
+    inline for (@typeInfo(Tag).@"enum".field_names) |f| {
+        const doc = check_docs[@backingInt(@field(Tag, f))];
+        const kw = comptime kebab(f);
         // The template opens with "(<keyword>" and the keyword is delimited by
         // a space or the closing paren — proving the documented form uses the
         // exact string parseCheck keys on.
@@ -356,6 +500,7 @@ test "parseCheck dispatches every documented check keyword to its variant" {
         .{ .src = "(check (pullup-range (pin \"P\") (net \"N\") " ++
             "(min-ohms 2000) (max-ohms 67000)))", .tag = .pullup_range },
         .{ .src = "(check (voltage-range (pin \"V\") (min 3.0) (max 5.4)))", .tag = .voltage_range },
+        .{ .src = "(check (voltage-not-above (pin \"EN\") (pin \"VIN\") (margin 0.3)))", .tag = .voltage_range },
         .{ .src = "(check (tied-to-net (pin \"P\") (net \"N\")))", .tag = .tied_to_net },
         .{ .src = "(check (not-connected (pin \"5\")))", .tag = .not_connected },
         .{ .src = "(check (pin-not-floating (pin \"BOOT0\")))", .tag = .pin_not_floating },
@@ -364,9 +509,16 @@ test "parseCheck dispatches every documented check keyword to its variant" {
             "(pins \"VDD_1\" \"VDD_2\") (min-uf 0.1) (count 2)))", .tag = .decoupling_per_pin },
         .{ .src = "(check (series-element (kind R) (pin \"P\") " ++
             "(target-net \"N\") (min 0) (max 10)))", .tag = .series_element },
+        .{ .src = "(check (feedback-divider (pin \"FB\") (return-net \"GND\") " ++
+            "(reference-v 0.6) (tolerance-pct 2)))", .tag = .feedback_divider },
+        .{ .src = "(check (set-resistor-output (pin \"SET\") (return-net \"GND\") " ++
+            "(output-pin \"OUT\") (current-ua 100) (tolerance-pct 2)))", .tag = .set_resistor_output },
     };
     // One case per documented variant — keeps the table and its coverage locked.
-    try std.testing.expectEqual(@typeInfo(std.meta.Tag(Check)).@"enum".fields.len, cases.len);
+    try std.testing.expectEqual(
+        check_docs.len,
+        cases.len,
+    );
     for (cases) |c| {
         const nodes = try parser_mod.parse(alloc, c.src);
         const chk = parseCheck(alloc, nodes[0]) orelse return error.NotRecognized;

@@ -11,14 +11,15 @@ const Node = ast.Node;
 const export_kicad = @import("../export_kicad.zig");
 const footprint_mod = @import("../export_kicad_footprint.zig");
 const geometry = @import("../placement/geometry.zig");
+const board_layers = @import("../board_layers.zig");
 const optimizer = @import("../placement/optimizer.zig");
 const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
 const numeric = @import("../numeric.zig");
+const lib_limits = @import("../lib_limits.zig");
 // ── Constants ─────────────────────────────────────────────────────
 const http_not_found: u16 = 404;
 const http_internal_error: u16 = 500;
-const max_footprint_bytes: usize = 256 * 1024;
 const sexp_ext_len: usize = ".sexp".len;
 const far_away: f64 = 999;
 const svg_bbox_pad: f64 = 0.5;
@@ -37,7 +38,26 @@ const Layer = enum { silk, fab };
 
 // `pts` carries a custom pad's real copper outline (footprint coords); when
 // present it's drawn as a filled polygon instead of the pos/size rectangle.
-const Pad = struct { id: []const u8, x: f64, y: f64, w: f64, h: f64, shape: []const u8, pts: ?[]const Point = null, drill: f64 = 0, npth: bool = false };
+const Pad = struct {
+    id: []const u8,
+    pad_type: []const u8 = "smd",
+    x: f64,
+    y: f64,
+    /// The pad's own rotation about its centre (deg), from `(pos X Y ROT)` —
+    /// the same token `placement/geometry.parsePad` reads into `Pad.rot` and
+    /// `export_kicad_footprint` emits as KiCad's `(at … ANGLE)`. A `pts`
+    /// polygon already carries its rotation, so this stays 0 for those.
+    rot: f64 = 0,
+    w: f64,
+    h: f64,
+    shape: []const u8,
+    pts: ?[]const Point = null,
+    drill_x: f64 = 0,
+    drill_y: f64 = 0,
+    roundrect_ratio: ?f64 = null,
+    mask_margin: ?f64 = null,
+    no_paste: bool = false,
+};
 const Point = struct { x: f64, y: f64 };
 const Seg = struct { x1: f64, y1: f64, x2: f64, y2: f64, layer: Layer };
 const Circ = struct { cx: f64, cy: f64, r: f64, layer: Layer };
@@ -81,7 +101,7 @@ pub fn footprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
         return;
     };
     defer ctx.allocator.free(fp_path);
-    const content = infra_fs.cwd().readFileAlloc(ctx.allocator, fp_path, max_footprint_bytes) catch {
+    const content = infra_fs.cwd().readFileAlloc(ctx.allocator, fp_path, lib_limits.max_footprint_bytes) catch {
         res.status = http_not_found;
         res.body = "Footprint not found";
         return;
@@ -110,10 +130,10 @@ pub fn footprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
         return;
     }
 
-    var buf: std.ArrayList(u8) = .empty;
-    try emitFootprintJson(buf.writer(ctx.allocator), shapes);
+    var buf: std.Io.Writer.Allocating = .init(ctx.allocator);
+    try emitFootprintJson(&buf.writer, shapes, std.hash.Wyhash.hash(0, content));
 
-    res.body = buf.toOwnedSlice(ctx.allocator) catch "";
+    res.body = buf.toOwnedSlice() catch "";
     res.content_type = .JSON;
 }
 
@@ -145,13 +165,17 @@ fn parsePad(allocator: std.mem.Allocator, child: Node) ?Pad {
     };
     // Pad type keyword (cl[2]): "smd" (default), "thru", or "npth" (non-plated).
     const ptype: []const u8 = cl[2].asAtom() orelse "smd";
-    const npth = std.mem.eql(u8, ptype, "npth");
     const shape: []const u8 = cl[3].asAtom() orelse "rect";
     var px: f64 = 0;
     var py: f64 = 0;
+    var prot: f64 = 0;
     var pw: f64 = 0;
     var ph: f64 = 0;
-    var drill: f64 = 0;
+    var drill_x: f64 = 0;
+    var drill_y: f64 = 0;
+    var roundrect_ratio: ?f64 = null;
+    var mask_margin: ?f64 = null;
+    var no_paste = false;
     var pts: ?[]const Point = null;
     for (cl[4..]) |sub| {
         if (sub.isForm("pos")) {
@@ -159,6 +183,7 @@ fn parsePad(allocator: std.mem.Allocator, child: Node) ?Pad {
             if (sl.len >= 3) {
                 px = sl[1].asNumber() orelse 0;
                 py = sl[2].asNumber() orelse 0;
+                if (sl.len >= 4) prot = sl[3].asNumber() orelse 0;
             }
         }
         if (sub.isForm("size")) {
@@ -169,15 +194,50 @@ fn parsePad(allocator: std.mem.Allocator, child: Node) ?Pad {
             }
         }
         if (sub.isForm("drill")) {
-            // `(drill D)` scalar or `(drill oval X Y)` — take the largest axis.
-            const dl = sub.asList().?;
-            for (dl[1..]) |dn| {
-                if (dn.asNumber()) |d| drill = @max(drill, d);
-            }
+            readDrill(sub, &drill_x, &drill_y);
+        }
+        if (sub.isForm("roundrect_rratio")) {
+            const rl = sub.asList().?;
+            if (rl.len >= 2) roundrect_ratio = rl[1].asNumber();
+        }
+        if (sub.isForm("mask-margin")) {
+            const ml = sub.asList().?;
+            if (ml.len >= 2) mask_margin = ml[1].asNumber();
+        }
+        if (sub.asAtom()) |a| {
+            if (std.mem.eql(u8, a, "no-paste")) no_paste = true;
         }
         if (sub.isForm("poly")) pts = readPolyPts(allocator, sub) catch null;
     }
-    return .{ .id = id, .x = px, .y = py, .w = pw, .h = ph, .shape = shape, .pts = pts, .drill = drill, .npth = npth };
+    return .{
+        .id = id,
+        .pad_type = ptype,
+        .x = px,
+        .y = py,
+        .rot = prot,
+        .w = pw,
+        .h = ph,
+        .shape = shape,
+        .pts = pts,
+        .drill_x = drill_x,
+        .drill_y = drill_y,
+        .roundrect_ratio = roundrect_ratio,
+        .mask_margin = mask_margin,
+        .no_paste = no_paste,
+    };
+}
+
+fn readDrill(node: Node, drill_x: *f64, drill_y: *f64) void {
+    const items = node.asList() orelse return;
+    if (items.len < 2) return;
+    if (items[1].asAtom()) |kind| {
+        if (!std.mem.eql(u8, kind, "oval") or items.len < 4) return;
+        drill_x.* = items[2].asNumber() orelse 0;
+        drill_y.* = items[3].asNumber() orelse drill_x.*;
+        return;
+    }
+    drill_x.* = items[1].asNumber() orelse 0;
+    drill_y.* = drill_x.*;
 }
 
 /// Parse the children of a `(silkscreen …)` or `(fab …)` block: `(line …)`,
@@ -315,7 +375,7 @@ fn grow(b: *BBox, x: f64, y: f64) void {
 /// The renderer draws courtyard (dashed) behind fab + silkscreen, with pads
 /// (polygon/circle/oval/rect + id label) on top — see
 /// `/static/footprint_svg.js`.
-fn emitFootprintJson(w: anytype, shapes: Shapes) HandlerError!void {
+fn emitFootprintJson(w: anytype, shapes: Shapes, revision: ?u64) HandlerError!void {
     const bounds = computeBBox(shapes);
     var viewport = bounds;
     viewport.min_x -= svg_bbox_pad;
@@ -332,22 +392,27 @@ fn emitFootprintJson(w: anytype, shapes: Shapes) HandlerError!void {
     try w.print(",\"editor\":{{\"grid\":{d:.3},\"margin\":{d:.3}}}", .{
         optimizer.grid_mm, geometry.bbox_margin_mm,
     });
+    if (revision) |rev| try w.print(",\"revision\":\"{x}\"", .{rev});
 
     try w.writeAll(",\"pads\":[");
     for (shapes.pads.items, 0..) |p, i| {
         if (i != 0) try w.writeAll(",");
-        try w.writeAll("{\"id\":");
+        try w.print("{{\"index\":{d},\"id\":", .{i});
         try writeJsonStr(w, p.id);
+        try w.writeAll(",\"type\":");
+        try writeJsonStr(w, p.pad_type);
+        if (std.mem.eql(u8, p.pad_type, "npth")) try w.writeAll(",\"npth\":true");
         try w.print(",\"x\":{d:.3},\"y\":{d:.3},\"w\":{d:.3},\"h\":{d:.3},\"shape\":", .{ p.x, p.y, p.w, p.h });
         try writeJsonStr(w, p.shape);
+        if (p.rot != 0) try w.print(",\"rot\":{d:.4}", .{p.rot});
         if (p.pts) |pts| {
             try w.writeAll(",\"poly\":");
             try writePtsJson(w, pts);
         }
-        if (p.drill > 0) {
-            try w.print(",\"drill\":{d:.3}", .{p.drill});
-            if (p.npth) try w.writeAll(",\"npth\":true");
-        }
+        if (p.drill_x > 0) try w.print(",\"drill\":{d:.3},\"drillX\":{d:.3},\"drillY\":{d:.3}", .{ @max(p.drill_x, p.drill_y), p.drill_x, p.drill_y });
+        if (p.roundrect_ratio) |ratio| try w.print(",\"roundrectRatio\":{d:.4}", .{ratio});
+        if (p.mask_margin) |margin| try w.print(",\"maskMargin\":{d:.4}", .{margin});
+        if (p.no_paste) try w.writeAll(",\"noPaste\":true");
         try w.writeAll("}");
     }
     try w.writeAll("]");
@@ -513,9 +578,9 @@ pub fn boardFootprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response
     // the front-authored library reads 1:1 — without this every Y-asymmetric
     // bottom part looks "re-pinned" even when the geometry matches exactly.
     if (found.back) try mirrorShapesY(req.arena, &shapes);
-    var buf: std.ArrayList(u8) = .empty;
-    try emitFootprintJson(buf.writer(req.arena), shapes);
-    res.body = buf.items;
+    var buf: std.Io.Writer.Allocating = .init(req.arena);
+    try emitFootprintJson(&buf.writer, shapes, null);
+    res.body = buf.written();
     res.content_type = .JSON;
 }
 
@@ -542,7 +607,7 @@ fn findBoardFootprint(nodes: []const Node, want: []const u8) ?BoardFpMatch {
                 if (std.mem.eql(u8, u, want)) is_match = true;
             } else if (std.mem.eql(u8, head, "layer")) {
                 const lname = sl[1].asString() orelse (sl[1].asAtom() orelse continue);
-                back = std.mem.eql(u8, lname, "B.Cu");
+                back = std.mem.eql(u8, lname, board_layers.b_cu);
             }
         }
         if (is_match) return .{ .children = cl[2..], .back = back };
@@ -693,7 +758,7 @@ test "footprint preview JSON separates geometry bounds from viewport padding" {
 
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
-    try emitFootprintJson(&aw.writer, shapes);
+    try emitFootprintJson(&aw.writer, shapes, null);
 
     const json = aw.written();
     const viewport_json = "\"bbox\":" ++
@@ -703,4 +768,38 @@ test "footprint preview JSON separates geometry bounds from viewport padding" {
     try std.testing.expect(std.mem.indexOf(u8, json, viewport_json) != null);
     try std.testing.expect(std.mem.indexOf(u8, json, bounds_json) != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"editor\":{\"grid\":0.100,\"margin\":0.150}") != null);
+}
+
+// spec: Web Server - Footprint preview carries a pad's own (pos X Y ROT) rotation so the library SVG draws it turned
+test "footprint preview JSON carries a pad's own rotation" {
+    // Third reader of `(pos X Y ROT)` after `placement/geometry.parsePad` and
+    // `export_kicad_footprint`. It ignored the token, so the library preview
+    // drew a turned pad square-on.
+    const src =
+        \\(footprint "T"
+        \\  (pad 1 smd rect (pos 1.0 2.0 45) (size 1.2 0.6))
+        \\  (pad 2 smd rect (pos -1.0 2.0) (size 1.2 0.6)))
+    ;
+    const nodes = try parser_mod.parse(std.testing.allocator, src);
+    defer parser_mod.freeNodes(std.testing.allocator, nodes);
+    const children = nodes[0].asList().?;
+
+    // `collectShapes` renders onto the request arena in production (a numeric
+    // pad id is formatted into it), so give it one here too.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var shapes: Shapes = .{};
+    try collectShapes(arena.allocator(), children[2..], &shapes);
+    try std.testing.expectEqual(@as(usize, 2), shapes.pads.items.len);
+    try std.testing.expectApproxEqAbs(@as(f64, 45), shapes.pads.items[0].rot, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 0), shapes.pads.items[1].rot, 1e-9);
+
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    try emitFootprintJson(&aw.writer, shapes, null);
+    const json = aw.written();
+    // The angle rides the JSON in netlisp's own frame (SVG rotate() shares it);
+    // an unrotated pad still emits no `rot` key at all.
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"rot\":45.0000") != null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, json, "\"rot\":"));
 }

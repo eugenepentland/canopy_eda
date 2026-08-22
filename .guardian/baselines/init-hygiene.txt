@@ -1,4 +1,4 @@
-# guardian-snapshot v1
-src/placement/router.zig:459: init-shaped fn 'init' contains 'for' (constructors should be straight-line)
-src/raster.zig:72: init-shaped fn 'init' contains 'while' (constructors should be straight-line)
-src/serve/rate_limiter.zig:29: init-shaped fn 'init' contains 'if' (constructors should be straight-line)
+# guardian-snapshot v3
+init-hygiene|src/placement/router.zig|init-shaped fn 'init' contains 'for' (constructors should be straight-line)
+init-hygiene|src/raster.zig|init-shaped fn 'init' contains 'while' (constructors should be straight-line)
+init-hygiene|src/serve/rate_limiter.zig|init-shaped fn 'init' contains 'if' (constructors should be straight-line)

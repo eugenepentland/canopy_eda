@@ -10,6 +10,8 @@
 //!   - `src/render_block_types.zig`  section-name classifier keywords
 //!   - `src/eval/check_grammar.zig`  requirement-check grammar (`check_docs`,
 //!                                   the same table `parseCheck` dispatches on)
+//!   - `src/eval/thermal.zig`        the `(thermal …)` / `(power …)` grammar
+//!                                   (`thermal_field_docs`, `power_form_doc`)
 //!
 //! Three enforcement layers keep it honest: `requireAllDocumented` in
 //! forms.zig turns an undocumented form into a compile error; per-table
@@ -19,21 +21,24 @@
 //! committed file fails the build. Regenerate with `zig build docs`.
 
 const std = @import("std");
+const infra_fs = @import("infra/fs.zig");
 const forms = @import("eval/forms.zig");
 const fmt_mod = @import("eval/fmt.zig");
 const tokenizer_mod = @import("sexpr/tokenizer.zig");
 const block_types = @import("render_block_types.zig");
 const check_grammar = @import("eval/check_grammar.zig");
+const thermal = @import("eval/thermal.zig");
 const numeric = @import("numeric.zig");
+const preflight = @import("preflight.zig");
 
 /// Render the full Markdown reference. The output is deterministic — the
 /// build's docs-check step and the drift test below compare it to the
 /// checked-in `docs/language-forms.md`. Caller owns the returned slice.
 pub fn renderLanguageReference(allocator: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-    try renderTo(buf.writer(allocator));
-    return buf.toOwnedSlice(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    defer buf.deinit();
+    renderTo(&buf.writer) catch return error.OutOfMemory;
+    return buf.toOwnedSlice();
 }
 
 fn renderTo(writer: anytype) !void {
@@ -59,7 +64,7 @@ fn renderTo(writer: anytype) !void {
         \\
     );
     for (forms.special_form_docs, 0..) |doc, i| {
-        const variant: forms.SpecialForm = @enumFromInt(i);
+        const variant: forms.SpecialForm = @fromBackingInt(@intCast(i));
         try writer.writeAll("| `");
         try writeCell(writer, doc.syntax);
         try writer.writeAll("` | ");
@@ -102,6 +107,7 @@ fn renderTo(writer: anytype) !void {
         try writer.print("| `~{c}` | {s} | {s} |\n", .{
             d.spec,
             switch (d.arg) {
+                .value => "value",
                 .number => "number",
                 .string => "string",
                 .none => "—",
@@ -166,7 +172,13 @@ fn renderTo(writer: anytype) !void {
 
     try renderClassifierKeywords(writer);
 
+    try renderReferenceAppendices(writer);
+}
+
+fn renderReferenceAppendices(writer: anytype) !void {
+    try renderThermalForms(writer);
     try renderRequirementChecks(writer);
+    try renderDatasheetReview(writer);
 }
 
 /// Render the "Section-name classifier keywords" section from the
@@ -203,6 +215,42 @@ fn renderClassifierKeywords(writer: anytype) !void {
     try writer.writeAll(".\n");
 }
 
+/// Render the "Thermal declarations" section from the tables `eval/thermal.zig`
+/// parses with: the library `(thermal …)` sub-forms and the instance-scope
+/// `(power …)` form.
+fn renderThermalForms(writer: anytype) !void {
+    try writer.writeAll(
+        \\
+        \\## Thermal declarations
+        \\
+        \\What a part can take, and what it burns — the two inputs to the
+        \\screening thermal analysis (`Tj = Ta + P·θJA`, lumped, no layout
+        \\coupling). A library part declares its envelope with `(thermal …)`
+        \\inside its `(component …)` / `(component-family …)` body; an
+        \\instance declares its dissipation with `(power …)` in its own body.
+        \\Both are optional: a part with no `(thermal (theta-ja …))` is
+        \\screened against a package estimate, and a part with no `(power …)`
+        \\has its dissipation derived from annotated pin currents or, for a
+        \\regulator module, from its back-computed conversion loss.
+        \\
+        \\| Form | Summary |
+        \\| --- | --- |
+        \\
+    );
+    for (thermal.thermal_field_docs) |doc| {
+        try writer.writeAll("| `");
+        try writeCell(writer, doc.syntax);
+        try writer.writeAll("` | ");
+        try writeCell(writer, doc.summary);
+        try writer.writeAll(" |\n");
+    }
+    try writer.writeAll("| `");
+    try writeCell(writer, thermal.power_form_doc.syntax);
+    try writer.writeAll("` | ");
+    try writeCell(writer, thermal.power_form_doc.summary);
+    try writer.writeAll(" |\n");
+}
+
 /// Render the "Requirement checks" section from `check_grammar.check_docs` —
 /// the same table `parseCheck` dispatches on, so the documented grammar can
 /// never drift from the checker.
@@ -234,6 +282,41 @@ fn renderRequirementChecks(writer: anytype) !void {
         try writeCell(writer, d.summary);
         try writer.writeAll(" |\n");
     }
+}
+
+fn renderDatasheetReview(writer: anytype) !void {
+    try writer.writeAll(
+        \\
+        \\## Datasheet review preflight
+        \\
+        \\Active-component library records may bind their requirement review
+        \\to an exact PDF using `(datasheet-review …)`. `read_datasheet`
+        \\returns the current PDF `sha256`; replacing that file automatically
+        \\makes the review stale. A complete record has this shape:
+        \\
+        \\```lisp
+        \\(datasheet-review
+        \\  (datasheet "part.pdf")
+        \\  (sha256 "<64 lowercase hex characters>")
+        \\  (status complete)
+        \\  (reviewed-by "agent-or-human")
+        \\  (date "YYYY-MM-DD")
+        \\  (category supply)
+        \\  (category-na sequencing "reason this topic is not applicable"))
+        \\```
+        \\
+        \\Every component requirement must cite that PDF with a 1-based page
+        \\and a short source quote. `netlisp check --profile preflight` and MCP
+        \\`run_checks {profile:"preflight"}` gate incomplete reviews and
+        \\unverified manual requirements. Authoring mode reports those legacy
+        \\gaps as warnings. Required review categories are:
+    );
+    try writer.writeAll(" ");
+    for (preflight.required_review_categories, 0..) |category, index| {
+        if (index > 0) try writer.writeAll(", ");
+        try writer.print("`{s}`", .{category});
+    }
+    try writer.writeAll(". Each must use `(category KEY)` or a `(category-na KEY \"rationale\")`.\n");
 }
 
 /// Slice one `## `-headed section out of a rendered reference (heading
@@ -323,9 +406,7 @@ test "language-forms.md is in sync with the dispatch tables" {
     // simply isn't there to compare against) — the build's
     // `gen-language-docs --check` step still enforces presence + sync
     // with a deterministic cwd.
-    var file = std.fs.cwd().openFile("docs/language-forms.md", .{}) catch return;
-    defer file.close();
-    const committed = try file.readToEndAlloc(alloc, 1024 * 1024);
+    const committed = infra_fs.cwd().readFileAlloc(alloc, "docs/language-forms.md", 1024 * 1024) catch return;
     defer alloc.free(committed);
 
     const generated = try renderLanguageReference(alloc);

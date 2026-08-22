@@ -1,11 +1,11 @@
-# guardian-snapshot v1
-switch on prongs (@"error",info,warning) appears in 2 files
-switch on prongs (atom,float,int,list,string,unit_val) appears in 2 files
-switch on prongs (bottom,left,right,top) appears in 2 files
-switch on prongs (datasheet,footprint,manufacturer,mpn,requirements_verified,value) appears in 2 files
-switch on prongs (fail,na,pass,verified) appears in 4 files
-switch on prongs (fail,pass,warn) appears in 2 files
-switch on prongs (float,integer) appears in 3 files
-switch on prongs (left,right) appears in 3 files
-switch on prongs (net,pin) appears in 7 files
-switch on prongs (no_consumers,no_source,ok,over,tight) appears in 3 files
+# guardian-snapshot v3
+repeated-switch-on-enum|@"error",info,warning
+repeated-switch-on-enum|atom,float,int,list,string,unit_val
+repeated-switch-on-enum|bottom,left,right,top
+repeated-switch-on-enum|datasheet,footprint,manufacturer,mpn,requirements_verified,value
+repeated-switch-on-enum|fail,na,pass,verified
+repeated-switch-on-enum|fail,pass,warn
+repeated-switch-on-enum|float,integer
+repeated-switch-on-enum|left,right
+repeated-switch-on-enum|net,pin
+repeated-switch-on-enum|no_consumers,no_source,ok,over,tight

@@ -8,6 +8,8 @@
 #      tier expressed as two build steps, so it needs no prebuilt
 #      guardian-check binary path — just the repo's own `zig build`.
 # The `&&` gates step 2 on a green step 1: a red build never ratchets mutation.
+# Both commands are internal validation and therefore stay self-hosted Debug;
+# this nightly must never request ReleaseSafe/LLVM. Deployment owns that mode.
 #
 # Install / enable (user-level, matching netlisp.service — this repo's units run
 # under `systemctl --user`, see the deploy hook in CLAUDE.md):
@@ -30,7 +32,7 @@ Type=oneshot
 WorkingDirectory=/home/epentland/ai/canopy/eda
 # Login shell (-l) so the user's PATH (and thus `zig`) is available, mirroring
 # how netlisp.service pins absolute paths rather than trusting a bare env.
-ExecStart=/bin/sh -lc 'cd /home/epentland/ai/canopy/eda && zig build && zig build mutate-full'
+ExecStart=/bin/sh -lc 'cd /home/epentland/ai/canopy/eda && /home/epentland/zig-toolchains/0.17.0-dev.1683+5ceec001b/zig build --seed=1 && /home/epentland/zig-toolchains/0.17.0-dev.1683+5ceec001b/zig build --seed=1 mutate-full'
 # A whole-tree mutation run is sequential and long; the systemd default
 # (~90s) would kill it. Cap generously instead of disabling the guard.
 TimeoutStartSec=6h
