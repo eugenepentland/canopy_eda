@@ -916,7 +916,7 @@ test "viewer JS wires freeform outline segment editing" {
     // on the first mutation, so opening the tool alone is not a layout edit.
     try std.testing.expect(std.mem.indexOf(u8, js, "function outlineEditable()") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "if(!PCB.outline){var a=outlineEditable()") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "outline edit: drag a corner or edge") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "outline sketch: select geometry, type exact dimensions") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "prop-outline-edit") != null);
     // Edge hit-test + whole-segment slide (the headline capability).
     try std.testing.expect(std.mem.indexOf(u8, js, "function edgeAt(") != null);
