@@ -340,11 +340,17 @@ fn localOptions(
     // them so supply drops can prove a live landing and signal routes cannot
     // cross an authored exclusion. Tracks/vias remain isolated.
     options.existing_zones = base.existing_zones;
-    options.guides = .{
-        .tracks = try selectedGuideTracks(alloc, base.guides.tracks, selected),
-        .vias = try selectedGuideVias(alloc, base.guides.vias, selected),
-        .reserved = try selectedReserved(alloc, base.guides.reserved, selected),
-    };
+    // Narrow ONLY the three net-indexed guide lists to the selected nets.
+    // Everything else `Guides` carries — the route-space director, the coupled
+    // pair's channel tier, and the pinch log that tier writes into — is a
+    // run-level choice the parent made for the whole transaction, and a
+    // sub-block must route on the same terms as the board containing it.
+    // Assigning a fresh struct literal here reset all three to their defaults
+    // instead, so a parent configured for field-space routing silently fell
+    // back to the lattice for every sub-block it owns.
+    options.guides.tracks = try selectedGuideTracks(alloc, base.guides.tracks, selected);
+    options.guides.vias = try selectedGuideVias(alloc, base.guides.vias, selected);
+    options.guides.reserved = try selectedReserved(alloc, base.guides.reserved, selected);
     // A child router must not leak its local net-by-net timeline into the board
     // stream. `routeAllClassified` emits one parent-indexed cumulative frame
     // after the child finishes instead.
@@ -837,6 +843,57 @@ fn bondViaObstacles(
     return out.items;
 }
 
+/// Net id under which a rail's ALREADY-FROZEN bond copper is shown to the next
+/// bond of that same rail.
+///
+/// `router.stampExistingCopper` reads an unnetted item as foreign metal, so the
+/// next bond keeps DRC clearance from it — and foreign metal is never a
+/// terminal, so the leg still cannot stop early on a previous bond and turn a
+/// neighboring land into a branch. Avoidance without attachment is exactly what
+/// this phase wants: each authored pair keeps closing cap-to-pin on its own,
+/// but it no longer draws that closure blind, straight through copper this same
+/// phase already froze one bond earlier.
+const bond_obstacle_net: i32 = -1;
+
+/// `foreign` plus this run's own copper on `net`, re-labelled as unnetted
+/// obstacles (see `bond_obstacle_net`). Saved board copper on the rail stays
+/// hidden: a fresh isolated candidate supersedes a saved module snapshot on the
+/// same net, so that copper is not what the assembled board will carry.
+fn railBondObstacles(
+    alloc: std.mem.Allocator,
+    foreign: []const route_policy.ExistingTrack,
+    items: []const SeedTrack,
+    net: usize,
+) std.mem.Allocator.Error![]const route_policy.ExistingTrack {
+    var out: std.ArrayList(route_policy.ExistingTrack) = .empty;
+    try out.appendSlice(alloc, foreign);
+    const want: i32 = @intCast(net);
+    for (items) |item| if (item.copper.net == want) {
+        var masked = item.copper;
+        masked.net = bond_obstacle_net;
+        try out.append(alloc, masked);
+    };
+    return out.items;
+}
+
+/// `railBondObstacles` for the barrels of the same rail.
+fn railBondViaObstacles(
+    alloc: std.mem.Allocator,
+    foreign: []const route_policy.ExistingVia,
+    items: []const SeedVia,
+    net: usize,
+) std.mem.Allocator.Error![]const route_policy.ExistingVia {
+    var out: std.ArrayList(route_policy.ExistingVia) = .empty;
+    try out.appendSlice(alloc, foreign);
+    const want: i32 = @intCast(net);
+    for (items) |item| if (item.copper.net == want) {
+        var masked = item.copper;
+        masked.net = bond_obstacle_net;
+        try out.append(alloc, masked);
+    };
+    return out.items;
+}
+
 const SubcircuitProgress = struct {
     alloc: std.mem.Allocator,
     base: route_policy.Options,
@@ -1006,6 +1063,55 @@ fn bondAccepted(
     return net < rejected.len and !rejected[net];
 }
 
+/// One bond's fresh copper, already through the ordered seed gate.
+const BondCopper = struct { tracks: []const SeedTrack, vias: []const SeedVia };
+
+/// Route one cap-to-pin pair and harvest only the copper it actually added, or
+/// null when the leg did not close or the board-level gate refused it. Both
+/// answers are "this obstacle view produced nothing usable", which is what lets
+/// the caller retry a walled-in bond against a narrower view.
+fn attemptBond(
+    ctx: SupplyBondContext,
+    pair: optimizer.Placement,
+    net: usize,
+    options: route_policy.Options,
+) std.mem.Allocator.Error!?BondCopper {
+    const alloc = ctx.alloc;
+    const routed = try router.routeWithOptions(alloc, pair, ctx.params, options);
+    if (failed(routed, pair, net)) return null;
+    const want: i32 = @intCast(net);
+    var tracks: std.ArrayList(SeedTrack) = .empty;
+    var vias: std.ArrayList(SeedVia) = .empty;
+    for (routed.tracks) |track| if (track.net == want) {
+        if (sameSeedTrack(ctx.tracks.items, track)) continue;
+        try appendTrack(alloc, &tracks, track);
+    };
+    for (routed.vias) |via| if (via.net == want) {
+        if (sameSeedVia(ctx.vias.items, via)) continue;
+        try appendVia(alloc, &vias, via);
+    };
+    if (tracks.items.len == 0 and vias.items.len == 0) return null;
+    if (!try bondAccepted(ctx, net, tracks.items, vias.items)) return null;
+    return .{ .tracks = tracks.items, .vias = vias.items };
+}
+
+/// Newly emitted vias an authored cap-to-pin bypass bond may spend.
+///
+/// A decoupling loop's usefulness is set by the area of the current loop it
+/// encloses — cap land, trace, IC supply land, return — and a barrel in that
+/// path adds its own inductance AND drives the loop down through the stackup
+/// and back. So the bond is routed as one continuous run on the cap's own
+/// surface layer: that is why `allowed_layers`/`preferred_layers` are pinned to
+/// `pts[bond.cap].layer` and why this budget is ZERO rather than merely small.
+/// A layer change here is not an expensive path, it is the wrong circuit.
+///
+/// It is named rather than written as a literal `0` because it is the single
+/// seam a later detour-triggered relaxation must widen. Today a bond that
+/// cannot close on the surface simply does not route (`failed` skips it and the
+/// rail waits for the global phase); trading loop area for a closed bond is a
+/// decision that belongs at this constant, with this rationale in view.
+const bypass_bond_max_vias: u16 = 0;
+
 /// Route explicit local bypass bonds cheaply. A retained pour is a carrier,
 /// not a replacement for the authored cap-to-pin surface path: keep that bond
 /// and let `carrierDrops` add only the vertical connection still needed. A
@@ -1053,33 +1159,55 @@ fn appendUncarriedSupplyBonds(
             const surface_layer = @as(u64, 1) << @intCast(pts[bond.cap].layer);
             bond_policies[ni].allowed_layers = surface_layer;
             bond_policies[ni].preferred_layers = surface_layer;
-            bond_policies[ni].max_vias = 0;
+            bond_policies[ni].max_vias = bypass_bond_max_vias;
             bond_options.net = bond_policies;
-            // Foreign candidates are real obstacles. Earlier copper on this
-            // same rail is deliberately hidden: each authored bypass pair must
-            // close cap-to-pin on its own instead of terminating early on a
+            // Foreign candidates are real obstacles. Copper this phase already
+            // froze on the SAME rail is neither hidden nor joinable: it is
+            // presented as unnetted metal (`bond_obstacle_net`), so the leg
+            // keeps clearance from it while each authored bypass pair still has
+            // to close cap-to-pin on its own instead of terminating early on a
             // previous bond and turning a neighboring QFN land into a branch.
-            bond_options.existing_tracks = try bondTrackObstacles(alloc, ctx.base.existing_tracks, ctx.tracks.items, ni);
-            bond_options.existing_vias = try bondViaObstacles(alloc, ctx.base.existing_vias, ctx.vias.items, ni);
-            const routed = try router.routeWithOptions(alloc, pair, ctx.params, bond_options);
-            if (failed(routed, pair, ni)) continue;
-            var bond_tracks: std.ArrayList(SeedTrack) = .empty;
-            var bond_vias: std.ArrayList(SeedVia) = .empty;
-            for (routed.tracks) |track| if (track.net == @as(i32, @intCast(ni))) {
-                if (sameSeedTrack(ctx.tracks.items, track)) continue;
-                try appendTrack(alloc, &bond_tracks, track);
-            };
-            for (routed.vias) |via| if (via.net == @as(i32, @intCast(ni))) {
-                if (sameSeedVia(ctx.vias.items, via)) continue;
-                try appendVia(alloc, &bond_vias, via);
-            };
-            if (bond_tracks.items.len == 0 and bond_vias.items.len == 0) continue;
-            if (!try bondAccepted(ctx, ni, bond_tracks.items, bond_vias.items)) continue;
-            const drew = bond_tracks.items.len > 0 or bond_vias.items.len > 0;
-            try ctx.tracks.appendSlice(alloc, bond_tracks.items);
-            try ctx.vias.appendSlice(alloc, bond_vias.items);
-            if (drew) ctx.routed_nets[ni] = true;
+            const foreign_tracks = try bondTrackObstacles(alloc, ctx.base.existing_tracks, ctx.tracks.items, ni);
+            const foreign_vias = try bondViaObstacles(alloc, ctx.base.existing_vias, ctx.vias.items, ni);
+            const rail_tracks = try railBondObstacles(alloc, foreign_tracks, ctx.tracks.items, ni);
+            const rail_vias = try railBondViaObstacles(alloc, foreign_vias, ctx.vias.items, ni);
+            bond_options.existing_tracks = rail_tracks;
+            bond_options.existing_vias = rail_vias;
+            var drawn = try attemptBond(ctx, pair, ni, bond_options);
+            // Avoidance is a preference, not a precondition. A bond that cannot
+            // close — or cannot pass the board gate — around its own rail's
+            // earlier copper is still authored intent, so it retries with that
+            // copper hidden exactly as this phase saw it before: same-rail
+            // overlap is electrically inert, a missing bypass bond is not. The
+            // retry exists only when there IS rail copper to hide, so the first
+            // bond of a rail still costs exactly one attempt.
+            if (drawn == null and
+                (rail_tracks.len > foreign_tracks.len or rail_vias.len > foreign_vias.len))
+            {
+                bond_options.existing_tracks = foreign_tracks;
+                bond_options.existing_vias = foreign_vias;
+                drawn = try attemptBond(ctx, pair, ni, bond_options);
+            }
+            const copper = drawn orelse continue;
+            try ctx.tracks.appendSlice(alloc, copper.tracks);
+            try ctx.vias.appendSlice(alloc, copper.vias);
+            ctx.routed_nets[ni] = true;
         }
+        // A GROUP-scoped fold belongs here, once every bond of this rail has
+        // routed: two legs that ended up running side by side down one channel
+        // are legally foldable into a shared trunk, and no per-bond router call
+        // can ever see that — its finish pass holds exactly one leg of this net,
+        // because every other leg is present only as the unnetted obstacle
+        // above. Making the group same-net for the fold and keeping it foreign
+        // for the search cannot be expressed through the routing entry points:
+        // one track list serves both. Only a POST-route seam separates them,
+        // which is why the fold's home is `route_cleanup` (mergeParallelBranches
+        // + mergeAdjacentPadEscapes over this net's accumulated bond copper,
+        // re-gated through `bondAccepted`). This module cannot reach it: the
+        // `serve-placement-internals` layering rule refuses a new src/serve ->
+        // src/placement import edge, and `router.zig` re-exports no entry that
+        // runs those passes over a caller's copper the way it does for
+        // `canonicalizeTraceJunctions`. Adding that one re-export unblocks it.
     }
 }
 
@@ -1735,6 +1863,104 @@ test "local signals preserve exact supply bond obstacles" {
     try testing.expectEqual(@as(i32, 2), options.existing_tracks[0].net);
     try testing.expectEqual(@as(usize, 1), options.existing_vias.len);
     try testing.expectEqual(@as(i32, 2), options.existing_vias[0].net);
+}
+
+// A sub-block routes on the same terms as the board that owns it: only the
+// net-indexed guide lists are scoped down, never the run-level directors. A
+// partial `Guides` literal in `localOptions` silently reset a field-space
+// parent to the lattice for every sub-block, with nothing at the call site to
+// say so.
+test "local options keep the parent's run-level guide directors" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    var pinch = route_policy.PinchLog{};
+    const guide_tracks = [_]route_policy.GuideTrack{
+        .{ .net = 0, .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.2 },
+        .{ .net = 1, .x1 = 0, .y1 = 1, .x2 = 1, .y2 = 1, .layer = 0, .width = 0.2 },
+    };
+    const parent = route_policy.Options{ .guides = .{
+        .tracks = &guide_tracks,
+        .route_space = .{ .field = .{ .scratch = alloc } },
+        .pair_channel = .mesh_behind_maze,
+        .pinch = &pinch,
+    } };
+    try testing.expect(parent.guides.route_space != .lattice);
+
+    var selected = [_]bool{ true, false };
+    const options = try localOptions(alloc, parent, null, &selected);
+    // The three net-indexed lists are the only fields this scoping owns.
+    try testing.expectEqual(@as(usize, 1), options.guides.tracks.len);
+    try testing.expectEqual(@as(i32, 0), options.guides.tracks[0].net);
+    // Everything else is the parent's run-level choice and rides through.
+    try testing.expect(options.guides.route_space == .field);
+    try testing.expect(options.guides.route_space.fieldAllocator() != null);
+    try testing.expectEqual(route_policy.PairChannel.mesh_behind_maze, options.guides.pair_channel);
+    try testing.expect(options.guides.pinch == &pinch);
+}
+
+fn expectNoNet(tracks: []const route_policy.ExistingTrack, omit: i32) !void {
+    for (tracks) |track| try testing.expect(track.net != omit);
+}
+
+// An earlier bond's copper reaches the next bond of the same rail as an
+// obstacle it must clear, never as a terminal it may stop on: the exactness the
+// per-bond isolation buys survives, the blind overlap does not.
+test "same-rail bond copper is shown to a later bond as unnetted metal" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    const board = [_]route_policy.ExistingTrack{
+        .{ .x1 = 0, .y1 = 5, .x2 = 1, .y2 = 5, .layer = 0, .width = 0.2, .net = 3 },
+        .{ .x1 = 0, .y1 = 6, .x2 = 1, .y2 = 6, .layer = 0, .width = 0.2, .net = 1 },
+    };
+    const seeds = [_]SeedTrack{
+        .{ .net = 1, .copper = .{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.2, .net = 1 } },
+        .{ .net = 2, .copper = .{ .x1 = 0, .y1 = 1, .x2 = 2, .y2 = 1, .layer = 0, .width = 0.2, .net = 2 } },
+    };
+    const foreign = try bondTrackObstacles(alloc, &board, &seeds, 1);
+    // Foreign candidates and foreign board copper stay exactly as authored;
+    // saved board copper on the rail itself stays hidden, because a fresh
+    // isolated candidate supersedes a saved module snapshot on that net.
+    try testing.expectEqual(@as(usize, 2), foreign.len);
+    try expectNoNet(foreign, 1);
+
+    const rail = try railBondObstacles(alloc, foreign, &seeds, 1);
+    try testing.expectEqual(foreign.len + 1, rail.len);
+    try testing.expectEqualSlices(route_policy.ExistingTrack, foreign, rail[0..foreign.len]);
+    const masked = rail[rail.len - 1];
+    // Same geometry, no net: an obstacle the next leg clears and cannot join.
+    try testing.expectEqual(bond_obstacle_net, masked.net);
+    try testing.expectEqual(seeds[0].copper.x2, masked.x2);
+    try testing.expectEqual(seeds[0].copper.y2, masked.y2);
+    try testing.expectEqual(seeds[0].copper.layer, masked.layer);
+
+    const vias = [_]SeedVia{
+        .{ .net = 1, .copper = .{ .x = 3, .y = 3, .dia = 0.6, .drill = 0.3, .net = 1 } },
+        .{ .net = 2, .copper = .{ .x = 4, .y = 4, .dia = 0.6, .drill = 0.3, .net = 2 } },
+    };
+    const foreign_vias = try bondViaObstacles(alloc, &.{}, &vias, 1);
+    const rail_vias = try railBondViaObstacles(alloc, foreign_vias, &vias, 1);
+    try testing.expectEqual(foreign_vias.len + 1, rail_vias.len);
+    try testing.expectEqual(bond_obstacle_net, rail_vias[rail_vias.len - 1].net);
+    try testing.expectEqual(@as(f64, 3), rail_vias[rail_vias.len - 1].x);
+
+    // A first bond has no rail copper to hide, so it never pays a second pass.
+    const first = try railBondObstacles(alloc, foreign, &.{}, 1);
+    try testing.expectEqual(foreign.len, first.len);
+}
+
+// The via budget an authored bypass bond may spend is an electrical statement
+// about loop area, not a routing convenience, so it is named where that
+// rationale can be read (`bypass_bond_max_vias`).
+test "an authored bypass bond spends no via on its surface path" {
+    try testing.expectEqual(@as(u16, 0), bypass_bond_max_vias);
+    const source = @embedFile("subcircuit_route.zig");
+    const start = std.mem.indexOf(u8, source, "fn appendUncarriedSupplyBonds(").?;
+    const end = std.mem.indexOfPos(u8, source, start, "fn polygonContains(").?;
+    const body = source[start..end];
+    try testing.expect(std.mem.indexOf(u8, body, "max_vias = bypass_bond_max_vias") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "max_vias = 0") == null);
 }
 
 fn expectSeedTracks(tracks: []const SeedTrack, net: usize, max_x: ?f64) !void {
