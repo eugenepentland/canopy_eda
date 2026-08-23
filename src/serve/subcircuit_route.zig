@@ -1144,7 +1144,7 @@ fn expectSeedTracks(tracks: []const SeedTrack, net: usize, max_x: ?f64) !void {
     }
 }
 
-// spec: Web Server - Carrier-backed ground, power, and input-rail terminals receive independent local drops except that an authored exact-target bypass bank keeps its bounded cap-to-pin surface bonds; without a declared plane or retained pour, authored passive-to-IC bonds and validated starred module copper complete bounded local supply trees while the board-spanning remainder waits for global routing
+// spec: Web Server - Carrier-backed ground terminals receive independent local drops and never a routed pad-to-pad surface web. Other carried power/input rails may keep authored exact-target bypass cap-to-pin surface bonds; without a declared plane or retained pour, authored passive-to-IC bonds and validated starred module copper complete bounded local supply trees while the board-spanning remainder waits for global routing
 test "supply nets drop to a plane and uncarried supply routes its local passive bond" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

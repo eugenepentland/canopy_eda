@@ -3427,12 +3427,14 @@ copper between them, so the decoupling loop the placer spent its objective
 tightening was then routed down to an inner layer and back up, and the board
 carried two barrels where one serves. Measured on straps-synth-lmx2595
 (2026-08-11): all six `V_3V3` bypass caps bound to `U1` by `(decouples …)` were
-joined only through In2. So the pass draws the LOCAL SURFACE CONNECTION FIRST —
-the pad pairs the placement's own decoupling model names, drawn with the
-ordinary short-hookup machinery through the same DRC-grade probe — and only then
-stitches, sharing one via across the copper it just drew. A bond the probe
-refuses is not drawn and its pads keep the two vias they had, so geometry
-decides and nothing here relaxes a rule.
+joined only through In2. So a non-ground carried rail draws the LOCAL SURFACE
+CONNECTION FIRST — the pad pairs the placement's own decoupling model names,
+drawn with the ordinary short-hookup machinery through the same DRC-grade probe
+— and only then stitches, sharing one via across the copper it just drew. A
+dedicated ground plane instead receives independent local drops and no routed
+pad-to-pad surface web, preserving the escape channel for each decoupling cap's
+signal-side path. A bond the probe refuses is not drawn and its pads keep the
+two vias they had, so geometry decides and nothing here relaxes a rule.
 
 Both halves of the share rule measure the SAME length — the pair's span, land
 centre to land centre. Charging the emitted polyline instead is how the pass came
@@ -3444,22 +3446,21 @@ The cluster's one barrel then stands ON the bypass cap's own land centre when th
 land admits it, which is where the loop-inductance literature puts it and which
 leaves no stub for the walk to charge at all.
 
-A package tie-off is a local package bond, not another required plane return. A
-plain `NC`, `N/C`, or numbered `NC` land deliberately assigned to ground joins
-the nearest real ground pad. An explicitly typed input/control strap joins the
-nearest real ground or supply pad carrying that same plane net. Both use
-surface copper on the same package face, with the real rail terminal offered
-the shared via first. Pins marked `DNC`, `DNU`, reserved, or RFU never enter
-this rule.
+A package tie-off is a local package bond only on an uncarried net. A plain
+`NC`, `N/C`, or numbered `NC` land deliberately assigned to ground may join the
+nearest real ground pad; an explicitly typed input/control strap may join the
+nearest real ground or supply pad on that net. A dedicated ground plane skips
+those bonds and drops each reachable land locally. Pins marked `DNC`, `DNU`,
+reserved, or RFU never enter this rule.
 
 - the implicit model plants a plane on ground and the dominant rail, a declared stackup on exactly its declared nets
 - a barrel's declared plane contacts count only interior planes of its own net, and fall back to the implicit model's single plane when no stackup is declared
 - grounded NC and input-strap pads bond to their package's real ground pad with the real return offered the shared via, while an ordinary unclassified pad does not
 - obstacle-order role lookup identifies package tie-off lands so the router's ground-via maximum cannot recreate their suppressed barrels
-- an HMC-style grounded tie-off ring surface-bonds to the exposed ground pad and adds no per-tie-off barrels while the thermal array and capacitor returns remain
+- a ground plane never surface-bonds an HMC-style grounded tie-off ring or capacitor returns; each reachable land drops locally while the exposed-pad thermal array remains
 - a pad already sitting in an outer-layer pour of its own net is stitched by the pour, not by a via
 - a decoupling loop's power leg bonds the cap's rail land to the hub pad it decouples
-- a loop's ground leg bonds on the ground net by the same rule, so no plane kind is a special case
+- a loop's ground leg may bond on an uncarried ground net, while a dedicated ground plane suppresses every such surface bond
 - a leg whose pads are not both terminals of the net being stitched is no bond, so a rail's pass never draws a ground leg
 - a lone leg whose pads are farther apart than via_share_max_mm is no bond, so no run is drawn that one via could not serve
 - a same-target capacitor bank extends a far exact-target leg through bounded local cap-to-cap hops while the path-length gate still places another via when needed
@@ -3469,7 +3470,7 @@ this rule.
 - a net with no drawn copper shares nothing, so every pad of it is stitched exactly as before
 - a bond carries the pair's span, so the share walk charges a run the same length the gate admitted it on
 - final fill-blind copper cleanup preserves exact-target bypass surface paths even when a rail plane makes their trace sections connectivity-redundant
-- a plane-carried net draws its bound cap's surface run to the hub pad before it stitches, and one via then serves both pads
+- a non-ground plane-carried net draws its bound cap's surface run to the hub pad before it stitches, and one via then serves both pads
 - a diagonal bound decoupling leg that the compact land hookup declines falls back to the continuous direct search instead of becoming two unrelated plane drops
 - the shared via of a DRAWN bond stands on the bypass cap's own land centre, so no copper is spent reaching the drop
 - a bond with every DRC-clean surface path blocked is not drawn, and its pads keep the independent stitch via each of them had
@@ -5545,7 +5546,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - When two local candidates collide, the earlier DRC-clean net remains frozen and only the later candidate is deferred to the global route
 - Accepted local plane drops are immutable same-net sources in the single global pass, so the global plane phase does not duplicate their barrels
 - Route responses report attempted, completed, and timed-out local sub-circuits, deferred supply nets, and accepted carrier drops while the compatibility fallback flag remains false
-- Carrier-backed ground, power, and input-rail terminals receive independent local drops except that an authored exact-target bypass bank keeps its bounded cap-to-pin surface bonds; without a declared plane or retained pour, authored passive-to-IC bonds and validated starred module copper complete bounded local supply trees while the board-spanning remainder waits for global routing
+- Carrier-backed ground terminals receive independent local drops and never a routed pad-to-pad surface web. Other carried power/input rails may keep authored exact-target bypass cap-to-pin surface bonds; without a declared plane or retained pour, authored passive-to-IC bonds and validated starred module copper complete bounded local supply trees while the board-spanning remainder waits for global routing
 - A hard route deadline gives all one-shot local sub-circuit attempts at most one quarter of the initially remaining time and preserves the original absolute deadline for the global phase
 - get_schematic_image is a registered read-only CLI tool
 - get_pcb_layout_image renders the heat-zone image when thermal is set, and a different picture for each cooling scenario

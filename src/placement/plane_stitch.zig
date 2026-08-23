@@ -17,14 +17,16 @@
 //! bypass caps bound to `U1` by `(decouples …)` were joined only through In2,
 //! 15 rail vias for 15 rail pads, 30 ground vias for 30 ground pads.
 //!
-//! So the pass now draws the LOCAL SURFACE CONNECTION FIRST:
+//! So the pass now draws the LOCAL SURFACE CONNECTION FIRST for non-ground
+//! carried rails. A dedicated GROUND plane is different: its terminals drop
+//! independently, without a routed surface web, so ground copper cannot take
+//! the escape channel needed by a bypass cap's signal-side path.
 //!
 //!   1. `bonds` reads the placement's own decoupling model (`optimizer.Loop` —
 //!      the cap↔hub-pad binding `(decouples "IC" PIN)` and the per-pin
 //!      shorthand produce, not a proximity guess) and names the pad pairs of
-//!      THIS net that belong together: the power leg on the rail, the ground
-//!      leg on ground. The same question asked twice, so no plane kind is a
-//!      special case.
+//!      THIS net that belong together. The router consumes these bonds for a
+//!      non-ground rail; it deliberately ignores them for a ground plane.
 //!      A pair further apart than `via_share_max_mm` is not a direct bond. In a
 //!      same-target capacitor bank, it may instead join a nearer already-bound
 //!      cap by a local hop; a lone far cap remains independent.
@@ -244,6 +246,21 @@ fn shortName(s: []const u8) []const u8 {
 /// realizing it (see `via_share_max_mm`).
 pub const Bond = struct { cap: usize, hub: usize, mm: f64 };
 
+/// Whether `pts` are terminals of a ground net already carried by a dedicated
+/// plane. The plane is the shortest common return; surface-bonding its pads
+/// would only build a top-layer web across signal-side escape channels.
+fn dedicatedGround(placement: optimizer.Placement, pts: []const pad_exit.NetPt) bool {
+    if (pts.len == 0) return false;
+    const first = pts[0];
+    for (placement.nets) |net| {
+        if (!optimizer.isGroundName(shortName(net.name)) or !netHasPlane(placement, net.name)) continue;
+        for (net.pins) |pin| {
+            if (std.mem.eql(u8, pin.ref_des, first.ref_des) and std.mem.eql(u8, pin.pin, first.pin)) return true;
+        }
+    }
+    return false;
+}
+
 const Candidate = struct { cap: usize, hub: usize, mm: f64 };
 
 /// The bonded pad pairs of one plane-carried net: for every decoupling loop,
@@ -260,12 +277,12 @@ const Candidate = struct { cap: usize, hub: usize, mm: f64 };
 /// The web's separate path-length gate still decides where another via is
 /// needed, so a chain can never share one barrel beyond the same bound.
 ///
-/// A package tie-off is another local bond. A plain NC/N/C pad which the author
-/// deliberately assigned to ground bonds only to a real ground pad. An
-/// explicitly typed input/control strap bonds to the real ground or supply pad
-/// carrying the same plane net. The real rail terminal is the preferred-via
-/// (`cap`) side, so its plane connection serves the tie-off through surface
-/// copper instead of every tied-low/high input drilling a duplicate barrel. A
+/// On an uncarried net, a package tie-off is another local bond. A plain NC/N/C
+/// pad which the author deliberately assigned to ground bonds only to a real
+/// ground pad. An explicitly typed input/control strap bonds to the real ground
+/// or supply pad carrying that net. The real rail terminal is the preferred-via
+/// (`cap`) side, so one transition can serve the local surface island. A
+/// dedicated ground plane returns above before making any of these bonds. A
 /// DNC/DNU/reserved pad is never tagged `optional_nc` and cannot enter this
 /// rule.
 pub fn bonds(
@@ -273,6 +290,7 @@ pub fn bonds(
     placement: optimizer.Placement,
     pts: []const pad_exit.NetPt,
 ) std.mem.Allocator.Error![]const Bond {
+    if (dedicatedGround(placement, pts)) return &.{};
     var candidates: std.ArrayList(Candidate) = .empty;
     for (placement.loops) |loop| {
         if (loop.cap >= placement.parts.len or loop.hub >= placement.parts.len) continue;
@@ -679,7 +697,7 @@ test "the rail leg of a loop is a bond on the rail net" {
     try testing.expectEqualStrings("U1", pts[bs[0].hub].ref_des);
 }
 
-// spec: placement/plane-stitch - a loop's ground leg bonds on the ground net by the same rule, so no plane kind is a special case
+// spec: placement/plane-stitch - a loop's ground leg may bond on an uncarried ground net, while a dedicated ground plane suppresses every such surface bond
 test "the ground leg of a loop is a bond on the ground net" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();

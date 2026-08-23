@@ -39,6 +39,23 @@ fn viasOn(vias: []const router.Via, net: i32) usize {
     return n;
 }
 
+fn tracksOn(tracks: []const router.Track, net: i32) usize {
+    var n: usize = 0;
+    for (tracks) |track| if (track.net == net) {
+        n += 1;
+    };
+    return n;
+}
+
+fn maxTrackMm(tracks: []const router.Track, net: i32) f64 {
+    var longest: f64 = 0;
+    for (tracks) |track| {
+        if (track.net != net) continue;
+        longest = @max(longest, std.math.hypot(track.x2 - track.x1, track.y2 - track.y1));
+    }
+    return longest;
+}
+
 /// Do the two angled fixture pads share one surface-copper island? Hoisted out
 /// of the test body so fixture filtering cannot hide assertions in branches.
 fn angledPadsConnected(arena: std.mem.Allocator, routed: router.RouteResult) std.mem.Allocator.Error!bool {
@@ -157,7 +174,7 @@ fn bench(arena: std.mem.Allocator, wall: bool, angled: bool, params: router.Rout
     }, params, .{});
 }
 
-// spec: placement/plane-stitch - a plane-carried net draws its bound cap's surface run to the hub pad before it stitches, and one via then serves both pads
+// spec: placement/plane-stitch - a non-ground plane-carried net draws its bound cap's surface run to the hub pad before it stitches, and one via then serves both pads
 test "a bound bypass pair is joined on the surface and stitched once" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
@@ -167,6 +184,10 @@ test "a bound bypass pair is joined on the surface and stitched once" {
     try testing.expect(crossesGap(routed.tracks, 0, .{ 0.5, 1.3 }, .{ -0.15, 0.15 }));
     // …and the pair is stitched ONCE: two independent vias is what this replaced.
     try testing.expectEqual(@as(usize, 1), viasOn(routed.vias, 0));
+    // The same loop's GND leg is carried by the dedicated ground plane. It
+    // receives independent drops and never grows a pad-to-pad surface route
+    // across the channel the rail leg just claimed.
+    try testing.expectEqual(@as(usize, 0), tracksOn(routed.tracks, 1));
 }
 
 // spec: placement/plane-stitch - the shared via of a DRAWN bond stands on the bypass cap's own land centre, so no copper is spent reaching the drop
@@ -220,7 +241,7 @@ test "an angled bound bypass pair stays one surface-connected stitch island" {
 
 // spec: placement/plane-stitch - final fill-blind copper cleanup preserves exact-target bypass surface paths even when a rail plane makes their trace sections connectivity-redundant
 // spec: placement/plane-stitch - a same-target capacitor bank extends a far exact-target leg through bounded local cap-to-cap hops while the path-length gate still places another via when needed
-// spec: placement/plane-stitch - an HMC-style grounded tie-off ring surface-bonds to the exposed ground pad and adds no per-tie-off barrels while the thermal array and capacitor returns remain
+// spec: placement/plane-stitch - a ground plane never surface-bonds an HMC-style grounded tie-off ring or capacitor returns; each reachable land drops locally while the exposed-pad thermal array remains
 test "two three-cap bypass banks remain surface-connected to their exact IC pins" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
@@ -368,10 +389,9 @@ test "two three-cap bypass banks remain surface-connected to their exact IC pins
         .via_dia = 0.4,
         .via_drill = 0.2,
     }, .{ .selected_nets = &ground_selected });
-    // Nine exposed-pad thermal barrels plus one direct return for each of the
-    // six bypass capacitors; none of the seven grounded input straps or five
-    // optional lands drills a via.
-    try testing.expectEqual(@as(usize, 15), viasOn(grounded.vias, 0));
+    // Ground must not create a top-layer web between any of these lands. Short
+    // fanout stubs are allowed only where a barrel cannot legally sit in-pad.
+    try testing.expect(maxTrackMm(grounded.tracks, 0) <= 1.0);
 }
 
 // spec: placement/router - signal nets in an explicit authored route wave claim their copper before plane stitching, while the rest wave still follows the plane pass
