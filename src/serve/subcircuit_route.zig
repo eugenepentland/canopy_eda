@@ -289,8 +289,9 @@ fn localOptions(
         .vias = try selectedGuideVias(alloc, base.guides.vias, selected),
         .reserved = try selectedReserved(alloc, base.guides.reserved, selected),
     };
-    // The live stream is reserved for the final assembled-board route. Local
-    // passes still share cancellation and timing with their caller.
+    // A child router must not leak its local net-by-net timeline into the board
+    // stream. `routeAllClassified` emits one parent-indexed cumulative frame
+    // after the child finishes instead.
     options.sink = null;
     return options;
 }
@@ -343,6 +344,86 @@ fn appendVia(alloc: std.mem.Allocator, out: *std.ArrayList(SeedVia), via: router
         .net = via.net,
     } });
 }
+
+const SubcircuitProgress = struct {
+    alloc: std.mem.Allocator,
+    base: route_policy.Options,
+    placement: optimizer.Placement,
+    tracks: *const std.ArrayList(SeedTrack),
+    vias: *const std.ArrayList(SeedVia),
+    nets: []const bool,
+
+    fn emit(
+        self: SubcircuitProgress,
+        kind: router.RouteEventKind,
+        name: []const u8,
+        current: usize,
+        total: usize,
+    ) std.mem.Allocator.Error!void {
+        const sink = self.base.sink orelse return;
+        const detail = try std.fmt.allocPrint(self.alloc, "{s} ({d}/{d})", .{ name, current, total });
+        defer self.alloc.free(detail);
+        const event_tracks = try self.alloc.alloc(router.Track, self.base.existing_tracks.len + self.tracks.items.len);
+        defer self.alloc.free(event_tracks);
+        var trace_mm: f64 = 0;
+        for (self.base.existing_tracks, 0..) |track, i| {
+            event_tracks[i] = .{
+                .x1 = track.x1,
+                .y1 = track.y1,
+                .x2 = track.x2,
+                .y2 = track.y2,
+                .layer = track.layer,
+                .width = track.width,
+                .net = track.net,
+            };
+            trace_mm += std.math.hypot(track.x2 - track.x1, track.y2 - track.y1);
+        }
+        for (self.tracks.items, 0..) |seed, i| {
+            const track = seed.copper;
+            event_tracks[self.base.existing_tracks.len + i] = .{
+                .x1 = track.x1,
+                .y1 = track.y1,
+                .x2 = track.x2,
+                .y2 = track.y2,
+                .layer = track.layer,
+                .width = track.width,
+                .net = track.net,
+            };
+            trace_mm += std.math.hypot(track.x2 - track.x1, track.y2 - track.y1);
+        }
+        const event_vias = try self.alloc.alloc(router.Via, self.base.existing_vias.len + self.vias.items.len);
+        defer self.alloc.free(event_vias);
+        for (self.base.existing_vias, 0..) |via, i| {
+            event_vias[i] = .{ .x = via.x, .y = via.y, .dia = via.dia, .drill = via.drill, .net = via.net };
+        }
+        for (self.vias.items, 0..) |seed, i| {
+            const via = seed.copper;
+            event_vias[self.base.existing_vias.len + i] = .{
+                .x = via.x,
+                .y = via.y,
+                .dia = via.dia,
+                .drill = via.drill,
+                .net = via.net,
+            };
+        }
+        var routed: usize = 0;
+        for (self.nets) |yes| if (yes) {
+            routed += 1;
+        };
+        const event = router.RouteEvent{
+            .kind = kind,
+            .detail = detail,
+            .state = .{
+                .routed = routed,
+                .total = self.placement.nets.len,
+                .trace_mm = trace_mm,
+                .tracks = event_tracks,
+                .vias = event_vias,
+            },
+        };
+        sink.emit(sink.ctx, &event);
+    }
+};
 
 fn hasRetainedPour(zones: []const route_policy.ExistingZone, net: usize) bool {
     for (zones) |zone| if (zone.copper and zone.net == @as(i32, @intCast(net))) return true;
@@ -596,14 +677,24 @@ pub fn routeAllClassified(
     var timed_out: usize = 0;
     var carrier_drop_vias: usize = 0;
     const phase_deadline = localPhaseDeadline(base);
+    const progress = SubcircuitProgress{
+        .alloc = alloc,
+        .base = base,
+        .placement = placement,
+        .tracks = &tracks,
+        .vias = &vias,
+        .nets = nets,
+    };
 
     for (block.sub_blocks, 0..) |sub, sub_i| {
         if (base.stop.cancel) |cancel| if (cancel.load(.monotonic)) break;
         attempted += 1;
         var sub_base = base;
         sub_base.stop.deadline_ns = sliceDeadline(phase_deadline, block.sub_blocks.len - sub_i);
+        try progress.emit(.subcircuit_start, sub.name, attempted, block.sub_blocks.len);
         const local = (try localPlacement(alloc, placement, sub.name)) orelse {
             completed += 1;
+            try progress.emit(.subcircuit_complete, sub.name, attempted, block.sub_blocks.len);
             continue;
         };
         const selected = try selectedNets(alloc, placement, sub.name, sub_base, supply, false);
@@ -623,6 +714,7 @@ pub fn routeAllClassified(
             );
             if (routed.cancelled and stopped(sub_base)) {
                 timed_out += 1;
+                try progress.emit(.subcircuit_failed, sub.name, attempted, block.sub_blocks.len);
                 continue;
             }
             for (routed.tracks) |track| {
@@ -654,7 +746,14 @@ pub fn routeAllClassified(
             .vias = &vias,
             .routed_nets = nets,
         });
-        if (stopped(sub_base) and phase_deadline != 0) timed_out += 1 else completed += 1;
+        const timed_out_here = stopped(sub_base) and phase_deadline != 0;
+        if (timed_out_here) timed_out += 1 else completed += 1;
+        try progress.emit(
+            if (timed_out_here) .subcircuit_failed else .subcircuit_complete,
+            sub.name,
+            attempted,
+            block.sub_blocks.len,
+        );
     }
 
     const selected_supply = try alloc.alloc(bool, placement.nets.len);

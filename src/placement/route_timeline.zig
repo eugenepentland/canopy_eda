@@ -35,6 +35,15 @@ pub fn traceLen(tracks: []const Track) f64 {
 /// the former is the useful audit trail, while the latter would be millions of
 /// implementation-detail frames on a full board.
 pub const RouteEventKind = enum {
+    /// One isolated first-level module is about to route. `detail` names it and
+    /// `state` carries the cumulative local copper from earlier modules.
+    subcircuit_start,
+    /// One isolated first-level module finished. `detail` names the module and
+    /// `state` carries all local candidate copper accumulated through it.
+    subcircuit_complete,
+    /// An isolated first-level module hit its local stop budget. `detail` names
+    /// the module and `state` preserves the earlier cumulative local copper.
+    subcircuit_failed,
     /// The pre-route board state (retained copper only). A live progress sink
     /// that sees a SECOND `.initial` should reset its accumulated view: it means
     /// the run restarted from scratch on a finer grid (see `routeWithCapture`).
@@ -71,8 +80,9 @@ pub const RouteEvent = struct {
     related_nets: []const usize = &.{},
     /// One-based rip-up round, 0 outside the bounded rip-up pass.
     round: usize = 0,
-    /// Free-form one-line label for a `hint_applied` decision (the interactive
-    /// session's human-readable hint description); empty for every other kind.
+    /// Free-form one-line label. Hierarchical events carry the first-level
+    /// module name; `hint_applied` carries the interactive session's readable
+    /// hint description. Empty for ordinary routing decisions.
     detail: []const u8 = "",
     /// The routing geometry the attempt that captured this event searched on.
     /// Constant across an attempt; carried per event so any single event is

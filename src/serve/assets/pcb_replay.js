@@ -191,6 +191,9 @@
   // ── Human-readable event labels (ported from route_review.js) ─────────
   var labels = {
     initial: ["Local setup", "Subcircuit routes frozen", "Accepted local subcircuit traces and carrier drops are fixed here. In a full-board run, whole-board global routing starts with the next decision."],
+    subcircuit_start: ["Local stage", "Routing subcircuit", "This module is routing in isolation; copper from earlier modules remains visible."],
+    subcircuit_complete: ["Local stage", "Subcircuit complete", "Candidate copper from this module is now visible; assembled-board validation may still defer a conflicting net."],
+    subcircuit_failed: ["Local stage", "Subcircuit timed out", "This module reached its local routing budget; previously completed local copper remains visible."],
     plane_routed: ["Plane pass", "Plane connection added", "A plane-backed net was connected by its pour or by a legal via drop."],
     plane_failed: ["Plane pass", "Plane connection failed", "The router could not find a legal plane connection for this net."],
     net_routed: ["Greedy pass", "Net routed", "This net claimed a legal path in priority order."],
@@ -213,6 +216,8 @@
   function eventText(ev, opts) {
     opts = opts || {};
     var base = labels[ev.kind] || ["Router", (ev.kind || "").replace(/_/g, " "), ""];
+    if ((ev.kind === "subcircuit_start" || ev.kind === "subcircuit_complete" || ev.kind === "subcircuit_failed") && ev.detail)
+      base = [base[0], base[1] + ": " + ev.detail, base[2]];
     if (ev.detail === "subcircuits-only") {
       if (ev.kind === "initial") base = ["Local stage", "Subcircuit routes frozen", "This run stops after validated local traces and carrier drops; no whole-board global routing is executed."];
       else if (ev.kind === "complete") base = ["Local stage", "Subcircuit-only stage complete", "This is the accepted local copper from every attempted first-level subcircuit. Boundary and deferred nets remain for a later full-board run."];
@@ -233,6 +238,7 @@
     kind = kind || "";
     if (kind.indexOf("failed") >= 0 || kind === "reroute_rejected") return "fail";
     if (kind === "ripup" || kind === "reroute_candidate") return "rip";
+    if (kind === "subcircuit_complete") return "ok";
     if (kind === "complete") return "end";
     if (kind.indexOf("routed") >= 0 || kind === "reroute_accepted") return "ok";
     return "";

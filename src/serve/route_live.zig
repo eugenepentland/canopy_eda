@@ -399,6 +399,7 @@ fn subcircuitsOnlyOutcome(
     options.existing_vias = run.prep.scoped.existing_vias;
     options.existing_zones = run.prep.scoped.existing_zones;
     options.stop.cancel = run.cancel;
+    options.sink = live.sink;
     if (run.prep.effort) |effort| options.effort = effort;
     if (options.stop.deadline_ns == 0 and options.stop.max_route_ms > 0)
         options.stop.deadline_ns = clock.nanoTimestamp() +
@@ -1002,8 +1003,7 @@ test "live job streams timeline events and finishes with the route contract" {
     try testing.expect(std.mem.indexOf(u8, final, "\"selected\":0,\"scope_unknown\":[]") != null);
 }
 
-// The subcircuits stage streams accepted local copper and completes without
-// entering whole-board global routing.
+// spec: Web Server - Live autorouting names each first-level sub-circuit when it starts and streams its cumulative copper when it finishes, before whole-board global routing begins, so full and subcircuits-only runs both reveal local progress
 test "subcircuits-only live stage stops before global routing" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -1044,12 +1044,16 @@ test "subcircuits-only live stage stops before global routing" {
     });
     const snap = (try store.snapshot(arena, "local", 0, 1)) orelse return error.TestUnexpectedResult;
     try testing.expect(snap.done and !snap.cancelled);
-    try testing.expectEqual(@as(usize, 2), snap.events.len);
-    try testing.expect(std.mem.indexOf(u8, snap.events[0], "\"kind\":\"initial\"") != null);
-    try testing.expect(std.mem.indexOf(u8, snap.events[0], "\"detail\":\"subcircuits-only\"") != null);
+    try testing.expectEqual(@as(usize, 4), snap.events.len);
+    try testing.expect(std.mem.indexOf(u8, snap.events[0], "\"kind\":\"subcircuit_start\"") != null);
+    try testing.expect(std.mem.indexOf(u8, snap.events[0], "\"detail\":\"amp (1/1)\"") != null);
+    try testing.expect(std.mem.indexOf(u8, snap.events[1], "\"kind\":\"subcircuit_complete\"") != null);
+    try testing.expect(std.mem.indexOf(u8, snap.events[1], "\"tracks\":[[") != null);
+    try testing.expect(std.mem.indexOf(u8, snap.events[2], "\"kind\":\"initial\"") != null);
+    try testing.expect(std.mem.indexOf(u8, snap.events[2], "\"detail\":\"subcircuits-only\"") != null);
     // A global run would stream net_routed/net_failed decisions between these
     // bookends. Their absence is the stage boundary under test.
-    for (snap.events) |event| {
+    for (snap.events[2..]) |event| {
         try testing.expect(std.mem.indexOf(u8, event, "\"kind\":\"net_routed\"") == null);
         try testing.expect(std.mem.indexOf(u8, event, "\"kind\":\"net_failed\"") == null);
     }
@@ -1057,6 +1061,21 @@ test "subcircuits-only live stage stops before global routing" {
     try testing.expect(std.mem.indexOf(u8, final, "\"stage\":\"subcircuits\"") != null);
     try testing.expect(std.mem.indexOf(u8, final, "\"attempted_subcircuits\":1") != null);
     try testing.expect(std.mem.indexOf(u8, final, "\"accepted_tracks\":1") != null);
+
+    const full_started = (store.begin("full-local") orelse return error.TestUnexpectedResult).started;
+    runLiveJob(arena, .{
+        .store = &store,
+        .name = "full-local",
+        .project_dir = no_project,
+        .gen = full_started.gen,
+        .prep = &prep,
+        .cancel = full_started.cancel,
+    });
+    const full = (try store.snapshot(arena, "full-local", 0, 1)) orelse return error.TestUnexpectedResult;
+    try testing.expect(full.done and full.events.len >= 3);
+    try testing.expect(std.mem.indexOf(u8, full.events[0], "\"kind\":\"subcircuit_start\"") != null);
+    try testing.expect(std.mem.indexOf(u8, full.events[1], "\"kind\":\"subcircuit_complete\"") != null);
+    try testing.expect(std.mem.indexOf(u8, full.events[2], "\"kind\":\"initial\"") != null);
 }
 
 // spec: serve/route-live - each streamed event serializes exactly as a replay timeline array element

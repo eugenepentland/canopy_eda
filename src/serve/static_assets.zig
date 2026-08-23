@@ -830,15 +830,20 @@ test "PCB live-route Stop freezes elapsed time while cancellation finishes" {
 
 // spec: Web Server - The PCB autorouter client offers full local-then-global and subcircuits-only stages, and the local stage never falls back to the blocking whole-board endpoint
 test "PCB autorouter client selects a terminal subcircuit stage" {
-    const markers = [_][]const u8{
-        "r-stage",
-        "Subcircuits + whole board",
-        "Subcircuits only",
-        "stage:stage",
-        "subcircuits-only stage needs the live router",
-        "Route subcircuits",
+    const markers = [_]struct { body: []const u8, marker: []const u8 }{
+        .{ .body = pcb_board_js, .marker = "r-stage" },
+        .{ .body = pcb_board_js, .marker = "Subcircuits + whole board" },
+        .{ .body = pcb_board_js, .marker = "Subcircuits only" },
+        .{ .body = pcb_board_js, .marker = "stage:stage" },
+        .{ .body = pcb_board_js, .marker = "subcircuits-only stage needs the live router" },
+        .{ .body = pcb_board_js, .marker = "Route subcircuits" },
+        .{ .body = pcb_replay_js, .marker = "subcircuit_start" },
+        .{ .body = pcb_replay_js, .marker = "Routing subcircuit" },
+        .{ .body = pcb_replay_js, .marker = "subcircuit_complete" },
+        .{ .body = pcb_replay_js, .marker = "Subcircuit complete" },
+        .{ .body = pcb_replay_js, .marker = "Candidate copper from this module is now visible" },
     };
-    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+    for (markers) |check| try std.testing.expect(std.mem.indexOf(u8, check.body, check.marker) != null);
 }
 
 // spec: Web Server - The PCB thermal overlay paints the cached heat field over the read-only board through the overlay seam

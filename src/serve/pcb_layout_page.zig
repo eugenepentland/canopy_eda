@@ -4371,6 +4371,7 @@ pub fn routePrepared(
     } else blk: {
         var base_options = preparedRouteOptions(alloc, prep);
         armRouteDeadline(&base_options);
+        base_options.sink = live.sink;
         var seeded_options = base_options;
         seed_stats = try addSubcircuitRouteSeeds(alloc, project_dir, prep.eff_block, prep.placement, prep.rp, &seeded_options);
         break :blk try route_plan.routeLoweredLive(alloc, prep.placement, prep.rp, &seeded_options, live);
