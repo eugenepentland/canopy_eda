@@ -314,6 +314,11 @@ const Outcome = struct {
     drc_errors: usize = 0,
     trace_mm: f64 = 0,
     vias: usize = 0,
+    /// The score's two v2 geometry terms (route_score.Inputs), measured by the
+    /// score module's shared helpers so a trial row's score matches what
+    /// `route_experiment` reports for the same board.
+    bends: usize = 0,
+    quality_warns: usize = 0,
 };
 
 /// Is `a` a strictly better board than `b`? Connectivity first — an ordering
@@ -541,7 +546,15 @@ const Search = struct {
         const errors = drc.errorCount(v);
         var trace: f64 = 0;
         for (r.tracks) |t| trace += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
-        return .{ .routed = r.routed, .total = r.total, .drc_errors = errors, .trace_mm = trace, .vias = r.vias.len };
+        return .{
+            .routed = r.routed,
+            .total = r.total,
+            .drc_errors = errors,
+            .trace_mm = trace,
+            .vias = r.vias.len,
+            .bends = route_score.bendCount(self.alloc, r.tracks) catch 0,
+            .quality_warns = route_score.qualityWarnCount(v),
+        };
     }
 };
 
@@ -872,6 +885,8 @@ fn trialRow(
                 .vias = t.out.vias,
                 .trace_mm = t.out.trace_mm,
                 .drc_errors = t.out.drc_errors,
+                .bends = t.out.bends,
+                .quality_warns = t.out.quality_warns,
             }),
             .routed = t.out.routed,
             .total = t.out.total,

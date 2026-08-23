@@ -534,20 +534,23 @@ pub fn writeDesignReviewJson(
     // corrected it to. Equal on a healthy run; above it means the router counted
     // a net complete whose pads its copper never joined.
     try w.print(",\"router_claimed\":{d}", .{replay.router_claimed});
-    try writeRouteScore(w, replay);
+    try writeRouteScore(arena, w, replay);
     try w.writeByte('}');
 }
 
 /// Emit `,"route_score":{"score":X,"score_v":V}` — the deterministic
 /// accept/reject scalar (route_score.zig) for this replay, computed from the
-/// same routed/total/via/trace/error-DRC numbers the `final` block reports. It
-/// is a distinct top-level field, unrelated to the placement `score` block.
+/// same routed/total/via/trace/DRC numbers the `final` block reports. It is a
+/// distinct top-level field, unrelated to the placement `score` block.
 ///
-/// Both halves of the score are the honest ones: `routed`/`total` are the
-/// connectivity oracle's (see `replayDesign`), and the DRC term is
+/// Every half of the score is the honest one: `routed`/`total` are the
+/// connectivity oracle's (see `replayDesign`), the error term is
 /// `drc.errorCount`, which drops `net_open` so an open net is charged once,
-/// through completion, instead of once there and again at 50 points a piece.
-fn writeRouteScore(w: *std.Io.Writer, replay: DesignReplay) HandlerError!void {
+/// through completion, instead of once there and again at 50 points a piece,
+/// and the v2 geometry terms are the shared measurements — `bendCount` over
+/// this replay's own copper and `qualityWarnCount` over its own DRC findings —
+/// so this replay and the `route_experiment` tool count identically.
+fn writeRouteScore(alloc: std.mem.Allocator, w: *std.Io.Writer, replay: DesignReplay) HandlerError!void {
     var trace_mm: f64 = 0;
     for (replay.run.routed.tracks) |t| trace_mm += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
     const s = route_score.score(.{
@@ -556,6 +559,8 @@ fn writeRouteScore(w: *std.Io.Writer, replay: DesignReplay) HandlerError!void {
         .vias = replay.run.routed.vias.len,
         .trace_mm = trace_mm,
         .drc_errors = drc.errorCount(replay.violations),
+        .bends = try route_score.bendCount(alloc, replay.run.routed.tracks),
+        .quality_warns = route_score.qualityWarnCount(replay.violations),
     });
     try w.print(",\"route_score\":{{\"score\":{d:.2},\"score_v\":{d}}}", .{ s, route_score.formula_version });
 }
@@ -1146,15 +1151,18 @@ test "design replay JSON carries the routing score" {
     try writeDesignReviewJson(arena, &aw.writer, "fixture", placement, replay);
     const json = aw.written();
     // The single routable net connects, so the score is the emitted value for
-    // this replay's own routed/total/via/trace numbers (no DRC errors here).
+    // this replay's own routed/total/via/trace/bend numbers (this fixture draws
+    // no DRC errors and no self-inflicted warnings).
     const expected = route_score.score(.{
         .routed = replay.run.routed.routed,
         .total = replay.run.routed.total,
         .vias = replay.run.routed.vias.len,
         .trace_mm = trackMmTotal(replay.run.routed.tracks),
         .drc_errors = 0,
+        .bends = try route_score.bendCount(arena, replay.run.routed.tracks),
+        .quality_warns = route_score.qualityWarnCount(replay.violations),
     });
-    const wanted = try std.fmt.allocPrint(arena, "\"route_score\":{{\"score\":{d:.2},\"score_v\":1}}", .{expected});
+    const wanted = try std.fmt.allocPrint(arena, "\"route_score\":{{\"score\":{d:.2},\"score_v\":2}}", .{expected});
     try testing.expect(std.mem.indexOf(u8, json, wanted) != null);
 }
 

@@ -1784,23 +1784,37 @@ different.
 
 ## placement/route-score
 
-Public functions: score, completionFraction
+Public functions: score, completionFraction, bendCount, qualityWarnCount
 
 The single deterministic scalar the constraint-DSL routing loop judges an
 accept/reject on. A pure function of the routing-result fields the describe and
 replay surfaces already emit — completion fraction (routed/total), via count,
-routed-copper length, and error-severity DRC count — with no clock or RNG, so
-the same routed board always scores identically. v1 is
-`1000·completion − 2·vias − 0.1·trace_mm − 50·drc_errors`; higher is better. The
-weights are named public constants (one-line tuning) and `formula_version` tags
-every downstream score so stored numbers are only compared within a version.
+routed-copper length, bend count, self-inflicted DRC warnings, and
+error-severity DRC count — with no clock or RNG, so the same routed board always
+scores identically. v2 is
+`1000·completion − 0.5·vias − 0.1·trace_mm − 0.05·bends − 1·quality_warns − 50·drc_errors`;
+higher is better. v1 priced a via at 2.0 (20 mm of copper) against the maze's own
+~1 mm via cost and scored bends and warnings at zero, so it rejected shorter,
+straighter boards the router preferred. `bendCount` and `qualityWarnCount` are
+the shared measurements every scoring surface must use, so two scores at one
+`formula_version` are counted the same way. The weights are named public
+constants (one-line tuning) and `formula_version` tags every downstream score so
+stored numbers are only compared within a version.
 
-- a fully routed board with no vias, copper, or DRC errors scores the completion weight
-- each via, mm of copper, and DRC error lowers the score by its named weight
+- a fully routed board with no vias, copper, bends, warnings, or DRC errors scores the completion weight
+- each via, mm of copper, bend, quality warning, and DRC error lowers the score by its named weight
 - a board with no routable nets counts as fully complete rather than a divide-by-zero
-- more vias, longer copper, or more DRC errors never raise the score
-- completeness-waiver: empty inputs (a zero-net board is the documented total==0 full-completion convention, unit-tested)
-- completeness-waiver: large inputs (the score is an O(1) arithmetic combination of five scalar inputs, independent of board size)
+- more vias, longer copper, more bends, more quality warnings, or more DRC errors never raise the score
+- completion outranks every geometry penalty combined, so a score can never prefer a board that routes fewer nets
+- spending vias to shorten and straighten a route now scores as the improvement it is, where v1 rejected it
+- two vias buy back their own cost from a millimetre of copper and a dozen corners, which v1 could never repay
+- a via is priced within an order of magnitude of the maze's own via cost, so the search and the score want the same board
+- a straight run split into segments has no bends, and each corner in a chain counts once
+- bend chains never span a net, a layer, a branch, or a zero-length segment
+- a sub-degree jog is a rounding artifact, not a bend
+- the score's warning term counts only the self-inflicted geometry kinds, never advisory warnings or errors
+- completeness-waiver: empty inputs (a zero-net board is the documented total==0 full-completion convention, unit-tested; an empty track slice counts zero bends)
+- completeness-waiver: large inputs (the score is an O(1) arithmetic combination of scalar inputs, independent of board size; bend counting is one O(n log n) sort over the routed segments)
 - completeness-waiver: unauthorized access (a pure in-process function over caller-supplied scalars; access control lives at the serve boundary)
 - completeness-waiver: i/o failure (no I/O — the inputs are plain integers and floats already in memory)
 - completeness-waiver: concurrent access (no shared or mutable state; the function is reentrant and side-effect-free)

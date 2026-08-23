@@ -5306,9 +5306,16 @@ fn residualBetter(candidate: router.RouteResult, baseline: router.RouteResult) b
     return residualCost(candidate) < residualCost(baseline) - 1e-6;
 }
 
-/// Same penalty balance as route_score v1 once completion and DRC are tied:
-/// one via costs the same as 20 mm of trace. This prevents a residual retry
+/// One via costs the same as 20 mm of trace, which prevents a residual retry
 /// from accepting an arbitrarily long detour merely because it saved one via.
+///
+/// This WAS route_score v1's balance once completion and DRC were tied. It no
+/// longer is: v1 priced a via 20× above the maze's own layer-change cost, and
+/// `route_score` v2 corrected that to 0.5 (5 mm of trace). The 20 here is now a
+/// deliberately stricter local tie-break — this gate accepts a retry that
+/// changes nothing but geometry, so it stays conservative about spending
+/// copper. Retuning it is a routing-behaviour change and wants its own
+/// measurement; it is not a v2 follow-through.
 fn residualCost(result: router.RouteResult) f64 {
     return 20.0 * @as(f64, @floatFromInt(result.vias.len)) + traceLength(result.tracks);
 }

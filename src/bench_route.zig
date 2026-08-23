@@ -313,6 +313,8 @@ fn benchOneConfigured(
         .vias = out.copper.vias,
         .trace_mm = out.copper.mm,
         .drc_errors = out.drc.errors,
+        .bends = route_score.bendCount(alloc, routed.tracks) catch 0,
+        .quality_warns = route_score.qualityWarnCount(v),
     });
     out.quality.copper_hash = copperHash(routed.tracks, routed.vias);
     return out;

@@ -175,6 +175,8 @@ fn writeRouteTrial(w: *std.Io.Writer, args: WriteArgs, candidate: connector_pino
         .vias = routed.result.vias.len,
         .trace_mm = trace_mm,
         .drc_errors = drc_errors,
+        .bends = try route_score.bendCount(args.alloc, routed.result.tracks),
+        .quality_warns = route_score.qualityWarnCount(violations),
     });
     try w.print(",\"route\":{{\"mode\":\"plan_neutral_one_shot\",\"seconds\":{d}", .{args.route_seconds});
     try w.print(",\"routed\":{d},\"total\":{d},\"vias\":{d}", .{

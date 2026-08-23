@@ -2421,10 +2421,16 @@ src/placement/route_result.zig::SharpBend struct_
 src/placement/route_result.zig::Track struct_
 src/placement/route_result.zig::Via struct_
 src/placement/route_score.zig::Inputs struct_
+src/placement/route_score.zig::bendCount | fn bendCount(alloc: std.mem.Allocator, tracks: []const route_result.Track) std.mem.Allocator.Error!usize
+src/placement/route_score.zig::bend_join_tol_mm value
+src/placement/route_score.zig::bend_min_deg value
+src/placement/route_score.zig::bend_penalty value
 src/placement/route_score.zig::completionFraction | fn completionFraction(routed: usize, total: usize) f64
 src/placement/route_score.zig::completion_weight value
 src/placement/route_score.zig::drc_error_penalty value
 src/placement/route_score.zig::formula_version value
+src/placement/route_score.zig::qualityWarnCount | fn qualityWarnCount(violations: []const drc.Violation) usize
+src/placement/route_score.zig::quality_warn_penalty value
 src/placement/route_score.zig::score | fn score(in: Inputs) f64
 src/placement/route_score.zig::trace_mm_penalty value
 src/placement/route_score.zig::via_penalty value

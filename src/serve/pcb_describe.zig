@@ -195,6 +195,8 @@ pub fn describeDesign(
             .vias = r.vias.len,
             .drc = v.len,
             .drc_errors = drc.errorCount(v),
+            .bends = route_score.bendCount(alloc, r.tracks) catch 0,
+            .quality_warns = route_score.qualityWarnCount(v),
             .drc_list = v,
             .names = .{ .nets = solved.placement.nets, .parts = solved.placement.parts },
             .routed = conn.routed,
@@ -333,6 +335,11 @@ const RoutedSummary = struct {
     /// `unrouted`, and charging an open net through the score's DRC term too
     /// made one open net outweigh the completion it is already measured by.
     drc_errors: usize = 0,
+    /// The score's two v2 geometry terms, measured by the score module's own
+    /// shared helpers over the same copper/findings this summary reports, so
+    /// this writer's number matches `route_experiment`'s for the same board.
+    bends: usize = 0,
+    quality_warns: usize = 0,
     /// The violations behind the count, each carrying its short traceable id
     /// (pcb_layout_page.violationId) — same records the viewer shows.
     drc_list: []const drc.Violation = &.{},
@@ -747,7 +754,10 @@ fn writeRoutedJson(w: *std.Io.Writer, r: RoutedSummary) std.Io.Writer.Error!void
     // means its own tally disagreed with the connectivity oracle.
     if (r.router_claimed > r.routed) try w.print(",\"router_claimed\":{d}", .{r.router_claimed});
     // The deterministic accept/reject scalar (route_score.zig), computed from the
-    // same routed/total/via/trace/error-DRC numbers this block already reports.
+    // same routed/total/via/trace/error-DRC numbers this block already reports,
+    // plus the two v2 geometry terms the summary's builder measured with the
+    // score module's shared helpers — so this number matches what
+    // `route_experiment` / the route-review replay report for the same board.
     try w.print(",\"score\":{d:.2},\"score_v\":{d}", .{
         route_score.score(.{
             .routed = r.routed,
@@ -755,6 +765,8 @@ fn writeRoutedJson(w: *std.Io.Writer, r: RoutedSummary) std.Io.Writer.Error!void
             .vias = r.vias,
             .trace_mm = r.trace_mm,
             .drc_errors = r.drc_errors,
+            .bends = r.bends,
+            .quality_warns = r.quality_warns,
         }),
         route_score.formula_version,
     });
@@ -2067,8 +2079,10 @@ test "writeRoutedJson emits the routing score from its own routed fields" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const alloc = arena_state.allocator();
-    // 3/4 routed, 2 vias, 20 mm copper, 1 error DRC:
-    //   1000·0.75 − 2·2 − 0.1·20 − 50·1 = 750 − 4 − 2 − 50 = 694.
+    // 3/4 routed, 2 vias, 20 mm copper, 1 error DRC. This summary leaves the
+    // measured v2 geometry terms (`bends`, `quality_warns`) at their zero
+    // defaults, so:
+    //   1000·0.75 − 0.5·2 − 0.1·20 − 50·1 = 750 − 1 − 2 − 50 = 697.
     const summary = RoutedSummary{
         .trace_mm = 20,
         .tracks = 3,
@@ -2080,7 +2094,7 @@ test "writeRoutedJson emits the routing score from its own routed fields" {
     };
     var aw: std.Io.Writer.Allocating = .init(alloc);
     try writeRoutedJson(&aw.writer, summary);
-    try std.testing.expect(std.mem.indexOf(u8, aw.written(), "\"score\":694.00,\"score_v\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, aw.written(), "\"score\":697.00,\"score_v\":2") != null);
 }
 
 // spec: placement/rf-port-frame-routing - every attempted RF net exposes its chosen trial, all trial scores, feasibility, entry error, curvature energy, and worst return loss in pcb-describe

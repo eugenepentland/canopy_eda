@@ -128,19 +128,28 @@ pub fn mcpRouteExperiment(
 
     // Score inputs: DRC-check the routed copper through the same filtered seam
     // describe uses, sum the trace, and count the fab-blocking violations (the
-    // score's DRC term — `drc.errorCount`, so warnings and `net_open` are both
+    // score's error term — `drc.errorCount`, so warnings and `net_open` are both
     // out; completion is already the `routed`/`total` term right below).
     // Reads DRC policy config; writes nothing.
+    //
+    // The two v2 geometry terms come from the score module's OWN shared
+    // measurements — `bendCount` over this run's copper, `qualityWarnCount` over
+    // this run's findings — so a number from this tool is directly comparable to
+    // the route-review replay's, which calls the same two helpers.
     const violations = drc_rules.checkFiltered(alloc, project_dir, name, solved.placement, exp.result, params.clearance);
     var trace_mm: f64 = 0;
     for (exp.result.tracks) |t| trace_mm += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
     const drc_errors = drc.errorCount(violations);
+    const bends = try route_score.bendCount(alloc, exp.result.tracks);
+    const quality_warns = route_score.qualityWarnCount(violations);
     const s = route_score.score(.{
         .routed = exp.result.routed,
         .total = exp.result.total,
         .vias = exp.result.vias.len,
         .trace_mm = trace_mm,
         .drc_errors = drc_errors,
+        .bends = bends,
+        .quality_warns = quality_warns,
     });
     // Per-open-net aiming data over the SAME copper the counters describe —
     // pours included, exactly as `/api/pcb-describe` builds its `open_nets`.
@@ -191,6 +200,9 @@ pub fn mcpRouteExperiment(
         trace_mm,
         drc_errors,
     });
+    // The two v2 geometry inputs ride beside the score so a plan-iterating
+    // agent can see WHICH term moved, not just that the scalar did.
+    try w.print(",\"bends\":{d},\"quality_warns\":{d}", .{ bends, quality_warns });
     try w.print(",\"score\":{d:.2},\"score_v\":{d}", .{ s, route_score.formula_version });
     try writeTopology(w, exp.topology);
     try stuck_json.writeStuckJson(w, exp.stuck);
