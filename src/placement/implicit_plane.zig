@@ -14,6 +14,12 @@
 //!     (`dominantRail`) when one qualifies, else ground again, which is what
 //!     this model did before rails were planed at all. A block with no
 //!     qualifying rail is therefore byte-identical to the legacy behaviour.
+//!     WHICH rail wins is settled by a tie-break LADDER that is a strict total
+//!     order over the qualifying nets — pad count, then role, then name — so
+//!     the answer is a function of the netlist's CONTENT alone. Reordering two
+//!     pin declarations in a `.sexp` may never move the plane from one rail to
+//!     another: the loser is condemned to long surface routing, and that is not
+//!     an electrical outcome any file's line order is allowed to decide.
 //!
 //! A planed rail behaves exactly as ground already does: the router plants a
 //! stitch via at each of its pads instead of routing it, the oracle counts its
@@ -26,6 +32,7 @@
 const std = @import("std");
 const board_layers = @import("../board_layers.zig");
 const flat_netlist = @import("../flat_netlist.zig");
+const module_policy = @import("module_policy.zig");
 const optimizer = @import("optimizer.zig");
 const pin_roles = @import("pin_roles.zig");
 const rails = @import("../eval/rails.zig");
@@ -82,12 +89,10 @@ pub fn carries(rules: optimizer.BoardRules, name: []const u8) bool {
 }
 
 /// The block's dominant supply rail: of the flattened nets that read as a
-/// supply rail, the one landing on the most pads. Deterministic — the scan is
-/// in flattened-net order and only a STRICTLY larger pad count displaces the
-/// incumbent, so a tie keeps first-appearance order. Null when nothing
+/// supply rail, the one that wins the tie-break LADDER below. Null when nothing
 /// qualifies, which keeps the block on the legacy two-ground-plane model.
 ///
-/// A net qualifies when all three hold:
+/// A net qualifies when all four hold:
 ///   * it is not ground (`optimizer.isGroundName`);
 ///   * its `/`-leaf reads as a supply by one of the project's two existing
 ///     rail predicates — `pin_roles.isSupplyFn` (the pinout-function rule:
@@ -100,18 +105,69 @@ pub fn carries(rules: optimizer.BoardRules, name: []const u8) bool {
 ///     leaf is shared — two sibling sub-blocks each with a private `VCC` the
 ///     parent never tied — would silently short them together through the
 ///     pour. An ambiguous leaf simply disqualifies the rail.
+///
+/// Among the qualifiers `outranks` decides, and it is a strict TOTAL order, so
+/// the winner depends only on which nets exist — never on the order the
+/// flattener happened to emit them in. That matters because the rail that loses
+/// this contest is the one left to long surface routing: an LDO whose `VIN` and
+/// `VOUT` land on the same pad count must not hand the plane to whichever pin
+/// was declared first in the `.sexp`.
 pub fn dominantRail(nets: []const FlatNet) ?[]const u8 {
-    var best: ?[]const u8 = null;
-    var best_pads: usize = 0;
+    var best: ?Candidate = null;
     for (nets) |net| {
-        if (net.pins.len < min_rail_pads or net.pins.len <= best_pads) continue;
+        if (net.pins.len < min_rail_pads) continue;
         const leaf = leafName(net.name);
         if (!isRailName(leaf)) continue;
         if (!leafIsUnique(nets, leaf)) continue;
-        best = net.name;
-        best_pads = net.pins.len;
+        const cand: Candidate = .{ .name = net.name, .pads = net.pins.len, .role = roleRank(leaf) };
+        if (best == null or outranks(cand, best.?)) best = cand;
     }
-    return best;
+    return if (best) |b| b.name else null;
+}
+
+/// One qualifying rail reduced to exactly the keys the ladder compares.
+const Candidate = struct {
+    name: []const u8,
+    pads: usize,
+    /// `roleRank`: 0 for an output/power-class rail, 1 for an input rail.
+    role: u8,
+};
+
+/// The tie-break ladder: does `a` displace `b`? Every rung is a comparison of
+/// values read off the netlist, and the last one is decisive, so this is a
+/// strict total order and `dominantRail`'s scan order cannot reach the answer.
+///
+///   1. **More pads wins.** Unchanged, and still the point of the exercise: a
+///      plane exists to JOIN pads, so the rail on the most of them buys the
+///      most routing.
+///   2. **An output rail beats an input rail.** A regulator's `VIN` arrives on
+///      one short trunk from a connector and is the high-dI/dt side the placer
+///      wants kept tight and local; its `VOUT` is what the rest of the board
+///      draws from, spread across every load. Given equal pad counts the output
+///      is the one a plane helps.
+///   3. **Lower net name wins.** The rung that makes the order TOTAL. Only nets
+///      with a UNIQUE leaf qualify, so no two candidates can carry the same
+///      name and reach this rung still tied.
+///
+/// A pad BOUNDING BOX would be a better rung 3 than the name — the rail whose
+/// pads spread furthest is the one that gains most from a plane. It is not
+/// reachable here: the argument is `[]const FlatNet` and a `FlatPin` carries
+/// only `ref_des`/`pin`, no coordinates. Nor could it be plumbed in, because
+/// `optimizer.boardRulesOf` calls this while building the rules the placer
+/// later runs on — there is no placed board to measure yet.
+fn outranks(a: Candidate, b: Candidate) bool {
+    if (a.pads != b.pads) return a.pads > b.pads;
+    if (a.role != b.role) return a.role < b.role;
+    return std.mem.order(u8, a.name, b.name) == .lt;
+}
+
+/// Rung 2's key, low-is-better: an INPUT rail ranks below every other rail that
+/// qualifies. The classification is `module_policy.classifyNetName`, this
+/// project's existing name-based net classifier and the same one the ERC and
+/// the placer already ask this question of (`input_rail` vs `power`) — as with
+/// the qualification predicates above, no new naming rule is coined here.
+fn roleRank(leaf: []const u8) u8 {
+    return if (module_policy.classifyNetName(leaf) == .input_rail) 1 else 0;
 }
 
 /// Does this net-name leaf read as a supply rail (and not a ground)?
@@ -163,13 +219,45 @@ test "dominantRail picks the widest supply rail" {
     try testing.expectEqualStrings("V_3V3", dominantRail(&nets).?);
 }
 
-// spec: placement/implicit-plane - a tie on pad count keeps the first flattened net
-test "dominantRail breaks a pad-count tie in first-appearance order" {
+// spec: placement/implicit-plane - a tie on pad count resolves the same whatever order the nets arrive in
+test "dominantRail answers a pad-count tie independently of net order" {
+    // Same role, same pad count: the name rung decides, and it decides the same
+    // way from either end. Reordering pin declarations in a `.sexp` reorders the
+    // flattened nets, and that may not move the plane.
     const nets = [_]FlatNet{ tNet("VCC_A", two_pins), tNet("VCC_B", two_pins) };
-    try testing.expectEqualStrings("VCC_A", dominantRail(&nets).?);
-    // Reversing the input reverses the answer — the rule is order, not spelling.
     const flipped = [_]FlatNet{ tNet("VCC_B", two_pins), tNet("VCC_A", two_pins) };
-    try testing.expectEqualStrings("VCC_B", dominantRail(&flipped).?);
+    try testing.expectEqualStrings("VCC_A", dominantRail(&nets).?);
+    try testing.expectEqualStrings("VCC_A", dominantRail(&flipped).?);
+
+    // The fixture case that exposed the order dependence: an LDO whose VIN and
+    // VOUT land on the same pad count. VOUT won only by being enumerated first;
+    // now it wins by the role rung, from either order.
+    const ldo = [_]FlatNet{ tNet("VOUT", &three_pins), tNet("VIN", &three_pins), tNet("GND", &three_pins) };
+    const ldo_flipped = [_]FlatNet{ tNet("GND", &three_pins), tNet("VIN", &three_pins), tNet("VOUT", &three_pins) };
+    try testing.expectEqualStrings("VOUT", dominantRail(&ldo).?);
+    try testing.expectEqualStrings("VOUT", dominantRail(&ldo_flipped).?);
+}
+
+// spec: placement/implicit-plane - a pad-count tie hands the plane to an output rail over an input rail
+test "dominantRail prefers an output rail to an input rail on a tie" {
+    // VIN sorts BEFORE VOUT, so the name rung alone would elect the input rail:
+    // only the role rung can produce this answer.
+    const tied = [_]FlatNet{ tNet("VIN", two_pins), tNet("VOUT", two_pins) };
+    try testing.expectEqualStrings("VOUT", dominantRail(&tied).?);
+
+    // Role never overrules pad count — the primary criterion still leads, so an
+    // input rail on more pads takes the plane.
+    const wider_input = [_]FlatNet{ tNet("VOUT", two_pins), tNet("VIN", &three_pins) };
+    try testing.expectEqualStrings("VIN", dominantRail(&wider_input).?);
+
+    // Other input spellings rank the same way (`rails.input_rail_prefixes`).
+    const bus = [_]FlatNet{ tNet("VBUS", two_pins), tNet("V_3V3", two_pins) };
+    try testing.expectEqualStrings("V_3V3", dominantRail(&bus).?);
+
+    // With no output rail in the running an input rail is still planed — the
+    // rung demotes, it does not disqualify.
+    const only_input = [_]FlatNet{ tNet("GND", &three_pins), tNet("VIN", two_pins) };
+    try testing.expectEqualStrings("VIN", dominantRail(&only_input).?);
 }
 
 // spec: placement/implicit-plane - a block with no qualifying rail keeps both inner planes on ground

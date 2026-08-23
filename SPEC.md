@@ -3329,8 +3329,15 @@ The whole model lives in one module because the router, the oracle, the DRC, the
 pour fill and the Gerber export must never disagree about it — a board where the
 router assumes a plane the Gerbers do not pour is a shipped short.
 
+WHICH rail wins is settled by a tie-break ladder — most pads, then an output
+rail over an input rail, then the lower net name — which is a strict total order
+over the qualifying nets. The rail that loses is left to long surface routing,
+so the choice may not turn on the order the flattener happened to emit nets in:
+reordering two pin declarations in a `.sexp` must never move the plane.
+
 - the dominant supply rail is the rail-class net with the most pads
-- a tie on pad count keeps the first flattened net
+- a tie on pad count resolves the same whatever order the nets arrive in
+- a pad-count tie hands the plane to an output rail over an input rail
 - a block with no qualifying rail keeps both inner planes on ground
 - the rail plane carries its net by full name or leaf, and nothing else
 - In1 is always ground and In2 is the chosen rail, else ground
