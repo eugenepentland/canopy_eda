@@ -305,6 +305,7 @@ pub fn planSilk(
                 .relief = relief,
                 .annotations = annotations,
                 .reserved_texts = reserved_texts,
+                .tracks = copper.tracks,
             },
         ),
     };

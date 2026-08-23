@@ -692,6 +692,7 @@ test {
     _ = @import("placement/net_topology.zig");
     _ = @import("placement/plane_stitch.zig");
     _ = @import("placement/plane_stitch_route_regression.zig");
+    _ = @import("placement/ldo_route_quality_regression.zig");
     _ = @import("placement/maze_scratch.zig");
     _ = @import("placement/manhattan_route.zig");
     _ = @import("placement/straighten.zig");

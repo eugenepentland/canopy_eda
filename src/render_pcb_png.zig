@@ -353,6 +353,7 @@ fn renderCanvas(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options)
             .relief = sub_relief,
             .annotations = sub_silk,
             .reserved_texts = pin_one_reserved,
+            .tracks = if (opts.routed) |r| r.tracks else &.{},
         },
     );
     defer subcircuit_silkscreen.deinitPinOneMarkers(alloc, pin_one_silk);

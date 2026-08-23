@@ -22,6 +22,7 @@ const outline = @import("placement/outline.zig");
 const pad_shape = @import("placement/pad_shape.zig");
 const perimeter_fence = @import("placement/perimeter_fence.zig");
 const mask_relief = @import("placement/mask_relief.zig");
+const route_result = @import("placement/route_result.zig");
 const font = @import("font5x7.zig");
 const silk_font = @import("silk_font.zig");
 
@@ -596,7 +597,34 @@ const PinOneContext = struct {
     keepouts: []const Keepout,
     annotations: []const Annotation,
     reserved_texts: []const font.BoardText,
+    tracks: []const route_result.Track,
 };
+
+/// Whether one pass of the pin-one search treats routed copper as an obstacle.
+///
+/// Copper is the only SOFT obstacle the marker has: silk over a trace is not a
+/// fabrication defect (the solder mask sits between them), it is a legibility
+/// one — a 0.3 mm white disc sitting mid-trace reads as a via in the board
+/// viewer. So the ring search runs once refusing copper and, only if that finds
+/// nothing at all, again allowing it. Dropping the marker is worse than
+/// printing it on a trace.
+const CopperPolicy = enum { avoid, allow };
+
+/// Does the marker disc at `point` land on (or within finished-silk clearance
+/// of) routed copper on its own outer face?
+///
+/// Only the face's own copper matters: the outer signal layers are 0 (F.Cu) and
+/// 1 (B.Cu), the same mapping `router_support.sideLayer` gives a placed part,
+/// and inner copper is invisible under silk by construction.
+fn pinOneHitsCopper(tracks: []const route_result.Track, side: optimizer.Side, point: [2]f64) bool {
+    const layer: u8 = if (side == .bottom) 1 else 0;
+    for (tracks) |track| {
+        if (track.layer != layer) continue;
+        const gap = pin_one_marker_radius_mm + track.width / 2 + label_clearance_mm;
+        if (pointSegmentDistance(point, .{ track.x1, track.y1 }, .{ track.x2, track.y2 }) < gap) return true;
+    }
+    return false;
+}
 
 const FootprintSilkObstacle = struct {
     side: optimizer.Side,
@@ -647,8 +675,10 @@ fn pinOneCandidateClear(
     placed: []const PinOneMarker,
     side: optimizer.Side,
     point: [2]f64,
+    copper: CopperPolicy,
 ) bool {
     const box = pinOneBox(point[0], point[1]);
+    if (copper == .avoid and pinOneHitsCopper(ctx.tracks, side, point)) return false;
     if (pinOneHitsFootprintSilk(ctx.footprint_silk, side, point)) return false;
     if (labelHitsArtOnSide(ctx.annotations, side, box)) return false;
     if (!labelClear(ctx.placement, .{
@@ -670,10 +700,96 @@ fn appendPinOneCandidate(
     ctx: PinOneContext,
     part: optimizer.Part,
     point: [2]f64,
+    copper: CopperPolicy,
 ) std.mem.Allocator.Error!bool {
-    if (!pinOneCandidateClear(ctx, out.items, part.side, point)) return false;
+    if (!pinOneCandidateClear(ctx, out.items, part.side, point, copper)) return false;
     try out.append(alloc, .{ .ref_des = part.ref_des, .side = part.side, .x = point[0], .y = point[1] });
     return true;
+}
+
+/// One part's pin-one dot, as far as `copper` allows: the authored corner if it
+/// is still clear, else the outward ring search around the pin. False means no
+/// slot in the whole search ring satisfied this pass.
+fn placePinOneMarker(
+    out: *std.ArrayList(PinOneMarker),
+    alloc: std.mem.Allocator,
+    ctx: PinOneContext,
+    site: PinOneSite,
+    copper: CopperPolicy,
+) std.mem.Allocator.Error!bool {
+    // Preserve an already-good authored location before searching; this
+    // keeps the generated dot on the package's intended pin-one corner.
+    if (site.authored and try appendPinOneCandidate(out, alloc, ctx, site.part, site.preferred, copper)) return true;
+
+    const steps: usize = @intFromFloat(@ceil(pin_one_search_radius_mm / pin_one_search_step_mm));
+    for (0..steps + 1) |ri| {
+        const radius = site.first_radius + @as(f64, @floatFromInt(ri)) * pin_one_search_step_mm;
+        // Authored direction first, then alternate around the pin so equal-
+        // distance candidates retain the footprint designer's corner.
+        const offsets = [_]f64{ 0, -1, 1, -2, 2, -3, 3, 4 };
+        for (offsets) |octant| {
+            const angle = site.base_angle + octant * std.math.pi / 4;
+            const x = site.pin[0] + radius * @cos(angle);
+            const y = site.pin[1] + radius * @sin(angle);
+            if (try appendPinOneCandidate(out, alloc, ctx, site.part, .{ x, y }, copper)) return true;
+        }
+    }
+    return false;
+}
+
+/// Everything one part's pin-one search needs that does not change between the
+/// copper-avoiding pass and the fallback.
+const PinOneSite = struct {
+    part: optimizer.Part,
+    /// World centre of the marked pad.
+    pin: [2]f64,
+    /// The authored dot's world centre, tried before any ring.
+    preferred: [2]f64,
+    /// Was there an authored dot at all?
+    authored: bool,
+    /// Direction the search opens in.
+    base_angle: f64,
+    /// Radius of the first ring: clear of the pad's own copper.
+    first_radius: f64,
+};
+
+/// Resolve `part`'s pin-one search geometry, or null when it is not a
+/// directional part that takes a marker.
+fn pinOneSite(part: optimizer.Part) ?PinOneSite {
+    const pad = pinOnePad(part) orelse return null;
+    var authored: ?geometry.SilkCircle = null;
+    for (part.features.silk_circles) |circle| {
+        if (!isAuthoredPinOneIndicator(circle)) continue;
+        authored = circle;
+        break;
+    }
+    if (!isDirectionalPart(part, authored != null)) return null;
+    const pin = optimizer.worldPadCenter(&part, pad.x, pad.y);
+    const old = if (authored) |indicator|
+        optimizer.worldPadCenter(&part, indicator.cx, indicator.cy)
+    else
+        pin;
+    var dx = if (authored != null) old[0] - pin[0] else pin[0] - part.x;
+    var dy = if (authored != null) old[1] - pin[1] else pin[1] - part.y;
+    var length = std.math.hypot(dx, dy);
+    if (length < 1e-9) {
+        dx = pin[0] - part.x;
+        dy = pin[1] - part.y;
+        length = std.math.hypot(dx, dy);
+    }
+    if (length < 1e-9) {
+        dx = -1;
+        dy = -1;
+        length = std.math.sqrt(2.0);
+    }
+    return .{
+        .part = part,
+        .pin = pin,
+        .preferred = old,
+        .authored = authored != null,
+        .base_angle = std.math.atan2(dy / length, dx / length),
+        .first_radius = @max(pad.w, pad.h) / 2 + label_clearance_mm + pin_one_marker_radius_mm,
+    };
 }
 
 /// Collision sources reserved while generated pin-one dots are placed.
@@ -683,6 +799,12 @@ pub const PinOneObstacles = struct {
     relief: mask_relief.Relief = .{},
     annotations: []const Annotation = &.{},
     reserved_texts: []const font.BoardText = &.{},
+    /// The board's routed copper. The one SOFT obstacle here (see
+    /// `CopperPolicy`): a slot clear of it is preferred, and a board with
+    /// nowhere clear still gets its marker. Default empty, so an unrouted board
+    /// — and every caller that has no copper to offer — places exactly as
+    /// before.
+    tracks: []const route_result.Track = &.{},
 };
 
 /// Place a uniform 0.3 mm filled dot beside pad 1 (or BGA/connector pad A1) of
@@ -690,7 +812,8 @@ pub const PinOneObstacles = struct {
 /// corner and is replaced in rendered/fabricated output; otherwise multi-pad
 /// hubs and two-pad D/Q parts search outward from pin 1. Placement uses the same
 /// board-edge, exact-pad, keepout, footprint/generated-art and text collision
-/// checks as sub-circuit labels.
+/// checks as sub-circuit labels, plus routed copper as a soft preference (see
+/// `CopperPolicy`).
 pub fn collectPinOneMarkers(
     alloc: std.mem.Allocator,
     placement: optimizer.Placement,
@@ -713,64 +836,17 @@ pub fn collectPinOneMarkers(
         .keepouts = obstacles.keepouts,
         .annotations = obstacles.annotations,
         .reserved_texts = obstacles.reserved_texts,
+        .tracks = obstacles.tracks,
     };
 
     var out: std.ArrayList(PinOneMarker) = .empty;
     errdefer out.deinit(alloc);
     for (placement.parts) |part| {
         if (excluded(part.ref_des, obstacles.excluded_refs)) continue;
-        const pad = pinOnePad(part) orelse continue;
-        var authored: ?geometry.SilkCircle = null;
-        for (part.features.silk_circles) |circle| {
-            if (!isAuthoredPinOneIndicator(circle)) continue;
-            authored = circle;
-            break;
-        }
-        if (!isDirectionalPart(part, authored != null)) continue;
-        const pin = optimizer.worldPadCenter(&part, pad.x, pad.y);
-        const old = if (authored) |indicator|
-            optimizer.worldPadCenter(&part, indicator.cx, indicator.cy)
-        else
-            pin;
-        var dx = if (authored != null) old[0] - pin[0] else pin[0] - part.x;
-        var dy = if (authored != null) old[1] - pin[1] else pin[1] - part.y;
-        var length = std.math.hypot(dx, dy);
-        if (length < 1e-9) {
-            dx = pin[0] - part.x;
-            dy = pin[1] - part.y;
-            length = std.math.hypot(dx, dy);
-        }
-        if (length < 1e-9) {
-            dx = -1;
-            dy = -1;
-            length = std.math.sqrt(2.0);
-        }
-        const base_angle = std.math.atan2(dy / length, dx / length);
-
-        // Preserve an already-good authored location before searching; this
-        // keeps the generated dot on the package's intended pin-one corner.
-        if (authored != null and try appendPinOneCandidate(&out, alloc, ctx, part, old)) continue;
-
-        const pad_radius = @max(pad.w, pad.h) / 2;
-        const first_radius = pad_radius + label_clearance_mm + pin_one_marker_radius_mm;
-        const steps: usize = @intFromFloat(@ceil(pin_one_search_radius_mm / pin_one_search_step_mm));
-        var placed = false;
-        for (0..steps + 1) |ri| {
-            const radius = first_radius + @as(f64, @floatFromInt(ri)) * pin_one_search_step_mm;
-            // Authored direction first, then alternate around the pin so equal-
-            // distance candidates retain the footprint designer's corner.
-            const offsets = [_]f64{ 0, -1, 1, -2, 2, -3, 3, 4 };
-            for (offsets) |octant| {
-                const angle = base_angle + octant * std.math.pi / 4;
-                const x = pin[0] + radius * @cos(angle);
-                const y = pin[1] + radius * @sin(angle);
-                if (try appendPinOneCandidate(&out, alloc, ctx, part, .{ x, y })) {
-                    placed = true;
-                    break;
-                }
-            }
-            if (placed) break;
-        }
+        const site = pinOneSite(part) orelse continue;
+        // Copper-free first; a board with nowhere clear keeps its marker.
+        if (try placePinOneMarker(&out, alloc, ctx, site, .avoid)) continue;
+        _ = try placePinOneMarker(&out, alloc, ctx, site, .allow);
     }
     return out.toOwnedSlice(alloc);
 }
@@ -2476,6 +2552,119 @@ test "pin-one marker searches away from a pad collision" {
     try std.testing.expectEqual(@as(usize, 1), got.len);
     try std.testing.expect(@abs(got[0].x - 4) > 1e-6 or @abs(got[0].y - 5) > 1e-6);
     try expectMarkerClearOfPads(std.testing.allocator, &parts, got[0]);
+}
+
+const copper_pin_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 1, .h = 1 }};
+const copper_pin_circles = [_]geometry.SilkCircle{.{ .cx = -1, .cy = 0, .r = 0.1 }};
+
+/// A one-part board for the copper-avoidance tests: a hub at (4, 4) whose
+/// authored pin-one dot sits 1 mm west of its own pad, on an 8 x 8 mm board so
+/// the marker's 4 mm search ring stays inside Edge.Cuts. `parts` is held by the
+/// caller because `Placement.parts` is a mutable slice into it.
+const PinOneCopperBoard = struct {
+    parts: [1]optimizer.Part = .{.{
+        .ref_des = "U1",
+        .kind = .hub,
+        .hw = 1.5,
+        .hh = 1.5,
+        .pads = &copper_pin_pads,
+        .fallback = false,
+        .features = .{ .silk_circles = &copper_pin_circles },
+        .x = 4,
+        .y = 4,
+    }},
+
+    fn placement(self: *PinOneCopperBoard) optimizer.Placement {
+        return .{
+            .parts = &self.parts,
+            .links = &.{},
+            .loops = &.{},
+            .stubs = &.{},
+            .instances = &.{},
+            .nets = &.{},
+            .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+            .minx = 0,
+            .miny = 0,
+            .maxx = 8,
+            .maxy = 8,
+            .generated = false,
+            .board_rect = .{ .minx = 0, .miny = 0, .w = 8, .h = 8 },
+        };
+    }
+};
+
+/// Distance from a marker's disc EDGE to the nearest same-face routed
+/// centreline, less that track's own half width — negative means the white dot
+/// is printed over copper.
+fn markerCopperGapMm(marker: PinOneMarker, tracks: []const route_result.Track) f64 {
+    const layer: u8 = if (marker.side == .bottom) 1 else 0;
+    var gap = std.math.inf(f64);
+    for (tracks) |track| {
+        if (track.layer != layer) continue;
+        const d = pointSegmentDistance(.{ marker.x, marker.y }, .{ track.x1, track.y1 }, .{ track.x2, track.y2 });
+        gap = @min(gap, d - pin_one_marker_radius_mm - track.width / 2);
+    }
+    return gap;
+}
+
+// spec: export_gerber - a generated pin-one dot prefers a slot clear of routed copper on its own face, so the marker never reads as a via sitting on a trace
+test "pin-one marker steps off the trace running through its authored corner" {
+    // A rail running west out of U1's pad, straight through the authored dot's
+    // corner at (3, 4). Nothing else is on the board, so the only reason to
+    // move is the copper.
+    const tracks = [_]route_result.Track{
+        .{ .x1 = 3.5, .y1 = 4, .x2 = 0.5, .y2 = 4, .layer = 0, .width = 0.35, .net = 0 },
+    };
+    var board = PinOneCopperBoard{};
+    const placement = board.placement();
+
+    const blind = try collectPinOneMarkers(std.testing.allocator, placement, .{});
+    defer deinitPinOneMarkers(std.testing.allocator, blind);
+    try std.testing.expectEqual(@as(usize, 1), blind.len);
+    // Without the copper the search keeps the authored corner, and that corner
+    // is on the trace.
+    try std.testing.expect(markerCopperGapMm(blind[0], &tracks) < 0);
+
+    const aware = try collectPinOneMarkers(std.testing.allocator, placement, .{ .tracks = &tracks });
+    defer deinitPinOneMarkers(std.testing.allocator, aware);
+    try std.testing.expectEqual(@as(usize, 1), aware.len);
+    try std.testing.expect(markerCopperGapMm(aware[0], &tracks) >= label_clearance_mm);
+    // …and it is still a pin-one marker: the search only ever walks outward
+    // from the pin, so it stays inside the ring it was already allowed.
+    try std.testing.expect(std.math.hypot(aware[0].x - 4, aware[0].y - 4) <= pin_one_search_radius_mm + 1);
+}
+
+// spec: export_gerber - copper is only a preference for a pin-one dot, so a part whose whole search ring is covered keeps its marker instead of losing it
+test "pin-one marker keeps its dot when every slot is over copper" {
+    // Sixteen radial spokes out of the pin, each 6 mm long and 3 mm wide: every
+    // point of the 4 mm search ring is inside one of them, so no copper-free
+    // slot exists at all.
+    var spokes: [16]route_result.Track = undefined;
+    for (&spokes, 0..) |*track, i| {
+        const angle = @as(f64, @floatFromInt(i)) * std.math.tau / 16.0;
+        track.* = .{
+            .x1 = 4,
+            .y1 = 4,
+            .x2 = 4 + 6 * @cos(angle),
+            .y2 = 4 + 6 * @sin(angle),
+            .layer = 0,
+            .width = 3,
+            .net = 0,
+        };
+    }
+    var board = PinOneCopperBoard{};
+    const placement = board.placement();
+
+    const got = try collectPinOneMarkers(std.testing.allocator, placement, .{ .tracks = &spokes });
+    defer deinitPinOneMarkers(std.testing.allocator, got);
+    // The fallback pass runs and the part is still marked — a dot on a trace
+    // beats no dot at all — and it lands exactly where the copper-blind search
+    // would have put it.
+    try std.testing.expectEqual(@as(usize, 1), got.len);
+    const blind = try collectPinOneMarkers(std.testing.allocator, placement, .{});
+    defer deinitPinOneMarkers(std.testing.allocator, blind);
+    try std.testing.expectEqual(@as(usize, 1), blind.len);
+    try std.testing.expectEqualDeep(blind[0], got[0]);
 }
 
 // Regression: authored footprint outlines share the physical silk layer with

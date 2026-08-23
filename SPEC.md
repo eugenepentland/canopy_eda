@@ -1833,6 +1833,69 @@ stored numbers are only compared within a version.
 - completeness-waiver: integer overflow (the usize counts are widened to f64 before any arithmetic; no integer accumulation occurs)
 - completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
 
+## placement/ldo-route-quality
+
+The routing-quality ratchet: one real board, routed end to end on every test
+run, with every reading that the routing audit moved held to a bound.
+
+Every fix the audit produced — the bend price and the detour guard, the priced
+gateway escapes and pad-escape reversal, the finish-pipeline gloss and its
+cancel tail, via-in-pad containment, the leg-scoped bypass freeze, score v2,
+current-sized rail width, the deterministic implicit-plane tie-break — was
+measured on one module: `bcuda-lt3045-ldo`, an LT3045 LDO with a DFN-10 and
+exposed pad, seven passives, a four-layer stack carrying a ground plane and a
+VOUT plane, and two authored `(decouples "IC" PIN)` bonds. Every one of them has
+a unit test of its own, and none of those tests can see the thing that actually
+regresses: the fixes INTERACT, and a change that keeps each unit honest can
+still ship a worse board. So the board itself is the test. Unit tests cannot
+read `projects/`, so the placement is constructed from that module's measured
+geometry — the eleven DFN lands, each passive's real pose, the real net list in
+the real order, the four decoupling loops the optimizer resolves — and routed
+through the ordinary whole-board entry.
+
+The DESIGN half of the module is deliberately left out: no net-class width, no
+authored route wave. What the fixture holds still is the ROUTER on that
+geometry, so a design-side change can never be mistaken for a routing
+regression, and a routing regression cannot be hidden behind a design that
+steers around it.
+
+Every bound is a measurement plus headroom, never a transcript. Per net, routed
+copper may not exceed 1.6x its own terminal MST (the yardstick `detour_guard`
+already uses); the audit's VIN leg toured at 1.96x and today's worst net is
+1.19x. The board may draw 16 corners (12 today, 19+ before), 26 barrels (22),
+and 6 self-inflicted DRC warnings (3 today, 24+ before). No fab-blocking DRC
+error is allowed at all, and both authored bonds must close over surface copper.
+No barrel standing in one of its own lands may hang its ring off it, and the one
+exception the geometry forces — a DFN edge land 0.10 mm narrower than a 0.4 mm
+ring, so no site on it could contain one — is COUNTED rather than ignored and
+bounded at one, because a pass that stopped containing barrels puts two more of
+them on this board's ground lands. The finished copper must be the closing
+gloss's own fixed point — running `glossFinishedTracks` again changes nothing —
+which is how a duplicate section or a dangling micro-tail is detected with the
+router's own predicate rather than a second one.
+
+The score floor is derived rather than quoted: `route_score.score` evaluated at
+the limit of every gate above is the score of the worst board this fixture still
+accepts, and the real board must clear it. Being implied by the conjunction is
+the point — it pins the scalar the routing loop optimizes to the geometry the
+rest of the section bounds, so a formula that grew a penalty term none of these
+gates bounds would charge the board and not the floor.
+
+- the LT3045 fixture routes every routable net with no fab-blocking DRC error, and both authored bypass bonds close over surface copper
+- no barrel on the LT3045 fixture hangs its ring off a land that could have contained it, and only the one DFN land too small for any ring carries one that does
+- no routed net on the LT3045 fixture runs past its own terminal span by more than the detour budget, and the board's corner count, via count, and self-inflicted warnings all stay inside their measured ceilings
+- the LT3045 fixture's finished copper is the closing gloss's own fixed point, and every sub-0.1mm section is either pad-neck copper or held at both ends
+- the LT3045 fixture's v2 route score clears the score of the worst board its own quality gates still admit
+- routing the LT3045 fixture twice yields byte-identical copper, so the audit's retries and guards stay deterministic
+- completeness-waiver: empty inputs (the fixture is a fixed board; there is no caller-supplied input to be empty, and the router's own empty-input behaviour is covered in placement/router)
+- completeness-waiver: large inputs (one eight-part board routed per test; the measurements are linear or one sort in its two dozen sections)
+- completeness-waiver: unauthorized access (an in-process route over a compiled-in placement; access control lives at the serve boundary)
+- completeness-waiver: i/o failure (no I/O — the placement is compiled in precisely because unit tests may not read the project tree)
+- completeness-waiver: concurrent access (no shared state; each test owns its arena and routes its own copy of the board)
+- completeness-waiver: malformed encoding (the fixture is typed structs, never parsed bytes)
+- completeness-waiver: integer overflow (counts are bounded by the fixture's own two dozen sections; the rest is float millimetre arithmetic)
+- completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
+
 ## placement/bend-smooth
 
 Public functions: minBendRadius, apply, detect, tessellate, arcLength
@@ -4170,6 +4233,8 @@ Public functions: planLayers, writeLayer
 - a pad crossing the middle of one corner arm splits that arm into two silk fragments without removing its printable ends or neighboring arm
 - generated sub-circuit names and stroke fragments keep 0.2 mm of finished-silk clearance from pads, keepouts, and Edge.Cuts
 - saved keepout polygons move generated sub-circuit names away and suppress corner legs that would enter them
+- a generated pin-one dot prefers a slot clear of routed copper on its own face, so the marker never reads as a via sitting on a trace
+- copper is only a preference for a pin-one dot, so a part whose whole search ring is covered keeps its marker instead of losing it
 - physical test points get uniform horizontal 0.8 mm labels directly above their pad whenever that slot is clear
 - a blocked test-point label searches nearby horizontal slots without crossing pads, keepouts, or Edge.Cuts
 - test-point labels reserve their chosen position so neighboring labels on the same face do not overlap
