@@ -2744,6 +2744,7 @@ are out of scope.
 - a chain both of whose ends lie on one same-net land, touched by nothing off that land, is copper the land already provides
 - redundant land copper is dropped only where a same-net barrel stands on that land, and only while the chain stays local to it
 - a differential pair leg is never re-sited, so a matched pair's skew survives the pass
+- an authored exact bypass rail is in scope, and its net transaction rolls back a drop that leaves one of its bonds no longer closing
 - completeness-waiver: empty inputs (a board with no via, or none standing on a land, moves nothing and returns)
 - completeness-waiver: large inputs (linear in vias times the net's own copper; each net's chains are extracted once per layer)
 - completeness-waiver: unauthorized access (a pure geometry pass inside the router; endpoint access control lives in serve/ward_auth)
@@ -3487,6 +3488,45 @@ to contain one degrades by a grid pitch instead of shipping an unlanded ring.
 - completeness-waiver: malformed encoding (inputs are typed structs, never parsed bytes)
 - completeness-waiver: integer overflow (ring indices are bounded by the 16-ring cap; the rest is float millimetre arithmetic)
 - completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
+
+## placement/bypass-intent
+
+Public functions: exactNet, build, Legs, Seg
+
+Which copper the finish must keep so an authored `(decouples "IC" PIN)` bond
+survives its own cleanup. `placement/bypass-open` decides the bond by one
+question — over same-net tracks on the two parts' shared outer face, is the
+cap's rail land united with the exact IC supply land — so the answer is a WALK:
+one cap-land → track → … → track → pin-land path through that same graph, taken
+fewest-hops with ties by track order. The rest of the rail (a `(decouples rail)`
+reservoir's escape, a branch to a connector, the plane drops) is ordinary copper
+the geometry passes may clean, and freezing it bought nothing: measured on
+`bcuda-lt3045-ldo`, one authored bond froze the whole `VIN` rail and cost the
+gloss three `land_transit` findings it could otherwise remove.
+
+A pass that acts object by object refuses the walk's own objects, which is
+sufficient because the walk's union-find edges depend only on its tracks and the
+two lands, and no finisher moves a part. A pass that rebuilds a whole net at
+once re-runs the walk over its candidate copper instead and puts the net back
+when a bond that was closed has come open — holding one chain rigid while the
+copper around it moves is not the conservative choice but a third board neither
+version would produce, and on `bcuda-lt3045-ldo` that shape cost `VIN` its route
+to a `track_width` finding. A bond with no walk protects nothing: it is one
+`bypass-open` reports open already, and no pass can push that verdict lower.
+
+- the copper frozen for an authored exact bypass bond is the cap-land-to-pin-land surface walk, not the whole rail net
+- a rail whose only copper is its exact bypass leg is frozen entire, exactly as the whole-net freeze left it
+- a whole-net rewrite is refused when it leaves an authored bypass bond that was closed no longer closing over routed copper
+- an authored exact bypass bond that no surface walk closes protects no copper, because the bond is already open and cleanup cannot open it further
+- leg membership survives the chain rebuild and junction splits that cleanup passes perform
+- completeness-waiver: empty inputs (a placement with no authored bond allocates nothing and answers false to every query)
+- completeness-waiver: large inputs (each walk is filtered to one rail on one face before its breadth-first sweep, and boards carry a handful of authored bonds)
+- completeness-waiver: unauthorized access (pure in-process geometry over an already-authorized layout)
+- completeness-waiver: i/o failure (no I/O; every input is typed placement and routed-copper data)
+- completeness-waiver: concurrent access (no shared state; every result is arena-owned by the caller)
+- completeness-waiver: malformed encoding (inputs are typed structs, never parsed bytes)
+- completeness-waiver: integer overflow (net and part indices are bounds-checked before conversion, and every allocation follows a slice length)
+- completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot)
 
 ## placement/bypass-open
 

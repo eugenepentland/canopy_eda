@@ -781,15 +781,16 @@ pub fn passBoard(board: router.CleanupBoard) std.mem.Allocator.Error!void {
     const mode: Mode = if (ctx.field_space != null) .continuous else .octilinear;
     var idx_of = std.StringHashMapUnmanaged(usize).empty;
     for (placement.parts, 0..) |p, i| try idx_of.put(ctx.arena, p.ref_des, i);
+    // The authored bypass bonds that are CLOSED as this pass begins. Straighten
+    // is transactional about them: it tautens the rail like any other net and
+    // then asks whether the bond still closes, rather than holding the leg's
+    // chain rigid while the copper around it moves — see `bypass_intent`.
+    const legs = try bypass_intent.build(ctx.arena, placement, router.Track, tracks.items);
     for (0..placement.nets.len) |net_i| {
         // A scoped route's unselected nets carry the caller's RETAINED copper
         // (`stampExistingCopper`), which must echo back unchanged — never
         // straightened into a different board than the caller submitted.
         if (!netSelected(ctx.selected_nets, net_i)) continue;
-        // The plane stitcher already drew this authored cap-to-pin requirement
-        // as clean octilinear copper. Tautening the whole plane-carried net can
-        // shorten that small graph past the exact IC land.
-        if (bypass_intent.exactNet(placement, net_i)) continue;
         const ni: i32 = @intCast(net_i);
         router.setNetParams(ctx, placement, net_i); // the probe reads this net's width/clearance
         // `route_cleanup.removeNetTracks` below SHIFTS the track list indexes
@@ -827,7 +828,11 @@ pub fn passBoard(board: router.CleanupBoard) std.mem.Allocator.Error!void {
         const after_smooth = ctx.rf.net_smooth.get(ni);
         const after_radius = if (after_smooth) |s| minimumBendRadius(s.arcs, s.sharp) else null;
         const after_sharp = if (after_smooth) |s| s.sharp.len else 0;
-        if (bendQualityRegressed(before_radius, before_sharp, after_radius, after_sharp)) {
+        // Two ways this rewrite is refused: it traded a clean RF bend radius
+        // for length, or it pulled an authored cap-to-pin bypass leg off its
+        // exact IC land. Either puts the net back exactly as it arrived.
+        const opened_bond = !try legs.stillCloses(ctx.arena, placement, router.Track, tracks.items);
+        if (opened_bond or bendQualityRegressed(before_radius, before_sharp, after_radius, after_sharp)) {
             route_cleanup.removeNetTracks(tracks, ni);
             try tracks.appendSlice(ctx.arena, mine.items);
             if (before_smooth) |s|

@@ -988,6 +988,7 @@ fn dropRedundantSections(
     support: copper_topology.BranchSupport,
     list: *std.ArrayList(Track),
     selected_nets: []const bool,
+    legs: bypass_intent.Legs,
 ) std.mem.Allocator.Error!bool {
     const topology = try arena.alloc(copper_topology.Track, list.items.len);
     const analysis = try copper_topology.analyzeRedundancy(
@@ -999,7 +1000,8 @@ fn dropRedundantSections(
     var write: usize = 0;
     var removed = false;
     for (list.items, analysis.removal, analysis.spanning) |track, planned, spanning| {
-        if (planned and spanning and mayRewrite(selected_nets, track.net)) {
+        const deletable = mayRewrite(selected_nets, track.net) and !legFrozen(legs, track);
+        if (planned and spanning and deletable) {
             removed = true;
             continue;
         }
@@ -1010,28 +1012,19 @@ fn dropRedundantSections(
     return removed;
 }
 
-/// Scope for the fill-blind section-deletion pass. An authored per-pin bypass
-/// binding makes its rail's surface path functional copper, even when a plane
-/// leaves every pad in the same ordinary connectivity component. The full DRC
-/// calls that missing path `bypass_open`; this lower hot seam cannot run that
-/// graph after every tentative deletion, so it conservatively leaves section
-/// deletion off for the few nets carrying exact-target bypass intent. Leaf and
-/// one-layer-via pruning still run on them below.
-fn redundantSectionScope(board: Board) std.mem.Allocator.Error![]const bool {
-    var has_exact = false;
-    for (0..board.placement.nets.len) |net_i| {
-        if (!board.enabled(net_i) or !bypass_intent.exactNet(board.placement, net_i)) continue;
-        has_exact = true;
-        break;
-    }
-    if (!has_exact) return board.ctx.selected_nets;
-
-    const scope = try board.ctx.arena.alloc(bool, board.placement.nets.len);
-    for (scope, 0..) |*enabled, net_i| enabled.* = board.enabled(net_i);
-    for (scope, 0..) |*enabled, net_i| {
-        if (bypass_intent.exactNet(board.placement, net_i)) enabled.* = false;
-    }
-    return scope;
+/// Is this track copper that an authored exact bypass bond depends on?
+///
+/// The fill-blind deletion oracle reads a plane as making every pad of a rail
+/// one connectivity component, so the local cap-to-pin surface leg an authored
+/// `(decouples "IC" PIN)` binding requires looks redundant to it, and the
+/// closing gloss fuses and clips runs with no view of the bond at all. Neither
+/// seam can run the `bypass_open` graph after every tentative edit — they work
+/// object by object, with no net-sized rollback — so both refuse the objects
+/// the bond's own surface walk is made of. Only those: the REST of the rail — a
+/// second cap's reservoir escape, a branch to a connector — is ordinary copper
+/// and stays fair game (see `bypass_intent`).
+fn legFrozen(legs: bypass_intent.Legs, track: Track) bool {
+    return legs.trackFrozen(track.net, track.layer, .{ track.x1, track.y1 }, .{ track.x2, track.y2 });
 }
 
 /// Remove topology artifacts to a fixed point. A leaf trace is dropped first;
@@ -1086,7 +1079,10 @@ pub fn pruneDanglingCopper(board: Board) std.mem.Allocator.Error!void {
 /// `liveSupportVias` for what crediting outlines here cost when it was tried.
 pub fn pruneDeadCopper(board: Board) std.mem.Allocator.Error!void {
     try pruneDanglingCopper(board);
-    const section_scope = try redundantSectionScope(board);
+    // Resolved once, over the copper the leaf prune left standing. The section
+    // oracle refuses the walk's own tracks every round below, so the walk stays
+    // whole however much of the rest of the rail goes with it.
+    const legs = try bypass_intent.build(board.arena(), board.placement, Track, board.tracks.items);
     const limit = board.tracks.items.len + 1;
     var round: usize = 0;
     while (round < limit) : (round += 1) {
@@ -1098,7 +1094,7 @@ pub fn pruneDeadCopper(board: Board) std.mem.Allocator.Error!void {
         // Pads, traces and live barrels — and no pour term at all. See
         // `liveSupportVias`: the fill this seam can see is an outline, and a
         // deletion licensed by an outline has no rollback here.
-        if (!try dropRedundantSections(board.ctx.arena, terminals, .{ .live_vias = live }, board.tracks, section_scope))
+        if (!try dropRedundantSections(board.ctx.arena, terminals, .{ .live_vias = live }, board.tracks, board.ctx.selected_nets, legs))
             break;
         router.copperCompacted(board.ctx);
         try pruneDanglingCopper(board);
@@ -2839,19 +2835,20 @@ pub fn glossFinishedTracks(
     return stats;
 }
 
-/// May the gloss rewrite this net's copper at all? Scope selection is the same
-/// question `mayRewrite` answers; an EXACT net (`bypass_intent.exactNet`) is
-/// additionally off limits, because its copper is authored cap-to-pin intent
-/// whose shape is the point — the same exemption `straighten` and `pad_escape`
-/// take.
-fn glossMayRewrite(board: Board, net: i32) bool {
-    if (!mayRewrite(board.ctx.selected_nets, net)) return false;
-    return !bypass_intent.exactNet(board.placement, @intCast(net));
+/// May the gloss rewrite this TRACK at all? Scope selection is the same
+/// question `mayRewrite` answers; leg copper (`bypass_intent.Legs`) is
+/// additionally off limits, because its shape is authored cap-to-pin intent and
+/// this sweep has no net-sized rollback with which to take the question back.
+/// Track by track is the granularity the gloss already works at, so the rest of
+/// an exact rail glosses like any other copper.
+fn glossMayRewrite(board: Board, legs: bypass_intent.Legs, t: Track) bool {
+    if (!mayRewrite(board.ctx.selected_nets, t.net)) return false;
+    return !legFrozen(legs, t);
 }
 
-fn glossMutableMask(board: Board) std.mem.Allocator.Error!std.ArrayList(bool) {
+fn glossMutableMask(board: Board, legs: bypass_intent.Legs) std.mem.Allocator.Error!std.ArrayList(bool) {
     var mutable: std.ArrayList(bool) = .empty;
-    for (board.tracks.items) |t| try mutable.append(board.arena(), glossMayRewrite(board, t.net));
+    for (board.tracks.items) |t| try mutable.append(board.arena(), glossMayRewrite(board, legs, t));
     return mutable;
 }
 
@@ -2859,10 +2856,11 @@ fn glossMutableMask(board: Board) std.mem.Allocator.Error!std.ArrayList(bool) {
 /// snap. Runs after EVERY copper-emitting pass, so nothing re-creates what it
 /// removes; it re-straightens nothing, so the escape rays drawn last survive.
 pub fn finalGloss(board: Board) std.mem.Allocator.Error!void {
-    var mutable = try glossMutableMask(board);
+    const legs = try bypass_intent.build(board.arena(), board.placement, Track, board.tracks.items);
+    var mutable = try glossMutableMask(board, legs);
     const stats = glossFinishedTracks(board.tracks, &mutable, board.vias.items, board.ctx.obs);
     if (stats.changed()) router.copperCompacted(board.ctx);
-    try snapPadStubs(board);
+    try snapPadStubs(board, legs);
 }
 
 /// The deadline tail: the deterministic, probe-free half of the finish.
@@ -2874,7 +2872,8 @@ pub fn finalGloss(board: Board) std.mem.Allocator.Error!void {
 /// when the caller has stopped waiting: this is bounded by the copper already
 /// on the board and takes no new decision.
 pub fn cancelGloss(board: Board) std.mem.Allocator.Error!void {
-    var mutable = try glossMutableMask(board);
+    const legs = try bypass_intent.build(board.arena(), board.placement, Track, board.tracks.items);
+    var mutable = try glossMutableMask(board, legs);
     _ = glossFinishedTracks(board.tracks, &mutable, board.vias.items, board.ctx.obs);
     dropDegenerateTracks(board.tracks, board.ctx.selected_nets);
     router.copperCompacted(board.ctx);
@@ -2913,14 +2912,19 @@ fn landOffences(pads: []const PadObs, tracks: []const Track, net: i32) usize {
 /// cannot be torn apart, and the rewrite is taken only when the probe clears
 /// each moved section at its real width AND the land tally strictly improves —
 /// a snap that merely re-parks the lap somewhere else is refused.
-pub fn snapPadStubs(board: Board) std.mem.Allocator.Error!void {
+pub fn snapPadStubs(board: Board, legs: bypass_intent.Legs) std.mem.Allocator.Error!void {
     const ctx = board.ctx;
     for (ctx.obs) |pad| {
-        if (pad.thru or pad.net < 0 or !glossMayRewrite(board, pad.net)) continue;
+        if (pad.thru or pad.net < 0 or !mayRewrite(ctx.selected_nets, pad.net)) continue;
         const land = padLand(pad);
         if (land.paddle()) continue;
         const net_i: usize = @intCast(pad.net);
         if (!board.enabled(net_i)) continue;
+        // The snap is a per-PAD transaction over every end parked on this land,
+        // so it is refused whole when one of those ends belongs to an authored
+        // bypass leg. The rest of an exact rail — the reservoir cap's escape,
+        // the branch to a connector — still gets its laps removed.
+        if (padHoldsLeg(board, legs, pad)) continue;
         var offending = false;
         for (board.tracks.items) |t| {
             if (t.net != pad.net or t.layer != pad.layer) continue;
@@ -2962,6 +2966,18 @@ pub fn snapPadStubs(board: Board) std.mem.Allocator.Error!void {
         dropDegenerateTracks(board.tracks, ctx.selected_nets);
         router.copperCompacted(ctx);
     }
+}
+
+/// Does any authored bypass-leg track park an end on this land? Consulted
+/// before `snapPadStubs` re-sites every end it finds there.
+fn padHoldsLeg(board: Board, legs: bypass_intent.Legs, pad: PadObs) bool {
+    if (!legs.any()) return false;
+    for (board.tracks.items) |t| {
+        if (t.net != pad.net or t.layer != pad.layer) continue;
+        if (!pointInPad(pad, t.x1, t.y1) and !pointInPad(pad, t.x2, t.y2)) continue;
+        if (legFrozen(legs, t)) return true;
+    }
+    return false;
 }
 
 /// One net's accumulated copper, handed to the branch fold.
@@ -3465,11 +3481,11 @@ test "dropRedundantSections removes a hook drawn on one land and keeps the run l
         .{ .x1 = 0.2, .y1 = 0, .x2 = 0.35, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
         .{ .x1 = 0.35, .y1 = 0, .x2 = 0.2, .y2 = 0.2, .layer = 0, .width = 0.2, .net = 0 },
     });
-    try testing.expect(try dropRedundantSections(arena, &lands, .{}, &list, &.{}));
+    try testing.expect(try dropRedundantSections(arena, &lands, .{}, &list, &.{}, .{}));
     try testing.expectEqual(@as(usize, 1), list.items.len);
     try testing.expectEqual(@as(f64, 5), list.items[0].x2);
     // The survivor is the only path to the second land, so this is a fixed point.
-    try testing.expect(!try dropRedundantSections(arena, &lands, .{}, &list, &.{}));
+    try testing.expect(!try dropRedundantSections(arena, &lands, .{}, &list, &.{}, .{}));
 }
 
 // spec: placement/router - the finish's section-deletion plan never strips retained out-of-scope copper
@@ -3490,7 +3506,7 @@ test "dropRedundantSections leaves an unselected net's redundant copper alone" {
         .{ .x1 = 0.35, .y1 = 0, .x2 = 0.2, .y2 = 0.2, .layer = 0, .width = 0.2, .net = 0 },
     });
     const retained = [_]bool{false};
-    try testing.expect(!try dropRedundantSections(arena, &lands, .{}, &list, &retained));
+    try testing.expect(!try dropRedundantSections(arena, &lands, .{}, &list, &retained, .{}));
     try testing.expectEqual(@as(usize, 3), list.items.len);
 }
 
@@ -3516,7 +3532,7 @@ test "dropRedundantSections keeps a component that joins no second support" {
     const analysis = try copper_topology.analyzeRedundancy(arena, &lands, fillTopologyTracks(topology, list.items), .{});
     try testing.expect(analysis.individual[0] and analysis.individual[1]);
     try testing.expect(!analysis.spanning[0] and !analysis.spanning[1]);
-    try testing.expect(!try dropRedundantSections(arena, &lands, .{}, &list, &.{}));
+    try testing.expect(!try dropRedundantSections(arena, &lands, .{}, &list, &.{}, .{}));
     try testing.expectEqual(@as(usize, 2), list.items.len);
 }
 
@@ -3579,16 +3595,16 @@ test "a fill-credited deletion plan consumes a doubled pad stub joined through i
     const topology = try arena.alloc(copper_topology.Track, list.items.len);
     const filled_tracks = fillTopologyTracks(topology, list.items);
     const blind = try copper_support.assemble(arena, placement, &lands, filled_tracks, &vias, &.{});
-    try testing.expect(!try dropRedundantSections(arena, &lands, blind.branch, &list, &.{}));
+    try testing.expect(!try dropRedundantSections(arena, &lands, blind.branch, &list, &.{}, .{}));
     try testing.expectEqual(@as(usize, 2), list.items.len);
 
     // The GATE is handed the fabricated fill, and there the second leg joins
     // nothing the first does not already join: exactly one survives.
     const poured = try copper_support.assemble(arena, placement, &lands, filled_tracks, &vias, &zones);
-    try testing.expect(try dropRedundantSections(arena, &lands, poured.branch, &list, &.{}));
+    try testing.expect(try dropRedundantSections(arena, &lands, poured.branch, &list, &.{}, .{}));
     try testing.expectEqual(@as(usize, 1), list.items.len);
     // …and the survivor is a fixed point rather than the next round's victim.
     const kept = try arena.alloc(copper_topology.Track, list.items.len);
     const after = try copper_support.assemble(arena, placement, &lands, fillTopologyTracks(kept, list.items), &vias, &zones);
-    try testing.expect(!try dropRedundantSections(arena, &lands, after.branch, &list, &.{}));
+    try testing.expect(!try dropRedundantSections(arena, &lands, after.branch, &list, &.{}, .{}));
 }

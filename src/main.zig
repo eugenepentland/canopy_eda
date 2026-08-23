@@ -663,6 +663,7 @@ test {
     _ = @import("placement/pose_math.zig");
     _ = @import("placement/pad_exit.zig");
     _ = @import("placement/drc_compose.zig");
+    _ = @import("placement/bypass_intent.zig");
     _ = @import("placement/bypass_open.zig");
     _ = @import("placement/routed_copper.zig");
     _ = @import("placement/router.zig");

@@ -168,6 +168,7 @@ test {
     _ = @import("placement/airwire_geometry.zig");
     _ = @import("placement/bend_smooth.zig");
     _ = @import("placement/blocker_nomination.zig");
+    _ = @import("placement/bypass_intent.zig");
     _ = @import("placement/bypass_open.zig");
     _ = @import("placement/cap_bind.zig");
     _ = @import("placement/cdt_layers.zig");

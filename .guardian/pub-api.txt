@@ -1351,7 +1351,13 @@ src/placement/blocker_nomination.zig::ranked | fn ranked(self: Table, alloc: std
 src/placement/blocker_nomination.zig::sweepHops | fn sweepHops(t: *Table, alloc: std.mem.Allocator, s: Sweep) std.mem.Allocator.Error!void
 src/placement/blocker_nomination.zig::trackGap | fn trackGap(hops: []const Hop, c: router.Track) f64
 src/placement/blocker_nomination.zig::viaGap | fn viaGap(hops: []const Hop, v: router.Via) f64
+src/placement/bypass_intent.zig::Legs struct_
+src/placement/bypass_intent.zig::Seg struct_
+src/placement/bypass_intent.zig::any | fn any(self: Legs) bool
+src/placement/bypass_intent.zig::build | fn build( arena: std.mem.Allocator, placement: optimizer.Placement, comptime Copper: type, tracks: []const Copper, ) std.mem.Allocator.Error!Legs
 src/placement/bypass_intent.zig::exactNet | fn exactNet(placement: optimizer.Placement, net_i: usize) bool
+src/placement/bypass_intent.zig::stillCloses | fn stillCloses( self: Legs, arena: std.mem.Allocator, placement: optimizer.Placement, comptime Copper: type, tracks: []const Copper, ) std.mem.Allocator.Error!bool
+src/placement/bypass_intent.zig::trackFrozen | fn trackFrozen(self: Legs, net: i32, layer: u8, a: [2]f64, b: [2]f64) bool
 src/placement/bypass_open.zig::check | fn check( arena: std.mem.Allocator, placement: optimizer.Placement, tracks: []const router.Track, ) std.mem.Allocator.Error![]drc.Violation
 src/placement/cap_bind.zig::CapBinds struct_
 src/placement/cap_bind.zig::CapTarget struct_
@@ -2171,16 +2177,18 @@ src/placement/plane_stitch.zig::via_share_max_mm value
 src/placement/plane_via.zig::InPad struct_
 src/placement/plane_via.zig::ThermalArray struct_
 src/placement/plane_via.zig::ThermalAxis struct_
+src/placement/plane_via.zig::barrelFits | fn barrelFits(pad: pad_shape.Shape, point: [2]f64, via_dia: f64) bool
 src/placement/plane_via.zig::count | fn count(self: ThermalArray) usize
 src/placement/plane_via.zig::fanDir | fn fanDir(obs: anytype, c: [2]f64, net: i32) [2]f64
+src/placement/plane_via.zig::inLandBarrelFits | fn inLandBarrelFits(land: ?pad_shape.Shape, point: [2]f64, via_dia: f64) bool
 src/placement/plane_via.zig::init | fn init(shape: pad_shape.Shape, anchor: [2]f64, via_dia: f64) InPad
+src/placement/plane_via.zig::landAt | fn landAt(obs: anytype, p: [2]f64, net: i32, layer: u8) ?pad_shape.Shape
 src/placement/plane_via.zig::max_thermal_axis_vias value
 src/placement/plane_via.zig::next | fn next(self: *InPad) ?[2]f64
 src/placement/plane_via.zig::overDrill | fn overDrill(shape: pad_shape.Shape, anchor: [2]f64, via_dia: f64, via_drill: f64) InPad
 src/placement/plane_via.zig::point | fn point(self: ThermalArray, col: usize, row: usize) [2]f64
 src/placement/plane_via.zig::swivel | fn swivel(k: usize) f64
 src/placement/plane_via.zig::thermalAxis | fn thermalAxis(span: f64, via_dia: f64, min_pitch: f64) ThermalAxis
-src/placement/plane_via.zig::thermalBarrelFits | fn thermalBarrelFits(pad: pad_shape.Shape, point: [2]f64, via_dia: f64) bool
 src/placement/plane_via.zig::thermal_via_pitch_mm value
 src/placement/port_escape.zig::Blocked struct_
 src/placement/port_escape.zig::Mm struct_
@@ -2353,7 +2361,7 @@ src/placement/route_cleanup.zig::reanchorLandTransit | fn reanchorLandTransit( a
 src/placement/route_cleanup.zig::removeNetTracks | fn removeNetTracks(list: *std.ArrayList(Track), net: i32) void
 src/placement/route_cleanup.zig::removeNetVias | fn removeNetVias(list: *std.ArrayList(Via), net: i32) void
 src/placement/route_cleanup.zig::snapLandTransitEndpoints | fn snapLandTransitEndpoints( pads: []const router.PadObs, tracks: *std.ArrayList(Track), selected_nets: []const bool, ) LandTransitRepair
-src/placement/route_cleanup.zig::snapPadStubs | fn snapPadStubs(board: Board) std.mem.Allocator.Error!void
+src/placement/route_cleanup.zig::snapPadStubs | fn snapPadStubs(board: Board, legs: bypass_intent.Legs) std.mem.Allocator.Error!void
 src/placement/route_cleanup.zig::snapTerminalVias | fn snapTerminalVias(board: Board) void
 src/placement/route_cleanup.zig::viaSiteClears | fn viaSiteClears(board: Board, tracks: []const Track, vias: []const Via, self_i: usize, x: f64, y: f64) bool
 src/placement/route_close.zig::HopMemo struct_

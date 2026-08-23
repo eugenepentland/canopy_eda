@@ -124,8 +124,17 @@ fn normalizeCandidates(
     // Exact cap-to-pin bypass copper is authored intent, not a generic route
     // candidate. Land-transit reanchoring can otherwise mistake a nearby pad
     // on the same rail for the bond's destination and drag the trace through
-    // adjacent pins. Preserve those nets byte-for-byte, just as the later
-    // route-cleanup passes do.
+    // adjacent pins.
+    //
+    // This mask stays NET-wide where every later cleanup pass now narrows to
+    // the bond's own leg (`bypass_intent.Legs`). The two normalizers it feeds —
+    // `snapLandTransitEndpoints` and `reanchorLandTransit` — take a per-NET
+    // scope, and that signature is shared with the viewer's own land-transit
+    // repair, so there is nowhere finer to say it here. Reanchoring is also the
+    // single move this exemption was introduced for: it re-aims a trace END at
+    // a land it picks itself, which is exactly how a leg walks off its exact
+    // pin. Over-protecting a hierarchical seed costs a little normalization;
+    // under-protecting one costs the bond.
     const rewrite = try alloc.dupe(bool, input.candidate);
     var any_rewrite = false;
     for (rewrite, 0..) |*selected, net_i| {

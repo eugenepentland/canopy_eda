@@ -142,16 +142,19 @@ pub fn passBoard(board: Board) std.mem.Allocator.Error!void {
     // to their linear scan over the live lists, which is the only view that
     // stays true while barrels walk (`pad_escape` rebuilds it per net after us).
     router.copperCompacted(ctx);
+    // The authored bypass bonds closed as this pass begins. Each net's
+    // transaction re-asks them below, alongside its island count.
+    const legs = try bypass_intent.build(ctx.arena, board.placement, Track, board.tracks.items);
     for (0..board.placement.nets.len) |net_i| {
         if (!mayCentre(board.placement, ctx.selected_nets, @intCast(net_i))) continue;
-        try passNet(board, @intCast(net_i));
+        try passNet(board, @intCast(net_i), legs);
     }
 }
 
 /// One net's transaction: centre its in-pad barrels, drop the copper its lands
 /// already provide, and put every bit of it back if that left its pads in more
-/// islands than before.
-fn passNet(board: Board, ni: i32) std.mem.Allocator.Error!void {
+/// islands than before — or left an authored bypass bond no longer closing.
+fn passNet(board: Board, ni: i32, legs: bypass_intent.Legs) std.mem.Allocator.Error!void {
     const arena = board.ctx.arena;
     const pads = try netPads(arena, board.ctx.obs, ni);
     if (pads.len == 0) return;
@@ -162,7 +165,12 @@ fn passNet(board: Board, ni: i32) std.mem.Allocator.Error!void {
     if (!changed) return;
     const before = try padIslands(arena, pads, was_tracks, try restoredVias(arena, board.vias.items, was_vias));
     const after = try padIslands(arena, pads, try netTracks(arena, board.tracks.items, ni), try netVias(arena, board.vias.items, ni));
-    if (after <= before) return;
+    // "The land already provides this" is a FILL-BLIND reading, and an authored
+    // bypass leg is exactly the copper a land cannot stand in for: `bypass_open`
+    // wants the track, not the node. So the island count is not the whole
+    // question here — the bond is asked too, in the same transaction.
+    const bonds_kept = try legs.stillCloses(arena, board.placement, Track, board.tracks.items);
+    if (after <= before and bonds_kept) return;
     // Refused: the net keeps every barrel and every millimetre it had.
     for (was_vias) |site| {
         board.vias.items[site.index].x = site.at[0];
@@ -277,7 +285,10 @@ fn mayCentre(placement: optimizer.Placement, selected: []const bool, net: i32) b
     for (placement.diff_pairs) |dp| {
         if (dp.p == ni or dp.n == ni) return false;
     }
-    if (bypass_intent.exactNet(placement, ni)) return false;
+    // An authored bypass rail is deliberately absent from this list. Barrels
+    // are invisible to `bypass_open` — it reads tracks and lands only — so no
+    // re-siting can open a bond, and the copper drop that rides along is judged
+    // by `passNet`'s transaction rather than kept out of the pass.
     if (ni < placement.rules.net.len and placement.rules.net[ni].rf.escape_mm > 0) return false;
     return true;
 }
@@ -694,6 +705,7 @@ test "the drop is confined to local copper on a land that carries a barrel" {
 }
 
 // spec: placement/via-centre - a differential pair leg is never re-sited, so a matched pair's skew survives the pass
+// spec: placement/via-centre - an authored exact bypass rail is in scope, and its net transaction rolls back a drop that leaves one of its bonds no longer closing
 test "diff-pair legs, escape-ruled and out-of-scope nets are left alone" {
     var pairs = [_]diff_pairs.DiffPair{.{ .p = 0, .n = 1, .gap = 0.2 }};
     var rules = [_]optimizer.NetRule{ .{}, .{}, .{ .rf = .{ .escape_mm = 1.0 } }, .{} };
@@ -723,6 +735,11 @@ test "diff-pair legs, escape-ruled and out-of-scope nets are left alone" {
     const scope = [_]bool{ false, false, false, false };
     try testing.expect(!mayCentre(placement, &scope, 3));
 
+    // An authored exact bypass rail used to be excluded here as a whole net.
+    // It is IN scope now: a barrel is invisible to `bypass_open`, which reads
+    // tracks and lands only, so no re-siting can open a bond — and the copper
+    // drop that rides along is judged by `passNet`'s transaction, which asks
+    // `bypass_intent.Legs.stillCloses` alongside the island count.
     const loops = [_]optimizer.Loop{.{
         .cap = 0,
         .hub = 0,
@@ -734,5 +751,5 @@ test "diff-pair legs, escape-ruled and out-of-scope nets are left alone" {
         .explicit_pin = "15",
     }};
     placement.loops = &loops;
-    try testing.expect(!mayCentre(placement, &.{}, 3));
+    try testing.expect(mayCentre(placement, &.{}, 3));
 }

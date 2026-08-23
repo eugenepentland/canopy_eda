@@ -1137,15 +1137,29 @@ pub fn passBoard(board: router.CleanupBoard) std.mem.Allocator.Error!void {
     for (placement.diff_pairs) |dp| {
         if (try passPair(board, dp)) touched = true;
     }
+    // The authored bypass bonds closed once the two sub-passes above have
+    // finished moving copper — see the transaction below.
+    const legs = try bypass_intent.build(ctx.arena, placement, router.Track, board.tracks.items);
     for (0..placement.nets.len) |net_i| {
         if (!netSelected(ctx.selected_nets, net_i)) continue;
-        if (escapeRuled(placement, net_i) or bypass_intent.exactNet(placement, net_i) or inDiffPair(placement, net_i)) continue;
+        if (escapeRuled(placement, net_i) or inDiffPair(placement, net_i)) continue;
         const ni: i32 = @intCast(net_i);
         router.setNetParams(ctx, placement, net_i);
         router.rebuildCopperIndex(ctx, board.tracks.items, board.vias.items);
+        var was: std.ArrayList(router.Track) = .empty;
+        for (board.tracks.items) |t| if (t.net == ni) try was.append(ctx.arena, t);
         const rebuilt = (try escapeNet(board, ni)) orelse continue;
         route_cleanup.removeNetTracks(board.tracks, ni);
         try board.tracks.appendSlice(ctx.arena, rebuilt);
+        // Re-anchoring a terminal is exactly the move that can walk an authored
+        // bypass leg off its exact IC land, and the ray is drawn per chain with
+        // no view of the bond. So the rail is re-escaped like any other net and
+        // then put back verbatim if a bond that was closed has come open.
+        if (!try legs.stillCloses(ctx.arena, placement, router.Track, board.tracks.items)) {
+            route_cleanup.removeNetTracks(board.tracks, ni);
+            try board.tracks.appendSlice(ctx.arena, was.items);
+            continue;
+        }
         touched = true;
     }
     if (touched) router.copperCompacted(ctx);

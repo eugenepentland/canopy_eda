@@ -236,6 +236,9 @@ pub fn passBoard(board: router.CleanupBoard) std.mem.Allocator.Error!void {
     const tracks = board.tracks;
     const vias = board.vias;
     var touched = false;
+    // The authored bypass bonds closed as this pass begins — see the
+    // transaction below.
+    const legs = try bypass_intent.build(ctx.arena, placement, router.Track, tracks.items);
     for (0..placement.nets.len) |net_i| {
         if (!netSelected(ctx.selected_nets, net_i)) continue;
         if (skipNet(placement, net_i)) continue;
@@ -255,6 +258,15 @@ pub fn passBoard(board: router.CleanupBoard) std.mem.Allocator.Error!void {
         })) orelse continue;
         route_cleanup.removeNetTracks(tracks, ni);
         try tracks.appendSlice(ctx.arena, trimmed);
+        // The trim keeps every surviving end inside its land, so it cannot open
+        // an ordinary net — but an authored bypass bond asks a sharper question
+        // than "is this pad joined", so the rail is put back verbatim if one of
+        // its bonds came open.
+        if (!try legs.stillCloses(ctx.arena, placement, router.Track, tracks.items)) {
+            route_cleanup.removeNetTracks(tracks, ni);
+            try tracks.appendSlice(ctx.arena, mine.items);
+            continue;
+        }
         touched = true;
     }
     // The removals packed survivors down, so every copper-index slot aliases.
@@ -349,12 +361,14 @@ fn netPads(
 }
 
 /// Nets this pass never touches: an escape-ruled `(max-freq …)` net (its
-/// straight reserve is measured from the pad anchor), an exact-target bypass
-/// rail (its surface topology is an authored requirement), and either leg of
-/// a diff pair (trimming one leg alone would decouple the pair).
+/// straight reserve is measured from the pad anchor) and either leg of a diff
+/// pair (trimming one leg alone would decouple the pair).
+///
+/// An exact-target bypass rail is NOT one of them any more: it is trimmed like
+/// any other net and the result is then checked against its authored bonds,
+/// which `passBoard` rolls back on.
 fn skipNet(placement: optimizer.Placement, net_i: usize) bool {
     if (net_i < placement.rules.net.len and placement.rules.net[net_i].rf.escape_mm > 0) return true;
-    if (bypass_intent.exactNet(placement, net_i)) return true;
     for (placement.diff_pairs) |dp| {
         if (dp.p == net_i or dp.n == net_i) return true;
     }
