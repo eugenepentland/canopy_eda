@@ -2611,6 +2611,7 @@ inherited a lap can still be improved.
 - An offending on-land junction snaps all of its same-net branches to the land centre together, preserving the junction.
 - A hierarchical route seed carrying a same-net land transit is rejected before the assembled-board router can reuse it.
 - A hierarchical route seed is centre-anchored through same-net lands before board acceptance and remains rejected when the normalized copper is not DRC-clean.
+- Authored exact bypass paths are immutable at the aggregate seed gate, so nearby same-rail lands cannot retarget their endpoints.
 
 Public functions: offence, segmentOffence, worsens, onLand
 
@@ -5538,6 +5539,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - A PCB design with PDN intents resolves selected BOM electrical model properties before placement
 - Hierarchical routing processes first-level sub-circuits in authored order, freezes each accepted DRC-clean local signal tree, and then runs exactly one assembled-board global candidate
 - Live autorouting names each first-level sub-circuit when it starts and streams its cumulative copper when it finishes, before whole-board global routing begins, so full and subcircuits-only runs both reveal local progress
+- A fresh isolated candidate supersedes saved module copper on the same net, including supply nets, so stale snapshots cannot poison valid bypass bonds.
 - The PCB live-route status freezes the local-stage clock when whole-board routing starts, names final DRC work, and preserves the final elapsed time after the job ends
 - A hierarchical local pass resolves each child PCB plan in the child's net namespace, including flattened port renames, while the destination board may narrow hard layer and via constraints
 - When two local candidates collide, the earlier DRC-clean net remains frozen and only the later candidate is deferred to the global route

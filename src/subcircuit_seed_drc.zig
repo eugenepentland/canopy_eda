@@ -11,6 +11,7 @@ const route_policy = @import("placement/route_policy.zig");
 const router = @import("placement/router.zig");
 const drc = @import("placement/drc.zig");
 const route_cleanup = @import("placement/route_cleanup.zig");
+const bypass_intent = @import("placement/bypass_intent.zig");
 const geometry = @import("placement/geometry.zig");
 const flat_netlist = @import("flat_netlist.zig");
 
@@ -120,6 +121,19 @@ fn normalizeCandidates(
     clearance: f64,
     input: anytype,
 ) std.mem.Allocator.Error!void {
+    // Exact cap-to-pin bypass copper is authored intent, not a generic route
+    // candidate. Land-transit reanchoring can otherwise mistake a nearby pad
+    // on the same rail for the bond's destination and drag the trace through
+    // adjacent pins. Preserve those nets byte-for-byte, just as the later
+    // route-cleanup passes do.
+    const rewrite = try alloc.dupe(bool, input.candidate);
+    var any_rewrite = false;
+    for (rewrite, 0..) |*selected, net_i| {
+        if (selected.* and bypass_intent.exactNet(placement, net_i)) selected.* = false;
+        any_rewrite = any_rewrite or selected.*;
+    }
+    if (!any_rewrite) return;
+
     const baseline_result = try routedResult(
         @TypeOf(input.track_list.items[0]),
         @TypeOf(input.via_list.items[0]),
@@ -144,7 +158,7 @@ fn normalizeCandidates(
             .width = item.copper.width,
             .net = item.copper.net,
         });
-        try mutable.append(alloc, true);
+        try mutable.append(alloc, item.net < rewrite.len and rewrite[item.net]);
     }
     const vias = try alloc.alloc(router.Via, input.via_list.items.len);
     for (input.via_list.items, vias) |item, *via| via.* = .{
@@ -156,10 +170,12 @@ fn normalizeCandidates(
     };
     const pads = try router.buildObstacles(alloc, placement.parts, placement.nets);
     try router.canonicalizeTraceJunctions(alloc, &tracks, &mutable, vias);
-    _ = route_cleanup.snapLandTransitEndpoints(pads, &tracks, input.candidate);
-    _ = try route_cleanup.reanchorLandTransit(alloc, pads, &tracks, input.candidate);
+    _ = route_cleanup.snapLandTransitEndpoints(pads, &tracks, rewrite);
+    _ = try route_cleanup.reanchorLandTransit(alloc, pads, &tracks, rewrite);
     mutable.clearRetainingCapacity();
-    for (tracks.items) |_| try mutable.append(alloc, true);
+    for (tracks.items) |track| {
+        try mutable.append(alloc, track.net >= 0 and @as(usize, @intCast(track.net)) < rewrite.len and rewrite[@intCast(track.net)]);
+    }
     try router.canonicalizeTraceJunctions(alloc, &tracks, &mutable, vias);
 
     const normalized = try candidateViolationCounts(
@@ -311,6 +327,72 @@ test "hierarchical seed normalization centres an own-land crossing" {
     const normalized = try routedResult(TestTrack, TestVia, alloc, tracks.items, vias.items);
     const violations = try drc.check(alloc, placement, normalized, 0.127);
     try std.testing.expectEqual(@as(usize, 0), drc.countKind(violations, .land_transit));
+}
+
+// spec: placement/land-transit - Authored exact bypass paths are immutable at the aggregate seed gate, so nearby same-rail lands cannot retarget their endpoints.
+test "hierarchical seed normalization preserves exact bypass copper" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    const pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.8 }};
+    var parts = [_]optimizer.Part{.{
+        .ref_des = "A",
+        .kind = .passive,
+        .hw = 0.4,
+        .hh = 0.5,
+        .pads = &pad,
+        .fallback = false,
+        .x = 0,
+        .y = 0,
+    }};
+    const pins = [_]flat_netlist.FlatPin{.{ .ref_des = "A", .pin = "1" }};
+    const nets = [_]flat_netlist.FlatNet{.{ .name = "VCC", .pins = &pins }};
+    const land = optimizer.PadRect{ .x = 0, .y = 0, .w = 0.4, .h = 0.8 };
+    const loops = [_]optimizer.Loop{.{
+        .cap = 0,
+        .hub = 0,
+        .cap_pwr = land,
+        .cap_gnd = land,
+        .hub_pwr = &.{land},
+        .hub_pwr_pin = land,
+        .hub_gnd = &.{land},
+        .hub_gnd_pin = land,
+        .pwr_net = 0,
+        .explicit_pin = "1",
+    }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &loops,
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -2,
+        .miny = -1,
+        .maxx = 2,
+        .maxy = 1,
+        .generated = false,
+        .rules = .{ .plane_nets = &.{}, .copper_layers = 2 },
+    };
+    const TestTrack = struct { copper: route_policy.ExistingTrack, net: usize };
+    const TestVia = struct { copper: route_policy.ExistingVia, net: usize };
+    const original = route_policy.ExistingTrack{
+        .x1 = -1,
+        .y1 = 0.3,
+        .x2 = 1,
+        .y2 = 0.3,
+        .layer = 0,
+        .width = 0.12,
+        .net = 0,
+    };
+    var tracks: std.ArrayList(TestTrack) = .empty;
+    try tracks.append(alloc, .{ .net = 0, .copper = original });
+    var vias: std.ArrayList(TestVia) = .empty;
+    const selected = [_]bool{true};
+    try normalizeCandidates(alloc, placement, 0.127, .{ .track_list = &tracks, .via_list = &vias, .candidate = &selected });
+    try std.testing.expectEqual(@as(usize, 1), tracks.items.len);
+    try std.testing.expectEqualDeep(original, tracks.items[0].copper);
 }
 
 // spec: Web Server - When two local candidates collide, the earlier DRC-clean net remains frozen and only the later candidate is deferred to the global route

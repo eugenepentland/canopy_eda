@@ -13,6 +13,7 @@ const optimizer = @import("../placement/optimizer.zig");
 const route_policy = @import("../placement/route_policy.zig");
 const router = @import("../placement/router.zig");
 const route_plan = @import("route_plan.zig");
+const seed_drc = @import("../subcircuit_seed_drc.zig");
 const clock = @import("../infra/clock.zig");
 const drc = @import("../placement/drc.zig");
 
@@ -345,6 +346,63 @@ fn appendVia(alloc: std.mem.Allocator, out: *std.ArrayList(SeedVia), via: router
     } });
 }
 
+fn sameSeedTrack(items: []const SeedTrack, track: router.Track) bool {
+    for (items) |item| {
+        const old = item.copper;
+        if (old.net != track.net or old.layer != track.layer or old.width != track.width) continue;
+        if (old.x1 != track.x1 or old.y1 != track.y1) continue;
+        if (old.x2 == track.x2 and old.y2 == track.y2) return true;
+    }
+    return false;
+}
+
+fn sameSeedVia(items: []const SeedVia, via: router.Via) bool {
+    for (items) |item| {
+        const old = item.copper;
+        if (old.net != via.net or old.x != via.x or old.y != via.y) continue;
+        if (old.dia == via.dia and old.drill == via.drill) return true;
+    }
+    return false;
+}
+
+fn seedTracks(alloc: std.mem.Allocator, items: []const SeedTrack) std.mem.Allocator.Error![]const route_policy.ExistingTrack {
+    const out = try alloc.alloc(route_policy.ExistingTrack, items.len);
+    for (items, out) |item, *track| track.* = item.copper;
+    return out;
+}
+
+fn seedVias(alloc: std.mem.Allocator, items: []const SeedVia) std.mem.Allocator.Error![]const route_policy.ExistingVia {
+    const out = try alloc.alloc(route_policy.ExistingVia, items.len);
+    for (items, out) |item, *via| via.* = item.copper;
+    return out;
+}
+
+fn bondTrackObstacles(
+    alloc: std.mem.Allocator,
+    base: []const route_policy.ExistingTrack,
+    items: []const SeedTrack,
+    net: usize,
+) std.mem.Allocator.Error![]const route_policy.ExistingTrack {
+    var out: std.ArrayList(route_policy.ExistingTrack) = .empty;
+    const omit: i32 = @intCast(net);
+    for (base) |track| if (track.net != omit) try out.append(alloc, track);
+    for (items) |item| if (item.copper.net != omit) try out.append(alloc, item.copper);
+    return out.items;
+}
+
+fn bondViaObstacles(
+    alloc: std.mem.Allocator,
+    base: []const route_policy.ExistingVia,
+    items: []const SeedVia,
+    net: usize,
+) std.mem.Allocator.Error![]const route_policy.ExistingVia {
+    var out: std.ArrayList(route_policy.ExistingVia) = .empty;
+    const omit: i32 = @intCast(net);
+    for (base) |via| if (via.net != omit) try out.append(alloc, via);
+    for (items) |item| if (item.copper.net != omit) try out.append(alloc, item.copper);
+    return out.items;
+}
+
 const SubcircuitProgress = struct {
     alloc: std.mem.Allocator,
     base: route_policy.Options,
@@ -430,6 +488,22 @@ fn hasRetainedPour(zones: []const route_policy.ExistingZone, net: usize) bool {
     return false;
 }
 
+/// Hide only `net`'s carrier copper from an explicit surface-bond attempt.
+/// Foreign pours and every typed keepout remain present as real obstacles.
+fn withoutNetCarrier(
+    alloc: std.mem.Allocator,
+    zones: []const route_policy.ExistingZone,
+    net: usize,
+) std.mem.Allocator.Error![]const route_policy.ExistingZone {
+    var out: std.ArrayList(route_policy.ExistingZone) = .empty;
+    const want: i32 = @intCast(net);
+    for (zones) |zone| {
+        if (zone.copper and zone.net == want) continue;
+        try out.append(alloc, zone);
+    }
+    return out.items;
+}
+
 const saved_supply_terminal_limit: usize = 12;
 
 /// Whether a saved supply tree is a bounded local island and has no declared
@@ -465,6 +539,7 @@ pub fn savedNetUsesMultipleLayers(tracks: anytype, net: []const u8) bool {
 
 const SupplyBondContext = struct {
     alloc: std.mem.Allocator,
+    board: optimizer.Placement,
     placement: optimizer.Placement,
     params: router.RouteParams,
     base: route_policy.Options,
@@ -475,9 +550,32 @@ const SupplyBondContext = struct {
     routed_nets: []bool,
 };
 
-/// Route explicit local bypass bonds cheaply. The board seed loader can then
-/// add a validated complete starred supply tree for this module; the shared
-/// rail trunk remains for the assembled-board pass.
+fn bondAccepted(
+    ctx: SupplyBondContext,
+    net: usize,
+    tracks: []const SeedTrack,
+    vias: []const SeedVia,
+) std.mem.Allocator.Error!bool {
+    const rejected = try ctx.alloc.alloc(bool, ctx.board.nets.len);
+    @memset(rejected, false);
+    var options = ctx.base;
+    options.existing_tracks = try seedTracks(ctx.alloc, ctx.tracks.items);
+    options.existing_vias = try seedVias(ctx.alloc, ctx.vias.items);
+    try seed_drc.reject(ctx.alloc, .{
+        .placement = ctx.board,
+        .params = ctx.params,
+        .options = options,
+        .rejected = rejected,
+        .tracks = tracks,
+        .vias = vias,
+    });
+    return net < rejected.len and !rejected[net];
+}
+
+/// Route explicit local bypass bonds cheaply. A retained pour is a carrier,
+/// not a replacement for the authored cap-to-pin surface path: keep that bond
+/// and let `carrierDrops` add only the vertical connection still needed. A
+/// declared plane takes its bonds through `carrierDrops`' plane-net branch.
 fn appendUncarriedSupplyBonds(
     ctx: SupplyBondContext,
 ) std.mem.Allocator.Error!void {
@@ -488,31 +586,64 @@ fn appendUncarriedSupplyBonds(
     for (placement.nets, 0..) |net, ni| {
         if (ni >= ctx.supply.len or !ctx.supply[ni]) continue;
         if (!enabled(ctx.base, ni)) continue;
-        if (router.netHasPlane(placement, net.name) or hasRetainedPour(ctx.base.existing_zones, ni)) continue;
+        if (router.netHasPlane(placement, net.name)) continue;
         const pts = try router.netPoints(alloc, placement, &idx_of, net);
         for (try router.localSupplyBonds(alloc, placement, pts)) |bond| {
             if (stopped(ctx.base)) return;
             const pins = try alloc.alloc(export_kicad.FlatPin, 2);
             pins[0] = .{ .ref_des = pts[bond.cap].ref_des, .pin = pts[bond.cap].pin };
             pins[1] = .{ .ref_des = pts[bond.hub].ref_des, .pin = pts[bond.hub].pin };
-            const pair_nets = try alloc.dupe(optimizer.FlatNet, placement.nets);
+            const pair_nets = try alloc.dupe(optimizer.FlatNet, ctx.board.nets);
             pair_nets[ni].pins = pins;
-            var pair = placement;
+            // The bond belongs to this module, but a long authored leg must
+            // see every assembled-board component it could otherwise wander
+            // through before the final seed gate gets a chance to reject it.
+            var pair = ctx.board;
             pair.nets = pair_nets;
+            pair.rules.plane_nets = &.{};
+            pair.rules.planes = .{};
+            // This pair is one local leaf, not the common rail trunk. Route it
+            // at the authored class width; assembled-board KCL still sizes the
+            // shared trunk for the rail's full declared load.
+            pair.rules.physical.rails = &.{};
             const only = try alloc.alloc(bool, pair.nets.len);
             @memset(only, false);
             only[ni] = true;
-            const routed = try router.routeWithOptions(alloc, pair, ctx.params, try localOptions(alloc, ctx.base, ctx.module, only));
+            var bond_base = ctx.base;
+            bond_base.existing_zones = try withoutNetCarrier(alloc, bond_base.existing_zones, ni);
+            var bond_options = try localOptions(alloc, bond_base, ctx.module, only);
+            const bond_policies = try alloc.alloc(route_policy.NetPolicy, pair.nets.len);
+            for (bond_policies, 0..) |*policy, policy_i| {
+                policy.* = if (policy_i < bond_options.net.len) bond_options.net[policy_i] else .{};
+            }
+            const surface_layer = @as(u64, 1) << @intCast(pts[bond.cap].layer);
+            bond_policies[ni].allowed_layers = surface_layer;
+            bond_policies[ni].preferred_layers = surface_layer;
+            bond_policies[ni].max_vias = 0;
+            bond_options.net = bond_policies;
+            // Foreign candidates are real obstacles. Earlier copper on this
+            // same rail is deliberately hidden: each authored bypass pair must
+            // close cap-to-pin on its own instead of terminating early on a
+            // previous bond and turning a neighboring QFN land into a branch.
+            bond_options.existing_tracks = try bondTrackObstacles(alloc, ctx.base.existing_tracks, ctx.tracks.items, ni);
+            bond_options.existing_vias = try bondViaObstacles(alloc, ctx.base.existing_vias, ctx.vias.items, ni);
+            const routed = try router.routeWithOptions(alloc, pair, ctx.params, bond_options);
             if (failed(routed, pair, ni)) continue;
-            var drew = false;
+            var bond_tracks: std.ArrayList(SeedTrack) = .empty;
+            var bond_vias: std.ArrayList(SeedVia) = .empty;
             for (routed.tracks) |track| if (track.net == @as(i32, @intCast(ni))) {
-                try appendTrack(alloc, ctx.tracks, track);
-                drew = true;
+                if (sameSeedTrack(ctx.tracks.items, track)) continue;
+                try appendTrack(alloc, &bond_tracks, track);
             };
             for (routed.vias) |via| if (via.net == @as(i32, @intCast(ni))) {
-                try appendVia(alloc, ctx.vias, via);
-                drew = true;
+                if (sameSeedVia(ctx.vias.items, via)) continue;
+                try appendVia(alloc, &bond_vias, via);
             };
+            if (bond_tracks.items.len == 0 and bond_vias.items.len == 0) continue;
+            if (!try bondAccepted(ctx, ni, bond_tracks.items, bond_vias.items)) continue;
+            const drew = bond_tracks.items.len > 0 or bond_vias.items.len > 0;
+            try ctx.tracks.appendSlice(alloc, bond_tracks.items);
+            try ctx.vias.appendSlice(alloc, bond_vias.items);
             if (drew) ctx.routed_nets[ni] = true;
         }
     }
@@ -701,6 +832,25 @@ pub fn routeAllClassified(
         const plan_view = try modulePlanPlacement(alloc, local, sub);
         const lowered = try route_plan.lower(alloc, sub.block, plan_view);
         const module_options = if (lowered.applied) lowered.options else null;
+        // Exact bypass intent is mandatory local topology. Freeze its legal
+        // surface copper before discretionary signal candidates so the final
+        // ordered seed gate preserves the supply bond and defers a later
+        // signal that happens to conflict with it, rather than the reverse.
+        try appendUncarriedSupplyBonds(.{
+            .alloc = alloc,
+            .board = placement,
+            // Carrier declarations live in the assembled-board namespace;
+            // the lowered module policy is already indexed and can still be
+            // applied while routing the parent's original net names.
+            .placement = local,
+            .params = params,
+            .base = sub_base,
+            .module = module_options,
+            .supply = supply,
+            .tracks = &tracks,
+            .vias = &vias,
+            .routed_nets = nets,
+        });
         if (anySelected(selected)) {
             // A local candidate still passes the router's connectivity/DRC gate here,
             // but topology cleanup belongs to the assembled board. Running the final
@@ -732,20 +882,6 @@ pub fn routeAllClassified(
                 try appendVia(alloc, &vias, via);
             }
         }
-        try appendUncarriedSupplyBonds(.{
-            .alloc = alloc,
-            // Carrier declarations live in the assembled-board namespace;
-            // the lowered module policy is already indexed and can still be
-            // applied while routing the parent's original net names.
-            .placement = local,
-            .params = params,
-            .base = sub_base,
-            .module = module_options,
-            .supply = supply,
-            .tracks = &tracks,
-            .vias = &vias,
-            .routed_nets = nets,
-        });
         const timed_out_here = stopped(sub_base) and phase_deadline != 0;
         if (timed_out_here) timed_out += 1 else completed += 1;
         try progress.emit(
@@ -1027,7 +1163,7 @@ test "supply nets drop to a plane and uncarried supply routes its local passive 
     };
     const nets = [_]optimizer.FlatNet{.{ .name = "VCC", .pins = &pins }};
     const land = optimizer.PadRect{ .x = 0, .y = 0, .w = 0.7, .h = 0.7 };
-    const loops = [_]optimizer.Loop{.{
+    var loops = [_]optimizer.Loop{.{
         .cap = 0,
         .hub = 1,
         .cap_pwr = land,
@@ -1063,10 +1199,26 @@ test "supply nets drop to a plane and uncarried supply routes its local passive 
     try testing.expect(planed.tracks.len > 0);
     try expectSeedTracks(planed.tracks, 0, 3.5);
 
+    // A retained pour is still a carrier, but it must not replace the explicit
+    // cap-to-pin surface bond. Both lands already touch this pour, so no extra
+    // drop is needed; the short bypass trace itself is the behavior under test.
+    const pour_box = [_][2]f64{ .{ -1, -1 }, .{ 3, -1 }, .{ 3, 1 }, .{ -1, 1 } };
+    const pour = [_]route_policy.ExistingZone{.{ .polygon = &pour_box, .layer = 0, .net = 0 }};
+    loops[0].explicit_pin = "1";
+    placement.rules = .{ .plane_nets = &.{}, .copper_layers = 4 };
+    const poured = try routeAllClassified(alloc, &board, placement, .{}, .{ .existing_zones = &pour }, &.{true});
+    try testing.expect(poured.tracks.len > 0);
+    var local_bond = false;
+    for (poured.tracks) |track| {
+        if (track.copper.x1 < 3.5 and track.copper.x2 < 3.5) local_bond = true;
+    }
+    try testing.expect(local_bond);
+
     const thru_pads = [_]Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.7, .h = 0.7, .thru = true, .drill = 0.3 }};
     parts[0].pads = &thru_pads;
     parts[1].pads = &thru_pads;
     parts[2].pads = &thru_pads;
+    placement.rules = .{ .plane_nets = &.{"VCC"}, .copper_layers = 4 };
     const thru = try routeAllClassified(alloc, &board, placement, .{}, .{}, &.{true});
     try testing.expectEqual(@as(usize, 0), thru.vias.len);
     try testing.expect(thru.complete_planes[0]);

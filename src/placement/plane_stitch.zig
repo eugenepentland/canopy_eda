@@ -344,6 +344,49 @@ pub fn bonds(
     return out.items;
 }
 
+/// Authored cap-to-exact-pin surface bonds are electrical intent, not a via-
+/// sharing optimization. Return their rail legs even when the present layout
+/// places the pair farther apart than `via_share_max_mm`; the router must still
+/// attempt the continuous outer-layer path that `bypass_open` checks.
+fn exactBonds(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    pts: []const pad_exit.NetPt,
+) std.mem.Allocator.Error![]const Bond {
+    var out: std.ArrayList(Bond) = .empty;
+    for (placement.loops) |loop| {
+        if (loop.explicit_pin.len == 0 or loop.rail_optout) continue;
+        if (loop.cap >= placement.parts.len or loop.hub >= placement.parts.len) continue;
+        const cap = placement.parts[loop.cap];
+        const hub = placement.parts[loop.hub];
+        const a = terminalAt(pts, cap, loop.cap_pwr) orelse continue;
+        const b = terminalAt(pts, hub, loop.hub_pwr_pin) orelse continue;
+        if (a == b or pts[a].layer != pts[b].layer or bondKnown(out.items, a, b)) continue;
+        try out.append(arena, .{
+            .cap = a,
+            .hub = b,
+            .mm = std.math.hypot(pts[b].x - pts[a].x, pts[b].y - pts[a].y),
+        });
+    }
+    return out.items;
+}
+
+/// Surface bonds used by routing: every bounded via-sharing bond plus every
+/// authored exact-target rail leg. Exact bonds are offered first so mandatory
+/// bypass intent gets routing priority in a crowded module.
+pub fn surfaceBonds(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    pts: []const pad_exit.NetPt,
+) std.mem.Allocator.Error![]const Bond {
+    var out: std.ArrayList(Bond) = .empty;
+    for (try exactBonds(arena, placement, pts)) |bond| try out.append(arena, bond);
+    for (try bonds(arena, placement, pts)) |bond| {
+        if (!bondKnown(out.items, bond.cap, bond.hub)) try out.append(arena, bond);
+    }
+    return out.items;
+}
+
 /// Look up a routed terminal's library role without widening the generic
 /// terminal or obstacle types. Missing pinout metadata preserves legacy
 /// behavior by classifying the terminal as ordinary.
@@ -386,6 +429,11 @@ pub fn packageTieObstacle(placement: optimizer.Placement, obstacle_i: usize) boo
 
 fn candidateKnown(list: []const Candidate, a: usize, b: usize) bool {
     for (list) |candidate| if (candidate.cap == a and candidate.hub == b) return true;
+    return false;
+}
+
+fn bondKnown(list: []const Bond, a: usize, b: usize) bool {
+    for (list) |bond| if (bond.cap == a and bond.hub == b) return true;
     return false;
 }
 
@@ -690,6 +738,15 @@ test "a leg longer than the share distance is not a bond" {
     parts[1].y = pts[1].y;
     far.parts = &parts;
     try testing.expectEqual(@as(usize, 0), (try bonds(arena_inst.allocator(), far, &pts)).len);
+
+    // The distance still prevents one barrel serving both pads, but an
+    // explicitly authored cap-to-pin requirement remains a routing bond.
+    var loops = bond_fixture.loops;
+    loops[0].explicit_pin = "7";
+    far.loops = &loops;
+    const surface = try surfaceBonds(arena_inst.allocator(), far, &pts);
+    try testing.expectEqual(@as(usize, 1), surface.len);
+    try testing.expect(surface[0].mm > via_share_max_mm);
 }
 
 // spec: placement/plane-stitch - a bond carries the pair's span, so the share walk charges a run the same length the gate admitted it on

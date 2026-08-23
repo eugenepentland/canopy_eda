@@ -2331,6 +2331,10 @@ fn seedTrackWidth(placement: optimizer.Placement, params: router.RouteParams, ne
     return params.track_width;
 }
 
+fn needsSavedSeedFallback(isolated: []const bool, net: usize) bool {
+    return net >= isolated.len or !isolated[net];
+}
+
 fn seedViaGeometry(placement: optimizer.Placement, params: router.RouteParams, net: usize, saved: SavedVia) [2]f64 {
     const rule = if (net < placement.rules.net.len) placement.rules.net[net] else optimizer.NetRule{};
     const dia = if (rule.via_dia > 0) rule.via_dia else if (saved.d > 0) saved.d else params.via_dia;
@@ -2357,7 +2361,7 @@ fn appendModuleSeedCopper(
         // A fresh isolated route is authoritative for this net. The saved
         // module snapshot remains a fallback only when the local autorouter
         // emitted no copper for it.
-        if (!supply and ctx.acc.isolated[ni]) continue;
+        if (!needsSavedSeedFallback(ctx.acc.isolated, ni)) continue;
         ctx.acc.candidate[ni] = true;
         ctx.acc.stats.copper.candidate_tracks += 1;
         if (!seedNetIsLocal(ctx.placement, slug, ni)) {
@@ -2398,7 +2402,7 @@ fn appendModuleSeedCopper(
         if (supply and !subcircuit_route.savedSupplyFallbackAllowed(ctx.placement, ctx.options, slug, ni)) continue;
         if (supply and !subcircuit_route.savedNetUsesMultipleLayers(routes.tracks, saved.net)) continue;
         if (!supply and ctx.placement.rules.carriesPlane(ctx.placement.nets[ni].name)) continue;
-        if (!supply and ctx.acc.isolated[ni]) continue;
+        if (!needsSavedSeedFallback(ctx.acc.isolated, ni)) continue;
         ctx.acc.candidate[ni] = true;
         ctx.acc.stats.copper.candidate_vias += 1;
         if (!seedNetIsLocal(ctx.placement, slug, ni)) {
@@ -2681,6 +2685,13 @@ test "route response exposes deterministic local phase statistics" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"attempted_subcircuits\":3") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"accepted_carrier_drops\":5") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"fallback\":false") != null);
+}
+
+// spec: Web Server - A fresh isolated candidate supersedes saved module copper on the same net, including supply nets, so stale snapshots cannot poison valid bypass bonds.
+test "fresh isolated supply copper suppresses its saved snapshot" {
+    try std.testing.expect(!needsSavedSeedFallback(&.{true}, 0));
+    try std.testing.expect(needsSavedSeedFallback(&.{false}, 0));
+    try std.testing.expect(needsSavedSeedFallback(&.{}, 0));
 }
 
 /// Initial state of the embed preview's show-clearance / show-DRC toggles,

@@ -111,6 +111,14 @@ fn localWidth(s: f64, len: f64, shape: Shape) f64 {
     return width;
 }
 
+fn routedNominal(placement: optimizer.Placement, ni: usize, track_width: f64) ?f64 {
+    const rule = if (ni < placement.rules.net.len) placement.rules.net[ni] else optimizer.NetRule{};
+    const authored = if (rule.width > 0) rule.width else placement.rules.design.track_width;
+    if (@abs(track_width - authored) <= router.clearance_eps) return authored;
+    const widened = @max(authored, placement.rules.powerWidthForNet(placement.nets[ni].name) orelse 0);
+    return if (@abs(track_width - widened) <= router.clearance_eps) widened else null;
+}
+
 fn appendSlice(arena: std.mem.Allocator, out: *std.ArrayList(router.Track), shape: Shape, s0: f64, s1: f64, len: f64) std.mem.Allocator.Error!void {
     if (s1 - s0 <= eps) return;
     const t = shape.track;
@@ -180,9 +188,12 @@ pub fn passBoard(board: router.CleanupBoard) std.mem.Allocator.Error!void {
             continue;
         }
         const rule = if (ni < board.placement.rules.net.len) board.placement.rules.net[ni] else optimizer.NetRule{};
-        const nominal = if (rule.width > 0) rule.width else board.placement.rules.design.track_width;
+        const nominal = routedNominal(board.placement, ni, track.width) orelse {
+            try out.append(arena, track);
+            continue;
+        };
         const neck = @max(rule.pad_neck.width, board.placement.rules.design.min_width);
-        if (!(rule.pad_neck.width > 0) or neck >= nominal - eps or @abs(track.width - nominal) > router.clearance_eps) {
+        if (!(rule.pad_neck.width > 0) or neck >= nominal - eps) {
             try out.append(arena, track);
             continue;
         }
@@ -282,4 +293,43 @@ test "DRC allowance accepts only neck-profile copper beside its own SMD pad" {
     const far = router.Track{ .x1 = 1.5, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.1524, .net = 0 };
     try testing.expect(try allowsTrack(arena, placement, near, 0.2532, 0.127));
     try testing.expect(!try allowsTrack(arena, placement, far, 0.2532, 0.127));
+}
+
+test "pad neck recognizes a power-capacity widened routed trunk" {
+    const foils = [_]@import("impedance.zig").Foil{
+        .{ .index = 1, .thickness_mm = 0.035 },
+        .{ .index = 2, .thickness_mm = 0.0152 },
+        .{ .index = 3, .thickness_mm = 0.0152 },
+        .{ .index = 4, .thickness_mm = 0.035 },
+    };
+    const rails = [_]@import("../eval/power_budget.zig").Rail{.{
+        .net = "VDD",
+        .load_max_a = 0.34,
+        .any_max_load = true,
+        .status = .no_source,
+    }};
+    const nets = [_]flat_netlist.FlatNet{.{ .name = "VDD", .pins = &.{} }};
+    const rules = [_]optimizer.NetRule{.{
+        .width = 0.2532,
+        .pad_neck = .{ .width = 0.1524, .max_length = 0.75, .taper_length = 0.35 },
+    }};
+    const placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .rules = .{ .net = &rules, .physical = .{ .stack = .{ .layers = 4, .foils = &foils }, .rails = &rails } },
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 1,
+        .maxy = 1,
+        .generated = true,
+    };
+    const widened = placement.rules.powerWidthForNet("VDD").?;
+    try testing.expect(widened > rules[0].width);
+    try testing.expectApproxEqAbs(widened, routedNominal(placement, 0, widened).?, eps);
+    try testing.expectApproxEqAbs(rules[0].width, routedNominal(placement, 0, rules[0].width).?, eps);
 }

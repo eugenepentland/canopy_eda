@@ -403,7 +403,7 @@ fn planeNetCopper(
     // Do not let a via newly placed for a nearby pad impersonate retained copper.
     const retained_via_count = vias.items.len;
     const pour = netPourLayers(placement, placement.nets[@intCast(ni)].name);
-    const bonds = try plane_stitch.bonds(arena, placement, pts);
+    const bonds = try plane_stitch.surfaceBonds(arena, placement, pts);
     var web = try plane_stitch.Web.init(arena, pts.len);
     for (bonds) |bond| {
         const from = pts[bond.cap];
@@ -4172,7 +4172,7 @@ fn isInductorBridge(placement: optimizer.Placement, idx_of: *std.StringHashMapUn
 pub const NetPt = pad_exit.NetPt;
 pub const netPoints = pad_exit.netPoints;
 /// Exact local capacitor-to-IC pad pairs from authored decoupling intent.
-pub const localSupplyBonds = plane_stitch.bonds;
+pub const localSupplyBonds = plane_stitch.surfaceBonds;
 const escTerm = pad_exit.asTerm;
 
 /// World centre of `pin` on `part`, or null if the pad isn't in the footprint.

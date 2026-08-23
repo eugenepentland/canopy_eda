@@ -2159,6 +2159,7 @@ src/placement/plane_stitch.zig::padInPour | fn padInPour(pour: [2]bool, c: pad_e
 src/placement/plane_stitch.zig::placedVia | fn placedVia(self: *Web, pad: usize, stub_mm: f64) void
 src/placement/plane_stitch.zig::retainedStubMm | fn retainedStubMm( comptime Track: type, comptime Via: type, arena: std.mem.Allocator, maybe_pad: ?pad_shape.Shape, layer: u8, net: i32, tracks: []const Track, vias: []const Via, ) std.mem.Allocator.Error!?f64
 src/placement/plane_stitch.zig::served | fn served(self: *Web, pad: usize) bool
+src/placement/plane_stitch.zig::surfaceBonds | fn surfaceBonds( arena: std.mem.Allocator, placement: optimizer.Placement, pts: []const pad_exit.NetPt, ) std.mem.Allocator.Error![]const Bond
 src/placement/plane_stitch.zig::viaOrder | fn viaOrder( arena: std.mem.Allocator, n: usize, bs: []const Bond, ) std.mem.Allocator.Error![]const usize
 src/placement/plane_stitch.zig::via_share_max_mm value
 src/placement/plane_via.zig::InPad struct_
