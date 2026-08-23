@@ -27,11 +27,26 @@
 //! candidate, never a verdict. No RNG and no clock: the same pad, anchor and
 //! via diameter always produce the same sequence, so a board routed twice gets
 //! byte-identical copper.
+//!
+//! The other half of the same question is CONTAINMENT itself, and it is this
+//! module's because the answer must be one answer. A via sited on a pad has to
+//! keep its finished annulus on that pad's copper: a ring hanging over the land
+//! edge is unsupported copper across the mask opening and a solder-wicking path
+//! out of the joint, and nothing else on the board can catch it — every copper
+//! clearance probe skips the routing net's own pads, which is exactly what a
+//! land the via is drilled into is. So `barrelFits` is the single predicate,
+//! `inLandBarrelFits` is the form a caller uses when it does not yet know
+//! whether the site is on a land at all (`landAt` answers that), and the ring
+//! walk, the thermal array and the router's pad-centre sites all measure the
+//! same geometry. Measured on `bcuda-lt3045-ldo`: the router's first candidate
+//! is the pad anchor snapped to the routing grid, and on U1's 0.80 x 0.30 mm
+//! DFN ground land that put a 0.4 mm barrel dead on the land with the ring
+//! ~0.05 mm past the 0.30 mm edge on each side — legal by every clearance rule
+//! and a defect on the board.
 
 const std = @import("std");
 const pad_shape = @import("pad_shape.zig");
-
-const thermal_barrel_samples: usize = 8;
+const numeric = @import("../numeric.zig");
 
 /// Preferred centre pitch for automatic exposed-pad thermal arrays. This is
 /// deliberately wider than the manufacturing minimum: tighter arrays remove
@@ -71,8 +86,8 @@ pub fn thermalAxis(span: f64, via_dia: f64, min_pitch: f64) ThermalAxis {
 }
 
 /// A centred regular field of thermal-via sites over one exposed land. Each
-/// exact site is still judged by `thermalBarrelFits`: a rejected custom-pad
-/// cell is skipped, never replaced by the nearest off-pattern point.
+/// exact site is still judged by `barrelFits`: a rejected custom-pad cell is
+/// skipped, never replaced by the nearest off-pattern point.
 pub const ThermalArray = struct {
     pad: pad_shape.Shape,
     centre: [2]f64,
@@ -97,18 +112,67 @@ pub const ThermalArray = struct {
     }
 };
 
-/// Whether a regular thermal-via site's complete barrel stays inside the
-/// exposed pad's real outline.
-pub fn thermalBarrelFits(pad: pad_shape.Shape, point: [2]f64, via_dia: f64) bool {
-    const r = via_dia / 2;
-    if (pad_shape.pointDist(pad.x0, pad.y0, pad.x1, pad.y1, pad.poly, point[0], point[1], std.math.inf(f64)) > 0) return false;
-    for (0..thermal_barrel_samples) |i| {
-        const a = @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(thermal_barrel_samples)) * std.math.tau;
-        if (pad_shape.pointDist(pad.x0, pad.y0, pad.x1, pad.y1, pad.poly, point[0] + r * @cos(a), point[1] + r * @sin(a), std.math.inf(f64)) > 0) return false;
+/// Whether a via of `via_dia` standing at `point` keeps its whole FINISHED
+/// BARREL — the copper annulus, not merely the drilled hole — inside `pad`'s
+/// real outline. This is the one containment predicate: the thermal array
+/// judges each of its regular cells with it, `InPad.init`'s strict ring walk
+/// yields only sites that pass it, and the router gates every via-in-pad site
+/// on it so an annular ring never hangs off the land it is drilled into.
+pub fn barrelFits(pad: pad_shape.Shape, point: [2]f64, via_dia: f64) bool {
+    return circleFits(pad, point, via_dia / 2);
+}
+
+/// Whether a circle of radius `r` about `point` stays on `pad`'s copper: the
+/// centre plus `barrel_samples` compass points around the rim, each measured
+/// against the real outline.
+fn circleFits(pad: pad_shape.Shape, point: [2]f64, r: f64) bool {
+    if (!onCopper(pad, point[0], point[1])) return false;
+    for (0..barrel_samples) |i| {
+        const a = @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(barrel_samples)) * std.math.tau;
+        if (!onCopper(pad, point[0] + r * @cos(a), point[1] + r * @sin(a))) return false;
     }
     return true;
 }
-const numeric = @import("../numeric.zig");
+
+/// Is (x,y) on `pad`'s copper? `pad_shape.pointDist` is 0 exactly there —
+/// inside the box for a simple pad, inside the real outline for a custom one —
+/// and an infinite slack keeps the outline test from being skipped.
+fn onCopper(pad: pad_shape.Shape, x: f64, y: f64) bool {
+    return pad_shape.pointDist(pad.x0, pad.y0, pad.x1, pad.y1, pad.poly, x, y, std.math.inf(f64)) <= fit_eps;
+}
+
+/// The net's own pad copper under `p` on `layer` — the first same-net land (in
+/// the caller's own obstacle order, so the answer is deterministic) whose shape
+/// contains the point, or null when `p` sits on no land of its own net. `obs` is
+/// any slice of records carrying `x0`/`y0`/`x1`/`y1`/`poly`/`net`/`thru`/`layer`
+/// — the router's pad-obstacle list, passed structurally so this module stays
+/// out of an import cycle with it.
+pub fn landAt(obs: anytype, p: [2]f64, net: i32, layer: u8) ?pad_shape.Shape {
+    for (obs) |q| {
+        if (q.net != net or (!q.thru and q.layer != layer)) continue;
+        if (pad_shape.pointDist(q.x0, q.y0, q.x1, q.y1, q.poly, p[0], p[1], std.math.inf(f64)) > 0) continue;
+        return .{ .x0 = q.x0, .y0 = q.y0, .x1 = q.x1, .y1 = q.y1, .poly = q.poly };
+    }
+    return null;
+}
+
+/// May a via of `via_dia` stand at `point` AS A VIA-IN-PAD, given the land its
+/// centre sits on (`landAt`, null when it sits on none)? A site ON one of its
+/// net's own lands is a via IN that land and has to contain its barrel there; a
+/// site on no such land is a via BESIDE the pad it serves, reached by the
+/// caller's stub, and this says nothing about it (the clearance predicates do).
+///
+/// The distinction is the whole rule. A barrel drilled into a land must keep its
+/// annular ring on that land's copper — a ring hanging over the edge is
+/// unsupported copper across the mask opening and a solder-wicking path, and no
+/// clearance check can see it, because the land is the routing net's own and
+/// every copper probe skips its own net. A barrel standing NEXT to a land, ring
+/// clear of it or merely tangent, is the ordinary laddered drop the plane pass
+/// has always made: refusing those would refuse nearly every stitch on a board.
+pub fn inLandBarrelFits(land: ?pad_shape.Shape, point: [2]f64, via_dia: f64) bool {
+    const pad = land orelse return true;
+    return barrelFits(pad, point, via_dia);
+}
 
 /// In-pad scan step as a fraction of the via's copper DIAMETER. A quarter of a
 /// 0.4 mm via is 0.1 mm — fine enough to find the legal band beside a crowding
@@ -130,6 +194,18 @@ const max_ring: usize = 16;
 /// inside the pad's copper. Eight is enough to reject any site whose barrel
 /// crosses a straight pad edge or a simplified outline's corner.
 const barrel_samples: usize = 8;
+/// Slack (mm) a barrel is allowed when it is measured against a pad EDGE.
+///
+/// The edge is the hard boundary: copper past it is off the land, which is the
+/// annular/solderability defect containment exists to refuse. So this is one
+/// nanometre — the same float-noise scale as the router's `clearance_eps` —
+/// bought for exactly one case: a barrel whose rim lands ON the edge (a 0.4 mm
+/// via in a land 0.4 mm across, where the centre and the rim need not round the
+/// same way) must read as contained rather than losing its site to arithmetic.
+/// It is not an overhang allowance and cannot be spent as one: a real overhang
+/// is tens of microns, and the measured DFN case this gate was written for hangs
+/// over by ~50 µm — 50000 times this — so every one of them is still refused.
+const fit_eps: f64 = 1e-6;
 
 /// Deterministic scan of the via sites inside one pad's own copper, walked in
 /// rings out from the pad's anchor so the nearest legal site wins.
@@ -227,22 +303,12 @@ pub const InPad = struct {
         return null;
     }
 
-    /// Is the whole via barrel centred at `p` inside this pad's copper?
+    /// Is the circle this scan contains (barrel for `init`, hole for
+    /// `overDrill`) inside the pad's copper when centred at `p`? One shared
+    /// `circleFits`, so the scan and the router's via-in-pad gate cannot drift
+    /// apart on what "inside the pad" means.
     fn barrelInside(self: InPad, p: [2]f64) bool {
-        if (!self.inCopper(p[0], p[1])) return false;
-        for (0..barrel_samples) |i| {
-            const a = @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(barrel_samples)) * std.math.tau;
-            if (!self.inCopper(p[0] + self.r * @cos(a), p[1] + self.r * @sin(a))) return false;
-        }
-        return true;
-    }
-
-    /// Is (x,y) on the pad's copper? `pad_shape.pointDist` is 0 exactly there —
-    /// inside the box for a simple pad, inside the real outline for a custom
-    /// one — and an infinite slack keeps the outline test from being skipped.
-    fn inCopper(self: InPad, x: f64, y: f64) bool {
-        const s = self.shape;
-        return pad_shape.pointDist(s.x0, s.y0, s.x1, s.y1, s.poly, x, y, std.math.inf(f64)) <= 0;
+        return circleFits(self.shape, p, self.r);
     }
 };
 
@@ -396,6 +462,42 @@ test "plane pass stitches a thermal pad from inside its own copper" {
     try testing.expectEqual(vias.len - 1, inside);
 }
 
+// spec: placement/plane-via - an exposed-pad thermal array keeps its centred regular field, which containment sizes but never displaces
+test "the thermal array keeps its exact centred field" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    // The land is 3 x 3 mm and the via 0.8 mm, and two same-net barrels need
+    // `via_dia + clearance` = 1.0 mm between centres — wider than the 0.9 mm
+    // preferred pitch, so the field is a centred 3 x 3 at exactly 1.0 mm. Every
+    // member is a cell of that regular pattern about the land's TRUE centre
+    // (0, 0) — never the declared 1.1 mm anchor, and never a nearest-legal point
+    // nudged off the lattice by the containment test that judges each cell.
+    const axis = thermalAxis(3.0, thermal_params.via_dia, thermal_params.via_dia + thermal_params.clearance);
+    try testing.expectEqual(@as(usize, 3), axis.count);
+    try testing.expectApproxEqAbs(@as(f64, 1.0), axis.pitch, 1e-12);
+    const array = ThermalArray{
+        .pad = thermal_land,
+        .centre = .{ 0, 0 },
+        .cols = axis.count,
+        .rows = axis.count,
+        .pitch_x = axis.pitch,
+        .pitch_y = axis.pitch,
+    };
+    const vias = try router.groundVias(arena, thermalPadPlacement(), thermal_params);
+    for (0..array.cols) |col| {
+        for (0..array.rows) |row| {
+            const want = array.point(col, row);
+            try testing.expect(barrelFits(thermal_land, want, thermal_params.via_dia));
+            var found = false;
+            for (vias) |v| {
+                if (@abs(v.x - want[0]) < 1e-9 and @abs(v.y - want[1]) < 1e-9) found = true;
+            }
+            try testing.expect(found);
+        }
+    }
+}
+
 // spec: placement/plane-via - the plane-via pass is deterministic: the same board replays the identical via positions
 test "plane pass replays identical via positions" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
@@ -526,6 +628,316 @@ test "in-pad scan replays the identical site sequence" {
     }
     try testing.expect(b.next() == null);
     try testing.expect(n > 8);
+}
+
+/// `bcuda-lt3045-ldo` U1's GND_1 land, as the router measures it: 0.80 x 0.30
+/// mm, and the board's via is 0.4 mm — so no point of it can hold the barrel.
+const dfn_land = pad_shape.Shape{ .x0 = 1.1, .y0 = -0.15, .x1 = 1.9, .y1 = 0.15 };
+/// An 0603 ground land off the same board: 0.90 x 0.95 mm, which holds the same
+/// barrel comfortably.
+const land_0603 = pad_shape.Shape{ .x0 = -0.45, .y0 = -0.475, .x1 = 0.45, .y1 = 0.475 };
+
+// spec: placement/plane-via - a via-in-pad site must land its whole annular ring on the pad, so a land too small to hold the barrel is refused at its own centre
+test "barrel containment refuses a land too small for the via" {
+    // The land is 0.30 mm across and the barrel 0.40, so its own centre — and
+    // the grid-snapped site the router actually took there — both overhang.
+    try testing.expect(!barrelFits(dfn_land, .{ 1.5, 0 }, 0.4));
+    try testing.expect(!barrelFits(dfn_land, .{ 1.578, 0.016 }, 0.4));
+    // Nothing about the LONG axis rescues it: slide along the 0.80 mm dimension
+    // and the 0.30 mm one still refuses.
+    try testing.expect(!barrelFits(dfn_land, .{ 1.3, 0 }, 0.4));
+    try testing.expect(!barrelFits(dfn_land, .{ 1.7, 0 }, 0.4));
+    // The 0603 land holds it at its centre, and refuses it once the barrel is
+    // pushed off the edge.
+    try testing.expect(barrelFits(land_0603, .{ 0, 0 }, 0.4));
+    try testing.expect(!barrelFits(land_0603, .{ 0.3, 0 }, 0.4));
+    // A smaller via fits the DFN land, so the rule is about the pair and not
+    // about the pad alone.
+    try testing.expect(barrelFits(dfn_land, .{ 1.5, 0 }, 0.25));
+}
+
+// spec: placement/plane-via - the pad edge is the containment boundary: a barrel exactly as wide as its land is contained, and a micron of real overhang is not
+test "barrel containment holds the pad edge as the boundary" {
+    // A 0.4 mm barrel in a land 0.4 mm square: the rim lands ON all four edges,
+    // and the tolerance exists so arithmetic noise cannot take that site away.
+    const exact = pad_shape.Shape{ .x0 = 100.0, .y0 = 50.0, .x1 = 100.4, .y1 = 50.4 };
+    try testing.expect(barrelFits(exact, .{ 100.2, 50.2 }, 0.4));
+    // One micron off centre is a thousand times the tolerance, and refused.
+    try testing.expect(!barrelFits(exact, .{ 100.201, 50.2 }, 0.4));
+    try testing.expect(!barrelFits(exact, .{ 100.2, 50.199 }, 0.4));
+    // The tolerance itself is not an overhang allowance anyone can spend: half
+    // of it still reads as contained, and it is 50000 times smaller than the
+    // ~50 µm defect this gate was written for.
+    try testing.expect(barrelFits(exact, .{ 100.2 + fit_eps / 2, 50.2 }, 0.4));
+    try testing.expect(fit_eps * 50000 <= 0.05 + 1e-12);
+}
+
+// spec: placement/plane-via - a via standing on no land of its own net is not a via-in-pad and is not held to containment
+test "containment judges only a site standing on its own land" {
+    // No land under the site: a via BESIDE the pad, joined by the caller's stub,
+    // and containment has nothing to say about it.
+    try testing.expect(inLandBarrelFits(null, .{ 1.5, 0 }, 0.4));
+    // A land under the site: a via IN it, and the ring has to land.
+    try testing.expect(!inLandBarrelFits(dfn_land, .{ 1.5, 0 }, 0.4));
+    try testing.expect(inLandBarrelFits(land_0603, .{ 0, 0 }, 0.4));
+}
+
+// spec: placement/plane-via - the land under a via site is the routing net's own pad on that layer, and a foreign or other-layer pad is not one
+test "landAt finds only the routing net's own pad on the via's layer" {
+    const Obs = struct { x0: f64, y0: f64, x1: f64, y1: f64, poly: []const [2]f64 = &.{}, net: i32, thru: bool = false, layer: u8 = 0 };
+    const obs = [_]Obs{
+        .{ .x0 = 1.1, .y0 = -0.15, .x1 = 1.9, .y1 = 0.15, .net = 2 },
+        .{ .x0 = 3.0, .y0 = -0.5, .x1 = 4.0, .y1 = 0.5, .net = 7 },
+        .{ .x0 = 5.0, .y0 = -0.5, .x1 = 6.0, .y1 = 0.5, .net = 2, .layer = 1 },
+        .{ .x0 = 7.0, .y0 = -0.5, .x1 = 8.0, .y1 = 0.5, .net = 2, .thru = true, .layer = 1 },
+    };
+    const own = landAt(&obs, .{ 1.5, 0 }, 2, 0) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(dfn_land.x0, own.x0);
+    try testing.expectEqual(dfn_land.y1, own.y1);
+    // A FOREIGN pad is not a land this via is in — clearance governs it instead.
+    try testing.expect(landAt(&obs, .{ 3.5, 0 }, 2, 0) == null);
+    // Nor is the net's own pad on another signal layer …
+    try testing.expect(landAt(&obs, .{ 5.5, 0 }, 2, 0) == null);
+    // … unless it is a through-hole land, which is copper on every layer.
+    try testing.expect(landAt(&obs, .{ 7.5, 0 }, 2, 0) != null);
+    // Off every pad is the ordinary case: a via in open copper.
+    try testing.expect(landAt(&obs, .{ 2.5, 0 }, 2, 0) == null);
+}
+
+/// Three ground lands on one grid-aligned row, sized so the plane pass has to
+/// take a different tier on each. The routing lattice is `track + clearance` =
+/// 0.4 mm with its origin at `(minx - 1, miny - 1)` = (-4, -2), so every land
+/// centre below is exactly ON a lattice node: the pad-centre candidate lands on
+/// the land itself, which is what makes containment — and not the snap — the
+/// only thing that can move a via here.
+///   * `U1.1` is `bcuda-lt3045-ldo`'s DFN land, 0.80 x 0.30: too shallow to hold
+///     the 0.4 mm barrel anywhere, so the in-pad walk is empty and only the
+///     outward fan is left.
+///   * `R1.1` is an 0603 land, 0.90 x 0.95: it holds the barrel at its centre.
+///   * `R2.1` is a 0.30 x 0.30 test land, smaller than the barrel in BOTH axes:
+///     no in-pad site at all, and every ring-1 fan site beside it is clear.
+///   * `R3.1` is a 0.30 x 1.60 tab — narrow like the DFN land but LONG along the
+///     axis the fan opens on. With no foreign copper near it `fanDir` falls back
+///     to +y, so the fan's first sites are a grid pitch UP the tab and still deep
+///     inside its own copper: the one case where an ungated fan would simply move
+///     the overhanging ring one ring out instead of off the land.
+const land_fixture = struct {
+    var dfn_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.8, .h = 0.3 }};
+    var wide_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.9, .h = 0.95 }};
+    var tiny_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.3, .h = 0.3 }};
+    var tab_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.3, .h = 1.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 0.5, .hh = 0.3, .pads = &dfn_pads, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &wide_pads, .fallback = false, .x = 2, .y = 0 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.2, .hh = 0.2, .pads = &tiny_pads, .fallback = false, .x = 4, .y = 0 },
+        .{ .ref_des = "R3", .kind = .passive, .hw = 0.2, .hh = 0.9, .pads = &tab_pads, .fallback = false, .x = -2, .y = 0 },
+    };
+    const gnd_pins = [_]flat_netlist.FlatPin{
+        .{ .ref_des = "U1", .pin = "1" },
+        .{ .ref_des = "R1", .pin = "1" },
+        .{ .ref_des = "R2", .pin = "1" },
+        .{ .ref_des = "R3", .pin = "1" },
+    };
+    const nets = [_]flat_netlist.FlatNet{.{ .name = "GND", .pins = &gnd_pins }};
+    const centres = [_][2]f64{ .{ 0, 0 }, .{ 2, 0 }, .{ 4, 0 }, .{ -2, 0 } };
+    const lands = [_]pad_shape.Shape{
+        .{ .x0 = -0.4, .y0 = -0.15, .x1 = 0.4, .y1 = 0.15 },
+        .{ .x0 = 1.55, .y0 = -0.475, .x1 = 2.45, .y1 = 0.475 },
+        .{ .x0 = 3.85, .y0 = -0.15, .x1 = 4.15, .y1 = 0.15 },
+        .{ .x0 = -2.15, .y0 = -0.8, .x1 = -1.85, .y1 = 0.8 },
+    };
+};
+
+/// The lattice the `land_fixture` numbers are chosen against: 0.2 mm track and
+/// 0.2 mm clearance put the routing grid at 0.4 mm, and the 0.4/0.2 via is the
+/// board via `bcuda-lt3045-ldo` carries.
+const land_params = router.RouteParams{
+    .track_width = 0.2,
+    .clearance = 0.2,
+    .via_dia = 0.4,
+    .via_drill = 0.2,
+};
+
+fn landPlacement() optimizer.Placement {
+    return .{
+        .parts = &land_fixture.parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &land_fixture.nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -3,
+        .miny = -1,
+        .maxx = 5,
+        .maxy = 1,
+        .generated = true,
+    };
+}
+
+/// One land's plane return: where the barrel stands, and how far it had to
+/// stand off the land centre to get there.
+const Return = struct { at: [2]f64, mm: f64 };
+
+/// The via serving `centre`: the nearest one on the plane net, with how far it
+/// had to stand off. Null when the pad lost its plane return entirely.
+fn nearestVia(vias: []const router.Via, centre: [2]f64) ?Return {
+    var best: ?Return = null;
+    for (vias) |v| {
+        const mm = std.math.hypot(v.x - centre[0], v.y - centre[1]);
+        if (best != null and mm >= best.?.mm) continue;
+        best = .{ .at = .{ v.x, v.y }, .mm = mm };
+    }
+    return best;
+}
+
+/// How many of the fixture's lands came out with a plane return of their OWN —
+/// a barrel near enough to be that land's drop rather than a neighbour's. One
+/// grid pitch's diagonal is the bound: the pad centre, anything inside the land,
+/// and the outward fan's first ring all fall inside it, and the next land is
+/// 2 mm away.
+fn landsServed(vias: []const router.Via) usize {
+    var n: usize = 0;
+    for (land_fixture.centres) |centre| {
+        const near = nearestVia(vias, centre) orelse continue;
+        if (near.mm <= 0.4 * std.math.sqrt2 + 1e-9) n += 1;
+    }
+    return n;
+}
+
+/// Does every placed barrel that STANDS on one of the fixture's lands keep its
+/// ring on that land? A barrel standing on no land is the ordinary laddered
+/// drop beside a pad and is not a via-in-pad, so it is not judged here.
+fn everyRingLanded(vias: []const router.Via) bool {
+    for (vias) |v| {
+        for (land_fixture.lands) |land| {
+            if (!onCopper(land, v.x, v.y)) continue;
+            if (!barrelFits(land, .{ v.x, v.y }, v.dia)) return false;
+        }
+    }
+    return true;
+}
+
+// spec: placement/plane-via - a plane return is never sited where its annular ring would hang off the land it stands on
+// spec: placement/plane-via - a land too small to contain the barrel keeps its plane return, taken from the outward fan beside it
+test "the plane pass lands every via-in-pad ring on its own pad" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const routed = try router.route(arena, landPlacement(), land_params);
+    // Every land still has its plane return: nothing is dropped for being
+    // awkward, which is the failure mode a containment rule could introduce.
+    try testing.expectEqual(land_fixture.centres.len, landsServed(routed.vias));
+    // And no placed barrel stands on a land of its own net with its ring hanging
+    // over the edge — the defect this gate exists for. A via sitting on NO land
+    // is the ordinary laddered drop and is not judged here.
+    try testing.expect(everyRingLanded(routed.vias));
+    // The 0.80 x 0.30 DFN land cannot contain the barrel anywhere, so its return
+    // is NOT at the land centre the ungated pad-centre candidate used to take …
+    const dfn = nearestVia(routed.vias, land_fixture.centres[0]).?;
+    try testing.expect(dfn.mm > 1e-9);
+    try testing.expect(!onCopper(land_fixture.lands[0], dfn.at[0], dfn.at[1]));
+    // … and it does not run away either: the fan's first ring is one grid pitch
+    // out, so the return stays within a pitch's diagonal of the land it serves.
+    try testing.expect(dfn.mm <= 0.4 * std.math.sqrt2 + 1e-9);
+    // The 0603 land holds the barrel, so its return is IN the land, at its exact
+    // centre — the tier below the refused snap is the in-pad walk, which opens
+    // on the anchor itself.
+    const wide = nearestVia(routed.vias, land_fixture.centres[1]).?;
+    try testing.expectApproxEqAbs(@as(f64, 0), wide.mm, 1e-9);
+    // The 0.30 mm square land has no in-pad site in either axis; the fan beside
+    // it still finds one.
+    const tiny = nearestVia(routed.vias, land_fixture.centres[2]).?;
+    try testing.expect(tiny.mm > 1e-9);
+    try testing.expect(!onCopper(land_fixture.lands[2], tiny.at[0], tiny.at[1]));
+    // The 0.30 x 1.60 tab is the case the fan itself has to be gated for: with no
+    // foreign copper near it the fan opens along +y, straight UP the tab, so its
+    // first sites are a grid pitch away and STILL on the tab's own copper — where
+    // the ring overhangs exactly as it did at the centre. The return therefore
+    // has to leave the tab sideways, which costs it the pitch's diagonal.
+    const tab = nearestVia(routed.vias, land_fixture.centres[3]).?;
+    try testing.expect(!onCopper(land_fixture.lands[3], tab.at[0], tab.at[1]));
+    try testing.expect(@abs(tab.at[0] - land_fixture.centres[3][0]) > 1e-9);
+    try testing.expect(tab.mm <= 0.4 * std.math.sqrt2 + 1e-9);
+}
+
+/// One authored bypass bond on a plane-carried rail: `C1`'s rail land is the
+/// cluster's cap land, so the plane pass sites the shared barrel ON it rather
+/// than at the grid-snapped anchor. `C1` sits at x = 3.0 while the lattice
+/// (origin -2, pitch 0.4) has nodes at 2.8 and 3.2 — so a via at exactly 3.0 can
+/// only have come from the exact-centre rule, never from the snap.
+const bond_fixture = struct {
+    var hub_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.5, .h = 0.5 }};
+    var cap_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.9, .h = 0.95 }};
+    var shallow_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.8, .h = 0.3 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &hub_pads, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &cap_pads, .fallback = false, .x = 3, .y = 0 },
+    };
+    const pins = [_]flat_netlist.FlatPin{
+        .{ .ref_des = "U1", .pin = "1" },
+        .{ .ref_des = "C1", .pin = "1" },
+    };
+    const nets = [_]flat_netlist.FlatNet{.{ .name = "VDD", .pins = &pins }};
+    const planes = [_][]const u8{"VDD"};
+    const loops = [_]optimizer.Loop{.{
+        .cap = 1,
+        .hub = 0,
+        .cap_pwr = .{ .x = 0, .y = 0, .w = 0.9, .h = 0.95 },
+        .cap_gnd = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+        .hub_pwr = &.{},
+        .hub_pwr_pin = .{ .x = 0, .y = 0, .w = 0.5, .h = 0.5 },
+        .hub_gnd = &.{},
+        .pwr_net = 0,
+        .explicit_pin = "1",
+    }};
+};
+
+fn bondPlacement() optimizer.Placement {
+    return .{
+        .parts = &bond_fixture.parts,
+        .links = &.{},
+        .loops = &bond_fixture.loops,
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &bond_fixture.nets,
+        .rules = .{ .plane_nets = &bond_fixture.planes },
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -1,
+        .miny = -1,
+        .maxx = 4,
+        .maxy = 1,
+        .generated = true,
+    };
+}
+
+// spec: placement/plane-via - a bonded bypass cap keeps its barrel at the exact land centre when the land contains it, and degrades to the nearest contained site when it does not
+test "a bonded cap land keeps its centred barrel only while the land contains it" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const cap_land = pad_shape.Shape{ .x0 = 2.55, .y0 = -0.475, .x1 = 3.45, .y1 = 0.475 };
+    const centred = try router.route(arena, bondPlacement(), land_params);
+    // The 0603 cap land holds the barrel, so the loop-inductance rule stands:
+    // the barrel is at the land's EXACT centre, off the routing lattice.
+    const at = nearestVia(centred.vias, .{ 3, 0 }) orelse return error.TestUnexpectedResult;
+    try testing.expectApproxEqAbs(@as(f64, 0), at.mm, 1e-9);
+    try testing.expect(barrelFits(cap_land, at.at, land_params.via_dia));
+
+    // Shrink that same land to the 0.80 x 0.30 DFN shape and the centre can no
+    // longer hold the ring. The rule yields rather than shipping an unlanded
+    // annulus — and it degrades gracefully: the barrel steps off the land, not
+    // across the board.
+    var shallow = bondPlacement();
+    var shallow_parts = bond_fixture.parts;
+    shallow_parts[1].pads = &bond_fixture.shallow_pads;
+    shallow.parts = &shallow_parts;
+    const moved = try router.route(arena, shallow, land_params);
+    const off = nearestVia(moved.vias, .{ 3, 0 }) orelse return error.TestUnexpectedResult;
+    try testing.expect(off.mm > 1e-9);
+    try testing.expect(off.mm <= 0.4 * std.math.sqrt2 + 1e-9);
+    const shallow_land = pad_shape.Shape{ .x0 = 2.6, .y0 = -0.15, .x1 = 3.4, .y1 = 0.15 };
+    try testing.expect(!onCopper(shallow_land, off.at[0], off.at[1]));
 }
 
 // spec: placement/plane-via - the in-pad ring walk visits every lattice cell of a ring exactly once

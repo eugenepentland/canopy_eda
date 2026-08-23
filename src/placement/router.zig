@@ -328,7 +328,7 @@ fn placeThermalViaArray(
     for (0..array.rows) |row| {
         for (0..array.cols) |col| {
             const pos = array.point(col, row);
-            if (!plane_via.thermalBarrelFits(array.pad, pos, ctx.params.via_dia)) continue;
+            if (!plane_via.barrelFits(array.pad, pos, ctx.params.via_dia)) continue;
             var already = false;
             for (vias.items) |via| {
                 if (via.net != ni) continue;
@@ -417,7 +417,18 @@ fn planeNetCopper(
         // The cluster's shared barrel belongs IN the bypass cap's land (see
         // `Web.capLand`), so the run carries the rail on to the pin and no
         // copper is spent reaching the drop. Anything else keeps the ladder.
-        const pos = if (web.capLand(i) and groundViaPointClear(ctx, vias.items, tracks.items, cc, ni)) cc else findGroundVia(ctx, vias.items, tracks.items, cc, ni, c.layer) orelse continue;
+        //
+        // "IN the land" is meant literally, so the exact centre is offered only
+        // when the land can actually HOLD the barrel: a ring hanging off the land
+        // is copper across the mask opening, and it is invisible to every
+        // clearance probe here because the land is this net's own. On refusal the
+        // ladder below takes over, and the loop-inductance argument degrades
+        // gracefully rather than collapsing — `findGroundVia`'s in-pad walk is
+        // centre-out from this same anchor, so the barrel ends up as close to the
+        // land as the land admits, and only a land that cannot contain the via
+        // anywhere falls through to a grid-fan site plus a stub.
+        const centred = web.capLand(i) and plane_via.inLandBarrelFits(padCopperAt(ctx, cc, ni, c.layer), cc, ctx.params.via_dia);
+        const pos = if (centred and groundViaPointClear(ctx, vias.items, tracks.items, cc, ni)) cc else findGroundVia(ctx, vias.items, tracks.items, cc, ni, c.layer) orelse continue;
         tally.placed = true;
         try vias.append(arena, .{ .x = pos[0], .y = pos[1], .dia = ctx.params.via_dia, .drill = ctx.params.via_drill, .net = ni });
         // A laddered via site is grid-snapped while the pad centre is not, so it
@@ -3521,11 +3532,18 @@ fn findGapStitch(state: *GapState, live: GapBoard, pt: NetPt, net: i32, poured: 
     // thing relaxed.
     //
     // The asymmetry it closes is with the router's OWN first pass:
-    // `findGroundVia` opens on the pad centre snapped to the grid, judged by
-    // clearance alone with no containment at all, so pass 1 has always been
-    // able to drop a via inside a small pad. This search could not — the strict
-    // scan refuses such a pad, and the fan's first ring starts a whole grid
-    // pitch out, so the pad's own centre was never a candidate here.
+    // `findGroundVia` opens on the pad centre snapped to the grid, and the
+    // strict scan refuses a pad this small while the fan's first ring starts a
+    // whole grid pitch out, so the pad's own centre was never a candidate here.
+    //
+    // It is a DELIBERATE relaxation, and not the gap pass 1 used to leave open.
+    // Pass 1 once judged its snapped centre by clearance alone, which let a
+    // barrel stand on a land too shallow to hold its ring; it now gates that
+    // site on `plane_via.inLandBarrelFits` and falls through to the ladder. This
+    // tier remains the one place the ring may overhang, it is reached only after
+    // strict containment and the whole fan have declined, and what licenses it
+    // is the DRILL being ringed by the pad's own copper — not an unpoliced
+    // default.
     //
     // Strictly additive by position: both tiers above have already declined, so
     // a pad that had a site keeps the site it had. On barracuda today it is
@@ -4710,21 +4728,17 @@ fn escapeFan(ctx: *Ctx, placed: []const Via, tracks: []const Track, a: [2]f64, d
 /// the point. Null when the anchor sits on no pad of its own net, which is when
 /// there is no pad copper for a via to hide inside.
 fn padCopperAt(ctx: *const Ctx, c: [2]f64, net: i32, layer: u8) ?pad_shape.Shape {
-    for (ctx.obs) |p| {
-        if (p.net != net or (!p.thru and p.layer != layer)) continue;
-        if (pad_shape.pointDist(p.x0, p.y0, p.x1, p.y1, p.poly, c[0], c[1], std.math.inf(f64)) > 0) continue;
-        return .{ .x0 = p.x0, .y0 = p.y0, .x1 = p.x1, .y1 = p.y1, .poly = p.poly };
-    }
-    return null;
+    return plane_via.landAt(ctx.obs, c, net, layer);
 }
 
 /// Find a DRC-safe spot for a ground via serving pad centre `c` on net `net`.
-/// Prefers the pad centre (true via-in-pad — fine on a large exposed pad); if
-/// that crowds a foreign pad, via, or retained track, searches the rest of the
-/// pad's OWN copper (`plane_via.InPad`) before fanning outward into open copper,
-/// returning that point (the caller joins it with a same-net stub). Null when no
-/// clear spot is found in the search window — the pad is then left without a via
-/// rather than emitting a guaranteed clearance violation.
+/// Prefers the pad centre (true via-in-pad — fine when the land can hold the
+/// barrel and still clear its neighbours); if that crowds a foreign pad, via, or
+/// retained track, or would leave the annular ring hanging off the land, searches
+/// the rest of the pad's OWN copper (`plane_via.InPad`) before fanning outward
+/// into open copper, returning that point (the caller joins it with a same-net
+/// stub). Null when no clear spot is found in the search window — the pad is then
+/// left without a via rather than emitting a guaranteed clearance violation.
 fn findGroundVia(
     ctx: *Ctx,
     placed: []const Via,
@@ -4734,15 +4748,29 @@ fn findGroundVia(
     layer: u8,
 ) ?[2]f64 {
     const grid = ctx.grid;
-    // Candidate 0: the pad centre, snapped to the grid (true via-in-pad when
-    // the pad is large enough to clear its neighbours).
+    // Candidate 0: the pad centre, snapped to the grid (true via-in-pad when the
+    // pad is large enough to clear its neighbours AND to hold the barrel).
+    //
+    // The snap is what makes containment a separate question from clearance
+    // here: it moves the site up to half a grid pitch off the anchor, so a site
+    // that sits ON the land can still hang its annular ring over the land's edge
+    // — and no clearance probe can see that, because `viaClearsPads` skips the
+    // routing net's own pads. Measured on `bcuda-lt3045-ldo`: U1's GND_1 land is
+    // 0.80 x 0.30 mm, the snap put a 0.4 mm barrel at (1.578, 0.016) against a
+    // land centred (1.500, 0.000), and the ring overhung the 0.30 mm dimension by
+    // 0.034/0.066 mm. Refusing it costs one stub and buys a landed annulus.
     {
         const s = grid.snap(c[0], c[1]);
-        if (groundViaPointClear(ctx, placed, tracks, s, net) and segClearsPadsOnLayer(ctx, c, s, net, null))
+        if (plane_via.inLandBarrelFits(padCopperAt(ctx, s, net, layer), s, ctx.params.via_dia) and
+            groundViaPointClear(ctx, placed, tracks, s, net) and segClearsPadsOnLayer(ctx, c, s, net, null))
             return s;
     }
     // A big pad (a thermal land) usually still has room a couple of tenths off
-    // its anchor — a site the grid-stepped fan below strides straight over.
+    // its anchor — a site the grid-stepped fan below strides straight over. This
+    // is also where a snap refused for containment lands: the walk is centre-out
+    // from the UNSNAPPED anchor and every site it yields contains the barrel, so
+    // a land that can hold the via at all gets it at (or nearest to) its own
+    // centre — strictly closer than the snap was, and with no stub at all.
     if (padCopperAt(ctx, c, net, layer)) |pad| {
         var scan = plane_via.InPad.init(pad, c, ctx.params.via_dia);
         while (scan.next()) |s| {
@@ -4752,6 +4780,11 @@ fn findGroundVia(
     }
     // Otherwise fan outward (away from foreign pads) in growing rings, snapping
     // each candidate to the grid, until one clears every foreign pad and via.
+    // The containment gate rides along: ring 1 is only one grid pitch out, so a
+    // snapped fan site routinely lands ON the anchor land's edge (or on a
+    // neighbouring same-net land), and a barrel straddling an edge is the same
+    // unlanded ring the pad-centre gate refuses. Ungated it would simply move
+    // the defect one ring out.
     const dir = plane_via.fanDir(ctx.obs, c, net);
     const ang0 = std.math.atan2(dir[1], dir[0]);
     var ring: usize = 1;
@@ -4762,6 +4795,7 @@ fn findGroundVia(
             const a = ang0 + plane_via.swivel(k);
             const s = grid.snap(c[0] + rad * @cos(a), c[1] + rad * @sin(a));
             if (!groundViaPointClear(ctx, placed, tracks, s, net)) continue;
+            if (!plane_via.inLandBarrelFits(padCopperAt(ctx, s, net, layer), s, ctx.params.via_dia)) continue;
             if (!segClearsPadsOnLayer(ctx, c, s, net, null)) continue;
             if (!segClearsTracks(ctx, tracks, c, s, net, layer)) continue;
             return s;

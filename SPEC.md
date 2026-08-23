@@ -3398,7 +3398,7 @@ Public functions: load, isGroundFn, isSupplyFn, strapPads, padRequirements
 
 ## placement/plane-via
 
-Public functions: InPad, fanDir, swivel
+Public functions: InPad, barrelFits, inLandBarrelFits, landAt, thermalAxis, ThermalArray, fanDir, swivel
 
 Where a plane-stitching via may land on the pad it serves. Both searches that
 drop one — the router's plane pass and the post-route gate's island stitch —
@@ -3435,6 +3435,33 @@ still offers nothing, both walks share one lattice in one order (so a caller
 running both gains sites and never trades one), and the relaxed walk is offered
 only after the strict walk and the fan have both declined.
 
+CONTAINMENT itself lives here too, because the answer has to be one answer. A
+via sited ON a pad must keep its finished annulus on that pad's copper: a ring
+hanging over the land edge is unsupported copper across the mask opening and a
+solder-wicking path out of the joint, and nothing else on the board can catch it
+— every copper clearance probe skips the routing net's OWN pads, and a land the
+via is drilled into is exactly that. So one predicate measures it (`barrelFits`,
+the barrel centre plus eight rim samples against the real outline) and every
+via-in-pad site is put through it: the ring walk's strict tier, the thermal
+array's regular cells, and the router's own pad-centre and fan candidates. The
+pad EDGE is the boundary, with a nanometre of tolerance that exists only so a
+barrel exactly as wide as its land is not lost to arithmetic; a manufacturable
+overhang is tens of microns and is refused. Measured on `bcuda-lt3045-ldo`: the
+plane pass opens on the pad anchor snapped to the routing lattice, and on U1's
+0.80 x 0.30 mm DFN ground land that put a 0.4 mm barrel on the land with the ring
+about 0.05 mm past the 0.30 mm edge on each side — legal by every clearance rule
+and a defect on the board.
+
+A refused site is not a lost via. The tiers below the pad centre take over in
+order, and they are centre-out: the in-pad walk opens on the land's own
+UNSNAPPED anchor, so a land that can hold the barrel at all gets it at (or
+nearest to) its own centre — strictly closer than the snapped candidate was, and
+with no stub. Only a land that cannot contain the barrel ANYWHERE falls through
+to a fan site beside it plus a stub, one grid pitch out. That ordering is what
+keeps the bonded-bypass rule honest: a cap land contains its barrel and keeps the
+exact-centre drop the loop-inductance argument asks for, and a cap land too small
+to contain one degrades by a grid pitch instead of shipping an unlanded ring.
+
 - the in-pad scan yields the pad's own anchor first when the barrel fits there
 - the in-pad scan never yields a site whose via barrel leaves the pad's copper
 - a pad too small to hold the via barrel offers the in-pad scan no site at all
@@ -3442,7 +3469,15 @@ only after the strict walk and the fan have both declined.
 - a pad too small to hold even the drilled hole offers no in-pad site, and a via with no usable drill is held to its barrel
 - the in-pad scan is deterministic: the same pad, anchor and via size replay the identical sequence
 - the in-pad ring walk visits every lattice cell of a ring exactly once
+- a via-in-pad site must land its whole annular ring on the pad, so a land too small to hold the barrel is refused at its own centre
+- the pad edge is the containment boundary: a barrel exactly as wide as its land is contained, and a micron of real overhang is not
+- a via standing on no land of its own net is not a via-in-pad and is not held to containment
+- the land under a via site is the routing net's own pad on that layer, and a foreign or other-layer pad is not one
+- a plane return is never sited where its annular ring would hang off the land it stands on
+- a land too small to contain the barrel keeps its plane return, taken from the outward fan beside it
+- a bonded bypass cap keeps its barrel at the exact land centre when the land contains it, and degrades to the nearest contained site when it does not
 - a thermal pad whose anchor is via-illegal is still stitched, from a site inside its own copper
+- an exposed-pad thermal array keeps its centred regular field, which containment sizes but never displaces
 - the plane-via pass is deterministic: the same board replays the identical via positions
 - completeness-waiver: empty inputs (a degenerate pad yields an empty scan, unit-tested; an empty obstacle list gives the fan its documented +y fallback)
 - completeness-waiver: large inputs (the ring walk is capped at 16 rings whatever the pad measures)

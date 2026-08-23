@@ -187,7 +187,17 @@ test "a bound bypass pair is joined on the surface and stitched once" {
     // The same loop's GND leg is carried by the dedicated ground plane. It
     // receives independent drops and never grows a pad-to-pad surface route
     // across the channel the rail leg just claimed.
-    try testing.expectEqual(@as(usize, 0), tracksOn(routed.tracks, 1));
+    try testing.expect(!crossesGap(routed.tracks, 1, .{ 0.5, 1.3 }, .{ -0.15, 0.15 }));
+    // It used to grow no ground copper AT ALL, and that zero was bought with an
+    // unlanded annulus: U1's ground land is 0.30 mm across against a 0.40 mm
+    // barrel, so EVERY site on that land hangs the ring at least 0.05 mm past
+    // its edge, and the drop the pass took there was one of them.
+    // `plane_via.inLandBarrelFits` refuses them now, and the ladder's next legal
+    // site is beside the land — which costs exactly one STUB (0.3 mm, the land
+    // centre out to the barrel), not a route. The cap's own 0.54 x 0.60 land
+    // still contains its barrel and still needs no copper at all.
+    try testing.expectEqual(@as(usize, 1), tracksOn(routed.tracks, 1));
+    try testing.expect(maxTrackMm(routed.tracks, 1) <= 0.4);
 }
 
 // spec: placement/plane-stitch - the shared via of a DRAWN bond stands on the bypass cap's own land centre, so no copper is spent reaching the drop
