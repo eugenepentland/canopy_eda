@@ -226,65 +226,13 @@ pub const clearance_eps: f64 = 1e-6;
 /// whether any actually dropped.
 const PlaneTally = struct { needed: bool = false, placed: bool = false };
 
-/// Preferred centre pitch for automatic exposed-pad thermal arrays. This is
-/// deliberately wider than the manufacturing minimum: tighter arrays remove
-/// useful spreading copper and quickly hit diminishing thermal returns. A
-/// small land may tighten below this only to fit a useful 3 x 3 field.
-const thermal_via_pitch_mm: f64 = 0.9;
-/// Bound one axis of an automatic field. A 4 x 4 array gives a large
-/// 4.6-mm-class RF/power paddle sixteen regular barrels without walling the
-/// package's own perimeter escapes; tighter packing showed no routing margin.
-const max_thermal_axis_vias: usize = 4;
-
-const ThermalAxis = struct {
-    count: usize,
-    pitch: f64,
-};
-
-/// Choose one centred array axis. Use the preferred pitch when it naturally
-/// gives at least three sites; otherwise tighten only when the DRC minimum can
-/// support a 3-site row. This makes Barracuda's 1.95-mm HMC451 paddle a 3-site
-/// axis while its 2.5-mm and 4.6-mm paddles remain at about 0.9-mm pitch.
-fn thermalAxis(span: f64, via_dia: f64, min_pitch: f64) ThermalAxis {
-    if (span < via_dia or min_pitch <= 0) return .{ .count = 0, .pitch = 0 };
-    const usable = span - via_dia;
-    const preferred_pitch = @max(thermal_via_pitch_mm, min_pitch);
-    const preferred_count = numeric.toCount(@floor(usable / preferred_pitch)) + 1;
-    const legal_count = numeric.toCount(@floor(usable / min_pitch)) + 1;
-    var count = @min(preferred_count, max_thermal_axis_vias);
-    if (count < 3 and legal_count >= 3) count = 3;
-    count = @min(count, max_thermal_axis_vias);
-    if (count < 2) return .{ .count = count, .pitch = 0 };
-    return .{
-        .count = count,
-        .pitch = @min(preferred_pitch, usable / @as(f64, @floatFromInt(count - 1))),
-    };
-}
-
-/// Whether one exact regular-grid site keeps its complete copper barrel inside
-/// the exposed pad's real outline. A rejected custom-pad cell is skipped; it is
-/// never replaced by the nearest off-pattern point.
-const ThermalArray = struct {
-    pad: pad_shape.Shape,
-    centre: [2]f64,
-    cols: usize,
-    rows: usize,
-    pitch_x: f64,
-    pitch_y: f64,
-
-    fn count(self: ThermalArray) usize {
-        return self.cols *| self.rows;
-    }
-
-    fn point(self: ThermalArray, col: usize, row: usize) [2]f64 {
-        const cx = (@as(f64, @floatFromInt(self.cols)) - 1) / 2;
-        const cy = (@as(f64, @floatFromInt(self.rows)) - 1) / 2;
-        return .{
-            self.centre[0] + (@as(f64, @floatFromInt(col)) - cx) * self.pitch_x,
-            self.centre[1] + (@as(f64, @floatFromInt(row)) - cy) * self.pitch_y,
-        };
-    }
-};
+/// The exposed-paddle array geometry — preferred pitch, axis bound, one axis's
+/// site count, and the centred lattice itself — lives with the rest of the
+/// plane-via siting rules (`plane_via`), which already owns whether a given
+/// barrel fits inside a paddle's real outline.
+const thermal_via_pitch_mm = plane_via.thermal_via_pitch_mm;
+const ThermalArray = plane_via.ThermalArray;
+const thermalAxis = plane_via.thermalAxis;
 
 /// Whether this terminal is a dominant exposed die/power paddle rather than an
 /// ordinary contact that merely happens to admit multiple drills.
@@ -2119,6 +2067,77 @@ pub fn canonicalizeTraceJunctions(
     return route_cleanup.canonicalizeTraceJunctions(arena, tracks, mutable, vias);
 }
 
+/// Public routing seam for the closing gloss over a caller's finished copper —
+/// the sibling of `canonicalizeTraceJunctions`, and its natural successor:
+/// canonicalization SPLITS sections and WELDS near-misses, which is exactly how
+/// a board acquires the collinear pairs and micron tails this removes. Same
+/// contract: `mutable` parallels `tracks` and is compacted with it, a false
+/// entry stays byte-for-byte identical. Own lands come from `placement`, so a
+/// stub end resting on one is never fused away.
+pub fn glossFinishedTracks(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    tracks: *std.ArrayList(Track),
+    mutable: *std.ArrayList(bool),
+    vias: []const Via,
+) std.mem.Allocator.Error!void {
+    _ = route_cleanup.glossFinishedTracks(tracks, mutable, vias, try buildObstacles(arena, placement.parts, placement.nets));
+}
+
+/// One net's accumulated copper, handed to the branch fold.
+pub const NetFold = route_cleanup.NetFold;
+/// The folded copper, plus whether anything actually folded.
+pub const FoldedNet = route_cleanup.FoldedNet;
+
+/// Public routing seam for a NET-SCOPED branch fold over copper a caller
+/// assembled outside one router call.
+///
+/// `mergeParallelBranches` and `mergeAdjacentPadEscapes` can only see legs that
+/// are same-net on ONE board. A phase that routes a rail's authored bypass bonds
+/// one pair at a time never gets that board: each call holds a single leg,
+/// because every other leg of the rail is presented to the search as unnetted
+/// obstacle metal so the pair still has to close cap-to-pin on its own. The
+/// doubled trunk two such legs leave down one channel is legal to fold and
+/// invisible to every per-bond finish — only a post-route seam can make the
+/// group same-net again, which is what this is.
+///
+/// It is a pure function of its inputs: the caller's copper comes back rewritten
+/// or verbatim, and `changed` says which, so the caller can re-run its own
+/// acceptance gate over the folded result and keep it only if it still passes.
+pub fn foldNetBranches(run: NetFold) std.mem.Allocator.Error!FoldedNet {
+    return route_cleanup.foldNetBranches(run);
+}
+
+/// A cleanup board over copper a caller assembled OUTSIDE one route call.
+///
+/// The post-route passes read the live routing context — pad obstacles, the
+/// clearance grid, the resolved per-net params — and a caller that stitched its
+/// answer together from several router calls has none of it. This builds the
+/// smallest context those passes need (no pour masks, no keepout gates, no
+/// timeline) around `options`' foreign copper, which `stampExistingCopper`
+/// appends to the lists as it stamps. Null when the board's lattice cannot be
+/// built at all, which for a cleanup means "leave the copper alone".
+pub fn cleanupBoard(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    params: RouteParams,
+    options: route_policy.Options,
+    copper: struct { tracks: *std.ArrayList(Track), vias: *std.ArrayList(Via) },
+) std.mem.Allocator.Error!?CleanupBoard {
+    const ctx = try arena.create(Ctx);
+    const scale = fittedGridScale(placement, params, options.selected_nets, options.grid_scale);
+    ctx.* = switch (try buildRouteCtx(arena, placement, params, options.selected_nets, scale)) {
+        .ok => |c| c,
+        .empty, .overflow => return null,
+    };
+    ctx.net_policy = options.net;
+    ctx.selected_nets = options.selected_nets;
+    ctx.zones = options.existing_zones;
+    ctx.effort = options.effort;
+    try stampExistingCopper(ctx, options, copper.tracks, copper.vias);
+    return .{ .ctx = ctx, .placement = placement, .tracks = copper.tracks, .vias = copper.vias };
+}
+
 fn routeSignalPass(run: SignalPass) std.mem.Allocator.Error!SignalResult {
     const arena = run.ctx.arena;
     var order: std.ArrayList(usize) = .empty;
@@ -2291,8 +2310,18 @@ fn finishRoute(run: RouteFinish) std.mem.Allocator.Error!RouteRun {
     // A deadline/cancelled route is already a valid partial board: failed nets
     // were rolled back and the loop above supplied its complete honest tally.
     // Do not spend an unbounded-looking cleanup tail straightening and
-    // re-glossing copper the caller has explicitly stopped waiting for.
-    if (routeCancelled(run.ctx)) return assembleRouteRun(run);
+    // re-glossing copper the caller has explicitly stopped waiting for — but do
+    // not ship RAW maze copper either. `cancelGloss` is the deterministic,
+    // probe-free, clock-free half of the finish (duplicate/degenerate drop plus
+    // the loose-leaf prune); a sliced sub-circuit reaches this path routinely,
+    // and its caller's DRC sees whatever comes out of it.
+    const board = CleanupBoard{ .ctx = run.ctx, .placement = run.placement, .tracks = run.tracks, .vias = run.vias };
+    if (routeCancelled(run.ctx)) {
+        var partial = board;
+        partial.preserve_vias = true; // no fill raster here to re-judge a barrel by
+        try route_cleanup.cancelGloss(partial);
+        return assembleRouteRun(run);
+    }
     const escape_marks = [2]usize{ run.tracks.items.len, run.vias.items.len };
     if (timing) |t| t.begin(.escape_stubs);
     try routeEscapeStubs(arena, run.ctx, run.placement, run.tracks, run.vias);
@@ -2317,7 +2346,6 @@ fn finishRoute(run: RouteFinish) std.mem.Allocator.Error!RouteRun {
     //     between pins vias into the corridors those runs would tauten through
     //     (deferring it costs straps +6 tracks). It is conditional because with
     //     no hop removed there is nothing merged to simplify.
-    const board = CleanupBoard{ .ctx = run.ctx, .placement = run.placement, .tracks = run.tracks, .vias = run.vias };
     if (timing) |t| t.begin(.straighten);
     try straighten.passBoard(board);
     if (timing) |t| t.end(.straighten);
@@ -2398,6 +2426,18 @@ fn finishRoute(run: RouteFinish) std.mem.Allocator.Error!RouteRun {
     var final_board = post_stitch_board;
     final_board.preserve_vias = true;
     try route_cleanup.pruneDeadCopper(final_board);
+    // THE LAST PASS. Every seam above has now emitted its final copper, and
+    // each of them rebuilds runs the others already finished with: an escape ray
+    // re-drawn over a comb the merge just consolidated, a neck shaped onto a
+    // section a prune left, a stitch land beside a barrel. What that leaves is
+    // sections emitted twice, halves of one straight run kept apart by a
+    // last-bit width difference, and tails too short for their own copper to
+    // notice — none of which any earlier pass looks for, because each of them
+    // ran before the copper that creates them existed. The gloss only ever
+    // removes indistinguishable metal and snaps a stub onto its own land, so
+    // putting it here cannot undo the escape rays `pad_escape` deliberately
+    // draws last (it re-straightens nothing) nor the necks `pad_neck` just cut.
+    try route_cleanup.finalGloss(final_board);
     var outcome_it = run.ctx.rf.port_outcomes.valueIterator();
     while (outcome_it.next()) |outcome| {
         for (run.tracks.items) |track| outcome.physical.retained_tracks += @intFromBool(track.net == outcome.net);

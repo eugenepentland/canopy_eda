@@ -358,7 +358,7 @@ Public functions: solve
 
 ## placement/router
 
-Public functions: route, perNetRouted, returnPathViolations, canonicalizeTraceJunctions
+Public functions: route, perNetRouted, returnPathViolations, canonicalizeTraceJunctions, glossFinishedTracks, foldNetBranches, cleanupBoard
 
 - maze-routes a two-pad net into connected track segments
 - an equal-length octilinear tie is settled toward the straight path rather than an arbitrary staircase of the same length
@@ -617,6 +617,12 @@ Public functions: route, perNetRouted, returnPathViolations, canonicalizeTraceJu
 - a via crowding an existing same-net via is folded onto it instead of kept as a second drill
 - a same-net via fold never moves fence or stamped copper and never crosses nets
 - a same-net via fold is never planned onto a via that is itself being folded away
+- the closing gloss drops every repeat of one finished section, keeping the widest copy once
+- the closing gloss drops a dangling tail shorter than half its own width and keeps one its copper does not cover
+- the closing gloss fuses a collinear pair at a bare vertex and refuses one carrying a junction, a barrel, or a land
+- the closing gloss leaves immutable caller copper byte-identical
+- a cancelled run still ships deduplicated, tail-free copper instead of raw maze output
+- a net-scoped branch fold folds a caller's accumulated parallel legs and hands back unfoldable copper verbatim
 
 ## serve/subcircuit-route
 
@@ -5005,6 +5011,7 @@ order, preferred/allowed layer masks, waypoints, via budgets).
 - a pair channel's pinch owners join the deepening round's nomination sweep and nowhere else, are judged by the same vacate policy as swept copper, and a wall owned by a keepout or the board edge is reported and never nominated
 - the public topology cleanup seam removes deletion-invariant trace sections and connectivity-redundant non-ground vias with the same connectivity gate as a normal route
 - generated physical trace contacts are canonicalized before the route gate can count or persist them
+- the route gate's closing gloss fuses the collinear halves a junction split leaves behind while keeping the split that names a real junction
 - a topology-flagged route wave lowers into planner corridor guides for its nets
 - the same plan without the topology flag lowers to exactly the guides it had before
 - a net whose wave authored waypoints keeps them and receives no planner guide

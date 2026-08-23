@@ -1193,22 +1193,111 @@ fn appendUncarriedSupplyBonds(
             try ctx.vias.appendSlice(alloc, copper.vias);
             ctx.routed_nets[ni] = true;
         }
-        // A GROUP-scoped fold belongs here, once every bond of this rail has
-        // routed: two legs that ended up running side by side down one channel
-        // are legally foldable into a shared trunk, and no per-bond router call
-        // can ever see that — its finish pass holds exactly one leg of this net,
+        // The GROUP-scoped fold, now that every bond of this rail has routed:
+        // two legs that ended up running side by side down one channel are
+        // legally foldable into a shared trunk, and no per-bond router call can
+        // ever see that — its finish pass holds exactly one leg of this net,
         // because every other leg is present only as the unnetted obstacle
         // above. Making the group same-net for the fold and keeping it foreign
         // for the search cannot be expressed through the routing entry points:
-        // one track list serves both. Only a POST-route seam separates them,
-        // which is why the fold's home is `route_cleanup` (mergeParallelBranches
-        // + mergeAdjacentPadEscapes over this net's accumulated bond copper,
-        // re-gated through `bondAccepted`). This module cannot reach it: the
-        // `serve-placement-internals` layering rule refuses a new src/serve ->
-        // src/placement import edge, and `router.zig` re-exports no entry that
-        // runs those passes over a caller's copper the way it does for
-        // `canonicalizeTraceJunctions`. Adding that one re-export unblocks it.
+        // one track list serves both, so only a POST-route seam separates them.
+        try foldRailBonds(ctx, ni);
     }
+}
+
+fn asRouterTrack(copper: route_policy.ExistingTrack) router.Track {
+    return .{
+        .x1 = copper.x1,
+        .y1 = copper.y1,
+        .x2 = copper.x2,
+        .y2 = copper.y2,
+        .layer = copper.layer,
+        .width = copper.width,
+        .net = copper.net,
+    };
+}
+
+fn asRouterVia(copper: route_policy.ExistingVia) router.Via {
+    return .{ .x = copper.x, .y = copper.y, .dia = copper.dia, .drill = copper.drill, .net = copper.net };
+}
+
+/// Would the FOLDED shape of `net` still pass the ordered seed gate?
+///
+/// `bondAccepted` judges one bond's fresh copper against everything already
+/// accepted, which is the wrong question here: the fold REPLACES this rail's
+/// copper rather than adding to it. So the rail's own metal comes out of the
+/// existing set and goes in as the candidate, and the gate judges the whole
+/// group exactly as it will ship.
+fn foldAccepted(
+    ctx: SupplyBondContext,
+    net: usize,
+    tracks: []const SeedTrack,
+    vias: []const SeedVia,
+) std.mem.Allocator.Error!bool {
+    const rejected = try ctx.alloc.alloc(bool, ctx.board.nets.len);
+    @memset(rejected, false);
+    var options = ctx.base;
+    options.existing_tracks = try bondTrackObstacles(ctx.alloc, ctx.base.existing_tracks, ctx.tracks.items, net);
+    options.existing_vias = try bondViaObstacles(ctx.alloc, ctx.base.existing_vias, ctx.vias.items, net);
+    try seed_drc.reject(ctx.alloc, .{
+        .placement = ctx.board,
+        .params = ctx.params,
+        .options = options,
+        .rejected = rejected,
+        .tracks = tracks,
+        .vias = vias,
+    });
+    return net < rejected.len and !rejected[net];
+}
+
+fn replaceNetSeeds(
+    ctx: SupplyBondContext,
+    net: usize,
+    tracks: []const SeedTrack,
+    vias: []const SeedVia,
+) std.mem.Allocator.Error!void {
+    var kept_tracks: std.ArrayList(SeedTrack) = .empty;
+    for (ctx.tracks.items) |item| if (item.net != net) try kept_tracks.append(ctx.alloc, item);
+    try kept_tracks.appendSlice(ctx.alloc, tracks);
+    ctx.tracks.* = kept_tracks;
+    var kept_vias: std.ArrayList(SeedVia) = .empty;
+    for (ctx.vias.items) |item| if (item.net != net) try kept_vias.append(ctx.alloc, item);
+    try kept_vias.appendSlice(ctx.alloc, vias);
+    ctx.vias.* = kept_vias;
+}
+
+/// Fold one rail's accumulated bypass-bond copper through the router's
+/// net-scoped seam, and keep the result only when it still passes the seed gate.
+///
+/// A no-op is the common case and costs one comparison: `foldNetBranches` hands
+/// the caller's own slices back unchanged when nothing folds, and this returns
+/// before touching the accumulator.
+fn foldRailBonds(ctx: SupplyBondContext, net: usize) std.mem.Allocator.Error!void {
+    const alloc = ctx.alloc;
+    var own: std.ArrayList(router.Track) = .empty;
+    var own_vias: std.ArrayList(router.Via) = .empty;
+    for (ctx.tracks.items) |item| if (item.net == net) try own.append(alloc, asRouterTrack(item.copper));
+    for (ctx.vias.items) |item| if (item.net == net) try own_vias.append(alloc, asRouterVia(item.copper));
+    if (own.items.len < 2) return;
+    var options = ctx.base;
+    options.existing_tracks = try bondTrackObstacles(alloc, ctx.base.existing_tracks, ctx.tracks.items, net);
+    options.existing_vias = try bondViaObstacles(alloc, ctx.base.existing_vias, ctx.vias.items, net);
+    const folded = try router.foldNetBranches(.{
+        .arena = alloc,
+        .placement = ctx.board,
+        .params = ctx.params,
+        .options = options,
+        .net = net,
+        .tracks = own.items,
+        .vias = own_vias.items,
+    });
+    if (!folded.changed) return;
+    var seeds: std.ArrayList(SeedTrack) = .empty;
+    for (folded.tracks) |track| try appendTrack(alloc, &seeds, track);
+    var barrels: std.ArrayList(SeedVia) = .empty;
+    for (folded.vias) |via| try appendVia(alloc, &barrels, via);
+    if (!try foldAccepted(ctx, net, seeds.items, barrels.items)) return;
+    try replaceNetSeeds(ctx, net, seeds.items, barrels.items);
 }
 
 fn polygonContains(poly: []const [2]f64, x: f64, y: f64) bool {

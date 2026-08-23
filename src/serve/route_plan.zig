@@ -5521,7 +5521,7 @@ fn gateConfigured(
         if (options.timing) |t| t.end(.gate);
         return reconciled;
     }
-    reconciled.result = try canonicalizeGeneratedJunctions(alloc, reconciled.result, options);
+    reconciled.result = try canonicalizeGeneratedJunctions(alloc, placement, reconciled.result, options);
     const canon_ms = phaseMs(gate_t0);
     // NO topology prune here. It used to run in every gate pass, which put the
     // reconcile ladder to work on a board the prune had just rewritten — the
@@ -5543,11 +5543,19 @@ fn gateConfigured(
 }
 
 /// Give every physical contact introduced by this route an explicit
-/// endpoint-on-centreline representation before topology pruning judges it.
-/// Caller-retained tracks are marked immutable by exact instance identity;
-/// canonicalization may bridge to them but never rewrites them.
+/// endpoint-on-centreline representation before topology pruning judges it,
+/// then gloss what that representation costs.
+///
+/// Canonicalization is the LAST thing on this board that emits copper, and it
+/// emits the two shapes nothing downstream looks for: a split leaves two
+/// perfectly collinear halves whose partner may since have gone away, and a weld
+/// leaves a micron-scale off-axis tail. Both are invisible to the router's own
+/// finish, which ran before this. `glossFinishedTracks` closes over the same
+/// `mutable` mask, so caller-retained copper is as untouched by the gloss as it
+/// is by the canonicalization: it may be bridged TO, never rewritten.
 fn canonicalizeGeneratedJunctions(
     alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
     routed: router.RouteResult,
     options: route_policy.Options,
 ) std.mem.Allocator.Error!router.RouteResult {
@@ -5557,6 +5565,7 @@ fn canonicalizeGeneratedJunctions(
     for (routed.tracks) |track| try mutable.append(alloc, topologyMutable(options.selected_nets, track.net) and
         !retainedTrack(track, options.existing_tracks));
     try router.canonicalizeTraceJunctions(alloc, &tracks, &mutable, routed.vias);
+    try router.glossFinishedTracks(alloc, placement, &tracks, &mutable, routed.vias);
     var out = routed;
     out.tracks = try tracks.toOwnedSlice(alloc);
     return out;
@@ -10799,6 +10808,148 @@ test "route gate prunes late stub and one-layer via findings" {
     try testing.expectEqual(@as(usize, 0), cleaned.vias.len);
 }
 
+// spec: serve/route-plan - the route gate's closing gloss fuses the collinear halves a junction split leaves behind while keeping the split that names a real junction
+test "route gate keeps a T's split and fuses a split with nothing at its vertex" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var parts = twoPadParts();
+    const nets = [_]optimizer.FlatNet{.{ .name = "SIG", .pins = &fixture_pins }};
+    const placement = fixturePlacement(&parts, &nets);
+    // A true mid-span X: canonicalization gives the crossbar an endpoint at the
+    // crossing, and the gloss must LEAVE it — the vertex is the junction.
+    const crossed = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 3, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 1.5, .y1 = -1, .x2 = 1.5, .y2 = 1, .layer = 0, .width = 0.2, .net = 0 },
+    };
+    const tee = try canonicalizeGeneratedJunctions(arena, placement, .{
+        .tracks = &crossed,
+        .vias = &.{},
+        .routed = 1,
+        .total = 1,
+    }, .{});
+    try testing.expectEqual(@as(usize, 3), tee.tracks.len);
+    try testing.expectEqual(@as(usize, 0), drc.countKind(
+        try drc.checkTopology(arena, placement, tee, &.{}),
+        .implicit_junction,
+    ));
+
+    // The same split with nothing left at its vertex — what a pruned partner
+    // leaves — is one run again, so the board ships one section, not two.
+    const halves = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 1.5, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 1.5, .y1 = 0, .x2 = 3, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+    };
+    const fused = try canonicalizeGeneratedJunctions(arena, placement, .{
+        .tracks = &halves,
+        .vias = &.{},
+        .routed = 1,
+        .total = 1,
+    }, .{});
+    try testing.expectEqual(@as(usize, 1), fused.tracks.len);
+    try testing.expectEqual(@as(f64, 0), @min(fused.tracks[0].x1, fused.tracks[0].x2));
+    try testing.expectEqual(@as(f64, 3), @max(fused.tracks[0].x1, fused.tracks[0].x2));
+}
+
+// spec: placement/router - a cancelled run still ships deduplicated, tail-free copper instead of raw maze output
+test "a cancelled route glosses its partial board instead of shipping it raw" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var parts = twoPadParts();
+    const nets = [_]optimizer.FlatNet{.{ .name = "SIG", .pins = &fixture_pins }};
+    const placement = fixturePlacement(&parts, &nets);
+    const run = router.Track{ .x1 = 0, .y1 = 0, .x2 = 3, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 };
+    const existing = [_]route_policy.ExistingTrack{
+        trackAsExisting(run),
+        trackAsExisting(run), // a second pass re-emitted the same section
+        // …and a 0.05 mm tail its own copper already covers.
+        trackAsExisting(.{ .x1 = 1.5, .y1 = 0, .x2 = 1.5, .y2 = 0.05, .layer = 0, .width = 0.2, .net = 0 }),
+    };
+    var cancelled: std.atomic.Value(bool) = .init(true);
+    const result = try router.routeWithOptions(arena, placement, .{}, .{
+        .existing_tracks = &existing,
+        .stop = .{ .cancel = &cancelled },
+    });
+    try testing.expect(result.cancelled);
+    // One section: the duplicate and the tail are both gone, and the run that
+    // actually joins the two pads is untouched.
+    try testing.expectEqual(@as(usize, 1), result.tracks.len);
+    try testing.expectEqual(@as(f64, 0), result.tracks[0].x1);
+    try testing.expectEqual(@as(f64, 3), result.tracks[0].x2);
+}
+
+// spec: placement/router - a net-scoped branch fold folds a caller's accumulated parallel legs and hands back unfoldable copper verbatim
+test "the net-scoped bond fold folds a doubled leg and leaves an unfoldable group alone" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // Barracuda's measured doubled-trunk shape, moved to the fixture origin: a
+    // trunk from one land plus a second land's leg running beside it.
+    const a = [2]f64{ 2.20000000000005, 2.12000000000002 };
+    const b = [2]f64{ 3.9032613427087, 0.40840018177056 };
+    const c = [2]f64{ 1.10000000000002, 2.69166152447922 };
+    const d = [2]f64{ 2.77492286718785, 1.01673865729137 };
+    const width = 0.2532;
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.3, .hh = 0.3, .pads = &route_plan_fixture_pad, .fallback = false, .x = 2.2, .y = 2.72 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.3, .hh = 0.3, .pads = &route_plan_fixture_pad, .fallback = false, .x = 1.1, .y = 3.3 },
+        .{ .ref_des = "R3", .kind = .passive, .hw = 0.3, .hh = 0.3, .pads = &route_plan_fixture_pad, .fallback = false, .x = b[0], .y = b[1] },
+    };
+    const pins = [_]export_kicad.FlatPin{
+        .{ .ref_des = "R1", .pin = "1" },
+        .{ .ref_des = "R2", .pin = "1" },
+        .{ .ref_des = "R3", .pin = "1" },
+    };
+    const nets = [_]optimizer.FlatNet{.{ .name = "SIG", .pins = &pins }};
+    var placement = fixturePlacement(&parts, &nets);
+    placement.minx = 0.5;
+    placement.miny = -0.2;
+    placement.maxx = 4.5;
+    placement.maxy = 3.9;
+    // Where the branch meets the trunk: d's foot on a—b, precomputed so this
+    // test needs no geometry helper from inside the placement layer.
+    const foot = [2]f64{ 3.0376816771522757, 1.2782173736957065 };
+    const legs = [_]router.Track{
+        .{ .x1 = 2.2, .y1 = 2.72, .x2 = a[0], .y2 = a[1], .layer = 0, .width = width, .net = 0 },
+        .{ .x1 = a[0], .y1 = a[1], .x2 = b[0], .y2 = b[1], .layer = 0, .width = width, .net = 0 },
+        .{ .x1 = 1.1, .y1 = 3.3, .x2 = c[0], .y2 = c[1], .layer = 0, .width = width, .net = 0 },
+        .{ .x1 = c[0], .y1 = c[1], .x2 = d[0], .y2 = d[1], .layer = 0, .width = width, .net = 0 },
+        .{ .x1 = d[0], .y1 = d[1], .x2 = foot[0], .y2 = foot[1], .layer = 0, .width = width, .net = 0 },
+    };
+    const folded = try router.foldNetBranches(.{
+        .arena = arena,
+        .placement = placement,
+        .params = .{},
+        .options = .{},
+        .net = 0,
+        .tracks = &legs,
+        .vias = &.{},
+    });
+    try testing.expect(folded.changed);
+    // A fold is only a fold when it SHORTENS the group, and it returns this
+    // net's copper alone — never the board it was probed against.
+    try testing.expect(trackMmOnLayer(folded.tracks, 0) + width < trackMmOnLayer(&legs, 0));
+    for (folded.tracks) |t| try testing.expectEqual(@as(i32, 0), t.net);
+
+    // The exactness the caller depends on: a group with nothing legally
+    // foldable comes back as the caller's OWN slice, byte-identical, so a
+    // no-op fold cannot perturb the copper it accumulated.
+    const single = legs[0..2];
+    const verbatim = try router.foldNetBranches(.{
+        .arena = arena,
+        .placement = placement,
+        .params = .{},
+        .options = .{},
+        .net = 0,
+        .tracks = single,
+        .vias = &.{},
+    });
+    try testing.expect(!verbatim.changed);
+    try testing.expectEqual(single.ptr, verbatim.tracks.ptr);
+    try testing.expectEqual(single.len, verbatim.tracks.len);
+}
+
 // spec: serve/route-plan - generated physical trace contacts are canonicalized before the route gate can count or persist them
 test "route gate canonicalizes a width-overlap gap and preserves its retained side" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
@@ -10812,14 +10963,19 @@ test "route gate canonicalizes a width-overlap gap and preserves its retained si
         .{ .x1 = 1.45, .y1 = 0, .x2 = 3, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
     };
     const existing = [_]route_policy.ExistingTrack{trackAsExisting(tracks[0])};
-    const canonical = try canonicalizeGeneratedJunctions(arena, .{
+    const canonical = try canonicalizeGeneratedJunctions(arena, placement, .{
         .tracks = &tracks,
         .vias = &.{},
         .routed = 1,
         .total = 1,
     }, .{ .existing_tracks = &existing });
-    try testing.expectEqual(@as(usize, 3), canonical.tracks.len);
+    // Two, not the three the bridge leaves: the closing gloss fuses the weld
+    // into the generated half it is collinear with (a degree-2 vertex holding
+    // nothing), which is strictly better output for the same topology.
+    try testing.expectEqual(@as(usize, 2), canonical.tracks.len);
     try testing.expect(sameTrack(canonical.tracks[0], existing[0]));
+    try testing.expectEqual(@as(f64, 1.4), @min(canonical.tracks[1].x1, canonical.tracks[1].x2));
+    try testing.expectEqual(@as(f64, 3), @max(canonical.tracks[1].x1, canonical.tracks[1].x2));
     const findings = try drc.checkTopology(arena, placement, canonical, &.{});
     try testing.expectEqual(@as(usize, 0), drc.countKind(findings, .implicit_junction));
 }

@@ -2169,12 +2169,19 @@ src/placement/plane_stitch.zig::surfaceBonds | fn surfaceBonds( arena: std.mem.A
 src/placement/plane_stitch.zig::viaOrder | fn viaOrder( arena: std.mem.Allocator, n: usize, bs: []const Bond, ) std.mem.Allocator.Error![]const usize
 src/placement/plane_stitch.zig::via_share_max_mm value
 src/placement/plane_via.zig::InPad struct_
+src/placement/plane_via.zig::ThermalArray struct_
+src/placement/plane_via.zig::ThermalAxis struct_
+src/placement/plane_via.zig::count | fn count(self: ThermalArray) usize
 src/placement/plane_via.zig::fanDir | fn fanDir(obs: anytype, c: [2]f64, net: i32) [2]f64
 src/placement/plane_via.zig::init | fn init(shape: pad_shape.Shape, anchor: [2]f64, via_dia: f64) InPad
+src/placement/plane_via.zig::max_thermal_axis_vias value
 src/placement/plane_via.zig::next | fn next(self: *InPad) ?[2]f64
 src/placement/plane_via.zig::overDrill | fn overDrill(shape: pad_shape.Shape, anchor: [2]f64, via_dia: f64, via_drill: f64) InPad
+src/placement/plane_via.zig::point | fn point(self: ThermalArray, col: usize, row: usize) [2]f64
 src/placement/plane_via.zig::swivel | fn swivel(k: usize) f64
+src/placement/plane_via.zig::thermalAxis | fn thermalAxis(span: f64, via_dia: f64, min_pitch: f64) ThermalAxis
 src/placement/plane_via.zig::thermalBarrelFits | fn thermalBarrelFits(pad: pad_shape.Shape, point: [2]f64, via_dia: f64) bool
+src/placement/plane_via.zig::thermal_via_pitch_mm value
 src/placement/port_escape.zig::Blocked struct_
 src/placement/port_escape.zig::Mm struct_
 src/placement/port_escape.zig::PadView struct_
@@ -2321,14 +2328,22 @@ src/placement/routability_lint.zig::freeFindings | fn freeFindings(alloc: Alloca
 src/placement/routability_lint.zig::preflight | fn preflight(alloc: Allocator, p: Placement, opts: Options) Allocator.Error![]Finding
 src/placement/routability_lint.zig::preflightCached | fn preflightCached(alloc: Allocator, scratch: Allocator, p: Placement, opts: Options, cache: Cache) Allocator.Error![]Finding
 src/placement/routability_lint.zig::preflightRepairCached | fn preflightRepairCached(alloc: Allocator, scratch: Allocator, p: Placement, opts: Options, cache: Cache) Allocator.Error![]Finding
+src/placement/route_cleanup.zig::FoldedNet struct_
+src/placement/route_cleanup.zig::GlossStats struct_
 src/placement/route_cleanup.zig::LandTransitRepair struct_
+src/placement/route_cleanup.zig::NetFold struct_
+src/placement/route_cleanup.zig::cancelGloss | fn cancelGloss(board: Board) std.mem.Allocator.Error!void
 src/placement/route_cleanup.zig::canonicalizeTraceJunctions | fn canonicalizeTraceJunctions( arena: std.mem.Allocator, tracks: *std.ArrayList(Track), mutable: *std.ArrayList(bool), vias: []const Via, ) std.mem.Allocator.Error!void
+src/placement/route_cleanup.zig::changed | fn changed(self: GlossStats) bool
 src/placement/route_cleanup.zig::closeNetOpens | fn closeNetOpens(board: Board) std.mem.Allocator.Error!void
 src/placement/route_cleanup.zig::collapseCollinearNets | fn collapseCollinearNets(board: Board) std.mem.Allocator.Error!void
 src/placement/route_cleanup.zig::countCopperIslands | fn countCopperIslands( arena: std.mem.Allocator, pads: []const PadObs, tracks: []const Track, vias: []const Via, parent_out: *[]usize, ) std.mem.Allocator.Error!usize
 src/placement/route_cleanup.zig::dropCoincidentVias | fn dropCoincidentVias(vias: *std.ArrayList(Via), selected_nets: []const bool) void
 src/placement/route_cleanup.zig::dropDegenerateTracks | fn dropDegenerateTracks(tracks: *std.ArrayList(Track), selected_nets: []const bool) void
 src/placement/route_cleanup.zig::dropRedundantViaPairs | fn dropRedundantViaPairs(board: Board) std.mem.Allocator.Error!void
+src/placement/route_cleanup.zig::finalGloss | fn finalGloss(board: Board) std.mem.Allocator.Error!void
+src/placement/route_cleanup.zig::foldNetBranches | fn foldNetBranches(run: NetFold) std.mem.Allocator.Error!FoldedNet
+src/placement/route_cleanup.zig::glossFinishedTracks | fn glossFinishedTracks( tracks: *std.ArrayList(Track), mutable: *std.ArrayList(bool), vias: []const Via, pads: []const PadObs, ) GlossStats
 src/placement/route_cleanup.zig::mergeAdjacentPadEscapes | fn mergeAdjacentPadEscapes(board: Board) std.mem.Allocator.Error!void
 src/placement/route_cleanup.zig::mergeParallelBranches | fn mergeParallelBranches(board: Board) std.mem.Allocator.Error!void
 src/placement/route_cleanup.zig::pruneDanglingCopper | fn pruneDanglingCopper(board: Board) std.mem.Allocator.Error!void
@@ -2338,6 +2353,7 @@ src/placement/route_cleanup.zig::reanchorLandTransit | fn reanchorLandTransit( a
 src/placement/route_cleanup.zig::removeNetTracks | fn removeNetTracks(list: *std.ArrayList(Track), net: i32) void
 src/placement/route_cleanup.zig::removeNetVias | fn removeNetVias(list: *std.ArrayList(Via), net: i32) void
 src/placement/route_cleanup.zig::snapLandTransitEndpoints | fn snapLandTransitEndpoints( pads: []const router.PadObs, tracks: *std.ArrayList(Track), selected_nets: []const bool, ) LandTransitRepair
+src/placement/route_cleanup.zig::snapPadStubs | fn snapPadStubs(board: Board) std.mem.Allocator.Error!void
 src/placement/route_cleanup.zig::snapTerminalVias | fn snapTerminalVias(board: Board) void
 src/placement/route_cleanup.zig::viaSiteClears | fn viaSiteClears(board: Board, tracks: []const Track, vias: []const Via, self_i: usize, x: f64, y: f64) bool
 src/placement/route_close.zig::HopMemo struct_
@@ -2503,6 +2519,7 @@ src/placement/router.zig::DirectRun struct_
 src/placement/router.zig::EscalateRun struct_
 src/placement/router.zig::FinishedRoute struct_
 src/placement/router.zig::FinishedRun struct_
+src/placement/router.zig::FoldedNet value
 src/placement/router.zig::Gap value
 src/placement/router.zig::GapBoard value
 src/placement/router.zig::GapEvent value
@@ -2514,6 +2531,7 @@ src/placement/router.zig::GapSink value
 src/placement/router.zig::GapWindow value
 src/placement/router.zig::Grid value
 src/placement/router.zig::LoopRouter struct_
+src/placement/router.zig::NetFold value
 src/placement/router.zig::NetPt value
 src/placement/router.zig::NetRouted struct_
 src/placement/router.zig::PadObs value
@@ -2546,6 +2564,7 @@ src/placement/router.zig::blocked | fn blocked(ctx: *Ctx, layer: usize, n: usize
 src/placement/router.zig::buildObstacles | fn buildObstacles(arena: std.mem.Allocator, parts: []const Part, nets: []const FlatNet) std.mem.Allocator.Error![]PadObs
 src/placement/router.zig::buildPairViaBan | fn buildPairViaBan( run: CoupledRun, at: []const [2]f64, radius: f64, ) std.mem.Allocator.Error![]const bool
 src/placement/router.zig::canonicalizeTraceJunctions | fn canonicalizeTraceJunctions( arena: std.mem.Allocator, tracks: *std.ArrayList(Track), mutable: *std.ArrayList(bool), vias: []const Via, ) std.mem.Allocator.Error!void
+src/placement/router.zig::cleanupBoard | fn cleanupBoard( arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams, options: route_policy.Options, copper: struct { tracks: *std.ArrayList(Track), vias: *std.ArrayList(Via) }, ) std.mem.Allocator.Error!?CleanupBoard
 src/placement/router.zig::clear | fn clear(self: OctiJoin, a: [2]f64, b: [2]f64) bool
 src/placement/router.zig::clear | fn clear(self: TautProbe, layer: u8, a: [2]f64, b: [2]f64) bool
 src/placement/router.zig::clearDoglegSegment | fn clearDoglegSegment(path: DirectPath, a: [2]f64, b: [2]f64) bool
@@ -2566,7 +2585,9 @@ src/placement/router.zig::enabled | fn enabled(self: CleanupBoard, net_i: usize)
 src/placement/router.zig::escapeActive | fn escapeActive(ctx: *const Ctx) bool
 src/placement/router.zig::finish | fn finish(self: RouteCore) std.mem.Allocator.Error!RouteRun
 src/placement/router.zig::finishBatch | fn finishBatch(core: RouteCore) std.mem.Allocator.Error!RouteRun
+src/placement/router.zig::foldNetBranches | fn foldNetBranches(run: NetFold) std.mem.Allocator.Error!FoldedNet
 src/placement/router.zig::gap_grid_divisor value
+src/placement/router.zig::glossFinishedTracks | fn glossFinishedTracks( arena: std.mem.Allocator, placement: optimizer.Placement, tracks: *std.ArrayList(Track), mutable: *std.ArrayList(bool), vias: []const Via, ) std.mem.Allocator.Error!void
 src/placement/router.zig::groundVias | fn groundVias(arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams) std.mem.Allocator.Error![]Via
 src/placement/router.zig::init | fn init( arena: std.mem.Allocator, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMapUnmanaged(usize), params: RouteParams, ) std.mem.Allocator.Error!LoopRouter
 src/placement/router.zig::keepoutExtra | fn keepoutExtra(ctx: *const Ctx, obstacle_net: i32) f64

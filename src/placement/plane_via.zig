@@ -33,6 +33,70 @@ const pad_shape = @import("pad_shape.zig");
 
 const thermal_barrel_samples: usize = 8;
 
+/// Preferred centre pitch for automatic exposed-pad thermal arrays. This is
+/// deliberately wider than the manufacturing minimum: tighter arrays remove
+/// useful spreading copper and quickly hit diminishing thermal returns. A
+/// small land may tighten below this only to fit a useful 3 x 3 field.
+pub const thermal_via_pitch_mm: f64 = 0.9;
+/// Bound one axis of an automatic field. A 4 x 4 array gives a large
+/// 4.6-mm-class RF/power paddle sixteen regular barrels without walling the
+/// package's own perimeter escapes; tighter packing showed no routing margin.
+pub const max_thermal_axis_vias: usize = 4;
+
+/// One axis of an automatic array: how many sites, and the centre pitch
+/// between them.
+pub const ThermalAxis = struct {
+    count: usize,
+    pitch: f64,
+};
+
+/// Choose one centred array axis. Use the preferred pitch when it naturally
+/// gives at least three sites; otherwise tighten only when the DRC minimum can
+/// support a 3-site row. This makes Barracuda's 1.95-mm HMC451 paddle a 3-site
+/// axis while its 2.5-mm and 4.6-mm paddles remain at about 0.9-mm pitch.
+pub fn thermalAxis(span: f64, via_dia: f64, min_pitch: f64) ThermalAxis {
+    if (span < via_dia or min_pitch <= 0) return .{ .count = 0, .pitch = 0 };
+    const usable = span - via_dia;
+    const preferred_pitch = @max(thermal_via_pitch_mm, min_pitch);
+    const preferred_count = numeric.toCount(@floor(usable / preferred_pitch)) + 1;
+    const legal_count = numeric.toCount(@floor(usable / min_pitch)) + 1;
+    var count = @min(preferred_count, max_thermal_axis_vias);
+    if (count < 3 and legal_count >= 3) count = 3;
+    count = @min(count, max_thermal_axis_vias);
+    if (count < 2) return .{ .count = count, .pitch = 0 };
+    return .{
+        .count = count,
+        .pitch = @min(preferred_pitch, usable / @as(f64, @floatFromInt(count - 1))),
+    };
+}
+
+/// A centred regular field of thermal-via sites over one exposed land. Each
+/// exact site is still judged by `thermalBarrelFits`: a rejected custom-pad
+/// cell is skipped, never replaced by the nearest off-pattern point.
+pub const ThermalArray = struct {
+    pad: pad_shape.Shape,
+    centre: [2]f64,
+    cols: usize,
+    rows: usize,
+    pitch_x: f64,
+    pitch_y: f64,
+
+    /// How many sites the field holds.
+    pub fn count(self: ThermalArray) usize {
+        return self.cols *| self.rows;
+    }
+
+    /// The exact world centre of one field cell.
+    pub fn point(self: ThermalArray, col: usize, row: usize) [2]f64 {
+        const cx = (@as(f64, @floatFromInt(self.cols)) - 1) / 2;
+        const cy = (@as(f64, @floatFromInt(self.rows)) - 1) / 2;
+        return .{
+            self.centre[0] + (@as(f64, @floatFromInt(col)) - cx) * self.pitch_x,
+            self.centre[1] + (@as(f64, @floatFromInt(row)) - cy) * self.pitch_y,
+        };
+    }
+};
+
 /// Whether a regular thermal-via site's complete barrel stays inside the
 /// exposed pad's real outline.
 pub fn thermalBarrelFits(pad: pad_shape.Shape, point: [2]f64, via_dia: f64) bool {

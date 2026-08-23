@@ -44,6 +44,7 @@ const plane_stitch = @import("plane_stitch.zig");
 const copper_contact = @import("copper_contact.zig");
 const land_transit = @import("land_transit.zig");
 const via_rules = @import("router_via_rules.zig");
+const route_policy = @import("route_policy.zig");
 
 const Track = router.Track;
 const Via = router.Via;
@@ -2516,6 +2517,517 @@ pub fn closeNetOpens(board: Board) std.mem.Allocator.Error!void {
     try pruneDanglingCopper(board);
 }
 
+// ── Final gloss ──────────────────────────────────────────────────────────────
+//
+// Everything above runs BEFORE the finish's last copper-emitting passes (pad
+// escape rays, adjacent-comb consolidation, the RF finisher, ground stitching,
+// the pad-local necks) and before the route gate's junction canonicalization,
+// which SPLITS sections at interior intersections and WELDS near-miss contacts.
+// Those passes leave three shapes nothing downstream ever revisits: a section
+// emitted twice by two passes that each rebuilt the same run, a pair of
+// perfectly collinear halves left over from a split whose partner later went
+// away, and a tail so short it is swallowed by the round cap of the copper it
+// hangs off. The gloss below is the closing sweep for exactly those three, and
+// it is deliberately the WEAKEST pass in this file: it removes copper the board
+// cannot tell apart from what stays, and it moves nothing except a stub end
+// onto its own land's centre (`snapPadStubs`, which probes). Nothing here
+// re-straightens, so the escape rays `pad_escape` draws last survive it.
+
+/// Endpoint identity for the gloss (mm). The passes that create the shapes it
+/// removes all copy coordinates rather than recomputing them (a split reuses
+/// the intersection point, a re-emitted section reuses its own endpoints), so
+/// the survivors agree to the last bits of the float rather than to a routing
+/// tolerance. Matching wider would start fusing two runs that genuinely meet at
+/// a shallow angle.
+const gloss_join_eps_mm: f64 = 1e-6;
+/// Width delta two sections may differ by and still count as ONE run (mm).
+///
+/// The collinear merge this gates used to demand EXACT float equality, which a
+/// split cannot break but a rebuild can: a per-net width resolved twice through
+/// `setNetParams` differs in its last bit, and two halves of one straight run
+/// then stayed two sections forever. A micron of width is under any fab's
+/// resolution, so a pair inside it is one run as far as the output is concerned.
+const gloss_width_eps_mm: f64 = 1e-6;
+/// Bound on the gloss's fixed-point sweeps. Each sweep applies every DISJOINT
+/// merge it finds, so a chain of `n` collinear sections needs `log2(n)` sweeps;
+/// eight covers 256-section runs, far past anything the router emits.
+const max_gloss_sweeps: usize = 8;
+
+/// What one final-gloss sweep removed.
+pub const GlossStats = struct {
+    /// Sections dropped as exact duplicates of a survivor.
+    duplicates: usize = 0,
+    /// Collinear pairs fused into one section.
+    merges: usize = 0,
+    /// Sub-half-width dangling tails dropped.
+    stubs: usize = 0,
+
+    /// Did this sweep change the copper at all?
+    pub fn changed(self: GlossStats) bool {
+        return self.duplicates + self.merges + self.stubs > 0;
+    }
+};
+
+fn glossPointEq(a: [2]f64, b: [2]f64) bool {
+    return @abs(a[0] - b[0]) <= gloss_join_eps_mm and @abs(a[1] - b[1]) <= gloss_join_eps_mm;
+}
+
+fn trackEnd(t: Track, which: usize) [2]f64 {
+    return if (which == 0) .{ t.x1, t.y1 } else .{ t.x2, t.y2 };
+}
+
+/// Are these two sections the same piece of copper — same net, same layer, same
+/// pair of endpoints in either order? Width is compared by the caller, which
+/// keeps the widest of a duplicate group.
+fn sameSection(a: Track, b: Track) bool {
+    if (a.net != b.net or a.layer != b.layer) return false;
+    const a0 = trackEnd(a, 0);
+    const a1 = trackEnd(a, 1);
+    const b0 = trackEnd(b, 0);
+    const b1 = trackEnd(b, 1);
+    return (glossPointEq(a0, b0) and glossPointEq(a1, b1)) or
+        (glossPointEq(a0, b1) and glossPointEq(a1, b0));
+}
+
+/// Drop every mutable section that repeats another one. The survivor of a group
+/// is its WIDEST member, and among equal widths the earliest — so the choice is
+/// independent of which pass emitted which copy, and a retained (immutable)
+/// copy always outlives the generated twin that shadows it.
+fn dropDuplicateSections(tracks: *std.ArrayList(Track), mutable: *std.ArrayList(bool)) usize {
+    var write: usize = 0;
+    var dropped: usize = 0;
+    for (tracks.items, 0..) |t, i| {
+        var shadowed = false;
+        if (mutable.items[i]) for (tracks.items, 0..) |other, j| {
+            if (j == i or !sameSection(t, other)) continue;
+            if (other.width > t.width + gloss_width_eps_mm or
+                (@abs(other.width - t.width) <= gloss_width_eps_mm and j < i))
+            {
+                shadowed = true;
+                break;
+            }
+        };
+        if (shadowed) {
+            dropped += 1;
+            continue;
+        }
+        tracks.items[write] = t;
+        mutable.items[write] = mutable.items[i];
+        write += 1;
+    }
+    tracks.shrinkRetainingCapacity(write);
+    mutable.shrinkRetainingCapacity(write);
+    return dropped;
+}
+
+/// Everything the finished board attaches to one point on one layer.
+const NodeUse = struct {
+    /// Same-net section ENDS meeting here, and the last one's index.
+    ends: usize = 0,
+    partner: usize = 0,
+    /// A same-net section whose INTERIOR passes through the point — the point
+    /// is a T even though no second end sits on it.
+    interior: bool = false,
+    /// A barrel or an own land anchors the point; copper may not be fused
+    /// across it, because the anchor is what a later reader identifies it by.
+    anchored: bool = false,
+};
+
+fn interiorHit(t: Track, at: [2]f64) bool {
+    const closest = pad_shape.closestOnSeg(t.x1, t.y1, t.x2, t.y2, at[0], at[1]);
+    if (closest.d > gloss_join_eps_mm) return false;
+    return !glossPointEq(.{ t.x1, t.y1 }, at) and !glossPointEq(.{ t.x2, t.y2 }, at);
+}
+
+fn glossPadAnchor(pads: []const PadObs, at: [2]f64, layer: u8, net: i32) bool {
+    for (pads) |pad| {
+        if (pad.net != net) continue;
+        if (!pad.thru and pad.layer != layer) continue;
+        if (pointInPad(pad, at[0], at[1])) return true;
+    }
+    return false;
+}
+
+/// The finished board the gloss reads: sections, barrels, and own lands.
+const GlossCopper = struct {
+    tracks: []const Track,
+    vias: []const Via,
+    pads: []const PadObs,
+};
+
+/// Everything incident on `at` for `net` on `layer`, skipping section `self_i`.
+fn nodeUse(copper: GlossCopper, self_i: usize, at: [2]f64, layer: u8, net: i32) NodeUse {
+    var use = NodeUse{};
+    for (copper.tracks, 0..) |t, i| {
+        if (i == self_i or t.net != net or t.layer != layer) continue;
+        if (glossPointEq(trackEnd(t, 0), at) or glossPointEq(trackEnd(t, 1), at)) {
+            use.ends += 1;
+            use.partner = i;
+        } else if (interiorHit(t, at)) {
+            use.interior = true;
+        }
+    }
+    for (copper.vias) |v| if (glossPointEq(.{ v.x, v.y }, at)) {
+        use.anchored = true;
+    };
+    if (glossPadAnchor(copper.pads, at, layer, net)) use.anchored = true;
+    return use;
+}
+
+/// Is the vertex where `a` and `b` meet at `at` a straight-through join?
+fn glossCollinear(a: Track, b: Track, at: [2]f64) bool {
+    const far_a = if (glossPointEq(trackEnd(a, 0), at)) trackEnd(a, 1) else trackEnd(a, 0);
+    const far_b = if (glossPointEq(trackEnd(b, 0), at)) trackEnd(b, 1) else trackEnd(b, 0);
+    const u = [2]f64{ far_a[0] - at[0], far_a[1] - at[1] };
+    const v = [2]f64{ far_b[0] - at[0], far_b[1] - at[1] };
+    const lu = std.math.hypot(u[0], u[1]);
+    const lv = std.math.hypot(v[0], v[1]);
+    if (lu <= gloss_join_eps_mm or lv <= gloss_join_eps_mm) return false;
+    // Opposed headings, and the vertex within a micron of the chord they span.
+    if (u[0] * v[0] + u[1] * v[1] >= 0) return false;
+    const off = @abs(cross2(u, v)) / (lu + lv);
+    return off <= gloss_join_eps_mm;
+}
+
+/// Fuse every straight-through same-width join between two mutable sections
+/// whose vertex holds nothing else. Junction-aware in both directions: a vertex
+/// with a third end, an interior crossing, a barrel, or an own land on it is
+/// left alone, because each of those is something a later reader identifies the
+/// board by. Returns the number of pairs fused.
+fn mergeCollinearRuns(
+    tracks: *std.ArrayList(Track),
+    mutable: *std.ArrayList(bool),
+    vias: []const Via,
+    pads: []const PadObs,
+) usize {
+    var fused: usize = 0;
+    var sweep: usize = 0;
+    while (sweep < max_gloss_sweeps) : (sweep += 1) {
+        var merged_this_sweep: usize = 0;
+        var i: usize = 0;
+        while (i < tracks.items.len) : (i += 1) {
+            if (!mutable.items[i]) continue;
+            const a = tracks.items[i];
+            for (0..2) |which| {
+                const at = trackEnd(a, which);
+                const use = nodeUse(.{ .tracks = tracks.items, .vias = vias, .pads = pads }, i, at, a.layer, a.net);
+                if (use.ends != 1 or use.interior or use.anchored) continue;
+                const j = use.partner;
+                if (!mutable.items[j]) continue;
+                const b = tracks.items[j];
+                if (@abs(a.width - b.width) > gloss_width_eps_mm) continue;
+                if (!glossCollinear(a, b, at)) continue;
+                const far_a = if (which == 0) trackEnd(a, 1) else trackEnd(a, 0);
+                const far_b = if (glossPointEq(trackEnd(b, 0), at)) trackEnd(b, 1) else trackEnd(b, 0);
+                tracks.items[i] = .{
+                    .x1 = far_a[0],
+                    .y1 = far_a[1],
+                    .x2 = far_b[0],
+                    .y2 = far_b[1],
+                    .layer = a.layer,
+                    .width = @max(a.width, b.width),
+                    .net = a.net,
+                };
+                _ = tracks.orderedRemove(j);
+                _ = mutable.orderedRemove(j);
+                if (j < i) i -= 1;
+                fused += 1;
+                merged_this_sweep += 1;
+                break;
+            }
+        }
+        if (merged_this_sweep == 0) break;
+    }
+    return fused;
+}
+
+/// Is `at` covered, after `t` goes away, by same-net copper at least as wide as
+/// `t`'s own? Any such section whose CENTRELINE passes through `at` sweeps every
+/// point within its own half width of `at`, which is more than `t`'s whole
+/// length; an own land covers it outright.
+fn glossCapCovers(
+    tracks: []const Track,
+    pads: []const PadObs,
+    self_i: usize,
+    at: [2]f64,
+    t: Track,
+) bool {
+    for (tracks, 0..) |other, i| {
+        if (i == self_i or other.net != t.net or other.layer != t.layer) continue;
+        if (other.width + gloss_width_eps_mm < t.width) continue;
+        if (pad_shape.closestOnSeg(other.x1, other.y1, other.x2, other.y2, at[0], at[1]).d <= gloss_join_eps_mm) return true;
+    }
+    return glossPadAnchor(pads, at, t.layer, t.net);
+}
+
+/// Drop every mutable tail shorter than half its own width whose free end holds
+/// nothing and whose attached end keeps a cap at least as wide.
+///
+/// No clearance probe is needed and none is taken, because such a tail adds no
+/// copper the board loses: every point of it lies within `width/2` of the
+/// attached end, and the round cap that survives there is at least `width/2`
+/// across, so the swept metal is unchanged. Anything the free end reached —
+/// foreign copper, a pour, a land — that cap reaches too, which is why this can
+/// neither open a net nor move a clearance verdict, and why the covering test is
+/// a precondition rather than a nicety. This is the 1 µm–0.1 mm dead zone
+/// `dropDegenerateTracks` (1 µm) and the chamfer floor (0.1 mm) leave between
+/// them.
+fn dropMicroStubs(
+    tracks: *std.ArrayList(Track),
+    mutable: *std.ArrayList(bool),
+    vias: []const Via,
+    pads: []const PadObs,
+) usize {
+    var write: usize = 0;
+    var dropped: usize = 0;
+    for (tracks.items, 0..) |t, i| {
+        var drop = false;
+        if (mutable.items[i] and
+            std.math.hypot(t.x2 - t.x1, t.y2 - t.y1) < t.width / 2)
+        {
+            for (0..2) |which| {
+                const free = trackEnd(t, which);
+                const use = nodeUse(.{ .tracks = tracks.items, .vias = vias, .pads = pads }, i, free, t.layer, t.net);
+                if (use.ends != 0 or use.interior or use.anchored) continue;
+                const kept = trackEnd(t, 1 - which);
+                if (!glossCapCovers(tracks.items, pads, i, kept, t)) continue;
+                drop = true;
+                break;
+            }
+        }
+        if (drop) {
+            dropped += 1;
+            continue;
+        }
+        tracks.items[write] = t;
+        mutable.items[write] = mutable.items[i];
+        write += 1;
+    }
+    tracks.shrinkRetainingCapacity(write);
+    mutable.shrinkRetainingCapacity(write);
+    return dropped;
+}
+
+/// The closing gloss over FINISHED copper: duplicate drop, collinear fuse,
+/// micro-tail drop, run to a fixed point.
+///
+/// Pure geometry over the two lists plus read-only vias and lands — no `Ctx`,
+/// no clearance probe, no clock — so the router's finish, the route gate, and
+/// the cancel tail can all run the same sweep and get the same answer. `mutable`
+/// parallels `tracks` and is compacted with it; a false entry is caller-retained
+/// copper that stays byte-for-byte identical, exactly as in
+/// `canonicalizeTraceJunctions`.
+pub fn glossFinishedTracks(
+    tracks: *std.ArrayList(Track),
+    mutable: *std.ArrayList(bool),
+    vias: []const Via,
+    pads: []const PadObs,
+) GlossStats {
+    std.debug.assert(mutable.items.len == tracks.items.len);
+    var stats = GlossStats{};
+    var round: usize = 0;
+    while (round < max_gloss_sweeps) : (round += 1) {
+        var pass = GlossStats{};
+        pass.duplicates = dropDuplicateSections(tracks, mutable);
+        pass.merges = mergeCollinearRuns(tracks, mutable, vias, pads);
+        pass.stubs = dropMicroStubs(tracks, mutable, vias, pads);
+        stats.duplicates += pass.duplicates;
+        stats.merges += pass.merges;
+        stats.stubs += pass.stubs;
+        if (!pass.changed()) break;
+    }
+    return stats;
+}
+
+/// May the gloss rewrite this net's copper at all? Scope selection is the same
+/// question `mayRewrite` answers; an EXACT net (`bypass_intent.exactNet`) is
+/// additionally off limits, because its copper is authored cap-to-pin intent
+/// whose shape is the point — the same exemption `straighten` and `pad_escape`
+/// take.
+fn glossMayRewrite(board: Board, net: i32) bool {
+    if (!mayRewrite(board.ctx.selected_nets, net)) return false;
+    return !bypass_intent.exactNet(board.placement, @intCast(net));
+}
+
+fn glossMutableMask(board: Board) std.mem.Allocator.Error!std.ArrayList(bool) {
+    var mutable: std.ArrayList(bool) = .empty;
+    for (board.tracks.items) |t| try mutable.append(board.arena(), glossMayRewrite(board, t.net));
+    return mutable;
+}
+
+/// The router finish's closing sweep: the pure gloss, then the probed pad-stub
+/// snap. Runs after EVERY copper-emitting pass, so nothing re-creates what it
+/// removes; it re-straightens nothing, so the escape rays drawn last survive.
+pub fn finalGloss(board: Board) std.mem.Allocator.Error!void {
+    var mutable = try glossMutableMask(board);
+    const stats = glossFinishedTracks(board.tracks, &mutable, board.vias.items, board.ctx.obs);
+    if (stats.changed()) router.copperCompacted(board.ctx);
+    try snapPadStubs(board);
+}
+
+/// The deadline tail: the deterministic, probe-free half of the finish.
+///
+/// A cancelled route used to ship raw maze copper — a sliced sub-circuit hits
+/// this path routinely — which meant duplicate sections, micron slivers and
+/// loose leaves went out under the caller's own DRC. None of the three needs a
+/// clearance probe, a straighten, or a clock to remove, so all three run even
+/// when the caller has stopped waiting: this is bounded by the copper already
+/// on the board and takes no new decision.
+pub fn cancelGloss(board: Board) std.mem.Allocator.Error!void {
+    var mutable = try glossMutableMask(board);
+    _ = glossFinishedTracks(board.tracks, &mutable, board.vias.items, board.ctx.obs);
+    dropDegenerateTracks(board.tracks, board.ctx.selected_nets);
+    router.copperCompacted(board.ctx);
+    try pruneDanglingCopper(board);
+}
+
+/// How many of `net`'s own lands `tracks` laps rather than terminates on.
+fn landOffences(pads: []const PadObs, tracks: []const Track, net: i32) usize {
+    var n: usize = 0;
+    for (tracks) |t| {
+        if (t.net != net) continue;
+        for (pads) |pad| {
+            if (pad.net != net or pad.thru or pad.layer != t.layer) continue;
+            if (land_transit.segmentOffence(
+                padLand(pad),
+                .{ t.x1, t.y1 },
+                .{ t.x2, t.y2 },
+                t.width / 2,
+            ) != null) n += 1;
+        }
+    }
+    return n;
+}
+
+/// Snap a stub end that LANDS ON its own land onto that land's centre.
+///
+/// The containment test is the point. `snapTerminalVias` already pulls a tail
+/// whose end sits within `net_open_slack_mm` (1 µm) of a pad CENTRE, which is
+/// the case that was never really broken; the shape that survives every pass is
+/// an end parked somewhere ELSE on the land — 0.02–0.4 mm off the middle, on the
+/// ray or beside it — which is electrically the same node and manufacturably the
+/// `land_transit` finding the board owner asked for. Snapping it costs one
+/// coordinate and removes the lap.
+///
+/// Every end at the snapped point moves together, so a junction on the land
+/// cannot be torn apart, and the rewrite is taken only when the probe clears
+/// each moved section at its real width AND the land tally strictly improves —
+/// a snap that merely re-parks the lap somewhere else is refused.
+pub fn snapPadStubs(board: Board) std.mem.Allocator.Error!void {
+    const ctx = board.ctx;
+    for (ctx.obs) |pad| {
+        if (pad.thru or pad.net < 0 or !glossMayRewrite(board, pad.net)) continue;
+        const land = padLand(pad);
+        if (land.paddle()) continue;
+        const net_i: usize = @intCast(pad.net);
+        if (!board.enabled(net_i)) continue;
+        var offending = false;
+        for (board.tracks.items) |t| {
+            if (t.net != pad.net or t.layer != pad.layer) continue;
+            if (!pointInPad(pad, t.x1, t.y1) and !pointInPad(pad, t.x2, t.y2)) continue;
+            if (land_transit.segmentOffence(land, .{ t.x1, t.y1 }, .{ t.x2, t.y2 }, t.width / 2) == null) continue;
+            offending = true;
+            break;
+        }
+        if (!offending) continue;
+        router.setNetParams(ctx, board.placement, net_i);
+        router.rebuildCopperIndex(ctx, board.tracks.items, board.vias.items);
+        const before = landOffences(ctx.obs, board.tracks.items, pad.net);
+        const centre = land.centre();
+        const snapped = try board.arena().dupe(Track, board.tracks.items);
+        for (snapped) |*t| {
+            if (t.net != pad.net or t.layer != pad.layer) continue;
+            if (pointInPad(pad, t.x1, t.y1)) {
+                t.x1 = centre[0];
+                t.y1 = centre[1];
+            }
+            if (pointInPad(pad, t.x2, t.y2)) {
+                t.x2 = centre[0];
+                t.y2 = centre[1];
+            }
+        }
+        if (landOffences(ctx.obs, snapped, pad.net) >= before) continue;
+        const probe = router.TautProbe{ .run = .{ .ctx = ctx, .net = pad.net, .tracks = board.tracks, .vias = board.vias } };
+        var clear = true;
+        for (snapped, board.tracks.items) |after, was| {
+            if (std.meta.eql(after, was)) continue;
+            const len = std.math.hypot(after.x2 - after.x1, after.y2 - after.y1);
+            if (len < min_emit_seg_mm) continue; // the snap swallowed it whole
+            if (probe.clearWidth(after.layer, .{ after.x1, after.y1 }, .{ after.x2, after.y2 }, after.width)) continue;
+            clear = false;
+            break;
+        }
+        if (!clear) continue;
+        @memcpy(board.tracks.items, snapped);
+        dropDegenerateTracks(board.tracks, ctx.selected_nets);
+        router.copperCompacted(ctx);
+    }
+}
+
+/// One net's accumulated copper, handed to the branch fold.
+pub const NetFold = struct {
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    params: router.RouteParams,
+    /// The board this net's copper must keep clearance from. Only
+    /// `existing_tracks` / `existing_vias` (the FOREIGN copper) and the routing
+    /// knobs are read; `selected_nets` is replaced by `net` alone. That copper
+    /// must NOT carry `net` itself — the caller's own accumulated copper arrives
+    /// through `tracks`/`vias`, and is what comes back.
+    options: route_policy.Options,
+    /// Flattened index of the net being folded.
+    net: usize,
+    /// Every section and barrel this net has accumulated, in emission order.
+    tracks: []const Track,
+    vias: []const Via,
+};
+
+/// The folded copper, plus whether anything actually folded.
+pub const FoldedNet = struct { tracks: []const Track, vias: []const Via, changed: bool };
+
+fn sameCopper(comptime T: type, a: []const T, b: []const T) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| if (!std.meta.eql(x, y)) return false;
+    return true;
+}
+
+/// Fold one net's accumulated legs into shared trunks — see the doc on the
+/// public seam, `router.foldNetBranches`, for why this cannot be done inside
+/// the routing calls that drew them.
+pub fn foldNetBranches(run: NetFold) std.mem.Allocator.Error!FoldedNet {
+    const arena = run.arena;
+    const verbatim = FoldedNet{ .tracks = run.tracks, .vias = run.vias, .changed = false };
+    if (run.net >= run.placement.nets.len) return verbatim;
+    const only = try arena.alloc(bool, run.placement.nets.len);
+    @memset(only, false);
+    only[run.net] = true;
+    var options = run.options;
+    options.selected_nets = only;
+    const tracks = try arena.create(std.ArrayList(Track));
+    tracks.* = .empty;
+    try tracks.appendSlice(arena, run.tracks);
+    const vias = try arena.create(std.ArrayList(Via));
+    vias.* = .empty;
+    try vias.appendSlice(arena, run.vias);
+    const board = (try router.cleanupBoard(arena, run.placement, run.params, options, .{
+        .tracks = tracks,
+        .vias = vias,
+    })) orelse return verbatim;
+    try mergeParallelBranches(board);
+    try mergeAdjacentPadEscapes(board);
+    // The foreign copper `cleanupBoard` appended is the caller's board, not this
+    // net's answer: hand back only what belongs to `net`, and only when the fold
+    // really moved it — an unchanged group returns the caller's own slices, so a
+    // no-op fold cannot perturb emission order.
+    const want: i32 = @intCast(run.net);
+    var folded: std.ArrayList(Track) = .empty;
+    for (tracks.items) |t| if (t.net == want) try folded.append(arena, t);
+    var barrels: std.ArrayList(Via) = .empty;
+    for (vias.items) |v| if (v.net == want) try barrels.append(arena, v);
+    if (sameCopper(Track, folded.items, run.tracks) and sameCopper(Via, barrels.items, run.vias)) return verbatim;
+    return .{ .tracks = folded.items, .vias = barrels.items, .changed = true };
+}
+
 // ── Unit tests ───────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -2527,6 +3039,142 @@ const AllClearProbe = struct {
         return true;
     }
 };
+
+/// The gloss over a plain track list with everything rewritable.
+fn glossFixture(
+    arena: std.mem.Allocator,
+    seed: []const Track,
+    vias: []const Via,
+    pads: []const PadObs,
+) std.mem.Allocator.Error!struct { tracks: std.ArrayList(Track), stats: GlossStats } {
+    var tracks: std.ArrayList(Track) = .empty;
+    try tracks.appendSlice(arena, seed);
+    var mutable: std.ArrayList(bool) = .empty;
+    for (seed) |_| try mutable.append(arena, true);
+    const stats = glossFinishedTracks(&tracks, &mutable, vias, pads);
+    std.debug.assert(tracks.items.len == mutable.items.len);
+    return .{ .tracks = tracks, .stats = stats };
+}
+
+// spec: placement/router - the closing gloss drops every repeat of one finished section, keeping the widest copy once
+test "repeated emissions of one section collapse to a single widest survivor" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    // The VIN shape the finish measured four times over: two passes rebuilt the
+    // same run, one of them at the rail width, one reversed end-for-end.
+    const seed = [_]Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 2, .y1 = 0, .x2 = 0, .y2 = 0, .layer = 0, .width = 0.35, .net = 0 },
+        .{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+        // Same geometry, other layer and other net: not the same copper.
+        .{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 1, .width = 0.2, .net = 0 },
+        .{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.2, .net = 1 },
+    };
+    const out = try glossFixture(arena, &seed, &.{}, &.{});
+    try testing.expectEqual(@as(usize, 3), out.tracks.items.len);
+    try testing.expectEqual(@as(usize, 3), out.stats.duplicates);
+    // The widest copy is the one that survives, so no swept copper is lost.
+    try testing.expectEqual(@as(f64, 0.35), out.tracks.items[0].width);
+    try testing.expectEqual(@as(u8, 1), out.tracks.items[1].layer);
+    try testing.expectEqual(@as(i32, 1), out.tracks.items[2].net);
+}
+
+// spec: placement/router - the closing gloss drops a dangling tail shorter than half its own width and keeps one its copper does not cover
+test "a sub-half-width dangling tail is glossed away and a longer one survives" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const seed = [_]Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+        // 0.05 mm off the run's own end — inside the 0.1 mm cap that stays.
+        .{ .x1 = 2, .y1 = 0, .x2 = 2, .y2 = 0.05, .layer = 0, .width = 0.2, .net = 0 },
+        // 0.05 mm off its MIDDLE — covered by the run's own swept width.
+        .{ .x1 = 1, .y1 = 0, .x2 = 1, .y2 = -0.05, .layer = 0, .width = 0.2, .net = 0 },
+        // Real copper: 0.4 mm is well past half a track width.
+        .{ .x1 = 0, .y1 = 0, .x2 = 0, .y2 = 0.4, .layer = 0, .width = 0.2, .net = 0 },
+    };
+    const out = try glossFixture(arena, &seed, &.{}, &.{});
+    try testing.expectEqual(@as(usize, 2), out.tracks.items.len);
+    try testing.expectEqual(@as(usize, 2), out.stats.stubs);
+    try testing.expectEqual(@as(f64, 0.4), out.tracks.items[1].y2);
+
+    // A tail whose free end is anchored is a connection, not an artifact: a
+    // barrel there keeps it, and so does its own land.
+    const barrel = [_]Via{.{ .x = 2, .y = 0.05, .dia = 0.4, .net = 0 }};
+    const kept = try glossFixture(arena, &seed, &barrel, &.{});
+    try testing.expectEqual(@as(usize, 3), kept.tracks.items.len);
+    const land = [_]PadObs{.{ .x0 = 0.9, .y0 = -0.15, .x1 = 1.1, .y1 = 0.05, .net = 0, .layer = 0 }};
+    const landed = try glossFixture(arena, &seed, &.{}, &land);
+    try testing.expectEqual(@as(usize, 3), landed.tracks.items.len);
+}
+
+// spec: placement/router - the closing gloss fuses a collinear pair at a bare vertex and refuses one carrying a junction, a barrel, or a land
+test "collinear halves fuse only where the vertex holds nothing else" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    // The shape a junction split leaves once its partner is gone. The widths
+    // differ in their last bit — the exact-equality merge this replaces left
+    // such a pair apart forever.
+    const split = [_]Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 1.5, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 1.5, .y1 = 0, .x2 = 3, .y2 = 0, .layer = 0, .width = 0.2 + 1e-9, .net = 0 },
+    };
+    const fused = try glossFixture(arena, &split, &.{}, &.{});
+    try testing.expectEqual(@as(usize, 1), fused.tracks.items.len);
+    try testing.expectEqual(@as(usize, 1), fused.stats.merges);
+    try testing.expectEqual(@as(f64, 0), @min(fused.tracks.items[0].x1, fused.tracks.items[0].x2));
+    try testing.expectEqual(@as(f64, 3), @max(fused.tracks.items[0].x1, fused.tracks.items[0].x2));
+
+    // A third branch at the vertex makes it a T: the split is the topology.
+    var tee: std.ArrayList(Track) = .empty;
+    try tee.appendSlice(arena, &split);
+    try tee.append(arena, .{ .x1 = 1.5, .y1 = 0, .x2 = 1.5, .y2 = 2, .layer = 0, .width = 0.2, .net = 0 });
+    const kept_tee = try glossFixture(arena, tee.items, &.{}, &.{});
+    try testing.expectEqual(@as(usize, 3), kept_tee.tracks.items.len);
+
+    // A barrel and an own land are each an anchor a later reader identifies
+    // the board by, so neither vertex is fused away either.
+    const barrel = [_]Via{.{ .x = 1.5, .y = 0, .dia = 0.4, .net = 0 }};
+    const on_via = try glossFixture(arena, &split, &barrel, &.{});
+    try testing.expectEqual(@as(usize, 2), on_via.tracks.items.len);
+    const land = [_]PadObs{.{ .x0 = 1.4, .y0 = -0.1, .x1 = 1.6, .y1 = 0.1, .net = 0, .layer = 0 }};
+    const on_land = try glossFixture(arena, &split, &.{}, &land);
+    try testing.expectEqual(@as(usize, 2), on_land.tracks.items.len);
+
+    // A real corner is not collinear and never fuses.
+    const corner = [_]Track{
+        split[0],
+        .{ .x1 = 1.5, .y1 = 0, .x2 = 1.5, .y2 = 1, .layer = 0, .width = 0.2, .net = 0 },
+    };
+    const bent = try glossFixture(arena, &corner, &.{}, &.{});
+    try testing.expectEqual(@as(usize, 2), bent.tracks.items.len);
+}
+
+// spec: placement/router - the closing gloss leaves immutable caller copper byte-identical
+test "the closing gloss never rewrites a section the caller retained" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const retained = Track{ .x1 = 0, .y1 = 0, .x2 = 1.5, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 };
+    var tracks: std.ArrayList(Track) = .empty;
+    try tracks.appendSlice(arena, &.{
+        retained,
+        .{ .x1 = 1.5, .y1 = 0, .x2 = 3, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+        retained, // a generated duplicate of retained copper
+    });
+    var mutable: std.ArrayList(bool) = .empty;
+    try mutable.appendSlice(arena, &.{ false, false, true });
+    const stats = glossFinishedTracks(&tracks, &mutable, &.{}, &.{});
+    // Only the generated copy goes; the two retained sections stay apart and
+    // byte-identical even though they are a collinear pair at a bare vertex.
+    try testing.expectEqual(@as(usize, 1), stats.duplicates);
+    try testing.expectEqual(@as(usize, 0), stats.merges);
+    try testing.expectEqual(@as(usize, 2), tracks.items.len);
+    try testing.expect(std.meta.eql(retained, tracks.items[0]));
+}
 
 // spec: placement/router - exact same-net vias at one coordinate collapse to one physical drill before final DRC
 test "coincident same-net vias collapse before final DRC" {
