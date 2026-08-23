@@ -611,7 +611,11 @@ pub fn routeAllClassified(
         const lowered = try route_plan.lower(alloc, sub.block, plan_view);
         const module_options = if (lowered.applied) lowered.options else null;
         if (anySelected(selected)) {
-            const routed = try route_plan.routeLowered(
+            // A local candidate still passes the router's connectivity/DRC gate here,
+            // but topology cleanup belongs to the assembled board. Running the final
+            // prune for every child repeats an expensive whole-candidate analysis and
+            // can discard copper whose continuation only exists outside this module.
+            const routed = try route_plan.routeLoweredCandidate(
                 alloc,
                 plan_view,
                 params,
@@ -1048,4 +1052,12 @@ test "local signal candidates preserve authored sub-circuit order" {
     try testing.expectEqual(@as(usize, 2), routed.phase.completed_subcircuits);
     try testing.expect(routed.tracks.len > 0);
     try testing.expectEqual(@as(usize, 1), routed.tracks[0].net);
+
+    const source = @embedFile("subcircuit_route.zig");
+    const start = std.mem.indexOf(u8, source, "pub fn routeAllClassified(").?;
+    const end = std.mem.indexOfPos(u8, source, start, "/// Compatibility spelling").?;
+    const body = source[start..end];
+
+    try testing.expect(std.mem.indexOf(u8, body, "route_plan.routeLoweredCandidate(") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "route_plan.routeLowered(") == null);
 }
