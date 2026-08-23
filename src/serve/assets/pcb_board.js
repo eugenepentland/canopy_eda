@@ -6940,6 +6940,9 @@ function drcMsg(d){
  return tag+d.k+on+" — gap "+drcMm(d.gap)+" mm < "+drcMm(d.clr)+" mm";}
 // Marker colour keeps the panel's err/warn split (warn markers read amber).
 function drcMarkColor(d){return (d&&(d.sev==="warn"||d.sev==="warning"))?"#e3b341":TH.drc;}
+// Connectivity remains actionable in the DRC sidebar, but its island-gap
+// coordinates are not useful board annotations and can overwhelm the copper.
+function drcOnBoard(d){return !!d&&d.k!=="net open";}
 function drawDrc(){while(gD.firstChild)gD.removeChild(gD.firstChild);
  renderDrcList(); // keep the violations panel in sync regardless of marker visibility
  if(PHYSICAL_REVIEW)return;
@@ -6947,7 +6950,7 @@ function drawDrc(){while(gD.firstChild)gD.removeChild(gD.firstChild);
  var cb=document.getElementById("r-drc-show"); if(cb&&!cb.checked)return;
  // A thin, screen-space (non-scaling) translucent ring + small dot: it flags the
  // spot without the fat opaque disc smothering the copper you're trying to read.
- (PCB.drc||[]).forEach(function(d){var cx=X(d.x),cy=Y(d.y),col=drcMarkColor(d);
+ (PCB.drc||[]).forEach(function(d){if(!drcOnBoard(d))return;var cx=X(d.x),cy=Y(d.y),col=drcMarkColor(d);
    var t=el("title",{}); t.textContent=drcMsg(d);
    var c=el("circle",{cx:cx.toFixed(1),cy:cy.toFixed(1),r:6,fill:"none",stroke:col,
     "stroke-width":1.1,"vector-effect":"non-scaling-stroke",opacity:0.6}); c.appendChild(t);
@@ -7082,7 +7085,7 @@ function drcStep(dir){var fo=drcFlatOrder();if(!fo.length)return;
  drcGoto(fo[at<0?(dir>0?0:fo.length-1):((at+dir+fo.length)%fo.length)]);}
 function drcGoto(i){var d=(PCB.drc||[])[i];if(!d)return;
  drcCur=i;drcMarkCur();inspSetHere({t:"drc",o:d});
- if(d.x!=null&&d.y!=null)focusPoint(d.x,d.y);}
+ if(drcOnBoard(d)&&d.x!=null&&d.y!=null)focusPoint(d.x,d.y);}
 // Paint the located row, scroll it into view, and refresh the pane header's
 // position readout + message. Safe on the embeds (no header, no-op lookups).
 function drcMarkCur(){var lst=document.getElementById("drc-list");
@@ -7132,7 +7135,7 @@ window.PCBDrcRulesApply=function(kinds){
 var insp=null; // {t:"track"|"via"|"keepout"|"drc", o:<live object>}
 function pxTolMm(px){return px*(vb.w/Math.max(svgMetricsGet().cw,1))/S;}
 function inspHitDrc(m){if(!viewSt.filt.drc)return null;var best=null,bd=Math.max(pxTolMm(12),0.3);
- (PCB.drc||[]).forEach(function(d){if(d.x==null)return;
+ (PCB.drc||[]).forEach(function(d){if(!drcOnBoard(d)||d.x==null)return;
   var dd=Math.hypot(m.x-d.x,m.y-d.y);if(dd<bd){bd=dd;best=d;}});return best;}
 function inspHitVia(m,strict){if(!viewSt.filt.via)return null;var best=null,bd=1e9,
   tol=strict?0:Math.max(pxTolMm(6),0.15); // strict = inside the barrel only
@@ -7247,7 +7250,7 @@ function pickCandidates(m){var out=[];
    if(band||nearPolyEdge(outer,m.x,m.y,zt)||(inner&&inner.length>=3&&nearPolyEdge(inner,m.x,m.y,zt)))
     add("Keepout",q.name||"Keepout area",reviewAreaLayerName(q,reviewAreaLayer(q)),{t:"keepout",o:q});});}
  if(viewSt.filt.drc){var dt=Math.max(pxTolMm(12),0.3);(PCB.drc||[]).forEach(function(d){
-  if(d.x==null||Math.hypot(m.x-d.x,m.y-d.y)>=dt)return;
+  if(!drcOnBoard(d)||d.x==null||Math.hypot(m.x-d.x,m.y-d.y)>=dt)return;
   add("DRC",d.k||"violation","#"+(d.id||"?")+(drcBetween(d)?(" · "+drcBetween(d)):""),{t:"drc",o:d});});}
  return out;}
 function pickGestureCancel(){
@@ -7530,7 +7533,7 @@ function paintInsp(ctx){if(!insp)return;var o=insp.o;
   var outer=o.poly||o.outer,inner=o.inner;
   if(outer&&outer.length>=3)keepoutPolyPath(ctx,outer);if(inner&&inner.length>=3)keepoutPolyPath(ctx,inner);
   ctx.fill("evenodd");ctx.stroke();setTimeout(paintSoon,60);}
- else{ctx.strokeStyle="#ffd33d";var rr=(insp.t=="via")?viaRenderRadius(o.d||0.4)+4:12;
+ else if(insp.t!=="drc"||drcOnBoard(o)){ctx.strokeStyle="#ffd33d";var rr=(insp.t=="via")?viaRenderRadius(o.d||0.4)+4:12;
   ctx.lineWidth=2;ctx.globalAlpha=0.5+0.5*Math.abs(Math.sin(Date.now()/240));
   ctx.beginPath();ctx.arc(X(o.x),Y(o.y),rr,0,6.2832);ctx.stroke();
   setTimeout(paintSoon,60);}
@@ -9071,7 +9074,7 @@ function focusPart(want,keepPane){
   if(r.type==="part"){flashIdx=r.data.i;flashUntil=Date.now()+900;}
   else if(r.type==="net"){findPreviewNet=r.data.net;hoverNet=findPreviewNet;}
   else if(r.type==="group"){findPreviewGroup=r.data.g;hoverGrpName=findPreviewGroup;}
-  else if(r.type==="drc"){var d=(PCB.drc||[])[r.data.i];if(d&&d.x!=null&&d.y!=null){flashPt={x:d.x,y:d.y};flashPtUntil=Date.now()+900;}}
+  else if(r.type==="drc"){var d=(PCB.drc||[])[r.data.i];if(drcOnBoard(d)&&d.x!=null&&d.y!=null){flashPt={x:d.x,y:d.y};flashPtUntil=Date.now()+900;}}
   else if(r.type==="text"){flashPt={x:r.data.x,y:r.data.y};flashPtUntil=Date.now()+900;}paintSoon();}
  function findSetAt(at,scroll){if(!findRows.length){findAt=-1;findInput.removeAttribute("aria-activedescendant");return;}
   findAt=(at+findRows.length)%findRows.length;var active=null;

@@ -358,6 +358,15 @@ test "viewer JS wires the WASM DRC worker, server reconciliation, and the overri
     try std.testing.expect(std.mem.indexOf(u8, worker, "drc_output_ptr") != null);
 }
 
+// spec: Web Server - Net-open DRC findings remain in the sidebar and counts but do not draw or hit-test as PCB markers
+test "viewer keeps net-open findings off the board while retaining the DRC list" {
+    const js = @embedFile("assets/pcb_board.js");
+    try std.testing.expect(std.mem.indexOf(u8, js, "function drcOnBoard(d){return !!d&&d.k!==\"net open\";}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "forEach(function(d){if(!drcOnBoard(d))return;var cx=X(d.x)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "function renderDrcList(){drcTabBadge();var lst=ensureDrcList();if(!lst)return;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "var v=PCB.drc||[];") != null);
+}
+
 // spec: Web Server - PCB drag/drop keeps full-board work and retained-overlay rebuilds off the interactive path
 test "viewer scopes commit DRC and retains drag-time work across frames" {
     const js = @embedFile("assets/pcb_board.js");

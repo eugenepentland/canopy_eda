@@ -641,7 +641,7 @@ fn checkImpl(
     try checkSilkOverPad(arena, &out, placement, pads, &pad_grid, rules.mask.margin);
     try checkTrackWidth(arena, &out, .{ .placement = placement, .routed = routed, .tracks = tracks, .min_width = rules.min_width });
     try checkCopperTopology(arena, &out, placement, pads, routed, topology_zones);
-    try checkLandTransit(c, tracks, pads, &pad_grid);
+    try checkLandTransit(c, placement, tracks, pads, &pad_grid);
     try checkGroundPadVias(arena, &out, placement, pads, vias, rules.pour.ground_via_max);
     try checkPadPad(c, pads, &pad_grid);
     try drc_diffpair.check(arena, &out, placement, .{ .tracks = tracks, .vias = vias }, clearance);
@@ -1063,8 +1063,15 @@ fn checkTrackTrack(c: Ctx, tracks: []const router.Track, track_grid: *Grid) Err 
 /// layer, so copper across its annulus is not a lap (the same call `pad_entry`
 /// and `pad_escape` make). Large lands are out of scope too — see
 /// `land_transit.paddle_min_half_mm`.
-fn checkLandTransit(c: Ctx, tracks: []const router.Track, pads: []const PadBox, pad_grid: *Grid) Err {
+fn checkLandTransit(c: Ctx, placement: optimizer.Placement, tracks: []const router.Track, pads: []const PadBox, pad_grid: *Grid) Err {
     for (tracks) |t| {
+        // Ground lands intentionally collect broad surface bonds, stitching
+        // fans, and pour tie-ins. Treating those shapes like a signal escape
+        // turns useful return copper into own-land noise. Use the shared
+        // ground-name predicate so split grounds (AGND/DGND/PGND/VSS, etc.)
+        // receive the same exemption as a literal GND net.
+        if (t.net >= 0 and @as(usize, @intCast(t.net)) < placement.nets.len and
+            optimizer.isGroundName(router.shortName(placement.nets[@intCast(t.net)].name))) continue;
         const half = t.width / 2;
         for (try pad_grid.near(c.arena, trackBox(t), c.clr_max)) |j| {
             const p = pads[j];
@@ -3579,8 +3586,8 @@ test "check keeps an essential loose section as a copper-stub error" {
     try testing.expectEqual(Severity.err, firstOfKind(found, .copper_stub).?.severity);
 }
 
-// spec: placement/drc - warns when a net's own copper laps one of its pads instead of being aimed at the pad centre
-test "check warns on same-net copper riding a land's flank, not on its escape ray" {
+// spec: placement/drc - warns when a signal net's own copper laps one of its pads instead of being aimed at the pad centre, while ground nets are exempt
+test "check warns on signal copper riding a land's flank, not a clean escape or ground bond" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
@@ -3616,6 +3623,14 @@ test "check warns on same-net copper riding a land's flank, not on its escape ra
     try testing.expectEqual(
         @as(usize, 0),
         countKind(try check(arena, placement, .{ .tracks = &clean, .vias = &.{}, .routed = 1, .total = 1 }, 0.127), .land_transit),
+    );
+    // The same flank geometry is intentional on a ground return: surface
+    // bonding and stitching copper may spread across its own lands.
+    const ground_nets = [_]FlatNet{.{ .name = "GND", .pins = &pins }};
+    placement.nets = &ground_nets;
+    try testing.expectEqual(
+        @as(usize, 0),
+        countKind(try check(arena, placement, .{ .tracks = &riding, .vias = &.{}, .routed = 1, .total = 1 }, 0.127), .land_transit),
     );
 }
 

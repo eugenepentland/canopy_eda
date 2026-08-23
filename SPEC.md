@@ -2761,7 +2761,7 @@ Public functions: check, checkTopology, checkWithZones, countKind, defaultSeveri
 
 - RF bend findings are reconstructed from submitted or saved copper, not only transient router metadata
 - every check stamps its kind's canonical default severity, and each warning kind is proved by a fixture
-- warns when a net's own copper laps one of its pads instead of being aimed at the pad centre
+- warns when a signal net's own copper laps one of its pads instead of being aimed at the pad centre, while ground nets are exempt
 - a match group spreading wider than its tolerance warns once, naming the longest and shortest nets
 - a match group with fewer than two routed members is reported as unfinished, never as mismatched
 - a design declaring no match group produces no measurement and no violation
@@ -5800,6 +5800,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The opt-in PCB frame benchmark briefly dwells at fit, maximum zoom, seek, and pan turnarounds without mixing those pauses into movement percentiles
 - The /pcb-layout left dock tabs Properties, Autorouter, DRC, and Sub-circuits, showing one pane at a time
 - The /pcb-layout DRC pane docks the violations list under a previous/next step-through
+- Net-open DRC findings remain in the sidebar and counts but do not draw or hit-test as PCB markers
 - The /pcb-layout accordion carries no optimizer tuning or score-reweigh panel
 - The /pcb-layout saved-version navigator sits inside Autorouter, immediately after the route controls
 - ?layout=<name> shows that saved layout verbatim, outranking the starred default, while ?refine= re-solves from it
