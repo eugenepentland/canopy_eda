@@ -43,6 +43,7 @@ const guide_branch = @import("guide_branch.zig");
 const bend_smooth = @import("bend_smooth.zig");
 const octilinear = @import("octilinear.zig");
 const manhattan_route = @import("manhattan_route.zig");
+const detour_guard = @import("detour_guard.zig");
 const net_topology = @import("net_topology.zig");
 const maze_scratch = @import("maze_scratch.zig");
 const straighten = @import("straighten.zig");
@@ -192,6 +193,31 @@ const reference_off_via_mult: f64 = 8.0;
 /// layers. Large enough to justify a layer change on a useful run, but finite
 /// so the router can escape a blocked preferred layer.
 const preferred_layer_cost_mult: f64 = 3.0;
+/// What one heading change costs an ORDINARY maze leg, as a multiple of the
+/// grid pitch — the octilinear counterpart of `manhattan_route.turn_cost_mult`,
+/// which prices the same corner at 4 pitches for an axis-only RF net.
+///
+/// Additive, like every other term here, and applied after the layer/corridor
+/// multipliers so a corner costs the same wherever it happens (a corner is a
+/// property of the turn, not of the copper it turns on).
+///
+/// Sized as a NUDGE rather than a preference. On the 8-neighbour lattice every
+/// interleaving of the same diagonal and orthogonal steps has exactly equal
+/// length, so with no price at all the search keeps whichever micro-staircase
+/// it happened to pop first; 0.15 pitches is enough to separate those (a
+/// staircase pays per facet, its L pays twice) while leaving the search's
+/// ordering essentially length-driven. The ceiling is real and measured: the
+/// note this constant replaces recorded a 0.6-pitch price taking barracuda from
+/// 81/90 nets and 19 DRC findings to 61/90 and 257 — a bend price large enough
+/// to reorder ROUTABILITY buys shape at the cost of connectivity, which is
+/// never the trade. 0.15 keeps every corner cheaper than one orthogonal step,
+/// so no bend can ever outrank real length.
+///
+/// A* stays admissible: `routeHeuristic` estimates the straight-line distance
+/// scaled by the smallest multiplier any step can carry, and a bend only ever
+/// ADDS to the true remaining cost, so the estimate can only fall further below
+/// it. Nothing about the heuristic changes.
+pub const bend_cost_mult: f64 = 0.15;
 /// Geometry comparisons use the same one-nanometre tolerance as `drc.zig`,
 /// so a route on an exact decimal clearance boundary is accepted consistently.
 pub const clearance_eps: f64 = 1e-6;
@@ -1234,6 +1260,18 @@ fn stampChord(ctx: *Ctx, chord: Track) void {
 /// copper and occupancy here and re-routes with layer changes. A net whose
 /// pads straddle both board sides needs a via by definition, so the caller
 /// skips this attempt outright (`topLayerFirstEligible`).
+///
+/// "Almost always" is the load-bearing word, and it is why a surface route that
+/// lands here is also MEASURED. The pass exists on the premise that a short
+/// net's surface path is the obvious one; a surface path that ran
+/// `detour_guard_ratio` past the net's own span is that premise failing, and
+/// accepting it is FINAL — the ladder below never runs, so the net never gets to
+/// weigh a two-via hop against a tour of the board. Such a route is therefore
+/// set beside the one the ordinary via-capable ladder draws, and the cheaper of
+/// the two (`detourScore`) is kept. It is a comparison rather than a refusal
+/// because a surface detour is often still the right answer — a net threading a
+/// wall through the one slot in it legitimately runs twice its own span, and
+/// paying two vias to shave a millimetre off that would be a bad trade.
 fn tryTopLayerFirst(
     ctx: *Ctx,
     net: i32,
@@ -1248,15 +1286,17 @@ fn tryTopLayerFirst(
     // `use_poly` changes what `foreignPadAt` answers, so it changes the memoized
     // static verdict — both flips invalidate it (see `resetStaticBlock`).
     ctx.static_block.reset();
-    const ok = try routeNet(ctx, net, pts, tracks, vias);
+    const routed = try routeNet(ctx, net, pts, tracks, vias);
     ctx.allow_vias = true;
     ctx.use_poly = false;
     ctx.static_block.reset();
-    if (!ok) {
+    if (!routed) {
         shrinkCopper(tracks, vias, t_mark, v_mark);
         clearNetOcc(ctx, net);
+        return false;
     }
-    return ok;
+    const run = DirectRun{ .ctx = ctx, .net = net, .tracks = tracks, .vias = vias };
+    return try detour_guard.judgeSurfaceDetour(run, pts, t_mark, v_mark);
 }
 
 fn topLayerFirstEligible(ctx: *const Ctx, enabled: bool, pts: []const NetPt) bool {
@@ -6350,6 +6390,19 @@ const Ctx = struct {
     /// first pass so a short signal net (e.g. a feedback tap) stays on the
     /// surface instead of diving to L2 the moment a via is marginally cheaper.
     allow_vias: bool = true,
+    /// Ceiling (mm) on what one maze layer change may cost, or null for the
+    /// lattice price alone.
+    ///
+    /// The ordinary price is `grid.g * via_cost_mult` — denominated in GRID
+    /// PITCHES, which keeps the cost model scale-free but makes the same
+    /// physical via cost four times more on a wide-track net's coarse lattice
+    /// (measured: 1.91 mm at the LDO fixture's 0.477 mm pitch) than on a
+    /// fine-pitch net's (0.51 mm at 0.127 mm). `detourGuard`'s retry caps it at
+    /// a physical figure so a connection that already detoured is re-searched
+    /// with vias priced by what they cost the BOARD. A `@min`, never a
+    /// replacement: the retry can only ever be more via-friendly than the
+    /// attempt it is second-guessing, never less.
+    via_cost_cap_mm: ?f64 = null,
     /// Net-indexed policy for this run plus the effective masks of the current
     /// net. All-zero defaults preserve the legacy search cost and reachability.
     net_policy: []const route_policy.NetPolicy = &.{},
@@ -6939,15 +6992,15 @@ pub fn routeNet(
         rollbackDirectRun(run, track_mark, via_mark);
         return false;
     }
-    const limit = ctx.max_vias orelse return true;
-    if (vias.items.len - via_mark <= @as(usize, limit)) return true;
-
-    rollbackDirectRun(run, track_mark, via_mark);
-    if (!saved_allow_vias) return false;
-    ctx.allow_vias = false;
-    const retried = try routeNetAttempt(ctx, net, ordered_pts, tracks, vias);
-    if (!retried) rollbackDirectRun(run, track_mark, via_mark);
-    return retried;
+    if (ctx.max_vias) |limit| if (vias.items.len - via_mark > @as(usize, limit)) {
+        rollbackDirectRun(run, track_mark, via_mark);
+        if (!saved_allow_vias) return false;
+        ctx.allow_vias = false;
+        const retried = try routeNetAttempt(ctx, net, ordered_pts, tracks, vias);
+        if (!retried) rollbackDirectRun(run, track_mark, via_mark);
+        return retried;
+    };
+    return try detour_guard.detourGuard(run, ordered_pts, track_mark, via_mark);
 }
 
 /// This net's authored `(branches …)` tree, or EMPTY when it has none — the one
@@ -7069,7 +7122,11 @@ fn escapeDirectRescue(
     return false;
 }
 
-fn routeNetAttempt(
+/// One pass of the ordinary per-net ladder: authored guides first, then the
+/// pour terminal, then the direct-synthesis experiments a short plain net is
+/// allowed, then the free-space and maze terminal trees. Transactional in the
+/// same sense as its callers — a false return leaves no copper behind.
+pub fn routeNetAttempt(
     ctx: *Ctx,
     net: i32,
     pts: []const NetPt,
@@ -7382,7 +7439,7 @@ pub fn restoreNetOcc(ctx: *Ctx, net: i32, tracks: []const Track, vias: []const V
 
 /// Roll both copper lists back to the marks an attempt recorded before it —
 /// the one rollback primitive every transactional pass here shares.
-fn shrinkCopper(t: *std.ArrayList(Track), v: *std.ArrayList(Via), tm: usize, vm: usize) void {
+pub fn shrinkCopper(t: *std.ArrayList(Track), v: *std.ArrayList(Via), tm: usize, vm: usize) void {
     t.shrinkRetainingCapacity(tm);
     v.shrinkRetainingCapacity(vm);
 }
@@ -11407,10 +11464,6 @@ const DijkstraHit = struct { goal: usize, source: usize, start: [2]f64 };
 
 const RoutePq = maze_scratch.RoutePq;
 
-/// Where a relaxation departs from: search key + the bend count of the path that
-/// reached it, which `maze_scratch.routeQLess` uses to settle equal-cost ties.
-const RelaxFrom = struct { key: usize, bends: u32 };
-
 const MazeSearch = struct {
     pq: *RoutePq,
     state: maze_scratch.State,
@@ -11644,7 +11697,7 @@ fn dijkstra(
         const ix = n % grid.nx;
         const iy = n / grid.nx;
         // Same-layer 4-neighbours (orthogonal, cost g).
-        const from = RelaxFrom{ .key = it.key, .bends = it.bends };
+        const from = it.key;
         for ([4][2]i64{ .{ 1, 0 }, .{ -1, 0 }, .{ 0, 1 }, .{ 0, -1 } }) |d|
             try relaxStep(ctx, search, net, from, layer, neighbor(grid, ix, iy, d[0], d[1]), grid.g);
         // Same-layer diagonals (45° bends, cost g·√2). Guarded against
@@ -11658,8 +11711,12 @@ fn dijkstra(
         // pads and copper, and only when this pass permits layer changes.
         // (On a 2-signal board this is exactly the old `1 - layer` step.)
         if (ctx.allow_vias and n_layers > 1 and viaAllowed(ctx, n, net, vias.items)) {
+            // The lattice price for a layer change, under whatever ceiling the
+            // caller set (`Ctx.via_cost_cap_mm`; null = the price to the bit).
+            const lattice = grid.g * via_cost_mult;
+            const via_step = if (ctx.via_cost_cap_mm) |cap| @min(lattice, cap) else lattice;
             for (0..n_layers) |to_layer| if (to_layer != layer)
-                try relaxStep(ctx, search, net, from, to_layer, n, grid.g * via_cost_mult);
+                try relaxStep(ctx, search, net, from, to_layer, n, via_step);
         }
     }
 
@@ -11699,12 +11756,11 @@ fn relaxStep(
     ctx: *Ctx,
     search: MazeSearch,
     net: i32,
-    from: RelaxFrom,
+    from_key: usize,
     to_layer: usize,
     to_node: ?usize,
     step: f64,
 ) std.mem.Allocator.Error!void {
-    const from_key = from.key;
     const tn = to_node orelse return;
     if (!layerInMask(ctx.allowed_layers, @intCast(to_layer))) return;
     if (blocked(ctx, to_layer, tn, net)) return;
@@ -11721,19 +11777,6 @@ fn relaxStep(
         const mask = ctx.pair_via_mask orelse return;
         if (!mask[tn]) return;
     }
-    // A heading change rides as extra length (`bend_cost_mult`), so the layer
-    // multipliers below discount it exactly as they discount the step itself.
-    //
-    // It is suppressed outright while an explicit SHAPE constraint is active: a
-    // diff-pair coupling corridor (this leg must hug its twin) or a reference
-    // corridor (it must follow a replayed path). Those are electrical//intent
-    // constraints, and a corner preference is cosmetic — it must never outrank
-    // them. Measured: a 0.6-step bend penalty is enough to pull a coupled leg
-    // clean out of its corridor and detour it the wrong way around an obstacle,
-    // away from its twin. Inside either corridor the search therefore runs on
-    // pure length plus the corridor discount, exactly as before the turn cost
-    // existed; the copper still comes out octilinear, because the lattice can
-    // express nothing else.
     // Stepping onto a poured outer layer costs extra (`POUR_COST_MULT`);
     // steps on an inner signal layer carry the mild `INNER_COST_MULT` bias
     // so equal-length paths stay on the outer faces.
@@ -11760,10 +11803,14 @@ fn relaxStep(
     // crosses — it just buys the shortest (≈perpendicular) crossing it can, and
     // a run parallel to the trace costs a multiple of that. See `rf_shadow`.
     eff *= ctx.shadow.multiplier(to_layer, tn, net, from_layer != to_layer, ctx.keep.exempt);
-    // A CORNER, added after every multiplier: the RF axis-only attempt buys
-    // straights with real length (`manhattan_route.turnCost`), and that price is
-    // a property of the turn, not of the layer or corridor it happens on. Zero —
-    // and the identical cost model — for every other route.
+    // A CORNER, added after every multiplier, because a corner is a property of
+    // the turn and not of the layer or corridor it happens on
+    // (`manhattan_route.turnCost`): `turn_cost_mult` (4 pitches) while the RF
+    // axis-only attempt is buying straights outright, `bend_cost_mult` (0.15)
+    // for every ordinary leg, and zero for a leg an explicit shape constraint
+    // already pins — the diff-pair coupling and reference corridors, which
+    // `search.lattice.enabled` marks and which therefore run on the cost model
+    // that predates any turn price, to the bit.
     eff += ctx.manhattan.turnCost(ctx.grid.g, search.lattice, from_key, to_key);
     // Diff-pair coupling: discount a step landing in the N net's corridor so it
     // hugs its P twin. No corridor → mult 1.0 → the cost is byte-identical.
@@ -11775,12 +11822,7 @@ fn relaxStep(
         congestion.price(ctx.congest, to_key, ctx.occ[to_layer][tn], net, ctx.grid.g);
     if (nd < search.state.dist[to_key]) {
         try search.state.settle(to_key, nd, @intCast(from_key));
-        try search.pq.add(.{
-            .f = nd + search.heuristic.estimate(ctx.grid, tn),
-            .d = nd,
-            .key = to_key,
-            .bends = from.bends + octilinear.turned(search.lattice, from_key, to_key),
-        });
+        try search.pq.add(.{ .f = nd + search.heuristic.estimate(ctx.grid, tn), .d = nd, .key = to_key });
     }
 }
 
@@ -11799,7 +11841,7 @@ const escape_align_min: f64 = 0.85;
 /// True when the current net carries a straight pad-escape reserve that can
 /// actually bind: a positive escape distance and at least one terminal with a
 /// real outward axis.
-fn escapeActive(ctx: *const Ctx) bool {
+pub fn escapeActive(ctx: *const Ctx) bool {
     if (ctx.rf.escape_mm <= 0) return false;
     for (ctx.rf.escape_pts) |pt| if (pt.out[0] != 0 or pt.out[1] != 0) return true;
     return false;
@@ -11843,7 +11885,7 @@ fn relaxDiag(
     ctx: *Ctx,
     search: MazeSearch,
     net: i32,
-    from: RelaxFrom,
+    from_key: usize,
     layer: usize,
     ix: usize,
     iy: usize,
@@ -11854,7 +11896,7 @@ fn relaxDiag(
     const c1 = neighbor(grid, ix, iy, dx, 0) orelse return;
     const c2 = neighbor(grid, ix, iy, 0, dy) orelse return;
     if (blocked(ctx, layer, c1, net) or blocked(ctx, layer, c2, net)) return;
-    try relaxStep(ctx, search, net, from, layer, neighbor(grid, ix, iy, dx, dy), grid.g * sqrt2);
+    try relaxStep(ctx, search, net, from_key, layer, neighbor(grid, ix, iy, dx, dy), grid.g * sqrt2);
 }
 
 /// Walk `prev` from the goal back to a source, stamp the path as net copper,

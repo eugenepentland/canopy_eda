@@ -395,11 +395,16 @@ fn channelBoard(arena: std.mem.Allocator) std.mem.Allocator.Error!optimizer.Plac
     };
 }
 
-/// Does `net` have routed copper inside `box`? Sampled along each segment, so a
-/// single long track that merely passes through still counts.
-fn copperIn(tracks: []const router.Track, net: i32, box: [4]f64) bool {
+/// Does `net` have routed copper inside `box` ON `layer`? Sampled along each
+/// segment, so a single long track that merely passes through still counts.
+///
+/// The layer is part of the question because a reserved lane names one
+/// (`ReservedLane.layer`): a slot in a wall is a corridor per FACE, and a net
+/// shut out of the top one can still cross underneath. Asking layer-blind would
+/// read that legal crossing as the reservation failing.
+fn copperIn(tracks: []const router.Track, net: i32, box: [4]f64, layer: u8) bool {
     for (tracks) |t| {
-        if (t.net != net) continue;
+        if (t.net != net or t.layer != layer) continue;
         const steps: usize = 64;
         for (0..steps + 1) |s| {
             const f = @as(f64, @floatFromInt(s)) / @as(f64, @floatFromInt(steps));
@@ -424,23 +429,24 @@ test "a reserved lane holds the channel for a net that has not routed yet" {
     const arena = arena_inst.allocator();
     const placement = try channelBoard(arena);
 
-    // Control: nothing reserved, so the low slot goes to whoever asks first —
-    // net 0, which is collinear with it and routes before net 1 even sees it.
+    // Control: nothing reserved, so the low slot's TOP face goes to whoever asks
+    // first — net 0, which is collinear with it and routes before net 1 even
+    // sees it. Net 1 then crosses underneath rather than taking that face.
     const open = try router.routeWithOptions(arena, placement, .{}, .{});
     try testing.expectEqual(@as(usize, 2), open.routed);
-    try testing.expect(copperIn(open.tracks, 0, gap_box));
-    try testing.expect(!copperIn(open.tracks, 1, gap_box));
+    try testing.expect(copperIn(open.tracks, 0, gap_box, 0));
+    try testing.expect(!copperIn(open.tracks, 1, gap_box, 0));
 
     // Hold it for net 1. Net 0's pads sit ON the channel's axis and it is the
     // first net offered the board, so this is exactly the case a soft guide
     // cannot express: by the time net 1 routes, net 0 has already taken the
-    // channel. With the reservation net 0 goes round the wall instead, and both
-    // nets still route.
+    // channel. With the reservation net 0 gives that face up, net 1 threads it,
+    // and both nets still route.
     const lanes = channelLane(1);
     const held = try router.routeWithOptions(arena, placement, .{}, .{ .guides = .{ .reserved = &lanes } });
     try testing.expectEqual(@as(usize, 2), held.routed);
-    try testing.expect(copperIn(held.tracks, 1, gap_box));
-    try testing.expect(!copperIn(held.tracks, 0, gap_box));
+    try testing.expect(copperIn(held.tracks, 1, gap_box, 0));
+    try testing.expect(!copperIn(held.tracks, 0, gap_box, 0));
 }
 
 // spec: placement/reserved-lanes - a reserved lane naming a layer the router does not model is skipped rather than mis-stamped

@@ -197,28 +197,29 @@ fn Managed(comptime T: type, comptime Context: type, comptime lessFn: fn (Contex
 
 pub const Pq = Managed(QItem, void, qLess);
 
-/// A queued maze state; `bends` is a pure tie-breaker, never part of the cost.
-pub const RouteQItem = struct { f: f64, d: f64, key: usize, bends: u32 = 0 };
+/// A queued maze state: `f` is the A* priority, `d` the cost already paid.
+pub const RouteQItem = struct { f: f64, d: f64, key: usize };
 
-/// Order by cost, then by FEWER BENDS, then by distance.
+/// Order by A* priority, then by cost paid.
 ///
-/// On the 8-neighbour lattice every interleaving of the same diagonal and
-/// orthogonal steps has *exactly* equal length, so a plain queue keeps whichever
-/// it popped first — a micro-staircase where a human draws one axis run plus one
-/// 45° run. Ranking equal-cost states by bend count pops the straighter one
-/// first; it relaxes its neighbours first, and the strict `nd < dist[to_key]`
-/// test then stops an equal-cost staircase overwriting the `prev` it wrote.
+/// This used to carry a third field — a per-path bend count, ranked between the
+/// two — because on the 8-neighbour lattice every interleaving of the same
+/// diagonal and orthogonal steps has *exactly* equal length, so a plain queue
+/// kept whichever micro-staircase it popped first where a human draws one axis
+/// run plus one 45° run. Its own doc called it "deliberately a tie-break, NOT a
+/// cost term", on the measurement that a 0.6-pitch bend PRICE took barracuda
+/// from 81/90 nets and 19 DRC findings to 61/90 and 257.
 ///
-/// Deliberately a tie-break, NOT a cost term: pricing a bend into `dist` leaves
-/// the Euclidean heuristic estimating a quantity the search no longer minimises,
-/// so A* degenerates toward Dijkstra and legs fail on `expansionBudget`.
-/// Measured on barracuda, a 0.6-step bend price took 81/90 nets routed and 19
-/// DRC to 61/90 and 257. Ordering is free, so it can never cost a routed net.
+/// The router now prices a corner directly (`router.bend_cost_mult`, a quarter
+/// of that measured ceiling), so the quantity this ordered is in `f` and `d`
+/// already — and there it composes: it is comparable against real length, it is
+/// discounted by the same corridor multipliers as the step it rides on, and A*
+/// can reason about it. A second, weaker copy of the same preference in the heap
+/// could only ever restate what `f` has already said, so it is gone rather than
+/// left contradicting its own justification.
 pub fn routeQLess(_: void, a: RouteQItem, b: RouteQItem) std.math.Order {
     const by_f = std.math.order(a.f, b.f);
-    if (by_f != .eq) return by_f;
-    const by_bends = std.math.order(a.bends, b.bends);
-    return if (by_bends == .eq) std.math.order(a.d, b.d) else by_bends;
+    return if (by_f == .eq) std.math.order(a.d, b.d) else by_f;
 }
 
 /// The maze queue (`router.dijkstra`).
@@ -318,16 +319,15 @@ test "qLess orders soft-probe states by cost" {
     try testing.expectEqual(std.math.Order.eq, qLess({}, .{ .d = 2, .key = 9 }, .{ .d = 2, .key = 0 }));
 }
 
-test "routeQLess breaks an equal-cost tie toward fewer bends" {
-    const straight = RouteQItem{ .f = 5, .d = 5, .key = 1, .bends = 1 };
-    const staircase = RouteQItem{ .f = 5, .d = 5, .key = 2, .bends = 4 };
-    try testing.expectEqual(std.math.Order.lt, routeQLess({}, straight, staircase));
-    // Cost still outranks the tie-break: a cheaper staircase pops first.
-    const cheaper = RouteQItem{ .f = 4, .d = 4, .key = 3, .bends = 9 };
-    try testing.expectEqual(std.math.Order.lt, routeQLess({}, cheaper, straight));
-    // Equal cost and equal bends falls through to distance.
-    const far = RouteQItem{ .f = 5, .d = 6, .key = 4, .bends = 1 };
-    try testing.expectEqual(std.math.Order.lt, routeQLess({}, straight, far));
+// spec: placement/router - the maze queue orders on A* priority alone, with corner count priced into the cost rather than ranked beside it
+test "routeQLess orders on priority then on cost paid" {
+    const near = RouteQItem{ .f = 5, .d = 5, .key = 1 };
+    // Priority outranks everything: a cheaper state pops first whatever shape
+    // reached it.
+    try testing.expectEqual(std.math.Order.lt, routeQLess({}, .{ .f = 4, .d = 4, .key = 3 }, near));
+    // Equal priority falls through to the cost already paid.
+    try testing.expectEqual(std.math.Order.lt, routeQLess({}, near, .{ .f = 5, .d = 6, .key = 4 }));
+    try testing.expectEqual(std.math.Order.eq, routeQLess({}, near, .{ .f = 5, .d = 5, .key = 9 }));
 }
 
 // spec: placement/router - vectorized maze-source discovery preserves ascending node order

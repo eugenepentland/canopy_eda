@@ -1499,6 +1499,8 @@ src/placement/critical_route_score.zig::addPath | fn addPath(self: *Rank, path: 
 src/placement/critical_route_score.zig::better | fn better(candidate: Rank, incumbent: Rank) bool
 src/placement/critical_route_score.zig::compare | fn compare(a: Rank, b: Rank) std.math.Order
 src/placement/critical_route_score.zig::estimate | fn estimate(a: Endpoint, b: Endpoint) Metrics
+src/placement/detour_guard.zig::detourGuard | fn detourGuard( run: DirectRun, pts: []const NetPt, track_mark: usize, via_mark: usize, ) std.mem.Allocator.Error!bool
+src/placement/detour_guard.zig::judgeSurfaceDetour | fn judgeSurfaceDetour( run: DirectRun, pts: []const NetPt, track_mark: usize, via_mark: usize, ) std.mem.Allocator.Error!bool
 src/placement/diff_couple.zig::auditPairBends | fn auditPairBends(run: router.CoupledRun, keep: usize) std.mem.Allocator.Error!void
 src/placement/diff_couple.zig::escalatePair | fn escalatePair(run: router.EscalateRun, pair: diff_pairs.DiffPair) std.mem.Allocator.Error!usize
 src/placement/diff_couple.zig::isPairMember | fn isPairMember(pairs: []const diff_pairs.DiffPair, net_i: usize) bool
@@ -1843,6 +1845,8 @@ src/placement/layout_lint.zig::lint | fn lint(alloc: Allocator, p: Placement, po
 src/placement/manhattan_route.zig::State struct_
 src/placement/manhattan_route.zig::attempt | fn attempt( run: router.DirectRun, pts: []const router.NetPt, ) std.mem.Allocator.Error!bool
 src/placement/manhattan_route.zig::axisStub | fn axisStub(seam: anytype, a: [2]f64, b: [2]f64) std.mem.Allocator.Error!bool
+src/placement/manhattan_route.zig::mstMm | fn mstMm(arena: std.mem.Allocator, pts: []const router.NetPt) std.mem.Allocator.Error!f64
+src/placement/manhattan_route.zig::routedMm | fn routedMm(added: []const router.Track) f64
 src/placement/manhattan_route.zig::stateFor | fn stateFor(placement: optimizer.Placement, net_i: usize) State
 src/placement/manhattan_route.zig::turnCost | fn turnCost(self: State, g: f64, lat: octilinear.Lattice, from_key: usize, to_key: usize) f64
 src/placement/manhattan_route.zig::turn_cost_mult value
@@ -2534,6 +2538,7 @@ src/placement/router.zig::VisionMask struct_
 src/placement/router.zig::addGroundPadStitches | fn addGroundPadStitches( arena: std.mem.Allocator, placement: optimizer.Placement, routed: RouteResult, ) std.mem.Allocator.Error!RouteResult
 src/placement/router.zig::arena | fn arena(self: CleanupBoard) std.mem.Allocator
 src/placement/router.zig::beginNet | fn beginNet(self: CleanupBoard, net_i: usize) void
+src/placement/router.zig::bend_cost_mult value
 src/placement/router.zig::blocked | fn blocked(ctx: *Ctx, layer: usize, n: usize, net: i32) bool
 src/placement/router.zig::buildObstacles | fn buildObstacles(arena: std.mem.Allocator, parts: []const Part, nets: []const FlatNet) std.mem.Allocator.Error![]PadObs
 src/placement/router.zig::buildPairViaBan | fn buildPairViaBan( run: CoupledRun, at: []const [2]f64, radius: f64, ) std.mem.Allocator.Error![]const bool
@@ -2555,6 +2560,7 @@ src/placement/router.zig::directViaClear | fn directViaClear(run: DirectRun, pos
 src/placement/router.zig::emitDoglegSegment | fn emitDoglegSegment( path: DirectPath, a: [2]f64, b: [2]f64, tracks: *std.ArrayList(Track), ) std.mem.Allocator.Error!void
 src/placement/router.zig::empty_cell value
 src/placement/router.zig::enabled | fn enabled(self: CleanupBoard, net_i: usize) bool
+src/placement/router.zig::escapeActive | fn escapeActive(ctx: *const Ctx) bool
 src/placement/router.zig::finish | fn finish(self: RouteCore) std.mem.Allocator.Error!RouteRun
 src/placement/router.zig::finishBatch | fn finishBatch(core: RouteCore) std.mem.Allocator.Error!RouteRun
 src/placement/router.zig::gap_grid_divisor value
@@ -2598,6 +2604,7 @@ src/placement/router.zig::routeCoreFinishedRun | fn routeCoreFinishedRun( arena:
 src/placement/router.zig::routeCoreStart | fn routeCoreStart( arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams, options: route_policy.Options, capture: TimelineCapture, ) std.mem.Allocator.Error!CoreOutcome
 src/placement/router.zig::routeFollowerLeg | fn routeFollowerLeg( run: EscalateRun, pair: diff_pairs.DiffPair, n_slot: *RipNet, ) std.mem.Allocator.Error!void
 src/placement/router.zig::routeNet | fn routeNet( ctx: *Ctx, net: i32, pts: []const NetPt, tracks: *std.ArrayList(Track), vias: *std.ArrayList(Via), ) std.mem.Allocator.Error!bool
+src/placement/router.zig::routeNetAttempt | fn routeNetAttempt( ctx: *Ctx, net: i32, pts: []const NetPt, tracks: *std.ArrayList(Track), vias: *std.ArrayList(Via), ) std.mem.Allocator.Error!bool
 src/placement/router.zig::routeWithOptions | fn routeWithOptions( arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams, options: route_policy.Options, ) std.mem.Allocator.Error!RouteResult
 src/placement/router.zig::routeWithTimeline | fn routeWithTimeline( arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams, options: route_policy.Options, ) std.mem.Allocator.Error!RouteRun
 src/placement/router.zig::saveSnapshot | fn saveSnapshot( scratch: std.mem.Allocator, ctx: *Ctx, tracks: *std.ArrayList(Track), vias: *std.ArrayList(Via), routable: []const RipNet, ) std.mem.Allocator.Error!RipSnapshot
@@ -2607,6 +2614,7 @@ src/placement/router.zig::setNetParams | fn setNetParams(ctx: *Ctx, placement: o
 src/placement/router.zig::setNetRoutePolicy | fn setNetRoutePolicy(ctx: *Ctx, net_i: usize, pts: []const NetPt) void
 src/placement/router.zig::shapeInput | fn shapeInput(run: DirectRun, ask: ShapeAsk) std.mem.Allocator.Error!?cdt_layers.Input
 src/placement/router.zig::shortName | fn shortName(s: []const u8) []const u8
+src/placement/router.zig::shrinkCopper | fn shrinkCopper(t: *std.ArrayList(Track), v: *std.ArrayList(Via), tm: usize, vm: usize) void
 src/placement/router.zig::tautProbe | fn tautProbe(self: CleanupBoard, net: i32) TautProbe
 src/placement/router.zig::trackWidth | fn trackWidth(self: CleanupBoard) f64
 src/placement/router.zig::tryMazeTerminalTree | fn tryMazeTerminalTree( ctx: *Ctx, net: i32, pts: []const NetPt, tracks: *std.ArrayList(Track), vias: *std.ArrayList(Via), partial_after: usize, ) std.mem.Allocator.Error!bool

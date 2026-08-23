@@ -361,6 +361,10 @@ Public functions: solve
 Public functions: route, perNetRouted, returnPathViolations, canonicalizeTraceJunctions
 
 - maze-routes a two-pad net into connected track segments
+- an equal-length octilinear tie is settled toward the straight path rather than an arbitrary staircase of the same length
+- the maze queue orders on A* priority alone, with corner count priced into the cost rather than ranked beside it
+- a connection that routes far past its own span is retried once on another face and keeps whichever route costs the board less
+- a net whose policy forbids vias keeps its detour rather than gaining one from the detour guard
 - a failed broad net retries its repair-waypoints before lower waves can claim the corridor, without perturbing a successful ordinary route
 - an authored branch tree routes a multi-drop net through one corridor per drop, bound to the terminals by geometry rather than by authored order
 - a branch tree that cannot be bound to distinct terminals guides nothing, leaving the net to the ordinary multi-terminal router
@@ -2257,7 +2261,7 @@ obstacle — 2.9×, and refused now.
 - the detour budget admits a clean elbow and refuses a route that runs far past its own span
 - declaring RF discipline never costs a board a routed net, because a declined axis attempt rolls back and the ordinary ladder runs unchanged
 - a differential pair member, a pinned corridor, an authored guide and a plain net are all refused the axis-only attempt
-- a corner costs the axis-only search real length while every other route prices it at zero
+- a corner costs the axis-only search four grid pitches and every other route the ordinary octilinear nudge, with a shape-pinned leg paying nothing
 - the axis join emits an L only when both legs clear and reports failure rather than falling back to a diagonal
 - an accepted axis-only route is measured for the off-axis copper its join seams can still emit
 - completeness-waiver: empty inputs (a net with no declared max-freq, an empty pair table and a route that laid no copper are each the ordinary decline path, asserted above)

@@ -97,13 +97,35 @@ pub const State = struct {
     /// coupled construction owns its shape and its corners.
     diff_paired: bool = false,
 
-    /// The extra cost the move `from_key` → `to_key` pays for changing heading:
-    /// `turn_cost_mult` grid pitches per corner while the axis-only attempt is
-    /// running, and zero — the pre-existing cost model, to the bit — otherwise.
+    /// The extra cost the move `from_key` → `to_key` pays for changing heading.
+    ///
+    /// Two prices, one seam. While the axis-only attempt is running a corner
+    /// costs `turn_cost_mult` (4) grid pitches, which is what collapses an
+    /// otherwise-free staircase into its L — on an axis lattice every monotone
+    /// path is the same length, so the corner price is the ONLY thing that can
+    /// tell those apart. Every other leg pays the ordinary octilinear nudge
+    /// (`router.bend_cost_mult`, 0.15 pitches): the 8-neighbour lattice at
+    /// least prices a detour by length, so it needs only enough to break the
+    /// exact ties between equal-length interleavings.
+    ///
+    /// The two also read the turn differently, and deliberately. The axis
+    /// attempt counts it ALWAYS: it is buying the corner outright, and
+    /// silencing the count on a pinned leg would not preserve a shape, it would
+    /// produce a staircase. The ordinary price goes through the gated `turned`,
+    /// so a leg whose shape an explicit constraint already owns — a diff-pair
+    /// coupling corridor (hug your twin) or a reference corridor (follow the
+    /// replayed path) — pays nothing and runs on the pre-existing cost model to
+    /// the bit. Those are electrical/intent constraints; a corner preference is
+    /// cosmetic and must never outrank them. Measured: a 0.6-pitch bend price
+    /// pulled a coupled leg clean out of its corridor and detoured it the wrong
+    /// way around an obstacle, away from its twin.
     pub fn turnCost(self: State, g: f64, lat: octilinear.Lattice, from_key: usize, to_key: usize) f64 {
-        if (!self.active) return 0;
-        const turns = octilinear.turnedAlways(lat, from_key, to_key);
-        return g * turn_cost_mult * @as(f64, @floatFromInt(turns));
+        if (self.active) {
+            const turns = octilinear.turnedAlways(lat, from_key, to_key);
+            return g * turn_cost_mult * @as(f64, @floatFromInt(turns));
+        }
+        const turns = octilinear.turned(lat, from_key, to_key);
+        return g * router.bend_cost_mult * @as(f64, @floatFromInt(turns));
     }
 };
 
@@ -266,7 +288,12 @@ fn withinDetourCap(
 
 /// Routed copper length (mm) in `added`. Vias carry no planar length, so they
 /// are not part of the measure.
-fn routedMm(added: []const router.Track) f64 {
+///
+/// Shared with the router's own detour guard (`router.detourGuard`), which asks
+/// the same post-hoc question of an ordinary net that this module asks of an RF
+/// one — "did this route run much farther than the net is wide?" — so both read
+/// one spelling of the measure rather than each carrying a copy.
+pub fn routedMm(added: []const router.Track) f64 {
     var mm: f64 = 0;
     for (added) |t| mm += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
     return mm;
@@ -280,7 +307,11 @@ fn routedMm(added: []const router.Track) f64 {
 ///
 /// O(n²) Prim over the arena: a net has a handful of terminals, and the exact
 /// tree matters more here than the asymptotics.
-fn mstMm(arena: std.mem.Allocator, pts: []const router.NetPt) std.mem.Allocator.Error!f64 {
+///
+/// Shared with `router.detourGuard` for the same reason `routedMm` is: one
+/// denominator, one spelling. Two terminals reduce to the pad-to-pad distance,
+/// which is the guard's terminal-pair case for free.
+pub fn mstMm(arena: std.mem.Allocator, pts: []const router.NetPt) std.mem.Allocator.Error!f64 {
     if (pts.len < 2) return 0;
     const best = try arena.alloc(f64, pts.len);
     const joined = try arena.alloc(bool, pts.len);
@@ -1226,8 +1257,8 @@ fn mstOf(pair: [2]router.NetPt) f64 {
     return apart(.{ pair[0].x, pair[0].y }, .{ pair[1].x, pair[1].y });
 }
 
-// spec: placement/manhattan-route - a corner costs the axis-only search real length while every other route prices it at zero
-test "turnCost prices a corner only while the axis-only attempt is running" {
+// spec: placement/manhattan-route - a corner costs the axis-only search four grid pitches and every other route the ordinary octilinear nudge, with a shape-pinned leg paying nothing
+test "turnCost prices a corner at four pitches for the axis attempt and a nudge for everyone else" {
     const nx: usize = 4;
     const nodes: usize = 12;
     var prev: [24]i64 = @splat(-1);
@@ -1241,9 +1272,19 @@ test "turnCost prices a corner only while the axis-only attempt is running" {
     try testing.expectApproxEqAbs(@as(f64, 0), active.turnCost(g, lat, 5, 6), 1e-12);
     // …and a via carries no heading, so a layer change is never a corner.
     try testing.expectApproxEqAbs(@as(f64, 0), active.turnCost(g, lat, 5, 5 + nodes), 1e-12);
-    // Every route that is not this attempt pays exactly zero, whatever the move.
+    // Every other route pays the ordinary octilinear nudge for the same corner —
+    // a fraction of the axis attempt's price, because the 8-neighbour lattice
+    // already charges a detour by length and needs only the ties broken.
     const idle = State{ .max_freq_hz = rf_hz };
-    try testing.expectApproxEqAbs(@as(f64, 0), idle.turnCost(g, lat, 5, 1), 1e-12);
+    try testing.expectApproxEqAbs(g * router.bend_cost_mult, idle.turnCost(g, lat, 5, 1), 1e-12);
+    try testing.expect(router.bend_cost_mult < turn_cost_mult);
+    try testing.expectApproxEqAbs(@as(f64, 0), idle.turnCost(g, lat, 5, 6), 1e-12);
+    // …and nothing at all on a leg whose shape an explicit constraint already
+    // pins, where a corner preference must not reorder anything. The axis
+    // attempt is exempt from the exemption: it is buying the corner outright.
+    const pinned = octilinear.Lattice{ .nx = nx, .nodes = nodes, .prev = &prev, .enabled = false };
+    try testing.expectApproxEqAbs(@as(f64, 0), idle.turnCost(g, pinned, 5, 1), 1e-12);
+    try testing.expectApproxEqAbs(g * turn_cost_mult, active.turnCost(g, pinned, 5, 1), 1e-12);
 }
 
 /// A join seam for the `axisStub` test, in the same shape the router's own one

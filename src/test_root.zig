@@ -240,6 +240,7 @@ test {
     _ = @import("placement/plan_resolve.zig");
     _ = @import("placement/plane_stitch.zig");
     _ = @import("placement/plane_stitch_route_regression.zig");
+    _ = @import("placement/detour_route_regression.zig");
     _ = @import("placement/plane_via.zig");
     _ = @import("placement/power_integrity.zig");
     _ = @import("placement/pdn_impedance.zig");
