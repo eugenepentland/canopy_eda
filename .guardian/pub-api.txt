@@ -2150,7 +2150,7 @@ src/placement/plane_stitch.zig::drew | fn drew(self: *Web, arena: std.mem.Alloca
 src/placement/plane_stitch.zig::init | fn init(arena: std.mem.Allocator, n: usize) std.mem.Allocator.Error!Web
 src/placement/plane_stitch.zig::netHasPlane | fn netHasPlane(placement: optimizer.Placement, name: []const u8) bool
 src/placement/plane_stitch.zig::netPourLayers | fn netPourLayers(placement: optimizer.Placement, name: []const u8) [2]bool
-src/placement/plane_stitch.zig::optionalNcObstacle | fn optionalNcObstacle(placement: optimizer.Placement, obstacle_i: usize) bool
+src/placement/plane_stitch.zig::packageTieObstacle | fn packageTieObstacle(placement: optimizer.Placement, obstacle_i: usize) bool
 src/placement/plane_stitch.zig::padInPour | fn padInPour(pour: [2]bool, c: pad_exit.NetPt) bool
 src/placement/plane_stitch.zig::placedVia | fn placedVia(self: *Web, pad: usize, stub_mm: f64) void
 src/placement/plane_stitch.zig::retainedStubMm | fn retainedStubMm( comptime Track: type, comptime Via: type, arena: std.mem.Allocator, maybe_pad: ?pad_shape.Shape, layer: u8, net: i32, tracks: []const Track, vias: []const Via, ) std.mem.Allocator.Error!?f64

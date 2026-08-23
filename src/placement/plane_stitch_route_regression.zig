@@ -220,7 +220,7 @@ test "an angled bound bypass pair stays one surface-connected stitch island" {
 
 // spec: placement/plane-stitch - final fill-blind copper cleanup preserves exact-target bypass surface paths even when a rail plane makes their trace sections connectivity-redundant
 // spec: placement/plane-stitch - a same-target capacitor bank extends a far exact-target leg through bounded local cap-to-cap hops while the path-length gate still places another via when needed
-// spec: placement/plane-stitch - an HMC-style grounded NC ring surface-bonds to the exposed ground pad and adds no per-NC barrels while the thermal array and capacitor returns remain
+// spec: placement/plane-stitch - an HMC-style grounded tie-off ring surface-bonds to the exposed ground pad and adds no per-tie-off barrels while the thermal array and capacitor returns remain
 test "two three-cap bypass banks remain surface-connected to their exact IC pins" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
@@ -314,8 +314,21 @@ test "two three-cap bypass banks remain surface-connected to their exact IC pins
     };
     var ic_roles = pin_roles.PartRoles{};
     try ic_roles.map.put(arena, "17", .ground);
-    const optional_pins = [_][]const u8{ "1", "2", "4", "5", "6", "7", "8", "9", "11", "12", "14", "16" };
-    for (optional_pins) |pin| try ic_roles.map.put(arena, pin, .optional_nc);
+    const tie_roles = [_]struct { pin: []const u8, class: pin_roles.PinClass }{
+        .{ .pin = "1", .class = .strap },
+        .{ .pin = "2", .class = .strap },
+        .{ .pin = "4", .class = .strap },
+        .{ .pin = "5", .class = .strap },
+        .{ .pin = "6", .class = .strap },
+        .{ .pin = "7", .class = .strap },
+        .{ .pin = "8", .class = .strap },
+        .{ .pin = "9", .class = .optional_nc },
+        .{ .pin = "11", .class = .optional_nc },
+        .{ .pin = "12", .class = .optional_nc },
+        .{ .pin = "14", .class = .optional_nc },
+        .{ .pin = "16", .class = .optional_nc },
+    };
+    for (tie_roles) |role| try ic_roles.map.put(arena, role.pin, role.class);
     var roles = [_]pin_roles.PartRoles{ ic_roles, .{}, .{}, .{}, .{}, .{}, .{} };
     var placement = optimizer.Placement{
         .parts = &parts,
@@ -356,7 +369,8 @@ test "two three-cap bypass banks remain surface-connected to their exact IC pins
         .via_drill = 0.2,
     }, .{ .selected_nets = &ground_selected });
     // Nine exposed-pad thermal barrels plus one direct return for each of the
-    // six bypass capacitors; none of the twelve optional lands drills a via.
+    // six bypass capacitors; none of the seven grounded input straps or five
+    // optional lands drills a via.
     try testing.expectEqual(@as(usize, 15), viasOn(grounded.vias, 0));
 }
 

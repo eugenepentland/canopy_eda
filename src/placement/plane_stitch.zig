@@ -260,12 +260,14 @@ const Candidate = struct { cap: usize, hub: usize, mm: f64 };
 /// The web's separate path-length gate still decides where another via is
 /// needed, so a chain can never share one barrel beyond the same bound.
 ///
-/// A plain NC/N/C pad which the author deliberately assigned to the same net as
-/// a real ground pad on its package is another local bond. The real ground is
-/// the preferred-via (`cap`) side, so an exposed paddle's thermal field serves
-/// the optional land through surface copper instead of every NC pad drilling a
-/// duplicate barrel. A DNC/DNU/reserved pad is never tagged `optional_nc` and
-/// cannot enter this rule.
+/// A package tie-off is another local bond. A plain NC/N/C pad which the author
+/// deliberately assigned to ground bonds only to a real ground pad. An
+/// explicitly typed input/control strap bonds to the real ground or supply pad
+/// carrying the same plane net. The real rail terminal is the preferred-via
+/// (`cap`) side, so its plane connection serves the tie-off through surface
+/// copper instead of every tied-low/high input drilling a duplicate barrel. A
+/// DNC/DNU/reserved pad is never tagged `optional_nc` and cannot enter this
+/// rule.
 pub fn bonds(
     arena: std.mem.Allocator,
     placement: optimizer.Placement,
@@ -292,18 +294,21 @@ pub fn bonds(
         }
     }
 
-    // Optional package grounds are semantic, not proximity guesses: both roles
-    // come from this exact part's pinout. Choose the nearest real ground pad on
-    // the same face, and put that real return on the preferred-via side.
-    for (pts, 0..) |pt, optional_i| {
-        if (terminalClass(placement, pt) != .optional_nc) continue;
+    // Package tie-offs are semantic, not proximity guesses: both roles come
+    // from this exact part's pinout. Choose the nearest compatible real rail
+    // pad on the same face, and put that real terminal on the preferred-via
+    // side. `pts` contains one net only, so a strap cannot accidentally bond a
+    // ground pad to a supply pad.
+    for (pts, 0..) |pt, tie_i| {
+        const tie_class = terminalClass(placement, pt);
+        if (!packageTieClass(tie_class)) continue;
         var best: ?Candidate = null;
-        for (pts, 0..) |anchor, ground_i| {
-            if (terminalClass(placement, anchor) != .ground or anchor.layer != pt.layer) continue;
+        for (pts, 0..) |anchor, anchor_i| {
+            if (!packageTieAnchor(tie_class, terminalClass(placement, anchor)) or anchor.layer != pt.layer) continue;
             if (!std.mem.eql(u8, anchor.ref_des, pt.ref_des)) continue;
             const mm = std.math.hypot(anchor.x - pt.x, anchor.y - pt.y);
             if (best != null and mm >= best.?.mm) continue;
-            best = .{ .cap = ground_i, .hub = optional_i, .mm = mm };
+            best = .{ .cap = anchor_i, .hub = tie_i, .mm = mm };
         }
         const candidate = best orelse continue;
         if (!candidateKnown(candidates.items, candidate.cap, candidate.hub)) try candidates.append(arena, candidate);
@@ -351,16 +356,28 @@ fn terminalClass(placement: optimizer.Placement, pt: pad_exit.NetPt) pin_roles.P
     return .other;
 }
 
-/// Whether `obstacle_i` in `router.buildObstacles` order is an optional NC
+fn packageTieClass(class: pin_roles.PinClass) bool {
+    return class == .optional_nc or class == .strap;
+}
+
+fn packageTieAnchor(tie: pin_roles.PinClass, anchor: pin_roles.PinClass) bool {
+    return switch (tie) {
+        .optional_nc => anchor == .ground,
+        .strap => anchor == .ground or anchor == .power,
+        else => false,
+    };
+}
+
+/// Whether `obstacle_i` in `router.buildObstacles` order is a package tie-off
 /// land. Keeping the role lookup separate avoids inflating every obstacle with
 /// metadata needed only by the final ground-via-distance pass.
-pub fn optionalNcObstacle(placement: optimizer.Placement, obstacle_i: usize) bool {
+pub fn packageTieObstacle(placement: optimizer.Placement, obstacle_i: usize) bool {
     var first: usize = 0;
     for (placement.parts, 0..) |part, part_i| {
         const past = first + part.pads.len;
         if (obstacle_i < past) {
             if (part_i >= placement.pin_roles.len) return false;
-            return placement.pin_roles[part_i].classOf(part.pads[obstacle_i - first].number) == .optional_nc;
+            return packageTieClass(placement.pin_roles[part_i].classOf(part.pads[obstacle_i - first].number));
         }
         first = past;
     }
@@ -628,32 +645,35 @@ test "the ground leg of a loop is a bond on the ground net" {
     try testing.expectEqualStrings("U1", pts[bs[0].hub].ref_des);
 }
 
-// spec: placement/plane-stitch - a grounded NC pad bonds to its package's real ground pad with the real return offered the shared via, while an ordinary unclassified pad does not
-// spec: placement/plane-stitch - obstacle-order role lookup identifies only optional NC lands so the router's ground-via maximum cannot recreate their suppressed barrels
-test "an optional grounded NC pad shares its package real-ground stitch" {
+// spec: placement/plane-stitch - grounded NC and input-strap pads bond to their package's real ground pad with the real return offered the shared via, while an ordinary unclassified pad does not
+// spec: placement/plane-stitch - obstacle-order role lookup identifies package tie-off lands so the router's ground-via maximum cannot recreate their suppressed barrels
+test "grounded NC and input strap pads share their package real-ground stitch" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
     var role = pin_roles.PartRoles{};
     try role.map.put(arena, "17", .ground);
     try role.map.put(arena, "1", .optional_nc);
-    try role.map.put(arena, "7", .optional_nc);
+    try role.map.put(arena, "7", .strap);
+    try role.map.put(arena, "8", .optional_nc);
     var roles = [_]pin_roles.PartRoles{ role, .{} };
     var placement = bondFixture();
     placement.pin_roles = &roles;
-    try testing.expect(optionalNcObstacle(placement, 0));
-    try testing.expect(!optionalNcObstacle(placement, 1));
-    try testing.expect(!optionalNcObstacle(placement, 2));
-    try testing.expect(!optionalNcObstacle(placement, 99));
+    try testing.expect(packageTieObstacle(placement, 0));
+    try testing.expect(packageTieObstacle(placement, 1));
+    try testing.expect(!packageTieObstacle(placement, 2));
+    try testing.expect(!packageTieObstacle(placement, 99));
     const pts = [_]pad_exit.NetPt{
         .{ .x = 0, .y = 0, .layer = 0, .ref_des = "U1", .pin = "17" },
         .{ .x = 1.4, .y = 0, .layer = 0, .ref_des = "U1", .pin = "1" },
-        .{ .x = -1.4, .y = 0, .layer = 0, .ref_des = "U1", .pin = "3" },
+        .{ .x = -1.4, .y = 0, .layer = 0, .ref_des = "U1", .pin = "7" },
     };
     const bs = try bonds(arena, placement, &pts);
-    try testing.expectEqual(@as(usize, 1), bs.len);
+    try testing.expectEqual(@as(usize, 2), bs.len);
     try testing.expectEqual(@as(usize, 0), bs[0].cap); // real GND owns the via
     try testing.expectEqual(@as(usize, 1), bs[0].hub); // optional NC shares it
+    try testing.expectEqual(@as(usize, 0), bs[1].cap); // real GND owns the via
+    try testing.expectEqual(@as(usize, 2), bs[1].hub); // input strap shares it
     const order = try viaOrder(arena_inst.allocator(), pts.len, bs);
     try testing.expectEqual(@as(usize, 0), order[0]);
 }

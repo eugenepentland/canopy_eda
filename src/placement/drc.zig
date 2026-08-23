@@ -1099,7 +1099,10 @@ fn checkGroundPadVias(
     if (!(max_distance > 0)) return;
     for (pads) |pad| {
         if (pad.thru or pad.net < 0) continue;
-        if (pad.part < placement.pin_roles.len and placement.pin_roles[pad.part].classOf(pad.num) == .optional_nc) continue;
+        if (pad.part < placement.pin_roles.len) {
+            const class = placement.pin_roles[pad.part].classOf(pad.num);
+            if (class == .optional_nc or class == .strap) continue;
+        }
         const net_i: usize = @intCast(pad.net);
         if (net_i >= placement.nets.len) continue;
         const name = placement.nets[net_i].name;
@@ -3637,14 +3640,17 @@ test "ground pad via distance is a warning and accepts the exact limit" {
     try testing.expectEqual(@as(usize, 0), countKind(served, .ground_via_distance));
 }
 
-// spec: placement/drc - an optional NC land assigned to ground is excluded from the ground-via maximum because its same-package real ground return owns the required plane connection
-test "ground via maximum does not require a barrel at an optional NC land" {
+// spec: placement/drc - an optional NC or input-strap land assigned to ground is excluded from the ground-via maximum because its same-package real ground return owns the required plane connection
+test "ground via maximum does not require a barrel at a package tie-off land" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
     const G = @import("geometry.zig");
     const PR = @import("pin_roles.zig");
-    const pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.5, .h = 0.5 }};
+    const pad = [_]G.Pad{
+        .{ .number = "1", .x = 0, .y = 0, .w = 0.5, .h = 0.5 },
+        .{ .number = "2", .x = 1, .y = 0, .w = 0.5, .h = 0.5 },
+    };
     var parts = [_]optimizer.Part{.{
         .ref_des = "U1",
         .kind = .hub,
@@ -3653,10 +3659,14 @@ test "ground via maximum does not require a barrel at an optional NC land" {
         .pads = &pad,
         .fallback = false,
     }};
-    const pins = [_]flat_netlist.FlatPin{.{ .ref_des = "U1", .pin = "1" }};
+    const pins = [_]flat_netlist.FlatPin{
+        .{ .ref_des = "U1", .pin = "1" },
+        .{ .ref_des = "U1", .pin = "2" },
+    };
     const nets = [_]FlatNet{.{ .name = "GND", .pins = &pins }};
     var role = PR.PartRoles{};
     try role.map.put(arena, "1", .optional_nc);
+    try role.map.put(arena, "2", .strap);
     var roles = [_]PR.PartRoles{role};
     var placement = partsOnly(&parts);
     placement.nets = &nets;
