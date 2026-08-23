@@ -13424,11 +13424,11 @@ test "quarter-pitch pass rescues a base-grid quantization failure beyond the loc
     }, 0.127);
     // W1 and W2 are sized to span the board height exactly (0→7.75 and
     // 8.25→10 on a 10 mm board), so their lands rest ON the cut line: two
-    // pad↔board-edge findings that belong to the obstacle fixture. Seven
-    // fixture courtyards also sit inside the default 2.5 mm assembly margin;
+    // pad↔board-edge findings that belong to the obstacle fixture. Two fixture
+    // courtyards also sit inside the default 0.2 mm edge margin;
     // neither finding family comes from the rescued route.
     try testing.expectEqual(@as(usize, 2), drc_mod.countKind(viol, .board_edge));
-    try testing.expectEqual(@as(usize, 7), drc_mod.countKind(viol, .component_edge));
+    try testing.expectEqual(@as(usize, 2), drc_mod.countKind(viol, .component_edge));
     // The rescue draws raw lattice copper: it runs BELOW the finish, so no pad
     // escape has disciplined it yet and its legs still leave their own lands
     // off centre — seven same-net `land_transit` warnings that belong to the
@@ -13443,7 +13443,7 @@ test "quarter-pitch pass rescues a base-grid quantization failure beyond the loc
     // gate. Its former width-only contact is a weak graze, not a fabricated
     // junction, so it must not be reported as an implicit electrical join.
     try testing.expectEqual(@as(usize, 0), drc_mod.countKind(viol, .implicit_junction));
-    try testing.expectEqual(@as(usize, 19), viol.len);
+    try testing.expectEqual(@as(usize, 14), viol.len);
 
     // The public batch seam runs the same sequence before diagnostics capture,
     // so the rescued net disappears from `failed` in the finished result.

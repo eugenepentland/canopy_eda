@@ -1368,13 +1368,12 @@ fn checkPadEdge(
     }
 }
 
-/// component courtyard ↔ board edge: JLCPCB Standard PCBA requires the
-/// component BODY to sit at least 2.5 mm from the finished edge. The placement
-/// engine has no separate body primitive, so its rotation-aware courtyard is
-/// the conservative body proxy; `(design-rules (component-edge MM))` can
-/// override the resolved default. A wholly off-board courtyard is staged work,
-/// already handled by fab-readiness, and NPTH-only mounting hardware has no
-/// assembled component body to police.
+/// component courtyard ↔ board edge: the rotation-aware courtyard must stay
+/// inside the resolved component-edge margin. The built-in fabrication minimum
+/// is 0.2 mm; `(design-rules (component-edge MM))` can state a wider assembly-
+/// process requirement. A wholly off-board courtyard is staged work, already
+/// handled by fab-readiness, and NPTH-only mounting hardware has no assembled
+/// component body to police.
 fn checkComponentEdge(
     arena: std.mem.Allocator,
     out: *Viol,
@@ -2649,9 +2648,10 @@ test "component-edge clearance reads the rotated courtyard's own corners" {
     var placement = partsOnly(&parts);
     placement.board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 10 };
     placement.board_poly = &poly;
+    placement.rules.design.edge.component = 2.5;
 
     // Its box's inner corner is a point the part does not occupy, and it sits
-    // 2.45 mm off the chamfer — inside the 2.5 mm default body margin.
+    // 2.45 mm off the chamfer — inside the authored 2.5 mm body margin.
     const box = optimizer.worldCourtyard(&parts[0]);
     try testing.expect(boardInset(placement.board_rect.?, placement.board_poly, box.minx, box.miny) < 2.5);
     // Every corner the part HAS clears it, so nothing is flagged.
@@ -3409,7 +3409,7 @@ test "check flags a pad at the board edge and skips a staged part's pads" {
     try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, routed, 0.127), .board_edge));
 }
 
-// spec: placement/drc - component courtyards default to JLCPCB Standard PCBA's 2.5 mm edge margin, honor an authored override, and exempt NPTH-only/staged parts
+// spec: placement/drc - component courtyards default to a 0.2 mm edge margin, honor an authored override, and exempt NPTH-only/staged parts
 test "check enforces component-to-edge clearance" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
@@ -3417,10 +3417,10 @@ test "check enforces component-to-edge clearance" {
     const routed = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
     const npth = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 1, .h = 1, .thru = true, .npth = true, .drill = 1 }};
     var parts = [_]optimizer.Part{
-        // Courtyard's left edge is exactly 2.5 mm from the cut: legal.
-        .{ .ref_des = "U1", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false, .x = 3, .y = 5 },
-        // Right edge gap = 1.9 mm: one component-edge warning.
-        .{ .ref_des = "U2", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false, .x = 7.6, .y = 5 },
+        // Courtyard's left edge is exactly 0.2 mm from the cut: legal.
+        .{ .ref_des = "U1", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false, .x = 0.7, .y = 5 },
+        // Right edge gap = 0.1 mm: one component-edge warning.
+        .{ .ref_des = "U2", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false, .x = 9.4, .y = 5 },
         // Mounting-hole courtyard touches the cut, but NPTH-only hardware has
         // no assembled body and is intentionally exempt.
         .{ .ref_des = "H1", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &npth, .fallback = false, .x = 0.5, .y = 5 },
@@ -3435,12 +3435,12 @@ test "check enforces component-to-edge clearance" {
     try testing.expectEqual(@as(usize, 1), countKind(defaults, .component_edge));
     const hit = firstOfKind(defaults, .component_edge).?;
     try testing.expectEqual(@as(i32, 1), hit.who.part_a);
-    try testing.expectEqual(@as(f64, 2.5), hit.clearance);
+    try testing.expectEqual(@as(f64, 0.2), hit.clearance);
     try testing.expectEqual(Severity.warn, hit.severity);
 
-    // A board-specific assembly process can state a smaller positive rule.
-    placement.rules.design.edge.component = 1.5;
-    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, routed, 0.127), .component_edge));
+    // A board-specific assembly process can state a wider rule.
+    placement.rules.design.edge.component = 0.3;
+    try testing.expectEqual(@as(usize, 2), countKind(try check(arena, placement, routed, 0.127), .component_edge));
 }
 
 // spec: placement/drc - component-edge clearance follows the exact rounded outline rather than its rectangular bounding box
@@ -3929,6 +3929,7 @@ fn hygieneBoard(arena: std.mem.Allocator) ![]const Violation {
     const routed = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
     var placement = partsOnly(&parts);
     placement.board_rect = .{ .minx = -1, .miny = -2, .w = 10, .h = 10 };
+    placement.rules.design.edge.component = 2.5;
     return check(arena, placement, routed, 0.127);
 }
 

@@ -744,8 +744,7 @@ pub fn signalLayerColor(sig: u8) []const u8 {
 
 /// Board-level default design rules as concrete millimetre values — the
 /// resolved form of a `(design-rules …)` form (or the built-in defaults when
-/// none is authored). Existing routing/fabrication fields retain their legacy
-/// values; the component-edge assembly check adds its JLCPCB-based default.
+/// none is authored).
 pub const DesignRules = struct {
     /// Copper-to-copper spacing (mm) — matches `RouteParams.clearance`.
     clearance: f64 = env.default_clearance_mm,
@@ -768,10 +767,10 @@ pub const DesignRules = struct {
     pour_clearance: f64 = env.default_pour_clearance_mm,
     /// Finished-board edge spacing (mm). Copper 0 ⇒ the DRC falls back to
     /// the plain copper `clearance` and the pour uses `pour_clearance`.
-    /// Component defaults to JLCPCB Standard PCBA's 2.5 mm body-to-edge rule;
-    /// the courtyard is the placement engine's conservative body proxy.
-    /// https://jlcpcb.com/help/article/terms-and-conditions-of-jlcpcb-assembly-service
-    edge: env.EdgeRules = .{ .copper = 0, .component = 2.5 },
+    /// Component defaults to a 0.2 mm courtyard-to-edge fabrication minimum.
+    /// Assembly services that require a wider process margin can author it with
+    /// `(design-rules (component-edge MM))`.
+    edge: env.EdgeRules = .{ .copper = 0, .component = 0.2 },
     /// Wall-to-wall spacing between two drilled holes (mm) — the hole-to-hole DRC.
     hole_to_hole: f64 = 0.25,
     /// Copper spacing between two vias of the SAME net (mm) — the `via_spacing`
@@ -12118,7 +12117,7 @@ test "designRulesOf fills defaults and honours authored overrides" {
     try testing.expectEqual(@as(f64, 0.25), d0.hole_to_hole);
     try testing.expectEqual(@as(f64, 0.1), d0.min_annular);
     try testing.expectEqual(@as(f64, 0), d0.edge.copper); // unset ⇒ falls back per-consumer
-    try testing.expectEqual(@as(f64, 2.5), d0.edge.component); // JLCPCB Standard PCBA default
+    try testing.expectEqual(@as(f64, 0.2), d0.edge.component);
     try testing.expectEqual(@as(f64, 0.3), d0.pour_clearance); // fab-safe inner-plane pour default
     try testing.expectEqual(@as(f64, 0.2), d0.pour.clearance_outer); // tighter on an outer face
     // Routing-geometry defaults match RouteParams exactly (backward compat).

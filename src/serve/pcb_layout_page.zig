@@ -14966,7 +14966,7 @@ test "board-rule json carries fab-floor scalars and the perimeter mask width" {
     try std.testing.expect(std.mem.indexOf(u8, d, "\"mask_web\":0.2") != null);
     try std.testing.expect(std.mem.indexOf(u8, d, "\"min_width\":0.1") != null);
     try std.testing.expect(std.mem.indexOf(u8, d, "\"clearance\":0.127") != null);
-    try std.testing.expect(std.mem.indexOf(u8, d, "\"component_edge\":2.5") != null);
+    try std.testing.expect(std.mem.indexOf(u8, d, "\"component_edge\":0.2") != null);
     try std.testing.expect(std.mem.indexOf(u8, d, "\"perimeter_mask_width\":0") != null);
     const legacy_start = std.mem.indexOf(u8, d, "\"rules\":{").?;
     const legacy_end = std.mem.indexOfScalarPos(u8, d, legacy_start, '}').?;

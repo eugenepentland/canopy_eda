@@ -2776,7 +2776,7 @@ Public functions: check, checkTopology, checkWithZones, countKind, defaultSeveri
 - checks the board edge against a non-rectangular outline polygon, catching copper in a notch
 - the polygon board-edge inset is measured against the copper-edge design rule
 - flags a component land crowding the board edge, exempts a staged off-board part, and reports nothing without an outline
-- component courtyards default to JLCPCB Standard PCBA's 2.5 mm edge margin, honor an authored override, and exempt NPTH-only/staged parts
+- component courtyards default to a 0.2 mm edge margin, honor an authored override, and exempt NPTH-only/staged parts
 - component-edge clearance follows the exact rounded outline rather than its rectangular bounding box
 - a pad inside the board rectangle but in a concave notch is measured against the outline polygon
 - a typed perimeter keepout flags only its blocked feature families, admits named nets, and exempts generated fence vias
