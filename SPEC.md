@@ -3414,9 +3414,10 @@ four copper layers whose two inner ones are planes. In1 has always been ground,
 which is why a bypass cap's ground leg needs one stitch via and never a trace;
 In2 was a second ground plane, so a supply rail landing on a dozen IC pads was
 left as an ordinary net for the router to draw — and on a dense QFN it drew
-nothing at all. In2 now carries the block's DOMINANT SUPPLY RAIL instead, so the
-rail behaves exactly as ground does: the router stitches each of its pads to the
-plane, the connectivity oracle counts those pads joined, port escape exempts
+nothing at all. In2 carries the block's DOMINANT SUPPLY RAIL when its
+`(power-plane on)` compatibility setting is enabled, so the rail behaves
+exactly as ground does: the router stitches each of its pads to the plane, the
+connectivity oracle counts those pads joined, port escape exempts
 them, and the Gerber's In2 pours the rail with antipads around foreign holes.
 The whole model lives in one module because the router, the oracle, the DRC, the
 pour fill and the Gerber export must never disagree about it — a board where the
@@ -3433,10 +3434,11 @@ reordering two pin declarations in a `.sexp` must never move the plane.
 - a pad-count tie hands the plane to an output rail over an input rail
 - a block with no qualifying rail keeps both inner planes on ground
 - the rail plane carries its net by full name or leaf, and nothing else
-- In1 is always ground and In2 is the chosen rail, else ground
+- In1 is always ground and In2 is the chosen rail when enabled, else ground
 - the u8 layer helpers on BoardRules answer exactly what the shared layer table does
 - the implicit rail plane pours In2 and antipads the holes it does not carry
 - a design that declares a `(stackup …)` keeps exactly its declared planes and plants no implicit rail
+- a disabled subcircuit power plane leaves the dominant supply rail unplaned without authoring a stackup
 - completeness-waiver: empty inputs (an empty net list yields no rail, unit-tested)
 - completeness-waiver: large inputs (the scan is linear in the flattened net list the caller already holds)
 - completeness-waiver: unauthorized access (pure in-process predicates over caller-supplied structs; access control lives at the serve boundary)
@@ -4663,6 +4665,7 @@ Public functions: analyze
 - board-role form sets the explicit board/subcircuit role
 - board-role defaults to subcircuit when the form is absent
 - board-role remains authoritative whether it appears before or after the board geometry form
+- power-plane defaults on, and off remains authoritative before or after board geometry
 - revision form captures id, date, and newest-first changelog
 - revision form with only an id is present with empty date/changelog
 - a design with no (revision …) form is unversioned (present=false)
@@ -5959,6 +5962,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The PCB replay client streams the live-route endpoint into the timeline player, follows the head, and reattaches to a running job through the overlay seam
 - The PCB live-route Stop action freezes the displayed elapsed time immediately while cooperative cancellation finishes, and resumes live progress if the cancellation request fails
 - The PCB autorouter client offers full local-then-global and subcircuits-only stages, and the local stage never falls back to the blocking whole-board endpoint
+- A subcircuit's PCB autorouter offers a Power plane toggle: on keeps the implicit dominant supply plane, off routes that supply as ordinary copper while retaining the ground plane; the choice is saved in the design source and reused by routing, DRC, reload, and fabrication outputs
 - The PCB board editor publishes the replay overlay, copper-adopt, and live-route result seams the replay client drives
 - The PCB thermal overlay paints the cached heat field over the read-only board through the overlay seam
 - The interactive route-session client bundles the stuck-net, corridor, and frontier surfaces

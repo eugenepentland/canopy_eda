@@ -307,7 +307,7 @@ test "carriesRail matches the declared-plane rule and carries folds in ground" {
     try testing.expect(!carries(railed, "SPI_SCK"));
 }
 
-// spec: placement/implicit-plane - In1 is always ground and In2 is the chosen rail, else ground
+// spec: placement/implicit-plane - In1 is always ground and In2 is the chosen rail when enabled, else ground
 test "innerPlanes assigns In1 to ground and In2 to the rail" {
     const legacy = innerPlanes(tRules(null));
     try testing.expect(legacy[0] == .ground);

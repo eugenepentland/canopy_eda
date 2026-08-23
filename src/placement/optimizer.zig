@@ -6504,7 +6504,11 @@ fn boardRulesOf(arena: std.mem.Allocator, block: *const DesignBlock, nets: []con
             .declared = planes,
             // The implicit model's own plane, chosen only when the design
             // authored no `(stackup …)` at all — see `implicit_plane`.
-            .implicit_rail = if (block.stackup.present) null else implicit_plane.dominantRail(nets),
+            .implicit_rail = if (block.stackup.present or
+                (block.board.role == .subcircuit and !block.board.power_plane))
+                null
+            else
+                implicit_plane.dominantRail(nets),
         },
         .design = designRulesOf(block),
         .physical = .{
@@ -10718,6 +10722,24 @@ test "a rated module output widens its rail once a bare stackup exists" {
     const outer = power_capacity.requiredTraceWidthMm(0.5, impedance.default_foil_mm, true).?;
     try testing.expectApproxEqAbs(outer, two.powerWidthForNet("VOUT").?, 1e-12);
     try testing.expect(outer < want);
+}
+
+// spec: placement/implicit-plane - a disabled subcircuit power plane leaves the dominant supply rail unplaned without authoring a stackup
+test "board rules honor the subcircuit power-plane switch" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } };
+    const nets = [_]FlatNet{.{ .name = "VCC", .pins = &pins }};
+    var block = DesignBlock{ .name = "module", .instances = &.{}, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &.{} };
+    const enabled = try boardRulesOf(arena, &block, &nets);
+    try testing.expectEqualStrings("VCC", enabled.planes.implicit_rail.?);
+    block.board.power_plane = false;
+    const disabled = try boardRulesOf(arena, &block, &nets);
+    try testing.expect(disabled.planes.implicit_rail == null);
+    block.board.role = .board;
+    const whole_board = try boardRulesOf(arena, &block, &nets);
+    try testing.expectEqualStrings("VCC", whole_board.planes.implicit_rail.?);
 }
 
 // spec: placement/optimizer - routing congestion is zero with no multi-pin nets and positive when nets pile into one region

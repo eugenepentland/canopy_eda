@@ -20,3 +20,20 @@ pub fn parse(evaluator: anytype, children: []const Node) BoardRole {
     evaluator.warnFmt(children[1].span, "unknown board role '{s}' — expected board|subcircuit", .{word});
     return .subcircuit;
 }
+
+/// Parse `(power-plane on|off)`, retaining the compatibility default (on) for
+/// missing or invalid values.
+pub fn parsePowerPlane(evaluator: anytype, children: []const Node) bool {
+    if (children.len < 2) {
+        evaluator.warnFmt(children[0].span, "(power-plane …) needs on|off", .{});
+        return true;
+    }
+    const word = children[1].asAtom() orelse {
+        evaluator.warnFmt(children[1].span, "(power-plane …) value must be on|off", .{});
+        return true;
+    };
+    if (std.mem.eql(u8, word, "on")) return true;
+    if (std.mem.eql(u8, word, "off")) return false;
+    evaluator.warnFmt(children[1].span, "unknown power-plane value '{s}' — expected on|off", .{word});
+    return true;
+}

@@ -8351,13 +8351,27 @@ window.PCBApplyRouteResult=function(j,opts){
 var rgo=document.getElementById("r-go");
 // Hierarchy stage is a client-owned routing choice. Build it beside the one
 // server-rendered Route action so the large PCB page stays a stable shell.
-var rstage=null;
+var rstage=null,rpower=null;
 (function(){if(!rgo)return;var row=rgo.parentNode;if(!row)return;
  var label=document.createElement("label");label.className="route-stage";label.setAttribute("for","r-stage");
  var title=document.createElement("span");title.textContent="Stage";
  rstage=document.createElement("select");rstage.id="r-stage";rstage.title="Stop after local subcircuit routing, or continue through whole-board global routing";
  [{v:"full",t:"Subcircuits + whole board"},{v:"subcircuits",t:"Subcircuits only"}].forEach(function(o){var e=document.createElement("option");e.value=o.v;e.textContent=o.t;rstage.appendChild(e);});
- label.appendChild(title);label.appendChild(rstage);row.insertBefore(label,rgo);})();
+ label.appendChild(title);label.appendChild(rstage);row.insertBefore(label,rgo);
+ // Role + plane mode are source-level design settings. Fetching them keeps the
+ // giant board blob free of another copy, and means exports and every router
+ // entry point read the same setting after the update/reload.
+ fetch("/api/board-role/"+encodeURIComponent(PCB.name)).then(function(r){if(!r.ok)throw 0;return r.json();}).then(function(meta){
+  if(meta.role!=="subcircuit"||meta.power_plane_applicable===false)return;
+  var plabel=document.createElement("label");plabel.className="route-power-plane";plabel.title="Use the implicit inner power plane; turn off to route the power rail as ordinary copper (ground remains on its plane)";
+  rpower=document.createElement("input");rpower.type="checkbox";rpower.id="r-power-plane";rpower.checked=meta.power_plane!==false;
+  var ptext=document.createElement("span");ptext.textContent="Power plane";
+  plabel.appendChild(rpower);plabel.appendChild(ptext);row.insertBefore(plabel,rgo);
+  rpower.addEventListener("change",function(){var wanted=rpower.checked;routeBusy(true);
+   fetch("/api/power-plane/"+encodeURIComponent(PCB.name),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:wanted})})
+    .then(function(r){if(!r.ok)throw 0;return r.json();}).then(function(){location.reload();})
+    .catch(function(){rpower.checked=!wanted;routeBusy(false);setStat("r-stat","err","could not update power-plane setting");});});
+ }).catch(function(){});})();
 // The ONE autoroute-from-the-viewer flow: build the payload from the on-screen
 // poses + the Route panel's geometry, stream it live when the driver is there,
 // fall back to the blocking POST when it isn't. Both the Autorouter panel's
@@ -8420,7 +8434,7 @@ function runRoute(opts){
 // first. Re-enabled by PCBApplyRouteResult (and by the error paths here).
 function routeBusy(on){["r-go","pcb-routeplan"].forEach(function(id){
  var b=document.getElementById(id);if(b)b.disabled=!!on;});
- if(rstage)rstage.disabled=!!on;}
+ if(rstage)rstage.disabled=!!on;if(rpower)rpower.disabled=!!on;}
 // The primary editor action is deliberately bounded: an authored standard
 // tier may consume minutes on a hard board.
 if(rgo)rgo.addEventListener("click",function(){runRoute({effort:"one_shot"});});

@@ -40,3 +40,17 @@ test "board role is independent of board form order" {
     const board_first = try evaluate(allocator, "(design-block \"test\" (board (size 80 55)) (board-role board))");
     try std.testing.expectEqual(env_mod.BoardRole.board, board_first.board.role);
 }
+
+// spec: eval/design_block - power-plane defaults on, and off remains authoritative before or after board geometry
+test "implicit power plane is explicit and independent of board form order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const defaulted = try evaluate(allocator, "(design-block \"test\" (board (size 20 10)))");
+    try std.testing.expect(defaulted.board.power_plane);
+    const before = try evaluate(allocator, "(design-block \"test\" (power-plane off) (board (size 20 10)))");
+    try std.testing.expect(!before.board.power_plane);
+    const after = try evaluate(allocator, "(design-block \"test\" (board (size 20 10)) (power-plane off))");
+    try std.testing.expect(!after.board.power_plane);
+}

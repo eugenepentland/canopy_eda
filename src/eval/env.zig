@@ -1239,6 +1239,9 @@ pub const BoardSpec = struct {
     /// Optional board-edge via fence and exposed-mask band.
     perimeter_fence: PerimeterFenceSpec = .{},
     role: BoardRole = .subcircuit,
+    /// No-stackup model: place the dominant supply rail on In2.Cu. Ground's
+    /// implicit In1.Cu plane is independent and remains present when false.
+    power_plane: bool = true,
     present: bool = false,
 };
 /// One `(plane IDX "NET")` entry of a `(stackup …)` form: copper layer IDX

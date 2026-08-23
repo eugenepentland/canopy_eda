@@ -343,6 +343,9 @@ svg.ruler-mode{cursor:crosshair}
 .route-primary{display:flex;gap:7px;align-items:center;flex-wrap:wrap}
 .route-primary .route-stage{flex:1 0 100%;display:flex;gap:7px;align-items:center}
 .route-primary .route-stage select{flex:1}
+.route-primary .route-power-plane{display:inline-flex;align-items:center;gap:6px;min-height:28px;padding:0 8px;
+  border:1px solid #3a3b40;border-radius:5px;background:#242529;color:#d6d7db;cursor:pointer;user-select:none}
+.route-primary .route-power-plane input{margin:0;accent-color:#5a8fd6}
 .route-primary .route-go{flex:1;min-width:118px;padding:7px 12px;background:#315f94;border-color:#5a8fd6;color:#fff;font-weight:700}
 .route-primary .route-go:hover{background:#3d70a8}
 .route-primary .route-scope-field{flex:1 0 100%;display:flex;gap:7px;align-items:center}

@@ -464,10 +464,13 @@ fn evalBlockBodyForm(
             // design body so form order cannot turn a board back into the
             // BoardSpec default (`subcircuit`).
             const role = build.board_spec.role;
+            const power_plane = build.board_spec.power_plane;
             build.board_spec.* = try parseBoard(self, form_children);
             build.board_spec.role = role;
+            build.board_spec.power_plane = power_plane;
         },
         .board_role => build.board_spec.role = board_role_mod.parse(self, form_children),
+        .power_plane => build.board_spec.power_plane = board_role_mod.parsePowerPlane(self, form_children),
         .revision => build.revision_spec.* = try parseRevision(self, form_children),
         .rough => build.rough_spec.* = try parseRough(self, form_children),
         .stackup => build.stackup_spec.* = try parseStackup(self, form_children),
@@ -1160,6 +1163,7 @@ fn evalSection(
             .layout,
             .board,
             .board_role,
+            .power_plane,
             .revision,
             .rough,
             .stackup,

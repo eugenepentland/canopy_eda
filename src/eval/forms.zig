@@ -149,6 +149,7 @@ pub const ScopeForm = enum {
     layout,
     board,
     board_role,
+    power_plane,
     revision,
     rough,
     stackup,
@@ -199,6 +200,7 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "diagram-layout", .layout },
     .{ "board", .board },
     .{ "board-role", .board_role },
+    .{ "power-plane", .power_plane },
     .{ "revision", .revision },
     .{ "rough", .rough },
     .{ "stackup", .stackup },
@@ -591,6 +593,12 @@ pub const scope_form_docs = blk: {
             "(board …) (physical outline) and (kicad-pcb …) (sync target), which keep their own " ++
             "jobs and no longer influence the role.",
     } };
+    t[@backingInt(ScopeForm.power_plane)] = .{ .scope = tl, .doc = .{
+        .syntax = "(power-plane on|off)",
+        .summary = "Choose whether a no-stackup subcircuit uses its second implicit inner layer as a supply plane. " ++
+            "Off routes the dominant supply rail as ordinary copper while retaining the implicit ground plane. " ++
+            "An authored (stackup …) remains authoritative and ignores this compatibility-model switch.",
+    } };
     t[@backingInt(ScopeForm.rough)] = .{ .scope = tl, .doc = .{
         .syntax = "(rough [(anchor \"REF\")] (group \"name\" \"REF\"…)… (critical-loop \"name\" \"REF\"…)…)",
         .summary = "Author the rough-placement seed (the `?rough=1` / \"Rough\" button on /pcb-layout): " ++
@@ -631,9 +639,11 @@ pub const scope_form_docs = blk: {
             "are routed as copper like any other net; `(stackup 2 (pour bottom \"GND\"))` is the " ++
             "classic 2-layer board with a bottom ground pour. Without the form the router keeps its " ++
             "legacy implicit model: 4 layers whose inner pair are assumed planes — In1 carries every " ++
-            "ground-named net, and In2 carries the block's dominant supply rail (the rail-named net " ++
+            "ground-named net, and by default In2 carries the block's dominant supply rail (the rail-named net " ++
             "landing on the most pads), so that rail joins by stitching via like ground instead of " ++
-            "being routed; with no qualifying rail In2 is a second ground plane, as it always was.",
+            "being routed. A subcircuit's `(power-plane off)` setting routes that supply as ordinary " ++
+            "copper and leaves In2 as a second ground plane; with no qualifying rail In2 is also a " ++
+            "second ground plane, as it always was.",
     } };
     t[@backingInt(ScopeForm.pdn)] = .{ .scope = tl, .doc = .{
         .syntax = "(pdn \"NET\" (ripple-v V) [(step-current-a A)] [(rise-time-s S)] " ++
