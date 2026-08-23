@@ -4662,6 +4662,7 @@ Public functions: analyze
 - board form parses outline size, corner radius, edge lists, corners, and typed perimeter keepouts
 - board-role form sets the explicit board/subcircuit role
 - board-role defaults to subcircuit when the form is absent
+- board-role remains authoritative whether it appears before or after the board geometry form
 - revision form captures id, date, and newest-first changelog
 - revision form with only an id is present with empty date/changelog
 - a design with no (revision …) form is unversioned (present=false)

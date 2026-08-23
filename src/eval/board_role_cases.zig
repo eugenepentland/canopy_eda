@@ -27,3 +27,16 @@ test "design-block without (board-role …) defaults to subcircuit" {
     const block = try evaluate(arena.allocator(), "(design-block \"test\" (board (size 80 55)))");
     try std.testing.expectEqual(env_mod.BoardRole.subcircuit, block.board.role);
 }
+
+// spec: eval/design_block - board-role remains authoritative whether it appears before or after the board geometry form
+test "board role is independent of board form order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const role_first = try evaluate(allocator, "(design-block \"test\" (board-role board) (board (size 80 55)))");
+    try std.testing.expectEqual(env_mod.BoardRole.board, role_first.board.role);
+
+    const board_first = try evaluate(allocator, "(design-block \"test\" (board (size 80 55)) (board-role board))");
+    try std.testing.expectEqual(env_mod.BoardRole.board, board_first.board.role);
+}

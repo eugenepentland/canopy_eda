@@ -458,7 +458,15 @@ fn evalBlockBodyForm(
             build.layout_spec.* = try parseLayout(self, form_children);
             build.has_explicit_layout = true;
         },
-        .board => build.board_spec.* = try parseBoard(self, form_children),
+        .board => {
+            // `(board …)` owns physical geometry, not fabrication identity.
+            // Preserve an explicit role already encountered earlier in the
+            // design body so form order cannot turn a board back into the
+            // BoardSpec default (`subcircuit`).
+            const role = build.board_spec.role;
+            build.board_spec.* = try parseBoard(self, form_children);
+            build.board_spec.role = role;
+        },
         .board_role => build.board_spec.role = board_role_mod.parse(self, form_children),
         .revision => build.revision_spec.* = try parseRevision(self, form_children),
         .rough => build.rough_spec.* = try parseRough(self, form_children),
