@@ -2846,7 +2846,9 @@ fn parseNetClassField(
     head: []const u8,
     c: []const Node,
 ) bool {
-    if (std.mem.eql(u8, head, "width")) {
+    if (parsePadNeckField(self, &spec.pad_neck, head, c)) {
+        return true;
+    } else if (std.mem.eql(u8, head, "width")) {
         if (c.len >= 2) spec.width = c[1].asNumber() orelse 0;
     } else if (std.mem.eql(u8, head, "clearance")) {
         if (c.len >= 2) spec.clearance = c[1].asNumber() orelse 0;
@@ -2877,6 +2879,25 @@ fn parseNetClassField(
     } else {
         return parseNetClassRfField(self, &spec.rf, head, c);
     }
+    return true;
+}
+
+fn parsePadNeckField(
+    self: *Evaluator,
+    profile: *env_mod.NetClassSpec.PadNeck,
+    head: []const u8,
+    c: []const Node,
+) bool {
+    const target: *f64 = if (std.mem.eql(u8, head, "pad-escape-width"))
+        &profile.width
+    else if (std.mem.eql(u8, head, "pad-escape-max-length"))
+        &profile.max_length
+    else if (std.mem.eql(u8, head, "taper-length"))
+        &profile.taper_length
+    else
+        return false;
+    if (c.len >= 2) target.* = c[1].asNumber() orelse 0;
+    if (target.* <= 0) self.warnFmt(c[0].span, "({s} MM) needs a positive value", .{head});
     return true;
 }
 
@@ -3974,6 +3995,30 @@ test "design-block captures (net-class …) rules" {
     try testing.expectEqualStrings("profile-only", block.net_classes[3].name);
     try testing.expectEqual(@as(f64, 1.0), block.net_classes[3].width);
     try testing.expectEqual(@as(usize, 0), block.net_classes[3].nets.len);
+}
+
+test "design-block captures pad escape neck and taper geometry" {
+    const arena = std.heap.page_allocator;
+    const src =
+        \\(design-block "neck"
+        \\  (net-class "power" (width 0.2532) (pad-escape-width 0.1524)
+        \\    (pad-escape-max-length 0.75) (taper-length 0.35) (nets "VDD")))
+    ;
+    const nodes = try sexpr_parser.parse(arena, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(arena, "");
+    defer eval.deinit();
+    var test_env = env_mod.Env.init(arena, null);
+    defer test_env.deinit();
+    const value = try evalDesignBlock(&eval, form_children[1..], &test_env);
+    try std.testing.expect(value == .design_block);
+    const block = value.design_block;
+    try std.testing.expectEqual(@as(usize, 1), block.net_classes.len);
+    const spec = block.net_classes[0];
+    try std.testing.expectEqual(@as(f64, 0.2532), spec.width);
+    try std.testing.expectEqual(@as(f64, 0.1524), spec.pad_neck.width);
+    try std.testing.expectEqual(@as(f64, 0.75), spec.pad_neck.max_length);
+    try std.testing.expectEqual(@as(f64, 0.35), spec.pad_neck.taper_length);
 }
 
 // spec: eval/design_block - net-class diff-pair sub-form flags the class and captures an explicit or default gap

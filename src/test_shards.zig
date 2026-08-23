@@ -88,6 +88,7 @@ pub const shards: []const []const []const u8 = &.{
         "placement.module_policy.test.",
         "placement.net_topology_route_regression.test.",
         "placement.pad_entry.test.",
+        "placement.pad_neck.test.",
         "placement.plane_stitch_route_regression.test.",
         "placement.rf_port_frames.test.",
         "placement.rough_identity.test.",

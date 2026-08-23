@@ -414,6 +414,7 @@ src/eval/env.zig::NetClassSpec struct_
 src/eval/env.zig::NetTie struct_
 src/eval/env.zig::Note struct_
 src/eval/env.zig::NoteRef struct_
+src/eval/env.zig::PadNeck struct_
 src/eval/env.zig::Part struct_
 src/eval/env.zig::PartPin struct_
 src/eval/env.zig::PartSignal struct_
@@ -2061,6 +2062,8 @@ src/placement/pad_grid.zig::cellFor | fn cellFor(w: f64, o: f64, cell: f64, n: u
 src/placement/pad_grid.zig::near | fn near(self: *const PadGrid, px: f64, py: f64) []const u32
 src/placement/pad_grid.zig::nearSegment | fn nearSegment(idx: *const PadGrid, a: [2]f64, b: [2]f64, reach: f64, scratch: *[near_scratch_len]u32) ?[]const u32
 src/placement/pad_grid.zig::near_scratch_len value
+src/placement/pad_neck.zig::allowsTrack | fn allowsTrack( arena: std.mem.Allocator, placement: optimizer.Placement, track: router.Track, nominal: f64, fab_min_width: f64, ) std.mem.Allocator.Error!bool
+src/placement/pad_neck.zig::passBoard | fn passBoard(board: router.CleanupBoard) std.mem.Allocator.Error!void
 src/placement/pad_shape.zig::SegClosest struct_
 src/placement/pad_shape.zig::Shape struct_
 src/placement/pad_shape.zig::closestOnSeg | fn closestOnSeg(ax: f64, ay: f64, bx: f64, by: f64, px: f64, py: f64) SegClosest

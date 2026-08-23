@@ -20,6 +20,7 @@ const geometry = @import("geometry.zig");
 const keepout = @import("keepout.zig");
 const land_transit = @import("land_transit.zig");
 const pad_shape = @import("pad_shape.zig");
+const pad_neck = @import("pad_neck.zig");
 const pose_math = @import("pose_math.zig");
 const outline = @import("outline.zig");
 const via_antipad = @import("via_antipad.zig");
@@ -1600,9 +1601,15 @@ fn checkTrackWidth(arena: std.mem.Allocator, out: *Viol, in: TrackWidthInput) st
             const ni: usize = @intCast(t.net);
             if (ni < nrules.len and nrules[ni].width > 0) want = nrules[ni].width;
         }
-        if (t.width < want - eps and !portFramePadTaper(in.routed, t, want)) {
-            try out.append(arena, .{ .x = (t.x1 + t.x2) / 2, .y = (t.y1 + t.y2) / 2, .gap = t.width, .clearance = want, .kind = .track_width, .who = .{ .net_a = t.net }, .layer = layerOf(t.layer) });
-        }
+        const under_width = t.width < want - eps;
+        const neck_ok = if (under_width)
+            try pad_neck.allowsTrack(arena, in.placement, t, want, in.min_width)
+        else
+            false;
+        const taper_ok = portFramePadTaper(in.routed, t, want);
+        if (!under_width) continue;
+        if (neck_ok or taper_ok) continue;
+        try out.append(arena, .{ .x = (t.x1 + t.x2) / 2, .y = (t.y1 + t.y2) / 2, .gap = t.width, .clearance = want, .kind = .track_width, .who = .{ .net_a = t.net }, .layer = layerOf(t.layer) });
     }
 }
 

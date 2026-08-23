@@ -660,6 +660,7 @@ pub const scope_form_docs = blk: {
     } };
     t[@backingInt(ScopeForm.net_class)] = .{ .scope = tl, .doc = .{
         .syntax = "(net-class \"name\" [(width MM)] [(clearance MM)] " ++
+            "[(pad-escape-width MM)] [(pad-escape-max-length MM)] [(taper-length MM)] " ++
             "[(via DIA DRILL)] [(priority 0-7)] [(diff-pair [GAP_MM])] [(max-freq HZ)] " ++
             "[(band MIN_HZ MAX_HZ)] [(return-loss DB)] " ++
             "[(escape MM)] [(min-bend-radius N)] [(resolution MM)] " ++
@@ -670,6 +671,7 @@ pub const scope_form_docs = blk: {
             "[(keepout MM [(escape MM)])] [(mask-relief MM)] [(nets \"A\" \"B\"…)])",
         .summary = "Routing geometry + routing order profile and/or membership for named nets: " ++
             "trace width, copper clearance, " ++
+            "an optional short pad-local neck width/maximum length/linear taper back to the class width, " ++
             "and via size (diameter + drill) in mm, plus a routing-priority tier — the autorouter " ++
             "routes higher tiers first, so a critical net (crystal, flash bus, a switcher's hot loop) " ++
             "claims its short path before a bulk rail can wall it off (the maze router has no rip-up; " ++

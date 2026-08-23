@@ -1326,8 +1326,20 @@ pub const StackupSpec = struct {
 /// loop) claims its short path before a bulk rail can block it (the maze
 /// router has no rip-up; first-routed wins).
 pub const NetClassSpec = struct {
+    /// Pad-local trace width, constant-neck length, and taper length.
+    pub const PadNeck = struct {
+        width: f64 = 0,
+        max_length: f64 = 0,
+        taper_length: f64 = 0,
+    };
+
     name: []const u8 = "",
     width: f64 = 0,
+    /// Pad-local neck-down profile. The ordinary class width remains the
+    /// routed trunk width; generated copper may use `width` for at most
+    /// `max_length` from an SMD land centre, then grows back to the trunk over
+    /// `taper_length`. A zero width leaves necking disabled.
+    pad_neck: PadNeck = .{},
     clearance: f64 = 0,
     via_dia: f64 = 0,
     via_drill: f64 = 0,

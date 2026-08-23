@@ -35,6 +35,7 @@ const bypass_intent = @import("bypass_intent.zig");
 const router = @import("router.zig");
 const optimizer = @import("optimizer.zig");
 const pad_shape = @import("pad_shape.zig");
+const pad_neck = @import("pad_neck.zig");
 const octilinear = @import("octilinear.zig");
 const dive_elide = @import("dive_elide.zig");
 const copper_support = @import("copper_support.zig");
@@ -1101,6 +1102,9 @@ pub fn pruneDeadCopper(board: Board) std.mem.Allocator.Error!void {
         router.copperCompacted(board.ctx);
         try pruneDanglingCopper(board);
     }
+    // No finish pass may rewrite centrelines after this oracle. Shape the
+    // authored pad-local necks here so later DRC/export see the final copper.
+    try pad_neck.passBoard(board);
 }
 
 fn samePhysicalVia(a: Via, b: Via) bool {

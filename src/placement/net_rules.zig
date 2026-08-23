@@ -37,6 +37,9 @@ pub const NetRule = struct {
         conflict: bool = false,
     } = .{},
     width: f64 = 0,
+    /// Resolved SMD pad-local neck profile. The router keeps `width` as the
+    /// nominal trunk geometry and uses this narrower profile only at lands.
+    pad_neck: env.NetClassSpec.PadNeck = .{},
     clearance: f64 = 0,
     via_dia: f64 = 0,
     via_drill: f64 = 0,
@@ -303,6 +306,9 @@ fn mergeFenceProfile(out: *NetRule, p: ClassProfileDecl, st: *FenceMerge) void {
 fn profileRule(profiles: []const ClassProfileDecl, win: WinningClass, conflict: bool) NetRule {
     var out = NetRule{ .class = .{ .name = win.class_name, .source = win.source, .conflict = conflict } };
     var width_rank = ProfileRank{};
+    var neck_width_rank = ProfileRank{};
+    var neck_length_rank = ProfileRank{};
+    var taper_length_rank = ProfileRank{};
     var clearance_rank = ProfileRank{};
     var via_dia_rank = ProfileRank{};
     var via_drill_rank = ProfileRank{};
@@ -362,6 +368,18 @@ fn profileRule(profiles: []const ClassProfileDecl, win: WinningClass, conflict: 
         if (p.spec.width > 0 and width_rank.better(p)) {
             out.width = p.spec.width;
             width_rank.take(p);
+        }
+        if (p.spec.pad_neck.width > 0 and neck_width_rank.better(p)) {
+            out.pad_neck.width = p.spec.pad_neck.width;
+            neck_width_rank.take(p);
+        }
+        if (p.spec.pad_neck.max_length > 0 and neck_length_rank.better(p)) {
+            out.pad_neck.max_length = p.spec.pad_neck.max_length;
+            neck_length_rank.take(p);
+        }
+        if (p.spec.pad_neck.taper_length > 0 and taper_length_rank.better(p)) {
+            out.pad_neck.taper_length = p.spec.pad_neck.taper_length;
+            taper_length_rank.take(p);
         }
         if (p.spec.clearance > 0 and clearance_rank.better(p)) {
             out.clearance = p.spec.clearance;
@@ -604,6 +622,38 @@ test "escape resolves from max-freq default, explicit value, and explicit zero" 
         else
             try std.testing.expectEqual(@as(f64, 0), rule.rf.escape_mm);
     }
+}
+
+test "pad neck geometry resolves independently from nominal class width" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const pins = [_]env.PinRef{.{ .ref_des = "U1", .pin = "1" }};
+    const nets = [_]env.Net{.{ .name = "VDD", .pins = &pins }};
+    const classes = [_]env.NetClassSpec{.{
+        .name = "power",
+        .width = 0.2532,
+        .pad_neck = .{ .width = 0.1524, .max_length = 0.75, .taper_length = 0.35 },
+        .nets = &.{"VDD"},
+    }};
+    const root = DesignBlock{
+        .name = "board",
+        .instances = &.{},
+        .nets = &nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .net_classes = &classes,
+    };
+    var flat: std.ArrayList(FlatNet) = .empty;
+    try flat_netlist.flattenAndMergeNets(arena, &root, &flat);
+    const rules = try resolvedNetRules(arena, &root, flat.items);
+    try std.testing.expectEqual(@as(usize, 1), rules.len);
+    try std.testing.expectEqual(@as(f64, 0.2532), rules[0].width);
+    try std.testing.expectEqual(@as(f64, 0.1524), rules[0].pad_neck.width);
+    try std.testing.expectEqual(@as(f64, 0.75), rules[0].pad_neck.max_length);
+    try std.testing.expectEqual(@as(f64, 0.35), rules[0].pad_neck.taper_length);
 }
 
 // spec: placement/optimizer - a net-class min-bend-radius lowers onto its nets' resolved rule
