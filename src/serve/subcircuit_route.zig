@@ -1,8 +1,9 @@
 //! Hierarchical autorouting's local phase.
 //!
 //! Each first-level sub-circuit is routed against a placement view containing
-//! only that sub-circuit's parts. The view keeps the board outline and routing
-//! rules, but drops every other component and all pre-existing board copper.
+//! only that sub-circuit's net terminals while retaining every board component
+//! as a physical obstacle. The view keeps the board outline and routing rules,
+//! but drops remote terminals and all pre-existing board copper.
 //! Its copper is returned in the parent placement's net-index namespace so the
 //! caller can validate and freeze it before starting the global route.
 
@@ -82,6 +83,22 @@ fn anySelected(selected: []const bool) bool {
     return false;
 }
 
+fn withLocalObstacles(
+    alloc: std.mem.Allocator,
+    options: route_policy.Options,
+    tracks: []const SeedTrack,
+    vias: []const SeedVia,
+) std.mem.Allocator.Error!route_policy.Options {
+    var out = options;
+    const existing_tracks = try alloc.alloc(route_policy.ExistingTrack, tracks.len);
+    for (tracks, existing_tracks) |seed, *existing| existing.* = seed.copper;
+    const existing_vias = try alloc.alloc(route_policy.ExistingVia, vias.len);
+    for (vias, existing_vias) |seed, *existing| existing.* = seed.copper;
+    out.existing_tracks = existing_tracks;
+    out.existing_vias = existing_vias;
+    return out;
+}
+
 fn localPlacement(
     alloc: std.mem.Allocator,
     placement: optimizer.Placement,
@@ -97,20 +114,35 @@ fn localPlacement(
     var miny = std.math.inf(f64);
     var maxx = -std.math.inf(f64);
     var maxy = -std.math.inf(f64);
+    var local_parts: usize = 0;
     for (placement.parts, 0..) |part, old| {
-        if (!memberRef(path, part.ref_des)) continue;
         old_to_new[old] = parts.items.len;
         try parts.append(alloc, part);
         if (old < placement.instances.len) try instances.append(alloc, placement.instances[old]);
         if (placement.priority.len > 0)
             try priority.append(alloc, if (old < placement.priority.len) placement.priority[old] else 0);
+        if (!memberRef(path, part.ref_des)) continue;
+        local_parts += 1;
         const box = optimizer.worldCourtyard(&part);
         minx = @min(minx, box.minx);
         miny = @min(miny, box.miny);
         maxx = @max(maxx, box.minx + box.w);
         maxy = @max(maxy, box.miny + box.h);
     }
-    if (parts.items.len == 0) return null;
+    if (local_parts == 0) return null;
+
+    // Keep the parent's net array (and therefore every parent net index), but
+    // expose only the terminals the isolated router can actually reach. A
+    // shared board net such as VTUNE otherwise asks the local connectivity gate
+    // to join pins belonging to components deliberately absent from this view.
+    const nets = try alloc.dupe(optimizer.FlatNet, placement.nets);
+    for (nets) |*net| {
+        var pins: std.ArrayList(export_kicad.FlatPin) = .empty;
+        for (net.pins) |pin| if (memberRef(path, pin.ref_des)) {
+            try pins.append(alloc, pin);
+        };
+        net.pins = pins.items;
+    }
 
     var loops: std.ArrayList(optimizer.Loop) = .empty;
     for (placement.loops) |loop| {
@@ -138,7 +170,7 @@ fn localPlacement(
         .loops = loops.items,
         .stubs = stubs.items,
         .instances = if (instances.items.len == parts.items.len) instances.items else &.{},
-        .nets = placement.nets,
+        .nets = nets,
         .priority = priority.items,
         .score = placement.score,
         .breakdown = placement.breakdown,
@@ -250,6 +282,10 @@ fn localOptions(
 ) std.mem.Allocator.Error!route_policy.Options {
     var options = base;
     if (module) |child| {
+        // Match the standalone module's routing tier. In particular, the
+        // default standard tier owns the bounded residual joins that make the
+        // module's Route button complete nets a one-shot pass leaves open.
+        options.effort = child.effort;
         const policies = try alloc.alloc(route_policy.NetPolicy, selected.len);
         for (policies, 0..) |*slot, ni| {
             const parent = if (ni < base.net.len) base.net[ni] else route_policy.NetPolicy{};
@@ -275,7 +311,6 @@ fn localOptions(
         options.net = policies;
     }
     options.selected_nets = selected;
-    options.effort = .one_shot;
     // Isolation means no saved track, via, pour, keepout, or foreign reserved
     // lane from the assembled board participates in this phase. Authored policy
     // for the selected nets still applies.
@@ -836,6 +871,8 @@ pub fn routeAllClassified(
         // surface copper before discretionary signal candidates so the final
         // ordered seed gate preserves the supply bond and defers a later
         // signal that happens to conflict with it, rather than the reverse.
+        const bond_track_mark = tracks.items.len;
+        const bond_via_mark = vias.items.len;
         try appendUncarriedSupplyBonds(.{
             .alloc = alloc,
             .board = placement,
@@ -852,15 +889,21 @@ pub fn routeAllClassified(
             .routed_nets = nets,
         });
         if (anySelected(selected)) {
-            // A local candidate still passes the router's connectivity/DRC gate here,
-            // but topology cleanup belongs to the assembled board. Running the final
-            // prune for every child repeats an expensive whole-candidate analysis and
-            // can discard copper whose continuation only exists outside this module.
-            const routed = try route_plan.routeLoweredCandidate(
+            // Run the same completion tier as the module's own Route button.
+            // The assembled-board gate remains authoritative, but feeding it
+            // an intentionally unfinished one-shot candidate creates a false
+            // hierarchy penalty: nets that finish standalone never exist here
+            // to be validated or kept.
+            const routed = try route_plan.routeLowered(
                 alloc,
                 plan_view,
                 params,
-                try localOptions(alloc, sub_base, module_options, selected),
+                try withLocalObstacles(
+                    alloc,
+                    try localOptions(alloc, sub_base, module_options, selected),
+                    tracks.items[bond_track_mark..],
+                    vias.items[bond_via_mark..],
+                ),
             );
             if (routed.cancelled and stopped(sub_base)) {
                 timed_out += 1;
@@ -970,8 +1013,8 @@ pub fn regressed(
 
 const testing = std.testing;
 
-// spec: serve/subcircuit-route - a sub-circuit routing view contains only its own components and uses their local bounds
-test "isolated sub-circuit view removes every foreign component" {
+// spec: serve/subcircuit-route - a sub-circuit routing view keeps every board component as an obstacle, exposes only its own net terminals, and uses local bounds
+test "isolated sub-circuit view retains foreign physical obstacles" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const alloc = arena_state.allocator();
@@ -1004,8 +1047,12 @@ test "isolated sub-circuit view removes every foreign component" {
     };
 
     const local = (try localPlacement(alloc, placement, "amp")) orelse return error.TestExpectedLocalPlacement;
-    try testing.expectEqual(@as(usize, 2), local.parts.len);
+    try testing.expectEqual(@as(usize, 3), local.parts.len);
     try testing.expectEqualStrings("amp/U1", local.parts[0].ref_des);
+    try testing.expectEqualStrings("other/U2", local.parts[2].ref_des);
+    try testing.expectEqual(@as(usize, 2), local.nets[0].pins.len);
+    try testing.expectEqualStrings("amp/U1", local.nets[0].pins[0].ref_des);
+    try testing.expectEqualStrings("amp/R1", local.nets[0].pins[1].ref_des);
     try testing.expect(local.maxx < 10 and local.maxy < 10);
     const selected = try selectedNets(alloc, placement, "amp", .{}, &.{false}, false);
     // Boundary nets route their internal island now; the global pass joins the
@@ -1049,7 +1096,7 @@ test "isolated sub-circuit selection respects the caller's net scope" {
     try testing.expect(!selected[0]);
 }
 
-// spec: Web Server - A hard route deadline gives all one-shot local sub-circuit attempts at most one quarter of the initially remaining time and preserves the original absolute deadline for the global phase
+// spec: Web Server - A hard route deadline gives all local sub-circuit completion attempts at most one quarter of the initially remaining time and preserves the original absolute deadline for the global phase
 test "local phase cutoff reserves three quarters of a board deadline" {
     const now = clock.nanoTimestamp();
     const board_deadline = now + 400 * clock.ns_per_ms;
@@ -1125,13 +1172,48 @@ test "local routing lowers child plan intent onto parent net indices" {
     try testing.expectEqual(@as(u64, 0b10), options.net[0].preferred_layers);
     try testing.expectEqual(@as(u64, 0b11), options.net[0].allowed_layers);
     try testing.expectEqual(@as(?u16, 1), options.net[0].max_vias);
-    try testing.expectEqual(route_policy.Effort.one_shot, options.effort);
+    try testing.expectEqual(route_policy.Effort.standard, options.effort);
 
     var conflict_selected = [_]bool{true};
     const top_only = [_]route_policy.NetPolicy{.{ .allowed_layers = 0b01 }};
     const bottom_only = [_]route_policy.NetPolicy{.{ .allowed_layers = 0b10 }};
     _ = try localOptions(alloc, .{ .net = &top_only }, .{ .net = &bottom_only }, &conflict_selected);
     try testing.expect(!conflict_selected[0]);
+}
+
+// spec: serve/subcircuit-route - a local sub-circuit uses the child plan's authored effort and the same completion gate as the standalone module Route button before its copper is offered to the assembled-board gate
+test "local routing uses the standalone completion tier" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    var standard_selected = [_]bool{true};
+    const standard = try localOptions(alloc, .{ .effort = .one_shot }, .{ .effort = .standard }, &standard_selected);
+    try testing.expectEqual(route_policy.Effort.standard, standard.effort);
+
+    var quick_selected = [_]bool{true};
+    const quick = try localOptions(alloc, .{ .effort = .standard }, .{ .effort = .one_shot }, &quick_selected);
+    try testing.expectEqual(route_policy.Effort.one_shot, quick.effort);
+
+    const source = @embedFile("subcircuit_route.zig");
+    const start = std.mem.indexOf(u8, source, "pub fn routeAllClassified(").?;
+    const end = std.mem.indexOfPos(u8, source, start, "/// Compatibility spelling").?;
+    const body = source[start..end];
+    try testing.expect(std.mem.indexOf(u8, body, "route_plan.routeLoweredCandidate(") == null);
+    try testing.expect(std.mem.indexOf(u8, body, "route_plan.routeLowered(") != null);
+}
+
+// spec: serve/subcircuit-route - local signal routing treats the same module's exact supply bonds as immutable physical obstacles
+test "local signals preserve exact supply bond obstacles" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    const tracks = [_]SeedTrack{.{ .net = 2, .copper = .{ .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.2, .net = 2 } }};
+    const vias = [_]SeedVia{.{ .net = 2, .copper = .{ .x = 1, .y = 0, .dia = 0.4, .drill = 0.2, .net = 2 } }};
+    const options = try withLocalObstacles(alloc, .{}, &tracks, &vias);
+    try testing.expectEqual(@as(usize, 1), options.existing_tracks.len);
+    try testing.expectEqual(@as(i32, 2), options.existing_tracks[0].net);
+    try testing.expectEqual(@as(usize, 1), options.existing_vias.len);
+    try testing.expectEqual(@as(i32, 2), options.existing_vias[0].net);
 }
 
 fn expectSeedTracks(tracks: []const SeedTrack, net: usize, max_x: ?f64) !void {
@@ -1309,6 +1391,6 @@ test "local signal candidates preserve authored sub-circuit order" {
     const end = std.mem.indexOfPos(u8, source, start, "/// Compatibility spelling").?;
     const body = source[start..end];
 
-    try testing.expect(std.mem.indexOf(u8, body, "route_plan.routeLoweredCandidate(") != null);
-    try testing.expect(std.mem.indexOf(u8, body, "route_plan.routeLowered(") == null);
+    try testing.expect(std.mem.indexOf(u8, body, "route_plan.routeLoweredCandidate(") == null);
+    try testing.expect(std.mem.indexOf(u8, body, "route_plan.routeLowered(") != null);
 }

@@ -628,8 +628,10 @@ same parent net continues elsewhere. The resulting parent-indexed copper is
 validated against the assembled placement and then fixed as same-net source
 copper for the single global pass.
 
-- a sub-circuit routing view contains only its own components and uses their local bounds
+- a sub-circuit routing view keeps every board component as an obstacle, exposes only its own net terminals, and uses local bounds
 - an unselected scoped net is never routed by a sub-circuit phase
+- a local sub-circuit uses the child plan's authored effort and the same completion gate as the standalone module Route button before its copper is offered to the assembled-board gate
+- local signal routing treats the same module's exact supply bonds as immutable physical obstacles
 - completeness-waiver: empty inputs (a block with no sub-circuits or no net with two local terminals returns empty copper and the caller takes the plain global path)
 - completeness-waiver: large inputs (sub-circuits route serially on component-local lattices; all allocations share the caller's request arena and the global quality comparison is bounded to the two existing candidates)
 - completeness-waiver: unauthorized access (an in-process routing phase over an already-authorized design and placement, with no file, request, or mutation surface)
@@ -5547,7 +5549,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Accepted local plane drops are immutable same-net sources in the single global pass, so the global plane phase does not duplicate their barrels
 - Route responses report attempted, completed, and timed-out local sub-circuits, deferred supply nets, and accepted carrier drops while the compatibility fallback flag remains false
 - Carrier-backed ground terminals receive independent local drops and never a routed pad-to-pad surface web. Other carried power/input rails may keep authored exact-target bypass cap-to-pin surface bonds; without a declared plane or retained pour, authored passive-to-IC bonds and validated starred module copper complete bounded local supply trees while the board-spanning remainder waits for global routing
-- A hard route deadline gives all one-shot local sub-circuit attempts at most one quarter of the initially remaining time and preserves the original absolute deadline for the global phase
+- A hard route deadline gives all local sub-circuit completion attempts at most one quarter of the initially remaining time and preserves the original absolute deadline for the global phase
 - get_schematic_image is a registered read-only CLI tool
 - get_pcb_layout_image renders the heat-zone image when thermal is set, and a different picture for each cooling scenario
 - The board PNG query turns ?thermal=1 into a heat-zone request carrying its scenario and ambient, and an unknown scenario word falls back to still air rather than refusing the image
