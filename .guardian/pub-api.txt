@@ -414,7 +414,7 @@ src/eval/env.zig::NetClassSpec struct_
 src/eval/env.zig::NetTie struct_
 src/eval/env.zig::Note struct_
 src/eval/env.zig::NoteRef struct_
-src/eval/env.zig::PadNeck struct_
+src/eval/env.zig::PadNeck value
 src/eval/env.zig::Part struct_
 src/eval/env.zig::PartPin struct_
 src/eval/env.zig::PartSignal struct_
@@ -1266,6 +1266,7 @@ src/outline_sketch.zig::current_version value
 src/outline_sketch.zig::default_sagitta_mm value
 src/outline_sketch.zig::max_constraints value
 src/outline_sketch.zig::max_entities value
+src/pad_neck_profile.zig::Profile struct_
 src/parts.zig::PartEntry struct_
 src/parts.zig::PartsDb struct_
 src/parts.zig::deinit | fn deinit(self: *PartsDb) void
@@ -2604,7 +2605,9 @@ src/placement/router.zig::visionMask | fn visionMask( arena: std.mem.Allocator, 
 src/placement/router.zig::waveOrdered | fn waveOrdered(core: *const RouteCore, net_i: usize) bool
 src/placement/router_support.zig::RouteParams struct_
 src/placement/router_support.zig::anyBottomPads | fn anyBottomPads(obstacles: anytype) bool
+src/placement/router_support.zig::padGatewayWidth | fn padGatewayWidth(params: RouteParams, distance: f64) f64
 src/placement/router_support.zig::sideLayer | fn sideLayer(part: anytype) u8
+src/placement/router_support.zig::usePadGateway | fn usePadGateway(params: *RouteParams, distance: f64) f64
 src/placement/router_via_rules.zig::CopperRule struct_
 src/placement/router_via_rules.zig::Scope enum_
 src/placement/router_via_rules.zig::buildOutlineMask | fn buildOutlineMask( comptime GridType: type, arena: std.mem.Allocator, placement: optimizer.Placement, grid: GridType, inset_req: f64, ) std.mem.Allocator.Error!?[]const bool

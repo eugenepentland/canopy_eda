@@ -4750,6 +4750,8 @@ pub fn setNetParams(ctx: *Ctx, placement: optimizer.Placement, net_i: usize) voi
     ctx.shadow.width = rf_shadow.widthAt(ctx.shadow.nets, @intCast(net_i));
     if (net_i < placement.rules.net.len) {
         const r = placement.rules.net[net_i];
+        p.pad_neck = r.pad_neck;
+        p.pad_neck.width = @max(p.pad_neck.width, placement.rules.design.min_width);
         if (r.width > 0) p.track_width = r.width;
         if (r.clearance > 0) p.clearance = r.clearance;
         if (r.via_dia > 0) p.via_dia = r.via_dia;
@@ -8930,34 +8932,32 @@ fn padGatewayFan(
     escape_aligned_only: bool,
 ) std.mem.Allocator.Error!void {
     const ctx = scan.ctx;
-    const tracks = scan.tracks;
-    const vias = scan.vias;
-    const pt = scan.pt;
-    const net = scan.net;
     const grid = ctx.grid;
-    const nodes = grid.nx * grid.ny;
-    const c = [2]f64{ pt.x, pt.y };
-    const dir = plane_via.fanDir(ctx.obs, c, net);
-    const ang0 = std.math.atan2(dir[1], dir[0]);
+    const c = [2]f64{ scan.pt.x, scan.pt.y };
+    const dir = plane_via.fanDir(ctx.obs, c, scan.net);
     var ring: usize = 1;
     while (ring <= ctx.gate_rings) : (ring += 1) {
         const rad = @as(f64, @floatFromInt(ring)) * grid.g;
         var k: usize = 0;
         while (k < 8) : (k += 1) {
-            const ang = octilinear.compass45(ang0, k);
+            const ang = octilinear.compass45(std.math.atan2(dir[1], dir[0]), k);
             if (escape_aligned_only) {
-                const along = @cos(ang) * pt.out[0] + @sin(ang) * pt.out[1];
+                const along = @cos(ang) * scan.pt.out[0] + @sin(ang) * scan.pt.out[1];
                 if (along < escape_align_min) continue;
             }
             const nd = grid.nearest(c[0] + rad * @cos(ang), c[1] + rad * @sin(ang));
             const n = grid.node(nd[0], nd[1]);
-            const key = @as(usize, pt.layer) * nodes + n;
+            const key = @as(usize, scan.pt.layer) * grid.nx * grid.ny + n;
             if (std.mem.indexOfScalar(usize, out.items, key) != null) continue;
-            if (blocked(ctx, pt.layer, n, net)) continue;
+            if (blocked(ctx, scan.pt.layer, n, scan.net)) continue;
             const s = [2]f64{ grid.worldX(nd[0]), grid.worldY(nd[1]) };
-            if (!segClearsPadsOnLayer(ctx, c, s, net, null)) continue;
-            if (!segClearsVias(ctx, vias, c, s, net)) continue;
-            if (!segClearsTracks(ctx, tracks, c, s, net, pt.layer)) continue;
+            const gateway_len = std.math.hypot(s[0] - c[0], s[1] - c[1]);
+            const saved_width = router_support.usePadGateway(&ctx.params, gateway_len);
+            const clears = segClearsPadsOnLayer(ctx, c, s, scan.net, null) and
+                segClearsVias(ctx, scan.vias, c, s, scan.net) and
+                segClearsTracks(ctx, scan.tracks, c, s, scan.net, scan.pt.layer);
+            ctx.params.track_width = saved_width;
+            if (!clears) continue;
             try out.append(ctx.arena, key);
         }
     }
@@ -14853,48 +14853,42 @@ test "rip-up leaves a wall-blocked net failed without disturbing a routed net" {
 }
 
 // spec: placement/router - escapes a fine-pitch pad through an off-grid gateway stub when no grid lane clears
-test "pad gateway routes a pad whose flanking grid columns are inside neighbour clearance" {
+test "pad gateway neck admits a QFN launch that the nominal width blocks" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
 
-    const G = @import("geometry.zig");
-    // A mini fine-pitch pad row (0.4 mm pitch, 0.2 mm pads): the target pad's
-    // axis sits at x = −0.095, exactly BETWEEN two grid columns (−0.222 and
-    // 0.032 for this bbox), and both columns are 0.173 mm from a neighbour
-    // pad — inside the 0.1905 mm reach. Every node the maze could start from
-    // is therefore blocked: without the off-grid gateway stub this net cannot
-    // route at all; with it, the stub leaves the pad centre along its axis
-    // (0.3 mm lateral to the neighbours, always clear) to the first free node.
-    const pin_pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.2, .h = 0.6 }};
-    const tgt_pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.3, .h = 0.3 }};
-    var parts = [_]Part{
-        .{ .ref_des = "U1", .kind = .passive, .hw = 0.15, .hh = 0.35, .pads = &pin_pad, .fallback = false, .x = -0.095, .y = 0 },
-        .{ .ref_des = "W1", .kind = .passive, .hw = 0.15, .hh = 0.35, .pads = &pin_pad, .fallback = false, .x = -0.495, .y = 0 },
-        .{ .ref_des = "W2", .kind = .passive, .hw = 0.15, .hh = 0.35, .pads = &pin_pad, .fallback = false, .x = 0.305, .y = 0 },
-        .{ .ref_des = "R9", .kind = .passive, .hw = 0.3, .hh = 0.3, .pads = &tgt_pad, .fallback = false, .x = -0.095, .y = 2.5 },
+    // The target is centred between two 0.2 mm-wide foreign lands on 0.33 mm
+    // pitch. Its 0.23 mm edge gap admits 0.1524 mm copper plus 0.127 mm
+    // clearance, but is narrower than the 0.2532 mm nominal trace needs.
+    const obs = [_]PadObs{
+        .{ .x0 = -0.43, .y0 = -0.3, .x1 = -0.23, .y1 = 0.3, .net = 1 },
+        .{ .x0 = 0.23, .y0 = -0.3, .x1 = 0.43, .y1 = 0.3, .net = 1 },
     };
-    const a_pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "R9", .pin = "1" } };
-    const b_pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "W1", .pin = "1" }, .{ .ref_des = "W2", .pin = "1" } };
-    const nets = [_]FlatNet{ .{ .name = "A", .pins = &a_pins }, .{ .name = "B", .pins = &b_pins } };
-    const placement = optimizer.Placement{
-        .parts = &parts,
-        .links = &.{},
-        .loops = &.{},
-        .stubs = &.{},
-        .instances = &.{},
-        .nets = &nets,
-        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
-        .minx = -1,
-        .miny = -1,
-        .maxx = 1.5,
-        .maxy = 3.5,
-        .generated = true,
+    const grid = Grid{ .ox = -2, .oy = -2, .g = 0.254, .nx = 20, .ny = 20 };
+    const nominal = RouteParams{ .track_width = 0.2532, .clearance = 0.127 };
+    var ctx = Ctx{
+        .arena = arena,
+        .grid = grid,
+        .obs = &obs,
+        .reach = nominal.track_width / 2 + nominal.clearance,
+        .occ = try allocLayerGrids(arena, 1, grid.nx * grid.ny),
+        .resv = try allocLayerGrids(arena, 1, grid.nx * grid.ny),
+        .params = nominal,
+        .base = nominal,
+        .index_reach = nominal.track_width / 2 + nominal.clearance,
     };
-    const r = try route(arena, placement, .{});
-    try testing.expectEqual(@as(usize, 2), r.total);
-    try testing.expectEqual(@as(usize, 2), r.routed);
-    try testing.expectEqual(@as(usize, 0), r.failed.len);
+    const terminal = NetPt{ .x = 0, .y = 0, .layer = 0, .out = .{ 0, 1 } };
+    var gateways: std.ArrayList(usize) = .empty;
+    try padGateways(&ctx, &.{}, &.{}, terminal, 0, &gateways);
+    try testing.expectEqual(@as(usize, 0), gateways.items.len);
+
+    ctx.params.pad_neck = .{ .width = 0.1524, .max_length = 0.75, .taper_length = 0.35 };
+    try padGateways(&ctx, &.{}, &.{}, terminal, 0, &gateways);
+    try testing.expect(gateways.items.len > 0);
+    try testing.expectEqual(nominal.track_width, ctx.params.track_width);
+    try testing.expectApproxEqAbs(@as(f64, 0.2028), router_support.padGatewayWidth(ctx.params, 0.925), 1e-9);
+    try testing.expectEqual(nominal.track_width, router_support.padGatewayWidth(ctx.params, 1.2));
 }
 
 // spec: placement/router - a hemmed breakout drops its unfinished escape stub when no legal via can land

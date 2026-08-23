@@ -8,6 +8,7 @@
 //! shared vocabulary of the whole pipeline.
 
 const std = @import("std");
+const pad_neck_profile = @import("../pad_neck_profile.zig");
 const ast = @import("../sexpr/ast.zig");
 const numeric = @import("../numeric.zig");
 
@@ -1327,11 +1328,7 @@ pub const StackupSpec = struct {
 /// router has no rip-up; first-routed wins).
 pub const NetClassSpec = struct {
     /// Pad-local trace width, constant-neck length, and taper length.
-    pub const PadNeck = struct {
-        width: f64 = 0,
-        max_length: f64 = 0,
-        taper_length: f64 = 0,
-    };
+    pub const PadNeck = pad_neck_profile.Profile;
 
     name: []const u8 = "",
     width: f64 = 0,
