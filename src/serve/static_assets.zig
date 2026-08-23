@@ -846,6 +846,20 @@ test "PCB autorouter client selects a terminal subcircuit stage" {
     for (markers) |check| try std.testing.expect(std.mem.indexOf(u8, check.body, check.marker) != null);
 }
 
+// spec: Web Server - The PCB live-route status freezes the local-stage clock when whole-board routing starts, names final DRC work, and preserves the final elapsed time after the job ends
+test "PCB live-route status distinguishes finished local routing from later phases" {
+    const cases = [_]struct { body: []const u8, marker: []const u8 }{
+        .{ .body = pcb_replay_js, .marker = "sawSubcircuit: false, localElapsedMs: null" },
+        .{ .body = pcb_replay_js, .marker = "Routing whole board" },
+        .{ .body = pcb_replay_js, .marker = "Subcircuits \" + (live.localElapsedMs / 1000).toFixed(1) + \"s ✓" },
+        .{ .body = pcb_replay_js, .marker = "finalizing DRC…" },
+        .{ .body = pcb_replay_js, .marker = "elapsedMs: live.elapsedMs" },
+        .{ .body = pcb_board_js, .marker = "typeof opts.elapsedMs===\"number\"" },
+        .{ .body = pcb_board_js, .marker = "finalOpts.elapsedMs=liveMeta.elapsedMs" },
+    };
+    for (cases) |case| try std.testing.expect(std.mem.indexOf(u8, case.body, case.marker) != null);
+}
+
 // spec: Web Server - The PCB thermal overlay paints the cached heat field over the read-only board through the overlay seam
 test "PCB thermal overlay claims the board overlay seam and reads the cached field endpoint" {
     const markers = [_][]const u8{

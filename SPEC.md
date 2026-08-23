@@ -5536,6 +5536,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - A PCB design with PDN intents resolves selected BOM electrical model properties before placement
 - Hierarchical routing processes first-level sub-circuits in authored order, freezes each accepted DRC-clean local signal tree, and then runs exactly one assembled-board global candidate
 - Live autorouting names each first-level sub-circuit when it starts and streams its cumulative copper when it finishes, before whole-board global routing begins, so full and subcircuits-only runs both reveal local progress
+- The PCB live-route status freezes the local-stage clock when whole-board routing starts, names final DRC work, and preserves the final elapsed time after the job ends
 - A hierarchical local pass resolves each child PCB plan in the child's net namespace, including flattened port renames, while the destination board may narrow hard layer and via constraints
 - When two local candidates collide, the earlier DRC-clean net remains frozen and only the later candidate is deferred to the global route
 - Accepted local plane drops are immutable same-net sources in the single global pass, so the global plane phase does not duplicate their barrels

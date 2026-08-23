@@ -8317,6 +8317,7 @@ window.PCBAdoptCopper=function(tracks,vias,drc,rfPaths){
 // panel, and re-enables the Route button.
 window.PCBApplyRouteResult=function(j,opts){
  opts=opts||{};var scope=opts.scope||"";
+ var elapsed=(typeof opts.elapsedMs==="number")?(" · "+(opts.elapsedMs/1000).toFixed(1)+"s"):"";
  if(opts.clr>0)PCB.clr=opts.clr;
  applyRoutedCopper(j.tracks||[],j.vias||[],j.drc||[],j.rf_paths||[]); // shared with PCBAdoptCopper
  var ok=(j.routed===j.total);
@@ -8327,8 +8328,8 @@ window.PCBApplyRouteResult=function(j,opts){
   var ss=j.subcircuit_seeds||{};
   setStat("r-stat",ss.timed_out_subcircuits?"warn":"ok","subcircuits "+(ss.completed_subcircuits||0)+"/"+(ss.attempted_subcircuits||0)+
    " · "+(ss.accepted_tracks||0)+" tracks · "+(ss.accepted_vias||0)+" vias"+
-   (ss.timed_out_subcircuits?(" · "+ss.timed_out_subcircuits+" timed out"):""));
- } else setStat("r-stat",ok?"ok":"warn","routed "+j.routed+"/"+j.total+(scope?" scoped":"")+" nets · "+((j.vias||[]).length)+" vias"+miss+unk);
+   (ss.timed_out_subcircuits?(" · "+ss.timed_out_subcircuits+" timed out"):"")+elapsed);
+ } else setStat("r-stat",ok?"ok":"warn","routed "+j.routed+"/"+j.total+(scope?" scoped":"")+" nets · "+((j.vias||[]).length)+" vias"+miss+unk+elapsed);
  routeSummaryFrom(j);
  setStat("r-drc",(j.drc||[]).length?"err":"ok",(j.drc||[]).length?(j.drc.length+" DRC violation(s)"):"DRC clean ✓");
  var rp=j.return_path||0; setStat("r-rp",rp?"warn":"ok",rp?(rp+" return-path warning(s)"):"return paths ✓");
@@ -8392,7 +8393,11 @@ function runRoute(opts){
  // (pcb_replay.js's window.PCBLiveRoute) owns the poll loop + growing scrubber
  // and calls applyFinal on an uncancelled finish; on a cancelled finish it
  // keeps the partial overlay and leaves the copper for the user to Adopt.
- function applyFinal(final){window.PCBApplyRouteResult(final,applyOpts);}
+ function applyFinal(final,liveMeta){
+  var finalOpts={clr:applyOpts.clr,plan:applyOpts.plan};
+  if(liveMeta&&typeof liveMeta.elapsedMs==="number")finalOpts.elapsedMs=liveMeta.elapsedMs;
+  window.PCBApplyRouteResult(final,finalOpts);
+ }
  if(!window.PCBLiveRoute){blockingRoute();return;}
  fetch("/api/route-live/"+encodeURIComponent(PCB.name)+"/start",{method:"POST",
    headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})

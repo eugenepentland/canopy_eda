@@ -171,7 +171,8 @@
   // the user scrubs back.
   var live = { on: false, gen: 0, attempt: 0, since: 0, misses: 0,
                follow: true, onFinal: null, logSeq: 0, seq: 0,
-               stopping: false, elapsedMs: 0, stopElapsedMs: 0 };
+               stopping: false, elapsedMs: 0, stopElapsedMs: 0,
+               sawSubcircuit: false, localElapsedMs: null };
 
   // ── Small formatters ──────────────────────────────────────────────────
   function nm(idx) {
@@ -190,7 +191,7 @@
 
   // ── Human-readable event labels (ported from route_review.js) ─────────
   var labels = {
-    initial: ["Local setup", "Subcircuit routes frozen", "Accepted local subcircuit traces and carrier drops are fixed here. In a full-board run, whole-board global routing starts with the next decision."],
+    initial: ["Whole-board stage", "Routing whole board", "Accepted local subcircuit traces and carrier drops are fixed; global routing is now working on the assembled board."],
     subcircuit_start: ["Local stage", "Routing subcircuit", "This module is routing in isolation; copper from earlier modules remains visible."],
     subcircuit_complete: ["Local stage", "Subcircuit complete", "Candidate copper from this module is now visible; assembled-board validation may still defer a conflicting net."],
     subcircuit_failed: ["Local stage", "Subcircuit timed out", "This module reached its local routing budget; previously completed local copper remains visible."],
@@ -745,6 +746,7 @@
     live.on = true; live.gen = gen; live.attempt = 0; live.since = 0;
     live.misses = 0; live.follow = true; live.stopping = false;
     live.elapsedMs = 0; live.stopElapsedMs = 0;
+    live.sawSubcircuit = false; live.localElapsedMs = null;
     live.onFinal = (opts && opts.onFinal) || null;
     liveResetTimeline(nets);
     // Reset the Route button's remembered disabled state to enabled so exitMode
@@ -791,8 +793,16 @@
     if (j.attempt !== live.attempt) { live.attempt = j.attempt; liveResetTimeline(data.nets); }
     if (j.events && j.events.length) {
       for (var i = 0; i < j.events.length; i++) {
-        visionLatch(j.events[i]);   // a second `.initial` = finer-grid restart: re-lattice
-        data.timeline.push(j.events[i]);
+        var incoming = j.events[i];
+        if (incoming.kind === "subcircuit_start" || incoming.kind === "subcircuit_complete" || incoming.kind === "subcircuit_failed")
+          live.sawSubcircuit = true;
+        // The first ordinary `.initial` after local events is the visible
+        // handoff to whole-board routing. Freeze the local phase clock there;
+        // the envelope clock can continue honestly for the global phase.
+        if (incoming.kind === "initial" && incoming.detail !== "subcircuits-only" && live.sawSubcircuit && live.localElapsedMs == null)
+          live.localElapsedMs = +j.elapsed_ms || 0;
+        visionLatch(incoming);   // a second `.initial` = finer-grid restart: re-lattice
+        data.timeline.push(incoming);
       }
       liveAppendLog();
       var last = data.timeline.length - 1;
@@ -843,10 +853,18 @@
     }
     var ev = data.timeline.length ? data.timeline[data.timeline.length - 1] : null;
     var bits = [];
+    var globalPhase = ev && ev.detail !== "subcircuits-only" &&
+      (ev.kind === "initial" || (live.localElapsedMs > 0 && ev.kind.indexOf("subcircuit_") !== 0));
+    if (globalPhase && live.localElapsedMs != null)
+      bits.push("Subcircuits " + (live.localElapsedMs / 1000).toFixed(1) + "s ✓");
     if (ev) bits.push(eventText(ev)[1]);
+    if (ev && ev.kind === "complete" && !j.done) bits.push("finalizing DRC…");
     bits.push((j.routed || 0) + " routed");
     if (ev && ev.round) bits.push("round " + ev.round);
-    bits.push(((j.elapsed_ms || 0) / 1000).toFixed(1) + "s");
+    var shownMs = globalPhase && live.localElapsedMs != null
+      ? Math.max(0, (+j.elapsed_ms || 0) - live.localElapsedMs)
+      : (+j.elapsed_ms || 0);
+    bits.push((shownMs / 1000).toFixed(1) + (globalPhase ? "s whole board" : "s"));
     routeStat("running", bits.join(" · "));
     if (j.err) status("⚠ " + j.err + " — still routing", "warn");
   }
@@ -864,13 +882,16 @@
       // the last frame's copper; Route stays gated until Adopt/Clear exits the view.
       if (live.follow) setFrame(data.timeline.length - 1, true);
       var ad = $("rp-adopt"); if (ad) ad.disabled = false;
-      routeStat("warn", "cancelled — partial " + routed + "/" + total);
+      routeStat("warn", "cancelled — partial " + routed + "/" + total + " · " + (live.elapsedMs / 1000).toFixed(1) + "s");
       status("cancelled — Adopt to keep the partial copper, or Clear", "warn");
     } else {
       // Uncancelled: exit the exclusive overlay, then let pcb_board.js land the
       // byte-exact `final` exactly like a blocking Route (copper + DRC + stuck).
       exitMode();
-      if (live.onFinal) live.onFinal(j.final || {});
+      if (live.onFinal) live.onFinal(j.final || {}, {
+        elapsedMs: live.elapsedMs,
+        localElapsedMs: live.localElapsedMs
+      });
       // Timeline stays loaded: scrubbing re-enters exclusive view (the board copper
       // IS the final anyway), and Adopt/Clear return to the live board.
       var ad2 = $("rp-adopt"); if (ad2) ad2.disabled = false;
