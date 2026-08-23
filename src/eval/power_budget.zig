@@ -109,13 +109,85 @@ fn collectExternalSources(
         if (!terminal_gop.found_existing) terminal_gop.value_ptr.* = .empty;
         try appendUniqueString(allocator, terminal_gop.value_ptr, path);
         if (port.current_typ == null and port.current_max == null) continue;
-        try sources.put(allocator, root, .{
+        try putStrongerSource(allocator, sources, root, .{
             .source_label = label,
             .display_rail = base,
             .current_typ = port.current_typ,
             .current_max = port.current_max,
         });
     }
+}
+
+/// A block's OWN `out` power ports, read as the declared rating of the rail
+/// they leave on.
+///
+/// `analyze` only ever runs on the design being built, so on a STANDALONE
+/// MODULE PAGE — `bcuda-lt3045-ldo` routed by itself rather than instantiated —
+/// the module IS the board, and `(port "VOUT" out power (current 0.5 0.5))` is
+/// the only statement anywhere on that page about how much current its output
+/// copper carries. Without this pass the page has no rail at all for VOUT, so
+/// the router's IPC-2221 widening has nothing to size against and the rail
+/// routes at the board default track width.
+///
+/// A PARALLEL collector rather than a second direction inside
+/// `collectExternalSources`, because the two say different things and must not
+/// share its tail:
+///
+///   * an `in` port is where current ENTERS, so it also records an
+///     `@external/NAME` source TERMINAL, which `power_integrity` resolves to
+///     the connector pads it injects the rail's current at. An `out` port is
+///     where current LEAVES; listing one there would inject a rail's whole
+///     current at a sink and corrupt the branch-current solve. This collector
+///     therefore registers capacity only, never a terminal.
+///   * a port with no `(current …)` contributes NOTHING here, where the `in`
+///     collector still records its terminal. That keeps the pass inert for
+///     every design that does not declare an output current — the only new
+///     rail rows are ones the author explicitly rated.
+///
+/// Parent-board semantics are untouched: a module reached as a `(sub-block …)`
+/// is read by the sub-block loop in `analyze` through its parent's `net_ties`,
+/// and never by this pass.
+fn collectSelfOutputs(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    net_parent: *std.StringHashMapUnmanaged([]const u8),
+    sources: *std.StringHashMapUnmanaged(SourceInfo),
+) std.mem.Allocator.Error!void {
+    for (block.ports) |port| {
+        if (!std.mem.eql(u8, port.direction, "out")) continue;
+        if (port.current_typ == null and port.current_max == null) continue;
+        // An explicit non-power kind is authoritative, exactly as it is for
+        // sub-block outputs: `(port "TX" out signal …)` is not a rail.
+        if (port.isDeclaredNonPower()) continue;
+        const base = na.baseNetName(if (port.net.len > 0) port.net else port.name);
+        const root = na.findRoot(net_parent, base);
+        try putStrongerSource(allocator, sources, root, .{
+            .source_label = try std.fmt.allocPrint(allocator, "external/{s}", .{port.name}),
+            .display_rail = base,
+            .current_typ = port.current_typ,
+            .current_max = port.current_max,
+        });
+    }
+}
+
+/// Record `incoming` as `root`'s source unless a stronger one already holds it.
+/// Several sources can land on one rail — a battery and a charger both on
+/// VBATT, or an internal regulator and the boundary rating of the port that
+/// re-exports its rail — and the budget check wants the highest capacity.
+/// Ranking by `current_max` (falling back to typ) makes the answer independent
+/// of declaration order.
+fn putStrongerSource(
+    allocator: std.mem.Allocator,
+    sources: *std.StringHashMapUnmanaged(SourceInfo),
+    root: []const u8,
+    incoming: SourceInfo,
+) std.mem.Allocator.Error!void {
+    if (sources.get(root)) |existing| {
+        const existing_max = existing.current_max orelse existing.current_typ orelse 0;
+        const incoming_max = incoming.current_max orelse incoming.current_typ orelse 0;
+        if (incoming_max <= existing_max) return;
+    }
+    try sources.put(allocator, root, incoming);
 }
 
 /// Analyze a block's declared sources and annotated consumer currents, and
@@ -131,7 +203,8 @@ pub fn analyze(
     // upstream regulator's budget.
     var net_parent = try na.buildFerriteBridges(allocator, block);
 
-    // Step 2: collect source declarations from sub-block output ports.
+    // Step 2: collect source declarations — from sub-block output ports, and
+    // from the block's OWN boundary ports in both directions.
     var sources: std.StringHashMapUnmanaged(SourceInfo) = .empty;
     var source_terminals: std.StringHashMapUnmanaged(std.ArrayList([]const u8)) = .empty;
 
@@ -141,6 +214,12 @@ pub fn analyze(
     // port's net. This also lets `(current typ max)` on the boundary participate
     // in the same source-capacity budget as module outputs.
     try collectExternalSources(allocator, block, &net_parent, &sources, &source_terminals);
+
+    // A board-level OUTPUT power port rates the rail it exports: on a standalone
+    // module page that declaration is the page's only current figure, and on a
+    // board that re-exports a rail through a connector it is what leaves the
+    // board. Capacity only, no terminal — see `collectSelfOutputs`.
+    try collectSelfOutputs(allocator, block, &net_parent, &sources);
 
     for (block.sub_blocks) |sb| {
         for (sb.block.ports) |port| {
@@ -159,21 +238,14 @@ pub fn analyze(
                 try appendUniqueString(allocator, terminal_gop.value_ptr, path);
                 if (port.current_typ == null and port.current_max == null) continue;
                 // Multiple sources on the same rail (e.g. battery + charger
-                // both on VBATT): keep the highest-capacity one for the
-                // budget check. Picking by current_max makes the result
-                // independent of sub-block declaration order.
-                const incoming = SourceInfo{
+                // both on VBATT) keep the highest-capacity one — see
+                // `putStrongerSource`.
+                try putStrongerSource(allocator, &sources, root, .{
                     .source_label = path,
                     .display_rail = base,
                     .current_typ = port.current_typ,
                     .current_max = port.current_max,
-                };
-                if (sources.get(root)) |existing| {
-                    const existing_max = existing.current_max orelse existing.current_typ orelse 0;
-                    const incoming_max = incoming.current_max orelse incoming.current_typ orelse 0;
-                    if (incoming_max <= existing_max) continue;
-                }
-                try sources.put(allocator, root, incoming);
+                });
             }
         }
     }
@@ -954,4 +1026,121 @@ test "a top-level input power port supplies its board rail" {
     try testing.expectEqual(@as(?f64, 1.0), v12.source_max_a);
     try testing.expectEqual(@as(usize, 1), v12.source_terminals.len);
     try testing.expectEqualStrings("@external/V12", v12.source_terminals[0]);
+}
+
+/// A regulator module as its OWN design root — the standalone module page, where
+/// nothing is a `(sub-block …)` and the only current figure on the page is the
+/// rating of the module's own output port.
+fn standaloneModuleBlock(alloc: std.mem.Allocator) !DesignBlock {
+    const vout_pins = try alloc.dupe(env_mod.PinRef, &.{
+        .{ .ref_des = "U1", .pin = "10" },
+        .{ .ref_des = "C_VOUT", .pin = "1" },
+    });
+    return .{
+        .name = "3.3 V LDO",
+        .instances = try alloc.dupe(env_mod.Instance, &.{ namedPart("U1", "lt3045edd"), namedPart("C_VOUT", "cap-0603") }),
+        .nets = try alloc.dupe(env_mod.Net, &.{
+            .{ .name = "VIN", .pins = &.{} },
+            .{ .name = "VOUT", .pins = vout_pins },
+        }),
+        .ports = try alloc.dupe(env_mod.Port, &.{
+            .{ .name = "VIN", .net = "VIN", .direction = "in", .rated_min = 1.8, .rated_max = 20.0 },
+            .{
+                .name = "VOUT",
+                .net = "VOUT",
+                .direction = "out",
+                .kind = "power",
+                .nominal = 3.3,
+                .current_typ = 0.5,
+                .current_max = 0.5,
+                .efficiency_linear = true,
+            },
+            .{ .name = "EN_UV", .net = "EN_UV", .direction = "in", .kind = "signal", .optional = true, .rated_min = 0.0, .rated_max = 20.0 },
+        }),
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+}
+
+// spec: eval/power_budget - a standalone module page's own out power port rates the rail it exports, so a module routed as the board still has a current figure to size copper against
+test "a top-level output power port rates its own rail" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const block = try standaloneModuleBlock(alloc);
+    const rails = try analyze(alloc, &block);
+
+    const vout = railNamed(rails, "VOUT").?;
+    try testing.expectEqualStrings("external/VOUT", vout.source_label);
+    try testing.expectEqual(@as(?f64, 0.5), vout.source_typ_a);
+    try testing.expectEqual(@as(?f64, 0.5), vout.source_max_a);
+    // Current LEAVES through this port, so it is NOT a synthetic injection
+    // terminal — listing it would make the branch-current solve treat a sink as
+    // a source.
+    try testing.expectEqual(@as(usize, 0), vout.source_terminals.len);
+    // Nothing on the page is annotated, so the rating stands alone.
+    try testing.expect(!vout.any_typ_load);
+    try testing.expect(!vout.any_max_load);
+    try testing.expectEqual(RailStatus.no_consumers, vout.status);
+
+    // The rated input port keeps its old behaviour: an external terminal, but no
+    // capacity, because it declared no `(current …)`.
+    try testing.expect(railNamed(rails, "VIN") == null);
+}
+
+// spec: eval/power_budget - only a `(current …)` on a top-level out port creates a rail, and an explicitly signal-kinded output never becomes one
+test "a top-level output port without a declared current rates nothing" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var block = try standaloneModuleBlock(alloc);
+    const ports = try alloc.dupe(env_mod.Port, block.ports);
+    ports[1].current_typ = null;
+    ports[1].current_max = null;
+    block.ports = ports;
+    try testing.expect(railNamed(try analyze(alloc, &block), "VOUT") == null);
+
+    // A declared non-power kind is authoritative even with a current on it.
+    const signal = try alloc.dupe(env_mod.Port, block.ports);
+    signal[1].current_typ = 0.5;
+    signal[1].current_max = 0.5;
+    signal[1].kind = "signal";
+    block.ports = signal;
+    try testing.expect(railNamed(try analyze(alloc, &block), "VOUT") == null);
+}
+
+// spec: eval/power_budget - a parent board reads a module's rating through its sub-block port, and the highest declared capacity wins a rail whichever way it was declared
+test "a sub-block source outranks a smaller boundary rating on the same rail" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var block = try siblingChainBlock(alloc);
+    // The buck declares 2 A on V3P3; the board also re-exports V3P3 at 0.5 A.
+    const buck = block.sub_blocks[0].block;
+    const buck_ports = try alloc.dupe(env_mod.Port, buck.ports);
+    buck_ports[1].current_typ = 2.0;
+    buck_ports[1].current_max = 2.0;
+    buck.ports = buck_ports;
+    const ports = try alloc.alloc(env_mod.Port, block.ports.len + 1);
+    @memcpy(ports[0..block.ports.len], block.ports);
+    ports[block.ports.len] = .{
+        .name = "V3P3",
+        .net = "V3P3",
+        .direction = "out",
+        .kind = "power",
+        .current_typ = 0.5,
+        .current_max = 0.5,
+    };
+    block.ports = ports;
+
+    const v3p3 = railNamed(try analyze(alloc, &block), "V3P3").?;
+    try testing.expectEqualStrings("buck/VOUT", v3p3.source_label);
+    try testing.expectEqual(@as(?f64, 2.0), v3p3.source_max_a);
+    // The regulator's own physical terminal is still the injection point.
+    try testing.expectEqual(@as(usize, 1), v3p3.source_terminals.len);
+    try testing.expectEqualStrings("buck/VOUT", v3p3.source_terminals[0]);
 }

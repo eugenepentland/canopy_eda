@@ -651,17 +651,34 @@ fn looserFirst(_: void, a: Frontier, b: Frontier) bool {
 }
 
 /// The track width net `ni` is routed at — its `(net-class … (width …))` when it
-/// declares one, else the board default. The same resolution
-/// `router.setNetParams` performs, so the corridor is measured at the copper the
-/// router would draw.
+/// declares one, else the board default, then raised to the IPC-2221 envelope of
+/// whatever rail current the net carries. The same resolution
+/// `router.setNetParams` performs (net class, then `effectivePowerTrackWidth`),
+/// so the corridor is measured at the copper the router would draw. Measuring a
+/// widened rail at its authored width proved a corridor the router then could
+/// not fit through.
+///
+/// One deliberate difference: the router also exempts a rail whose copper an
+/// EXISTING hand-drawn zone already carries, and a `Placement` holds no zones —
+/// only the DECLARED planes are visible here (`plane_stitch.netHasPlane`, the
+/// same predicate the escape exemption above uses). A rail poured by such a zone
+/// is therefore measured at its full envelope, which is the conservative
+/// direction for a lint: it can over-report a blocked port, never miss one.
 fn netWidth(p: Placement, ni: usize) f64 {
-    if (ni >= p.rules.net.len or p.rules.net[ni].width <= 0) return p.rules.design.track_width;
-    return p.rules.net[ni].width;
+    var width = p.rules.design.track_width;
+    if (ni < p.rules.net.len and p.rules.net[ni].width > 0) width = p.rules.net[ni].width;
+    if (ni >= p.nets.len) return width;
+    const name = p.nets[ni].name;
+    if (plane_stitch.netHasPlane(p, name)) return width;
+    return @max(width, p.rules.powerWidthForNet(name) orelse 0);
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
+const impedance = @import("impedance.zig");
+const power_budget = @import("../eval/power_budget.zig");
+const power_capacity = @import("power_capacity.zig");
 
 fn tPad(n: []const u8, x: f64, y: f64, w: f64, h: f64) geometry.Pad {
     return .{ .number = n, .x = x, .y = y, .w = w, .h = h };
@@ -902,4 +919,41 @@ test "detect with no port mask reports nothing" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     try testing.expectEqual(@as(usize, 0), (try detect(arena.allocator(), p, &.{})).len);
+}
+
+// spec: placement/port_escape - a port net's corridor is probed at the router's effective width, so an unpoured rail is measured at its IPC-2221 envelope and a plane-carried one is not
+test "netWidth mirrors the router's power-envelope widening" {
+    const rails = [_]power_budget.Rail{
+        .{ .net = "V3P3", .load_max_a = 0.5, .any_max_load = true, .status = .no_source },
+        .{ .net = "GND", .load_max_a = 0.5, .any_max_load = true, .status = .no_source },
+    };
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "V3P3", .pins = &.{} },
+        .{ .name = "GND", .pins = &.{} },
+        .{ .name = "SPI_SCK", .pins = &.{} },
+    };
+    const planes = [_][]const u8{"GND"};
+    var parts: [0]Part = .{};
+    var p = tPlacement(&parts, &nets);
+    p.rules = .{
+        .design = .{ .track_width = 0.127, .clearance = 0.127 },
+        .plane_nets = &planes,
+        .copper_layers = 4,
+        .physical = .{ .stack = .{ .layers = 4 }, .rails = &rails },
+    };
+
+    // Worst layer of a uniform four-layer stack is an inner one.
+    const envelope = power_capacity.requiredTraceWidthMm(0.5, impedance.default_foil_mm, false).?;
+    try testing.expect(envelope > p.rules.design.track_width);
+    try testing.expectApproxEqAbs(envelope, netWidth(p, 0), 1e-12);
+    // A plane-carried rail rejoins through its pour, so neither the router nor
+    // this probe widens its surface copper.
+    try testing.expectEqual(p.rules.design.track_width, netWidth(p, 1));
+    try testing.expectEqual(p.rules.design.track_width, netWidth(p, 2));
+
+    // An authored class wider than the envelope still wins: the two compose as
+    // a maximum, exactly as `router.setNetParams` composes them.
+    const class = [_]optimizer.NetRule{.{ .width = envelope * 2 }};
+    p.rules.net = &class;
+    try testing.expectApproxEqAbs(envelope * 2, netWidth(p, 0), 1e-12);
 }

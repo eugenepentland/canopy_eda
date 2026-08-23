@@ -61,9 +61,21 @@ fn sameRail(a: []const u8, b: []const u8) bool {
     return std.ascii.eqlIgnoreCase(a, b) or std.ascii.eqlIgnoreCase(net_names.leaf(a), net_names.leaf(b));
 }
 
-/// Conservative current envelope available before topology exists. Prefer an
-/// authored maximum; when only typical current is known, at least route for it
-/// rather than silently treating the rail as zero-current. Ambiguous leaf-name
+/// Conservative current envelope available before topology exists, in
+/// preference order:
+///
+///   1. the rail's annotated maximum LOAD, then its typical load — what this
+///      board is measured to draw. When only typical current is known, at least
+///      route for it rather than silently treating the rail as zero-current;
+///   2. failing any load at all, the rail's declared SOURCE capacity (max, then
+///      typ). A page whose consumers are off-board — a regulator module routed
+///      standalone, a board that re-exports a rail through a connector — states
+///      its current exactly once, on the supply or boundary-port declaration.
+///      Copper sized for zero amps is the one answer that is certainly wrong,
+///      and the rating is precisely the current the rail is built to carry.
+///
+/// Loads win whenever they exist: they are what the board actually draws, while
+/// the source figure is only what the supply could deliver. Ambiguous leaf-name
 /// matches return null.
 pub fn routingCurrentA(rails: []const power_budget.Rail, net: []const u8) ?f64 {
     var found: ?power_budget.Rail = null;
@@ -78,6 +90,10 @@ pub fn routingCurrentA(rails: []const power_budget.Rail, net: []const u8) ?f64 {
         rail.load_max_a
     else if (rail.any_typ_load)
         rail.load_typ_a
+    else if (rail.source_max_a) |capacity|
+        capacity
+    else if (rail.source_typ_a) |capacity|
+        capacity
     else
         return null;
     return if (current > 0 and std.math.isFinite(current)) current else null;
@@ -103,4 +119,58 @@ test "routing current prefers maximum and refuses ambiguous leaf rails" {
         .{ .net = "logic/VDD", .load_typ_a = 0.1, .any_typ_load = true, .status = .no_source },
     };
     try std.testing.expectEqual(@as(?f64, null), routingCurrentA(&ambiguous, "VDD"));
+}
+
+// spec: placement/power-routing - a rail with no annotated load routes for its declared source capacity, so a standalone regulator page sizes copper from its own output rating
+test "routing current falls back to source capacity when nothing declares a load" {
+    // A standalone LDO module page: the module's own `(port "VOUT" out power
+    // (current 0.5 0.5))` is the page's only current statement, and no pin on
+    // the page is annotated with a draw.
+    const rated = [_]power_budget.Rail{.{
+        .net = "VOUT",
+        .source_label = "external/VOUT",
+        .source_typ_a = 0.5,
+        .source_max_a = 0.5,
+        .status = .no_consumers,
+    }};
+    try std.testing.expectEqual(@as(?f64, 0.5), routingCurrentA(&rated, "VOUT"));
+
+    // Maximum capacity outranks typical, exactly as maximum load outranks it.
+    const spread = [_]power_budget.Rail{.{
+        .net = "V5",
+        .source_label = "external/V5",
+        .source_typ_a = 0.4,
+        .source_max_a = 1.2,
+        .status = .no_consumers,
+    }};
+    try std.testing.expectEqual(@as(?f64, 1.2), routingCurrentA(&spread, "V5"));
+
+    // Typical alone still answers when the source declared no maximum.
+    const typ_only = [_]power_budget.Rail{.{
+        .net = "V1P8",
+        .source_label = "ldo/VOUT",
+        .source_typ_a = 0.25,
+        .status = .no_consumers,
+    }};
+    try std.testing.expectEqual(@as(?f64, 0.25), routingCurrentA(&typ_only, "V1P8"));
+}
+
+// spec: placement/power-routing - declared loads outrank source capacity, so a rail routes for what the board draws rather than what its supply could deliver
+test "routing current prefers a declared load over the source rating" {
+    const rails = [_]power_budget.Rail{.{
+        .net = "V3P3",
+        .source_label = "ldo/VOUT",
+        .source_typ_a = 1.0,
+        .source_max_a = 2.0,
+        .load_typ_a = 0.2,
+        .load_max_a = 0.34,
+        .any_typ_load = true,
+        .any_max_load = true,
+        .status = .ok,
+    }};
+    try std.testing.expectEqual(@as(?f64, 0.34), routingCurrentA(&rails, "V3P3"));
+
+    // A rail that declares neither still has nothing to size copper against.
+    const bare = [_]power_budget.Rail{.{ .net = "NC", .status = .no_source }};
+    try std.testing.expectEqual(@as(?f64, null), routingCurrentA(&bare, "NC"));
 }

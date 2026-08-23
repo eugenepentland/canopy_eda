@@ -2953,6 +2953,9 @@ is enlarged only as far as the derived drill and annular-ring rules require.
 - a power pour's effective minimum neck is raised above the board fabrication floor by the rail maximum and actual stack foil
 - board rules derive the worst-layer trace width and one-barrel drill from maximum rail load
 - an unpoured rail reserves its whole maximum-current width while a pour-backed rail leaves short fanouts to the post-route branch-current proof
+- a rail with no annotated load routes for its declared source capacity, so a standalone regulator page sizes copper from its own output rating
+- declared loads outrank source capacity, so a rail routes for what the board draws rather than what its supply could deliver
+- a standalone module that rates its own output port and declares a bare layer count gets an IPC-2221 width for that rail; without the stackup no width is invented
 - power-routing named tests remain assigned to exactly one test shard
 - completeness-waiver: concurrent access (capacity functions are pure and routing reads one immutable placement snapshot while mutating only its caller-owned route)
 - completeness-waiver: empty inputs (a missing or empty stack and a rail without an unambiguous declared load produce no derived geometry)
@@ -3198,6 +3201,8 @@ completely with every surface calling the board clean. It is measured by
 - an escape fan the corridor seats in full is not flagged
 - an escape fan every net of which an authored assignment already covers is not flagged
 - a port net with no corridor out of the block and no room for a via is flagged, and only when the caller supplies the port mask
+- a corridor is measured at the router's effective width, so an unpoured rail's IPC-2221 envelope widens the demand and a plane-carried rail keeps its authored width
+- a net class wider than the rail envelope keeps its authored width, so the two rules compose as a maximum rather than one overriding the other
 - completeness-waiver: empty inputs (a placement with no parts is unit-tested to return an empty finding slice)
 - completeness-waiver: large inputs (the pad table is built once and every scan is bounded by the pad count; findings are bucketed and ref lists capped, so a dense board yields a bounded report)
 - completeness-waiver: unauthorized access (a pure in-memory analysis of an already-resolved placement; access control lives at the serve boundary)
@@ -3297,6 +3302,7 @@ this block has nothing to prove.
 - the port mask names exactly the block's declared port nets, matching a flattened net on its leaf
 - detecting on the same placement twice reports the same findings
 - an empty port mask leaves every net unexamined
+- a port net's corridor is probed at the router's effective width, so an unpoured rail is measured at its IPC-2221 envelope and a plane-carried one is not
 - completeness-waiver: empty inputs (an empty port mask and a placement with no parts both return an empty finding slice before any lattice is built)
 - completeness-waiver: large inputs (the lattice is refused above a cell cap and the flood stops at the first escape; the pad index bounds every cell test to its own bucket)
 - completeness-waiver: unauthorized access (a pure in-memory analysis of an already-resolved placement; access control lives at the serve boundary)
@@ -4372,6 +4378,9 @@ Public functions: analyze
 - a regulator's back-computed input draw counts its output rail's sub-block loads exactly once, as one consumer row on the input rail
 - a regulator's input draw is charged to a supply input, never to the rail an explicitly signal-kinded enable input sits on
 - a top-level input power port is an external rail source, and its declared current capacity and synthetic physical terminal survive into the rail budget
+- a standalone module page's own out power port rates the rail it exports, so a module routed as the board still has a current figure to size copper against
+- only a `(current …)` on a top-level out port creates a rail, and an explicitly signal-kinded output never becomes one
+- a parent board reads a module's rating through its sub-block port, and the highest declared capacity wins a rail whichever way it was declared
 
 ## eval/thermal
 

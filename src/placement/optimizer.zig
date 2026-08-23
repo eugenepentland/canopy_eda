@@ -10649,6 +10649,77 @@ test "board power geometry follows stack foil and via plating" {
     try testing.expect(rules.powerViaDrillForNet("V_3V3_LMX").? < 0.2);
 }
 
+/// A standalone regulator module page — the module IS the design root, its
+/// rating lives on its own `(port … out power (current …))`, and `declare_stack`
+/// decides whether it also authors a `(stackup N)`. Nothing else is declared:
+/// the point is what the MINIMUM is.
+fn ratedModuleBlock(arena: std.mem.Allocator, declare_stack: bool) !env.DesignBlock {
+    const ports = try arena.dupe(env.Port, &.{
+        .{ .name = "VIN", .net = "VIN", .direction = "in", .rated_min = 1.8, .rated_max = 20.0 },
+        .{
+            .name = "VOUT",
+            .net = "VOUT",
+            .direction = "out",
+            .kind = "power",
+            .nominal = 3.3,
+            .current_typ = 0.5,
+            .current_max = 0.5,
+        },
+    });
+    return .{
+        .name = "3.3 V LDO",
+        .instances = &.{},
+        .nets = try arena.dupe(env.Net, &.{.{ .name = "VOUT", .pins = &.{} }}),
+        .ports = ports,
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        // Layer count ONLY: no `(copper …)` foils, no `(dielectric …)` intervals,
+        // no planes. `impedance.Stack.foilMm` then answers `default_foil_mm` for
+        // every index, which is all IPC-2221 needs.
+        .stackup = if (declare_stack) .{ .layers = 4, .present = true } else .{},
+    };
+}
+
+// spec: placement/power-routing - a standalone module that rates its own output port and declares a bare layer count gets an IPC-2221 width for that rail; without the stackup no width is invented
+test "a rated module output widens its rail once a bare stackup exists" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Gate A: with no `(stackup …)` there is no foil thickness to size copper
+    // against, and none is invented — the rail keeps the board default width.
+    const bare = try ratedModuleBlock(arena, false);
+    const bare_rules = try boardRulesOf(arena, &bare, &.{});
+    try testing.expectEqual(@as(?f64, 0.5), power_capacity.routingCurrentA(bare_rules.physical.rails, "VOUT"));
+    try testing.expectEqual(@as(?f64, null), bare_rules.powerWidthForNet("VOUT"));
+
+    // Declaring the layer count alone is enough: the whole chain composes —
+    // the module's own out port rates the rail (`power_budget`), the rating
+    // stands in for absent loads (`power_capacity.routingCurrentA`), and the
+    // stack supplies default foil for every layer.
+    const stacked = try ratedModuleBlock(arena, true);
+    const rules = try boardRulesOf(arena, &stacked, &.{});
+    try testing.expectEqual(@as(u8, 4), rules.physical.stack.layers);
+
+    // Worst layer of a 4-layer stack at uniform foil is an INNER one (IPC-2221
+    // derates a buried conductor), so that is the width the envelope must be.
+    const want = power_capacity.requiredTraceWidthMm(0.5, impedance.default_foil_mm, false).?;
+    const inner = rules.physical.stack.foilMm(2);
+    try testing.expectEqual(impedance.default_foil_mm, inner);
+    try testing.expectApproxEqAbs(want, rules.powerWidthForNet("VOUT").?, 1e-12);
+    // And it is a real widening: well past the 0.127 mm default track width.
+    try testing.expect(want > (DesignRules{}).track_width);
+
+    // A two-layer board has no buried copper, so the same current only needs
+    // the outer-layer width — the layer count is load-bearing, not decoration.
+    var two = rules;
+    two.physical.stack.layers = 2;
+    const outer = power_capacity.requiredTraceWidthMm(0.5, impedance.default_foil_mm, true).?;
+    try testing.expectApproxEqAbs(outer, two.powerWidthForNet("VOUT").?, 1e-12);
+    try testing.expect(outer < want);
+}
+
 // spec: placement/optimizer - routing congestion is zero with no multi-pin nets and positive when nets pile into one region
 test "congestionPenalty fires only on dense regions" {
     const pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.2, .h = 0.2 }};
