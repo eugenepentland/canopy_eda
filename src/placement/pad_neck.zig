@@ -170,35 +170,43 @@ fn shapeTrack(arena: std.mem.Allocator, out: *std.ArrayList(router.Track), shape
 }
 
 /// Shape every selected generated net that declares a pad-local neck.
-pub fn passBoard(board: router.CleanupBoard) std.mem.Allocator.Error!void {
-    const arena = board.ctx.arena;
+///
+/// This is the copper-only seam used by scoped route replay before its output
+/// is offered to the assembled-board gate. Normal complete-board routing uses
+/// `passBoard` below, which also reports the compaction to the route context.
+pub fn shapeGeneratedTracks(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    selected_nets: []const bool,
+    tracks: *std.ArrayList(router.Track),
+) std.mem.Allocator.Error!bool {
     var out: std.ArrayList(router.Track) = .empty;
-    const pads_by_net = try arena.alloc([]const Pad, board.placement.nets.len);
-    const pads_known = try arena.alloc(bool, board.placement.nets.len);
+    const pads_by_net = try arena.alloc([]const Pad, placement.nets.len);
+    const pads_known = try arena.alloc(bool, placement.nets.len);
     @memset(pads_known, false);
     var changed = false;
-    for (board.tracks.items) |track| {
-        if (track.net < 0 or @as(usize, @intCast(track.net)) >= board.placement.nets.len) {
+    for (tracks.items) |track| {
+        if (track.net < 0 or @as(usize, @intCast(track.net)) >= placement.nets.len) {
             try out.append(arena, track);
             continue;
         }
         const ni: usize = @intCast(track.net);
-        if (board.ctx.selected_nets.len > 0 and (ni >= board.ctx.selected_nets.len or !board.ctx.selected_nets[ni])) {
+        if (selected_nets.len > 0 and (ni >= selected_nets.len or !selected_nets[ni])) {
             try out.append(arena, track);
             continue;
         }
-        const rule = if (ni < board.placement.rules.net.len) board.placement.rules.net[ni] else optimizer.NetRule{};
-        const nominal = routedNominal(board.placement, ni, track.width) orelse {
+        const rule = if (ni < placement.rules.net.len) placement.rules.net[ni] else optimizer.NetRule{};
+        const nominal = routedNominal(placement, ni, track.width) orelse {
             try out.append(arena, track);
             continue;
         };
-        const neck = @max(rule.pad_neck.width, board.placement.rules.design.min_width);
+        const neck = @max(rule.pad_neck.width, placement.rules.design.min_width);
         if (!(rule.pad_neck.width > 0) or neck >= nominal - eps) {
             try out.append(arena, track);
             continue;
         }
         if (!pads_known[ni]) {
-            pads_by_net[ni] = try netPads(arena, board.placement, track.net);
+            pads_by_net[ni] = try netPads(arena, placement, track.net);
             pads_known[ni] = true;
         }
         const pads = pads_by_net[ni];
@@ -219,9 +227,16 @@ pub fn passBoard(board: router.CleanupBoard) std.mem.Allocator.Error!void {
         });
         changed = true;
     }
-    if (!changed) return;
-    board.tracks.clearRetainingCapacity();
-    try board.tracks.appendSlice(arena, out.items);
+    if (!changed) return false;
+    tracks.clearRetainingCapacity();
+    try tracks.appendSlice(arena, out.items);
+    return true;
+}
+
+/// Shape a complete router board and notify its cleanup context when the track
+/// list changes.
+pub fn passBoard(board: router.CleanupBoard) std.mem.Allocator.Error!void {
+    if (!try shapeGeneratedTracks(board.ctx.arena, board.placement, board.ctx.selected_nets, board.tracks)) return;
     router.copperCompacted(board.ctx);
 }
 

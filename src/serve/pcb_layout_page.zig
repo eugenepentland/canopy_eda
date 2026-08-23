@@ -16453,16 +16453,18 @@ test "loadSubBlockPoses re-keys a module-only defmodule layout onto parent refs"
     try std.testing.expectEqual(@as(?u16, 2), options.net[ctrl_i].max_vias);
 
     // A board-level tweak makes the one-shot local candidate incomplete and
-    // invalidates the stale saved snapshot. Neither partial source is frozen;
-    // the assembled-board global phase receives the net instead.
+    // invalidates the stale saved snapshot. The standalone completion retry
+    // must still produce fresh, board-rule-width copper for the moved pads.
     board_parts[2].x += 0.5;
     const moved_policies = try alloc.alloc(route_policy.NetPolicy, board_nets.items.len);
     @memset(moved_policies, .{});
     var moved_options = route_policy.Options{ .net = moved_policies };
     const moved = try addSubcircuitRouteSeeds(alloc, project_dir, dblock, placement, placement.rules.design.routeParams(), &moved_options);
-    try std.testing.expectEqual(@as(usize, 0), moved.copper.accepted_nets);
-    try std.testing.expectEqual(@as(usize, 1), moved.copper.rejected_nets);
-    try std.testing.expectEqual(@as(usize, 0), moved_options.existing_tracks.len);
+    try std.testing.expectEqual(@as(usize, 1), moved.copper.accepted_nets);
+    try std.testing.expectEqual(@as(usize, 0), moved.copper.rejected_nets);
+    try std.testing.expectEqual(@as(usize, 2), moved_options.existing_tracks.len);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.55), moved_options.existing_tracks[0].width, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.55), moved_options.existing_tracks[1].width, 1e-9);
 }
 
 test "mcpSetPartPoses rejects an empty poses array before resolving" {

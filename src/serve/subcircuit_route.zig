@@ -14,6 +14,7 @@ const optimizer = @import("../placement/optimizer.zig");
 const route_policy = @import("../placement/route_policy.zig");
 const router = @import("../placement/router.zig");
 const route_plan = @import("route_plan.zig");
+const pad_neck_shape = @import("../pad_neck_shape.zig");
 const seed_drc = @import("../subcircuit_seed_drc.zig");
 const clock = @import("../infra/clock.zig");
 const drc = @import("../placement/drc.zig");
@@ -99,10 +100,11 @@ fn withLocalObstacles(
     return out;
 }
 
-fn localPlacement(
+fn placementView(
     alloc: std.mem.Allocator,
     placement: optimizer.Placement,
     path: []const u8,
+    keep_foreign_parts: bool,
 ) std.mem.Allocator.Error!?optimizer.Placement {
     const old_to_new = try alloc.alloc(?usize, placement.parts.len);
     @memset(old_to_new, null);
@@ -116,12 +118,14 @@ fn localPlacement(
     var maxy = -std.math.inf(f64);
     var local_parts: usize = 0;
     for (placement.parts, 0..) |part, old| {
+        const member = memberRef(path, part.ref_des);
+        if (!keep_foreign_parts and !member) continue;
         old_to_new[old] = parts.items.len;
         try parts.append(alloc, part);
         if (old < placement.instances.len) try instances.append(alloc, placement.instances[old]);
         if (placement.priority.len > 0)
             try priority.append(alloc, if (old < placement.priority.len) placement.priority[old] else 0);
-        if (!memberRef(path, part.ref_des)) continue;
+        if (!member) continue;
         local_parts += 1;
         const box = optimizer.worldCourtyard(&part);
         minx = @min(minx, box.minx);
@@ -188,6 +192,22 @@ fn localPlacement(
         .diff_pairs = placement.diff_pairs,
         .match_groups = placement.match_groups,
     };
+}
+
+fn localPlacement(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    path: []const u8,
+) std.mem.Allocator.Error!?optimizer.Placement {
+    return placementView(alloc, placement, path, true);
+}
+
+fn standalonePlacement(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    path: []const u8,
+) std.mem.Allocator.Error!?optimizer.Placement {
+    return placementView(alloc, placement, path, false);
 }
 
 fn samePin(a: export_kicad.FlatPin, b: env.PinRef, path: []const u8) bool {
@@ -355,6 +375,385 @@ fn failed(routed: router.RouteResult, placement: optimizer.Placement, net_i: usi
     if (net_i >= placement.nets.len) return true;
     for (routed.failed) |name| if (std.mem.eql(u8, name, placement.nets[net_i].name)) return true;
     return false;
+}
+
+fn failedSelection(
+    alloc: std.mem.Allocator,
+    selected: []const bool,
+    routed: router.RouteResult,
+    placement: optimizer.Placement,
+) std.mem.Allocator.Error![]bool {
+    const retry = try alloc.alloc(bool, selected.len);
+    for (retry, 0..) |*yes, ni| yes.* = selected[ni] and failed(routed, placement, ni);
+    return retry;
+}
+
+fn anyRecovered(selected: []const bool, routed: router.RouteResult, placement: optimizer.Placement) bool {
+    for (selected, 0..) |yes, ni| if (yes and !failed(routed, placement, ni)) return true;
+    return false;
+}
+
+fn rebuildNetMask(nets: []bool, tracks: []const SeedTrack, vias: []const SeedVia) void {
+    @memset(nets, false);
+    for (tracks) |track| {
+        if (track.net < nets.len) nets[track.net] = true;
+    }
+    for (vias) |via| {
+        if (via.net < nets.len) nets[via.net] = true;
+    }
+}
+
+/// A pad-neck retry should first reproduce the compact surface escape a user
+/// gets from the module's Route button. An ordinary failed signal uses the
+/// opposite outer face, leaving the congested terminal face to its neighbours.
+fn preferCommonTerminalSurface(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    selected: []const bool,
+    options: route_policy.Options,
+) std.mem.Allocator.Error!route_policy.Options {
+    var out = options;
+    const policies = try alloc.alloc(route_policy.NetPolicy, placement.nets.len);
+    for (policies, 0..) |*policy, ni| policy.* = if (ni < options.net.len) options.net[ni] else .{};
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    for (placement.parts, 0..) |part, i| try idx_of.put(alloc, part.ref_des, i);
+    for (selected, 0..) |yes, ni| {
+        if (!yes or ni >= placement.nets.len) continue;
+        const pts = try router.netPoints(alloc, placement, &idx_of, placement.nets[ni]);
+        var surface: ?u8 = null;
+        var mixed = false;
+        for (pts) |pt| {
+            if (pt.thru) continue;
+            if (surface) |layer| {
+                if (layer != pt.layer) mixed = true;
+            } else surface = pt.layer;
+        }
+        if (mixed or surface == null) continue;
+        const surface_mask = @as(u64, 1) << @intCast(surface.?);
+        const pad_neck = ni < placement.rules.net.len and placement.rules.net[ni].pad_neck.width > 0;
+        if (pad_neck) {
+            if (policies[ni].allowed_layers != 0 and policies[ni].allowed_layers & surface_mask == 0) continue;
+            policies[ni].allowed_layers = surface_mask;
+            policies[ni].preferred_layers = surface_mask;
+            policies[ni].max_vias = 0;
+            continue;
+        }
+        const layer_count = @min(@as(u8, 64), placement.rules.copper_layers);
+        const board_mask = if (layer_count == 64) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(layer_count)) - 1;
+        const alternate = board_mask & ~surface_mask;
+        if (alternate == 0) continue;
+        const mask = @as(u64, 1) << @intCast(63 - @clz(alternate));
+        policies[ni].allowed_layers = mask;
+        policies[ni].preferred_layers = mask;
+        policies[ni].max_vias = 2;
+    }
+    out.net = policies;
+    return out;
+}
+
+fn searchAtPadNeck(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    selected: []const bool,
+) std.mem.Allocator.Error!optimizer.Placement {
+    var out = placement;
+    const rules = try alloc.dupe(optimizer.NetRule, placement.rules.net);
+    for (selected, 0..) |yes, ni| {
+        if (!yes or ni >= rules.len) continue;
+        const parent = rules[ni];
+        rules[ni] = .{};
+        if (parent.pad_neck.width > 0) rules[ni].width = @max(parent.pad_neck.width, placement.rules.design.min_width);
+    }
+    out.rules.net = rules;
+    out.rules.plane_nets = &.{};
+    out.rules.planes = .{};
+    out.rules.physical.rails = &.{};
+    return out;
+}
+
+fn standaloneRetryOptions(
+    alloc: std.mem.Allocator,
+    base: route_policy.Options,
+    module: ?route_policy.Options,
+    selected: []bool,
+) std.mem.Allocator.Error!route_policy.Options {
+    var out = try localOptions(alloc, base, module, selected);
+    if (module == null) {
+        const policies = try alloc.alloc(route_policy.NetPolicy, selected.len);
+        for (policies) |*policy| policy.* = .{};
+        out.net = policies;
+        out.effort = .standard;
+    }
+    out.existing_tracks = &.{};
+    out.existing_vias = &.{};
+    out.existing_zones = &.{};
+    out.guides = if (module) |child| child.guides else .{};
+    return out;
+}
+
+fn prioritizeSelection(
+    alloc: std.mem.Allocator,
+    options: route_policy.Options,
+    selected: []const bool,
+) std.mem.Allocator.Error!route_policy.Options {
+    var out = options;
+    const policies = try alloc.alloc(route_policy.NetPolicy, selected.len);
+    for (policies, 0..) |*policy, ni| {
+        policy.* = if (ni < options.net.len) options.net[ni] else .{};
+        if (selected[ni]) policy.wave.priority = std.math.maxInt(u32);
+    }
+    out.net = policies;
+    return out;
+}
+
+const StandaloneRetryContext = struct {
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    sub: env.SubBlock,
+    params: router.RouteParams,
+    base: route_policy.Options,
+};
+
+fn runStandaloneRetry(
+    ctx: StandaloneRetryContext,
+    retry_selected: []const bool,
+    narrow_search: bool,
+) std.mem.Allocator.Error!router.RouteResult {
+    const focused = try ctx.alloc.dupe(bool, retry_selected);
+    const search_view = if (narrow_search)
+        try searchAtPadNeck(ctx.alloc, ctx.placement, focused)
+    else
+        ctx.placement;
+    const lowered = try route_plan.lower(ctx.alloc, ctx.sub.block, search_view);
+    const module = if (lowered.applied) lowered.options else null;
+    var options = try standaloneRetryOptions(ctx.alloc, ctx.base, module, focused);
+    options = try preferCommonTerminalSurface(ctx.alloc, ctx.placement, retry_selected, options);
+    options = try prioritizeSelection(ctx.alloc, options, retry_selected);
+    const routed = try router.routeWithOptions(ctx.alloc, search_view, ctx.params, options);
+    const finished = try route_plan.finishLoweredCandidate(ctx.alloc, search_view, ctx.params, options, routed);
+    return if (narrow_search)
+        pad_neck_shape.restoreGeneratedTracks(ctx.alloc, ctx.placement, retry_selected, finished)
+    else
+        finished;
+}
+
+fn routedObstacles(
+    alloc: std.mem.Allocator,
+    routed: router.RouteResult,
+    options: route_policy.Options,
+) std.mem.Allocator.Error!route_policy.Options {
+    var out = options;
+    const tracks = try alloc.alloc(route_policy.ExistingTrack, routed.tracks.len);
+    for (routed.tracks, tracks) |track, *slot| slot.* = .{
+        .x1 = track.x1,
+        .y1 = track.y1,
+        .x2 = track.x2,
+        .y2 = track.y2,
+        .layer = track.layer,
+        .width = track.width,
+        .net = track.net,
+    };
+    const vias = try alloc.alloc(route_policy.ExistingVia, routed.vias.len);
+    for (routed.vias, vias) |via, *slot| slot.* = .{
+        .x = via.x,
+        .y = via.y,
+        .dia = via.dia,
+        .drill = via.drill,
+        .net = via.net,
+    };
+    out.existing_tracks = tracks;
+    out.existing_vias = vias;
+    return out;
+}
+
+fn routeAroundRecovered(
+    ctx: StandaloneRetryContext,
+    selected: []bool,
+    recovered: router.RouteResult,
+) std.mem.Allocator.Error!router.RouteResult {
+    const lowered = try route_plan.lower(ctx.alloc, ctx.sub.block, ctx.placement);
+    const module = if (lowered.applied) lowered.options else null;
+    var options = try standaloneRetryOptions(ctx.alloc, ctx.base, module, selected);
+    options = try routedObstacles(ctx.alloc, recovered, options);
+    return route_plan.routeLowered(ctx.alloc, ctx.placement, ctx.params, options);
+}
+
+fn conflictingPrimarySelection(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    params: router.RouteParams,
+    primary: router.RouteResult,
+    recovered: router.RouteResult,
+    retry_selected: []const bool,
+) std.mem.Allocator.Error![]bool {
+    var tracks: std.ArrayList(router.Track) = .empty;
+    try tracks.appendSlice(alloc, recovered.tracks);
+    try tracks.appendSlice(alloc, primary.tracks);
+    var vias: std.ArrayList(router.Via) = .empty;
+    try vias.appendSlice(alloc, recovered.vias);
+    try vias.appendSlice(alloc, primary.vias);
+    const violations = try drc.check(alloc, placement, .{
+        .tracks = tracks.items,
+        .vias = vias.items,
+        .routed = 0,
+        .total = 0,
+    }, params.clearance);
+    const conflicts = try alloc.alloc(bool, retry_selected.len);
+    @memset(conflicts, false);
+    for (violations) |v| {
+        switch (v.kind) {
+            .track_track, .via_track, .via_via, .via_spacing => {},
+            else => continue,
+        }
+        const a: ?usize = if (v.who.net_a >= 0) @intCast(v.who.net_a) else null;
+        const b: ?usize = if (v.who.net_b >= 0) @intCast(v.who.net_b) else null;
+        if (a) |ni| if (ni < retry_selected.len and retry_selected[ni]) {
+            if (b) |other| {
+                if (other < conflicts.len and !retry_selected[other]) conflicts[other] = true;
+            }
+        };
+        if (b) |ni| if (ni < retry_selected.len and retry_selected[ni]) {
+            if (a) |other| {
+                if (other < conflicts.len and !retry_selected[other]) conflicts[other] = true;
+            }
+        };
+    }
+    return conflicts;
+}
+
+const CopperOutput = struct {
+    alloc: std.mem.Allocator,
+    nets: []bool,
+    tracks: *std.ArrayList(SeedTrack),
+    vias: *std.ArrayList(SeedVia),
+};
+
+const RetryCloseContext = struct {
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    params: router.RouteParams,
+    stop: route_policy.Stop,
+    out: CopperOutput,
+};
+
+fn appendSuccessfulCopper(
+    out: CopperOutput,
+    routed: router.RouteResult,
+    placement: optimizer.Placement,
+    selected: []const bool,
+) std.mem.Allocator.Error!void {
+    for (routed.tracks) |track| {
+        if (track.net < 0) continue;
+        const ni: usize = @intCast(track.net);
+        if (ni >= out.nets.len or !selected[ni] or failed(routed, placement, ni)) continue;
+        out.nets[ni] = true;
+        try appendTrack(out.alloc, out.tracks, track);
+    }
+    for (routed.vias) |via| {
+        if (via.net < 0) continue;
+        const ni: usize = @intCast(via.net);
+        if (ni >= out.nets.len or !selected[ni] or failed(routed, placement, ni)) continue;
+        out.nets[ni] = true;
+        try appendVia(out.alloc, out.vias, via);
+    }
+}
+
+fn appendTwoTerminalClosures(
+    ctx: RetryCloseContext,
+    routed: router.RouteResult,
+    selected: []const bool,
+) std.mem.Allocator.Error!void {
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    for (ctx.placement.parts, 0..) |part, i| try idx_of.put(ctx.alloc, part.ref_des, i);
+    for (selected, 0..) |yes, ni| {
+        if (!yes or ni >= ctx.placement.nets.len) continue;
+        if (!failed(routed, ctx.placement, ni)) continue;
+        const pts = try router.netPoints(ctx.alloc, ctx.placement, &idx_of, ctx.placement.nets[ni]);
+        if (pts.len != 2) continue;
+        const gaps = [_]router.Gap{.{ .net_i = ni, .from = pts[0], .to = pts[1] }};
+        const paths = try router.closeGaps(
+            ctx.alloc,
+            ctx.placement,
+            ctx.params,
+            .{},
+            &gaps,
+            .{ .ripup = false, .raster = .{ .stop = ctx.stop } },
+        );
+        const path = paths[0] orelse continue;
+        for (path.tracks) |track| try appendTrack(ctx.alloc, ctx.out.tracks, track);
+        for (path.vias) |via| try appendVia(ctx.alloc, ctx.out.vias, via);
+        if (path.tracks.len > 0 or path.vias.len > 0) ctx.out.nets[ni] = true;
+    }
+}
+
+const FailedRetryContext = struct {
+    alloc: std.mem.Allocator,
+    board: optimizer.Placement,
+    primary_view: optimizer.Placement,
+    sub: env.SubBlock,
+    params: router.RouteParams,
+    base: route_policy.Options,
+    out: CopperOutput,
+    signal_track_mark: usize,
+    signal_via_mark: usize,
+};
+
+fn retryFailedSignals(
+    ctx: FailedRetryContext,
+    primary: router.RouteResult,
+    selected: []const bool,
+) std.mem.Allocator.Error!void {
+    const retry_selected = try failedSelection(ctx.alloc, selected, primary, ctx.primary_view);
+    if (!anySelected(retry_selected)) return;
+    const standalone = (try standalonePlacement(ctx.alloc, ctx.board, ctx.sub.name)) orelse return;
+    const retry_view = try modulePlanPlacement(ctx.alloc, standalone, ctx.sub);
+    const retry_ctx = StandaloneRetryContext{
+        .alloc = ctx.alloc,
+        .placement = retry_view,
+        .sub = ctx.sub,
+        .params = ctx.params,
+        .base = ctx.base,
+    };
+    var retry_routed = try runStandaloneRetry(retry_ctx, retry_selected, false);
+    if (!anyRecovered(retry_selected, retry_routed, retry_view)) {
+        retry_routed = try runStandaloneRetry(retry_ctx, retry_selected, true);
+    }
+    if (!anyRecovered(retry_selected, retry_routed, retry_view)) {
+        try appendTwoTerminalClosures(.{
+            .alloc = ctx.alloc,
+            .placement = retry_view,
+            .params = ctx.params,
+            .stop = ctx.base.stop,
+            .out = ctx.out,
+        }, retry_routed, retry_selected);
+        return;
+    }
+
+    const conflicts = try conflictingPrimarySelection(
+        ctx.alloc,
+        retry_view,
+        ctx.params,
+        primary,
+        retry_routed,
+        retry_selected,
+    );
+    const conflict_routed = if (anySelected(conflicts))
+        try routeAroundRecovered(retry_ctx, conflicts, retry_routed)
+    else
+        retry_routed;
+    ctx.out.tracks.shrinkRetainingCapacity(ctx.signal_track_mark);
+    ctx.out.vias.shrinkRetainingCapacity(ctx.signal_via_mark);
+    rebuildNetMask(ctx.out.nets, ctx.out.tracks.items, ctx.out.vias.items);
+    // The assembled-board gate is ordered by first copper appearance. Let the
+    // recovered tree claim its proven local channel, repair only primary trees
+    // that physically cross it, then replay every untouched primary tree.
+    try appendSuccessfulCopper(ctx.out, retry_routed, retry_view, retry_selected);
+    try appendSuccessfulCopper(ctx.out, conflict_routed, retry_view, conflicts);
+    const remaining = try ctx.alloc.dupe(bool, selected);
+    for (remaining, retry_selected, conflicts) |*yes, retry_yes, conflict_yes| {
+        yes.* = yes.* and !retry_yes and !conflict_yes;
+    }
+    try appendSuccessfulCopper(ctx.out, primary, ctx.primary_view, remaining);
 }
 
 fn appendTrack(alloc: std.mem.Allocator, out: *std.ArrayList(SeedTrack), track: router.Track) std.mem.Allocator.Error!void {
@@ -820,7 +1219,8 @@ fn carrierDrops(ctx: DropContext, selected: []const bool) std.mem.Allocator.Erro
 }
 
 /// Route every first-level sub-circuit independently and concatenate its
-/// parent-indexed copper. No run sees another sub-circuit's parts or copper.
+/// parent-indexed copper. A run sees every assembled component as an obstacle,
+/// but no other sub-circuit's terminals or generated copper.
 pub fn routeAllClassified(
     alloc: std.mem.Allocator,
     block: *const env.DesignBlock,
@@ -888,6 +1288,8 @@ pub fn routeAllClassified(
             .vias = &vias,
             .routed_nets = nets,
         });
+        const signal_track_mark = tracks.items.len;
+        const signal_via_mark = vias.items.len;
         if (anySelected(selected)) {
             // Run the same completion tier as the module's own Route button.
             // The assembled-board gate remains authoritative, but feeding it
@@ -910,20 +1312,22 @@ pub fn routeAllClassified(
                 try progress.emit(.subcircuit_failed, sub.name, attempted, block.sub_blocks.len);
                 continue;
             }
-            for (routed.tracks) |track| {
-                if (track.net < 0) continue;
-                const ni: usize = @intCast(track.net);
-                if (ni >= nets.len or !selected[ni] or failed(routed, plan_view, ni)) continue;
-                nets[ni] = true;
-                try appendTrack(alloc, &tracks, track);
-            }
-            for (routed.vias) |via| {
-                if (via.net < 0) continue;
-                const ni: usize = @intCast(via.net);
-                if (ni >= nets.len or !selected[ni] or failed(routed, plan_view, ni)) continue;
-                nets[ni] = true;
-                try appendVia(alloc, &vias, via);
-            }
+            const copper_out = CopperOutput{ .alloc = alloc, .nets = nets, .tracks = &tracks, .vias = &vias };
+            try appendSuccessfulCopper(copper_out, routed, plan_view, selected);
+
+            // Retry only primary failures in the standalone physical view,
+            // then offer the reordered result to the full-board DRC below.
+            try retryFailedSignals(.{
+                .alloc = alloc,
+                .board = placement,
+                .primary_view = plan_view,
+                .sub = sub,
+                .params = params,
+                .base = sub_base,
+                .out = copper_out,
+                .signal_track_mark = signal_track_mark,
+                .signal_via_mark = signal_via_mark,
+            }, routed, selected);
         }
         const timed_out_here = stopped(sub_base) and phase_deadline != 0;
         if (timed_out_here) timed_out += 1 else completed += 1;
@@ -1054,6 +1458,10 @@ test "isolated sub-circuit view retains foreign physical obstacles" {
     try testing.expectEqualStrings("amp/U1", local.nets[0].pins[0].ref_des);
     try testing.expectEqualStrings("amp/R1", local.nets[0].pins[1].ref_des);
     try testing.expect(local.maxx < 10 and local.maxy < 10);
+    const standalone = (try standalonePlacement(alloc, placement, "amp")) orelse return error.TestExpectedStandalonePlacement;
+    try testing.expectEqual(@as(usize, 2), standalone.parts.len);
+    try testing.expectEqualStrings("amp/U1", standalone.parts[0].ref_des);
+    try testing.expectEqualStrings("amp/R1", standalone.parts[1].ref_des);
     const selected = try selectedNets(alloc, placement, "amp", .{}, &.{false}, false);
     // Boundary nets route their internal island now; the global pass joins the
     // third terminal after the isolated copper is frozen.
@@ -1200,6 +1608,119 @@ test "local routing uses the standalone completion tier" {
     const body = source[start..end];
     try testing.expect(std.mem.indexOf(u8, body, "route_plan.routeLoweredCandidate(") == null);
     try testing.expect(std.mem.indexOf(u8, body, "route_plan.routeLowered(") != null);
+}
+
+// spec: serve/subcircuit-route - a module-only retry drops an impossible parent-only route constraint, follows standalone surface and pad-neck geometry, then must pass the parent's via budget and full-board DRC
+test "module-only retry follows standalone surface and pad-neck geometry" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    const Pad = std.meta.Child(@FieldType(optimizer.Part, "pads"));
+    const pads = [_]Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.5, .h = 0.5 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "A", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .side = .bottom },
+        .{ .ref_des = "B", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 2, .side = .bottom },
+    };
+    const pins = [_]export_kicad.FlatPin{
+        .{ .ref_des = "A", .pin = "1" },
+        .{ .ref_des = "B", .pin = "1" },
+    };
+    const nets = [_]optimizer.FlatNet{.{ .name = "SW", .pins = &pins }};
+    const policies = [_]route_policy.NetPolicy{.{ .allowed_layers = 0b11, .preferred_layers = 0b01, .max_vias = 2 }};
+    const net_rules = [_]optimizer.NetRule{.{
+        .width = 0.2532,
+        .pad_neck = .{ .width = 0.1524, .max_length = 0.75, .taper_length = 0.35 },
+    }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -1,
+        .miny = -1,
+        .maxx = 3,
+        .maxy = 1,
+        .generated = false,
+        .rules = .{ .net = &net_rules },
+    };
+    const options = try preferCommonTerminalSurface(alloc, placement, &.{true}, .{ .net = &policies });
+    try testing.expectEqual(@as(u64, 0b10), options.net[0].allowed_layers);
+    try testing.expectEqual(@as(u64, 0b10), options.net[0].preferred_layers);
+    try testing.expectEqual(@as(?u16, 0), options.net[0].max_vias);
+
+    var standalone_selected = [_]bool{true};
+    const standalone_options = try standaloneRetryOptions(alloc, .{ .net = &policies, .effort = .one_shot }, null, &standalone_selected);
+    try testing.expectEqual(route_policy.Effort.standard, standalone_options.effort);
+    try testing.expectEqual(@as(u64, 0), standalone_options.net[0].allowed_layers);
+    try testing.expectEqual(@as(u64, 0), standalone_options.net[0].preferred_layers);
+    try testing.expectEqual(@as(?u16, null), standalone_options.net[0].max_vias);
+
+    const search = try searchAtPadNeck(alloc, placement, &.{true});
+    try testing.expectEqual(@as(f64, 0.1524), search.rules.net[0].width);
+    const narrow_tracks = [_]router.Track{.{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 1, .width = 0.1524, .net = 0 }};
+    const restored = try pad_neck_shape.restoreGeneratedTracks(alloc, placement, &.{true}, .{
+        .tracks = &narrow_tracks,
+        .vias = &.{},
+        .routed = 1,
+        .total = 1,
+    });
+    try testing.expect(restored.tracks.len > 10);
+    try testing.expectEqual(@as(f64, 0.1524), restored.tracks[0].width);
+    try testing.expectEqual(@as(f64, 0.1524), restored.tracks[restored.tracks.len - 1].width);
+    var widened = false;
+    for (restored.tracks) |track| widened = widened or track.width > 0.1524;
+    try testing.expect(widened);
+}
+
+test "recovered retry identifies only crossing primary copper" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    const nets = [_]optimizer.FlatNet{
+        .{ .name = "RECOVERED", .pins = &.{} },
+        .{ .name = "CROSSING", .pins = &.{} },
+        .{ .name = "CLEAR", .pins = &.{} },
+    };
+    const placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -2,
+        .miny = -2,
+        .maxx = 2,
+        .maxy = 2,
+        .generated = false,
+        .rules = .{ .net = &.{ .{}, .{}, .{} } },
+    };
+    const recovered_tracks = [_]router.Track{.{
+        .x1 = -1,
+        .y1 = 0,
+        .x2 = 1,
+        .y2 = 0,
+        .layer = 0,
+        .width = 0.2,
+        .net = 0,
+    }};
+    const primary_tracks = [_]router.Track{
+        .{ .x1 = 0, .y1 = -1, .x2 = 0, .y2 = 1, .layer = 0, .width = 0.2, .net = 1 },
+        .{ .x1 = -1, .y1 = 1, .x2 = 1, .y2 = 1, .layer = 0, .width = 0.2, .net = 2 },
+    };
+    const conflicts = try conflictingPrimarySelection(
+        alloc,
+        placement,
+        .{ .clearance = 0.1 },
+        .{ .tracks = &primary_tracks, .vias = &.{}, .routed = 2, .total = 2 },
+        .{ .tracks = &recovered_tracks, .vias = &.{}, .routed = 1, .total = 1 },
+        &.{ true, false, false },
+    );
+    try testing.expectEqualSlices(bool, &.{ false, true, false }, conflicts);
 }
 
 // spec: serve/subcircuit-route - local signal routing treats the same module's exact supply bonds as immutable physical obstacles

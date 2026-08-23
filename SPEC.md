@@ -619,9 +619,10 @@ Public functions: routeAll, regressed
 
 The hierarchical autorouter routes each first-level sub-circuit before the
 assembled board. A local pass retains the real board outline, stackup, design
-rules, pours, and keepouts, but its placement contains only that sub-circuit's
-components and its maze sees no saved trace/via copper or foreign reserved
-lanes. It lowers the child block's own PCB plan in the child's net namespace;
+rules, pours, and keepouts. Its primary placement retains every assembled-board
+component as a physical obstacle while exposing only that sub-circuit's net
+terminals, and its maze sees no saved trace/via copper or foreign reserved lanes.
+It lowers the child block's own PCB plan in the child's net namespace;
 the parent board may narrow hard layer and via constraints. Nets with two or
 more terminals inside the sub-circuit route their local island even when the
 same parent net continues elsewhere. The resulting parent-indexed copper is
@@ -631,6 +632,7 @@ copper for the single global pass.
 - a sub-circuit routing view keeps every board component as an obstacle, exposes only its own net terminals, and uses local bounds
 - an unselected scoped net is never routed by a sub-circuit phase
 - a local sub-circuit uses the child plan's authored effort and the same completion gate as the standalone module Route button before its copper is offered to the assembled-board gate
+- a module-only retry drops an impossible parent-only route constraint, follows standalone surface and pad-neck geometry, then must pass the parent's via budget and full-board DRC
 - local signal routing treats the same module's exact supply bonds as immutable physical obstacles
 - completeness-waiver: empty inputs (a block with no sub-circuits or no net with two local terminals returns empty copper and the caller takes the plain global path)
 - completeness-waiver: large inputs (sub-circuits route serially on component-local lattices; all allocations share the caller's request arena and the global quality comparison is bounded to the two existing candidates)

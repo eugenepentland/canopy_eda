@@ -1267,6 +1267,7 @@ src/outline_sketch.zig::default_sagitta_mm value
 src/outline_sketch.zig::max_constraints value
 src/outline_sketch.zig::max_entities value
 src/pad_neck_profile.zig::Profile struct_
+src/pad_neck_shape.zig::restoreGeneratedTracks | fn restoreGeneratedTracks( arena: std.mem.Allocator, placement: optimizer.Placement, selected: []const bool, routed: router.RouteResult, ) std.mem.Allocator.Error!router.RouteResult
 src/parts.zig::PartEntry struct_
 src/parts.zig::PartsDb struct_
 src/parts.zig::deinit | fn deinit(self: *PartsDb) void
@@ -2065,6 +2066,7 @@ src/placement/pad_grid.zig::nearSegment | fn nearSegment(idx: *const PadGrid, a:
 src/placement/pad_grid.zig::near_scratch_len value
 src/placement/pad_neck.zig::allowsTrack | fn allowsTrack( arena: std.mem.Allocator, placement: optimizer.Placement, track: router.Track, nominal: f64, fab_min_width: f64, ) std.mem.Allocator.Error!bool
 src/placement/pad_neck.zig::passBoard | fn passBoard(board: router.CleanupBoard) std.mem.Allocator.Error!void
+src/placement/pad_neck.zig::shapeGeneratedTracks | fn shapeGeneratedTracks( arena: std.mem.Allocator, placement: optimizer.Placement, selected_nets: []const bool, tracks: *std.ArrayList(router.Track), ) std.mem.Allocator.Error!bool
 src/placement/pad_shape.zig::SegClosest struct_
 src/placement/pad_shape.zig::Shape struct_
 src/placement/pad_shape.zig::closestOnSeg | fn closestOnSeg(ax: f64, ay: f64, bx: f64, by: f64, px: f64, py: f64) SegClosest
