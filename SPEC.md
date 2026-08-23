@@ -363,6 +363,7 @@ Public functions: route, perNetRouted, returnPathViolations, canonicalizeTraceJu
 - maze-routes a two-pad net into connected track segments
 - an equal-length octilinear tie is settled toward the straight path rather than an arbitrary staircase of the same length
 - the maze queue orders on A* priority alone, with corner count priced into the cost rather than ranked beside it
+- a maze leg is charged for the escape stub each pad gateway implies, so it buys the entry that points where the route goes instead of the outermost free one
 - a connection that routes far past its own span is retried once on another face and keeps whichever route costs the board less
 - a net whose policy forbids vias keeps its detour rather than gaining one from the detour guard
 - a failed broad net retries its repair-waypoints before lower waves can claim the corridor, without perturbing a successful ordinary route
@@ -2545,6 +2546,20 @@ compete, so a mitre is bought with a bounded amount of copper and never with a
 detour. Every candidate is the same probed, via-safe, junction-safe rewrite the
 pass always emitted; only which of them is kept has changed.
 
+The fan's own width is the other half of that choice. It is centred on the
+heading the maze left by and reaches only the forward five, because a heading
+pointing back past the pad is not an escape — while the copper it is centred on
+is going somewhere. When it is NOT, the centre is the thing that is wrong: a
+chain whose own second leg turns more than 90 degrees off the first left its pad
+the wrong way, which is the shape a free gateway ring used to buy the maze. Such
+a chain opens the fan to all eight headings, measures the "no ray can serve this
+hop" test against the shortest escape any of them asks for rather than the
+suspect heading's own, and lets the reversal rejoin the route past the wrong-way
+stub it undoes — the same lattice-noise budget, read radially rather than from
+one point on the ring, and never past a vertex the new ray is heading towards.
+Nothing else changes: the widened candidates are scored and budgeted exactly like
+the rest, so a well-formed escape sees the same five headings in the same order.
+
 Total bends is the second key because square corners alone do not separate the
 two shapes a reader tells apart: an escape leaving on the maze's heading and then
 mitring turns one 45-degree corner where the same connection escaping toward its
@@ -2616,8 +2631,12 @@ inherited a lap can still be improved.
 - lapping a same-net land the connection does not serve is the first key of the escape score, so no number of corners saved buys copper into a pad's flank
 - a short chain whose two ends both sit on lands is planned as one shape, so a jog between two legal rays is not forced to meet one of them square
 - the joint plan is bounded to a hop and refused whenever it does not strictly beat the copper it would replace
+- a chain that turns back on the heading it left the pad by opens the fan to every heading, so a wrong-way escape can be re-aimed at the route it serves
+- the fan only opens past its forward headings for a chain whose own second leg turns back on the first, so a well-formed escape is scored against exactly the headings it always was
+- a reversal may rejoin past the wrong-way stub it undoes, measuring the same lattice-noise budget radially, and never past a vertex the new ray is heading towards
+- an authored (max-freq …) escape reserve outranks this pass, so no widened fan can re-aim an RF net's straight exit
 - completeness-waiver: empty inputs (a chain with no pad end, or one already compliant, returns null and the copper is echoed verbatim)
-- completeness-waiver: large inputs (linear in the net's segment count; each end walks its own chain once, over a fan of at most five headings)
+- completeness-waiver: large inputs (linear in the net's segment count; each end walks its own chain once, over a fan of at most eight headings)
 - completeness-waiver: unauthorized access (a pure geometry pass inside the router; endpoint access control lives in serve/ward_auth)
 - completeness-waiver: i/o failure (no disk or socket — inputs are in-memory routed copper and pad outlines)
 - completeness-waiver: concurrent access (a pure function over immutable inputs into per-call arena-owned slices; the caller serialises copper mutation)

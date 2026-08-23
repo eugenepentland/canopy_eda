@@ -389,6 +389,64 @@ fn baseHeading(pts: []const [2]f64, c: [2]f64) ?usize {
     return null;
 }
 
+/// The heading of the chain's SECOND leg — from the vertex `baseHeading` read to
+/// the next one distinct from it. Null when the chain has only one leg to read.
+fn onwardDir(pts: []const [2]f64, c: [2]f64) ?[2]f64 {
+    for (pts[1..], 1..) |p, i| {
+        if (dist(p, c) < eps) continue;
+        for (pts[i + 1 ..]) |q| {
+            const d = dist(q, p);
+            if (d < eps) continue;
+            return .{ (q[0] - p[0]) / d, (q[1] - p[1]) / d };
+        }
+        return null;
+    }
+    return null;
+}
+
+/// How many of the eight headings this end's fan may offer: the usual forward
+/// five, or ALL of them when the escape is pointing the wrong way.
+///
+/// `fan_len`'s reasoning — "a heading pointing BACK past the pad is never an
+/// escape" — holds only while the copper it is centred on is going somewhere.
+/// It is centred on `baseHeading`, which reads the heading the MAZE left by, and
+/// the maze can leave by a heading that immediately turns back past 90°: the
+/// gateway fan used to hand out its outer rings for free in every direction, so
+/// a pad could exit 0.5 mm on the side AWAY from its partner and 45° back across
+/// itself (`bcuda-lt3045-ldo`'s C_VOUT). Priced gateways (`router.GateAnchors`)
+/// stop the maze buying that shape; this is the other half — the repair pass
+/// could not UNDO one, because the only heading that draws the connection
+/// straight is the 180° reversal the fan structurally refused to build.
+///
+/// So the fan opens to all eight exactly when the chain's own second leg says
+/// the first one was wrong: the onward direction points more than 90° away from
+/// the heading the copper left on. A well-formed escape — anything still making
+/// forward progress — reads the same five headings it always did, in the same
+/// order, and every widened candidate still has to beat the incumbent on the
+/// unchanged score and inside the unchanged mitre budget.
+fn fanWidth(pts: []const [2]f64, c: [2]f64, base: usize) usize {
+    const onward = onwardDir(pts, c) orelse return fan_len;
+    const along = headings[base][0] * onward[0] + headings[base][1] * onward[1];
+    return if (along < 0) headings.len else fan_len;
+}
+
+/// The reach the "no ray can serve this hop" bail measures a chain against.
+///
+/// Ordinarily the escape on the heading the copper leaves by, which is the
+/// question that bail asks: is the continuation nearer the pad centre than the
+/// ray itself would reach? But `escapeReach` is direction-dependent (a long land
+/// asks for far more copper on its long axis than across it), so once the fan
+/// has opened BECAUSE that heading is under suspicion, using its reach as the
+/// universal proxy can veto the very reversal the widening exists to find. The
+/// honest test for "no ray at all has room" is then the SHORTEST escape any
+/// heading in the fan asks for.
+fn bailReach(pad: Pad, base: usize, fan: usize) f64 {
+    var out = escapeReach(pad, fanHeading(base, 0));
+    if (fan <= fan_len) return out;
+    for (1..fan) |k| out = @min(out, escapeReach(pad, fanHeading(base, k)));
+    return out;
+}
+
 /// The `k`-th heading of the search fan around `base`: straight on first, then
 /// ±45°, ±90°, … so the least disturbing escape is always tried first.
 fn fanHeading(base: usize, k: usize) [2]f64 {
@@ -695,8 +753,10 @@ fn chooseEscape(cands: []const Candidate) ?Candidate {
 }
 
 /// One escape the chooser may take: the `k`-th heading of the fan around
-/// `base`, rejoining the route `skip` vertices along its tail.
-const Choice = struct { base: usize, k: usize, skip: usize };
+/// `base`, rejoining the route `skip` vertices along its tail. `reverse` marks a
+/// candidate that turns back past 90° on a chain `fanWidth` diagnosed as
+/// wrong-way — the only kind allowed to skip the stub it is undoing.
+const Choice = struct { base: usize, k: usize, skip: usize, reverse: bool = false };
 
 /// The copper `pick` would draw, or null when it does not clear or would leave
 /// something the old copper carried behind.
@@ -718,10 +778,20 @@ fn escapeOn(
     };
     const tail = beyondZone(job.pts, c, reach) orelse return null;
     if (pick.skip >= tail.len) return null;
-    // Only lattice noise sitting on the exit may be skipped — never a vertex
-    // far enough out to be somebody's routing decision (see `skip_reach_mm`).
+    // Only lattice noise sitting on the exit may be skipped — never a vertex far
+    // enough out to be somebody's routing decision (see `skip_reach_mm`).
+    //
+    // A REVERSAL measures that same budget from the exit RING rather than from
+    // the one point standing on it. The vertex it has to drop is the wrong-way
+    // stub it exists to undo, which by construction sits on the OPPOSITE side of
+    // that very circle — so it is the same "one lattice step past the escape
+    // zone" allowance, read radially. Nothing farther out qualifies, and nothing
+    // ahead of the new ray qualifies at all: a vertex the escape is heading
+    // TOWARDS is route, not noise, whichever way the old copper went.
     for (tail[0..pick.skip]) |p| {
-        if (dist(p, ray.exit) > skip_reach_mm) return null;
+        if (dist(p, ray.exit) <= skip_reach_mm) continue;
+        if (!pick.reverse or dist(p, c) > reach + skip_reach_mm) return null;
+        if ((p[0] - c[0]) * dir[0] + (p[1] - c[1]) * dir[1] > 0) return null;
     }
     if (!clear(ctx, ray.at, ray.exit)) return null;
     const built = (try joinBeyond(Context, arena, ray, tail[pick.skip..], ctx, clear)) orelse return null;
@@ -753,11 +823,13 @@ fn escapeStep(
     const c = job.pad.centre();
     const base = baseHeading(job.pts, c) orelse return null;
     // Is there room for the escape this connection needs? A hop whose
-    // continuation sits closer to the pad centre than the escape on the heading
-    // it leaves by cannot be made compliant by ANY ray — the copper would have
-    // to leave the pad, pass the point it is serving, and come back. Such an end
-    // keeps what it has and is counted as a fallback, like a blocked one.
-    if (beyondZone(job.pts, c, escapeReach(job.pad, fanHeading(base, 0))) == null) return null;
+    // continuation sits closer to the pad centre than the shortest escape the
+    // fan can ask for (`bailReach`) cannot be made compliant by ANY ray — the
+    // copper would have to leave the pad, pass the point it is serving, and come
+    // back. Such an end keeps what it has and is counted as a fallback, like a
+    // blocked one.
+    const fan = fanWidth(job.pts, c, base);
+    if (beyondZone(job.pts, c, bailReach(job.pad, base, fan)) == null) return null;
     var cands: std.ArrayList(Candidate) = .empty;
     // The copper already on the board goes in FIRST, when the rule already
     // permits it: first place means it wins every tie, so only a strictly better
@@ -769,9 +841,11 @@ fn escapeStep(
         .bends = bendCorners(job.pts),
         .held = true,
     });
-    for (0..fan_len) |k| {
+    for (0..fan) |k| {
+        const dir = fanHeading(base, k);
+        const reverse = dir[0] * headings[base][0] + dir[1] * headings[base][1] < 0;
         for (0..max_tail_skip + 1) |skip| {
-            const pick = Choice{ .base = base, .k = k, .skip = skip };
+            const pick = Choice{ .base = base, .k = k, .skip = skip, .reverse = reverse };
             const built = (try escapeOn(Context, arena, job, pick, ctx, clear)) orelse continue;
             try cands.append(arena, .{
                 .pts = built,
@@ -1527,6 +1601,119 @@ const cap_pad = Pad{ .x0 = -0.31, .y0 = -0.28, .x1 = 0.31, .y1 = 0.28 };
 /// owner's second complaint was drawn on. Its west reach is 0.6 mm, which is
 /// where the square corner sat.
 const bypass_pad = Pad{ .x0 = -0.45, .y0 = -0.45, .x1 = 0.45, .y1 = 0.45 };
+
+// spec: placement/pad-escape - a chain that turns back on the heading it left the pad by opens the fan to every heading, so a wrong-way escape can be re-aimed at the route it serves
+test "an escape aimed against its own route is turned round onto the route's heading" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    // A QFN pin whose maze leg left EAST — one lattice step, the free outer ring
+    // the gateway fan used to hand out (`router.GateAnchors`) — and then turned
+    // back north-west across itself to reach its partner. The pad's own copper
+    // says the first leg was wrong: the second one points 135 degrees off it.
+    const pts = [_][2]f64{
+        .{ 0, 0 },
+        .{ 0.254, 0 },
+        .{ 0.254 - 0.4 * std.math.sqrt1_2, 0.4 * std.math.sqrt1_2 },
+        .{ 0.254 - 0.8 * std.math.sqrt1_2, 0.4 * std.math.sqrt1_2 },
+    };
+    try testing.expectEqual(@as(usize, 0), baseHeading(&pts, .{ 0, 0 }).?); // east
+    try testing.expectEqual(headings.len, fanWidth(&pts, .{ 0, 0 }, 0));
+
+    const job = EndJob{ .pts = &pts, .pad = qfn_pad };
+    const out = (try escapeHead(Board, arena, job, .{}, Board.clear)) orelse
+        return testing.expect(false);
+    // North-west is the fifth swivel off east — `fan_len` stops at the second,
+    // so this heading exists only because the chain asked for the whole compass.
+    const ray = rayOf(out);
+    try testing.expect(ray[0] < 0 and ray[1] > 0);
+    try testing.expectApproxEqAbs(escapeReach(qfn_pad, headings[3]), ray[2], 1e-9);
+    // And it is bought, not spent: the connection is shorter than the one it
+    // replaces, not merely differently shaped.
+    try testing.expect(polylineLength(out) < polylineLength(&pts) - 0.4);
+}
+
+// spec: placement/pad-escape - the fan only opens past its forward headings for a chain whose own second leg turns back on the first, so a well-formed escape is scored against exactly the headings it always was
+test "the fan opens to every heading only for a chain that turns back on itself" {
+    const c = [2]f64{ 0, 0 };
+    // Straight out east, then a 90 degree turn north: still going somewhere.
+    const forward = [_][2]f64{ .{ 0, 0 }, .{ 0.4, 0 }, .{ 0.4, 1.0 } };
+    try testing.expectEqual(fan_len, fanWidth(&forward, c, 0));
+    // The same first leg, then 135 degrees back: not going anywhere it has not
+    // already been.
+    const back = [_][2]f64{ .{ 0, 0 }, .{ 0.4, 0 }, .{ -0.3, -0.7 } };
+    try testing.expectEqual(headings.len, fanWidth(&back, c, 0));
+    // A single-leg chain has no second leg to read, so it keeps the narrow fan.
+    const one = [_][2]f64{ .{ 0, 0 }, .{ 0.4, 0 } };
+    try testing.expectEqual(fan_len, fanWidth(&one, c, 0));
+    // A widened fan is judged against the SHORTEST escape any of its headings
+    // asks for; the narrow one still measures the heading it leaves by. On a
+    // 0.3 x 0.9 land those differ by a factor of two, which is the difference
+    // between "no ray can serve this hop" and a ray that serves it easily.
+    try testing.expectApproxEqAbs(@as(f64, 0.6), bailReach(qfn_pad, 2, fan_len), 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0.3), bailReach(qfn_pad, 2, headings.len), 1e-9);
+}
+
+// spec: placement/pad-escape - a reversal may rejoin past the wrong-way stub it undoes, measuring the same lattice-noise budget radially, and never past a vertex the new ray is heading towards
+test "only a reversal may skip the wrong-way stub, and never a vertex ahead of it" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    // The same shape with a longer wrong-way stub: 0.508 mm east, which is past
+    // the 0.362 mm the north-west escape reaches, so the reversal can only be
+    // drawn if it may rejoin the route PAST that stub.
+    const pts = [_][2]f64{
+        .{ 0, 0 },
+        .{ 0.508, 0 },
+        .{ 0.508 - 0.6 * std.math.sqrt1_2, 0.6 * std.math.sqrt1_2 },
+        .{ 0.508 - 1.2 * std.math.sqrt1_2, 0.6 * std.math.sqrt1_2 },
+    };
+    const job = EndJob{ .pts = &pts, .pad = qfn_pad };
+    const nw = Choice{ .base = 0, .k = 5, .skip = 1, .reverse = true };
+    try testing.expect((try escapeOn(Board, arena, job, nw, .{}, Board.clear)) != null);
+    // The same skip on a candidate that is NOT undoing that stub is refused: the
+    // vertex is 0.8 mm from the ray's exit, far outside the noise budget.
+    var forward = nw;
+    forward.reverse = false;
+    try testing.expect((try escapeOn(Board, arena, job, forward, .{}, Board.clear)) == null);
+    // Nor may a reversal swallow the vertex it is heading TOWARDS — that is the
+    // route, not the stub. Skipping two takes in the north-west leg itself.
+    var greedy = nw;
+    greedy.skip = 2;
+    try testing.expect((try escapeOn(Board, arena, job, greedy, .{}, Board.clear)) == null);
+}
+
+// spec: placement/pad-escape - an authored (max-freq …) escape reserve outranks this pass, so no widened fan can re-aim an RF net's straight exit
+test "an escape-ruled net keeps its authored straight exit" {
+    // The exemption `passBoard` applies before a net's chains are ever built:
+    // a net whose reserve is authored is skipped whole, widened fan and all.
+    const rules = [_]optimizer.NetRule{
+        .{ .class = .{ .name = "rf" }, .rf = .{ .max_freq_hz = 12e9, .escape_mm = 1.5 } },
+        .{ .class = .{ .name = "sig" } },
+    };
+    var placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 1,
+        .maxy = 1,
+        .generated = true,
+    };
+    placement.rules.net = &rules;
+    try testing.expect(escapeRuled(placement, 0));
+    try testing.expect(!escapeRuled(placement, 1));
+    // And the reserve's own shape is never read as wrong-way: an authored escape
+    // runs straight for far longer than this pass's floor and then bends once,
+    // which is forward progress on any heading it leaves by.
+    const reserved = [_][2]f64{ .{ 0, 0 }, .{ 1.5, 0 }, .{ 2.5, 1.0 } };
+    try testing.expectEqual(fan_len, fanWidth(&reserved, .{ 0, 0 }, 0));
+}
 
 // spec: placement/pad-escape - an escape that is already compliant still competes against the whole fan, so a legal ray aimed the wrong way is re-read instead of waved through
 

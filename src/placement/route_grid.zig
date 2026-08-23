@@ -314,6 +314,61 @@ pub fn selectedDiffPairGap(placement: optimizer.Placement, selected_nets: []cons
     return 0;
 }
 
+/// One maze leg's A* priority term: the straight-line distance from a node to
+/// the goal REGION's bounding box, discounted by `scale`.
+///
+/// A box rather than a point because a leg's goals are a pad's whole gateway fan
+/// (`router.padGateways`), not one node — an estimate aimed at any single member
+/// would over-state the distance to the others and stop being admissible. Inside
+/// the box it is zero, which is also what lets the search stop the moment the
+/// best `dist + escape stub` it holds can no longer be beaten: every goal sits
+/// in the box, so a goal's priority IS its cost paid.
+///
+/// `scale` must be the SMALLEST multiplier any step of the leg can be discounted
+/// by, or the estimate can exceed the true remaining cost and the path found
+/// stops being the cheapest one.
+pub const Heuristic = struct {
+    active: bool = false,
+    scale: f64 = 1,
+    min_x: f64 = 0,
+    min_y: f64 = 0,
+    max_x: f64 = 0,
+    max_y: f64 = 0,
+
+    /// The estimate for `node`, or 0 for a leg with no goals to aim at.
+    pub fn estimate(self: Heuristic, grid: Grid, node: usize) f64 {
+        if (!self.active) return 0;
+        const x = grid.worldX(node % grid.nx);
+        const y = grid.worldY(node / grid.nx);
+        const dx = @max(@max(self.min_x - x, x - self.max_x), 0);
+        const dy = @max(@max(self.min_y - y, y - self.max_y), 0);
+        return std.math.hypot(dx, dy) * self.scale;
+    }
+};
+
+/// Build the `Heuristic` bounding `goals` (full `layer*nodes + node` keys).
+pub fn heuristic(grid: Grid, goals: []const usize, nodes: usize, scale: f64) Heuristic {
+    if (goals.len == 0) return .{};
+    var out = Heuristic{
+        .active = true,
+        .scale = scale,
+        .min_x = std.math.inf(f64),
+        .min_y = std.math.inf(f64),
+        .max_x = -std.math.inf(f64),
+        .max_y = -std.math.inf(f64),
+    };
+    for (goals) |goal| {
+        const target = goal % nodes;
+        const x = grid.worldX(target % grid.nx);
+        const y = grid.worldY(target / grid.nx);
+        out.min_x = @min(out.min_x, x);
+        out.min_y = @min(out.min_y, y);
+        out.max_x = @max(out.max_x, x);
+        out.max_y = @max(out.max_y, y);
+    }
+    return out;
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 const testing = std.testing;

@@ -2373,11 +2373,14 @@ src/placement/route_diagnose.zig::capture | fn capture( core: *const router.Rout
 src/placement/route_free_space.zig::tryTerminalTree | fn tryTerminalTree( result_arena: std.mem.Allocator, ctx: anytype, net: i32, pts: []const router.NetPt, tracks: *std.ArrayList(router.Track), vias: *std.ArrayList(router.Via), comptime DirectPath: type, comptime clear_segment: fn (DirectPath, Point, Point) bool, comptime stamp_occ: fn (@TypeOf(ctx), Point, Point, i32, u8) void, comptime stamp_rf: fn (@TypeOf(ctx), Point, Point, i32, u8) void, ) std.mem.Allocator.Error!bool
 src/placement/route_grid.zig::Grid struct_
 src/placement/route_grid.zig::GridDims struct_
+src/placement/route_grid.zig::Heuristic struct_
 src/placement/route_grid.zig::Mode enum_
 src/placement/route_grid.zig::apron_mm value
 src/placement/route_grid.zig::effectiveGridScale | fn effectiveGridScale(selected_nets: []const bool, requested: f64) f64
+src/placement/route_grid.zig::estimate | fn estimate(self: Heuristic, grid: Grid, node: usize) f64
 src/placement/route_grid.zig::fine_selection_max_nets value
 src/placement/route_grid.zig::fittedGridScale | fn fittedGridScale( placement: optimizer.Placement, params: router.RouteParams, selected_nets: []const bool, requested: f64, ) f64
+src/placement/route_grid.zig::heuristic | fn heuristic(grid: Grid, goals: []const usize, nodes: usize, scale: f64) Heuristic
 src/placement/route_grid.zig::maxRouteParams | fn maxRouteParams( placement: optimizer.Placement, base: router.RouteParams, selected_nets: []const bool, ) router.RouteParams
 src/placement/route_grid.zig::max_batch_expansions value
 src/placement/route_grid.zig::max_nodes value

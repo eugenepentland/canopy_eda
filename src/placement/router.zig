@@ -3142,7 +3142,7 @@ fn mazeHop(state: *GapState, live: GapBoard, from: NetPt, to: NetPt, net: i32) s
     // the search trivially succeed without laying any metal).
     var tracks: std.ArrayList(Track) = .empty;
     var vias: std.ArrayList(Via) = .empty;
-    const hit = (try dijkstra(ctx, net, goals.items, seeds.items, &tracks, &vias)) orelse {
+    const hit = (try dijkstra(ctx, net, .{ .goals = goals.items, .sources = seeds.items, .anchors = .{ .source = from, .goal = to } }, &tracks, &vias)) orelse {
         if (routeCancelled(ctx)) return null;
         const direct_reason: GapReason = if (searchWasLimited(ctx, @intCast(net))) .exhausted else .blocked;
         // The fine finishing rung deliberately allows an SMD terminal via. Give
@@ -3370,7 +3370,7 @@ fn mazeStitch(state: *GapState, live: GapBoard, pt: NetPt, net: i32, poured: boo
     }
     var tracks: std.ArrayList(Track) = .empty;
     var vias: std.ArrayList(Via) = .empty;
-    const hit = (try dijkstra(ctx, net, goals, seeds.items, &tracks, &vias)) orelse {
+    const hit = (try dijkstra(ctx, net, .{ .goals = goals, .sources = seeds.items, .anchors = .{ .source = pt } }, &tracks, &vias)) orelse {
         state.reason = if (searchWasLimited(ctx, @intCast(net))) .exhausted else .blocked;
         return null;
     };
@@ -6854,12 +6854,10 @@ fn routeNetToZone(
             connected_any = true;
             continue;
         }
-        const goal = ctx.grid.nearest(pt.x, pt.y);
-        var goals: std.ArrayList(usize) = .empty;
-        try goals.append(ctx.arena, @as(usize, pt.layer) * nodes + ctx.grid.node(goal[0], goal[1]));
-        try padGateways(ctx, tracks.items, vias.items, pt, net, &goals);
+        var ends = try padMazeEnds(ctx, tracks.items, vias.items, pt, net);
+        ends.sources = sources.items;
         const prior = tracks.items.len; // this net's copper BEFORE the leg
-        if (try dijkstra(ctx, net, goals.items, sources.items, tracks, vias)) |hit| {
+        if (try dijkstra(ctx, net, ends, tracks, vias)) |hit| {
             try gateStub(ctx, net, pt, hit.goal, vias.items, tracks);
             // Same weld the terminal tree does, for the same reason: after the
             // first pad this pass seeds from the net's own `occ` marks, so the
@@ -6890,6 +6888,18 @@ fn routeNetToZone(
     }
     ctx.zone_partial = !complete and connected_any;
     return complete;
+}
+
+/// The keys ONE pad terminal may finish a maze leg on — its access node plus its
+/// gateway fan — with the anchor that prices every one of them (`GateAnchors`).
+/// The caller fills in the leg's source side.
+fn padMazeEnds(ctx: *Ctx, tracks: []const Track, vias: []const Via, pt: NetPt, net: i32) std.mem.Allocator.Error!MazeEnds {
+    const nodes = ctx.grid.nx * ctx.grid.ny;
+    const nd = ctx.grid.nearest(pt.x, pt.y);
+    var goals: std.ArrayList(usize) = .empty;
+    try goals.append(ctx.arena, @as(usize, pt.layer) * nodes + ctx.grid.node(nd[0], nd[1]));
+    try padGateways(ctx, tracks, vias, pt, net, &goals);
+    return .{ .goals = goals.items, .anchors = .{ .goal = pt } };
 }
 
 /// Connect every pad of one net by repeatedly maze-routing the next pad to the
@@ -7232,14 +7242,16 @@ pub fn tryMazeTerminalTree(
     var have_copper = false; // true once some leg routed (seed stub emitted)
     var connected_legs: usize = 0;
     for (pts[1..]) |pt| {
-        const goal = ctx.grid.nearest(pt.x, pt.y);
-        const goal_key = @as(usize, pt.layer) * nodes + ctx.grid.node(goal[0], goal[1]);
-        var goals: std.ArrayList(usize) = .empty;
-        try goals.append(ctx.arena, goal_key);
-        try padGateways(ctx, tracks.items, vias.items, pt, net, &goals);
-        const extra: []const usize = if (have_copper) &.{} else seed_gates.items;
+        var ends = try padMazeEnds(ctx, tracks.items, vias.items, pt, net);
+        // Both ends of the FIRST leg are pad fans, so both are priced. Once this
+        // net owns copper the source side is that copper, not an escape: there is
+        // no stub to charge for standing on metal that already exists.
+        if (!have_copper) {
+            ends.sources = seed_gates.items;
+            ends.anchors.source = pts[0];
+        }
         const prior = tracks.items.len; // this net's copper BEFORE the leg
-        if (try dijkstra(ctx, net, goals.items, extra, tracks, vias)) |hit| {
+        if (try dijkstra(ctx, net, ends, tracks, vias)) |hit| {
             // Join the goal pad's centre to whichever entry node the path
             // actually reached (plain access node or gateway alike).
             try gateStub(ctx, net, pt, hit.goal, vias.items, tracks);
@@ -8770,14 +8782,10 @@ fn tryViaSeededMazeCandidate(
     });
     stampViaOcc(run.ctx, pos[0], pos[1], run.net);
 
-    const nodes = run.ctx.grid.nx * run.ctx.grid.ny;
-    const goal = run.ctx.grid.nearest(to.x, to.y);
-    var goals: std.ArrayList(usize) = .empty;
-    try goals.append(run.ctx.arena, @as(usize, to.layer) * nodes + run.ctx.grid.node(goal[0], goal[1]));
-    try padGateways(run.ctx, run.tracks.items, run.vias.items, to, run.net, &goals);
+    const ends = try padMazeEnds(run.ctx, run.tracks.items, run.vias.items, to, run.net);
     const old_allow_vias = run.ctx.allow_vias;
     run.ctx.allow_vias = false;
-    const hit = dijkstra(run.ctx, run.net, goals.items, &.{}, run.tracks, run.vias) catch |err| {
+    const hit = dijkstra(run.ctx, run.net, ends, run.tracks, run.vias) catch |err| {
         run.ctx.allow_vias = old_allow_vias;
         return err;
     };
@@ -8872,12 +8880,8 @@ fn tryTwoViaSeededMazeCandidate(
     });
     stampViaOcc(run.ctx, pos[0], pos[1], run.net);
 
-    const nodes = run.ctx.grid.nx * run.ctx.grid.ny;
-    const goal = run.ctx.grid.nearest(to.x, to.y);
-    var goals: std.ArrayList(usize) = .empty;
-    try goals.append(run.ctx.arena, @as(usize, to.layer) * nodes + run.ctx.grid.node(goal[0], goal[1]));
-    try padGateways(run.ctx, run.tracks.items, run.vias.items, to, run.net, &goals);
-    if (try dijkstra(run.ctx, run.net, goals.items, &.{}, run.tracks, run.vias)) |hit| {
+    const ends = try padMazeEnds(run.ctx, run.tracks.items, run.vias.items, to, run.net);
+    if (try dijkstra(run.ctx, run.net, ends, run.tracks, run.vias)) |hit| {
         try gateStub(run.ctx, run.net, to, hit.goal, run.vias.items, run.tracks);
         return .routed;
     }
@@ -11453,8 +11457,56 @@ fn netRoutedLonger(_: void, a: NetRouted, b: NetRouted) bool {
     return std.mem.lessThan(u8, b.name, a.name); // stable, name-descending tiebreak
 }
 
+/// The pad centres whose `padGateways` fan produced the keys one maze leg is
+/// handed, so `dijkstra` can PRICE the escape stub each of those keys implies.
+///
+/// A gateway is not a free way into the grid: whichever one the path uses,
+/// `gateStub` afterwards draws real copper from the pad's centre out to it. The
+/// search used to see none of that — every gateway was a dist-0 source, and any
+/// popped goal was accepted at whatever dist it carried and added nothing — so
+/// the fan's outermost ring was the cheapest entry the maze could buy in EVERY
+/// direction, including straight away from the target. Measured on
+/// `bcuda-lt3045-ldo`: `C_VOUT` left its pad 0.51 mm (ring 2) on the heading
+/// opposite its partner and then turned 45° back across itself, and that
+/// wrong-way stub was permanent, because no later pass may LENGTHEN copper to
+/// straighten what the search chose.
+///
+/// With an anchor the leg pays for what it draws: `hypot(pad, key)`, the
+/// straight-line length of that stub. That is a LOWER bound on the copper
+/// `gateStub` actually lays (an off-axis join mitres, an axis dogleg turns), so
+/// charging it can only under-state the price — which is exactly what keeps it
+/// safe against a search whose A* heuristic must stay admissible.
+///
+/// A null anchor prices nothing, so a caller whose keys are not a pad fan (zone
+/// copper, a seeded via, a stitch's via sites) searches as it always did.
+const GateAnchors = struct { source: ?NetPt = null, goal: ?NetPt = null };
+
+/// One maze leg's two ends: the keys it may finish ON, the keys it may grow FROM
+/// beyond the net's own copper, and the pad fans (if any) those key sets belong
+/// to — the anchors that turn a key into a priced escape rather than a free one.
+const MazeEnds = struct {
+    goals: []const usize,
+    sources: []const usize = &.{},
+    anchors: GateAnchors = .{},
+};
+
+/// What entering or leaving the maze at grid key `k` costs when `anchor` names
+/// the pad the key's fan surrounds — 0 for an unanchored key. See `GateAnchors`.
+///
+/// Through the SAME lens the leg's own steps are priced by: `scale` is the
+/// lowest multiplier any of them can be discounted by (`routeHeuristic`), so a
+/// stub is comparable with the lattice run it is competing against. Charging a
+/// raw millimetre against steps a coupling corridor has halved would price the
+/// escape out of every discount the leg exists to take — measured on the
+/// diff-pair fixture, where the N net stopped detouring toward its P twin at all.
+fn gateStubCost(grid: Grid, nodes: usize, anchor: ?NetPt, k: usize, scale: f64) f64 {
+    const pt = anchor orelse return 0;
+    const n = k % nodes;
+    return std.math.hypot(grid.worldX(n % grid.nx) - pt.x, grid.worldY(n / grid.nx) - pt.y) * scale;
+}
+
 /// Where a successful maze leg entered and left the grid: `goal` is the goal
-/// key it reached (plain access node or pad gateway), `source` the dist-0 key
+/// key it reached (plain access node or pad gateway), `source` the seeded key
 /// the path grew from — the caller stubs the pad centres onto both. `start` is
 /// where the leg's copper ACTUALLY begins: `source`'s own point normally, or
 /// the trimmed point when that source sat inside a foreign land (see the
@@ -11472,49 +11524,16 @@ const MazeSearch = struct {
     lattice: octilinear.Lattice,
 };
 
-const RouteHeuristic = struct {
-    active: bool = false,
-    scale: f64 = 1,
-    min_x: f64 = 0,
-    min_y: f64 = 0,
-    max_x: f64 = 0,
-    max_y: f64 = 0,
+const RouteHeuristic = route_grid.Heuristic;
 
-    fn estimate(self: RouteHeuristic, grid: Grid, node: usize) f64 {
-        if (!self.active) return 0;
-        const x = grid.worldX(node % grid.nx);
-        const y = grid.worldY(node / grid.nx);
-        const dx = @max(@max(self.min_x - x, x - self.max_x), 0);
-        const dy = @max(@max(self.min_y - y, y - self.max_y), 0);
-        return std.math.hypot(dx, dy) * self.scale;
-    }
-};
-
+/// This leg's A* estimate. The scale is the LOWEST multiplier any step of the
+/// leg can be discounted by — 0.1× inside a reference corridor, 0.5× inside a
+/// pair corridor, 0.05× in both — which is what keeps the Euclidean estimate
+/// admissible while it still points somewhere useful.
 fn routeHeuristic(ctx: *Ctx, goals: []const usize, nodes: usize) RouteHeuristic {
-    // Corridor discounts can reduce a geometric step to 0.1× (reference),
-    // 0.5× (pair), or 0.05× combined. Scaling by that same lower bound keeps
-    // the Euclidean estimate admissible while retaining useful direction.
-    if (goals.len == 0) return .{};
     const reference_scale: f64 = if (ctx.reference_corridor != null) reference_corridor_mult else 1;
     const pair_scale: f64 = if (ctx.corridor != null) diff_corridor_mult else 1;
-    var result = RouteHeuristic{
-        .active = true,
-        .scale = reference_scale * pair_scale,
-        .min_x = std.math.inf(f64),
-        .min_y = std.math.inf(f64),
-        .max_x = -std.math.inf(f64),
-        .max_y = -std.math.inf(f64),
-    };
-    for (goals) |goal| {
-        const target = goal % nodes;
-        const x = ctx.grid.worldX(target % ctx.grid.nx);
-        const y = ctx.grid.worldY(target / ctx.grid.nx);
-        result.min_x = @min(result.min_x, x);
-        result.min_y = @min(result.min_y, y);
-        result.max_x = @max(result.max_x, x);
-        result.max_y = @max(result.max_y, y);
-    }
-    return result;
+    return route_grid.heuristic(ctx.grid, goals, nodes, reference_scale * pair_scale);
 }
 
 fn recordSearchLimit(ctx: *Ctx, net: i32) std.mem.Allocator.Error!void {
@@ -11573,18 +11592,73 @@ fn expansionBudget(in: BudgetInput) usize {
     return @min(ordinary, cap);
 }
 
-/// Dijkstra from all of net's current copper (occ==net) plus `extra_sources`
-/// (the seed pad's gateways) to the nearest key in `goals` (full
+/// Seed one maze leg's Dijkstra frontier: every node this net already owns, plus
+/// the seed pad's gateway fan, each at what it costs to START there.
+///
+/// The `occ == net` scan is deliberately NOT filtered by `foreignPadAt`, though a
+/// stamped node CAN be illegal copper (the halo reaches past the centreline).
+/// Dropping those sources does remove the resulting violations, but measured on
+/// barracuda it costs NINE connected nets and doubles the route time:
+/// `tryMazeTerminalTree` fails the whole net when one leg cannot reach the net's
+/// existing copper, and those failures cascade into rip-up escalation. Seeding
+/// only the legal marks when any exist measured identical — the legs that die
+/// need the buried cluster specifically, not just some legal source.
+/// `trimBuriedStart` handles it at the other end instead: the leg routes, and its
+/// copper is pulled back off the land it started in.
+///
+/// PRICES (see `GateAnchors`): a gateway costs the stub that reaches it, and so
+/// does the seed pad's own ACCESS node — that node is a mark in `occ` like any
+/// other, but `gateStub` still draws copper from the pad centre out to it, and
+/// leaving the one reachable entry free would price the whole fan against a zero
+/// that is not real. Every OTHER mark is copper that already exists and costs
+/// nothing to stand on.
+fn seedMazeSources(ctx: *Ctx, net: i32, ends: MazeEnds, search: MazeSearch) std.mem.Allocator.Error!void {
+    const grid = ctx.grid;
+    const nodes = grid.nx * grid.ny;
+    const anchor = ends.anchors.source;
+    const seed_key: ?usize = if (anchor) |pt| blk: {
+        const nd = grid.nearest(pt.x, pt.y);
+        break :blk @as(usize, pt.layer) * nodes + grid.node(nd[0], nd[1]);
+    } else null;
+    for (0..ctx.occ.len) |layer| {
+        var cursor: usize = 0;
+        while (std.mem.findScalarPos(i32, ctx.occ[layer], cursor, net)) |n| {
+            const k = layer * nodes + n;
+            var at = net_topology.sourceCost(ctx.join_lands, grid.worldX(n % grid.nx), grid.worldY(n / grid.nx));
+            if (seed_key == k) at += gateStubCost(grid, nodes, anchor, k, search.heuristic.scale);
+            try search.state.settle(k, at, -1);
+            try search.pq.add(.{ .f = at + search.heuristic.estimate(grid, n), .d = at, .key = k });
+            cursor = n + 1;
+        }
+    }
+    for (ends.sources) |k| {
+        const at = gateStubCost(grid, nodes, anchor, k, search.heuristic.scale);
+        if (at < search.state.dist[k]) {
+            try search.state.settle(k, at, -1);
+            try search.pq.add(.{ .f = at + search.heuristic.estimate(grid, k % nodes), .d = at, .key = k });
+        }
+    }
+}
+
+/// Dijkstra from all of net's current copper (occ==net) plus `ends.sources`
+/// (the seed pad's gateways) to the CHEAPEST key in `ends.goals` (full
 /// layer*nodes+node keys). On success, stamps the path as the net's copper,
 /// emits the tracks/vias, and reports which goal/source the path used.
+///
+/// "Cheapest" counts the escape stubs, not just the lattice path: with
+/// `ends.anchors` naming the pad a fan belongs to, a source gateway is seeded at
+/// the length of the stub `gateStub` will draw to reach it, and a goal is
+/// accepted on `dist + its own stub` (`GateAnchors`). Without anchors every stub
+/// is zero and the search is the pre-pricing one to the bit.
 fn dijkstra(
     ctx: *Ctx,
     net: i32,
-    goals: []const usize,
-    extra_sources: []const usize,
+    ends: MazeEnds,
     tracks: *std.ArrayList(Track),
     vias: *std.ArrayList(Via),
 ) std.mem.Allocator.Error!?DijkstraHit {
+    const goals = ends.goals;
+    const anchors = ends.anchors;
     const grid = ctx.grid;
     const nodes = grid.nx * grid.ny;
     // Mark in `tracks` before this leg — the buried-source repair below only
@@ -11600,14 +11674,18 @@ fn dijkstra(
     // nodes), so a range test rejects almost every pop before the membership
     // scan runs at all. Same predicate, same `found_key`; with no goals the
     // range is empty and the test is false, exactly as the scan was.
+    //
+    // `goal_stub_min` rides along: the cheapest stub in the whole goal fan, and
+    // so the OPTIMALITY bound of the priced accept below.
+    const heuristic = routeHeuristic(ctx, goals, nodes);
     var goal_lo: usize = std.math.maxInt(usize);
     var goal_hi: usize = 0;
+    var goal_stub_min: f64 = std.math.inf(f64);
     for (goals) |goal| {
         goal_lo = @min(goal_lo, goal);
         goal_hi = @max(goal_hi, goal);
+        goal_stub_min = @min(goal_stub_min, gateStubCost(grid, nodes, anchors.goal, goal, heuristic.scale));
     }
-
-    const heuristic = routeHeuristic(ctx, goals, nodes);
     if (ctx.route_queue == null) ctx.route_queue = RoutePq.init(ctx.arena, {});
     const pq = &ctx.route_queue.?;
     pq.clearRetainingCapacity();
@@ -11622,35 +11700,7 @@ fn dijkstra(
             .enabled = ctx.corridor == null and ctx.reference_corridor == null,
         },
     };
-    // Sources: every node already owned by this net, on any signal layer…
-    //
-    // Deliberately NOT filtered by `foreignPadAt`, though a stamped node CAN be
-    // illegal copper (the halo reaches past the centreline). Dropping those
-    // sources does remove the resulting violations, but measured on barracuda it
-    // costs NINE connected nets and doubles the route time: `tryMazeTerminalTree`
-    // fails the whole net when one leg cannot reach the net's existing copper,
-    // and those failures cascade into rip-up escalation. Seeding only the legal
-    // marks when any exist measured identical — the legs that die need the buried
-    // cluster specifically, not just some legal source. `trimBuriedStart` handles
-    // it at the other end instead: the leg routes, and its copper is pulled back
-    // off the land it started in.
-    for (0..n_layers) |layer| {
-        var cursor: usize = 0;
-        while (std.mem.findScalarPos(i32, ctx.occ[layer], cursor, net)) |n| {
-            const k = layer * nodes + n;
-            const at = net_topology.sourceCost(ctx.join_lands, grid.worldX(n % grid.nx), grid.worldY(n / grid.nx));
-            try state.settle(k, at, -1);
-            try pq.add(.{ .f = at + heuristic.estimate(grid, n), .d = at, .key = k });
-            cursor = n + 1;
-        }
-    }
-    // …plus the seed pad's gateway nodes (validated by `padGateways`).
-    for (extra_sources) |k| {
-        if (dist[k] > 0) {
-            try state.settle(k, 0, -1);
-            try pq.add(.{ .f = heuristic.estimate(grid, k % nodes), .d = 0, .key = k });
-        }
-    }
+    try seedMazeSources(ctx, net, ends, search);
 
     // An escape-forced net lost its direct-synthesis shortcut and pays soft
     // penalties around both terminals, so its search legitimately expands more
@@ -11675,6 +11725,15 @@ fn dijkstra(
         t.maze_expansions += expansions;
     };
     var found_key: ?usize = null;
+    // The best `dist + goal stub` accepted so far, and the OPTIMALITY invariant
+    // that lets the leg stop: every goal still unpopped costs at least the heap
+    // minimum `f` to reach — A* admissibility over a goal region where `h` is
+    // zero, so a goal's own priority IS its cost paid — and at least
+    // `goal_stub_min` to leave. Once `f + goal_stub_min` reaches `found_total`,
+    // nothing left in the queue can beat it, and every goal that could TIE it
+    // has already been popped. An unanchored leg prices every stub at zero, so
+    // the test fires on the first goal popped: the pre-pricing search, exactly.
+    var found_total: f64 = std.math.inf(f64);
     while (pq.removeOrNull()) |it| {
         if (it.d > dist[it.key]) continue;
         // A single maze leg may consume hundreds of thousands of expansions;
@@ -11686,10 +11745,23 @@ fn dijkstra(
         if (it.key >= goal_lo and it.key <= goal_hi and
             std.mem.indexOfScalar(usize, goals, it.key) != null)
         {
-            found_key = it.key;
-            break;
+            // A goal pops at its FINAL dist (a stale entry was skipped above), so
+            // this is the one chance to price it. A STRICT improvement is required
+            // to displace an equal earlier one, so the winner is a function of the
+            // queue order alone — the same board still routes byte-identically.
+            const total = it.d + gateStubCost(grid, nodes, anchors.goal, it.key, heuristic.scale);
+            if (total < found_total) {
+                found_total = total;
+                found_key = it.key;
+            }
         }
+        if (found_key != null and it.f + goal_stub_min >= found_total) break;
         if (expansions >= expansion_limit) {
+            // A budget that runs out AFTER a goal was accepted has not failed the
+            // leg: `found_total` is already the best any remaining key could tie,
+            // it is simply no longer proven optimal. Ship it rather than throwing
+            // a routed leg away over the last few expansions.
+            if (found_key != null) break;
             try recordSearchLimit(ctx, net);
             return null;
         }
@@ -13473,9 +13545,18 @@ test "quarter-pitch pass rescues a base-grid quantization failure beyond the loc
     try testing.expectEqual(@as(usize, 2), drc_mod.countKind(viol, .component_edge));
     // The rescue draws raw lattice copper: it runs BELOW the finish, so no pad
     // escape has disciplined it yet and its legs still leave their own lands
-    // off centre — seven same-net `land_transit` warnings that belong to the
+    // off centre — nine same-net `land_transit` warnings that belong to the
     // fixture's geometry, not to a clearance failure.
-    try testing.expectEqual(@as(usize, 7), drc_mod.countKind(viol, .land_transit));
+    //
+    // Nine rather than the seven this fixture used to draw: priced pad gateways
+    // (`GateAnchors`) stopped the legs buying a free outer fan ring, so each one
+    // now enters its land nearer the centre and passes closer to the siblings of
+    // a seven-pad chain packed on 1 mm pitch. The finish's own pad-escape pass —
+    // which this rescue runs below, and which every board sees — is what centres
+    // those entries; the trade on the whole board is measured the other way
+    // round (`bcuda-lt3045-ldo`: 18.47 mm of trace to 16.87 mm, 24 quality
+    // warnings to 9).
+    try testing.expectEqual(@as(usize, 9), drc_mod.countKind(viol, .land_transit));
     // Under the full-cross-section contact graph, only three stored sections
     // can be deleted without changing pad/live-via/pour connectivity. Eight
     // sections the capsule-only graph called redundant are now correctly kept:
@@ -13485,7 +13566,7 @@ test "quarter-pitch pass rescues a base-grid quantization failure beyond the loc
     // gate. Its former width-only contact is a weak graze, not a fabricated
     // junction, so it must not be reported as an implicit electrical join.
     try testing.expectEqual(@as(usize, 0), drc_mod.countKind(viol, .implicit_junction));
-    try testing.expectEqual(@as(usize, 14), viol.len);
+    try testing.expectEqual(@as(usize, 16), viol.len);
 
     // The public batch seam runs the same sequence before diagnostics capture,
     // so the rescued net disappears from `failed` in the finished result.
@@ -15026,13 +15107,86 @@ test "a routed diagonal reserves its corner cells against foreign nets only" {
     // (6,6) — the unique shortest path is the pure 45° diagonal.
     ctx.occ[0][grid.node(2, 2)] = 0;
     const goals = [_]usize{grid.node(6, 6)}; // layer 0 ⇒ key == node index
-    const hit = try dijkstra(&ctx, 0, &goals, &.{}, &tracks, &vias);
+    const hit = try dijkstra(&ctx, 0, .{ .goals = &goals }, &tracks, &vias);
     try testing.expect(hit != null);
 
     // Each diagonal step (i,i)→(i+1,i+1) squeezes past corners (i+1,i) and
     // (i,i+1) — all must now be reserved for net 0: blocked for a foreign net,
     // open for the owner, and never copper (occ stays EMPTY).
     try testing.expect(diagCornersReserved(&ctx, 2, 6, 0));
+}
+
+// spec: placement/router - a maze leg is charged for the escape stub each pad gateway implies, so it buys the entry that points where the route goes instead of the outermost free one
+test "a priced gateway fan stops the maze buying a free wrong-way escape" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // Two off-grid pads 2.61 mm apart with one foreign land standing between
+    // them, so the lattice run has to go round while a straight gateway stub
+    // does not.
+    //
+    // Unpriced, this is the shape the fan cannot help drawing: BOTH ends may
+    // enter the grid anywhere in their six-ring fan for nothing, so the search
+    // minimises only the lattice run BETWEEN the two fans — and `gateStub` then
+    // draws two long straight rays from the pad centres out to wherever that run
+    // happened to start and end. Any meeting point off the line between the pads
+    // makes those rays a V, and nothing in the cost told the search so. Priced,
+    // the two rays ARE part of what is minimised.
+    const grid = Grid{ .ox = 0, .oy = 0, .g = 0.254, .nx = 20, .ny = 14 };
+    const obs = [_]PadObs{.{ .x0 = 1.5, .y0 = 0.6, .x1 = 2.1, .y1 = 1.4, .net = 1, .layer = 0 }};
+    var ctx = Ctx{
+        .arena = arena,
+        .grid = grid,
+        .obs = &obs,
+        .reach = 0.1905,
+        .occ = try allocLayerGrids(arena, 1, grid.nx * grid.ny),
+        .resv = try allocLayerGrids(arena, 1, grid.nx * grid.ny),
+        .params = .{},
+        .base = .{},
+        .index_reach = 0.1905,
+    };
+    const from = NetPt{ .x = 2.948, .y = 1.424, .layer = 0 };
+    const to = NetPt{ .x = 0.538, .y = 0.418, .layer = 0 };
+    var src_gates: std.ArrayList(usize) = .empty;
+    var goals: std.ArrayList(usize) = .empty;
+    const seed = grid.nearest(from.x, from.y);
+    ctx.occ[0][grid.node(seed[0], seed[1])] = 0;
+    try padGateways(&ctx, &.{}, &.{}, from, 0, &src_gates);
+    const near = grid.nearest(to.x, to.y);
+    try goals.append(arena, grid.node(near[0], near[1])); // layer 0 ⇒ key == node
+    try padGateways(&ctx, &.{}, &.{}, to, 0, &goals);
+    try testing.expect(src_gates.items.len > 8 and goals.items.len > 8);
+
+    // Route the leg and hand back every millimetre of copper it lays: the maze
+    // run plus the two escape stubs. Only `anchors` differs between the calls.
+    const Leg = struct {
+        fn copper(c: *Ctx, ends: MazeEnds, a: NetPt, b: NetPt) std.mem.Allocator.Error!f64 {
+            clearNetOcc(c, 0);
+            const nd = c.grid.nearest(a.x, a.y);
+            c.occ[a.layer][c.grid.node(nd[0], nd[1])] = 0;
+            var tracks: std.ArrayList(Track) = .empty;
+            var vias: std.ArrayList(Via) = .empty;
+            const hit = (try dijkstra(c, 0, ends, &tracks, &vias)) orelse return std.math.inf(f64);
+            try gateStub(c, 0, a, hit.source, vias.items, &tracks);
+            try gateStub(c, 0, b, hit.goal, vias.items, &tracks);
+            return route_timeline.traceLen(tracks.items);
+        }
+    };
+    const both = MazeEnds{ .goals = goals.items, .sources = src_gates.items };
+    const free = try Leg.copper(&ctx, both, from, to);
+    var priced = both;
+    priced.anchors = .{ .source = from, .goal = to };
+    const paid = try Leg.copper(&ctx, priced, from, to);
+
+    // A whole fan radius is the scale of the thing being bought, so it is the
+    // scale to judge the waste on: the free leg draws MORE than the straight
+    // line between the pads plus one fan radius, and the priced leg draws less.
+    const straight = std.math.hypot(to.x - from.x, to.y - from.y);
+    const fan_reach = @as(f64, @floatFromInt(gate_rings)) * grid.g;
+    try testing.expect(free > straight + fan_reach);
+    try testing.expect(paid < straight + fan_reach);
+    try testing.expect(paid < free - 4 * grid.g);
 }
 
 // spec: placement/router - a leg seeded on a pad-buried halo node has its copper trimmed back off the land instead of the net being failed
@@ -15135,7 +15289,7 @@ test "dijkstra pulls a leg off the foreign land its source was buried in" {
     var tracks: std.ArrayList(Track) = .empty;
     var vias: std.ArrayList(Via) = .empty;
     const goals = [_]usize{grid.node(9, 2)}; // one layer ⇒ key == node index
-    const hit = (try dijkstra(&ctx, 0, &goals, &.{}, &tracks, &vias)) orelse
+    const hit = (try dijkstra(&ctx, 0, .{ .goals = &goals }, &tracks, &vias)) orelse
         return error.LegNotRouted;
 
     // The leg is routed, reaches its goal, and grew from the buried source…
@@ -15321,12 +15475,12 @@ test "batch maze search is bounded and reuses its board-sized buffers" {
 
     var tracks: std.ArrayList(Track) = .empty;
     var vias: std.ArrayList(Via) = .empty;
-    try testing.expect(try dijkstra(&ctx, 0, &.{goal}, &.{}, &tracks, &vias) == null);
+    try testing.expect(try dijkstra(&ctx, 0, .{ .goals = &.{goal} }, &tracks, &vias) == null);
     try testing.expectEqualSlices(usize, &.{0}, ctx.search_limited.items);
     const dist_ptr = ctx.search.dist.ptr;
 
     ctx.occ[0][grid.node(100, 60)] = empty_cell;
-    try testing.expect(try dijkstra(&ctx, 0, &.{goal}, &.{}, &tracks, &vias) != null);
+    try testing.expect(try dijkstra(&ctx, 0, .{ .goals = &.{goal} }, &tracks, &vias) != null);
     try testing.expect(dist_ptr == ctx.search.dist.ptr);
 }
 
@@ -15366,7 +15520,7 @@ test "a rolled-back attempt leaves search_limited byte-identical" {
     const goal = grid.node(190, 60);
     ctx.occ[0][source] = 0;
     for (0..grid.ny) |y| ctx.occ[0][grid.node(100, y)] = 1;
-    try testing.expect(try dijkstra(&ctx, 0, &.{goal}, &.{}, &tracks, &vias) == null);
+    try testing.expect(try dijkstra(&ctx, 0, .{ .goals = &.{goal} }, &tracks, &vias) == null);
     try testing.expectEqualSlices(usize, &.{ 2, 0 }, ctx.search_limited.items);
 
     // Rolling the attempt back unwinds its mark and only its mark.
