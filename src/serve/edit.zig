@@ -776,6 +776,104 @@ fn designBlockInsertPos(source: []const u8) ?usize {
     return end - 1;
 }
 
+/// Replace every direct `(board-role …)` child of the design root, or append
+/// one when the design still relies on the subcircuit default. AST offsets keep
+/// similarly named text in comments, strings, modules, and nested blocks out of
+/// the edit while the byte splice preserves all unrelated source formatting.
+fn patchBoardRoleSource(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    role: env_mod.BoardRole,
+) EditError![]u8 {
+    const nodes = sexpr_parser.parse(allocator, source) catch return error.InvalidSource;
+    defer sexpr_parser.freeNodes(allocator, nodes);
+
+    var root_children: ?[]const @import("../sexpr/ast.zig").Node = null;
+    var root_open_opt: ?usize = null;
+    for (nodes) |node| {
+        const children = node.asList() orelse continue;
+        const is_design_block = node.isForm("design-block");
+        const is_string_block = node.isForm("block") and children.len >= 2 and children[1].asString() != null;
+        if (is_design_block or is_string_block) {
+            root_children = children;
+            root_open_opt = @intCast(node.span.offset);
+            break;
+        }
+    }
+    const children = root_children orelse return error.MalformedSource;
+    if (children.len < 2) return error.MalformedSource;
+
+    const root_open = root_open_opt orelse return error.MalformedSource;
+    const root_end = findFormEnd(source, root_open) orelse return error.MalformedSource;
+    const replacement = switch (role) {
+        .board => "(board-role board)",
+        .subcircuit => "(board-role subcircuit)",
+    };
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    const w = AllocatingWriter{ .writer = &out.writer };
+    var cursor: usize = 0;
+    var found = false;
+    for (children[2..]) |child| {
+        if (!child.isForm("board-role")) continue;
+        const start: usize = @intCast(child.span.offset);
+        const end = findFormEnd(source, start) orelse return error.MalformedSource;
+        if (start < cursor or end > root_end) return error.MalformedSource;
+        try w.writeAll(source[cursor..start]);
+        try w.writeAll(replacement);
+        cursor = end;
+        found = true;
+    }
+    if (found) {
+        try w.writeAll(source[cursor..]);
+        return out.toOwnedSlice();
+    }
+
+    try w.writeAll(source[0 .. root_end - 1]);
+    try w.writeAll("\n  ");
+    try w.writeAll(replacement);
+    try w.writeAll(source[root_end - 1 ..]);
+    return out.toOwnedSlice();
+}
+
+/// POST /api/board-role/:name  Body: {"role":"board|subcircuit"}.
+/// Surgically updates the design-root role, snapshots, and rebuilds so every
+/// role-aware GUI/API consumer observes the change immediately.
+pub fn setBoardRoleApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse return sendJsonError(ctx, res, http_not_found, "missing design");
+    const body = req.body() orelse return sendJsonError(ctx, res, http_bad_request, "missing body");
+    const role_text = parseJsonString(body, "\"role\"") orelse
+        return sendJsonError(ctx, res, http_bad_request, "missing role");
+    const role: env_mod.BoardRole = if (std.mem.eql(u8, role_text, "board"))
+        .board
+    else if (std.mem.eql(u8, role_text, "subcircuit"))
+        .subcircuit
+    else
+        return sendJsonError(ctx, res, http_bad_request, "role must be board or subcircuit");
+
+    const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch
+        return sendJsonError(ctx, res, http_not_found, "cannot read design source");
+    defer ctx.allocator.free(source);
+    const updated = patchBoardRoleSource(ctx.allocator, source, role) catch |err| {
+        const message = switch (err) {
+            error.InvalidSource => "design source has invalid s-expression syntax",
+            error.MalformedSource => "source does not contain an editable design root",
+            else => "could not update design role",
+        };
+        return sendJsonError(ctx, res, http_bad_request, message);
+    };
+    defer ctx.allocator.free(updated);
+
+    const result = writeAndRebuild(ctx.allocator, ctx.project_dir, name, updated, "set board role from schematic") catch
+        return sendJsonError(ctx, res, http_internal_error, "could not save and rebuild design role");
+    res.header(header_cors_allow_origin, "*");
+    res.content_type = .JSON;
+    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"role\":\"{s}\",\"version\":{d}}}", .{
+        @tagName(role), result.version,
+    });
+}
+
 /// Emit `{"ok":true,"version":N}` (or rebuild-failure 500) for a finished mutation.
 fn finishMutation(ctx: *Server, name: []const u8, new_source: []const u8, desc: []const u8, res: *httpz.Response) HandlerError!void {
     const result = writeAndRebuild(ctx.allocator, ctx.project_dir, name, new_source, desc) catch {
@@ -2950,6 +3048,46 @@ pub fn saveSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
 }
 
 // ── Tests ─────────────────────────────────────────────────────────
+
+// spec: Web Server - the schematic Design type control replaces only the design root's board-role form, preserving comments and nested module text
+test "schematic design type replaces the direct board role only" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\(defmodule helper ()
+        \\  (design-block "Nested" (board-role subcircuit)))
+        \\(design-block "Main"
+        \\  ;; Example text: (board-role subcircuit)
+        \\  (section "Power")
+        \\  (board-role subcircuit))
+    ;
+    const updated = try patchBoardRoleSource(allocator, source, .board);
+    defer allocator.free(updated);
+
+    try std.testing.expect(std.mem.indexOf(u8, updated, "(design-block \"Nested\" (board-role subcircuit))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, updated, ";; Example text: (board-role subcircuit)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, updated, "(section \"Power\")\n  (board-role board))") != null);
+}
+
+// spec: Web Server - the schematic Design type control adds an explicit role when a string-named block currently relies on the subcircuit default
+test "schematic design type inserts a board role into a string block root" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\(import helper)
+        \\(block "Carrier"
+        \\  (section "IO"))
+    ;
+    const updated = try patchBoardRoleSource(allocator, source, .subcircuit);
+    defer allocator.free(updated);
+
+    try std.testing.expectEqualStrings(
+        \\(import helper)
+        \\(block "Carrier"
+        \\  (section "IO")
+        \\  (board-role subcircuit))
+    ,
+        updated,
+    );
+}
 
 test "componentLinksDatasheet dedupes a re-download counter name" {
     // spec: serve/edit - datasheet dedupe ignores re-download counter suffix

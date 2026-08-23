@@ -5741,6 +5741,10 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 
 ## Web Server
 
+- the schematic page exposes the current board role as a Design type selector on designs but not reusable module pages
+- the schematic Design type control replaces only the design root's board-role form, preserving comments and nested module text
+- the schematic Design type control adds an explicit role when a string-named block currently relies on the subcircuit default
+
 - A PCB design with PDN intents resolves selected BOM electrical model properties before placement
 - Hierarchical routing processes first-level sub-circuits in authored order, freezes each accepted DRC-clean local signal tree, and then runs exactly one assembled-board global candidate
 - Live autorouting names each first-level sub-circuit when it starts and streams its cumulative copper when it finishes, before whole-board global routing begins, so full and subcircuits-only runs both reveal local progress

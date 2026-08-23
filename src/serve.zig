@@ -742,6 +742,7 @@ pub fn serve(
     // Edit
     router.post("/api/edit-value/:name", edit.editValueApi, .{});
     router.post("/api/design-rules/:name", design_rules_edit.editDesignRulesApi, .{});
+    router.post("/api/board-role/:name", edit.setBoardRoleApi, .{});
     router.post("/api/edit-mpn/:name", edit.editMpnApi, .{});
     router.post("/api/edit-footprint/:name", edit.editFootprintApi, .{});
     router.post("/api/new-design", edit.newDesignApi, .{});

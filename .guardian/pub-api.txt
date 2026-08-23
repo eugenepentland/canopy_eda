@@ -3232,6 +3232,7 @@ src/serve/edit.zig::renameSectionApi | fn renameSectionApi(ctx: *Server, req: *h
 src/serve/edit.zig::restoreDesignCore | fn restoreDesignCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, id: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::rewirePinApi | fn rewirePinApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::saveSourceApi | fn saveSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit.zig::setBoardRoleApi | fn setBoardRoleApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::setDnpApi | fn setDnpApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::swapPinsApi | fn swapPinsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::swapPinsCore | fn swapPinsCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ref_des: []const u8, pin_a: []const u8, pin_b: []const u8, ) EditError!MutationResult

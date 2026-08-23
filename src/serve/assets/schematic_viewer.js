@@ -2045,6 +2045,37 @@
     schPushBtn.addEventListener('click', function () { schPushRun(false, true); });
   }
 
+  // ---- Design type ----
+  // The server owns the source splice: this selector only sends the requested
+  // enum, so comments and unrelated forms never make a client-side round trip.
+  var boardRoleSelect = document.getElementById('board-role-select');
+  if (boardRoleSelect) {
+    boardRoleSelect.addEventListener('change', function () {
+      var previous = boardRoleSelect.value === 'board' ? 'subcircuit' : 'board';
+      var role = boardRoleSelect.value;
+      boardRoleSelect.disabled = true;
+      fetch('/api/board-role/' + encodeURIComponent(DESIGN_NAME), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: role })
+      }).then(function (r) {
+        return r.text().then(function (body) { return { ok: r.ok, body: body }; });
+      }).then(function (resp) {
+        var payload = {};
+        try { payload = JSON.parse(resp.body); } catch (_e) {}
+        if (!resp.ok || payload.ok === false) {
+          throw new Error(payload.error || ('save failed: ' + resp.body));
+        }
+        schToast('Design type set to ' + (role === 'board' ? 'Whole PCB' : 'Subcircuit'), 'ok', 2500);
+        window.location.reload();
+      }).catch(function (e) {
+        boardRoleSelect.value = previous;
+        boardRoleSelect.disabled = false;
+        schToast('Could not change design type: ' + e.message, 'err', 8000);
+      });
+    });
+  }
+
   // ---- Edit SRC ----
   // Loads the raw .sexp via GET /api/source into a modal editor and saves via
   // POST /api/source. The server validates syntax, rebuilds, and bumps the

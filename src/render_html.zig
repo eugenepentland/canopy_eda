@@ -67,6 +67,7 @@ pub const SchematicOptions = struct {
     path: []const u8,
     view: SchematicView = .functional,
     embed: bool = false,
+    board_role: env_mod.BoardRole = .subcircuit,
 };
 
 const PageRender = struct {
@@ -164,7 +165,9 @@ pub fn renderToHtml(
     try pages_tmpl.Navbar.render(.{""}, w);
     try w.writeAll("<div class=\"sch-layout\">");
     try w.writeAll("<div class=\"sch-wrap\">");
-    try writeHeader(w, block.name, design_name, status, options, block.revision, block.kicad_pcb_path != null);
+    var header_options = options;
+    header_options.board_role = block.board.role;
+    try writeHeader(w, block.name, design_name, status, header_options, block.revision, block.kicad_pcb_path != null);
 
     // Pair top-level `(sub-block …)` declarations with the section that wires
     // them (e.g. `(section "XSPI2 NOR Flash" …)` adopts `(sub-block "flash" …)`)
@@ -435,6 +438,23 @@ fn writeHeader(
     try w.writeAll("\">Thermal</a>");
     try w.writeAll("</nav>");
     try writeSchematicModeSwitch(w, design_name, options);
+    // A design's fabrication role is explicit source metadata, not inferred
+    // from its outline or folder. Keep the selector off reusable module pages:
+    // those are definitions embedded by a design, not project design roots.
+    if (std.mem.eql(u8, options.path, "/schematics/")) {
+        try w.writeAll(
+            "<label class=\"board-role-control\" for=\"board-role-select\">" ++
+                "<span>Design type</span><select id=\"board-role-select\" " ++
+                "aria-label=\"Design type\" title=\"Choose whether this design is a reusable subcircuit or a whole PCB\">",
+        );
+        try w.print("<option value=\"subcircuit\"{s}>Subcircuit</option>", .{
+            if (options.board_role == .subcircuit) " selected" else "",
+        });
+        try w.print("<option value=\"board\"{s}>Whole PCB</option>", .{
+            if (options.board_role == .board) " selected" else "",
+        });
+        try w.writeAll("</select></label>");
+    }
     // Deliberately minimal toolbar: Reload, Edit SRC, ERC, the BOM +
     // design-review + PDF exports, and a single PCB-sync control. Everything
     // else (History, Netlist export, datasheet upload) was moved off this bar
@@ -2674,6 +2694,25 @@ test "the PCB-layout link targets the module for a module sub circuit and the de
     try std.testing.expect(std.mem.indexOf(u8, inl_html, "href=\"/pcb-layout/demo?sub=power-in\"") != null);
 }
 
+// spec: Web Server - the schematic page exposes the current board role as a Design type selector on designs but not reusable module pages
+test "schematic header exposes design type only for project designs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var block = emptyAttachBlock("Demo");
+    block.board.role = .board;
+    var checks: CheckResultMap = .empty;
+    const design_html = try renderToHtml(allocator, &block, "", "demo", "", .pass, null, &checks, .{ .path = "/schematics/" });
+    try std.testing.expect(std.mem.indexOf(u8, design_html, "id=\"board-role-select\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, design_html, "<option value=\"board\" selected>Whole PCB</option>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, schematic_viewer_js_asset, "/api/board-role/") != null);
+
+    var module: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer module.deinit();
+    try writeHeader(&module.writer, "Mod", "mod", .pass, .{ .path = "/modules/" }, .{}, false);
+    try std.testing.expect(std.mem.indexOf(u8, module.written(), "board-role-select") == null);
+}
+
 // spec: render_html - Schematic pages expose a URL-backed Sequential and Functional slider with Functional as the default a bare URL renders
 test "schematic header switches between sequential and functional views" {
     // A design served at /schematics/ gets a view toggle whose active Schematic
@@ -2682,7 +2721,7 @@ test "schematic header switches between sequential and functional views" {
     // default page never has to spell its own view out.
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
-    try writeHeader(&aw.writer, "Demo", "demo", .pass, .{ .path = "/schematics/" }, .{}, false);
+    try writeHeader(&aw.writer, "Demo", "demo", .pass, .{ .path = "/schematics/", .board_role = .board }, .{}, false);
     const html = aw.written();
     try std.testing.expect(std.mem.indexOf(u8, html, "class=\"viewtoggle\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "href=\"/schematics/demo\">Schematic</a>") != null);
