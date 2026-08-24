@@ -2111,13 +2111,14 @@ function paintKeepouts(ctx,k){if(PHYSICAL_REVIEW||!viewSt.vis.keepouts)return;
  ctx.drawImage(keepoutOverlayCv,0,0);ctx.restore();}
 // movG/only: drag-cache split — a group box is dynamic when any member moves
 // (its bounding box follows the drag).
+function partOnVisibleFace(p){return layerAlpha(p&&p.side==="bottom"?1:0)>0;}
 function paintGroupBoxes(ctx,k,movG,only){
  if(PHYSICAL_REVIEW&&(!reviewFocusActive()||!reviewFocusGroups()))return;
  var ik=1/Math.max(k,0.01);
  for(var g in GRPS){var idxs=GRPS[g];if(idxs.length<2)continue;
   if(movG&&(!!movG[g])!==only)continue;
   var x0=1/0,y0=1/0,x1=-1/0,y1=-1/0,n=0;
-  idxs.forEach(function(i){var p=P[i];if(unplacedSet[p.ref])return;
+  idxs.forEach(function(i){var p=P[i];if(unplacedSet[p.ref]||!partOnVisibleFace(p))return;
    var a=(p.rot||0)*Math.PI/180,ca=Math.abs(Math.cos(a)),sa=Math.abs(Math.sin(a));
    var ehw=(p.hw*ca+p.hh*sa)*S,ehh=(p.hw*sa+p.hh*ca)*S;
    var cc=wpt(i,p.ccx||0,p.ccy||0);
@@ -3029,7 +3030,7 @@ function grpIdxs(i){var g=grpOf(P[i].ref);return grpRigid(g)?GRPS[g]:null;}
 // Smallest box wins if two groups overlap, matching partAt's nested-hit rule.
 function grpAt(wx,wy){var best=null,ba=1e18,pad=3/S;
  for(var g in GRPS){if(!grpRigid(g))continue;var x0=1e18,y0=1e18,x1=-1e18,y1=-1e18,n=0;
-  GRPS[g].forEach(function(i){if(unplacedSet[P[i].ref])return;var b=partAABB(i);
+  GRPS[g].forEach(function(i){if(unplacedSet[P[i].ref]||!partOnVisibleFace(P[i]))return;var b=partAABB(i);
    x0=Math.min(x0,b.x0);y0=Math.min(y0,b.y0);x1=Math.max(x1,b.x1);y1=Math.max(y1,b.y1);n++;});
   if(!n||wx<x0-pad||wx>x1+pad||wy<y0-pad||wy>y1+pad)continue;
   var ar=(x1-x0)*(y1-y0);if(ar<ba){ba=ar;best=g;}}

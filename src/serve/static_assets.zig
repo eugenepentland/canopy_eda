@@ -636,6 +636,21 @@ test "PCB side presets hide annotations owned by hidden copper" {
     try std.testing.expect(std.mem.indexOf(u8, marker, "d.l==null||layerAlpha(d.l)>0") != null);
 }
 
+// spec: Web Server - Front-only and Back-only PCB presets hide opposite-face sub-circuit bounding boxes and remove their empty-area hit targets
+test "PCB side presets hide opposite-face sub-circuit boxes" {
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "function partOnVisibleFace(p){return layerAlpha(p&&p.side===\"bottom\"?1:0)>0;}") != null);
+
+    const paint_start = std.mem.indexOf(u8, pcb_board_js, "function paintGroupBoxes").?;
+    const paint_end = std.mem.indexOfPos(u8, pcb_board_js, paint_start, "function paintPadAlign").?;
+    const painter = pcb_board_js[paint_start..paint_end];
+    try std.testing.expect(std.mem.indexOf(u8, painter, "if(unplacedSet[p.ref]||!partOnVisibleFace(p))return;") != null);
+
+    const hit_start = std.mem.indexOf(u8, pcb_board_js, "function grpAt").?;
+    const hit_end = std.mem.indexOfPos(u8, pcb_board_js, hit_start, "function grpToggle").?;
+    const hit_test = pcb_board_js[hit_start..hit_end];
+    try std.testing.expect(std.mem.indexOf(u8, hit_test, "if(unplacedSet[P[i].ref]||!partOnVisibleFace(P[i]))return;") != null);
+}
+
 // spec: kicad_pcb/import-layout - the PCB editor previews KiCad warnings before replacing its starred layout
 test "PCB editor carries the guarded inbound KiCad sync workflow" {
     const markers = [_][]const u8{
