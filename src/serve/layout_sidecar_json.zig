@@ -17,6 +17,29 @@ const page = @import("pcb_layout_page.zig");
 const env_mod = @import("../eval/env.zig");
 const SavedRfPath = @typeInfo(@FieldType(page.SavedRoutes, "rf_paths")).pointer.child;
 
+const ParsedZoneSketch = struct {
+    sketch: shape_sketch.Sketch,
+    poly: []const [2]f64,
+};
+
+fn parseZoneSketch(
+    alloc: std.mem.Allocator,
+    sketch_value: std.json.Value,
+    poly_value: ?std.json.Value,
+) ParsedZoneSketch {
+    const sketch = shape_sketch_json.parse(alloc, sketch_value) orelse invalid_zone_sketch;
+    const compiled = shape_sketch.compile(alloc, sketch, shape_sketch.default_sagitta_mm) catch |err| {
+        const fallback = parseOutlinePts(alloc, poly_value) orelse &.{};
+        if (err != error.OpenProfile) return .{ .sketch = sketch, .poly = fallback };
+        const closed = (shape_sketch.closeSingleGap(alloc, sketch) catch null) orelse
+            return .{ .sketch = sketch, .poly = fallback };
+        const closed_compiled = shape_sketch.compile(alloc, closed, shape_sketch.default_sagitta_mm) catch
+            return .{ .sketch = sketch, .poly = fallback };
+        return .{ .sketch = closed, .poly = closed_compiled.poly };
+    };
+    return .{ .sketch = sketch, .poly = compiled.poly };
+}
+
 /// Parse a pose object's optional `"side"` field ("bottom" → bottom, else top).
 pub fn jsonSide(v: ?std.json.Value) optimizer.Side {
     const s = v orelse return .top;
@@ -142,11 +165,9 @@ pub fn parseSavedRoutes(alloc: std.mem.Allocator, v: ?std.json.Value) ?page.Save
             if (it != .object) continue;
             var sketch: ?shape_sketch.Sketch = null;
             const poly = if (it.object.get("sketch")) |sketch_value| blk: {
-                sketch = shape_sketch_json.parse(alloc, sketch_value) orelse invalid_zone_sketch;
-                const compiled = shape_sketch.compile(alloc, sketch.?, shape_sketch.default_sagitta_mm) catch {
-                    break :blk parseOutlinePts(alloc, it.object.get("poly")) orelse &.{};
-                };
-                break :blk compiled.poly;
+                const parsed = parseZoneSketch(alloc, sketch_value, it.object.get("poly"));
+                sketch = parsed.sketch;
+                break :blk parsed.poly;
             } else parseOutlinePts(alloc, it.object.get("poly")) orelse continue;
             zones.append(alloc, .{
                 .net = jsonStrField(it.object.get("net")),
@@ -381,6 +402,19 @@ test "saved copper zone sketch compiles native arcs and rejects an open profile"
     const encoded_value = try std.json.parseFromSliceLeaky(std.json.Value, alloc, encoded.written(), .{});
     const round_trip = parseSavedRoutes(alloc, encoded_value) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(shape_sketch.CurveKind.arc, round_trip.zones[0].sketch.?.curves[0].kind);
+
+    const one_gap =
+        "{\"tracks\":[],\"vias\":[],\"zones\":[{\"net\":\"V_3V3A\",\"layer\":\"F.Cu\",\"filled\":true," ++
+        "\"poly\":[[0,0],[10,0],[10,10],[0,10]],\"sketch\":{" ++
+        "\"version\":1,\"points\":[{\"id\":1,\"x\":0,\"y\":0},{\"id\":2,\"x\":10,\"y\":0},{\"id\":3,\"x\":10,\"y\":10},{\"id\":4,\"x\":0,\"y\":10}]," ++
+        "\"curves\":[{\"id\":11,\"kind\":\"line\",\"a\":1,\"b\":2},{\"id\":12,\"kind\":\"line\",\"a\":2,\"b\":3},{\"id\":13,\"kind\":\"line\",\"a\":3,\"b\":4}],\"constraints\":[]}}]}";
+    const one_gap_value = try std.json.parseFromSliceLeaky(std.json.Value, alloc, one_gap, .{});
+    const repaired_routes = parseSavedRoutes(alloc, one_gap_value) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 4), repaired_routes.zones[0].sketch.?.curves.len);
+    try std.testing.expect(saveRejection(alloc, null, tSavedWithZones(repaired_routes.zones)) == null);
+    var repaired_encoded: std.Io.Writer.Allocating = .init(alloc);
+    try writeSavedZonesJson(&repaired_encoded.writer, repaired_routes.zones);
+    try std.testing.expect(std.mem.indexOf(u8, repaired_encoded.written(), "\"id\":14") != null);
 
     const open = "{\"tracks\":[],\"vias\":[],\"zones\":[{\"net\":\"GND\",\"layer\":\"F.Cu\",\"poly\":[[0,0],[1,0],[0,1]],\"sketch\":{\"version\":1,\"points\":[{\"id\":1,\"x\":0,\"y\":0},{\"id\":2,\"x\":1,\"y\":0}],\"curves\":[{\"id\":3,\"kind\":\"line\",\"a\":1,\"b\":2}],\"constraints\":[]}}]}";
     const open_value = try std.json.parseFromSliceLeaky(std.json.Value, alloc, open, .{});

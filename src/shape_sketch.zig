@@ -337,6 +337,79 @@ pub fn compile(alloc: std.mem.Allocator, sketch: Sketch, max_sagitta: f64) Compi
     };
 }
 
+/// Add the only unambiguous missing line when the physical curves are one
+/// connected open chain. The candidate must compile as a valid closed profile;
+/// branches, disconnected contours, crossings and degenerate geometry are
+/// deliberately left for the caller to reject.
+pub fn closeSingleGap(alloc: std.mem.Allocator, sketch: Sketch) CompileError!?Sketch {
+    if (sketch.version != current_version) return null;
+    if (sketch.points.len > max_entities or sketch.curves.len >= max_entities) return null;
+    if (sketch.constraints.len > max_constraints) return null;
+    if (!idsUnique(sketch) or !constraintsValid(sketch)) return null;
+
+    const degrees = try alloc.alloc(u8, sketch.points.len);
+    defer alloc.free(degrees);
+    @memset(degrees, 0);
+
+    var profile_count: usize = 0;
+    for (sketch.curves) |curve| {
+        if (curve.construction) continue;
+        profile_count += 1;
+        const a = pointIndex(sketch.points, curve.a) orelse return null;
+        const b = pointIndex(sketch.points, curve.b) orelse return null;
+        if (a == b or degrees[a] >= 2 or degrees[b] >= 2) return null;
+        degrees[a] += 1;
+        degrees[b] += 1;
+    }
+    if (profile_count < 2) return null;
+
+    var endpoints: [2]u32 = undefined;
+    var endpoint_count: usize = 0;
+    for (degrees, 0..) |degree, point_i| switch (degree) {
+        0, 2 => {},
+        1 => {
+            if (endpoint_count == endpoints.len) return null;
+            endpoints[endpoint_count] = sketch.points[point_i].id;
+            endpoint_count += 1;
+        },
+        else => return null,
+    };
+    if (endpoint_count != endpoints.len) return null;
+
+    var max_id: u32 = 0;
+    for (sketch.points) |point| max_id = @max(max_id, point.id);
+    for (sketch.curves) |curve| max_id = @max(max_id, curve.id);
+    for (sketch.constraints) |constraint| max_id = @max(max_id, constraint.id);
+    if (max_id == std.math.maxInt(u32)) return null;
+
+    const curves = try alloc.alloc(Curve, sketch.curves.len + 1);
+    errdefer alloc.free(curves);
+    @memcpy(curves[0..sketch.curves.len], sketch.curves);
+    curves[sketch.curves.len] = .{
+        .id = max_id + 1,
+        .kind = .line,
+        .a = endpoints[0],
+        .b = endpoints[1],
+    };
+    const repaired: Sketch = .{
+        .version = sketch.version,
+        .points = sketch.points,
+        .curves = curves,
+        .constraints = sketch.constraints,
+    };
+    const compiled = compile(alloc, repaired, default_sagitta_mm) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => {
+            alloc.free(curves);
+            return null;
+        },
+    };
+    alloc.free(compiled.pts);
+    alloc.free(compiled.poly);
+    alloc.free(compiled.arcs);
+    return repaired;
+}
+
 fn rectSketch() Sketch {
     return .{
         .points = @constCast(&[_]Point{
@@ -436,4 +509,32 @@ test "outline sketch rejects a branched open profile and duplicate ids" {
     var duplicate = rectSketch();
     duplicate.curves = &duplicate_curves;
     try std.testing.expectError(error.DuplicateId, compile(std.testing.allocator, duplicate, default_sagitta_mm));
+}
+
+test "outline sketch closes one unambiguous gap but refuses branches" {
+    var open = rectSketch();
+    open.curves = open.curves[0..3];
+    const repaired = (try closeSingleGap(std.testing.allocator, open)) orelse
+        return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(repaired.curves);
+    try std.testing.expectEqual(@as(usize, 4), repaired.curves.len);
+    const closing = repaired.curves[3];
+    try std.testing.expect(
+        (closing.a == 1 and closing.b == 4) or
+            (closing.a == 4 and closing.b == 1),
+    );
+
+    const compiled = try compile(std.testing.allocator, repaired, default_sagitta_mm);
+    defer std.testing.allocator.free(compiled.pts);
+    defer std.testing.allocator.free(compiled.poly);
+    defer std.testing.allocator.free(compiled.arcs);
+    try std.testing.expectEqual(@as(usize, 4), compiled.pts.len);
+
+    var branched = rectSketch();
+    branched.curves = @constCast(&[_]Curve{
+        .{ .id = 11, .kind = .line, .a = 1, .b = 2 },
+        .{ .id = 12, .kind = .line, .a = 2, .b = 3 },
+        .{ .id = 13, .kind = .line, .a = 2, .b = 4 },
+    });
+    try std.testing.expect((try closeSingleGap(std.testing.allocator, branched)) == null);
 }

@@ -3921,6 +3921,7 @@ src/shape_sketch.zig::Curve struct_
 src/shape_sketch.zig::CurveKind enum_
 src/shape_sketch.zig::Point struct_
 src/shape_sketch.zig::Sketch struct_
+src/shape_sketch.zig::closeSingleGap | fn closeSingleGap(alloc: std.mem.Allocator, sketch: Sketch) CompileError!?Sketch
 src/shape_sketch.zig::compile | fn compile(alloc: std.mem.Allocator, sketch: Sketch, max_sagitta: f64) CompileError!Compiled
 src/shape_sketch.zig::current_version value
 src/shape_sketch.zig::default_sagitta_mm value

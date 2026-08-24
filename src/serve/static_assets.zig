@@ -267,7 +267,7 @@ test "the DXF board-outline importer asset is registered with its parser seam" {
 // spec: Web Server - The PCB outline sketch box-selects corner vertices in Outline mode or the Outline-only filter; Delete removes selected vertices and their incident curves without healing the resulting open profile, while Remove fillet remains a separate sharp-corner command
 // spec: Web Server - The PCB outline Line tool stays inside the sketch, creates connected native line chains, snaps endpoints to shared existing point IDs and H/V inference, lets Enter retain an open chain, and normalizes a reconnected closed loop for fabrication
 // spec: Web Server - Backspace or Delete on a selected native outline curve removes only that curve, leaves loose endpoints for free sketch editing, remains undoable, and Save explains that open geometry must be reconnected
-// spec: Web Server - A malformed custom copper-area save names a clickable exact zone that enters its sketch and frames it; a single connected two-endpoint gap exposes an explicit undoable Close profile repair, while branches and disconnected geometry are never guessed closed
+// spec: Web Server - A malformed custom copper-area save names a clickable exact zone that enters its sketch and frames it; a single connected two-endpoint gap exposes an explicit undoable Close profile repair and is safely closed on save for stale sessions, while branches and disconnected geometry are never guessed closed
 test "the shared parametric shape sketch engine is registered with its editor contracts" {
     try std.testing.expect(registryHasAsset("shape_sketch.js"));
     try std.testing.expect(registryHasAsset("pcb_outline_sketch.js"));
