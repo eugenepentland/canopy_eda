@@ -263,6 +263,10 @@ pub const Parties = struct {
     track_a: i32 = -1,
     pad_a: []const u8 = "",
     pad_b: []const u8 = "",
+    /// Reporting-only nearest probe points for an open net: ax, ay, bx, by.
+    /// The connectivity checker supplies these so a viewer can draw the
+    /// specific missing join without re-running copper geometry in JavaScript.
+    bridge: ?[4]f64 = null,
 };
 
 /// A part index as a `Parties` field (out-of-range → "unknown" rather than a

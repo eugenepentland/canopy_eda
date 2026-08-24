@@ -8522,21 +8522,13 @@ fn writeLayDelta(w: *std.Io.Writer, s: LayoutScore, auto: LayoutScore) std.Io.Wr
 }
 
 /// Chip row that toggles the collapsible control panels (Route / Stuck — an
-/// accordion, one open at a time) plus the two board-view overlays (the blame
-/// Heatmap tint and the trace Legend). The Route chip starts active when the
+/// accordion, one open at a time) plus the blame Heatmap and trace Legend.
+/// The Route chip starts active when the
 /// page loaded already routed, so its status panel is visible without a click.
 /// All behaviour is wired in BOARD_JS by the `data-panel` / id hooks.
-/// Opening tag shared by the embed's board-view toggle chips (Ratsnest / Net
-/// colours / Heatmap / Legend) — extracted so the repeated literal stays in
-/// one place.
+/// Opening tag shared by the embed's board-view toggle chips (Heatmap / Legend)
+/// — extracted so the repeated literal stays in one place.
 const view_chip_open = "<label class=\"view-chip\" ";
-/// Tooltip `title="…">` attributes shared by the embed tabs-row chips.
-const tip_rats_attr = "title=\"Show unresolved electrical ratsnest airwires — connected copper and " ++
-    "declared planes suppress them\">";
-const tip_guides_attr = "title=\"Show placement-intent guides from passives to their assigned IC pins — " ++
-    "these remain visible after routing and on plane nets\">";
-const tip_netcol_attr = "title=\"Give every net its own pad/airwire colour (no-connect white, GND brown, " ++
-    "power warm) so connectivity reads off the board without the schematic\">";
 
 fn writeTabsRow(w: *std.Io.Writer, route_open: bool, with_view_controls: bool) std.Io.Writer.Error!void {
     try w.writeAll("<div class=\"pcb-tabs\">");
@@ -8555,12 +8547,6 @@ fn writeTabsRow(w: *std.Io.Writer, route_open: bool, with_view_controls: bool) s
     // the tool strip — writeSidebar calls this with `with_view_controls=false`.
     if (with_view_controls) {
         try w.writeAll("<span class=\"tabs-sep\"></span>");
-        try w.writeAll(view_chip_open ++ tip_rats_attr ++
-            "<input type=\"checkbox\" id=\"v-rats\"> Ratsnest</label>");
-        try w.writeAll(view_chip_open ++ tip_guides_attr ++
-            "<input type=\"checkbox\" id=\"v-guides\"> Placement guides</label>");
-        try w.writeAll(view_chip_open ++ tip_netcol_attr ++
-            "<input type=\"checkbox\" id=\"v-netcol\" checked> Net colours</label>");
         try w.writeAll(view_chip_open ++
             "title=\"Tint each part green→red by its share of the objective (cost/blame heatmap)\">" ++
             "<input type=\"checkbox\" id=\"v-heat\"> Heatmap</label>");
@@ -9128,7 +9114,7 @@ fn writeActivityRail(w: *std.Io.Writer) std.Io.Writer.Error!void {
         "<button type=\"button\" data-dock-pane=\"side-drc\" title=\"Design-rule violations\"><span aria-hidden=\"true\">△</span><small>DRC</small></button>" ++
         "<button type=\"button\" data-dock-pane=\"side-subs\" title=\"Sub-circuit palette\"><span aria-hidden=\"true\">▦</span><small>Blocks</small></button>" ++
         "<span class=\"activity-spacer\"></span>" ++
-        "<button type=\"button\" data-dock-appearance title=\"Layers, objects and nets\"><span aria-hidden=\"true\">▤</span><small>View</small></button></nav>");
+        "<button type=\"button\" data-dock-appearance title=\"Layers and objects\"><span aria-hidden=\"true\">▤</span><small>View</small></button></nav>");
 }
 
 /// Full-page header row: title + the Schematic ⇄ PCB Layout ⇄ 3D switcher
@@ -9219,8 +9205,8 @@ fn writeRightDock(
     }
 }
 
-/// The right-docked Appearance panel (full page only), KiCad pcbnew's
-/// Layers/Objects/Nets dock. Only the empty panes are markup: every row is
+/// The right-docked Appearance panel (full page only), with Layers / Objects.
+/// Only the empty panes are markup: every row is
 /// built client-side by ONE builder shared with the embed's layers popover,
 /// from `PCB.layer_table` plus the persisted per-design visibility and
 /// active-layer state, so the two surfaces cannot drift apart.
@@ -9228,11 +9214,9 @@ fn writeAppearance(w: *std.Io.Writer) std.Io.Writer.Error!void {
     try w.writeAll("<aside class=\"pcb-rside pcb-appear\" id=\"pcb-appear\">" ++
         "<button class=\"dock-close\" type=\"button\" data-dock-close title=\"Close panel\" aria-label=\"Close panel\">×</button>" ++
         "<div class=\"ap-tabs\"><button class=\"ap-tab active\" data-aptab=\"ap-layers\">Layers</button>" ++
-        "<button class=\"ap-tab\" data-aptab=\"ap-objects\">Objects</button>" ++
-        "<button class=\"ap-tab\" data-aptab=\"ap-nets\">Nets</button></div>" ++
+        "<button class=\"ap-tab\" data-aptab=\"ap-objects\">Objects</button></div>" ++
         "<div class=\"ap-pane\" id=\"ap-layers\"></div>" ++
-        "<div class=\"ap-pane\" id=\"ap-objects\" hidden></div>" ++
-        "<div class=\"ap-pane\" id=\"ap-nets\" hidden></div></aside>");
+        "<div class=\"ap-pane\" id=\"ap-objects\" hidden></div></aside>");
 }
 
 // ── Embedded board data (consumed by BOARD_JS) ───────────────────────────
@@ -14322,8 +14306,8 @@ test "the viewer adopts the shown layout and keeps the url on its permalink" {
     try std.testing.expect(std.mem.indexOf(u8, js, "PCB.single") == null);
 }
 
-// spec: Web Server - The /pcb-layout viewer defaults reference designators, ratsnest, placement guides, and DRC markers off and net colours on
-test "PCB view defaults reduce inspection clutter and enable net colours" {
+// spec: Web Server - The PCB viewer keeps net colours permanently on and omits the Nets tab, Ratsnest control, and Placement guides control
+test "PCB view retires global connection overlays and keeps net colours on" {
     try std.testing.expect(std.mem.indexOf(u8, tip_draw, "/ switches posture") != null);
     try std.testing.expect(std.mem.indexOf(u8, tip_draw, "A toggles tangent arcs") != null);
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
@@ -14331,22 +14315,21 @@ test "PCB view defaults reduce inspection clutter and enable net colours" {
     try writeAppearance(&aw.writer);
     const html = aw.written();
     try std.testing.expect(std.mem.indexOf(u8, html, "<div class=\"ap-pane\" id=\"ap-objects\" hidden></div>") != null);
-    // KiCad's three-tab Appearance shell. Only the empty panes are markup —
-    // every row inside them is built by the shared client-side builder.
-    try std.testing.expect(std.mem.indexOf(u8, html, "data-aptab=\"ap-nets\">Nets</button>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html, "<div class=\"ap-pane\" id=\"ap-nets\" hidden></div></aside>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "data-aptab=\"ap-layers\">Layers</button>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "data-aptab=\"ap-objects\">Objects</button>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "ap-nets") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"v-rats\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"v-guides\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"v-netcol\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"r-clr-show\"") == null);
-    try std.testing.expect(std.mem.indexOf(u8, tip_rats_attr, "decoupling") == null);
 
     var tabs: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer tabs.deinit();
     try writeTabsRow(&tabs.writer, false, true);
-    try std.testing.expect(std.mem.indexOf(u8, tabs.written(), "id=\"v-rats\" checked") == null);
-    try std.testing.expect(std.mem.indexOf(u8, tabs.written(), "id=\"v-guides\" checked") == null);
-    try std.testing.expect(std.mem.indexOf(u8, tabs.written(), "id=\"v-netcol\" checked") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tabs.written(), "id=\"v-rats\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, tabs.written(), "id=\"v-guides\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, tabs.written(), "id=\"v-netcol\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, tabs.written(), "id=\"v-heat\"") != null);
 
     var route: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer route.deinit();
@@ -14354,8 +14337,9 @@ test "PCB view defaults reduce inspection clutter and enable net colours" {
     try std.testing.expect(std.mem.indexOf(u8, route.written(), "id=\"r-drc-show\" type=\"checkbox\" checked") == null);
 
     const js = @embedFile("assets/pcb_board.js");
-    try std.testing.expect(std.mem.indexOf(u8, js, "vis:{refdes:0,padnum:1,rats:0,drc:0,netcol:1,guides:0") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "function ratsSync()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "viewSt.vis.netcol=1;viewSt.vis.rats=0;viewSt.vis.guides=0;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "var netColOn=true;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "function ratsSync()") == null);
     try std.testing.expect(std.mem.indexOf(u8, js, "function drcSync()") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "if(n===\"Front\"||n===\"Back\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "selectActiveLayer(selected.l)") != null);
@@ -14544,7 +14528,8 @@ test "the placement-guide power line dashes a defaulted decoupling target" {
     try std.testing.expect(std.mem.indexOf(u8, js, "\" (defaulted)\"") != null);
 }
 
-// spec: Web Server - Placement guides survive declared-plane filtering
+// Legacy proximity-link serialization stays stable even though the viewer no
+// longer exposes placement guides as a display option.
 test "placement guides survive plane filtering" {
     const links = [_]optimizer.Link{
         .{ .a = 0, .b = 1, .ax = 0, .ay = 0, .bx = 1, .by = 1, .kind = .proximity, .net = "VDD" },
@@ -14741,13 +14726,15 @@ test "the full editor uses a compact activity rail and fabrication menu" {
     try std.testing.expect(std.mem.indexOf(u8, html, "pcb-matlab-rf") == null);
 }
 
-// Net colours remain an Appearance toggle without a persistent above-board legend.
-test "the pcb editor removes the net colour legend" {
+// Net colours are the permanent presentation and need neither a toggle nor a legend.
+test "the pcb editor keeps net colours on without a control or legend" {
     const css = @embedFile("assets/pcb_layout.css");
     const js = @embedFile("assets/pcb_board.js");
     try std.testing.expect(std.mem.indexOf(u8, css, ".net-legend") == null);
     try std.testing.expect(std.mem.indexOf(u8, js, "getElementById(\"net-legend\")") == null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "name:\"Net colours\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "name:\"Net colours\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "function apNetsHtml") == null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "var netColOn=true;") != null);
 }
 
 // spec: Web Server - The /pcb-layout DRC pane docks the violations list under a previous/next step-through

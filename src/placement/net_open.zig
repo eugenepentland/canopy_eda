@@ -192,7 +192,7 @@ fn emitOpens(
     const link = try arena.alloc(usize, n);
     in_tree[0] = true;
     for (0..n) |j| {
-        best_to[j] = if (j == 0) .{ .dist = std.math.inf(f64), .x = 0, .y = 0 } else nearestApproach(islands[0], islands[j]);
+        best_to[j] = if (j == 0) approachInf() else nearestApproach(islands[0], islands[j]);
         link[j] = 0;
     }
     var joined: usize = 1;
@@ -230,13 +230,27 @@ fn emitOpens(
                 .pad_a = islands[from].pad.pad,
                 .part_b = islands[pick].pad.part,
                 .pad_b = islands[pick].pad.pad,
+                .bridge = .{ best.a[0], best.a[1], best.b[0], best.b[1] },
             },
         });
     }
 }
 
 /// The nearest-approach point + edge-to-edge gap between two islands' copper.
-const Approach = struct { dist: f64, x: f64, y: f64 };
+const Approach = struct {
+    dist: f64,
+    x: f64,
+    y: f64,
+    /// The two feature probes that attained `dist`, one on each island.
+    a: [2]f64,
+    b: [2]f64,
+};
+
+const Closest = struct { dist: f64, x: f64, y: f64 };
+
+fn approachInf() Approach {
+    return .{ .dist = std.math.inf(f64), .x = 0, .y = 0, .a = .{ 0, 0 }, .b = .{ 0, 0 } };
+}
 
 /// Edge-to-edge nearest approach between two islands over their pad / track /
 /// via copper. Two features of DISTINCT components never touch (a touch would
@@ -244,7 +258,7 @@ const Approach = struct { dist: f64, x: f64, y: f64 };
 /// endpoint, a via centre, or a pad outline — the probes below are exact for
 /// the open case.
 fn nearestApproach(a: *const Comp, b: *const Comp) Approach {
-    var best = Approach{ .dist = std.math.inf(f64), .x = 0, .y = 0 };
+    var best = approachInf();
     for (a.tracks.items) |ta| {
         for (b.tracks.items) |tb| trackTrack(&best, ta, tb);
         for (b.vias.items) |vb| trackVia(&best, ta, vb);
@@ -313,7 +327,13 @@ fn segClosestPoint(t: router.Track, p: [2]f64) [2]f64 {
 /// Keep `gap` (and a marker midway between the two probe points) when it beats
 /// what `best` holds.
 fn fold(best: *Approach, gap: f64, a: [2]f64, b: [2]f64) void {
-    if (gap < best.dist) best.* = .{ .dist = gap, .x = (a[0] + b[0]) / 2, .y = (a[1] + b[1]) / 2 };
+    if (gap < best.dist) best.* = .{
+        .dist = gap,
+        .x = (a[0] + b[0]) / 2,
+        .y = (a[1] + b[1]) / 2,
+        .a = a,
+        .b = b,
+    };
 }
 
 /// track ↔ track: probe both endpoints of each track against the other track's
@@ -335,7 +355,13 @@ fn trackVia(best: *Approach, t: router.Track, v: router.Via) void {
 /// via ↔ via: centre distance minus both radii.
 fn viaVia(best: *Approach, a: router.Via, b: router.Via) void {
     const d = std.math.hypot(a.x - b.x, a.y - b.y) - a.dia / 2 - b.dia / 2;
-    if (d < best.dist) best.* = .{ .dist = d, .x = (a.x + b.x) / 2, .y = (a.y + b.y) / 2 };
+    if (d < best.dist) best.* = .{
+        .dist = d,
+        .x = (a.x + b.x) / 2,
+        .y = (a.y + b.y) / 2,
+        .a = .{ a.x, a.y },
+        .b = .{ b.x, b.y },
+    };
 }
 
 /// Fold point `(px,py)` against track `t`'s centreline into `best`: the gap is
@@ -344,7 +370,13 @@ fn viaVia(best: *Approach, a: router.Via, b: router.Via) void {
 fn consider(best: *Approach, px: f64, py: f64, t: router.Track, r: f64) void {
     const c = segClosest(t.x1, t.y1, t.x2, t.y2, px, py);
     const gap = c.dist - r;
-    if (gap < best.dist) best.* = .{ .dist = gap, .x = (px + c.x) / 2, .y = (py + c.y) / 2 };
+    if (gap < best.dist) best.* = .{
+        .dist = gap,
+        .x = (px + c.x) / 2,
+        .y = (py + c.y) / 2,
+        .a = .{ px, py },
+        .b = .{ c.x, c.y },
+    };
 }
 
 /// `consider` with the same geometry — kept as a twin so `trackTrack` reads
@@ -355,7 +387,7 @@ fn considerRev(best: *Approach, px: f64, py: f64, t: router.Track, r: f64) void 
 
 /// Closest point on segment `(ax,ay)-(bx,by)` to point `(px,py)`, and its
 /// distance.
-fn segClosest(ax: f64, ay: f64, bx: f64, by: f64, px: f64, py: f64) Approach {
+fn segClosest(ax: f64, ay: f64, bx: f64, by: f64, px: f64, py: f64) Closest {
     const dx = bx - ax;
     const dy = by - ay;
     const len2 = dx * dx + dy * dy;
@@ -401,6 +433,7 @@ fn count(vs: []const drc.Violation) usize {
 }
 
 // spec: placement/drc - flags a net whose drawn copper splits into disconnected islands at the nearest-approach gap
+// spec: placement/drc - A net-open DRC violation carries the two nearest island probe coordinates used to report its missing join
 test "two same-net track islands with a small gap flag one net_open at the gap" {
     var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_i.deinit();
@@ -434,6 +467,11 @@ test "two same-net track islands with a small gap flag one net_open at the gap" 
     try testing.expect(@abs(v.gap - 0.4) < 0.05); // copper-edge gap ≈ 0.4 mm
     try testing.expect(@abs(v.x - 5.0) < 0.2); // marker in the gap midpoint
     try testing.expect(@abs(v.y - 0.0) < 0.2);
+    const bridge = v.who.bridge orelse return error.TestExpectedEqual;
+    try testing.expect(@abs(@min(bridge[0], bridge[2]) - 4.7) < 0.05);
+    try testing.expect(@abs(@max(bridge[0], bridge[2]) - 5.3) < 0.05);
+    try testing.expect(@abs(bridge[1]) < 0.05);
+    try testing.expect(@abs(bridge[3]) < 0.05);
 }
 
 // spec: fab_readiness - Copper connectivity uses a 1 µm numeric contact tolerance; a same-net 1–20 µm gap stays electrically open and is an error-severity hairline_gap

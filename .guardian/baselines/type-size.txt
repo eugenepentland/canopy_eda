@@ -43,6 +43,7 @@
 10 src/kicad_pcb/snapshot.zig|Zone
 10 src/kicad_pcb/writer.zig|ApplyStats
 8 src/placement/copper_support.zig|Zone
+8 src/placement/drc.zig|Parties
 8 src/placement/drc.zig|Violation
 8 src/placement/gap_policy.zig|GapOptions
 13 src/placement/geometry.zig|Pad

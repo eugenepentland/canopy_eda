@@ -226,6 +226,11 @@ try{var _vs=JSON.parse(localStorage.getItem(viewKey)||"null");if(_vs){
  // object appear unresponsive. Legacy persisted filters are intentionally
  // ignored; the defaults above restore normal selection on every page load.
  }}catch(e){}
+// These are no longer user-selectable modes: connection colour is the board's
+// normal presentation, while the old all-board ratsnest and placement guides
+// stay retired even when an older localStorage record had enabled them.
+if(viewSt.vis.netcol!==1||viewSt.vis.rats!==0||viewSt.vis.guides!==0)_vmig=true;
+viewSt.vis.netcol=1;viewSt.vis.rats=0;viewSt.vis.guides=0;
 if(_vmig)viewSave(); // rewrite the store once, in the canonical spelling
 function viewSave(){try{localStorage.setItem(viewKey,JSON.stringify(viewSt,function(k,v){return k==="filt"?undefined:v;}));}catch(e){}}
 // Effective snap step (mm). grid "off" (0) → a tiny step so parts still move
@@ -7590,7 +7595,7 @@ function renderDrcList(){drcTabBadge();var lst=ensureDrcList();if(!lst)return;
    '<span class="drc-gc '+(err?"err":"warn")+'">'+countText+'</span></div>';
   if(coll)return;
   if(openNets){openNets.forEach(function(ng){var expanded=!!drcOpenExpanded[ng.name],first=v[ng.idxs[0]],sc=drcSevClass(first);
-   h+='<div class="drc-net'+(sc?' '+sc:'')+(expanded?'':' coll')+'" data-drcnet="'+pEsc(ng.name)+'" title="'+
+   h+='<div class="drc-net'+(sc?' '+sc:'')+(expanded?'':' coll')+'" data-drcnet="'+pEsc(ng.name)+'" data-drcfirst="'+ng.idxs[0]+'" title="'+
     (expanded?'Hide':'Show')+' '+ng.idxs.length+' connection'+(ng.idxs.length>1?'s':'')+' needed for '+pEsc(ng.name||'unnamed net')+'">'+
     '<span class="drc-tw">'+(expanded?'▾':'▸')+'</span><span class="drc-loc">'+pEsc(ng.name||'(unnamed net)')+'</span>'+
     '<span class="drc-net-count">'+ng.idxs.length+' connection'+(ng.idxs.length>1?'s':'')+' needed</span></div>';
@@ -7608,10 +7613,11 @@ function renderDrcList(){drcTabBadge();var lst=ensureDrcList();if(!lst)return;
    drcCollapsed[k]=!drcCollapsed[k];renderDrcList();});});
  lst.querySelectorAll("[data-drcnet]").forEach(function(g){
   g.addEventListener("click",function(){var name=g.getAttribute("data-drcnet");
+   var first=+g.getAttribute("data-drcfirst");
    var expanding=!drcOpenExpanded[name];drcOpenExpanded[name]=expanding;
    if(!expanding&&drcOpenNetName((PCB.drc||[])[drcCur])===name){
     for(var i=0;i<(PCB.drc||[]).length;i++){if(drcOpenNetName(PCB.drc[i])===name){drcCur=i;break;}}}
-   renderDrcList();});});
+   renderDrcList();drcGoto(first);});});
  lst.querySelectorAll("[data-drc]").forEach(function(row){
   row.addEventListener("click",function(){drcGoto(+row.getAttribute("data-drc"));});});
  drcMarkCur();if(window.PCBFindRefresh)window.PCBFindRefresh();}
@@ -7641,7 +7647,8 @@ function drcStep(dir){var fo=drcFlatOrder();if(!fo.length)return;
  drcGoto(fo[at<0?(dir>0?0:fo.length-1):((at+dir+fo.length)%fo.length)]);}
 function drcGoto(i){var d=(PCB.drc||[])[i];if(!d)return;
  drcCur=i;drcMarkCur();inspSetHere({t:"drc",o:d});
- if(drcOnBoard(d)&&d.x!=null&&d.y!=null)focusPoint(d.x,d.y);}
+ if(d.bridge&&d.bridge.length===4){zoomToPoly([[d.bridge[0],d.bridge[1]],[d.bridge[2],d.bridge[3]]]);paintSoon();}
+ else if(drcOnBoard(d)&&d.x!=null&&d.y!=null)focusPoint(d.x,d.y);}
 // Paint the located row, scroll it into view, and refresh the pane header's
 // position readout + message. Safe on the embeds (no header, no-op lookups).
 function drcMarkCur(){var lst=document.getElementById("drc-list");
@@ -8097,6 +8104,7 @@ function renderInspProps(body){var o=insp.o,h="",hint='<div class="prop-lock">';
   else done(false);});
  var gb=document.getElementById("insp-goto");
  if(gb)gb.addEventListener("click",function(){var q=insp&&insp.o;if(!q)return;
+  if(q.bridge&&q.bridge.length===4){zoomToPoly([[q.bridge[0],q.bridge[1]],[q.bridge[2],q.bridge[3]]]);paintSoon();return;}
   if(q.x!=null){focusPoint(q.x,q.y);return;}if(q.x1!=null){focusPoint((q.x1+q.x2)/2,(q.y1+q.y2)/2);return;}
   var pts=q.poly||q.outer;if(!pts||!pts.length)return;var x=0,y=0;pts.forEach(function(p){x+=p[0];y+=p[1];});
   focusPoint(x/pts.length,y/pts.length);});
@@ -8144,6 +8152,14 @@ function paintInsp(ctx){if(!insp)return;var o=insp.o;
   var outer=o.poly||o.outer,inner=o.inner;
   if(outer&&outer.length>=3)keepoutPolyPath(ctx,outer);if(inner&&inner.length>=3)keepoutPolyPath(ctx,inner);
   ctx.fill("evenodd");ctx.stroke();setTimeout(paintSoon,60);}
+ else if(insp.t==="drc"&&o.bridge&&o.bridge.length===4){
+  var b=o.bridge,n=o.a&&o.a.net?netCollapse(o.a.net):"";
+  ctx.strokeStyle=netColorOf(n)||"#ffd33d";ctx.fillStyle=ctx.strokeStyle;ctx.lineWidth=2.2;
+  ctx.globalAlpha=0.65+0.35*Math.abs(Math.sin(Date.now()/240));ctx.setLineDash([8,5]);
+  ctx.beginPath();ctx.moveTo(X(b[0]),Y(b[1]));ctx.lineTo(X(b[2]),Y(b[3]));ctx.stroke();ctx.setLineDash([]);
+  ctx.beginPath();ctx.moveTo(X(b[0])+4,Y(b[1]));ctx.arc(X(b[0]),Y(b[1]),4,0,6.2832);
+  ctx.moveTo(X(b[2])+4,Y(b[3]));ctx.arc(X(b[2]),Y(b[3]),4,0,6.2832);ctx.fill();
+  setTimeout(paintSoon,60);}
  else if(insp.t!=="drc"||drcOnBoard(o)){ctx.strokeStyle="#ffd33d";var rr=(insp.t=="via")?viaRenderRadius(o.d||0.4)+4:12;
   ctx.lineWidth=2;ctx.globalAlpha=0.5+0.5*Math.abs(Math.sin(Date.now()/240));
   ctx.beginPath();ctx.arc(X(o.x),Y(o.y),rr,0,6.2832);ctx.stroke();
@@ -9241,8 +9257,8 @@ loadCamReview();
  // wiring, so a layer cannot be present, named, ordered or behave differently
  // in one of them — the containers only style what they are handed. The panes
  // follow KiCad's Appearance dock: Layers (real fabrication layers, in
- // top→bottom physical order), Objects (feature overlays + the selection
- // filter), Nets (the net-colour view).
+ // top→bottom physical order) and Objects (feature overlays + selection
+ // filter). Net colouring is always on, so it needs no pane or row.
  var lb=document.getElementById("pcb-layers-btn"),pop=document.getElementById("pcb-layers-pop");
  function planeLabel(L){return L.plane+" "+(L.l==null?"plane":"pour")+(L.implicit?" (implicit)":"");}
  // The Layers rows: the copper stack straight off PCB.layer_table, then the
@@ -9259,12 +9275,9 @@ loadCamReview();
      " — click to route on it (B toggles "+LN.f_cu+"/"+LN.b_cu+"; PgUp/PgDn cycle)")});});
   TECH.forEach(function(T){rows.push({key:T.key,name:T.name,stack:null,routable:false,c:T.c,kind:"",desc:T.desc});});
   return rows;}
- // The Objects rows: every overlay that is a FEATURE of the view rather than a
- // fabrication layer. Net colours belongs to the Nets pane with the rest of the
- // net view, which is the only reason it is not in this list.
+ // The Objects rows: every user-selectable overlay that is a FEATURE of the
+ // view rather than a fabrication layer.
  function apObjectRows(){return [
-  {key:"rats",name:"Ratsnest",c:TH.awOther,desc:"Airwires for every unrouted connection"},
-  {key:"guides",name:"Placement guides",c:TH.awProx,desc:"Decoupling-loop targets, drawn independently of the electrical ratsnest"},
   {key:"drc_err",name:"DRC errors",c:TH.drc,desc:"Error-severity design-rule violations on the shown board"},
   {key:"drc_warn",name:"DRC warnings",c:"#e3b341",desc:"Warning-severity design-rule violations on the shown board"},
   {key:"clr",name:"Clearance halos",c:"#7ee787",desc:"Clearance rings around pads, tracks and vias (the Route panel sets the mm)"},
@@ -9288,8 +9301,8 @@ loadCamReview();
   ["zone","Pours / keepouts","Click anywhere inside a copper-pour zone or keepout area"],
   ["drc","DRC markers","Click DRC markers to inspect them"]];}
  // KiCad's layer presets — a fixed set, each writing the whole LAYER half of
- // the visibility map in one click. Object and net rows are deliberately left
- // alone: a preset answers "which layers am I looking at", not "which tools".
+ // the visibility map in one click. Object rows are deliberately left alone:
+ // a preset answers "which layers am I looking at", not "which tools".
  var AP_PRESETS=["All","Front","Back","Copper only"];
 function apPresetApply(n){
   STACK.forEach(function(L){
@@ -9338,24 +9351,13 @@ function apPresetApply(n){
     '"><input type="checkbox" data-ap-filt="'+r[0]+'"'+(viewSt.filt[r[0]]!==0?' checked':'')+
     '><span>'+pEsc(r[1])+'</span></label>';}).join("");
   return h+apPourSlider();}
- function apNetsHtml(compact){
-  var n=0,nc=PCB.netcolor||{},k;for(k in nc)n++;
-  var h='<div class="ap-h">Net view</div>'+apRow({key:"netcol",name:"Net colours",stack:null,routable:false,
-   c:"linear-gradient(90deg,#e5484d,#f0b72f,#2ec27e,#58a6ff)",kind:"",
-   desc:"Colour every pad, trace and airwire by its net instead of by its copper layer"});
-  if(compact)return h;
-  return h+'<div class="ap-note">'+n+' net'+(n===1?'':'s')+' carry a colour · no-connect white, '+
-   'ground brown, power warm, and one colour per signal net.</div>';}
- function apPopHtml(){return apLayersHtml()+apObjectsHtml(true)+apNetsHtml(true);}
+ function apPopHtml(){return apLayersHtml()+apObjectsHtml(true);}
  // ── State writes. Every control in every container lands here, so the two
  // surfaces cannot drive the same flag through different fan-outs.
  function apVisToggle(k){
   if(k==="clr"){clrSet(!clrOn());return;} // owns its own sync + overlay repaint
   viewSt.vis[k]=viewSt.vis[k]?0:1;viewSave();
   partInteractionVisibilitySync();
-  if(k==="netcol")netColSync(); // shared state fans out to every control
-  if(k==="guides")guidesSync();
-  if(k==="rats")ratsSync();
   if(k==="drc_err"||k==="drc_warn")drcSync();
   if(PCB.apSync)PCB.apSync();
   dragCacheDrop();paintSoon();drawDrc();rats();drawBoardRect();}
@@ -9396,7 +9398,6 @@ function apPresetApply(n){
  function apRender(){
   apFill(document.getElementById("ap-layers"),apLayersHtml());
   apFill(document.getElementById("ap-objects"),apObjectsHtml(false));
-  apFill(document.getElementById("ap-nets"),apNetsHtml(false));
   if(pop&&!pop.hidden)apFill(pop,apPopHtml());}
  // Every container's rows are re-marked from ONE state read, so a flag flipped
  // by a keyboard shortcut, the Route panel or the other container is reflected
@@ -9628,51 +9629,17 @@ if(heatCb)heatCb.addEventListener("change",function(){heatOn=heatCb.checked;
 var legCb=document.getElementById("v-legend");
 if(legCb)legCb.addEventListener("change",function(){var l=document.getElementById("pcb-legend");
  if(l)l.hidden=!legCb.checked;});
-// ── Net colours: give every net its own colour so connectivity reads off
+// ── Net colours: every net always gets its own colour so connectivity reads off
 //    the board without the schematic. Per-net colour comes straight from
 //    PCB.netcolor[net] (no-connect → white, GND → brown, power → warm,
 //    each signal net → a distinct colour). A pad on NO net is a no-connect
-//    pin → white; off, pads go back to copper. Orthogonal to the heatmap
-//    (which tints courtyards). rats() honours the flag, so re-drawing the
-//    ratsnest re-applies the airwire colours.
-//    DEFAULT-ON, and the choice PERSISTS per design in viewSt (localStorage)
-//    so it survives reloads.
-//    Every control drives one state through netColSet/apVisToggle: the
-//    Appearance Nets pane's row (dock and popover alike, one builder) and the
-//    embed's view chip — netColSync keeps them agreeing.
-var netColOn=!!viewSt.vis.netcol;
-// ── Electrical ratsnest toggle. Placement guides have their own visibility
-//    state and deliberately remain drawn when this checkbox is off.
-var ratsOn=!!viewSt.vis.rats;
-var ratsCb=document.getElementById("v-rats");
-function ratsSync(){ratsOn=!!viewSt.vis.rats;
- if(ratsCb)ratsCb.checked=ratsOn;
- if(PCB.apSync)PCB.apSync();
- paintSoon();rats();}
-function ratsSet(on){viewSt.vis.rats=on?1:0;viewSave();ratsSync();}
-if(ratsCb)ratsCb.addEventListener("change",function(){ratsSet(ratsCb.checked);});
+//    pin → white. This is orthogonal to the heatmap (which tints courtyards).
+var netColOn=true;
+// Legacy all-board ratsnest/placement-guide rendering remains inert; a chosen
+// open-net DRC finding owns the only focused connection line.
+var ratsOn=false;
 function netColorOf(nk){if(!nk||!PCB.netcolor)return null;return PCB.netcolor[nk]||null;}
-// Placement guides are independent from electrical ratsnest visibility and
-// persist per design like the other visibility controls.
-function guidesSync(){
- var cb=document.getElementById("v-guides");if(cb)cb.checked=!!viewSt.vis.guides;
- if(PCB.apSync)PCB.apSync();
- paintSoon();rats();}
-function guidesSet(on){viewSt.vis.guides=on?1:0;viewSave();guidesSync();}
-var guidesCb=document.getElementById("v-guides");
-if(guidesCb)guidesCb.addEventListener("change",function(){guidesSet(guidesCb.checked);});
-// Reflect the current netcol state into every control and repaint.
-function netColSync(){netColOn=!!viewSt.vis.netcol;cuGeomDrop(); // copper colour is a bucket key
- // GPU twin: colour is baked per instance, so the flip is a copper + pad rebuild
- // (lazy — the flags collapse into one rebuild on the next frame).
- if(gpuOn){PCBGpu.rebuildCopper();PCBGpu.rebuildParts();}
- var cb=document.getElementById("v-netcol");if(cb)cb.checked=netColOn;
- if(PCB.apSync)PCB.apSync();
- paintSoon();rats();}
-function netColSet(on){viewSt.vis.netcol=on?1:0;viewSave();netColSync();}
-var netColCb=document.getElementById("v-netcol");
-if(netColCb)netColCb.addEventListener("change",function(){netColSet(netColCb.checked);});
-ratsSync();guidesSync();netColSync();drcSync();showScore(PCB.auto);drawRoute();drawClr();drawDrc();
+drcSync();showScore(PCB.auto);drawRoute();drawClr();drawDrc();
 markUnplaced(PCB.placement&&PCB.placement.unplaced);
 // The page already embeds authoritative server DRC for this exact saved state.
 // Show it immediately, but defer the worker/WASM download and reconciliation

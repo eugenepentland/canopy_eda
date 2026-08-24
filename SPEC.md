@@ -2946,6 +2946,7 @@ Public functions: check, checkTopology, checkWithZones, countKind, defaultSeveri
 - flags a differential pair whose leg lengths are skewed and passes a length-matched pair
 - flags a net whose drawn copper splits into disconnected islands at the nearest-approach gap
 - A net-open DRC violation names its net and a pad from each copper island it failed to join
+- A net-open DRC violation carries the two nearest island probe coordinates used to report its missing join
 - a track bridging the two islands clears the net-open flag
 - a persisted solver RF polygon contributes its compact centreline to connectivity DRC without reviving chord-level geometry findings
 - a via joining two same-net islands across layers clears the net-open flag
@@ -6057,6 +6058,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The /pcb-layout left dock tabs Properties, Autorouter, DRC, and Sub-circuits, showing one pane at a time
 - The /pcb-layout DRC pane docks the violations list under a previous/next step-through
 - Net-open DRC reporting groups every island gap by full net name and counts each open net once while retaining expandable per-gap details
+- Selecting a grouped net-open row or one of its gaps frames and draws a net-coloured line between that finding's nearest island probes
 - Net-open DRC findings remain in the sidebar and counts but do not draw or hit-test as PCB markers
 - The /pcb-layout accordion carries no optimizer tuning or score-reweigh panel
 - The /pcb-layout saved-version navigator sits inside Autorouter, immediately after the route controls
@@ -6070,7 +6072,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - A layout sidecar past a megabyte still reads back in full, and one that cannot be read or parsed is reported instead of passing as no layouts
 - The page blob inlines copper for the layout it shows and marks the other routed rows as server-side, so page weight does not grow with the candidates kept
 - The viewer adopts the shown layout as its edit target and keeps the address bar on that layout's permalink
-- The /pcb-layout viewer defaults reference designators, ratsnest, placement guides, and DRC markers off and net colours on
+- The PCB viewer keeps net colours permanently on and omits the Nets tab, Ratsnest control, and Placement guides control
 - DRC error and warning markers have independent persisted visibility controls in the PCB Appearance objects list
 - Board text and generated annotations live on their physical F./B.Silkscreen layers without an extra Appearance row or per-hover geometry rebuild
 - The /pcb-layout Appearance dock provides one generic Keepouts layer for fixed typed regions and clean active-copper net-class halos without overlap-darkened fills or decorative pad-escape rings
@@ -6151,7 +6153,6 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - the board PNG fills inner planes from the same pour engine the fabrication outputs use
 - the board PNG strokes a routed arc as a curve and drops the chords it owns
 - the board PNG paints bottom-side parts under top-side parts
-- Placement guides survive declared-plane filtering
 - A DRC violation carries a stable 4-hex id emitted by the shared JSON writer
 - The shared DRC JSON writer emits each violation's named parties and omits the sides the checker could not name
 - The WASM DRC bridge parses board-state JSON to the same violations as a direct drc.check run
@@ -6188,9 +6189,8 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - A multi-part drag or rotate carries copper on nets private to the moving parts and leaves shared-net copper in place
 - Align, distribute, and pad-align carry each entity's own copper by that entity's own delta
 - A press on marquee-selected copper drags the whole selection instead of sliding that one segment
-- Placement guides remain independently controllable from the ratsnest
 - The Objects tab offers a selection filter that skips unchecked object types when clicking
-- The Appearance panel separates Layers, Objects and Nets tabs, listing real fabrication layers in top-to-bottom physical order and the feature overlays under Objects
+- The Appearance panel separates Layers and Objects tabs, listing real fabrication layers in top-to-bottom physical order and the feature overlays under Objects
 - The /pcb-layout Appearance dock and the embed layers popover render their rows from one shared builder, so a layer is named, ordered and wired identically in both
 - Footprint silkscreen and courtyards are visible per board side, and a hidden courtyard layer never hides a selected part's outline
 - Ordinary PCB-editor courtyard outlines use a 0.25-pixel stroke, while hover and selection outlines stay emphasized

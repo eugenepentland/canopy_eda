@@ -267,13 +267,15 @@ fn writeJsonStr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
 }
 
 /// One violation as a JSON object, `id` first, then `"l"` (the routable copper
-/// layer, OMITTED when the finding has no single layer), then the `a`/`b`
-/// parties (nets / pads that clashed) whenever the checker could name them.
+/// layer, OMITTED when the finding has no single layer), an optional four-value
+/// open-net `bridge`, then the `a`/`b` parties (nets / pads that clashed)
+/// whenever the checker could name them.
 pub fn writeViolation(w: *std.Io.Writer, v: drc.Violation, names: Names) std.Io.Writer.Error!void {
     try w.print("{{\"id\":\"{x:0>4}\",\"x\":{d},\"y\":{d},\"gap\":{d},\"clr\":{d},\"k\":\"{s}\",\"sev\":\"{s}\"", .{
         violationId(v), v.x, v.y, v.gap, v.clearance, kindStr(v.kind), sevStr(v.severity),
     });
     if (v.layer) |layer| try w.print(",\"l\":{d}", .{layer.int()});
+    if (v.who.bridge) |b| try w.print(",\"bridge\":[{d},{d},{d},{d}]", .{ b[0], b[1], b[2], b[3] });
     try writeParty(w, "a", party(names, v.who.net_a, v.who.part_a, v.who.pad_a));
     try writeParty(w, "b", party(names, v.who.net_b, v.who.part_b, v.who.pad_b));
     try w.writeAll("}");
@@ -295,6 +297,27 @@ test "violation id is deterministic, position-sensitive, and 4 hex chars in the 
     try std.testing.expect(std.mem.startsWith(u8, out, "{\"id\":\""));
     try std.testing.expectEqual(@as(u8, '"'), out[11]); // exactly 4 hex chars
     try std.testing.expect(std.mem.indexOf(u8, out, "\"k\":\"hole↔hole\"") != null);
+}
+
+// Regression guard for the shared wire representation of the checker probes.
+test "net-open bridge probes serialize only when present" {
+    const open = drc.Violation{
+        .x = 5,
+        .y = 0,
+        .gap = 0.4,
+        .clearance = 0,
+        .kind = .net_open,
+        .who = .{ .bridge = .{ 4.7, 0, 5.3, 0 } },
+    };
+    var with_bridge: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer with_bridge.deinit();
+    try writeViolation(&with_bridge.writer, open, .{});
+    try std.testing.expect(std.mem.indexOf(u8, with_bridge.written(), "\"bridge\":[4.7,0,5.3,0]") != null);
+
+    var ordinary: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer ordinary.deinit();
+    try writeViolation(&ordinary.writer, .{ .x = 1, .y = 2, .gap = 0, .clearance = 0.2, .kind = .hole_hole }, .{});
+    try std.testing.expect(std.mem.indexOf(u8, ordinary.written(), "\"bridge\"") == null);
 }
 
 // spec: Web Server - A per-layer DRC violation carries its copper layer on the wire and in its id, so two defects at one point on different layers stay distinct

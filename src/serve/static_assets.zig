@@ -1157,21 +1157,23 @@ test "PCB WebGPU renderer skips out-of-range track layers as the 2D path does" {
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "function trackLayerOrder(){var ord=[];") != null);
 }
 
-// spec: Web Server - The Appearance panel separates Layers, Objects and Nets tabs, listing real fabrication layers in top-to-bottom physical order and the feature overlays under Objects
+// spec: Web Server - The Appearance panel separates Layers and Objects tabs, listing real fabrication layers in top-to-bottom physical order and the feature overlays under Objects
 // spec: Web Server - The PCB editor selection filter includes the board outline and a session-only Outline only preset that disables every other filter type and suppresses board-text selection without making a reopened board appear unresponsive
-test "PCB Appearance panel splits real layers from feature objects and nets" {
+test "PCB Appearance panel splits real layers from feature objects" {
     const Check = struct { haystack: []const u8 = pcb_board_js, marker: []const u8, present: bool = true };
     const checks = [_]Check{
-        // Three panes, three row tables. The Layers rows are the copper stack
-        // followed by the static tech layers; the overlays that used to sit
-        // among them are Objects, and the net view is its own pane. (The dock's
-        // own three-pane shell is asserted where writeAppearance is rendered.)
+        // The Layers rows are the copper stack followed by the static tech
+        // layers; selectable overlays live under Objects. Net colours are the
+        // permanent board presentation rather than another pane.
         .{ .marker = "function apLayerRows(){var rows=[];" },
         .{ .marker = "function apObjectRows(){return [" },
-        .{ .marker = "function apNetsHtml(compact){" },
+        .{ .marker = "function apNetsHtml(compact){", .present = false },
         .{ .marker = "{key:\"clr\",name:\"Clearance halos\"" },
         .{ .marker = "{key:\"padnum\",name:\"Pad numbers\"" },
-        .{ .marker = "{key:\"netcol\",name:\"Net colours\"" },
+        .{ .marker = "{key:\"netcol\",name:\"Net colours\"", .present = false },
+        .{ .marker = "{key:\"rats\",name:\"Ratsnest\"", .present = false },
+        .{ .marker = "{key:\"guides\",name:\"Placement guides\"", .present = false },
+        .{ .marker = "var netColOn=true;" },
         // The selection filter is Objects' second half, not a separate builder.
         .{ .marker = "<span>Selection filter</span>" },
         .{ .marker = "function apFiltRows(){return [" },
@@ -1228,9 +1230,9 @@ test "PCB Appearance rows come from one builder for both containers" {
         .{ .marker = "function apFill(box,html){if(!box)return;box.innerHTML=html;apWire(box);}" },
         .{ .marker = "apFill(document.getElementById(\"ap-layers\"),apLayersHtml());" },
         .{ .marker = "apFill(document.getElementById(\"ap-objects\"),apObjectsHtml(false));" },
-        .{ .marker = "apFill(document.getElementById(\"ap-nets\"),apNetsHtml(false));" },
-        // The embed popover is the same three builders, compact variants.
-        .{ .marker = "function apPopHtml(){return apLayersHtml()+apObjectsHtml(true)+apNetsHtml(true);}" },
+        .{ .marker = "apFill(document.getElementById(\"ap-nets\"),apNetsHtml(false));", .present = false },
+        // The embed popover uses those same two builders.
+        .{ .marker = "function apPopHtml(){return apLayersHtml()+apObjectsHtml(true);}" },
         .{ .marker = "function popOpen(){if(!pop||!lb)return;apFill(pop,apPopHtml());" },
         // One row renderer, so a row's markup exists in exactly one place.
         .{ .marker = "function apRow(r){var cur=(r.stack!=null&&r.stack===activeStack);" },

@@ -1165,13 +1165,14 @@ test "viewer JS rebases an active drag after live rotation" {
     try std.testing.expect(std.mem.indexOf(u8, js, "if(!live)recordUndo()") != null);
 }
 
-// spec: Web Server - Placement guides remain independently controllable from the ratsnest
-test "viewer JS keeps placement guides independent with inspection defaults" {
+// spec: Web Server - Selecting a grouped net-open row or one of its gaps frames and draws a net-coloured line between that finding's nearest island probes
+test "viewer JS locates an open net with its nearest-probe line" {
     const js = @embedFile("assets/pcb_board.js");
-    try std.testing.expect(std.mem.indexOf(u8, js, "vis:{refdes:0,padnum:1,rats:0,drc_err:0,drc_warn:0,netcol:1,guides:0") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "guide?!showGuides:(!showRats||l.done)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "if(!viewSt.vis.guides)return") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "Placement guides") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "data-drcfirst=\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "renderDrcList();drcGoto(first);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "d.bridge&&d.bridge.length===4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "zoomToPoly([[d.bridge[0],d.bridge[1]],[d.bridge[2],d.bridge[3]]])") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "ctx.strokeStyle=netColorOf(n)||\"#ffd33d\"") != null);
 }
 
 // spec: Web Server - the /pcb-layout viewer reshapes a drawn outline via vertex drag, edge slide, insert, and delete
