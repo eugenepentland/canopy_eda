@@ -3015,7 +3015,8 @@ function selectionSeed(){var ps=sel.slice(),ts=selCu.t.slice(),vs=selCu.v.slice(
  if(insp&&insp.t==="track"&&ts.indexOf(insp.o)<0)ts.push(insp.o);
  if(insp&&insp.t==="via"&&vs.indexOf(insp.o)<0)vs.push(insp.o);
  return {p:ps,t:ts,v:vs};}
-function selectionCommit(seed){inspClear();clearSel();selSet(seed.p);selCuTo(seed.t,seed.v);paintSoon();selNet(null);}
+function selectionCommit(seed){inspClear();clearSel();selSet(seed.p);selCuTo(seed.t,seed.v);paintSoon();selNet(null);
+ if(seed.t.length===2&&!seed.v.length&&!seed.p.length)routeStatMsg("2 tracks selected — right-click for Fillet…");}
 // Ctrl/Cmd-click shares the marquee's selection state instead of growing a
 // second kind of multi-selection. A rigid sub-circuit toggles as one item: if
 // every member is already selected the click removes all of them, otherwise it
@@ -3466,6 +3467,7 @@ function kbdToggle(){
   '<div class="kbd-row"><span>Inspect copper / DRC marker (Select mode)</span><kbd>click it</kbd></div>'+
   '<div class="kbd-row"><span>Choose an exact object where selectable items overlap</span><kbd>click / tap and hold</kbd></div>'+
   '<div class="kbd-row"><span>Slide selected track (Shift = free) &middot; delete</span><kbd>drag &middot; Del</kbd></div>'+
+  '<div class="kbd-row"><span>Fillet two connected selected tracks</span><kbd>right-click &middot; Fillet…</kbd></div>'+
   '<div class="kbd-row"><span>Delete every box-selected track / via</span><kbd>Del</kbd></div>'+
   '<div class="kbd-row"><span>Move part or board silkscreen text (R rotates while held)</span><kbd>drag item</kbd></div>'+
   '<div class="kbd-row"><span>Align exact pads (moves first pad’s component / sub-circuit)</span><kbd>●↔● tool</kbd></div>'+
@@ -5163,6 +5165,7 @@ svg.addEventListener("pointerdown",function(ev){
  if(SPACE||ev.button===1){focusBoardShortcuts();ev.preventDefault();startPan(ev);return;}
  if(ev.target!==svg)return;
  focusBoardShortcuts();ev.preventDefault();
+ if(ev.button===2)return; // context-menu commands own secondary clicks
  if(PCB.rulerOn)return; // ruler overlay owns the gesture (its capture handlers measure)
  if(heatsinkMode){if(ev.button!==0)return;var hm0=mm(ev),hh=hsHandleAt(hm0);if(hh){heatsinkDrag=hsDragStart(hh,hm0);pcap(ev);svg.style.cursor=hsCursor(hh);return;}
   heatsinkDraw={x0:hm0.x,y0:hm0.y,x1:hm0.x,y1:hm0.y};pcap(ev);return;}
@@ -6199,6 +6202,40 @@ function arcRoundedTracks(points,want,l,w,net){var out=[],bends=0,minR=1e18,cur=
   out.push({x1:f.p1.x,y1:f.p1.y,xm:f.pm.x,ym:f.pm.y,x2:f.p2.x,y2:f.p2.y,l:l,w:w,net:net,source:"human"});
   cur=f.p2;bends++;minR=Math.min(minR,f.radius);}
  line(cur,points[points.length-1]);return {tracks:out,bends:bends,minRadius:bends?minR:0};}
+// Exact two-segment fillet used by the Select tool's context menu. Unlike the
+// hand-router's multi-corner pass, this command never silently shrinks the
+// requested radius: a radius that cannot leave a short straight remnant on
+// both selected legs is rejected with the largest value that fits.
+function traceFilletContext(t1,t2){var eps=2e-3;
+ if(!t1||!t2||t1===t2)return {ok:false,error:"Select two different trace segments."};
+ if(t1.xm!=null||t2.xm!=null)return {ok:false,error:"Select two straight segments; an existing arc cannot be filleted again."};
+ if((t1.l||0)!==(t2.l||0))return {ok:false,error:"The segments must be on the same copper layer."};
+ if((t1.net||"")!==(t2.net||""))return {ok:false,error:"The segments must carry the same net."};
+ if(Math.abs((t1.w||.25)-(t2.w||.25))>1e-7)return {ok:false,error:"The segments must have the same width."};
+ var e1=[{x:t1.x1,y:t1.y1,e:1},{x:t1.x2,y:t1.y2,e:2}],e2=[{x:t2.x1,y:t2.y1,e:1},{x:t2.x2,y:t2.y2,e:2}],hits=[];
+ e1.forEach(function(a){e2.forEach(function(c){if(Math.hypot(a.x-c.x,a.y-c.y)<=eps)hits.push({u:a,v:c});});});
+ if(hits.length!==1)return {ok:false,error:hits.length?"The selected segments overlap ambiguously.":"The selected segments must share one endpoint."};
+ var h=hits[0],a=h.u.e===1?e1[1]:e1[0],c=h.v.e===1?e2[1]:e2[0],b={x:(h.u.x+h.v.x)/2,y:(h.u.y+h.v.y)/2},
+  x1=b.x-a.x,y1=b.y-a.y,x2=c.x-b.x,y2=c.y-b.y,l1=Math.hypot(x1,y1),l2=Math.hypot(x2,y2);
+ if(l1<.02||l2<.02)return {ok:false,error:"Both segments must be at least 0.02 mm long."};
+ var u={x:x1/l1,y:y1/l1},v={x:x2/l2,y:y2/l2},dot=Math.max(-1,Math.min(1,u.x*v.x+u.y*v.y)),cross=u.x*v.y-u.y*v.x;
+ if(Math.abs(cross)<1e-7)return {ok:false,error:dot<0?"A 180° reversal cannot be filleted.":"Collinear segments do not form a corner."};
+ var tan=Math.tan(Math.acos(dot)/2),maxRadius=(Math.min(l1,l2)-.01)/tan;
+ if(!(tan>1e-8)||!(maxRadius>.001))return {ok:false,error:"This corner is too short to fillet."};
+ return {ok:true,t1:t1,t2:t2,a:a,b:b,c:c,u:u,v:v,cross:cross,l1:l1,l2:l2,tan:tan,maxRadius:maxRadius,e1:h.u.e,e2:h.v.e};}
+function traceFilletLine(t,end,p){return {x1:end===1?p.x:t.x1,y1:end===1?p.y:t.y1,x2:end===2?p.x:t.x2,y2:end===2?p.y:t.y2,
+ l:t.l||0,w:t.w||.25,net:t.net||"",g:t.g,source:t.source,id:trackIdEnsure(t)};}
+function traceFilletRadiusLimit(maxRadius){return Math.floor((maxRadius+1e-10)*1000)/1000;}
+function traceFilletPlan(t1,t2,radius){var c=traceFilletContext(t1,t2);if(!c.ok)return c;
+ radius=+radius;if(!(radius>0))return {ok:false,error:"Enter a radius greater than zero.",maxRadius:c.maxRadius};
+ if(radius>c.maxRadius+1e-9)return {ok:false,error:"Radius is too large; maximum is "+traceFilletRadiusLimit(c.maxRadius).toFixed(3)+" mm.",maxRadius:c.maxRadius};
+ var trim=radius*c.tan,p1={x:c.b.x-c.u.x*trim,y:c.b.y-c.u.y*trim},p2={x:c.b.x+c.v.x*trim,y:c.b.y+c.v.y*trim},sgn=c.cross<0?-1:1,
+  cx=p1.x-c.u.y*sgn*radius,cy=p1.y+c.u.x*sgn*radius,a1=Math.atan2(p1.y-cy,p1.x-cx),a2=Math.atan2(p2.y-cy,p2.x-cx),tau=Math.PI*2,sw=a2-a1;
+ if(sgn>0){while(sw<0)sw+=tau;while(sw>tau)sw-=tau;}else{while(sw>0)sw-=tau;while(sw< -tau)sw+=tau;}
+ var am=a1+sw/2,arc={x1:p1.x,y1:p1.y,xm:cx+radius*Math.cos(am),ym:cy+radius*Math.sin(am),x2:p2.x,y2:p2.y,
+  l:t1.l||0,w:t1.w||.25,net:t1.net||"",g:t1.g&&t1.g===t2.g?t1.g:undefined,source:"human"};
+ return {ok:true,radius:radius,maxRadius:c.maxRadius,first:traceFilletLine(t1,c.e1,p1),arc:arc,second:traceFilletLine(t2,c.e2,p2)};}
+window.PCBTraceFilletPlan=traceFilletPlan;
 // Automatic land tapers for completed hand routes. Two policies share this
 // lowering seam:
 //  · an authored pad neck stays at pad_neck_width for max_length, then grows
@@ -6941,6 +6978,8 @@ svg.addEventListener("dblclick",function(ev){if(drawMode&&dtrace){ev.preventDefa
  if(e){ev.preventDefault();outlineInsertVertex(e);}});
 svg.addEventListener("contextmenu",function(ev){
  if(pickMenu){ev.preventDefault();return;}
+ if(!RO&&!anyDrawTool()&&traceFilletSelectionReady()){
+  ev.preventDefault();traceFilletMenuOpen(ev);return;}
  if(backingMode&&!RO){var bi=backingVtxAt(mm(ev));if(bi>=0){ev.preventDefault();backingDelete(bi);}return;}
  // Pour tool armed: right-click deletes the pour under (or near the rim of) the
  // cursor. Takes precedence over the outline/copper-delete paths below.
@@ -7345,6 +7384,34 @@ function pickGestureCancel(){
  if(marqEl&&marqEl.parentNode)marqEl.parentNode.removeChild(marqEl);marqEl=null;marq=null;
  svg.style.cursor="";}
 function pickMenuClose(){if(pickMenu&&pickMenu.parentNode)pickMenu.parentNode.removeChild(pickMenu);pickMenu=null;}
+// ── Two-track fillet context menu ──────────────────────────────────────
+// Ctrl/Cmd-click and marquee selection both land in selCu, so the command is
+// available regardless of how the pair was selected. Right-click first shows
+// the action menu; choosing Fillet reveals the radius field and explicit Apply.
+function traceFilletSelectionReady(){return selCu.t.length===2&&!selCu.v.length&&!sel.length;}
+function traceFilletDefault(c){var custom=parseFloat((document.getElementById("r-br")||{}).value),r=custom>0?custom:3*(c.t1.w||.25);
+ return Math.max(.001,traceFilletRadiusLimit(Math.min(r,c.maxRadius)));}
+function traceFilletReplace(pair,radius){var t1=pair[0],t2=pair[1],plan=traceFilletPlan(t1,t2,radius);
+ if(!plan.ok)return plan;var base=PCB.tracks||[],after=base.filter(function(t){return t!==t1&&t!==t2;});
+ plan.arc.id=trackIdNew();after=after.concat([plan.first,plan.arc,plan.second]);
+ if(drcGateDiffBlocks(base,PCB.vias||[],after,PCB.vias||[]))return {ok:false,error:"Fillet would create a DRC error."};
+ var snap=snapAll();recordUndo(snap);rfDropForTracks(pair);PCB.tracks=after;copperTouched();
+ routeStatMsg("fillet applied · R"+plan.radius.toFixed(3)+" mm — Save/Update to keep");scheduleDrc();paintSoon();return plan;}
+function traceFilletMenuPosition(menu,at){var hr=sceneShell.getBoundingClientRect(),x=at.clientX-hr.left+12,y=at.clientY-hr.top+12;
+ x=Math.max(6,Math.min(x,Math.max(6,hr.width-menu.offsetWidth-6)));y=Math.max(6,Math.min(y,Math.max(6,hr.height-menu.offsetHeight-6)));
+ menu.style.left=x+"px";menu.style.top=y+"px";}
+function traceFilletMenuOpen(at){pickMenuClose();var pair=selCu.t.slice(),c=traceFilletContext(pair[0],pair[1]),limit=c.ok?traceFilletRadiusLimit(c.maxRadius):0,menu=document.createElement("div");
+ menu.className="pcb-pick-menu pcb-trace-menu";menu.setAttribute("role","menu");menu.setAttribute("aria-label","Trace actions");
+ menu.innerHTML='<div class="pcb-pick-head"><b>2 trace segments</b><span>'+pEsc((pair[0].net||"")?nLeaf(pair[0].net):"no net")+'</span></div>'+
+  '<button type="button" class="pcb-pick-item pcb-trace-fillet" role="menuitem"'+(c.ok?'':' disabled')+'><span class="pcb-pick-kind">Modify</span><span class="pcb-pick-copy"><b>Fillet…</b><small>'+pEsc(c.ok?("tangent arc · max R"+limit.toFixed(3)+" mm"):c.error)+'</small></span></button>';
+ sceneShell.appendChild(menu);pickMenu=menu;traceFilletMenuPosition(menu,at);var action=menu.querySelector(".pcb-trace-fillet");
+ action.addEventListener("click",function(){if(!c.ok)return;var initial=traceFilletDefault(c);
+  menu.innerHTML='<form class="pcb-trace-form"><div class="pcb-pick-head"><b>Fillet radius</b><span>mm</span></div><label>Radius <span><input name="radius" type="number" min="0.001" max="'+limit.toFixed(3)+'" step="0.001" value="'+initial.toFixed(3)+'" required> mm</span></label><small class="pcb-trace-limit">Maximum for these segments: '+limit.toFixed(3)+' mm</small><div class="pcb-trace-error" role="alert"></div><div class="pcb-trace-buttons"><button type="button" class="btn" data-fillet-cancel>Cancel</button><button type="submit" class="btn primary">Apply</button></div></form>';
+  traceFilletMenuPosition(menu,at);var form=menu.querySelector("form"),input=form.elements.radius,err=menu.querySelector(".pcb-trace-error");
+  menu.querySelector("[data-fillet-cancel]").addEventListener("click",pickMenuClose);
+  form.addEventListener("submit",function(ev){ev.preventDefault();var result=traceFilletReplace(pair,parseFloat(input.value));
+   if(!result.ok){err.textContent=result.error;input.focus();return;}pickMenuClose();});input.focus();input.select();});
+ if(c.ok)action.focus();}
 function pickSelect(c,at){var d=c.data;pickMenuClose();inspClear();selCuClear();selClear();clearSel();window.PCBSelNet(null);
  if(d.t==="sub"){selectGroup(d.g);return;}
  if(d.t==="fp"){selGroup=null;selectComp(P[d.i].ref);return;}

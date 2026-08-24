@@ -736,6 +736,31 @@ test "viewer JS promotes the initial plain selection when modifier clicking anot
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, js, marker) != null);
 }
 
+// spec: Web Server - Two selected connected trace segments expose a right-click Fillet command that applies an exact native-arc radius through the normal copper edit gates
+test "viewer JS fillets two selected trace segments from the context menu" {
+    const js = @embedFile("assets/pcb_board.js");
+    const markers = [_][]const u8{
+        "function traceFilletContext(t1,t2)",
+        "function traceFilletPlan(t1,t2,radius)",
+        "if(radius>c.maxRadius+1e-9)",
+        "xm:cx+radius*Math.cos(am),ym:cy+radius*Math.sin(am)",
+        "window.PCBTraceFilletPlan=traceFilletPlan",
+        "function traceFilletSelectionReady(){return selCu.t.length===2&&!selCu.v.length&&!sel.length;}",
+        "traceFilletMenuOpen(ev);return;",
+        "<b>Fillet…</b>",
+        "name=\"radius\" type=\"number\"",
+        "drcGateDiffBlocks(base,PCB.vias||[],after,PCB.vias||[])",
+        "recordUndo(snap);rfDropForTracks(pair);PCB.tracks=after;copperTouched();",
+        "fillet applied · R",
+        "if(ev.button===2)return; // context-menu commands own secondary clicks",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, js, marker) != null);
+
+    const context_menu = std.mem.indexOf(u8, js, "traceFilletMenuOpen(ev);return;").?;
+    const draw_delete = std.mem.indexOfPos(u8, js, context_menu, "if(!drawMode)return;").?;
+    try std.testing.expect(context_menu < draw_delete);
+}
+
 // spec: Web Server - Align, distribute, and pad-align carry each entity's own copper by that entity's own delta
 test "viewer JS panel moves carry per-entity copper and never shift one object twice" {
     const js = @embedFile("assets/pcb_board.js");

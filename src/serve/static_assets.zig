@@ -631,6 +631,17 @@ test "PCB editor carries tangent arc routing geometry" {
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
+test "PCB editor styles the two-trace fillet radius menu" {
+    const markers = [_][]const u8{
+        ".pcb-trace-menu{",
+        ".pcb-trace-form{",
+        ".pcb-trace-form input{",
+        ".pcb-trace-error{",
+        ".pcb-trace-buttons{",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_layout_css, marker) != null);
+}
+
 test "PCB editor automatically lowers manual pad tapers" {
     const markers = [_][]const u8{
         "function drawTaperProfile", "function drawRfTaperAllowed", "pad_neck_width",                    "kind:\"rf\"",
