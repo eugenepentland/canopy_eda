@@ -3356,10 +3356,26 @@ function stampPoseCompose(a,b){var t=stampPoseLin(a,b.x,b.y);return {x:t.x+a.x,y
 function stampPoseInverse(p){var q={x:0,y:0,rot:stampPoseNorm(p.back?p.rot:-p.rot),back:p.back};
  var t=stampPoseLin(q,p.x,p.y);q.x=-t.x;q.y=-t.y;return q;}
 function stampLayer(l,mirror){return !mirror?l:(l===0?1:(l===1?0:l));}
-// Stamp a group from its module ★ layout (PCB.subseeds). The module anchor's
+// Refresh Stamp's small seed payload at click time. A module layout is commonly
+// edited in another tab while this board stays open with unsaved work, so the
+// page-load PCB.subseeds snapshot is only an initial palette preview, never the
+// authority for the actual Stamp.
+function stampBusy(g,on){document.querySelectorAll("[data-stamp],[data-grp-stamp]").forEach(function(b){
+ if(b.getAttribute("data-stamp")!==g&&b.getAttribute("data-grp-stamp")!==g)return;
+ b.disabled=on;if(on)b.setAttribute("aria-busy","true");else b.removeAttribute("aria-busy");});}
+function refreshStampSeeds(g){stampBusy(g,true);
+ return fetch("/api/pcb-subseeds/"+encodeURIComponent(PCB.name),{cache:"no-store"})
+  .then(function(r){if(!r.ok)throw new Error("server returned "+r.status);return r.json();})
+  .then(function(j){PCB.subseeds=j.subseeds||{};PCB.subseedinfo=j.subseedinfo||{};
+   PCB.submodules=j.submodules||PCB.submodules||{};PCB.subroutes=j.subroutes||{};
+   var idxs=GRPS[g]||[],seeds=PCB.subseeds;
+   if(!idxs.some(function(i){return !!seeds[P[i].ref];})){subPanelRefresh();
+    throw new Error("the module has no saved layout matching its current parts");}
+  });}
+// Stamp a group from its freshly fetched module layout. The module anchor's
 // LIVE board pose is invariant; every saved part and copper primitive follows
 // the rigid module-anchor → board-anchor transform around it.
-function stampGroup(g){var seeds=PCB.subseeds||{},idxs=GRPS[g]||[],hit=[];
+function stampGroup(g){return refreshStampSeeds(g).then(function(){var seeds=PCB.subseeds||{},idxs=GRPS[g]||[],hit=[];
  idxs.forEach(function(i){var sd=seeds[P[i].ref];if(sd)hit.push({i:i,sd:sd});});
  if(!hit.length)return;
  recordUndo();
@@ -3397,7 +3413,9 @@ function stampGroup(g){var seeds=PCB.subseeds||{},idxs=GRPS[g]||[],hit=[];
   (sr.vias||[]).forEach(function(v){if(v.net&&lockedNets[v.net])return;
    var a=stampPoseApply(xf,v.x,v.y);
    PCB.vias.push({x:a.x,y:a.y,d:v.d||0.4,drill:v.drill||0,net:v.net||"",g:g,source:v.source,id:viaIdNew()});});}
- rats();drawClr();drawRoute();fetchScore();refreshUnplaced();subPanelRefresh();scheduleDrc();progressRefresh();}
+ rats();drawClr();drawRoute();fetchScore();refreshUnplaced();subPanelRefresh();scheduleDrc();progressRefresh();
+ }).catch(function(e){window.alert("Stamp failed: "+(e&&e.message?e.message:e));
+ }).finally(function(){stampBusy(g,false);});}
 stampGroupFn=stampGroup;
 // Iterative layout editing: curLayout is the saved layout the Update button
 // writes back into (overwrite in place) instead of forcing a new one. Set by

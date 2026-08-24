@@ -661,7 +661,7 @@ reason = "the web layer sits on top - a format/eval/placement module importing s
 name = "serve-placement-internals"
 from = ["src/serve/*"]
 to = ["src/placement/*"]
-allow = ["src/serve/mcp_connector_pinout.zig"]
+allow = ["src/serve/mcp_connector_pinout.zig", "src/serve/pcb_subseeds.zig"]
 reason = "ratchet ahead of the placement/model.zig extraction - serve should depend on placement's data model, not compile against the 12.3k-line solver"
 
 [[twin]]

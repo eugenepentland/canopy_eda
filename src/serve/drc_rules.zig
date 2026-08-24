@@ -813,6 +813,26 @@ test "viewer JS restamps a sub-circuit around its live side and rotation" {
     try std.testing.expect(std.mem.indexOf(u8, body, "stampLayer(t.l||0,xf.back)") != null);
 }
 
+// spec: Web Server - Stamp fetches the current module layout when clicked, so a sub-circuit edit in another tab applies without reloading a board and without discarding its unsaved work
+test "viewer JS refreshes sub-circuit seeds before every stamp" {
+    const js = @embedFile("assets/pcb_board.js");
+    const start = std.mem.indexOf(u8, js, "function stampGroup(g)") orelse
+        return error.TestStampGroupMissing;
+    const tail = js[start..];
+    const end = std.mem.indexOf(u8, tail, "stampGroupFn=stampGroup;") orelse
+        return error.TestStampGroupEndMissing;
+    const body = tail[0..end];
+    const refresh = std.mem.indexOf(u8, body, "refreshStampSeeds(g)") orelse
+        return error.TestStampRefreshMissing;
+    const seeds = std.mem.indexOf(u8, body, "var seeds=PCB.subseeds||{}") orelse
+        return error.TestStampSeedsMissing;
+
+    try std.testing.expect(refresh < seeds);
+    try std.testing.expect(std.mem.indexOf(u8, js, "fetch(\"/api/pcb-subseeds/\"+encodeURIComponent(PCB.name),{cache:\"no-store\"})") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "PCB.subseeds=j.subseeds||{}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "PCB.subroutes=j.subroutes||{}") != null);
+}
+
 // spec: Web Server - A multi-part drag or rotate carries copper on nets private to the moving parts and leaves shared-net copper in place
 test "viewer JS carries private-net copper with a multi-part move and strands nothing shared" {
     const js = @embedFile("assets/pcb_board.js");

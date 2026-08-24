@@ -378,6 +378,7 @@ test {
     _ = @import("serve/pcb_keepout_json.zig");
     _ = @import("serve/pcb_layout_import.zig");
     _ = @import("serve/pcb_layout_page.zig");
+    _ = @import("serve/pcb_subseeds.zig");
     _ = @import("serve/pcb_layout_sync.zig");
     _ = @import("serve/pcb_page_cache.zig");
     _ = @import("serve/progress_cache.zig");

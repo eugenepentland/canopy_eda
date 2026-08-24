@@ -49,6 +49,7 @@ const sync_kicad_sch = @import("serve/sync_kicad_sch.zig");
 const assembly_debug = @import("serve/assembly_debug.zig");
 const assembly_page_cache = @import("serve/assembly_page_cache.zig");
 const pcb_layout_page = @import("serve/pcb_layout_page.zig");
+const pcb_subseeds = @import("serve/pcb_subseeds.zig");
 const matlab_rf_export = @import("serve/matlab_rf_export.zig");
 const pcb_page_cache = @import("serve/pcb_page_cache.zig");
 const thermal_cache = @import("serve/thermal_cache.zig");
@@ -567,6 +568,7 @@ fn registerPcbRoutes(router: anytype) void {
     router.get("/pcb-route-lab/:name", routeLabRedirect, .{});
     router.get("/pcb-layout/:name", pcb_layout_page.pcbLayoutPage, .{});
     router.get("/api/pcb-cam/:name", pcb_layout_page.pcbCamJsonApi, .{});
+    router.get("/api/pcb-subseeds/:name", pcb_subseeds.pcbSubSeedsApi, .{});
     router.get("/api/pcb-layout/:name", pcb_layout_page.pcbLayoutJsonApi, .{});
     router.get("/api/pcb-settings/:name", pcb_layout_page.pcbSettingsApi, .{});
     router.get("/api/pcb-png/:name", pcb_layout_page.pcbPngApi, .{});
