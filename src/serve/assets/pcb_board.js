@@ -3254,6 +3254,13 @@ function selCuCopper(){return {t:selCu.t.slice(),v:selCu.v.slice(),z:[]};}
 function grpCopper(g){return {t:(PCB.tracks||[]).filter(function(t){return t.g===g;}),
  v:(PCB.vias||[]).filter(function(v){return v.g===g;}),
  z:(PCB.zones||[]).filter(function(z){return z.g===g;})};}
+// A user-zone's visible solid copper lives in zone_fills, keyed back to the
+// raw PCB.zones boundary by numeric index. Carry both during a rigid drag: the
+// boundary is the saved authority, while the fill is what the user actually
+// sees under the pointer until drop-time refill re-carves it around the board.
+function zoneFillsFor(zones){var own={},all=PCB.zones||[];
+ (zones||[]).forEach(function(z){var i=all.indexOf(z);if(i>=0)own[i]=1;});
+ return (PCB.zone_fills||[]).filter(function(f){return !!own[f.zone];});}
 function privateNets(idxs){var mv={};idxs.forEach(function(i){mv[i]=1;});
  var all={},mine={};
  P.forEach(function(p,i){(p.pads||[]).forEach(function(pd){if(!pd.net)return;
@@ -3285,11 +3292,14 @@ function gdragStart(m,down,idxs){var src=idxs||sel;
  var g=idxs?grpOf(P[down].ref):null;
  var mv=src.filter(function(k){return !P[k].locked;}); // locked members stay put
  var cu=carriedCopper(mv,g,!g);
+ var fills=zoneFillsFor(cu.z);
  return {sx:m.x,sy:m.y,lx:m.x,ly:m.y,adx:0,ady:0,moved:false,active:false,down:down,
  snap:snapAll(),g:g,
  ct:cu.t.map(function(t){return {t:t,x1:t.x1,y1:t.y1,xm:t.xm,ym:t.ym,x2:t.x2,y2:t.y2};}),
  cv:cu.v.map(function(v){return {v:v,x:v.x,y:v.y};}),
  cz:cu.z.map(function(z){return {z:z,poly:(z.poly||[]).map(function(p){return [p[0],p[1]];})};}),
+ cf:fills.map(function(f){return {f:f,poly:(f.poly||[]).map(function(p){return [p[0],p[1]];}),
+  holes:(f.holes||[]).map(function(h){return h.map(function(p){return [p[0],p[1]];});})};}),
  orig:mv.map(function(k){return {i:k,x:P[k].x,y:P[k].y};})};}
 // The copper a live drag carries, as a plain {t,v} object list (a live R press
 // rotates it through the same rigid transform as the parts).
@@ -5442,8 +5452,10 @@ svg.addEventListener("pointermove",function(ev){
    if(o.xm!=null){o.t.xm=o.xm+gdx;o.t.ym=o.ym+gdy;}o.t.x2=o.x2+gdx;o.t.y2=o.y2+gdy;});
   gdrag.cv.forEach(function(o){o.v.x=o.x+gdx;o.v.y=o.y+gdy;});
   gdrag.cz.forEach(function(o){o.z.poly=o.poly.map(function(p){return [p[0]+gdx,p[1]+gdy];});});
+  gdrag.cf.forEach(function(o){o.f.poly=o.poly.map(function(p){return [p[0]+gdx,p[1]+gdy];});
+   o.f.holes=o.holes.map(function(h){return h.map(function(p){return [p[0]+gdx,p[1]+gdy];});});});
   if(gdrag.ct.length||gdrag.cv.length)gpuCuEdit(); // the carried copper translated in place
-  if(gdrag.cz.length){pourGeomDrop();dragCacheDrop();}
+  if(gdrag.cz.length||gdrag.cf.length){pourGeomDrop();dragCacheDrop();}
   ratsUpdate(gidx);paintSoon();refreshUnplaced();return;}
  if(typeof drag!=="undefined"&&drag){var dm=mm(ev),dg=snapG();
   if(!partDragReady(drag,dm))return;
@@ -5525,11 +5537,11 @@ svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.p
   inspShow({t:"via",o:vgd.v},ev);return;}
  if(txDrag){var moved=txDrag.moved,adopted=txDrag.adopted,ti=txDrag.i,tsnap=txDrag.snap;txDrag=null;svg.style.cursor="";
   if(moved||adopted){recordUndo(tsnap);txDirty();txPopReposition(ti);scheduleDrc();}return;}
- if(typeof gdrag!=="undefined"&&gdrag){var gmv=gdrag.moved,gsnap=gdrag.snap,gdn=gdrag.down,gbg=gdrag.boxGroup,gcu=gdrag.cuDown;gdrag=null;svg.style.cursor="";
+ if(typeof gdrag!=="undefined"&&gdrag){var gmv=gdrag.moved,gsnap=gdrag.snap,gdn=gdrag.down,gbg=gdrag.boxGroup,gcu=gdrag.cuDown,gzones=gdrag.cz.length;gdrag=null;svg.style.cursor="";
   // No movement = a plain click on a rigid-group / multi-selected part (or on
   // selected copper) — select or inspect it like any other click instead of
   // swallowing it. Post-drag repaint drops the drag cache and restores pad labels.
-  if(gmv){recordUndo(gsnap);fetchScore();dragCacheDrop();paintSoon();if(anyCopper())scheduleDrc();}
+  if(gmv){recordUndo(gsnap);fetchScore();dragCacheDrop();paintSoon();if(gzones)refillPours();if(anyCopper())scheduleDrc();}
   else if(gcu)inspShow(gcu,ev);
   else if(gbg)selectGroup(gbg);
   else if(gdn!=null&&gdn>=0)clickPart(ev,gdn);return;}

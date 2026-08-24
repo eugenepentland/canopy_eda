@@ -816,9 +816,16 @@ test "viewer JS restamps a sub-circuit around its live side and rotation" {
     try std.testing.expect(std.mem.indexOf(u8, body, "PCB.zones=(PCB.zones||[]).filter(function(z){return z.g!==g;});") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "filled:true,keepout:false,priority:+z.priority||0,g:g") != null);
     // The ownership tag persists and makes later rigid translations/rotations
-    // carry the stamped pour with the rest of the module copper.
+    // carry the stamped pour with the rest of the module copper. A drag also
+    // carries the carved zone-fill contour (including clearance holes), which
+    // is the solid copper actually painted, then refills it after drop.
     try std.testing.expect(std.mem.indexOf(u8, js, "z:(PCB.zones||[]).filter(function(z){return z.g===g;})") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "function zoneFillsFor(zones)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "var fills=zoneFillsFor(cu.z);") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "gdrag.cz.forEach(function(o){o.z.poly=o.poly.map") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "gdrag.cf.forEach(function(o){o.f.poly=o.poly.map") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "o.f.holes=o.holes.map") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(gzones)refillPours();") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "(cop.z||[]).forEach(function(z){z.poly=") != null);
 }
 
