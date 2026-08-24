@@ -478,18 +478,7 @@ pub fn netConnectivity(
     const zone_fills = try userZoneFills(arena, placement, copper, null);
     for (placement.nets, 0..) |net, net_i| {
         const graph = try buildNetGraphPrepared(arena, placement, copper, net, @intCast(net_i), .{ .zone_fills = zone_fills });
-        const comps = try netComponentsOf(arena, graph);
-        // A net that lands in <2 distinct board locations needs no copper
-        // (single pad, or a plane-carried net whose pads the plane joins).
-        const routable = comps.locations >= 2;
-        try out.append(arena, .{
-            .name = net.name,
-            .routable = routable,
-            .connected = routable and comps.groups <= 1,
-            .islands = comps.groups,
-            .coarsened = comps.coarsened,
-            .hairline_gaps = graphHairlineGaps(graph),
-        });
+        try out.append(arena, try netStatusFromGraph(arena, net.name, graph, true));
     }
     return out.toOwnedSlice(arena);
 }
@@ -530,7 +519,9 @@ pub fn routableTally(
     return summarizeConnectivity(arena, conn);
 }
 
-fn summarizeConnectivity(arena: std.mem.Allocator, conn: []const NetStatus) std.mem.Allocator.Error!Tally {
+/// Fold per-net connectivity statuses into the connection-level and collapsed
+/// logical-net totals reported by the PCB APIs.
+pub fn summarizeConnectivity(arena: std.mem.Allocator, conn: []const NetStatus) std.mem.Allocator.Error!Tally {
     var t = Tally{};
     var open: std.ArrayList([]const u8) = .empty;
     var logical = std.StringArrayHashMapUnmanaged(bool).empty;
@@ -984,7 +975,16 @@ pub fn userZoneFills(
 pub const SharedFills = struct {
     zone_fills: []const pour.Fill,
     base: ?pour.EdgeField = null,
+    /// Optional carrying-layer fills retained by full DRC's topology pass.
+    /// When present, connectivity assigns components from these exact labels
+    /// instead of rasterizing the same plane again.
+    plane_fills: []const pour.NetFills = &.{},
 };
+
+fn preparedNetFills(all: []const pour.NetFills, name: []const u8) ?pour.NetFills {
+    for (all) |prepared| if (std.mem.eql(u8, prepared.net_name, name)) return prepared;
+    return null;
+}
 
 /// `buildNetGraph` with the board's user-zone rasters and edge-margin field
 /// supplied by the caller. The fills depend on the board and its copper, never
@@ -1029,7 +1029,11 @@ pub fn buildNetGraphPrepared(
         if (sameNet(v.net, net_i)) try vs.append(arena, v);
     }
     const qpads = try planeQueries(arena, items);
-    const join = try pour.planeConnect(arena, placement, .{ .tracks = copper.tracks, .vias = copper.vias, .zones = copper.zones }, .{ .net_name = net.name, .pads = qpads, .vias = vs.items, .base = fills.base });
+    const query: pour.PlaneQuery = .{ .net_name = net.name, .pads = qpads, .vias = vs.items, .base = fills.base };
+    const join = if (preparedNetFills(fills.plane_fills, net.name)) |prepared|
+        try pour.planeConnectPrepared(arena, query, prepared)
+    else
+        try pour.planeConnect(arena, placement, .{ .tracks = copper.tracks, .vias = copper.vias, .zones = copper.zones }, query);
     const n_pads = items.len;
     const n_tracks = segs.items.len;
     const parent = try arena.alloc(usize, n_pads + n_tracks + vs.items.len + join.n_comp);
@@ -1147,6 +1151,24 @@ fn netComponentsOf(arena: std.mem.Allocator, g: NetGraph) std.mem.Allocator.Erro
     var group_root: std.AutoHashMapUnmanaged(usize, void) = .empty;
     for (0..g.n_pads) |i| try group_root.put(arena, find(g.parent, i), {});
     return .{ .locations = g.locations, .groups = group_root.count(), .coarsened = g.plane.coarsened };
+}
+
+/// Derive one reporting status from an already-built connectivity graph.
+/// Whole-board consumers that also need the graph use this seam so they do not
+/// raster the same plane and rebuild the same unions a second time merely to
+/// produce the routed tally. Callers that only expose that tally can skip the
+/// separate quadratic hairline-gap audit with `include_hairline = false`.
+pub fn netStatusFromGraph(arena: std.mem.Allocator, name: []const u8, graph: NetGraph, include_hairline: bool) std.mem.Allocator.Error!NetStatus {
+    const comps = try netComponentsOf(arena, graph);
+    const routable = comps.locations >= 2;
+    return .{
+        .name = name,
+        .routable = routable,
+        .connected = routable and comps.groups <= 1,
+        .islands = comps.groups,
+        .coarsened = comps.coarsened,
+        .hairline_gaps = if (include_hairline) graphHairlineGaps(graph) else 0,
+    };
 }
 
 /// Reduce the net's pad nodes to their reportable identity (`NetGraph.pads`).

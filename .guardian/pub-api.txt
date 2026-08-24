@@ -807,12 +807,14 @@ src/fab_readiness.zig::buildNetGraphPrepared | fn buildNetGraphPrepared( arena: 
 src/fab_readiness.zig::check | fn check( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, ctx: Context, ) std.mem.Allocator.Error!Report
 src/fab_readiness.zig::netConnectivity | fn netConnectivity( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, ) std.mem.Allocator.Error![]const NetStatus
 src/fab_readiness.zig::netHasPlane value
+src/fab_readiness.zig::netStatusFromGraph | fn netStatusFromGraph(arena: std.mem.Allocator, name: []const u8, graph: NetGraph, include_hairline: bool) std.mem.Allocator.Error!NetStatus
 src/fab_readiness.zig::ok | fn ok(self: Report) bool
 src/fab_readiness.zig::openNets | fn openNets( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, ) std.mem.Allocator.Error![]const OpenNet
 src/fab_readiness.zig::openNetsAmong | fn openNetsAmong( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, names: ?[]const []const u8, ) std.mem.Allocator.Error![]const OpenNet
 src/fab_readiness.zig::root | fn root(self: NetGraph, node: usize) usize
 src/fab_readiness.zig::routableTally | fn routableTally( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, ) std.mem.Allocator.Error!Tally
 src/fab_readiness.zig::staging_band_mm value
+src/fab_readiness.zig::summarizeConnectivity | fn summarizeConnectivity(arena: std.mem.Allocator, conn: []const NetStatus) std.mem.Allocator.Error!Tally
 src/fab_readiness.zig::userZoneFills | fn userZoneFills( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, base: ?pour.EdgeField, ) std.mem.Allocator.Error![]const pour.Fill
 src/fab_readiness.zig::writeJson | fn writeJson(w: *std.Io.Writer, report: Report) std.Io.Writer.Error!void
 src/flat_netlist.zig::CanonicalNetMap value
@@ -1578,8 +1580,10 @@ src/placement/drc.zig::errorCount | fn errorCount(violations: []const Violation)
 src/placement/drc.zig::partyIndex | fn partyIndex(i: usize) i32
 src/placement/drc.zig::segSegDist | fn segSegDist(ax1: f64, ay1: f64, ax2: f64, ay2: f64, bx1: f64, by1: f64, bx2: f64, by2: f64) f64
 src/placement/drc.zig::staging_exempt_mm value
+src/placement/drc_compose.zig::CheckReport struct_
 src/placement/drc_compose.zig::CopperCheck struct_
 src/placement/drc_compose.zig::checkDefaultRules | fn checkDefaultRules(alloc: std.mem.Allocator, in: CopperCheck) []const drc.Violation
+src/placement/drc_compose.zig::checkDefaultRulesReport | fn checkDefaultRulesReport(alloc: std.mem.Allocator, in: CopperCheck) CheckReport
 src/placement/drc_compose.zig::checkFilled | fn checkFilled(alloc: std.mem.Allocator, in: CopperCheck) []const drc.Violation
 src/placement/drc_compose.zig::checkTopologyFilled | fn checkTopologyFilled(alloc: std.mem.Allocator, in: CopperCheck) []const drc.Violation
 src/placement/drc_diffpair.zig::Copper struct_
@@ -1910,7 +1914,9 @@ src/placement/near_bind.zig::Unresolved struct_
 src/placement/near_bind.zig::Why enum_
 src/placement/near_bind.zig::resolve | fn resolve( arena: std.mem.Allocator, instances: []const FlatInstance, nets: []const FlatNet, ) std.mem.Allocator.Error!Resolved
 src/placement/near_bind.zig::text | fn text(self: Why) []const u8
+src/placement/net_open.zig::Report struct_
 src/placement/net_open.zig::check | fn check( arena: std.mem.Allocator, placement: optimizer.Placement, copper: routed_copper.Copper, base: ?pour.EdgeField, ) std.mem.Allocator.Error![]drc.Violation
+src/placement/net_open.zig::checkWithConnectivity | fn checkWithConnectivity( arena: std.mem.Allocator, placement: optimizer.Placement, copper: routed_copper.Copper, base: ?pour.EdgeField, plane_fills: []const pour.NetFills, ) std.mem.Allocator.Error!Report
 src/placement/net_rules.zig::FenceRule struct_
 src/placement/net_rules.zig::ImpedanceRule value
 src/placement/net_rules.zig::NetRule struct_
@@ -2211,6 +2217,7 @@ src/placement/pour.zig::Fill struct_
 src/placement/pour.zig::Grid struct_
 src/placement/pour.zig::Join struct_
 src/placement/pour.zig::LayerSpec struct_
+src/placement/pour.zig::NetFills struct_
 src/placement/pour.zig::PadQuery struct_
 src/placement/pour.zig::PlaneNet union_
 src/placement/pour.zig::PlaneQuery struct_
@@ -2227,6 +2234,7 @@ src/placement/pour.zig::higherThanDeclared | fn higherThanDeclared( arena: std.m
 src/placement/pour.zig::initMargin | fn initMargin(g: Grid, placement: optimizer.Placement, r: optimizer.BoardRect, inset: f64) void
 src/placement/pour.zig::outerSpec | fn outerSpec(net_name: []const u8, side: optimizer.Side) LayerSpec
 src/placement/pour.zig::planeConnect | fn planeConnect( arena: std.mem.Allocator, placement: optimizer.Placement, copper: Copper, q: PlaneQuery, ) std.mem.Allocator.Error!Join
+src/placement/pour.zig::planeConnectPrepared | fn planeConnectPrepared(arena: std.mem.Allocator, q: PlaneQuery, prepared: NetFills) std.mem.Allocator.Error!Join
 src/placement/pour.zig::segmentComponents | fn segmentComponents( arena: std.mem.Allocator, fill: Fill, x1: f64, y1: f64, x2: f64, y2: f64, ) std.mem.Allocator.Error![]const i32
 src/placement/pour.zig::segmentContacts | fn segmentContacts( self: Fill, arena: std.mem.Allocator, x1: f64, y1: f64, x2: f64, y2: f64, ) std.mem.Allocator.Error![]const ComponentContact
 src/placement/pour.zig::sharedEdgeField | fn sharedEdgeField(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error!?EdgeField
@@ -3186,6 +3194,7 @@ src/serve/drc_json.zig::kindStr | fn kindStr(k: drc.Kind) []const u8
 src/serve/drc_json.zig::writeDrawerGroupsJson | fn writeDrawerGroupsJson(w: *std.Io.Writer) std.Io.Writer.Error!void
 src/serve/drc_json.zig::writeViolation | fn writeViolation(w: *std.Io.Writer, v: drc.Violation, names: Names) std.Io.Writer.Error!void
 src/serve/drc_rules.zig::Action enum_
+src/serve/drc_rules.zig::ApiReport struct_
 src/serve/drc_rules.zig::CopperCheck value
 src/serve/drc_rules.zig::Rules struct_
 src/serve/drc_rules.zig::apply | fn apply(alloc: std.mem.Allocator, rules: Rules, list: []const drc.Violation) []const drc.Violation
@@ -3193,6 +3202,8 @@ src/serve/drc_rules.zig::checkDefaultRules value
 src/serve/drc_rules.zig::checkFilled value
 src/serve/drc_rules.zig::checkFiltered | fn checkFiltered( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, placement: optimizer.Placement, r: router.RouteResult, clearance: f64, ) []const drc.Violation
 src/serve/drc_rules.zig::checkFilteredZones | fn checkFilteredZones( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, in: CopperCheck, ) []const drc.Violation
+src/serve/drc_rules.zig::checkFilteredZonesReport | fn checkFilteredZonesReport( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, in: CopperCheck, ) drc_compose.CheckReport
+src/serve/drc_rules.zig::checkFilteredZonesTally | fn checkFilteredZonesTally( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, in: CopperCheck, ) ApiReport
 src/serve/drc_rules.zig::checkTopologyFilled value
 src/serve/drc_rules.zig::getApi | fn getApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/drc_rules.zig::load | fn load(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) Rules

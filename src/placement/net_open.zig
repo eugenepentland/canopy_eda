@@ -54,7 +54,29 @@ pub fn check(
     copper: routed_copper.Copper,
     base: ?pour.EdgeField,
 ) std.mem.Allocator.Error![]drc.Violation {
+    return (try checkWithConnectivity(arena, placement, copper, base, &.{})).violations;
+}
+
+/// Open-net findings plus the per-net connectivity statuses derived from the
+/// exact same graphs. The authoritative DRC endpoint needs both; returning
+/// them together avoids rastering every carried plane and rebuilding every
+/// same-net union a second time solely for its routed/total summary.
+pub const Report = struct {
+    violations: []drc.Violation,
+    connectivity: []const fab.NetStatus,
+};
+
+/// Run the open-net sweep and retain each graph's connectivity status so a
+/// reporting caller can summarize it without a duplicate whole-board pass.
+pub fn checkWithConnectivity(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    copper: routed_copper.Copper,
+    base: ?pour.EdgeField,
+    plane_fills: []const pour.NetFills,
+) std.mem.Allocator.Error!Report {
     var out: std.ArrayList(drc.Violation) = .empty;
+    var connectivity: std.ArrayList(fab.NetStatus) = .empty;
     // Raster the user zones ONCE for the whole run. A zone's fill is a property
     // of the board and its copper, not of the net being inspected, so the
     // per-net graph builder gets the same slice every time — see
@@ -69,11 +91,15 @@ pub fn check(
         .copper = copper,
         .zone_fills = try fab.userZoneFills(arena, placement, copper, base),
         .base = base,
+        .plane_fills = plane_fills,
     };
     for (placement.nets, 0..) |net, ni| {
-        try checkNet(arena, &out, board, net, @intCast(ni));
+        try connectivity.append(arena, try checkNet(arena, &out, board, net, @intCast(ni)));
     }
-    return out.toOwnedSlice(arena);
+    return .{
+        .violations = try out.toOwnedSlice(arena),
+        .connectivity = try connectivity.toOwnedSlice(arena),
+    };
 }
 
 /// One connected component of a net's copper: whether it holds a pad (so a
@@ -99,6 +125,7 @@ const Board = struct {
     copper: routed_copper.Copper,
     zone_fills: []const pour.Fill,
     base: ?pour.EdgeField,
+    plane_fills: []const pour.NetFills,
 };
 
 fn checkNet(
@@ -107,12 +134,20 @@ fn checkNet(
     board: Board,
     net: flat_netlist.FlatNet,
     net_i: i32,
-) std.mem.Allocator.Error!void {
-    const g = try fab.buildNetGraphPrepared(arena, board.placement, board.copper, net, net_i, .{ .zone_fills = board.zone_fills, .base = board.base });
+) std.mem.Allocator.Error!fab.NetStatus {
+    const g = try fab.buildNetGraphPrepared(arena, board.placement, board.copper, net, net_i, .{
+        .zone_fills = board.zone_fills,
+        .base = board.base,
+        .plane_fills = board.plane_fills,
+    });
+    // The live DRC response only consumes routed/total from these retained
+    // statuses. Its RF path lowering can contain thousands of private chords,
+    // so do not run the separate quadratic hairline-gap audit here.
+    const status = try fab.netStatusFromGraph(arena, net.name, g, false);
     // A net whose pads all sit at one board location needs no copper (a single
     // pad, or a net-tie's coincident pads) — the same gate `netComponents`
     // applies, so the marker and the fab gate agree on what "routable" means.
-    if (g.locations < 2) return;
+    if (g.locations < 2) return status;
 
     // Bucket every feature by its component root.
     var comps: std.AutoHashMapUnmanaged(usize, *Comp) = .empty;
@@ -145,9 +180,10 @@ fn checkNet(
         if (plane and !c.has_pad) continue;
         try islands.append(arena, c);
     }
-    if (islands.items.len < 2) return; // everything is one piece of metal — fine.
+    if (islands.items.len < 2) return status; // everything is one piece of metal — fine.
 
     try emitOpens(arena, out, islands.items, net_i);
+    return status;
 }
 
 /// The `*Comp` for a union-find root, minted on first sight (arena-owned).
@@ -913,9 +949,10 @@ test "a net with two pads and no copper flags one net_open" {
 
     // No tracks, no vias: `fab_readiness.routableTally` calls SIG routable and
     // unconnected, so the marker has to agree instead of staying silent.
-    const vs = try check(arena, placement, .{}, null);
-    try testing.expectEqual(@as(usize, 1), count(vs));
-    const tally = try @import("../fab_readiness.zig").routableTally(arena, placement, .{});
+    const report = try checkWithConnectivity(arena, placement, .{}, null, &.{});
+    try testing.expectEqual(@as(usize, 1), count(report.violations));
+    try testing.expectEqual(nets.len, report.connectivity.len);
+    const tally = try fab.summarizeConnectivity(arena, report.connectivity);
     try testing.expectEqual(@as(usize, 1), tally.total);
     try testing.expectEqual(@as(usize, 0), tally.routed);
 

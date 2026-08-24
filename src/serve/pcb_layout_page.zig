@@ -4632,12 +4632,9 @@ pub fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
         res.body = aw.written();
         return;
     }
-    const violations = drc_rules.checkFilteredZones(ctx.allocator, ctx.project_dir, name, .{ .placement = placement, .routed = rr, .clearance = clearance, .zones = user_zones });
-    const tally = fab_readiness.routableTally(ctx.allocator, placement, .{
-        .tracks = rr.tracks,
-        .vias = rr.vias,
-        .zones = user_zones,
-    }) catch null;
+    const report = drc_rules.checkFilteredZonesTally(ctx.allocator, ctx.project_dir, name, .{ .placement = placement, .routed = rr, .clearance = clearance, .zones = user_zones });
+    const violations = report.violations;
+    const tally = report.tally;
 
     try w.writeAll("{\"drc\":[");
     for (violations, 0..) |vio, i| {

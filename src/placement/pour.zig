@@ -1976,6 +1976,22 @@ pub const PlaneQuery = struct {
     base: ?EdgeField = null,
 };
 
+/// Already-computed carrying-layer fills for one net. Full DRC needs their
+/// contours for topology and their labels for connectivity; retaining both
+/// views lets those consumers share one rasterization.
+pub const NetFills = struct {
+    net_name: []const u8,
+    layers: []const LayerSpec,
+    fills: []const Fill,
+};
+
+/// Assign pads and vias to a net's retained fill components, applying the same
+/// cross-layer through-feature union and dense component numbering as
+/// `planeConnect`.
+pub fn planeConnectPrepared(arena: std.mem.Allocator, q: PlaneQuery, prepared: NetFills) std.mem.Allocator.Error!Join {
+    return joinPlaneFills(arena, q, prepared.layers, prepared.fills);
+}
+
 /// Fuse one net's pads, tracks and vias through the plane fills that carry
 /// that net, answering which same-net copper lands in the same kept component
 /// and which pads the plane actually connects. `q` carries the net's name, pad
@@ -1987,19 +2003,11 @@ pub fn planeConnect(
     q: PlaneQuery,
 ) std.mem.Allocator.Error!Join {
     const layers = try carryingLayers(arena, placement.rules, q.net_name);
-    const pad_comp = try arena.alloc(i32, q.pads.len);
-    const via_comp = try arena.alloc(i32, q.vias.len);
-    @memset(pad_comp, -1);
-    @memset(via_comp, -1);
-    if (layers.len == 0) return .{ .pad_comp = pad_comp, .via_comp = via_comp, .n_comp = 0, .coarsened = false };
-
-    // Global component ids are (layer_offset[l] + local), unified by a
-    // union-find so a through pad / via that lands in two layers' components
-    // fuses them.
-    var total: usize = 0;
+    // Most nets are not plane-carried. Preserve the empty-layer fast path
+    // before constructing the board-wide edge field: on Barracuda that raster
+    // costs roughly 150 ms and must not be repeated for every ordinary net.
+    if (layers.len == 0) return joinPlaneFills(arena, q, layers, &.{});
     const fills = try arena.alloc(Fill, layers.len);
-    const offset = try arena.alloc(usize, layers.len);
-    var coarsened = false;
     // Every carrying layer rasters the SAME board on the SAME lattice, so the
     // outline walk that seeds each cell's edge margin is done once here and
     // copied per layer; and connectivity reads only `labels`, so no layer needs
@@ -2015,9 +2023,27 @@ pub fn planeConnect(
         // is left untouched.
         if (s.track_layer) |tl| s.higher = try higherThanDeclared(arena, copper.zones, tl, s.net);
         fills[l] = try computeFill(arena, placement, copper, s, .{ .base = base_eff, .contours = false });
+    }
+    return joinPlaneFills(arena, q, layers, fills);
+}
+
+fn joinPlaneFills(arena: std.mem.Allocator, q: PlaneQuery, layers: []const LayerSpec, fills: []const Fill) std.mem.Allocator.Error!Join {
+    const pad_comp = try arena.alloc(i32, q.pads.len);
+    const via_comp = try arena.alloc(i32, q.vias.len);
+    @memset(pad_comp, -1);
+    @memset(via_comp, -1);
+    if (layers.len == 0) return .{ .pad_comp = pad_comp, .via_comp = via_comp, .n_comp = 0, .coarsened = false };
+
+    // Global component ids are (layer_offset[l] + local), unified by a
+    // union-find so a through pad / via that lands in two layers' components
+    // fuses them.
+    var total: usize = 0;
+    const offset = try arena.alloc(usize, layers.len);
+    var coarsened = false;
+    for (fills, 0..) |fill, l| {
         offset[l] = total;
-        total += fills[l].n_comp;
-        coarsened = coarsened or fills[l].coarsened;
+        total += fill.n_comp;
+        coarsened = coarsened or fill.coarsened;
     }
     const uf = try arena.alloc(usize, total);
     for (uf, 0..) |*u, i| u.* = i;
@@ -3146,6 +3172,20 @@ test "planeConnect splits pads across a severed plane" {
     try testing.expectEqual(@as(usize, 2), cut.n_comp);
     try testing.expect(cut.pad_comp[0] != cut.pad_comp[1]);
     try testing.expect(cut.pad_comp[0] >= 0 and cut.pad_comp[1] >= 0);
+
+    // Full DRC retains this same fill after producing topology contours. Its
+    // prepared-connectivity path must classify pads exactly like a fresh fill.
+    const layers = try carryingLayers(arena, placement.rules, "GND");
+    const fills = [_]Fill{try compute(arena, placement, .{ .tracks = &wall }, layers[0])};
+    const prepared = try planeConnectPrepared(
+        arena,
+        .{ .net_name = "GND", .pads = &qpads, .vias = &.{} },
+        .{ .net_name = "GND", .layers = layers, .fills = &fills },
+    );
+    try testing.expectEqual(cut.n_comp, prepared.n_comp);
+    try testing.expectEqual(cut.coarsened, prepared.coarsened);
+    try testing.expectEqualSlices(i32, cut.pad_comp, prepared.pad_comp);
+    try testing.expectEqualSlices(i32, cut.via_comp, prepared.via_comp);
 }
 
 // spec: placement/pour - the fill respects a non-rectangular board outline

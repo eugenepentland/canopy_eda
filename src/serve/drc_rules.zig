@@ -9,6 +9,7 @@
 const std = @import("std");
 const httpz = @import("httpz");
 const drc_compose = @import("../placement/drc_compose.zig");
+const fab_readiness = @import("../fab_readiness.zig");
 const font = @import("../font5x7.zig");
 const drc = @import("../placement/drc.zig");
 const net_open = @import("../placement/net_open.zig");
@@ -122,6 +123,51 @@ pub fn checkFilteredZones(
 ) []const drc.Violation {
     const raw = drc_compose.checkDefaultRules(alloc, in);
     return apply(alloc, load(alloc, project_dir, name), raw);
+}
+
+/// The filtered violations plus connectivity statuses computed during the
+/// same pass. The live DRC endpoint consumes this form because its response
+/// carries both the violations and routed/total; other callers keep the
+/// slice-only wrapper above.
+pub fn checkFilteredZonesReport(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    in: CopperCheck,
+) drc_compose.CheckReport {
+    const raw = drc_compose.checkDefaultRulesReport(alloc, in);
+    return .{
+        .violations = apply(alloc, load(alloc, project_dir, name), raw.violations),
+        .net_report = raw.net_report,
+    };
+}
+
+/// Filtered DRC violations and the routed tally needed by `/api/pcb-drc`.
+/// The tally consumes the net-open graphs retained by the same pass; an
+/// incomplete fail-open report falls back to the standalone connectivity pass.
+pub const ApiReport = struct {
+    violations: []const drc.Violation,
+    tally: ?fab_readiness.Tally,
+};
+
+/// Run filtered DRC and derive its response tally from retained connectivity,
+/// falling back to a standalone pass when the fail-open report is incomplete.
+pub fn checkFilteredZonesTally(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    in: CopperCheck,
+) ApiReport {
+    const report = checkFilteredZonesReport(alloc, project_dir, name, in);
+    const tally = if (report.net_report.connectivity.len == in.placement.nets.len)
+        fab_readiness.summarizeConnectivity(alloc, report.net_report.connectivity) catch null
+    else
+        fab_readiness.routableTally(alloc, in.placement, .{
+            .tracks = in.routed.tracks,
+            .vias = in.routed.vias,
+            .zones = in.zones,
+        }) catch null;
+    return .{ .violations = report.violations, .tally = tally };
 }
 
 /// The copper context one connectivity/geometry DRC pass measures, and the
@@ -360,6 +406,13 @@ test "viewer JS wires the WASM DRC worker, server reconciliation, and the overri
     const worker = @embedFile("assets/drc_worker.js");
     try std.testing.expect(std.mem.indexOf(u8, worker, "drc_check") != null);
     try std.testing.expect(std.mem.indexOf(u8, worker, "drc_output_ptr") != null);
+    // The server fallback derives its response tally from the same net-open
+    // graph and retains the standalone fail-open path.
+    const page = @embedFile("pcb_layout_page.zig");
+    const rules = @embedFile("drc_rules.zig");
+    try std.testing.expect(std.mem.indexOf(u8, page, "checkFilteredZonesTally") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rules, "summarizeConnectivity(alloc, report.net_report.connectivity)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rules, "fab_readiness.routableTally(alloc, in.placement") != null);
 }
 
 // spec: Web Server - Net-open DRC findings remain in the sidebar and counts but do not draw or hit-test as PCB markers
@@ -569,7 +622,7 @@ test "pour refill takes the fills-only API path and shares its edge raster" {
     try std.testing.expect(std.mem.indexOf(u8, js, "scheduleServerReconcile();})") != null);
 
     const fast = std.mem.indexOf(u8, page, "if (queryFlag(req, \"pours_only\")) {") orelse return error.TestExpectedEqual;
-    const full_drc = std.mem.indexOf(u8, page[fast..], "const violations = drc_rules.checkFilteredZones") orelse return error.TestExpectedEqual;
+    const full_drc = std.mem.indexOf(u8, page[fast..], "const report = drc_rules.checkFilteredZonesTally") orelse return error.TestExpectedEqual;
     const branch = page[fast .. fast + full_drc];
     try std.testing.expect(std.mem.indexOf(u8, branch, "pour.sharedEdgeField(req.arena, placement)") != null);
     try std.testing.expect(std.mem.count(u8, branch, "base_edge);") == 3);

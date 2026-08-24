@@ -56,18 +56,33 @@ pub const CopperCheck = struct {
 /// `checkFilteredZones` against a design with no rule sidecar, minus the
 /// pointless filesystem probe.
 pub fn checkDefaultRules(alloc: std.mem.Allocator, in: CopperCheck) []const drc.Violation {
-    const geom = checkFilled(alloc, in);
+    return checkDefaultRulesReport(alloc, in).violations;
+}
+
+/// Full DRC result plus the connectivity statuses already built by the
+/// net-open layer. Reporting endpoints that also show routed/total consume the
+/// statuses instead of repeating the board's per-net plane rasters and unions.
+pub const CheckReport = struct {
+    violations: []const drc.Violation,
+    net_report: net_open.Report,
+};
+
+/// Compose all DRC layers while retaining the net-open layer's reusable
+/// connectivity report for a caller that also needs a routed tally.
+pub fn checkDefaultRulesReport(alloc: std.mem.Allocator, in: CopperCheck) CheckReport {
+    const filled = checkFilledReport(alloc, in);
+    const geom = filled.violations;
     const silk = withBoardText(alloc, in.placement, geom, in.texts);
     const bypass = withBypassOpen(alloc, in.placement, in.routed, silk);
-    return withNetOpen(alloc, in.placement, in.routed, bypass, in.zones, in.base_edge);
+    return withNetOpenReport(alloc, in, bypass, filled.plane_fills);
 }
 
 /// Run only copper-topology findings against the fabricated fill components.
 /// Persisted cleanup uses this to obtain the exact same jointly-safe removal
 /// plan as full DRC without paying for unrelated geometry findings each round.
 pub fn checkTopologyFilled(alloc: std.mem.Allocator, in: CopperCheck) []const drc.Violation {
-    const topology_zones = filledTopologyZones(alloc, in) catch return &.{};
-    return drc.checkTopology(alloc, in.placement, in.routed, topology_zones) catch &.{};
+    const filled = filledTopology(alloc, in) catch return &.{};
+    return drc.checkTopology(alloc, in.placement, in.routed, filled.zones) catch &.{};
 }
 
 /// Append exact-target bypass connectivity warnings. This stays beside the
@@ -149,20 +164,38 @@ fn withBoardText(
 /// `copper_stub` — an ERROR — to the zone-blind spelling. A caller that pours a
 /// rail and then judges its copper without the pour is contradicting itself.
 pub fn checkFilled(alloc: std.mem.Allocator, in: CopperCheck) []const drc.Violation {
-    const topology_zones = filledTopologyZones(alloc, in) catch
-        return drc.check(alloc, in.placement, in.routed, in.clearance) catch &.{};
-    const base = drc.checkWithZones(alloc, in.placement, in.routed, in.clearance, topology_zones) catch &.{};
+    return checkFilledReport(alloc, in).violations;
+}
+
+const FilledCheck = struct {
+    violations: []const drc.Violation,
+    plane_fills: []const pour.NetFills,
+};
+
+fn checkFilledReport(alloc: std.mem.Allocator, in: CopperCheck) FilledCheck {
+    const filled = filledTopology(alloc, in) catch return .{
+        .violations = drc.check(alloc, in.placement, in.routed, in.clearance) catch &.{},
+        .plane_fills = &.{},
+    };
+    const base = drc.checkWithZones(alloc, in.placement, in.routed, in.clearance, filled.zones) catch &.{};
     var out: std.ArrayList(drc.Violation) = .empty;
-    out.appendSlice(alloc, base) catch return base;
-    drc_return_path.check(alloc, &out, in.placement, in.routed, topology_zones) catch return base;
-    return out.items;
+    out.appendSlice(alloc, base) catch return .{ .violations = base, .plane_fills = filled.plane_fills };
+    drc_return_path.check(alloc, &out, in.placement, in.routed, filled.zones) catch
+        return .{ .violations = base, .plane_fills = filled.plane_fills };
+    return .{ .violations = out.items, .plane_fills = filled.plane_fills };
 }
 
 /// Reduce every declared plane/pour and hand-authored zone to the exact kept
 /// fill components the Gerber uses. The DRC topology graph receives one node
 /// per component (and its holes), never one outline-wide conductor.
-fn filledTopologyZones(alloc: std.mem.Allocator, in: CopperCheck) std.mem.Allocator.Error![]const drc.TopologyZone {
+const FilledTopology = struct {
+    zones: []const drc.TopologyZone,
+    plane_fills: []const pour.NetFills,
+};
+
+fn filledTopology(alloc: std.mem.Allocator, in: CopperCheck) std.mem.Allocator.Error!FilledTopology {
     var out: std.ArrayList(drc.TopologyZone) = .empty;
+    var plane_fills: std.ArrayList(pour.NetFills) = .empty;
     var component: u64 = 1;
     const physical_tracks = try path_copper.tracks(alloc, in.routed);
     const copper = pour.Copper{ .tracks = physical_tracks, .vias = in.routed.vias, .zones = in.zones };
@@ -173,11 +206,16 @@ fn filledTopologyZones(alloc: std.mem.Allocator, in: CopperCheck) std.mem.Alloca
     const base = if (in.base_edge) |b| b else try pour.sharedEdgeField(alloc, in.placement);
     for (in.placement.nets) |net| {
         const layers = try pour.carryingLayers(alloc, in.placement.rules, net.name);
-        for (layers) |layer| {
+        if (layers.len == 0) continue;
+        const prepared_layers = try alloc.alloc(pour.LayerSpec, layers.len);
+        const fills = try alloc.alloc(pour.Fill, layers.len);
+        for (layers, 0..) |layer, fill_i| {
             var spec = layer;
             if (spec.track_layer) |track_layer|
                 spec.higher = try pour.higherThanDeclared(alloc, in.zones, track_layer, spec.net);
             const fill = try pour.computeShared(alloc, in.placement, copper, spec, base);
+            prepared_layers[fill_i] = spec;
+            fills[fill_i] = fill;
             for (fill.contours, 0..) |contour, contour_i| {
                 try out.append(alloc, .{
                     .net = net.name,
@@ -191,6 +229,7 @@ fn filledTopologyZones(alloc: std.mem.Allocator, in: CopperCheck) std.mem.Alloca
                 component += 1;
             }
         }
+        try plane_fills.append(alloc, .{ .net_name = net.name, .layers = prepared_layers, .fills = fills });
     }
     for (in.zones, 0..) |zone, zone_i| {
         var spec = pour.zoneLayerSpec(zone.net, pour.sideOfSignal(zone.layer), zone.layer, zone.poly);
@@ -207,27 +246,30 @@ fn filledTopologyZones(alloc: std.mem.Allocator, in: CopperCheck) std.mem.Alloca
             component += 1;
         }
     }
-    return out.toOwnedSlice(alloc);
+    return .{
+        .zones = try out.toOwnedSlice(alloc),
+        .plane_fills = try plane_fills.toOwnedSlice(alloc),
+    };
 }
 
 /// Append the net-open connectivity violations to the geometric ones. Fail-open:
 /// on any allocation failure the geometric list rides through unchanged (a
 /// partial DRC beats none).
-fn withNetOpen(
+fn withNetOpenReport(
     alloc: std.mem.Allocator,
-    placement: optimizer.Placement,
-    r: router.RouteResult,
+    in: CopperCheck,
     geom: []const drc.Violation,
-    zones: []const pour.UserZone,
-    base: ?pour.EdgeField,
-) []const drc.Violation {
-    const tracks = connectivityTracks(alloc, r) catch return geom;
-    const opens = net_open.check(alloc, placement, .{ .tracks = tracks, .vias = r.vias, .zones = zones }, base) catch return geom;
-    if (opens.len == 0) return geom;
+    plane_fills: []const pour.NetFills,
+) CheckReport {
+    const empty: net_open.Report = .{ .violations = &.{}, .connectivity = &.{} };
+    const tracks = connectivityTracks(alloc, in.routed) catch return .{ .violations = geom, .net_report = empty };
+    const report = net_open.checkWithConnectivity(alloc, in.placement, .{ .tracks = tracks, .vias = in.routed.vias, .zones = in.zones }, in.base_edge, plane_fills) catch
+        return .{ .violations = geom, .net_report = empty };
+    if (report.violations.len == 0) return .{ .violations = geom, .net_report = report };
     var all: std.ArrayList(drc.Violation) = .empty;
-    all.appendSlice(alloc, geom) catch return geom;
-    all.appendSlice(alloc, opens) catch return geom;
-    return all.items;
+    all.appendSlice(alloc, geom) catch return .{ .violations = geom, .net_report = report };
+    all.appendSlice(alloc, report.violations) catch return .{ .violations = geom, .net_report = report };
+    return .{ .violations = all.items, .net_report = report };
 }
 
 /// A persisted RF path intentionally omits its solver chords: the compact
