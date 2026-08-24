@@ -8,6 +8,7 @@
 const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
 const numeric = @import("../numeric.zig");
+const net_names = @import("../net_name.zig");
 const sexpr_parser = @import("../sexpr/parser.zig");
 const log = @import("../infra/log.zig");
 const env_mod = @import("env.zig");
@@ -27,6 +28,7 @@ const micro_forms = @import("micro_forms.zig");
 const pin_enrichment = @import("pin_enrichment.zig");
 const forms_mod = @import("forms.zig");
 const board_role_mod = @import("board_role.zig");
+const net_analysis = @import("net_analysis.zig");
 const section_maturity = @import("section_maturity.zig");
 const stackup_presets = @import("stackup_presets.zig");
 const ScopeForm = forms_mod.ScopeForm;
@@ -72,6 +74,25 @@ fn isInertFormHead(name: []const u8) bool {
         std.mem.eql(u8, name, "hierarchical-ids") or
         std.mem.eql(u8, name, "row") or
         std.mem.eql(u8, name, "col");
+}
+
+/// Apply the source-level subcircuit power-plane switch after every body form
+/// has been read, so it is independent of `(power-plane …)` / `(stackup …)`
+/// order. The authored source remains intact: rebuilding after switching back
+/// on restores every declared supply plane. Only the evaluated electrical role
+/// is filtered; layer count and physical construction are unchanged.
+fn applyPowerPlanePolicy(self: *Evaluator, board: env_mod.BoardSpec, stackup: *env_mod.StackupSpec) EvalError!void {
+    const disabled_for_subcircuit = board.role == .subcircuit and !board.power_plane;
+    if (!disabled_for_subcircuit) return;
+    if (!stackup.present or stackup.planes.len == 0) return;
+    const kept = self.allocator.alloc(env_mod.StackupPlane, stackup.planes.len) catch return EvalError.OutOfMemory;
+    var count: usize = 0;
+    for (stackup.planes) |plane| {
+        if (!net_analysis.isGroundName(net_names.leaf(plane.net))) continue;
+        kept[count] = plane;
+        count += 1;
+    }
+    stackup.planes = kept[0..count];
 }
 
 /// Evaluate a `(design-block "name" form…)` form into a heap-allocated
@@ -171,6 +192,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
         .net_form_sources = &net_form_sources,
     };
     try evalBlockBodyForms(self, body_forms, env, &build);
+    try applyPowerPlanePolicy(self, board_spec, &stackup_spec);
     // Every instance now exists, so a `(decouples "IC" FUNC)` / `(near "REF"
     // FUNC)` can finally be read against the pinout of the part it names — in
     // either declaration order.

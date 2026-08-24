@@ -23,6 +23,7 @@ const sexpr_parser = @import("../sexpr/parser.zig");
 const datasheet_attach = @import("datasheet_attach.zig");
 const rebuild_design = @import("rebuild_design.zig");
 const modules_mod = @import("modules.zig");
+const SexprNode = @import("../sexpr/ast.zig").Node;
 
 // ── Constants ─────────────────────────────────────────────────────
 const http_not_found: u16 = 404;
@@ -776,10 +777,30 @@ fn designBlockInsertPos(source: []const u8) ?usize {
     return end - 1;
 }
 
-/// Replace every direct atom-valued `form_name` child of the design root, or
-/// append one when the design still relies on that form's default. AST offsets keep
-/// similarly named text in comments, strings, modules, and nested blocks out of
-/// the edit while the byte splice preserves all unrelated source formatting.
+fn isEditableDesignRoot(node: SexprNode) bool {
+    const children = node.asList() orelse return false;
+    return node.isForm("design-block") or
+        (node.isForm("block") and children.len >= 2 and children[1].asString() != null);
+}
+
+/// Find either a top-level editable design root or the direct design body of a
+/// standalone `(defmodule …)`. The latter is what `/pcb-layout/<module-name>`
+/// evaluates, so its source-level PCB settings must be editable from that page.
+fn editableDesignRoot(nodes: []const SexprNode) ?SexprNode {
+    for (nodes) |node| if (isEditableDesignRoot(node)) return node;
+    for (nodes) |node| {
+        if (!node.isForm("defmodule")) continue;
+        const children = node.asList() orelse continue;
+        if (children.len < 4) continue;
+        for (children[3..]) |child| if (isEditableDesignRoot(child)) return child;
+    }
+    return null;
+}
+
+/// Replace every direct atom-valued `form_name` child of the editable design
+/// root, or append one when it still relies on that form's default. AST offsets
+/// keep similarly named text in comments and nested helper blocks out of the
+/// edit while the byte splice preserves all unrelated source formatting.
 fn patchRootAtomForm(
     allocator: std.mem.Allocator,
     source: []const u8,
@@ -789,22 +810,11 @@ fn patchRootAtomForm(
     const nodes = sexpr_parser.parse(allocator, source) catch return error.InvalidSource;
     defer sexpr_parser.freeNodes(allocator, nodes);
 
-    var root_children: ?[]const @import("../sexpr/ast.zig").Node = null;
-    var root_open_opt: ?usize = null;
-    for (nodes) |node| {
-        const children = node.asList() orelse continue;
-        const is_design_block = node.isForm("design-block");
-        const is_string_block = node.isForm("block") and children.len >= 2 and children[1].asString() != null;
-        if (is_design_block or is_string_block) {
-            root_children = children;
-            root_open_opt = @intCast(node.span.offset);
-            break;
-        }
-    }
-    const children = root_children orelse return error.MalformedSource;
+    const root = editableDesignRoot(nodes) orelse return error.MalformedSource;
+    const children = root.asList() orelse return error.MalformedSource;
     if (children.len < 2) return error.MalformedSource;
 
-    const root_open = root_open_opt orelse return error.MalformedSource;
+    const root_open: usize = @intCast(root.span.offset);
     const root_end = findFormEnd(source, root_open) orelse return error.MalformedSource;
     var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
@@ -844,37 +854,29 @@ fn patchPowerPlaneSource(allocator: std.mem.Allocator, source: []const u8, enabl
     return patchRootAtomForm(allocator, source, "power-plane", if (enabled) "(power-plane on)" else "(power-plane off)");
 }
 
-const BoardRouteMeta = struct { role: env_mod.BoardRole = .subcircuit, power_plane: bool = true, stackup_authored: bool = false };
+const BoardRouteMeta = struct { role: env_mod.BoardRole = .subcircuit, power_plane: bool = true };
 
 fn boardRouteMeta(allocator: std.mem.Allocator, source: []const u8) EditError!BoardRouteMeta {
     const nodes = sexpr_parser.parse(allocator, source) catch return error.InvalidSource;
     defer sexpr_parser.freeNodes(allocator, nodes);
     var meta = BoardRouteMeta{};
-    for (nodes) |node| {
-        const children = node.asList() orelse continue;
-        const root = node.isForm("design-block") or (node.isForm("block") and children.len >= 2 and children[1].asString() != null);
-        if (!root) continue;
-        for (children[2..]) |child| {
-            const values = child.asList() orelse continue;
-            if (child.isForm("stackup")) {
-                meta.stackup_authored = true;
-                continue;
-            }
-            if (values.len < 2) continue;
-            const word = values[1].asAtom() orelse continue;
-            if (child.isForm("board-role")) {
-                if (std.mem.eql(u8, word, "board")) meta.role = .board else if (std.mem.eql(u8, word, "subcircuit")) meta.role = .subcircuit;
-            } else if (child.isForm("power-plane")) {
-                if (std.mem.eql(u8, word, "on")) meta.power_plane = true else if (std.mem.eql(u8, word, "off")) meta.power_plane = false;
-            }
+    const root = editableDesignRoot(nodes) orelse return error.MalformedSource;
+    const children = root.asList() orelse return error.MalformedSource;
+    for (children[2..]) |child| {
+        const values = child.asList() orelse continue;
+        if (values.len < 2) continue;
+        const word = values[1].asAtom() orelse continue;
+        if (child.isForm("board-role")) {
+            if (std.mem.eql(u8, word, "board")) meta.role = .board else if (std.mem.eql(u8, word, "subcircuit")) meta.role = .subcircuit;
+        } else if (child.isForm("power-plane")) {
+            if (std.mem.eql(u8, word, "on")) meta.power_plane = true else if (std.mem.eql(u8, word, "off")) meta.power_plane = false;
         }
-        return meta;
     }
-    return error.MalformedSource;
+    return meta;
 }
 
-/// GET /api/board-role/:name — role plus the source-level implicit-power-plane
-/// choice used to build the subcircuit autorouter control.
+/// GET /api/board-role/:name — role plus the source-level supply-plane choice
+/// used to build the subcircuit autorouter control.
 pub fn getBoardRoleApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse return sendJsonError(ctx, res, http_not_found, "missing design");
     const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch
@@ -885,7 +887,7 @@ pub fn getBoardRoleApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
     res.header(header_cors_allow_origin, "*");
     res.content_type = .JSON;
     res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"role\":\"{s}\",\"power_plane\":{s},\"power_plane_applicable\":{s}}}", .{
-        @tagName(meta.role), if (meta.power_plane) "true" else "false", if (!meta.stackup_authored) "true" else "false",
+        @tagName(meta.role), if (meta.power_plane) "true" else "false", if (meta.role == .subcircuit) "true" else "false",
     });
 }
 
@@ -927,7 +929,7 @@ pub fn setBoardRoleApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
 }
 
 /// POST /api/power-plane/:name  Body: {"enabled":true|false}. Updates the
-/// source-level no-stackup model, then rebuilds before the PCB page reloads.
+/// source-level plane policy, then rebuilds before the PCB page reloads.
 pub fn setPowerPlaneApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse return sendJsonError(ctx, res, http_not_found, "missing design");
     const body = req.body() orelse return sendJsonError(ctx, res, http_bad_request, "missing body");
@@ -943,8 +945,8 @@ pub fn setPowerPlaneApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
     defer ctx.allocator.free(source);
     const meta = boardRouteMeta(ctx.allocator, source) catch
         return sendJsonError(ctx, res, http_bad_request, "source does not contain an editable design root");
-    if (meta.role != .subcircuit or meta.stackup_authored)
-        return sendJsonError(ctx, res, http_bad_request, "power-plane mode applies only to subcircuits without an authored stackup");
+    if (meta.role != .subcircuit)
+        return sendJsonError(ctx, res, http_bad_request, "power-plane mode applies only to subcircuits");
     const updated = patchPowerPlaneSource(ctx.allocator, source, enabled_v.bool) catch |err| {
         const message = switch (err) {
             error.InvalidSource => "design source has invalid s-expression syntax",
@@ -3179,25 +3181,31 @@ test "schematic design type inserts a board role into a string block root" {
     );
 }
 
-// spec: Web Server - A subcircuit's PCB autorouter offers a Power plane toggle: on keeps the implicit dominant supply plane, off routes that supply as ordinary copper while retaining the ground plane; the choice is saved in the design source and reused by routing, DRC, reload, and fabrication outputs
-test "autorouter power-plane toggle patches and reads the direct design setting" {
+// spec: Web Server - A subcircuit's PCB autorouter offers a Power plane toggle for implicit and authored stackups: on keeps supply planes, off routes supplies as ordinary copper while retaining ground planes; the choice is saved in design source and reused by routing, DRC, reload, and fabrication outputs
+test "autorouter power-plane toggle patches nested module design settings" {
     const allocator = std.testing.allocator;
     const source =
-        \\(design-block "Module"
-        \\  (board-role subcircuit)
-        \\  (board (size 20 10)))
+        \\(defmodule bcuda-lt3045-ldo ((vout 3.3))
+        \\  "LDO"
+        \\  (let label (fmt "~V LDO" vout))
+        \\  (design-block label
+        \\    (stackup 4 (plane 2 "GND") (plane 3 "VOUT"))))
     ;
     const updated = try patchPowerPlaneSource(allocator, source, false);
     defer allocator.free(updated);
     try std.testing.expect(std.mem.indexOf(u8, updated, "(power-plane off)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, updated, "(plane 3 \"VOUT\")") != null);
     const meta = try boardRouteMeta(allocator, updated);
     try std.testing.expectEqual(env_mod.BoardRole.subcircuit, meta.role);
     try std.testing.expect(!meta.power_plane);
-    const stacked = try boardRouteMeta(allocator, "(design-block \"Module\" (stackup \"preset\"))");
-    try std.testing.expect(stacked.stackup_authored);
+    const restored = try patchPowerPlaneSource(allocator, updated, true);
+    defer allocator.free(restored);
+    try std.testing.expect((try boardRouteMeta(allocator, restored)).power_plane);
+    try std.testing.expect(std.mem.indexOf(u8, restored, "(plane 3 \"VOUT\")") != null);
 
     const js = @embedFile("assets/pcb_board.js");
     try std.testing.expect(std.mem.indexOf(u8, js, "meta.role!==\"subcircuit\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "power_plane_applicable===false") == null);
     try std.testing.expect(std.mem.indexOf(u8, js, "rpower.id=\"r-power-plane\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "fetch(\"/api/power-plane/\"") != null);
 }

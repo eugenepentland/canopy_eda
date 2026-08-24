@@ -54,3 +54,22 @@ test "implicit power plane is explicit and independent of board form order" {
     const after = try evaluate(allocator, "(design-block \"test\" (board (size 20 10)) (power-plane off))");
     try std.testing.expect(!after.board.power_plane);
 }
+
+// spec: eval/design_block - power-plane off removes authored non-ground planes from subcircuits while retaining ground planes, stackup geometry, and whole-board declarations
+test "power-plane policy applies to authored subcircuit stackups" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const stackup = "(stackup 4 (plane 2 \"GND\") (plane 3 \"VOUT\"))";
+
+    const off = try evaluate(allocator, try std.fmt.allocPrint(allocator, "(design-block \"sub\" (power-plane off) {s})", .{stackup}));
+    try std.testing.expectEqual(@as(u8, 4), off.stackup.layers);
+    try std.testing.expectEqual(@as(usize, 1), off.stackup.planes.len);
+    try std.testing.expectEqualStrings("GND", off.stackup.planes[0].net);
+
+    const on = try evaluate(allocator, try std.fmt.allocPrint(allocator, "(design-block \"sub\" {s} (power-plane on))", .{stackup}));
+    try std.testing.expectEqual(@as(usize, 2), on.stackup.planes.len);
+
+    const board = try evaluate(allocator, try std.fmt.allocPrint(allocator, "(design-block \"pcb\" (board-role board) (power-plane off) {s})", .{stackup}));
+    try std.testing.expectEqual(@as(usize, 2), board.stackup.planes.len);
+}

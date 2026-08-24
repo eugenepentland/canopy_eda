@@ -1239,8 +1239,9 @@ pub const BoardSpec = struct {
     /// Optional board-edge via fence and exposed-mask band.
     perimeter_fence: PerimeterFenceSpec = .{},
     role: BoardRole = .subcircuit,
-    /// No-stackup model: place the dominant supply rail on In2.Cu. Ground's
-    /// implicit In1.Cu plane is independent and remains present when false.
+    /// Subcircuit plane policy: false removes non-ground authored planes, or
+    /// suppresses the dominant-supply plane in the implicit stackup model.
+    /// Ground planes and the physical copper-layer construction remain.
     power_plane: bool = true,
     present: bool = false,
 };

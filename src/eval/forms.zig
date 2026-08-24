@@ -595,9 +595,9 @@ pub const scope_form_docs = blk: {
     } };
     t[@backingInt(ScopeForm.power_plane)] = .{ .scope = tl, .doc = .{
         .syntax = "(power-plane on|off)",
-        .summary = "Choose whether a no-stackup subcircuit uses its second implicit inner layer as a supply plane. " ++
-            "Off routes the dominant supply rail as ordinary copper while retaining the implicit ground plane. " ++
-            "An authored (stackup …) remains authoritative and ignores this compatibility-model switch.",
+        .summary = "Choose whether a subcircuit uses supply planes. Off routes supply rails as ordinary copper " ++
+            "while retaining every ground plane and the physical stackup: it suppresses the implicit dominant-supply " ++
+            "plane or any authored non-ground (plane …) entries. On restores the planes declared in source.",
     } };
     t[@backingInt(ScopeForm.rough)] = .{ .scope = tl, .doc = .{
         .syntax = "(rough [(anchor \"REF\")] (group \"name\" \"REF\"…)… (critical-loop \"name\" \"REF\"…)…)",
@@ -641,9 +641,9 @@ pub const scope_form_docs = blk: {
             "legacy implicit model: 4 layers whose inner pair are assumed planes — In1 carries every " ++
             "ground-named net, and by default In2 carries the block's dominant supply rail (the rail-named net " ++
             "landing on the most pads), so that rail joins by stitching via like ground instead of " ++
-            "being routed. A subcircuit's `(power-plane off)` setting routes that supply as ordinary " ++
-            "copper and leaves In2 as a second ground plane; with no qualifying rail In2 is also a " ++
-            "second ground plane, as it always was.",
+            "being routed. A subcircuit's `(power-plane off)` setting routes supplies as ordinary " ++
+            "copper and retains only ground planes, whether the stackup is implicit or authored; " ++
+            "with no qualifying rail In2 is also a second ground plane, as it always was.",
     } };
     t[@backingInt(ScopeForm.pdn)] = .{ .scope = tl, .doc = .{
         .syntax = "(pdn \"NET\" (ripple-v V) [(step-current-a A)] [(rise-time-s S)] " ++

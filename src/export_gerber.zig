@@ -2057,7 +2057,7 @@ test "the implicit stackup's Gerber planes agree with the router's plane model" 
     try testing.expect(!router.netHasPlane(legacy, "V_3V3"));
 }
 
-// spec: placement/implicit-plane - a design that declares a `(stackup …)` keeps exactly its declared planes and plants no implicit rail
+// spec: placement/implicit-plane - a design that declares a `(stackup …)` plants no implicit rail and emits exactly its effective declared planes
 test "a declared stackup ignores the implicit rail entirely" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();

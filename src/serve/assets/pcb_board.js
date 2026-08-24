@@ -8362,8 +8362,8 @@ var rstage=null,rpower=null;
  // giant board blob free of another copy, and means exports and every router
  // entry point read the same setting after the update/reload.
  fetch("/api/board-role/"+encodeURIComponent(PCB.name)).then(function(r){if(!r.ok)throw 0;return r.json();}).then(function(meta){
-  if(meta.role!=="subcircuit"||meta.power_plane_applicable===false)return;
-  var plabel=document.createElement("label");plabel.className="route-power-plane";plabel.title="Use the implicit inner power plane; turn off to route the power rail as ordinary copper (ground remains on its plane)";
+  if(meta.role!=="subcircuit")return;
+  var plabel=document.createElement("label");plabel.className="route-power-plane";plabel.title="Use supply planes from the implicit or authored stackup; turn off to route supply rails as ordinary copper (ground planes remain)";
   rpower=document.createElement("input");rpower.type="checkbox";rpower.id="r-power-plane";rpower.checked=meta.power_plane!==false;
   var ptext=document.createElement("span");ptext.textContent="Power plane";
   plabel.appendChild(rpower);plabel.appendChild(ptext);row.insertBefore(plabel,rgo);
