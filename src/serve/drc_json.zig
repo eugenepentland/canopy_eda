@@ -164,6 +164,11 @@ fn sevStr(sev: drc.Severity) []const u8 {
 /// biased positive so the u64 conversion never sees a negative value (board
 /// coordinates are tens of mm — nowhere near the 4e9 bias).
 fn quant(val: f64, scale: f64) u64 {
+    // A checker may use infinity to mean "no matching feature exists" (for
+    // example, a diff-pair leg with no partner copper on the same layer).
+    // Invalid geometry still needs a stable UI locator, and must never reach
+    // @intFromFloat.
+    if (!std.math.isFinite(val)) return 0;
     return @intFromFloat(@round(val * scale) + 4_000_000_000);
 }
 
@@ -266,19 +271,61 @@ fn writeJsonStr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
     try w.writeAll("\"");
 }
 
+/// JSON has no NaN or infinity literals. Preserve the absence of a finite
+/// measurement as `null`; every DRC consumer already renders null as `?`.
+fn writeFiniteNumber(w: *std.Io.Writer, value: f64) std.Io.Writer.Error!void {
+    if (std.math.isFinite(value)) return w.print("{d}", .{value});
+    return w.writeAll("null");
+}
+
 /// One violation as a JSON object, `id` first, then `"l"` (the routable copper
 /// layer, OMITTED when the finding has no single layer), an optional four-value
 /// open-net `bridge`, then the `a`/`b` parties (nets / pads that clashed)
 /// whenever the checker could name them.
 pub fn writeViolation(w: *std.Io.Writer, v: drc.Violation, names: Names) std.Io.Writer.Error!void {
-    try w.print("{{\"id\":\"{x:0>4}\",\"x\":{d},\"y\":{d},\"gap\":{d},\"clr\":{d},\"k\":\"{s}\",\"sev\":\"{s}\"", .{
-        violationId(v), v.x, v.y, v.gap, v.clearance, kindStr(v.kind), sevStr(v.severity),
-    });
+    try w.print("{{\"id\":\"{x:0>4}\",\"x\":", .{violationId(v)});
+    try writeFiniteNumber(w, v.x);
+    try w.writeAll(",\"y\":");
+    try writeFiniteNumber(w, v.y);
+    try w.writeAll(",\"gap\":");
+    try writeFiniteNumber(w, v.gap);
+    try w.writeAll(",\"clr\":");
+    try writeFiniteNumber(w, v.clearance);
+    try w.print(",\"k\":\"{s}\",\"sev\":\"{s}\"", .{ kindStr(v.kind), sevStr(v.severity) });
     if (v.layer) |layer| try w.print(",\"l\":{d}", .{layer.int()});
-    if (v.who.bridge) |b| try w.print(",\"bridge\":[{d},{d},{d},{d}]", .{ b[0], b[1], b[2], b[3] });
+    if (v.who.bridge) |b| {
+        try w.writeAll(",\"bridge\":[");
+        for (b, 0..) |value, i| {
+            if (i > 0) try w.writeByte(',');
+            try writeFiniteNumber(w, value);
+        }
+        try w.writeByte(']');
+    }
     try writeParty(w, "a", party(names, v.who.net_a, v.who.part_a, v.who.pad_a));
     try writeParty(w, "b", party(names, v.who.net_b, v.who.part_b, v.who.pad_b));
     try w.writeAll("}");
+}
+
+// Regression for barracuda: a diff-pair split across copper layers has no
+// finite same-layer separation, which used to emit bare `inf` into `const
+// PCB=...` and abort every board script that followed it.
+test "non-finite DRC measurements serialize as valid JSON nulls" {
+    const v = drc.Violation{
+        .x = 188.6,
+        .y = 104.625,
+        .gap = std.math.inf(f64),
+        .clearance = 0.622,
+        .kind = .diff_uncoupled,
+        .severity = .warn,
+    };
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    try writeViolation(&aw.writer, v, .{});
+
+    try std.testing.expect(std.mem.indexOf(u8, aw.written(), "inf") == null);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, aw.written(), .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("gap").? == .null);
 }
 
 // spec: Web Server - A DRC violation carries a stable 4-hex id emitted by the shared JSON writer
