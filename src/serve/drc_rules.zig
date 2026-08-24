@@ -376,7 +376,7 @@ test "viewer controls DRC error and warning marker visibility independently" {
     const js = @embedFile("assets/pcb_board.js");
     try std.testing.expect(std.mem.indexOf(u8, js, "drc_err:0,drc_warn:0") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "else if(k===\"drc\"){hit=true;out.drc_err=val;out.drc_warn=val;}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "function drcMarkerVisible(d){return drcOnBoard(d)&&!!viewSt.vis[drcSevClass(d)===\"warn\"?\"drc_warn\":\"drc_err\"];") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "function drcMarkerVisible(d){return drcOnBoard(d)&&!!viewSt.vis[drcSevClass(d)===\"warn\"?\"drc_warn\":\"drc_err\"]&&") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "{key:\"drc_err\",name:\"DRC errors\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "{key:\"drc_warn\",name:\"DRC warnings\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "if(!drcMarkerVisible(d)||d.x==null)return;") != null);
