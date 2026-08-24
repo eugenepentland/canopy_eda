@@ -2709,15 +2709,15 @@ test "check flags sub-minimum drills" {
     try testing.expectEqual(@as(usize, 2), countKind(v, .min_drill));
 }
 
-// spec: placement/drc - board-level design rules default to the toolchain's legacy constants when no form is authored
-test "check default rules equal the legacy constants" {
-    // The no-form `DesignRules{}` must reproduce every old constant so existing
-    // designs are unchanged: annular 0.1, min-drill 0.2, hole-to-hole 0.25.
+// spec: placement/drc - board-level design rules resolve to the documented toolchain defaults when no form is authored
+test "check default rules equal the documented defaults" {
+    // The no-form `DesignRules{}` must reproduce every documented built-in
+    // fabrication floor, including the 0.1 mm minimum solder-mask web.
     const d = optimizer.DesignRules{};
     try testing.expectEqual(@as(f64, 0.1), d.min_annular);
     try testing.expectEqual(@as(f64, 0.2), d.min_drill);
     try testing.expectEqual(@as(f64, 0.25), d.hole_to_hole);
-    try testing.expectEqual(@as(f64, 0.2), d.mask.web);
+    try testing.expectEqual(@as(f64, 0.1), d.mask.web);
     try testing.expectEqual(@as(f64, 0.1), d.min_width);
     try testing.expectEqual(@as(f64, 0.05), d.mask.margin);
     try testing.expectEqual(@as(f64, 0.3), d.pour_clearance);

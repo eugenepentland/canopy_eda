@@ -756,7 +756,7 @@ pub const DesignRules = struct {
     /// adjacent openings. Sub-minimum positive webs are removed by merging the
     /// apertures in the fabrication mask. One group because mask generation
     /// always reads the two together.
-    mask: env.MaskRules = .{ .margin = 0.05, .web = 0.2, .relief_corner_radius = 0 },
+    mask: env.MaskRules = .{ .margin = 0.05, .web = 0.1, .relief_corner_radius = 0 },
     /// Copper-pour isolation (mm) for an INNER plane: the gap a solid pour
     /// holds off foreign copper (hole/via antipads, track and pad halos) AND
     /// its Gerber board-edge pullback. A pour on an OUTER copper face resolves

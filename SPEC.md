@@ -2911,7 +2911,7 @@ Public functions: check, checkTopology, checkWithZones, countKind, defaultSeveri
 - flags two vias of the SAME net crowded closer than the via-to-via rule, which the foreign-net clearance rule exempts
 - the same-net via spacing rule defaults to the pair's resolved clearance, and an authored (design-rules (via-to-via ...)) overrides it
 - flags a drilled hole below the minimum drill diameter (pads and vias); SMD pads exempt
-- board-level design rules default to the toolchain's legacy constants when no form is authored
+- board-level design rules resolve to the documented toolchain defaults when no form is authored
 - a (design-rules …) value overrides the matching default in the DRC
 - a wider board clearance flags copper the default rule allowed
 - a net-class clearance override is enforced against that net's neighbours server-side

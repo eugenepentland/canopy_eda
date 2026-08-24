@@ -2389,18 +2389,18 @@ test "mask output removes a sub-minimum web between pad openings" {
     const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
     var parts = [_]optimizer.Part{
         .{ .ref_des = "R1", .kind = .passive, .hw = 0.2, .hh = 0.2, .pads = &pads, .fallback = false, .x = 10, .y = 5 },
-        .{ .ref_des = "R2", .kind = .passive, .hw = 0.2, .hh = 0.2, .pads = &pads, .fallback = false, .x = 10.6, .y = 5 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.2, .hh = 0.2, .pads = &pads, .fallback = false, .x = 10.55, .y = 5 },
     };
     const placement = testPlacement(&parts, &.{});
     var out: std.Io.Writer.Allocating = .init(arena);
     try writeLayer(&out.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .mask = .top }, .{ .function = "Soldermask,Top" });
     const mask = out.written();
-    // Two 0.5 mm-tall openings leave 0.1 mm of mask between them. The extra
+    // Two 0.5 mm-tall openings leave 0.05 mm of mask between them. The extra
     // 0.5 mm round stroke crosses that complete web, merging the apertures.
     try testing.expect(std.mem.indexOf(u8, mask, "%ADD11C,0.500000*%") != null);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, mask, "D01*"));
 
-    parts[1].x = 10.7; // opening gap = 0.2 mm, exactly the retained-web floor.
+    parts[1].x = 10.6; // opening gap = 0.1 mm, exactly the retained-web floor.
     const legal = testPlacement(&parts, &.{});
     var legal_out: std.Io.Writer.Allocating = .init(arena);
     try writeLayer(&legal_out.writer, arena, legal, .{}, &.{}, export_fab.frameFor(legal), .{ .mask = .top }, .{ .function = "Soldermask,Top" });
@@ -2494,11 +2494,11 @@ test "continuous mask relief does not re-cover every pad" {
     };
     const mask = try reliefMask(arena, &parts, &nets, &rules, .{ .tracks = &tracks });
 
-    // The sampled opening stops at x=9.2, before the exact x=9.25 pad-dam
-    // boundary. The continuous opening needs no clear/dark cap repair, and the
+    // The sampled opening stops at the exact x=9.35 pad-dam boundary. The
+    // continuous opening needs no clear/dark cap repair, and the
     // legacy 1.5 x 1.0 mm all-pad subtraction must not return.
     try testing.expect(std.mem.indexOf(u8, mask, "G36*") != null);
-    try testing.expect(std.mem.indexOf(u8, mask, "X9200000Y") != null);
+    try testing.expect(std.mem.indexOf(u8, mask, "X9350000Y") != null);
     try testing.expect(std.mem.indexOf(u8, mask, "%LPC*%") == null);
     try testing.expect(std.mem.indexOf(u8, mask, "R,1.500000X1.000000*%") == null);
     try testing.expect(std.mem.indexOf(u8, mask, "R,1.100000X0.600000*%") != null); // pad opening
@@ -2524,12 +2524,12 @@ test "mask relief writes the authored terminal fillet" {
     try writeLayer(&mw.writer, arena, placement, .{ .tracks = &tracks }, &.{}, export_fab.frameFor(placement), .{ .mask = .top }, .{ .function = "Soldermask,Top" });
     const mask = mw.written();
 
-    // The dam transition is x=9.2 after 0.05 mm sampling. Its 0.777 mm half
+    // The dam transition is x=9.35. Its 0.777 mm half
     // opening is pulled in by the authored 0.2 mm fillet at the vertical cap:
     // world y=5.577 becomes y-up 4.423 in the Gerber frame.
     try testing.expect(std.mem.indexOf(u8, mask, "G36*") != null);
     try testing.expect(std.mem.indexOf(u8, mask, "G02") != null or std.mem.indexOf(u8, mask, "G03") != null);
-    try testing.expect(std.mem.indexOf(u8, mask, "X9200000Y4423000") != null);
+    try testing.expect(std.mem.indexOf(u8, mask, "X9350000Y4423000") != null);
 }
 
 // spec: export_gerber - fence vias never emit solder-mask apertures; the widened RF polygon alone exposes overlapping copper
