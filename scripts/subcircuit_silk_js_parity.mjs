@@ -1,9 +1,9 @@
 // Sub-circuit silkscreen JS parity check: validates that the pcb_board.js
-// client-side port (no merging, 1.5 mm edge snap, keepout shift) mirrors the
+// client-side port (no merging, 1 mm edge alignment, keepout shift) mirrors the
 // Zig subcircuit_silkscreen behavior. Run manually with `node scripts/subcircuit_silk_js_parity.mjs`
 // from the repo root; exits non-zero on any mismatch.
 // Standalone validation of the pcb_board.js sub-circuit silk port against the
-// Zig behavior (no merging, 1.5 mm edge snap, keepout shift). Extracts the
+// Zig behavior (no merging, 1 mm edge alignment, keepout shift). Extracts the
 // pure geometry functions from pcb_board.js and stubs the board-only helpers.
 import fs from 'fs';
 const src = fs.readFileSync('src/serve/assets/pcb_board.js', 'utf8');
@@ -11,7 +11,7 @@ const src = fs.readFileSync('src/serve/assets/pcb_board.js', 'utf8');
 const SUB_SILK_CLEAR = 0.2, SUB_SILK_STROKE = 0.15;
 const SUB_SILK_INK_CLEAR = SUB_SILK_CLEAR + SUB_SILK_STROKE / 2;
 const SUB_SILK_CORNER_INSET = 0.2;
-const SUB_SILK_SNAP = 1.5, SUB_SILK_SHIFT_MAX = 2, SUB_SILK_SHIFT_STEP = 0.1;
+const SUB_SILK_SNAP = 1, SUB_SILK_SHIFT_MAX = 2, SUB_SILK_SHIFT_STEP = 0.1;
 
 // Axis-aligned rect keepout stubs for polyContains/polyDistEdge (the real ones
 // handle arbitrary polygons; these match for rectangles, which tests use).
@@ -37,7 +37,7 @@ function polyDistEdge(pts, x, y) {
 // Pull the exact functions out of pcb_board.js by name, then eval them with
 // the stubs in scope.
 const wanted = [
-  'subSilkRawSegments', 'subSilkClusterLeg', 'subSilkSnapEdges', 'subSilkSnapOne',
+  'subSilkRawSegments', 'subSilkClusterLeg', 'subSilkSnapEdges', 'subSilkSnapOne', 'subSilkSnapFacing',
   'subSilkSegPoint', 'subSilkSegHitsKeepout', 'subSilkBoxClearKeepouts',
   'subSilkShiftClearKeepouts', 'subSilkAssignArt',
 ];
@@ -58,7 +58,7 @@ for (const name of wanted) {
 const makeEnv = () => {
   const f = new Function(
     'SUB_SILK_INK_CLEAR', 'SUB_SILK_CORNER_INSET', 'SUB_SILK_SNAP', 'SUB_SILK_SHIFT_MAX', 'SUB_SILK_SHIFT_STEP', 'polyContains', 'polyDistEdge',
-    body + '; return {subSilkRawSegments,subSilkClusterLeg,subSilkSnapEdges,subSilkSnapOne,subSilkSegPoint,subSilkSegHitsKeepout,subSilkBoxClearKeepouts,subSilkShiftClearKeepouts,subSilkAssignArt};'
+    body + '; return {subSilkRawSegments,subSilkClusterLeg,subSilkSnapEdges,subSilkSnapOne,subSilkSnapFacing,subSilkSegPoint,subSilkSegHitsKeepout,subSilkBoxClearKeepouts,subSilkShiftClearKeepouts,subSilkAssignArt};'
   );
   return f(SUB_SILK_INK_CLEAR, SUB_SILK_CORNER_INSET, SUB_SILK_SNAP, SUB_SILK_SHIFT_MAX, SUB_SILK_SHIFT_STEP, polyContains, polyDistEdge);
 };
@@ -114,25 +114,63 @@ function segCount(q) { return q.raw.length; }
   check('C: bottom.minx stays 4.3', qs[1].x0, 4.3);
 }
 
-// ── Test D: keepout straddling the right edge shifts the box left 0.8 mm
+// ── Test D: near-parallel edges align without perpendicular overlap
+{
+  const env = makeEnv();
+  const qs = [
+    { g: 'origin', x0: 0, y0: 0, x1: 4, y1: 4, l: 1, side: 'top' },
+    { g: 'above', x0: 0.8, y0: 8, x1: 4.8, y1: 12, l: 1, side: 'top' },
+    { g: 'right', x0: 8, y0: 0.8, x1: 12, y1: 4.8, l: 1, side: 'top' },
+  ];
+  env.subSilkAssignArt(qs, []);
+  check('D: separated boxes align left edges', qs[0].x0 === 0.4 && qs[1].x0 === 0.4, true);
+  check('D: separated boxes align right edges', qs[0].x1 === 4.4 && qs[1].x1 === 4.4, true);
+  check('D: separated boxes align top edges', qs[0].y0 === 0.4 && qs[2].y0 === 0.4, true);
+  check('D: separated boxes align bottom edges', qs[0].y1 === 4.4 && qs[2].y1 === 4.4, true);
+}
+
+// ── Test E: the 1 mm threshold is inclusive, and a larger difference stays put
+{
+  const env = makeEnv();
+  const a = { v: 2 }, b = { v: 3 };
+  check('E: exactly 1 mm snaps', env.subSilkSnapOne(a, 'v', b, 'v'), true);
+  check('E: exact-boundary midpoint', a.v === 2.5 && b.v === 2.5, true);
+  const c = { v: 2 }, d = { v: 3.001 };
+  check('E: more than 1 mm does not snap', env.subSilkSnapOne(c, 'v', d, 'v'), false);
+  check('E: over-threshold coordinates stay put', c.v === 2 && d.v === 3.001, true);
+}
+
+// ── Test F: overlapping narrow boxes keep their widths
+{
+  const env = makeEnv();
+  const qs = [
+    { g: 'a', x0: 0, y0: 0, x1: 1, y1: 1, l: 0.75, side: 'top' },
+    { g: 'b', x0: 0.5, y0: 0, x1: 1.5, y1: 1, l: 0.75, side: 'top' },
+  ];
+  env.subSilkSnapEdges(qs);
+  check('F: first narrow box keeps width', qs[0].x1 - qs[0].x0, 1);
+  check('F: second narrow box keeps width', qs[1].x1 - qs[1].x0, 1);
+}
+
+// ── Test G: keepout straddling the right edge shifts the box left 0.8 mm
 {
   const env = makeEnv();
   const qs = [{ g: 'rf', x0: 2.5, y0: 3.5, x1: 7.5, y1: 6.5, l: 0.75, side: 'top' }];
   const keepouts = [[[6.8, 3.0], [8.6, 3.0], [8.6, 7.0], [6.8, 7.0]]];
   env.subSilkAssignArt(qs, keepouts);
-  check('D: maxx shifts to 6.7', qs[0].x1, 6.7, 1e-6);
-  check('D: box still clear of keepout', env.subSilkBoxClearKeepouts(qs[0], keepouts), true);
-  check('D: all 8 marks survive', segCount(qs[0]), 8);
+  check('G: maxx shifts to 6.7', qs[0].x1, 6.7, 1e-6);
+  check('G: box still clear of keepout', env.subSilkBoxClearKeepouts(qs[0], keepouts), true);
+  check('G: all 8 marks survive', segCount(qs[0]), 8);
 }
 
-// ── Test E: a box fully inside a keepout stays put (no shift finds a clear spot)
+// ── Test H: a box fully inside a keepout stays put (no shift finds a clear spot)
 {
   const env = makeEnv();
   const qs = [{ g: 'quiet', x0: 2.5, y0: 3.5, x1: 7.5, y1: 6.5, l: 0.75, side: 'top' }];
   const keepouts = [[[2.4, 3.4], [7.6, 3.4], [7.6, 6.6], [2.4, 6.6]]];
   env.subSilkAssignArt(qs, keepouts);
-  check('E: box stays at 7.5', qs[0].x1, 7.5, 1e-6);
-  check('E: marks still clipped (not clear)', !env.subSilkBoxClearKeepouts(qs[0], keepouts), true);
+  check('H: box stays at 7.5', qs[0].x1, 7.5, 1e-6);
+  check('H: marks still clipped (not clear)', !env.subSilkBoxClearKeepouts(qs[0], keepouts), true);
 }
 
 console.log(failures === 0 ? '\nALL JS SILK TESTS PASSED' : '\n' + failures + ' FAILURE(S)');

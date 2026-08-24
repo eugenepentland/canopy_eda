@@ -3,9 +3,9 @@
 //! A top-level sub-block is visible in a placement as the prefix before the
 //! first slash (`buck/U1`, `buck/C1`, ...). Every prefix gets four short
 //! corner L marks around the union of its courtyards; overlapping boxes no
-//! longer merge into one shared envelope. Same-face boxes whose facing edges
-//! come within 1.5 mm snap both edges to the shared midpoint so adjacent
-//! envelopes align instead of drawing a thin double edge, and a box whose
+//! longer merge into one shared envelope. Same-face box edges whose X or Y
+//! coordinates come within 1 mm snap to the shared midpoint so nearby
+//! envelopes line up cleanly, and a box whose
 //! corner marks a keepout would clip shifts itself a little so the marks
 //! still draw whole. Every prefix keeps its own fixed-size horizontal name.
 //! The label placer searches corner-near slots along the top and bottom edges,
@@ -39,9 +39,9 @@ const label_edge_gap_mm: f64 = 0.15;
 const label_edge_offset_mm: f64 = 1.0;
 /// Distance the four L-shaped corner brackets sit inside the annotation box.
 const corner_inset_mm: f64 = 0.2;
-/// Same-face annotation boxes whose facing edges come this close share one
-/// aligned edge at the midpoint instead of drawing a thin double edge.
-const edge_snap_gap_mm: f64 = 1.5;
+/// Same-face annotation-box edges whose X or Y coordinates differ by no more
+/// than this align at their shared midpoint.
+const edge_snap_tolerance_mm: f64 = 1.0;
 /// Furthest a sub-circuit box may translate so its corner marks clear a
 /// keepout; the search prefers the smallest movement.
 const keepout_shift_max_mm: f64 = 2.0;
@@ -1303,24 +1303,39 @@ fn excluded(ref: []const u8, refs: []const []const u8) bool {
     return false;
 }
 
-/// Move two facing edges of nearby same-side annotation boxes to their shared
-/// midpoint when the gap between them is under `edge_snap_gap_mm`. The four
-/// span arguments are the perpendicular-axis projections of the two boxes;
-/// they must overlap for the edges to actually face one another.
-fn snapEdgePair(e0: *f64, e1: *f64, p0lo: f64, p0hi: f64, p1lo: f64, p1hi: f64) bool {
-    const gap = e1.* - e0.*;
-    if (gap <= 0 or gap >= edge_snap_gap_mm) return false;
-    if (@max(p0lo, p1lo) >= @min(p0hi, p1hi)) return false;
+/// Move two distinct edge coordinates to their shared midpoint when they are
+/// within the alignment tolerance. Equality is already stable and needs no
+/// further pass.
+fn snapEdgePair(e0: *f64, e1: *f64) bool {
+    const gap = @abs(e1.* - e0.*);
+    if (gap == 0 or gap > edge_snap_tolerance_mm) return false;
     const midpoint = (e0.* + e1.*) / 2;
     e0.* = midpoint;
     e1.* = midpoint;
     return true;
 }
 
-/// Align facing edges of same-face annotation boxes that come within
-/// `edge_snap_gap_mm` of each other. Iterating to a fixed point lets a chain
-/// of close boxes settle on one common line; every pass only closes gaps, so
-/// the result is stable and the pass count is bounded by the box count.
+/// Align opposite edges only when they face across a non-negative gap and the
+/// boxes overlap on the perpendicular axis. This keeps overlapping narrow or
+/// diagonally separated boxes from collapsing or stretching toward each other.
+fn snapFacingEdgePair(trailing: *f64, leading: *f64, p0lo: f64, p0hi: f64, p1lo: f64, p1hi: f64) bool {
+    const gap = leading.* - trailing.*;
+    if (gap < 0 or gap > edge_snap_tolerance_mm) return false;
+    if (gap == 0) return false;
+    if (@max(p0lo, p1lo) >= @min(p0hi, p1hi)) return false;
+    const midpoint = (trailing.* + leading.*) / 2;
+    trailing.* = midpoint;
+    leading.* = midpoint;
+    return true;
+}
+
+/// Align any vertical or horizontal edges of same-face annotation boxes whose
+/// coordinates come within `edge_snap_tolerance_mm`. Perpendicular overlap is
+/// deliberately irrelevant: matching the top edges of horizontally separated
+/// boxes (and the left edges of vertically separated boxes) is the main visual
+/// cleanup this pass provides. Repeating the pair scan lets short chains of
+/// close coordinates settle toward the same line while bounding the work by
+/// the box count.
 fn snapNearbyEdges(annotations: []Annotation) void {
     const n = annotations.len;
     var changed = true;
@@ -1332,18 +1347,14 @@ fn snapNearbyEdges(annotations: []Annotation) void {
                 if (annotations[i].side != annotations[j].side) continue;
                 const a = &annotations[i];
                 const b = &annotations[j];
-                const a_y0 = a.miny;
-                const a_y1 = a.maxy;
-                const b_y0 = b.miny;
-                const b_y1 = b.maxy;
-                changed = snapEdgePair(&a.maxx, &b.minx, a_y0, a_y1, b_y0, b_y1) or changed;
-                changed = snapEdgePair(&b.maxx, &a.minx, b_y0, b_y1, a_y0, a_y1) or changed;
-                const a_x0 = a.minx;
-                const a_x1 = a.maxx;
-                const b_x0 = b.minx;
-                const b_x1 = b.maxx;
-                changed = snapEdgePair(&a.maxy, &b.miny, a_x0, a_x1, b_x0, b_x1) or changed;
-                changed = snapEdgePair(&b.maxy, &a.miny, b_x0, b_x1, a_x0, a_x1) or changed;
+                changed = snapEdgePair(&a.minx, &b.minx) or changed;
+                changed = snapEdgePair(&a.maxx, &b.maxx) or changed;
+                changed = snapFacingEdgePair(&a.maxx, &b.minx, a.miny, a.maxy, b.miny, b.maxy) or changed;
+                changed = snapFacingEdgePair(&b.maxx, &a.minx, b.miny, b.maxy, a.miny, a.maxy) or changed;
+                changed = snapEdgePair(&a.miny, &b.miny) or changed;
+                changed = snapEdgePair(&a.maxy, &b.maxy) or changed;
+                changed = snapFacingEdgePair(&a.maxy, &b.miny, a.minx, a.maxx, b.minx, b.maxx) or changed;
+                changed = snapFacingEdgePair(&b.maxy, &a.miny, b.minx, b.maxx, a.minx, a.maxx) or changed;
             }
         }
     }
@@ -1560,8 +1571,9 @@ pub fn collectWithBoardTexts(
         initialized += 1;
     }
     // Each sub-circuit draws its own four corner marks. Nearby same-face boxes
-    // first align their close edges on the shared midpoint, and a box whose
-    // marks a keepout would clip shifts itself so they still draw whole.
+    // first align close X/Y edge coordinates on the shared midpoint, and a
+    // box whose marks a keepout would clip shifts itself so they still draw
+    // whole.
     snapNearbyEdges(out);
     shiftBoxesClearOfKeepouts(out, keepouts);
     const label_ctx = LabelPlacementContext{
@@ -1882,7 +1894,7 @@ test "overlapping opposite-face sub-circuits do not merge" {
     try std.testing.expectEqual(@as(usize, 8), got[1].visibleSegments().len);
 }
 
-// spec: export_gerber - same-face sub-circuit boxes whose facing edges come within 1.5 mm snap both edges to the shared midpoint so adjacent envelopes align
+// spec: export_gerber - same-face sub-circuit box edges whose X or Y coordinates differ by at most 1 mm snap to the shared midpoint so nearby envelopes align
 test "nearby same-side sub-circuit boxes snap facing edges to the midpoint" {
     const parts = [_]optimizer.Part{
         .{ .ref_des = "left/U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false, .x = 2, .y = 5, .side = .top },
@@ -1917,6 +1929,94 @@ test "nearby same-side sub-circuit boxes snap facing edges to the midpoint" {
     try std.testing.expectApproxEqAbs(@as(f64, 6.5), got[1].maxy, 1e-9);
     try std.testing.expectEqual(@as(usize, 8), got[0].visibleSegments().len);
     try std.testing.expectEqual(@as(usize, 8), got[1].visibleSegments().len);
+}
+
+// spec: export_gerber - same-face sub-circuit boxes align near-parallel edges within 1 mm even when the boxes do not overlap on the perpendicular axis
+test "nearby parallel box edges align without perpendicular overlap" {
+    var boxes = [_]Annotation{
+        .{
+            .name = "origin",
+            .side = .top,
+            .minx = 0,
+            .miny = 0,
+            .maxx = 4,
+            .maxy = 4,
+            .label_text = .{ .x = 0, .y = 0, .text = "" },
+        },
+        .{
+            // Vertically separated from origin; both X edges are 0.8 mm off.
+            .name = "above",
+            .side = .top,
+            .minx = 0.8,
+            .miny = 8,
+            .maxx = 4.8,
+            .maxy = 12,
+            .label_text = .{ .x = 0, .y = 0, .text = "" },
+        },
+        .{
+            // Horizontally separated; both Y edges are 0.8 mm off origin.
+            .name = "right",
+            .side = .top,
+            .minx = 8,
+            .miny = 0.8,
+            .maxx = 12,
+            .maxy = 4.8,
+            .label_text = .{ .x = 0, .y = 0, .text = "" },
+        },
+    };
+
+    snapNearbyEdges(&boxes);
+
+    try std.testing.expectApproxEqAbs(@as(f64, 0.4), boxes[0].minx, 1e-9);
+    try std.testing.expectApproxEqAbs(boxes[0].minx, boxes[1].minx, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 4.4), boxes[0].maxx, 1e-9);
+    try std.testing.expectApproxEqAbs(boxes[0].maxx, boxes[1].maxx, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.4), boxes[0].miny, 1e-9);
+    try std.testing.expectApproxEqAbs(boxes[0].miny, boxes[2].miny, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 4.4), boxes[0].maxy, 1e-9);
+    try std.testing.expectApproxEqAbs(boxes[0].maxy, boxes[2].maxy, 1e-9);
+}
+
+test "edge alignment tolerance includes exactly one millimetre" {
+    var at_a: f64 = 2;
+    var at_b: f64 = 3;
+    try std.testing.expect(snapEdgePair(&at_a, &at_b));
+    try std.testing.expectApproxEqAbs(@as(f64, 2.5), at_a, 1e-9);
+    try std.testing.expectApproxEqAbs(at_a, at_b, 1e-9);
+
+    var over_a: f64 = 2;
+    var over_b: f64 = 3.001;
+    try std.testing.expect(!snapEdgePair(&over_a, &over_b));
+    try std.testing.expectApproxEqAbs(@as(f64, 2), over_a, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 3.001), over_b, 1e-9);
+}
+
+test "edge alignment preserves overlapping narrow box widths" {
+    var boxes = [_]Annotation{
+        .{
+            .name = "a",
+            .side = .top,
+            .minx = 0,
+            .miny = 0,
+            .maxx = 1,
+            .maxy = 1,
+            .label_text = .{ .x = 0, .y = 0, .text = "" },
+        },
+        .{
+            .name = "b",
+            .side = .top,
+            .minx = 0.5,
+            .miny = 0,
+            .maxx = 1.5,
+            .maxy = 1,
+            .label_text = .{ .x = 0, .y = 0, .text = "" },
+        },
+    };
+
+    snapNearbyEdges(&boxes);
+
+    try std.testing.expectApproxEqAbs(@as(f64, 1), boxes[0].maxx - boxes[0].minx, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 1), boxes[1].maxx - boxes[1].minx, 1e-9);
 }
 
 // spec: export_gerber - nearby sub-circuit boxes on opposite board faces keep their own edge positions

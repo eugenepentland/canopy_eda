@@ -4239,7 +4239,8 @@ Public functions: planLayers, writeLayer
 - Four L corners bound each isolated flattened sub-circuit, and its fixed-size horizontal label first tries a corner-near slot on the top or bottom edge
 - overlapping same-face sub-circuit bounds each keep their own four-corner envelope instead of merging
 - chained overlapping sub-circuits keep one independent corner envelope per member instead of merging transitively
-- same-face sub-circuit boxes whose facing edges come within 1.5 mm snap both edges to the shared midpoint so adjacent envelopes align
+- same-face sub-circuit box edges whose X or Y coordinates differ by at most 1 mm snap to the shared midpoint so nearby envelopes align
+- same-face sub-circuit boxes align near-parallel edges within 1 mm even when the boxes do not overlap on the perpendicular axis
 - nearby sub-circuit boxes on opposite board faces keep their own edge positions
 - overlapping sub-circuit bounds on opposite board faces keep independent corner envelopes
 - a keepout that would clip a sub-circuit box's corner marks shifts the box slightly so the marks still draw whole

@@ -435,6 +435,10 @@ test "viewer puts board text and annotations on side-specific silk layers" {
     try std.testing.expect(std.mem.indexOf(u8, js, "q.label=overrides[q.g]?null:subSilkPlace(q,used,pads,keepouts)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "function subSilkAssignArt") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "function subSilkSnapEdges") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "SUB_SILK_SNAP=1,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "subSilkSnapOne(a,\"x0\",b,\"x0\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "subSilkSnapOne(a,\"y0\",b,\"y0\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "subSilkSnapFacing(a,\"x1\",b,\"x0\",a.y0,a.y1,b.y0,b.y1)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "function subSilkShiftClearKeepouts") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "segs=q.labelArt||subSilkRawSegments(q)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "var b=wrect(i,pp[pi])") != null);

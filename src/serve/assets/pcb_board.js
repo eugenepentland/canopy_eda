@@ -5774,9 +5774,9 @@ function txDragStart(i,m,ev,snap,adopted){txSelect(i);
 // Generated silkscreen artwork. It shares the owning side's F./B.Silkscreen
 // fabrication layer with footprint art: each flattened top-level sub-circuit
 // gets four short L corners around its live courtyard union, and overlapping
-// boxes no longer merge into one shared envelope. Same-face boxes whose
-// facing edges come within 1.5 mm snap both edges to the shared midpoint so
-// adjacent envelopes align, and a box whose corner marks a keepout would clip
+// boxes no longer merge into one shared envelope. Same-face box edges whose
+// X or Y coordinates come within 1 mm snap to the shared midpoint so nearby
+// envelopes line up cleanly, and a box whose corner marks a keepout would clip
 // shifts itself a little so the marks still draw whole. Every sub-circuit
 // keeps its fixed-size horizontal name, which searches corner-near top/bottom
 // slots, then ±1 mm offsets, then the box interior. Names avoid
@@ -5785,7 +5785,7 @@ function txDragStart(i,m,ev,snap,adopted){txSelect(i);
 // Courtyards may overlap the artwork. Prefer a U... hub as the main IC (then
 // any hub, largest first); that part's side owns the artwork.
 var SUB_SILK_MAX=1.0,SUB_SILK_GAP=0.15,SUB_SILK_CLEAR=0.2,SUB_SILK_EDGE=0.2,SUB_SILK_STROKE=0.15,SUB_SILK_INK_CLEAR=SUB_SILK_CLEAR+SUB_SILK_STROKE/2,SUB_SILK_CORNER_INSET=0.2,SUB_SILK_LABEL_OFFSET=1;
-var SUB_SILK_SNAP=1.5,SUB_SILK_SHIFT_MAX=2,SUB_SILK_SHIFT_STEP=0.1;
+var SUB_SILK_SNAP=1,SUB_SILK_SHIFT_MAX=2,SUB_SILK_SHIFT_STEP=0.1;
 var PIN_ONE_LIMIT=0.5,PIN_ONE_DIA=0.3,PIN_ONE_R=PIN_ONE_DIA/2,PIN_ONE_STEP=0.1,PIN_ONE_SEARCH=4;
 var SUB_SILK_CORNER_FRACS=[0,1,0.125,0.875,0.25,0.75,0.375,0.625,0.5];
 function subSilkTextWidth(g,size){return silkTextWidth(g,size);}
@@ -5858,26 +5858,34 @@ function subSilkRawSegments(q){var d=SUB_SILK_CORNER_INSET;return [
  {x1:q.x0+d+q.l,y1:q.y1-d,x2:q.x0+d,y2:q.y1-d},{x1:q.x0+d,y1:q.y1-d,x2:q.x0+d,y2:q.y1-d-q.l},
  {x1:q.x1-d-q.l,y1:q.y1-d,x2:q.x1-d,y2:q.y1-d},{x1:q.x1-d,y1:q.y1-d,x2:q.x1-d,y2:q.y1-d-q.l}];}
 function subSilkClusterLeg(r){return Math.max(0.75,Math.min(2,Math.min(r.x1-r.x0,r.y1-r.y0)*0.22));}
-// Snap facing edges of same-face annotation boxes that come within
-// SUB_SILK_SNAP of each other to their shared midpoint. Iterating to a fixed
-// point lets a chain of close boxes settle on one common line; every pass
-// only closes gaps, so the result is stable and bounded.
+// Align any X/Y edges of same-face annotation boxes that come within
+// SUB_SILK_SNAP of each other. Perpendicular overlap is irrelevant: parallel
+// edges should line up even when their boxes sit next to one another.
 function subSilkSnapEdges(qs){
  var changed=true,passes=0;
  while(changed&&passes<=qs.length){changed=false;passes++;
   for(var i=0;i<qs.length;i++)for(var j=i+1;j<qs.length;j++){
    var a=qs[i],b=qs[j];if(a.side!==b.side)continue;
-   if(subSilkSnapOne(a,"x1",b,"x0",a.y0,a.y1,b.y0,b.y1))changed=true;
-   if(subSilkSnapOne(b,"x1",a,"x0",b.y0,b.y1,a.y0,a.y1))changed=true;
-   if(subSilkSnapOne(a,"y1",b,"y0",a.x0,a.x1,b.x0,b.x1))changed=true;
-   if(subSilkSnapOne(b,"y1",a,"y0",b.x0,b.x1,a.x0,a.x1))changed=true;}}
+   if(subSilkSnapOne(a,"x0",b,"x0"))changed=true;
+   if(subSilkSnapOne(a,"x1",b,"x1"))changed=true;
+   if(subSilkSnapFacing(a,"x1",b,"x0",a.y0,a.y1,b.y0,b.y1))changed=true;
+   if(subSilkSnapFacing(b,"x1",a,"x0",b.y0,b.y1,a.y0,a.y1))changed=true;
+   if(subSilkSnapOne(a,"y0",b,"y0"))changed=true;
+   if(subSilkSnapOne(a,"y1",b,"y1"))changed=true;
+   if(subSilkSnapFacing(a,"y1",b,"y0",a.x0,a.x1,b.x0,b.x1))changed=true;
+   if(subSilkSnapFacing(b,"y1",a,"y0",b.x0,b.x1,a.x0,a.x1))changed=true;}}
 }
-// Move `qa[ka]` and `qb[kb]` (facing edges of nearby same-side boxes) to their
-// shared midpoint when the gap is under SUB_SILK_SNAP and the perpendicular
-// spans overlap, so the edges actually face one another.
-function subSilkSnapOne(qa,ka,qb,kb,p0lo,p0hi,p1lo,p1hi){
+// Move two distinct edge coordinates to their shared midpoint when their
+// absolute difference is within the inclusive tolerance.
+function subSilkSnapOne(qa,ka,qb,kb){
+ var gap=Math.abs(qb[kb]-qa[ka]);
+ if(gap===0||gap>SUB_SILK_SNAP)return false;
+ var mid=(qa[ka]+qb[kb])/2;qa[ka]=mid;qb[kb]=mid;return true;}
+// Opposite edges align only across a real gap with overlapping perpendicular
+// spans, never through an overlap or between diagonally separated boxes.
+function subSilkSnapFacing(qa,ka,qb,kb,p0lo,p0hi,p1lo,p1hi){
  var gap=qb[kb]-qa[ka];
- if(gap<=0||gap>=SUB_SILK_SNAP)return false;
+ if(gap<=0||gap>SUB_SILK_SNAP)return false;
  if(Math.max(p0lo,p1lo)>=Math.min(p0hi,p1hi))return false;
  var mid=(qa[ka]+qb[kb])/2;qa[ka]=mid;qb[kb]=mid;return true;}
 // True if any point of `s` comes within the finished-stroke clearance of a
