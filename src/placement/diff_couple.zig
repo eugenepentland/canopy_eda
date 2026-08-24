@@ -189,17 +189,25 @@ const PairPads = struct {
 fn viaBanRadius(run: router.CoupledRun, pair: diff_pairs.DiffPair) f64 {
     const p = run.ctx.params;
     const off = p.track_width + pair.gap;
-    const half = diff_route.viaSpread(off, p.via_dia, p.clearance, p.track_width) / 2;
+    const half = pairViaSpread(run, pair, off) / 2;
     return half + p.via_dia / 2 + p.clearance;
 }
 
 /// Centre-to-centre spacing this pair's via barrels need: wide enough for the
 /// two barrels' copper AND the opposite leg's track, and for the drill-to-drill
 /// manufacturing wall.
-fn pairViaSpread(run: router.CoupledRun, off: f64) f64 {
-    const p = run.ctx.params;
+fn pairViaSpread(run: router.CoupledRun, pair: diff_pairs.DiffPair, off: f64) f64 {
+    return pairViaSpreadFor(run.ctx.params, pair, off, run.ctx.hole_to_hole);
+}
+
+fn pairViaSpreadFor(p: router.RouteParams, pair: diff_pairs.DiffPair, off: f64, hole_to_hole: f64) f64 {
     const copper = diff_route.viaSpread(off, p.via_dia, p.clearance, p.track_width);
-    return @max(copper, p.via_drill + run.ctx.hole_to_hole);
+    // KiCad's EffectiveDiffPairViaGap is edge-to-edge: the barrel centres are
+    // one via diameter farther apart. Keep the router's opposite-track guard
+    // and the board's drill-to-drill minimum as additional lower bounds.
+    const via_gap = if (pair.via_gap > 0) pair.via_gap else pair.gap;
+    const pair_gap = p.via_dia + via_gap;
+    return @max(copper, @max(pair_gap, p.via_drill + hole_to_hole));
 }
 
 /// Re-read the envelope route's fresh copper as one ordered centreline. Null
@@ -247,7 +255,7 @@ fn legsFor(
     const off = ctx.params.track_width + pair.gap;
     const built = (try diff_route.build(ctx.arena, center, .{
         .off = off,
-        .via_spread = pairViaSpread(run, off),
+        .via_spread = pairViaSpread(run, pair, off),
         .via_clear = ctx.params.via_dia / 2 + ctx.params.track_width / 2 + ctx.params.clearance,
         .seq = ends.seq,
         .mid = ends.mid,
@@ -1086,6 +1094,22 @@ pub fn recouple(run: router.EscalateRun, pair: diff_pairs.DiffPair) std.mem.Allo
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
+
+// spec: placement/router - a coupled diff pair applies KiCad's edge-to-edge via gap independently of its trace gap
+test "dp_coupled pair via spread honors the KiCad via gap" {
+    const params = router.RouteParams{
+        .track_width = 0.15,
+        .clearance = 0.127,
+        .via_drill = 0.3,
+        .via_dia = 0.6,
+    };
+    const explicit = diff_pairs.DiffPair{ .p = 0, .n = 1, .gap = 0.2, .via_gap = 0.35 };
+    try testing.expectApproxEqAbs(@as(f64, 0.95), pairViaSpreadFor(params, explicit, 0.35, 0.2), 1e-9);
+
+    // Zero retains KiCad's default "via gap same as trace gap" behavior.
+    const inherited = diff_pairs.DiffPair{ .p = 0, .n = 1, .gap = 0.2 };
+    try testing.expectApproxEqAbs(@as(f64, 0.8), pairViaSpreadFor(params, inherited, 0.35, 0.2), 1e-9);
+}
 
 // spec: placement/router - a declined coupled diff pair can name the copper that blocked it, telling the pair's own legs apart from a foreign net
 test "dp_coupled census names SELF legs apart from foreign nets and measures pad rectangles" {

@@ -74,9 +74,11 @@ pub fn adapt(
 
     const nets = try convertNets(arena, board);
     const mutable_rules = try netRules(arena, board, project);
-    inferDiffPairRules(arena, nets, mutable_rules, project);
+    try inferDiffPairRules(arena, nets, mutable_rules, project);
     rules.net = mutable_rules;
-    const pairs = try diff_pairs.resolve(arena, nets, rules.net);
+    const resolved_pairs = try diff_pairs.resolve(arena, nets, rules.net);
+    const pairs = try arena.dupe(diff_pairs.DiffPair, resolved_pairs);
+    applyDiffPairViaGaps(pairs, rules.net, project);
     const bounds = snapshot_mod.outlineBounds(board);
     const fallback = partBounds(parts);
     const minx = if (bounds.valid) bounds.min.x else fallback[0];
@@ -491,18 +493,35 @@ fn inferDiffPairRules(
     nets: []const export_kicad.FlatNet,
     rules: []optimizer.NetRule,
     project: ?project_mod.ProjectRules,
-) void {
+) std.mem.Allocator.Error!void {
     for (nets, 0..) |net, pi| {
         const leaf = shortName(net.name);
-        const mate = pairMate(arena, leaf) orelse continue;
+        const named = (try pairMate(arena, leaf)) orelse continue;
+        if (named.polarity != .p) continue;
+        const dm = try dmPairMate(arena, leaf);
         for (nets, 0..) |other, ni| {
-            if (!std.ascii.eqlIgnoreCase(shortName(other.name), mate)) continue;
+            const candidate = shortName(other.name);
+            const kicad_match = std.ascii.eqlIgnoreCase(candidate, named.name);
+            const dm_match = if (dm) |want| std.ascii.eqlIgnoreCase(candidate, want) else false;
+            if (!kicad_match and !dm_match) continue;
             const class = if (project) |p| findClass(p, rules[pi].class.name) else null;
-            const gap = if (class) |c|
-                nonzero(c.diff_pair_gap, diff_pairs.default_gap_mm)
+            const defaults = if (project) |p| findClass(p, "Default") else null;
+            const min_gap = if (project) |p|
+                nonzero(p.design.min_clearance, diff_pairs.default_gap_mm)
             else
                 diff_pairs.default_gap_mm;
-            const width = if (class) |c| nonzero(c.diff_pair_width, rules[pi].width) else rules[pi].width;
+            const inherited_gap = if (class) |c|
+                nonzero(c.diff_pair_gap, if (defaults) |d| d.diff_pair_gap else 0)
+            else
+                0;
+            const gap = @max(nonzero(inherited_gap, min_gap), min_gap);
+            const inherited_width = if (class) |c|
+                nonzero(c.diff_pair_width, if (defaults) |d| d.diff_pair_width else 0)
+            else
+                0;
+            const base_width = nonzero(rules[pi].width, if (defaults) |d| d.track_width else 0);
+            const min_width = if (project) |p| nonzero(p.design.min_track_width, base_width) else base_width;
+            const width = @max(nonzero(inherited_width, base_width), min_width);
             rules[pi].diff_gap = gap;
             rules[ni].diff_gap = gap;
             rules[pi].width = width;
@@ -512,18 +531,76 @@ fn inferDiffPairRules(
     }
 }
 
-fn pairMate(arena: std.mem.Allocator, name: []const u8) ?[]const u8 {
-    if (name.len > 2 and std.mem.endsWith(u8, name, "_P")) {
-        const out = arena.dupe(u8, name) catch return null;
-        out[out.len - 1] = 'N';
-        return out;
-    }
-    if (name.len > 2 and std.mem.endsWith(u8, name, "DP")) {
-        const out = arena.dupe(u8, name) catch return null;
-        out[out.len - 1] = 'M';
-        return out;
+const PairPolarity = enum { p, n };
+
+const PairMate = struct { name: []const u8, polarity: PairPolarity };
+
+/// Local adapter copy of pcbnew's BOARD::MatchDpSuffix rule. Keeping it here
+/// avoids making the placement helper public solely for an import seam.
+fn pairMate(arena: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!?PairMate {
+    if (name.len == 0) return null;
+    var i = name.len;
+    while (i > 0) {
+        i -= 1;
+        const ch = name[i];
+        if (std.ascii.isDigit(ch) or ch == '_') continue;
+        const found: struct { replacement: u8, polarity: PairPolarity } = switch (ch) {
+            'P', '+' => .{ .replacement = if (ch == 'P') 'N' else '-', .polarity = .p },
+            'N', '-' => .{ .replacement = if (ch == 'N') 'P' else '+', .polarity = .n },
+            else => return null,
+        };
+        const out = try arena.dupe(u8, name);
+        out[i] = found.replacement;
+        return .{ .name = out, .polarity = found.polarity };
     }
     return null;
+}
+
+/// Preserve the adapter's older `DP`/`DM` convention as an additional alias.
+fn dmPairMate(arena: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!?[]const u8 {
+    if (name.len <= 2 or !std.mem.endsWith(u8, name, "DP")) return null;
+    const out = try arena.dupe(u8, name);
+    out[out.len - 1] = 'M';
+    return out;
+}
+
+/// Apply KiCad's separate edge-to-edge via gap after generic pair resolution.
+/// Zero is retained when no project class is available, meaning trace gap.
+fn applyDiffPairViaGaps(
+    pairs: []diff_pairs.DiffPair,
+    rules: []const optimizer.NetRule,
+    project: ?project_mod.ProjectRules,
+) void {
+    const p = project orelse return;
+    for (pairs) |*pair| {
+        if (pair.p >= rules.len) continue;
+        const class = findClass(p, rules[pair.p].class.name) orelse continue;
+        const defaults = findClass(p, "Default");
+        const board_defaults = optimizer.DesignRules{};
+        const inherited = nonzero(class.diff_pair_via_gap, if (defaults) |d| d.diff_pair_via_gap else 0);
+        const default_via_dia = if (defaults) |d|
+            nonzero(d.via_diameter, board_defaults.via_dia)
+        else
+            board_defaults.via_dia;
+        const default_via_drill = if (defaults) |d|
+            nonzero(d.via_drill, board_defaults.via_drill)
+        else
+            board_defaults.via_drill;
+        const via_dia = @max(
+            nonzero(class.via_diameter, default_via_dia),
+            p.design.min_via_diameter,
+        );
+        const via_drill = @max(
+            nonzero(class.via_drill, default_via_drill),
+            p.design.min_via_drill,
+        );
+        const annular = @max((via_dia - via_drill) / 2, 0);
+        // Mirrors SIZES_SETTINGS::EffectiveDiffPairViaGap's copper-to-hole
+        // term. The drill-to-drill term remains geometry-dependent and is
+        // applied in diff_couple once the live RouteParams are known.
+        const copper_to_hole = @max(p.design.min_hole_clearance - annular, 0);
+        pair.via_gap = @max(nonzero(inherited, pair.gap), copper_to_hole);
+    }
 }
 
 fn shortName(name: []const u8) []const u8 {
@@ -650,7 +727,7 @@ test "adapter reconstructs a rotated bottom KiCad pad centre" {
     try std.testing.expectApproxEqAbs(@as(f64, 28.5), world[1], 1e-9);
 }
 
-test "adapter applies KiCad differential width and gap to both pair legs" {
+test "adapter applies KiCad differential width trace gap and via gap to both pair legs" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -667,6 +744,7 @@ test "adapter applies KiCad differential width and gap to both pair legs" {
         .track_width = 0.127,
         .diff_pair_width = 0.2532,
         .diff_pair_gap = 0.1524,
+        .diff_pair_via_gap = 0.2032,
     }};
     const got = try adapt(arena, .{
         .layers = &layers,
@@ -678,4 +756,49 @@ test "adapter applies KiCad differential width and gap to both pair legs" {
         try std.testing.expectApproxEqAbs(@as(f64, 0.2532), rule.width, 1e-9);
         try std.testing.expectApproxEqAbs(@as(f64, 0.1524), rule.diff_gap, 1e-9);
     }
+    try std.testing.expectApproxEqAbs(@as(f64, 0.2032), got.placement.diff_pairs[0].via_gap, 1e-9);
+}
+
+// spec: placement/router - KiCad pair names support P/N and +/- with trailing suffix digits, while pair rules inherit Default and respect board and physical-hole minima
+test "adapter follows KiCad pair suffixes inheritance and minima" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const layers = [_]snapshot_mod.Layer{
+        .{ .name = "F.Cu", .copper = true },
+        .{ .name = "B.Cu", .copper = true },
+    };
+    const nets = [_]snapshot_mod.Net{
+        .{ .name = "CLK+" },
+        .{ .name = "CLK-" },
+        .{ .name = "LANE_P_12" },
+        .{ .name = "LANE_N_12" },
+    };
+    const classes = [_]project_mod.NetClass{
+        .{
+            .name = "Default",
+            .track_width = 0.12,
+            .diff_pair_width = 0.18,
+            .diff_pair_gap = 0.08,
+            .diff_pair_via_gap = 0.24,
+            .via_diameter = 0.5,
+            .via_drill = 0.3,
+        },
+        .{ .name = "Lane" },
+    };
+    const patterns = [_]project_mod.NetClassPattern{.{ .pattern = "LANE*", .net_class = "Lane" }};
+    const got = try adapt(arena, .{ .layers = &layers, .nets = &nets }, .{
+        .design = .{ .min_clearance = 0.1, .min_track_width = 0.15, .min_hole_clearance = 0.4 },
+        .net_classes = &classes,
+        .patterns = &patterns,
+    });
+
+    try std.testing.expectEqual(@as(usize, 2), got.placement.diff_pairs.len);
+    try std.testing.expectEqual(@as(usize, 0), got.placement.diff_pairs[0].p);
+    try std.testing.expectEqual(@as(usize, 1), got.placement.diff_pairs[0].n);
+    try std.testing.expectEqual(@as(usize, 2), got.placement.diff_pairs[1].p);
+    try std.testing.expectEqual(@as(usize, 3), got.placement.diff_pairs[1].n);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.1), got.placement.diff_pairs[1].gap, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.3), got.placement.diff_pairs[1].via_gap, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.18), got.placement.rules.net[2].width, 1e-9);
 }

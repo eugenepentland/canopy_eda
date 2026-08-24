@@ -486,6 +486,8 @@ Public functions: route, perNetRouted, returnPathViolations, canonicalizeTraceJu
 - a pad's own quarter rotation reorients its routing obstacle so the vacated lane routes straight and DRC agrees
 - a max-freq net's routed staircase collapses straight at finish and its arcs rebuild on the taut path
 - diff-pair resolution pairs a two-net class and matches a larger class by P/N naming
+- diff-pair naming follows KiCad's P/N and +/- suffix rule, including trailing digits and underscores
+- KiCad pair names support P/N and +/- with trailing suffix digits, while pair rules inherit Default and respect board and physical-hole minima
 - routes a diff pair's N net immediately after its P net
 - dilates the routed P copper into a per-layer coupling corridor bitset
 - dilates foreign copper into the coupled diff-pair envelope's exclusion mask
@@ -495,6 +497,7 @@ Public functions: route, perNetRouted, returnPathViolations, canonicalizeTraceJu
 - a coupled diff pair miters every centreline bend so the legs hold the class offset through the corner
 - a coupled diff pair turns each centreline layer change into a via pair spread along the path normal
 - a coupled diff pair sizes its via-pair spread so both barrels clear each other and the opposite leg
+- a coupled diff pair applies KiCad's edge-to-edge via gap independently of its trace gap
 - a coupled diff pair length-matches its legs in the pad fans, leaving the coupled section untouched
 - a coupled diff pair threads its end's pad pairs in sequence, terminus first, converging to the class gap beyond the last
 - the coupled diff-pair chainer welds a run onto a barrel within half a track of the drill centre, not only dead on it

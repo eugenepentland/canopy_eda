@@ -3,9 +3,9 @@
 //!
 //! A `(net-class … (diff-pair [GAP]))` form marks its member nets as a
 //! differential pair. `resolve` groups the flagged nets by class and pairs
-//! them (a two-member class directly, a larger class by the `_P`/`_N` and
-//! `DP`/`DM` naming convention — the same rule `optimizer.diffMateOfP` uses
-//! for placement), producing `DiffPair` records (net indices + target gap).
+//! them (a two-member class directly, a larger class by KiCad's `P`/`N` and
+//! `+`/`-` suffix convention), producing `DiffPair` records (net indices +
+//! target trace and via gaps).
 //! `reorder` sequences each pair's N net immediately after its P net, and
 //! `buildCorridor` dilates the routed P copper into a bitset the maze cost
 //! model discounts so the N net hugs its twin. An empty pair set makes every
@@ -18,8 +18,14 @@ const FlatNet = optimizer.FlatNet;
 const NetRule = optimizer.NetRule;
 
 /// One resolved differential pair: the P- and N-side net indices (into the
-/// design's flattened `nets`) plus the target edge-to-edge coupling gap (mm).
-pub const DiffPair = struct { p: usize, n: usize, gap: f64 };
+/// design's flattened `nets`) plus target edge-to-edge trace and via gaps (mm).
+pub const DiffPair = struct {
+    p: usize,
+    n: usize,
+    gap: f64,
+    /// Edge-to-edge barrel gap; zero means "same as trace gap".
+    via_gap: f64 = 0,
+};
 
 /// A pending corridor build for the N net at index `.n` of some pair: the
 /// already-routed P net's index and the pair gap the router turns into a
@@ -38,21 +44,42 @@ fn leaf(s: []const u8) []const u8 {
     return s;
 }
 
-/// The differential mate LEAF name for a P-side net, or null when `s` is not a
-/// P-side name — a private copy of `optimizer.diffMateOfP`'s rule (`…_P`→`…_N`,
-/// `…DP`→`…DM`) kept local so this module needs no new cross-file `pub` seam.
-fn mate(arena: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error!?[]const u8 {
-    if (s.len > 2 and std.mem.endsWith(u8, s, "_P")) {
-        const m = try arena.dupe(u8, s);
-        m[m.len - 1] = 'N';
-        return m;
-    }
-    if (s.len > 2 and std.mem.endsWith(u8, s, "DP")) {
-        const m = try arena.dupe(u8, s);
-        m[m.len - 1] = 'M';
-        return m;
+const Polarity = enum { p, n };
+
+const NamedMate = struct { name: []const u8, polarity: Polarity };
+
+/// KiCad-compatible differential mate recognition. Scan backward over trailing
+/// digits and underscores, then exchange the first `P`/`N` or `+`/`-` marker.
+/// Thus `USB_DP`, `CLK+`, and `LANE_P_1` all resolve exactly as pcbnew's
+/// `BOARD::MatchDpSuffix` resolves them.
+fn namedMate(
+    arena: std.mem.Allocator,
+    s: []const u8,
+) std.mem.Allocator.Error!?NamedMate {
+    if (s.len == 0) return null;
+    var i = s.len;
+    while (i > 0) {
+        i -= 1;
+        const ch = s[i];
+        if (std.ascii.isDigit(ch) or ch == '_') continue;
+        const found: struct { replacement: u8, polarity: Polarity } = switch (ch) {
+            'P', '+' => .{ .replacement = if (ch == 'P') 'N' else '-', .polarity = .p },
+            'N', '-' => .{ .replacement = if (ch == 'N') 'P' else '+', .polarity = .n },
+            else => return null,
+        };
+        const out = try arena.dupe(u8, s);
+        out[i] = found.replacement;
+        return .{ .name = out, .polarity = found.polarity };
     }
     return null;
+}
+
+/// The pre-existing Netlisp spelling retained alongside KiCad's rule.
+fn dmMate(arena: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error!?[]const u8 {
+    if (s.len <= 2 or !std.mem.endsWith(u8, s, "DP")) return null;
+    const out = try arena.dupe(u8, s);
+    out[out.len - 1] = 'M';
+    return out;
 }
 
 /// The coupling gap for a pair whose P net carries `rule`: an explicit
@@ -105,24 +132,38 @@ fn pairClass(
     if (members.len == 2) {
         const a = members[0];
         const b = members[1];
-        const p_first = (try mate(arena, leaf(nets[a].name))) != null or
-            (try mate(arena, leaf(nets[b].name))) == null;
+        const a_mate = try namedMate(arena, leaf(nets[a].name));
+        const b_mate = try namedMate(arena, leaf(nets[b].name));
+        const p_first = if (a_mate) |m| m.polarity == .p else if (b_mate) |m| m.polarity != .p else true;
         const p = if (p_first) a else b;
         const n = if (p_first) b else a;
-        try pairs.append(arena, .{ .p = p, .n = n, .gap = gapOf(rules[p]) });
+        try pairs.append(arena, .{
+            .p = p,
+            .n = n,
+            .gap = gapOf(rules[p]),
+        });
         return;
     }
     const matched = try arena.alloc(bool, members.len);
     @memset(matched, false);
     for (members, 0..) |p_i, ii| {
         if (matched[ii]) continue;
-        const want = (try mate(arena, leaf(nets[p_i].name))) orelse continue;
+        const named = (try namedMate(arena, leaf(nets[p_i].name))) orelse continue;
+        if (named.polarity != .p) continue;
+        const dm = try dmMate(arena, leaf(nets[p_i].name));
         for (members, 0..) |n_i, jj| {
             if (jj == ii or matched[jj]) continue;
-            if (!std.ascii.eqlIgnoreCase(leaf(nets[n_i].name), want)) continue;
+            const candidate = leaf(nets[n_i].name);
+            const kicad_match = std.ascii.eqlIgnoreCase(candidate, named.name);
+            const dm_match = if (dm) |want| std.ascii.eqlIgnoreCase(candidate, want) else false;
+            if (!kicad_match and !dm_match) continue;
             matched[ii] = true;
             matched[jj] = true;
-            try pairs.append(arena, .{ .p = p_i, .n = n_i, .gap = gapOf(rules[p_i]) });
+            try pairs.append(arena, .{
+                .p = p_i,
+                .n = n_i,
+                .gap = gapOf(rules[p_i]),
+            });
             break;
         }
     }
@@ -301,6 +342,26 @@ fn expectCells(cor: []const bool, want: bool, idxs: []const usize) !void {
     for (idxs) |n| try testing.expectEqual(want, cor[n]);
 }
 
+fn expectMate(arena: std.mem.Allocator, name: []const u8, want: []const u8, polarity: Polarity) !void {
+    const got = (try namedMate(arena, name)) orelse return error.MissingMate;
+    try testing.expectEqualStrings(want, got.name);
+    try testing.expectEqual(polarity, got.polarity);
+}
+
+// spec: placement/router - diff-pair naming follows KiCad's P/N and +/- suffix rule, including trailing digits and underscores
+test "namedMate follows KiCad MatchDpSuffix" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    try expectMate(arena, "USB_DP", "USB_DN", .p);
+    try expectMate(arena, "USB_DN", "USB_DP", .n);
+    try expectMate(arena, "CLK+", "CLK-", .p);
+    try expectMate(arena, "CLK-", "CLK+", .n);
+    try expectMate(arena, "LANE_P_12", "LANE_N_12", .p);
+    try testing.expect((try namedMate(arena, "ORDINARY")) == null);
+}
+
 // spec: placement/router - diff-pair resolution pairs a two-net class and matches a larger class by P/N naming
 test "resolve pairs a two-net class directly, a larger class by naming, and drops leftovers" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
@@ -332,6 +393,7 @@ test "resolve pairs a two-net class directly, a larger class by naming, and drop
     try testing.expectEqual(@as(usize, 0), pairs[0].p);
     try testing.expectEqual(@as(usize, 1), pairs[0].n);
     try testing.expectEqual(@as(f64, 0.2), pairs[0].gap);
+    try testing.expectEqual(@as(f64, 0), pairs[0].via_gap);
     // Named class: DP is P, DM is N, gap falls back to the default.
     try testing.expectEqual(@as(usize, 2), pairs[1].p);
     try testing.expectEqual(@as(usize, 3), pairs[1].n);
