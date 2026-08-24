@@ -5551,7 +5551,10 @@ svg.addEventListener("pointerdown",function(ev){
    if(outlineRectArmed)outDraw={x0:qm.x,y0:qm.y,x1:qm.x,y1:qm.y,area:true};
    else{marq={x0:qm.x,y0:qm.y,x1:qm.x,y1:qm.y,moved:false,outline:true};marqEl=el("rect",{"class":"marquee",x:0,y:0,width:0,height:0});gU.appendChild(marqEl);}
    pcap(ev);return;}
-  var qhit=pourAt(qm);if(qhit){pourBeginEdit(qhit);return;}
+  // Once a new contour has started, every primary click belongs to it. An
+  // existing area's fill may sit under the intended next vertex, but must not
+  // steal that click and switch the tool from drawing into edit mode.
+  if(!pourPts){var qhit=pourAt(qm);if(qhit){pourBeginEdit(qhit);return;}}
   if(pourPts&&pourPts.length>=3){var qf=pourPts[0];
    if(Math.max(Math.abs(qm.x-qf[0]),Math.abs(qm.y-qf[1]))<=7/S){pourClose();return;}}
   pourPts=pourPts||[];

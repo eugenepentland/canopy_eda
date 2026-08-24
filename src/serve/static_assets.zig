@@ -341,6 +341,12 @@ test "custom copper area drawing infers axes unless Ctrl is held" {
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "pourCur=pourSnap(mm(ev),ev)") != null);
 }
 
+// Once a new custom copper-area contour has its first vertex, clicking through
+// an existing pour adds another vertex instead of selecting that pour to edit.
+test "custom copper area drawing owns clicks over existing pours" {
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "if(!pourPts){var qhit=pourAt(qm);if(qhit){pourBeginEdit(qhit);return;}}") != null);
+}
+
 // spec: Web Server - Dragging an endpoint of a horizontal or vertical outline segment changes its length without translating the constrained line, with dominant-direction disambiguation at H/V corners
 test "axis-constrained outline endpoint drags project the cursor onto the segment" {
     try std.testing.expect(std.mem.indexOf(u8, shape_sketch_js, "function pointDragAxis(s,id,x,y,origin)") != null);
