@@ -1382,7 +1382,7 @@ test "assembly client reveals the BOM row for a board-picked component" {
 test "assembly review only picks parts on the shown side" {
     const board_js = @embedFile("assets/pcb_board.js");
     try std.testing.expect(std.mem.indexOf(u8, board_js, "function reviewPartOnShownSide(p)") != null);
-    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, board_js, "if(!reviewPartOnShownSide(p))continue;"));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, board_js, "if(!partOnVisibleFace(p)||!reviewPartOnShownSide(p))continue;"));
     const client_js = @embedFile("assets/assembly_debug.js");
     try std.testing.expect(std.mem.indexOf(u8, client_js, "if (pickedSide && pickedSide !== boardSide) return;") != null);
 }

@@ -666,6 +666,26 @@ test "PCB side presets hide opposite-face sub-circuit boxes" {
     try std.testing.expect(std.mem.indexOf(u8, hit_test, "if(unplacedSet[P[i].ref]||!partOnVisibleFace(P[i]))return;") != null);
 }
 
+// spec: Web Server - Front-only and Back-only PCB views exclude opposite-face footprints from hover, direct and exact-pad clicks, marquee and select-all selection, and every part/group transform
+test "PCB side presets restrict footprint interaction to the visible face" {
+    const markers = [_][]const u8{
+        "if(!partOnVisibleFace(p)||!reviewPartOnShownSide(p))continue;",
+        "function selSet(idxs){sel=visiblePartIdxs(idxs);",
+        "if(!partOnVisibleFace(p))return;var b=partAABB(i);",
+        "if(!p.locked&&partOnVisibleFace(p))all.push(i);",
+        "if(unplacedSet[P[i].ref]||!partOnVisibleFace(P[i]))return;",
+        "!P[k].locked&&partOnVisibleFace(P[k])",
+        "!P[i].locked&&partOnVisibleFace(P[i])",
+        "partInteractionVisibilitySync();",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+
+    const picker_start = std.mem.indexOf(u8, pcb_board_js, "function pickPartHits").?;
+    const picker_end = std.mem.indexOfPos(u8, pcb_board_js, picker_start, "function pickCandidates").?;
+    const picker = pcb_board_js[picker_start..picker_end];
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, picker, "if(!partOnVisibleFace(p)||!reviewPartOnShownSide(p))return;"));
+}
+
 // spec: kicad_pcb/import-layout - the PCB editor previews KiCad warnings before replacing its starred layout
 test "PCB editor carries the guarded inbound KiCad sync workflow" {
     const markers = [_][]const u8{

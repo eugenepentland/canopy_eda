@@ -725,10 +725,12 @@ test "viewer JS keeps copper on a part move: drag marks connectivity, does not c
 // spec: Web Server - Dragging or rotating a marquee selection carries the tracks and vias the band caught
 test "viewer JS moves marquee-selected copper with the parts it was banded with" {
     const js = @embedFile("assets/pcb_board.js");
-    // A marquee drag seeds its carried copper from the band (a rigid-group drag
-    // seeds from the group tag); both add the private-net copper below.
+    // A marquee drag seeds its carried copper from the band. A rigid-group drag
+    // seeds from the group tag only when every member is on a visible face;
+    // both add the private-net copper below.
     try std.testing.expect(std.mem.indexOf(u8, js, "var cu=carriedCopper(mv,g,!g);") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, " if(g)add(grpCopper(g));\n if(banded)add(selCuCopper());") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(g&&visiblePartIdxs(GRPS[g]).length===(GRPS[g]||[]).length)add(grpCopper(g));") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(banded)add(selCuCopper());") != null);
     // Pressing a selected part with copper in the band drags the whole set.
     try std.testing.expect(std.mem.indexOf(u8, js, "if(sel.indexOf(hi)>=0&&(sel.length>1||selCuCount())){gdrag=gdragStart(m,hi);") != null);
     // Both are translated by the same grid-snapped delta, gated on the delta
@@ -969,9 +971,9 @@ test "viewer JS carries private-net copper with a multi-part move and strands no
     try std.testing.expect(std.mem.indexOf(u8, js, "all[pd.net]=(all[pd.net]||0)+1;if(mv[i])mine[pd.net]=(mine[pd.net]||0)+1;") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "for(var k in mine)if(mine[k]===all[k])") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "return {t:(PCB.tracks||[]).filter(function(t){return t.net&&priv[t.net];})") != null);
-    // Locked members never move, so they are excluded from the moving set —
-    // their nets stay shared and their copper stays put.
-    try std.testing.expect(std.mem.indexOf(u8, js, "var mv=src.filter(function(k){return !P[k].locked;});") != null);
+    // Locked and hidden-face members never move, so they are excluded from the
+    // moving set — their nets stay shared and their copper stays put.
+    try std.testing.expect(std.mem.indexOf(u8, js, "var mv=src.filter(function(k){return !P[k].locked&&partOnVisibleFace(P[k]);});") != null);
     // Every multi-part gesture takes the union: group tag, band, private nets.
     try std.testing.expect(std.mem.indexOf(u8, js, "function carriedCopper(idxs,g,banded)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "add(privateCopper(idxs));") != null);

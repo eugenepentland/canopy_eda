@@ -6042,6 +6042,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - PCB pad-number labels remain capped at 13 screen pixels regardless of pad geometry or zoom
 - Front-only and Back-only PCB presets hide opposite-face SMD pad numbers and layer-scoped DRC markers while retaining through-hole labels and layerless findings
 - Front-only and Back-only PCB presets hide opposite-face sub-circuit bounding boxes and remove their empty-area hit targets
+- Front-only and Back-only PCB views exclude opposite-face footprints from hover, direct and exact-pad clicks, marquee and select-all selection, and every part/group transform
 - WebGPU pan and zoom frames replay a cached render bundle until geometry, layer order, or visible-pour membership changes
 - The WebGPU renderer drops a track whose layer the board does not have instead of repainting it on F.Cu
 - A new copper pour defaults to the active copper layer and its picker lists every routable layer

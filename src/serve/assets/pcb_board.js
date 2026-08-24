@@ -601,7 +601,7 @@ function reviewPartOnShownSide(p){return !PHYSICAL_REVIEW||reviewPartSide(p)===r
 // Smallest hit wins so a cap sitting on a hub grabs before the hub.
 function partAt(wx,wy){var best=-1,ba=1e18;
  for(var i=0;i<P.length;i++){var p=P[i];
-  if(!reviewPartOnShownSide(p))continue;
+  if(!partOnVisibleFace(p)||!reviewPartOnShownSide(p))continue;
   var a=-(p.rot||0)*Math.PI/180,c=Math.cos(a),sn=Math.sin(a);
   var lx=wx-p.x,ly=wy-p.y,rx=lx*c-ly*sn,ry=lx*sn+ly*c;
   if(p.side==="bottom")rx=-rx;
@@ -623,8 +623,9 @@ function padAt(i,wx,wy){var p=P[i],a=-(p.rot||0)*Math.PI/180,c=Math.cos(a),sn=Ma
 // Smallest visible pad wins when pads overlap. Assembly review additionally
 // limits every pad, including through-holes, to its owning placement's face.
 function padHitAt(wx,wy){if(!viewSt.filt.pad&&!PHYSICAL_REVIEW)return null;var best=null,ba=1e18;
- for(var i=0;i<P.length;i++){var p=P[i],pd=padAt(i,wx,wy);if(!pd)continue;
-  if(!reviewPartOnShownSide(p))continue;
+ for(var i=0;i<P.length;i++){var p=P[i];
+  if(!partOnVisibleFace(p)||!reviewPartOnShownSide(p))continue;
+  var pd=padAt(i,wx,wy);if(!pd)continue;
   if(!(pd.drill>0)&&layerAlpha(p.side==="bottom"?1:0)<=0)continue;
   var b=wrect(i,pd),ar=Math.max((b.x1-b.x0)*(b.y1-b.y0),1e-12);
   if(ar<ba){ba=ar;best={i:i,pd:pd};}}
@@ -1434,6 +1435,7 @@ function paintCamBoard(ctx,k){if(!CAM_REVIEW)return;ctx.save();if(physicalBoardP
 // A rigid sub-circuit's selected state belongs exclusively to its green group
 // box (paintGroupBoxes), rather than repeating around every member courtyard.
 function partStroke(i,p){
+ if(!partOnVisibleFace(p))return null;
  if(reviewFocusActive()){
   if(reviewFocus.refIdx[i])return {c:"#ffd33d",w:2.8};
   if(reviewFocus.partIdx[i])return {c:"#58d6ff",w:2.5};}
@@ -1629,9 +1631,9 @@ function paintParts(ctx,k,mov,only){
   if(sprite){ctx.globalAlpha=focusAlpha;
    ctx.drawImage(sprite.image,sprite.x*S,sprite.y*S,sprite.w*S,sprite.h*S);
    // The focused-part outline belongs above an opaque package body.
-   if(reviewFocusActive()&&reviewFocus.partIdx[i]){var ss=partStroke(i,p);
+   if(reviewFocusActive()&&reviewFocus.partIdx[i]){var ss=partStroke(i,p);if(ss){
     ctx.strokeStyle=ss.c;ctx.lineWidth=ss.w;ctx.setLineDash([]);
-    ctx.strokeRect(ccx-hw,ccy-hh,2*hw,2*hh);}}
+    ctx.strokeRect(ccx-hw,ccy-hh,2*hw,2*hh);}}}
   // Placement orientation must remain visible even above an opaque model:
   // repaint authored pad 1 last in the same rotated/mirrored part frame.
   (p.pads||[]).forEach(function(pd){var targetPad=reviewFocusPad(i,pd);
@@ -2112,6 +2114,7 @@ function paintKeepouts(ctx,k){if(PHYSICAL_REVIEW||!viewSt.vis.keepouts)return;
 // movG/only: drag-cache split — a group box is dynamic when any member moves
 // (its bounding box follows the drag).
 function partOnVisibleFace(p){return layerAlpha(p&&p.side==="bottom"?1:0)>0;}
+function visiblePartIdxs(idxs){return (idxs||[]).filter(function(i){return P[i]&&partOnVisibleFace(P[i]);});}
 function paintGroupBoxes(ctx,k,movG,only){
  if(PHYSICAL_REVIEW&&(!reviewFocusActive()||!reviewFocusGroups()))return;
  var ik=1/Math.max(k,0.01);
@@ -3063,8 +3066,20 @@ function dragSnapPose(d,m,g){return {x:d.x0+Math.round((m.x-d.m0.x)/g)*g,
 // on any selected part moves the whole set. Painted purple vs the blue .sel.
 var sel=[];
 function markSel(){paintSoon();}
-function selSet(idxs){sel=idxs;markSel();refreshAlignBar();}
+function selSet(idxs){sel=visiblePartIdxs(idxs);markSel();refreshAlignBar();}
 function selClear(){if(!sel.length)return;sel=[];markSel();refreshAlignBar();}
+// A face/layer visibility change also retires interaction state that points at
+// the face which just disappeared. This keeps an old selection from remaining
+// keyboard-movable after the user switches from Front to Back (or vice versa).
+function partInteractionVisibilitySync(){if(RO)return;var changed=false;
+ if(cur>=0&&!partOnVisibleFace(P[cur])){cur=-1;changed=true;}
+ if(hoverGrpName&&!visiblePartIdxs(GRPS[hoverGrpName]).length){hoverGrpName=null;changed=true;}
+ var next=visiblePartIdxs(sel);if(next.length!==sel.length){sel=next;changed=true;}
+ if(selRef){var si=P.findIndex(function(p){return p.ref===selRef;});
+  if(si<0||!partOnVisibleFace(P[si])){selRef=null;changed=true;}}
+ if(selGroup&&!visiblePartIdxs(GRPS[selGroup]).length){selGroup=null;changed=true;}
+ if(typeof padAlignA!=="undefined"&&padAlignA&&!partOnVisibleFace(P[padAlignA.i])){padAlignA=null;padAlignB=null;changed=true;}
+ if(changed){renderProps();markGrpRow();refreshAlignBar();padAlignRefresh();markSelPart();}}
 function selectionMod(ev){return !!(ev&&(ev.ctrlKey||ev.metaKey));}
 // A plain click uses the richer Properties selection (`selRef` / `selGroup` /
 // `insp`), while a modifier click uses the marquee arrays below. Promote that
@@ -3084,6 +3099,7 @@ function selectionCommit(seed){inspClear();clearSel();selSet(seed.p);selCuTo(see
 // every member is already selected the click removes all of them, otherwise it
 // adds every missing member. Standalone footprints pass a one-index list.
 function selectionToggleParts(idxs){var seed=selectionSeed(),all=true,next=seed.p;
+ idxs=visiblePartIdxs(idxs);
  idxs.forEach(function(i){if(next.indexOf(i)<0)all=false;});
  if(all)next=next.filter(function(i){return idxs.indexOf(i)<0;});
  else idxs.forEach(function(i){if(next.indexOf(i)<0)next.push(i);});
@@ -3112,7 +3128,7 @@ function selectionToggleAt(ev,m){
 // the click names an exact pad. Source ownership is stronger than the current
 // rigid/exploded display choice — a pad under a sub-circuit always moves that
 // whole sub-circuit, which is the invariant this tool promises.
-function padAlignOwner(hit){var g=grpOf(P[hit.i].ref),idxs=(g&&GRPS[g])?GRPS[g].slice():[hit.i];
+function padAlignOwner(hit){var g=grpOf(P[hit.i].ref),idxs=visiblePartIdxs((g&&GRPS[g])?GRPS[g]:[hit.i]);
  return {g:g,idxs:idxs,label:g?("sub-circuit "+g+" ("+idxs.length+" parts)"):refLabel(P[hit.i].ref)};}
 function padAlignLabel(hit){if(!hit)return "not selected";var pd=hit.pd,p=P[hit.i];
  return refLabel(p.ref)+" · pad "+(pd.num||"?")+(pd.net?(" · "+nLeaf(pd.net)):"");}
@@ -3166,10 +3182,10 @@ document.querySelectorAll("[data-pad-axis]").forEach(function(b){b.addEventListe
 // locked parts. Align uses courtyard-box edges; distribute evens out origin
 // spacing between the two extremes.
 function selEntities(){var claimed={},ents=[];
- sel.forEach(function(i){if(P[i].locked)return;
+ sel.forEach(function(i){if(P[i].locked||!partOnVisibleFace(P[i]))return;
   var g=grpIdxs(i); // rigid-group member indices, or null for a lone part
   if(g){var key=grpOf(P[i].ref);if(claimed[key])return;claimed[key]=1;
-   var idxs=g.filter(function(k){return !P[k].locked;});
+   var idxs=g.filter(function(k){return !P[k].locked&&partOnVisibleFace(P[k]);});
    if(idxs.length)ents.push({idxs:idxs,g:key});} // g: whose stamped copper rides
   else ents.push({idxs:[i],g:null});});
  return ents;}
@@ -3278,7 +3294,7 @@ document.addEventListener("keydown",function(ev){if(kbTyping(ev.target))return;
  if((ev.ctrlKey||ev.metaKey)&&(ev.key==="a"||ev.key==="A")){ev.preventDefault();
   // Select-all honours the Objects tab exactly like the marquee, so
   // "Footprints off" + Ctrl+A + Del is the whole-board copper rip-up.
-  var all=[];if(viewSt.filt.fp)P.forEach(function(p,i){if(!p.locked)all.push(i);});
+  var all=[];if(viewSt.filt.fp)P.forEach(function(p,i){if(!p.locked&&partOnVisibleFace(p))all.push(i);});
   var at=[],av=[];
   if(!RO&&!anyDrawTool()){
    if(viewSt.filt.track)(PCB.tracks||[]).forEach(function(t){if(layerAlpha(t.l||0)>0)at.push(t);});
@@ -3321,10 +3337,11 @@ function privateCopper(idxs){var priv=idxs.length?privateNets(idxs):null;
   v:(PCB.vias||[]).filter(function(v){return v.net&&priv[v.net];}),z:[]};}
 // Union of the applicable sources, deduped — one object never translates twice.
 function carriedCopper(idxs,g,banded){var seen=new Set(),t=[],v=[],z=[];
+ idxs=visiblePartIdxs(idxs);
  var add=function(cu){cu.t.forEach(function(o){if(!seen.has(o)){seen.add(o);t.push(o);}});
   cu.v.forEach(function(o){if(!seen.has(o)){seen.add(o);v.push(o);}});
   (cu.z||[]).forEach(function(o){if(!seen.has(o)){seen.add(o);z.push(o);}});};
- if(g)add(grpCopper(g));
+ if(g&&visiblePartIdxs(GRPS[g]).length===(GRPS[g]||[]).length)add(grpCopper(g));
  if(banded)add(selCuCopper());
  add(privateCopper(idxs));
  return {t:t,v:v,z:z};}
@@ -3338,7 +3355,7 @@ function copperMoved(){var band=selCuCopper();copperTouched();
  drawRoute();}
 function gdragStart(m,down,idxs){var src=idxs||sel;
  var g=idxs?grpOf(P[down].ref):null;
- var mv=src.filter(function(k){return !P[k].locked;}); // locked members stay put
+ var mv=src.filter(function(k){return !P[k].locked&&partOnVisibleFace(P[k]);}); // locked / hidden-face members stay put
  var cu=carriedCopper(mv,g,!g);
  var fills=zoneFillsFor(cu.z);
  return {sx:m.x,sy:m.y,lx:m.x,ly:m.y,adx:0,ady:0,moved:false,active:false,down:down,
@@ -3369,7 +3386,7 @@ function gdragRebase(d){d.sx=d.lx;d.sy=d.ly;d.active=true;d.adx=0;d.ady=0;
 // lookup with an explicit set — how a marquee selection rotates the copper it
 // caught, which carries no group tag.
 function rotateGroup(idxs,sign,keepG,live,cu){
- var mv=idxs.filter(function(i){return !P[i].locked;});if(!mv.length)return false;
+ var mv=idxs.filter(function(i){return !P[i].locked&&partOnVisibleFace(P[i]);});if(!mv.length)return false;
  if(!live)recordUndo();
  var r0=mv[0],r0x=P[r0].x,r0y=P[r0].y;
  var cx=0,cy=0;mv.forEach(function(i){cx+=P[i].x;cy+=P[i].y;});cx/=mv.length;cy/=mv.length;
@@ -3398,7 +3415,7 @@ function rotateGroup(idxs,sign,keepG,live,cu){
  if(live){paintSoon();return true;}
  fetchScore();scheduleDrc();updatePropLive();
  if(window.PCB3D&&window.PCB3D.sync)window.PCB3D.sync();return true;}
-function rotatePart(i,sign,live){if(i<0||P[i].locked)return false;if(!live)recordUndo();
+function rotatePart(i,sign,live){if(i<0||P[i].locked||!partOnVisibleFace(P[i]))return false;if(!live)recordUndo();
  P[i].rot=((((P[i].rot||0)+(sign>0?45:-45))%360)+360)%360;setT(i);
  ratsUpdate([i]);drawClr();refreshUnplaced();
  if(live){paintSoon();return true;}
@@ -3417,7 +3434,7 @@ function flipAnchor(mv,want){if(want!=null&&mv.indexOf(want)>=0)return want;
 // group's positions and relative rotations inside-out. Keeping the anchor's
 // x/y/rotation fixed makes a single-part flip byte-compatible with the old
 // behavior and makes a double group flip exactly reversible.
-function flipParts(idxs,wantAnchor){var mv=idxs.filter(function(i){return !P[i].locked;});
+function flipParts(idxs,wantAnchor){var mv=idxs.filter(function(i){return !P[i].locked&&partOnVisibleFace(P[i]);});
  if(!mv.length)return false;var anchor=flipAnchor(mv,wantAnchor);recordUndo();
  var before=stampPoseOf(P[anchor]);
  var after={x:before.x,y:before.y,rot:before.rot,back:!before.back};
@@ -3691,7 +3708,7 @@ document.addEventListener("keydown",function(ev){
    // A part inside an INTACT rigid sub-circuit locks/unlocks the WHOLE group at
    // once — one L signs off a stamped module's place wave (place-wave done ⇔
    // all members locked). Ungrouped / exploded parts keep single-part locking.
-   var gli=grpIdxs(cur);
+   var gli=visiblePartIdxs(grpIdxs(cur));
    if(gli&&gli.length>1){var nl=!P[cur].locked;
     gli.forEach(function(k){P[k].locked=nl;setT(k);});
     if(selRef&&gli.some(function(k){return P[k].ref===selRef;}))renderProps();}
@@ -5677,7 +5694,7 @@ svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.p
    // Intersection test: a part is caught when its courtyard box overlaps the
    // band — so a large IC whose origin sits outside the rubber-band still
    // selects (KiCad's crossing-window behaviour).
-   var pick=[];if(viewSt.filt.fp)P.forEach(function(p,i){var b=partAABB(i);
+   var pick=[];if(viewSt.filt.fp)P.forEach(function(p,i){if(!partOnVisibleFace(p))return;var b=partAABB(i);
     if(!(b.x1<ax||b.x0>bx||b.y1<ay||b.y0>by))pick.push(i);});
    // Copper rides the same band. The Objects tab's Tracks/Vias toggles decide
    // whether it joins the pick, so unchecking Footprints turns the marquee into
@@ -7627,13 +7644,13 @@ function statusFeatureNet(m,partIndex){
 // until the timer fires, so ordinary clicks and drags pay no dense-board scan.
 var PICK_HOLD_MS=450,PICK_SLOP_PX=5,pickHold=null,pickMenu=null,pickPreview=null;
 function pickPartHits(m){var out=[];
- P.forEach(function(p,i){if(!reviewPartOnShownSide(p))return;
+ P.forEach(function(p,i){if(!partOnVisibleFace(p)||!reviewPartOnShownSide(p))return;
   var a=-(p.rot||0)*Math.PI/180,c=Math.cos(a),sn=Math.sin(a),lx=m.x-p.x,ly=m.y-p.y;
   var rx=lx*c-ly*sn,ry=lx*sn+ly*c;if(p.side==="bottom")rx=-rx;
   if(Math.abs(rx-(p.ccx||0))<=p.hw&&Math.abs(ry-(p.ccy||0))<=p.hh)out.push(i);});
  return out;}
 function pickPadHits(m){var out=[];
- P.forEach(function(p,i){if(!reviewPartOnShownSide(p))return;
+ P.forEach(function(p,i){if(!partOnVisibleFace(p)||!reviewPartOnShownSide(p))return;
   var a=-(p.rot||0)*Math.PI/180,c=Math.cos(a),sn=Math.sin(a),lx=m.x-p.x,ly=m.y-p.y;
   var rx=lx*c-ly*sn,ry=lx*sn+ly*c;if(p.side==="bottom")rx=-rx;
   (p.pads||[]).forEach(function(pd){var hit=false;
@@ -7646,7 +7663,7 @@ function pickPadHits(m){var out=[];
    out.push({i:i,pd:pd});});});return out;}
 function pickGroupHits(m){var out=[],pad=3/S;
  for(var g in GRPS){if(!grpRigid(g))continue;var x0=1e18,y0=1e18,x1=-1e18,y1=-1e18,n=0;
-  GRPS[g].forEach(function(i){if(unplacedSet[P[i].ref])return;var b=partAABB(i);
+  GRPS[g].forEach(function(i){if(unplacedSet[P[i].ref]||!partOnVisibleFace(P[i]))return;var b=partAABB(i);
    x0=Math.min(x0,b.x0);y0=Math.min(y0,b.y0);x1=Math.max(x1,b.x1);y1=Math.max(y1,b.y1);n++;});
   if(n&&m.x>=x0-pad&&m.x<=x1+pad&&m.y>=y0-pad&&m.y<=y1+pad)out.push(g);}
  return out;}
@@ -7997,7 +8014,7 @@ function paintInsp(ctx){if(!insp)return;var o=insp.o;
 // any real selection state. That keeps the board unchanged until click while
 // giving every candidate kind one bright, topmost outline — including pads,
 // which deliberately select their owning footprint only after confirmation.
-function paintPickPreviewPart(ctx,i){var p=P[i];if(!p)return;
+function paintPickPreviewPart(ctx,i){var p=P[i];if(!p||!partOnVisibleFace(p))return;
  ctx.save();ctx.translate(X(p.x),Y(p.y));ctx.rotate((p.rot||0)*Math.PI/180);if(p.side==="bottom")ctx.scale(-1,1);
  var hw=p.hw*S,hh=p.hh*S,ccx=(p.ccx||0)*S,ccy=(p.ccy||0)*S;
  ctx.strokeRect(ccx-hw,ccy-hh,2*hw,2*hh);ctx.restore();}
@@ -8005,7 +8022,7 @@ function paintPickPreview(ctx){var d=pickPreview;if(!d)return;
  ctx.save();ctx.setLineDash([]);ctx.lineJoin="round";ctx.lineCap="round";
  ctx.strokeStyle="#58a6ff";ctx.fillStyle="rgba(88,166,255,.16)";ctx.lineWidth=2.6;ctx.globalAlpha=1;
  if(d.t==="sub"){
-  var x0=1/0,y0=1/0,x1=-1/0,y1=-1/0,n=0;(GRPS[d.g]||[]).forEach(function(i){var p=P[i];if(!p||unplacedSet[p.ref])return;
+  var x0=1/0,y0=1/0,x1=-1/0,y1=-1/0,n=0;(GRPS[d.g]||[]).forEach(function(i){var p=P[i];if(!p||unplacedSet[p.ref]||!partOnVisibleFace(p))return;
    paintPickPreviewPart(ctx,i);var b=partAABB(i);x0=Math.min(x0,b.x0);y0=Math.min(y0,b.y0);x1=Math.max(x1,b.x1);y1=Math.max(y1,b.y1);n++;});
   if(n){var pd=3;ctx.lineWidth=3.2;ctx.strokeRect(X(x0)-pd,Y(y0)-pd,(x1-x0)*S+2*pd,(y1-y0)*S+2*pd);}}
  else if(d.t==="fp")paintPickPreviewPart(ctx,d.i);
@@ -9146,6 +9163,7 @@ function apPresetApply(n){
    var selected=stackForSignal(n==="Back"?1:0);
    if(selected)selectActiveLayer(selected.l);
   }
+  partInteractionVisibilitySync();
   viewSave();if(PCB.apSync)PCB.apSync();apRender();dragCacheDrop();paintSoon();drawBoardRect();drawDrc();rats();}
  // ── Markup. One row renderer for BOTH panes: a layer row and an object row
  // are the same thing — a swatch, a canonical name, an eye — and only a copper
@@ -9193,6 +9211,7 @@ function apPresetApply(n){
  function apVisToggle(k){
   if(k==="clr"){clrSet(!clrOn());return;} // owns its own sync + overlay repaint
   viewSt.vis[k]=viewSt.vis[k]?0:1;viewSave();
+  partInteractionVisibilitySync();
   if(k==="netcol")netColSync(); // shared state fans out to every control
   if(k==="guides")guidesSync();
   if(k==="rats")ratsSync();
@@ -9338,7 +9357,7 @@ function apPresetApply(n){
  // back to a clicked rigid sub-circuit (which selects via selGroup, not sel).
  function moveSelection(){var ents=selEntities();
   if(!ents.length&&selGroup&&grpRigid(selGroup)){
-   var gi=GRPS[selGroup].filter(function(i){return !P[i].locked;});
+   var gi=GRPS[selGroup].filter(function(i){return !P[i].locked&&partOnVisibleFace(P[i]);});
    if(gi.length)ents=[{idxs:gi,g:selGroup}];}
   return ents;}
  function moveSelBy(dx,dy){if(RO)return;
