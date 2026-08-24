@@ -24,6 +24,7 @@ const net_open = @import("net_open.zig");
 const optimizer = @import("optimizer.zig");
 const router = @import("router.zig");
 const pour = @import("pour.zig");
+const path_copper = @import("path_copper.zig");
 const font = @import("../font5x7.zig");
 const silk_font = @import("../silk_font.zig");
 
@@ -163,7 +164,8 @@ pub fn checkFilled(alloc: std.mem.Allocator, in: CopperCheck) []const drc.Violat
 fn filledTopologyZones(alloc: std.mem.Allocator, in: CopperCheck) std.mem.Allocator.Error![]const drc.TopologyZone {
     var out: std.ArrayList(drc.TopologyZone) = .empty;
     var component: u64 = 1;
-    const copper = pour.Copper{ .tracks = in.routed.tracks, .vias = in.routed.vias, .zones = in.zones };
+    const physical_tracks = try path_copper.tracks(alloc, in.routed);
+    const copper = pour.Copper{ .tracks = physical_tracks, .vias = in.routed.vias, .zones = in.zones };
     // Every plane, pour and zone below rasters the SAME board on the SAME
     // lattice, so the outline walk that seeds each cell's edge margin is done
     // once here and copied per fill. `base_edge` is the whole render's field
@@ -234,48 +236,5 @@ fn withNetOpen(
 /// track remains on that net. Geometry DRC keeps the polygon proof instead of
 /// reclassifying its implementation samples as editable track segments.
 fn connectivityTracks(alloc: std.mem.Allocator, r: router.RouteResult) std.mem.Allocator.Error![]const router.Track {
-    var missing: usize = 0;
-    for (r.rf_port_outcomes) |outcome| {
-        if (!outcome.success or outcome.physical.gate_removed or outcome.physical.samples.len < 2) continue;
-        for (outcome.physical.samples[1..], 1..) |sample, i| {
-            const before = outcome.physical.samples[i - 1];
-            if (!hasTrackChord(r.tracks, outcome.net, outcome.physical.layer, before.at, sample.at)) missing += 1;
-        }
-    }
-    if (missing == 0) return r.tracks;
-    var tracks: std.ArrayList(router.Track) = .empty;
-    try tracks.ensureTotalCapacity(alloc, r.tracks.len + missing);
-    try tracks.appendSlice(alloc, r.tracks);
-    for (r.rf_port_outcomes) |outcome| {
-        if (!outcome.success or outcome.physical.gate_removed or outcome.physical.samples.len < 2) continue;
-        for (outcome.physical.samples[1..], 1..) |sample, i| {
-            const before = outcome.physical.samples[i - 1];
-            if (std.math.hypot(sample.at[0] - before.at[0], sample.at[1] - before.at[1]) <= 1e-9) continue;
-            if (hasTrackChord(r.tracks, outcome.net, outcome.physical.layer, before.at, sample.at)) continue;
-            try tracks.append(alloc, .{
-                .x1 = before.at[0],
-                .y1 = before.at[1],
-                .x2 = sample.at[0],
-                .y2 = sample.at[1],
-                .layer = outcome.physical.layer,
-                .width = (before.width_mm + sample.width_mm) / 2,
-                .net = outcome.net,
-            });
-        }
-    }
-    return tracks.toOwnedSlice(alloc);
-}
-
-fn hasTrackChord(tracks: []const router.Track, net: i32, layer: u8, a: [2]f64, b: [2]f64) bool {
-    for (tracks) |track| {
-        if (track.net != net or track.layer != layer) continue;
-        const forward = sameTrackPoint(.{ track.x1, track.y1 }, a) and sameTrackPoint(.{ track.x2, track.y2 }, b);
-        const reverse = sameTrackPoint(.{ track.x1, track.y1 }, b) and sameTrackPoint(.{ track.x2, track.y2 }, a);
-        if (forward or reverse) return true;
-    }
-    return false;
-}
-
-fn sameTrackPoint(a: [2]f64, b: [2]f64) bool {
-    return @abs(a[0] - b[0]) <= 1e-7 and @abs(a[1] - b[1]) <= 1e-7;
+    return path_copper.tracks(alloc, r);
 }

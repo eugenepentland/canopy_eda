@@ -235,6 +235,7 @@ test {
     _ = @import("placement/pad_exit.zig");
     _ = @import("placement/pad_grid.zig");
     _ = @import("placement/pad_neck.zig");
+    _ = @import("placement/path_copper.zig");
     _ = @import("pad_neck_shape.zig");
     _ = @import("placement/pad_shape.zig");
     _ = @import("placement/perimeter_fence.zig");

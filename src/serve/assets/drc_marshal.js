@@ -35,6 +35,23 @@ function buildDrcInput(PCB, live) {
   var parts = live.parts || PCB.parts || [];
   var tracks = live.tracks || PCB.tracks || [];
   var vias = live.vias || PCB.vias || [];
+  var rfPaths = live.rf_paths || PCB.rf_paths || [];
+  function pathOwnsTrack(t) {
+    if (typeof window !== "undefined" && window.PCBRfOwnsTrack) return window.PCBRfOwnsTrack(t);
+    return rfPaths.some(function (p) {
+      return (p.track_ids || []).length && t.id && p.track_ids.indexOf(t.id) >= 0;
+    });
+  }
+  var physicalTracks = tracks.filter(function (t) { return !pathOwnsTrack(t); });
+  rfPaths.forEach(function (p) {
+    var samples = p.samples || [];
+    for (var i = 1; i < samples.length; i++) {
+      var a = samples[i - 1], b = samples[i];
+      if (Math.hypot(b[0] - a[0], b[1] - a[1]) <= 1e-9) continue;
+      physicalTracks.push({ x1: +a[0], y1: +a[1], x2: +b[0], y2: +b[1],
+        l: p.l || 0, w: (+a[2] + +b[2]) / 2, net: p.net || "" });
+    }
+  });
   // A drawn / live outline overrides the authored `(board …)` rect, mirroring
   // the server's /api/pcb-drc handling of the POST `outline` field. A rectangle
   // outline has no `pts`; a polygon (⬠ Poly) outline carries its exact vertices.
@@ -56,7 +73,7 @@ function buildDrcInput(PCB, live) {
     // Pass parts through: each already carries ref/x/y/rot/side/kind/hw/hh/
     // ccx/ccy/pads/silk in the wasm's schema; unknown extra keys are ignored.
     parts: parts,
-    tracks: tracks.reduce(function (out, t) {
+    tracks: physicalTracks.reduce(function (out, t) {
       var segs = (typeof window !== "undefined" && window.PCBTrackChords) ? window.PCBTrackChords(t) : [t];
       segs.forEach(function (s) { out.push({ x1: s.x1, y1: s.y1, x2: s.x2, y2: s.y2,
         l: t.l || 0, w: t.w, net: collapseNet(t.net) }); });
@@ -65,7 +82,7 @@ function buildDrcInput(PCB, live) {
     vias: vias.map(function (v) {
       return { x: v.x, y: v.y, d: v.d, drill: v.drill, net: collapseNet(v.net) };
     }),
-    rf_paths: (live.rf_paths || PCB.rf_paths || []).map(function (p) {
+    rf_paths: rfPaths.map(function (p) {
       return { net: collapseNet(p.net), l: p.l || 0, samples: p.samples || [] };
     }),
     netclasses: (PCB.netclasses || []).map(function (c) {

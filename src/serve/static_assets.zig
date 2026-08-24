@@ -658,11 +658,17 @@ test "PCB editor styles the two-trace fillet radius menu" {
 
 test "PCB editor automatically lowers manual pad tapers" {
     const markers = [_][]const u8{
-        "function drawTaperProfile", "function drawRfTaperAllowed", "pad_neck_width",                    "kind:\"rf\"",
-        "nominal*1.2",               "function drawTaperTracks",    "function drawApplyAutomaticTapers", "automatic pad tapers added",
-        "window.PCBDrawTaperTracks",
+        "function drawTaperProfile", "function drawRfTaperAllowed", "pad_neck_width",                      "kind:\"rf\"",
+        "nominal*1.2",               "function drawTaperTracks",    "function drawApplyAutomaticTapers",   "automatic pad tapers added",
+        "window.PCBDrawTaperTracks", "function drawTaperPath",      "track_ids:tracks.map(trackIdEnsure)",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "function drawReplaceLaid") == null);
+}
+
+test "PCB editor DRC lowers taper polygons to private probe tracks" {
+    for ([_][]const u8{ "var physicalTracks", "window.PCBRfOwnsTrack", "physicalTracks.push" }) |marker|
+        try std.testing.expect(std.mem.indexOf(u8, drc_marshal_js, marker) != null or std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
 test "browser saves keep the newest-edited layout first in memory and in the panel" {

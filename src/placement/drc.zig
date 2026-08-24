@@ -21,6 +21,7 @@ const keepout = @import("keepout.zig");
 const land_transit = @import("land_transit.zig");
 const pad_shape = @import("pad_shape.zig");
 const pad_neck = @import("pad_neck.zig");
+const path_copper = @import("path_copper.zig");
 const pose_math = @import("pose_math.zig");
 const outline = @import("outline.zig");
 const via_antipad = @import("via_antipad.zig");
@@ -607,9 +608,11 @@ fn checkImpl(
     var out: std.ArrayList(Violation) = .empty;
     const pads = try padBoxes(arena, placement);
     const vias = routed.vias;
-    // Smoothed RF bends already ride in `tracks` as chords, so every
-    // geometric rule below sees the curved copper without special cases.
-    const tracks = routed.tracks;
+    // Swept paths are the physical width authority. Saved editor handles stay
+    // compact; every capsule-based rule sees private profile chords instead.
+    const tracks = try path_copper.tracks(arena, routed);
+    var physical = routed;
+    physical.tracks = tracks;
     const rules = placement.rules.design;
     const clr = ClearanceResolver{ .base = clearance, .rules = placement.rules };
     // Widest clearance any pair can demand — the grid inflation, so no violating
@@ -640,7 +643,7 @@ fn checkImpl(
     try checkMaskSlivers(arena, &out, pads, &pad_grid, rules.mask.margin, rules.mask.web);
     try checkSilkOverPad(arena, &out, placement, pads, &pad_grid, rules.mask.margin);
     try checkTrackWidth(arena, &out, .{ .placement = placement, .routed = routed, .tracks = tracks, .min_width = rules.min_width });
-    try checkCopperTopology(arena, &out, placement, pads, routed, topology_zones);
+    try checkCopperTopology(arena, &out, placement, pads, physical, topology_zones);
     try checkLandTransit(c, placement, tracks, pads, &pad_grid);
     try checkGroundPadVias(arena, &out, placement, pads, vias, rules.pour.ground_via_max);
     try checkPadPad(c, pads, &pad_grid);
@@ -687,7 +690,18 @@ fn checkImpl(
 
 fn successfulPortFrame(routed: router.RouteResult, net: i32) bool {
     for (routed.rf_port_outcomes) |outcome| {
-        if (outcome.net == net and outcome.success and !outcome.physical.gate_removed) return true;
+        if (outcome.net != net or !outcome.success) continue;
+        if (outcome.physical.gate_removed) continue;
+        const samples = outcome.physical.samples;
+        for (samples[1..], 1..) |sample, i| {
+            const before = samples[i - 1];
+            const width = (before.width_mm + sample.width_mm) / 2;
+            for (routed.tracks) |track| {
+                if (track.net != net or track.layer != outcome.physical.layer) continue;
+                if (@abs(track.width - width) > eps) continue;
+                if (sameChord(track, before.at, sample.at)) return true;
+            }
+        }
     }
     return false;
 }
@@ -2923,6 +2937,12 @@ test "check finds the saved LO1_DRIVE hard junction when RouteResult bend metada
 
     // A successful port-frame outcome describes the smooth curve underlying
     // its chord tessellation, so the same geometric vertex is not a warning.
+    const smooth_samples = [_]@import("rf_path_solver.zig").Sample{
+        .{ .at = .{ tracks[0].x1, tracks[0].y1 }, .s_mm = 0, .curvature = 0, .width_mm = tracks[0].width },
+        .{ .at = .{ tracks[0].x2, tracks[0].y2 }, .s_mm = 1, .curvature = 0, .width_mm = tracks[0].width },
+        .{ .at = .{ tracks[1].x2, tracks[1].y2 }, .s_mm = 2, .curvature = 0, .width_mm = tracks[1].width },
+        .{ .at = .{ tracks[2].x2, tracks[2].y2 }, .s_mm = 3, .curvature = 0, .width_mm = tracks[2].width },
+    };
     const outcomes = [_]@import("rf_port_report.zig").Outcome{.{
         .net = 0,
         .chosen = 0,
@@ -2930,7 +2950,7 @@ test "check finds the saved LO1_DRIVE hard junction when RouteResult bend metada
         .success = true,
         .metrics = .{},
         .trials = &.{},
-        .physical = .{ .sample_count = tracks.len },
+        .physical = .{ .sample_count = smooth_samples.len, .samples = &smooth_samples },
     }};
     var synthesized = raw;
     synthesized.rf_port_outcomes = &outcomes;

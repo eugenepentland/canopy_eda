@@ -22,6 +22,7 @@ const optimizer = @import("placement/optimizer.zig");
 const outline = @import("placement/outline.zig");
 const router = @import("placement/router.zig");
 const rf_port_report = @import("placement/rf_port_report.zig");
+const path_copper = @import("placement/path_copper.zig");
 const geometry = @import("placement/geometry.zig");
 const pad_shape = @import("placement/pad_shape.zig");
 const pour = @import("placement/pour.zig");
@@ -476,12 +477,7 @@ fn writeRfRegions(g: *Gx, paths: []const rf_port_report.Outcome, layer: u8) Erro
 }
 
 fn rfOwnsTrack(paths: []const rf_port_report.Outcome, track: router.Track) bool {
-    for (paths) |path| {
-        if (!path.success or path.physical.gate_removed) continue;
-        if (path.net < 0 or path.physical.samples.len < 2) continue;
-        if (path.net == track.net and path.physical.layer == track.layer) return true;
-    }
-    return false;
+    return path_copper.ownsTrack(paths, track);
 }
 
 fn writeRfRun(g: *Gx, samples: []const @import("placement/rf_path_solver.zig").Sample) Error!void {
@@ -1875,6 +1871,8 @@ test "solver RF chords emit one swept copper region" {
     const tracks = [_]router.Track{
         .{ .x1 = 1, .y1 = 5, .x2 = 2, .y2 = 5, .layer = 0, .width = 0.15, .net = 0 },
         .{ .x1 = 2, .y1 = 5, .x2 = 4, .y2 = 5.5, .layer = 0, .width = 0.25, .net = 0 },
+        // Same net and layer, but not part of the path: this branch must remain.
+        .{ .x1 = 2, .y1 = 5, .x2 = 2, .y2 = 6, .layer = 0, .width = 0.4, .net = 0 },
     };
     const samples = [_]@import("placement/rf_path_solver.zig").Sample{
         .{ .at = .{ 1, 5 }, .s_mm = 0, .curvature = 0, .width_mm = 0.1 },
@@ -1897,6 +1895,7 @@ test "solver RF chords emit one swept copper region" {
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "G36*"));
     try testing.expect(std.mem.indexOf(u8, out, "C,0.150000*%") == null);
     try testing.expect(std.mem.indexOf(u8, out, "C,0.250000*%") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "C,0.400000*%") != null);
 }
 
 // spec: export_gerber - every copper Gerber file takes its name and X2 file function from the shared layer table row

@@ -734,6 +734,7 @@ test {
     _ = @import("placement/impedance_rules.zig");
     _ = @import("placement/via_antipad.zig");
     _ = @import("placement/trace_em.zig");
+    _ = @import("placement/path_copper.zig");
     _ = @import("placement/routability_lint.zig");
     _ = @import("placement/rough_routability.zig");
     _ = @import("placement/port_escape.zig");

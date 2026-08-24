@@ -2086,6 +2086,8 @@ src/placement/pair_pinch.zig::max_reports value
 src/placement/pair_pinch.zig::owner | fn owner(self: Report, side: Side) ?usize
 src/placement/pair_pinch.zig::record | fn record(self: *Log, report: Report) void
 src/placement/pair_pinch.zig::reports | fn reports(self: *const Log) []const Report
+src/placement/path_copper.zig::ownsTrack | fn ownsTrack(paths: []const rf_port_report.Outcome, track: anytype) bool
+src/placement/path_copper.zig::tracks | fn tracks(arena: std.mem.Allocator, routed: router.RouteResult) std.mem.Allocator.Error![]const router.Track
 src/placement/pdn_impedance.zig::Analysis struct_
 src/placement/pdn_impedance.zig::Capacitor struct_
 src/placement/pdn_impedance.zig::Peak struct_
