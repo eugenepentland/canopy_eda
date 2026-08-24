@@ -366,9 +366,22 @@ test "viewer JS wires the WASM DRC worker, server reconciliation, and the overri
 test "viewer keeps net-open findings off the board while retaining the DRC list" {
     const js = @embedFile("assets/pcb_board.js");
     try std.testing.expect(std.mem.indexOf(u8, js, "function drcOnBoard(d){return !!d&&d.k!==\"net open\";}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "forEach(function(d){if(!drcOnBoard(d))return;var cx=X(d.x)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "forEach(function(d){if(!drcMarkerVisible(d))return;var cx=X(d.x)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "function renderDrcList(){drcTabBadge();var lst=ensureDrcList();if(!lst)return;") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "var v=PCB.drc||[];") != null);
+}
+
+// spec: Web Server - DRC error and warning markers have independent persisted visibility controls in the PCB Appearance objects list
+test "viewer controls DRC error and warning marker visibility independently" {
+    const js = @embedFile("assets/pcb_board.js");
+    try std.testing.expect(std.mem.indexOf(u8, js, "drc_err:0,drc_warn:0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "else if(k===\"drc\"){hit=true;out.drc_err=val;out.drc_warn=val;}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "function drcMarkerVisible(d){return drcOnBoard(d)&&!!viewSt.vis[drcSevClass(d)===\"warn\"?\"drc_warn\":\"drc_err\"];") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "{key:\"drc_err\",name:\"DRC errors\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "{key:\"drc_warn\",name:\"DRC warnings\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(!drcMarkerVisible(d)||d.x==null)return;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(k===\"drc_err\"||k===\"drc_warn\")drcSync();") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "function drcSet(on){viewSt.vis.drc_err=on?1:0;viewSt.vis.drc_warn=on?1:0;viewSave();drcSync();}") != null);
 }
 
 // spec: Web Server - PCB drag/drop keeps full-board work and retained-overlay rebuilds off the interactive path
@@ -1096,7 +1109,7 @@ test "viewer JS rebases an active drag after live rotation" {
 // spec: Web Server - Placement guides remain independently controllable from the ratsnest
 test "viewer JS keeps placement guides independent with inspection defaults" {
     const js = @embedFile("assets/pcb_board.js");
-    try std.testing.expect(std.mem.indexOf(u8, js, "vis:{refdes:0,padnum:1,rats:0,drc:0,netcol:1,guides:0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "vis:{refdes:0,padnum:1,rats:0,drc_err:0,drc_warn:0,netcol:1,guides:0") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "guide?!showGuides:(!showRats||l.done)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "if(!viewSt.vis.guides)return") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "Placement guides") != null);
