@@ -3315,6 +3315,7 @@ src/serve/layout_sidecar_json.zig::parseSavedTexts | fn parseSavedTexts(alloc: s
 src/serve/layout_sidecar_json.zig::parseViaSpan | fn parseViaSpan(v: ?std.json.Value) ?[2]u8
 src/serve/layout_sidecar_json.zig::saveRejection | fn saveRejection(arena: std.mem.Allocator, rules: ?optimizer.BoardRules, entry: page.SavedLayout) ?[]const u8
 src/serve/layout_sidecar_json.zig::stackupLayerRules | fn stackupLayerRules(arena: std.mem.Allocator, block: *const env_mod.DesignBlock) std.mem.Allocator.Error!optimizer.BoardRules
+src/serve/layout_sidecar_json.zig::writeSavedZonesJson | fn writeSavedZonesJson(w: *std.Io.Writer, zones: []const page.SavedZone) std.Io.Writer.Error!void
 src/serve/library.zig::Datasheet struct_
 src/serve/library.zig::HandlerError value
 src/serve/library.zig::Kind enum_

@@ -268,6 +268,8 @@ test "the parametric board-outline sketch engine is registered with its editor c
     const Check = struct { bytes: []const u8, marker: []const u8 };
     const checks = [_]Check{
         .{ .bytes = pcb_outline_sketch_js, .marker = "root.PCBOutlineSketch = api" },
+        .{ .bytes = pcb_outline_sketch_js, .marker = "root.PCBShapeSketch = api" },
+        .{ .bytes = pcb_outline_sketch_js, .marker = "function ensurePolygon(o)" },
         .{ .bytes = pcb_outline_sketch_js, .marker = "function solve(s,opts)" },
         .{ .bytes = pcb_outline_sketch_js, .marker = "function fromSegments(segments)" },
         .{ .bytes = pcb_outline_sketch_js, .marker = "function pointDragAxis(s,id,x,y,origin)" },
@@ -295,6 +297,10 @@ test "the parametric board-outline sketch engine is registered with its editor c
         .{ .bytes = pcb_board_js, .marker = "OS.addLinePath(sk,pts)" },
         .{ .bytes = pcb_board_js, .marker = "outline is open — reconnect its loose endpoints before saving" },
         .{ .bytes = pcb_board_js, .marker = "polyCur=polySnap(mm(ev))" },
+        .{ .bytes = pcb_board_js, .marker = "Copper pour sketch" },
+        .{ .bytes = pcb_board_js, .marker = "function activeSketchPromote()" },
+        .{ .bytes = pcb_board_js, .marker = "OS.ensurePolygon(pourEdit)" },
+        .{ .bytes = pcb_board_js, .marker = "OS.fromPolygon(pts)" },
     };
     for (checks) |check| try std.testing.expect(std.mem.indexOf(u8, check.bytes, check.marker) != null);
 }
@@ -305,7 +311,7 @@ test "axis-constrained outline endpoint drags project the cursor onto the segmen
     try std.testing.expect(std.mem.indexOf(u8, pcb_outline_sketch_js, "if(axis===\"horizontal\")y=p.y;else if(axis===\"vertical\")x=p.x;") != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_outline_sketch_js, "var target=pointDragTarget(s,id,x,y,axis)") != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "vdrag.axis=OS.pointDragAxis") != null);
-    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "OS.movePoint(PCB.outline.sketch,vdrag.id,vgx,vgy,vdrag.axis)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "OS.movePoint(shape.sketch,vdrag.id,vgx,vgy,vdrag.axis)") != null);
 }
 
 fn registryHasAsset(name: []const u8) bool {
@@ -340,7 +346,7 @@ test "PCB board editor shows the Board outline properties on a plain outline edg
         "selRef=null;selGroup=null;",
         "pcbSideTab(\"side-props\");renderProps();markGrpRow();markSelPart();",
         "function outlineSelect(type,index,id,ev)",
-        "outlineSketchPanelSync();showOutlineProps();drawBoardRect();",
+        "outlineSketchPanelSync();if(!activeSketchIsPour())showOutlineProps();drawBoardRect();",
         // Wired into both outline-gesture releases: a no-move vertex press…
         "else outlineSelect(\"point\",vd.i,vd.id,ev);",
         // …and a no-move edge press.
@@ -1083,7 +1089,7 @@ test "PCB Appearance panel splits real layers from feature objects and nets" {
         .{ .marker = "return k===\"filt\"?undefined:v" },
         .{ .marker = "Legacy persisted filters are intentionally" },
         .{ .marker = "if(outlineOnlyFilter())directText=-1;" },
-        .{ .marker = "if(outlineMode||outlineOnlyFilter())drawOutlineSketchSelection" },
+        .{ .marker = "if(!activeSketchIsPour()&&(outlineMode||outlineOnlyFilter()))drawOutlineSketchSelection" },
         // Pad-number labels became a real toggle rather than an unconditional pass.
         .{ .marker = "if(PHYSICAL_REVIEW||!viewSt.vis.padnum||k<1.15||gestureBusy())return;" },
         // The old split-brain wiring is gone with the panels it served.

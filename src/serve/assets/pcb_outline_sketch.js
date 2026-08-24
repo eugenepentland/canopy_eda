@@ -1,10 +1,14 @@
-// Parametric board-outline sketch kernel. Dependency-free and usable both in
-// the browser and from Node tests. Geometry stays in world millimetres.
+// Parametric closed-shape sketch kernel. Board outlines and custom copper pours
+// use this same dependency-free engine; geometry stays in world millimetres.
 (function (root, factory) {
   "use strict";
   var api = factory();
   if (typeof module === "object" && module.exports) module.exports = api;
-  if (root) root.PCBOutlineSketch = api;
+  if (root) {
+    root.PCBShapeSketch = api;
+    // Compatibility for the DXF importer and older cached board scripts.
+    root.PCBOutlineSketch = api;
+  }
 })(typeof window !== "undefined" ? window : this, function () {
   "use strict";
 
@@ -103,6 +107,13 @@
     return s;
   }
   function ensure(o) { if(!o)return null;if(!validSketch(o.sketch))o.sketch=fromOutline(o);o.radii=null;syncOutline(o);return o.sketch; }
+
+  // Copper pours persist their fabrication fallback as `poly` rather than the
+  // outline model's `pts` + bbox. These adapters keep the authoring sketch
+  // generic while every fill/DRC/export consumer continues reading `poly`.
+  function fromPolygon(poly) { return fromOutline({pts:poly||[]}); }
+  function syncPolygon(o) { var g=o&&compile(o.sketch);if(!g)return null;o.poly=g.points;return g; }
+  function ensurePolygon(o) { if(!o)return null;if(!validSketch(o.sketch))o.sketch=fromPolygon(o.poly);syncPolygon(o);return o.sketch; }
 
   function compile(s,sag) {
     if(!validSketch(s))return null;sag=Math.max(0.0001,+sag||SAG);
@@ -274,7 +285,7 @@
       out.push({id:q.id,x:x,y:y,kind:q.kind,value:dimensionValue(s,q),driving:q.driving!==false});});return out;}
   function state(s){var copy=cp(s),result=solve(copy,{iterations:1});return result;}
 
-  return {VERSION:VERSION,clone:cp,valid:validSketch,closed:isClosed,normalize:normalize,fromSegments:fromSegments,fromOutline:fromOutline,ensure:ensure,compile:compile,syncOutline:syncOutline,
+  return {VERSION:VERSION,clone:cp,valid:validSketch,closed:isClosed,normalize:normalize,fromSegments:fromSegments,fromOutline:fromOutline,fromPolygon:fromPolygon,ensure:ensure,ensurePolygon:ensurePolygon,compile:compile,syncOutline:syncOutline,syncPolygon:syncPolygon,
     point:point,curve:curve,physicalCurves:physicalCurves,physicalPoints:physicalPoints,nextId:nextId,arcCircle:arcCircle,
     solve:solve,state:state,addConstraint:addConstraint,removeConstraint:removeConstraint,pointDragAxis:pointDragAxis,pointDragTarget:pointDragTarget,movePoint:movePoint,moveCurve:moveCurve,
     insertPoint:insertPoint,deletePoint:deletePoint,deleteSegment:deleteSegment,addLinePath:addLinePath,toArc:toArc,toLine:toLine,filletPoint:filletPoint,chamferPoint:chamferPoint,removeFillet:removeFillet,snapLinePoint:snapLinePoint,

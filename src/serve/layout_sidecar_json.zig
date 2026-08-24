@@ -12,6 +12,7 @@ const optimizer = @import("../placement/optimizer.zig");
 const outline_mod = @import("../placement/outline.zig");
 const outline_sketch = @import("../outline_sketch.zig");
 const outline_sketch_json = @import("outline_sketch_json.zig");
+const invalid_zone_sketch: outline_sketch.Sketch = .{ .points = &.{}, .curves = &.{} };
 const page = @import("pcb_layout_page.zig");
 const env_mod = @import("../eval/env.zig");
 const SavedRfPath = @typeInfo(@FieldType(page.SavedRoutes, "rf_paths")).pointer.child;
@@ -139,7 +140,14 @@ pub fn parseSavedRoutes(alloc: std.mem.Allocator, v: ?std.json.Value) ?page.Save
     if (obj.object.get("zones")) |zv| if (zv == .array) {
         for (zv.array.items) |it| {
             if (it != .object) continue;
-            const poly = parseOutlinePts(alloc, it.object.get("poly")) orelse continue;
+            var sketch: ?outline_sketch.Sketch = null;
+            const poly = if (it.object.get("sketch")) |sketch_value| blk: {
+                sketch = outline_sketch_json.parse(alloc, sketch_value) orelse invalid_zone_sketch;
+                const compiled = outline_sketch.compile(alloc, sketch.?, outline_sketch.default_sagitta_mm) catch {
+                    break :blk parseOutlinePts(alloc, it.object.get("poly")) orelse &.{};
+                };
+                break :blk compiled.poly;
+            } else parseOutlinePts(alloc, it.object.get("poly")) orelse continue;
             zones.append(alloc, .{
                 .net = jsonStrField(it.object.get("net")),
                 .layer = jsonStrField(it.object.get("layer")),
@@ -147,6 +155,7 @@ pub fn parseSavedRoutes(alloc: std.mem.Allocator, v: ?std.json.Value) ?page.Save
                 .filled = jsonFlag(it.object.get("filled")),
                 .keepout = jsonFlag(it.object.get("keepout")),
                 .priority = jsonInt(it.object.get("priority")),
+                .sketch = sketch,
             }) catch return null;
         }
     };
@@ -183,6 +192,36 @@ pub fn parseSavedRoutes(alloc: std.mem.Allocator, v: ?std.json.Value) ?page.Save
         .zones = zones.toOwnedSlice(alloc) catch return null,
         .rf_paths = rf_paths.toOwnedSlice(alloc) catch return null,
     };
+}
+
+/// Serialize zone records in the sidecar/embedded `PCB.zones` shape. Kept by
+/// the sidecar codec so adding authoring metadata does not grow the page/API
+/// module that merely embeds the result.
+pub fn writeSavedZonesJson(w: *std.Io.Writer, zones: []const page.SavedZone) std.Io.Writer.Error!void {
+    try w.writeAll("[");
+    for (zones, 0..) |zone, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"net\":");
+        try page.writeJsonStr(w, zone.net);
+        try w.writeAll(",\"layer\":");
+        try page.writeJsonStr(w, zone.layer);
+        try w.writeAll(",\"poly\":[");
+        for (zone.poly, 0..) |point, pi| {
+            if (pi > 0) try w.writeAll(",");
+            try w.print("[{d},{d}]", .{ point[0], point[1] });
+        }
+        try w.print("],\"filled\":{s},\"keepout\":{s}", .{
+            if (zone.filled) "true" else "false",
+            if (zone.keepout) "true" else "false",
+        });
+        if (zone.sketch) |sketch| {
+            try w.writeAll(",\"sketch\":");
+            try outline_sketch_json.write(w, sketch);
+        }
+        if (zone.priority != 0) try w.print(",\"priority\":{d}", .{zone.priority});
+        try w.writeByte('}');
+    }
+    try w.writeAll("]");
 }
 
 /// A via's optional `"s":[from,to]` LAYER SPAN → the two routable indices, or
@@ -273,6 +312,37 @@ test "saved outline prefers the versioned sketch and compiles its native arcs" {
     try std.testing.expect(got.derived.poly.?.len > got.pts.?.len);
     try std.testing.expectEqual(@as(f64, 10), got.w);
     try std.testing.expect(got.y < 0);
+}
+
+// spec: Web Server - Custom copper pours and board outlines use one versioned shape-sketch engine: a pour exposes the outline editor's rectangle/line creation, vertex and edge editing, dimensions, geometric constraints, arc/line conversion, fillet removal/addition, chamfer, offset, mirror, selection deletion and undo/redo; its native sketch round-trips while fill, routing, DRC and export consume the compiled polygon
+test "saved copper zone sketch compiles native arcs and rejects an open profile" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    const closed =
+        "{\"tracks\":[],\"vias\":[],\"zones\":[{\"net\":\"GND\",\"layer\":\"F.Cu\",\"filled\":true," ++
+        "\"poly\":[[99,99],[100,99],[100,100]],\"sketch\":{" ++
+        "\"version\":1,\"points\":[{\"id\":1,\"x\":0,\"y\":0},{\"id\":2,\"x\":10,\"y\":0},{\"id\":3,\"x\":10,\"y\":10},{\"id\":4,\"x\":0,\"y\":10}]," ++
+        "\"curves\":[{\"id\":11,\"kind\":\"arc\",\"a\":1,\"b\":2,\"mid\":[5,-2]},{\"id\":12,\"kind\":\"line\",\"a\":2,\"b\":3},{\"id\":13,\"kind\":\"line\",\"a\":3,\"b\":4},{\"id\":14,\"kind\":\"line\",\"a\":4,\"b\":1}],\"constraints\":[]}}]}";
+    const closed_value = try std.json.parseFromSliceLeaky(std.json.Value, alloc, closed, .{});
+    const routes = parseSavedRoutes(alloc, closed_value) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(routes.zones[0].sketch != null);
+    try std.testing.expect(routes.zones[0].poly.len > 4);
+    try std.testing.expect(routes.zones[0].poly[0][0] < 1);
+    var encoded: std.Io.Writer.Allocating = .init(alloc);
+    try encoded.writer.writeAll("{\"tracks\":[],\"vias\":[],\"zones\":");
+    try writeSavedZonesJson(&encoded.writer, routes.zones);
+    try encoded.writer.writeByte('}');
+    const encoded_value = try std.json.parseFromSliceLeaky(std.json.Value, alloc, encoded.written(), .{});
+    const round_trip = parseSavedRoutes(alloc, encoded_value) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(outline_sketch.CurveKind.arc, round_trip.zones[0].sketch.?.curves[0].kind);
+
+    const open = "{\"tracks\":[],\"vias\":[],\"zones\":[{\"net\":\"GND\",\"layer\":\"F.Cu\",\"poly\":[[0,0],[1,0],[0,1]],\"sketch\":{\"version\":1,\"points\":[{\"id\":1,\"x\":0,\"y\":0},{\"id\":2,\"x\":1,\"y\":0}],\"curves\":[{\"id\":3,\"kind\":\"line\",\"a\":1,\"b\":2}],\"constraints\":[]}}]}";
+    const open_value = try std.json.parseFromSliceLeaky(std.json.Value, alloc, open, .{});
+    const invalid_routes = parseSavedRoutes(alloc, open_value) orelse return error.TestUnexpectedResult;
+    try std.testing.expectError(error.OpenProfile, outline_sketch.compile(alloc, invalid_routes.zones[0].sketch.?, outline_sketch.default_sagitta_mm));
+    const rejection = saveRejection(alloc, null, tSavedWithZones(invalid_routes.zones)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, rejection, "invalid copper pour sketch") != null);
 }
 
 /// Parse visually edited backing polygons from a saved layout. Invalid
@@ -528,8 +598,11 @@ pub fn saveRejection(arena: std.mem.Allocator, rules: ?optimizer.BoardRules, ent
 /// layer. Null `rules` — the block did not resolve — checks nothing rather than
 /// judging against a stackup nobody could read.
 fn zoneLayerError(arena: std.mem.Allocator, rules: ?optimizer.BoardRules, routes: ?page.SavedRoutes) ?[]const u8 {
-    const lr = rules orelse return null;
     const r = routes orelse return null;
+    for (r.zones) |z| if (z.sketch) |sketch| {
+        _ = outline_sketch.compile(arena, sketch, outline_sketch.default_sagitta_mm) catch return "invalid copper pour sketch — repair its open, crossing, or malformed geometry";
+    };
+    const lr = rules orelse return null;
     for (r.zones) |z| {
         if (z.keepout or zoneLayerLegal(lr, z.layer)) continue;
         return std.fmt.allocPrint(

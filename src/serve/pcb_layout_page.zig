@@ -341,6 +341,10 @@ pub const SavedZone = struct {
     poly: []const [2]f64 = &.{},
     filled: bool = false,
     keepout: bool = false,
+    /// Native authoring geometry for an editor-created custom pour. `poly`
+    /// remains the compiled chord contour consumed by fill, routing, DRC and
+    /// exporters; imported/legacy zones omit this field.
+    sketch: ?outline_sketch.Sketch = null,
     /// KiCad-style fill priority (`(priority N)`). On one layer a pour outranks a
     /// DIFFERENT-net pour it overlaps when its priority is strictly greater: the
     /// higher pour fills the overlap and the lower recedes by the pour clearance
@@ -5020,7 +5024,6 @@ pub fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
         res.body = "invalid board outline sketch — repair its open, crossing, or malformed geometry";
         return;
     };
-
     var entry = SavedLayout{
         .name = nm,
         .kind = kind_manual,
@@ -6175,30 +6178,7 @@ fn writeSavedTextsJson(w: *std.Io.Writer, texts: []const font5x7.BoardText) std.
 }
 
 /// Serialize zone records in the sidecar/embedded `PCB.zones` shape.
-fn writeSavedZonesJson(w: *std.Io.Writer, zones: []const SavedZone) std.Io.Writer.Error!void {
-    try w.writeAll("[");
-    for (zones, 0..) |zone, i| {
-        if (i > 0) try w.writeAll(",");
-        try w.writeAll(net_object_open);
-        try writeJsonStr(w, zone.net);
-        try w.writeAll(",\"layer\":");
-        try writeJsonStr(w, zone.layer);
-        try w.writeAll(",\"poly\":[");
-        for (zone.poly, 0..) |point, pi| {
-            if (pi > 0) try w.writeAll(",");
-            try w.print(pt_pair_fmt, .{ point[0], point[1] });
-        }
-        try w.print("],\"filled\":{s},\"keepout\":{s}", .{
-            if (zone.filled) "true" else "false",
-            if (zone.keepout) "true" else "false",
-        });
-        // Priority rides along only when set, so priority-free boards keep their
-        // exact prior sidecar/blob bytes (no churn on the next save).
-        if (zone.priority != 0) try w.print(",\"priority\":{d}", .{zone.priority});
-        try w.writeByte('}');
-    }
-    try w.writeAll("]");
-}
+const writeSavedZonesJson = sidecar_json.writeSavedZonesJson;
 
 fn writeSavedRfPathsJson(w: *std.Io.Writer, saved_paths: []const SavedRfPath) std.Io.Writer.Error!void {
     try w.writeByte('[');
@@ -8167,10 +8147,9 @@ const tip_dxf = "Import a DXF file as the board outline (picks the same saved ov
     "(mm/inch selectable in the dialog), and preserves arcs as editable sketch curves. The chosen loop becomes the exact board " ++
     "edge the renderers draw, the board-edge DRC measures, and the " ++
     board_layers.edge_cuts ++ " Gerber traces. Saved with the layout (Save/Update).";
-const tip_pour_zone = "Custom copper pour (Z): click to place polygon " ++
-    "vertices (grid-snapped, Shift = free angle), click the first vertex / Enter / double-click to close, then pick a net " ++
-    "and layer. The region fills as copper around the current parts, tracks and vias (server-filled, redrawn by \u{27F3} Pours). " ++
-    "Right-click a pour to delete it. Saved with the layout (Save/Update); emitted on the copper Gerber.";
+const tip_pour_zone = "Custom copper pour (Z): click an existing pour for the full outline-style sketch palette (lines/arcs, dimensions, constraints, fillet, chamfer, offset and mirror), or click empty space to draw a new polygon. " ++
+    "Pick its net, layer and priority; the compiled profile fills around current copper (redrawn by \u{27F3} Pours). " ++
+    "Double-click an edge to add a vertex; right-click a vertex or pour to delete. Saved with the layout and emitted on the copper Gerber.";
 const tip_draw = "Route tracks (X): click a pad to start a trace, click to " ++
     "fix corners (45\u{b0}/grid snapped, / switches posture, A toggles tangent arcs, Shift = free angle), V drops a via and flips " ++
     "layer, click a same-net pad or double-click to finish, Backspace steps back, Esc ends. Right-click deletes the " ++

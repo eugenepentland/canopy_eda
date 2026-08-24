@@ -1,4 +1,4 @@
-//! JSON codec for the versioned parametric board-outline sketch.
+//! JSON codec for versioned board-outline and copper-pour shape sketches.
 //!
 //! This stays independent of the layout-page types so the sidecar parser and
 //! writer can share one strict schema without adding more code to the already
@@ -111,7 +111,7 @@ pub fn parse(alloc: std.mem.Allocator, v: ?std.json.Value) ?sketch_mod.Sketch {
     };
 }
 
-/// Write the compact sidecar representation of one parametric outline sketch.
+/// Write the compact sidecar representation of one parametric shape sketch.
 pub fn write(w: *std.Io.Writer, sketch: sketch_mod.Sketch) std.Io.Writer.Error!void {
     try w.print("{{\"version\":{d},\"points\":[", .{sketch.version});
     for (sketch.points, 0..) |point, i| {

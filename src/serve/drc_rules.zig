@@ -996,7 +996,7 @@ test "viewer JS wires freeform outline segment editing" {
     try std.testing.expect(std.mem.indexOf(u8, js, "function outlineVertexDelete(") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "function outlinePromote(") != null);
     // Clicking empty space cannot silently clear the outline.
-    try std.testing.expect(std.mem.indexOf(u8, js, "outline unchanged — drag to draw a new rectangle") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "activeSketchName()+\" unchanged — drag to draw a new rectangle\"") != null);
     // Live self-intersection validity (red draw + Save refusal) mirrors the server.
     try std.testing.expect(std.mem.indexOf(u8, js, "function polySelfIntersects(") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "if(outlineBad())") != null);

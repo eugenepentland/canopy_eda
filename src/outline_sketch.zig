@@ -1,7 +1,7 @@
-//! Parametric board-outline sketch model.
+//! Parametric closed-shape sketch model for board outlines and copper pours.
 //!
 //! The layout sidecar persists authoring intent (stable points/curves and
-//! constraints), while every existing physical-board consumer continues to
+//! constraints), while physical-board and copper-fill consumers continue to
 //! receive the compiled closed polygon plus exact three-point circular arcs.
 //! Keeping that boundary here prevents the browser editor, DRC, Gerber and 3D
 //! paths from growing competing interpretations of a sketch.
@@ -13,9 +13,9 @@ const outline = @import("placement/outline.zig");
 
 /// Sidecar schema version understood by this compiler.
 pub const current_version: u8 = 1;
-/// Defensive ceiling for points or curves in one interactive outline.
+/// Defensive ceiling for points or curves in one interactive shape.
 pub const max_entities: usize = 512;
-/// Defensive ceiling for persisted relationships in one outline.
+/// Defensive ceiling for persisted relationships in one shape.
 pub const max_constraints: usize = 1024;
 /// Maximum chord deviation used by physical polygon consumers.
 pub const default_sagitta_mm: f64 = 0.01;
@@ -28,7 +28,7 @@ pub const Point = struct {
     construction: bool = false,
 };
 
-/// Physical and construction curves supported by the outline sketch.
+/// Physical and construction curves supported by the shape sketch.
 pub const CurveKind = enum { line, arc };
 
 /// A curve references stable point IDs. Arc `mid` selects the exact directed
@@ -78,7 +78,7 @@ pub const Constraint = struct {
     mode: ConstraintMode = .driving,
 };
 
-/// Versioned parametric authoring state persisted with a layout outline.
+/// Versioned parametric authoring state persisted with a layout shape.
 pub const Sketch = struct {
     version: u8 = current_version,
     points: []const Point,
