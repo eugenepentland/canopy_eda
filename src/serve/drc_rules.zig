@@ -844,6 +844,20 @@ test "viewer JS refreshes sub-circuit seeds before every stamp" {
     try std.testing.expect(std.mem.indexOf(u8, js, "PCB.subroutes=j.subroutes||{}") != null);
 }
 
+// spec: Web Server - A live Stamp refresh keeps every stampable sub-circuit's palette action visible when the fresh grid placement uses different ref-des assignments from the open board
+test "sub-circuit palette tests refreshed seeds through stable origins" {
+    const js = @embedFile("assets/pcb_board.js");
+    const start = std.mem.indexOf(u8, js, "function subPanelRefresh()") orelse
+        return error.TestSubPanelRefreshMissing;
+    const tail = js[start..];
+    const end = std.mem.indexOf(u8, tail, "subPanelRefresh();})();") orelse
+        return error.TestSubPanelRefreshEndMissing;
+    const body = tail[0..end];
+
+    try std.testing.expect(std.mem.indexOf(u8, body, "stampSeedFor(g,P[i])") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "seeds[P[i].ref]") == null);
+}
+
 // spec: Web Server - A multi-part drag or rotate carries copper on nets private to the moving parts and leaves shared-net copper in place
 test "viewer JS carries private-net copper with a multi-part move and strands nothing shared" {
     const js = @embedFile("assets/pcb_board.js");

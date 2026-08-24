@@ -4090,9 +4090,13 @@ if(!RO&&PCB.shown_layout)setActiveLayout(PCB.shown_layout);
 function subPanelRefresh(){var box=document.getElementById("sub-panel");if(!box)return;
  // No heading: the pane's own tab names it.
  var names=Object.keys(GRPS).sort();var h='';
- var seeds=PCB.subseeds||{},sinfo=PCB.subseedinfo||{};
+ var sinfo=PCB.subseedinfo||{};
  names.forEach(function(g){
-  var hasSeed=GRPS[g].some(function(i){return !!seeds[P[i].ref];});
+  // A click-time refresh is keyed by stable module origin because its fresh
+  // grid ref-des can differ from the already-open board. Keep the button's
+  // visibility on that same bridge; otherwise the refresh that makes Stamp
+  // current can immediately hide Stamp for groups with renumbered refs.
+  var hasSeed=GRPS[g].some(function(i){return !!stampSeedFor(g,P[i]);});
   var inf=sinfo[g],tot=GRPS[g].length;
   var cov=(inf&&inf.n<tot)?'<span class="sub-cov" title="The module snapshot covers '+inf.n+' of this group’s '+tot+' parts — the rest keep their positions on Stamp.">'+inf.n+'/'+tot+'</span>':'';
   var mod=(PCB.submodules||{})[g];
