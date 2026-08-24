@@ -3738,6 +3738,7 @@ undoBtns();
 var DRAFT_KEY="pcb-draft:"+PCB.name+(PCB.sub?(":"+PCB.sub):"");
 var pcbDirty=false,draftTimer=null,draftIdle=null,autosaveTimer=null,dirtyGeneration=0;
 var autosaveQueued=false,saveQueue=Promise.resolve();
+var autosaveRetryMs=2000;
 function autosaveName(){return curLayout;}
 function markDirty(){if(RO)return;pcbDirty=true;dirtyGeneration++;scheduleDraft();scheduleAutosave();}
 function clearDirty(){pcbDirty=false;
@@ -3769,12 +3770,17 @@ function scheduleAutosave(ms){if(RO||!autosaveName())return;
  autosaveTimer=setTimeout(runAutosave,ms||2500);}
 function runAutosave(){autosaveTimer=null;if(!pcbDirty||autosaveQueued||anyUnplaced())return;
  if(draftGestureLive()){scheduleAutosave(500);return;}
- var nm=autosaveName();if(!nm)return;autosaveQueued=true;
+ var nm=autosaveName();if(!nm)return;var attemptGeneration=dirtyGeneration;autosaveQueued=true;
  persistLayout(nm,"autosaving",true).then(function(result){autosaveQueued=false;
   // A successful request only leaves pcbDirty set when the user made a newer
   // edit while its older payload was in flight. Coalesce that edit into one
   // follow-up save; failures/conflicts keep the draft without request-spamming.
-  if(result==="saved"&&pcbDirty)scheduleAutosave();});}
+  if(result==="saved"&&pcbDirty)scheduleAutosave();
+  else if(result==="retry"&&pcbDirty){var ms=autosaveRetryMs;autosaveRetryMs=Math.min(30000,autosaveRetryMs*2);scheduleAutosave(ms);}
+  // A newer edit may have repaired a hard validation failure while the large
+  // board's previous request was still being checked. Give that generation
+  // its own attempt without retry-spamming the unchanged invalid payload.
+  else if(result==="failed"&&pcbDirty&&dirtyGeneration!==attemptGeneration)scheduleAutosave();});}
 function draftPoses(){return P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,
  side:p.side||"top",locked:!!p.locked,origin:p.origin||""};});}
 // Persist the working state to localStorage. On a quota error (large boards)
@@ -3784,7 +3790,7 @@ function saveDraft(sync){if(RO)return;
   draftIdle=window.requestIdleCallback?window.requestIdleCallback(run,{timeout:1000}):setTimeout(run,0);return;}
  copperIdsEnsureAll();var ts=Math.floor(Date.now()/1000);
  try{localStorage.setItem(DRAFT_KEY,JSON.stringify({poses:draftPoses(),
-   tracks:PCB.tracks||[],vias:PCB.vias||[],rf_paths:PCB.rf_paths||[],texts:PCB.texts||[],outline:PCB.outline||null,fabrication_layers:PCB.fabrication_layers||[],
+   tracks:PCB.tracks||[],vias:PCB.vias||[],zones:PCB.zones||[],rf_paths:PCB.rf_paths||[],texts:PCB.texts||[],outline:PCB.outline||null,fabrication_layers:PCB.fabrication_layers||[],
    rev:PCB.rev||0,ts:ts}));}
  catch(e){
   try{localStorage.setItem(DRAFT_KEY,JSON.stringify({poses:draftPoses(),rev:PCB.rev||0,ts:ts,partial:true}));}
@@ -3801,6 +3807,9 @@ function applyDraft(d){recordUndo();
  applyAll();
  if(!d.partial){
   if((d.tracks&&d.tracks.length)||(d.vias&&d.vias.length)||(d.rf_paths&&d.rf_paths.length)){PCB.tracks=d.tracks||[];PCB.vias=d.vias||[];PCB.rf_paths=d.rf_paths||[];PCB.drc=[];drawRoute();drawDrc();}
+  // Old drafts predate zone capture; leave the server-rendered pours alone for
+  // those, while a new draft can deliberately restore an empty zone list.
+  if(d.zones){PCB.zones=d.zones;PCB.zone_fills=[];pourGeomDrop();}
   PCB.texts=(d.texts||[]).map(cloneText);
   PCB.outline=d.outline||null;PCB.fabrication_layers=JSON.parse(JSON.stringify(d.fabrication_layers||fabricationDefaults));outlineGeomDrop();drawBoardRect();}
  copperTouched();paintSoon();markDirty();scheduleDrc();}
@@ -4000,6 +4009,14 @@ function persistLayout(nm,verb,automatic){var task=saveQueue.then(function(){
  return persistLayoutNow(nm,verb,!!automatic);});
  saveQueue=task.then(function(result){return result;},function(){return "failed";});
  return saveQueue;}
+function saveResponse(r){return r.text().then(function(t){
+ var body=(t||"").trim();
+ if(r.status===409){var j={};try{j=body?JSON.parse(body):{};}catch(ignore){}
+  var conflict=new Error("conflict");conflict.conflict=true;if(typeof j.rev==="number")conflict.rev=j.rev;throw conflict;}
+ if(!r.ok){var detail=body&&!/^\s*</.test(body)?body:("save failed ("+r.status+")");
+  var httpError=new Error(detail.slice(0,240));httpError.status=r.status;
+  httpError.retryable=r.status===408||r.status===425||r.status===429||r.status>=500;throw httpError;}
+ try{return body?JSON.parse(body):{};}catch(ignore){var badReply=new Error("invalid save response");badReply.retryable=true;throw badReply;}});}
 // Persist the current poses to layout nm and update the panel IN PLACE — no
 // page reload, so the camera and view toggles you set while editing stay put.
 function persistLayoutNow(nm,verb,automatic){var msg=document.getElementById("pcb-savemsg");
@@ -4023,13 +4040,11 @@ function persistLayoutNow(nm,verb,automatic){var msg=document.getElementById("pc
  // (another window saved since) instead of silently clobbering it.
  return fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name)+subq(),{method:"POST",
    headers:{"Content-Type":"application/json"},body:JSON.stringify({name:nm,parts:parts,routes:routes,outline:PCB.outline||null,fabrication_layers:PCB.fabrication_layers||[],heatsink:PCB.heatsink||null,texts:texts,rev:PCB.rev||0})})
-  .then(function(r){
-    if(r.status===409){return r.json().catch(function(){return {};}).then(function(j){
-      var e=new Error("conflict");e.conflict=true;if(j&&typeof j.rev==="number")e.rev=j.rev;throw e;});}
-    if(!r.ok)throw 0;return r.json();})
+  .then(saveResponse)
   .then(function(j){
     // Adopt the server's bumped rev so the next Save from this window matches.
     if(j&&typeof j.rev==="number")PCB.rev=j.rev;
+    autosaveRetryMs=2000;
     var pmap={};parts.forEach(function(p){pmap[p.ref]={x:p.x,y:p.y,rot:p.rot,origin:p.origin||"",side:p.side,locked:p.locked};});
     var Ls=PCB.layouts||(PCB.layouts=[]),found=null,foundAt=-1;
     for(var i=0;i<Ls.length;i++)if(Ls[i].name===nm){found=Ls[i];foundAt=i;break;}
@@ -4064,8 +4079,10 @@ function persistLayoutNow(nm,verb,automatic){var msg=document.getElementById("pc
      // other window's version, then re-saves.
      if(msg){msg.style.color="#d29922";msg.textContent="layout changed in another window \u{2014} reload to continue";}
      return "conflict";}
-    if(msg){msg.style.color="#f85149";
-     msg.textContent=(automatic?"automatic save":(verb==="updating"?"update":"save"))+" failed";}
+    var retryable=!e||e.retryable||typeof e.status!=="number";
+    if(automatic&&retryable){if(msg){msg.style.color="#8b949e";msg.textContent="autosave interrupted \u{2014} retrying\u{2026}";}return "retry";}
+    if(msg){msg.style.color="#f85149";msg.textContent=e&&e.message?e.message:
+     ((verb==="updating"?"update":"save")+" failed");}
     return "failed";});}
 // Let external PCB-editor actions serialize behind autosave. Inbound KiCad
 // import uses this before preview and again before apply, so it cannot race an

@@ -5022,15 +5022,6 @@ pub fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
         };
     }
     const new_rev = disk_rev + 1;
-    // Snapshot the design-level sidecar this save will overwrite BEFORE touching
-    // it, so a bad Save/Update is recoverable from history. Best-effort. Sub
-    // circuits keep multi-snapshot in-file history already, so they're skipped.
-    if (sub == null) {
-        if (layoutsSidecar(req.arena, ctx.project_dir, name, null, layouts_ext)) |scp| {
-            _ = history.snapshotLayouts(req.arena, ctx.project_dir, name, scp) catch null;
-        }
-    }
-
     // Score the hand layout with the optimizer's own objective (comparable to
     // the auto baseline); the same pass hands back the block's layer rules.
     const checked = try scoreSavedLayout(ctx, req, name, sub, parts);
@@ -5060,6 +5051,15 @@ pub fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
         res.status = 400;
         res.body = msg;
         return;
+    }
+    // Snapshot only a request that has passed every rejection above and will
+    // actually overwrite the sidecar. Rejected idle-autosaves used to consume
+    // all 20 history slots with identical copies of the last good board.
+    // Best-effort; sub circuits keep multi-snapshot in-file history already.
+    if (sub == null) {
+        if (layoutsSidecar(req.arena, ctx.project_dir, name, null, layouts_ext)) |scp| {
+            _ = history.snapshotLayouts(req.arena, ctx.project_dir, name, scp) catch null;
+        }
     }
     const existing = readLayoutsSub(req.arena, ctx.project_dir, name, sub);
     var out: std.ArrayList(SavedLayout) = .empty;

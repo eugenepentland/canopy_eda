@@ -457,10 +457,44 @@ test "viewer autosaves dirty PCB layouts without clearing newer crash drafts" {
     try std.testing.expect(std.mem.indexOf(u8, js, "function scheduleAutosave(ms)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "if(draftGestureLive()){scheduleAutosave(500);return;}") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "requestIdleCallback(run,{timeout:1000})") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "zones:PCB.zones||[]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(d.zones){PCB.zones=d.zones") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "persistLayout(nm,\"autosaving\",true)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "if(dirtyGeneration===saveGeneration)clearDirty()") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "setActiveLayout(nm);syncLayoutUrl(nm);clearDirty()") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "saveQueue=task.then") != null);
+    // A deploy or dropped connection is transient: retain the crash draft and
+    // retry with bounded backoff instead of presenting a permanent failure.
+    try std.testing.expect(std.mem.indexOf(u8, js, "else if(result===\"retry\"&&pcbDirty)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "Math.min(30000,autosaveRetryMs*2)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "dirtyGeneration!==attemptGeneration") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "autosave interrupted \\u{2014} retrying") != null);
+    // A real 400 keeps its actionable server reason instead of collapsing all
+    // failures to the old, content-free "automatic save failed" message.
+    try std.testing.expect(std.mem.indexOf(u8, js, "function saveResponse(r)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "new Error(detail.slice(0,240))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "automatic save\")+\" failed") == null);
+}
+
+// Rejected saves must not consume recovery-history slots with identical copies
+// of the last good board. Validation therefore precedes the snapshot, which in
+// turn immediately precedes the sidecar write.
+test "layout save validates before snapshotting recovery history" {
+    const source = @embedFile("pcb_layout_page.zig");
+    const handler_start = std.mem.indexOf(u8, source, "pub fn saveNamedLayoutApi") orelse
+        return error.TestExpectedSaveHandler;
+    const handler_tail = source[handler_start..];
+    const handler_end = std.mem.indexOf(u8, handler_tail, "pub fn pcbLayoutHistoryApi") orelse
+        return error.TestExpectedHistoryHandler;
+    const handler = handler_tail[0..handler_end];
+    const validation = std.mem.indexOf(u8, handler, "sidecar_json.saveRejection") orelse
+        return error.TestExpectedSaveValidation;
+    const snapshot = std.mem.indexOf(u8, handler, "history.snapshotLayouts") orelse
+        return error.TestExpectedHistorySnapshot;
+    const write = std.mem.indexOf(u8, handler, "writeLayoutsSubRev") orelse
+        return error.TestExpectedLayoutWrite;
+    try std.testing.expect(validation < snapshot);
+    try std.testing.expect(snapshot < write);
 }
 
 // Autosave removes the manual Save click that used to defocus dock fields.
