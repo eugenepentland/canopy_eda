@@ -768,8 +768,8 @@ test "viewer JS panel moves carry per-entity copper and never shift one object t
     // poses + carried copper together — no caller translates copper by hand.
     try std.testing.expect(std.mem.indexOf(u8, js, "function moveEntities(ents,deltas,banded)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "commitMove(moveEntities(ents,deltas));") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "var cu=carriedCopper(e.idxs,e.g,false),t=[],v=[];") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "shiftCopper({t:t,v:v},d.dx,d.dy);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "var cu=carriedCopper(e.idxs,e.g,false),t=[],v=[],z=[];") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "shiftCopper({t:t,v:v,z:z},d.dx,d.dy);") != null);
     // An entity knows its group, so its stamped copper rides with it.
     try std.testing.expect(std.mem.indexOf(u8, js, "if(idxs.length)ents.push({idxs:idxs,g:key});") != null);
     // One claim set spans the operation: two entities cannot both shift an
@@ -810,7 +810,16 @@ test "viewer JS restamps a sub-circuit around its live side and rotation" {
     // outer copper layers so bottom-side parts do not retain top-side tracks.
     try std.testing.expect(std.mem.indexOf(u8, body, "stampPoseApply(xf,t.x1,t.y1)") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "stampPoseApply(xf,v.x,v.y)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "stampPoseApply(xf,+p[0],+p[1])") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "stampLayer(t.l||0,xf.back)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "stampZoneLayer(z.layer,xf.back)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "PCB.zones=(PCB.zones||[]).filter(function(z){return z.g!==g;});") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "filled:true,keepout:false,priority:+z.priority||0,g:g") != null);
+    // The ownership tag persists and makes later rigid translations/rotations
+    // carry the stamped pour with the rest of the module copper.
+    try std.testing.expect(std.mem.indexOf(u8, js, "z:(PCB.zones||[]).filter(function(z){return z.g===g;})") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "gdrag.cz.forEach(function(o){o.z.poly=o.poly.map") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "(cop.z||[]).forEach(function(z){z.poly=") != null);
 }
 
 // spec: Web Server - Stamp fetches the current module layout when clicked, so a sub-circuit edit in another tab applies without reloading a board and without discarding its unsaved work
@@ -951,6 +960,7 @@ test "viewer JS selects rigid sub-circuits before their components and preserves
     try std.testing.expect(std.mem.indexOf(u8, rotate_body, "var cop=cu||(keepG?grpCopper(keepG):null)") != null);
     try std.testing.expect(std.mem.indexOf(u8, rotate_body, "cop.t.forEach") != null);
     try std.testing.expect(std.mem.indexOf(u8, rotate_body, "cop.v.forEach") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rotate_body, "(cop.z||[]).forEach") != null);
     try std.testing.expect(std.mem.indexOf(u8, rotate_body, "clearRouteFor") == null);
     try std.testing.expect(std.mem.indexOf(u8, rotate_body, "scheduleDrc()") != null);
     // …and that list is tag-filtered, so untagged board routing stays put.

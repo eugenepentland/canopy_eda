@@ -117,8 +117,7 @@ fn importedSavedLayout(
         .net = zone.net,
         .layer = zone.layer,
         .poly = zone.poly,
-        .filled = zone.filled,
-        .keepout = zone.keepout,
+        .flags = .{ .filled = zone.filled, .keepout = zone.keepout },
         .priority = zone.priority,
     };
     const routes: ?page.SavedRoutes = if (tracks.len + vias.len + zones.len > 0)
@@ -193,7 +192,7 @@ test "writeImportedStarredLayout round-trips one starred layout and bumps rev" {
     try std.testing.expectEqualStrings("VDD", layouts[0].routes.?.vias[0].net);
     try std.testing.expectEqual(@as(usize, 2), layouts[0].routes.?.zones.len);
     try std.testing.expectEqualStrings("In1.Cu", layouts[0].routes.?.zones[0].layer);
-    try std.testing.expect(layouts[0].routes.?.zones[1].keepout);
+    try std.testing.expect(layouts[0].routes.?.zones[1].flags.keepout);
     try std.testing.expectEqual(@as(usize, 4), layouts[0].outline.?.pts.?.len);
     // Two user-save writes onto a rev-less sidecar leave rev at 2.
     try std.testing.expectEqual(@as(i64, 2), page.readLayoutRev(arena, project_dir, "demo", null));

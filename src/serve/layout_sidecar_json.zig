@@ -152,8 +152,11 @@ pub fn parseSavedRoutes(alloc: std.mem.Allocator, v: ?std.json.Value) ?page.Save
                 .net = jsonStrField(it.object.get("net")),
                 .layer = jsonStrField(it.object.get("layer")),
                 .poly = poly,
-                .filled = jsonFlag(it.object.get("filled")),
-                .keepout = jsonFlag(it.object.get("keepout")),
+                .flags = .{
+                    .filled = jsonFlag(it.object.get("filled")),
+                    .keepout = jsonFlag(it.object.get("keepout")),
+                },
+                .g = jsonStrField(it.object.get("g")),
                 .priority = jsonInt(it.object.get("priority")),
                 .sketch = sketch,
             }) catch return null;
@@ -211,9 +214,13 @@ pub fn writeSavedZonesJson(w: *std.Io.Writer, zones: []const page.SavedZone) std
             try w.print("[{d},{d}]", .{ point[0], point[1] });
         }
         try w.print("],\"filled\":{s},\"keepout\":{s}", .{
-            if (zone.filled) "true" else "false",
-            if (zone.keepout) "true" else "false",
+            if (zone.flags.filled) "true" else "false",
+            if (zone.flags.keepout) "true" else "false",
         });
+        if (zone.g.len > 0) {
+            try w.writeAll(",\"g\":");
+            try page.writeJsonStr(w, zone.g);
+        }
         if (zone.sketch) |sketch| {
             try w.writeAll(",\"sketch\":");
             try shape_sketch_json.write(w, sketch);
@@ -684,7 +691,7 @@ fn zoneLayerError(arena: std.mem.Allocator, rules: ?optimizer.BoardRules, routes
     };
     const lr = rules orelse return null;
     for (r.zones) |z| {
-        if (z.keepout or zoneLayerLegal(lr, z.layer)) continue;
+        if (z.flags.keepout or zoneLayerLegal(lr, z.layer)) continue;
         return std.fmt.allocPrint(
             arena,
             "zone layer \"{s}\" is not a copper layer on this board — routable layers: {s}",
@@ -712,18 +719,18 @@ test "layout save rejects an unknown zone layer and keeps imported copper spelli
     // Routable layers pass, and so do the copper spellings only an import
     // produces: the planed inner, KiCad's multi-layer names, any case.
     for ([_][]const u8{ "F.Cu", "B.Cu", "In2.Cu", "In1.Cu", "In3.Cu", "F&B.Cu", "*.Cu", "in2.cu" }) |ln| {
-        const ok = [_]page.SavedZone{.{ .net = "GND", .layer = ln, .poly = &poly, .filled = true }};
+        const ok = [_]page.SavedZone{.{ .net = "GND", .layer = ln, .poly = &poly, .flags = .{ .filled = true } }};
         try std.testing.expect(saveRejection(arena, rules, tSavedWithZones(&ok)) == null);
     }
     // Junk is refused, naming the layer and the legal set.
-    const bad = [_]page.SavedZone{.{ .net = "GND", .layer = "Top", .poly = &poly, .filled = true }};
+    const bad = [_]page.SavedZone{.{ .net = "GND", .layer = "Top", .poly = &poly, .flags = .{ .filled = true } }};
     const msg = saveRejection(arena, rules, tSavedWithZones(&bad)) orelse
         return error.TestExpectedZoneLayerRejection;
     try std.testing.expect(std.mem.indexOf(u8, msg, "\"Top\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, msg, "F.Cu, B.Cu, In2.Cu") != null);
     // A keepout conducts nothing and its layer is never read, so it is skipped;
     // and with no resolved block there is no stackup to judge against.
-    const ko = [_]page.SavedZone{.{ .layer = "Top", .poly = &poly, .keepout = true }};
+    const ko = [_]page.SavedZone{.{ .layer = "Top", .poly = &poly, .flags = .{ .keepout = true } }};
     try std.testing.expect(saveRejection(arena, rules, tSavedWithZones(&ko)) == null);
     try std.testing.expect(saveRejection(arena, null, tSavedWithZones(&bad)) == null);
 }

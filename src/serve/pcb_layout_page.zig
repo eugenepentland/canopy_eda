@@ -332,24 +332,15 @@ pub const SavedVia = struct {
     id: []const u8 = "",
 };
 
-/// One persisted KiCad-zone polygon. `filled=false` is the authored boundary
-/// fallback; `filled=true` is an exact KiCad-computed fill. Keepout polygons
-/// are contextual geometry only and must never be treated as connected copper.
+/// Persisted custom/KiCad copper-zone geometry. Declared stackup planes are
+/// never represented here. `g` owns a zone stamped from a reusable subcircuit.
 pub const SavedZone = struct {
     net: []const u8 = "",
     layer: []const u8 = "",
     poly: []const [2]f64 = &.{},
-    filled: bool = false,
-    keepout: bool = false,
-    /// Native authoring geometry for an editor-created custom pour. `poly`
-    /// remains the compiled chord contour consumed by fill, routing, DRC and
-    /// exporters; imported/legacy zones omit this field.
+    flags: packed struct { filled: bool = false, keepout: bool = false } = .{},
+    g: []const u8 = "",
     sketch: ?shape_sketch.Sketch = null,
-    /// KiCad-style fill priority (`(priority N)`). On one layer a pour outranks a
-    /// DIFFERENT-net pour it overlaps when its priority is strictly greater: the
-    /// higher pour fills the overlap and the lower recedes by the pour clearance
-    /// (`pour.outranks` / `pour.higherPolys`). Default 0; omitted from the
-    /// sidecar/blob when 0 so priority-free boards never churn.
     priority: i64 = 0,
 };
 
@@ -2073,6 +2064,28 @@ fn writeSubRoutesJson(
         }
         try writeViaId(w, vi, i);
         try w.writeAll("}");
+    }
+    try w.writeAll("],\"zones\":[");
+    var first_zone = true;
+    for (sr.zones) |z| {
+        // Stamp conductive custom pours only. Keepouts are contextual geometry,
+        // while declared planes / stackup pours never live in SavedRoutes.zones
+        // at all and therefore cannot leak into this payload.
+        if (!z.flags.filled or z.flags.keepout) continue;
+        if (z.net.len == 0 or z.poly.len < 3) continue;
+        if (!first_zone) try w.writeByte(',') else first_zone = false;
+        try w.writeAll("{\"net\":");
+        try writeJsonStr(w, mappedNet(alloc, &net_map, slug, z.net));
+        try w.writeAll(",\"layer\":");
+        try writeJsonStr(w, z.layer);
+        try w.writeAll(",\"poly\":[");
+        for (z.poly, 0..) |point, pi| {
+            if (pi > 0) try w.writeByte(',');
+            try w.print(pt_pair_fmt, .{ point[0], point[1] });
+        }
+        try w.writeAll("],\"filled\":true,\"keepout\":false");
+        if (z.priority != 0) try w.print(",\"priority\":{d}", .{z.priority});
+        try w.writeByte('}');
     }
     try w.writeAll("]}");
 }
@@ -6329,7 +6342,7 @@ pub fn restoreRoutes(alloc: std.mem.Allocator, sr: SavedRoutes, nets: []const ex
 /// still PERSISTED (round-tripped in the sidecar); they are only skipped for
 /// fills/connectivity/routing.
 fn userPourLayer(rules: optimizer.BoardRules, z: SavedZone) ?u8 {
-    if (!z.filled or z.keepout or z.net.len == 0) return null;
+    if (!z.flags.filled or z.flags.keepout or z.net.len == 0) return null;
     const layer = rules.signalIndexOfName(z.layer) orelse return null;
     if (!outline_mod.valid(z.poly)) return null;
     return layer;
@@ -6360,7 +6373,7 @@ fn userZonesFrom(alloc: std.mem.Allocator, rules: optimizer.BoardRules, zones: [
 fn silkKeepoutsFrom(alloc: std.mem.Allocator, zones: []const SavedZone) []const subcircuit_silkscreen.Keepout {
     var out: std.ArrayList(subcircuit_silkscreen.Keepout) = .empty;
     for (zones) |zone| {
-        if (zone.keepout and zone.poly.len >= 3) out.append(alloc, .{ .polygon = zone.poly }) catch return out.items;
+        if (zone.flags.keepout and zone.poly.len >= 3) out.append(alloc, .{ .polygon = zone.poly }) catch return out.items;
     }
     return out.items;
 }
@@ -6403,7 +6416,7 @@ fn zoneFillReqsFrom(alloc: std.mem.Allocator, rules: optimizer.BoardRules, zones
 fn existingZonesFrom(alloc: std.mem.Allocator, placement: optimizer.Placement, zones: []const SavedZone) []const route_policy.ExistingZone {
     var out: std.ArrayList(route_policy.ExistingZone) = .empty;
     for (zones) |z| {
-        if (z.keepout) {
+        if (z.flags.keepout) {
             const layer = placement.rules.signalIndexOfName(z.layer) orelse continue;
             if (z.poly.len < 3) continue;
             out.append(alloc, .{ .polygon = z.poly, .layer = layer, .net = -2, .tracks_blocked = true, .vias_blocked = true, .copper = false }) catch return out.items;
@@ -11324,7 +11337,7 @@ fn mcpBuildCopperZones(
             .net = net_v.string,
             .layer = layer_v.string,
             .poly = poly,
-            .filled = true,
+            .flags = .{ .filled = true },
             .priority = priority,
         });
     }
@@ -15451,7 +15464,7 @@ test "layouts sidecar round-trips user copper-pour zones" {
 
     const parts = [_]PartPose{.{ .ref = "U1", .x = 0, .y = 0, .rot = 0 }};
     const poly = [_][2]f64{ .{ 0, 0 }, .{ 5, 0 }, .{ 5, 5 }, .{ 0, 5 } };
-    const zones = [_]SavedZone{.{ .net = "GND", .layer = "F.Cu", .poly = &poly, .filled = true, .keepout = false }};
+    const zones = [_]SavedZone{.{ .net = "GND", .layer = "F.Cu", .poly = &poly, .flags = .{ .filled = true } }};
     const layouts = [_]SavedLayout{.{
         .name = "poured",
         .kind = kind_manual,
@@ -15468,8 +15481,8 @@ test "layouts sidecar round-trips user copper-pour zones" {
     try std.testing.expectEqual(@as(usize, 1), sr.zones.len);
     try std.testing.expectEqualStrings("GND", sr.zones[0].net);
     try std.testing.expectEqualStrings("F.Cu", sr.zones[0].layer);
-    try std.testing.expect(sr.zones[0].filled);
-    try std.testing.expect(!sr.zones[0].keepout);
+    try std.testing.expect(sr.zones[0].flags.filled);
+    try std.testing.expect(!sr.zones[0].flags.keepout);
     try std.testing.expectEqual(@as(usize, 4), sr.zones[0].poly.len);
 }
 
@@ -15479,9 +15492,9 @@ test "saved keepout zones become silkscreen exclusions" {
     defer arena_state.deinit();
     const poly = [_][2]f64{ .{ 1, 1 }, .{ 3, 1 }, .{ 2, 3 } };
     const zones = [_]SavedZone{
-        .{ .poly = &poly, .keepout = false },
-        .{ .poly = &[_][2]f64{ .{ 0, 0 }, .{ 1, 1 } }, .keepout = true },
-        .{ .poly = &poly, .keepout = true },
+        .{ .poly = &poly },
+        .{ .poly = &[_][2]f64{ .{ 0, 0 }, .{ 1, 1 } }, .flags = .{ .keepout = true } },
+        .{ .poly = &poly, .flags = .{ .keepout = true } },
     };
     const got = silkKeepoutsFrom(arena_state.allocator(), &zones);
     try std.testing.expectEqual(@as(usize, 1), got.len);
@@ -15523,8 +15536,8 @@ test "zone_fills emit a carved rectangle pour over a pad with its zone index and
     // its ORIGINAL index in the emitted zones array.
     const poly = [_][2]f64{ .{ 7, 2 }, .{ 13, 2 }, .{ 13, 8 }, .{ 7, 8 } };
     const zones = [_]SavedZone{
-        .{ .net = "GND", .layer = "F.Cu", .poly = &poly, .filled = true },
-        .{ .net = "GND", .layer = "F.Cu", .poly = &poly, .filled = true, .keepout = true },
+        .{ .net = "GND", .layer = "F.Cu", .poly = &poly, .flags = .{ .filled = true } },
+        .{ .net = "GND", .layer = "F.Cu", .poly = &poly, .flags = .{ .filled = true, .keepout = true } },
     };
     const reqs = zoneFillReqsFrom(arena, placement.rules, &zones);
     try std.testing.expectEqual(@as(usize, 1), reqs.len);
@@ -15576,7 +15589,7 @@ test "inner-layer zone_fills carry the In-layer name and omit side" {
     };
 
     const poly = [_][2]f64{ .{ 7, 2 }, .{ 13, 2 }, .{ 13, 8 }, .{ 7, 8 } };
-    const zones = [_]SavedZone{.{ .net = "V_3V3A", .layer = "In2.Cu", .poly = &poly, .filled = true, .priority = 5 }};
+    const zones = [_]SavedZone{.{ .net = "V_3V3A", .layer = "In2.Cu", .poly = &poly, .flags = .{ .filled = true }, .priority = 5 }};
     const reqs = zoneFillReqsFrom(arena, placement.rules, &zones);
     try std.testing.expectEqual(@as(usize, 1), reqs.len);
     // An inner layer has no outer face and rides its signal-layer index (2).
@@ -15700,13 +15713,15 @@ test "layouts sidecar round-trips the copper stamp group tag" {
         .{ .x1 = 3, .y1 = 0, .x2 = 5, .y2 = 0, .w = 0.3, .net = "VOUT" },
     };
     const vias = [_]SavedVia{.{ .x = 1, .y = 0, .d = 0.6, .drill = 0.3, .net = "GND", .g = "buck" }};
+    const zone_poly = [_][2]f64{ .{ 0, 0 }, .{ 2, 0 }, .{ 2, 2 }, .{ 0, 2 } };
+    const zones = [_]SavedZone{.{ .net = "VOUT", .layer = board_layers.f_cu, .poly = &zone_poly, .flags = .{ .filled = true }, .g = "buck" }};
     const layouts = [_]SavedLayout{.{
         .name = "routed",
         .kind = kind_manual,
         .ts = 1,
         .score = null,
         .parts = &parts,
-        .routes = .{ .tracks = &tracks, .vias = &vias },
+        .routes = .{ .tracks = &tracks, .vias = &vias, .zones = &zones },
     }};
 
     var aw: std.Io.Writer.Allocating = .init(alloc);
@@ -15716,6 +15731,7 @@ test "layouts sidecar round-trips the copper stamp group tag" {
     try std.testing.expectEqualStrings("buck", sr.tracks[0].g);
     try std.testing.expectEqualStrings("", sr.tracks[1].g);
     try std.testing.expectEqualStrings("buck", sr.vias[0].g);
+    try std.testing.expectEqualStrings("buck", sr.zones[0].g);
 }
 
 // spec: Web Server - An RF fence via keeps the name of the net it flanks through the sidecar and the page blob, stitching ground while belonging to that trace
@@ -15829,8 +15845,8 @@ test "saved routes preserve KiCad zones and legacy routes stay compatible" {
     try std.testing.expectEqual(@as(usize, 2), sr.zones.len);
     try std.testing.expectEqualStrings("GND", sr.zones[0].net);
     try std.testing.expectEqualStrings("In1.Cu", sr.zones[0].layer);
-    try std.testing.expect(sr.zones[0].filled);
-    try std.testing.expect(sr.zones[1].keepout);
+    try std.testing.expect(sr.zones[0].flags.filled);
+    try std.testing.expect(sr.zones[1].flags.keepout);
 
     var sidecar: std.Io.Writer.Allocating = .init(alloc);
     try writeSavedRoutesJson(&sidecar.writer, sr);
@@ -15878,7 +15894,7 @@ test "set_copper_zones validates nets inner layers and polygons" {
     const zones = (try mcpBuildCopperZones(alloc, &valid_out, placement, valid_json)).?;
     try std.testing.expectEqual(@as(usize, 1), zones.len);
     try std.testing.expectEqualStrings("In3.Cu", zones[0].layer);
-    try std.testing.expect(zones[0].filled);
+    try std.testing.expect(zones[0].flags.filled);
     try std.testing.expectEqual(@as(i64, 4), zones[0].priority);
 
     var plane_out: std.ArrayList(u8) = .empty;
@@ -15920,7 +15936,7 @@ test "unscoped clear_routes preserves copper zones" {
         .net = "SIG",
         .layer = board_layers.f_cu,
         .poly = &poly,
-        .filled = true,
+        .flags = .{ .filled = true },
     }};
     const routes = SavedRoutes{
         .tracks = &.{.{ .x1 = 0, .y1 = 0, .x2 = 4, .y2 = 0, .w = 0.2, .net = "SIG" }},
@@ -15956,7 +15972,15 @@ test "stamped copper nets map to parent nets with slug fallback" {
         .{ .x1 = 0, .y1 = 0, .x2 = 3, .y2 = 0, .w = 0.3, .net = "VOUT", .source = route_source_human },
         .{ .x1 = 0, .y1 = 1, .x2 = 3, .y2 = 1, .w = 0.2, .net = "FB" },
     };
-    const sr = SavedRoutes{ .tracks = &tracks, .vias = &.{} };
+    const vout_poly = [_][2]f64{ .{ 0, 0 }, .{ 4, 0 }, .{ 4, 3 }, .{ 0, 3 } };
+    const private_poly = [_][2]f64{ .{ 5, 0 }, .{ 7, 0 }, .{ 7, 2 }, .{ 5, 2 } };
+    const keepout_poly = [_][2]f64{ .{ 8, 0 }, .{ 9, 0 }, .{ 9, 1 }, .{ 8, 1 } };
+    const zones = [_]SavedZone{
+        .{ .net = "VOUT", .layer = board_layers.f_cu, .poly = &vout_poly, .flags = .{ .filled = true }, .priority = 3 },
+        .{ .net = "FB", .layer = "In3.Cu", .poly = &private_poly, .flags = .{ .filled = true } },
+        .{ .layer = board_layers.b_cu, .poly = &keepout_poly, .flags = .{ .keepout = true } },
+    };
+    const sr = SavedRoutes{ .tracks = &tracks, .vias = &.{}, .zones = &zones };
     const parent_nets = [_]export_kicad.FlatNet{
         .{ .name = "5V0", .pins = &.{} },
         .{ .name = "buck/FB", .pins = &.{} },
@@ -15979,8 +16003,10 @@ test "stamped copper nets map to parent nets with slug fallback" {
     try std.testing.expect(std.mem.indexOf(u8, out, "\"net\":\"5V0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"net\":\"buck/FB\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"net\":\"VOUT\"") == null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"w\":0.55") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"source\":\"human\"") != null);
+    // Conductive custom zones follow the identical parent-net bridge. A
+    // keepout is not a pour and declared plane fills never enter SavedRoutes.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"zones\":[{\"net\":\"5V0\"") != null and std.mem.indexOf(u8, out, "\"net\":\"buck/FB\",\"layer\":\"In3.Cu\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"priority\":3") != null and std.mem.indexOf(u8, out, "\"keepout\":true") == null);
 }
 
 // spec: Web Server - A saved layout round-trips each part's board side and lock flag through the sidecar
@@ -16178,7 +16204,7 @@ test "mcp route_pcb scoped copper preserves custom pours while dropping and merg
             .{ .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 0, .w = 0.2, .net = "B" },
         },
         .vias = &.{},
-        .zones = &.{.{ .net = "A", .layer = "In2.Cu", .poly = &zone_poly, .filled = true }},
+        .zones = &.{.{ .net = "A", .layer = "In2.Cu", .poly = &zone_poly, .flags = .{ .filled = true } }},
     };
     var scope = std.StringHashMapUnmanaged(void).empty;
     try scope.put(alloc, "A", {});

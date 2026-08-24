@@ -3985,8 +3985,8 @@ fn emitAuthoritativeZones(d: *DiffContext, w: anytype, first: *bool, layout: Kic
     }
     if (layout.routes) |routes| {
         for (routes.zones) |zone| {
-            if (!zone.filled) continue;
-            if (zone.keepout) continue;
+            if (!zone.flags.filled) continue;
+            if (zone.flags.keepout) continue;
             if (zone.net.len == 0) continue;
             if (zone.poly.len < 3) continue;
             if (!first.*) try w.writeAll(",");

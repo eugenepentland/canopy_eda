@@ -3139,7 +3139,9 @@ function commitMove(idxs){if(!idxs.length)return;
 // per-frame translate.
 function shiftCopper(cu,dx,dy){
  cu.t.forEach(function(t){t.x1+=dx;t.y1+=dy;if(t.xm!=null){t.xm+=dx;t.ym+=dy;}t.x2+=dx;t.y2+=dy;});
- cu.v.forEach(function(v){v.x+=dx;v.y+=dy;});}
+ cu.v.forEach(function(v){v.x+=dx;v.y+=dy;});
+ (cu.z||[]).forEach(function(z){(z.poly||[]).forEach(function(p){p[0]+=dx;p[1]+=dy;});});
+ if((cu.z||[]).length){pourGeomDrop();dragCacheDrop();markPoursStale();}}
 // Move entities, each by its OWN delta, carrying each one's copper (its stamped
 // group copper + the nets private to it). A band selection is deliberately not
 // consulted here: align/distribute reflows entities independently, so a banded
@@ -3152,13 +3154,14 @@ function shiftCopper(cu,dx,dy){
 function moveEntities(ents,deltas,banded){var claimed=new Set(),moved=[],ncu=0;
  var band=banded?selCuCopper():null;
  ents.forEach(function(e,k){var d=deltas[k];if(!d||(!d.dx&&!d.dy))return;
-  var cu=carriedCopper(e.idxs,e.g,false),t=[],v=[];
+  var cu=carriedCopper(e.idxs,e.g,false),t=[],v=[],z=[];
   if(band){band.t.forEach(function(o){if(!claimed.has(o)){claimed.add(o);t.push(o);}});
    band.v.forEach(function(o){if(!claimed.has(o)){claimed.add(o);v.push(o);}});}
   cu.t.forEach(function(o){if(!claimed.has(o)){claimed.add(o);t.push(o);}});
   cu.v.forEach(function(o){if(!claimed.has(o)){claimed.add(o);v.push(o);}});
+  cu.z.forEach(function(o){if(!claimed.has(o)){claimed.add(o);z.push(o);}});
   e.idxs.forEach(function(i){P[i].x+=d.dx;P[i].y+=d.dy;moved.push(i);});
-  shiftCopper({t:t,v:v},d.dx,d.dy);ncu+=t.length+v.length;});
+  shiftCopper({t:t,v:v,z:z},d.dx,d.dy);ncu+=t.length+v.length+z.length;});
  if(ncu)copperMoved();
  return moved;}
 function alignSel(mode){var ents=selEntities();if(ents.length<2)return;
@@ -3237,9 +3240,10 @@ document.addEventListener("keydown",function(ev){if(kbTyping(ev.target))return;
 // Copper on a net that also lands on a part staying put (a rail, GND, a bus
 // leaving the block) is left where it is: moving it would tear the far end.
 // Ratsnest + DRC then show exactly what still needs rerouting.
-function selCuCopper(){return {t:selCu.t.slice(),v:selCu.v.slice()};}
+function selCuCopper(){return {t:selCu.t.slice(),v:selCu.v.slice(),z:[]};}
 function grpCopper(g){return {t:(PCB.tracks||[]).filter(function(t){return t.g===g;}),
- v:(PCB.vias||[]).filter(function(v){return v.g===g;})};}
+ v:(PCB.vias||[]).filter(function(v){return v.g===g;}),
+ z:(PCB.zones||[]).filter(function(z){return z.g===g;})};}
 function privateNets(idxs){var mv={};idxs.forEach(function(i){mv[i]=1;});
  var all={},mine={};
  P.forEach(function(p,i){(p.pads||[]).forEach(function(pd){if(!pd.net)return;
@@ -3247,17 +3251,18 @@ function privateNets(idxs){var mv={};idxs.forEach(function(i){mv[i]=1;});
  var priv={},n=0;for(var k in mine)if(mine[k]===all[k]){priv[k]=1;n++;}
  return n?priv:null;}
 function privateCopper(idxs){var priv=idxs.length?privateNets(idxs):null;
- if(!priv)return {t:[],v:[]};
+ if(!priv)return {t:[],v:[],z:[]};
  return {t:(PCB.tracks||[]).filter(function(t){return t.net&&priv[t.net];}),
-  v:(PCB.vias||[]).filter(function(v){return v.net&&priv[v.net];})};}
+  v:(PCB.vias||[]).filter(function(v){return v.net&&priv[v.net];}),z:[]};}
 // Union of the applicable sources, deduped — one object never translates twice.
-function carriedCopper(idxs,g,banded){var seen=new Set(),t=[],v=[];
+function carriedCopper(idxs,g,banded){var seen=new Set(),t=[],v=[],z=[];
  var add=function(cu){cu.t.forEach(function(o){if(!seen.has(o)){seen.add(o);t.push(o);}});
-  cu.v.forEach(function(o){if(!seen.has(o)){seen.add(o);v.push(o);}});};
+  cu.v.forEach(function(o){if(!seen.has(o)){seen.add(o);v.push(o);}});
+  (cu.z||[]).forEach(function(o){if(!seen.has(o)){seen.add(o);z.push(o);}});};
  if(g)add(grpCopper(g));
  if(banded)add(selCuCopper());
  add(privateCopper(idxs));
- return {t:t,v:v};}
+ return {t:t,v:v,z:z};}
 // A gesture MOVED copper (as opposed to ripping it up): connectivity, pours and
 // inspected facts go stale like any copper edit — but copperTouched also drops
 // the copper selection, because a rip-up can free those objects. Here every one
@@ -3274,18 +3279,20 @@ function gdragStart(m,down,idxs){var src=idxs||sel;
  snap:snapAll(),g:g,
  ct:cu.t.map(function(t){return {t:t,x1:t.x1,y1:t.y1,xm:t.xm,ym:t.ym,x2:t.x2,y2:t.y2};}),
  cv:cu.v.map(function(v){return {v:v,x:v.x,y:v.y};}),
+ cz:cu.z.map(function(z){return {z:z,poly:(z.poly||[]).map(function(p){return [p[0],p[1]];})};}),
  orig:mv.map(function(k){return {i:k,x:P[k].x,y:P[k].y};})};}
 // The copper a live drag carries, as a plain {t,v} object list (a live R press
 // rotates it through the same rigid transform as the parts).
-function gdragCopper(d){return (d.ct.length||d.cv.length)?
- {t:d.ct.map(function(o){return o.t;}),v:d.cv.map(function(o){return o.v;})}:null;}
+function gdragCopper(d){return (d.ct.length||d.cv.length||d.cz.length)?
+ {t:d.ct.map(function(o){return o.t;}),v:d.cv.map(function(o){return o.v;}),z:d.cz.map(function(o){return o.z;})}:null;}
 // A live R press changes the drag's geometry in place. Rebase every drag
 // baseline at the current pointer so the next pointermove adds only the NEW
 // delta instead of restoring the stale pre-rotation positions/copper.
 function gdragRebase(d){d.sx=d.lx;d.sy=d.ly;d.active=true;d.adx=0;d.ady=0;
  d.orig=d.orig.map(function(o){return {i:o.i,x:P[o.i].x,y:P[o.i].y};});
  d.ct=d.ct.map(function(o){return {t:o.t,x1:o.t.x1,y1:o.t.y1,xm:o.t.xm,ym:o.t.ym,x2:o.t.x2,y2:o.t.y2};});
- d.cv=d.cv.map(function(o){return {v:o.v,x:o.v.x,y:o.v.y};});}
+ d.cv=d.cv.map(function(o){return {v:o.v,x:o.v.x,y:o.v.y};});
+ d.cz=d.cz.map(function(o){return {z:o.z,poly:(o.z.poly||[]).map(function(p){return [p[0],p[1]];})};});}
 // Rotate a rigid group 45° about its centroid (locked members stay put).
 // keepG (the group's slug, when the whole rigid group rotates) carries the
 // group's stamped copper through the same rigid transform, derived from one
@@ -3313,7 +3320,9 @@ function rotateGroup(idxs,sign,keepG,live,cu){
    var a=rr(t.x1,t.y1),b=rr(t.x2,t.y2),m=t.xm!=null?rr(t.xm,t.ym):null;
    t.x1=a.x;t.y1=a.y;if(m){t.xm=m.x;t.ym=m.y;}t.x2=b.x;t.y2=b.y;});
   cop.v.forEach(function(v){
-   var a=rr(v.x,v.y);v.x=a.x;v.y=a.y;});}
+   var a=rr(v.x,v.y);v.x=a.x;v.y=a.y;});
+  (cop.z||[]).forEach(function(z){z.poly=(z.poly||[]).map(function(p){var a=rr(p[0],p[1]);return [a.x,a.y];});});
+  if((cop.z||[]).length){pourGeomDrop();dragCacheDrop();markPoursStale();}}
  // Carried copper (group-tagged or selected) follows the rigid transform above.
  // Every other track stays where it was so rotating never destroys routing;
  // ratsnest + DRC expose any endpoints that now need reconnecting.
@@ -3367,6 +3376,8 @@ function stampPoseCompose(a,b){var t=stampPoseLin(a,b.x,b.y);return {x:t.x+a.x,y
 function stampPoseInverse(p){var q={x:0,y:0,rot:stampPoseNorm(p.back?p.rot:-p.rot),back:p.back};
  var t=stampPoseLin(q,p.x,p.y);q.x=-t.x;q.y=-t.y;return q;}
 function stampLayer(l,mirror){return !mirror?l:(l===0?1:(l===1?0:l));}
+function stampZoneLayer(l,mirror){if(!mirror)return l;
+ return l===LN.f_cu?LN.b_cu:(l===LN.b_cu?LN.f_cu:l);}
 // Refresh Stamp's small seed payload at click time. A module layout is commonly
 // edited in another tab while this board stays open with unsaved work, so the
 // page-load PCB.subseeds snapshot is only an initial palette preview, never the
@@ -3416,8 +3427,11 @@ function stampGroup(g){return refreshStampSeeds(g).then(function(){var idxs=GRPS
  clearRouteFor(idxs,g);
  PCB.tracks=(PCB.tracks||[]).filter(function(t){return t.g!==g;});
  PCB.vias=(PCB.vias||[]).filter(function(v){return v.g!==g;});
+ var oldZoneCount=(PCB.zones||[]).length;
+ PCB.zones=(PCB.zones||[]).filter(function(z){return z.g!==g;});
  var sr=(PCB.subroutes||{})[g];
- if(sr&&((sr.tracks||[]).length||(sr.vias||[]).length)){
+ var stampedZones=PCB.zones.length!==oldZoneCount;
+ if(sr&&((sr.tracks||[]).length||(sr.vias||[]).length||(sr.zones||[]).length)){
   var lockedNets={};idxs.forEach(function(i){if(!P[i].locked)return;
    (P[i].pads||[]).forEach(function(pd){if(pd.net)lockedNets[pd.net]=1;});});
   (sr.tracks||[]).forEach(function(t){if(t.net&&lockedNets[t.net])return;
@@ -3425,7 +3439,12 @@ function stampGroup(g){return refreshStampSeeds(g).then(function(){var idxs=GRPS
    PCB.tracks.push({x1:a.x,y1:a.y,xm:m&&m.x,ym:m&&m.y,x2:b.x,y2:b.y,l:stampLayer(t.l||0,xf.back),w:t.w||0.25,net:t.net||"",g:g,source:t.source,id:trackIdNew()});});
   (sr.vias||[]).forEach(function(v){if(v.net&&lockedNets[v.net])return;
    var a=stampPoseApply(xf,v.x,v.y);
-   PCB.vias.push({x:a.x,y:a.y,d:v.d||0.4,drill:v.drill||0,net:v.net||"",g:g,source:v.source,id:viaIdNew()});});}
+   PCB.vias.push({x:a.x,y:a.y,d:v.d||0.4,drill:v.drill||0,net:v.net||"",g:g,source:v.source,id:viaIdNew()});});
+  (sr.zones||[]).forEach(function(z){if(!z.net||z.keepout||lockedNets[z.net])return;
+   var poly=(z.poly||[]).map(function(p){var a=stampPoseApply(xf,+p[0],+p[1]);return [a.x,a.y];});
+   if(poly.length<3)return;PCB.zones.push({net:z.net,layer:stampZoneLayer(z.layer,xf.back),poly:poly,
+    filled:true,keepout:false,priority:+z.priority||0,g:g});stampedZones=true;});}
+ if(stampedZones)onZonesChanged();
  rats();drawClr();drawRoute();fetchScore();refreshUnplaced();subPanelRefresh();scheduleDrc();progressRefresh();
  }).catch(function(e){window.alert("Stamp failed: "+(e&&e.message?e.message:e));
  }).finally(function(){stampBusy(g,false);});}
@@ -3625,7 +3644,7 @@ function cloneText(t){return {x:t.x,y:t.y,rot:t.rot||0,side:t.side||"top",size:t
 function cloneTexts(){return (PCB.texts||[]).map(cloneText);}
 function cloneFabricationLayers(){return JSON.parse(JSON.stringify(PCB.fabrication_layers||[]));}
 function cloneHeatsink(){return PCB.heatsink?JSON.parse(JSON.stringify(PCB.heatsink)):null;}
-function cloneZones(){return (PCB.zones||[]).map(function(z){return {net:z.net||"",layer:z.layer||"",poly:(z.poly||[]).map(function(p){return [+p[0],+p[1]];}),filled:!!z.filled,keepout:!!z.keepout,priority:+z.priority||0,
+function cloneZones(){return (PCB.zones||[]).map(function(z){return {net:z.net||"",layer:z.layer||"",poly:(z.poly||[]).map(function(p){return [+p[0],+p[1]];}),filled:!!z.filled,keepout:!!z.keepout,priority:+z.priority||0,g:z.g,
  sketch:z.sketch?(OS?OS.clone(z.sketch):JSON.parse(JSON.stringify(z.sketch))):null};});}
 // Deep-copy the drawn board outline ({x,y,w,h,pts?}) so a snapshot holds its
 // own vertex array — an in-place vertex drag must not mutate a stored undo step.
@@ -3650,7 +3669,7 @@ function restoreSnap(s){s.poses.forEach(function(q,i){if(P[i]){P[i].x=q.x;P[i].y
  PCB.vias=(s.vias||[]).map(function(v){return {x:v.x,y:v.y,d:v.d,drill:v.drill,net:v.net||"",g:v.g,f:v.f,source:v.source,id:v.id||viaIdNew()};});
  PCB.rf_paths=(s.rf_paths||[]).map(function(p){return {net:p.net,l:p.l||0,samples:(p.samples||[]).map(function(q){return [+q[0],+q[1],+q[2]];})};});
  var editZoneIndex=typeof pourEdit!=="undefined"&&pourEdit?(PCB.zones||[]).indexOf(pourEdit):-1;
- PCB.zones=(s.zones||[]).map(function(z){return {net:z.net||"",layer:z.layer||"",poly:(z.poly||[]).map(function(p){return [+p[0],+p[1]];}),filled:!!z.filled,keepout:!!z.keepout,priority:+z.priority||0,
+ PCB.zones=(s.zones||[]).map(function(z){return {net:z.net||"",layer:z.layer||"",poly:(z.poly||[]).map(function(p){return [+p[0],+p[1]];}),filled:!!z.filled,keepout:!!z.keepout,priority:+z.priority||0,g:z.g,
   sketch:z.sketch?(OS?OS.clone(z.sketch):JSON.parse(JSON.stringify(z.sketch))):null};});
  if(typeof pourEdit!=="undefined")pourEdit=editZoneIndex>=0&&editZoneIndex<PCB.zones.length?PCB.zones[editZoneIndex]:null;
  pourGeomDrop();markPoursStale();
@@ -5400,7 +5419,9 @@ svg.addEventListener("pointermove",function(ev){
   gdrag.ct.forEach(function(o){o.t.x1=o.x1+gdx;o.t.y1=o.y1+gdy;
    if(o.xm!=null){o.t.xm=o.xm+gdx;o.t.ym=o.ym+gdy;}o.t.x2=o.x2+gdx;o.t.y2=o.y2+gdy;});
   gdrag.cv.forEach(function(o){o.v.x=o.x+gdx;o.v.y=o.y+gdy;});
+  gdrag.cz.forEach(function(o){o.z.poly=o.poly.map(function(p){return [p[0]+gdx,p[1]+gdy];});});
   if(gdrag.ct.length||gdrag.cv.length)gpuCuEdit(); // the carried copper translated in place
+  if(gdrag.cz.length){pourGeomDrop();dragCacheDrop();}
   ratsUpdate(gidx);paintSoon();refreshUnplaced();return;}
  if(typeof drag!=="undefined"&&drag){var dm=mm(ev),dg=snapG();
   if(!partDragReady(drag,dm))return;
