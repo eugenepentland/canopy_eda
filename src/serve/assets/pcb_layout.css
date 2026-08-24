@@ -431,19 +431,21 @@ svg.ruler-mode{cursor:crosshair}
 .sub-name{color:#e4e5e9;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 a.sub-name:hover,a.grp-name:hover{color:#6ba1e8;text-decoration:underline}
 .sub-n{color:#85868d;font-size:11px}
-.sub-rigid,.sub-stamp,.sub-save{background:#2c2d31;border:1px solid #3a3b40;border-radius:4px;color:#d6d7db;
+.sub-rigid,.sub-stamp,.sub-save,.sub-layout-pick{background:#2c2d31;border:1px solid #3a3b40;border-radius:4px;color:#d6d7db;
   font-size:11px;padding:1px 7px;cursor:pointer}
 .sub-rigid.on{color:#7ee787;border-color:#2ea04366}
-.sub-stamp:hover,.sub-save:hover,.sub-rigid:hover{border-color:#5a8fd6}
+.sub-stamp:hover,.sub-save:hover,.sub-rigid:hover,.sub-layout-pick:hover{border-color:#5a8fd6}
+.sub-layout-pick{max-width:112px;padding-right:2px}
 .sub-cov{color:#d8a03c;font-size:10.5px;font-weight:600;cursor:help}
 .sub-noseed{color:#85868d;font-size:11px;cursor:help;padding:1px 7px}
 /* Properties panel: the selected part's sub-circuit row (+ per-part Stamp). */
 .prop-grp{display:flex;align-items:center;gap:8px;padding:6px 14px;font-size:12px;flex-wrap:wrap}
 .grp-name{color:#7ee787;font-weight:600}
 .grp-n{color:#85868d;font-size:11px}
-.grp-stamp,.grp-save{background:#2c2d31;border:1px solid #3a3b40;border-radius:4px;color:#d6d7db;
+.grp-stamp,.grp-save,.grp-layout-pick{background:#2c2d31;border:1px solid #3a3b40;border-radius:4px;color:#d6d7db;
   font-size:11px;padding:1px 7px;cursor:pointer}
-.grp-stamp:hover,.grp-save:hover{border-color:#5a8fd6}
+.grp-stamp:hover,.grp-save:hover,.grp-layout-pick:hover{border-color:#5a8fd6}
+.grp-layout-pick{max-width:180px}
 .grp-noseed{color:#85868d;font-size:11px;cursor:help}
 .marquee{fill:rgba(90,143,214,.12);stroke:#5a8fd6;stroke-width:1;stroke-dasharray:4 3;vector-effect:non-scaling-stroke;pointer-events:none}
 .pad[data-net]{cursor:pointer}

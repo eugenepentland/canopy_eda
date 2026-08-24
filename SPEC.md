@@ -5989,6 +5989,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Stamped copper adopts destination net-class geometry
 - Restamping a sub-circuit preserves its anchor's board side and rigidly mirrors its parts and stamped copper onto that side
 - Stamp fetches the current module layout when clicked, so a sub-circuit edit in another tab applies without reloading a board and without discarding its unsaved work
+- Stamp defaults to the sub-circuit's starred layout, while its adjacent picker can stamp any compatible named saved layout without changing the star
 - Saving a rigid sub-circuit from its parent PCB is the inverse of Stamp: poses and group-owned copper return to module coordinates, including a board-side mirror
 - A live Stamp refresh keeps every stampable sub-circuit's palette action visible when the fresh grid placement uses different ref-des assignments from the open board
 - Selecting a rigid sub-circuit exposes its Stamp and layout-page actions directly in Properties

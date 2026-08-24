@@ -897,7 +897,7 @@ test "viewer JS panel moves carry per-entity copper and never shift one object t
 // spec: Web Server - Restamping a sub-circuit preserves its anchor's board side and rigidly mirrors its parts and stamped copper onto that side
 test "viewer JS restamps a sub-circuit around its live side and rotation" {
     const js = @embedFile("assets/pcb_board.js");
-    const start = std.mem.indexOf(u8, js, "function stampGroup(g)") orelse
+    const start = std.mem.indexOf(u8, js, "function stampGroup(g,layout)") orelse
         return error.TestStampGroupMissing;
     const tail = js[start..];
     const end = std.mem.indexOf(u8, tail, "stampGroupFn=stampGroup;") orelse
@@ -941,23 +941,37 @@ test "viewer JS restamps a sub-circuit around its live side and rotation" {
 // spec: Web Server - Stamp fetches the current module layout when clicked, so a sub-circuit edit in another tab applies without reloading a board and without discarding its unsaved work
 test "viewer JS refreshes sub-circuit seeds before every stamp" {
     const js = @embedFile("assets/pcb_board.js");
-    const start = std.mem.indexOf(u8, js, "function stampGroup(g)") orelse
+    const start = std.mem.indexOf(u8, js, "function stampGroup(g,layout)") orelse
         return error.TestStampGroupMissing;
     const tail = js[start..];
     const end = std.mem.indexOf(u8, tail, "stampGroupFn=stampGroup;") orelse
         return error.TestStampGroupEndMissing;
     const body = tail[0..end];
-    const refresh = std.mem.indexOf(u8, body, "refreshStampSeeds(g)") orelse
+    const refresh = std.mem.indexOf(u8, body, "refreshStampSeeds(g,layout)") orelse
         return error.TestStampRefreshMissing;
     const seeds = std.mem.indexOf(u8, body, "stampSeedFor(g,P[i])") orelse
         return error.TestStampStableSeedsMissing;
 
     try std.testing.expect(refresh < seeds);
-    try std.testing.expect(std.mem.indexOf(u8, js, "fetch(\"/api/pcb-subseeds/\"+encodeURIComponent(PCB.name),{cache:\"no-store\"})") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "var url=\"/api/pcb-subseeds/\"+encodeURIComponent(PCB.name)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "PCB.subseeds=j.subseeds||{}") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "PCB.subseedorigins=j.subseedorigins||{}") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "(p.origin&&stableSeeds[p.origin])||(PCB.subseeds||{})[p.ref]") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "PCB.subroutes=j.subroutes||{}") != null);
+}
+
+// spec: Web Server - Stamp defaults to the sub-circuit's starred layout, while its adjacent picker can stamp any compatible named saved layout without changing the star
+test "viewer JS offers named sub-circuit layouts beside the starred Stamp action" {
+    const js = @embedFile("assets/pcb_board.js");
+    for ([_][]const u8{
+        "Stamp a specific saved layout",
+        "Other layout…",
+        "data-layout-stamp=",
+        "function stampGroup(g,layout)",
+        "?group=\"+encodeURIComponent(g)+\"&layout=\"+encodeURIComponent(layout)",
+        "if(!layout)PCB.subseeddefaultinfo=PCB.subseedinfo",
+        "stampGroupFn(g,layout)",
+    }) |marker| try std.testing.expect(std.mem.indexOf(u8, js, marker) != null);
 }
 
 // spec: Web Server - A live Stamp refresh keeps every stampable sub-circuit's palette action visible when the fresh grid placement uses different ref-des assignments from the open board
@@ -966,7 +980,7 @@ test "sub-circuit palette tests refreshed seeds through stable origins" {
     const start = std.mem.indexOf(u8, js, "function subPanelRefresh()") orelse
         return error.TestSubPanelRefreshMissing;
     const tail = js[start..];
-    const end = std.mem.indexOf(u8, tail, "subPanelRefresh();})();") orelse
+    const end = std.mem.indexOf(u8, tail, "// Net hover (sidebar") orelse
         return error.TestSubPanelRefreshEndMissing;
     const body = tail[0..end];
 
@@ -986,9 +1000,9 @@ test "viewer JS shows stamp and layout link for a selected sub-circuit" {
         return error.TestSelectedSubcircuitPropsEndMissing;
     const body = tail[0..end];
     const markers = [_][]const u8{
-        "var ginf=(PCB.subseedinfo||{})[selGroup],ghref=subLayoutHref(selGroup);",
+        "var ginf=defaultStampInfo(selGroup),ghref=subLayoutHref(selGroup);",
         "data-grp-stamp=",
-        "Stamp module layout",
+        "stampLayoutPicker(selGroup,ginf",
         "Open sub-circuit layout",
         "if(gsb)gsb.addEventListener",
     };

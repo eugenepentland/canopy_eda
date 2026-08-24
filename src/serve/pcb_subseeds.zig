@@ -13,6 +13,7 @@ const optimizer = @import("../placement/optimizer.zig");
 const pose_math = @import("../placement/pose_math.zig");
 const board_layers = @import("../board_layers.zig");
 const export_kicad = @import("../export_kicad.zig");
+const flat_netlist = @import("../flat_netlist.zig");
 const review = @import("../review.zig");
 const numeric = @import("../numeric.zig");
 const clock = @import("../infra/clock.zig");
@@ -56,7 +57,9 @@ pub fn pcbSubSeedsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) p
         res.body = "Placement failed";
         return;
     };
-    const seeds = build(ctx.allocator, ctx.project_dir, name, block, placement);
+    const selected_group = pcb.queryOpt(req, "group");
+    const selected_layout = pcb.queryOpt(req, "layout");
+    const seeds = build(ctx.allocator, ctx.project_dir, name, block, placement, .{ .group = selected_group, .layout = selected_layout });
     var out: std.Io.Writer.Allocating = .init(ctx.allocator);
     try out.writer.print(
         "{{\"subseeds\":{s},\"subseedorigins\":{s},\"subseedinfo\":{s},\"submodules\":{s},\"subroutes\":{s},\"subsaveinfo\":{s}}}",
@@ -70,6 +73,7 @@ pub fn pcbSubSeedsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) p
 const CapturePose = pose_math.RigidPose;
 const CaptureTarget = struct { ref: []const u8, pose: CapturePose };
 const CaptureNetMap = struct { names: std.StringHashMapUnmanaged([]const u8) };
+const StampSelection = struct { group: ?[]const u8 = null, layout: ?[]const u8 = null };
 
 fn parseObject(req: *httpz.Request, res: *httpz.Response) ?std.json.Value {
     const body = pcb.bodyParam(req, res) orelse return null;
@@ -403,6 +407,7 @@ fn build(
     parent_name: []const u8,
     block: *const env.DesignBlock,
     placement: optimizer.Placement,
+    selection: StampSelection,
 ) SeedsJson {
     var poses: std.Io.Writer.Allocating = .init(alloc);
     var origin_poses: std.Io.Writer.Allocating = .init(alloc);
@@ -423,7 +428,11 @@ fn build(
 
     for (block.sub_blocks) |sb| {
         writeSaveInfo(&save_info.writer, alloc, project_dir, parent_name, sb, &save_first) catch return .{};
-        const seeds = pcb.subBlockPoseByOriginKey(alloc, project_dir, sb) orelse continue;
+        const want = if (selection.group != null and std.mem.eql(u8, selection.group.?, sb.name)) selection.layout else null;
+        const seeds = if (want) |layout|
+            exactNamedSeeds(alloc, project_dir, sb, layout) orelse continue
+        else
+            pcb.subBlockPoseByOriginKey(alloc, project_dir, sb) orelse continue;
         var group_origins: std.Io.Writer.Allocating = .init(alloc);
         group_origins.writer.writeByte('{') catch return .{};
         var group_origin_first = true;
@@ -454,7 +463,7 @@ fn build(
         pcb.writeJsonStr(&origin_poses.writer, sb.name) catch return .{};
         origin_poses.writer.writeByte(':') catch return .{};
         origin_poses.writer.writeAll(group_origins.written()) catch return .{};
-        writeInfo(&info.writer, sb.name, seeds, count, &info_first) catch return .{};
+        writeInfo(&info.writer, sb.name, seeds, count, pcb.readLayouts(alloc, project_dir, sb.source), &info_first) catch return .{};
         if (seeds.routes) |saved| {
             if (parent_pin_nets == null) parent_pin_nets = parentPinNetMap(alloc, placement);
             const pin_nets = if (parent_pin_nets) |*map| map else continue;
@@ -484,6 +493,70 @@ fn build(
         .routes = routes.written(),
         .save_info = save_info.written(),
     };
+}
+
+/// Resolve one exact saved module layout onto stable origin keys. This mirrors
+/// the default resolver's bridge, but deliberately has no ★/cache fallback: a
+/// picker choice must either produce the named arrangement or refuse to stamp.
+fn exactNamedSeeds(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    sub_block: env.SubBlock,
+    want: []const u8,
+) ?pcb.SubBlockSeeds {
+    const resolved = modules.resolveModuleBlock(alloc, project_dir, sub_block.source) orelse return null;
+    defer {
+        resolved.eval.deinit();
+        alloc.destroy(resolved.eval);
+    }
+    var flat: std.ArrayList(flat_netlist.FlatInstance) = .empty;
+    flat_netlist.collectInstances(alloc, resolved.block, "", &flat) catch return null;
+    var origin_of = std.StringHashMapUnmanaged([]const u8).empty;
+    for (flat.items) |instance| {
+        const origin = alloc.dupe(u8, instance.origin_key) catch return null;
+        origin_of.put(alloc, instance.ref_des, origin) catch return null;
+    }
+
+    var chosen: ?pcb.SavedLayout = null;
+    for (pcb.readLayouts(alloc, project_dir, sub_block.source)) |layout| {
+        if (std.mem.eql(u8, layout.name, want)) {
+            chosen = layout;
+            break;
+        }
+    }
+    const layout = chosen orelse return null;
+    var poses = std.StringHashMapUnmanaged(pcb.SyncPose).empty;
+    for (layout.parts) |part| {
+        const origin = origin_of.get(part.ref) orelse continue;
+        if (origin.len == 0) continue;
+        poses.put(alloc, origin, .{ .x = part.x, .y = part.y, .rot = part.rot, .side = part.side }) catch return null;
+    }
+    if (poses.count() == 0) return null;
+    return .{
+        .map = poses,
+        .layout_name = layout.name,
+        .starred = layout.default,
+        .routes = layout.routes,
+        .pin_nets = if (layout.routes != null) namedPinNets(alloc, resolved.block, &origin_of) else &.{},
+    };
+}
+
+fn namedPinNets(
+    alloc: std.mem.Allocator,
+    block: *const env.DesignBlock,
+    origin_of: *const std.StringHashMapUnmanaged([]const u8),
+) []const pcb.SubPinNet {
+    var nets: std.ArrayList(flat_netlist.FlatNet) = .empty;
+    flat_netlist.collectNets(alloc, block, "", &nets) catch return &.{};
+    var out: std.ArrayList(pcb.SubPinNet) = .empty;
+    for (nets.items) |net| for (net.pins) |pin| {
+        const origin = origin_of.get(pin.ref_des) orelse continue;
+        if (origin.len == 0) continue;
+        const net_name = alloc.dupe(u8, net.name) catch return &.{};
+        const pad = alloc.dupe(u8, pin.pin) catch return &.{};
+        out.append(alloc, .{ .net = net_name, .origin_key = origin, .pad = pad }) catch return &.{};
+    };
+    return out.toOwnedSlice(alloc) catch &.{};
 }
 
 fn reusableModuleSource(source: []const u8) bool {
@@ -521,6 +594,7 @@ fn writeInfo(
     group: []const u8,
     seeds: pcb.SubBlockSeeds,
     count: usize,
+    layouts: []const pcb.SavedLayout,
     first: *bool,
 ) std.Io.Writer.Error!void {
     if (!first.*) try w.writeByte(',');
@@ -534,6 +608,14 @@ fn writeInfo(
         try pcb.writeJsonStr(w, seeds.alt_name);
         try w.print(",\"alt_n\":{d}", .{seeds.alt_n});
     }
+    try w.writeAll(",\"layouts\":[");
+    for (layouts, 0..) |layout, i| {
+        if (i > 0) try w.writeByte(',');
+        try w.writeAll("{\"name\":");
+        try pcb.writeJsonStr(w, layout.name);
+        try w.print(",\"starred\":{}}}", .{layout.default});
+    }
+    try w.writeByte(']');
     try w.writeByte('}');
 }
 
@@ -698,12 +780,14 @@ test "subseed routes include only filled custom pours with parent net names" {
     try std.testing.expect(!stamped[0].object.get("keepout").?.bool);
 }
 
-fn testApiBody(alloc: std.mem.Allocator, project_dir: []const u8) ![]const u8 {
+fn testApiBody(alloc: std.mem.Allocator, project_dir: []const u8, group: ?[]const u8, layout: ?[]const u8) ![]const u8 {
     var state = serve_root.ServerState{};
     var server = Server{ .allocator = alloc, .project_dir = project_dir, .auth_dir = project_dir, .state = &state };
     var request = httpz.testing.init(.{});
     defer request.deinit();
     request.param("name", "board");
+    if (group) |value| request.query("group", value);
+    if (layout) |value| request.query("layout", value);
     try pcbSubSeedsApi(&server, request.req, request.res);
     try std.testing.expectEqual(@as(u16, 200), request.res.status);
     return alloc.dupe(u8, request.res.body);
@@ -773,7 +857,7 @@ test "subseed endpoint rereads a module layout saved after the board opened" {
         \\ {"ref":"C1","x":1,"y":1,"rot":0,"origin":"C_A"},
         \\ {"ref":"C2","x":2,"y":2,"rot":0,"origin":"C_B"}]}]}
     });
-    const before = try testApiBody(alloc, project_dir);
+    const before = try testApiBody(alloc, project_dir, null, null);
     try std.testing.expectEqual(@as(f64, 3), try seedXSum(alloc, before));
     try std.testing.expectEqual(@as(f64, 1), try originSeedX(alloc, before, "sm", "C_A"));
 
@@ -782,11 +866,34 @@ test "subseed endpoint rereads a module layout saved after the board opened" {
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = layout_path, .data =
         \\{"default":"hand","layouts":[{"name":"hand","default":true,"parts":[
         \\ {"ref":"C1","x":10,"y":1,"rot":0,"origin":"C_A"},
-        \\ {"ref":"C2","x":20,"y":2,"rot":0,"origin":"C_B"}]}]}
+        \\ {"ref":"C2","x":20,"y":2,"rot":0,"origin":"C_B"}]},
+        \\ {"name":"compact","parts":[
+        \\ {"ref":"C1","x":100,"y":1,"rot":0,"origin":"C_A"},
+        \\ {"ref":"C2","x":200,"y":2,"rot":0,"origin":"C_B"}],
+        \\ "routes":{"tracks":[{"x1":100,"y1":1,"x2":200,"y2":2,"l":0,"w":0.25,"net":"CTRL"}],"vias":[]}}]}
     });
-    const after = try testApiBody(alloc, project_dir);
+    const after = try testApiBody(alloc, project_dir, null, null);
     try std.testing.expectEqual(@as(f64, 30), try seedXSum(alloc, after));
     try std.testing.expectEqual(@as(f64, 10), try originSeedX(alloc, after, "sm", "C_A"));
+
+    // The quick action still resolves the star, while an exact picker request
+    // returns the named pose payload and advertises every compatible choice.
+    const compact = try testApiBody(alloc, project_dir, "sm", "compact");
+    try std.testing.expectEqual(@as(f64, 300), try seedXSum(alloc, compact));
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, compact, .{});
+    defer parsed.deinit();
+    const info = parsed.value.object.get("subseedinfo").?.object.get("sm").?.object;
+    try std.testing.expectEqualStrings("compact", info.get("layout").?.string);
+    try std.testing.expect(!info.get("starred").?.bool);
+    try std.testing.expectEqual(@as(usize, 2), info.get("layouts").?.array.items.len);
+    const tracks = parsed.value.object.get("subroutes").?.object.get("sm").?.object.get("tracks").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), tracks.len);
+    try std.testing.expectEqual(@as(i64, 100), tracks[0].object.get("x1").?.integer);
+
+    const missing = try testApiBody(alloc, project_dir, "sm", "not saved");
+    const missing_parsed = try std.json.parseFromSlice(std.json.Value, alloc, missing, .{});
+    defer missing_parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 0), missing_parsed.value.object.get("subseedorigins").?.object.count());
 }
 
 // spec: Web Server - Saving a rigid sub-circuit from its parent PCB is the inverse of Stamp: poses and group-owned copper return to module coordinates, including a board-side mirror
