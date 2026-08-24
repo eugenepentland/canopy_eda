@@ -263,6 +263,30 @@ fn writeRoutes(
         }
         try w.writeByte('}');
     }
+    try w.writeAll("],\"zones\":[");
+    var zone_first = true;
+    for (saved.zones) |zone| {
+        // SavedRoutes.zones contains only user-authored/imported zone geometry;
+        // declared stackup planes (including internal GND planes) live outside
+        // SavedRoutes and can therefore never enter the Stamp payload. Keepouts
+        // and unfilled sketches are not copper pours and are deliberately not
+        // copied either.
+        if (!zone.flags.filled or zone.flags.keepout) continue;
+        if (zone.net.len == 0 or zone.poly.len < 3) continue;
+        if (!zone_first) try w.writeByte(',');
+        zone_first = false;
+        const net = mappedNet(alloc, &names, group, zone.net);
+        try w.writeAll("{\"net\":");
+        try pcb.writeJsonStr(w, net);
+        try w.writeAll(",\"layer\":");
+        try pcb.writeJsonStr(w, zone.layer);
+        try w.writeAll(",\"poly\":[");
+        for (zone.poly, 0..) |point, i| {
+            if (i > 0) try w.writeByte(',');
+            try w.print("[{d},{d}]", .{ point[0], point[1] });
+        }
+        try w.print("],\"filled\":true,\"keepout\":false,\"priority\":{d}}}", .{zone.priority});
+    }
     try w.writeAll("]}");
 }
 
@@ -283,6 +307,42 @@ fn netRule(nets: []const export_kicad.FlatNet, rules: []const optimizer.NetRule,
         if (std.ascii.eqlIgnoreCase(net.name, name)) return rules[i];
     }
     return .{};
+}
+
+test "subseed routes include only filled custom pours with parent net names" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const pour_poly = [_][2]f64{ .{ 1, 2 }, .{ 4, 2 }, .{ 4, 6 }, .{ 1, 6 } };
+    const zones = [_]pcb.SavedZone{
+        .{ .net = "VIN", .layer = "F.Cu", .poly = &pour_poly, .flags = .{ .filled = true }, .priority = 3 },
+        .{ .net = "VIN", .layer = "F.Cu", .poly = &pour_poly, .flags = .{ .filled = true, .keepout = true } },
+        .{ .net = "VIN", .layer = "F.Cu", .poly = &pour_poly },
+    };
+    const saved = pcb.SavedRoutes{ .tracks = &.{}, .vias = &.{}, .zones = &zones };
+    const pin_nets = [_]pcb.SubPinNet{.{ .net = "VIN", .origin_key = "U1", .pad = "1" }};
+    var ref_of_origin = std.StringHashMapUnmanaged([]const u8).empty;
+    try ref_of_origin.put(alloc, "U1", "ldo/U24");
+    var parent_pin_nets = std.StringHashMapUnmanaged([]const u8).empty;
+    try parent_pin_nets.put(alloc, "ldo/U24\x001", "V_3P3");
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    try writeRoutes(&out.writer, alloc, "ldo", saved, .{
+        .pin_nets = &pin_nets,
+        .ref_of_origin = &ref_of_origin,
+        .parent_pin_nets = &parent_pin_nets,
+        .parent_nets = &.{},
+        .parent_rules = &.{},
+    });
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, out.written(), .{});
+    const stamped = parsed.value.object.get("zones").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), stamped.len);
+    try std.testing.expectEqualStrings("V_3P3", stamped[0].object.get("net").?.string);
+    try std.testing.expectEqualStrings("F.Cu", stamped[0].object.get("layer").?.string);
+    try std.testing.expectEqual(@as(usize, 4), stamped[0].object.get("poly").?.array.items.len);
+    try std.testing.expect(stamped[0].object.get("filled").?.bool);
+    try std.testing.expect(!stamped[0].object.get("keepout").?.bool);
 }
 
 fn testApiBody(alloc: std.mem.Allocator, project_dir: []const u8) ![]const u8 {
