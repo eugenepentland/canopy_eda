@@ -2986,6 +2986,7 @@ Public functions: compute, computeMasks, initMargin, planeConnect, segmentCompon
 - the configured minimum pour width erodes and regrows the fill, removing a connected neck narrower than the fabrication floor while restoring broad copper to its ordinary clearance boundary
 - the configured pour corner radius fillets emitted contour corners
 - a clipped user pour confines the fill to the drawn polygon, carves foreign copper, and keeps its region when no same-net seed lies inside
+- a clipped user pour skips foreign-copper stamp windows wholly outside the clip's boundary halo
 - a small drawn zone lands its copper edge on the clip boundary no matter how much board lies outside it
 - an inner-layer user pour carves a clipped fill, stamping only through-hole/via copper as foreign while SMD pads leave it intact
 - a pour outranks a different-net overlapping pour only with strictly greater priority on the same layer

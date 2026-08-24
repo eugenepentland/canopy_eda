@@ -1120,6 +1120,7 @@ fn stampForeign(
 ) void {
     const inner = spec.side == null;
     const base = baseGapFor(placement.rules.design, spec);
+    const active = foreignActiveBounds(g, spec.clip);
     for (placement.parts) |p| {
         for (p.pads) |pad| {
             if (!padOnLayer(p, pad, spec)) continue;
@@ -1128,9 +1129,9 @@ fn stampForeign(
             const reach = classPourClearance(placement, net_name, spec.net, base);
             const c = optimizer.worldPadCenter(&p, pad.x, pad.y);
             if (inner) {
-                if (pad.drill > 0) stampDisc(g, c[0], c[1], pad.drill / 2 + reach);
+                if (pad.drill > 0) stampDiscWithin(g, active, c[0], c[1], pad.drill / 2 + reach);
             } else {
-                stampPad(g, p, pad, reach);
+                stampPadWithin(g, active, p, pad, reach);
             }
         }
     }
@@ -1139,14 +1140,50 @@ fn stampForeign(
             if (t.layer != tl) continue;
             if (planeCarries(spec.net, netName(placement, t.net))) continue;
             const reach = trackPourClearance(placement, t, spec.net, base);
-            stampSeg(g, t.x1, t.y1, t.x2, t.y2, t.width / 2 + reach);
+            stampSegWithin(g, active, .{ t.x1, t.y1 }, .{ t.x2, t.y2 }, t.width / 2 + reach);
         }
     }
     for (copper.vias) |v| {
         if (planeCarries(spec.net, netName(placement, v.net))) continue;
         const reach = viaPlaneClearance(placement, v, spec.net, base);
-        stampDisc(g, v.x, v.y, v.dia / 2 + reach);
+        stampDiscWithin(g, active, v.x, v.y, v.dia / 2 + reach);
     }
+}
+
+/// The only clipped-fill cells whose obstacle margins can affect membership or
+/// a traced boundary. `clipMargin` evaluates the polygon exactly through this
+/// same four-cell halo; farther cells are already blocked by their distance to
+/// the clip box and cannot neighbour kept copper. A full-face pour returns null
+/// and retains the ordinary board-wide stamping path.
+fn foreignActiveBounds(g: Grid, clip: []const [2]f64) ?[4]f64 {
+    if (clip.len < 3) return null;
+    var box = polyBounds(clip);
+    const halo = 4 * g.pitch;
+    box[0] -= halo;
+    box[1] -= halo;
+    box[2] += halo;
+    box[3] += halo;
+    return box;
+}
+
+/// Does a feature's COMPLETE stamp window overlap the portion of a clipped
+/// fill that can survive? Bounds are inclusive so a just-touching clearance
+/// window is retained; false is therefore a conservative, geometry-safe cull.
+fn stampWindowActive(active: ?[4]f64, x0: f64, y0: f64, x1: f64, y1: f64) bool {
+    const box = active orelse return true;
+    return x1 >= box[0] and y1 >= box[1] and x0 <= box[2] and y0 <= box[3];
+}
+
+fn stampDiscWithin(g: Grid, active: ?[4]f64, cx: f64, cy: f64, rad: f64) void {
+    const win = rad + window_cells * g.pitch;
+    if (!stampWindowActive(active, cx - win, cy - win, cx + win, cy + win)) return;
+    stampDisc(g, cx, cy, rad);
+}
+
+fn stampSegWithin(g: Grid, active: ?[4]f64, a: [2]f64, b: [2]f64, rad: f64) void {
+    const win = rad + window_cells * g.pitch;
+    if (!stampWindowActive(active, @min(a[0], b[0]) - win, @min(a[1], b[1]) - win, @max(a[0], b[0]) + win, @max(a[1], b[1]) + win)) return;
+    stampSeg(g, a[0], a[1], b[0], b[1], rad);
 }
 
 /// Carve footprint-authored copper-pour keepouts on their outer face. The
@@ -1445,9 +1482,15 @@ fn segDelta(a: [2]f64, dir: [2]f64, len2: f64, p: [2]f64) [2]f64 {
 /// slack is the full window radius, so its box early-out stays exact everywhere
 /// the field feeds the iso-line interpolation.
 pub fn stampPad(g: Grid, p: optimizer.Part, pad: geometry.Pad, reach: f64) void {
+    stampPadWithin(g, null, p, pad, reach);
+}
+
+fn stampPadWithin(g: Grid, active: ?[4]f64, p: optimizer.Part, pad: geometry.Pad, reach: f64) void {
     var arena_buf: [4096]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
     const sh = pad_shape.worldShape(fba.allocator(), p, pad) catch return;
+    const win = reach + window_cells * g.pitch;
+    if (!stampWindowActive(active, sh.x0 - win, sh.y0 - win, sh.x1 + win, sh.y1 + win)) return;
     stampPadShape(g, sh, reach);
 }
 
@@ -2315,6 +2358,29 @@ test "user-zone clip confines the fill, carves a foreign pad, and keeps an unsee
     // confines the fill to the user's polygon.
     try testing.expect(fill.componentAt(2, 2) < 0);
     try testing.expect(fill.componentAt(18, 18) < 0);
+}
+
+// spec: placement/pour - a clipped user pour skips foreign-copper stamp windows wholly outside the clip's boundary halo
+test "clip active bounds retain touching stamp windows and reject distant ones" {
+    const clip = [_][2]f64{ .{ 5, 5 }, .{ 15, 5 }, .{ 15, 15 }, .{ 5, 15 } };
+    const g = Grid{
+        .minx = 0,
+        .miny = 0,
+        .pitch = 0.1,
+        .nx = 200,
+        .ny = 200,
+        .labels = &.{},
+        .margin = &.{},
+        .iso = 0,
+    };
+    const active = foreignActiveBounds(g, &clip);
+    // The active box is the clip plus the same four-cell halo `clipMargin`
+    // evaluates exactly: [4.6, 4.6]..[15.4, 15.4].
+    try testing.expect(stampWindowActive(active, 15.4, 7, 16, 8));
+    try testing.expect(!stampWindowActive(active, 15.400001, 7, 16, 8));
+    try testing.expect(!stampWindowActive(active, -20, -20, -10, -10));
+    // A declared/full-face pour has no clip cull at all.
+    try testing.expect(stampWindowActive(foreignActiveBounds(g, &.{}), -20, -20, -10, -10));
 }
 
 // spec: placement/pour - a small drawn zone lands its copper edge on the clip boundary no matter how much board lies outside it
