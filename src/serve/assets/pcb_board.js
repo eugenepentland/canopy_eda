@@ -4086,6 +4086,7 @@ function persistLayoutNow(nm,verb,automatic){var msg=document.getElementById("pc
  // 400 it anyway); the editing state is preserved so the user can fix it.
  if(outlineBad()){if(msg){msg.style.color="#f85149";var og=OS&&PCB.outline&&PCB.outline.sketch&&OS.compile(PCB.outline.sketch);
    msg.textContent=og&&!og.closed?"outline is open — reconnect its loose endpoints before saving":"outline self-intersects — fix it before saving";}return Promise.resolve("invalid");}
+ recoverOpenPourSketches();
  var pbad=pourSketchBad();if(pbad){if(msg)showPourIssue(msg,pbad,pbad.open?("Zone #"+(pbad.index+1)+" · "+(pbad.zone.net||"keepout")+" on "+(pbad.zone.layer||"")+" is open — click to repair"):("Zone #"+(pbad.index+1)+" · "+(pbad.zone.net||"keepout")+" on "+(pbad.zone.layer||"")+" is invalid — click to inspect"));return Promise.resolve("invalid");}
  if(backingBad()){if(msg){msg.style.color="#f85149";
    msg.textContent="backing region sketch is open, conflicted, self-intersecting, or has zero area — fix it before saving";}return Promise.resolve("invalid");}
@@ -4944,8 +4945,15 @@ function outlineBad(){var o=PCB.outline;if(!o)return false;
  if(!(o.w>=2&&o.h>=2))return true;
  if(OS&&o.sketch){var g=OS.compile(o.sketch);return !g||!g.closed||polySelfIntersects(g.points)||OS.state(o.sketch).conflict;}
  return !!(o.pts&&o.pts.length>=3&&polySelfIntersects(o.pts));}
-function pourSketchBad(){if(!OS)return null;var bad=null;(PCB.zones||[]).some(function(z,i){if(!z.sketch)return false;var g=OS.compile(z.sketch),st=OS.state(z.sketch);
- if(!g||!g.closed||st.conflict||polySelfIntersects(g.points)){bad={zone:z,index:i,open:!!(g&&!g.closed)};return true;}return false;});return bad;}
+function pourSketchBad(){if(!OS)return null;var bad=null;(PCB.zones||[]).some(function(z,i){if(!z.sketch)return false;var g=OS.compile(z.sketch),st=g?OS.state(z.sketch):null;
+ if(!g||!g.closed||(st&&st.conflict)||polySelfIntersects(g.points)){bad={zone:z,index:i,open:!!(g&&!g.closed)};return true;}return false;});return bad;}
+// Saving must not strand unrelated component/route edits behind stale hidden
+// authoring topology. Preserve the exact visible copper polygon: first close a
+// simple gap without losing intent, otherwise rebuild a clean line sketch.
+function recoverOpenPourSketches(){if(!OS)return 0;var count=0;(PCB.zones||[]).forEach(function(z){if(!z.sketch)return;var g=OS.compile(z.sketch),st=g?OS.state(z.sketch):null;if(g&&g.closed&&!(st&&st.conflict)&&!polySelfIntersects(g.points))return;
+ var replacement=g&&!g.closed?OS.clone(z.sketch):null;if(!replacement||!OS.closeProfile(replacement)){var pts=z.poly;if(!pts||pts.length<3||polySelfIntersects(pts))return;var area=0;
+  for(var i=0;i<pts.length;i++){var a=pts[i],b=pts[(i+1)%pts.length];area+=a[0]*b[1]-b[0]*a[1];}if(!Number.isFinite(area)||Math.abs(area)<1e-9)return;replacement=OS.fromPolygon(pts);}
+ var closed=OS.compile(replacement);if(!closed||!closed.closed||polySelfIntersects(closed.points))return;z.sketch=replacement;z.poly=closed.points;count++;});return count;}
 function outlineDrc(){var o=PCB.outline,g=OS&&o&&o.sketch&&OS.compile(o.sketch);if(!g||g.closed)scheduleDrc();}
 // Delete a vertex (right-click a handle) and every incident curve. The sketch
 // may remain open; no replacement edge is synthesized behind the user's back.

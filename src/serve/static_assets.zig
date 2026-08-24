@@ -305,6 +305,8 @@ test "the shared parametric shape sketch engine is registered with its editor co
         .{ .bytes = pcb_board_js, .marker = "OS.addLinePath(sk,pts)" },
         .{ .bytes = pcb_board_js, .marker = "outline is open — reconnect its loose endpoints before saving" },
         .{ .bytes = pcb_board_js, .marker = "function showPourIssue(msg,issue,detail)" },
+        .{ .bytes = pcb_board_js, .marker = "function recoverOpenPourSketches()" },
+        .{ .bytes = pcb_board_js, .marker = "recoverOpenPourSketches();" },
         .{ .bytes = pcb_board_js, .marker = "data-sk=\"close-profile\"" },
         .{ .bytes = pcb_board_js, .marker = "polyCur=polySnap(mm(ev))" },
         .{ .bytes = pcb_board_js, .marker = "copper keepout" },
@@ -316,6 +318,19 @@ test "the shared parametric shape sketch engine is registered with its editor co
         .{ .bytes = footprint_editor_js, .marker = "function shapeAction(action)" },
     };
     for (checks) |check| try std.testing.expect(std.mem.indexOf(u8, check.bytes, check.marker) != null);
+}
+
+test "layout save recovers open copper sketches before rejecting geometry" {
+    const recover_fn = std.mem.indexOf(u8, pcb_board_js, "function recoverOpenPourSketches()") orelse
+        return error.TestUnexpectedResult;
+    const save_fn = std.mem.indexOf(u8, pcb_board_js, "function persistLayoutNow(") orelse
+        return error.TestUnexpectedResult;
+    const recover_call = std.mem.indexOfPos(u8, pcb_board_js, save_fn, "recoverOpenPourSketches();") orelse
+        return error.TestUnexpectedResult;
+    const reject_call = std.mem.indexOfPos(u8, pcb_board_js, save_fn, "var pbad=pourSketchBad();") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(recover_call < reject_call);
+    try std.testing.expect(std.mem.indexOfPos(u8, pcb_board_js, recover_fn, "replacement=OS.fromPolygon(pts)") != null);
 }
 
 // spec: Web Server - While drawing a custom copper area, nearly horizontal or vertical segments snap onto that axis in both the live preview and committed polygon; holding Ctrl bypasses only this axis inference

@@ -29,13 +29,22 @@ fn parseZoneSketch(
 ) ParsedZoneSketch {
     const sketch = shape_sketch_json.parse(alloc, sketch_value) orelse invalid_zone_sketch;
     const compiled = shape_sketch.compile(alloc, sketch, shape_sketch.default_sagitta_mm) catch |err| {
-        const fallback = parseOutlinePts(alloc, poly_value) orelse &.{};
-        if (err != error.OpenProfile) return .{ .sketch = sketch, .poly = fallback };
-        const closed = (shape_sketch.closeSingleGap(alloc, sketch) catch null) orelse
+        const fallback_owned = parseOutlinePts(alloc, poly_value);
+        const fallback = fallback_owned orelse &.{};
+        if (err == error.OpenProfile) {
+            if (shape_sketch.closeSingleGap(alloc, sketch) catch null) |closed| {
+                const closed_compiled = shape_sketch.compile(alloc, closed, shape_sketch.default_sagitta_mm) catch
+                    return .{ .sketch = sketch, .poly = fallback };
+                if (fallback_owned) |owned| alloc.free(owned);
+                return .{ .sketch = closed, .poly = closed_compiled.poly };
+            }
+        }
+        const rebuilt = (shape_sketch.fromPolygon(alloc, fallback) catch null) orelse
             return .{ .sketch = sketch, .poly = fallback };
-        const closed_compiled = shape_sketch.compile(alloc, closed, shape_sketch.default_sagitta_mm) catch
+        const rebuilt_compiled = shape_sketch.compile(alloc, rebuilt, shape_sketch.default_sagitta_mm) catch
             return .{ .sketch = sketch, .poly = fallback };
-        return .{ .sketch = closed, .poly = closed_compiled.poly };
+        if (fallback_owned) |owned| alloc.free(owned);
+        return .{ .sketch = rebuilt, .poly = rebuilt_compiled.poly };
     };
     return .{ .sketch = sketch, .poly = compiled.poly };
 }
@@ -418,11 +427,54 @@ test "saved copper zone sketch compiles native arcs and rejects an open profile"
 
     const open = "{\"tracks\":[],\"vias\":[],\"zones\":[{\"net\":\"GND\",\"layer\":\"F.Cu\",\"poly\":[[0,0],[1,0],[0,1]],\"sketch\":{\"version\":1,\"points\":[{\"id\":1,\"x\":0,\"y\":0},{\"id\":2,\"x\":1,\"y\":0}],\"curves\":[{\"id\":3,\"kind\":\"line\",\"a\":1,\"b\":2}],\"constraints\":[]}}]}";
     const open_value = try std.json.parseFromSliceLeaky(std.json.Value, alloc, open, .{});
-    const invalid_routes = parseSavedRoutes(alloc, open_value) orelse return error.TestUnexpectedResult;
+    const normalized_routes = parseSavedRoutes(alloc, open_value) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 3), normalized_routes.zones[0].sketch.?.curves.len);
+    try std.testing.expect(saveRejection(alloc, null, tSavedWithZones(normalized_routes.zones)) == null);
+}
+
+// spec: Web Server - When a copper-area sketch cannot compile as a closed contour but its persisted visible polygon is valid, Update rebuilds a clean closed line sketch from that exact polygon and saves the remaining layout edits; crossing or zero-area visible polygons are still rejected
+test "saved copper zones rebuild complex OpenProfile topology from their visible polygon" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    const branched =
+        "{\"tracks\":[],\"vias\":[],\"zones\":[{\"net\":\"V_3V3A\",\"layer\":\"F.Cu\",\"poly\":[[0,0],[6,0],[6,4],[0,4]],\"sketch\":{" ++
+        "\"version\":1,\"points\":[{\"id\":1,\"x\":0,\"y\":0},{\"id\":2,\"x\":6,\"y\":0},{\"id\":3,\"x\":6,\"y\":4},{\"id\":4,\"x\":0,\"y\":4}]," ++
+        "\"curves\":[{\"id\":11,\"kind\":\"line\",\"a\":1,\"b\":2},{\"id\":12,\"kind\":\"line\",\"a\":2,\"b\":3},{\"id\":13,\"kind\":\"line\",\"a\":3,\"b\":4},{\"id\":14,\"kind\":\"line\",\"a\":4,\"b\":1},{\"id\":15,\"kind\":\"line\",\"a\":1,\"b\":3}],\"constraints\":[]}}]}";
+    const branched_value = try std.json.parseFromSliceLeaky(std.json.Value, alloc, branched, .{});
+    const repaired = parseSavedRoutes(alloc, branched_value) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 4), repaired.zones[0].sketch.?.curves.len);
+    try std.testing.expectEqual(@as(u32, shape_sketch.max_entities + 1), repaired.zones[0].sketch.?.curves[0].id);
+    try std.testing.expect(saveRejection(alloc, null, tSavedWithZones(repaired.zones)) == null);
+
+    const invalid =
+        "{\"tracks\":[],\"vias\":[],\"zones\":[{\"net\":\"GND\",\"layer\":\"F.Cu\",\"poly\":[[0,0],[4,4],[0,4],[4,0]],\"sketch\":{" ++
+        "\"version\":1,\"points\":[{\"id\":1,\"x\":0,\"y\":0},{\"id\":2,\"x\":1,\"y\":0}],\"curves\":[{\"id\":3,\"kind\":\"line\",\"a\":1,\"b\":2}],\"constraints\":[]}}]}";
+    const invalid_value = try std.json.parseFromSliceLeaky(std.json.Value, alloc, invalid, .{});
+    const invalid_routes = parseSavedRoutes(alloc, invalid_value) orelse return error.TestUnexpectedResult;
     try std.testing.expectError(error.OpenProfile, shape_sketch.compile(alloc, invalid_routes.zones[0].sketch.?, shape_sketch.default_sagitta_mm));
     const rejection = saveRejection(alloc, null, tSavedWithZones(invalid_routes.zones)) orelse return error.TestUnexpectedResult;
     try std.testing.expect(std.mem.indexOf(u8, rejection, "invalid custom copper-area sketch") != null);
     try std.testing.expect(std.mem.indexOf(u8, rejection, "zone #1 (GND on F.Cu): OpenProfile") != null);
+}
+
+test "saved copper zones discard other broken hidden authoring state" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    const source =
+        "{\"tracks\":[],\"vias\":[],\"zones\":[" ++
+        "{\"net\":\"A\",\"layer\":\"F.Cu\",\"poly\":[[0,0],[4,0],[4,3],[0,3]],\"sketch\":{\"version\":2,\"points\":[],\"curves\":[],\"constraints\":[]}}," ++
+        "{\"net\":\"B\",\"layer\":\"F.Cu\",\"poly\":[[5,0],[9,0],[9,3],[5,3]],\"sketch\":{\"version\":1,\"points\":[{\"id\":1,\"x\":5,\"y\":0},{\"id\":2,\"x\":9,\"y\":0},{\"id\":3,\"x\":9,\"y\":3},{\"id\":4,\"x\":5,\"y\":3}],\"curves\":[{\"id\":11,\"kind\":\"line\",\"a\":1,\"b\":2},{\"id\":11,\"kind\":\"line\",\"a\":2,\"b\":3},{\"id\":13,\"kind\":\"line\",\"a\":3,\"b\":4},{\"id\":14,\"kind\":\"line\",\"a\":4,\"b\":1}],\"constraints\":[]}}," ++
+        "{\"net\":\"C\",\"layer\":\"F.Cu\",\"poly\":[[10,0],[14,0],[14,3],[10,3]],\"sketch\":{\"version\":1,\"points\":[{\"id\":1,\"x\":10,\"y\":0},{\"id\":2,\"x\":14,\"y\":3},{\"id\":3,\"x\":10,\"y\":3},{\"id\":4,\"x\":14,\"y\":0}],\"curves\":[{\"id\":11,\"kind\":\"line\",\"a\":1,\"b\":2},{\"id\":12,\"kind\":\"line\",\"a\":2,\"b\":3},{\"id\":13,\"kind\":\"line\",\"a\":3,\"b\":4},{\"id\":14,\"kind\":\"line\",\"a\":4,\"b\":1}],\"constraints\":[]}}]}";
+    const value = try std.json.parseFromSliceLeaky(std.json.Value, alloc, source, .{});
+    const repaired = parseSavedRoutes(alloc, value) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 3), repaired.zones.len);
+    for (repaired.zones) |zone| {
+        try std.testing.expectEqual(@as(usize, 4), zone.sketch.?.curves.len);
+        try std.testing.expectEqual(@as(u32, shape_sketch.max_entities + 1), zone.sketch.?.curves[0].id);
+    }
+    try std.testing.expect(saveRejection(alloc, null, tSavedWithZones(repaired.zones)) == null);
 }
 
 /// Parse visually edited backing polygons from a saved layout. Invalid

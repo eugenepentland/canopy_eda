@@ -3925,6 +3925,7 @@ src/shape_sketch.zig::closeSingleGap | fn closeSingleGap(alloc: std.mem.Allocato
 src/shape_sketch.zig::compile | fn compile(alloc: std.mem.Allocator, sketch: Sketch, max_sagitta: f64) CompileError!Compiled
 src/shape_sketch.zig::current_version value
 src/shape_sketch.zig::default_sagitta_mm value
+src/shape_sketch.zig::fromPolygon | fn fromPolygon(alloc: std.mem.Allocator, poly: []const [2]f64) CompileError!?Sketch
 src/shape_sketch.zig::max_constraints value
 src/shape_sketch.zig::max_entities value
 src/silk_font.zig::Stroke struct_

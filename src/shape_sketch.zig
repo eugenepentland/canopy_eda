@@ -366,7 +366,16 @@ pub fn closeSingleGap(alloc: std.mem.Allocator, sketch: Sketch) CompileError!?Sk
     var endpoints: [2]u32 = undefined;
     var endpoint_count: usize = 0;
     for (degrees, 0..) |degree, point_i| switch (degree) {
-        0, 2 => {},
+        0 => {
+            const point = sketch.points[point_i];
+            var construction_only = point.construction;
+            for (sketch.curves) |curve| if (curve.construction and (curve.a == point.id or curve.b == point.id)) {
+                construction_only = true;
+                break;
+            };
+            if (!construction_only) return null;
+        },
+        2 => {},
         1 => {
             if (endpoint_count == endpoints.len) return null;
             endpoints[endpoint_count] = sketch.points[point_i].id;
@@ -408,6 +417,35 @@ pub fn closeSingleGap(alloc: std.mem.Allocator, sketch: Sketch) CompileError!?Sk
     alloc.free(compiled.poly);
     alloc.free(compiled.arcs);
     return repaired;
+}
+
+/// Rebuild a clean, line-only authoring sketch from the exact polygon visible
+/// to fill, DRC and export consumers. This is a recovery boundary for invalid
+/// hidden authoring topology: only an already-valid physical polygon qualifies.
+pub fn fromPolygon(alloc: std.mem.Allocator, poly: []const [2]f64) CompileError!?Sketch {
+    if (poly.len < 3 or poly.len > max_entities or !outline.valid(poly)) return null;
+    for (poly, 0..) |p, i| {
+        const q = poly[(i + 1) % poly.len];
+        if (!std.math.isFinite(p[0]) or !std.math.isFinite(p[1])) return null;
+        if (std.math.hypot(q[0] - p[0], q[1] - p[1]) <= 1e-9) return null;
+    }
+
+    const points = try alloc.alloc(Point, poly.len);
+    errdefer alloc.free(points);
+    const curves = try alloc.alloc(Curve, poly.len);
+    errdefer alloc.free(curves);
+    for (poly, 0..) |p, i| {
+        const point_id: u32 = @intCast(i + 1);
+        const next_id: u32 = @intCast((i + 1) % poly.len + 1);
+        points[i] = .{ .id = point_id, .x = p[0], .y = p[1] };
+        curves[i] = .{
+            .id = @intCast(max_entities + i + 1),
+            .kind = .line,
+            .a = point_id,
+            .b = next_id,
+        };
+    }
+    return .{ .points = points, .curves = curves };
 }
 
 fn rectSketch() Sketch {
@@ -537,4 +575,26 @@ test "outline sketch closes one unambiguous gap but refuses branches" {
         .{ .id = 13, .kind = .line, .a = 2, .b = 4 },
     });
     try std.testing.expect((try closeSingleGap(std.testing.allocator, branched)) == null);
+
+    var unused = rectSketch();
+    unused.curves = unused.curves[0..2];
+    try std.testing.expect((try closeSingleGap(std.testing.allocator, unused)) == null);
+}
+
+test "outline sketch rebuilds a valid visible polygon but rejects malformed backing" {
+    const poly = [_][2]f64{ .{ 0, 0 }, .{ 6, 0 }, .{ 6, 4 }, .{ 0, 4 } };
+    const rebuilt = (try fromPolygon(std.testing.allocator, &poly)) orelse
+        return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(rebuilt.points);
+    defer std.testing.allocator.free(rebuilt.curves);
+    const compiled = try compile(std.testing.allocator, rebuilt, default_sagitta_mm);
+    defer std.testing.allocator.free(compiled.pts);
+    defer std.testing.allocator.free(compiled.poly);
+    defer std.testing.allocator.free(compiled.arcs);
+    try std.testing.expectEqualSlices([2]f64, &poly, compiled.pts);
+
+    const bow_tie = [_][2]f64{ .{ 0, 0 }, .{ 4, 4 }, .{ 0, 4 }, .{ 4, 0 } };
+    try std.testing.expect((try fromPolygon(std.testing.allocator, &bow_tie)) == null);
+    const repeated = [_][2]f64{ .{ 0, 0 }, .{ 4, 0 }, .{ 4, 0 }, .{ 0, 4 } };
+    try std.testing.expect((try fromPolygon(std.testing.allocator, &repeated)) == null);
 }
