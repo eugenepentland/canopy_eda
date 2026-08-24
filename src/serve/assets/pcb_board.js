@@ -3374,17 +3374,19 @@ function stampBusy(g,on){document.querySelectorAll("[data-stamp],[data-grp-stamp
 function refreshStampSeeds(g){stampBusy(g,true);
  return fetch("/api/pcb-subseeds/"+encodeURIComponent(PCB.name),{cache:"no-store"})
   .then(function(r){if(!r.ok)throw new Error("server returned "+r.status);return r.json();})
-  .then(function(j){PCB.subseeds=j.subseeds||{};PCB.subseedinfo=j.subseedinfo||{};
+  .then(function(j){PCB.subseeds=j.subseeds||{};PCB.subseedorigins=j.subseedorigins||{};PCB.subseedinfo=j.subseedinfo||{};
    PCB.submodules=j.submodules||PCB.submodules||{};PCB.subroutes=j.subroutes||{};
-   var idxs=GRPS[g]||[],seeds=PCB.subseeds;
-   if(!idxs.some(function(i){return !!seeds[P[i].ref];})){subPanelRefresh();
+   var idxs=GRPS[g]||[];
+   if(!idxs.some(function(i){return !!stampSeedFor(g,P[i]);})){subPanelRefresh();
     throw new Error("the module has no saved layout matching its current parts");}
   });}
+function stampSeedFor(g,p){var stableSeeds=(PCB.subseedorigins||{})[g]||{};
+ return (p.origin&&stableSeeds[p.origin])||(PCB.subseeds||{})[p.ref];}
 // Stamp a group from its freshly fetched module layout. The module anchor's
 // LIVE board pose is invariant; every saved part and copper primitive follows
 // the rigid module-anchor → board-anchor transform around it.
-function stampGroup(g){return refreshStampSeeds(g).then(function(){var seeds=PCB.subseeds||{},idxs=GRPS[g]||[],hit=[];
- idxs.forEach(function(i){var sd=seeds[P[i].ref];if(sd)hit.push({i:i,sd:sd});});
+function stampGroup(g){return refreshStampSeeds(g).then(function(){var idxs=GRPS[g]||[],hit=[];
+ idxs.forEach(function(i){var sd=stampSeedFor(g,P[i]);if(sd)hit.push({i:i,sd:sd});});
  if(!hit.length)return;
  recordUndo();
  // Anchor on the group's main IC: keep ITS current board position and form

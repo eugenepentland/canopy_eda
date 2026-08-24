@@ -18,12 +18,16 @@ const pcb = @import("pcb_layout_page.zig");
 const Server = serve_root.Server;
 const SeedsJson = struct {
     poses: []const u8 = "{}",
+    origin_poses: []const u8 = "{}",
     info: []const u8 = "{}",
     mods: []const u8 = "{}",
     routes: []const u8 = "{}",
 };
 
 /// GET /api/pcb-subseeds/:name — return current module layouts for Stamp.
+/// Poses are supplied both by the endpoint's temporary ref-des and by stable
+/// module-local origin key; an already-open board must use the latter because
+/// its persisted ref-des assignment can differ from a fresh grid placement.
 pub fn pcbSubSeedsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb.HandlerError!void {
     const name = pcb.nameParam(req, res) orelse return;
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
@@ -48,8 +52,8 @@ pub fn pcbSubSeedsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) p
     const seeds = build(ctx.allocator, ctx.project_dir, block, placement);
     var out: std.Io.Writer.Allocating = .init(ctx.allocator);
     try out.writer.print(
-        "{{\"subseeds\":{s},\"subseedinfo\":{s},\"submodules\":{s},\"subroutes\":{s}}}",
-        .{ seeds.poses, seeds.info, seeds.mods, seeds.routes },
+        "{{\"subseeds\":{s},\"subseedorigins\":{s},\"subseedinfo\":{s},\"submodules\":{s},\"subroutes\":{s}}}",
+        .{ seeds.poses, seeds.origin_poses, seeds.info, seeds.mods, seeds.routes },
     );
     res.header("Cache-Control", "no-store");
     res.content_type = .JSON;
@@ -80,18 +84,24 @@ fn build(
     placement: optimizer.Placement,
 ) SeedsJson {
     var poses: std.Io.Writer.Allocating = .init(alloc);
+    var origin_poses: std.Io.Writer.Allocating = .init(alloc);
     var info: std.Io.Writer.Allocating = .init(alloc);
     var routes: std.Io.Writer.Allocating = .init(alloc);
     poses.writer.writeByte('{') catch return .{};
+    origin_poses.writer.writeByte('{') catch return .{};
     info.writer.writeByte('{') catch return .{};
     routes.writer.writeByte('{') catch return .{};
     var pose_first = true;
+    var origin_group_first = true;
     var info_first = true;
     var route_first = true;
     var parent_pin_nets: ?std.StringHashMapUnmanaged([]const u8) = null;
 
     for (block.sub_blocks) |sb| {
         const seeds = pcb.subBlockPoseByOriginKey(alloc, project_dir, sb) orelse continue;
+        var group_origins: std.Io.Writer.Allocating = .init(alloc);
+        group_origins.writer.writeByte('{') catch return .{};
+        var group_origin_first = true;
         var ref_of_origin = std.StringHashMapUnmanaged([]const u8).empty;
         var count: usize = 0;
         for (placement.instances) |inst| {
@@ -105,8 +115,20 @@ fn build(
             poses.writer.print(":{{\"x\":{d},\"y\":{d},\"rot\":{d}", .{ pose.x, pose.y, pose.rot }) catch return .{};
             if (pose.side == .bottom) poses.writer.writeAll(",\"side\":\"bottom\"") catch return .{};
             poses.writer.writeByte('}') catch return .{};
+            if (!group_origin_first) group_origins.writer.writeByte(',') catch return .{};
+            group_origin_first = false;
+            pcb.writeJsonStr(&group_origins.writer, inst.origin_key) catch return .{};
+            group_origins.writer.print(":{{\"x\":{d},\"y\":{d},\"rot\":{d}", .{ pose.x, pose.y, pose.rot }) catch return .{};
+            if (pose.side == .bottom) group_origins.writer.writeAll(",\"side\":\"bottom\"") catch return .{};
+            group_origins.writer.writeByte('}') catch return .{};
         }
         if (count == 0) continue;
+        group_origins.writer.writeByte('}') catch return .{};
+        if (!origin_group_first) origin_poses.writer.writeByte(',') catch return .{};
+        origin_group_first = false;
+        pcb.writeJsonStr(&origin_poses.writer, sb.name) catch return .{};
+        origin_poses.writer.writeByte(':') catch return .{};
+        origin_poses.writer.writeAll(group_origins.written()) catch return .{};
         writeInfo(&info.writer, sb.name, seeds, count, &info_first) catch return .{};
         if (seeds.routes) |saved| {
             if (parent_pin_nets == null) parent_pin_nets = parentPinNetMap(alloc, placement);
@@ -125,10 +147,12 @@ fn build(
         }
     }
     poses.writer.writeByte('}') catch return .{};
+    origin_poses.writer.writeByte('}') catch return .{};
     info.writer.writeByte('}') catch return .{};
     routes.writer.writeByte('}') catch return .{};
     return .{
         .poses = poses.written(),
+        .origin_poses = origin_poses.written(),
         .info = info.written(),
         .mods = buildModules(alloc, block),
         .routes = routes.written(),
@@ -289,6 +313,18 @@ fn seedXSum(alloc: std.mem.Allocator, body: []const u8) !f64 {
     return sum;
 }
 
+fn originSeedX(alloc: std.mem.Allocator, body: []const u8, group: []const u8, origin: []const u8) !f64 {
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const groups = parsed.value.object.get("subseedorigins").?.object;
+    const pose = groups.get(group).?.object.get(origin).?.object;
+    return switch (pose.get("x").?) {
+        .float => |v| v,
+        .integer => |v| @floatFromInt(v),
+        else => error.TestUnexpectedResult,
+    };
+}
+
 test "subseed endpoint rereads a module layout saved after the board opened" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -326,6 +362,7 @@ test "subseed endpoint rereads a module layout saved after the board opened" {
     });
     const before = try testApiBody(alloc, project_dir);
     try std.testing.expectEqual(@as(f64, 3), try seedXSum(alloc, before));
+    try std.testing.expectEqual(@as(f64, 1), try originSeedX(alloc, before, "sm", "C_A"));
 
     // This is the other tab's completed Update: the already-open board makes
     // another endpoint request rather than reusing its page-load seed object.
@@ -336,4 +373,5 @@ test "subseed endpoint rereads a module layout saved after the board opened" {
     });
     const after = try testApiBody(alloc, project_dir);
     try std.testing.expectEqual(@as(f64, 30), try seedXSum(alloc, after));
+    try std.testing.expectEqual(@as(f64, 10), try originSeedX(alloc, after, "sm", "C_A"));
 }

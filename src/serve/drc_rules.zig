@@ -824,12 +824,14 @@ test "viewer JS refreshes sub-circuit seeds before every stamp" {
     const body = tail[0..end];
     const refresh = std.mem.indexOf(u8, body, "refreshStampSeeds(g)") orelse
         return error.TestStampRefreshMissing;
-    const seeds = std.mem.indexOf(u8, body, "var seeds=PCB.subseeds||{}") orelse
-        return error.TestStampSeedsMissing;
+    const seeds = std.mem.indexOf(u8, body, "stampSeedFor(g,P[i])") orelse
+        return error.TestStampStableSeedsMissing;
 
     try std.testing.expect(refresh < seeds);
     try std.testing.expect(std.mem.indexOf(u8, js, "fetch(\"/api/pcb-subseeds/\"+encodeURIComponent(PCB.name),{cache:\"no-store\"})") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "PCB.subseeds=j.subseeds||{}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "PCB.subseedorigins=j.subseedorigins||{}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "(p.origin&&stableSeeds[p.origin])||(PCB.subseeds||{})[p.ref]") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "PCB.subroutes=j.subroutes||{}") != null);
 }
 
