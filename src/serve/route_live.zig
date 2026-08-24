@@ -999,7 +999,7 @@ test "live job streams timeline events and finishes with the route contract" {
     // The blocking /api/pcb-route response contract, field for field.
     try testing.expect(std.mem.indexOf(u8, final, "\"tracks\":[") != null);
     try testing.expect(std.mem.indexOf(u8, final, "\"stuck\":[") != null);
-    try testing.expect(std.mem.indexOf(u8, final, "\"routed\":1,\"total\":1,\"return_path\":") != null);
+    try testing.expect(std.mem.indexOf(u8, final, "\"routed\":1,\"total\":1,\"unique_routed\":1,\"unique_total\":1,\"return_path\":") != null);
     try testing.expect(std.mem.indexOf(u8, final, "\"selected\":0,\"scope_unknown\":[]") != null);
 }
 

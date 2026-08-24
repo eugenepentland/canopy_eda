@@ -5873,6 +5873,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The PCB autorouter sidebar exposes one whole-board Route action; routing-wave scope remains an API concern rather than a routine UI choice
 - The PNG and describe endpoints restore the shown layout's persisted routed copper against the current netlist when no fresh route is requested
 - routableTally summarises copper connectivity into routed/total/open counts, excluding nets that need no copper
+- The Routed UI count collapses per-pin micro-net connections onto unique logical net names while requiring every member connection to close
 - the route-vision mask survives a run-length round trip across both long runs and maximal alternation
 - the route-vision reach flood promotes only free space connected to the seed pad, leaving a walled-off pocket unreached
 - two same-net pads whose lands touch are one island, and opposite-face SMD pads are not

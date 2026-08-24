@@ -4357,6 +4357,8 @@ pub const RouteOutcome = struct {
     violations: []const drc.Violation,
     return_path: usize,
     subcircuit_seeds: SubcircuitRouteSeedStats = .{},
+    /// Connection-level plus logical-net connectivity for the returned copper.
+    connectivity: fab_readiness.Tally = .{},
     /// What the ROUTER claimed before the shared oracle gate corrected
     /// `run.routed.routed` (see `route_plan.PlannedRun.claimed_routed`). Carried
     /// so the surfaces that persist this run — the cached design replay — can
@@ -4411,8 +4413,8 @@ pub fn routePrepared(
     pr.run.routed = (try perimeter_fence.append(alloc, prep.placement, pr.run.routed)).?;
     const routed = pr.run.routed;
     const violations = drc_rules.checkFilteredZones(alloc, project_dir, name, .{ .placement = prep.placement, .routed = routed, .clearance = prep.rp.clearance, .zones = prep.user_zones });
-    const rp_warn = router.returnPathViolations(prep.placement, routed, router.return_path_radius_mm);
-    return .{ .run = pr.run, .stuck = pr.stuck, .violations = violations, .return_path = rp_warn, .subcircuit_seeds = seed_stats, .claimed_routed = pr.claimed_routed };
+    const connectivity = try fab_readiness.routableTally(alloc, prep.placement, .{ .tracks = routed.tracks, .arcs = routed.arcs, .rf_paths = routed.rf_port_outcomes, .vias = routed.vias, .zones = prep.user_zones });
+    return .{ .run = pr.run, .stuck = pr.stuck, .violations = violations, .return_path = router.returnPathViolations(prep.placement, routed, router.return_path_radius_mm), .subcircuit_seeds = seed_stats, .connectivity = connectivity, .claimed_routed = pr.claimed_routed };
 }
 
 /// Serialize the shared pipeline's response fields (no surrounding braces) —
@@ -4425,10 +4427,9 @@ pub fn writeRoutePayload(
     prep: RoutePrep,
     outcome: RouteOutcome,
 ) std.Io.Writer.Error!void {
-    const routed = outcome.run.routed;
-    try writeRoutedArrays(w, routed, outcome.violations, .{ .nets = prep.placement.nets, .parts = prep.placement.parts }, null, prep.placement);
+    try writeRoutedArrays(w, outcome.run.routed, outcome.violations, .{ .nets = prep.placement.nets, .parts = prep.placement.parts }, null, prep.placement);
     try stuck_json.writeStuckJson(w, outcome.stuck);
-    try w.print(",\"routed\":{d},\"total\":{d},\"return_path\":{d},\"selected\":{d},\"scope_unknown\":", .{ routed.routed, routed.total, outcome.return_path, prep.echo.selected });
+    try w.print(",\"routed\":{d},\"total\":{d},\"unique_routed\":{d},\"unique_total\":{d},\"return_path\":{d},\"selected\":{d},\"scope_unknown\":", .{ outcome.run.routed.routed, outcome.run.routed.total, outcome.connectivity.unique_routed, outcome.connectivity.unique_total, outcome.return_path, prep.echo.selected });
     try mcpWriteStrArray(w, prep.echo.unknown);
     try writeRouteSeedStats(w, outcome.subcircuit_seeds);
 }
@@ -4515,7 +4516,8 @@ pub fn pcbRouteApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
 /// on-screen copper `{"tracks":[…],"vias":[…]}` (the same SavedRoutes shape the
 /// layout sidecar stores) and optional `clearance`/`outline`. It builds the
 /// placement at those poses, restores the copper into the current netlist, runs
-/// `drc.check` against it, and returns `{"drc":[…],"n":N,"routed":R,"total":T}`.
+/// `drc.check` against it, and returns connection-level `routed`/`total` plus
+/// UI-facing `unique_routed`/`unique_total`.
 /// The completion pair comes from the shared connectivity oracle over the same
 /// submitted copper, keeping the editor header current after manual edits.
 /// This lets the viewer
@@ -4628,7 +4630,7 @@ pub fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
         try writeViolation(w, vio, .{ .nets = placement.nets, .parts = placement.parts });
     }
     try w.print("],\"n\":{d}", .{violations.len});
-    if (tally) |t| try w.print(",\"routed\":{d},\"total\":{d}", .{ t.routed, t.total });
+    if (tally) |t| try w.print(",\"routed\":{d},\"total\":{d},\"unique_routed\":{d},\"unique_total\":{d}", .{ t.routed, t.total, t.unique_routed, t.unique_total });
     if (queryFlag(req, "pours")) {
         const live_copper: pour.Copper = .{ .tracks = rr.tracks, .vias = rr.vias };
         try w.writeAll(",\"pours\":");
@@ -6573,8 +6575,10 @@ fn resolveShownView(ctx: *Server, req: ?*httpz.Request, in: ShownInputs) ShownVi
             .zones = user_zones,
         }) catch null;
     if (routed) |*r| if (tally) |t| {
-        r.routed = t.routed;
-        r.total = t.total;
+        // RouteResult keeps the count displayed by this page. The detailed
+        // connection tally remains on `ShownView.tally` for non-UI consumers.
+        r.routed = t.unique_routed;
+        r.total = t.unique_total;
         r.failed = t.open;
     };
     const texts = shownTexts(in.layouts, in.shown);
@@ -9134,12 +9138,12 @@ fn writeHeadNav(
     try w.writeAll("<div class=\"pcb-head\">");
     try w.print("<h1>{s} <span class=\"pcb-sub\">PCB Layout · force-directed · drag to edit</span></h1>", .{title});
     if (tally) |t| {
-        const cls = if (t.routed == t.total) " complete" else "";
+        const cls = if (t.unique_routed == t.unique_total) " complete" else "";
         try w.print(
             "<span class=\"pcb-route-summary{s}\" id=\"pcb-route-summary\" data-total=\"{d}\" " ++
-                "title=\"Completed routable nets; single-pad and already plane-carried nets are excluded\">" ++
+                "title=\"Unique logical nets completed; per-pin connections are collapsed and single-pad or plane-carried nets are excluded\">" ++
                 "Routed <strong>{d} / {d}</strong></span>",
-            .{ cls, t.total, t.routed, t.total },
+            .{ cls, t.unique_total, t.unique_routed, t.unique_total },
         );
     } else {
         try w.writeAll("<span class=\"pcb-route-summary\" id=\"pcb-route-summary\" title=\"Routing completion unavailable\">Routed <strong>— / —</strong></span>");
@@ -13682,7 +13686,7 @@ test "CLI persist refreshes the auto cache poses so a default read sees the muta
 test "PCB header links board designs to assembly and keeps modules scoped" {
     var board: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer board.deinit();
-    try writeHeadNav(&board.writer, false, "demo", "Demo", null, .{ .routed = 7, .total = 9 });
+    try writeHeadNav(&board.writer, false, "demo", "Demo", null, .{ .routed = 70, .total = 90, .unique_routed = 7, .unique_total = 9 });
     try std.testing.expect(std.mem.indexOf(u8, board.written(), "href=\"/pcb-layout/demo?view=3d\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, board.written(), "href=\"/assembly-debug/demo\"") != null);
     var selected: std.Io.Writer.Allocating = .init(std.testing.allocator);
@@ -13711,20 +13715,27 @@ test "PCB header links board designs to assembly and keeps modules scoped" {
     try std.testing.expect(std.mem.indexOf(u8, module.written(), "/assembly-debug/") == null);
 }
 
-test "PCB editor header carries a live routing-completion summary" {
+// spec: Web Server - The Routed UI count collapses per-pin micro-net connections onto unique logical net names while requiring every member connection to close
+test "PCB editor header carries a live unique-net routing summary" {
     var incomplete: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer incomplete.deinit();
-    try writeHeadNav(&incomplete.writer, false, "demo", "Demo", null, .{ .routed = 7, .total = 9 });
+    try writeHeadNav(&incomplete.writer, false, "demo", "Demo", null, .{ .routed = 70, .total = 90, .unique_routed = 7, .unique_total = 9 });
     try std.testing.expect(std.mem.indexOf(u8, incomplete.written(), "class=\"pcb-route-summary\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, incomplete.written(), "Routed <strong>7 / 9</strong>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, incomplete.written(), "70 / 90") == null);
+    try std.testing.expect(std.mem.indexOf(u8, incomplete.written(), "Unique logical nets completed") != null);
 
     var complete: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer complete.deinit();
-    try writeHeadNav(&complete.writer, false, "demo", "Demo", null, .{ .routed = 9, .total = 9 });
+    try writeHeadNav(&complete.writer, false, "demo", "Demo", null, .{ .routed = 90, .total = 90, .unique_routed = 9, .unique_total = 9 });
     try std.testing.expect(std.mem.indexOf(u8, complete.written(), "class=\"pcb-route-summary complete\"") != null);
 
     const board_js = @embedFile("assets/pcb_board.js");
     try std.testing.expect(std.mem.indexOf(u8, board_js, "function routeSummary(routed,total)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, board_js, "function uniqueRouteCounts(j)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, board_js, "typeof j.unique_routed===\"number\"") != null);
+    const page_src = @embedFile("pcb_layout_page.zig");
+    try std.testing.expect(std.mem.indexOf(u8, page_src, "\\\"unique_routed\\\":{d},\\\"unique_total\\\":{d}") != null);
     try std.testing.expect(std.mem.indexOf(u8, board_js, "drcChip(srv.length);routeSummaryFrom(j)") != null);
     const route_apply = std.mem.indexOf(u8, board_js, "else setStat(\"r-stat\",ok?") orelse return error.TestExpectedEqual;
     try std.testing.expect(std.mem.indexOf(u8, board_js[route_apply..], "routeSummaryFrom(j);") != null);
@@ -14454,7 +14465,7 @@ test "phone layout prioritizes board inspection with touch-sized bottom sheets" 
 
     var nav: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer nav.deinit();
-    try writeHeadNav(&nav.writer, false, "demo", "Demo", null, .{ .routed = 4, .total = 4 });
+    try writeHeadNav(&nav.writer, false, "demo", "Demo", null, .{ .routed = 40, .total = 40, .unique_routed = 4, .unique_total = 4 });
     try std.testing.expect(std.mem.indexOf(u8, nav.written(), ">Schematic</a>") != null);
     try std.testing.expect(std.mem.indexOf(u8, nav.written(), ">PCB Layout</a>") != null);
     try std.testing.expect(std.mem.indexOf(u8, nav.written(), ">3D View</a>") != null);

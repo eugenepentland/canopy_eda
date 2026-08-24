@@ -8620,14 +8620,17 @@ function legsToTracks(fx,fy,legs,layer,w,net){var out=[],px=fx,py=fy;
 function setStat(id,cls,txt){var e=document.getElementById(id);
  if(e){e.className="route-stat"+(cls?" "+cls:"");e.textContent=txt;}}
 // Glanceable routing completion in the page header. The server owns the
-// connectivity definition; this client only renders the routed/total pair
-// returned by page load, autoroute, and the authoritative post-edit DRC pass.
+// connectivity definition; this client renders its logical-net pair while the
+// response retains connection-level routed/total for DRC and routing details.
 function routeSummary(routed,total){var e=document.getElementById("pcb-route-summary");if(!e)return;
  if(typeof routed!=="number"||typeof total!=="number")return;
  routed=Math.max(0,Math.min(routed,total));e.className="pcb-route-summary"+(routed===total?" complete":"");
  e.setAttribute("data-total",String(total));var s=e.querySelector("strong");if(s)s.textContent=routed+" / "+total;
- e.title="Completed routable nets; single-pad and already plane-carried nets are excluded";}
-function routeSummaryFrom(j){if(j)routeSummary(j.routed,j.total);}
+ e.title="Unique logical nets completed; per-pin connections are collapsed and single-pad or plane-carried nets are excluded";}
+function uniqueRouteCounts(j){return {
+ routed:typeof j.unique_routed==="number"?j.unique_routed:j.routed,
+ total:typeof j.unique_total==="number"?j.unique_total:j.total};}
+function routeSummaryFrom(j){if(j){var c=uniqueRouteCounts(j);routeSummary(c.routed,c.total);}}
 function clearRoute(){planChip(null);
  if(!(PCB.tracks&&PCB.tracks.length)&&!(PCB.vias&&PCB.vias.length)&&!(PCB.rf_paths&&PCB.rf_paths.length)&&!(PCB.drc&&PCB.drc.length))return;
  PCB.tracks=[];PCB.vias=[];PCB.rf_paths=[];PCB.drc=[];copperTouched();
@@ -8635,23 +8638,22 @@ function clearRoute(){planChip(null);
 // The scorebar's PLAN chip: what the "Route plan" action drew, and the standing
 // reminder that this copper is NOT saved. `j` null hides it (any clearRoute —
 // a re-solve, an Apply, a Reset — drops the copper, so the chip must go too).
-// The counts are the response's own routed/total, which the shared oracle gate
-// has already corrected, so the chip cannot claim more than the copper closed.
+// The headline counts unique logical nets; the response's routed/total remains
+// the detailed micro-net connection tally used by the open ledger.
 function planChip(j){var el=document.getElementById("pcb-planchip");if(!el)return;
  if(!j){el.style.display="none";el.textContent="";el.className="src-chip src-plan";return;}
  var open=(j.unrouted&&j.unrouted.length)?j.unrouted:[];
  var nd=(j.drc||[]).length;
+ var c=uniqueRouteCounts(j);
  el.className="src-chip src-plan"+(open.length?" plan-open":"");
- el.textContent="plan · "+j.routed+"/"+j.total+" nets"+(open.length?(" · "+open.length+" open"):"")+
+ el.textContent="plan · "+c.routed+"/"+c.total+" nets"+(open.length?(" · "+open.length+" open"):"")+
    (nd?(" · "+nd+" DRC"):"");
  el.title="A routing PLAN for the placement on screen — one-shot autoroute, nothing saved. "+
    "Save (or Update) persists these tracks with the poses; moving a part or re-solving drops them."+
    (open.length?("\nCould not close: "+open.join(", ")):"\nEvery routable net closed.")+
-   // The denominator is the connectivity oracle's ROUTABLE tally, not the net
-   // count: a net that needs no copper (one pad — a module port — or a net a
-   // declared plane carries) is out of both halves. Said here so the ratio is
-   // not read as "every net on the board".
-   "\nCounts nets that need copper; single-pad (port) and plane-carried nets are excluded.";
+   // Per-pin micro-nets collapse to their logical rail; a rail closes only when
+   // all of those required connections close.
+   "\nCounts unique logical nets that need copper; per-pin connections are collapsed, and single-pad or plane-carried nets are excluded.";
  el.style.display="";}
 var courtState=null;
 function partByRef(ref){for(var i=0;i<P.length;i++)if(P[i].ref===ref)return P[i];return null;}
@@ -9045,7 +9047,7 @@ window.PCBApplyRouteResult=function(j,opts){
  var elapsed=(typeof opts.elapsedMs==="number")?(" · "+(opts.elapsedMs/1000).toFixed(1)+"s"):"";
  if(opts.clr>0)PCB.clr=opts.clr;
  applyRoutedCopper(j.tracks||[],j.vias||[],j.drc||[],j.rf_paths||[]); // shared with PCBAdoptCopper
- var ok=(j.routed===j.total);
+ var counts=uniqueRouteCounts(j),ok=(counts.routed===counts.total);
  var miss=(j.unrouted&&j.unrouted.length)?(" · missing: "+j.unrouted.join(", ")):"";
  var unk=(j.scope_unknown&&j.scope_unknown.length)?(" · unknown scope: "+j.scope_unknown.join(", ")):"";
  if(j.grid_overflow)setStat("r-stat","err","board exceeds the routing grid cap — not routed");
@@ -9054,7 +9056,7 @@ window.PCBApplyRouteResult=function(j,opts){
   setStat("r-stat",ss.timed_out_subcircuits?"warn":"ok","subcircuits "+(ss.completed_subcircuits||0)+"/"+(ss.attempted_subcircuits||0)+
    " · "+(ss.accepted_tracks||0)+" tracks · "+(ss.accepted_vias||0)+" vias"+
    (ss.timed_out_subcircuits?(" · "+ss.timed_out_subcircuits+" timed out"):"")+elapsed);
- } else setStat("r-stat",ok?"ok":"warn","routed "+j.routed+"/"+j.total+(scope?" scoped":"")+" nets · "+((j.vias||[]).length)+" vias"+miss+unk+elapsed);
+ } else setStat("r-stat",ok?"ok":"warn","routed "+counts.routed+"/"+counts.total+(scope?" scoped":"")+" nets · "+((j.vias||[]).length)+" vias"+miss+unk+elapsed);
  routeSummaryFrom(j);
  setStat("r-drc",(j.drc||[]).length?"err":"ok",(j.drc||[]).length?(j.drc.length+" DRC violation(s)"):"DRC clean ✓");
  var rp=j.return_path||0; setStat("r-rp",rp?"warn":"ok",rp?(rp+" return-path warning(s)"):"return paths ✓");

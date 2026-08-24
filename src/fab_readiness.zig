@@ -34,6 +34,7 @@ const pad_shape = @import("placement/pad_shape.zig");
 const copper_contact = @import("placement/copper_contact.zig");
 const outline_mod = @import("placement/outline.zig");
 const board_layers = @import("board_layers.zig");
+const net_analysis = @import("eval/net_analysis.zig");
 
 /// A part is treated as off-board (staged, not on the real board) when its
 /// courtyard centre sits more than this far outside the board outline — the
@@ -496,8 +497,15 @@ pub fn netConnectivity(
 /// The routable-net tally of a board's copper: how many nets are fully
 /// connected, how many need copper at all, and the names still open.
 pub const Tally = struct {
+    /// Connection-level micro-net tally used by routing progress and repair
+    /// gates. Per-pin stubs such as `VDD.U3.7` remain separate here.
     routed: usize = 0,
     total: usize = 0,
+    /// User-facing logical-net tally: dot-suffixed micro-nets collapse onto
+    /// their base name, and a base is routed only when every routable member
+    /// is connected.
+    unique_routed: usize = 0,
+    unique_total: usize = 0,
     open: []const []const u8 = &.{},
     coarsened: bool = false,
     hairline_gaps: usize = 0,
@@ -519,18 +527,32 @@ pub fn routableTally(
     copper: export_gerber.Copper,
 ) std.mem.Allocator.Error!Tally {
     const conn = try netConnectivity(arena, placement, copper);
+    return summarizeConnectivity(arena, conn);
+}
+
+fn summarizeConnectivity(arena: std.mem.Allocator, conn: []const NetStatus) std.mem.Allocator.Error!Tally {
     var t = Tally{};
     var open: std.ArrayList([]const u8) = .empty;
+    var logical = std.StringArrayHashMapUnmanaged(bool).empty;
     for (conn) |ns| {
         t.coarsened = t.coarsened or ns.coarsened;
         t.hairline_gaps += ns.hairline_gaps;
         if (!ns.routable) continue;
         t.total += 1;
+        const gop = try logical.getOrPut(arena, net_analysis.baseNetName(ns.name));
+        if (!gop.found_existing) {
+            gop.value_ptr.* = true;
+            t.unique_total += 1;
+        }
+        gop.value_ptr.* = gop.value_ptr.* and ns.connected;
         if (ns.connected) {
             t.routed += 1;
         } else {
             try open.append(arena, ns.name);
         }
+    }
+    for (logical.values()) |connected| {
+        if (connected) t.unique_routed += 1;
     }
     t.open = try open.toOwnedSlice(arena);
     return t;
@@ -2223,6 +2245,8 @@ test "routableTally counts connected nets and names the open ones, skipping non-
     // needs no copper, so counting it would understate a finished board.
     try testing.expectEqual(@as(usize, 2), t.total);
     try testing.expectEqual(@as(usize, 1), t.routed);
+    try testing.expectEqual(@as(usize, 2), t.unique_total);
+    try testing.expectEqual(@as(usize, 1), t.unique_routed);
     try testing.expectEqual(@as(usize, 1), t.open.len);
     try testing.expectEqualStrings("OPEN", t.open[0]);
 
@@ -2231,7 +2255,32 @@ test "routableTally counts connected nets and names the open ones, skipping non-
     const bare = try routableTally(arena, placement, .{});
     try testing.expectEqual(@as(usize, 2), bare.total);
     try testing.expectEqual(@as(usize, 0), bare.routed);
+    try testing.expectEqual(@as(usize, 2), bare.unique_total);
+    try testing.expectEqual(@as(usize, 0), bare.unique_routed);
     try testing.expectEqual(@as(usize, 2), bare.open.len);
+}
+
+// Regression guard for both halves of the detailed/logical tally contract.
+test "routing tally reports unique logical nets without hiding connection detail" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const conn = [_]NetStatus{
+        .{ .name = "CLK", .routable = true, .connected = true, .islands = 1 },
+        .{ .name = "VDD.U1.7", .routable = true, .connected = true, .islands = 1 },
+        .{ .name = "VDD.U2.8", .routable = true, .connected = false, .islands = 2 },
+        .{ .name = "VDD", .routable = false, .connected = false, .islands = 1 },
+        .{ .name = "SOLO", .routable = false, .connected = false, .islands = 1 },
+    };
+    const tally = try summarizeConnectivity(arena_i.allocator(), &conn);
+
+    // Repair/DRC surfaces retain all three required connections and the exact
+    // open micro-net. The UI sees only CLK and VDD, with VDD still incomplete.
+    try testing.expectEqual(@as(usize, 3), tally.total);
+    try testing.expectEqual(@as(usize, 2), tally.routed);
+    try testing.expectEqual(@as(usize, 1), tally.open.len);
+    try testing.expectEqualStrings("VDD.U2.8", tally.open[0]);
+    try testing.expectEqual(@as(usize, 2), tally.unique_total);
+    try testing.expectEqual(@as(usize, 1), tally.unique_routed);
 }
 
 /// Two 2-pad nets (WIRED, OPEN) plus a single-pad SOLO on a plane-free 2-layer
