@@ -248,6 +248,7 @@ pub const shards: []const []const []const u8 = &.{
         "serve.notes.test.",
         "serve.outline_sketch_json.test.",
         "serve.pcb_layout_page.test.",
+        "serve.pcb_subseeds.test.",
         "serve.pcb_page_cache.test.",
         "serve.progress_cache.test.",
         "serve.route_plan.test.",
@@ -539,4 +540,13 @@ pub const shards: []const []const []const u8 = &.{
 test {
     try std.testing.expectEqualStrings("ground_via_seed.test.", shards[0][0]);
     try std.testing.expectEqualStrings("serve.ground_vias.test.", shards[0][2]);
+}
+
+// spec: Development pipeline - The live sub-circuit Stamp endpoint regression remains claimed by the shard manifest
+test {
+    var claimed = false;
+    for (shards[3]) |filter| {
+        if (std.mem.eql(u8, filter, "serve.pcb_subseeds.test.")) claimed = true;
+    }
+    try std.testing.expect(claimed);
 }
