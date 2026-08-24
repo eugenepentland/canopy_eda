@@ -569,6 +569,7 @@ fn registerPcbRoutes(router: anytype) void {
     router.get("/pcb-layout/:name", pcb_layout_page.pcbLayoutPage, .{});
     router.get("/api/pcb-cam/:name", pcb_layout_page.pcbCamJsonApi, .{});
     router.get("/api/pcb-subseeds/:name", pcb_subseeds.pcbSubSeedsApi, .{});
+    router.post("/api/pcb-subcircuit-layout/:name", pcb_subseeds.saveSubcircuitLayoutApi, .{});
     router.get("/api/pcb-layout/:name", pcb_layout_page.pcbLayoutJsonApi, .{});
     router.get("/api/pcb-settings/:name", pcb_layout_page.pcbSettingsApi, .{});
     router.get("/api/pcb-png/:name", pcb_layout_page.pcbPngApi, .{});

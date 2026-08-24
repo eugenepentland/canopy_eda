@@ -4923,7 +4923,7 @@ pub fn pcbGerbersApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
 /// routed-trace loop). For a `?sub` circuit the score is against the scoped
 /// sub-block. A resolve/score failure just leaves it unscored. Extracted from
 /// `saveNamedLayoutApi` to keep that handler focused.
-fn scoreSavedLayout(
+pub fn scoreSavedLayout(
     ctx: *Server,
     req: *httpz.Request,
     name: []const u8,
@@ -5220,7 +5220,9 @@ fn namedLayoutMutationRev(
     return disk_rev;
 }
 
-fn commitNamedLayoutMutation(
+/// Persist a revised named-layout list, snapshotting top-level stores first,
+/// and return the optimistic-concurrency revision written to the sidecar.
+pub fn commitNamedLayoutMutation(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
     design: []const u8,
@@ -6008,7 +6010,7 @@ pub fn hasSavedLayout(
 
 /// As `readLayouts`, but for a `?sub=` scoped sub circuit reads its per-sub
 /// sidecar (`layoutsSidecar`). `sub == null` is identical to `readLayouts`.
-fn readLayoutsSub(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8) []const SavedLayout {
+pub fn readLayoutsSub(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8) []const SavedLayout {
     return readSidecarDoc(alloc, project_dir, name, sub).layouts;
 }
 

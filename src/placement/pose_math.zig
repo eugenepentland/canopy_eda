@@ -1,3 +1,6 @@
+//! Shared PCB pose and oriented-geometry math.
+//! Keeps exact right angles while supporting arbitrary editor rotations.
+
 const std = @import("std");
 
 /// Rotate a local point counter-clockwise in the board's y-down coordinate
@@ -18,6 +21,51 @@ pub fn rotate(x: f64, y: f64, degrees: f64) [2]f64 {
     const c = @cos(a);
     const s = @sin(a);
     return .{ x * c - y * s, x * s + y * c };
+}
+
+/// A rigid PCB pose: translation + rotation, with an optional local-X mirror
+/// for the back board face. Composition is shared by Stamp and its inverse.
+pub const RigidPose = struct { x: f64, y: f64, rot: f64, back: bool };
+
+/// Normalize an editor rotation to an integer degree in [0, 360).
+pub fn rigidNorm(rot: f64) f64 {
+    return @mod(@round(rot), 360.0);
+}
+
+fn rigidLinear(pose: RigidPose, x_in: f64, y: f64) [2]f64 {
+    const x = if (pose.back) -x_in else x_in;
+    return rotate(x, y, pose.rot);
+}
+
+/// Apply a rigid pose to a local point.
+pub fn rigidApply(pose: RigidPose, x: f64, y: f64) [2]f64 {
+    const point = rigidLinear(pose, x, y);
+    return .{ point[0] + pose.x, point[1] + pose.y };
+}
+
+/// Compose local pose `b` beneath world pose `a`.
+pub fn rigidCompose(a: RigidPose, b: RigidPose) RigidPose {
+    const at = rigidLinear(a, b.x, b.y);
+    return .{
+        .x = at[0] + a.x,
+        .y = at[1] + a.y,
+        .rot = rigidNorm(a.rot + if (a.back) -b.rot else b.rot),
+        .back = a.back != b.back,
+    };
+}
+
+/// Return the inverse rigid transform, including its board-side mirror.
+pub fn rigidInverse(pose: RigidPose) RigidPose {
+    var out = RigidPose{
+        .x = 0,
+        .y = 0,
+        .rot = rigidNorm(if (pose.back) pose.rot else -pose.rot),
+        .back = pose.back,
+    };
+    const at = rigidLinear(out, pose.x, pose.y);
+    out.x = -at[0];
+    out.y = -at[1];
+    return out;
 }
 
 /// Axis-aligned half-extents of a rectangle after rotation.
@@ -194,4 +242,15 @@ test "pose math handles right-angle and 45-degree transforms" {
     const ext = aabbHalf(2, 1, 45);
     try std.testing.expectApproxEqAbs(3 * root_half, ext[0], 1e-12);
     try std.testing.expectApproxEqAbs(3 * root_half, ext[1], 1e-12);
+}
+
+test "capture sub-circuit pose exactly reverses a mirrored Stamp transform" {
+    const local = RigidPose{ .x = 12, .y = 20, .rot = 90, .back = false };
+    const to_board = RigidPose{ .x = 100, .y = 50, .rot = 90, .back = true };
+    const on_board = rigidCompose(to_board, local);
+    const captured = rigidCompose(rigidInverse(to_board), on_board);
+    try std.testing.expectApproxEqAbs(local.x, captured.x, 1e-9);
+    try std.testing.expectApproxEqAbs(local.y, captured.y, 1e-9);
+    try std.testing.expectEqual(local.rot, captured.rot);
+    try std.testing.expectEqual(local.back, captured.back);
 }

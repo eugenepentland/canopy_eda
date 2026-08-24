@@ -998,6 +998,23 @@ test "viewer JS shows stamp and layout link for a selected sub-circuit" {
     try std.testing.expect(std.mem.indexOf(u8, js, "return \"/pcb-layout/\"+encodeURIComponent(PCB.name)+\"?sub=\"+encodeURIComponent(g);") != null);
 }
 
+// spec: Web Server - The PCB Sub-circuits palette and Properties expose Save to sub-circuit, which fetches a fresh target revision before capturing only that group's poses and owned copper as a new layout
+test "viewer JS saves a selected board group back to its sub-circuit" {
+    const js = @embedFile("assets/pcb_board.js");
+    for ([_][]const u8{
+        "data-save-sub=",
+        "data-grp-save=",
+        "Save to sub-circuit",
+        "function saveGroupLayout(g)",
+        "refreshSubcircuitData().then",
+        "(PCB.subsaveinfo||{})[g]",
+        "t.g===g",
+        "v.g===g",
+        "z.g===g",
+        "fetch(\"/api/pcb-subcircuit-layout/\"+encodeURIComponent(PCB.name)",
+    }) |marker| try std.testing.expect(std.mem.indexOf(u8, js, marker) != null);
+}
+
 // spec: Web Server - A multi-part drag or rotate carries copper on nets private to the moving parts and leaves shared-net copper in place
 test "viewer JS carries private-net copper with a multi-part move and strands nothing shared" {
     const js = @embedFile("assets/pcb_board.js");

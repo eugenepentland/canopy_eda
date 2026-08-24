@@ -2845,11 +2845,14 @@ function renderProps(){var body=document.getElementById("prop-body");if(!body)re
     'drag to move · R / Shift+R to rotate · click a component again to select it')+'</span></div>'+
    '<div class="prop-sec">Layout</div><div class="prop-grp">'+
    (ginf&&!RO?'<button class="btn grp-stamp" data-grp-stamp="'+pEsc(selGroup)+'" title="'+stampTitle(selGroup,ginf)+'">Stamp module layout</button>':'')+
+   (!RO?'<button class="btn grp-save" data-grp-save="'+pEsc(selGroup)+'" title="Save this on-board arrangement as a new layout on the sub-circuit">Save to sub-circuit…</button>':'')+
    '<a class="btn grp-layout" href="'+ghref+'" target="_blank" rel="noopener" title="Open this sub-circuit on its own PCB-layout page">Open sub-circuit layout ↗</a>'+
    (!ginf?'<span class="grp-noseed" title="Open the sub-circuit layout, place its parts, then save a layout before stamping it here.">no saved layout to stamp</span>':'')+
    '</div>';
   var gsb=body.querySelector("[data-grp-stamp]");
   if(gsb)gsb.addEventListener("click",function(){if(stampGroupFn)stampGroupFn(gsb.getAttribute("data-grp-stamp"));});
+  var gsv=body.querySelector("[data-grp-save]");
+  if(gsv)gsv.addEventListener("click",function(){if(saveGroupFn)saveGroupFn(gsv.getAttribute("data-grp-save"));});
   return;}
  var p=selRef?partByRef(selRef):null;
  if(!p){var bo=PCB.outline||PCB.board,os=PCB.outline?'Layout override':'Design outline',aos=authoredOutlineSeed();
@@ -2907,6 +2910,7 @@ function renderProps(){var body=document.getElementById("prop-body");if(!body)re
    '<span class="grp-n">'+GRPS[pg].length+' parts</span>'+
    (pinf&&!RO?'<button class="btn grp-stamp" data-grp-stamp="'+pEsc(pg)+'" title="'+stampTitle(pg,pinf)+'">Stamp module layout</button>':
     (pinf?'':'<span class="grp-noseed" title="No saved layout on the module matches its current parts — open the module’s own /pcb-layout page, lay it out and save (★ star it to pin the choice).">no saved module layout</span>'))+
+   (!RO?'<button class="btn grp-save" data-grp-save="'+pEsc(pg)+'" title="Save this on-board arrangement as a new layout on the sub-circuit">Save to sub-circuit…</button>':'')+
    '</div>';
  }
  var pads=(p.pads||[]).slice().sort(function(a,b){var an=parseInt(a.num,10),bn=parseInt(b.num,10);
@@ -2924,6 +2928,8 @@ function renderProps(){var body=document.getElementById("prop-body");if(!body)re
  if(cb)cb.addEventListener("click",function(){openFpCard(cb.getAttribute("data-court-ref"));});
  var gsb=body.querySelector("[data-grp-stamp]");
  if(gsb)gsb.addEventListener("click",function(){if(stampGroupFn)stampGroupFn(gsb.getAttribute("data-grp-stamp"));});
+ var gsv=body.querySelector("[data-grp-save]");
+ if(gsv)gsv.addEventListener("click",function(){if(saveGroupFn)saveGroupFn(gsv.getAttribute("data-grp-save"));});
  body.querySelectorAll(".pn[data-net]").forEach(function(e){var nn=e.getAttribute("data-net");
   if(!nn)return;e.style.cursor="pointer";
   if(nn===selNetCur)e.classList.add("net-sel");
@@ -3002,7 +3008,7 @@ function grpOf(ref){var i=String(ref).indexOf("/");return i<0?null:ref.slice(0,i
 var GRPS={};P.forEach(function(p,i){var g=grpOf(p.ref);if(g)(GRPS[g]=GRPS[g]||[]).push(i);});
 // stampGroup lives in the edit-only block below; the properties panel (shared
 // with RO pages) reaches it through this indirection.
-var stampGroupFn=null;
+var stampGroupFn=null,saveGroupFn=null;
 // Selecting a part lights its sub-circuit's row in the sidebar palette (and
 // scrolls it into view), so board and palette stay cross-referenced.
 function markGrpRow(){var g=selGroup||(selRef?grpOf(selRef):null),hit=null;
@@ -3521,14 +3527,19 @@ function stampZoneLayer(l,mirror){if(!mirror)return l;
 // edited in another tab while this board stays open with unsaved work, so the
 // page-load PCB.subseeds snapshot is only an initial palette preview, never the
 // authority for the actual Stamp.
-function stampBusy(g,on){document.querySelectorAll("[data-stamp],[data-grp-stamp]").forEach(function(b){
- if(b.getAttribute("data-stamp")!==g&&b.getAttribute("data-grp-stamp")!==g)return;
+function stampBusy(g,on){document.querySelectorAll("[data-stamp],[data-grp-stamp],[data-save-sub],[data-grp-save]").forEach(function(b){
+ if(b.getAttribute("data-stamp")!==g&&b.getAttribute("data-grp-stamp")!==g&&
+    b.getAttribute("data-save-sub")!==g&&b.getAttribute("data-grp-save")!==g)return;
  b.disabled=on;if(on)b.setAttribute("aria-busy","true");else b.removeAttribute("aria-busy");});}
-function refreshStampSeeds(g){stampBusy(g,true);
+function refreshSubcircuitData(){
  return fetch("/api/pcb-subseeds/"+encodeURIComponent(PCB.name),{cache:"no-store"})
   .then(function(r){if(!r.ok)throw new Error("server returned "+r.status);return r.json();})
   .then(function(j){PCB.subseeds=j.subseeds||{};PCB.subseedorigins=j.subseedorigins||{};PCB.subseedinfo=j.subseedinfo||{};
    PCB.submodules=j.submodules||PCB.submodules||{};PCB.subroutes=j.subroutes||{};
+   PCB.subsaveinfo=j.subsaveinfo||{};
+  });}
+function refreshStampSeeds(g){stampBusy(g,true);
+ return refreshSubcircuitData().then(function(){
    var idxs=GRPS[g]||[];
    if(!idxs.some(function(i){return !!stampSeedFor(g,P[i]);})){subPanelRefresh();
     throw new Error("the module has no saved layout matching its current parts");}
@@ -3588,6 +3599,34 @@ function stampGroup(g){return refreshStampSeeds(g).then(function(){var idxs=GRPS
  }).catch(function(e){window.alert("Stamp failed: "+(e&&e.message?e.message:e));
  }).finally(function(){stampBusy(g,false);});}
 stampGroupFn=stampGroup;
+// Inverse of Stamp: send only this rigid group's live poses and explicitly
+// group-owned copper. The server re-keys by origin, reverses the board pose,
+// maps parent nets back to module nets, and writes a NEW module layout behind
+// the freshly fetched target revision.
+function saveGroupLayout(g){var idxs=GRPS[g]||[];if(!idxs.length)return Promise.resolve();
+ var suggested=((PCB.name||"board")+" "+stamp()).slice(0,80);
+ var nm=window.prompt("Save this board arrangement as a new sub-circuit layout:",suggested);
+ if(nm===null)return Promise.resolve();nm=nm.trim();if(!nm)return Promise.resolve();
+ if(nm.length>80){window.alert("Layout names are limited to 80 characters.");return Promise.resolve();}
+ stampBusy(g,true);
+ return refreshSubcircuitData().then(function(){var info=(PCB.subsaveinfo||{})[g];
+  if(!info||typeof info.rev!=="number")throw new Error("the sub-circuit save target is unavailable");
+  var parts=idxs.map(function(i){var p=P[i];return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,origin:p.origin||"",side:p.side||"top",locked:!!p.locked};});
+  var tracks=(PCB.tracks||[]).filter(function(t){return t.g===g;});
+  var vias=(PCB.vias||[]).filter(function(v){return v.g===g;});
+  var zones=(PCB.zones||[]).filter(function(z){return z.g===g;});
+  var routes=(tracks.length||vias.length||zones.length)?{tracks:tracks,vias:vias,zones:zones}:null;
+  return fetch("/api/pcb-subcircuit-layout/"+encodeURIComponent(PCB.name),{method:"POST",headers:{"Content-Type":"application/json"},
+   body:JSON.stringify({group:g,name:nm,parts:parts,routes:routes,rev:info.rev})});
+ }).then(function(r){return r.text().then(function(t){var j={};try{j=t?JSON.parse(t):{};}catch(ignore){}
+   if(!r.ok)throw new Error((j&&j.error)||t||("server returned "+r.status));return j;});})
+  .then(function(j){var info=(PCB.subsaveinfo||{})[g];if(info&&typeof j.rev==="number")info.rev=j.rev;
+   var msg=document.getElementById("pcb-savemsg");if(msg){msg.style.color="#3fb950";
+    msg.textContent="saved ‘"+nm+"’ to "+g+" ✓";}
+   return refreshSubcircuitData().catch(function(){});})
+  .catch(function(e){window.alert("Save to sub-circuit failed: "+(e&&e.message?e.message:e));})
+  .finally(function(){stampBusy(g,false);});}
+saveGroupFn=saveGroupLayout;
 // Iterative layout editing: curLayout is the saved layout the Update button
 // writes back into (overwrite in place) instead of forcing a new one. Set by
 // Load and after a Save as…. Save/Update persist in place (no page reload — see
@@ -4273,10 +4312,12 @@ function subPanelRefresh(){var box=document.getElementById("sub-panel");if(!box)
    (hasSeed?'<button class="btn sub-stamp" data-stamp="'+pEsc(g)+'" title="'+
      (inf?stampTitle(g,inf):"Place this sub-circuit from its module layout")+'">Stamp</button>':
     '<span class="sub-noseed" title="No saved layout on the module matches its current parts \u2014 lay it out and save on the module\u2019s own page.">\u2014</span>')+
+   '<button class="btn sub-save" data-save-sub="'+pEsc(g)+'" title="Save the current on-board arrangement as a new layout on this sub-circuit">Save\u2026</button>'+
    '</div>';});
  box.innerHTML=h;
  box.querySelectorAll("[data-rigid]").forEach(function(b){b.addEventListener("click",function(){grpToggle(b.getAttribute("data-rigid"));});});
  box.querySelectorAll("[data-stamp]").forEach(function(b){b.addEventListener("click",function(){stampGroup(b.getAttribute("data-stamp"));});});
+ box.querySelectorAll("[data-save-sub]").forEach(function(b){b.addEventListener("click",function(){saveGroupLayout(b.getAttribute("data-save-sub"));});});
  box.querySelectorAll(".sub-row").forEach(function(r){var g=r.getAttribute("data-grp");
   r.addEventListener("mouseenter",function(){grpHl(g,true);});
   r.addEventListener("mouseleave",function(){grpHl(g,false);});});

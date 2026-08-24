@@ -10,10 +10,16 @@ const paths = @import("../paths.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const env = @import("../eval/env.zig");
 const optimizer = @import("../placement/optimizer.zig");
+const pose_math = @import("../placement/pose_math.zig");
+const board_layers = @import("../board_layers.zig");
 const export_kicad = @import("../export_kicad.zig");
+const review = @import("../review.zig");
+const numeric = @import("../numeric.zig");
+const clock = @import("../infra/clock.zig");
 const serve_root = @import("../serve.zig");
 const modules = @import("modules.zig");
 const pcb = @import("pcb_layout_page.zig");
+const sidecar_json = @import("layout_sidecar_json.zig");
 
 const Server = serve_root.Server;
 const SeedsJson = struct {
@@ -22,6 +28,7 @@ const SeedsJson = struct {
     info: []const u8 = "{}",
     mods: []const u8 = "{}",
     routes: []const u8 = "{}",
+    save_info: []const u8 = "{}",
 };
 
 /// GET /api/pcb-subseeds/:name — return current module layouts for Stamp.
@@ -49,15 +56,328 @@ pub fn pcbSubSeedsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) p
         res.body = "Placement failed";
         return;
     };
-    const seeds = build(ctx.allocator, ctx.project_dir, block, placement);
+    const seeds = build(ctx.allocator, ctx.project_dir, name, block, placement);
     var out: std.Io.Writer.Allocating = .init(ctx.allocator);
     try out.writer.print(
-        "{{\"subseeds\":{s},\"subseedorigins\":{s},\"subseedinfo\":{s},\"submodules\":{s},\"subroutes\":{s}}}",
-        .{ seeds.poses, seeds.origin_poses, seeds.info, seeds.mods, seeds.routes },
+        "{{\"subseeds\":{s},\"subseedorigins\":{s},\"subseedinfo\":{s},\"submodules\":{s},\"subroutes\":{s},\"subsaveinfo\":{s}}}",
+        .{ seeds.poses, seeds.origin_poses, seeds.info, seeds.mods, seeds.routes, seeds.save_info },
     );
     res.header("Cache-Control", "no-store");
     res.content_type = .JSON;
     res.body = out.written();
+}
+
+const CapturePose = pose_math.RigidPose;
+const CaptureTarget = struct { ref: []const u8, pose: CapturePose };
+const CaptureNetMap = struct { names: std.StringHashMapUnmanaged([]const u8) };
+
+fn parseObject(req: *httpz.Request, res: *httpz.Response) ?std.json.Value {
+    const body = pcb.bodyParam(req, res) orelse return null;
+    const root = std.json.parseFromSliceLeaky(std.json.Value, req.arena, body, .{}) catch {
+        res.status = 400;
+        res.body = "bad JSON";
+        return null;
+    };
+    if (root != .object) {
+        res.status = 400;
+        res.body = "expected JSON object";
+        return null;
+    }
+    return root;
+}
+
+fn capturePose(part: anytype) CapturePose {
+    return .{ .x = part.x, .y = part.y, .rot = pose_math.rigidNorm(part.rot), .back = part.side == .bottom };
+}
+
+fn captureTargets(alloc: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error!std.StringHashMapUnmanaged(CaptureTarget) {
+    var out = std.StringHashMapUnmanaged(CaptureTarget).empty;
+    for (placement.parts, 0..) |part, i| {
+        if (i >= placement.instances.len) break;
+        const origin = placement.instances[i].origin_key;
+        if (origin.len > 0) try out.put(alloc, origin, .{ .ref = part.ref_des, .pose = capturePose(part) });
+    }
+    return out;
+}
+
+fn captureParts(
+    alloc: std.mem.Allocator,
+    submitted: []const pcb.PartPose,
+    targets: *const std.StringHashMapUnmanaged(CaptureTarget),
+) (std.mem.Allocator.Error || error{NoMatchingParts})!struct { parts: []const pcb.PartPose, transform: CapturePose } {
+    var source_anchor: ?pcb.PartPose = null;
+    var target_anchor: ?CaptureTarget = null;
+    for (submitted) |part| {
+        if (part.origin.len == 0) continue;
+        if (targets.get(part.origin)) |target| {
+            source_anchor = part;
+            target_anchor = target;
+            break;
+        }
+    }
+    const source = source_anchor orelse return error.NoMatchingParts;
+    const target = target_anchor orelse return error.NoMatchingParts;
+    const transform = pose_math.rigidCompose(target.pose, pose_math.rigidInverse(capturePose(source)));
+    var out: std.ArrayList(pcb.PartPose) = .empty;
+    for (submitted) |part| {
+        const mapped = targets.get(part.origin) orelse continue;
+        const pose = pose_math.rigidCompose(transform, capturePose(part));
+        try out.append(alloc, .{
+            .ref = mapped.ref,
+            .x = pose.x,
+            .y = pose.y,
+            .rot = pose.rot,
+            .origin = part.origin,
+            .side = if (pose.back) .bottom else .top,
+            .locked = part.locked,
+        });
+    }
+    if (out.items.len == 0) return error.NoMatchingParts;
+    return .{ .parts = try out.toOwnedSlice(alloc), .transform = transform };
+}
+
+fn captureNetMap(
+    alloc: std.mem.Allocator,
+    group: []const u8,
+    parent: optimizer.Placement,
+    target: optimizer.Placement,
+) std.mem.Allocator.Error!CaptureNetMap {
+    var target_ref_origin = std.StringHashMapUnmanaged([]const u8).empty;
+    for (target.instances) |instance| try target_ref_origin.put(alloc, instance.ref_des, instance.origin_key);
+    var target_pin_net = std.StringHashMapUnmanaged([]const u8).empty;
+    for (target.nets) |net| for (net.pins) |pin| {
+        const origin = target_ref_origin.get(pin.ref_des) orelse continue;
+        const key = try std.fmt.allocPrint(alloc, "{s}\x00{s}", .{ origin, pin.pin });
+        try target_pin_net.put(alloc, key, net.name);
+    };
+    var parent_ref_origin = std.StringHashMapUnmanaged([]const u8).empty;
+    for (parent.instances) |instance| if (inGroup(instance.ref_des, group))
+        try parent_ref_origin.put(alloc, instance.ref_des, instance.origin_key);
+    var names = std.StringHashMapUnmanaged([]const u8).empty;
+    var ambiguous = std.StringHashMapUnmanaged(void).empty;
+    for (parent.nets) |net| for (net.pins) |pin| {
+        const origin = parent_ref_origin.get(pin.ref_des) orelse continue;
+        const key = try std.fmt.allocPrint(alloc, "{s}\x00{s}", .{ origin, pin.pin });
+        const target_name = target_pin_net.get(key) orelse continue;
+        if (names.get(net.name)) |prior| {
+            if (!std.mem.eql(u8, prior, target_name)) try ambiguous.put(alloc, net.name, {});
+        } else try names.put(alloc, net.name, target_name);
+    };
+    var it = ambiguous.keyIterator();
+    while (it.next()) |name| _ = names.remove(name.*);
+    return .{ .names = names };
+}
+
+fn capturedNet(map: *const CaptureNetMap, parent_name: []const u8) ?[]const u8 {
+    if (parent_name.len == 0) return "";
+    return map.names.get(parent_name);
+}
+
+fn captureRoutes(
+    alloc: std.mem.Allocator,
+    group: []const u8,
+    submitted: ?pcb.SavedRoutes,
+    transform: CapturePose,
+    nets: *const CaptureNetMap,
+) std.mem.Allocator.Error!?pcb.SavedRoutes {
+    const routes = submitted orelse return null;
+    var tracks: std.ArrayList(pcb.SavedTrack) = .empty;
+    var vias: std.ArrayList(pcb.SavedVia) = .empty;
+    var zones: std.ArrayList(pcb.SavedZone) = .empty;
+    for (routes.tracks) |track| {
+        if (!std.mem.eql(u8, track.g, group)) continue;
+        const net = capturedNet(nets, track.net) orelse continue;
+        const a = pose_math.rigidApply(transform, track.x1, track.y1);
+        const b = pose_math.rigidApply(transform, track.x2, track.y2);
+        const mid = if (track.xm != null and track.ym != null) pose_math.rigidApply(transform, track.xm.?, track.ym.?) else null;
+        try tracks.append(alloc, .{
+            .x1 = a[0],
+            .y1 = a[1],
+            .x2 = b[0],
+            .y2 = b[1],
+            .xm = if (mid) |point| point[0] else null,
+            .ym = if (mid) |point| point[1] else null,
+            .l = if (!transform.back) track.l else if (track.l == 0) 1 else if (track.l == 1) 0 else track.l,
+            .w = track.w,
+            .net = net,
+            .source = track.source,
+        });
+    }
+    for (routes.vias) |via| {
+        if (!std.mem.eql(u8, via.g, group)) continue;
+        const net = capturedNet(nets, via.net) orelse continue;
+        const at = pose_math.rigidApply(transform, via.x, via.y);
+        try vias.append(alloc, .{
+            .x = at[0],
+            .y = at[1],
+            .d = via.d,
+            .drill = via.drill,
+            .net = net,
+            .f = via.f,
+            .source = via.source,
+            .s = via.s,
+        });
+    }
+    for (routes.zones) |zone| {
+        if (!std.mem.eql(u8, zone.g, group)) continue;
+        if (!zone.flags.filled or zone.flags.keepout) continue;
+        const net = capturedNet(nets, zone.net) orelse continue;
+        const poly = try alloc.alloc([2]f64, zone.poly.len);
+        for (zone.poly, 0..) |point, i| poly[i] = pose_math.rigidApply(transform, point[0], point[1]);
+        try zones.append(alloc, .{
+            .net = net,
+            .layer = if (!transform.back) zone.layer else if (std.mem.eql(u8, zone.layer, board_layers.f_cu)) board_layers.b_cu else if (std.mem.eql(u8, zone.layer, board_layers.b_cu)) board_layers.f_cu else zone.layer,
+            .poly = poly,
+            .flags = .{ .filled = true },
+            .priority = zone.priority,
+        });
+    }
+    if (tracks.items.len == 0 and vias.items.len == 0 and zones.items.len == 0) return null;
+    return .{ .tracks = try tracks.toOwnedSlice(alloc), .vias = try vias.toOwnedSlice(alloc), .zones = try zones.toOwnedSlice(alloc) };
+}
+
+fn findSubBlock(alloc: std.mem.Allocator, block: *const env.DesignBlock, group: []const u8) ?env.SubBlock {
+    for (block.sub_blocks) |sub| {
+        if (std.mem.eql(u8, sub.name, group)) return sub;
+        const slug = review.slugify(alloc, sub.name) catch continue;
+        if (std.mem.eql(u8, slug, group)) return sub;
+    }
+    return null;
+}
+
+/// POST /api/pcb-subcircuit-layout/:name — inverse Stamp into a new module layout.
+pub fn saveSubcircuitLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb.HandlerError!void {
+    const parent_name = pcb.nameParam(req, res) orelse return;
+    const root = parseObject(req, res) orelse return;
+    const group_v = root.object.get("group") orelse {
+        res.status = 400;
+        res.body = "no sub-circuit";
+        return;
+    };
+    const name_v = root.object.get("name") orelse {
+        res.status = 400;
+        res.body = "no layout name";
+        return;
+    };
+    if (group_v != .string or name_v != .string) {
+        res.status = 400;
+        res.body = "bad sub-circuit save";
+        return;
+    }
+    const layout_name = std.mem.trim(u8, name_v.string, " \t\n\r");
+    if (layout_name.len == 0 or layout_name.len > 80) {
+        res.status = 400;
+        res.body = "bad layout name";
+        return;
+    }
+    const submitted = sidecar_json.parsePartPoses(req.arena, root.object.get("parts")) orelse {
+        res.status = 400;
+        res.body = "no parts";
+        return;
+    };
+    const client_rev: i64 = if (root.object.get("rev")) |value| switch (value) {
+        .integer => |i| i,
+        .float => |f| numeric.checkedInt(i64, f) orelse -1,
+        else => -1,
+    } else -1;
+    if (client_rev < 0) {
+        res.status = 400;
+        res.body = "bad sub-circuit revision";
+        return;
+    }
+
+    var parent_eval = Evaluator.init(ctx.allocator, ctx.project_dir);
+    defer parent_eval.deinit();
+    var parent_module: ?modules.ResolvedBlock = null;
+    defer if (parent_module) |resolved| {
+        resolved.eval.deinit();
+        ctx.allocator.destroy(resolved.eval);
+    };
+    const parent_block = resolveBlock(ctx.allocator, ctx.project_dir, parent_name, &parent_eval, &parent_module) orelse {
+        res.status = 404;
+        res.body = "design not found";
+        return;
+    };
+    const sub = findSubBlock(req.arena, parent_block, group_v.string) orelse {
+        res.status = 404;
+        res.body = "sub-circuit not found";
+        return;
+    };
+    const module_target = reusableModuleSource(sub.source);
+    const target_slug = if (module_target) null else review.slugify(req.arena, sub.name) catch {
+        res.status = 500;
+        return;
+    };
+    const target_name = if (module_target) sub.source else parent_name;
+    var target_module: ?modules.ResolvedBlock = null;
+    defer if (target_module) |resolved| {
+        resolved.eval.deinit();
+        ctx.allocator.destroy(resolved.eval);
+    };
+    const target_block: *env.DesignBlock = if (module_target) blk: {
+        target_module = modules.resolveModuleBlock(ctx.allocator, ctx.project_dir, sub.source);
+        break :blk if (target_module) |resolved| resolved.block else {
+            res.status = 404;
+            res.body = "module could not be resolved";
+            return;
+        };
+    } else sub.block;
+
+    const disk_rev = pcb.readLayoutRev(req.arena, ctx.project_dir, target_name, target_slug);
+    if (client_rev != disk_rev) {
+        res.status = 409;
+        res.content_type = .JSON;
+        res.body = try std.fmt.allocPrint(req.arena, "{{\"error\":\"conflict\",\"rev\":{d}}}", .{disk_rev});
+        return;
+    }
+    const existing = pcb.readLayoutsSub(req.arena, ctx.project_dir, target_name, target_slug);
+    for (existing) |layout| if (std.mem.eql(u8, layout.name, layout_name)) {
+        res.status = 422;
+        res.body = "a layout with that name already exists";
+        return;
+    };
+    const target_placement = optimizer.gridPlace(req.arena, target_block, ctx.project_dir, .{}) catch {
+        res.status = 500;
+        res.body = "could not build the sub-circuit placement";
+        return;
+    };
+    const targets = try captureTargets(req.arena, target_placement);
+    const captured = captureParts(req.arena, submitted, &targets) catch |err| switch (err) {
+        error.NoMatchingParts => {
+            res.status = 409;
+            res.body = "the sub-circuit parts no longer match the module";
+            return;
+        },
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    const parent_placement = optimizer.gridPlace(req.arena, parent_block, ctx.project_dir, .{}) catch {
+        res.status = 500;
+        res.body = "could not map the parent board nets";
+        return;
+    };
+    const net_map = try captureNetMap(req.arena, sub.name, parent_placement, target_placement);
+    const routes = try captureRoutes(req.arena, sub.name, pcb.parseSavedRoutes(req.arena, root.object.get("routes")), captured.transform, &net_map);
+    const checked = try pcb.scoreSavedLayout(ctx, req, target_name, target_slug, captured.parts);
+    const entry = pcb.SavedLayout{
+        .name = layout_name,
+        .kind = pcb.kind_manual,
+        .ts = clock.timestamp(),
+        .score = checked.score,
+        .parts = captured.parts,
+        .routes = routes,
+        .default = existing.len == 0,
+    };
+    if (sidecar_json.saveRejection(req.arena, checked.layers, entry)) |message| {
+        res.status = 400;
+        res.body = message;
+        return;
+    }
+    var out: std.ArrayList(pcb.SavedLayout) = .empty;
+    try out.append(req.arena, entry);
+    try out.appendSlice(req.arena, existing);
+    const new_rev = pcb.commitNamedLayoutMutation(req.arena, ctx.project_dir, target_name, target_slug, out.items, disk_rev);
+    res.content_type = .JSON;
+    res.body = try std.fmt.allocPrint(req.arena, "{{\"ok\":true,\"rev\":{d},\"parts\":{d},\"copper\":{}}}", .{ new_rev, captured.parts.len, routes != null });
 }
 
 fn resolveBlock(
@@ -80,6 +400,7 @@ fn resolveBlock(
 fn build(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
+    parent_name: []const u8,
     block: *const env.DesignBlock,
     placement: optimizer.Placement,
 ) SeedsJson {
@@ -87,17 +408,21 @@ fn build(
     var origin_poses: std.Io.Writer.Allocating = .init(alloc);
     var info: std.Io.Writer.Allocating = .init(alloc);
     var routes: std.Io.Writer.Allocating = .init(alloc);
+    var save_info: std.Io.Writer.Allocating = .init(alloc);
     poses.writer.writeByte('{') catch return .{};
     origin_poses.writer.writeByte('{') catch return .{};
     info.writer.writeByte('{') catch return .{};
     routes.writer.writeByte('{') catch return .{};
+    save_info.writer.writeByte('{') catch return .{};
     var pose_first = true;
     var origin_group_first = true;
     var info_first = true;
     var route_first = true;
+    var save_first = true;
     var parent_pin_nets: ?std.StringHashMapUnmanaged([]const u8) = null;
 
     for (block.sub_blocks) |sb| {
+        writeSaveInfo(&save_info.writer, alloc, project_dir, parent_name, sb, &save_first) catch return .{};
         const seeds = pcb.subBlockPoseByOriginKey(alloc, project_dir, sb) orelse continue;
         var group_origins: std.Io.Writer.Allocating = .init(alloc);
         group_origins.writer.writeByte('{') catch return .{};
@@ -150,13 +475,41 @@ fn build(
     origin_poses.writer.writeByte('}') catch return .{};
     info.writer.writeByte('}') catch return .{};
     routes.writer.writeByte('}') catch return .{};
+    save_info.writer.writeByte('}') catch return .{};
     return .{
         .poses = poses.written(),
         .origin_poses = origin_poses.written(),
         .info = info.written(),
         .mods = buildModules(alloc, block),
         .routes = routes.written(),
+        .save_info = save_info.written(),
     };
+}
+
+fn reusableModuleSource(source: []const u8) bool {
+    return source.len > 0 and std.mem.indexOfScalar(u8, source, '/') == null and
+        !std.mem.endsWith(u8, source, ".sexp");
+}
+
+/// Fresh optimistic-concurrency revisions for the inverse of Stamp. The PCB
+/// page fetches this immediately before Save to sub-circuit, so a second module
+/// editor cannot be silently overwritten by an already-open parent board.
+fn writeSaveInfo(
+    w: *std.Io.Writer,
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    parent_name: []const u8,
+    sb: env.SubBlock,
+    first: *bool,
+) std.Io.Writer.Error!void {
+    const module = reusableModuleSource(sb.source);
+    const slug = if (module) null else review.slugify(alloc, sb.name) catch return;
+    const target = if (module) sb.source else parent_name;
+    const rev = pcb.readLayoutRev(alloc, project_dir, target, slug);
+    if (!first.*) try w.writeByte(',');
+    first.* = false;
+    try pcb.writeJsonStr(w, sb.name);
+    try w.print(":{{\"rev\":{d}}}", .{rev});
 }
 
 fn inGroup(ref: []const u8, group: []const u8) bool {
@@ -434,4 +787,53 @@ test "subseed endpoint rereads a module layout saved after the board opened" {
     const after = try testApiBody(alloc, project_dir);
     try std.testing.expectEqual(@as(f64, 30), try seedXSum(alloc, after));
     try std.testing.expectEqual(@as(f64, 10), try originSeedX(alloc, after, "sm", "C_A"));
+}
+
+// spec: Web Server - Saving a rigid sub-circuit from its parent PCB is the inverse of Stamp: poses and group-owned copper return to module coordinates, including a board-side mirror
+test "sub-circuit capture rekeys poses and owned copper into module coordinates" {
+    const alloc = std.testing.allocator;
+    var targets = std.StringHashMapUnmanaged(CaptureTarget).empty;
+    defer targets.deinit(alloc);
+    const local_a = CapturePose{ .x = 10, .y = 20, .rot = 90, .back = false };
+    const local_b = CapturePose{ .x = 12, .y = 20, .rot = 0, .back = false };
+    try targets.put(alloc, "U-origin", .{ .ref = "U1", .pose = local_a });
+    try targets.put(alloc, "R-origin", .{ .ref = "R1", .pose = local_b });
+    const to_board = CapturePose{ .x = 100, .y = 50, .rot = 90, .back = true };
+    const board_a = pose_math.rigidCompose(to_board, local_a);
+    const board_b = pose_math.rigidCompose(to_board, local_b);
+    const submitted = [_]pcb.PartPose{
+        .{ .ref = "power/U42", .x = board_a.x, .y = board_a.y, .rot = board_a.rot, .origin = "U-origin", .side = .bottom },
+        .{ .ref = "power/R87", .x = board_b.x, .y = board_b.y, .rot = board_b.rot, .origin = "R-origin", .side = .bottom },
+    };
+    const captured = try captureParts(alloc, &submitted, &targets);
+    defer alloc.free(captured.parts);
+    try std.testing.expectEqualStrings("U1", captured.parts[0].ref);
+    try std.testing.expectEqualStrings("R1", captured.parts[1].ref);
+    try std.testing.expectApproxEqAbs(local_b.x, captured.parts[1].x, 1e-9);
+    try std.testing.expectEqual(optimizer.Side.top, captured.parts[1].side);
+
+    var names = std.StringHashMapUnmanaged([]const u8).empty;
+    defer names.deinit(alloc);
+    try names.put(alloc, "PARENT_VOUT", "VOUT");
+    const board_start = pose_math.rigidApply(to_board, 10, 20);
+    const board_end = pose_math.rigidApply(to_board, 12, 20);
+    const tracks = [_]pcb.SavedTrack{.{
+        .x1 = board_start[0],
+        .y1 = board_start[1],
+        .x2 = board_end[0],
+        .y2 = board_end[1],
+        .l = 1,
+        .w = 0.3,
+        .net = "PARENT_VOUT",
+        .g = "power",
+    }};
+    const routes = (try captureRoutes(alloc, "power", .{ .tracks = &tracks, .vias = &.{} }, captured.transform, &.{ .names = names })).?;
+    defer alloc.free(routes.tracks);
+    defer alloc.free(routes.vias);
+    defer alloc.free(routes.zones);
+    try std.testing.expectApproxEqAbs(@as(f64, 10), routes.tracks[0].x1, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 12), routes.tracks[0].x2, 1e-9);
+    try std.testing.expectEqual(@as(u8, 0), routes.tracks[0].l);
+    try std.testing.expectEqualStrings("VOUT", routes.tracks[0].net);
+    try std.testing.expectEqualStrings("", routes.tracks[0].g);
 }

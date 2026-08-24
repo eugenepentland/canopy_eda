@@ -2192,8 +2192,13 @@ src/placement/port_escape.zig::detect | fn detect(arena: Allocator, p: Placement
 src/placement/port_escape.zig::detectWithPads | fn detectWithPads(arena: Allocator, p: Placement, ports: []const bool, pads: []const PadView) Allocator.Error![]Blocked
 src/placement/port_escape.zig::portNets | fn portNets( arena: Allocator, block: *const env.DesignBlock, nets: []const FlatNet, ) Allocator.Error![]bool
 src/placement/pose_math.zig::Penetration struct_
+src/placement/pose_math.zig::RigidPose struct_
 src/placement/pose_math.zig::aabbHalf | fn aabbHalf(hw: f64, hh: f64, degrees: f64) [2]f64
 src/placement/pose_math.zig::obbPenetration | fn obbPenetration(a: [4][2]f64, b: [4][2]f64) ?Penetration
+src/placement/pose_math.zig::rigidApply | fn rigidApply(pose: RigidPose, x: f64, y: f64) [2]f64
+src/placement/pose_math.zig::rigidCompose | fn rigidCompose(a: RigidPose, b: RigidPose) RigidPose
+src/placement/pose_math.zig::rigidInverse | fn rigidInverse(pose: RigidPose) RigidPose
+src/placement/pose_math.zig::rigidNorm | fn rigidNorm(rot: f64) f64
 src/placement/pose_math.zig::rotate | fn rotate(x: f64, y: f64, degrees: f64) [2]f64
 src/placement/pose_snapshot.zig::Pose struct_
 src/placement/pose_snapshot.zig::capture | fn capture(comptime Part: type, arena: std.mem.Allocator, parts: []const Part) std.mem.Allocator.Error![]Pose
@@ -3499,6 +3504,7 @@ src/serve/pcb_layout_page.zig::SyncVia struct_
 src/serve/pcb_layout_page.zig::ThermalPng struct_
 src/serve/pcb_layout_page.zig::addSubcircuitRouteSeeds | fn addSubcircuitRouteSeeds( alloc: std.mem.Allocator, project_dir: []const u8, block: *const env_mod.DesignBlock, placement: optimizer.Placement, params: router.RouteParams, options: *route_policy.Options, ) std.mem.Allocator.Error!SubcircuitRouteSeedStats
 src/serve/pcb_layout_page.zig::bodyParam | fn bodyParam(req: *httpz.Request, res: *httpz.Response) ?[]const u8
+src/serve/pcb_layout_page.zig::commitNamedLayoutMutation | fn commitNamedLayoutMutation( alloc: std.mem.Allocator, project_dir: []const u8, design: []const u8, sub: ?[]const u8, layouts: []const SavedLayout, disk_rev: i64, ) i64
 src/serve/pcb_layout_page.zig::deleteNamedLayoutApi | fn deleteNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::diagnoseWithSubcircuitSeeds | fn diagnoseWithSubcircuitSeeds( alloc: std.mem.Allocator, project_dir: []const u8, block: *const env_mod.DesignBlock, placement: optimizer.Placement, params: router.RouteParams, base_options: route_policy.Options, ) std.mem.Allocator.Error!struct { diagnostic: route_plan.PlannedDiagnostic, seeds: SubcircuitRouteSeedStats = .{} }
 src/serve/pcb_layout_page.zig::fabViewFor | fn fabViewFor(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layout_arg: ?[]const u8) FabViewError!FabView
@@ -3558,6 +3564,7 @@ src/serve/pcb_layout_page.zig::readCacheSlot | fn readCacheSlot(alloc: std.mem.A
 src/serve/pcb_layout_page.zig::readLayoutPosesFor | fn readLayoutPosesFor( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, want: []const u8, block: *env_mod.DesignBlock, sub: ?[]const u8, ) ?[]const optimizer.RefPose
 src/serve/pcb_layout_page.zig::readLayoutRev | fn readLayoutRev(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8) i64
 src/serve/pcb_layout_page.zig::readLayouts | fn readLayouts(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) []const SavedLayout
+src/serve/pcb_layout_page.zig::readLayoutsSub | fn readLayoutsSub(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8) []const SavedLayout
 src/serve/pcb_layout_page.zig::renameNamedLayoutApi | fn renameNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::renderDesignPng | fn renderDesignPng( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: PngRequest, ) PngError![]u8
 src/serve/pcb_layout_page.zig::rescoreLayoutsApi | fn rescoreLayoutsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
@@ -3572,6 +3579,7 @@ src/serve/pcb_layout_page.zig::route_source_human value
 src/serve/pcb_layout_page.zig::route_source_imported value
 src/serve/pcb_layout_page.zig::saveNamedLayoutApi | fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::savePcbCourtyardApi | fn savePcbCourtyardApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::scoreSavedLayout | fn scoreSavedLayout( ctx: *Server, req: *httpz.Request, name: []const u8, sub: ?[]const u8, parts: []const PartPose, ) HandlerError!sidecar_json.SavedLayoutCheck
 src/serve/pcb_layout_page.zig::setDefaultLayoutApi | fn setDefaultLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::shownLayoutCopper | fn shownLayoutCopper( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: PngRequest, placement: optimizer.Placement, ) ShownCopper
 src/serve/pcb_layout_page.zig::sidecar_max_bytes value
@@ -3608,6 +3616,7 @@ src/serve/pcb_rules_json.zig::writeMaskRelief | fn writeMaskRelief( w: *std.Io.W
 src/serve/pcb_rules_json.zig::writeNetClasses | fn writeNetClasses(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.Error!void
 src/serve/pcb_rules_json.zig::writePlaneNets | fn writePlaneNets(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.Error!void
 src/serve/pcb_subseeds.zig::pcbSubSeedsApi | fn pcbSubSeedsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb.HandlerError!void
+src/serve/pcb_subseeds.zig::saveSubcircuitLayoutApi | fn saveSubcircuitLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb.HandlerError!void
 src/serve/pdf_viewer.zig::HandlerError value
 src/serve/pdf_viewer.zig::pdfViewerPage | fn pdfViewerPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/placement_outline.zig::apply | fn apply( placement: *optimizer.Placement, rect: optimizer.BoardRect, poly: ?[]const [2]f64, arcs: []const optimizer.BoardArc, ) void

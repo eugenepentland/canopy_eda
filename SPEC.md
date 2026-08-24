@@ -5986,8 +5986,10 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Stamped copper adopts destination net-class geometry
 - Restamping a sub-circuit preserves its anchor's board side and rigidly mirrors its parts and stamped copper onto that side
 - Stamp fetches the current module layout when clicked, so a sub-circuit edit in another tab applies without reloading a board and without discarding its unsaved work
+- Saving a rigid sub-circuit from its parent PCB is the inverse of Stamp: poses and group-owned copper return to module coordinates, including a board-side mirror
 - A live Stamp refresh keeps every stampable sub-circuit's palette action visible when the fresh grid placement uses different ref-des assignments from the open board
 - Selecting a rigid sub-circuit exposes its Stamp and layout-page actions directly in Properties
+- The PCB Sub-circuits palette and Properties expose Save to sub-circuit, which fetches a fresh target revision before capturing only that group's poses and owned copper as a new layout
 - the PCB hand router defaults to the active net class while the sidebar keeps its resolved geometry controls hidden
 - The /pcb-layout Route panel presents Route board, Stop, status, and live replay without cached-load, interactive-session, scope, or advanced-routing controls
 - A completed Route board run persists its applied copper to the active layout, or creates the conventional first `layout` snapshot; Route plan remains temporary
