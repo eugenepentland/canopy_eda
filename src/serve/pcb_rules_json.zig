@@ -146,11 +146,17 @@ pub fn writeMaskRelief(
 ) std.Io.Writer.Error!void {
     try w.writeAll(",\"mask_relief\":");
     const empty = "{\"openings\":[],\"strokes\":[],\"joints\":[]}";
-    const r = routed orelse return w.writeAll(empty);
+    const r = routed orelse {
+        try w.writeAll(empty);
+        return writeMaskMerges(w, alloc, p);
+    };
     const relief = mask_relief.computeRouted(alloc, p, .{
         .tracks = r.tracks,
         .arcs = r.arcs,
-    }, r.vias) catch return w.writeAll(empty);
+    }, r.vias) catch {
+        try w.writeAll(empty);
+        return writeMaskMerges(w, alloc, p);
+    };
     try w.writeAll("{\"openings\":[");
     for (relief.openings, 0..) |opening, i| {
         if (i > 0) try w.writeByte(',');
@@ -182,6 +188,27 @@ pub fn writeMaskRelief(
         try w.print("{{\"x\":{d:.3},\"y\":{d:.3},\"l\":{d},\"d\":{d:.3}}}", .{ joint.x, joint.y, joint.layer, joint.dia });
     }
     try w.writeAll("]}");
+    try writeMaskMerges(w, alloc, p);
+}
+
+/// Emit the automatic sub-minimum mask-web joins used by the Gerber writer.
+/// The physical 2D/3D previews punch these exact strokes out of their mask, so
+/// review shows the same merged apertures the fabrication package ships.
+fn writeMaskMerges(
+    w: *std.Io.Writer,
+    alloc: std.mem.Allocator,
+    p: optimizer.Placement,
+) std.Io.Writer.Error!void {
+    try w.writeAll(",\"mask_merges\":[");
+    const merges = mask_relief.collectMerges(alloc, p) catch return w.writeByte(']');
+    for (merges, 0..) |merge, i| {
+        if (i > 0) try w.writeByte(',');
+        try w.print(
+            "{{\"x1\":{d:.4},\"y1\":{d:.4},\"x2\":{d:.4},\"y2\":{d:.4},\"l\":{d},\"w\":{d:.4}}}",
+            .{ merge.x1, merge.y1, merge.x2, merge.y2, merge.layer, merge.width },
+        );
+    }
+    try w.writeByte(']');
 }
 
 /// A JSON string literal with the page blob's escaping: JSON's own escapes plus
@@ -349,7 +376,7 @@ test "the blob serves mask-relief geometry for the shown copper" {
     // is a no-op exactly when the Gerber's is.
     var ew: std.Io.Writer.Allocating = .init(arena);
     try writeMaskRelief(&ew.writer, arena, fixture(null, &rules), null);
-    try testing.expectEqualStrings(",\"mask_relief\":{\"openings\":[],\"strokes\":[],\"joints\":[]}", ew.written());
+    try testing.expectEqualStrings(",\"mask_relief\":{\"openings\":[],\"strokes\":[],\"joints\":[]},\"mask_merges\":[]", ew.written());
 }
 
 // spec: Web Server - The PCB page blob names the declared plane nets, and omits the key entirely when the design declares no stackup

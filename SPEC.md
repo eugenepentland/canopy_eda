@@ -2916,7 +2916,6 @@ Public functions: check, checkTopology, checkWithZones, countKind, defaultSeveri
 - a wider board clearance flags copper the default rule allowed
 - a net-class clearance override is enforced against that net's neighbours server-side
 - an oval slot's hole-to-hole clearance is measured end-to-end (capsule), not at its centre
-- flags a thin solder-mask web between two adjacent pad openings, and is a warning
 - flags silkscreen that crosses a foreign pad's mask opening, as a warning
 - flags board-level silkscreen text crossing a same-side component courtyard, as a warning
 - silk-over-pad checks authored footprint silk rather than inventing reference-designator artwork
@@ -4219,6 +4218,7 @@ Public functions: planLayers, writeLayer
 - outer copper flashes side-correct pads and draws routed tracks/vias in the y-up frame
 - a solver RF taper is emitted as one swept polygon rather than its centreline chord apertures
 - mask openings expand pads and tent vias; paste covers only same-side SMD pads
+- pad openings separated by a positive web below mask-web are merged across that web instead of producing a mask-sliver DRC warning
 - an IC exposed paddle opens the opposite-face solder mask at the exact EP outline, without the component-side mask margin
 - non-ground outer-face traces and vias remain masked where they cross an opposite-face exposed-paddle window, and a non-ground pour suppresses that window
 - a pad's own (mask-margin …) sizes its mask opening instead of the board rule, and a no-paste pad gets no stencil aperture

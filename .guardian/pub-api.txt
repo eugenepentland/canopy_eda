@@ -1848,10 +1848,12 @@ src/placement/manhattan_route.zig::turnCost | fn turnCost(self: State, g: f64, l
 src/placement/manhattan_route.zig::turn_cost_mult value
 src/placement/mask_relief.zig::Copper struct_
 src/placement/mask_relief.zig::Joint struct_
+src/placement/mask_relief.zig::Merge struct_
 src/placement/mask_relief.zig::Relief struct_
 src/placement/mask_relief.zig::Stroke struct_
 src/placement/mask_relief.zig::TerminalFinish struct_
 src/placement/mask_relief.zig::any | fn any(self: Relief) bool
+src/placement/mask_relief.zig::collectMerges | fn collectMerges(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error![]const Merge
 src/placement/mask_relief.zig::compute | fn compute(arena: std.mem.Allocator, placement: optimizer.Placement, copper: Copper) std.mem.Allocator.Error!Relief
 src/placement/mask_relief.zig::computeRouted | fn computeRouted( arena: std.mem.Allocator, placement: optimizer.Placement, copper: Copper, vias: []const router.Via, ) std.mem.Allocator.Error!Relief
 src/placement/mask_relief.zig::min_exposed_mm value

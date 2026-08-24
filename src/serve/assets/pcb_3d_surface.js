@@ -202,13 +202,23 @@
     });
   }
 
+  function punchMaskMerges(ctx, data, side) {
+    var layer = side === "bottom" ? 1 : 0;
+    ctx.lineCap = "round"; ctx.lineJoin = "round";
+    (data.mask_merges || []).forEach(function (m) {
+      if ((+m.l || 0) !== layer) return;
+      ctx.lineWidth = Math.max(+m.w || 0, 0.01); ctx.beginPath();
+      ctx.moveTo(+m.x1, +m.y1); ctx.lineTo(+m.x2, +m.y2); ctx.stroke();
+    });
+  }
+
   function maskCanvas(data, pts, b, width, height, scale, side) {
     var cv = document.createElement("canvas"); cv.width = width; cv.height = height;
     var ctx = cv.getContext("2d");
     ctx.setTransform(scale, 0, 0, scale, -b.minx * scale, -b.miny * scale);
     ctx.fillStyle = MASK; boardPath(ctx, pts); ctx.fill();
     ctx.globalCompositeOperation = "destination-out"; ctx.fillStyle = "#000"; ctx.strokeStyle = "#000";
-    drawPads(ctx, data, side, true); punchRelief(ctx, data, side);
+    drawPads(ctx, data, side, true); punchMaskMerges(ctx, data, side); punchRelief(ctx, data, side);
     var edge = Math.max(0, +(data.rules && data.rules.perimeter_mask_width) || 0);
     if (edge > 0) { boardPath(ctx, pts); ctx.lineWidth = 2 * edge; ctx.lineJoin = "round"; ctx.stroke(); }
     return cv;

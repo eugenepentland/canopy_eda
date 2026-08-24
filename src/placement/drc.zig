@@ -35,7 +35,7 @@ const FlatNet = flat_netlist.FlatNet;
 /// via / plated-thru-pad ring under the fab minimum; `board_edge` = copper (a
 /// track, a via, or a component land) near the outline; `component_edge` = a
 /// component courtyard/body proxy inside the assembly edge margin; `courtyard`/
-/// `hole_hole`/`min_drill`/`track_width`/`mask_sliver`/
+/// `hole_hole`/`min_drill`/`track_width`/
 /// `silk_over_pad` as named; `diff_uncoupled`/`diff_skew` = differential-pair
 /// coupling / length-match warnings (see `drc_diffpair.zig`).
 pub const Kind = enum {
@@ -114,7 +114,6 @@ pub const Kind = enum {
     /// rail pour or two independent plane drops may make the NET connected,
     /// but they do not make the local high-frequency bypass connection.
     bypass_open,
-    mask_sliver,
     silk_over_pad,
     diff_uncoupled,
     diff_skew,
@@ -164,13 +163,13 @@ pub const TopologyZone = copper_support.Zone;
 /// reading the table rather than the violation, treated) them as fab errors.
 ///
 /// Warnings are the findings a board can still be fabricated with: assembly
-/// hygiene (courtyard / mask sliver / silk over pad), RF preferences (keepout
+/// hygiene (courtyard / silk over pad), RF preferences (keepout
 /// halo, sharp bend), and differential-pair coupling / skew. Everything else is
 /// a fab error and blocks the gate.
 pub fn defaultSeverity(k: Kind) Severity {
     return switch (k) {
         // Assembly hygiene — the board builds; a human decides whether to care.
-        .component_edge, .courtyard, .mask_sliver, .silk_over_pad, .single_layer_via, .redundant_via => .warn,
+        .component_edge, .courtyard, .silk_over_pad, .single_layer_via, .redundant_via => .warn,
         // Copper lying wholly on its own net's land: junk a reader should not
         // have to explain, but it can neither short nor open a net.
         .dangling_copper, .implicit_junction => .warn,
@@ -621,10 +620,9 @@ fn checkImpl(
     for (placement.rules.net) |nr| clr_max = @max(clr_max, nr.clearance);
     for (vias) |via| clr_max = @max(clr_max, viaAntipadGap(placement.rules, via));
 
-    // Grids built once and shared. The pad grid is also queried by mask/silk, so
-    // its cell is sized by the widest of those deltas.
-    const mask_delta = rules.mask.web + 2 * rules.mask.margin;
-    var pad_grid = try Grid.build(arena, PadBox, pads, padBox, @max(clr_max, mask_delta));
+    // Grids built once and shared. The pad grid is also queried by silk, so its
+    // cell is sized to cover the mask-opening margin used there.
+    var pad_grid = try Grid.build(arena, PadBox, pads, padBox, @max(clr_max, rules.mask.margin));
     var via_grid = try Grid.build(arena, router.Via, vias, viaBox, clr_max);
     var track_grid = try Grid.build(arena, router.Track, tracks, trackBox, clr_max);
 
@@ -634,13 +632,12 @@ fn checkImpl(
     try checkViaTrack(c, vias, tracks, &track_grid);
     try checkTrackTrack(c, tracks, &track_grid);
     try checkTrackPad(c, tracks, pads, &pad_grid);
-    // Drill / edge / courtyard / mask / silk / width rules live in helpers.
+    // Drill / edge / courtyard / silk / width rules live in helpers.
     try checkDrillRules(arena, &out, pads, vias, rules);
     try checkBoardEdge(arena, &out, placement, tracks, vias, rules.edgeClearance());
     try checkPadEdge(arena, &out, placement, pads, rules.edgeClearance());
     try checkComponentEdge(arena, &out, placement, rules.edge.component);
     try checkCourtyards(arena, &out, placement);
-    try checkMaskSlivers(arena, &out, pads, &pad_grid, rules.mask.margin, rules.mask.web);
     try checkSilkOverPad(arena, &out, placement, pads, &pad_grid, rules.mask.margin);
     try checkTrackWidth(arena, &out, .{ .placement = placement, .routed = routed, .tracks = tracks, .min_width = rules.min_width });
     try checkCopperTopology(arena, &out, placement, pads, physical, topology_zones);
@@ -940,7 +937,7 @@ fn padParties(net: i32, p: PadBox) Parties {
     return .{ .net_a = net, .net_b = p.net, .part_b = partyIndex(p.part), .pad_b = p.num };
 }
 
-/// The `Parties` of a pad-vs-pad clash (pad↔pad clearance, mask sliver).
+/// The `Parties` of a pad-vs-pad clearance clash.
 fn padPairParties(a: PadBox, b: PadBox) Parties {
     return .{
         .net_a = a.net,
@@ -1469,48 +1466,6 @@ fn checkCourtyards(arena: std.mem.Allocator, out: *Viol, placement: optimizer.Pl
                 // Assembly concern → warn; `gap` = −depth (no clearance rule).
                 // Parties are the two PARTS (a courtyard belongs to no net).
                 try out.append(arena, .{ .x = ov.x, .y = ov.y, .gap = -ov.depth, .clearance = 0, .kind = .courtyard, .severity = defaultSeverity(.courtyard), .who = .{ .part_a = partyIndex(i), .part_b = partyIndex(bi) } });
-            }
-        }
-    }
-}
-
-/// mask sliver: the solder-mask WEB between two adjacent pad openings (each pad
-/// box grown by `mask_margin`/side) must not fall below `min_web`, or the strip
-/// flakes off and bridges. Cross-part, same-side pairs only; merged openings
-/// (web ≤ 0) skipped. A warning, never a fab-gate blocker.
-fn checkMaskSlivers(
-    arena: std.mem.Allocator,
-    out: *Viol,
-    pads: []const PadBox,
-    grid: *Grid,
-    mask_margin: f64,
-    min_web: f64,
-) Err {
-    if (min_web <= 0 or pads.len < 2) return;
-    const m2 = 2 * mask_margin;
-    // A sliver needs BOTH axis gaps under `min_web`, i.e. the raw pad boxes within
-    // `min_web + 2·margin` on each axis — the grid inflation, so no pair is missed.
-    const delta = min_web + m2;
-    for (pads, 0..) |a, i| {
-        for (try grid.near(arena, padBox(a), delta)) |ju| {
-            if (ju <= i) continue;
-            const b = pads[ju];
-            if (a.part == b.part) continue;
-            // Openings must share a face (SMD → its part's side; thru → both).
-            if (!(a.thru or b.thru or a.layer == b.layer)) continue;
-            // Opening-to-opening gap per axis = raw pad-box gap − 2·margin.
-            const wgx = @max(a.x0 - b.x1, b.x0 - a.x1) - m2;
-            const wgy = @max(a.y0 - b.y1, b.y0 - a.y1) - m2;
-            // If either axis alone already clears the rule, the web (≥ that
-            // axis' gap) can't be a sliver — cheap reject + correctness.
-            if (wgx >= min_web - eps or wgy >= min_web - eps) continue;
-            // Web width: a diagonal corner gap when separated on both axes,
-            // else the one positive axis (overlap on the other).
-            const web = if (wgx > 0 and wgy > 0) std.math.hypot(wgx, wgy) else @max(wgx, wgy);
-            if (web > eps and web < min_web - eps) {
-                const mx = ((a.x0 + a.x1) + (b.x0 + b.x1)) / 4;
-                const my = ((a.y0 + a.y1) + (b.y0 + b.y1)) / 4;
-                try out.append(arena, .{ .x = mx, .y = my, .gap = web, .clearance = min_web, .kind = .mask_sliver, .severity = defaultSeverity(.mask_sliver), .who = padPairParties(a, b) });
             }
         }
     }
@@ -2997,36 +2952,6 @@ test "check measures an oval slot as a capsule for hole-to-hole" {
     try testing.expectApproxEqAbs(@as(f64, 0.1), firstOfKind(v, .hole_hole).?.gap, 1e-9);
 }
 
-// spec: placement/drc - flags a thin solder-mask web between two adjacent pad openings, and is a warning
-test "check flags a mask sliver between adjacent openings" {
-    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena_inst.deinit();
-    const arena = arena_inst.allocator();
-    const G = @import("geometry.zig");
-    const routed = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
-
-    // Two 0.4×0.4 SMD pads on different parts. Copper gap 0.2 mm ⇒ mask
-    // openings (0.05 mm/side) leave a 0.1 mm web — under the 0.2 mm default.
-    // Small courtyards (hw 0.25) keep them from a courtyard overlap.
-    const a_pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
-    const b_pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
-    var close = [_]optimizer.Part{
-        .{ .ref_des = "R1", .kind = .passive, .hw = 0.25, .hh = 0.25, .pads = &a_pad, .fallback = false, .x = 0, .y = 0 },
-        .{ .ref_des = "R2", .kind = .passive, .hw = 0.25, .hh = 0.25, .pads = &b_pad, .fallback = false, .x = 0.6, .y = 0 },
-    };
-    const v = try check(arena, partsOnly(&close), routed, 0.127);
-    try testing.expectEqual(@as(usize, 1), countKind(v, .mask_sliver));
-    // It's an assembly-hygiene WARNING, never a blocker.
-    try testing.expectEqual(Severity.warn, firstOfKind(v, .mask_sliver).?.severity);
-
-    // Slide R2 far away ⇒ openings well clear ⇒ no sliver.
-    var apart = [_]optimizer.Part{
-        .{ .ref_des = "R1", .kind = .passive, .hw = 0.25, .hh = 0.25, .pads = &a_pad, .fallback = false, .x = 0, .y = 0 },
-        .{ .ref_des = "R2", .kind = .passive, .hw = 0.25, .hh = 0.25, .pads = &b_pad, .fallback = false, .x = 3, .y = 0 },
-    };
-    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, partsOnly(&apart), routed, 0.127), .mask_sliver));
-}
-
 // spec: placement/drc - flags silkscreen that crosses a foreign pad's mask opening, as a warning
 test "check flags silkscreen over a foreign pad" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
@@ -3827,7 +3752,7 @@ const KindSet = [@typeInfo(Kind).@"enum".field_names.len]bool;
 
 /// Every violation a set of deliberately-bad boards produces. Between them they
 /// trip every kind whose canonical default is a WARNING: assembly hygiene
-/// (component edge, courtyard, mask sliver, silk over pad), the RF rules
+/// (component edge, courtyard, silk over pad), the RF rules
 /// (keepout halo, sharp bend), both differential-pair rules, the match-group
 /// length mismatch, the single-layer via, and copper drawn dead on its own land.
 /// Error kinds come along for the ride and are checked the same way.
@@ -3935,8 +3860,8 @@ fn topologyBoard(arena: std.mem.Allocator) ![]const Violation {
     return check(arena, placement, .{ .tracks = &tracks, .vias = &vias, .routed = 1, .total = 1 }, 0.127);
 }
 
-/// Two parts close enough to overlap courtyards AND leave a thin mask web
-/// between their pads, one of them drawing silk across the other's pad.
+/// Two parts close enough to overlap courtyards, one of them drawing silk
+/// across the other's pad.
 fn hygieneBoard(arena: std.mem.Allocator) ![]const Violation {
     const G = @import("geometry.zig");
     const a_pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};

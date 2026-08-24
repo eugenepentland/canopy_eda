@@ -2020,17 +2020,24 @@ function reliefTerminalFinish(ctx,s,atStart,clear){if(!(atStart?s.ts:s.te))retur
  ctx.beginPath();if(clear){p(-h,h,true);p(r,h);p(r,-h);p(-h,-h);ctx.closePath();ctx.fill();return;}if(!(r>0))return;
  p(r,h,true);p(r,-h);for(var i=1;i<=6;i++){var a=-Math.PI/2-Math.PI*i/12;p(r+r*Math.cos(a),-h+r+r*Math.sin(a));}
  p(0,h-r);for(var j=1;j<=6;j++){var b=Math.PI-Math.PI*j/12;p(r+r*Math.cos(b),h-r+r*Math.sin(b));}ctx.closePath();ctx.fill();}
+// A merge stroke ends inside both pad apertures, so its compositor must reveal
+// the real lands under those ends. Kept outside paintMaskRelief deliberately:
+// the RF terminal path itself still never subtracts/repaints a square pad dam.
+function paintMaskMergePads(ctx,L){P.forEach(function(p){(p.pads||[]).forEach(function(pd){
+ if(pd.npth||!(pd.thru||pd.drill>0||(p.side==="bottom"?1:0)===L))return;
+ ctx.fill(worldPadPath(p,pd));});});}
 function paintMaskRelief(ctx){if(!PHYSICAL_REVIEW||reviewFocusHasNets())return;
- var d=PCB.mask_relief,os=d&&d.openings||[],ss=d&&d.strokes||[],js=d&&d.joints||[],L=activeLayer,
+ var d=PCB.mask_relief,os=d&&d.openings||[],ss=d&&d.strokes||[],js=d&&d.joints||[],ms=PCB.mask_merges||[],L=activeLayer,
   mw=Number(PCB.rules&&PCB.rules.perimeter_mask_width)||0,any=mw>0,layerHasOutline=false;
  for(var oi=0;oi<os.length;oi++){if((os[oi].l||0)===L){any=true;layerHasOutline=true;break;}}
  if(!any)for(var i=0;i<ss.length;i++){if((ss[i].l||0)===L){any=true;break;}}
  if(!any)for(var j=0;j<js.length;j++){if((js[j].l||0)===L){any=true;break;}}
+ if(!any)for(var mi=0;mi<ms.length;mi++){if((ms[mi].l||0)===L){any=true;break;}}
  if(!any)return;
  var target=ctx.canvas,cv=reliefCv;if(!cv)cv=reliefCv=document.createElement("canvas");
  if(cv.width!==target.width||cv.height!==target.height){cv.width=target.width;cv.height=target.height;reliefKey="";}
   var tr=ctx.getTransform(),corner=PCB.rules&&PCB.rules.mask_relief_corner_radius||0,
-  key=[cv.width,cv.height,L,os.length,ss.length,js.length,(PCB.vias||[]).length,mw,corner,keepoutGeomRev,keepoutTransformKey(tr)].join("|");
+  key=[cv.width,cv.height,L,os.length,ss.length,js.length,ms.length,(PCB.vias||[]).length,mw,corner,keepoutGeomRev,keepoutTransformKey(tr)].join("|");
  if(reliefKey!==key){var mc=cv.getContext("2d");mc.setTransform(1,0,0,1,0,0);mc.clearRect(0,0,cv.width,cv.height);
   mc.setTransform(tr);mc.lineCap="round";mc.lineJoin="round";
   // Removing mask reveals substrate first. Repaint every real copper shape
@@ -2049,11 +2056,20 @@ function paintMaskRelief(ctx){if(!PHYSICAL_REVIEW||reviewFocusHasNets())return;
    ss.forEach(function(s){if((s.l||0)!==L)return;reliefTerminalFinish(mc,s,true,true);reliefTerminalFinish(mc,s,false,true);});
    mc.globalCompositeOperation="source-over";mc.fillStyle=PH.substrate;
    ss.forEach(function(s){if((s.l||0)!==L)return;reliefTerminalFinish(mc,s,true,false);reliefTerminalFinish(mc,s,false,false);});}
+  // Automatic DFM pass: a positive web below mask-web is removed by this
+  // exact Gerber stroke. It belongs in the same substrate/copper compositor as
+  // RF relief, because the gap between two pads may expose bare substrate.
+  mc.strokeStyle=PH.substrate;mc.lineCap="round";
+  ms.forEach(function(m){if((m.l||0)!==L)return;mc.lineWidth=m.w*S;mc.beginPath();
+   mc.moveTo(X(m.x1),Y(m.y1));mc.lineTo(X(m.x2),Y(m.y2));mc.stroke();});
   mc.globalCompositeOperation="source-atop";mc.fillStyle=PH.copper;mc.strokeStyle=PH.copper;
   reviewCopperAreas().forEach(function(aq){var q=aq.q;if(q.keepout||aq.kind==="zone"||reviewAreaLayer(q)!==L)return;mc.fill(aq.fillPath,"evenodd");});
   rfPathGeom().forEach(function(rf){if(rf.l===L)mc.fill(rf.path);});
   (PCB.tracks||[]).forEach(function(t){if((t.l||0)!==L)return;mc.lineWidth=Math.max(t.w*S,1.2);
    mc.beginPath();trackPath(mc,t);mc.stroke();});
+  // Merge strokes terminate inside the two pad apertures. Repaint the actual
+  // pad lands through those openings just like pours/tracks/vias below them.
+  paintMaskMergePads(mc,L);
   // Via copper has no mask flag or aperture. Paint every ring, then let the
   // existing source-atop operation retain only the pixels under an opening.
   (PCB.vias||[]).forEach(function(v){var rr=viaRenderRadius(v.d);
@@ -7235,7 +7251,6 @@ function drcMsg(d){
    " never join ("+drcMm(d.gap)+" mm apart)";}
  if(d.k=="courtyard overlap")return tag+d.k+on+" — parts overlap by "+drcMm(-d.gap)+" mm";
  if(d.k=="silkscreen overlap")return tag+d.k+on+" — silkscreen crosses a pad's solder-mask opening";
- if(d.k=="mask sliver")return tag+d.k+on+" — mask web "+drcMm(d.gap)+" mm < "+drcMm(d.clr)+" mm min";
  if(d.k=="track width")return tag+d.k+on+" — "+drcMm(d.gap)+" mm < "+drcMm(d.clr)+" mm required";
  // The copper-topology findings carry no clearance pair at all (gap=clr=0), so
  // the generic form below would print "gap 0.000 mm < 0.000 mm" — say what the
@@ -7928,7 +7943,7 @@ function paintPickPreview(ctx){var d=pickPreview;if(!d)return;
 // authoritative re-check (all 8 checks, incl. annular + board-edge).
 var drcTimer=null,drcSeq=0;
 // Chip splits the count by severity: error-severity violations gate the fab
-// package (red), warning-severity ones (courtyard/mask-sliver/silk) are advisory.
+// package (red), warning-severity ones (courtyard/silk) are advisory.
 function drcChip(n){var e=document.getElementById("r-drc");if(!e)return;
  if(n<0){e.className="route-stat";e.textContent="checking…";return;}
  var arr=PCB.drc||[],err=0,warn=0;
@@ -8161,7 +8176,7 @@ function drcRefreshNow(){if(!wasmDrc.failed&&wasmDrc.worker){runWasmDrc();schedu
 var drcGate={inst:null,mem:null,ready:false,failed:false,sLoaded:false,netIdx:null,sSeq:0};
 // Only clearance/edge/hole-class violations block a commit: they are the ones a
 // user fixes by rerouting. track-width / min-drill / annular are geometry the
-// route can't dodge (blocking them would trap the pen), and mask/silk/courtyard
+// route can't dodge (blocking them would trap the pen), and silk/courtyard
 // are warnings — none should ever make copper un-layable. "net open" and
 // "copper stub" stay out for the same reason: a half-drawn route is the normal
 // mid-session state, not a reason to refuse the segment that starts it.

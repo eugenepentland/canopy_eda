@@ -974,6 +974,113 @@ pub fn strokePoly(s: Stroke) [4][2]f64 {
     };
 }
 
+// ── Sub-minimum web suppression ────────────────────────────────────────────
+
+const merge_eps: f64 = 1e-9;
+
+/// One round-ended dark stroke on a negative solder-mask layer. `layer` uses
+/// the routed-copper convention (0 = top, 1 = bottom).
+pub const Merge = struct {
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+    width: f64,
+    layer: u8,
+};
+
+const PadOpening = struct {
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
+    top: bool,
+    bottom: bool,
+};
+
+fn openingOn(o: PadOpening, layer: u8) bool {
+    return if (layer == 0) o.top else o.bottom;
+}
+
+fn appendMerge(out: *std.ArrayList(Merge), arena: std.mem.Allocator, a: PadOpening, b: PadOpening, layer: u8, min_web: f64) std.mem.Allocator.Error!void {
+    if (!openingOn(a, layer) or !openingOn(b, layer)) return;
+
+    const gx = @max(a.x0 - b.x1, b.x0 - a.x1);
+    const gy = @max(a.y0 - b.y1, b.y0 - a.y1);
+    if (gx >= min_web - merge_eps or gy >= min_web - merge_eps) return;
+    const gap = if (gx > 0 and gy > 0) std.math.hypot(gx, gy) else @max(gx, gy);
+    // Non-positive means the apertures already merge. A legal-width web stays.
+    if (gap <= merge_eps or gap >= min_web - merge_eps) return;
+
+    var merge: Merge = undefined;
+    if (gx > 0 and gy <= 0) {
+        // Side-by-side apertures: delete the complete web over their shared Y
+        // span, rather than merely nicking its centre.
+        const left = if (a.x1 <= b.x0) a else b;
+        const right = if (a.x1 <= b.x0) b else a;
+        const lo = @max(a.y0, b.y0);
+        const hi = @min(a.y1, b.y1);
+        if (hi - lo <= merge_eps) return;
+        merge = .{ .x1 = left.x1, .y1 = (lo + hi) / 2, .x2 = right.x0, .y2 = (lo + hi) / 2, .width = hi - lo, .layer = layer };
+    } else if (gy > 0 and gx <= 0) {
+        // Stacked apertures: the corresponding full shared X span.
+        const lower = if (a.y1 <= b.y0) a else b;
+        const upper = if (a.y1 <= b.y0) b else a;
+        const lo = @max(a.x0, b.x0);
+        const hi = @min(a.x1, b.x1);
+        if (hi - lo <= merge_eps) return;
+        merge = .{ .x1 = (lo + hi) / 2, .y1 = lower.y1, .x2 = (lo + hi) / 2, .y2 = upper.y0, .width = hi - lo, .layer = layer };
+    } else {
+        // Corner-to-corner adjacency has no shared projection. Cut a bounded
+        // min-web-wide diagonal join between the nearest aperture corners.
+        const ax = if (a.x1 <= b.x0) a.x1 else a.x0;
+        const bx = if (a.x1 <= b.x0) b.x0 else b.x1;
+        const ay = if (a.y1 <= b.y0) a.y1 else a.y0;
+        const by = if (a.y1 <= b.y0) b.y0 else b.y1;
+        const narrow = @min(@min(a.x1 - a.x0, a.y1 - a.y0), @min(b.x1 - b.x0, b.y1 - b.y0));
+        merge = .{ .x1 = ax, .y1 = ay, .x2 = bx, .y2 = by, .width = @min(min_web, narrow), .layer = layer };
+    }
+    if (merge.width > merge_eps) try out.append(arena, merge);
+}
+
+/// Collect every pad-aperture join needed by the resolved minimum mask web.
+/// SMD pads open on their component face; through/NPTH pads open on both.
+/// Each pad's own mask-margin override sizes its aperture before the pair is
+/// judged. Pairs inside one footprint are included: a fab limit applies to the
+/// finished mask regardless of which footprint authored the neighbouring pads.
+pub fn collectMerges(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error![]const Merge {
+    const min_web = placement.rules.design.mask.web;
+    if (min_web <= 0) return &.{};
+
+    var openings: std.ArrayList(PadOpening) = .empty;
+    for (placement.parts) |part| {
+        for (part.pads) |pad| {
+            const shape = try pad_shape.worldShape(arena, part, pad);
+            const margin = pad.maskMargin(placement.rules.design.mask.margin);
+            const opening = PadOpening{
+                .x0 = shape.x0 - margin,
+                .y0 = shape.y0 - margin,
+                .x1 = shape.x1 + margin,
+                .y1 = shape.y1 + margin,
+                .top = pad.thru or pad.npth or part.side == .top,
+                .bottom = pad.thru or pad.npth or part.side == .bottom,
+            };
+            // A sufficiently negative override can suppress the aperture.
+            if (opening.x1 - opening.x0 <= merge_eps or opening.y1 - opening.y0 <= merge_eps) continue;
+            try openings.append(arena, opening);
+        }
+    }
+
+    var out: std.ArrayList(Merge) = .empty;
+    for (openings.items, 0..) |a, i| {
+        for (openings.items[i + 1 ..]) |b| {
+            try appendMerge(&out, arena, a, b, 0, min_web);
+            try appendMerge(&out, arena, a, b, 1, min_web);
+        }
+    }
+    return out.toOwnedSlice(arena);
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -1003,6 +1110,41 @@ const two_nets = [_]flat_netlist.FlatNet{
     .{ .name = "RF", .pins = &.{} },
     .{ .name = "GND", .pins = &.{} },
 };
+
+test "sub-minimum pad-aperture webs are merged" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.2, .hh = 0.2, .pads = &pads, .fallback = false },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.2, .hh = 0.2, .pads = &pads, .fallback = false, .x = 0.6 },
+    };
+    const merges = try collectMerges(arena, testPlacement(&parts, &.{}, &.{}));
+    try testing.expectEqual(@as(usize, 1), merges.len);
+    try testing.expectEqual(@as(u8, 0), merges[0].layer);
+    try testing.expectApproxEqAbs(@as(f64, 0.25), merges[0].x1, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0.35), merges[0].x2, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0.5), merges[0].width, 1e-9);
+
+    parts[1].x = 0.7; // opening gap = 0.2 mm: exactly legal, no merge.
+    try testing.expectEqual(@as(usize, 0), (try collectMerges(arena, testPlacement(&parts, &.{}, &.{}))).len);
+}
+
+test "through-pad web merges reach both faces and use pad margins" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const pads = [_]geometry.Pad{
+        .{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4, .thru = true, .drill = 0.2, .overrides = .{ .mask_margin = 0.1 } },
+        .{ .number = "2", .x = 0.65, .y = 0, .w = 0.4, .h = 0.4, .thru = true, .drill = 0.2, .overrides = .{ .mask_margin = 0.1 } },
+    };
+    var parts = [_]optimizer.Part{.{ .ref_des = "J1", .kind = .passive, .hw = 0.6, .hh = 0.2, .pads = &pads, .fallback = false }};
+    const merges = try collectMerges(arena, testPlacement(&parts, &.{}, &.{}));
+    try testing.expectEqual(@as(usize, 2), merges.len);
+    try testing.expectEqual(@as(u8, 0), merges[0].layer);
+    try testing.expectEqual(@as(u8, 1), merges[1].layer);
+}
 
 // spec: placement/mask-relief - a fenced max-freq class's default band widens to expose the fence row's annular rings
 // spec: placement/mask-relief - a max-freq class without a (fence …) widens the same way, because it is a fence target too and its generated fence row must untent

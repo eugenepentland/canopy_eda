@@ -211,7 +211,6 @@ var DRC_HELP={
  board_edge:"Copper sits closer to the routed board outline than the edge rule.",
  component_edge:"A component courtyard sits closer to the finished board edge than the component-edge rule. The built-in fabrication minimum is 0.2 mm; assembly services may require a wider authored value.",
  courtyard:"Two component courtyards overlap — the parts collide on assembly.",
- mask_sliver:"Solder mask between openings is thinner than the minimum web and will flake off.",
  silk_over_pad:"Footprint or board-level silkscreen crosses a pad or component courtyard.",
  diff_uncoupled:"A differential pair runs uncoupled for longer than its budget allows.",
  diff_skew:"The two legs of a differential pair differ in length beyond the skew budget.",

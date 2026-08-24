@@ -802,8 +802,8 @@ pub const scope_form_docs = blk: {
             "(copper-edge) copper-to-board-outline clearance; " ++
             "(component-edge) component-courtyard-to-board-outline clearance; (hole-to-hole) " ++
             "wall-to-wall spacing between two drilled holes; (min-annular) minimum via annular ring " ++
-            "(copper radius − drill radius); (mask-web) smallest solder-mask sliver between two adjacent " ++
-            "openings; (min-width) narrowest legal track; (pour-clearance) the BASE copper-pour isolation " ++
+            "(copper radius − drill radius); (mask-web) smallest solder-mask web retained between adjacent " ++
+            "openings — a positive strip below it is removed by merging those apertures; (min-width) narrowest legal track; (pour-clearance) the BASE copper-pour isolation " ++
             "gap — how far a solid pour holds off foreign copper (pad/track halos, hole and via antipads) " ++
             "on every ordinary net, and, with no (copper-edge …), its pullback from the board outline; an " ++
             "RF (net-class …) still carves its own per-net exceptions over it (a (ground-gap …) opening, a " ++

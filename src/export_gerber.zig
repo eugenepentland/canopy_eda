@@ -712,7 +712,9 @@ fn thermalRelief(g: *Gx, p: optimizer.Part, pad: geometry.Pad, gap: f64) Error!v
 /// Solder mask (negative: a flash = an OPENING in the mask). SMD pads open
 /// on their part's side; an IC's exposed thermal paddle additionally opens an
 /// exact 1:1 window on the opposite face; through-hole and NPTH pads open on
-/// both sides.
+/// both sides. Any positive web below the resolved `mask-web` floor is removed
+/// by joining the neighbouring apertures; it is not left as a DRC warning for
+/// a fabricator to resolve differently.
 /// Ordinary vias are tented. A RELIEVED net (`(mask-relief …)`, defaulting on
 /// for a max-freq class, widened over a declared fence) opens the mask along
 /// its routed copper first — the exposure-run polygons plus an antipad-sized
@@ -745,6 +747,12 @@ fn writeMask(g: *Gx, placement: optimizer.Placement, copper: Copper, side: optim
             // the board's 0.05 mm ships a fiducial no vision system can read.
             try flashPad(g, p, pad, pad.maskMargin(margin));
         }
+    }
+    for (try mask_relief.collectMerges(g.arena, placement)) |merge| {
+        const layer: u8 = if (side == .bottom) 1 else 0;
+        if (merge.layer != layer) continue;
+        try g.use(.c, merge.width, 0);
+        try g.line(merge.x1, merge.y1, merge.x2, merge.y2);
     }
     const fence = placement.rules.perimeter_fence;
     if (fence.mask_width > 0) {
@@ -2370,6 +2378,33 @@ test "mask margin reads from the design rules" {
     var ww: std.Io.Writer.Allocating = .init(arena);
     try writeLayer(&ww.writer, arena, wide, .{}, &.{}, export_fab.frameFor(wide), .{ .mask = .top }, .{ .function = "Soldermask,Top" });
     try testing.expect(std.mem.indexOf(u8, ww.written(), "R,1.200000X0.700000*%") != null);
+}
+
+// spec: export_gerber - pad openings separated by a positive web below mask-web are merged across that web instead of producing a mask-sliver DRC warning
+test "mask output removes a sub-minimum web between pad openings" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.2, .hh = 0.2, .pads = &pads, .fallback = false, .x = 10, .y = 5 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.2, .hh = 0.2, .pads = &pads, .fallback = false, .x = 10.6, .y = 5 },
+    };
+    const placement = testPlacement(&parts, &.{});
+    var out: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&out.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .mask = .top }, .{ .function = "Soldermask,Top" });
+    const mask = out.written();
+    // Two 0.5 mm-tall openings leave 0.1 mm of mask between them. The extra
+    // 0.5 mm round stroke crosses that complete web, merging the apertures.
+    try testing.expect(std.mem.indexOf(u8, mask, "%ADD11C,0.500000*%") != null);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, mask, "D01*"));
+
+    parts[1].x = 10.7; // opening gap = 0.2 mm, exactly the retained-web floor.
+    const legal = testPlacement(&parts, &.{});
+    var legal_out: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&legal_out.writer, arena, legal, .{}, &.{}, export_fab.frameFor(legal), .{ .mask = .top }, .{ .function = "Soldermask,Top" });
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, legal_out.written(), "D01*"));
 }
 
 /// Render one face's mask for the RF relief tests: `rules` are index-aligned

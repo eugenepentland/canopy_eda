@@ -210,7 +210,7 @@ pub fn check(
     const violations = drc_rules.apply(arena, ctx.drc_rules, drc.check(arena, placement, routed, clearance) catch &.{});
     stats.connectivity.drc_violations = violations.len;
     // Partition by severity: error-severity violations block the gate; warnings
-    // (courtyard overlap, mask slivers, silkscreen over a pad) flow through as
+    // (courtyard overlap, silkscreen over a pad) flow through as
     // an informational finding but never 409 the download.
     var drc_errs: std.ArrayList(drc.Violation) = .empty;
     var drc_warns: std.ArrayList(drc.Violation) = .empty;

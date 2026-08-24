@@ -551,7 +551,7 @@ literals = [
   "\"track_track\"", "\"track_pad\"", "\"pad_pad\"", "\"annular\"",
   "\"pad_annular\"", "\"board_edge\"", "\"hole_hole\"", "\"copper_stub\"",
   "\"dangling_copper\"", "\"single_layer_via\"", "\"land_transit\"",
-  "\"mask_sliver\"", "\"silk_over_pad\"", "\"diff_uncoupled\"",
+  "\"silk_over_pad\"", "\"diff_uncoupled\"",
   "\"diff_skew\"", "\"length_mismatch\"", "\"sharp_bend\"",
   "\"keepout_violation\"", "\"net_open\"",
 ]
@@ -777,7 +777,7 @@ surfaces = ["http:/modules", "mcp:preview_module"]
 name = "drc-kind-strings"
 literals = [
   # drcMsg branches — kinds the generic "gap X mm < Y mm" form would misread.
-  "net open", "courtyard overlap", "silkscreen overlap", "mask sliver",
+  "net open", "courtyard overlap", "silkscreen overlap",
   "track width", "diff skew", "diff uncoupled", "copper stub",
   "dangling copper", "single-layer via", "copper on own land",
   "length mismatch",

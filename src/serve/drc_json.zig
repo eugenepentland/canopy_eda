@@ -40,7 +40,6 @@ pub fn kindStr(k: drc.Kind) []const u8 {
         .reference_transition => "reference transition",
         .loop_area => "return loop area",
         .bypass_open => "bypass open",
-        .mask_sliver => "mask sliver",
         .silk_over_pad => "silkscreen overlap",
         .diff_uncoupled => "diff uncoupled",
         .diff_skew => "diff skew",
@@ -82,7 +81,7 @@ pub const drawer_groups = [_]DrawerGroup{
     .{
         .title = "Fabrication limits",
         .blurb = "Board-level minimums, the routed outline, and assembly hygiene.",
-        .kinds = &.{ .track_width, .board_edge, .component_edge, .courtyard, .mask_sliver, .silk_over_pad },
+        .kinds = &.{ .track_width, .board_edge, .component_edge, .courtyard, .silk_over_pad },
     },
     .{
         .title = "Signal integrity",
