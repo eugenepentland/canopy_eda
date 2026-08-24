@@ -7487,6 +7487,17 @@ function drcRulesPost(){var ov={};
 // Collapsed type-groups in the violations panel, keyed by kind label. Persists
 // across re-renders so a group you fold stays folded through DRC refreshes.
 var drcCollapsed={};
+// Net-open emits one record per missing island-to-island join. Keep those gap
+// records for inspection, but present one collapsed row per exact (unshortened)
+// net name so an unrouted rail with 40 isolated pads reads as one open net, not
+// 39 unrelated errors. A net row expands on demand to expose its individual
+// gaps and their stable violation ids.
+var drcOpenExpanded=Object.create(null);
+function drcOpenNetName(d){return d&&d.k==="net open"&&d.a&&d.a.net?String(d.a.net):"";}
+function drcOpenNetGroups(idxs){var v=PCB.drc||[],by=Object.create(null),out=[];
+ idxs.forEach(function(i){var name=drcOpenNetName(v[i]),key="$"+name,g=by[key];
+  if(!g){g=by[key]={name:name,idxs:[]};out.push(g);}g.idxs.push(i);});
+ out.sort(function(a,b){return a.name<b.name?-1:a.name>b.name?1:0;});return out;}
 // A type-group counts as an error (sorts first, red badge) unless every one of
 // its violations is a warning — matching the on-board marker colour split.
 function grpSev(idxs){var v=PCB.drc||[];
@@ -7505,32 +7516,46 @@ function drcGroups(){var v=PCB.drc||[],groups={},order=[];
   var ra=rank[a]==null?999:rank[a],rb=rank[b]==null?999:rank[b];
   if(ra!==rb)return ra-rb;return a<b?-1:a>b?1:0;});
  return {groups:groups,order:order};}
+// Counts for compact status surfaces. Ordinary violations still count one by
+// one; net-open gaps count once per net, matching the rows the user can act on.
+// The raw gap count remains available in the expanded list and its type header.
+function drcSummary(){var v=PCB.drc||[],openIdx=[],otherErr=0,otherWarn=0;
+ v.forEach(function(d,i){if(d.k==="net open")openIdx.push(i);
+  else if(drcSevClass(d)==="warn")otherWarn++;else otherErr++;});
+ var nets=drcOpenNetGroups(openIdx),openErr=0,openWarn=0;
+ nets.forEach(function(g){if(grpSev(g.idxs))openWarn++;else openErr++;});
+ return {open:nets.length,openGaps:openIdx.length,otherErr:otherErr,otherWarn:otherWarn,
+  err:otherErr+openErr,warn:otherWarn+openWarn};}
 // Grouped by type: each type gets a collapsible header row with a count badge,
-// then its own violations underneath. Rows keep their original PCB.drc index so
-// a click still locates the record.
+// then its own violations underneath. Net-open gets one extra level by exact
+// net name, collapsed by default; expanding a net reveals the original rows.
+// Rows keep their original PCB.drc index so a click still locates the record.
 function renderDrcList(){drcTabBadge();var lst=ensureDrcList();if(!lst)return;
  var v=PCB.drc||[];
  var g=drcGroups(),groups=g.groups,order=g.order;
- var nt=order.length;
+ var nt=order.length,sum=drcSummary(),issues=sum.err+sum.warn,other=sum.otherErr+sum.otherWarn;
  var h='<div class="drc-row" style="cursor:default;font-weight:600"><span class="drc-k">'+
-  (v.length?(v.length+" violation"+(v.length>1?"s":"")+(nt>1?" · "+nt+" types":"")):"No DRC violations")+'</span>'+
+  (v.length?((sum.open?(sum.open+" open net"+(sum.open>1?"s":"")+(other?(" · "+other+" other issue"+(other>1?"s":"")):"")):
+   (issues+" issue"+(issues>1?"s":"")))+(nt>1?" · "+nt+" types":"")):"No DRC violations")+'</span>'+
   '<button id="drc-cog" class="btn" style="font-size:11px" title="Choose which checks count as errors or warnings, or are ignored — saved with the design, honoured by the APIs and the fab gate too">\u2699 Rules</button></div>';
  if(drcRulesOpen)h+=drcRulesHtml();
  order.forEach(function(k){var idxs=groups[k],err=grpSev(idxs)===0,coll=!!drcCollapsed[k];
+  var openNets=k==="net open"?drcOpenNetGroups(idxs):null;
+  var countText=openNets?(openNets.length+" net"+(openNets.length>1?"s":"")):String(idxs.length);
   h+='<div class="drc-grp'+(err?" err":" warn")+(coll?" coll":"")+'" data-drcg="'+pEsc(k)+'" title="'+
-    (coll?"Show":"Hide")+' these '+idxs.length+' violation'+(idxs.length>1?"s":"")+'">'+
+    (coll?"Show":"Hide")+' these '+(openNets?(openNets.length+' open net'+(openNets.length>1?'s':'')+' / '+idxs.length+' missing connections'):(idxs.length+' violation'+(idxs.length>1?'s':'')))+'">'+
    '<span class="drc-tw">'+(coll?"▸":"▾")+'</span>'+
    '<span class="drc-k">'+pEsc(k)+'</span>'+
-   '<span class="drc-gc '+(err?"err":"warn")+'">'+idxs.length+'</span></div>';
+   '<span class="drc-gc '+(err?"err":"warn")+'">'+countText+'</span></div>';
   if(coll)return;
-  idxs.forEach(function(i){var d=v[i],loc=drcLoc(d),pads=drcPads(d),sc=drcSevClass(d);
-   h+='<div class="drc-row'+(sc?" "+sc:"")+'" data-drc="'+i+'" title="'+pEsc(drcMsg(d))+' — click to locate">'+
-    (d.id?'<span class="drc-loc drc-id">#'+pEsc(d.id)+'</span>':'')+
-    (loc?'<span class="drc-loc">'+pEsc(loc)+'</span>':'')+
-    (pads?'<span class="drc-ref">'+pEsc(pads)+'</span>':'')+
-    '<span class="drc-gap">'+(d.gap!=null?(Math.round(d.gap*1000)/1000):"?")+' / '+
-     (d.clr!=null?(Math.round(d.clr*1000)/1000):"?")+' mm</span>'+
-    '</div>';});});
+  if(openNets){openNets.forEach(function(ng){var expanded=!!drcOpenExpanded[ng.name],first=v[ng.idxs[0]],sc=drcSevClass(first);
+   h+='<div class="drc-net'+(sc?' '+sc:'')+(expanded?'':' coll')+'" data-drcnet="'+pEsc(ng.name)+'" title="'+
+    (expanded?'Hide':'Show')+' '+ng.idxs.length+' connection'+(ng.idxs.length>1?'s':'')+' needed for '+pEsc(ng.name||'unnamed net')+'">'+
+    '<span class="drc-tw">'+(expanded?'▾':'▸')+'</span><span class="drc-loc">'+pEsc(ng.name||'(unnamed net)')+'</span>'+
+    '<span class="drc-net-count">'+ng.idxs.length+' connection'+(ng.idxs.length>1?'s':'')+' needed</span></div>';
+   if(!expanded)return;
+   ng.idxs.forEach(function(i){h+=drcViolationRow(v[i],i);});});return;}
+  idxs.forEach(function(i){h+=drcViolationRow(v[i],i);});});
  lst.innerHTML=h;
  var cog=document.getElementById("drc-cog");
  if(cog)cog.addEventListener("click",function(){drcRulesOpen=!drcRulesOpen;renderDrcList();});
@@ -7540,18 +7565,34 @@ function renderDrcList(){drcTabBadge();var lst=ensureDrcList();if(!lst)return;
  lst.querySelectorAll("[data-drcg]").forEach(function(g){
   g.addEventListener("click",function(){var k=g.getAttribute("data-drcg");
    drcCollapsed[k]=!drcCollapsed[k];renderDrcList();});});
+ lst.querySelectorAll("[data-drcnet]").forEach(function(g){
+  g.addEventListener("click",function(){var name=g.getAttribute("data-drcnet");
+   var expanding=!drcOpenExpanded[name];drcOpenExpanded[name]=expanding;
+   if(!expanding&&drcOpenNetName((PCB.drc||[])[drcCur])===name){
+    for(var i=0;i<(PCB.drc||[]).length;i++){if(drcOpenNetName(PCB.drc[i])===name){drcCur=i;break;}}}
+   renderDrcList();});});
  lst.querySelectorAll("[data-drc]").forEach(function(row){
   row.addEventListener("click",function(){drcGoto(+row.getAttribute("data-drc"));});});
  drcMarkCur();if(window.PCBFindRefresh)window.PCBFindRefresh();}
+function drcViolationRow(d,i){var loc=drcLoc(d),pads=drcPads(d),sc=drcSevClass(d);
+ return '<div class="drc-row'+(sc?' '+sc:'')+'" data-drc="'+i+'" title="'+pEsc(drcMsg(d))+' — click to locate">'+
+  (d.id?'<span class="drc-loc drc-id">#'+pEsc(d.id)+'</span>':'')+
+  (loc?'<span class="drc-loc">'+pEsc(loc)+'</span>':'')+
+  (pads?'<span class="drc-ref">'+pEsc(pads)+'</span>':'')+
+  '<span class="drc-gap">'+(d.gap!=null?(Math.round(d.gap*1000)/1000):'?')+' / '+
+   (d.clr!=null?(Math.round(d.clr*1000)/1000):'?')+' mm</span></div>';}
 // ── DRC step-through ────────────────────────────────────────────────────
 // The DRC pane's ‹ Prev / Next › walk the list in rendered order, wrapping at
-// both ends; a collapsed type-group drops out of the walk exactly as it drops
-// out of the list. Locating a violation keeps the DRC tab up (inspSetHere), so
-// a whole board's worth can be clicked through without the pane sliding away —
-// the located violation's full message shows in the pane header.
+// both ends. A collapsed type-group drops out; a collapsed net-open row counts
+// once, while an expanded one exposes every gap. Locating a violation keeps the
+// DRC tab up (inspSetHere), so a whole board's worth can be clicked through
+// without the pane sliding away — the located violation's full message shows
+// in the pane header.
 var drcCur=-1;
 function drcFlatOrder(){var g=drcGroups(),out=[];
  g.order.forEach(function(k){if(drcCollapsed[k])return;
+  if(k==="net open"){drcOpenNetGroups(g.groups[k]).forEach(function(ng){
+   if(drcOpenExpanded[ng.name])ng.idxs.forEach(function(i){out.push(i);});else out.push(ng.idxs[0]);});return;}
   g.groups[k].forEach(function(i){out.push(i);});});
  return out;}
 function drcStep(dir){var fo=drcFlatOrder();if(!fo.length)return;
@@ -7566,6 +7607,8 @@ function drcMarkCur(){var lst=document.getElementById("drc-list");
  var d=(PCB.drc||[])[drcCur]||null,cur=null;
  if(lst)lst.querySelectorAll(".drc-row[data-drc]").forEach(function(r){
   var on=+r.getAttribute("data-drc")===drcCur;r.classList.toggle("cur",on);if(on)cur=r;});
+ if(lst)lst.querySelectorAll(".drc-net[data-drcnet]").forEach(function(r){
+  var on=!!d&&drcOpenNetName(d)===r.getAttribute("data-drcnet");r.classList.toggle("cur",on);if(on&&!cur)cur=r;});
  if(cur&&cur.scrollIntoView)cur.scrollIntoView({block:"nearest"});
  var fo=drcFlatOrder(),at=d?fo.indexOf(drcCur):-1;
  var pos=document.getElementById("drc-pos");
@@ -7584,12 +7627,12 @@ function drcListToggle(){var lst=ensureDrcList();if(!lst)return;
  var p=document.getElementById("drc-prev"),n=document.getElementById("drc-next");
  if(p)p.addEventListener("click",function(){drcStep(-1);});
  if(n)n.addEventListener("click",function(){drcStep(1);});})();
-// Left-dock DRC tab badge: the error count (red) when any check fails, else the
-// warning count (amber), else bare — the same severity split as the markers.
+// Left-dock DRC tab badge: the actionable error count (red) when any check
+// fails, else the warning count (amber), else bare. Net-open contributes one
+// per net here, while other checks retain their per-violation counts.
 function drcTabBadge(){var tab=document.querySelector('.side-tab[data-sidetab="side-drc"]');
  if(!tab)return;
- var arr=PCB.drc||[],err=0,warn=0;
- for(var i=0;i<arr.length;i++){if(drcSevClass(arr[i])==="warn")warn++;else err++;}
+ var sum=drcSummary(),err=sum.err,warn=sum.warn;
  tab.innerHTML="DRC"+(err?' <span class="side-tab-n err">'+err+"</span>":
   (warn?' <span class="side-tab-n warn">'+warn+"</span>":""));}
 // The Design settings drawer's DRC policy section edits the same per-kind rule
@@ -8102,14 +8145,16 @@ function paintPickPreview(ctx){var d=pickPreview;if(!d)return;
 // The live client-side check blocks obvious shorts during drawing; this is the
 // authoritative re-check (all 8 checks, incl. annular + board-edge).
 var drcTimer=null,drcSeq=0;
-// Chip splits the count by severity: error-severity violations gate the fab
-// package (red), warning-severity ones (courtyard/silk) are advisory.
+// Chip splits the count by severity while rolling a net's many open gaps into
+// one actionable open-net count. The underlying raw violations still gate fab.
 function drcChip(n){var e=document.getElementById("r-drc");if(!e)return;
  if(n<0){e.className="route-stat";e.textContent="checking…";return;}
- var arr=PCB.drc||[],err=0,warn=0;
- for(var i=0;i<arr.length;i++){if(arr[i].sev=="warn")warn++;else err++;}
+ var sum=drcSummary(),err=sum.err,warn=sum.warn,bits=[];
  e.className="route-stat "+(err?"err":"ok");
- e.textContent=err?(err+" err / "+warn+" warn"):(warn?(warn+" warn"):"DRC clean ✓");}
+ if(sum.open)bits.push(sum.open+" open net"+(sum.open>1?"s":""));
+ if(sum.otherErr)bits.push(sum.otherErr+(sum.open?" other err":" err"));
+ if(sum.otherWarn)bits.push(sum.otherWarn+" warn");
+ e.textContent=bits.length?bits.join(" · "):"DRC clean ✓";}
 function runDrcNow(){if(RO)return;var seq=++drcSeq;drcChip(-1);
  var payload=boardStatePayload();
  fetch("/api/pcb-drc/"+encodeURIComponent(PCB.name)+subq(),{method:"POST",

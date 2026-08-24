@@ -6054,6 +6054,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The opt-in PCB frame benchmark briefly dwells at fit, maximum zoom, seek, and pan turnarounds without mixing those pauses into movement percentiles
 - The /pcb-layout left dock tabs Properties, Autorouter, DRC, and Sub-circuits, showing one pane at a time
 - The /pcb-layout DRC pane docks the violations list under a previous/next step-through
+- Net-open DRC reporting groups every island gap by full net name and counts each open net once while retaining expandable per-gap details
 - Net-open DRC findings remain in the sidebar and counts but do not draw or hit-test as PCB markers
 - The /pcb-layout accordion carries no optimizer tuning or score-reweigh panel
 - The /pcb-layout saved-version navigator sits inside Autorouter, immediately after the route controls

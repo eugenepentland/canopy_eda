@@ -503,6 +503,13 @@ a.sub-name:hover,a.grp-name:hover{color:#6ba1e8;text-decoration:underline}
 .drc-row.cur{background:#2a1c1a}
 .drc-row.warn{border-left-color:#d8a03c}
 .drc-row.err{border-left-color:#e05b4b}
+.drc-net{display:flex;align-items:center;gap:7px;padding:5px 9px 5px 18px;font-size:11px;cursor:pointer;
+  border-left:2px solid #e05b4b;border-bottom:1px solid #232428;background:#1d1e22;user-select:none}
+.drc-net:hover{background:#25262b}
+.drc-net.warn{border-left-color:#d8a03c}
+.drc-net.cur{background:#2a1c1a}
+.drc-net .drc-loc{flex:1 1 auto;min-width:0;font-weight:600}
+.drc-net-count{flex:none;margin-left:auto;color:#9b9ca3;font-size:10.5px;white-space:nowrap}
 .drc-k{color:#e4e5e9;font-weight:600;white-space:nowrap}
 .drc-loc{color:#8ab8f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,monospace}
 /* A narrow pane must not eat the short columns: the id and the measurement
