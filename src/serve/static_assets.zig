@@ -1124,6 +1124,12 @@ test "PCB editor click and hold disambiguates overlapping selectable objects" {
         "if(items.length<2)return;h.open=true;pickGestureCancel();pickMenuOpen(items,h.at);",
         "if(Math.hypot(ev.clientX-h.cx,ev.clientY-h.cy)>PICK_SLOP_PX)pickHoldCancel",
         "class=\"pcb-pick-item\" role=\"menuitem\"",
+        "function pickPreviewSet(c){var next=c?c.data:null;",
+        "function pickMenuClose(){pickPreviewSet(null);",
+        "b.addEventListener(\"pointerenter\",function(){pickPreviewSet(c);});",
+        "b.addEventListener(\"focus\",function(){pickPreviewSet(c);});",
+        "menu.addEventListener(\"pointerleave\",function(){pickPreviewSet(null);});",
+        "function paintPickPreview(ctx){var d=pickPreview;if(!d)return;",
         "if(pickHoldRelease(ev)){ev.preventDefault();return;}",
         "if(pickMenu){ev.preventDefault();return;}",
     };

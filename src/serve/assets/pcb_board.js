@@ -853,6 +853,7 @@ function ovsFrame(ctx,w,h,k,kk,zoomHeld){
  // magenta under an opaque white line, which is invisible.
  if(cur>=0){var hl={};hl[cur]=1;paintParts(ctx,k,hl,true);}
  paintInsp(ctx);
+ paintPickPreview(ctx);
  paintDraw(ctx);
  paintPadAlign(ctx,k);
  return true;}
@@ -1156,6 +1157,7 @@ function scenePaint(){paintQueued=false;
   paintScene(ctx,k);
   if(window.PCBOverlay&&PCBOverlay.paint){try{PCBOverlay.paint(CTX);}catch(e){}} // replay overlay (never mutates PCB copper), above the board's own layers
   paintInsp(ctx);
+  paintPickPreview(ctx);
   paintDraw(ctx);
   paintPadAlign(ctx,k);
   gpuScene=false;}
@@ -1198,6 +1200,7 @@ function scenePaint(){paintQueued=false;
    paintStages(ctx,k,{mov:mov,only:true,cop:cop,movG:movG});
    if(window.PCBOverlay&&PCBOverlay.paint){try{PCBOverlay.paint(CTX);}catch(e){}}} // replay overlay stays visible mid-drag
   paintInsp(ctx);
+  paintPickPreview(ctx);
   paintDraw(ctx);
   paintPadAlign(ctx,k);}
  paintFlash(ctx);}
@@ -7399,7 +7402,7 @@ function inspHitForPart(m,pi){var d=inspHitDrc(m);if(d)return {t:"drc",o:d};
 // drag/marquee is cancelled and a compact menu lets the user bypass hierarchy
 // and priority to name the exact target. Candidate collection is deferred
 // until the timer fires, so ordinary clicks and drags pay no dense-board scan.
-var PICK_HOLD_MS=450,PICK_SLOP_PX=5,pickHold=null,pickMenu=null;
+var PICK_HOLD_MS=450,PICK_SLOP_PX=5,pickHold=null,pickMenu=null,pickPreview=null;
 function pickPartHits(m){var out=[];
  P.forEach(function(p,i){if(!reviewPartOnShownSide(p))return;
   var a=-(p.rot||0)*Math.PI/180,c=Math.cos(a),sn=Math.sin(a),lx=m.x-p.x,ly=m.y-p.y;
@@ -7453,7 +7456,8 @@ function pickGestureCancel(){
  drag=null;gdrag=null;clickCand=null;segdrag=null;viadrag=null;osdrag=null;pan=null;
  if(marqEl&&marqEl.parentNode)marqEl.parentNode.removeChild(marqEl);marqEl=null;marq=null;
  svg.style.cursor="";}
-function pickMenuClose(){if(pickMenu&&pickMenu.parentNode)pickMenu.parentNode.removeChild(pickMenu);pickMenu=null;}
+function pickPreviewSet(c){var next=c?c.data:null;if(pickPreview===next)return;pickPreview=next;paintSoon();}
+function pickMenuClose(){pickPreviewSet(null);if(pickMenu&&pickMenu.parentNode)pickMenu.parentNode.removeChild(pickMenu);pickMenu=null;}
 // ── Two-track fillet context menu ──────────────────────────────────────
 // Ctrl/Cmd-click and marquee selection both land in selCu, so the command is
 // available regardless of how the pair was selected. Right-click first shows
@@ -7500,8 +7504,12 @@ function pickMenuOpen(items,at){pickMenuClose();var host=sceneShell;if(!host)ret
  x=Math.max(6,Math.min(x,Math.max(6,hr.width-menu.offsetWidth-6)));
  y=Math.max(6,Math.min(y,Math.max(6,hr.height-menu.offsetHeight-6)));
  menu.style.left=x+"px";menu.style.top=y+"px";
- var buttons=[].slice.call(menu.querySelectorAll("[data-pick]"));buttons.forEach(function(b){b.addEventListener("click",function(ev){
-  ev.stopPropagation();pickSelect(items[+b.getAttribute("data-pick")],at);});});
+ var buttons=[].slice.call(menu.querySelectorAll("[data-pick]"));buttons.forEach(function(b){var c=items[+b.getAttribute("data-pick")];
+  b.addEventListener("pointerenter",function(){pickPreviewSet(c);});
+  b.addEventListener("focus",function(){pickPreviewSet(c);});
+  b.addEventListener("click",function(ev){ev.stopPropagation();pickSelect(c,at);});});
+ menu.addEventListener("pointerleave",function(){pickPreviewSet(null);});
+ menu.addEventListener("focusout",function(ev){if(!menu.contains(ev.relatedTarget))pickPreviewSet(null);});
  menu.addEventListener("keydown",function(ev){var i=buttons.indexOf(document.activeElement);
   if(ev.key==="Escape"){ev.preventDefault();ev.stopPropagation();pickMenuClose();try{svg.focus();}catch(e){}return;}
   if(ev.key!=="ArrowDown"&&ev.key!=="ArrowUp")return;ev.preventDefault();
@@ -7761,6 +7769,36 @@ function paintInsp(ctx){if(!insp)return;var o=insp.o;
   ctx.lineWidth=2;ctx.globalAlpha=0.5+0.5*Math.abs(Math.sin(Date.now()/240));
   ctx.beginPath();ctx.arc(X(o.x),Y(o.y),rr,0,6.2832);ctx.stroke();
   setTimeout(paintSoon,60);}
+ ctx.restore();}
+// The exact-object menu previews its focused/hovered row without borrowing
+// any real selection state. That keeps the board unchanged until click while
+// giving every candidate kind one bright, topmost outline — including pads,
+// which deliberately select their owning footprint only after confirmation.
+function paintPickPreviewPart(ctx,i){var p=P[i];if(!p)return;
+ ctx.save();ctx.translate(X(p.x),Y(p.y));ctx.rotate((p.rot||0)*Math.PI/180);if(p.side==="bottom")ctx.scale(-1,1);
+ var hw=p.hw*S,hh=p.hh*S,ccx=(p.ccx||0)*S,ccy=(p.ccy||0)*S;
+ ctx.strokeRect(ccx-hw,ccy-hh,2*hw,2*hh);ctx.restore();}
+function paintPickPreview(ctx){var d=pickPreview;if(!d)return;
+ ctx.save();ctx.setLineDash([]);ctx.lineJoin="round";ctx.lineCap="round";
+ ctx.strokeStyle="#58a6ff";ctx.fillStyle="rgba(88,166,255,.16)";ctx.lineWidth=2.6;ctx.globalAlpha=1;
+ if(d.t==="sub"){
+  var x0=1/0,y0=1/0,x1=-1/0,y1=-1/0,n=0;(GRPS[d.g]||[]).forEach(function(i){var p=P[i];if(!p||unplacedSet[p.ref])return;
+   paintPickPreviewPart(ctx,i);var b=partAABB(i);x0=Math.min(x0,b.x0);y0=Math.min(y0,b.y0);x1=Math.max(x1,b.x1);y1=Math.max(y1,b.y1);n++;});
+  if(n){var pd=3;ctx.lineWidth=3.2;ctx.strokeRect(X(x0)-pd,Y(y0)-pd,(x1-x0)*S+2*pd,(y1-y0)*S+2*pd);}}
+ else if(d.t==="fp")paintPickPreviewPart(ctx,d.i);
+ else if(d.t==="pad"){
+  var p=P[d.i];if(p){ctx.translate(X(p.x),Y(p.y));ctx.rotate((p.rot||0)*Math.PI/180);if(p.side==="bottom")ctx.scale(-1,1);
+   padPath(ctx,d.pd);ctx.fill();ctx.stroke();}}
+ else if(d.t==="track"){
+  ctx.lineWidth=Math.max((d.o.w||.25)*S,1.2)+6;ctx.globalAlpha=.38;ctx.beginPath();trackPath(ctx,d.o);ctx.stroke();
+  ctx.lineWidth=Math.max((d.o.w||.25)*S,1.2)+2;ctx.globalAlpha=1;ctx.beginPath();trackPath(ctx,d.o);ctx.stroke();}
+ else if(d.t==="via"){
+  ctx.beginPath();ctx.arc(X(d.o.x),Y(d.o.y),viaRenderRadius(d.o.d||.4)+5,0,6.2832);ctx.fill();ctx.stroke();}
+ else if(d.t==="zone"||d.t==="keepout"){
+  var outer=d.o.poly||d.o.outer,inner=d.o.inner;ctx.beginPath();
+  if(outer&&keepoutPolyPath(ctx,outer)){if(inner)keepoutPolyPath(ctx,inner);ctx.fill("evenodd");ctx.stroke();}}
+ else if(d.t==="drc"){
+  ctx.beginPath();ctx.arc(X(d.o.x),Y(d.o.y),13,0,6.2832);ctx.fill();ctx.stroke();}
  ctx.restore();}
 // ── Auto-DRC after copper edits (debounced ~800 ms) ─────────────────────
 // Every copper mutation (draw/delete/Stamp/route apply) and every Save
