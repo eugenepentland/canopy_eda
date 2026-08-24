@@ -5001,30 +5001,36 @@ var clickCand=null; // pressed a part but won't drag (RO page / locked part)
 // KiCad's drag45: the grabbed segment slides along its own normal and keeps
 // its direction; each neighbour keeps ITS angle too — corners re-solve as the
 // intersection of the two fixed direction lines, so neighbours only extend or
-// shorten. A collinear run (or a bare/pad end) gets a perpendicular jog
-// segment inserted (dropped again if it ends zero-length); a via or 3-way
-// junction translates rigidly. Shift = free move (whole node follows).
+// shorten. Parallel neighbours through one node (including a via) share that
+// fixed line. A collinear run, bare/pad end, arc, or ambiguous branch stays
+// anchored and gets a perpendicular connector instead of repositioning its
+// existing copper. Shift = explicit free move (whole node follows).
 var segdrag=null;
-function segAttached(t,x,y){var eps=2e-3,out=[],anyVia=false;
- (PCB.vias||[]).forEach(function(v){if(Math.abs(v.x-x)<eps&&Math.abs(v.y-y)<eps){out.push({v:v});anyVia=true;}});
+function segAttached(t,x,y){var eps=2e-3,out=[],anyVia=false,net=t.net||"";
+ (PCB.vias||[]).forEach(function(v){if((v.net||"")===net&&Math.abs(v.x-x)<eps&&Math.abs(v.y-y)<eps){out.push({v:v});anyVia=true;}});
  (PCB.tracks||[]).forEach(function(q){if(q===t)return;
+  if((q.net||"")!==net)return; // touching foreign copper is not attached to this route
   if(!anyVia&&(q.l||0)!==(t.l||0))return; // cross-layer joins only through a via
   if(Math.abs(q.x1-x)<eps&&Math.abs(q.y1-y)<eps)out.push({q:q,e:1});
   else if(Math.abs(q.x2-x)<eps&&Math.abs(q.y2-y)<eps)out.push({q:q,e:2});});
  return out;}
 // How one end of the dragged segment behaves while it slides (see above):
-// corner (angle-preserving intersection) / jog (perpendicular connector,
-// anchored at the old point) / free (rigid node translate).
+// corner (angle-preserving intersection) / anchor (perpendicular connector,
+// with old copper untouched). A free rigid-node translation is Shift-only.
 function segPlan(t,x,y,d){var at=segAttached(t,x,y);
- var vias=at.filter(function(w){return w.v;}),trs=at.filter(function(w){return w.q;});
- if(!vias.length&&trs.length===1){var w=trs[0],q=w.q;
-  var fx=(w.e===1)?q.x2:q.x1,fy=(w.e===1)?q.y2:q.y1;
-  var ex=x-fx,ey=y-fy,eL=Math.hypot(ex,ey);
-  if(eL>1e-9){ex/=eL;ey/=eL;
-   if(Math.abs(d.x*ey-d.y*ex)>1e-6)return {mode:"corner",w:w,q:q,fx:fx,fy:fy,ex:ex,ey:ey,at:at};
-   return {mode:"jog",sx:x,sy:y,jog:null,at:at};}}
- if(!at.length)return {mode:"jog",sx:x,sy:y,jog:null,at:at};
- return {mode:"free",at:at};}
+ var trs=at.filter(function(w){return w.q;});
+ if(trs.length){var first=trs[0],q=first.q;
+  var fx=(first.e===1)?q.x2:q.x1,fy=(first.e===1)?q.y2:q.y1;
+  var ex=x-fx,ey=y-fy,eL=Math.hypot(ex,ey),sameLine=q.xm==null&&q.ym==null&&eL>1e-9;
+  if(sameLine){ex/=eL;ey/=eL;
+   // Several serialized segments may meet at one visually continuous node.
+   // They can all stretch without moving when their support lines agree.
+   trs.forEach(function(w){var r=w.q,rx=x-((w.e===1)?r.x2:r.x1),ry=y-((w.e===1)?r.y2:r.y1),rL=Math.hypot(rx,ry);
+    if(r.xm!=null||r.ym!=null||rL<1e-9||Math.abs(ex*ry/rL-ey*rx/rL)>1e-6)sameLine=false;});
+   if(sameLine&&Math.abs(d.x*ey-d.y*ex)>1e-6)return {mode:"corner",fx:fx,fy:fy,ex:ex,ey:ey,at:at};}}
+ // No unique fixed support line: keep every existing neighbour/via exactly
+ // where it was and bridge from that anchored junction to the moved segment.
+ return {mode:"anchor",sx:x,sy:y,jog:null,at:at};}
 function segStart(t,m){drcGateSessionEnsure();var dx=t.x2-t.x1,dy=t.y2-t.y1,L=Math.hypot(dx,dy)||1;
  var d={x:dx/L,y:dy/L};
  return {t:t,m0:m,moved:false,snap:snapAll(),o:{x1:t.x1,y1:t.y1,xm:t.xm,ym:t.ym,x2:t.x2,y2:t.y2},
@@ -5036,16 +5042,20 @@ function segFollow(list,nx,ny){list.forEach(function(w){
 function segJogDrop(pl){if(pl.jog){PCB.tracks=PCB.tracks.filter(function(q){return q!==pl.jog;});pl.jog=null;}}
 // New position for one endpoint whose original was `o`, slid by (mx,my).
 function segEnd(sd,pl,o,mx,my,free){var ax=o.x+mx,ay=o.y+my;
- if(free||pl.mode==="free"){if(pl.jog)segJogDrop(pl);segFollow(pl.at,ax,ay);return {x:ax,y:ay};}
+ // Every pointermove is absolute from the drag snapshot. This also makes a
+ // mid-gesture Shift press reversible: releasing Shift restores the fixed
+ // neighbours before applying the constrained slide again.
+ segFollow(pl.at,o.x,o.y);
+ if(free){if(pl.jog)segJogDrop(pl);segFollow(pl.at,ax,ay);return {x:ax,y:ay};}
  if(pl.mode==="corner"){
   var cr=sd.d.x*pl.ey-sd.d.y*pl.ex;
   var tp=((pl.fx-ax)*pl.ey-(pl.fy-ay)*pl.ex)/cr;
   var cx=ax+tp*sd.d.x,cy=ay+tp*sd.d.y;
-  if(pl.w.e===1){pl.q.x1=cx;pl.q.y1=cy;}else{pl.q.x2=cx;pl.q.y2=cy;}
+  segFollow(pl.at,cx,cy); // far ends and every supporting line remain fixed
   return {x:cx,y:cy};}
- // jog: the anchor point stays put (on the collinear run / the pad); a
+ // anchor: the old junction stays put (collinear run / pad / branch); a
  // perpendicular connector carries the moved endpoint.
- if(!pl.jog){pl.jog={x1:pl.sx,y1:pl.sy,x2:ax,y2:ay,l:sd.t.l||0,w:sd.t.w,net:sd.t.net||"",source:sd.t.source};
+ if(!pl.jog){pl.jog={x1:pl.sx,y1:pl.sy,x2:ax,y2:ay,l:sd.t.l||0,w:sd.t.w,net:sd.t.net||"",g:sd.t.g,source:sd.t.source,id:trackIdNew()};
   (PCB.tracks=PCB.tracks||[]).push(pl.jog);}
  else{pl.jog.x2=ax;pl.jog.y2=ay;}
  return {x:ax,y:ay};}

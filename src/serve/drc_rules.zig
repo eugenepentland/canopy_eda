@@ -636,11 +636,22 @@ test "settings drawer DRC policy edits every kind and syncs the board view" {
     }
 }
 
-// spec: Web Server - Segment drags preserve neighbour track angles and insert perpendicular jogs on collinear runs
-test "viewer JS drags segments KiCad-style: corner intersections and collinear jogs" {
+// spec: Web Server - Segment drags preserve neighbouring trace support lines: compatible neighbours only stretch or shrink, while collinear runs, arcs, and ambiguous junctions remain anchored behind a connector
+test "viewer JS slides segments KiCad-style without repositioning neighbouring traces" {
     const js = @embedFile("assets/pcb_board.js");
     try std.testing.expect(std.mem.indexOf(u8, js, "function segPlan") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "\"corner\"") != null);
+    // A serialized route can have multiple same-line segments at one visual
+    // corner. They all receive the resolved intersection; only their joined
+    // endpoints move, so their fixed endpoints/supporting lines cannot drift.
+    try std.testing.expect(std.mem.indexOf(u8, js, "trs.forEach(function(w)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "segFollow(pl.at,cx,cy); // far ends and every supporting line remain fixed") != null);
+    // Branches, arcs, bare ends and collinear runs are not rigid-translated as
+    // a fallback. Their existing node stays put and a removable bridge is laid.
+    try std.testing.expect(std.mem.indexOf(u8, js, "return {mode:\"anchor\",sx:x,sy:y,jog:null,at:at};") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "return {mode:\"free\",at:at};") == null);
+    // Free node movement remains available only as the explicit Shift path.
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(free){if(pl.jog)segJogDrop(pl);segFollow(pl.at,ax,ay);") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "segJogClean") != null);
 }
 
