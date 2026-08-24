@@ -6186,6 +6186,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The Objects filter disables sub-circuit hits so overlapping traces remain selectable
 - The Objects filter picks pour and keepout interiors and offers enable-all and disable-all actions
 - Routing toward a same-net pad snaps the whole approach onto the pad centreline
+- hand-routing resolves overlapping pad hits on the trace's current copper layer before considering the opposite face
 - The hand-route tool lays both legs of a differential pair together with mitered offset corners
 - The auto-commit author is the ward user, falling back to the dev-admin identity
 - The auto-commit parses porcelain status into a dirty-path set including a rename's source

@@ -6530,10 +6530,29 @@ function drawLegs(m,shift){var t=drawTarget(m,shift);
  if(!shift){var alt=drawPath(dtrace.lx,dtrace.ly,t,drawPosture^1);
   if(!drawLegsViolate(alt))return {t:t,legs:alt,dodged:true};}
  return {t:t,legs:clipLegs(legs),clipped:true};}
-function padTarget(m){var i=partAt(m.x,m.y);if(i<0)return null;
- var pd=padAt(i,m.x,m.y);if(!pd)return null;
- var c=wpt(i,pd.x,pd.y);
- return {i:i,pd:pd,x:c.x,y:c.y,net:pd.net||"",l:(P[i].side==="bottom")?1:0};}
+// Route-pad selection is deliberately independent of courtyard selection.
+// Overlapping footprints may put a top and bottom SMD pad under the same
+// cursor; partAt() knows only courtyard size, so using its winner here could
+// make an in-progress F.Cu trace inspect the B.Cu pad and report a false
+// wrong-net/invalid connection. Rank every exact pad hit by layer first, then
+// by the active trace net, then by physical area. Through pads span all layers.
+function drawPadLayer(p,pd){return (pd.thru||pd.drill>0)?-1:(p.side==="bottom"?1:0);}
+function drawPadHitsAt(wx,wy){var out=[];
+ P.forEach(function(p,i){var pd=padAt(i,wx,wy);if(!pd)return;
+  var b=wrect(i,pd);out.push({i:i,pd:pd,area:Math.max((b.x1-b.x0)*(b.y1-b.y0),1e-12)});});
+ return out;}
+function drawPadPick(hits,layer,nets,strictLayer){var best=null,bt=1e9,ba=1e18;
+ hits.forEach(function(h){var pl=drawPadLayer(P[h.i],h.pd),compatible=(pl<0||pl===layer);
+  if(strictLayer&&!compatible)return;
+  var preferred=false;if(nets&&nets.length)for(var k=0;k<nets.length;k++)if(h.pd.net===nets[k]){preferred=true;break;}
+  var tier=(compatible?0:2)+((nets&&nets.length&&!preferred)?1:0);
+  if(tier<bt||(tier===bt&&h.area<ba)){best=h;bt=tier;ba=h.area;}});
+ return best;}
+function padTarget(m){var layer=dtrace?dtrace.l:activeLayer,nets=dtrace?[dtrace.net]:[];
+ if(dtrace&&dtrace.pair)nets.push(dtrace.pair.net);
+ var h=drawPadPick(drawPadHitsAt(m.x,m.y),layer,nets,!!dtrace);if(!h)return null;
+ var p=P[h.i],pd=h.pd,c=wpt(h.i,pd.x,pd.y),pl=drawPadLayer(p,pd);
+ return {i:h.i,pd:pd,x:c.x,y:c.y,net:pd.net||"",l:pl<0?layer:pl};}
 function segDist(px,py,t){var best=1e18;trackChords(t).forEach(function(s){var dx=s.x2-s.x1,dy=s.y2-s.y1,L2=dx*dx+dy*dy;
  var u=L2>0?((px-s.x1)*dx+(py-s.y1)*dy)/L2:0;u=Math.max(0,Math.min(1,u));
  best=Math.min(best,Math.hypot(px-(s.x1+u*dx),py-(s.y1+u*dy)));});return best;}
@@ -6706,9 +6725,9 @@ function viaViolation(x,y,net,dia,drill){var clr=netClrFor(net),vr=(dia||0.4)/2;
 function magSnap(m,net){var pxr=9; // screen-px capture radius
  var wr=pxr*(vb.w/Math.max(svgMetricsGet().cw,1))/S; // convert px→world mm at current zoom
  var best=null,bd=wr;
- // exact point snaps — land the endpoint ON copper (pad centres, any net;
- // same-net track endpoints). These win when the cursor is right on a target.
- P.forEach(function(p,i){(p.pads||[]).forEach(function(pd){var c=wpt(i,pd.x,pd.y);
+ // exact point snaps — land the endpoint ON copper (current-layer pad centres,
+ // any net; same-net track endpoints). These win right on a target.
+ P.forEach(function(p,i){(p.pads||[]).forEach(function(pd){if(dtrace&&drawPadLayer(p,pd)>=0&&drawPadLayer(p,pd)!==dtrace.l)return;var c=wpt(i,pd.x,pd.y);
   var d=Math.hypot(c.x-m.x,c.y-m.y);if(d<bd){bd=d;best={x:c.x,y:c.y,mag:true};}});});
  (PCB.tracks||[]).forEach(function(t){if(net&&t.net&&t.net!==net)return;
   [[t.x1,t.y1],[t.x2,t.y2]].forEach(function(e){var d=Math.hypot(e[0]-m.x,e[1]-m.y);
@@ -6724,6 +6743,7 @@ function magSnap(m,net){var pxr=9; // screen-px capture radius
    var horiz=adx>=ady,sx=dx<0?-1:1,sy=dy<0?-1:1;
    var corr=wr*2.0,dg=snapG(),cb=corr,cbest=null;
    P.forEach(function(p,i){(p.pads||[]).forEach(function(pd){
+    if(drawPadLayer(p,pd)>=0&&drawPadLayer(p,pd)!==dtrace.l)return;
     if(!pd.net||!net||netCollapse(pd.net)!==netCollapse(net))return;
     var c=wpt(i,pd.x,pd.y);
     if(horiz){if((c.x-dtrace.lx)*sx<=0)return;var d=Math.abs(m.y-c.y);
