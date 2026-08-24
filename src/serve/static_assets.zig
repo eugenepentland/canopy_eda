@@ -313,6 +313,14 @@ test "the shared parametric shape sketch engine is registered with its editor co
     for (checks) |check| try std.testing.expect(std.mem.indexOf(u8, check.bytes, check.marker) != null);
 }
 
+// spec: Web Server - While drawing a custom copper area, nearly horizontal or vertical segments snap onto that axis in both the live preview and committed polygon; holding Ctrl bypasses only this axis inference
+test "custom copper area drawing infers axes unless Ctrl is held" {
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "function pourSnap(m,ev)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "axis=!(ev&&ev.ctrlKey)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "qsn=pourSnap(qm,ev)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "pourCur=pourSnap(mm(ev),ev)") != null);
+}
+
 // spec: Web Server - Dragging an endpoint of a horizontal or vertical outline segment changes its length without translating the constrained line, with dominant-direction disambiguation at H/V corners
 test "axis-constrained outline endpoint drags project the cursor onto the segment" {
     try std.testing.expect(std.mem.indexOf(u8, shape_sketch_js, "function pointDragAxis(s,id,x,y,origin)") != null);

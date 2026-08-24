@@ -3516,7 +3516,7 @@ function kbdToggle(){
   '<div class="kbd-row"><span>Edit outline: select vertices or segments + Delete leaves an open sketch &middot; Line reconnects loose endpoints &middot; Remove fillet restores a sharp corner</span><kbd>in outline sketch</kbd></div>'+
   '<div class="kbd-row"><span>Dimension selected outline geometry</span><kbd>D in outline sketch</kbd></div>'+
   '<div class="kbd-row"><span>Constrain selected outline line</span><kbd>H / V</kbd></div>'+
-  '<div class="kbd-row"><span>Edit a custom pour with the same sketch palette, geometry tools and constraints as the board outline</span><kbd>Z, then click pour</kbd></div>'+
+  '<div class="kbd-row"><span>Draw/edit a custom pour (near H/V snaps; Ctrl bypasses) with the shared sketch palette</span><kbd>Z, then click board/pour</kbd></div>'+
   '<div class="kbd-row"><span>Hand-route mode (click pad → trace; head stops at clearance obstacles)</span><kbd>X</kbd></div>'+
   '<div class="kbd-row"><span>Open the View sidebar (when no trace or outline sketch is active)</span><kbd>V</kbd></div>'+
   '<div class="kbd-row"><span>Drop via + flip layer (while actively routing)</span><kbd>V</kbd></div>'+
@@ -4664,6 +4664,11 @@ function polyArm(on,withinOutline){if(RO&&on)return;
  toolSync();outlineSketchPanelSync();
  drawBoardRect();}
 function polySnap(m){var existing=outlinePtsOf(activeSketchIsArea()?activeSketchShape():outlineEditable())||[],tol=9/S,g=viewSt.grid;return OS&&OS.snapLinePoint?OS.snapLinePoint(polyPts||[],existing,m.x,m.y,g,tol,6/S):{x:g>0?Math.round(m.x/g)*g:m.x,y:g>0?Math.round(m.y/g)*g:m.y};}
+// New copper-area vertices share the Line tool's screen-space H/V inference.
+// Shift still bypasses the drawing grid; Ctrl bypasses only axis inference so
+// a deliberately shallow diagonal remains available without changing grids.
+function pourSnap(m,ev){var g=ev&&ev.shiftKey?0:G,axis=!(ev&&ev.ctrlKey);
+ return axis&&OS&&OS.snapLinePoint?OS.snapLinePoint(pourPts||[],[],m.x,m.y,g,0,6/S):{x:g>0?Math.round(m.x/g)*g:m.x,y:g>0?Math.round(m.y/g)*g:m.y,axis:null};}
 function outlineMsg(txt){var msg=document.getElementById("pcb-savemsg");
  if(msg){msg.style.color="#8b949e";msg.textContent=txt;}}
 function heatsinkArm(on){if(RO&&on)return;
@@ -4897,7 +4902,8 @@ function polyFinish(closeChain){
 function polyClose(){return polyFinish(true);}
 function polyPop(){if(polyPts&&polyPts.length){polyPts.pop();if(!polyPts.length)polyPts=null;drawBoardRect();}}
 // ── ▩ Custom copper pours ────────────────────────────────────────────────
-// Draw a polygon (grid-snapped clicks, Shift = free), close it, then a small
+// Draw a polygon (grid-snapped clicks, Shift = free grid, Ctrl = no H/V snap),
+// close it, then a small
 // dialog picks the net + layer; the closed region becomes a PCB.zones entry the
 // server fills (PCB.zone_fills). Zones are board-anchored (never move with a
 // part), persisted with the layout, and deletable (right-click while armed).
@@ -4917,7 +4923,7 @@ function pourArm(on){if(RO&&on)return;
  svg.classList.toggle("outline-mode",on||outlineMode||polyMode);
  var msg=document.getElementById("pcb-savemsg");
  if(msg&&on){msg.style.color=POUR_COL;
-  msg.textContent="copper area: click an existing pour or keepout to edit its sketch, or click empty board space to draw a new one";}
+  msg.textContent="copper area: click an existing area to edit, or draw a new one — near H/V segments snap; hold Ctrl to disable";}
  else if(msg&&!on){msg.textContent="";}
  outlineSketchPanelSync();toolSync();
  drawBoardRect();}
@@ -5303,7 +5309,7 @@ svg.addEventListener("pointerdown",function(ev){
   if(pourPts&&pourPts.length>=3){var qf=pourPts[0];
    if(Math.max(Math.abs(qm.x-qf[0]),Math.abs(qm.y-qf[1]))<=7/S){pourClose();return;}}
   pourPts=pourPts||[];
-  var qnp=ev.shiftKey?[qm.x,qm.y]:[Math.round(qm.x/G)*G,Math.round(qm.y/G)*G],qlp=pourPts[pourPts.length-1];
+  var qsn=pourSnap(qm,ev),qnp=[qsn.x,qsn.y],qlp=pourPts[pourPts.length-1];
   if(!qlp||qlp[0]!==qnp[0]||qlp[1]!==qnp[1])pourPts.push(qnp);
   pourCur=null;drawBoardRect();return;}
  if(outlineMode){var om=mm(ev),oe0=edgeAt(om);
@@ -5403,7 +5409,7 @@ svg.addEventListener("pointermove",function(ev){
  if(segdrag){segMove(mm(ev),ev.shiftKey);return;}
  if(viadrag){viaMove(mm(ev));return;}
  if(polyMode&&polyPts){polyCur=polySnap(mm(ev));drawBoardRect();return;}
- if(pourMode&&pourPts){pourCur=mm(ev);drawBoardRect();return;}
+ if(pourMode&&pourPts){pourCur=pourSnap(mm(ev),ev);drawBoardRect();return;}
  if(txDrag){var tm=mm(ev),t=PCB.texts[txDrag.i];if(t){
    var nx=Math.round((tm.x+txDrag.ox)/G)*G,ny=Math.round((tm.y+txDrag.oy)/G)*G;
    if(nx!==t.x||ny!==t.y){t.x=nx;t.y=ny;txDrag.moved=true;paintSoon();}}return;}
