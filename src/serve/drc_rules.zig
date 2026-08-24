@@ -561,6 +561,20 @@ test "toolbar exposes a pour-refill button gated on declared pours" {
     try std.testing.expect(std.mem.indexOf(u8, js, "PCB.pours_declared") != null);
 }
 
+// spec: Web Server - refill pours returns visible fill geometry before independently refreshed DRC/connectivity work
+test "pour refill takes the fills-only API path and shares its edge raster" {
+    const js = @embedFile("assets/pcb_board.js");
+    const page = @embedFile("pcb_layout_page.zig");
+    try std.testing.expect(std.mem.indexOf(u8, js, "pours=1&pours_only=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "scheduleServerReconcile();})") != null);
+
+    const fast = std.mem.indexOf(u8, page, "if (queryFlag(req, \"pours_only\")) {") orelse return error.TestExpectedEqual;
+    const full_drc = std.mem.indexOf(u8, page[fast..], "const violations = drc_rules.checkFilteredZones") orelse return error.TestExpectedEqual;
+    const branch = page[fast .. fast + full_drc];
+    try std.testing.expect(std.mem.indexOf(u8, branch, "pour.sharedEdgeField(req.arena, placement)") != null);
+    try std.testing.expect(std.mem.count(u8, branch, "base_edge);") == 3);
+}
+
 // spec: Web Server - the toolbar pour button flags a stale indicator after board edits and disables during replay
 test "toolbar pour button tracks staleness and gates under replay" {
     const js = @embedFile("assets/pcb_board.js");

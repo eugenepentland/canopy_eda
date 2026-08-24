@@ -8376,14 +8376,17 @@ function groundViasRun(){if(groundViasInFlight||RO)return;var b=document.getElem
 function refillPours(){if(poursInFlight)return;var bs=pourBtns();if(!bs.length)return;
  poursInFlight=true;var seq=++poursReqSeq;bs.forEach(function(b){b.disabled=true;});
  setStat("r-pour-stat","","refilling…");var q=subq();
- fetch("/api/pcb-drc/"+encodeURIComponent(PCB.name)+q+(q?"&":"?")+"pours=1",{method:"POST",
+ fetch("/api/pcb-drc/"+encodeURIComponent(PCB.name)+q+(q?"&":"?")+"pours=1&pours_only=1",{method:"POST",
   headers:{"Content-Type":"application/json"},body:JSON.stringify(boardStatePayload())})
   .then(function(r){if(!r.ok)throw 0;return r.json();})
   .then(function(j){PCB.pours=j.pours||[];PCB.plane_fills=j.plane_fills||[];PCB.zone_fills=j.zone_fills||[];routeSummaryFrom(j);pourGeomDrop();dragCacheDrop();paintSoon();
    if(seq===poursReqSeq)poursFresh(); // no edit landed while in flight → fresh
    var nfill=PCB.pours.length+(PCB.plane_fills||[]).length+(PCB.zone_fills||[]).length;
    setStat("r-pour-stat",nfill?"ok":"warn",nfill?"pours refilled ✓":"no pours to fill");
-   poursInFlight=false;bs.forEach(function(b){b.disabled=false;});})
+   poursInFlight=false;bs.forEach(function(b){b.disabled=false;});
+   // The fast response intentionally omits DRC/connectivity. Reconcile those
+   // after the new fill is already visible instead of holding up this button.
+   scheduleServerReconcile();})
   .catch(function(){setStat("r-pour-stat","err","refill failed");
    poursInFlight=false;bs.forEach(function(b){b.disabled=false;});});}
 pourBtns().forEach(function(b){b.addEventListener("click",refillPours);});

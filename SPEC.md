@@ -5983,6 +5983,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - saved/imported keepout zones feed the generated-silkscreen exclusion geometry on both board faces
 - the PCB viewer uses the same above-first, fixed-horizontal collision search for generated test-point labels
 - the PCB blob and pour-refill compute carved zone_fills for each filled netted outer-layer user zone
+- refill pours returns visible fill geometry before independently refreshed DRC/connectivity work
 - a filled inner-layer user zone emits a layer-tagged zone_fill with no side and preserves priority through both routing adapters
 - Stamped module copper keeps its group tag through the sidecar so rigid-group moves carry it
 - Stamped module copper maps its net names onto the parent design via the origin-key bridge, slug-prefixing private nets

@@ -4523,6 +4523,7 @@ pub fn pcbRouteApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
 /// This lets the viewer
 /// verify hand-drawn copper continuously (debounced after any copper edit + on
 /// Save) instead of only when the user clicks Route; `?pours=1` also recomputes live pours.
+/// `?pours_only=1` returns fills before the editor's independent DRC refresh.
 pub fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = nameParam(req, res) orelse return;
     const body = bodyParam(req, res) orelse return;
@@ -4615,6 +4616,22 @@ pub fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
 
     const clearance = if (body_clearance > 0) body_clearance else placement.rules.design.clearance;
     const user_zones = userZonesFrom(ctx.allocator, placement.rules, posted_zones);
+    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const w = &aw.writer;
+    if (queryFlag(req, "pours_only")) {
+        const live_copper: pour.Copper = .{ .tracks = rr.tracks, .vias = rr.vias };
+        // Share one board-edge raster across every returned fill family.
+        const base_edge = pour.sharedEdgeField(req.arena, placement) catch null;
+        try w.writeAll("{\"pours\":");
+        try pour_json.writePours(w, req.arena, placement, live_copper, user_zones, base_edge);
+        try pour_json.writePlaneFillsField(w, req.arena, placement, live_copper, false, base_edge);
+        try w.writeAll(",\"zone_fills\":");
+        try pour_json.writeZoneFills(w, req.arena, placement, live_copper, zoneFillReqsFrom(req.arena, placement.rules, posted_zones), base_edge);
+        try w.writeByte('}');
+        res.content_type = .JSON;
+        res.body = aw.written();
+        return;
+    }
     const violations = drc_rules.checkFilteredZones(ctx.allocator, ctx.project_dir, name, .{ .placement = placement, .routed = rr, .clearance = clearance, .zones = user_zones });
     const tally = fab_readiness.routableTally(ctx.allocator, placement, .{
         .tracks = rr.tracks,
@@ -4622,8 +4639,6 @@ pub fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
         .zones = user_zones,
     }) catch null;
 
-    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
-    const w = &aw.writer;
     try w.writeAll("{\"drc\":[");
     for (violations, 0..) |vio, i| {
         if (i > 0) try w.writeAll(",");
@@ -4633,12 +4648,13 @@ pub fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
     if (tally) |t| try w.print(",\"routed\":{d},\"total\":{d},\"unique_routed\":{d},\"unique_total\":{d}", .{ t.routed, t.total, t.unique_routed, t.unique_total });
     if (queryFlag(req, "pours")) {
         const live_copper: pour.Copper = .{ .tracks = rr.tracks, .vias = rr.vias };
+        const base_edge = pour.sharedEdgeField(req.arena, placement) catch null;
         try w.writeAll(",\"pours\":");
-        try pour_json.writePours(w, req.arena, placement, live_copper, userZonesFrom(req.arena, placement.rules, posted_zones), null);
-        try pour_json.writePlaneFillsField(w, req.arena, placement, live_copper, false, null);
+        try pour_json.writePours(w, req.arena, placement, live_copper, user_zones, base_edge);
+        try pour_json.writePlaneFillsField(w, req.arena, placement, live_copper, false, base_edge);
         // User-zone carved fills, `zone` indexing the POSTED zones order.
         try w.writeAll(",\"zone_fills\":");
-        try pour_json.writeZoneFills(w, req.arena, placement, live_copper, zoneFillReqsFrom(req.arena, placement.rules, posted_zones), null);
+        try pour_json.writeZoneFills(w, req.arena, placement, live_copper, zoneFillReqsFrom(req.arena, placement.rules, posted_zones), base_edge);
     }
     try w.writeByte('}');
     res.content_type = .JSON;
