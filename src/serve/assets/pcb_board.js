@@ -7068,8 +7068,9 @@ function drawDests(pi,pd){var out=[];
   out.push({i:oi,pd:opd,x:ox,y:oy});});
  return out;}
 // ── Coupled differential-pair drawing ───────────────────────────────────
-// Starting a trace on a pad whose net belongs to a `(net-class … (diff-pair))`
-// pair auto-couples the ✎ Draw tool (P uncouples): every click lays BOTH legs,
+// Starting a trace on a pad, via, or track whose net belongs to a
+// `(net-class … (diff-pair))` pair auto-couples the ✎ Draw tool (P uncouples):
+// every click lays BOTH legs,
 // the partner track offset perpendicular by (track width + pair gap) with
 // mitered corners (the miter point sits on both legs' offset lines, so the
 // coupled spacing holds through every bend). V drops a via pair — spread along
@@ -7082,6 +7083,16 @@ function dpPartnerPad(px,py,net,onlyPart){var key=netCollapse(net||""),best=null
   (p.pads||[]).forEach(function(pd){if(!pd.net||netCollapse(pd.net)!==key)return;
    var c=wpt(i,pd.x,pd.y),d=Math.hypot(c.x-px,c.y-py);
    if(d<bd){bd=d;best={i:i,pd:pd,x:c.x,y:c.y,net:pd.net};}});});
+ return best;}
+// The matching continuation anchor when Draw starts from existing copper.
+// Vias span every signal layer; track endpoints must be on the active layer.
+// Considering endpoints rather than an arbitrary point along the twin keeps
+// the two resumed heads at the ends of the already-coupled run.
+function dpPartnerCopper(px,py,net,layer){var key=netCollapse(net||""),best=null,bd=1e18;
+ function take(x,y,n,kind){var d=Math.hypot(x-px,y-py);if(d<bd){bd=d;best={x:x,y:y,net:n,kind:kind};}}
+ (PCB.vias||[]).forEach(function(v){if(v.net&&netCollapse(v.net)===key)take(v.x,v.y,v.net,"via");});
+ (PCB.tracks||[]).forEach(function(t){if(!t.net||netCollapse(t.net)!==key||Number(t.l||0)!==layer)return;
+  take(t.x1,t.y1,t.net,"track");take(t.x2,t.y2,t.net,"track");});
  return best;}
 // Mitered offset of corner c between unit leg directions d1→d2 on side s: the
 // intersection of the two offset lines — exact coupled spacing through the
@@ -7254,14 +7265,15 @@ function drawStart(net,layer,x,y,pi,pd){
   dests.map(function(d){return refLabel(P[d.i].ref);}).join(", "));
  var tr={net:net,l:layer,w:trackW(net),lx:x,ly:y,n:0,undo:snapAll(),laid:[],dest:dests,pdir:null,steps:[],
   startPad:(pi!=null&&pd&&!pd.thru)?{i:pi,pd:pd,l:layer}:null};
- // Auto-couple: a pad start on a declared diff-pair net grabs the partner
- // net's nearest pad as the twin trace's start — within 5 mm only (farther
- // apart the pads aren't a launch pair, so the trace stays single-ended).
- if(pi!=null&&pd){var dp=diffPairInfo(net);
-  if(dp){var ns=dpPartnerPad(x,y,dp.partner,null);
-   if(ns&&Math.hypot(ns.x-x,ns.y-y)<=5){
-    tr.pair={net:ns.net,lx:ns.x,ly:ns.y,laid:[],s:0,gap:dp.gap>0?dp.gap:(PCB.clr||0.127),start:ns};
-    routeStatMsg("coupled pair "+nLeaf(net)+" ⇄ "+nLeaf(ns.net)+" — press P to uncouple");}}}
+ // Auto-couple a declared pair from either its launch pads or already-routed
+ // copper. The latter is what preserves pair mode after ending at a via and
+ // resuming on an inner layer. Five millimetres is the existing launch-pair
+ // ceiling; a farther candidate is unrelated copper, so keep the start single.
+ var dp=diffPairInfo(net),ns=null;
+ if(dp)ns=(pi!=null&&pd)?dpPartnerPad(x,y,dp.partner,null):dpPartnerCopper(x,y,dp.partner,layer);
+ if(ns&&Math.hypot(ns.x-x,ns.y-y)<=5){
+  tr.pair={net:ns.net,lx:ns.x,ly:ns.y,laid:[],s:0,gap:dp.gap>0?dp.gap:(PCB.clr||0.127),start:ns};
+  routeStatMsg("coupled pair "+nLeaf(net)+" ⇄ "+nLeaf(ns.net)+" — press P to uncouple");}
  return tr;}
 function drawClick(m,shift){
  if(!dtrace){var pt=padTarget(m);

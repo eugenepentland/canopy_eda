@@ -1306,6 +1306,12 @@ test "viewer JS wires the coupled diff-pair hand-draw mode" {
     // A pad start on a declared pair auto-couples the tool to the partner pad.
     try std.testing.expect(std.mem.indexOf(u8, js, "var dp=diffPairInfo(net)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "tr.pair={net:ns.net") != null);
+    // Ending at a via/track and resuming on an inner layer reacquires the
+    // partner from existing copper instead of silently becoming single-ended.
+    try std.testing.expect(std.mem.indexOf(u8, js, "function dpPartnerCopper(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "dpPartnerCopper(x,y,dp.partner,layer)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "(PCB.vias||[]).forEach") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "(PCB.tracks||[]).forEach") != null);
     // The partner chain is a mitered perpendicular offset of the drawn legs.
     try std.testing.expect(std.mem.indexOf(u8, js, "function dpMiter(") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "function dpChainFor(") != null);
