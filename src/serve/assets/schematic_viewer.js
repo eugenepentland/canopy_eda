@@ -2469,8 +2469,11 @@
     var addText = document.getElementById('sch-notes-add-text');
     var scratchTa = document.getElementById('sch-notes-text');
     var status = document.getElementById('sch-notes-status');
+    var errorDetails = document.getElementById('sch-notes-error-details');
+    var errorText = document.getElementById('sch-notes-error-text');
+    var errorCopy = document.getElementById('sch-notes-error-copy');
     var notesCount = document.getElementById('sch-notes-count');
-    if (!taskBox || !addForm || !addText || !scratchTa || !status) return;
+    if (!taskBox || !addForm || !addText || !scratchTa || !status || !errorDetails || !errorText) return;
 
     // Headline count shown in the collapsed Design Notes <summary>: how many
     // TODOs are still open. Cleared when the design has no tasks at all.
@@ -2488,9 +2491,67 @@
     var scratchSaving = false;
     var scratchPending = false;
 
-    function setStatus(msg, isError) {
+    function setStatus(msg, isError, details) {
       status.textContent = msg;
       status.classList.toggle('is-error', !!isError);
+      status.classList.toggle('is-actionable', !!details);
+      errorText.textContent = details || '';
+      errorDetails.hidden = true;
+      status.setAttribute('aria-expanded', 'false');
+      if (details) {
+        status.setAttribute('role', 'button');
+        status.setAttribute('tabindex', '0');
+        status.setAttribute('aria-controls', 'sch-notes-error-details');
+        status.setAttribute('title', 'Click for failure details');
+      } else {
+        status.removeAttribute('role');
+        status.removeAttribute('tabindex');
+        status.removeAttribute('aria-controls');
+        status.removeAttribute('title');
+      }
+    }
+    function toggleFailureDetails() {
+      if (!status.classList.contains('is-actionable')) return;
+      errorDetails.hidden = !errorDetails.hidden;
+      status.setAttribute('aria-expanded', errorDetails.hidden ? 'false' : 'true');
+    }
+    status.addEventListener('click', toggleFailureDetails);
+    status.addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+      toggleFailureDetails();
+    });
+    if (errorCopy) errorCopy.addEventListener('click', function () {
+      var details = errorText.textContent;
+      if (!details || !navigator.clipboard) return;
+      navigator.clipboard.writeText(details).then(function () {
+        errorCopy.textContent = 'Copied';
+        setTimeout(function () { errorCopy.textContent = 'Copy details'; }, 1400);
+      });
+    });
+    function failureSuggestion(err) {
+      if (err.errorCode === 'AccessDenied' || err.errorCode === 'PermissionDenied') return 'Make the design notes file and its directory writable by the EDA server, then retry.';
+      if (err.errorCode === 'NoSpaceLeft' || err.errorCode === 'DiskQuota') return 'Free disk space (or quota) on the server, then retry.';
+      if (err.httpStatus === 404) return 'Reload the page. This task may have been changed or removed by another editor.';
+      if (err.httpStatus === 400) return 'Reload the page and retry. If it still fails, copy these details when reporting the problem.';
+      if (err.httpStatus === 413) return 'Shorten the notes file so it is below the 1 MB limit, then retry.';
+      if (err.httpStatus >= 500) return 'Check that the design notes file is writable and inspect the server log, then retry.';
+      if (!err.httpStatus) return 'Check the connection to the EDA server, then retry.';
+      return 'Retry the update. If it fails again, copy these details when reporting the problem.';
+    }
+    function showFailure(summary, action, path, err, context) {
+      var lines = [
+        'Action: ' + action,
+        'Time: ' + new Date().toISOString(),
+        'Request: POST ' + path,
+      ];
+      if (context) lines.push(context);
+      lines.push('HTTP status: ' + (err.httpStatus ? err.httpStatus + (err.statusText ? ' ' + err.statusText : '') : 'No response'));
+      if (err.errorCode) lines.push('Error code: ' + err.errorCode);
+      lines.push('Problem: ' + (err.serverMessage || err.message || 'Unknown error'));
+      if (err.responseBody && err.responseBody !== err.serverMessage) lines.push('Server response: ' + err.responseBody);
+      lines.push('', 'Suggested fix: ' + failureSuggestion(err));
+      setStatus(summary + ': ' + (err.serverMessage || err.message || 'unknown error') + ' — click for details', true, lines.join('\n'));
     }
     function fmtTime() {
       var d = new Date();
@@ -2552,7 +2613,20 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       }).then(function (r) {
-        if (!r.ok) return r.text().then(function (t) { throw new Error('HTTP ' + r.status + ': ' + t); });
+        if (!r.ok) return r.text().then(function (t) {
+          var serverMessage = t;
+          try {
+            var parsed = JSON.parse(t);
+            if (parsed && parsed.error) serverMessage = parsed.error;
+          } catch (_) {}
+          var err = new Error(serverMessage || ('HTTP ' + r.status));
+          err.httpStatus = r.status;
+          err.statusText = r.statusText;
+          err.errorCode = r.headers.get('x-netlisp-error') || '';
+          err.serverMessage = serverMessage;
+          err.responseBody = t;
+          throw err;
+        });
         return r.json();
       });
     }
@@ -2579,7 +2653,7 @@
         postJson(base + endpoint, { id: id }).then(refreshTasks)
           .then(function () { setStatus('updated at ' + fmtTime()); })
           .catch(function (err) {
-            setStatus('update failed: ' + err.message, true);
+            showFailure('update failed', e.target.checked ? 'Mark task complete' : 'Reopen task', base + endpoint, err, 'Task ID: ' + id);
             e.target.checked = !e.target.checked;
           });
       } else if (e.target.classList.contains('sch-notes-task-remove')) {

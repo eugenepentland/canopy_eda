@@ -477,6 +477,14 @@ details li{margin:3px 0;font-size:0.88rem;color:#c9d1d9;line-height:1.45;}
 .sch-notes-text:focus{outline:none;border-color:#58a6ff;}
 .sch-notes-status{font-size:0.74rem;min-height:1em;}
 .sch-notes-status.is-error{color:#f85149;}
+.sch-notes-status.is-actionable{cursor:pointer;text-decoration:underline;text-decoration-style:dotted;text-underline-offset:3px;width:max-content;max-width:100%;}
+.sch-notes-status.is-actionable:hover{color:#ff7b72;}
+.sch-notes-status.is-actionable:focus-visible{outline:2px solid #58a6ff;outline-offset:3px;border-radius:2px;}
+.sch-notes-error-details{margin-top:4px;padding:10px 12px;background:#161b22;border:1px solid #f85149;border-radius:6px;color:#c9d1d9;}
+.sch-notes-error-head{display:flex;align-items:center;justify-content:space-between;gap:12px;color:#ff7b72;font-size:0.78rem;}
+.sch-notes-error-copy{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:5px;padding:4px 9px;font:inherit;font-size:0.72rem;cursor:pointer;}
+.sch-notes-error-copy:hover{background:#30363d;border-color:#58a6ff;}
+.sch-notes-error-details pre{margin:8px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;color:#c9d1d9;font:0.74rem/1.5 "SF Mono","Menlo",monospace;}
 .sch-notes-tasks{display:flex;flex-direction:column;gap:6px;}
 .sch-notes-empty{padding:8px 10px;border:1px dashed #30363d;border-radius:6px;font-size:0.78rem;}
 .sch-notes-empty code{background:#161b22;border:1px solid #21262d;border-radius:3px;padding:0 4px;font-size:0.74rem;}

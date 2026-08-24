@@ -244,6 +244,11 @@ pub fn renderToHtml(
         \\spellcheck="false" placeholder="Free-form notes (anything that isn't a structured TODO line)…"></textarea>
         \\</details>
         \\<div class="sch-notes-status muted" id="sch-notes-status" aria-live="polite"></div>
+        \\<div class="sch-notes-error-details" id="sch-notes-error-details" hidden>
+        \\<div class="sch-notes-error-head"><strong>Failure details</strong>
+        \\<button type="button" class="sch-notes-error-copy" id="sch-notes-error-copy">Copy details</button></div>
+        \\<pre id="sch-notes-error-text"></pre>
+        \\</div>
         \\</div>
         \\</details>
     );
@@ -2592,6 +2597,22 @@ test "the embedded schematic page marks its body for the pane stylesheet" {
     try std.testing.expect(std.mem.indexOf(u8, schematic_css, "body.sch-embed .navbar{display:none;}") != null);
     try std.testing.expect(std.mem.indexOf(u8, schematic_css, "body.sch-embed .sch-head{display:none;}") != null);
     try std.testing.expect(std.mem.indexOf(u8, schematic_css, "body.sch-embed .sch-sidebar{display:none;}") != null);
+}
+
+test "design note update failures have an accessible diagnostic panel" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var block = emptyAttachBlock("Demo");
+    var checks: CheckResultMap = .empty;
+    const html = try renderToHtml(allocator, &block, "", "demo", "", .pass, null, &checks, .{ .path = "/schematics/" });
+
+    try std.testing.expect(std.mem.indexOf(u8, html, "id=\"sch-notes-status\" aria-live=\"polite\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "id=\"sch-notes-error-details\" hidden") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "id=\"sch-notes-error-copy\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, schematic_css, ".sch-notes-status.is-actionable") != null);
+    try std.testing.expect(std.mem.indexOf(u8, schematic_css, ".sch-notes-error-details pre") != null);
 }
 
 // spec: render_html - The schematic page renders no thermal panel, linking out to /thermal/:name instead, so the page reads nothing but the design's own .sexp

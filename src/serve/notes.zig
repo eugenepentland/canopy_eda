@@ -14,6 +14,7 @@
 //! top of the file with the scratchpad text below a blank line.
 
 const std = @import("std");
+const logError = std.log.err;
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
 const infra_random = @import("../infra/random.zig");
@@ -38,6 +39,7 @@ const http_internal_error: u16 = 500;
 
 // JSON / header literals reused across handlers
 const cors_header = "access-control-allow-origin";
+const error_code_header = "x-netlisp-error";
 const err_missing_name = "{\"error\":\"missing name\"}";
 const err_no_body = "{\"error\":\"no body\"}";
 const err_invalid_json = "{\"error\":\"invalid json\"}";
@@ -408,8 +410,15 @@ fn mutateTaskByIdApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response, mo
     if (id_val != .string or id_val.string.len == 0)
         return jsonError(res, http_bad_request, "{\"error\":\"id must be a non-empty string\"}");
 
-    const result = mutateTaskCore(ctx.allocator, ctx.project_dir, name, id_val.string, mode) catch
-        return jsonError(res, http_internal_error, "{\"error\":\"mutate failed\"}");
+    const result = mutateTaskCore(ctx.allocator, ctx.project_dir, name, id_val.string, mode) catch |err| {
+        // Keep the response safe (no server paths), but carry the concrete Zig
+        // error name so the notes UI can turn an otherwise opaque 500 into a
+        // useful, copyable diagnostic. The full event also lands in the server
+        // log for whoever follows up on the report.
+        logError("design notes task {s} failed: {s}", .{ @tagName(mode), @errorName(err) });
+        res.header(error_code_header, @errorName(err));
+        return jsonError(res, http_internal_error, "{\"error\":\"cannot update notes file\"}");
+    };
     if (result == null) return jsonError(res, http_not_found, "{\"error\":\"task id not found\"}");
 
     res.body = ok_json;
