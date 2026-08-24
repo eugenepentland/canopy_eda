@@ -3489,7 +3489,8 @@ function kbdToggle(){
   '<div class="kbd-row"><span>Constrain selected outline line</span><kbd>H / V</kbd></div>'+
   '<div class="kbd-row"><span>Edit a custom pour with the same sketch palette, geometry tools and constraints as the board outline</span><kbd>Z, then click pour</kbd></div>'+
   '<div class="kbd-row"><span>Hand-route mode (click pad → trace; head stops at clearance obstacles)</span><kbd>X</kbd></div>'+
-  '<div class="kbd-row"><span>Drop via + flip layer (while routing)</span><kbd>V</kbd></div>'+
+  '<div class="kbd-row"><span>Open the View sidebar (when no trace or outline sketch is active)</span><kbd>V</kbd></div>'+
+  '<div class="kbd-row"><span>Drop via + flip layer (while actively routing)</span><kbd>V</kbd></div>'+
   '<div class="kbd-row"><span>Focus / select top or bottom copper</span><kbd>B</kbd></div>'+
   '<div class="kbd-row"><span>Cycle the selected routable layer</span><kbd>PgUp / PgDn</kbd></div>'+
   '<div class="kbd-row"><span>Switch 45&deg; corner posture (while routing)</span><kbd>/</kbd></div>'+
@@ -7068,7 +7069,7 @@ svg.addEventListener("contextmenu",function(ev){
 document.addEventListener("keydown",function(ev){if(RO||kbTyping(ev.target))return;
  if((ev.key=="x"||ev.key=="X")&&!ev.ctrlKey&&!ev.metaKey){ev.preventDefault();drawModeSet(!drawMode);return;}
  if(!drawMode)return;
- if(ev.key=="v"||ev.key=="V"){ev.preventDefault();drawViaHere();return;}
+ if(dtrace&&(ev.key=="v"||ev.key=="V")){ev.preventDefault();drawViaHere();return;}
  if((ev.key=="p"||ev.key=="P")&&dtrace&&dtrace.pair){ev.preventDefault();
   dtrace.pair=null;routeStatMsg("pair uncoupled — routing "+nLeaf(dtrace.net)+" alone");drawBtnSync();ovPaintSoon();return;}
  if(ev.key=="/"){ev.preventDefault();drawPosture^=1;
@@ -9028,8 +9029,17 @@ function apPresetApply(n){
   var r=lb.getBoundingClientRect(),pr=(pop.offsetParent||document.body).getBoundingClientRect();
   pop.style.left=(r.left-pr.left)+"px";pop.style.top=(r.bottom-pr.top+4)+"px";pop.hidden=false;lb.classList.add("active");}
  function popClose(){if(pop)pop.hidden=true;if(lb)lb.classList.remove("active");}
+ function apOpen(){
+  if(mobileInspectMode()){mobilePanelSet("layers",true);return true;}
+  if(compactDockMode()){compactDockSet("appearance",true,"");return true;}
+  if(pop&&lb){popOpen();return true;}
+  return !!document.getElementById("pcb-appear");}
  if(lb)lb.addEventListener("click",function(ev){ev.stopPropagation();if(pop.hidden)popOpen();else popClose();});
  document.addEventListener("click",function(ev){if(pop&&!pop.hidden&&ev.target!==lb&&!pop.contains(ev.target))popClose();});
+ document.addEventListener("keydown",function(ev){
+  if((ev.key!=="v"&&ev.key!=="V")||ev.ctrlKey||ev.metaKey||ev.altKey||kbTyping(ev.target))return;
+  if(dtrace||outlineMode||activeSketchIsArea())return;
+  if(apOpen())ev.preventDefault();});
  apRender();
  document.querySelectorAll(".ap-tab").forEach(function(t){
   t.addEventListener("click",function(){

@@ -8240,6 +8240,18 @@ test "M binds the move-by-distance dialog and D binds the ruler, and the toolstr
     try std.testing.expect(std.mem.indexOf(u8, tip_move, "Move selected parts by an X/Y distance (M)") != null);
 }
 
+// V opens the PCB View sidebar unless an active trace needs it to drop a via,
+// while outline sketches retain their vertical constraint shortcut.
+test "V opens the View sidebar outside an active trace or outline sketch" {
+    const js = @embedFile("assets/pcb_board.js");
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(dtrace&&(ev.key==\"v\"||ev.key==\"V\")){ev.preventDefault();drawViaHere();return;}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(dtrace||outlineMode||activeSketchIsArea())return;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "compactDockSet(\"appearance\",true,\"\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "mobilePanelSet(\"layers\",true)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(pop&&lb){popOpen();return true;}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "Open the View sidebar (when no trace or outline sketch is active)") != null);
+}
+
 // spec: Web Server - The PCB editor imports a DXF board outline: the page ships a DXF button (toolstrip + embed action bar) and the importer script, whose client-side parser exposes the loops a picked .dxf found (LWPOLYLINE/POLYLINE loops, LINE/ARC chains, $INSUNITS units, Y-flip to the board frame)
 test "the toolstrip ships the DXF board-outline import button" {
     // Both surfaces carry the button under the same id the importer wires
