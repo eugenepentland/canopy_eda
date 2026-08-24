@@ -202,6 +202,7 @@ candidate for deployment.
 
 - Roots unit tests separately from the production executable
 - Runs the unit-test suite as concurrent shards whose filters claim every named test, including local-first routing regressions, exactly once
+- Ground-via seed model and endpoint tests remain claimed by the shard manifest
 - Bridges every test-bearing module into the shard import graph so filters alone decide a shard's contents
 - Rejects a shard filter that no longer names a test in the tree
 - Pins every gated full-test invocation with `--seed=1` so an unchanged tree's test run is a cache hit
@@ -3462,6 +3463,22 @@ Public functions: load, isGroundFn, isSupplyFn, strapPads, padRequirements
 - connectionRequirement tiers an unconnected pad by confidence
 - padRequirements keeps only the flaggable pads of a part
 
+## placement/ground-via-seed
+
+Public functions: generateLive
+
+- hand routing can seed one legal exposed-pad field and one centred GND-pad barrel without replacing existing copper
+- running the ground-via seed repeatedly adds each eligible barrel at most once
+- a candidate that would add a fabrication DRC error is reported as blocked and is not returned
+- completeness-waiver: empty inputs (a board with no eligible ground-plane pads returns an empty outcome, unit-tested by the plane-via candidate contract)
+- completeness-waiver: large inputs (the autorouter candidate pass and indexed incremental DRC gate bound the work; no unbounded search is introduced)
+- completeness-waiver: unauthorized access (pure in-process transformation over caller-supplied structs; access control lives at the serve boundary)
+- completeness-waiver: i/o failure (no I/O; every input is a typed struct)
+- completeness-waiver: concurrent access (no shared mutable state; the result is arena-owned)
+- completeness-waiver: malformed encoding (inputs are typed structs, never parsed bytes)
+- completeness-waiver: integer overflow (counts are bounded by candidate slice length)
+- completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
+
 ## placement/plane-via
 
 Public functions: InPad, barrelFits, inLandBarrelFits, landAt, thermalAxis, ThermalArray, fanDir, swivel
@@ -6229,6 +6246,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The PCB page blob names the implicit model's supply-rail plane so the client DRC shares the server's plane-carried verdict
 - The PCB page blob always carries the ground-name token vocabulary so the browser's ground test cannot drift from the server's
 - The PCB viewer offers a Fence action that lays (and regenerates) the RF ground via fence onto the active layout's routed RF traces — declared (fence …) classes and max-freq classes alike
+- The PCB hand-routing editor offers one undoable GND-vias action that seeds DRC-legal exposed-pad arrays and centred ground-pad barrels without replacing submitted copper
 - GET /api/schematic-pdf/:name returns the composed review PDF as an application/pdf attachment that passes the writer's structural self-check
 - GET /api/schematic-pdf/:name answers an unknown design or module name with a 404 whose body never reads as a PDF
 - GET /api/schematic-pdf/:name?theme=light composes the print palette, yielding different bytes over the same pages as the default screen palette

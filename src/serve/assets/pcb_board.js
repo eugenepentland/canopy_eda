@@ -7645,9 +7645,10 @@ function runDrcNow(){if(RO)return;var seq=++drcSeq;drcChip(-1);
     var oldIds=drcIdSet(PCB.drc||[]),changed=srv.length!==(PCB.drc||[]).length||!idSetEq(drcIdSet(srv),oldIds);
     PCB.drc=srv;if(changed)drawDrc();drcChip(srv.length);routeSummaryFrom(j);}) // server wins
   .catch(function(){if(seq===drcSeq)drcChip(0);});}
-function boardStatePayload(){return {
+function boardStatePayload(){var vg=viaGeo();return {
  parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,side:p.side||"top"};}),
- tracks:PCB.tracks||[],vias:PCB.vias||[],zones:PCB.zones||[],rf_paths:PCB.rf_paths||[],clearance:clrVal(),outline:PCB.outline||null};}
+ tracks:PCB.tracks||[],vias:PCB.vias||[],zones:PCB.zones||[],rf_paths:PCB.rf_paths||[],clearance:clrVal(),
+ via_dia:vg.dia,via_drill:vg.drill,outline:PCB.outline||null};}
 // ── Declared-pour refill + staleness ─────────────────────────────────────
 // Pours delivered by the server (page load) or a refill reflect the board
 // state at that instant; any later edit feeding boardStatePayload() (part
@@ -7704,6 +7705,32 @@ function markPoursStale(){pourGeomDrop(); // every copper/pose edit funnels here
  poursReqSeq++; // an edit supersedes any in-flight refill's freshness
  if(PCB.poursStale)return;PCB.poursStale=true;pourBtnSync();}
 function poursFresh(){PCB.poursStale=false;pourBtnSync();}
+// Seed only via-in-pad ground barrels from the autorouter's plane pass: QFN
+// exposed-pad arrays and exact GND-pad centres. The server judges each addition
+// against the submitted hand copper; no trace or existing via is replaced.
+var groundViasInFlight=false;
+function groundViasBtnInstall(){if(RO||document.getElementById("pcb-ground-vias"))return;
+ var anchor=document.getElementById("pcb-fence")||document.getElementById("pcb-pour");if(!anchor||!anchor.parentNode)return;
+ var b=document.createElement("button");b.className="btn";b.id="pcb-ground-vias";b.textContent="⊙ GND vias";
+ b.title="Seed exposed-pad thermal arrays and centred GND via-in-pad drops without autorouting";
+ anchor.parentNode.insertBefore(b,anchor);}
+function groundViasRun(){if(groundViasInFlight||RO)return;var b=document.getElementById("pcb-ground-vias");if(!b)return;
+ groundViasInFlight=true;b.disabled=true;routeStatMsg("seeding GND vias…");
+ var payload=boardStatePayload(),sent=JSON.stringify(payload),q=subq();
+ fetch("/api/pcb-drc/"+encodeURIComponent(PCB.name)+"/ground-vias"+q,{method:"POST",
+  headers:{"Content-Type":"application/json"},body:sent})
+  .then(function(r){if(!r.ok)throw 0;return r.json();})
+  .then(function(j){groundViasInFlight=false;b.disabled=false;
+   if(JSON.stringify(boardStatePayload())!==sent){routeStatMsg("board changed — click GND vias again");return;}
+   var g=j||{},added=g.added||[];
+   if(added.length){recordUndo();PCB.vias=PCB.vias||[];added.forEach(function(v){PCB.vias.push({x:v.x,y:v.y,d:v.d,
+     drill:v.drill,net:v.net||"",source:"autorouter",id:viaIdNew()});});
+    copperIdsEnsureAll();drawRoute();scheduleDrc();}
+   var msg="GND vias: "+added.length+" added";
+   if(g.duplicates)msg+=" · "+g.duplicates+" already present";
+   if(g.blocked)msg+=" · "+g.blocked+" blocked by DRC";
+   routeStatMsg(msg,!!g.blocked&&!added.length);})
+  .catch(function(){groundViasInFlight=false;b.disabled=false;routeStatMsg("GND via seed failed",true);});}
 function refillPours(){if(poursInFlight)return;var bs=pourBtns();if(!bs.length)return;
  poursInFlight=true;var seq=++poursReqSeq;bs.forEach(function(b){b.disabled=true;});
  setStat("r-pour-stat","","refilling…");var q=subq();
@@ -7718,6 +7745,7 @@ function refillPours(){if(poursInFlight)return;var bs=pourBtns();if(!bs.length)r
   .catch(function(){setStat("r-pour-stat","err","refill failed");
    poursInFlight=false;bs.forEach(function(b){b.disabled=false;});});}
 pourBtns().forEach(function(b){b.addEventListener("click",refillPours);});
+(function(){groundViasBtnInstall();var b=document.getElementById("pcb-ground-vias");if(b&&!RO)b.addEventListener("click",groundViasRun);})();
 (function(){var b=fenceBtn();if(b&&!RO)b.addEventListener("click",fenceRun);})();
 function scheduleDrc(){if(RO)return;
  copperTouched(); // every copper/pose edit funnels here — refresh airwire doneness

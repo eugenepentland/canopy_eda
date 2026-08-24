@@ -661,6 +661,7 @@ test {
     _ = @import("placement/edge_rotation.zig");
     _ = @import("placement/pose_snapshot.zig");
     _ = @import("placement/pose_math.zig");
+    _ = @import("ground_via_seed.zig");
     _ = @import("placement/pad_exit.zig");
     _ = @import("placement/drc_compose.zig");
     _ = @import("placement/bypass_intent.zig");

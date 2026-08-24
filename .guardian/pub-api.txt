@@ -854,6 +854,9 @@ src/gerber_verify.zig::parse | fn parse(arena: std.mem.Allocator, bytes: []const
 src/gerber_verify.zig::verifyCopperLayer | fn verifyCopperLayer( arena: std.mem.Allocator, gerber_bytes: []const u8, frame: export_fab.Frame, flashes: []const ExpectFlash, segments: []const ExpectSegment, ) ParseError!Report
 src/githash.zig::shortHash | fn shortHash(io: std.Io, gpa: std.mem.Allocator, repo_root: []const u8) ?[]const u8
 src/githash.zig::short_len value
+src/ground_via_seed.zig::LiveOutcome struct_
+src/ground_via_seed.zig::NamedVia struct_
+src/ground_via_seed.zig::generateLive | fn generateLive( arena: std.mem.Allocator, project_dir: []const u8, input: anytype, ) std.mem.Allocator.Error!LiveOutcome
 src/id_insert.zig::IdInsertError value
 src/id_insert.zig::applyInserts | fn applyInserts( allocator: std.mem.Allocator, source: []const u8, pending: []const Evaluator.PendingId, pending_child: []const Evaluator.PendingChildId, ) IdInsertError![]u8
 src/id_insert.zig::insertPendingIds | fn insertPendingIds( allocator: std.mem.Allocator, source_path: []const u8, pending: []const Evaluator.PendingId, pending_child: []const Evaluator.PendingChildId, ) IdInsertError!void
@@ -3251,6 +3254,7 @@ src/serve/footprint_editor.zig::saveApi | fn saveApi(ctx: *Server, req: *httpz.R
 src/serve/footprint_preview.zig::HandlerError value
 src/serve/footprint_preview.zig::boardFootprintApi | fn boardFootprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/footprint_preview.zig::footprintApi | fn footprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/ground_vias.zig::api | fn api(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/gzip_cache.zig::Store struct_
 src/serve/gzip_cache.zig::compress | fn compress(self: *Store, alloc: std.mem.Allocator, body: []const u8) deflate.Error![]u8
 src/serve/gzip_cache.zig::deinit | fn deinit(self: *Store) void

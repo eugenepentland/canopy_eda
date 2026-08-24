@@ -55,6 +55,7 @@ const thermal_cache = @import("serve/thermal_cache.zig");
 const progress_cache = @import("serve/progress_cache.zig");
 const warmup = @import("serve/warmup.zig");
 const pcb_fence = @import("serve/pcb_fence.zig");
+const ground_vias = @import("serve/ground_vias.zig");
 const pcb_layout_sync = @import("serve/pcb_layout_sync.zig");
 const route_review = @import("serve/route_review.zig");
 const route_session_api = @import("serve/route_session_api.zig");
@@ -597,6 +598,7 @@ fn registerPcbRoutes(router: anytype) void {
     router.post("/api/pcb-route-analyze/:name", route_analyze_api.pcbRouteAnalyzeApi, .{});
     router.post("/api/route-vision/:name", route_vision.routeVisionApi, .{});
     router.post("/api/pcb-drc/:name", pcb_layout_page.pcbDrcApi, .{});
+    router.post("/api/pcb-drc/:name/ground-vias", ground_vias.api, .{});
     router.post("/api/pcb-fence/:name", pcb_fence.pcbFenceApi, .{});
     router.get("/api/pcb-drc-rules/:name", drc_rules.getApi, .{});
     router.post("/api/pcb-drc-rules/:name", drc_rules.setApi, .{});

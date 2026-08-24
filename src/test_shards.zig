@@ -46,10 +46,14 @@
 //! Balance is by MEASURED wall time, not test count. Regenerate with
 //! `scripts/test_shard_balance.py` after a large shift in test cost.
 
+const std = @import("std");
+
 pub const shards: []const []const []const u8 = &.{
     // shard 0
     &.{
+        "ground_via_seed.test.",
         "placement.fine_accept.test.a n",
+        "serve.ground_vias.test.",
     },
     // shard 1
     &.{
@@ -530,3 +534,9 @@ pub const shards: []const []const []const u8 = &.{
         "subcircuit_silkscreen.test.",
     },
 };
+
+// spec: Development pipeline - Ground-via seed model and endpoint tests remain claimed by the shard manifest
+test {
+    try std.testing.expectEqualStrings("ground_via_seed.test.", shards[0][0]);
+    try std.testing.expectEqualStrings("serve.ground_vias.test.", shards[0][2]);
+}

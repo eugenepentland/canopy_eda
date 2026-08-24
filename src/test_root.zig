@@ -203,6 +203,7 @@ test {
     _ = @import("placement/gap_close_route.zig");
     _ = @import("placement/gap_policy.zig");
     _ = @import("placement/geometry.zig");
+    _ = @import("ground_via_seed.zig");
     _ = @import("placement/guide_branch.zig");
     _ = @import("placement/impedance.zig");
     _ = @import("placement/impedance_coupled_stripline.zig");
@@ -340,6 +341,7 @@ test {
     _ = @import("serve/footprint_editor.zig");
     _ = @import("serve/footprint_preview.zig");
     _ = @import("serve/gzip_cache.zig");
+    _ = @import("serve/ground_vias.zig");
     _ = @import("serve/history.zig");
     _ = @import("serve/kicad_sch_export.zig");
     _ = @import("serve/layer_table_json.zig");
