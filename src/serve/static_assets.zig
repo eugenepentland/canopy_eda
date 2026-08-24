@@ -631,6 +631,15 @@ test "PCB editor carries tangent arc routing geometry" {
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
+test "PCB editor automatically lowers manual pad tapers" {
+    const markers = [_][]const u8{
+        "function drawTaperProfile", "function drawRfTaperAllowed", "pad_neck_width",                    "kind:\"rf\"",
+        "nominal*1.2",               "function drawTaperTracks",    "function drawApplyAutomaticTapers", "automatic pad tapers added",
+        "window.PCBDrawTaperTracks",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+}
+
 test "browser saves keep the newest-edited layout first in memory and in the panel" {
     const markers = [_][]const u8{
         "list.insertBefore(row,list.firstChild)",

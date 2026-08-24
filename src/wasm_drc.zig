@@ -400,13 +400,23 @@ fn buildNetClassOverrides(arena: std.mem.Allocator, v: ?std.json.Value, nettab: 
                 .clearance = jNum(clearanceVal(o)),
                 .via_dia = jNum(o.get("via_dia")),
                 .via_drill = jNum(o.get("via_drill")),
+                .pad_neck = .{
+                    .width = jNum(o.get("pad_neck_width")),
+                    .max_length = jNum(o.get("pad_neck_max_length")),
+                    .taper_length = jNum(o.get("pad_neck_taper_length")),
+                },
                 // The resolved RF same-layer keepout halo + its pad-escape
                 // exemption. Both must cross the bridge or the client silently
                 // under-reports `keepout_violation` forever — the server would flag
                 // an intrusion the browser's per-edit check never sees.
                 .rf = .{
+                    .max_freq_hz = jNum(o.get("max_freq_hz")),
                     .keepout_mm = jNum(o.get("keepout_mm")),
                     .keepout_escape_mm = jNum(o.get("keepout_escape_mm")),
+                    .impedance = .{
+                        .ohms = jNum(o.get("impedance_ohms")),
+                        .diff_ohms = jNum(o.get("diff_impedance_ohms")),
+                    },
                 },
             },
         });
@@ -746,6 +756,38 @@ test "bridge JSON equals a direct drc.check on the same board" {
     // two are directly comparable byte-for-byte (same violations, same ids).
     const direct_json = try serialize(arena, ref.violations, ref.names);
     try testing.expectEqualStrings(direct_json, out);
+}
+
+test "bridge accepts geometry-exact manual neck and RF land tapers" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const rf =
+        \\{"clearance":0.127,"rules":{"min_width":0.127},
+        \\ "netclasses":[{"net":"RF","class":"rf","width":0.4,"max_freq_hz":12000000000,"impedance_ohms":50}],
+        \\ "parts":[{"ref":"U1","kind":"hub","hw":1,"hh":1,"x":0,"y":0,"side":"top",
+        \\   "pads":[{"num":"1","x":0,"y":0,"w":0.6,"h":0.2,"net":"RF"}]}],
+        \\ "tracks":[{"x1":0,"y1":0,"x2":0.3,"y2":0,"l":0,"w":0.2,"net":"RF"},
+        \\             {"x1":0.3,"y1":0,"x2":0.38,"y2":0,"l":0,"w":0.234,"net":"RF"}]}
+    ;
+    const rf_bad =
+        \\{"clearance":0.127,"rules":{"min_width":0.127},
+        \\ "netclasses":[{"net":"RF","class":"rf","width":0.4,"max_freq_hz":12000000000,"impedance_ohms":50}],
+        \\ "parts":[{"ref":"U1","kind":"hub","hw":1,"hh":1,"x":0,"y":0,"side":"top",
+        \\   "pads":[{"num":"1","x":0,"y":0,"w":0.6,"h":0.2,"net":"RF"}]}],
+        \\ "tracks":[{"x1":0.3,"y1":0,"x2":0.7,"y2":0,"l":0,"w":0.2,"net":"RF"}]}
+    ;
+    const neck =
+        \\{"clearance":0.127,"rules":{"min_width":0.127},
+        \\ "netclasses":[{"net":"VDD","width":0.3,"pad_neck_width":0.2,"pad_neck_max_length":0.75,"pad_neck_taper_length":0.35}],
+        \\ "parts":[{"ref":"U1","kind":"hub","hw":1,"hh":1,"x":0,"y":0,"side":"top",
+        \\   "pads":[{"num":"1","x":0,"y":0,"w":0.25,"h":0.6,"net":"VDD"}]}],
+        \\ "tracks":[{"x1":0,"y1":0,"x2":0.5,"y2":0,"l":0,"w":0.2,"net":"VDD"}]}
+    ;
+    try testing.expect(std.mem.indexOf(u8, runDrcJson(arena, rf), "\"k\":\"track width\"") == null);
+    try testing.expect(std.mem.indexOf(u8, runDrcJson(arena, rf_bad), "\"k\":\"track width\"") != null);
+    try testing.expect(std.mem.indexOf(u8, runDrcJson(arena, neck), "\"k\":\"track width\"") == null);
 }
 
 // spec: Web Server - The WASM DRC bridge returns an error object on malformed input instead of trapping

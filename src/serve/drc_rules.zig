@@ -352,6 +352,10 @@ test "viewer JS wires the WASM DRC worker, server reconciliation, and the overri
     try std.testing.expect(std.mem.indexOf(u8, marshal, "PCB.keepouts") != null);
     try std.testing.expect(std.mem.indexOf(u8, marshal, "keepout_mm") != null);
     try std.testing.expect(std.mem.indexOf(u8, marshal, "keepout_escape_mm") != null);
+    try std.testing.expect(std.mem.indexOf(u8, marshal, "pad_neck_width") != null);
+    try std.testing.expect(std.mem.indexOf(u8, marshal, "pad_neck_max_length") != null);
+    try std.testing.expect(std.mem.indexOf(u8, marshal, "pad_neck_taper_length") != null);
+    try std.testing.expect(std.mem.indexOf(u8, marshal, "impedance_ohms") != null);
     try std.testing.expect(std.mem.indexOf(u8, marshal, "PCB.plane_nets") != null);
     const worker = @embedFile("assets/drc_worker.js");
     try std.testing.expect(std.mem.indexOf(u8, worker, "drc_check") != null);

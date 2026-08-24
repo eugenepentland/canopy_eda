@@ -6189,6 +6189,81 @@ function arcRoundedTracks(points,want,l,w,net){var out=[],bends=0,minR=1e18,cur=
   out.push({x1:f.p1.x,y1:f.p1.y,xm:f.pm.x,ym:f.pm.y,x2:f.p2.x,y2:f.p2.y,l:l,w:w,net:net,source:"human"});
   cur=f.p2;bends++;minR=Math.min(minR,f.radius);}
  line(cur,points[points.length-1]);return {tracks:out,bends:bends,minRadius:bends?minR:0};}
+// Automatic land tapers for completed hand routes. Two policies share this
+// lowering seam:
+//  · an authored pad neck stays at pad_neck_width for max_length, then grows
+//    over taper_length (the ordinary autorouter pad_neck pass);
+//  · a single-ended controlled-impedance RF route starts at the ACTUAL SMD
+//    land width, holds through half the land length, then reaches nominal over
+//    1.2 trace widths (the G2 RF port finisher's exact width profile).
+// The route stays ordinary constant-width track/arc pieces, so save, DRC,
+// Gerber, KiCad and selection all see the same copper.
+function drawEndpointPad(net,l,x,y){var hit=null,key=net||"";
+ P.some(function(p,i){return (p.pads||[]).some(function(pd){if(pd.thru||!pd.net||pd.net!==key)return false;
+   var pl=p.side==="bottom"?1:0,c=wpt(i,pd.x,pd.y);if(pl!==l||Math.hypot(c.x-x,c.y-y)>1e-7)return false;
+   hit={i:i,pd:pd,l:pl};return true;});});return hit;}
+function drawRfTaperAllowed(net){var key=net||"",pads=[];
+ if((PCB.vias||[]).some(function(v){return (v.net||"")===key;}))return false;
+ P.forEach(function(p){(p.pads||[]).forEach(function(pd){if(pd.net===key)pads.push({thru:!!pd.thru,l:p.side==="bottom"?1:0});});});
+ return pads.length===2&&(pads[0].thru||pads[1].thru||pads[0].l===pads[1].l);}
+function drawTaperProfile(net,pad,nominal,rfAllowed){if(!pad||!pad.pd)return null;
+ var c=netClassInfo(net||"");if(!c)return null;
+ var classW=+c.width||+((PCB.rules||{}).track_width)||baseTrackW();
+ if(!(classW>0)||Math.abs(nominal-classW)>1e-7)return null;
+ var neck=+c.pad_neck_width||0;
+ if(neck>0){neck=Math.max(neck,+((PCB.rules||{}).min_width)||0);
+  if(neck>=nominal-1e-9)return null;
+  return {kind:"neck",width:neck,land:(+c.pad_neck_max_length||.75),taper:(+c.pad_neck_taper_length||.35),step:.025};}
+ if(!rfAllowed||!(+c.max_freq_hz>0)||!(+c.impedance_ohms>0)||(+c.diff_impedance_ohms>0))return null;
+ var across=Math.min(+pad.pd.w||0,+pad.pd.h||0),along=Math.max(+pad.pd.w||0,+pad.pd.h||0);
+ if(!(across>0)||!(along>0)||Math.abs(across-nominal)<=1e-9)return null;
+ return {kind:"rf",width:across,land:along/2,taper:nominal*1.2,step:nominal*1.2/6};}
+function drawTrackPoint(t,f){var g=trackArcGeom(t);if(g){var a=g.a1+g.sweep*f;return {x:g.cx+g.r*Math.cos(a),y:g.cy+g.r*Math.sin(a)};}
+ return {x:t.x1+(t.x2-t.x1)*f,y:t.y1+(t.y2-t.y1)*f};}
+function drawTrackPiece(t,f0,f1,w){var a=drawTrackPoint(t,f0),b=drawTrackPoint(t,f1),q={x1:a.x,y1:a.y,x2:b.x,y2:b.y,l:t.l||0,w:w,net:t.net||"",source:"human",id:trackIdNew()};
+ if(t.xm!=null&&t.ym!=null){var m=drawTrackPoint(t,(f0+f1)/2);q.xm=m.x;q.ym=m.y;}return q;}
+function drawProfileWidth(s,total,start,end,nominal){
+ function local(d,p){if(!p)return nominal;if(d<=p.land)return p.width;if(d>=p.land+p.taper)return nominal;
+  return p.width+(nominal-p.width)*(d-p.land)/p.taper;}
+ var sa=!!start&&s<start.land+start.taper,ea=!!end&&total-s<end.land+end.taper;
+ if(sa&&ea)return Math.min(local(s,start),local(total-s,end));
+ if(sa)return local(s,start);if(ea)return local(total-s,end);return nominal;}
+// Pure centreline lowering: split at every profile sample and use the wider
+// endpoint for each constant-width piece (a conservative outer approximation
+// of the linear taper). `tracks` must be in gesture order.
+function drawTaperTracks(tracks,start,end,nominal){if(!tracks.length||(!start&&!end))return tracks.slice();
+ var lens=tracks.map(trackLength),total=lens.reduce(function(a,b){return a+b;},0),targets=[0,total];
+ function cuts(p,rev){if(!p)return;var d=0;targets.push(rev?total-p.land:p.land);
+  for(d=p.land+p.step;d<p.land+p.taper-1e-9;d+=p.step)targets.push(rev?total-d:d);
+  targets.push(rev?total-p.land-p.taper:p.land+p.taper);}
+ cuts(start,false);cuts(end,true);targets=targets.filter(function(s){return s>1e-9&&s<total-1e-9;});
+ targets.push(0,total);targets.sort(function(a,b){return a-b;});
+ var unique=[];targets.forEach(function(s){if(!unique.length||Math.abs(s-unique[unique.length-1])>1e-8)unique.push(s);});
+ var out=[],base=0,ci=1;
+ tracks.forEach(function(t,ti){var len=lens[ti],stop=base+len,loc=[base];
+  while(ci<unique.length&&unique[ci]<stop-1e-8){if(unique[ci]>base+1e-8)loc.push(unique[ci]);ci++;}loc.push(stop);
+  for(var j=1;j<loc.length;j++){var s0=loc[j-1],s1=loc[j],w=Math.max(drawProfileWidth(s0,total,start,end,nominal),drawProfileWidth(s1,total,start,end,nominal));
+   out.push(drawTrackPiece(t,len>1e-12?(s0-base)/len:0,len>1e-12?(s1-base)/len:1,w));}base=stop;
+  while(ci<unique.length&&unique[ci]<=base+1e-8)ci++;});return out;}
+window.PCBDrawTaperTracks=drawTaperTracks;
+function drawReplaceLaid(shaped){var board=PCB.tracks||[],old=dtrace.laid.slice(),at=board.length;
+ old.forEach(function(t){var i=board.indexOf(t);if(i>=0){at=Math.min(at,i);board.splice(i,1);}});
+ if(at>board.length)at=board.length;Array.prototype.splice.apply(board,[at,0].concat(shaped));dtrace.laid=shaped;dtrace.n=shaped.length;gpuCuEdit();}
+function drawApplyAutomaticTapers(){if(!dtrace||dtrace.pair||!dtrace.laid||!dtrace.laid.length)return {ok:true,changed:false};
+ var old=dtrace.laid.slice(),nominal=dtrace.w,rfAllowed=drawRfTaperAllowed(dtrace.net);
+ var sp=dtrace.startPad,ep=drawEndpointPad(dtrace.net,dtrace.l,dtrace.lx,dtrace.ly),sr=drawTaperProfile(dtrace.net,sp,nominal,rfAllowed),er=drawTaperProfile(dtrace.net,ep,nominal,rfAllowed);
+ if(!sr&&!er)return {ok:true,changed:false};var shaped;
+ // Authored pad_neck shapes only the pad-ended segment. RF port tapering is a
+ // path-length profile and may continue over several short gesture pieces.
+ if((sr&&sr.kind==="neck")||(er&&er.kind==="neck")){
+  if(old.length===1)shaped=drawTaperTracks(old,sr,er,nominal);
+  else{shaped=old.slice();if(sr)shaped.splice.apply(shaped,[0,1].concat(drawTaperTracks([old[0]],sr,null,nominal)));
+   if(er){var last=shaped.length-1,tail=drawTaperTracks([shaped[last]],null,er,nominal);shaped.splice.apply(shaped,[last,1].concat(tail));}}
+ }else shaped=drawTaperTracks(old,sr,er,nominal);
+ var board=PCB.tracks||[],after=board.filter(function(t){return old.indexOf(t)<0;}).concat(shaped),base=dtrace.undo||{};
+ if(drcGateDiffBlocks(base.tracks||[],base.vias||[],after,PCB.vias||[])){
+  routeStatMsg("automatic pad taper would violate DRC — adjust the launch before finishing",true);return {ok:false,changed:false};}
+ drawReplaceLaid(shaped);return {ok:true,changed:true};}
 // Exact candidate copper for the current click. Including the last committed
 // segment lets the next click round the corner at the current route head; the
 // old segment is atomically replaced on commit. Internal posture corners are
@@ -6478,8 +6553,9 @@ function drawCommitPlan(plan){if(!plan||!plan.tracks.length)return false;
  if(plan.bends){var want=drawArcRadius(),shrunk=plan.minRadius+1e-6<want;
   routeStatMsg((shrunk?"fit-limited arc · R":"tangent arc · R")+plan.minRadius.toFixed(3)+" mm");}
  return true;}
-function drawEnd(){if(dtrace&&dtrace.n>0){recordUndo(dtrace.undo);scheduleDrc();}
- dtrace=null;drawBtnSync();ovPaintSoon();routeStatMsg();}
+function drawEnd(){var tapered={ok:true,changed:false};if(dtrace&&dtrace.n>0){tapered=drawApplyAutomaticTapers();if(!tapered.ok)return false;
+  recordUndo(dtrace.undo);scheduleDrc();}
+ dtrace=null;drawBtnSync();ovPaintSoon();routeStatMsg(tapered.changed?"automatic pad tapers added":null);return true;}
 // Destination pads for a trace started on pad (pi,pd): the far end of every
 // still-unrouted airwire touching that pad — where this trace is *supposed*
 // to land. paintDraw pulses them amber (the click-highlight treatment), and
@@ -6681,7 +6757,8 @@ function drawStart(net,layer,x,y,pi,pd){
  var dests=drawDests(pi,pd);
  if(dests.length)routeStatMsg("route "+nLeaf(net)+" → "+
   dests.map(function(d){return refLabel(P[d.i].ref);}).join(", "));
- var tr={net:net,l:layer,w:trackW(net),lx:x,ly:y,n:0,undo:snapAll(),laid:[],dest:dests,pdir:null,steps:[]};
+ var tr={net:net,l:layer,w:trackW(net),lx:x,ly:y,n:0,undo:snapAll(),laid:[],dest:dests,pdir:null,steps:[],
+  startPad:(pi!=null&&pd&&!pd.thru)?{i:pi,pd:pd,l:layer}:null};
  // Auto-couple: a pad start on a declared diff-pair net grabs the partner
  // net's nearest pad as the twin trace's start — within 5 mm only (farther
  // apart the pads aren't a launch pair, so the trace stays single-ended).

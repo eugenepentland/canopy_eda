@@ -21,8 +21,14 @@ const eps: f64 = 1e-9;
 const taper_step_mm: f64 = 0.025;
 const default_neck_length_mm: f64 = 0.75;
 const default_taper_length_mm: f64 = 0.35;
+const rf_taper_widths: f64 = 1.2;
 
-const Pad = struct { at: [2]f64, layer: u8 };
+const Pad = struct {
+    at: [2]f64,
+    layer: u8,
+    along: f64,
+    across: f64,
+};
 
 fn dist(a: [2]f64, b: [2]f64) f64 {
     return std.math.hypot(b[0] - a[0], b[1] - a[1]);
@@ -54,6 +60,8 @@ fn netPads(arena: std.mem.Allocator, placement: optimizer.Placement, net: i32) s
                 try out.append(arena, .{
                     .at = optimizer.worldPadCenter(&part, pad.x, pad.y),
                     .layer = if (part.side == .bottom) 1 else 0,
+                    .along = @max(pad.w, pad.h),
+                    .across = @min(pad.w, pad.h),
                 });
             }
         }
@@ -61,10 +69,12 @@ fn netPads(arena: std.mem.Allocator, placement: optimizer.Placement, net: i32) s
     return out.items;
 }
 
-/// Whether an under-nominal segment is exactly inside this net class's
-/// authored pad-neck envelope. DRC uses this instead of trusting provenance:
-/// restored and hand-authored copper earns the exception only by satisfying
-/// the same width and pad-distance profile the generator emits.
+/// Whether an under-nominal segment is exactly inside this net class's pad
+/// transition envelope: an authored pad neck when present, otherwise the
+/// pad-size taper used by eligible single-ended controlled-impedance routes.
+/// DRC uses geometry instead of trusting provenance, so generated, restored,
+/// and hand-routed copper all earn the exception by satisfying the same width
+/// and pad-distance profile.
 pub fn allowsTrack(
     arena: std.mem.Allocator,
     placement: optimizer.Placement,
@@ -75,21 +85,36 @@ pub fn allowsTrack(
     if (track.net < 0) return false;
     const ni: usize = @intCast(track.net);
     if (ni >= placement.nets.len or ni >= placement.rules.net.len) return false;
-    const profile = placement.rules.net[ni].pad_neck;
+    const rule = placement.rules.net[ni];
+    const profile = rule.pad_neck;
     const neck = @max(profile.width, fab_min_width);
-    if (!(profile.width > 0) or neck >= nominal - eps or track.width < neck - eps) return false;
+    const authored = profile.width > 0 and neck < nominal - eps and track.width >= neck - eps;
+    const no_authored_neck = profile.width <= 0;
+    const controlled_impedance = no_authored_neck and rule.rf.max_freq_hz > 0 and rule.rf.impedance.ohms > 0 and
+        rule.rf.impedance.diff_ohms <= 0;
+    if (!authored and !controlled_impedance) return false;
     const neck_len = if (profile.max_length > 0) profile.max_length else default_neck_length_mm;
     const taper_len = if (profile.taper_length > 0) profile.taper_length else default_taper_length_mm;
-    const total = neck_len + taper_len;
     const a = [2]f64{ track.x1, track.y1 };
     const b = [2]f64{ track.x2, track.y2 };
     for (try netPads(arena, placement, track.net)) |pad| {
         if (pad.layer != track.layer) continue;
         const da = dist(pad.at, a);
         const db = dist(pad.at, b);
-        if (da > total + taper_step_mm + eps or db > total + taper_step_mm + eps) continue;
-        const required = profileWidth(@max(da, db), neck, nominal, neck_len, taper_len);
-        if (track.width + eps >= required) return true;
+        if (authored) {
+            const total = neck_len + taper_len;
+            if (da > total + taper_step_mm + eps or db > total + taper_step_mm + eps) continue;
+            const required = profileWidth(@max(da, db), neck, nominal, neck_len, taper_len);
+            if (track.width + eps >= required) return true;
+        } else {
+            if (pad.across <= 0 or pad.along <= 0) continue;
+            if (pad.across >= nominal - eps) continue;
+            const land = pad.along / 2;
+            const rf_taper = nominal * rf_taper_widths;
+            if (@min(da, db) > land + rf_taper + eps) continue;
+            const required = profileWidth(@max(da, db), pad.across, nominal, land, rf_taper);
+            if (track.width + eps >= required) return true;
+        }
     }
     return false;
 }
@@ -308,6 +333,51 @@ test "DRC allowance accepts only neck-profile copper beside its own SMD pad" {
     const far = router.Track{ .x1 = 1.5, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.1524, .net = 0 };
     try testing.expect(try allowsTrack(arena, placement, near, 0.2532, 0.127));
     try testing.expect(!try allowsTrack(arena, placement, far, 0.2532, 0.127));
+}
+
+test "DRC allowance recognizes the controlled-impedance land taper profile" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const pads = [_]@import("geometry.zig").Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.2 }};
+    var parts = [_]optimizer.Part{.{
+        .ref_des = "U1",
+        .kind = .hub,
+        .hw = 1,
+        .hh = 1,
+        .pads = &pads,
+        .fallback = false,
+    }};
+    const pins = [_]flat_netlist.FlatPin{.{ .ref_des = "U1", .pin = "1" }};
+    const nets = [_]flat_netlist.FlatNet{.{ .name = "RF", .pins = &pins }};
+    const rules = [_]optimizer.NetRule{.{
+        .class = .{ .name = "rf" },
+        .width = 0.4,
+        .rf = .{ .max_freq_hz = 12e9, .impedance = .{ .ohms = 50 } },
+    }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .rules = .{ .net = &rules },
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 5,
+        .maxy = 5,
+        .generated = true,
+    };
+    const land = router.Track{ .x1 = 0, .y1 = 0, .x2 = 0.3, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 };
+    const taper = router.Track{ .x1 = 0.3, .y1 = 0, .x2 = 0.38, .y2 = 0, .layer = 0, .width = 0.234, .net = 0 };
+    const too_thin = router.Track{ .x1 = 0.3, .y1 = 0, .x2 = 0.7, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 };
+    const far = router.Track{ .x1 = 2, .y1 = 0, .x2 = 2.1, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 };
+    try testing.expect(try allowsTrack(arena, placement, land, 0.4, 0.127));
+    try testing.expect(try allowsTrack(arena, placement, taper, 0.4, 0.127));
+    try testing.expect(!try allowsTrack(arena, placement, too_thin, 0.4, 0.127));
+    try testing.expect(!try allowsTrack(arena, placement, far, 0.4, 0.127));
 }
 
 test "pad neck recognizes a power-capacity widened routed trunk" {

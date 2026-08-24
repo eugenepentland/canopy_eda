@@ -44,6 +44,7 @@ pub fn writeNetClasses(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.
         try w.print(
             ",\"width\":{d},\"clearance\":{d},\"via_dia\":{d},\"via_drill\":{d}," ++
                 "\"priority\":{d},\"diff_gap\":{d},\"band_start_hz\":{d},\"max_freq_hz\":{d}," ++
+                "\"pad_neck_width\":{d},\"pad_neck_max_length\":{d},\"pad_neck_taper_length\":{d}," ++
                 "\"keepout_mm\":{d},\"rf_corridor_mm\":{d},\"keepout_escape_mm\":{d},\"impedance_ohms\":{d}," ++
                 "\"diff_impedance_ohms\":{d},\"impedance_layer\":{d},\"ground_gap_mm\":{d},\"ground_gap_max_mm\":{d}," ++
                 "\"width_derived\":{},\"return_loss_target_db\":{d}," ++
@@ -57,6 +58,9 @@ pub fn writeNetClasses(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.
                 rule.diff_gap,
                 rule.rf.electrical.band_start_hz,
                 rule.rf.max_freq_hz,
+                rule.pad_neck.width,
+                rule.pad_neck.max_length,
+                rule.pad_neck.taper_length,
                 rule.rf.keepout_mm,
                 rfCorridorMm(rule, p.rules.design),
                 rule.rf.keepout_escape_mm,
@@ -240,7 +244,11 @@ test "the net-class blob carries keepout and impedance geometry" {
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
     const rules = [_]optimizer.NetRule{
-        .{ .class = .{ .name = "rf" }, .width = 0.3, .rf = .{
+        .{ .class = .{ .name = "rf" }, .width = 0.3, .pad_neck = .{
+            .width = 0.1524,
+            .max_length = 0.75,
+            .taper_length = 0.35,
+        }, .rf = .{
             .keepout_mm = 0.5,
             .keepout_escape_mm = 1.0,
             .impedance = .{ .ohms = 50, .ground_gap_mm = 0.127, .ground_gap_max_mm = 1.75 },
@@ -255,6 +263,9 @@ test "the net-class blob carries keepout and impedance geometry" {
     try testing.expect(std.mem.indexOf(u8, out, "\"impedance_ohms\":50") != null);
     try testing.expect(std.mem.indexOf(u8, out, "\"ground_gap_mm\":0.127") != null);
     try testing.expect(std.mem.indexOf(u8, out, "\"ground_gap_max_mm\":1.75") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"pad_neck_width\":0.1524") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"pad_neck_max_length\":0.75") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"pad_neck_taper_length\":0.35") != null);
     // The class IDENTITY is load-bearing for the same rule: the client waives the
     // halo between one class's own members, and cannot without this name.
     try testing.expect(std.mem.indexOf(u8, out, "\"class\":\"rf\"") != null);

@@ -284,6 +284,18 @@ fn buildNetClassOverrides(arena: std.mem.Allocator, v: ?std.json.Value, nettab: 
             .clearance = jNum(clearanceVal(o)),
             .via_dia = jNum(o.get("via_dia")),
             .via_drill = jNum(o.get("via_drill")),
+            .pad_neck = .{
+                .width = jNum(o.get("pad_neck_width")),
+                .max_length = jNum(o.get("pad_neck_max_length")),
+                .taper_length = jNum(o.get("pad_neck_taper_length")),
+            },
+            .rf = .{
+                .max_freq_hz = jNum(o.get("max_freq_hz")),
+                .impedance = .{
+                    .ohms = jNum(o.get("impedance_ohms")),
+                    .diff_ohms = jNum(o.get("diff_impedance_ohms")),
+                },
+            },
         } });
     }
     return list.toOwnedSlice(arena);
@@ -1187,6 +1199,26 @@ test "reloading the session replaces the board state" {
     var sb = try buildSessionCtx(arena, board_b);
     const ib = testNetIdx(sb.net_names, "SIG");
     try testing.expectEqual(@as(u32, 0), probeSegResult(&sb, tSeg(-1, -1, 1, -1, ib)));
+}
+
+test "session preserves pad transition fields from net-class JSON" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const board =
+        \\{"netclasses":[{"net":"RF","width":0.4,"max_freq_hz":12000000000,"impedance_ohms":50,
+        \\ "pad_neck_width":0.2,"pad_neck_max_length":0.75,"pad_neck_taper_length":0.35}],
+        \\ "parts":[{"ref":"U1","kind":"hub","hw":1,"hh":1,"x":0,"y":0,"side":"top",
+        \\ "pads":[{"num":"1","x":0,"y":0,"w":0.6,"h":0.2,"net":"RF"}]}]}
+    ;
+    const sess = try buildSessionCtx(arena, board);
+    const idx: usize = @intCast(testNetIdx(sess.net_names, "RF"));
+    const rule = sess.rules.net[idx];
+    try testing.expectEqual(@as(f64, 0.2), rule.pad_neck.width);
+    try testing.expectEqual(@as(f64, 0.75), rule.pad_neck.max_length);
+    try testing.expectEqual(@as(f64, 0.35), rule.pad_neck.taper_length);
+    try testing.expectEqual(@as(f64, 12e9), rule.rf.max_freq_hz);
+    try testing.expectEqual(@as(f64, 50), rule.rf.impedance.ohms);
 }
 
 // spec: Web Server - Both client DRC bridges read the blob's design-rule object through one shared reader, so the stateless check and the session probe resolve identical board rules

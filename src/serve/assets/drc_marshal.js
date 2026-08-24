@@ -78,6 +78,10 @@ function buildDrcInput(PCB, live) {
       return {
         net: collapseNet(c.net), class: c.class, width: c.width, clearance: c.clearance,
         via_dia: c.via_dia, via_drill: c.via_drill,
+        max_freq_hz: c.max_freq_hz, impedance_ohms: c.impedance_ohms,
+        diff_impedance_ohms: c.diff_impedance_ohms,
+        pad_neck_width: c.pad_neck_width, pad_neck_max_length: c.pad_neck_max_length,
+        pad_neck_taper_length: c.pad_neck_taper_length,
         keepout_mm: c.keepout_mm, keepout_escape_mm: c.keepout_escape_mm
       };
     }),
