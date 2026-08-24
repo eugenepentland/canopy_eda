@@ -3,10 +3,13 @@
 //! The full plane pass also emits fan-out barrels joined by temporary stubs.
 //! A hand-routing seed must not silently invent those traces, so this seam
 //! keeps only candidates whose complete annulus lands on their own GND pad:
-//! exposed-pad thermal fields and ordinary centred ground-pad drops.
+//! exposed-pad thermal fields and ordinary centred ground-pad drops. Ordinary
+//! drops prefer the pad's exact world centre before the incremental DRC gate;
+//! this removes routing-grid offsets introduced by flattened subcircuits.
 
 const std = @import("std");
 const drc = @import("placement/drc.zig");
+const geometry = @import("placement/geometry.zig");
 const optimizer = @import("placement/optimizer.zig");
 const pad_shape = @import("placement/pad_shape.zig");
 const plane_via = @import("placement/plane_via.zig");
@@ -29,12 +32,28 @@ fn groundNet(placement: optimizer.Placement, via: router.Via) ?usize {
     return if (optimizer.isGroundName(name)) net_i else null;
 }
 
-fn landsOnOwnPad(
+const OwnPad = struct {
+    shape: pad_shape.Shape,
+    centre: [2]f64,
+    thermal: bool,
+};
+
+fn exposedPad(part: optimizer.Part, own: geometry.Pad) bool {
+    const own_area = own.w * own.h;
+    var other_area: f64 = 0;
+    for (part.pads) |pad| {
+        if (std.mem.eql(u8, pad.number, own.number) or pad.thru) continue;
+        other_area = @max(other_area, pad.w * pad.h);
+    }
+    return own_area >= 1.0 and own_area >= 2.0 * other_area;
+}
+
+fn ownPadAt(
     arena: std.mem.Allocator,
     placement: optimizer.Placement,
     net_i: usize,
     via: router.Via,
-) std.mem.Allocator.Error!bool {
+) std.mem.Allocator.Error!?OwnPad {
     const net = placement.nets[net_i];
     for (net.pins) |pin| {
         for (placement.parts) |part| {
@@ -42,11 +61,16 @@ fn landsOnOwnPad(
             for (part.pads) |pad| {
                 if (!std.mem.eql(u8, pad.number, pin.pin)) continue;
                 const shape = try pad_shape.worldShape(arena, part, pad);
-                if (plane_via.barrelFits(shape, .{ via.x, via.y }, via.dia)) return true;
+                if (!plane_via.barrelFits(shape, .{ via.x, via.y }, via.dia)) continue;
+                return .{
+                    .shape = shape,
+                    .centre = optimizer.worldPadCenter(&part, pad.x, pad.y),
+                    .thermal = exposedPad(part, pad),
+                };
             }
         }
     }
-    return false;
+    return null;
 }
 
 fn sameVia(a: router.Via, b: router.Via) bool {
@@ -54,10 +78,18 @@ fn sameVia(a: router.Via, b: router.Via) bool {
     return a.net == b.net and @abs(a.x - b.x) <= eps and @abs(a.y - b.y) <= eps;
 }
 
-/// Generate the same exposed-pad arrays and centred GND-pad barrels as the
+fn hasSameVia(vias: []const router.Via, candidate: router.Via) bool {
+    for (vias) |via| if (sameVia(via, candidate)) return true;
+    return false;
+}
+
+/// Generate the same exposed-pad arrays and ordinary GND-pad barrels as the
 /// autorouter's plane pass, without routing any trace or replacing existing
-/// copper. Exact existing barrels make the operation idempotent; the shared
-/// incremental DRC gate rejects any candidate that would add a fab error.
+/// copper. An ordinary barrel is offered at its pad's exact world centre first,
+/// then falls back to the router's site if the submitted board blocks it.
+/// Thermal-array cells retain their regular field. Exact existing barrels make
+/// the operation idempotent; the shared incremental DRC gate rejects any
+/// candidate that would add a fab error.
 fn generate(
     arena: std.mem.Allocator,
     placement: optimizer.Placement,
@@ -71,24 +103,35 @@ fn generate(
     var out = Outcome{};
     var gate = try drc.ViaAdditionGate.build(arena, placement, routed, params.clearance, proposed[0]);
 
-    for (proposed) |candidate| {
-        const net_i = groundNet(placement, candidate) orelse continue;
-        if (!try landsOnOwnPad(arena, placement, net_i, candidate)) continue;
+    for (proposed) |proposed_candidate| {
+        const net_i = groundNet(placement, proposed_candidate) orelse continue;
+        const own_pad = try ownPadAt(arena, placement, net_i, proposed_candidate) orelse continue;
         out.candidates += 1;
 
-        var duplicate = false;
-        for (gate.others.items) |existing| {
-            if (!sameVia(existing, candidate)) continue;
-            duplicate = true;
-            break;
+        var candidate = proposed_candidate;
+        if (!own_pad.thermal and plane_via.barrelFits(own_pad.shape, own_pad.centre, candidate.dia)) {
+            candidate.x = own_pad.centre[0];
+            candidate.y = own_pad.centre[1];
         }
-        if (duplicate) {
+
+        if (hasSameVia(gate.others.items, candidate)) {
             out.duplicates += 1;
             continue;
         }
         if (try gate.addsError(arena, candidate)) {
-            out.blocked += 1;
-            continue;
+            if (sameVia(candidate, proposed_candidate)) {
+                out.blocked += 1;
+                continue;
+            }
+            candidate = proposed_candidate;
+            if (hasSameVia(gate.others.items, candidate)) {
+                out.duplicates += 1;
+                continue;
+            }
+            if (try gate.addsError(arena, candidate)) {
+                out.blocked += 1;
+                continue;
+            }
         }
         try gate.accept(arena, candidate);
         try accepted.append(arena, candidate);
@@ -170,7 +213,6 @@ pub fn generateLive(
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
-const geometry = @import("placement/geometry.zig");
 const flat_netlist = @import("flat_netlist.zig");
 const testing = std.testing;
 
@@ -184,7 +226,19 @@ const fixture = struct {
     var cap_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.9, .h = 0.95 }};
     var parts = [_]optimizer.Part{
         .{ .ref_des = "U1", .kind = .hub, .hw = 2.5, .hh = 2.5, .pads = &qfn_pads, .fallback = false },
-        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &cap_pads, .fallback = false, .x = 5 },
+        // Deliberately off the router lattice, as a flattened subcircuit pad
+        // commonly is after its parent transform. The land is wide enough for
+        // both its true centre and the nearby snapped point to hold the barrel.
+        .{
+            .ref_des = "C1",
+            .kind = .passive,
+            .hw = 0.5,
+            .hh = 0.5,
+            .pads = &cap_pads,
+            .fallback = false,
+            .x = 5.03,
+            .y = 0.18,
+        },
     };
     const pins = [_]flat_netlist.FlatPin{
         .{ .ref_des = "U1", .pin = "1" },
@@ -217,7 +271,7 @@ const test_params = router.RouteParams{
     .via_drill = 0.4,
 };
 
-// spec: placement/ground-via-seed - hand routing can seed one legal exposed-pad field and one centred GND-pad barrel without replacing existing copper
+// spec: placement/ground-via-seed - hand routing can seed one legal exposed-pad field and one centred GND-pad barrel without replacing existing copper, preserving the exact centre of an off-grid transformed subcircuit pad when it is legal
 // spec: placement/ground-via-seed - running the ground-via seed repeatedly adds each eligible barrel at most once
 test "ground via seed adds the via-in-pad candidates once" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
@@ -229,6 +283,14 @@ test "ground via seed adds the via-in-pad candidates once" {
     try testing.expectEqual(@as(usize, 10), first.candidates);
     try testing.expectEqual(@as(usize, 10), first.vias.len);
     try testing.expectEqual(@as(usize, 0), first.blocked);
+    var centred = false;
+    for (first.vias) |via| {
+        if (@abs(via.x - fixture.parts[1].x) <= 1e-9 and @abs(via.y - fixture.parts[1].y) <= 1e-9) {
+            centred = true;
+            break;
+        }
+    }
+    try testing.expect(centred);
 
     const saved = router.RouteResult{ .tracks = &.{}, .vias = first.vias, .routed = 0, .total = 0 };
     const second = try generate(arena, fixturePlacement(), saved, test_params);

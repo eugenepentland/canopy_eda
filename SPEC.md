@@ -3471,7 +3471,7 @@ Public functions: load, isGroundFn, isSupplyFn, strapPads, padRequirements
 
 Public functions: generateLive
 
-- hand routing can seed one legal exposed-pad field and one centred GND-pad barrel without replacing existing copper
+- hand routing can seed one legal exposed-pad field and one centred GND-pad barrel without replacing existing copper, preserving the exact centre of an off-grid transformed subcircuit pad when it is legal
 - running the ground-via seed repeatedly adds each eligible barrel at most once
 - a candidate that would add a fabrication DRC error is reported as blocked and is not returned
 - completeness-waiver: empty inputs (a board with no eligible ground-plane pads returns an empty outcome, unit-tested by the plane-via candidate contract)
