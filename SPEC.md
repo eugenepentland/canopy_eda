@@ -6185,6 +6185,9 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The hand-route head dodges or clips at clearance obstacles instead of drawing violating copper
 - Moving a placed component leaves its connected traces in place instead of deleting them
 - Dragging or rotating a marquee selection carries the tracks and vias the band caught
+- A resolved board click retains the exact-object stack so Tab or Alt-click can cycle priority losers with the hold picker's preview and unified selection apply path
+- Marquee and Select All expose transient count chips that can drop one selection kind or Alt-keep only footprints, tracks, vias, or combined copper without changing the global Objects filter
+- Double-clicking routed copper or pressing J under the pointer selects its endpoint/via-connected run, and repeating expands through the shared mixed-selection commit to every track and via on the net
 - Ctrl/Cmd-click toggles footprints, rigid sub-circuits, tracks, and vias into one multi-selection without a marquee drag
 - Holding Ctrl/Cmd after an ordinary first click retains that part, sub-circuit, track, or via when the next item joins the multi-selection
 - Ctrl/Cmd+C and Ctrl/Cmd+V copy and paste a selected trace, via, or mixed copper selection as one undoable edit with fresh identities

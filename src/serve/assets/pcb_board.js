@@ -2280,11 +2280,34 @@ function segHitsRect(x1,y1,x2,y2,ax,ay,bx,by){
   if(p[i]<0){if(r>t1)return false;if(r>t0)t0=r;}
   else{if(r<t0)return false;if(r<t1)t1=r;}}
  return true;}
-// Report a copper band pick on the toolbar message line. A parts-only band
-// stays silent — the sidebar Align cluster already announces that count.
-function marqReport(nt,nv){if(!(nt||nv))return;
- routeStatMsg(nt+" track"+(nt==1?"":"s")+" · "+nv+" via"+(nv==1?"":"s")+
-  " selected — drag moves them with the parts, Del deletes, Esc clears");}
+// A completed marquee / Select All gets a small post-hoc type filter. Clicking
+// a chip drops that kind; Alt-click keeps only it. The combined Copper chip is
+// the one-action Ctrl+A → copper-only path while the atomic Track/Via chips
+// retain precise pruning. Every action round-trips through the same mixed
+// selection seed/commit seam as modifier clicks.
+var marqChips=null,marqChipsAt=null;
+function marqChipsHide(){if(marqChips&&marqChips.parentNode)marqChips.parentNode.removeChild(marqChips);marqChips=null;marqChipsAt=null;}
+function marqChipApply(kind,only){var seed=selectionSeed();
+ if(only){if(kind!=="fp")seed.p=[];if(kind!=="track"&&kind!=="copper")seed.t=[];if(kind!=="via"&&kind!=="copper")seed.v=[];}
+ else{if(kind==="fp")seed.p=[];else if(kind==="track")seed.t=[];else if(kind==="via")seed.v=[];else if(kind==="copper"){seed.t=[];seed.v=[];}}
+ selectionCommit(seed);if(seed.p.length||seed.t.length||seed.v.length)marqChipsShow(marqChipsAt);else marqChipsHide();}
+function marqChipsShow(at){marqChipsHide();var seed=selectionSeed(),spec=[];
+ if(seed.p.length)spec.push({k:"fp",n:seed.p.length,label:"footprint"});
+ if(seed.p.length&&(seed.t.length||seed.v.length))spec.push({k:"copper",n:seed.t.length+seed.v.length,label:"copper",c:true});
+ if(seed.t.length)spec.push({k:"track",n:seed.t.length,label:"track"});
+ if(seed.v.length)spec.push({k:"via",n:seed.v.length,label:"via"});
+ if(!spec.length||!sceneShell)return;marqChipsAt=at||null;var bar=document.createElement("div");bar.className="pcb-selection-chips";
+ spec.forEach(function(s){var b=document.createElement("button");b.type="button";b.className="pcb-selection-chip"+(s.c?" copper":"");b.setAttribute("data-selection-type",s.k);
+  b.textContent=s.n+" "+s.label+(s.n===1||s.label==="copper"?"":"s");b.title="Click to remove "+s.label+"; Alt-click to keep only "+s.label;
+  b.addEventListener("click",function(ev){ev.preventDefault();ev.stopPropagation();marqChipApply(s.k,ev.altKey);});bar.appendChild(b);});
+ var hint=document.createElement("span");hint.className="pcb-selection-hint";hint.textContent="click drops · Alt keeps";bar.appendChild(hint);
+ sceneShell.appendChild(bar);marqChips=bar;var hr=sceneShell.getBoundingClientRect(),x=at&&isFinite(at.clientX)?at.clientX-hr.left+10:(hr.width-bar.offsetWidth)/2,
+  y=at&&isFinite(at.clientY)?at.clientY-hr.top+10:34;x=Math.max(6,Math.min(x,Math.max(6,hr.width-bar.offsetWidth-6)));y=Math.max(6,Math.min(y,Math.max(6,hr.height-bar.offsetHeight-6)));
+ bar.style.left=x+"px";bar.style.top=y+"px";}
+// Report a copper pick on the toolbar and show the type chips for every kind,
+// including a parts-only band (whose old status line intentionally stayed quiet).
+function marqReport(np,nt,nv,at){if(nt||nv)routeStatMsg(nt+" track"+(nt==1?"":"s")+" · "+nv+" via"+(nv==1?"":"s")+
+  " selected — drag moves them with the parts, Del deletes, Esc clears");marqChipsShow(at);}
 // Bulk rip-up: every marquee-selected track/via goes in ONE undo step.
 function cuDeleteSelected(){var nt=selCu.t.length,nv=selCu.v.length;if(!(nt||nv))return;
  var dead=selCuMembers();recordUndo();
@@ -2563,7 +2586,8 @@ function copperTouched(){linksDirty=true;
  if(gpuOn)PCBGpu.rebuildCopper(); // GPU twin of cuGeomDrop — lazy, so a burst costs one rebuild
  markPoursStale(); // any copper/pose edit invalidates the declared pours
  selCuClear(); // a rip-up/drag can free the selected objects — drop the refs
- inspClear();} // inspected copper/marker facts are stale after any edit
+ inspClear();marqChipsHide();if(typeof pickCycleClear==="function")pickCycleClear();
+ if(typeof semanticCopperState!=="undefined")semanticCopperState=null;} // every cached copper target is stale after an edit
 function connKey(x,y,l){return Math.round(x*1000)+","+Math.round(y*1000)+","+l;}
 function linksRecompute(){linksDirty=false;
  var links=PCB.links||[];if(!links.length)return;
@@ -3380,7 +3404,7 @@ document.addEventListener("keydown",function(ev){if(kbTyping(ev.target))return;
   if(!RO&&!anyDrawTool()){
    if(viewSt.filt.track)(PCB.tracks||[]).forEach(function(t){if(layerAlpha(t.l||0)>0)at.push(t);});
    if(viewSt.filt.via&&anyCopperVisible())(PCB.vias||[]).forEach(function(v){av.push(v);});}
-  clearSel();selSet(all);selCuTo(at,av);marqReport(at.length,av.length);selNet(null);return;}
+  selectionCommit({p:all,t:at,v:av});marqReport(all.length,at.length,av.length,null);return;}
  if(ev.key==="F"&&ev.shiftKey&&!ev.ctrlKey&&!ev.metaKey){ev.preventDefault();zoomToSel();return;}});
 // ── Copper a multi-part gesture carries ─────────────────────────────────
 // Moving several parts at once and leaving their routing behind strands the
@@ -3426,6 +3450,25 @@ function carriedCopper(idxs,g,banded){var seen=new Set(),t=[],v=[],z=[];
  if(banded)add(selCuCopper());
  add(privateCopper(idxs));
  return {t:t,v:v,z:z};}
+// ── Semantic copper selection ──────────────────────────────────────────
+// A routed run is one component of the same union-find graph that decides
+// whether ratsnest links are already satisfied. Reusing linksBuildNet keeps
+// endpoints, vias and endpoint-on-segment T junctions electrically identical
+// between selection and connectivity reporting instead of growing a second
+// almost-the-same adjacency model.
+var semanticCopperState=null;
+function netCopper(seed){var net=netCollapse(seed.o.net||"");if(!net)return {t:seed.t==="track"?[seed.o]:[],v:seed.t==="via"?[seed.o]:[]};return {
+ t:(PCB.tracks||[]).filter(function(t){return netCollapse(t.net||"")===net;}),v:(PCB.vias||[]).filter(function(v){return netCollapse(v.net||"")===net;})};}
+function connectedCopper(seed){var all=netCopper(seed);if(all.t.length+all.v.length<2)return all;
+ var roots=linksBuildNet({ts:all.t,vs:all.v,ps:[]}),key=seed.t==="track"?connKey(seed.o.x1,seed.o.y1,seed.o.l||0):connKey(seed.o.x,seed.o.y,0),root=roots[key];
+ if(root===undefined)return {t:seed.t==="track"?[seed.o]:[],v:seed.t==="via"?[seed.o]:[]};return {
+  t:all.t.filter(function(t){return roots[connKey(t.x1,t.y1,t.l||0)]===root;}),
+  v:all.v.filter(function(v){return roots[connKey(v.x,v.y,0)]===root;})};}
+function semanticCopperAt(m){var h=selectedCopperHit(m);if(h&&(h.t==="track"||h.t==="via"))return h;
+ var v=inspHitVia(m),t=inspHitTrack(m);if(v)return {t:"via",o:v};if(t)return {t:"track",o:t};return null;}
+function semanticCopperSelect(hit,at){if(!hit)return false;var net=netCollapse(hit.o.net||""),full=!!(semanticCopperState&&semanticCopperState.net===net&&(semanticCopperState.stage==="run"||semanticCopperState.stage==="net")),cu=full?netCopper(hit):connectedCopper(hit);
+ semanticCopperState={net:net,stage:full?"net":"run"};selectionCommit({p:[],t:cu.t,v:cu.v});marqChipsShow(at);
+ routeStatMsg((full?"full net "+(net?nLeaf(net):"(no net)"):"connected copper run")+" selected · "+cu.t.length+" track"+(cu.t.length===1?"":"s")+" · "+cu.v.length+" via"+(cu.v.length===1?"":"s")+(full?"":" — double-click again for the full net"));return true;}
 // A gesture MOVED copper (as opposed to ripping it up): connectivity, pours and
 // inspected facts go stale like any copper edit — but copperTouched also drops
 // the copper selection, because a rip-up can free those objects. Here every one
@@ -3721,7 +3764,8 @@ function kbdToggle(){
   '<div class="kbd-row"><span>Step back / finish trace</span><kbd>Backspace / Enter &middot; dbl-click</kbd></div>'+
   '<div class="kbd-row"><span>Delete track or via (in route mode)</span><kbd>right-click</kbd></div>'+
   '<div class="kbd-row"><span>Inspect copper / DRC marker (Select mode)</span><kbd>click it</kbd></div>'+
-  '<div class="kbd-row"><span>Choose an exact object where selectable items overlap</span><kbd>click / tap and hold</kbd></div>'+
+  '<div class="kbd-row"><span>Cycle exact objects where selectable items overlap</span><kbd>Tab / Alt+click / hold</kbd></div>'+
+  '<div class="kbd-row"><span>Select connected copper; repeat for the full net</span><kbd>double-click track/via · J under pointer</kbd></div>'+
   '<div class="kbd-row"><span>Slide selected track (Shift = free) &middot; delete</span><kbd>drag &middot; Del</kbd></div>'+
   '<div class="kbd-row"><span>Fillet two connected selected tracks</span><kbd>right-click &middot; Fillet…</kbd></div>'+
   '<div class="kbd-row"><span>Delete every box-selected track / via</span><kbd>Del</kbd></div>'+
@@ -3746,7 +3790,7 @@ var SPACE=false;
 document.addEventListener("keydown",function(ev){if((ev.key===" "||ev.code==="Space")&&!kbTyping(ev.target)){SPACE=true;ev.preventDefault();}});
 document.addEventListener("keyup",function(ev){if(ev.key===" "||ev.code==="Space")SPACE=false;});
 document.addEventListener("keydown",function(ev){
- if(ev.key=="Escape"){if(pickMenu){ev.preventDefault();pickMenuClose();try{svg.focus();}catch(e){}return;}if(window.PCBFindIsOpen&&window.PCBFindIsOpen()){ev.preventDefault();window.PCBFindClose();return;}if(PHYSICAL_REVIEW){ev.preventDefault();selNet(null);return;}if(kbdOv){kbdClose();}else if(PCB.moveDlgOpen&&PCB.moveDlgOpen()){PCB.moveDlgClose();}else if(hsModalShown()){hsModalClose();}else if(heatsinkMode){heatsinkArm(false);}else if(padAlignMode){padAlignArm(false);}else if(drawMode){if(dtrace)drawEnd();else drawModeSet(false);}else if(textMode){if(txSel>=0){txSelect(-1);}else txArm(false);}else if(backingMode){backingArm(false);}else if(polyMode){if(polyPts){polyPts=null;polyCur=null;drawBoardRect();}else polyArm(false);}else if(pourMode){if(pourDlg){closePourDialog();}else if(pourPts){pourPts=null;pourCur=null;drawBoardRect();}else pourArm(false);}else if(outlineMode){outDraw=null;outlineArm(false);drawBoardRect();}else if(selCuClear()){}else if(insp){inspClear();}else{selClear();clearSel();}return;}
+ if(ev.key=="Escape"){marqChipsHide();pickCycleClear();if(pickMenu){ev.preventDefault();pickMenuClose();try{svg.focus();}catch(e){}return;}if(window.PCBFindIsOpen&&window.PCBFindIsOpen()){ev.preventDefault();window.PCBFindClose();return;}if(PHYSICAL_REVIEW){ev.preventDefault();selNet(null);return;}if(kbdOv){kbdClose();}else if(PCB.moveDlgOpen&&PCB.moveDlgOpen()){PCB.moveDlgClose();}else if(hsModalShown()){hsModalClose();}else if(heatsinkMode){heatsinkArm(false);}else if(padAlignMode){padAlignArm(false);}else if(drawMode){if(dtrace)drawEnd();else drawModeSet(false);}else if(textMode){if(txSel>=0){txSelect(-1);}else txArm(false);}else if(backingMode){backingArm(false);}else if(polyMode){if(polyPts){polyPts=null;polyCur=null;drawBoardRect();}else polyArm(false);}else if(pourMode){if(pourDlg){closePourDialog();}else if(pourPts){pourPts=null;pourCur=null;drawBoardRect();}else pourArm(false);}else if(outlineMode){outDraw=null;outlineArm(false);drawBoardRect();}else if(selCuClear()){}else if(insp){inspClear();}else{selClear();clearSel();}return;}
  if((outlineMode||activeSketchIsArea())&&!kbTyping(ev.target)&&(ev.key==="d"||ev.key==="D")){ev.preventDefault();outlineSketchDimension();return;}
  if((outlineMode||activeSketchIsArea())&&!kbTyping(ev.target)&&(ev.key==="h"||ev.key==="H")){ev.preventDefault();outlineSketchConstraint("horizontal");return;}
  if((outlineMode||activeSketchIsArea())&&!kbTyping(ev.target)&&(ev.key==="v"||ev.key==="V")){ev.preventDefault();outlineSketchConstraint("vertical");return;}
@@ -3763,6 +3807,8 @@ document.addEventListener("keydown",function(ev){
   txRotate(txDrag.i,ev.shiftKey?-90:90);txDrag.moved=true;paintSoon();return;}
  var typing=kbTyping(ev.target);
  if(ev.key=="?"&&!typing){ev.preventDefault();kbdToggle();return;}
+ if((ev.key==="j"||ev.key==="J")&&!ev.ctrlKey&&!ev.metaKey&&!ev.altKey&&!typing&&!RO&&!anyDrawTool()&&lastBoardPointer){
+  var linked=semanticCopperAt(lastBoardPointer.m);if(linked){ev.preventDefault();semanticCopperSelect(linked,lastBoardPointer.at);}return;}
  // T toggles the silkscreen-text tool (not while typing in the inline editor).
  if((ev.key=="t"||ev.key=="T")&&!ev.ctrlKey&&!ev.metaKey&&!typing){ev.preventDefault();txArm(!textMode);return;}
  // Z toggles the ▩ custom copper-pour tool (Ctrl/Cmd+Z stays undo).
@@ -5349,7 +5395,7 @@ function panMove(ev){if(!pan)return false;var slop=pan.slop||3;
   vb.x=pan.vx-(ev.clientX-pan.cx)*(vb.w/Math.max(sw,1));
   vb.y=pan.vy-(ev.clientY-pan.cy)*(vb.h/Math.max(sh,1));}
  setVB();return true;}
-var clickCand=null; // pressed a part but won't drag (RO page / locked part)
+var clickCand=null,lastBoardPointer=null; // latest hover also powers J: select connected copper without a click
 // ── Track-segment editing (Select mode) ─────────────────────────────────
 // KiCad's drag45: the grabbed segment slides along its own normal and keeps
 // its direction; each neighbour keeps ITS angle too — corners re-solve as the
@@ -5515,6 +5561,8 @@ svg.addEventListener("pointercancel",function(ev){touchUp(ev);
 svg.addEventListener("pointerdown",function(ev){
  if(SPACE||ev.button===1){focusBoardShortcuts();ev.preventDefault();startPan(ev);return;}
  if(ev.target!==svg)return;
+ marqChipsHide();
+ if(!ev.altKey)pickCycleClear();
  focusBoardShortcuts();ev.preventDefault();
  if(ev.button===2)return; // context-menu commands own secondary clicks
  if(PCB.rulerOn)return; // ruler overlay owns the gesture (its capture handlers measure)
@@ -5574,6 +5622,10 @@ svg.addEventListener("pointerdown",function(ev){
  if(THERMAL_REVIEW&&ev.button===0){var tm=mm(ev),tph=padHitAt(tm.x,tm.y);
   startPan(ev);pan.tapi=tph?tph.i:partAt(tm.x,tm.y);return;}
  var m=mm(ev);
+ lastBoardPointer={m:m,at:{clientX:ev.clientX,clientY:ev.clientY}};
+ // Alt-click is the pointer form of Tab cycling. It resolves immediately and
+ // never arms a drag, modifier-toggle, marquee, or long-press timer.
+ if(!RO&&!anyDrawTool()&&ev.button===0&&ev.altKey&&!ev.ctrlKey&&!ev.metaKey){pickHoldCancel();pickCycleAt(ev,m);return;}
  // A modifier click is a selection gesture, never the start of a part/copper
  // drag. Resolve it before selected-copper and footprint drag priority so
  // clicking an existing member reliably toggles it back out of the set.
@@ -5644,7 +5696,7 @@ svg.addEventListener("pointermove",function(ev){
  pickHoldMove(ev);
  if(ev.pointerType==="touch"&&touchMove(ev))return; // active pinch consumed it
  // Status bar: live cursor position, drag delta, hovered part/net.
- var stm=mm(ev);statusXY(stm);statusDelta(stm);statusHover(stm);
+ var stm=mm(ev);lastBoardPointer={m:stm,at:{clientX:ev.clientX,clientY:ev.clientY}};statusXY(stm);statusDelta(stm);statusHover(stm);
  if(heatsinkDrag){hsDragMove(mm(ev));return;}
  if(heatsinkDraw){var hsm=mm(ev);heatsinkDraw.x1=hsm.x;heatsinkDraw.y1=hsm.y;drawBoardRect();return;}
  if(vdrag){var vv=mm(ev),vgx=Math.round(vv.x/G)*G,vgy=Math.round(vv.y/G)*G,shape=activeSketchIsArea()?activeSketchShape():outlineEditable(),vc=outlinePtsOf(shape);
@@ -5719,14 +5771,15 @@ function clickPart(ev,i){var m=mm(ev),pd=padAt(i,m.x,m.y),cg=grpOf(P[i].ref);
  // depend on exactly which pixel of the component the user happened to hit.
  if(!RO&&viewSt.filt.sub&&cg&&grpRigid(cg)){inspClear();
   if(pd&&pd.net&&viewSt.filt.pad)selNet(pd.net);
-  if(selGroup!==cg){selectGroup(cg);return;}selectComp(P[i].ref);return;}
+  if(selGroup!==cg){selectGroup(cg);pickCycleRemember(m,ev,{t:"sub",g:cg});return;}
+  selectComp(P[i].ref);pickCycleRemember(m,ev,{t:"fp",i:i});return;}
  // Standalone-part clicks keep the copper-inspection precedence rule:
  // marker > pad > via/track > the part itself.
  if(!anyDrawTool()){var ihp=inspHitForPart(m,i);
-  if(ihp){inspShow(ihp,ev);return;}
+  if(ihp){inspShow(ihp,ev);pickCycleRemember(m,ev,ihp);return;}
   inspClear();}
  if(pd&&pd.net&&viewSt.filt.pad)selNet(pd.net);
- if(!RO)selectComp(P[i].ref);}
+ if(!RO){selectComp(P[i].ref);pickCycleRemember(m,ev,pd&&viewSt.filt.pad?{t:"pad",i:i,pd:pd}:{t:"fp",i:i});}}
 svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.pointerId);}catch(e){}
  if(ev.pointerType==="touch")touchUp(ev);
  if(pickHoldRelease(ev)){ev.preventDefault();return;}
@@ -5759,7 +5812,7 @@ svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.p
     restoreSnap(sgd.snap);inspClear();
     routeStatMsg("move reverted — it would create a DRC error",true);return;}
    recordUndo(sgd.snap);routeStatMsg();scheduleDrc();}
-  inspSet({t:"track",o:sgd.t});return;}
+  inspSet({t:"track",o:sgd.t});if(!sgd.moved)pickCycleRemember(mm(ev),ev,{t:"track",o:sgd.t});return;}
  if(viadrag){var vgd=viadrag;viadrag=null;svg.style.cursor="";
   if(vgd.moved){
    // Same contract as a segment drag: gate PRE-drag vs. now; a move that
@@ -5770,7 +5823,7 @@ svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.p
    recordUndo(vgd.snap);routeStatMsg();scheduleDrc();
    inspSet({t:"via",o:vgd.v});return;}
   // No movement — the press was a plain click: today's click-to-inspect.
-  inspShow({t:"via",o:vgd.v},ev);return;}
+  inspShow({t:"via",o:vgd.v},ev);pickCycleRemember(mm(ev),ev,{t:"via",o:vgd.v});return;}
  if(txDrag){var moved=txDrag.moved,adopted=txDrag.adopted,ti=txDrag.i,tsnap=txDrag.snap;txDrag=null;svg.style.cursor="";
   if(moved||adopted){recordUndo(tsnap);txDirty();txPopReposition(ti);scheduleDrc();}return;}
  if(typeof gdrag!=="undefined"&&gdrag){var gmv=gdrag.moved,gsnap=gdrag.snap,gdn=gdrag.down,gbg=gdrag.boxGroup,gcu=gdrag.cuDown,gzones=gdrag.cz.length;gdrag=null;svg.style.cursor="";
@@ -5778,8 +5831,8 @@ svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.p
   // selected copper) — select or inspect it like any other click instead of
   // swallowing it. Post-drag repaint drops the drag cache and restores pad labels.
   if(gmv){recordUndo(gsnap);fetchScore();dragCacheDrop();paintSoon();if(gzones)refillPours();if(anyCopper())scheduleDrc();}
-  else if(gcu)inspShow(gcu,ev);
-  else if(gbg)selectGroup(gbg);
+  else if(gcu){inspShow(gcu,ev);pickCycleRemember(mm(ev),ev,gcu);}
+  else if(gbg){selectGroup(gbg);pickCycleRemember(mm(ev),ev,{t:"sub",g:gbg});}
   else if(gdn!=null&&gdn>=0)clickPart(ev,gdn);return;}
  if(typeof drag!=="undefined"&&drag){var dmv=drag.moved,dsnap=drag.snap,di2=drag.i;drag=null;svg.style.cursor="";
   if(dmv){recordUndo(dsnap);fetchScore();dragCacheDrop();paintSoon();if(anyCopper())scheduleDrc();return;}
@@ -5841,14 +5894,14 @@ svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.p
     ct=selCu.t.concat(ct.filter(function(o){return !selCuHas(o);}));
     cv=selCu.v.concat(cv.filter(function(o){return !selCuHas(o);}));
     pick=sel.concat(pick.filter(function(i){return sel.indexOf(i)<0;}));}
-   clearSel();selSet(pick);selCuTo(ct,cv);marqReport(ct.length,cv.length);}
+   selectionCommit({p:pick,t:ct,v:cv});marqReport(pick.length,ct.length,cv.length,ev);}
   else{
    // A stationary click on empty board: copper / DRC-marker inspection
    // before falling through to plain deselect.
    var anyTool2=drawMode||textMode||polyMode||pourMode||outlineMode||PCB.rulerOn;
    var mm2=mm(ev);if(reviewClearOutside(mm2))return;
    var ih2=anyTool2?null:inspHit(mm2);
-   if(ih2){inspShow(ih2,ev);}
+   if(ih2){inspShow(ih2,ev);pickCycleRemember(mm2,ev,ih2);}
    else{var rn2=RO?reviewSurfaceNetAt(mm2):"";
     if(rn2)selNet(rn2);else{inspClear();selCuClear();selClear();clearSel();selNet(null);}}}return;}});
 svg.addEventListener("mousedown",function(ev){if(ev.button===1)ev.preventDefault();});
@@ -7433,6 +7486,7 @@ svg.addEventListener("dblclick",function(ev){if(drawMode&&dtrace){ev.preventDefa
  if(pourMode&&pourEdit&&!polyMode){var qm=mm(ev);if(vtxAt(qm)>=0)return;var qe=edgeAt(qm);if(qe){ev.preventDefault();outlineInsertVertex(qe);}return;}
  if(backingMode&&backingEdit&&!RO&&!polyMode){var bm=mm(ev);if(vtxAt(bm)>=0)return;var be=edgeAt(bm);
   if(be){ev.preventDefault();outlineInsertVertex(be);}return;}
+ if(!RO&&!anyDrawTool()){var cm=mm(ev),ch=semanticCopperAt(cm);if(ch){ev.preventDefault();pickCycleClear();semanticCopperSelect(ch,ev);return;}}
  // Double-click an outline edge (not on a vertex) to insert a new vertex there.
  if(RO||textMode||polyPts||(!outlineMode&&!viewSt.filt.outline))return;
  var m=mm(ev);if(vtxAt(m)>=0)return;var e=edgeAt(m);
@@ -7858,9 +7912,9 @@ function statusFeatureNet(m,partIndex){
 // primary press waits briefly, then enumerates EVERY visible, filter-enabled
 // object under the pointer. If at least two are present, the still-unmoved
 // drag/marquee is cancelled and a compact menu lets the user bypass hierarchy
-// and priority to name the exact target. Candidate collection is deferred
-// until the timer fires, so ordinary clicks and drags pay no dense-board scan.
-var PICK_HOLD_MS=450,PICK_SLOP_PX=5,pickHold=null,pickMenu=null,pickPreview=null;
+// and priority to name the exact target. A completed ordinary click now runs
+// the same enumeration once to seed Tab; drags still cancel before that scan.
+var PICK_HOLD_MS=450,PICK_SLOP_PX=5,pickHold=null,pickMenu=null,pickPreview=null,pickCycle=null;
 function pickPartHits(m){var out=[];
  P.forEach(function(p,i){if(!partOnVisibleFace(p)||!reviewPartOnShownSide(p))return;
   var a=-(p.rot||0)*Math.PI/180,c=Math.cos(a),sn=Math.sin(a),lx=m.x-p.x,ly=m.y-p.y;
@@ -7910,6 +7964,28 @@ function pickCandidates(m){var out=[];
   if(!drcMarkerVisible(d)||d.x==null||Math.hypot(m.x-d.x,m.y-d.y)>=dt)return;
   add("DRC",d.k||"violation","#"+(d.id||"?")+(drcBetween(d)?(" · "+drcBetween(d)):""),{t:"drc",o:d});});}
  return out;}
+// Tab / Alt-click cycle the exact same candidates as the hold picker, but in a
+// stable object-kind order. Normal clicks remember the object they resolved so
+// the first Tab advances to the next item instead of selecting the same one
+// twice. Candidate identity is always the live board object / part index.
+function pickDataSame(a,b){if(!a||!b||a.t!==b.t)return false;
+ if(a.t==="sub")return a.g===b.g;if(a.t==="fp")return a.i===b.i;
+ if(a.t==="pad")return a.i===b.i&&a.pd===b.pd;return a.o===b.o;}
+function pickCycleSort(items){var rank={sub:0,fp:1,pad:2,track:3,via:4,zone:5,keepout:5,drc:6};
+ return items.slice().sort(function(a,b){return (rank[a.data.t]||0)-(rank[b.data.t]||0);});}
+function pickCycleSet(items,at,data){items=pickCycleSort(items);if(items.length<2){pickCycle=null;return;}
+ var i=-1;for(var k=0;k<items.length;k++)if(pickDataSame(items[k].data,data)){i=k;break;}
+ pickCycle={items:items,i:i,at:{clientX:at.clientX,clientY:at.clientY}};}
+function pickCycleRemember(m,at,data){pickPreviewSet(null);pickCycleSet(pickCandidates(m),at,data);}
+function pickCycleClear(){pickCycle=null;pickPreviewSet(null);}
+function pickCycleCurrent(m){if(insp)return {t:insp.t,o:insp.o};
+ if(selRef){var i=P.findIndex(function(p){return p.ref===selRef;});if(i>=0){var pd=padAt(i,m.x,m.y);if(pd&&pd.net&&pd.net===selNetCur)return {t:"pad",i:i,pd:pd};return {t:"fp",i:i};}}
+ if(selGroup&&!selRef)return {t:"sub",g:selGroup};return null;}
+function pickCycleApply(step){if(!pickCycle||pickCycle.items.length<2)return false;var n=pickCycle.items.length;
+ pickCycle.i=(pickCycle.i+step+n)%n;var c=pickCycle.items[pickCycle.i];pickSelect(c,pickCycle.at);pickPreviewSet(c);
+ routeStatMsg(c.kind+" selected · "+(pickCycle.i+1)+" of "+n+" here — Tab cycles");return true;}
+function pickCycleAt(ev,m){var at={clientX:ev.clientX,clientY:ev.clientY},items=pickCandidates(m);pickCycleSet(items,at,pickCycleCurrent(m));
+ if(!pickCycle){if(items.length===1){pickSelect(items[0],at);pickPreviewSet(items[0]);}return items.length>0;}return pickCycleApply(ev.shiftKey?-1:1);}
 function pickGestureCancel(){
  drag=null;gdrag=null;clickCand=null;segdrag=null;viadrag=null;osdrag=null;pan=null;
  if(marqEl&&marqEl.parentNode)marqEl.parentNode.removeChild(marqEl);marqEl=null;marq=null;
@@ -7965,7 +8041,7 @@ function pickMenuOpen(items,at){pickMenuClose();var host=sceneShell;if(!host)ret
  var buttons=[].slice.call(menu.querySelectorAll("[data-pick]"));buttons.forEach(function(b){var c=items[+b.getAttribute("data-pick")];
   b.addEventListener("pointerenter",function(){pickPreviewSet(c);});
   b.addEventListener("focus",function(){pickPreviewSet(c);});
-  b.addEventListener("click",function(ev){ev.stopPropagation();pickSelect(c,at);});});
+  b.addEventListener("click",function(ev){ev.stopPropagation();pickCycleSet(items,at,c.data);pickSelect(c,at);});});
  menu.addEventListener("pointerleave",function(){pickPreviewSet(null);});
  menu.addEventListener("focusout",function(ev){if(!menu.contains(ev.relatedTarget))pickPreviewSet(null);});
  menu.addEventListener("keydown",function(ev){var i=buttons.indexOf(document.activeElement);
@@ -7985,6 +8061,8 @@ function pickHoldRelease(ev){var h=pickHold;if(!h||h.id!==ev.pointerId)return fa
  if(h.timer!=null)clearTimeout(h.timer);pickHold=null;return h.open;}
 document.addEventListener("pointerdown",function(ev){if(pickMenu&&!pickMenu.contains(ev.target))pickMenuClose();});
 document.addEventListener("keydown",function(ev){if(ev.key==="Escape"&&pickMenu)pickMenuClose();});
+document.addEventListener("keydown",function(ev){if(ev.key!=="Tab"||ev.ctrlKey||ev.metaKey||kbTyping(ev.target)||pickMenu||RO||anyDrawTool())return;
+ if(pickCycleApply(ev.shiftKey?-1:1)){ev.preventDefault();ev.stopPropagation();}});
 function anyDrawTool(){return drawMode||textMode||polyMode||pourMode||outlineMode||backingMode||heatsinkMode||padAlignMode||!!PCB.rulerOn;}
 function n2(v){return (+v).toFixed(2);}
 // Net→class resolution is per track, per via and per pad on every keepout
