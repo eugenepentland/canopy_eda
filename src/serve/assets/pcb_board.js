@@ -269,7 +269,7 @@ function statusLayer(){var sw=document.getElementById("st-layer-sw");
 // mm↔mil display formatting (display only — the model stays mm).
 function fmtLen(mm){if(viewSt.units==="mil")return (mm/0.0254).toFixed(1)+" mil";return mm.toFixed(2)+" mm";}
 function fmtLen2(mm){if(viewSt.units==="mil")return (mm/0.0254).toFixed(0)+" mil";return mm.toFixed(2)+" mm";}
-// Status-bar live segments: cursor position, drag delta, zoom %, hovered part.
+// Status-bar live segments: cursor position, drag delta, zoom %, hovered part/net.
 function statusXY(m){stSet("st-xy","x "+fmtLen(m.x)+"   y "+fmtLen(m.y));}
 function statusZoom(){stSet("st-zoom","zoom "+Math.round(100*VBW/vb.w)+"%");}
 function statusDelta(m){var t="";
@@ -282,10 +282,10 @@ function netCopperStats(net){var mm=0,vias=0;
  (PCB.tracks||[]).forEach(function(t){if(t.net===net)mm+=trackLength(t);});
  (PCB.vias||[]).forEach(function(v){if(v.net===net)vias++;});
  return {mm:mm,vias:vias};}
-function statusHover(m){var t="";
- if(hoverNet){t=hoverNet;var s=netCopperStats(hoverNet);
+function statusHover(m,pointNet){var t="",net=hoverNet||pointNet;
+ if(net){t=net;if(hoverNet){var s=netCopperStats(net);
   if(s.mm>0)t+=" · "+fmtLen(s.mm);
-  if(s.vias>0)t+=" · "+s.vias+" via"+(s.vias>1?"s":"");}
+  if(s.vias>0)t+=" · "+s.vias+" via"+(s.vias>1?"s":"");}}
  else if(cur>=0&&P[cur]){t=refLabel(P[cur].ref);
   var pd=m?padAt(cur,m.x,m.y):null;
   if(pd&&pd.net)t+=" · "+pd.net;
@@ -5550,6 +5550,7 @@ svg.addEventListener("pointermove",function(ev){
   var hg=(hi>=0)?grpOf(P[hi].ref):null;
   hoverGrpName=(viewSt.filt.sub&&hg&&grpRigid(hg))?hg:null;
   paintSoon();}
+ statusHover(hm,statusFeatureNet(hm,hi));
  var hhc=heatsinkMode?hsHandleAt(hm):null;
  var hoverCursor=THERMAL_REVIEW?"grab":(heatsinkMode?(hhc?hsCursor(hhc):"crosshair"):(padAlignMode?"crosshair":((backingMode||outlineMode||polyMode)?"":(hi<0?"":(P[hi].locked?"not-allowed":(RO?"":"grab"))))));
  if(!RO&&!anyDrawTool()&&!SPACE){
@@ -7588,6 +7589,26 @@ function inspHitForPart(m,pi){var d=inspHitDrc(m);if(d)return {t:"drc",o:d};
  if(viewSt.filt.pad&&pi>=0&&padAt(pi,m.x,m.y))return null;
  var v=inspHitVia(m);if(v)return {t:"via",o:v};
  var t=inspHitTrack(m);if(t)return {t:"track",o:t};return null;}
+
+// Net identity under a resting pointer. Pads keep the richer existing
+// "reference · net" status text; off-pad routed copper, vias, pours and visible
+// unrouted airwires contribute their net name to that same bottom-right slot.
+// Reuse the inspector hit rules so hidden/filter-disabled copper cannot report
+// a net the user cannot see or select.
+function statusFeatureNet(m,partIndex){
+ if(partIndex>=0&&padAt(partIndex,m.x,m.y))return null;
+ var v=inspHitVia(m);if(v&&v.net)return v.net;
+ var t=inspHitTrack(m);if(t&&t.net)return t.net;
+ var z=partIndex<0?inspHitZone(m):null;
+ if(z&&z.t==="zone"&&z.o&&z.o.net)return z.o.net;
+ if(PHYSICAL_REVIEW||ovExclusive()||!ratsOn||!viewSt.vis.rats)return null;
+ if(linksDirty&&!dragIdxSet())linksRecompute();
+ var best=null,bd=Math.max(pxTolMm(5),0.12);
+ (PCB.links||[]).forEach(function(l){
+  if(l.k==="proximity"||l.done||!l.net)return;
+  var a=wpt(l.a,l.ax,l.ay),b=wpt(l.b,l.bx,l.by),d=ptSegDist(m.x,m.y,a.x,a.y,b.x,b.y);
+  if(d<bd){bd=d;best=l.net;}});
+ return best;}
 
 // ── Click-and-hold exact-object picker ─────────────────────────────────
 // Normal clicks deliberately keep their fast precedence ladder. A stationary

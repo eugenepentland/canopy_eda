@@ -8233,6 +8233,19 @@ test "status bar ships the renderer chip the viewer JS drives" {
     try std.testing.expect(std.mem.indexOf(u8, statusbar_html, "id=\"st-gpu\"") != null);
 }
 
+// spec: Web Server - Hovering visible routed copper, vias, pours, or unrouted airwires identifies their net in the PCB status bar while pad hover retains its component context
+test "PCB status bar identifies nets under the pointer" {
+    const js = @embedFile("assets/pcb_board.js");
+    try std.testing.expect(std.mem.indexOf(u8, js, "function statusHover(m,pointNet)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "function statusFeatureNet(m,partIndex)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "var v=inspHitVia(m);if(v&&v.net)return v.net;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "var t=inspHitTrack(m);if(t&&t.net)return t.net;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "z.t===\"zone\"&&z.o&&z.o.net") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "PHYSICAL_REVIEW||ovExclusive()||!ratsOn") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "l.k===\"proximity\"||l.done||!l.net") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "statusHover(hm,statusFeatureNet(hm,hi));") != null);
+}
+
 // spec: Web Server - M opens a move-by-distance dialog for the selected parts (X and/or Y in the current units, one undo step, carried copper) and D arms the ruler/measure tool
 test "M binds the move-by-distance dialog and D binds the ruler, and the toolstrip ships a Move button" {
     const js = @embedFile("assets/pcb_board.js");

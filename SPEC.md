@@ -6034,6 +6034,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The /pcb-layout page ships a self-contained WebGPU board renderer, on by default where the browser exposes WebGPU and inert under the ?gpu=0 opt-out
 - Custom pads use the exact Canvas2D polygon path instead of the WebGPU triangle fan
 - The PCB status bar carries a live renderer chip that reads GPU or 2D and follows device loss
+- Hovering visible routed copper, vias, pours, or unrouted airwires identifies their net in the PCB status bar while pad hover retains its component context
 - M opens a move-by-distance dialog for the selected parts (X and/or Y in the current units, one undo step, carried copper) and D arms the ruler/measure tool
 - The ruler drag keeps its live measurement across redraws: the drawn overlay clears per frame but the drag's start/end state survives until the gesture ends
 - The overscan pan-buffer fingerprint reads the clearance-halo toggle from view state instead of a removed DOM checkbox, so a pan never throws
