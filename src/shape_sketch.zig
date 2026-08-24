@@ -225,9 +225,58 @@ fn appendArcFallback(
     }
 }
 
-/// Compile the ordered, non-construction curves into the physical board loop.
-/// Physical curves must form exactly one closed chain in their stored order;
-/// construction entities may appear anywhere and never enter the profile.
+const ProfileStep = struct {
+    curve_index: usize,
+    reverse: bool,
+};
+
+/// Traverse the physical curves as one closed, non-branching contour. Sketch
+/// editors keep stable entity IDs, so a repaired edge may sit at the end of the
+/// array or face against its neighbours even though the geometry is a valid
+/// loop. Curve storage order is authoring history, not fabrication geometry.
+fn profileOrder(alloc: std.mem.Allocator, sketch: Sketch, profile_count: usize) CompileError![]ProfileStep {
+    const order = try alloc.alloc(ProfileStep, profile_count);
+    errdefer alloc.free(order);
+    const used = try alloc.alloc(bool, sketch.curves.len);
+    defer alloc.free(used);
+    @memset(used, false);
+
+    var first_index: ?usize = null;
+    for (sketch.curves, 0..) |curve, i| if (!curve.construction) {
+        first_index = i;
+        break;
+    };
+    const start_i = first_index orelse return error.OpenProfile;
+    const start = sketch.curves[start_i];
+    order[0] = .{ .curve_index = start_i, .reverse = false };
+    used[start_i] = true;
+    const first_point = start.a;
+    var at = start.b;
+
+    for (1..profile_count) |out_i| {
+        var match: ?usize = null;
+        for (sketch.curves, 0..) |curve, curve_i| {
+            if (curve.construction or used[curve_i]) continue;
+            if (curve.a != at and curve.b != at) continue;
+            // More than one unused continuation is a branch, not one closed
+            // contour. Preserve the established open-profile classification.
+            if (match != null) return error.OpenProfile;
+            match = curve_i;
+        }
+        const curve_i = match orelse return error.OpenProfile;
+        const curve = sketch.curves[curve_i];
+        const reverse = curve.b == at;
+        order[out_i] = .{ .curve_index = curve_i, .reverse = reverse };
+        used[curve_i] = true;
+        at = if (reverse) curve.a else curve.b;
+    }
+    if (at != first_point) return error.OpenProfile;
+    return order;
+}
+
+/// Compile the non-construction curves into the physical board loop.
+/// Curves must form exactly one closed chain, but may be stored in any order or
+/// direction; construction entities may appear anywhere and never enter it.
 pub fn compile(alloc: std.mem.Allocator, sketch: Sketch, max_sagitta: f64) CompileError!Compiled {
     if (sketch.version != current_version) return error.UnsupportedVersion;
     if (sketch.points.len > max_entities or sketch.curves.len > max_entities) return error.TooManyEntities;
@@ -240,6 +289,8 @@ pub fn compile(alloc: std.mem.Allocator, sketch: Sketch, max_sagitta: f64) Compi
         profile_count += 1;
     };
     if (profile_count < 2) return error.OpenProfile;
+    const order = try profileOrder(alloc, sketch, profile_count);
+    defer alloc.free(order);
 
     const pts = try alloc.alloc([2]f64, profile_count);
     errdefer alloc.free(pts);
@@ -248,21 +299,18 @@ pub fn compile(alloc: std.mem.Allocator, sketch: Sketch, max_sagitta: f64) Compi
     var arcs: std.ArrayList(optimizer.BoardArc) = .empty;
     errdefer arcs.deinit(alloc);
 
-    var first_a: ?u32 = null;
-    var previous_b: ?u32 = null;
     var out_i: usize = 0;
-    for (sketch.curves) |curve| {
-        if (curve.construction) continue;
-        if (previous_b) |want| if (curve.a != want) return error.OpenProfile;
-        const a = pointOf(sketch.points, curve.a) orelse return error.MissingPoint;
-        const b = pointOf(sketch.points, curve.b) orelse return error.MissingPoint;
+    for (order) |step| {
+        const curve = sketch.curves[step.curve_index];
+        const a_id = if (step.reverse) curve.b else curve.a;
+        const b_id = if (step.reverse) curve.a else curve.b;
+        const a = pointOf(sketch.points, a_id) orelse return error.MissingPoint;
+        const b = pointOf(sketch.points, b_id) orelse return error.MissingPoint;
         if (!std.math.isFinite(a[0]) or !std.math.isFinite(a[1])) return error.DegenerateCurve;
         if (!std.math.isFinite(b[0]) or !std.math.isFinite(b[1])) return error.DegenerateCurve;
         if (std.math.hypot(a[0] - b[0], a[1] - b[1]) <= 1e-9) return error.DegenerateCurve;
         pts[out_i] = a;
         out_i += 1;
-        if (first_a == null) first_a = curve.a;
-        previous_b = curve.b;
         switch (curve.kind) {
             .line => {
                 if (curve.mid != null) return error.InvalidArc;
@@ -277,7 +325,6 @@ pub fn compile(alloc: std.mem.Allocator, sketch: Sketch, max_sagitta: f64) Compi
             },
         }
     }
-    if (previous_b.? != first_a.?) return error.OpenProfile;
 
     const poly_slice = try poly.toOwnedSlice(alloc);
     errdefer alloc.free(poly_slice);
@@ -318,6 +365,39 @@ test "outline sketch compiles an ordered line profile" {
     try std.testing.expectEqual(@as(f64, 10), got.rect.h);
 }
 
+test "outline sketch compiles a closed profile stored out of order and direction" {
+    var sketch = rectSketch();
+    sketch.curves = @constCast(&[_]Curve{
+        .{ .id = 11, .kind = .line, .a = 1, .b = 2 },
+        .{ .id = 13, .kind = .line, .a = 4, .b = 3 },
+        .{ .id = 12, .kind = .line, .a = 2, .b = 3 },
+        .{ .id = 14, .kind = .line, .a = 4, .b = 1 },
+    });
+    const compiled = try compile(std.testing.allocator, sketch, default_sagitta_mm);
+    defer std.testing.allocator.free(compiled.pts);
+    defer std.testing.allocator.free(compiled.poly);
+    defer std.testing.allocator.free(compiled.arcs);
+    const expected = [_][2]f64{ .{ 0, 0 }, .{ 20, 0 }, .{ 20, 10 }, .{ 0, 10 } };
+    try std.testing.expectEqualSlices([2]f64, &expected, compiled.pts);
+}
+
+test "outline sketch preserves a reversed native arc while traversing the contour" {
+    var sketch = rectSketch();
+    sketch.curves = @constCast(&[_]Curve{
+        .{ .id = 11, .kind = .line, .a = 1, .b = 2 },
+        .{ .id = 13, .kind = .line, .a = 3, .b = 4 },
+        .{ .id = 12, .kind = .arc, .a = 3, .b = 2, .mid = .{ 25, 5 } },
+        .{ .id = 14, .kind = .line, .a = 4, .b = 1 },
+    });
+    const compiled = try compile(std.testing.allocator, sketch, default_sagitta_mm);
+    defer std.testing.allocator.free(compiled.pts);
+    defer std.testing.allocator.free(compiled.poly);
+    defer std.testing.allocator.free(compiled.arcs);
+    try std.testing.expectEqual(@as(usize, 1), compiled.arcs.len);
+    try std.testing.expectEqual([2]f64{ 20, 0 }, compiled.arcs[0].p1);
+    try std.testing.expectEqual([2]f64{ 20, 10 }, compiled.arcs[0].p2);
+}
+
 test "outline sketch retains a native circular edge and bounded fallback" {
     const points = [_]Point{
         .{ .id = 1, .x = 0, .y = 0 },
@@ -340,7 +420,7 @@ test "outline sketch retains a native circular edge and bounded fallback" {
     try std.testing.expect(got.rect.miny < 0);
 }
 
-test "outline sketch rejects open and duplicate-id profiles" {
+test "outline sketch rejects a branched open profile and duplicate ids" {
     var open_curves = [_]Curve{
         .{ .id = 11, .kind = .line, .a = 1, .b = 2 },
         .{ .id = 12, .kind = .line, .a = 2, .b = 3 },

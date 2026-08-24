@@ -388,6 +388,7 @@ test "saved copper zone sketch compiles native arcs and rejects an open profile"
     try std.testing.expectError(error.OpenProfile, shape_sketch.compile(alloc, invalid_routes.zones[0].sketch.?, shape_sketch.default_sagitta_mm));
     const rejection = saveRejection(alloc, null, tSavedWithZones(invalid_routes.zones)) orelse return error.TestUnexpectedResult;
     try std.testing.expect(std.mem.indexOf(u8, rejection, "invalid custom copper-area sketch") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rejection, "zone #1 (GND on F.Cu): OpenProfile") != null);
 }
 
 /// Parse visually edited backing polygons from a saved layout. Invalid
@@ -686,8 +687,12 @@ pub fn saveRejection(arena: std.mem.Allocator, rules: ?optimizer.BoardRules, ent
 /// judging against a stackup nobody could read.
 fn zoneLayerError(arena: std.mem.Allocator, rules: ?optimizer.BoardRules, routes: ?page.SavedRoutes) ?[]const u8 {
     const r = routes orelse return null;
-    for (r.zones) |z| if (z.sketch) |sketch| {
-        _ = shape_sketch.compile(arena, sketch, shape_sketch.default_sagitta_mm) catch return "invalid custom copper-area sketch — repair its open, crossing, or malformed geometry";
+    for (r.zones, 0..) |z, zone_index| if (z.sketch) |sketch| {
+        _ = shape_sketch.compile(arena, sketch, shape_sketch.default_sagitta_mm) catch |err| return std.fmt.allocPrint(
+            arena,
+            "invalid custom copper-area sketch in zone #{d} ({s} on {s}): {s} — repair its open, crossing, or malformed geometry",
+            .{ zone_index + 1, if (z.flags.keepout) "keepout" else z.net, z.layer, @errorName(err) },
+        ) catch "invalid custom copper-area sketch — repair its open, crossing, or malformed geometry";
     };
     const lr = rules orelse return null;
     for (r.zones) |z| {
