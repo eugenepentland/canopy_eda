@@ -1427,15 +1427,15 @@ function paintCamBoard(ctx,k){if(!CAM_REVIEW)return;ctx.save();if(physicalBoardP
  layers.forEach(function(L){if(L.kind==="drill"&&camLayerVisible(L))camPaintLayer(ctx,L,PH.hole,1);});
  layers.forEach(function(L){if(L.kind==="outline"&&camLayerVisible(L))camPaintLayer(ctx,L,PH.edge,1);});}
 // KiCad-style highlight ladder: hover/selection brighten to white; marquee
-// and rigid-group glows keep their accents; everything else is the dim
-// courtyard magenta.
+// glows keep their accent; everything else is the dim courtyard magenta.
+// A rigid sub-circuit's selected state belongs exclusively to its green group
+// box (paintGroupBoxes), rather than repeating around every member courtyard.
 function partStroke(i,p){
  if(reviewFocusActive()){
   if(reviewFocus.refIdx[i])return {c:"#ffd33d",w:2.8};
   if(reviewFocus.partIdx[i])return {c:"#58d6ff",w:2.5};}
  if(i===cur&&!RO)return {c:"#ffffff",w:2};
  if(selRef&&p.ref===selRef)return {c:"#ffffff",w:2.4};
- if(selGroup&&grpOf(p.ref)===selGroup)return {c:"#7ee787",w:2.2};
  if(sel&&sel.indexOf&&sel.indexOf(i)>=0)return {c:TH.sel,w:2};
  if(hoverGrpName&&grpOf(p.ref)===hoverGrpName)return {c:"#7ee787",w:2};
  return {c:TH.court,w:0.25};}

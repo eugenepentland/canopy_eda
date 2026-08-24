@@ -969,6 +969,19 @@ test "viewer JS selects rigid sub-circuits before their components and preserves
     try std.testing.expect(std.mem.indexOf(u8, js, "if(selRef===P[hi].ref){drag=") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "function grpAt(wx,wy)") != null);
 
+    // Group scope is shown once on the green aggregate bounding box. It must
+    // not also turn every member's courtyard green; a drilled-in component
+    // retains its independent white selection stroke.
+    const part_stroke_start = std.mem.indexOf(u8, js, "function partStroke(i,p){") orelse
+        return error.TestPartStrokeMissing;
+    const part_stroke_tail = js[part_stroke_start..];
+    const part_stroke_end = std.mem.indexOf(u8, part_stroke_tail, "var partPaths=[];") orelse
+        return error.TestPartStrokeEndMissing;
+    const part_stroke = part_stroke_tail[0..part_stroke_end];
+    try std.testing.expect(std.mem.indexOf(u8, part_stroke, "selRef&&p.ref===selRef") != null);
+    try std.testing.expect(std.mem.indexOf(u8, part_stroke, "selGroup") == null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "var picked=(selGroup===g),hov=(hoverGrpName===g);") != null);
+
     // Guard the rotation body itself: stamped group-tagged tracks/vias are
     // transformed, but no net-clearing call may remove untagged board copper.
     const rotate_start = std.mem.indexOf(u8, js, "function rotateGroup(") orelse return error.TestRotateGroupMissing;
