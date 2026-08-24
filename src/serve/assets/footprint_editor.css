@@ -114,6 +114,14 @@ kbd { padding: 1px 4px; background: #242931; border: 1px solid #3b424d; border-r
 .dim-ext { stroke-width: 1px; opacity: .78; }
 .dim-text { fill: #a1f1ff; paint-order: stroke; stroke: #07101c; stroke-linejoin: round; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 600; }
 .dim-preview { opacity: .72; }
+.shape-tools { display:flex; flex-wrap:wrap; gap:4px; margin-top:7px; }
+.shape-tools span { flex-basis:100%; color:#8993a0; font-size:9px; text-transform:uppercase; letter-spacing:.05em; }
+.shape-tools button { min-height:24px; padding:2px 6px; font-size:10px; }
+.shape-tools button.on { color:#7ee787; border-color:#2ea043; }
+.shape-profile { fill:rgba(126,231,135,.05); stroke:#7ee787; stroke-width:1.7px; vector-effect:non-scaling-stroke; }
+.shape-profile.open { fill:none; stroke:#e3b341; stroke-dasharray:5 3; }
+.shape-handle { fill:#07101c; stroke:#7ee787; stroke-width:1.4px; vector-effect:non-scaling-stroke; }
+.shape-selected { stroke:#fff; stroke-width:3px; vector-effect:non-scaling-stroke; }
 
 @media (max-width: 980px) {
   main { grid-template-columns: 180px minmax(280px, 1fr) 250px; }

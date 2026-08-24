@@ -10,9 +10,9 @@ const numeric = @import("../numeric.zig");
 const font5x7 = @import("../font5x7.zig");
 const optimizer = @import("../placement/optimizer.zig");
 const outline_mod = @import("../placement/outline.zig");
-const outline_sketch = @import("../outline_sketch.zig");
-const outline_sketch_json = @import("outline_sketch_json.zig");
-const invalid_zone_sketch: outline_sketch.Sketch = .{ .points = &.{}, .curves = &.{} };
+const shape_sketch = @import("../shape_sketch.zig");
+const shape_sketch_json = @import("shape_sketch_json.zig");
+const invalid_zone_sketch: shape_sketch.Sketch = .{ .points = &.{}, .curves = &.{} };
 const page = @import("pcb_layout_page.zig");
 const env_mod = @import("../eval/env.zig");
 const SavedRfPath = @typeInfo(@FieldType(page.SavedRoutes, "rf_paths")).pointer.child;
@@ -140,10 +140,10 @@ pub fn parseSavedRoutes(alloc: std.mem.Allocator, v: ?std.json.Value) ?page.Save
     if (obj.object.get("zones")) |zv| if (zv == .array) {
         for (zv.array.items) |it| {
             if (it != .object) continue;
-            var sketch: ?outline_sketch.Sketch = null;
+            var sketch: ?shape_sketch.Sketch = null;
             const poly = if (it.object.get("sketch")) |sketch_value| blk: {
-                sketch = outline_sketch_json.parse(alloc, sketch_value) orelse invalid_zone_sketch;
-                const compiled = outline_sketch.compile(alloc, sketch.?, outline_sketch.default_sagitta_mm) catch {
+                sketch = shape_sketch_json.parse(alloc, sketch_value) orelse invalid_zone_sketch;
+                const compiled = shape_sketch.compile(alloc, sketch.?, shape_sketch.default_sagitta_mm) catch {
                     break :blk parseOutlinePts(alloc, it.object.get("poly")) orelse &.{};
                 };
                 break :blk compiled.poly;
@@ -216,12 +216,50 @@ pub fn writeSavedZonesJson(w: *std.Io.Writer, zones: []const page.SavedZone) std
         });
         if (zone.sketch) |sketch| {
             try w.writeAll(",\"sketch\":");
-            try outline_sketch_json.write(w, sketch);
+            try shape_sketch_json.write(w, sketch);
         }
         if (zone.priority != 0) try w.print(",\"priority\":{d}", .{zone.priority});
         try w.writeByte('}');
     }
     try w.writeAll("]");
+}
+
+/// Write physical backing polygons plus any index-aligned native sketches.
+pub fn writeSavedFabricationLayersJson(w: *std.Io.Writer, layers: []const page.SavedFabricationLayer) std.Io.Writer.Error!void {
+    try w.writeByte('[');
+    for (layers, 0..) |layer, i| {
+        if (i > 0) try w.writeByte(',');
+        try w.writeAll("{\"name\":");
+        try page.writeJsonStr(w, layer.name);
+        try w.writeAll(",\"regions\":[");
+        for (layer.regions, 0..) |region, ri| {
+            if (ri > 0) try w.writeByte(',');
+            try w.writeByte('[');
+            for (region, 0..) |point, pi| {
+                if (pi > 0) try w.writeByte(',');
+                try w.print("[{d},{d}]", .{ point[0], point[1] });
+            }
+            try w.writeByte(']');
+        }
+        try w.writeByte(']');
+        var has_sketch = false;
+        for (layer.sketches) |sketch| if (sketch != null) {
+            has_sketch = true;
+            break;
+        };
+        if (has_sketch) {
+            try w.writeAll(",\"sketches\":[");
+            for (layer.regions, 0..) |_, ri| {
+                if (ri > 0) try w.writeByte(',');
+                if (ri < layer.sketches.len) {
+                    if (layer.sketches[ri]) |sketch| try shape_sketch_json.write(w, sketch) else try w.writeAll("null");
+                } else try w.writeAll("null");
+            }
+            try w.writeByte(']');
+        }
+        try w.writeByte('}');
+    }
+    try w.writeByte(']');
 }
 
 /// A via's optional `"s":[from,to]` LAYER SPAN → the two routable indices, or
@@ -255,8 +293,8 @@ pub fn layerIndexFromJson(v: ?std.json.Value) u8 {
 pub fn parseSavedOutline(alloc: std.mem.Allocator, v: ?std.json.Value) ?page.SavedOutline {
     const obj = v orelse return null;
     if (obj != .object) return null;
-    if (outline_sketch_json.parse(alloc, obj.object.get("sketch"))) |sketch| {
-        const compiled = outline_sketch.compile(alloc, sketch, outline_sketch.default_sagitta_mm) catch return null;
+    if (shape_sketch_json.parse(alloc, obj.object.get("sketch"))) |sketch| {
+        const compiled = shape_sketch.compile(alloc, sketch, shape_sketch.default_sagitta_mm) catch return null;
         return .{
             .x = compiled.rect.minx,
             .y = compiled.rect.miny,
@@ -335,14 +373,14 @@ test "saved copper zone sketch compiles native arcs and rejects an open profile"
     try encoded.writer.writeByte('}');
     const encoded_value = try std.json.parseFromSliceLeaky(std.json.Value, alloc, encoded.written(), .{});
     const round_trip = parseSavedRoutes(alloc, encoded_value) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(outline_sketch.CurveKind.arc, round_trip.zones[0].sketch.?.curves[0].kind);
+    try std.testing.expectEqual(shape_sketch.CurveKind.arc, round_trip.zones[0].sketch.?.curves[0].kind);
 
     const open = "{\"tracks\":[],\"vias\":[],\"zones\":[{\"net\":\"GND\",\"layer\":\"F.Cu\",\"poly\":[[0,0],[1,0],[0,1]],\"sketch\":{\"version\":1,\"points\":[{\"id\":1,\"x\":0,\"y\":0},{\"id\":2,\"x\":1,\"y\":0}],\"curves\":[{\"id\":3,\"kind\":\"line\",\"a\":1,\"b\":2}],\"constraints\":[]}}]}";
     const open_value = try std.json.parseFromSliceLeaky(std.json.Value, alloc, open, .{});
     const invalid_routes = parseSavedRoutes(alloc, open_value) orelse return error.TestUnexpectedResult;
-    try std.testing.expectError(error.OpenProfile, outline_sketch.compile(alloc, invalid_routes.zones[0].sketch.?, outline_sketch.default_sagitta_mm));
+    try std.testing.expectError(error.OpenProfile, shape_sketch.compile(alloc, invalid_routes.zones[0].sketch.?, shape_sketch.default_sagitta_mm));
     const rejection = saveRejection(alloc, null, tSavedWithZones(invalid_routes.zones)) orelse return error.TestUnexpectedResult;
-    try std.testing.expect(std.mem.indexOf(u8, rejection, "invalid copper pour sketch") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rejection, "invalid custom copper-area sketch") != null);
 }
 
 /// Parse visually edited backing polygons from a saved layout. Invalid
@@ -356,22 +394,43 @@ pub fn parseSavedFabricationLayers(alloc: std.mem.Allocator, v: ?std.json.Value)
         const nv = item.object.get("name") orelse continue;
         const rv = item.object.get("regions") orelse continue;
         if (nv != .string or nv.string.len == 0 or rv != .array) continue;
+        const sketches_value = item.object.get("sketches");
         var regions: std.ArrayList([]const [2]f64) = .empty;
-        for (rv.array.items) |region_value| {
-            const points = parseOutlinePts(alloc, region_value) orelse continue;
+        var sketches: std.ArrayList(?shape_sketch.Sketch) = .empty;
+        for (rv.array.items, 0..) |region_value, region_index| {
+            var sketch: ?shape_sketch.Sketch = null;
+            var points = parseOutlinePts(alloc, region_value) orelse continue;
+            if (parseFabricationSketch(alloc, sketches_value, region_index)) |parsed| {
+                alloc.free(points);
+                points = parsed.compiled;
+                sketch = parsed.sketch;
+            }
             if (!outline_mod.valid(points)) {
                 alloc.free(points);
                 continue;
             }
             regions.append(alloc, points) catch return layers.items;
+            if (sketches_value != null) sketches.append(alloc, sketch) catch return layers.items;
         }
         if (regions.items.len == 0) continue;
         layers.append(alloc, .{
             .name = nv.string,
             .regions = regions.toOwnedSlice(alloc) catch return layers.items,
+            .sketches = if (sketches_value != null) sketches.toOwnedSlice(alloc) catch return layers.items else &.{},
         }) catch return layers.items;
     }
     return layers.toOwnedSlice(alloc) catch layers.items;
+}
+
+const ParsedFabricationSketch = struct { sketch: shape_sketch.Sketch, compiled: []const [2]f64 };
+fn parseFabricationSketch(alloc: std.mem.Allocator, value: ?std.json.Value, index: usize) ?ParsedFabricationSketch {
+    const array = value orelse return null;
+    if (array != .array or index >= array.array.items.len) return null;
+    const sketch = shape_sketch_json.parse(alloc, array.array.items[index]) orelse return null;
+    const compiled = shape_sketch.compile(alloc, sketch, shape_sketch.default_sagitta_mm) catch return null;
+    alloc.free(compiled.pts);
+    alloc.free(compiled.arcs);
+    return .{ .sketch = sketch, .compiled = compiled.poly };
 }
 
 /// Parse one saved physical heatsink. Malformed or non-physical geometry is
@@ -448,6 +507,24 @@ test "saved fabrication backing parses named valid polygons only" {
     try std.testing.expectEqualStrings("psb_tape.gbr", layers[0].name);
     try std.testing.expectEqual(@as(usize, 1), layers[0].regions.len);
     try std.testing.expectEqual(@as(f64, 8), layers[0].regions[0][1][0]);
+}
+
+test "saved fabrication regions round trip native shape sketches" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    const source =
+        "[{\"name\":\"stiffener\",\"regions\":[[[9,9],[10,9],[9,10]]],\"sketches\":[{" ++
+        "\"version\":1,\"points\":[{\"id\":1,\"x\":0,\"y\":0},{\"id\":2,\"x\":4,\"y\":0},{\"id\":3,\"x\":4,\"y\":3},{\"id\":4,\"x\":0,\"y\":3}]," ++
+        "\"curves\":[{\"id\":11,\"kind\":\"line\",\"a\":1,\"b\":2},{\"id\":12,\"kind\":\"line\",\"a\":2,\"b\":3},{\"id\":13,\"kind\":\"line\",\"a\":3,\"b\":4},{\"id\":14,\"kind\":\"line\",\"a\":4,\"b\":1}],\"constraints\":[]}]}]";
+    const value = try std.json.parseFromSliceLeaky(std.json.Value, alloc, source, .{});
+    const layers = parseSavedFabricationLayers(alloc, value);
+    try std.testing.expectEqual(@as(usize, 1), layers.len);
+    try std.testing.expect(layers[0].sketches[0] != null);
+    try std.testing.expectEqual(@as(f64, 4), layers[0].regions[0][1][0]);
+    var encoded: std.Io.Writer.Allocating = .init(alloc);
+    try writeSavedFabricationLayersJson(&encoded.writer, layers);
+    try std.testing.expect(std.mem.indexOf(u8, encoded.written(), "\"sketches\"") != null);
 }
 
 /// Parse a per-vertex fillet-radius array (index-aligned with `pts`); null
@@ -589,6 +666,9 @@ pub fn saveRejection(arena: std.mem.Allocator, rules: ?optimizer.BoardRules, ent
     if (entry.outline) |o| if (o.pts) |pts| {
         if (!outline_mod.valid(pts)) return "invalid board outline — the polygon self-intersects or has zero area";
     };
+    for (entry.fabrication_layers) |layer| for (layer.sketches) |maybe_sketch| if (maybe_sketch) |sketch| {
+        _ = shape_sketch.compile(arena, sketch, shape_sketch.default_sagitta_mm) catch return "invalid fabrication-region sketch — repair its open, crossing, or malformed geometry";
+    };
     return zoneLayerError(arena, rules, entry.routes);
 }
 
@@ -600,7 +680,7 @@ pub fn saveRejection(arena: std.mem.Allocator, rules: ?optimizer.BoardRules, ent
 fn zoneLayerError(arena: std.mem.Allocator, rules: ?optimizer.BoardRules, routes: ?page.SavedRoutes) ?[]const u8 {
     const r = routes orelse return null;
     for (r.zones) |z| if (z.sketch) |sketch| {
-        _ = outline_sketch.compile(arena, sketch, outline_sketch.default_sagitta_mm) catch return "invalid copper pour sketch — repair its open, crossing, or malformed geometry";
+        _ = shape_sketch.compile(arena, sketch, shape_sketch.default_sagitta_mm) catch return "invalid custom copper-area sketch — repair its open, crossing, or malformed geometry";
     };
     const lr = rules orelse return null;
     for (r.zones) |z| {
