@@ -919,6 +919,30 @@ test "sub-circuit palette tests refreshed seeds through stable origins" {
     try std.testing.expect(std.mem.indexOf(u8, body, "seeds[P[i].ref]") == null);
 }
 
+// directly in Properties: Stamp when a saved seed exists, plus a link to the
+// reusable module page or the parent design's scoped sub-circuit page.
+// spec: Web Server - Selecting a rigid sub-circuit exposes its Stamp and layout-page actions directly in Properties
+test "viewer JS shows stamp and layout link for a selected sub-circuit" {
+    const js = @embedFile("assets/pcb_board.js");
+    const start = std.mem.indexOf(u8, js, "if(selGroup&&!selRef&&GRPS[selGroup])") orelse
+        return error.TestSelectedSubcircuitPropsMissing;
+    const tail = js[start..];
+    const end = std.mem.indexOf(u8, tail, "return;}\n var p=selRef") orelse
+        return error.TestSelectedSubcircuitPropsEndMissing;
+    const body = tail[0..end];
+    const markers = [_][]const u8{
+        "var ginf=(PCB.subseedinfo||{})[selGroup],ghref=subLayoutHref(selGroup);",
+        "data-grp-stamp=",
+        "Stamp module layout",
+        "Open sub-circuit layout",
+        "if(gsb)gsb.addEventListener",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, body, marker) != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "function subLayoutHref(g)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "return \"/pcb-layout/\"+encodeURIComponent(mod);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "return \"/pcb-layout/\"+encodeURIComponent(PCB.name)+\"?sub=\"+encodeURIComponent(g);") != null);
+}
+
 // spec: Web Server - A multi-part drag or rotate carries copper on nets private to the moving parts and leaves shared-net copper in place
 test "viewer JS carries private-net copper with a multi-part move and strands nothing shared" {
     const js = @embedFile("assets/pcb_board.js");

@@ -2825,11 +2825,19 @@ function wireOutlineEntityProps(body){if(!OS||!PCB.outline||!PCB.outline.sketch)
 function renderProps(){var body=document.getElementById("prop-body");if(!body)return;
  if(insp){renderInspProps(body);return;}
  if(selGroup&&!selRef&&GRPS[selGroup]){var gn=GRPS[selGroup].length;
+  var ginf=(PCB.subseedinfo||{})[selGroup],ghref=subLayoutHref(selGroup);
   body.innerHTML='<div class="prop-head"><span class="prop-ref">'+pEsc(selGroup)+'</span>'+
    '<span class="prop-val">'+gn+' parts</span></div>'+
    '<div class="prop-grp"><span class="grp-name">Sub-circuit selected</span>'+
    '<span class="grp-n">'+(mobileInspectMode()?'tap a component again to inspect it':
-    'drag to move · R / Shift+R to rotate · click a component again to select it')+'</span></div>';
+    'drag to move · R / Shift+R to rotate · click a component again to select it')+'</span></div>'+
+   '<div class="prop-sec">Layout</div><div class="prop-grp">'+
+   (ginf&&!RO?'<button class="btn grp-stamp" data-grp-stamp="'+pEsc(selGroup)+'" title="'+stampTitle(selGroup,ginf)+'">Stamp module layout</button>':'')+
+   '<a class="btn grp-layout" href="'+ghref+'" target="_blank" rel="noopener" title="Open this sub-circuit on its own PCB-layout page">Open sub-circuit layout ↗</a>'+
+   (!ginf?'<span class="grp-noseed" title="Open the sub-circuit layout, place its parts, then save a layout before stamping it here.">no saved layout to stamp</span>':'')+
+   '</div>';
+  var gsb=body.querySelector("[data-grp-stamp]");
+  if(gsb)gsb.addEventListener("click",function(){if(stampGroupFn)stampGroupFn(gsb.getAttribute("data-grp-stamp"));});
   return;}
  var p=selRef?partByRef(selRef):null;
  if(!p){var bo=PCB.outline||PCB.board,os=PCB.outline?'Layout override':'Design outline',aos=authoredOutlineSeed();
@@ -2882,9 +2890,7 @@ function renderProps(){var body=document.getElementById("prop-body");if(!body)re
  var pg=grpOf(p.ref);
  if(pg&&GRPS[pg]&&GRPS[pg].length>1){
   var pinf=(PCB.subseedinfo||{})[pg];
-  var pmod=(PCB.submodules||{})[pg];
-  var pname=pmod?'<a class="grp-name" href="/pcb-layout/'+encodeURIComponent(pmod)+'" target="_blank" rel="noopener" title="Open module ‘'+pEsc(pmod)+'’ on its own PCB-layout page.">'+pEsc(pg)+'</a>'
-   :'<span class="grp-name">'+pEsc(pg)+'</span>';
+  var pname='<a class="grp-name" href="'+subLayoutHref(pg)+'" target="_blank" rel="noopener" title="Open this sub-circuit on its own PCB-layout page.">'+pEsc(pg)+'</a>';
   h+='<div class="prop-sec">Sub-circuit</div><div class="prop-grp">'+pname+
    '<span class="grp-n">'+GRPS[pg].length+' parts</span>'+
    (pinf&&!RO?'<button class="btn grp-stamp" data-grp-stamp="'+pEsc(pg)+'" title="'+stampTitle(pg,pinf)+'">Stamp module layout</button>':
@@ -3000,6 +3006,12 @@ function stampTitle(g,inf){var tot=(GRPS[g]||[]).length;
  if(!inf.starred)t+=" · no ★ on the module; best-coverage snapshot used (★ one on the module page to pin it)";
  if(inf.alt)t+=" · newer snapshot ‘"+pEsc(inf.alt)+"’ covers "+inf.alt_n+" module parts — ★ it on the module page to stamp from it instead";
  return t;}
+// A reusable module owns its own PCB-layout page. Path/inline sub-circuits do
+// not, so their editor is the parent design's ?sub= slice instead. Keep this
+// decision shared by every sub-circuit link in the board editor.
+function subLayoutHref(g){var mod=(PCB.submodules||{})[g]||"";
+ if(mod&&mod.indexOf("/")<0&&!/\.sexp$/i.test(mod))return "/pcb-layout/"+encodeURIComponent(mod);
+ return "/pcb-layout/"+encodeURIComponent(PCB.name)+"?sub="+encodeURIComponent(g);}
 var rigidOffKey="pcb-rigid-off:"+PCB.name, rigidOff={};
 try{rigidOff=JSON.parse(localStorage.getItem(rigidOffKey)||"{}")||{};}catch(e){}
 function rigidSave(){try{localStorage.setItem(rigidOffKey,JSON.stringify(rigidOff));}catch(e){}}
@@ -4154,9 +4166,7 @@ function subPanelRefresh(){var box=document.getElementById("sub-panel");if(!box)
   var hasSeed=GRPS[g].some(function(i){return !!stampSeedFor(g,P[i]);});
   var inf=sinfo[g],tot=GRPS[g].length;
   var cov=(inf&&inf.n<tot)?'<span class="sub-cov" title="The module snapshot covers '+inf.n+' of this group’s '+tot+' parts — the rest keep their positions on Stamp.">'+inf.n+'/'+tot+'</span>':'';
-  var mod=(PCB.submodules||{})[g];
-  var nameH=mod?'<a class="sub-name" href="/pcb-layout/'+encodeURIComponent(mod)+'" target="_blank" rel="noopener" title="Open module ‘'+pEsc(mod)+'’ on its own PCB-layout page — lay it out and save / ★ a layout there.">'+pEsc(g)+'</a>'
-   :'<span class="sub-name">'+pEsc(g)+'</span>';
+  var nameH='<a class="sub-name" href="'+subLayoutHref(g)+'" target="_blank" rel="noopener" title="Open this sub-circuit on its own PCB-layout page — lay it out and save / ★ a layout there.">'+pEsc(g)+'</a>';
   h+='<div class="sub-row" data-grp="'+pEsc(g)+'">'+
    nameH+'<span class="sub-n">'+tot+'</span>'+
    '<button class="btn sub-rigid'+(grpRigid(g)?" on":"")+'" data-rigid="'+pEsc(g)+'" title="'+
