@@ -6512,6 +6512,7 @@ fn boardRulesOf(arena: std.mem.Allocator, block: *const DesignBlock, nets: []con
         },
         .design = designRulesOf(block),
         .physical = .{
+            .role = block.board.role,
             .board_thickness = if (block.stackup.present) block.stackup.thickness else 0,
             .via_plating_mm = if (block.design_rules.via.plating > 0)
                 block.design_rules.via.plating
@@ -6522,6 +6523,21 @@ fn boardRulesOf(arena: std.mem.Allocator, block: *const DesignBlock, nets: []con
             .pdn_intents = block.pdn_intents,
         },
     };
+}
+
+// Regression: the evaluated board/sub-circuit role reaches fabrication
+// consumers through every placement's resolved physical rules.
+test "board rules retain the authored board role" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var block = DesignBlock{ .name = "role", .instances = &.{}, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &.{} };
+
+    const sub = try boardRulesOf(arena, &block, &.{});
+    try std.testing.expectEqual(env.BoardRole.subcircuit, sub.physical.role);
+    block.board.role = .board;
+    const board = try boardRulesOf(arena, &block, &.{});
+    try std.testing.expectEqual(env.BoardRole.board, board.physical.role);
 }
 
 /// Resolve the design's `(design-rules …)` form into concrete `DesignRules`:

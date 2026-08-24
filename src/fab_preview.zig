@@ -81,7 +81,7 @@ pub fn writeJson(
     try w.writeAll("],\"profile\":");
     try writeProfile(w, arena, profile_ops, frame);
     try w.writeAll(",\"fab_id\":");
-    try json.writeString(w, &mark.short_hex);
+    if (mark.printed) try json.writeString(w, &mark.short_hex) else try w.writeAll("null");
     try w.writeAll(",\"sha256\":");
     try json.writeString(w, &mark.digest_hex);
     try w.writeByte('}');
@@ -447,4 +447,46 @@ test "CAM preview replaces an adopted fabrication identity instead of drawing it
     });
 
     try std.testing.expectEqualStrings(a.written(), b.written());
+}
+
+// Regression: sub-circuit CAM previews keep the digest but contain no
+// generated or stale adopted fabrication ID.
+test "CAM preview omits fabrication ID silk for sub-circuits" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 10,
+        .maxy = 10,
+        .generated = false,
+        .board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 10 },
+    };
+    placement.rules.physical.role = .subcircuit;
+    const texts = [_]font.BoardText{
+        .{ .x = 2, .y = 2, .text = "REV A" },
+        .{ .x = 3, .y = 2, .text = "ID STALE", .fabrication_id = true },
+    };
+    var out: std.Io.Writer.Allocating = .init(arena);
+    try writeJson(&out.writer, arena, .{
+        .enabled = true,
+        .placement = placement,
+        .routed = null,
+        .zones = &.{},
+        .silk_keepouts = &.{},
+        .texts = &texts,
+        .package = .{ .frame = export_fab.frameFor(placement), .drill_suffixes = .{ "PTH", "NPTH" } },
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"fab_id\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"sha256\":\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "ID STALE") == null);
 }

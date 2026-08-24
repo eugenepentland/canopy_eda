@@ -17,19 +17,24 @@ const testpoint_silkscreen = @import("testpoint_silkscreen.zig");
 
 pub const Error = export_gerber.Error || error{NoSilkscreenSpace};
 
-/// The compact board mark and its complete lookup digest. `text.text` and all
-/// slices are owned by the allocator passed to `build`.
+/// The compact board mark and its complete lookup digest. `text`, when the
+/// placement is a complete board, and all slices are owned by the allocator
+/// passed to `build`.
 pub const Mark = struct {
     short_hex: [8]u8,
     digest_hex: [64]u8,
-    text: font.BoardText,
+    /// False for reusable sub-circuits: the digest still identifies the CAM
+    /// package, but no generated `ID XXXXXXXX` text is added to board silk.
+    printed: bool = true,
+    text: ?font.BoardText,
 };
 
 /// Return the board texts to fabricate: every user-authored label plus exactly
-/// one current identity mark. An adopted identity lives in the saved layout so
-/// the editor can move it, but it is only a placement preference for `build`;
-/// carrying that stale entry into a Gerber alongside `mark.text` would print
-/// both strings on top of each other.
+/// one current identity mark when `mark.printed` is true. An adopted identity
+/// lives in the saved layout so the editor can move it, but it is only a
+/// placement preference for `build`; carrying that stale entry into a Gerber
+/// alongside `mark.text` would print both strings on top of each other. For an
+/// unprinted mark, stale adopted identity text is removed and not replaced.
 pub fn replaceAdoptedText(
     arena: std.mem.Allocator,
     user_texts: []const font.BoardText,
@@ -39,14 +44,14 @@ pub fn replaceAdoptedText(
     for (user_texts) |text| {
         if (!text.fabrication_id) authored_count += 1;
     }
-    const result = try arena.alloc(font.BoardText, authored_count + 1);
+    const result = try arena.alloc(font.BoardText, authored_count + @intFromBool(mark.text != null));
     var index: usize = 0;
     for (user_texts) |text| {
         if (text.fabrication_id) continue;
         result[index] = text;
         index += 1;
     }
-    result[index] = mark.text;
+    if (mark.text) |text| result[index] = text;
     return result;
 }
 
@@ -113,6 +118,12 @@ pub fn build(
     const digest_hex = std.fmt.bytesToHex(digest, .lower);
     var short_hex: [8]u8 = undefined;
     @memcpy(&short_hex, digest_hex[0..short_hex.len]);
+    if (placement.rules.physical.role == .subcircuit) return .{
+        .short_hex = short_hex,
+        .digest_hex = digest_hex,
+        .printed = false,
+        .text = null,
+    };
     const printed_short = try arena.dupe(u8, &short_hex);
     _ = std.ascii.upperString(printed_short, &short_hex);
     const printed = try std.fmt.allocPrint(arena, "ID {s}", .{printed_short});
@@ -160,10 +171,10 @@ test "fabrication identity is deterministic and retains its full digest" {
     const b = try build(arena, p, .{}, &.{}, export_fab.frameFor(p), null);
     try std.testing.expectEqualSlices(u8, &a.digest_hex, &b.digest_hex);
     try std.testing.expectEqualSlices(u8, &a.short_hex, a.digest_hex[0..a.short_hex.len]);
-    try std.testing.expectEqualStrings(a.text.text, b.text.text);
+    try std.testing.expectEqualStrings(a.text.?.text, b.text.?.text);
     try std.testing.expectEqual(@as(usize, 64), a.digest_hex.len);
     try std.testing.expectEqual(@as(usize, 8), a.short_hex.len);
-    try std.testing.expect(std.mem.startsWith(u8, a.text.text, "ID "));
+    try std.testing.expect(std.mem.startsWith(u8, a.text.?.text, "ID "));
 }
 
 // spec: export_gerber - a physical fabrication-geometry change produces a different printed identity
@@ -177,7 +188,7 @@ test "fabrication identity changes with manufactured board geometry" {
     const b = try build(arena, b_placement, .{}, &.{}, export_fab.frameFor(b_placement), null);
     try std.testing.expect(!std.mem.eql(u8, &a.digest_hex, &b.digest_hex));
     try std.testing.expect(!std.mem.eql(u8, &a.short_hex, &b.short_hex));
-    try std.testing.expect(!std.mem.eql(u8, a.text.text, b.text.text));
+    try std.testing.expect(!std.mem.eql(u8, a.text.?.text, b.text.?.text));
 }
 
 // spec: export_gerber - an adopted fabrication identity keeps its editable position without entering the identity digest
@@ -190,13 +201,13 @@ test "adopted fabrication identity preserves position and digest" {
     const auto = try build(arena, p, .{}, &.{}, export_fab.frameFor(p), null);
     const adopted = try build(arena, p, .{}, &.{preferred}, export_fab.frameFor(p), null);
     try std.testing.expectEqualSlices(u8, &auto.digest_hex, &adopted.digest_hex);
-    try std.testing.expectEqual(@as(f64, 4), adopted.text.x);
-    try std.testing.expectEqual(@as(f64, 3), adopted.text.y);
-    try std.testing.expectEqual(@as(f64, 90), adopted.text.rot);
-    try std.testing.expect(adopted.text.bottom);
-    try std.testing.expectEqual(@as(f64, 1.2), adopted.text.size);
-    try std.testing.expect(adopted.text.fabrication_id);
-    try std.testing.expectEqualStrings(auto.text.text, adopted.text.text);
+    try std.testing.expectEqual(@as(f64, 4), adopted.text.?.x);
+    try std.testing.expectEqual(@as(f64, 3), adopted.text.?.y);
+    try std.testing.expectEqual(@as(f64, 90), adopted.text.?.rot);
+    try std.testing.expect(adopted.text.?.bottom);
+    try std.testing.expectEqual(@as(f64, 1.2), adopted.text.?.size);
+    try std.testing.expect(adopted.text.?.fabrication_id);
+    try std.testing.expectEqualStrings(auto.text.?.text, adopted.text.?.text);
 }
 
 // spec: export_gerber - an adopted fabrication identity is replaced, not duplicated, when composing the final silkscreen texts
@@ -215,6 +226,30 @@ test "fabricated texts replace adopted identity with one current mark" {
     try std.testing.expectEqual(@as(usize, 2), texts.len);
     try std.testing.expectEqualStrings("REV A", texts[0].text);
     try std.testing.expect(!texts[0].fabrication_id);
-    try std.testing.expectEqualStrings(mark.text.text, texts[1].text);
+    try std.testing.expectEqualStrings(mark.text.?.text, texts[1].text);
     try std.testing.expect(texts[1].fabrication_id);
+}
+
+// Regression: reusable sub-circuit CAM keeps its digest without generated or
+// stale adopted fabrication-ID silk.
+test "unprinted fabrication identity strips generated board text" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var p = testPlacement(20);
+    p.rules.physical.role = .subcircuit;
+    const saved = [_]font.BoardText{
+        .{ .x = 2, .y = 2, .text = "REV A" },
+        .{ .x = 4, .y = 3, .text = "ID STALE", .fabrication_id = true },
+    };
+    const mark = try build(arena, p, .{}, &saved, export_fab.frameFor(p), null);
+    const texts = try replaceAdoptedText(arena, &saved, mark);
+
+    try std.testing.expect(!mark.printed);
+    try std.testing.expect(mark.text == null);
+    try std.testing.expectEqual(@as(usize, 64), mark.digest_hex.len);
+    try std.testing.expectEqual(@as(usize, 8), mark.short_hex.len);
+    try std.testing.expectEqual(@as(usize, 1), texts.len);
+    try std.testing.expectEqualStrings("REV A", texts[0].text);
+    try std.testing.expect(!texts[0].fabrication_id);
 }

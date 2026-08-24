@@ -5,6 +5,10 @@ const S=PCB.scale,MX=PCB.minx,MY=PCB.miny,M=PCB.margin,G=PCB.grid;
 const OS=window.PCBShapeSketch||window.PCBOutlineSketch||null;
 const P=PCB.parts,PED=PCB.part_edits||{};
 P.forEach(function(p){var e=PED[p.ref];if(e){p.src=e.src;p.srcName=e.srcName;p.srcRef=e.srcRef;}});
+// A null generated fabrication mark is deliberate for reusable sub-circuits.
+// Drop any older adopted copy from the live artwork too; ordinary authored
+// board text remains untouched, and complete boards receive PCB.fab_text.
+if(!PCB.fab_text)PCB.texts=(PCB.texts||[]).filter(function(t){return !t.fabrication_id;});
 const orig=P.map(function(p){return {x:p.x,y:p.y,rot:p.rot||0,side:p.side||"top"};});
 var RO=!!PCB.ro;
 var MOBILE_MQ=window.matchMedia?window.matchMedia("(max-width: 920px)"):{matches:false};

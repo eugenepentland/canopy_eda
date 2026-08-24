@@ -27,6 +27,9 @@ const NetRule = optimizer.NetRule;
 /// the rails beside the stackup is intentional: a current number without the
 /// copper thickness it flows through cannot produce a capacity verdict.
 pub const Physical = struct {
+    /// Complete boards print the deterministic short fabrication identity;
+    /// reusable sub-circuits keep only the package digest.
+    role: env.BoardRole = .board,
     board_thickness: f64 = 0,
     via_plating_mm: f64 = env.default_via_plating_mm,
     stack: impedance.Stack = .{},
