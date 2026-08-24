@@ -6612,9 +6612,11 @@ function drawLegs(m,shift){var t=drawTarget(m,shift);
 // Route-pad selection is deliberately independent of courtyard selection.
 // Overlapping footprints may put a top and bottom SMD pad under the same
 // cursor; partAt() knows only courtyard size, so using its winner here could
-// make an in-progress F.Cu trace inspect the B.Cu pad and report a false
-// wrong-net/invalid connection. Rank every exact pad hit by layer first, then
-// by the active trace net, then by physical area. Through pads span all layers.
+// make an F.Cu trace inspect the B.Cu pad and report a false wrong-net/invalid
+// connection. A route START is strict too: with B.Cu active, clicking through
+// a top-only exposed pad must reach B.Cu copper beneath it instead of silently
+// starting a top trace. Rank compatible hits by trace net, then physical area.
+// Through pads span all layers.
 function drawPadLayer(p,pd){return (pd.thru||pd.drill>0)?-1:(p.side==="bottom"?1:0);}
 function drawPadHitsAt(wx,wy){var out=[];
  P.forEach(function(p,i){var pd=padAt(i,wx,wy);if(!pd)return;
@@ -6629,13 +6631,14 @@ function drawPadPick(hits,layer,nets,strictLayer){var best=null,bt=1e9,ba=1e18;
  return best;}
 function padTarget(m){var layer=dtrace?dtrace.l:activeLayer,nets=dtrace?[dtrace.net]:[];
  if(dtrace&&dtrace.pair)nets.push(dtrace.pair.net);
- var h=drawPadPick(drawPadHitsAt(m.x,m.y),layer,nets,!!dtrace);if(!h)return null;
+ var h=drawPadPick(drawPadHitsAt(m.x,m.y),layer,nets,true);if(!h)return null;
  var p=P[h.i],pd=h.pd,c=wpt(h.i,pd.x,pd.y),pl=drawPadLayer(p,pd);
  return {i:h.i,pd:pd,x:c.x,y:c.y,net:pd.net||"",l:pl<0?layer:pl};}
 function segDist(px,py,t){var best=1e18;trackChords(t).forEach(function(s){var dx=s.x2-s.x1,dy=s.y2-s.y1,L2=dx*dx+dy*dy;
  var u=L2>0?((px-s.x1)*dx+(py-s.y1)*dy)/L2:0;u=Math.max(0,Math.min(1,u));
  best=Math.min(best,Math.hypot(px-(s.x1+u*dx),py-(s.y1+u*dy)));});return best;}
-function drawHitTrack(m){var best=null,bd=1e9;(PCB.tracks||[]).forEach(function(t){
+function drawHitTrack(m,layer){var best=null,bd=1e9;(PCB.tracks||[]).forEach(function(t){
+ if(layer!=null&&Number(t.l||0)!==layer)return;
  var d=segDist(m.x,m.y,t),tol=Math.max((t.w||0.25)/2+0.15,0.3);
  if(d<tol&&d<bd){bd=d;best=t;}});return best;}
 function drawHitVia(m){var best=null,bd=1e9;(PCB.vias||[]).forEach(function(v){
@@ -7073,7 +7076,7 @@ function drawClick(m,shift){
   if(pt&&pt.net){dtrace=drawStart(pt.net,pt.l,pt.x,pt.y,pt.i,pt.pd);drawBtnSync();ovPaintSoon();return;}
   var v=drawHitVia(m);
   if(v&&v.net){dtrace=drawStart(v.net,activeLayer,v.x,v.y);drawBtnSync();ovPaintSoon();return;}
-  var t=drawHitTrack(m);
+  var t=drawHitTrack(m,activeLayer);
   if(t&&t.net){var d1=Math.hypot(m.x-t.x1,m.y-t.y1),d2=Math.hypot(m.x-t.x2,m.y-t.y2);
    dtrace=drawStart(t.net,t.l||0,d1<=d2?t.x1:t.x2,d1<=d2?t.y1:t.y2);
    drawBtnSync();ovPaintSoon();return;}

@@ -1172,8 +1172,8 @@ test "viewer JS centre-line snaps a route toward a same-net pad" {
     try std.testing.expect(std.mem.indexOf(u8, js, "cbest={x:Math.round(m.x/dg)*dg,y:c.y,mag:true}") != null);
 }
 
-// spec: Web Server - hand-routing resolves overlapping pad hits on the trace's current copper layer before considering the opposite face
-test "viewer JS picks a hand-route pad on the trace layer" {
+// spec: Web Server - hand-routing starts and continues only from pads and traces on the active copper layer, so opposite-face lands cannot steal a route click
+test "viewer JS picks hand-route copper only on the active layer" {
     const js = @embedFile("assets/pcb_board.js");
     const start = std.mem.indexOf(u8, js, "function drawPadLayer(p,pd)") orelse
         return error.TestDrawPadLayerMissing;
@@ -1183,13 +1183,20 @@ test "viewer JS picks a hand-route pad on the trace layer" {
     const body = tail[0..end];
 
     // The routing picker scans exact pads across the board instead of accepting
-    // partAt's courtyard winner, filters incompatible SMD faces while a trace
-    // is live, and keeps through pads compatible with every signal layer.
+    // partAt's courtyard winner, filters incompatible SMD faces both at route
+    // start and while a trace is live, and keeps through pads compatible with
+    // every signal layer.
     try std.testing.expect(std.mem.indexOf(u8, body, "function drawPadHitsAt(wx,wy)") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "(pd.thru||pd.drill>0)?-1") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "if(strictLayer&&!compatible)return") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "drawPadPick(drawPadHitsAt(m.x,m.y),layer,nets,!!dtrace)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "drawPadPick(drawPadHitsAt(m.x,m.y),layer,nets,true)") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "partAt(m.x,m.y)") == null);
+
+    // Starting from an existing trace is equally strict: a B.Cu trace hidden
+    // beneath top-side pad copper wins only while B.Cu is the active layer.
+    try std.testing.expect(std.mem.indexOf(u8, js, "function drawHitTrack(m,layer)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(layer!=null&&Number(t.l||0)!==layer)return") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "drawHitTrack(m,activeLayer)") != null);
 
     // Magnetic endpoint and centre-line snaps use the same layer rule, so an
     // opposite-face pad cannot pull the route head away after hit selection.
