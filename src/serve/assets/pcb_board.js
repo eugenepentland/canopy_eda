@@ -189,7 +189,9 @@ var TECH=[
 // ── Live view state (layers / grid / units) — audit 1.5 ─────────────────
 // Persisted per design in localStorage alongside the existing "pcb-rigid-off:"
 // key. `G` stays the footprint-editor grid constant; snap uses gridMM (0 = off).
-var viewKey="pcb-view:"+PCB.name,viewSt={grid:G,units:"mm",active:0,stack:null,pourOp:0,vis:{refdes:0,padnum:1,rats:0,drc:0,netcol:1,guides:0,keepouts:1,antipads:0,clr:0,heatsink:1},filt:{fp:1,sub:1,pad:1,track:1,via:1,zone:1,drc:1,outline:1}};
+// Legacy persisted schema began `vis:{refdes:0,padnum:1,rats:0,drc:0,netcol:1,guides:0,...}`;
+// visMigrate fans that single DRC bit out to both severity-specific layers.
+var viewKey="pcb-view:"+PCB.name,viewSt={grid:G,units:"mm",active:0,stack:null,pourOp:0,vis:{refdes:0,padnum:1,rats:0,drc_err:0,drc_warn:0,netcol:1,guides:0,keepouts:1,antipads:0,clr:0,heatsink:1},filt:{fp:1,sub:1,pad:1,track:1,via:1,zone:1,drc:1,outline:1}};
 function outlineOnlyFilter(){if(!viewSt.filt.outline)return false;for(var k in viewSt.filt)if(k!=="outline"&&viewSt.filt[k])return false;return true;}
 // Copper defaults: every ROUTABLE layer visible. A PLANE row starts HIDDEN, so
 // a board opens exactly as it always did (a plane used to render only while it
@@ -206,6 +208,7 @@ function visMigrate(v){var out={},hit=false,k;
   else if(k==="bottom"){hit=true;out[layerName(1)]=val;}
   else if(/^l[0-9]+$/.test(k)){hit=true;out[layerName(parseInt(k.slice(1),10))]=val;}
   else if(k==="silk"){hit=true;out[LN.f_silks]=val;out[LN.b_silks]=val;}
+  else if(k==="drc"){hit=true;out.drc_err=val;out.drc_warn=val;}
   else if(k==="edge"){hit=true;out[LN.edge_cuts]=val;}
   else out[k]=val;}
  return hit?out:null;}
@@ -7312,25 +7315,25 @@ function drcMarkColor(d){return (d&&(d.sev==="warn"||d.sev==="warning"))?"#e3b34
 // Connectivity remains actionable in the DRC sidebar, but its island-gap
 // coordinates are not useful board annotations and can overwhelm the copper.
 function drcOnBoard(d){return !!d&&d.k!=="net open";}
+function drcMarkerVisible(d){return drcOnBoard(d)&&!!viewSt.vis[drcSevClass(d)==="warn"?"drc_warn":"drc_err"];}
 function drawDrc(){while(gD.firstChild)gD.removeChild(gD.firstChild);
  renderDrcList(); // keep the violations panel in sync regardless of marker visibility
  if(PHYSICAL_REVIEW)return;
- if(!viewSt.vis.drc)return;
- var cb=document.getElementById("r-drc-show"); if(cb&&!cb.checked)return;
  // A thin, screen-space (non-scaling) translucent ring + small dot: it flags the
  // spot without the fat opaque disc smothering the copper you're trying to read.
- (PCB.drc||[]).forEach(function(d){if(!drcOnBoard(d))return;var cx=X(d.x),cy=Y(d.y),col=drcMarkColor(d);
+ (PCB.drc||[]).forEach(function(d){if(!drcMarkerVisible(d))return;var cx=X(d.x),cy=Y(d.y),col=drcMarkColor(d);
    var t=el("title",{}); t.textContent=drcMsg(d);
    var c=el("circle",{cx:cx.toFixed(1),cy:cy.toFixed(1),r:6,fill:"none",stroke:col,
     "stroke-width":1.1,"vector-effect":"non-scaling-stroke",opacity:0.6}); c.appendChild(t);
    gD.appendChild(c);
    gD.appendChild(el("circle",{cx:cx.toFixed(1),cy:cy.toFixed(1),r:1.1,fill:col,opacity:0.6}));});}
 var drcCb=document.getElementById("r-drc-show");
+if(drcCb&&drcCb.checked){viewSt.vis.drc_err=1;viewSt.vis.drc_warn=1;}
 function drcSync(){
- if(drcCb)drcCb.checked=!!viewSt.vis.drc;
- if(PCB.apSync)PCB.apSync(); // every Appearance container's DRC row, both surfaces
+ if(drcCb){drcCb.checked=!!viewSt.vis.drc_err&&!!viewSt.vis.drc_warn;drcCb.indeterminate=!!viewSt.vis.drc_err!==!!viewSt.vis.drc_warn;}
+ if(PCB.apSync)PCB.apSync(); // every Appearance container's severity rows, both surfaces
  drawDrc();}
-function drcSet(on){viewSt.vis.drc=on?1:0;viewSave();drcSync();}
+function drcSet(on){viewSt.vis.drc_err=on?1:0;viewSt.vis.drc_warn=on?1:0;viewSave();drcSync();}
 if(drcCb)drcCb.addEventListener("change",function(){drcSet(drcCb.checked);});
 // ── DRC violations panel ────────────────────────────────────────────────
 // The full page docks this list in the left dock's DRC pane (#drc-list, emitted
@@ -7504,7 +7507,7 @@ window.PCBDrcRulesApply=function(kinds){
 var insp=null; // {t:"track"|"via"|"keepout"|"drc", o:<live object>}
 function pxTolMm(px){return px*(vb.w/Math.max(svgMetricsGet().cw,1))/S;}
 function inspHitDrc(m){if(!viewSt.filt.drc)return null;var best=null,bd=Math.max(pxTolMm(12),0.3);
- (PCB.drc||[]).forEach(function(d){if(!drcOnBoard(d)||d.x==null)return;
+ (PCB.drc||[]).forEach(function(d){if(!drcMarkerVisible(d)||d.x==null)return;
   var dd=Math.hypot(m.x-d.x,m.y-d.y);if(dd<bd){bd=dd;best=d;}});return best;}
 function inspHitVia(m,strict){if(!viewSt.filt.via)return null;var best=null,bd=1e9,
   tol=strict?0:Math.max(pxTolMm(6),0.15); // strict = inside the barrel only
@@ -7619,7 +7622,7 @@ function pickCandidates(m){var out=[];
    if(band||nearPolyEdge(outer,m.x,m.y,zt)||(inner&&inner.length>=3&&nearPolyEdge(inner,m.x,m.y,zt)))
     add("Keepout",q.name||"Keepout area",reviewAreaLayerName(q,reviewAreaLayer(q)),{t:"keepout",o:q});});}
  if(viewSt.filt.drc){var dt=Math.max(pxTolMm(12),0.3);(PCB.drc||[]).forEach(function(d){
-  if(!drcOnBoard(d)||d.x==null||Math.hypot(m.x-d.x,m.y-d.y)>=dt)return;
+  if(!drcMarkerVisible(d)||d.x==null||Math.hypot(m.x-d.x,m.y-d.y)>=dt)return;
   add("DRC",d.k||"violation","#"+(d.id||"?")+(drcBetween(d)?(" · "+drcBetween(d)):""),{t:"drc",o:d});});}
  return out;}
 function pickGestureCancel(){
@@ -9054,7 +9057,8 @@ loadCamReview();
  function apObjectRows(){return [
   {key:"rats",name:"Ratsnest",c:TH.awOther,desc:"Airwires for every unrouted connection"},
   {key:"guides",name:"Placement guides",c:TH.awProx,desc:"Decoupling-loop targets, drawn independently of the electrical ratsnest"},
-  {key:"drc",name:"DRC markers",c:TH.drc,desc:"Design-rule violations on the shown board"},
+  {key:"drc_err",name:"DRC errors",c:TH.drc,desc:"Error-severity design-rule violations on the shown board"},
+  {key:"drc_warn",name:"DRC warnings",c:"#e3b341",desc:"Warning-severity design-rule violations on the shown board"},
   {key:"clr",name:"Clearance halos",c:"#7ee787",desc:"Clearance rings around pads, tracks and vias (the Route panel sets the mm)"},
   {key:"antipads",name:"Antipads",c:"#f59e0b",desc:"Solved plane antipads around controlled-impedance vias"},
   {key:"keepouts",name:"Keepouts",c:"linear-gradient(90deg,#a855f7,#f59e0b)",
@@ -9142,7 +9146,7 @@ function apPresetApply(n){
   if(k==="netcol")netColSync(); // shared state fans out to every control
   if(k==="guides")guidesSync();
   if(k==="rats")ratsSync();
-  if(k==="drc")drcSync();
+  if(k==="drc_err"||k==="drc_warn")drcSync();
   if(PCB.apSync)PCB.apSync();
   dragCacheDrop();paintSoon();drawDrc();rats();drawBoardRect();}
  function apFiltSet(k,on){viewSt.filt[k]=on?1:0;

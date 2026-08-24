@@ -6062,6 +6062,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The page blob inlines copper for the layout it shows and marks the other routed rows as server-side, so page weight does not grow with the candidates kept
 - The viewer adopts the shown layout as its edit target and keeps the address bar on that layout's permalink
 - The /pcb-layout viewer defaults reference designators, ratsnest, placement guides, and DRC markers off and net colours on
+- DRC error and warning markers have independent persisted visibility controls in the PCB Appearance objects list
 - Board text and generated annotations live on their physical F./B.Silkscreen layers without an extra Appearance row or per-hover geometry rebuild
 - The /pcb-layout Appearance dock provides one generic Keepouts layer for fixed typed regions and clean active-copper net-class halos without overlap-darkened fills or decorative pad-escape rings
 - PCB edits autosave after idle and retain crash drafts until that save succeeds
