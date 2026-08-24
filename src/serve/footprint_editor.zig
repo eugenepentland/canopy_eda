@@ -35,7 +35,14 @@ const PadChange = struct {
     pad: ?PadEdit = null,
 };
 
-const CourtyardEdit = struct { x0: f64, y0: f64, x1: f64, y1: f64 };
+const PolygonEdit = struct { poly: [][]f64 };
+const CourtyardEdit = struct { x0: f64 = 0, y0: f64 = 0, x1: f64 = 0, y1: f64 = 0, poly: ?[][]f64 = null };
+const ArtworkEdit = struct {
+    lines: [][]f64 = &.{},
+    circles: [][]f64 = &.{},
+    rects: [][]f64 = &.{},
+    polys: []const PolygonEdit = &.{},
+};
 
 const SaveRequest = struct {
     revision: []const u8,
@@ -45,9 +52,11 @@ const SaveRequest = struct {
     changes: []const PadChange = &.{},
     additions: []const PadEdit = &.{},
     courtyard: ?CourtyardEdit = null,
+    silk: ?ArtworkEdit = null,
+    fab: ?ArtworkEdit = null,
 };
 
-const FormKind = enum { pad, courtyard };
+const FormKind = enum { pad, courtyard, silk, fab };
 const FormSpan = struct { start: usize, end: usize, kind: FormKind, pad_index: usize = 0 };
 const Scan = struct { forms: []const FormSpan, root_close: usize, pad_count: usize };
 
@@ -173,8 +182,7 @@ fn writeRightPanel(w: *std.Io.Writer) std.Io.Writer.Error!void {
         \\          <option value="roundrect">Rounded rect</option><option value="oval">Oval</option>
         \\          <option value="circle">Circle</option><option value="custom">Custom</option>
         \\        </select></label>
-        \\        <label class="readonly-note" id="custom-note" hidden>Custom polygons can be selected,
-        \\        measured, duplicated, or deleted; their vertices are source-preserved.</label>
+        \\        <label class="readonly-note" id="custom-note" hidden>Custom polygons use the shared shape sketch tools below.</label>
         \\        <label class="readonly-note multi-note" id="multi-note" hidden>Width and height apply to every
         \\        selected pad. Group center X/Y moves them together while preserving their spacing.</label>
         \\        <label><span id="pad-x-label">X</span><input id="pad-x" class="expression-input" type="text" inputmode="decimal"></label>
@@ -185,6 +193,13 @@ fn writeRightPanel(w: *std.Io.Writer) std.Io.Writer.Error!void {
         \\        <label>Drill Y<input id="pad-drill-y" class="expression-input" type="text" inputmode="decimal"></label>
         \\        <p class="expression-help">Math accepted: <code>0.4-2</code>, <code>2.54/2</code>, <code>(1+2)*0.5</code></p>
         \\      </div>
+        \\    </section>
+        \\    <section id="shape-sketch-panel"><div class="section-head"><h2>Shape sketch</h2><button id="shape-finish">Finish</button></div>
+        \\      <p class="muted" id="shape-status">Select a custom pad, courtyard, silk polygon, or fab polygon.</p>
+        \\      <div class="shape-tools"><span>Create</span><button data-shape="rect">Rectangle</button><button data-shape="line-tool">Line</button><button data-shape="dimension">Dimension</button></div>
+        \\      <div class="shape-tools"><span>Constrain</span><button data-shape="horizontal">H</button><button data-shape="vertical">V</button><button data-shape="coincident">Coincident</button><button data-shape="parallel">∥</button><button data-shape="perpendicular">⟂</button><button data-shape="tangent">Tangent</button><button data-shape="equal">Equal</button><button data-shape="midpoint">Midpoint</button><button data-shape="symmetric">Symmetry</button><button data-shape="fixed">Fix</button></div>
+        \\      <div class="shape-tools"><span>Modify</span><button data-shape="arc">Arc</button><button data-shape="line">Line</button><button data-shape="fillet">Fillet</button><button data-shape="remove-fillet">Remove fillet</button><button data-shape="chamfer">Chamfer</button><button data-shape="offset">Offset</button><button data-shape="mirror-x">Mirror X</button><button data-shape="mirror-y">Mirror Y</button><button data-shape="delete">Delete</button></div>
+        \\      <div class="shape-tools"><span>Artwork</span><button id="edit-courtyard">Courtyard</button><button id="add-silk-poly">+ Silk polygon</button><button id="add-fab-poly">+ Fab polygon</button></div>
         \\    </section>
         \\    <section><div class="section-head"><h2>Courtyard</h2>
         \\      <button id="court-from-pads">Fit to pads</button></div>
@@ -207,7 +222,7 @@ fn writeRightPanel(w: *std.Io.Writer) std.Io.Writer.Error!void {
         \\  </aside>
         \\</main>
         \\<div id="toast" role="status"></div>
-        \\<script src="/static/footprint_svg.js"></script><script src="/static/footprint_editor.js"></script>
+        \\<script src="/static/footprint_svg.js"></script><script src="/static/shape_sketch.js"></script><script src="/static/footprint_editor.js"></script>
         \\</body></html>
     );
 }
@@ -303,6 +318,29 @@ fn validatePad(p: PadEdit) bool {
     return true;
 }
 
+fn validatePointArray(poly: []const []const f64, min_len: usize) bool {
+    if (poly.len < min_len or poly.len > 512) return false;
+    for (poly) |point| {
+        if (point.len < 2) return false;
+        if (!finiteBounded(point[0]) or !finiteBounded(point[1])) return false;
+    }
+    return true;
+}
+
+fn validateArtwork(art: ArtworkEdit) bool {
+    for (art.lines) |line| if (!validNumbers(line, 4, false)) return false;
+    for (art.circles) |circle| if (!validNumbers(circle, 3, true)) return false;
+    for (art.rects) |rect| if (!validNumbers(rect, 4, false)) return false;
+    for (art.polys) |poly| if (!validatePointArray(poly.poly, 3)) return false;
+    return true;
+}
+
+fn validNumbers(values: []const f64, count: usize, positive_last: bool) bool {
+    if (values.len < count) return false;
+    for (values[0..count]) |value| if (!finiteBounded(value)) return false;
+    return !positive_last or values[count - 1] > 0;
+}
+
 fn oneOf(value: []const u8, choices: []const []const u8) bool {
     for (choices) |choice| if (std.mem.eql(u8, value, choice)) return true;
     return false;
@@ -321,10 +359,16 @@ fn validateRequest(allocator: std.mem.Allocator, payload: SaveRequest, old_pad_c
     }
     for (payload.additions) |pad| if (!validatePad(pad)) return false;
     if (payload.courtyard) |c| {
-        if (!finiteBounded(c.x0) or !finiteBounded(c.y0)) return false;
-        if (!finiteBounded(c.x1) or !finiteBounded(c.y1)) return false;
-        if (c.x1 <= c.x0 or c.y1 <= c.y0) return false;
+        if (c.poly) |poly| {
+            if (!validatePointArray(poly, 3)) return false;
+        } else {
+            if (!finiteBounded(c.x0) or !finiteBounded(c.y0)) return false;
+            if (!finiteBounded(c.x1) or !finiteBounded(c.y1)) return false;
+            if (c.x1 <= c.x0 or c.y1 <= c.y0) return false;
+        }
     }
+    if (payload.silk) |art| if (!validateArtwork(art)) return false;
+    if (payload.fab) |art| if (!validateArtwork(art)) return false;
     return true;
 }
 
@@ -377,6 +421,10 @@ fn scanTopForms(allocator: std.mem.Allocator, src: []const u8) !Scan {
                     pad_index += 1;
                 } else if (std.mem.eql(u8, name, "courtyard")) {
                     try forms.append(allocator, .{ .start = start, .end = i + 1, .kind = .courtyard });
+                } else if (std.mem.eql(u8, name, "silkscreen")) {
+                    try forms.append(allocator, .{ .start = start, .end = i + 1, .kind = .silk });
+                } else if (std.mem.eql(u8, name, "fab")) {
+                    try forms.append(allocator, .{ .start = start, .end = i + 1, .kind = .fab });
                 }
                 child_start = null;
             }
@@ -422,6 +470,8 @@ fn rewrite(allocator: std.mem.Allocator, src: []const u8, scan: Scan, payload: S
     const w = &out.writer;
     var cursor: usize = 0;
     var courtyard_written = false;
+    var silk_written = false;
+    var fab_written = false;
     for (scan.forms) |span| {
         try w.writeAll(src[cursor..span.start]);
         switch (span.kind) {
@@ -433,6 +483,14 @@ fn rewrite(allocator: std.mem.Allocator, src: []const u8, scan: Scan, payload: S
                     try writeCourtyard(w, court);
                     courtyard_written = true;
                 }
+            } else try w.writeAll(src[span.start..span.end]),
+            .silk => if (payload.silk) |art| {
+                try writeArtwork(w, "silkscreen", art);
+                silk_written = true;
+            } else try w.writeAll(src[span.start..span.end]),
+            .fab => if (payload.fab) |art| {
+                try writeArtwork(w, "fab", art);
+                fab_written = true;
             } else try w.writeAll(src[span.start..span.end]),
         }
         cursor = span.end;
@@ -446,6 +504,14 @@ fn rewrite(allocator: std.mem.Allocator, src: []const u8, scan: Scan, payload: S
         try w.writeAll("\n  ");
         try writeCourtyard(w, payload.courtyard.?);
     }
+    if (payload.silk) |art| if (!silk_written) {
+        try w.writeAll("\n  ");
+        try writeArtwork(w, "silkscreen", art);
+    };
+    if (payload.fab) |art| if (!fab_written) {
+        try w.writeAll("\n  ");
+        try writeArtwork(w, "fab", art);
+    };
     try w.writeAll(src[scan.root_close..]);
     // `written()` borrows the writer's buffer: its length is the byte COUNT
     // while the live allocation is the buffer's CAPACITY, so the caller could
@@ -504,7 +570,25 @@ fn isAtomChar(c: u8) bool {
 }
 
 fn writeCourtyard(w: *std.Io.Writer, court: CourtyardEdit) !void {
+    if (court.poly) |poly| {
+        try w.writeAll("(courtyard (poly");
+        for (poly) |point| try w.print(" ({d:.4} {d:.4})", .{ point[0], point[1] });
+        return w.writeAll("))");
+    }
     try w.print("(courtyard (rect {d:.4} {d:.4} {d:.4} {d:.4}))", .{ court.x0, court.y0, court.x1, court.y1 });
+}
+
+fn writeArtwork(w: *std.Io.Writer, name: []const u8, art: ArtworkEdit) !void {
+    try w.print("({s}", .{name});
+    for (art.lines) |line| try w.print(" (line ({d:.4} {d:.4}) ({d:.4} {d:.4}))", .{ line[0], line[1], line[2], line[3] });
+    for (art.circles) |circle| try w.print(" (circle ({d:.4} {d:.4}) {d:.4})", .{ circle[0], circle[1], circle[2] });
+    for (art.rects) |rect| try w.print(" (rect {d:.4} {d:.4} {d:.4} {d:.4})", .{ rect[0], rect[1], rect[2], rect[3] });
+    for (art.polys) |poly| {
+        try w.writeAll(" (poly");
+        for (poly.poly) |point| try w.print(" ({d:.4} {d:.4})", .{ point[0], point[1] });
+        try w.writeByte(')');
+    }
+    try w.writeByte(')');
 }
 
 fn atomicWrite(path: []const u8, data: []const u8) !void {
@@ -554,6 +638,7 @@ test "footprint editor scanner ignores parentheses in strings and comments" {
     try std.testing.expect(scan.root_close == src.len - 1);
 }
 
+// spec: Web Server - The footprint editor uses the shared shape-sketch tools for custom pad polygons, polygon courtyards, and closed silkscreen/fabrication artwork, while retaining conventional physical footprint forms for export and placement
 test "footprint editor assets expose precise dimension and pad controls" {
     const js = @embedFile("assets/footprint_editor.js");
     const css = @embedFile("assets/footprint_editor.css");
@@ -565,8 +650,29 @@ test "footprint editor assets expose precise dimension and pad controls" {
     try std.testing.expect(std.mem.indexOf(u8, js, "finishMarquee") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "evaluateExpression") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "driveConstruction") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "window.PCBShapeSketch") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "function shapeAction(action)") != null);
     try std.testing.expect(std.mem.indexOf(u8, css, ".dim-text") != null);
     try std.testing.expect(std.mem.indexOf(u8, css, ".construction-line") != null);
+}
+
+test "footprint editor rewrites polygon courtyard and editable artwork" {
+    const src = "(footprint x (pad 1 smd rect (pos 0 0) (size 1 1)) (silkscreen (line (0 0) (1 1))) (fab (rect -1 -1 1 1)) (courtyard (rect -2 -2 2 2)))";
+    const scan = try scanTopForms(std.testing.allocator, src);
+    defer std.testing.allocator.free(scan.forms);
+    var court = [_][]f64{ @constCast(&[_]f64{ -2, -1 }), @constCast(&[_]f64{ 2, -1 }), @constCast(&[_]f64{ 1, 2 }) };
+    var silk_poly = [_][]f64{ @constCast(&[_]f64{ 0, 0 }), @constCast(&[_]f64{ 1, 0 }), @constCast(&[_]f64{ 0, 1 }) };
+    const payload: SaveRequest = .{
+        .revision = "x",
+        .courtyard = .{ .poly = &court },
+        .silk = .{ .polys = &.{.{ .poly = &silk_poly }} },
+    };
+    try std.testing.expect(validateRequest(std.testing.allocator, payload, 1));
+    const out = try rewrite(std.testing.allocator, src, scan, payload);
+    defer std.testing.allocator.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(courtyard (poly") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(silkscreen (poly") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(fab (rect -1 -1 1 1))") != null);
 }
 
 test "footprint editor rejects duplicate or out-of-range source pad changes" {

@@ -1256,20 +1256,6 @@ src/net_name.zig::leaf | fn leaf(name: []const u8) []const u8
 src/net_name.zig::parent | fn parent(name: []const u8) ?[]const u8
 src/numeric.zig::checkedInt | fn checkedInt(comptime T: type, f: f64) ?T
 src/numeric.zig::toCount | fn toCount(f: f64) usize
-src/outline_sketch.zig::CompileError value
-src/outline_sketch.zig::Compiled struct_
-src/outline_sketch.zig::Constraint struct_
-src/outline_sketch.zig::ConstraintKind enum_
-src/outline_sketch.zig::ConstraintMode enum_
-src/outline_sketch.zig::Curve struct_
-src/outline_sketch.zig::CurveKind enum_
-src/outline_sketch.zig::Point struct_
-src/outline_sketch.zig::Sketch struct_
-src/outline_sketch.zig::compile | fn compile(alloc: std.mem.Allocator, sketch: Sketch, max_sagitta: f64) CompileError!Compiled
-src/outline_sketch.zig::current_version value
-src/outline_sketch.zig::default_sagitta_mm value
-src/outline_sketch.zig::max_constraints value
-src/outline_sketch.zig::max_entities value
 src/pad_neck_profile.zig::Profile struct_
 src/pad_neck_shape.zig::restoreGeneratedTracks | fn restoreGeneratedTracks( arena: std.mem.Allocator, placement: optimizer.Placement, selected: []const bool, routed: router.RouteResult, ) std.mem.Allocator.Error!router.RouteResult
 src/parts.zig::PartEntry struct_
@@ -3315,6 +3301,7 @@ src/serve/layout_sidecar_json.zig::parseSavedTexts | fn parseSavedTexts(alloc: s
 src/serve/layout_sidecar_json.zig::parseViaSpan | fn parseViaSpan(v: ?std.json.Value) ?[2]u8
 src/serve/layout_sidecar_json.zig::saveRejection | fn saveRejection(arena: std.mem.Allocator, rules: ?optimizer.BoardRules, entry: page.SavedLayout) ?[]const u8
 src/serve/layout_sidecar_json.zig::stackupLayerRules | fn stackupLayerRules(arena: std.mem.Allocator, block: *const env_mod.DesignBlock) std.mem.Allocator.Error!optimizer.BoardRules
+src/serve/layout_sidecar_json.zig::writeSavedFabricationLayersJson | fn writeSavedFabricationLayersJson(w: *std.Io.Writer, layers: []const page.SavedFabricationLayer) std.Io.Writer.Error!void
 src/serve/layout_sidecar_json.zig::writeSavedZonesJson | fn writeSavedZonesJson(w: *std.Io.Writer, zones: []const page.SavedZone) std.Io.Writer.Error!void
 src/serve/library.zig::Datasheet struct_
 src/serve/library.zig::HandlerError value
@@ -3433,8 +3420,6 @@ src/serve/notes.zig::removeTaskApi | fn removeTaskApi(ctx: *Server, req: *httpz.
 src/serve/notes.zig::renderNotes | fn renderNotes(allocator: std.mem.Allocator, notes: Notes) ![]u8
 src/serve/notes.zig::reopenTaskApi | fn reopenTaskApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/notes.zig::saveNotesApi | fn saveNotesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/outline_sketch_json.zig::parse | fn parse(alloc: std.mem.Allocator, v: ?std.json.Value) ?sketch_mod.Sketch
-src/serve/outline_sketch_json.zig::write | fn write(w: *std.Io.Writer, sketch: sketch_mod.Sketch) std.Io.Writer.Error!void
 src/serve/page_cache.zig::FileSet struct_
 src/serve/page_cache.zig::FileStamp struct_
 src/serve/page_cache.zig::append | fn append(self: *FileSet, stamp: FileStamp) std.mem.Allocator.Error!void
@@ -3727,6 +3712,8 @@ src/serve/schematic_pdf.zig::schematicPdfApi | fn schematicPdfApi(ctx: *Server, 
 src/serve/schematic_png.zig::HandlerError value
 src/serve/schematic_png.zig::schematicPngApi | fn schematicPngApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/schematic_viewer_js.zig::schematic_viewer_js_asset value
+src/serve/shape_sketch_json.zig::parse | fn parse(alloc: std.mem.Allocator, v: ?std.json.Value) ?sketch_mod.Sketch
+src/serve/shape_sketch_json.zig::write | fn write(w: *std.Io.Writer, sketch: sketch_mod.Sketch) std.Io.Writer.Error!void
 src/serve/static_assets.zig::HandlerError value
 src/serve/static_assets.zig::staticAsset | fn staticAsset(_: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/stuck_json.zig::net_key value
@@ -3921,6 +3908,20 @@ src/sexpr/tokenizer.zig::init | fn init(source: []const u8) Tokenizer
 src/sexpr/tokenizer.zig::next | fn next(self: *Tokenizer) !Token
 src/sexpr/tokenizer.zig::si_scales value
 src/sexpr/tokenizer.zig::si_unit_letters value
+src/shape_sketch.zig::CompileError value
+src/shape_sketch.zig::Compiled struct_
+src/shape_sketch.zig::Constraint struct_
+src/shape_sketch.zig::ConstraintKind enum_
+src/shape_sketch.zig::ConstraintMode enum_
+src/shape_sketch.zig::Curve struct_
+src/shape_sketch.zig::CurveKind enum_
+src/shape_sketch.zig::Point struct_
+src/shape_sketch.zig::Sketch struct_
+src/shape_sketch.zig::compile | fn compile(alloc: std.mem.Allocator, sketch: Sketch, max_sagitta: f64) CompileError!Compiled
+src/shape_sketch.zig::current_version value
+src/shape_sketch.zig::default_sagitta_mm value
+src/shape_sketch.zig::max_constraints value
+src/shape_sketch.zig::max_entities value
 src/silk_font.zig::Stroke struct_
 src/silk_font.zig::advanceUnits | fn advanceUnits(ch: u8) f64
 src/silk_font.zig::cap_units value

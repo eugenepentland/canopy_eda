@@ -16,9 +16,9 @@ const footprint_svg_js = @embedFile("assets/footprint_svg.js");
 const footprint_editor_js = @embedFile("assets/footprint_editor.js");
 const footprint_editor_css = @embedFile("assets/footprint_editor.css");
 const pcb_board_js = @embedFile("assets/pcb_board.js");
-// Dependency-free parametric outline model + constraint solver. Loaded before
-// pcb_board.js so the board IIFE can use it during initial outline setup.
-const pcb_outline_sketch_js = @embedFile("assets/pcb_outline_sketch.js");
+// Dependency-free parametric shape model + constraint solver. Loaded before
+// editors so board, copper, fabrication, and footprint shapes share one kernel.
+const shape_sketch_js = @embedFile("assets/shape_sketch.js");
 // Client-side ASCII DXF board-outline importer (the ⤒ DXF button next to the
 // ▭ Outline / ⬡ Poly tools). Script-tagged AFTER pcb_board.js — it leans on
 // the board script's globals (PCB, snapAll, outlineBboxSync, …) and wires
@@ -134,7 +134,9 @@ const registry = [_]Asset{
     .{ .name = "footprint_editor.js", .body = footprint_editor_js, .content_type = .JS },
     .{ .name = "footprint_editor.css", .body = footprint_editor_css, .content_type = .CSS },
     .{ .name = "pcb_board.js", .body = pcb_board_js, .content_type = .JS },
-    .{ .name = "pcb_outline_sketch.js", .body = pcb_outline_sketch_js, .content_type = .JS },
+    .{ .name = "shape_sketch.js", .body = shape_sketch_js, .content_type = .JS },
+    // Compatibility for old cached page markup and third-party integrations.
+    .{ .name = "pcb_outline_sketch.js", .body = shape_sketch_js, .content_type = .JS },
     .{ .name = "pcb_dxf.js", .body = pcb_dxf_js, .content_type = .JS },
     .{ .name = "pcb_kicad_import.js", .body = pcb_kicad_import_js, .content_type = .JS },
     .{ .name = "pcb_replay.js", .body = pcb_replay_js, .content_type = .JS },
@@ -260,29 +262,32 @@ test "the DXF board-outline importer asset is registered with its parser seam" {
 }
 
 // spec: Web Server - The PCB board-outline sketch keeps stable entities, constraints, driving dimensions, and exact arcs in a separately testable client model loaded before the editor
+// spec: Web Server - The neutral shape-sketch kernel is shared by board outlines, custom copper pours and keepouts, fabrication backing regions, custom footprint pads, footprint courtyards, and closed silk/fab artwork; board cutouts and slots remain outside this single-contour engine
+// spec: Web Server - Custom copper keepouts use the same copper-area picker and the same full shape-sketch palette as pours; generated rule/perimeter keepouts remain derived and read-only
 // spec: Web Server - The PCB outline sketch box-selects corner vertices in Outline mode or the Outline-only filter; Delete removes selected vertices and their incident curves without healing the resulting open profile, while Remove fillet remains a separate sharp-corner command
 // spec: Web Server - The PCB outline Line tool stays inside the sketch, creates connected native line chains, snaps endpoints to shared existing point IDs and H/V inference, lets Enter retain an open chain, and normalizes a reconnected closed loop for fabrication
 // spec: Web Server - Backspace or Delete on a selected native outline curve removes only that curve, leaves loose endpoints for free sketch editing, remains undoable, and Save explains that open geometry must be reconnected
-test "the parametric board-outline sketch engine is registered with its editor contracts" {
+test "the shared parametric shape sketch engine is registered with its editor contracts" {
+    try std.testing.expect(registryHasAsset("shape_sketch.js"));
     try std.testing.expect(registryHasAsset("pcb_outline_sketch.js"));
     const Check = struct { bytes: []const u8, marker: []const u8 };
     const checks = [_]Check{
-        .{ .bytes = pcb_outline_sketch_js, .marker = "root.PCBOutlineSketch = api" },
-        .{ .bytes = pcb_outline_sketch_js, .marker = "root.PCBShapeSketch = api" },
-        .{ .bytes = pcb_outline_sketch_js, .marker = "function ensurePolygon(o)" },
-        .{ .bytes = pcb_outline_sketch_js, .marker = "function solve(s,opts)" },
-        .{ .bytes = pcb_outline_sketch_js, .marker = "function fromSegments(segments)" },
-        .{ .bytes = pcb_outline_sketch_js, .marker = "function pointDragAxis(s,id,x,y,origin)" },
-        .{ .bytes = pcb_outline_sketch_js, .marker = "function pointDragTarget(s,id,x,y,axis)" },
-        .{ .bytes = pcb_outline_sketch_js, .marker = "filletPoint:filletPoint" },
-        .{ .bytes = pcb_outline_sketch_js, .marker = "chamferPoint:chamferPoint" },
-        .{ .bytes = pcb_outline_sketch_js, .marker = "offset:offset" },
-        .{ .bytes = pcb_outline_sketch_js, .marker = "mirror:mirror" },
-        .{ .bytes = pcb_outline_sketch_js, .marker = "function removeFillet(s,cid)" },
-        .{ .bytes = pcb_outline_sketch_js, .marker = "function deleteSegment(s,cid)" },
-        .{ .bytes = pcb_outline_sketch_js, .marker = "function addLinePath(s,coords,tol)" },
-        .{ .bytes = pcb_outline_sketch_js, .marker = "closed:isClosed" },
-        .{ .bytes = pcb_outline_sketch_js, .marker = "snapLinePoint:snapLinePoint" },
+        .{ .bytes = shape_sketch_js, .marker = "root.PCBOutlineSketch = api" },
+        .{ .bytes = shape_sketch_js, .marker = "root.PCBShapeSketch = api" },
+        .{ .bytes = shape_sketch_js, .marker = "function ensurePolygon(o)" },
+        .{ .bytes = shape_sketch_js, .marker = "function solve(s,opts)" },
+        .{ .bytes = shape_sketch_js, .marker = "function fromSegments(segments)" },
+        .{ .bytes = shape_sketch_js, .marker = "function pointDragAxis(s,id,x,y,origin)" },
+        .{ .bytes = shape_sketch_js, .marker = "function pointDragTarget(s,id,x,y,axis)" },
+        .{ .bytes = shape_sketch_js, .marker = "filletPoint:filletPoint" },
+        .{ .bytes = shape_sketch_js, .marker = "chamferPoint:chamferPoint" },
+        .{ .bytes = shape_sketch_js, .marker = "offset:offset" },
+        .{ .bytes = shape_sketch_js, .marker = "mirror:mirror" },
+        .{ .bytes = shape_sketch_js, .marker = "function removeFillet(s,cid)" },
+        .{ .bytes = shape_sketch_js, .marker = "function deleteSegment(s,cid)" },
+        .{ .bytes = shape_sketch_js, .marker = "function addLinePath(s,coords,tol)" },
+        .{ .bytes = shape_sketch_js, .marker = "closed:isClosed" },
+        .{ .bytes = shape_sketch_js, .marker = "snapLinePoint:snapLinePoint" },
         .{ .bytes = pcb_board_js, .marker = "outline-sketch-palette" },
         .{ .bytes = pcb_board_js, .marker = "function outlineSketchDimension()" },
         .{ .bytes = pcb_board_js, .marker = "function outlineSketchConstraint(kind)" },
@@ -297,19 +302,22 @@ test "the parametric board-outline sketch engine is registered with its editor c
         .{ .bytes = pcb_board_js, .marker = "OS.addLinePath(sk,pts)" },
         .{ .bytes = pcb_board_js, .marker = "outline is open — reconnect its loose endpoints before saving" },
         .{ .bytes = pcb_board_js, .marker = "polyCur=polySnap(mm(ev))" },
-        .{ .bytes = pcb_board_js, .marker = "Copper pour sketch" },
+        .{ .bytes = pcb_board_js, .marker = "copper keepout" },
         .{ .bytes = pcb_board_js, .marker = "function activeSketchPromote()" },
-        .{ .bytes = pcb_board_js, .marker = "OS.ensurePolygon(pourEdit)" },
+        .{ .bytes = pcb_board_js, .marker = "OS.ensurePolygon(shape)" },
         .{ .bytes = pcb_board_js, .marker = "OS.fromPolygon(pts)" },
+        .{ .bytes = pcb_board_js, .marker = "backing region sketch" },
+        .{ .bytes = footprint_editor_js, .marker = "var OS = window.PCBShapeSketch" },
+        .{ .bytes = footprint_editor_js, .marker = "function shapeAction(action)" },
     };
     for (checks) |check| try std.testing.expect(std.mem.indexOf(u8, check.bytes, check.marker) != null);
 }
 
 // spec: Web Server - Dragging an endpoint of a horizontal or vertical outline segment changes its length without translating the constrained line, with dominant-direction disambiguation at H/V corners
 test "axis-constrained outline endpoint drags project the cursor onto the segment" {
-    try std.testing.expect(std.mem.indexOf(u8, pcb_outline_sketch_js, "function pointDragAxis(s,id,x,y,origin)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, pcb_outline_sketch_js, "if(axis===\"horizontal\")y=p.y;else if(axis===\"vertical\")x=p.x;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, pcb_outline_sketch_js, "var target=pointDragTarget(s,id,x,y,axis)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shape_sketch_js, "function pointDragAxis(s,id,x,y,origin)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shape_sketch_js, "if(axis===\"horizontal\")y=p.y;else if(axis===\"vertical\")x=p.x;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shape_sketch_js, "var target=pointDragTarget(s,id,x,y,axis)") != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "vdrag.axis=OS.pointDragAxis") != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "OS.movePoint(shape.sketch,vdrag.id,vgx,vgy,vdrag.axis)") != null);
 }
@@ -346,7 +354,7 @@ test "PCB board editor shows the Board outline properties on a plain outline edg
         "selRef=null;selGroup=null;",
         "pcbSideTab(\"side-props\");renderProps();markGrpRow();markSelPart();",
         "function outlineSelect(type,index,id,ev)",
-        "outlineSketchPanelSync();if(!activeSketchIsPour())showOutlineProps();drawBoardRect();",
+        "outlineSketchPanelSync();if(!activeSketchIsArea())showOutlineProps();drawBoardRect();",
         // Wired into both outline-gesture releases: a no-move vertex press…
         "else outlineSelect(\"point\",vd.i,vd.id,ev);",
         // …and a no-move edge press.
@@ -1089,7 +1097,7 @@ test "PCB Appearance panel splits real layers from feature objects and nets" {
         .{ .marker = "return k===\"filt\"?undefined:v" },
         .{ .marker = "Legacy persisted filters are intentionally" },
         .{ .marker = "if(outlineOnlyFilter())directText=-1;" },
-        .{ .marker = "if(!activeSketchIsPour()&&(outlineMode||outlineOnlyFilter()))drawOutlineSketchSelection" },
+        .{ .marker = "if(!activeSketchIsArea()&&(outlineMode||outlineOnlyFilter()))drawOutlineSketchSelection" },
         // Pad-number labels became a real toggle rather than an unconditional pass.
         .{ .marker = "if(PHYSICAL_REVIEW||!viewSt.vis.padnum||k<1.15||gestureBusy())return;" },
         // The old split-brain wiring is gone with the panels it served.

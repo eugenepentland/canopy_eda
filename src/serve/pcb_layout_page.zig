@@ -38,8 +38,8 @@ const drc = @import("../placement/drc.zig");
 const drc_json = @import("drc_json.zig");
 const drc_rules = @import("drc_rules.zig");
 const outline_mod = @import("../placement/outline.zig");
-const outline_sketch = @import("../outline_sketch.zig");
-const outline_sketch_json = @import("outline_sketch_json.zig");
+const shape_sketch = @import("../shape_sketch.zig");
+const shape_sketch_json = @import("shape_sketch_json.zig");
 const via_fence = @import("../placement/via_fence.zig");
 const perimeter_fence = @import("../placement/perimeter_fence.zig");
 const pcb_keepout_json = @import("pcb_keepout_json.zig");
@@ -344,7 +344,7 @@ pub const SavedZone = struct {
     /// Native authoring geometry for an editor-created custom pour. `poly`
     /// remains the compiled chord contour consumed by fill, routing, DRC and
     /// exporters; imported/legacy zones omit this field.
-    sketch: ?outline_sketch.Sketch = null,
+    sketch: ?shape_sketch.Sketch = null,
     /// KiCad-style fill priority (`(priority N)`). On one layer a pour outranks a
     /// DIFFERENT-net pour it overlaps when its priority is strictly greater: the
     /// higher pour fills the overlap and the lower recedes by the pour clearance
@@ -480,7 +480,7 @@ pub const SavedOutline = struct {
     } = .{},
     /// Versioned parametric authoring intent; physical fields above are its
     /// compiled compatibility projection when present.
-    sketch: ?outline_sketch.Sketch = null,
+    sketch: ?shape_sketch.Sketch = null,
 };
 
 /// Per-layout editable positive polygons for one authored backing layer.
@@ -488,6 +488,9 @@ pub const SavedOutline = struct {
 pub const SavedFabricationLayer = struct {
     name: []const u8,
     regions: []const []const [2]f64,
+    /// Optional index-aligned native authoring geometry. `regions` remains the
+    /// compiled projection used by fabrication, 3D, and thermal consumers.
+    sketches: []const ?shape_sketch.Sketch = &.{},
 };
 
 /// Which layout state the page is showing — the precedence ladder made
@@ -1096,6 +1099,7 @@ fn renderLayoutPage(
                 pcb_part_json.buildEditSources(ctx.allocator, eff_block, if (sub_block) |sb| sb.source else name),
             .outline_drawn = rv.outline_drawn,
             .saved_outline = rv.outline,
+            .saved_fabrication_layers = rv.fabrication_layers,
             .saved_heatsink = rv.heatsink,
             .base_edge = rv.base_edge,
             .top_design = top_design,
@@ -1142,7 +1146,7 @@ fn writePageScripts(w: *std.Io.Writer, mode: PageScripts) std.Io.Writer.Error!vo
     if (!mode.physical_review) try w.writeAll("<script src=\"/static/drc_marshal.js\"></script>");
     // WebGPU must precede pcb_board.js, which reads window.PCBGpu at boot.
     try w.writeAll("<script src=\"/static/pcb_gpu.js\"></script>");
-    if (!mode.physical_review) try w.writeAll("<script src=\"/static/pcb_outline_sketch.js\"></script>");
+    if (!mode.physical_review) try w.writeAll("<script src=\"/static/shape_sketch.js\"></script>");
     try w.writeAll("<script src=\"/static/pcb_board.js\"></script>");
     if (!mode.physical_review) try w.writeAll("<script src=\"/static/pcb_settings.js\"></script>" ++
         "<script src=\"/static/pcb_dxf.js\"></script>" ++
@@ -3570,7 +3574,7 @@ test "assembly iframe defers CAM and omits editor-only clients" {
     });
     const html = scripts.written();
     try std.testing.expect(std.mem.indexOf(u8, html, "pcb_board.js") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html, "pcb_outline_sketch.js") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "shape_sketch.js") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "drc_marshal.js") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "pcb_settings.js") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "pcb_replay.js") == null);
@@ -6099,7 +6103,7 @@ fn writeSavedOutlineJson(w: *std.Io.Writer, o: SavedOutline) std.Io.Writer.Error
     }
     if (o.sketch) |sketch| {
         try w.writeAll(",\"sketch\":");
-        try outline_sketch_json.write(w, sketch);
+        try shape_sketch_json.write(w, sketch);
     }
     try w.writeAll("}");
 }
@@ -6119,27 +6123,6 @@ fn writeSavedHeatsinkJson(w: *std.Io.Writer, sink: SavedHeatsink) std.Io.Writer.
     });
     try writeJsonStr(w, sink.fin_axis);
     try w.print(",\"pad_thickness_mm\":{d},\"pad_k_w_mk\":{d}}}", .{ sink.pad_thickness_mm, sink.pad_k_w_mk });
-}
-
-fn writeSavedFabricationLayersJson(w: *std.Io.Writer, layers: []const SavedFabricationLayer) std.Io.Writer.Error!void {
-    try w.writeAll("[");
-    for (layers, 0..) |layer, i| {
-        if (i > 0) try w.writeAll(",");
-        try w.writeAll("{\"name\":");
-        try writeJsonStr(w, layer.name);
-        try w.writeAll(",\"regions\":[");
-        for (layer.regions, 0..) |region, ri| {
-            if (ri > 0) try w.writeAll(",");
-            try w.writeAll("[");
-            for (region, 0..) |point, pi| {
-                if (pi > 0) try w.writeAll(",");
-                try w.print(pt_pair_fmt, .{ point[0], point[1] });
-            }
-            try w.writeAll("]");
-        }
-        try w.writeAll("]}");
-    }
-    try w.writeAll("]");
 }
 
 /// Serialize a board-text array as
@@ -7138,7 +7121,7 @@ pub fn writeLayoutsFileJsonRev(w: *std.Io.Writer, layouts: []const SavedLayout, 
         }
         if (L.fabrication_layers.len > 0) {
             try w.writeAll(fabrication_layers_open);
-            try writeSavedFabricationLayersJson(w, L.fabrication_layers);
+            try sidecar_json.writeSavedFabricationLayersJson(w, L.fabrication_layers);
         }
         if (L.heatsink) |sink| {
             try w.writeAll(",\"heatsink\":");
@@ -8095,7 +8078,7 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, sr
         try w.writeAll("<button class=\"btn\" id=\"pcb-outline-poly\" title=\"" ++ tip_poly ++ "\">\u{2B21} Poly</button>");
         try w.writeAll("<button class=\"btn\" id=\"pcb-backing\" title=\"" ++ tip_backing ++ "\">\u{25A7} Backing</button>");
         try w.writeAll("<button class=\"btn\" id=\"pcb-outline-dxf\" title=\"" ++ tip_dxf ++ "\">\u{2912} DXF</button>");
-        try w.writeAll("<button class=\"btn\" id=\"pcb-pour-zone\" title=\"" ++ tip_pour_zone ++ "\">\u{25A9} Pour</button>");
+        try w.writeAll("<button class=\"btn\" id=\"pcb-pour-zone\" title=\"" ++ tip_pour_zone ++ "\">\u{25A9} Area</button>");
         try w.writeAll("<button class=\"btn\" id=\"pcb-draw\" title=\"" ++ tip_draw ++ "\">\u{270E} Draw</button>");
         try w.writeAll("<button class=\"btn\" id=\"pcb-text\" title=\"" ++ tip_text ++ "\">T Text</button>");
     }
@@ -8147,9 +8130,8 @@ const tip_dxf = "Import a DXF file as the board outline (picks the same saved ov
     "(mm/inch selectable in the dialog), and preserves arcs as editable sketch curves. The chosen loop becomes the exact board " ++
     "edge the renderers draw, the board-edge DRC measures, and the " ++
     board_layers.edge_cuts ++ " Gerber traces. Saved with the layout (Save/Update).";
-const tip_pour_zone = "Custom copper pour (Z): click an existing pour for the full outline-style sketch palette (lines/arcs, dimensions, constraints, fillet, chamfer, offset and mirror), or click empty space to draw a new polygon. " ++
-    "Pick its net, layer and priority; the compiled profile fills around current copper (redrawn by \u{27F3} Pours). " ++
-    "Double-click an edge to add a vertex; right-click a vertex or pour to delete. Saved with the layout and emitted on the copper Gerber.";
+const tip_pour_zone = "Custom copper area (Z): edit pours and keepouts with the full shared shape-sketch palette (lines/arcs, dimensions, constraints, fillet, chamfer, offset and mirror), or draw a new polygon. " ++
+    "Choose pour or keepout plus its layer; pours also select a net and priority. Double-click an edge to add a vertex; right-click geometry to delete. Saved with the layout.";
 const tip_draw = "Route tracks (X): click a pad to start a trace, click to " ++
     "fix corners (45\u{b0}/grid snapped, / switches posture, A toggles tangent arcs, Shift = free angle), V drops a via and flips " ++
     "layer, click a same-net pad or double-click to finish, Backspace steps back, Esc ends. Right-click deletes the " ++
@@ -8158,8 +8140,8 @@ const tip_text = "Silkscreen text (T): click on the board to place a label " ++
     "(grid-snapped, on the active side). In Select or Text mode, click an existing label to edit it and drag it to " ++
     "move it, R rotates 90\u{b0}, Del or right-click deletes. Saved with the layout (Save/Update); emitted on the silk " ++
     "Gerber.";
-const tip_backing = "Edit fabrication backing: drag polygon vertices, double-click an edge to add a vertex, or right-click a vertex to remove it. " ++
-    "The authored top/bottom side, material, thickness, and automatic footprint cutouts remain unchanged. Saved with the layout and emitted in its named Gerber.";
+const tip_backing = "Edit fabrication backing regions with the shared shape-sketch palette: lines/arcs, dimensions, constraints, fillet, chamfer, offset and mirror. " ++
+    "The authored side, material, thickness, and automatic footprint cutouts remain unchanged. Saved with the layout and emitted in its named Gerber.";
 const tip_heatsink = "Draw or edit a physical heatsink. Drag its body to move it, drag corner handles to resize it, or click it to edit its face, target, material, fin count/dimensions, and thermal pad. Saved with the layout; the thermal ladder and 3D view use it.";
 const tip_ruler = "Ruler / measure (D): drag to measure dx / dy / distance in the current units; Esc exits.";
 const tip_move = "Move selected parts by an X/Y distance (M): marquee or Ctrl/Cmd+click parts, then press M (or this button) and type how far to move them; copper that belongs to the selection rides along, one undo step.";
@@ -8283,7 +8265,7 @@ test "the toolstrip ships the DXF board-outline import button" {
     try std.testing.expect(std.mem.indexOf(u8, page_js, "var RO=!!PCB.ro") != null);
 }
 
-// spec: Web Server - The PCB editor overlays source-declared fabrication backing, edits its polygon with undo, and persists per-layout geometry without changing its side or material
+// spec: Web Server - The PCB editor overlays source-declared fabrication backing, edits every region with the outline sketch palette and undo, and persists compiled polygons plus index-aligned native sketches without changing side or material
 test "the PCB editor ships a persistent fabrication backing polygon tool" {
     const js = @embedFile("assets/pcb_board.js");
     try std.testing.expect(std.mem.indexOf(u8, toolstrip_html, "id=\"pcb-backing\"") != null);
@@ -9257,6 +9239,8 @@ const PcbDataOpts = struct {
     /// Exact shown outline; unlike board_poly, this retains nominal vertices
     /// and their editable fillet radii.
     saved_outline: ?SavedOutline = null,
+    /// Native sketches for the shown backing overrides.
+    saved_fabrication_layers: []const SavedFabricationLayer = &.{},
     /// Physical heatsink authored on the shown saved layout.
     saved_heatsink: ?SavedHeatsink = null,
     /// This page is a whole top-level DESIGN (not a module page, not a `?sub`
@@ -9902,7 +9886,7 @@ fn writeBlobHead(
         try w.writeAll("null");
     }
     try w.writeByte(',');
-    try writeFabricationLayersField(w, p);
+    try writeFabricationLayersField(w, p, opts.saved_fabrication_layers);
     try pcb_keepout_json.write(w, alloc, p);
     try w.writeAll("\"pours\":");
     if (opts.omit_pours) try w.writeAll("[]") else try pour_json.writePours(w, alloc, p, copper, userZonesFrom(alloc, p.rules, shownZones(opts.saved_routes)), opts.base_edge);
@@ -9998,7 +9982,28 @@ fn writePointArray(w: *std.Io.Writer, points: []const [2]f64) std.Io.Writer.Erro
 /// vertices. The browser therefore edits one uniform representation, while
 /// source-level `region board` still follows later outline changes until the
 /// user makes and saves an explicit override.
-fn writeFabricationLayersField(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.Error!void {
+fn writeFabricationSketches(w: *std.Io.Writer, count: usize, layer_name: []const u8, saved_layers: []const SavedFabricationLayer) std.Io.Writer.Error!void {
+    var found: ?[]const ?shape_sketch.Sketch = null;
+    for (saved_layers) |saved| if (std.mem.eql(u8, saved.name, layer_name)) {
+        found = saved.sketches;
+        break;
+    };
+    const sketches = found orelse return;
+    var any = false;
+    for (sketches) |sketch| if (sketch != null) {
+        any = true;
+        break;
+    };
+    if (!any) return;
+    try w.writeAll(",\"sketches\":[");
+    for (0..count) |i| {
+        if (i > 0) try w.writeByte(',');
+        if (i < sketches.len and sketches[i] != null) try shape_sketch_json.write(w, sketches[i].?) else try w.writeAll("null");
+    }
+    try w.writeByte(']');
+}
+
+fn writeFabricationLayersField(w: *std.Io.Writer, p: optimizer.Placement, saved_layers: []const SavedFabricationLayer) std.Io.Writer.Error!void {
     try w.writeAll("\"fabrication_layers\":[");
     for (p.fabrication_layers, 0..) |layer, i| {
         if (i > 0) try w.writeAll(",");
@@ -10029,7 +10034,9 @@ fn writeFabricationLayersField(w: *std.Io.Writer, p: optimizer.Placement) std.Io
                 },
             }
         }
-        try w.print("],\"exclude_footprints\":{s},\"all_sides\":{s},\"clearance\":{d}}}", .{
+        try w.writeByte(']');
+        try writeFabricationSketches(w, layer.regions.len, layer.name, saved_layers);
+        try w.print(",\"exclude_footprints\":{s},\"all_sides\":{s},\"clearance\":{d}}}", .{
             if (layer.exclude_footprints.enabled) "true" else "false",
             if (layer.exclude_footprints.all_sides) "true" else "false",
             layer.exclude_footprints.clearance,
@@ -10163,7 +10170,7 @@ fn writeLayoutsJson(w: *std.Io.Writer, layouts: []const SavedLayout, shown: ?[]c
         }
         if (L.fabrication_layers.len > 0) {
             try w.writeAll(fabrication_layers_open);
-            try writeSavedFabricationLayersJson(w, L.fabrication_layers);
+            try sidecar_json.writeSavedFabricationLayersJson(w, L.fabrication_layers);
         }
         if (L.heatsink) |sink| {
             try w.writeAll(",\"heatsink\":");
@@ -14585,7 +14592,7 @@ test "the route panel is one whole-board action with replay" {
     });
     const script_html = scripts.written();
     try std.testing.expect(std.mem.indexOf(u8, script_html, "pcb_replay.js") != null);
-    try std.testing.expect((std.mem.indexOf(u8, script_html, "pcb_outline_sketch.js") orelse return error.TestUnexpectedResult) <
+    try std.testing.expect((std.mem.indexOf(u8, script_html, "shape_sketch.js") orelse return error.TestUnexpectedResult) <
         (std.mem.indexOf(u8, script_html, "pcb_board.js") orelse return error.TestUnexpectedResult));
     try std.testing.expect(std.mem.indexOf(u8, scripts.written(), "pcb_route_session.js") == null);
 }

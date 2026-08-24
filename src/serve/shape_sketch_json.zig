@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const numeric = @import("../numeric.zig");
-const sketch_mod = @import("../outline_sketch.zig");
+const sketch_mod = @import("../shape_sketch.zig");
 
 fn number(v: ?std.json.Value) ?f64 {
     const value = v orelse return null;
@@ -40,7 +40,7 @@ fn pointPair(v: ?std.json.Value) ?[2]f64 {
 }
 
 /// Parse a strict v1 sketch. Structural/profile validity is deliberately left
-/// to `outline_sketch.compile`, which returns a specific geometry error.
+/// to `shape_sketch.compile`, which returns a specific geometry error.
 pub fn parse(alloc: std.mem.Allocator, v: ?std.json.Value) ?sketch_mod.Sketch {
     const value = v orelse return null;
     if (value != .object) return null;

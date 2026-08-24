@@ -401,7 +401,7 @@ fn parsePadPoly(arena: std.mem.Allocator, node: Node) ?[]const [2]f64 {
 
 const Ext = struct { hw: f64, hh: f64, cx: f64 = 0, cy: f64 = 0 };
 
-/// `(courtyard (rect x1 y1 x2 y2))` or `(courtyard (circle (cx cy) r))`.
+/// Rectangular, circular, or polygonal courtyard boundary.
 /// Returns the box's half-extents plus its centre offset from the footprint
 /// origin — a courtyard need not be origin-centred (connectors whose pads
 /// hang off one side), or null.
@@ -411,7 +411,32 @@ fn parseCourtyard(node: Node) ?Ext {
     const shape = cl[1];
     if (shape.isForm("rect")) return parseRectExt(shape);
     if (shape.isForm("circle")) return parseCircleExt(shape);
+    if (shape.isForm("poly")) return parsePolyExt(shape);
     return null;
+}
+
+fn parsePolyExt(shape: Node) ?Ext {
+    const pl = shape.asList() orelse return null;
+    if (pl.len < 4) return null;
+    var minx: f64 = std.math.inf(f64);
+    var miny: f64 = std.math.inf(f64);
+    var maxx: f64 = -std.math.inf(f64);
+    var maxy: f64 = -std.math.inf(f64);
+    var count: usize = 0;
+    for (pl[1..]) |point| {
+        const xy = point.asList() orelse continue;
+        if (xy.len < 2) continue;
+        const x = xy[0].asNumber() orelse continue;
+        const y = xy[1].asNumber() orelse continue;
+        minx = @min(minx, x);
+        miny = @min(miny, y);
+        maxx = @max(maxx, x);
+        maxy = @max(maxy, y);
+        count += 1;
+    }
+    if (count < 3) return null;
+    if (!(maxx > minx) or !(maxy > miny)) return null;
+    return .{ .hw = (maxx - minx) / 2, .hh = (maxy - miny) / 2, .cx = (minx + maxx) / 2, .cy = (miny + maxy) / 2 };
 }
 
 /// `(rect x1 y1 x2 y2)` → the true box: half-extents + centre offset (no

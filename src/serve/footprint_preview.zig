@@ -76,11 +76,12 @@ const Shapes = struct {
     polys: std.ArrayList(Poly) = .empty,
     court_rects: std.ArrayList(CourtRect) = .empty,
     court_circs: std.ArrayList(CourtCirc) = .empty,
+    court_polys: std.ArrayList([]const Point) = .empty,
 
     fn isEmpty(self: Shapes) bool {
         return self.pads.items.len == 0 and self.segs.items.len == 0 and
             self.rects.items.len == 0 and self.polys.items.len == 0 and
-            self.court_rects.items.len == 0 and self.court_circs.items.len == 0;
+            self.court_rects.items.len == 0 and self.court_circs.items.len == 0 and self.court_polys.items.len == 0;
     }
 };
 
@@ -264,6 +265,8 @@ fn parseCourtyard(allocator: std.mem.Allocator, items: []const Node, shapes: *Sh
             if (readRect(sub, .fab)) |r| try shapes.court_rects.append(allocator, .{ .x0 = r.x0, .y0 = r.y0, .x1 = r.x1, .y1 = r.y1 });
         } else if (sub.isForm("circle")) {
             if (readCircle(sub, .fab)) |c| try shapes.court_circs.append(allocator, .{ .cx = c.cx, .cy = c.cy, .r = c.r });
+        } else if (sub.isForm("poly")) {
+            if (try readPoly(allocator, sub, .fab)) |p| try shapes.court_polys.append(allocator, p.pts);
         }
     }
 }
@@ -357,6 +360,7 @@ fn computeBBox(shapes: Shapes) BBox {
         grow(&b, c.cx - c.r, c.cy - c.r);
         grow(&b, c.cx + c.r, c.cy + c.r);
     }
+    for (shapes.court_polys.items) |poly| for (poly) |pt| grow(&b, pt.x, pt.y);
     return b;
 }
 
@@ -431,6 +435,11 @@ fn emitFootprintJson(w: anytype, shapes: Shapes, revision: ?u64) HandlerError!vo
     for (shapes.court_circs.items, 0..) |c, i| {
         if (i != 0) try w.writeAll(",");
         try w.print("[{d:.3},{d:.3},{d:.3}]", .{ c.cx, c.cy, c.r });
+    }
+    try w.writeAll("],\"polys\":[");
+    for (shapes.court_polys.items, 0..) |poly, i| {
+        if (i != 0) try w.writeByte(',');
+        try writePtsJson(w, poly);
     }
     try w.writeAll("]}}");
 }
@@ -640,6 +649,11 @@ fn mirrorShapesY(allocator: std.mem.Allocator, shapes: *Shapes) HandlerError!voi
         r.y1 = -r.y1;
     }
     for (shapes.court_circs.items) |*c| c.cy = -c.cy;
+    for (shapes.court_polys.items) |*poly| {
+        const flipped = try allocator.alloc(Point, poly.len);
+        for (poly.*, 0..) |pt, i| flipped[i] = .{ .x = pt.x, .y = -pt.y };
+        poly.* = flipped;
+    }
 }
 
 /// The board layer a KiCad fp graphic targets, looked up from its

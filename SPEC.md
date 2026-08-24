@@ -5822,12 +5822,13 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The PCB editor imports a DXF board outline: the page ships a DXF button (toolstrip + embed action bar) and the importer script, whose client-side parser exposes the loops a picked .dxf found (LWPOLYLINE/POLYLINE loops, LINE/ARC chains, $INSUNITS units, Y-flip to the board frame)
 - The PCB editor imports a DXF board outline: the importer honours $INSUNITS, flips Y to the board frame, preserves native arcs in the editable sketch, and feeds the existing outline-override seam (Save/Update persists it like any drawn outline)
 - The PCB board-outline sketch keeps stable entities, constraints, driving dimensions, and exact arcs in a separately testable client model loaded before the editor
+- The neutral shape-sketch kernel is shared by board outlines, custom copper pours and keepouts, fabrication backing regions, custom footprint pads, footprint courtyards, and closed silk/fab artwork; board cutouts and slots remain outside this single-contour engine
 - Dragging an endpoint of a horizontal or vertical outline segment changes its length without translating the constrained line, with dominant-direction disambiguation at H/V corners
 - The PCB outline sketch box-selects corner vertices in Outline mode or the Outline-only filter; Delete removes selected vertices and their incident curves without healing the resulting open profile, while Remove fillet remains a separate sharp-corner command
 - The PCB editor selection filter includes the board outline and a session-only Outline only preset that disables every other filter type and suppresses board-text selection without making a reopened board appear unresponsive
 - The PCB outline Line tool stays inside the sketch, creates connected native line chains, snaps endpoints to shared existing point IDs and H/V inference, lets Enter retain an open chain, and normalizes a reconnected closed loop for fabrication
 - Backspace or Delete on a selected native outline curve removes only that curve, leaves loose endpoints for free sketch editing, remains undoable, and Save explains that open geometry must be reconnected
-- The PCB editor overlays source-declared fabrication backing, edits its polygon with undo, and persists per-layout geometry without changing its side or material
+- The PCB editor overlays source-declared fabrication backing, edits every region with the outline sketch palette and undo, and persists compiled polygons plus index-aligned native sketches without changing side or material
 - The PCB editor draws one physical heatsink base rectangle on either board face, reopens it for parameter edits, drags it to reposition, resizes it with corner handles, directly edits fin count or gap, target package, material, base/fins and thermal pad, persists the assembly with the named layout, previews its pad/base/fins in 3D, and feeds the same exact contact and derived theta-SA to built-in and Elmer thermal solves
 - The PCB editor offers a persistent display-only heatsink visibility toggle in Appearance > Objects, without changing saved geometry or thermal simulations, and entering the heatsink edit tool reveals a hidden heatsink
 - Selecting a board outline exposes editable dimensions, slides horizontal/vertical edges only perpendicular to themselves, and uses Shift to constrain non-axis-aligned edge slides to their dominant axis
@@ -5960,6 +5961,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - a tool property that documents a comma-separated string declares string among its schema types
 - cropnet= computes the viewport as a net set's pad + copper bbox plus a margin, case-insensitively and excluding other nets' copper
 - Library previews edit footprint courtyards with PCB-style controls
+- The footprint editor uses the shared shape-sketch tools for custom pad polygons, polygon courtyards, and closed silkscreen/fabrication artwork, while retaining conventional physical footprint forms for export and placement
 - The PCB editor's sidebar footprint button opens the part's library card (datasheet links, footprint editor, 3D-model drag-in and alignment) instead of only the courtyard modal
 - Footprint preview reports exact geometry bounds separately from its padded SVG viewport
 - Footprint preview carries a pad's own (pos X Y ROT) rotation so the library SVG draws it turned
@@ -6034,6 +6036,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The WebGPU renderer drops a track whose layer the board does not have instead of repainting it on F.Cu
 - A new copper pour defaults to the active copper layer and its picker lists every routable layer
 - Custom copper pours and board outlines use one versioned shape-sketch engine: a pour exposes the outline editor's rectangle/line creation, vertex and edge editing, dimensions, geometric constraints, arc/line conversion, fillet removal/addition, chamfer, offset, mirror, selection deletion and undo/redo; its native sketch round-trips while fill, routing, DRC and export consume the compiled polygon
+- Custom copper keepouts use the same copper-area picker and the same full shape-sketch palette as pours; generated rule/perimeter keepouts remain derived and read-only
 - The read-only assembly review opens on an outer board face even when the editor was left on an inner layer
 - The clearance-halo toggle persists with the rest of the PCB view state and both of its surfaces read that one value
 - A layout save refuses a copper pour on a layer this board has not got while keeping the spellings a KiCad import carries

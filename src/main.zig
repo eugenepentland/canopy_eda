@@ -647,7 +647,7 @@ test {
     _ = @import("placement/mask_relief.zig");
     _ = @import("placement/pad_shape.zig");
     _ = @import("placement/outline.zig");
-    _ = @import("outline_sketch.zig");
+    _ = @import("shape_sketch.zig");
     _ = @import("placement/pour.zig");
     _ = @import("placement/courtyard_close.zig");
     _ = @import("placement/optimizer.zig");
@@ -756,7 +756,7 @@ test {
     _ = @import("serve/pcb_layout_page.zig");
     _ = @import("serve/layout_sidecar_json.zig");
     _ = @import("serve/placement_outline.zig");
-    _ = @import("serve/outline_sketch_json.zig");
+    _ = @import("serve/shape_sketch_json.zig");
     _ = @import("serve/pcb_part_json.zig");
     _ = @import("serve/pcb_layout_import.zig");
     _ = @import("serve/route_plan.zig");
