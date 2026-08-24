@@ -3251,6 +3251,13 @@ function zoomToSel(){var idxs=sel.slice();
  var cx=(sx0+sx1)/2,cy=(sy0+sy1)/2,far=hostAspect();
  if(h/w<far)h=w*far;else w=h/far; // match the stage aspect
  vb={x:cx-w/2,y:cy-h/2,w:w,h:h};setVB();paintSoon();}
+// Frame one world-space polygon. Save errors use this to take the user to the
+// exact malformed copper area instead of leaving them to hunt across the board.
+function zoomToPoly(pts){if(!pts||!pts.length)return;var x0=1e18,y0=1e18,x1=-1e18,y1=-1e18;
+ pts.forEach(function(p){x0=Math.min(x0,+p[0]);y0=Math.min(y0,+p[1]);x1=Math.max(x1,+p[0]);y1=Math.max(y1,+p[1]);});
+ var sx0=X(x0),sy0=Y(y0),sx1=X(x1),sy1=Y(y1),w=Math.max(Math.abs(sx1-sx0),VBW*.02),h=Math.max(Math.abs(sy1-sy0),VBW*.02);
+ w*=1.8;h*=1.8;var cx=(sx0+sx1)/2,cy=(sy0+sy1)/2,far=hostAspect();if(h/w<far)h=w*far;else w=h/far;
+ vb={x:cx-w/2,y:cy-h/2,w:w,h:h};setVB();paintSoon();}
 // Wire the Align cluster buttons + select-all / zoom-to-selection keys.
 (function(){
  document.querySelectorAll("#align-bar [data-align]").forEach(function(b){
@@ -4053,6 +4060,15 @@ function saveResponse(r){return r.text().then(function(t){
   var httpError=new Error(detail.slice(0,240));httpError.status=r.status;
   httpError.retryable=r.status===408||r.status===425||r.status===429||r.status>=500;throw httpError;}
  try{return body?JSON.parse(body):{};}catch(ignore){var badReply=new Error("invalid save response");badReply.retryable=true;throw badReply;}});}
+function pourIssueFromError(e){var text=e&&e.message||"",m=text.match(/invalid custom copper-area sketch in zone #(\d+) \((.*?) on (.*?)\):\s*([A-Za-z]+)/);if(!m)return null;
+ var i=parseInt(m[1],10)-1,z=(PCB.zones||[])[i];return z?{zone:z,index:i,open:m[4]==="OpenProfile",detail:text}:null;}
+function focusPourIssue(issue){var z=issue&&issue.zone;if(!z||(PCB.zones||[]).indexOf(z)<0)return;
+ pourArm(true);pourBeginEdit(z);var g=OS&&z.sketch&&OS.compile(z.sketch),pts=g&&g.points&&g.points.length?g.points:z.poly;zoomToPoly(pts||[]);
+ var repair=issue.open?(OS&&z.sketch&&OS.canCloseProfile&&OS.canCloseProfile(z.sketch)?" Use Close profile, then Update.":" Reconnect the amber loose endpoints, then Update."):" Inspect the red geometry for a crossing, branch, or zero-length edge.";
+ outlineMsg("Zone #"+(issue.index+1)+" · "+(z.net||"keepout")+" on "+(z.layer||"")+(issue.open?" is open.":" is invalid.")+repair);}
+function showPourIssue(msg,issue,detail){if(!msg||!issue)return false;msg.style.color="#f85149";msg.textContent="";
+ var b=document.createElement("button");b.type="button";b.className="savemsg-action";b.textContent=detail||("Zone #"+(issue.index+1)+" · "+(issue.zone.net||"keepout")+" on "+(issue.zone.layer||"")+" is invalid — inspect and repair");
+ b.title="Open and frame this copper-area sketch";b.addEventListener("click",function(){focusPourIssue(issue);});msg.appendChild(b);return true;}
 // Persist the current poses to layout nm and update the panel IN PLACE — no
 // page reload, so the camera and view toggles you set while editing stay put.
 function persistLayoutNow(nm,verb,automatic){var msg=document.getElementById("pcb-savemsg");
@@ -4061,7 +4077,7 @@ function persistLayoutNow(nm,verb,automatic){var msg=document.getElementById("pc
  // 400 it anyway); the editing state is preserved so the user can fix it.
  if(outlineBad()){if(msg){msg.style.color="#f85149";var og=OS&&PCB.outline&&PCB.outline.sketch&&OS.compile(PCB.outline.sketch);
    msg.textContent=og&&!og.closed?"outline is open — reconnect its loose endpoints before saving":"outline self-intersects — fix it before saving";}return Promise.resolve("invalid");}
- var pbad=pourSketchBad();if(pbad){if(msg){msg.style.color="#f85149";msg.textContent=pbad.open?"copper pour sketch is open — reconnect its loose endpoints before saving":"copper pour sketch is invalid — repair it before saving";}return Promise.resolve("invalid");}
+ var pbad=pourSketchBad();if(pbad){if(msg)showPourIssue(msg,pbad,pbad.open?("Zone #"+(pbad.index+1)+" · "+(pbad.zone.net||"keepout")+" on "+(pbad.zone.layer||"")+" is open — click to repair"):("Zone #"+(pbad.index+1)+" · "+(pbad.zone.net||"keepout")+" on "+(pbad.zone.layer||"")+" is invalid — click to inspect"));return Promise.resolve("invalid");}
  if(backingBad()){if(msg){msg.style.color="#f85149";
    msg.textContent="backing region sketch is open, conflicted, self-intersecting, or has zero area — fix it before saving";}return Promise.resolve("invalid");}
  copperIdsEnsureAll();var saveGeneration=dirtyGeneration;
@@ -4117,7 +4133,7 @@ function persistLayoutNow(nm,verb,automatic){var msg=document.getElementById("pc
      return "conflict";}
     var retryable=!e||e.retryable||typeof e.status!=="number";
     if(automatic&&retryable){if(msg){msg.style.color="#8b949e";msg.textContent="autosave interrupted \u{2014} retrying\u{2026}";}return "retry";}
-    if(msg){msg.style.color="#f85149";msg.textContent=e&&e.message?e.message:
+    var issue=pourIssueFromError(e);if(msg&&!showPourIssue(msg,issue,e&&e.message)){msg.style.color="#f85149";msg.textContent=e&&e.message?e.message:
      ((verb==="updating"?"update":"save")+" failed");}
     return "failed";});}
 // Let external PCB-editor actions serialize behind autosave. Inbound KiCad
@@ -4686,13 +4702,14 @@ function outlineSketchModify(action){return outlineSketchMutate(action,function(
   if(action==="offset"){n=outlineSketchNumber("Profile offset (mm, positive = outward)",1);return n!=null&&OS.offset(sk,n);}
   if(action==="mirror-x"||action==="mirror-y"){g=OS.compile(sk);return g&&OS.mirror(sk,action==="mirror-x"?"x":"y",action==="mirror-x"?g.rect.x+g.rect.w/2:g.rect.y+g.rect.h/2);}return false;});}
 function outlineSketchPanelSync(){var host=svg&&svg.parentNode,p=document.getElementById("outline-sketch-palette"),active=outlineMode||activeSketchIsArea();if(!active||RO||!OS){if(p)p.remove();return;}if(!p){p=document.createElement("div");p.id="outline-sketch-palette";p.className="outline-sketch-palette";host.appendChild(p);}
- var sh=activeSketchShape(),sk=sh&&sh.sketch,st=sk?OS.state(sk):null,sg=sk&&OS.compile(sk),title=activeSketchName()+" sketch";p.innerHTML='<div class="osp-head"><b>'+title.charAt(0).toUpperCase()+title.slice(1)+'</b><span class="osp-dof '+(st&&st.conflict?'bad':'')+'">'+(st?(st.conflict?'conflict':((sg&&!sg.closed?'open · ':'')+st.dof+' DOF')):'select or create a shape')+'</span></div>'+
+ var sh=activeSketchShape(),sk=sh&&sh.sketch,st=sk?OS.state(sk):null,sg=sk&&OS.compile(sk),title=activeSketchName()+" sketch",closable=!!(sg&&!sg.closed&&OS.canCloseProfile&&OS.canCloseProfile(sk));p.innerHTML='<div class="osp-head"><b>'+title.charAt(0).toUpperCase()+title.slice(1)+'</b><span class="osp-dof '+(st&&st.conflict?'bad':'')+'">'+(st?(st.conflict?'conflict':((sg&&!sg.closed?'open · ':'')+st.dof+' DOF')):'select or create a shape')+'</span></div>'+
   '<div class="osp-group"><span>Create</span><button data-sk="new-rect"'+(outlineRectArmed?' class="on"':'')+'>Rectangle</button><button data-sk="new-poly"'+(polyMode&&polySketchOwned?' class="on"':'')+'>Line</button><button data-sk="dimension">Dimension</button></div>'+
+  (closable?'<button class="osp-finish osp-repair" data-sk="close-profile">Close profile</button>':'')+
   '<div class="osp-group"><span>Constrain</span><button data-sk="horizontal">H</button><button data-sk="vertical">V</button><button data-sk="coincident">Coincident</button><button data-sk="parallel">∥</button><button data-sk="perpendicular">⟂</button><button data-sk="tangent">Tangent</button><button data-sk="equal">Equal</button><button data-sk="midpoint">Midpoint</button><button data-sk="symmetric">Symmetry</button><button data-sk="fixed">Fix</button></div>'+
   '<div class="osp-group"><span>Modify</span><button data-sk="arc">Arc</button><button data-sk="line">Line</button><button data-sk="fillet">Fillet</button><button data-sk="remove-fillet">Remove fillet</button><button data-sk="chamfer">Chamfer</button><button data-sk="offset">Offset</button><button data-sk="mirror-x">Mirror X</button><button data-sk="mirror-y">Mirror Y</button></div>'+
   (pourMode&&pourEdit?'<button class="osp-finish" data-sk="properties">Type / net / layer…</button>':'')+
   '<button class="osp-finish" data-sk="finish">Finish sketch</button>';
- p.querySelectorAll("[data-sk]").forEach(function(b){b.addEventListener("click",function(){var a=b.getAttribute("data-sk");if(a==="finish"){if(polyMode)polyArm(false);if(backingMode)backingArm(false);else if(pourMode)pourArm(false);else outlineArm(false);}else if(a==="properties"&&pourEdit)openPourDialog(pourEdit.poly,pourEdit);else if(a==="new-poly")polyArm(!(polyMode&&polySketchOwned),true);else if(a==="new-rect"){if(polyMode)polyArm(false);outlineRectArmed=!outlineRectArmed;outlineSketchPanelSync();outlineMsg(outlineRectArmed?"rectangle armed: drag empty board space to replace the "+activeSketchName():"rectangle cancelled: empty drag box-selects sketch vertices");}else if(a==="remove-fillet")outlineRemoveFilletSelected();else if(a==="dimension")outlineSketchDimension();else if(["horizontal","vertical","coincident","parallel","perpendicular","tangent","equal","midpoint","symmetric","fixed"].indexOf(a)>=0)outlineSketchConstraint(a);else outlineSketchModify(a);});});}
+ p.querySelectorAll("[data-sk]").forEach(function(b){b.addEventListener("click",function(){var a=b.getAttribute("data-sk");if(a==="finish"){if(polyMode)polyArm(false);if(backingMode)backingArm(false);else if(pourMode)pourArm(false);else outlineArm(false);}else if(a==="close-profile")outlineSketchMutate("profile closed",function(sk){return OS.closeProfile(sk);});else if(a==="properties"&&pourEdit)openPourDialog(pourEdit.poly,pourEdit);else if(a==="new-poly")polyArm(!(polyMode&&polySketchOwned),true);else if(a==="new-rect"){if(polyMode)polyArm(false);outlineRectArmed=!outlineRectArmed;outlineSketchPanelSync();outlineMsg(outlineRectArmed?"rectangle armed: drag empty board space to replace the "+activeSketchName():"rectangle cancelled: empty drag box-selects sketch vertices");}else if(a==="remove-fillet")outlineRemoveFilletSelected();else if(a==="dimension")outlineSketchDimension();else if(["horizontal","vertical","coincident","parallel","perpendicular","tangent","equal","midpoint","symmetric","fixed"].indexOf(a)>=0)outlineSketchConstraint(a);else outlineSketchModify(a);});});}
 // ⬡ Poly / in-sketch Line tool: click connected outline segments freely.
 // Endpoints magnetize to existing corners and the chain start, infer horizontal
 // or vertical alignment, and otherwise use the grid. Enter finishes an open

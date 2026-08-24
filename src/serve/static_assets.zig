@@ -267,6 +267,7 @@ test "the DXF board-outline importer asset is registered with its parser seam" {
 // spec: Web Server - The PCB outline sketch box-selects corner vertices in Outline mode or the Outline-only filter; Delete removes selected vertices and their incident curves without healing the resulting open profile, while Remove fillet remains a separate sharp-corner command
 // spec: Web Server - The PCB outline Line tool stays inside the sketch, creates connected native line chains, snaps endpoints to shared existing point IDs and H/V inference, lets Enter retain an open chain, and normalizes a reconnected closed loop for fabrication
 // spec: Web Server - Backspace or Delete on a selected native outline curve removes only that curve, leaves loose endpoints for free sketch editing, remains undoable, and Save explains that open geometry must be reconnected
+// spec: Web Server - A malformed custom copper-area save names a clickable exact zone that enters its sketch and frames it; a single connected two-endpoint gap exposes an explicit undoable Close profile repair, while branches and disconnected geometry are never guessed closed
 test "the shared parametric shape sketch engine is registered with its editor contracts" {
     try std.testing.expect(registryHasAsset("shape_sketch.js"));
     try std.testing.expect(registryHasAsset("pcb_outline_sketch.js"));
@@ -286,6 +287,8 @@ test "the shared parametric shape sketch engine is registered with its editor co
         .{ .bytes = shape_sketch_js, .marker = "function removeFillet(s,cid)" },
         .{ .bytes = shape_sketch_js, .marker = "function deleteSegment(s,cid)" },
         .{ .bytes = shape_sketch_js, .marker = "function addLinePath(s,coords,tol)" },
+        .{ .bytes = shape_sketch_js, .marker = "function closeProfile(s)" },
+        .{ .bytes = shape_sketch_js, .marker = "canCloseProfile:canCloseProfile" },
         .{ .bytes = shape_sketch_js, .marker = "closed:isClosed" },
         .{ .bytes = shape_sketch_js, .marker = "snapLinePoint:snapLinePoint" },
         .{ .bytes = pcb_board_js, .marker = "outline-sketch-palette" },
@@ -301,6 +304,8 @@ test "the shared parametric shape sketch engine is registered with its editor co
         .{ .bytes = pcb_board_js, .marker = "polyArm(!(polyMode&&polySketchOwned),true)" },
         .{ .bytes = pcb_board_js, .marker = "OS.addLinePath(sk,pts)" },
         .{ .bytes = pcb_board_js, .marker = "outline is open — reconnect its loose endpoints before saving" },
+        .{ .bytes = pcb_board_js, .marker = "function showPourIssue(msg,issue,detail)" },
+        .{ .bytes = pcb_board_js, .marker = "data-sk=\"close-profile\"" },
         .{ .bytes = pcb_board_js, .marker = "polyCur=polySnap(mm(ev))" },
         .{ .bytes = pcb_board_js, .marker = "copper keepout" },
         .{ .bytes = pcb_board_js, .marker = "function activeSketchPromote()" },

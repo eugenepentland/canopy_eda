@@ -258,6 +258,17 @@
     function existing(q){var best=null,bd=tol;physicalPoints(s).forEach(function(p){var d=Math.hypot(p.x-q[0],p.y-q[1]);if(d<=bd){bd=d;best=p;}});return best;}
     function endpoint(q){var p=existing(q);if(p)return p;var id=nextId(s);p={id:id,x:+q[0],y:+q[1]};s.points.push(p);return p;}
     var a=endpoint(coords[0]);for(var i=1;i<coords.length;i++){var b=endpoint(coords[i]);if(a.id!==b.id&&dist(a,b)>1e-9){s.curves.push({id:nextId(s),kind:"line",a:a.id,b:b.id});added=true;}a=b;}return added;}
+  // Repair the common one-edge gap explicitly. Only a single connected chain
+  // with exactly two loose endpoints qualifies: adding the candidate edge to a
+  // clone must produce the one closed contour accepted by closedOrder. This
+  // refuses branches and disconnected islands instead of guessing at copper.
+  function closeProfile(s){if(!validSketch(s))return false;if(isClosed(s))return normalize(s);var pcs=physicalCurves(s),degree={},ends=[];
+    if(pcs.length<2)return false;pcs.forEach(function(c){degree[c.a]=(degree[c.a]||0)+1;degree[c.b]=(degree[c.b]||0)+1;});
+    Object.keys(degree).forEach(function(id){if(degree[id]===1)ends.push(+id);else if(degree[id]!==2)ends.push(NaN);});
+    if(ends.length!==2||!isFinite(ends[0])||!isFinite(ends[1]))return false;
+    var edge={id:nextId(s),kind:"line",a:ends[0],b:ends[1]};s.curves.push(edge);
+    if(!isClosed(s)){s.curves.pop();return false;}normalize(s);return true;}
+  function canCloseProfile(s){return !!(s&&closeProfile(cp(s)));}
   // Fusion-style line endpoint inference. Existing/profile vertices win over
   // the drawing grid, followed by horizontal/vertical alignment to the last
   // line endpoint. Returning the exact target coordinates makes the resulting
@@ -288,6 +299,6 @@
   return {VERSION:VERSION,clone:cp,valid:validSketch,closed:isClosed,normalize:normalize,fromSegments:fromSegments,fromOutline:fromOutline,fromPolygon:fromPolygon,ensure:ensure,ensurePolygon:ensurePolygon,compile:compile,syncOutline:syncOutline,syncPolygon:syncPolygon,
     point:point,curve:curve,physicalCurves:physicalCurves,physicalPoints:physicalPoints,nextId:nextId,arcCircle:arcCircle,
     solve:solve,state:state,addConstraint:addConstraint,removeConstraint:removeConstraint,pointDragAxis:pointDragAxis,pointDragTarget:pointDragTarget,movePoint:movePoint,moveCurve:moveCurve,
-    insertPoint:insertPoint,deletePoint:deletePoint,deleteSegment:deleteSegment,addLinePath:addLinePath,toArc:toArc,toLine:toLine,filletPoint:filletPoint,chamferPoint:chamferPoint,removeFillet:removeFillet,snapLinePoint:snapLinePoint,
+    insertPoint:insertPoint,deletePoint:deletePoint,deleteSegment:deleteSegment,addLinePath:addLinePath,closeProfile:closeProfile,canCloseProfile:canCloseProfile,toArc:toArc,toLine:toLine,filletPoint:filletPoint,chamferPoint:chamferPoint,removeFillet:removeFillet,snapLinePoint:snapLinePoint,
     offset:offset,mirror:mirror,annotations:annotations,dimensionValue:dimensionValue};
 });
