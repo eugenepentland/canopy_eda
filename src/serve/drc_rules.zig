@@ -789,6 +789,31 @@ test "viewer JS promotes the initial plain selection when modifier clicking anot
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, js, marker) != null);
 }
 
+// spec: Web Server - Ctrl/Cmd+C and Ctrl/Cmd+V copy and paste a selected trace, via, or mixed copper selection as one undoable edit with fresh identities
+test "viewer JS copies and pastes selected PCB copper" {
+    const js = @embedFile("assets/pcb_board.js");
+    const markers = [_][]const u8{
+        "function copperClipboardSelection(){var seed=selectionSeed()",
+        "CU_CLIP_PREFIX=\"netlisp-pcb-copper-v1:\"",
+        "navigator.clipboard.writeText(cuClipboardText)",
+        "navigator.clipboard.readText().then(use",
+        "if(k!==\"c\"&&k!==\"v\")return;",
+        "ev.preventDefault();ev.stopImmediatePropagation();if(k===\"c\")copperCopy();else copperPasteShortcut();",
+        "id:trackIdNew()",
+        "id:viaIdNew()",
+        "if(v.s)q.s=v.s.slice()",
+        "if(drcGateDiffBlocks(bt,bv,at,av))",
+        "recordUndo();PCB.tracks=at;PCB.vias=av;copperTouched();",
+        "selCuTo(nt,nv);drawRoute();scheduleDrc();paintSoon();",
+        "Copy / paste selected traces and vias",
+        "Ctrl / Cmd + C / V",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, js, marker) != null);
+
+    // Undo/redo must retain a blind/buried via's optional layer span too.
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, js, "s:Array.isArray(v.s)?v.s.slice():undefined"));
+}
+
 // spec: Web Server - L locks or unlocks every footprint in an explicit multi-selection without requiring a hovered member
 test "viewer JS toggles the lock state of a multi-part selection with L" {
     const js = @embedFile("assets/pcb_board.js");

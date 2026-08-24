@@ -6178,6 +6178,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Dragging or rotating a marquee selection carries the tracks and vias the band caught
 - Ctrl/Cmd-click toggles footprints, rigid sub-circuits, tracks, and vias into one multi-selection without a marquee drag
 - Holding Ctrl/Cmd after an ordinary first click retains that part, sub-circuit, track, or via when the next item joins the multi-selection
+- Ctrl/Cmd+C and Ctrl/Cmd+V copy and paste a selected trace, via, or mixed copper selection as one undoable edit with fresh identities
 - L locks or unlocks every footprint in an explicit multi-selection without requiring a hovered member
 - Two selected connected trace segments expose a right-click Fillet command that applies an exact native-arc radius through the normal copper edit gates
 - F rigidly mirrors a selected sub-circuit or marquee group to the opposite board side around one stable anchor, preserving relative positions and orientations in one undo

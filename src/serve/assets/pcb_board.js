@@ -3123,7 +3123,61 @@ function selectionToggleAt(ev,m){
  if(hit&&(hit.t==="track"||hit.t==="via")){selectionToggleCopper(hit);return;}
  if(hit){inspShow(hit,ev);return;}
  if(hi>=0)selectionToggleParts([hi]);}
-// ── Pad-to-pad RF alignment ─────────────────────────────────────────────
+// ── Copper clipboard ───────────────────────────────────────────────────
+// Ctrl/Cmd+C copies only the copper in the shared selection: a lone inspected
+// track/via is promoted by selectionSeed(), while a marquee/modifier selection
+// contributes all of its tracks and vias. The text form lets another board tab
+// receive it through the system clipboard; cuClipboard is the permission-free
+// fallback browsers need when navigator.clipboard is unavailable or denied.
+var CU_CLIP_PREFIX="netlisp-pcb-copper-v1:",cuClipboard=null,cuClipboardText="",cuPasteCount=0;
+function copperClipTrack(t){return {x1:+t.x1,y1:+t.y1,xm:t.xm==null?null:+t.xm,ym:t.ym==null?null:+t.ym,
+ x2:+t.x2,y2:+t.y2,l:+(t.l||0),w:+(t.w||0.25),net:String(t.net||"")};}
+function copperClipVia(v){var q={x:+v.x,y:+v.y,d:+(v.d||0.4),drill:+(v.drill||0),net:String(v.net||"")};
+ if(Array.isArray(v.s)&&v.s.length===2)q.s=[+v.s[0],+v.s[1]];return q;}
+function copperClipboardSelection(){var seed=selectionSeed(),seen=new Set(),ts=[],vs=[];
+ seed.t.forEach(function(t){if(!seen.has(t)&&(PCB.tracks||[]).indexOf(t)>=0){seen.add(t);ts.push(copperClipTrack(t));}});
+ seed.v.forEach(function(v){if(!seen.has(v)&&(PCB.vias||[]).indexOf(v)>=0){seen.add(v);vs.push(copperClipVia(v));}});
+ return {tracks:ts,vias:vs};}
+function copperClipboardEncode(cu){return CU_CLIP_PREFIX+JSON.stringify({tracks:cu.tracks,vias:cu.vias});}
+function copperClipboardDecode(text){if(typeof text!=="string"||text.indexOf(CU_CLIP_PREFIX)!==0||text.length>1000000)return null;
+ var q;try{q=JSON.parse(text.slice(CU_CLIP_PREFIX.length));}catch(e){return null;}
+ if(!q||!Array.isArray(q.tracks)||!Array.isArray(q.vias)||q.tracks.length+q.vias.length<1||q.tracks.length+q.vias.length>10000)return null;
+ function num(n){return typeof n==="number"&&isFinite(n);}
+ var ts=[],vs=[];
+ for(var i=0;i<q.tracks.length;i++){var t=q.tracks[i];
+  if(!t||!num(t.x1)||!num(t.y1)||!num(t.x2)||!num(t.y2)||!num(t.l)||t.l<0||t.l>=NSIG||Math.floor(t.l)!==t.l||!num(t.w)||t.w<=0||t.w>100||typeof t.net!=="string"||t.net.length>512)return null;
+  if((t.xm==null)!==(t.ym==null)||(t.xm!=null&&(!num(t.xm)||!num(t.ym))))return null;ts.push(copperClipTrack(t));}
+ for(var j=0;j<q.vias.length;j++){var v=q.vias[j];
+  if(!v||!num(v.x)||!num(v.y)||!num(v.d)||v.d<=0||v.d>100||!num(v.drill)||v.drill<0||v.drill>v.d||typeof v.net!=="string"||v.net.length>512)return null;
+  if(v.s!=null&&(!Array.isArray(v.s)||v.s.length!==2||!num(v.s[0])||!num(v.s[1])||Math.floor(v.s[0])!==v.s[0]||Math.floor(v.s[1])!==v.s[1]||v.s[0]<0||v.s[1]>=NSIG||v.s[0]>=v.s[1]))return null;vs.push(copperClipVia(v));}
+ return {tracks:ts,vias:vs};}
+function copperCopy(){var cu=copperClipboardSelection(),n=cu.tracks.length+cu.vias.length;if(!n){routeStatMsg("select a trace or via to copy",true);return false;}
+ cuClipboard=cu;cuClipboardText=copperClipboardEncode(cu);cuPasteCount=0;
+ if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(cuClipboardText).catch(function(){});
+ routeStatMsg("copied "+cu.tracks.length+" track"+(cu.tracks.length===1?"":"s")+" · "+cu.vias.length+" via"+(cu.vias.length===1?"":"s"));return true;}
+function copperPaste(text){var cu=copperClipboardDecode(text);
+ if(cu){if(text!==cuClipboardText)cuPasteCount=0;cuClipboard=cu;cuClipboardText=copperClipboardEncode(cu);}
+ else cu=cuClipboard;
+ if(!cu){routeStatMsg("copy a trace or via before pasting",true);return false;}
+ // Each paste steps one current grid interval down/right. Exact in-place
+ // duplication is visually indistinguishable and leaves overlapping records;
+ // the offset makes the new, still-selected copper immediately draggable.
+ var d=Math.max(snapG(),0.01)*(++cuPasteCount),nt=cu.tracks.map(function(t){return {x1:t.x1+d,y1:t.y1+d,xm:t.xm==null?undefined:t.xm+d,ym:t.ym==null?undefined:t.ym+d,
+  x2:t.x2+d,y2:t.y2+d,l:t.l,w:t.w,net:t.net,source:"human",id:trackIdNew()};}),
+ nv=cu.vias.map(function(v){var q={x:v.x+d,y:v.y+d,d:v.d,drill:v.drill,net:v.net,source:"human",id:viaIdNew()};if(v.s)q.s=v.s.slice();return q;}),
+ bt=PCB.tracks||[],bv=PCB.vias||[],at=bt.concat(nt),av=bv.concat(nv);
+ if(drcGateDiffBlocks(bt,bv,at,av)){cuPasteCount--;routeStatMsg("paste would create a DRC error",true);return false;}
+ recordUndo();PCB.tracks=at;PCB.vias=av;copperTouched();selClear();clearSel();selCuTo(nt,nv);drawRoute();scheduleDrc();paintSoon();
+ routeStatMsg("pasted "+nt.length+" track"+(nt.length===1?"":"s")+" · "+nv.length+" via"+(nv.length===1?"":"s")+" — selected and ready to move");return true;}
+function copperPasteShortcut(){function use(text){copperPaste(text);}
+ if(navigator.clipboard&&navigator.clipboard.readText)navigator.clipboard.readText().then(use,function(){use("");});else use("");}
+// Capture ahead of the document's tool shortcuts: Ctrl/Cmd+V must never also
+// become the bare V via/layer/outline command. Text controls retain the native
+// operating-system clipboard, and read-only review pages never intercept it.
+window.addEventListener("keydown",function(ev){if(RO||kbTyping(ev.target)||!(ev.ctrlKey||ev.metaKey)||ev.altKey)return;
+ var k=(ev.key||"").toLowerCase();if(k!=="c"&&k!=="v")return;if(anyDrawTool())return;
+ ev.preventDefault();ev.stopImmediatePropagation();if(k==="c")copperCopy();else copperPasteShortcut();},true);
+// Pad-to-pad RF alignment.
 // Dedicated mode avoids the normal hierarchical group/copper click priority:
 // the click names an exact pad. Source ownership is stronger than the current
 // rigid/exploded display choice — a pad under a sub-circuit always moves that
@@ -3611,6 +3665,7 @@ function kbdToggle(){
   '<div class="kbd-row"><span>Add / remove an item from the selection</span><kbd>Ctrl / Cmd + click</kbd></div>'+
   '<div class="kbd-row"><span>Select box &mdash; parts + copper (Shift adds; Objects tab picks what it catches)</span><kbd>drag empty space</kbd></div>'+
   '<div class="kbd-row"><span>Move all selected together &mdash; parts and the copper in the band</span><kbd>drag any selected part or track</kbd></div>'+
+  '<div class="kbd-row"><span>Copy / paste selected traces and vias</span><kbd>Ctrl / Cmd + C / V</kbd></div>'+
   '<div class="kbd-row"><span>Find parts, nets, DRC, sub-circuits, or board text</span><kbd>Ctrl / Cmd + F</kbd></div>'+
   '<div class="kbd-row"><span>Clear selection</span><kbd>Esc / click empty</kbd></div>'+
   '<div class="kbd-row"><span>Undo / redo move</span><kbd>Ctrl+Z / Ctrl+Shift+Z</kbd></div>'+
@@ -3731,7 +3786,7 @@ function applyAll(){P.forEach(function(p,i){setT(i);});clearRoute();rats();fetch
 var undoStack=[],redoStack=[];
 function snapPoses(){return P.map(function(p){return {x:p.x,y:p.y,rot:p.rot||0,side:p.side||"top",locked:!!p.locked};});}
 function cloneCopper(){return {tracks:(PCB.tracks||[]).map(function(t){return {x1:t.x1,y1:t.y1,xm:t.xm,ym:t.ym,x2:t.x2,y2:t.y2,l:t.l||0,w:t.w,net:t.net||"",g:t.g,source:t.source,id:trackIdEnsure(t)};}),
- vias:(PCB.vias||[]).map(function(v){return {x:v.x,y:v.y,d:v.d,drill:v.drill,net:v.net||"",g:v.g,f:v.f,source:v.source,id:viaIdEnsure(v)};}),
+ vias:(PCB.vias||[]).map(function(v){return {x:v.x,y:v.y,d:v.d,drill:v.drill,net:v.net||"",g:v.g,f:v.f,source:v.source,s:Array.isArray(v.s)?v.s.slice():undefined,id:viaIdEnsure(v)};}),
  rf_paths:(PCB.rf_paths||[]).map(function(p){return {net:p.net,l:p.l||0,
   track_ids:(p.track_ids||[]).slice(),samples:(p.samples||[]).map(function(s){return [+s[0],+s[1],+s[2]];})};})};}
 function cloneText(t){return {x:t.x,y:t.y,rot:t.rot||0,side:t.side||"top",size:t.size||1,text:t.text,subcircuit:t.subcircuit||undefined,testpoint:t.testpoint||undefined,fabrication_id:!!t.fabrication_id};}
@@ -3760,7 +3815,7 @@ function restoreSnap(s){s.poses.forEach(function(q,i){if(P[i]){P[i].x=q.x;P[i].y
  // snapshot's copper AFTER it, then repaint + re-DRC.
  applyAll();
  PCB.tracks=(s.tracks||[]).map(function(t){return {x1:t.x1,y1:t.y1,xm:t.xm,ym:t.ym,x2:t.x2,y2:t.y2,l:t.l||0,w:t.w,net:t.net||"",g:t.g,source:t.source,id:t.id||trackIdNew()};});
- PCB.vias=(s.vias||[]).map(function(v){return {x:v.x,y:v.y,d:v.d,drill:v.drill,net:v.net||"",g:v.g,f:v.f,source:v.source,id:v.id||viaIdNew()};});
+ PCB.vias=(s.vias||[]).map(function(v){return {x:v.x,y:v.y,d:v.d,drill:v.drill,net:v.net||"",g:v.g,f:v.f,source:v.source,s:Array.isArray(v.s)?v.s.slice():undefined,id:v.id||viaIdNew()};});
  PCB.rf_paths=(s.rf_paths||[]).map(function(p){return {net:p.net,l:p.l||0,
   track_ids:(p.track_ids||[]).slice(),samples:(p.samples||[]).map(function(q){return [+q[0],+q[1],+q[2]];})};});
  var editZoneIndex=typeof pourEdit!=="undefined"&&pourEdit?(PCB.zones||[]).indexOf(pourEdit):-1;
