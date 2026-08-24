@@ -371,6 +371,17 @@ test "viewer keeps net-open findings off the board while retaining the DRC list"
     try std.testing.expect(std.mem.indexOf(u8, js, "var v=PCB.drc||[];") != null);
 }
 
+// spec: Web Server - Net-open DRC reporting groups every island gap by full net name and counts each open net once while retaining expandable per-gap details
+test "viewer consolidates net-open findings by exact net" {
+    const js = @embedFile("assets/pcb_board.js");
+    try std.testing.expect(std.mem.indexOf(u8, js, "function drcOpenNetName(d){return d&&d.k===\"net open\"&&d.a&&d.a.net?String(d.a.net):\"\";}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "function drcOpenNetGroups(idxs)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(k===\"net open\"){drcOpenNetGroups(g.groups[k])") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "connection'+(ng.idxs.length>1?'s':'')+' needed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "var sum=drcSummary(),err=sum.err,warn=sum.warn,bits=[];") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "open net\"+(sum.open>1?\"s\":\"\")") != null);
+}
+
 // spec: Web Server - DRC error and warning markers have independent persisted visibility controls in the PCB Appearance objects list
 test "viewer controls DRC error and warning marker visibility independently" {
     const js = @embedFile("assets/pcb_board.js");
