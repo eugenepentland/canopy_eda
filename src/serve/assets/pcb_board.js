@@ -3538,7 +3538,7 @@ function kbdToggle(){
   '<div class="kbd-row"><span>Measure dx / dy / distance (drag on the board)</span><kbd>D</kbd></div>'+
   '<div class="kbd-row"><span>Rotate selected group / component −45°</span><kbd>Shift+R</kbd></div>'+
   '<div class="kbd-row"><span>Flip selected group / component top/bottom</span><kbd>F</kbd></div>'+
-  '<div class="kbd-row"><span>Lock / unlock hovered part</span><kbd>L</kbd></div>'+
+  '<div class="kbd-row"><span>Lock / unlock selected parts (hovered part fallback)</span><kbd>L</kbd></div>'+
   '<div class="kbd-row"><span>Explode / re-cohere hovered sub-circuit</span><kbd>G</kbd></div>'+
   '<div class="kbd-row"><span>Move whole sub-circuit</span><kbd>drag any of its parts</kbd></div>'+
   '<div class="kbd-row"><span>Edit the current board outline; drag empty space to box-select vertices</span><kbd>▭ Outline</kbd></div>'+
@@ -3651,7 +3651,15 @@ document.addEventListener("keydown",function(ev){
    if(fi<0)return;ev.preventDefault();
    if(!selRef){var fgi=grpIdxs(fi);if(fgi){flipParts(fgi,fi);return;}}
    flipParts([fi],fi);return;}
- if((ev.key=="l"||ev.key=="L")&&cur>=0&&!typing){ev.preventDefault();
+ if((ev.key=="l"||ev.key=="L")&&!typing){
+   // An explicit multi-selection owns L even when the pointer has left it.
+   // A mixed selection converges to locked; once every member is locked, the
+   // next press unlocks the whole selection. This makes the command a stable
+   // lock/unlock toggle without depending on which selected part is hovered.
+   if(sel.length>1){ev.preventDefault();var sl=!sel.every(function(k){return P[k].locked;});
+    sel.forEach(function(k){P[k].locked=sl;setT(k);});
+    refreshAlignBar();progressRefresh();return;}
+   if(cur<0)return;ev.preventDefault();
    // A part inside an INTACT rigid sub-circuit locks/unlocks the WHOLE group at
    // once — one L signs off a stamped module's place wave (place-wave done ⇔
    // all members locked). Ungrouped / exploded parts keep single-part locking.

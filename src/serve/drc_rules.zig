@@ -770,6 +770,26 @@ test "viewer JS promotes the initial plain selection when modifier clicking anot
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, js, marker) != null);
 }
 
+// spec: Web Server - L locks or unlocks every footprint in an explicit multi-selection without requiring a hovered member
+test "viewer JS toggles the lock state of a multi-part selection with L" {
+    const js = @embedFile("assets/pcb_board.js");
+    const markers = [_][]const u8{
+        "Lock / unlock selected parts (hovered part fallback)",
+        "if(sel.length>1){ev.preventDefault();var sl=!sel.every(function(k){return P[k].locked;});",
+        "sel.forEach(function(k){P[k].locked=sl;setT(k);});",
+        "refreshAlignBar();progressRefresh();return;",
+        "if(cur<0)return;ev.preventDefault();",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, js, marker) != null);
+
+    // Selection dispatch precedes the hover fallback, so L still works after
+    // the pointer leaves the selected components. The every() predicate makes
+    // a mixed selection lock uniformly; only an all-locked set unlocks.
+    const selected = std.mem.indexOf(u8, js, markers[1]).?;
+    const hover = std.mem.indexOfPos(u8, js, selected, markers[4]).?;
+    try std.testing.expect(selected < hover);
+}
+
 // spec: Web Server - Two selected connected trace segments expose a right-click Fillet command that applies an exact native-arc radius through the normal copper edit gates
 test "viewer JS fillets two selected trace segments from the context menu" {
     const js = @embedFile("assets/pcb_board.js");
