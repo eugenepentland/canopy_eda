@@ -826,7 +826,6 @@ test "Euler bend has zero-curvature seams and finite curvature-rate energy" {
     try testing.expect(saw_curve);
 }
 
-// spec: placement/rf-port-frame-routing - pad tapers hold full land width through the pad edge before narrowing or widening to the controlled-impedance body
 test "pad tapers hold land width through the edge before reaching nominal" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();

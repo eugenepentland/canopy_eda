@@ -14,7 +14,9 @@
 
 const std = @import("std");
 const flat_netlist = @import("../flat_netlist.zig");
+const pad_neck_profile = @import("../pad_neck_profile.zig");
 const optimizer = @import("optimizer.zig");
+const pose_math = @import("pose_math.zig");
 const router = @import("router.zig");
 
 const eps: f64 = 1e-9;
@@ -26,8 +28,9 @@ const rf_taper_widths: f64 = 1.2;
 const Pad = struct {
     at: [2]f64,
     layer: u8,
-    along: f64,
-    across: f64,
+    half_w: f64,
+    half_h: f64,
+    axis_x: [2]f64,
 };
 
 fn dist(a: [2]f64, b: [2]f64) f64 {
@@ -45,9 +48,57 @@ fn profileWidth(distance: f64, neck: f64, nominal: f64, neck_len: f64, taper_len
     return neck + (nominal - neck) * std.math.clamp(f, 0, 1);
 }
 
-fn endpointPad(pads: []const Pad, point: [2]f64, layer: u8) bool {
-    for (pads) |pad| if (pad.layer == layer and samePoint(pad.at, point)) return true;
-    return false;
+fn unit(v: [2]f64) ?[2]f64 {
+    const len = std.math.hypot(v[0], v[1]);
+    if (len <= eps) return null;
+    return .{ v[0] / len, v[1] / len };
+}
+
+fn localComponents(pad: Pad, direction: [2]f64) [2]f64 {
+    const axis_y = [2]f64{ -pad.axis_x[1], pad.axis_x[0] };
+    return .{
+        direction[0] * pad.axis_x[0] + direction[1] * pad.axis_x[1],
+        direction[0] * axis_y[0] + direction[1] * axis_y[1],
+    };
+}
+
+fn boxRayHalfExtent(pad: Pad, direction: [2]f64) f64 {
+    const local = localComponents(pad, direction);
+    var extent = std.math.inf(f64);
+    if (@abs(local[0]) > eps) extent = @min(extent, pad.half_w / @abs(local[0]));
+    if (@abs(local[1]) > eps) extent = @min(extent, pad.half_h / @abs(local[1]));
+    return if (std.math.isFinite(extent)) extent else 0;
+}
+
+/// Width of the pad's centre cross-section perpendicular to this launch.
+/// Unlike min(w,h), this follows rotated and diagonal trace entries.
+fn launchSpan(pad: Pad, direction: [2]f64) f64 {
+    return 2 * boxRayHalfExtent(pad, .{ -direction[1], direction[0] });
+}
+
+fn needsNeck(profile: pad_neck_profile.Profile, nominal: f64, pad: Pad, direction: [2]f64) bool {
+    return profile.width > 0 and
+        profile.width < nominal - eps and
+        launchSpan(pad, direction) < nominal - eps;
+}
+
+fn endpointNeedsNeck(
+    pads: []const Pad,
+    point: [2]f64,
+    layer: u8,
+    profile: pad_neck_profile.Profile,
+    nominal: f64,
+    direction: [2]f64,
+) bool {
+    var found = false;
+    for (pads) |pad| {
+        if (pad.layer != layer or !samePoint(pad.at, point)) continue;
+        found = true;
+        // Coincident same-net lands act as their copper union. If any one can
+        // carry the trunk, narrowing the connection is unnecessary.
+        if (!needsNeck(profile, nominal, pad, direction)) return false;
+    }
+    return found;
 }
 
 fn netPads(arena: std.mem.Allocator, placement: optimizer.Placement, net: i32) std.mem.Allocator.Error![]const Pad {
@@ -60,8 +111,13 @@ fn netPads(arena: std.mem.Allocator, placement: optimizer.Placement, net: i32) s
                 try out.append(arena, .{
                     .at = optimizer.worldPadCenter(&part, pad.x, pad.y),
                     .layer = if (part.side == .bottom) 1 else 0,
-                    .along = @max(pad.w, pad.h),
-                    .across = @min(pad.w, pad.h),
+                    .half_w = pad.w / 2,
+                    .half_h = pad.h / 2,
+                    .axis_x = blk: {
+                        var local = pose_math.rotate(1, 0, pad.rot);
+                        if (part.side == .bottom) local[0] = -local[0];
+                        break :blk pose_math.rotate(local[0], local[1], part.rot);
+                    },
                 });
             }
         }
@@ -97,22 +153,24 @@ pub fn allowsTrack(
     const taper_len = if (profile.taper_length > 0) profile.taper_length else default_taper_length_mm;
     const a = [2]f64{ track.x1, track.y1 };
     const b = [2]f64{ track.x2, track.y2 };
+    const direction = unit(.{ b[0] - a[0], b[1] - a[1] }) orelse return false;
     for (try netPads(arena, placement, track.net)) |pad| {
         if (pad.layer != track.layer) continue;
         const da = dist(pad.at, a);
         const db = dist(pad.at, b);
         if (authored) {
+            if (!needsNeck(profile, nominal, pad, direction)) continue;
             const total = neck_len + taper_len;
             if (da > total + taper_step_mm + eps or db > total + taper_step_mm + eps) continue;
             const required = profileWidth(@max(da, db), neck, nominal, neck_len, taper_len);
             if (track.width + eps >= required) return true;
         } else {
-            if (pad.across <= 0 or pad.along <= 0) continue;
-            if (pad.across >= nominal - eps) continue;
-            const land = pad.along / 2;
+            const across = launchSpan(pad, direction);
+            if (!(across > 0) or across >= nominal - eps) continue;
+            const land = boxRayHalfExtent(pad, direction);
             const rf_taper = nominal * rf_taper_widths;
             if (@min(da, db) > land + rf_taper + eps) continue;
-            const required = profileWidth(@max(da, db), pad.across, nominal, land, rf_taper);
+            const required = profileWidth(@max(da, db), across, nominal, land, rf_taper);
             if (track.width + eps >= required) return true;
         }
     }
@@ -235,8 +293,12 @@ pub fn shapeGeneratedTracks(
             pads_known[ni] = true;
         }
         const pads = pads_by_net[ni];
-        const at_start = endpointPad(pads, .{ track.x1, track.y1 }, track.layer);
-        const at_end = endpointPad(pads, .{ track.x2, track.y2 }, track.layer);
+        const direction = unit(.{ track.x2 - track.x1, track.y2 - track.y1 }) orelse {
+            try out.append(arena, track);
+            continue;
+        };
+        const at_start = endpointNeedsNeck(pads, .{ track.x1, track.y1 }, track.layer, rule.pad_neck, nominal, direction);
+        const at_end = endpointNeedsNeck(pads, .{ track.x2, track.y2 }, track.layer, rule.pad_neck, nominal, direction);
         if (!at_start and !at_end) {
             try out.append(arena, track);
             continue;
@@ -295,11 +357,11 @@ test "overlapping endpoint profiles keep a short pad to pad hop narrow" {
     for (out.items) |slice| try testing.expectApproxEqAbs(@as(f64, 0.1524), slice.width, eps);
 }
 
-test "DRC allowance accepts only neck-profile copper beside its own SMD pad" {
+test "DRC allowance accepts only neck-profile copper beside its own undersized SMD pad" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const pads = [_]@import("geometry.zig").Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.25, .h = 0.6 }};
+    const pads = [_]@import("geometry.zig").Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.25 }};
     var parts = [_]optimizer.Part{.{
         .ref_des = "U1",
         .kind = .hub,
@@ -333,6 +395,68 @@ test "DRC allowance accepts only neck-profile copper beside its own SMD pad" {
     const far = router.Track{ .x1 = 1.5, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.1524, .net = 0 };
     try testing.expect(try allowsTrack(arena, placement, near, 0.2532, 0.127));
     try testing.expect(!try allowsTrack(arena, placement, far, 0.2532, 0.127));
+}
+
+// spec: placement/rf-port-frame-routing - pad tapers measure the land along the actual launch angle, hold its required width through the pad edge, and never flare a nominal trace merely because the land is wider
+test "pad launch span and edge distance follow a diagonal entry" {
+    const root = @sqrt(0.5);
+    const pad = Pad{
+        .at = .{ 0, 0 },
+        .layer = 0,
+        .half_w = 0.4,
+        .half_h = 0.1,
+        .axis_x = .{ 1, 0 },
+    };
+    try testing.expectApproxEqAbs(@as(f64, 0.2 * @sqrt(2.0)), launchSpan(pad, .{ root, root }), 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.1 * @sqrt(2.0)), boxRayHalfExtent(pad, .{ root, root }), 1e-12);
+}
+
+test "generated track keeps nominal width at a land that can carry its launch" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const G = @import("geometry.zig");
+    const fine_pads = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.80, .h = 0.20 }};
+    const roomy_pads = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.54, .h = 0.64 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &fine_pads, .fallback = false },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 1, .pads = &roomy_pads, .fallback = false, .x = 2 },
+    };
+    const pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } };
+    const nets = [_]flat_netlist.FlatNet{.{ .name = "VDD", .pins = &pins }};
+    const rules = [_]optimizer.NetRule{.{
+        .width = 0.35,
+        .pad_neck = .{ .width = 0.20, .max_length = 0.50, .taper_length = 0.25 },
+    }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .rules = .{ .net = &rules, .design = .{ .track_width = 0.127, .min_width = 0.127 } },
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -1,
+        .miny = -1,
+        .maxx = 3,
+        .maxy = 1,
+        .generated = true,
+    };
+    var tracks: std.ArrayList(router.Track) = .empty;
+    try tracks.append(arena, .{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.35, .net = 0 });
+    try testing.expect(try shapeGeneratedTracks(arena, placement, &.{true}, &tracks));
+    try testing.expectEqual(@as(f64, 0.20), tracks.items[0].width);
+    try testing.expectEqual(@as(f64, 0.35), tracks.items[tracks.items.len - 1].width);
+    try testing.expect(!try allowsTrack(arena, placement, .{
+        .x1 = 1.7,
+        .y1 = 0,
+        .x2 = 2,
+        .y2 = 0,
+        .layer = 0,
+        .width = 0.20,
+        .net = 0,
+    }, 0.35, 0.127));
 }
 
 test "DRC allowance recognizes the controlled-impedance land taper profile" {

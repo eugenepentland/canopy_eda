@@ -481,41 +481,8 @@ fn rfOwnsTrack(paths: []const rf_port_report.Outcome, track: router.Track) bool 
 }
 
 fn writeRfRun(g: *Gx, samples: []const @import("placement/rf_path_solver.zig").Sample) Error!void {
-    const n = samples.len;
-    const poly = try g.arena.alloc([2]f64, n * 2);
-    for (samples, 0..) |sample, i| {
-        const point = sample.at;
-        const da = if (i == 0)
-            unitRf(.{ samples[1].at[0] - point[0], samples[1].at[1] - point[1] })
-        else
-            unitRf(.{ point[0] - samples[i - 1].at[0], point[1] - samples[i - 1].at[1] });
-        const db = if (i + 1 == n)
-            da
-        else
-            unitRf(.{ samples[i + 1].at[0] - point[0], samples[i + 1].at[1] - point[1] });
-        var mx = -da[1] - db[1];
-        var my = da[0] + db[0];
-        var ml = std.math.hypot(mx, my);
-        if (ml <= 1e-9) {
-            mx = -db[1];
-            my = db[0];
-            ml = 1;
-        }
-        mx /= ml;
-        my /= ml;
-        const nb = [2]f64{ -db[1], db[0] };
-        const half = sample.width_mm / 2;
-        const denom = @max(0.5, @abs(mx * nb[0] + my * nb[1]));
-        const offset = @min(half / denom, half * 2);
-        poly[i] = .{ point[0] + mx * offset, point[1] + my * offset };
-        poly[n * 2 - 1 - i] = .{ point[0] - mx * offset, point[1] - my * offset };
-    }
+    const poly = try path_copper.outline(g.arena, samples);
     try regionPoly(g, poly);
-}
-
-fn unitRf(v: [2]f64) [2]f64 {
-    const d = std.math.hypot(v[0], v[1]);
-    return if (d > 1e-12) .{ v[0] / d, v[1] / d } else .{ 1, 0 };
 }
 
 fn writeLayerArcs(g: *Gx, arcs: []const router.Arc, layer: u8) Error!void {

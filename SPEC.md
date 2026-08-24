@@ -1996,7 +1996,7 @@ the owning switch pad axis.
 - G2 route matches both port frames and keeps one-width straight entries
 - a cramped switch launch fits against one trace-width of straight entry even when its pad taper is longer
 - Euler bend has zero-curvature seams and finite curvature-rate energy
-- pad tapers hold full land width through the pad edge before narrowing or widening to the controlled-impedance body
+- pad tapers measure the land along the actual launch angle, hold its required width through the pad edge, and never flare a nominal trace merely because the land is wider
 - a trace taper remains one swept polygon with compact edit handles while DRC lowers private width-profile chords
 - solver RF geometry and taper proof survive saved-layout round trips
 - a solver-proven one-width pad taper may narrow below the controlled line width, but thin copper away from the land still fails DRC

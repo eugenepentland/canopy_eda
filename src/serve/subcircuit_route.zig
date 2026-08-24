@@ -1833,7 +1833,9 @@ test "module-only retry follows standalone surface and pad-neck geometry" {
     defer arena_state.deinit();
     const alloc = arena_state.allocator();
     const Pad = std.meta.Child(@FieldType(optimizer.Part, "pads"));
-    const pads = [_]Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.5, .h = 0.5 }};
+    // A genuinely fine land: restoring nominal geometry must taper its narrow
+    // retry copper, while a roomy passive land now correctly stays full-width.
+    const pads = [_]Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.5, .h = 0.2 }};
     var parts = [_]optimizer.Part{
         .{ .ref_des = "A", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .side = .bottom },
         .{ .ref_des = "B", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 2, .side = .bottom },

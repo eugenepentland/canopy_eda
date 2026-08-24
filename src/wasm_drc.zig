@@ -782,7 +782,7 @@ test "bridge accepts geometry-exact manual neck and RF land tapers" {
         \\{"clearance":0.127,"rules":{"min_width":0.127},
         \\ "netclasses":[{"net":"VDD","width":0.3,"pad_neck_width":0.2,"pad_neck_max_length":0.75,"pad_neck_taper_length":0.35}],
         \\ "parts":[{"ref":"U1","kind":"hub","hw":1,"hh":1,"x":0,"y":0,"side":"top",
-        \\   "pads":[{"num":"1","x":0,"y":0,"w":0.25,"h":0.6,"net":"VDD"}]}],
+        \\   "pads":[{"num":"1","x":0,"y":0,"w":0.6,"h":0.25,"net":"VDD"}]}],
         \\ "tracks":[{"x1":0,"y1":0,"x2":0.5,"y2":0,"l":0,"w":0.2,"net":"VDD"}]}
     ;
     try testing.expect(std.mem.indexOf(u8, runDrcJson(arena, rf), "\"k\":\"track width\"") == null);

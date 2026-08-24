@@ -2369,15 +2369,17 @@ function rfPathGeom(){var src=PCB.rf_paths||[];
  src.forEach(function(cur){if(!cur.samples||cur.samples.length<2)return;
   var pts=cur.samples.map(function(s){return [+s[0],+s[1]];}),ws=cur.samples.map(function(s){return +s[2];});
   var left=[],right=[];
+  function add(out,p){var q=out.length&&out[out.length-1];if(!q||Math.abs(q[0]-p[0])>1e-7||Math.abs(q[1]-p[1])>1e-7)out.push(p);}
   for(var i=0;i<pts.length;i++){var ax,ay,bx,by;
    if(i===0){ax=pts[1][0]-pts[0][0];ay=pts[1][1]-pts[0][1];bx=ax;by=ay;}
    else if(i===pts.length-1){ax=pts[i][0]-pts[i-1][0];ay=pts[i][1]-pts[i-1][1];bx=ax;by=ay;}
    else{ax=pts[i][0]-pts[i-1][0];ay=pts[i][1]-pts[i-1][1];bx=pts[i+1][0]-pts[i][0];by=pts[i+1][1]-pts[i][1];}
-   var al=Math.hypot(ax,ay)||1,bl=Math.hypot(bx,by)||1,nax=-ay/al,nay=ax/al,nbx=-by/bl,nby=bx/bl,
-    mx=nax+nbx,my=nay+nby,ml=Math.hypot(mx,my),half=ws[i]/2;
-   if(ml<1e-8){mx=nax;my=nay;ml=1;}
-   mx/=ml;my/=ml;var den=Math.max(.5,Math.abs(mx*nbx+my*nby)),off=Math.min(half/den,half*2);
-   left.push([pts[i][0]+mx*off,pts[i][1]+my*off]);right.push([pts[i][0]-mx*off,pts[i][1]-my*off]);}
+   var al=Math.hypot(ax,ay)||1,bl=Math.hypot(bx,by)||1,half=Math.max(ws[i],1e-9)/2;
+   [1,-1].forEach(function(side,si){var out=si?right:left,nax=-ay/al*side,nay=ax/al*side,nbx=-by/bl*side,nby=bx/bl*side;
+    if(i===0||i===pts.length-1){add(out,[pts[i][0]+nbx*half,pts[i][1]+nby*half]);return;}
+    var mx=nax+nbx,my=nay+nby,ml=Math.hypot(mx,my);if(ml>1e-9){mx/=ml;my/=ml;var den=mx*nbx+my*nby;
+     if(den>1e-9){var off=half/den;if(off<=half*2+1e-9){add(out,[pts[i][0]+mx*off,pts[i][1]+my*off]);return;}}}
+    add(out,[pts[i][0]+nax*half,pts[i][1]+nay*half]);add(out,[pts[i][0]+nbx*half,pts[i][1]+nby*half]);});}
   var poly=left.concat(right.reverse()),path=new Path2D();path.moveTo(X(poly[0][0]),Y(poly[0][1]));
   for(var j=1;j<poly.length;j++)path.lineTo(X(poly[j][0]),Y(poly[j][1]));path.closePath();
   runs.push({l:cur.l||0,net:cur.net,poly:poly,path:path});});
@@ -6615,20 +6617,33 @@ function drawRfTaperAllowed(net){var key=net||"",pads=[];
  if((PCB.vias||[]).some(function(v){return (v.net||"")===key;}))return false;
  P.forEach(function(p){(p.pads||[]).forEach(function(pd){if(pd.net===key)pads.push({thru:!!pd.thru,l:p.side==="bottom"?1:0});});});
  return pads.length===2&&(pads[0].thru||pads[1].thru||pads[0].l===pads[1].l);}
-function drawTaperProfile(net,pad,nominal,rfAllowed){if(!pad||!pad.pd)return null;
+function drawPadLaunch(pad,dir){if(!pad||!pad.pd||!dir)return null;
+ var dl=Math.hypot(dir.x,dir.y);if(dl<1e-10)return null;dir={x:dir.x/dl,y:dir.y/dl};
+ var pd=pad.pd,a=(+pd.rot||0)*Math.PI/180,c=wpt(pad.i,pd.x,pd.y),
+  q=wpt(pad.i,pd.x+Math.cos(a),pd.y+Math.sin(a)),ux=q.x-c.x,uy=q.y-c.y,ul=Math.hypot(ux,uy)||1;
+ ux/=ul;uy/=ul;var vx=-uy,vy=ux,hw=(+pd.w||0)/2,hh=(+pd.h||0)/2;
+ function half(dx,dy){var lx=dx*ux+dy*uy,ly=dx*vx+dy*vy,e=1/0;
+  if(Math.abs(lx)>1e-10)e=Math.min(e,hw/Math.abs(lx));if(Math.abs(ly)>1e-10)e=Math.min(e,hh/Math.abs(ly));
+  return isFinite(e)?e:0;}
+ return {land:half(dir.x,dir.y),span:2*half(-dir.y,dir.x)};}
+window.PCBDrawPadLaunch=drawPadLaunch;
+function drawTaperProfile(net,pad,nominal,rfAllowed,dir){if(!pad||!pad.pd)return null;
  var c=netClassInfo(net||"");if(!c)return null;
  var classW=+c.width||+((PCB.rules||{}).track_width)||baseTrackW();
  if(!(classW>0)||Math.abs(nominal-classW)>1e-7)return null;
+ var launch=drawPadLaunch(pad,dir),span=launch?launch.span:Math.min(+pad.pd.w||0,+pad.pd.h||0);
  var neck=+c.pad_neck_width||0;
  if(neck>0){neck=Math.max(neck,+((PCB.rules||{}).min_width)||0);
-  if(neck>=nominal-1e-9)return null;
+  if(neck>=nominal-1e-9||span>=nominal-1e-9)return null;
   return {kind:"neck",width:neck,land:(+c.pad_neck_max_length||.75),taper:(+c.pad_neck_taper_length||.35),step:.025};}
  if(!rfAllowed||!(+c.max_freq_hz>0)||!(+c.impedance_ohms>0)||(+c.diff_impedance_ohms>0))return null;
- var across=Math.min(+pad.pd.w||0,+pad.pd.h||0),along=Math.max(+pad.pd.w||0,+pad.pd.h||0);
- if(!(across>0)||!(along>0)||Math.abs(across-nominal)<=1e-9)return null;
- return {kind:"rf",width:across,land:along/2,taper:nominal*1.2,step:nominal*1.2/6};}
+ if(!(span>0)||span>=nominal-1e-9)return null;
+ return {kind:"rf",width:span,land:launch?launch.land:Math.max(+pad.pd.w||0,+pad.pd.h||0)/2,
+  taper:nominal*1.2,step:nominal*1.2/6};}
 function drawTrackPoint(t,f){var g=trackArcGeom(t);if(g){var a=g.a1+g.sweep*f;return {x:g.cx+g.r*Math.cos(a),y:g.cy+g.r*Math.sin(a)};}
  return {x:t.x1+(t.x2-t.x1)*f,y:t.y1+(t.y2-t.y1)*f};}
+function drawTrackEndDirection(t,start){var a=drawTrackPoint(t,start?0:1),b=drawTrackPoint(t,start ? .001 : .999);
+ return {x:b.x-a.x,y:b.y-a.y};}
 function drawTrackPiece(t,f0,f1,w){var a=drawTrackPoint(t,f0),b=drawTrackPoint(t,f1),q={x1:a.x,y1:a.y,x2:b.x,y2:b.y,l:t.l||0,w:w,net:t.net||"",source:"human",id:trackIdNew()};
  if(t.xm!=null&&t.ym!=null){var m=drawTrackPoint(t,(f0+f1)/2);q.xm=m.x;q.ym=m.y;}return q;}
 function drawProfileWidth(s,total,start,end,nominal){
@@ -6674,7 +6689,9 @@ function drawTaperPath(tracks,start,end,nominal){if(!tracks.length||(!start&&!en
   track_ids:tracks.map(trackIdEnsure),samples:samples};}
 function drawApplyAutomaticTapers(){if(!dtrace||dtrace.pair||!dtrace.laid||!dtrace.laid.length)return {ok:true,changed:false};
  var old=dtrace.laid.slice(),nominal=dtrace.w,rfAllowed=drawRfTaperAllowed(dtrace.net);
- var sp=dtrace.startPad,ep=drawEndpointPad(dtrace.net,dtrace.l,dtrace.lx,dtrace.ly),sr=drawTaperProfile(dtrace.net,sp,nominal,rfAllowed),er=drawTaperProfile(dtrace.net,ep,nominal,rfAllowed);
+ var sp=dtrace.startPad,ep=drawEndpointPad(dtrace.net,dtrace.l,dtrace.lx,dtrace.ly),
+  sr=drawTaperProfile(dtrace.net,sp,nominal,rfAllowed,drawTrackEndDirection(old[0],true)),
+  er=drawTaperProfile(dtrace.net,ep,nominal,rfAllowed,drawTrackEndDirection(old[old.length-1],false));
  if(!sr&&!er)return {ok:true,changed:false};var shaped;
  // Authored pad_neck shapes only the pad-ended segment. RF port tapering is a
  // path-length profile and may continue over several short gesture pieces.

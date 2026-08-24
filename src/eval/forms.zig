@@ -681,7 +681,8 @@ pub const scope_form_docs = blk: {
             "[(keepout MM [(escape MM)])] [(mask-relief MM)] [(nets \"A\" \"B\"…)])",
         .summary = "Routing geometry + routing order profile and/or membership for named nets: " ++
             "trace width, copper clearance, " ++
-            "an optional short pad-local neck width/maximum length/linear taper back to the class width, " ++
+            "an optional short pad-local neck width/maximum length/linear taper back to the class width " ++
+            "(applied only where the land's span across the actual launch is narrower than the trace), " ++
             "and via size (diameter + drill) in mm, plus a routing-priority tier — the autorouter " ++
             "routes higher tiers first, so a critical net (crystal, flash bus, a switcher's hot loop) " ++
             "claims its short path before a bulk rail can wall it off (the maze router has no rip-up; " ++
