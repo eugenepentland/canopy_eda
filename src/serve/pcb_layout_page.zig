@@ -8148,7 +8148,7 @@ const tip_dxf = "Import a DXF file as the board outline (picks the same saved ov
 const tip_pour_zone = "Custom copper area (Z): edit pours and keepouts with the full shared shape-sketch palette (lines/arcs, dimensions, constraints, fillet, chamfer, offset and mirror), or draw a new polygon. " ++
     "Choose pour or keepout plus its layer; pours also select a net and priority. Double-click an edge to add a vertex; right-click geometry to delete. Saved with the layout.";
 const tip_draw = "Route tracks (X): click a pad to start a trace, click to " ++
-    "fix corners (45\u{b0}/grid snapped, / switches posture, A toggles tangent arcs, Shift = free angle), V drops a via and flips " ++
+    "fix corners (E toggles 45\u{b0}/90\u{b0}, / switches posture, A toggles tangent arcs, Shift = free angle), V drops a via and flips " ++
     "layer, click a same-net pad or double-click to finish, Backspace steps back, Esc ends. Right-click deletes the " ++
     "track/via under the cursor. Copper is saved with the layout (Save/Update).";
 const tip_text = "Silkscreen text (T): click on the board to place a label " ++
@@ -8224,7 +8224,7 @@ const statusbar_html =
     "<i id=\"st-layer-sw\"></i><span id=\"st-layer-nm\"></span></span>" ++
     "<span class=\"st-seg\" id=\"st-gpu\" " ++
     "title=\"Active renderer — WebGPU where the browser supports it, Canvas2D otherwise (?gpu=0 forces 2D)\"></span>" ++
-    "<span class=\"st-seg st-tool\" id=\"st-tool\"></span>" ++
+    "<span class=\"st-seg st-tool\" id=\"st-tool\"></span><label class=\"st-seg st-bend\" id=\"st-bend\" hidden title=\"Manual trace bend angle (E toggles while routing)\">bend <select id=\"pcb-bend-angle\" aria-label=\"Manual trace bend angle\"><option value=\"45\">45\u{b0}</option><option value=\"90\">90\u{b0}</option></select></label>" ++
     "<span class=\"st-spacer\"></span>" ++
     "<span class=\"st-seg st-hover\" id=\"st-hover\"></span>" ++
     "<button class=\"st-seg st-btn\" id=\"pcb-help\" title=\"Keyboard &amp; mouse shortcuts (?)\">?</button>" ++
@@ -8232,7 +8232,7 @@ const statusbar_html =
 
 // spec: Web Server - The PCB status bar carries a live renderer chip that reads GPU or 2D and follows device loss
 test "status bar ships the renderer chip the viewer JS drives" {
-    try std.testing.expect(std.mem.indexOf(u8, statusbar_html, "id=\"st-gpu\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, statusbar_html, "id=\"st-gpu\"") != null and std.mem.indexOf(u8, statusbar_html, "id=\"pcb-bend-angle\"") != null);
 }
 
 // spec: Web Server - Hovering visible routed copper, vias, pours, or unrouted airwires identifies their net in the PCB status bar while pad hover retains its component context

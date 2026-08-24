@@ -722,6 +722,16 @@ test "PCB editor carries tangent arc routing geometry" {
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
+// spec: Web Server - While hand-routing, the PCB editor can toggle the preview and committed path between 45-degree octilinear and 90-degree Manhattan bends
+test "PCB editor carries persistent 45 and 90 degree manual bend modes" {
+    const markers = [_][]const u8{
+        "DRAW_ANGLE_KEY=\"pcb-draw-angle\"",                                  "function drawAngleSet",
+        "drawAngle+\"° trace bends\"",
+        "if(drawAngle===\"90\")return [po===0?{x:t.x,y:ay}:{x:ax,y:t.y},t];", "drawAngleSet(drawAngle===\"45\"?\"90\":\"45\",true)",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+}
+
 test "PCB editor styles the two-trace fillet radius menu" {
     const markers = [_][]const u8{
         ".pcb-trace-menu{",

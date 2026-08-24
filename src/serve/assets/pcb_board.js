@@ -3695,7 +3695,8 @@ function kbdToggle(){
   '<div class="kbd-row"><span>Drop via + flip layer (while actively routing)</span><kbd>V</kbd></div>'+
   '<div class="kbd-row"><span>Focus / select top or bottom copper</span><kbd>B</kbd></div>'+
   '<div class="kbd-row"><span>Cycle the selected routable layer</span><kbd>PgUp / PgDn</kbd></div>'+
-  '<div class="kbd-row"><span>Switch 45&deg; corner posture (while routing)</span><kbd>/</kbd></div>'+
+  '<div class="kbd-row"><span>Toggle 45&deg; / 90&deg; trace bends (while routing)</span><kbd>E</kbd></div>'+
+  '<div class="kbd-row"><span>Switch corner posture (while routing)</span><kbd>/</kbd></div>'+
   '<div class="kbd-row"><span>Toggle sharp / rounded tangent-arc bends</span><kbd>A</kbd></div>'+
   '<div class="kbd-row"><span>Step back / finish trace</span><kbd>Backspace / Enter &middot; dbl-click</kbd></div>'+
   '<div class="kbd-row"><span>Delete track or via (in route mode)</span><kbd>right-click</kbd></div>'+
@@ -6415,7 +6416,7 @@ if(clrIn)clrIn.addEventListener("input",drawClr);
 // ── Hand routing: draw tracks + vias (X) ────────────────────────────────
 // KiCad-style manual routing on the same PCB.tracks/PCB.vias model the
 // autorouter fills: click a pad to start (net + layer come from the pad),
-// click to fix 45°/grid-snapped corners (Shift = free angle), V drops a via
+// click to fix 45° or 90° grid-snapped corners (Shift = free angle), V drops a via
 // and flips layer, click a same-net pad / double-click / Enter to finish,
 // Backspace steps back, Esc ends (then exits the mode). Right-click deletes
 // the track/via under the cursor. Copper persists through the normal layout
@@ -6437,6 +6438,21 @@ function drawWidthInit(){var s=document.getElementById("r-dw");if(!s)return;
  s.addEventListener("change",function(){try{localStorage.setItem(DRAW_W_KEY,s.value);}catch(e){}
   if(dtrace&&dtrace.n===0)dtrace.w=trackW(dtrace.net);drawArcControlSync();drawBtnSync();ovPaintSoon();});}
 drawWidthInit();
+// Manual route angle is an interaction preference, independent of the
+// sharp/rounded corner treatment below. The status-bar selector is visible
+// while Draw is armed; E toggles the same setting for editable embeds, which
+// do not carry the full-page status bar.
+var DRAW_ANGLE_KEY="pcb-draw-angle",drawAngle="45";
+function drawAngleControlSync(){var wrap=document.getElementById("st-bend"),s=document.getElementById("pcb-bend-angle");
+ if(s)s.value=drawAngle;if(wrap)wrap.hidden=!drawMode;}
+function drawAngleSet(value,announce){drawAngle=value==="90"?"90":"45";
+ try{localStorage.setItem(DRAW_ANGLE_KEY,drawAngle);}catch(e){}
+ drawAngleControlSync();drawBtnSync();ovPaintSoon();
+ if(announce)routeStatMsg(drawAngle+"° trace bends");}
+function drawAngleInit(){var s=document.getElementById("pcb-bend-angle");
+ try{if(localStorage.getItem(DRAW_ANGLE_KEY)==="90")drawAngle="90";}catch(e){}
+ if(s)s.addEventListener("change",function(){drawAngleSet(s.value,true);});drawAngleControlSync();}
+drawAngleInit();
 // Manual bend style. Rounded mode uses the same representation as the RF
 // autorouter: true tangent-circle geometry tessellated into copper chords with
 // <=0.01 mm sagitta, so save/export/DRC need no second trace format. A zero
@@ -6449,7 +6465,7 @@ function drawArcControlSync(msg){var s=document.getElementById("r-bend"),i=docum
  if(!s)return;var on=s.value==="arc";if(i)i.disabled=!on;
  if(o){var v=parseFloat(i?i.value:0),r=drawArcRadius();
   o.textContent=msg||(on?(dtrace&&dtrace.pair?"rounded bends pause while the differential pair is coupled":
-   (!dtrace&&!(v>0)?"automatic 3× active trace width":((v>0?"requested ":"automatic 3× width · ")+r.toFixed(3)+" mm"))):"45° posture corners");}}
+   (!dtrace&&!(v>0)?"automatic 3× active trace width":((v>0?"requested ":"automatic 3× width · ")+r.toFixed(3)+" mm"))):(drawAngle+"° posture corners"));}}
 function drawArcInit(){var s=document.getElementById("r-bend"),i=document.getElementById("r-br");if(!s||!i)return;
  try{var bs=localStorage.getItem(DRAW_BEND_KEY),rs=localStorage.getItem(DRAW_RADIUS_KEY);
   if(bs==="arc"||bs==="sharp")s.value=bs;if(rs!=null&&parseFloat(rs)>=0)i.value=rs;}catch(e){}
@@ -6464,7 +6480,7 @@ function toolSync(){
  var ruler=!!PCB.rulerOn;
  var any=drawMode||textMode||polyMode||pourMode||outlineMode||backingMode||heatsinkMode||ruler||padAlignMode;
  var sb=document.getElementById("tool-select");if(sb)sb.classList.toggle("on",!any);
- stSet("st-tool",drawMode?(dtrace?("route "+nLeaf(dtrace.net)+(dtrace.pair?" ⇄ "+nLeaf(dtrace.pair.net):"")+" · "+layerName(dtrace.l)+" · "+dtrace.w+" mm"+(drawArcOn()&&!dtrace.pair?(" · arc R"+drawArcRadius().toFixed(3)):"")):("route · "+layerName(activeLayer)+(drawArcOn()?" · arcs":"")))
+ stSet("st-tool",drawMode?(dtrace?("route "+nLeaf(dtrace.net)+(dtrace.pair?" ⇄ "+nLeaf(dtrace.pair.net):"")+" · "+layerName(dtrace.l)+" · "+dtrace.w+" mm · "+drawAngle+"°"+(drawArcOn()&&!dtrace.pair?(" · arc R"+drawArcRadius().toFixed(3)):"")):("route · "+layerName(activeLayer)+" · "+drawAngle+"°"+(drawArcOn()?" · arcs":"")))
   :(padAlignMode?(padAlignA?(padAlignB?"align pads · choose X or Y":"align pads · target pad"):"align pads · moving pad"):(textMode?"text":(heatsinkMode?"heatsink":(backingMode?"backing":(polyMode?"poly outline":(pourMode?"copper pour":(outlineMode?"outline":(ruler?"measure":""))))))))); }
 function drawBtnSync(){var b=document.getElementById("pcb-draw");if(!b)return;
  b.classList.toggle("on",drawMode);
@@ -6476,7 +6492,7 @@ function drawBtnSync(){var b=document.getElementById("pcb-draw");if(!b)return;
   if(!b.getAttribute("data-tip"))b.setAttribute("data-tip",b.title||"");
   b.title=drawMode?lbl:b.getAttribute("data-tip");}
  else b.textContent=lbl;
- drawArcControlSync();toolSync();}
+ drawArcControlSync();drawAngleControlSync();toolSync();}
 function drawModeSet(on){if(RO)return;drawMode=on;if(!on)dtrace=null;
  if(on&&heatsinkMode)heatsinkArm(false);
  if(on){drcGateInit();drcGateSessionEnsure();} // warm/reload only when copper is about to need it
@@ -6494,22 +6510,23 @@ function drawModeSet(on){if(RO)return;drawMode=on;if(!on)dtrace=null;
  if(on&&textMode)txArm(false);
  if(on&&PCB.rulerOff)PCB.rulerOff();
  svg.style.cursor=on?"crosshair":"";drawBtnSync();ovPaintSoon();}
-// Grid snap for the draw tool. The old H/V/diagonal *projection* is gone:
-// a click now reaches the exact snapped point via drawPath's octilinear
-// leg pair (KiCad's router posture), so nothing gets projected away.
+// Grid snap for the draw tool. A click reaches the exact snapped point through
+// drawPath's selected 45° octilinear or 90° Manhattan leg pair, so nothing is
+// projected away.
 function drawSnap(m){var dg=snapG();
  return {x:Math.round(m.x/dg)*dg,y:Math.round(m.y/dg)*dg};}
-// KiCad-style corner posture: the route from the last vertex to the target
-// is up to TWO octilinear legs — one axis-aligned, one 45° diagonal.
-// drawPosture 0 = axis leg first, diagonal into the target ("line then 45°");
-// 1 = diagonal leg first, axis into the target. '/' toggles while routing,
-// exactly like KiCad's interactive router. Returns [target] when one leg
-// already reaches it (pure H/V/45° displacement).
+// KiCad-style corner posture: the route from the last vertex to the target is
+// up to two constrained legs. In 45° mode that is one axis-aligned and one
+// diagonal leg; in 90° mode it is one of the two Manhattan elbows. '/'
+// switches the first/second-leg posture in either mode. Returns [target] when
+// one constrained leg already reaches it.
 var drawPosture=0;
 function drawPath(ax,ay,t,posture){
  var po=(posture==null)?drawPosture:posture;
  var dx=t.x-ax,dy=t.y-ay,adx=Math.abs(dx),ady=Math.abs(dy);
- if(adx<1e-9||ady<1e-9||Math.abs(adx-ady)<1e-9)return [t];
+ if(adx<1e-9||ady<1e-9)return [t];
+ if(drawAngle==="90")return [po===0?{x:t.x,y:ay}:{x:ax,y:t.y},t];
+ if(Math.abs(adx-ady)<1e-9)return [t];
  var m=Math.min(adx,ady),sx=dx<0?-1:1,sy=dy<0?-1:1,mid;
  if(po===0)mid=(adx>ady)?{x:t.x-sx*m,y:ay}:{x:ax,y:t.y-sy*m};
  else mid={x:ax+sx*m,y:ay+sy*m};
@@ -7012,7 +7029,7 @@ function drawDests(pi,pd){var out=[];
 // Starting a trace on a pad whose net belongs to a `(net-class … (diff-pair))`
 // pair auto-couples the ✎ Draw tool (P uncouples): every click lays BOTH legs,
 // the partner track offset perpendicular by (track width + pair gap) with
-// mitered 45° corners (the miter point sits on both legs' offset lines, so the
+// mitered corners (the miter point sits on both legs' offset lines, so the
 // coupled spacing holds through every bend). V drops a via pair — spread along
 // the pair normal when two barrels + clearance don't fit the coupling gap —
 // and finishing on either far pad fans each leg into its own pad. Commits are
@@ -7390,10 +7407,11 @@ document.addEventListener("keydown",function(ev){if(RO||kbTyping(ev.target))retu
  if((ev.key=="p"||ev.key=="P")&&dtrace&&dtrace.pair){ev.preventDefault();
   dtrace.pair=null;routeStatMsg("pair uncoupled — routing "+nLeaf(dtrace.net)+" alone");drawBtnSync();ovPaintSoon();return;}
  if(ev.key=="/"){ev.preventDefault();drawPosture^=1;
-  routeStatMsg("corner posture: "+(drawPosture?"45° then line":"line then 45°"));ovPaintSoon();return;}
+  routeStatMsg("corner posture: "+(drawAngle==="90"?(drawPosture?"vertical then horizontal":"horizontal then vertical"):(drawPosture?"45° then line":"line then 45°")));ovPaintSoon();return;}
+ if(ev.key=="e"||ev.key=="E"){ev.preventDefault();drawAngleSet(drawAngle==="45"?"90":"45",true);return;}
  if(ev.key=="a"||ev.key=="A"){ev.preventDefault();var bs=document.getElementById("r-bend");
   if(bs){bs.value=bs.value==="arc"?"sharp":"arc";bs.dispatchEvent(new Event("change"));
-   routeStatMsg(bs.value==="arc"?"rounded tangent-arc bends":"sharp 45° bends");}return;}
+   routeStatMsg(bs.value==="arc"?"rounded tangent-arc bends":("sharp "+drawAngle+"° bends"));}return;}
  if(ev.key=="Backspace"){ev.preventDefault();drawBack();return;}
  if(ev.key=="Enter"&&dtrace){ev.preventDefault();drawEnd();return;}});
 // ── Who a violation is between ──────────────────────────────────────────
