@@ -1730,9 +1730,14 @@ function paintPadLabels(ctx,k,mov,only){
   if(mov&&(!!mov[i])!==only)continue;
   if(!(p.pads||[]).length)continue;
   if(cull&&partCulled(i))continue; // one box test per PART, not per pad
+  // Labels belong to the same face copper as their SMD pads. A Front/Back
+  // preset must not leave the hidden face's numbers floating over an empty
+  // board; drilled pads remain because their copper is visible on both faces.
+  var padLayer=p.side==="bottom"?1:0;
   var focusAlpha=reviewFocusPartAlpha(i);if(focusAlpha<=0)continue;
   ctx.globalAlpha=focusAlpha;
   for(var j=0;j<p.pads.length;j++){var pd=p.pads[j];if(!pd.num)continue;
+   if(!(pd.drill>0)&&layerAlpha(padLayer)<=0)continue;
    var labelPx=Math.min(PAD_LABEL_MAX_PX,Math.min(pd.w,pd.h)*S*0.55*k);
    if(labelPx<PAD_LABEL_MIN_PX)continue;
    // Convert the clamped CSS-pixel size back to world units for the canvas
@@ -7326,7 +7331,11 @@ function drcMarkColor(d){return (d&&(d.sev==="warn"||d.sev==="warning"))?"#e3b34
 // Connectivity remains actionable in the DRC sidebar, but its island-gap
 // coordinates are not useful board annotations and can overwhelm the copper.
 function drcOnBoard(d){return !!d&&d.k!=="net open";}
-function drcMarkerVisible(d){return drcOnBoard(d)&&!!viewSt.vis[drcSevClass(d)==="warn"?"drc_warn":"drc_err"];}
+// A layer-scoped finding is an annotation of that copper, so the same eye or
+// Front/Back preset hides both. Layerless findings describe physical features
+// spanning the board (holes/vias/edge) or the whole assembly and stay visible.
+function drcMarkerVisible(d){return drcOnBoard(d)&&!!viewSt.vis[drcSevClass(d)==="warn"?"drc_warn":"drc_err"]&&
+ (d.l==null||layerAlpha(d.l)>0);}
 function drawDrc(){while(gD.firstChild)gD.removeChild(gD.firstChild);
  renderDrcList(); // keep the violations panel in sync regardless of marker visibility
  if(PHYSICAL_REVIEW)return;

@@ -622,6 +622,20 @@ test "PCB pad-number labels have a screen-space size ceiling" {
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "if(fs*k<5.5)") == null);
 }
 
+// spec: Web Server - Front-only and Back-only PCB presets hide opposite-face SMD pad numbers and layer-scoped DRC markers while retaining through-hole labels and layerless findings
+test "PCB side presets hide annotations owned by hidden copper" {
+    const labels_start = std.mem.indexOf(u8, pcb_board_js, "function paintPadLabels").?;
+    const labels_end = std.mem.indexOfPos(u8, pcb_board_js, labels_start, "function padPath").?;
+    const labels = pcb_board_js[labels_start..labels_end];
+    try std.testing.expect(std.mem.indexOf(u8, labels, "var padLayer=p.side===\"bottom\"?1:0;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, labels, "if(!(pd.drill>0)&&layerAlpha(padLayer)<=0)continue;") != null);
+
+    const marker_start = std.mem.indexOf(u8, pcb_board_js, "function drcMarkerVisible").?;
+    const marker_end = std.mem.indexOfPos(u8, pcb_board_js, marker_start, "function drawDrc").?;
+    const marker = pcb_board_js[marker_start..marker_end];
+    try std.testing.expect(std.mem.indexOf(u8, marker, "d.l==null||layerAlpha(d.l)>0") != null);
+}
+
 // spec: kicad_pcb/import-layout - the PCB editor previews KiCad warnings before replacing its starred layout
 test "PCB editor carries the guarded inbound KiCad sync workflow" {
     const markers = [_][]const u8{
