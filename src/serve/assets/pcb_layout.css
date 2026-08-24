@@ -105,6 +105,17 @@ a{color:#6ba1e8;text-decoration:none}a:hover{text-decoration:underline}
 .pcb-trace-form label span{display:flex;align-items:center;gap:5px;color:#9b9ca3}.pcb-trace-form input{width:94px;padding:5px 6px;border:1px solid #555762;border-radius:4px;background:#191a1d;color:#f2f3f4;font:inherit;font-variant-numeric:tabular-nums}
 .pcb-trace-form input:focus{outline:1px solid #6da9ef;border-color:#6da9ef}.pcb-trace-limit{padding:0 7px;color:#85868d}.pcb-trace-error{min-height:15px;padding:0 7px;color:#ff7b72;font-size:10.5px}
 .pcb-trace-buttons{display:flex;justify-content:flex-end;gap:6px;padding:0 7px 5px}.pcb-trace-buttons .btn{min-width:68px}.pcb-trace-buttons .primary{background:#356eae;border-color:#4a86c7;color:#fff;font-weight:600}
+/* Post-selection type pruning. The bar is anchored beside the completed
+   marquee (or near the top of the stage for keyboard Select All) and stays
+   above the canvas without stealing any board geometry. */
+.pcb-selection-chips{position:absolute;z-index:82;display:flex;align-items:center;gap:4px;max-width:calc(100% - 12px);
+  padding:4px;background:rgba(31,32,36,.96);border:1px solid #4a4b52;border-radius:7px;
+  box-shadow:0 7px 20px rgba(0,0,0,.48);font:11px/1.2 system-ui,sans-serif;white-space:nowrap}
+.pcb-selection-chip{border:1px solid #465b78;border-radius:999px;padding:4px 8px;background:#29384c;color:#dcecff;
+  cursor:pointer;font:inherit;font-variant-numeric:tabular-nums}
+.pcb-selection-chip:hover,.pcb-selection-chip:focus{outline:none;border-color:#6da9ef;background:#355071;color:#fff}
+.pcb-selection-chip.copper{border-color:#725d8e;background:#3b304c;color:#eadcff}
+.pcb-selection-hint{padding:0 4px;color:#85868d;font-size:9.5px}
 /* ── KiCad status bar ── */
 .pcb-status{height:26px;flex:none;display:flex;align-items:stretch;background:#232428;
   border-top:1px solid #2c2d31;font-size:11.5px;color:#9b9ca3;position:relative;z-index:2;overflow:hidden}

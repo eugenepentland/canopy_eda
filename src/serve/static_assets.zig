@@ -1239,6 +1239,50 @@ test "PCB editor click and hold disambiguates overlapping selectable objects" {
     try std.testing.expect(std.mem.indexOf(u8, pcb_layout_css, ".pcb-pick-menu{") != null);
 }
 
+// spec: Web Server - A resolved board click retains the exact-object stack so Tab or Alt-click can cycle priority losers with the hold picker's preview and unified selection apply path
+test "PCB editor cycles overlapping selectable objects after a click" {
+    const markers = [_][]const u8{
+        "function pickCycleSort(items){var rank={sub:0,fp:1,pad:2,track:3,via:4,zone:5,keepout:5,drc:6};",
+        "function pickCycleRemember(m,at,data){pickPreviewSet(null);pickCycleSet(pickCandidates(m),at,data);}",
+        "pickCycle.i=(pickCycle.i+step+n)%n;var c=pickCycle.items[pickCycle.i];pickSelect(c,pickCycle.at);pickPreviewSet(c);",
+        "if(!RO&&!anyDrawTool()&&ev.button===0&&ev.altKey&&!ev.ctrlKey&&!ev.metaKey){pickHoldCancel();pickCycleAt(ev,m);return;}",
+        "if(ev.key!==\"Tab\"||ev.ctrlKey||ev.metaKey||kbTyping(ev.target)||pickMenu||RO||anyDrawTool())return;",
+        "pickCycleSet(items,at,c.data);pickSelect(c,at);",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+}
+
+// spec: Web Server - Marquee and Select All expose transient count chips that can drop one selection kind or Alt-keep only footprints, tracks, vias, or combined copper without changing the global Objects filter
+test "PCB editor prunes bulk selections with post-hoc type chips" {
+    const markers = [_][]const u8{
+        "function marqChipApply(kind,only){var seed=selectionSeed();",
+        "if(kind!==\"track\"&&kind!==\"copper\")seed.t=[];",
+        "if(kind!==\"via\"&&kind!==\"copper\")seed.v=[];",
+        "selectionCommit(seed);if(seed.p.length||seed.t.length||seed.v.length)marqChipsShow(marqChipsAt);",
+        "b.setAttribute(\"data-selection-type\",s.k);",
+        "selectionCommit({p:all,t:at,v:av});marqReport(all.length,at.length,av.length,null)",
+        "selectionCommit({p:pick,t:ct,v:cv});marqReport(pick.length,ct.length,cv.length,ev)",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_layout_css, ".pcb-selection-chips{") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_layout_css, ".pcb-selection-chip.copper{") != null);
+}
+
+// spec: Web Server - Double-clicking routed copper or pressing J under the pointer selects its endpoint/via-connected run, and repeating expands through the shared mixed-selection commit to every track and via on the net
+test "PCB editor expands copper selection by connectivity then full net" {
+    const markers = [_][]const u8{
+        "function netCopper(seed){var net=netCollapse(seed.o.net||\"\");",
+        "function connectedCopper(seed){var all=netCopper(seed);",
+        "var roots=linksBuildNet({ts:all.t,vs:all.v,ps:[]})",
+        "roots[connKey(t.x1,t.y1,t.l||0)]===root",
+        "selectionCommit({p:[],t:cu.t,v:cu.v});marqChipsShow(at);",
+        "double-click again for the full net",
+        "(ev.key===\"j\"||ev.key===\"J\")",
+        "if(!RO&&!anyDrawTool()){var cm=mm(ev),ch=semanticCopperAt(cm);",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+}
+
 // spec: Web Server - The /pcb-layout Appearance dock and the embed layers popover render their rows from one shared builder, so a layer is named, ordered and wired identically in both
 test "PCB Appearance rows come from one builder for both containers" {
     const Check = struct { marker: []const u8, present: bool = true };

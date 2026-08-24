@@ -1114,7 +1114,11 @@ test "viewer JS gives selected copper drag priority over overlapping footprints"
         js,
         "gdrag=gdragStart(m,null);gdrag.cuDown=selectedHit;",
     ) != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "else if(gcu)inspShow(gcu,ev);") != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        js,
+        "else if(gcu){inspShow(gcu,ev);pickCycleRemember(mm(ev),ev,gcu);}",
+    ) != null);
     // Crucially, dispatch happens before footprint/courtyard hit-testing.
     const selected_drag = std.mem.indexOf(u8, js, "var selectedHit=selectedCopperHit(m);").?;
     const part_hit = std.mem.indexOfPos(u8, js, selected_drag, "partAt(m.x,m.y)").?;
