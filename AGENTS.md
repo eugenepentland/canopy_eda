@@ -67,6 +67,14 @@ the pre-existing main-checkout state to the user.
 Before handing work back, report the worktree path, feature branch, verification
 performed, and whether the branch remains unmerged.
 
+## Repository workflow feedback
+
+After an EDA-tool task, append a concise entry to `FEEDBACK.md` when you
+encounter a genuine blocker or identify a concrete way to reduce future turns,
+tool calls, rebuilds, or retries. Follow that file's append-only format and do
+not add routine success notes. This repository log is separate from the
+mandatory Guardian feedback log described by the global instructions.
+
 ## Build and test modes
 
 **Scope: the EDA tool source only.** These modes drive the toolchain build
