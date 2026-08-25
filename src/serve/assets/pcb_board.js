@@ -3249,10 +3249,13 @@ window.addEventListener("keydown",function(ev){if(RO||kbTyping(ev.target)||!(ev.
  ev.preventDefault();ev.stopImmediatePropagation();if(k==="c")copperCopy();else copperPasteShortcut();},true);
 // Pad-to-pad RF alignment.
 // Dedicated mode avoids the normal hierarchical group/copper click priority:
-// the click names an exact pad. Source ownership is stronger than the current
-// rigid/exploded display choice — a pad under a sub-circuit always moves that
-// whole sub-circuit, which is the invariant this tool promises.
-function padAlignOwner(hit){var g=grpOf(P[hit.i].ref),idxs=visiblePartIdxs((g&&GRPS[g])?GRPS[g]:[hit.i]);
+// the click names an exact pad. On an assembled board, a pad under a
+// sub-circuit moves that whole sub-circuit regardless of its rigid/exploded
+// display choice. Inside a `?sub=` editor that group is the editing scope
+// itself, so moving it would claim every possible target; there the exact
+// component under the first pad is the owner instead.
+function padAlignOwner(hit){var scoped=!!(PCB.sub&&PCB.sub.length),g=scoped?null:grpOf(P[hit.i].ref),
+ idxs=visiblePartIdxs((g&&GRPS[g])?GRPS[g]:[hit.i]);
  return {g:g,idxs:idxs,label:g?("sub-circuit "+g+" ("+idxs.length+" parts)"):refLabel(P[hit.i].ref)};}
 function padAlignLabel(hit){if(!hit)return "not selected";var pd=hit.pd,p=P[hit.i];
  return refLabel(p.ref)+" · pad "+(pd.num||"?")+(pd.net?(" · "+nLeaf(pd.net)):"");}

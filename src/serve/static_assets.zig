@@ -440,6 +440,24 @@ test "PCB editor carries the exact pad alignment workflow" {
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
+// spec: Web Server - A scoped sub-circuit PCB editor aligns one member component to another member's exact pad while the assembled-board editor still moves the source sub-circuit as one owner
+test "PCB pad alignment uses component ownership inside a sub-circuit editor" {
+    const start = std.mem.indexOf(u8, pcb_board_js, "function padAlignOwner(hit)") orelse
+        return error.PadAlignOwnerMissing;
+    const tail = pcb_board_js[start..];
+    const end = std.mem.indexOf(u8, tail, "function padAlignLabel") orelse
+        return error.PadAlignOwnerEndMissing;
+    const owner = tail[0..end];
+    try std.testing.expect(std.mem.indexOf(u8, owner, "scoped=!!(PCB.sub&&PCB.sub.length)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, owner, "g=scoped?null:grpOf(P[hit.i].ref)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, owner, "[hit.i]") != null);
+
+    // The second click only rejects a pad on the resolved moving owner. In a
+    // scoped editor that owner contains one component, so another component
+    // with the same flattened sub-circuit prefix remains a valid target.
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "moving.idxs.indexOf(hit.i)>=0") != null);
+}
+
 // spec: Web Server - F rigidly mirrors a selected sub-circuit or marquee group to the opposite board side around one stable anchor, preserving relative positions and orientations in one undo
 test "PCB editor rigidly mirrors the complete selected part target" {
     const markers = [_][]const u8{
