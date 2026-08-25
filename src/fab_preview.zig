@@ -14,6 +14,7 @@ const font = @import("font5x7.zig");
 const gerber = @import("gerber_verify.zig");
 const json = @import("json_writer.zig");
 const optimizer = @import("placement/optimizer.zig");
+const outline = @import("placement/outline.zig");
 const pour = @import("placement/pour.zig");
 const router = @import("placement/router.zig");
 const subcircuit_silkscreen = @import("subcircuit_silkscreen.zig");
@@ -109,7 +110,7 @@ fn writeProfile(w: *std.Io.Writer, arena: std.mem.Allocator, ops: []const gerber
             .p1 = world(frame, arc.p1[0], arc.p1[1]),
             .p2 = world(frame, arc.p2[0], arc.p2[1]),
             .center = world(frame, arc.center[0], arc.center[1]),
-            .cw = worldArcCw(arc.cw),
+            .cw = arc.cw,
         }),
         else => {},
     };
@@ -172,15 +173,11 @@ fn appendProfilePiece(points: *std.ArrayList([2]f64), arena: std.mem.Allocator, 
     }
 }
 
+/// Gerber y-up point → board/canvas y-down point. A parsed arc's `cw` label
+/// stays unchanged: the y-down samplers interpret that label in their own
+/// frame, while negating it would select the complementary major sweep.
 fn world(frame: export_fab.Frame, x: f64, y: f64) [2]f64 {
     return .{ x + frame.ox, frame.oy - y };
-}
-
-/// Gerber is y-up while board/canvas coordinates are y-down. Reflecting an
-/// arc across the X axis reverses its winding, just as it reverses polygon
-/// winding; endpoints and centre alone are not enough to carry that fact.
-fn worldArcCw(gerber_cw: bool) bool {
-    return !gerber_cw;
 }
 
 fn writeGerberLayer(w: *std.Io.Writer, layer: export_gerber.LayerFile, parsed: gerber.Parsed, frame: export_fab.Frame) !void {
@@ -258,8 +255,8 @@ fn writeOp(w: *std.Io.Writer, op: gerber.Op, frame: export_fab.Frame) !void {
             const b = world(frame, arc.p2[0], arc.p2[1]);
             const c = world(frame, arc.center[0], arc.center[1]);
             try w.print("[\"a\",{d},{d},{d},{d},{d},{d},{d},{s},{s}]", .{
-                a[0],                                        a[1],                              b[0], b[1], c[0], c[1], arc.w,
-                if (worldArcCw(arc.cw)) "true" else "false", if (arc.dark) "true" else "false",
+                a[0],                            a[1],                              b[0], b[1], c[0], c[1], arc.w,
+                if (arc.cw) "true" else "false", if (arc.dark) "true" else "false",
             });
         },
         .region => |region| {
@@ -398,50 +395,64 @@ test "CAM preview serializes quantized Gerber silk and Excellon drills" {
     _ = try std.json.parseFromSliceLeaky(std.json.Value, arena, out.written(), .{});
 }
 
-// Assembly transforms native Gerber arcs back to the editor's y-down frame
-// without selecting the complementary major sweep.
-test "CAM preview reverses arc winding when it restores board coordinates" {
+// spec: export_gerber - the Assembly CAM profile preserves the authored minor fillets after Gerber write/read-back and coordinate restoration
+test "CAM preview preserves generated Gerber fillet winding" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const frame = export_fab.Frame{ .ox = 0, .oy = 10 };
-    const gerber_arc = gerber.Arc{
-        .p1 = .{ 0, 1 },
-        .p2 = .{ 1, 0 },
-        .center = .{ 1, 1 },
-        .w = 0.1,
-        .cw = true,
-        .dark = true,
+    var placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 20,
+        .maxy = 10,
+        .generated = false,
+        .board_rect = .{ .minx = 0, .miny = 0, .w = 20, .h = 10 },
     };
+    const square = [_][2]f64{ .{ 0, 0 }, .{ 20, 0 }, .{ 20, 10 }, .{ 0, 10 } };
+    const radii = [_]f64{ 2, 2, 2, 2 };
+    const fillet = try outline.filletPath(arena, &square, &radii, 0.01);
+    placement.board_poly = fillet.poly;
+    placement.board_arcs = fillet.arcs;
+    const frame = export_fab.frameFor(placement);
+
+    var gerber_bytes: std.Io.Writer.Allocating = .init(arena);
+    try export_gerber.writeLayer(&gerber_bytes.writer, arena, placement, .{}, &.{}, frame, .edge, .{ .function = "Profile,NP" });
+    const parsed = try gerber.parse(arena, gerber_bytes.written());
 
     var profile_json: std.Io.Writer.Allocating = .init(arena);
-    try writeProfile(&profile_json.writer, arena, &.{.{ .arc = gerber_arc }}, frame);
+    try writeProfile(&profile_json.writer, arena, parsed.ops, frame);
     const profile = try std.json.parseFromSliceLeaky(std.json.Value, arena, profile_json.written(), .{});
-    try std.testing.expect(profile.array.items.len > 3);
+    try std.testing.expect(profile.array.items.len > fillet.poly.len);
     for (profile.array.items) |item| {
         const point = item.array.items;
-        try std.testing.expect(point[0] == .float or point[0] == .integer);
-        try std.testing.expect(point[1] == .float or point[1] == .integer);
-        const x: f64 = switch (point[0]) {
-            .float => |value| value,
-            .integer => |value| @floatFromInt(value),
-            else => 0,
-        };
-        const y: f64 = switch (point[1]) {
-            .float => |value| value,
-            .integer => |value| @floatFromInt(value),
-            else => 0,
-        };
-        // This is the intended minor quarter-circle. Keeping G02 after the
-        // y-flip instead walks the other 270 degrees and reaches x=2/y=8.
-        try std.testing.expect(x >= -1e-9 and x <= 1 + 1e-9);
-        try std.testing.expect(y >= 9 - 1e-9 and y <= 10 + 1e-9);
+        const x = jsonNumber(point[0]);
+        const y = jsonNumber(point[1]);
+        // Every restored point must remain on the authored filleted boundary.
+        // Choosing the complementary 270-degree sweep sends a corner deep
+        // inside the board, millimetres away from this fine fallback contour.
+        try std.testing.expect(outline.distToEdge(fillet.poly, x, y) <= 0.02);
     }
 
+    const gerber_arc = parsed.arcs[0];
     var op_json: std.Io.Writer.Allocating = .init(arena);
     try writeOp(&op_json.writer, .{ .arc = gerber_arc }, frame);
     const op = try std.json.parseFromSliceLeaky(std.json.Value, arena, op_json.written(), .{});
-    try std.testing.expect(!op.array.items[8].bool);
+    try std.testing.expectEqual(gerber_arc.cw, op.array.items[8].bool);
+}
+
+fn jsonNumber(value: std.json.Value) f64 {
+    return switch (value) {
+        .float => |number| number,
+        .integer => |number| @floatFromInt(number),
+        else => std.math.nan(f64),
+    };
 }
 
 test "CAM preview replaces an adopted fabrication identity instead of drawing its stale text" {

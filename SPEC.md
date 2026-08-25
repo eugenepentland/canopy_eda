@@ -4364,6 +4364,7 @@ Public functions: planLayers, writeLayer
 - an adopted fabrication identity is replaced, not duplicated, when composing the final silkscreen texts
 - a physical fabrication-geometry change produces a different printed identity
 - Gerber read-back preserves ordered polarity operations, filled contours, and native arcs for the Assembly CAM preview
+- the Assembly CAM profile preserves the authored minor fillets after Gerber write/read-back and coordinate restoration
 - the Assembly CAM payload is generated from every planned Gerber plus both Excellon drill files and carries their fabrication ID and full digest
 - a roundrect pad emits its rounded outline as a G36 region while a plain rect stays an R aperture
 - a custom polygon pad's mask opening dilates its original fill with a round boundary stroke by the mask margin, preserving concave notches without self-intersecting offset rings
