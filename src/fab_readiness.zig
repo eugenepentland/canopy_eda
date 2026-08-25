@@ -1248,7 +1248,13 @@ fn graphHairlineGaps(g: NetGraph) usize {
 fn planeQueries(arena: std.mem.Allocator, items: []const PadNode) std.mem.Allocator.Error![]const pour.PadQuery {
     const out = try arena.alloc(pour.PadQuery, items.len);
     for (items, 0..) |p, i| {
-        out[i] = .{ .cx = p.cx, .cy = p.cy, .x0 = p.x0, .y0 = p.y0, .x1 = p.x1, .y1 = p.y1, .thru = p.thru, .side = p.side };
+        out[i] = .{
+            .cx = p.cx,
+            .cy = p.cy,
+            .shape = .{ .x0 = p.x0, .y0 = p.y0, .x1 = p.x1, .y1 = p.y1, .poly = p.poly },
+            .thru = p.thru,
+            .side = p.side,
+        };
     }
     return out;
 }
@@ -1771,6 +1777,61 @@ test "a plane via bridges a surface pad to the ground plane" {
         .{ .x = 0, .y = 0, .dia = 0.4, .drill = 0.2, .net = 0 },
         .{ .x = 10, .y = 0, .dia = 0.4, .drill = 0.2, .net = 0 },
     };
+    const wired = try check(arena, placement, .{ .vias = &vias }, .{});
+    try testing.expect(!hasError(wired, "unrouted-net"));
+    try testing.expectEqual(@as(usize, 1), wired.stats.connected_nets);
+}
+
+test "a plane via on a concave custom pad uses the authored copper outline" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // Barracuda's TPSM84338 GND pad in miniature: an L-shaped land whose
+    // bounding-box centre is empty. The via sits on the horizontal arm, not at
+    // that empty centre, and must join the SMD land to the implicit GND plane.
+    const l_poly = [_][2]f64{
+        .{ -0.375, -1.600 }, .{ -0.375, -0.811 }, .{ -0.550, -0.615 }, .{ -0.586, -0.601 },
+        .{ -1.800, -0.601 }, .{ -1.850, -0.550 }, .{ -1.850, -0.376 }, .{ -1.800, -0.326 },
+        .{ -0.175, -0.326 }, .{ -0.125, -0.376 }, .{ -0.125, -1.600 }, .{ -0.175, -1.650 },
+        .{ -0.325, -1.650 }, .{ -0.375, -1.600 },
+    };
+    const custom = [_]geometry.Pad{.{
+        .number = "1",
+        .x = -0.988,
+        .y = -0.988,
+        .w = 1.725,
+        .h = 1.324,
+        .shape = "custom",
+        .poly = &l_poly,
+    }};
+    const ordinary = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &custom, .fallback = false, .x = 203.2, .y = 95, .rot = 270 },
+        .{ .ref_des = "TP1", .kind = .passive, .hw = 1, .hh = 1, .pads = &ordinary, .fallback = false, .x = 190, .y = 95 },
+    };
+    const pins = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "TP1", .pin = "1" } };
+    const nets = [_]export_kicad.FlatNet{.{ .name = "GND", .pins = &pins }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 185,
+        .miny = 90,
+        .maxx = 208,
+        .maxy = 100,
+        .generated = false,
+        .board_rect = .{ .minx = 185, .miny = 90, .w = 23, .h = 10 },
+    };
+    const vias = [_]router.Via{
+        .{ .x = 202.7, .y = 95.52447405648955, .dia = 0.4, .drill = 0.2, .net = 0 },
+        .{ .x = 190, .y = 95, .dia = 0.4, .drill = 0.2, .net = 0 },
+    };
+
     const wired = try check(arena, placement, .{ .vias = &vias }, .{});
     try testing.expect(!hasError(wired, "unrouted-net"));
     try testing.expectEqual(@as(usize, 1), wired.stats.connected_nets);

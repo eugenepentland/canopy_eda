@@ -411,15 +411,14 @@ test "segment components sees fill between two outside endpoints" {
     try std.testing.expectEqualSlices(i32, &.{0}, found);
 }
 
-/// A pad reduced to what membership needs: its world box + centre, whether it
-/// is a through-hole (present on every copper layer) and which side it sits on.
+/// A pad reduced to what membership needs: its world box + copper anchor and,
+/// for custom pads, the authored world-space copper outline. `poly` is empty
+/// when the box is exact. Through-hole pads are present on every copper layer;
+/// SMD pads only on their own side.
 pub const PadQuery = struct {
     cx: f64,
     cy: f64,
-    x0: f64,
-    y0: f64,
-    x1: f64,
-    y1: f64,
+    shape: pad_shape.Shape,
     thru: bool,
     side: optimizer.Side,
 };
@@ -2054,15 +2053,48 @@ fn joinPlaneFills(arena: std.mem.Allocator, q: PlaneQuery, layers: []const Layer
     return .{ .pad_comp = pad_comp, .via_comp = via_comp, .n_comp = n, .coarsened = coarsened };
 }
 
+fn joinPadComponent(component: i32, layer_offset: usize, uf: []usize, first: *i32) void {
+    if (component < 0) return;
+    const gid: i32 = @intCast(layer_offset + @as(usize, @intCast(component)));
+    if (first.* < 0) first.* = gid else ufUnite(uf, @intCast(first.*), @intCast(gid));
+}
+
+fn assignCustomPad(fill: Fill, q: PadQuery, layer_offset: usize, uf: []usize, first: *i32) void {
+    joinPadComponent(fill.componentAt(q.cx, q.cy), layer_offset, uf, first);
+    const f = fill.frame;
+    if (!(f.pitch > 0) or f.nx == 0 or f.ny == 0) return;
+    const fi0 = @max(@floor((q.shape.x0 - f.minx) / f.pitch), 0);
+    const fj0 = @max(@floor((q.shape.y0 - f.miny) / f.pitch), 0);
+    const fi1 = @min(@floor((q.shape.x1 - f.minx) / f.pitch), @as(f64, @floatFromInt(f.nx - 1)));
+    const fj1 = @min(@floor((q.shape.y1 - f.miny) / f.pitch), @as(f64, @floatFromInt(f.ny - 1)));
+    const col0 = numeric.checkedInt(usize, fi0) orelse return;
+    const row0 = numeric.checkedInt(usize, fj0) orelse return;
+    const col1 = numeric.checkedInt(usize, fi1) orelse return;
+    const row1 = numeric.checkedInt(usize, fj1) orelse return;
+    if (col0 > col1 or row0 > row1) return;
+    for (row0..row1 + 1) |j| {
+        for (col0..col1 + 1) |i| {
+            const point = [2]f64{
+                f.minx + (@as(f64, @floatFromInt(i)) + 0.5) * f.pitch,
+                f.miny + (@as(f64, @floatFromInt(j)) + 0.5) * f.pitch,
+            };
+            if (pad_shape.pointDist(q.shape.x0, q.shape.y0, q.shape.x1, q.shape.y1, q.shape.poly, point[0], point[1], std.math.inf(f64)) != 0) continue;
+            joinPadComponent(fill.labels[j * f.nx + i], layer_offset, uf, first);
+        }
+    }
+}
+
 fn assignPads(pads: []const PadQuery, layers: []const LayerSpec, fills: []const Fill, offset: []const usize, uf: []usize, out: []i32) void {
     for (pads, 0..) |q, pi| {
         var first: i32 = -1;
         for (layers, 0..) |spec, l| {
             if (!padPresent(q, spec)) continue;
-            const c = fills[l].padComponent(q.cx, q.cy, q.x0, q.y0, q.x1, q.y1);
-            if (c < 0) continue;
-            const gid: i32 = @intCast(offset[l] + @as(usize, @intCast(c)));
-            if (first < 0) first = gid else ufUnite(uf, @intCast(first), @intCast(gid));
+            if (q.shape.poly.len >= 3) {
+                assignCustomPad(fills[l], q, offset[l], uf, &first);
+                continue;
+            }
+            const c = fills[l].padComponent(q.cx, q.cy, q.shape.x0, q.shape.y0, q.shape.x1, q.shape.y1);
+            joinPadComponent(c, offset[l], uf, &first);
         }
         out[pi] = first;
     }
@@ -2613,8 +2645,8 @@ test "priority: planeConnect drops a pad sitting under a user pour" {
     const placement = testPlacement(&parts, &nets, .{ .plane_nets = &gnd_names, .copper_layers = 2, .planes = .{ .declared = &planes } });
 
     const qpads = [_]PadQuery{
-        .{ .cx = 3, .cy = 10, .x0 = 2.7, .y0 = 9.7, .x1 = 3.3, .y1 = 10.3, .thru = false, .side = .bottom },
-        .{ .cx = 10, .cy = 10, .x0 = 9.7, .y0 = 9.7, .x1 = 10.3, .y1 = 10.3, .thru = false, .side = .bottom },
+        .{ .cx = 3, .cy = 10, .shape = .{ .x0 = 2.7, .y0 = 9.7, .x1 = 3.3, .y1 = 10.3 }, .thru = false, .side = .bottom },
+        .{ .cx = 10, .cy = 10, .shape = .{ .x0 = 9.7, .y0 = 9.7, .x1 = 10.3, .y1 = 10.3 }, .thru = false, .side = .bottom },
     };
 
     // No user pours: the solid plane connects both pads.
@@ -3156,8 +3188,8 @@ test "planeConnect splits pads across a severed plane" {
     const placement = testPlacement(&parts, &nets, .{ .plane_nets = &gnd_names, .copper_layers = 2, .planes = .{ .declared = &planes } });
 
     const qpads = [_]PadQuery{
-        .{ .cx = 3, .cy = 10, .x0 = 2.7, .y0 = 9.7, .x1 = 3.3, .y1 = 10.3, .thru = false, .side = .bottom },
-        .{ .cx = 17, .cy = 10, .x0 = 16.7, .y0 = 9.7, .x1 = 17.3, .y1 = 10.3, .thru = false, .side = .bottom },
+        .{ .cx = 3, .cy = 10, .shape = .{ .x0 = 2.7, .y0 = 9.7, .x1 = 3.3, .y1 = 10.3 }, .thru = false, .side = .bottom },
+        .{ .cx = 17, .cy = 10, .shape = .{ .x0 = 16.7, .y0 = 9.7, .x1 = 17.3, .y1 = 10.3 }, .thru = false, .side = .bottom },
     };
 
     // No wall: one plane, both pads share a component.
@@ -3186,6 +3218,43 @@ test "planeConnect splits pads across a severed plane" {
     try testing.expectEqual(cut.coarsened, prepared.coarsened);
     try testing.expectEqualSlices(i32, cut.pad_comp, prepared.pad_comp);
     try testing.expectEqualSlices(i32, cut.via_comp, prepared.via_comp);
+}
+
+test "a concave custom pad joins every fill component touched by its copper" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // The Π-shaped custom land reaches the left and right fill islands around
+    // an empty bounding-box centre. Either centre-only or box-corner sampling
+    // sees at most one island; the authored copper joins both electrically.
+    const custom_poly = [_][2]f64{
+        .{ 0, 0 }, .{ 1, 0 }, .{ 1, 1.4 }, .{ 2, 1.4 },
+        .{ 2, 0 }, .{ 3, 0 }, .{ 3, 2 },   .{ 0, 2 },
+    };
+    const pads = [_]PadQuery{
+        .{ .cx = 0.5, .cy = 0.5, .shape = .{ .x0 = 0, .y0 = 0, .x1 = 3, .y1 = 2, .poly = &custom_poly }, .thru = false, .side = .top },
+        .{ .cx = 0.5, .cy = 0.5, .shape = .{ .x0 = 0.25, .y0 = 0.25, .x1 = 0.75, .y1 = 0.75 }, .thru = false, .side = .top },
+        .{ .cx = 2.5, .cy = 0.5, .shape = .{ .x0 = 2.25, .y0 = 0.25, .x1 = 2.75, .y1 = 0.75 }, .thru = false, .side = .top },
+    };
+    const labels = [_]i32{ 0, -1, 1 };
+    const layers = [_]LayerSpec{.{ .net = .ground, .side = .top, .track_layer = 0 }};
+    const fills = [_]Fill{.{
+        .frame = .{ .minx = 0, .miny = 0, .pitch = 1, .nx = 3, .ny = 1 },
+        .labels = &labels,
+        .n_comp = 2,
+        .contours = &.{},
+        .holes = &.{},
+        .coarsened = false,
+    }};
+    const joined = try planeConnectPrepared(
+        arena,
+        .{ .net_name = "GND", .pads = &pads, .vias = &.{} },
+        .{ .net_name = "GND", .layers = &layers, .fills = &fills },
+    );
+    try testing.expectEqual(@as(usize, 1), joined.n_comp);
+    try testing.expectEqual(joined.pad_comp[0], joined.pad_comp[1]);
+    try testing.expectEqual(joined.pad_comp[0], joined.pad_comp[2]);
 }
 
 // spec: placement/pour - the fill respects a non-rectangular board outline
@@ -3361,8 +3430,8 @@ test "planeConnect isolates a same-net pad on the wrong side of a single-sided p
     const placement = testPlacement(&parts, &nets, .{ .plane_nets = &gnd_names, .copper_layers = 2, .planes = .{ .declared = &planes } });
 
     const qpads = [_]PadQuery{
-        .{ .cx = 3, .cy = 10, .x0 = 2.7, .y0 = 9.7, .x1 = 3.3, .y1 = 10.3, .thru = false, .side = .bottom },
-        .{ .cx = 15, .cy = 10, .x0 = 14.7, .y0 = 9.7, .x1 = 15.3, .y1 = 10.3, .thru = false, .side = .top },
+        .{ .cx = 3, .cy = 10, .shape = .{ .x0 = 2.7, .y0 = 9.7, .x1 = 3.3, .y1 = 10.3 }, .thru = false, .side = .bottom },
+        .{ .cx = 15, .cy = 10, .shape = .{ .x0 = 14.7, .y0 = 9.7, .x1 = 15.3, .y1 = 10.3 }, .thru = false, .side = .top },
     };
     const join = try planeConnect(arena, placement, .{}, .{ .net_name = "GND", .pads = &qpads, .vias = &.{} });
     try testing.expect(join.pad_comp[0] >= 0); // C1 (bottom) reaches the pour
