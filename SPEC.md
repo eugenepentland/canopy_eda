@@ -5990,6 +5990,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Stamped module copper maps its net names onto the parent design via the origin-key bridge, slug-prefixing private nets
 - Stamped copper adopts destination net-class geometry
 - Restamping a sub-circuit preserves its anchor's board side and rigidly mirrors its parts and stamped copper onto that side
+- Restamping a sub-circuit replaces only that group's stamped copper and preserves board-level tracks, vias, and RF paths on the same nets
 - Stamp fetches the current module layout when clicked, so a sub-circuit edit in another tab applies without reloading a board and without discarding its unsaved work
 - Stamp defaults to the sub-circuit's starred layout, while its adjacent picker can stamp any compatible named saved layout without changing the star
 - Saving a rigid sub-circuit from its parent PCB is the inverse of Stamp: poses and group-owned copper return to module coordinates, including a board-side mirror

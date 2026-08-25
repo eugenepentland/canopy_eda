@@ -3636,13 +3636,15 @@ function stampGroup(g,layout){return refreshStampSeeds(g,layout).then(function()
   P[i].x=Math.round(np.x/sg)*sg;P[i].y=Math.round(np.y/sg)*sg;
   P[i].rot=np.rot;P[i].side=np.back?"bottom":"top";setT(i);});
  delete rigidOff[g];rigidSave();
- // Copper: replace this group's stamped copper with the module snapshot's
+ // Copper: replace only this group's stamped copper with the module snapshot's
  // (PCB.subroutes — net names already mapped to this design), transformed by
  // the same rigid pose as the parts and tagged with the group slug so rigid
- // drags/rotates carry it. A side flip mirrors endpoints and swaps F.Cu/B.Cu.
- // Nets touching a locked (not-moved) member are skipped — their copper would
- // be geometrically wrong.
- clearRouteFor(idxs,g);
+ // drags/rotates carry it. Board-owned tracks, vias and RF paths have no group
+ // tag and stay in place even when their nets touch this sub-circuit; ratsnest
+ // and DRC expose any gap left by a moved pad without destroying that routing.
+ // A side flip mirrors endpoints and swaps F.Cu/B.Cu. Nets touching a locked
+ // (not-moved) member are skipped — their stamped copper would be geometrically
+ // wrong.
  PCB.tracks=(PCB.tracks||[]).filter(function(t){return t.g!==g;});
  PCB.vias=(PCB.vias||[]).filter(function(v){return v.g!==g;});
  var oldZoneCount=(PCB.zones||[]).length;

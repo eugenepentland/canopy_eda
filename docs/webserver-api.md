@@ -139,7 +139,10 @@ Local dev still uses `http://localhost:7050`.
   is tagged with its group slug (`g` on tracks/vias, persisted through the
   sidecar), so rigid-group drags/rotates carry it along; it's dropped only
   when its group is broken apart (a member moved alone), and a re-Stamp
-  replaces it. Nets touching a locked (not-moved) member are skipped.
+  replaces only that tagged copper. Board-level tracks, vias, and RF paths on
+  nets connected to the sub-circuit remain in place; ratsnest and DRC show any
+  gap created by a moved pad. Nets touching a locked (not-moved) member are
+  skipped.
 - **Named layouts + per-layout URLs (2026-07-27)**: every block — top-level
   DESIGNS included — keeps as many named saved layouts as you save, listed in
   the Sub-circuits pane's Layouts panel. (This *replaces* the 2026-07-02

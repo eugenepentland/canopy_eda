@@ -1005,6 +1005,26 @@ test "viewer JS restamps a sub-circuit around its live side and rotation" {
     try std.testing.expect(std.mem.indexOf(u8, js, "(cop.z||[]).forEach(function(z){z.poly=") != null);
 }
 
+// spec: Web Server - Restamping a sub-circuit replaces only that group's stamped copper and preserves board-level tracks, vias, and RF paths on the same nets
+test "viewer JS restamp preserves board-owned copper connected to the sub-circuit" {
+    const js = @embedFile("assets/pcb_board.js");
+    const start = std.mem.indexOf(u8, js, "function stampGroup(g,layout)") orelse
+        return error.TestStampGroupMissing;
+    const tail = js[start..];
+    const end = std.mem.indexOf(u8, tail, "stampGroupFn=stampGroup;") orelse
+        return error.TestStampGroupEndMissing;
+    const body = tail[0..end];
+
+    // The ownership tag is the replacement boundary. Net-based clearing would
+    // also erase untagged board routing merely because it terminates on a pad
+    // inside this group, including RF paths whose ownership is board-wide.
+    try std.testing.expect(std.mem.indexOf(u8, body, "clearRouteFor(idxs,g)") == null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "PCB.tracks=(PCB.tracks||[]).filter(function(t){return t.g!==g;});") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "PCB.vias=(PCB.vias||[]).filter(function(v){return v.g!==g;});") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "PCB.zones=(PCB.zones||[]).filter(function(z){return z.g!==g;});") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "PCB.rf_paths=") == null);
+}
+
 // spec: Web Server - Stamp fetches the current module layout when clicked, so a sub-circuit edit in another tab applies without reloading a board and without discarding its unsaved work
 test "viewer JS refreshes sub-circuit seeds before every stamp" {
     const js = @embedFile("assets/pcb_board.js");
