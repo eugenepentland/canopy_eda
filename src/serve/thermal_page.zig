@@ -511,7 +511,7 @@ fn writeBoardLegend(w: *std.Io.Writer) std.Io.Writer.Error!void {
     try w.writeAll("<label class=\"tp-scale-bound\"><input type=\"number\" id=\"tp-scale-max\" " ++
         "step=\"1\" value=\"125\" aria-label=\"Scale maximum temperature\" aria-invalid=\"false\"> °C</label></div>");
     try w.writeAll("<span class=\"tp-hotspot\" id=\"tp-hotspot\"></span>");
-    try w.writeAll("<label class=\"tp-switch\"><input type=\"checkbox\" id=\"tp-labels\" checked> Labels</label>");
+    try w.writeAll("<label class=\"tp-switch\"><input type=\"checkbox\" id=\"tp-labels\"> All labels</label>");
     try w.writeAll("<label class=\"tp-switch\">Wash <input type=\"range\" id=\"tp-opacity\" " ++
         "min=\"20\" max=\"100\" step=\"5\" value=\"80\"></label>");
     try w.writeAll("</div>");
@@ -1496,6 +1496,46 @@ test "the thermal board switches between physical top and bottom faces" {
         "function paintRearHeatsink(ctx,k)",
         "paintRearHeatsink(c,k);paintPhysicalBoard(c,k)",
         "dragCacheDrop();drawBoardRect();paintSoon()",
+    }));
+}
+
+// spec: serve/thermal-page - hovering the thermal board reports the interpolated temperature at the pointer from the same solved grid that paints the heat field
+test "the thermal board reports its solved temperature under the pointer" {
+    const overlay = @embedFile("assets/pcb_thermal.js");
+    try testing.expect(containsAll(overlay, &.{
+        "function gridTemperatureAt(x, y)",
+        "g.rise_c[cy * g.cols + cx]",
+        "top + (bottom - top) * fy",
+        "boardSvg.getScreenCTM()",
+        "temp.toFixed(1) + \" °C\"",
+        "boardSvg.addEventListener(\"pointerleave\", probeHide)",
+    }));
+}
+
+// spec: serve/thermal-page - thermal part labels start hidden, clicking an IC shows only that IC's reference and temperature, and the optional All labels control reveals every reported part on the visible face
+test "thermal labels reveal only the clicked IC by default" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try fixtureProject(alloc, &tmp);
+    const html = (try serve(alloc, project, "heater", &.{})).body;
+    try testing.expect(std.mem.indexOf(u8, html, "<input type=\"checkbox\" id=\"tp-labels\"> All labels") != null);
+
+    const overlay = @embedFile("assets/pcb_thermal.js");
+    try testing.expect(containsAll(overlay, &.{
+        "labels: false",
+        "selectedRef: \"\"",
+        "if (view.labels || view.selectedRef) paintLabels(ctx)",
+        "if (!view.labels && row.ref !== view.selectedRef) return",
+        "typeof d.selectedRef === \"string\"",
+    }));
+    const client = @embedFile("assets/thermal_page.js");
+    try testing.expect(containsAll(client, &.{
+        "d.type === \"eda-pcb-ref-picked\"",
+        "tell({ selectedRef: d.ref || \"\" })",
     }));
 }
 

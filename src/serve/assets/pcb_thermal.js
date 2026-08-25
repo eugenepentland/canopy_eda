@@ -47,7 +47,8 @@
     layout: q.get("layout") || "",
     side: "top",
     opacity: 0.8,
-    labels: true,
+    labels: false,
+    selectedRef: "",
     scaleMinC: openingScaleMinC,
     scaleMaxC: openingScaleMaxC,
   };
@@ -166,6 +167,74 @@
     return { x: p.x + lx * c - ly * s, y: p.y + lx * s + ly * c, hw: p.hw || 0, hh: p.hh || 0 };
   }
 
+  // ── Cursor temperature probe ─────────────────────────────────────────
+  // The heat raster is bilinear-smoothed between solved cell centres. Sample
+  // those same four centres so the number under the pointer agrees with the
+  // colour it is explaining, including at a mirrored bottom-board view.
+  var boardSvg = document.getElementById("pcb-svg");
+  var boardShell = boardSvg && boardSvg.parentNode;
+  var boardHost = boardShell && boardShell.parentNode;
+  var probe = null;
+  if (boardHost) {
+    if (getComputedStyle(boardHost).position === "static") boardHost.style.position = "relative";
+    probe = document.createElement("div");
+    probe.setAttribute("role", "status");
+    probe.setAttribute("aria-live", "off");
+    probe.hidden = true;
+    probe.style.cssText = "position:absolute;z-index:30;pointer-events:none;padding:4px 7px;border:1px solid rgba(255,255,255,.32);border-radius:4px;background:rgba(8,12,18,.92);color:#f2f4f8;font:600 12px ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.35)";
+    boardHost.appendChild(probe);
+  }
+  function boardContains(x, y) {
+    var pts = PCB.board_poly || (PCB.outline && PCB.outline.pts) || null;
+    if (pts && pts.length >= 3) {
+      var inside = false;
+      for (var i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+        var a = pts[i], b = pts[j];
+        if (((a[1] > y) !== (b[1] > y)) && x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0]) inside = !inside;
+      }
+      return inside;
+    }
+    var board = PCB.board;
+    return !!(board && x >= board.x && x <= board.x + board.w && y >= board.y && y <= board.y + board.h);
+  }
+  function gridTemperatureAt(x, y) {
+    var g = field && field.grid;
+    if (!g || !g.cols || !g.rows || !(g.cell_mm > 0) || !boardContains(x, y)) return null;
+    var gx = (x - g.origin_x_mm) / g.cell_mm - 0.5;
+    var gy = (y - g.origin_y_mm) / g.cell_mm - 0.5;
+    if (gx < -0.5 || gy < -0.5 || gx > g.cols - 0.5 || gy > g.rows - 0.5) return null;
+    gx = Math.max(0, Math.min(g.cols - 1, gx));
+    gy = Math.max(0, Math.min(g.rows - 1, gy));
+    var x0 = Math.floor(gx), y0 = Math.floor(gy), x1 = Math.min(x0 + 1, g.cols - 1), y1 = Math.min(y0 + 1, g.rows - 1);
+    var fx = gx - x0, fy = gy - y0;
+    function rise(cx, cy) { var v = Number(g.rise_c[cy * g.cols + cx]); return isFinite(v) ? v : 0; }
+    var top = rise(x0, y0) + (rise(x1, y0) - rise(x0, y0)) * fx;
+    var bottom = rise(x0, y1) + (rise(x1, y1) - rise(x0, y1)) * fx;
+    return field.ambient_c + top + (bottom - top) * fy;
+  }
+  function probeHide() { if (probe) probe.hidden = true; }
+  function probeMove(ev) {
+    if (!probe || !boardSvg || !field) { probeHide(); return; }
+    var matrix = boardSvg.getScreenCTM();
+    if (!matrix) { probeHide(); return; }
+    var p = boardSvg.createSVGPoint(); p.x = ev.clientX; p.y = ev.clientY;
+    p = p.matrixTransform(matrix.inverse());
+    var temp = gridTemperatureAt(p.x / S + MX - M, p.y / S + MY - M);
+    if (temp == null || !isFinite(temp)) { probeHide(); return; }
+    var hostRect = boardHost.getBoundingClientRect();
+    probe.textContent = temp.toFixed(1) + " °C";
+    probe.style.left = (ev.clientX - hostRect.left) + "px";
+    probe.style.top = (ev.clientY - hostRect.top) + "px";
+    probe.style.transform = (ev.clientX - hostRect.left > hostRect.width - 90) ?
+      "translate(-100%,-130%)" : "translate(12px,-130%)";
+    probe.hidden = false;
+  }
+  if (boardSvg) {
+    boardSvg.addEventListener("pointermove", probeMove);
+    boardSvg.addEventListener("pointerleave", probeHide);
+    boardSvg.addEventListener("pointercancel", probeHide);
+  }
+
   // ── Paint ─────────────────────────────────────────────────────────────
   function paint(ctx) {
     if (!field || !raster) return;
@@ -206,7 +275,7 @@
       ctx.stroke();
     }
 
-    if (view.labels) paintLabels(ctx);
+    if (view.labels || view.selectedRef) paintLabels(ctx);
     ctx.restore();
   }
 
@@ -218,6 +287,7 @@
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     (field.parts || []).forEach(function (row) {
+      if (!view.labels && row.ref !== view.selectedRef) return;
       var i = byRef[row.ref];
       if (i === undefined) return;
       var part = (PCB.parts || [])[i];
@@ -294,6 +364,7 @@
         if (mine !== seq) return;                 // a newer request already won
         if (!j.available) {
           field = null; raster = null;
+          probeHide();
           tell({ t: "thermal:state", loading: false, unavailable: j.unavailable || "" });
           repaint();
           return;
@@ -312,6 +383,7 @@
       .catch(function (e) {
         if (mine !== seq) return;
         field = null; raster = null;
+        probeHide();
         tell({ t: "thermal:state", loading: false, error: String(e && e.message || e) });
         repaint();
       });
@@ -328,6 +400,7 @@
     }
     if (typeof d.opacity === "number") view.opacity = Math.max(0, Math.min(1, d.opacity));
     if (typeof d.labels === "boolean") view.labels = d.labels;
+    if (typeof d.selectedRef === "string") view.selectedRef = d.selectedRef;
     if (d.side === "top" || d.side === "bottom") view.side = d.side;
     var nextMinC = typeof d.scaleMinC === "number" ? d.scaleMinC : view.scaleMinC;
     var nextMaxC = typeof d.scaleMaxC === "number" ? d.scaleMaxC : view.scaleMaxC;

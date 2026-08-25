@@ -5556,6 +5556,8 @@ Read-only: nothing here writes to the project dir.
 - the page's client swaps only the ambient-dependent regions, keeps scenario switching local, and broadcasts a picked ref on the shared cross-probe channel
 - the page puts its panel beside a live board frame rather than a static heat image, embedding the read-only PCB viewer with the thermal overlay on
 - the board's legend starts at 25 °C to 125 °C, lets the reader edit both endpoints without another solve, and preserves a valid manual range in the page URL
+- hovering the thermal board reports the interpolated temperature at the pointer from the same solved grid that paints the heat field
+- thermal part labels start hidden, clicking an IC shows only that IC's reference and temperature, and the optional All labels control reveals every reported part on the visible face
 - the thermal board view switches between the physical top and mirrored bottom faces without a new solve, shows temperature labels only for parts on the visible face, paints a same-face heatsink above the board and occludes an opposite-face heatsink behind it, and keeps the selected face in the page URL
 - the thermal board frame omits generated CAM artwork, routed copper, DRC, pour geometry, and editor-only layout metadata because its exclusive heat overlay hides that data
 - GET /thermal/:name?layout=<name> screens that saved layout and carries the choice into the board frame, the tab bar, the cross-probe links and the facts link

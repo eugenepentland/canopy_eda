@@ -153,6 +153,11 @@
   }
   window.addEventListener("message", function (ev) {
     var d = ev.data;
+    if (frame && ev.source !== frame.contentWindow) return;
+    if (d && d.type === "eda-pcb-ref-picked") {
+      tell({ selectedRef: d.ref || "" });
+      return;
+    }
     if (!d || d.t !== "thermal:state") return;
     if (veil) {
       veil.hidden = !d.loading && !d.error && !d.unavailable;
