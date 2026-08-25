@@ -2461,11 +2461,12 @@ test "continuous mask relief does not re-cover every pad" {
     };
     const mask = try reliefMask(arena, &parts, &nets, &rules, .{ .tracks = &tracks });
 
-    // The sampled opening stops at the exact x=9.35 pad-dam boundary. The
-    // continuous opening needs no clear/dark cap repair, and the
+    // The sampled opening stops at x=8.55: the pad aperture + web excludes the
+    // full 0.777 mm-half-width relief, not only its centreline. The continuous
+    // opening needs no clear/dark cap repair, and the
     // legacy 1.5 x 1.0 mm all-pad subtraction must not return.
     try testing.expect(std.mem.indexOf(u8, mask, "G36*") != null);
-    try testing.expect(std.mem.indexOf(u8, mask, "X9350000Y") != null);
+    try testing.expect(std.mem.indexOf(u8, mask, "X8550000Y") != null);
     try testing.expect(std.mem.indexOf(u8, mask, "%LPC*%") == null);
     try testing.expect(std.mem.indexOf(u8, mask, "R,1.500000X1.000000*%") == null);
     try testing.expect(std.mem.indexOf(u8, mask, "R,1.100000X0.600000*%") != null); // pad opening
@@ -2491,12 +2492,12 @@ test "mask relief writes the authored terminal fillet" {
     try writeLayer(&mw.writer, arena, placement, .{ .tracks = &tracks }, &.{}, export_fab.frameFor(placement), .{ .mask = .top }, .{ .function = "Soldermask,Top" });
     const mask = mw.written();
 
-    // The dam transition is x=9.35. Its 0.777 mm half
+    // The full-opening dam transition is x=8.55. Its 0.777 mm half
     // opening is pulled in by the authored 0.2 mm fillet at the vertical cap:
     // world y=5.577 becomes y-up 4.423 in the Gerber frame.
     try testing.expect(std.mem.indexOf(u8, mask, "G36*") != null);
     try testing.expect(std.mem.indexOf(u8, mask, "G02") != null or std.mem.indexOf(u8, mask, "G03") != null);
-    try testing.expect(std.mem.indexOf(u8, mask, "X9350000Y4423000") != null);
+    try testing.expect(std.mem.indexOf(u8, mask, "X8550000Y4423000") != null);
 }
 
 // spec: export_gerber - fence vias never emit solder-mask apertures; the widened RF polygon alone exposes overlapping copper
