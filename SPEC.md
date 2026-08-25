@@ -1997,6 +1997,7 @@ the owning switch pad axis.
 - a cramped switch launch fits against one trace-width of straight entry even when its pad taper is longer
 - Euler bend has zero-curvature seams and finite curvature-rate energy
 - every single-ended controlled-impedance SMD launch tapers between the actual angle-aware land span and nominal width, including wider lands and via-fed or branched nets
+- a named saved layout made before automatic tapers reconciles only uncovered nominal-width launch runs, accepts no new routing-class DRC errors, and persists the approved RF paths through ordinary autosave
 - a trace taper remains one swept polygon with compact edit handles while DRC lowers private width-profile chords
 - solver RF geometry and taper proof survive saved-layout round trips
 - a solver-proven one-width pad taper may narrow below the controlled line width, but thin copper away from the land still fails DRC

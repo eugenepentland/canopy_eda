@@ -14350,6 +14350,21 @@ test "PCB viewer exposes provenance and persistent copper IDs" {
     try std.testing.expect(std.mem.indexOf(u8, js, "copperIdsEnsureAll();var saveGeneration") != null);
 }
 
+// spec: placement/rf-port-frame-routing - A named saved layout made before automatic tapers reconciles only uncovered nominal-width launch runs, accepts no new routing-class DRC errors, and persists the approved RF paths through ordinary autosave
+test "saved controlled-impedance copper receives an idempotent DRC-gated taper retrofit" {
+    const js = @embedFile("assets/pcb_board.js");
+    try std.testing.expect(std.mem.indexOf(u8, js, "function drawRfRetrofitPlan()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(claimed[id]||rfOwnsTrack(t))return;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "!(+c.impedance_ohms>0)||(+c.diff_impedance_ohms>0)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "drawViaAt(last.net,x,y)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "function drawRfRetrofitCheck(paths)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "payload.rf_paths=paths") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "drawRfRetrofitCheck(original.concat(accepted,[pending[i]]))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(!drawRfRetrofitHasNewBlock(baseline,j.drc||[]))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "PCB.rf_paths=original.concat(accepted);PCB.drc=baseline") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(!RO&&PCB.shown_layout)setTimeout(drawRfRetrofitSaved,0);") != null);
+}
+
 // spec: Web Server - visible board silkscreen text can be selected and grid-dragged directly in Select mode, with one undo step and refreshed DRC
 test "Select mode directly drags visible board silkscreen text" {
     const js = @embedFile("assets/pcb_board.js");

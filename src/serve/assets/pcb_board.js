@@ -6835,6 +6835,60 @@ function drawApplyAutomaticTapers(){if(!dtrace||dtrace.pair||!dtrace.laid||!dtra
   routeStatMsg("automatic pad taper would violate DRC — adjust the launch before finishing",true);return {ok:false,changed:false};}
  if(!paths.length)return {ok:true,changed:false};PCB.rf_paths=PCB.rf_paths||[];
  Array.prototype.push.apply(PCB.rf_paths,paths);cuGeomDrop();gpuCuEdit();return {ok:true,changed:true};}
+// Retrofit saved controlled-impedance copper that predates automatic launch
+// tapering. A saved route is already an arbitrary graph rather than one ordered
+// pen gesture, so start at each uncovered SMD land and follow its unique
+// same-layer nominal-width run until the profile is complete, a via/branch is
+// reached, or another land terminates it. Existing RF paths own their tracks
+// and make this pass idempotent across reloads.
+function drawSamePointXY(ax,ay,bx,by){return Math.abs(ax-bx)<=1e-7&&Math.abs(ay-by)<=1e-7;}
+function drawReverseTrack(t){var q={x1:t.x2,y1:t.y2,x2:t.x1,y2:t.y1,l:t.l||0,w:t.w,net:t.net||"",g:t.g,source:t.source,id:trackIdEnsure(t)};
+ if(t.xm!=null&&t.ym!=null){q.xm=t.xm;q.ym=t.ym;}return q;}
+function drawTrackFromPoint(t,x,y){
+ if(drawSamePointXY(t.x1,t.y1,x,y))return t;
+ if(drawSamePointXY(t.x2,t.y2,x,y))return drawReverseTrack(t);return null;}
+function drawViaAt(net,x,y){return (PCB.vias||[]).some(function(v){return v.net===net&&drawSamePointXY(v.x,v.y,x,y);});}
+function drawRfRetrofitRun(seed,reverse,nominal,start,claimed){var first=reverse?drawReverseTrack(seed):seed,
+ run=[first],used={};used[trackIdEnsure(seed)]=1;var total=trackLength(first),end=null;
+ for(var guard=0;guard<256;guard++){
+  var last=run[run.length-1],x=last.x2,y=last.y2,pad=drawEndpointPad(last.net,last.l||0,x,y);
+  if(pad){end=drawTaperProfile(last.net,pad,nominal,drawTrackEndDirection(last,false));break;}
+  if(total>=start.land+start.taper-1e-9||drawViaAt(last.net,x,y))break;
+  var next=[];(PCB.tracks||[]).forEach(function(t){var id=trackIdEnsure(t);if(used[id]||claimed[id]||rfOwnsTrack(t))return;
+   if(t.net!==last.net||(t.l||0)!==(last.l||0)||Math.abs((+t.w||0)-nominal)>1e-7)return;
+   var q=drawTrackFromPoint(t,x,y);if(q&&trackLength(q)>1e-9)next.push({t:t,q:q});});
+  if(next.length!==1)break;var n=next[0];used[trackIdEnsure(n.t)]=1;run.push(n.q);total+=trackLength(n.q);}
+ var path=drawTaperPath(run,start,end,nominal);if(!path)return null;
+ run.forEach(function(t){claimed[trackIdEnsure(t)]=1;});return path;}
+function drawRfRetrofitPlan(){var claimed={},paths=[];
+ (PCB.tracks||[]).forEach(function(t){var id=trackIdEnsure(t);if(claimed[id]||rfOwnsTrack(t))return;
+  var c=netClassInfo(t.net||"");if(!c||!(+c.impedance_ohms>0)||(+c.diff_impedance_ohms>0))return;
+  var nominal=+c.width||+((PCB.rules||{}).track_width)||baseTrackW();if(!(nominal>0)||Math.abs((+t.w||0)-nominal)>1e-7)return;
+  for(var end=0;end<2&&!claimed[id];end++){var x=end?t.x2:t.x1,y=end?t.y2:t.y1,pad=drawEndpointPad(t.net,t.l||0,x,y);
+   if(!pad)continue;var oriented=end?drawReverseTrack(t):t,profile=drawTaperProfile(t.net,pad,nominal,drawTrackEndDirection(oriented,true));
+   if(!profile)continue;var path=drawRfRetrofitRun(t,!!end,nominal,profile,claimed);if(path)paths.push(path);}});
+ return paths;}
+function drawRfRetrofitHasNewBlock(before,after){var bc=drcBlockCounts(before||[]),ac=drcBlockCounts(after||[]);
+ for(var id in ac)if(ac[id]>(bc[id]||0))return true;return false;}
+function drawRfRetrofitCheck(paths){var payload=boardStatePayload();payload.rf_paths=paths;
+ return fetch("/api/pcb-drc/"+encodeURIComponent(PCB.name)+subq(),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
+  .then(function(r){if(!r.ok)throw 0;return r.json();});}
+function drawRfRetrofitSaved(){
+ if(RO||!PCB.shown_layout||!curLayout||!(PCB.tracks||[]).length)return;
+ var pending=drawRfRetrofitPlan();if(!pending.length)return;var generation=dirtyGeneration,layout=curLayout,
+  original=(PCB.rf_paths||[]).slice(),accepted=[],baseline=(PCB.drc||[]).slice();
+ function current(){return generation===dirtyGeneration&&layout===curLayout;}
+ function finish(){if(!current())return;if(!accepted.length){routeStatMsg(pending.length+" saved impedance tapers blocked by DRC",true);return;}
+  var before=snapAll();PCB.rf_paths=original.concat(accepted);PCB.drc=baseline;
+  copperTouched();recordUndo(before);drawRoute();drawDrc();drcChip(PCB.drc.length);
+  routeStatMsg(accepted.length+" saved impedance taper"+(accepted.length===1?"":"s")+" added"+(accepted.length<pending.length?" · "+(pending.length-accepted.length)+" blocked by DRC":""));scheduleDrc();}
+ function next(i){if(!current())return;if(i>=pending.length){finish();return;}
+  routeStatMsg("checking saved impedance tapers "+(i+1)+"/"+pending.length+"…");
+  drawRfRetrofitCheck(original.concat(accepted,[pending[i]])).then(function(j){if(!current())return;
+   if(!drawRfRetrofitHasNewBlock(baseline,j.drc||[])){accepted.push(pending[i]);baseline=j.drc||[];}next(i+1);})
+   .catch(function(){if(current())routeStatMsg("saved impedance taper check interrupted — reload to retry",true);});}
+ next(0);}
+window.PCBDrawRfRetrofitPlan=drawRfRetrofitPlan;
 // Exact candidate copper for the current click. Including the last committed
 // segment lets the next click round the corner at the current route head; the
 // old segment is atomically replaced on commit. Internal posture corners are
@@ -9842,6 +9896,10 @@ var ratsOn=false;
 function netColorOf(nk){if(!nk||!PCB.netcolor)return null;return PCB.netcolor[nk]||null;}
 drcSync();showScore(PCB.auto);drawRoute();drawClr();drawDrc();
 markUnplaced(PCB.placement&&PCB.placement.unplaced);
+// A named saved layout may predate automatic impedance tapers. Reconcile it
+// only after the whole script has initialized, then let the ordinary dirty /
+// autosave path persist an approved migration into that same layout row.
+if(!RO&&PCB.shown_layout)setTimeout(drawRfRetrofitSaved,0);
 // The page already embeds authoritative server DRC for this exact saved state.
 // Show it immediately, but defer the worker/WASM download and reconciliation
 // POST until the first real edit instead of checking an unchanged board twice.
