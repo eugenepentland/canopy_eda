@@ -3005,6 +3005,7 @@ Public functions: compute, computeMasks, initMargin, planeConnect, segmentCompon
 - a foreign net-class clearance widens the ground-pour gap around its track
 - a grounded-coplanar ground gap overrides the generic ground-pour clearance without changing non-ground pours
 - an opt-in CPWG gap profile follows taper width and stops at its authored maximum
+- a bottom CPWG gap uses the bottom physical stackup on multilayer boards
 - a single-ended controlled-impedance via gets the same stackup-derived antipad clearance on every foreign pour
 - a max-freq via with no authored impedance target synthesizes its antipad at the 50 ohm default
 - every emitted contour point keeps at least the pour clearance from foreign copper
@@ -3159,6 +3160,7 @@ silently coerced into a two-port.
 - a matched quarter-wave section remains matched
 - a width step is visible as finite return loss
 - routed CPWG sections synthesize their local gap from exact widths
+- route layer 1 maps to bottom physical copper on multilayer boards
 - completeness-waiver: empty inputs (a controlled net with no routed tracks returns an explicit no-copper result; a net without an impedance target is outside this analysis and returns null)
 - completeness-waiver: large inputs (topology extraction and local field analysis are linear in the selected net's routed tracks and vias; every sweep has a fixed 61 points)
 - completeness-waiver: unauthorized access (pure analysis of an already-authorized in-memory placement and route; it performs no request or identity work)

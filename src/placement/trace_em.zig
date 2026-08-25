@@ -201,11 +201,14 @@ fn emptyAnalysis(rule: optimizer.NetRule, status: Status) Analysis {
     };
 }
 
-fn routePhysicalLayer(stack: impedance.Stack, route_layer: u8) ?u8 {
-    var buffer: [32]u8 = undefined;
-    const layers = impedance.signalLayers(stack, &buffer);
-    if (route_layer >= layers.len) return null;
-    return layers[route_layer];
+fn routePhysicalLayer(rules: optimizer.BoardRules, route_layer: u8) ?u8 {
+    // Persisted route-layer indices always keep the two outer faces first:
+    // 0 = F.Cu, 1 = B.Cu, then plane-free inner layers in stack order.  The
+    // impedance helper's signalLayers() result is instead in physical
+    // top-to-bottom order, so indexing that slice directly misread B.Cu as
+    // the first routable inner layer on a multilayer board.
+    if (route_layer >= rules.signalLayerCount()) return null;
+    return rules.signalStackIndex(route_layer);
 }
 
 fn lineMatrix(section: Section, frequency_hz: f64) Matrix {
@@ -269,10 +272,11 @@ fn buildTrackGraph(
     alloc: std.mem.Allocator,
     routed: router.RouteResult,
     net: i32,
-    stack: impedance.Stack,
+    rules: optimizer.BoardRules,
     rule: optimizer.NetRule,
     counts: GeometryCounts,
 ) std.mem.Allocator.Error!Graph {
+    const stack = rules.physical.stack;
     const sections = try alloc.alloc(Section, counts.tracks);
     const track_to_section = try alloc.alloc(usize, routed.tracks.len);
     @memset(track_to_section, std.math.maxInt(usize));
@@ -290,7 +294,7 @@ fn buildTrackGraph(
     var section_count: usize = 0;
     for (routed.tracks, 0..) |track, track_index| {
         if (track.net != net) continue;
-        const physical_layer = routePhysicalLayer(stack, track.layer) orelse {
+        const physical_layer = routePhysicalLayer(rules, track.layer) orelse {
             graph.geometry_ok = false;
             continue;
         };
@@ -442,7 +446,7 @@ pub fn analyzeNet(
     const net: i32 = @intCast(net_index);
     const counts = geometryCounts(routed, net);
     if (counts.tracks == 0) return base;
-    var graph = try buildTrackGraph(alloc, routed, net, stack, rule, counts);
+    var graph = try buildTrackGraph(alloc, routed, net, placement.rules, rule, counts);
     base.sections = graph.sections;
     base.via_count = counts.vias;
     if (!graph.geometry_ok or graph.sections.len != counts.tracks) {
@@ -585,4 +589,61 @@ test "routed CPWG sections synthesize their local gap from exact widths" {
     try testing.expectApproxEqAbs(@as(f64, 0.29747), result.summary.ground_gap.max_mm, 0.0001);
     try testing.expectApproxEqAbs(@as(f64, 0), result.summary.ground_gap.capped_length_mm, 1e-9);
     try testing.expect(result.summary.worst_return_loss_db > result.target.band.return_loss_db);
+}
+
+// spec: placement/trace-em - route layer 1 maps to bottom physical copper on multilayer boards
+test "bottom route layer maps to the bottom physical copper" {
+    var arena_instance = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+    var parts = [_]optimizer.Part{};
+    const physical_planes = [_]u8{ 2, 5 };
+    const plane_rows = [_]optimizer.PlaneAt{
+        .{ .index = 2, .net = "GND" },
+        .{ .index = 5, .net = "GND" },
+    };
+    const dielectrics = [_]impedance.Dielectric{
+        .{ .after_layer = 1, .thickness_mm = 0.0994, .er = 4.4 },
+        .{ .after_layer = 5, .thickness_mm = 0.0994, .er = 4.4 },
+    };
+    const rule = optimizer.NetRule{
+        .class = .{ .name = "rf-50ohm" },
+        .width = 0.18335412052887323,
+        .clearance = 0.127,
+        .rf = .{
+            .max_freq_hz = 12e9,
+            .electrical = .{ .band_start_hz = 120e6, .return_loss_target_db = 20 },
+            .impedance = .{ .ohms = 50, .ground_gap_mm = 0.127, .width_derived = true },
+        },
+    };
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 2,
+        .maxy = 1,
+        .generated = false,
+        .rules = .{
+            .net = &.{rule},
+            .plane_nets = &.{},
+            .copper_layers = 6,
+            .planes = .{ .declared = &plane_rows },
+            .physical = .{ .stack = .{ .layers = 6, .planes = &physical_planes, .dielectrics = &dielectrics } },
+        },
+    };
+    const tracks = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 1, .width = rule.width, .net = 0 },
+    };
+    const result = (try analyzeNet(arena, placement, .{ .tracks = &tracks, .vias = &.{}, .routed = 1, .total = 1 }, 0)).?;
+    try testing.expectEqual(Status.ok, result.status);
+    try testing.expectEqual(@as(u8, 1), result.sections[0].layers.route);
+    try testing.expectEqual(@as(u8, 6), result.sections[0].layers.physical);
+    try testing.expectEqualStrings("grounded-coplanar", result.sections[0].electrical.structure);
+    try testing.expectApproxEqAbs(@as(f64, 50), result.sections[0].electrical.z0_ohms, 1e-9);
 }
