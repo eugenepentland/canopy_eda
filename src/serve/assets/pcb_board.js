@@ -5450,7 +5450,8 @@ function segPlan(t,x,y,d){var at=segAttached(t,x,y);
 function segStart(t,m){drcGateSessionEnsure();var dx=t.x2-t.x1,dy=t.y2-t.y1,L=Math.hypot(dx,dy)||1;
  var d={x:dx/L,y:dy/L};
  return {t:t,m0:m,moved:false,snap:snapAll(),o:{x1:t.x1,y1:t.y1,xm:t.xm,ym:t.ym,x2:t.x2,y2:t.y2},
-  d:d,px:-d.y,py:d.x,a:segPlan(t,t.x1,t.y1,d),b:segPlan(t,t.x2,t.y2,d)};}
+  d:d,px:-d.y,py:d.x,a:segPlan(t,t.x1,t.y1,d),b:segPlan(t,t.x2,t.y2,d),
+  arcLast:t.xm!=null?{x1:t.x1,y1:t.y1,xm:t.xm,ym:t.ym,x2:t.x2,y2:t.y2}:null};}
 function segFollow(list,nx,ny){list.forEach(function(w){
  if(w.v){w.v.x=nx;w.v.y=ny;}
  else if(w.e===1){w.q.x1=nx;w.q.y1=ny;}
@@ -5475,16 +5476,41 @@ function segEnd(sd,pl,o,mx,my,free){var ax=o.x+mx,ay=o.y+my;
   (PCB.tracks=PCB.tracks||[]).push(pl.jog);}
  else{pl.jog.x2=ax;pl.jog.y2=ay;}
  return {x:ax,y:ay};}
+// Rebuild a dragged native fillet from its two tangent support lines. Sliding
+// the arc chord resolves new endpoints on those lines above; their normals
+// meet at the only circle centre that keeps both joins tangent. Preserve the
+// authored sweep direction so the midpoint remains on the same fillet branch.
+function segTangentArcMid(sd,p1,p2){var old=trackArcGeom(sd.o);
+ if(!old||sd.a.mode!=="corner"||sd.b.mode!=="corner")return null;
+ var n1x=-sd.a.ey,n1y=sd.a.ex,n2x=-sd.b.ey,n2y=sd.b.ex,
+  cr=n1x*n2y-n1y*n2x;if(Math.abs(cr)<1e-9)return null;
+ var qx=p2.x-p1.x,qy=p2.y-p1.y,s=(qx*n2y-qy*n2x)/cr,
+  cx=p1.x+s*n1x,cy=p1.y+s*n1y,r=Math.hypot(p1.x-cx,p1.y-cy);
+ if(r<1e-6)return null;
+ var a1=Math.atan2(p1.y-cy,p1.x-cx),a2=Math.atan2(p2.y-cy,p2.x-cx),tau=Math.PI*2,sw=a2-a1;
+ if(old.sweep>=0){while(sw<0)sw+=tau;while(sw>=tau)sw-=tau;}
+ else{while(sw>0)sw-=tau;while(sw<=-tau)sw+=tau;}
+ var am=a1+sw/2;return {x:cx+r*Math.cos(am),y:cy+r*Math.sin(am)};}
 function segMove(m,free){var sd=segdrag,g=snapG();
  var dx=m.x-sd.m0.x,dy=m.y-sd.m0.y,mx,my;
  if(free){mx=Math.round(dx/g)*g;my=Math.round(dy/g)*g;}
  else{var k=Math.round((dx*sd.px+dy*sd.py)/g)*g;mx=sd.px*k;my=sd.py*k;}
  var e1=segEnd(sd,sd.a,{x:sd.o.x1,y:sd.o.y1},mx,my,free);
  var e2=segEnd(sd,sd.b,{x:sd.o.x2,y:sd.o.y2},mx,my,free);
+ var arcMid=!free&&sd.o.xm!=null?segTangentArcMid(sd,e1,e2):null;
+ // Exactly at the virtual sharp corner the tangent circle has zero radius.
+ // Hold the last valid fillet for that one grid position instead of persisting
+ // a degenerate three-point arc or briefly breaking tangency.
+ if(!free&&sd.o.xm!=null&&sd.a.mode==="corner"&&sd.b.mode==="corner"&&!arcMid){var h=sd.arcLast;
+  segFollow(sd.a.at,h.x1,h.y1);segFollow(sd.b.at,h.x2,h.y2);
+  sd.t.x1=h.x1;sd.t.y1=h.y1;sd.t.xm=h.xm;sd.t.ym=h.ym;sd.t.x2=h.x2;sd.t.y2=h.y2;
+  gpuCuEdit();paintSoon();return;}
  if(e1.x===sd.t.x1&&e1.y===sd.t.y1&&e2.x===sd.t.x2&&e2.y===sd.t.y2)return;
  if(!sd.moved){sd.moved=true;rfDropForTracks([sd.t]);svg.style.cursor="grabbing";}
  sd.t.x1=e1.x;sd.t.y1=e1.y;sd.t.x2=e2.x;sd.t.y2=e2.y;
- if(sd.o.xm!=null){sd.t.xm=sd.o.xm+((e1.x-sd.o.x1)+(e2.x-sd.o.x2))/2;
+ if(arcMid){sd.t.xm=arcMid.x;sd.t.ym=arcMid.y;
+  sd.arcLast={x1:e1.x,y1:e1.y,xm:arcMid.x,ym:arcMid.y,x2:e2.x,y2:e2.y};}
+ else if(sd.o.xm!=null){sd.t.xm=sd.o.xm+((e1.x-sd.o.x1)+(e2.x-sd.o.x2))/2;
   sd.t.ym=sd.o.ym+((e1.y-sd.o.y1)+(e2.y-sd.o.y2))/2;}
  if(insp&&insp.o===sd.t)renderProps();
  gpuCuEdit(); // segEnd/segFollow just moved copper (and may have laid a jog) in place

@@ -805,6 +805,23 @@ test "viewer JS slides segments KiCad-style without repositioning neighbouring t
     try std.testing.expect(std.mem.indexOf(u8, js, "segJogClean") != null);
 }
 
+// spec: Web Server - Dragging a native trace fillet re-solves its circle against both neighbouring support lines so both joins remain tangent
+test "viewer JS keeps a dragged trace fillet tangent to both neighbouring segments" {
+    const js = @embedFile("assets/pcb_board.js");
+    try std.testing.expect(std.mem.indexOf(u8, js, "function segTangentArcMid(sd,p1,p2)") != null);
+    // The new centre is the intersection of the two normals through the
+    // endpoints resolved by the existing fixed-support-line drag solve.
+    try std.testing.expect(std.mem.indexOf(u8, js, "cr=n1x*n2y-n1y*n2x") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "cx=p1.x+s*n1x,cy=p1.y+s*n1y") != null);
+    // The original sweep sign chooses the same arc branch, and the native
+    // three-point representation receives the newly solved circular midpoint.
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(old.sweep>=0)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "sd.t.xm=arcMid.x;sd.t.ym=arcMid.y;") != null);
+    // Passing through zero radius holds the previous valid circle rather than
+    // leaving a degenerate arc in the saved layout.
+    try std.testing.expect(std.mem.indexOf(u8, js, "var h=sd.arcLast;") != null);
+}
+
 // spec: Web Server - The hand-route head dodges or clips at clearance obstacles instead of drawing violating copper
 test "viewer JS pushes the route head back: posture dodge then clearance clip" {
     const js = @embedFile("assets/pcb_board.js");

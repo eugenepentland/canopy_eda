@@ -6187,6 +6187,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - A DRC check for copper outside any project design still layers the net-open connectivity rule onto the built-in severities
 - The /pcb-layout Properties dock hosts the inspector with segment editing and DRC rule settings
 - Segment drags preserve neighbouring trace support lines: compatible neighbours only stretch or shrink, while collinear runs, arcs, and ambiguous junctions remain anchored behind a connector
+- Dragging a native trace fillet re-solves its circle against both neighbouring support lines so both joins remain tangent
 - The hand-route head dodges or clips at clearance obstacles instead of drawing violating copper
 - Moving a placed component leaves its connected traces in place instead of deleting them
 - Dragging or rotating a marquee selection carries the tracks and vias the band caught
