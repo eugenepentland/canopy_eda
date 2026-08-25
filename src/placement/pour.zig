@@ -591,6 +591,19 @@ pub fn computeShared(
     return computeFill(arena, placement, copper, spec, .{ .base = base });
 }
 
+/// Membership-only computed fill seeded from a caller-shared edge field. PDN,
+/// connectivity, and other analysis consumers retain labels but never pay to
+/// trace render contours a second time.
+pub fn computeMaskShared(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    copper: Copper,
+    spec: LayerSpec,
+    base: ?EdgeField,
+) std.mem.Allocator.Error!Fill {
+    return computeFill(arena, placement, copper, spec, .{ .base = base, .contours = false });
+}
+
 /// Compute the poured fill for `spec` over `placement` + `copper`. All output
 /// is arena-owned. An empty/degenerate outline yields an empty fill.
 pub fn compute(

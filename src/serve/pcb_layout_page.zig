@@ -1093,6 +1093,7 @@ fn renderLayoutPage(
             .saved_fabrication_layers = rv.fabrication_layers,
             .saved_heatsink = rv.heatsink,
             .base_edge = rv.base_edge,
+            .scratch_allocator = ctx.scratch_allocator,
             .top_design = top_design,
             .shown_layout = if (sub == null) adoptedLayoutName(sel, starred_name) else null,
             .src = src_class,
@@ -9263,6 +9264,9 @@ const PcbDataOpts = struct {
     /// threaded into every pour writer here so the outline walk happens once
     /// for the whole render instead of once per writer. Null seeds per writer.
     base_edge: ?pour.EdgeField = null,
+    /// Separate capability for board-sized analysis scratch; production uses
+    /// the page allocator so releasing a fill really returns its pages.
+    scratch_allocator: ?std.mem.Allocator = null,
     /// Exact shown outline; unlike board_poly, this retains nominal vertices
     /// and their editable fillet radii.
     saved_outline: ?SavedOutline = null,
@@ -9464,7 +9468,7 @@ fn writePayloadAnalysis(
     try trace_em_json.write(w, alloc, p, routed);
     try power_integrity_json.write(
         w,
-        alloc,
+        .{ .output = alloc, .scratch = opts.scratch_allocator orelse alloc },
         p,
         routed,
         userZonesFrom(alloc, p.rules, shownZones(opts.saved_routes)),

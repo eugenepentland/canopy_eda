@@ -33,6 +33,13 @@ pub fn write(
         try writeJsonStr(w, if (net_index < placement.rules.net.len) placement.rules.net[net_index].class.name else "");
         try w.writeAll(",\"status\":");
         try writeJsonStr(w, analysis.status.name());
+        try w.writeAll(",\"via_model_valid_to_hz\":");
+        if (analysis.via_model.valid_to_hz) |valid_to_hz|
+            try w.print("{d}", .{valid_to_hz})
+        else
+            try w.writeAll("null");
+        try w.print(",\"via_model_target_synthesized_antipad\":{}", .{analysis.via_model.target_synthesized_antipad});
+        try w.print(",\"via_model_inner_stub_unmodeled\":{}", .{analysis.via_model.inner_stub_unmodeled});
         try w.print(
             ",\"target_ohms\":{d},\"band_start_hz\":{d},\"band_stop_hz\":{d},\"band_assumed\":{}," ++
                 "\"ground_gap_mm\":{d},\"ground_gap_max_mm\":{d},\"width_derived\":{},\"return_loss_target_db\":{d}," ++

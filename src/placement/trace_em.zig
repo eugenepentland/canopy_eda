@@ -3,11 +3,15 @@
 //! This is deliberately not described as a full-wave field solver.  It uses
 //! the stackup's closed-form microstrip/grounded-CPWG/stripline solution for
 //! every routed width, cascades the real route as lossy transmission-line
-//! sections, and inserts a first-order lumped model at each through-via.  That
-//! makes width steps, delay, skin-effect loss, dielectric loss, and via
-//! discontinuities visible while keeping the model deterministic and
-//! auditable.  Radiation, connector launches, solder mask, copper roughness,
-//! and coupling to nearby shapes still require a 3D solver or measurement.
+//! sections. A through-via is represented by an equivalent distributed line
+//! whose total low-frequency L and C come from the stackup-aware antipad model;
+//! this keeps the model passive after the barrel becomes electrically long
+//! instead of extrapolating one lumped pi section beyond its useful range.
+//! Width steps, delay, skin-effect loss, dielectric loss, and modeled via
+//! mismatch remain visible while keeping the calculation deterministic and
+//! auditable. Radiation, connector launches, via stubs, return-via placement,
+//! solder mask, copper roughness, and coupling to nearby shapes still require
+//! a 3D solver or measurement.
 
 const std = @import("std");
 const impedance = @import("impedance.zig");
@@ -21,6 +25,11 @@ pub const sweep_points: usize = 61;
 pub const assumed_loss_tangent: f64 = 0.02;
 /// Bulk annealed-copper conductivity assumed by the skin-effect estimate.
 pub const copper_conductivity_s_per_m: f64 = 5.8e7;
+/// Above one twentieth of the equivalent wavelength, the target-derived
+/// antipad estimate cannot independently certify a via transition. At this
+/// theta=pi/10 boundary, its old lumped-pi and distributed series terms differ
+/// by about 1.64%; the bounded sweep remains diagnostic, not a green verdict.
+const equivalent_via_max_phase_rad: f64 = std.math.pi / 10.0;
 
 const c0_m_per_s: f64 = 299_792_458.0;
 const mu0_h_per_m: f64 = 1.256_637_062_12e-6;
@@ -33,6 +42,7 @@ pub const Status = enum {
     no_stackup,
     unsupported_geometry,
     unsupported_topology,
+    via_needs_3d,
 
     /// Stable kebab-case status string written to the browser JSON.
     pub fn name(self: Status) []const u8 {
@@ -42,6 +52,7 @@ pub const Status = enum {
             .no_stackup => "no-stackup",
             .unsupported_geometry => "unsupported-geometry",
             .unsupported_topology => "unsupported-topology",
+            .via_needs_3d => "via-needs-3d",
         };
     }
 };
@@ -85,6 +96,16 @@ pub const Analysis = struct {
     sections: []const Section,
     samples: []const Sample,
     via_count: usize,
+    via_model: struct {
+        /// Lowest lambda/20 validity ceiling across the route's modeled vias.
+        valid_to_hz: ?f64,
+        /// True because the available geometry derives antipad C from the
+        /// authored impedance, rather than measuring an independent shape.
+        target_synthesized_antipad: bool,
+        /// A through-via touching an inner signal layer leaves an open barrel
+        /// stub that this equivalent-line model does not represent.
+        inner_stub_unmodeled: bool,
+    },
     summary: struct {
         total_length_mm: f64,
         delay_ps: f64,
@@ -138,7 +159,16 @@ const Matrix = struct {
 
 const Element = union(enum) {
     line: usize,
-    via: struct { inductance_nh: f64, capacitance_pf: f64 },
+    via: ViaElement,
+};
+
+const ViaElement = struct {
+    inductance_nh: f64,
+    capacitance_pf: f64,
+    length_mm: f64,
+    drill_mm: f64,
+    plating_mm: f64,
+    inner_transition: bool,
 };
 
 const Node = struct { x: f64, y: f64, layer: u8, degree: usize = 0 };
@@ -150,6 +180,7 @@ const ElementContext = struct {
     stack: impedance.Stack,
     rule: optimizer.NetRule,
     board_clearance: f64,
+    via_plating_mm: f64,
 };
 const Graph = struct {
     sections: []Section,
@@ -190,6 +221,7 @@ fn emptyAnalysis(rule: optimizer.NetRule, status: Status) Analysis {
         .sections = &.{},
         .samples = &.{},
         .via_count = 0,
+        .via_model = .{ .valid_to_hz = null, .target_synthesized_antipad = false, .inner_stub_unmodeled = false },
         .summary = .{
             .total_length_mm = 0,
             .delay_ps = 0,
@@ -228,20 +260,53 @@ fn lineMatrix(section: Section, frequency_hz: f64) Matrix {
     return .{ .a = ch, .b = sh.scale(section.electrical.z0_ohms), .c = sh.scale(1.0 / section.electrical.z0_ohms), .d = ch };
 }
 
-fn viaMatrix(inductance_nh: f64, capacitance_pf: f64, frequency_hz: f64) Matrix {
+/// Equivalent distributed through-via model.
+///
+/// The antipad solver supplies total low-frequency L and C, so
+/// `sqrt(L/C)` is the modeled transition impedance and `sqrt(L*C)` is its
+/// equivalent delay. Cascading the corresponding line is the infinite-cell
+/// limit of a ladder made from those same totals: it agrees with the old
+/// lumped-pi model to first order, but remains passive and bounded when the
+/// barrel is no longer electrically short. Generic FR-4 dielectric loss is
+/// applied along the equivalent line. Barrel resistance uses the authored
+/// finished length, drill, and plating; at RF it conservatively credits the
+/// inner barrel surface only.
+///
+/// This is not a launch or 3D-via solver. In particular, the available route
+/// geometry does not describe pad stacks, unused-barrel stubs, antipad shapes,
+/// or nearby return vias.
+fn viaMatrix(via: ViaElement, frequency_hz: f64) Matrix {
+    if (!(via.inductance_nh > 0)) return .{};
+    if (!(via.capacitance_pf > 0)) return .{};
+    if (!(frequency_hz > 0)) return .{};
     const omega = 2.0 * std.math.pi * frequency_hz;
-    const z = Complex{ .im = omega * inductance_nh * 1e-9 };
-    const half_y = Complex{ .im = omega * capacitance_pf * 1e-12 / 2.0 };
-    const shunt = Matrix{ .c = half_y };
-    const series = Matrix{ .b = z };
-    return Matrix.cascade(Matrix.cascade(shunt, series), shunt);
+    const inductance_h = via.inductance_nh * 1e-9;
+    const capacitance_f = via.capacitance_pf * 1e-12;
+    const z0 = @sqrt(inductance_h / capacitance_f);
+    const phase = omega * @sqrt(inductance_h * capacitance_f);
+    const attenuation = phase * assumed_loss_tangent / 2.0;
+    const half_al = attenuation / 2.0;
+    const half_bl = phase / 2.0;
+    const ch = Complex{ .re = std.math.cosh(half_al) * @cos(half_bl), .im = std.math.sinh(half_al) * @sin(half_bl) };
+    const sh = Complex{ .re = std.math.sinh(half_al) * @cos(half_bl), .im = std.math.cosh(half_al) * @sin(half_bl) };
+    const half_line = Matrix{ .a = ch, .b = sh.scale(z0), .c = sh.scale(1.0 / z0), .d = ch };
+
+    var resistance_ohms: f64 = 0;
+    if (via.length_mm > 0 and via.drill_mm > 0 and via.plating_mm > 0) {
+        const skin_depth_m = @sqrt(1.0 / (std.math.pi * frequency_hz * mu0_h_per_m * copper_conductivity_s_per_m));
+        const conducting_thickness_m = @min(via.plating_mm / 1000.0, skin_depth_m);
+        const inner_surface_area_m2 = std.math.pi * (via.drill_mm / 1000.0) * conducting_thickness_m;
+        resistance_ohms = (via.length_mm / 1000.0) / (copper_conductivity_s_per_m * inner_surface_area_m2);
+    }
+    const barrel_resistance = Matrix{ .b = .{ .re = resistance_ohms } };
+    return Matrix.cascade(Matrix.cascade(half_line, barrel_resistance), half_line);
 }
 
 fn sampleAt(elements: []const Element, sections: []const Section, frequency_hz: f64, reference_ohms: f64) Sample {
     var m = Matrix{};
     for (elements) |element| m = Matrix.cascade(m, switch (element) {
         .line => |index| lineMatrix(sections[index], frequency_hz),
-        .via => |v| viaMatrix(v.inductance_nh, v.capacitance_pf, frequency_hz),
+        .via => |v| viaMatrix(v, frequency_hz),
     });
     const zref = Complex{ .re = reference_ohms };
     const den = Complex.add(Complex.add(m.a, m.b.scale(1.0 / reference_ohms)), Complex.add(m.c.scale(reference_ohms), m.d));
@@ -259,6 +324,49 @@ fn sampleAt(elements: []const Element, sections: []const Section, frequency_hz: 
         .zin_im_ohms = zin.im,
         .s11_phase_deg = std.math.atan2(s11.im, s11.re) * 180.0 / std.math.pi,
     };
+}
+
+fn viaValidToHz(elements: []const Element) ?f64 {
+    var result: ?f64 = null;
+    for (elements) |element| switch (element) {
+        .line => {},
+        .via => |via| {
+            if (!(via.inductance_nh > 0) or !(via.capacitance_pf > 0)) continue;
+            const delay_s = @sqrt(via.inductance_nh * 1e-9 * via.capacitance_pf * 1e-12);
+            const valid_to_hz = equivalent_via_max_phase_rad / (2.0 * std.math.pi * delay_s);
+            result = if (result) |old| @min(old, valid_to_hz) else valid_to_hz;
+        },
+    };
+    return result;
+}
+
+fn viaNeeds3d(elements: []const Element, stop_frequency_hz: f64) bool {
+    for (elements) |element| switch (element) {
+        .line => {},
+        .via => |via| if (via.inner_transition) return true,
+    };
+    const valid_to_hz = viaValidToHz(elements) orelse return false;
+    return stop_frequency_hz > valid_to_hz;
+}
+
+fn hasUnmodeledInnerStub(elements: []const Element) bool {
+    for (elements) |element| switch (element) {
+        .line => {},
+        .via => |via| if (via.inner_transition) return true,
+    };
+    return false;
+}
+
+fn viaDelayPs(elements: []const Element) f64 {
+    var result: f64 = 0;
+    for (elements) |element| switch (element) {
+        .line => {},
+        .via => |via| {
+            if (!(via.inductance_nh > 0) or !(via.capacitance_pf > 0)) continue;
+            result += @sqrt(via.inductance_nh * 1e-9 * via.capacitance_pf * 1e-12) * 1e12;
+        },
+    };
+    return result;
 }
 
 fn geometryCounts(routed: router.RouteResult, net: i32) GeometryCounts {
@@ -395,6 +503,7 @@ fn orderedElements(
     graph: *Graph,
     endpoints: [2]usize,
     context: ElementContext,
+    geometry_ok: *bool,
 ) ?usize {
     var count: usize = 0;
     var current = endpoints[0];
@@ -415,10 +524,27 @@ fn orderedElements(
                 const via = context.routed.vias[via_index];
                 const drill = if (via.drill > 0) via.drill else if (context.rule.via_drill > 0) context.rule.via_drill else via.dia * 0.5;
                 const solved = via_antipad.solve(context.stack, context.rule.rf.impedance.ohms, via.dia, drill, context.board_clearance);
+                const inner_transition = graph.nodes[edge.a].layer >= 2 or graph.nodes[edge.b].layer >= 2;
                 break :blk .{ .via = if (solved) |v|
-                    .{ .inductance_nh = v.inductance_nh, .capacitance_pf = v.capacitance_pf }
-                else
-                    .{ .inductance_nh = 0, .capacitance_pf = 0 } };
+                    .{
+                        .inductance_nh = v.inductance_nh,
+                        .capacitance_pf = v.capacitance_pf,
+                        .length_mm = v.length_mm,
+                        .drill_mm = drill,
+                        .plating_mm = context.via_plating_mm,
+                        .inner_transition = inner_transition,
+                    }
+                else invalid: {
+                    geometry_ok.* = false;
+                    break :invalid .{
+                        .inductance_nh = 0,
+                        .capacitance_pf = 0,
+                        .length_mm = 0,
+                        .drill_mm = 0,
+                        .plating_mm = 0,
+                        .inner_transition = inner_transition,
+                    };
+                } };
             },
         };
         count += 1;
@@ -461,19 +587,36 @@ pub fn analyzeNet(
     };
     const elements = try alloc.alloc(Element, graph.edge_count);
     const clearance = if (rule.clearance > 0) rule.clearance else placement.rules.design.clearance;
+    var element_geometry_ok = true;
     const element_count = orderedElements(elements, &graph, endpoints, .{
         .routed = routed,
         .stack = stack,
         .rule = rule,
         .board_clearance = clearance,
-    }) orelse {
+        .via_plating_mm = placement.rules.physical.via_plating_mm,
+    }, &element_geometry_ok) orelse {
         base.status = .unsupported_topology;
         summarize(&base);
         return base;
     };
+    if (!element_geometry_ok) {
+        base.status = .unsupported_geometry;
+        summarize(&base);
+        return base;
+    }
 
-    base.status = .ok;
+    // The antipad L/C estimate is valuable while the transition is
+    // electrically short. Once it crosses the conservative lambda/20 limit,
+    // its capacitance is circular with the authored impedance target and the
+    // route lacks the actual pad-stack, return-via and stub geometry needed
+    // for independent certification. Keep the passive distributed sweep as a
+    // diagnostic, but never turn that target-derived match into a green pass.
+    base.via_model.valid_to_hz = viaValidToHz(elements[0..element_count]);
+    base.via_model.target_synthesized_antipad = base.via_model.valid_to_hz != null;
+    base.via_model.inner_stub_unmodeled = hasUnmodeledInnerStub(elements[0..element_count]);
+    base.status = if (viaNeeds3d(elements[0..element_count], base.target.band.stop_hz)) .via_needs_3d else .ok;
     summarize(&base);
+    base.summary.delay_ps += viaDelayPs(elements[0..element_count]);
     const samples = try alloc.alloc(Sample, sweep_points);
     const ratio = base.target.band.stop_hz / base.target.band.start_hz;
     for (samples, 0..) |*sample, i| {
@@ -513,6 +656,82 @@ fn summarize(result: *Analysis) void {
 
 const testing = std.testing;
 
+fn expectPassiveViaSweep(elements: []const Element) !void {
+    var i: usize = 0;
+    while (i <= 40) : (i += 1) {
+        const frequency_hz = 0.2e9 + 19.8e9 * @as(f64, @floatFromInt(i)) / 40.0;
+        const sample = sampleAt(elements, &.{}, frequency_hz, 50);
+        try testing.expect(std.math.isFinite(sample.return_loss_db));
+        try testing.expect(std.math.isFinite(sample.insertion_loss_db));
+        try testing.expect(sample.return_loss_db > 40);
+        try testing.expect(sample.insertion_loss_db >= 0);
+        try testing.expect(sample.insertion_loss_db < 1);
+    }
+}
+
+fn analyzeTestVia(
+    alloc: std.mem.Allocator,
+    stop_frequency_hz: f64,
+    from_layer: u8,
+    to_layer: u8,
+    via_dia_mm: f64,
+) !Analysis {
+    const dielectrics = [_]impedance.Dielectric{
+        .{ .after_layer = 1, .thickness_mm = 0.0994, .er = 4.4 },
+        .{ .after_layer = 2, .thickness_mm = 0.1346, .er = 4.4 },
+        .{ .after_layer = 3, .thickness_mm = 0.8560, .er = 4.4 },
+        .{ .after_layer = 4, .thickness_mm = 0.1346, .er = 4.4 },
+        .{ .after_layer = 5, .thickness_mm = 0.0994, .er = 4.4 },
+    };
+    const physical_planes = [_]u8{ 2, 5 };
+    const plane_rows = [_]optimizer.PlaneAt{
+        .{ .index = 2, .net = "GND" },
+        .{ .index = 5, .net = "GND" },
+    };
+    const rule = optimizer.NetRule{
+        .class = .{ .name = "rf-50ohm" },
+        .width = 0.18335412052887323,
+        .clearance = 0.127,
+        .via_dia = via_dia_mm,
+        .via_drill = 0.2,
+        .rf = .{
+            .max_freq_hz = stop_frequency_hz,
+            .electrical = .{ .band_start_hz = stop_frequency_hz / 100.0, .return_loss_target_db = 20 },
+            .impedance = .{ .ohms = 50, .ground_gap_mm = 0.127, .width_derived = true },
+        },
+    };
+    var parts = [_]optimizer.Part{};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 2,
+        .maxy = 1,
+        .generated = false,
+        .rules = .{
+            .net = &.{rule},
+            .copper_layers = 6,
+            .planes = .{ .declared = &plane_rows },
+            .physical = .{
+                .via_plating_mm = 0.020,
+                .stack = .{ .layers = 6, .planes = &physical_planes, .dielectrics = &dielectrics, .board_mm = 1.6 },
+            },
+        },
+    };
+    const tracks = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 0, .layer = from_layer, .width = rule.width, .net = 0 },
+        .{ .x1 = 1, .y1 = 0, .x2 = 2, .y2 = 0, .layer = to_layer, .width = rule.width, .net = 0 },
+    };
+    const vias = [_]router.Via{.{ .x = 1, .y = 0, .dia = via_dia_mm, .drill = 0.2, .net = 0 }};
+    return (try analyzeNet(alloc, placement, .{ .tracks = &tracks, .vias = &vias, .routed = 1, .total = 1 }, 0)).?;
+}
+
 // spec: placement/trace-em - a matched quarter-wave section remains matched
 test "matched uniform section has negligible reflection" {
     const section = Section{
@@ -526,6 +745,133 @@ test "matched uniform section has negligible reflection" {
     const sample = sampleAt(&.{.{ .line = 0 }}, &.{section}, 1.0e9, 50);
     try testing.expect(sample.return_loss_db > 250);
     try testing.expect(sample.insertion_loss_db > 0);
+}
+
+// spec: placement/trace-em - a distributed through-via preserves the antipad model's low-frequency inductance and capacitance
+test "distributed via preserves its low frequency lumped equivalent" {
+    const via = ViaElement{
+        .inductance_nh = 1.49,
+        .capacitance_pf = 0.596,
+        .length_mm = 1.6,
+        .drill_mm = 0.2,
+        // Isolate the L/C equivalence from the separately modeled conductor
+        // loss. Dielectric loss has a negligible first-order effect here.
+        .plating_mm = 0,
+        .inner_transition = false,
+    };
+    const frequency_hz = 1.0e6;
+    const omega = 2.0 * std.math.pi * frequency_hz;
+    const matrix = viaMatrix(via, frequency_hz);
+
+    try testing.expectApproxEqAbs(via.inductance_nh, matrix.b.im / omega * 1e9, 1e-6);
+    try testing.expectApproxEqAbs(via.capacitance_pf, matrix.c.im / omega * 1e12, 1e-6);
+    try testing.expectApproxEqAbs(@as(f64, 1), matrix.a.re, 1e-6);
+    try testing.expectApproxEqAbs(matrix.a.re, matrix.d.re, 1e-12);
+}
+
+// spec: placement/trace-em - a target-matched 1.6 mm through-via swept to 20 GHz requires 3D verification instead of passing by construction
+test "target matched 1.6 mm via requires 3D verification at 20 GHz" {
+    var arena_instance = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+    const dielectrics = [_]impedance.Dielectric{
+        .{ .after_layer = 1, .thickness_mm = 0.0994, .er = 4.4 },
+        .{ .after_layer = 2, .thickness_mm = 0.1346, .er = 4.4 },
+        .{ .after_layer = 3, .thickness_mm = 0.8560, .er = 4.4 },
+        .{ .after_layer = 4, .thickness_mm = 0.1346, .er = 4.4 },
+        .{ .after_layer = 5, .thickness_mm = 0.0994, .er = 4.4 },
+    };
+    const planes = [_]u8{ 2, 5 };
+    const stack = impedance.Stack{ .layers = 6, .dielectrics = &dielectrics, .board_mm = 1.6 };
+    const solved = via_antipad.solve(stack, 50, 0.4, 0.2, 0.127).?;
+    try testing.expectApproxEqAbs(@as(f64, 50), solved.estimated_ohms, 1e-9);
+    const via = ViaElement{
+        .inductance_nh = solved.inductance_nh,
+        .capacitance_pf = solved.capacitance_pf,
+        .length_mm = solved.length_mm,
+        .drill_mm = 0.2,
+        .plating_mm = 0.020,
+        .inner_transition = false,
+    };
+    const elements = [_]Element{.{ .via = via }};
+
+    try expectPassiveViaSweep(&elements);
+
+    const high = sampleAt(&elements, &.{}, 20e9, 50);
+    try testing.expect(high.return_loss_db > 40);
+    try testing.expect(high.insertion_loss_db > 0.2);
+    try testing.expect(high.insertion_loss_db < 0.5);
+    try testing.expect(viaNeeds3d(&elements, 20e9));
+
+    // Exercise the public result as well as the matrix: even though the
+    // target-derived equivalent happens to look matched, the route cannot be
+    // reported as an independent electrical pass above the validity limit.
+    var parts = [_]optimizer.Part{};
+    const rule = optimizer.NetRule{
+        .class = .{ .name = "rf-50ohm" },
+        .width = 0.18335412052887323,
+        .clearance = 0.127,
+        .via_dia = 0.4,
+        .via_drill = 0.2,
+        .rf = .{
+            .max_freq_hz = 20e9,
+            .electrical = .{ .band_start_hz = 0.2e9, .return_loss_target_db = 20 },
+            .impedance = .{ .ohms = 50, .ground_gap_mm = 0.127, .width_derived = true },
+        },
+    };
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 2,
+        .maxy = 1,
+        .generated = false,
+        .rules = .{
+            .net = &.{rule},
+            .copper_layers = 6,
+            .physical = .{
+                .via_plating_mm = 0.020,
+                .stack = .{ .layers = 6, .planes = &planes, .dielectrics = &dielectrics, .board_mm = 1.6 },
+            },
+        },
+    };
+    const tracks = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = rule.width, .net = 0 },
+        .{ .x1 = 1, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 1, .width = rule.width, .net = 0 },
+    };
+    const vias = [_]router.Via{.{ .x = 1, .y = 0, .dia = 0.4, .drill = 0.2, .net = 0 }};
+    const analysis = (try analyzeNet(arena, placement, .{ .tracks = &tracks, .vias = &vias, .routed = 1, .total = 1 }, 0)).?;
+    try testing.expectEqual(Status.via_needs_3d, analysis.status);
+    try testing.expect(analysis.via_model.target_synthesized_antipad);
+    try testing.expect(analysis.via_model.valid_to_hz.? > 1.6e9);
+    try testing.expect(analysis.via_model.valid_to_hz.? < 1.8e9);
+    try testing.expect(analysis.summary.delay_ps > 29);
+    try testing.expect(analysis.summary.worst_return_loss_db > analysis.target.band.return_loss_db);
+}
+
+// spec: placement/trace-em - an unsolved through-via refuses analysis instead of becoming an identity
+test "unsolved via cannot disappear into a passing two port" {
+    var arena_instance = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_instance.deinit();
+    const analysis = try analyzeTestVia(arena_instance.allocator(), 100e6, 0, 1, 0);
+    try testing.expectEqual(Status.unsupported_geometry, analysis.status);
+    try testing.expectEqual(@as(usize, 0), analysis.samples.len);
+}
+
+// spec: placement/trace-em - an inner-layer through-via requires 3D verification for its unused barrel stub
+test "inner layer via requires 3D verification below the LC limit" {
+    var arena_instance = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_instance.deinit();
+    const analysis = try analyzeTestVia(arena_instance.allocator(), 100e6, 0, 2, 0.4);
+    try testing.expect(analysis.via_model.valid_to_hz.? > analysis.target.band.stop_hz);
+    try testing.expect(analysis.via_model.inner_stub_unmodeled);
+    try testing.expectEqual(Status.via_needs_3d, analysis.status);
 }
 
 // spec: placement/trace-em - a width step is visible as finite return loss

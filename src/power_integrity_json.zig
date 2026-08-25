@@ -8,15 +8,23 @@ const pdn_impedance = @import("placement/pdn_impedance.zig");
 const pour = @import("placement/pour.zig");
 const json_writer = @import("json_writer.zig");
 
+/// Separate ownership domains for retained JSON facts and large disposable
+/// fill rasters.
+pub const Allocators = struct {
+    output: std.mem.Allocator,
+    scratch: std.mem.Allocator,
+};
+
 /// Emit the model metadata and routed power-copper screen into a page blob.
 pub fn write(
     w: *std.Io.Writer,
-    alloc: std.mem.Allocator,
+    allocators: Allocators,
     placement: optimizer.Placement,
     routed: ?router.RouteResult,
     zones: []const pour.UserZone,
     base_edge: ?pour.EdgeField,
 ) std.Io.Writer.Error!void {
+    const alloc = allocators.output;
     try w.print(
         ",\"power_integrity\":{{\"model\":\"IPC-2221 continuous-current screen\"," ++
             "\"assumptions\":{{\"temperature_rise_c\":{d},\"via_plating_mm\":{d}," ++
@@ -122,18 +130,21 @@ pub fn write(
         try w.writeAll("]}");
     }
     try w.writeAll("],\"ac\":");
-    try writeAc(w, alloc, placement, route);
+    try writeAc(w, allocators, placement, route, zones, base_edge);
     try w.writeByte('}');
 }
 
 fn writeAc(
     w: *std.Io.Writer,
-    alloc: std.mem.Allocator,
+    allocators: Allocators,
     placement: optimizer.Placement,
     route: router.RouteResult,
+    zones: []const pour.UserZone,
+    base_edge: ?pour.EdgeField,
 ) std.Io.Writer.Error!void {
-    try w.writeAll("{\"model\":\"routed lumped RLC / target impedance screen\",\"rails\":[");
-    const ac = pdn_impedance.analyze(alloc, placement, route) catch {
+    const alloc = allocators.output;
+    try w.writeAll("{\"model\":\"routed and computed-pour lumped RLC / target impedance screen\",\"rails\":[");
+    const ac = pdn_impedance.analyzeCopper(alloc, allocators.scratch, placement, route, zones, base_edge) catch {
         try w.writeAll("]}");
         return;
     };
@@ -160,6 +171,20 @@ fn writeAcRail(w: *std.Io.Writer, alloc: std.mem.Allocator, rail: pdn_impedance.
         rail.worst_magnitude_ohm,
     });
     if (rail.passes) |pass| try w.writeAll(if (pass) "true" else "false") else try w.writeAll("null");
+    var coverage_complete = rail.capacitors.len > 0;
+    for (rail.capacitors) |cap| {
+        if (std.mem.eql(u8, cap.path_kind.power, "fallback") or !std.mem.eql(u8, cap.path_kind.ground, "computed-pour")) {
+            coverage_complete = false;
+            break;
+        }
+    }
+    try w.print(",\"path_coverage_complete\":{s},\"path_coverage_reason\":", .{if (coverage_complete) "true" else "false"});
+    if (coverage_complete)
+        try w.writeAll("null")
+    else if (rail.capacitors.len == 0)
+        try writeString(w, "no bound decoupling capacitors were extracted")
+    else
+        try writeString(w, "one or more capacitor legs use fallback or estimated geometry");
     try w.writeAll(",\"points\":[");
     for (rail.points, 0..) |point, i| {
         if (i > 0) try w.writeByte(',');
@@ -194,7 +219,11 @@ fn writeAcCap(w: *std.Io.Writer, cap: pdn_impedance.Capacitor) std.Io.Writer.Err
     try writeString(w, cap.value);
     try w.writeAll(",\"model_source\":");
     try writeString(w, cap.model_source);
-    try w.print(",\"capacitance_f\":{d},\"effective_factor\":{d},\"esr_ohm\":{d},\"intrinsic_esl_h\":{d},\"mounting_inductance_h\":{d},\"power_path_mm\":{d},\"ground_path_mm\":{d},\"routed_power_path\":{s},\"model_estimated\":{s},\"mounted_srf_hz\":{d},\"removal_impact_db\":{d},\"ideal_mount_improvement_db\":{d},\"ineffective\":{s}}}", .{
+    try w.writeAll(",\"power_path_kind\":");
+    try writeString(w, cap.path_kind.power);
+    try w.writeAll(",\"ground_path_kind\":");
+    try writeString(w, cap.path_kind.ground);
+    try w.print(",\"capacitance_f\":{d},\"effective_factor\":{d},\"esr_ohm\":{d},\"intrinsic_esl_h\":{d},\"mounting_inductance_h\":{d},\"power_path_mm\":{d},\"ground_path_mm\":{d},\"model_estimated\":{s},\"mounted_srf_hz\":{d},\"removal_impact_db\":{d},\"ideal_mount_improvement_db\":{d},\"ineffective\":{s}}}", .{
         cap.capacitance_f,
         cap.effective_factor,
         cap.esr_ohm,
@@ -202,7 +231,6 @@ fn writeAcCap(w: *std.Io.Writer, cap: pdn_impedance.Capacitor) std.Io.Writer.Err
         cap.mounting_inductance_h,
         cap.power_path_mm,
         cap.ground_path_mm,
-        if (cap.routed_power_path) "true" else "false",
         if (cap.model_estimated) "true" else "false",
         cap.mounted_srf_hz,
         cap.removal_impact_db,
@@ -229,4 +257,30 @@ fn writeString(w: *std.Io.Writer, value: []const u8) std.Io.Writer.Error!void {
         // member here instead of adding a panic to the page path.
         error.OutOfMemory => return error.WriteFailed,
     };
+}
+
+test "PDN capacitor JSON serializes finite computed-pour provenance for both legs" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try writeAcCap(&out.writer, .{
+        .ref_des = "C1",
+        .target_ref_des = "U1",
+        .target_pin = "1",
+        .value = "100nF",
+        .model_source = "fixture",
+        .capacitance_f = 100e-9,
+        .effective_factor = 1,
+        .esr_ohm = 0.02,
+        .intrinsic_esl_h = 0.4e-9,
+        .mounting_inductance_h = 0.8e-9,
+        .power_path_mm = 1.2,
+        .ground_path_mm = 1.4,
+        .path_kind = .{ .power = "computed-pour", .ground = "computed-pour" },
+        .model_estimated = false,
+        .mounted_srf_hz = 10e6,
+    });
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"power_path_kind\":\"computed-pour\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"ground_path_kind\":\"computed-pour\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"mounting_inductance_h\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"mounting_inductance_h\":0,") == null);
 }

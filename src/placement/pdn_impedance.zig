@@ -5,8 +5,8 @@
 //! unioned as they are in the DC budget), and each capacitor is a series RLC
 //! branch whose C/ESR/ESL comes from the selected BOM row. Mounting inductance
 //! is added independently from the actual pad locations, shortest connected
-//! routed power path, nearby ground-via locations, and stackup reference-plane
-//! height. The branches plus a regulator/source RL model are solved as a
+//! routed or computed-pour power path, nearby ground-via locations, and stackup
+//! reference-plane height. The branches plus a regulator/source RL model are solved as a
 //! lumped one-port over a logarithmic sweep. This is a screening model: fast,
 //! deterministic and actionable, but not a plane-cavity/package solver.
 
@@ -14,6 +14,7 @@ const std = @import("std");
 const optimizer = @import("optimizer.zig");
 const router = @import("router.zig");
 const impedance = @import("impedance.zig");
+const pour = @import("pour.zig");
 const decouple_key = @import("../decouple_key.zig");
 const net_names = @import("../net_name.zig");
 const numeric = @import("../numeric.zig");
@@ -25,6 +26,11 @@ const min_sweep_points: usize = 33;
 const max_sweep_points: usize = 161;
 const peak_prominence_db = 3.0;
 const ineffective_db = 1.0;
+
+fn capPathComplete(cap: Capacitor) bool {
+    return !std.mem.eql(u8, cap.path_kind.power, "fallback") and
+        std.mem.eql(u8, cap.path_kind.ground, "computed-pour");
+}
 
 /// One sampled complex-impedance result, stored as magnitude and phase.
 pub const Point = struct {
@@ -54,7 +60,12 @@ pub const Capacitor = struct {
     mounting_inductance_h: f64,
     power_path_mm: f64,
     ground_path_mm: f64,
-    routed_power_path: bool,
+    /// Each leg reports the copper model that earned its mounting-inductance
+    /// credit; neither a whole pour nor an assumed via becomes equipotential.
+    path_kind: struct {
+        power: []const u8,
+        ground: []const u8,
+    },
     model_estimated: bool,
     mounted_srf_hz: f64,
     removal_impact_db: f64 = 0,
@@ -163,7 +174,24 @@ fn samePoint(x1: f64, y1: f64, x2: f64, y2: f64) bool {
     return std.math.hypot(x1 - x2, y1 - y2) <= 1.0e-5;
 }
 
-const RoutePath = struct { length_mm: f64, width_mm: f64 };
+const RoutePath = struct {
+    length_mm: f64,
+    width_mm: f64,
+    /// Filled sheets integrate their finite local width directly. Explicit
+    /// tracks leave this null and use the ordinary trace formula.
+    inductance_nh: ?f64 = null,
+};
+
+const PouredSurface = struct {
+    net: []const u8,
+    layer: u8,
+    fill: pour.Fill,
+};
+
+const CopperPaths = struct {
+    power: []?RoutePath,
+    ground: []?RoutePath,
+};
 
 const PathRequest = struct {
     net: i32,
@@ -173,6 +201,18 @@ const PathRequest = struct {
     finish_reach: f64,
     board_mm: f64,
 };
+
+fn relaxPath(dist: []f64, widths: []f64, node: usize, candidate: f64, width: f64) void {
+    if (candidate >= dist[node]) return;
+    dist[node] = candidate;
+    widths[node] = width;
+}
+
+fn considerPath(answer: *f64, answer_width: *f64, candidate: f64, width: f64) void {
+    if (candidate >= answer.*) return;
+    answer.* = candidate;
+    answer_width.* = width;
+}
 
 /// Shortest connected copper-centreline path between two pads. Router output
 /// normally terminates segments at junctions; exact endpoint contacts and
@@ -188,23 +228,26 @@ fn routedPath(
     const start_reach = request.start_reach;
     const finish_reach = request.finish_reach;
     var indices: std.ArrayList(usize) = .empty;
+    defer indices.deinit(alloc);
     for (routed.tracks, 0..) |t, i| if (t.net == net) try indices.append(alloc, i);
     if (indices.items.len == 0) return null;
     const n = indices.items.len * 2;
     const dist = try alloc.alloc(f64, n);
+    defer alloc.free(dist);
     const used = try alloc.alloc(bool, n);
+    defer alloc.free(used);
+    const path_width = try alloc.alloc(f64, n);
+    defer alloc.free(path_width);
     @memset(dist, std.math.inf(f64));
     @memset(used, false);
-    var weighted_width: f64 = 0;
-    var total_track: f64 = 0;
+    @memset(path_width, 0);
     for (indices.items, 0..) |ri, i| {
         const t = routed.tracks[ri];
-        const len = std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
-        weighted_width += len * t.width;
-        total_track += len;
         if (pointSegmentDistance(start, t) <= start_reach + t.width / 2.0 + 1.0e-5) {
             dist[2 * i] = std.math.hypot(start[0] - t.x1, start[1] - t.y1);
             dist[2 * i + 1] = std.math.hypot(start[0] - t.x2, start[1] - t.y2);
+            path_width[2 * i] = t.width;
+            path_width[2 * i + 1] = t.width;
         }
     }
     var iteration: usize = 0;
@@ -222,32 +265,222 @@ fn routedPath(
         const x = if (node % 2 == 0) t.x1 else t.x2;
         const y = if (node % 2 == 0) t.y1 else t.y2;
         const other = if (node % 2 == 0) node + 1 else node - 1;
-        dist[other] = @min(dist[other], best + std.math.hypot(t.x2 - t.x1, t.y2 - t.y1));
+        const across = best + std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
+        relaxPath(dist, path_width, other, across, if (path_width[node] > 0) @min(path_width[node], t.width) else t.width);
         for (indices.items, 0..) |rj, j| {
             const q = routed.tracks[rj];
             if (q.layer == t.layer) {
-                if (samePoint(x, y, q.x1, q.y1)) dist[2 * j] = @min(dist[2 * j], best);
-                if (samePoint(x, y, q.x2, q.y2)) dist[2 * j + 1] = @min(dist[2 * j + 1], best);
+                if (samePoint(x, y, q.x1, q.y1)) relaxPath(dist, path_width, 2 * j, best, @min(path_width[node], q.width));
+                if (samePoint(x, y, q.x2, q.y2)) relaxPath(dist, path_width, 2 * j + 1, best, @min(path_width[node], q.width));
             }
         }
         for (routed.vias) |via| {
             if (via.net != net or !samePoint(x, y, via.x, via.y)) continue;
             for (indices.items, 0..) |rj, j| {
                 const q = routed.tracks[rj];
-                if (samePoint(x, y, q.x1, q.y1)) dist[2 * j] = @min(dist[2 * j], best + request.board_mm);
-                if (samePoint(x, y, q.x2, q.y2)) dist[2 * j + 1] = @min(dist[2 * j + 1], best + request.board_mm);
+                const jumped = best + request.board_mm;
+                if (samePoint(x, y, q.x1, q.y1)) relaxPath(dist, path_width, 2 * j, jumped, @min(path_width[node], q.width));
+                if (samePoint(x, y, q.x2, q.y2)) relaxPath(dist, path_width, 2 * j + 1, jumped, @min(path_width[node], q.width));
             }
         }
     }
     var answer = std.math.inf(f64);
+    var answer_width: f64 = 0;
     for (indices.items, 0..) |ri, i| {
         const t = routed.tracks[ri];
         if (pointSegmentDistance(finish, t) > finish_reach + t.width / 2.0 + 1.0e-5) continue;
-        answer = @min(answer, dist[2 * i] + std.math.hypot(finish[0] - t.x1, finish[1] - t.y1));
-        answer = @min(answer, dist[2 * i + 1] + std.math.hypot(finish[0] - t.x2, finish[1] - t.y2));
+        const first_answer = dist[2 * i] + std.math.hypot(finish[0] - t.x1, finish[1] - t.y1);
+        considerPath(&answer, &answer_width, first_answer, @min(path_width[2 * i], t.width));
+        const second_answer = dist[2 * i + 1] + std.math.hypot(finish[0] - t.x2, finish[1] - t.y2);
+        considerPath(&answer, &answer_width, second_answer, @min(path_width[2 * i + 1], t.width));
     }
     if (!std.math.isFinite(answer)) return null;
-    return .{ .length_mm = answer, .width_mm = if (total_track > 0) weighted_width / total_track else 0.2 };
+    return .{ .length_mm = answer, .width_mm = if (answer_width > 0) answer_width else 0.2 };
+}
+
+fn transverseWidth(fill: pour.Fill, component: i32, at: [2]f64, normal: [2]f64) f64 {
+    const step = fill.frame.pitch / 2.0;
+    var width = step;
+    for ([_]f64{ -1, 1 }) |sign| {
+        var distance = step;
+        while (distance <= 100.0) : (distance += step) {
+            const sample = [2]f64{ at[0] + sign * normal[0] * distance, at[1] + sign * normal[1] * distance };
+            if (fill.componentAt(sample[0], sample[1]) != component) break;
+            width += step;
+        }
+    }
+    return width;
+}
+
+/// A conservative sheet-inductance path through exact computed copper. Both
+/// pad centres and every half-pitch sample of the direct corridor must remain
+/// in one kept fill component. A hole, slot, island split, or coarsened raster
+/// refuses credit instead of treating the whole component as equipotential.
+/// Local transverse fill width is further capped by 45-degree spreading from
+/// each pad contact, then harmonically integrated along the corridor.
+fn fillPath(
+    fill: pour.Fill,
+    start: [2]f64,
+    finish: [2]f64,
+    start_width: f64,
+    finish_width: f64,
+    reference_height: f64,
+) ?RoutePath {
+    if (fill.coarsened or !(fill.frame.pitch > 0)) return null;
+    const component = fill.componentAt(start[0], start[1]);
+    if (component < 0 or fill.componentAt(finish[0], finish[1]) != component) return null;
+    const length = std.math.hypot(finish[0] - start[0], finish[1] - start[1]);
+    if (!(length > 0)) return .{ .length_mm = 0, .width_mm = @max(@min(start_width, finish_width), 0.05) };
+    const tangent = [2]f64{ (finish[0] - start[0]) / length, (finish[1] - start[1]) / length };
+    const normal = [2]f64{ -tangent[1], tangent[0] };
+    const steps = @max(@as(usize, 1), numeric.toCount(@ceil(length / (fill.frame.pitch / 2.0))));
+    const ds = length / @as(f64, @floatFromInt(steps));
+    var squares: f64 = 0;
+    for (0..steps + 1) |i| {
+        const fraction = @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(steps));
+        const at = [2]f64{ start[0] + (finish[0] - start[0]) * fraction, start[1] + (finish[1] - start[1]) * fraction };
+        if (fill.componentAt(at[0], at[1]) != component) return null;
+        const from_start = length * fraction;
+        const from_finish = length - from_start;
+        const spreading_cap = @min(start_width + 2.0 * from_start, finish_width + 2.0 * from_finish);
+        const local_width = @max(@min(transverseWidth(fill, component, at, normal), spreading_cap), 0.05);
+        const weight: f64 = if (i == 0 or i == steps) 0.5 else 1.0;
+        squares += weight * ds / local_width;
+    }
+    if (!(squares > 0)) return null;
+    return .{
+        .length_mm = length,
+        .width_mm = length / squares,
+        .inductance_nh = mu0_nh_per_mm * @max(reference_height, 0.02) * squares,
+    };
+}
+
+const PourPathRequest = struct {
+    net_name: []const u8,
+    layer: u8,
+    start: [2]f64,
+    finish: [2]f64,
+    start_width: f64,
+    finish_width: f64,
+    reference_height: f64,
+};
+
+fn pouredPath(surfaces: []const PouredSurface, request: PourPathRequest) ?RoutePath {
+    var best: ?RoutePath = null;
+    for (surfaces) |surface| {
+        if (surface.layer != request.layer or !intentMatches(surface.net, request.net_name)) continue;
+        const path = fillPath(surface.fill, request.start, request.finish, request.start_width, request.finish_width, request.reference_height) orelse continue;
+        const cost = path.length_mm / @max(path.width_mm, 0.05);
+        if (best == null or cost < best.?.length_mm / @max(best.?.width_mm, 0.05)) best = path;
+    }
+    return best;
+}
+
+fn betterPourPath(slot: *?RoutePath, candidate: RoutePath) void {
+    const candidate_cost = candidate.length_mm / @max(candidate.width_mm, 0.05);
+    if (slot.* == null or candidate_cost < slot.*.?.length_mm / @max(slot.*.?.width_mm, 0.05)) slot.* = candidate;
+}
+
+fn loopPourRequests(p: optimizer.Placement, lp: optimizer.Loop) ?struct { power: PourPathRequest, ground: PourPathRequest } {
+    if (lp.cap >= p.parts.len or lp.hub >= p.parts.len or lp.pwr_net < 0 or @as(usize, @intCast(lp.pwr_net)) >= p.nets.len) return null;
+    const cap_part = p.parts[lp.cap];
+    const hub_part = p.parts[lp.hub];
+    if (cap_part.side != hub_part.side) return null;
+    const layer: u8 = if (cap_part.side == .top) 0 else 1;
+    const h_ref = referenceHeight(p, cap_part.side);
+    return .{
+        .power = .{
+            .net_name = p.nets[@intCast(lp.pwr_net)].name,
+            .layer = layer,
+            .start = optimizer.worldPadCenter(&cap_part, lp.cap_pwr.x, lp.cap_pwr.y),
+            .finish = optimizer.worldPadCenter(&hub_part, lp.hub_pwr_pin.x, lp.hub_pwr_pin.y),
+            .start_width = @max(@min(lp.cap_pwr.w, lp.cap_pwr.h), 0.1),
+            .finish_width = @max(@min(lp.hub_pwr_pin.w, lp.hub_pwr_pin.h), 0.1),
+            .reference_height = h_ref,
+        },
+        .ground = .{
+            .net_name = "GND",
+            .layer = layer,
+            .start = optimizer.worldPadCenter(&cap_part, lp.cap_gnd.x, lp.cap_gnd.y),
+            .finish = optimizer.worldPadCenter(&hub_part, lp.hub_gnd_pin.x, lp.hub_gnd_pin.y),
+            .start_width = @max(@min(lp.cap_gnd.w, lp.cap_gnd.h), 0.1),
+            .finish_width = @max(@min(lp.hub_gnd_pin.w, lp.hub_gnd_pin.h), 0.1),
+            .reference_height = h_ref,
+        },
+    };
+}
+
+fn considerSurfacePath(slot: *?RoutePath, surface: PouredSurface, request: PourPathRequest) void {
+    if (surface.layer != request.layer or !intentMatches(surface.net, request.net_name)) return;
+    const candidate = fillPath(surface.fill, request.start, request.finish, request.start_width, request.finish_width, request.reference_height) orelse return;
+    betterPourPath(slot, candidate);
+}
+
+fn computedPaths(
+    alloc: std.mem.Allocator,
+    scratch_alloc: std.mem.Allocator,
+    p: optimizer.Placement,
+    routed: router.RouteResult,
+    zones: []const pour.UserZone,
+    base_edge: ?pour.EdgeField,
+) std.mem.Allocator.Error!CopperPaths {
+    const Meta = struct { net: []const u8, layer: u8, spec: pour.LayerSpec };
+    var metas: std.ArrayList(Meta) = .empty;
+    const copper: pour.Copper = .{ .tracks = routed.tracks, .vias = routed.vias, .zones = zones };
+    for (p.nets) |net| {
+        var relevant = optimizer.isGroundName(net_names.leaf(net.name));
+        for (p.rules.physical.pdn_intents) |intent| if (intentMatches(intent.net, net.name)) {
+            relevant = true;
+            break;
+        };
+        if (!relevant) continue;
+        const layers = try pour.carryingLayers(alloc, p.rules, net.name);
+        for (layers) |layer| {
+            const signal_layer = layer.track_layer orelse continue;
+            var spec = layer;
+            spec.higher = try pour.higherThanDeclared(alloc, zones, signal_layer, spec.net);
+            try metas.append(alloc, .{ .net = net.name, .layer = signal_layer, .spec = spec });
+        }
+    }
+    for (zones, 0..) |zone, i| {
+        var relevant = optimizer.isGroundName(net_names.leaf(zone.net));
+        for (p.rules.physical.pdn_intents) |intent| if (intentMatches(intent.net, zone.net)) {
+            relevant = true;
+            break;
+        };
+        if (!relevant) continue;
+        var spec = pour.zoneLayerSpec(zone.net, pour.sideOfSignal(zone.layer), zone.layer, zone.poly);
+        spec.higher = try pour.higherPolys(alloc, zones, i);
+        try metas.append(alloc, .{ .net = zone.net, .layer = zone.layer, .spec = spec });
+    }
+    const power = try alloc.alloc(?RoutePath, p.loops.len);
+    const ground = try alloc.alloc(?RoutePath, p.loops.len);
+    @memset(power, null);
+    @memset(ground, null);
+    const shared = if (base_edge) |field| field else try pour.sharedEdgeField(alloc, p);
+
+    // `computeFill` is arena-oriented and keeps several board-sized work
+    // rasters beside its returned labels. The server allocator outlives its
+    // cached pages, so retaining every relevant surface there made a Barracuda
+    // page hold nearly a gigabyte. Extract compact per-loop facts
+    // while one surface is live, then recycle all of that surface's scratch
+    // before rasterizing the next one.
+    var scratch_state = std.heap.ArenaAllocator.init(scratch_alloc);
+    defer scratch_state.deinit();
+    for (metas.items) |meta| {
+        const surface = PouredSurface{
+            .net = meta.net,
+            .layer = meta.layer,
+            .fill = try pour.computeMaskShared(scratch_state.allocator(), p, copper, meta.spec, shared),
+        };
+        for (p.loops, 0..) |lp, i| {
+            const requests = loopPourRequests(p, lp) orelse continue;
+            considerSurfacePath(&power[i], surface, requests.power);
+            considerSurfacePath(&ground[i], surface, requests.ground);
+        }
+        _ = scratch_state.reset(.retain_capacity);
+    }
+    return .{ .power = power, .ground = ground };
 }
 
 fn nearestGroundVia(p: optimizer.Placement, routed: router.RouteResult, at: [2]f64) ?router.Via {
@@ -278,6 +511,10 @@ fn traceInductanceNh(length_mm: f64, width_mm: f64, height_mm: f64) f64 {
     return mu0_nh_per_mm * h * length_mm / @max(width, h * 2.0);
 }
 
+fn pathInductanceNh(path: RoutePath, height_mm: f64) f64 {
+    return path.inductance_nh orelse traceInductanceNh(path.length_mm, path.width_mm, height_mm);
+}
+
 fn viaInductanceNh(height_mm: f64, drill_mm: f64) f64 {
     const h = @max(height_mm, 0.02);
     const d = @max(drill_mm, 0.08);
@@ -289,6 +526,8 @@ fn buildCap(
     alloc: std.mem.Allocator,
     p: optimizer.Placement,
     routed: router.RouteResult,
+    pour_path: ?RoutePath,
+    ground_pour_path: ?RoutePath,
     lp: optimizer.Loop,
 ) std.mem.Allocator.Error!?Capacitor {
     if (lp.cap >= p.parts.len or lp.hub >= p.parts.len or lp.cap >= p.instances.len or lp.pwr_net < 0) return null;
@@ -318,35 +557,58 @@ fn buildCap(
         .finish_reach = hp_reach,
         .board_mm = board_mm,
     });
-    const straight = std.math.hypot(cp[0] - hp[0], cp[1] - hp[1]);
-    const power_mm = if (route_path) |path| path.length_mm else straight;
-    const power_width = if (route_path) |path| path.width_mm else @max(lp.cap_pwr.w, 0.1);
     const h_ref = referenceHeight(p, cap_part.side);
-    var mount_nh = traceInductanceNh(power_mm, power_width, h_ref);
-
-    const cap_via = nearestGroundVia(p, routed, cg);
-    const hub_via = nearestGroundVia(p, routed, hg);
-    var ground_mm: f64 = 0;
-    if (cap_via) |v| {
-        const d = std.math.hypot(cg[0] - v.x, cg[1] - v.y);
-        ground_mm += d;
-        mount_nh += traceInductanceNh(d, @max(lp.cap_gnd.w, 0.1), h_ref);
-        mount_nh += viaInductanceNh(h_ref, if (v.drill > 0) v.drill else 0.2);
-    } else {
-        ground_mm += std.math.hypot(cg[0] - hg[0], cg[1] - hg[1]);
-        mount_nh += viaInductanceNh(h_ref, 0.2);
-    }
-    if (hub_via) |v| {
-        const d = std.math.hypot(hg[0] - v.x, hg[1] - v.y);
-        ground_mm += d;
-        mount_nh += traceInductanceNh(d, @max(lp.hub_gnd_pin.w, 0.1), h_ref);
-        mount_nh += viaInductanceNh(h_ref, if (v.drill > 0) v.drill else 0.2);
-        if (cap_via) |cv| {
-            const spread = std.math.hypot(cv.x - v.x, cv.y - v.y);
-            const spread_width = @max(0.5, spread / 2.0);
-            mount_nh += traceInductanceNh(spread, spread_width, h_ref);
+    const straight = std.math.hypot(cp[0] - hp[0], cp[1] - hp[1]);
+    var power_kind: []const u8 = "fallback";
+    const power_path = if (route_path) |trace| if (pour_path) |sheet| blk: {
+        if (pathInductanceNh(sheet, h_ref) < pathInductanceNh(trace, h_ref)) {
+            power_kind = "computed-pour";
+            break :blk sheet;
         }
-    } else mount_nh += viaInductanceNh(h_ref, 0.2);
+        power_kind = "track";
+        break :blk trace;
+    } else blk: {
+        power_kind = "track";
+        break :blk trace;
+    } else if (pour_path) |sheet| blk: {
+        power_kind = "computed-pour";
+        break :blk sheet;
+    } else null;
+    const power_mm = if (power_path) |path| path.length_mm else straight;
+    const power_width = if (power_path) |path| path.width_mm else @max(lp.cap_pwr.w, 0.1);
+    var mount_nh = if (power_path) |path| pathInductanceNh(path, h_ref) else traceInductanceNh(power_mm, power_width, h_ref);
+
+    var ground_kind: []const u8 = "fallback";
+    var ground_mm: f64 = 0;
+    if (ground_pour_path) |path| {
+        ground_kind = "computed-pour";
+        ground_mm = path.length_mm;
+        mount_nh += pathInductanceNh(path, h_ref);
+    } else {
+        const cap_via = nearestGroundVia(p, routed, cg);
+        const hub_via = nearestGroundVia(p, routed, hg);
+        if (cap_via != null and hub_via != null) ground_kind = "estimated-via-return";
+        if (cap_via) |v| {
+            const d = std.math.hypot(cg[0] - v.x, cg[1] - v.y);
+            ground_mm += d;
+            mount_nh += traceInductanceNh(d, @max(lp.cap_gnd.w, 0.1), h_ref);
+            mount_nh += viaInductanceNh(h_ref, if (v.drill > 0) v.drill else 0.2);
+        } else {
+            ground_mm += std.math.hypot(cg[0] - hg[0], cg[1] - hg[1]);
+            mount_nh += viaInductanceNh(h_ref, 0.2);
+        }
+        if (hub_via) |v| {
+            const d = std.math.hypot(hg[0] - v.x, hg[1] - v.y);
+            ground_mm += d;
+            mount_nh += traceInductanceNh(d, @max(lp.hub_gnd_pin.w, 0.1), h_ref);
+            mount_nh += viaInductanceNh(h_ref, if (v.drill > 0) v.drill else 0.2);
+            if (cap_via) |cv| {
+                const spread = std.math.hypot(cv.x - v.x, cv.y - v.y);
+                const spread_width = @max(0.5, spread / 2.0);
+                mount_nh += traceInductanceNh(spread, spread_width, h_ref);
+            }
+        } else mount_nh += viaInductanceNh(h_ref, 0.2);
+    }
 
     const mount_h = mount_nh * 1.0e-9;
     const srf = 1.0 / (two_pi * @sqrt(@max(1.0e-30, (esl + mount_h) * c_eff)));
@@ -363,7 +625,7 @@ fn buildCap(
         .mounting_inductance_h = mount_h,
         .power_path_mm = power_mm,
         .ground_path_mm = ground_mm,
-        .routed_power_path = route_path != null,
+        .path_kind = .{ .power = power_kind, .ground = ground_kind },
         .model_estimated = !explicit_model,
         .mounted_srf_hz = srf,
     };
@@ -418,13 +680,14 @@ fn buildRail(
     alloc: std.mem.Allocator,
     p: optimizer.Placement,
     routed: router.RouteResult,
+    paths: CopperPaths,
     intent: @import("../eval/env.zig").PdnIntent,
 ) std.mem.Allocator.Error!Rail {
     var caps: std.ArrayList(Capacitor) = .empty;
-    for (p.loops) |lp| {
+    for (p.loops, 0..) |lp, i| {
         if (lp.pwr_net < 0 or @as(usize, @intCast(lp.pwr_net)) >= p.nets.len) continue;
         if (!intentMatches(intent.net, p.nets[@intCast(lp.pwr_net)].name)) continue;
-        if (try buildCap(alloc, p, routed, lp)) |cap| try caps.append(alloc, cap);
+        if (try buildCap(alloc, p, routed, paths.power[i], paths.ground[i], lp)) |cap| try caps.append(alloc, cap);
     }
     const explicit_step = intent.step_current_a;
     const step = explicit_step orelse inferredStep(p, intent.net);
@@ -466,7 +729,16 @@ fn buildRail(
     rail.points = points;
     rail.worst_frequency_hz = points[worst_index].frequency_hz;
     rail.worst_magnitude_ohm = points[worst_index].magnitude_ohm;
-    if (target) |z| rail.passes = verdict_worst <= z;
+    var path_complete = rail.capacitors.len > 0;
+    for (rail.capacitors) |cap| {
+        if (!capPathComplete(cap)) {
+            path_complete = false;
+            break;
+        }
+    }
+    // Fallback branches remain in the diagnostic curve, but an assumed
+    // straight trace or imaginary return via can never produce a green proof.
+    if (target) |z| rail.passes = if (path_complete) verdict_worst <= z else null;
     rail.peaks = try peakList(alloc, points, target);
     const f_probe = rail.worst_frequency_hz;
     const with_mag = @max(1.0e-30, rail.worst_magnitude_ohm);
@@ -484,8 +756,22 @@ pub fn analyze(
     p: optimizer.Placement,
     routed: router.RouteResult,
 ) std.mem.Allocator.Error!Analysis {
+    return analyzeCopper(alloc, alloc, p, routed, &.{}, null);
+}
+
+/// Extract and sweep explicit PDN intents against routed copper plus the exact
+/// clearance-carved saved user pours used for fabrication and connectivity.
+pub fn analyzeCopper(
+    alloc: std.mem.Allocator,
+    scratch_alloc: std.mem.Allocator,
+    p: optimizer.Placement,
+    routed: router.RouteResult,
+    zones: []const pour.UserZone,
+    base_edge: ?pour.EdgeField,
+) std.mem.Allocator.Error!Analysis {
+    const paths = try computedPaths(alloc, scratch_alloc, p, routed, zones, base_edge);
     var rails: std.ArrayList(Rail) = .empty;
-    for (p.rules.physical.pdn_intents) |intent| try rails.append(alloc, try buildRail(alloc, p, routed, intent));
+    for (p.rules.physical.pdn_intents) |intent| try rails.append(alloc, try buildRail(alloc, p, routed, paths, intent));
     return .{ .rails = try rails.toOwnedSlice(alloc) };
 }
 
@@ -529,7 +815,7 @@ test "series RLC branch resonates at mounted SRF" {
         .mounting_inductance_h = 0.6e-9,
         .power_path_mm = 1,
         .ground_path_mm = 1,
-        .routed_power_path = true,
+        .path_kind = .{ .power = "track", .ground = "computed-pour" },
         .model_estimated = false,
         .mounted_srf_hz = 1.0 / (two_pi * @sqrt(100e-9 * 1e-9)),
     };
@@ -543,4 +829,220 @@ test "mounting inductance lowers capacitor self resonance" {
     const bare = 1.0 / (two_pi * @sqrt(c * 0.4e-9));
     const mounted = 1.0 / (two_pi * @sqrt(c * (0.4e-9 + 3.0e-9)));
     try std.testing.expect(mounted < bare / 2.0);
+}
+
+test "PDN rail without extracted capacitors cannot green-pass" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const intents = [_]@import("../eval/env.zig").PdnIntent{.{ .net = "VDD", .ripple_v = 0.1, .step_current_a = 1 }};
+    const placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 0,
+        .maxy = 0,
+        .generated = true,
+        .rules = .{ .physical = .{ .pdn_intents = &intents } },
+    };
+    const analysis = try analyze(arena_state.allocator(), placement, .{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 });
+    try std.testing.expectEqual(@as(usize, 0), analysis.rails[0].capacitors.len);
+    try std.testing.expect(analysis.rails[0].passes == null);
+}
+
+// spec: placement/pdn-impedance - a computed PDN pour path integrates finite transverse sheet width capped by terminal spreading, so a broad fill lowers mounting inductance while a narrow neck limits it
+test "computed custom pour corridor lowers mounting inductance without becoming equipotential" {
+    const broad_labels: [45]i32 = @splat(0);
+    const broad = pour.Fill{
+        .frame = .{ .minx = 0, .miny = 0, .pitch = 1, .nx = 9, .ny = 5 },
+        .labels = &broad_labels,
+        .n_comp = 1,
+        .contours = &.{},
+        .holes = &.{},
+        .coarsened = false,
+    };
+    var narrow_labels: [45]i32 = @splat(-1);
+    for (18..27) |i| narrow_labels[i] = 0;
+    const narrow = pour.Fill{
+        .frame = broad.frame,
+        .labels = &narrow_labels,
+        .n_comp = 1,
+        .contours = &.{},
+        .holes = &.{},
+        .coarsened = false,
+    };
+    const surfaces = [_]PouredSurface{.{ .net = "VDD", .layer = 0, .fill = broad }};
+    const wide_path = pouredPath(&surfaces, .{
+        .net_name = "VDD",
+        .layer = 0,
+        .start = .{ 0.5, 2.5 },
+        .finish = .{ 8.5, 2.5 },
+        .start_width = 1,
+        .finish_width = 1,
+        .reference_height = 0.1,
+    }).?;
+    const neck_path = fillPath(narrow, .{ 0.5, 2.5 }, .{ 8.5, 2.5 }, 1, 1, 0.1).?;
+    try std.testing.expect(wide_path.inductance_nh.? > 0);
+    try std.testing.expect(wide_path.inductance_nh.? < neck_path.inductance_nh.?);
+    try std.testing.expect(wide_path.width_mm > neck_path.width_mm);
+}
+
+// spec: placement/pdn-impedance - a hole, split island, or coarsened fill refuses PDN pour-path credit
+test "computed pour refuses a hole split island and coarsened fill" {
+    var hole_labels: [27]i32 = @splat(0);
+    hole_labels[13] = -1;
+    const hole = pour.Fill{
+        .frame = .{ .minx = 0, .miny = 0, .pitch = 1, .nx = 9, .ny = 3 },
+        .labels = &hole_labels,
+        .n_comp = 1,
+        .contours = &.{},
+        .holes = &.{},
+        .coarsened = false,
+    };
+    try std.testing.expect(fillPath(hole, .{ 0.5, 1.5 }, .{ 8.5, 1.5 }, 1, 1, 0.1) == null);
+
+    var split_labels: [27]i32 = @splat(0);
+    for (14..27) |i| split_labels[i] = 1;
+    var split = hole;
+    split.labels = &split_labels;
+    split.n_comp = 2;
+    try std.testing.expect(fillPath(split, .{ 0.5, 1.5 }, .{ 8.5, 1.5 }, 1, 1, 0.1) == null);
+
+    var coarse = hole;
+    const coarse_labels: [27]i32 = @splat(0);
+    coarse.labels = &coarse_labels;
+    coarse.coarsened = true;
+    try std.testing.expect(fillPath(coarse, .{ 0.5, 1.5 }, .{ 8.5, 1.5 }, 1, 1, 0.1) == null);
+}
+
+test "diagonal computed-pour neck retains finite transverse width" {
+    var labels: [49]i32 = @splat(-1);
+    for (0..7) |i| {
+        labels[i * 7 + i] = 0;
+        if (i + 1 < 7) labels[i * 7 + i + 1] = 0;
+        if (i > 0) labels[i * 7 + i - 1] = 0;
+    }
+    const fill = pour.Fill{
+        .frame = .{ .minx = 0, .miny = 0, .pitch = 1, .nx = 7, .ny = 7 },
+        .labels = &labels,
+        .n_comp = 1,
+        .contours = &.{},
+        .holes = &.{},
+        .coarsened = false,
+    };
+    const path = fillPath(fill, .{ 0.5, 0.5 }, .{ 6.5, 6.5 }, 1, 1, 0.1).?;
+    try std.testing.expect(path.width_mm > 0.5 and path.width_mm < 2.0);
+    try std.testing.expect(path.inductance_nh.? > 0);
+}
+
+// spec: placement/pdn-impedance - a routed PDN path uses the selected route's bottleneck width, not unrelated copper on the same net
+test "routed power path reports the selected path bottleneck width" {
+    const tracks = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.1, .net = 0 },
+        .{ .x1 = 1, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.3, .net = 0 },
+        .{ .x1 = 20, .y1 = 20, .x2 = 40, .y2 = 20, .layer = 0, .width = 5, .net = 0 },
+    };
+    const routed = router.RouteResult{ .tracks = &tracks, .vias = &.{}, .routed = 1, .total = 1 };
+    const path = (try routedPath(std.testing.allocator, routed, .{
+        .net = 0,
+        .start = .{ 0, 0 },
+        .finish = .{ 2, 0 },
+        .start_reach = 0.05,
+        .finish_reach = 0.05,
+        .board_mm = 1.6,
+    })).?;
+    try std.testing.expectApproxEqAbs(@as(f64, 0.1), path.width_mm, 1e-12);
+}
+
+// spec: placement/pdn-impedance - a saved custom-pour corridor reaches live PDN analysis and reports computed-pour provenance for each credited leg
+// spec: placement/pdn-impedance - PDN pour extraction retains only compact per-capacitor path facts and recycles each board-sized fill before rasterizing the next surface
+// spec: placement/pdn-impedance - a fallback or estimated-via-return PDN mounting path remains diagnostic and cannot produce a green target-impedance verdict
+test "PDN capacitor to load custom pour is live analysis copper" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    const geometry = @import("geometry.zig");
+    const flat = @import("../flat_netlist.zig");
+    const pwr_pad = geometry.Pad{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 };
+    const gnd_pad = geometry.Pad{ .number = "2", .x = 0, .y = 1, .w = 0.4, .h = 0.4 };
+    const pads = [_]geometry.Pad{ pwr_pad, gnd_pad };
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .value = "100nF", .x = 2, .y = 5 },
+        .{ .ref_des = "U1", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 8, .y = 5 },
+    };
+    const instances = [_]flat.FlatInstance{
+        .{ .ref_des = "C1", .component = "capacitor-0402", .value = "100nF", .footprint = "C_0402", .properties = &.{}, .uuid = "c1" },
+        .{ .ref_des = "U1", .component = "load", .value = "", .footprint = "U", .properties = &.{}, .uuid = "u1" },
+    };
+    const pwr_pins = [_]flat.FlatPin{ .{ .ref_des = "C1", .pin = "1" }, .{ .ref_des = "U1", .pin = "1" } };
+    const gnd_pins = [_]flat.FlatPin{ .{ .ref_des = "C1", .pin = "2" }, .{ .ref_des = "U1", .pin = "2" } };
+    const nets = [_]optimizer.FlatNet{ .{ .name = "VDD", .pins = &pwr_pins }, .{ .name = "GND", .pins = &gnd_pins } };
+    const pwr_rect = optimizer.PadRect{ .x = 0, .y = 0, .w = 0.4, .h = 0.4 };
+    const gnd_rect = optimizer.PadRect{ .x = 0, .y = 1, .w = 0.4, .h = 0.4 };
+    const hub_pwr = [_]optimizer.PadRect{pwr_rect};
+    const hub_gnd = [_]optimizer.PadRect{gnd_rect};
+    const loops = [_]optimizer.Loop{.{
+        .cap = 0,
+        .hub = 1,
+        .cap_pwr = pwr_rect,
+        .cap_gnd = gnd_rect,
+        .hub_pwr = &hub_pwr,
+        .hub_pwr_pin = pwr_rect,
+        .hub_gnd = &hub_gnd,
+        .hub_gnd_pin = gnd_rect,
+        .pwr_net = 0,
+        .explicit_pin = "1",
+    }};
+    const intents = [_]@import("../eval/env.zig").PdnIntent{.{ .net = "VDD", .ripple_v = 0.05, .step_current_a = 0.1 }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &loops,
+        .stubs = &.{},
+        .instances = &instances,
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 1 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 10,
+        .maxy = 10,
+        .generated = true,
+        .board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 10 },
+        .rules = .{ .copper_layers = 2, .physical = .{ .stack = .{ .layers = 2 }, .pdn_intents = &intents } },
+    };
+    const ground_vias = [_]router.Via{
+        .{ .x = 2, .y = 6, .dia = 0.4, .drill = 0.2, .net = 1 },
+        .{ .x = 8, .y = 6, .dia = 0.4, .drill = 0.2, .net = 1 },
+    };
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &ground_vias, .routed = 0, .total = 1 };
+    const zone_poly = [_][2]f64{ .{ 1, 4 }, .{ 9, 4 }, .{ 9, 5.4 }, .{ 1, 5.4 } };
+    const ground_poly = [_][2]f64{ .{ 1, 5.6 }, .{ 9, 5.6 }, .{ 9, 6.4 }, .{ 1, 6.4 } };
+    const zones = [_]pour.UserZone{
+        .{ .net = "VDD", .layer = 0, .poly = &zone_poly },
+        .{ .net = "GND", .layer = 0, .poly = &ground_poly },
+    };
+    const without = try analyze(alloc, placement, routed);
+    const with = try analyzeCopper(alloc, std.testing.allocator, placement, routed, &zones, null);
+    try std.testing.expectEqualStrings("fallback", without.rails[0].capacitors[0].path_kind.power);
+    try std.testing.expectEqualStrings("estimated-via-return", without.rails[0].capacitors[0].path_kind.ground);
+    try std.testing.expect(without.rails[0].passes == null);
+    try std.testing.expectEqualStrings("computed-pour", with.rails[0].capacitors[0].path_kind.power);
+    try std.testing.expectEqualStrings("computed-pour", with.rails[0].capacitors[0].path_kind.ground);
+    try std.testing.expect(with.rails[0].capacitors[0].mounting_inductance_h > 0);
+    try std.testing.expect(with.rails[0].passes != null);
+    try std.testing.expect(with.rails[0].capacitors[0].mounting_inductance_h < without.rails[0].capacitors[0].mounting_inductance_h);
+
+    const blocker_poly = [_][2]f64{ .{ 4.5, 3 }, .{ 5.5, 3 }, .{ 5.5, 7 }, .{ 4.5, 7 } };
+    const clipped_zones = [_]pour.UserZone{
+        .{ .net = "VDD", .layer = 0, .poly = &zone_poly },
+        .{ .net = "OTHER", .layer = 0, .poly = &blocker_poly, .priority = 1 },
+    };
+    const clipped = try analyzeCopper(alloc, std.testing.allocator, placement, routed, &clipped_zones, null);
+    try std.testing.expectEqualStrings("fallback", clipped.rails[0].capacitors[0].path_kind.power);
+    try std.testing.expect(clipped.rails[0].passes == null);
 }

@@ -2103,6 +2103,7 @@ src/placement/pdn_impedance.zig::Peak struct_
 src/placement/pdn_impedance.zig::Point struct_
 src/placement/pdn_impedance.zig::Rail struct_
 src/placement/pdn_impedance.zig::analyze | fn analyze( alloc: std.mem.Allocator, p: optimizer.Placement, routed: router.RouteResult, ) std.mem.Allocator.Error!Analysis
+src/placement/pdn_impedance.zig::analyzeCopper | fn analyzeCopper( alloc: std.mem.Allocator, scratch_alloc: std.mem.Allocator, p: optimizer.Placement, routed: router.RouteResult, zones: []const pour.UserZone, base_edge: ?pour.EdgeField, ) std.mem.Allocator.Error!Analysis
 src/placement/pdn_impedance.zig::writeSpice | fn writeSpice(w: *std.Io.Writer, rail: Rail) std.Io.Writer.Error!void
 src/placement/perimeter_fence.zig::append | fn append(alloc: std.mem.Allocator, p: optimizer.Placement, routed: ?router.RouteResult) std.mem.Allocator.Error!?router.RouteResult
 src/placement/perimeter_fence.zig::generate | fn generate(alloc: std.mem.Allocator, p: optimizer.Placement) std.mem.Allocator.Error![]const router.Via
@@ -2227,6 +2228,7 @@ src/placement/pour.zig::carryingLayers | fn carryingLayers(arena: std.mem.Alloca
 src/placement/pour.zig::clippedByHigher | fn clippedByHigher(zones: []const UserZone, i: usize, x: f64, y: f64) bool
 src/placement/pour.zig::componentAt | fn componentAt(self: Fill, x: f64, y: f64) i32
 src/placement/pour.zig::compute | fn compute( arena: std.mem.Allocator, placement: optimizer.Placement, copper: Copper, spec: LayerSpec, ) std.mem.Allocator.Error!Fill
+src/placement/pour.zig::computeMaskShared | fn computeMaskShared( arena: std.mem.Allocator, placement: optimizer.Placement, copper: Copper, spec: LayerSpec, base: ?EdgeField, ) std.mem.Allocator.Error!Fill
 src/placement/pour.zig::computeMasks | fn computeMasks( arena: std.mem.Allocator, placement: optimizer.Placement, copper: Copper, specs: []const LayerSpec, ) std.mem.Allocator.Error![]Fill
 src/placement/pour.zig::computeShared | fn computeShared( arena: std.mem.Allocator, placement: optimizer.Placement, copper: Copper, spec: LayerSpec, base: ?EdgeField, ) std.mem.Allocator.Error!Fill
 src/placement/pour.zig::contains | fn contains(self: Fill, x: f64, y: f64) bool
@@ -2819,7 +2821,8 @@ src/placement/via_merge.zig::ViaPt struct_
 src/placement/via_merge.zig::plan | fn plan(arena: std.mem.Allocator, vias: []const ViaPt) std.mem.Allocator.Error![]const Merge
 src/png.zig::Error value
 src/png.zig::encodeRgb | fn encodeRgb(alloc: std.mem.Allocator, width: u32, height: u32, rgb: []const u8) Error![]u8
-src/power_integrity_json.zig::write | fn write( w: *std.Io.Writer, alloc: std.mem.Allocator, placement: optimizer.Placement, routed: ?router.RouteResult, zones: []const pour.UserZone, base_edge: ?pour.EdgeField, ) std.Io.Writer.Error!void
+src/power_integrity_json.zig::Allocators struct_
+src/power_integrity_json.zig::write | fn write( w: *std.Io.Writer, allocators: Allocators, placement: optimizer.Placement, routed: ?router.RouteResult, zones: []const pour.UserZone, base_edge: ?pour.EdgeField, ) std.Io.Writer.Error!void
 src/preflight.zig::Finding struct_
 src/preflight.zig::FindingKind enum_
 src/preflight.zig::FindingStatus enum_
@@ -3073,7 +3076,7 @@ src/serve.zig::pcbJobBegin | fn pcbJobBegin(name: []const u8) PcbJobBegin
 src/serve.zig::pcbJobFinish | fn pcbJobFinish(name: []const u8, gen: u32, outcome: JobOutcome) void
 src/serve.zig::pcbJobFrame | fn pcbJobFrame(name: []const u8, gen: u32, json: []const u8) void
 src/serve.zig::pcbJobSnapshot | fn pcbJobSnapshot(alloc: std.mem.Allocator, name: []const u8) ?PcbJobView
-src/serve.zig::serve | fn serve( io: std.Io, allocator: std.mem.Allocator, port: u16, project_dir: []const u8, auth_dir: ?[]const u8, ) ServeError!void
+src/serve.zig::serve | fn serve( io: std.Io, allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, port: u16, project_dir: []const u8, auth_dir: ?[]const u8, ) ServeError!void
 src/serve.zig::setLiveLayoutJson | fn setLiveLayoutJson(name: []const u8, data: ?[]const u8) void
 src/serve/api.zig::HandlerError value
 src/serve/api.zig::addComponentDatasheetApi | fn addComponentDatasheetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void

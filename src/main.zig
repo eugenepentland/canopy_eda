@@ -146,7 +146,7 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, command, "export-pdf")) {
         try commands.cmdExportPdf(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "serve")) {
-        try dispatchServe(init.io, allocator, args[2..], arena, init.environ_map);
+        try dispatchServe(init.io, allocator, std.heap.page_allocator, args[2..], arena, init.environ_map);
     } else if (std.mem.eql(u8, command, "mint-plugin-token")) {
         const label = optionalArg(args[2..], "--label") orelse "plugin";
         const auth_dir = try resolveAuthDir(arena, init.environ_map, args[2..]);
@@ -311,14 +311,14 @@ fn cmdGenLanguageDocs(allocator: std.mem.Allocator, out_path: []const u8, check_
 /// Resolve and start the web server (`serve` command). Extracted from
 /// `main`'s dispatch chain to keep that chain's cognitive complexity under the
 /// Guardian cap.
-fn dispatchServe(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8, arena: std.mem.Allocator, environ: *const std.process.Environ.Map) !void {
+fn dispatchServe(io: std.Io, allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, args: []const []const u8, arena: std.mem.Allocator, environ: *const std.process.Environ.Map) !void {
     const project_dir = optionalArg(args, "--project-dir") orelse ".";
     const port: u16 = if (optionalArg(args, "--port")) |p|
         std.fmt.parseInt(u16, p, parse_port_radix) catch default_serve_port
     else
         default_serve_port;
     const auth_dir_override = optionalArg(args, "--auth-dir") orelse readAuthDirEnv(arena, environ);
-    try serve_mod.serve(io, allocator, port, project_dir, auth_dir_override);
+    try serve_mod.serve(io, allocator, scratch_allocator, port, project_dir, auth_dir_override);
 }
 
 /// Print the runtime build id (the deployment-provided EDA commit from

@@ -1622,6 +1622,27 @@ test "persisted RF polygon closes its net without exposing geometry chords" {
     try std.testing.expectEqual(@as(usize, 0), drc.countKind(checked, .track_pad));
 }
 
+// spec: Web Server - The PCB trace inspector marks a target-synthesized through-via beyond its lambda-over-twenty model band as requiring 3D verification and never presents its diagnostic sweep as a green full-band verdict
+test "trace inspector refuses a green verdict beyond the via model band" {
+    const js = @embedFile("assets/pcb_board.js");
+    const json = @embedFile("trace_em_json.zig");
+    try std.testing.expect(std.mem.indexOf(u8, js, "via-needs-3d") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "needs 3D verification") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "via_model_valid_to_hz") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "via_model_valid_to_hz") != null);
+}
+
+// spec: Web Server - The PCB PDN inspector labels each capacitor power and ground path provenance and withholds a green target verdict when any mounting path remains estimated or no bound capacitor was extracted
+test "PDN inspector exposes path provenance and refuses unproven green verdicts" {
+    const js = @embedFile("assets/pcb_board.js");
+    const json = @embedFile("../power_integrity_json.zig");
+    try std.testing.expect(std.mem.indexOf(u8, js, "path unproven") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "power_path_kind") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "ground_path_kind") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "path_coverage_complete") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "no bound decoupling capacitors were extracted") != null);
+}
+
 /// How many `net_open` findings a violation list carries.
 fn countOpen(list: []const drc.Violation) usize {
     var n: usize = 0;

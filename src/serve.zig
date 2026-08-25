@@ -366,6 +366,9 @@ pub const ServerState = struct {
 /// before dispatch.
 pub const Server = struct {
     allocator: std.mem.Allocator,
+    /// Process capability for large, short-lived analysis work that must be
+    /// returned to the OS rather than retained by the response arena.
+    scratch_allocator: ?std.mem.Allocator = null,
     project_dir: []const u8,
     /// Directory holding the auth state files. Post ward-migration this is only
     /// `plugin_tokens.json` (the KiCad-sync bearer store) — passkeys, sessions,
@@ -411,6 +414,7 @@ pub const Server = struct {
         // page_allocator internally and was audited to do so.
         var req_handler = Server{
             .allocator = res.arena,
+            .scratch_allocator = self.scratch_allocator,
             .project_dir = self.project_dir,
             .auth_dir = self.auth_dir,
             .dev_mode = self.dev_mode,
@@ -635,6 +639,7 @@ fn registerLibraryRoutes(router: anytype) void {
 pub fn serve(
     io: std.Io,
     allocator: std.mem.Allocator,
+    scratch_allocator: std.mem.Allocator,
     port: u16,
     project_dir: []const u8,
     auth_dir: ?[]const u8,
@@ -655,7 +660,7 @@ pub fn serve(
     thermal_cache.publish(&state.caches.thermal_solves);
     defer thermal_cache.publish(null);
     state.ward.init(allocator); // ward verdict caches + HTTP client from WARD_* env
-    var handler = Server{ .allocator = allocator, .project_dir = project_dir, .auth_dir = effective_auth, .dev_mode = dev_mode, .state = &state };
+    var handler = Server{ .allocator = allocator, .scratch_allocator = scratch_allocator, .project_dir = project_dir, .auth_dir = effective_auth, .dev_mode = dev_mode, .state = &state };
     var server = try httpz.Server(*Server).init(io, allocator, .{
         .address = .all(port),
         .request = .{

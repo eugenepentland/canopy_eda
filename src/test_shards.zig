@@ -162,6 +162,7 @@ pub const shards: []const []const []const u8 = &.{
         "placement.power_integrity.test.",
         "placement.pdn_impedance.test.",
         "placement.power_current.test.",
+        "power_integrity_json.test.",
         "placement.rf_port_finish.test.",
         "placement.rough_routability.test.",
         "placement.route_grid.test.",

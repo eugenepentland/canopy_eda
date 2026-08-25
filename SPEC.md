@@ -2986,7 +2986,7 @@ Public functions: contains, distToEdge, signedInset, bboxRect, segCrossesEdge, r
 
 ## placement/pour
 
-Public functions: compute, computeMasks, initMargin, planeConnect, segmentComponents, stampDisc, stampPad, stampSeg, viaPlaneClearance
+Public functions: compute, computeMaskShared, computeMasks, initMargin, planeConnect, segmentComponents, stampDisc, stampPad, stampSeg, viaPlaneClearance
 
 - a seeded pour keeps its component and drops an unseeded orphan island
 - the configured minimum pour width erodes and regrows the fill, removing a connected neck narrower than the fabrication floor while restoring broad copper to its ordinary clearance boundary
@@ -3147,7 +3147,11 @@ stackup/reference planes with its own routed width and resolved grounded-CPWG
 gap, then the route is ordered as a point-to-point chain and cascaded as lossy
 transmission-line ABCD sections. Skin effect uses bulk-copper conductivity;
 dielectric loss uses the surfaced generic-FR-4 tan-delta assumption; a
-through-via uses the existing stackup-aware lumped antipad L/C estimate.
+through-via uses an equivalent distributed barrel derived from the existing
+stackup-aware antipad L/C estimate, preserving its low-frequency inductance and
+capacitance while remaining passive beyond the lumped approximation's useful
+range. Barrel resistance is included, but pad stacks, unused stubs, local
+return-via geometry, and full-wave 3D coupling remain outside the model.
 
 The result includes local and route-wide Z0, delay, Zin, S11 return loss and
 S21 insertion loss over the class band. The PCB inspector identifies the
@@ -3161,6 +3165,10 @@ silently coerced into a two-port.
 - a width step is visible as finite return loss
 - routed CPWG sections synthesize their local gap from exact widths
 - route layer 1 maps to bottom physical copper on multilayer boards
+- a distributed through-via preserves the antipad model's low-frequency inductance and capacitance
+- a target-matched 1.6 mm through-via swept to 20 GHz requires 3D verification instead of passing by construction
+- an unsolved through-via refuses analysis instead of becoming an identity
+- an inner-layer through-via requires 3D verification for its unused barrel stub
 - completeness-waiver: empty inputs (a controlled net with no routed tracks returns an explicit no-copper result; a net without an impedance target is outside this analysis and returns null)
 - completeness-waiver: large inputs (topology extraction and local field analysis are linear in the selected net's routed tracks and vias; every sweep has a fixed 61 points)
 - completeness-waiver: unauthorized access (pure analysis of an already-authorized in-memory placement and route; it performs no request or identity work)
@@ -3169,6 +3177,34 @@ silently coerced into a two-port.
 - completeness-waiver: malformed encoding (the solver receives typed finite geometry after design/layout parsing; unsupported formula domains return an explicit status)
 - completeness-waiver: integer overflow (counts are bounded by input slice lengths, allocations use the allocator's checked size arithmetic, and the sweep count is a small compile-time constant)
 - completeness-waiver: panic-free (unsupported topology and field geometry return statuses, and the transmission-line math is entered only after positive impedance, width, band, and stackup checks)
+
+## placement/pdn-impedance
+
+Public functions: analyze, analyzeCopper, writeSpice
+
+The routed-board target-impedance screen resolves each decoupling branch from
+the selected BOM C/ESR/ESL and finite mounting inductance. Explicit tracks use
+the selected path's bottleneck width. Saved power and ground pours are credited
+only through the exact clearance-carved, non-coarsened fill component, with a
+finite sheet-inductance integral capped by terminal spreading. A missing or
+refused physical path remains available as a labelled diagnostic estimate but
+cannot produce a green rail verdict. This is not a plane-cavity, package,
+regulator-loop, or full-wave solver.
+
+- a saved custom-pour corridor reaches live PDN analysis and reports computed-pour provenance for each credited leg
+- PDN pour extraction retains only compact per-capacitor path facts and recycles each board-sized fill before rasterizing the next surface
+- a computed PDN pour path integrates finite transverse sheet width capped by terminal spreading, so a broad fill lowers mounting inductance while a narrow neck limits it
+- a hole, split island, or coarsened fill refuses PDN pour-path credit
+- a routed PDN path uses the selected route's bottleneck width, not unrelated copper on the same net
+- a fallback or estimated-via-return PDN mounting path remains diagnostic and cannot produce a green target-impedance verdict
+- completeness-waiver: empty inputs (a design with no PDN intents returns an empty rail list; an intent with no bound capacitors retains an explicit diagnostic rail rather than fabricating a branch)
+- completeness-waiver: large inputs (only PDN and ground fill masks are built; membership-only fills omit contours and share the caller's edge field, while each capacitor corridor is sampled at the fill half-pitch)
+- completeness-waiver: unauthorized access (pure analysis of an already-authorized in-memory placement and saved copper; it performs no request or identity work)
+- completeness-waiver: i/o failure (the analyzer performs no I/O; optional SPICE and browser serialization are handled by callers)
+- completeness-waiver: concurrent access (all masks, paths, sweeps, and output belong to the request allocator; there is no mutable global state)
+- completeness-waiver: malformed encoding (typed finite geometry and resolved component properties enter the model; invalid or coarsened fill refuses physical-path credit)
+- completeness-waiver: integer overflow (raster dimensions and sweep counts use checked conversions and allocator-checked slice sizes)
+- completeness-waiver: panic-free (domain checks precede logarithms, square roots, divisions, and raster indexing; unsupported geometry remains an explicit unproven path)
 
 ## placement/mask-relief
 
@@ -5785,6 +5821,8 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - the schematic Design type control adds an explicit role when a string-named block currently relies on the subcircuit default
 
 - A PCB design with PDN intents resolves selected BOM electrical model properties before placement
+- The PCB trace inspector marks a target-synthesized through-via beyond its lambda-over-twenty model band as requiring 3D verification and never presents its diagnostic sweep as a green full-band verdict
+- The PCB PDN inspector labels each capacitor power and ground path provenance and withholds a green target verdict when any mounting path remains estimated or no bound capacitor was extracted
 - Hierarchical routing processes first-level sub-circuits in authored order, freezes each accepted DRC-clean local signal tree, and then runs exactly one assembled-board global candidate
 - Live autorouting names each first-level sub-circuit when it starts and streams its cumulative copper when it finishes, before whole-board global routing begins, so full and subcircuits-only runs both reveal local progress
 - A fresh isolated candidate supersedes saved module copper on the same net, including supply nets, so stale snapshots cannot poison valid bypass bonds.
