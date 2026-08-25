@@ -3174,7 +3174,7 @@ no surface can disagree about where the board ships bare.
 - a fenced max-freq class's default band widens to expose the fence row's annular rings
 - a max-freq class without a (fence …) widens the same way, because it is a fence target too and its generated fence row must untent
 - an exposed run shorter than one millimetre stays tented
-- a pad beside an exposed RF trace retains one mask web from the full relief opening, not merely from the trace centreline
+- a pad beside an exposed RF trace does not interrupt the trace relief centreline
 - exposure runs merge across segment joints before the length test
 - mask relief contains no per-via state; via exposure is solely polygon overlap with copper
 - an exposed RF trace-to-via transition opens its solved antipad plus the trace pullback only on the connected face
@@ -4226,7 +4226,7 @@ Public functions: planLayers, writeLayer
 - non-ground outer-face traces and vias remain masked where they cross an opposite-face exposed-paddle window, and a non-ground pour suppresses that window
 - a pad's own (mask-margin …) sizes its mask opening instead of the board rule, and a no-paste pad gets no stencil aperture
 - a relieved max-freq net opens solder mask only with layer polygons, never via flashes
-- mask relief geometry itself stops one mask web before pad openings so terminal fillets survive the final fabrication layer
+- mask relief restores a local pad-shaped web and then reopens the pad without interrupting the exposed trace
 - mask-relief pad-dam terminations use the authored corner fillet in the fabrication layer
 - fence vias never emit solder-mask apertures; the widened RF polygon alone exposes overlapping copper
 - (mask-relief 0) keeps a max-freq net tented and an authored pullback opts in a class without max-freq
@@ -6284,7 +6284,8 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Design Settings edits board-level numeric rules in the GUI, preserves unrelated source forms, rebuilds, and reloads the shown layout
 - Design Settings renders validated numeric rule inputs with save-and-rebuild feedback
 - Design Settings creates a design-rules source form when a board previously relied entirely on defaults
-- Assembly mask relief finishes overlapping route chords with one authored-radius terminal fillet rather than a square pad subtraction
+- Assembly mask relief retains one authored-radius terminal fillet where a pad terminates or crosses the RF route
+- Assembly and 3D mask relief restore a local pad-shaped web without interrupting the exposed trace
 - The PCB page blob names the declared plane nets, and omits the key entirely when the design declares no stackup
 - The PCB page blob names the implicit model's supply-rail plane so the client DRC shares the server's plane-carried verdict
 - The PCB page blob always carries the ground-name token vocabulary so the browser's ground test cannot drift from the server's

@@ -834,7 +834,7 @@ test "PCB review composes mask openings from substrate and actual copper" {
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
-// spec: Web Server - Assembly mask relief finishes overlapping route chords with one authored-radius terminal fillet rather than a square pad subtraction
+// spec: Web Server - Assembly mask relief retains one authored-radius terminal fillet where a pad terminates or crosses the RF route
 test "PCB review finishes rounded mask terminals after chord caps" {
     const start = std.mem.indexOf(u8, pcb_board_js, "function paintMaskRelief") orelse return error.TestUnexpectedResult;
     const tail = pcb_board_js[start..];
@@ -843,7 +843,21 @@ test "PCB review finishes rounded mask terminals after chord caps" {
     try std.testing.expect(std.mem.indexOf(u8, relief_painter, "reliefOpeningPath") != null);
     try std.testing.expect(std.mem.indexOf(u8, relief_painter, "reliefTerminalFinish") != null);
     try std.testing.expect(std.mem.indexOf(u8, relief_painter, "destination-out") != null);
-    try std.testing.expect(std.mem.indexOf(u8, relief_painter, "worldPadPath") == null);
+}
+
+// spec: Web Server - Assembly and 3D mask relief restore a local pad-shaped web without interrupting the exposed trace
+test "physical previews restore local mask islands around pads" {
+    const board_markers = [_][]const u8{
+        "function clearMaskPadIslands",             "worldPadPath(p,pd)", "PCB.rules&&PCB.rules.mask_web",
+        "if(hasRfRelief)clearMaskPadIslands(mc,L)",
+    };
+    for (board_markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+
+    const relief = std.mem.indexOf(u8, pcb_3d_surface_js, "punchRelief(ctx, data, side);") orelse return error.TestUnexpectedResult;
+    const island = std.mem.indexOf(u8, pcb_3d_surface_js, "drawPadIslands(ctx, data, side);") orelse return error.TestUnexpectedResult;
+    const aperture = std.mem.indexOfPos(u8, pcb_3d_surface_js, island, "drawPads(ctx, data, side, true);") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, pcb_3d_surface_js, "function drawPadIslands") != null);
+    try std.testing.expect(relief < island and island < aperture);
 }
 
 // spec: Web Server - assembly model bodies load from persistent calibrated PNGs and render STEP only to populate a missing or stale filesystem cache entry

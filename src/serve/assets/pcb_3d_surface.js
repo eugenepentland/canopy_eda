@@ -173,6 +173,20 @@
     });
   }
 
+  function drawPadIslands(ctx, data, side) {
+    var margin = Math.max(0, +(data.rules && data.rules.mask_margin) || 0);
+    var grow = window.PCBMaskPadIslandGrow ? window.PCBMaskPadIslandGrow() : margin;
+    (data.parts || []).forEach(function (part) {
+      withPartTransform(ctx, part, function () {
+        (part.pads || []).forEach(function (pad) {
+          if (!padOnFace(part, pad, side)) return;
+          tracePad(ctx, pad); ctx.fill();
+          if (grow > 0) { ctx.lineWidth = 2 * grow; ctx.lineJoin = "round"; ctx.stroke(); }
+        });
+      });
+    });
+  }
+
   function drawVias(ctx, data) {
     (data.vias || []).forEach(function (v) {
       ctx.beginPath(); ctx.arc(+v.x, +v.y, Math.max(+v.d || 0.4, 0.05) / 2, 0, Math.PI * 2); ctx.fill();
@@ -218,7 +232,13 @@
     ctx.setTransform(scale, 0, 0, scale, -b.minx * scale, -b.miny * scale);
     ctx.fillStyle = MASK; boardPath(ctx, pts); ctx.fill();
     ctx.globalCompositeOperation = "destination-out"; ctx.fillStyle = "#000"; ctx.strokeStyle = "#000";
-    drawPads(ctx, data, side, true); punchMaskMerges(ctx, data, side); punchRelief(ctx, data, side);
+    punchRelief(ctx, data, side);
+    // Restore only a local pad-shaped web over a wider RF relief, then reopen
+    // the pad aperture. The relief itself remains continuous around the island.
+    ctx.globalCompositeOperation = "source-over"; ctx.fillStyle = MASK; ctx.strokeStyle = MASK;
+    drawPadIslands(ctx, data, side);
+    ctx.globalCompositeOperation = "destination-out"; ctx.fillStyle = "#000"; ctx.strokeStyle = "#000";
+    drawPads(ctx, data, side, true); punchMaskMerges(ctx, data, side);
     var edge = Math.max(0, +(data.rules && data.rules.perimeter_mask_width) || 0);
     if (edge > 0) { boardPath(ctx, pts); ctx.lineWidth = 2 * edge; ctx.lineJoin = "round"; ctx.stroke(); }
     return cv;

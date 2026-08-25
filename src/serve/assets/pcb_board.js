@@ -2007,8 +2007,9 @@ function paintNetKeepouts(ctx,b){if(!b||!b.any)return;
 // including via rings, through these polygons exactly as the Gerber does.
 // Bare-copper trace relief, composed offscreen exactly like the fab geometry:
 // opening outlines first, then actual copper clipped through them. The shared
-// mask-relief solver has already stopped every terminal one web before its pad;
-// subtracting the pad dam again here would square off the authored fillet.
+// mask-relief solver has already stopped every terminal one web before its pad.
+// A pad beside (rather than on) the centreline is restored as a local
+// pad-shaped mask island below, matching the Gerber clear/reopen ordering.
 var reliefCv=null,reliefKey="";
 function reliefOutlinePath(ctx,o){var pts=o&&o.p||[];if(pts.length<3)return false;
  ctx.beginPath();ctx.moveTo(X(pts[0][0]),Y(pts[0][1]));
@@ -2047,18 +2048,28 @@ function reliefTerminalFinish(ctx,s,atStart,clear){if(!(atStart?s.ts:s.te))retur
 function paintMaskMergePads(ctx,L){P.forEach(function(p){(p.pads||[]).forEach(function(pd){
  if(pd.npth||!(pd.thru||pd.drill>0||(p.side==="bottom"?1:0)===L))return;
  ctx.fill(worldPadPath(p,pd));});});}
+function maskPadIslandGrow(){var margin=Number(PCB.rules&&PCB.rules.mask_margin)||0,
+ web=Number(PCB.rules&&PCB.rules.mask_web)||0;return Math.max(0,margin+web);}
+window.PCBMaskPadIslandGrow=maskPadIslandGrow;
+function clearMaskPadIslands(ctx,L){var grow=maskPadIslandGrow();
+ ctx.save();ctx.globalCompositeOperation="destination-out";ctx.fillStyle="#000";ctx.strokeStyle="#000";
+ ctx.lineJoin="round";ctx.lineCap="round";ctx.lineWidth=2*grow*S;
+ P.forEach(function(p){(p.pads||[]).forEach(function(pd){
+  if(!(pd.thru||pd.drill>0||(p.side==="bottom"?1:0)===L))return;
+  var shape=worldPadPath(p,pd);ctx.fill(shape);if(grow>0)ctx.stroke(shape);});});ctx.restore();}
 function paintMaskRelief(ctx){if(!PHYSICAL_REVIEW||reviewFocusHasNets())return;
  var d=PCB.mask_relief,os=d&&d.openings||[],ss=d&&d.strokes||[],js=d&&d.joints||[],ms=PCB.mask_merges||[],L=activeLayer,
-  mw=Number(PCB.rules&&PCB.rules.perimeter_mask_width)||0,any=mw>0,layerHasOutline=false;
- for(var oi=0;oi<os.length;oi++){if((os[oi].l||0)===L){any=true;layerHasOutline=true;break;}}
- if(!any)for(var i=0;i<ss.length;i++){if((ss[i].l||0)===L){any=true;break;}}
- if(!any)for(var j=0;j<js.length;j++){if((js[j].l||0)===L){any=true;break;}}
+  mw=Number(PCB.rules&&PCB.rules.perimeter_mask_width)||0,any=mw>0,layerHasOutline=false,hasRfRelief=false;
+ for(var oi=0;oi<os.length;oi++){if((os[oi].l||0)===L){any=true;hasRfRelief=true;layerHasOutline=true;break;}}
+ if(!hasRfRelief)for(var i=0;i<ss.length;i++){if((ss[i].l||0)===L){any=true;hasRfRelief=true;break;}}
+ if(!hasRfRelief)for(var j=0;j<js.length;j++){if((js[j].l||0)===L){any=true;hasRfRelief=true;break;}}
  if(!any)for(var mi=0;mi<ms.length;mi++){if((ms[mi].l||0)===L){any=true;break;}}
  if(!any)return;
  var target=ctx.canvas,cv=reliefCv;if(!cv)cv=reliefCv=document.createElement("canvas");
  if(cv.width!==target.width||cv.height!==target.height){cv.width=target.width;cv.height=target.height;reliefKey="";}
   var tr=ctx.getTransform(),corner=PCB.rules&&PCB.rules.mask_relief_corner_radius||0,
-  key=[cv.width,cv.height,L,os.length,ss.length,js.length,ms.length,(PCB.vias||[]).length,mw,corner,keepoutGeomRev,keepoutTransformKey(tr)].join("|");
+  key=[cv.width,cv.height,L,os.length,ss.length,js.length,ms.length,(PCB.vias||[]).length,mw,corner,
+   PCB.rules&&PCB.rules.mask_margin,PCB.rules&&PCB.rules.mask_web,keepoutGeomRev,keepoutTransformKey(tr)].join("|");
  if(reliefKey!==key){var mc=cv.getContext("2d");mc.setTransform(1,0,0,1,0,0);mc.clearRect(0,0,cv.width,cv.height);
   mc.setTransform(tr);mc.lineCap="round";mc.lineJoin="round";
   // Removing mask reveals substrate first. Repaint every real copper shape
@@ -2077,6 +2088,7 @@ function paintMaskRelief(ctx){if(!PHYSICAL_REVIEW||reviewFocusHasNets())return;
    ss.forEach(function(s){if((s.l||0)!==L)return;reliefTerminalFinish(mc,s,true,true);reliefTerminalFinish(mc,s,false,true);});
    mc.globalCompositeOperation="source-over";mc.fillStyle=PH.substrate;
    ss.forEach(function(s){if((s.l||0)!==L)return;reliefTerminalFinish(mc,s,true,false);reliefTerminalFinish(mc,s,false,false);});}
+  if(hasRfRelief)clearMaskPadIslands(mc,L);
   // Automatic DFM pass: a positive web below mask-web is removed by this
   // exact Gerber stroke. It belongs in the same substrate/copper compositor as
   // RF relief, because the gap between two pads may expose bare substrate.
