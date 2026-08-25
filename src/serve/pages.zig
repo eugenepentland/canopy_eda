@@ -193,7 +193,7 @@ pub fn cssPage(_: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError
 }
 
 // spec: Web Server - The navigation bar routes home through the Netlisp brand and carries no separate Designs tab
-test "navbar brand links home and no Designs tab remains" {
+test "navbar keeps the user-facing destinations" {
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
     try home_template.Navbar.render(.{"designs"}, &aw.writer);
@@ -203,9 +203,9 @@ test "navbar brand links home and no Designs tab remains" {
     try std.testing.expect(std.mem.indexOf(u8, html, "<a href=\"/\" class=\"brand\">Netlisp</a>") != null);
     // …and it is the ONLY link to `/`: the separate Designs tab is gone.
     try std.testing.expect(std.mem.indexOf(u8, html, ">Designs<") == null);
-    // The remaining destinations are untouched.
+    // Library remains, while internal tool surfaces do not appear as tabs.
     try std.testing.expect(std.mem.indexOf(u8, html, "href=\"/library\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html, "href=\"/route-review\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "href=\"/route-review\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, ">MCP</a>") == null);
 
     // The brand must still read as a link once the generic `.navbar a` colour
