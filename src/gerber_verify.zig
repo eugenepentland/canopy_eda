@@ -154,7 +154,11 @@ pub fn parse(arena: std.mem.Allocator, bytes: []const u8) ParseError!Parsed {
             },
             1 => {
                 if (in_region) {
-                    try region_points.append(arena, .{ op.x, op.y });
+                    if (arc_cw or arc_ccw) {
+                        try appendRegionArc(&region_points, arena, .{ cx, cy }, .{ op.x, op.y }, .{ op.i, op.j }, arc_cw);
+                    } else {
+                        try region_points.append(arena, .{ op.x, op.y });
+                    }
                 } else if (arc_cw or arc_ccw) {
                     const arc = Arc{
                         .p1 = .{ cx, cy },
@@ -202,6 +206,46 @@ pub fn parse(arena: std.mem.Allocator, bytes: []const u8) ParseError!Parsed {
         .regions = try regions.toOwnedSlice(arena),
         .ops = try ops.toOwnedSlice(arena),
     };
+}
+
+/// Flatten one native interpolation while it is part of a G36/G37 contour.
+/// `Region` is intentionally a polygon because the preview composes it with a
+/// normal canvas fill; retaining only the interpolation's endpoint would turn
+/// every rounded Gerber boundary into its chord.
+fn appendRegionArc(
+    points: *std.ArrayList([2]f64),
+    arena: std.mem.Allocator,
+    start: [2]f64,
+    finish: [2]f64,
+    center_offset: [2]f64,
+    cw: bool,
+) std.mem.Allocator.Error!void {
+    const center = [2]f64{ start[0] + center_offset[0], start[1] + center_offset[1] };
+    const radius = std.math.hypot(start[0] - center[0], start[1] - center[1]);
+    if (!(radius > 0) or !std.math.isFinite(radius)) return points.append(arena, finish);
+
+    const a0 = std.math.atan2(start[1] - center[1], start[0] - center[0]);
+    var a1 = std.math.atan2(finish[1] - center[1], finish[0] - center[0]);
+    if (cw) {
+        while (a1 >= a0) a1 -= std.math.tau;
+    } else {
+        while (a1 <= a0) a1 += std.math.tau;
+    }
+    // At most 0.02 mm of arc length per edge is comfortably below visible CAM
+    // preview resolution. The cap also keeps malformed third-party input from
+    // manufacturing an unbounded polygon, though our own writer stays far
+    // below it.
+    const raw_steps = @ceil(@abs(a1 - a0) * radius / 0.02);
+    const steps = @max(@as(usize, 2), @as(usize, @intFromFloat(@min(raw_steps, 4096.0))));
+    for (1..steps + 1) |i| {
+        if (i == steps) {
+            try points.append(arena, finish);
+            continue;
+        }
+        const t = @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(steps));
+        const angle = a0 + (a1 - a0) * t;
+        try points.append(arena, .{ center[0] + radius * @cos(angle), center[1] + radius * @sin(angle) });
+    }
 }
 
 /// `%ADDnnK,w[Xh]*%` → an `Aperture`. `inner` is the text between `%…*%`.
@@ -428,7 +472,7 @@ test "parse reads apertures, flashes, segments, and regions" {
         "D10*\nX5000000Y5000000D03*\n" ++
         "D11*\nX1000000Y2000000D02*\nX3000000Y2000000D01*\n" ++
         "X3000000Y3000000D02*\nG02X5000000Y3000000I1000000J0D01*\nG01*\n" ++
-        "G36*\nX0Y0D02*\nX1000000Y0D01*\nX0Y0D01*\nG37*\n" ++
+        "G36*\nX0Y0D02*\nX1000000Y0D01*\nG03X2000000Y1000000I0J1000000D01*\nG01*\nX0Y0D01*\nG37*\n" ++
         "M02*\n";
     const p = try parse(arena, g);
     try testing.expectEqual(@as(usize, 2), p.apertures.len);
@@ -445,7 +489,12 @@ test "parse reads apertures, flashes, segments, and regions" {
     try testing.expect(p.arcs[0].cw);
     try testing.expectApproxEqAbs(@as(f64, 4), p.arcs[0].center[0], 1e-9);
     try testing.expectEqual(@as(usize, 1), p.regions.len);
-    try testing.expectEqual(@as(usize, 3), p.regions[0].points.len);
+    try testing.expect(p.regions[0].points.len > 3);
+    var saw_curved_region_point = false;
+    for (p.regions[0].points) |point| {
+        if (point[0] > 1.5 and point[1] < 0.5) saw_curved_region_point = true;
+    }
+    try testing.expect(saw_curved_region_point);
     try testing.expectEqual(@as(usize, 4), p.ops.len);
 }
 
