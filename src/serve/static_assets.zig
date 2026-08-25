@@ -988,8 +988,7 @@ test "PCB 3D viewer uses the physical board profile and component side" {
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_3d_viewer_js, marker) != null);
 }
 
-// spec: Web Server - the PCB 3D viewer downloads its complete assembled geometry as a self-contained millimetre-based, schema-conformant AP242 faceted B-rep STEP model that preserves each source solid, substitutes conservative mechanical envelopes retaining placed bounding extents for over-tessellated small vendor meshes, batches geometry into independent face-budgeted product roots, omits invalid open vendor fragments rather than letting them hide closed solids, and imports as bodies rather than presentation-only tessellation
-test "PCB STEP writer emits faceted B-rep bodies rather than presentation tessellation" {
+test "generated PCB STEP bodies remain faceted B-reps rather than presentation tessellation" {
     const writer_markers = [_][]const u8{
         "function splitComponents(body)",
         "function orientClosedComponent(points, triangles)",
@@ -1017,24 +1016,24 @@ test "PCB STEP writer emits faceted B-rep bodies rather than presentation tessel
     try std.testing.expect(std.mem.indexOf(u8, pcb_step_export_js, "TESSELLATED_SHAPE_REPRESENTATION(") == null);
 }
 
-test "PCB 3D viewer collects every physical group for STEP export" {
+// spec: Web Server - the PCB 3D viewer asks the server for a self-contained millimetre-based AP242 assembly: each unique library STEP entity graph is embedded once without tessellation and reused through rigid component occurrences, while only Canopy-generated board and heatsink geometry remains compact faceted B-rep; the downloaded assembly retains analytic vendor surfaces and imports as CAD bodies rather than presentation-only tessellation
+test "PCB 3D viewer sends generated solids and exact component occurrences to the server" {
     const viewer_markers = [_][]const u8{
-        "function collectStepBodies()",
+        "function collectGeneratedStepBodies()",
+        "function exactStepInstances()",
         "function collectStepMeshes(group, name)",
-        "STEP_PROXY_FACE_THRESHOLD = 32",
-        "STEP_PROXY_MAX_SIZE_MM = 10",
-        "function stepProxyBox(obj, name, meshIndex, position, triangleCount)",
-        "mechanical envelope",
         "obj.userData.pcb3dKind === \"surfaces\"",
         "collectStepMeshes(boardGroup, \"PCB\")",
         "partGroups.forEach",
         "heatsinkGroup.children",
-        "triangleColors: mixed ? triangleColors : null",
-        "window.PCBStepExport.build(DATA.name, bodies)",
+        "new THREE.Matrix4().multiplyMatrices(mount.matrixWorld, local.matrix)",
+        "matrix: Array.prototype.slice.call(world.elements)",
+        "window.PCBStepExport.prepareBodies(out)",
+        "fetch(\"/api/pcb-step/\"",
         "a.download = stepFileName()",
     };
     for (viewer_markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_3d_viewer_js, marker) != null);
-    try std.testing.expect(std.mem.indexOf(u8, pcb_3d_viewer_js, "function collectStepBody(group, name)") == null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_3d_viewer_js, "window.PCBStepExport.build(DATA.name") == null);
 }
 
 // spec: Web Server - the PCB 3D viewer composites each face's outer copper, soldermask, and silkscreen—including generated sub-circuit, test-point, and pin-1 artwork—into one non-overlapping visible canvas cap; the STEP solid carries green top/bottom faces and brown substrate walls, and only mechanical drills strictly larger than 1 mm are cut through the board

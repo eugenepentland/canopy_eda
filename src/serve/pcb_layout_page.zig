@@ -10570,7 +10570,7 @@ const pcb_3d_stage_html =
     \\<button class="btn" id="pcb3d-front">Front</button>
     \\<button class="btn" id="pcb3d-side">Side</button>
     \\<span class="sep"></span>
-    \\<button class="btn" id="pcb3d-export-step" title="Download the board, mounting holes, placed component models, and heatsink as a schema-conformant AP242 faceted B-rep STEP file">Export STEP</button>
+    \\<button class="btn" id="pcb3d-export-step" title="Download the board, mounting holes, placed component B-reps, and heatsink as a server-built AP242 STEP assembly">Export STEP</button>
     \\<span class="sep"></span>
     \\<label><input type="checkbox" id="pcb3d-t-models" checked>Models</label>
     \\<label><input type="checkbox" id="pcb3d-t-surface" checked>Surfaces</label>

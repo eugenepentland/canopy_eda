@@ -324,6 +324,7 @@ test {
     _ = @import("serve.zig");
     _ = @import("serve/assembly_debug.zig");
     _ = @import("serve/assembly_page_cache.zig");
+    _ = @import("serve/pcb_step_export.zig");
     _ = @import("serve/auth_store.zig");
     _ = @import("serve/autocommit.zig");
     _ = @import("serve/board_backup.zig");

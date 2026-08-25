@@ -588,6 +588,7 @@ test {
     _ = @import("serve/edit.zig");
     _ = @import("serve/assembly_debug.zig");
     _ = @import("serve/assembly_page_cache.zig");
+    _ = @import("serve/pcb_step_export.zig");
     _ = @import("serve/rework_guide.zig");
     _ = @import("serve/modules.zig");
     _ = @import("serve/schematic_pdf.zig");
