@@ -1915,6 +1915,11 @@ src/placement/near_bind.zig::Unresolved struct_
 src/placement/near_bind.zig::Why enum_
 src/placement/near_bind.zig::resolve | fn resolve( arena: std.mem.Allocator, instances: []const FlatInstance, nets: []const FlatNet, ) std.mem.Allocator.Error!Resolved
 src/placement/near_bind.zig::text | fn text(self: Why) []const u8
+src/placement/net_identity.zig::Identity struct_
+src/placement/net_identity.zig::canonical | fn canonical(self: Identity, net: i32) i32
+src/placement/net_identity.zig::canonicalName | fn canonicalName(self: Identity, nets: []const optimizer.FlatNet, net: i32) []const u8
+src/placement/net_identity.zig::init | fn init(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error!Identity
+src/placement/net_identity.zig::same | fn same(self: Identity, a: i32, b: i32) bool
 src/placement/net_open.zig::Report struct_
 src/placement/net_open.zig::check | fn check( arena: std.mem.Allocator, placement: optimizer.Placement, copper: routed_copper.Copper, base: ?pour.EdgeField, ) std.mem.Allocator.Error![]drc.Violation
 src/placement/net_open.zig::checkWithConnectivity | fn checkWithConnectivity( arena: std.mem.Allocator, placement: optimizer.Placement, copper: routed_copper.Copper, base: ?pour.EdgeField, plane_fills: []const pour.NetFills, ) std.mem.Allocator.Error!Report

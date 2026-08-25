@@ -2908,6 +2908,7 @@ Public functions: check, checkTopology, checkWithZones, countKind, defaultSeveri
 - a typed perimeter keepout flags only its blocked feature families, admits named nets, and exempts generated fence vias
 - flags same-layer track crossings and sub-clearance pairs between nets
 - flags a track crossing a foreign pad on its layer; other-layer SMD pads don't clash
+- parent-rail copper may touch a structurally proven generated per-pin bypass pad, while dotted lookalike nets remain foreign
 - A copper-clearance DRC violation names both nets it is between, and a pad party names its part and pad number
 - inner signal layers get the same same-layer checks; through pads clash on every inner layer
 - SMD pads on opposite board faces may overlap in 2D; sharing a face or a through barrel still clashes
@@ -3690,6 +3691,29 @@ short surface-current path to the supply land it is meant to serve.
 - completeness-waiver: concurrent access (no shared state; every graph is arena-owned by the caller)
 - completeness-waiver: malformed encoding (inputs are typed structs, never parsed bytes)
 - completeness-waiver: integer overflow (indices are bounds-checked before conversion and graph allocation follows slice lengths)
+- completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot)
+
+## placement/physical-net-identity
+
+Public functions: Identity.init, Identity.same, Identity.canonical, Identity.canonicalName
+
+The physical-copper identity shared by clearance, topology, and connectivity
+checks. Per-pin decoupling shorthand preserves an exact target by splitting a
+logical rail into a small connection net, but the fabricated copper on that
+connection remains part of the parent rail. Aliasing requires the placement's
+explicit bypass-loop metadata plus matching hub and capacitor pins; punctuation
+alone is never evidence.
+
+- Generated per-pin bypass connection nets share fabricated copper with their parent rail
+- Dotted net names without matching explicit bypass-loop and pin evidence remain electrically distinct
+- Alias connectivity does not duplicate parent-only orphan copper into every bypass-stub open-net report
+- completeness-waiver: empty inputs (an empty netlist produces an empty identity map and exact comparisons)
+- completeness-waiver: large inputs (construction is one bounded loop scan with linear net lookup; physical comparisons are constant-time)
+- completeness-waiver: unauthorized access (pure in-process identity over an already-authorized placement)
+- completeness-waiver: i/o failure (no I/O; every input is typed placement data)
+- completeness-waiver: concurrent access (no shared state; the identity slice is arena-owned by the caller)
+- completeness-waiver: malformed encoding (inputs are typed structs and all indices are bounds-checked)
+- completeness-waiver: integer overflow (indices are checked before conversion and allocations follow slice lengths)
 - completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot)
 
 ## placement/plane-stitch
@@ -6517,6 +6541,7 @@ Public functions: compute, writeJson
 - writeJson emits all six stages with status, done, total, and open items
 - an empty placement leaves the placement and routing rungs vacuously done
 - netConnectivity reports the routable and connected counts the fab report records
+- netConnectivity credits parent-rail copper to structurally proven generated per-pin bypass connections
 - a place wave is done only when every member part is locked
 - a route wave counts only its routable members toward done and total
 - the current wave is the first incomplete wave of the current stage

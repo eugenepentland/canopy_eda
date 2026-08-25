@@ -223,6 +223,7 @@ test {
     _ = @import("placement/maze_scratch.zig");
     _ = @import("placement/module_policy.zig");
     _ = @import("placement/near_bind.zig");
+    _ = @import("placement/net_identity.zig");
     _ = @import("placement/net_open.zig");
     _ = @import("placement/net_rules.zig");
     _ = @import("placement/net_topology.zig");

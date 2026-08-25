@@ -12,6 +12,7 @@ const std = @import("std");
 const copper_contact = @import("copper_contact.zig");
 const drc = @import("drc.zig");
 const optimizer = @import("optimizer.zig");
+const net_identity = @import("net_identity.zig");
 const pad_shape = @import("pad_shape.zig");
 const router = @import("router.zig");
 
@@ -26,6 +27,7 @@ pub fn check(
     tracks: []const router.Track,
 ) std.mem.Allocator.Error![]drc.Violation {
     var out: std.ArrayList(drc.Violation) = .empty;
+    const identity = try net_identity.Identity.init(arena, placement);
     for (placement.loops) |loop| {
         if (loop.explicit_pin.len == 0 or loop.rail_optout or loop.pwr_net < 0) continue;
         if (loop.cap >= placement.parts.len or loop.hub >= placement.parts.len) continue;
@@ -44,7 +46,7 @@ pub fn check(
         if (cap.side == hub.side and try surfaceConnected(
             arena,
             tracks,
-            loop.pwr_net,
+            .{ .identity = identity, .net = loop.pwr_net },
             layer,
             cap_shape,
             hub_shape,
@@ -107,19 +109,24 @@ fn tracksTouch(a: router.Track, b: router.Track) bool {
     );
 }
 
+const PhysicalNet = struct {
+    identity: net_identity.Identity,
+    net: i32,
+};
+
 /// Connectivity over only the local routed copper on `layer`: pad nodes plus
 /// the same-net track capsules. Vias and pours are intentionally absent.
 fn surfaceConnected(
     arena: std.mem.Allocator,
     all_tracks: []const router.Track,
-    net: i32,
+    physical_net: PhysicalNet,
     layer: u8,
     cap: pad_shape.Shape,
     hub: pad_shape.Shape,
 ) std.mem.Allocator.Error!bool {
     var tracks: std.ArrayList(router.Track) = .empty;
     for (all_tracks) |track| {
-        if (track.net == net and track.layer == layer) try tracks.append(arena, track);
+        if (physical_net.identity.same(track.net, physical_net.net) and track.layer == layer) try tracks.append(arena, track);
     }
     // Node 0 = cap pad, node 1 = hub pad, remainder = filtered tracks.
     const parent = try arena.alloc(usize, tracks.items.len + 2);
@@ -204,6 +211,21 @@ test "a bypass routed to the wrong QFN supply pad warns until its exact target i
     const to_target = [_]router.Track{.{ .x1 = 4, .y1 = 0, .x2 = 0, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 }};
     const closed = try check(arena, placement, &to_target);
     try std.testing.expectEqual(@as(usize, 0), closed.len);
+
+    // Per-pin shorthand keeps the exact target on VDD.U1.1, while a saved
+    // board may carry the physically identical surface leg on parent VDD.
+    // That parent-labelled copper is still a complete local bypass path.
+    const split_nets = [_]optimizer.FlatNet{
+        .{ .name = "VDD", .pins = &.{} },
+        .{ .name = "VDD.U1.1", .pins = &pins },
+    };
+    var split_loops = loops;
+    split_loops[0].pwr_net = 1;
+    var split_placement = placement;
+    split_placement.nets = &split_nets;
+    split_placement.loops = &split_loops;
+    const parent_track = [_]router.Track{.{ .x1 = 4, .y1 = 0, .x2 = 0, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 }};
+    try std.testing.expectEqual(@as(usize, 0), (try check(arena, split_placement, &parent_track)).len);
 
     var reservoir_loop = loops;
     reservoir_loop[0].rail_optout = true;

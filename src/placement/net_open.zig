@@ -41,6 +41,7 @@ const copper_contact = @import("copper_contact.zig");
 const fab = @import("../fab_readiness.zig");
 const routed_copper = @import("routed_copper.zig");
 const flat_netlist = @import("../flat_netlist.zig");
+const net_identity = @import("net_identity.zig");
 
 const eps: f64 = 1e-9;
 
@@ -92,6 +93,7 @@ pub fn checkWithConnectivity(
         .zone_fills = try fab.userZoneFills(arena, placement, copper, base),
         .base = base,
         .plane_fills = plane_fills,
+        .identity = try net_identity.Identity.init(arena, placement),
     };
     for (placement.nets, 0..) |net, ni| {
         try connectivity.append(arena, try checkNet(arena, &out, board, net, @intCast(ni)));
@@ -126,6 +128,7 @@ const Board = struct {
     zone_fills: []const pour.Fill,
     base: ?pour.EdgeField,
     plane_fills: []const pour.NetFills,
+    identity: net_identity.Identity,
 };
 
 fn checkNet(
@@ -139,6 +142,7 @@ fn checkNet(
         .zone_fills = board.zone_fills,
         .base = board.base,
         .plane_fills = board.plane_fills,
+        .identity = board.identity,
     });
     // The live DRC response only consumes routed/total from these retained
     // statuses. Its RF path lowering can contain thousands of private chords,
@@ -172,12 +176,17 @@ fn checkNet(
     // (copper touching no pad) are dropped — they are almost always connected
     // through the pour, which this pass cannot cheaply confirm; a pad-bearing
     // island that misses the plane is still a real open and stays.
-    const plane = router.netHasPlane(board.placement, net.name);
+    const canonical_net = board.identity.canonical(net_i);
+    const plane = router.netHasPlane(board.placement, board.identity.canonicalName(board.placement.nets, net_i));
     var islands: std.ArrayList(*Comp) = .empty;
     var it = comps.valueIterator();
     while (it.next()) |cp| {
         const c = cp.*;
-        if (plane and !c.has_pad) continue;
+        // An alias graph borrows the parent rail's copper solely to decide
+        // whether THIS connection net's pads reach it. Parent/sibling copper
+        // that reaches neither target pad is not an orphan of every bypass
+        // stub; its canonical net owns that diagnostic once.
+        if ((plane or canonical_net != net_i) and !c.has_pad) continue;
         try islands.append(arena, c);
     }
     if (islands.items.len < 2) return status; // everything is one piece of metal — fine.
@@ -590,6 +599,46 @@ test "a track joining the two islands produces no net_open" {
     const tracks = [_]router.Track{.{ .x1 = 0, .y1 = 0, .x2 = 10, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 }};
     const vs = try check(arena, placement, .{ .tracks = &tracks }, null);
     try testing.expectEqual(@as(usize, 0), count(vs));
+}
+
+// spec: placement/physical-net-identity - Alias connectivity does not duplicate parent-only orphan copper into every bypass-stub open-net report
+test "a bypass alias borrows parent copper without duplicating parent orphan islands" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    const hub_pads = [_]geometry.Pad{.{ .number = "5", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    const cap_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "core/U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &hub_pads, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "core/C1", .kind = .passive, .hw = 1, .hh = 1, .pads = &cap_pads, .fallback = false, .x = 4, .y = 0 },
+    };
+    const pins = [_]flat_netlist.FlatPin{
+        .{ .ref_des = "core/U1", .pin = "5" },
+        .{ .ref_des = "core/C1", .pin = "1" },
+    };
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "core/VDD", .pins = &.{} },
+        .{ .name = "core/VDD.U1.5", .pins = &pins },
+    };
+    const loops = [_]optimizer.Loop{.{
+        .cap = 1,
+        .hub = 0,
+        .cap_pwr = .{ .x = 0, .y = 0, .w = 0.6, .h = 0.6 },
+        .cap_gnd = .{ .x = 0, .y = 0, .w = 0.6, .h = 0.6 },
+        .hub_pwr = &.{},
+        .hub_pwr_pin = .{ .x = 0, .y = 0, .w = 0.6, .h = 0.6 },
+        .hub_gnd = &.{},
+        .pwr_net = 1,
+        .explicit_pin = "5",
+    }};
+    var placement = twoPadPlacement(&parts, &nets);
+    placement.loops = &loops;
+    const tracks = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 4, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 8, .y1 = 1, .x2 = 9, .y2 = 1, .layer = 0, .width = 0.2, .net = 0 },
+    };
+    try testing.expectEqual(@as(usize, 0), count(try check(arena, placement, .{ .tracks = &tracks }, null)));
 }
 
 // spec: placement/drc - a via joining two same-net islands across layers clears the net-open flag

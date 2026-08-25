@@ -19,6 +19,7 @@ const drc_match = @import("drc_match.zig");
 const geometry = @import("geometry.zig");
 const keepout = @import("keepout.zig");
 const land_transit = @import("land_transit.zig");
+const net_identity = @import("net_identity.zig");
 const pad_shape = @import("pad_shape.zig");
 const pad_neck = @import("pad_neck.zig");
 const path_copper = @import("path_copper.zig");
@@ -461,6 +462,7 @@ pub const ViaAdditionGate = struct {
         pad_grid: Grid,
         track_grid: Grid,
         tracks: []const router.Track,
+        identity: net_identity.Identity,
     };
 
     /// The grid inflation the full check would use for this copper. `probe` is
@@ -491,6 +493,7 @@ pub const ViaAdditionGate = struct {
                 .pad_grid = try Grid.build(arena, PadBox, pads, padBox, clr_max),
                 .track_grid = try Grid.build(arena, router.Track, routed.tracks, trackBox, clr_max),
                 .tracks = routed.tracks,
+                .identity = try net_identity.Identity.init(arena, placement),
             },
             .clr = .{ .base = clearance, .rules = placement.rules },
             .clr_max = clr_max,
@@ -505,7 +508,7 @@ pub const ViaAdditionGate = struct {
     /// error-severity violation (`net_open` excluded, matching `errorCount`).
     pub fn addsError(self: *ViaAdditionGate, arena: std.mem.Allocator, v: router.Via) std.mem.Allocator.Error!bool {
         var out: Viol = .empty;
-        const c = Ctx{ .arena = arena, .out = &out, .clr = self.clr, .clr_max = self.clr_max, .via_to_via = self.via_to_via };
+        const c = Ctx{ .arena = arena, .out = &out, .clr = self.clr, .clr_max = self.clr_max, .via_to_via = self.via_to_via, .identity = self.world.identity };
         const one = [_]router.Via{v};
         try checkViaPad(c, &one, self.world.pads, &self.world.pad_grid);
         try checkViaTrack(c, &one, self.world.tracks, &self.world.track_grid);
@@ -545,6 +548,7 @@ pub const TrackAdditionGate = struct {
     tracks: []const router.Track,
     vias: []const router.Via,
     clr: ClearanceResolver,
+    identity: net_identity.Identity,
 
     /// Build the immutable pad/copper world once for all bend probes.
     pub fn build(
@@ -559,6 +563,7 @@ pub const TrackAdditionGate = struct {
             .tracks = routed.tracks,
             .vias = routed.vias,
             .clr = .{ .base = clearance, .rules = placement.rules },
+            .identity = try net_identity.Identity.init(arena, placement),
         };
     }
 
@@ -566,21 +571,21 @@ pub const TrackAdditionGate = struct {
     /// edge under the same pairwise spacing rules as the full DRC.
     pub fn clear(self: TrackAdditionGate, candidate: router.Track) bool {
         for (self.pads) |pad| {
-            if (sameNet(candidate.net, pad.net)) continue;
+            if (self.identity.same(candidate.net, pad.net)) continue;
             if (!pad.thru and pad.layer != candidate.layer) continue;
             const required = self.clr.between(candidate.net, pad.net);
             const window = candidate.width / 2 + required;
             if (segShapeDist(candidate, pad, window) - candidate.width / 2 < required - eps) return false;
         }
         for (self.tracks) |track| {
-            if (sameNet(candidate.net, track.net) or candidate.layer != track.layer) continue;
+            if (self.identity.same(candidate.net, track.net) or candidate.layer != track.layer) continue;
             const required = self.clr.between(candidate.net, track.net);
             const gap = segSegDist(candidate.x1, candidate.y1, candidate.x2, candidate.y2, track.x1, track.y1, track.x2, track.y2) -
                 candidate.width / 2 - track.width / 2;
             if (gap < required - eps) return false;
         }
         for (self.vias) |via| {
-            if (sameNet(candidate.net, via.net)) continue;
+            if (self.identity.same(candidate.net, via.net)) continue;
             const required = self.clr.between(candidate.net, via.net);
             const gap = segPointDist(candidate.x1, candidate.y1, candidate.x2, candidate.y2, via.x, via.y) -
                 candidate.width / 2 - via.dia / 2;
@@ -630,7 +635,8 @@ fn checkImpl(
     var via_grid = try Grid.build(arena, router.Via, vias, viaBox, clr_max);
     var track_grid = try Grid.build(arena, router.Track, tracks, trackBox, clr_max);
 
-    const c = Ctx{ .arena = arena, .out = &out, .clr = clr, .clr_max = clr_max, .via_to_via = rules.via_to_via };
+    const identity = try net_identity.Identity.init(arena, placement);
+    const c = Ctx{ .arena = arena, .out = &out, .clr = clr, .clr_max = clr_max, .via_to_via = rules.via_to_via, .identity = identity };
     try checkViaPad(c, vias, pads, &pad_grid);
     try checkViaVia(c, vias, &via_grid);
     try checkViaTrack(c, vias, tracks, &track_grid);
@@ -715,25 +721,25 @@ fn successfulPortFrameBend(routed: router.RouteResult, bend: router.SharpBend) b
     return false;
 }
 
-fn topologyTerminals(arena: std.mem.Allocator, pads: []const PadBox) std.mem.Allocator.Error![]const copper_topology.Terminal {
+fn topologyTerminals(arena: std.mem.Allocator, pads: []const PadBox, identity: net_identity.Identity) std.mem.Allocator.Error![]const copper_topology.Terminal {
     const out = try arena.alloc(copper_topology.Terminal, pads.len);
     for (pads, out) |pad, *terminal| terminal.* = .{
         .shape = .{ .x0 = pad.x0, .y0 = pad.y0, .x1 = pad.x1, .y1 = pad.y1, .poly = pad.poly },
-        .net = pad.net,
+        .net = identity.canonical(pad.net),
         .layer = pad.layer,
         .thru = pad.thru,
     };
     return out;
 }
 
-fn topologyTracks(arena: std.mem.Allocator, tracks: []const router.Track) std.mem.Allocator.Error![]const copper_topology.Track {
+fn topologyTracks(arena: std.mem.Allocator, tracks: []const router.Track, identity: net_identity.Identity) std.mem.Allocator.Error![]const copper_topology.Track {
     const out = try arena.alloc(copper_topology.Track, tracks.len);
     for (tracks, out) |track, *topology| topology.* = .{
         .a = .{ track.x1, track.y1 },
         .b = .{ track.x2, track.y2 },
         .layer = track.layer,
         .width = track.width,
-        .net = track.net,
+        .net = identity.canonical(track.net),
     };
     return out;
 }
@@ -759,9 +765,9 @@ fn topologyTrackIdentities(
     return identities;
 }
 
-fn topologyVias(arena: std.mem.Allocator, vias: []const router.Via) std.mem.Allocator.Error![]const copper_topology.Via {
+fn topologyVias(arena: std.mem.Allocator, vias: []const router.Via, identity: net_identity.Identity) std.mem.Allocator.Error![]const copper_topology.Via {
     const out = try arena.alloc(copper_topology.Via, vias.len);
-    for (vias, out) |via, *topology| topology.* = .{ .at = .{ via.x, via.y }, .dia = via.dia, .net = via.net };
+    for (vias, out) |via, *topology| topology.* = .{ .at = .{ via.x, via.y }, .dia = via.dia, .net = identity.canonical(via.net) };
     return out;
 }
 
@@ -784,10 +790,11 @@ fn checkCopperTopology(
     const tracks = route.tracks;
     const zones = route.zones;
     const vias = routed.vias;
+    const identity = try net_identity.Identity.init(arena, placement);
     const track_identities = try topologyTrackIdentities(arena, routed, tracks);
-    const terminals = try topologyTerminals(arena, pads);
-    const topology_tracks = try topologyTracks(arena, tracks);
-    const topology_vias = try topologyVias(arena, vias);
+    const terminals = try topologyTerminals(arena, pads, identity);
+    const topology_tracks = try topologyTracks(arena, tracks, identity);
+    const topology_vias = try topologyVias(arena, vias, identity);
     const implicit = try copper_topology.implicitJoins(arena, topology_tracks);
     for (implicit) |join| {
         const stored_i = track_identities[join.a] orelse track_identities[join.b] orelse continue;
@@ -816,9 +823,10 @@ fn checkCopperTopology(
     const via_candidates = try arena.alloc(bool, vias.len);
     const via_components = try arena.alloc([]const u64, vias.len);
     for (vias, 0..) |via, via_i| {
-        const non_ground = via.net >= 0 and @as(usize, @intCast(via.net)) < placement.nets.len and
-            !optimizer.isGroundName(router.shortName(placement.nets[@intCast(via.net)].name));
-        via_components[via_i] = try copper_support.componentsAt(arena, placement, via.net, zones, .{ via.x, via.y }, null);
+        const canonical_net = identity.canonical(via.net);
+        const non_ground = canonical_net >= 0 and @as(usize, @intCast(canonical_net)) < placement.nets.len and
+            !optimizer.isGroundName(router.shortName(placement.nets[@intCast(canonical_net)].name));
+        via_components[via_i] = try copper_support.componentsAt(arena, placement, canonical_net, zones, .{ via.x, via.y }, null);
         const unobserved_fill = (support.via_poured[via_i] != 0 or support.via_planes[via_i] != 0) and
             via_components[via_i].len == 0;
         via_candidates[via_i] = non_ground and !unobserved_fill;
@@ -1011,6 +1019,11 @@ const Ctx = struct {
     /// The board's `(design-rules (via-to-via MM))`, or 0 for "resolved
     /// clearance" (see `viaSpacingRule`).
     via_to_via: f64 = 0,
+    identity: net_identity.Identity = .{},
+
+    fn sameNet(self: Ctx, a: i32, b: i32) bool {
+        return self.identity.same(a, b);
+    }
 };
 
 /// The spacing rule two vias of the SAME net are held to. An authored
@@ -1029,7 +1042,7 @@ fn checkViaPad(c: Ctx, vias: []const router.Via, pads: []const PadBox, pad_grid:
         const vr = v.dia / 2;
         for (try pad_grid.near(c.arena, viaBox(v), c.clr_max)) |j| {
             const p = pads[j];
-            if (sameNet(v.net, p.net)) continue;
+            if (c.sameNet(v.net, p.net)) continue;
             const eff = c.clr.between(v.net, p.net);
             const gap = pad_shape.pointDist(p.x0, p.y0, p.x1, p.y1, p.poly, v.x, v.y, vr + eff) - vr;
             if (gap < eff - eps) {
@@ -1044,7 +1057,7 @@ fn checkViaPad(c: Ctx, vias: []const router.Via, pads: []const PadBox, pad_grid:
 /// the full sweep (`checkViaVia`) and the additive gate (`ViaAdditionGate`),
 /// so the two can never disagree.
 fn viaPairViolation(c: Ctx, a: router.Via, b: router.Via) ?Violation {
-    const same = sameNet(a.net, b.net);
+    const same = c.sameNet(a.net, b.net);
     const eff = if (same) viaSpacingRule(c, a.net) else @max(
         c.clr.between(a.net, b.net),
         @max(viaAntipadGap(c.clr.rules, a), viaAntipadGap(c.clr.rules, b)),
@@ -1079,7 +1092,7 @@ fn checkViaTrack(c: Ctx, vias: []const router.Via, tracks: []const router.Track,
         const vr = v.dia / 2;
         for (try track_grid.near(c.arena, viaBox(v), c.clr_max)) |j| {
             const t = tracks[j];
-            if (sameNet(v.net, t.net)) continue;
+            if (c.sameNet(v.net, t.net)) continue;
             const eff = c.clr.between(v.net, t.net);
             const gap = segPointDist(t.x1, t.y1, t.x2, t.y2, v.x, v.y) - vr - t.width / 2;
             if (gap < eff - eps) {
@@ -1096,7 +1109,7 @@ fn checkTrackTrack(c: Ctx, tracks: []const router.Track, track_grid: *Grid) Err 
         for (try track_grid.near(c.arena, trackBox(a), c.clr_max)) |ju| {
             if (ju <= i) continue;
             const b = tracks[ju];
-            if (a.layer != b.layer or sameNet(a.net, b.net)) continue;
+            if (a.layer != b.layer or c.sameNet(a.net, b.net)) continue;
             const eff = c.clr.between(a.net, b.net);
             const gap = segSegDist(a.x1, a.y1, a.x2, a.y2, b.x1, b.y1, b.x2, b.y2) - a.width / 2 - b.width / 2;
             if (gap < eff - eps) {
@@ -1153,7 +1166,7 @@ fn checkLandTransit(
         const half = t.width / 2;
         for (try pad_grid.near(c.arena, trackBox(t), c.clr_max)) |j| {
             const p = pads[j];
-            if (!sameNet(t.net, p.net) or p.thru or p.layer != t.layer) continue;
+            if (!c.sameNet(t.net, p.net) or p.thru or p.layer != t.layer) continue;
             const land = land_transit.Land{ .x0 = p.x0, .y0 = p.y0, .x1 = p.x1, .y1 = p.y1, .poly = p.poly };
             const f = land_transit.segmentOffence(land, .{ t.x1, t.y1 }, .{ t.x2, t.y2 }, half) orelse continue;
             const finding = Violation{
@@ -1233,7 +1246,7 @@ fn checkTrackPad(c: Ctx, tracks: []const router.Track, pads: []const PadBox, pad
     for (tracks) |t| {
         for (try pad_grid.near(c.arena, trackBox(t), c.clr_max)) |j| {
             const p = pads[j];
-            if (sameNet(t.net, p.net)) continue;
+            if (c.sameNet(t.net, p.net)) continue;
             if (!p.thru and p.layer != t.layer) continue;
             const eff = c.clr.between(t.net, p.net);
             const need = t.width / 2 + eff;
@@ -1256,7 +1269,7 @@ fn checkPadPad(c: Ctx, pads: []const PadBox, pad_grid: *Grid) Err {
         for (try pad_grid.near(c.arena, padBox(a), c.clr_max)) |ju| {
             if (ju <= i) continue;
             const b = pads[ju];
-            if (a.part == b.part or sameNet(a.net, b.net)) continue;
+            if (a.part == b.part or c.sameNet(a.net, b.net)) continue;
             const share_face = a.thru or b.thru or a.layer == b.layer;
             if (!share_face) continue;
             const eff = c.clr.between(a.net, b.net);
@@ -1780,12 +1793,6 @@ fn boxOverlap(a: [4]f64, b: [4]f64) ?[2]f64 {
     const oy1 = @min(a[3], b[3]);
     if (ox1 <= ox0 + eps or oy1 <= oy0 + eps) return null;
     return .{ (ox0 + ox1) / 2, (oy0 + oy1) / 2 };
-}
-
-/// Two features may touch only if they share a (real) net; index -1 ("no net")
-/// still needs clearance.
-fn sameNet(a: i32, b: i32) bool {
-    return a == b and a != -1;
 }
 
 // ── Spatial hash ─────────────────────────────────────────────────────────────
@@ -2449,6 +2456,63 @@ test "check flags track-to-pad clashes layer-aware" {
     const own = [_]router.Track{.{ .x1 = -1, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.127, .net = 0 }};
     const ok = router.RouteResult{ .tracks = &own, .vias = &.{}, .routed = 1, .total = 1 };
     try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, ok, 0.127), .track_pad));
+}
+
+// spec: placement/drc - parent-rail copper may touch a structurally proven generated per-pin bypass pad, while dotted lookalike nets remain foreign
+test "parent rail copper shares clearance identity only with proven bypass stubs" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const G = @import("geometry.zig");
+
+    const hub_pads = [_]G.Pad{.{ .number = "5", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    const cap_pads = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "core/U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &hub_pads, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "core/C1", .kind = .passive, .hw = 1, .hh = 1, .pads = &cap_pads, .fallback = false, .x = 4, .y = 0 },
+    };
+    const stub_pins = [_]flat_netlist.FlatPin{
+        .{ .ref_des = "core/U1", .pin = "5" },
+        .{ .ref_des = "core/C1", .pin = "1" },
+    };
+    const nets = [_]FlatNet{
+        .{ .name = "core/VDD", .pins = &.{} },
+        .{ .name = "core/VDD.U1.5", .pins = &stub_pins },
+        .{ .name = "SENSOR.DATA.1", .pins = &.{} },
+    };
+    const loops = [_]optimizer.Loop{.{
+        .cap = 1,
+        .hub = 0,
+        .cap_pwr = .{ .x = 0, .y = 0, .w = 0.6, .h = 0.6 },
+        .cap_gnd = .{ .x = 0, .y = 0, .w = 0.6, .h = 0.6 },
+        .hub_pwr = &.{},
+        .hub_pwr_pin = .{ .x = 0, .y = 0, .w = 0.6, .h = 0.6 },
+        .hub_gnd = &.{},
+        .pwr_net = 1,
+        .explicit_pin = "5",
+    }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &loops,
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -1,
+        .miny = -1,
+        .maxx = 5,
+        .maxy = 1,
+        .generated = false,
+    };
+
+    const parent = [_]router.Track{.{ .x1 = 0, .y1 = 0, .x2 = 4, .y2 = 0, .layer = 0, .width = 0.127, .net = 0 }};
+    const parent_route = router.RouteResult{ .tracks = &parent, .vias = &.{}, .routed = 1, .total = 1 };
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, parent_route, 0.127), .track_pad));
+
+    const dotted = [_]router.Track{.{ .x1 = 3, .y1 = 0, .x2 = 5, .y2 = 0, .layer = 0, .width = 0.127, .net = 2 }};
+    const dotted_route = router.RouteResult{ .tracks = &dotted, .vias = &.{}, .routed = 1, .total = 1 };
+    try testing.expectEqual(@as(usize, 1), countKind(try check(arena, placement, dotted_route, 0.127), .track_pad));
 }
 
 // spec: placement/drc - A copper-clearance DRC violation names both nets it is between, and a pad party names its part and pad number
@@ -3955,8 +4019,8 @@ test "checkWithZones credits same-net filled copper and honours priority clippin
     try testing.expectEqual(@as(usize, 0), countKind(bare, .copper_stub));
     try testing.expectEqual(@as(usize, 1), countKind(bare, .dangling_copper));
     try testing.expectEqual(@as(usize, 1), countKind(bare, .single_layer_via));
-    const topology_tracks = try topologyTracks(arena, &tracks);
-    const topology_vias = try topologyVias(arena, &vias);
+    const topology_tracks = try topologyTracks(arena, &tracks, .{});
+    const topology_vias = try topologyVias(arena, &vias, .{});
     try testing.expect(copper_topology.looseEnd(&.{}, topology_tracks, topology_vias, 0, .{ 0, 0 }) != null);
 
     const region = [_][2]f64{ .{ -1, -1 }, .{ 3, -1 }, .{ 3, 1 }, .{ -1, 1 } };

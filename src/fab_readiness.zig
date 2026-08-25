@@ -35,6 +35,7 @@ const copper_contact = @import("placement/copper_contact.zig");
 const outline_mod = @import("placement/outline.zig");
 const board_layers = @import("board_layers.zig");
 const net_analysis = @import("eval/net_analysis.zig");
+const net_identity = @import("placement/net_identity.zig");
 
 /// A part is treated as off-board (staged, not on the real board) when its
 /// courtyard centre sits more than this far outside the board outline — the
@@ -477,8 +478,9 @@ pub fn netConnectivity(
     const physical = try export_gerber.physicalCopper(arena, copper);
     var out: std.ArrayList(NetStatus) = .empty;
     const zone_fills = try userZoneFills(arena, placement, physical, null);
+    const identity = try net_identity.Identity.init(arena, placement);
     for (placement.nets, 0..) |net, net_i| {
-        const graph = try buildNetGraphPrepared(arena, placement, physical, net, @intCast(net_i), .{ .zone_fills = zone_fills });
+        const graph = try buildNetGraphPrepared(arena, placement, physical, net, @intCast(net_i), .{ .zone_fills = zone_fills, .identity = identity });
         try out.append(arena, try netStatusFromGraph(arena, net.name, graph, true));
     }
     return out.toOwnedSlice(arena);
@@ -626,6 +628,7 @@ pub fn openNetsAmong(
     const physical = try export_gerber.physicalCopper(arena, copper);
     var out: std.ArrayList(OpenNet) = .empty;
     const zone_fills = try userZoneFills(arena, placement, physical, null);
+    const identity = try net_identity.Identity.init(arena, placement);
     for (placement.nets, 0..) |net, ni| {
         if (names) |wanted| {
             var selected = false;
@@ -637,7 +640,7 @@ pub fn openNetsAmong(
             }
             if (!selected) continue;
         }
-        const detail = try openNetDetail(arena, placement, physical, net, @intCast(ni), zone_fills);
+        const detail = try openNetDetail(arena, placement, physical, net, @intCast(ni), .{ .zone_fills = zone_fills, .identity = identity });
         if (detail) |d| try out.append(arena, d);
     }
     return out.toOwnedSlice(arena);
@@ -651,14 +654,14 @@ fn openNetDetail(
     copper: export_gerber.Copper,
     net: export_kicad.FlatNet,
     net_i: i32,
-    zone_fills: []const pour.Fill,
+    fills: SharedFills,
 ) std.mem.Allocator.Error!?OpenNet {
     // ONE graph for both the verdict and the island report: `buildNetGraph`
     // rasters the net's pour fills, so building it twice here paid that raster
     // twice per open net for an identical answer. `padNodes` is the same
     // deterministic list the graph's pad nodes were built from, so index `i`
     // still names node `i`.
-    const g = try buildNetGraphPrepared(arena, placement, copper, net, net_i, .{ .zone_fills = zone_fills });
+    const g = try buildNetGraphPrepared(arena, placement, copper, net, net_i, fills);
     const comps = try netComponentsOf(arena, g);
     if (comps.locations < 2 or comps.groups <= 1) return null;
 
@@ -980,7 +983,10 @@ pub fn buildNetGraph(
     net_i: i32,
 ) std.mem.Allocator.Error!NetGraph {
     const physical = try export_gerber.physicalCopper(arena, copper);
-    return buildNetGraphPrepared(arena, placement, physical, net, net_i, .{ .zone_fills = try userZoneFills(arena, placement, physical, null) });
+    return buildNetGraphPrepared(arena, placement, physical, net, net_i, .{
+        .zone_fills = try userZoneFills(arena, placement, physical, null),
+        .identity = try net_identity.Identity.init(arena, placement),
+    });
 }
 
 /// Raster every retained user zone once per board-level connectivity query.
@@ -1025,6 +1031,8 @@ pub const SharedFills = struct {
     /// When present, connectivity assigns components from these exact labels
     /// instead of rasterizing the same plane again.
     plane_fills: []const pour.NetFills = &.{},
+    /// Canonical bypass-stub ownership, shared across a whole-board net sweep.
+    identity: net_identity.Identity = .{},
 };
 
 fn preparedNetFills(all: []const pour.NetFills, name: []const u8) ?pour.NetFills {
@@ -1047,6 +1055,11 @@ pub fn buildNetGraphPrepared(
 ) std.mem.Allocator.Error!NetGraph {
     const physical = try export_gerber.physicalCopper(arena, copper);
     const items = try padNodes(arena, placement, net);
+    const identity = if (fills.identity.owner.len == placement.nets.len)
+        fills.identity
+    else
+        try net_identity.Identity.init(arena, placement);
+    const physical_name = identity.canonicalName(placement.nets, net_i);
 
     // Distinct board locations: unique pad-centre positions (0.05 mm buckets).
     // A net with <2 must not be flagged as unrouted (one pad, or all pads
@@ -1059,15 +1072,15 @@ pub fn buildNetGraphPrepared(
     // barrels abut.
     var segs: std.ArrayList(router.Track) = .empty;
     for (physical.tracks) |t| {
-        if (sameNet(t.net, net_i)) try segs.append(arena, t);
+        if (identity.same(t.net, net_i)) try segs.append(arena, t);
     }
     var vs: std.ArrayList(router.Via) = .empty;
     for (physical.vias) |v| {
-        if (sameNet(v.net, net_i)) try vs.append(arena, v);
+        if (identity.same(v.net, net_i)) try vs.append(arena, v);
     }
     const qpads = try planeQueries(arena, items);
-    const query: pour.PlaneQuery = .{ .net_name = net.name, .pads = qpads, .vias = vs.items, .base = fills.base };
-    const join = if (preparedNetFills(fills.plane_fills, net.name)) |prepared|
+    const query: pour.PlaneQuery = .{ .net_name = physical_name, .pads = qpads, .vias = vs.items, .base = fills.base };
+    const join = if (preparedNetFills(fills.plane_fills, physical_name)) |prepared|
         try pour.planeConnectPrepared(arena, query, prepared)
     else
         try pour.planeConnect(arena, placement, .{ .tracks = physical.tracks, .vias = physical.vias, .zones = physical.zones }, query);
@@ -1146,7 +1159,7 @@ pub fn buildNetGraphPrepared(
     // User-drawn copper pours credit only the same minimum-width-filtered fill
     // that Gerber emits. This prevents a narrow authored neck from closing a
     // net in readiness checks after the fabrication geometry removes it.
-    try uniteUserZones(arena, parent, copper.zones, net.name, .{
+    try uniteUserZones(arena, parent, copper.zones, physical_name, .{
         .items = items,
         .tracks = segs.items,
         .vias = vs.items,
@@ -1381,11 +1394,6 @@ fn unite(parent: []usize, a: usize, b: usize) void {
 }
 
 // ── Net / plane / geometry helpers ──────────────────────────────────────────
-
-/// Net index equality that respects the router's -1 = "no net" convention.
-fn sameNet(a: i32, b: i32) bool {
-    return a == b and a != -1;
-}
 
 /// ref-des → part index (linear; net fan-out is small).
 fn partIndex(placement: optimizer.Placement, ref: []const u8) ?usize {
@@ -2400,6 +2408,60 @@ test "routableTally counts connected nets and names the open ones, skipping non-
     try testing.expectEqual(@as(usize, 2), bare.unique_total);
     try testing.expectEqual(@as(usize, 0), bare.unique_routed);
     try testing.expectEqual(@as(usize, 2), bare.open.len);
+}
+
+// spec: placement/progress - netConnectivity credits parent-rail copper to structurally proven generated per-pin bypass connections
+test "parent rail copper closes its generated bypass connection net" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    const hub_pads = [_]geometry.Pad{.{ .number = "5", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    const cap_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "core/U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &hub_pads, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "core/C1", .kind = .passive, .hw = 1, .hh = 1, .pads = &cap_pads, .fallback = false, .x = 4, .y = 0 },
+    };
+    const stub_pins = [_]export_kicad.FlatPin{
+        .{ .ref_des = "core/U1", .pin = "5" },
+        .{ .ref_des = "core/C1", .pin = "1" },
+    };
+    const nets = [_]export_kicad.FlatNet{
+        .{ .name = "core/VDD", .pins = &.{} },
+        .{ .name = "core/VDD.U1.5", .pins = &stub_pins },
+    };
+    const loops = [_]optimizer.Loop{.{
+        .cap = 1,
+        .hub = 0,
+        .cap_pwr = .{ .x = 0, .y = 0, .w = 0.6, .h = 0.6 },
+        .cap_gnd = .{ .x = 0, .y = 0, .w = 0.6, .h = 0.6 },
+        .hub_pwr = &.{},
+        .hub_pwr_pin = .{ .x = 0, .y = 0, .w = 0.6, .h = 0.6 },
+        .hub_gnd = &.{},
+        .pwr_net = 1,
+        .explicit_pin = "5",
+    }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &loops,
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -1,
+        .miny = -1,
+        .maxx = 5,
+        .maxy = 1,
+        .generated = false,
+        .board_rect = .{ .minx = -1, .miny = -1, .w = 6, .h = 2 },
+        .rules = .{ .plane_nets = &.{}, .copper_layers = 2 },
+    };
+    const tracks = [_]router.Track{.{ .x1 = 0, .y1 = 0, .x2 = 4, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 }};
+    const status = try netConnectivity(arena, placement, .{ .tracks = &tracks });
+    try testing.expect(status[1].routable);
+    try testing.expect(status[1].connected);
+    try testing.expectEqual(@as(usize, 1), status[1].islands);
 }
 
 // Regression guard for both halves of the detailed/logical tally contract.
