@@ -493,21 +493,23 @@ fn writeBoardPane(w: *std.Io.Writer, v: View) std.Io.Writer.Error!void {
     try w.writeAll("</div></section>");
 }
 
-/// The board controls strip: the colour ramp keyed to the fixed 25–125 °C range,
+/// The board controls strip: the colour ramp, its editable absolute endpoints,
 /// the hotspot readout, and the two switches that only change what is DRAWN
-/// (label chips, wash opacity) and so never cost a solve.
+/// (range, label chips, wash opacity) and so never cost a solve.
 ///
-/// The ramp's end labels are invariant across boards and scenarios, so a colour
-/// has the same thermal meaning while the reader compares cooling options.
+/// The scale starts at 25–125 °C. Its client keeps a valid manual range in the
+/// URL and sends it to the overlay, which recolours its cached field in place.
 fn writeBoardLegend(w: *std.Io.Writer) std.Io.Writer.Error!void {
     try w.writeAll("<div class=\"tp-board-controls\">");
     try w.writeAll("<div class=\"tp-face\" role=\"group\" aria-label=\"Board face\">");
     try w.writeAll("<span>View</span><button type=\"button\" id=\"tp-face-top\" data-board-side=\"top\" class=\"on\" aria-pressed=\"true\">Top</button>");
     try w.writeAll("<button type=\"button\" id=\"tp-face-bottom\" data-board-side=\"bottom\" aria-pressed=\"false\">Bottom</button></div>");
     try w.writeAll("<div class=\"tp-legend\" aria-label=\"Temperature scale\">");
-    try w.writeAll("<span class=\"tp-legend-lo\" id=\"tp-legend-lo\">25 °C</span>");
+    try w.writeAll("<label class=\"tp-scale-bound\"><input type=\"number\" id=\"tp-scale-min\" " ++
+        "step=\"1\" value=\"25\" aria-label=\"Scale minimum temperature\" aria-invalid=\"false\"> °C</label>");
     try w.writeAll("<span class=\"tp-ramp\"></span>");
-    try w.writeAll("<span class=\"tp-legend-hi\" id=\"tp-legend-hi\">125 °C</span></div>");
+    try w.writeAll("<label class=\"tp-scale-bound\"><input type=\"number\" id=\"tp-scale-max\" " ++
+        "step=\"1\" value=\"125\" aria-label=\"Scale maximum temperature\" aria-invalid=\"false\"> °C</label></div>");
     try w.writeAll("<span class=\"tp-hotspot\" id=\"tp-hotspot\"></span>");
     try w.writeAll("<label class=\"tp-switch\"><input type=\"checkbox\" id=\"tp-labels\" checked> Labels</label>");
     try w.writeAll("<label class=\"tp-switch\">Wash <input type=\"range\" id=\"tp-opacity\" " ++
@@ -1334,7 +1336,7 @@ test "a design with no ladder renders the reason instead of a broken image" {
     // read as "solved, and cold".
     try testing.expect(std.mem.indexOf(u8, html, "<img") == null);
     try testing.expect(std.mem.indexOf(u8, html, "<iframe") == null);
-    try testing.expect(std.mem.indexOf(u8, html, "id=\"tp-legend-hi\"") == null);
+    try testing.expect(std.mem.indexOf(u8, html, "id=\"tp-scale-max\"") == null);
     try testing.expect(std.mem.indexOf(u8, html, "id=\"tp-seg\"") == null);
     try testing.expect(std.mem.indexOf(u8, html, "id=\"tp-ladder\"") == null);
     // The sentence saying why, and the lumped screen's own rows underneath it.
@@ -1489,8 +1491,8 @@ test "the thermal board switches between physical top and bottom faces" {
     }));
 }
 
-// spec: serve/thermal-page - the board's legend stays fixed at 25 °C to 125 °C while its hotspot readout and progress veil are filled from the overlay's own report
-test "the board uses a fixed temperature scale and reports its hotspot" {
+// spec: serve/thermal-page - the board's legend starts at 25 °C to 125 °C, lets the reader edit both endpoints without another solve, and preserves a valid manual range in the page URL
+test "the board offers a persistent manual temperature scale" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const alloc = arena_state.allocator();
@@ -1500,34 +1502,49 @@ test "the board uses a fixed temperature scale and reports its hotspot" {
     const project = try fixtureProject(alloc, &tmp);
 
     const html = (try serve(alloc, project, "heater", &.{})).body;
-    // The absolute reference is present before the field loads and never shifts
-    // when a reader changes cooling scenario or ambient.
+    // Both numeric endpoints are useful before the field loads and expose their
+    // defaults directly to keyboard, touch-spinner and assistive-tech users.
     try testing.expect(containsAll(html, &.{
-        "id=\"tp-legend-lo\"",
-        "id=\"tp-legend-hi\"",
+        "id=\"tp-scale-min\"",
+        "id=\"tp-scale-max\"",
+        "value=\"25\"",
+        "value=\"125\"",
+        "Scale minimum temperature",
+        "Scale maximum temperature",
         "id=\"tp-hotspot\"",
         "id=\"tp-heat-loading\"",
         "id=\"tp-labels\"",
         "id=\"tp-opacity\"",
     }));
-    try testing.expect(std.mem.indexOf(u8, html, "id=\"tp-legend-lo\">25 °C<") != null);
-    try testing.expect(std.mem.indexOf(u8, html, "id=\"tp-legend-hi\">125 °C<") != null);
-
-    // The iframe maps ABSOLUTE copper temperature onto those exact endpoints;
-    // it does not divide by this field's own maximum rise.
+    // The iframe maps absolute copper temperatures onto the chosen endpoints
+    // and rebuilds its existing raster when they change.
     const overlay = @embedFile("assets/pcb_thermal.js");
     try testing.expect(containsAll(overlay, &.{
-        "var SCALE_MIN_C = 25",
-        "var SCALE_MAX_C = 125",
+        "var SCALE_DEFAULT_MIN_C = 25",
+        "var SCALE_DEFAULT_MAX_C = 125",
+        "view.scaleMinC",
+        "view.scaleMaxC",
         "temperatureNorm(f.ambient_c + g.rise_c[p])",
-        "tempC - j.ambient_c",
+        "if (recolor && field) raster = buildRaster(field)",
+    }));
+
+    // The parent validates min < max, sends both values without showing the
+    // solve veil, and records a non-default range in the reproducible URL.
+    const client = @embedFile("assets/thermal_page.js");
+    try testing.expect(containsAll(client, &.{
+        "function scaleSet(",
+        "nextMaxC > nextMinC",
+        "scaleMinC: scaleMinC, scaleMaxC: scaleMaxC",
+        "searchParams.get(\"scale_min\")",
+        "searchParams.get(\"scale_max\")",
+        "searchParams.set(\"scale_min\"",
+        "searchParams.set(\"scale_max\"",
     }));
 
     // Both halves of the postMessage contract, so a rename on either side of
     // the frame boundary fails here rather than silently blanking the legend.
     const report = [_][]const u8{ "thermal:state", "hotspot", "unavailable" };
     try testing.expect(containsAll(overlay, &report));
-    const client = @embedFile("assets/thermal_page.js");
     try testing.expect(containsAll(client, &report));
     // The words are written from that report and never from a second fetch —
     // two fetches are how the picture and the legend come to disagree.

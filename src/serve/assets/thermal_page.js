@@ -13,7 +13,8 @@
 //     message carrying the payload it drew from, and the hotspot readout and
 //     "solving" veil beside it are filled from THAT — never from a second fetch,
 //     which is how the two halves could come to show different scenarios. The
-//     legend is an invariant 25–125 °C reference rendered with the page.
+//     legend starts at 25–125 °C and lets the reader change either endpoint;
+//     that rebuilds only the field's pixels and contours, never the solve.
 //
 //  2. AMBIENT re-renders on the server. One fetch of this page's own
 //     `?fragment=1`, whose body is exactly the two ambient-dependent regions
@@ -47,14 +48,29 @@
   var scenario = page.getAttribute("data-scenario") || "natural";
   var ambient = parseFloat(page.getAttribute("data-ambient"));
   if (!isFinite(ambient)) ambient = 25;
+  var SCALE_DEFAULT_MIN_C = 25;
+  var SCALE_DEFAULT_MAX_C = 125;
+  var scaleMinC = SCALE_DEFAULT_MIN_C;
+  var scaleMaxC = SCALE_DEFAULT_MAX_C;
   var boardSide = "top";
-  try { boardSide = new URL(window.location.href).searchParams.get("board_side") === "bottom" ? "bottom" : "top"; } catch (e) {}
+  try {
+    var openingUrl = new URL(window.location.href);
+    boardSide = openingUrl.searchParams.get("board_side") === "bottom" ? "bottom" : "top";
+    var openingMinC = parseFloat(openingUrl.searchParams.get("scale_min"));
+    var openingMaxC = parseFloat(openingUrl.searchParams.get("scale_max"));
+    if (isFinite(openingMinC) && isFinite(openingMaxC) && openingMaxC > openingMinC) {
+      scaleMinC = openingMinC;
+      scaleMaxC = openingMaxC;
+    }
+  } catch (e) {}
 
   var frame = document.getElementById("tp-frame");
   var veil = document.getElementById("tp-heat-loading");
   var hotspotOut = document.getElementById("tp-hotspot");
   var labelsBox = document.getElementById("tp-labels");
   var opacityBox = document.getElementById("tp-opacity");
+  var scaleMinInput = document.getElementById("tp-scale-min");
+  var scaleMaxInput = document.getElementById("tp-scale-max");
   var status = document.getElementById("tp-status");
   var ambientInput = document.getElementById("tp-ambient");
   var jsonLink = document.getElementById("tp-json");
@@ -63,6 +79,10 @@
 
   function enc(s) { return encodeURIComponent(s); }
   function layoutParam() { return LAYOUT ? "&layout=" + enc(LAYOUT) : ""; }
+  function scaleParam() {
+    if (scaleMinC === SCALE_DEFAULT_MIN_C && scaleMaxC === SCALE_DEFAULT_MAX_C) return "";
+    return "&scale_min=" + enc(String(scaleMinC)) + "&scale_max=" + enc(String(scaleMaxC));
+  }
   function compareOpen() {
     var d = document.getElementById("tp-compare");
     return !!(d && d.open);
@@ -75,6 +95,21 @@
     if (!frame || !frame.contentWindow) return;
     msg.t = "thermal:view";
     try { frame.contentWindow.postMessage(msg, "*"); } catch (e) { /* frame not ready yet */ }
+  }
+  function scaleSet(updateUrl) {
+    if (!scaleMinInput || !scaleMaxInput) return;
+    var nextMinC = parseFloat(scaleMinInput.value);
+    var nextMaxC = parseFloat(scaleMaxInput.value);
+    var valid = isFinite(nextMinC) && isFinite(nextMaxC) && nextMaxC > nextMinC;
+    scaleMinInput.setCustomValidity(valid ? "" : "Minimum must be below maximum");
+    scaleMaxInput.setCustomValidity(valid ? "" : "Maximum must be above minimum");
+    scaleMinInput.setAttribute("aria-invalid", valid ? "false" : "true");
+    scaleMaxInput.setAttribute("aria-invalid", valid ? "false" : "true");
+    if (!valid) return;
+    scaleMinC = nextMinC;
+    scaleMaxC = nextMaxC;
+    tell({ scaleMinC: scaleMinC, scaleMaxC: scaleMaxC });
+    if (updateUrl) syncUrl();
   }
   function orientBoard() {
     if (!frame || !frame.contentWindow) return;
@@ -99,7 +134,10 @@
   function heatRefresh() {
     if (!frame) return;
     if (veil) { veil.hidden = false; veil.textContent = "Solving…"; }
-    tell({ scenario: scenario, ambient: ambient, side: boardSide });
+    tell({
+      scenario: scenario, ambient: ambient, side: boardSide,
+      scaleMinC: scaleMinC, scaleMaxC: scaleMaxC
+    });
   }
   window.addEventListener("message", function (ev) {
     var d = ev.data;
@@ -117,12 +155,14 @@
         (d.converged === false ? " (did not converge)" : "");
     }
   });
-  // The frame loads with the scenario and ambient already in its own URL, so
-  // there is nothing to send until the reader changes one. Re-sending on load
-  // only covers a frame that was reloaded out from under us (a browser Back).
+  // The frame loads with the solve inputs in its own URL. On load it still
+  // needs the display-only range, and this also covers a browser Back reload.
   if (frame) frame.addEventListener("load", function () {
     orientBoard();
-    tell({ scenario: scenario, ambient: ambient, side: boardSide });
+    tell({
+      scenario: scenario, ambient: ambient, side: boardSide,
+      scaleMinC: scaleMinC, scaleMaxC: scaleMaxC
+    });
   });
   for (var f = 0; f < faceButtons.length; f++) {
     faceButtons[f].addEventListener("click", function () { boardSideSet(this.getAttribute("data-board-side"), true); });
@@ -131,6 +171,12 @@
   if (labelsBox) labelsBox.addEventListener("change", function () { tell({ labels: labelsBox.checked }); });
   if (opacityBox) {
     opacityBox.addEventListener("input", function () { tell({ opacity: parseInt(opacityBox.value, 10) / 100 }); });
+  }
+  if (scaleMinInput && scaleMaxInput) {
+    scaleMinInput.value = String(scaleMinC);
+    scaleMaxInput.value = String(scaleMaxC);
+    scaleMinInput.addEventListener("input", function () { scaleSet(true); });
+    scaleMaxInput.addEventListener("input", function () { scaleSet(true); });
   }
 
   // ---- Scenario selection (local) ----------------------------------------
@@ -217,6 +263,13 @@
       u.searchParams.set("scenario", scenario);
       if (boardSide === "bottom") u.searchParams.set("board_side", "bottom");
       else u.searchParams.delete("board_side");
+      if (scaleMinC === SCALE_DEFAULT_MIN_C && scaleMaxC === SCALE_DEFAULT_MAX_C) {
+        u.searchParams.delete("scale_min");
+        u.searchParams.delete("scale_max");
+      } else {
+        u.searchParams.set("scale_min", String(scaleMinC));
+        u.searchParams.set("scale_max", String(scaleMaxC));
+      }
       if (LAYOUT) u.searchParams.set("layout", LAYOUT); else u.searchParams.delete("layout");
       if (compareOpen()) u.searchParams.set("compare", "1"); else u.searchParams.delete("compare");
       window.history.replaceState(null, "", u.toString());
@@ -242,7 +295,7 @@
       } catch (e) {
         window.location.href = "/thermal/" + enc(NAME) + "?ambient=" + enc(String(ambient)) +
           "&scenario=" + enc(scenario) + (boardSide === "bottom" ? "&board_side=bottom" : "") +
-          (next ? "&layout=" + enc(next) : "");
+          (next ? "&layout=" + enc(next) : "") + scaleParam();
       }
     });
   }
@@ -352,6 +405,6 @@
   }, true);
   compareProgress();
 
-  // The frame's own URL already carries the opening scenario and ambient, so
-  // the first paint costs no message at all.
+  // The frame's own URL carries the solve inputs. Its load message above also
+  // applies the reader's display-only scale without another solve.
 })();

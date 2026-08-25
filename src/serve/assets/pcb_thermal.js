@@ -31,6 +31,14 @@
 
   // ── View state ────────────────────────────────────────────────────────
   var q = new URLSearchParams(location.search);
+  var SCALE_DEFAULT_MIN_C = 25;
+  var SCALE_DEFAULT_MAX_C = 125;
+  var openingScaleMinC = parseFloat(q.get("scale_min"));
+  var openingScaleMaxC = parseFloat(q.get("scale_max"));
+  if (!isFinite(openingScaleMinC) || !isFinite(openingScaleMaxC) || openingScaleMaxC <= openingScaleMinC) {
+    openingScaleMinC = SCALE_DEFAULT_MIN_C;
+    openingScaleMaxC = SCALE_DEFAULT_MAX_C;
+  }
   var view = {
     scenario: q.get("scenario") || "natural",
     ambient: parseFloat(q.get("ambient")),
@@ -40,6 +48,8 @@
     side: "top",
     opacity: 0.8,
     labels: true,
+    scaleMinC: openingScaleMinC,
+    scaleMaxC: openingScaleMaxC,
   };
   if (!isFinite(view.ambient)) view.ambient = 25;
 
@@ -57,14 +67,11 @@
     [0.76, 0xf2, 0xdc, 0x5a],
     [1.00, 0xe8, 0x40, 0x2a]
   ];
-  // One absolute reference across every board, scenario and ambient. A field
-  // colder than the floor stays at the cold end; one hotter than the ceiling
-  // stays red. In particular, a successful heatsink no longer stretches its
-  // modest peak back up to the same red as an overheating bare board.
-  var SCALE_MIN_C = 25;
-  var SCALE_MAX_C = 125;
+  // One absolute reference at a time across the whole field. The parent may
+  // change its endpoints without requesting another solve; temperatures
+  // outside the chosen interval clamp to its nearest colour.
   function temperatureNorm(tempC) {
-    return (tempC - SCALE_MIN_C) / (SCALE_MAX_C - SCALE_MIN_C);
+    return (tempC - view.scaleMinC) / (view.scaleMaxC - view.scaleMinC);
   }
   function ramp(t) {
     if (!(t > 0)) t = 0; else if (t > 1) t = 1;
@@ -100,7 +107,12 @@
       img.data[p * 4 + 2] = col[2]; img.data[p * 4 + 3] = 255;
     }
     c.putImageData(img, 0, 0);
-    return { cv: cv, hi: hi };
+    var out = { cv: cv, hi: hi, iso: [] };
+    [0.2, 0.4, 0.6, 0.8].forEach(function (frac) {
+      var tempC = view.scaleMinC + (view.scaleMaxC - view.scaleMinC) * frac;
+      out.iso = out.iso.concat(contour(g, tempC - f.ambient_c));
+    });
+    return out;
   }
 
   // ── Isotherm contours ─────────────────────────────────────────────────
@@ -273,13 +285,6 @@
         }
         field = j;
         raster = buildRaster(j);
-        if (raster) {
-          raster.iso = [];
-          [0.2, 0.4, 0.6, 0.8].forEach(function (frac) {
-            var tempC = SCALE_MIN_C + (SCALE_MAX_C - SCALE_MIN_C) * frac;
-            raster.iso = raster.iso.concat(contour(j.grid, tempC - j.ambient_c));
-          });
-        }
         // The parent panel's hotspot readout uses the SAME payload rather than
         // fetching its own, so the two halves cannot show different scenarios.
         tell({
@@ -301,6 +306,7 @@
     var d = ev.data;
     if (!d || d.t !== "thermal:view") return;
     var refetch = false;
+    var recolor = false;
     if (d.scenario && d.scenario !== view.scenario) { view.scenario = d.scenario; refetch = true; }
     if (typeof d.ambient === "number" && isFinite(d.ambient) && d.ambient !== view.ambient) {
       view.ambient = d.ambient; refetch = true;
@@ -308,7 +314,18 @@
     if (typeof d.opacity === "number") view.opacity = Math.max(0, Math.min(1, d.opacity));
     if (typeof d.labels === "boolean") view.labels = d.labels;
     if (d.side === "top" || d.side === "bottom") view.side = d.side;
-    if (refetch) load(); else repaint();
+    var nextMinC = typeof d.scaleMinC === "number" && isFinite(d.scaleMinC) ? d.scaleMinC : view.scaleMinC;
+    var nextMaxC = typeof d.scaleMaxC === "number" && isFinite(d.scaleMaxC) ? d.scaleMaxC : view.scaleMaxC;
+    if (nextMaxC > nextMinC && (nextMinC !== view.scaleMinC || nextMaxC !== view.scaleMaxC)) {
+      view.scaleMinC = nextMinC;
+      view.scaleMaxC = nextMaxC;
+      recolor = true;
+    }
+    if (refetch) load();
+    else {
+      if (recolor && field) raster = buildRaster(field);
+      repaint();
+    }
   });
 
   window.PCBOverlay.paint = paint;
@@ -318,7 +335,7 @@
   // exact absolute range behind its colours.
   window.PCBThermal = {
     ramp: rampCss, reload: load, view: view,
-    scaleMinC: SCALE_MIN_C, scaleMaxC: SCALE_MAX_C
+    scale: function () { return { minC: view.scaleMinC, maxC: view.scaleMaxC }; }
   };
   load();
 })();

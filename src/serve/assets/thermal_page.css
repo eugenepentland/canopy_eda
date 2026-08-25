@@ -114,7 +114,19 @@ button { color: inherit; }
   border: 1px solid var(--line);
   background: linear-gradient(90deg, #071438 0%, #1a5fc8 28%, #2fc4d6 52%, #f2dc5a 76%, #e8402a 100%);
 }
-.tp-legend-lo, .tp-legend-hi { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tp-scale-bound { display:flex;align-items:center;gap:3px;white-space:nowrap; }
+.tp-scale-bound input {
+  width: 58px;
+  min-height: 28px;
+  padding: 2px 4px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+.tp-scale-bound input[aria-invalid="true"] { border-color: var(--danger); outline: 1px solid var(--danger); }
 .tp-hotspot { color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .tp-switch { display: flex; align-items: center; gap: 5px; cursor: pointer; white-space: nowrap; }
 .tp-switch input[type="range"] { width: 92px; }

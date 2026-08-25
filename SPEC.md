@@ -5524,6 +5524,11 @@ browser is exactly the disagreement this page is built to prevent. Switching
 cooling scenario needs no round trip: all four per-part tables are rendered into
 the document and the client reveals one.
 
+`?scale_min=NN&scale_max=NN` selects the heat-map colour range only. The two
+legend endpoints are editable number controls, default to 25–125 °C, require a
+finite maximum above the minimum, recolour the cached field without a solve,
+and remain in the URL so a reload or shared link reproduces the same picture.
+
 `?layout=<name>` screens one saved layout of the design instead of its default
 board, and the choice rides into the board frame, the tab bar, the cross-probe
 links and the facts link, so nothing on the page describes a board other than
@@ -5550,7 +5555,7 @@ Read-only: nothing here writes to the project dir.
 - ?scenario=<tag> opens the page on that rung with its own part table shown and the board frame opened on it
 - the page's client swaps only the ambient-dependent regions, keeps scenario switching local, and broadcasts a picked ref on the shared cross-probe channel
 - the page puts its panel beside a live board frame rather than a static heat image, embedding the read-only PCB viewer with the thermal overlay on
-- the board's legend stays fixed at 25 °C to 125 °C while its hotspot readout and progress veil are filled from the overlay's own report
+- the board's legend starts at 25 °C to 125 °C, lets the reader edit both endpoints without another solve, and preserves a valid manual range in the page URL
 - the thermal board view switches between the physical top and mirrored bottom faces without a new solve, shows temperature labels only for parts on the visible face, and keeps the selected face in the page URL
 - the thermal board frame omits generated CAM artwork, routed copper, DRC, pour geometry, and editor-only layout metadata because its exclusive heat overlay hides that data
 - GET /thermal/:name?layout=<name> screens that saved layout and carries the choice into the board frame, the tab bar, the cross-probe links and the facts link
