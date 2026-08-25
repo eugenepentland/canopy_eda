@@ -85,6 +85,7 @@ const model_viewer_3d_js = @embedFile("assets/model_viewer_3d.js");
 // same Three.js + occt-import-js stack as the footprint viewer; lazy-loaded
 // only when the tab is first opened.
 const pcb_3d_surface_js = @embedFile("assets/pcb_3d_surface.js");
+const pcb_step_export_js = @embedFile("assets/pcb_step_export.js");
 const pcb_3d_viewer_js = @embedFile("assets/pcb_3d_viewer.js");
 // Assembly/debug's persistent transparent model-image loader. It reads saved
 // PNGs first and invokes the STEP renderer only to populate a missing/stale
@@ -162,6 +163,7 @@ const registry = [_]Asset{
     .{ .name = "occt-import-js.wasm", .body = occt_import_wasm, .content_type = .WASM },
     .{ .name = "model_viewer_3d.js", .body = model_viewer_3d_js, .content_type = .JS },
     .{ .name = "pcb_3d_surface.js", .body = pcb_3d_surface_js, .content_type = .JS },
+    .{ .name = "pcb_step_export.js", .body = pcb_step_export_js, .content_type = .JS },
     .{ .name = "pcb_3d_viewer.js", .body = pcb_3d_viewer_js, .content_type = .JS },
     .{ .name = "pcb_model_sprites.js", .body = pcb_model_sprites_js, .content_type = .JS },
     .{ .name = "drc.wasm", .body = drc_wasm, .content_type = .WASM },
@@ -978,24 +980,38 @@ test "PCB 3D viewer uses the physical board profile and component side" {
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_3d_viewer_js, marker) != null);
 }
 
-// spec: Web Server - the PCB 3D viewer downloads its complete assembled geometry as a self-contained millimetre-based AP242 STEP model
-test "PCB 3D viewer exports an AP242 tessellated assembly" {
-    const markers = [_][]const u8{
-        "function collectStepMeshes()",
-        "function buildStepFile(meshes)",
-        "COORDINATES_LIST(",
-        "TRIANGULATED_FACE(",
-        "TESSELLATED_SHAPE_REPRESENTATION(",
-        "SHAPE_DEFINITION_REPRESENTATION(#8,#",
+// spec: Web Server - the PCB 3D viewer downloads its complete assembled geometry as a self-contained millimetre-based AP242 faceted B-rep STEP model that mechanical CAD tools import as bodies rather than presentation-only tessellation
+test "PCB STEP writer emits faceted B-rep bodies rather than presentation tessellation" {
+    const writer_markers = [_][]const u8{
+        "function splitComponents(body)",
+        "function componentClosed(triangles)",
+        "CARTESIAN_POINT('',",
+        "POLY_LOOP('',(#",
+        "FACE_OUTER_BOUND('',#",
+        "PLANE('',#",
+        "ADVANCED_FACE('',(#",
+        "CLOSED_SHELL",
+        "FACETED_BREP(",
+        "FACETED_BREP_SHAPE_REPRESENTATION",
+        "SHELL_BASED_SURFACE_MODEL",
         "SI_UNIT(.MILLI.,.METRE.)",
+    };
+    for (writer_markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_step_export_js, marker) != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_step_export_js, "TRIANGULATED_FACE(") == null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_step_export_js, "TESSELLATED_SHAPE_REPRESENTATION(") == null);
+}
+
+test "PCB 3D viewer collects every physical group for STEP export" {
+    const viewer_markers = [_][]const u8{
+        "function collectStepBodies()",
         "obj.userData.pcb3dKind === \"surfaces\"",
-        "collect(boardGroup, \"PCB\")",
-        "collect(partsGroup, \"Component\")",
-        "collect(heatsinkGroup, \"Heatsink\")",
-        "new Blob([buildStepFile(meshes)], { type: \"model/step\" })",
+        "collectStepBody(boardGroup, \"PCB\")",
+        "partGroups.forEach",
+        "heatsinkGroup.children",
+        "window.PCBStepExport.build(DATA.name, bodies)",
         "a.download = stepFileName()",
     };
-    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_3d_viewer_js, marker) != null);
+    for (viewer_markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_3d_viewer_js, marker) != null);
 }
 
 // spec: Web Server - the PCB 3D viewer composites each face's outer copper, soldermask, and silkscreen—including generated sub-circuit, test-point, and pin-1 artwork—into one non-overlapping visible cap and cuts circular drills and slots through the board
