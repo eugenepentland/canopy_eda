@@ -853,12 +853,12 @@ fn ringSites(len: f64, pitch: f64) usize {
     return @max(min_ring_sites, numeric.toCount(@round(len / pitch)));
 }
 
-/// Phase samples for a legal contour march. Four moves a nominal site in
-/// quarter-pitch increments, fine enough to find a manufacturable via-sized slot
+/// Phase samples for a legal contour march. Eight moves a nominal site in
+/// eighth-pitch increments, fine enough to find a manufacturable via-sized slot
 /// without turning obstacle vetting into an unbounded search. The zero phase is
 /// always tried first and wins ties, preserving existing geometry unless a shift
 /// places strictly more vias.
-const contour_phase_trials: usize = 4;
+const contour_phase_trials: usize = 8;
 
 /// Number of sites the fixed-spacing contour march can legally retain at
 /// `phase`. This is a dry score: the pass is not mutated until the winning phase
@@ -1213,7 +1213,7 @@ fn straight(x0: f64, x1: f64, y: f64) router.Track {
     return .{ .x1 = x0, .y1 = y, .x2 = x1, .y2 = y, .layer = 0, .width = 0.3, .net = 0 };
 }
 
-// spec: placement/via-fence - in legal mode the uniform contour lattice shifts phase when the contour's arbitrary first vertex misses usable sites, retaining the phase that places the most vias without changing pitch
+// spec: placement/via-fence - in legal mode the uniform contour lattice shifts in eighth-pitch steps when the contour's arbitrary first vertex misses usable sites, retaining the phase that places the most vias without changing pitch
 test "a legal contour shifts its uniform lattice into usable slots" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
@@ -1243,6 +1243,7 @@ test "a legal contour shifts its uniform lattice into usable slots" {
     const closed = [_][2]f64{ .{ 10, 10 }, .{ 14, 10 }, .{ 14, 14 }, .{ 10, 14 }, .{ 10, 10 } };
     const n = ringSites(chainLength(&closed), plan.pitch);
     const spacing = chainLength(&closed) / @as(f64, @floatFromInt(n));
+    try testing.expectEqual(@as(usize, 8), contour_phase_trials);
 
     // Phase zero lands all eight candidates on the blockers. Rotating the same
     // eight-site, 2 mm lattice puts every post between them; no extra site and no

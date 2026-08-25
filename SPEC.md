@@ -2090,13 +2090,13 @@ the copper touches. A net with no routed track on any layer is left unfenced —
 shields a routed path, and ringing bare pads would only wall off the routing still
 to come. The pitch is divided evenly into each contour's perimeter (`round(L /
 pitch)` sites at an actual spacing of `L / n`), so the fence closes with no seam
-gap and no bunching. In legal mode that uniform lattice is tried at bounded phase
+gap and no bunching. In legal mode that uniform lattice is tried at eighth-pitch phase
 offsets around the closed contour and the phase retaining the most legal sites
 wins, so the contour's arbitrary first vertex cannot strand a manufacturable slot
 between candidates. A contour too short or a pitch too coarse for even one
 division still takes a whole minimum ring rather than a lone via.
 
-- in legal mode the uniform contour lattice shifts phase when the contour's arbitrary first vertex misses usable sites, retaining the phase that places the most vias without changing pitch
+- in legal mode the uniform contour lattice shifts in eighth-pitch steps when the contour's arbitrary first vertex misses usable sites, retaining the phase that places the most vias without changing pitch
 
 How hard each ring site is vetted is the caller's mode. `legal`, the DEFAULT, vets
 each site against the board, where **gaps are preferred over conflicts**: a
