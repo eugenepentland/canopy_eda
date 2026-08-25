@@ -1085,6 +1085,36 @@ test "viewer JS refreshes sub-circuit seeds before every stamp" {
     try std.testing.expect(std.mem.indexOf(u8, js, "PCB.subroutes=j.subroutes||{}") != null);
 }
 
+// spec: Web Server - Save to sub-circuit captures untagged local connected traces and vias while excluding a connected run that reaches any component outside the sub-circuit
+test "viewer JS captures local routed copper when saving a sub-circuit layout" {
+    const js = @embedFile("assets/pcb_board.js");
+    const start = std.mem.indexOf(u8, js, "function subcircuitSaveCopper(idxs,g)") orelse
+        return error.TestSubcircuitSaveCopperMissing;
+    const tail = js[start..];
+    const end = std.mem.indexOf(u8, tail, "// ── Semantic copper selection") orelse
+        return error.TestSubcircuitSaveCopperEndMissing;
+    const body = tail[0..end];
+
+    // Tagged copper remains authoritative, while the connectivity graph adds
+    // untagged hand/autorouter runs and rejects roots touching an outside pad.
+    try std.testing.expect(std.mem.indexOf(u8, body, "owned=grpCopper(g)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "var roots=linksBuildNet(b),keep={},foreign={};") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "if(inside[q.i])keep[root]=1;else foreign[root]=1;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "Object.keys(foreign).forEach(function(root){delete keep[root];});") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "b.ts.forEach(function(o){if(keep[roots[connKey(o.x1,o.y1,o.l||0)]])addTrack(o);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "b.vs.forEach(function(o){if(keep[roots[connKey(o.x,o.y,0)]])addVia(o);") != null);
+
+    const save_start = std.mem.indexOf(u8, js, "function saveGroupLayout(g)") orelse
+        return error.TestSaveGroupLayoutMissing;
+    const save_tail = js[save_start..];
+    const save_end = std.mem.indexOf(u8, save_tail, "saveGroupFn=saveGroupLayout;") orelse
+        return error.TestSaveGroupLayoutEndMissing;
+    const save_body = save_tail[0..save_end];
+    try std.testing.expect(std.mem.indexOf(u8, save_body, "var copper=subcircuitSaveCopper(idxs,g);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, save_body, "subcircuitSaveTagged(t,g)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, save_body, "subcircuitSaveTagged(v,g)") != null);
+}
+
 // spec: Web Server - Stamp defaults to the sub-circuit's starred layout, while its adjacent picker can stamp any compatible named saved layout without changing the star
 test "viewer JS offers named sub-circuit layouts beside the starred Stamp action" {
     const js = @embedFile("assets/pcb_board.js");
@@ -1137,7 +1167,7 @@ test "viewer JS shows stamp and layout link for a selected sub-circuit" {
     try std.testing.expect(std.mem.indexOf(u8, js, "return \"/pcb-layout/\"+encodeURIComponent(PCB.name)+\"?sub=\"+encodeURIComponent(g);") != null);
 }
 
-// spec: Web Server - The PCB Sub-circuits palette and Properties expose Save to sub-circuit, which fetches a fresh target revision before capturing only that group's poses and owned copper as a new layout
+// spec: Web Server - The PCB Sub-circuits palette and Properties expose Save to sub-circuit, which fetches a fresh target revision before capturing that group's poses, stamped copper, and locally connected traces/vias as a new layout
 test "viewer JS saves a selected board group back to its sub-circuit" {
     const js = @embedFile("assets/pcb_board.js");
     for ([_][]const u8{

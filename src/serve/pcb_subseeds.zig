@@ -917,7 +917,7 @@ test "subseed endpoint rereads a module layout saved after the board opened" {
     try std.testing.expectEqual(@as(usize, 0), missing_parsed.value.object.get("subseedorigins").?.object.count());
 }
 
-// spec: Web Server - Saving a rigid sub-circuit from its parent PCB is the inverse of Stamp: poses and group-owned copper return to module coordinates, including a board-side mirror
+// spec: Web Server - Saving a rigid sub-circuit from its parent PCB is the inverse of Stamp: poses, group-owned copper, and local connected traces/vias return to module coordinates, including a board-side mirror; a copper run reaching any component outside the sub-circuit remains board-owned
 test "sub-circuit capture rekeys poses and owned copper into module coordinates" {
     const alloc = std.testing.allocator;
     var targets = std.StringHashMapUnmanaged(CaptureTarget).empty;

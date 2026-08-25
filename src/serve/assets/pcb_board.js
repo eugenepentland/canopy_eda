@@ -2948,7 +2948,7 @@ function renderProps(){var body=document.getElementById("prop-body");if(!body)re
     'drag to move · R / Shift+R to rotate · click a component again to select it')+'</span></div>'+
    '<div class="prop-sec">Layout</div><div class="prop-grp">'+
    (ginf&&!RO?'<button class="btn grp-stamp" data-grp-stamp="'+pEsc(selGroup)+'" title="'+stampTitle(selGroup,ginf)+'">Stamp '+(ginf.starred?'★ ':'')+'layout</button>'+stampLayoutPicker(selGroup,ginf,"grp-layout-pick"):'')+
-   (!RO?'<button class="btn grp-save" data-grp-save="'+pEsc(selGroup)+'" title="Save this on-board arrangement as a new layout on the sub-circuit">Save to sub-circuit…</button>':'')+
+   (!RO?'<button class="btn grp-save" data-grp-save="'+pEsc(selGroup)+'" title="Save this on-board arrangement and its local connected traces and vias as a new layout on the sub-circuit">Save to sub-circuit…</button>':'')+
    '<a class="btn grp-layout" href="'+ghref+'" target="_blank" rel="noopener" title="Open this sub-circuit on its own PCB-layout page">Open sub-circuit layout ↗</a>'+
    (!ginf?'<span class="grp-noseed" title="Open the sub-circuit layout, place its parts, then save a layout before stamping it here.">no saved layout to stamp</span>':'')+
    '</div>';
@@ -3014,7 +3014,7 @@ function renderProps(){var body=document.getElementById("prop-body");if(!body)re
    '<span class="grp-n">'+GRPS[pg].length+' parts</span>'+
    (pinf&&!RO?'<button class="btn grp-stamp" data-grp-stamp="'+pEsc(pg)+'" title="'+stampTitle(pg,pinf)+'">Stamp '+(pinf.starred?'★ ':'')+'layout</button>'+stampLayoutPicker(pg,pinf,"grp-layout-pick"):
     (pinf?'':'<span class="grp-noseed" title="No saved layout on the module matches its current parts — open the module’s own /pcb-layout page, lay it out and save (★ star it to pin the choice).">no saved module layout</span>'))+
-   (!RO?'<button class="btn grp-save" data-grp-save="'+pEsc(pg)+'" title="Save this on-board arrangement as a new layout on the sub-circuit">Save to sub-circuit…</button>':'')+
+   (!RO?'<button class="btn grp-save" data-grp-save="'+pEsc(pg)+'" title="Save this on-board arrangement and its local connected traces and vias as a new layout on the sub-circuit">Save to sub-circuit…</button>':'')+
    '</div>';
  }
  var pads=(p.pads||[]).slice().sort(function(a,b){var an=parseInt(a.num,10),bn=parseInt(b.num,10);
@@ -3524,6 +3524,30 @@ function carriedCopper(idxs,g,banded){var seen=new Set(),t=[],v=[],z=[];
  if(banded)add(selCuCopper());
  add(privateCopper(idxs));
  return {t:t,v:v,z:z};}
+// Copper captured by Save to sub-circuit. Existing stamped copper has an
+// explicit owner tag and always belongs to the snapshot. Newly hand-routed or
+// autorouted copper has no tag, so recover its ownership from connectivity:
+// keep a connected run when it touches at least one pad in this sub-circuit
+// and no pad on a component outside it. This carries local shared-rail stubs
+// and via drops (for example a GND pad -> plane via) without swallowing the
+// board-wide rail/bus that leaves the block.
+function subcircuitSaveCopper(idxs,g){var inside={},wanted={},seen=new Set(),t=[],v=[],owned=grpCopper(g);
+ idxs.forEach(function(i){inside[i]=1;(P[i].pads||[]).forEach(function(pd){var net=netCollapse(pd.net||"");if(net)wanted[net]=1;});});
+ function addTrack(o){if(!seen.has(o)){seen.add(o);t.push(o);}}
+ function addVia(o){if(!seen.has(o)){seen.add(o);v.push(o);}}
+ owned.t.forEach(addTrack);owned.v.forEach(addVia);
+ Object.keys(wanted).forEach(function(net){var b={ts:[],vs:[],ps:[]};
+  (PCB.tracks||[]).forEach(function(o){if(netCollapse(o.net||"")===net)b.ts.push(o);});
+  (PCB.vias||[]).forEach(function(o){if(netCollapse(o.net||"")===net)b.vs.push(o);});
+  P.forEach(function(p,i){(p.pads||[]).forEach(function(pd){if(netCollapse(pd.net||"")===net)b.ps.push({i:i,pd:pd});});});
+  var roots=linksBuildNet(b),keep={},foreign={};
+  b.ps.forEach(function(q){var j=(P[q.i].pads||[]).indexOf(q.pd),root=roots["pad:"+q.i+":"+j];if(root===undefined)return;
+   if(inside[q.i])keep[root]=1;else foreign[root]=1;});
+  Object.keys(foreign).forEach(function(root){delete keep[root];});
+  b.ts.forEach(function(o){if(keep[roots[connKey(o.x1,o.y1,o.l||0)]])addTrack(o);});
+  b.vs.forEach(function(o){if(keep[roots[connKey(o.x,o.y,0)]])addVia(o);});});
+ return {t:t,v:v,z:owned.z.slice()};}
+function subcircuitSaveTagged(o,g){var q={};Object.keys(o).forEach(function(k){q[k]=o[k];});q.g=g;return q;}
 // ── Semantic copper selection ──────────────────────────────────────────
 // A routed run is one component of the same union-find graph that decides
 // whether ratsnest links are already satisfied. Reusing linksBuildNet keeps
@@ -3744,10 +3768,10 @@ function stampGroup(g,layout){return refreshStampSeeds(g,layout).then(function()
  }).catch(function(e){window.alert("Stamp failed: "+(e&&e.message?e.message:e));
  }).finally(function(){stampBusy(g,false);});}
 stampGroupFn=stampGroup;
-// Inverse of Stamp: send only this rigid group's live poses and explicitly
-// group-owned copper. The server re-keys by origin, reverses the board pose,
-// maps parent nets back to module nets, and writes a NEW module layout behind
-// the freshly fetched target revision.
+// Inverse of Stamp: send this rigid group's live poses, stamped copper and
+// local connected traces/vias. The server re-keys by origin, reverses the
+// board pose, maps parent nets back to module nets, and writes a NEW module
+// layout behind the freshly fetched target revision.
 function saveGroupLayout(g){var idxs=GRPS[g]||[];if(!idxs.length)return Promise.resolve();
  var suggested=((PCB.name||"board")+" "+stamp()).slice(0,80);
  var nm=window.prompt("Save this board arrangement as a new sub-circuit layout:",suggested);
@@ -3757,9 +3781,12 @@ function saveGroupLayout(g){var idxs=GRPS[g]||[];if(!idxs.length)return Promise.
  return refreshSubcircuitData().then(function(){var info=(PCB.subsaveinfo||{})[g];
   if(!info||typeof info.rev!=="number")throw new Error("the sub-circuit save target is unavailable");
   var parts=idxs.map(function(i){var p=P[i];return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,origin:p.origin||"",side:p.side||"top",locked:!!p.locked};});
-  var tracks=(PCB.tracks||[]).filter(function(t){return t.g===g;});
-  var vias=(PCB.vias||[]).filter(function(v){return v.g===g;});
-  var zones=(PCB.zones||[]).filter(function(z){return z.g===g;});
+  var copper=subcircuitSaveCopper(idxs,g);
+  // Tag copies for the server's explicit capture boundary; leave the live
+  // board objects untouched so Save itself is not a copper edit.
+  var tracks=copper.t.map(function(t){return subcircuitSaveTagged(t,g);});
+  var vias=copper.v.map(function(v){return subcircuitSaveTagged(v,g);});
+  var zones=copper.z;
   var routes=(tracks.length||vias.length||zones.length)?{tracks:tracks,vias:vias,zones:zones}:null;
   return fetch("/api/pcb-subcircuit-layout/"+encodeURIComponent(PCB.name),{method:"POST",headers:{"Content-Type":"application/json"},
    body:JSON.stringify({group:g,name:nm,parts:parts,routes:routes,rev:info.rev})});
@@ -4466,7 +4493,7 @@ function subPanelRefresh(){var box=document.getElementById("sub-panel");if(!box)
    (hasSeed?'<button class="btn sub-stamp" data-stamp="'+pEsc(g)+'" title="'+
      (inf?stampTitle(g,inf):"Place this sub-circuit from its starred module layout")+'">Stamp'+(inf&&inf.starred?' ★':'')+'</button>'+stampLayoutPicker(g,inf,"sub-layout-pick"):
     '<span class="sub-noseed" title="No saved layout on the module matches its current parts \u2014 lay it out and save on the module\u2019s own page.">\u2014</span>')+
-   '<button class="btn sub-save" data-save-sub="'+pEsc(g)+'" title="Save the current on-board arrangement as a new layout on this sub-circuit">Save\u2026</button>'+
+   '<button class="btn sub-save" data-save-sub="'+pEsc(g)+'" title="Save the current on-board arrangement and its local connected traces and vias as a new layout on this sub-circuit">Save\u2026</button>'+
    '</div>';});
  box.innerHTML=h;
  box.querySelectorAll("[data-rigid]").forEach(function(b){b.addEventListener("click",function(){grpToggle(b.getAttribute("data-rigid"));});});

@@ -6055,10 +6055,11 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Restamping a sub-circuit replaces only that group's stamped copper and preserves board-level tracks, vias, and RF paths on the same nets
 - Stamp fetches the current module layout when clicked, so a sub-circuit edit in another tab applies without reloading a board and without discarding its unsaved work
 - Stamp defaults to the sub-circuit's starred layout, while its adjacent picker can stamp any compatible named saved layout without changing the star
-- Saving a rigid sub-circuit from its parent PCB is the inverse of Stamp: poses and group-owned copper return to module coordinates, including a board-side mirror
+- Saving a rigid sub-circuit from its parent PCB is the inverse of Stamp: poses, group-owned copper, and local connected traces/vias return to module coordinates, including a board-side mirror; a copper run reaching any component outside the sub-circuit remains board-owned
+- Save to sub-circuit captures untagged local connected traces and vias while excluding a connected run that reaches any component outside the sub-circuit
 - A live Stamp refresh keeps every stampable sub-circuit's palette action visible when the fresh grid placement uses different ref-des assignments from the open board
 - Selecting a rigid sub-circuit exposes its Stamp and layout-page actions directly in Properties
-- The PCB Sub-circuits palette and Properties expose Save to sub-circuit, which fetches a fresh target revision before capturing only that group's poses and owned copper as a new layout
+- The PCB Sub-circuits palette and Properties expose Save to sub-circuit, which fetches a fresh target revision before capturing that group's poses, stamped copper, and locally connected traces/vias as a new layout
 - the PCB hand router defaults to the active net class while the sidebar keeps its resolved geometry controls hidden
 - The /pcb-layout Route panel presents Route board, Stop, status, and live replay without cached-load, interactive-session, scope, or advanced-routing controls
 - A completed Route board run persists its applied copper to the active layout, or creates the conventional first `layout` snapshot; Route plan remains temporary
