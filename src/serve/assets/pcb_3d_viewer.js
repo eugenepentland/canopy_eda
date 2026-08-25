@@ -547,8 +547,8 @@
   function artworkSig() {
     try {
       return JSON.stringify([
-        DATA.parts, DATA.tracks, DATA.vias, DATA.pours, DATA.zone_fills,
-        DATA.mask_relief, DATA.texts, DATA.fab_text, DATA.heatsink
+        DATA.parts, DATA.tracks, DATA.vias, DATA.pours, DATA.zone_fills, DATA.rf_paths,
+        DATA.mask_relief, DATA.mask_merges, DATA.texts, DATA.fab_text, DATA.heatsink
       ]);
     } catch (_) { return "artwork"; }
   }

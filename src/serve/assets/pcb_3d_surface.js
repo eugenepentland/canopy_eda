@@ -123,6 +123,23 @@
     });
   }
 
+  // Saved RF routes are centreline chords plus one swept, variable-width
+  // copper surface. Assembly paints that surface (including pad tapers); use
+  // the same lowered world-space rings here so a bottom mask opening reveals
+  // copper instead of substrate around the narrower centreline fallback.
+  function drawRfPaths(ctx, data, side) {
+    var layer = side === "bottom" ? 1 : 0, paths = [];
+    try {
+      if (window.PCBRfSurfacePolys) paths = window.PCBRfSurfacePolys(data) || [];
+    } catch (_) {}
+    paths.forEach(function (path) {
+      if ((+path.l || 0) !== layer) return;
+      (path.polys || []).forEach(function (poly) {
+        ctx.beginPath(); if (!tracePoly(ctx, poly)) return; ctx.fill();
+      });
+    });
+  }
+
   function withPartTransform(ctx, part, fn) {
     ctx.save(); ctx.translate(+part.x, +part.y); ctx.rotate(deg(part.rot));
     if (part.side === "bottom") ctx.scale(-1, 1);
@@ -195,7 +212,8 @@
 
   function drawCopper(ctx, data, side) {
     ctx.fillStyle = COPPER; ctx.strokeStyle = COPPER;
-    drawAreas(ctx, data, side); drawTracks(ctx, data, side); drawPads(ctx, data, side, false); drawVias(ctx, data);
+    drawAreas(ctx, data, side); drawTracks(ctx, data, side); drawRfPaths(ctx, data, side);
+    drawPads(ctx, data, side, false); drawVias(ctx, data);
   }
 
   function punchRelief(ctx, data, side) {

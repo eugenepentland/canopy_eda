@@ -2464,7 +2464,7 @@ function rfCompactRing(pts,ws){if(!pts||pts.length<2)return [];var left=[],right
 // editing and obstacle probes, but paint as ONE swept custom-copper polygon.
 // Exact endpoint widths preserve the pad taper without exposing every solver
 // sample as a separately stroked track.
-function rfPathGeom(){var src=PCB.rf_paths||[];
+function rfPathGeom(data){var src=data&&data.rf_paths||PCB.rf_paths||[];
  if(rfGeom&&rfGeom.src===src&&rfGeom.n===src.length)return rfGeom.p;
  var runs=[];
  src.forEach(function(cur){var clean=rfCleanSamples(cur.samples);if(clean.pts.length<2)return;
@@ -2473,6 +2473,11 @@ function rfPathGeom(){var src=PCB.rf_paths||[];
    for(var j=1;j<ring.length;j++)path.lineTo(X(ring[j][0]),Y(ring[j][1]));path.closePath();});
   runs.push({l:cur.l||0,net:cur.net,poly:poly,polys:polys,path:path});});
  rfGeom={src:src,n:src.length,p:runs};return runs;}
+// The 3D face compositor must paint the exact same swept RF copper as the
+// assembly view. Keep the world-space rings here, beside the one lowering
+// implementation, rather than reconstructing tapers independently in 3D.
+window.PCBRfSurfacePolys=function(data){return rfPathGeom(data).map(function(r){
+ return {l:r.l,net:r.net,polys:r.polys};});};
 function rfSamePoint(a,b){return Math.abs(a[0]-b[0])<=1e-7&&Math.abs(a[1]-b[1])<=1e-7;}
 function rfPathCoversTrack(ss,t,a,b){for(var i=0;i<ss.length;i++){if(!rfSamePoint(ss[i],a))continue;
   for(var j=i+1;j<ss.length;j++){if(!rfSamePoint(ss[j],b))continue;var on=true;

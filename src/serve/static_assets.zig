@@ -955,10 +955,15 @@ test "PCB 3D viewer exports an AP242 tessellated assembly" {
 }
 
 // spec: Web Server - the PCB 3D viewer composites each face's outer copper, soldermask, and silkscreen—including generated sub-circuit, test-point, and pin-1 artwork—into one non-overlapping visible cap and cuts circular drills and slots through the board
+// spec: Web Server - exposed RF copper on both board faces uses the same swept taper polygons in Assembly and the PCB 3D viewer
 test "PCB 3D viewer textures both manufactured faces and cuts drills" {
     const Check = struct { bytes: []const u8, marker: []const u8 };
     const checks = [_]Check{
         .{ .bytes = pcb_3d_surface_js, .marker = "function drawCopper(ctx, data, side)" },
+        .{ .bytes = pcb_board_js, .marker = "window.PCBRfSurfacePolys=function(data)" },
+        .{ .bytes = pcb_3d_surface_js, .marker = "function drawRfPaths(ctx, data, side)" },
+        .{ .bytes = pcb_3d_surface_js, .marker = "window.PCBRfSurfacePolys(data)" },
+        .{ .bytes = pcb_3d_surface_js, .marker = "drawRfPaths(ctx, data, side)" },
         .{ .bytes = pcb_3d_surface_js, .marker = "function maskCanvas(data, pts, b, width, height, scale, side)" },
         .{ .bytes = pcb_3d_surface_js, .marker = "function drawFootprintSilk(ctx, data, side)" },
         .{ .bytes = pcb_board_js, .marker = "window.PCBGeneratedSilk=function(){return boardSilkCurrentGeom();}" },
@@ -973,6 +978,7 @@ test "PCB 3D viewer textures both manufactured faces and cuts drills" {
         .{ .bytes = pcb_3d_surface_js, .marker = "shape.holes.push(path)" },
         .{ .bytes = pcb_3d_viewer_js, .marker = "surface.collectHoles(DATA, pts)" },
         .{ .bytes = pcb_3d_viewer_js, .marker = "surface.makeTexture(THREE, DATA, pts, side)" },
+        .{ .bytes = pcb_3d_viewer_js, .marker = "DATA.zone_fills, DATA.rf_paths" },
         .{ .bytes = pcb_3d_viewer_js, .marker = "new THREE.ShapeGeometry(shape)" },
         .{ .bytes = pcb_3d_viewer_js, .marker = "new THREE.MeshBasicMaterial({ visible: false })" },
         .{ .bytes = pcb_3d_viewer_js, .marker = "color: surface.maskColor" },
