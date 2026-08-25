@@ -62,12 +62,12 @@ pub fn forNet(
         .layer = if (start.pad.thru) end.layer else start.layer,
         .start_section = padSection(start.pad, nominal_width, target_z),
         .end_section = padSection(end.pad, nominal_width, target_z),
-        // A land narrower than the controlled line needs a physical neck.
-        // A wider land already accepts the nominal trace: its electrical step
-        // remains in padSection(), but widening the trace before the pad would
-        // add copper the connection does not need.
-        .start_width_mm = @min(nominal_width, @min(start.pad.w, start.pad.h)),
-        .end_width_mm = @min(nominal_width, @min(end.pad.w, end.pad.h)),
+        // Match the actual land cross-section at both ends. This deliberately
+        // preserves wider lands as physical flares as well as narrower lands
+        // as neck-downs; the solver and final clearance probe judge the whole
+        // transition rather than silently leaving a width step at the pad.
+        .start_width_mm = @min(start.pad.w, start.pad.h),
+        .end_width_mm = @min(end.pad.w, end.pad.h),
     };
 }
 
@@ -156,8 +156,8 @@ test "series land frame uses the through-body pad axis" {
     const pair = forNet(fixture(&parts, &nets), 0, .{ 0, 0 }, .{ 4, 0 }, 0.2, 50).?;
     try testing.expectEqual([2]f64{ 0, 1 }, pair.start.tangent); // QFN land long axis
     try testing.expectEqual([2]f64{ 1, 0 }, pair.end.tangent); // 0201 through-body axis
-    try testing.expectApproxEqAbs(@as(f64, 0.2), pair.start_width_mm, 1e-12);
-    try testing.expectApproxEqAbs(@as(f64, 0.2), pair.end_width_mm, 1e-12); // the wider passive land needs no flare
+    try testing.expectApproxEqAbs(@as(f64, 0.3), pair.start_width_mm, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.4), pair.end_width_mm, 1e-12);
 }
 
 fn fixture(parts: []optimizer.Part, nets: []const optimizer.FlatNet) optimizer.Placement {

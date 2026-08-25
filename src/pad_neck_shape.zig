@@ -1,4 +1,4 @@
-//! Stable pad-neck shaping seam shared by route lowering and the solver.
+//! Stable pad-transition shaping seam shared by route lowering and the solver.
 //!
 //! The web layer must not import placement implementation modules directly.
 //! This small root-level adapter keeps that boundary while ensuring replayed
@@ -11,7 +11,8 @@ const router = @import("placement/router.zig");
 const pad_neck = @import("placement/pad_neck.zig");
 
 /// Restore selected replay tracks to their authored nominal class width, then
-/// apply the ordinary pad-local neck and taper profile at SMD endpoints.
+/// apply the ordinary authored neck or controlled-impedance taper profile at
+/// SMD endpoints.
 pub fn restoreGeneratedTracks(
     arena: std.mem.Allocator,
     placement: optimizer.Placement,

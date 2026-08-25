@@ -749,14 +749,15 @@ test "PCB editor styles the two-trace fillet radius menu" {
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_layout_css, marker) != null);
 }
 
-test "PCB editor automatically lowers manual pad tapers" {
+test "PCB editor automatically lowers every local controlled-impedance pad taper" {
     const markers = [_][]const u8{
-        "function drawTaperProfile", "function drawRfTaperAllowed",    "pad_neck_width",                      "kind:\"rf\"",
-        "nominal*1.2",               "function drawTaperTracks",       "function drawApplyAutomaticTapers",   "automatic pad tapers added",
-        "window.PCBDrawTaperTracks", "function drawTaperPath",         "track_ids:tracks.map(trackIdEnsure)", "window.PCBDrawPadLaunch",
-        "span>=nominal-1e-9",        "function drawTrackEndDirection",
+        "function drawTaperProfile", "Math.abs(span-nominal)<=1e-9", "pad_neck_width",                      "kind:\"rf\"",
+        "nominal*1.2",               "function drawTaperTracks",     "function drawApplyAutomaticTapers",   "automatic pad tapers added",
+        "window.PCBDrawTaperTracks", "function drawTaperPath",       "track_ids:tracks.map(trackIdEnsure)", "window.PCBDrawPadLaunch",
+        "function drawRfTaperPlan",  "window.PCBDrawRfTaperPlan",    "vias, opposite-side terminals",       "function drawTrackEndDirection",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "function drawRfTaperAllowed") == null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "function drawReplaceLaid") == null);
 }
 
