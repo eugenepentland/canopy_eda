@@ -1358,7 +1358,7 @@ test "PCB review asset exposes complete ref and net focus coverage" {
     try std.testing.expect(std.mem.indexOf(u8, js, "sceneShell.contains(ev.target)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "if(PHYSICAL_REVIEW)return;") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "PHYSICAL_REVIEW&&!reviewFocusHasNets()") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "reviewPad=RO?padHitAt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "exactPad=(RO||viewSt.filt.pad)?padHitAt") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "svgScreenInverse") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "window.addEventListener(\"mousemove\"") != null);
 }

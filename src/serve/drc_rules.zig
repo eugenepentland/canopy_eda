@@ -841,7 +841,7 @@ test "viewer JS toggles PCB items into the shared selection with a modifier clic
         "function selectionMod(ev){return !!(ev&&(ev.ctrlKey||ev.metaKey));}",
         "function selectionToggleParts(idxs)",
         "if(all)next=next.filter(function(i){return idxs.indexOf(i)<0;});",
-        "selectionToggleParts(GRPS[cg])",
+        "if(hi>=0){selectionToggleParts([hi]);return;}",
         "selectionToggleParts(GRPS[gh])",
         "function selectionToggleCopper(hit)",
         "var arr=hit.t===\"track\"?ts:vs,at=arr.indexOf(hit.o);",
@@ -1219,19 +1219,39 @@ test "viewer JS gives selected copper drag priority over overlapping footprints"
     ).? < part_hit);
 }
 
-// Regression guard for hierarchical rigid-group selection and non-destructive
+// Regression guard for fallback rigid-group selection and non-destructive
 // copper handling during group rotation.
-test "viewer JS selects rigid sub-circuits before their components and preserves copper on rotate" {
+test "viewer JS selects rigid sub-circuits only as a fallback and preserves copper on rotate" {
     const js = @embedFile("assets/pcb_board.js");
 
-    // Selection has an explicit group scope. A first click enters it, while an
-    // already-active group falls through to selectComp for the drill-in click.
+    // Selection has an explicit group scope, but the broad group box is tested
+    // only after precise copper/DRC/zone hits miss. Clicking a component is a
+    // leaf edit immediately; the group stays available from empty box space.
     try std.testing.expect(std.mem.indexOf(u8, js, "var selRef=null,selGroup=null") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "if(!RO&&viewSt.filt.sub&&cg&&grpRigid(cg))") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "if(selGroup!==cg)") != null);
+    const precise_hit = std.mem.indexOf(u8, js, "var sh=(!RO&&!anyDrawTool())?inspHit(m):null;") orelse
+        return error.TestPreciseHitMissing;
+    const group_hit = std.mem.indexOfPos(
+        u8,
+        js,
+        precise_hit,
+        "var gh=(!sh&&!RO&&viewSt.filt.sub)?grpAt(m.x,m.y):null;",
+    ) orelse return error.TestFallbackGroupHitMissing;
+    try std.testing.expect(precise_hit < group_hit);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(sh&&sh.t===\"track\"){segdrag=segStart") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(sh&&sh.t===\"via\"){viadrag=viaStart") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "drag=dragStart(hi,m);svg.style.cursor=\"grab\";});") != null);
+    const click_part_start = std.mem.indexOf(u8, js, "function clickPart(ev,i)") orelse
+        return error.TestClickPartMissing;
+    const click_part_tail = js[click_part_start..];
+    const click_part_end = std.mem.indexOf(u8, click_part_tail, "svg.addEventListener(\"pointerup\"") orelse
+        return error.TestClickPartEndMissing;
+    const click_part = click_part_tail[0..click_part_end];
+    try std.testing.expect(std.mem.indexOf(u8, click_part, "inspHitForPart(m,i)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, click_part, "selectComp(P[i].ref)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, click_part, "selectGroup(") == null);
     try std.testing.expect(std.mem.indexOf(u8, js, "if(selGroup&&!selRef)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "if(selRef===P[hi].ref){drag=") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "function grpAt(wx,wy)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "drc:5,sub:6") != null);
 
     // Group scope is shown once on the green aggregate bounding box. It must
     // not also turn every member's courtyard green; a drilled-in component
@@ -1348,9 +1368,13 @@ test "viewer wires a selection filter that gates the hit-testers" {
     // The filter gates ordinary PCB-editor picks; physical assembly review is
     // deliberately always pickable even when the editor persisted it off.
     try std.testing.expect(std.mem.indexOf(u8, js, "(PHYSICAL_REVIEW||viewSt.filt.fp)?partAt(m.x,m.y):-1") != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        js,
+        "var exactPad=(RO||viewSt.filt.pad)?padHitAt(m.x,m.y):null",
+    ) != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "viewSt.filt.sub)?grpAt") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "viewSt.filt.sub?grpIdxs") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "viewSt.filt.sub&&cg&&grpRigid") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(viewSt.filt.sub){var gh=grpAt") != null);
 }
 
 // spec: Web Server - Routing toward a same-net pad snaps the whole approach onto the pad centreline

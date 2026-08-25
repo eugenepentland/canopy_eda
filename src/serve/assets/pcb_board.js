@@ -2772,13 +2772,11 @@ function svgScreenDelta(dx,dy){var inv=svgScreenInverse(),a=svgScreenPoint(0,0,i
 function mm(ev){var p=svgScreenPoint(ev.clientX,ev.clientY);
  return {x:p.x/S+MX-M,y:p.y/S+MY-M};}
 // ── KiCad-style properties panel ──────────────────────────────────────
-// The sidebar shows one selection at a time: a rigid sub-circuit first, then a
-// component after drilling in. Clicking empty board clears it back to the hint.
-// renderProps rebuilds the panel; updatePropLive is the cheap pose refresh.
-// Hierarchical selection for rigid sub-circuits. The first click selects the
-// group (`selGroup`, no `selRef`); a second click while that group is active
-// drills into one component (`selGroup` + `selRef`). This state, rather than
-// incidental hover, is the authority for move / rotate targeting.
+// The sidebar shows one selection at a time. Precise board objects win normal
+// clicks; a rigid sub-circuit is the fallback for otherwise-empty space inside
+// its box. Clicking empty board clears it back to the hint. renderProps rebuilds
+// the panel; updatePropLive is the cheap pose refresh. `selGroup` / `selRef`,
+// rather than incidental hover, remain the authority for move / rotate targets.
 var selRef=null,selGroup=null;
 function pEsc(s){return String(s==null?"":s).replace(/[&<>"]/g,function(c){
  return c=="&"?"&amp;":(c=="<"?"&lt;":(c==">"?"&gt;":"&quot;"));});}
@@ -3161,19 +3159,19 @@ function selectionToggleCopper(hit){var seed=selectionSeed(),ts=seed.t,vs=seed.v
  var arr=hit.t==="track"?ts:vs,at=arr.indexOf(hit.o);
  if(at>=0)arr.splice(at,1);else arr.push(hit.o);
  selectionCommit(seed);}
-// Resolve a modifier click with the normal hit precedence. Intact rigid groups
-// beat coincident copper; standalone pads beat copper; bare tracks/vias remain
-// individually selectable. Empty Ctrl/Cmd-click deliberately preserves the
-// accumulated selection.
+// Resolve a modifier click with the normal hit precedence. Exact components,
+// pads, tracks, and vias beat the broad rigid-group box; the group is toggled
+// only from otherwise-empty space inside it. Empty Ctrl/Cmd-click deliberately
+// preserves the accumulated selection.
 function selectionToggleAt(ev,m){
- var hi=viewSt.filt.fp?partAt(m.x,m.y):-1,cg=hi>=0?grpOf(P[hi].ref):null;
- if(hi>=0&&viewSt.filt.sub&&cg&&grpRigid(cg)){selectionToggleParts(GRPS[cg]);return;}
- if(hi<0&&viewSt.filt.sub){var gh=grpAt(m.x,m.y);
-  if(gh){selectionToggleParts(GRPS[gh]);return;}}
+ var ph=viewSt.filt.pad?padHitAt(m.x,m.y):null;
+ var hi=ph?ph.i:(viewSt.filt.fp?partAt(m.x,m.y):-1);
  var hit=hi>=0?inspHitForPart(m,hi):inspHit(m);
  if(hit&&(hit.t==="track"||hit.t==="via")){selectionToggleCopper(hit);return;}
  if(hit){inspShow(hit,ev);return;}
- if(hi>=0)selectionToggleParts([hi]);}
+ if(hi>=0){selectionToggleParts([hi]);return;}
+ if(viewSt.filt.sub){var gh=grpAt(m.x,m.y);
+  if(gh)selectionToggleParts(GRPS[gh]);}}
 // ── Copper clipboard ───────────────────────────────────────────────────
 // Ctrl/Cmd+C copies only the copper in the shared selection: a lone inspected
 // track/via is promoted by selectionSeed(), while a marquee/modifier selection
@@ -3841,8 +3839,8 @@ document.addEventListener("keydown",function(ev){
    if(drag){ev.preventDefault();if(rotatePart(drag.i,rsign,true)){drag.active=true;drag.moved=true;copperTouched();}return;}
    // Mirror the drag priority (pointerdown): a marquee multi-select that
    // includes the hovered part rotates as ONE rigid body about the selection's
-   // centroid. Explicit hierarchical selection comes next: group first-click,
-   // drilled-in component second-click. Hover is only the no-selection fallback.
+   // centroid. An explicitly selected fallback group comes next, then an exact
+   // selected component. Hover is only the no-selection fallback.
    // The selection's copper rotates with it, exactly as it translates on a drag.
    if(cur>=0&&sel.length>1&&sel.indexOf(cur)>=0){ev.preventDefault();
     rotateGroup(sel,rsign,null,false,carriedCopper(sel.filter(function(k){return !P[k].locked;}),null,true));return;}
@@ -3857,7 +3855,7 @@ document.addEventListener("keydown",function(ev){
    var gg=grpOf(P[cur].ref);if(gg&&GRPS[gg]){grpToggle(gg);grpHl(gg,grpRigid(gg));}return;}
  if((ev.key=="f"||ev.key=="F")&&!ev.shiftKey&&!typing){
    // Match R and drag targeting: the explicit selection wins when the hover
-   // belongs to it; an explicit hierarchical group wins next; a drilled-in
+   // belongs to it; an explicitly selected fallback group wins next; an exact
    // component overrides its parent; hover is only the final fallback.
    if(cur>=0&&sel.length>1&&sel.indexOf(cur)>=0){ev.preventDefault();flipParts(sel,cur);return;}
    if(selGroup&&!selRef){ev.preventDefault();flipParts(GRPS[selGroup]||[]);return;}
@@ -5668,26 +5666,26 @@ svg.addEventListener("pointerdown",function(ev){
     gdrag=gdragStart(m,null);gdrag.cuDown=selectedHit;pcap(ev);svg.style.cursor="grab";return;}
    if(selectedHit.t==="track"){segdrag=segStart(selectedHit.o,m);pcap(ev);return;}
    if(selectedHit.t==="via"){viadrag=viaStart(selectedHit.o,m);pcap(ev);return;}}}
- var reviewPad=RO?padHitAt(m.x,m.y):null;
- var hi=reviewPad?reviewPad.i:((PHYSICAL_REVIEW||viewSt.filt.fp)?partAt(m.x,m.y):-1);
+ var exactPad=(RO||viewSt.filt.pad)?padHitAt(m.x,m.y):null;
+ var hi=exactPad?exactPad.i:((PHYSICAL_REVIEW||viewSt.filt.fp)?partAt(m.x,m.y):-1);
  if(hi<0){
   if(!RO&&viewSt.filt.outline){var uv=vtxAt(m);if(uv>=0){vdrag=outlineVdrag(uv);pcap(ev);return;}}
-  // The visible sub-circuit box is itself selectable, including its empty
-  // interior. This always returns to group scope; drilling into a component
-  // still requires clicking an actual component below.
-  var gh=(!RO&&viewSt.filt.sub)?grpAt(m.x,m.y):null;
-  if(gh){var ga=GRPS[gh];pcap(ev);selectGroup(gh);
-   gdrag=gdragStart(m,ga[0],ga);gdrag.boxGroup=gh;svg.style.cursor="grab";return;}
   // A track under the press arms a segment drag, a via arms a rigid node
-  // drag (a stationary click just selects either); DRC-marker presses keep
-  // today's click-to-inspect.
-  if(!RO&&!anyDrawTool()){var sh=inspHit(m);
+  // drag (a stationary click just selects either). Every other precise hit
+  // also suppresses the broad sub-circuit box and resolves on pointer-up.
+  var sh=(!RO&&!anyDrawTool())?inspHit(m):null;
+  if(sh){
    if(sh&&sh.t==="track"){segdrag=segStart(sh.o,m);pcap(ev);return;}
    if(sh&&sh.t==="via"){viadrag=viaStart(sh.o,m);pcap(ev);return;}}
   // An outline EDGE away from its vertices arms a whole-segment slide (copper
   // above wins — this is reached only for empty perimeter space).
   if(!RO&&!anyDrawTool()&&viewSt.filt.outline){var oe=edgeAt(m);
    if(oe){osdrag=osegStart(oe,m);pcap(ev);svg.style.cursor="grabbing";return;}}
+  // The visible sub-circuit box is selectable, including its empty interior,
+  // but only after every enabled precise object hit-test has missed.
+  var gh=(!sh&&!RO&&viewSt.filt.sub)?grpAt(m.x,m.y):null;
+  if(gh){var ga=GRPS[gh];pcap(ev);selectGroup(gh);
+   gdrag=gdragStart(m,ga[0],ga);gdrag.boxGroup=gh;svg.style.cursor="grab";return;}
   marq={x0:m.x,y0:m.y,x1:m.x,y1:m.y,moved:false,outline:outlineOnlyFilter()};pcap(ev);
   marqEl=el("rect",{"class":"marquee",x:0,y:0,width:0,height:0});gU.appendChild(marqEl);return;}
  // Part gesture (hit-tested — parts are canvas-painted, not DOM).
@@ -5698,12 +5696,8 @@ svg.addEventListener("pointerdown",function(ev){
  // copper is nothing to move as a set, so it falls through to a plain drag.
  if(sel.indexOf(hi)>=0&&(sel.length>1||selCuCount())){gdrag=gdragStart(m,hi);svg.style.cursor="grab";return;}
  if(sel.length)selClear();
- // Once the user has drilled into this exact component, subsequent drags are
- // leaf edits. Before that, a press anywhere in a rigid sub-circuit moves the
- // group; a stationary first/second click is resolved by clickPart below.
- if(selRef===P[hi].ref){drag=dragStart(hi,m);svg.style.cursor="grab";return;}
- var gi=viewSt.filt.sub?grpIdxs(hi):null;
- if(gi){gdrag=gdragStart(m,hi,gi);svg.style.cursor="grab";return;}
+ // A component is a precise target, so pressing it edits that component. The
+ // rigid group remains movable by pressing otherwise-empty space in its box.
  drag=dragStart(hi,m);svg.style.cursor="grab";});
 svg.addEventListener("pointermove",function(ev){
  pickHoldMove(ev);
@@ -5776,17 +5770,10 @@ svg.addEventListener("pointermove",function(ev){
   if(txDirectAt(hm)>=0||subSilkAt(hm.x,hm.y)||testPointSilkAt(hm.x,hm.y)||fabTextAt(hm.x,hm.y))hoverCursor="move";
   else if(hi<0&&(inspHitTrack(hm)||inspHitVia(hm)))hoverCursor="move";}
  if(svg.style.cursor!==hoverCursor)svg.style.cursor=hoverCursor;});
-function clickPart(ev,i){var m=mm(ev),pd=padAt(i,m.x,m.y),cg=grpOf(P[i].ref);
+function clickPart(ev,i){var m=mm(ev),pd=padAt(i,m.x,m.y);
  if(RO){if(reviewClearOutside(m))return;var ph=padHitAt(m.x,m.y);reviewPickedRef(ph?ph.i:i,ph?ph.pd:pd);return;}
- // Hierarchical sub-circuit selection owns clicks inside a rigid group's
- // components. This precedence is deliberate: otherwise a coincident trace or
- // via can intermittently swallow the first/second click and make selection
- // depend on exactly which pixel of the component the user happened to hit.
- if(!RO&&viewSt.filt.sub&&cg&&grpRigid(cg)){inspClear();
-  if(pd&&pd.net&&viewSt.filt.pad)selNet(pd.net);
-  if(selGroup!==cg){selectGroup(cg);pickCycleRemember(m,ev,{t:"sub",g:cg});return;}
-  selectComp(P[i].ref);pickCycleRemember(m,ev,{t:"fp",i:i});return;}
- // Standalone-part clicks keep the copper-inspection precedence rule:
+ // Component clicks keep the copper-inspection precedence rule regardless of
+ // whether the component belongs to a rigid sub-circuit:
  // marker > pad > via/track > the part itself.
  if(!anyDrawTool()){var ihp=inspHitForPart(m,i);
   if(ihp){inspShow(ihp,ev);pickCycleRemember(m,ev,ihp);return;}
@@ -7984,7 +7971,7 @@ function pickCandidates(m){var out=[];
 function pickDataSame(a,b){if(!a||!b||a.t!==b.t)return false;
  if(a.t==="sub")return a.g===b.g;if(a.t==="fp")return a.i===b.i;
  if(a.t==="pad")return a.i===b.i&&a.pd===b.pd;return a.o===b.o;}
-function pickCycleSort(items){var rank={sub:0,fp:1,pad:2,track:3,via:4,zone:5,keepout:5,drc:6};
+function pickCycleSort(items){var rank={fp:0,pad:1,track:2,via:3,zone:4,keepout:4,drc:5,sub:6};
  return items.slice().sort(function(a,b){return (rank[a.data.t]||0)-(rank[b.data.t]||0);});}
 function pickCycleSet(items,at,data){items=pickCycleSort(items);if(items.length<2){pickCycle=null;return;}
  var i=-1;for(var k=0;k<items.length;k++)if(pickDataSame(items[k].data,data)){i=k;break;}
