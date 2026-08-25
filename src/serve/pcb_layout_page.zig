@@ -14709,6 +14709,20 @@ test "route panel keeps authored geometry hidden instead of exposing routing tun
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"r-br\"") == null);
 }
 
+test "net-class settings synchronize existing track and via geometry" {
+    const board_js = @embedFile("assets/pcb_board.js");
+    const settings_js = @embedFile("assets/pcb_settings.js");
+    try std.testing.expect(std.mem.indexOf(u8, board_js, "function netClassGeometryPlan(tracks,vias)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, board_js, "p.tracks.forEach(function(q){q.track.w=q.width;})") != null);
+    try std.testing.expect(std.mem.indexOf(u8, board_js, "p.vias.forEach(function(q){q.via.d=q.dia;q.via.drill=q.drill;})") != null);
+    try std.testing.expect(std.mem.indexOf(u8, board_js, "rfDropForTracks(changedTracks)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, board_js, "if(poursDeclared())refillPours();") != null);
+    try std.testing.expect(std.mem.indexOf(u8, board_js, "recordUndo(before)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, settings_js, "id=\"ds-class-sync\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, settings_js, "Apply classes to routed copper") != null);
+    try std.testing.expect(std.mem.indexOf(u8, settings_js, "window.PCBApplyNetClassGeometry()") != null);
+}
+
 // spec: Web Server - The PCB autorouter sidebar exposes one whole-board Route action; routing-wave scope remains an API concern rather than a routine UI choice
 // spec: Web Server - The /pcb-layout Route panel presents Route board, Stop, status, and live replay without cached-load, interactive-session, scope, or advanced-routing controls
 test "the route panel is one whole-board action with replay" {

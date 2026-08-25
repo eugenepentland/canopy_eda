@@ -8441,6 +8441,46 @@ function ncIndex(){var L=PCB.netclasses||[];if(ncIdx&&ncIdx.src===L)return ncIdx
  ncIdx={src:L,exact:ex,coll:co,halo:halo};return ncIdx;}
 function netClassInfo(net){var ix=ncIndex();
  return ix.exact[net]||ix.coll[netCollapse(net)]||null;}
+// Resolve the bulk geometry edit without touching the board. Keeping this as a
+// plan makes the Settings drawer able to report exactly what its button will
+// change, and keeps the mutating half one atomic undo step. Only nets with a
+// resolved class row participate: ordinary hand-authored widths on unclassed
+// nets remain explicit. Clearance / CPWG gap are not stored on tracks; the
+// refill + DRC after apply consume those values directly from the same class.
+function netClassGeometryPlan(tracks,vias){var tp=[],vp=[],nets=Object.create(null),eps=1e-7;
+ (tracks||[]).forEach(function(t){var c=netClassInfo(t.net||""),w=c&&+c.width;
+  if(!(w>0)||Math.abs((+t.w||0)-w)<=eps)return;
+  tp.push({track:t,width:w});nets[t.net||""]=1;});
+ (vias||[]).forEach(function(v){var c=netClassInfo(v.net||"");if(!c)return;
+  var d=+c.via_dia,dr=+c.via_drill,nd=d>0?d:(+v.d||0),nr=dr>0?dr:(+v.drill||0);
+  if(Math.abs((+v.d||0)-nd)<=eps&&Math.abs((+v.drill||0)-nr)<=eps)return;
+  vp.push({via:v,dia:nd,drill:nr});nets[v.net||""]=1;});
+ return {tracks:tp,vias:vp,nets:Object.keys(nets).length};}
+function netClassGeometryStatus(){var p=netClassGeometryPlan(PCB.tracks,PCB.vias);
+ return {tracks:p.tracks.length,vias:p.vias.length,nets:p.nets,changed:p.tracks.length+p.vias.length,editable:!RO};}
+function applyNetClassGeometry(){if(RO)return netClassGeometryStatus();
+ var p=netClassGeometryPlan(PCB.tracks,PCB.vias);if(!p.tracks.length&&!p.vias.length){
+  routeStatMsg("routed copper already matches its net classes");return netClassGeometryStatus();}
+ var before=snapAll(),changedTracks=p.tracks.map(function(q){return q.track;});recordUndo(before);
+ // A swept RF path is derived from the widths of its hidden centreline tracks.
+ // Invalidating only paths owned by changed tracks prevents stale taper copper
+ // from visually/fabricationally overriding the new class width. The existing
+ // saved-route retrofit can reconstruct legal pad tapers from this centreline.
+ rfDropForTracks(changedTracks);
+ p.tracks.forEach(function(q){q.track.w=q.width;});
+ p.vias.forEach(function(q){q.via.d=q.dia;q.via.drill=q.drill;});
+ PCB.drc=[];drawRoute();drawClr();drawDrc();scheduleDrc();
+ // The gap is a rule, not a field on each segment. Refilling here is the part
+ // of this one-click action that applies a changed class clearance / CPWG gap
+ // to the physical ground-pour openings without moving a centreline.
+ if(poursDeclared())refillPours();
+ routeStatMsg("net classes applied to "+p.tracks.length+" track"+(p.tracks.length===1?"":"s")+
+  " and "+p.vias.length+" via"+(p.vias.length===1?"":"s")+" across "+p.nets+" net"+(p.nets===1?"":"s")+
+  " — centre lines preserved; Save/Update to keep");
+ return netClassGeometryStatus();}
+window.PCBNetClassGeometryPlan=netClassGeometryPlan;
+window.PCBNetClassGeometryStatus=netClassGeometryStatus;
+window.PCBApplyNetClassGeometry=applyNetClassGeometry;
 var traceEmIdx=null,traceEmDirty=false,powerIntegrityIdx=null,powerIntegrityDirty=false;
 function traceEmInfo(net){if(!traceEmIdx){traceEmIdx={exact:{},coll:{}};
  ((PCB.trace_em&&PCB.trace_em.analyses)||[]).forEach(function(a){traceEmIdx.exact[a.net]=a;var k=netCollapse(a.net);if(traceEmIdx.coll[k]===undefined)traceEmIdx.coll[k]=a;});}
