@@ -821,7 +821,9 @@ test "Assembly review paints ordered CAM bytes with independent layer visibility
         .{ .bytes = assembly_debug_js, .marker = "assembly-cam-layers:" },
         .{ .bytes = assembly_debug_js, .marker = "populateInnerCopperLayers" },
         .{ .bytes = assembly_debug_js, .marker = "copper-inner-" },
-        .{ .bytes = pcb_board_js, .marker = "innerLayers:STACK.filter" },
+        .{ .bytes = assembly_debug_js, .marker = "frame.contentWindow.PCBReviewInnerLayers" },
+        .{ .bytes = pcb_board_js, .marker = "window.PCBReviewInnerLayers=reviewInnerLayers" },
+        .{ .bytes = pcb_board_js, .marker = "innerLayers:reviewInnerLayers()" },
         .{ .bytes = pcb_board_js, .marker = "hasOwnProperty.call(camVisibility,L.id)" },
     };
     for (checks) |check| try std.testing.expect(std.mem.indexOf(u8, check.bytes, check.marker) != null);

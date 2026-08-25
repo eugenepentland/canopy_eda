@@ -1153,6 +1153,7 @@ test "page HTML is read-only and carries embed, data, and focus assets" {
     try std.testing.expect(std.mem.indexOf(u8, js, "eda-pcb-cam-visibility") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "assembly-cam-layers:") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "populateInnerCopperLayers(payload.innerLayers)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "frame.contentWindow.PCBReviewInnerLayers") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "frame.style.transform") == null);
 }
 

@@ -221,6 +221,13 @@
 
   function requestBoardParts() {
     if (!frame || !frame.contentWindow) return;
+    // The iframe and shell are same-origin. Read its one physical layer table
+    // directly once available; unlike the message request this also works when
+    // iframe load and listener installation happen in either order.
+    try {
+      const innerLayers = frame.contentWindow.PCBReviewInnerLayers;
+      if (typeof innerLayers === 'function') populateInnerCopperLayers(innerLayers());
+    } catch (_) {}
     frame.contentWindow.postMessage({ type: 'eda-pcb-parts-request' }, window.location.origin);
   }
 

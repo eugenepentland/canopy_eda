@@ -4469,11 +4469,16 @@ function reviewPickedRef(i,pd){var p=P[i],side=reviewPartSide(p);
  if(window.parent===window)return;
  try{window.parent.postMessage({type:"eda-pcb-ref-picked",design:PCB.name,
   ref:p.ref,side:side,pad:(pd&&pd.num)||"",net:(pd&&pd.net)||"",stats:stats},window.location.origin);}catch(e){}}
+function reviewInnerLayers(){return STACK.filter(function(r){return r.i>1&&r.i<STACK.length;}).map(function(r){
+ return {id:"copper-inner-"+r.i,name:r.name};});}
+// The assembly shell is same-origin. Expose the physical stack directly so
+// its layer menu does not depend on a postMessage request winning an iframe
+// load race; the message response below remains useful for part-side data.
+window.PCBReviewInnerLayers=reviewInnerLayers;
 function reviewPostParts(target,origin){if(!PHYSICAL_REVIEW||!target||!target.postMessage)return;
  try{target.postMessage({type:"eda-pcb-parts",design:PCB.name,parts:P.map(function(p){
   return {ref:p.ref,side:p.side==="bottom"?"bottom":"top"};}),
-  innerLayers:STACK.filter(function(r){return r.i>1&&r.i<STACK.length;}).map(function(r){
-   return {id:"copper-inner-"+r.i,name:r.name};})},origin);}catch(e){}}
+  innerLayers:reviewInnerLayers()},origin);}catch(e){}}
 function reviewCamVisibility(next){if(!next||typeof next!=="object")return;
  Object.keys(next).forEach(function(k){if(typeof next[k]==="boolean")camVisibility[k]=next[k];});
  dragCacheDrop();paintSoon();}
