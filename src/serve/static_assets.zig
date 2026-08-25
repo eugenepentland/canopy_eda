@@ -788,6 +788,16 @@ test "PCB editor automatically lowers every local controlled-impedance pad taper
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "function drawReplaceLaid") == null);
 }
 
+// spec: Web Server - Escape cancels an active manual route even when automatic pad-taper DRC rejects finishing it, restoring the route-start copper and exiting Draw instead of retrying the blocked finish
+test "PCB editor Escape cancels a DRC-blocked manual route" {
+    const markers = [_][]const u8{
+        "function drawCancel()",                                                "restoreCopperSnap(snap)",
+        "if(dtrace)drawCancel();else drawModeSet(false)",                       "routeStatMsg(\"routing cancelled\")",
+        "if(ev.key==\"Enter\"&&dtrace){ev.preventDefault();drawEnd();return;}", "Cancel active trace and exit Draw",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+}
+
 test "PCB editor DRC lowers taper polygons to private probe tracks" {
     for ([_][]const u8{ "var physicalTracks", "window.PCBRfOwnsTrack", "physicalTracks.push", "Math.max(+a[2], +b[2])" }) |marker|
         try std.testing.expect(std.mem.indexOf(u8, drc_marshal_js, marker) != null or std.mem.indexOf(u8, pcb_board_js, marker) != null);

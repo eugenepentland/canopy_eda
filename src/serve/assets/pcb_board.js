@@ -3839,6 +3839,7 @@ function kbdToggle(){
   '<div class="kbd-row"><span>Switch corner posture (while routing)</span><kbd>/</kbd></div>'+
   '<div class="kbd-row"><span>Toggle sharp / rounded tangent-arc bends</span><kbd>A</kbd></div>'+
   '<div class="kbd-row"><span>Step back / finish trace</span><kbd>Backspace / Enter &middot; dbl-click</kbd></div>'+
+  '<div class="kbd-row"><span>Cancel active trace and exit Draw</span><kbd>Esc</kbd></div>'+
   '<div class="kbd-row"><span>Delete track or via (in route mode)</span><kbd>right-click</kbd></div>'+
   '<div class="kbd-row"><span>Inspect copper / DRC marker (Select mode)</span><kbd>click it</kbd></div>'+
   '<div class="kbd-row"><span>Cycle exact objects where selectable items overlap</span><kbd>Tab / Alt+click / hold</kbd></div>'+
@@ -3867,7 +3868,7 @@ var SPACE=false;
 document.addEventListener("keydown",function(ev){if((ev.key===" "||ev.code==="Space")&&!kbTyping(ev.target)){SPACE=true;ev.preventDefault();}});
 document.addEventListener("keyup",function(ev){if(ev.key===" "||ev.code==="Space")SPACE=false;});
 document.addEventListener("keydown",function(ev){
- if(ev.key=="Escape"){marqChipsHide();pickCycleClear();if(pickMenu){ev.preventDefault();pickMenuClose();try{svg.focus();}catch(e){}return;}if(window.PCBFindIsOpen&&window.PCBFindIsOpen()){ev.preventDefault();window.PCBFindClose();return;}if(PHYSICAL_REVIEW){ev.preventDefault();selNet(null);return;}if(kbdOv){kbdClose();}else if(PCB.moveDlgOpen&&PCB.moveDlgOpen()){PCB.moveDlgClose();}else if(hsModalShown()){hsModalClose();}else if(heatsinkMode){heatsinkArm(false);}else if(padAlignMode){padAlignArm(false);}else if(drawMode){if(dtrace)drawEnd();else drawModeSet(false);}else if(textMode){if(txSel>=0){txSelect(-1);}else txArm(false);}else if(backingMode){backingArm(false);}else if(polyMode){if(polyPts){polyPts=null;polyCur=null;drawBoardRect();}else polyArm(false);}else if(pourMode){if(pourDlg){closePourDialog();}else if(pourPts){pourPts=null;pourCur=null;drawBoardRect();}else pourArm(false);}else if(outlineMode){outDraw=null;outlineArm(false);drawBoardRect();}else if(selCuClear()){}else if(insp){inspClear();}else{selClear();clearSel();}return;}
+ if(ev.key=="Escape"){marqChipsHide();pickCycleClear();if(pickMenu){ev.preventDefault();pickMenuClose();try{svg.focus();}catch(e){}return;}if(window.PCBFindIsOpen&&window.PCBFindIsOpen()){ev.preventDefault();window.PCBFindClose();return;}if(PHYSICAL_REVIEW){ev.preventDefault();selNet(null);return;}if(kbdOv){kbdClose();}else if(PCB.moveDlgOpen&&PCB.moveDlgOpen()){PCB.moveDlgClose();}else if(hsModalShown()){hsModalClose();}else if(heatsinkMode){heatsinkArm(false);}else if(padAlignMode){padAlignArm(false);}else if(drawMode){if(dtrace)drawCancel();else drawModeSet(false);}else if(textMode){if(txSel>=0){txSelect(-1);}else txArm(false);}else if(backingMode){backingArm(false);}else if(polyMode){if(polyPts){polyPts=null;polyCur=null;drawBoardRect();}else polyArm(false);}else if(pourMode){if(pourDlg){closePourDialog();}else if(pourPts){pourPts=null;pourCur=null;drawBoardRect();}else pourArm(false);}else if(outlineMode){outDraw=null;outlineArm(false);drawBoardRect();}else if(selCuClear()){}else if(insp){inspClear();}else{selClear();clearSel();}return;}
  if((outlineMode||activeSketchIsArea())&&!kbTyping(ev.target)&&(ev.key==="d"||ev.key==="D")){ev.preventDefault();outlineSketchDimension();return;}
  if((outlineMode||activeSketchIsArea())&&!kbTyping(ev.target)&&(ev.key==="h"||ev.key==="H")){ev.preventDefault();outlineSketchConstraint("horizontal");return;}
  if((outlineMode||activeSketchIsArea())&&!kbTyping(ev.target)&&(ev.key==="v"||ev.key==="V")){ev.preventDefault();outlineSketchConstraint("vertical");return;}
@@ -3999,14 +4000,16 @@ function recordUndo(snap){var e=(snap&&snap.poses)?snap:snapAll(Array.isArray(sn
  drawRfRetrofitDrcClear();
  undoStack.push(e);if(undoStack.length>200)undoStack.shift();
  redoStack.length=0;undoBtns();markDirty();}
+function restoreCopperSnap(s){
+ PCB.tracks=(s.tracks||[]).map(function(t){return {x1:t.x1,y1:t.y1,xm:t.xm,ym:t.ym,x2:t.x2,y2:t.y2,l:t.l||0,w:t.w,net:t.net||"",g:t.g,source:t.source,id:t.id||trackIdNew()};});
+ PCB.vias=(s.vias||[]).map(function(v){return {x:v.x,y:v.y,d:v.d,drill:v.drill,net:v.net||"",g:v.g,f:v.f,source:v.source,s:Array.isArray(v.s)?v.s.slice():undefined,id:v.id||viaIdNew()};});
+ PCB.rf_paths=(s.rf_paths||[]).map(function(p){return {net:p.net,l:p.l||0,portal:!!p.portal,
+  track_ids:(p.track_ids||[]).slice(),samples:(p.samples||[]).map(function(q){return [+q[0],+q[1],+q[2]];})};});}
 function restoreSnap(s){s.poses.forEach(function(q,i){if(P[i]){P[i].x=q.x;P[i].y=q.y;P[i].rot=q.rot;P[i].side=q.side||"top";P[i].locked=!!q.locked;}});
  // applyAll() clears copper (a moved part invalidates routing), so restore the
  // snapshot's copper AFTER it, then repaint + re-DRC.
  applyAll();
- PCB.tracks=(s.tracks||[]).map(function(t){return {x1:t.x1,y1:t.y1,xm:t.xm,ym:t.ym,x2:t.x2,y2:t.y2,l:t.l||0,w:t.w,net:t.net||"",g:t.g,source:t.source,id:t.id||trackIdNew()};});
- PCB.vias=(s.vias||[]).map(function(v){return {x:v.x,y:v.y,d:v.d,drill:v.drill,net:v.net||"",g:v.g,f:v.f,source:v.source,s:Array.isArray(v.s)?v.s.slice():undefined,id:v.id||viaIdNew()};});
- PCB.rf_paths=(s.rf_paths||[]).map(function(p){return {net:p.net,l:p.l||0,portal:!!p.portal,
-  track_ids:(p.track_ids||[]).slice(),samples:(p.samples||[]).map(function(q){return [+q[0],+q[1],+q[2]];})};});
+ restoreCopperSnap(s);
  var editZoneIndex=typeof pourEdit!=="undefined"&&pourEdit?(PCB.zones||[]).indexOf(pourEdit):-1;
  PCB.zones=(s.zones||[]).map(function(z){return {net:z.net||"",layer:z.layer||"",layers:Array.isArray(z.layers)?z.layers.slice():undefined,poly:(z.poly||[]).map(function(p){return [+p[0],+p[1]];}),filled:!!z.filled,keepout:!!z.keepout,priority:+z.priority||0,g:z.g,
   sketch:z.sketch?(OS?OS.clone(z.sketch):JSON.parse(JSON.stringify(z.sketch))):null};});
@@ -6599,7 +6602,8 @@ if(clrIn)clrIn.addEventListener("input",drawClr);
 // autorouter fills: click a pad to start (net + layer come from the pad),
 // click to fix 45° or 90° grid-snapped corners (Shift = free angle), V drops a via
 // and flips layer, click a same-net pad / double-click / Enter to finish,
-// Backspace steps back, Esc ends (then exits the mode). Right-click deletes
+// Backspace steps back, and Esc cancels the active trace and exits the mode.
+// Right-click deletes
 // the track/via under the cursor. Copper persists through the normal layout
 // Save/Update (routes ride the sidecar), so a module's hand routing saved on
 // its own page is exactly what Stamp later carries onto a parent board.
@@ -7359,6 +7363,15 @@ function drawCommitPlan(plan){if(!plan||!plan.tracks.length)return false;
 function drawEnd(){var tapered={ok:true,changed:false};if(dtrace&&dtrace.n>0){tapered=drawApplyAutomaticTapers();if(!tapered.ok)return false;
   recordUndo(dtrace.undo);scheduleDrc();}
  dtrace=null;drawBtnSync();ovPaintSoon();routeStatMsg(tapered.changed?"automatic pad tapers added":null);return true;}
+// Escape is cancellation, not another finish attempt. In particular, a DRC-
+// blocked automatic taper deliberately keeps drawEnd() live so the user can
+// adjust it; Escape must still provide a guaranteed way out. Restore the exact
+// route-start copper snapshot because a gesture can add vias, replace rounded
+// segments, and temporarily drop a pre-existing RF path as it is extended.
+function drawCancel(){var snap=dtrace&&dtrace.undo;dtrace=null;
+ if(snap){restoreCopperSnap(snap);linksDirty=true;traceEmDirty=true;powerIntegrityDirty=true;ovsRev++;
+  keepoutGeomDrop();cuGeomDrop();gpuCuEdit();rats();drcGateSessionDefer();}
+ drawModeSet(false);routeStatMsg("routing cancelled");}
 // Destination pads for a trace started on pad (pi,pd): the far end of every
 // still-unrouted airwire touching that pad — where this trace is *supposed*
 // to land. paintDraw pulses them amber (the click-highlight treatment), and
