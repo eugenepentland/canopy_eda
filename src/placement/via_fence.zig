@@ -35,7 +35,10 @@
 //! net's whole copper union, the same shape a ground pour's edge takes as it
 //! wraps the chain (`via_guide.trace`). The pitch is divided evenly into that one
 //! perimeter (`round(L / pitch)` sites, actual spacing `L / n`), so the fence
-//! closes with no seam gap and no bunching.
+//! closes with no seam gap and no bunching. In legal mode the same spacing is
+//! tried at a few phase offsets around the closed curve and the phase retaining
+//! the most legal sites wins; an arbitrary marching-squares start vertex must
+//! not make a narrow but usable slot fall between two candidates.
 //!
 //! How hard a ring site is vetted is the caller's `Mode`:
 //!
@@ -850,6 +853,59 @@ fn ringSites(len: f64, pitch: f64) usize {
     return @max(min_ring_sites, numeric.toCount(@round(len / pitch)));
 }
 
+/// Phase samples for a legal contour march. Four moves a nominal site in
+/// quarter-pitch increments, fine enough to find a manufacturable via-sized slot
+/// without turning obstacle vetting into an unbounded search. The zero phase is
+/// always tried first and wins ties, preserving existing geometry unless a shift
+/// places strictly more vias.
+const contour_phase_trials: usize = 4;
+
+/// Number of sites the fixed-spacing contour march can legally retain at
+/// `phase`. This is a dry score: the pass is not mutated until the winning phase
+/// is known, so every trial sees the identical board and earlier-ring sites.
+fn contourPhaseScore(
+    pass: Pass,
+    closed: []const [2]f64,
+    n: usize,
+    spacing: f64,
+    phase: f64,
+    plan: FencePlan,
+) usize {
+    var kept: usize = 0;
+    const ring_from = pass.accepted.items.len;
+    for (0..n) |i| {
+        const p = pointAt(closed, phase + @as(f64, @floatFromInt(i)) * spacing);
+        if (pass.judge(p[0], p[1], plan, ring_from) == null) kept += 1;
+    }
+    return kept;
+}
+
+/// Pick the rotation of the uniform site lattice that retains the most legal
+/// posts. Spacing and site count do not change: this only moves the seam around
+/// the closed contour. Raw `.all` mode keeps phase zero because every phase is
+/// equally legal and phase search would add no information.
+fn bestContourPhase(
+    pass: Pass,
+    closed: []const [2]f64,
+    n: usize,
+    spacing: f64,
+    plan: FencePlan,
+) f64 {
+    if (pass.in.mode == .all) return 0;
+    var best_phase: f64 = 0;
+    var best = contourPhaseScore(pass, closed, n, spacing, 0, plan);
+    if (best == n) return 0;
+    for (1..contour_phase_trials) |trial| {
+        const phase = spacing * @as(f64, @floatFromInt(trial)) / contour_phase_trials;
+        const kept = contourPhaseScore(pass, closed, n, spacing, phase, plan);
+        if (kept > best) {
+            best = kept;
+            best_phase = phase;
+        }
+    }
+    return best_phase;
+}
+
 /// March one closed guide contour and offer a site at every even division of its
 /// perimeter. This is the whole candidate generator: one uniform spacing around
 /// each contour, ends included.
@@ -872,9 +928,10 @@ fn marchContour(
     const n = ringSites(len, plan.pitch);
     const spacing = len / @as(f64, @floatFromInt(n));
     const ring_from = pass.accepted.items.len;
+    const phase = bestContourPhase(pass.*, closed, n, spacing, plan);
     var i: usize = 0;
     while (i < n) : (i += 1) {
-        const p = pointAt(closed, @as(f64, @floatFromInt(i)) * spacing);
+        const p = pointAt(closed, phase + @as(f64, @floatFromInt(i)) * spacing);
         rep.march.sites += 1;
         if (pass.judge(p[0], p[1], plan, ring_from)) |reason| {
             rep.skipped.bump(reason);
@@ -1154,6 +1211,49 @@ test "a rotated footprint via keepout rejects overlapping fence copper exactly" 
 /// A straight horizontal RF track from x0 to x1 at y, on net 0, top copper.
 fn straight(x0: f64, x1: f64, y: f64) router.Track {
     return .{ .x1 = x0, .y1 = y, .x2 = x1, .y2 = y, .layer = 0, .width = 0.3, .net = 0 };
+}
+
+// spec: placement/via-fence - in legal mode the uniform contour lattice shifts phase when the contour's arbitrary first vertex misses usable sites, retaining the phase that places the most vias without changing pitch
+test "a legal contour shifts its uniform lattice into usable slots" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    var parts = [_]optimizer.Part{};
+    const blockers = [_]router.Via{
+        .{ .x = 10, .y = 10, .dia = 0.4, .drill = 0.2, .net = 0 },
+        .{ .x = 12, .y = 10, .dia = 0.4, .drill = 0.2, .net = 0 },
+        .{ .x = 14, .y = 10, .dia = 0.4, .drill = 0.2, .net = 0 },
+        .{ .x = 14, .y = 12, .dia = 0.4, .drill = 0.2, .net = 0 },
+        .{ .x = 14, .y = 14, .dia = 0.4, .drill = 0.2, .net = 0 },
+        .{ .x = 12, .y = 14, .dia = 0.4, .drill = 0.2, .net = 0 },
+        .{ .x = 10, .y = 14, .dia = 0.4, .drill = 0.2, .net = 0 },
+        .{ .x = 10, .y = 12, .dia = 0.4, .drill = 0.2, .net = 0 },
+    };
+    var pass = try probePass(arena, rfFixture(&parts), &.{}, &blockers);
+    const contour = [_][2]f64{ .{ 10, 10 }, .{ 14, 10 }, .{ 14, 14 }, .{ 10, 14 } };
+    const plan = FencePlan{
+        .pitch = 2,
+        .dist = 0.8,
+        .via = probe_via,
+        .stitch_i = probe_stitch,
+        .stitch_name = "GND",
+        .fenced_name = "RF",
+    };
+    const closed = [_][2]f64{ .{ 10, 10 }, .{ 14, 10 }, .{ 14, 14 }, .{ 10, 14 }, .{ 10, 10 } };
+    const n = ringSites(chainLength(&closed), plan.pitch);
+    const spacing = chainLength(&closed) / @as(f64, @floatFromInt(n));
+
+    // Phase zero lands all eight candidates on the blockers. Rotating the same
+    // eight-site, 2 mm lattice puts every post between them; no extra site and no
+    // clearance exemption is needed.
+    try testing.expectEqual(@as(usize, 0), contourPhaseScore(pass, &closed, n, spacing, 0, plan));
+    try testing.expect(bestContourPhase(pass, &closed, n, spacing, plan) > 0);
+    var rep = NetReport{ .net = "RF" };
+    try marchContour(&pass, &contour, plan, &rep);
+    try testing.expectEqual(n, rep.march.sites);
+    try testing.expectEqual(n, rep.placed);
+    try testing.expectEqual(@as(usize, 0), rep.skipped.total());
 }
 
 /// Distance (mm) between the two closest accepted sites — the one number that
