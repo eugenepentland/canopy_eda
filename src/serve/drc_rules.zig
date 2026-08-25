@@ -1280,6 +1280,25 @@ test "viewer JS locates an open net with its nearest-probe line" {
     try std.testing.expect(std.mem.indexOf(u8, js, "ctx.strokeStyle=netColorOf(n)||\"#ffd33d\"") != null);
 }
 
+// spec: Web Server - The selected net-open bridge uses a screen-space hairline and hollow endpoint rings that shrink for short gaps
+test "viewer JS keeps a selected short net-open gap precise" {
+    const js = @embedFile("assets/pcb_board.js");
+    const start = std.mem.indexOf(u8, js, "else if(insp.t===\"drc\"&&o.bridge&&o.bridge.length===4)") orelse
+        return error.TestDrcBridgePaintMissing;
+    const tail = js[start..];
+    const end = std.mem.indexOf(u8, tail, "setTimeout(paintSoon,60);}") orelse
+        return error.TestDrcBridgePaintEndMissing;
+    const body = tail[0..end];
+
+    try std.testing.expect(std.mem.indexOf(u8, js, "function paintInsp(ctx,k)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "ik=1/Math.max(k||1,.01)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "ctx.lineWidth=.7*ik") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "Math.max(.7,Math.min(1.8,spanPx*.18))*ik") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "ctx.arc(x1,y1,endpointR") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "ctx.arc(x2,y2,endpointR") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "ctx.fill()") == null);
+}
+
 // spec: Web Server - the /pcb-layout viewer reshapes a drawn outline via vertex drag, edge slide, insert, and delete
 test "viewer JS wires freeform outline segment editing" {
     const js = @embedFile("assets/pcb_board.js");

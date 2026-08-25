@@ -6065,6 +6065,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The /pcb-layout DRC pane docks the violations list under a previous/next step-through
 - Net-open DRC reporting groups every island gap by full net name and counts each open net once while retaining expandable per-gap details
 - Selecting a grouped net-open row or one of its gaps frames and draws a net-coloured line between that finding's nearest island probes
+- The selected net-open bridge uses a screen-space hairline and hollow endpoint rings that shrink for short gaps
 - Net-open DRC findings remain in the sidebar and counts but do not draw or hit-test as PCB markers
 - The /pcb-layout accordion carries no optimizer tuning or score-reweigh panel
 - The /pcb-layout saved-version navigator sits inside Autorouter, immediately after the route controls

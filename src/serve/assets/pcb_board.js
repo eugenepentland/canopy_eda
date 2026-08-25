@@ -865,7 +865,7 @@ function ovsFrame(ctx,w,h,k,kk,zoomHeld){
  // baked courtyard stroke — the only compounding is that translucent 0.35
  // magenta under an opaque white line, which is invisible.
  if(cur>=0){var hl={};hl[cur]=1;paintParts(ctx,k,hl,true);}
- paintInsp(ctx);
+ paintInsp(ctx,k);
  paintPickPreview(ctx);
  paintDraw(ctx);
  paintPadAlign(ctx,k);
@@ -1169,7 +1169,7 @@ function scenePaint(){paintQueued=false;
   ctx.setTransform(kk,0,0,kk,-vb.x*kk,-vb.y*kk);   // draw in svg-unit coords
   paintScene(ctx,k);
   if(window.PCBOverlay&&PCBOverlay.paint){try{PCBOverlay.paint(CTX);}catch(e){}} // replay overlay (never mutates PCB copper), above the board's own layers
-  paintInsp(ctx);
+  paintInsp(ctx,k);
   paintPickPreview(ctx);
   paintDraw(ctx);
   paintPadAlign(ctx,k);
@@ -1212,7 +1212,7 @@ function scenePaint(){paintQueued=false;
    // acceptable, arguably better feedback while holding a part.
    paintStages(ctx,k,{mov:mov,only:true,cop:cop,movG:movG});
    if(window.PCBOverlay&&PCBOverlay.paint){try{PCBOverlay.paint(CTX);}catch(e){}}} // replay overlay stays visible mid-drag
-  paintInsp(ctx);
+  paintInsp(ctx,k);
   paintPickPreview(ctx);
   paintDraw(ctx);
   paintPadAlign(ctx,k);}
@@ -8293,7 +8293,7 @@ function inspShow(hit,ev){
   else done(false);});
  paintSoon();}
 // Selected copper / marker highlight, painted above the copper.
-function paintInsp(ctx){if(!insp)return;var o=insp.o;
+function paintInsp(ctx,k){if(!insp)return;var o=insp.o;
  ctx.save();ctx.setLineDash([]);
  if(insp.t=="track"){ctx.lineCap="round";ctx.globalAlpha=1;ctx.strokeStyle=layerHighlightColor(o.l||0);
   ctx.lineWidth=Math.max((o.w||0.25)*S,1.2);
@@ -8305,12 +8305,16 @@ function paintInsp(ctx){if(!insp)return;var o=insp.o;
   if(outer&&outer.length>=3)keepoutPolyPath(ctx,outer);if(inner&&inner.length>=3)keepoutPolyPath(ctx,inner);
   ctx.fill("evenodd");ctx.stroke();setTimeout(paintSoon,60);}
  else if(insp.t==="drc"&&o.bridge&&o.bridge.length===4){
-  var b=o.bridge,n=o.a&&o.a.net?netCollapse(o.a.net):"";
-  ctx.strokeStyle=netColorOf(n)||"#ffd33d";ctx.fillStyle=ctx.strokeStyle;ctx.lineWidth=2.2;
-  ctx.globalAlpha=0.65+0.35*Math.abs(Math.sin(Date.now()/240));ctx.setLineDash([8,5]);
-  ctx.beginPath();ctx.moveTo(X(b[0]),Y(b[1]));ctx.lineTo(X(b[2]),Y(b[3]));ctx.stroke();ctx.setLineDash([]);
-  ctx.beginPath();ctx.moveTo(X(b[0])+4,Y(b[1]));ctx.arc(X(b[0]),Y(b[1]),4,0,6.2832);
-  ctx.moveTo(X(b[2])+4,Y(b[3]));ctx.arc(X(b[2]),Y(b[3]),4,0,6.2832);ctx.fill();
+  var b=o.bridge,n=o.a&&o.a.net?netCollapse(o.a.net):"",ik=1/Math.max(k||1,.01);
+  var x1=X(b[0]),y1=Y(b[1]),x2=X(b[2]),y2=Y(b[3]),spanPx=Math.hypot(x2-x1,y2-y1)/ik;
+  var endpointR=Math.max(.7,Math.min(1.8,spanPx*.18))*ik;
+  ctx.strokeStyle=netColorOf(n)||"#ffd33d";ctx.lineWidth=.7*ik;
+  ctx.globalAlpha=0.65+0.35*Math.abs(Math.sin(Date.now()/240));ctx.setLineDash([5*ik,4*ik]);
+  ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke();ctx.setLineDash([]);
+  // Hollow, screen-space rings keep close probes individually readable instead
+  // of merging into the large filled blob the old board-space discs produced.
+  ctx.beginPath();ctx.moveTo(x1+endpointR,y1);ctx.arc(x1,y1,endpointR,0,6.2832);
+  ctx.moveTo(x2+endpointR,y2);ctx.arc(x2,y2,endpointR,0,6.2832);ctx.stroke();
   setTimeout(paintSoon,60);}
  else if(insp.t!=="drc"||drcOnBoard(o)){ctx.strokeStyle="#ffd33d";var rr=(insp.t=="via")?viaRenderRadius(o.d||0.4)+4:12;
   ctx.lineWidth=2;ctx.globalAlpha=0.5+0.5*Math.abs(Math.sin(Date.now()/240));
