@@ -9171,9 +9171,41 @@ fn writeRightDock(
     }
     if (edit_embed) {
         try w.writeAll("<aside class=\"pcb-rside\">");
+        try w.writeAll(alignment_tools_html);
         try writeLayoutsPanel(w, alloc, pd);
         try w.writeAll("</aside>");
     }
+}
+
+// spec: Web Server - Editable sub-circuit PCB embeds expose the pad aligner's Same X and Same Y controls
+test "editable sub-circuit embeds expose pad alignment controls" {
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    var parts = [_]optimizer.Part{};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 1,
+        .maxy = 1,
+        .generated = true,
+    };
+    try writeRightDock(&aw.writer, std.testing.allocator, true, true, .{
+        .panel = .{ .name = "demo", .sub = "power" },
+        .layouts = &.{},
+        .auto = .{ .hpwl = 0, .loop = 0, .caps = 0 },
+        .placement = placement,
+    });
+    const html = aw.written();
+    try std.testing.expect(std.mem.indexOf(u8, html, "id=\"pad-align-bar\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "data-pad-axis=\"x\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "data-pad-axis=\"y\"") != null);
 }
 
 /// The right-docked Appearance panel (full page only), with Layers / Objects.
