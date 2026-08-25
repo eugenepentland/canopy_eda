@@ -8755,9 +8755,7 @@ function poursDeclared(){return !!PCB.pours_declared||((PCB.plane_fills||[]).len
 // The server PERSISTS it into that row (like the KiCad-sync/autoroute-adopt
 // paths), so the reply describes what is now on disk and the page reloads onto it.
 var fenceInFlight=false;
-function fenceDeclared(){return !!PCB.fence_declared;}
 function fenceBtn(){return document.getElementById("pcb-fence");}
-function fenceBtnSync(){var b=fenceBtn();if(b)b.style.display=fenceDeclared()?"":"none";}
 function fenceSkipped(nets){var n=0;(nets||[]).forEach(function(r){var s=r.skipped||{};
  n+=(s.pad||0)+(s.track||0)+(s.via||0)+(s.keepout||0)+(s.outline||0)+(s.dedup||0);});return n;}
 function fenceRun(){if(fenceInFlight)return;var b=fenceBtn();if(!b)return;
@@ -10198,7 +10196,9 @@ if(!RO&&PCB.shown_layout)setTimeout(drawRfRetrofitSaved,0);
 if(!RO)drcChip((PCB.drc||[]).length);
 // Arm pour-staleness only after boot so subsequent edits (not initial display)
 // light the ⟳ Pours button, and sync its initial visibility + fresh tooltip.
-pourBtnSync();fenceBtnSync();poursArmed=true;
+// Via fence remains visible on every editable board: board-edge perimeter
+// fencing is unrelated, and the endpoint can explain any missing RF metadata.
+pourBtnSync();poursArmed=true;
 // ── Cross-probe focus: ?focus=REF (or #REF) selects that part on load —
 //    zoom/centre the view on it, flash its courtyard, and reveal it in the
 //    component sidebar. Exact ref first, then the bare sub-block leaf

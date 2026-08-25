@@ -8116,9 +8116,9 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, sr
     try w.writeAll("<button class=\"btn\" id=\"pcb-pour\" title=\"Recompute declared copper pours " ++
         "around the current parts, tracks and vias\">\u{27F3} Pours</button>");
     // RF ground via fencing — the end-of-design pass over the active layout's
-    // persisted copper. Hidden client side unless the board has a fence target
-    // (a declared (fence …) or a max-freq RF trace); the click POSTs
-    // /api/pcb-fence and patches the copper back in.
+    // persisted copper. Always visible: board-edge perimeter fencing is not a
+    // prerequisite, and the click POSTs /api/pcb-fence to patch the RF fence
+    // copper back in.
     try w.writeAll("<button class=\"btn\" id=\"pcb-fence\" title=\"Lay the RF ground via fence " ++
         "along this layout's routed RF traces (declared (fence …) and max-freq classes; skips any site that would clash)\">\u{2591} Fence</button>");
     // Editable embed keeps the drawing tools in the action bar (it has no
@@ -10016,9 +10016,8 @@ fn writeBlobHead(
     try pcb_rules_json.writePlaneNets(w, p);
     try pcb_rules_json.writeGroundNames(w);
     // Does any net resolve to a fence target — a `(net-class … (fence …))` or a
-    // `(max-freq …)` RF trace? Drives the toolbar's ░ Fence button visibility, so
-    // a board with no fenceable RF copper never shows an action whose only
-    // possible answer is "nothing to fence".
+    // `(max-freq …)` RF trace? Retained in the page model for clients that want
+    // to describe the board's RF capabilities; it does not hide the Fence action.
     try w.print("\"fence_declared\":{s},", .{if (via_fence.anyFenceable(p)) "true" else "false"});
     // Every flattened net name (sorted, deduped) — the user-pour tool's net
     // picker offers exactly these, matching the names tracks/zones/zone_fills use.

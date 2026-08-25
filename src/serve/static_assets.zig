@@ -511,6 +511,7 @@ test "PCB editor rigidly mirrors the complete selected part target" {
 
 // spec: Web Server - Generated RF fence sites render, select, and edit as ordinary vias; provenance remains internal for safe regeneration
 // spec: Web Server - The PCB viewer offers a Fence action that lays (and regenerates) the RF ground via fence onto the active layout's routed RF traces — declared (fence …) classes and max-freq classes alike
+// spec: Web Server - The PCB editor always shows the RF via-fence action, regardless of whether the board declares perimeter fencing or currently resolves a fenceable RF class
 test "PCB editor carries the RF via-fence action as ordinary vias" {
     const Check = struct { haystack: []const u8 = pcb_board_js, marker: []const u8, present: bool = true };
     const checks = [_]Check{
@@ -525,8 +526,11 @@ test "PCB editor carries the RF via-fence action as ordinary vias" {
         // The action: POST, then reload onto the row the server just wrote.
         .{ .marker = "function fenceRun" },
         .{ .marker = "/api/pcb-fence/" },
-        .{ .marker = "function fenceBtnSync" },
-        .{ .marker = "PCB.fence_declared" },
+        // The action is never hidden based on board metadata. In particular,
+        // perimeter-fence and RF-class declarations do not gate visibility.
+        .{ .marker = "function fenceBtnSync", .present = false },
+        .{ .marker = "function fenceDeclared", .present = false },
+        .{ .marker = "style.display=fence", .present = false },
         // The old visual class and its dedicated WebGPU slot are both gone.
         .{ .marker = "function isFenceVia", .present = false },
         .{ .marker = "function fenceVisible", .present = false },

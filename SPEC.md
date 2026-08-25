@@ -6358,6 +6358,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The fence endpoint 404s an unknown layout naming the rows that exist, and refuses a board that declares no fence
 - The generate_fence CLI tool and the fence HTTP endpoint share one implementation, so they report the same board
 - Generated RF fence sites render, select, and edit as ordinary vias; provenance remains internal for safe regeneration
+- The PCB editor always shows the RF via-fence action, regardless of whether the board declares perimeter fencing or currently resolves a fenceable RF class
 - The PCB page blob carries both the authored keepout halo and the full RF fence corridor through the far edge of its vias
 - The PCB page blob carries each net class's resolved mask relief and fence untent reach so the assembly view shows the shipped mask
 - The PCB page blob serves each continuous mask-relief run as one closed filleted polygon so the assembly view draws the shipped mask
