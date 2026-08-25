@@ -10,10 +10,10 @@
 //
 //     The board itself is the live PCB viewer in an iframe (pcb_thermal.js),
 //     which paints the field as an overlay. It answers with a `thermal:state`
-//     message carrying the payload it drew from, and the legend, the hotspot
-//     readout and the "solving" veil beside it are filled from THAT — never from
-//     a second fetch, which is how the two halves could come to show different
-//     scenarios.
+//     message carrying the payload it drew from, and the hotspot readout and
+//     "solving" veil beside it are filled from THAT — never from a second fetch,
+//     which is how the two halves could come to show different scenarios. The
+//     legend is an invariant 25–125 °C reference rendered with the page.
 //
 //  2. AMBIENT re-renders on the server. One fetch of this page's own
 //     `?fragment=1`, whose body is exactly the two ambient-dependent regions
@@ -52,8 +52,6 @@
 
   var frame = document.getElementById("tp-frame");
   var veil = document.getElementById("tp-heat-loading");
-  var legendLo = document.getElementById("tp-legend-lo");
-  var legendHi = document.getElementById("tp-legend-hi");
   var hotspotOut = document.getElementById("tp-hotspot");
   var labelsBox = document.getElementById("tp-labels");
   var opacityBox = document.getElementById("tp-opacity");
@@ -113,13 +111,6 @@
       else if (d.loading) veil.textContent = "Solving…";
     }
     if (d.loading) return;
-    // The scale is per-field: the ramp's ends are this scenario's own coldest
-    // and hottest copper, so a legend copied from another rung would mislabel
-    // every colour on screen.
-    if (legendLo && typeof d.ambient_c === "number") legendLo.textContent = Math.round(d.ambient_c) + " °C";
-    if (legendHi && typeof d.max_rise_c === "number" && typeof d.ambient_c === "number") {
-      legendHi.textContent = Math.round(d.ambient_c + d.max_rise_c) + " °C";
-    }
     if (hotspotOut && d.hotspot) {
       hotspotOut.textContent = "Hotspot " + d.hotspot.c.toFixed(1) + " °C at " +
         d.hotspot.x_mm.toFixed(1) + ", " + d.hotspot.y_mm.toFixed(1) + " mm" +

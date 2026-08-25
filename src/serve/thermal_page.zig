@@ -493,22 +493,21 @@ fn writeBoardPane(w: *std.Io.Writer, v: View) std.Io.Writer.Error!void {
     try w.writeAll("</div></section>");
 }
 
-/// The board controls strip: the colour ramp keyed to this field's own range,
+/// The board controls strip: the colour ramp keyed to the fixed 25–125 °C range,
 /// the hotspot readout, and the two switches that only change what is DRAWN
 /// (label chips, wash opacity) and so never cost a solve.
 ///
-/// The ramp's end labels are filled in by the client from the overlay's own
-/// payload — the scale is per-field, and printing a range the server guessed
-/// from a different scenario is exactly the disagreement this page avoids.
+/// The ramp's end labels are invariant across boards and scenarios, so a colour
+/// has the same thermal meaning while the reader compares cooling options.
 fn writeBoardLegend(w: *std.Io.Writer) std.Io.Writer.Error!void {
     try w.writeAll("<div class=\"tp-board-controls\">");
     try w.writeAll("<div class=\"tp-face\" role=\"group\" aria-label=\"Board face\">");
     try w.writeAll("<span>View</span><button type=\"button\" id=\"tp-face-top\" data-board-side=\"top\" class=\"on\" aria-pressed=\"true\">Top</button>");
     try w.writeAll("<button type=\"button\" id=\"tp-face-bottom\" data-board-side=\"bottom\" aria-pressed=\"false\">Bottom</button></div>");
     try w.writeAll("<div class=\"tp-legend\" aria-label=\"Temperature scale\">");
-    try w.writeAll("<span class=\"tp-legend-lo\" id=\"tp-legend-lo\">—</span>");
+    try w.writeAll("<span class=\"tp-legend-lo\" id=\"tp-legend-lo\">25 °C</span>");
     try w.writeAll("<span class=\"tp-ramp\"></span>");
-    try w.writeAll("<span class=\"tp-legend-hi\" id=\"tp-legend-hi\">—</span></div>");
+    try w.writeAll("<span class=\"tp-legend-hi\" id=\"tp-legend-hi\">125 °C</span></div>");
     try w.writeAll("<span class=\"tp-hotspot\" id=\"tp-hotspot\"></span>");
     try w.writeAll("<label class=\"tp-switch\"><input type=\"checkbox\" id=\"tp-labels\" checked> Labels</label>");
     try w.writeAll("<label class=\"tp-switch\">Wash <input type=\"range\" id=\"tp-opacity\" " ++
@@ -1490,8 +1489,8 @@ test "the thermal board switches between physical top and bottom faces" {
     }));
 }
 
-// spec: serve/thermal-page - the board's legend, hotspot readout and progress veil are filled from the overlay's own report, so the picture and the words beside it are one field
-test "the board legend and hotspot readout are filled from the overlay's report" {
+// spec: serve/thermal-page - the board's legend stays fixed at 25 °C to 125 °C while its hotspot readout and progress veil are filled from the overlay's own report
+test "the board uses a fixed temperature scale and reports its hotspot" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const alloc = arena_state.allocator();
@@ -1501,8 +1500,8 @@ test "the board legend and hotspot readout are filled from the overlay's report"
     const project = try fixtureProject(alloc, &tmp);
 
     const html = (try serve(alloc, project, "heater", &.{})).body;
-    // The server renders the boxes EMPTY: the scale is per-field, and a range
-    // printed here from a different scenario would mislabel every colour drawn.
+    // The absolute reference is present before the field loads and never shifts
+    // when a reader changes cooling scenario or ambient.
     try testing.expect(containsAll(html, &.{
         "id=\"tp-legend-lo\"",
         "id=\"tp-legend-hi\"",
@@ -1511,12 +1510,23 @@ test "the board legend and hotspot readout are filled from the overlay's report"
         "id=\"tp-labels\"",
         "id=\"tp-opacity\"",
     }));
-    try testing.expect(std.mem.indexOf(u8, html, "id=\"tp-legend-lo\">—<") != null);
+    try testing.expect(std.mem.indexOf(u8, html, "id=\"tp-legend-lo\">25 °C<") != null);
+    try testing.expect(std.mem.indexOf(u8, html, "id=\"tp-legend-hi\">125 °C<") != null);
+
+    // The iframe maps ABSOLUTE copper temperature onto those exact endpoints;
+    // it does not divide by this field's own maximum rise.
+    const overlay = @embedFile("assets/pcb_thermal.js");
+    try testing.expect(containsAll(overlay, &.{
+        "var SCALE_MIN_C = 25",
+        "var SCALE_MAX_C = 125",
+        "temperatureNorm(f.ambient_c + g.rise_c[p])",
+        "tempC - j.ambient_c",
+    }));
 
     // Both halves of the postMessage contract, so a rename on either side of
     // the frame boundary fails here rather than silently blanking the legend.
-    const report = [_][]const u8{ "thermal:state", "max_rise_c", "hotspot", "unavailable" };
-    try testing.expect(containsAll(@embedFile("assets/pcb_thermal.js"), &report));
+    const report = [_][]const u8{ "thermal:state", "hotspot", "unavailable" };
+    try testing.expect(containsAll(overlay, &report));
     const client = @embedFile("assets/thermal_page.js");
     try testing.expect(containsAll(client, &report));
     // The words are written from that report and never from a second fetch —

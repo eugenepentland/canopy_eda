@@ -4973,16 +4973,16 @@ image cannot describe a different board, scenario or ambient than the JSON —
 nothing here re-solves anything.
 
 Four channels carry the field so no single one has to be trusted alone: the
-colour ramp, isotherm lines at fixed fractions of the peak rise (which read in
-greyscale and under any colour blindness), each powered part's junction
-temperature printed on it, and the legend bar captioned with the absolute
-temperatures its two ends stand for. The ramp's luminance climbs monotonically
+colour ramp, isotherm lines at fixed fractions of the absolute 25–125 °C scale
+(which read in greyscale and under any colour blindness), each powered part's
+junction temperature printed on it, and the legend bar captioned with the
+absolute temperatures its two ends stand for. The ramp's luminance climbs monotonically
 from deep blue through cyan to yellow and then turns red — a bounded, deliberate
 exception, since a strictly luminance-monotone ramp cannot end in a saturated
 red at all, and the other three channels are what carry the hot end.
 
 - the heat-zone image is a valid PNG whose pixels differ between two cooling scenarios of the same board
-- the field is painted hot at the dissipating part and cold away from it, and the legend's ends are the field's own temperatures at the requested ambient
+- the field is painted against one absolute 25 °C to 125 °C scale, clamping temperatures outside it so the same colour means the same heat across boards and cooling scenarios
 - absolute temperatures on the image follow the requested ambient, shifting one for one with it
 - the ramp runs cold to hot through one blue, cyan and yellow band each, ends on red, and clamps outside the unit interval
 - a reported part always keeps its label while an unreported one keeps its ref only when the text fits its own box and lands clear of every label already placed
@@ -5550,7 +5550,7 @@ Read-only: nothing here writes to the project dir.
 - ?scenario=<tag> opens the page on that rung with its own part table shown and the board frame opened on it
 - the page's client swaps only the ambient-dependent regions, keeps scenario switching local, and broadcasts a picked ref on the shared cross-probe channel
 - the page puts its panel beside a live board frame rather than a static heat image, embedding the read-only PCB viewer with the thermal overlay on
-- the board's legend, hotspot readout and progress veil are filled from the overlay's own report, so the picture and the words beside it are one field
+- the board's legend stays fixed at 25 °C to 125 °C while its hotspot readout and progress veil are filled from the overlay's own report
 - the thermal board view switches between the physical top and mirrored bottom faces without a new solve, shows temperature labels only for parts on the visible face, and keeps the selected face in the page URL
 - the thermal board frame omits generated CAM artwork, routed copper, DRC, pour geometry, and editor-only layout metadata because its exclusive heat overlay hides that data
 - GET /thermal/:name?layout=<name> screens that saved layout and carries the choice into the board frame, the tab bar, the cross-probe links and the facts link

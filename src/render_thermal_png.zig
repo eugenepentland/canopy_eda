@@ -18,8 +18,8 @@
 //! alone:
 //!
 //!   * the colour ramp (deep blue → cyan → yellow → red);
-//!   * isotherm lines at fixed fractions of the peak rise, which read in
-//!     greyscale and under any colour blindness;
+//!   * isotherm lines at fixed fractions of the absolute temperature scale,
+//!     which read in greyscale and under any colour blindness;
 //!   * each powered part's junction temperature printed on it in degrees; and
 //!   * the legend bar, captioned with the absolute temperatures its two ends
 //!     stand for at the ambient the caller asked about.
@@ -73,7 +73,11 @@ const scale_band_px: u32 = 34;
 const field_block_px: f32 = 2;
 /// Cell height of a part label in final pixels.
 const label_h: f32 = 9;
-/// Fractions of the peak rise an isotherm is drawn at — the hue-free channel
+/// Absolute endpoints used by every thermal image. Temperatures outside the
+/// range clamp to its nearest colour.
+const scale_min_c: f64 = 25;
+const scale_max_c: f64 = 125;
+/// Fractions of the fixed scale an isotherm is drawn at — the hue-free channel
 /// that keeps the field's shape readable in greyscale.
 const isotherms = [_]f64{ 0.2, 0.4, 0.6, 0.8 };
 
@@ -235,7 +239,8 @@ const Ctx = struct {
     p: optimizer.Placement,
     view: View,
     opts: Options,
-    /// `[min, max]` rise in the field (°C) — the ramp's two ends.
+    /// `[min, max]` rise in the field (°C), retained only to recognize a flat
+    /// field that should not receive a hotspot marker.
     span: [2]f64,
 
     fn xpx(self: *Ctx, mm: f64) f32 {
@@ -248,13 +253,11 @@ const Ctx = struct {
         return @floatCast(mm * self.scale);
     }
 
-    /// Where a rise sits on the ramp: 0 at the field's coolest cell, 1 at its
-    /// hottest. Normalizing to the field rather than to an absolute scale is
-    /// what makes a 0.2 W board and a 20 W board both legible.
+    /// Where a rise sits on the fixed absolute ramp: 25 °C at 0 and 125 °C at
+    /// 1. Values beyond either end clamp, so colours compare across scenarios.
     fn norm(self: *Ctx, rise: f64) f64 {
-        const span = self.span[1] - self.span[0];
-        if (!(span > 0)) return 0;
-        return std.math.clamp((rise - self.span[0]) / span, 0.0, 1.0);
+        const temp_c = self.opts.ambient_c + rise;
+        return std.math.clamp((temp_c - scale_min_c) / (scale_max_c - scale_min_c), 0.0, 1.0);
     }
 
     /// Bilinear sample of the rise field at a world point, over the cell
@@ -295,9 +298,9 @@ const Ctx = struct {
         }
     }
 
-    /// Isotherms at fixed fractions of the peak rise, drawn on the cell
-    /// boundaries a threshold falls across. Deterministic and interpolation-free
-    /// — the point is a hue-free contour, not a smooth curve.
+    /// Isotherms at fixed fractions of the absolute 25–125 °C scale, drawn on
+    /// the cell boundaries a threshold falls across. Deterministic and
+    /// interpolation-free — the point is a hue-free contour, not a smooth curve.
     fn drawIsotherms(self: *Ctx) void {
         const g = self.view.result.grid;
         if (!(self.span[1] - self.span[0] > 0)) return;
@@ -502,8 +505,7 @@ const Ctx = struct {
         return buf[0..w.end];
     }
 
-    /// The colour bar, captioned with the ABSOLUTE temperatures its two ends
-    /// stand for at the caller's ambient.
+    /// The colour bar, captioned with its invariant absolute endpoints.
     fn drawLegend(self: *Ctx) void {
         const y: f32 = @as(f32, @floatFromInt(self.cv.h - scale_band_px)) + 8;
         const pad: f32 = 6;
@@ -515,8 +517,8 @@ const Ctx = struct {
         }
         var lo_buf: [32]u8 = undefined;
         var hi_buf: [32]u8 = undefined;
-        const lo = std.fmt.bufPrint(&lo_buf, "{d:.0}C", .{self.opts.ambient_c + self.span[0]}) catch "";
-        const hi = std.fmt.bufPrint(&hi_buf, "{d:.0}C", .{self.opts.ambient_c + self.span[1]}) catch "";
+        const lo = std.fmt.bufPrint(&lo_buf, "{d:.0}C", .{scale_min_c}) catch "";
+        const hi = std.fmt.bufPrint(&hi_buf, "{d:.0}C", .{scale_max_c}) catch "";
         self.cv.text(pad, y + bar_h + 3, lo, 9, text_dim, 1.0, .start);
         self.cv.text(pad + bar_w, y + bar_h + 3, hi, 9, text_dim, 1.0, .end);
         self.cv.text(pad + bar_w + 12, y + 1, "BOARD COPPER, COLD TO HOT", 9, text_dim, 1.0, .start);
@@ -672,8 +674,8 @@ test "the heat-zone image encodes as a PNG and changes with the scenario" {
     try testing.expect(!std.mem.eql(u8, still, blown));
 }
 
-// spec: render_thermal_png - the field is painted hot at the dissipating part and cold away from it, and the legend's ends are the field's own temperatures at the requested ambient
-test "the painted field is hottest under the dissipating part" {
+// spec: render_thermal_png - the field is painted against one absolute 25 °C to 125 °C scale, clamping temperatures outside it so the same colour means the same heat across boards and cooling scenarios
+test "the painted field uses a fixed absolute temperature scale" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -700,10 +702,13 @@ test "the painted field is hottest under the dissipating part" {
     try testing.expect(ctx.sample(10, 10) > ctx.sample(30, 30));
     try testing.expect(view.row.hotspot.x_mm < 20);
     try testing.expect(view.row.hotspot.y_mm < 20);
-    // The normalized ramp coordinate spans the whole bar: cold cell at 0, the
-    // hotspot at 1.
-    try testing.expectApproxEqAbs(@as(f64, 1), ctx.norm(ctx.span[1]), 1e-12);
-    try testing.expectApproxEqAbs(@as(f64, 0), ctx.norm(ctx.span[0]), 1e-12);
+    // Absolute temperatures, not this field's extrema, own the ramp. These are
+    // rises above the 25 °C ambient in ctx.opts.
+    try testing.expectApproxEqAbs(@as(f64, 0), ctx.norm(0), 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.5), ctx.norm(50), 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 1), ctx.norm(100), 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0), ctx.norm(-50), 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 1), ctx.norm(200), 1e-12);
 }
 
 // spec: render_thermal_png - absolute temperatures on the image follow the requested ambient, shifting one for one with it

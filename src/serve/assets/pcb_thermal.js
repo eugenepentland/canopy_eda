@@ -57,6 +57,15 @@
     [0.76, 0xf2, 0xdc, 0x5a],
     [1.00, 0xe8, 0x40, 0x2a]
   ];
+  // One absolute reference across every board, scenario and ambient. A field
+  // colder than the floor stays at the cold end; one hotter than the ceiling
+  // stays red. In particular, a successful heatsink no longer stretches its
+  // modest peak back up to the same red as an overheating bare board.
+  var SCALE_MIN_C = 25;
+  var SCALE_MAX_C = 125;
+  function temperatureNorm(tempC) {
+    return (tempC - SCALE_MIN_C) / (SCALE_MAX_C - SCALE_MIN_C);
+  }
   function ramp(t) {
     if (!(t > 0)) t = 0; else if (t > 1) t = 1;
     for (var i = 1; i < RAMP.length; i++) {
@@ -85,11 +94,8 @@
     var img = c.createImageData(cols, rows);
     var hi = g.max_rise_c || 0;
     for (var i = 0; i < g.rise_c.length; i++) if (g.rise_c[i] > hi) hi = g.rise_c[i];
-    // A dead-flat field (every cell equal) has no gradient to show; normalising
-    // by ~0 would paint the whole board scalding red for a board at ambient.
-    var scale = hi > 0.05 ? 1 / hi : 0;
     for (var p = 0; p < cols * rows; p++) {
-      var col = ramp(g.rise_c[p] * scale);
+      var col = ramp(temperatureNorm(f.ambient_c + g.rise_c[p]));
       img.data[p * 4] = col[0]; img.data[p * 4 + 1] = col[1];
       img.data[p * 4 + 2] = col[2]; img.data[p * 4 + 3] = 255;
     }
@@ -270,12 +276,12 @@
         if (raster) {
           raster.iso = [];
           [0.2, 0.4, 0.6, 0.8].forEach(function (frac) {
-            raster.iso = raster.iso.concat(contour(j.grid, raster.hi * frac));
+            var tempC = SCALE_MIN_C + (SCALE_MAX_C - SCALE_MIN_C) * frac;
+            raster.iso = raster.iso.concat(contour(j.grid, tempC - j.ambient_c));
           });
         }
-        // The parent panel's legend and headline read the SAME payload rather
-        // than fetching their own, so the two halves of the page cannot show
-        // different scenarios.
+        // The parent panel's hotspot readout uses the SAME payload rather than
+        // fetching its own, so the two halves cannot show different scenarios.
         tell({
           t: "thermal:state", loading: false, scenario: j.scenario, ambient_c: j.ambient_c,
           hotspot: j.hotspot, converged: j.converged, max_rise_c: raster ? raster.hi : 0,
@@ -308,8 +314,11 @@
   window.PCBOverlay.paint = paint;
   window.PCBOverlay.exclusive = true;   // copper/clearance/DRC step aside
   window.PCBOverlay.ghost = false;
-  // Exposed for the parent page's legend and for tests: the ramp is the one
-  // thing both frames have to agree on to describe the same colour.
-  window.PCBThermal = { ramp: rampCss, reload: load, view: view };
+  // Exposed for diagnostics and tests so a direct board frame can state the
+  // exact absolute range behind its colours.
+  window.PCBThermal = {
+    ramp: rampCss, reload: load, view: view,
+    scaleMinC: SCALE_MIN_C, scaleMaxC: SCALE_MAX_C
+  };
   load();
 })();
