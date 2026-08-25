@@ -1431,11 +1431,14 @@ function camLayerBitmap(target,L,col){var tr=target.getTransform(),key=[target.c
  else (L.ops||[]).forEach(function(o){camDrawOp(c,o,col);});
  camLayerCache[L.id]={key:key,cv:cv};return cv;}
 function camPaintLayer(ctx,L,col,a){var cv=camLayerBitmap(ctx,L,col);ctx.save();ctx.setTransform(1,0,0,1,0,0);ctx.globalCompositeOperation="source-over";ctx.globalAlpha=a==null?1:a;ctx.drawImage(cv,0,0);ctx.restore();}
+function camCopperPaintOrder(layers){var shown=layers.filter(function(L){return L.kind==="copper"&&camLayerVisible(L);});
+ // CAM arrives in physical top-to-bottom order. Paint far-to-near so the
+ // closest enabled film is last (and bright) from either board face.
+ if(activeLayer===0)shown.reverse();return shown;}
 function paintCamBoard(ctx,k){if(!CAM_REVIEW)return;ctx.save();if(physicalBoardPath(ctx)){ctx.fillStyle=PH.substrate;ctx.fill();}ctx.restore();
  var layers=PCB.cam.layers||[];
- // Inner films are optional context; the selected outer copper is the face.
- layers.forEach(function(L){if(L.kind==="copper"&&L.side==="inner"&&camLayerVisible(L))camPaintLayer(ctx,L,"#b87333",0.24);});
- layers.forEach(function(L){if(L.kind==="copper"&&L.side!=="inner"&&camLayerVisible(L))camPaintLayer(ctx,L,PH.copper,1);});
+ var copper=camCopperPaintOrder(layers);
+ copper.forEach(function(L,i){camPaintLayer(ctx,L,PH.copper,i===copper.length-1?1:0.24);});
  layers.forEach(function(L){if(L.kind==="mask"&&camLayerVisible(L))camPaintLayer(ctx,L,PH.mask,0.94);});
  layers.forEach(function(L){if(L.kind==="paste"&&camLayerVisible(L))camPaintLayer(ctx,L,"#b9c5d1",0.72);});
  layers.forEach(function(L){if(L.kind==="silk"&&camLayerVisible(L))camPaintLayer(ctx,L,PH.silk,1);});
