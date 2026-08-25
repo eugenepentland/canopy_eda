@@ -142,6 +142,26 @@ function loadCamReview(){
    PCB.cam=cam;CAM_REVIEW=true;camLayerCache={};dragCacheDrop();paintSoon();})
   .catch(function(){});};
  requestAnimationFrame(function(){requestAnimationFrame(start);});}
+// Full editable pages paint placement + saved tracks/vias first. Copper fills,
+// connectivity/DRC, mask artwork, and electrical analyses are one separately
+// dependency-cached response, requested only after two real frames. If the user
+// edits while it is running, its saved-state result is stale and is discarded.
+function loadDeferredAnalysis(){
+ if(RO||!PCB.analysis_deferred)return;
+ var generation=dirtyGeneration,rev=PCB.rev;
+ function current(){return generation===dirtyGeneration&&rev===PCB.rev;}
+ var start=function(){var u=new URL(window.location.href);u.hash="";u.searchParams.set("derived","1");
+  fetch(u.pathname+u.search).then(function(r){if(!r.ok)throw 0;return r.json();})
+   .then(function(j){if(!current()||!j||j.rev!==rev)return;
+    PCB.pours=j.pours||[];PCB.plane_fills=j.plane_fills||[];PCB.zone_fills=j.zone_fills||[];
+    PCB.drc=drawRfRetrofitDrcMerge(j.drc||[]);
+    PCB.mask_relief=j.mask_relief||{openings:[],strokes:[],joints:[]};PCB.mask_merges=j.mask_merges||[];
+    PCB.antipads=j.antipads||[];PCB.trace_em=j.trace_em||{analyses:[]};
+    PCB.power_integrity=j.power_integrity||{nets:[]};PCB.fab_text=j.fab_text||null;
+    PCB.analysis_deferred=false;traceEmIdx=null;powerIntegrityIdx=null;traceEmDirty=false;powerIntegrityDirty=false;
+    routeSummaryFrom(j);pourGeomDrop();dragCacheDrop();paintSoon();drawDrc();drcChip(PCB.drc.length);poursFresh();})
+   .catch(function(){if(!current())return;runDrcNow();if(poursDeclared())refillPours();});};
+ requestAnimationFrame(function(){requestAnimationFrame(start);});}
 // Persistent assembly sprites are registered by pcb_model_sprites.js after
 // the bare board has painted. The map stays empty on every other PCB surface,
 // so the normal editor pays only one failed property lookup per visible part.
@@ -9897,6 +9917,7 @@ if(rgh)rgh.addEventListener("click",function(ev){ev.preventDefault();if(onSub())
 })();
 fitVB(); // initial fit to the container + overlay paint + label visibility
 loadCamReview();
+loadDeferredAnalysis();
 // ── Layers / grid / units / ruler controls (audit 1.5) ──────────────────
 (function(){
  // Grid selector — feeds snapG(); persists per design.
@@ -10346,10 +10367,9 @@ markUnplaced(PCB.placement&&PCB.placement.unplaced);
 // only after the whole script has initialized, then let the ordinary dirty /
 // autosave path persist an approved migration into that same layout row.
 if(!RO&&PCB.shown_layout)setTimeout(drawRfRetrofitSaved,0);
-// The page already embeds authoritative server DRC for this exact saved state.
-// Show it immediately, but defer the worker/WASM download and reconciliation
-// POST until the first real edit instead of checking an unchanged board twice.
-if(!RO)drcChip((PCB.drc||[]).length);
+// A compact first response is still resolving its server DRC; a complete page
+// already embeds the authoritative result and shows it immediately.
+if(!RO)drcChip(PCB.analysis_deferred?-1:(PCB.drc||[]).length);
 // Arm pour-staleness only after boot so subsequent edits (not initial display)
 // light the ⟳ Pours button, and sync its initial visibility + fresh tooltip.
 // Via fence remains visible on every editable board: board-edge perimeter
