@@ -260,6 +260,21 @@
   function repaint() {
     if (window.PCBRepaint) window.PCBRepaint();
   }
+  // Display-only scale update. Exposed below for the same-origin parent so a
+  // number-input gesture can rebuild the already-solved raster synchronously;
+  // the message listener calls the same seam as its loading/fallback path.
+  function setScale(minC, maxC, redraw) {
+    if (typeof minC !== "number" || !isFinite(minC) ||
+        typeof maxC !== "number" || !isFinite(maxC) || maxC <= minC) return false;
+    if (minC === view.scaleMinC && maxC === view.scaleMaxC) return false;
+    view.scaleMinC = minC;
+    view.scaleMaxC = maxC;
+    if (redraw !== false) {
+      if (field) raster = buildRaster(field);
+      repaint();
+    }
+    return true;
+  }
   function tell(msg) {
     try { if (window.parent && window.parent !== window) window.parent.postMessage(msg, "*"); } catch (e) {}
   }
@@ -314,13 +329,9 @@
     if (typeof d.opacity === "number") view.opacity = Math.max(0, Math.min(1, d.opacity));
     if (typeof d.labels === "boolean") view.labels = d.labels;
     if (d.side === "top" || d.side === "bottom") view.side = d.side;
-    var nextMinC = typeof d.scaleMinC === "number" && isFinite(d.scaleMinC) ? d.scaleMinC : view.scaleMinC;
-    var nextMaxC = typeof d.scaleMaxC === "number" && isFinite(d.scaleMaxC) ? d.scaleMaxC : view.scaleMaxC;
-    if (nextMaxC > nextMinC && (nextMinC !== view.scaleMinC || nextMaxC !== view.scaleMaxC)) {
-      view.scaleMinC = nextMinC;
-      view.scaleMaxC = nextMaxC;
-      recolor = true;
-    }
+    var nextMinC = typeof d.scaleMinC === "number" ? d.scaleMinC : view.scaleMinC;
+    var nextMaxC = typeof d.scaleMaxC === "number" ? d.scaleMaxC : view.scaleMaxC;
+    recolor = setScale(nextMinC, nextMaxC, false);
     if (refetch) load();
     else {
       if (recolor && field) raster = buildRaster(field);
@@ -334,7 +345,7 @@
   // Exposed for diagnostics and tests so a direct board frame can state the
   // exact absolute range behind its colours.
   window.PCBThermal = {
-    ramp: rampCss, reload: load, view: view,
+    ramp: rampCss, reload: load, setScale: setScale, view: view,
     scale: function () { return { minC: view.scaleMinC, maxC: view.scaleMaxC }; }
   };
   load();

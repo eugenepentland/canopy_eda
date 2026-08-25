@@ -1525,6 +1525,7 @@ test "the board offers a persistent manual temperature scale" {
         "view.scaleMinC",
         "view.scaleMaxC",
         "temperatureNorm(f.ambient_c + g.rise_c[p])",
+        "setScale: setScale",
         "if (recolor && field) raster = buildRaster(field)",
     }));
 
@@ -1533,6 +1534,9 @@ test "the board offers a persistent manual temperature scale" {
     const client = @embedFile("assets/thermal_page.js");
     try testing.expect(containsAll(client, &.{
         "function scaleSet(",
+        "function scalePush(",
+        "frame.contentWindow.PCBThermal",
+        "thermal.setScale(scaleMinC, scaleMaxC)",
         "nextMaxC > nextMinC",
         "scaleMinC: scaleMinC, scaleMaxC: scaleMaxC",
         "searchParams.get(\"scale_min\")",

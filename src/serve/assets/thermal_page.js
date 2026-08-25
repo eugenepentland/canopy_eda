@@ -89,12 +89,24 @@
   }
 
   // ---- The board frame ----------------------------------------------------
-  // The frame owns the picture; this page owns the words beside it. Everything
-  // here is one postMessage down and one status message back.
+  // The frame owns the picture; this page owns the words beside it. General
+  // state crosses by message; scale changes also use the same-origin redraw
+  // seam so an input gesture updates pixels synchronously.
   function tell(msg) {
     if (!frame || !frame.contentWindow) return;
     msg.t = "thermal:view";
     try { frame.contentWindow.postMessage(msg, "*"); } catch (e) { /* frame not ready yet */ }
+  }
+  function scalePush() {
+    if (!frame || !frame.contentWindow) return;
+    // Same-origin direct call gives the number inputs a synchronous redraw.
+    // The message remains the loading-order fallback and keeps the frame's
+    // public message contract usable when it is opened by another parent.
+    try {
+      var thermal = frame.contentWindow.PCBThermal;
+      if (thermal && typeof thermal.setScale === "function") thermal.setScale(scaleMinC, scaleMaxC);
+    } catch (e) { /* frame still navigating */ }
+    tell({ scaleMinC: scaleMinC, scaleMaxC: scaleMaxC });
   }
   function scaleSet(updateUrl) {
     if (!scaleMinInput || !scaleMaxInput) return;
@@ -108,7 +120,7 @@
     if (!valid) return;
     scaleMinC = nextMinC;
     scaleMaxC = nextMaxC;
-    tell({ scaleMinC: scaleMinC, scaleMaxC: scaleMaxC });
+    scalePush();
     if (updateUrl) syncUrl();
   }
   function orientBoard() {
