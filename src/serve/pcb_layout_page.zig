@@ -10570,12 +10570,12 @@ const pcb_3d_stage_html =
     \\<button class="btn" id="pcb3d-front">Front</button>
     \\<button class="btn" id="pcb3d-side">Side</button>
     \\<span class="sep"></span>
-    \\<button class="btn" id="pcb3d-export-step" title="Download the board, mounting holes, placed component B-reps, and heatsink as a server-built AP242 STEP assembly">Export STEP</button>
+    \\<button class="btn" id="pcb3d-export-step" title="Download the green board solid, artwork wraps, mounting holes, exact component B-reps, and the heatsink when enabled">Export STEP</button>
     \\<span class="sep"></span>
     \\<label><input type="checkbox" id="pcb3d-t-models" checked>Models</label>
     \\<label><input type="checkbox" id="pcb3d-t-surface" checked>Surfaces</label>
     \\<label><input type="checkbox" id="pcb3d-t-board" checked>Board</label>
-    \\<label><input type="checkbox" id="pcb3d-t-heatsink" checked>Heatsink</label>
+    \\<label title="Uncheck to hide and exclude the heatsink from STEP export"><input type="checkbox" id="pcb3d-t-heatsink" checked>Heatsink</label>
     \\<label><input type="checkbox" id="pcb3d-t-axes" checked>Axes</label>
     \\</div></div>
 ;

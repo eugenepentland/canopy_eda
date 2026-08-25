@@ -1,11 +1,11 @@
 //! Server-side PCB STEP assembly composer.
 //!
-//! Generated board/heatsink bodies arrive as the small faceted geometry the
-//! browser already owns. Component geometry never does: each unique library
-//! STEP is parsed here, copied into the AP242 exchange structure without
-//! tessellation, then instanced with an assembly transform. Repeated packages
-//! therefore share one exact B-rep definition instead of expanding the
-//! preview triangles once per placement.
+//! The generated green board/heatsink bodies and coloured artwork wraps arrive
+//! as the compact geometry the browser already owns. Component geometry never
+//! does: each unique library STEP is parsed here, copied into the AP242 exchange
+//! structure without tessellation, then instanced with an assembly transform.
+//! Repeated packages therefore share one exact B-rep definition instead of
+//! expanding the preview triangles once per placement.
 
 const std = @import("std");
 const httpz = @import("httpz");
@@ -31,6 +31,9 @@ const Body = struct {
     triangles: []const [3]usize,
     color: ?[3]f64 = null,
     triangleColors: ?[]const ?[3]f64 = null,
+    /// False is a closed FACETED_BREP. True is a coloured, zero-thickness
+    /// SHELL_BASED_SURFACE_MODEL used for the two PCB artwork wraps.
+    surface: bool = false,
 };
 
 const Instance = struct {
@@ -438,6 +441,91 @@ fn writeDirection(w: *std.Io.Writer, id: u64, v: [3]f64) std.Io.Writer.Error!voi
     try w.writeAll("));\n");
 }
 
+const TriangleEdge = struct { a: usize, b: usize };
+
+fn edgeOf(a: usize, b: usize) TriangleEdge {
+    return if (a < b) .{ .a = a, .b = b } else .{ .a = b, .b = a };
+}
+
+fn componentRoot(parent: []usize, start: usize) usize {
+    var node = start;
+    while (parent[node] != node) node = parent[node];
+    const root = node;
+    node = start;
+    while (parent[node] != node) {
+        const next = parent[node];
+        parent[node] = root;
+        node = next;
+    }
+    return root;
+}
+
+fn joinComponents(parent: []usize, a: usize, b: usize) void {
+    const root_a = componentRoot(parent, a);
+    const root_b = componentRoot(parent, b);
+    if (root_a != root_b) parent[root_b] = root_a;
+}
+
+fn writeSurfaceModel(
+    allocator: std.mem.Allocator,
+    w: *std.Io.Writer,
+    next_id: *u64,
+    body: Body,
+    face_ids: []const u64,
+) (std.mem.Allocator.Error || std.Io.Writer.Error)!u64 {
+    const parent = try allocator.alloc(usize, body.triangles.len);
+    for (parent, 0..) |*entry, i| entry.* = i;
+    var first_by_edge: std.AutoHashMapUnmanaged(TriangleEdge, usize) = .empty;
+    for (body.triangles, 0..) |triangle, triangle_index| {
+        const edges = [3]TriangleEdge{
+            edgeOf(triangle[0], triangle[1]),
+            edgeOf(triangle[1], triangle[2]),
+            edgeOf(triangle[2], triangle[0]),
+        };
+        for (edges) |edge| {
+            const gop = try first_by_edge.getOrPut(allocator, edge);
+            if (gop.found_existing) joinComponents(parent, triangle_index, gop.value_ptr.*) else gop.value_ptr.* = triangle_index;
+        }
+    }
+
+    var group_by_root: std.AutoHashMapUnmanaged(usize, usize) = .empty;
+    var groups: std.ArrayList(std.ArrayList(u64)) = .empty;
+    for (face_ids, 0..) |face, triangle_index| {
+        const root = componentRoot(parent, triangle_index);
+        const gop = try group_by_root.getOrPut(allocator, root);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = groups.items.len;
+            try groups.append(allocator, .empty);
+        }
+        try groups.items[gop.value_ptr.*].append(allocator, face);
+    }
+
+    const shell_ids = try allocator.alloc(u64, groups.items.len);
+    for (groups.items, 0..) |group, group_index| {
+        shell_ids[group_index] = next_id.*;
+        next_id.* += 1;
+        try w.print("#{d}=OPEN_SHELL(", .{shell_ids[group_index]});
+        try stepText(w, body.name);
+        try w.writeAll(",(");
+        for (group.items, 0..) |face, i| {
+            if (i > 0) try w.writeByte(',');
+            try w.print("#{d}", .{face});
+        }
+        try w.writeAll("));\n");
+    }
+    const model = next_id.*;
+    next_id.* += 1;
+    try w.print("#{d}=SHELL_BASED_SURFACE_MODEL(", .{model});
+    try stepText(w, body.name);
+    try w.writeAll(",(");
+    for (shell_ids, 0..) |shell, i| {
+        if (i > 0) try w.writeByte(',');
+        try w.print("#{d}", .{shell});
+    }
+    try w.writeAll("));\n");
+    return model;
+}
+
 const StyleState = struct {
     assignments: std.AutoHashMapUnmanaged(u64, u64) = .empty,
     styled_items: std.ArrayList(u64) = .empty,
@@ -492,7 +580,11 @@ const StyleState = struct {
 
 fn writeFacetedBodies(w: *std.Io.Writer, bodies: []const Body, next_id: *u64, root_items: *std.ArrayList(u64), styles: *StyleState, allocator: std.mem.Allocator) (ExportError || std.mem.Allocator.Error || std.Io.Writer.Error)!void {
     for (bodies) |body| {
-        if (body.points.len < 4 or body.points.len > max_points_per_body or body.triangles.len < 4 or body.triangles.len > max_triangles_per_body) return error.InvalidGeometry;
+        const minimum_points: usize = if (body.surface) 3 else 4;
+        const minimum_triangles: usize = if (body.surface) 1 else 4;
+        if (body.name.len == 0 or body.name.len > 256) return error.InvalidGeometry;
+        if (body.points.len < minimum_points or body.points.len > max_points_per_body) return error.InvalidGeometry;
+        if (body.triangles.len < minimum_triangles or body.triangles.len > max_triangles_per_body) return error.InvalidGeometry;
         const point_ids = try allocator.alloc(u64, body.points.len);
         for (body.points, 0..) |point, i| {
             if (!finitePoint(point)) return error.InvalidGeometry;
@@ -534,22 +626,28 @@ fn writeFacetedBodies(w: *std.Io.Writer, bodies: []const Body, next_id: *u64, ro
             try styles.item(allocator, w, next_id, face, triangle_color);
             try face_ids.append(allocator, face);
         }
-        const shell = next_id.*;
-        const brep = shell + 1;
-        next_id.* += 2;
-        try w.print("#{d}=CLOSED_SHELL(", .{shell});
-        try stepText(w, body.name);
-        try w.writeAll(",(");
-        for (face_ids.items, 0..) |face, i| {
-            if (i > 0) try w.writeByte(',');
-            try w.print("#{d}", .{face});
+        if (body.surface) {
+            const model = try writeSurfaceModel(allocator, w, next_id, body, face_ids.items);
+            try root_items.append(allocator, model);
+            try styles.item(allocator, w, next_id, model, body.color);
+        } else {
+            const shell = next_id.*;
+            const brep = shell + 1;
+            next_id.* += 2;
+            try w.print("#{d}=CLOSED_SHELL(", .{shell});
+            try stepText(w, body.name);
+            try w.writeAll(",(");
+            for (face_ids.items, 0..) |face, i| {
+                if (i > 0) try w.writeByte(',');
+                try w.print("#{d}", .{face});
+            }
+            try w.writeAll("));\n");
+            try w.print("#{d}=FACETED_BREP(", .{brep});
+            try stepText(w, body.name);
+            try w.print(",#{d});\n", .{shell});
+            try root_items.append(allocator, brep);
+            try styles.item(allocator, w, next_id, brep, body.color);
         }
-        try w.writeAll("));\n");
-        try w.print("#{d}=FACETED_BREP(", .{brep});
-        try stepText(w, body.name);
-        try w.print(",#{d});\n", .{shell});
-        try root_items.append(allocator, brep);
-        try styles.item(allocator, w, next_id, brep, body.color);
     }
 }
 
@@ -679,7 +777,8 @@ fn sendError(res: *httpz.Response, status: u16, message: []const u8) void {
 }
 
 /// POST /api/pcb-step/:name — compose exact source STEP B-reps with the small
-/// generated board/heatsink solids and return one self-contained AP242 file.
+/// generated board/heatsink solids and artwork wraps, returning one
+/// self-contained AP242 file.
 pub fn pcbStepApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse return sendError(res, 404, "design not found");
     if (!safeDesignName(name)) return sendError(res, 400, "invalid design name");
@@ -810,4 +909,31 @@ test "exact assembly embeds one source B-rep and instances repeated footprints" 
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output, "COLOUR_RGB('',0.100000000,0.400000000,0.200000000)"));
     try std.testing.expect(std.mem.indexOf(u8, output, "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "CARTESIAN_POINT('',(25.000000000,0.000000000,0.000000000))") != null);
+}
+
+test "artwork rectangles export as coloured surface wraps beside the board solid" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const colors = [_]?[3]f64{ .{ 0.78, 0.57, 0.24 }, .{ 0.78, 0.57, 0.24 } };
+    const output = try build(arena.allocator(), ".", "fixture", .{
+        .bodies = &.{
+            .{
+                .name = "PCB solid",
+                .points = &.{ .{ 0, 0, 0 }, .{ 10, 0, 0 }, .{ 0, 10, 0 }, .{ 0, 0, -1.6 } },
+                .triangles = &.{ .{ 0, 2, 1 }, .{ 0, 1, 3 }, .{ 1, 2, 3 }, .{ 2, 0, 3 } },
+                .color = .{ 0.047, 0.404, 0.204 },
+            },
+            .{
+                .name = "PCB top artwork wrap",
+                .points = &.{ .{ 1, 1, 0.002 }, .{ 5, 1, 0.002 }, .{ 5, 2, 0.002 }, .{ 1, 2, 0.002 } },
+                .triangles = &.{ .{ 0, 2, 1 }, .{ 0, 3, 2 } },
+                .triangleColors = &colors,
+                .surface = true,
+            },
+        },
+    });
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output, "FACETED_BREP("));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output, "OPEN_SHELL("));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output, "SHELL_BASED_SURFACE_MODEL("));
+    try std.testing.expect(std.mem.indexOf(u8, output, "COLOUR_RGB('',0.780000000,0.570000000,0.240000000)") != null);
 }

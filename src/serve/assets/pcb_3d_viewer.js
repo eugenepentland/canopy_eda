@@ -347,20 +347,27 @@
   }
 
   function collectGeneratedStepBodies() {
-    var out = [];
+    var out = [], wraps = [];
     scene.updateMatrixWorld(true);
-    // Visibility checkboxes are viewing aids, not manufacturing selections: a
-    // hidden layer remains part of the downloaded physical assembly.
+    // The substrate is always a closed green solid. Its two canvas-backed face
+    // meshes contribute separate colour wraps because raster textures are not
+    // portable between STEP importers.
     out.push.apply(out, collectStepMeshes(boardGroup, "PCB"));
-    (heatsinkGroup.children || []).forEach(function (child, i) {
+    boardGroup.traverse(function (child) {
+      if (child.userData && child.userData.stepArtwork) wraps.push(child.userData.stepArtwork);
+    });
+    // Unlike camera/view controls, the heatsink checkbox is an assembly
+    // selection: an unchecked heatsink must not enter the exported STEP.
+    if (layerVisible.heatsink) (heatsinkGroup.children || []).forEach(function (child, i) {
       out.push.apply(out, collectStepMeshes(child, "Heatsink " + (i + 1)));
     });
-    return window.PCBStepExport.prepareBodies(out).filter(function (body) { return body.closed; }).map(function (body) {
+    var solids = window.PCBStepExport.prepareBodies(out).filter(function (body) { return body.closed; }).map(function (body) {
       return {
         name: body.name, points: body.points, triangles: body.triangles,
         color: body.color, triangleColors: body.triangleColors
       };
     });
+    return solids.concat(wraps);
   }
 
   function exactStepInstances() {
@@ -552,6 +559,8 @@
     mesh.position.z = z; mesh.renderOrder = 2;
     mesh.visible = layerVisible.surfaces;
     mesh.userData.pcb3dKind = "surfaces";
+    mesh.userData.stepArtwork = surface.makeStepArtworkWrap(painted, side,
+      z + (side === "top" ? 0.002 : -0.002));
     mesh.userData.disposeMaterial = true;
     boardGroup.add(mesh);
   }
@@ -676,12 +685,10 @@
     var rim = new THREE.DirectionalLight(0xffffff, 0.3); rim.position.set(0, 0, -60); scene.add(rim);
     axes = buildAxisGizmo(8); scene.add(axes); // labeled +X/+Y/+Z arrows + origin dot
 
-    // ExtrudeGeometry assigns material 0 to its front/back caps and material 1
-    // to every outer and drill wall. The canvas meshes remain the only browser-
-    // visible caps, but the hidden physical caps carry green mask colour into
-    // STEP while the walls retain the brown FR-4 substrate colour.
+    // The physical board exports as one uniformly green closed body. Browser
+    // canvas faces still paint the richer manufacturing appearance above it.
     boardCapMat = new THREE.MeshBasicMaterial({ color: surface.maskColor, visible: false });
-    boardEdgeMat = new THREE.MeshStandardMaterial({ color: 0x6f5529, metalness: 0.03, roughness: 0.95 });
+    boardEdgeMat = new THREE.MeshStandardMaterial({ color: surface.maskColor, metalness: 0.03, roughness: 0.95 });
 
     boardGroup = new THREE.Group();
     partsGroup = new THREE.Group();

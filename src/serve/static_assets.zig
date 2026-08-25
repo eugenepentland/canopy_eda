@@ -1016,7 +1016,7 @@ test "generated PCB STEP bodies remain faceted B-reps rather than presentation t
     try std.testing.expect(std.mem.indexOf(u8, pcb_step_export_js, "TESSELLATED_SHAPE_REPRESENTATION(") == null);
 }
 
-// spec: Web Server - the PCB 3D viewer asks the server for a self-contained millimetre-based AP242 assembly: each unique library STEP entity graph is embedded once without tessellation and reused through rigid component occurrences, while only Canopy-generated board and heatsink geometry remains compact faceted B-rep; the downloaded assembly retains analytic vendor surfaces and imports as CAD bodies rather than presentation-only tessellation
+// spec: Web Server - the PCB 3D viewer asks the server for a self-contained millimetre-based AP242 assembly: each unique library STEP entity graph is embedded once without tessellation and reused through rigid component occurrences, the generated board remains a compact green faceted solid, top and bottom artwork use colour-preserving surface wraps, and an unchecked heatsink is omitted from the assembly
 test "PCB 3D viewer sends generated solids and exact component occurrences to the server" {
     const viewer_markers = [_][]const u8{
         "function collectGeneratedStepBodies()",
@@ -1024,6 +1024,7 @@ test "PCB 3D viewer sends generated solids and exact component occurrences to th
         "function collectStepMeshes(group, name)",
         "obj.userData.pcb3dKind === \"surfaces\"",
         "collectStepMeshes(boardGroup, \"PCB\")",
+        "if (layerVisible.heatsink)",
         "partGroups.forEach",
         "heatsinkGroup.children",
         "new THREE.Matrix4().multiplyMatrices(mount.matrixWorld, local.matrix)",
@@ -1036,7 +1037,7 @@ test "PCB 3D viewer sends generated solids and exact component occurrences to th
     try std.testing.expect(std.mem.indexOf(u8, pcb_3d_viewer_js, "window.PCBStepExport.build(DATA.name") == null);
 }
 
-// spec: Web Server - the PCB 3D viewer composites each face's outer copper, soldermask, and silkscreen—including generated sub-circuit, test-point, and pin-1 artwork—into one non-overlapping visible canvas cap; the STEP solid carries green top/bottom faces and brown substrate walls, and only mechanical drills strictly larger than 1 mm are cut through the board
+// spec: Web Server - the PCB 3D viewer composites each face's outer copper, soldermask, and silkscreen—including generated sub-circuit, test-point, and pin-1 artwork—into one non-overlapping visible canvas cap; the same canvas drives compact top and bottom STEP artwork wraps over the green board solid, and only mechanical drills strictly larger than 1 mm are cut through the board
 // spec: Web Server - exposed RF copper on both board faces uses the same swept taper polygons in Assembly and the PCB 3D viewer
 test "PCB 3D viewer textures both manufactured faces and cuts drills" {
     const Check = struct { bytes: []const u8, marker: []const u8 };
@@ -1054,6 +1055,8 @@ test "PCB 3D viewer textures both manufactured faces and cuts drills" {
         .{ .bytes = pcb_3d_surface_js, .marker = "(all.tps || []).forEach" },
         .{ .bytes = pcb_3d_surface_js, .marker = "(all.pin1 || []).forEach" },
         .{ .bytes = pcb_3d_surface_js, .marker = "new THREE.CanvasTexture(cv)" },
+        .{ .bytes = pcb_3d_surface_js, .marker = "function makeStepArtworkWrap(painted, side, z)" },
+        .{ .bytes = pcb_3d_surface_js, .marker = "surface: true" },
         .{ .bytes = pcb_3d_surface_js, .marker = "function collectHoles(data, pts)" },
         .{ .bytes = pcb_3d_surface_js, .marker = "MECHANICAL_HOLE_MIN_DIAMETER = 1.0" },
         .{ .bytes = pcb_3d_surface_js, .marker = "drill > MECHANICAL_HOLE_MIN_DIAMETER" },
@@ -1065,7 +1068,8 @@ test "PCB 3D viewer textures both manufactured faces and cuts drills" {
         .{ .bytes = pcb_3d_viewer_js, .marker = "DATA.zone_fills, DATA.rf_paths" },
         .{ .bytes = pcb_3d_viewer_js, .marker = "new THREE.ShapeGeometry(shape)" },
         .{ .bytes = pcb_3d_viewer_js, .marker = "new THREE.MeshBasicMaterial({ color: surface.maskColor, visible: false })" },
-        .{ .bytes = pcb_3d_viewer_js, .marker = "color: 0x6f5529" },
+        .{ .bytes = pcb_3d_viewer_js, .marker = "boardEdgeMat = new THREE.MeshStandardMaterial({ color: surface.maskColor" },
+        .{ .bytes = pcb_3d_viewer_js, .marker = "surface.makeStepArtworkWrap(painted, side" },
         .{ .bytes = pcb_3d_viewer_js, .marker = "addBoardFace(shape, pts, \"top\", 0)" },
         .{ .bytes = pcb_3d_viewer_js, .marker = "addBoardFace(shape, pts, \"bottom\", -thickness)" },
         .{ .bytes = pcb_3d_viewer_js, .marker = "pcb3d-t-surface" },

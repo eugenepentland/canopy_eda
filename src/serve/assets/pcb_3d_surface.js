@@ -14,6 +14,19 @@
   var SILK = "#f5f3e8";
   var MAX_TEXTURE = 2048, PX_PER_MM = 32, ROUND_HOLE_SEGMENTS = 16;
   var MECHANICAL_HOLE_MIN_DIAMETER = 1.0;
+  // STEP has no broadly portable equivalent of a WebGL canvas texture.  A
+  // four-sample/mm, run-length encoded face mesh retains the manufactured
+  // appearance as a light CAD surface wrap without pixel-sized solid boxes.
+  var STEP_WRAP_PX_PER_MM = 4, STEP_WRAP_MAX_DIM = 720;
+  var STEP_PALETTE = [
+    // Omit the ordinary masked-board background: the closed green substrate
+    // directly beneath the wrap already supplies it.
+    { rgb: [28, 100, 50], step: null },
+    { rgb: [42, 110, 54], step: [0.165, 0.431, 0.212] }, // copper below mask
+    { rgb: [199, 146, 62], step: [0.780, 0.573, 0.243] }, // exposed copper
+    { rgb: [245, 243, 232], step: [0.961, 0.953, 0.910] }, // silkscreen
+    { rgb: [111, 85, 41], step: [0.435, 0.333, 0.161] } // mask opening over FR-4
+  ];
 
   function deg(d) { return (+d || 0) * Math.PI / 180; }
 
@@ -344,7 +357,88 @@
     var texture = new THREE.CanvasTexture(cv);
     if (THREE.sRGBEncoding) texture.encoding = THREE.sRGBEncoding;
     texture.needsUpdate = true;
-    return { texture: texture, bounds: b };
+    return { texture: texture, bounds: b, canvas: cv };
+  }
+
+  function nearestStepPalette(r, g, b, a) {
+    if (a < 128) return -1;
+    var best = 0, distance = Infinity;
+    STEP_PALETTE.forEach(function (entry, index) {
+      var dr = r - entry.rgb[0], dg = g - entry.rgb[1], db = b - entry.rgb[2];
+      var d = dr * dr + dg * dg + db * db;
+      if (d < distance) { best = index; distance = d; }
+    });
+    return best;
+  }
+
+  // Convert the already-composited manufacturing canvas into coloured planar
+  // rectangles. Adjacent cells of one colour are merged across each row, so
+  // a mostly-green board contributes no wrap faces and fine artwork stays
+  // compact. The server stores these rectangles as an AP242 surface model.
+  function makeStepArtworkWrap(painted, side, z) {
+    var cv = painted && painted.canvas, b = painted && painted.bounds;
+    if (!cv || !b || !cv.width || !cv.height) return null;
+    var scale = Math.min(STEP_WRAP_PX_PER_MM, STEP_WRAP_MAX_DIM / Math.max(b.w, b.h));
+    scale = Math.max(0.25, scale);
+    var cols = Math.max(1, Math.ceil(b.w * scale));
+    var rows = Math.max(1, Math.ceil(b.h * scale));
+    var pixels = cv.getContext("2d").getImageData(0, 0, cv.width, cv.height).data;
+    var classes = new Int8Array(cols * rows);
+
+    for (var row = 0; row < rows; row++) {
+      var sy0 = Math.floor(row * cv.height / rows), sy1 = Math.max(sy0 + 1, Math.floor((row + 1) * cv.height / rows));
+      for (var col = 0; col < cols; col++) {
+        var sx0 = Math.floor(col * cv.width / cols), sx1 = Math.max(sx0 + 1, Math.floor((col + 1) * cv.width / cols));
+        var counts = [0, 0, 0, 0, 0], opaque = 0;
+        for (var sy = sy0; sy < sy1; sy++) for (var sx = sx0; sx < sx1; sx++) {
+          var at = 4 * (sy * cv.width + sx);
+          var kind = nearestStepPalette(pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]);
+          if (kind >= 0) { counts[kind]++; opaque++; }
+        }
+        var chosen = 0, chosenCount = 0;
+        // Prefer real artwork when it covers at least 15% of the cell. This
+        // keeps 0.15 mm silk and narrow traces from disappearing on downsample.
+        for (var kindIndex = 1; kindIndex < counts.length; kindIndex++) {
+          if (counts[kindIndex] > chosenCount) { chosen = kindIndex; chosenCount = counts[kindIndex]; }
+        }
+        if (!opaque || chosenCount < Math.max(1, Math.ceil(opaque * 0.15))) chosen = 0;
+        classes[row * cols + col] = chosen;
+      }
+    }
+
+    var points = [], pointIndexes = Object.create(null), triangles = [], triangleColors = [];
+    function pointAt(col, rowIndex) {
+      var key = col + "," + rowIndex, found = pointIndexes[key];
+      if (found !== undefined) return found;
+      found = points.length; pointIndexes[key] = found;
+      points.push([
+        b.minx + b.w * col / cols,
+        -(b.miny + b.h * rowIndex / rows),
+        z
+      ]);
+      return found;
+    }
+    function addRun(rowIndex, first, after, kind) {
+      var a = pointAt(first, rowIndex), b0 = pointAt(after, rowIndex);
+      var c = pointAt(after, rowIndex + 1), d = pointAt(first, rowIndex + 1);
+      if (side === "top") triangles.push([a, c, b0], [a, d, c]);
+      else triangles.push([a, b0, c], [a, c, d]);
+      triangleColors.push(STEP_PALETTE[kind].step, STEP_PALETTE[kind].step);
+    }
+    for (var outRow = 0; outRow < rows; outRow++) {
+      var runStart = 0, runKind = classes[outRow * cols];
+      for (var outCol = 1; outCol <= cols; outCol++) {
+        var nextKind = outCol < cols ? classes[outRow * cols + outCol] : -1;
+        if (nextKind === runKind) continue;
+        if (runKind > 0) addRun(outRow, runStart, outCol, runKind);
+        runStart = outCol; runKind = nextKind;
+      }
+    }
+    if (!triangles.length) return null;
+    return {
+      name: "PCB " + side + " artwork wrap", surface: true,
+      points: points, triangles: triangles, triangleColors: triangleColors
+    };
   }
 
   function collectHoles(data, pts) {
@@ -425,6 +519,7 @@
   window.PCB3DSurface = {
     addShapeHoles: addShapeHoles,
     collectHoles: collectHoles,
+    makeStepArtworkWrap: makeStepArtworkWrap,
     makeTexture: makeTexture,
     maskColor: MASK_COLOR,
     mapUvs: mapUvs
