@@ -143,7 +143,7 @@ fn writeAc(
     base_edge: ?pour.EdgeField,
 ) std.Io.Writer.Error!void {
     const alloc = allocators.output;
-    try w.writeAll("{\"model\":\"routed and computed-pour lumped RLC / target impedance screen\",\"rails\":[");
+    try w.writeAll("{\"model\":\"routed, computed-pour, and via-plane lumped RLC / target impedance screen\",\"rails\":[");
     const ac = pdn_impedance.analyzeCopper(alloc, allocators.scratch, placement, route, zones, base_edge) catch {
         try w.writeAll("]}");
         return;
@@ -173,7 +173,9 @@ fn writeAcRail(w: *std.Io.Writer, alloc: std.mem.Allocator, rail: pdn_impedance.
     if (rail.passes) |pass| try w.writeAll(if (pass) "true" else "false") else try w.writeAll("null");
     var coverage_complete = rail.capacitors.len > 0;
     for (rail.capacitors) |cap| {
-        if (std.mem.eql(u8, cap.path_kind.power, "fallback") or !std.mem.eql(u8, cap.path_kind.ground, "computed-pour")) {
+        const ground_proven = std.mem.eql(u8, cap.path_kind.ground, "computed-pour") or
+            std.mem.eql(u8, cap.path_kind.ground, "computed-via-plane");
+        if (std.mem.eql(u8, cap.path_kind.power, "fallback") or !ground_proven) {
             coverage_complete = false;
             break;
         }

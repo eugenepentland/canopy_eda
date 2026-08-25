@@ -3188,8 +3188,11 @@ the selected path's bottleneck width. Saved power and ground pours are credited
 only through the exact clearance-carved, non-coarsened fill component, with a
 finite sheet-inductance integral capped by terminal spreading. A missing or
 refused physical path remains available as a labelled diagnostic estimate but
-cannot produce a green rail verdict. This is not a plane-cavity, package,
-regulator-loop, or full-wave solver.
+cannot produce a green rail verdict. Inner-plane return proof requires authored
+surface copper from each pad to a same-net via and exact same-component plane
+copper between the barrels. Characterized MLCC rows may provide a voltage bias
+curve plus tolerance and temperature factors. This is not a plane-cavity,
+package, regulator-loop, or full-wave solver.
 
 - a saved custom-pour corridor reaches live PDN analysis and reports computed-pour provenance for each credited leg
 - PDN pour extraction retains only compact per-capacitor path facts and recycles each board-sized fill before rasterizing the next surface
@@ -3197,6 +3200,9 @@ regulator-loop, or full-wave solver.
 - a hole, split island, or coarsened fill refuses PDN pour-path credit
 - a routed PDN path uses the selected route's bottleneck width, not unrelated copper on the same net
 - a fallback or estimated-via-return PDN mounting path remains diagnostic and cannot produce a green target-impedance verdict
+- a same-component pour path may bend around a clearance hole, but still integrates finite path length and width instead of treating the component as equipotential
+- a capacitor and any actual load ground pad earn computed-via-plane proof only when authored surface copper reaches same-net vias in one exact inner-plane fill component
+- characterized capacitor DC-bias curves interpolate at the resolved rail voltage and combine with tolerance and temperature derating
 - completeness-waiver: empty inputs (a design with no PDN intents returns an empty rail list; an intent with no bound capacitors retains an explicit diagnostic rail rather than fabricating a branch)
 - completeness-waiver: large inputs (only PDN and ground fill masks are built; membership-only fills omit contours and share the caller's edge field, while each capacitor corridor is sampled at the fill half-pitch)
 - completeness-waiver: unauthorized access (pure analysis of an already-authorized in-memory placement and saved copper; it performs no request or identity work)
@@ -4392,6 +4398,7 @@ Public functions: write
 - identity resolution is a fixed point: two consecutive resolveIdentities calls produce a byte-identical BOM
 - identity is deterministic: each part takes uuidFromId(its stable id), independent of any prior .bom contents
 - automatically assigned refdes reuse the prior BOM label by stable ID while newly inserted parts take numbers above the prior range
+- a selected parts-table row persists its complete rated and analysis properties, replaces the previous row's managed properties, and may migrate an exact legacy MPN to its declared current MPN
 
 ## render_html
 

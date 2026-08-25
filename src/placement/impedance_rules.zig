@@ -34,6 +34,10 @@ pub const Physical = struct {
     via_plating_mm: f64 = env.default_via_plating_mm,
     stack: impedance.Stack = .{},
     rails: []const power_budget.Rail = &.{},
+    /// Voltage-resolved physical rail identities. PDN component models use
+    /// these nominal voltages to evaluate authored DC-bias curves rather than
+    /// applying one package-wide capacitance factor to every supply voltage.
+    rail_specs: []const env.PowerRail = &.{},
     pdn_intents: []const env.PdnIntent = &.{},
 };
 

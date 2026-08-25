@@ -80,13 +80,25 @@ fn stabilizeRefdes(
     try refdes_stability.apply(allocator, block, priors);
 }
 
-fn appendPdnModelProperties(
+const selected_part_keys_property = "selected-part-property-keys";
+
+fn propertyValue(props: []const Property, key: []const u8) ?[]const u8 {
+    for (props) |prop| if (std.mem.eql(u8, prop.key, key)) return prop.value;
+    return null;
+}
+
+fn listedProperty(keys: []const u8, key: []const u8) bool {
+    var it = std.mem.splitScalar(u8, keys, ',');
+    while (it.next()) |candidate| if (std.mem.eql(u8, candidate, key)) return true;
+    return false;
+}
+
+fn appendSelectedPartProperties(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(Property),
     attrs: []const Property,
 ) !void {
     for (attrs) |attr| {
-        if (!std.mem.startsWith(u8, attr.key, "pdn-")) continue;
         var present = false;
         for (out.items) |old| if (std.mem.eql(u8, old.key, attr.key)) {
             present = true;
@@ -97,27 +109,83 @@ fn appendPdnModelProperties(
             .value = try allocator.dupe(u8, attr.value),
         });
     }
+    if (attrs.len == 0) return;
+    var keys: std.Io.Writer.Allocating = .init(allocator);
+    defer keys.deinit();
+    for (attrs, 0..) |attr, idx| {
+        if (idx > 0) try keys.writer.writeByte(',');
+        try keys.writer.writeAll(attr.key);
+    }
+    try out.append(allocator, .{
+        .key = try allocator.dupe(u8, selected_part_keys_property),
+        .value = try keys.toOwnedSlice(),
+    });
 }
 
-test "selected BOM rows propagate only PDN model attributes" {
-    const alloc = std.testing.allocator;
+fn selectedPartProperties(
+    allocator: std.mem.Allocator,
+    existing_props: []const Property,
+    part: *const parts_mod.PartEntry,
+    has_mpn_from_component: bool,
+) ![]const Property {
+    const legacy_mpn = propertyValue(part.attrs, "legacy-mpn");
+    const upgrade_legacy = if (legacy_mpn) |legacy|
+        if (propertyValue(existing_props, "mpn")) |old| std.mem.eql(u8, old, legacy) else false
+    else
+        false;
+    var has_mpn = propertyValue(existing_props, "mpn") != null or has_mpn_from_component;
+    if (upgrade_legacy) has_mpn = false;
+
     var out: std.ArrayList(Property) = .empty;
-    defer {
-        for (out.items) |p| {
-            alloc.free(p.key);
-            alloc.free(p.value);
-        }
-        out.deinit(alloc);
+    const old_selected_keys = propertyValue(existing_props, selected_part_keys_property) orelse "";
+    for (existing_props) |prop| {
+        if (std.mem.startsWith(u8, prop.key, "pdn-")) continue;
+        if (std.mem.eql(u8, prop.key, selected_part_keys_property)) continue;
+        if (listedProperty(old_selected_keys, prop.key)) continue;
+        if (upgrade_legacy and (std.mem.eql(u8, prop.key, "manufacturer") or std.mem.eql(u8, prop.key, "mpn"))) continue;
+        try out.append(allocator, prop);
     }
+    if (!has_mpn and part.manufacturer.len > 0) try out.append(allocator, .{
+        .key = try allocator.dupe(u8, "manufacturer"),
+        .value = try allocator.dupe(u8, part.manufacturer),
+    });
+    if (!has_mpn and part.mpn.len > 0) try out.append(allocator, .{
+        .key = try allocator.dupe(u8, "mpn"),
+        .value = try allocator.dupe(u8, part.mpn),
+    });
+    try appendSelectedPartProperties(allocator, &out, part.attrs);
+    return out.toOwnedSlice(allocator);
+}
+
+// spec: bom-resolve - a selected parts-table row persists its complete rated and analysis properties, replaces the previous row's managed properties, and may migrate an exact legacy MPN to its declared current MPN
+test "selected part properties and exact legacy MPN migration" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const old = [_]Property{
+        .{ .key = "manufacturer", .value = "Old Maker" },
+        .{ .key = "mpn", .value = "OLD-1" },
+        .{ .key = "pdn-esr-ohm", .value = "0.050" },
+    };
     const attrs = [_]Property{
         .{ .key = "dielectric", .value = "x7r" },
+        .{ .key = "legacy-mpn", .value = "OLD-1" },
         .{ .key = "pdn-esr-ohm", .value = "0.018" },
-        .{ .key = "pdn-esl-h", .value = "4e-10" },
+        .{ .key = "pdn-dc-bias-curve", .value = "0:1,5:0.4" },
     };
-    try appendPdnModelProperties(alloc, &out, &attrs);
-    try std.testing.expectEqual(@as(usize, 2), out.items.len);
-    try std.testing.expectEqualStrings("pdn-esr-ohm", out.items[0].key);
-    try std.testing.expectEqualStrings("pdn-esl-h", out.items[1].key);
+    const part = parts_mod.PartEntry{
+        .value = "1uF",
+        .manufacturer = "Current Maker",
+        .mpn = "NEW-1",
+        .attrs = &attrs,
+        .preferred = true,
+    };
+    const out = try selectedPartProperties(alloc, &old, &part, false);
+    try std.testing.expectEqualStrings("Current Maker", propertyValue(out, "manufacturer").?);
+    try std.testing.expectEqualStrings("NEW-1", propertyValue(out, "mpn").?);
+    try std.testing.expectEqualStrings("x7r", propertyValue(out, "dielectric").?);
+    try std.testing.expectEqualStrings("0.018", propertyValue(out, "pdn-esr-ohm").?);
+    try std.testing.expectEqualStrings("0:1,5:0.4", propertyValue(out, "pdn-dc-bias-curve").?);
 }
 
 /// Resolve identities and BOM data for all instances in a design block.
@@ -209,10 +277,7 @@ pub fn resolveIdentities(
     defer parts_db.deinit();
 
     for (flat_list.items) |info| {
-        var has_mpn = false;
-        if (props_map.get(info.ref_des)) |existing_props| for (existing_props) |p| {
-            if (std.mem.eql(u8, p.key, "mpn")) has_mpn = true;
-        };
+        const existing_props = props_map.get(info.ref_des) orelse &.{};
         if (info.footprint.len == 0) {
             if (info.value.len > 0) {
                 log.warn("{s} uses unsized family '{s}' — no footprint or MPN resolution", .{ info.ref_des, info.component });
@@ -226,36 +291,10 @@ pub fn resolveIdentities(
                 break;
             }
         }
-        if (has_mpn_from_component) has_mpn = true;
-
         if (parts_db.lookup(info.component, info.value, info.attrs)) |part| {
-            var new_props: std.ArrayList(Property) = .empty;
-            if (props_map.get(info.ref_des)) |existing| {
-                // Selected-row electrical data is authoritative. Do not carry
-                // a previous row's model through an MPN/value change.
-                for (existing) |p| {
-                    if (std.mem.startsWith(u8, p.key, "pdn-")) continue;
-                    try new_props.append(allocator, p);
-                }
-            }
-            if (!has_mpn and part.manufacturer.len > 0) {
-                try new_props.append(allocator, .{
-                    .key = try allocator.dupe(u8, "manufacturer"),
-                    .value = try allocator.dupe(u8, part.manufacturer),
-                });
-            }
-            if (!has_mpn and part.mpn.len > 0) {
-                try new_props.append(allocator, .{
-                    .key = try allocator.dupe(u8, "mpn"),
-                    .value = try allocator.dupe(u8, part.mpn),
-                });
-            }
-            // Electrical model columns belong to the selected BOM row just as
-            // surely as its MPN. Persist them so post-route PDN extraction uses
-            // the part that will actually be stuffed, while ordinary matching
-            // attrs (dielectric/tolerance) stay out of the manufacturing BOM.
-            try appendPdnModelProperties(allocator, &new_props, part.attrs);
-            try props_map.put(allocator, info.ref_des, try new_props.toOwnedSlice(allocator));
+            // Persist the complete selected row: procurement/review needs the
+            // rated properties, and physical analysis needs its PDN columns.
+            try props_map.put(allocator, info.ref_des, try selectedPartProperties(allocator, existing_props, part, has_mpn_from_component));
         }
     }
 

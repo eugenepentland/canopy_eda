@@ -6521,6 +6521,7 @@ fn boardRulesOf(arena: std.mem.Allocator, block: *const DesignBlock, nets: []con
                 env.default_via_plating_mm,
             .stack = try impedance_rules.stackOf(arena, block),
             .rails = try power_budget.analyze(arena, block),
+            .rail_specs = block.rails,
             .pdn_intents = block.pdn_intents,
         },
     };
