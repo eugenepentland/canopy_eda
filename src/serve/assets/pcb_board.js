@@ -819,7 +819,7 @@ function ovsFp(){
   "|"+activeLayer+"|"+(netColOn?1:0)+"|"+(heatOn?1:0)+"|"+heatScale+"|"+(ratsOn?1:0)+
   "|"+(selRef||"")+"|"+(selGroup||"")+"|"+((sel&&sel.length)||0)+":"+((sel&&sel.join&&sel.join(","))||"")+
   "|"+(selNetCur||"")+"|"+(hoverNet||"")+"|"+(hoverGrpName||"")+
-  "|"+(drawMode?1:0)+"|"+((drawMode&&dtrace&&dtrace.net)||"")+
+  "|"+(drawMode?1:0)+"|"+((drawMode&&dtrace&&dtrace.net)||"")+"|"+(viaMode?1:0)+":"+viaNet+
   "|"+(ovExclusive()?1:0)+(ovGhost()?1:0)+
   "|"+selCu.t.length+","+selCu.v.length+
   "|"+ovsCount(unplacedSet)+"|"+(PCB.texts?PCB.texts.length:0)+"|"+(txSel===undefined?-1:txSel)+
@@ -833,7 +833,7 @@ function ovsOn(w,h,kk){
  if(!(Date.now()<vbQuiet))return false; // only inside the viewport-busy window — a quiet frame must render exactly
  if(!(w>0&&h>0&&kk>0))return false;
  if(window.PCBOverlay&&PCBOverlay.paint)return false; // the replay overlay repaints over the scene every frame
- if(drawMode&&dtrace)return false;      // a live hand-routed trace follows the cursor
+ if((drawMode&&dtrace)||viaMode)return false; // live copper previews follow the cursor
  if(segdrag||viadrag)return false;      // copper moves per pointermove with no invalidation hook
  return true;}
 // Is the viewport wholly inside the buffer, at the exact integer crop the blit
@@ -1667,7 +1667,7 @@ function paintParts(ctx,k,mov,only){
    else fill=bot?TH.padBot:TH.padTop;
    // Net highlight: hovered net, or the net being hand-routed right now —
    // the whole net lights up while a trace is live, same as a net click.
-   var hlNet=hoverNet||(drawMode&&dtrace?dtrace.net:null),hl=false;
+   var hlNet=hoverNet||(drawMode&&dtrace?dtrace.net:(viaMode&&viaNet?viaNet:null)),hl=false;
    if(hlNet&&pd.net===hlNet){fill="#f85149";padAlpha=1;hl=true;}
    if(focusPad){fill="#58d6ff";padAlpha=1;hl=true;}
    if(targetPad){fill="#ff7b72";padAlpha=1;hl=true;}
@@ -3404,6 +3404,7 @@ function padAlignRefresh(){var bar=document.getElementById("pad-align-bar");if(!
  else if(padAlignMode)padAlignStatus("Choose Same X for a vertical run or Same Y for a horizontal run.");}
 function padAlignArm(on){if(RO&&on)return;
  if(on&&heatsinkMode)heatsinkArm(false);
+ if(on&&viaMode)viaModeSet(false);
  if(on){if(drawMode)drawModeSet(false);if(textMode)txArm(false);if(polyMode)polyArm(false);
   if(outlineMode)outlineArm(false);if(pourMode)pourArm(false);if(backingMode)backingArm(false);if(PCB.rulerOff)PCB.rulerOff();}
  padAlignMode=!!on;padAlignA=null;padAlignB=null;
@@ -3942,6 +3943,7 @@ function kbdToggle(){
   '<div class="kbd-row"><span>Hand-route mode (click pad → trace; head stops at clearance obstacles)</span><kbd>X</kbd></div>'+
   '<div class="kbd-row"><span>Open the View sidebar (when no trace or outline sketch is active)</span><kbd>V</kbd></div>'+
   '<div class="kbd-row"><span>Drop via + flip layer (while actively routing)</span><kbd>V</kbd></div>'+
+  '<div class="kbd-row"><span>Place standalone vias on a chosen net (no trace)</span><kbd>Shift+V / ⊙ Via</kbd></div>'+
   '<div class="kbd-row"><span>Focus / select top or bottom copper</span><kbd>B</kbd></div>'+
   '<div class="kbd-row"><span>Cycle the selected routable layer</span><kbd>PgUp / PgDn</kbd></div>'+
   '<div class="kbd-row"><span>Toggle 45&deg; / 90&deg; trace bends (while routing)</span><kbd>E</kbd></div>'+
@@ -3977,7 +3979,7 @@ var SPACE=false;
 document.addEventListener("keydown",function(ev){if((ev.key===" "||ev.code==="Space")&&!kbTyping(ev.target)){SPACE=true;ev.preventDefault();}});
 document.addEventListener("keyup",function(ev){if(ev.key===" "||ev.code==="Space")SPACE=false;});
 document.addEventListener("keydown",function(ev){
- if(ev.key=="Escape"){marqChipsHide();pickCycleClear();if(pickMenu){ev.preventDefault();pickMenuClose();try{svg.focus();}catch(e){}return;}if(window.PCBFindIsOpen&&window.PCBFindIsOpen()){ev.preventDefault();window.PCBFindClose();return;}if(PHYSICAL_REVIEW){ev.preventDefault();selNet(null);return;}if(kbdOv){kbdClose();}else if(PCB.moveDlgOpen&&PCB.moveDlgOpen()){PCB.moveDlgClose();}else if(hsModalShown()){hsModalClose();}else if(heatsinkMode){heatsinkArm(false);}else if(padAlignMode){padAlignArm(false);}else if(drawMode){if(dtrace)drawCancel();else drawModeSet(false);}else if(textMode){if(txSel>=0){txSelect(-1);}else txArm(false);}else if(backingMode){backingArm(false);}else if(polyMode){if(polyPts){polyPts=null;polyCur=null;drawBoardRect();}else polyArm(false);}else if(pourMode){if(pourDlg){closePourDialog();}else if(pourPts){pourPts=null;pourCur=null;drawBoardRect();}else pourArm(false);}else if(outlineMode){outDraw=null;outlineArm(false);drawBoardRect();}else if(selCuClear()){}else if(insp){inspClear();}else{selClear();clearSel();}return;}
+ if(ev.key=="Escape"){marqChipsHide();pickCycleClear();if(pickMenu){ev.preventDefault();pickMenuClose();try{svg.focus();}catch(e){}return;}if(window.PCBFindIsOpen&&window.PCBFindIsOpen()){ev.preventDefault();window.PCBFindClose();return;}if(PHYSICAL_REVIEW){ev.preventDefault();selNet(null);return;}if(kbdOv){kbdClose();}else if(PCB.moveDlgOpen&&PCB.moveDlgOpen()){PCB.moveDlgClose();}else if(hsModalShown()){hsModalClose();}else if(heatsinkMode){heatsinkArm(false);}else if(padAlignMode){padAlignArm(false);}else if(viaMode){viaModeSet(false);}else if(drawMode){if(dtrace)drawCancel();else drawModeSet(false);}else if(textMode){if(txSel>=0){txSelect(-1);}else txArm(false);}else if(backingMode){backingArm(false);}else if(polyMode){if(polyPts){polyPts=null;polyCur=null;drawBoardRect();}else polyArm(false);}else if(pourMode){if(pourDlg){closePourDialog();}else if(pourPts){pourPts=null;pourCur=null;drawBoardRect();}else pourArm(false);}else if(outlineMode){outDraw=null;outlineArm(false);drawBoardRect();}else if(selCuClear()){}else if(insp){inspClear();}else{selClear();clearSel();}return;}
  if((outlineMode||activeSketchIsArea())&&!kbTyping(ev.target)&&(ev.key==="d"||ev.key==="D")){ev.preventDefault();outlineSketchDimension();return;}
  if((outlineMode||activeSketchIsArea())&&!kbTyping(ev.target)&&(ev.key==="h"||ev.key==="H")){ev.preventDefault();outlineSketchConstraint("horizontal");return;}
  if((outlineMode||activeSketchIsArea())&&!kbTyping(ev.target)&&(ev.key==="v"||ev.key==="V")){ev.preventDefault();outlineSketchConstraint("vertical");return;}
@@ -5055,6 +5057,7 @@ function outlineArm(on){
  if(on&&polyMode)polyArm(false);
  if(on&&pourMode)pourArm(false);
  if(on&&drawMode)drawModeSet(false);
+ if(on&&viaMode)viaModeSet(false);
  if(on&&textMode)txArm(false);
  if(on&&PCB.rulerOff)PCB.rulerOff();
  outlineMode=on;if(!on)outlineRectArmed=false;
@@ -5146,6 +5149,7 @@ function polyArm(on,withinOutline){if(RO&&on)return;
  if(on&&outlineMode&&!withinOutline)outlineArm(false);
  if(on&&pourMode&&!withinOutline)pourArm(false);
  if(on&&drawMode)drawModeSet(false);
+ if(on&&viaMode)viaModeSet(false);
  if(on&&textMode)txArm(false);
  if(on&&PCB.rulerOff)PCB.rulerOff();
  if(on&&withinOutline)outlineRectArmed=false;
@@ -5168,7 +5172,7 @@ function pourSnap(m,ev){var g=ev&&ev.shiftKey?0:G,axis=!(ev&&ev.ctrlKey);
 function outlineMsg(txt){var msg=document.getElementById("pcb-savemsg");
  if(msg){msg.style.color="#8b949e";msg.textContent=txt;}}
 function heatsinkArm(on){if(RO&&on)return;
- if(on){if(backingMode)backingArm(false);if(padAlignMode)padAlignArm(false);if(outlineMode)outlineArm(false);if(polyMode)polyArm(false);if(pourMode)pourArm(false);if(drawMode)drawModeSet(false);if(textMode)txArm(false);if(PCB.rulerOff)PCB.rulerOff();}
+ if(on){if(backingMode)backingArm(false);if(padAlignMode)padAlignArm(false);if(outlineMode)outlineArm(false);if(polyMode)polyArm(false);if(pourMode)pourArm(false);if(drawMode)drawModeSet(false);if(viaMode)viaModeSet(false);if(textMode)txArm(false);if(PCB.rulerOff)PCB.rulerOff();}
  if(on&&!viewSt.vis.heatsink){viewSt.vis.heatsink=1;viewSave();if(PCB.apSync)PCB.apSync();drawBoardRect();}
  heatsinkMode=!!on;if(!on){heatsinkDraw=null;if(heatsinkDrag&&heatsinkDrag.snap)restoreSnap(heatsinkDrag.snap);heatsinkDrag=null;}var b=document.getElementById("pcb-heatsink");if(b)b.classList.toggle("on",heatsinkMode);
  svg.style.cursor=heatsinkMode?"crosshair":"";if(heatsinkMode)outlineMsg(PCB.heatsink?"heatsink: drag the body to move, drag a corner to resize, or click it to edit parameters":"heatsink: drag its base rectangle on the board; Esc exits");
@@ -5219,7 +5223,7 @@ function backingArm(on){if(RO&&on)return;
  if(on&&heatsinkMode)heatsinkArm(false);
  if(on&&padAlignMode)padAlignArm(false);
  if(on&&outlineMode)outlineArm(false);if(on&&polyMode)polyArm(false);if(on&&pourMode)pourArm(false);
- if(on&&drawMode)drawModeSet(false);if(on&&textMode)txArm(false);if(on&&PCB.rulerOff)PCB.rulerOff();
+ if(on&&drawMode)drawModeSet(false);if(on&&viaMode)viaModeSet(false);if(on&&textMode)txArm(false);if(on&&PCB.rulerOff)PCB.rulerOff();
  backingMode=!!on;if(!on){backingEdit=null;outlineSelection=[];outlineRectArmed=false;}else if(!backingEdit){var l=(PCB.fabrication_layers||[])[0],p=l&&(l.regions||[])[0];if(p)backingEdit={layer:l,index:0,poly:p,sketch:(l.sketches||[])[0]||null};}var b=document.getElementById("pcb-backing");if(b)b.classList.toggle("on",backingMode);
  svg.classList.toggle("outline-mode",backingMode||outlineMode||polyMode);
  if(backingMode)outlineMsg("backing region sketch: click a region to edit it with the shared constraints and modify tools");
@@ -5256,6 +5260,7 @@ window.PCBDxfSeams={
   if(polyMode)polyArm(false);
   if(pourMode)pourArm(false);
   if(drawMode)drawModeSet(false);
+  if(viaMode)viaModeSet(false);
   if(textMode)txArm(false);
   if(backingMode)backingArm(false);}
 };
@@ -5421,6 +5426,7 @@ function pourArm(on){if(RO&&on)return;
  if(on&&outlineMode)outlineArm(false);
  if(on&&polyMode)polyArm(false);
  if(on&&drawMode)drawModeSet(false);
+ if(on&&viaMode)viaModeSet(false);
  if(on&&textMode)txArm(false);
  if(on&&PCB.rulerOff)PCB.rulerOff();
  pourMode=on;
@@ -5860,6 +5866,7 @@ svg.addEventListener("pointerdown",function(ev){
   else{marq={x0:om.x,y0:om.y,x1:om.x,y1:om.y,moved:false,outline:true};
    marqEl=el("rect",{"class":"marquee",x:0,y:0,width:0,height:0});gU.appendChild(marqEl);}
   pcap(ev);return;}
+ if(viaMode&&ev.button===0){viaPlaceAt(mm(ev));return;}
  if(drawMode&&ev.button===0){drawClick(mm(ev),ev.shiftKey);return;}
  if(ev.pointerType==="touch"){
   if(!RO&&!anyDrawTool()&&ev.button===0&&touchCount()===0)pickHoldArm(ev,mm(ev));else pickHoldCancel();
@@ -5955,6 +5962,7 @@ svg.addEventListener("pointermove",function(ev){
   if(outDraw.area){drawBoardRect();gB.appendChild(el("rect",{x:X(opr.x).toFixed(1),y:Y(opr.y).toFixed(1),width:(opr.w*S).toFixed(1),height:(opr.h*S).toFixed(1),fill:"rgba(240,198,116,.07)",stroke:POUR_COL,"stroke-width":1.6,"stroke-dasharray":"6 4"}));}
   else drawBoardRect(opr);return;}
  if(panMove(ev))return;
+ if(viaMode){viaCur=mm(ev);ovPaintSoon();return;}
  if(drawMode){drawShift=ev.shiftKey;drawCur=mm(ev);if(dtrace)ovPaintSoon();return;}
  if(marq){var m=mm(ev);marq.x1=m.x;marq.y1=m.y;
   if(Math.abs(m.x-marq.x0)>0.2||Math.abs(m.y-marq.y0)>0.2)marq.moved=true;
@@ -6177,6 +6185,7 @@ function txArm(on){textMode=on;if(RO)textMode=false;
  svg.classList.toggle("text-mode",textMode);
  if(textMode&&padAlignMode)padAlignArm(false);
  if(textMode&&drawMode)drawModeSet(false);
+ if(textMode&&viaMode)viaModeSet(false);
  if(textMode&&outlineMode)outlineArm(false);
  if(textMode&&polyMode)polyArm(false);
  if(textMode&&pourMode)pourArm(false);
@@ -6666,8 +6675,10 @@ function txPlace(m){var gx=Math.round(m.x/G)*G,gy=Math.round(m.y/G)*G;
  txSelect(PCB.texts.length-1);txDirty();}
 var textBtn=document.getElementById("pcb-text");
 if(textBtn&&!RO)textBtn.addEventListener("click",function(){txArm(!textMode);});
-function viaGeo(){var va=parseFloat((document.getElementById("r-va")||{}).value),
- vd=parseFloat((document.getElementById("r-vd")||{}).value);return {dia:va>0?va:0.4,drill:vd>0?vd:0.2};}
+function viaGeo(net){var va=parseFloat((document.getElementById("r-va")||{}).value),
+ vd=parseFloat((document.getElementById("r-vd")||{}).value),c=net?netClassInfo(net):null,
+ cd=c&&parseFloat(c.via_dia),cdr=c&&parseFloat(c.via_drill);
+ return {dia:cd>0?cd:(va>0?va:0.4),drill:cdr>0?cdr:(vd>0?vd:0.2)};}
 function drawVia(g,wx,wy,dia,drill){var r=viaRenderRadius(dia),rh=viaRenderRadius(drill);
  g.appendChild(el("circle",{cx:X(wx).toFixed(1),cy:Y(wy).toFixed(1),r:r.toFixed(1),fill:TH.via}));
  g.appendChild(el("circle",{cx:X(wx).toFixed(1),cy:Y(wy).toFixed(1),r:rh.toFixed(1),fill:TH.viaHole}));}
@@ -6720,7 +6731,7 @@ if(clrCb){
  clrCb.addEventListener("change",function(){clrSet(clrCb.checked);});}
 var clrIn=document.getElementById("r-cl");
 if(clrIn)clrIn.addEventListener("input",drawClr);
-// ── Hand routing: draw tracks + vias (X) ────────────────────────────────
+// ── Hand routing + standalone via placement ────────────────────────────
 // KiCad-style manual routing on the same PCB.tracks/PCB.vias model the
 // autorouter fills: click a pad to start (net + layer come from the pad),
 // click to fix 45° or 90° grid-snapped corners (Shift = free angle), V drops a via
@@ -6731,6 +6742,7 @@ if(clrIn)clrIn.addEventListener("input",drawClr);
 // Save/Update (routes ride the sidecar), so a module's hand routing saved on
 // its own page is exactly what Stamp later carries onto a parent board.
 var drawMode=false,dtrace=null,drawCur=null,drawShift=false;
+var viaMode=false,viaNet="",viaCur=null;
 // Transient red flash of a commit the engine gate refused (see drcGateBlocks):
 // the draw head stays live, and paintDraw pulses these world-space legs red so
 // the user sees the click didn't take instead of silently getting nothing.
@@ -6782,14 +6794,65 @@ function drawArcInit(){var s=document.getElementById("r-bend"),i=document.getEle
  i.addEventListener("input",function(){try{localStorage.setItem(DRAW_RADIUS_KEY,i.value);}catch(e){}
   drawArcControlSync();drawBtnSync();ovPaintSoon();});drawArcControlSync();}
 drawArcInit();
+// Standalone vias use the same model, net-class geometry and two-tier DRC gate
+// as V during routing, but own no trace head. The status-bar net picker makes
+// plane stitching possible even when the target net has no surface copper at
+// the intended site; clicking a pad/track/via can pick the net instead.
+function viaNetSet(net,announce){viaNet=String(net||"");var s=document.getElementById("pcb-via-net");
+ if(s&&s.value!==viaNet)s.value=viaNet;viaBtnSync();ovPaintSoon();
+ if(announce)routeStatMsg(viaNet?("placing vias on "+nLeaf(viaNet)+" — click the board"):"choose a via net below, or click a pad / existing copper");}
+function viaControlsInit(){if((PCB.netnames||[]).length===1)viaNet=PCB.netnames[0];var s=document.getElementById("pcb-via-net");if(!s)return;
+ s.textContent="";var empty=document.createElement("option");empty.value="";empty.textContent="choose…";s.appendChild(empty);
+ (PCB.netnames||[]).forEach(function(net){var o=document.createElement("option");o.value=net;o.textContent=net;s.appendChild(o);});
+ s.value=viaNet;
+ s.addEventListener("change",function(){viaNetSet(s.value,true);});}
+function viaBtnSync(){var b=document.getElementById("pcb-via"),ctl=document.getElementById("st-via");
+ if(b){b.classList.toggle("on",viaMode);if(!b.classList.contains("ts-btn"))b.textContent=viaMode&&viaNet?("⊙ "+nLeaf(viaNet)):"⊙ Via";}
+ if(ctl)ctl.hidden=!viaMode;toolSync();}
+function viaModeSet(on){if(RO)return;on=!!on;
+ if(on&&heatsinkMode)heatsinkArm(false);
+ if(on&&padAlignMode)padAlignArm(false);
+ if(on&&drawMode)drawModeSet(false);
+ if(on&&textMode)txArm(false);
+ if(on&&polyMode)polyArm(false);
+ if(on&&outlineMode)outlineArm(false);
+ if(on&&pourMode)pourArm(false);
+ if(on&&backingMode)backingArm(false);
+ if(on&&PCB.rulerOff)PCB.rulerOff();
+ viaMode=on;viaCur=null;
+ if(on){drcGateInit();drcGateSessionEnsure();pcbSideTab("side-route");
+  var rc=document.querySelector('.tab-chip[data-panel="panel-route"]');if(rc&&!rc.classList.contains("active"))rc.click();
+  routeStatMsg(viaNet?("placing vias on "+nLeaf(viaNet)+" — click the board"):"choose a via net below, or click a pad / existing copper");}
+ svg.style.cursor=on?"crosshair":"";viaBtnSync();ovPaintSoon();}
+function viaPickNetAt(m){var p=padTarget(m);if(p&&p.net)return p.net;
+ var v=drawHitVia(m);if(v&&v.net)return v.net;var t=drawHitTrack(m,activeLayer);if(t&&t.net)return t.net;
+ var z=pourAt(m);return z&&!z.keepout&&z.net?z.net:"";}
+function viaSnap(m,net){var g=snapG(),best={x:Math.round(m.x/g)*g,y:Math.round(m.y/g)*g},
+ wr=9*(vb.w/Math.max(svgMetricsGet().cw,1))/S,bd=wr,key=netCollapse(net||"");
+ function take(x,y){var d=Math.hypot(x-m.x,y-m.y);if(d<bd){bd=d;best={x:x,y:y,mag:true};}}
+ P.forEach(function(p,i){(p.pads||[]).forEach(function(pd){if(pd.net&&netCollapse(pd.net)===key){var c=wpt(i,pd.x,pd.y);take(c.x,c.y);}});});
+ (PCB.tracks||[]).forEach(function(t){if(!t.net||netCollapse(t.net)!==key)return;trackChords(t).forEach(function(c){
+  var dx=c.x2-c.x1,dy=c.y2-c.y1,l2=dx*dx+dy*dy,u=l2?((m.x-c.x1)*dx+(m.y-c.y1)*dy)/l2:0;
+  u=Math.max(0,Math.min(1,u));take(c.x1+u*dx,c.y1+u*dy);});});return best;}
+function viaSamePoint(x,y){return (PCB.vias||[]).some(function(v){return Math.hypot(v.x-x,v.y-y)<=1e-7;});}
+function viaPlaceAt(m){if(!viaNet){var picked=viaPickNetAt(m);if(picked){viaNetSet(picked,true);return;}
+  routeStatMsg("choose a via net below, or click a pad / existing copper",true);return;}
+ var q=viaSnap(m,viaNet),vg=viaGeo(viaNet);
+ if(viaSamePoint(q.x,q.y)){routeStatMsg("there is already a via here",true);return;}
+ if(viaViolation(q.x,q.y,viaNet,vg.dia,vg.drill)){routeStatMsg("a via here violates clearance — choose another point",true);return;}
+ var cand={x:q.x,y:q.y,d:vg.dia,drill:vg.drill,net:viaNet,source:"human",id:viaIdNew()};
+ if(drcGateBlocks(null,[cand])){routeStatMsg("a via here would create a DRC error — choose another point",true);return;}
+ recordUndo();rfDropNet(viaNet);PCB.vias=PCB.vias||[];PCB.vias.push(cand);scheduleDrc();paintSoon();
+ routeStatMsg(nLeaf(viaNet)+" via placed — click again or Esc to finish");}
+viaControlsInit();
 // Tool-strip radio state + the status bar's tool segment. The Select tool
 // lights up whenever no drawing mode is armed.
 function toolSync(){
  var ruler=!!PCB.rulerOn;
- var any=drawMode||textMode||polyMode||pourMode||outlineMode||backingMode||heatsinkMode||ruler||padAlignMode;
+ var any=drawMode||viaMode||textMode||polyMode||pourMode||outlineMode||backingMode||heatsinkMode||ruler||padAlignMode;
  var sb=document.getElementById("tool-select");if(sb)sb.classList.toggle("on",!any);
  stSet("st-tool",drawMode?(dtrace?("route "+nLeaf(dtrace.net)+(dtrace.pair?" ⇄ "+nLeaf(dtrace.pair.net):"")+" · "+layerName(dtrace.l)+" · "+dtrace.w+" mm · "+drawAngle+"°"+(drawArcOn()&&!dtrace.pair?(" · arc R"+drawArcRadius().toFixed(3)):"")):("route · "+layerName(activeLayer)+" · "+drawAngle+"°"+(drawArcOn()?" · arcs":"")))
-  :(padAlignMode?(padAlignA?(padAlignB?"align pads · choose X or Y":"align pads · target pad"):"align pads · moving pad"):(textMode?"text":(heatsinkMode?"heatsink":(backingMode?"backing":(polyMode?"poly outline":(pourMode?"copper pour":(outlineMode?"outline":(ruler?"measure":""))))))))); }
+  :(viaMode?(viaNet?("via · "+nLeaf(viaNet)):"via · choose net"):(padAlignMode?(padAlignA?(padAlignB?"align pads · choose X or Y":"align pads · target pad"):"align pads · moving pad"):(textMode?"text":(heatsinkMode?"heatsink":(backingMode?"backing":(polyMode?"poly outline":(pourMode?"copper pour":(outlineMode?"outline":(ruler?"measure":"")))))))))); }
 function drawBtnSync(){var b=document.getElementById("pcb-draw");if(!b)return;
  b.classList.toggle("on",drawMode);
  var al=layerName(activeLayer);
@@ -6802,6 +6865,7 @@ function drawBtnSync(){var b=document.getElementById("pcb-draw");if(!b)return;
  else b.textContent=lbl;
  drawArcControlSync();drawAngleControlSync();toolSync();}
 function drawModeSet(on){if(RO)return;drawMode=on;if(!on)dtrace=null;
+ if(on&&viaMode)viaModeSet(false);
  if(on&&heatsinkMode)heatsinkArm(false);
  if(on){drcGateInit();drcGateSessionEnsure();} // warm/reload only when copper is about to need it
  // Arming Draw surfaces the Route panel's track-width / layer controls. The
@@ -7673,7 +7737,7 @@ function dpFinish(pt2){var pr=dtrace.pair,isP=(pt2.net===dtrace.net);
 // spreads symmetrically along its own normal first (short jog legs, gated
 // together with the vias); the junction direction resets so the next click
 // fans back into the coupled run.
-function dpViaPair(){var pr=dtrace.pair,vg=viaGeo();
+function dpViaPair(){var pr=dtrace.pair,vg=viaGeo(dtrace.net);
  var need=vg.dia+netClrFor(dtrace.net);
  var px=dtrace.lx,py=dtrace.ly,nx=pr.lx,ny=pr.ly;
  var ux=nx-px,uy=ny-py,L=Math.hypot(ux,uy),jog=0;
@@ -7786,7 +7850,7 @@ function nextDrawLayer(cur){if(activeLayer!==cur)return activeLayer;
  return (cur+1)%NSIG;}
 function drawViaHere(){if(!dtrace)return;
  if(dtrace.pair){dpViaPair();return;}
- var vg=viaGeo();
+ var vg=viaGeo(dtrace.net);
  if(viaViolation(dtrace.lx,dtrace.ly,dtrace.net,vg.dia,vg.drill)){
   routeStatMsg("a via here violates clearance — move first",true);return;}
  var candV=[{x:dtrace.lx,y:dtrace.ly,d:vg.dia,drill:vg.drill,net:dtrace.net,source:"human",id:viaIdNew()}];
@@ -7811,13 +7875,19 @@ function drawDelAt(m){var v=drawHitVia(m);
  if(v){recordUndo();PCB.vias=PCB.vias.filter(function(q){return q!==v;});gpuCuEdit();routeStatMsg();ovPaintSoon();scheduleDrc();return;}
  var t=drawHitTrack(m);
  if(t){recordUndo();rfDropForTracks([t]);PCB.tracks=PCB.tracks.filter(function(q){return q!==t;});gpuCuEdit();routeStatMsg();ovPaintSoon();scheduleDrc();}}
+function paintViaTool(ctx){if(!viaMode||!viaCur)return;var q=viaNet?viaSnap(viaCur,viaNet):drawSnap(viaCur),vg=viaGeo(viaNet),
+ blocked=viaNet&&(viaSamePoint(q.x,q.y)||!!viaViolation(q.x,q.y,viaNet,vg.dia,vg.drill)),r=viaRenderRadius(vg.dia),rh=viaRenderRadius(vg.drill);
+ ctx.save();ctx.globalAlpha=0.82;ctx.fillStyle=blocked?"#ff4d4d":((viaNet&&netColorOf(netCollapse(viaNet)))||TH.via);
+ ctx.beginPath();ctx.arc(X(q.x),Y(q.y),r,0,6.2832);ctx.fill();ctx.fillStyle=TH.viaHole;
+ ctx.beginPath();ctx.arc(X(q.x),Y(q.y),rh,0,6.2832);ctx.fill();ctx.strokeStyle=blocked?"#ff4d4d":"#7ee787";
+ ctx.lineWidth=1.3;ctx.setLineDash(viaNet?[]:[3,2]);ctx.beginPath();ctx.arc(X(q.x),Y(q.y),r+3,0,6.2832);ctx.stroke();ctx.restore();}
 // Route-head preview: the exact leg chain a click will commit (posture legs
 // from drawPath), drawn SOLID at the real track width with round caps —
 // KiCad-style, so what you see is precisely the copper you get. Only a
 // clearance-violating head goes RED + dashed (the "won't commit" signal).
 // The airwire's far pad(s) pulse amber the whole time the trace is live —
 // the "connect me HERE" target.
-function paintDraw(ctx){if(!drawMode||!dtrace)return;
+function paintDraw(ctx){paintViaTool(ctx);if(!drawMode||!dtrace)return;
  if(drawFlash){if(Date.now()<drawFlash.until){ // engine gate refused this click
    ctx.save();ctx.lineCap="round";ctx.lineJoin="round";ctx.setLineDash([]);
    ctx.strokeStyle="#ff4d4d";ctx.lineWidth=Math.max(dtrace.w*S,1.4);
@@ -7872,6 +7942,8 @@ function paintDraw(ctx){if(!drawMode||!dtrace)return;
  ctx.restore();}
 var drawBtn=document.getElementById("pcb-draw");
 if(drawBtn&&!RO)drawBtn.addEventListener("click",function(){drawModeSet(!drawMode);});
+var viaBtn=document.getElementById("pcb-via");
+if(viaBtn&&!RO)viaBtn.addEventListener("click",function(){viaModeSet(!viaMode);});
 svg.addEventListener("dblclick",function(ev){if(!RO&&PCB.partDimensionDblClick&&PCB.partDimensionDblClick(ev))return;
  if(drawMode&&dtrace){ev.preventDefault();drawEnd();return;}
  if(pourMode&&pourPts){ev.preventDefault();pourClose();return;}
@@ -7897,11 +7969,13 @@ svg.addEventListener("contextmenu",function(ev){
  if(!RO&&!drawMode&&!textMode&&(outlineMode||polyMode||viewSt.filt.outline)){var vm=mm(ev),vi=vtxAt(vm);
   if(vi>=0){ev.preventDefault();outlineVertexDelete(vi);return;}}
  if(textMode){var tm=mm(ev),ti=txAt(tm.x,tm.y);if(ti>=0){ev.preventDefault();txDelete(ti);}return;}
+ if(viaMode){ev.preventDefault();viaModeSet(false);return;}
  if(!drawMode)return;ev.preventDefault();
  if(dtrace){drawEnd();return;}
  drawDelAt(mm(ev));});
 document.addEventListener("keydown",function(ev){if(RO||kbTyping(ev.target))return;
  if((ev.key=="x"||ev.key=="X")&&!ev.ctrlKey&&!ev.metaKey){ev.preventDefault();drawModeSet(!drawMode);return;}
+ if(!drawMode&&(ev.key=="v"||ev.key=="V")&&ev.shiftKey&&!ev.ctrlKey&&!ev.metaKey){ev.preventDefault();viaModeSet(!viaMode);return;}
  if(!drawMode)return;
  if(dtrace&&(ev.key=="v"||ev.key=="V")){ev.preventDefault();drawViaHere();return;}
  if((ev.key=="p"||ev.key=="P")&&dtrace&&dtrace.pair){ev.preventDefault();
@@ -8451,7 +8525,7 @@ document.addEventListener("pointerdown",function(ev){if(pickMenu&&!pickMenu.cont
 document.addEventListener("keydown",function(ev){if(ev.key==="Escape"&&pickMenu)pickMenuClose();});
 document.addEventListener("keydown",function(ev){if(ev.key!=="Tab"||ev.ctrlKey||ev.metaKey||kbTyping(ev.target)||pickMenu||RO||anyDrawTool())return;
  if(pickCycleApply(ev.shiftKey?-1:1)){ev.preventDefault();ev.stopPropagation();}});
-function anyDrawTool(){return drawMode||textMode||polyMode||pourMode||outlineMode||backingMode||heatsinkMode||padAlignMode||!!PCB.rulerOn;}
+function anyDrawTool(){return drawMode||viaMode||textMode||polyMode||pourMode||outlineMode||backingMode||heatsinkMode||padAlignMode||!!PCB.rulerOn;}
 function n2(v){return (+v).toFixed(2);}
 // Net→class resolution is per track, per via and per pad on every keepout
 // frame, so the two linear passes are indexed instead. Priority is the pass
@@ -10008,7 +10082,8 @@ function apPresetApply(n){
  document.addEventListener("click",function(ev){if(pop&&!pop.hidden&&ev.target!==lb&&!pop.contains(ev.target))popClose();});
  document.addEventListener("keydown",function(ev){
   if((ev.key!=="v"&&ev.key!=="V")||ev.ctrlKey||ev.metaKey||ev.altKey||kbTyping(ev.target))return;
-  if(dtrace||outlineMode||activeSketchIsArea())return;
+  if(ev.shiftKey)return; // Shift+V belongs to the standalone Via tool
+  if(dtrace||viaMode||outlineMode||activeSketchIsArea())return;
   if(apOpen())ev.preventDefault();});
  apRender();
  document.querySelectorAll(".ap-tab").forEach(function(t){
@@ -10020,6 +10095,7 @@ function apPresetApply(n){
  if(selToolBtn)selToolBtn.addEventListener("click",function(){
   if(padAlignMode)padAlignArm(false);
   if(drawMode)drawModeSet(false);
+  if(viaMode)viaModeSet(false);
   if(textMode)txArm(false);
   if(polyMode)polyArm(false);
   if(outlineMode)outlineArm(false);
@@ -10052,7 +10128,7 @@ function apPresetApply(n){
  var rulerBtn=document.getElementById("pcb-ruler-btn");
  function rulerArm(on){rulerMode=on;PCB.rulerOn=on;svg.classList.toggle("ruler-mode",on);
   if(on&&heatsinkMode)heatsinkArm(false);
-  if(on){if(padAlignMode)padAlignArm(false);if(drawMode)drawModeSet(false);if(textMode)txArm(false);
+  if(on){if(padAlignMode)padAlignArm(false);if(drawMode)drawModeSet(false);if(viaMode)viaModeSet(false);if(textMode)txArm(false);
    if(polyMode)polyArm(false);if(outlineMode)outlineArm(false);if(pourMode)pourArm(false);closeMoveDialog();}
  if(rulerBtn)rulerBtn.classList.toggle("active",on);
   if(!on){rulerClear();rulerDraw=null;stSet("st-dxdy","");var msg=document.getElementById("pcb-savemsg");if(msg&&/(measure|dimension)/.test(msg.textContent))msg.textContent="";}

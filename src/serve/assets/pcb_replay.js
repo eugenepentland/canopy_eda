@@ -526,9 +526,9 @@
   // so only the replay frame shows; a chip announces the mode and the tools that
   // would fight the overlay for the board's copper are disabled.
 
-  // Tool gating: Route, pour-refill, the ✎ Draw toggle, and Save/Update. Each
+  // Tool gating: Route, pour-refill, the ✎ Draw / ⊙ Via toggles, and Save/Update. Each
   // button's prior disabled state is remembered so exit restores it exactly.
-  var GATED = ["r-go", "pcb-pour", "pcb-draw", "pcb-saveas", "pcb-update"];
+  var GATED = ["r-go", "pcb-pour", "pcb-draw", "pcb-via", "pcb-saveas", "pcb-update"];
   var gatePrev = {};
   function gateTools(on) {
     if (on) {

@@ -8124,6 +8124,7 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, sr
         try w.writeAll("<button class=\"btn\" id=\"pcb-outline-dxf\" title=\"" ++ tip_dxf ++ "\">\u{2912} DXF</button>");
         try w.writeAll("<button class=\"btn\" id=\"pcb-pour-zone\" title=\"" ++ tip_pour_zone ++ "\">\u{25A9} Area</button>");
         try w.writeAll("<button class=\"btn\" id=\"pcb-draw\" title=\"" ++ tip_draw ++ "\">\u{270E} Draw</button>");
+        try w.writeAll("<button class=\"btn\" id=\"pcb-via\" title=\"" ++ tip_via ++ "\">\u{2299} Via</button>");
         try w.writeAll("<button class=\"btn\" id=\"pcb-text\" title=\"" ++ tip_text ++ "\">T Text</button>");
     }
     try w.writeAll(bar_grp_end);
@@ -8180,6 +8181,7 @@ const tip_draw = "Route tracks (X): click a pad to start a trace, click to " ++
     "fix corners (E toggles 45\u{b0}/90\u{b0}, / switches posture, A toggles tangent arcs, Shift = free angle), V drops a via and flips " ++
     "layer, click a same-net pad or double-click to finish, Backspace steps back, Esc ends. Right-click deletes the " ++
     "track/via under the cursor. Copper is saved with the layout (Save/Update).";
+const tip_via = "Place standalone vias (Shift+V): choose a net in the status bar, or click a pad / existing copper to pick its net, then click the board to place DRC-checked vias without drawing traces. Esc or right-click exits. Copper is saved with the layout (Save/Update).";
 const tip_text = "Silkscreen text (T): click on the board to place a label " ++
     "(grid-snapped, on the active side). In Select or Text mode, click an existing label to edit it and drag it to " ++
     "move it, R rotates 90\u{b0}, Del or right-click deletes. Saved with the layout (Save/Update); emitted on the silk " ++
@@ -8200,6 +8202,7 @@ const toolstrip_html =
     "<div class=\"pcb-toolstrip\" id=\"pcb-toolstrip\">" ++
     "<button class=\"ts-btn on\" id=\"tool-select\" title=\"Select / move (Esc) — drag parts or silkscreen text, marquee-select on empty board\">\u{2196}</button>" ++
     "<button class=\"ts-btn\" id=\"pcb-draw\" title=\"" ++ tip_draw ++ "\">\u{270E}</button>" ++
+    "<button class=\"ts-btn\" id=\"pcb-via\" title=\"" ++ tip_via ++ "\">\u{2299}</button>" ++
     "<button class=\"ts-btn\" id=\"pcb-outline\" title=\"" ++ tip_outline ++ "\">\u{25AD}</button>" ++
     "<button class=\"ts-btn\" id=\"pcb-outline-poly\" title=\"" ++ tip_poly ++ "\">\u{2B21}</button>" ++
     "<button class=\"ts-btn\" id=\"pcb-backing\" title=\"" ++ tip_backing ++ "\">\u{25A7}</button>" ++
@@ -8254,6 +8257,7 @@ const statusbar_html =
     "<span class=\"st-seg\" id=\"st-gpu\" " ++
     "title=\"Active renderer — WebGPU where the browser supports it, Canvas2D otherwise (?gpu=0 forces 2D)\"></span>" ++
     "<span class=\"st-seg st-tool\" id=\"st-tool\"></span><label class=\"st-seg st-bend\" id=\"st-bend\" hidden title=\"Manual trace bend angle (E toggles while routing)\">bend <select id=\"pcb-bend-angle\" aria-label=\"Manual trace bend angle\"><option value=\"45\">45\u{b0}</option><option value=\"90\">90\u{b0}</option></select></label>" ++
+    "<label class=\"st-seg st-via\" id=\"st-via\" hidden title=\"Electrical net assigned to newly placed vias\">via net <select id=\"pcb-via-net\" aria-label=\"Standalone via net\"></select></label>" ++
     "<span class=\"st-spacer\"></span>" ++
     "<span class=\"st-seg st-hover\" id=\"st-hover\"></span>" ++
     "<button class=\"st-seg st-btn\" id=\"pcb-help\" title=\"Keyboard &amp; mouse shortcuts (?)\">?</button>" ++
@@ -8275,6 +8279,25 @@ test "PCB status bar identifies nets under the pointer" {
     try std.testing.expect(std.mem.indexOf(u8, js, "PHYSICAL_REVIEW||ovExclusive()||!ratsOn") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "l.k===\"proximity\"||l.done||!l.net") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "statusHover(hm,statusFeatureNet(hm,hi));") != null);
+}
+
+// spec: Web Server - The PCB editor places repeated standalone vias on a chosen net without creating trace segments, using grid/copper snapping, net-class geometry, the live DRC gate, and one undo step per via
+test "PCB editor ships a standalone manual via tool" {
+    const js = @embedFile("assets/pcb_board.js");
+    try std.testing.expect(std.mem.indexOf(u8, toolstrip_html, "id=\"pcb-via\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tip_via, "without drawing traces") != null);
+    try std.testing.expect(std.mem.indexOf(u8, statusbar_html, "id=\"pcb-via-net\"") != null);
+    for ([_][]const u8{
+        "function viaModeSet(on)",
+        "function viaSnap(m,net)",
+        "function viaPlaceAt(m)",
+        "var q=viaSnap(m,viaNet),vg=viaGeo(viaNet);",
+        "if(viaViolation(q.x,q.y,viaNet,vg.dia,vg.drill))",
+        "if(drcGateBlocks(null,[cand]))",
+        "recordUndo();rfDropNet(viaNet);PCB.vias=PCB.vias||[];PCB.vias.push(cand);scheduleDrc();",
+        "if(viaMode&&ev.button===0){viaPlaceAt(mm(ev));return;}",
+        "Shift+V / ⊙ Via",
+    }) |marker| try std.testing.expect(std.mem.indexOf(u8, js, marker) != null);
 }
 
 // spec: Web Server - M opens a move-by-distance dialog for the selected parts (X and/or Y in the current units, one undo step, carried copper) and D arms the ruler/measure tool
@@ -8302,7 +8325,7 @@ test "M binds the move-by-distance dialog and D binds the ruler, and the toolstr
 test "V opens the View sidebar outside an active trace or outline sketch" {
     const js = @embedFile("assets/pcb_board.js");
     try std.testing.expect(std.mem.indexOf(u8, js, "if(dtrace&&(ev.key==\"v\"||ev.key==\"V\")){ev.preventDefault();drawViaHere();return;}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "if(dtrace||outlineMode||activeSketchIsArea())return;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(dtrace||viaMode||outlineMode||activeSketchIsArea())return;") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "compactDockSet(\"appearance\",true,\"\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "mobilePanelSet(\"layers\",true)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "if(pop&&lb){popOpen();return true;}") != null);
