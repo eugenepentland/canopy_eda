@@ -8378,6 +8378,15 @@ test "D drives a selected footprint origin from a stable outline edge" {
     try std.testing.expect(std.mem.indexOf(u8, js, "dimensions:cloneDimensions()") != null);
 }
 
+// spec: Web Server - Double-clicking a saved PCB driving dimension line or value reopens its exact-distance editor
+test "a PCB driving dimension opens its value editor on double click" {
+    const js = @embedFile("assets/pcb_board.js");
+    try std.testing.expect(std.mem.indexOf(u8, js, "function partDimensionAt(m)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "PCB.partDimensionDblClick=function(ev)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(!RO&&PCB.partDimensionDblClick&&PCB.partDimensionDblClick(ev))return;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "state.existing&&partDimensionEdge(state.existing)") != null);
+}
+
 // spec: Web Server - The overscan pan-buffer fingerprint reads the clearance-halo toggle from view state instead of a removed DOM checkbox, so a pan never throws
 test "the overscan fingerprint reads the clearance toggle from view state" {
     const js = @embedFile("assets/pcb_board.js");

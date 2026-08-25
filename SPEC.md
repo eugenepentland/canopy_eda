@@ -6111,6 +6111,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Hovering visible routed copper, vias, pours, or unrouted airwires identifies their net in the PCB status bar while pad hover retains its component context
 - M opens a move-by-distance dialog for the selected parts (X and/or Y in the current units, one undo step, carried copper) and D arms the ruler/measure tool
 - With one footprint selected, D authors a persistent driving dimension from that footprint origin to a perpendicular straight outline edge
+- Double-clicking a saved PCB driving dimension line or value reopens its exact-distance editor
 - The ruler drag keeps its live measurement across redraws: the drawn overlay clears per frame but the drag's start/end state survives until the gesture ends
 - The overscan pan-buffer fingerprint reads the clearance-halo toggle from view state instead of a removed DOM checkbox, so a pan never throws
 - PCB pad-number labels remain capped at 13 screen pixels regardless of pad geometry or zoom

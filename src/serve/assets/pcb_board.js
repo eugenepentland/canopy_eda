@@ -7827,7 +7827,8 @@ function paintDraw(ctx){if(!drawMode||!dtrace)return;
  ctx.restore();}
 var drawBtn=document.getElementById("pcb-draw");
 if(drawBtn&&!RO)drawBtn.addEventListener("click",function(){drawModeSet(!drawMode);});
-svg.addEventListener("dblclick",function(ev){if(drawMode&&dtrace){ev.preventDefault();drawEnd();return;}
+svg.addEventListener("dblclick",function(ev){if(!RO&&PCB.partDimensionDblClick&&PCB.partDimensionDblClick(ev))return;
+ if(drawMode&&dtrace){ev.preventDefault();drawEnd();return;}
  if(pourMode&&pourPts){ev.preventDefault();pourClose();return;}
  if(pourMode&&pourEdit&&!polyMode){var qm=mm(ev);if(vtxAt(qm)>=0)return;var qe=edgeAt(qm);if(qe){ev.preventDefault();outlineInsertVertex(qe);}return;}
  if(backingMode&&backingEdit&&!RO&&!polyMode){var bm=mm(ev);if(vtxAt(bm)>=0)return;var be=edgeAt(bm);
@@ -9999,6 +10000,14 @@ function apPresetApply(n){
   else{if(!pts||hit.i<0||hit.i>=pts.length)return null;a={x:pts[hit.i][0],y:pts[hit.i][1]};b={x:pts[(hit.i+1)%pts.length][0],y:pts[(hit.i+1)%pts.length][1]};}
   if(axis==="x"&&Math.abs(a.x-b.x)<1e-7)return {id:c&&c.id||null,i:hit.i,coord:(a.x+b.x)/2,px:hit.px,py:hit.py};
   if(axis==="y"&&Math.abs(a.y-b.y)<1e-7)return {id:c&&c.id||null,i:hit.i,coord:(a.y+b.y)/2,px:hit.px,py:hit.py};return null;}
+ function partDimensionAt(m){var sx=X(m.x),sy=Y(m.y),best=null;
+  PCB.dimensions.forEach(function(d){var p=partByRef(d.ref),edge=partDimensionEdge(d);if(!p||!edge)return;
+   var x1=X(p.x),y1=Y(p.y),x2=X(d.axis==="x"?edge.coord:p.x),y2=Y(d.axis==="y"?edge.coord:p.y),near=false,dist=1e9;
+   if(d.axis==="x"&&sx>=Math.min(x1,x2)-6&&sx<=Math.max(x1,x2)+6){dist=Math.abs(sy-y1);near=dist<=6;}
+   else if(d.axis==="y"&&sy>=Math.min(y1,y2)-6&&sy<=Math.max(y1,y2)+6){dist=Math.abs(sx-x1);near=dist<=6;}
+   var label=fmtLen2(Math.abs(+d.offset||0)),lx=(x1+x2)/2+6,ly=(y1+y2)/2-5;
+   if(sx>=lx-3&&sx<=lx+label.length*6.2+3&&sy>=ly-12&&sy<=ly+4){near=true;dist=0;}
+   if(near&&(!best||dist<best.dist))best={dimension:d,edge:edge,dist:dist};});return best;}
  var dimensionDlg=null;
  function closePartDimensionDialog(){if(dimensionDlg&&dimensionDlg.parentNode)dimensionDlg.parentNode.removeChild(dimensionDlg);dimensionDlg=null;}
  function openPartDimensionDialog(state){rulerArm(false);closePartDimensionDialog();var p=partByRef(state.ref);if(!p||!state.target)return;
@@ -10010,10 +10019,12 @@ function apPresetApply(n){
   var unit=viewSt.units==="mil"?0.0254:1,field=document.createElement("input");field.type="number";field.min="0";field.step="any";field.inputMode="decimal";field.value=(Math.abs(p[state.axis]-state.target.coord)/unit).toFixed(3);field.style.cssText="width:150px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;padding:4px";
   var row=document.createElement("label");row.style.cssText="display:flex;align-items:center;gap:7px";row.appendChild(field);row.appendChild(document.createTextNode(viewSt.units==="mil"?"mil":"mm"));dlg.appendChild(row);
   var ba=document.createElement("div");ba.style.cssText="margin-top:9px;display:flex;gap:6px;justify-content:flex-end";var cancel=document.createElement("button"),ok=document.createElement("button");cancel.className=ok.className="btn";cancel.textContent="Cancel";ok.textContent="Set dimension";ok.style.cssText="border-color:#2ea043;color:#7ee787";ba.appendChild(cancel);ba.appendChild(ok);dlg.appendChild(ba);
-  function commit(){var n=parseFloat(field.value);if(!isFinite(n)||n<0)return;var pre=snapAll();outlinePromote();var edge=dimensionEdgeAt(state.cursor,state.axis),part=partByRef(state.ref);if(!edge||!edge.id||!part){restoreSnap(pre);closePartDimensionDialog();outlineMsg("dimension unchanged — the target must be a straight horizontal or vertical board edge");return;}
+  function commit(){var n=parseFloat(field.value);if(!isFinite(n)||n<0)return;var pre=snapAll();if(!state.existing)outlinePromote();var resolved=state.existing&&partDimensionEdge(state.existing),edge=resolved?{id:resolved.curve.id,coord:resolved.coord}:dimensionEdgeAt(state.cursor,state.axis),part=partByRef(state.ref);if(!edge||!edge.id||!part){restoreSnap(pre);closePartDimensionDialog();outlineMsg("dimension unchanged — the target must be a straight horizontal or vertical board edge");return;}
    var sign=part[state.axis]-edge.coord<0?-1:1,d={ref:part.ref,axis:state.axis,edge_id:edge.id,offset:sign*n*unit},old=partDimensionFor(part.ref,state.axis);
    if(old){old.edge_id=d.edge_id;old.offset=d.offset;}else PCB.dimensions.push(d);partDimensionsApply();recordUndo(pre);closePartDimensionDialog();drawBoardRect();renderProps();scheduleDrc();outlineMsg((state.axis==="x"?"horizontal":"vertical")+" driving dimension set to "+fmtLen(Math.abs(d.offset))+" — Save/Update to keep");}
   cancel.addEventListener("click",closePartDimensionDialog);ok.addEventListener("click",commit);dlg.addEventListener("keydown",function(ev){ev.stopPropagation();if(ev.key==="Enter"){ev.preventDefault();commit();}else if(ev.key==="Escape"){ev.preventDefault();closePartDimensionDialog();}});svg.parentNode.appendChild(dlg);field.focus();field.select();}
+ PCB.partDimensionDblClick=function(ev){if(anyDrawTool())return false;var at=mm(ev),hit=partDimensionAt(at);if(!hit)return false;
+  ev.preventDefault();pickCycleClear();selectComp(hit.dimension.ref);openPartDimensionDialog({ref:hit.dimension.ref,axis:hit.dimension.axis,target:{id:hit.edge.curve.id,coord:hit.edge.coord},cursor:at,b:at,existing:hit.dimension});return true;};
  // ── Move selected parts by an X/Y distance (M) ────────────────────────
  // M with parts selected opens a small dialog for X and Y distances in the
  // current display units. One shared delta for every selected entity, so the
