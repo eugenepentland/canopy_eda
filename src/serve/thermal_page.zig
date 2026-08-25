@@ -1457,7 +1457,7 @@ test "the page embeds the read-only board viewer instead of a heat image" {
     try testing.expect(std.mem.indexOf(u8, html, "pcb-png") == null);
 }
 
-// spec: serve/thermal-page - the thermal board view switches between the physical top and mirrored bottom faces without a new solve, shows temperature labels only for parts on the visible face, and keeps the selected face in the page URL
+// spec: serve/thermal-page - the thermal board view switches between the physical top and mirrored bottom faces without a new solve, shows temperature labels only for parts on the visible face, paints a same-face heatsink above the board and occludes an opposite-face heatsink behind it, and keeps the selected face in the page URL
 test "the thermal board switches between physical top and bottom faces" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -1488,6 +1488,14 @@ test "the thermal board switches between physical top and bottom faces" {
         "if (view.side === \"bottom\")",
         "ctx.scale(-1, 1)",
         "d.side === \"top\" || d.side === \"bottom\"",
+    }));
+    const board = @embedFile("assets/pcb_board.js");
+    try testing.expect(containsAll(board, &.{
+        "function heatsinkBehindBoard(s)",
+        "if(heatsinkBehindBoard(s))return",
+        "function paintRearHeatsink(ctx,k)",
+        "paintRearHeatsink(c,k);paintPhysicalBoard(c,k)",
+        "dragCacheDrop();drawBoardRect();paintSoon()",
     }));
 }
 

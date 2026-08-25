@@ -405,7 +405,14 @@ function drawBacking(){(PCB.fabrication_layers||[]).forEach(function(l){(l.regio
  });});}
 var heatsinkMode=false,heatsinkDraw=null,heatsinkDrag=null,heatsinkEditSnap=null;
 function heatsinkRect(){if(heatsinkDraw)return {x:Math.min(heatsinkDraw.x0,heatsinkDraw.x1),y:Math.min(heatsinkDraw.y0,heatsinkDraw.y1),w:Math.abs(heatsinkDraw.x1-heatsinkDraw.x0),h:Math.abs(heatsinkDraw.y1-heatsinkDraw.y0),side:(PCB.heatsink&&PCB.heatsink.side)||"bottom"};return PCB.heatsink;}
+// In a physical review the selected face is the viewer-facing board surface.
+// Opposite-face hardware belongs below the opaque substrate pass, rather than
+// in this retained SVG above the thermal wash. `reviewSide` is assigned later
+// during scene-state setup, so its not-yet-initialized value means the opening
+// top face just like reviewOrient's default.
+function heatsinkBehindBoard(s){var shown=reviewSide==="bottom"?"bottom":"top",sink=s&&s.side==="top"?"top":"bottom";return !!(PHYSICAL_REVIEW&&s&&sink!==shown);}
 function drawHeatsink(){var s=heatsinkRect();if(!viewSt.vis.heatsink&&!heatsinkMode&&!heatsinkDraw)return;if(!s||!(s.w>0)||!(s.h>0))return;
+ if(heatsinkBehindBoard(s))return;
  var col=s.side==="top"?"#f59e0b":"#38bdf8",x=X(s.x),y=Y(s.y),w=s.w*S,h=s.h*S;
  gB.appendChild(el("rect",{x:x.toFixed(1),y:y.toFixed(1),width:w.toFixed(1),height:h.toFixed(1),fill:col,stroke:col,"stroke-width":1.7,opacity:0.24,"stroke-dasharray":heatsinkDraw?"6 4":"0",class:"heatsink-box"}));
  var axis=s.fin_axis||"length",pitch=(+s.fin_thickness_mm||1)+Math.max(+s.fin_gap_mm||0,0),across=axis==="length"?s.w:s.h,n=Math.min(512,Math.max(1,Math.floor((across+Math.max(+s.fin_gap_mm||0,0))/pitch)));
@@ -1121,7 +1128,7 @@ function paintAntipads(ctx,k){var A=PCB.antipads||[];
 //         buffers, so their pass draws in full 2D
 //   f     the pass itself; null = this surface paints nothing for the stage
 var PAINT_STAGES=[
- {n:"substrate",gpu:"all",rv:0,f:function(c,k,s){paintPhysicalBoard(c,k);paintGridDots(c,k);}},
+ {n:"substrate",gpu:"all",rv:0,f:function(c,k,s){paintRearHeatsink(c,k);paintPhysicalBoard(c,k);paintGridDots(c,k);}},
  {n:"plane_fills",gpu:"fill",rv:1,f:function(c,k,s){paintPours(c,k);}},
  {n:"keepouts",gpu:"",rv:2,f:function(c,k,s){paintKeepouts(c,k);}},
  {n:"groups",gpu:"",rv:8,sp:1,f:function(c,k,s){paintGroupBoxes(c,k,s.movG,s.only);}},
@@ -1169,7 +1176,7 @@ function paintStages(ctx,k,s){
 // overlays. Called verbatim by scenePaint's quiet path and by ovsBuild, so a
 // blit can never disagree with the repaint that replaces it.
 function paintScene(ctx,k){
- if(CAM_REVIEW){paintCamBoard(ctx,k);if(camVisible("components")){paintParts(ctx,k);paintGroupBoxes(ctx,k);}return;}
+ if(CAM_REVIEW){paintRearHeatsink(ctx,k);paintCamBoard(ctx,k);if(camVisible("components")){paintParts(ctx,k);paintGroupBoxes(ctx,k);}return;}
  paintStages(ctx,k,QUIET_STATE);}
 // Zoom frames render the FULL scene — a SCALED gesture blit of the previous
 // frame was tried (2026-08-06) and reverted by user preference: the soft zoom
@@ -1420,6 +1427,24 @@ function paintGridDots(ctx,k){
 function physicalBoardPath(ctx){var pts=reviewBoardPoints();if(pts.length<3)return false;
  ctx.beginPath();ctx.moveTo(X(pts[0][0]),Y(pts[0][1]));
  for(var i=1;i<pts.length;i++)ctx.lineTo(X(pts[i][0]),Y(pts[i][1]));ctx.closePath();return true;}
+// Paint an opposite-face sink before the physical board. The board and thermal
+// field therefore occlude its footprint while any real overhang remains
+// visible around the edge — the depth cue that the retained SVG could not
+// provide because that SVG is necessarily above the scene canvas.
+function paintRearHeatsink(ctx,k){var s=heatsinkRect();
+ if(!PHYSICAL_REVIEW||!viewSt.vis.heatsink||!s||!(s.w>0)||!(s.h>0)||!heatsinkBehindBoard(s))return;
+ var col=s.side==="top"?"#f59e0b":"#38bdf8",x=X(s.x),y=Y(s.y),w=s.w*S,h=s.h*S;
+ var axis=s.fin_axis||"length",pitch=(+s.fin_thickness_mm||1)+Math.max(+s.fin_gap_mm||0,0);
+ var across=axis==="length"?s.w:s.h,n=Math.min(512,Math.max(1,Math.floor((across+Math.max(+s.fin_gap_mm||0,0))/pitch)));
+ ctx.save();ctx.fillStyle=col;ctx.strokeStyle=col;ctx.lineWidth=1.7;ctx.globalAlpha=.24;
+ ctx.fillRect(x,y,w,h);ctx.strokeRect(x,y,w,h);ctx.globalAlpha=.7;ctx.lineWidth=1;
+ ctx.beginPath();for(var i=0;i<n;i++){var q=(i+.5)/n;
+  if(axis==="length"){ctx.moveTo(x+q*w,y);ctx.lineTo(x+q*w,y+h);}
+  else{ctx.moveTo(x,y+q*h);ctx.lineTo(x+w,y+q*h);}}ctx.stroke();
+ ctx.globalAlpha=1;ctx.fillStyle=col;ctx.font="700 10px system-ui,sans-serif";
+ ctx.textAlign="left";ctx.textBaseline="alphabetic";
+ ctx.fillText("HEATSINK · "+(s.side||"bottom").toUpperCase()+(s.target_ref?" · "+s.target_ref:""),x+5,y+13);
+ ctx.restore();}
 function paintPhysicalBoard(ctx,k){if(!PHYSICAL_REVIEW||!physicalBoardPath(ctx))return;
  var ik=1/Math.max(k||1,0.01),r=PCB.rules||{},mw=Number(r.perimeter_mask_width)||0;
  ctx.save();ctx.fillStyle=PH.mask;ctx.fill();
@@ -4897,7 +4922,10 @@ function reviewOrient(side,rotation){var nextSide=side==="bottom"?"bottom":"top"
  reviewSide=nextSide;reviewRotation=nextRotation;reviewOriented=true;
  var next=reviewSide==="bottom"&&NSIG>1?1:0;activeLayer=next;var st=stackForSignal(next);if(st)activeStack=st.i;
  var s=document.getElementById("pcb-actlayer");if(s)s.value=String(activeStack);
- if(PCB.apSync)PCB.apSync();statusLayer();reviewApplyOrientation();}
+ if(PCB.apSync)PCB.apSync();statusLayer();reviewApplyOrientation();
+ // The retained front sink and canvas-painted rear sink trade places with the
+ // selected face; refresh both layers even when no copper visibility changed.
+ dragCacheDrop();drawBoardRect();paintSoon();}
 window.PCBReviewFocus={set:reviewSet,clear:reviewClear};
 window.addEventListener("message",function(ev){var msg=ev.data;
  if(!msg||ev.origin!==window.location.origin)return;
