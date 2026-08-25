@@ -805,7 +805,7 @@ test "PCB review carries the physical board paint pipeline" {
 }
 
 // spec: Web Server - The Assembly board substrate paints parsed Gerber/Excellon operations instead of rebuilding fabrication artwork from browser fonts and placement objects
-// spec: Web Server - Assembly layer controls independently toggle face copper, inner copper, solder mask, paste, silkscreen, drills, board outline, and component overlays
+// spec: Web Server - Assembly layer controls independently toggle face copper, every physical inner copper layer, solder mask, paste, silkscreen, drills, board outline, and component overlays
 test "Assembly review paints ordered CAM bytes with independent layer visibility" {
     const Check = struct { bytes: []const u8, marker: []const u8 };
     const checks = [_]Check{
@@ -819,6 +819,10 @@ test "Assembly review paints ordered CAM bytes with independent layer visibility
         .{ .bytes = assembly_debug_js, .marker = "function applyCamLayers" },
         .{ .bytes = assembly_debug_js, .marker = "data-cam-layer" },
         .{ .bytes = assembly_debug_js, .marker = "assembly-cam-layers:" },
+        .{ .bytes = assembly_debug_js, .marker = "populateInnerCopperLayers" },
+        .{ .bytes = assembly_debug_js, .marker = "copper-inner-" },
+        .{ .bytes = pcb_board_js, .marker = "innerLayers:STACK.filter" },
+        .{ .bytes = pcb_board_js, .marker = "hasOwnProperty.call(camVisibility,L.id)" },
     };
     for (checks) |check| try std.testing.expect(std.mem.indexOf(u8, check.bytes, check.marker) != null);
 }

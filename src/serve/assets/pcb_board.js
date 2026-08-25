@@ -1402,7 +1402,7 @@ function paintPhysicalBoard(ctx,k){if(!PHYSICAL_REVIEW||!physicalBoardPath(ctx))
 var camLayerCache={};
 function camLayerVisible(L){if(!L)return false;
  if(L.kind==="copper"){
-  if(L.side==="inner")return camVisible("inner_copper");
+  if(L.side==="inner")return Object.prototype.hasOwnProperty.call(camVisibility,L.id)?camVisible(L.id):camVisible("inner_copper");
   return camVisible("copper")&&L.side===(activeLayer===1?"bottom":"top");}
  if(L.kind==="mask"||L.kind==="paste"||L.kind==="silk")return camVisible(L.kind)&&L.side===(activeLayer===1?"bottom":"top");
  if(L.kind==="drill")return camVisible("drills");
@@ -4471,9 +4471,11 @@ function reviewPickedRef(i,pd){var p=P[i],side=reviewPartSide(p);
   ref:p.ref,side:side,pad:(pd&&pd.num)||"",net:(pd&&pd.net)||"",stats:stats},window.location.origin);}catch(e){}}
 function reviewPostParts(target,origin){if(!PHYSICAL_REVIEW||!target||!target.postMessage)return;
  try{target.postMessage({type:"eda-pcb-parts",design:PCB.name,parts:P.map(function(p){
-  return {ref:p.ref,side:p.side==="bottom"?"bottom":"top"};})},origin);}catch(e){}}
+  return {ref:p.ref,side:p.side==="bottom"?"bottom":"top"};}),
+  innerLayers:STACK.filter(function(r){return r.i>1&&r.i<STACK.length;}).map(function(r){
+   return {id:"copper-inner-"+r.i,name:r.name};})},origin);}catch(e){}}
 function reviewCamVisibility(next){if(!next||typeof next!=="object")return;
- Object.keys(camVisibility).forEach(function(k){if(typeof next[k]==="boolean")camVisibility[k]=next[k];});
+ Object.keys(next).forEach(function(k){if(typeof next[k]==="boolean")camVisibility[k]=next[k];});
  dragCacheDrop();paintSoon();}
 function selNet(net){if(net&&selNetCur===net)net=null;
  if(RO)reviewPickedNet(net);

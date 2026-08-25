@@ -11,7 +11,8 @@
   const boardRotateRight = document.getElementById('board-rotate-right');
   const boardOrientation = document.getElementById('board-orientation');
   const load3dModels = document.getElementById('load-3d-models');
-  const camLayerInputs = Array.from(document.querySelectorAll('[data-cam-layer]'));
+  let camLayerInputs = Array.from(document.querySelectorAll('[data-cam-layer]'));
+  const innerCopperLayers = document.getElementById('inner-copper-layers');
   const reworkGuide = document.getElementById('rework-guide');
   const guideWorkspace = document.getElementById('guide-workspace');
   const guideListNode = document.getElementById('guide-list');
@@ -625,6 +626,43 @@
     return state;
   }
 
+  function savedCamLayers() {
+    try { return JSON.parse(localStorage.getItem(`assembly-cam-layers:${model.name || ''}`) || 'null'); } catch (_) {}
+    return null;
+  }
+
+  function restoreCamLayerInputs(saved) {
+    if (!saved || typeof saved !== 'object') return;
+    camLayerInputs.forEach((input) => {
+      const key = input.dataset.camLayer;
+      if (typeof saved[key] === 'boolean') input.checked = saved[key];
+      // Migrate the former all-inner toggle without retaining it as a second
+      // visibility control. Once saved again, every inner layer has own state.
+      else if (key.indexOf('copper-inner-') === 0 && typeof saved.inner_copper === 'boolean') {
+        input.checked = saved.inner_copper;
+      }
+    });
+  }
+
+  function populateInnerCopperLayers(layers) {
+    if (!innerCopperLayers || !Array.isArray(layers)) return;
+    innerCopperLayers.textContent = '';
+    layers.forEach((layer) => {
+      if (!layer || !layer.id || !layer.name) return;
+      const label = document.createElement('label');
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.dataset.camLayer = String(layer.id);
+      input.addEventListener('change', () => applyCamLayers(true));
+      label.appendChild(input);
+      label.appendChild(document.createTextNode(` ${layer.name}`));
+      innerCopperLayers.appendChild(label);
+    });
+    camLayerInputs = Array.from(document.querySelectorAll('[data-cam-layer]'));
+    restoreCamLayerInputs(savedCamLayers());
+    applyCamLayers(false);
+  }
+
   function applyCamLayers(persist) {
     if (frame && frame.contentWindow) {
       frame.contentWindow.postMessage({
@@ -638,13 +676,7 @@
   }
 
   function restoreCamLayers() {
-    let saved = null;
-    try { saved = JSON.parse(localStorage.getItem(`assembly-cam-layers:${model.name || ''}`) || 'null'); } catch (_) {}
-    if (saved && typeof saved === 'object') {
-      camLayerInputs.forEach((input) => {
-        if (typeof saved[input.dataset.camLayer] === 'boolean') input.checked = saved[input.dataset.camLayer];
-      });
-    }
+    restoreCamLayerInputs(savedCamLayers());
     applyCamLayers(false);
   }
 
@@ -1169,6 +1201,7 @@
     if (event.origin !== window.location.origin || event.source !== frame.contentWindow) return;
     const payload = event.data || {};
     if (payload.type === 'eda-pcb-parts') {
+      populateInnerCopperLayers(payload.innerLayers);
       partSides.clear();
       (payload.parts || []).forEach((part) => {
         if (!part || !part.ref) return;

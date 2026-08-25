@@ -845,7 +845,10 @@ fn renderPage(allocator: std.mem.Allocator, name: []const u8, index: Index, layo
     try w.writeAll("<input id=\"load-3d-models\" type=\"checkbox\"> 3D models</label>");
     try w.writeAll("<details class=\"layer-menu\"><summary>Layers</summary><div class=\"layer-menu-pop\">");
     try w.writeAll("<label><input type=\"checkbox\" data-cam-layer=\"copper\" checked> Face copper</label>");
-    try w.writeAll("<label><input type=\"checkbox\" data-cam-layer=\"inner_copper\"> Inner copper</label>");
+    // The iframe fills this from its shared physical layer table. Keeping the
+    // stack in one place means a 4-layer board gets In1/In2 while a 6-layer
+    // board gets In1..In4, with no second layer-name table in this shell.
+    try w.writeAll("<div id=\"inner-copper-layers\"></div>");
     try w.writeAll("<label><input type=\"checkbox\" data-cam-layer=\"mask\" checked> Solder mask</label>");
     try w.writeAll("<label><input type=\"checkbox\" data-cam-layer=\"paste\"> Paste stencil</label>");
     try w.writeAll("<label><input type=\"checkbox\" data-cam-layer=\"silk\" checked> Silkscreen</label>");
@@ -1124,7 +1127,9 @@ test "page HTML is read-only and carries embed, data, and focus assets" {
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"board-rotate-right\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"load-3d-models\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "class=\"layer-menu\"") != null);
-    try std.testing.expectEqual(@as(usize, 8), std.mem.count(u8, html, "data-cam-layer="));
+    try std.testing.expectEqual(@as(usize, 7), std.mem.count(u8, html, "data-cam-layer="));
+    try std.testing.expect(std.mem.indexOf(u8, html, "id=\"inner-copper-layers\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "> Inner copper</label>") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"assembly-search\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "data-mode=") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "Debug / Bring-up") == null);
@@ -1147,6 +1152,7 @@ test "page HTML is read-only and carries embed, data, and focus assets" {
     try std.testing.expect(std.mem.indexOf(u8, js, "url.searchParams.delete('model_sprites')") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "eda-pcb-cam-visibility") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "assembly-cam-layers:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "populateInnerCopperLayers(payload.innerLayers)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "frame.style.transform") == null);
 }
 

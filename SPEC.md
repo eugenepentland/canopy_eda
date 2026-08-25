@@ -6286,7 +6286,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The PCB page blob serves each continuous mask-relief run as one closed filleted polygon so the assembly view draws the shipped mask
 - The Assembly board substrate paints parsed Gerber/Excellon operations instead of rebuilding fabrication artwork from browser fonts and placement objects
 - The Assembly board paints its lightweight semantic view before asynchronously loading dependency-cached Gerber/Excellon artwork, and its initial iframe omits hidden DRC, editable-layout metadata, and editor-only scripts
-- Assembly layer controls independently toggle face copper, inner copper, solder mask, paste, silkscreen, drills, board outline, and component overlays
+- Assembly layer controls independently toggle face copper, every physical inner copper layer, solder mask, paste, silkscreen, drills, board outline, and component overlays
 - Assembly mask openings repaint actual pour copper as bare copper while leaving only copper-free gaps as exposed substrate
 - Design Settings edits board-level numeric rules in the GUI, preserves unrelated source forms, rebuilds, and reloads the shown layout
 - Design Settings renders validated numeric rule inputs with save-and-rebuild feedback
