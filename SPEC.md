@@ -6144,6 +6144,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - every physical copper layer is selectable and a plane-only view uses its computed fill
 - Drilled via and through-hole pad bores remain board-coloured on every copper view, including generated RF fence sites and the far side of opaque pours
 - selecting a routable copper layer reveals it and gives custom pour fills on that active layer a clear baseline highlight
+- custom copper-pour fills, boundaries, and labels use their net colour in both the 2D and WebGPU renderers
 - the /pcb-layout action toolbar carries a first-class pour-refill button gated to designs that declare outer-layer copper pours
 - the toolbar pour button flags a stale indicator after board edits and disables during replay
 - the /pcb-layout toolbar carries a custom copper-pour tool that draws a polygon zone, picks its net and layer, persists it with the layout, and refills its fill

@@ -927,14 +927,20 @@ function gpuPourList(){var out=[];
  reviewCopperAreas().forEach(function(aq){
   if(!aq.poly||aq.poly.length<3||aq.q.keepout||aq.kind==="zone")return;out.push(aq);});
  return out;}
+// User-authored pours use the same permanent per-net palette as their tracks,
+// vias and pads. A zone fill is keyed back to its source by numeric `zone`;
+// raw/imported zone boundaries arrive as kind "zone". Declared stackup pours
+// deliberately retain their physical layer colour.
+function customPourNetColor(aq){var q=aq&&aq.q;
+ if(!q||q.keepout||(aq.kind!=="zone"&&typeof q.zone!=="number"))return null;
+ return netColorOf(netCollapse(q.net))||netColorOf(q.net);}
 // Geometry + fill colour for the bake (board mm; pcb_gpu.js maps them through
-// the same X()/Y()). The colour is exactly paintPours' — the theme's own
-// TH.padTop for a top pour, TH.padBot for a bottom one AND for
-// an area whose layer doesn't resolve, the layer's own hue for an inner pour.
+// the same X()/Y()). Custom pours take their net colour; declared pours use the
+// theme's outer-face colour or the layer's own hue for an inner pour.
 function gpuPourGeom(){return gpuPourList().map(function(aq){
- var L=reviewAreaLayer(aq.q),st=reviewAreaStack(aq.q);
+ var L=reviewAreaLayer(aq.q),st=reviewAreaStack(aq.q),netCol=customPourNetColor(aq);
  return {poly:aq.poly,holes:aq.holes||[],
-  col:st&&st.c?st.c:((L!=null&&L>=2)?layerColor(L):(L===0?TH.padTop:TH.padBot))};});}
+  col:netCol||(st&&st.c?st.c:((L!=null&&L>=2)?layerColor(L):(L===0?TH.padTop:TH.padBot)))};});}
 // Each area's effective fill alpha this frame, in the same order — paintPours'
 // editor-branch ladder verbatim, minus the review-focus terms: gpuLive() defers
 // to cuBatchOn(), which refuses every frame with a focus active, so `hit` is
@@ -1860,9 +1866,9 @@ function paintPours(ctx,k){
   // A raw PCB.zones polygon (kind "zone") is only ever the dashed boundary — the
   // solid copper is painted by its "pour" fill entry (declared pours + user
   // PCB.zone_fills). Keepouts keep their own hatched-fill treatment below.
-  // An inner-layer pour (signal index ≥2, resolved from its In-layer name) paints
-  // in that layer's hue via layerRgba; the outer faces keep their red/blue washes.
-  var boundary=aq.kind==="zone"&&!q.keepout;
+  // Custom pours follow their net's permanent colour. Declared inner-layer
+  // pours retain the layer hue and declared outer pours retain red/blue washes.
+  var boundary=aq.kind==="zone"&&!q.keepout,netCol=customPourNetColor(aq);
   // GPU frame: the pour FILLS are on the WebGPU canvas below (stencil-invert +
   // cover, the exact even-odd rule this fill uses), painted under the copper
   // instead of over it. Keepout washes, every rim, every dash and every label
@@ -1887,17 +1893,17 @@ function paintPours(ctx,k){
     var baseA=hit?0.30:(activeUserFill?0.36:(top?0.10:0.12)),baseEff=a*baseA;
     var effA=(hit||reviewAreaFocused(q))?Math.min(1,baseEff+(1-baseEff)*(viewSt.pourOp||0)):baseEff;
     ctx.globalAlpha=1;
-    ctx.fillStyle=hit?"rgba(88,214,255,"+effA+")":(st?stackRgba(st,effA):(inner?layerRgba(L,effA):hexRgba(top?TH.padTop:TH.padBot,effA)));
+    ctx.fillStyle=hit?"rgba(88,214,255,"+effA+")":(netCol?hexRgba(netCol,effA):(st?stackRgba(st,effA):(inner?layerRgba(L,effA):hexRgba(top?TH.padTop:TH.padBot,effA))));
     ctx.fill(aq.fillPath,"evenodd");ctx.globalAlpha=a;}}
   ctx.strokeStyle=q.keepout?"rgba(139,148,158,0.55)":(hit?"#8be9ff":
-   (st?stackRgba(st,0.5):(inner?layerRgba(L,0.5):hexRgba(top?TH.padTop:TH.padBot,top?0.45:0.5))));
+   (netCol?hexRgba(netCol,0.5):(st?stackRgba(st,0.5):(inner?layerRgba(L,0.5):hexRgba(top?TH.padTop:TH.padBot,top?0.45:0.5)))));
   ctx.lineWidth=hit?2:1;ctx.setLineDash(q.keepout?[2,3]:(boundary?[9,4]:[5,4]));ctx.stroke(aq.rimPath);ctx.setLineDash([]);
   var sk=(L==null?String(q.layers||q.layer||"zone"):String(L));
   if(!seen[sk]){seen[sk]=1;
    ctx.font="600 "+(11*ik).toFixed(2)+"px system-ui,sans-serif";
    ctx.textAlign="left";ctx.textBaseline="alphabetic";
    ctx.fillStyle=hit?"#8be9ff":(q.keepout?"rgba(180,185,190,0.8)":
-    (st?stackRgba(st,0.9):(inner?layerRgba(L,0.9):(top?"rgba(220,90,90,0.9)":"rgba(110,155,215,0.9)"))));
+    (netCol?hexRgba(netCol,0.9):(st?stackRgba(st,0.9):(inner?layerRgba(L,0.9):(top?"rgba(220,90,90,0.9)":"rgba(110,155,215,0.9)")))));
    var ln=reviewAreaLayerName(q,L);
    ctx.fillText((q.keepout?"keepout":((q.net||"unassigned")+" "+(boundary?"zone boundary":aq.kind)))+" · "+ln,
     aq.lx+5*ik,aq.ly-5*ik);}

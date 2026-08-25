@@ -686,6 +686,17 @@ test "active custom copper pours remain visible on selected inner layers" {
     try std.testing.expect(std.mem.indexOf(u8, js, "activeUserFill?0.36") != null);
 }
 
+// spec: Web Server - custom copper-pour fills, boundaries, and labels use their net colour in both the 2D and WebGPU renderers
+test "custom copper pours use their net colours in both renderers" {
+    const js = @embedFile("assets/pcb_board.js");
+    try std.testing.expect(std.mem.indexOf(u8, js, "function customPourNetColor(aq)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "netCol=customPourNetColor(aq)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "col:netCol||") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "netCol?hexRgba(netCol,effA)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "netCol?hexRgba(netCol,0.5)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "netCol?hexRgba(netCol,0.9)") != null);
+}
+
 // spec: Web Server - The PCB Route request always carries the current custom copper pours so the autorouter can terminate pour nets through vias
 test "viewer sends custom copper pours with the whole-board route" {
     const js = @embedFile("assets/pcb_board.js");
