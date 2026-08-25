@@ -2112,6 +2112,7 @@ src/placement/perimeter_fence.zig::keepoutAllowsNet | fn keepoutAllowsNet(p: opt
 src/placement/perimeter_fence.zig::keepoutLimit | fn keepoutLimit(p: optimizer.Placement) f64
 src/placement/perimeter_fence.zig::outlinePoints | fn outlinePoints(alloc: std.mem.Allocator, p: optimizer.Placement) std.mem.Allocator.Error![]const [2]f64
 src/placement/perimeter_fence.zig::provenance value
+src/placement/perimeter_fence.zig::viaServesPad | fn viaServesPad( alloc: std.mem.Allocator, p: optimizer.Placement, net_name: []const u8, x: f64, y: f64, dia: f64, ) bool
 src/placement/pin_roles.zig::NcRequirement enum_
 src/placement/pin_roles.zig::PadReq struct_
 src/placement/pin_roles.zig::PartRoles struct_

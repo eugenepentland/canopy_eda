@@ -11,6 +11,7 @@ const drc = @import("drc.zig");
 const optimizer = @import("optimizer.zig");
 const router = @import("router.zig");
 const outline = @import("outline.zig");
+const pad_shape = @import("pad_shape.zig");
 const numeric = @import("../numeric.zig");
 
 /// Saved-route provenance reserved for board-derived perimeter sites.
@@ -219,6 +220,40 @@ fn crowdsComponent(p: optimizer.Placement, site: router.Via) bool {
     return false;
 }
 
+/// Whether a via barrel overlaps the exact authored copper of a same-net pad.
+/// Used when an old generated fence tag is reinterpreted after an outline move:
+/// a barrel that now serves a land has functional electrical meaning and must
+/// not disappear with the rest of the stale ring. The exact outline matters
+/// for concave custom pads whose bounding-box notch contains no copper.
+pub fn viaServesPad(
+    alloc: std.mem.Allocator,
+    p: optimizer.Placement,
+    net_name: []const u8,
+    x: f64,
+    y: f64,
+    dia: f64,
+) bool {
+    const reach = dia / 2 + 1e-9;
+    // Current generated sites never crowd a component, so reject the ordinary
+    // ring in the cheap broad phase before walking net pins or pad outlines.
+    if (!crowdsComponent(p, .{ .x = x, .y = y, .dia = dia, .drill = 0, .net = -1 })) return false;
+    for (p.nets) |net| {
+        if (!std.mem.eql(u8, net.name, net_name)) continue;
+        for (net.pins) |pin| {
+            const part = for (p.parts) |part| {
+                if (std.mem.eql(u8, part.ref_des, pin.ref_des)) break part;
+            } else continue;
+            const pad = for (part.pads) |pad| {
+                if (std.mem.eql(u8, pad.number, pin.pin)) break pad;
+            } else continue;
+            const shape = pad_shape.worldShape(alloc, part, pad) catch continue;
+            if (pad_shape.pointDist(shape.x0, shape.y0, shape.x1, shape.y1, shape.poly, x, y, reach) <= reach) return true;
+        }
+        return false;
+    }
+    return false;
+}
+
 /// Append current board-derived sites to routed copper, deduplicating a hand
 /// via at the same net and coordinates, and rejecting any site that would add
 /// a DRC error. Creates a via-only result when no route exists. The verdict
@@ -269,7 +304,11 @@ pub fn isGenerated(p: optimizer.Placement, via: router.Via) bool {
     const f = p.rules.perimeter_fence;
     return via.net == net and @abs(via.dia - f.via_dia) < 1e-6 and
         @abs(via.drill - f.via_drill) < 1e-6 and
-        @abs(signedInsetOf(p, via.x, via.y) - f.edge_offset) < 1e-5;
+        @abs(signedInsetOf(p, via.x, via.y) - f.edge_offset) < 1e-5 and
+        // Generated sites are rejected under every component courtyard by
+        // `append`; a via there is functional hand/ground-stitch copper that
+        // merely happens to share the perimeter geometry, not part of the ring.
+        !crowdsComponent(p, via);
 }
 
 const testing = std.testing;
@@ -321,6 +360,23 @@ test "polygon perimeter fence follows exact outline" {
     defer testing.allocator.free(vias);
     try testing.expect(vias.len > 40);
     for (vias) |via| try testing.expectApproxEqAbs(@as(f64, 0.5), outline.signedInset(&poly, via.x, via.y), 1e-7);
+}
+
+test "a via under a component is not classified as generated perimeter copper" {
+    var parts = [_]optimizer.Part{.{
+        .ref_des = "U1",
+        .kind = .hub,
+        .hw = 0.4,
+        .hh = 0.4,
+        .pads = &.{},
+        .fallback = false,
+        .x = 0.5,
+        .y = 5,
+    }};
+    var p = fixture(null);
+    p.parts = &parts;
+    const via = router.Via{ .x = 0.5, .y = 5, .dia = 0.4, .drill = 0.2, .net = 0 };
+    try testing.expect(!isGenerated(p, via));
 }
 
 // spec: placement/perimeter-fence - incomplete declarations and unresolved stitch nets emit no copper

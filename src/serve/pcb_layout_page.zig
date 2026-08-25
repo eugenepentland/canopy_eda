@@ -359,7 +359,13 @@ fn routesWithPerimeter(alloc: std.mem.Allocator, placement: optimizer.Placement,
     const old = base orelse SavedRoutes{ .tracks = &.{}, .vias = &.{} };
     var vias: std.ArrayList(SavedVia) = .empty;
     for (old.vias) |via| {
-        if (std.mem.eql(u8, via.f, perimeter_fence.provenance)) continue;
+        if (std.mem.eql(u8, via.f, perimeter_fence.provenance)) {
+            if (!perimeter_fence.viaServesPad(alloc, placement, via.net, via.x, via.y, via.d)) continue;
+            var adopted = via;
+            adopted.f = "";
+            vias.append(alloc, adopted) catch return base;
+            continue;
+        }
         vias.append(alloc, via) catch return base;
     }
     const restored = restoreRoutes(alloc, .{ .tracks = old.tracks, .vias = vias.items, .zones = old.zones, .rf_paths = old.rf_paths }, placement.nets) orelse return base;
@@ -7003,12 +7009,27 @@ test "the via dedupe key ignores provenance and keeps the untagged original" {
     try std.testing.expectEqualStrings("", kept[0].g);
 }
 
-test "perimeter restore replaces stale derived vias and preserves hand vias" {
+test "perimeter restore replaces stale derived vias but adopts one serving exact custom-pad copper" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const alloc = arena_state.allocator();
-    const nets = [_]export_kicad.FlatNet{.{ .name = "GND", .pins = &.{} }};
-    var placement = addTracksFixture(&.{}, &nets, &.{});
+    // L-shaped copper: the bounding-box centre and lower-left notch are empty,
+    // while (5.6, 0.5) lies in the right-hand leg.
+    const poly = [_][2]f64{ .{ -1, -1 }, .{ 1, -1 }, .{ 1, 1 }, .{ 0.2, 1 }, .{ 0.2, -0.2 }, .{ -1, -0.2 } };
+    const pads = [_]geometry.Pad{.{ .number = "3", .x = 0, .y = 0, .w = 2, .h = 2, .shape = "custom", .poly = &poly }};
+    var parts = [_]optimizer.Part{.{
+        .ref_des = "U1",
+        .kind = .hub,
+        .hw = 1,
+        .hh = 1,
+        .pads = &pads,
+        .fallback = false,
+        .x = 5,
+        .y = 0,
+    }};
+    const pins = [_]export_kicad.FlatPin{.{ .ref_des = "U1", .pin = "3" }};
+    const nets = [_]export_kicad.FlatNet{.{ .name = "GND", .pins = &pins }};
+    var placement = addTracksFixture(&parts, &nets, &.{});
     placement.rules.perimeter_fence = .{
         .via_dia = 0.4,
         .via_drill = 0.2,
@@ -7020,15 +7041,21 @@ test "perimeter restore replaces stale derived vias and preserves hand vias" {
         .tracks = &.{},
         .vias = &.{
             .{ .x = 999, .y = 999, .d = 0.4, .drill = 0.2, .net = "GND", .f = perimeter_fence.provenance },
+            .{ .x = 5.6, .y = 0.5, .d = 0.4, .drill = 0.2, .net = "GND", .f = perimeter_fence.provenance },
+            .{ .x = 4.5, .y = 0.5, .d = 0.4, .drill = 0.2, .net = "GND", .f = perimeter_fence.provenance },
             .{ .x = 0, .y = 0, .d = 0.6, .drill = 0.3, .net = "GND" },
         },
     };
     const current = routesWithPerimeter(alloc, placement, old) orelse return error.TestExpectedRoutes;
-    try std.testing.expectEqual(@as(usize, 49), current.vias.len); // 48-site ring + hand via
-    try std.testing.expectApproxEqAbs(@as(f64, 0), current.vias[0].x, 1e-9);
+    try std.testing.expectEqual(@as(usize, 50), current.vias.len); // 48-site ring + hand via + adopted via-in-pad
+    try std.testing.expectApproxEqAbs(@as(f64, 5.6), current.vias[0].x, 1e-9);
     try std.testing.expectEqualStrings("", current.vias[0].f);
-    for (current.vias) |via| try std.testing.expect(via.x != 999);
-    try std.testing.expectEqualStrings(perimeter_fence.provenance, current.vias[1].f);
+    try std.testing.expectApproxEqAbs(@as(f64, 0), current.vias[1].x, 1e-9);
+    for (current.vias) |via| {
+        try std.testing.expect(via.x != 999);
+        try std.testing.expect(!(via.x == 4.5 and via.y == 0.5));
+    }
+    try std.testing.expectEqualStrings(perimeter_fence.provenance, current.vias[2].f);
 }
 
 /// Serialize the sidecar with no optimistic-concurrency rev (rev 0 → omitted).
