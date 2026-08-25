@@ -158,6 +158,7 @@
       else if(q.kind==="length"&&ca&&finite(v))add(entityLength(s,ca.id)-v);
       else if((q.kind==="radius"||q.kind==="diameter")&&ca&&finite(v)){var ag=arcCircle(s,ca);if(ag)add(ag.r-(q.kind==="diameter"?v/2:v));}
       else if(q.kind==="angle"&&ca&&finite(v)){var d=lineDir(s,ca);if(d)add(wrapAngle(Math.atan2(d.y,d.x)-v*Math.PI/180));}
+      else if(q.kind==="collinear"&&ca&&cb&&ca.kind==="line"&&cb.kind==="line"){var cla=point(s,ca.a),clb=point(s,ca.b),clda=lineDir(s,ca),cldb=lineDir(s,cb);if(clda&&cldb){add(pointLineResidual(point(s,cb.a),cla,clb));add(pointLineResidual(point(s,cb.b),cla,clb));}}
       else if((q.kind==="parallel"||q.kind==="perpendicular")&&ca&&cb){var da=lineDir(s,ca),db=lineDir(s,cb);if(da&&db)add(q.kind==="parallel"?da.x*db.y-da.y*db.x:da.x*db.x+da.y*db.y);}
       else if(q.kind==="equal"&&ca&&cb)add(entityLength(s,ca.id)-entityLength(s,cb.id));
       else if(q.kind==="midpoint"&&a&&cb){var ma=point(s,cb.a),mb=point(s,cb.b);add(a.x-(ma.x+mb.x)/2);add(a.y-(ma.y+mb.y)/2);}
@@ -271,6 +272,24 @@
   // Erasing a curve leaves its endpoints in place when neighbouring geometry
   // still uses them. This is intentionally allowed to open the profile.
   function deleteSegment(s,cid){var c=curve(s,cid);if(!c||c.construction)return false;dropEntities(s,[],[cid]);return true;}
+  // Closing by drag is a topological merge, not just two numerically equal
+  // coordinates. Only the two loose endpoints of one line-only open chain are
+  // candidates, and a trial merge must turn every physical curve into the one
+  // closed contour accepted by fabrication.
+  function mergePointInto(s,dropId,keepId){if(dropId===keepId||!point(s,dropId)||!point(s,keepId))return false;
+    for(var i=0;i<s.curves.length;i++){var c=s.curves[i],a=c.a===dropId?keepId:c.a,b=c.b===dropId?keepId:c.b;if(a===b)return false;}
+    s.curves.forEach(function(c){if(c.a===dropId)c.a=keepId;if(c.b===dropId)c.b=keepId;});
+    (s.constraints||[]).forEach(function(q){if(q.a===dropId)q.a=keepId;if(q.b===dropId)q.b=keepId;if(q.c===dropId)q.c=keepId;});
+    s.constraints=(s.constraints||[]).filter(function(q){return !(q.kind==="coincident"&&q.a===q.b);});
+    s.points=s.points.filter(function(p){return p.id!==dropId;});return true;}
+  function closedGeometryValid(s){var pcs=physicalCurves(s);for(var i=0;i<pcs.length;i++){var c=pcs[i],a=point(s,c.a),b=point(s,c.b);if(!a||!b||dist(a,b)<=1e-9||(c.kind==="arc"&&!arcCircle(s,c)))return false;}
+    var g=compile(s),area=0;if(!g||!g.closed||g.points.length<3)return false;for(i=0;i<g.points.length;i++){var p=g.points[i],q=g.points[(i+1)%g.points.length];area+=p[0]*q[1]-q[0]*p[1];}return Math.abs(area)>1e-9;}
+  function mergeClosesProfile(s,dropId,keepId){var trial=cp(s);if(!mergePointInto(trial,dropId,keepId)||!isClosed(trial))return null;normalize(trial);var solved=solve(trial);return solved.conflict||!closedGeometryValid(trial)?null:trial;}
+  function closingEndpointTarget(s,dragId,x,y,tol){tol=Math.max(0,+tol||0);var pcs=physicalCurves(s),incident={},degree={};
+    pcs.forEach(function(c){degree[c.a]=(degree[c.a]||0)+1;degree[c.b]=(degree[c.b]||0)+1;if(c.kind==="line"){(incident[c.a]||(incident[c.a]=[])).push(c);(incident[c.b]||(incident[c.b]=[])).push(c);}});
+    if(degree[dragId]!==1||!incident[dragId]||incident[dragId].length!==1)return null;var best=null,bd=tol+1e-12;
+    physicalPoints(s).forEach(function(p){if(p.id===dragId||degree[p.id]!==1||!incident[p.id]||incident[p.id].length!==1)return;var d=Math.hypot(x-p.x,y-p.y);if(d<=bd&&mergeClosesProfile(s,dragId,p.id)){bd=d;best={id:p.id,x:p.x,y:p.y};}});return best;}
+  function closeByMergingEndpoints(s,dropId,keepId){var merged=mergeClosesProfile(s,dropId,keepId);if(!merged)return false;s.points=merged.points;s.curves=merged.curves;s.constraints=merged.constraints;return true;}
   function addLinePath(s,coords,tol){coords=coords||[];tol=Math.max(1e-9,+tol||1e-7);if(coords.length<2)return false;var added=false;
     function existing(q){var best=null,bd=tol;physicalPoints(s).forEach(function(p){var d=Math.hypot(p.x-q[0],p.y-q[1]);if(d<=bd){bd=d;best=p;}});return best;}
     function endpoint(q){var p=existing(q);if(p)return p;var id=nextId(s);p={id:id,x:+q[0],y:+q[1]};s.points.push(p);return p;}
@@ -316,6 +335,6 @@
   return {VERSION:VERSION,clone:cp,valid:validSketch,closed:isClosed,normalize:normalize,fromSegments:fromSegments,fromOutline:fromOutline,fromPolygon:fromPolygon,ensure:ensure,ensurePolygon:ensurePolygon,compile:compile,syncOutline:syncOutline,syncPolygon:syncPolygon,
     point:point,curve:curve,physicalCurves:physicalCurves,physicalPoints:physicalPoints,nextId:nextId,arcCircle:arcCircle,
     solve:solve,state:state,addConstraint:addConstraint,removeConstraint:removeConstraint,pointDragAxis:pointDragAxis,pointDragTarget:pointDragTarget,movePoint:movePoint,moveCurve:moveCurve,
-    insertPoint:insertPoint,deletePoint:deletePoint,deleteSegment:deleteSegment,addLinePath:addLinePath,closeProfile:closeProfile,canCloseProfile:canCloseProfile,toArc:toArc,toLine:toLine,filletPoint:filletPoint,chamferPoint:chamferPoint,removeFillet:removeFillet,snapLinePoint:snapLinePoint,
+    insertPoint:insertPoint,deletePoint:deletePoint,deleteSegment:deleteSegment,addLinePath:addLinePath,closeProfile:closeProfile,canCloseProfile:canCloseProfile,closingEndpointTarget:closingEndpointTarget,closeByMergingEndpoints:closeByMergingEndpoints,toArc:toArc,toLine:toLine,filletPoint:filletPoint,chamferPoint:chamferPoint,removeFillet:removeFillet,snapLinePoint:snapLinePoint,
     offset:offset,mirror:mirror,annotations:annotations,dimensionValue:dimensionValue};
 });

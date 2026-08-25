@@ -47,6 +47,7 @@ pub const ConstraintKind = enum {
     coincident,
     horizontal,
     vertical,
+    collinear,
     parallel,
     perpendicular,
     tangent,
@@ -141,6 +142,11 @@ fn curveExists(sketch: Sketch, id: u32) bool {
     return false;
 }
 
+fn lineExists(sketch: Sketch, id: u32) bool {
+    for (sketch.curves) |curve| if (curve.id == id) return curve.kind == .line;
+    return false;
+}
+
 fn pointExists(sketch: Sketch, id: u32) bool {
     return pointIndex(sketch.points, id) != null;
 }
@@ -160,6 +166,10 @@ fn constraintsValid(sketch: Sketch) bool {
         .length, .angle, .radius, .diameter => {
             if (!curveExists(sketch, constraint.a)) return false;
             if (!dimensionValid(constraint)) return false;
+        },
+        .collinear => {
+            if (!lineExists(sketch, constraint.a)) return false;
+            if (!lineExists(sketch, constraint.b orelse return false)) return false;
         },
         .parallel, .perpendicular, .tangent, .equal => {
             if (!curveExists(sketch, constraint.a)) return false;
@@ -474,6 +484,23 @@ test "outline sketch compiles an ordered line profile" {
     try std.testing.expectEqual(@as(usize, 4), got.poly.len);
     try std.testing.expectEqual(@as(f64, 20), got.rect.w);
     try std.testing.expectEqual(@as(f64, 10), got.rect.h);
+}
+
+test "outline sketch accepts collinear line constraints and rejects arc operands" {
+    var sketch = rectSketch();
+    const constraints = [_]Constraint{
+        .{ .id = 21, .kind = .collinear, .a = 11, .b = 13 },
+    };
+    sketch.constraints = &constraints;
+    const compiled = try compile(std.testing.allocator, sketch, default_sagitta_mm);
+    defer std.testing.allocator.free(compiled.pts);
+    defer std.testing.allocator.free(compiled.poly);
+    defer std.testing.allocator.free(compiled.arcs);
+
+    var curves: [4]Curve = sketch.curves[0..4].*;
+    curves[2] = .{ .id = 13, .kind = .arc, .a = 3, .b = 4, .mid = .{ 10, 15 } };
+    sketch.curves = &curves;
+    try std.testing.expectError(error.InvalidProfile, compile(std.testing.allocator, sketch, default_sagitta_mm));
 }
 
 test "outline sketch compiles a closed profile stored out of order and direction" {

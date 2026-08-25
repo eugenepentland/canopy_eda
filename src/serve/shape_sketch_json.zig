@@ -193,3 +193,25 @@ test "persisted outline sketch recompiles exact arcs after a JSON round trip" {
     const recompiled = try sketch_mod.compile(alloc, second, sketch_mod.default_sagitta_mm);
     try std.testing.expectEqualDeep(compiled.arcs[0], recompiled.arcs[0]);
 }
+
+test "collinear line constraints round trip through the sketch sidecar" {
+    const alloc = std.testing.allocator;
+    const source =
+        "{\"version\":1,\"points\":[{\"id\":1,\"x\":0,\"y\":0},{\"id\":2,\"x\":10,\"y\":0}," ++
+        "{\"id\":3,\"x\":10,\"y\":10},{\"id\":4,\"x\":0,\"y\":10}]," ++
+        "\"curves\":[{\"id\":11,\"kind\":\"line\",\"a\":1,\"b\":2},{\"id\":12,\"kind\":\"line\",\"a\":2,\"b\":3}," ++
+        "{\"id\":13,\"kind\":\"line\",\"a\":3,\"b\":4},{\"id\":14,\"kind\":\"line\",\"a\":4,\"b\":1}]," ++
+        "\"constraints\":[{\"id\":21,\"kind\":\"collinear\",\"a\":11,\"b\":13}]}";
+    var tree = try std.json.parseFromSlice(std.json.Value, alloc, source, .{});
+    defer tree.deinit();
+    const sketch = parse(alloc, tree.value) orelse return error.TestUnexpectedResult;
+    defer alloc.free(sketch.points);
+    defer alloc.free(sketch.curves);
+    defer alloc.free(sketch.constraints);
+    try std.testing.expectEqual(sketch_mod.ConstraintKind.collinear, sketch.constraints[0].kind);
+
+    var encoded: std.Io.Writer.Allocating = .init(alloc);
+    defer encoded.deinit();
+    try write(&encoded.writer, sketch);
+    try std.testing.expect(std.mem.indexOf(u8, encoded.written(), "\"kind\":\"collinear\"") != null);
+}

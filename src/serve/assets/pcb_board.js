@@ -5055,6 +5055,7 @@ function outlineSketchNumber(label,value){var text=window.prompt(label,String(Ma
 function outlineSketchConstraint(kind){return outlineSketchMutate(kind+" constraint",function(sk){var cs=outlineSelected("curve"),ps=outlineSelected("point"),q=null;
   if(kind==="horizontal"||kind==="vertical")q=cs.length&&OS.addConstraint(sk,kind,cs[0]);
   else if(kind==="coincident")q=ps.length>=2&&OS.addConstraint(sk,kind,ps[0],ps[1]);
+  else if(kind==="collinear"&&cs.length>=2){var ca=OS.curve(sk,cs[0]),cb=OS.curve(sk,cs[1]);if(ca&&cb&&ca.kind==="line"&&cb.kind==="line")q=OS.addConstraint(sk,kind,cs[0],cs[1]);}
   else if(kind==="midpoint")q=ps.length&&cs.length&&OS.addConstraint(sk,kind,ps[0],cs[0]);
   else if(kind==="symmetric")q=ps.length>=2&&cs.length&&OS.addConstraint(sk,kind,ps[0],ps[1],null,cs[0]);
   else if(kind==="fixed"){if(ps.length)q=OS.addConstraint(sk,kind,ps[0]);else if(cs.length){var c=OS.curve(sk,cs[0]);q=OS.addConstraint(sk,kind,c.a);if(q)OS.addConstraint(sk,kind,c.b);}}
@@ -5074,11 +5075,11 @@ function outlineSketchPanelSync(){var host=svg&&svg.parentNode,p=document.getEle
  var sh=activeSketchShape(),sk=sh&&sh.sketch,st=sk?OS.state(sk):null,sg=sk&&OS.compile(sk),title=activeSketchName()+" sketch",closable=!!(sg&&!sg.closed&&OS.canCloseProfile&&OS.canCloseProfile(sk));p.innerHTML='<div class="osp-head"><b>'+title.charAt(0).toUpperCase()+title.slice(1)+'</b><span class="osp-dof '+(st&&st.conflict?'bad':'')+'">'+(st?(st.conflict?'conflict':((sg&&!sg.closed?'open · ':'')+st.dof+' DOF')):'select or create a shape')+'</span></div>'+
   '<div class="osp-group"><span>Create</span><button data-sk="new-rect"'+(outlineRectArmed?' class="on"':'')+'>Rectangle</button><button data-sk="new-poly"'+(polyMode&&polySketchOwned?' class="on"':'')+'>Line</button><button data-sk="dimension">Dimension</button></div>'+
   (closable?'<button class="osp-finish osp-repair" data-sk="close-profile">Close profile</button>':'')+
-  '<div class="osp-group"><span>Constrain</span><button data-sk="horizontal">H</button><button data-sk="vertical">V</button><button data-sk="coincident">Coincident</button><button data-sk="parallel">∥</button><button data-sk="perpendicular">⟂</button><button data-sk="tangent">Tangent</button><button data-sk="equal">Equal</button><button data-sk="midpoint">Midpoint</button><button data-sk="symmetric">Symmetry</button><button data-sk="fixed">Fix</button></div>'+
+  '<div class="osp-group"><span>Constrain</span><button data-sk="horizontal">H</button><button data-sk="vertical">V</button><button data-sk="coincident">Coincident</button><button data-sk="collinear">Co-linear</button><button data-sk="parallel">∥</button><button data-sk="perpendicular">⟂</button><button data-sk="tangent">Tangent</button><button data-sk="equal">Equal</button><button data-sk="midpoint">Midpoint</button><button data-sk="symmetric">Symmetry</button><button data-sk="fixed">Fix</button></div>'+
   '<div class="osp-group"><span>Modify</span><button data-sk="arc">Arc</button><button data-sk="line">Line</button><button data-sk="fillet">Fillet</button><button data-sk="remove-fillet">Remove fillet</button><button data-sk="chamfer">Chamfer</button><button data-sk="offset">Offset</button><button data-sk="mirror-x">Mirror X</button><button data-sk="mirror-y">Mirror Y</button></div>'+
   (pourMode&&pourEdit?'<button class="osp-finish" data-sk="properties">Type / net / layer…</button>':'')+
   '<button class="osp-finish" data-sk="finish">Finish sketch</button>';
- p.querySelectorAll("[data-sk]").forEach(function(b){b.addEventListener("click",function(){var a=b.getAttribute("data-sk");if(a==="finish"){if(polyMode)polyArm(false);if(backingMode)backingArm(false);else if(pourMode)pourArm(false);else outlineArm(false);}else if(a==="close-profile")outlineSketchMutate("profile closed",function(sk){return OS.closeProfile(sk);});else if(a==="properties"&&pourEdit)openPourDialog(pourEdit.poly,pourEdit);else if(a==="new-poly")polyArm(!(polyMode&&polySketchOwned),true);else if(a==="new-rect"){if(polyMode)polyArm(false);outlineRectArmed=!outlineRectArmed;outlineSketchPanelSync();outlineMsg(outlineRectArmed?"rectangle armed: drag empty board space to replace the "+activeSketchName():"rectangle cancelled: empty drag box-selects sketch vertices");}else if(a==="remove-fillet")outlineRemoveFilletSelected();else if(a==="dimension")outlineSketchDimension();else if(["horizontal","vertical","coincident","parallel","perpendicular","tangent","equal","midpoint","symmetric","fixed"].indexOf(a)>=0)outlineSketchConstraint(a);else outlineSketchModify(a);});});}
+ p.querySelectorAll("[data-sk]").forEach(function(b){b.addEventListener("click",function(){var a=b.getAttribute("data-sk");if(a==="finish"){if(polyMode)polyArm(false);if(backingMode)backingArm(false);else if(pourMode)pourArm(false);else outlineArm(false);}else if(a==="close-profile")outlineSketchMutate("profile closed",function(sk){return OS.closeProfile(sk);});else if(a==="properties"&&pourEdit)openPourDialog(pourEdit.poly,pourEdit);else if(a==="new-poly")polyArm(!(polyMode&&polySketchOwned),true);else if(a==="new-rect"){if(polyMode)polyArm(false);outlineRectArmed=!outlineRectArmed;outlineSketchPanelSync();outlineMsg(outlineRectArmed?"rectangle armed: drag empty board space to replace the "+activeSketchName():"rectangle cancelled: empty drag box-selects sketch vertices");}else if(a==="remove-fillet")outlineRemoveFilletSelected();else if(a==="dimension")outlineSketchDimension();else if(["horizontal","vertical","coincident","collinear","parallel","perpendicular","tangent","equal","midpoint","symmetric","fixed"].indexOf(a)>=0)outlineSketchConstraint(a);else outlineSketchModify(a);});});}
 // ⬡ Poly / in-sketch Line tool: click connected outline segments freely.
 // Endpoints magnetize to existing corners and the chain start, infer horizontal
 // or vertical alignment, and otherwise use the grid. Enter finishes an open
@@ -5892,11 +5893,13 @@ svg.addEventListener("pointermove",function(ev){
  var stm=mm(ev);lastBoardPointer={m:stm,at:{clientX:ev.clientX,clientY:ev.clientY}};statusXY(stm);statusDelta(stm);statusHover(stm);
  if(heatsinkDrag){hsDragMove(mm(ev));return;}
  if(heatsinkDraw){var hsm=mm(ev);heatsinkDraw.x1=hsm.x;heatsinkDraw.y1=hsm.y;drawBoardRect();return;}
- if(vdrag){var vv=mm(ev),vgx=Math.round(vv.x/G)*G,vgy=Math.round(vv.y/G)*G,shape=activeSketchIsArea()?activeSketchShape():outlineEditable(),vc=outlinePtsOf(shape);
+ if(vdrag){var vv=mm(ev),vgx=Math.round(vv.x/G)*G,vgy=Math.round(vv.y/G)*G,shape=activeSketchIsArea()?activeSketchShape():outlineEditable(),vc=outlinePtsOf(shape),vsk=OS&&shape&&shape.sketch;
+  if(vsk&&vdrag.id&&OS.closingEndpointTarget){var vend=OS.closingEndpointTarget(vsk,vdrag.id,vv.x,vv.y,9/S);vdrag.closeId=vend&&vend.id;if(vend){vgx=vend.x;vgy=vend.y;}}else vdrag.closeId=null;
   if(vc&&vdrag.i<vc.length&&(vc[vdrag.i][0]!==vgx||vc[vdrag.i][1]!==vgy)){
    shape=activeSketchPromote();if(OS&&shape.sketch){if(!vdrag.id){var vps=OS.physicalPoints(shape.sketch);vdrag.id=vps[vdrag.i]&&vps[vdrag.i].id;}
-    if(vdrag.axis===undefined)vdrag.axis=OS.pointDragAxis(shape.sketch,vdrag.id,vgx,vgy,{x:vdrag.x0,y:vdrag.y0});
-    OS.movePoint(shape.sketch,vdrag.id,vgx,vgy,vdrag.axis);activeSketchSync(shape);}
+    if(!vdrag.closeId&&OS.closingEndpointTarget){var promotedEnd=OS.closingEndpointTarget(shape.sketch,vdrag.id,vv.x,vv.y,9/S);vdrag.closeId=promotedEnd&&promotedEnd.id;if(promotedEnd){vgx=promotedEnd.x;vgy=promotedEnd.y;}}
+    if(vdrag.axis===undefined&&!vdrag.closeId)vdrag.axis=OS.pointDragAxis(shape.sketch,vdrag.id,vgx,vgy,{x:vdrag.x0,y:vdrag.y0});
+    OS.movePoint(shape.sketch,vdrag.id,vgx,vgy,vdrag.closeId?null:vdrag.axis);activeSketchSync(shape);}
    else shape.pts[vdrag.i]=[vgx,vgy];vdrag.moved=true;if(!activeSketchIsArea())outlineBboxSync();drawBoardRect();}
   return;}
  if(osdrag){osegMove(mm(ev),ev.shiftKey);return;}
@@ -5976,7 +5979,8 @@ svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.p
   // one undo step (Ctrl+Z reverts the whole vertex move) and re-run the DRC so
   // the board-edge geometry the mid-drag session probes tracks the new shape.
   // A stationary press is a plain click: select the board outline itself.
-  if(vd.moved){if(vd.snap)recordUndo(vd.snap);else markDirty();if(activeSketchIsArea()){var avs=activeSketchShape();activeSketchChanged(OS&&avs&&avs.sketch&&OS.compile(avs.sketch));}else outlineDrc();outlineMsg(activeSketchName()+" edited — Save/Update to keep");}
+  if(vd.moved){var snapped=false,avs=activeSketchShape();if(vd.closeId&&OS&&avs&&avs.sketch&&OS.closeByMergingEndpoints)snapped=OS.closeByMergingEndpoints(avs.sketch,vd.id,vd.closeId);var acompiled=OS&&avs&&avs.sketch&&activeSketchSync(avs);
+   if(vd.snap)recordUndo(vd.snap);else markDirty();if(activeSketchIsArea())activeSketchChanged(acompiled);else outlineDrc();outlineSelection=[];outlineSketchPanelSync();outlineMsg(snapped?activeSketchName()+" endpoints snapped — profile closed; Save/Update to keep":activeSketchName()+" edited — Save/Update to keep");}
   else outlineSelect("point",vd.i,vd.id,ev);
   return;}
  if(osdrag){var od=osdrag;osdrag=null;svg.style.cursor="";

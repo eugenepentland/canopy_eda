@@ -268,6 +268,7 @@ test "the DXF board-outline importer asset is registered with its parser seam" {
 // spec: Web Server - The PCB outline Line tool stays inside the sketch, creates connected native line chains, snaps endpoints to shared existing point IDs and H/V inference, lets Enter retain an open chain, and normalizes a reconnected closed loop for fabrication
 // spec: Web Server - Backspace or Delete on a selected native outline curve removes only that curve, leaves loose endpoints for free sketch editing, remains undoable, and Save explains that open geometry must be reconnected
 // spec: Web Server - A malformed custom copper-area save names a clickable exact zone that enters its sketch and frames it; a single connected two-endpoint gap exposes an explicit undoable Close profile repair and is safely closed on save for stale sessions, while branches and disconnected geometry are never guessed closed
+// spec: Web Server - Two selected straight sketch curves can be constrained co-linear, and dragging the two loose line endpoints of one open contour together snaps and merges their stable point identity to close the fabrication profile
 test "the shared parametric shape sketch engine is registered with its editor contracts" {
     try std.testing.expect(registryHasAsset("shape_sketch.js"));
     try std.testing.expect(registryHasAsset("pcb_outline_sketch.js"));
@@ -320,6 +321,15 @@ test "the shared parametric shape sketch engine is registered with its editor co
     for (checks) |check| try std.testing.expect(std.mem.indexOf(u8, check.bytes, check.marker) != null);
 }
 
+test "shape sketches expose co-linear constraints and dragged endpoint closure" {
+    try std.testing.expect(std.mem.indexOf(u8, shape_sketch_js, "q.kind===\"collinear\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shape_sketch_js, "function closingEndpointTarget(s,dragId,x,y,tol)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shape_sketch_js, "function closeByMergingEndpoints(s,dropId,keepId)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "data-sk=\"collinear\">Co-linear") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "OS.closingEndpointTarget(vsk,vdrag.id,vv.x,vv.y,9/S)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "OS.closeByMergingEndpoints(avs.sketch,vd.id,vd.closeId)") != null);
+}
+
 test "layout save recovers open copper sketches before rejecting geometry" {
     const recover_fn = std.mem.indexOf(u8, pcb_board_js, "function recoverOpenPourSketches()") orelse
         return error.TestUnexpectedResult;
@@ -353,7 +363,7 @@ test "axis-constrained outline endpoint drags project the cursor onto the segmen
     try std.testing.expect(std.mem.indexOf(u8, shape_sketch_js, "if(axis===\"horizontal\")y=p.y;else if(axis===\"vertical\")x=p.x;") != null);
     try std.testing.expect(std.mem.indexOf(u8, shape_sketch_js, "var target=pointDragTarget(s,id,x,y,axis)") != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "vdrag.axis=OS.pointDragAxis") != null);
-    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "OS.movePoint(shape.sketch,vdrag.id,vgx,vgy,vdrag.axis)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "OS.movePoint(shape.sketch,vdrag.id,vgx,vgy,vdrag.closeId?null:vdrag.axis)") != null);
 }
 
 // spec: Web Server - Sliding a shape-sketch line through line-arc-line corner fillets carries each valid arc rigidly, including saved near-tangent fillets, and changes only the length of its outer straight neighbour
