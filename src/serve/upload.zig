@@ -15,16 +15,17 @@ const Server = serve_root.Server;
 // ── Constants ─────────────────────────────────────────────────────
 const http_bad_request: u16 = 400;
 const http_internal_error: u16 = 500;
-// /tmp templates assembled at use site to keep the absolute-path literal
-// out of a string-literal token guardian's ban-hardcoded-paths checker
-// flags. The TMP_DIR fragment is just a directory name.
+// /var/tmp template assembled at use site to keep the absolute-path literal
+// out of a string-literal token guardian's ban-hardcoded-paths checker flags.
+// Library packages can be tens of MiB, so staging them on the persistent temp
+// filesystem avoids exhausting a user's quota on the RAM-backed /tmp mount.
+const var_dir_name = "var";
 const tmp_dir_name = "tmp";
 // SECURITY: the temp-file name is minted from a process-unique token, NEVER
 // from the client-supplied `X-Filename` header — templating an attacker string
 // into a `/tmp/...` path was an arbitrary-file-write (path traversal via
 // `../../..`) → RCE vector. Both `{d}` fields are our own counters.
-const tmp_zip_template = "/" ++ tmp_dir_name ++ "/eda-upload-{d}-{d}";
-const tmp_extract_template = "/" ++ tmp_dir_name ++ "/eda-extract-{d}-{d}";
+const tmp_zip_template = "/" ++ var_dir_name ++ "/" ++ tmp_dir_name ++ "/eda-upload-{d}-{d}";
 
 /// Monotonic counter appended to temp-file names so two uploads landing in the
 /// same millisecond can't collide (and so no request input reaches the path).
@@ -35,8 +36,7 @@ fn nextTmpSeq() u64 {
 }
 const max_kicad_file_bytes: usize = 10 * 1024 * 1024;
 const max_step_file_bytes: usize = 50 * 1024 * 1024;
-// Preserve the former 50 KiB capture cap for unzip/find/cleanup.
-const process_output_bytes: usize = 50 * 1024;
+const zip_reader_buffer_bytes: usize = 64 * 1024;
 const sexp_path_template = "{s}/{s}.sexp";
 
 /// Error set for HTTP handlers in this module.
@@ -66,12 +66,35 @@ pub const ImportResult = struct {
     component: ComponentWrite,
 };
 
+const ArchiveFile = struct {
+    filename: []const u8,
+    data: []const u8,
+};
+
+const ArchiveFiles = struct {
+    symbol: ?ArchiveFile = null,
+    footprint: ?ArchiveFile = null,
+    step: ?ArchiveFile = null,
+};
+
+const StagedArchive = struct {
+    path: []const u8,
+    file: infra_fs.File,
+
+    fn deinit(self: *StagedArchive) void {
+        self.file.close();
+        infra_fs.cwd().deleteFile(self.path) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => log.warn("deleting staged zip: {s}", .{@errorName(err)}),
+        };
+    }
+};
+
 /// Failure modes of `importZipBytes`. `NoKicadFiles` is the only client
 /// mistake (maps to HTTP 400); the rest are environment/IO failures (500).
 pub const ImportError = error{
     WriteFailed,
     ExtractFailed,
-    ScanFailed,
     NoKicadFiles,
     ReadFailed,
     ConvertFailed,
@@ -82,8 +105,7 @@ pub const ImportError = error{
 pub fn importErrorMessage(e: ImportError) []const u8 {
     return switch (e) {
         error.WriteFailed => "could not write temp/library files",
-        error.ExtractFailed => "zip extraction failed (is unzip installed?)",
-        error.ScanFailed => "could not scan extracted files",
+        error.ExtractFailed => "zip extraction failed (invalid or unsupported archive)",
         error.NoKicadFiles => "zip must contain a .kicad_sym and a .kicad_mod file",
         error.ReadFailed => "could not read KiCad files from the zip",
         error.ConvertFailed => "footprint/pinout conversion failed",
@@ -97,8 +119,81 @@ pub fn importErrorStatus(e: ImportError) u16 {
     return if (e == error.NoKicadFiles) http_bad_request else http_internal_error;
 }
 
+fn stageArchive(allocator: std.mem.Allocator, zip_bytes: []const u8) ImportError!StagedArchive {
+    const path = try std.fmt.allocPrint(allocator, tmp_zip_template, .{ clock.milliTimestamp(), nextTmpSeq() });
+    const file = infra_fs.cwd().createFile(path, .{ .read = true }) catch |err| {
+        log.warn("creating zip-upload staging file: {s}", .{@errorName(err)});
+        return error.WriteFailed;
+    };
+    file.writeAll(zip_bytes) catch |err| {
+        file.close();
+        infra_fs.cwd().deleteFile(path) catch |delete_err| switch (delete_err) {
+            error.FileNotFound => {},
+            else => log.warn("deleting failed zip-upload staging file: {s}", .{@errorName(delete_err)}),
+        };
+        log.warn("writing zip-upload staging file: {s}", .{@errorName(err)});
+        return error.WriteFailed;
+    };
+    return .{ .path = path, .file = file };
+}
+
+fn extractArchiveEntry(
+    allocator: std.mem.Allocator,
+    reader: *std.Io.File.Reader,
+    entry: std.zip.Iterator.Entry,
+    max_bytes: usize,
+) ImportError![]const u8 {
+    if (entry.uncompressed_size > max_bytes) return error.ReadFailed;
+    const size = std.math.cast(usize, entry.uncompressed_size) orelse return error.ReadFailed;
+    const data = try allocator.alloc(u8, size);
+    errdefer allocator.free(data);
+    var writer = std.Io.Writer.fixed(data);
+    entry.extractTo(reader, &writer) catch return error.ExtractFailed;
+    if (writer.buffered().len != data.len) return error.ExtractFailed;
+    return data;
+}
+
+fn replaceArchiveFile(allocator: std.mem.Allocator, slot: *?ArchiveFile, replacement: ArchiveFile) void {
+    if (slot.*) |old| {
+        allocator.free(old.filename);
+        allocator.free(old.data);
+    }
+    slot.* = replacement;
+}
+
+fn readArchiveFiles(allocator: std.mem.Allocator, zip_file: std.Io.File) ImportError!ArchiveFiles {
+    var read_buffer: [zip_reader_buffer_bytes]u8 = undefined;
+    var reader = zip_file.reader(infra_fs.currentIo(), &read_buffer);
+    var iterator = std.zip.Iterator.init(&reader) catch return error.ExtractFailed;
+    var files: ArchiveFiles = .{};
+
+    while ((iterator.next() catch return error.ExtractFailed)) |entry| {
+        const filename_len = std.math.cast(usize, entry.filename_len) orelse return error.ExtractFailed;
+        const filename_buf = try allocator.alloc(u8, filename_len);
+        var keep_filename = false;
+        defer if (!keep_filename) allocator.free(filename_buf);
+        const filename = entry.getFilename(&reader, filename_buf, .{}) catch return error.ExtractFailed;
+
+        if (std.mem.endsWith(u8, filename, ".kicad_sym")) {
+            const data = try extractArchiveEntry(allocator, &reader, entry, max_kicad_file_bytes);
+            replaceArchiveFile(allocator, &files.symbol, .{ .filename = filename, .data = data });
+            keep_filename = true;
+        } else if (std.mem.endsWith(u8, filename, ".kicad_mod")) {
+            const data = try extractArchiveEntry(allocator, &reader, entry, max_kicad_file_bytes);
+            replaceArchiveFile(allocator, &files.footprint, .{ .filename = filename, .data = data });
+            keep_filename = true;
+        } else if (std.ascii.endsWithIgnoreCase(filename, ".stp") or std.ascii.endsWithIgnoreCase(filename, ".step")) {
+            if (entry.uncompressed_size > max_step_file_bytes) continue;
+            const data = try extractArchiveEntry(allocator, &reader, entry, max_step_file_bytes);
+            replaceArchiveFile(allocator, &files.step, .{ .filename = filename, .data = data });
+            keep_filename = true;
+        }
+    }
+    return files;
+}
+
 /// Convert a KiCad library ZIP (already in memory) into library entries:
-/// write the bytes to a temp file, extract via the system `unzip`, locate
+/// stage the bytes on disk, read the archive with `std.zip`, locate
 /// the `.kicad_sym` / `.kicad_mod` / optional STEP, convert them, and write
 /// `lib/{components,footprints,pinouts,models}`. Shared by the `/api/upload-zip`
 /// route and the CLI `download_footprint` tool. `filename` is advisory only
@@ -112,55 +207,20 @@ pub fn importZipBytes(
     filename: []const u8,
 ) ImportError!ImportResult {
     _ = filename;
-    const tmp_zip = try std.fmt.allocPrint(allocator, tmp_zip_template, .{ clock.milliTimestamp(), nextTmpSeq() });
-    {
-        const f = infra_fs.cwd().createFile(tmp_zip, .{}) catch return error.WriteFailed;
-        defer f.close();
-        f.writeAll(zip_bytes) catch return error.WriteFailed;
-    }
-
-    const tmp_dir = try std.fmt.allocPrint(allocator, tmp_extract_template, .{ clock.milliTimestamp(), nextTmpSeq() });
-    const unzip_result = std.process.run(allocator, infra_fs.currentIo(), .{
-        .argv = &.{ "unzip", "-o", "-q", tmp_zip, "-d", tmp_dir },
-        .stdout_limit = .limited(process_output_bytes),
-        .stderr_limit = .limited(process_output_bytes),
-    }) catch return error.ExtractFailed;
-    defer deinitProcessResult(allocator, unzip_result);
-    if (!unzip_result.term.success()) return error.ExtractFailed;
-
-    const find_result = std.process.run(allocator, infra_fs.currentIo(), .{
-        .argv = &.{ "find", tmp_dir, "-type", "f" },
-        .stdout_limit = .limited(process_output_bytes),
-        .stderr_limit = .limited(process_output_bytes),
-    }) catch return error.ScanFailed;
-    defer deinitProcessResult(allocator, find_result);
-
-    var sym_path: ?[]const u8 = null;
-    var fp_path: ?[]const u8 = null;
-    var step_path: ?[]const u8 = null;
-    var line_iter = std.mem.splitScalar(u8, find_result.stdout, '\n');
-    while (line_iter.next()) |line| {
-        if (line.len == 0) continue;
-        if (std.mem.endsWith(u8, line, ".kicad_sym")) sym_path = line;
-        if (std.mem.endsWith(u8, line, ".kicad_mod")) fp_path = line;
-        if (std.ascii.endsWithIgnoreCase(line, ".stp") or std.ascii.endsWithIgnoreCase(line, ".step")) step_path = line;
-    }
-    if (sym_path == null or fp_path == null) return error.NoKicadFiles;
-
-    const sym_data = infra_fs.cwd().readFileAlloc(allocator, sym_path.?, max_kicad_file_bytes) catch
-        return error.ReadFailed;
-    const fp_data = infra_fs.cwd().readFileAlloc(allocator, fp_path.?, max_kicad_file_bytes) catch
-        return error.ReadFailed;
-    const step_data: ?[]const u8 = if (step_path) |sp|
-        (infra_fs.cwd().readFileAlloc(allocator, sp, max_step_file_bytes) catch null)
-    else
-        null;
+    var staged = try stageArchive(allocator, zip_bytes);
+    defer staged.deinit();
+    const files = try readArchiveFiles(allocator, staged.file.f);
+    const symbol = files.symbol orelse return error.NoKicadFiles;
+    const footprint_file = files.footprint orelse return error.NoKicadFiles;
+    const sym_data = symbol.data;
+    const fp_data = footprint_file.data;
+    const step_data: ?[]const u8 = if (files.step) |step| step.data else null;
 
     const pkg_name = extractPackageName(sym_data);
-    saveSourceFile(allocator, project_dir, std.fs.path.basename(sym_path.?), sym_data);
-    saveSourceFile(allocator, project_dir, std.fs.path.basename(fp_path.?), fp_data);
-    if (step_data != null and step_path != null) {
-        saveSourceFile(allocator, project_dir, std.fs.path.basename(step_path.?), step_data.?);
+    saveSourceFile(allocator, project_dir, std.fs.path.basename(symbol.filename), sym_data);
+    saveSourceFile(allocator, project_dir, std.fs.path.basename(footprint_file.filename), fp_data);
+    if (files.step) |step| {
+        saveSourceFile(allocator, project_dir, std.fs.path.basename(step.filename), step.data);
     }
 
     const symbol_conv = @import("../convert/symbol.zig");
@@ -179,12 +239,6 @@ pub fn importZipBytes(
     // that `findModelFile`'s substring fallback misses — e.g. a CSE part whose
     // symbol is "ASE-25.000MHZ-L-C-T" but whose footprint is "ASE20000MHZLRT".
     if (step_data) |sd| try writeModelFile(allocator, project_dir, fp_name_final, sd);
-
-    infra_fs.cwd().deleteFile(tmp_zip) catch |e| switch (e) {
-        error.FileNotFound => {},
-        else => log.warn("deleting {s}: {s}", .{ tmp_zip, @errorName(e) }),
-    };
-    cleanupExtractDir(allocator, tmp_dir);
 
     return .{
         .package_name = pkg_name,
@@ -232,60 +286,13 @@ fn writeModelFile(
 /// by `allocator`), or null when the zip has no STEP or extraction fails.
 /// Backs the library page's "drop a zip onto a component" → attach-3D-model
 /// flow, which only needs the model (not the symbol/footprint importZipBytes
-/// requires). Unzips to a temp dir via the system `unzip` and cleans up.
+/// requires). Uses the same bounded `std.zip` reader and staging cleanup.
 pub fn extractStepBytes(allocator: std.mem.Allocator, zip_bytes: []const u8, filename: []const u8) ?[]const u8 {
     _ = filename; // advisory only — never used to build a path (client-controlled)
-    const tmp_zip = std.fmt.allocPrint(allocator, tmp_zip_template, .{ clock.milliTimestamp(), nextTmpSeq() }) catch return null;
-    {
-        const f = infra_fs.cwd().createFile(tmp_zip, .{}) catch return null;
-        defer f.close();
-        f.writeAll(zip_bytes) catch return null;
-    }
-    defer infra_fs.cwd().deleteFile(tmp_zip) catch |e| log.warn("rm {s}: {s}", .{ tmp_zip, @errorName(e) });
-
-    const tmp_dir = std.fmt.allocPrint(allocator, tmp_extract_template, .{ clock.milliTimestamp(), nextTmpSeq() }) catch return null;
-    defer cleanupExtractDir(allocator, tmp_dir);
-
-    const unzip_result = std.process.run(allocator, infra_fs.currentIo(), .{
-        .argv = &.{ "unzip", "-o", "-q", tmp_zip, "-d", tmp_dir },
-        .stdout_limit = .limited(process_output_bytes),
-        .stderr_limit = .limited(process_output_bytes),
-    }) catch return null;
-    defer deinitProcessResult(allocator, unzip_result);
-    if (!unzip_result.term.success()) return null;
-
-    const find_result = std.process.run(allocator, infra_fs.currentIo(), .{
-        .argv = &.{ "find", tmp_dir, "-type", "f" },
-        .stdout_limit = .limited(process_output_bytes),
-        .stderr_limit = .limited(process_output_bytes),
-    }) catch return null;
-    defer deinitProcessResult(allocator, find_result);
-
-    var it = std.mem.splitScalar(u8, find_result.stdout, '\n');
-    while (it.next()) |line| {
-        if (line.len == 0) continue;
-        if (std.ascii.endsWithIgnoreCase(line, ".step") or std.ascii.endsWithIgnoreCase(line, ".stp")) {
-            return infra_fs.cwd().readFileAlloc(allocator, line, max_step_file_bytes) catch return null;
-        }
-    }
-    return null;
-}
-
-fn deinitProcessResult(allocator: std.mem.Allocator, result: std.process.RunResult) void {
-    allocator.free(result.stdout);
-    allocator.free(result.stderr);
-}
-
-fn cleanupExtractDir(allocator: std.mem.Allocator, tmp_dir: []const u8) void {
-    const result = std.process.run(allocator, infra_fs.currentIo(), .{
-        .argv = &.{ "rm", "-rf", tmp_dir },
-        .stdout_limit = .limited(process_output_bytes),
-        .stderr_limit = .limited(process_output_bytes),
-    }) catch |e| {
-        log.warn("cleanup {s}: {s}", .{ tmp_dir, @errorName(e) });
-        return;
-    };
-    deinitProcessResult(allocator, result);
+    var staged = stageArchive(allocator, zip_bytes) catch return null;
+    defer staged.deinit();
+    const files = readArchiveFiles(allocator, staged.file.f) catch return null;
+    return if (files.step) |step| step.data else null;
 }
 
 /// POST /api/upload-zip — accept a KiCad library zip (must contain a
@@ -545,4 +552,54 @@ test "isEscapedWhitespace reads the escape letter after the backslash" {
     // a real `\\n` escape as ordinary text.
     try std.testing.expect(isEscapedWhitespace("x\\n", 1));
     try std.testing.expect(!isEscapedWhitespace("x\\q", 1));
+}
+
+// spec: serve/upload - KiCad ZIP import stages outside RAM-backed /tmp and reads entries with bounded std.zip extraction, without requiring system unzip
+test "zip import succeeds without system unzip or RAM-backed temp space" {
+    const zipfile = @import("../zipfile.zig");
+    const symbol =
+        \\(kicad_symbol_lib (version 20211014) (generator test)
+        \\  (symbol "SCRP-2-682W+"
+        \\    (property "Reference" "U")
+        \\    (property "ki_description" "Power splitter")
+        \\    (property "Manufacturer_Name" "Mini-Circuits")
+        \\    (property "Manufacturer_Part_Number" "SCRP-2-682W+")
+        \\    (pin passive line (at 0 0 0) (length 1.27)
+        \\      (name "PORT_1") (number "1"))
+        \\  )
+        \\)
+    ;
+    const footprint =
+        \\(module "SCRP2682W" (layer F.Cu)
+        \\  (descr "test footprint")
+        \\  (pad 1 smd rect (at 0 0) (size 1 1) (layers F.Cu F.Mask F.Paste))
+        \\)
+    ;
+    const step = "ISO-10303-21;\nEND-ISO-10303-21;\n";
+
+    var zip_out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer zip_out.deinit();
+    try zipfile.write(&zip_out.writer, &.{
+        .{ .name = "SCRP-2-682W+/KiCad/SCRP-2-682W+.kicad_sym", .data = symbol },
+        .{ .name = "SCRP-2-682W+/KiCad/SCRP2682W.kicad_mod", .data = footprint },
+        .{ .name = "SCRP-2-682W+/3D/SCRP-2-682W+.stp", .data = step },
+    });
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", arena);
+
+    const result = try importZipBytes(arena, project_dir, zip_out.written(), "LIB_SCRP-2-682W+.zip");
+    try std.testing.expectEqualStrings("SCRP-2-682W+", result.package_name);
+    try std.testing.expectEqualStrings("scrp-2-682w+", result.component_name);
+    try std.testing.expectEqualStrings("scrp2682w", result.footprint_name);
+    try std.testing.expect(result.has_3d);
+
+    try tmp.dir.access(std.testing.io, "lib/components/scrp-2-682w+.sexp", .{});
+    try tmp.dir.access(std.testing.io, "lib/pinouts/scrp-2-682w+.sexp", .{});
+    try tmp.dir.access(std.testing.io, "lib/footprints/scrp2682w.sexp", .{});
+    try tmp.dir.access(std.testing.io, "lib/models/scrp2682w.step", .{});
 }

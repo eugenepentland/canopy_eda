@@ -5655,6 +5655,20 @@ Public functions: getNotesApi, saveNotesApi, getTasksApi, addTaskApi, completeTa
 - Parses open and done task lines and preserves scratchpad
 - Ignores lines that don't match the structured task format
 
+## serve/upload
+
+Public functions: importZipBytes, extractStepBytes, uploadZipApi
+
+- KiCad ZIP import stages outside RAM-backed /tmp and reads entries with bounded std.zip extraction, without requiring system unzip
+- completeness-waiver: empty inputs (an empty or non-ZIP body fails archive extraction and writes no library entry)
+- completeness-waiver: large inputs (HTTP bodies are capped at 64 MiB; extracted symbols and footprints at 10 MiB each; STEP models at 50 MiB)
+- completeness-waiver: unauthorized access (the route is dispatched only after the shared Ward authorization middleware accepts the request)
+- completeness-waiver: i/o failure (staging and library-write failures return a 500-class ImportError and the staged archive is removed on every later exit)
+- completeness-waiver: concurrent access (process-unique timestamp-plus-atomic-counter staging names prevent colliding uploads)
+- completeness-waiver: malformed encoding (std.zip validates archive structure, filenames, compression methods, extents, and CRC before bytes reach a converter)
+- completeness-waiver: integer overflow (ZIP sizes are checked before u64-to-usize conversion and output allocation)
+- completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
+
 ## serve/upload_datasheet
 
 Public functions: uploadDatasheetApi, listDatasheetsApi, serveDatasheetApi, isPdfMagic, sanitizeFilename, storeDatasheet, storeErrorBody, storeErrorStatus
