@@ -3174,6 +3174,7 @@ no surface can disagree about where the board ships bare.
 - a fenced max-freq class's default band widens to expose the fence row's annular rings
 - a max-freq class without a (fence …) widens the same way, because it is a fence target too and its generated fence row must untent
 - an exposed run shorter than one millimetre stays tented
+- a pad beside an exposed RF trace retains one mask web from the full relief opening, not merely from the trace centreline
 - exposure runs merge across segment joints before the length test
 - mask relief contains no per-via state; via exposure is solely polygon overlap with copper
 - an exposed RF trace-to-via transition opens its solved antipad plus the trace pullback only on the connected face

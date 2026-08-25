@@ -15,10 +15,11 @@
 //!
 //! Geometry (`compute`): relief follows EXPOSURE RUNS, not raw segments. Each
 //! relieved net's centreline (tracks plus tessellated arcs, per outer face) is
-//! sampled against the pad dams — every pad's extents grown by the mask margin
-//! plus one web — contiguous exposed stretches merge across segment joints,
-//! and a run shorter than `min_exposed_mm` stays tented: a sliver of bare
-//! trace between two lands is mask the fab would rather keep.
+//! sampled against the pad dams — every pad's extents grown by its mask margin,
+//! one web, and the local opening's half-width — contiguous exposed stretches
+//! merge across segment joints, and a run shorter than `min_exposed_mm` stays
+//! tented: a sliver of bare trace between two lands is mask the fab would
+//! rather keep.
 
 const std = @import("std");
 const optimizer = @import("optimizer.zig");
@@ -33,7 +34,7 @@ const numeric = @import("../numeric.zig");
 /// An exposed stretch shorter than this (measured along the centreline, after
 /// dams) keeps its mask.
 pub const min_exposed_mm: f64 = 1.0;
-/// Centreline sampling pitch for the dam test.
+/// Centreline sampling pitch for the full-opening dam test.
 const sample_mm: f64 = 0.05;
 /// Two exposure runs whose segment ends land within this of each other are one
 /// run for the length test.
@@ -318,15 +319,19 @@ fn collectDams(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem
     return out.toOwnedSlice(arena);
 }
 
-fn dammed(dams: []const Dam, layer: u8, x: f64, y: f64) bool {
+fn dammed(dams: []const Dam, layer: u8, opening_radius: f64, x: f64, y: f64) bool {
     for (dams) |d| {
         const blocks = if (layer == 0) d.top else d.bottom;
         if (!blocks) continue;
         const s = d.shape;
+        const guard = d.grow + @max(0, opening_radius);
         // `pointDist` compares the bounding box first and only walks the outline
-        // once the box is within `grow`, so a pad the sample is nowhere near
-        // still costs one box comparison — the same work the old rect test did.
-        if (pad_shape.pointDist(s.x0, s.y0, s.x1, s.y1, s.poly, x, y, d.grow) <= d.grow) return true;
+        // once the box is within `guard`, so a pad the sample is nowhere near
+        // still costs one box comparison. Including the opening radius is what
+        // protects a pad beside a wide RF relief: checking only the trace
+        // centreline lets the opening's edge wash across the pad aperture even
+        // though the routed copper itself clears it.
+        if (pad_shape.pointDist(s.x0, s.y0, s.x1, s.y1, s.poly, x, y, guard) <= guard) return true;
     }
     return false;
 }
@@ -384,6 +389,7 @@ fn reliefRuns(
     for (segs.items, 0..) |s, si| {
         const len = std.math.hypot(s.x2 - s.x1, s.y2 - s.y1);
         if (len <= 0) continue;
+        const opening_radius = s.width / 2 + spec.relief;
         const steps = numeric.checkedInt(usize, @ceil(len / sample_mm)) orelse 1;
         var run_start: ?f64 = null;
         var last_exposed: f64 = 0;
@@ -392,7 +398,7 @@ fn reliefRuns(
             const t = len * @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(steps));
             const x = s.x1 + (s.x2 - s.x1) * t / len;
             const y = s.y1 + (s.y2 - s.y1) * t / len;
-            if (!dammed(dams, spec.layer, x, y)) {
+            if (!dammed(dams, spec.layer, opening_radius, x, y)) {
                 if (run_start == null) run_start = t;
                 last_exposed = t;
                 if (k == steps) try ivals.append(arena, .{ .seg = si, .t0 = run_start.?, .t1 = t });
@@ -442,8 +448,8 @@ fn emitRunGeometry(arena: std.mem.Allocator, dams: []const Dam, spec: RunSpec, r
             .layer = spec.layer,
             .widths = .{ .opening = s.width + 2 * spec.relief, .copper = s.width },
             .terminal = .{
-                .trim_start = intervalTerminal(dams, spec.layer, run, i, true),
-                .trim_end = intervalTerminal(dams, spec.layer, run, i, false),
+                .trim_start = intervalTerminal(dams, spec, run, i, true),
+                .trim_end = intervalTerminal(dams, spec, run, i, false),
                 .radius = spec.corner_radius,
             },
         };
@@ -480,7 +486,7 @@ fn emitRunGeometry(arena: std.mem.Allocator, dams: []const Dam, spec: RunSpec, r
 /// endpoint so the pad-dam terminal survives the chord boundary and receives
 /// the authored fillet. An actual exposed continuation wins first, preventing
 /// an ordinary bend or T-joint near a pad from being mistaken for a terminal.
-fn intervalTerminal(dams: []const Dam, layer: u8, run: Run, index: usize, at_start: bool) bool {
+fn intervalTerminal(dams: []const Dam, spec: RunSpec, run: Run, index: usize, at_start: bool) bool {
     const iv = run.ivals[index];
     const s = run.segs[iv.seg];
     const len = segLen(s);
@@ -491,7 +497,7 @@ fn intervalTerminal(dams: []const Dam, layer: u8, run: Run, index: usize, at_sta
     const probe = if (at_start) t - sample_mm - join_tol_mm else t + sample_mm + join_tol_mm;
     const x = s.x1 + (s.x2 - s.x1) * probe / len;
     const y = s.y1 + (s.y2 - s.y1) * probe / len;
-    return dammed(dams, layer, x, y);
+    return dammed(dams, spec.layer, s.width / 2 + spec.relief, x, y);
 }
 
 fn endpointHasExposedContinuation(run: Run, index: usize, t: f64) bool {
@@ -1193,24 +1199,66 @@ test "short exposed run between two pads keeps its mask" {
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
 
-    // Two pads 1.7 mm apart: their dams (pad half 0.25 + margin 0.05 + web
-    // 0.1 each) leave a 0.9 mm sliver between them — under the 1 mm floor,
-    // so nothing opens.
+    // Two pads 2.0 mm apart: their full-opening dams (pad half 0.25 + margin
+    // 0.05 + web 0.1 + opening half-width 0.15, on each end) leave a 0.9 mm
+    // sliver between them — under the 1 mm floor, so nothing opens.
     const pads = [_]geometry.Pad{
-        .{ .number = "1", .x = -0.85, .y = 0, .w = 0.5, .h = 0.5 },
-        .{ .number = "2", .x = 0.85, .y = 0, .w = 0.5, .h = 0.5 },
+        .{ .number = "1", .x = -1, .y = 0, .w = 0.5, .h = 0.5 },
+        .{ .number = "2", .x = 1, .y = 0, .w = 0.5, .h = 0.5 },
     };
     var parts = [_]optimizer.Part{
         .{ .ref_des = "R1", .kind = .passive, .hw = 1.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 5, .y = 5 },
     };
     const rules = [_]optimizer.NetRule{
-        .{ .class = .{ .name = "rf" }, .rf = .{ .max_freq_hz = 12e9 } },
+        .{ .class = .{ .name = "rf" }, .rf = .{ .max_freq_hz = 12e9, .mask_relief_mm = 0.05 } },
         .{},
     };
     const placement = testPlacement(&parts, &two_nets, &rules);
-    const tracks = [_]router.Track{.{ .x1 = 4.15, .y1 = 5, .x2 = 5.85, .y2 = 5, .layer = 0, .width = 0.2, .net = 0 }};
+    const tracks = [_]router.Track{.{ .x1 = 4, .y1 = 5, .x2 = 6, .y2 = 5, .layer = 0, .width = 0.2, .net = 0 }};
     const r = try compute(arena, placement, .{ .tracks = &tracks });
     try testing.expectEqual(@as(usize, 0), r.strokes.len);
+}
+
+// spec: placement/mask-relief - a pad beside an exposed RF trace retains one mask web from the full relief opening, not merely from the trace centreline
+test "nearby pad dams the full mask opening" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // The trace centreline clears this GND land by 0.35 mm, but its 0.8 mm
+    // mask opening reaches 0.4 mm each side and would wash straight across the
+    // pad aperture if only the centreline were tested. This is the Barracuda
+    // C101/C102 arrangement reduced to one nearby land.
+    const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.5, .h = 0.5 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "C101", .kind = .passive, .hw = 0.25, .hh = 0.25, .pads = &pads, .fallback = false, .x = 5, .y = 0.6 },
+    };
+    const rules = [_]optimizer.NetRule{
+        .{ .class = .{ .name = "rf" }, .rf = .{ .max_freq_hz = 12e9, .mask_relief_mm = 0.3 } },
+        .{},
+    };
+    const placement = testPlacement(&parts, &two_nets, &rules);
+    const tracks = [_]router.Track{.{ .x1 = 2, .y1 = 0, .x2 = 8, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 }};
+    const relief = try compute(arena, placement, .{ .tracks = &tracks });
+
+    try testing.expectEqual(@as(usize, 2), relief.strokes.len);
+    try testing.expectEqual(@as(usize, 2), relief.openings.len);
+    const pad_world = try pad_shape.worldShape(arena, parts[0], pads[0]);
+    const required_web = pads[0].maskMargin(placement.rules.design.mask.margin) + placement.rules.design.mask.web;
+    for (relief.openings) |opening| {
+        var x0 = std.math.inf(f64);
+        var y0 = std.math.inf(f64);
+        var x1 = -std.math.inf(f64);
+        var y1 = -std.math.inf(f64);
+        for (opening.poly) |point| {
+            x0 = @min(x0, point[0]);
+            y0 = @min(y0, point[1]);
+            x1 = @max(x1, point[0]);
+            y1 = @max(y1, point[1]);
+        }
+        const opening_shape = pad_shape.Shape{ .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1, .poly = opening.poly };
+        try testing.expect(pad_shape.shapeGap(pad_world, opening_shape, required_web) + 1e-9 >= required_web);
+    }
 }
 
 // spec: placement/mask-relief - a rotated land's dam follows its outline, so relief runs up to the pad and not to its bounding box
@@ -1220,10 +1268,9 @@ test "a 45-degree land dams only its own copper" {
     const arena = arena_inst.allocator();
 
     // A 3 × 0.4 mm land on a part turned 45°, fed along the world x axis. Its
-    // bounding box is 2.404 mm square, so the box dam reached 1.452 mm back
-    // from the pad centre; the copper the trace actually approaches is 0.636 mm
-    // away at the margin + web standoff. That 0.8 mm is bare band the launch
-    // was losing purely to its pose.
+    // bounding box is 2.404 mm square. The exact outline still admits more bare
+    // trace than that box after both geometries are grown by the full opening's
+    // half-width plus the margin + web standoff.
     const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 3.0, .h = 0.4 }};
     var parts = [_]optimizer.Part{
         .{ .ref_des = "J1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pads, .fallback = false, .x = 10, .y = 5, .rot = 45 },
@@ -1240,10 +1287,11 @@ test "a 45-degree land dams only its own copper" {
     const s = r.strokes[0];
     const reach = @max(s.x1, s.x2);
     // Sampling quantizes the boundary to 0.05 mm, so allow one pitch.
-    // The standoff is met where the diagonal edge is (h/2 + margin + web) away.
-    try testing.expectApproxEqAbs(@as(f64, 10) - 0.35 / @cos(std.math.pi / 4.0), reach, sample_mm + 1e-9);
+    // The standoff is met where the diagonal edge is (h/2 + margin + web +
+    // opening half-width) away.
+    try testing.expectApproxEqAbs(@as(f64, 10) - (0.35 + s.widths.opening / 2) / @cos(std.math.pi / 4.0), reach, sample_mm + 1e-9);
     // Well past where the bounding box would have stopped it.
-    try testing.expect(reach > 10 - 1.4);
+    try testing.expect(reach > 8.0);
     // And it is still a pad-dam terminal, so it keeps its authored fillet.
     try testing.expect(s.terminal.trim_end);
 }
@@ -1423,13 +1471,13 @@ test "pad-dam terminal survives a short route chord boundary" {
     const rules = [_]optimizer.NetRule{ .{ .class = .{ .name = "rf" }, .rf = .{ .max_freq_hz = 12e9 } }, .{} };
     var placement = testPlacement(&parts, &two_nets, &rules);
     placement.rules.design.mask.relief_corner_radius = 0.4;
-    // The pad dam begins at x=9.35. The short first chord ends at x=9.31,
-    // producing only a zero-length exposed sample; the next, 0.064 mm chord
-    // starts fully exposed at local t=0 and must still carry a 0.4 mm fillet.
+    // The full-opening pad dam begins at x=8.573. The short first chord ends at
+    // x=8.55, producing only a zero-length exposed sample; the next, 0.064 mm
+    // chord starts fully exposed at local t=0 and must still carry a 0.4 mm fillet.
     const tracks = [_]router.Track{
-        .{ .x1 = 10, .y1 = 5, .x2 = 9.31, .y2 = 5, .layer = 0, .width = 0.2, .net = 0 },
-        .{ .x1 = 9.31, .y1 = 5, .x2 = 9.246, .y2 = 5, .layer = 0, .width = 0.2, .net = 0 },
-        .{ .x1 = 9.246, .y1 = 5, .x2 = 2, .y2 = 5, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 10, .y1 = 5, .x2 = 8.55, .y2 = 5, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 8.55, .y1 = 5, .x2 = 8.486, .y2 = 5, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 8.486, .y1 = 5, .x2 = 2, .y2 = 5, .layer = 0, .width = 0.2, .net = 0 },
     };
     const relief = try compute(arena, placement, .{ .tracks = &tracks });
     try testing.expectEqual(@as(usize, 2), relief.strokes.len);
