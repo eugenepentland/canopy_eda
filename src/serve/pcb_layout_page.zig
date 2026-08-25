@@ -10486,6 +10486,8 @@ const pcb_3d_stage_html =
     \\<button class="btn" id="pcb3d-front">Front</button>
     \\<button class="btn" id="pcb3d-side">Side</button>
     \\<span class="sep"></span>
+    \\<button class="btn" id="pcb3d-export-step" title="Download the board, placed component models, and heatsink as an AP242 STEP file">Export STEP</button>
+    \\<span class="sep"></span>
     \\<label><input type="checkbox" id="pcb3d-t-models" checked>Models</label>
     \\<label><input type="checkbox" id="pcb3d-t-surface" checked>Surfaces</label>
     \\<label><input type="checkbox" id="pcb3d-t-board" checked>Board</label>
@@ -13698,6 +13700,7 @@ test "PCB header links board designs to assembly and keeps modules scoped" {
     try std.testing.expect(std.mem.indexOf(u8, selected.written(), "href=\"/assembly-debug/demo?layout=an2548-div4-post-ldo\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_3d_toggle_js, "get(\"view\")===\"3d\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_3d_stage_html, "id=\"pcb3d-bottom\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_3d_stage_html, "id=\"pcb3d-export-step\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_3d_stage_html, "id=\"pcb3d-t-surface\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_3d_stage_html, "id=\"pcb3d-t-heatsink\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, @embedFile("assets/pcb_board.js"), "function hsModalOpen(rect)") != null);

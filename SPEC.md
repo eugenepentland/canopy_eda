@@ -6150,6 +6150,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Editable sub-circuit PCB embeds expose the pad aligner's Same X and Same Y controls
 - physical board navigation exposes stable 3D and a read-only assembly workspace
 - the PCB 3D viewer extrudes the physical outline at the authored thickness and mounts bottom-side footprints beneath it
+- the PCB 3D viewer downloads its complete assembled geometry as a self-contained millimetre-based AP242 STEP model
 - the PCB 3D viewer composites each face's outer copper, soldermask, and silkscreen—including generated sub-circuit, test-point, and pin-1 artwork—into one non-overlapping visible cap and cuts circular drills and slots through the board
 - the retired /pcb-route-lab page 302-redirects to the /pcb-layout page for the same design
 - assembly model bodies load from persistent calibrated PNGs and render STEP only to populate a missing or stale filesystem cache entry

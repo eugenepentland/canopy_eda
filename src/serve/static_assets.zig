@@ -907,6 +907,26 @@ test "PCB 3D viewer uses the physical board profile and component side" {
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_3d_viewer_js, marker) != null);
 }
 
+// spec: Web Server - the PCB 3D viewer downloads its complete assembled geometry as a self-contained millimetre-based AP242 STEP model
+test "PCB 3D viewer exports an AP242 tessellated assembly" {
+    const markers = [_][]const u8{
+        "function collectStepMeshes()",
+        "function buildStepFile(meshes)",
+        "COORDINATES_LIST(",
+        "TRIANGULATED_FACE(",
+        "TESSELLATED_SHAPE_REPRESENTATION(",
+        "SHAPE_DEFINITION_REPRESENTATION(#8,#",
+        "SI_UNIT(.MILLI.,.METRE.)",
+        "obj.userData.pcb3dKind === \"surfaces\"",
+        "collect(boardGroup, \"PCB\")",
+        "collect(partsGroup, \"Component\")",
+        "collect(heatsinkGroup, \"Heatsink\")",
+        "new Blob([buildStepFile(meshes)], { type: \"model/step\" })",
+        "a.download = stepFileName()",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_3d_viewer_js, marker) != null);
+}
+
 // spec: Web Server - the PCB 3D viewer composites each face's outer copper, soldermask, and silkscreen—including generated sub-circuit, test-point, and pin-1 artwork—into one non-overlapping visible cap and cuts circular drills and slots through the board
 test "PCB 3D viewer textures both manufactured faces and cuts drills" {
     const Check = struct { bytes: []const u8, marker: []const u8 };

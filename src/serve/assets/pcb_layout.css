@@ -635,6 +635,7 @@ body.mode-3d .pcb-3d-stage{display:block}
 .pcb-3d-tools .btn{font:inherit;font-size:12px;border:1px solid #3a3b40;background:#2c2d31;border-radius:5px;
   padding:3px 9px;cursor:pointer;color:#d6d7db}
 .pcb-3d-tools .btn:hover{background:#37383d;border-color:#5a8fd6;color:#f0f1f3}
+.pcb-3d-tools .btn:disabled{cursor:wait;opacity:.55}
 .pcb-3d-tools label{display:flex;gap:3px;align-items:center;cursor:pointer}
 .pcb-3d-tools .sep{width:1px;height:16px;background:#3a3b40}
 /* 3D mode owns the workspace, so editor docks and the activity rail stay hidden. */

@@ -38,6 +38,7 @@
   // changed in 2D (Load/reset/drag) and re-fit the camera only when it did.
   var lastSig = "";
   var statusEl, canvas;
+  var exportButton;
 
   var DEFAULT_BOARD_T = 1.6;
   var boardCapMat, boardEdgeMat;
@@ -54,6 +55,12 @@
     statusEl.style.display = "block";
     statusEl.textContent = msg;
     statusEl.className = isErr ? "err" : "";
+  }
+
+  function updateExportButton() {
+    if (!exportButton) return;
+    exportButton.disabled = pendingModels > 0;
+    exportButton.textContent = pendingModels > 0 ? "Loading models…" : "Export STEP";
   }
 
   // ── Geometry helpers ─────────────────────────────────────────────
@@ -212,6 +219,7 @@
     if (!fp || !((DATA.models || {})[fp])) return;
     var generation = modelGenerations[fp] || 0;
     pendingModels++;
+    updateExportButton();
     setStatus("Loading 3D models…");
     getModelTemplate(fp).then(function (tmpl) {
       // An upload can replace this footprint while its old STEP is still being
@@ -229,7 +237,135 @@
       }
     }).catch(function () {}).then(function () {
       if (--pendingModels <= 0) setStatus(null);
+      updateExportButton();
     });
+  }
+
+  // ── AP242 tessellated STEP export ─────────────────────────────────
+  // The source component files contain exact CAD surfaces, but by the time the
+  // browser has composed the board they are Three.js triangle buffers. AP242
+  // carries that representation natively through COORDINATES_LIST and
+  // TRIANGULATED_FACE, so the download preserves the assembled scene without a
+  // server-side CAD installation or a lossy mesh-format detour.
+  function stepText(s) {
+    return "'" + String(s || "").replace(/[^\x20-\x7e]/g, "_").replace(/'/g, "''") + "'";
+  }
+
+  function stepReal(n) {
+    n = +n;
+    if (!isFinite(n) || Math.abs(n) < 5e-10) n = 0;
+    var s = n.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+    return s.indexOf(".") < 0 ? s + "." : s;
+  }
+
+  function stepFileName() {
+    var base = String(DATA.name || "pcb").replace(/[^A-Za-z0-9._-]+/g, "-");
+    base = base.replace(/^-+|-+$/g, "") || "pcb";
+    return base + ".step";
+  }
+
+  // Copy one BufferGeometry into world-space coordinates. Surface texture caps
+  // are skipped by the caller: the extruded substrate already contains both
+  // physical caps, while those two meshes exist only to paint WebGL artwork.
+  function stepMesh(mesh, fallbackName) {
+    var geometry = mesh.geometry;
+    var position = geometry && geometry.getAttribute && geometry.getAttribute("position");
+    if (!position || position.count < 3) return null;
+
+    var points = new Array(position.count), v = new THREE.Vector3();
+    for (var i = 0; i < position.count; i++) {
+      v.fromBufferAttribute(position, i).applyMatrix4(mesh.matrixWorld);
+      points[i] = "(" + stepReal(v.x) + "," + stepReal(v.y) + "," + stepReal(v.z) + ")";
+    }
+
+    var triangles = [], index = geometry.index;
+    if (index) {
+      for (var j = 0; j + 2 < index.count; j += 3) {
+        var a = index.getX(j), b = index.getX(j + 1), c = index.getX(j + 2);
+        if (a !== b && b !== c && c !== a) triangles.push("(" + (a + 1) + "," + (b + 1) + "," + (c + 1) + ")");
+      }
+    } else {
+      for (var k = 0; k + 2 < position.count; k += 3) triangles.push("(" + (k + 1) + "," + (k + 2) + "," + (k + 3) + ")");
+    }
+    if (!triangles.length) return null;
+    return { name: mesh.name || fallbackName, points: points, triangles: triangles };
+  }
+
+  function collectStepMeshes() {
+    var out = [], serial = 0;
+    function collect(group, label) {
+      if (!group) return;
+      group.updateMatrixWorld(true);
+      group.traverse(function (obj) {
+        if (!obj.isMesh || (obj.userData && obj.userData.pcb3dKind === "surfaces")) return;
+        var part = stepMesh(obj, label + " " + (++serial));
+        if (part) out.push(part);
+      });
+    }
+    // Visibility checkboxes are viewing aids, not manufacturing selections: a
+    // hidden layer remains part of the downloaded physical assembly.
+    collect(boardGroup, "PCB");
+    collect(partsGroup, "Component");
+    collect(heatsinkGroup, "Heatsink");
+    return out;
+  }
+
+  function buildStepFile(meshes) {
+    var lines = [
+      "ISO-10303-21;", "HEADER;",
+      "FILE_DESCRIPTION(('Canopy PCB 3D export'),'2;1');",
+      "FILE_NAME(" + stepText(stepFileName()) + "," + stepText(new Date().toISOString().slice(0, 19)) + ",('Canopy'),('Canopy'),'Canopy EDA','','');",
+      "FILE_SCHEMA(('AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF { 1 0 10303 442 1 1 4 }'));",
+      "ENDSEC;", "DATA;",
+      "#1=APPLICATION_CONTEXT('managed model based 3d engineering');",
+      "#2=APPLICATION_PROTOCOL_DEFINITION('international standard','ap242_managed_model_based_3d_engineering',2016,#1);",
+      "#3=PRODUCT_CONTEXT('',#1,'mechanical');",
+      "#4=PRODUCT(" + stepText(DATA.name || "PCB assembly") + "," + stepText(DATA.name || "PCB assembly") + ",'',(#3));",
+      "#5=PRODUCT_DEFINITION_FORMATION('','',#4);",
+      "#6=PRODUCT_DEFINITION_CONTEXT('part definition',#1,'design');",
+      "#7=PRODUCT_DEFINITION('design','',#5,#6);",
+      "#8=PRODUCT_DEFINITION_SHAPE('','',#7);",
+      "#9=(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.));",
+      "#10=(NAMED_UNIT(*)PLANE_ANGLE_UNIT()SI_UNIT($,.RADIAN.));",
+      "#11=(NAMED_UNIT(*)SI_UNIT($,.STERADIAN.)SOLID_ANGLE_UNIT());",
+      "#12=UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-6),#9,'distance_accuracy_value','confusion accuracy');",
+      "#13=(GEOMETRIC_REPRESENTATION_CONTEXT(3)GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#12))GLOBAL_UNIT_ASSIGNED_CONTEXT((#9,#10,#11))REPRESENTATION_CONTEXT('','3D Context'));"
+    ];
+    var next = 14, faceIds = [];
+    meshes.forEach(function (mesh) {
+      var coords = next++, face = next++;
+      lines.push("#" + coords + "=COORDINATES_LIST(" + stepText(mesh.name) + "," + mesh.points.length + ",(\n" + mesh.points.join(",\n") + "));" );
+      lines.push("#" + face + "=TRIANGULATED_FACE(" + stepText(mesh.name) + ",#" + coords + "," + mesh.points.length + ",(),$,(),(\n" + mesh.triangles.join(",\n") + "));" );
+      faceIds.push("#" + face);
+    });
+    var representation = next++;
+    lines.push("#" + representation + "=TESSELLATED_SHAPE_REPRESENTATION(" + stepText(DATA.name || "PCB assembly") + ",(\n" + faceIds.join(",\n") + "),#13);");
+    lines.push("#" + next + "=SHAPE_DEFINITION_REPRESENTATION(#8,#" + representation + ");", "ENDSEC;", "END-ISO-10303-21;", "");
+    return lines.join("\n");
+  }
+
+  function exportStep() {
+    if (pendingModels > 0) return;
+    exportButton.disabled = true;
+    exportButton.textContent = "Preparing…";
+    setStatus("Preparing STEP export…");
+    // Yield once so the busy state paints before large assemblies are encoded.
+    setTimeout(function () {
+      try {
+        var meshes = collectStepMeshes();
+        if (!meshes.length) throw new Error("no 3D geometry");
+        var blob = new Blob([buildStepFile(meshes)], { type: "model/step" });
+        var url = URL.createObjectURL(blob), a = document.createElement("a");
+        a.href = url; a.download = stepFileName(); a.style.display = "none";
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+        setStatus(null);
+      } catch (err) {
+        console.error(err);
+        setStatus("STEP export failed: " + (err && err.message ? err.message : err), true);
+      }
+      updateExportButton();
+    }, 0);
   }
 
   // Register an uploaded/replaced model without rebuilding the PCB scene or
@@ -538,6 +674,9 @@
     on("pcb3d-iso", viewIso);
     on("pcb3d-front", function () { frame(0, -1, 0.03); });
     on("pcb3d-side", function () { frame(1, 0, 0.03); });
+    exportButton = document.getElementById("pcb3d-export-step");
+    if (exportButton) exportButton.onclick = exportStep;
+    updateExportButton();
     var chk = function (id, fn) { var e = document.getElementById(id); if (e) e.onchange = function (ev) { fn(ev.target.checked); }; };
     chk("pcb3d-t-models", function (v) {
       layerVisible.models = v;
