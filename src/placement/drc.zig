@@ -421,7 +421,8 @@ pub fn checkTopology(
 ) std.mem.Allocator.Error![]Violation {
     var out: Viol = .empty;
     const pads = try padBoxes(arena, placement);
-    try checkCopperTopology(arena, &out, placement, pads, routed, zones);
+    const tracks = try path_copper.tracks(arena, routed);
+    try checkCopperTopology(arena, &out, placement, pads, .{ .routed = routed, .tracks = tracks, .zones = zones });
     return out.toOwnedSlice(arena);
 }
 
@@ -615,8 +616,6 @@ fn checkImpl(
     // Swept paths are the physical width authority. Saved editor handles stay
     // compact; every capsule-based rule sees private profile chords instead.
     const tracks = try path_copper.tracks(arena, routed);
-    var physical = routed;
-    physical.tracks = tracks;
     const rules = placement.rules.design;
     const clr = ClearanceResolver{ .base = clearance, .rules = placement.rules };
     // Widest clearance any pair can demand — the grid inflation, so no violating
@@ -645,8 +644,17 @@ fn checkImpl(
     try checkCourtyards(arena, &out, placement);
     try checkSilkOverPad(arena, &out, placement, pads, &pad_grid, rules.mask.margin);
     try checkTrackWidth(arena, &out, .{ .placement = placement, .routed = routed, .tracks = tracks, .min_width = rules.min_width });
-    try checkCopperTopology(arena, &out, placement, pads, physical, topology_zones);
-    try checkLandTransit(c, placement, tracks, pads, &pad_grid);
+    // Topology still needs the private chords as physical support (a curved or
+    // flared path may touch something its compact handle does not), but finding
+    // identity must remain in the persisted track domain.  The topology checker
+    // therefore keeps private chords in its graph while refusing to emit them
+    // as independently editable/removable route sections.
+    try checkCopperTopology(arena, &out, placement, pads, .{ .routed = routed, .tracks = tracks, .zones = topology_zones });
+    // Own-land transit is a physical-copper rule, so retain the lowered width
+    // profile.  Its checker coalesces chords only when they belong to the same
+    // swept path and land, instead of presenting tessellation density as
+    // warning severity or hiding distinct editable sections.
+    try checkLandTransit(c, placement, routed, tracks, pads, &pad_grid);
     try checkGroundPadVias(arena, &out, placement, pads, vias, rules.pour.ground_via_max);
     try checkPadPad(c, pads, &pad_grid);
     try drc_diffpair.check(arena, &out, placement, .{ .tracks = tracks, .vias = vias }, clearance);
@@ -683,26 +691,25 @@ fn checkImpl(
         // vertex detector on that tessellation would flag the intentional
         // chord joins as hard bends. Saved/imported copper carries no outcome
         // and still receives the conservative geometric audit below.
-        if (successfulPortFrame(routed, sb.net)) continue;
+        if (successfulPortFrameBend(routed, sb)) continue;
         if (sharpBendRecorded(routed.sharp_bends, sb)) continue;
         try appendSharpViolation(arena, &out, sb);
     }
     return out.toOwnedSlice(arena);
 }
 
-fn successfulPortFrame(routed: router.RouteResult, net: i32) bool {
+/// True only for an INTERNAL tessellation vertex of a successful swept path.
+/// Path endpoints remain auditable because an adjoining stored section may
+/// make a real hard corner there; unrelated corners on the same net must never
+/// inherit another path's proof of G2 continuity.
+fn successfulPortFrameBend(routed: router.RouteResult, bend: router.SharpBend) bool {
     for (routed.rf_port_outcomes) |outcome| {
-        if (outcome.net != net or !outcome.success) continue;
+        if (outcome.net != bend.net or outcome.physical.layer != bend.layer or !outcome.success) continue;
         if (outcome.physical.gate_removed) continue;
         const samples = outcome.physical.samples;
-        for (samples[1..], 1..) |sample, i| {
-            const before = samples[i - 1];
-            const width = (before.width_mm + sample.width_mm) / 2;
-            for (routed.tracks) |track| {
-                if (track.net != net or track.layer != outcome.physical.layer) continue;
-                if (@abs(track.width - width) > eps) continue;
-                if (sameChord(track, before.at, sample.at)) return true;
-            }
+        if (samples.len < 3) continue;
+        for (samples[1 .. samples.len - 1]) |sample| {
+            if (std.math.hypot(sample.at[0] - bend.x, sample.at[1] - bend.y) <= 1e-4) return true;
         }
     }
     return false;
@@ -731,6 +738,27 @@ fn topologyTracks(arena: std.mem.Allocator, tracks: []const router.Track) std.me
     return out;
 }
 
+/// Map the physical topology view back to persisted editor sections.  The
+/// lowering contract emits every non-path stored section first, in saved order,
+/// then private swept-path chords.  Null therefore means "real copper support,
+/// but not an independently editable or reportable track".
+fn topologyTrackIdentities(
+    arena: std.mem.Allocator,
+    routed: router.RouteResult,
+    physical_tracks: []const router.Track,
+) std.mem.Allocator.Error![]const ?usize {
+    const identities = try arena.alloc(?usize, physical_tracks.len);
+    @memset(identities, null);
+    var physical_i: usize = 0;
+    for (routed.tracks, 0..) |track, stored_i| {
+        if (path_copper.ownsTrack(routed.rf_port_outcomes, track)) continue;
+        if (physical_i == identities.len) break;
+        identities[physical_i] = stored_i;
+        physical_i += 1;
+    }
+    return identities;
+}
+
 fn topologyVias(arena: std.mem.Allocator, vias: []const router.Via) std.mem.Allocator.Error![]const copper_topology.Via {
     const out = try arena.alloc(copper_topology.Via, vias.len);
     for (vias, out) |via, *topology| topology.* = .{ .at = .{ via.x, via.y }, .dia = via.dia, .net = via.net };
@@ -739,22 +767,31 @@ fn topologyVias(arena: std.mem.Allocator, vias: []const router.Via) std.mem.Allo
 
 /// Copper that is electrically legal but topologically useless: loose trace
 /// leaves are errors; vias reaching at most one copper layer are warnings.
+const TopologyRoute = struct {
+    routed: router.RouteResult,
+    tracks: []const router.Track,
+    zones: []const TopologyZone,
+};
+
 fn checkCopperTopology(
     arena: std.mem.Allocator,
     out: *Viol,
     placement: optimizer.Placement,
     pads: []const PadBox,
-    routed: router.RouteResult,
-    zones: []const TopologyZone,
+    route: TopologyRoute,
 ) std.mem.Allocator.Error!void {
-    const tracks = routed.tracks;
+    const routed = route.routed;
+    const tracks = route.tracks;
+    const zones = route.zones;
     const vias = routed.vias;
+    const track_identities = try topologyTrackIdentities(arena, routed, tracks);
     const terminals = try topologyTerminals(arena, pads);
     const topology_tracks = try topologyTracks(arena, tracks);
     const topology_vias = try topologyVias(arena, vias);
     const implicit = try copper_topology.implicitJoins(arena, topology_tracks);
     for (implicit) |join| {
-        const track = tracks[join.a];
+        const stored_i = track_identities[join.a] orelse track_identities[join.b] orelse continue;
+        const track = routed.tracks[stored_i];
         try out.append(arena, .{
             .x = join.at[0],
             .y = join.at[1],
@@ -762,7 +799,7 @@ fn checkCopperTopology(
             .clearance = 0,
             .kind = .implicit_junction,
             .severity = defaultSeverity(.implicit_junction),
-            .who = .{ .net_a = track.net, .track_a = partyIndex(join.a) },
+            .who = .{ .net_a = track.net, .track_a = partyIndex(stored_i) },
             .layer = layerOf(track.layer),
         });
     }
@@ -814,6 +851,11 @@ fn checkCopperTopology(
     const redundant = redundancy.individual;
     const removal = redundancy.removal;
     for (tracks, 0..) |track, track_i| {
+        // A successful swept path is one semantic copper object.  Its private
+        // chords remain in the graph so the exact flared/curved copper supports
+        // adjoining pads, tracks, vias, and pours, but none is independently
+        // reportable or removable merely because neighbouring samples overlap.
+        const stored_i = track_identities[track_i] orelse continue;
         const loose = copper_topology.looseEnd(terminals, topology_tracks, topology_vias, track_i, .{
             endpoint_pours[track_i][0],
             endpoint_pours[track_i][1],
@@ -833,7 +875,7 @@ fn checkCopperTopology(
                     // Only jointly safe plan members are offered to automatic
                     // cleanup; every independently redundant section is still
                     // reported to the user.
-                    .track_a = if (removal[track_i]) partyIndex(track_i) else -1,
+                    .track_a = if (removal[track_i]) partyIndex(stored_i) else -1,
                 },
                 .layer = layerOf(track.layer),
             });
@@ -847,7 +889,7 @@ fn checkCopperTopology(
             .clearance = 0,
             .kind = .copper_stub,
             .severity = defaultSeverity(.copper_stub),
-            .who = .{ .net_a = track.net, .track_a = partyIndex(track_i) },
+            .who = .{ .net_a = track.net, .track_a = partyIndex(stored_i) },
             .layer = layerOf(track.layer),
         });
     }
@@ -888,6 +930,7 @@ fn appendSharpViolation(arena: std.mem.Allocator, out: *Viol, sb: router.SharpBe
         .kind = .sharp_bend,
         .severity = defaultSeverity(.sharp_bend),
         .who = .{ .net_a = sb.net },
+        .layer = layerOf(sb.layer),
     });
 }
 
@@ -1079,7 +1122,20 @@ fn checkTrackTrack(c: Ctx, tracks: []const router.Track, track_grid: *Grid) Err 
 /// layer, so copper across its annulus is not a lap (the same call `pad_entry`
 /// and `pad_escape` make). Large lands are out of scope too — see
 /// `land_transit.paddle_min_half_mm`.
-fn checkLandTransit(c: Ctx, placement: optimizer.Placement, tracks: []const router.Track, pads: []const PadBox, pad_grid: *Grid) Err {
+fn checkLandTransit(
+    c: Ctx,
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    tracks: []const router.Track,
+    pads: []const PadBox,
+    pad_grid: *Grid,
+) Err {
+    const PathLandFinding = struct {
+        path: usize,
+        pad: usize,
+        violation: Violation,
+    };
+    var path_findings: std.ArrayList(PathLandFinding) = .empty;
     for (tracks) |t| {
         // Ground lands intentionally collect broad surface bonds, stitching
         // fans, and pour tie-ins. Treating those shapes like a signal escape
@@ -1088,13 +1144,19 @@ fn checkLandTransit(c: Ctx, placement: optimizer.Placement, tracks: []const rout
         // receive the same exemption as a literal GND net.
         if (t.net >= 0 and @as(usize, @intCast(t.net)) < placement.nets.len and
             optimizer.isGroundName(router.shortName(placement.nets[@intCast(t.net)].name))) continue;
+        var path_owner: ?usize = null;
+        for (routed.rf_port_outcomes, 0..) |_, path_i| {
+            if (!path_copper.ownsTrack(routed.rf_port_outcomes[path_i .. path_i + 1], t)) continue;
+            path_owner = path_i;
+            break;
+        }
         const half = t.width / 2;
         for (try pad_grid.near(c.arena, trackBox(t), c.clr_max)) |j| {
             const p = pads[j];
             if (!sameNet(t.net, p.net) or p.thru or p.layer != t.layer) continue;
             const land = land_transit.Land{ .x0 = p.x0, .y0 = p.y0, .x1 = p.x1, .y1 = p.y1, .poly = p.poly };
             const f = land_transit.segmentOffence(land, .{ t.x1, t.y1 }, .{ t.x2, t.y2 }, half) orelse continue;
-            try c.out.append(c.arena, .{
+            const finding = Violation{
                 .x = f.at[0],
                 .y = f.at[1],
                 .gap = f.overlap_mm,
@@ -1103,9 +1165,26 @@ fn checkLandTransit(c: Ctx, placement: optimizer.Placement, tracks: []const rout
                 .severity = defaultSeverity(.land_transit),
                 .who = padParties(t.net, p),
                 .layer = layerOf(t.layer),
-            });
+            };
+            const path_i = path_owner orelse {
+                try c.out.append(c.arena, finding);
+                continue;
+            };
+            var grouped = false;
+            for (path_findings.items) |*prior| {
+                if (prior.path != path_i or prior.pad != j) continue;
+                if (finding.clearance > prior.violation.clearance + eps or
+                    (@abs(finding.clearance - prior.violation.clearance) <= eps and finding.gap > prior.violation.gap))
+                {
+                    prior.violation = finding;
+                }
+                grouped = true;
+                break;
+            }
+            if (!grouped) try path_findings.append(c.arena, .{ .path = path_i, .pad = j, .violation = finding });
         }
     }
+    for (path_findings.items) |finding| try c.out.append(c.arena, finding.violation);
 }
 
 /// Enforce the optional maximum ground-return drop distance. The pad and via
@@ -2834,6 +2913,7 @@ test "check enforces a per-net class clearance from placement.rules.net" {
 }
 
 // spec: placement/drc - RF bend findings are reconstructed from submitted or saved copper, not only transient router metadata
+// spec: placement/drc - a successful swept RF path suppresses only its internal tessellation vertices, not unrelated same-net corners
 test "check finds the saved LO1_DRIVE hard junction when RouteResult bend metadata is absent" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -2897,6 +2977,7 @@ test "check finds the saved LO1_DRIVE hard junction when RouteResult bend metada
     try testing.expectApproxEqAbs(157.05575853087134, finding.x, 1e-9);
     try testing.expectApproxEqAbs(105.19867467474472, finding.y, 1e-9);
     try testing.expectApproxEqAbs(0.9372, finding.clearance, 1e-12);
+    try testing.expectEqual(@as(?board_layers.SignalIndex, .top), finding.layer);
 
     // A fresh router result can still carry the same finding. The actual-copper
     // audit supplements that metadata without duplicating its DRC marker.
@@ -2933,6 +3014,20 @@ test "check finds the saved LO1_DRIVE hard junction when RouteResult bend metada
     var synthesized = raw;
     synthesized.rf_port_outcomes = &outcomes;
     try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, synthesized, 0.127), .sharp_bend));
+
+    // The same net may have an unrelated hard corner outside that swept path.
+    // Its geometry receives no path-wide exemption.
+    const mixed_tracks = [_]router.Track{
+        tracks[0],
+        tracks[1],
+        tracks[2],
+        .{ .x1 = 10, .y1 = 0, .x2 = 11, .y2 = 0, .layer = 0, .width = 0.3124, .net = 0 },
+        .{ .x1 = 11, .y1 = 0, .x2 = 11, .y2 = 1, .layer = 0, .width = 0.3124, .net = 0 },
+    };
+    synthesized.tracks = &mixed_tracks;
+    const precise = try check(arena, placement, synthesized, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(precise, .sharp_bend));
+    try testing.expectApproxEqAbs(@as(f64, 11), firstOfKind(precise, .sharp_bend).?.x, 1e-9);
 }
 
 // spec: placement/drc - an oval slot's hole-to-hole clearance is measured end-to-end (capsule), not at its centre
@@ -3530,6 +3625,73 @@ test "check warns for a deletable dangling branch but not its pad-to-pad trunk" 
     try testing.expectEqual(@as(usize, 0), countKind(found, .copper_stub));
 }
 
+// spec: placement/drc - swept RF paths remain one semantic topology object even when their overlapping physical profile is tessellated into many chords
+test "check does not report successful RF path chords as removable copper" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const G = @import("geometry.zig");
+    const pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.5, .h = 0.5 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.3, .hh = 0.3, .pads = &pad, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.3, .hh = 0.3, .pads = &pad, .fallback = false, .x = 2, .y = 0 },
+    };
+    const pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "R1", .pin = "1" }, .{ .ref_des = "R2", .pin = "1" } };
+    const nets = [_]FlatNet{.{ .name = "RF", .pins = &pins }};
+    var placement = partsOnly(&parts);
+    placement.nets = &nets;
+
+    // Each compact editor section is shorter than the wide copper around it.
+    // Judged independently, deleting any one chord appears harmless because
+    // its neighbours' capsules still overlap.  The successful path outcome is
+    // the authored object, though, and its sample sections are not individual
+    // cleanup candidates or loose stubs.
+    const tracks = [_]router.Track{
+        .{ .x1 = 0.00, .y1 = 0, .x2 = 0.25, .y2 = 0, .layer = 0, .width = 0.5, .net = 0 },
+        .{ .x1 = 0.25, .y1 = 0, .x2 = 0.50, .y2 = 0, .layer = 0, .width = 0.5, .net = 0 },
+        .{ .x1 = 0.50, .y1 = 0, .x2 = 0.75, .y2 = 0, .layer = 0, .width = 0.5, .net = 0 },
+        .{ .x1 = 0.75, .y1 = 0, .x2 = 1.00, .y2 = 0, .layer = 0, .width = 0.5, .net = 0 },
+        .{ .x1 = 1.00, .y1 = 0, .x2 = 1.25, .y2 = 0, .layer = 0, .width = 0.5, .net = 0 },
+        .{ .x1 = 1.25, .y1 = 0, .x2 = 1.50, .y2 = 0, .layer = 0, .width = 0.5, .net = 0 },
+        .{ .x1 = 1.50, .y1 = 0, .x2 = 1.75, .y2 = 0, .layer = 0, .width = 0.5, .net = 0 },
+        .{ .x1 = 1.75, .y1 = 0, .x2 = 2.00, .y2 = 0, .layer = 0, .width = 0.5, .net = 0 },
+        // A real stored branch follows all eight path-owned sections.  It must
+        // retain saved index 8 after those sections are replaced by private
+        // chords in the physical topology view.
+        .{ .x1 = 1.00, .y1 = 0, .x2 = 1.00, .y2 = 1.5, .layer = 0, .width = 0.2, .net = 0 },
+    };
+    const samples = [_]RfSample{
+        .{ .at = .{ 0.00, 0 }, .s_mm = 0.00, .curvature = 0, .width_mm = 0.5 },
+        .{ .at = .{ 0.25, 0 }, .s_mm = 0.25, .curvature = 0, .width_mm = 0.5 },
+        .{ .at = .{ 0.50, 0 }, .s_mm = 0.50, .curvature = 0, .width_mm = 0.5 },
+        .{ .at = .{ 0.75, 0 }, .s_mm = 0.75, .curvature = 0, .width_mm = 0.5 },
+        .{ .at = .{ 1.00, 0 }, .s_mm = 1.00, .curvature = 0, .width_mm = 0.5 },
+        .{ .at = .{ 1.25, 0 }, .s_mm = 1.25, .curvature = 0, .width_mm = 0.5 },
+        .{ .at = .{ 1.50, 0 }, .s_mm = 1.50, .curvature = 0, .width_mm = 0.5 },
+        .{ .at = .{ 1.75, 0 }, .s_mm = 1.75, .curvature = 0, .width_mm = 0.5 },
+        .{ .at = .{ 2.00, 0 }, .s_mm = 2.00, .curvature = 0, .width_mm = 0.5 },
+    };
+    const outcomes = [_]@import("rf_port_report.zig").Outcome{.{
+        .net = 0,
+        .chosen = 0,
+        .feasible = true,
+        .success = true,
+        .metrics = .{},
+        .trials = &.{},
+        .physical = .{ .sample_count = samples.len, .samples = &samples, .layer = 0 },
+    }};
+    const found = try check(arena, placement, .{
+        .tracks = &tracks,
+        .vias = &.{},
+        .routed = 1,
+        .total = 1,
+        .rf_port_outcomes = &outcomes,
+    }, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(found, .dangling_copper));
+    try testing.expectEqual(@as(i32, 8), firstOfKind(found, .dangling_copper).?.who.track_a);
+    try testing.expectEqual(@as(usize, 0), countKind(found, .copper_stub));
+}
+
 test "check warns for both sections of a self-supporting backtrack" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
@@ -3581,6 +3743,7 @@ test "check keeps an essential loose section as a copper-stub error" {
 }
 
 // spec: placement/drc - warns when a signal net's own copper laps one of its pads instead of being aimed at the pad centre, while ground nets are exempt
+// spec: placement/drc - reports one own-land warning per swept RF path and physical land rather than one per tessellation chord
 test "check warns on signal copper riding a land's flank, not a clean escape or ground bond" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
@@ -3608,6 +3771,39 @@ test "check warns on signal copper riding a land's flank, not a clean escape or 
     const v = firstOfKind(found, .land_transit).?;
     try testing.expectEqual(Severity.warn, v.severity);
     try testing.expectApproxEqAbs(@as(f64, 0.15), v.clearance, 1e-9); // how far the line misses the centre
+    // Tessellating the same dirty run more finely does not multiply what is one
+    // land-level routing condition into one warning per implementation chord.
+    const sampled_riding = [_]router.Track{
+        riding[0],
+        .{ .x1 = 0.15, .y1 = 0.15, .x2 = 0.15, .y2 = 0.60, .layer = 0, .width = 0.127, .net = 0 },
+        .{ .x1 = 0.15, .y1 = 0.60, .x2 = 0.15, .y2 = 1.14, .layer = 0, .width = 0.127, .net = 0 },
+    };
+    const riding_samples = [_]RfSample{
+        .{ .at = .{ 0, 0 }, .s_mm = 0, .curvature = 0, .width_mm = 0.127 },
+        .{ .at = .{ 0.15, 0.15 }, .s_mm = 0.212, .curvature = 0, .width_mm = 0.127 },
+        .{ .at = .{ 0.15, 0.60 }, .s_mm = 0.662, .curvature = 0, .width_mm = 0.127 },
+        .{ .at = .{ 0.15, 1.14 }, .s_mm = 1.202, .curvature = 0, .width_mm = 0.127 },
+    };
+    const riding_outcomes = [_]@import("rf_port_report.zig").Outcome{.{
+        .net = 0,
+        .chosen = 0,
+        .feasible = true,
+        .success = true,
+        .metrics = .{},
+        .trials = &.{},
+        .physical = .{ .sample_count = riding_samples.len, .samples = &riding_samples, .layer = 0 },
+    }};
+    const sampled_route = router.RouteResult{
+        .tracks = &sampled_riding,
+        .vias = &.{},
+        .routed = 1,
+        .total = 1,
+        .rf_port_outcomes = &riding_outcomes,
+    };
+    try testing.expectEqual(
+        @as(usize, 1),
+        countKind(try check(arena, placement, sampled_route, 0.127), .land_transit),
+    );
     // The disciplined shape — north until clear of the land, THEN the 45 — is
     // the same connection, the same length, and no finding.
     const clean = [_]router.Track{

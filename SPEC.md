@@ -2884,8 +2884,10 @@ question each caller answers honestly through `Zone.component`.
 Public functions: check, checkTopology, checkWithZones, countKind, defaultSeverity, errorCount
 
 - RF bend findings are reconstructed from submitted or saved copper, not only transient router metadata
+- a successful swept RF path suppresses only its internal tessellation vertices, not unrelated same-net corners
 - every check stamps its kind's canonical default severity, and each warning kind is proved by a fixture
 - warns when a signal net's own copper laps one of its pads instead of being aimed at the pad centre, while ground nets are exempt
+- reports one own-land warning per swept RF path and physical land rather than one per tessellation chord
 - a match group spreading wider than its tolerance warns once, naming the longest and shortest nets
 - a match group with fewer than two routed members is reported as unfinished, never as mismatched
 - a design declaring no match group produces no measurement and no violation
@@ -2930,6 +2932,7 @@ Public functions: check, checkTopology, checkWithZones, countKind, defaultSeveri
 - flags a routed trace endpoint that reaches no same-net copper as a copper-stub error when its section still carries support connectivity
 - warns once when same-net trace capsules touch across separate explicit centreline components
 - warns once per stored trace section whose deletion preserves all pad, live-via, and pour connectivity
+- swept RF paths remain one semantic topology object even when their overlapping physical profile is tessellated into many chords
 - warns on a through-via that reaches fewer than two copper layers
 - a jointly safe subset of multi-layer non-ground vias is reported for cleanup while every ground via is protected
 - credits same-net user zones when classifying trace ends and via layer use, including priority clipping
