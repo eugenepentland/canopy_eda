@@ -742,6 +742,11 @@ const PadNode = struct {
     cx: f64,
     cy: f64,
     part: usize,
+    /// Index of the flattened schematic pin that produced this geometry. A
+    /// footprint may describe one logical pin with several same-number pads
+    /// (a custom SMD land plus embedded plated barrels); those geometries are
+    /// separate copper contact shapes but one component terminal.
+    logical: usize,
     thru: bool,
     side: optimizer.Side,
     /// The pin this pad came from, kept so `openNets` can name the endpoint an
@@ -759,28 +764,65 @@ fn padNodes(
     net: export_kicad.FlatNet,
 ) std.mem.Allocator.Error![]PadNode {
     var nodes: std.ArrayList(PadNode) = .empty;
-    for (net.pins) |pin| {
+    for (net.pins, 0..) |pin, logical| {
         const pi = partIndex(placement, pin.ref_des) orelse continue;
         const part = placement.parts[pi];
-        const pad = padOf(part, pin.pin) orelse continue;
-        const sh = try pad_shape.worldShape(arena, part, pad);
-        const anchor = pad_shape.copperAnchor(sh);
-        try nodes.append(arena, .{
-            .x0 = sh.x0,
-            .y0 = sh.y0,
-            .x1 = sh.x1,
-            .y1 = sh.y1,
-            .poly = sh.poly,
-            .cx = anchor[0],
-            .cy = anchor[1],
-            .part = pi,
-            .thru = pad.thru,
-            .side = part.side,
-            .ref = pin.ref_des,
-            .pad = pin.pin,
-        });
+        for (part.pads) |pad| {
+            if (!std.mem.eql(u8, pad.number, pin.pin)) continue;
+            const sh = try pad_shape.worldShape(arena, part, pad);
+            const anchor = pad_shape.copperAnchor(sh);
+            try nodes.append(arena, .{
+                .x0 = sh.x0,
+                .y0 = sh.y0,
+                .x1 = sh.x1,
+                .y1 = sh.y1,
+                .poly = sh.poly,
+                .cx = anchor[0],
+                .cy = anchor[1],
+                .part = pi,
+                .logical = logical,
+                .thru = pad.thru,
+                .side = part.side,
+                .ref = pin.ref_des,
+                .pad = pin.pin,
+            });
+        }
     }
     return nodes.toOwnedSlice(arena);
+}
+
+/// Unite every copper geometry belonging to one component pin. Repeated
+/// same-number pads are one logical terminal: integrated thermal/output vias
+/// connect the custom SMD land to the opposite face even though the flattened
+/// netlist quite correctly names that pin only once.
+fn uniteLogicalPads(parent: []usize, items: []const PadNode) void {
+    if (items.len < 2) return;
+    for (items[1..], 1..) |item, i| {
+        if (item.logical == items[i - 1].logical) unite(parent, i, i - 1);
+    }
+}
+
+fn firstLogicalGeometry(items: []const PadNode, i: usize) bool {
+    return i == 0 or items[i - 1].logical != items[i].logical;
+}
+
+/// Distinct logical terminal positions, preserving the historical 0.05 mm
+/// coincident-pad bucket while ignoring extra geometries of the same pin.
+fn logicalPadLocations(items: []const PadNode) usize {
+    var locations: usize = 0;
+    for (items, 0..) |a, i| {
+        if (!firstLogicalGeometry(items, i)) continue;
+        var duplicate = false;
+        for (items[0..i], 0..) |b, j| {
+            if (!firstLogicalGeometry(items, j)) continue;
+            if (@abs(a.cx - b.cx) < 0.05 and @abs(a.cy - b.cy) < 0.05) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) locations += 1;
+    }
+    return locations;
 }
 
 /// Unite every pair of this net's pad nodes whose LANDS meet. Two pads share
@@ -1004,17 +1046,7 @@ pub fn buildNetGraphPrepared(
     // Distinct board locations: unique pad-centre positions (0.05 mm buckets).
     // A net with <2 must not be flagged as unrouted (one pad, or all pads
     // coincident — a bridge/net-tie footprint).
-    var locations: usize = 0;
-    for (items, 0..) |a, i| {
-        var dup = false;
-        for (items[0..i]) |b| {
-            if (@abs(a.cx - b.cx) < 0.05 and @abs(a.cy - b.cy) < 0.05) {
-                dup = true;
-                break;
-            }
-        }
-        if (!dup) locations += 1;
-    }
+    const locations = logicalPadLocations(items);
 
     // Same-net copper features become union-find nodes so connectivity chains
     // through them: pad↔track / pad↔via where copper lands on a pad, track↔track
@@ -1039,6 +1071,7 @@ pub fn buildNetGraphPrepared(
     const parent = try arena.alloc(usize, n_pads + n_tracks + vs.items.len + join.n_comp);
     for (parent, 0..) |*p, i| p.* = i;
     planeUnite(parent, join, n_pads, n_tracks);
+    uniteLogicalPads(parent, items);
     // Every plane fill component is pour copper whether or not it credited a
     // pad, so its tail node marks the group it carries (see `PlaneJoin.nodes`).
     var plane_nodes: std.ArrayList(usize) = .empty;
@@ -2555,6 +2588,32 @@ test "touching same-net pads join without a trace; opposite faces stay separate"
     const open = try routableTally(arena, tallyFixture(&split, &split_nets), .{});
     try testing.expectEqual(@as(usize, 1), open.total);
     try testing.expectEqual(@as(usize, 0), open.routed);
+}
+
+test "repeated same-number plated subpads carry a custom SMD land to the opposite face" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // TPSM84338 VOUT in miniature: one logical pad 4 is authored as a broad
+    // custom surface land plus embedded same-number plated barrels. The bottom
+    // capacitor touches a barrel, so the component footprint itself supplies
+    // the top-to-bottom transition; there is no separate saved via.
+    const module_pads = [_]geometry.Pad{
+        .{ .number = "4", .x = 0, .y = 0, .w = 2, .h = 1 },
+        .{ .number = "4", .x = 0.6, .y = 0, .w = 0.3, .h = 0.3, .shape = "circle", .thru = true, .drill = 0.2 },
+    };
+    const cap_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &module_pads, .fallback = false, .x = 0, .y = 0, .side = .top },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.4, .hh = 0.4, .pads = &cap_pads, .fallback = false, .x = 0.6, .y = 0, .side = .bottom },
+    };
+    const pins = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "4" }, .{ .ref_des = "C1", .pin = "1" } };
+    const nets = [_]export_kicad.FlatNet{.{ .name = "VOUT", .pins = &pins }};
+
+    const connected = try routableTally(arena, tallyFixture(&parts, &nets), .{});
+    try testing.expectEqual(@as(usize, 1), connected.total);
+    try testing.expectEqual(@as(usize, 1), connected.routed);
 }
 
 // spec: fab_readiness - an open net's island report marks the island already joined to the net's plane or pour copper
