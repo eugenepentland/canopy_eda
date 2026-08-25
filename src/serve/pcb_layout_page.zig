@@ -104,6 +104,7 @@ const jsonSide = sidecar_json.jsonSide;
 const jsonFlag = sidecar_json.jsonFlag;
 const jsonStrField = sidecar_json.jsonStrField;
 const parsePartPoses = sidecar_json.parsePartPoses;
+const parsePartEdgeDimensions = sidecar_json.parsePartEdgeDimensions;
 /// Re-exported for the KiCad sync (module-★ copper parsing).
 pub const parseSavedRoutes = sidecar_json.parseSavedRoutes;
 const parseSavedOutline = sidecar_json.parseSavedOutline;
@@ -213,6 +214,19 @@ pub const PartPose = struct {
     locked: bool = false,
 };
 
+/// One driving PCB-editor dimension from a footprint origin to a straight
+/// board-outline edge. `axis` is `"x"` for a horizontal dimension to a
+/// vertical edge and `"y"` for a vertical dimension to a horizontal edge.
+/// `edge_id` is the stable curve id in `SavedOutline.sketch`; `offset` is the
+/// signed origin coordinate minus the edge coordinate, so moving that edge
+/// repositions only the constrained axis of the footprint.
+pub const SavedPartEdgeDimension = struct {
+    ref: []const u8,
+    axis: []const u8,
+    edge_id: u32,
+    offset: f64,
+};
+
 /// The weighted `objective` the optimizer minimizes plus its visible HPWL +
 /// decoupling-loop terms, stored with a layout so the list shows "better/worse"
 /// at a glance without re-running the optimizer. `objective` is 0 for legacy
@@ -270,6 +284,8 @@ pub const SavedLayout = struct {
     /// none). Persisted with the layout so a Save → reload round-trips them,
     /// and the ★ layout's set is what the Gerber silk / PNG render.
     texts: []const font5x7.BoardText = &.{},
+    /// PCB-editor driving dimensions from footprint origins to outline edges.
+    dimensions: []const SavedPartEdgeDimension = &.{},
 };
 
 /// Canonical creator tags persisted on saved tracks and vias. Known values are
@@ -1175,6 +1191,7 @@ fn renderLayoutPage(
             .saved_outline = rv.outline,
             .saved_fabrication_layers = rv.fabrication_layers,
             .saved_heatsink = rv.heatsink,
+            .saved_dimensions = rv.dimensions,
             .base_edge = rv.base_edge,
             .scratch_allocator = ctx.scratch_allocator,
             .top_design = top_design,
@@ -5150,6 +5167,7 @@ pub fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
         .fabrication_layers = parseSavedFabricationLayers(req.arena, root.object.get("fabrication_layers")),
         .heatsink = parseSavedHeatsink(root.object.get("heatsink")),
         .texts = parseSavedTexts(req.arena, root.object.get("texts")),
+        .dimensions = parsePartEdgeDimensions(req.arena, root.object.get("dimensions")),
     };
     // Geometry this WRITE path refuses — a bow-tie board outline, a pour on a
     // layer this board has not got (see `saveRejection` for why each is judged
@@ -5998,7 +6016,20 @@ fn rekeyRowsToLive(
         const res = resolvePoseIdentity(alloc, live, L.parts) orelse continue;
         const np = alloc.dupe(PartPose, L.parts) catch continue;
         for (np, 0..) |*pp, i| pp.ref = res.refs[i];
+        const nd = alloc.dupe(SavedPartEdgeDimension, L.dimensions) catch {
+            L.parts = np;
+            continue;
+        };
+        for (nd) |*dimension| {
+            for (L.parts, 0..) |part, i| {
+                if (std.mem.eql(u8, dimension.ref, part.ref)) {
+                    dimension.ref = res.refs[i];
+                    break;
+                }
+            }
+        }
         L.parts = np;
+        L.dimensions = nd;
     }
     return out;
 }
@@ -6196,6 +6227,7 @@ fn layoutsFromRoot(alloc: std.mem.Allocator, root: std.json.Value) ?[]const Save
             .fabrication_layers = parseSavedFabricationLayers(alloc, it.object.get("fabrication_layers")),
             .heatsink = parseSavedHeatsink(it.object.get("heatsink")),
             .texts = parseSavedTexts(alloc, it.object.get("texts")),
+            .dimensions = parsePartEdgeDimensions(alloc, it.object.get("dimensions")),
         }) catch return list.items;
     }
     return list.toOwnedSlice(alloc) catch null;
@@ -6205,82 +6237,12 @@ fn layoutsFromRoot(alloc: std.mem.Allocator, root: std.json.Value) ?[]const Save
 /// shape `parseSavedOutline` reads back (rect fields always, `pts` only for
 /// polygon outlines). Shared by the sidecar writer and the page blob so the
 /// two can never diverge.
-fn writeSavedOutlineJson(w: *std.Io.Writer, o: SavedOutline) std.Io.Writer.Error!void {
-    try w.print("{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d}", .{ o.x, o.y, o.w, o.h });
-    if (o.pts) |pts| {
-        try w.writeAll(",\"pts\":[");
-        for (pts, 0..) |p, i| {
-            if (i > 0) try w.writeAll(",");
-            try w.print(pt_pair_fmt, .{ p[0], p[1] });
-        }
-        try w.writeAll("]");
-    }
-    if (o.radii) |radii| {
-        try w.writeAll(",\"radii\":[");
-        for (radii, 0..) |radius, i| {
-            if (i > 0) try w.writeAll(",");
-            try w.print("{d}", .{radius});
-        }
-        try w.writeAll("]");
-    }
-    if (o.sketch) |sketch| {
-        try w.writeAll(",\"sketch\":");
-        try shape_sketch_json.write(w, sketch);
-    }
-    try w.writeAll("}");
-}
-
-fn writeSavedHeatsinkJson(w: *std.Io.Writer, sink: SavedHeatsink) std.Io.Writer.Error!void {
-    try w.print("{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d},\"side\":", .{ sink.x, sink.y, sink.w, sink.h });
-    try writeJsonStr(w, sink.side);
-    try w.writeAll(",\"target_ref\":");
-    try writeJsonStr(w, sink.target_ref);
-    try w.writeAll(",\"material\":");
-    try writeJsonStr(w, sink.material);
-    try w.print(",\"base_mm\":{d},\"fin_height_mm\":{d},\"fin_thickness_mm\":{d},\"fin_gap_mm\":{d},\"fin_axis\":", .{
-        sink.base_mm,
-        sink.fin_height_mm,
-        sink.fin_thickness_mm,
-        sink.fin_gap_mm,
-    });
-    try writeJsonStr(w, sink.fin_axis);
-    try w.print(",\"pad_thickness_mm\":{d},\"pad_k_w_mk\":{d}}}", .{ sink.pad_thickness_mm, sink.pad_k_w_mk });
-}
-
-/// Serialize a board-text array as
-/// `[{"x","y","rot","side","size","text","subcircuit"?,"testpoint"?,"fabrication_id"?}, …]`
-/// (the shape `parseSavedTexts` reads and the client `PCB.texts` consumes).
-fn writeBoardTextJson(w: *std.Io.Writer, t: font5x7.BoardText) std.Io.Writer.Error!void {
-    try w.print("{{\"x\":{d},\"y\":{d},\"rot\":{d},\"side\":\"{s}\",\"size\":{d},\"text\":", .{
-        t.x, t.y, t.rot, if (t.bottom) "bottom" else "top", t.size,
-    });
-    try writeJsonStr(w, t.text);
-    if (t.owner) |owner| switch (owner) {
-        .subcircuit => |subcircuit| {
-            try w.writeAll(",\"subcircuit\":");
-            try writeJsonStr(w, subcircuit);
-        },
-        .testpoint => |testpoint| {
-            try w.writeAll(",\"testpoint\":");
-            try writeJsonStr(w, testpoint);
-        },
-    };
-    if (t.fabrication_id) try w.writeAll(",\"fabrication_id\":true");
-    try w.writeAll("}");
-}
-
-fn writeOptionalBoardTextJson(w: *std.Io.Writer, text: ?font5x7.BoardText) std.Io.Writer.Error!void {
-    if (text) |t| try writeBoardTextJson(w, t) else try w.writeAll("null");
-}
-
-fn writeSavedTextsJson(w: *std.Io.Writer, texts: []const font5x7.BoardText) std.Io.Writer.Error!void {
-    try w.writeAll("[");
-    for (texts, 0..) |t, i| {
-        if (i > 0) try w.writeAll(",");
-        try writeBoardTextJson(w, t);
-    }
-    try w.writeAll("]");
-}
+const writeSavedOutlineJson = sidecar_json.writeSavedOutlineJson;
+const writePartEdgeDimensionsJson = sidecar_json.writePartEdgeDimensionsJson;
+const writeSavedHeatsinkJson = sidecar_json.writeSavedHeatsinkJson;
+const writeBoardTextJson = sidecar_json.writeBoardTextJson;
+const writeOptionalBoardTextJson = sidecar_json.writeOptionalBoardTextJson;
+const writeSavedTextsJson = sidecar_json.writeSavedTextsJson;
 
 /// Serialize zone records in the sidecar/embedded `PCB.zones` shape.
 const writeSavedZonesJson = sidecar_json.writeSavedZonesJson;
@@ -6521,6 +6483,8 @@ const ShownView = struct {
     /// The shown layout's board-level silkscreen texts (empty when none) —
     /// the blob emits them as `PCB.texts` so the viewer draws them on load.
     texts: []const font5x7.BoardText = &.{},
+    /// Driving footprint-origin dimensions authored on the shown layout.
+    dimensions: []const SavedPartEdgeDimension = &.{},
 };
 
 /// What `resolveShownView` reads: the placement being shown, the saved-layout
@@ -6622,7 +6586,7 @@ fn resolveShownView(ctx: *Server, req: ?*httpz.Request, in: ShownInputs) ShownVi
         drc_rules.checkFilteredZones(ctx.allocator, ctx.project_dir, name, .{ .placement = in.placement.*, .routed = routed.?, .clearance = ro.params.clearance, .zones = user_zones, .texts = texts, .base_edge = base_edge })
     else
         &.{};
-    return .{ .ro = ro, .routed = routed, .tally = tally, .violations = violations, .outline_drawn = outline_drawn, .base_edge = base_edge, .outline = shownOutline(in.layouts, in.shown), .fabrication_layers = fabrication_layers, .heatsink = shownHeatsink(in.layouts, in.shown), .saved = saved, .texts = texts };
+    return .{ .ro = ro, .routed = routed, .tally = tally, .violations = violations, .outline_drawn = outline_drawn, .base_edge = base_edge, .outline = shownOutline(in.layouts, in.shown), .fabrication_layers = fabrication_layers, .heatsink = shownHeatsink(in.layouts, in.shown), .saved = saved, .texts = texts, .dimensions = shownDimensions(in.layouts, in.shown) };
 }
 
 fn shownOutline(layouts: []const SavedLayout, shown: ?[]const u8) ?SavedOutline {
@@ -6634,6 +6598,13 @@ fn shownOutline(layouts: []const SavedLayout, shown: ?[]const u8) ?SavedOutline 
     }
     const blessed = blessedLayout(layouts) orelse return null;
     return blessed.outline;
+}
+
+fn shownDimensions(layouts: []const SavedLayout, shown: ?[]const u8) []const SavedPartEdgeDimension {
+    if (shown) |sn| for (layouts) |layout| {
+        if (std.mem.eql(u8, layout.name, sn)) return layout.dimensions;
+    };
+    return if (blessedLayout(layouts)) |layout| layout.dimensions else &.{};
 }
 
 fn shownFabricationLayers(layouts: []const SavedLayout, shown: ?[]const u8) []const SavedFabricationLayer {
@@ -7206,6 +7177,10 @@ pub fn writeLayoutsFileJsonRev(w: *std.Io.Writer, layouts: []const SavedLayout, 
         if (L.texts.len > 0) {
             try w.writeAll(texts_open);
             try writeSavedTextsJson(w, L.texts);
+        }
+        if (L.dimensions.len > 0) {
+            try w.writeAll(",\"dimensions\":");
+            try writePartEdgeDimensionsJson(w, L.dimensions);
         }
         if (L.score) |s| try w.print(",\"hpwl\":{d},\"loop\":{d},\"caps\":{d},\"objective\":{d}", .{ s.hpwl, s.loop, s.caps, s.objective });
         try w.writeAll(",\"parts\":[");
@@ -8219,7 +8194,7 @@ const tip_text = "Silkscreen text (T): click on the board to place a label " ++
 const tip_backing = "Edit fabrication backing regions with the shared shape-sketch palette: lines/arcs, dimensions, constraints, fillet, chamfer, offset and mirror. " ++
     "The authored side, material, thickness, and automatic footprint cutouts remain unchanged. Saved with the layout and emitted in its named Gerber.";
 const tip_heatsink = "Draw or edit a physical heatsink. Drag its body to move it, drag corner handles to resize it, or click it to edit its face, target, material, fin count/dimensions, and thermal pad. Saved with the layout; the thermal ladder and 3D view use it.";
-const tip_ruler = "Ruler / measure (D): drag to measure dx / dy / distance in the current units; Esc exits.";
+const tip_ruler = "Ruler / dimension (D): drag to measure, or select a footprint first and drag its origin to a straight board edge to create a driving dimension.";
 const tip_move = "Move selected parts by an X/Y distance (M): marquee or Ctrl/Cmd+click parts, then press M (or this button) and type how far to move them; copper that belongs to the selection rides along, one undo step.";
 const pad_align_tool_html = @embedFile("assets/pcb_pad_align_tool.html");
 const alignment_tools_html = @embedFile("assets/pcb_alignment_tools.html");
@@ -8325,7 +8300,7 @@ test "M binds the move-by-distance dialog and D binds the ruler, and the toolstr
     try std.testing.expect(std.mem.indexOf(u8, toolstrip_html, "id=\"pcb-move-btn\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, toolstrip_html, "id=\"pcb-ruler-btn\"") != null);
     // Tooltips name the NEW keys so a user pressing M finds the move dialog.
-    try std.testing.expect(std.mem.indexOf(u8, tip_ruler, "Ruler / measure (D)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tip_ruler, "Ruler / dimension (D)") != null);
     try std.testing.expect(std.mem.indexOf(u8, tip_move, "Move selected parts by an X/Y distance (M)") != null);
 }
 
@@ -8389,7 +8364,18 @@ test "the ruler's drag state survives the per-frame overlay redraw" {
     // pointerup / rulerArm(false).
     try std.testing.expect(std.mem.indexOf(u8, js, "function rulerClear(){if(rgRuler&&rgRuler.parentNode)rgRuler.parentNode.removeChild(rgRuler);rgRuler=null;}") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "function rulerClear(){if(rgRuler&&rgRuler.parentNode)rgRuler.parentNode.removeChild(rgRuler);rgRuler=null;rulerDraw=null;}") == null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "var m=mm(ev);rulerDraw.b=m;rulerDrawNow(rulerDraw.a,m);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "else rulerDraw.b=m;rulerDrawNow(rulerDraw.a,rulerDraw.b,rulerDraw);") != null);
+}
+
+// spec: Web Server - With one footprint selected, D authors a persistent driving dimension from that footprint origin to a perpendicular straight outline edge
+test "D drives a selected footprint origin from a stable outline edge" {
+    const js = @embedFile("assets/pcb_board.js");
+    try std.testing.expect(std.mem.indexOf(u8, js, "a=p?{x:p.x,y:p.y}:m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "function dimensionEdgeAt(m,axis)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "d={ref:part.ref,axis:state.axis,edge_id:edge.id,offset:sign*n*unit}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "function outlineGeomDrop(){outlineGeomRev++;outlineFilletCache=null;boardShapeCache=null;partDimensionsApply();}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "dimensions:PCB.dimensions||[]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "dimensions:cloneDimensions()") != null);
 }
 
 // spec: Web Server - The overscan pan-buffer fingerprint reads the clearance-halo toggle from view state instead of a removed DOM checkbox, so a pan never throws
@@ -9363,6 +9349,8 @@ const PcbDataOpts = struct {
     saved_fabrication_layers: []const SavedFabricationLayer = &.{},
     /// Physical heatsink authored on the shown saved layout.
     saved_heatsink: ?SavedHeatsink = null,
+    /// Footprint-origin dimensions driven from the shown outline sketch.
+    saved_dimensions: []const SavedPartEdgeDimension = &.{},
     /// This page is a whole top-level DESIGN (not a module page, not a `?sub`
     /// scoped sub circuit) — the only scope the "Sync from KiCad" board import
     /// makes sense on, since it reads the design's own `.kicad_pcb`.
@@ -10060,6 +10048,8 @@ fn writeBlobHead(
     }
     try w.writeAll("\"heatsink\":");
     if (opts.saved_heatsink) |sink| try writeSavedHeatsinkJson(w, sink) else try w.writeAll("null");
+    try w.writeAll(",\"dimensions\":");
+    try writePartEdgeDimensionsJson(w, opts.saved_dimensions);
     try w.writeAll(",");
     // Optimistic-concurrency rev the page loaded — Save/Update echoes it to 409 a
     // stale write from another window.
@@ -10299,6 +10289,10 @@ fn writeLayoutsJson(w: *std.Io.Writer, layouts: []const SavedLayout, shown: ?[]c
         if (L.texts.len > 0) {
             try w.writeAll(texts_open);
             try writeSavedTextsJson(w, L.texts);
+        }
+        if (L.dimensions.len > 0) {
+            try w.writeAll(",\"dimensions\":");
+            try writePartEdgeDimensionsJson(w, L.dimensions);
         }
         try w.writeAll(",\"parts\":{");
         for (L.parts, 0..) |pt, j| {
@@ -10805,6 +10799,10 @@ pub fn mcpWorkingName(
     return "layout";
 }
 
+fn mcpWorkingDimensions(working: ?SavedLayout) []const SavedPartEdgeDimension {
+    return if (working) |layout| layout.dimensions else &.{};
+}
+
 /// Persist `entry` as the working layout: upsert by name (starring it clears
 /// any other default), and star a block's first-ever layout so the page,
 /// KiCad sync and fab outputs all reopen on it. Mirrors `saveNamedLayoutApi`.
@@ -11266,6 +11264,7 @@ pub fn mcpSetPartPoses(
         .routes = filtered.routes,
         .outline = if (working) |w| w.outline else null,
         .texts = if (working) |w| w.texts else &.{},
+        .dimensions = mcpWorkingDimensions(working),
     };
     mcpPersistWorking(alloc, project_dir, name, entry, false);
 
@@ -11353,6 +11352,7 @@ pub fn mcpSetBoardOutline(
         .routes = if (working) |wl| wl.routes else null,
         .outline = outline,
         .texts = if (working) |wl| wl.texts else &.{},
+        .dimensions = mcpWorkingDimensions(working),
     };
     mcpPersistWorking(alloc, project_dir, name, entry, false);
 
@@ -11487,6 +11487,7 @@ pub fn mcpSetCopperZones(
         .routes = routes,
         .outline = if (working) |w| w.outline else null,
         .texts = if (working) |w| w.texts else &.{},
+        .dimensions = mcpWorkingDimensions(working),
     };
     mcpPersistWorking(alloc, project_dir, name, entry, false);
 
@@ -11910,6 +11911,7 @@ pub fn mcpRoutePcb(
         .routes = merged,
         .outline = if (working) |wl| wl.outline else null,
         .texts = if (working) |wl| wl.texts else &.{},
+        .dimensions = mcpWorkingDimensions(working),
     };
     mcpPersistWorking(alloc, project_dir, name, entry, false);
 
@@ -11997,6 +11999,7 @@ pub fn mcpSavePcbLayout(
         .routes = working.routes,
         .outline = working.outline,
         .texts = working.texts,
+        .dimensions = working.dimensions,
     };
     mcpPersistWorking(alloc, project_dir, name, entry, star);
 
@@ -12131,6 +12134,7 @@ pub fn mcpClearRoutes(
         .routes = new_routes,
         .outline = working.outline,
         .texts = working.texts,
+        .dimensions = working.dimensions,
     };
     mcpPersistWorking(alloc, project_dir, name, entry, false);
 
@@ -12833,6 +12837,7 @@ pub fn mcpCleanRouteTopology(
             .routes = persisted,
             .outline = working.outline,
             .texts = working.texts,
+            .dimensions = working.dimensions,
         }, false);
     }
 
@@ -12970,6 +12975,7 @@ pub fn mcpNormalizeJunctions(
             .routes = persisted,
             .outline = working.outline,
             .texts = working.texts,
+            .dimensions = working.dimensions,
         }, false);
     }
 
@@ -13112,6 +13118,7 @@ pub fn mcpRepairLandTransit(
             .routes = persisted,
             .outline = working.outline,
             .texts = working.texts,
+            .dimensions = working.dimensions,
         };
         mcpPersistWorking(alloc, project_dir, name, entry, false);
     }
@@ -13204,6 +13211,7 @@ pub fn mcpStitchGroundPads(
             .routes = persisted,
             .outline = working.outline,
             .texts = working.texts,
+            .dimensions = working.dimensions,
         }, false);
     }
 
@@ -13316,6 +13324,7 @@ pub fn mcpAddTracks(
             .routes = merged,
             .outline = if (working) |wl| wl.outline else null,
             .texts = if (working) |wl| wl.texts else &.{},
+            .dimensions = mcpWorkingDimensions(working),
         };
         mcpPersistWorking(alloc, project_dir, name, entry, false);
     }
@@ -13526,12 +13535,14 @@ test "layouts sidecar round-trips cache slot" {
     const alloc = arena_state.allocator();
 
     const parts = [_]PartPose{.{ .ref = "U1", .x = 1.5, .y = -2.0, .rot = 90 }};
+    const dimensions = [_]SavedPartEdgeDimension{.{ .ref = "U1", .axis = "x", .edge_id = 17, .offset = 2 }};
     const layouts = [_]SavedLayout{.{
         .name = "best",
         .kind = kind_manual,
         .ts = 123,
         .score = .{ .hpwl = 10, .loop = 2, .caps = 1, .objective = 42 },
         .parts = &parts,
+        .dimensions = &dimensions,
         .default = true,
     }};
     var params = optimizer.Params{};
@@ -13547,6 +13558,11 @@ test "layouts sidecar round-trips cache slot" {
     try std.testing.expectEqualStrings("best", got[0].name);
     try std.testing.expect(got[0].default);
     try std.testing.expectEqual(@as(usize, 1), got[0].parts.len);
+    try std.testing.expectEqual(@as(usize, 1), got[0].dimensions.len);
+    try std.testing.expectEqualStrings("U1", got[0].dimensions[0].ref);
+    try std.testing.expectEqualStrings("x", got[0].dimensions[0].axis);
+    try std.testing.expectEqual(@as(u32, 17), got[0].dimensions[0].edge_id);
+    try std.testing.expectEqual(@as(f64, 2), got[0].dimensions[0].offset);
 
     const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, text, .{});
     const slot = parseCacheSlot(alloc, root.object.get("cache").?) orelse return error.TestParseFailed;
@@ -17160,12 +17176,18 @@ test "blob rows re-key onto live refs and the client Load matches by exact ref" 
         .{ .ref = "amp1/U5", .origin = "U1", .x = 1, .y = 2, .rot = 0 },
         .{ .ref = "amp2/U6", .origin = "U1", .x = 3, .y = 4, .rot = 0 },
     };
+    const dimensions = [_]SavedPartEdgeDimension{
+        .{ .ref = "amp1/U5", .axis = "x", .edge_id = 7, .offset = 2 },
+        .{ .ref = "amp2/U6", .axis = "y", .edge_id = 8, .offset = 3 },
+    };
     const rows = [_]SavedLayout{
-        .{ .name = "hand", .kind = kind_manual, .ts = 1, .score = null, .parts = &row_parts },
+        .{ .name = "hand", .kind = kind_manual, .ts = 1, .score = null, .parts = &row_parts, .dimensions = &dimensions },
     };
     const out = rekeyRowsToLive(alloc, &rows, &live);
     try std.testing.expectEqualStrings("amp1/U7", out[0].parts[0].ref);
     try std.testing.expectEqualStrings("amp2/U9", out[0].parts[1].ref);
+    try std.testing.expectEqualStrings("amp1/U7", out[0].dimensions[0].ref);
+    try std.testing.expectEqualStrings("amp2/U9", out[0].dimensions[1].ref);
     // …and the client builds NO origin map of its own any more: Load is an
     // exact-ref lookup over these server-rekeyed rows.
     const js = @embedFile("assets/pcb_board.js");

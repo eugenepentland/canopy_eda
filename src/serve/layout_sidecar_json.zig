@@ -120,6 +120,34 @@ pub fn parsePartPoses(alloc: std.mem.Allocator, v: ?std.json.Value) ?[]const pag
     return list.toOwnedSlice(alloc) catch null;
 }
 
+/// Parse persistent footprint-origin → outline-edge driving dimensions. Bad
+/// rows are skipped so removing/replacing an outline curve cannot make an old
+/// layout unreadable; the editor surfaces an unmatched edge as a dangling
+/// dimension and lets the user remove it.
+pub fn parsePartEdgeDimensions(alloc: std.mem.Allocator, v: ?std.json.Value) []const page.SavedPartEdgeDimension {
+    const arr = v orelse return &.{};
+    if (arr != .array) return &.{};
+    var list: std.ArrayList(page.SavedPartEdgeDimension) = .empty;
+    for (arr.array.items) |it| {
+        if (it != .object) continue;
+        const ref = it.object.get("ref") orelse continue;
+        const axis = it.object.get("axis") orelse continue;
+        const edge_raw = jsonInt(it.object.get("edge_id"));
+        const offset = jsonOptNum(it.object.get("offset")) orelse continue;
+        if (ref != .string or ref.string.len == 0) continue;
+        if (axis != .string) continue;
+        if (!std.mem.eql(u8, axis.string, "x") and !std.mem.eql(u8, axis.string, "y")) continue;
+        if (edge_raw <= 0 or edge_raw > std.math.maxInt(u32)) continue;
+        list.append(alloc, .{
+            .ref = ref.string,
+            .axis = axis.string,
+            .edge_id = @intCast(edge_raw),
+            .offset = offset,
+        }) catch return list.items;
+    }
+    return list.toOwnedSlice(alloc) catch list.items;
+}
+
 /// Parse a `{"tracks":[…],"vias":[…],"zones":[…]}` saved-routes object (the
 /// same shape the live route JSON and the layouts sidecar use). `zones` is
 /// optional for backward compatibility. Null when absent, malformed, or empty.
@@ -314,6 +342,92 @@ pub fn writeSavedFabricationLayersJson(w: *std.Io.Writer, layers: []const page.S
             try w.writeByte(']');
         }
         try w.writeByte('}');
+    }
+    try w.writeByte(']');
+}
+
+/// Serialize the exact editable outline shape retained by a saved layout.
+pub fn writeSavedOutlineJson(w: *std.Io.Writer, outline: page.SavedOutline) std.Io.Writer.Error!void {
+    try w.print("{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d}", .{ outline.x, outline.y, outline.w, outline.h });
+    if (outline.pts) |points| {
+        try w.writeAll(",\"pts\":[");
+        for (points, 0..) |point, i| {
+            if (i > 0) try w.writeByte(',');
+            try w.print("[{d},{d}]", .{ point[0], point[1] });
+        }
+        try w.writeByte(']');
+    }
+    if (outline.radii) |radii| {
+        try w.writeAll(",\"radii\":[");
+        for (radii, 0..) |radius, i| {
+            if (i > 0) try w.writeByte(',');
+            try w.print("{d}", .{radius});
+        }
+        try w.writeByte(']');
+    }
+    if (outline.sketch) |sketch| {
+        try w.writeAll(",\"sketch\":");
+        try shape_sketch_json.write(w, sketch);
+    }
+    try w.writeByte('}');
+}
+
+/// Serialize footprint-origin driving dimensions in the saved-layout shape.
+pub fn writePartEdgeDimensionsJson(w: *std.Io.Writer, dimensions: []const page.SavedPartEdgeDimension) std.Io.Writer.Error!void {
+    try w.writeByte('[');
+    for (dimensions, 0..) |dimension, i| {
+        if (i > 0) try w.writeByte(',');
+        try w.writeAll("{\"ref\":");
+        try page.writeJsonStr(w, dimension.ref);
+        try w.writeAll(",\"axis\":");
+        try page.writeJsonStr(w, dimension.axis);
+        try w.print(",\"edge_id\":{d},\"offset\":{d}}}", .{ dimension.edge_id, dimension.offset });
+    }
+    try w.writeByte(']');
+}
+
+/// Serialize one saved physical heatsink assembly.
+pub fn writeSavedHeatsinkJson(w: *std.Io.Writer, sink: page.SavedHeatsink) std.Io.Writer.Error!void {
+    try w.print("{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d},\"side\":", .{ sink.x, sink.y, sink.w, sink.h });
+    try page.writeJsonStr(w, sink.side);
+    try w.writeAll(",\"target_ref\":");
+    try page.writeJsonStr(w, sink.target_ref);
+    try w.writeAll(",\"material\":");
+    try page.writeJsonStr(w, sink.material);
+    try w.print(",\"base_mm\":{d},\"fin_height_mm\":{d},\"fin_thickness_mm\":{d},\"fin_gap_mm\":{d},\"fin_axis\":", .{ sink.base_mm, sink.fin_height_mm, sink.fin_thickness_mm, sink.fin_gap_mm });
+    try page.writeJsonStr(w, sink.fin_axis);
+    try w.print(",\"pad_thickness_mm\":{d},\"pad_k_w_mk\":{d}}}", .{ sink.pad_thickness_mm, sink.pad_k_w_mk });
+}
+
+/// Serialize one board-level fabrication text label.
+pub fn writeBoardTextJson(w: *std.Io.Writer, text: font5x7.BoardText) std.Io.Writer.Error!void {
+    try w.print("{{\"x\":{d},\"y\":{d},\"rot\":{d},\"side\":\"{s}\",\"size\":{d},\"text\":", .{ text.x, text.y, text.rot, if (text.bottom) "bottom" else "top", text.size });
+    try page.writeJsonStr(w, text.text);
+    if (text.owner) |owner| switch (owner) {
+        .subcircuit => |subcircuit| {
+            try w.writeAll(",\"subcircuit\":");
+            try page.writeJsonStr(w, subcircuit);
+        },
+        .testpoint => |testpoint| {
+            try w.writeAll(",\"testpoint\":");
+            try page.writeJsonStr(w, testpoint);
+        },
+    };
+    if (text.fabrication_id) try w.writeAll(",\"fabrication_id\":true");
+    try w.writeByte('}');
+}
+
+/// Serialize an optional board text as its object or JSON null.
+pub fn writeOptionalBoardTextJson(w: *std.Io.Writer, text: ?font5x7.BoardText) std.Io.Writer.Error!void {
+    if (text) |value| try writeBoardTextJson(w, value) else try w.writeAll("null");
+}
+
+/// Serialize the board-text array retained by a saved layout.
+pub fn writeSavedTextsJson(w: *std.Io.Writer, texts: []const font5x7.BoardText) std.Io.Writer.Error!void {
+    try w.writeByte('[');
+    for (texts, 0..) |text, i| {
+        if (i > 0) try w.writeByte(',');
+        try writeBoardTextJson(w, text);
     }
     try w.writeByte(']');
 }

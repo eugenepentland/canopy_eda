@@ -4,6 +4,7 @@ const S=PCB.scale,MX=PCB.minx,MY=PCB.miny,M=PCB.margin,G=PCB.grid;
 // One constraint/curve kernel serves every closed editable board shape.
 const OS=window.PCBShapeSketch||window.PCBOutlineSketch||null;
 const P=PCB.parts,PED=PCB.part_edits||{};
+PCB.dimensions=Array.isArray(PCB.dimensions)?PCB.dimensions:[];
 P.forEach(function(p){var e=PED[p.ref];if(e){p.src=e.src;p.srcName=e.srcName;p.srcRef=e.srcRef;}});
 // A null generated fabrication mark is deliberate for reusable sub-circuits.
 // Drop any older adopted copy from the live artwork too; ordinary authored
@@ -363,7 +364,7 @@ var fabricationDefaults=JSON.parse(JSON.stringify(PCB.fabrication_layers));
 // rounded outline in that inner loop made one 20-corner board spend ~110 ms per
 // drag frame.  Keep the exact geometry until an outline edit invalidates it.
 var outlineGeomRev=0,outlineFilletCache=null,boardShapeCache=null,outlineFilletBuilds=0;
-function outlineGeomDrop(){outlineGeomRev++;outlineFilletCache=null;boardShapeCache=null;}
+function outlineGeomDrop(){outlineGeomRev++;outlineFilletCache=null;boardShapeCache=null;partDimensionsApply();}
 // Return the exact native fillets plus a fine chord polygon used only by the
 // browser DRC. The persisted outline remains nominal vertices + radii.
 function outlineFilletGeom(o){var pts=outlinePtsOf(o),rs=o&&o.radii;
@@ -465,9 +466,36 @@ function drawBoardRect(tmp){
  }
  if(linePreview)polySketch(); // connected Line preview stays over the outline it may snap to
  if(PHYSICAL_REVIEW)return; // fabrication dimensions are not printed on the board
+ drawPartDimensions();
  var bt=el("text",{x:(X(br.x)+6).toFixed(1),y:(Y(br.y)+14).toFixed(1),fill:EC,"font-size":"11",opacity:0.8});
  bt.textContent=fmtLen2(br.w)+"×"+fmtLen2(br.h)+(drawn?" (drawn)":(editing?" (edit)":"")); gB.appendChild(bt);
 }
+// Persistent driving dimensions from a footprint origin to a straight outline
+// curve. The signed offset makes the relation directional, while the displayed
+// value stays the familiar positive distance.
+function partDimensionEdge(d){var o=PCB.outline,sk=OS&&o&&o.sketch;if(!sk||!d)return null;
+ var c=OS.curve(sk,+d.edge_id);if(!c||c.kind!=="line")return null;
+ var a=OS.point(sk,c.a),b=OS.point(sk,c.b);if(!a||!b)return null;
+ if(d.axis==="x"&&Math.abs(a.x-b.x)<1e-7)return {curve:c,a:a,b:b,coord:(a.x+b.x)/2};
+ if(d.axis==="y"&&Math.abs(a.y-b.y)<1e-7)return {curve:c,a:a,b:b,coord:(a.y+b.y)/2};
+ return null;}
+var applyingPartDimensions=false;
+function partDimensionsApply(){if(applyingPartDimensions||!Array.isArray(PCB.dimensions)||!PCB.dimensions.length)return [];
+ applyingPartDimensions=true;var moved=[];
+ PCB.dimensions.forEach(function(d){var p=partByRef(d.ref),e=partDimensionEdge(d),off=+d.offset;if(!p||!e||!isFinite(off))return;
+  var v=e.coord+off;if(Math.abs(p[d.axis]-v)<1e-9)return;p[d.axis]=v;
+  var i=P.indexOf(p);if(i>=0&&moved.indexOf(i)<0)moved.push(i);});
+ moved.forEach(setT);if(moved.length){ratsUpdate(moved);copperTouched();dragCacheDrop();paintSoon();updatePropLive();}
+ applyingPartDimensions=false;return moved;}
+function drawPartDimensions(){if(!Array.isArray(PCB.dimensions))return;
+ PCB.dimensions.forEach(function(d){var p=partByRef(d.ref),e=partDimensionEdge(d);if(!p||!e)return;
+  var x1=X(p.x),y1=Y(p.y),x2=X(d.axis==="x"?e.coord:p.x),y2=Y(d.axis==="y"?e.coord:p.y),col="#58d6ff";
+  gB.appendChild(el("line",{x1:x1.toFixed(1),y1:y1.toFixed(1),x2:x2.toFixed(1),y2:y2.toFixed(1),stroke:col,"stroke-width":1.2,"stroke-dasharray":"4 3",opacity:.95}));
+  var tick=4;if(d.axis==="x"){
+   [x1,x2].forEach(function(x){gB.appendChild(el("line",{x1:x.toFixed(1),y1:(y1-tick).toFixed(1),x2:x.toFixed(1),y2:(y1+tick).toFixed(1),stroke:col,"stroke-width":1.2}));});}
+  else [y1,y2].forEach(function(y){gB.appendChild(el("line",{x1:(x1-tick).toFixed(1),y1:y.toFixed(1),x2:(x1+tick).toFixed(1),y2:y.toFixed(1),stroke:col,"stroke-width":1.2}));});
+  var t=el("text",{x:((x1+x2)/2+6).toFixed(1),y:((y1+y2)/2-5).toFixed(1),fill:col,"font-size":"10","font-family":"ui-monospace,monospace","font-weight":"600"});
+  t.textContent=fmtLen2(Math.abs(+d.offset||0));gB.appendChild(t);});}
 function outlineSketchPath(g,sk){sk=sk||(activeSketchShape()||{}).sketch;var cs=g.curves,d="",last=null;
  cs.forEach(function(c){var a=OS.point(sk,c.a),b=OS.point(sk,c.b);if(!a||!b)return;
   if(!last||last.id!==a.id)d+=" M "+X(a.x).toFixed(3)+" "+Y(a.y).toFixed(3);
@@ -2937,6 +2965,18 @@ function wireOutlineEntityProps(body){if(!OS||!PCB.outline||!PCB.outline.sketch)
   enter("prop-sketch-y",function(n){outlineSketchMutate("point Y set",function(s){var p=OS.point(s,sel.id);p.y=n;if(!(s.constraints||[]).some(function(q){return q.kind==="fixed"&&q.a===p.id;}))OS.addConstraint(s,"fixed",p.id);return true;});});}
  else if(e){enter("prop-sketch-length",function(n){if(n>0)outlineDimSet("length",sel.id,n);});enter("prop-sketch-angle",function(n){outlineDimSet("angle",sel.id,n);});enter("prop-sketch-radius",function(n){if(n>0)outlineDimSet("radius",sel.id,n);});}
  body.querySelectorAll("[data-rm-sk]").forEach(function(b){b.addEventListener("click",function(){var id=+b.getAttribute("data-rm-sk");outlineSketchMutate("constraint removed",function(s){OS.removeConstraint(s,id);return true;});});});}
+function partDimensionFor(ref,axis){for(var i=0;i<PCB.dimensions.length;i++){var d=PCB.dimensions[i];if(d.ref===ref&&d.axis===axis)return d;}return null;}
+function partDimensionRows(p){var out='',any=false;["x","y"].forEach(function(axis){var d=partDimensionFor(p.ref,axis);if(!d)return;any=true;
+  var edge=partDimensionEdge(d),label=axis==="x"?"Horizontal to edge":"Vertical to edge";
+  out+='<div class="prop-row"><span class="k">'+label+(edge?'':' (missing)')+'</span><span style="display:flex;align-items:center;gap:4px">'+
+   '<input class="pv-in" style="width:70px" data-part-dim="'+axis+'" type="number" min="0" step="0.001" value="'+(Math.round(Math.abs(+d.offset||0)*1000)/1000)+'"'+(edge?'':' disabled')+'>'+
+   '<button class="btn" style="padding:1px 5px" type="button" data-part-dim-rm="'+axis+'" title="Remove driving dimension">×</button></span></div>';});
+ if(!any)out='<div class="prop-edit-note">Press <kbd>D</kbd>, then drag from this footprint origin to a horizontal or vertical board edge.</div>';
+ return '<div class="prop-sec">Driving dimensions</div>'+(any?'<div class="prop-rows">'+out+'</div>':out);}
+function wirePartDimensionProps(body,p){body.querySelectorAll("[data-part-dim]").forEach(function(inp){inp.addEventListener("change",function(){var d=partDimensionFor(p.ref,inp.getAttribute("data-part-dim")),n=parseFloat(inp.value);if(!d||!isFinite(n)||n<0){renderProps();return;}
+   var pre=snapAll(),sign=d.offset<0?-1:1;d.offset=sign*n;partDimensionsApply();recordUndo(pre);drawBoardRect();scheduleDrc();renderProps();});});
+ body.querySelectorAll("[data-part-dim-rm]").forEach(function(btn){btn.addEventListener("click",function(){var axis=btn.getAttribute("data-part-dim-rm"),pre=snapAll();
+   PCB.dimensions=PCB.dimensions.filter(function(d){return !(d.ref===p.ref&&d.axis===axis);});recordUndo(pre);drawBoardRect();renderProps();});});}
 function renderProps(){var body=document.getElementById("prop-body");if(!body)return;
  if(insp){renderInspProps(body);return;}
  if(selGroup&&!selRef&&GRPS[selGroup]){var gn=GRPS[selGroup].length;
@@ -3003,6 +3043,7 @@ function renderProps(){var body=document.getElementById("prop-body");if(!body)re
    pRow("Type",(p.kind=="hub"?"Hub / IC":"Passive")+(p.locked?" · 🔒 locked":""))+'</div>';
  }
  if(p.fp)h+='<button class="prop-fp" data-court-ref="'+pEsc(p.ref)+'" title="Open library card — datasheet, footprint editor, 3D model">▢ '+pEsc(p.fp)+'</button>';
+ if(!RO&&!mobileInspectMode())h+=partDimensionRows(p);
  // Sub-circuit row: the part's group, and — when the module has a stampable
  // saved layout — the same Stamp the palette offers, so "pull the module's
  // layout" is reachable from the part itself.
@@ -3027,6 +3068,7 @@ function renderProps(){var body=document.getElementById("prop-body");if(!body)re
   'title="Open the schematic page scrolled to this part">Show in schematic →</a>';
  body.innerHTML=h;netIdxDrop();
  if(!RO&&!p.locked)wirePropInputs(p.ref);
+ if(!RO)wirePartDimensionProps(body,p);
  if(fpEdit)wirePassiveFootprint(p);
  var cb=body.querySelector("[data-court-ref]");
  if(cb)cb.addEventListener("click",function(){openFpCard(cb.getAttribute("data-court-ref"));});
@@ -3185,6 +3227,9 @@ function partDragReady(d,m){if(d.active)return true;var a=d.m0||{x:d.sx,y:d.sy};
  d.active=true;svg.style.cursor="grabbing";return true;}
 function dragSnapPose(d,m,g){return {x:d.x0+Math.round((m.x-d.m0.x)/g)*g,
  y:d.y0+Math.round((m.y-d.m0.y)/g)*g};}
+function partPoseConstrained(i,pose){var ref=P[i]&&P[i].ref;if(!ref)return pose;
+ ["x","y"].forEach(function(axis){var d=partDimensionFor(ref,axis),e=d&&partDimensionEdge(d);if(e)pose[axis]=e.coord+(+d.offset||0);});return pose;}
+function entityDimensionLocked(e,axis){return e.idxs.some(function(i){return !!partDimensionFor(P[i].ref,axis);});}
 // Multi-select (marquee): sel = part indices currently box-selected; a drag
 // on any selected part moves the whole set. Painted purple vs the blue .sel.
 var sel=[];
@@ -3378,6 +3423,7 @@ function entBox(e){var x0=1e18,y0=1e18,x1=-1e18,y1=-1e18,sx=0,sy=0;
 // moveEntities; copper left behind (a rail, a bus leaving the block) shows up
 // as an airwire/DRC finding instead of being destructively deleted.
 function commitMove(idxs){if(!idxs.length)return;
+ var driven=partDimensionsApply();driven.forEach(function(i){if(idxs.indexOf(i)<0)idxs.push(i);});
  ratsUpdate(idxs);drawClr();fetchScore();refreshUnplaced();
  dragCacheDrop();paintSoon();scheduleDrc();updatePropLive();
  if(window.PCB3D&&window.PCB3D.sync)window.PCB3D.sync();}
@@ -3399,7 +3445,7 @@ function shiftCopper(cu,dx,dy){
 // object is ever translated twice when two entities could both claim it.
 function moveEntities(ents,deltas,banded){var claimed=new Set(),moved=[],ncu=0;
  var band=banded?selCuCopper():null;
- ents.forEach(function(e,k){var d=deltas[k];if(!d||(!d.dx&&!d.dy))return;
+ ents.forEach(function(e,k){var src=deltas[k];if(!src)return;var d={dx:entityDimensionLocked(e,"x")?0:src.dx,dy:entityDimensionLocked(e,"y")?0:src.dy};if(!d.dx&&!d.dy)return;
   var cu=carriedCopper(e.idxs,e.g,false),t=[],v=[],z=[];
   if(band){band.t.forEach(function(o){if(!claimed.has(o)){claimed.add(o);t.push(o);}});
    band.v.forEach(function(o){if(!claimed.has(o)){claimed.add(o);v.push(o);}});}
@@ -3581,7 +3627,7 @@ function gdragStart(m,down,idxs){var src=idxs||sel;
  var cu=carriedCopper(mv,g,!g);
  var fills=zoneFillsFor(cu.z);
  return {sx:m.x,sy:m.y,lx:m.x,ly:m.y,adx:0,ady:0,moved:false,active:false,down:down,
- snap:snapAll(),g:g,
+ snap:snapAll(),g:g,lockX:mv.some(function(i){return !!partDimensionFor(P[i].ref,"x");}),lockY:mv.some(function(i){return !!partDimensionFor(P[i].ref,"y");}),
  ct:cu.t.map(function(t){return {t:t,x1:t.x1,y1:t.y1,xm:t.xm,ym:t.ym,x2:t.x2,y2:t.y2};}),
  cv:cu.v.map(function(v){return {v:v,x:v.x,y:v.y};}),
  cz:cu.z.map(function(z){return {z:z,poly:(z.poly||[]).map(function(p){return [p[0],p[1]];})};}),
@@ -3845,7 +3891,7 @@ function kbdToggle(){
  kbdOv.innerHTML='<div class="kbd-box"><h3>Keyboard &amp; mouse</h3>'+
   '<div class="kbd-row"><span>Rotate selected group / component +45°</span><kbd>R</kbd></div>'+
   '<div class="kbd-row"><span>Move selected parts by an X/Y distance (dialog)</span><kbd>M</kbd></div>'+
-  '<div class="kbd-row"><span>Measure dx / dy / distance (drag on the board)</span><kbd>D</kbd></div>'+
+  '<div class="kbd-row"><span>Measure, or dimension a selected footprint origin to a board edge</span><kbd>D</kbd></div>'+
   '<div class="kbd-row"><span>Rotate selected group / component −45°</span><kbd>Shift+R</kbd></div>'+
   '<div class="kbd-row"><span>Flip selected group / component top/bottom</span><kbd>F</kbd></div>'+
   '<div class="kbd-row"><span>Lock / unlock selected parts (hovered part fallback)</span><kbd>L</kbd></div>'+
@@ -4009,6 +4055,7 @@ function cloneText(t){return {x:t.x,y:t.y,rot:t.rot||0,side:t.side||"top",size:t
 function cloneTexts(){return (PCB.texts||[]).map(cloneText);}
 function cloneFabricationLayers(){return JSON.parse(JSON.stringify(PCB.fabrication_layers||[]));}
 function cloneHeatsink(){return PCB.heatsink?JSON.parse(JSON.stringify(PCB.heatsink)):null;}
+function cloneDimensions(){return JSON.parse(JSON.stringify(PCB.dimensions||[]));}
 function cloneZones(){return (PCB.zones||[]).map(function(z){return {net:z.net||"",layer:z.layer||"",layers:Array.isArray(z.layers)?z.layers.slice():undefined,poly:(z.poly||[]).map(function(p){return [+p[0],+p[1]];}),filled:!!z.filled,keepout:!!z.keepout,priority:+z.priority||0,g:z.g,
  sketch:z.sketch?(OS?OS.clone(z.sketch):JSON.parse(JSON.stringify(z.sketch))):null};});}
 // Deep-copy the drawn board outline ({x,y,w,h,pts?}) so a snapshot holds its
@@ -4018,7 +4065,7 @@ function cloneOutline(){var o=PCB.outline;if(!o)return null;
   radii:o.radii?o.radii.slice():null,sketch:o.sketch?(OS?OS.clone(o.sketch):JSON.parse(JSON.stringify(o.sketch))):null};}
 // Build a full snapshot. `poses` optionally overrides the current poses (a
 // drag's captured pre-move state); copper + texts + outline are always current.
-function snapAll(poses){var c=cloneCopper();return {poses:poses||snapPoses(),tracks:c.tracks,vias:c.vias,rf_paths:c.rf_paths,zones:cloneZones(),texts:cloneTexts(),outline:cloneOutline(),fabrication_layers:cloneFabricationLayers(),heatsink:cloneHeatsink()};}
+function snapAll(poses){var c=cloneCopper();return {poses:poses||snapPoses(),tracks:c.tracks,vias:c.vias,rf_paths:c.rf_paths,zones:cloneZones(),texts:cloneTexts(),outline:cloneOutline(),fabrication_layers:cloneFabricationLayers(),heatsink:cloneHeatsink(),dimensions:cloneDimensions()};}
 function undoBtns(){var u=document.getElementById("pcb-undo"),r=document.getElementById("pcb-redo");
  if(u)u.disabled=!undoStack.length;if(r)r.disabled=!redoStack.length;}
 // recordUndo accepts a full snapshot {poses,tracks,vias}, a bare pose array
@@ -4056,6 +4103,7 @@ function restoreSnap(s){s.poses.forEach(function(q,i){if(P[i]){P[i].x=q.x;P[i].y
  PCB.fabrication_layers=JSON.parse(JSON.stringify(s.fabrication_layers||fabricationDefaults));
  if(typeof backingEdit!=="undefined"){var restoredBacking=backingLayerIndex>=0&&PCB.fabrication_layers[backingLayerIndex];backingEdit=restoredBacking&&backingRegionIndex>=0?{layer:restoredBacking,index:backingRegionIndex,poly:restoredBacking.regions[backingRegionIndex],sketch:(restoredBacking.sketches||[])[backingRegionIndex]||null}:null;}
  PCB.heatsink=s.heatsink?JSON.parse(JSON.stringify(s.heatsink)):null;
+ PCB.dimensions=JSON.parse(JSON.stringify(s.dimensions||[]));
  outlineGeomDrop();
  drawBoardRect();
  outlineSketchPanelSync();
@@ -4134,6 +4182,7 @@ function saveDraft(sync){if(RO)return;
  copperIdsEnsureAll();var ts=Math.floor(Date.now()/1000);
  try{localStorage.setItem(DRAFT_KEY,JSON.stringify({poses:draftPoses(),
    tracks:PCB.tracks||[],vias:PCB.vias||[],zones:PCB.zones||[],rf_paths:PCB.rf_paths||[],texts:PCB.texts||[],outline:PCB.outline||null,fabrication_layers:PCB.fabrication_layers||[],
+   dimensions:PCB.dimensions||[],
    rev:PCB.rev||0,ts:ts}));}
  catch(e){
   try{localStorage.setItem(DRAFT_KEY,JSON.stringify({poses:draftPoses(),rev:PCB.rev||0,ts:ts,partial:true}));}
@@ -4154,6 +4203,7 @@ function applyDraft(d){recordUndo();
   // those, while a new draft can deliberately restore an empty zone list.
   if(d.zones){PCB.zones=d.zones;PCB.zone_fills=[];pourGeomDrop();}
   PCB.texts=(d.texts||[]).map(cloneText);
+  PCB.dimensions=JSON.parse(JSON.stringify(d.dimensions||[]));
   PCB.outline=d.outline||null;PCB.fabrication_layers=JSON.parse(JSON.stringify(d.fabrication_layers||fabricationDefaults));outlineGeomDrop();drawBoardRect();}
  copperTouched();paintSoon();markDirty();scheduleDrc();}
 // Banner offering Restore/Discard of a found draft (fixed bar at top of page).
@@ -4179,7 +4229,7 @@ if(polyBtn)polyBtn.addEventListener("click",function(){polyArm(!polyMode);});
 var pourZoneBtn=document.getElementById("pcb-pour-zone");
 if(pourZoneBtn)pourZoneBtn.addEventListener("click",function(){pourArm(!pourMode);});
 document.getElementById("pcb-reset").addEventListener("click",function(){recordUndo();
- selClear();P.forEach(function(p,i){p.x=orig[i].x;p.y=orig[i].y;p.rot=orig[i].rot;p.side=orig[i].side;});applyAll();});
+ selClear();P.forEach(function(p,i){p.x=orig[i].x;p.y=orig[i].y;p.rot=orig[i].rot;p.side=orig[i].side;});applyAll();partDimensionsApply();});
 function pad2(n){return (n<10?"0":"")+n;}
 function stamp(){var d=new Date();return pad2(d.getMonth()+1)+"-"+pad2(d.getDate())+" "+pad2(d.getHours())+":"+pad2(d.getMinutes());}
 // Query string for a permalink, carrying the ?sub= scope when the page has one.
@@ -4207,6 +4257,7 @@ function loadLayoutName(nm){
   PCB.tracks=L.routes.tracks||[];PCB.vias=L.routes.vias||[];PCB.rf_paths=L.routes.rf_paths||[];PCB.drc=[];drawRoute();drawDrc();}
  // Restore this layout's custom copper pours; the carved fills recompute below.
  PCB.zones=(L.routes&&L.routes.zones)?L.routes.zones:[];PCB.zone_fills=[];pourGeomDrop();
+ PCB.dimensions=JSON.parse(JSON.stringify(L.dimensions||[]));
  PCB.outline=L.outline||null;PCB.fabrication_layers=JSON.parse(JSON.stringify((L.fabrication_layers&&L.fabrication_layers.length)?L.fabrication_layers:fabricationDefaults));outlineGeomDrop();
  PCB.heatsink=L.heatsink?JSON.parse(JSON.stringify(L.heatsink)):null;drawBoardRect();
  PCB.texts=(L.texts||[]).map(cloneText);
@@ -4393,7 +4444,7 @@ function persistLayoutNow(nm,verb,automatic){var msg=document.getElementById("pc
  // Echo the sidecar rev the page loaded so the server can 409 a stale write
  // (another window saved since) instead of silently clobbering it.
  return fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name)+subq(),{method:"POST",
-   headers:{"Content-Type":"application/json"},body:JSON.stringify({name:nm,parts:parts,routes:routes,outline:PCB.outline||null,fabrication_layers:PCB.fabrication_layers||[],heatsink:PCB.heatsink||null,texts:texts,rev:PCB.rev||0})})
+   headers:{"Content-Type":"application/json"},body:JSON.stringify({name:nm,parts:parts,routes:routes,outline:PCB.outline||null,fabrication_layers:PCB.fabrication_layers||[],heatsink:PCB.heatsink||null,texts:texts,dimensions:PCB.dimensions||[],rev:PCB.rev||0})})
   .then(saveResponse)
   .then(function(j){
     // Adopt the server's bumped rev so the next Save from this window matches.
@@ -4404,9 +4455,9 @@ function persistLayoutNow(nm,verb,automatic){var msg=document.getElementById("pc
     for(var i=0;i<Ls.length;i++)if(Ls[i].name===nm){found=Ls[i];foundAt=i;break;}
     var sb=currentScore;
     var savedScore=sb?{hpwl:sb.hpwl||0,loop:sb.loop_raw||sb.loop||0,caps:sb.caps||0,objective:sb.objective||0}:null;
-    if(found){found.parts=pmap;found.kind="manual";found.score=savedScore;found.routes=routes;found.outline=PCB.outline||null;found.fabrication_layers=cloneFabricationLayers();found.heatsink=cloneHeatsink();found.texts=texts;found.ts=Math.floor(Date.now()/1000);
+    if(found){found.parts=pmap;found.kind="manual";found.score=savedScore;found.routes=routes;found.outline=PCB.outline||null;found.fabrication_layers=cloneFabricationLayers();found.heatsink=cloneHeatsink();found.texts=texts;found.dimensions=cloneDimensions();found.ts=Math.floor(Date.now()/1000);
      if(foundAt>0){Ls.splice(foundAt,1);Ls.unshift(found);}}
-    else Ls.unshift({name:nm,kind:"manual",parts:pmap,score:savedScore,routes:routes,outline:PCB.outline||null,fabrication_layers:cloneFabricationLayers(),heatsink:cloneHeatsink(),texts:texts,ts:Math.floor(Date.now()/1000)});
+    else Ls.unshift({name:nm,kind:"manual",parts:pmap,score:savedScore,routes:routes,outline:PCB.outline||null,fabrication_layers:cloneFabricationLayers(),heatsink:cloneHeatsink(),texts:texts,dimensions:cloneDimensions(),ts:Math.floor(Date.now()/1000)});
     upsertLayoutPanel(nm);updateLayoutRowScore(nm,savedScore);setActiveLayout(nm);layoutNavSync(true);
     // An EXPLICIT save accepts the board as shown — staged parts included
     // (they are covered by the row now), so the autosave gate lifts.
@@ -5042,7 +5093,7 @@ function activeSketchIsArea(){return !!((pourMode&&pourEdit)||(backingMode&&back
 function activeSketchShape(){return backingMode&&backingEdit?backingEdit:(pourMode&&pourEdit?pourEdit:PCB.outline);}
 function activeSketchName(){if(backingMode&&backingEdit)return "backing region";if(pourMode&&pourEdit)return pourEdit.keepout?"copper keepout":"copper pour";return "outline";}
 function activeSketchPromote(){var shape=activeSketchShape();if(activeSketchIsArea()){if(OS)OS.ensurePolygon(shape);return shape;}outlinePromote();return PCB.outline;}
-function activeSketchSync(shape){if(!activeSketchIsArea())return OS.syncOutline(shape);var compiled=OS.syncPolygon(shape);if(backingMode&&backingEdit){backingEdit.layer.regions[backingEdit.index]=shape.poly;(backingEdit.layer.sketches=backingEdit.layer.sketches||[])[backingEdit.index]=shape.sketch;}return compiled;}
+function activeSketchSync(shape){if(!activeSketchIsArea()){var outlineCompiled=OS.syncOutline(shape);outlineGeomDrop();return outlineCompiled;}var compiled=OS.syncPolygon(shape);if(backingMode&&backingEdit){backingEdit.layer.regions[backingEdit.index]=shape.poly;(backingEdit.layer.sketches=backingEdit.layer.sketches||[])[backingEdit.index]=shape.sketch;}return compiled;}
 function activeSketchChanged(compiled){if(backingMode&&backingEdit){markDirty();paintSoon();}
  else if(activeSketchIsArea()){pourGeomDrop();dragCacheDrop();paintSoon();markPoursStale();if(compiled&&compiled.closed)refillPours();}
  else{outlineGeomDrop();if(compiled&&compiled.closed)scheduleDrc();}}
@@ -5868,7 +5919,7 @@ svg.addEventListener("pointermove",function(ev){
   marqEl.setAttribute("width",((bx-ax)*S).toFixed(1));marqEl.setAttribute("height",((by-ay)*S).toFixed(1));return;}
  if(typeof gdrag!=="undefined"&&gdrag){var gg=snapG(),gm=mm(ev);gdrag.lx=gm.x;gdrag.ly=gm.y;
   if(!partDragReady(gdrag,gm))return;
-  var gdx=Math.round((gm.x-gdrag.sx)/gg)*gg,gdy=Math.round((gm.y-gdrag.sy)/gg)*gg;
+  var gdx=gdrag.lockX?0:Math.round((gm.x-gdrag.sx)/gg)*gg,gdy=gdrag.lockY?0:Math.round((gm.y-gdrag.sy)/gg)*gg;
   // Gate on the SNAPPED delta, not on a part actually moving: a selection can
   // be copper-only (a band with Footprints off), and that still has to travel.
   if(gdx===gdrag.adx&&gdy===gdrag.ady)return;
@@ -5887,7 +5938,7 @@ svg.addEventListener("pointermove",function(ev){
   ratsUpdate(gidx);paintSoon();refreshUnplaced();return;}
  if(typeof drag!=="undefined"&&drag){var dm=mm(ev),dg=snapG();
   if(!partDragReady(drag,dm))return;
-  var dp=dragSnapPose(drag,dm,dg),nx=dp.x,ny=dp.y,di=drag.i;
+  var dp=partPoseConstrained(drag.i,dragSnapPose(drag,dm,dg)),nx=dp.x,ny=dp.y,di=drag.i;
   if(nx!==P[di].x||ny!==P[di].y){P[di].x=nx;P[di].y=ny;
    if(!drag.moved){drag.moved=true;testPointSilkRelease(P[di].ref);copperTouched();}ratsUpdate([di]);paintSoon();refreshUnplaced();
    if(selRef===P[di].ref)updatePropLive();}return;}
@@ -9919,27 +9970,50 @@ function apPresetApply(n){
   if(on&&heatsinkMode)heatsinkArm(false);
   if(on){if(padAlignMode)padAlignArm(false);if(drawMode)drawModeSet(false);if(textMode)txArm(false);
    if(polyMode)polyArm(false);if(outlineMode)outlineArm(false);if(pourMode)pourArm(false);closeMoveDialog();}
-  if(rulerBtn)rulerBtn.classList.toggle("active",on);
-  if(!on){rulerClear();rulerDraw=null;stSet("st-dxdy","");var msg=document.getElementById("pcb-savemsg");if(msg&&/measure/.test(msg.textContent))msg.textContent="";}
-  else{var m2=document.getElementById("pcb-savemsg");if(m2){m2.style.color="#e3b341";m2.textContent="measure: drag to measure (Esc exits)";}}
+ if(rulerBtn)rulerBtn.classList.toggle("active",on);
+  if(!on){rulerClear();rulerDraw=null;stSet("st-dxdy","");var msg=document.getElementById("pcb-savemsg");if(msg&&/(measure|dimension)/.test(msg.textContent))msg.textContent="";}
+  else{var m2=document.getElementById("pcb-savemsg"),rp=selRef&&partByRef(selRef);if(m2){m2.style.color="#e3b341";m2.textContent=rp?
+    ("dimension: drag from "+refLabel(rp.ref)+" origin to a horizontal or vertical board edge"):
+    "measure: drag to measure (Esc exits)";}}
   toolSync();}
  // Remove the drawn ruler overlay only — the live {a,b} drag state stays so
  // the pointermove handler can keep redrawing. rulerArm(false) is where the
  // whole gesture is retired.
  function rulerClear(){if(rgRuler&&rgRuler.parentNode)rgRuler.parentNode.removeChild(rgRuler);rgRuler=null;}
- function rulerDrawNow(a,b){rulerClear();rgRuler=el("g",{});gU.appendChild(rgRuler);
+ function rulerDrawNow(a,b,state){rulerClear();rgRuler=el("g",{});gU.appendChild(rgRuler);
   var dx=b.x-a.x,dy=b.y-a.y,dist=Math.hypot(dx,dy);
   rgRuler.appendChild(el("line",{"class":"pcb-ruler-line",x1:X(a.x).toFixed(1),y1:Y(a.y).toFixed(1),x2:X(b.x).toFixed(1),y2:Y(b.y).toFixed(1)}));
   // dx / dy guide legs
   rgRuler.appendChild(el("line",{"class":"pcb-ruler-line",x1:X(a.x).toFixed(1),y1:Y(a.y).toFixed(1),x2:X(b.x).toFixed(1),y2:Y(a.y).toFixed(1),opacity:0.5}));
   rgRuler.appendChild(el("line",{"class":"pcb-ruler-line",x1:X(b.x).toFixed(1),y1:Y(a.y).toFixed(1),x2:X(b.x).toFixed(1),y2:Y(b.y).toFixed(1),opacity:0.5}));
   var lt=el("text",{"class":"pcb-ruler-lbl",x:(X(b.x)+8).toFixed(1),y:(Y(b.y)-6).toFixed(1)});
-  lt.textContent="d="+fmtLen2(dist)+"  dx="+fmtLen2(Math.abs(dx))+"  dy="+fmtLen2(Math.abs(dy));
+  lt.textContent=state&&state.ref?((state.axis==="x"?"X":"Y")+" = "+fmtLen2(Math.abs(state.axis==="x"?dx:dy))+(state.target?" · release to set":" · snap to edge")):
+   ("d="+fmtLen2(dist)+"  dx="+fmtLen2(Math.abs(dx))+"  dy="+fmtLen2(Math.abs(dy)));
   rgRuler.appendChild(lt);
   // Mirror the measurement into the status bar's delta segment.
   stSet("st-dxdy","d "+fmtLen2(dist)+"  dx "+fmtLen2(Math.abs(dx))+"  dy "+fmtLen2(Math.abs(dy)));}
  PCB.rulerOff=function(){if(rulerMode)rulerArm(false);};
  if(rulerBtn)rulerBtn.addEventListener("click",function(){rulerArm(!rulerMode);});
+ function dimensionEdgeAt(m,axis){var hit=edgeAt(m);if(!hit)return null;var o=outlineEditable(),pts=outlinePtsOf(o),a,b,c=null;
+  if(OS&&o&&o.sketch&&hit.id){c=OS.curve(o.sketch,hit.id);if(!c||c.kind!=="line")return null;a=OS.point(o.sketch,c.a);b=OS.point(o.sketch,c.b);}
+  else{if(!pts||hit.i<0||hit.i>=pts.length)return null;a={x:pts[hit.i][0],y:pts[hit.i][1]};b={x:pts[(hit.i+1)%pts.length][0],y:pts[(hit.i+1)%pts.length][1]};}
+  if(axis==="x"&&Math.abs(a.x-b.x)<1e-7)return {id:c&&c.id||null,i:hit.i,coord:(a.x+b.x)/2,px:hit.px,py:hit.py};
+  if(axis==="y"&&Math.abs(a.y-b.y)<1e-7)return {id:c&&c.id||null,i:hit.i,coord:(a.y+b.y)/2,px:hit.px,py:hit.py};return null;}
+ var dimensionDlg=null;
+ function closePartDimensionDialog(){if(dimensionDlg&&dimensionDlg.parentNode)dimensionDlg.parentNode.removeChild(dimensionDlg);dimensionDlg=null;}
+ function openPartDimensionDialog(state){rulerArm(false);closePartDimensionDialog();var p=partByRef(state.ref);if(!p||!state.target)return;
+  var dlg=document.createElement("div");dimensionDlg=dlg;dlg.style.cssText="position:absolute;z-index:60;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px;font:12px system-ui;color:#c9d1d9;box-shadow:0 6px 22px rgba(0,0,0,.6);min-width:250px";
+  var sr=svg.getBoundingClientRect(),vb2=svg.viewBox.baseVal,kx=sr.width/vb2.w,ky=sr.height/vb2.h;
+  dlg.style.left=(svg.offsetLeft+(X(state.b.x)-vb2.x)*kx+8)+"px";dlg.style.top=(svg.offsetTop+(Y(state.b.y)-vb2.y)*ky+8)+"px";
+  var title=document.createElement("div");title.style.cssText="font-weight:600;margin-bottom:6px";title.textContent=(state.axis==="x"?"Horizontal":"Vertical")+" distance to board edge";dlg.appendChild(title);
+  var hint=document.createElement("div");hint.style.cssText="color:#8b949e;font-size:11px;line-height:1.35;margin-bottom:8px";hint.textContent=refLabel(p.ref)+" origin will follow this edge when the board outline changes.";dlg.appendChild(hint);
+  var unit=viewSt.units==="mil"?0.0254:1,field=document.createElement("input");field.type="number";field.min="0";field.step="any";field.inputMode="decimal";field.value=(Math.abs(p[state.axis]-state.target.coord)/unit).toFixed(3);field.style.cssText="width:150px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;padding:4px";
+  var row=document.createElement("label");row.style.cssText="display:flex;align-items:center;gap:7px";row.appendChild(field);row.appendChild(document.createTextNode(viewSt.units==="mil"?"mil":"mm"));dlg.appendChild(row);
+  var ba=document.createElement("div");ba.style.cssText="margin-top:9px;display:flex;gap:6px;justify-content:flex-end";var cancel=document.createElement("button"),ok=document.createElement("button");cancel.className=ok.className="btn";cancel.textContent="Cancel";ok.textContent="Set dimension";ok.style.cssText="border-color:#2ea043;color:#7ee787";ba.appendChild(cancel);ba.appendChild(ok);dlg.appendChild(ba);
+  function commit(){var n=parseFloat(field.value);if(!isFinite(n)||n<0)return;var pre=snapAll();outlinePromote();var edge=dimensionEdgeAt(state.cursor,state.axis),part=partByRef(state.ref);if(!edge||!edge.id||!part){restoreSnap(pre);closePartDimensionDialog();outlineMsg("dimension unchanged — the target must be a straight horizontal or vertical board edge");return;}
+   var sign=part[state.axis]-edge.coord<0?-1:1,d={ref:part.ref,axis:state.axis,edge_id:edge.id,offset:sign*n*unit},old=partDimensionFor(part.ref,state.axis);
+   if(old){old.edge_id=d.edge_id;old.offset=d.offset;}else PCB.dimensions.push(d);partDimensionsApply();recordUndo(pre);closePartDimensionDialog();drawBoardRect();renderProps();scheduleDrc();outlineMsg((state.axis==="x"?"horizontal":"vertical")+" driving dimension set to "+fmtLen(Math.abs(d.offset))+" — Save/Update to keep");}
+  cancel.addEventListener("click",closePartDimensionDialog);ok.addEventListener("click",commit);dlg.addEventListener("keydown",function(ev){ev.stopPropagation();if(ev.key==="Enter"){ev.preventDefault();commit();}else if(ev.key==="Escape"){ev.preventDefault();closePartDimensionDialog();}});svg.parentNode.appendChild(dlg);field.focus();field.select();}
  // ── Move selected parts by an X/Y distance (M) ────────────────────────
  // M with parts selected opens a small dialog for X and Y distances in the
  // current display units. One shared delta for every selected entity, so the
@@ -10031,12 +10105,16 @@ function apPresetApply(n){
  // phase, and swallows the gesture only while in ruler mode.
  svg.addEventListener("pointerdown",function(ev){if(!rulerMode||ev.button!==0)return;
   ev.stopPropagation();ev.preventDefault();try{svg.setPointerCapture(ev.pointerId);}catch(e){}
-  var m=mm(ev);rulerDraw={a:m,b:m};rulerDrawNow(m,m);},true);
+  var m=mm(ev),p=selRef&&partByRef(selRef),a=p?{x:p.x,y:p.y}:m;rulerDraw={a:a,b:a,ref:p&&p.ref||null,axis:null,target:null,cursor:m};rulerDrawNow(a,a,rulerDraw);},true);
  svg.addEventListener("pointermove",function(ev){if(!rulerMode||!rulerDraw)return;
-  ev.stopPropagation();var m=mm(ev);rulerDraw.b=m;rulerDrawNow(rulerDraw.a,m);},true);
+  ev.stopPropagation();var m=mm(ev);rulerDraw.cursor=m;
+  if(rulerDraw.ref){var dx=m.x-rulerDraw.a.x,dy=m.y-rulerDraw.a.y,axis=Math.abs(dx)>=Math.abs(dy)?"x":"y",target=dimensionEdgeAt(m,axis);rulerDraw.axis=axis;rulerDraw.target=target;
+   rulerDraw.b=axis==="x"?{x:target?target.coord:m.x,y:rulerDraw.a.y}:{x:rulerDraw.a.x,y:target?target.coord:m.y};}
+  else rulerDraw.b=m;rulerDrawNow(rulerDraw.a,rulerDraw.b,rulerDraw);},true);
  svg.addEventListener("pointerup",function(ev){if(!rulerMode||!rulerDraw)return;
   ev.stopPropagation();try{svg.releasePointerCapture(ev.pointerId);}catch(e){}
-  rulerDraw=null;/* keep the measurement drawn until next drag / Esc */},true);
+  var done=rulerDraw;rulerDraw=null;if(done.ref&&done.target)openPartDimensionDialog(done);
+  /* ordinary measurement stays drawn until next drag / Esc */},true);
 })();
 // ── Collapsible control deck (accordion) + board-view overlays ──────────
 (function(){

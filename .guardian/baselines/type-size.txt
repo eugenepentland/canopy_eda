@@ -81,7 +81,7 @@
 14 src/serve/mcp_tools.zig|DesignSummary
 27 src/serve/pcb_layout_page.zig|PngRequest
 14 src/serve/pcb_layout_page.zig|SavedHeatsink
-12 src/serve/pcb_layout_page.zig|SavedLayout
+13 src/serve/pcb_layout_page.zig|SavedLayout
 8 src/serve/pcb_layout_page.zig|SavedOutline
 12 src/serve/pcb_layout_page.zig|SavedTrack
 10 src/serve/pcb_layout_page.zig|SavedVia

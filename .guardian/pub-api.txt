@@ -3320,6 +3320,7 @@ src/serve/layout_sidecar_json.zig::jsonStrField | fn jsonStrField(v: ?std.json.V
 src/serve/layout_sidecar_json.zig::layerIndexFromJson | fn layerIndexFromJson(v: ?std.json.Value) u8
 src/serve/layout_sidecar_json.zig::parseOutlinePts | fn parseOutlinePts(alloc: std.mem.Allocator, v: ?std.json.Value) ?[]const [2]f64
 src/serve/layout_sidecar_json.zig::parseOutlineRadii | fn parseOutlineRadii(alloc: std.mem.Allocator, v: ?std.json.Value, count: usize) ?[]const f64
+src/serve/layout_sidecar_json.zig::parsePartEdgeDimensions | fn parsePartEdgeDimensions(alloc: std.mem.Allocator, v: ?std.json.Value) []const page.SavedPartEdgeDimension
 src/serve/layout_sidecar_json.zig::parsePartPoses | fn parsePartPoses(alloc: std.mem.Allocator, v: ?std.json.Value) ?[]const page.PartPose
 src/serve/layout_sidecar_json.zig::parseSavedFabricationLayers | fn parseSavedFabricationLayers(alloc: std.mem.Allocator, v: ?std.json.Value) []const page.SavedFabricationLayer
 src/serve/layout_sidecar_json.zig::parseSavedHeatsink | fn parseSavedHeatsink(v: ?std.json.Value) ?page.SavedHeatsink
@@ -3329,7 +3330,13 @@ src/serve/layout_sidecar_json.zig::parseSavedTexts | fn parseSavedTexts(alloc: s
 src/serve/layout_sidecar_json.zig::parseViaSpan | fn parseViaSpan(v: ?std.json.Value) ?[2]u8
 src/serve/layout_sidecar_json.zig::saveRejection | fn saveRejection(arena: std.mem.Allocator, rules: ?optimizer.BoardRules, entry: page.SavedLayout) ?[]const u8
 src/serve/layout_sidecar_json.zig::stackupLayerRules | fn stackupLayerRules(arena: std.mem.Allocator, block: *const env_mod.DesignBlock) std.mem.Allocator.Error!optimizer.BoardRules
+src/serve/layout_sidecar_json.zig::writeBoardTextJson | fn writeBoardTextJson(w: *std.Io.Writer, text: font5x7.BoardText) std.Io.Writer.Error!void
+src/serve/layout_sidecar_json.zig::writeOptionalBoardTextJson | fn writeOptionalBoardTextJson(w: *std.Io.Writer, text: ?font5x7.BoardText) std.Io.Writer.Error!void
+src/serve/layout_sidecar_json.zig::writePartEdgeDimensionsJson | fn writePartEdgeDimensionsJson(w: *std.Io.Writer, dimensions: []const page.SavedPartEdgeDimension) std.Io.Writer.Error!void
 src/serve/layout_sidecar_json.zig::writeSavedFabricationLayersJson | fn writeSavedFabricationLayersJson(w: *std.Io.Writer, layers: []const page.SavedFabricationLayer) std.Io.Writer.Error!void
+src/serve/layout_sidecar_json.zig::writeSavedHeatsinkJson | fn writeSavedHeatsinkJson(w: *std.Io.Writer, sink: page.SavedHeatsink) std.Io.Writer.Error!void
+src/serve/layout_sidecar_json.zig::writeSavedOutlineJson | fn writeSavedOutlineJson(w: *std.Io.Writer, outline: page.SavedOutline) std.Io.Writer.Error!void
+src/serve/layout_sidecar_json.zig::writeSavedTextsJson | fn writeSavedTextsJson(w: *std.Io.Writer, texts: []const font5x7.BoardText) std.Io.Writer.Error!void
 src/serve/layout_sidecar_json.zig::writeSavedZonesJson | fn writeSavedZonesJson(w: *std.Io.Writer, zones: []const page.SavedZone) std.Io.Writer.Error!void
 src/serve/library.zig::Datasheet struct_
 src/serve/library.zig::HandlerError value
@@ -3508,6 +3515,7 @@ src/serve/pcb_layout_page.zig::SavedFabricationLayer struct_
 src/serve/pcb_layout_page.zig::SavedHeatsink struct_
 src/serve/pcb_layout_page.zig::SavedLayout struct_
 src/serve/pcb_layout_page.zig::SavedOutline struct_
+src/serve/pcb_layout_page.zig::SavedPartEdgeDimension struct_
 src/serve/pcb_layout_page.zig::SavedRoutes struct_
 src/serve/pcb_layout_page.zig::SavedTrack struct_
 src/serve/pcb_layout_page.zig::SavedVia struct_
