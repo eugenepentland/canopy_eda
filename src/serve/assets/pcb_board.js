@@ -5280,7 +5280,7 @@ function outlineInsertVertex(e){var pre=snapAll(),shape=activeSketchPromote();
 // actual move, so a bare click never rewrites a rect into a polygon).
 function osegStart(e,m){var shape=activeSketchIsArea()?activeSketchShape():outlineEditable(),pts=outlinePtsOf(shape),i=e.i,j=(i+1)%pts.length;
  var sk=OS&&shape.sketch,cs=sk&&OS.physicalCurves(sk),c=cs&&cs[i],ap=c&&OS.point(sk,c.a),bp=c&&OS.point(sk,c.b);
- return {i:i,j:j,id:c&&c.id,aid:c&&c.a,bid:c&&c.b,mid0:c&&c.mid&&c.mid.slice(),m0:m,a0:c?[ap.x,ap.y]:pts[i].slice(),b0:c?[bp.x,bp.y]:pts[j].slice(),moved:false,snap:snapAll()};}
+ return {i:i,j:j,id:c&&c.id,aid:c&&c.a,bid:c&&c.b,mid0:c&&c.mid&&c.mid.slice(),sketch0:sk&&OS.clone(sk),m0:m,a0:c?[ap.x,ap.y]:pts[i].slice(),b0:c?[bp.x,bp.y]:pts[j].slice(),moved:false,snap:snapAll()};}
 function osegMove(m,square){var sd=osdrag,shape=activeSketchIsArea()?activeSketchShape():outlineEditable(),cur=outlinePtsOf(shape);
  var dx=Math.round((m.x-sd.m0.x)/G)*G,dy=Math.round((m.y-sd.m0.y)/G)*G;
  var ex=sd.b0[0]-sd.a0[0],ey=sd.b0[1]-sd.a0[1],axisTol=1e-6;
@@ -5294,7 +5294,7 @@ function osegMove(m,square){var sd=osdrag,shape=activeSketchIsArea()?activeSketc
  if(liveA&&liveB){if(liveA.x===na[0]&&liveA.y===na[1]&&liveB.x===nb[0]&&liveB.y===nb[1])return;}
  else if(cur[sd.i][0]===na[0]&&cur[sd.i][1]===na[1]&&cur[sd.j][0]===nb[0]&&cur[sd.j][1]===nb[1])return;
  shape=activeSketchPromote();
- if(OS&&shape.sketch){if(!sd.id){var sc=OS.physicalCurves(shape.sketch)[sd.i];sd.id=sc&&sc.id;sd.aid=sc&&sc.a;sd.bid=sc&&sc.b;}
+ if(OS&&shape.sketch){if(sd.sketch0)shape.sketch=OS.clone(sd.sketch0);if(!sd.id){var sc=OS.physicalCurves(shape.sketch)[sd.i];sd.id=sc&&sc.id;sd.aid=sc&&sc.a;sd.bid=sc&&sc.b;if(!sd.sketch0)sd.sketch0=OS.clone(shape.sketch);}
   var ap=OS.point(shape.sketch,sd.aid),bp=OS.point(shape.sketch,sd.bid),scur=OS.curve(shape.sketch,sd.id);ap.x=sd.a0[0];ap.y=sd.a0[1];bp.x=sd.b0[0];bp.y=sd.b0[1];if(scur&&sd.mid0)scur.mid=[sd.mid0[0]+dx,sd.mid0[1]+dy];OS.moveCurve(shape.sketch,sd.id,dx,dy);activeSketchSync(shape);}
  else{var pts=shape.pts;pts[sd.i]=na;pts[sd.j]=nb;}
  sd.moved=true;if(!activeSketchIsArea())outlineBboxSync();drawBoardRect();}

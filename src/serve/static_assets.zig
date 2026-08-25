@@ -356,6 +356,24 @@ test "axis-constrained outline endpoint drags project the cursor onto the segmen
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "OS.movePoint(shape.sketch,vdrag.id,vgx,vgy,vdrag.axis)") != null);
 }
 
+// spec: Web Server - Sliding a shape-sketch line through tangent fillets carries each fillet rigidly and changes only the length of its outer straight neighbour
+test "shape edge slides carry tangent fillets without changing their geometry" {
+    // The shared kernel recognizes only a true line-arc-line tangent chain, so
+    // an unrelated authored arc is still left to the ordinary constraint solve.
+    try std.testing.expect(std.mem.indexOf(u8, shape_sketch_js, "function rigidFilletAt(s,host,pid)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shape_sketch_js, "hit.length!==1||hit[0].kind!==\"arc\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shape_sketch_js, "outer.length!==1||outer[0].kind!==\"line\"") != null);
+    // Its far tangent point and native three-point midpoint follow the dragged
+    // edge. The final exact translation preserves radius and sweep rather than
+    // relying on the numerical solver to leave them merely close.
+    try std.testing.expect(std.mem.indexOf(u8, shape_sketch_js, "{arc:f.arc.id,x:f.mx+dx,y:f.my+dy,weight:50}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shape_sketch_js, "f.far.x=f.fx+tx;f.far.y=f.fy+ty;f.arc.mid[0]=f.mx+tx;f.arc.mid[1]=f.my+ty;") != null);
+    // Every pointer move starts from the gesture snapshot, preventing repeated
+    // move events from accumulating rounding or solver drift in the fillet.
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "sketch0:sk&&OS.clone(sk)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "if(sd.sketch0)shape.sketch=OS.clone(sd.sketch0)") != null);
+}
+
 fn registryHasAsset(name: []const u8) bool {
     for (registry) |a| {
         if (std.mem.eql(u8, a.name, name)) return true;

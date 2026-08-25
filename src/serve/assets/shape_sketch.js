@@ -165,7 +165,7 @@
       else if(q.kind==="symmetric"&&a&&b&&q.c!=null){var axis=curve(s,q.c);if(axis){var la=point(s,axis.a),lb=point(s,axis.b),mid={x:(a.x+b.x)/2,y:(a.y+b.y)/2},ad=lineDir(s,axis);add(pointLineResidual(mid,la,lb));if(ad)add((b.x-a.x)*ad.x+(b.y-a.y)*ad.y);}}
       else if(q.kind==="fixed"&&a&&fixed[q.a]){add(a.x-fixed[q.a].x,10);add(a.y-fixed[q.a].y,10);}
     });
-    (targets||[]).forEach(function(t){var p=point(s,t.id);if(p){add(p.x-t.x,t.weight||25);add(p.y-t.y,t.weight||25);}});
+    (targets||[]).forEach(function(t){if(t.arc!=null){var ac=curve(s,t.arc);if(ac&&ac.kind==="arc"&&ac.mid){add(ac.mid[0]-t.x,t.weight||25);add(ac.mid[1]-t.y,t.weight||25);}return;}var p=point(s,t.id);if(p){add(p.x-t.x,t.weight||25);add(p.y-t.y,t.weight||25);}});
     return out;
   }
   function gaussian(a,b) {
@@ -223,7 +223,23 @@
     if(axis==="horizontal")y=p.y;else if(axis==="vertical")x=p.x;
     return {x:x,y:y};}
   function movePoint(s,id,x,y,axis){var target=pointDragTarget(s,id,x,y,axis);return solve(s,{targets:[{id:id,x:target.x,y:target.y,weight:50}],iterations:10,stay:1e-4});}
-  function moveCurve(s,id,dx,dy){var c=curve(s,id);if(!c)return null;var a=point(s,c.a),b=point(s,c.b);return solve(s,{targets:[{id:a.id,x:a.x+dx,y:a.y+dy,weight:50},{id:b.id,x:b.x+dx,y:b.y+dy,weight:50}],iterations:10,stay:1e-4});}
+  // A tangent arc between the dragged line and its next straight neighbour is
+  // a fillet, not an independently deformable curve. Record its three-point
+  // geometry so a line slide can carry the whole arc rigidly and move only the
+  // joined endpoint of the outer line (which then merely changes length).
+  function rigidFilletAt(s,host,pid){if(!host||host.kind!=="line")return null;var pcs=physicalCurves(s),hit=pcs.filter(function(c){return c!==host&&(c.a===pid||c.b===pid);});
+    if(hit.length!==1||hit[0].kind!=="arc")return null;var arc=hit[0],farId=arc.a===pid?arc.b:arc.a,outer=pcs.filter(function(c){return c!==arc&&(c.a===farId||c.b===farId);});
+    if(outer.length!==1||outer[0].kind!=="line")return null;var ht=tangentAt(s,host,pid),an=tangentAt(s,arc,pid),af=tangentAt(s,arc,farId),ot=tangentAt(s,outer[0],farId);
+    if(!ht||!an||!af||!ot||Math.abs(ht.x*an.y-ht.y*an.x)>1e-5||Math.abs(af.x*ot.y-af.y*ot.x)>1e-5)return null;
+    var near=point(s,pid),far=point(s,farId);return {arc:arc,near:near,far:far,nx:near.x,ny:near.y,fx:far.x,fy:far.y,mx:+arc.mid[0],my:+arc.mid[1]};}
+  function moveCurve(s,id,dx,dy){var c=curve(s,id);if(!c)return null;var a=point(s,c.a),b=point(s,c.b),fillets=[],fa=rigidFilletAt(s,c,c.a),fb=rigidFilletAt(s,c,c.b),targets=[{id:a.id,x:a.x+dx,y:a.y+dy,weight:50},{id:b.id,x:b.x+dx,y:b.y+dy,weight:50}];
+    if(fa)fillets.push(fa);if(fb&&(!fa||fb.arc!==fa.arc))fillets.push(fb);fillets.forEach(function(f){targets.push({id:f.far.id,x:f.fx+dx,y:f.fy+dy,weight:50},{arc:f.arc.id,x:f.mx+dx,y:f.my+dy,weight:50});});
+    var result=solve(s,{targets:targets,iterations:10,stay:1e-4});if(result.conflict)return result;
+    // The solver honours surrounding dimensions/axes, then the actual motion
+    // of the shared tangent point supplies one exact translation for all three
+    // arc points. This last assignment keeps radius, sweep and shape invariant
+    // instead of leaving them merely close under a weighted numeric solve.
+    fillets.forEach(function(f){var tx=f.near.x-f.nx,ty=f.near.y-f.ny;f.far.x=f.fx+tx;f.far.y=f.fy+ty;f.arc.mid[0]=f.mx+tx;f.arc.mid[1]=f.my+ty;});return result;}
   function insertPoint(s,curveId,x,y){var idx=s.curves.findIndex(function(c){return c.id===curveId;}),c=idx>=0?s.curves[idx]:null;if(!c||c.construction)return null;
     var pid=nextId(s),cid=pid+1,oldb=c.b;c.b=pid;c.kind="line";delete c.mid;s.points.push({id:pid,x:x,y:y});s.curves.splice(idx+1,0,{id:cid,kind:"line",a:pid,b:oldb});return pid;}
   function dropEntities(s,pointIds,curveIds){var ps={},cs={};(pointIds||[]).forEach(function(id){ps[id]=1;});(curveIds||[]).forEach(function(id){cs[id]=1;});
