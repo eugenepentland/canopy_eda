@@ -688,14 +688,17 @@ fn thermalRelief(g: *Gx, p: optimizer.Part, pad: geometry.Pad, gap: f64) Error!v
 /// opening polygon where an exposed run reaches an RF transition via — that
 /// `mask_relief.computeRouted` returns, which already merged runs across joints,
 /// dropped stretches under its 1 mm floor, and clipped trace openings one mask
-/// web before every pad. The exact clipped outline retains its terminal
-/// fillets; no later clear-polarity pass can square them off. A declared
-/// perimeter fence adds one continuous
+/// web before pads that terminate or cross the route. For a pad beside a wider
+/// RF opening, a clear-polarity copy of that pad's aperture plus one web puts
+/// back only a local pad-shaped mask island; the pad aperture is then reopened,
+/// so the trace exposure remains continuous around it. A declared perimeter
+/// fence adds one continuous
 /// opening centred on the exact finished edge; CAM clips the outside half,
 /// leaving the authored `mask-width` band inward on both faces.
 fn writeMask(g: *Gx, placement: optimizer.Placement, copper: Copper, side: optimizer.Side) Error!void {
     const margin = placement.rules.design.mask.margin;
-    _ = try writeMaskRelief(g, placement, copper, side);
+    const had_relief = try writeMaskRelief(g, placement, copper, side);
+    if (had_relief) try writeMaskPadIslands(g, placement, copper, side);
     for (placement.parts) |p| {
         for (p.pads) |pad| {
             if (isSmd(pad) and p.side != side) {
@@ -743,6 +746,31 @@ fn writeMask(g: *Gx, placement: optimizer.Placement, copper: Copper, side: optim
             try protectOppositeEpSignals(g, placement, copper, p, pad, side);
         }
     }
+}
+
+/// Put solder mask back locally where a routed RF opening overlaps a pad's
+/// retaining web. This pass deliberately paints the exact pad shape plus its
+/// aperture margin and one mask web, rather than clipping a full-width bar out
+/// of the relief run. `writeMask` immediately re-flashes the ordinary pad
+/// apertures afterward, leaving a pad-shaped island/ring while the exposed RF
+/// trace continues on both sides.
+fn writeMaskPadIslands(g: *Gx, placement: optimizer.Placement, copper: Copper, side: optimizer.Side) Error!void {
+    const design = placement.rules.design;
+    try g.polarity(false);
+    for (placement.parts) |p| {
+        for (p.pads) |pad| {
+            var aperture_margin = pad.maskMargin(design.mask.margin);
+            if (isSmd(pad) and p.side != side) {
+                if (!isExposedPaddle(p, pad)) continue;
+                if (oppositeEpHasNonGroundPour(g, placement, copper, p, pad, side)) continue;
+                // The opposite-face EP aperture is exact-size, so its island
+                // grows only by the required web.
+                aperture_margin = 0;
+            }
+            try flashPad(g, p, pad, aperture_margin + design.mask.web);
+        }
+    }
+    try g.polarity(true);
 }
 
 /// Dark relief openings over every relieved net's copper on this face. A
@@ -2444,8 +2472,8 @@ test "max-freq mask relief emits polygons and no via flashes" {
     try testing.expect(std.mem.indexOf(u8, bottom, "X5000000Y5000000D03*") == null);
 }
 
-// spec: export_gerber - mask relief geometry itself stops one mask web before pad openings so terminal fillets survive the final fabrication layer
-test "continuous mask relief does not re-cover every pad" {
+// spec: export_gerber - mask relief restores a local pad-shaped web and then reopens the pad without interrupting the exposed trace
+test "continuous mask relief restores a local pad island" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
@@ -2461,15 +2489,41 @@ test "continuous mask relief does not re-cover every pad" {
     };
     const mask = try reliefMask(arena, &parts, &nets, &rules, .{ .tracks = &tracks });
 
-    // The sampled opening stops at x=8.55: the pad aperture + web excludes the
-    // full 0.777 mm-half-width relief, not only its centreline. The continuous
-    // opening needs no clear/dark cap repair, and the
-    // legacy 1.5 x 1.0 mm all-pad subtraction must not return.
+    // The centreline dam still ends the relief at x=9.35. A clear-polarity
+    // 1.3 x 0.8 mm copy then restores exactly the pad opening plus one 0.1 mm
+    // web; dark polarity reopens the ordinary 1.1 x 0.6 mm pad aperture.
     try testing.expect(std.mem.indexOf(u8, mask, "G36*") != null);
-    try testing.expect(std.mem.indexOf(u8, mask, "X8550000Y") != null);
-    try testing.expect(std.mem.indexOf(u8, mask, "%LPC*%") == null);
+    try testing.expect(std.mem.indexOf(u8, mask, "X9350000Y") != null);
+    try testing.expect(std.mem.indexOf(u8, mask, "%LPC*%") != null);
+    try testing.expect(std.mem.indexOf(u8, mask, "R,1.300000X0.800000*%") != null);
+    try testing.expect(std.mem.indexOf(u8, mask, "%LPD*%") != null);
     try testing.expect(std.mem.indexOf(u8, mask, "R,1.500000X1.000000*%") == null);
     try testing.expect(std.mem.indexOf(u8, mask, "R,1.100000X0.600000*%") != null); // pad opening
+}
+
+test "nearby pad island leaves the RF trace relief continuous" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const pads = [_]geometry.Pad{.{ .number = "2", .x = 0, .y = 0, .w = 0.5, .h = 0.5 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "C101", .kind = .passive, .hw = 0.25, .hh = 0.25, .pads = &pads, .fallback = false, .x = 5, .y = 5.6 },
+    };
+    const nets = [_]export_kicad.FlatNet{.{ .name = "RF", .pins = &.{} }};
+    const rules = [_]optimizer.NetRule{.{ .class = .{ .name = "rf" }, .rf = .{ .max_freq_hz = 12e9, .mask_relief_mm = 0.3 } }};
+    const tracks = [_]router.Track{.{ .x1 = 2, .y1 = 5, .x2 = 8, .y2 = 5, .layer = 0, .width = 0.2, .net = 0 }};
+    const mask = try reliefMask(arena, &parts, &nets, &rules, .{ .tracks = &tracks });
+
+    // The single region still runs from x=2 through x=8. Only the local
+    // 0.8 mm pad-shaped protector is clear, followed by the 0.6 mm aperture.
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, mask, "G36*"));
+    try testing.expect(std.mem.indexOf(u8, mask, "X2000000Y4600000D02*") != null);
+    try testing.expect(std.mem.indexOf(u8, mask, "X8000000Y") != null);
+    try testing.expect(std.mem.indexOf(u8, mask, "%LPC*%") != null);
+    try testing.expect(std.mem.indexOf(u8, mask, "R,0.800000X0.800000*%") != null);
+    try testing.expect(std.mem.indexOf(u8, mask, "%LPD*%") != null);
+    try testing.expect(std.mem.indexOf(u8, mask, "R,0.600000X0.600000*%") != null);
 }
 
 // spec: export_gerber - mask-relief pad-dam terminations use the authored corner fillet in the fabrication layer
@@ -2492,12 +2546,12 @@ test "mask relief writes the authored terminal fillet" {
     try writeLayer(&mw.writer, arena, placement, .{ .tracks = &tracks }, &.{}, export_fab.frameFor(placement), .{ .mask = .top }, .{ .function = "Soldermask,Top" });
     const mask = mw.written();
 
-    // The full-opening dam transition is x=8.55. Its 0.777 mm half
+    // The centreline dam transition is x=9.35. Its 0.777 mm half
     // opening is pulled in by the authored 0.2 mm fillet at the vertical cap:
     // world y=5.577 becomes y-up 4.423 in the Gerber frame.
     try testing.expect(std.mem.indexOf(u8, mask, "G36*") != null);
     try testing.expect(std.mem.indexOf(u8, mask, "G02") != null or std.mem.indexOf(u8, mask, "G03") != null);
-    try testing.expect(std.mem.indexOf(u8, mask, "X8550000Y4423000") != null);
+    try testing.expect(std.mem.indexOf(u8, mask, "X9350000Y4423000") != null);
 }
 
 // spec: export_gerber - fence vias never emit solder-mask apertures; the widened RF polygon alone exposes overlapping copper

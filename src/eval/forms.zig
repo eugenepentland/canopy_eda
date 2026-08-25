@@ -757,11 +757,11 @@ pub const scope_form_docs = blk: {
             "and one that also declares a (fence …) widens the band over the whole stitch row (edge " ++
             "gap + fence via + margin) so the shielding vias' annular rings ship bare too; " ++
             "(mask-relief 0) keeps the class tented, and a positive MM overrides either default or " ++
-            "opts in a class with no (max-freq …). The full relief opening is always held back from " ++
-            "every pad opening by the board's mask web, so a wide exposed RF band beside a land " ++
-            "cannot uncover the retaining dam; paste and solder stay dammed at QFN and passive lands, " ++
-            "and an exposed stretch shorter than 1 mm keeps its mask outright — a sliver of bare trace " ++
-            "between two lands is mask worth keeping. " ++
+            "opts in a class with no (max-freq …). Where a wide relief overlaps a nearby pad, a local " ++
+            "pad-shaped mask island retains one board mask web around that pad's aperture while the RF " ++
+            "trace stays exposed around the island; paste and solder therefore stay dammed at QFN and " ++
+            "passive lands. An exposed stretch shorter than 1 mm keeps its mask outright — a sliver of " ++
+            "bare trace between two lands is mask worth keeping. " ++
             "(impedance OHMS [(layer IDX)]) declares the class's target " ++
             "single-ended characteristic impedance, which is what turns (max-freq …) from geometry " ++
             "discipline into an electrical statement. Declared ALONE, the class's track WIDTH is " ++
