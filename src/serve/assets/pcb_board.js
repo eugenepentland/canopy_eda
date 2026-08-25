@@ -3991,6 +3991,7 @@ function undoBtns(){var u=document.getElementById("pcb-undo"),r=document.getElem
 // recordUndo accepts a full snapshot {poses,tracks,vias}, a bare pose array
 // (legacy drag capture — copper filled from the current model), or nothing.
 function recordUndo(snap){var e=(snap&&snap.poses)?snap:snapAll(Array.isArray(snap)?snap:null);
+ drawRfRetrofitDrcClear();
  undoStack.push(e);if(undoStack.length>200)undoStack.shift();
  redoStack.length=0;undoBtns();markDirty();}
 function restoreSnap(s){s.poses.forEach(function(q,i){if(P[i]){P[i].x=q.x;P[i].y=q.y;P[i].rot=q.rot;P[i].side=q.side||"top";P[i].locked=!!q.locked;}});
@@ -6976,8 +6977,9 @@ function drawRfRetrofitGroups(){var claimed={},groups=[];
    if(!profile)continue;var group=drawRfRetrofitRun(t,!!end,nominal,pad,profile,claimed);if(group)groups.push(group);}});
  return groups;}
 function drawRfRetrofitPlan(){var paths=[];drawRfRetrofitGroups().forEach(function(group){paths=paths.concat(group);});return paths;}
-function drawRfRetrofitHasNewBlock(before,after){var bc=drcBlockCounts(before||[]),ac=drcBlockCounts(after||[]);
- for(var id in ac)if(ac[id]>(bc[id]||0))return true;return false;}
+function drawRfRetrofitNewBlocks(before,after){var bc=drcBlockCounts(before||[]),seen={},out=[];
+ (after||[]).forEach(function(d){if(!d.id||d.sev==="warn"||d.sev==="warning"||!DRC_BLOCK[d.k])return;
+  seen[d.id]=(seen[d.id]||0)+1;if(seen[d.id]>(bc[d.id]||0))out.push(d);});return out;}
 function drawSamePortalPath(a,b){var as=a&&a.samples||[],bs=b&&b.samples||[];
  if(!a||!b||(a.net||"")!==(b.net||"")||+(a.l||0)!==+(b.l||0)||as.length!==2||bs.length!==2)return false;
  function close(p,q){return Math.hypot(+p[0]- +q[0],+p[1]- +q[1])<=1e-7&&Math.abs(+p[2]- +q[2])<=1e-7;}
@@ -6999,22 +7001,41 @@ function drawRfMissingPortalGroups(){var existing=PCB.rf_paths||[],groups=[],pla
    var known=existing.some(function(other){return drawSamePortalPath(collar,other);})||planned.some(function(other){return drawSamePortalPath(collar,other);});
    if(!known){group.push(collar);planned.push(collar);}});
   if(group.length)groups.push(group);});return groups;}
+// A rejected candidate is not committed, so its engine violation would normally
+// disappear with the hypothetical copper. Keep one client-side error at the
+// engine's exact collision point for each blocked taper. The ordinary DRC panel
+// and board-marker click path can then take the user straight to the launch.
+var drawRfRetrofitDrc=[];
+function drawRfRetrofitDrcMerge(list){return (list||[]).filter(function(d){return !d.rf_taper_block;}).concat(drawRfRetrofitDrc);}
+function drawRfRetrofitDrcClear(){if(!drawRfRetrofitDrc.length)return;
+ drawRfRetrofitDrc=[];PCB.drc=(PCB.drc||[]).filter(function(d){return !d.rf_taper_block;});drawDrc();drcChip(PCB.drc.length);}
+function drawRfRetrofitNotice(paths,blocks,index){var samples=[],best=blocks[0]||{},bestDist=1/0;
+ (paths||[]).forEach(function(path){samples=samples.concat(path.samples||[]);});
+ blocks.forEach(function(d){if(d.x==null||d.y==null)return;samples.forEach(function(s){var dd=Math.hypot(d.x-s[0],d.y-s[1]);
+   if(dd<bestDist){bestDist=dd;best=d;}});});
+ var first=paths&&paths[0]||{},fallback=samples.length?samples[Math.floor(samples.length/2)]:[0,0];
+ return {id:"taper-"+(index+1),k:"impedance taper blocked",sev:"err",rf_taper_block:true,cause:best.k,
+  x:best.x==null?fallback[0]:best.x,y:best.y==null?fallback[1]:best.y,l:best.l==null?(first.l||0):best.l,
+  gap:best.gap,clr:best.clr,a:best.a,b:best.b};}
 function drawRfRetrofitCheck(paths){var payload=boardStatePayload();payload.rf_paths=paths;
  return fetch("/api/pcb-drc/"+encodeURIComponent(PCB.name)+subq(),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
   .then(function(r){if(!r.ok)throw 0;return r.json();});}
 function drawRfRetrofitSaved(){
  if(RO||!curLayout||(!((PCB.tracks||[]).length)&&!((PCB.rf_paths||[]).length)))return;
  var pending=drawRfMissingPortalGroups().concat(drawRfRetrofitGroups());if(!pending.length)return;var generation=dirtyGeneration,layout=curLayout,
-  original=(PCB.rf_paths||[]).slice(),accepted=[],acceptedBundles=0,baseline=(PCB.drc||[]).slice();
+  original=(PCB.rf_paths||[]).slice(),accepted=[],acceptedBundles=0,blocked=[],baseline=(PCB.drc||[]).filter(function(d){return !d.rf_taper_block;});
  function current(){return generation===dirtyGeneration&&layout===curLayout;}
- function finish(){if(!current())return;if(!acceptedBundles){routeStatMsg(pending.length+" saved impedance tapers blocked by DRC",true);return;}
-  var before=snapAll();PCB.rf_paths=original.concat(accepted);PCB.drc=baseline;
-  copperTouched();recordUndo(before);drawRoute();drawDrc();drcChip(PCB.drc.length);
-  routeStatMsg(acceptedBundles+" saved impedance taper"+(acceptedBundles===1?"":"s")+" added"+(acceptedBundles<pending.length?" · "+(pending.length-acceptedBundles)+" blocked by DRC":""));scheduleDrc();}
+ function finish(){if(!current())return;
+  if(acceptedBundles){var before=snapAll();PCB.rf_paths=original.concat(accepted);copperTouched();recordUndo(before);drawRoute();}
+  drawRfRetrofitDrc=blocked;PCB.drc=drawRfRetrofitDrcMerge(baseline);drawDrc();drcChip(PCB.drc.length);
+  if(!acceptedBundles){routeStatMsg(blocked.length+" saved impedance taper"+(blocked.length===1?"":"s")+" need attention — click the DRC errors to locate",true);return;}
+  routeStatMsg(acceptedBundles+" saved impedance taper"+(acceptedBundles===1?"":"s")+" added"+(blocked.length?" · "+blocked.length+" need attention in DRC":""));scheduleDrc();}
  function next(i){if(!current())return;if(i>=pending.length){finish();return;}
   routeStatMsg("checking saved impedance tapers "+(i+1)+"/"+pending.length+"…");
   drawRfRetrofitCheck(original.concat(accepted,pending[i])).then(function(j){if(!current())return;
-   if(!drawRfRetrofitHasNewBlock(baseline,j.drc||[])){Array.prototype.push.apply(accepted,pending[i]);acceptedBundles++;baseline=j.drc||[];}next(i+1);})
+   var newBlocks=drawRfRetrofitNewBlocks(baseline,j.drc||[]);
+   if(!newBlocks.length){Array.prototype.push.apply(accepted,pending[i]);acceptedBundles++;baseline=j.drc||[];}
+   else blocked.push(drawRfRetrofitNotice(pending[i],newBlocks,i));next(i+1);})
    .catch(function(){if(current())routeStatMsg("saved impedance taper check interrupted — reload to retry",true);});}
  next(0);}
 window.PCBDrawRfRetrofitPlan=drawRfRetrofitPlan;
@@ -7781,6 +7802,8 @@ function drcPads(d){var a=drcPad(d.a),b=drcPad(d.b);
 function drcMsg(d){
  var tag=d.id?("#"+d.id+" "):""; // the violation's short traceable id
  var who=drcBetween(d),on=who?(" — "+who):"";
+ if(d.k==="impedance taper blocked")return tag+d.k+on+" — proposed taper would create "+
+  (d.cause||"a routing clearance error")+" (gap "+drcMm(d.gap)+" mm < "+drcMm(d.clr)+" mm required)";
  // A net open is one net in pieces, not two parties clashing — name the net,
  // then the island on each side of the gap.
  if(d.k=="net open"){var n=(d.a&&d.a.net)?nLeaf(d.a.net):"",ends=drcPads(d);
@@ -8601,8 +8624,8 @@ function runDrcNow(){if(RO)return;var seq=++drcSeq;drcChip(-1);
     // log both so wasm/server drift is visible (wave-2 audit).
     if(!wasmDrc.failed&&wasmDrc.lastN!=null&&(srv.length!==wasmDrc.lastN||!idSetEq(drcIdSet(srv),wasmDrc.lastIds)))
      console.warn("[drc] wasm/server mismatch",{wasm:wasmDrc.lastN,server:srv.length});
-    var oldIds=drcIdSet(PCB.drc||[]),changed=srv.length!==(PCB.drc||[]).length||!idSetEq(drcIdSet(srv),oldIds);
-    PCB.drc=srv;if(changed)drawDrc();drcChip(srv.length);routeSummaryFrom(j);}) // server wins
+    var shown=drawRfRetrofitDrcMerge(srv),oldIds=drcIdSet(PCB.drc||[]),changed=shown.length!==(PCB.drc||[]).length||!idSetEq(drcIdSet(shown),oldIds);
+    PCB.drc=shown;if(changed)drawDrc();drcChip(shown.length);routeSummaryFrom(j);}) // server wins
   .catch(function(){if(seq===drcSeq)drcChip(0);});}
 function boardStatePayload(){var vg=viaGeo();return {
  parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,side:p.side||"top"};}),
@@ -8779,6 +8802,7 @@ function applyWasmDrc(resp){if(!resp||!resp.drc)return;
  // through the fast geometry refresh instead of tearing them down for 150 ms
  // and recreating them when the reconcile arrives.
  (PCB.drc||[]).forEach(function(d){if(d.k==="net open")list.push(d);});
+ list=drawRfRetrofitDrcMerge(list);
  var changed=list.length!==(PCB.drc||[]).length||!idSetEq(drcIdSet(list),drcIdSet(PCB.drc||[]));
  PCB.drc=list;wasmDrc.lastN=engine.length;wasmDrc.lastIds=drcIdSet(engine);
  if(changed)drawDrc();drcChip(list.length);} // no "checking…" flicker — the wasm result is immediate

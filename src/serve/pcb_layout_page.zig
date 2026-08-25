@@ -13754,7 +13754,7 @@ test "PCB editor header carries a live unique-net routing summary" {
     try std.testing.expect(std.mem.indexOf(u8, board_js, "typeof j.unique_routed===\"number\"") != null);
     const page_src = @embedFile("pcb_layout_page.zig");
     try std.testing.expect(std.mem.indexOf(u8, page_src, "\\\"unique_routed\\\":{d},\\\"unique_total\\\":{d}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, board_js, "drcChip(srv.length);routeSummaryFrom(j)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, board_js, "drcChip(shown.length);routeSummaryFrom(j)") != null);
     const route_apply = std.mem.indexOf(u8, board_js, "else setStat(\"r-stat\",ok?") orelse return error.TestExpectedEqual;
     try std.testing.expect(std.mem.indexOf(u8, board_js[route_apply..], "routeSummaryFrom(j);") != null);
 }
@@ -14401,7 +14401,7 @@ test "PCB viewer exposes provenance and persistent copper IDs" {
     try std.testing.expect(std.mem.indexOf(u8, js, "copperIdsEnsureAll();var saveGeneration") != null);
 }
 
-// spec: placement/rf-port-frame-routing - A named saved layout made before automatic tapers reconciles only uncovered nominal-width launch runs, accepts no new routing-class DRC errors, and persists the approved RF paths through ordinary autosave
+// spec: placement/rf-port-frame-routing - a named saved layout made before automatic tapers reconciles only uncovered nominal-width launch runs, accepts no new routing-class DRC errors, persists the approved RF paths through ordinary autosave, and exposes each rejected taper as a clickable DRC error at the blocking clearance
 test "saved controlled-impedance copper receives an idempotent DRC-gated taper retrofit" {
     const js = @embedFile("assets/pcb_board.js");
     try std.testing.expect(std.mem.indexOf(u8, js, "function drawRfRetrofitPlan()") != null);
@@ -14412,8 +14412,15 @@ test "saved controlled-impedance copper receives an idempotent DRC-gated taper r
     try std.testing.expect(std.mem.indexOf(u8, js, "payload.rf_paths=paths") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "drawRfRetrofitCheck(original.concat(accepted,pending[i]))") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "Array.prototype.push.apply(accepted,pending[i]);acceptedBundles++") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "if(!drawRfRetrofitHasNewBlock(baseline,j.drc||[]))") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "PCB.rf_paths=original.concat(accepted);PCB.drc=baseline") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "function drawRfRetrofitNewBlocks(before,after)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "blocked.push(drawRfRetrofitNotice(pending[i],newBlocks,i))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "k:\"impedance taper blocked\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "click the DRC errors to locate") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "PCB.drc=drawRfRetrofitDrcMerge(baseline)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "var shown=drawRfRetrofitDrcMerge(srv)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "list=drawRfRetrofitDrcMerge(list)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "drawRfRetrofitDrcClear();") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "PCB.rf_paths=original.concat(accepted)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "if(!RO&&PCB.shown_layout)setTimeout(drawRfRetrofitSaved,0);") != null);
 }
 
