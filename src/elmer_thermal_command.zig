@@ -349,7 +349,7 @@ fn prepare(
     if (board_thermal.counts.with_power == 0) exit.fatal("No part declares thermal dissipation\n", .{});
     const copper = pcb_layout_page.thermalCopper(solved);
     var inputs = try thermal_scenarios.inputsFor(alloc, board_thermal, solved.placement, copper);
-    inputs.heatsink = selectedHeatsink(args, pcb_layout_page.thermalHeatsink(solved));
+    inputs.heatsink = selectedHeatsink(args, pcb_layout_page.thermalHeatsink(solved, board_thermal));
     const builtin = try thermal_field.solveScenario(alloc, inputs, args.scenario);
     if (!builtin.converged) exit.fatal("The built-in thermal solve did not converge; refusing a misleading comparison\n", .{});
     const model = try thermal_field.discretize(alloc, inputs, args.scenario);

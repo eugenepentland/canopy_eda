@@ -210,7 +210,7 @@ pub fn solveFor(
     };
     if (solved.placement.parts.len == 0) return .{ .unavailable = no_parts };
 
-    return .{ .results = try solveOver(alloc, &eval, project_dir, name, bt, boardOf(solved, layout)) };
+    return .{ .results = try solveOver(alloc, &eval, project_dir, name, bt, boardOf(solved, layout, bt)) };
 }
 
 /// The board one solve is over: the resolved placement, and the copper standing
@@ -230,11 +230,11 @@ pub const Board = struct {
 /// The board a solved request describes. `layout` must be the `?layout=` the
 /// request was solved with (null for the default board) — it is the half of the
 /// cache key the geometry cannot supply.
-pub fn boardOf(solved: pcb_layout_page.SolvedRequest, layout: ?[]const u8) Board {
+pub fn boardOf(solved: pcb_layout_page.SolvedRequest, layout: ?[]const u8, bt: thermal.BoardThermal) Board {
     return .{
         .placement = solved.placement,
         .copper = pcb_layout_page.thermalCopper(solved),
-        .heatsink = pcb_layout_page.thermalHeatsink(solved),
+        .heatsink = pcb_layout_page.thermalHeatsink(solved, bt),
         .layout = layout,
     };
 }
@@ -1205,7 +1205,7 @@ test "a caller holding its own placement shares the one cached solve" {
     const solved = try pcb_layout_page.solveForRequest(alloc, project, "heater", .{}, &eval, &module_res);
     const nb = try mcp_tools.evalNamedBlock(alloc, project, "heater", &eval);
     const bench = try thermal.analyze(alloc, nb.block, 25);
-    const over = try solveOver(alloc, &eval, project, "heater", bench, boardOf(solved, null));
+    const over = try solveOver(alloc, &eval, project, "heater", bench, boardOf(solved, null, bench));
     try testing.expect(over.len > 0);
     try testing.expectEqual(@as(usize, 1), store.entries.count());
 

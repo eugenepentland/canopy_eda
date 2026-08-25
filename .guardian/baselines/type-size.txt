@@ -69,6 +69,8 @@
 10 src/placement/route_timing.zig|PhaseTimer
 8 src/placement/thermal_field.zig|Heatsink
 8 src/placement/thermal_field.zig|HeatsinkGeometry
+8 src/placement/thermal_field.zig|PartField
+8 src/placement/thermal_field.zig|PartInput
 10 src/placement/thermal_field.zig|ScenarioResult
 24 src/render_pcb_png.zig|Options
 14 src/render_svg/context.zig|FlatInst

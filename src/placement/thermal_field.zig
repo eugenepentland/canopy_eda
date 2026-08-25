@@ -369,6 +369,7 @@ pub const Mount = struct {
 /// how hot its junction may get, plus how the layout mounts it.
 pub const PartInput = struct {
     ref_des: []const u8,
+    origin_key: []const u8 = "",
     /// Dissipation (W). A non-finite or negative figure injects nothing.
     watts: f64 = 0,
     /// Junction-to-board resistance (K/W), the declared figure when there is one.
@@ -467,6 +468,7 @@ pub const Hotspot = struct {
 /// One placed part's answer under one scenario.
 pub const PartField = struct {
     ref_des: []const u8,
+    origin_key: []const u8 = "",
     /// Hottest copper under the part's own cells (°C above ambient).
     board_rise_c: f64,
     /// Junction rise above ambient: the board under it, plus `P·θJB` (°C). Null
@@ -1751,6 +1753,7 @@ fn partField(
     const land_m2 = @as(f64, @floatFromInt(spanCells(spans))) * cell_m * cell_m;
     var row = PartField{
         .ref_des = part.ref_des,
+        .origin_key = part.origin_key,
         .board_rise_c = board_rise,
         .theta_transfer_c_per_w = transferResistance(part, land_m2, transfer),
     };

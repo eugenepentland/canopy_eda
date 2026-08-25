@@ -28,6 +28,7 @@
 //! every ambient, and the arithmetic lives in one place.
 
 const std = @import("std");
+const flat_netlist = @import("flat_netlist.zig");
 const net_name = @import("net_name.zig");
 const impedance = @import("placement/impedance.zig");
 const optimizer = @import("placement/optimizer.zig");
@@ -279,20 +280,21 @@ pub fn partInputs(
     p: optimizer.Placement,
     copper: Copper,
 ) std.mem.Allocator.Error![]thermal_field.PartInput {
-    var index = try PartIndex.build(allocator, p.parts);
+    var index = try PartIndex.build(allocator, p);
     defer index.deinit(allocator);
 
     const out = try allocator.alloc(thermal_field.PartInput, bt.parts.len);
     for (bt.parts, out) |row, *slot| {
         slot.* = .{
             .ref_des = row.ref_des,
+            .origin_key = row.origin_key,
             .watts = row.power.watts orelse 0,
             .theta_jb = row.theta.jb,
             .theta_jc = .{ .generic = row.theta.jc.generic, .top = row.theta.jc.top, .bottom = row.theta.jc.bottom },
             .theta_ja = row.theta.ja,
             .tj_max = row.limits.tj_max,
         };
-        const pi = index.find(p.parts, row.ref_des) orelse continue;
+        const pi = index.find(p, row.ref_des, row.origin_key) orelse continue;
         placeInput(slot, p.parts[pi], copper.vias);
     }
     return out;
@@ -365,15 +367,20 @@ const PartIndex = struct {
     const ambiguous: usize = std.math.maxInt(usize);
 
     exact: std.StringHashMapUnmanaged(usize) = .empty,
+    origin: std.StringHashMapUnmanaged(usize) = .empty,
     leaf: std.StringHashMapUnmanaged(usize) = .empty,
 
     fn build(
         allocator: std.mem.Allocator,
-        parts: []const optimizer.Part,
+        p: optimizer.Placement,
     ) std.mem.Allocator.Error!PartIndex {
         var self = PartIndex{};
-        for (parts, 0..) |part, i| {
+        for (p.parts, 0..) |part, i| {
             try self.exact.put(allocator, part.ref_des, i);
+            if (i < p.instances.len and p.instances[i].origin_key.len > 0) {
+                const key = try std.fmt.allocPrint(allocator, "{s}\x00{s}", .{ net_name.parent(part.ref_des) orelse "", p.instances[i].origin_key });
+                try self.origin.put(allocator, key, i);
+            }
             const short = net_name.leaf(part.ref_des);
             const gop = try self.leaf.getOrPut(allocator, short);
             gop.value_ptr.* = if (gop.found_existing) ambiguous else i;
@@ -383,19 +390,54 @@ const PartIndex = struct {
 
     fn deinit(self: *PartIndex, allocator: std.mem.Allocator) void {
         self.exact.deinit(allocator);
+        self.origin.deinit(allocator);
         self.leaf.deinit(allocator);
     }
 
     /// The part `ref` names, or null. A leaf two parts share resolves to
     /// neither: guessing which board position a watt belongs to would be worse
     /// than reporting the part as unplaced, because the wrong guess is silent.
-    fn find(self: PartIndex, parts: []const optimizer.Part, ref: []const u8) ?usize {
+    fn find(self: PartIndex, p: optimizer.Placement, ref: []const u8, origin: []const u8) ?usize {
+        if (origin.len > 0) {
+            var buf: [512]u8 = undefined;
+            const key = std.fmt.bufPrint(&buf, "{s}\x00{s}", .{ net_name.parent(ref) orelse "", origin }) catch return null;
+            if (self.origin.get(key)) |i| return i;
+        }
         if (self.exact.get(ref)) |i| return i;
         const i = self.leaf.get(net_name.leaf(ref)) orelse return null;
-        if (i == ambiguous or i >= parts.len) return null;
+        if (i == ambiguous or i >= p.parts.len) return null;
         return i;
     }
 };
+
+/// A saved assembly target resolved onto the current thermal flatten. The
+/// placement supplies the physical board side while the thermal row supplies
+/// the current ref-des; scoped origin identity bridges ref-des renumbering.
+pub const MountedTarget = struct {
+    ref_des: []const u8,
+    side: optimizer.Side,
+};
+
+/// Follow a saved target through ref-des renumbering without ever accepting a
+/// recycled exact ref. Null means the saved placement no longer identifies a
+/// current thermal part, so applying a sink would risk cooling the wrong IC.
+pub fn resolveMountedTarget(bt: thermal.BoardThermal, p: optimizer.Placement, saved_ref: []const u8) ?MountedTarget {
+    var mounted: ?MountedTarget = null;
+    var origin: []const u8 = "";
+    for (p.parts, 0..) |part, i| {
+        if (!std.mem.eql(u8, part.ref_des, saved_ref)) continue;
+        mounted = .{ .ref_des = saved_ref, .side = part.side };
+        if (i < p.instances.len) origin = p.instances[i].origin_key;
+        break;
+    }
+    const saved = mounted orelse return null;
+    if (origin.len == 0) return saved;
+    for (bt.parts) |part| {
+        if (!std.mem.eql(u8, net_name.parent(part.ref_des) orelse "", net_name.parent(saved_ref) orelse "")) continue;
+        if (std.mem.eql(u8, part.origin_key, origin)) return .{ .ref_des = part.ref_des, .side = saved.side };
+    }
+    return null;
+}
 
 // ── The ladder as the read surfaces report it ─────────────────────────────
 
@@ -403,6 +445,7 @@ const PartIndex = struct {
 /// rather than the solver's rises above ambient.
 pub const PartRow = struct {
     ref: []const u8,
+    origin_key: []const u8 = "",
     /// Junction temperature (°C). Null when the part declares neither a θJB nor
     /// a θJA to fall back on, so no junction could be computed at all.
     tj_c: ?f64 = null,
@@ -619,6 +662,7 @@ fn rowAt(
     for (result.parts, parts) |field, *row| {
         row.* = .{
             .ref = field.ref_des,
+            .origin_key = field.origin_key,
             .tj_c = if (field.tj_rise_c) |rise| ambient_c + rise else null,
             .board_c = ambient_c + field.board_rise_c,
             .jb_estimated = field.jb_estimated,
@@ -657,10 +701,10 @@ pub fn rowsByPart(
 ) std.mem.Allocator.Error![]const ?PartRow {
     const out = try allocator.alloc(?PartRow, p.parts.len);
     @memset(out, null);
-    var index = try PartIndex.build(allocator, p.parts);
+    var index = try PartIndex.build(allocator, p);
     defer index.deinit(allocator);
     for (rows) |row| {
-        const pi = index.find(p.parts, row.ref) orelse continue;
+        const pi = index.find(p, row.ref, row.origin_key) orelse continue;
         out[pi] = row;
     }
     return out;
@@ -921,6 +965,32 @@ test "screened rows match placed parts exact-then-leaf and unmatched rows stay u
     try testing.expectEqual(@as(usize, 2), result.skipped.len);
     try testing.expectEqualStrings("U9", result.skipped[0]);
     try testing.expectEqualStrings("U_GHOST", result.skipped[1]);
+}
+
+// spec: thermal_scenarios - layout thermal rows follow scoped origin identity across ref-des renumbering before considering a recycled exact ref
+test "thermal placement follows origin across ref-des renumbering" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var parts = [_]optimizer.Part{
+        testPart("mixer/U15", 10, 10),
+        testPart("mixer/U8", 30, 10),
+    };
+    const instances = [_]flat_netlist.FlatInstance{
+        .{ .ref_des = "mixer/U15", .origin_key = "U1", .component = "mixer", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
+        .{ .ref_des = "mixer/U8", .origin_key = "U2", .component = "other", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
+    };
+    var p = testPlacement(&parts, true);
+    p.instances = &instances;
+    var row = testRow("mixer/U8", 1);
+    row.origin_key = "U1";
+    const inputs = try partInputs(arena, .{ .ambient_c = 25, .parts = &.{row} }, p, .{});
+    const box = inputs[0].mount.box orelse return error.TestExpectedMount;
+    try testing.expectApproxEqAbs(@as(f64, 9), box.x_mm, 1e-9);
+    const target = resolveMountedTarget(.{ .ambient_c = 25, .parts = &.{row} }, p, "mixer/U15") orelse
+        return error.TestExpectedTarget;
+    try testing.expectEqualStrings("mixer/U8", target.ref_des);
+    try testing.expectEqual(optimizer.Side.top, target.side);
 }
 
 // spec: thermal_scenarios - the spreader layer count is the implicit four-layer board when no stackup is declared and the declared inner planes plus two outer faces when one is

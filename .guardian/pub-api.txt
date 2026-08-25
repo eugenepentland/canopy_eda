@@ -3622,7 +3622,7 @@ src/serve/pcb_layout_page.zig::solveForRequest | fn solveForRequest( alloc: std.
 src/serve/pcb_layout_page.zig::subBlockPoseByOriginKey | fn subBlockPoseByOriginKey( alloc: std.mem.Allocator, project_dir: []const u8, sub_block: env_mod.SubBlock, ) ?SubBlockSeeds
 src/serve/pcb_layout_page.zig::subSlug | fn subSlug(req: ?*httpz.Request) ?[]const u8
 src/serve/pcb_layout_page.zig::thermalCopper | fn thermalCopper(solved: SolvedRequest) thermal_scenarios.Copper
-src/serve/pcb_layout_page.zig::thermalHeatsink | fn thermalHeatsink(solved: SolvedRequest) ?thermal_scenarios.Heatsink
+src/serve/pcb_layout_page.zig::thermalHeatsink | fn thermalHeatsink(solved: SolvedRequest, bt: thermal.BoardThermal) ?thermal_scenarios.Heatsink
 src/serve/pcb_layout_page.zig::unknownLayoutMsg | fn unknownLayoutMsg( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8, want: []const u8, ) []const u8
 src/serve/pcb_layout_page.zig::viasForPoses | fn viasForPoses( alloc: std.mem.Allocator, block: *const env_mod.DesignBlock, project_dir: []const u8, seed: optimizer.PoseSeed, params: optimizer.Params, ) ?[]const SyncVia
 src/serve/pcb_layout_page.zig::warmPage | fn warmPage(ctx: *Server, scratch: std.mem.Allocator, name: []const u8) bool
@@ -3859,7 +3859,7 @@ src/serve/thermal_api.zig::Board struct_
 src/serve/thermal_api.zig::HandlerError value
 src/serve/thermal_api.zig::Solved struct_
 src/serve/thermal_api.zig::ThermalError value
-src/serve/thermal_api.zig::boardOf | fn boardOf(solved: pcb_layout_page.SolvedRequest, layout: ?[]const u8) Board
+src/serve/thermal_api.zig::boardOf | fn boardOf(solved: pcb_layout_page.SolvedRequest, layout: ?[]const u8, bt: thermal.BoardThermal) Board
 src/serve/thermal_api.zig::mcpDescribeThermal | fn mcpDescribeThermal( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) std.mem.Allocator.Error!bool
 src/serve/thermal_api.zig::scenariosFor | fn scenariosFor( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, bt: thermal.BoardThermal, ambient_c: f64, layout: ?[]const u8, ) std.mem.Allocator.Error!thermal_scenarios.Answer
 src/serve/thermal_api.zig::solveFor | fn solveFor( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, bt: thermal.BoardThermal, layout: ?[]const u8, ) std.mem.Allocator.Error!Solved
@@ -4081,6 +4081,7 @@ src/thermal_scenarios.zig::HeatsinkPlacement struct_
 src/thermal_scenarios.zig::Hotspot struct_
 src/thermal_scenarios.zig::Ladder struct_
 src/thermal_scenarios.zig::Limit struct_
+src/thermal_scenarios.zig::MountedTarget struct_
 src/thermal_scenarios.zig::Painted struct_
 src/thermal_scenarios.zig::PartField value
 src/thermal_scenarios.zig::PartRow struct_
@@ -4101,6 +4102,7 @@ src/thermal_scenarios.zig::paintAt | fn paintAt( allocator: std.mem.Allocator, b
 src/thermal_scenarios.zig::paintFrom | fn paintFrom( allocator: std.mem.Allocator, results: []const thermal_field.ScenarioResult, p: optimizer.Placement, scenario: Scenario, ambient_c: f64, ) std.mem.Allocator.Error!?Painted
 src/thermal_scenarios.zig::partInputs | fn partInputs( allocator: std.mem.Allocator, bt: thermal.BoardThermal, p: optimizer.Placement, copper: Copper, ) std.mem.Allocator.Error![]thermal_field.PartInput
 src/thermal_scenarios.zig::ratingsCap | fn ratingsCap(bt: thermal.BoardThermal) thermal_field.AmbientLimit
+src/thermal_scenarios.zig::resolveMountedTarget | fn resolveMountedTarget(bt: thermal.BoardThermal, p: optimizer.Placement, saved_ref: []const u8) ?MountedTarget
 src/thermal_scenarios.zig::rowFor | fn rowFor(ladder: Ladder, scenario: Scenario) ?Row
 src/thermal_scenarios.zig::rowsByPart | fn rowsByPart( allocator: std.mem.Allocator, p: optimizer.Placement, rows: []const PartRow, ) std.mem.Allocator.Error![]const ?PartRow
 src/thermal_scenarios.zig::scenarioLabel | fn scenarioLabel( allocator: std.mem.Allocator, scenario: thermal_field.Scenario, sink: HeatsinkPlacement, ) std.mem.Allocator.Error![]const u8

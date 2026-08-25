@@ -351,6 +351,9 @@ pub const PartThermal = struct {
     /// Ref-des, prefixed with its `sub-block/` path when the part sits inside
     /// a module — the same spelling the flattened netlist uses.
     ref_des: []const u8,
+    /// Module-local source identity, stable when cosmetic ref-des counters
+    /// shift. Layout-aware consumers scope it by `ref_des`'s sub-block path.
+    origin_key: []const u8 = "",
     component: []const u8,
     power: PartPower = .{},
     theta: PartTheta = .{},
@@ -456,7 +459,7 @@ fn collectBlock(
 
     for (block.instances) |inst| {
         const ref = try std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, inst.ref_des });
-        var row = PartThermal{ .ref_des = ref, .component = inst.component };
+        var row = PartThermal{ .ref_des = ref, .origin_key = inst.origin_key, .component = inst.component };
         row.power = instancePower(inst, annotated.get(inst.ref_des));
         row.theta = thetaFor(inst);
         row.limits = limitsFor(inst);

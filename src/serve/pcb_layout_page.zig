@@ -3146,20 +3146,13 @@ pub fn thermalCopper(solved: SolvedRequest) thermal_scenarios.Copper {
 /// Convert a saved physical-face assembly into the package-relative form the
 /// thermal kernel consumes. A sink on the component's own face is a package-
 /// top path; the opposite physical PCB face is the board/exposed-pad path.
-pub fn thermalHeatsink(solved: SolvedRequest) ?thermal_scenarios.Heatsink {
+pub fn thermalHeatsink(solved: SolvedRequest, bt: thermal.BoardThermal) ?thermal_scenarios.Heatsink {
     const saved = solved.heatsink orelse return null;
-    var target_side: ?optimizer.Side = null;
-    for (solved.placement.parts) |part| {
-        if (std.mem.eql(u8, part.ref_des, saved.target_ref)) {
-            target_side = part.side;
-            break;
-        }
-    }
-    const mounted = target_side orelse return null;
+    const target = thermal_scenarios.resolveMountedTarget(bt, solved.placement, saved.target_ref) orelse return null;
     const physical = optimizer.Side.fromStr(saved.side);
     return .{
-        .ref_des = saved.target_ref,
-        .side = if (physical == mounted) .package_top else .board_backside,
+        .ref_des = target.ref_des,
+        .side = if (physical == target.side) .package_top else .board_backside,
         .physical_face = if (physical == .top) .top else .bottom,
         .geometry = .{
             .width_mm = saved.w,

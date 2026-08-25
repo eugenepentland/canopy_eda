@@ -4908,7 +4908,7 @@ own column headers are free to use the Greek letter.
 
 ## thermal_scenarios
 
-Public functions: boardOf, spreaderLayersOf, sheetOf, coverageOf, ratingsCap, partInputs, inputsFor, rowsByPart, solveAt, ladderAt, paintAt, boardVerdict, governingRow, rowFor, scenarioLabel, coolingClause, interventionPhrase
+Public functions: boardOf, spreaderLayersOf, sheetOf, coverageOf, ratingsCap, partInputs, inputsFor, resolveMountedTarget, rowsByPart, solveAt, ladderAt, paintAt, boardVerdict, governingRow, rowFor, scenarioLabel, coolingClause, interventionPhrase
 
 The one seam between `eval/thermal.zig` (what each part burns, and what it is
 rated for) and `placement/thermal_field.zig` (where that heat goes once the
@@ -4931,6 +4931,7 @@ the arithmetic that adds the ambient lives in exactly one place.
 
 - the board rectangle is the placement's authored outline, and a design without one falls back to the parts bounding box with the substitution reported
 - screened parts are matched to placed parts by exact ref then by unique leaf, and a row matching nothing is left unplaced for the solver to report as skipped
+- layout thermal rows follow scoped origin identity across ref-des renumbering before considering a recycled exact ref
 - the spreader layer count is the implicit four-layer board when no stackup is declared and the declared inner planes plus two outer faces when one is
 - the conducting sheet is read off a declared stackup's finished thickness, per-foil copper weights and dielectric hop, and a design declaring none falls back to the solver's own screening convention
 - a part carries its mounted side and the vias standing inside its own courtyard into the solver, so a bottom-side part blocks the bottom face and a via array under a land is counted
