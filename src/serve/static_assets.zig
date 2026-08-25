@@ -356,14 +356,16 @@ test "axis-constrained outline endpoint drags project the cursor onto the segmen
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "OS.movePoint(shape.sketch,vdrag.id,vgx,vgy,vdrag.axis)") != null);
 }
 
-// spec: Web Server - Sliding a shape-sketch line through tangent fillets carries each fillet rigidly and changes only the length of its outer straight neighbour
-test "shape edge slides carry tangent fillets without changing their geometry" {
-    // The shared kernel recognizes only a true line-arc-line tangent chain, so
-    // an unrelated authored arc is still left to the ordinary constraint solve.
+// spec: Web Server - Sliding a shape-sketch line through line-arc-line corner fillets carries each valid arc rigidly, including saved near-tangent fillets, and changes only the length of its outer straight neighbour
+test "shape edge slides carry near-tangent fillets without changing their geometry" {
+    // The shared kernel recognizes a simple line-arc-line corner by topology.
+    // This includes visually rounded saved corners whose numeric tangent has
+    // drifted, while standalone arcs, arc chains and branches remain excluded.
     try std.testing.expect(std.mem.indexOf(u8, shape_sketch_js, "function rigidFilletAt(s,host,pid)") != null);
     try std.testing.expect(std.mem.indexOf(u8, shape_sketch_js, "hit.length!==1||hit[0].kind!==\"arc\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, shape_sketch_js, "outer.length!==1||outer[0].kind!==\"line\"") != null);
-    // Its far tangent point and native three-point midpoint follow the dragged
+    try std.testing.expect(std.mem.indexOf(u8, shape_sketch_js, "outer.length!==1||outer[0].kind!==\"line\"||!arcCircle(s,arc)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shape_sketch_js, "tangentAt(s,host,pid)") == null);
+    // Its far joined point and native three-point midpoint follow the dragged
     // edge. The final exact translation preserves radius and sweep rather than
     // relying on the numerical solver to leave them merely close.
     try std.testing.expect(std.mem.indexOf(u8, shape_sketch_js, "{arc:f.arc.id,x:f.mx+dx,y:f.my+dy,weight:50}") != null);

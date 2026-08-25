@@ -223,20 +223,21 @@
     if(axis==="horizontal")y=p.y;else if(axis==="vertical")x=p.x;
     return {x:x,y:y};}
   function movePoint(s,id,x,y,axis){var target=pointDragTarget(s,id,x,y,axis);return solve(s,{targets:[{id:id,x:target.x,y:target.y,weight:50}],iterations:10,stay:1e-4});}
-  // A tangent arc between the dragged line and its next straight neighbour is
-  // a fillet, not an independently deformable curve. Record its three-point
-  // geometry so a line slide can carry the whole arc rigidly and move only the
-  // joined endpoint of the outer line (which then merely changes length).
+  // A native arc between the dragged line and its next straight neighbour is a
+  // rounded corner, not an independently deformable curve. Topology identifies
+  // it more reliably than exact tangency: imported and previously edited
+  // fillets can be a fraction off their ideal support lines while still being
+  // the same line-arc-line corner. Record its three-point geometry so a line
+  // slide carries the whole arc rigidly and only changes the outer line length.
   function rigidFilletAt(s,host,pid){if(!host||host.kind!=="line")return null;var pcs=physicalCurves(s),hit=pcs.filter(function(c){return c!==host&&(c.a===pid||c.b===pid);});
     if(hit.length!==1||hit[0].kind!=="arc")return null;var arc=hit[0],farId=arc.a===pid?arc.b:arc.a,outer=pcs.filter(function(c){return c!==arc&&(c.a===farId||c.b===farId);});
-    if(outer.length!==1||outer[0].kind!=="line")return null;var ht=tangentAt(s,host,pid),an=tangentAt(s,arc,pid),af=tangentAt(s,arc,farId),ot=tangentAt(s,outer[0],farId);
-    if(!ht||!an||!af||!ot||Math.abs(ht.x*an.y-ht.y*an.x)>1e-5||Math.abs(af.x*ot.y-af.y*ot.x)>1e-5)return null;
+    if(outer.length!==1||outer[0].kind!=="line"||!arcCircle(s,arc))return null;
     var near=point(s,pid),far=point(s,farId);return {arc:arc,near:near,far:far,nx:near.x,ny:near.y,fx:far.x,fy:far.y,mx:+arc.mid[0],my:+arc.mid[1]};}
   function moveCurve(s,id,dx,dy){var c=curve(s,id);if(!c)return null;var a=point(s,c.a),b=point(s,c.b),fillets=[],fa=rigidFilletAt(s,c,c.a),fb=rigidFilletAt(s,c,c.b),targets=[{id:a.id,x:a.x+dx,y:a.y+dy,weight:50},{id:b.id,x:b.x+dx,y:b.y+dy,weight:50}];
     if(fa)fillets.push(fa);if(fb&&(!fa||fb.arc!==fa.arc))fillets.push(fb);fillets.forEach(function(f){targets.push({id:f.far.id,x:f.fx+dx,y:f.fy+dy,weight:50},{arc:f.arc.id,x:f.mx+dx,y:f.my+dy,weight:50});});
     var result=solve(s,{targets:targets,iterations:10,stay:1e-4});if(result.conflict)return result;
     // The solver honours surrounding dimensions/axes, then the actual motion
-    // of the shared tangent point supplies one exact translation for all three
+    // of the shared corner point supplies one exact translation for all three
     // arc points. This last assignment keeps radius, sweep and shape invariant
     // instead of leaving them merely close under a weighted numeric solve.
     fillets.forEach(function(f){var tx=f.near.x-f.nx,ty=f.near.y-f.ny;f.far.x=f.fx+tx;f.far.y=f.fy+ty;f.arc.mid[0]=f.mx+tx;f.arc.mid[1]=f.my+ty;});return result;}
