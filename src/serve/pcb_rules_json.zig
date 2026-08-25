@@ -14,6 +14,7 @@ const na = @import("../eval/net_analysis.zig");
 const router = @import("../placement/router.zig");
 const mask_relief = @import("../placement/mask_relief.zig");
 const via_fence = @import("../placement/via_fence.zig");
+const export_gerber = @import("../export_gerber.zig");
 
 fn rfCorridorMm(rule: optimizer.NetRule, design: optimizer.DesignRules) f64 {
     if (!via_fence.fenceable(rule)) return rule.rf.keepout_mm;
@@ -150,10 +151,19 @@ pub fn writeMaskRelief(
         try w.writeAll(empty);
         return writeMaskMerges(w, alloc, p);
     };
-    const relief = mask_relief.computeRouted(alloc, p, .{
+    const copper = export_gerber.physicalCopper(alloc, .{
         .tracks = r.tracks,
+        .vias = r.vias,
         .arcs = r.arcs,
-    }, r.vias) catch {
+        .rf_paths = r.rf_port_outcomes,
+    }) catch {
+        try w.writeAll(empty);
+        return writeMaskMerges(w, alloc, p);
+    };
+    const relief = mask_relief.computeRouted(alloc, p, .{
+        .tracks = copper.tracks,
+        .arcs = copper.arcs,
+    }, copper.vias) catch {
         try w.writeAll(empty);
         return writeMaskMerges(w, alloc, p);
     };
@@ -371,6 +381,31 @@ test "the blob serves mask-relief geometry for the shown copper" {
     try testing.expect(std.mem.indexOf(u8, out, "\"cu\":0.2") != null);
     try testing.expect(std.mem.indexOf(u8, out, "\"x1\":2") != null);
     try testing.expect(std.mem.indexOf(u8, out, "\"vias\"") == null);
+
+    // RF-only saved copper has no ordinary track to serialize. The physical
+    // adapter must still give the browser the wide portal collar's relief,
+    // including the max endpoint width used by the Gerber/DRC consumers.
+    const RfOutcome = @typeInfo(@FieldType(router.RouteResult, "rf_port_outcomes")).pointer.child;
+    const RfPhysical = @FieldType(RfOutcome, "physical");
+    const RfSample = @typeInfo(@FieldType(RfPhysical, "samples")).pointer.child;
+    const samples = [_]RfSample{
+        .{ .at = .{ 2, 5 }, .s_mm = 0, .curvature = 0, .width_mm = 0.4 },
+        .{ .at = .{ 5, 5 }, .s_mm = 3, .curvature = 0, .width_mm = 0.4 },
+        .{ .at = .{ 8, 5 }, .s_mm = 6, .curvature = 0, .width_mm = 0.2 },
+    };
+    const paths = [_]RfOutcome{.{
+        .net = 0,
+        .chosen = 0,
+        .feasible = true,
+        .success = true,
+        .metrics = .{},
+        .trials = &.{},
+        .physical = .{ .sample_count = samples.len, .samples = &samples, .layer = 0 },
+    }};
+    const sampled = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .rf_port_outcomes = &paths, .routed = 1, .total = 1 };
+    var sw: std.Io.Writer.Allocating = .init(arena);
+    try writeMaskRelief(&sw.writer, arena, placement, sampled);
+    try testing.expect(std.mem.indexOf(u8, sw.written(), "\"cu\":0.4") != null);
 
     // Nothing routed ⇒ the explicit empty shape, so the viewer's relief pass
     // is a no-op exactly when the Gerber's is.

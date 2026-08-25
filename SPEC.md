@@ -1996,9 +1996,9 @@ the owning switch pad axis.
 - G2 route matches both port frames and keeps one-width straight entries
 - a cramped switch launch fits against one trace-width of straight entry even when its pad taper is longer
 - Euler bend has zero-curvature seams and finite curvature-rate energy
-- every single-ended controlled-impedance SMD launch tapers between the actual angle-aware land span and nominal width, including wider lands and via-fed or branched nets
+- every single-ended controlled-impedance SMD launch tapers between the actual path-crossing land span and nominal width, including wider lands, bends inside the pad, full flat-face collars on rectangular and oval pads, and via-fed or branched nets
 - a named saved layout made before automatic tapers reconciles only uncovered nominal-width launch runs, accepts no new routing-class DRC errors, and persists the approved RF paths through ordinary autosave
-- a trace taper remains one swept polygon with compact edit handles while DRC lowers private width-profile chords
+- a trace taper remains one logical swept path with compact edit handles while DRC lowers conservative private width-profile chords and folded offset rings lower to overlapping simple fabrication regions
 - solver RF geometry and taper proof survive saved-layout round trips
 - a solver-proven one-width pad taper may narrow below the controlled line width, but thin copper away from the land still fails DRC
 - a route removed by the final DRC gate is never rendered, saved, replayed, or fabricated as an RF polygon
@@ -4264,6 +4264,8 @@ Public functions: planLayers, writeLayer
 - the implicit stackup's inner planes pour exactly the nets the router treats as plane-carried
 - outer copper flashes side-correct pads and draws routed tracks/vias in the y-up frame
 - a solver RF taper is emitted as one swept polygon rather than its centreline chord apertures
+- a folded RF sweep emits overlapping simple dark regions instead of a self-crossing G36 region
+- downstream geometry consumes an RF portal collar as physical copper even when no compact track handle was persisted
 - mask openings expand pads and tent vias; paste covers only same-side SMD pads
 - pad openings separated by a positive web below mask-web are merged across that web instead of producing a mask-sliver DRC warning
 - an IC exposed paddle opens the opposite-face solder mask at the exact EP outline, without the component-side mask margin
@@ -6212,6 +6214,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - the board PNG paints the canonical stages in order
 - the board PNG fills inner planes from the same pour engine the fabrication outputs use
 - the board PNG strokes a routed arc as a curve and drops the chords it owns
+- RF-only saved paths paint their sampled physical chords even when no ordinary track handle is present
 - the board PNG paints bottom-side parts under top-side parts
 - A DRC violation carries a stable 4-hex id emitted by the shared JSON writer
 - The shared DRC JSON writer emits each violation's named parties and omits the sides the checker could not name

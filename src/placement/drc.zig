@@ -24,6 +24,7 @@ const pad_neck = @import("pad_neck.zig");
 const path_copper = @import("path_copper.zig");
 const pose_math = @import("pose_math.zig");
 const outline = @import("outline.zig");
+const RfSample = @import("rf_path_solver.zig").Sample;
 const via_antipad = @import("via_antipad.zig");
 const board_layers = @import("../board_layers.zig");
 const flat_netlist = @import("../flat_netlist.zig");
@@ -1603,15 +1604,33 @@ fn portFramePadTaper(routed: router.RouteResult, track: router.Track, nominal_wi
         if (outcome.net != track.net or outcome.physical.layer != track.layer) continue;
         if (!outcome.success or outcome.physical.gate_removed) continue;
         const samples = outcome.physical.samples;
-        if (samples.len < 2) continue;
-        for (samples[1..], 1..) |sample, i| {
-            const before = samples[i - 1];
-            const width = (before.width_mm + sample.width_mm) / 2;
-            if (@abs(track.width - width) > eps) continue;
-            if (sameChord(track, before.at, sample.at)) return true;
+        var cursor: usize = 0;
+        var before = nextCleanRfSample(samples, &cursor) orelse continue;
+        while (nextCleanRfSample(samples, &cursor)) |sample| {
+            // path_copper.tracks uses the wider endpoint so every private
+            // capsule conservatively covers the linear swept profile.
+            const width = @max(before.width_mm, sample.width_mm);
+            if (@abs(track.width - width) <= eps and sameChord(track, before.at, sample.at)) return true;
+            before = sample;
         }
     }
     return false;
+}
+
+/// Iterate the same normalized sample stream as path_copper: consecutive
+/// points within 1e-9 mm collapse onto the first coordinate and keep the widest
+/// width. In particular, an all-coincident stream produces no chord.
+fn nextCleanRfSample(samples: []const RfSample, cursor: *usize) ?RfSample {
+    if (cursor.* >= samples.len) return null;
+    var clean = samples[cursor.*];
+    cursor.* += 1;
+    while (cursor.* < samples.len) {
+        const sample = samples[cursor.*];
+        if (!(std.math.hypot(sample.at[0] - clean.at[0], sample.at[1] - clean.at[1]) <= 1e-9)) break;
+        clean.width_mm = @max(clean.width_mm, sample.width_mm);
+        cursor.* += 1;
+    }
+    return clean;
 }
 
 fn sameChord(track: router.Track, a: [2]f64, b: [2]f64) bool {
@@ -3116,10 +3135,19 @@ test "track width allows only the proven port-frame pad taper" {
         .{ .x1 = 0, .y1 = 0, .x2 = 0.15, .y2 = 0, .layer = 0, .width = 0.15, .net = 0 },
         .{ .x1 = 1, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.15, .net = 0 },
     };
-    const samples = [_]@import("rf_path_solver.zig").Sample{
-        .{ .at = .{ 0, 0 }, .s_mm = 0, .curvature = 0, .width_mm = 0.1 },
-        .{ .at = .{ 0.15, 0 }, .s_mm = 0.15, .curvature = 0, .width_mm = 0.2 },
+    const samples = [_]RfSample{
+        // The widest value occurs before a narrower duplicate. Normalization
+        // must retain this first coordinate and carry 0.15 onto the real chord.
+        .{ .at = .{ 0, 0 }, .s_mm = 0, .curvature = 0, .width_mm = 0.15 },
+        .{ .at = .{ 0.5e-9, 0 }, .s_mm = 0, .curvature = 0, .width_mm = 0.1 },
+        .{ .at = .{ 0.15, 0 }, .s_mm = 0.15, .curvature = 0, .width_mm = 0.1 },
     };
+    var clean_cursor: usize = 0;
+    const clean_first = nextCleanRfSample(&samples, &clean_cursor).?;
+    try testing.expectEqual(@as(f64, 0), clean_first.at[0]);
+    try testing.expectEqual(@as(f64, 0.15), clean_first.width_mm);
+    try testing.expectEqual(@as(f64, 0.15), nextCleanRfSample(&samples, &clean_cursor).?.at[0]);
+    try testing.expect(nextCleanRfSample(&samples, &clean_cursor) == null);
     const outcomes = [_]@import("rf_port_report.zig").Outcome{.{
         .net = 0,
         .chosen = 0,
@@ -3127,12 +3155,29 @@ test "track width allows only the proven port-frame pad taper" {
         .success = true,
         .metrics = .{},
         .trials = &.{},
-        .physical = .{ .sample_count = 2, .samples = &samples },
+        .physical = .{ .sample_count = samples.len, .samples = &samples },
     }};
     const routed = router.RouteResult{ .tracks = &tracks, .vias = &.{}, .routed = 0, .total = 1, .rf_port_outcomes = &outcomes };
     const violations = try check(arena, placement, routed, 0.127);
     try testing.expectEqual(@as(usize, 1), countKind(violations, .track_width));
     try testing.expectApproxEqAbs(@as(f64, 1.5), firstOfKind(violations, .track_width).?.x, 1e-12);
+
+    const coincident_samples = [_]RfSample{
+        .{ .at = .{ 3, 0 }, .s_mm = 0, .curvature = 0, .width_mm = 0.15 },
+        .{ .at = .{ 3 + 0.5e-9, 0 }, .s_mm = 0, .curvature = 0, .width_mm = 0.1 },
+    };
+    const coincident_outcomes = [_]@import("rf_port_report.zig").Outcome{.{
+        .net = 0,
+        .chosen = 0,
+        .feasible = true,
+        .success = true,
+        .metrics = .{},
+        .trials = &.{},
+        .physical = .{ .sample_count = coincident_samples.len, .samples = &coincident_samples },
+    }};
+    const coincident_track = router.Track{ .x1 = 3, .y1 = 0, .x2 = 3, .y2 = 0, .layer = 0, .width = 0.15, .net = 0 };
+    const coincident_routed = router.RouteResult{ .tracks = &.{coincident_track}, .vias = &.{}, .routed = 0, .total = 1, .rf_port_outcomes = &coincident_outcomes };
+    try testing.expect(!portFramePadTaper(coincident_routed, coincident_track, 0.2));
 }
 
 // spec: placement/drc - existing copper violations are error-severity; only the hygiene checks are warnings

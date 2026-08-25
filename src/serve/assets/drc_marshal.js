@@ -39,17 +39,28 @@ function buildDrcInput(PCB, live) {
   function pathOwnsTrack(t) {
     if (typeof window !== "undefined" && window.PCBRfOwnsTrack) return window.PCBRfOwnsTrack(t);
     return rfPaths.some(function (p) {
-      return (p.track_ids || []).length && t.id && p.track_ids.indexOf(t.id) >= 0;
+      return !p.portal && (p.track_ids || []).length && t.id && p.track_ids.indexOf(t.id) >= 0;
     });
+  }
+  function cleanRfSamples(samples) {
+    return (samples || []).reduce(function (out, sample) {
+      var clean = [+sample[0], +sample[1], +sample[2]];
+      var last = out[out.length - 1];
+      if (last && Math.hypot(clean[0] - last[0], clean[1] - last[1]) <= 1e-9) {
+        last[2] = Math.max(last[2], clean[2]);
+      } else {
+        out.push(clean);
+      }
+      return out;
+    }, []);
   }
   var physicalTracks = tracks.filter(function (t) { return !pathOwnsTrack(t); });
   rfPaths.forEach(function (p) {
-    var samples = p.samples || [];
+    var samples = cleanRfSamples(p.samples);
     for (var i = 1; i < samples.length; i++) {
       var a = samples[i - 1], b = samples[i];
-      if (Math.hypot(b[0] - a[0], b[1] - a[1]) <= 1e-9) continue;
       physicalTracks.push({ x1: +a[0], y1: +a[1], x2: +b[0], y2: +b[1],
-        l: p.l || 0, w: (+a[2] + +b[2]) / 2, net: p.net || "" });
+        l: p.l || 0, w: Math.max(+a[2], +b[2]), net: p.net || "" });
     }
   });
   // A drawn / live outline overrides the authored `(board …)` rect, mirroring

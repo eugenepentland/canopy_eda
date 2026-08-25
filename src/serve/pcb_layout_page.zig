@@ -349,6 +349,12 @@ pub const SavedRoutes = struct {
         net: []const u8,
         layer: u8,
         samples: []const rf_path_solver.Sample,
+        /// Stable editor handles whose geometry owns this swept region. A
+        /// collar repeats its main path's IDs so either one is invalidated
+        /// atomically when any underlying route segment changes.
+        track_ids: []const []const u8 = &.{},
+        /// A pad-face collar belongs to the handles above but never owns them.
+        portal: bool = false,
     } = &.{},
 };
 const SavedRfPath = @typeInfo(@FieldType(SavedRoutes, "rf_paths")).pointer.child;
@@ -6208,7 +6214,13 @@ fn writeSavedRfPathsJson(w: *std.Io.Writer, saved_paths: []const SavedRfPath) st
         if (i > 0) try w.writeByte(',');
         try w.writeAll("{\"net\":");
         try writeJsonStr(w, path.net);
-        try w.print(",\"l\":{d},\"samples\":[", .{path.layer});
+        try w.print(",\"l\":{d}", .{path.layer});
+        if (path.track_ids.len > 0) {
+            try w.writeAll(",\"track_ids\":");
+            try writeStringList(w, path.track_ids);
+        }
+        if (path.portal) try w.writeAll(",\"portal\":true");
+        try w.writeAll(",\"samples\":[");
         for (path.samples, 0..) |sample, si| {
             if (si > 0) try w.writeByte(',');
             try w.print("[{d},{d},{d}]", .{ sample.at[0], sample.at[1], sample.width_mm });
@@ -14398,7 +14410,8 @@ test "saved controlled-impedance copper receives an idempotent DRC-gated taper r
     try std.testing.expect(std.mem.indexOf(u8, js, "drawViaAt(last.net,x,y)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "function drawRfRetrofitCheck(paths)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "payload.rf_paths=paths") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "drawRfRetrofitCheck(original.concat(accepted,[pending[i]]))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "drawRfRetrofitCheck(original.concat(accepted,pending[i]))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "Array.prototype.push.apply(accepted,pending[i]);acceptedBundles++") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "if(!drawRfRetrofitHasNewBlock(baseline,j.drc||[]))") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "PCB.rf_paths=original.concat(accepted);PCB.drc=baseline") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "if(!RO&&PCB.shown_layout)setTimeout(drawRfRetrofitSaved,0);") != null);
@@ -15434,7 +15447,8 @@ test "saved layouts restore RF taper geometry and solver proof" {
         .{ .at = .{ 1, 2 }, .s_mm = 0, .curvature = 0, .width_mm = 0.1 },
         .{ .at = .{ 3, 2 }, .s_mm = 2, .curvature = 0, .width_mm = 0.3 },
     };
-    const rf_paths = [_]SavedRfPath{.{ .net = "RF", .layer = 0, .samples = &samples }};
+    const track_ids = [_][]const u8{ "seg-a", "seg-b" };
+    const rf_paths = [_]SavedRfPath{.{ .net = "RF", .layer = 0, .samples = &samples, .track_ids = &track_ids, .portal = true }};
     const layouts = [_]SavedLayout{.{
         .name = "rf-routed",
         .kind = kind_manual,
@@ -15451,6 +15465,10 @@ test "saved layouts restore RF taper geometry and solver proof" {
     try std.testing.expectEqual(@as(usize, 1), saved.rf_paths.len);
     try std.testing.expectApproxEqAbs(@as(f64, 0.1), saved.rf_paths[0].samples[0].width_mm, 1e-12);
     try std.testing.expectApproxEqAbs(@as(f64, 0.3), saved.rf_paths[0].samples[1].width_mm, 1e-12);
+    try std.testing.expectEqual(@as(usize, track_ids.len), saved.rf_paths[0].track_ids.len);
+    for (track_ids, saved.rf_paths[0].track_ids) |expected, actual|
+        try std.testing.expectEqualStrings(expected, actual);
+    try std.testing.expect(saved.rf_paths[0].portal);
 
     const nets = [_]export_kicad.FlatNet{.{ .name = "RF", .pins = &.{} }};
     const restored = restoreRoutes(alloc, saved, &nets) orelse return error.TestParseFailed;

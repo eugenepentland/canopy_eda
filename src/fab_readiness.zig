@@ -474,10 +474,11 @@ pub fn netConnectivity(
     placement: optimizer.Placement,
     copper: export_gerber.Copper,
 ) std.mem.Allocator.Error![]const NetStatus {
+    const physical = try export_gerber.physicalCopper(arena, copper);
     var out: std.ArrayList(NetStatus) = .empty;
-    const zone_fills = try userZoneFills(arena, placement, copper, null);
+    const zone_fills = try userZoneFills(arena, placement, physical, null);
     for (placement.nets, 0..) |net, net_i| {
-        const graph = try buildNetGraphPrepared(arena, placement, copper, net, @intCast(net_i), .{ .zone_fills = zone_fills });
+        const graph = try buildNetGraphPrepared(arena, placement, physical, net, @intCast(net_i), .{ .zone_fills = zone_fills });
         try out.append(arena, try netStatusFromGraph(arena, net.name, graph, true));
     }
     return out.toOwnedSlice(arena);
@@ -622,8 +623,9 @@ pub fn openNetsAmong(
     names: ?[]const []const u8,
 ) std.mem.Allocator.Error![]const OpenNet {
     if (names) |wanted| if (wanted.len == 0) return &.{};
+    const physical = try export_gerber.physicalCopper(arena, copper);
     var out: std.ArrayList(OpenNet) = .empty;
-    const zone_fills = try userZoneFills(arena, placement, copper, null);
+    const zone_fills = try userZoneFills(arena, placement, physical, null);
     for (placement.nets, 0..) |net, ni| {
         if (names) |wanted| {
             var selected = false;
@@ -635,7 +637,7 @@ pub fn openNetsAmong(
             }
             if (!selected) continue;
         }
-        const detail = try openNetDetail(arena, placement, copper, net, @intCast(ni), zone_fills);
+        const detail = try openNetDetail(arena, placement, physical, net, @intCast(ni), zone_fills);
         if (detail) |d| try out.append(arena, d);
     }
     return out.toOwnedSlice(arena);
@@ -977,7 +979,8 @@ pub fn buildNetGraph(
     net: export_kicad.FlatNet,
     net_i: i32,
 ) std.mem.Allocator.Error!NetGraph {
-    return buildNetGraphPrepared(arena, placement, copper, net, net_i, .{ .zone_fills = try userZoneFills(arena, placement, copper, null) });
+    const physical = try export_gerber.physicalCopper(arena, copper);
+    return buildNetGraphPrepared(arena, placement, physical, net, net_i, .{ .zone_fills = try userZoneFills(arena, placement, physical, null) });
 }
 
 /// Raster every retained user zone once per board-level connectivity query.
@@ -990,15 +993,16 @@ pub fn userZoneFills(
     copper: export_gerber.Copper,
     base: ?pour.EdgeField,
 ) std.mem.Allocator.Error![]const pour.Fill {
-    const fills = try arena.alloc(pour.Fill, copper.zones.len);
+    const physical = try export_gerber.physicalCopper(arena, copper);
+    const fills = try arena.alloc(pour.Fill, physical.zones.len);
     // One board, one lattice: seed the edge-margin field once for all zones.
     // `base` is the caller's shared field when the whole render pours the same
     // board (the page render, the fab gate) — without it we seed our own.
     const base_eff = if (base) |b| b else try pour.sharedEdgeField(arena, placement);
-    for (copper.zones, 0..) |z, zi| {
+    for (physical.zones, 0..) |z, zi| {
         var spec = pour.zoneLayerSpec(z.net, pour.sideOfSignal(z.layer), z.layer, z.poly);
-        spec.higher = try pour.higherPolys(arena, copper.zones, zi);
-        fills[zi] = try pour.computeShared(arena, placement, .{ .tracks = copper.tracks, .vias = copper.vias }, spec, base_eff);
+        spec.higher = try pour.higherPolys(arena, physical.zones, zi);
+        fills[zi] = try pour.computeShared(arena, placement, .{ .tracks = physical.tracks, .vias = physical.vias }, spec, base_eff);
     }
     return fills;
 }
@@ -1041,6 +1045,7 @@ pub fn buildNetGraphPrepared(
     net_i: i32,
     fills: SharedFills,
 ) std.mem.Allocator.Error!NetGraph {
+    const physical = try export_gerber.physicalCopper(arena, copper);
     const items = try padNodes(arena, placement, net);
 
     // Distinct board locations: unique pad-centre positions (0.05 mm buckets).
@@ -1053,11 +1058,11 @@ pub fn buildNetGraphPrepared(
     // at a same-layer joint, track↔via at a layer jump, via↔via where two
     // barrels abut.
     var segs: std.ArrayList(router.Track) = .empty;
-    for (copper.tracks) |t| {
+    for (physical.tracks) |t| {
         if (sameNet(t.net, net_i)) try segs.append(arena, t);
     }
     var vs: std.ArrayList(router.Via) = .empty;
-    for (copper.vias) |v| {
+    for (physical.vias) |v| {
         if (sameNet(v.net, net_i)) try vs.append(arena, v);
     }
     const qpads = try planeQueries(arena, items);
@@ -1065,7 +1070,7 @@ pub fn buildNetGraphPrepared(
     const join = if (preparedNetFills(fills.plane_fills, net.name)) |prepared|
         try pour.planeConnectPrepared(arena, query, prepared)
     else
-        try pour.planeConnect(arena, placement, .{ .tracks = copper.tracks, .vias = copper.vias, .zones = copper.zones }, query);
+        try pour.planeConnect(arena, placement, .{ .tracks = physical.tracks, .vias = physical.vias, .zones = physical.zones }, query);
     const n_pads = items.len;
     const n_tracks = segs.items.len;
     const parent = try arena.alloc(usize, n_pads + n_tracks + vs.items.len + join.n_comp);
@@ -1577,6 +1582,27 @@ test "connectivity flags an unrouted net and passes a routed one" {
     const routed = try check(arena, placement, .{ .tracks = &tracks }, .{});
     try testing.expect(!hasError(routed, "unrouted-net"));
     try testing.expectEqual(@as(usize, 1), routed.stats.connected_nets);
+
+    // An RF path may persist only its compact sampled proof. Connectivity must
+    // lower that proof to its private physical chords rather than seeing an
+    // empty track list and reporting a false airwire.
+    const rf_samples = [_]@import("placement/rf_path_solver.zig").Sample{
+        .{ .at = .{ 0, 0 }, .s_mm = 0, .curvature = 0, .width_mm = 0.2 },
+        .{ .at = .{ 5, 1 }, .s_mm = 5.1, .curvature = 0, .width_mm = 0.3 },
+        .{ .at = .{ 10, 0 }, .s_mm = 10.2, .curvature = 0, .width_mm = 0.2 },
+    };
+    const rf_paths = [_]@import("placement/rf_port_report.zig").Outcome{.{
+        .net = 0,
+        .chosen = 0,
+        .feasible = true,
+        .success = true,
+        .metrics = .{},
+        .trials = &.{},
+        .physical = .{ .sample_count = rf_samples.len, .samples = &rf_samples, .layer = 0 },
+    }};
+    const sampled = try netConnectivity(arena, placement, .{ .rf_paths = &rf_paths });
+    try testing.expectEqual(@as(usize, 1), sampled.len);
+    try testing.expect(sampled[0].connected);
 
     // A real maze route is a CHAIN of segments (only the end segments touch
     // the pads) — the union must propagate through the track↔track joints.

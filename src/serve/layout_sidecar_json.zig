@@ -199,6 +199,8 @@ pub fn parseSavedRoutes(alloc: std.mem.Allocator, v: ?std.json.Value) ?page.Save
                 .net = net,
                 .layer = layerIndexFromJson(it.object.get("l")),
                 .samples = samples.toOwnedSlice(alloc) catch return null,
+                .track_ids = jsonStringList(alloc, it.object.get("track_ids")),
+                .portal = jsonFlag(it.object.get("portal")),
             }) catch return null;
         }
     };

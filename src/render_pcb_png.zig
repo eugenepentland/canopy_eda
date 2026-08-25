@@ -34,10 +34,35 @@ const subcircuit_silkscreen = @import("subcircuit_silkscreen.zig");
 const testpoint_silkscreen = @import("testpoint_silkscreen.zig");
 const mask_relief = @import("placement/mask_relief.zig");
 
+/// Replace an RF path's compact editor handles with the conservative physical
+/// chords/collars consumed by render-time geometry, and suppress any native
+/// arc whose copper is already represented by those samples. Clearing the RF
+/// outcomes makes the returned view idempotent at downstream helper seams.
+fn physicalRoute(arena: std.mem.Allocator, routed: router.RouteResult) std.mem.Allocator.Error!router.RouteResult {
+    if (routed.rf_port_outcomes.len == 0) return routed;
+    const copper = try export_gerber.physicalCopper(arena, .{
+        .tracks = routed.tracks,
+        .vias = routed.vias,
+        .arcs = routed.arcs,
+        .rf_paths = routed.rf_port_outcomes,
+    });
+    var physical = routed;
+    physical.tracks = copper.tracks;
+    physical.arcs = copper.arcs;
+    physical.rf_port_outcomes = &.{};
+    return physical;
+}
+
+fn physicalOptions(arena: std.mem.Allocator, input: Options) std.mem.Allocator.Error!Options {
+    var opts = input;
+    if (opts.routed) |r| opts.routed = try physicalRoute(arena, r);
+    return opts;
+}
+
 /// The shown copper's mask relief for the sub-circuit silk pass — empty when
 /// nothing is routed, so an unrouted preview pays nothing.
 fn silkRelief(arena: std.mem.Allocator, p: optimizer.Placement, routed: ?router.RouteResult) std.mem.Allocator.Error!mask_relief.Relief {
-    const r = routed orelse return .{};
+    const r = try physicalRoute(arena, routed orelse return .{});
     return mask_relief.computeRouted(arena, p, .{ .tracks = r.tracks, .arcs = r.arcs }, r.vias);
 }
 
@@ -226,9 +251,18 @@ pub const Options = struct {
 
 /// Render `p` to PNG bytes owned by `alloc`.
 pub fn render(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options) png.Error![]u8 {
-    var cv = try renderCanvas(alloc, p, opts);
+    var cv = try renderPhysicalCanvas(alloc, p, opts);
     defer cv.deinit();
     return cv.toPng(alloc);
+}
+
+/// Resolve solver RF profiles to their physical copper for one paint. The
+/// returned canvas owns its pixels, so the temporary route slices can be freed
+/// as soon as the synchronous render completes.
+fn renderPhysicalCanvas(alloc: std.mem.Allocator, p: optimizer.Placement, input_opts: Options) png.Error!raster.Canvas {
+    var copper_arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer copper_arena_state.deinit();
+    return renderCanvas(alloc, p, try physicalOptions(copper_arena_state.allocator(), input_opts));
 }
 
 /// Render `p` onto a fresh canvas (the body of `render`, reusable by the
@@ -507,7 +541,10 @@ pub fn cropNetBbox(
         }
     }
     if (routed) |r| {
-        for (r.tracks) |t| {
+        var copper_arena_state = std.heap.ArenaAllocator.init(alloc);
+        defer copper_arena_state.deinit();
+        const physical = try physicalRoute(copper_arena_state.allocator(), r);
+        for (physical.tracks) |t| {
             if (!net_hit.contains(t.net)) continue;
             minx = @min(minx, @min(t.x1, t.x2));
             maxx = @max(maxx, @max(t.x1, t.x2));
@@ -549,7 +586,7 @@ pub fn renderSheet(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Optio
     var main_opts = opts;
     main_opts.crop = null;
     main_opts.precomputed_pours = pre;
-    var main_cv = try renderCanvas(alloc, p, main_opts);
+    var main_cv = try renderPhysicalCanvas(alloc, p, main_opts);
     defer main_cv.deinit();
 
     // Biggest hubs first.
@@ -574,7 +611,7 @@ pub fn renderSheet(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Optio
         const part = p.parts[pi];
         const pin_one = try alloc.alloc([]const u8, 1);
         pin_one[0] = part.ref_des;
-        var tcv = try renderCanvas(alloc, p, .{
+        var tcv = try renderPhysicalCanvas(alloc, p, .{
             .width = tile_w,
             .bare = true,
             .crop = part.ref_des,
@@ -633,7 +670,10 @@ pub fn renderSheet(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Optio
 /// drops that entry, so `pourFill` falls back to a per-face compute for it.
 fn precomputePours(arena: std.mem.Allocator, p: optimizer.Placement, routed: ?router.RouteResult, zones: []const pour.UserZone) []const PrecomputedPour {
     var out: std.ArrayList(PrecomputedPour) = .empty;
-    const copper: pour.Copper = if (routed) |rt| .{ .tracks = rt.tracks, .vias = rt.vias } else .{};
+    const copper: pour.Copper = if (routed) |rt| blk: {
+        const physical = physicalRoute(arena, rt) catch return &.{};
+        break :blk .{ .tracks = physical.tracks, .vias = physical.vias };
+    } else .{};
     for ([_]optimizer.Side{ .bottom, .top }) |side| {
         const net = p.rules.pourNetOnSide(side) orelse continue;
         var spec = pour.outerSpec(net, side);
@@ -2051,7 +2091,7 @@ test "PNG paints an inner plane's copper and carves a foreign via's antipad in i
     };
     const vias = [_]router.Via{.{ .x = 10, .y = 10, .dia = 0.6, .net = 1 }};
     const routed = router.RouteResult{ .tracks = &.{}, .vias = &vias, .routed = 0, .total = 0 };
-    var cv = try renderCanvas(alloc, p, .{ .width = 600, .routed = routed, .bare = true });
+    var cv = try renderPhysicalCanvas(alloc, p, .{ .width = 600, .routed = routed, .bare = true });
     defer cv.deinit();
     const px_mm: usize = 50; // 600 px / 24 mm × ss=2
     const row = (12 * px_mm) * cv.iw; // world y = 10
@@ -2092,7 +2132,7 @@ test "PNG draws a routed arc off its true curve, not its chords" {
         .{ .x1 = mid[0], .y1 = mid[1], .x2 = 10, .y2 = 4, .layer = 0, .width = 0.6, .net = 0 },
     };
     const routed = router.RouteResult{ .tracks = &chords, .vias = &.{}, .arcs = &arcs, .routed = 1, .total = 1 };
-    var cv = try renderCanvas(alloc, p, .{ .width = 600, .routed = routed, .bare = true });
+    var cv = try renderPhysicalCanvas(alloc, p, .{ .width = 600, .routed = routed, .bare = true });
     defer cv.deinit();
     const px_mm: usize = 50;
     // 45° along the arc — ON the curve, and the point the two chords cut the
@@ -2105,6 +2145,61 @@ test "PNG draws a routed arc off its true curve, not its chords" {
     const inside = (@as(usize, @intFromFloat(@round(13.0 * @as(f64, px_mm)))) * cv.iw +
         @as(usize, @intFromFloat(@round(13.0 * @as(f64, px_mm))))) * 3;
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x10, 0x23 }, cv.buf[inside .. inside + 3]);
+}
+
+fn containsCopperRedPixel(rgb: []const u8) bool {
+    var i: usize = 0;
+    while (i + 2 < rgb.len) : (i += 3) {
+        if (rgb[i] > 0x80 and rgb[i + 1] < 0x80) return true;
+    }
+    return false;
+}
+
+// spec: Web Server - RF-only saved paths paint their sampled physical chords even when no ordinary track handle is present
+test "PNG draws an RF-only physical path" {
+    const alloc = std.testing.allocator;
+    const p = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 10,
+        .maxy = 10,
+        .generated = false,
+    };
+    const RfOutcome = @typeInfo(@FieldType(router.RouteResult, "rf_port_outcomes")).pointer.child;
+    const RfPhysical = @FieldType(RfOutcome, "physical");
+    const RfSample = @typeInfo(@FieldType(RfPhysical, "samples")).pointer.child;
+    const samples = [_]RfSample{
+        .{ .at = .{ 2, 2 }, .s_mm = 0, .curvature = 0, .width_mm = 0.2 },
+        .{ .at = .{ 8, 2 }, .s_mm = 6, .curvature = 0, .width_mm = 0.4 },
+        .{ .at = .{ 8, 8 }, .s_mm = 12, .curvature = 0, .width_mm = 0.2 },
+    };
+    const paths = [_]RfOutcome{.{
+        .net = 0,
+        .chosen = 0,
+        .feasible = true,
+        .success = true,
+        .metrics = .{},
+        .trials = &.{},
+        .physical = .{ .sample_count = samples.len, .samples = &samples, .layer = 0 },
+    }};
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .rf_port_outcomes = &paths, .routed = 1, .total = 1 };
+    var route_arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer route_arena_state.deinit();
+    const physical = try physicalRoute(route_arena_state.allocator(), routed);
+    try std.testing.expectEqual(@as(usize, 2), physical.tracks.len);
+    var cv = try renderPhysicalCanvas(alloc, p, .{ .width = 600, .routed = routed, .bare = true });
+    defer cv.deinit();
+
+    // An otherwise empty board has no copper-red pixels. The RF-only proof
+    // therefore has to be lowered and painted for any such pixel to exist.
+    try std.testing.expect(containsCopperRedPixel(cv.buf));
 }
 
 // spec: Web Server - the board PNG paints bottom-side parts under top-side parts

@@ -468,7 +468,7 @@ test "DRC allowance accepts only neck-profile copper beside its own undersized S
     try testing.expect(!try allowsTrack(arena, placement, far, 0.2532, 0.127));
 }
 
-// spec: placement/rf-port-frame-routing - every single-ended controlled-impedance SMD launch tapers between the actual angle-aware land span and nominal width, including wider lands and via-fed or branched nets
+// spec: placement/rf-port-frame-routing - every single-ended controlled-impedance SMD launch tapers between the actual path-crossing land span and nominal width, including wider lands, bends inside the pad, full flat-face collars on rectangular and oval pads, and via-fed or branched nets
 test "pad launch span and edge distance follow a diagonal entry" {
     const root = @sqrt(0.5);
     const pad = Pad{

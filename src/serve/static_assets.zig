@@ -769,10 +769,19 @@ test "PCB editor styles the two-trace fillet radius menu" {
 
 test "PCB editor automatically lowers every local controlled-impedance pad taper" {
     const markers = [_][]const u8{
-        "function drawTaperProfile", "Math.abs(span-nominal)<=1e-9", "pad_neck_width",                      "kind:\"rf\"",
-        "nominal*1.2",               "function drawTaperTracks",     "function drawApplyAutomaticTapers",   "automatic pad tapers added",
-        "window.PCBDrawTaperTracks", "function drawTaperPath",       "track_ids:tracks.map(trackIdEnsure)", "window.PCBDrawPadLaunch",
-        "function drawRfTaperPlan",  "window.PCBDrawRfTaperPlan",    "vias, opposite-side terminals",       "function drawTrackEndDirection",
+        "function drawTaperProfile",                                 "Math.abs(span-nominal)<=1e-9",   "pad_neck_width",                      "kind:\"rf\"",
+        "nominal*1.2",                                               "function drawTaperTracks",       "function drawApplyAutomaticTapers",   "automatic pad tapers added",
+        "window.PCBDrawTaperTracks",                                 "function drawTaperPath",         "track_ids:tracks.map(trackIdEnsure)", "window.PCBDrawPadLaunch",
+        "function drawRfTaperPlan",                                  "window.PCBDrawRfTaperPlan",      "vias, opposite-side terminals",       "function drawTrackEndDirection",
+        "function rfFallbackRegions",                                "function rfRingFolded",          "overlapping simple segment",          "polys=rfFallbackRegions(pts,ws,poly)",
+        "function rfCleanSamples",                                   "function rfCompactRing",         "ws[last]=Math.max(ws[last],w)",       "clean.pts.length<2",
+        "function drawPathPadLaunch",                                "window.PCBDrawPathPadLaunch",    "first box-boundary",                  "span:2*f.half(-wy,wx)",
+        "function drawPadPortal",                                    "function drawTaperPortalPath",   "function drawRfMissingPortalGroups",  "drawTaperPortalProbes(paths)",
+        "pd.shape===\"roundrect\"||pd.shape===\"oval\"",             "ctx.arcTo(hw,-hh,hw,-hh+rr,rr)", "acceptedBundles++",                   "track_ids:(ownerIds||[]).slice()",
+        "a.net||\"\"",                                               "planned.push(collar)",           "PCB.rf_paths||[]).length",            "drawSamePortalPath",
+        "function rfPathBelongsToTrack",                             "p.portal",                       "portal:!!p.portal",                   "rfPathBelongsToTrack(p,t)",
+        "shape===\"rect\"||shape===\"roundrect\"||shape===\"oval\"", "if(path.portal)return",          "path.track_ids=ownerIds.slice()",     "if(RO||!curLayout||",
+        "if(!RO)setTimeout(drawRfRetrofitSaved,0);",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "function drawRfTaperAllowed") == null);
@@ -780,7 +789,7 @@ test "PCB editor automatically lowers every local controlled-impedance pad taper
 }
 
 test "PCB editor DRC lowers taper polygons to private probe tracks" {
-    for ([_][]const u8{ "var physicalTracks", "window.PCBRfOwnsTrack", "physicalTracks.push" }) |marker|
+    for ([_][]const u8{ "var physicalTracks", "window.PCBRfOwnsTrack", "physicalTracks.push", "Math.max(+a[2], +b[2])" }) |marker|
         try std.testing.expect(std.mem.indexOf(u8, drc_marshal_js, marker) != null or std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 

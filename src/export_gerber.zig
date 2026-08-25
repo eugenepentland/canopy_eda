@@ -127,6 +127,41 @@ pub const Copper = routed_copper.Copper;
 
 pub const Error = std.Io.Writer.Error || std.mem.Allocator.Error;
 
+/// Rebuild the router-shaped view `path_copper` consumes from the persisted
+/// export bundle. The returned slices still belong to `copper`; only the
+/// physical lowering below may allocate into the caller's arena.
+fn routedCopper(copper: Copper) router.RouteResult {
+    return .{
+        .tracks = copper.tracks,
+        .vias = copper.vias,
+        .arcs = copper.arcs,
+        .rf_port_outcomes = copper.rf_paths,
+        .routed = 0,
+        .total = 0,
+    };
+}
+
+fn physicalTracks(arena: std.mem.Allocator, copper: Copper) std.mem.Allocator.Error![]const router.Track {
+    return path_copper.tracks(arena, routedCopper(copper));
+}
+
+fn physicalArcs(arena: std.mem.Allocator, copper: Copper) std.mem.Allocator.Error![]const router.Arc {
+    return path_copper.filterArcs(arena, copper.rf_paths, copper.arcs);
+}
+
+/// Normalize persisted/editor copper into the conservative physical view used
+/// by geometry consumers outside the placement layer. The returned bundle is
+/// idempotent: its RF paths are cleared after their sampled chords and collars
+/// replace compact handles, and RF-owned native arcs are omitted.
+pub fn physicalCopper(arena: std.mem.Allocator, copper: Copper) std.mem.Allocator.Error!Copper {
+    if (copper.rf_paths.len == 0) return copper;
+    var physical = copper;
+    physical.tracks = try physicalTracks(arena, copper);
+    physical.arcs = try physicalArcs(arena, copper);
+    physical.rf_paths = &.{};
+    return physical;
+}
+
 /// Plan the full Gerber file set for `placement` from its `(stackup …)`
 /// rules: no stackup form = the router's legacy implicit 4-layer model (whose
 /// two inner planes `implicit_plane` names — ground, then the dominant supply
@@ -282,11 +317,13 @@ pub fn planSilk(
     copper: Copper,
     texts: []const font.BoardText,
 ) Error!SilkPlan {
+    const tracks = try physicalTracks(arena, copper);
+    const arcs = try physicalArcs(arena, copper);
     // Generated annotations and test-point labels are placed first so the
     // pin-one search can reserve every board-level silk box around pad 1.
     const relief = try mask_relief.computeRouted(arena, placement, .{
-        .tracks = copper.tracks,
-        .arcs = copper.arcs,
+        .tracks = tracks,
+        .arcs = arcs,
     }, copper.vias);
     const annotations = try subcircuit_silkscreen.collectWithBoardTexts(arena, placement, &.{}, copper.silk_keepouts, relief, texts);
     const testpoint_labels = try testpoint_silkscreen.collectWithKeepouts(arena, placement, &.{}, copper.silk_keepouts, annotations, texts);
@@ -306,7 +343,7 @@ pub fn planSilk(
                 .relief = relief,
                 .annotations = annotations,
                 .reserved_texts = reserved_texts,
-                .tracks = copper.tracks,
+                .tracks = tracks,
             },
         ),
     };
@@ -406,6 +443,8 @@ pub fn writeLayer(
 fn writeCopper(g: *Gx, placement: optimizer.Placement, copper: Copper, side: optimizer.Side) Error!void {
     const li: u8 = if (side == .bottom) 1 else 0;
     const stack_idx: u8 = if (side == .top) 1 else bottomIndex(placement.rules);
+    const physical_tracks = try physicalTracks(g.arena, copper);
+    const physical_arcs = try physicalArcs(g.arena, copper);
 
     // A `(plane IDX "NET")` declared on this OUTER layer: pour the COMPUTED
     // fill (island-free kept components) and its computed holes verbatim. The
@@ -419,14 +458,14 @@ fn writeCopper(g: *Gx, placement: optimizer.Placement, copper: Copper, side: opt
         // so the declared copper recedes by the clearance around it (no short).
         var pspec: pour.LayerSpec = .{ .net = pnet, .side = side, .track_layer = li };
         pspec.higher = try pour.higherThanDeclared(g.arena, copper.zones, li, pnet);
-        const fill = try pour.computeShared(g.arena, placement, .{ .tracks = copper.tracks, .vias = copper.vias }, pspec, g.edge);
+        const fill = try pour.computeShared(g.arena, placement, .{ .tracks = physical_tracks, .vias = copper.vias }, pspec, g.edge);
         try writeComputedFill(g, fill);
     }
 
     // Hand-drawn user copper pours on this outer face (see `writeUserZone`).
     for (copper.zones, 0..) |z, zi| {
         if (z.layer != li) continue;
-        try writeUserZone(g, placement, copper, side, li, zi);
+        try writeUserZone(g, placement, copper, physical_tracks, side, zi);
     }
 
     for (placement.parts) |p| {
@@ -444,7 +483,7 @@ fn writeCopper(g: *Gx, placement: optimizer.Placement, copper: Copper, side: opt
         try g.line(t.x1, t.y1, t.x2, t.y2);
     }
     try writeRfRegions(g, copper.rf_paths, li);
-    try writeLayerArcs(g, copper.arcs, li);
+    try writeLayerArcs(g, physical_arcs, li);
     for (copper.vias) |v| {
         try g.useAs(.c, v.dia, 0, .via_pad);
         try g.flash(v.x, v.y);
@@ -481,8 +520,8 @@ fn rfOwnsTrack(paths: []const rf_port_report.Outcome, track: router.Track) bool 
 }
 
 fn writeRfRun(g: *Gx, samples: []const @import("placement/rf_path_solver.zig").Sample) Error!void {
-    const poly = try path_copper.outline(g.arena, samples);
-    try regionPoly(g, poly);
+    const polys = try path_copper.regions(g.arena, samples);
+    for (polys) |poly| try regionPoly(g, poly);
 }
 
 fn writeLayerArcs(g: *Gx, arcs: []const router.Arc, layer: u8) Error!void {
@@ -511,12 +550,12 @@ fn writePlaneClearanceArcs(g: *Gx, placement: optimizer.Placement, arcs: []const
 /// barrels/vias + same-layer inner tracks, never SMD pads). Emits the carved
 /// fill as dark G36 regions and punches its interior antipad loops in clear
 /// polarity. Own-net through-hole pads stay solidly joined without thermals.
-fn writeUserZone(g: *Gx, placement: optimizer.Placement, copper: Copper, side: ?optimizer.Side, track_layer: u8, zi: usize) Error!void {
+fn writeUserZone(g: *Gx, placement: optimizer.Placement, copper: Copper, physical_tracks: []const router.Track, side: ?optimizer.Side, zi: usize) Error!void {
     const z = copper.zones[zi];
-    var spec = pour.zoneLayerSpec(z.net, side, track_layer, z.poly);
+    var spec = pour.zoneLayerSpec(z.net, side, z.layer, z.poly);
     // Clear the fill back from any higher-priority overlapping pour on this layer.
     spec.higher = try pour.higherPolys(g.arena, copper.zones, zi);
-    const fill = try pour.computeShared(g.arena, placement, .{ .tracks = copper.tracks, .vias = copper.vias }, spec, g.edge);
+    const fill = try pour.computeShared(g.arena, placement, .{ .tracks = physical_tracks, .vias = copper.vias }, spec, g.edge);
     if (fill.contours.len == 0) return;
     try writeComputedFill(g, fill);
 }
@@ -560,11 +599,13 @@ fn contourAreaDesc(contours: []const []const [2]f64, a: usize, b: usize) bool {
 /// may terminate on it). SMD pads live only on their outer face and never
 /// appear here.
 fn writeInnerCopper(g: *Gx, placement: optimizer.Placement, copper: Copper, sig: u8) Error!void {
+    const physical_tracks = try physicalTracks(g.arena, copper);
+    const physical_arcs = try physicalArcs(g.arena, copper);
     // Poured base first, so the pad/track/via copper below re-lands on the
     // cleaned fill — the same ordering `writeCopper` uses for an outer face.
     for (copper.zones, 0..) |z, zi| {
         if (z.layer != sig) continue;
-        try writeUserZone(g, placement, copper, null, sig, zi);
+        try writeUserZone(g, placement, copper, physical_tracks, null, zi);
     }
     for (placement.parts) |p| {
         for (p.pads) |pad| {
@@ -580,7 +621,7 @@ fn writeInnerCopper(g: *Gx, placement: optimizer.Placement, copper: Copper, sig:
         try g.line(t.x1, t.y1, t.x2, t.y2);
     }
     try writeRfRegions(g, copper.rf_paths, sig);
-    try writeLayerArcs(g, copper.arcs, sig);
+    try writeLayerArcs(g, physical_arcs, sig);
     for (copper.vias) |v| {
         try g.useAs(.c, v.dia, 0, .via_pad);
         try g.flash(v.x, v.y);
@@ -595,7 +636,8 @@ fn writeInnerCopper(g: *Gx, placement: optimizer.Placement, copper: Copper, sig:
 fn writePlane(g: *Gx, placement: optimizer.Placement, copper: Copper, pl: PlaneLayer) Error!void {
     const pc = placement.rules.design.pour_clearance;
     const pnet: pour.PlaneNet = if (pl.net == .ground) .ground else .{ .named = pl.net.named };
-    const fill = try pour.computeShared(g.arena, placement, .{ .tracks = copper.tracks, .vias = copper.vias }, .{ .net = pnet }, g.edge);
+    const physical_tracks = try physicalTracks(g.arena, copper);
+    const fill = try pour.computeShared(g.arena, placement, .{ .tracks = physical_tracks, .vias = copper.vias }, .{ .net = pnet }, g.edge);
     for (fill.contours) |poly| try regionPoly(g, poly);
     try g.polarity(false);
     const nets = try padNets(g.arena, placement);
@@ -697,13 +739,17 @@ fn thermalRelief(g: *Gx, p: optimizer.Part, pad: geometry.Pad, gap: f64) Error!v
 /// leaving the authored `mask-width` band inward on both faces.
 fn writeMask(g: *Gx, placement: optimizer.Placement, copper: Copper, side: optimizer.Side) Error!void {
     const margin = placement.rules.design.mask.margin;
-    const had_relief = try writeMaskRelief(g, placement, copper, side);
-    if (had_relief) try writeMaskPadIslands(g, placement, copper, side);
+    var physical = copper;
+    physical.tracks = try physicalTracks(g.arena, copper);
+    physical.arcs = try physicalArcs(g.arena, copper);
+    physical.rf_paths = &.{};
+    const had_relief = try writeMaskRelief(g, placement, physical, side);
+    if (had_relief) try writeMaskPadIslands(g, placement, physical, side);
     for (placement.parts) |p| {
         for (p.pads) |pad| {
             if (isSmd(pad) and p.side != side) {
                 if (!isExposedPaddle(p, pad)) continue;
-                if (oppositeEpHasNonGroundPour(g, placement, copper, p, pad, side)) continue;
+                if (oppositeEpHasNonGroundPour(g, placement, physical, p, pad, side)) continue;
                 // The remote opening is a board-to-heatsink contact window,
                 // not a solderable land. Keep it exactly the EP's authored
                 // outline: the normal registration margin belongs only to the
@@ -742,8 +788,8 @@ fn writeMask(g: *Gx, placement: optimizer.Placement, copper: Copper, side: optim
         if (p.side == side) continue;
         for (p.pads) |pad| {
             if (!isExposedPaddle(p, pad)) continue;
-            if (oppositeEpHasNonGroundPour(g, placement, copper, p, pad, side)) continue;
-            try protectOppositeEpSignals(g, placement, copper, p, pad, side);
+            if (oppositeEpHasNonGroundPour(g, placement, physical, p, pad, side)) continue;
+            try protectOppositeEpSignals(g, placement, physical, p, pad, side);
         }
     }
 }
@@ -1899,6 +1945,66 @@ test "solver RF chords emit one swept copper region" {
     try testing.expect(std.mem.indexOf(u8, out, "C,0.150000*%") == null);
     try testing.expect(std.mem.indexOf(u8, out, "C,0.250000*%") == null);
     try testing.expect(std.mem.indexOf(u8, out, "C,0.400000*%") != null);
+}
+
+// spec: export_gerber - a folded RF sweep emits overlapping simple dark regions instead of a self-crossing G36 region
+test "a folded RF offset ring emits overlapping simple Gerber regions" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const samples = [_]@import("placement/rf_path_solver.zig").Sample{
+        .{ .at = .{ 143.96, 105.45 }, .s_mm = 0, .curvature = 0, .width_mm = 0.56 },
+        .{ .at = .{ 144.22, 105.45 }, .s_mm = 0.26, .curvature = 0, .width_mm = 0.56 },
+        .{ .at = .{ 144.22, 105.5 }, .s_mm = 0.31, .curvature = 0, .width_mm = 0.56 },
+    };
+    const paths = [_]rf_port_report.Outcome{.{
+        .net = 0,
+        .chosen = 0,
+        .feasible = true,
+        .success = true,
+        .metrics = .{},
+        .trials = &.{},
+        .physical = .{ .sample_count = samples.len, .samples = &samples, .layer = 0 },
+    }};
+    const placement = testPlacement(&.{}, &.{});
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&aw.writer, arena, placement, .{ .tracks = &.{}, .rf_paths = &paths }, &.{}, export_fab.frameFor(placement), .{ .copper = .top }, .{ .function = "Copper,L1,Top" });
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, aw.written(), "G36*"));
+}
+
+// spec: export_gerber - downstream geometry consumes an RF portal collar as physical copper even when no compact track handle was persisted
+test "physical copper lowers an RF-only collar once" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const samples = [_]@import("placement/rf_path_solver.zig").Sample{
+        .{ .at = .{ 2, 3 }, .s_mm = 0, .curvature = 0, .width_mm = 0.12 },
+        .{ .at = .{ 2.4, 3.1 }, .s_mm = 0.412, .curvature = 0, .width_mm = 0.46 },
+    };
+    const paths = [_]rf_port_report.Outcome{.{
+        .net = 7,
+        .chosen = 0,
+        .feasible = true,
+        .success = true,
+        .metrics = .{},
+        .trials = &.{},
+        .physical = .{ .sample_count = samples.len, .samples = &samples, .layer = 1 },
+    }};
+
+    const physical = try physicalCopper(arena, .{ .rf_paths = &paths });
+    try testing.expectEqual(@as(usize, 1), physical.tracks.len);
+    try testing.expectEqual(@as(i32, 7), physical.tracks[0].net);
+    try testing.expectEqual(@as(u8, 1), physical.tracks[0].layer);
+    try testing.expectEqual(samples[0].at[0], physical.tracks[0].x1);
+    try testing.expectEqual(samples[0].at[1], physical.tracks[0].y1);
+    try testing.expectEqual(samples[1].at[0], physical.tracks[0].x2);
+    try testing.expectEqual(samples[1].at[1], physical.tracks[0].y2);
+    try testing.expectEqual(@as(f64, 0.46), physical.tracks[0].width);
+    try testing.expectEqual(@as(usize, 0), physical.rf_paths.len);
+
+    const again = try physicalCopper(arena, physical);
+    try testing.expectEqual(physical.tracks.ptr, again.tracks.ptr);
+    try testing.expectEqual(physical.tracks.len, again.tracks.len);
 }
 
 // spec: export_gerber - every copper Gerber file takes its name and X2 file function from the shared layer table row

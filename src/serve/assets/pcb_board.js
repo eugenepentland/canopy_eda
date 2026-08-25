@@ -1781,6 +1781,11 @@ function padPath(ctx,pd){
   ctx.closePath();return;}
  ctx.save();ctx.translate(pd.x*S,pd.y*S);ctx.rotate((pd.rot||0)*Math.PI/180);
  if(pd.shape==="circle")ctx.arc(0,0,Math.min(pd.w,pd.h)/2*S,0,6.2832);
+ else if(pd.shape==="roundrect"||pd.shape==="oval"){var hw=pd.w/2*S,hh=pd.h/2*S,
+   rr=pd.shape==="oval"?Math.min(hw,hh):Math.min((+pd.rratio>0?Math.min(+pd.rratio,.5):.25)*Math.min(pd.w,pd.h)*S,hw,hh);
+  ctx.moveTo(-hw+rr,-hh);ctx.lineTo(hw-rr,-hh);ctx.arcTo(hw,-hh,hw,-hh+rr,rr);
+  ctx.lineTo(hw,hh-rr);ctx.arcTo(hw,hh,hw-rr,hh,rr);ctx.lineTo(-hw+rr,hh);
+  ctx.arcTo(-hw,hh,-hw,hh-rr,rr);ctx.lineTo(-hw,-hh+rr);ctx.arcTo(-hw,-hh,-hw+rr,-hh,rr);ctx.closePath();}
  else ctx.rect(-pd.w/2*S,-pd.h/2*S,pd.w*S,pd.h*S);
  ctx.restore();}
 // Sub-circuit boxes: each ref-prefix group ("buck/…") draws as ONE named
@@ -2403,6 +2408,58 @@ function trackLength(t){var g=trackArcGeom(t);return g?g.r*Math.abs(g.sweep):Mat
 // hook of their own.
 var cuBatch=null,rfGeom=null;
 function cuGeomDrop(){cuBatch=null;rfGeom=null;}
+// Collapse only CONSECUTIVE coincident profile samples. Solvers and persisted
+// layouts can legitimately repeat a centreline station at a section boundary;
+// keeping the wider width preserves all copper while preventing a zero-length
+// leg from poisoning endpoint normals, miter joins, or the fallback regions.
+function rfCleanSamples(samples){var pts=[],ws=[];(samples||[]).forEach(function(s){
+ var x=+(s&&s[0]),y=+(s&&s[1]),w=+(s&&s[2]);if(!isFinite(x)||!isFinite(y))return;
+ if(!(w>0)||!isFinite(w))w=1e-9;var last=pts.length-1;
+ if(last>=0&&Math.hypot(x-pts[last][0],y-pts[last][1])<=1e-9){ws[last]=Math.max(ws[last],w);return;}
+ pts.push([x,y]);ws.push(w);});return {pts:pts,ws:ws};}
+// A wide path that turns within half its width of an endpoint can fold its
+// ordinary left/right offset ring across itself. Keep the compact ring in the
+// common case; lower a folded ring to overlapping simple segment trapezoids
+// and convex joins. A compound non-zero fill then represents their union
+// without clipping legitimate copper elsewhere along a turned path.
+function rfRingFolded(ring){if(!ring||ring.length<3)return true;var n=ring.length,eps=1e-9;
+ function cross(a,b,c){return (b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0]);}
+ function on(p,a,b,t){return Math.abs(cross(a,b,p))<=t&&p[0]>=Math.min(a[0],b[0])-eps&&p[0]<=Math.max(a[0],b[0])+eps&&p[1]>=Math.min(a[1],b[1])-eps&&p[1]<=Math.max(a[1],b[1])+eps;}
+ function touch(a,b,c,d,t){var abc=cross(a,b,c),abd=cross(a,b,d),cda=cross(c,d,a),cdb=cross(c,d,b);
+  if(((abc>t&&abd< -t)||(abc< -t&&abd>t))&&((cda>t&&cdb< -t)||(cda< -t&&cdb>t)))return true;
+  return Math.abs(abc)<=t&&on(c,a,b,t)||Math.abs(abd)<=t&&on(d,a,b,t)||Math.abs(cda)<=t&&on(a,c,d,t)||Math.abs(cdb)<=t&&on(b,c,d,t);}
+ for(var i=0;i<n;i++){var a=ring[i],b=ring[(i+1)%n],abx=b[0]-a[0],aby=b[1]-a[1],al=Math.hypot(abx,aby);if(al<=eps)return true;
+  for(var j=i+1;j<n;j++){var c=ring[j],d=ring[(j+1)%n],cdx=d[0]-c[0],cdy=d[1]-c[1],cl=Math.hypot(cdx,cdy),t=eps*Math.max(1,al,cl),adj=(i+1)%n===j||(j+1)%n===i;
+   if(adj){if(Math.abs(abx*cdy-aby*cdx)<=t&&abx*cdx+aby*cdy< -t)return true;continue;}
+   if(touch(a,b,c,d,t))return true;}}
+ return false;}
+function rfFallbackRegions(pts,ws,ring){if(!rfRingFolded(ring))return [ring];var out=[];
+ for(var i=1;i<pts.length;i++){var a=pts[i-1],b=pts[i],dx=b[0]-a[0],dy=b[1]-a[1],dl=Math.hypot(dx,dy);
+  if(dl<=1e-9)continue;var nx=-dy/dl,ny=dx/dl,ah=Math.max(ws[i-1],1e-9)/2,bh=Math.max(ws[i],1e-9)/2;
+  out.push([[a[0]+nx*ah,a[1]+ny*ah],[b[0]+nx*bh,b[1]+ny*bh],
+   [b[0]-nx*bh,b[1]-ny*bh],[a[0]-nx*ah,a[1]-ny*ah]]);}
+ for(var j=1;j+1<pts.length;j++){var p=pts[j],adx=p[0]-pts[j-1][0],ady=p[1]-pts[j-1][1],
+  bdx=pts[j+1][0]-p[0],bdy=pts[j+1][1]-p[1],al=Math.hypot(adx,ady),bl=Math.hypot(bdx,bdy),h=Math.max(ws[j],1e-9)/2;
+  if(al<=1e-9||bl<=1e-9)continue;
+  var na=[-ady/al*h,adx/al*h],nb=[-bdy/bl*h,bdx/bl*h],cand=[[p[0]+na[0],p[1]+na[1]],[p[0]-na[0],p[1]-na[1]],
+   [p[0]+nb[0],p[1]+nb[1]],[p[0]-nb[0],p[1]-nb[1]]],join=[];
+  cand.forEach(function(q){if(!join.some(function(r){return Math.hypot(q[0]-r[0],q[1]-r[1])<=1e-7;}))join.push(q);});
+  join.sort(function(a,b){return Math.atan2(b[1]-p[1],b[0]-p[0])-Math.atan2(a[1]-p[1],a[0]-p[0]);});
+  if(join.length>=3)out.push(join);}
+ return out;}
+function rfCompactRing(pts,ws){if(!pts||pts.length<2)return [];var left=[],right=[];
+ function add(out,p){var q=out.length&&out[out.length-1];if(!q||Math.abs(q[0]-p[0])>1e-7||Math.abs(q[1]-p[1])>1e-7)out.push(p);}
+ for(var i=0;i<pts.length;i++){var ax,ay,bx,by;
+  if(i===0){ax=pts[1][0]-pts[0][0];ay=pts[1][1]-pts[0][1];bx=ax;by=ay;}
+  else if(i===pts.length-1){ax=pts[i][0]-pts[i-1][0];ay=pts[i][1]-pts[i-1][1];bx=ax;by=ay;}
+  else{ax=pts[i][0]-pts[i-1][0];ay=pts[i][1]-pts[i-1][1];bx=pts[i+1][0]-pts[i][0];by=pts[i+1][1]-pts[i][1];}
+  var al=Math.hypot(ax,ay)||1,bl=Math.hypot(bx,by)||1,half=Math.max(ws[i],1e-9)/2;
+  [1,-1].forEach(function(side,si){var out=si?right:left,nax=-ay/al*side,nay=ax/al*side,nbx=-by/bl*side,nby=bx/bl*side;
+   if(i===0||i===pts.length-1){add(out,[pts[i][0]+nbx*half,pts[i][1]+nby*half]);return;}
+   var mx=nax+nbx,my=nay+nby,ml=Math.hypot(mx,my);if(ml>1e-9){mx/=ml;my/=ml;var den=mx*nbx+my*nby;
+    if(den>1e-9){var off=half/den;if(off<=half*2+1e-9){add(out,[pts[i][0]+mx*off,pts[i][1]+my*off]);return;}}}
+   add(out,[pts[i][0]+nax*half,pts[i][1]+nay*half]);add(out,[pts[i][0]+nbx*half,pts[i][1]+nby*half]);});}
+ return left.concat(right.reverse());}
 // Solver-generated RF paths stay as short centreline chords for connectivity,
 // editing and obstacle probes, but paint as ONE swept custom-copper polygon.
 // Exact endpoint widths preserve the pad taper without exposing every solver
@@ -2410,40 +2467,30 @@ function cuGeomDrop(){cuBatch=null;rfGeom=null;}
 function rfPathGeom(){var src=PCB.rf_paths||[];
  if(rfGeom&&rfGeom.src===src&&rfGeom.n===src.length)return rfGeom.p;
  var runs=[];
- src.forEach(function(cur){if(!cur.samples||cur.samples.length<2)return;
-  var pts=cur.samples.map(function(s){return [+s[0],+s[1]];}),ws=cur.samples.map(function(s){return +s[2];});
-  var left=[],right=[];
-  function add(out,p){var q=out.length&&out[out.length-1];if(!q||Math.abs(q[0]-p[0])>1e-7||Math.abs(q[1]-p[1])>1e-7)out.push(p);}
-  for(var i=0;i<pts.length;i++){var ax,ay,bx,by;
-   if(i===0){ax=pts[1][0]-pts[0][0];ay=pts[1][1]-pts[0][1];bx=ax;by=ay;}
-   else if(i===pts.length-1){ax=pts[i][0]-pts[i-1][0];ay=pts[i][1]-pts[i-1][1];bx=ax;by=ay;}
-   else{ax=pts[i][0]-pts[i-1][0];ay=pts[i][1]-pts[i-1][1];bx=pts[i+1][0]-pts[i][0];by=pts[i+1][1]-pts[i][1];}
-   var al=Math.hypot(ax,ay)||1,bl=Math.hypot(bx,by)||1,half=Math.max(ws[i],1e-9)/2;
-   [1,-1].forEach(function(side,si){var out=si?right:left,nax=-ay/al*side,nay=ax/al*side,nbx=-by/bl*side,nby=bx/bl*side;
-    if(i===0||i===pts.length-1){add(out,[pts[i][0]+nbx*half,pts[i][1]+nby*half]);return;}
-    var mx=nax+nbx,my=nay+nby,ml=Math.hypot(mx,my);if(ml>1e-9){mx/=ml;my/=ml;var den=mx*nbx+my*nby;
-     if(den>1e-9){var off=half/den;if(off<=half*2+1e-9){add(out,[pts[i][0]+mx*off,pts[i][1]+my*off]);return;}}}
-    add(out,[pts[i][0]+nax*half,pts[i][1]+nay*half]);add(out,[pts[i][0]+nbx*half,pts[i][1]+nby*half]);});}
-  var poly=left.concat(right.reverse()),path=new Path2D();path.moveTo(X(poly[0][0]),Y(poly[0][1]));
-  for(var j=1;j<poly.length;j++)path.lineTo(X(poly[j][0]),Y(poly[j][1]));path.closePath();
-  runs.push({l:cur.l||0,net:cur.net,poly:poly,path:path});});
+ src.forEach(function(cur){var clean=rfCleanSamples(cur.samples);if(clean.pts.length<2)return;
+  var pts=clean.pts,ws=clean.ws,poly=rfCompactRing(pts,ws),polys=rfFallbackRegions(pts,ws,poly),path=new Path2D();
+  polys.forEach(function(ring){if(ring.length<3)return;path.moveTo(X(ring[0][0]),Y(ring[0][1]));
+   for(var j=1;j<ring.length;j++)path.lineTo(X(ring[j][0]),Y(ring[j][1]));path.closePath();});
+  runs.push({l:cur.l||0,net:cur.net,poly:poly,polys:polys,path:path});});
  rfGeom={src:src,n:src.length,p:runs};return runs;}
 function rfSamePoint(a,b){return Math.abs(a[0]-b[0])<=1e-7&&Math.abs(a[1]-b[1])<=1e-7;}
 function rfPathCoversTrack(ss,t,a,b){for(var i=0;i<ss.length;i++){if(!rfSamePoint(ss[i],a))continue;
   for(var j=i+1;j<ss.length;j++){if(!rfSamePoint(ss[j],b))continue;var on=true;
    for(var k=i+1;k<j;k++)if(segDist(ss[k][0],ss[k][1],t)>.011){on=false;break;}
    if(on)return true;}}return false;}
-function rfPathOwnsTrack(p,t){if(!p||!t||(p.l||0)!==(t.l||0)||p.net!==t.net)return false;
+function rfPathOwnsTrack(p,t){if(!p||p.portal||!t||+(p.l||0)!==+(t.l||0)||(p.net||"")!==(t.net||""))return false;
  var ids=p.track_ids||[];if(ids.length)return !!t.id&&ids.indexOf(t.id)>=0;
  var ss=p.samples||[];if(ss.length<2)return false;
  return rfPathCoversTrack(ss,t,[t.x1,t.y1],[t.x2,t.y2])||rfPathCoversTrack(ss,t,[t.x2,t.y2],[t.x1,t.y1]);}
 function rfOwnsTrack(t){return (PCB.rf_paths||[]).some(function(p){return rfPathOwnsTrack(p,t);});}
 window.PCBRfOwnsTrack=rfOwnsTrack;
+function rfPathBelongsToTrack(p,t){if(!p||!t||+(p.l||0)!==+(t.l||0)||(p.net||"")!==(t.net||""))return false;
+ var ids=p.track_ids||[];return (!!t.id&&ids.indexOf(t.id)>=0)||rfPathOwnsTrack(p,t);}
 // A generated RF polygon is exact only while its hidden centreline chords are
 // untouched. Editing one drops its polygon proof; ordinary tracks become
 // visible/editable and DRC judges them until Route creates a fresh RF path.
 function rfDropForTracks(ts){if(!(PCB.rf_paths||[]).length||!ts||!ts.length)return;
- var before=PCB.rf_paths;PCB.rf_paths=before.filter(function(p){return !ts.some(function(t){return rfPathOwnsTrack(p,t);});});
+ var before=PCB.rf_paths;PCB.rf_paths=before.filter(function(p){return !ts.some(function(t){return rfPathBelongsToTrack(p,t);});});
  if(PCB.rf_paths.length!==before.length)cuGeomDrop();}
 function rfDropNet(net){if(!net)return;var before=PCB.rf_paths;
  PCB.rf_paths=before.filter(function(p){return p.net!==net;});if(PCB.rf_paths.length!==before.length)cuGeomDrop();}
@@ -3923,7 +3970,7 @@ var undoStack=[],redoStack=[];
 function snapPoses(){return P.map(function(p){return {x:p.x,y:p.y,rot:p.rot||0,side:p.side||"top",locked:!!p.locked};});}
 function cloneCopper(){return {tracks:(PCB.tracks||[]).map(function(t){return {x1:t.x1,y1:t.y1,xm:t.xm,ym:t.ym,x2:t.x2,y2:t.y2,l:t.l||0,w:t.w,net:t.net||"",g:t.g,source:t.source,id:trackIdEnsure(t)};}),
  vias:(PCB.vias||[]).map(function(v){return {x:v.x,y:v.y,d:v.d,drill:v.drill,net:v.net||"",g:v.g,f:v.f,source:v.source,s:Array.isArray(v.s)?v.s.slice():undefined,id:viaIdEnsure(v)};}),
- rf_paths:(PCB.rf_paths||[]).map(function(p){return {net:p.net,l:p.l||0,
+ rf_paths:(PCB.rf_paths||[]).map(function(p){return {net:p.net,l:p.l||0,portal:!!p.portal,
   track_ids:(p.track_ids||[]).slice(),samples:(p.samples||[]).map(function(s){return [+s[0],+s[1],+s[2]];})};})};}
 function cloneText(t){return {x:t.x,y:t.y,rot:t.rot||0,side:t.side||"top",size:t.size||1,text:t.text,subcircuit:t.subcircuit||undefined,testpoint:t.testpoint||undefined,fabrication_id:!!t.fabrication_id};}
 function cloneTexts(){return (PCB.texts||[]).map(cloneText);}
@@ -3952,7 +3999,7 @@ function restoreSnap(s){s.poses.forEach(function(q,i){if(P[i]){P[i].x=q.x;P[i].y
  applyAll();
  PCB.tracks=(s.tracks||[]).map(function(t){return {x1:t.x1,y1:t.y1,xm:t.xm,ym:t.ym,x2:t.x2,y2:t.y2,l:t.l||0,w:t.w,net:t.net||"",g:t.g,source:t.source,id:t.id||trackIdNew()};});
  PCB.vias=(s.vias||[]).map(function(v){return {x:v.x,y:v.y,d:v.d,drill:v.drill,net:v.net||"",g:v.g,f:v.f,source:v.source,s:Array.isArray(v.s)?v.s.slice():undefined,id:v.id||viaIdNew()};});
- PCB.rf_paths=(s.rf_paths||[]).map(function(p){return {net:p.net,l:p.l||0,
+ PCB.rf_paths=(s.rf_paths||[]).map(function(p){return {net:p.net,l:p.l||0,portal:!!p.portal,
   track_ids:(p.track_ids||[]).slice(),samples:(p.samples||[]).map(function(q){return [+q[0],+q[1],+q[2]];})};});
  var editZoneIndex=typeof pourEdit!=="undefined"&&pourEdit?(PCB.zones||[]).indexOf(pourEdit):-1;
  PCB.zones=(s.zones||[]).map(function(z){return {net:z.net||"",layer:z.layer||"",layers:Array.isArray(z.layers)?z.layers.slice():undefined,poly:(z.poly||[]).map(function(p){return [+p[0],+p[1]];}),filled:!!z.filled,keepout:!!z.keepout,priority:+z.priority||0,g:z.g,
@@ -4129,7 +4176,8 @@ function loadLayoutName(nm){
  PCB.texts=(L.texts||[]).map(cloneText);
  txSel=-1;txPopClose();copperTouched();paintSoon();
  setActiveLayout(nm);syncLayoutUrl(nm);clearDirty();
- if((PCB.zones||[]).length)refillPours();else scheduleDrc();}
+ if((PCB.zones||[]).length)refillPours();else scheduleDrc();
+ if(!RO)setTimeout(drawRfRetrofitSaved,0);}
 function bindLayLoad(b){b.addEventListener("click",function(){loadLayoutName(b.getAttribute("data-lay-load"));});}
 function bindLayDel(b){b.addEventListener("click",function(){var nm=b.getAttribute("data-lay-del");
  if(!nm)return;
@@ -6739,21 +6787,51 @@ function drawEndpointPad(net,l,x,y){var hit=null,key=net||"";
  P.some(function(p,i){return (p.pads||[]).some(function(pd){if(pd.thru||!pd.net||pd.net!==key)return false;
    var pl=p.side==="bottom"?1:0,c=wpt(i,pd.x,pd.y);if(pl!==l||Math.hypot(c.x-x,c.y-y)>1e-7)return false;
    hit={i:i,pd:pd,l:pl};return true;});});return hit;}
-function drawPadLaunch(pad,dir){if(!pad||!pad.pd||!dir)return null;
- var dl=Math.hypot(dir.x,dir.y);if(dl<1e-10)return null;dir={x:dir.x/dl,y:dir.y/dl};
+function drawPadFrame(pad){if(!pad||!pad.pd)return null;
  var pd=pad.pd,a=(+pd.rot||0)*Math.PI/180,c=wpt(pad.i,pd.x,pd.y),
   q=wpt(pad.i,pd.x+Math.cos(a),pd.y+Math.sin(a)),ux=q.x-c.x,uy=q.y-c.y,ul=Math.hypot(ux,uy)||1;
- ux/=ul;uy/=ul;var vx=-uy,vy=ux,hw=(+pd.w||0)/2,hh=(+pd.h||0)/2;
+ ux/=ul;uy/=ul;var vx=-uy,vy=ux,hw=(+pd.w||0)/2,hh=(+pd.h||0)/2,radius=0,shape=pd.shape||"rect",
+  portalOk=!(pd.poly&&pd.poly.length>=3)&&(shape==="rect"||shape==="roundrect"||shape==="oval");
+ if(shape==="roundrect")radius=Math.min((+pd.rratio>0?Math.min(+pd.rratio,.5):.25)*Math.min(2*hw,2*hh),hw,hh);
+ else if(shape==="oval")radius=Math.min(hw,hh);
  function half(dx,dy){var lx=dx*ux+dy*uy,ly=dx*vx+dy*vy,e=1/0;
   if(Math.abs(lx)>1e-10)e=Math.min(e,hw/Math.abs(lx));if(Math.abs(ly)>1e-10)e=Math.min(e,hh/Math.abs(ly));
   return isFinite(e)?e:0;}
- return {land:half(dir.x,dir.y),span:2*half(-dir.y,dir.x)};}
+ function local(p){var dx=p.x-c.x,dy=p.y-c.y;return {x:dx*ux+dy*uy,y:dx*vx+dy*vy};}
+ function world(x,y){return {x:c.x+ux*x+vx*y,y:c.y+uy*x+vy*y};}
+ return {c:c,ux:ux,uy:uy,vx:vx,vy:vy,hw:hw,hh:hh,radius:radius,portalOk:portalOk,half:half,local:local,world:world};}
+function drawPadPortal(f,lx,ly){if(!f.portalOk)return null;var xface=Math.abs(Math.abs(lx)-f.hw)<=Math.abs(Math.abs(ly)-f.hh);
+ if(xface){var sx=lx<0?-1:1,hx=f.hh-f.radius;if(!(hx>1e-9)||Math.abs(ly)>hx+1e-7)return null;
+  return {a:f.world(sx*f.hw,-hx),b:f.world(sx*f.hw,hx),out:{x:sx*f.ux,y:sx*f.uy},width:2*hx};}
+ var sy=ly<0?-1:1,hy=f.hw-f.radius;if(!(hy>1e-9)||Math.abs(lx)>hy+1e-7)return null;
+ return {a:f.world(-hy,sy*f.hh),b:f.world(hy,sy*f.hh),out:{x:sy*f.vx,y:sy*f.vy},width:2*hy};}
+function drawPadLaunch(pad,dir){if(!dir)return null;var dl=Math.hypot(dir.x,dir.y),f=drawPadFrame(pad);
+ if(!f||dl<1e-10)return null;dir={x:dir.x/dl,y:dir.y/dl};var land=f.half(dir.x,dir.y),exit=f.local({x:f.c.x+dir.x*land,y:f.c.y+dir.y*land});
+ return {land:land,span:2*f.half(-dir.y,dir.x),portal:drawPadPortal(f,exit.x,exit.y)};}
 window.PCBDrawPadLaunch=drawPadLaunch;
+// Measure a bent launch along the ordered centreline rather than projecting
+// one endpoint tangent through the pad forever. The first box-boundary
+// crossing supplies both the real path length held at land width and the
+// angle-aware span where copper actually exits.
+function drawPathPadLaunch(tracks,pad,start){var f=drawPadFrame(pad);if(!f||!tracks||!tracks.length)return null;
+ var total=0,n=tracks.length;
+ for(var ti=0;ti<n;ti++){var t=start?tracks[ti]:drawReverseTrack(tracks[n-1-ti]),ch=trackChords(t),piece=trackLength(t)/ch.length;
+  for(var j=0;j<ch.length;j++){var a={x:ch[j].x1,y:ch[j].y1},b={x:ch[j].x2,y:ch[j].y2},la=f.local(a),lb=f.local(b),
+   ai=Math.abs(la.x)<=f.hw+1e-9&&Math.abs(la.y)<=f.hh+1e-9,bi=Math.abs(lb.x)<=f.hw+1e-9&&Math.abs(lb.y)<=f.hh+1e-9;
+   if(ai&&!bi){var dx=lb.x-la.x,dy=lb.y-la.y,k=1,q;
+    if(Math.abs(dx)>1e-12){q=((lb.x<0?-f.hw:f.hw)-la.x)/dx;if(q>=-1e-9&&q<=k)k=q;}
+    if(Math.abs(dy)>1e-12){q=((lb.y<0?-f.hh:f.hh)-la.y)/dy;if(q>=-1e-9&&q<=k)k=q;}
+    var wx=b.x-a.x,wy=b.y-a.y,wl=Math.hypot(wx,wy);if(wl<1e-10)return null;wx/=wl;wy/=wl;
+    k=Math.max(0,Math.min(1,k));var ex=la.x+(lb.x-la.x)*k,ey=la.y+(lb.y-la.y)*k;
+    return {land:total+piece*k,span:2*f.half(-wy,wx),portal:drawPadPortal(f,ex,ey)};}
+   total+=piece;}}
+ return null;}
+window.PCBDrawPathPadLaunch=drawPathPadLaunch;
 function drawTaperProfile(net,pad,nominal,dir){if(!pad||!pad.pd)return null;
  var c=netClassInfo(net||"");if(!c)return null;
  var classW=+c.width||+((PCB.rules||{}).track_width)||baseTrackW();
  if(!(classW>0)||Math.abs(nominal-classW)>1e-7)return null;
- var launch=drawPadLaunch(pad,dir),span=launch?launch.span:Math.min(+pad.pd.w||0,+pad.pd.h||0);
+ var launch=dir&&dir.land!=null&&dir.span!=null?dir:drawPadLaunch(pad,dir),span=launch?launch.span:Math.min(+pad.pd.w||0,+pad.pd.h||0);
  var neck=+c.pad_neck_width||0;
  if(neck>0){neck=Math.max(neck,+((PCB.rules||{}).min_width)||0);
   if(neck<nominal-1e-9&&span<nominal-1e-9)
@@ -6761,7 +6839,7 @@ function drawTaperProfile(net,pad,nominal,dir){if(!pad||!pad.pd)return null;
  if(!(+c.impedance_ohms>0)||(+c.diff_impedance_ohms>0))return null;
  if(!(span>0)||Math.abs(span-nominal)<=1e-9)return null;
  return {kind:"rf",width:span,land:launch?launch.land:Math.max(+pad.pd.w||0,+pad.pd.h||0)/2,
-  taper:nominal*1.2,step:nominal*1.2/6};}
+  taper:nominal*1.2,step:nominal*1.2/6,portal:launch&&launch.portal||null};}
 function drawTrackPoint(t,f){var g=trackArcGeom(t);if(g){var a=g.a1+g.sweep*f;return {x:g.cx+g.r*Math.cos(a),y:g.cy+g.r*Math.sin(a)};}
  return {x:t.x1+(t.x2-t.x1)*f,y:t.y1+(t.y2-t.y1)*f};}
 function drawTrackEndDirection(t,start){var a=drawTrackPoint(t,start?0:1),b=drawTrackPoint(t,start ? .001 : .999);
@@ -6812,26 +6890,38 @@ function drawTaperPath(tracks,start,end,nominal){if(!tracks.length||(!start&&!en
   samples.push([p.x,p.y,drawProfileWidth(s,total,start,end,nominal)]);});
  return {net:tracks[0].net||"",l:tracks[0].l||0,
   track_ids:tracks.map(trackIdEnsure),samples:samples};}
+// A scalar-width sweep cannot mate both shoulders of an off-centre pad exit.
+// Add a very short full-face collar across the exact oriented pad portal. It
+// overlaps the path at its real crossing, is persisted/fabricated as ordinary
+// RF-path copper, and is included in both the synchronous and server DRC gates.
+function drawTaperPortalPath(profile,track,nominal,ownerIds){var p=profile&&profile.kind==="rf"&&profile.portal;if(!p)return null;
+ var d=Math.max(+((PCB.rules||{}).min_width)||.003,Math.min(.02,nominal*.08));
+ return {net:track.net||"",l:track.l||0,track_ids:(ownerIds||[]).slice(),portal:true,samples:
+  [[p.a.x,p.a.y,d],[p.b.x,p.b.y,d]]};}
+function drawTaperPathSet(tracks,start,end,nominal){var main=drawTaperPath(tracks,start,end,nominal);if(!main)return [];
+ var out=[main],head=drawTaperPortalPath(start,tracks[0],nominal,main.track_ids),tail=drawTaperPortalPath(end,tracks[tracks.length-1],nominal,main.track_ids);
+ if(head)out.push(head);if(tail&&!out.some(function(path){return drawSamePortalPath(tail,path);}))out.push(tail);return out;}
+function drawTaperPortalProbes(paths){var out=[];(paths||[]).forEach(function(p){if(!p.portal||!p.samples||p.samples.length!==2)return;
+  var a=p.samples[0],b=p.samples[1];out.push({x1:a[0],y1:a[1],x2:b[0],y2:b[1],l:p.l||0,w:Math.max(+a[2],+b[2]),net:p.net||""});});return out;}
 // Keep a via-fed gesture's two launch profiles on their own contiguous layer
 // runs. The middle (including every via transition) remains nominal centreline
 // copper and no custom path claims tracks from another layer.
 function drawRfTaperPlan(tracks,start,end,nominal){var n=tracks.length,head=0,tail=n,paths=[],shaped=[];
  if(start){var hl=tracks[0].l||0;while(head<n&&(tracks[head].l||0)===hl)head++;}
  if(end){var el=tracks[n-1].l||0;while(tail>0&&(tracks[tail-1].l||0)===el)tail--;}
- if(start&&end&&head>tail){var whole=drawTaperPath(tracks,start,end,nominal);
-  return {tracks:drawTaperTracks(tracks,start,end,nominal),paths:whole?[whole]:[]};}
- if(start){var first=tracks.slice(0,head),fp=drawTaperPath(first,start,null,nominal);
-  shaped=shaped.concat(drawTaperTracks(first,start,null,nominal));if(fp)paths.push(fp);}
+ if(start&&end&&head>tail)return {tracks:drawTaperTracks(tracks,start,end,nominal),paths:drawTaperPathSet(tracks,start,end,nominal)};
+ if(start){var first=tracks.slice(0,head);
+  shaped=shaped.concat(drawTaperTracks(first,start,null,nominal));paths=paths.concat(drawTaperPathSet(first,start,null,nominal));}
  shaped=shaped.concat(tracks.slice(start?head:0,end?tail:n));
- if(end){var last=tracks.slice(tail),lp=drawTaperPath(last,null,end,nominal);
-  shaped=shaped.concat(drawTaperTracks(last,null,end,nominal));if(lp)paths.push(lp);}
+ if(end){var last=tracks.slice(tail);
+  shaped=shaped.concat(drawTaperTracks(last,null,end,nominal));paths=paths.concat(drawTaperPathSet(last,null,end,nominal));}
  return {tracks:shaped,paths:paths};}
 window.PCBDrawRfTaperPlan=drawRfTaperPlan;
 function drawApplyAutomaticTapers(){if(!dtrace||dtrace.pair||!dtrace.laid||!dtrace.laid.length)return {ok:true,changed:false};
  var old=dtrace.laid.slice(),nominal=dtrace.w;
  var sp=dtrace.startPad,ep=drawEndpointPad(dtrace.net,dtrace.l,dtrace.lx,dtrace.ly),
-  sr=drawTaperProfile(dtrace.net,sp,nominal,drawTrackEndDirection(old[0],true)),
-  er=drawTaperProfile(dtrace.net,ep,nominal,drawTrackEndDirection(old[old.length-1],false));
+  sr=drawTaperProfile(dtrace.net,sp,nominal,drawPathPadLaunch(old,sp,true)||drawTrackEndDirection(old[0],true)),
+  er=drawTaperProfile(dtrace.net,ep,nominal,drawPathPadLaunch(old,ep,false)||drawTrackEndDirection(old[old.length-1],false));
  if(!sr&&!er)return {ok:true,changed:false};var shaped,paths=[];
  // Authored pad_neck shapes only the pad-ended segment. RF port tapering is a
  // path-length profile and may continue over several short gesture pieces.
@@ -6839,11 +6929,11 @@ function drawApplyAutomaticTapers(){if(!dtrace||dtrace.pair||!dtrace.laid||!dtra
   if(old.length===1)shaped=drawTaperTracks(old,sr,er,nominal);
   else{shaped=old.slice();if(sr)shaped.splice.apply(shaped,[0,1].concat(drawTaperTracks([old[0]],sr,null,nominal)));
    if(er){var last=shaped.length-1,tail=drawTaperTracks([shaped[last]],null,er,nominal);shaped.splice.apply(shaped,[last,1].concat(tail));}}
-  if(old.length===1){var both=drawTaperPath(old,sr,er,nominal);if(both)paths.push(both);}
-  else{if(sr){var headPath=drawTaperPath([old[0]],sr,null,nominal);if(headPath)paths.push(headPath);}
-   if(er){var tailPath=drawTaperPath([old[old.length-1]],null,er,nominal);if(tailPath)paths.push(tailPath);}}
+  if(old.length===1)paths=paths.concat(drawTaperPathSet(old,sr,er,nominal));
+  else{if(sr)paths=paths.concat(drawTaperPathSet([old[0]],sr,null,nominal));
+   if(er)paths=paths.concat(drawTaperPathSet([old[old.length-1]],null,er,nominal));}
  }else{var rfPlan=drawRfTaperPlan(old,sr,er,nominal);shaped=rfPlan.tracks;paths=rfPlan.paths;}
- var board=PCB.tracks||[],after=board.filter(function(t){return old.indexOf(t)<0;}).concat(shaped),base=dtrace.undo||{};
+ var board=PCB.tracks||[],after=board.filter(function(t){return old.indexOf(t)<0;}).concat(shaped,drawTaperPortalProbes(paths)),base=dtrace.undo||{};
  if(drcGateDiffBlocks(base.tracks||[],base.vias||[],after,PCB.vias||[])){
   routeStatMsg("automatic pad taper would violate DRC — adjust the launch before finishing",true);return {ok:false,changed:false};}
  if(!paths.length)return {ok:true,changed:false};PCB.rf_paths=PCB.rf_paths||[];
@@ -6861,44 +6951,70 @@ function drawTrackFromPoint(t,x,y){
  if(drawSamePointXY(t.x1,t.y1,x,y))return t;
  if(drawSamePointXY(t.x2,t.y2,x,y))return drawReverseTrack(t);return null;}
 function drawViaAt(net,x,y){return (PCB.vias||[]).some(function(v){return v.net===net&&drawSamePointXY(v.x,v.y,x,y);});}
-function drawRfRetrofitRun(seed,reverse,nominal,start,claimed){var first=reverse?drawReverseTrack(seed):seed,
- run=[first],used={};used[trackIdEnsure(seed)]=1;var total=trackLength(first),end=null;
+function drawRfRetrofitRun(seed,reverse,nominal,pad,start,claimed){var first=reverse?drawReverseTrack(seed):seed,
+ run=[first],used={};used[trackIdEnsure(seed)]=1;var total=trackLength(first),endPad=null,
+ walk=start.land+start.taper+Math.hypot(+pad.pd.w||0,+pad.pd.h||0);
  for(var guard=0;guard<256;guard++){
-  var last=run[run.length-1],x=last.x2,y=last.y2,pad=drawEndpointPad(last.net,last.l||0,x,y);
-  if(pad){end=drawTaperProfile(last.net,pad,nominal,drawTrackEndDirection(last,false));break;}
-  if(total>=start.land+start.taper-1e-9||drawViaAt(last.net,x,y))break;
+  var last=run[run.length-1],x=last.x2,y=last.y2,finishPad=drawEndpointPad(last.net,last.l||0,x,y);
+  if(finishPad){endPad=finishPad;break;}
+  if(total>=walk-1e-9||drawViaAt(last.net,x,y))break;
   var next=[];(PCB.tracks||[]).forEach(function(t){var id=trackIdEnsure(t);if(used[id]||claimed[id]||rfOwnsTrack(t))return;
    if(t.net!==last.net||(t.l||0)!==(last.l||0)||Math.abs((+t.w||0)-nominal)>1e-7)return;
    var q=drawTrackFromPoint(t,x,y);if(q&&trackLength(q)>1e-9)next.push({t:t,q:q});});
   if(next.length!==1)break;var n=next[0];used[trackIdEnsure(n.t)]=1;run.push(n.q);total+=trackLength(n.q);}
- var path=drawTaperPath(run,start,end,nominal);if(!path)return null;
- run.forEach(function(t){claimed[trackIdEnsure(t)]=1;});return path;}
-function drawRfRetrofitPlan(){var claimed={},paths=[];
+ start=drawTaperProfile(first.net,pad,nominal,drawPathPadLaunch(run,pad,true)||drawTrackEndDirection(first,true));if(!start)return null;
+ var last=run[run.length-1],end=endPad?drawTaperProfile(last.net,endPad,nominal,
+  drawPathPadLaunch(run,endPad,false)||drawTrackEndDirection(last,false)):null;
+ var paths=drawTaperPathSet(run,start,end,nominal);if(!paths.length)return null;
+ run.forEach(function(t){claimed[trackIdEnsure(t)]=1;});return paths;}
+function drawRfRetrofitGroups(){var claimed={},groups=[];
  (PCB.tracks||[]).forEach(function(t){var id=trackIdEnsure(t);if(claimed[id]||rfOwnsTrack(t))return;
   var c=netClassInfo(t.net||"");if(!c||!(+c.impedance_ohms>0)||(+c.diff_impedance_ohms>0))return;
   var nominal=+c.width||+((PCB.rules||{}).track_width)||baseTrackW();if(!(nominal>0)||Math.abs((+t.w||0)-nominal)>1e-7)return;
   for(var end=0;end<2&&!claimed[id];end++){var x=end?t.x2:t.x1,y=end?t.y2:t.y1,pad=drawEndpointPad(t.net,t.l||0,x,y);
    if(!pad)continue;var oriented=end?drawReverseTrack(t):t,profile=drawTaperProfile(t.net,pad,nominal,drawTrackEndDirection(oriented,true));
-   if(!profile)continue;var path=drawRfRetrofitRun(t,!!end,nominal,profile,claimed);if(path)paths.push(path);}});
- return paths;}
+   if(!profile)continue;var group=drawRfRetrofitRun(t,!!end,nominal,pad,profile,claimed);if(group)groups.push(group);}});
+ return groups;}
+function drawRfRetrofitPlan(){var paths=[];drawRfRetrofitGroups().forEach(function(group){paths=paths.concat(group);});return paths;}
 function drawRfRetrofitHasNewBlock(before,after){var bc=drcBlockCounts(before||[]),ac=drcBlockCounts(after||[]);
  for(var id in ac)if(ac[id]>(bc[id]||0))return true;return false;}
+function drawSamePortalPath(a,b){var as=a&&a.samples||[],bs=b&&b.samples||[];
+ if(!a||!b||(a.net||"")!==(b.net||"")||+(a.l||0)!==+(b.l||0)||as.length!==2||bs.length!==2)return false;
+ function close(p,q){return Math.hypot(+p[0]- +q[0],+p[1]- +q[1])<=1e-7&&Math.abs(+p[2]- +q[2])<=1e-7;}
+ return (close(as[0],bs[0])&&close(as[1],bs[1]))||(close(as[0],bs[1])&&close(as[1],bs[0]));}
+// Saved RF paths created before pad collars already own their centreline
+// tracks, so the ordinary nominal-track retrofit correctly skips them. Migrate
+// those paths explicitly by deriving each pad portal from their stored samples;
+// a geometry match makes this pass idempotent even though old sidecars carry no
+// collar tag.
+function drawRfMissingPortalGroups(){var existing=PCB.rf_paths||[],groups=[],planned=[];
+ existing.forEach(function(path){if(path.portal)return;var ss=path.samples||[],c=netClassInfo(path.net||"");if(ss.length<2||!c||!(+c.impedance_ohms>0)||(+c.diff_impedance_ohms>0))return;
+  var tracks=[];for(var i=1;i<ss.length;i++)tracks.push({x1:+ss[i-1][0],y1:+ss[i-1][1],x2:+ss[i][0],y2:+ss[i][1],l:path.l||0,w:+ss[i][2],net:path.net||""});
+  var nominal=+c.width||+((PCB.rules||{}).track_width)||baseTrackW(),group=[],ownerIds=(path.track_ids||[]).slice();
+  if(!ownerIds.length)(PCB.tracks||[]).forEach(function(t){if(rfPathOwnsTrack(path,t)){var id=trackIdEnsure(t);if(ownerIds.indexOf(id)<0)ownerIds.push(id);}});
+  if(!(path.track_ids||[]).length&&ownerIds.length)path.track_ids=ownerIds.slice();
+  [true,false].forEach(function(start){var q=start?ss[0]:ss[ss.length-1],pad=drawEndpointPad(path.net,path.l||0,+q[0],+q[1]);if(!pad)return;
+   var launch=drawPathPadLaunch(tracks,pad,start);if(!launch||!launch.portal)return;
+   var collar=drawTaperPortalPath({kind:"rf",portal:launch.portal},tracks[start?0:tracks.length-1],nominal,ownerIds);if(!collar)return;
+   var known=existing.some(function(other){return drawSamePortalPath(collar,other);})||planned.some(function(other){return drawSamePortalPath(collar,other);});
+   if(!known){group.push(collar);planned.push(collar);}});
+  if(group.length)groups.push(group);});return groups;}
 function drawRfRetrofitCheck(paths){var payload=boardStatePayload();payload.rf_paths=paths;
  return fetch("/api/pcb-drc/"+encodeURIComponent(PCB.name)+subq(),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
   .then(function(r){if(!r.ok)throw 0;return r.json();});}
 function drawRfRetrofitSaved(){
- if(RO||!PCB.shown_layout||!curLayout||!(PCB.tracks||[]).length)return;
- var pending=drawRfRetrofitPlan();if(!pending.length)return;var generation=dirtyGeneration,layout=curLayout,
-  original=(PCB.rf_paths||[]).slice(),accepted=[],baseline=(PCB.drc||[]).slice();
+ if(RO||!curLayout||(!((PCB.tracks||[]).length)&&!((PCB.rf_paths||[]).length)))return;
+ var pending=drawRfMissingPortalGroups().concat(drawRfRetrofitGroups());if(!pending.length)return;var generation=dirtyGeneration,layout=curLayout,
+  original=(PCB.rf_paths||[]).slice(),accepted=[],acceptedBundles=0,baseline=(PCB.drc||[]).slice();
  function current(){return generation===dirtyGeneration&&layout===curLayout;}
- function finish(){if(!current())return;if(!accepted.length){routeStatMsg(pending.length+" saved impedance tapers blocked by DRC",true);return;}
+ function finish(){if(!current())return;if(!acceptedBundles){routeStatMsg(pending.length+" saved impedance tapers blocked by DRC",true);return;}
   var before=snapAll();PCB.rf_paths=original.concat(accepted);PCB.drc=baseline;
   copperTouched();recordUndo(before);drawRoute();drawDrc();drcChip(PCB.drc.length);
-  routeStatMsg(accepted.length+" saved impedance taper"+(accepted.length===1?"":"s")+" added"+(accepted.length<pending.length?" · "+(pending.length-accepted.length)+" blocked by DRC":""));scheduleDrc();}
+  routeStatMsg(acceptedBundles+" saved impedance taper"+(acceptedBundles===1?"":"s")+" added"+(acceptedBundles<pending.length?" · "+(pending.length-acceptedBundles)+" blocked by DRC":""));scheduleDrc();}
  function next(i){if(!current())return;if(i>=pending.length){finish();return;}
   routeStatMsg("checking saved impedance tapers "+(i+1)+"/"+pending.length+"…");
-  drawRfRetrofitCheck(original.concat(accepted,[pending[i]])).then(function(j){if(!current())return;
-   if(!drawRfRetrofitHasNewBlock(baseline,j.drc||[])){accepted.push(pending[i]);baseline=j.drc||[];}next(i+1);})
+  drawRfRetrofitCheck(original.concat(accepted,pending[i])).then(function(j){if(!current())return;
+   if(!drawRfRetrofitHasNewBlock(baseline,j.drc||[])){Array.prototype.push.apply(accepted,pending[i]);acceptedBundles++;baseline=j.drc||[];}next(i+1);})
    .catch(function(){if(current())routeStatMsg("saved impedance taper check interrupted — reload to retry",true);});}
  next(0);}
 window.PCBDrawRfRetrofitPlan=drawRfRetrofitPlan;
