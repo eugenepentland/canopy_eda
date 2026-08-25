@@ -6140,7 +6140,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - PCB design-rule settings illustrate every board rule with an accessible SVG
 - The DRC policy settings section edits each check's error, warning, or ignored action in grouped rows and resets them to defaults
 - The DRC policy drawer sections its checks from one server-shipped grouping table that covers every violation kind exactly once
-- PCB Layers shows plane-only rows and B toggles the persisted focused outer layer
+- PCB Layers shows plane-only rows and B toggles the persisted focused outer layer, including while the trace-drawing tool is armed or has a live route head
 - every physical copper layer is selectable and a plane-only view uses its computed fill
 - Drilled via and through-hole pad bores remain board-coloured on every copper view, including generated RF fence sites and the far side of opaque pours
 - selecting a routable copper layer reveals it and gives custom pour fills on that active layer a clear baseline highlight

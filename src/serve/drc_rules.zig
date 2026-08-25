@@ -591,7 +591,7 @@ test "viewer keeps PCB undo reachable after autosave" {
     try std.testing.expect(std.mem.indexOf(u8, js, "doRedo();}},true);") != null);
 }
 
-// spec: Web Server - PCB Layers shows plane-only rows and B toggles the persisted focused outer layer
+// spec: Web Server - PCB Layers shows plane-only rows and B toggles the persisted focused outer layer, including while the trace-drawing tool is armed or has a live route head
 test "viewer exposes the physical stack and a persistent B-key active side" {
     const js = @embedFile("assets/pcb_board.js");
     try std.testing.expect(std.mem.indexOf(u8, js, "var STACK=LT.map(function(r){") != null);
@@ -600,6 +600,7 @@ test "viewer exposes the physical stack and a persistent B-key active side" {
     try std.testing.expect(std.mem.indexOf(u8, js, "data-ap-stack") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "add(PCB.plane_fills,\"plane\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "ev.key===\"b\"||ev.key===\"B\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "&&(!anyDrawTool()||drawMode)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "layer!==focus") != null);
 }
 

@@ -9594,10 +9594,12 @@ function apPresetApply(n){
  var helpBtn=document.getElementById("pcb-help");
  if(helpBtn)helpBtn.addEventListener("click",function(){kbdToggle();});
  statusLayer(); // initial active-layer segment
- // B toggles the two outer faces. PgUp/PgDn (and parentheses) cycle every
- // routable draw layer; plane-only layers are selected directly in the stack.
+ // B toggles the two outer faces, including while the trace tool is armed or
+ // has a live route head. Other drawing tools still reserve their gestures.
+ // PgUp/PgDn (and parentheses) cycle every routable draw layer; plane-only
+ // layers are selected directly in the stack.
  document.addEventListener("keydown",function(ev){if(kbTyping(ev.target))return;
-  if((ev.key==="b"||ev.key==="B")&&!ev.ctrlKey&&!ev.metaKey&&!ev.altKey&&!anyDrawTool()){
+  if((ev.key==="b"||ev.key==="B")&&!ev.ctrlKey&&!ev.metaKey&&!ev.altKey&&(!anyDrawTool()||drawMode)){
    ev.preventDefault();selectActiveLayer(activeLayer===0?1:0);
    routeStatMsg("active side: "+layerName(activeLayer));return;}
   if(ev.key==="("||ev.key==="PageUp"||ev.key===")"||ev.key==="PageDown"){
