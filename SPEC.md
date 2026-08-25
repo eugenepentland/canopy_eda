@@ -6291,7 +6291,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The Appearance panel separates Layers and Objects tabs, listing real fabrication layers in top-to-bottom physical order and the feature overlays under Objects
 - The /pcb-layout Appearance dock and the embed layers popover render their rows from one shared builder, so a layer is named, ordered and wired identically in both
 - Footprint silkscreen and courtyards are visible per board side, and a hidden courtyard layer never hides a selected part's outline
-- Ordinary PCB-editor courtyard outlines use a 0.25-pixel stroke, while hover and selection outlines stay emphasized
+- Ordinary PCB-editor courtyard outlines use a 0.25-pixel stroke, standalone-part hover and selection outlines stay emphasized, and rigid sub-circuit hover highlights only the group bounding box
 - Every PCB layer's visibility is keyed by its canonical layer name and a stored legacy view state migrates onto those names once
 - A PCB plane layer carries its own visibility eye, still renders when it is not the viewed row, and keeps vias drawn when it is the only visible copper
 - The Appearance Layers tab offers All, Front, Back and Copper-only presets that rewrite the layer visibility map in one click

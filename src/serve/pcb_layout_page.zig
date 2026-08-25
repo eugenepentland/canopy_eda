@@ -14476,12 +14476,15 @@ test "PCB view retires global connection overlays and keeps net colours on" {
     try std.testing.expect(std.mem.indexOf(u8, js, "selectActiveLayer(selected.l)") != null);
 }
 
-// spec: Web Server - Ordinary PCB-editor courtyard outlines use a 0.25-pixel stroke, while hover and selection outlines stay emphasized
-test "ordinary PCB courtyard outlines are thin without weakening interaction highlights" {
+// spec: Web Server - Ordinary PCB-editor courtyard outlines use a 0.25-pixel stroke, standalone-part hover and selection outlines stay emphasized, and rigid sub-circuit hover highlights only the group bounding box
+test "PCB courtyard highlights distinguish parts from sub-circuit bounds" {
     const js = @embedFile("assets/pcb_board.js");
     try std.testing.expect(std.mem.indexOf(u8, js, "return {c:TH.court,w:0.25};") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "if(selRef&&p.ref===selRef)return {c:\"#ffffff\",w:2.4};") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "if(i===cur&&!RO)return {c:\"#ffffff\",w:2};") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "var groupHover=hoverGrpName&&grpOf(p.ref)===hoverGrpName;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(i===cur&&!RO&&!groupHover)return {c:\"#ffffff\",w:2};") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(hoverGrpName&&grpOf(p.ref)===hoverGrpName)return {c:\"#7ee787\",w:2};") == null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "ctx.strokeStyle=(picked||hov)?\"#7ee787\":\"rgba(126,231,135,0.4)\";") != null);
 }
 
 // spec: Web Server - Every saved trace segment and via has a stable inspector-visible ID that survives saves and retained-copper rewrites, with deterministic IDs backfilled for legacy copper

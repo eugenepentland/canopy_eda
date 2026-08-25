@@ -430,9 +430,6 @@ svg.ruler-mode{cursor:crosshair}
 /* Pour refill: amber accent when declared pours are stale (copper/pose
    edited since the last fill) — matches the Draw-armed accent language. */
 #pcb-pour.stale{color:#f0c674;border-color:#b08800;box-shadow:0 0 0 1px #b0880066}
-/* Rigid sub-circuit hover: every member of the group glows together, so
-   "this whole block drags as one" is visible before you grab it. */
-.part.grp-hl .court{stroke:#7ee787!important;stroke-width:2!important}
 /* Sub-circuits palette (sidebar tab): one row per sub-block. */
 .sub-panel{flex:none;padding:4px 0}
 .sub-panel:empty{display:none}

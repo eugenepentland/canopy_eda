@@ -1474,17 +1474,18 @@ function paintCamBoard(ctx,k){if(!CAM_REVIEW)return;ctx.save();if(physicalBoardP
  layers.forEach(function(L){if(L.kind==="outline"&&camLayerVisible(L))camPaintLayer(ctx,L,PH.edge,1);});}
 // KiCad-style highlight ladder: hover/selection brighten to white; marquee
 // glows keep their accent; everything else is the dim courtyard magenta.
-// A rigid sub-circuit's selected state belongs exclusively to its green group
-// box (paintGroupBoxes), rather than repeating around every member courtyard.
+// A rigid sub-circuit's hover and selected states belong exclusively to its
+// green group box (paintGroupBoxes), rather than repeating around member
+// courtyards or separately outlining the member under the pointer.
 function partStroke(i,p){
  if(!partOnVisibleFace(p))return null;
  if(reviewFocusActive()){
   if(reviewFocus.refIdx[i])return {c:"#ffd33d",w:2.8};
   if(reviewFocus.partIdx[i])return {c:"#58d6ff",w:2.5};}
- if(i===cur&&!RO)return {c:"#ffffff",w:2};
+ var groupHover=hoverGrpName&&grpOf(p.ref)===hoverGrpName;
+ if(i===cur&&!RO&&!groupHover)return {c:"#ffffff",w:2};
  if(selRef&&p.ref===selRef)return {c:"#ffffff",w:2.4};
  if(sel&&sel.indexOf&&sel.indexOf(i)>=0)return {c:TH.sel,w:2};
- if(hoverGrpName&&grpOf(p.ref)===hoverGrpName)return {c:"#7ee787",w:2};
  return {c:TH.court,w:0.25};}
 // Per-part Path2D cache: silk strokes + drill bores are static geometry in
 // part-local coords — build once, then each frame is a single stroke()/fill()
