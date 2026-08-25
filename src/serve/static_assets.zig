@@ -1242,8 +1242,9 @@ test "PCB editor click and hold disambiguates overlapping selectable objects" {
 // spec: Web Server - A resolved board click retains the exact-object stack so Tab or Alt-click can cycle priority losers with the hold picker's preview and unified selection apply path
 test "PCB editor cycles overlapping selectable objects after a click" {
     const markers = [_][]const u8{
-        "function pickCycleSort(items){var rank={fp:0,pad:1,track:2,via:3,zone:4,keepout:4,drc:5,sub:6};",
+        "function pickCycleSort(items){var rank={via:0,track:1,pad:2,fp:3,sub:4,zone:5,keepout:5,drc:6};",
         "function pickCycleRemember(m,at,data){pickPreviewSet(null);pickCycleSet(pickCandidates(m),at,data);}",
+        "function pickMenuOpen(items,at){pickMenuClose();items=pickCycleSort(items);",
         "pickCycle.i=(pickCycle.i+step+n)%n;var c=pickCycle.items[pickCycle.i];pickSelect(c,pickCycle.at);pickPreviewSet(c);",
         "if(!RO&&!anyDrawTool()&&ev.button===0&&ev.altKey&&!ev.ctrlKey&&!ev.metaKey){pickHoldCancel();pickCycleAt(ev,m);return;}",
         "if(ev.key!==\"Tab\"||ev.ctrlKey||ev.metaKey||kbTyping(ev.target)||pickMenu||RO||anyDrawTool())return;",

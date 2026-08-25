@@ -2778,11 +2778,12 @@ function svgScreenDelta(dx,dy){var inv=svgScreenInverse(),a=svgScreenPoint(0,0,i
 function mm(ev){var p=svgScreenPoint(ev.clientX,ev.clientY);
  return {x:p.x/S+MX-M,y:p.y/S+MY-M};}
 // ── KiCad-style properties panel ──────────────────────────────────────
-// The sidebar shows one selection at a time. Precise board objects win normal
-// clicks; a rigid sub-circuit is the fallback for otherwise-empty space inside
-// its box. Clicking empty board clears it back to the hint. renderProps rebuilds
-// the panel; updatePropLive is the cheap pose refresh. `selGroup` / `selRef`,
-// rather than incidental hover, remain the authority for move / rotate targets.
+// The sidebar shows one selection at a time. Normal clicks follow the board's
+// explicit object priority: vias, traces, pads, footprints, sub-circuits,
+// pours/keepouts, then DRC. Clicking empty board clears it back to the hint.
+// renderProps rebuilds the panel; updatePropLive is the cheap pose refresh.
+// `selGroup` / `selRef`, rather than incidental hover, remain the authority for
+// move / rotate targets.
 var selRef=null,selGroup=null;
 function pEsc(s){return String(s==null?"":s).replace(/[&<>"]/g,function(c){
  return c=="&"?"&amp;":(c=="<"?"&lt;":(c==">"?"&gt;":"&quot;"));});}
@@ -3165,19 +3166,18 @@ function selectionToggleCopper(hit){var seed=selectionSeed(),ts=seed.t,vs=seed.v
  var arr=hit.t==="track"?ts:vs,at=arr.indexOf(hit.o);
  if(at>=0)arr.splice(at,1);else arr.push(hit.o);
  selectionCommit(seed);}
-// Resolve a modifier click with the normal hit precedence. Exact components,
-// pads, tracks, and vias beat the broad rigid-group box; the group is toggled
-// only from otherwise-empty space inside it. Empty Ctrl/Cmd-click deliberately
-// preserves the accumulated selection.
+// Resolve a modifier click with the same canonical priority as a plain click:
+// via, trace, pad, footprint, sub-circuit, pour/keepout, then DRC. Empty
+// Ctrl/Cmd-click deliberately preserves the accumulated selection.
 function selectionToggleAt(ev,m){
+ var hit=priorityCopperHit(m);
+ if(hit){selectionToggleCopper(hit);return;}
  var ph=viewSt.filt.pad?padHitAt(m.x,m.y):null;
  var hi=ph?ph.i:(viewSt.filt.fp?partAt(m.x,m.y):-1);
- var hit=hi>=0?inspHitForPart(m,hi):inspHit(m);
- if(hit&&(hit.t==="track"||hit.t==="via")){selectionToggleCopper(hit);return;}
- if(hit){inspShow(hit,ev);return;}
  if(hi>=0){selectionToggleParts([hi]);return;}
  if(viewSt.filt.sub){var gh=grpAt(m.x,m.y);
-  if(gh)selectionToggleParts(GRPS[gh]);}}
+  if(gh){selectionToggleParts(GRPS[gh]);return;}}
+ hit=inspHit(m);if(hit)inspShow(hit,ev);}
 // ── Copper clipboard ───────────────────────────────────────────────────
 // Ctrl/Cmd+C copies only the copper in the shared selection: a lone inspected
 // track/via is promoted by selectionSeed(), while a marquee/modifier selection
@@ -5663,33 +5663,26 @@ svg.addEventListener("pointerdown",function(ev){
  // Movement cancels the timer; only a true hold with multiple filtered hits
  // replaces the armed gesture with the exact-object picker.
  if(!RO&&!anyDrawTool()&&ev.button===0)pickHoldArm(ev,m);
- // An explicit copper selection owns a drag that starts on it, even when a
- // footprint courtyard also covers the pointer. Selection is the user's
- // disambiguation: do not let the broader, implicit part hit below steal it.
- if(!RO&&!anyDrawTool()){var selectedHit=selectedCopperHit(m);
-  if(selectedHit){
-   if(selCuHas(selectedHit.o)&&(selCuCount()+sel.length)>1){
-    gdrag=gdragStart(m,null);gdrag.cuDown=selectedHit;pcap(ev);svg.style.cursor="grab";return;}
-   if(selectedHit.t==="track"){segdrag=segStart(selectedHit.o,m);pcap(ev);return;}
-   if(selectedHit.t==="via"){viadrag=viaStart(selectedHit.o,m);pcap(ev);return;}}}
+ // Copper is the top of the canonical selection ladder: vias first, then
+ // traces. Within one kind, an already-selected object wins so its next drag
+ // remains stable; that never lets a selected trace outrank an overlapping via.
+ if(!RO&&!anyDrawTool()){var copperHit=priorityCopperHit(m);
+  if(copperHit){
+   if(selCuHas(copperHit.o)&&(selCuCount()+sel.length)>1){
+    gdrag=gdragStart(m,null);gdrag.cuDown=copperHit;pcap(ev);svg.style.cursor="grab";return;}
+   if(copperHit.t==="via"){viadrag=viaStart(copperHit.o,m);pcap(ev);return;}
+   segdrag=segStart(copperHit.o,m);pcap(ev);return;}}
  var exactPad=(RO||viewSt.filt.pad)?padHitAt(m.x,m.y):null;
  var hi=exactPad?exactPad.i:((PHYSICAL_REVIEW||viewSt.filt.fp)?partAt(m.x,m.y):-1);
  if(hi<0){
   if(!RO&&viewSt.filt.outline){var uv=vtxAt(m);if(uv>=0){vdrag=outlineVdrag(uv);pcap(ev);return;}}
-  // A track under the press arms a segment drag, a via arms a rigid node
-  // drag (a stationary click just selects either). Every other precise hit
-  // also suppresses the broad sub-circuit box and resolves on pointer-up.
-  var sh=(!RO&&!anyDrawTool())?inspHit(m):null;
-  if(sh){
-   if(sh&&sh.t==="track"){segdrag=segStart(sh.o,m);pcap(ev);return;}
-   if(sh&&sh.t==="via"){viadrag=viaStart(sh.o,m);pcap(ev);return;}}
   // An outline EDGE away from its vertices arms a whole-segment slide (copper
   // above wins — this is reached only for empty perimeter space).
   if(!RO&&!anyDrawTool()&&viewSt.filt.outline){var oe=edgeAt(m);
    if(oe){osdrag=osegStart(oe,m);pcap(ev);svg.style.cursor="grabbing";return;}}
-  // The visible sub-circuit box is selectable, including its empty interior,
-  // but only after every enabled precise object hit-test has missed.
-  var gh=(!sh&&!RO&&viewSt.filt.sub)?grpAt(m.x,m.y):null;
+  // The broad sub-circuit box follows pads/footprints but deliberately precedes
+  // pours, keepouts, and DRC markers in the requested priority ladder.
+  var gh=(!RO&&viewSt.filt.sub)?grpAt(m.x,m.y):null;
   if(gh){var ga=GRPS[gh];pcap(ev);selectGroup(gh);
    gdrag=gdragStart(m,ga[0],ga);gdrag.boxGroup=gh;svg.style.cursor="grab";return;}
   marq={x0:m.x,y0:m.y,x1:m.x,y1:m.y,moved:false,outline:outlineOnlyFilter()};pcap(ev);
@@ -5778,12 +5771,9 @@ svg.addEventListener("pointermove",function(ev){
  if(svg.style.cursor!==hoverCursor)svg.style.cursor=hoverCursor;});
 function clickPart(ev,i){var m=mm(ev),pd=padAt(i,m.x,m.y);
  if(RO){if(reviewClearOutside(m))return;var ph=padHitAt(m.x,m.y);reviewPickedRef(ph?ph.i:i,ph?ph.pd:pd);return;}
- // Component clicks keep the copper-inspection precedence rule regardless of
- // whether the component belongs to a rigid sub-circuit:
- // marker > pad > via/track > the part itself.
- if(!anyDrawTool()){var ihp=inspHitForPart(m,i);
-  if(ihp){inspShow(ihp,ev);pickCycleRemember(m,ev,ihp);return;}
-  inspClear();}
+ // Via/trace hits were already dispatched at pointerdown. At this tier an
+ // enabled exact pad wins, followed by its owning footprint.
+ if(!anyDrawTool())inspClear();
  if(pd&&pd.net&&viewSt.filt.pad)selNet(pd.net);
  if(!RO){selectComp(P[i].ref);pickCycleRemember(m,ev,pd&&viewSt.filt.pad?{t:"pad",i:i,pd:pd}:{t:"fp",i:i});}}
 svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.pointerId);}catch(e){}
@@ -7844,26 +7834,30 @@ function inspHitTrack(m){if(!viewSt.filt.track)return null;var best=null,bd=1e9,
   var d=segDist(m.x,m.y,t)-(t.w||0.25)/2;
   if(d<tol&&d<bd){bd=d;best=t;}});return best;}
 // Hit-test only copper the user has already selected. The inspector's single
-// selection wins over a marquee band when both contain coincident copper; vias
-// retain the normal via-before-track tie-break inside the band. This is called
-// before partAt(), so a footprint's much larger courtyard cannot steal the
-// selected object's drag.
+// selection wins over a marquee band of the same kind; vias retain the
+// canonical via-before-track tie-break. This is called before partAt(), so a
+// footprint's much larger courtyard cannot steal the selected object's drag.
 function selectedCopperHit(m){
  function viaHit(v){if(!viewSt.filt.via||(PCB.vias||[]).indexOf(v)<0)return false;
   return Math.hypot(m.x-v.x,m.y-v.y)-(v.d||0.4)/2<Math.max(pxTolMm(6),0.15);}
  function trackHit(t){if(!viewSt.filt.track||layerAlpha(t.l||0)<=0||(PCB.tracks||[]).indexOf(t)<0)return false;
   return segDist(m.x,m.y,t)-(t.w||0.25)/2<Math.max(pxTolMm(5),0.12);}
  if(insp&&insp.t==="via"&&viaHit(insp.o))return insp;
- if(insp&&insp.t==="track"&&trackHit(insp.o))return insp;
  var best=null,bd=1e9;
  selCu.v.forEach(function(v){if(!viaHit(v))return;var d=Math.hypot(m.x-v.x,m.y-v.y)-(v.d||0.4)/2;
   if(d<bd){bd=d;best={t:"via",o:v};}});
  if(best)return best;
+ if(insp&&insp.t==="track"&&trackHit(insp.o))return insp;
  selCu.t.forEach(function(t){if(!trackHit(t))return;var d=segDist(m.x,m.y,t)-(t.w||0.25)/2;
   if(d<bd){bd=d;best={t:"track",o:t};}});return best;}
-// Pours / keepouts are the final hit-test tier, behind components, groups,
-// DRC, vias and tracks. Their whole visible area is clickable: the Objects
-// filter can isolate them without forcing the user to catch a one-pixel dashed
+// Resolve the top two priority tiers. A selected candidate of the winning kind
+// remains sticky for dragging; selection never promotes a trace above a via.
+function priorityCopperHit(m){var selected=selectedCopperHit(m),v=inspHitVia(m);
+ if(v)return selected&&selected.t==="via"?selected:{t:"via",o:v};
+ var t=inspHitTrack(m);if(t)return selected&&selected.t==="track"?selected:{t:"track",o:t};return null;}
+// Pours / keepouts follow components and groups but precede DRC. Their whole
+// visible area is clickable: the Objects filter can isolate them without
+// forcing the user to catch a one-pixel dashed
 // rim. Editable copper zones open their pour dialog; imported/fixed keepouts
 // select into the read-only Properties inspector. A hidden layer/overlay never
 // leaves invisible geometry clickable.
@@ -7878,20 +7872,10 @@ function inspHitZone(m){if(RO||!viewSt.filt.zone)return null;var zs=PCB.zones||[
    if(band||nearPolyEdge(outer,m.x,m.y,tol)||(inner&&inner.length>=3&&nearPolyEdge(inner,m.x,m.y,tol)))
     return {t:"keepout",o:q};}}
  return null;}
-function inspHit(m){var d=inspHitDrc(m);if(d)return {t:"drc",o:d};
- var v=inspHitVia(m);if(v)return {t:"via",o:v};
+function inspHit(m){var v=inspHitVia(m);if(v)return {t:"via",o:v};
  var t=inspHitTrack(m);if(t)return {t:"track",o:t};
- return inspHitZone(m);}
-// Inspection hit for a click that is ALSO over part `pi`: a DRC marker wins
-// outright (debugging beats selection); a click INSIDE a via barrel wins
-// even on a pad (the stitch-via-in-ground-pad case — it's the smaller,
-// precise target); any other pad click stays a part click; bare vias and
-// tracks win only off-pad.
-function inspHitForPart(m,pi){var d=inspHitDrc(m);if(d)return {t:"drc",o:d};
- var vs=inspHitVia(m,true);if(vs)return {t:"via",o:vs};
- if(viewSt.filt.pad&&pi>=0&&padAt(pi,m.x,m.y))return null;
- var v=inspHitVia(m);if(v)return {t:"via",o:v};
- var t=inspHitTrack(m);if(t)return {t:"track",o:t};return null;}
+ var z=inspHitZone(m);if(z)return z;
+ var d=inspHitDrc(m);return d?{t:"drc",o:d}:null;}
 
 // Net identity under a resting pointer. Pads keep the richer existing
 // "reference · net" status text; off-pad routed copper, vias, pours and visible
@@ -7977,7 +7961,7 @@ function pickCandidates(m){var out=[];
 function pickDataSame(a,b){if(!a||!b||a.t!==b.t)return false;
  if(a.t==="sub")return a.g===b.g;if(a.t==="fp")return a.i===b.i;
  if(a.t==="pad")return a.i===b.i&&a.pd===b.pd;return a.o===b.o;}
-function pickCycleSort(items){var rank={fp:0,pad:1,track:2,via:3,zone:4,keepout:4,drc:5,sub:6};
+function pickCycleSort(items){var rank={via:0,track:1,pad:2,fp:3,sub:4,zone:5,keepout:5,drc:6};
  return items.slice().sort(function(a,b){return (rank[a.data.t]||0)-(rank[b.data.t]||0);});}
 function pickCycleSet(items,at,data){items=pickCycleSort(items);if(items.length<2){pickCycle=null;return;}
  var i=-1;for(var k=0;k<items.length;k++)if(pickDataSame(items[k].data,data)){i=k;break;}
@@ -8031,7 +8015,7 @@ function pickSelect(c,at){var d=c.data;pickMenuClose();inspClear();selCuClear();
  if(d.t==="fp"){selGroup=null;selectComp(P[d.i].ref);return;}
  if(d.t==="pad"){selGroup=null;selectComp(P[d.i].ref);if(d.pd.net)window.PCBSelNet(d.pd.net);return;}
  inspShow({t:d.t,o:d.o},at);}
-function pickMenuOpen(items,at){pickMenuClose();var host=sceneShell;if(!host)return;
+function pickMenuOpen(items,at){pickMenuClose();items=pickCycleSort(items);var host=sceneShell;if(!host)return;
  var menu=document.createElement("div");menu.className="pcb-pick-menu";menu.setAttribute("role","menu");
  menu.setAttribute("aria-label","Select exact object");
  var h='<div class="pcb-pick-head"><b>Select exact object</b><span>'+items.length+' objects here</span></div>';

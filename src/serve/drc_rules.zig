@@ -865,7 +865,7 @@ test "viewer JS toggles PCB items into the shared selection with a modifier clic
     // Modifier dispatch precedes both selected-copper and footprint drag
     // dispatch, so toggling an existing member cannot accidentally move it.
     const modifier = std.mem.indexOf(u8, js, "selectionToggleAt(ev,m);return;").?;
-    const copper_drag = std.mem.indexOfPos(u8, js, modifier, "var selectedHit=selectedCopperHit(m);").?;
+    const copper_drag = std.mem.indexOfPos(u8, js, modifier, "var copperHit=priorityCopperHit(m);").?;
     const part_drag = std.mem.indexOfPos(u8, js, modifier, "if(sel.indexOf(hi)>=0").?;
     try std.testing.expect(modifier < copper_drag);
     try std.testing.expect(modifier < part_drag);
@@ -1200,12 +1200,12 @@ test "viewer JS gives selected copper drag priority over overlapping footprints"
     try std.testing.expect(std.mem.indexOf(
         u8,
         js,
-        "if(selCuHas(selectedHit.o)&&(selCuCount()+sel.length)>1){",
+        "if(selCuHas(copperHit.o)&&(selCuCount()+sel.length)>1){",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
         js,
-        "gdrag=gdragStart(m,null);gdrag.cuDown=selectedHit;",
+        "gdrag=gdragStart(m,null);gdrag.cuDown=copperHit;",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -1213,43 +1213,56 @@ test "viewer JS gives selected copper drag priority over overlapping footprints"
         "else if(gcu){inspShow(gcu,ev);pickCycleRemember(mm(ev),ev,gcu);}",
     ) != null);
     // Crucially, dispatch happens before footprint/courtyard hit-testing.
-    const selected_drag = std.mem.indexOf(u8, js, "var selectedHit=selectedCopperHit(m);").?;
+    const selected_drag = std.mem.indexOf(u8, js, "var copperHit=priorityCopperHit(m);").?;
     const part_hit = std.mem.indexOfPos(u8, js, selected_drag, "partAt(m.x,m.y)").?;
     try std.testing.expect(selected_drag < part_hit);
     try std.testing.expect(std.mem.indexOfPos(
         u8,
         js,
         selected_drag,
-        "segdrag=segStart(selectedHit.o,m);",
+        "segdrag=segStart(copperHit.o,m);",
     ).? < part_hit);
     try std.testing.expect(std.mem.indexOfPos(
         u8,
         js,
         selected_drag,
-        "viadrag=viaStart(selectedHit.o,m);",
+        "viadrag=viaStart(copperHit.o,m);",
     ).? < part_hit);
 }
 
-// Regression guard for fallback rigid-group selection and non-destructive
+// Regression guard for the canonical click priority and non-destructive
 // copper handling during group rotation.
-test "viewer JS selects rigid sub-circuits only as a fallback and preserves copper on rotate" {
+test "viewer JS follows the canonical selection priority and preserves copper on group rotate" {
     const js = @embedFile("assets/pcb_board.js");
 
-    // Selection has an explicit group scope, but the broad group box is tested
-    // only after precise copper/DRC/zone hits miss. Clicking a component is a
-    // leaf edit immediately; the group stays available from empty box space.
+    // The cycle/picker rank is the requested source of truth: via, trace, pad,
+    // footprint, sub-circuit, pour/keepout, then DRC.
     try std.testing.expect(std.mem.indexOf(u8, js, "var selRef=null,selGroup=null") != null);
-    const precise_hit = std.mem.indexOf(u8, js, "var sh=(!RO&&!anyDrawTool())?inspHit(m):null;") orelse
-        return error.TestPreciseHitMissing;
-    const group_hit = std.mem.indexOfPos(
+    try std.testing.expect(std.mem.indexOf(
         u8,
         js,
-        precise_hit,
-        "var gh=(!sh&&!RO&&viewSt.filt.sub)?grpAt(m.x,m.y):null;",
-    ) orelse return error.TestFallbackGroupHitMissing;
-    try std.testing.expect(precise_hit < group_hit);
-    try std.testing.expect(std.mem.indexOf(u8, js, "if(sh&&sh.t===\"track\"){segdrag=segStart") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "if(sh&&sh.t===\"via\"){viadrag=viaStart") != null);
+        "rank={via:0,track:1,pad:2,fp:3,sub:4,zone:5,keepout:5,drc:6}",
+    ) != null);
+
+    // Normal pointer dispatch handles copper before the exact pad/footprint,
+    // while the broad group box is reached only when neither part tier hit.
+    const copper_hit = std.mem.indexOf(u8, js, "var copperHit=priorityCopperHit(m);") orelse
+        return error.TestPriorityCopperHitMissing;
+    const pad_hit = std.mem.indexOfPos(u8, js, copper_hit, "var exactPad=(RO||viewSt.filt.pad)?padHitAt") orelse
+        return error.TestPriorityPadHitMissing;
+    const group_hit = std.mem.indexOfPos(u8, js, pad_hit, "var gh=(!RO&&viewSt.filt.sub)?grpAt") orelse
+        return error.TestPriorityGroupHitMissing;
+    try std.testing.expect(copper_hit < pad_hit);
+    try std.testing.expect(pad_hit < group_hit);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(copperHit.t===\"via\"){viadrag=viaStart") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "segdrag=segStart(copperHit.o,m)") != null);
+    const priority_copper = std.mem.indexOf(u8, js, "function priorityCopperHit(m)") orelse
+        return error.TestPriorityCopperHelperMissing;
+    const priority_via = std.mem.indexOfPos(u8, js, priority_copper, "v=inspHitVia(m)") orelse
+        return error.TestPriorityViaMissing;
+    const priority_track = std.mem.indexOfPos(u8, js, priority_via, "t=inspHitTrack(m)") orelse
+        return error.TestPriorityTrackMissing;
+    try std.testing.expect(priority_via < priority_track);
     try std.testing.expect(std.mem.indexOf(u8, js, "drag=dragStart(hi,m);svg.style.cursor=\"grab\";});") != null);
     const click_part_start = std.mem.indexOf(u8, js, "function clickPart(ev,i)") orelse
         return error.TestClickPartMissing;
@@ -1257,12 +1270,20 @@ test "viewer JS selects rigid sub-circuits only as a fallback and preserves copp
     const click_part_end = std.mem.indexOf(u8, click_part_tail, "svg.addEventListener(\"pointerup\"") orelse
         return error.TestClickPartEndMissing;
     const click_part = click_part_tail[0..click_part_end];
-    try std.testing.expect(std.mem.indexOf(u8, click_part, "inspHitForPart(m,i)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, click_part, "inspHit") == null);
     try std.testing.expect(std.mem.indexOf(u8, click_part, "selectComp(P[i].ref)") != null);
     try std.testing.expect(std.mem.indexOf(u8, click_part, "selectGroup(") == null);
     try std.testing.expect(std.mem.indexOf(u8, js, "if(selGroup&&!selRef)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "function grpAt(wx,wy)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "drc:5,sub:6") != null);
+
+    // Once the higher object tiers and group miss, pours/keepouts beat DRC.
+    const low_hit = std.mem.indexOf(u8, js, "function inspHit(m){") orelse
+        return error.TestLowPriorityHitMissing;
+    const zone_hit = std.mem.indexOfPos(u8, js, low_hit, "var z=inspHitZone(m);if(z)return z;") orelse
+        return error.TestPriorityZoneHitMissing;
+    const drc_hit = std.mem.indexOfPos(u8, js, zone_hit, "var d=inspHitDrc(m)") orelse
+        return error.TestPriorityDrcHitMissing;
+    try std.testing.expect(zone_hit < drc_hit);
 
     // Group scope is shown once on the green aggregate bounding box. It must
     // not also turn every member's courtyard green; a drilled-in component
