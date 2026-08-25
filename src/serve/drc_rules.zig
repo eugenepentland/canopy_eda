@@ -661,12 +661,21 @@ test "pour dialog defaults to the active layer and offers the whole stack" {
     const js = @embedFile("assets/pcb_board.js");
     // A new pour takes the ACTIVE layer's real name; the old outer-face guess
     // silently dropped a pour drawn while an inner layer was active onto F.Cu.
-    try std.testing.expect(std.mem.indexOf(u8, js, "var defLayer=existing?(existing.layer||LN.f_cu):layerName(activeLayer);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "var defLayers=existing?zoneLayers(existing):[layerName(activeLayer)];") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "activeLayer===1)?\"B.Cu\"") == null);
     // The picker is built from the board's own layer table, and still keeps any
     // extra layer an existing zone names (an imported In3.Cu / F&B.Cu pour).
     try std.testing.expect(std.mem.indexOf(u8, js, "var lopts=LYR.map(function(L){return L.name;});") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "if(z.layer&&lopts.indexOf(z.layer)<0)lopts.push(z.layer);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "zoneLayers(z).forEach") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "cb.type=\"checkbox\"") != null);
+}
+
+// spec: Web Server - the custom-pour dialog independently selects multiple copper layers and persists the complete selection through create, edit, and undo
+test "custom pour dialog persists multiple selected layers" {
+    const js = @embedFile("assets/pcb_board.js");
+    try std.testing.expect(std.mem.indexOf(u8, js, "layers=layerInputs.filter(function(cb){return cb.checked;})") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "existing.layers=layers.length>1?layers.slice():undefined") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "layers:Array.isArray(z.layers)?z.layers.slice():undefined") != null);
 }
 
 // spec: Web Server - selecting a routable copper layer reveals it and gives custom pour fills on that active layer a clear baseline highlight
@@ -988,7 +997,7 @@ test "viewer JS restamps a sub-circuit around its live side and rotation" {
     try std.testing.expect(std.mem.indexOf(u8, body, "stampPoseApply(xf,v.x,v.y)") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "stampPoseApply(xf,+p[0],+p[1])") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "stampLayer(t.l||0,xf.back)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "stampZoneLayer(z.layer,xf.back)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "zoneLayers(z).map(function(ln){return stampZoneLayer(ln,xf.back);})") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "PCB.zones=(PCB.zones||[]).filter(function(z){return z.g!==g;});") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "filled:true,keepout:false,priority:+z.priority||0,g:g") != null);
     // The ownership tag persists and makes later rigid translations/rotations

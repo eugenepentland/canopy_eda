@@ -3662,7 +3662,8 @@ function stampGroup(g,layout){return refreshStampSeeds(g,layout).then(function()
    PCB.vias.push({x:a.x,y:a.y,d:v.d||0.4,drill:v.drill||0,net:v.net||"",g:g,source:v.source,id:viaIdNew()});});
   (sr.zones||[]).forEach(function(z){if(!z.net||z.keepout||lockedNets[z.net])return;
    var poly=(z.poly||[]).map(function(p){var a=stampPoseApply(xf,+p[0],+p[1]);return [a.x,a.y];});
-   if(poly.length<3)return;PCB.zones.push({net:z.net,layer:stampZoneLayer(z.layer,xf.back),poly:poly,
+   if(poly.length<3)return;var zlayers=zoneLayers(z).map(function(ln){return stampZoneLayer(ln,xf.back);});
+   PCB.zones.push({net:z.net,layer:zlayers[0]||stampZoneLayer(z.layer,xf.back),layers:zlayers.length>1?zlayers:undefined,poly:poly,
     filled:true,keepout:false,priority:+z.priority||0,g:g});stampedZones=true;});}
  if(stampedZones)onZonesChanged();
  rats();drawClr();drawRoute();fetchScore();refreshUnplaced();subPanelRefresh();scheduleDrc();progressRefresh();
@@ -3906,7 +3907,7 @@ function cloneText(t){return {x:t.x,y:t.y,rot:t.rot||0,side:t.side||"top",size:t
 function cloneTexts(){return (PCB.texts||[]).map(cloneText);}
 function cloneFabricationLayers(){return JSON.parse(JSON.stringify(PCB.fabrication_layers||[]));}
 function cloneHeatsink(){return PCB.heatsink?JSON.parse(JSON.stringify(PCB.heatsink)):null;}
-function cloneZones(){return (PCB.zones||[]).map(function(z){return {net:z.net||"",layer:z.layer||"",poly:(z.poly||[]).map(function(p){return [+p[0],+p[1]];}),filled:!!z.filled,keepout:!!z.keepout,priority:+z.priority||0,g:z.g,
+function cloneZones(){return (PCB.zones||[]).map(function(z){return {net:z.net||"",layer:z.layer||"",layers:Array.isArray(z.layers)?z.layers.slice():undefined,poly:(z.poly||[]).map(function(p){return [+p[0],+p[1]];}),filled:!!z.filled,keepout:!!z.keepout,priority:+z.priority||0,g:z.g,
  sketch:z.sketch?(OS?OS.clone(z.sketch):JSON.parse(JSON.stringify(z.sketch))):null};});}
 // Deep-copy the drawn board outline ({x,y,w,h,pts?}) so a snapshot holds its
 // own vertex array — an in-place vertex drag must not mutate a stored undo step.
@@ -3932,7 +3933,7 @@ function restoreSnap(s){s.poses.forEach(function(q,i){if(P[i]){P[i].x=q.x;P[i].y
  PCB.rf_paths=(s.rf_paths||[]).map(function(p){return {net:p.net,l:p.l||0,
   track_ids:(p.track_ids||[]).slice(),samples:(p.samples||[]).map(function(q){return [+q[0],+q[1],+q[2]];})};});
  var editZoneIndex=typeof pourEdit!=="undefined"&&pourEdit?(PCB.zones||[]).indexOf(pourEdit):-1;
- PCB.zones=(s.zones||[]).map(function(z){return {net:z.net||"",layer:z.layer||"",poly:(z.poly||[]).map(function(p){return [+p[0],+p[1]];}),filled:!!z.filled,keepout:!!z.keepout,priority:+z.priority||0,g:z.g,
+ PCB.zones=(s.zones||[]).map(function(z){return {net:z.net||"",layer:z.layer||"",layers:Array.isArray(z.layers)?z.layers.slice():undefined,poly:(z.poly||[]).map(function(p){return [+p[0],+p[1]];}),filled:!!z.filled,keepout:!!z.keepout,priority:+z.priority||0,g:z.g,
   sketch:z.sketch?(OS?OS.clone(z.sketch):JSON.parse(JSON.stringify(z.sketch))):null};});
  if(typeof pourEdit!=="undefined")pourEdit=editZoneIndex>=0&&editZoneIndex<PCB.zones.length?PCB.zones[editZoneIndex]:null;
  pourGeomDrop();markPoursStale();
@@ -4618,7 +4619,9 @@ function reviewLayerByName(name){var k=reviewText(name),hit=null;
 // face tests and is never the layer authority.
 function reviewAreaStack(q){if(!q)return null;
  if(typeof q.stack==="number"){var byIdx=stackByIndex(q.stack);if(byIdx)return byIdx;}
- var name=(typeof q.layer==="string")?q.layer:(Array.isArray(q.layers)?q.layers[0]:null);
+ if(Array.isArray(q.layers)&&q.layers.length){var active=stackByIndex(activeStack);
+  if(active&&q.layers.some(function(n){return reviewText(n)===reviewText(active.name);}))return active;}
+ var name=(Array.isArray(q.layers)&&q.layers.length)?q.layers[0]:((typeof q.layer==="string")?q.layer:null);
  return name?reviewLayerByName(name):null;}
 function reviewAreaLayer(q){var st=reviewAreaStack(q);return st&&typeof st.l==="number"?st.l:null;}
 function reviewAreaFocused(q){var st=reviewAreaStack(q);return !!st&&st.i===activeStack;}
@@ -5202,6 +5205,9 @@ function polyPop(){if(polyPts&&polyPts.length){polyPts.pop();if(!polyPts.length)
 // server fills (PCB.zone_fills). Zones are board-anchored (never move with a
 // part), persisted with the layout, and deletable (right-click while armed).
 var POUR_COL="#f0c674"; // amber — distinct from the ⬡ Poly outline's green
+function zoneLayers(z){var out=[];
+ if(z&&Array.isArray(z.layers))z.layers.forEach(function(ln){ln=String(ln||"");if(ln&&out.indexOf(ln)<0)out.push(ln);});
+ if(!out.length&&z&&z.layer)out.push(String(z.layer));return out;}
 function pourArm(on){if(RO&&on)return;
  if(on&&heatsinkMode)heatsinkArm(false);
  if(on&&backingMode)backingArm(false);
@@ -5294,8 +5300,9 @@ function openPourDialog(pts,existing){
  var def=existing?existing.net:pourDefaultNet(pts),defKeepout=!!(existing&&existing.keepout);
  // A NEW pour lands on the layer being worked, whatever it is — drawing one
  // while an inner layer was active used to silently create it on F.Cu.
- var defLayer=existing?(existing.layer||LN.f_cu):layerName(activeLayer);
- if(!host){if(!existing)createZone(pts,def,defLayer,0);return;}
+ var defLayers=existing?zoneLayers(existing):[layerName(activeLayer)];
+ if(!defLayers.length)defLayers=[LN.f_cu];
+ if(!host){if(!existing)createZone(pts,def,defLayers,0);return;}
  var dlg=document.createElement("div");pourDlg=dlg;dlg.className="pour-dlg";
  dlg.style.cssText="position:absolute;z-index:60;background:#161b22;border:1px solid #30363d;"+
   "border-radius:6px;padding:10px;font:12px system-ui;color:#c9d1d9;box-shadow:0 6px 22px rgba(0,0,0,.6);min-width:210px";
@@ -5305,7 +5312,7 @@ function openPourDialog(pts,existing){
  dlg.style.top=(svg.offsetTop+(Y(miny)-vb2.y)*ky)+"px";
  var title=document.createElement("div");title.textContent=existing?"Edit copper area":"New copper area";
  title.style.cssText="font-weight:600;margin-bottom:6px;color:"+POUR_COL;dlg.appendChild(title);
- function row(label,node){var r=document.createElement("label");
+ function row(label,node){var r=document.createElement("div");
   r.style.cssText="display:flex;align-items:center;gap:6px;margin:4px 0";
   var s=document.createElement("span");s.textContent=label;s.style.cssText="width:52px;color:#8b949e";
   r.appendChild(s);r.appendChild(node);return r;}
@@ -5317,22 +5324,24 @@ function openPourDialog(pts,existing){
  var names=PCB.netnames||[];
  if(!names.length){var o0=document.createElement("option");o0.value="";o0.textContent="(no nets)";nsel.appendChild(o0);}
  names.forEach(function(n){var o=document.createElement("option");o.value=n;o.textContent=n;if(n===def)o.selected=true;nsel.appendChild(o);});
- // Layer options: every ROUTABLE copper layer this board has (LYR — the same
- // table the painters key off), plus any layer already used by a pour on this
- // board (so editing an imported In3.Cu / F&B.Cu pour keeps its layer).
- var lsel=document.createElement("select");
- lsel.style.cssText="background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;padding:3px";
+ // Layer checkboxes: every ROUTABLE copper layer this board has (LYR — the
+ // same table the painters key off), plus any layers already used by a pour.
+ // A checkbox list makes selecting several layers explicit without relying on
+ // platform-specific Ctrl/Command semantics of a native multi-select.
+ var lbox=document.createElement("div");
+ lbox.style.cssText="flex:1;max-height:120px;overflow:auto;background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:3px 6px";
  var lopts=LYR.map(function(L){return L.name;});
- (PCB.zones||[]).forEach(function(z){if(z.layer&&lopts.indexOf(z.layer)<0)lopts.push(z.layer);});
- if(defLayer&&lopts.indexOf(defLayer)<0)lopts.push(defLayer);
+ (PCB.zones||[]).forEach(function(z){zoneLayers(z).forEach(function(ln){if(lopts.indexOf(ln)<0)lopts.push(ln);});});
+ defLayers.forEach(function(ln){if(ln&&lopts.indexOf(ln)<0)lopts.push(ln);});
  var lname={};lname[LN.f_cu]=sideLabel(false);lname[LN.b_cu]=sideLabel(true);
- lopts.forEach(function(ln){var o=document.createElement("option");o.value=ln;o.textContent=lname[ln]||ln;lsel.appendChild(o);});
- lsel.value=defLayer;
+ var layerInputs=[];lopts.forEach(function(ln){var lab=document.createElement("label"),cb=document.createElement("input"),txt=document.createElement("span");
+  lab.style.cssText="display:flex;align-items:center;gap:5px;white-space:nowrap;padding:1px 0";cb.type="checkbox";cb.value=ln;cb.checked=defLayers.indexOf(ln)>=0;
+  txt.textContent=lname[ln]||ln;lab.appendChild(cb);lab.appendChild(txt);lbox.appendChild(lab);layerInputs.push(cb);});
  var pin=document.createElement("input");pin.type="number";pin.min="0";pin.step="1";pin.inputMode="numeric";
  pin.value=String(existing?(existing.priority||0):0);
  pin.style.cssText="width:70px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;padding:3px";
- dlg.appendChild(row("Type",tsel));dlg.appendChild(row("Net",nsel));dlg.appendChild(row("Layer",lsel));dlg.appendChild(row("Priority",pin));
- function typeSync(){var ko=tsel.value==="keepout";nsel.disabled=ko;pin.disabled=ko;hint.textContent=ko?"Keepouts block routed copper on the selected layer and carry the same editable native sketch as pours.":"Higher priority wins where pours overlap on a layer; the lower one is pushed back by the clearance gap so they can't short.";}
+ dlg.appendChild(row("Type",tsel));dlg.appendChild(row("Net",nsel));dlg.appendChild(row("Layers",lbox));dlg.appendChild(row("Priority",pin));
+ function typeSync(){var ko=tsel.value==="keepout";nsel.disabled=ko;pin.disabled=ko;hint.style.color="#8b949e";hint.textContent=ko?"Keepouts block routed copper on every selected layer and carry the same editable native sketch as pours.":"The same pour boundary is filled independently on every selected layer. Higher priority wins where pours overlap on a layer.";}
  var hint=document.createElement("div");
  hint.style.cssText="margin:4px 2px 0;color:#8b949e;font-size:11px;line-height:1.35;max-width:230px";
  dlg.appendChild(hint);
@@ -5340,12 +5349,13 @@ function openPourDialog(pts,existing){
  var cancel=document.createElement("button");cancel.textContent="Cancel";cancel.className="btn";
  var ok=document.createElement("button");ok.textContent=existing?"Update area":"Create area";ok.className="btn";
  ok.style.cssText="border-color:#2ea043;color:#7ee787";
- function commit(){var keepout=tsel.value==="keepout",net=keepout?"":(nsel.value||""),layer=lsel.value||LN.f_cu,prio=keepout?0:parseInt(pin.value,10);if(!(prio>0))prio=0;
+ function commit(){var keepout=tsel.value==="keepout",net=keepout?"":(nsel.value||""),layers=layerInputs.filter(function(cb){return cb.checked;}).map(function(cb){return cb.value;}),prio=keepout?0:parseInt(pin.value,10);if(!(prio>0))prio=0;
+  if(!layers.length){hint.style.color="#f85149";hint.textContent="Select at least one copper layer.";return;}
   var pre=pourDialogSnap;closePourDialog();
-  if(existing){existing.net=net;existing.layer=layer;existing.priority=prio;existing.keepout=keepout;existing.filled=!keepout;recordUndo(pre);onZonesChanged();
+  if(existing){existing.net=net;existing.layer=layers[0];existing.layers=layers.length>1?layers.slice():undefined;existing.priority=prio;existing.keepout=keepout;existing.filled=!keepout;recordUndo(pre);onZonesChanged();
    var m=document.getElementById("pcb-savemsg");if(m){m.style.color="#7ee787";
-    m.textContent=(keepout?"copper keepout":"copper pour")+" updated ("+(keepout?layer:((net||"no net")+" · "+layer+" · priority "+prio))+")";}}
-  else createZone(pts,net,layer,prio,keepout);}
+    m.textContent=(keepout?"copper keepout":"copper pour")+" updated ("+(keepout?layers.join(", "):((net||"no net")+" · "+layers.join(", ")+" · priority "+prio))+")";}}
+  else createZone(pts,net,layers,prio,keepout);}
  cancel.addEventListener("click",function(){closePourDialog();});
  ok.addEventListener("click",commit);
  ba.appendChild(cancel);ba.appendChild(ok);dlg.appendChild(ba);
@@ -5354,15 +5364,16 @@ function openPourDialog(pts,existing){
   else if(ev.key==="Escape"){ev.preventDefault();closePourDialog();}});
  tsel.addEventListener("change",typeSync);typeSync();host.appendChild(dlg);tsel.focus();}
 // Push a new pour onto PCB.zones and refresh (dirty + stale + auto-refill).
-function createZone(pts,net,layer,prio,keepout){
+function createZone(pts,net,layers,prio,keepout){
  var pre=snapAll(),sk=OS?OS.fromPolygon(pts):null;
  PCB.zones=PCB.zones||[];
- var zone={net:keepout?"":(net||""),layer:layer||LN.f_cu,poly:pts,filled:!keepout,keepout:!!keepout,priority:keepout?0:(prio>0?prio:0)};if(sk)zone.sketch=sk;
+ layers=Array.isArray(layers)&&layers.length?layers:[layers||LN.f_cu];
+ var zone={net:keepout?"":(net||""),layer:layers[0],layers:layers.length>1?layers.slice():undefined,poly:pts,filled:!keepout,keepout:!!keepout,priority:keepout?0:(prio>0?prio:0)};if(sk)zone.sketch=sk;
  PCB.zones.push(zone);recordUndo(pre);
  onZonesChanged();
  var msg=document.getElementById("pcb-savemsg");
  if(msg){msg.style.color="#7ee787";
-  msg.textContent=(keepout?"copper keepout":"copper pour")+" added ("+(keepout?layer:((net||"no net")+" · "+layer+((prio>0)?(" · priority "+prio):"")))+")";}}
+  msg.textContent=(keepout?"copper keepout":"copper pour")+" added ("+(keepout?layers.join(", "):((net||"no net")+" · "+layers.join(", ")+((prio>0)?(" · priority "+prio):"")))+")";}}
 // A zone create/delete: mark the layout dirty (Save/Update), invalidate pours,
 // and kick a refill so the carved fill appears right after drawing.
 function onZonesChanged(){markDirty();pourGeomDrop();dragCacheDrop();paintSoon();markPoursStale();refillPours();}

@@ -14,6 +14,7 @@ const shape_sketch = @import("../shape_sketch.zig");
 const shape_sketch_json = @import("shape_sketch_json.zig");
 const invalid_zone_sketch: shape_sketch.Sketch = .{ .points = &.{}, .curves = &.{} };
 const page = @import("pcb_layout_page.zig");
+const saved_zone = @import("saved_zone.zig");
 const env_mod = @import("../eval/env.zig");
 const SavedRfPath = @typeInfo(@FieldType(page.SavedRoutes, "rf_paths")).pointer.child;
 
@@ -171,25 +172,8 @@ pub fn parseSavedRoutes(alloc: std.mem.Allocator, v: ?std.json.Value) ?page.Save
     var zones: std.ArrayList(page.SavedZone) = .empty;
     if (obj.object.get("zones")) |zv| if (zv == .array) {
         for (zv.array.items) |it| {
-            if (it != .object) continue;
-            var sketch: ?shape_sketch.Sketch = null;
-            const poly = if (it.object.get("sketch")) |sketch_value| blk: {
-                const parsed = parseZoneSketch(alloc, sketch_value, it.object.get("poly"));
-                sketch = parsed.sketch;
-                break :blk parsed.poly;
-            } else parseOutlinePts(alloc, it.object.get("poly")) orelse continue;
-            zones.append(alloc, .{
-                .net = jsonStrField(it.object.get("net")),
-                .layer = jsonStrField(it.object.get("layer")),
-                .poly = poly,
-                .flags = .{
-                    .filled = jsonFlag(it.object.get("filled")),
-                    .keepout = jsonFlag(it.object.get("keepout")),
-                },
-                .g = jsonStrField(it.object.get("g")),
-                .priority = jsonInt(it.object.get("priority")),
-                .sketch = sketch,
-            }) catch return null;
+            const zone = parseSavedZone(alloc, it) orelse continue;
+            zones.append(alloc, zone) catch return null;
         }
     };
     var rf_paths: std.ArrayList(SavedRfPath) = .empty;
@@ -227,6 +211,31 @@ pub fn parseSavedRoutes(alloc: std.mem.Allocator, v: ?std.json.Value) ?page.Save
     };
 }
 
+fn parseSavedZone(alloc: std.mem.Allocator, value: std.json.Value) ?page.SavedZone {
+    if (value != .object) return null;
+    var sketch: ?shape_sketch.Sketch = null;
+    const poly = if (value.object.get("sketch")) |sketch_value| blk: {
+        const parsed = parseZoneSketch(alloc, sketch_value, value.object.get("poly"));
+        sketch = parsed.sketch;
+        break :blk parsed.poly;
+    } else parseOutlinePts(alloc, value.object.get("poly")) orelse return null;
+    const layers = jsonStringList(alloc, value.object.get("layers"));
+    const legacy_layer = jsonStrField(value.object.get("layer"));
+    return .{
+        .net = jsonStrField(value.object.get("net")),
+        .layer = if (legacy_layer.len > 0) legacy_layer else if (layers.len > 0) layers[0] else "",
+        .layers = layers,
+        .poly = poly,
+        .flags = .{
+            .filled = jsonFlag(value.object.get("filled")),
+            .keepout = jsonFlag(value.object.get("keepout")),
+        },
+        .g = jsonStrField(value.object.get("g")),
+        .priority = jsonInt(value.object.get("priority")),
+        .sketch = sketch,
+    };
+}
+
 /// Serialize zone records in the sidecar/embedded `PCB.zones` shape. Kept by
 /// the sidecar codec so adding authoring metadata does not grow the page/API
 /// module that merely embeds the result.
@@ -237,7 +246,15 @@ pub fn writeSavedZonesJson(w: *std.Io.Writer, zones: []const page.SavedZone) std
         try w.writeAll("{\"net\":");
         try page.writeJsonStr(w, zone.net);
         try w.writeAll(",\"layer\":");
-        try page.writeJsonStr(w, zone.layer);
+        try page.writeJsonStr(w, saved_zone.primaryLayer(&zone));
+        if (zone.layers.len > 1) {
+            try w.writeAll(",\"layers\":[");
+            for (zone.layers, 0..) |layer_name, li| {
+                if (li > 0) try w.writeByte(',');
+                try page.writeJsonStr(w, layer_name);
+            }
+            try w.writeByte(']');
+        }
         try w.writeAll(",\"poly\":[");
         for (zone.poly, 0..) |point, pi| {
             if (pi > 0) try w.writeAll(",");
@@ -704,6 +721,22 @@ pub fn jsonStrField(v: ?std.json.Value) []const u8 {
     return if (sv == .string) sv.string else "";
 }
 
+fn jsonStringList(alloc: std.mem.Allocator, v: ?std.json.Value) []const []const u8 {
+    const value = v orelse return &.{};
+    if (value != .array) return &.{};
+    var out: std.ArrayList([]const u8) = .empty;
+    for (value.array.items) |item| {
+        if (item != .string or item.string.len == 0) continue;
+        var duplicate = false;
+        for (out.items) |existing| if (std.ascii.eqlIgnoreCase(existing, item.string)) {
+            duplicate = true;
+            break;
+        };
+        if (!duplicate) out.append(alloc, item.string) catch return out.items;
+    }
+    return out.toOwnedSlice(alloc) catch out.items;
+}
+
 /// What a layout SAVE learns from resolving the block: the optimizer score for
 /// the posted poses, plus the layer half of that block's board rules — null
 /// when the block did not resolve, which switches the zone-layer check below
@@ -777,17 +810,21 @@ fn zoneLayerError(arena: std.mem.Allocator, rules: ?optimizer.BoardRules, routes
         _ = shape_sketch.compile(arena, sketch, shape_sketch.default_sagitta_mm) catch |err| return std.fmt.allocPrint(
             arena,
             "invalid custom copper-area sketch in zone #{d} ({s} on {s}): {s} — repair its open, crossing, or malformed geometry",
-            .{ zone_index + 1, if (z.flags.keepout) "keepout" else z.net, z.layer, @errorName(err) },
+            .{ zone_index + 1, if (z.flags.keepout) "keepout" else z.net, saved_zone.primaryLayer(&z), @errorName(err) },
         ) catch "invalid custom copper-area sketch — repair its open, crossing, or malformed geometry";
     };
     const lr = rules orelse return null;
     for (r.zones) |z| {
-        if (z.flags.keepout or zoneLayerLegal(lr, z.layer)) continue;
-        return std.fmt.allocPrint(
-            arena,
-            "zone layer \"{s}\" is not a copper layer on this board — routable layers: {s}",
-            .{ z.layer, routableLayerNames(arena, lr) },
-        ) catch null;
+        if (z.flags.keepout) continue;
+        var legacy: [1][]const u8 = undefined;
+        for (saved_zone.layers(&z, &legacy)) |layer_name| {
+            if (zoneLayerLegal(lr, layer_name)) continue;
+            return std.fmt.allocPrint(
+                arena,
+                "zone layer \"{s}\" is not a copper layer on this board — routable layers: {s}",
+                .{ layer_name, routableLayerNames(arena, lr) },
+            ) catch null;
+        }
     }
     return null;
 }

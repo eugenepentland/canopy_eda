@@ -3504,7 +3504,7 @@ src/serve/pcb_layout_page.zig::SavedOutline struct_
 src/serve/pcb_layout_page.zig::SavedRoutes struct_
 src/serve/pcb_layout_page.zig::SavedTrack struct_
 src/serve/pcb_layout_page.zig::SavedVia struct_
-src/serve/pcb_layout_page.zig::SavedZone struct_
+src/serve/pcb_layout_page.zig::SavedZone value
 src/serve/pcb_layout_page.zig::ShownCopper struct_
 src/serve/pcb_layout_page.zig::SolvedRequest struct_
 src/serve/pcb_layout_page.zig::SubBlockSeeds struct_
@@ -3730,6 +3730,12 @@ src/serve/route_session_api.zig::startSessionApi | fn startSessionApi(ctx: *Serv
 src/serve/route_vision.zig::HandlerError value
 src/serve/route_vision.zig::routeVisionApi | fn routeVisionApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/saved_anchor_migration.zig::bind | fn bind( comptime Live: type, comptime Pose: type, comptime Result: type, live: []const Live, parts: []const Pose, rough: env.RoughSpec, res: Result, ) void
+src/serve/saved_zone.zig::SavedZone struct_
+src/serve/saved_zone.zig::existingZones | fn existingZones(alloc: std.mem.Allocator, placement: optimizer.Placement, zones: []const SavedZone) []const route_policy.ExistingZone
+src/serve/saved_zone.zig::fillRequests | fn fillRequests(alloc: std.mem.Allocator, rules: optimizer.BoardRules, zones: []const SavedZone) []const pour_json.ZoneFillReq
+src/serve/saved_zone.zig::layers | fn layers(zone: *const SavedZone, legacy: *[1][]const u8) []const []const u8
+src/serve/saved_zone.zig::primaryLayer | fn primaryLayer(zone: *const SavedZone) []const u8
+src/serve/saved_zone.zig::userZones | fn userZones(alloc: std.mem.Allocator, rules: optimizer.BoardRules, zones: []const SavedZone) []const pour.UserZone
 src/serve/schematic_page.zig::HandlerError value
 src/serve/schematic_page.zig::schematicPage | fn schematicPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/schematic_pdf.zig::HandlerError value

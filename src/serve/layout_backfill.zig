@@ -24,6 +24,7 @@ const paths = @import("../paths.zig");
 const history = @import("history.zig");
 const subprocess = @import("subprocess.zig");
 const page = @import("pcb_layout_page.zig");
+const saved_zone = @import("saved_zone.zig");
 
 const SavedLayout = page.SavedLayout;
 
@@ -317,7 +318,8 @@ pub fn boardKey(L: SavedLayout) u64 {
     }
     for (r.zones) |z| {
         h.update(z.net);
-        h.update(z.layer);
+        var legacy: [1][]const u8 = undefined;
+        for (saved_zone.layers(&z, &legacy)) |layer_name| h.update(layer_name);
         h.update(std.mem.asBytes(&z.poly.len));
     }
     return h.final();

@@ -26,6 +26,7 @@ const env_mod = @import("../eval/env.zig");
 const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
 const pcb_layout = @import("pcb_layout_page.zig");
+const saved_zone = @import("saved_zone.zig");
 const board_backup = @import("board_backup.zig");
 const optimizer = @import("../placement/optimizer.zig");
 const pose_math = @import("../placement/pose_math.zig");
@@ -3989,10 +3990,13 @@ fn emitAuthoritativeZones(d: *DiffContext, w: anytype, first: *bool, layout: Kic
             if (zone.flags.keepout) continue;
             if (zone.net.len == 0) continue;
             if (zone.poly.len < 3) continue;
-            if (!first.*) try w.writeAll(",");
-            first.* = false;
             const net = d.net_display.get(zone.net) orelse zone.net;
-            try emitZoneOp(w, net, zone.layer, zone.poly, zone.priority);
+            var legacy: [1][]const u8 = undefined;
+            for (saved_zone.layers(&zone, &legacy)) |layer_name| {
+                if (!first.*) try w.writeAll(",");
+                first.* = false;
+                try emitZoneOp(w, net, layer_name, zone.poly, zone.priority);
+            }
         }
     }
 }

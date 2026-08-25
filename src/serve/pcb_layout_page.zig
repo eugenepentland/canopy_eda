@@ -91,6 +91,7 @@ const numeric = @import("../numeric.zig");
 const escape = @import("../escape.zig");
 const Server = serve_root.Server;
 const sidecar_json = @import("layout_sidecar_json.zig");
+const saved_zone = @import("saved_zone.zig");
 const layout_layers = @import("layout_layers.zig");
 const copper_ids = @import("copper_ids.zig");
 // JSON leaf parsers split into layout_sidecar_json.zig; aliased so the many
@@ -332,17 +333,10 @@ pub const SavedVia = struct {
     id: []const u8 = "",
 };
 
-/// Persisted custom/KiCad copper-zone geometry. Declared stackup planes are
-/// never represented here. `g` owns a zone stamped from a reusable subcircuit.
-pub const SavedZone = struct {
-    net: []const u8 = "",
-    layer: []const u8 = "",
-    poly: []const [2]f64 = &.{},
-    flags: packed struct { filled: bool = false, keepout: bool = false } = .{},
-    g: []const u8 = "",
-    sketch: ?shape_sketch.Sketch = null,
-    priority: i64 = 0,
-};
+/// Persisted custom/KiCad copper-zone geometry shared with sidecar consumers.
+pub const SavedZone = saved_zone.SavedZone;
+const savedZoneLayers = saved_zone.layers;
+const savedZonePrimaryLayer = saved_zone.primaryLayer;
 
 /// A saved layout's persisted copper — routed tracks/vias plus optional
 /// imported KiCad zone polygons. The default keeps old sidecars and existing
@@ -2077,7 +2071,15 @@ fn writeSubRoutesJson(
         try w.writeAll("{\"net\":");
         try writeJsonStr(w, mappedNet(alloc, &net_map, slug, z.net));
         try w.writeAll(",\"layer\":");
-        try writeJsonStr(w, z.layer);
+        try writeJsonStr(w, savedZonePrimaryLayer(&z));
+        if (z.layers.len > 1) {
+            try w.writeAll(",\"layers\":[");
+            for (z.layers, 0..) |layer_name, li| {
+                if (li > 0) try w.writeByte(',');
+                try writeJsonStr(w, layer_name);
+            }
+            try w.writeByte(']');
+        }
         try w.writeAll(",\"poly\":[");
         for (z.poly, 0..) |point, pi| {
             if (pi > 0) try w.writeByte(',');
@@ -6351,38 +6353,15 @@ pub fn restoreRoutes(alloc: std.mem.Allocator, sr: SavedRoutes, nets: []const ex
     };
 }
 
-/// The routable signal-layer index of a saved zone that is an eligible user
-/// copper pour: filled, net-carrying, non-keepout, on a resolvable signal layer
-/// (`BoardRules.signalIndexOfName` — outer faces always, a plane-free inner
-/// layer; a layer claimed by a `(plane …)` or an unknown name → null), and a
-/// valid (≥3-pt, non-degenerate, simple) polygon — else null. Invalid zones are
-/// still PERSISTED (round-tripped in the sidecar); they are only skipped for
-/// fills/connectivity/routing.
-fn userPourLayer(rules: optimizer.BoardRules, z: SavedZone) ?u8 {
-    if (!z.flags.filled or z.flags.keepout or z.net.len == 0) return null;
-    const layer = rules.signalIndexOfName(z.layer) orelse return null;
-    if (!outline_mod.valid(z.poly)) return null;
-    return layer;
-}
-
 /// The net index of `name` in the flattened netlist, or null when unknown.
 fn netIndexByName(placement: optimizer.Placement, name: []const u8) ?i32 {
     for (placement.nets, 0..) |net, i| if (std.mem.eql(u8, net.name, name)) return @intCast(i);
     return null;
 }
 
-/// Reduce saved zones to the user copper pours the connectivity
-/// (`fab_readiness.buildNetGraph` / `net_open`) and Gerber paths consume. The
-/// `layer` is the routable signal-layer index (0/1 outer, ≥2 inner); the
-/// connectivity path unites an inner zone's through-hole pads/vias only.
-fn userZonesFrom(alloc: std.mem.Allocator, rules: optimizer.BoardRules, zones: []const SavedZone) []const pour.UserZone {
-    var out: std.ArrayList(pour.UserZone) = .empty;
-    for (zones) |z| {
-        const layer = userPourLayer(rules, z) orelse continue;
-        out.append(alloc, .{ .net = z.net, .layer = layer, .poly = z.poly, .priority = z.priority }) catch return out.items;
-    }
-    return out.items;
-}
+const userZonesFrom = saved_zone.userZones;
+const zoneFillReqsFrom = saved_zone.fillRequests;
+const existingZonesFrom = saved_zone.existingZones;
 
 /// Keepout polygons are no-silkscreen regions on both faces. Unlike copper
 /// pours they need no net/layer resolution; a three-point imported boundary is
@@ -6391,58 +6370,6 @@ fn silkKeepoutsFrom(alloc: std.mem.Allocator, zones: []const SavedZone) []const 
     var out: std.ArrayList(subcircuit_silkscreen.Keepout) = .empty;
     for (zones) |zone| {
         if (zone.flags.keepout and zone.poly.len >= 3) out.append(alloc, .{ .polygon = zone.poly }) catch return out.items;
-    }
-    return out.items;
-}
-
-/// Reduce saved zones to the `ZoneFillReq`s the blob / refill compute carved
-/// fills for — same filter as `userZonesFrom`, keyed on each zone's ORIGINAL
-/// index into the emitted `PCB.zones` array (so the client maps a fill back to
-/// its zone), carrying its KiCad layer name, outer face (`null` = inner),
-/// signal-layer index for the fill's foreign-track carve, priority, and the
-/// higher-priority overlapping pours each fill must clear (`pour.higherPolys`,
-/// computed over the identically-filtered `userZonesFrom` set).
-fn zoneFillReqsFrom(alloc: std.mem.Allocator, rules: optimizer.BoardRules, zones: []const SavedZone) []const pour_json.ZoneFillReq {
-    const uz = userZonesFrom(alloc, rules, zones);
-    var out: std.ArrayList(pour_json.ZoneFillReq) = .empty;
-    var k: usize = 0; // index into the filtered `uz` (matches this loop's filter)
-    for (zones, 0..) |z, i| {
-        const layer = userPourLayer(rules, z) orelse continue;
-        out.append(alloc, .{
-            .index = i,
-            .net = z.net,
-            .layer_name = z.layer,
-            .side = pour.sideOfSignal(layer),
-            .track_layer = layer,
-            .poly = z.poly,
-            .higher = pour.higherPolys(alloc, uz, k) catch &.{},
-        }) catch return out.items;
-        k += 1;
-    }
-    return out.items;
-}
-
-/// Map saved zones to router `ExistingZone`s: a filled netted non-keepout pour
-/// on a routable signal layer becomes same-net SOURCE copper the maze grows a
-/// route from; a keepout becomes a hard track+via obstacle. Unknown-net copper
-/// and zones on a non-routable layer are dropped. An inner-layer zone rides its
-/// signal-layer index; the router only seeds it where that inner layer is a
-/// modeled maze layer (`largestNetZone`'s `layer >= occ.len` backstop), so it is
-/// a safe no-op on boards that route only the outer faces. `placement` resolves
-/// each net NAME to its index.
-fn existingZonesFrom(alloc: std.mem.Allocator, placement: optimizer.Placement, zones: []const SavedZone) []const route_policy.ExistingZone {
-    var out: std.ArrayList(route_policy.ExistingZone) = .empty;
-    for (zones) |z| {
-        if (z.flags.keepout) {
-            const layer = placement.rules.signalIndexOfName(z.layer) orelse continue;
-            if (z.poly.len < 3) continue;
-            out.append(alloc, .{ .polygon = z.poly, .layer = layer, .net = -2, .tracks_blocked = true, .vias_blocked = true, .copper = false }) catch return out.items;
-            continue;
-        }
-        // A filled netted valid pour → same-net source copper.
-        const layer = userPourLayer(placement.rules, z) orelse continue;
-        const ni = netIndexByName(placement, z.net) orelse continue;
-        out.append(alloc, .{ .polygon = z.poly, .layer = layer, .net = ni, .copper = true, .priority = z.priority }) catch return out.items;
     }
     return out.items;
 }
@@ -15490,7 +15417,8 @@ test "layouts sidecar round-trips user copper-pour zones" {
 
     const parts = [_]PartPose{.{ .ref = "U1", .x = 0, .y = 0, .rot = 0 }};
     const poly = [_][2]f64{ .{ 0, 0 }, .{ 5, 0 }, .{ 5, 5 }, .{ 0, 5 } };
-    const zones = [_]SavedZone{.{ .net = "GND", .layer = "F.Cu", .poly = &poly, .flags = .{ .filled = true } }};
+    const layers = [_][]const u8{ "F.Cu", "B.Cu" };
+    const zones = [_]SavedZone{.{ .net = "GND", .layer = "F.Cu", .layers = &layers, .poly = &poly, .flags = .{ .filled = true } }};
     const layouts = [_]SavedLayout{.{
         .name = "poured",
         .kind = kind_manual,
@@ -15507,6 +15435,8 @@ test "layouts sidecar round-trips user copper-pour zones" {
     try std.testing.expectEqual(@as(usize, 1), sr.zones.len);
     try std.testing.expectEqualStrings("GND", sr.zones[0].net);
     try std.testing.expectEqualStrings("F.Cu", sr.zones[0].layer);
+    try std.testing.expectEqual(@as(usize, 2), sr.zones[0].layers.len);
+    try std.testing.expectEqualStrings("B.Cu", sr.zones[0].layers[1]);
     try std.testing.expect(sr.zones[0].flags.filled);
     try std.testing.expect(!sr.zones[0].flags.keepout);
     try std.testing.expectEqual(@as(usize, 4), sr.zones[0].poly.len);
@@ -15582,7 +15512,8 @@ test "zone_fills emit a carved rectangle pour over a pad with its zone index and
 }
 
 // spec: Web Server - a filled inner-layer user zone emits a layer-tagged zone_fill with no side and preserves priority through both routing adapters
-test "inner-layer zone_fills carry the In-layer name and omit side" {
+// spec: Web Server - one custom pour applied to multiple selected layers expands into an independent fill and routing source on every layer
+test "multi-layer custom pour expands across outer and inner layers" {
     var arena_i = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_i.deinit();
     const arena = arena_i.allocator();
@@ -15615,23 +15546,31 @@ test "inner-layer zone_fills carry the In-layer name and omit side" {
     };
 
     const poly = [_][2]f64{ .{ 7, 2 }, .{ 13, 2 }, .{ 13, 8 }, .{ 7, 8 } };
-    const zones = [_]SavedZone{.{ .net = "V_3V3A", .layer = "In2.Cu", .poly = &poly, .flags = .{ .filled = true }, .priority = 5 }};
+    const layer_names = [_][]const u8{ "F.Cu", "In2.Cu" };
+    const zones = [_]SavedZone{.{ .net = "V_3V3A", .layer = "F.Cu", .layers = &layer_names, .poly = &poly, .flags = .{ .filled = true }, .priority = 5 }};
     const reqs = zoneFillReqsFrom(arena, placement.rules, &zones);
-    try std.testing.expectEqual(@as(usize, 1), reqs.len);
-    // An inner layer has no outer face and rides its signal-layer index (2).
-    try std.testing.expectEqual(@as(?optimizer.Side, null), reqs[0].side);
-    try std.testing.expectEqual(@as(u8, 2), reqs[0].track_layer);
-    try std.testing.expectEqualStrings("In2.Cu", reqs[0].layer_name);
+    try std.testing.expectEqual(@as(usize, 2), reqs.len);
+    try std.testing.expectEqual(@as(?optimizer.Side, .top), reqs[0].side);
+    // The second application is an inner layer: no outer face, signal index 2.
+    try std.testing.expectEqual(@as(?optimizer.Side, null), reqs[1].side);
+    try std.testing.expectEqual(@as(u8, 2), reqs[1].track_layer);
+    try std.testing.expectEqualStrings("In2.Cu", reqs[1].layer_name);
 
-    try std.testing.expect(existingZonesFrom(arena, placement, &zones)[0].priority == 5 and
-        userZoneSources(arena, placement, userZonesFrom(arena, placement.rules, &zones))[0].priority == 5);
+    const existing = existingZonesFrom(arena, placement, &zones);
+    const users = userZonesFrom(arena, placement.rules, &zones);
+    try std.testing.expectEqual(@as(usize, 2), existing.len);
+    try std.testing.expectEqual(@as(usize, 2), users.len);
+    try std.testing.expect(existing[1].layer == 2 and existing[1].priority == 5);
+    try std.testing.expect(users[0].layer == 0 and users[1].layer == 2);
 
     var aw: std.Io.Writer.Allocating = .init(arena);
     try pour_json.writeZoneFills(&aw.writer, arena, placement, .{}, reqs, null);
     const js = aw.written();
-    // The zone_fill carries the KiCad layer name and NO side key.
+    // Both selected layer names are emitted; only the outer application has a
+    // `side`, while the inner one is identified by its layer name.
+    try std.testing.expect(std.mem.indexOf(u8, js, "\"layer\":\"F.Cu\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "\"layer\":\"In2.Cu\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "\"side\":") == null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, js, "\"side\":"));
     try std.testing.expect(std.mem.indexOf(u8, js, "\"poly\":[") != null);
 }
 

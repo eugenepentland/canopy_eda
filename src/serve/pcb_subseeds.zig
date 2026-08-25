@@ -21,6 +21,7 @@ const serve_root = @import("../serve.zig");
 const modules = @import("modules.zig");
 const pcb = @import("pcb_layout_page.zig");
 const sidecar_json = @import("layout_sidecar_json.zig");
+const saved_zone = @import("saved_zone.zig");
 
 const Server = serve_root.Server;
 const SeedsJson = struct {
@@ -228,9 +229,21 @@ fn captureRoutes(
         const net = capturedNet(nets, zone.net) orelse continue;
         const poly = try alloc.alloc([2]f64, zone.poly.len);
         for (zone.poly, 0..) |point, i| poly[i] = pose_math.rigidApply(transform, point[0], point[1]);
+        var legacy: [1][]const u8 = undefined;
+        const source_layers = saved_zone.layers(&zone, &legacy);
+        const layers = try alloc.alloc([]const u8, source_layers.len);
+        for (source_layers, layers) |layer_name, *transformed| transformed.* = if (!transform.back)
+            layer_name
+        else if (std.mem.eql(u8, layer_name, board_layers.f_cu))
+            board_layers.b_cu
+        else if (std.mem.eql(u8, layer_name, board_layers.b_cu))
+            board_layers.f_cu
+        else
+            layer_name;
         try zones.append(alloc, .{
             .net = net,
-            .layer = if (!transform.back) zone.layer else if (std.mem.eql(u8, zone.layer, board_layers.f_cu)) board_layers.b_cu else if (std.mem.eql(u8, zone.layer, board_layers.b_cu)) board_layers.f_cu else zone.layer,
+            .layer = if (layers.len > 0) layers[0] else "",
+            .layers = if (layers.len > 1) layers else &.{},
             .poly = poly,
             .flags = .{ .filled = true },
             .priority = zone.priority,
@@ -714,7 +727,15 @@ fn writeRoutes(
         try w.writeAll("{\"net\":");
         try pcb.writeJsonStr(w, net);
         try w.writeAll(",\"layer\":");
-        try pcb.writeJsonStr(w, zone.layer);
+        try pcb.writeJsonStr(w, saved_zone.primaryLayer(&zone));
+        if (zone.layers.len > 1) {
+            try w.writeAll(",\"layers\":[");
+            for (zone.layers, 0..) |layer_name, li| {
+                if (li > 0) try w.writeByte(',');
+                try pcb.writeJsonStr(w, layer_name);
+            }
+            try w.writeByte(']');
+        }
         try w.writeAll(",\"poly\":[");
         for (zone.poly, 0..) |point, i| {
             if (i > 0) try w.writeByte(',');
