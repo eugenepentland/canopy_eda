@@ -1300,10 +1300,8 @@ fn trackPourClearance(placement: optimizer.Placement, track: router.Track, plane
     if (!(rule.rf.impedance.ohms > 0) or rule.rf.impedance.diff_ohms > 0) return fixed;
     if (!(gap > 0) or !(cap > gap)) return fixed;
 
-    var physical_layers: [32]u8 = undefined;
-    const layers = impedance.signalLayers(placement.rules.physical.stack, &physical_layers);
-    if (track.layer >= layers.len) return fixed;
-    const physical_layer = layers[track.layer];
+    if (track.layer >= placement.rules.signalLayerCount()) return fixed;
+    const physical_layer = placement.rules.signalStackIndex(track.layer);
     const ref = impedance.reference(placement.rules.physical.stack, physical_layer) orelse return fixed;
     const solved = impedance.refGroundGapForZ0(
         ref,
@@ -2839,6 +2837,43 @@ test "ground pour gap follows controlled-impedance taper up to its cap" {
     try testing.expectApproxEqAbs(@as(f64, 0.29747), trackPourClearance(placement, taper, .{ .named = "GND" }, 0.3), 0.0001);
     try testing.expectEqual(@as(f64, 1.75), trackPourClearance(placement, launch, .{ .named = "GND" }, 0.3));
     try testing.expectEqual(placement.rules.clearanceForNet(1, 0.3), trackPourClearance(placement, launch, .{ .named = "VCC" }, 0.3));
+}
+
+// spec: placement/pour - a bottom CPWG gap uses the bottom physical stackup on multilayer boards
+test "bottom CPWG gap uses the bottom physical stackup" {
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "GND", .pins = &.{} },
+        .{ .name = "RF", .pins = &.{} },
+    };
+    const rules = [_]optimizer.NetRule{
+        .{},
+        .{ .class = .{ .name = "rf-cpwg-50" }, .clearance = 0.127, .rf = .{
+            .impedance = .{ .ohms = 50, .ground_gap_mm = 0.127, .ground_gap_max_mm = 1.75 },
+        } },
+    };
+    const dielectrics = [_]impedance.Dielectric{
+        .{ .after_layer = 1, .thickness_mm = 0.0994, .er = 4.4 },
+        .{ .after_layer = 5, .thickness_mm = 0.0994, .er = 4.4 },
+    };
+    const physical_planes = [_]u8{ 2, 5 };
+    const plane_rows = [_]optimizer.PlaneAt{
+        .{ .index = 2, .net = "GND" },
+        .{ .index = 5, .net = "GND" },
+    };
+    const placement = testPlacement(&.{}, &nets, .{
+        .net = &rules,
+        .plane_nets = &.{},
+        .copper_layers = 6,
+        .planes = .{ .declared = &plane_rows },
+        .physical = .{ .board_thickness = 1.6, .stack = .{
+            .layers = 6,
+            .planes = &physical_planes,
+            .dielectrics = &dielectrics,
+            .board_mm = 1.6,
+        } },
+    });
+    const bottom = router.Track{ .x1 = 5, .y1 = 10, .x2 = 10, .y2 = 10, .layer = 1, .width = 0.18335412052887323, .net = 1 };
+    try testing.expectApproxEqAbs(@as(f64, 0.127), trackPourClearance(placement, bottom, .{ .named = "GND" }, 0.3), 0.0001);
 }
 
 // spec: placement/pour - a single-ended controlled-impedance via gets the same stackup-derived antipad clearance on every foreign pour
