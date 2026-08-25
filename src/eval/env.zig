@@ -1418,9 +1418,10 @@ pub const ClassFence = struct {
     /// `(pitch MM)` — via centre-to-centre spacing along the trace.
     /// 0 = derive from the class's `(max-freq …)` as guided-wavelength/10.
     pitch_mm: f64 = 0,
-    /// `(layers N)` — concentric rows of fence vias. One is the legacy/default
-    /// fence; each additional row sits one resolved pitch farther outward.
-    layers: u8 = 1,
+    /// Generated and solder-mask-open fence row counts. `(layers N)` defaults
+    /// to one generated row; `(mask-layers N)` uses 0 as its undeclared
+    /// sentinel, exposing every generated row for backward compatibility.
+    rows: struct { generated: u8 = 1, mask_open: u8 = 0 } = .{},
     /// `(offset MM)` — copper-edge to fence-via copper-edge gap. 0 = derive as
     /// the class clearance plus a fabrication margin.
     offset_mm: f64 = 0,

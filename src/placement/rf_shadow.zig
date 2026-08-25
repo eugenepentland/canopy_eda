@@ -381,7 +381,7 @@ fn corridorMm(rule: optimizer.NetRule, design: optimizer.DesignRules) f64 {
         @max(asked_pitch, @max(dia + design.clearance, drill + design.hole_to_hole))
     else
         0;
-    const extra_rows: f64 = @floatFromInt(@max(1, rule.rf.fence.layers) - 1);
+    const extra_rows: f64 = @floatFromInt(@max(1, rule.rf.fence.rows.generated) - 1);
     return gap + dia + extra_rows * pitch;
 }
 
@@ -463,7 +463,7 @@ test "the shadow corridor width resolves per class from the fence, else the keep
 
     // Additional layers reserve their actual generated row pitch too.
     const layered = [_]optimizer.NetRule{
-        .{ .rf = .{ .fence = .{ .declared = true, .pitch_mm = 1.0, .layers = 3, .offset_mm = 0.25, .via_dia = 0.6 } } },
+        .{ .rf = .{ .fence = .{ .declared = true, .pitch_mm = 1.0, .rows = .{ .generated = 3 }, .offset_mm = 0.25, .via_dia = 0.6 } } },
         .{},
         .{},
     };

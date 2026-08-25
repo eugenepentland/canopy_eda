@@ -2655,7 +2655,7 @@ fn parsePourEntry(self: *Evaluator, c: []const Node, layers: u8) ?env_mod.Stacku
     return .{ .index = idx, .net = net };
 }
 
-/// Parse a `(fence [(pitch MM)] [(layers N)] [(offset MM)] [(via DIA DRILL)] [(net "N")])`
+/// Parse a `(fence [(pitch MM)] [(layers N)] [(mask-layers N)] [(offset MM)] [(via DIA DRILL)] [(net "N")])`
 /// sub-form of a `(net-class …)` into `out`. Presence alone is the opt-in, so a
 /// bare `(fence)` is valid and leaves every field at its derive-me sentinel; a
 /// non-positive number or an unknown child is warned and dropped.
@@ -2676,7 +2676,16 @@ fn parseClassFence(self: *Evaluator, out: *env_mod.ClassFence, c: []const Node) 
             if (!whole or !in_range) {
                 self.warnFmt(f[0].span, "(fence (layers N)) needs a whole number from 1 to 32, e.g. (layers 2)", .{});
             } else {
-                out.layers = numeric.checkedInt(u8, raw) orelse 1;
+                out.rows.generated = numeric.checkedInt(u8, raw) orelse 1;
+            }
+        } else if (std.mem.eql(u8, head, "mask-layers")) {
+            const raw = if (f.len >= 2) f[1].asNumber() orelse 0 else 0;
+            const whole = std.math.isFinite(raw) and raw == @floor(raw);
+            const in_range = raw >= 1 and raw <= 32;
+            if (!whole or !in_range) {
+                self.warnFmt(f[0].span, "(fence (mask-layers N)) needs a whole number from 1 to 32, e.g. (mask-layers 1)", .{});
+            } else {
+                out.rows.mask_open = numeric.checkedInt(u8, raw) orelse 0;
             }
         } else if (std.mem.eql(u8, head, "offset")) {
             if (f.len >= 2) out.offset_mm = f[1].asNumber() orelse 0;
@@ -2690,6 +2699,10 @@ fn parseClassFence(self: *Evaluator, out: *env_mod.ClassFence, c: []const Node) 
         } else {
             self.warnFmt(f[0].span, "unknown (fence …) sub-form ({s} …)", .{head});
         }
+    }
+    if (out.rows.mask_open > out.rows.generated) {
+        self.warnFmt(c[0].span, "(fence (mask-layers N)) cannot exceed the generated (layers N); clamping {d} to {d}", .{ out.rows.mask_open, out.rows.generated });
+        out.rows.mask_open = out.rows.generated;
     }
 }
 
@@ -4161,12 +4174,13 @@ test "design-block captures RF band and return-loss target" {
 }
 
 // spec: eval/design_block - net-class fence sub-form captures its pitch, layer count, offset, via and stitch net, and a bare (fence) opts in at every default
+// spec: eval/design_block - net-class fence sub-form captures a mask-open layer count independently of its generated layer count
 test "design-block captures (net-class … (fence …)) declarations" {
     const a = std.heap.page_allocator;
     const src =
         \\(design-block "test"
         \\  (net-class "rf" (width 0.3124) (max-freq 12G)
-        \\    (fence (pitch 1.0) (layers 2) (offset 0.65) (via 0.4 0.2) (net "GND"))
+        \\    (fence (pitch 1.0) (layers 2) (mask-layers 1) (offset 0.65) (via 0.4 0.2) (net "GND"))
         \\    (nets "RF1_VCO"))
         \\  (net-class "rf-bare" (max-freq 12G) (fence) (nets "RF2_VCO"))
         \\  (net-class "plain" (width 0.3) (nets "VBUS")))
@@ -4183,7 +4197,8 @@ test "design-block captures (net-class … (fence …)) declarations" {
     const fenced = block.net_classes[0].rf.fence;
     try testing.expect(fenced.declared);
     try testing.expectEqual(@as(f64, 1.0), fenced.pitch_mm);
-    try testing.expectEqual(@as(u8, 2), fenced.layers);
+    try testing.expectEqual(@as(u8, 2), fenced.rows.generated);
+    try testing.expectEqual(@as(u8, 1), fenced.rows.mask_open);
     try testing.expectEqual(@as(f64, 0.65), fenced.offset_mm);
     try testing.expectEqual(@as(f64, 0.4), fenced.via_dia);
     try testing.expectEqual(@as(f64, 0.2), fenced.via_drill);
@@ -4193,7 +4208,8 @@ test "design-block captures (net-class … (fence …)) declarations" {
     const bare = block.net_classes[1].rf.fence;
     try testing.expect(bare.declared);
     try testing.expectEqual(@as(f64, 0), bare.pitch_mm);
-    try testing.expectEqual(@as(u8, 1), bare.layers);
+    try testing.expectEqual(@as(u8, 1), bare.rows.generated);
+    try testing.expectEqual(@as(u8, 0), bare.rows.mask_open);
     try testing.expectEqual(@as(f64, 0), bare.offset_mm);
     try testing.expectEqual(@as(f64, 0), bare.via_dia);
     try testing.expectEqual(@as(f64, 0), bare.via_drill);
@@ -5379,19 +5395,30 @@ test "ignored instance sub-form records a warning" {
 
 // spec: eval/design_block - an unknown child of a net-class fence or keepout records a lint warning naming it
 // spec: eval/design_block - a fence layer count outside 1–32 or not a whole number is warned and keeps the one-row default
+// spec: eval/design_block - a fence mask-layer count outside 1–32 or not a whole number is warned and keeps the expose-all default
+// spec: eval/design_block - a fence mask-layer count above the generated layer count is warned and clamped
 test "unknown fence and keepout sub-forms record warnings" {
     const alloc = std.heap.page_allocator;
     var eval: Evaluator = undefined;
     try evalWarningFixture(alloc, &eval,
         \\(design-block "T"
         \\  (net-class "rf" (max-freq 12G)
-        \\    (fence (spacing 1.0) (layers 2.5))
+        \\    (fence (spacing 1.0) (layers 2.5) (mask-layers 2.5))
         \\    (keepout 0.5 (margin 1.5))
         \\    (nets "RF1_VCO")))
     );
     try testing.expect(hasWarningContaining(&eval, "unknown (fence …) sub-form (spacing …)"));
     try testing.expect(hasWarningContaining(&eval, "(fence (layers N)) needs a whole number from 1 to 32"));
+    try testing.expect(hasWarningContaining(&eval, "(fence (mask-layers N)) needs a whole number from 1 to 32"));
     try testing.expect(hasWarningContaining(&eval, "unknown (keepout …) sub-form (margin …)"));
+
+    try evalWarningFixture(alloc, &eval,
+        \\(design-block "T"
+        \\  (net-class "rf" (max-freq 12G)
+        \\    (fence (mask-layers 3) (layers 2))
+        \\    (nets "RF1_VCO")))
+    );
+    try testing.expect(hasWarningContaining(&eval, "cannot exceed the generated (layers N); clamping 3 to 2"));
 }
 
 // spec: eval/design_block - inert id/ids/hierarchical-ids/row/col heads never draw warnings

@@ -677,7 +677,7 @@ pub const scope_form_docs = blk: {
             "[(impedance OHMS [(layer IDX)])] [(diff-impedance OHMS [(layer IDX)])] [(ground-gap MM [(max MM)])] " ++
             "[(match-group \"NAME\" [(tolerance MM)])] " ++
             "[(return-path [(reference \"NET\")] [(stitch-radius MM)] [(max-loop-area MM2)])] " ++
-            "[(fence [(pitch MM)] [(layers N)] [(offset MM)] [(via DIA DRILL)] [(net \"N\")])] " ++
+            "[(fence [(pitch MM)] [(layers N)] [(mask-layers N)] [(offset MM)] [(via DIA DRILL)] [(net \"N\")])] " ++
             "[(keepout MM [(escape MM)])] [(mask-relief MM)] [(nets \"A\" \"B\"…)])",
         .summary = "Routing geometry + routing order profile and/or membership for named nets: " ++
             "trace width, copper clearance, " ++
@@ -741,7 +741,8 @@ pub const scope_form_docs = blk: {
             "All children optional: (pitch MM) is the via " ++
             "centre-to-centre spacing along the contour (default: a tenth of the guided wavelength " ++
             "implied by (max-freq …)); (layers N) selects 1–32 concentric rows (default 1), with " ++
-            "each added row one resolved pitch farther outward; (offset MM) is the GAP from the net's copper edge to the fence " ++
+            "each added row one resolved pitch farther outward; (mask-layers N) exposes only the N innermost rows " ++
+            "through the derived RF solder-mask opening (default: expose every generated row); (offset MM) is the GAP from the net's copper edge to the fence " ++
             "via's copper edge (default: the DRC minimum — the clearance + a 0.1 mm margin), " ++
             "(via DIA DRILL) the fence via geometry (default: the class's own (via …), " ++
             "else the board (design-rules (via …))), and (net \"N\") the stitched net (default: the " ++

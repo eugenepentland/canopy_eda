@@ -85,8 +85,9 @@ pub const FenceRule = struct {
     /// Resolved `(pitch MM)` via spacing along the trace (0 = derive from
     /// `Rf.max_freq_hz`; see `via_fence.resolvedPitchMm`).
     pitch_mm: f64 = 0,
-    /// Resolved `(layers N)` concentric row count (default 1).
-    layers: u8 = 1,
+    /// Resolved generated and mask-open row counts. A zero mask-open count
+    /// preserves the legacy default: expose every generated row.
+    rows: struct { generated: u8 = 1, mask_open: u8 = 0 } = .{},
     /// Resolved `(offset MM)` copper-edge gap (0 = derive from the net's
     /// clearance; see `via_fence.resolvedGapMm`).
     offset_mm: f64 = 0,
@@ -284,7 +285,7 @@ fn mergeFenceProfile(out: *NetRule, p: ClassProfileDecl, st: *FenceMerge) void {
         out.rf.fence = .{
             .declared = true,
             .pitch_mm = f.pitch_mm,
-            .layers = f.layers,
+            .rows = .{ .generated = f.rows.generated, .mask_open = f.rows.mask_open },
             .offset_mm = f.offset_mm,
             .via_dia = f.via_dia,
             .via_drill = f.via_drill,
@@ -793,7 +794,7 @@ test "a destination fence declaration replaces the module's fence outright" {
         .nets = &.{"RFIN"},
         .rf = .{
             .max_freq_hz = 12e9,
-            .fence = .{ .declared = true, .pitch_mm = 2.0, .layers = 3, .offset_mm = 0.9, .via_dia = 0.5, .net = "AGND" },
+            .fence = .{ .declared = true, .pitch_mm = 2.0, .rows = .{ .generated = 3, .mask_open = 1 }, .offset_mm = 0.9, .via_dia = 0.5, .net = "AGND" },
         },
     }};
     var child = DesignBlock{
@@ -834,7 +835,8 @@ test "a destination fence declaration replaces the module's fence outright" {
     const fence = rules[0].rf.fence;
     try std.testing.expect(fence.declared);
     try std.testing.expectEqual(@as(f64, 1.0), fence.pitch_mm);
-    try std.testing.expectEqual(@as(u8, 1), fence.layers);
+    try std.testing.expectEqual(@as(u8, 1), fence.rows.generated);
+    try std.testing.expectEqual(@as(u8, 0), fence.rows.mask_open);
     try std.testing.expectEqual(@as(f64, 0), fence.offset_mm);
     try std.testing.expectEqual(@as(f64, 0), fence.via_dia);
     try std.testing.expectEqualStrings("", fence.net);

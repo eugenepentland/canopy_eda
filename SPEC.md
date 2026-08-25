@@ -2073,8 +2073,9 @@ existing design. The first row uses the resolved edge gap; each later row is one
 effective pitch farther outward. Effective pitch is the authored/derived pitch
 raised to the same copper and hole-to-hole manufacturing floor used along a row,
 so adjacent rows are buildable by construction. The RF crossing shadow reserves
-the full outer-row corridor before routing, and solder-mask relief extends over
-the outermost row.
+the full outer-row corridor before routing. Solder-mask relief extends over every
+row by default; `(mask-layers N)` limits that derived opening to the N innermost
+rows without changing the generated fence or its routing reservation.
 
 The generator reads a solved placement plus a saved layout's persisted copper.
 **A fence wraps copper, not centrelines.** Per fenced net, `placement/via_guide`
@@ -2147,6 +2148,7 @@ ring of identical violations.
 
 - a fence pitch derives a tenth of the guided wavelength from the class max-freq
 - (fence (layers N)) marches N concentric closed rows one effective pitch apart while the default remains one
+- (fence (mask-layers N)) changes only mask reach and leaves generated fence geometry intact
 - a fence with neither pitch nor max-freq resolves to no spacing so the generator can report it unresolvable
 - a fence offset is the gap from the net's copper edge to the fence via's copper edge, derived from the class clearance and a fabrication margin
 - the guide contour is the level set at one distance from the net's copper, so a straight trace traces a racetrack that distance from its edge
@@ -3236,6 +3238,7 @@ no surface can disagree about where the board ships bare.
 
 - a fenced max-freq class's default band widens to expose the fence row's annular rings
 - a layered fence's default band reaches the outermost row
+- a layered fence can limit its derived mask opening to the innermost N rows
 - a max-freq class without a (fence …) widens the same way, because it is a fence target too and its generated fence row must untent
 - an exposed run shorter than one millimetre stays tented
 - a pad beside an exposed RF trace does not interrupt the trace relief centreline
@@ -4761,7 +4764,10 @@ Public functions: analyze
 - net-class min-bend-radius sub-form captures the per-class bend-radius floor multiple
 - net-class mask-relief sub-form captures the pullback and an explicit zero keeps the class tented
 - net-class fence sub-form captures its pitch, layer count, offset, via and stitch net, and a bare (fence) opts in at every default
+- net-class fence sub-form captures a mask-open layer count independently of its generated layer count
 - a fence layer count outside 1–32 or not a whole number is warned and keeps the one-row default
+- a fence mask-layer count outside 1–32 or not a whole number is warned and keeps the expose-all default
+- a fence mask-layer count above the generated layer count is warned and clamped
 - net-class keepout sub-form captures the halo distance and leaves its escape radius at the inherit sentinel unless authored
 - an unknown child of a net-class fence or keepout records a lint warning naming it
 - design-rules form captures the board-level default rules on the design block

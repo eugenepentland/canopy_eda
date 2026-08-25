@@ -195,7 +195,7 @@ pub const mask_untent_slack_mm: f64 = 0.3;
 /// blob so the two untent the same vias.
 pub fn maskUntentReachMm(rule: NetRule, design: DesignRules) f64 {
     const via = resolvedFenceVia(rule, design);
-    return fenceOuterEdgeMm(rule, design) - via.dia / 2 + mask_untent_slack_mm;
+    return fenceMaskOuterEdgeMm(rule, design) - via.dia / 2 + mask_untent_slack_mm;
 }
 
 /// The centre-to-centre spacing (mm) two adjacent fence vias of geometry `via`
@@ -226,16 +226,34 @@ pub fn effectivePitchMm(rule: NetRule, design: DesignRules) f64 {
 /// clamp keeps hand-built/test rules with a zero field on the legacy one-row
 /// behavior instead of letting unsigned subtraction underflow.
 pub fn resolvedLayers(rule: NetRule) u8 {
-    return @max(1, rule.rf.fence.layers);
+    return @max(1, rule.rf.fence.rows.generated);
+}
+
+/// Number of innermost fence rows the derived RF solder-mask opening reaches.
+/// An omitted `(mask-layers …)` exposes every generated row, preserving the
+/// behavior that predates selective fence-row tenting.
+fn resolvedMaskLayers(rule: NetRule) u8 {
+    const layers = resolvedLayers(rule);
+    const asked = rule.rf.fence.rows.mask_open;
+    return if (asked == 0) layers else @min(asked, layers);
+}
+
+fn outerEdgeForRowsMm(rule: NetRule, design: DesignRules, rows: u8) f64 {
+    const via = resolvedFenceVia(rule, design);
+    const extra_rows: f64 = @floatFromInt(@max(1, rows) - 1);
+    return resolvedGapMm(rule, design) + via.dia + extra_rows * effectivePitchMm(rule, design);
 }
 
 /// Outermost fence copper edge measured from the fenced net's copper edge.
 /// The first row consumes `gap + via diameter`; later rows are one effective
 /// pitch farther outward apiece.
 pub fn fenceOuterEdgeMm(rule: NetRule, design: DesignRules) f64 {
-    const via = resolvedFenceVia(rule, design);
-    const extra_rows: f64 = @floatFromInt(resolvedLayers(rule) - 1);
-    return resolvedGapMm(rule, design) + via.dia + extra_rows * effectivePitchMm(rule, design);
+    return outerEdgeForRowsMm(rule, design, resolvedLayers(rule));
+}
+
+/// Outermost copper edge of the fence rows selected for mask exposure.
+fn fenceMaskOuterEdgeMm(rule: NetRule, design: DesignRules) f64 {
+    return outerEdgeForRowsMm(rule, design, resolvedMaskLayers(rule));
 }
 
 /// Does `via` satisfy the two DRC rules that judge a via on its OWN geometry
@@ -1437,6 +1455,7 @@ test "a fenced trace is fenced by an evenly spaced closed guide" {
 }
 
 // spec: placement/via-fence - (fence (layers N)) marches N concentric closed rows one effective pitch apart while the default remains one
+// spec: placement/via-fence - (fence (mask-layers N)) changes only mask reach and leaves generated fence geometry intact
 test "a layered fence marches concentric rows at the effective pitch" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
@@ -1448,7 +1467,7 @@ test "a layered fence marches concentric rows at the effective pitch" {
         .{ .name = "GND", .pins = &.{} },
     };
     const rules = [_]NetRule{
-        .{ .rf = .{ .fence = .{ .declared = true, .pitch_mm = 1, .layers = 2, .offset_mm = 0.6 } } },
+        .{ .rf = .{ .fence = .{ .declared = true, .pitch_mm = 1, .rows = .{ .generated = 2 }, .offset_mm = 0.6 } } },
         .{},
     };
     const tracks = [_]router.Track{straight(10, 20, 10)};
@@ -1468,6 +1487,14 @@ test "a layered fence marches concentric rows at the effective pitch" {
     try testing.expect(yRange(res.sites)[1] > 11.8);
     try testing.expectApproxEqAbs(@as(f64, 1.0), effectivePitchMm(rules[0], DesignRules{}), 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 2.0), fenceOuterEdgeMm(rules[0], DesignRules{}), 1e-12);
+
+    var selective = rules[0];
+    selective.rf.fence.rows.mask_open = 1;
+    try testing.expectEqual(@as(u8, 2), resolvedLayers(selective));
+    try testing.expectEqual(@as(u8, 1), resolvedMaskLayers(selective));
+    try testing.expectApproxEqAbs(@as(f64, 2.0), fenceOuterEdgeMm(selective, DesignRules{}), 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 1.0), fenceMaskOuterEdgeMm(selective, DesignRules{}), 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 1.1), maskUntentReachMm(selective, DesignRules{}), 1e-12);
 }
 
 // spec: placement/via-fence - a (max-freq …) RF class is fenced even when it declares no (fence …), its pitch deriving as λg/10 exactly as a bare (fence)'s does

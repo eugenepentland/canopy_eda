@@ -447,7 +447,7 @@ test "the shadow corridor equals via_fence's outermost fence row" {
         .{ .rf = .{ .fence = .{ .declared = true, .via_dia = 0.8 } } }, // authored fence via
         .{ .clearance = 0.25, .via_dia = 0.6, .rf = .{ .fence = .{ .declared = true } } }, // class fallbacks
         .{ .rf = .{ .max_freq_hz = 12e9 } }, // derived fence target, no authored fence
-        .{ .rf = .{ .fence = .{ .declared = true, .pitch_mm = 0.8, .layers = 3 } } },
+        .{ .rf = .{ .fence = .{ .declared = true, .pitch_mm = 0.8, .rows = .{ .generated = 3 } } } },
     };
     for (cases) |rule| {
         var b = board(0, "SPI_SCK");
