@@ -473,16 +473,15 @@ fn writeOutcome(w: *std.Io.Writer, o: Outcome, version: u64) std.Io.Writer.Error
         try w.writeAll(",\"stitch\":");
         try writeJsonStr(w, n.stitch);
         try w.print(
-            ",\"placed\":{d},\"candidates\":{d},\"contours\":{d},\"guide_mm\":{d:.3}," ++
+            ",\"placed\":{d},\"candidates\":{d},\"layers\":{d},\"contours\":{d},\"guide_mm\":{d:.3}," ++
                 "\"pitch_mm\":{d:.4},\"pitch_clamped\":{}," ++
                 "\"gap_mm\":{d:.4},\"guide_dist_mm\":{d:.4}," ++
                 "\"skipped\":{{\"pad\":{d},\"track\":{d},\"via\":{d}," ++
                 "\"keepout\":{d},\"outline\":{d},\"dedup\":{d}}}",
             .{
-                n.placed,          n.march.sites,   n.contours,     n.march.guide_mm,
-                n.march.pitch_mm,  n.march.clamped, n.march.gap_mm, n.march.dist_mm,
-                n.skipped.pad,     n.skipped.track, n.skipped.via,  n.skipped.keepout,
-                n.skipped.outline, n.skipped.dedup,
+                n.placed,         n.march.sites,   n.march.layers,    n.contours,        n.march.guide_mm,
+                n.march.pitch_mm, n.march.clamped, n.march.gap_mm,    n.march.dist_mm,   n.skipped.pad,
+                n.skipped.track,  n.skipped.via,   n.skipped.keepout, n.skipped.outline, n.skipped.dedup,
             },
         );
         if (n.err.len > 0) {
@@ -663,7 +662,7 @@ fn writeFenceFixture(dir: std.Io.Dir) !void {
         \\(design-block "Fence Fixture"
         \\  (import cap)
         \\  (board (size 20 10))
-        \\  (net-class "rf" (width 0.3) (clearance 0.127) (max-freq 12G) (fence)
+        \\  (net-class "rf" (width 0.3) (clearance 0.127) (max-freq 12G) (fence (layers 2))
         \\    (nets "SIG"))
         \\  (instance "C1" (cap "10nF") (pin 1 "SIG") (pin 2 "GND"))
         \\  (instance "C2" (cap "10nF") (pin 1 "SIG") (pin 2 "GND")))
@@ -725,6 +724,7 @@ fn resultFloat(body: []const u8, key: []const u8) ?f64 {
 }
 
 // spec: Web Server - POST /api/pcb-fence/:name lays (and regenerates) the RF ground via fence onto a saved layout's persisted copper — every declared (fence …) or (max-freq …) RF trace — and reports what it placed and skipped
+// spec: Web Server - The fence endpoint reports the resolved layer count for each fenced net
 // spec: Web Server - A fence dry run reports what it would place and writes nothing to the layout
 test "the fence endpoint fences a saved layout, and a dry run writes nothing" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
@@ -745,6 +745,7 @@ test "the fence endpoint fences a saved layout, and a dry run writes nothing" {
     try testing.expect(std.mem.indexOf(u8, dry.body, "\"ground\":\"GND\"") != null);
     try testing.expect(std.mem.indexOf(u8, dry.body, "\"net\":\"SIG\"") != null);
     try testing.expect(std.mem.indexOf(u8, dry.body, "\"pitch_mm\":1.191") != null);
+    try testing.expectEqual(@as(i64, 2), resultInt(dry.body, "layers").?);
     try testing.expect(std.mem.indexOf(u8, dry.body, "\"pitch_clamped\":false") != null);
     // The ring is CLOSED, so its perimeter beats the two 9 mm flanks on their own:
     // the end caps and the corner miters are the difference.

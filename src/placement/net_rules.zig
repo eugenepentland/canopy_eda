@@ -85,8 +85,10 @@ pub const FenceRule = struct {
     /// Resolved `(pitch MM)` via spacing along the trace (0 = derive from
     /// `Rf.max_freq_hz`; see `via_fence.resolvedPitchMm`).
     pitch_mm: f64 = 0,
-    /// Resolved `(offset MM)` centreline-to-via distance (0 = derive from the
-    /// net's width/clearance/via; see `via_fence.resolvedOffsetMm`).
+    /// Resolved `(layers N)` concentric row count (default 1).
+    layers: u8 = 1,
+    /// Resolved `(offset MM)` copper-edge gap (0 = derive from the net's
+    /// clearance; see `via_fence.resolvedGapMm`).
     offset_mm: f64 = 0,
     /// Resolved fence-via copper diameter, mm (0 = inherit the net's own via,
     /// else the board design rules; see `via_fence.resolvedFenceVia`).
@@ -282,6 +284,7 @@ fn mergeFenceProfile(out: *NetRule, p: ClassProfileDecl, st: *FenceMerge) void {
         out.rf.fence = .{
             .declared = true,
             .pitch_mm = f.pitch_mm,
+            .layers = f.layers,
             .offset_mm = f.offset_mm,
             .via_dia = f.via_dia,
             .via_drill = f.via_drill,
@@ -790,7 +793,7 @@ test "a destination fence declaration replaces the module's fence outright" {
         .nets = &.{"RFIN"},
         .rf = .{
             .max_freq_hz = 12e9,
-            .fence = .{ .declared = true, .pitch_mm = 2.0, .offset_mm = 0.9, .via_dia = 0.5, .net = "AGND" },
+            .fence = .{ .declared = true, .pitch_mm = 2.0, .layers = 3, .offset_mm = 0.9, .via_dia = 0.5, .net = "AGND" },
         },
     }};
     var child = DesignBlock{
@@ -831,6 +834,7 @@ test "a destination fence declaration replaces the module's fence outright" {
     const fence = rules[0].rf.fence;
     try std.testing.expect(fence.declared);
     try std.testing.expectEqual(@as(f64, 1.0), fence.pitch_mm);
+    try std.testing.expectEqual(@as(u8, 1), fence.layers);
     try std.testing.expectEqual(@as(f64, 0), fence.offset_mm);
     try std.testing.expectEqual(@as(f64, 0), fence.via_dia);
     try std.testing.expectEqualStrings("", fence.net);

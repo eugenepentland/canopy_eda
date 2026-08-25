@@ -2796,9 +2796,11 @@ src/placement/via_fence.zig::Skips struct_
 src/placement/via_fence.zig::anyFenceable | fn anyFenceable(placement: optimizer.Placement) bool
 src/placement/via_fence.zig::assumed_er value
 src/placement/via_fence.zig::c_mm_per_s value
+src/placement/via_fence.zig::effectivePitchMm | fn effectivePitchMm(rule: NetRule, design: DesignRules) f64
 src/placement/via_fence.zig::err_no_ground value
 src/placement/via_fence.zig::err_unresolvable_pitch value
 src/placement/via_fence.zig::err_via_unbuildable value
+src/placement/via_fence.zig::fenceOuterEdgeMm | fn fenceOuterEdgeMm(rule: NetRule, design: DesignRules) f64
 src/placement/via_fence.zig::fenceable | fn fenceable(rule: NetRule) bool
 src/placement/via_fence.zig::fromStr | fn fromStr(s: []const u8) ?Mode
 src/placement/via_fence.zig::generate | fn generate(arena: std.mem.Allocator, in: Input) std.mem.Allocator.Error!Result
@@ -2811,6 +2813,7 @@ src/placement/via_fence.zig::offset_margin_mm value
 src/placement/via_fence.zig::pitch_wavelength_divisor value
 src/placement/via_fence.zig::resolvedFenceVia | fn resolvedFenceVia(rule: NetRule, design: DesignRules) FenceVia
 src/placement/via_fence.zig::resolvedGapMm | fn resolvedGapMm(rule: NetRule, design: DesignRules) f64
+src/placement/via_fence.zig::resolvedLayers | fn resolvedLayers(rule: NetRule) u8
 src/placement/via_fence.zig::resolvedPitchMm | fn resolvedPitchMm(rule: NetRule) f64
 src/placement/via_fence.zig::total | fn total(self: Skips) usize
 src/placement/via_fence.zig::viaBuildable | fn viaBuildable(via: FenceVia, design: DesignRules) bool

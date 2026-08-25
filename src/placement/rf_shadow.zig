@@ -70,6 +70,11 @@ pub const via_mult: f64 = 12.0;
 /// Mirrors `via_fence.offset_margin_mm` — see `corridorMm` for why the two
 /// formulas are replicated here rather than imported.
 const fence_margin_mm: f64 = 0.1;
+/// Mirrors the wavelength defaults in `via_fence.zig`; kept local because this
+/// router-side module cannot import the post-route fence generator.
+const c_mm_per_s: f64 = 299792458000;
+const assumed_er: f64 = 4.4;
+const pitch_wavelength_divisor: f64 = 10;
 
 /// The per-run shadow state the router carries. Inert by default: with no lanes
 /// every query short-circuits on a length and the cost model is byte-identical to
@@ -353,7 +358,8 @@ pub fn widthOf(placement: optimizer.Placement, net_i: usize) f64 {
 }
 
 /// The fence corridor width (mm) for a fenced class: resolved gap + fence via
-/// diameter. See `widthOf` for the source-of-truth note.
+/// diameter, plus one effective pitch for every additional concentric row.
+/// See `widthOf` for the source-of-truth note.
 fn corridorMm(rule: optimizer.NetRule, design: optimizer.DesignRules) f64 {
     const gap = if (rule.rf.fence.offset_mm > 0)
         rule.rf.fence.offset_mm
@@ -362,7 +368,21 @@ fn corridorMm(rule: optimizer.NetRule, design: optimizer.DesignRules) f64 {
     const dia = if (rule.rf.fence.via_dia > 0)
         rule.rf.fence.via_dia
     else if (rule.via_dia > 0) rule.via_dia else design.via_dia;
-    return gap + dia;
+    const drill = if (rule.rf.fence.via_drill > 0)
+        rule.rf.fence.via_drill
+    else if (rule.via_drill > 0) rule.via_drill else design.via_drill;
+    const asked_pitch = if (rule.rf.fence.pitch_mm > 0)
+        rule.rf.fence.pitch_mm
+    else if (rule.rf.max_freq_hz > 0)
+        c_mm_per_s / (rule.rf.max_freq_hz * @sqrt(assumed_er)) / pitch_wavelength_divisor
+    else
+        0;
+    const pitch = if (asked_pitch > 0)
+        @max(asked_pitch, @max(dia + design.clearance, drill + design.hole_to_hole))
+    else
+        0;
+    const extra_rows: f64 = @floatFromInt(@max(1, rule.rf.fence.layers) - 1);
+    return gap + dia + extra_rows * pitch;
 }
 
 /// The net-indexed corridor table `State.nets` carries, or empty when no net
@@ -440,6 +460,14 @@ test "the shadow corridor width resolves per class from the fence, else the keep
         .{},
     };
     try testing.expectApproxEqAbs(@as(f64, 0.85), widthOf(fixture(&three_nets, &authored, design), 0), 1e-12);
+
+    // Additional layers reserve their actual generated row pitch too.
+    const layered = [_]optimizer.NetRule{
+        .{ .rf = .{ .fence = .{ .declared = true, .pitch_mm = 1.0, .layers = 3, .offset_mm = 0.25, .via_dia = 0.6 } } },
+        .{},
+        .{},
+    };
+    try testing.expectApproxEqAbs(@as(f64, 2.85), widthOf(fixture(&three_nets, &layered, design), 0), 1e-12);
 
     // A max-freq class is the same derived fence target even without an
     // authored (fence), and a wider explicit halo can only expand it.

@@ -1418,9 +1418,11 @@ pub const ClassFence = struct {
     /// `(pitch MM)` — via centre-to-centre spacing along the trace.
     /// 0 = derive from the class's `(max-freq …)` as guided-wavelength/10.
     pitch_mm: f64 = 0,
-    /// `(offset MM)` — trace centreline to fence-via centre. 0 = derive from
-    /// the class geometry (half the trace width + clearance + half the via
-    /// diameter + a margin), i.e. the tightest DRC-legal row.
+    /// `(layers N)` — concentric rows of fence vias. One is the legacy/default
+    /// fence; each additional row sits one resolved pitch farther outward.
+    layers: u8 = 1,
+    /// `(offset MM)` — copper-edge to fence-via copper-edge gap. 0 = derive as
+    /// the class clearance plus a fabrication margin.
     offset_mm: f64 = 0,
     /// `(via DIA DRILL)` copper diameter for the fence vias (mm).
     /// 0 = inherit the class's own `(via …)`, else the board design rules.

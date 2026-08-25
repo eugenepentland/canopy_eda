@@ -117,7 +117,7 @@ pub fn reliefMm(rule: optimizer.NetRule, design: optimizer.DesignRules) f64 {
     if (rule.rf.mask_relief_mm >= 0) return rule.rf.mask_relief_mm;
     if (rule.rf.max_freq_hz <= 0) return 0;
     if (via_fence.fenceable(rule))
-        return via_fence.resolvedGapMm(rule, design) + via_fence.resolvedFenceVia(rule, design).dia + design.mask.margin;
+        return via_fence.fenceOuterEdgeMm(rule, design) + design.mask.margin;
     return design.mask.margin;
 }
 
@@ -1149,6 +1149,7 @@ test "through-pad web merges reach both faces and use pad margins" {
 }
 
 // spec: placement/mask-relief - a fenced max-freq class's default band widens to expose the fence row's annular rings
+// spec: placement/mask-relief - a layered fence's default band reaches the outermost row
 // spec: placement/mask-relief - a max-freq class without a (fence …) widens the same way, because it is a fence target too and its generated fence row must untent
 test "fenced default band swallows the fence row" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
@@ -1167,6 +1168,16 @@ test "fenced default band swallows the fence row" {
     // each side of the 0.2 trace ⇒ 0.2 + 2×0.677.
     try testing.expectApproxEqAbs(@as(f64, 1.554), r.strokes[0].widths.opening, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 0.2), r.strokes[0].widths.copper, 1e-9);
+
+    const layered = [_]optimizer.NetRule{
+        .{ .class = .{ .name = "rf" }, .rf = .{ .max_freq_hz = 12e9, .fence = .{ .declared = true, .layers = 2 } } },
+        .{},
+    };
+    placement.rules.net = &layered;
+    const lr = try compute(arena, placement, .{ .tracks = &tracks });
+    const pitch = via_fence.guidedWavelengthMm(12e9) / via_fence.pitch_wavelength_divisor;
+    const layered_opening = 0.2 + 2 * (0.227 + 0.4 + pitch + 0.05);
+    try testing.expectApproxEqAbs(layered_opening, lr.strokes[0].widths.opening, 1e-9);
 
     // A max-freq class WITHOUT a (fence) widens identically: it is a fence
     // target, so the fence the Fence action will generate needs the same

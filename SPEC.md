@@ -445,7 +445,7 @@ Public functions: route, perNetRouted, returnPathViolations, canonicalizeTraceJu
 - each crossing of an RF corridor is judged on its own contiguous span, so one segment crossing several unrelated corridors squarely is not refused for their sum
 - a foreign net crossing a shadowed RF corridor crosses it roughly square instead of running along it
 - ground copper crosses an RF corridor without paying the shadow, so a return path may still follow the trace
-- the router's fence-corridor width agrees with the via-fence generator's own gap and via resolution
+- the router's fence-corridor width agrees with the via-fence generator's outermost resolved row
 - routes corners as 45° diagonals rather than 90° bends
 - straightEscapePair accepts an axis-aligned pad pair that faces along the hop, rejecting a diagonal, a perpendicular-facing, a coincident, or a cross-layer pair
 - LoopRouter measures a real per-leg trace length that detours foreign pads
@@ -2049,10 +2049,10 @@ current outline and declaration, not accumulated as hand-authored copper.
 
 ## placement/via-fence
 
-Public functions: guidedWavelengthMm, resolvedPitchMm, resolvedFenceVia, resolvedGapMm, guideDistMm, minPitchMm, generate (placement/via_guide: trace, perimeter)
+Public functions: guidedWavelengthMm, resolvedPitchMm, resolvedFenceVia, resolvedGapMm, guideDistMm, minPitchMm, effectivePitchMm, resolvedLayers, fenceOuterEdgeMm, generate (placement/via_guide: trace, perimeter)
 
 Spec resolution and on-demand generation for a `(net-class … (fence …))` ground
-via fence: the flanking row of stitching vias an RF class's routed traces get,
+via fence: the concentric rows of stitching vias an RF class's routed traces get,
 generated once placement and routing have settled. Every child of the form is
 optional — a bare `(fence)` is legal — so the parsed spec and the resolved
 `NetRule` both carry "derive me" sentinels, and this layer turns them into
@@ -2067,6 +2067,14 @@ the trace: the same 0.2 mm that clears a 0.3 mm trace buries a via inside a 0.6 
 0402 land. A class with neither an authored pitch nor a max-freq resolves to no
 spacing at all, which is the signal that its fence is unresolvable rather than an
 invitation to guess one.
+
+`(layers N)` selects 1–32 concentric rows and defaults to one, preserving every
+existing design. The first row uses the resolved edge gap; each later row is one
+effective pitch farther outward. Effective pitch is the authored/derived pitch
+raised to the same copper and hole-to-hole manufacturing floor used along a row,
+so adjacent rows are buildable by construction. The RF crossing shadow reserves
+the full outer-row corridor before routing, and solder-mask relief extends over
+the outermost row.
 
 The generator reads a solved placement plus a saved layout's persisted copper.
 **A fence wraps copper, not centrelines.** Per fenced net, `placement/via_guide`
@@ -2138,6 +2146,7 @@ min-drill rule rejects is refused per net with a reason rather than marched into
 ring of identical violations.
 
 - a fence pitch derives a tenth of the guided wavelength from the class max-freq
+- (fence (layers N)) marches N concentric closed rows one effective pitch apart while the default remains one
 - a fence with neither pitch nor max-freq resolves to no spacing so the generator can report it unresolvable
 - a fence offset is the gap from the net's copper edge to the fence via's copper edge, derived from the class clearance and a fabrication margin
 - the guide contour is the level set at one distance from the net's copper, so a straight trace traces a racetrack that distance from its edge
@@ -2175,7 +2184,7 @@ ring of identical violations.
 - anyFenceable answers false for a board whose classes carry neither a fence nor a max-freq
 - in legal mode a fence site outside the board outline or inside its copper-edge clearance is skipped as an outline gap
 - completeness-waiver: empty inputs (a default-constructed rule declares no fence and every helper answers 0 — the no-pitch-no-max-freq test's case)
-- completeness-waiver: large inputs (each resolver is constant-time arithmetic over one rule; the guide field is capped at 8M nodes per net, coarsening its cell rather than growing without bound)
+- completeness-waiver: large inputs (layer count is capped at 32; each resolver is constant-time arithmetic over one rule; each guide field is capped at 8M nodes per net and row, coarsening its cell rather than growing without bound)
 - completeness-waiver: unauthorized access (pure millimetre arithmetic with no endpoint; server-side access control lives in serve/ward_auth)
 - completeness-waiver: i/o failure (no disk or socket — the inputs are an in-memory NetRule and the resolved board DesignRules)
 - completeness-waiver: concurrent access (stateless pure functions over by-value inputs, holding no allocator and no mutable state)
@@ -3226,6 +3235,7 @@ writer, the viewer blob, and the generated sub-circuit silkscreen consume, so
 no surface can disagree about where the board ships bare.
 
 - a fenced max-freq class's default band widens to expose the fence row's annular rings
+- a layered fence's default band reaches the outermost row
 - a max-freq class without a (fence …) widens the same way, because it is a fence target too and its generated fence row must untent
 - an exposed run shorter than one millimetre stays tented
 - a pad beside an exposed RF trace does not interrupt the trace relief centreline
@@ -4750,7 +4760,8 @@ Public functions: analyze
 - net-class diff-pair sub-form flags the class and captures an explicit or default gap
 - net-class min-bend-radius sub-form captures the per-class bend-radius floor multiple
 - net-class mask-relief sub-form captures the pullback and an explicit zero keeps the class tented
-- net-class fence sub-form captures its pitch, offset, via and stitch net, and a bare (fence) opts in at every default
+- net-class fence sub-form captures its pitch, layer count, offset, via and stitch net, and a bare (fence) opts in at every default
+- a fence layer count outside 1–32 or not a whole number is warned and keeps the one-row default
 - net-class keepout sub-form captures the halo distance and leaves its escape radius at the inherit sentinel unless authored
 - an unknown child of a net-class fence or keepout records a lint warning naming it
 - design-rules form captures the board-level default rules on the design block
@@ -6373,6 +6384,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - A moved RF part drops its trace's fence with its copper, because a fence via is invalidated by the net it flanks and not by the ground net it stitches
 - Two vias in the same hole on the same net are one via whatever their provenance tags say, and the first row is the one kept
 - POST /api/pcb-fence/:name lays (and regenerates) the RF ground via fence onto a saved layout's persisted copper — every declared (fence …) or (max-freq …) RF trace — and reports what it placed and skipped
+- The fence endpoint reports the resolved layer count for each fenced net
 - A board whose RF class carries only (max-freq …) — no (fence …) — is still fenced by the endpoint, the pitch deriving as λg/10 and the vias persisting with the flanked net as provenance
 - The fence endpoint accepts a max-freq-only RF board and reports a normal dry run on it, so the Fence action covers RF traces that never spelled (fence) out
 - A fence dry run reports what it would place and writes nothing to the layout

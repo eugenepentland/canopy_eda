@@ -438,8 +438,8 @@ test "the escape exemption is net-gated, so no passer-by threads between two RF 
     try testing.expect(betweenPadsGap(out.tracks, other_net) < halo_mm);
 }
 
-// spec: placement/router - the router's fence-corridor width agrees with the via-fence generator's own gap and via resolution
-test "the shadow corridor equals via_fence's resolved gap plus its fence via" {
+// spec: placement/router - the router's fence-corridor width agrees with the via-fence generator's outermost resolved row
+test "the shadow corridor equals via_fence's outermost fence row" {
     const design = optimizer.DesignRules{ .clearance = 0.15, .via_dia = 0.45, .via_drill = 0.25 };
     const cases = [_]optimizer.NetRule{
         .{ .rf = .{ .fence = .{ .declared = true } } }, // derive gap and via
@@ -447,6 +447,7 @@ test "the shadow corridor equals via_fence's resolved gap plus its fence via" {
         .{ .rf = .{ .fence = .{ .declared = true, .via_dia = 0.8 } } }, // authored fence via
         .{ .clearance = 0.25, .via_dia = 0.6, .rf = .{ .fence = .{ .declared = true } } }, // class fallbacks
         .{ .rf = .{ .max_freq_hz = 12e9 } }, // derived fence target, no authored fence
+        .{ .rf = .{ .fence = .{ .declared = true, .pitch_mm = 0.8, .layers = 3 } } },
     };
     for (cases) |rule| {
         var b = board(0, "SPI_SCK");
@@ -454,7 +455,7 @@ test "the shadow corridor equals via_fence's resolved gap plus its fence via" {
         // `via_fence` is the source of truth; `rf_shadow` replicates the two
         // formulas because it sits BELOW the router that `via_fence` reads. This
         // is the pin that keeps the copy honest.
-        const want = via_fence.resolvedGapMm(rule, design) + via_fence.resolvedFenceVia(rule, design).dia;
+        const want = via_fence.fenceOuterEdgeMm(rule, design);
         var p = b.placement();
         p.rules = .{ .net = &b.rules, .design = design };
         try testing.expectApproxEqAbs(want, rf_shadow.widthOf(p, 0), 1e-12);

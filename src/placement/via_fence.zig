@@ -1,7 +1,7 @@
 //! RF ground via fencing — the spec-resolution layer for a
 //! `(net-class … (fence …))` declaration.
 //!
-//! A fenced class's routed traces get a flanking row of ground stitching vias
+//! A fenced class's routed traces get one or more concentric rows of ground stitching vias
 //! on each side, generated on demand once placement and routing have settled
 //! (never by the autorouter mid-solve). Authors write only what they mean to
 //! pin down: `(fence)` alone is legal, and every child of the form carries a
@@ -194,7 +194,8 @@ pub const mask_untent_slack_mm: f64 = 0.3;
 /// trace's own half-width. Shared by the Gerber mask writer and the viewer
 /// blob so the two untent the same vias.
 pub fn maskUntentReachMm(rule: NetRule, design: DesignRules) f64 {
-    return guideDistMm(rule, design) + mask_untent_slack_mm;
+    const via = resolvedFenceVia(rule, design);
+    return fenceOuterEdgeMm(rule, design) - via.dia / 2 + mask_untent_slack_mm;
 }
 
 /// The centre-to-centre spacing (mm) two adjacent fence vias of geometry `via`
@@ -210,6 +211,31 @@ pub fn maskUntentReachMm(rule: NetRule, design: DesignRules) f64 {
 /// up to it and reports the clamp rather than emitting copper that DRCs.
 pub fn minPitchMm(via: FenceVia, design: DesignRules) f64 {
     return @max(via.dia + design.clearance, via.drill + design.hole_to_hole);
+}
+
+/// The pitch the generator can actually march: the authored/derived pitch
+/// raised to the board's manufacturable via-spacing floor. Zero preserves an
+/// unresolvable pitch so `planFor` can return its useful diagnostic.
+pub fn effectivePitchMm(rule: NetRule, design: DesignRules) f64 {
+    const asked = resolvedPitchMm(rule);
+    if (!(asked > 0)) return 0;
+    return @max(asked, minPitchMm(resolvedFenceVia(rule, design), design));
+}
+
+/// Concrete concentric-row count. Parsed designs are already in 1–32; the
+/// clamp keeps hand-built/test rules with a zero field on the legacy one-row
+/// behavior instead of letting unsigned subtraction underflow.
+pub fn resolvedLayers(rule: NetRule) u8 {
+    return @max(1, rule.rf.fence.layers);
+}
+
+/// Outermost fence copper edge measured from the fenced net's copper edge.
+/// The first row consumes `gap + via diameter`; later rows are one effective
+/// pitch farther outward apiece.
+pub fn fenceOuterEdgeMm(rule: NetRule, design: DesignRules) f64 {
+    const via = resolvedFenceVia(rule, design);
+    const extra_rows: f64 = @floatFromInt(resolvedLayers(rule) - 1);
+    return resolvedGapMm(rule, design) + via.dia + extra_rows * effectivePitchMm(rule, design);
 }
 
 /// Does `via` satisfy the two DRC rules that judge a via on its OWN geometry
@@ -319,6 +345,8 @@ pub const Site = struct {
 /// What one net's march resolved to, and what it drew: the millimetres actually
 /// used plus the guide those millimetres were marched around.
 pub const March = struct {
+    /// Concentric rows requested by `(fence (layers N))` (default 1).
+    layers: u8 = 1,
     /// The pitch marched, i.e. `resolvedPitchMm` raised to `minPitchMm` if it
     /// sat below that floor.
     pitch_mm: f64 = 0,
@@ -952,10 +980,12 @@ fn marchVia(
     pass: *Pass,
     signal: router.Via,
     plan: FencePlan,
+    row: usize,
     rep: *NetReport,
 ) std.mem.Allocator.Error!void {
     const antipad_gap = pass.antipadGap(signal);
-    const from_edge = @max(plan.dist, plan.via.dia / 2 + antipad_gap);
+    const from_edge = @max(plan.dist, plan.via.dia / 2 + antipad_gap) +
+        @as(f64, @floatFromInt(row)) * plan.pitch;
     const radius = signal.dia / 2 + from_edge;
     if (!(radius > 0) or !std.math.isFinite(radius)) return;
 
@@ -984,6 +1014,7 @@ fn marchVia(
 const FencePlan = struct {
     pitch: f64,
     dist: f64,
+    layers: u8 = 1,
     via: FenceVia,
     stitch_i: i32,
     stitch_name: []const u8,
@@ -1034,6 +1065,7 @@ fn planFor(
     const pairwise = placement.rules.clearanceBetween(@intCast(stitch), @intCast(fenced), design.clearance) + offset_margin_mm;
     const gap = if (rule.rf.fence.offset_mm > 0) asked_gap else @max(asked_gap, pairwise);
     rep.march = .{
+        .layers = resolvedLayers(rule),
         .pitch_mm = @max(asked, floor),
         .clamped = floor > asked,
         .gap_mm = gap,
@@ -1042,6 +1074,7 @@ fn planFor(
     return .{
         .pitch = rep.march.pitch_mm,
         .dist = rep.march.dist_mm,
+        .layers = rep.march.layers,
         .via = via,
         .stitch_i = @intCast(stitch),
         .stitch_name = rep.stitch,
@@ -1069,14 +1102,19 @@ fn fenceNet(pass: *Pass, net_i: i32, plan: FencePlan, rep: *NetReport) std.mem.A
     // actually surround the through-via. This makes the electrically critical
     // local return ring the stable geometry and lets the ordinary row yield at
     // their overlap.
-    for (pass.in.vias) |signal| {
-        if (signal.net != net_i) continue;
-        try marchVia(pass, signal, plan, rep);
+    for (0..plan.layers) |row| {
+        for (pass.in.vias) |signal| {
+            if (signal.net != net_i) continue;
+            try marchVia(pass, signal, plan, row, rep);
+        }
     }
 
-    const guide = try via_guide.trace(pass.arena, copper, plan.dist);
-    rep.contours += guide.contours.len;
-    for (guide.contours) |contour| try marchContour(pass, contour, plan, rep);
+    for (0..plan.layers) |row| {
+        const dist = plan.dist + @as(f64, @floatFromInt(row)) * plan.pitch;
+        const guide = try via_guide.trace(pass.arena, copper, dist);
+        rep.contours += guide.contours.len;
+        for (guide.contours) |contour| try marchContour(pass, contour, plan, rep);
+    }
 }
 
 /// Generate the ground via fence for every net whose resolved class declares a
@@ -1396,6 +1434,40 @@ test "a fenced trace is fenced by an evenly spaced closed guide" {
     const gaps = wrapGapRange(res.sites);
     try testing.expect(gaps[1] <= spacing * 1.01);
     try testing.expect(gaps[0] >= spacing * 0.9);
+}
+
+// spec: placement/via-fence - (fence (layers N)) marches N concentric closed rows one effective pitch apart while the default remains one
+test "a layered fence marches concentric rows at the effective pitch" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    var parts = [_]optimizer.Part{};
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "RF", .pins = &.{} },
+        .{ .name = "GND", .pins = &.{} },
+    };
+    const rules = [_]NetRule{
+        .{ .rf = .{ .fence = .{ .declared = true, .pitch_mm = 1, .layers = 2, .offset_mm = 0.6 } } },
+        .{},
+    };
+    const tracks = [_]router.Track{straight(10, 20, 10)};
+    const res = try generate(arena, .{
+        .placement = fixture(&parts, &nets, &rules),
+        .tracks = &tracks,
+        .mode = .all,
+    });
+
+    const rep = res.nets[0];
+    try testing.expectEqual(@as(u8, 2), rep.march.layers);
+    try testing.expectEqual(@as(usize, 2), rep.contours);
+    const inner = 20 + 2 * std.math.pi * 0.95;
+    const outer = 20 + 2 * std.math.pi * 1.95;
+    try testing.expectApproxEqAbs(inner + outer, rep.march.guide_mm, (inner + outer) * 0.01);
+    try testing.expectEqual(rep.march.sites, rep.placed);
+    try testing.expect(yRange(res.sites)[1] > 11.8);
+    try testing.expectApproxEqAbs(@as(f64, 1.0), effectivePitchMm(rules[0], DesignRules{}), 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 2.0), fenceOuterEdgeMm(rules[0], DesignRules{}), 1e-12);
 }
 
 // spec: placement/via-fence - a (max-freq …) RF class is fenced even when it declares no (fence …), its pitch deriving as λg/10 exactly as a bare (fence)'s does
