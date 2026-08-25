@@ -13,6 +13,7 @@
   var MASK_COLOR = "#0c6734", MASK = "rgba(12, 103, 52, 0.84)";
   var SILK = "#f5f3e8";
   var MAX_TEXTURE = 2048, PX_PER_MM = 32, ROUND_HOLE_SEGMENTS = 16;
+  var MECHANICAL_HOLE_MIN_DIAMETER = 1.0;
 
   function deg(d) { return (+d || 0) * Math.PI / 180; }
 
@@ -356,8 +357,12 @@
     }
     (data.parts || []).forEach(function (part) {
       (part.pads || []).forEach(function (pad) {
-        if (!(+pad.drill > 0)) return;
-        var c = padPoint(part, pad, 0, 0), h = { x: c[0], y: c[1], r: +pad.drill / 2, plated: !pad.npth };
+        var drill = +pad.drill;
+        // STEP is a mechanical-fit export. Tiny plated drills and stitch vias
+        // explode the faceted board topology without helping enclosure work;
+        // retain only holes strictly larger than 1 mm (normally mounting).
+        if (!(drill > MECHANICAL_HOLE_MIN_DIAMETER)) return;
+        var c = padPoint(part, pad, 0, 0), h = { x: c[0], y: c[1], r: drill / 2, plated: !pad.npth };
         if (pad.slot_half && (+pad.slot_half[0] || +pad.slot_half[1])) {
           var e = padPoint(part, pad, +pad.slot_half[0], +pad.slot_half[1]);
           var f = padPoint(part, pad, -pad.slot_half[0], -pad.slot_half[1]);
@@ -368,7 +373,9 @@
     });
     var fallback = +(data.rules && data.rules.via_drill) || 0.2;
     (data.vias || []).forEach(function (v) {
-      add({ x: +v.x, y: +v.y, r: Math.max(+v.drill || fallback, 0.01) / 2, plated: true });
+      var drill = +v.drill || fallback;
+      if (!(drill > MECHANICAL_HOLE_MIN_DIAMETER)) return;
+      add({ x: +v.x, y: +v.y, r: drill / 2, plated: true });
     });
     return holes;
   }

@@ -6208,8 +6208,8 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Editable sub-circuit PCB embeds expose the pad aligner's Same X and Same Y controls
 - physical board navigation exposes stable 3D and a read-only assembly workspace
 - the PCB 3D viewer extrudes the physical outline at the authored thickness and mounts bottom-side footprints beneath it
-- the PCB 3D viewer downloads its complete assembled geometry as a self-contained millimetre-based AP242 faceted B-rep STEP model that mechanical CAD tools import as bodies rather than presentation-only tessellation
-- the PCB 3D viewer composites each face's outer copper, soldermask, and silkscreen—including generated sub-circuit, test-point, and pin-1 artwork—into one non-overlapping visible cap and cuts circular drills and slots through the board
+- the PCB 3D viewer downloads its complete assembled geometry as a self-contained millimetre-based, schema-conformant AP242 faceted B-rep STEP model that preserves each source solid, substitutes conservative mechanical envelopes retaining placed bounding extents for over-tessellated small vendor meshes, batches geometry into independent face-budgeted product roots, omits invalid open vendor fragments rather than letting them hide closed solids, and imports as bodies rather than presentation-only tessellation
+- the PCB 3D viewer composites each face's outer copper, soldermask, and silkscreen—including generated sub-circuit, test-point, and pin-1 artwork—into one non-overlapping visible canvas cap; the STEP solid carries green top/bottom faces and brown substrate walls, and only mechanical drills strictly larger than 1 mm are cut through the board
 - exposed RF copper on both board faces uses the same swept taper polygons in Assembly and the PCB 3D viewer
 - the retired /pcb-route-lab page 302-redirects to the /pcb-layout page for the same design
 - assembly model bodies load from persistent calibrated PNGs and render STEP only to populate a missing or stale filesystem cache entry

@@ -242,50 +242,122 @@
   }
 
   // ── AP242 faceted B-rep STEP export ───────────────────────────────
+  // CAD importers can exhaust their tessellation budget on an assembly made
+  // from tens of thousands of tiny planar faces. Keep dimensionally
+  // significant geometry exact, but replace dense vendor meshes smaller than
+  // 10 mm with a mechanical envelope retaining their placed extents.
+  var STEP_PROXY_FACE_THRESHOLD = 32, STEP_PROXY_MAX_SIZE_MM = 10;
+
   function stepFileName() {
     return window.PCBStepExport.fileName(DATA.name);
   }
 
-  // Flatten one logical scene object to world-space triangle buffers.  The
-  // writer welds face-boundary duplicates and splits disconnected solids.
-  function collectStepBody(group, name) {
-    if (!group) return null;
-    var points = [], triangles = [], v = new THREE.Vector3();
+  function stepMaterialColor(material) {
+    if (!material || !material.color) return null;
+    return [material.color.r, material.color.g, material.color.b];
+  }
+
+  function sameStepColor(a, b) {
+    if (!a || !b) return a === b;
+    return Math.abs(a[0] - b[0]) < 1e-9 && Math.abs(a[1] - b[1]) < 1e-9 && Math.abs(a[2] - b[2]) < 1e-9;
+  }
+
+  function triangleStepColor(obj, offset) {
+    var materialIndex = 0, groups = (obj.geometry && obj.geometry.groups) || [];
+    for (var i = 0; i < groups.length; i++) {
+      if (offset >= groups[i].start && offset < groups[i].start + groups[i].count) {
+        materialIndex = groups[i].materialIndex || 0;
+        break;
+      }
+    }
+    var material = Array.isArray(obj.material) ? obj.material[materialIndex] : obj.material;
+    return stepMaterialColor(material);
+  }
+
+  function stepProxyBox(obj, name, meshIndex, position, triangleCount) {
+    if (triangleCount <= STEP_PROXY_FACE_THRESHOLD || /(^|\/)(?:J|MK)\d/.test(name)) return null;
+    var min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity], v = new THREE.Vector3();
+    for (var i = 0; i < position.count; i++) {
+      v.fromBufferAttribute(position, i).applyMatrix4(obj.matrixWorld);
+      var values = [v.x, v.y, v.z];
+      for (var axis = 0; axis < 3; axis++) {
+        min[axis] = Math.min(min[axis], values[axis]); max[axis] = Math.max(max[axis], values[axis]);
+      }
+    }
+    var largest = Math.max(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
+    if (!(largest < STEP_PROXY_MAX_SIZE_MM)) return null;
+    var corners = [
+      [min[0], min[1], min[2]], [max[0], min[1], min[2]],
+      [max[0], max[1], min[2]], [min[0], max[1], min[2]],
+      [min[0], min[1], max[2]], [max[0], min[1], max[2]],
+      [max[0], max[1], max[2]], [min[0], max[1], max[2]]
+    ];
+    var points = corners.map(function (point) { return point.slice(); });
+    return {
+      name: name + " mesh " + meshIndex + " mechanical envelope", points: points,
+      triangles: [
+        [0, 2, 1], [0, 3, 2], [4, 5, 6], [4, 6, 7],
+        [0, 1, 5], [0, 5, 4], [1, 2, 6], [1, 6, 5],
+        [2, 3, 7], [2, 7, 6], [3, 0, 4], [3, 4, 7]
+      ],
+      color: stepMaterialColor(Array.isArray(obj.material) ? obj.material[0] : obj.material)
+    };
+  }
+
+  // Preserve every source mesh as its own candidate solid.  Flattening all
+  // children of a package into one vertex pool welds merely touching package,
+  // lead and pad bodies together and turns valid vendor solids non-manifold.
+  // The writer may still split disconnected islands inside one source mesh.
+  function collectStepMeshes(group, name) {
+    if (!group) return [];
+    var out = [], v = new THREE.Vector3(), meshIndex = 0;
     group.traverse(function (obj) {
       if (!obj.isMesh || (obj.userData && obj.userData.pcb3dKind === "surfaces")) return;
       var geometry = obj.geometry;
       var position = geometry && geometry.getAttribute && geometry.getAttribute("position");
       if (!position || position.count < 3) return;
-      var base = points.length;
+      var index = geometry.index, triangleCount = Math.floor((index ? index.count : position.count) / 3);
+      var ordinal = ++meshIndex, proxy = stepProxyBox(obj, name, ordinal, position, triangleCount);
+      if (proxy) { out.push(proxy); return; }
+      var points = [], triangles = [], triangleColors = [];
       for (var i = 0; i < position.count; i++) {
         v.fromBufferAttribute(position, i).applyMatrix4(obj.matrixWorld);
         points.push([v.x, v.y, v.z]);
       }
-      var index = geometry.index;
       if (index) {
         for (var j = 0; j + 2 < index.count; j += 3) {
-          triangles.push([base + index.getX(j), base + index.getX(j + 1), base + index.getX(j + 2)]);
+          triangles.push([index.getX(j), index.getX(j + 1), index.getX(j + 2)]);
+          triangleColors.push(triangleStepColor(obj, j));
         }
       } else {
-        for (var k = 0; k + 2 < position.count; k += 3) triangles.push([base + k, base + k + 1, base + k + 2]);
+        for (var k = 0; k + 2 < position.count; k += 3) {
+          triangles.push([k, k + 1, k + 2]);
+          triangleColors.push(triangleStepColor(obj, k));
+        }
       }
+      if (!triangles.length) return;
+      var uniform = triangleColors[0] || stepMaterialColor(Array.isArray(obj.material) ? obj.material[0] : obj.material);
+      var mixed = triangleColors.some(function (color) { return !sameStepColor(color, uniform); });
+      out.push({
+        name: name + " mesh " + ordinal, points: points, triangles: triangles,
+        color: mixed ? null : uniform, triangleColors: mixed ? triangleColors : null
+      });
     });
-    return triangles.length ? { name: name, points: points, triangles: triangles } : null;
+    return out;
   }
 
   function collectStepBodies() {
-    var out = [], body;
+    var out = [];
     scene.updateMatrixWorld(true);
     // Visibility checkboxes are viewing aids, not manufacturing selections: a
     // hidden layer remains part of the downloaded physical assembly.
-    body = collectStepBody(boardGroup, "PCB"); if (body) out.push(body);
+    out.push.apply(out, collectStepMeshes(boardGroup, "PCB"));
     partGroups.forEach(function (group, i) {
       var p = (DATA.parts || [])[i] || {};
-      body = collectStepBody(group, p.ref || p.fp || ("Component " + (i + 1)));
-      if (body) out.push(body);
+      out.push.apply(out, collectStepMeshes(group, p.ref || p.fp || ("Component " + (i + 1))));
     });
     (heatsinkGroup.children || []).forEach(function (child, i) {
-      body = collectStepBody(child, "Heatsink " + (i + 1)); if (body) out.push(body);
+      out.push.apply(out, collectStepMeshes(child, "Heatsink " + (i + 1)));
     });
     return out;
   }
@@ -564,12 +636,11 @@
     axes = buildAxisGizmo(8); scene.add(axes); // labeled +X/+Y/+Z arrows + origin dot
 
     // ExtrudeGeometry assigns material 0 to its front/back caps and material 1
-    // to every outer and drill wall. The textured ShapeGeometry meshes are the
-    // real visible caps, so suppress material 0 completely instead of stacking
-    // two surfaces a few microns apart. Brown FR-4 sidewalls also make bores
-    // legible through the green mask and copper annulus.
-    boardCapMat = new THREE.MeshBasicMaterial({ visible: false });
-    boardEdgeMat = new THREE.MeshStandardMaterial({ color: surface.maskColor, metalness: 0.03, roughness: 0.95 });
+    // to every outer and drill wall. The canvas meshes remain the only browser-
+    // visible caps, but the hidden physical caps carry green mask colour into
+    // STEP while the walls retain the brown FR-4 substrate colour.
+    boardCapMat = new THREE.MeshBasicMaterial({ color: surface.maskColor, visible: false });
+    boardEdgeMat = new THREE.MeshStandardMaterial({ color: 0x6f5529, metalness: 0.03, roughness: 0.95 });
 
     boardGroup = new THREE.Group();
     partsGroup = new THREE.Group();

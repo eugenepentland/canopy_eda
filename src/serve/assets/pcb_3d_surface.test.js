@@ -38,6 +38,27 @@ function triangleCovers(geometry, x, y, z) {
   return false;
 }
 
+const mechanicalHoles = PCB3DSurface.collectHoles({
+  parts: [{
+    x: 0, y: 0, rot: 0, side: "top",
+    pads: [
+      { x: 2, y: 2, drill: 0.2 },
+      { x: 4, y: 2, drill: 0.95 },
+      { x: 6, y: 2, drill: 1.0 },
+      { x: 8, y: 2, drill: 1.01 },
+      { x: 10, y: 2, drill: 3.0, npth: true },
+    ],
+  }],
+  rules: { via_drill: 0.2 },
+  vias: [
+    { x: 12, y: 2, drill: 0.2 },
+    { x: 14, y: 2, drill: 1.5 },
+  ],
+}, [[0, 0], [20, 0], [20, 10], [0, 10]]);
+assert.deepEqual(mechanicalHoles.map((hole) => [hole.x, hole.r * 2]), [
+  [8, 1.01], [10, 3], [14, 1.5],
+], "only drills strictly larger than 1 mm belong in the mechanical model");
+
 const holes = [
   { x: 5, y: 5, r: 1 },
   { x: 12, y: 5, x2: 15, y2: 5, r: 0.75 },
@@ -59,4 +80,4 @@ for (const hole of holes) {
     "the substrate top cap must leave the drill center empty");
 }
 
-console.log("PCB 3D surface geometry: round and slotted drills remain open");
+console.log("PCB 3D surface geometry: mechanical drills remain open and electrical drills are omitted");
