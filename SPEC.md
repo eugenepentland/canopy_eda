@@ -6130,6 +6130,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The /pcb-layout saved-version navigator sits inside Autorouter, immediately after the route controls
 - ?layout=<name> shows that saved layout verbatim, outranking the starred default, while ?refine= re-solves from it
 - A ?layout= name matching no saved layout is a 404 that lists the names that do exist
+- A /pcb-layout design that exists but fails to parse or evaluate returns a compiler-style build-error page with file, line, column, failing source line/caret when available, and the evaluator message; only a genuinely unknown design/module name returns the not-found message
 - The fab-readiness report and the fab package endpoints resolve ?layout=<name> to that named saved row and 404 an unknown name, never silently reporting a different board
 - Every block keeps many named layouts, and the saved-layouts panel links each one by its own ?layout= permalink
 - The /pcb-layout saved-version sidebar renames and deletes any selected named layout, rejecting duplicate names and stale revisions

@@ -78,6 +78,7 @@ const font5x7 = @import("../font5x7.zig");
 const png_mod = @import("../png.zig");
 const assets_css = @import("assets_css.zig");
 const pages_tmpl = @import("templates/pages.zig");
+const diag_format = @import("diag_format.zig");
 const serve_root = @import("../serve.zig");
 const route_plan = @import("route_plan.zig");
 const subcircuit_route = @import("subcircuit_route.zig");
@@ -868,6 +869,68 @@ fn refuse(res: ?*httpz.Response, status: u16, body: []const u8) ?[]const u8 {
     return null;
 }
 
+/// Render the evaluator diagnostic left behind by a failed design load.
+/// Null means no source-located failure was recorded, which is how the caller
+/// distinguishes a genuinely unknown design/module name from a broken one.
+fn renderBlockLoadDiagnostic(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    eval: *const Evaluator,
+) HandlerError!?[]const u8 {
+    if (eval.last_error == null) return null;
+    const source_path = paths.designSourcePath(allocator, project_dir, name) catch return null;
+    defer allocator.free(source_path);
+    const d = try diag_format.load(allocator, source_path, "BuildError", eval.last_error);
+    return try diag_format.renderErrorPage(allocator, name, d);
+}
+
+// spec: Web Server - A /pcb-layout design that exists but fails to parse or evaluate returns a compiler-style build-error page with file, line, column, failing source line/caret when available, and the evaluator message; only a genuinely unknown design/module name returns the not-found message
+test "PCB page load failure identifies the imported module and source location" {
+    // Evaluator source/AST storage follows the project's arena-lifetime
+    // convention; keep the fixture under one arena so the leak-checking test
+    // allocator sees the complete lifetime end at deinit.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    defer allocator.free(project_dir);
+
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    try tmp.dir.createDirPath(std.testing.io, "lib/modules");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/demo.sexp",
+        .data = "(import broken-module)\n(design-block \"Demo\")\n",
+    });
+    // The regression fixture: an import path exists but contains no parseable
+    // module, so evaluation fails after resolving the design name itself.
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/modules/broken-module.sexp",
+        .data = "",
+    });
+
+    const source_path = try paths.designSourcePath(allocator, project_dir, "demo");
+    defer allocator.free(source_path);
+    var eval = Evaluator.init(allocator, project_dir);
+    defer eval.deinit();
+    try std.testing.expectError(error.ImportError, eval.evalFile(source_path));
+
+    const html = (try renderBlockLoadDiagnostic(allocator, project_dir, "demo", &eval)) orelse
+        return error.TestExpectedDiagnostic;
+    defer allocator.free(html);
+    try std.testing.expect(std.mem.indexOf(u8, html, "Build error — demo") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "cannot import 'broken-module'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "src/demo.sexp:1:9") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "(import broken-module)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "<span class=\"caret\">") != null);
+
+    var missing_eval = Evaluator.init(allocator, project_dir);
+    defer missing_eval.deinit();
+    try std.testing.expect((try renderBlockLoadDiagnostic(allocator, project_dir, "not-there", &missing_eval)) == null);
+}
+
 /// Render the page body, or null when a guard refused (the status is written
 /// into `res` when there is one). Split out of the handler so the boot warm-up
 /// can pre-render a page with no live request: a null `req` reads through every
@@ -888,8 +951,22 @@ fn renderLayoutPage(
     const name = job.name;
     const eval = job.eval;
     const module_res_out = job.module_res_out;
-    const block: *env_mod.DesignBlock = resolveBlock(ctx.allocator, ctx.project_dir, name, eval, module_res_out) orelse
-        return refuse(res, 500, no_block_msg);
+    const block: *env_mod.DesignBlock = resolveBlock(ctx.allocator, ctx.project_dir, name, eval, module_res_out) orelse {
+        // A source file that exists but failed to parse/evaluate is not a
+        // missing design. Preserve the evaluator's source-located diagnostic
+        // so the PCB page identifies the failing form/import just like the
+        // schematic page and CLI do. A genuinely unknown name has no
+        // diagnostic and remains the terse not-found response.
+        if (try renderBlockLoadDiagnostic(ctx.allocator, ctx.project_dir, name, eval)) |html| {
+            if (res) |r| {
+                r.status = 500;
+                r.content_type = .HTML;
+                r.body = html;
+            }
+            return null;
+        }
+        return refuse(res, 404, no_block_msg);
+    };
     const module_res = module_res_out.*;
     // A `?sub=<slug>` request scopes the layout to a single sub-block — the
     // schematic page's per-sub-block preview — so only that sub-block's parts
