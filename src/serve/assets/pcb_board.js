@@ -4799,8 +4799,10 @@ function reviewAreaLayerNames(q,L){var out=[];
 function reviewAreaSpansStack(q){return !!q&&Array.isArray(q.layers)&&q.layers.length>=STACK.length;}
 function reviewAreaLayerName(q,L){
  return reviewAreaSpansStack(q)?"All layers":reviewAreaLayerNames(q,L).join(", ");}
-function reviewBoardPoints(){var o=PCB.outline,pts=o&&o.pts&&o.pts.length?o.pts:(PCB.board_poly||null),out=[];
+function reviewBoardPoints(){
  if(CAM_REVIEW&&PCB.cam.profile&&PCB.cam.profile.length>=3)return PCB.cam.profile;
+ var o=PCB.outline,geom=o?outlineFilletGeom(o):null,
+  pts=geom&&geom.points&&geom.points.length>=3?geom.points:(o&&o.pts&&o.pts.length?o.pts:(PCB.board_poly||null)),out=[];
  if(pts&&pts.length>=3)pts.forEach(function(p){var q=reviewPoint(p);if(q)out.push(q);});
  if(out.length>=3)return out;var b=o||PCB.board;if(!b||!(b.w>0)||!(b.h>0))return [];
  return [[b.x,b.y],[b.x+b.w,b.y],[b.x+b.w,b.y+b.h],[b.x,b.y+b.h]];}

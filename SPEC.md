@@ -6241,6 +6241,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - assembly part and BOM selections highlight only placements on the currently viewed board face and retarget when that face is switched
 - assembly review hides scores, DRC, and clearance, loads 3D models only on request, preserves board appearance when component picks update the sidebar, and retains middle-pan and scene-only orientation
 - assembly review derives bare via copper only by clipping it through mask-opening geometry, including the exact authored-width board-edge band
+- Before its asynchronous CAM profile arrives, Assembly preserves the saved outline's native arcs instead of joining their endpoints as chamfers
 - assembly sidebar selections sit beside their row without scrolling a list the row is already visible in, and omit the copper focus report
 - assembly parts, BOM lines, and selections link every datasheet their components declare that is present under lib/datasheets/
 - the assembly workspace opens on its parts list, leaving the guide panel one tab click or a deep link away

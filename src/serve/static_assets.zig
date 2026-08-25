@@ -877,6 +877,7 @@ test "PCB review carries the physical board paint pipeline" {
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "var seq=PHYSICAL_REVIEW?REVIEW_STAGES:PAINT_STAGES") != null);
 }
 
+// spec: Web Server - Before its asynchronous CAM profile arrives, Assembly preserves the saved outline's native arcs instead of joining their endpoints as chamfers
 // spec: Web Server - The Assembly board substrate paints parsed Gerber/Excellon operations instead of rebuilding fabrication artwork from browser fonts and placement objects
 // spec: Web Server - Assembly layer controls independently toggle face copper, every physical inner copper layer, solder mask, paste, silkscreen, drills, board outline, and component overlays
 // spec: Web Server - Assembly paints the closest enabled copper film from the viewed face bright gold and every enabled film behind it dim gold
@@ -890,6 +891,7 @@ test "Assembly review paints ordered CAM bytes with independent layer visibility
         .{ .bytes = pcb_board_js, .marker = "if(camVisible(\"components\")){paintParts" },
         .{ .bytes = pcb_board_js, .marker = "eda-pcb-cam-visibility" },
         .{ .bytes = pcb_board_js, .marker = "PCB.cam.profile" },
+        .{ .bytes = pcb_board_js, .marker = "geom=o?outlineFilletGeom(o):null" },
         .{ .bytes = assembly_debug_js, .marker = "function applyCamLayers" },
         .{ .bytes = assembly_debug_js, .marker = "data-cam-layer" },
         .{ .bytes = assembly_debug_js, .marker = "assembly-cam-layers:" },
