@@ -891,7 +891,9 @@ test "Assembly review paints ordered CAM bytes with independent layer visibility
         .{ .bytes = pcb_board_js, .marker = "if(camVisible(\"components\")){paintParts" },
         .{ .bytes = pcb_board_js, .marker = "eda-pcb-cam-visibility" },
         .{ .bytes = pcb_board_js, .marker = "PCB.cam.profile" },
-        .{ .bytes = pcb_board_js, .marker = "geom=o?outlineFilletGeom(o):null" },
+        .{ .bytes = pcb_board_js, .marker = "function physicalReviewOutlinePoints()" },
+        .{ .bytes = pcb_board_js, .marker = "this read-only page omits the sketch compiler" },
+        .{ .bytes = pcb_board_js, .marker = "physical=physicalReviewOutlinePoints()" },
         .{ .bytes = assembly_debug_js, .marker = "function applyCamLayers" },
         .{ .bytes = assembly_debug_js, .marker = "data-cam-layer" },
         .{ .bytes = assembly_debug_js, .marker = "assembly-cam-layers:" },
@@ -906,6 +908,10 @@ test "Assembly review paints ordered CAM bytes with independent layer visibility
         .{ .bytes = pcb_board_js, .marker = "i===copper.length-1?1:0.24" },
     };
     for (checks) |check| try std.testing.expect(std.mem.indexOf(u8, check.bytes, check.marker) != null);
+    const draw_board = std.mem.indexOf(u8, pcb_board_js, "function drawBoardRect(tmp)") orelse return error.TestUnexpectedResult;
+    const physical_return = std.mem.indexOfPos(u8, pcb_board_js, draw_board, "if(PHYSICAL_REVIEW)return;") orelse return error.TestUnexpectedResult;
+    const authoring_outline = std.mem.indexOfPos(u8, pcb_board_js, draw_board, "var linePreview=") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(physical_return < authoring_outline);
 }
 
 // spec: Web Server - Assembly mask openings repaint actual pour copper as bare copper while leaving only copper-free gaps as exposed substrate

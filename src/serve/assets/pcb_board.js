@@ -381,6 +381,11 @@ function outlineFilletGeom(o){var pts=outlinePtsOf(o),rs=o&&o.radii;
  var geom={points:out,arcs:arcs,corners:fs};
  outlineFilletCache={o:o,rev:outlineGeomRev,geom:geom};return geom;}
 window.PCBOutlinePoly=function(o){return outlineFilletGeom(o).points;};
+// Assembly deliberately omits the sketch-authoring engine. Its server blob
+// already carries the compiled physical polygon used by Gerber export, so use
+// that projection for the pre-CAM canvas path instead of joining the sketch's
+// nominal arc endpoints into visible chords.
+function physicalReviewOutlinePoints(){return PHYSICAL_REVIEW&&PCB.board_poly&&PCB.board_poly.length>=3?PCB.board_poly:null;}
 function authoredOutlineSeed(){var b=PCB.board,as=PCB.board_arcs||[];if(!b||as.length!==4)return null;
  var rs=as.map(function(a){var g=trackArcGeom(a);return g?g.r:0;});
  return {x:b.x,y:b.y,w:b.w,h:b.h,pts:[[b.x,b.y],[b.x+b.w,b.y],[b.x+b.w,b.y+b.h],[b.x,b.y+b.h]],radii:rs};}
@@ -412,6 +417,11 @@ function drawBoardRect(tmp){
  while(gB.firstChild)gB.removeChild(gB.firstChild);
  drawBacking();
  drawHeatsink();
+ // Assembly's canvas paints the physical fallback and then the parsed Profile
+ // Gerber. Do not stack the editor's authoring-outline SVG over that contour:
+ // this read-only page omits the sketch compiler, so its nominal arc endpoints
+ // would otherwise appear as a second diagonal chord.
+ if(PHYSICAL_REVIEW)return;
  // ▩ Pour polygon in progress — drawn over the outline (not instead of it), so
  // the board edge stays visible while placing a copper-pour boundary.
  if(pourPts&&pourPts.length)pourSketch();
@@ -4801,8 +4811,8 @@ function reviewAreaLayerName(q,L){
  return reviewAreaSpansStack(q)?"All layers":reviewAreaLayerNames(q,L).join(", ");}
 function reviewBoardPoints(){
  if(CAM_REVIEW&&PCB.cam.profile&&PCB.cam.profile.length>=3)return PCB.cam.profile;
- var o=PCB.outline,geom=o?outlineFilletGeom(o):null,
-  pts=geom&&geom.points&&geom.points.length>=3?geom.points:(o&&o.pts&&o.pts.length?o.pts:(PCB.board_poly||null)),out=[];
+ var o=PCB.outline,geom=o?outlineFilletGeom(o):null,physical=physicalReviewOutlinePoints(),
+  pts=physical||(geom&&geom.points&&geom.points.length>=3?geom.points:(o&&o.pts&&o.pts.length?o.pts:(PCB.board_poly||null))),out=[];
  if(pts&&pts.length>=3)pts.forEach(function(p){var q=reviewPoint(p);if(q)out.push(q);});
  if(out.length>=3)return out;var b=o||PCB.board;if(!b||!(b.w>0)||!(b.h>0))return [];
  return [[b.x,b.y],[b.x+b.w,b.y],[b.x+b.w,b.y+b.h],[b.x,b.y+b.h]];}
