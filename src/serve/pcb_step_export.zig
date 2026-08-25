@@ -1,11 +1,12 @@
 //! Server-side PCB STEP assembly composer.
 //!
-//! The generated green board/heatsink bodies and coloured artwork wraps arrive
-//! as the compact geometry the browser already owns. Component geometry never
-//! does: each unique library STEP is parsed here, copied into the AP242 exchange
-//! structure without tessellation, then instanced with an assembly transform.
-//! Repeated packages therefore share one exact B-rep definition instead of
-//! expanding the preview triangles once per placement.
+//! The browser sends an outline/thickness/hole recipe for the green PCB, which
+//! is authored here as an analytic advanced B-rep rather than copying display
+//! triangles. Generated heatsinks remain small faceted bodies. Component
+//! geometry never crosses the wire: each unique library STEP is parsed here,
+//! copied into the AP242 exchange structure without tessellation, then instanced
+//! with an assembly transform. Repeated packages therefore share one exact
+//! B-rep definition instead of expanding the preview triangles per placement.
 
 const std = @import("std");
 const httpz = @import("httpz");
@@ -22,6 +23,10 @@ const max_bodies: usize = 4096;
 const max_instances: usize = 8192;
 const max_points_per_body: usize = 250_000;
 const max_triangles_per_body: usize = 250_000;
+const max_board_outline_points: usize = 2048;
+const max_board_holes: usize = 1024;
+const round_hole_segments: usize = 24;
+const slot_half_segments: usize = 12;
 
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
@@ -31,9 +36,30 @@ const Body = struct {
     triangles: []const [3]usize,
     color: ?[3]f64 = null,
     triangleColors: ?[]const ?[3]f64 = null,
-    /// False is a closed FACETED_BREP. True is a coloured, zero-thickness
-    /// SHELL_BASED_SURFACE_MODEL used for the two PCB artwork wraps.
+    /// Legacy browser payloads used zero-thickness surface bodies for artwork.
+    /// They are deliberately ignored: Fusion exposes their raster-derived
+    /// triangle topology instead of treating them as an image/decal.
     surface: bool = false,
+};
+
+const BoardHole = struct {
+    x: f64,
+    y: f64,
+    r: f64,
+    /// A second centre turns the round hole into a capsule slot. Both values
+    /// must either be present or absent.
+    x2: ?f64 = null,
+    y2: ?f64 = null,
+};
+
+const Board = struct {
+    name: []const u8 = "PCB",
+    /// Viewer-world millimetres (X right, Y north), without a repeated closing
+    /// point. The server still tolerates that common repeated endpoint.
+    outline: []const [2]f64,
+    holes: []const BoardHole = &.{},
+    thickness: f64,
+    color: ?[3]f64 = .{ 0.047, 0.404, 0.204 },
 };
 
 const Instance = struct {
@@ -45,8 +71,15 @@ const Instance = struct {
 };
 
 const Request = struct {
+    board: ?Board = null,
     bodies: []const Body = &.{},
     instances: []const Instance = &.{},
+};
+
+const BoardProduct = struct {
+    name: []const u8,
+    product_definition: u64,
+    representation: u64,
 };
 
 const Entity = struct {
@@ -119,6 +152,99 @@ fn writePoint(w: *std.Io.Writer, p: [3]f64) std.Io.Writer.Error!void {
 fn finitePoint(p: [3]f64) bool {
     return std.math.isFinite(p[0]) and std.math.isFinite(p[1]) and std.math.isFinite(p[2]) and
         @abs(p[0]) <= 1_000_000 and @abs(p[1]) <= 1_000_000 and @abs(p[2]) <= 1_000_000;
+}
+
+fn finitePoint2(p: [2]f64) bool {
+    return std.math.isFinite(p[0]) and std.math.isFinite(p[1]) and
+        @abs(p[0]) <= 1_000_000 and @abs(p[1]) <= 1_000_000;
+}
+
+fn pointDistanceSquared2(a: [2]f64, b: [2]f64) f64 {
+    const dx = a[0] - b[0];
+    const dy = a[1] - b[1];
+    return dx * dx + dy * dy;
+}
+
+fn signedArea2(points: []const [2]f64) f64 {
+    var twice_area: f64 = 0;
+    for (points, 0..) |a, i| {
+        const b = points[(i + 1) % points.len];
+        twice_area += a[0] * b[1] - b[0] * a[1];
+    }
+    return twice_area / 2;
+}
+
+fn orient2(a: [2]f64, b: [2]f64, c: [2]f64) f64 {
+    return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+}
+
+fn pointOnSegment2(p: [2]f64, a: [2]f64, b: [2]f64, tolerance: f64) bool {
+    if (@abs(orient2(a, b, p)) > tolerance) return false;
+    return p[0] >= @min(a[0], b[0]) - tolerance and p[0] <= @max(a[0], b[0]) + tolerance and
+        p[1] >= @min(a[1], b[1]) - tolerance and p[1] <= @max(a[1], b[1]) + tolerance;
+}
+
+fn segmentsIntersect2(a: [2]f64, b: [2]f64, c: [2]f64, d: [2]f64) bool {
+    const tolerance = 1e-9;
+    const ab_c = orient2(a, b, c);
+    const ab_d = orient2(a, b, d);
+    const cd_a = orient2(c, d, a);
+    const cd_b = orient2(c, d, b);
+    const c_and_d_opposite = (ab_c > tolerance and ab_d < -tolerance) or (ab_c < -tolerance and ab_d > tolerance);
+    const a_and_b_opposite = (cd_a > tolerance and cd_b < -tolerance) or (cd_a < -tolerance and cd_b > tolerance);
+    if (c_and_d_opposite and a_and_b_opposite) return true;
+    if (pointOnSegment2(c, a, b, tolerance)) return true;
+    if (pointOnSegment2(d, a, b, tolerance)) return true;
+    if (pointOnSegment2(a, c, d, tolerance)) return true;
+    return pointOnSegment2(b, c, d, tolerance);
+}
+
+fn simplePolygon2(points: []const [2]f64) bool {
+    for (points, 0..) |a, i| {
+        const i_next = (i + 1) % points.len;
+        const b = points[i_next];
+        for (points, 0..) |c, j| {
+            if (j <= i) continue;
+            const j_next = (j + 1) % points.len;
+            // Neighbouring edges share one endpoint by construction.
+            if (i == j or i_next == j or j_next == i) continue;
+            if (segmentsIntersect2(a, b, c, points[j_next])) return false;
+        }
+    }
+    return true;
+}
+
+fn pointInPolygon2(points: []const [2]f64, p: [2]f64) bool {
+    var inside = false;
+    var j = points.len - 1;
+    for (points, 0..) |pi, i| {
+        const pj = points[j];
+        if (pointOnSegment2(p, pj, pi, 1e-9)) return true;
+        if ((pi[1] > p[1]) != (pj[1] > p[1])) {
+            const x_cross = (pj[0] - pi[0]) * (p[1] - pi[1]) / (pj[1] - pi[1]) + pi[0];
+            if (p[0] < x_cross) inside = !inside;
+        }
+        j = i;
+    }
+    return inside;
+}
+
+fn pointSegmentDistanceSquared2(p: [2]f64, a: [2]f64, b: [2]f64) f64 {
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const length_squared = dx * dx + dy * dy;
+    if (!(length_squared > 1e-24)) return pointDistanceSquared2(p, a);
+    const raw_t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / length_squared;
+    const t = @max(0, @min(1, raw_t));
+    return pointDistanceSquared2(p, .{ a[0] + t * dx, a[1] + t * dy });
+}
+
+fn segmentDistanceSquared2(a: [2]f64, b: [2]f64, c: [2]f64, d: [2]f64) f64 {
+    if (segmentsIntersect2(a, b, c, d)) return 0;
+    return @min(
+        @min(pointSegmentDistanceSquared2(a, c, d), pointSegmentDistanceSquared2(b, c, d)),
+        @min(pointSegmentDistanceSquared2(c, a, b), pointSegmentDistanceSquared2(d, a, b)),
+    );
 }
 
 fn vectorLength(v: [3]f64) f64 {
@@ -441,91 +567,6 @@ fn writeDirection(w: *std.Io.Writer, id: u64, v: [3]f64) std.Io.Writer.Error!voi
     try w.writeAll("));\n");
 }
 
-const TriangleEdge = struct { a: usize, b: usize };
-
-fn edgeOf(a: usize, b: usize) TriangleEdge {
-    return if (a < b) .{ .a = a, .b = b } else .{ .a = b, .b = a };
-}
-
-fn componentRoot(parent: []usize, start: usize) usize {
-    var node = start;
-    while (parent[node] != node) node = parent[node];
-    const root = node;
-    node = start;
-    while (parent[node] != node) {
-        const next = parent[node];
-        parent[node] = root;
-        node = next;
-    }
-    return root;
-}
-
-fn joinComponents(parent: []usize, a: usize, b: usize) void {
-    const root_a = componentRoot(parent, a);
-    const root_b = componentRoot(parent, b);
-    if (root_a != root_b) parent[root_b] = root_a;
-}
-
-fn writeSurfaceModel(
-    allocator: std.mem.Allocator,
-    w: *std.Io.Writer,
-    next_id: *u64,
-    body: Body,
-    face_ids: []const u64,
-) (std.mem.Allocator.Error || std.Io.Writer.Error)!u64 {
-    const parent = try allocator.alloc(usize, body.triangles.len);
-    for (parent, 0..) |*entry, i| entry.* = i;
-    var first_by_edge: std.AutoHashMapUnmanaged(TriangleEdge, usize) = .empty;
-    for (body.triangles, 0..) |triangle, triangle_index| {
-        const edges = [3]TriangleEdge{
-            edgeOf(triangle[0], triangle[1]),
-            edgeOf(triangle[1], triangle[2]),
-            edgeOf(triangle[2], triangle[0]),
-        };
-        for (edges) |edge| {
-            const gop = try first_by_edge.getOrPut(allocator, edge);
-            if (gop.found_existing) joinComponents(parent, triangle_index, gop.value_ptr.*) else gop.value_ptr.* = triangle_index;
-        }
-    }
-
-    var group_by_root: std.AutoHashMapUnmanaged(usize, usize) = .empty;
-    var groups: std.ArrayList(std.ArrayList(u64)) = .empty;
-    for (face_ids, 0..) |face, triangle_index| {
-        const root = componentRoot(parent, triangle_index);
-        const gop = try group_by_root.getOrPut(allocator, root);
-        if (!gop.found_existing) {
-            gop.value_ptr.* = groups.items.len;
-            try groups.append(allocator, .empty);
-        }
-        try groups.items[gop.value_ptr.*].append(allocator, face);
-    }
-
-    const shell_ids = try allocator.alloc(u64, groups.items.len);
-    for (groups.items, 0..) |group, group_index| {
-        shell_ids[group_index] = next_id.*;
-        next_id.* += 1;
-        try w.print("#{d}=OPEN_SHELL(", .{shell_ids[group_index]});
-        try stepText(w, body.name);
-        try w.writeAll(",(");
-        for (group.items, 0..) |face, i| {
-            if (i > 0) try w.writeByte(',');
-            try w.print("#{d}", .{face});
-        }
-        try w.writeAll("));\n");
-    }
-    const model = next_id.*;
-    next_id.* += 1;
-    try w.print("#{d}=SHELL_BASED_SURFACE_MODEL(", .{model});
-    try stepText(w, body.name);
-    try w.writeAll(",(");
-    for (shell_ids, 0..) |shell, i| {
-        if (i > 0) try w.writeByte(',');
-        try w.print("#{d}", .{shell});
-    }
-    try w.writeAll("));\n");
-    return model;
-}
-
 const StyleState = struct {
     assignments: std.AutoHashMapUnmanaged(u64, u64) = .empty,
     styled_items: std.ArrayList(u64) = .empty,
@@ -578,10 +619,363 @@ const StyleState = struct {
     }
 };
 
+const PreparedBoard = struct {
+    name: []const u8,
+    rings: []const []const [2]f64,
+    thickness: f64,
+    color: ?[3]f64,
+};
+
+fn reversePoints2(points: [][2]f64) void {
+    var i: usize = 0;
+    while (i < points.len / 2) : (i += 1) {
+        const opposite = points.len - 1 - i;
+        const tmp = points[i];
+        points[i] = points[opposite];
+        points[opposite] = tmp;
+    }
+}
+
+const BoardHoleAxis = struct { start: [2]f64, finish: [2]f64 };
+
+fn validateBoardHole(board: Board, outer: []const [2]f64, hole_index: usize) ExportError!BoardHoleAxis {
+    const hole = board.holes[hole_index];
+    const start = [2]f64{ hole.x, hole.y };
+    const has_x2 = hole.x2 != null;
+    const has_y2 = hole.y2 != null;
+    if (has_x2 != has_y2) return error.InvalidGeometry;
+    if (!finitePoint2(start) or !std.math.isFinite(hole.r)) return error.InvalidGeometry;
+    if (!(hole.r > 0.00001) or hole.r > 100_000) return error.InvalidGeometry;
+    const finish = if (has_x2) [2]f64{ hole.x2.?, hole.y2.? } else start;
+    if (!finitePoint2(finish)) return error.InvalidGeometry;
+    if (!pointInPolygon2(outer, start) or !pointInPolygon2(outer, finish)) return error.InvalidGeometry;
+
+    const required_clearance_squared = (hole.r + 1e-7) * (hole.r + 1e-7);
+    for (outer, 0..) |a, edge_index| {
+        const b = outer[(edge_index + 1) % outer.len];
+        if (segmentDistanceSquared2(start, finish, a, b) < required_clearance_squared) return error.InvalidGeometry;
+    }
+    for (board.holes[0..hole_index]) |other| {
+        const other_start = [2]f64{ other.x, other.y };
+        const other_finish = if (other.x2 != null and other.y2 != null)
+            [2]f64{ other.x2.?, other.y2.? }
+        else
+            other_start;
+        const separation = hole.r + other.r + 1e-7;
+        if (segmentDistanceSquared2(start, finish, other_start, other_finish) < separation * separation) return error.InvalidGeometry;
+    }
+    return .{ .start = start, .finish = finish };
+}
+
+fn makeBoardHoleRing(allocator: std.mem.Allocator, axis: BoardHoleAxis, radius: f64) std.mem.Allocator.Error![][2]f64 {
+    const axis_dx = axis.finish[0] - axis.start[0];
+    const axis_dy = axis.finish[1] - axis.start[1];
+    const axis_length = @sqrt(axis_dx * axis_dx + axis_dy * axis_dy);
+    var ring: [][2]f64 = undefined;
+    if (axis_length <= 1e-7) {
+        ring = try allocator.alloc([2]f64, round_hole_segments);
+        for (ring, 0..) |*point, i| {
+            const angle = 2 * std.math.pi * @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(round_hole_segments));
+            point.* = .{ axis.start[0] + radius * @cos(angle), axis.start[1] + radius * @sin(angle) };
+        }
+    } else {
+        ring = try allocator.alloc([2]f64, 2 * (slot_half_segments + 1));
+        const axis_angle = std.math.atan2(axis_dy, axis_dx);
+        var at: usize = 0;
+        for (0..slot_half_segments + 1) |i| {
+            const angle = axis_angle - std.math.pi / 2.0 + std.math.pi * @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(slot_half_segments));
+            ring[at] = .{ axis.finish[0] + radius * @cos(angle), axis.finish[1] + radius * @sin(angle) };
+            at += 1;
+        }
+        for (0..slot_half_segments + 1) |i| {
+            const angle = axis_angle + std.math.pi / 2.0 + std.math.pi * @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(slot_half_segments));
+            ring[at] = .{ axis.start[0] + radius * @cos(angle), axis.start[1] + radius * @sin(angle) };
+            at += 1;
+        }
+    }
+    if (signedArea2(ring) > 0) reversePoints2(ring);
+    return ring;
+}
+
+fn prepareBoard(allocator: std.mem.Allocator, board: Board) (ExportError || std.mem.Allocator.Error)!PreparedBoard {
+    if (board.name.len == 0 or board.name.len > 256) return error.InvalidGeometry;
+    if (!std.math.isFinite(board.thickness)) return error.InvalidGeometry;
+    if (!(board.thickness > 0.00001) or board.thickness > 10_000) return error.InvalidGeometry;
+    if (board.outline.len < 3 or board.outline.len > max_board_outline_points + 1 or board.holes.len > max_board_holes) return error.InvalidGeometry;
+    if (board.color) |color| if (StyleState.colorKey(color) == null) return error.InvalidGeometry;
+
+    var outline_len = board.outline.len;
+    if (outline_len > 3 and pointDistanceSquared2(board.outline[0], board.outline[outline_len - 1]) <= 1e-18) outline_len -= 1;
+    if (outline_len < 3 or outline_len > max_board_outline_points) return error.InvalidGeometry;
+    const outer = try allocator.alloc([2]f64, outline_len);
+    @memcpy(outer, board.outline[0..outline_len]);
+    for (outer, 0..) |point, i| {
+        if (!finitePoint2(point) or pointDistanceSquared2(point, outer[(i + 1) % outer.len]) <= 1e-18) return error.InvalidGeometry;
+    }
+    const area = signedArea2(outer);
+    if (!std.math.isFinite(area) or @abs(area) <= 1e-9) return error.InvalidGeometry;
+    if (!simplePolygon2(outer)) return error.InvalidGeometry;
+    // The top face uses a +Z plane. Its outer loop is counter-clockwise;
+    // every inner loop is clockwise, giving one untriangulated planar cap.
+    if (area < 0) reversePoints2(outer);
+
+    const rings = try allocator.alloc([]const [2]f64, board.holes.len + 1);
+    rings[0] = outer;
+    for (board.holes, 0..) |hole, hole_index| {
+        const axis = try validateBoardHole(board, outer, hole_index);
+        rings[hole_index + 1] = try makeBoardHoleRing(allocator, axis, hole.r);
+    }
+    return .{ .name = board.name, .rings = rings, .thickness = board.thickness, .color = board.color };
+}
+
+const BoardVertex = struct { point: u64, vertex: u64 };
+const BoardRingTopology = struct {
+    points: []const [2]f64,
+    top: []BoardVertex,
+    bottom: []BoardVertex,
+    top_edges: []u64,
+    bottom_edges: []u64,
+    vertical_edges: []u64,
+};
+
+fn takeId(next_id: *u64) u64 {
+    const id = next_id.*;
+    next_id.* += 1;
+    return id;
+}
+
+fn writeCartesianPointEntity(w: *std.Io.Writer, next_id: *u64, point: [3]f64) std.Io.Writer.Error!u64 {
+    const id = takeId(next_id);
+    try w.print("#{d}=CARTESIAN_POINT('',(", .{id});
+    try writePoint(w, point);
+    try w.writeAll("));\n");
+    return id;
+}
+
+fn writeBoardVertex(w: *std.Io.Writer, next_id: *u64, point: [3]f64) std.Io.Writer.Error!BoardVertex {
+    const point_id = try writeCartesianPointEntity(w, next_id, point);
+    const vertex = takeId(next_id);
+    try w.print("#{d}=VERTEX_POINT('',#{d});\n", .{ vertex, point_id });
+    return .{ .point = point_id, .vertex = vertex };
+}
+
+fn writeLineEdge(
+    w: *std.Io.Writer,
+    next_id: *u64,
+    start_point: u64,
+    start_vertex: u64,
+    end_vertex: u64,
+    direction_value: [3]f64,
+) (ExportError || std.Io.Writer.Error)!u64 {
+    const direction = normalized(direction_value) orelse return error.InvalidGeometry;
+    const direction_id = takeId(next_id);
+    try writeDirection(w, direction_id, direction);
+    const vector = takeId(next_id);
+    try w.print("#{d}=VECTOR('',#{d},1.000000000);\n", .{ vector, direction_id });
+    const line = takeId(next_id);
+    try w.print("#{d}=LINE('',#{d},#{d});\n", .{ line, start_point, vector });
+    const edge = takeId(next_id);
+    try w.print("#{d}=EDGE_CURVE('',#{d},#{d},#{d},.T.);\n", .{ edge, start_vertex, end_vertex, line });
+    return edge;
+}
+
+fn writeRingTopology(
+    allocator: std.mem.Allocator,
+    w: *std.Io.Writer,
+    next_id: *u64,
+    points: []const [2]f64,
+    thickness: f64,
+) (ExportError || std.mem.Allocator.Error || std.Io.Writer.Error)!BoardRingTopology {
+    const top = try allocator.alloc(BoardVertex, points.len);
+    const bottom = try allocator.alloc(BoardVertex, points.len);
+    for (points, 0..) |point, i| {
+        top[i] = try writeBoardVertex(w, next_id, .{ point[0], point[1], 0 });
+        bottom[i] = try writeBoardVertex(w, next_id, .{ point[0], point[1], -thickness });
+    }
+    const top_edges = try allocator.alloc(u64, points.len);
+    const bottom_edges = try allocator.alloc(u64, points.len);
+    const vertical_edges = try allocator.alloc(u64, points.len);
+    for (points, 0..) |point, i| {
+        const after = (i + 1) % points.len;
+        const next = points[after];
+        const edge_direction = [3]f64{ next[0] - point[0], next[1] - point[1], 0 };
+        top_edges[i] = try writeLineEdge(w, next_id, top[i].point, top[i].vertex, top[after].vertex, edge_direction);
+        bottom_edges[i] = try writeLineEdge(w, next_id, bottom[i].point, bottom[i].vertex, bottom[after].vertex, edge_direction);
+        vertical_edges[i] = try writeLineEdge(w, next_id, top[i].point, top[i].vertex, bottom[i].vertex, .{ 0, 0, -1 });
+    }
+    return .{
+        .points = points,
+        .top = top,
+        .bottom = bottom,
+        .top_edges = top_edges,
+        .bottom_edges = bottom_edges,
+        .vertical_edges = vertical_edges,
+    };
+}
+
+fn writeOrientedEdge(w: *std.Io.Writer, next_id: *u64, edge: u64, forward: bool) std.Io.Writer.Error!u64 {
+    const id = takeId(next_id);
+    try w.print("#{d}=ORIENTED_EDGE('',*,*,#{d},{s});\n", .{ id, edge, if (forward) ".T." else ".F." });
+    return id;
+}
+
+fn writeRingLoop(
+    allocator: std.mem.Allocator,
+    w: *std.Io.Writer,
+    next_id: *u64,
+    edges: []const u64,
+    forward: bool,
+) (std.mem.Allocator.Error || std.Io.Writer.Error)!u64 {
+    const oriented = try allocator.alloc(u64, edges.len);
+    for (oriented, 0..) |*id, i| {
+        const edge_index = if (forward) i else edges.len - 1 - i;
+        id.* = try writeOrientedEdge(w, next_id, edges[edge_index], forward);
+    }
+    const loop = takeId(next_id);
+    try w.print("#{d}=EDGE_LOOP('',(", .{loop});
+    for (oriented, 0..) |edge, i| {
+        if (i > 0) try w.writeByte(',');
+        try w.print("#{d}", .{edge});
+    }
+    try w.writeAll("));\n");
+    return loop;
+}
+
+fn writePlanarCap(
+    allocator: std.mem.Allocator,
+    w: *std.Io.Writer,
+    next_id: *u64,
+    rings: []const BoardRingTopology,
+    top: bool,
+) (std.mem.Allocator.Error || std.Io.Writer.Error)!u64 {
+    const bounds = try allocator.alloc(u64, rings.len);
+    for (rings, 0..) |ring, ring_index| {
+        const loop = try writeRingLoop(allocator, w, next_id, if (top) ring.top_edges else ring.bottom_edges, top);
+        bounds[ring_index] = takeId(next_id);
+        if (ring_index == 0) {
+            try w.print("#{d}=FACE_OUTER_BOUND('',#{d},.T.);\n", .{ bounds[ring_index], loop });
+        } else {
+            try w.print("#{d}=FACE_BOUND('',#{d},.T.);\n", .{ bounds[ring_index], loop });
+        }
+    }
+    const placement = takeId(next_id);
+    const anchor = if (top) rings[0].top[0].point else rings[0].bottom[0].point;
+    try w.print("#{d}=AXIS2_PLACEMENT_3D('',#{d},#15,#16);\n", .{ placement, anchor });
+    const plane = takeId(next_id);
+    try w.print("#{d}=PLANE('',#{d});\n", .{ plane, placement });
+    const face = takeId(next_id);
+    try w.print("#{d}=ADVANCED_FACE('',(", .{face});
+    for (bounds, 0..) |bound, i| {
+        if (i > 0) try w.writeByte(',');
+        try w.print("#{d}", .{bound});
+    }
+    try w.print("),#{d},{s});\n", .{ plane, if (top) ".T." else ".F." });
+    return face;
+}
+
+fn writeBoardSideFace(
+    w: *std.Io.Writer,
+    next_id: *u64,
+    ring: BoardRingTopology,
+    edge_index: usize,
+) (ExportError || std.Io.Writer.Error)!u64 {
+    const after = (edge_index + 1) % ring.points.len;
+    // Reversing the top edge makes every shared shell edge oppose its cap use:
+    // top(j->i), down(i), bottom(i->j), up(j).
+    const oriented = [4]u64{
+        try writeOrientedEdge(w, next_id, ring.top_edges[edge_index], false),
+        try writeOrientedEdge(w, next_id, ring.vertical_edges[edge_index], true),
+        try writeOrientedEdge(w, next_id, ring.bottom_edges[edge_index], true),
+        try writeOrientedEdge(w, next_id, ring.vertical_edges[after], false),
+    };
+    const loop = takeId(next_id);
+    try w.print("#{d}=EDGE_LOOP('',(#{d},#{d},#{d},#{d}));\n", .{ loop, oriented[0], oriented[1], oriented[2], oriented[3] });
+    const bound = takeId(next_id);
+    try w.print("#{d}=FACE_OUTER_BOUND('',#{d},.T.);\n", .{ bound, loop });
+
+    const point = ring.points[edge_index];
+    const next = ring.points[after];
+    const dx = next[0] - point[0];
+    const dy = next[1] - point[1];
+    const length = @sqrt(dx * dx + dy * dy);
+    if (!(length > 1e-12)) return error.InvalidGeometry;
+    const normal_id = takeId(next_id);
+    try writeDirection(w, normal_id, .{ dy / length, -dx / length, 0 });
+    const reference_id = takeId(next_id);
+    try writeDirection(w, reference_id, .{ -dx / length, -dy / length, 0 });
+    const placement = takeId(next_id);
+    try w.print("#{d}=AXIS2_PLACEMENT_3D('',#{d},#{d},#{d});\n", .{ placement, ring.top[after].point, normal_id, reference_id });
+    const plane = takeId(next_id);
+    try w.print("#{d}=PLANE('',#{d});\n", .{ plane, placement });
+    const face = takeId(next_id);
+    try w.print("#{d}=ADVANCED_FACE('',(#{d}),#{d},.T.);\n", .{ face, bound, plane });
+    return face;
+}
+
+fn writeAnalyticBoard(
+    allocator: std.mem.Allocator,
+    w: *std.Io.Writer,
+    next_id: *u64,
+    board: Board,
+    styles: *StyleState,
+) (ExportError || std.mem.Allocator.Error || std.Io.Writer.Error)!BoardProduct {
+    const prepared = try prepareBoard(allocator, board);
+    const topology = try allocator.alloc(BoardRingTopology, prepared.rings.len);
+    var side_count: usize = 0;
+    for (prepared.rings, 0..) |ring, i| {
+        topology[i] = try writeRingTopology(allocator, w, next_id, ring, prepared.thickness);
+        side_count += ring.len;
+    }
+    const faces = try allocator.alloc(u64, side_count + 2);
+    faces[0] = try writePlanarCap(allocator, w, next_id, topology, true);
+    faces[1] = try writePlanarCap(allocator, w, next_id, topology, false);
+    var face_index: usize = 2;
+    for (topology) |ring| for (ring.points, 0..) |_, edge_index| {
+        faces[face_index] = try writeBoardSideFace(w, next_id, ring, edge_index);
+        face_index += 1;
+    };
+
+    const shell = takeId(next_id);
+    try w.print("#{d}=CLOSED_SHELL(", .{shell});
+    try stepText(w, prepared.name);
+    try w.writeAll(",(");
+    for (faces, 0..) |face, i| {
+        if (i > 0) try w.writeByte(',');
+        try w.print("#{d}", .{face});
+    }
+    try w.writeAll("));\n");
+    const solid = takeId(next_id);
+    try w.print("#{d}=MANIFOLD_SOLID_BREP(", .{solid});
+    try stepText(w, prepared.name);
+    try w.print(",#{d});\n", .{shell});
+    try styles.item(allocator, w, next_id, solid, prepared.color);
+
+    const product = takeId(next_id);
+    try w.print("#{d}=PRODUCT(", .{product});
+    try stepText(w, prepared.name);
+    try w.writeByte(',');
+    try stepText(w, prepared.name);
+    try w.writeAll(",'',(#3));\n");
+    const formation = takeId(next_id);
+    try w.print("#{d}=PRODUCT_DEFINITION_FORMATION('','',#{d});\n", .{ formation, product });
+    const definition = takeId(next_id);
+    try w.print("#{d}=PRODUCT_DEFINITION('design','',#{d},#6);\n", .{ definition, formation });
+    const definition_shape = takeId(next_id);
+    try w.print("#{d}=PRODUCT_DEFINITION_SHAPE('','',#{d});\n", .{ definition_shape, definition });
+    const representation = takeId(next_id);
+    try w.print("#{d}=ADVANCED_BREP_SHAPE_REPRESENTATION(", .{representation});
+    try stepText(w, prepared.name);
+    try w.print(",(#17,#{d}),#13);\n", .{solid});
+    const definition_representation = takeId(next_id);
+    try w.print("#{d}=SHAPE_DEFINITION_REPRESENTATION(#{d},#{d});\n", .{ definition_representation, definition_shape, representation });
+    return .{ .name = prepared.name, .product_definition = definition, .representation = representation };
+}
+
 fn writeFacetedBodies(w: *std.Io.Writer, bodies: []const Body, next_id: *u64, root_items: *std.ArrayList(u64), styles: *StyleState, allocator: std.mem.Allocator) (ExportError || std.mem.Allocator.Error || std.Io.Writer.Error)!void {
     for (bodies) |body| {
-        const minimum_points: usize = if (body.surface) 3 else 4;
-        const minimum_triangles: usize = if (body.surface) 1 else 4;
+        if (body.surface) continue;
+        const minimum_points: usize = 4;
+        const minimum_triangles: usize = 4;
         if (body.name.len == 0 or body.name.len > 256) return error.InvalidGeometry;
         if (body.points.len < minimum_points or body.points.len > max_points_per_body) return error.InvalidGeometry;
         if (body.triangles.len < minimum_triangles or body.triangles.len > max_triangles_per_body) return error.InvalidGeometry;
@@ -626,33 +1020,33 @@ fn writeFacetedBodies(w: *std.Io.Writer, bodies: []const Body, next_id: *u64, ro
             try styles.item(allocator, w, next_id, face, triangle_color);
             try face_ids.append(allocator, face);
         }
-        if (body.surface) {
-            const model = try writeSurfaceModel(allocator, w, next_id, body, face_ids.items);
-            try root_items.append(allocator, model);
-            try styles.item(allocator, w, next_id, model, body.color);
-        } else {
-            const shell = next_id.*;
-            const brep = shell + 1;
-            next_id.* += 2;
-            try w.print("#{d}=CLOSED_SHELL(", .{shell});
-            try stepText(w, body.name);
-            try w.writeAll(",(");
-            for (face_ids.items, 0..) |face, i| {
-                if (i > 0) try w.writeByte(',');
-                try w.print("#{d}", .{face});
-            }
-            try w.writeAll("));\n");
-            try w.print("#{d}=FACETED_BREP(", .{brep});
-            try stepText(w, body.name);
-            try w.print(",#{d});\n", .{shell});
-            try root_items.append(allocator, brep);
-            try styles.item(allocator, w, next_id, brep, body.color);
+        const shell = next_id.*;
+        const brep = shell + 1;
+        next_id.* += 2;
+        try w.print("#{d}=CLOSED_SHELL(", .{shell});
+        try stepText(w, body.name);
+        try w.writeAll(",(");
+        for (face_ids.items, 0..) |face, i| {
+            if (i > 0) try w.writeByte(',');
+            try w.print("#{d}", .{face});
         }
+        try w.writeAll("));\n");
+        try w.print("#{d}=FACETED_BREP(", .{brep});
+        try stepText(w, body.name);
+        try w.print(",#{d});\n", .{shell});
+        try root_items.append(allocator, brep);
+        try styles.item(allocator, w, next_id, brep, body.color);
     }
 }
 
 fn build(allocator: std.mem.Allocator, project_dir: []const u8, design_name: []const u8, request: Request) (ExportError || std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8 {
-    if (request.bodies.len == 0 or request.bodies.len > max_bodies or request.instances.len > max_instances) return error.BadRequest;
+    if (request.bodies.len > max_bodies or request.instances.len > max_instances) return error.BadRequest;
+    var has_faceted_body = false;
+    for (request.bodies) |body| if (!body.surface) {
+        has_faceted_body = true;
+        break;
+    };
+    if (request.board == null and !has_faceted_body) return error.BadRequest;
 
     var next_id: u64 = 18;
     var models: std.ArrayList(ImportedModel) = .empty;
@@ -704,6 +1098,10 @@ fn build(allocator: std.mem.Allocator, project_dir: []const u8, design_name: []c
     var root_items: std.ArrayList(u64) = .empty;
     var styles: StyleState = .{};
     try root_items.append(allocator, 17);
+    const board_product = if (request.board) |board|
+        try writeAnalyticBoard(allocator, w, &next_id, board, &styles)
+    else
+        null;
     try writeFacetedBodies(w, request.bodies, &next_id, &root_items, &styles, allocator);
 
     const root_representation = next_id;
@@ -726,6 +1124,35 @@ fn build(allocator: std.mem.Allocator, project_dir: []const u8, design_name: []c
         }
         try w.writeAll("),#13);\n");
         next_id += 1;
+    }
+
+    if (board_product) |board| {
+        const point = next_id;
+        const z_direction = point + 1;
+        const x_direction = point + 2;
+        const placement = point + 3;
+        next_id += 4;
+        try w.print("#{d}=CARTESIAN_POINT('',(0.000000000,0.000000000,0.000000000));\n", .{point});
+        try writeDirection(w, z_direction, .{ 0, 0, 1 });
+        try writeDirection(w, x_direction, .{ 1, 0, 0 });
+        try w.print("#{d}=AXIS2_PLACEMENT_3D('',#{d},#{d},#{d});\n", .{ placement, point, z_direction, x_direction });
+        const nauo = next_id;
+        const occurrence_shape = nauo + 1;
+        const transform = nauo + 2;
+        const relationship = nauo + 3;
+        const dependent = nauo + 4;
+        next_id += 5;
+        try w.print("#{d}=NEXT_ASSEMBLY_USAGE_OCCURRENCE(", .{nauo});
+        try stepText(w, board.name);
+        try w.writeByte(',');
+        try stepText(w, board.name);
+        try w.print(",'',#7,#{d},$);\n", .{board.product_definition});
+        try w.print("#{d}=PRODUCT_DEFINITION_SHAPE('','',#{d});\n", .{ occurrence_shape, nauo });
+        try w.print("#{d}=ITEM_DEFINED_TRANSFORMATION('','',#17,#{d});\n", .{ transform, placement });
+        try w.print("#{d}=(REPRESENTATION_RELATIONSHIP('',", .{relationship});
+        try stepText(w, board.name);
+        try w.print(",#{d},#{d})REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#{d})SHAPE_REPRESENTATION_RELATIONSHIP());\n", .{ board.representation, root_representation, transform });
+        try w.print("#{d}=CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#{d},#{d});\n", .{ dependent, relationship, occurrence_shape });
     }
 
     for (request.instances, 0..) |instance, i| {
@@ -776,9 +1203,10 @@ fn sendError(res: *httpz.Response, status: u16, message: []const u8) void {
     res.body = message;
 }
 
-/// POST /api/pcb-step/:name — compose exact source STEP B-reps with the small
-/// generated board/heatsink solids and artwork wraps, returning one
-/// self-contained AP242 file.
+/// POST /api/pcb-step/:name — compose exact source STEP B-reps with the
+/// analytic board and optional generated heatsink solids, returning one
+/// self-contained AP242 file. Raster artwork is intentionally not STEP
+/// geometry; the browser packages it as Fusion decal PNGs.
 pub fn pcbStepApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse return sendError(res, 404, "design not found");
     if (!safeDesignName(name)) return sendError(res, 400, "invalid design name");
@@ -911,29 +1339,72 @@ test "exact assembly embeds one source B-rep and instances repeated footprints" 
     try std.testing.expect(std.mem.indexOf(u8, output, "CARTESIAN_POINT('',(25.000000000,0.000000000,0.000000000))") != null);
 }
 
-test "artwork rectangles export as coloured surface wraps beside the board solid" {
+test "PCB recipe exports one analytic manifold solid and ignores legacy artwork triangles" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const colors = [_]?[3]f64{ .{ 0.78, 0.57, 0.24 }, .{ 0.78, 0.57, 0.24 } };
     const output = try build(arena.allocator(), ".", "fixture", .{
-        .bodies = &.{
-            .{
-                .name = "PCB solid",
-                .points = &.{ .{ 0, 0, 0 }, .{ 10, 0, 0 }, .{ 0, 10, 0 }, .{ 0, 0, -1.6 } },
-                .triangles = &.{ .{ 0, 2, 1 }, .{ 0, 1, 3 }, .{ 1, 2, 3 }, .{ 2, 0, 3 } },
-                .color = .{ 0.047, 0.404, 0.204 },
+        .board = .{
+            .name = "PCB solid",
+            // Repeated endpoint is accepted and stripped before topology is built.
+            .outline = &.{ .{ 0, 0 }, .{ 20, 0 }, .{ 20, 10 }, .{ 0, 10 }, .{ 0, 0 } },
+            .holes = &.{
+                .{ .x = 5, .y = 5, .r = 1 },
+                .{ .x = 11, .y = 5, .x2 = 14, .y2 = 5, .r = 0.75 },
             },
-            .{
-                .name = "PCB top artwork wrap",
-                .points = &.{ .{ 1, 1, 0.002 }, .{ 5, 1, 0.002 }, .{ 5, 2, 0.002 }, .{ 1, 2, 0.002 } },
-                .triangles = &.{ .{ 0, 2, 1 }, .{ 0, 3, 2 } },
-                .triangleColors = &colors,
-                .surface = true,
-            },
+            .thickness = 1.6,
+            .color = .{ 0.047, 0.404, 0.204 },
         },
+        .bodies = &.{.{
+            .name = "PCB top artwork wrap",
+            .points = &.{ .{ 1, 1, 0.002 }, .{ 5, 1, 0.002 }, .{ 5, 2, 0.002 }, .{ 1, 2, 0.002 } },
+            .triangles = &.{ .{ 0, 2, 1 }, .{ 0, 3, 2 } },
+            .triangleColors = &colors,
+            .surface = true,
+        }},
     });
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output, "FACETED_BREP("));
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output, "OPEN_SHELL("));
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output, "SHELL_BASED_SURFACE_MODEL("));
-    try std.testing.expect(std.mem.indexOf(u8, output, "COLOUR_RGB('',0.780000000,0.570000000,0.240000000)") != null);
+    const expected_side_faces = 4 + round_hole_segments + 2 * (slot_half_segments + 1);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output, "MANIFOLD_SOLID_BREP("));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output, "ADVANCED_BREP_SHAPE_REPRESENTATION("));
+    try std.testing.expectEqual(expected_side_faces + 2, std.mem.count(u8, output, "ADVANCED_FACE("));
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, output, "FACE_BOUND("));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output, "NEXT_ASSEMBLY_USAGE_OCCURRENCE("));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, output, "FACETED_BREP("));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, output, "FACE_SURFACE("));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, output, "POLY_LOOP("));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, output, "OPEN_SHELL("));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, output, "SHELL_BASED_SURFACE_MODEL("));
+    try std.testing.expect(std.mem.indexOf(u8, output, "COLOUR_RGB('',0.047000000,0.404000000,0.204000000)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "COLOUR_RGB('',0.780000000,0.570000000,0.240000000)") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "PCB top artwork wrap") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "CARTESIAN_POINT('',(0.000000000,0.000000000,-1.600000000))") != null);
+}
+
+test "analytic PCB validation rejects self intersections and invalid mechanical holes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const rectangle = [_][2]f64{ .{ 0, 0 }, .{ 20, 0 }, .{ 20, 10 }, .{ 0, 10 } };
+    try std.testing.expectError(error.InvalidGeometry, prepareBoard(aa, .{
+        .outline = &.{ .{ 0, 0 }, .{ 10, 10 }, .{ 0, 10 }, .{ 10, 0 } },
+        .thickness = 1.6,
+    }));
+    try std.testing.expectError(error.InvalidGeometry, prepareBoard(aa, .{
+        .outline = &rectangle,
+        .holes = &.{.{ .x = 0.5, .y = 5, .r = 1 }},
+        .thickness = 1.6,
+    }));
+    try std.testing.expectError(error.InvalidGeometry, prepareBoard(aa, .{
+        .outline = &rectangle,
+        .holes = &.{
+            .{ .x = 5, .y = 5, .r = 2 },
+            .{ .x = 7, .y = 5, .r = 1 },
+        },
+        .thickness = 1.6,
+    }));
+    try std.testing.expectError(error.InvalidGeometry, prepareBoard(aa, .{
+        .outline = &rectangle,
+        .holes = &.{.{ .x = 5, .y = 5, .x2 = 8, .r = 0.5 }},
+        .thickness = 1.6,
+    }));
 }
