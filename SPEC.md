@@ -3026,6 +3026,7 @@ Public functions: compute, computeMaskShared, computeMasks, initMargin, planeCon
 - every emitted contour point keeps at least the pour clearance from foreign copper
 - contour vertices interpolate the clearance iso-line instead of snapping to grid corners
 - a foreign via interior to a seeded pour punches an antipad hole that encircles it at clearance
+- a round NPTH on an outer face punches a round antipad instead of its bounding square
 - a foreign trace that splits a plane leaves its same-net pads in separate components
 - a track crossing a fill is assigned to every fabricated component it traverses even when both endpoints lie outside
 - the fill respects a non-rectangular board outline
@@ -3902,7 +3903,7 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - simplifies a dense outline to a few corners within tolerance
 - a rectangular pad off a quarter turn carries its four rotated corners, so its keepout is the land and not the land's square bounding box
 - a rotated rectangular pad on a bottom-side part carries corners mirrored with the part
-- a circle or oval pad off a quarter turn keeps its bounding box, which no rectangle can tighten
+- a circle carries a round collision outline while an oval conservatively keeps its bounding box
 
 ## eval/builtins
 
