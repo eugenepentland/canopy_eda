@@ -17,6 +17,14 @@ const numeric = @import("../numeric.zig");
 /// Saved-route provenance reserved for board-derived perimeter sites.
 pub const provenance = "@perimeter";
 
+/// One exposed solder-mask stroke along the finished board outline. The
+/// Gerber and KiCad writers consume these fragments instead of independently
+/// guessing where an edge-mounted footprint interrupts the perimeter band.
+pub const MaskSegment = struct {
+    a: [2]f64,
+    b: [2]f64,
+};
+
 /// Whether a placement carries an effective perimeter-fence declaration.
 fn declared(p: optimizer.Placement) bool {
     const f = p.rules.perimeter_fence;
@@ -170,39 +178,75 @@ fn pointAt(poly: []const [2]f64, distance: f64) [2]f64 {
     return poly[0];
 }
 
-/// Generate the perimeter sites for the current exact outline. An incomplete
-/// declaration or unresolved stitch net produces no copper.
-pub fn generate(alloc: std.mem.Allocator, p: optimizer.Placement) std.mem.Allocator.Error![]const router.Via {
-    if (!declared(p)) return &.{};
-    const net = netIndex(p) orelse return &.{};
-    const edge = try outlinePoints(alloc, p);
-    defer if (p.board_poly == null and edge.len > 0) alloc.free(edge);
-    const path = try insetPolygon(alloc, edge, p.rules.perimeter_fence.edge_offset);
-    defer if (path.len > 0) alloc.free(path);
-    if (path.len < 3) return &.{};
-    const length = perimeter(path);
-    if (!std.math.isFinite(length) or !(length > 0)) return &.{};
-    const needed = @ceil(length / p.rules.perimeter_fence.spacing);
-    const count: usize = @max(3, numeric.checkedInt(usize, needed) orelse return &.{});
-    const pitch = length / @as(f64, @floatFromInt(count));
-    const vias = try alloc.alloc(router.Via, count);
-    for (vias, 0..) |*via, i| {
-        // Half-pitch phase avoids pinning a site to the polygon's arbitrary
-        // seam while preserving a uniform closed-loop pitch.
-        const pt = pointAt(path, (@as(f64, @floatFromInt(i)) + 0.5) * pitch);
-        via.* = .{
-            .x = pt[0],
-            .y = pt[1],
-            .dia = p.rules.perimeter_fence.via_dia,
-            .drill = p.rules.perimeter_fence.via_drill,
-            .net = net,
-        };
-    }
-    return vias;
+const Interval = struct { lo: f64, hi: f64 };
+
+fn intervalLessThan(_: void, a: Interval, b: Interval) bool {
+    return a.lo < b.lo;
 }
 
-fn sameVia(a: router.Via, b: router.Via) bool {
-    return a.net == b.net and std.math.hypot(a.x - b.x, a.y - b.y) < 1e-6;
+fn clipAxis(origin: f64, delta: f64, min: f64, max: f64, lo: *f64, hi: *f64) bool {
+    if (@abs(delta) <= 1e-12) return origin >= min and origin <= max;
+    const ta = (min - origin) / delta;
+    const tb = (max - origin) / delta;
+    lo.* = @max(lo.*, @min(ta, tb));
+    hi.* = @min(hi.*, @max(ta, tb));
+    return lo.* <= hi.*;
+}
+
+/// Parameter interval where segment `a`→`b` crosses an axis-aligned box.
+fn boxInterval(a: [2]f64, b: [2]f64, minx: f64, miny: f64, maxx: f64, maxy: f64) ?Interval {
+    var lo: f64 = 0;
+    var hi: f64 = 1;
+    if (!clipAxis(a[0], b[0] - a[0], minx, maxx, &lo, &hi)) return null;
+    if (!clipAxis(a[1], b[1] - a[1], miny, maxy, &lo, &hi)) return null;
+    return .{ .lo = lo, .hi = hi };
+}
+
+fn lerp(a: [2]f64, b: [2]f64, t: f64) [2]f64 {
+    return .{ a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t };
+}
+
+/// Perimeter mask strokes with automatic gaps wherever their circular stroke
+/// would enter a placed component courtyard. Expanding each courtyard by the
+/// stroke radius before clipping also keeps the round stroke caps outside the
+/// real courtyard. The result is intentionally side-independent: a connector
+/// interrupts the through-board via ring and therefore masks both faces.
+pub fn maskSegments(alloc: std.mem.Allocator, p: optimizer.Placement) std.mem.Allocator.Error![]const MaskSegment {
+    const width = p.rules.perimeter_fence.mask_width;
+    if (!(width > 0) or p.board_rect == null) return &.{};
+    const poly = try outlinePoints(alloc, p);
+    defer if (p.board_poly == null and poly.len > 0) alloc.free(poly);
+    if (poly.len < 3) return &.{};
+
+    var out: std.ArrayList(MaskSegment) = .empty;
+    var blocked: std.ArrayList(Interval) = .empty;
+    defer blocked.deinit(alloc);
+    for (poly, 0..) |a, i| {
+        const b = poly[(i + 1) % poly.len];
+        blocked.clearRetainingCapacity();
+        for (p.parts) |part| {
+            const c = optimizer.worldCourtyard(&part);
+            if (boxInterval(
+                a,
+                b,
+                c.minx - width,
+                c.miny - width,
+                c.minx + c.w + width,
+                c.miny + c.h + width,
+            )) |interval| try blocked.append(alloc, interval);
+        }
+        std.mem.sort(Interval, blocked.items, {}, intervalLessThan);
+        var cursor: f64 = 0;
+        for (blocked.items) |interval| {
+            const lo = std.math.clamp(interval.lo, 0, 1);
+            const hi = std.math.clamp(interval.hi, 0, 1);
+            if (lo > cursor + 1e-9) try out.append(alloc, .{ .a = lerp(a, b, cursor), .b = lerp(a, b, lo) });
+            cursor = @max(cursor, hi);
+            if (cursor >= 1 - 1e-9) break;
+        }
+        if (cursor < 1 - 1e-9) try out.append(alloc, .{ .a = lerp(a, b, cursor), .b = b });
+    }
+    return out.toOwnedSlice(alloc);
 }
 
 /// Perimeter stitches are derived copper, so a component courtyard wins when
@@ -218,6 +262,42 @@ fn crowdsComponent(p: optimizer.Placement, site: router.Via) bool {
         if (std.math.hypot(site.x - qx, site.y - qy) < radius - 1e-9) return true;
     }
     return false;
+}
+
+/// Generate the perimeter sites for the current exact outline. An incomplete
+/// declaration or unresolved stitch net produces no copper.
+pub fn generate(alloc: std.mem.Allocator, p: optimizer.Placement) std.mem.Allocator.Error![]const router.Via {
+    if (!declared(p)) return &.{};
+    const net = netIndex(p) orelse return &.{};
+    const edge = try outlinePoints(alloc, p);
+    defer if (p.board_poly == null and edge.len > 0) alloc.free(edge);
+    const path = try insetPolygon(alloc, edge, p.rules.perimeter_fence.edge_offset);
+    defer if (path.len > 0) alloc.free(path);
+    if (path.len < 3) return &.{};
+    const length = perimeter(path);
+    if (!std.math.isFinite(length) or !(length > 0)) return &.{};
+    const needed = @ceil(length / p.rules.perimeter_fence.spacing);
+    const count: usize = @max(3, numeric.checkedInt(usize, needed) orelse return &.{});
+    const pitch = length / @as(f64, @floatFromInt(count));
+    var vias: std.ArrayList(router.Via) = .empty;
+    for (0..count) |i| {
+        // Half-pitch phase avoids pinning a site to the polygon's arbitrary
+        // seam while preserving a uniform closed-loop pitch.
+        const pt = pointAt(path, (@as(f64, @floatFromInt(i)) + 0.5) * pitch);
+        const site: router.Via = .{
+            .x = pt[0],
+            .y = pt[1],
+            .dia = p.rules.perimeter_fence.via_dia,
+            .drill = p.rules.perimeter_fence.via_drill,
+            .net = net,
+        };
+        if (!crowdsComponent(p, site)) try vias.append(alloc, site);
+    }
+    return vias.toOwnedSlice(alloc);
+}
+
+fn sameVia(a: router.Via, b: router.Via) bool {
+    return a.net == b.net and std.math.hypot(a.x - b.x, a.y - b.y) < 1e-6;
 }
 
 /// Whether a via barrel overlaps the exact authored copper of a same-net pad.
@@ -457,7 +537,7 @@ test "additive via gate matches the full-check verdict site by site" {
 }
 
 // spec: placement/perimeter-fence - derived perimeter sites yield to component courtyards even when the component shares the stitch net
-test "perimeter append skips sites under a grounded edge component" {
+test "perimeter generation skips sites under a grounded edge component" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -473,8 +553,9 @@ test "perimeter append skips sites under a grounded edge component" {
     }};
     var p = fixture(null);
     p.parts = &parts;
-    const raw = try generate(arena, p);
+    const generated = try generate(arena, p);
     const result = (try append(arena, p, null)).?;
-    try testing.expect(result.vias.len < raw.len);
+    try testing.expectEqual(generated.len, result.vias.len);
+    try testing.expect(generated.len < (try generate(arena, fixture(null))).len);
     for (result.vias) |via| try testing.expect(!crowdsComponent(p, via));
 }

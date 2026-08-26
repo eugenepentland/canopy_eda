@@ -2141,12 +2141,14 @@ src/placement/pdn_impedance.zig::Rail struct_
 src/placement/pdn_impedance.zig::analyze | fn analyze( alloc: std.mem.Allocator, p: optimizer.Placement, routed: router.RouteResult, ) std.mem.Allocator.Error!Analysis
 src/placement/pdn_impedance.zig::analyzeCopper | fn analyzeCopper( alloc: std.mem.Allocator, scratch_alloc: std.mem.Allocator, p: optimizer.Placement, routed: router.RouteResult, zones: []const pour.UserZone, base_edge: ?pour.EdgeField, ) std.mem.Allocator.Error!Analysis
 src/placement/pdn_impedance.zig::writeSpice | fn writeSpice(w: *std.Io.Writer, rail: Rail) std.Io.Writer.Error!void
+src/placement/perimeter_fence.zig::MaskSegment struct_
 src/placement/perimeter_fence.zig::append | fn append(alloc: std.mem.Allocator, p: optimizer.Placement, routed: ?router.RouteResult) std.mem.Allocator.Error!?router.RouteResult
 src/placement/perimeter_fence.zig::generate | fn generate(alloc: std.mem.Allocator, p: optimizer.Placement) std.mem.Allocator.Error![]const router.Via
 src/placement/perimeter_fence.zig::insetOutline | fn insetOutline(alloc: std.mem.Allocator, p: optimizer.Placement, distance: f64) std.mem.Allocator.Error![]const [2]f64
 src/placement/perimeter_fence.zig::isGenerated | fn isGenerated(p: optimizer.Placement, via: router.Via) bool
 src/placement/perimeter_fence.zig::keepoutAllowsNet | fn keepoutAllowsNet(p: optimizer.Placement, net: i32) bool
 src/placement/perimeter_fence.zig::keepoutLimit | fn keepoutLimit(p: optimizer.Placement) f64
+src/placement/perimeter_fence.zig::maskSegments | fn maskSegments(alloc: std.mem.Allocator, p: optimizer.Placement) std.mem.Allocator.Error![]const MaskSegment
 src/placement/perimeter_fence.zig::outlinePoints | fn outlinePoints(alloc: std.mem.Allocator, p: optimizer.Placement) std.mem.Allocator.Error![]const [2]f64
 src/placement/perimeter_fence.zig::provenance value
 src/placement/perimeter_fence.zig::viaServesPad | fn viaServesPad( alloc: std.mem.Allocator, p: optimizer.Placement, net_name: []const u8, x: f64, y: f64, dia: f64, ) bool

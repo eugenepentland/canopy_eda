@@ -246,6 +246,33 @@
     });
   }
 
+  function maskPartBox(part) {
+    var a=(+part.rot||0)*Math.PI/180,c=Math.cos(a),s=Math.sin(a),ca=Math.abs(c),sa=Math.abs(s);
+    var lx=+part.ccx||0,ly=+part.ccy||0;if((part.side||"top")==="bottom")lx=-lx;
+    var cx=(+part.x||0)+lx*c-ly*s,cy=(+part.y||0)+lx*s+ly*c;
+    var hw=(+part.hw||0)*ca+(+part.hh||0)*sa,hh=(+part.hw||0)*sa+(+part.hh||0)*ca;
+    return {x0:cx-hw,y0:cy-hh,x1:cx+hw,y1:cy+hh};
+  }
+
+  function maskBoxInterval(a,b,q) {
+    var lo=0,hi=1;
+    function axis(o,d,mn,mx) { if(Math.abs(d)<=1e-12)return o>=mn&&o<=mx;
+      var ta=(mn-o)/d,tb=(mx-o)/d;lo=Math.max(lo,Math.min(ta,tb));hi=Math.min(hi,Math.max(ta,tb));return lo<=hi; }
+    return axis(a[0],b[0]-a[0],q.x0,q.x1)&&axis(a[1],b[1]-a[1],q.y0,q.y1)?[lo,hi]:null;
+  }
+
+  function maskPerimeterSegments(data,pts,width) {
+    var out=[];
+    for(var ei=0;ei<pts.length;ei++) { var a=pts[ei],b=pts[(ei+1)%pts.length],blocked=[];
+      (data.parts||[]).forEach(function(part){var q=maskPartBox(part),iv=maskBoxInterval(a,b,{x0:q.x0-width,y0:q.y0-width,x1:q.x1+width,y1:q.y1+width});if(iv)blocked.push(iv);});
+      blocked.sort(function(u,v){return u[0]-v[0];});var cursor=0;
+      blocked.forEach(function(iv){var lo=Math.max(0,Math.min(1,iv[0])),hi=Math.max(0,Math.min(1,iv[1]));
+        if(lo>cursor+1e-9)out.push([a[0]+(b[0]-a[0])*cursor,a[1]+(b[1]-a[1])*cursor,a[0]+(b[0]-a[0])*lo,a[1]+(b[1]-a[1])*lo]);cursor=Math.max(cursor,hi);});
+      if(cursor<1-1e-9)out.push([a[0]+(b[0]-a[0])*cursor,a[1]+(b[1]-a[1])*cursor,b[0],b[1]]);
+    }
+    return out;
+  }
+
   function maskCanvas(data, pts, b, width, height, scale, side) {
     var cv = document.createElement("canvas"); cv.width = width; cv.height = height;
     var ctx = cv.getContext("2d");
@@ -260,7 +287,15 @@
     ctx.globalCompositeOperation = "destination-out"; ctx.fillStyle = "#000"; ctx.strokeStyle = "#000";
     drawPads(ctx, data, side, true); punchMaskMerges(ctx, data, side);
     var edge = Math.max(0, +(data.rules && data.rules.perimeter_mask_width) || 0);
-    if (edge > 0) { boardPath(ctx, pts); ctx.lineWidth = 2 * edge; ctx.lineJoin = "round"; ctx.stroke(); }
+    if (edge > 0) {
+      var segments = maskPerimeterSegments(data,pts,edge);
+      ctx.beginPath();
+      segments.forEach(function (s) {
+        if (!s || s.length < 4) return;
+        ctx.moveTo(+s[0], +s[1]); ctx.lineTo(+s[2], +s[3]);
+      });
+      ctx.lineWidth = 2 * edge; ctx.lineJoin = "round"; ctx.stroke();
+    }
     return cv;
   }
 
