@@ -7544,11 +7544,11 @@ function viaViolation(x,y,net,dia,drill){var clr=netClrFor(net),vr=(dia||0.4)/2;
   if(d3<clr-1e-6)return {x:x,y:y,k:"via↔via"};}
  return null;}
 // ── Magnetic snap while drawing (KiCad-style) ───────────────────────────
-// Pad centres and same-net existing track endpoints within a small SCREEN
-// radius override the grid snap so a trace lands exactly on copper. Shift
-// (free angle) keeps grid-only. Exact same-net endpoints also carry `finish` so
-// the click that lands on them can complete the route; centre-line guidance is
-// intentionally not a finishing snap.
+// Pad centres and same-net copper within a small SCREEN radius override the
+// grid snap so a trace lands exactly on a pad, trace body, via, or filled pour.
+// Shift (free angle) keeps grid-only. Same-net copper carries `finish` so the
+// click that lands on it completes the route; centre-line guidance alone does
+// not finish.
 function magSnap(m,net){var pxr=9; // screen-px capture radius
  var wr=pxr*(vb.w/Math.max(svgMetricsGet().cw,1))/S; // convert px→world mm at current zoom
  var best=null,bd=wr;
@@ -7559,6 +7559,7 @@ function magSnap(m,net){var pxr=9; // screen-px capture radius
  (PCB.tracks||[]).forEach(function(t){if(net&&t.net&&t.net!==net)return;
   [[t.x1,t.y1],[t.x2,t.y2]].forEach(function(e){var d=Math.hypot(e[0]-m.x,e[1]-m.y);
    if(d<bd){bd=d;best={x:e[0],y:e[1],mag:true,finish:!!(net&&t.net===net&&(!dtrace||dtrace.laid.indexOf(t)<0))};}});});
+ if(dtrace){var copper=drawNearestRatTarget(m,bd);if(copper){bd=copper.d;best={x:copper.x,y:copper.y,mag:true,finish:true};}}
  if(best)return best;
  // Centre-line snap: while routing roughly along an axis toward a same-net pad
  // AHEAD, lock the cross-axis onto that pad's centre so the WHOLE approach sits
@@ -7636,6 +7637,59 @@ function drawDests(pi,pd,net,layer,x,y){var out=[],seen={};
   if(ra===startRoot&&rb!==startRoot)drawDestAdd(out,seen,l.b,l.bx,l.by);
   else if(rb===startRoot&&ra!==startRoot)drawDestAdd(out,seen,l.a,l.ax,l.ay);});
  return out;}
+// Connectivity root under the route launch. It lets the target collector skip
+// the copper island we are already extending instead of pointing back into it.
+function drawStartRoot(pi,pd,net,layer,x,y){var conn=linkConnCache[netCollapse(net||"")];if(!conn||!conn.roots)return;
+ if(pi!=null&&pd){var pn=connPadNode(pi,pd.x,pd.y),pr=pn&&conn.roots[pn];if(pr!==undefined)return pr;}
+ return conn.roots[connKey(x,y,layer||0)];}
+// Nearest point on a segment/polyline contour. Track bodies and pour rims use
+// this same projection so the ratline lands on copper, not its bounding box.
+function drawSegNearest(x,y,x1,y1,x2,y2){var dx=x2-x1,dy=y2-y1,l2=dx*dx+dy*dy,u=l2?((x-x1)*dx+(y-y1)*dy)/l2:0;
+ u=Math.max(0,Math.min(1,u));var qx=x1+u*dx,qy=y1+u*dy;return {x:qx,y:qy,d:Math.hypot(x-qx,y-qy)};}
+function drawPolyNearest(poly,x,y){var best=null;if(!poly||poly.length<2)return best;
+ for(var i=0,j=poly.length-1;i<poly.length;j=i++){var q=drawSegNearest(x,y,poly[j][0],poly[j][1],poly[i][0],poly[i][1]);if(!best||q.d<best.d)best=q;}
+ return best;}
+// The exact nearest copper point of a carved fill: the cursor itself while it
+// is already over copper, otherwise the outer rim or the rim of its antipad.
+function drawFillNearest(a,x,y){if(!a||!a.poly)return null;
+ if(polyContains(a.poly,x,y)){var holes=a.holes||[];
+  for(var h=0;h<holes.length;h++)if(polyContains(holes[h],x,y))return drawPolyNearest(holes[h],x,y);
+  return {x:x,y:y,d:0};}
+ return drawPolyNearest(a.poly,x,y);}
+function drawSegNearPoly(s,poly,r){if(!poly||poly.length<2)return false;
+ for(var i=0,j=poly.length-1;i<poly.length;j=i++)if(segSegDist(s.x1,s.y1,s.x2,s.y2,poly[j][0],poly[j][1],poly[i][0],poly[i][1])<=r+1e-6)return true;
+ return false;}
+function drawTrackTouchesFill(a,t,r){return trackChords(t).some(function(s){var a1=drawFillNearest(a,s.x1,s.y1),a2=drawFillNearest(a,s.x2,s.y2);
+  if((a1&&a1.d<=r+1e-6)||(a2&&a2.d<=r+1e-6)||drawSegNearPoly(s,a.poly,r))return true;
+  return (a.holes||[]).some(function(h){return drawSegNearPoly(s,h,r);});});}
+function drawFillOnStartRoot(a,tr,roots,root){var here=drawFillNearest(a,tr.lx,tr.ly);if(here&&here.d<1e-6)return true;
+ if(root===undefined||!roots)return false;var hit=false;
+ (PCB.tracks||[]).some(function(t){if(netCollapse(t.net||"")!==netCollapse(tr.net||"")||Number(t.l||0)!==tr.l||roots[connKey(t.x1,t.y1,t.l||0)]!==root)return false;
+  if(drawTrackTouchesFill(a,t,(t.w||tr.w||0.25)/2)){hit=true;return true;}return false;});
+ if(hit)return true;
+ (PCB.vias||[]).some(function(v){if(netCollapse(v.net||"")!==netCollapse(tr.net||"")||roots[connKey(v.x,v.y,0)]!==root)return false;
+  var q=drawFillNearest(a,v.x,v.y);if(q&&q.d<=(v.d||0.4)/2+1e-6){hit=true;return true;}return false;});return hit;}
+// All useful finish geometry on the destination side of this route. Pads stay
+// as the ratsnest fallback; same-net tracks/vias outside the launch component
+// and active-layer filled pours are first-class targets.
+function drawRatTargets(tr){var out=[];(tr.dest||[]).forEach(function(d){out.push({kind:"pad",d:d});});
+ var conn=linkConnCache[netCollapse(tr.net||"")],roots=conn&&conn.roots,root=tr.startRoot;
+ (PCB.tracks||[]).forEach(function(t){if(netCollapse(t.net||"")!==netCollapse(tr.net||"")||Number(t.l||0)!==tr.l||tr.laid.indexOf(t)>=0)return;
+  if(root!==undefined&&roots&&roots[connKey(t.x1,t.y1,t.l||0)]===root)return;out.push({kind:"track",o:t});});
+ (PCB.vias||[]).forEach(function(v){if(netCollapse(v.net||"")!==netCollapse(tr.net||""))return;
+  if(Math.hypot(v.x-tr.lx,v.y-tr.ly)<1e-6)return;
+  if(root!==undefined&&roots&&roots[connKey(v.x,v.y,0)]===root)return;out.push({kind:"via",o:v});});
+ reviewCopperAreas().forEach(function(a){var q=a.q;if(!q||q.keepout||a.kind==="zone"||netCollapse(q.net||"")!==netCollapse(tr.net||"")||reviewAreaLayer(q)!==tr.l)return;
+  if(drawFillOnStartRoot(a,tr,roots,root))return;out.push({kind:"fill",o:a});});
+ return out;}
+function drawTargetNearest(t,head){if(t.kind==="pad"){var c=wpt(t.d.i,t.d.x,t.d.y);return {x:c.x,y:c.y,d:Math.hypot(c.x-head.x,c.y-head.y),kind:t.kind};}
+ if(t.kind==="via"){var v=t.o;return {x:v.x,y:v.y,d:Math.hypot(v.x-head.x,v.y-head.y),kind:t.kind};}
+ if(t.kind==="fill"){var f=drawFillNearest(t.o,head.x,head.y);if(f)f.kind=t.kind;return f;}
+ var best=null;trackChords(t.o).forEach(function(s){var q=drawSegNearest(head.x,head.y,s.x1,s.y1,s.x2,s.y2);if(!best||q.d<best.d)best=q;});
+ if(best)best.kind=t.kind;return best;}
+function drawNearestRatTarget(head,limit){if(!dtrace||!dtrace.ratTargets)return null;var best=null;
+ dtrace.ratTargets.forEach(function(t){var q=drawTargetNearest(t,head);if(q&&(!best||q.d<best.d))best=q;});
+ return best&&(limit==null||best.d<limit)?best:null;}
 // ── Coupled differential-pair drawing ───────────────────────────────────
 // Starting a trace on a pad, via, or track whose net belongs to a
 // `(net-class … (diff-pair))` pair auto-couples the ✎ Draw tool (P uncouples):
@@ -7816,7 +7870,7 @@ function dpViaPair(){var pr=dtrace.pair,vg=viaGeo(dtrace.net);
  rfDropNet(dtrace.net);rfDropNet(pr.net);
  PCB.vias=PCB.vias||[];PCB.vias.push(candV[0]);PCB.vias.push(candV[1]);
  gpuCuEdit();
- dtrace.l=nextDrawLayer(dtrace.l);activeLayer=dtrace.l;syncActiveLayer();drawBtnSync();ovPaintSoon();}
+ dtrace.l=nextDrawLayer(dtrace.l);activeLayer=dtrace.l;syncActiveLayer();dtrace.ratTargets=drawRatTargets(dtrace);drawBtnSync();ovPaintSoon();}
 // Backspace in pair mode unwinds the last CLICK as a unit — both legs' segs
 // popped by identity, an inside-corner trim restored, both heads and the
 // junction direction put back.
@@ -7833,7 +7887,9 @@ function drawStart(net,layer,x,y,pi,pd){
  if(dests.length)routeStatMsg("route "+nLeaf(net)+" → "+
   dests.map(function(d){return refLabel(P[d.i].ref);}).join(", "));
  var tr={net:net,l:layer,w:trackW(net),lx:x,ly:y,n:0,undo:snapAll(),laid:[],dest:dests,pdir:null,steps:[],
+  startRoot:drawStartRoot(pi,pd,net,layer,x,y),ratTargets:[],
   startPad:(pi!=null&&pd&&!pd.thru)?{i:pi,pd:pd,l:layer}:null};
+ tr.ratTargets=drawRatTargets(tr);
  // Auto-couple a declared pair from either its launch pads or already-routed
  // copper. The latter is what preserves pair mode after ending at a via and
  // resuming on an inner layer. Five millimetres is the existing launch-pair
@@ -7919,7 +7975,7 @@ function drawViaHere(){if(!dtrace)return;
  rfDropNet(dtrace.net);
  PCB.vias.push(candV[0]);
  gpuCuEdit();
- dtrace.l=nextDrawLayer(dtrace.l);activeLayer=dtrace.l;syncActiveLayer();drawBtnSync();ovPaintSoon();}
+ dtrace.l=nextDrawLayer(dtrace.l);activeLayer=dtrace.l;syncActiveLayer();dtrace.ratTargets=drawRatTargets(dtrace);drawBtnSync();ovPaintSoon();}
 function drawBack(){if(!dtrace)return;
  if(dtrace.pair){dpBack();return;}
  var st=dtrace.steps.length?dtrace.steps[dtrace.steps.length-1]:null;
@@ -7942,11 +7998,9 @@ function paintViaTool(ctx){if(!viaMode||!viaCur)return;var q=viaNet?viaSnap(viaC
  ctx.beginPath();ctx.arc(X(q.x),Y(q.y),rh,0,6.2832);ctx.fill();ctx.strokeStyle=blocked?"#ff4d4d":"#7ee787";
  ctx.lineWidth=1.3;ctx.setLineDash(viaNet?[]:[3,2]);ctx.beginPath();ctx.arc(X(q.x),Y(q.y),r+3,0,6.2832);ctx.stroke();ctx.restore();}
 // Keep one live ratsnest line attached to the ROUTABLE preview head, aimed at
-// the closest destination pad centre. Using the clipped preview endpoint (not
-// the raw cursor) makes the line say exactly where legal copper currently ends.
-function drawNearestDest(head){if(!head||!dtrace||!dtrace.dest)return null;
- var best=null,bd=1e100;dtrace.dest.forEach(function(d){var c=wpt(d.i,d.x,d.y),dd=Math.hypot(c.x-head.x,c.y-head.y);
-  if(dd<bd){bd=dd;best={x:c.x,y:c.y,d:d};}});return best;}
+// the closest point on destination copper. Using the clipped preview endpoint
+// (not the raw cursor) makes the line say exactly where legal copper ends.
+function drawNearestDest(head){return head?drawNearestRatTarget(head):null;}
 function paintDrawRatline(ctx,head){var q=drawNearestDest(head);if(!q)return;
  ctx.save();ctx.setLineDash([]);ctx.strokeStyle=(netColOn&&netColorOf(netCollapse(dtrace.net)))||TH.ratsLine;
  ctx.globalAlpha=0.72;ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(X(head.x),Y(head.y));ctx.lineTo(X(q.x),Y(q.y));ctx.stroke();ctx.restore();}

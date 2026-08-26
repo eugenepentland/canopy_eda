@@ -850,11 +850,19 @@ test "PCB editor finishes a manual trace on a magnetic endpoint snap" {
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
-// spec: Web Server - While hand-routing, one live ratsnest line follows the legal preview endpoint to the closest unresolved destination, including when routing resumes from existing copper.
+// spec: Web Server - While hand-routing, one live ratsnest line follows the legal preview endpoint to the closest unresolved same-net pad, trace body, via, or filled-pour point outside the launch island, including when routing resumes from existing copper.
 test "PCB editor carries the live route ratsnest to the nearest destination" {
     const markers = [_][]const u8{
         "function drawDests(pi,pd,net,layer,x,y)",
-        "startRoot=conn.roots[connKey(x,y,layer||0)]",
+        "function drawRatTargets(tr)",
+        "kind:\"track\"",
+        "kind:\"via\"",
+        "kind:\"fill\"",
+        "function drawFillNearest(a,x,y)",
+        "function drawTrackTouchesFill(a,t,r)",
+        "function drawFillOnStartRoot(a,tr,roots,root)",
+        "function drawNearestRatTarget(head,limit)",
+        "best={x:copper.x,y:copper.y,mag:true,finish:true}",
         "function drawNearestDest(head)",
         "function paintDrawRatline(ctx,head)",
         "var head=dl.legs.length?dl.legs[dl.legs.length-1]",
