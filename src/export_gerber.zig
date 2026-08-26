@@ -735,7 +735,9 @@ fn thermalRelief(g: *Gx, p: optimizer.Part, pad: geometry.Pad, gap: f64) Error!v
 /// fence adds openings centred on the exact finished edge; CAM clips the
 /// outside half, leaving the authored `mask-width` band inward on both faces.
 /// Edge-mounted component courtyards split that stroke automatically, keeping
-/// mask beneath the hardware without an authored exclusion list.
+/// mask beneath the hardware without an authored exclusion list. Pads and
+/// routed traces on each face split it again, retaining at least 0.2 mm of
+/// finished mask between their copper/apertures and the perimeter opening.
 fn writeMask(g: *Gx, placement: optimizer.Placement, copper: Copper, side: optimizer.Side) Error!void {
     const margin = placement.rules.design.mask.margin;
     var physical = copper;
@@ -771,7 +773,7 @@ fn writeMask(g: *Gx, placement: optimizer.Placement, copper: Copper, side: optim
     }
     const fence = placement.rules.perimeter_fence;
     if (fence.mask_width > 0) {
-        const segments = try perimeter_fence.maskSegments(g.arena, placement);
+        const segments = try perimeter_fence.maskSegmentsForFace(g.arena, placement, physical.tracks, side);
         if (segments.len > 0) {
             try g.use(.c, 2 * fence.mask_width, 0);
             for (segments) |segment| try g.line(segment.a[0], segment.a[1], segment.b[0], segment.b[1]);
@@ -2481,6 +2483,68 @@ test "perimeter mask band leaves an automatic edge-component gap" {
     try testing.expect(std.mem.indexOf(u8, mask, "X0Y10000000D02*\nX8300000Y10000000D01*") != null);
     try testing.expect(std.mem.indexOf(u8, mask, "X11700000Y10000000D02*\nX20000000Y10000000D01*") != null);
     try testing.expect(std.mem.indexOf(u8, mask, "X0Y10000000D02*\nX20000000Y10000000D01*") == null);
+    try testing.expect((try perimeter_fence.maskSegments(arena, placement)).len > 0);
+}
+
+// spec: placement/perimeter-fence - each face's perimeter opening stops at least 0.2 mm before routed traces and pad apertures without suppressing valid via sites
+test "perimeter mask keeps a face-aware copper web" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const pads = [_]geometry.Pad{.{
+        .number = "1",
+        .x = -5,
+        .y = -4.5,
+        .w = 1,
+        .h = 0.4,
+    }};
+    var parts = [_]optimizer.Part{.{
+        .ref_des = "J1",
+        .kind = .hub,
+        .x = 10,
+        .y = 5,
+        .hw = 0,
+        .hh = 0,
+        .pads = &pads,
+        .fallback = false,
+    }};
+    const nets = [_]export_kicad.FlatNet{.{ .name = "GND", .pins = &.{} }};
+    var placement = testPlacement(&parts, &nets);
+    placement.rules.perimeter_fence = .{
+        .via_dia = 0.4,
+        .via_drill = 0.2,
+        .spacing = 1,
+        .edge_offset = 0.5,
+        .mask_width = 0.7,
+    };
+    const tracks = [_]router.Track{.{
+        .x1 = 14,
+        .y1 = 0,
+        .x2 = 14,
+        .y2 = 2,
+        .layer = 0,
+        .width = 0.2,
+        .net = -1,
+    }};
+
+    var top_writer: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&top_writer.writer, arena, placement, .{ .tracks = &tracks }, &.{}, export_fab.frameFor(placement), .{ .mask = .top }, .{ .function = "Soldermask,Top" });
+    const top = top_writer.written();
+    // The pad aperture ends at x=5.55 (0.5 mm copper radius + 0.05 mm mask
+    // margin); its nearest perimeter-stroke cap ends at x=5.35, leaving the
+    // local 0.2 mm web. The 0.2 mm trace similarly blocks x=13..15 after its
+    // radius, web, and the perimeter stroke radius are included.
+    try testing.expect(std.mem.indexOf(u8, top, "X0Y10000000D02*\nX3550000Y10000000D01*") != null);
+    try testing.expect(std.mem.indexOf(u8, top, "X6450000Y10000000D02*\nX13000000Y10000000D01*") != null);
+    try testing.expect(std.mem.indexOf(u8, top, "X15000000Y10000000D02*\nX20000000Y10000000D01*") != null);
+
+    var bottom_writer: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&bottom_writer.writer, arena, placement, .{ .tracks = &tracks }, &.{}, export_fab.frameFor(placement), .{ .mask = .bottom }, .{ .function = "Soldermask,Bot" });
+    // Both obstacles are top-only, so they do not remove bottom-face mask.
+    try testing.expect(std.mem.indexOf(u8, bottom_writer.written(), "X0Y10000000D02*\nX20000000Y10000000D01*") != null);
+
+    const sites = try perimeter_fence.generate(arena, placement);
+    try testing.expectEqual(@as(usize, 56), sites.len);
 }
 
 // spec: export_gerber - the mask margin comes from (design-rules …), defaulting byte-identically to 0.05 mm

@@ -3705,6 +3705,7 @@ fn syncPerimeterMaskSegments(
     project_dir: []const u8,
     name: []const u8,
     mask: pcb_layout.SyncPerimeterMask,
+    side: optimizer.Side,
 ) ?[]const perimeter_fence.MaskSegment {
     var layout = pcb_layout.loadSyncLayout(alloc, project_dir, name) orelse return null;
     var poses: std.ArrayList(optimizer.RefPose) = .empty;
@@ -3734,7 +3735,11 @@ fn syncPerimeterMaskSegments(
             .poly = mask.outline,
         } },
     }, .{}) catch return null;
-    return perimeter_fence.maskSegments(alloc, placement) catch null;
+    const tracks = if (pcb_layout.loadSyncRoutes(alloc, project_dir, name)) |saved|
+        if (pcb_layout.restoreRoutes(alloc, saved, placement.nets)) |routes| routes.tracks else &.{}
+    else
+        &.{};
+    return perimeter_fence.maskSegmentsForFace(alloc, placement, tracks, side) catch null;
 }
 
 /// Seed the DSL-authored edge mask opening into a new KiCad board as F.Mask
@@ -3754,15 +3759,18 @@ fn emitPerimeterMask(
 ) !void {
     if (!d.board_fresh or !seedsWholeLayout(d)) return;
     const mask = pcb_layout.loadSyncPerimeterMask(d.spc.arena, block, project_dir, name) orelse return;
-    const clipped = syncPerimeterMaskSegments(d.spc.arena, block, project_dir, name, mask);
-    const layers = [_][]const u8{ proto_layer_f_mask, proto_layer_b_mask };
+    const layers = [_]struct { name: []const u8, side: optimizer.Side }{
+        .{ .name = proto_layer_f_mask, .side = .top },
+        .{ .name = proto_layer_b_mask, .side = .bottom },
+    };
     for (layers) |layer| {
+        const clipped = syncPerimeterMaskSegments(d.spc.arena, block, project_dir, name, mask, layer.side);
         if (clipped) |segments| for (segments) |segment| {
             if (!first.*) try w.writeAll(",");
             first.* = false;
             try w.writeAll(board_item_op_open);
             var item_first = true;
-            try writeBoardShapeOpen(w, layer, 2 * mask.width, &item_first);
+            try writeBoardShapeOpen(w, layer.name, 2 * mask.width, &item_first);
             try writeSegmentGeom(w, segment.a[0], segment.a[1], segment.b[0], segment.b[1]);
             try w.writeAll("}}}");
         } else for (mask.outline, 0..) |a, i| {
@@ -3771,7 +3779,7 @@ fn emitPerimeterMask(
             first.* = false;
             try w.writeAll(board_item_op_open);
             var item_first = true;
-            try writeBoardShapeOpen(w, layer, 2 * mask.width, &item_first);
+            try writeBoardShapeOpen(w, layer.name, 2 * mask.width, &item_first);
             try writeSegmentGeom(w, a[0], a[1], b[0], b[1]);
             try w.writeAll("}}}");
         };

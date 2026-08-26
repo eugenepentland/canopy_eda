@@ -2077,7 +2077,7 @@ the owning switch pad axis.
 
 ## placement/perimeter-fence
 
-Public functions: generate, append, outlinePoints, maskSegments, isGenerated
+Public functions: generate, append, outlinePoints, maskSegments, maskSegmentsForFace, isGenerated
 
 A `(board … (perimeter-fence …))` declaration generates a plated via ring from
 the board's exact finished outline. Its `(via DIA DRILL)` values are finished
@@ -2093,6 +2093,7 @@ current outline and declaration, not accumulated as hand-authored copper.
 - incomplete declarations and unresolved stitch nets emit no copper
 - derived perimeter sites yield to component courtyards even when the component shares the stitch net
 - component courtyards automatically interrupt both the generated vias and exposed mask band
+- each face's perimeter opening stops at least 0.2 mm before routed traces and pad apertures without suppressing valid via sites
 - a perimeter keepout begins at the fence via's inward copper edge, carries typed block policy, and admits named nets
 - Gerber opens the authored-width solder-mask band around the exact board outline on both faces
 - completeness-waiver: empty inputs (no effective board outline, incomplete dimensions, or an unresolved net produce an empty site set)
