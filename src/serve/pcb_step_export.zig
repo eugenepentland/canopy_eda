@@ -24,6 +24,7 @@ const max_instances: usize = 8192;
 const max_points_per_body: usize = 250_000;
 const max_triangles_per_body: usize = 250_000;
 const max_board_outline_points: usize = 2048;
+const max_board_outline_arcs: usize = 512;
 const max_board_holes: usize = 1024;
 const round_hole_segments: usize = 24;
 const slot_half_segments: usize = 12;
@@ -52,11 +53,21 @@ const BoardHole = struct {
     y2: ?f64 = null,
 };
 
+const BoardArc = struct {
+    p1: [2]f64,
+    pm: [2]f64,
+    p2: [2]f64,
+};
+
 const Board = struct {
     name: []const u8 = "PCB",
     /// Viewer-world millimetres (X right, Y north), without a repeated closing
     /// point. The server still tolerates that common repeated endpoint.
     outline: []const [2]f64,
+    /// Exact three-point circular pieces within `outline`. The polygon remains
+    /// the validation/containment fallback; these replace their owned chord
+    /// runs with STEP CIRCLE edges and cylindrical side faces.
+    arcs: []const BoardArc = &.{},
     holes: []const BoardHole = &.{},
     thickness: f64,
     color: ?[3]f64 = .{ 0.047, 0.404, 0.204 },
@@ -157,6 +168,66 @@ fn finitePoint(p: [3]f64) bool {
 fn finitePoint2(p: [2]f64) bool {
     return std.math.isFinite(p[0]) and std.math.isFinite(p[1]) and
         @abs(p[0]) <= 1_000_000 and @abs(p[1]) <= 1_000_000;
+}
+
+const BoardArcCircle = struct {
+    center: [2]f64,
+    radius: f64,
+    start_angle: f64,
+    sweep: f64,
+};
+
+fn boardArcCircle(arc: BoardArc) ?BoardArcCircle {
+    if (!finitePoint2(arc.p1)) return null;
+    if (!finitePoint2(arc.pm)) return null;
+    if (!finitePoint2(arc.p2)) return null;
+    const x1 = arc.p1[0];
+    const y1 = arc.p1[1];
+    const xm = arc.pm[0];
+    const ym = arc.pm[1];
+    const x2 = arc.p2[0];
+    const y2 = arc.p2[1];
+    const d = 2 * (x1 * (ym - y2) + xm * (y2 - y1) + x2 * (y1 - ym));
+    if (@abs(d) < 1e-12) return null;
+    const s1 = x1 * x1 + y1 * y1;
+    const sm = xm * xm + ym * ym;
+    const s2 = x2 * x2 + y2 * y2;
+    const cx = (s1 * (ym - y2) + sm * (y2 - y1) + s2 * (y1 - ym)) / d;
+    const cy = (s1 * (x2 - xm) + sm * (x1 - x2) + s2 * (xm - x1)) / d;
+    const radius = std.math.hypot(x1 - cx, y1 - cy);
+    if (!(radius > 1e-9) or !std.math.isFinite(radius)) return null;
+    const start = std.math.atan2(y1 - cy, x1 - cx);
+    const mid = std.math.atan2(ym - cy, xm - cx);
+    const finish = std.math.atan2(y2 - cy, x2 - cx);
+    const ccw_mid = @mod(mid - start, std.math.tau);
+    const ccw_end = @mod(finish - start, std.math.tau);
+    const sweep = if (ccw_mid <= ccw_end) ccw_end else ccw_end - std.math.tau;
+    if (@abs(sweep) < 1e-9 or @abs(sweep) >= std.math.tau - 1e-9) return null;
+    return .{ .center = .{ cx, cy }, .radius = radius, .start_angle = start, .sweep = sweep };
+}
+
+fn reversedBoardArc(arc: BoardArc) BoardArc {
+    return .{ .p1 = arc.p2, .pm = arc.pm, .p2 = arc.p1 };
+}
+
+fn arcProgress(circle: BoardArcCircle, point: [2]f64) f64 {
+    const angle = std.math.atan2(point[1] - circle.center[1], point[0] - circle.center[0]);
+    return if (circle.sweep >= 0)
+        @mod(angle - circle.start_angle, std.math.tau)
+    else
+        @mod(circle.start_angle - angle, std.math.tau);
+}
+
+fn arcOwnsDirectedSegment(circle: BoardArcCircle, a: [2]f64, b: [2]f64, tolerance: f64) bool {
+    const ra = std.math.hypot(a[0] - circle.center[0], a[1] - circle.center[1]);
+    const rb = std.math.hypot(b[0] - circle.center[0], b[1] - circle.center[1]);
+    if (@abs(ra - circle.radius) > tolerance or @abs(rb - circle.radius) > tolerance) return false;
+    const angular_tolerance = tolerance / @max(circle.radius, tolerance);
+    const pa = arcProgress(circle, a);
+    const pb = arcProgress(circle, b);
+    return pa <= @abs(circle.sweep) + angular_tolerance and
+        pb <= @abs(circle.sweep) + angular_tolerance and
+        pb + angular_tolerance >= pa;
 }
 
 fn pointDistanceSquared2(a: [2]f64, b: [2]f64) f64 {
@@ -619,9 +690,19 @@ const StyleState = struct {
     }
 };
 
+const PreparedCurve = struct {
+    start: [2]f64,
+    finish: [2]f64,
+    arc: ?BoardArcCircle = null,
+};
+
+const PreparedRing = struct {
+    curves: []const PreparedCurve,
+};
+
 const PreparedBoard = struct {
     name: []const u8,
-    rings: []const []const [2]f64,
+    rings: []const PreparedRing,
     thickness: f64,
     color: ?[3]f64,
 };
@@ -634,6 +715,96 @@ fn reversePoints2(points: [][2]f64) void {
         points[i] = points[opposite];
         points[opposite] = tmp;
     }
+}
+
+fn pointIndexNear(points: []const [2]f64, wanted: [2]f64) ?usize {
+    for (points, 0..) |point, i| {
+        if (pointDistanceSquared2(point, wanted) <= 1e-10) return i;
+    }
+    return null;
+}
+
+fn prepareLineRing(allocator: std.mem.Allocator, points: []const [2]f64) std.mem.Allocator.Error!PreparedRing {
+    const curves = try allocator.alloc(PreparedCurve, points.len);
+    for (curves, 0..) |*curve, i| curve.* = .{
+        .start = points[i],
+        .finish = points[(i + 1) % points.len],
+    };
+    return .{ .curves = curves };
+}
+
+fn prepareOuterRing(
+    allocator: std.mem.Allocator,
+    points: []const [2]f64,
+    source_arcs: []const BoardArc,
+    reversed: bool,
+) (ExportError || std.mem.Allocator.Error)!PreparedRing {
+    if (source_arcs.len == 0) return prepareLineRing(allocator, points);
+    const edge_arcs = try allocator.alloc(?usize, points.len);
+    @memset(edge_arcs, null);
+    const arc_starts = try allocator.alloc(usize, source_arcs.len);
+    const arc_counts = try allocator.alloc(usize, source_arcs.len);
+    const circles = try allocator.alloc(BoardArcCircle, source_arcs.len);
+
+    for (source_arcs, 0..) |source_arc, arc_index| {
+        const arc = if (reversed) reversedBoardArc(source_arc) else source_arc;
+        const circle = boardArcCircle(arc) orelse return error.InvalidGeometry;
+        const start = pointIndexNear(points, arc.p1) orelse return error.InvalidGeometry;
+        const finish = pointIndexNear(points, arc.p2) orelse return error.InvalidGeometry;
+        if (start == finish) return error.InvalidGeometry;
+        var edge = start;
+        var count: usize = 0;
+        while (edge != finish) {
+            if (count >= points.len) return error.InvalidGeometry;
+            const after = (edge + 1) % points.len;
+            if (!arcOwnsDirectedSegment(circle, points[edge], points[after], 0.0001)) return error.InvalidGeometry;
+            if (edge_arcs[edge] != null) return error.InvalidGeometry;
+            edge_arcs[edge] = arc_index;
+            count += 1;
+            edge = after;
+        }
+        if (count == 0) return error.InvalidGeometry;
+        arc_starts[arc_index] = start;
+        arc_counts[arc_index] = count;
+        circles[arc_index] = circle;
+    }
+
+    var first_edge: usize = 0;
+    var found_line = false;
+    for (edge_arcs, 0..) |arc, edge| {
+        if (arc == null) {
+            first_edge = edge;
+            found_line = true;
+            break;
+        }
+    }
+    if (!found_line) first_edge = arc_starts[0];
+
+    var curves: std.ArrayList(PreparedCurve) = .empty;
+    errdefer curves.deinit(allocator);
+    var edge = first_edge;
+    var traversed: usize = 0;
+    while (traversed < points.len) {
+        if (edge_arcs[edge]) |arc_index| {
+            if (edge != arc_starts[arc_index]) return error.InvalidGeometry;
+            const count = arc_counts[arc_index];
+            const after = (edge + count) % points.len;
+            try curves.append(allocator, .{
+                .start = points[edge],
+                .finish = points[after],
+                .arc = circles[arc_index],
+            });
+            traversed += count;
+            edge = after;
+        } else {
+            const after = (edge + 1) % points.len;
+            try curves.append(allocator, .{ .start = points[edge], .finish = points[after] });
+            traversed += 1;
+            edge = after;
+        }
+    }
+    if (edge != first_edge or curves.items.len < 2) return error.InvalidGeometry;
+    return .{ .curves = try curves.toOwnedSlice(allocator) };
 }
 
 const BoardHoleAxis = struct { start: [2]f64, finish: [2]f64 };
@@ -701,7 +872,7 @@ fn prepareBoard(allocator: std.mem.Allocator, board: Board) (ExportError || std.
     if (board.name.len == 0 or board.name.len > 256) return error.InvalidGeometry;
     if (!std.math.isFinite(board.thickness)) return error.InvalidGeometry;
     if (!(board.thickness > 0.00001) or board.thickness > 10_000) return error.InvalidGeometry;
-    if (board.outline.len < 3 or board.outline.len > max_board_outline_points + 1 or board.holes.len > max_board_holes) return error.InvalidGeometry;
+    if (board.outline.len < 3 or board.outline.len > max_board_outline_points + 1 or board.arcs.len > max_board_outline_arcs or board.holes.len > max_board_holes) return error.InvalidGeometry;
     if (board.color) |color| if (StyleState.colorKey(color) == null) return error.InvalidGeometry;
 
     var outline_len = board.outline.len;
@@ -717,20 +888,21 @@ fn prepareBoard(allocator: std.mem.Allocator, board: Board) (ExportError || std.
     if (!simplePolygon2(outer)) return error.InvalidGeometry;
     // The top face uses a +Z plane. Its outer loop is counter-clockwise;
     // every inner loop is clockwise, giving one untriangulated planar cap.
-    if (area < 0) reversePoints2(outer);
+    const reversed = area < 0;
+    if (reversed) reversePoints2(outer);
 
-    const rings = try allocator.alloc([]const [2]f64, board.holes.len + 1);
-    rings[0] = outer;
+    const rings = try allocator.alloc(PreparedRing, board.holes.len + 1);
+    rings[0] = try prepareOuterRing(allocator, outer, board.arcs, reversed);
     for (board.holes, 0..) |hole, hole_index| {
         const axis = try validateBoardHole(board, outer, hole_index);
-        rings[hole_index + 1] = try makeBoardHoleRing(allocator, axis, hole.r);
+        rings[hole_index + 1] = try prepareLineRing(allocator, try makeBoardHoleRing(allocator, axis, hole.r));
     }
     return .{ .name = board.name, .rings = rings, .thickness = board.thickness, .color = board.color };
 }
 
 const BoardVertex = struct { point: u64, vertex: u64 };
 const BoardRingTopology = struct {
-    points: []const [2]f64,
+    curves: []const PreparedCurve,
     top: []BoardVertex,
     bottom: []BoardVertex,
     top_edges: []u64,
@@ -779,32 +951,61 @@ fn writeLineEdge(
     return edge;
 }
 
+fn writeCircleEdge(
+    w: *std.Io.Writer,
+    next_id: *u64,
+    curve: PreparedCurve,
+    z: f64,
+    start_vertex: u64,
+    end_vertex: u64,
+) (ExportError || std.Io.Writer.Error)!u64 {
+    const arc = curve.arc orelse return error.InvalidGeometry;
+    const radial = normalized(.{ curve.start[0] - arc.center[0], curve.start[1] - arc.center[1], 0 }) orelse return error.InvalidGeometry;
+    const center = try writeCartesianPointEntity(w, next_id, .{ arc.center[0], arc.center[1], z });
+    const reference = takeId(next_id);
+    try writeDirection(w, reference, radial);
+    const placement = takeId(next_id);
+    try w.print("#{d}=AXIS2_PLACEMENT_3D('',#{d},#15,#{d});\n", .{ placement, center, reference });
+    const circle = takeId(next_id);
+    try w.print("#{d}=CIRCLE('',#{d},", .{ circle, placement });
+    try stepReal(w, arc.radius);
+    try w.writeAll(");\n");
+    const edge = takeId(next_id);
+    try w.print("#{d}=EDGE_CURVE('',#{d},#{d},#{d},{s});\n", .{ edge, start_vertex, end_vertex, circle, if (arc.sweep > 0) ".T." else ".F." });
+    return edge;
+}
+
 fn writeRingTopology(
     allocator: std.mem.Allocator,
     w: *std.Io.Writer,
     next_id: *u64,
-    points: []const [2]f64,
+    ring: PreparedRing,
     thickness: f64,
 ) (ExportError || std.mem.Allocator.Error || std.Io.Writer.Error)!BoardRingTopology {
-    const top = try allocator.alloc(BoardVertex, points.len);
-    const bottom = try allocator.alloc(BoardVertex, points.len);
-    for (points, 0..) |point, i| {
+    const top = try allocator.alloc(BoardVertex, ring.curves.len);
+    const bottom = try allocator.alloc(BoardVertex, ring.curves.len);
+    for (ring.curves, 0..) |curve, i| {
+        const point = curve.start;
         top[i] = try writeBoardVertex(w, next_id, .{ point[0], point[1], 0 });
         bottom[i] = try writeBoardVertex(w, next_id, .{ point[0], point[1], -thickness });
     }
-    const top_edges = try allocator.alloc(u64, points.len);
-    const bottom_edges = try allocator.alloc(u64, points.len);
-    const vertical_edges = try allocator.alloc(u64, points.len);
-    for (points, 0..) |point, i| {
-        const after = (i + 1) % points.len;
-        const next = points[after];
-        const edge_direction = [3]f64{ next[0] - point[0], next[1] - point[1], 0 };
-        top_edges[i] = try writeLineEdge(w, next_id, top[i].point, top[i].vertex, top[after].vertex, edge_direction);
-        bottom_edges[i] = try writeLineEdge(w, next_id, bottom[i].point, bottom[i].vertex, bottom[after].vertex, edge_direction);
+    const top_edges = try allocator.alloc(u64, ring.curves.len);
+    const bottom_edges = try allocator.alloc(u64, ring.curves.len);
+    const vertical_edges = try allocator.alloc(u64, ring.curves.len);
+    for (ring.curves, 0..) |curve, i| {
+        const after = (i + 1) % ring.curves.len;
+        if (curve.arc != null) {
+            top_edges[i] = try writeCircleEdge(w, next_id, curve, 0, top[i].vertex, top[after].vertex);
+            bottom_edges[i] = try writeCircleEdge(w, next_id, curve, -thickness, bottom[i].vertex, bottom[after].vertex);
+        } else {
+            const edge_direction = [3]f64{ curve.finish[0] - curve.start[0], curve.finish[1] - curve.start[1], 0 };
+            top_edges[i] = try writeLineEdge(w, next_id, top[i].point, top[i].vertex, top[after].vertex, edge_direction);
+            bottom_edges[i] = try writeLineEdge(w, next_id, bottom[i].point, bottom[i].vertex, bottom[after].vertex, edge_direction);
+        }
         vertical_edges[i] = try writeLineEdge(w, next_id, top[i].point, top[i].vertex, bottom[i].vertex, .{ 0, 0, -1 });
     }
     return .{
-        .points = points,
+        .curves = ring.curves,
         .top = top,
         .bottom = bottom,
         .top_edges = top_edges,
@@ -879,7 +1080,7 @@ fn writeBoardSideFace(
     ring: BoardRingTopology,
     edge_index: usize,
 ) (ExportError || std.Io.Writer.Error)!u64 {
-    const after = (edge_index + 1) % ring.points.len;
+    const after = (edge_index + 1) % ring.curves.len;
     // Reversing the top edge makes every shared shell edge oppose its cap use:
     // top(j->i), down(i), bottom(i->j), up(j).
     const oriented = [4]u64{
@@ -893,22 +1094,41 @@ fn writeBoardSideFace(
     const bound = takeId(next_id);
     try w.print("#{d}=FACE_OUTER_BOUND('',#{d},.T.);\n", .{ bound, loop });
 
-    const point = ring.points[edge_index];
-    const next = ring.points[after];
-    const dx = next[0] - point[0];
-    const dy = next[1] - point[1];
-    const length = @sqrt(dx * dx + dy * dy);
-    if (!(length > 1e-12)) return error.InvalidGeometry;
-    const normal_id = takeId(next_id);
-    try writeDirection(w, normal_id, .{ dy / length, -dx / length, 0 });
-    const reference_id = takeId(next_id);
-    try writeDirection(w, reference_id, .{ -dx / length, -dy / length, 0 });
-    const placement = takeId(next_id);
-    try w.print("#{d}=AXIS2_PLACEMENT_3D('',#{d},#{d},#{d});\n", .{ placement, ring.top[after].point, normal_id, reference_id });
-    const plane = takeId(next_id);
-    try w.print("#{d}=PLANE('',#{d});\n", .{ plane, placement });
+    const curve = ring.curves[edge_index];
+    var surface: u64 = undefined;
+    var same_sense = true;
+    if (curve.arc) |arc| {
+        const radial = normalized(.{ curve.start[0] - arc.center[0], curve.start[1] - arc.center[1], 0 }) orelse return error.InvalidGeometry;
+        const center = try writeCartesianPointEntity(w, next_id, .{ arc.center[0], arc.center[1], 0 });
+        const reference = takeId(next_id);
+        try writeDirection(w, reference, radial);
+        const placement = takeId(next_id);
+        try w.print("#{d}=AXIS2_PLACEMENT_3D('',#{d},#15,#{d});\n", .{ placement, center, reference });
+        surface = takeId(next_id);
+        try w.print("#{d}=CYLINDRICAL_SURFACE('',#{d},", .{ surface, placement });
+        try stepReal(w, arc.radius);
+        try w.writeAll(");\n");
+        // With a CCW outer ring, a positive circular sweep has the cylinder's
+        // natural radial normal on the material exterior. A negative (concave)
+        // sweep needs the inverse face sense. Clockwise hole rings follow the
+        // same material-on-the-left boundary convention.
+        same_sense = arc.sweep > 0;
+    } else {
+        const dx = curve.finish[0] - curve.start[0];
+        const dy = curve.finish[1] - curve.start[1];
+        const length = @sqrt(dx * dx + dy * dy);
+        if (!(length > 1e-12)) return error.InvalidGeometry;
+        const normal_id = takeId(next_id);
+        try writeDirection(w, normal_id, .{ dy / length, -dx / length, 0 });
+        const reference_id = takeId(next_id);
+        try writeDirection(w, reference_id, .{ -dx / length, -dy / length, 0 });
+        const placement = takeId(next_id);
+        try w.print("#{d}=AXIS2_PLACEMENT_3D('',#{d},#{d},#{d});\n", .{ placement, ring.top[after].point, normal_id, reference_id });
+        surface = takeId(next_id);
+        try w.print("#{d}=PLANE('',#{d});\n", .{ surface, placement });
+    }
     const face = takeId(next_id);
-    try w.print("#{d}=ADVANCED_FACE('',(#{d}),#{d},.T.);\n", .{ face, bound, plane });
+    try w.print("#{d}=ADVANCED_FACE('',(#{d}),#{d},{s});\n", .{ face, bound, surface, if (same_sense) ".T." else ".F." });
     return face;
 }
 
@@ -924,13 +1144,13 @@ fn writeAnalyticBoard(
     var side_count: usize = 0;
     for (prepared.rings, 0..) |ring, i| {
         topology[i] = try writeRingTopology(allocator, w, next_id, ring, prepared.thickness);
-        side_count += ring.len;
+        side_count += ring.curves.len;
     }
     const faces = try allocator.alloc(u64, side_count + 2);
     faces[0] = try writePlanarCap(allocator, w, next_id, topology, true);
     faces[1] = try writePlanarCap(allocator, w, next_id, topology, false);
     var face_index: usize = 2;
-    for (topology) |ring| for (ring.points, 0..) |_, edge_index| {
+    for (topology) |ring| for (ring.curves, 0..) |_, edge_index| {
         faces[face_index] = try writeBoardSideFace(w, next_id, ring, edge_index);
         face_index += 1;
     };
@@ -1205,8 +1425,8 @@ fn sendError(res: *httpz.Response, status: u16, message: []const u8) void {
 
 /// POST /api/pcb-step/:name — compose exact source STEP B-reps with the
 /// analytic board and optional generated heatsink solids, returning one
-/// self-contained AP242 file. Raster artwork is intentionally not STEP
-/// geometry; the browser packages it as Fusion decal PNGs.
+/// self-contained AP242 file. Raster preview artwork is intentionally omitted
+/// from STEP rather than approximated with selectable triangle geometry.
 pub fn pcbStepApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse return sendError(res, 404, "design not found");
     if (!safeDesignName(name)) return sendError(res, 400, "invalid design name");
@@ -1380,6 +1600,31 @@ test "PCB recipe exports one analytic manifold solid and ignores legacy artwork 
     try std.testing.expect(std.mem.indexOf(u8, output, "CARTESIAN_POINT('',(0.000000000,0.000000000,-1.600000000))") != null);
 }
 
+test "PCB outline fillet exports native circular edges and a cylindrical side face" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    // Clockwise input mirrors the browser's Y-flipped board frame. The server
+    // normalizes it to a CCW outer wire without losing the three-point arc.
+    const output = try build(arena.allocator(), ".", "rounded-fixture", .{ .board = .{
+        .name = "PCB solid",
+        .outline = &.{
+            .{ 0, 10 },                    .{ 10, 10 }, .{ 10, 2 },
+            .{ 9.414213562, 0.585786438 }, .{ 8, 0 },   .{ 0, 0 },
+        },
+        .arcs = &.{.{
+            .p1 = .{ 10, 2 },
+            .pm = .{ 9.414213562, 0.585786438 },
+            .p2 = .{ 8, 0 },
+        }},
+        .thickness = 1.6,
+    } });
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, output, "=CIRCLE('',"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output, "=CYLINDRICAL_SURFACE('',"));
+    try std.testing.expectEqual(@as(usize, 6), std.mem.count(u8, output, "=PLANE('',"));
+    try std.testing.expectEqual(@as(usize, 7), std.mem.count(u8, output, "=ADVANCED_FACE('',"));
+    try std.testing.expectEqual(@as(usize, 15), std.mem.count(u8, output, "=EDGE_CURVE('',"));
+}
+
 test "analytic PCB validation rejects self intersections and invalid mechanical holes" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1405,6 +1650,13 @@ test "analytic PCB validation rejects self intersections and invalid mechanical 
     try std.testing.expectError(error.InvalidGeometry, prepareBoard(aa, .{
         .outline = &rectangle,
         .holes = &.{.{ .x = 5, .y = 5, .x2 = 8, .r = 0.5 }},
+        .thickness = 1.6,
+    }));
+    try std.testing.expectError(error.InvalidGeometry, prepareBoard(aa, .{
+        .outline = &rectangle,
+        // An arc cannot claim a hidden chord whose endpoints are absent from
+        // the validated fallback contour.
+        .arcs = &.{.{ .p1 = .{ 5, 0 }, .pm = .{ 6, 1 }, .p2 = .{ 7, 0 } }},
         .thickness = 1.6,
     }));
 }

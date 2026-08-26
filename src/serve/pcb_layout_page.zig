@@ -10610,8 +10610,7 @@ const pcb_3d_stage_html =
     \\<button class="btn" id="pcb3d-front">Front</button>
     \\<button class="btn" id="pcb3d-side">Side</button>
     \\<span class="sep"></span>
-    \\<button class="btn" id="pcb3d-export-step" title="Download the analytic green PCB solid, mounting holes, exact component B-reps, and the heatsink when enabled">Export STEP</button>
-    \\<button class="btn" id="pcb3d-export-artwork" title="Download one ZIP with the analytic STEP, physically sized top/bottom PNG decals, alignment metadata, and Fusion instructions">Fusion bundle</button>
+    \\<button class="btn" id="pcb3d-export-step" title="Download the analytic green PCB solid with native rounded corners, mounting holes, exact component B-reps, and the heatsink when enabled">Export STEP</button>
     \\<span class="sep"></span>
     \\<label><input type="checkbox" id="pcb3d-t-models" checked>Models</label>
     \\<label><input type="checkbox" id="pcb3d-t-surface" checked>Surfaces</label>
@@ -10638,7 +10637,7 @@ const pcb_3d_toggle_js =
     \\ if(loaded)return Promise.resolve();
     \\ if(loading)return loading;
     \\ var seq=Promise.resolve();
-    \\ ["/static/three.min.js","/static/OrbitControls.js","/static/occt-import-js.js","/static/pcb_3d_surface.js","/static/pcb_step_export.js","/static/pcb_fusion_bundle.js","/static/pcb_3d_viewer.js"]
+    \\ ["/static/three.min.js","/static/OrbitControls.js","/static/occt-import-js.js","/static/pcb_3d_surface.js","/static/pcb_step_export.js","/static/pcb_3d_viewer.js"]
     \\  .forEach(function(u){seq=seq.then(function(){return loadScript(u);});});
     \\ loading=seq.then(function(){loaded=true;});
     \\ return loading;}
@@ -13848,7 +13847,7 @@ test "PCB header links board designs to assembly and keeps modules scoped" {
     try std.testing.expect(std.mem.indexOf(u8, pcb_3d_toggle_js, "get(\"view\")===\"3d\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_3d_stage_html, "id=\"pcb3d-bottom\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_3d_stage_html, "id=\"pcb3d-export-step\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, pcb_3d_stage_html, "id=\"pcb3d-export-artwork\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_3d_stage_html, "id=\"pcb3d-export-artwork\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_3d_stage_html, "id=\"pcb3d-t-surface\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_3d_stage_html, "id=\"pcb3d-t-heatsink\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, @embedFile("assets/pcb_board.js"), "function hsModalOpen(rect)") != null);
@@ -13861,9 +13860,9 @@ test "PCB header links board designs to assembly and keeps modules scoped" {
     try std.testing.expect(std.mem.indexOf(u8, @embedFile("assets/pcb_3d_viewer.js"), "function rebuildHeatsink()") != null);
     const surface_asset = std.mem.indexOf(u8, pcb_3d_toggle_js, "pcb_3d_surface.js") orelse return error.TestUnexpectedResult;
     const step_export_asset = std.mem.indexOf(u8, pcb_3d_toggle_js, "pcb_step_export.js") orelse return error.TestUnexpectedResult;
-    const fusion_bundle_asset = std.mem.indexOf(u8, pcb_3d_toggle_js, "pcb_fusion_bundle.js") orelse return error.TestUnexpectedResult;
     const viewer_asset = std.mem.indexOf(u8, pcb_3d_toggle_js, "pcb_3d_viewer.js") orelse return error.TestUnexpectedResult;
-    try std.testing.expect(surface_asset < step_export_asset and step_export_asset < fusion_bundle_asset and fusion_bundle_asset < viewer_asset);
+    try std.testing.expect(surface_asset < step_export_asset and step_export_asset < viewer_asset);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_3d_toggle_js, "pcb_fusion_bundle.js") == null);
 
     var module: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer module.deinit();

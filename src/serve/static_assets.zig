@@ -86,7 +86,6 @@ const model_viewer_3d_js = @embedFile("assets/model_viewer_3d.js");
 // only when the tab is first opened.
 const pcb_3d_surface_js = @embedFile("assets/pcb_3d_surface.js");
 const pcb_step_export_js = @embedFile("assets/pcb_step_export.js");
-const pcb_fusion_bundle_js = @embedFile("assets/pcb_fusion_bundle.js");
 const pcb_3d_viewer_js = @embedFile("assets/pcb_3d_viewer.js");
 // Assembly/debug's persistent transparent model-image loader. It reads saved
 // PNGs first and invokes the STEP renderer only to populate a missing/stale
@@ -165,7 +164,6 @@ const registry = [_]Asset{
     .{ .name = "model_viewer_3d.js", .body = model_viewer_3d_js, .content_type = .JS },
     .{ .name = "pcb_3d_surface.js", .body = pcb_3d_surface_js, .content_type = .JS },
     .{ .name = "pcb_step_export.js", .body = pcb_step_export_js, .content_type = .JS },
-    .{ .name = "pcb_fusion_bundle.js", .body = pcb_fusion_bundle_js, .content_type = .JS },
     .{ .name = "pcb_3d_viewer.js", .body = pcb_3d_viewer_js, .content_type = .JS },
     .{ .name = "pcb_model_sprites.js", .body = pcb_model_sprites_js, .content_type = .JS },
     .{ .name = "drc.wasm", .body = drc_wasm, .content_type = .WASM },
@@ -1023,15 +1021,19 @@ test "generated auxiliary STEP bodies remain faceted B-reps rather than presenta
     try std.testing.expect(std.mem.indexOf(u8, pcb_step_export_js, "TESSELLATED_SHAPE_REPRESENTATION(") == null);
 }
 
-// spec: Web Server - the PCB 3D viewer asks the server for a self-contained millimetre-based AP242 assembly: each unique library STEP entity graph is embedded once without tessellation and reused through rigid component occurrences, the board outline/thickness/mechanical holes become one green analytic manifold B-rep rather than a faceted mesh, and an unchecked heatsink is omitted from the assembly
+// spec: Web Server - the PCB 3D viewer asks the server for a self-contained millimetre-based AP242 assembly: each unique library STEP entity graph is embedded once without tessellation and reused through rigid component occurrences, the board outline/thickness/mechanical holes become one green analytic manifold B-rep rather than a faceted mesh, native board-outline arcs become circular edge curves and cylindrical side faces rather than chorded corner facets, and an unchecked heatsink is omitted from the assembly
 test "PCB 3D viewer sends an analytic board recipe and exact component occurrences to the server" {
     const viewer_markers = [_][]const u8{
         "function collectGeneratedStepBodies()",
         "function exactStepBoard()",
+        "function outlineGeometry()",
+        "window.PCBOutlineGeometry",
+        "arc.p1.x",
         "function exactStepInstances()",
         "function collectStepMeshes(group, name)",
         "obj.userData.pcb3dKind === \"surfaces\"",
         "outline: pts.map(function (point) { return [+point[0], -(+point[1])]; })",
+        "arcs: arcs.map(function (arc)",
         "holes: holes",
         "thickness: boardThickness()",
         "board: exactStepBoard()",
@@ -1045,12 +1047,13 @@ test "PCB 3D viewer sends an analytic board recipe and exact component occurrenc
         "downloadBlob(blob, stepFileName())",
     };
     for (viewer_markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_3d_viewer_js, marker) != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "window.PCBOutlineGeometry=function(o)") != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_3d_viewer_js, "collectStepMeshes(boardGroup, \"PCB\")") == null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_3d_viewer_js, "stepArtwork") == null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_3d_viewer_js, "window.PCBStepExport.build(DATA.name") == null);
 }
 
-// spec: Web Server - the PCB 3D viewer composites each face's outer copper, soldermask, and silkscreen—including generated sub-circuit, test-point, and pin-1 artwork—into one non-overlapping visible canvas cap; because STEP does not portably map raster images onto B-rep faces, the Fusion bundle packages that same renderer at up to 32 pixels/mm as physically sized top and bottom PNG decals beside the analytic STEP, explicit world-coordinate metadata, and instructions instead of turning the artwork into selectable triangular faces, and only mechanical drills strictly larger than 1 mm are cut through the board
+// spec: Web Server - the PCB 3D viewer composites each face's outer copper, soldermask, and silkscreen—including generated sub-circuit, test-point, and pin-1 artwork—into one non-overlapping visible canvas cap; the regular STEP export omits that raster artwork instead of turning it into selectable geometry, and only mechanical drills strictly larger than 1 mm are cut through the board
 // spec: Web Server - exposed RF copper on both board faces uses the same swept taper polygons in Assembly and the PCB 3D viewer
 test "PCB 3D viewer textures both manufactured faces and cuts drills" {
     const Check = struct { bytes: []const u8, marker: []const u8 };
@@ -1068,8 +1071,6 @@ test "PCB 3D viewer textures both manufactured faces and cuts drills" {
         .{ .bytes = pcb_3d_surface_js, .marker = "(all.tps || []).forEach" },
         .{ .bytes = pcb_3d_surface_js, .marker = "(all.pin1 || []).forEach" },
         .{ .bytes = pcb_3d_surface_js, .marker = "new THREE.CanvasTexture(cv)" },
-        .{ .bytes = pcb_3d_surface_js, .marker = "DECAL_MAX_TEXTURE = 8192" },
-        .{ .bytes = pcb_3d_surface_js, .marker = "function makeDecalImage(data, pts, side)" },
         .{ .bytes = pcb_3d_surface_js, .marker = "function collectHoles(data, pts)" },
         .{ .bytes = pcb_3d_surface_js, .marker = "MECHANICAL_HOLE_MIN_DIAMETER = 1.0" },
         .{ .bytes = pcb_3d_surface_js, .marker = "drill > MECHANICAL_HOLE_MIN_DIAMETER" },
@@ -1082,23 +1083,13 @@ test "PCB 3D viewer textures both manufactured faces and cuts drills" {
         .{ .bytes = pcb_3d_viewer_js, .marker = "new THREE.ShapeGeometry(shape)" },
         .{ .bytes = pcb_3d_viewer_js, .marker = "new THREE.MeshBasicMaterial({ color: surface.maskColor, visible: false })" },
         .{ .bytes = pcb_3d_viewer_js, .marker = "boardEdgeMat = new THREE.MeshStandardMaterial({ color: surface.maskColor" },
-        .{ .bytes = pcb_3d_viewer_js, .marker = "artworkProfile = pts.map" },
-        .{ .bytes = pcb_3d_viewer_js, .marker = "function exportFusionBundle()" },
-        .{ .bytes = pcb_3d_viewer_js, .marker = "function decalManifest(base, top, bottom)" },
-        .{ .bytes = pcb_3d_viewer_js, .marker = "canvas.toBlob" },
-        .{ .bytes = pcb_3d_viewer_js, .marker = "base + \"-top.png\"" },
-        .{ .bytes = pcb_3d_viewer_js, .marker = "base + \"-bottom.png\"" },
-        .{ .bytes = pcb_3d_viewer_js, .marker = "withPngPhysicalResolution" },
-        .{ .bytes = pcb_3d_viewer_js, .marker = "topLeftWorldMm" },
-        .{ .bytes = pcb_3d_viewer_js, .marker = "makeZip([" },
-        .{ .bytes = pcb_3d_viewer_js, .marker = "base + \"-fusion.zip\"" },
-        .{ .bytes = pcb_fusion_bundle_js, .marker = "withPngPhysicalResolution" },
-        .{ .bytes = pcb_fusion_bundle_js, .marker = "makeZip" },
         .{ .bytes = pcb_3d_viewer_js, .marker = "addBoardFace(shape, pts, \"top\", 0)" },
         .{ .bytes = pcb_3d_viewer_js, .marker = "addBoardFace(shape, pts, \"bottom\", -thickness)" },
         .{ .bytes = pcb_3d_viewer_js, .marker = "pcb3d-t-surface" },
     };
     for (checks) |check| try std.testing.expect(std.mem.indexOf(u8, check.bytes, check.marker) != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_3d_viewer_js, "Fusion bundle") == null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_3d_viewer_js, "makeDecalImage") == null);
 }
 
 // spec: Web Server - PCB design-rule settings illustrate every board rule with an accessible SVG

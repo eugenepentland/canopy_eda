@@ -401,6 +401,10 @@ function outlineFilletGeom(o){var pts=outlinePtsOf(o),rs=o&&o.radii;
  var geom={points:out,arcs:arcs,corners:fs};
  outlineFilletCache={o:o,rev:outlineGeomRev,geom:geom};return geom;}
 window.PCBOutlinePoly=function(o){return outlineFilletGeom(o).points;};
+// The STEP exporter needs the same native line/arc contour as the editor,
+// not only its fine DRC polygon. Keep this read-only seam beside PCBOutlinePoly
+// so a live unsaved fillet edit exports without flattening its circular arc.
+window.PCBOutlineGeometry=function(o){return outlineFilletGeom(o);};
 // Assembly deliberately omits the sketch-authoring engine. Its server blob
 // already carries the compiled physical polygon used by Gerber export, so use
 // that projection for the pre-CAM canvas path instead of joining the sketch's

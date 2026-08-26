@@ -12,8 +12,7 @@
   var SUBSTRATE = "#6f5529";
   var MASK_COLOR = "#0c6734", MASK = "rgba(12, 103, 52, 0.84)";
   var SILK = "#f5f3e8";
-  var PREVIEW_MAX_TEXTURE = 2048, DECAL_MAX_TEXTURE = 8192, PX_PER_MM = 32;
-  var DECAL_MAX_PIXELS = 24 * 1024 * 1024;
+  var PREVIEW_MAX_TEXTURE = 2048, PX_PER_MM = 32;
   var ROUND_HOLE_SEGMENTS = 16;
   var MECHANICAL_HOLE_MIN_DIAMETER = 1.0;
 
@@ -344,12 +343,7 @@
     ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.drawImage(maskCanvas(data, pts, b, width, height, scale, side), 0, 0); ctx.restore();
     drawSilk(ctx, data, side);
-    return {
-      canvas: cv, bounds: b, renderPixelsPerMm: scale,
-      physicalPixelsPerMmX: width / b.w,
-      physicalPixelsPerMmY: height / b.h,
-      widthMm: b.w, heightMm: b.h
-    };
+    return { canvas: cv, bounds: b };
   }
 
   function makeTexture(THREE, data, pts, side) {
@@ -360,13 +354,6 @@
     texture.needsUpdate = true;
     painted.texture = texture;
     return painted;
-  }
-
-  // Decals use the identical manufacturing renderer as the browser face, but
-  // are generated only on demand so they can retain the 32 px/mm target on
-  // normal boards without consuming a pair of large GPU textures.
-  function makeDecalImage(data, pts, side) {
-    return paintFace(data, pts, side, DECAL_MAX_TEXTURE, DECAL_MAX_PIXELS);
   }
 
   function collectHoles(data, pts) {
@@ -447,7 +434,6 @@
   window.PCB3DSurface = {
     addShapeHoles: addShapeHoles,
     collectHoles: collectHoles,
-    makeDecalImage: makeDecalImage,
     makeTexture: makeTexture,
     maskColor: MASK_COLOR,
     mapUvs: mapUvs

@@ -38,8 +38,7 @@
   // changed in 2D (Load/reset/drag) and re-fit the camera only when it did.
   var lastSig = "";
   var statusEl, canvas;
-  var exportButton, artworkButton;
-  var artworkProfile = null;
+  var exportButton;
 
   var DEFAULT_BOARD_T = 1.6;
   var boardCapMat, boardEdgeMat;
@@ -63,7 +62,6 @@
       exportButton.disabled = pendingModels > 0;
       exportButton.textContent = pendingModels > 0 ? "Loading models…" : "Export STEP";
     }
-    if (artworkButton) artworkButton.disabled = pendingModels > 0 || !artworkProfile || !window.PCBFusionBundle;
   }
 
   // ── Geometry helpers ─────────────────────────────────────────────
@@ -108,21 +106,37 @@
     return [[r.x, r.y], [r.x + r.w, r.y], [r.x + r.w, r.y + r.h], [r.x, r.y + r.h]];
   }
 
-  // Resolve the same physical outline the 2D editor paints. A live layout
-  // override wins; PCBOutlinePoly expands its native corner radii using the
-  // editor's cached fillet geometry. Otherwise board_poly is already the
-  // server's exact sagitta-bounded profile, with board as the rectangle
-  // fallback. Re-reading this on every sync means an edited outline appears
-  // when the user returns to 3D without a page reload.
-  function outlinePoints() {
-    var pts = null;
-    if (DATA.outline) {
-      if (typeof window.PCBOutlinePoly === "function") pts = window.PCBOutlinePoly(DATA.outline);
-      else pts = DATA.outline.pts;
-      if (!pts || pts.length < 3) pts = rectPoints(DATA.outline);
+  function outlineArc(arc) {
+    if (!arc) return null;
+    if (Array.isArray(arc.p1) && Array.isArray(arc.pm) && Array.isArray(arc.p2)) {
+      return { p1: [+arc.p1[0], +arc.p1[1]], pm: [+arc.pm[0], +arc.pm[1]], p2: [+arc.p2[0], +arc.p2[1]] };
     }
-    if (!pts || pts.length < 3) pts = DATA.board_poly;
-    if (!pts || pts.length < 3) pts = rectPoints(DATA.board);
+    if (arc.p1 && arc.pm && arc.p2) {
+      return { p1: [+arc.p1.x, +arc.p1.y], pm: [+arc.pm.x, +arc.pm.y], p2: [+arc.p2.x, +arc.p2.y] };
+    }
+    return { p1: [+arc.x1, +arc.y1], pm: [+arc.xm, +arc.ym], p2: [+arc.x2, +arc.y2] };
+  }
+
+  // Resolve the same physical outline the 2D editor paints in both forms the
+  // viewers need: a fine polygon for WebGL and the native circular arcs for
+  // STEP. A live layout override wins; otherwise board_poly + board_arcs are
+  // the server's fabrication contour, with board as the sharp rectangle
+  // fallback. Re-reading this on every sync picks up unsaved fillet edits.
+  function outlineGeometry() {
+    var pts = null, arcs = [];
+    if (DATA.outline) {
+      if (typeof window.PCBOutlineGeometry === "function") {
+        var live = window.PCBOutlineGeometry(DATA.outline);
+        if (live) { pts = live.points; arcs = live.arcs || []; }
+      } else if (typeof window.PCBOutlinePoly === "function") pts = window.PCBOutlinePoly(DATA.outline);
+      else pts = DATA.outline.pts;
+      if (!pts || pts.length < 3) { pts = rectPoints(DATA.outline); arcs = []; }
+    }
+    if (!pts || pts.length < 3) {
+      pts = DATA.board_poly;
+      arcs = pts && pts.length >= 3 ? (DATA.board_arcs || []) : [];
+    }
+    if (!pts || pts.length < 3) { pts = rectPoints(DATA.board); arcs = []; }
     if (!pts || pts.length < 3) return null;
 
     // A few importers repeat the first point at the end. Shape closes the path
@@ -133,7 +147,12 @@
       var a = out[0], b = out[out.length - 1];
       if (Math.abs(a[0] - b[0]) < 1e-9 && Math.abs(a[1] - b[1]) < 1e-9) out.pop();
     }
-    return out.length >= 3 ? out : null;
+    return out.length >= 3 ? { points: out, arcs: arcs.map(outlineArc).filter(Boolean) } : null;
+  }
+
+  function outlinePoints() {
+    var geometry = outlineGeometry();
+    return geometry && geometry.points;
   }
 
   function boundsOfPoints(pts) {
@@ -367,13 +386,16 @@
   }
 
   function exactStepBoard() {
-    var pts = outlinePoints();
+    var geometry = outlineGeometry();
+    var pts = geometry && geometry.points;
+    var arcs = geometry ? geometry.arcs : [];
     if (!pts) {
       var partBB = computePartBounds(), mg = 2.0;
       pts = [[partBB.minx - mg, -(partBB.miny - mg)],
         [partBB.maxx + mg, -(partBB.miny - mg)],
         [partBB.maxx + mg, -(partBB.maxy + mg)],
         [partBB.minx - mg, -(partBB.maxy + mg)]];
+      arcs = [];
     }
     var holes = surface.collectHoles(DATA, pts).map(function (hole) {
       var out = { x: +hole.x, y: -(+hole.y), r: +hole.r };
@@ -385,6 +407,13 @@
     return {
       name: "PCB solid",
       outline: pts.map(function (point) { return [+point[0], -(+point[1])]; }),
+      arcs: arcs.map(function (arc) {
+        return {
+          p1: [+arc.p1[0], -(+arc.p1[1])],
+          pm: [+arc.pm[0], -(+arc.pm[1])],
+          p2: [+arc.p2[0], -(+arc.p2[1])]
+        };
+      }),
       holes: holes,
       thickness: boardThickness(),
       color: stepMaterialColor(boardEdgeMat)
@@ -443,15 +472,6 @@
     setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
   }
 
-  function canvasPng(canvas) {
-    return new Promise(function (resolve, reject) {
-      if (!canvas || !canvas.toBlob) return reject(new Error("artwork canvas is unavailable"));
-      canvas.toBlob(function (blob) {
-        if (blob) resolve(blob); else reject(new Error("could not encode artwork PNG"));
-      }, "image/png");
-    });
-  }
-
   function exportStep() {
     if (pendingModels > 0) return;
     exportButton.disabled = true;
@@ -467,128 +487,6 @@
         console.error(err);
         setStatus("STEP export failed: " + (err && err.message ? err.message : err), true);
       }).then(function () {
-        updateExportButton();
-      });
-    }, 0);
-  }
-
-  function decalManifest(base, top, bottom) {
-    var b = top.bounds, thickness = boardThickness();
-    function image(side, painted, z, normal) {
-      var pixelWidth = painted.pixelWidth || painted.canvas.width;
-      var pixelHeight = painted.pixelHeight || painted.canvas.height;
-      return {
-        file: base + "-" + side + ".png",
-        pixelWidth: pixelWidth,
-        pixelHeight: pixelHeight,
-        physicalWidthMm: painted.widthMm,
-        physicalHeightMm: painted.heightMm,
-        physicalPixelsPerMetreX: Math.round(painted.physicalPixelsPerMmX * 1000),
-        physicalPixelsPerMetreY: Math.round(painted.physicalPixelsPerMmY * 1000),
-        topLeftWorldMm: [painted.bounds.minx, -painted.bounds.miny, z],
-        imageXAxisWorld: [1, 0, 0],
-        imageYAxisWorld: [0, -1, 0],
-        outwardNormalWorld: normal,
-        mmPerPixel: [painted.widthMm / pixelWidth, painted.heightMm / pixelHeight]
-      };
-    }
-    return {
-      schema: "canopy-fusion-decals-v1",
-      units: "millimetre",
-      stepFile: base + ".step",
-      solidBodyName: "PCB solid",
-      note: "STEP carries the editable solid; PNG artwork must be applied with Fusion's native Decal command and saved in the Fusion design.",
-      board: {
-        thicknessMm: thickness,
-        boundsWorldMm: { minX: b.minx, minY: -b.maxy, maxX: b.maxx, maxY: -b.miny },
-        topZMm: 0,
-        bottomZMm: -thickness
-      },
-      images: {
-        top: image("top", top, 0, [0, 0, 1]),
-        bottom: image("bottom", bottom, -thickness, [0, 0, -1])
-      }
-    };
-  }
-
-  function fusionReadme(base, top) {
-    var width = top.widthMm.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
-    var height = top.heightMm.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
-    return [
-      "Canopy Fusion PCB package", "", "1. Open " + base + ".step in Fusion.",
-      "2. Confirm PCB solid is listed as a solid BRep body, not a mesh body.",
-      "3. Use Design > Insert > Decal on the top face with " + base + "-top.png.",
-      "4. Repeat on the bottom face with " + base + "-bottom.png.",
-      "5. Save the result as a Fusion design (F3D). STEP itself cannot retain Fusion decals.", "",
-      "Set each decal to " + width + " mm wide by " + height + " mm high if Fusion does not read the PNG's embedded physical size.",
-      "Image +X points right and image rows point toward world -Y; the bottom outward normal is -Z.",
-      "decals.json records the unambiguous world-coordinate mapping and bottom-face orientation.",
-      "Do not convert either PNG into a mesh or extruded trace geometry.", ""
-    ].join("\n");
-  }
-
-  // A STEP file cannot carry Fusion's native raster decal. Package the same
-  // manufacturing renderer at up to 32 px/mm with the analytic STEP instead;
-  // pHYs metadata and decals.json preserve its exact physical placement.
-  function encodeDecalPng(side) {
-    var painted = surface.makeDecalImage(DATA, artworkProfile, side);
-    var metadata = {
-      bounds: painted.bounds,
-      pixelWidth: painted.canvas.width,
-      pixelHeight: painted.canvas.height,
-      physicalPixelsPerMmX: painted.physicalPixelsPerMmX,
-      physicalPixelsPerMmY: painted.physicalPixelsPerMmY,
-      widthMm: painted.widthMm,
-      heightMm: painted.heightMm
-    };
-    function release() { painted.canvas.width = painted.canvas.height = 1; }
-    return canvasPng(painted.canvas).then(function (blob) {
-      return window.PCBFusionBundle.withPngPhysicalResolution(blob, {
-        x: Math.round(painted.physicalPixelsPerMmX * 1000),
-        y: Math.round(painted.physicalPixelsPerMmY * 1000)
-      });
-    }).then(function (blob) {
-      release();
-      return { metadata: metadata, blob: blob };
-    }, function (err) {
-      release();
-      throw err;
-    });
-  }
-
-  function exportFusionBundle() {
-    if (pendingModels > 0 || !artworkProfile || !window.PCBFusionBundle) return;
-    artworkButton.disabled = true;
-    artworkButton.textContent = "Exporting…";
-    setStatus("Building analytic STEP and Fusion decal package…");
-    setTimeout(function () {
-      var base = stepFileName().replace(/\.step$/i, "");
-      var top, bottom;
-      Promise.resolve().then(function () {
-        return encodeDecalPng("top");
-      }).then(function (asset) {
-        top = asset;
-        return encodeDecalPng("bottom");
-      }).then(function (asset) {
-        bottom = asset;
-        return requestStepBlob();
-      }).then(function (step) {
-        var manifest = decalManifest(base, top.metadata, bottom.metadata);
-        return window.PCBFusionBundle.makeZip([
-          { name: base + ".step", data: step },
-          { name: base + "-top.png", data: top.blob },
-          { name: base + "-bottom.png", data: bottom.blob },
-          { name: "decals.json", data: JSON.stringify(manifest, null, 2) + "\n" },
-          { name: "README.txt", data: fusionReadme(base, top.metadata) }
-        ]);
-      }).then(function (zip) {
-        downloadBlob(zip, base + "-fusion.zip");
-        setStatus(null);
-      }).catch(function (err) {
-        console.error(err);
-        setStatus("Fusion export failed: " + (err && err.message ? err.message : err), true);
-      }).then(function () {
-        artworkButton.textContent = "Fusion bundle";
         updateExportButton();
       });
     }, 0);
@@ -729,7 +627,6 @@
   // outlines, slots and circular holes are all triangulated into the same
   // extrusion. Legacy scenes with no outline retain the courtyard rectangle.
   function rebuildBoard() {
-    artworkProfile = null;
     var pts = outlinePoints();
     if (!pts) {
       var partBB = computePartBounds(), mg = 2.0;
@@ -756,7 +653,6 @@
     boardGroup.add(board);
     addBoardFace(shape, pts, "top", 0);
     addBoardFace(shape, pts, "bottom", -thickness);
-    artworkProfile = pts.map(function (point) { return [+point[0], +point[1]]; });
     updateExportButton();
     center.x = (bb.minx + bb.maxx) / 2; center.y = (bb.miny + bb.maxy) / 2;
     span = Math.max(bb.maxx - bb.minx, bb.maxy - bb.miny, 8);
@@ -902,8 +798,6 @@
     on("pcb3d-side", function () { frame(1, 0, 0.03); });
     exportButton = document.getElementById("pcb3d-export-step");
     if (exportButton) exportButton.onclick = exportStep;
-    artworkButton = document.getElementById("pcb3d-export-artwork");
-    if (artworkButton) artworkButton.onclick = exportFusionBundle;
     updateExportButton();
     var chk = function (id, fn) { var e = document.getElementById(id); if (e) e.onchange = function (ev) { fn(ev.target.checked); }; };
     chk("pcb3d-t-models", function (v) {
