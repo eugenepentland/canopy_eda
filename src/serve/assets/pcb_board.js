@@ -8002,8 +8002,8 @@ function paintViaTool(ctx){if(!viaMode||!viaCur)return;var q=viaNet?viaSnap(viaC
 // (not the raw cursor) makes the line say exactly where legal copper ends.
 function drawNearestDest(head){return head?drawNearestRatTarget(head):null;}
 function paintDrawRatline(ctx,head){var q=drawNearestDest(head);if(!q)return;
- ctx.save();ctx.setLineDash([]);ctx.strokeStyle=(netColOn&&netColorOf(netCollapse(dtrace.net)))||TH.ratsLine;
- ctx.globalAlpha=0.72;ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(X(head.x),Y(head.y));ctx.lineTo(X(q.x),Y(q.y));ctx.stroke();ctx.restore();}
+ ctx.save();ctx.setLineDash([5,4]);ctx.strokeStyle=(netColOn&&netColorOf(netCollapse(dtrace.net)))||TH.ratsLine;
+ ctx.globalAlpha=0.42;ctx.lineWidth=0.8;ctx.beginPath();ctx.moveTo(X(head.x),Y(head.y));ctx.lineTo(X(q.x),Y(q.y));ctx.stroke();ctx.restore();}
 // Route-head preview: the exact leg chain a click will commit (posture legs
 // from drawPath), drawn SOLID at the real track width with round caps —
 // KiCad-style, so what you see is precisely the copper you get. Only a
