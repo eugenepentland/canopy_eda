@@ -797,6 +797,16 @@ test "PCB editor carries persistent 45 and 90 degree manual bend modes" {
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
+// spec: Web Server - A click that magnetically snaps to a same-net pad or existing trace endpoint finishes the manual trace only after the path reaches that endpoint.
+test "PCB editor finishes a manual trace on a magnetic endpoint snap" {
+    const markers = [_][]const u8{
+        "finish:!!(net&&pd.net===net)",
+        "finish:!!(net&&t.net===net&&(!dtrace||dtrace.laid.indexOf(t)<0))",
+        "if(dl.t.finish&&!dl.clipped){drawEnd();return;}",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+}
+
 test "PCB editor styles the two-trace fillet radius menu" {
     const markers = [_][]const u8{
         ".pcb-trace-menu{",

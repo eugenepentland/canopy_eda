@@ -7518,17 +7518,19 @@ function viaViolation(x,y,net,dia,drill){var clr=netClrFor(net),vr=(dia||0.4)/2;
 // ── Magnetic snap while drawing (KiCad-style) ───────────────────────────
 // Pad centres and same-net existing track endpoints within a small SCREEN
 // radius override the grid snap so a trace lands exactly on copper. Shift
-// (free angle) keeps grid-only. Returns {x,y,mag:true} on a magnet hit.
+// (free angle) keeps grid-only. Exact same-net endpoints also carry `finish` so
+// the click that lands on them can complete the route; centre-line guidance is
+// intentionally not a finishing snap.
 function magSnap(m,net){var pxr=9; // screen-px capture radius
  var wr=pxr*(vb.w/Math.max(svgMetricsGet().cw,1))/S; // convert px→world mm at current zoom
  var best=null,bd=wr;
  // exact point snaps — land the endpoint ON copper (current-layer pad centres,
  // any net; same-net track endpoints). These win right on a target.
  P.forEach(function(p,i){(p.pads||[]).forEach(function(pd){if(dtrace&&drawPadLayer(p,pd)>=0&&drawPadLayer(p,pd)!==dtrace.l)return;var c=wpt(i,pd.x,pd.y);
-  var d=Math.hypot(c.x-m.x,c.y-m.y);if(d<bd){bd=d;best={x:c.x,y:c.y,mag:true};}});});
+  var d=Math.hypot(c.x-m.x,c.y-m.y);if(d<bd){bd=d;best={x:c.x,y:c.y,mag:true,finish:!!(net&&pd.net===net)};}});});
  (PCB.tracks||[]).forEach(function(t){if(net&&t.net&&t.net!==net)return;
   [[t.x1,t.y1],[t.x2,t.y2]].forEach(function(e){var d=Math.hypot(e[0]-m.x,e[1]-m.y);
-   if(d<bd){bd=d;best={x:e[0],y:e[1],mag:true};}});});
+   if(d<bd){bd=d;best={x:e[0],y:e[1],mag:true,finish:!!(net&&t.net===net&&(!dtrace||dtrace.laid.indexOf(t)<0))};}});});
  if(best)return best;
  // Centre-line snap: while routing roughly along an axis toward a same-net pad
  // AHEAD, lock the cross-axis onto that pad's centre so the WHOLE approach sits
@@ -7845,7 +7847,9 @@ function drawClick(m,shift){
  var planC=drawRoutePlan(dl.legs),candC=planC.tracks;
  if(drcGateBlocks(candC,null)){routeStatMsg("that would create a DRC error — route around it",true);drawFlashSet(candC);return;}
  if(dl.clipped)routeStatMsg("head clipped at the clearance boundary — route around the obstacle",true);
- drawCommitPlan(planC);drawBtnSync();ovPaintSoon();}
+ drawCommitPlan(planC);
+ if(dl.t.finish&&!dl.clipped){drawEnd();return;}
+ drawBtnSync();ovPaintSoon();}
 // Resolve the committed target point for a click: magnet first (unless Shift),
 // then the grid snap.
 function drawTarget(m,shift){if(!shift){var mg=magSnap(m,dtrace&&dtrace.net);if(mg)return mg;}

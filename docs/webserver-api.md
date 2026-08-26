@@ -128,7 +128,10 @@ Local dev still uses `http://localhost:7050`.
   flips layer, finish on a same-net pad / double-click / Enter, Backspace
   steps back, right-click deletes copper under the cursor; Save/Update
   persists it like any routed copper (works on module pages → the module's
-  `.layouts.json`). **Rigid sub-circuits**: parts sharing a sub-block prefix
+  `.layouts.json`). A click that magnetically snaps to a same-net pad or
+  existing trace endpoint finishes the manual trace only after the path reaches
+  that endpoint.
+  **Rigid sub-circuits**: parts sharing a sub-block prefix
   drag/rotate as one unit (G explodes/re-coheres; per-design localStorage),
   and the sidebar Sub-circuits palette **Stamp**s a whole module ★ layout
   onto the board via the same origin_key bridge KiCad sync seeds from

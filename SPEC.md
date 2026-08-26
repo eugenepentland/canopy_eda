@@ -6351,6 +6351,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The Objects filter disables sub-circuit hits so overlapping traces remain selectable
 - The Objects filter picks pour and keepout interiors and offers enable-all and disable-all actions
 - Routing toward a same-net pad snaps the whole approach onto the pad centreline
+- A click that magnetically snaps to a same-net pad or existing trace endpoint finishes the manual trace only after the path reaches that endpoint.
 - hand-routing starts and continues only from pads and traces on the active copper layer, so opposite-face lands cannot steal a route click
 - The hand-route tool lays both legs of a differential pair together with mitered offset corners
 - The auto-commit author is the ward user, falling back to the dev-admin identity
