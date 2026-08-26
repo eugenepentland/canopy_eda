@@ -55,8 +55,38 @@ pub fn check(
     copper: routed_copper.Copper,
     base: ?pour.EdgeField,
 ) std.mem.Allocator.Error![]drc.Violation {
-    return (try checkWithConnectivity(arena, placement, copper, base, &.{})).violations;
+    return (try checkWithConnectivity(arena, placement, copper, .{ .base = base })).violations;
 }
+
+/// Raster the board's user zones for connectivity — the whole-run fill
+/// `checkWithConnectivity` builds when a caller does not hand one in.
+///
+/// Exposed so the reporting DRC seam can MEMOISE it beside the topology fill it
+/// already retains: both are the same function of the board and its copper, and
+/// this one is the other half of that seam's cost — 2.6 s of a barracuda-base
+/// pass, for four zones. Feed the result back through `Prepared.zone_fills`.
+pub fn zoneFills(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    copper: routed_copper.Copper,
+    base: ?pour.EdgeField,
+) std.mem.Allocator.Error![]const pour.Fill {
+    return fab.userZoneFills(arena, placement, copper, base);
+}
+
+/// Board-level fill state a caller may have already built for this exact board,
+/// so one whole-board sweep is not repeated per pass. Every field defaults to
+/// "not prepared", which reproduces the unshared behaviour exactly.
+pub const Prepared = struct {
+    /// The caller's shared board-edge margin field (`pour.sharedEdgeField`).
+    base: ?pour.EdgeField = null,
+    /// Carrying-layer fills retained by the topology pass.
+    plane_fills: []const pour.NetFills = &.{},
+    /// The user-zone rasters (`zoneFills`). Null — NOT an empty slice — means
+    /// "not prepared": a board with no zones legitimately rasters to none, and
+    /// the two must not be confused or a zoned board loses its pour credit.
+    zone_fills: ?[]const pour.Fill = null,
+};
 
 /// Open-net findings plus the per-net connectivity statuses derived from the
 /// exact same graphs. The authoritative DRC endpoint needs both; returning
@@ -73,14 +103,15 @@ pub fn checkWithConnectivity(
     arena: std.mem.Allocator,
     placement: optimizer.Placement,
     copper: routed_copper.Copper,
-    base: ?pour.EdgeField,
-    plane_fills: []const pour.NetFills,
+    prepared: Prepared,
 ) std.mem.Allocator.Error!Report {
     var out: std.ArrayList(drc.Violation) = .empty;
     var connectivity: std.ArrayList(fab.NetStatus) = .empty;
-    // Raster the user zones ONCE for the whole run. A zone's fill is a property
-    // of the board and its copper, not of the net being inspected, so the
-    // per-net graph builder gets the same slice every time — see
+    // Raster the user zones ONCE for the whole run — or not at all, when the
+    // caller already holds this board's rasters (`Prepared.zone_fills`, which
+    // the reporting DRC seam memoises). A zone's fill is a property of the
+    // board and its copper, not of the net being inspected, so the per-net
+    // graph builder gets the same slice every time — see
     // `fab.buildNetGraphPrepared`. Rebuilding it inside the loop made this pass
     // (which the PCB page runs on every render) cost ~86 s on barracuda.
     // `base` is the caller's shared edge-margin field; every fill below — the
@@ -90,9 +121,9 @@ pub fn checkWithConnectivity(
     const board: Board = .{
         .placement = placement,
         .copper = copper,
-        .zone_fills = try fab.userZoneFills(arena, placement, copper, base),
-        .base = base,
-        .plane_fills = plane_fills,
+        .zone_fills = prepared.zone_fills orelse try zoneFills(arena, placement, copper, prepared.base),
+        .base = prepared.base,
+        .plane_fills = prepared.plane_fills,
         .identity = try net_identity.Identity.init(arena, placement),
     };
     for (placement.nets, 0..) |net, ni| {
@@ -998,7 +1029,7 @@ test "a net with two pads and no copper flags one net_open" {
 
     // No tracks, no vias: `fab_readiness.routableTally` calls SIG routable and
     // unconnected, so the marker has to agree instead of staying silent.
-    const report = try checkWithConnectivity(arena, placement, .{}, null, &.{});
+    const report = try checkWithConnectivity(arena, placement, .{}, .{});
     try testing.expectEqual(@as(usize, 1), count(report.violations));
     try testing.expectEqual(nets.len, report.connectivity.len);
     const tally = try fab.summarizeConnectivity(arena, report.connectivity);

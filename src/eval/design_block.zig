@@ -2906,6 +2906,10 @@ fn parseNetClassField(
         return true;
     } else if (std.mem.eql(u8, head, "width")) {
         if (c.len >= 2) spec.width = c[1].asNumber() orelse 0;
+    } else if (std.mem.eql(u8, head, "power-branch-width")) {
+        if (c.len >= 2) spec.pad_neck.power_branch_width = c[1].asNumber() orelse 0;
+        if (spec.pad_neck.power_branch_width <= 0)
+            self.warnFmt(c[0].span, "(power-branch-width MM) needs a positive width", .{});
     } else if (std.mem.eql(u8, head, "clearance")) {
         if (c.len >= 2) spec.clearance = c[1].asNumber() orelse 0;
     } else if (std.mem.eql(u8, head, "via")) {
@@ -4019,7 +4023,7 @@ test "design-block captures (net-class …) rules" {
     const a = std.heap.page_allocator;
     const src =
         \\(design-block "test"
-        \\  (net-class "power" (width 0.3) (clearance 0.2) (via 0.5 0.3) (nets "VBUS" "+5V"))
+        \\  (net-class "power" (width 0.3) (power-branch-width 0.15) (clearance 0.2) (via 0.5 0.3) (nets "VBUS" "+5V"))
         \\  (net-class "hot" (priority 3) (nets "SW"))
         \\  (net-class "over" (priority 99) (nets "CLK"))
         \\  (net-class "profile-only" (width 1.0)))
@@ -4039,6 +4043,7 @@ test "design-block captures (net-class …) rules" {
     const nc = block.net_classes[0];
     try testing.expectEqualStrings("power", nc.name);
     try testing.expectEqual(@as(f64, 0.3), nc.width);
+    try testing.expectEqual(@as(f64, 0.15), nc.pad_neck.power_branch_width);
     try testing.expectEqual(@as(f64, 0.2), nc.clearance);
     try testing.expectEqual(@as(f64, 0.5), nc.via_dia);
     try testing.expectEqual(@as(f64, 0.3), nc.via_drill);

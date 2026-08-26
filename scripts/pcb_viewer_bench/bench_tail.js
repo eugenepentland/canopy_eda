@@ -182,7 +182,7 @@
       let t=performance.now();const full=B.gateFullDiffFn(bt,bv,bt,av);RESULT.scenarios.drc_gate_full_ms=+(performance.now()-t).toFixed(2);
       t=performance.now();const scoped=B.gateDiffFn(bt,bv,bt,av);RESULT.scenarios.drc_gate_scoped_ms=+(performance.now()-t).toFixed(2);
       RESULT.scenarios.drc_gate_scope_matches_full=full===scoped;
-      const s=B.gateScopeFn(bt,bv,bt,av);RESULT.meta.drc_gate_scope={parts:s.parts.length,tracks:s.at.length,vias:s.av.length};
+      const s=B.gateScopeFn(bt,bv,bt,av);RESULT.meta.drc_gate_scope={parts:s.parts.length,tracks:s.at.length,vias:s.av.length,rf_paths:s.rf.length};
       const cases=[{bt:bt,bv:bv,at:bt,av:bv.concat([{x:q.x-20,y:q.y-20,d:0.4,drill:0.2,net:"__BENCH_STAGE__"}])}];
       for(let i=0;i<Math.min(5,bt.length);i++){const at=bt.slice(),o=bt[i];
         at[i]=Object.assign({},o,{x1:o.x1+0.05,x2:o.x2+0.05});cases.push({bt:bt,bv:bv,at:at,av:bv});}

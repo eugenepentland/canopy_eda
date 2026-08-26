@@ -55,6 +55,9 @@ pub const shards: []const []const []const u8 = &.{
         "placement.fine_accept.test.a n",
         "serve.ground_vias.test.",
         "serve.pcb_step_export.test.",
+        "bench_page.test.",
+        "placement.fill_cache.test.",
+        "placement.drc_compose.test.",
     },
     // shard 1
     &.{
@@ -255,6 +258,7 @@ pub const shards: []const []const []const u8 = &.{
         "serve.pcb_page_cache.test.",
         "serve.pcb_derived.test.",
         "serve.progress_cache.test.",
+        "serve.describe_cache.test.",
         "serve.route_plan.test.",
         "serve.route_session_api.test.",
         "serve.route_vision.test.",

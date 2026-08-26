@@ -40,6 +40,12 @@ test "design note update failures expose actionable diagnostics" {
     try std.testing.expect(std.mem.indexOf(u8, js, "status.addEventListener('click', toggleFailureDetails)") != null);
 }
 
+test "clearing schematic net search removes its highlight" {
+    const js = schematic_viewer_js_asset;
+    try std.testing.expect(std.mem.indexOf(u8, js, "if (!searchInput.value.trim()) clearHighlight();") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "searchInput.value = '';\n      clearHighlight();\n      closeResults();") != null);
+}
+
 // spec: Web Server - A standalone module opened through the schematic page exposes direct pin-net editing and deletion for source-backed parts
 test "standalone module schematic exposes structured part edits" {
     const js = schematic_viewer_js_asset;

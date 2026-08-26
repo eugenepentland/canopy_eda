@@ -19,6 +19,7 @@ const elmer_thermal_command = @import("elmer_thermal_command.zig");
 const query = @import("query.zig");
 const tool_cli = @import("tool_cli.zig");
 const bench_route = @import("bench_route.zig");
+const bench_page = @import("bench_page.zig");
 const plugin_tokens = @import("serve/plugin_tokens.zig");
 const build_id = @import("build_id.zig");
 
@@ -273,6 +274,10 @@ fn dispatchQueryCommand(
         try bench_route.cmdBenchRoute(allocator, args);
         return true;
     }
+    if (std.mem.eql(u8, command, "bench-page")) {
+        try bench_page.cmdBenchPage(allocator, args);
+        return true;
+    }
     return false;
 }
 
@@ -490,6 +495,7 @@ fn printUsage() !void {
         \\  netlisp export-elmer-thermal [--project-dir <d>] [--output-dir <out>] [--layout <name>] [--ambient <C>] [--scenario <natural|airflow_1ms|airflow_2ms>] <name>  Export an Elmer FEM thermal case
         \\  netlisp compare-elmer-thermal [--project-dir <d>] [--output-dir <out>] [--layout <name>] [--ambient <C>] [--scenario <natural|airflow_1ms|airflow_2ms>] [--solver <path>] <name>  Run Elmer and write a side-by-side thermal comparison
         \\  netlisp bench-thermal [--project-dir <d>] [--layout <name>] [--reps <n>] <name>  Benchmark only the built-in four-scenario thermal field solve
+        \\  netlisp bench-page [--project-dir <d>] [--reps <n>] [--json] [--baseline <file>] [<name>…]  Benchmark PCB-page load + DRC latency per board (--baseline gates against a committed recording)
         \\  netlisp export-schematic-png [--project-dir <d>] <name> [--sub <slug>|--ref <hub>] [--view sequential|functional] [--theme light|dark] [--width <px>] [--output <file>]  Export a schematic block PNG without a browser
         \\  netlisp convert-footprint <file>        Convert KiCad .kicad_mod to .sexp
         \\  netlisp convert-symbol <file> [--filter <name>]  Convert KiCad .kicad_sym to .sexp
@@ -665,6 +671,7 @@ test {
     _ = @import("ground_via_seed.zig");
     _ = @import("placement/pad_exit.zig");
     _ = @import("placement/drc_compose.zig");
+    _ = @import("placement/fill_cache.zig");
     _ = @import("placement/bypass_intent.zig");
     _ = @import("placement/bypass_open.zig");
     _ = @import("placement/routed_copper.zig");
@@ -800,6 +807,7 @@ test {
     _ = @import("serve/gzip_cache.zig");
     _ = @import("serve/pcb_page_cache.zig");
     _ = @import("serve/progress_cache.zig");
+    _ = @import("serve/describe_cache.zig");
     _ = @import("deflate.zig");
     _ = @import("png.zig");
     _ = @import("font5x7.zig");
@@ -820,6 +828,7 @@ test {
     _ = @import("placement/route_grid.zig");
     _ = @import("placement/route_determinism.zig");
     _ = @import("bench_route.zig");
+    _ = @import("bench_page.zig");
     _ = @import("gerber_verify.zig");
     _ = @import("zipfile.zig");
 

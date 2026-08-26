@@ -1525,11 +1525,12 @@ fn writeAuthoredSettings(
         try w.writeAll(name_open);
         try writeJsonStr(w, class.name);
         try w.print(
-            ",\"width\":{d},\"clearance\":{d},\"via_dia\":{d},\"via_drill\":{d}," ++
+            ",\"width\":{d},\"power_branch_width\":{d},\"clearance\":{d},\"via_dia\":{d},\"via_drill\":{d}," ++
                 "\"priority\":{d},\"diff_gap\":{d},\"max_freq_hz\":{d},\"impedance_ohms\":{d},\"ground_gap_mm\":{d},\"ground_gap_max_mm\":{d},\"nets\":",
             .{
-                class.width,    class.clearance,      class.via_dia,           class.via_drill,                  class.priority,
-                class.diff_gap, class.rf.max_freq_hz, class.rf.impedance.ohms, class.rf.impedance.ground_gap_mm, class.rf.impedance.ground_gap_max_mm,
+                class.width,                          class.pad_neck.power_branch_width, class.clearance,      class.via_dia,           class.via_drill,
+                class.priority,                       class.diff_gap,                    class.rf.max_freq_hz, class.rf.impedance.ohms, class.rf.impedance.ground_gap_mm,
+                class.rf.impedance.ground_gap_max_mm,
             },
         );
         try writeStringList(w, class.nets);

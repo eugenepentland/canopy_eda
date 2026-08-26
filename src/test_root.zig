@@ -33,6 +33,7 @@ test {
     // declare run. No test-bearing module in src/ is skipped any more, which is
     // why nothing below consults an exemption list.
     _ = @import("bench_route.zig");
+    _ = @import("bench_page.zig");
     _ = @import("board_layers.zig");
     _ = @import("board_theme.zig");
     _ = @import("bom.zig");
@@ -192,6 +193,7 @@ test {
     _ = @import("placement/dive_elide.zig");
     _ = @import("placement/diff_shape.zig");
     _ = @import("placement/drc.zig");
+    _ = @import("placement/drc_compose.zig");
     _ = @import("placement/drc_diffpair.zig");
     _ = @import("placement/drc_keepout.zig");
     _ = @import("placement/drc_match.zig");
@@ -199,6 +201,7 @@ test {
     _ = @import("placement/edge_rotation.zig");
     _ = @import("placement/escalate_retry.zig");
     _ = @import("placement/escape_assign.zig");
+    _ = @import("placement/fill_cache.zig");
     _ = @import("placement/fine_accept.zig");
     _ = @import("placement/fine_window.zig");
     _ = @import("placement/gap_close_route.zig");
@@ -387,6 +390,7 @@ test {
     _ = @import("serve/pcb_layout_sync.zig");
     _ = @import("serve/pcb_page_cache.zig");
     _ = @import("serve/progress_cache.zig");
+    _ = @import("serve/describe_cache.zig");
     _ = @import("serve/pcb_part_json.zig");
     _ = @import("serve/pcb_progress.zig");
     _ = @import("serve/pcb_rules_json.zig");

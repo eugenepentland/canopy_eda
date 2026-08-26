@@ -16,7 +16,7 @@
 //! A warm-up render now answers both halves from ONE solve: it publishes the
 //! finished page through a `PageSink` the moment it is ready — so admitting the
 //! page never waits on the analyses behind it — and then completes the same
-//! solved view and returns the deferred JSON (`pcb_layout_page.warmPage`).
+//! solved view and returns the deferred JSON (`warmPage`, below).
 //!
 //! And `spawn` starts that warm from the page handler itself. Measured on
 //! barracuda (2026-08-26, Debug), the prefix a second render repeats is ~0.4 s

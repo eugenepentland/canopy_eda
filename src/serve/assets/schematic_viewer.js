@@ -246,6 +246,9 @@
     currentResults = search(searchInput.value);
     selectedIdx = currentResults.length ? 0 : -1;
     renderResults();
+    // Clearing the native search field (including its built-in × button)
+    // should also clear a net highlight selected from an earlier result.
+    if (!searchInput.value.trim()) clearHighlight();
   });
 
   searchInput.addEventListener('keydown', function (e) {
@@ -263,6 +266,7 @@
     } else if (e.key === 'Escape') {
       e.preventDefault();
       searchInput.value = '';
+      clearHighlight();
       closeResults();
       searchInput.blur();
     }

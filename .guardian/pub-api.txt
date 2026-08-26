@@ -6,6 +6,17 @@ src/allocating_writer.zig::writeByte | fn writeByte(self: AllocatingWriter, byte
 src/asserted_fns.zig::buildMap | fn buildMap(allocator: Allocator, block: *const DesignBlock) Allocator.Error!Map
 src/bench_layout.zig::main | fn main(init: std.process.Init) !void
 src/bench_layout.zig::process_io value
+src/bench_page.zig::BenchError value
+src/bench_page.zig::BoardResult struct_
+src/bench_page.zig::DrcCounts struct_
+src/bench_page.zig::Facts struct_
+src/bench_page.zig::Phases struct_
+src/bench_page.zig::benchOne | fn benchOne( allocator: std.mem.Allocator, arena: std.mem.Allocator, project_dir: []const u8, name: []const u8, reps: usize, ) std.mem.Allocator.Error!BoardResult
+src/bench_page.zig::cmdBenchPage | fn cmdBenchPage(allocator: std.mem.Allocator, args: []const []const u8) BenchError!void
+src/bench_page.zig::corpus | fn corpus(arena: std.mem.Allocator, project_dir: []const u8) std.mem.Allocator.Error![]const []const u8
+src/bench_page.zig::names value
+src/bench_page.zig::writeResultsJson | fn writeResultsJson(w: *std.Io.Writer, results: []const BoardResult) json_writer.WriteError!void
+src/bench_page.zig::writeTable | fn writeTable(w: *std.Io.Writer, results: []const BoardResult, reps: usize) std.Io.Writer.Error!void
 src/bench_route.zig::BenchError value
 src/bench_route.zig::BoardResult struct_
 src/bench_route.zig::Copper struct_
@@ -1561,6 +1572,7 @@ src/placement/dive_elide.zig::policyAdmits | fn policyAdmits(policy: route_polic
 src/placement/dive_elide.zig::strandedAt | fn strandedAt(d: f64, other_reach: f64, via_r: f64, trace_w: f64) bool
 src/placement/drc.zig::Kind enum_
 src/placement/drc.zig::Parties struct_
+src/placement/drc.zig::PreparedCopper struct_
 src/placement/drc.zig::Severity enum_
 src/placement/drc.zig::TopologyZone value
 src/placement/drc.zig::TrackAdditionGate struct_
@@ -1572,6 +1584,7 @@ src/placement/drc.zig::build | fn build( arena: std.mem.Allocator, placement: op
 src/placement/drc.zig::build | fn build( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, clearance: f64, probe: router.Via, ) std.mem.Allocator.Error!ViaAdditionGate
 src/placement/drc.zig::check | fn check( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, clearance: f64, ) std.mem.Allocator.Error![]Violation
 src/placement/drc.zig::checkTopology | fn checkTopology( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, zones: []const TopologyZone, ) std.mem.Allocator.Error![]Violation
+src/placement/drc.zig::checkWithPreparedCopper | fn checkWithPreparedCopper( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, clearance: f64, prepared: PreparedCopper, ) std.mem.Allocator.Error![]Violation
 src/placement/drc.zig::checkWithZones | fn checkWithZones( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, clearance: f64, zones: []const TopologyZone, ) std.mem.Allocator.Error![]Violation
 src/placement/drc.zig::clear | fn clear(self: TrackAdditionGate, candidate: router.Track) bool
 src/placement/drc.zig::countKind | fn countKind(v: []const Violation, k: Kind) usize
@@ -1636,6 +1649,19 @@ src/placement/escape_assign.zig::plan | fn plan(arena: Allocator, placement: opt
 src/placement/escape_assign.zig::refused | fn refused(self: Contention) usize
 src/placement/escape_assign.zig::reservedLanes | fn reservedLanes( arena: Allocator, p: Plan, run_mm: f64, ) Allocator.Error![]const route_policy.ReservedLane
 src/placement/escape_assign.zig::suggestDsl | fn suggestDsl( arena: Allocator, placement: optimizer.Placement, c: Contention, ) Allocator.Error![]const u8
+src/placement/fill_cache.zig::Entry struct_
+src/placement/fill_cache.zig::Fills struct_
+src/placement/fill_cache.zig::Held struct_
+src/placement/fill_cache.zig::Key struct_
+src/placement/fill_cache.zig::Store struct_
+src/placement/fill_cache.zig::acquire | fn acquire(k: Key) Held
+src/placement/fill_cache.zig::acquire | fn acquire(self: *Store, k: Key) Held
+src/placement/fill_cache.zig::deinit | fn deinit(self: *Store) void
+src/placement/fill_cache.zig::fills | fn fills(self: Held) Fills
+src/placement/fill_cache.zig::key | fn key( placement: optimizer.Placement, routed: router.RouteResult, zones: []const pour.UserZone, ) Key
+src/placement/fill_cache.zig::put | fn put(k: Key, fills: Fills) void
+src/placement/fill_cache.zig::put | fn put(self: *Store, k: Key, fills: Fills) void
+src/placement/fill_cache.zig::release | fn release(self: *Held) void
 src/placement/fine_accept.zig::Attempt struct_
 src/placement/fine_accept.zig::Board struct_
 src/placement/fine_accept.zig::Connectivity struct_
@@ -1920,9 +1946,11 @@ src/placement/net_identity.zig::canonical | fn canonical(self: Identity, net: i3
 src/placement/net_identity.zig::canonicalName | fn canonicalName(self: Identity, nets: []const optimizer.FlatNet, net: i32) []const u8
 src/placement/net_identity.zig::init | fn init(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error!Identity
 src/placement/net_identity.zig::same | fn same(self: Identity, a: i32, b: i32) bool
+src/placement/net_open.zig::Prepared struct_
 src/placement/net_open.zig::Report struct_
 src/placement/net_open.zig::check | fn check( arena: std.mem.Allocator, placement: optimizer.Placement, copper: routed_copper.Copper, base: ?pour.EdgeField, ) std.mem.Allocator.Error![]drc.Violation
-src/placement/net_open.zig::checkWithConnectivity | fn checkWithConnectivity( arena: std.mem.Allocator, placement: optimizer.Placement, copper: routed_copper.Copper, base: ?pour.EdgeField, plane_fills: []const pour.NetFills, ) std.mem.Allocator.Error!Report
+src/placement/net_open.zig::checkWithConnectivity | fn checkWithConnectivity( arena: std.mem.Allocator, placement: optimizer.Placement, copper: routed_copper.Copper, prepared: Prepared, ) std.mem.Allocator.Error!Report
+src/placement/net_open.zig::zoneFills | fn zoneFills( arena: std.mem.Allocator, placement: optimizer.Placement, copper: routed_copper.Copper, base: ?pour.EdgeField, ) std.mem.Allocator.Error![]const pour.Fill
 src/placement/net_rules.zig::FenceRule struct_
 src/placement/net_rules.zig::ImpedanceRule value
 src/placement/net_rules.zig::NetRule struct_
@@ -2280,6 +2308,8 @@ src/placement/power_integrity.zig::analyze | fn analyze( alloc: std.mem.Allocato
 src/placement/power_integrity.zig::analyzeCopper | fn analyzeCopper( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, zones: []const pour.UserZone, base_edge: ?pour.EdgeField, ) std.mem.Allocator.Error!Analysis
 src/placement/power_integrity.zig::name | fn name(self: SurfaceCapacityStatus) []const u8
 src/placement/power_integrity.zig::name | fn name(self: SurfaceKind) []const u8
+src/placement/power_integrity.zig::routedTrackRequiredWidths | fn routedTrackRequiredWidths( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, ) std.mem.Allocator.Error![]const ?f64
+src/placement/power_integrity.zig::routedTrackRequiredWidthsPrepared | fn routedTrackRequiredWidthsPrepared( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, plane_fills: []const pour.NetFills, zones: []const pour.UserZone, zone_fills: []const pour.Fill, ) std.mem.Allocator.Error![]const ?f64
 src/placement/power_integrity.zig::temperature_rise_c value
 src/placement/power_integrity.zig::via_plating_mm value
 src/placement/progress.zig::Inputs struct_
@@ -3176,6 +3206,10 @@ src/serve/datasheet_attach.zig::datasheetStem | fn datasheetStem(name: []const u
 src/serve/datasheet_attach.zig::linksDatasheet | fn linksDatasheet(component_form: []const u8, pdf: []const u8) bool
 src/serve/datasheet_attach.zig::spliceDatasheet | fn spliceDatasheet( allocator: std.mem.Allocator, source: []const u8, pdf: []const u8, ) SpliceError![]u8
 src/serve/datasheet_review_json.zig::write | fn write(writer: anytype, root_body: []const ast.Node) !void
+src/serve/describe_cache.zig::Store struct_
+src/serve/describe_cache.zig::deinit | fn deinit(self: *Store) void
+src/serve/describe_cache.zig::serve | fn serve(self: *Store, in: anytype, miss_version: *?u32) bool
+src/serve/describe_cache.zig::store | fn store(self: *Store, in: anytype) void
 src/serve/design_diff.zig::DesignDiff struct_
 src/serve/design_diff.zig::DiffError value
 src/serve/design_diff.zig::FieldChange struct_
@@ -3187,6 +3221,7 @@ src/serve/design_diff.zig::diffBlocks | fn diffBlocks( allocator: std.mem.Alloca
 src/serve/design_diff.zig::historyApi | fn historyApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/design_diff.zig::writeDiffJson | fn writeDiffJson(w: anytype, diff: DesignDiff) (std.mem.Allocator.Error || std.Io.Writer.Error)!void
 src/serve/design_rules_edit.zig::editDesignRulesApi | fn editDesignRulesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) std.mem.Allocator.Error!void
+src/serve/design_rules_edit.zig::editStackupPlanesApi | fn editStackupPlanesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) std.mem.Allocator.Error!void
 src/serve/diag_format.zig::Diagnostic struct_
 src/serve/diag_format.zig::build | fn build( allocator: std.mem.Allocator, file_path: []const u8, source: []const u8, err_name: []const u8, last_error: ?evaluator_mod.EvalDiagnostic, ) std.mem.Allocator.Error!Diagnostic
 src/serve/diag_format.zig::caretLine | fn caretLine(allocator: std.mem.Allocator, source_line: []const u8, col: u32) std.mem.Allocator.Error![]u8
@@ -3502,7 +3537,7 @@ src/serve/pcb_describe.zig::DescribeError value
 src/serve/pcb_describe.zig::Side enum_
 src/serve/pcb_describe.zig::aabbHalf | fn aabbHalf(part: optimizer.Part) [2]f64
 src/serve/pcb_describe.zig::anchorIndex | fn anchorIndex(parts: []const optimizer.Part, nets: []const optimizer.FlatNet) ?usize
-src/serve/pcb_describe.zig::describeDesign | fn describeDesign( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: pcb_layout_page.PngRequest, ) pcb_layout_page.PngError![]u8
+src/serve/pcb_describe.zig::describeDesign | fn describeDesign( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: pcb_layout_page.PngRequest, deps: ?*?page_cache.FileSet, ) pcb_layout_page.PngError![]u8
 src/serve/pcb_describe.zig::describeProgress | fn describeProgress( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: pcb_layout_page.PngRequest, deps: ?*?page_cache.FileSet, ) pcb_layout_page.PngError![]u8
 src/serve/pcb_describe.zig::layoutProgressApi | fn layoutProgressApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void
 src/serve/pcb_describe.zig::originOf | fn originOf(p: optimizer.Placement, pi: usize) []const u8

@@ -726,6 +726,60 @@ one-board anecdote.
 - completeness-waiver: integer overflow (counts come from routed slices; the score arithmetic widens to f64 before any accumulation)
 - completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
 
+## bench-page
+
+Public functions: benchOne, corpus, writeTable, writeResultsJson, cmdBenchPage
+
+The PCB-page latency benchmark that makes "the page got slower" a checkable
+claim before it reaches main. Page-load and DRC-update latency regressed
+repeatedly because nothing measured them. `netlisp bench-page
+[--project-dir <dir>] [--reps <n>] [--json] [--baseline <file>] [<design> …]`
+times the production seams per board — design evaluation, `.layouts.json`
+read+parse, `solveForRequest` (verbatim ★ restore + copper restore), the
+reporting DRC (`drc_rules.checkFilteredZones`, `net_open` included), the
+geometry-only `drc.check` (native twin of the client WASM engine), and the
+complete cold page render through the boot warm-up's page-scoped seam
+(`pcb_derived.warmPage(…, .page)`) on a fresh cache, which stops where the
+reader's first paint does and leaves the `?derived=1` analyses out — and prints
+per-board phase medians plus the DRC counts, rendered-page size, and whether
+the render was admitted to the page cache. The corpus is every design with a
+saved-layout sidecar (the boot warm-up's own guard), so nothing is
+solved-and-persisted for a board nobody laid out.
+
+`--baseline <file>` is the durable regression gate the tracked `pre-push` hook
+runs for main (via `scripts/perf_gate.sh`, behind `scripts/gate.sh`'s
+machine-wide lock): it compares each board's phase medians against a committed
+`--json` recording and exits non-zero on a per-board allowance breach
+(`max(base×1.30, base+25 ms)`), a corpus-wide geomean drift past 1.10, a
+hand-set absolute budget in the baseline's `budgets` object, moved DRC counts
+(unlike work is not comparable), or lost page-cache retention. Full workflow:
+`docs/benchmarks/pcb-page/README.md`.
+
+- the CLI parses project dir, reps, output and baseline flags with positionals as design names
+- phase medians are the outlier-tolerant middle of the rep samples
+- the JSON recording round-trips through the baseline loader with every phase and invariant intact
+- the --baseline gate passes a run identical to its committed baseline
+- a phase past both the ratio and absolute allowance fails the gate and names the board, phase, and limit
+- millisecond-scale jitter under the absolute floor never fails the ratio rule
+- corpus-wide drift fails the gate even when every board stays inside its own allowance
+- a hand-set absolute budget in the baseline file caps every board regardless of the recorded medians
+- a board without a blessed layout is reported but kept out of the gate, since its per-render re-solve is neither stable nor comparable
+- moved DRC counts mean unlike work, which fails the gate with a re-record hint instead of comparing wall times
+- losing page-cache retention fails the gate even when every timing column improved
+- new and vanished boards are noted rather than silently passing or failing the gate
+- a missing or corrupt baseline is a gate failure, never a pass
+- a failed board renders as FAILED in the table and carries ok=false in JSON
+- a page render the cache refused is flagged in the table so a silent every-load-cold regression is visible
+- the page-cache retention probe asks under the same entry and live version the page warm admitted, so a cached page is never reported as NOT retained
+- completeness-waiver: empty inputs (an empty corpus prints an empty table; a zero-baseline phase is ratio-floored so it cannot divide by zero)
+- completeness-waiver: large inputs (each rep runs in its own arena, freed before the next; the corpus peaks at one rep's render)
+- completeness-waiver: unauthorized access (a local CLI over a project directory the invoking user already owns; no network or auth surface)
+- completeness-waiver: i/o failure (a design that fails to load or solve is an ok=false FAILED row rather than aborting the corpus; an unreadable baseline fails the gate, never passes it)
+- completeness-waiver: concurrent access (renders through the same warm-up seam the server boot uses, against this process's own fresh cache; sidecar writes are the render path's own, identical to boot warm-up)
+- completeness-waiver: malformed encoding (a sidecar that fails to parse is logged and still timed — the parse work it measured is real; design-parse diagnostics belong to the evaluator)
+- completeness-waiver: integer overflow (all timing arithmetic widens to f64; counts come from slice lengths)
+- completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
+
 ## placement/route-timing
 
 Public functions: PhaseTimer (begin, end, beginNet, endNet, noteAttempt, elapsed, total, label)
@@ -2892,11 +2946,12 @@ question each caller answers honestly through `Zone.component`.
 - an authored ground-via maximum warns on an SMD ground pad until a same-net plane via falls within the budget
 - an optional NC or input-strap land assigned to ground is excluded from the ground-via maximum because its same-package real ground return owns the required plane connection
 
-Public functions: check, checkTopology, checkWithZones, countKind, defaultSeverity, errorCount
+Public functions: check, checkTopology, checkWithZones, checkWithPreparedCopper, countKind, defaultSeverity, errorCount
 
 - RF bend findings are reconstructed from submitted or saved copper, not only transient router metadata
 - a successful swept RF path suppresses only its internal tessellation vertices, not unrelated same-net corners
 - every check stamps its kind's canonical default severity, and each warning kind is proved by a fixture
+- reporting DRC reuses its exact cached plane, pour, and user-zone fills when solving local power-track current
 - warns when a signal net's own copper laps one of its pads instead of being aimed at the pad centre, while ground nets are exempt
 - reports one own-land warning per swept RF path and physical land rather than one per tessellation chord
 - a match group spreading wider than its tolerance warns once, naming the longest and shortest nets
@@ -2941,6 +2996,7 @@ Public functions: check, checkTopology, checkWithZones, countKind, defaultSeveri
 - silk-over-pad checks authored footprint silk rather than inventing reference-designator artwork
 - flags a plated through-hole pad whose annular ring is under the minimum; NPTH pads exempt
 - flags a track narrower than its net-class width, else the board minimum, as an error
+- a solved local-current requirement replaces the whole-net class width for that power track, but never permits copper below its own IPC-2221 requirement
 - flags a routed trace endpoint that reaches no same-net copper as a copper-stub error when its section still carries support connectivity
 - warns once when same-net trace capsules touch across separate explicit centreline components
 - warns once per stored trace section whose deletion preserves all pad, live-via, and pour connectivity
@@ -3026,6 +3082,7 @@ Public functions: compute, computeMaskShared, computeMasks, initMargin, planeCon
 - every emitted contour point keeps at least the pour clearance from foreign copper
 - contour vertices interpolate the clearance iso-line instead of snapping to grid corners
 - a foreign via interior to a seeded pour punches an antipad hole that encircles it at clearance
+- a round NPTH on an outer face punches a round antipad instead of its bounding square
 - a foreign trace that splits a plane leaves its same-net pads in separate components
 - a track crossing a fill is assigned to every fabricated component it traverses even when both endpoints lie outside
 - the fill respects a non-rectangular board outline
@@ -3046,6 +3103,34 @@ connectivity model.
 
 - completeness-waiver: concurrent access (each fill owns its allocator-backed grids and reads an immutable placement snapshot; callers serialize mutations to the copper handed into a later fill)
 
+## placement/fill-cache
+
+Public functions: acquire, key, put
+
+- one board fingerprints identically from two independently built copies and differently after any change to its copper
+- the fingerprint ignores the objective score and whether the optimizer ran, so one saved board shares an entry across the surfaces that resolve it
+- a retained fill is copied out of the request arena that poured it and stays readable after that arena is gone
+- an evicted board is freed only once its last reader releases it, so a DRC pass reading a fill is never overtaken by a newer board
+- a board already retained is never duplicated, and the least recently borrowed board is the one eviction takes
+- a board with no planes, pours or zones retains its empty fill so the surfaces after it skip the pour attempt too
+- a board whose fill alone exceeds the whole store's byte ceiling is declined rather than retained, and every later pass simply pours it again
+- a second reporting DRC over an unchanged board reuses the retained fill instead of re-pouring it and returns the identical verdict
+
+The reporting DRC seam pours every declared plane, every pour and every drawn
+zone of a board before it can judge copper topology or connectivity, and that
+raster is the whole cost of the seam. It is a pure function of the board, so it
+is retained under a 128-bit content fingerprint of the placement, the routed
+copper and the user zones, and borrowed rather than re-poured by every later
+pass over the same board.
+
+- completeness-waiver: large inputs (a single board's fill is refused outright when it exceeds the store's whole byte ceiling, and the retained set is bounded by both a board count and that ceiling; the fill itself is already cell-capped by placement/pour)
+- completeness-waiver: unauthorized access (an in-process memo over boards a caller already holds; entries are reachable only through a fingerprint of the exact board's own bytes, so nothing can read copper it did not already have, and there is no file, request, or auth surface)
+- completeness-waiver: concurrent access (the store is mutex-guarded and every borrow is refcounted, so an entry evicted under a reader is unlinked and freed by that reader's release rather than under it; a published entry is immutable, so passes over one board share it with no lock held while they read)
+- completeness-waiver: i/o failure (no I/O — the memo copies typed in-memory fills and reads no path; an allocation failure declines the entry and leaves the caller's freshly poured fill standing)
+- completeness-waiver: malformed encoding (typed placement and pour values only; design parsing and board-file rejection happen long before a fill exists to retain)
+- completeness-waiver: integer overflow (the fingerprint widens every scalar to its own storage width before hashing and does no arithmetic on it; the byte total only ever adds a measured arena capacity and subtracts the same value on eviction)
+- completeness-waiver: panic-free (every failure path degrades to a miss — a failed allocation, an oversized board, and a key another thread published first all return without retaining, and the DRC pass pours its own fill as it always did)
+
 ## placement/module_policy
 
 Public functions: analyze, classifyNetName, isInductor
@@ -3059,15 +3144,18 @@ Public functions: analyze, classifyNetName, isInductor
 
 Public functions: capacityForArea, traceCapacityA, requiredTraceWidthMm,
 viaCapacityA, requiredViaDrillMm, routingCurrentA, powerWidthForNet,
-powerViaDrillForNet
+powerViaDrillForNet, routedTrackRequiredWidths, routedTrackRequiredWidthsPrepared
 
 Power routing derives conservative pre-route copper geometry from the rail's
 declared load envelope, the actual stack foil, the 10 °C IPC-2221 screening
 target, and the board's via-plating rule. Shared traces without plane or pour
 support reserve the full rail load. For a rail carried by an explicitly
 declared plane or copper zone, the fill reserves the full-current neck while
-short pad fanouts retain their authored width and are judged after routing at
-the local branch current solved by the power-integrity analysis. The router
+short pad fanouts may opt into `(power-branch-width MM)` and are judged after
+routing at the local branch current solved by the power-integrity analysis.
+The ordinary class width remains the fallback whenever that solve is
+incomplete, and the PCB DRC panel can widen only failing opted-in segments on
+1 mil increments without moving their centre lines. The router
 does not invent planes on arbitrary layers, and a required single-barrel via
 is enlarged only as far as the derived drill and annular-ring rules require.
 
@@ -3075,6 +3163,7 @@ is enlarged only as far as the derived drill and annular-ring rules require.
 - a power pour's effective minimum neck is raised above the board fabrication floor by the rail maximum and actual stack foil
 - board rules derive the worst-layer trace width and one-barrel drill from maximum rail load
 - an unpoured rail reserves its whole maximum-current width while a pour-backed rail leaves short fanouts to the post-route branch-current proof
+- a solved plane-aware rail exposes an index-aligned required width for each local-current branch, while an incomplete opted-in rail screens every segment at the whole-rail current
 - a rail with no annotated load routes for its declared source capacity, so a standalone regulator page sizes copper from its own output rating
 - declared loads outrank source capacity, so a rail routes for what the board draws rather than what its supply could deliver
 - a standalone module that rates its own output port and declares a bare layer count gets an IPC-2221 width for that rail; without the stackup no width is invented
@@ -3902,7 +3991,7 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - simplifies a dense outline to a few corners within tolerance
 - a rectangular pad off a quarter turn carries its four rotated corners, so its keepout is the land and not the land's square bounding box
 - a rotated rectangular pad on a bottom-side part carries corners mirrored with the part
-- a circle or oval pad off a quarter turn keeps its bounding box, which no rectangle can tighten
+- a circle carries a round collision outline while an oval conservatively keeps its bounding box
 
 ## eval/builtins
 
@@ -5945,6 +6034,9 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The layout-progress ladder endpoint bypasses its cache for any query parameter
 - The layout-progress ladder endpoint reuses a dependency-validated JSON body and invalidates it when the design or its sidecars change
 - The layout-progress cache refuses a body whose dependency set stamps nothing
+- The PCB-describe endpoint reuses a dependency-validated facts document and invalidates it when the design or its sidecars change
+- The PCB-describe endpoint caches only its allow-listed query modes and bypasses fresh-solve and sub-scoped requests
+- The PCB-describe cache refuses a body whose dependency set stamps nothing
 - The layout-status reader reuses a parsed layouts sidecar until that file's mtime or size changes
 - The fab-readiness gate reuses caller-supplied net connectivity instead of recomputing it
 - The navigation bar routes home through the Netlisp brand and carries no separate Designs tab
@@ -5976,6 +6068,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - PCB passive footprint edits update the exact owning schematic source
 - tangent trace bends and outline fillets remain native editable arcs in the PCB editor
 - While hand-routing, the PCB editor can toggle the preview and committed path between 45-degree octilinear and 90-degree Manhattan bends
+- The PCB hand router starts opted-in current-aware power nets at their branch width and defers only that width verdict from its zone-blind synchronous gate and fast WASM marker list to authoritative server DRC
 - The PCB editor places repeated standalone vias on a chosen net without creating trace segments, using grid/copper snapping, net-class geometry, the live DRC gate, and one undo step per via
 - Escape cancels an active manual route even when automatic pad-taper DRC rejects finishing it, restoring the route-start copper and exiting Draw instead of retrying the blocked finish
 - Every saved trace segment and via has a stable inspector-visible ID that survives saves and retained-copper rewrites, with deterministic IDs backfilled for legacy copper
@@ -6136,6 +6229,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Selecting a rigid sub-circuit exposes its Stamp and layout-page actions directly in Properties
 - The PCB Sub-circuits palette and Properties expose Save to sub-circuit, which fetches a fresh target revision before capturing that group's poses, stamped copper, and locally connected traces/vias as a new layout
 - the PCB hand router defaults to the active net class while the sidebar keeps its resolved geometry controls hidden
+- the PCB hand router previews and clearance-checks an authored pad neck at its tapered physical width before committing either a pad-out or pad-in gesture
 - The /pcb-layout Route panel presents Route board, Stop, status, and live replay without cached-load, interactive-session, scope, or advanced-routing controls
 - A completed Route board run persists its applied copper to the active layout, or creates the conventional first `layout` snapshot; Route plan remains temporary
 - The PCB replay client streams the live-route endpoint into the timeline player, follows the head, and reattaches to a running job through the overlay seam
@@ -6345,7 +6439,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Ctrl/Cmd+C and Ctrl/Cmd+V copy and paste a selected trace, via, or mixed copper selection as one undoable edit with fresh identities
 - L locks or unlocks every footprint in an explicit multi-selection without requiring a hovered member
 - Two selected connected trace segments expose a right-click Fillet command that applies an exact native-arc radius through the normal copper edit gates
-- F rigidly mirrors a selected sub-circuit or marquee group to the opposite board side around one stable anchor, preserving relative positions and orientations in one undo
+- F rigidly mirrors a selected sub-circuit or marquee group to the opposite board side around one stable anchor, preserving relative positions, orientations, and routed copper in one undo
 - A multi-part drag or rotate carries copper on nets private to the moving parts and leaves shared-net copper in place
 - Align, distribute, and pad-align carry each entity's own copper by that entity's own delta
 - A press on marquee-selected copper drags the whole selection instead of sliding that one segment
@@ -6361,6 +6455,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The Objects filter picks pours and keepouts only at their visible edges and offers enable-all and disable-all actions
 - Routing toward a same-net pad snaps the whole approach onto the pad centreline
 - A click that magnetically snaps to a same-net pad or existing trace endpoint finishes the manual trace only after the path reaches that endpoint.
+- While hand-routing, one faded dashed ratsnest line follows the legal preview endpoint to the closest unresolved same-net pad, trace body, via, or filled-pour point outside the launch island, including when routing resumes from existing copper.
 - hand-routing starts and continues only from pads and traces on the active copper layer, so opposite-face lands cannot steal a route click
 - The hand-route tool lays both legs of a differential pair together with mitered offset corners
 - The auto-commit author is the ward user, falling back to the dev-admin identity
@@ -6433,6 +6528,9 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Design Settings edits board-level numeric rules in the GUI, preserves unrelated source forms, rebuilds, and reloads the shown layout
 - Design Settings renders validated numeric rule inputs with save-and-rebuild feedback
 - Design Settings creates a design-rules source form when a board previously relied entirely on defaults
+- Design Settings adds, edits, and deletes whole-layer copper planes without replacing physical stackup construction or comments
+- Saving plane controls on an implicit board authors the visible copper count and supports an explicitly plane-free stack
+- Design Settings exposes whole-layer copper assignments with add, edit, delete, validated save, and read-only states
 - Assembly mask relief retains one authored-radius terminal fillet where a pad terminates or crosses the RF route
 - Assembly and 3D mask relief restore a local pad-shaped web without interrupting the exposed trace
 - The PCB page blob names the declared plane nets, and omits the key entirely when the design declares no stackup

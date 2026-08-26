@@ -45,7 +45,7 @@ fn keyIndex(comptime param: []const u8) usize {
 
 /// What a request-less render is warming. The editor asks for two responses
 /// per page — the page itself, then `?derived=1` after first paint — and one
-/// solve answers both (see `serve/pcb_derived_warm.zig`), so the warm path
+/// solve answers both (see `serve/pcb_derived.zig`), so the warm path
 /// reserves and admits each under its own cache identity.
 pub const WarmKind = enum {
     page,

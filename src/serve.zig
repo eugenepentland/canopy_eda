@@ -55,6 +55,7 @@ const pcb_page_cache = @import("serve/pcb_page_cache.zig");
 const pcb_derived = @import("serve/pcb_derived.zig");
 const thermal_cache = @import("serve/thermal_cache.zig");
 const progress_cache = @import("serve/progress_cache.zig");
+const describe_cache = @import("serve/describe_cache.zig");
 const warmup = @import("serve/warmup.zig");
 const pcb_fence = @import("serve/pcb_fence.zig");
 const pcb_step_export = @import("serve/pcb_step_export.zig");
@@ -309,6 +310,10 @@ pub const Caches = struct {
     /// Dependency-validated PCB-completion ladder JSON (`/api/layout-progress`),
     /// the per-card body the home page requests once per design on every load.
     progress_json: progress_cache.Store = .{},
+    /// Dependency-validated PCB spatial-facts JSON (`/api/pcb-describe`), the
+    /// endpoint agent loops and review tooling re-request most — and the one
+    /// that used to pay its full 6.5 s solve + reporting DRC every single call.
+    describe_json: describe_cache.Store = .{},
     /// Memoised gzip streams, keyed on the response body itself (see
     /// `gzip_cache`). Held here rather than module-scope so two server
     /// instances stay independent.
@@ -323,6 +328,7 @@ pub const Caches = struct {
             .pcb_pages = .{ .allocator = allocator },
             .thermal_solves = .{ .allocator = allocator },
             .progress_json = .{ .allocator = allocator },
+            .describe_json = .{ .allocator = allocator },
             .gzip = .{ .allocator = allocator },
         };
     }
@@ -333,6 +339,7 @@ pub const Caches = struct {
         self.pcb_pages.deinit();
         self.thermal_solves.deinit();
         self.progress_json.deinit();
+        self.describe_json.deinit();
         self.gzip.deinit();
     }
 };
@@ -759,6 +766,7 @@ pub fn serve(
     // Edit
     router.post("/api/edit-value/:name", edit.editValueApi, .{});
     router.post("/api/design-rules/:name", design_rules_edit.editDesignRulesApi, .{});
+    router.post("/api/stackup-planes/:name", design_rules_edit.editStackupPlanesApi, .{});
     router.get("/api/board-role/:name", edit.getBoardRoleApi, .{});
     router.post("/api/board-role/:name", edit.setBoardRoleApi, .{});
     router.post("/api/power-plane/:name", edit.setPowerPlaneApi, .{});

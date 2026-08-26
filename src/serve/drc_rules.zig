@@ -529,10 +529,13 @@ test "viewer controls DRC error and warning marker visibility independently" {
 test "viewer scopes commit DRC and retains drag-time work across frames" {
     const js = @embedFile("assets/pcb_board.js");
     // The synchronous commit gate compares the same base/after result
-    // multisets, but each engine call receives only the changed neighbourhood.
+    // multisets, but each engine call receives only the changed neighbourhood,
+    // including only RF paths whose swept copper intersects that neighbourhood.
     try std.testing.expect(std.mem.indexOf(u8, js, "function drcGateScope(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "drcGateRun(scope.bt,scope.bv,scope.parts)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "drcGateRun(scope.at,scope.av,scope.parts)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "function drcRfScope(box)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "rf:drcRfScope(box)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "drcGateRun(scope.bt,scope.bv,scope.parts,scope.rf)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "drcGateRun(scope.at,scope.av,scope.parts,scope.rf)") != null);
     // Worker/session consumers share one full-board serialization generation,
     // while session refill waits for idle or an explicit copper gesture.
     try std.testing.expect(std.mem.indexOf(u8, js, "function drcInputJson()") != null);

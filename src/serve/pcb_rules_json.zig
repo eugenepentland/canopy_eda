@@ -43,7 +43,7 @@ pub fn writeNetClasses(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.
         try w.writeAll(",\"source\":");
         try writeJsonStr(w, rule.class.source);
         try w.print(
-            ",\"width\":{d},\"clearance\":{d},\"via_dia\":{d},\"via_drill\":{d}," ++
+            ",\"width\":{d},\"power_branch_width\":{d},\"clearance\":{d},\"via_dia\":{d},\"via_drill\":{d}," ++
                 "\"priority\":{d},\"diff_gap\":{d},\"band_start_hz\":{d},\"max_freq_hz\":{d}," ++
                 "\"pad_neck_width\":{d},\"pad_neck_max_length\":{d},\"pad_neck_taper_length\":{d}," ++
                 "\"keepout_mm\":{d},\"rf_corridor_mm\":{d},\"keepout_escape_mm\":{d},\"impedance_ohms\":{d}," ++
@@ -52,6 +52,7 @@ pub fn writeNetClasses(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.
                 "\"mask_relief_mm\":{d},\"fence_reach_mm\":{d},\"fence_net\":",
             .{
                 rule.width,
+                rule.pad_neck.power_branch_width,
                 rule.clearance,
                 rule.via_dia,
                 rule.via_drill,
@@ -285,6 +286,7 @@ test "the net-class blob carries keepout and impedance geometry" {
             .width = 0.1524,
             .max_length = 0.75,
             .taper_length = 0.35,
+            .power_branch_width = 0.1524,
         }, .rf = .{
             .keepout_mm = 0.5,
             .keepout_escape_mm = 1.0,
@@ -303,6 +305,7 @@ test "the net-class blob carries keepout and impedance geometry" {
     try testing.expect(std.mem.indexOf(u8, out, "\"pad_neck_width\":0.1524") != null);
     try testing.expect(std.mem.indexOf(u8, out, "\"pad_neck_max_length\":0.75") != null);
     try testing.expect(std.mem.indexOf(u8, out, "\"pad_neck_taper_length\":0.35") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"power_branch_width\":0.1524") != null);
     // The class IDENTITY is load-bearing for the same rule: the client waives the
     // halo between one class's own members, and cannot without this name.
     try testing.expect(std.mem.indexOf(u8, out, "\"class\":\"rf\"") != null);

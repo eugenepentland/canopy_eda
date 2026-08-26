@@ -669,7 +669,7 @@ pub const scope_form_docs = blk: {
             "end in `.gbr`; JLCPCB tape names conventionally use `pst_` for top and `psb_` for bottom.",
     } };
     t[@backingInt(ScopeForm.net_class)] = .{ .scope = tl, .doc = .{
-        .syntax = "(net-class \"name\" [(width MM)] [(clearance MM)] " ++
+        .syntax = "(net-class \"name\" [(width MM)] [(power-branch-width MM)] [(clearance MM)] " ++
             "[(pad-escape-width MM)] [(pad-escape-max-length MM)] [(taper-length MM)] " ++
             "[(via DIA DRILL)] [(priority 0-7)] [(diff-pair [GAP_MM])] [(max-freq HZ)] " ++
             "[(band MIN_HZ MAX_HZ)] [(return-loss DB)] " ++
@@ -681,6 +681,7 @@ pub const scope_form_docs = blk: {
             "[(keepout MM [(escape MM)])] [(mask-relief MM)] [(nets \"A\" \"B\"…)])",
         .summary = "Routing geometry + routing order profile and/or membership for named nets: " ++
             "trace width, copper clearance, " ++
+            "an optional power-branch-width that starts plane-backed rail fanouts narrow while preserving width as the conservative whole-rail fallback (post-route DRC solves each segment's current and identifies only the branches that must grow), " ++
             "an optional short pad-local neck width/maximum length/linear taper back to the class width " ++
             "(applied only where the land's span across the actual launch is narrower than the trace), " ++
             "and via size (diameter + drill) in mm, plus a routing-priority tier — the autorouter " ++

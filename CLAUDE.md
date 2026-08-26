@@ -23,10 +23,14 @@ zig build --seed=1 test      # unit tests + Guardian gate
 zig build docs               # regenerate language reference after any DSL change
 zig build test-affected      # default dev check: tests affected by your diff
 zig build run -- serve --project-dir projects/designs   # web server :7050
+scripts/perf_gate.sh         # PCB-page latency gate vs committed baseline
+                             # (pre-push on main runs this; --record re-baselines)
 ```
 
 - NEVER pass `-Doptimize=safe` to the PATH zig (multi-minute LLVM build);
-  use the pinned production compiler: `scripts/zig-prod build --seed=1 -Doptimize=safe -p /tmp/<prefix>`
+  use the pinned production compiler: `scripts/zig-prod build --seed=1 -Doptimize=safe -p ~/.cache/netlisp/prod/<prefix>`
+  (prefixes under ~/.cache/netlisp/prod/, never /tmp — /tmp has a per-user
+  quota that stale prefixes once filled, breaking every tool on the machine)
 - Unit-test binary compiles at `-Dtest-opt` (keep Debug); do not pass `-Dtest-opt=safe`.
 - IDs are persisted at write time: any surface that writes designs must pin
   minted ids back into `src/<design>.sexp` before deriving uuids

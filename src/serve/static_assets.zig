@@ -437,6 +437,20 @@ test "PCB board editor shows the Board outline properties on a plain outline edg
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
+// PCB outline vertex marks appear only during outline editing and retain the
+// existing larger coordinate-tested drag target.
+test "PCB board outline editing shows compact vertex dots without shrinking hit targets" {
+    const markers = [_][]const u8{
+        "OUTLINE_VERTEX_SIZE=3;",
+        "r:OUTLINE_VERTEX_SIZE/2,fill:col",
+        "if(editing)(nominal||pts).forEach",
+        "if(editing){var rc=outlinePtsOf(outlineEditable());",
+        "function vtxAt(m)",
+        "var bd=7/S,best=-1;",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+}
+
 // spec: Web Server - Selecting a board outline exposes editable dimensions, slides horizontal/vertical edges only perpendicular to themselves, and uses Shift to constrain non-axis-aligned edge slides to their dominant axis
 test "PCB board editor edits dimensions and slides outline edges along their normal" {
     const markers = [_][]const u8{
@@ -498,8 +512,8 @@ test "PCB pad alignment uses component ownership inside a sub-circuit editor" {
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "moving.idxs.indexOf(hit.i)>=0") != null);
 }
 
-// spec: Web Server - F rigidly mirrors a selected sub-circuit or marquee group to the opposite board side around one stable anchor, preserving relative positions and orientations in one undo
-test "PCB editor rigidly mirrors the complete selected part target" {
+// spec: Web Server - F rigidly mirrors a selected sub-circuit or marquee group to the opposite board side around one stable anchor, preserving relative positions, orientations, and routed copper in one undo
+test "PCB editor rigidly mirrors the complete selected part target without deleting copper" {
     const markers = [_][]const u8{
         "function flipAnchor(mv,want)",
         "function flipParts(idxs,wantAnchor)",
@@ -517,6 +531,19 @@ test "PCB editor rigidly mirrors the complete selected part target" {
         "flipParts([fi],fi)",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+
+    const flip_start = std.mem.indexOf(u8, pcb_board_js, "function flipParts(idxs,wantAnchor)") orelse
+        return error.FlipPartsMissing;
+    const flip_tail = pcb_board_js[flip_start..];
+    const flip_end = std.mem.indexOf(u8, flip_tail, "function stampPoseNorm") orelse
+        return error.FlipPartsEndMissing;
+    const flip_body = flip_tail[0..flip_end];
+    try std.testing.expect(std.mem.indexOf(u8, flip_body, "clearRouteFor") == null);
+    try std.testing.expect(std.mem.indexOf(u8, flip_body, "PCB.tracks") == null);
+    try std.testing.expect(std.mem.indexOf(u8, flip_body, "PCB.vias") == null);
+    try std.testing.expect(std.mem.indexOf(u8, flip_body, "PCB.rf_paths") == null);
+    try std.testing.expect(std.mem.indexOf(u8, flip_body, "ratsUpdate(mv)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, flip_body, "scheduleDrc()") != null);
 }
 
 // spec: Web Server - Generated RF fence sites render, select, and edit as ordinary vias; provenance remains internal for safe regeneration
@@ -530,9 +557,9 @@ test "PCB editor carries the RF via-fence action as ordinary vias" {
         .{ .marker = "[\"via\",\"Vias\"" },
         .{ .marker = "var byL={},barrel=[],holes=new Path2D(),nb=0;" },
         .{ .marker = "via:anyCopperVisible()?1:0" },
-        // The provenance tag survives undo/redo and net-keyed invalidation.
+        // The provenance tag survives undo/redo so fence regeneration can
+        // still distinguish generated sites from ordinary ground vias.
         .{ .marker = "g:v.g,f:v.f" },
-        .{ .marker = "if(v.f)return !nets[v.f];" },
         // The action: POST, then reload onto the row the server just wrote.
         .{ .marker = "function fenceRun" },
         .{ .marker = "/api/pcb-fence/" },
@@ -800,12 +827,49 @@ test "PCB editor carries persistent 45 and 90 degree manual bend modes" {
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
+// spec: Web Server - The PCB hand router starts opted-in current-aware power nets at their branch width and defers only that width verdict from its zone-blind synchronous gate and fast WASM marker list to authoritative server DRC
+test "PCB hand router uses current-aware branch width without weakening geometry gates" {
+    const markers = [_][]const u8{
+        "v=c&&parseFloat(c.power_branch_width)",
+        "if(!(v>0))v=c&&parseFloat(c.width)",
+        "function drcGateDefersPowerWidth(d)",
+        "d.k!==\"track width\"",
+        "w>0&&+d.gap+1e-7>=w",
+        "!DRC_BLOCK[d.k]||drcGateDefersPowerWidth(d)",
+        "applyDrcOverrides(resp.drc).filter(function(d){return !drcGateDefersPowerWidth(d);})",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+}
+
 // spec: Web Server - A click that magnetically snaps to a same-net pad or existing trace endpoint finishes the manual trace only after the path reaches that endpoint.
 test "PCB editor finishes a manual trace on a magnetic endpoint snap" {
     const markers = [_][]const u8{
         "finish:!!(net&&pd.net===net)",
         "finish:!!(net&&t.net===net&&(!dtrace||dtrace.laid.indexOf(t)<0))",
         "if(dl.t.finish&&!dl.clipped){drawEnd();return;}",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+}
+
+// spec: Web Server - While hand-routing, one faded dashed ratsnest line follows the legal preview endpoint to the closest unresolved same-net pad, trace body, via, or filled-pour point outside the launch island, including when routing resumes from existing copper.
+test "PCB editor carries the live route ratsnest to the nearest destination" {
+    const markers = [_][]const u8{
+        "function drawDests(pi,pd,net,layer,x,y)",
+        "function drawRatTargets(tr)",
+        "kind:\"track\"",
+        "kind:\"via\"",
+        "kind:\"fill\"",
+        "function drawFillNearest(a,x,y)",
+        "function drawTrackTouchesFill(a,t,r)",
+        "function drawFillOnStartRoot(a,tr,roots,root)",
+        "function drawNearestRatTarget(head,limit)",
+        "best={x:copper.x,y:copper.y,mag:true,finish:true}",
+        "function drawNearestDest(head)",
+        "function paintDrawRatline(ctx,head)",
+        "ctx.setLineDash([5,4])",
+        "ctx.globalAlpha=0.42;ctx.lineWidth=0.8",
+        "var head=dl.legs.length?dl.legs[dl.legs.length-1]",
+        "paintDrawRatline(ctx,head)",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
@@ -842,6 +906,22 @@ test "PCB editor automatically lowers every local controlled-impedance pad taper
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "function drawRfTaperAllowed") == null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "function drawReplaceLaid") == null);
+}
+
+// spec: Web Server - the PCB hand router previews and clearance-checks an authored pad neck at its tapered physical width before committing either a pad-out or pad-in gesture
+test "PCB hand router gates pad entry and exit at the prospective tapered width" {
+    const markers = [_][]const u8{
+        "function drawAutomaticTaperPlan",
+        "window.PCBDrawAutomaticTaperPlan",
+        "function drawProspectiveTaperPlan",
+        "dtrace.n===0?dtrace.startPad:null",
+        "candF=drawProspectiveTaperPlan(planF).tracks",
+        "candC=drawProspectiveTaperPlan(planC).tracks",
+        "tracks=drawProspectiveTaperPlan(drawRoutePlan(legs)).tracks",
+        "preview=drawProspectiveTaperPlan(drawRoutePlan(dl.legs)).tracks",
+        "Math.max((t.w||dtrace.w)*S,1.2)",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
 // spec: Web Server - Escape cancels an active manual route even when automatic pad-taper DRC rejects finishing it, restoring the route-start copper and exiting Draw instead of retrying the blocked finish
@@ -1125,6 +1205,16 @@ test "PCB settings include an SVG explanation for every design rule" {
 test "PCB settings expose numeric rule editors and the save-rebuild action" {
     const markers = [_][]const u8{
         "data-ds-rule", "/api/design-rules/", "Save changes", "Saving and rebuilding", "location.reload()",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_settings_js, marker) != null);
+}
+
+// spec: Web Server - Design Settings exposes whole-layer copper assignments with add, edit, delete, validated save, and read-only states
+test "PCB settings edit whole-layer copper assignments" {
+    const markers = [_][]const u8{
+        "Whole-layer copper", "Add whole-layer pour", "ds-plane-layer",
+        "ds-plane-net",       "ds-plane-delete",      "/api/stackup-planes/",
+        "Save plane changes", "planes:vals",          "This layout is read-only.",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_settings_js, marker) != null);
 }

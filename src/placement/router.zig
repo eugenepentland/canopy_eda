@@ -4923,7 +4923,7 @@ fn effectivePowerTrackWidth(
     net_i: usize,
     authored: f64,
 ) f64 {
-    if (powerPourCarried(zones, placement, net_i) or net_i >= placement.nets.len) return authored;
+    if (powerPourCarried(zones, placement, net_i) or net_i >= placement.nets.len) return if (net_i < placement.nets.len and net_i < placement.rules.net.len and placement.rules.net[net_i].pad_neck.power_branch_width > 0) @max(placement.rules.net[net_i].pad_neck.power_branch_width, placement.rules.design.min_width) else authored;
     return @max(authored, placement.rules.powerWidthForNet(placement.nets[net_i].name) orelse 0);
 }
 

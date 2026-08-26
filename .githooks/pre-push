@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# pre-push — the PCB-page latency gate for main.
+#
+# Pushing main is the moment a commit becomes everyone's problem, so this is
+# where the page-load / DRC-latency budget is enforced: build netlisp at the
+# pushed state and run `bench-page --baseline` against the committed recording
+# (docs/benchmarks/pcb-page/README.md has the rules). Feature-branch pushes are
+# never gated — the cost lands exactly once, on the push that matters.
+#
+# Escapes, loud on purpose:
+#   EDA_PERF_SKIP=1 git push      # skip this one push, and say so
+#   git push --no-verify          # git's own whole-hook bypass
+#
+# A machine without the designs repo (fresh clone, CI) warns and allows: the
+# gate can only measure where the boards live. A missing BASELINE, by contrast,
+# fails — a gate that silently stops gating is how regressions got here.
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+BASELINE="${EDA_PERF_BASELINE:-docs/benchmarks/pcb-page/baseline.json}"
+PROJECT_DIR="${EDA_PERF_PROJECT_DIR:-projects/designs}"
+
+# stdin: "<local ref> <local sha> <remote ref> <remote sha>" per ref being
+# pushed. Gate only when some ref lands on the remote's main (deletes exempt).
+gate_main=0
+zero="0000000000000000000000000000000000000000"
+while read -r _local_ref local_sha remote_ref _remote_sha; do
+  [ "$remote_ref" = "refs/heads/main" ] || continue
+  [ "$local_sha" = "$zero" ] && continue
+  gate_main=1
+done
+[ "$gate_main" = 1 ] || exit 0
+
+if [ "${EDA_PERF_SKIP:-0}" = "1" ]; then
+  echo "pre-push: EDA_PERF_SKIP=1 — PCB-page latency gate SKIPPED for this push" >&2
+  exit 0
+fi
+if [ ! -d "$PROJECT_DIR/src" ]; then
+  echo "pre-push: designs repo not at $PROJECT_DIR — PCB-page latency gate skipped (nothing to measure here)" >&2
+  exit 0
+fi
+if [ ! -f "$BASELINE" ]; then
+  echo "pre-push: REFUSED — no committed page-latency baseline at $BASELINE." >&2
+  echo "pre-push: record one and commit it:  scripts/perf_gate.sh --record" >&2
+  echo "pre-push: (bypass once with EDA_PERF_SKIP=1 if you must)" >&2
+  exit 1
+fi
+
+echo "pre-push: PCB-page latency gate for main (bench-page vs $BASELINE) — queueing behind the machine gate lock…"
+bash scripts/perf_gate.sh
+status=$?
+if [ "$status" -ne 0 ]; then
+  echo "pre-push: REFUSED — page latency regressed vs $BASELINE (see the gate report above)." >&2
+  echo "pre-push: fix it, or if the change is intentional re-record: scripts/perf_gate.sh --record (commit the diff)" >&2
+fi
+exit "$status"
