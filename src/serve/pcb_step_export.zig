@@ -91,6 +91,7 @@ const BoardProduct = struct {
     name: []const u8,
     product_definition: u64,
     representation: u64,
+    assembly_offset: [3]f64,
 };
 
 const Entity = struct {
@@ -900,6 +901,35 @@ fn prepareBoard(allocator: std.mem.Allocator, board: Board) (ExportError || std.
     return .{ .name = board.name, .rings = rings, .thickness = board.thickness, .color = board.color };
 }
 
+fn boardAssemblyOffset(board: PreparedBoard) [3]f64 {
+    const outer = board.rings[0].curves;
+    var min = [2]f64{ std.math.inf(f64), std.math.inf(f64) };
+    var max = [2]f64{ -std.math.inf(f64), -std.math.inf(f64) };
+    for (outer) |curve| {
+        for ([2][2]f64{ curve.start, curve.finish }) |point| {
+            min[0] = @min(min[0], point[0]);
+            min[1] = @min(min[1], point[1]);
+            max[0] = @max(max[0], point[0]);
+            max[1] = @max(max[1], point[1]);
+        }
+        if (curve.arc) |arc| for ([4]f64{ 0, std.math.pi / 2.0, std.math.pi, 3.0 * std.math.pi / 2.0 }) |angle| {
+            const point = [2]f64{ arc.center[0] + arc.radius * @cos(angle), arc.center[1] + arc.radius * @sin(angle) };
+            if (arcProgress(arc, point) > @abs(arc.sweep) + 1e-12) continue;
+            min[0] = @min(min[0], point[0]);
+            min[1] = @min(min[1], point[1]);
+            max[0] = @max(max[0], point[0]);
+            max[1] = @max(max[1], point[1]);
+        };
+    }
+    return .{ -(min[0] + max[0]) / 2, -(min[1] + max[1]) / 2, board.thickness / 2 };
+}
+
+fn translatedPoint(point: [3]f64, offset: [3]f64) ExportError![3]f64 {
+    const translated = [3]f64{ point[0] + offset[0], point[1] + offset[1], point[2] + offset[2] };
+    if (!finitePoint(translated)) return error.InvalidGeometry;
+    return translated;
+}
+
 const BoardVertex = struct { point: u64, vertex: u64 };
 const BoardRingTopology = struct {
     curves: []const PreparedCurve,
@@ -1188,10 +1218,20 @@ fn writeAnalyticBoard(
     try w.print(",(#17,#{d}),#13);\n", .{solid});
     const definition_representation = takeId(next_id);
     try w.print("#{d}=SHAPE_DEFINITION_REPRESENTATION(#{d},#{d});\n", .{ definition_representation, definition_shape, representation });
-    return .{ .name = prepared.name, .product_definition = definition, .representation = representation };
+    return .{
+        .name = prepared.name,
+        .product_definition = definition,
+        .representation = representation,
+        .assembly_offset = boardAssemblyOffset(prepared),
+    };
 }
 
-fn writeFacetedBodies(w: *std.Io.Writer, bodies: []const Body, next_id: *u64, root_items: *std.ArrayList(u64), styles: *StyleState, allocator: std.mem.Allocator) (ExportError || std.mem.Allocator.Error || std.Io.Writer.Error)!void {
+const FacetedBodyWriteCtx = struct {
+    allocator: std.mem.Allocator,
+    assembly_offset: [3]f64,
+};
+
+fn writeFacetedBodies(w: *std.Io.Writer, bodies: []const Body, next_id: *u64, root_items: *std.ArrayList(u64), styles: *StyleState, ctx: FacetedBodyWriteCtx) (ExportError || std.mem.Allocator.Error || std.Io.Writer.Error)!void {
     for (bodies) |body| {
         if (body.surface) continue;
         const minimum_points: usize = 4;
@@ -1199,13 +1239,13 @@ fn writeFacetedBodies(w: *std.Io.Writer, bodies: []const Body, next_id: *u64, ro
         if (body.name.len == 0 or body.name.len > 256) return error.InvalidGeometry;
         if (body.points.len < minimum_points or body.points.len > max_points_per_body) return error.InvalidGeometry;
         if (body.triangles.len < minimum_triangles or body.triangles.len > max_triangles_per_body) return error.InvalidGeometry;
-        const point_ids = try allocator.alloc(u64, body.points.len);
+        const point_ids = try ctx.allocator.alloc(u64, body.points.len);
         for (body.points, 0..) |point, i| {
             if (!finitePoint(point)) return error.InvalidGeometry;
             point_ids[i] = next_id.*;
             next_id.* += 1;
             try w.print("#{d}=CARTESIAN_POINT('',(", .{point_ids[i]});
-            try writePoint(w, point);
+            try writePoint(w, try translatedPoint(point, ctx.assembly_offset));
             try w.writeAll("));\n");
         }
         var face_ids: std.ArrayList(u64) = .empty;
@@ -1237,8 +1277,8 @@ fn writeFacetedBodies(w: *std.Io.Writer, bodies: []const Body, next_id: *u64, ro
                 (if (triangle_index < colors.len) colors[triangle_index] else null)
             else
                 null;
-            try styles.item(allocator, w, next_id, face, triangle_color);
-            try face_ids.append(allocator, face);
+            try styles.item(ctx.allocator, w, next_id, face, triangle_color);
+            try face_ids.append(ctx.allocator, face);
         }
         const shell = next_id.*;
         const brep = shell + 1;
@@ -1254,8 +1294,8 @@ fn writeFacetedBodies(w: *std.Io.Writer, bodies: []const Body, next_id: *u64, ro
         try w.print("#{d}=FACETED_BREP(", .{brep});
         try stepText(w, body.name);
         try w.print(",#{d});\n", .{shell});
-        try root_items.append(allocator, brep);
-        try styles.item(allocator, w, next_id, brep, body.color);
+        try root_items.append(ctx.allocator, brep);
+        try styles.item(ctx.allocator, w, next_id, brep, body.color);
     }
 }
 
@@ -1322,7 +1362,11 @@ fn build(allocator: std.mem.Allocator, project_dir: []const u8, design_name: []c
         try writeAnalyticBoard(allocator, w, &next_id, board, &styles)
     else
         null;
-    try writeFacetedBodies(w, request.bodies, &next_id, &root_items, &styles, allocator);
+    const assembly_offset = if (board_product) |board| board.assembly_offset else [3]f64{ 0, 0, 0 };
+    try writeFacetedBodies(w, request.bodies, &next_id, &root_items, &styles, .{
+        .allocator = allocator,
+        .assembly_offset = assembly_offset,
+    });
 
     const root_representation = next_id;
     next_id += 1;
@@ -1352,7 +1396,9 @@ fn build(allocator: std.mem.Allocator, project_dir: []const u8, design_name: []c
         const x_direction = point + 2;
         const placement = point + 3;
         next_id += 4;
-        try w.print("#{d}=CARTESIAN_POINT('',(0.000000000,0.000000000,0.000000000));\n", .{point});
+        try w.print("#{d}=CARTESIAN_POINT('',(", .{point});
+        try writePoint(w, board.assembly_offset);
+        try w.writeAll("));\n");
         try writeDirection(w, z_direction, .{ 0, 0, 1 });
         try writeDirection(w, x_direction, .{ 1, 0, 0 });
         try w.print("#{d}=AXIS2_PLACEMENT_3D('',#{d},#{d},#{d});\n", .{ placement, point, z_direction, x_direction });
@@ -1384,7 +1430,7 @@ fn build(allocator: std.mem.Allocator, project_dir: []const u8, design_name: []c
         const placement = point + 3;
         next_id += 4;
         try w.print("#{d}=CARTESIAN_POINT('',(", .{point});
-        try writePoint(w, axes.origin);
+        try writePoint(w, try translatedPoint(axes.origin, assembly_offset));
         try w.writeAll("));\n");
         try writeDirection(w, z_direction, axes.z);
         try writeDirection(w, x_direction, axes.x);
@@ -1507,7 +1553,8 @@ test "matrix extraction rejects scaling and preserves rigid component placement"
     try std.testing.expectError(error.InvalidMatrix, matrixAxes(scaled));
 }
 
-test "exact assembly embeds one source B-rep and instances repeated footprints" {
+// spec: Web Server - the PCB STEP assembly places its origin at the PCB outline bounding-box centre in X/Y and the board thickness mid-plane in Z, translating component occurrences and generated solids by the same offset
+test "exact assembly embeds one source B-rep and centers board-backed geometry" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const aa = arena.allocator();
@@ -1557,6 +1604,28 @@ test "exact assembly embeds one source B-rep and instances repeated footprints" 
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output, "COLOUR_RGB('',0.100000000,0.400000000,0.200000000)"));
     try std.testing.expect(std.mem.indexOf(u8, output, "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "CARTESIAN_POINT('',(25.000000000,0.000000000,0.000000000))") != null);
+
+    var board_part = identity;
+    board_part[12] = 25;
+    board_part[13] = 9;
+    const centered = try build(aa, project_dir, "centered-fixture", .{
+        .board = .{
+            .name = "PCB solid",
+            .outline = &.{ .{ 10, 4 }, .{ 30, 4 }, .{ 30, 14 }, .{ 10, 14 } },
+            .thickness = 2,
+        },
+        .bodies = &.{.{
+            .name = "Heatsink",
+            .points = &.{ .{ 20, 9, 0 }, .{ 22, 9, 0 }, .{ 20, 11, 0 }, .{ 20, 9, 3 } },
+            .triangles = &.{ .{ 0, 2, 1 }, .{ 0, 1, 3 }, .{ 1, 2, 3 }, .{ 2, 0, 3 } },
+        }},
+        .instances = &.{.{ .name = "J1", .footprint = "demo", .matrix = board_part }},
+    });
+    // The complete board spans X=-10..10, Y=-5..5 and Z=-1..1. The
+    // component and generated body receive the exact same assembly offset.
+    try std.testing.expect(std.mem.indexOf(u8, centered, "CARTESIAN_POINT('',(-20.000000000,-9.000000000,1.000000000))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, centered, "CARTESIAN_POINT('',(5.000000000,0.000000000,1.000000000))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, centered, "CARTESIAN_POINT('',(2.000000000,0.000000000,1.000000000))") != null);
 }
 
 test "PCB recipe exports one analytic manifold solid and ignores legacy artwork triangles" {
