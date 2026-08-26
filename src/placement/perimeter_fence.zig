@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const drc = @import("drc.zig");
+const geometry = @import("geometry.zig");
 const optimizer = @import("optimizer.zig");
 const router = @import("router.zig");
 const outline = @import("outline.zig");
@@ -25,12 +26,10 @@ pub const MaskSegment = struct {
     b: [2]f64,
 };
 
-/// Perimeter openings retain at least this much finished solder mask between
-/// their rounded stroke and ordinary outer-layer copper. This local floor is
-/// intentionally independent of the board-wide general dam rule: fine-pitch pad
-/// apertures may need a smaller global dam, while exposed board-edge copper
-/// still needs a robust strip over nearby launches and traces.
-const minimum_retained_dam_mm: f64 = 0.2;
+/// Edge-to-edge separation between perimeter hardware and a component pad.
+/// The same floor governs the via annulus and the solder-mask opening, so the
+/// two derived features leave one predictable pad-shaped gap.
+const pad_clearance_mm: f64 = 0.2;
 
 /// Whether a placement carries an effective perimeter-fence declaration.
 fn declared(p: optimizer.Placement) bool {
@@ -227,33 +226,30 @@ fn appendBoxInterval(
 }
 
 fn retainedWeb(p: optimizer.Placement) f64 {
-    return @max(minimum_retained_dam_mm, p.rules.design.mask.web);
+    return @max(pad_clearance_mm, p.rules.design.mask.web);
 }
 
-/// Perimeter mask strokes with automatic gaps wherever their circular stroke
-/// would enter a placed component courtyard. Expanding each courtyard by the
-/// stroke radius before clipping also keeps the round stroke caps outside the
-/// real courtyard. The result is intentionally side-independent: a connector
-/// interrupts the through-board via ring and therefore masks both faces.
+/// Perimeter mask strokes with pad-only gaps on both faces.
 pub fn maskSegments(alloc: std.mem.Allocator, p: optimizer.Placement) std.mem.Allocator.Error![]const MaskSegment {
     return maskSegmentsForFace(alloc, p, &.{}, null);
 }
 
-/// Face-aware perimeter mask artwork. In addition to the mechanical courtyard
-/// gaps, the opening stops before every pad aperture and routed trace on this
-/// outer face. The central stroke is clipped by its radius plus the requested
-/// web, so its round caps also leave the full web. Pad growth includes the
-/// normal aperture margin because the useful dam lies BETWEEN the pad opening
-/// and perimeter opening, not merely between their copper centre shapes.
+/// Face-aware perimeter mask artwork. The opening stops before every pad
+/// aperture on this outer face. The central stroke is clipped by its radius
+/// plus the requested web, so its round caps also leave the full web. Pad growth
+/// includes the normal aperture margin because the useful dam lies BETWEEN the
+/// pad opening and perimeter opening, not merely between their copper shapes.
 ///
-/// Passing `null` retains the historical courtyard-only form used by callers
-/// that do not have a routed-copper view.
+/// `tracks` remains in the public signature for source compatibility; routed
+/// copper does not interrupt the perimeter opening. Passing `null` includes
+/// the pads from both faces.
 pub fn maskSegmentsForFace(
     alloc: std.mem.Allocator,
     p: optimizer.Placement,
     tracks: []const router.Track,
     side: ?optimizer.Side,
 ) std.mem.Allocator.Error![]const MaskSegment {
+    _ = tracks;
     const width = p.rules.perimeter_fence.mask_width;
     if (!(width > 0) or p.board_rect == null) return &.{};
     const poly = try outlinePoints(alloc, p);
@@ -267,16 +263,9 @@ pub fn maskSegmentsForFace(
         const b = poly[(i + 1) % poly.len];
         blocked.clearRetainingCapacity();
         for (p.parts) |part| {
-            const c = optimizer.worldCourtyard(&part);
-            try appendBoxInterval(&blocked, alloc, a, b, .{
-                .x0 = c.minx,
-                .y0 = c.miny,
-                .x1 = c.minx + c.w,
-                .y1 = c.miny + c.h,
-            }, width);
-            if (side) |face| for (part.pads) |pad| {
+            for (part.pads) |pad| {
                 const face_only = !pad.thru and !pad.npth;
-                if (face_only and part.side != face) continue;
+                if (side) |face| if (face_only and part.side != face) continue;
                 const shape = try pad_shape.worldShape(alloc, part, pad);
                 const aperture_margin = @max(@as(f64, 0), pad.maskMargin(p.rules.design.mask.margin));
                 try appendBoxInterval(
@@ -286,27 +275,6 @@ pub fn maskSegmentsForFace(
                     b,
                     .{ .x0 = shape.x0, .y0 = shape.y0, .x1 = shape.x1, .y1 = shape.y1 },
                     width + aperture_margin + retainedWeb(p),
-                );
-            };
-        }
-        if (side) |face| {
-            const layer: u8 = if (face == .bottom) 1 else 0;
-            for (tracks) |track| {
-                if (track.layer != layer) continue;
-                if (!(track.width > 0)) continue;
-                const copper_radius = track.width / 2;
-                try appendBoxInterval(
-                    &blocked,
-                    alloc,
-                    a,
-                    b,
-                    .{
-                        .x0 = @min(track.x1, track.x2),
-                        .y0 = @min(track.y1, track.y2),
-                        .x1 = @max(track.x1, track.x2),
-                        .y1 = @max(track.y1, track.y2),
-                    },
-                    width + copper_radius + retainedWeb(p),
                 );
             }
         }
@@ -324,17 +292,21 @@ pub fn maskSegmentsForFace(
     return out.toOwnedSlice(alloc);
 }
 
-/// Perimeter stitches are derived copper, so a component courtyard wins when
-/// the two compete for the same edge real estate. This is deliberately
-/// net-blind: a grounded header still must not have a fence barrel drilled
-/// under its plastic body or lands.
-fn crowdsComponent(p: optimizer.Placement, site: router.Via) bool {
-    const radius = site.dia / 2;
+fn collectPadShapes(alloc: std.mem.Allocator, p: optimizer.Placement) std.mem.Allocator.Error![]const pad_shape.Shape {
+    var shapes: std.ArrayList(pad_shape.Shape) = .empty;
     for (p.parts) |part| {
-        const c = optimizer.worldCourtyard(&part);
-        const qx = std.math.clamp(site.x, c.minx, c.minx + c.w);
-        const qy = std.math.clamp(site.y, c.miny, c.miny + c.h);
-        if (std.math.hypot(site.x - qx, site.y - qy) < radius - 1e-9) return true;
+        for (part.pads) |pad| try shapes.append(alloc, try pad_shape.worldShape(alloc, part, pad));
+    }
+    return shapes.toOwnedSlice(alloc);
+}
+
+/// Whether the via annulus comes within the fixed perimeter-hardware clearance
+/// of any pad. This is deliberately net-blind: perimeter stitching beside a
+/// GND land still retains the same 0.2 mm physical gap as every other land.
+fn crowdsPad(shapes: []const pad_shape.Shape, site: router.Via) bool {
+    const reach = site.dia / 2 + pad_clearance_mm;
+    for (shapes) |shape| {
+        if (pad_shape.pointDist(shape.x0, shape.y0, shape.x1, shape.y1, shape.poly, site.x, site.y, reach) < reach - 1e-9) return true;
     }
     return false;
 }
@@ -354,6 +326,9 @@ pub fn generate(alloc: std.mem.Allocator, p: optimizer.Placement) std.mem.Alloca
     const needed = @ceil(length / p.rules.perimeter_fence.spacing);
     const count: usize = @max(3, numeric.checkedInt(usize, needed) orelse return &.{});
     const pitch = length / @as(f64, @floatFromInt(count));
+    var scratch_state = std.heap.ArenaAllocator.init(alloc);
+    defer scratch_state.deinit();
+    const pad_shapes = try collectPadShapes(scratch_state.allocator(), p);
     var vias: std.ArrayList(router.Via) = .empty;
     for (0..count) |i| {
         // Half-pitch phase avoids pinning a site to the polygon's arbitrary
@@ -366,7 +341,7 @@ pub fn generate(alloc: std.mem.Allocator, p: optimizer.Placement) std.mem.Alloca
             .drill = p.rules.perimeter_fence.via_drill,
             .net = net,
         };
-        if (!crowdsComponent(p, site)) try vias.append(alloc, site);
+        if (!crowdsPad(pad_shapes, site)) try vias.append(alloc, site);
     }
     return vias.toOwnedSlice(alloc);
 }
@@ -389,9 +364,6 @@ pub fn viaServesPad(
     dia: f64,
 ) bool {
     const reach = dia / 2 + 1e-9;
-    // Current generated sites never crowd a component, so reject the ordinary
-    // ring in the cheap broad phase before walking net pins or pad outlines.
-    if (!crowdsComponent(p, .{ .x = x, .y = y, .dia = dia, .drill = 0, .net = -1 })) return false;
     for (p.nets) |net| {
         if (!std.mem.eql(u8, net.name, net_name)) continue;
         for (net.pins) |pin| {
@@ -424,7 +396,6 @@ pub fn append(alloc: std.mem.Allocator, p: optimizer.Placement, routed: ?router.
     var vias: std.ArrayList(router.Via) = .empty;
     try vias.appendSlice(alloc, old);
     site_loop: for (sites) |site| {
-        if (crowdsComponent(p, site)) continue;
         for (vias.items) |via| if (sameVia(site, via)) continue :site_loop;
         if (try gate.addsError(alloc, site)) continue;
         try vias.append(alloc, site);
@@ -459,11 +430,7 @@ pub fn isGenerated(p: optimizer.Placement, via: router.Via) bool {
     const f = p.rules.perimeter_fence;
     return via.net == net and @abs(via.dia - f.via_dia) < 1e-6 and
         @abs(via.drill - f.via_drill) < 1e-6 and
-        @abs(signedInsetOf(p, via.x, via.y) - f.edge_offset) < 1e-5 and
-        // Generated sites are rejected under every component courtyard by
-        // `append`; a via there is functional hand/ground-stitch copper that
-        // merely happens to share the perimeter geometry, not part of the ring.
-        !crowdsComponent(p, via);
+        @abs(signedInsetOf(p, via.x, via.y) - f.edge_offset) < 1e-5;
 }
 
 const testing = std.testing;
@@ -517,7 +484,7 @@ test "polygon perimeter fence follows exact outline" {
     for (vias) |via| try testing.expectApproxEqAbs(@as(f64, 0.5), outline.signedInset(&poly, via.x, via.y), 1e-7);
 }
 
-test "a via under a component is not classified as generated perimeter copper" {
+test "a via under a pad-free component is classified as generated perimeter copper" {
     var parts = [_]optimizer.Part{.{
         .ref_des = "U1",
         .kind = .hub,
@@ -531,7 +498,7 @@ test "a via under a component is not classified as generated perimeter copper" {
     var p = fixture(null);
     p.parts = &parts;
     const via = router.Via{ .x = 0.5, .y = 5, .dia = 0.4, .drill = 0.2, .net = 0 };
-    try testing.expect(!isGenerated(p, via));
+    try testing.expect(isGenerated(p, via));
 }
 
 // spec: placement/perimeter-fence - incomplete declarations and unresolved stitch nets emit no copper
@@ -611,8 +578,9 @@ test "additive via gate matches the full-check verdict site by site" {
     try testing.expect(accepted.items.len > routed.vias.len); // …and acceptances
 }
 
-// spec: placement/perimeter-fence - derived perimeter sites yield to component courtyards even when the component shares the stitch net
-test "perimeter generation skips sites under a grounded edge component" {
+// spec: placement/perimeter-fence - component bodies and courtyards do not interrupt generated perimeter vias
+// spec: placement/perimeter-fence - pad proximity is the only component-derived reason to suppress a perimeter via site, retaining 0.2 mm from pad copper to the via annulus; ordinary copper and drill DRC legality still applies
+test "perimeter generation ignores bodies and clears pads by 0.2 mm" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -628,9 +596,23 @@ test "perimeter generation skips sites under a grounded edge component" {
     }};
     var p = fixture(null);
     p.parts = &parts;
+    try testing.expectEqual(@as(usize, 56), (try generate(arena, p)).len);
+
+    const pads = [_]geometry.Pad{.{
+        .number = "1",
+        .x = 0,
+        .y = 0,
+        .w = 0.6,
+        .h = 1.0,
+    }};
+    parts[0].pads = &pads;
+    const nets = [_]flat_netlist.FlatNet{.{ .name = "GND", .pins = &.{.{ .ref_des = "J1", .pin = "1" }} }};
+    p.nets = &nets;
     const generated = try generate(arena, p);
-    const result = (try append(arena, p, null)).?;
-    try testing.expectEqual(generated.len, result.vias.len);
-    try testing.expect(generated.len < (try generate(arena, fixture(null))).len);
-    for (result.vias) |via| try testing.expect(!crowdsComponent(p, via));
+    try testing.expect(generated.len < 56);
+    const shape = try pad_shape.worldShape(arena, parts[0], pads[0]);
+    for (generated) |via| {
+        const gap = pad_shape.pointDist(shape.x0, shape.y0, shape.x1, shape.y1, shape.poly, via.x, via.y, std.math.inf(f64)) - via.dia / 2;
+        try testing.expect(gap >= pad_clearance_mm - 1e-9);
+    }
 }

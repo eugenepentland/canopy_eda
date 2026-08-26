@@ -2091,9 +2091,10 @@ current outline and declaration, not accumulated as hand-authored copper.
 - a rectangular fence closes at no more than the declared pitch and keeps every centre at its exact edge offset
 - exact rounded/polygon outlines, not their bounding boxes, drive perimeter sites
 - incomplete declarations and unresolved stitch nets emit no copper
-- derived perimeter sites yield to component courtyards even when the component shares the stitch net
-- component courtyards automatically interrupt both the generated vias and exposed mask band
-- each face's perimeter opening stops at least 0.2 mm before routed traces and pad apertures without suppressing valid via sites
+- component bodies and courtyards do not interrupt generated perimeter vias
+- component bodies and courtyards do not interrupt the exposed perimeter mask band
+- pad proximity is the only component-derived reason to suppress a perimeter via site, retaining 0.2 mm from pad copper to the via annulus; ordinary copper and drill DRC legality still applies
+- each face's perimeter opening stops at least 0.2 mm before pad apertures, while routed traces do not interrupt it
 - a perimeter keepout begins at the fence via's inward copper edge, carries typed block policy, and admits named nets
 - Gerber opens the authored-width solder-mask band around the exact board outline on both faces
 - completeness-waiver: empty inputs (no effective board outline, incomplete dimensions, or an unresolved net produce an empty site set)

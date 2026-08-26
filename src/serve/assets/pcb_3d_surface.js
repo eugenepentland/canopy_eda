@@ -246,14 +246,6 @@
     });
   }
 
-  function maskPartBox(part) {
-    var a=(+part.rot||0)*Math.PI/180,c=Math.cos(a),s=Math.sin(a),ca=Math.abs(c),sa=Math.abs(s);
-    var lx=+part.ccx||0,ly=+part.ccy||0;if((part.side||"top")==="bottom")lx=-lx;
-    var cx=(+part.x||0)+lx*c-ly*s,cy=(+part.y||0)+lx*s+ly*c;
-    var hw=(+part.hw||0)*ca+(+part.hh||0)*sa,hh=(+part.hw||0)*sa+(+part.hh||0)*ca;
-    return {x0:cx-hw,y0:cy-hh,x1:cx+hw,y1:cy+hh};
-  }
-
   function maskPadBox(part,pad) {
     var a=(+part.rot||0)*Math.PI/180,c=Math.cos(a),s=Math.sin(a),bot=(part.side||"top")==="bottom";
     function world(x,y){if(bot)x=-x;return [(+part.x||0)+x*c-y*s,(+part.y||0)+x*s+y*c];}
@@ -273,14 +265,11 @@
   }
 
   function maskPerimeterSegments(data,pts,width,side) {
-    var out=[],layer=side==="bottom"?1:0,margin=Math.max(0,+(data.rules&&data.rules.mask_margin)||0),
+    var out=[],margin=Math.max(0,+(data.rules&&data.rules.mask_margin)||0),
       islandGrow=window.PCBMaskPadIslandGrow?window.PCBMaskPadIslandGrow():margin,web=Math.max(.2,islandGrow-margin);
     for(var ei=0;ei<pts.length;ei++) { var a=pts[ei],b=pts[(ei+1)%pts.length],blocked=[];
-      (data.parts||[]).forEach(function(part){var q=maskPartBox(part),iv=maskBoxInterval(a,b,{x0:q.x0-width,y0:q.y0-width,x1:q.x1+width,y1:q.y1+width});if(iv)blocked.push(iv);});
       (data.parts||[]).forEach(function(part){(part.pads||[]).forEach(function(pad){if(!(+pad.drill>0)&&(part.side||"top")!==side)return;
         var q=maskPadBox(part,pad),grow=width+margin+web,iv=maskBoxInterval(a,b,{x0:q.x0-grow,y0:q.y0-grow,x1:q.x1+grow,y1:q.y1+grow});if(iv)blocked.push(iv);});});
-      (data.tracks||[]).forEach(function(t){if((+t.l||0)!==layer||!(+t.w>0))return;var grow=width+(+t.w)/2+web,
-        iv=maskBoxInterval(a,b,{x0:Math.min(+t.x1,+t.x2)-grow,y0:Math.min(+t.y1,+t.y2)-grow,x1:Math.max(+t.x1,+t.x2)+grow,y1:Math.max(+t.y1,+t.y2)+grow});if(iv)blocked.push(iv);});
       blocked.sort(function(u,v){return u[0]-v[0];});var cursor=0;
       blocked.forEach(function(iv){var lo=Math.max(0,Math.min(1,iv[0])),hi=Math.max(0,Math.min(1,iv[1]));
         if(lo>cursor+1e-9)out.push([a[0]+(b[0]-a[0])*cursor,a[1]+(b[1]-a[1])*cursor,a[0]+(b[0]-a[0])*lo,a[1]+(b[1]-a[1])*lo]);cursor=Math.max(cursor,hi);});

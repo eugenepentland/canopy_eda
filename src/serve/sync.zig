@@ -3745,7 +3745,7 @@ fn syncPerimeterMaskSegments(
 /// Seed the DSL-authored edge mask opening into a new KiCad board as F.Mask
 /// and B.Mask graphic strokes. The stroke is centred on Edge.Cuts, so a width
 /// of `2*mask-width` exposes exactly the authored band inside the board;
-/// courtyard-clipped fragments leave solder mask beneath edge hardware.
+/// pad-clipped fragments leave a 0.2 mm web around nearby pad apertures.
 /// Board graphics are emitted only on first insertion: the board snapshot has
 /// no update identity for existing graphics, so repeating them would stack
 /// duplicates.
