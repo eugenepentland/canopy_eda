@@ -11421,11 +11421,20 @@ fn mcpBuildCopperZones(
                 return null;
             },
         };
+        var group: []const u8 = "";
+        if (item.object.get("group")) |gv| {
+            if (gv != .string) {
+                _ = try mcpFailFmt(out, alloc, "zone {d} group must be a string", .{i});
+                return null;
+            }
+            group = gv.string;
+        }
         try zones.append(alloc, .{
             .net = net_v.string,
             .layer = layer_v.string,
             .poly = poly,
             .flags = .{ .filled = true },
+            .g = group,
             .priority = priority,
         });
     }
@@ -16063,7 +16072,7 @@ test "set_copper_zones validates nets inner layers and polygons" {
     const valid_json = try std.json.parseFromSliceLeaky(
         std.json.Value,
         alloc,
-        "{\"zones\":[{\"net\":\"SIG\",\"layer\":\"In3.Cu\",\"priority\":4,\"poly\":[[0,0],[8,0],[8,6],[0,6]]}]}",
+        "{\"zones\":[{\"net\":\"SIG\",\"layer\":\"In3.Cu\",\"priority\":4,\"group\":\"buck\",\"poly\":[[0,0],[8,0],[8,6],[0,6]]}]}",
         .{},
     );
     const zones = (try mcpBuildCopperZones(alloc, &valid_out, placement, valid_json)).?;
@@ -16071,6 +16080,7 @@ test "set_copper_zones validates nets inner layers and polygons" {
     try std.testing.expectEqualStrings("In3.Cu", zones[0].layer);
     try std.testing.expect(zones[0].flags.filled);
     try std.testing.expectEqual(@as(i64, 4), zones[0].priority);
+    try std.testing.expectEqualStrings("buck", zones[0].g);
 
     var plane_out: std.ArrayList(u8) = .empty;
     const claimed_plane = try std.json.parseFromSliceLeaky(

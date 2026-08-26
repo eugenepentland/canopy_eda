@@ -1142,6 +1142,15 @@ test "viewer JS restamps a sub-circuit around its live side and rotation" {
     try std.testing.expect(std.mem.indexOf(u8, js, "(cop.z||[]).forEach(function(z){z.poly=") != null);
 }
 
+// A board-edge change alters the clipping boundary for declared pours. Keep
+// the refill after DRC invalidation so its versioned response remains current.
+test "closed outline edits automatically refill declared pours after DRC invalidation" {
+    const js = @embedFile("assets/pcb_board.js");
+    try std.testing.expect(std.mem.indexOf(u8, js, "function outlineDrc(){var o=PCB.outline,g=OS&&o&&o.sketch&&OS.compile(o.sketch);if(!g||g.closed){scheduleDrc();refillPours();}}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "else{outlineGeomDrop();if(compiled&&compiled.closed)outlineDrc();}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "drawBoardRect();if(valid)outlineDrc();") != null);
+}
+
 // spec: Web Server - Restamping a sub-circuit replaces only that group's stamped copper and preserves board-level tracks, vias, and RF paths on the same nets
 test "viewer JS restamp preserves board-owned copper connected to the sub-circuit" {
     const js = @embedFile("assets/pcb_board.js");

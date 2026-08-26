@@ -5208,7 +5208,7 @@ function activeSketchPromote(){var shape=activeSketchShape();if(activeSketchIsAr
 function activeSketchSync(shape){if(!activeSketchIsArea()){var outlineCompiled=OS.syncOutline(shape);outlineGeomDrop();return outlineCompiled;}var compiled=OS.syncPolygon(shape);if(backingMode&&backingEdit){backingEdit.layer.regions[backingEdit.index]=shape.poly;(backingEdit.layer.sketches=backingEdit.layer.sketches||[])[backingEdit.index]=shape.sketch;}return compiled;}
 function activeSketchChanged(compiled){if(backingMode&&backingEdit){markDirty();paintSoon();}
  else if(activeSketchIsArea()){pourGeomDrop();dragCacheDrop();paintSoon();markPoursStale();if(compiled&&compiled.closed)refillPours();}
- else{outlineGeomDrop();if(compiled&&compiled.closed)scheduleDrc();}}
+ else{outlineGeomDrop();if(compiled&&compiled.closed)outlineDrc();}}
 function polyArm(on,withinOutline){if(RO&&on)return;
  if(on&&heatsinkMode)heatsinkArm(false);
  if(on&&backingMode&&!withinOutline)backingArm(false);
@@ -5426,7 +5426,11 @@ function recoverOpenPourSketches(){if(!OS)return 0;var count=0;(PCB.zones||[]).f
  var replacement=g&&!g.closed?OS.clone(z.sketch):null;if(!replacement||!OS.closeProfile(replacement)){var pts=z.poly;if(!pts||pts.length<3||polySelfIntersects(pts))return;var area=0;
   for(var i=0;i<pts.length;i++){var a=pts[i],b=pts[(i+1)%pts.length];area+=a[0]*b[1]-b[0]*a[1];}if(!Number.isFinite(area)||Math.abs(area)<1e-9)return;replacement=OS.fromPolygon(pts);}
  var closed=OS.compile(replacement);if(!closed||!closed.closed||polySelfIntersects(closed.points))return;z.sketch=replacement;z.poly=closed.points;count++;});return count;}
-function outlineDrc(){var o=PCB.outline,g=OS&&o&&o.sketch&&OS.compile(o.sketch);if(!g||g.closed)scheduleDrc();}
+// Every committed closed-outline edit changes the clip boundary for declared
+// pours. DRC must invalidate the old fill first; starting the refill before
+// scheduleDrc() would make copperTouched() supersede its request sequence and
+// silently discard the fresh response.
+function outlineDrc(){var o=PCB.outline,g=OS&&o&&o.sketch&&OS.compile(o.sketch);if(!g||g.closed){scheduleDrc();refillPours();}}
 // Delete a vertex (right-click a handle) and every incident curve. The sketch
 // may remain open; no replacement edge is synthesized behind the user's back.
 function outlineVertexDelete(i){var o=activeSketchIsArea()?activeSketchShape():outlineEditable();if(!o)return;
@@ -5472,7 +5476,7 @@ function polyFinish(closeChain){
  // closed contour. Open sketch editing is provided by Line inside Outline.
  if(!closeChain||pts.length<4){outlineMsg("use Outline > Line to keep open geometry; this Poly outline command requires a closed loop");return false;}
  var pre=snapAll(),prev=PCB.outline;pts.pop();polyPts=null;polyCur=null;PCB.outline={x:0,y:0,w:0,h:0,pts:pts};outlineBboxSync();
- var valid=PCB.outline.w>=2&&PCB.outline.h>=2&&!polySelfIntersects(pts);if(!valid)PCB.outline=prev;else{if(OS)OS.ensure(PCB.outline);recordUndo(pre);}polyArm(false);drawBoardRect();
+ var valid=PCB.outline.w>=2&&PCB.outline.h>=2&&!polySelfIntersects(pts);if(!valid)PCB.outline=prev;else{if(OS)OS.ensure(PCB.outline);recordUndo(pre);}polyArm(false);drawBoardRect();if(valid)outlineDrc();
  outlineMsg(valid?"connected outline profile closed — Save/Update to keep":"profile is too small or crosses itself — outline unchanged");return valid;}
 function polyClose(){return polyFinish(true);}
 function polyPop(){if(polyPts&&polyPts.length){polyPts.pop();if(!polyPts.length)polyPts=null;drawBoardRect();}}
@@ -6154,6 +6158,7 @@ svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.p
   PCB.outline={x:ax,y:ay,w:bx-ax,h:by-ay};
   outlineGeomDrop();
   drawBoardRect();
+  outlineDrc();
   var msg=document.getElementById("pcb-savemsg");
   if(msg){msg.style.color="#8b949e";
    msg.textContent="outline set — Save/Update to keep";}
