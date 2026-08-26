@@ -17,7 +17,7 @@ own corpus rule), medians over 3 reps, in ms:
 | `solve_ms` | `solveForRequest` — eval + sidecar + ★ verbatim restore + copper restore |
 | `drc_report_ms` | `drc_rules.checkFilteredZones` — the reporting DRC (geometry + pour topology + `net_open` + severity overrides) behind `/api/pcb-drc`, the page blob, describe, and the fab gate. **Reps are not independent**: the seam memoises a board's poured copper while the board is unchanged (`src/placement/fill_cache.zig`), so rep 1 pours it and the rest borrow it, and the median is the RECONCILE cost — what an editor DRC loop and every derived fetch pay over a board that has not moved. |
 | `drc_geom_ms` | `drc.check` — geometry only, the native twin of the client's interactive WASM DRC |
-| `page_ms` | `warmPage` on a fresh cache — the complete cold `/pcb-layout/:name` render: eval, sidecar, placement, DRC, HTML, cache admission, gzip memo |
+| `page_ms` | `pcb_derived.warmPage(…, .page)` on a fresh cache — the complete cold `/pcb-layout/:name` render: eval, sidecar, placement, DRC, HTML, cache admission, gzip memo. The `.page` scope stops where the reader's first paint does; the analyses behind `?derived=1` are a separate response with its own cache entry and are not in this number. |
 
 Phases nest (`eval ⊂ solve ⊂ page`); the DRC phases are timed standalone.
 Alongside the timings each row records the DRC counts (errors / total /

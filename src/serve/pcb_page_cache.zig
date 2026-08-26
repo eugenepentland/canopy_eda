@@ -30,9 +30,45 @@ const cache_header = "X-Netlisp-PCB-Page-Cache";
 /// `thermal` adds one script tag to that same iframe for the thermal page's
 /// board pane, so it keys rather than bypasses — a thermal reader dialling
 /// scenarios reloads that frame repeatedly.
-const keyed_params = [_][]const u8{ "embed", "review", "drc", "edit", "model_sprites", "thermal", "cam", "derived" };
+const keyed_params = [_][]const u8{ "embed", "review", "drc", "edit", "model_sprites", "thermal", "cam", "derived", "pdn" };
 
 const Identity = struct { layout: ?[]const u8, keyed: [keyed_params.len]?[]const u8 };
+
+/// Position of a `WarmKind`'s query flag in `keyed_params`, resolved once so
+/// each request-less warm spells its query in exactly one place.
+fn keyIndex(comptime param: []const u8) usize {
+    for (keyed_params, 0..) |candidate, i| {
+        if (std.mem.eql(u8, candidate, param)) return i;
+    }
+    @compileError("keyed_params must carry \"" ++ param ++ "\" for its WarmKind");
+}
+
+/// What a request-less render is warming. The editor asks for two responses
+/// per page — the page itself, then `?derived=1` after first paint — and one
+/// solve answers both (see `serve/pcb_derived.zig`), so the warm path
+/// reserves and admits each under its own cache identity.
+pub const WarmKind = enum {
+    page,
+    derived,
+    pdn,
+
+    fn identity(self: WarmKind) Identity {
+        var ident = Identity{ .layout = null, .keyed = @splat(null) };
+        switch (self) {
+            .page => {},
+            .derived => ident.keyed[comptime keyIndex("derived")] = "1",
+            .pdn => ident.keyed[comptime keyIndex("pdn")] = "1",
+        }
+        return ident;
+    }
+
+    fn contentType(self: WarmKind) httpz.ContentType {
+        return switch (self) {
+            .page => .HTML,
+            .derived, .pdn => .JSON,
+        };
+    }
+};
 
 const Entry = struct {
     html: []const u8,
@@ -96,10 +132,10 @@ fn cacheKey(allocator: std.mem.Allocator, name: []const u8, ident: Identity) std
     return allocator.dupe(u8, aw.written());
 }
 
-/// Everything retention needs that is not the page itself. Named rather than
-/// `anytype` because both callers are in this file's control: the request path
+/// Everything retention needs that is not the body itself. Named rather than
+/// `anytype` because every caller is in the server's control: the request path
 /// unpacks it from its handler input, the warm-up builds it directly.
-const Retain = struct {
+pub const Retain = struct {
     scratch: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
@@ -207,22 +243,35 @@ pub const Store = struct {
         self.mutex.unlock();
     }
 
-    /// Reserve the query-free entry for startup warm-up. A live request that
-    /// arrives during that render joins it rather than duplicating the work.
-    pub fn reserveWarm(self: *Store, scratch: std.mem.Allocator, name: []const u8) bool {
+    /// Reserve one query-free entry for a request-less warm. A live request
+    /// that arrives during that render joins it rather than duplicating the
+    /// work. `live_version` is the design's version as the caller read it,
+    /// used exactly as `serve` uses it.
+    ///
+    /// A retained entry only refuses the reservation while it is still VALID. A
+    /// warm that runs because a design was just edited finds the pre-edit entry
+    /// still sitting in the map — nothing evicts it until a reader asks — and
+    /// treating that as "already warm" would hand the wait straight back to
+    /// that reader. Drop the dead entry and claim instead.
+    pub fn reserveWarm(self: *Store, scratch: std.mem.Allocator, name: []const u8, kind: WarmKind, live_version: u32) bool {
         const allocator = self.allocator orelse return false;
-        const ident = Identity{ .layout = null, .keyed = @splat(null) };
+        const ident = kind.identity();
         const key = cacheKey(scratch, name, ident) catch return false;
         defer scratch.free(key);
         self.mutex.lock();
         defer self.mutex.unlock();
-        if (self.entries.contains(key) or self.in_flight.contains(key)) return false;
+        if (self.entries.getPtr(key)) |entry| {
+            if (entry.live_version == live_version and entry.files.isValid()) return false;
+            const removed = self.entries.fetchRemove(key).?;
+            self.freeEntry(allocator, removed.key, removed.value);
+        }
+        if (self.in_flight.contains(key)) return false;
         return self.claim(allocator, key);
     }
 
     /// Complete a reservation created by `reserveWarm`, on success or error.
-    pub fn finishWarm(self: *Store, scratch: std.mem.Allocator, name: []const u8) void {
-        self.finishIdentity(scratch, name, .{ .layout = null, .keyed = @splat(null) });
+    pub fn finishWarm(self: *Store, scratch: std.mem.Allocator, name: []const u8, kind: WarmKind) void {
+        self.finishIdentity(scratch, name, kind.identity());
     }
 
     /// Serve a valid cache hit and return true. `req`/`res` are the live
@@ -303,19 +352,20 @@ pub const Store = struct {
         self.admit(retain, ident, in.res.body, content_type, captured);
     }
 
-    /// Retain a page rendered with NO request — the boot warm-up's pre-render
-    /// of the plain `/pcb-layout/<name>` URL. Identical retention rules to
-    /// `store`, but the identity is the query-free page by construction rather
-    /// than read off a request, which is precisely the entry a first visitor's
-    /// bare URL looks up. `layout_rev` is the warm-up's store-time freshness
-    /// check, duck-typed exactly as `store`'s.
-    pub fn warm(self: *Store, in: Retain, html: []const u8, layout_rev: anytype) void {
-        const captured = self.capture(in, html) orelse return;
+    /// Retain a body rendered with NO request — the warm-up's pre-render of the
+    /// plain `/pcb-layout/<name>` URL, or of the `?derived=1` payload the editor
+    /// fetches after first paint. Identical retention rules to `store`, but the
+    /// identity comes from `kind` by construction rather than being read off a
+    /// request, which is precisely the entry a first visitor's bare URL (and its
+    /// deferred fetch) looks up. `layout_rev` is the warm-up's store-time
+    /// freshness check, duck-typed exactly as `store`'s.
+    pub fn warm(self: *Store, in: Retain, kind: WarmKind, body: []const u8, layout_rev: anytype) void {
+        const captured = self.capture(in, body) orelse return;
         if (layout_rev.moved()) {
             captured.deinit();
             return;
         }
-        self.admit(in, .{ .layout = null, .keyed = @splat(null) }, html, .HTML, captured);
+        self.admit(in, kind.identity(), body, kind.contentType(), captured);
     }
 
     /// Stamp a rendered page's dependencies and validate it for retention.
@@ -389,6 +439,12 @@ pub const Store = struct {
         gop.value_ptr.* = .{ .html = body, .content_type = content_type, .files = captured.files, .live_version = live_version, .used = self.nextUse(), .plain = isPlain(ident) };
         self.bytes += body.len;
         self.trim(allocator);
+        // One warm-up render admits several entries — the page, then the
+        // after-paint payload, then the impedance sweep — and keeps every
+        // reservation until the last of them is done. A request already asleep
+        // on one of those keys must wake HERE, when its own entry lands, not at
+        // the end of analyses it never asked for.
+        self.changed.broadcast();
     }
 };
 
@@ -503,14 +559,101 @@ test "PCB page cache keys separate the default, named-layout, and embed pages" {
     try testing.expect(!std.mem.eql(u8, dflt, derived_key));
 }
 
+// spec: Web Server - The PDN sweep is keyed apart from the after-paint payload, so the viewer's two fetches never collide on one cache entry
+test "deferred payload and PDN sweep occupy distinct cache entries" {
+    var derived = httpz.testing.init(.{});
+    defer derived.deinit();
+    derived.query("derived", "1");
+    var sweep = httpz.testing.init(.{});
+    defer sweep.deinit();
+    sweep.query("pdn", "1");
+    const derived_key = try cacheKey(std.testing.allocator, "demo", identity(derived.req).?);
+    defer std.testing.allocator.free(derived_key);
+    const sweep_key = try cacheKey(std.testing.allocator, "demo", identity(sweep.req).?);
+    defer std.testing.allocator.free(sweep_key);
+    try std.testing.expect(!std.mem.eql(u8, derived_key, sweep_key));
+
+    // And each warm reserves the entry its own fetch looks up.
+    const warm_key = try cacheKey(std.testing.allocator, "demo", WarmKind.pdn.identity());
+    defer std.testing.allocator.free(warm_key);
+    try std.testing.expectEqualStrings(sweep_key, warm_key);
+    try std.testing.expectEqual(httpz.ContentType.JSON, WarmKind.pdn.contentType());
+}
+
 test "PCB page cache coalesces duplicate warm-up reservations" {
     var cache: Store = .{ .allocator = std.testing.allocator };
     defer cache.deinit();
-    try std.testing.expect(cache.reserveWarm(std.testing.allocator, "demo"));
-    try std.testing.expect(!cache.reserveWarm(std.testing.allocator, "demo"));
-    cache.finishWarm(std.testing.allocator, "demo");
-    try std.testing.expect(cache.reserveWarm(std.testing.allocator, "demo"));
-    cache.finishWarm(std.testing.allocator, "demo");
+    try std.testing.expect(cache.reserveWarm(std.testing.allocator, "demo", .page, 1));
+    try std.testing.expect(!cache.reserveWarm(std.testing.allocator, "demo", .page, 1));
+    cache.finishWarm(std.testing.allocator, "demo", .page);
+    try std.testing.expect(cache.reserveWarm(std.testing.allocator, "demo", .page, 1));
+    cache.finishWarm(std.testing.allocator, "demo", .page);
+}
+
+// spec: Web Server - One warm-up render answers both the PCB page and its deferred payload, each reserved and retained under its own cache identity
+test "PCB page and deferred-payload warms reserve independently" {
+    var cache: Store = .{ .allocator = std.testing.allocator };
+    defer cache.deinit();
+    // The page reservation must not block the deferred one: a single render
+    // holds both at once and publishes the page before the analyses finish.
+    try std.testing.expect(cache.reserveWarm(std.testing.allocator, "demo", .page, 1));
+    try std.testing.expect(cache.reserveWarm(std.testing.allocator, "demo", .derived, 1));
+    try std.testing.expect(!cache.reserveWarm(std.testing.allocator, "demo", .derived, 1));
+    cache.finishWarm(std.testing.allocator, "demo", .page);
+    cache.finishWarm(std.testing.allocator, "demo", .derived);
+    try std.testing.expect(cache.reserveWarm(std.testing.allocator, "demo", .derived, 1));
+    cache.finishWarm(std.testing.allocator, "demo", .derived);
+}
+
+// spec: Web Server - A deferred-payload warm reserves the SAME cache entry the editor's `?derived=1` fetch looks up, so the browser joins that render instead of starting a second one
+test "deferred warm identity is the browser's derived request identity" {
+    var derived_req = httpz.testing.init(.{});
+    defer derived_req.deinit();
+    derived_req.query("derived", "1");
+    const from_request = identity(derived_req.req).?;
+    const from_warm = WarmKind.derived.identity();
+    const request_key = try cacheKey(std.testing.allocator, "demo", from_request);
+    defer std.testing.allocator.free(request_key);
+    const warm_key = try cacheKey(std.testing.allocator, "demo", from_warm);
+    defer std.testing.allocator.free(warm_key);
+    try std.testing.expectEqualStrings(request_key, warm_key);
+    try std.testing.expectEqual(httpz.ContentType.JSON, WarmKind.derived.contentType());
+    try std.testing.expectEqual(httpz.ContentType.HTML, WarmKind.page.contentType());
+}
+
+// spec: Web Server - A warm-up reservation drops a retained PCB entry an edit has already invalidated, so the warm that edit triggered actually runs instead of deferring to the dead entry
+test "warm reservation claims an invalidated entry instead of skipping it" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "src", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/demo.sexp", .data = "(design demo)" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/demo.layouts.json", .data = "{}" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+
+    var cache: Store = .{ .allocator = testing.allocator };
+    defer cache.deinit();
+    var eval = Evaluator.init(testing.allocator, root);
+    defer eval.deinit();
+    var first = httpz.testing.init(.{});
+    defer first.deinit();
+    first.query("derived", "1");
+    var version: ?u32 = null;
+    try testing.expect(!cache.serve(.{ .scratch = first.arena, .name = "demo", .live_version = 0 }, first.req, first.res, &version));
+    first.res.status = 200;
+    first.res.content_type = .JSON;
+    first.res.body = "{\"rev\":0}";
+    cache.store(.{ .scratch = first.arena, .project_dir = root, .name = "demo", .req = first.req, .eval = &eval, .res = first.res, .live_version = version, .current_version = @as(u32, 0), .layout_rev = StubRev{} });
+
+    // Still valid: nothing to warm, so the reservation is refused.
+    try testing.expect(!cache.reserveWarm(testing.allocator, "demo", .derived, 0));
+
+    // An edit bumps the design's live version. Nothing evicts the retained
+    // entry until a reader asks for it — and that reader is exactly who the
+    // warm exists to spare, so the reservation must take it over.
+    try testing.expect(cache.reserveWarm(testing.allocator, "demo", .derived, 1));
+    cache.finishWarm(testing.allocator, "demo", .derived);
 }
 
 test "PCB page cache preserves JSON content type for deferred CAM" {

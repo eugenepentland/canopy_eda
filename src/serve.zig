@@ -52,6 +52,7 @@ const pcb_layout_page = @import("serve/pcb_layout_page.zig");
 const pcb_subseeds = @import("serve/pcb_subseeds.zig");
 const matlab_rf_export = @import("serve/matlab_rf_export.zig");
 const pcb_page_cache = @import("serve/pcb_page_cache.zig");
+const pcb_derived = @import("serve/pcb_derived.zig");
 const thermal_cache = @import("serve/thermal_cache.zig");
 const progress_cache = @import("serve/progress_cache.zig");
 const describe_cache = @import("serve/describe_cache.zig");
@@ -365,6 +366,10 @@ pub const ServerState = struct {
     route_live: route_live.Store = .{},
     /// Derived results held so a repeat request costs nothing.
     caches: Caches = .{},
+    /// Background PCB deferred-payload warms in flight (see
+    /// `serve/pcb_derived.zig`). Held here rather than at module scope so two
+    /// server instances stay independent.
+    derived_warms: pcb_derived.WarmLimit = .{},
 };
 
 // ── Server ─────────────────────────────────────────────────────────────

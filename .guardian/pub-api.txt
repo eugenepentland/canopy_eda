@@ -2862,8 +2862,11 @@ src/placement/via_merge.zig::ViaPt struct_
 src/placement/via_merge.zig::plan | fn plan(arena: std.mem.Allocator, vias: []const ViaPt) std.mem.Allocator.Error![]const Merge
 src/png.zig::Error value
 src/png.zig::encodeRgb | fn encodeRgb(alloc: std.mem.Allocator, width: u32, height: u32, rgb: []const u8) Error![]u8
+src/power_integrity_json.zig::AcMode enum_
 src/power_integrity_json.zig::Allocators struct_
-src/power_integrity_json.zig::write | fn write( w: *std.Io.Writer, allocators: Allocators, placement: optimizer.Placement, routed: ?router.RouteResult, zones: []const pour.UserZone, base_edge: ?pour.EdgeField, ) std.Io.Writer.Error!void
+src/power_integrity_json.zig::Inputs struct_
+src/power_integrity_json.zig::write | fn write(w: *std.Io.Writer, allocators: Allocators, in: Inputs) std.Io.Writer.Error!void
+src/power_integrity_json.zig::writeAcResponse | fn writeAcResponse(w: *std.Io.Writer, allocators: Allocators, in: Inputs, rev: i64) std.Io.Writer.Error!void
 src/preflight.zig::Finding struct_
 src/preflight.zig::FindingKind enum_
 src/preflight.zig::FindingStatus enum_
@@ -3227,6 +3230,7 @@ src/serve/design_rules_edit.zig::editStackupPlanesApi | fn editStackupPlanesApi(
 src/serve/diag_format.zig::Diagnostic struct_
 src/serve/diag_format.zig::build | fn build( allocator: std.mem.Allocator, file_path: []const u8, source: []const u8, err_name: []const u8, last_error: ?evaluator_mod.EvalDiagnostic, ) std.mem.Allocator.Error!Diagnostic
 src/serve/diag_format.zig::caretLine | fn caretLine(allocator: std.mem.Allocator, source_line: []const u8, col: u32) std.mem.Allocator.Error![]u8
+src/serve/diag_format.zig::designLoadPage | fn designLoadPage( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, eval: *const evaluator_mod.Evaluator, ) (std.mem.Allocator.Error || error{WriteFailed})!?[]const u8
 src/serve/diag_format.zig::formatText | fn formatText(allocator: std.mem.Allocator, d: Diagnostic) (std.mem.Allocator.Error || std.Io.Writer.Error)![]u8
 src/serve/diag_format.zig::load | fn load( allocator: std.mem.Allocator, file_path: []const u8, err_name: []const u8, last_error: ?evaluator_mod.EvalDiagnostic, ) std.mem.Allocator.Error!Diagnostic
 src/serve/diag_format.zig::renderErrorPage | fn renderErrorPage( allocator: std.mem.Allocator, design_name: []const u8, d: Diagnostic, ) (std.mem.Allocator.Error || std.Io.Writer.Error)![]u8
@@ -3251,6 +3255,8 @@ src/serve/drc_json.zig::writeViolation | fn writeViolation(w: *std.Io.Writer, v:
 src/serve/drc_rules.zig::Action enum_
 src/serve/drc_rules.zig::ApiReport struct_
 src/serve/drc_rules.zig::CopperCheck value
+src/serve/drc_rules.zig::Deferred struct_
+src/serve/drc_rules.zig::DeferredInputs struct_
 src/serve/drc_rules.zig::Rules struct_
 src/serve/drc_rules.zig::apply | fn apply(alloc: std.mem.Allocator, rules: Rules, list: []const drc.Violation) []const drc.Violation
 src/serve/drc_rules.zig::checkDefaultRules value
@@ -3262,6 +3268,8 @@ src/serve/drc_rules.zig::checkFilteredZonesTally | fn checkFilteredZonesTally( a
 src/serve/drc_rules.zig::checkTopologyFilled value
 src/serve/drc_rules.zig::getApi | fn getApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/drc_rules.zig::load | fn load(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) Rules
+src/serve/drc_rules.zig::reconcile | fn reconcile(self: Deferred, routed: *?router.RouteResult) void
+src/serve/drc_rules.zig::resolveDeferred | fn resolveDeferred( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, in: DeferredInputs, ) Deferred
 src/serve/drc_rules.zig::setApi | fn setApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/drc_rules.zig::writeKindsJson | fn writeKindsJson(w: *std.Io.Writer, rules: Rules) std.Io.Writer.Error!void
 src/serve/edit.zig::AssertionFailure value
@@ -3520,6 +3528,15 @@ src/serve/pages.zig::HomeData struct_
 src/serve/pages.zig::cssPage | fn cssPage(_: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pages.zig::gatherHome | fn gatherHome(allocator: std.mem.Allocator, project_dir: []const u8) HomeData
 src/serve/pages.zig::indexPage | fn indexPage(ctx: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_derived.zig::BothPayloads struct_
+src/serve/pcb_derived.zig::PageSink struct_
+src/serve/pcb_derived.zig::WarmLimit struct_
+src/serve/pcb_derived.zig::WarmScope enum_
+src/serve/pcb_derived.zig::bothPayloads | fn bothPayloads(ctx: *Server, name: []const u8, page: []const u8, job: DeferredJob) pcb_layout_page.HandlerError![]const u8
+src/serve/pcb_derived.zig::call | fn call(self: PageSink, kind: pcb_page_cache.WarmKind, body: []const u8) void
+src/serve/pcb_derived.zig::spawn | fn spawn(ctx: *Server, name: []const u8) void
+src/serve/pcb_derived.zig::warmPage | fn warmPage(ctx: *Server, scratch: std.mem.Allocator, name: []const u8, scope: WarmScope) bool
+src/serve/pcb_derived.zig::warmsDeferred | fn warmsDeferred(req: *httpz.Request) bool
 src/serve/pcb_describe.zig::Analyses struct_
 src/serve/pcb_describe.zig::DescribeError value
 src/serve/pcb_describe.zig::Side enum_
@@ -3545,6 +3562,7 @@ src/serve/pcb_fence.zig::run | fn run( alloc: std.mem.Allocator, project_dir: []
 src/serve/pcb_keepout_json.zig::write | fn write( w: *std.Io.Writer, alloc: std.mem.Allocator, placement: optimizer.Placement, ) (std.mem.Allocator.Error || std.Io.Writer.Error)!void
 src/serve/pcb_layout_import.zig::writeImportedStarredLayout | fn writeImportedStarredLayout( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, imported: import_layout.Imported, ) bool
 src/serve/pcb_layout_page.zig::CacheSlot struct_
+src/serve/pcb_layout_page.zig::DeferredJob struct_
 src/serve/pcb_layout_page.zig::FabAuthored struct_
 src/serve/pcb_layout_page.zig::FabView struct_
 src/serve/pcb_layout_page.zig::FabViewError value
@@ -3555,6 +3573,7 @@ src/serve/pcb_layout_page.zig::PngError value
 src/serve/pcb_layout_page.zig::PngFail struct_
 src/serve/pcb_layout_page.zig::PngRequest struct_
 src/serve/pcb_layout_page.zig::RefPose value
+src/serve/pcb_layout_page.zig::RenderJob struct_
 src/serve/pcb_layout_page.zig::RouteOutcome struct_
 src/serve/pcb_layout_page.zig::RoutePrep struct_
 src/serve/pcb_layout_page.zig::RoutePrepError value
@@ -3570,6 +3589,7 @@ src/serve/pcb_layout_page.zig::SavedVia struct_
 src/serve/pcb_layout_page.zig::SavedZone value
 src/serve/pcb_layout_page.zig::ShownCopper struct_
 src/serve/pcb_layout_page.zig::SolvedRequest struct_
+src/serve/pcb_layout_page.zig::StoreRevCheck struct_
 src/serve/pcb_layout_page.zig::SubBlockSeeds struct_
 src/serve/pcb_layout_page.zig::SubPinNet struct_
 src/serve/pcb_layout_page.zig::SubcircuitRouteSeedStats struct_
@@ -3578,6 +3598,7 @@ src/serve/pcb_layout_page.zig::SyncPose struct_
 src/serve/pcb_layout_page.zig::SyncVia struct_
 src/serve/pcb_layout_page.zig::ThermalPng struct_
 src/serve/pcb_layout_page.zig::addSubcircuitRouteSeeds | fn addSubcircuitRouteSeeds( alloc: std.mem.Allocator, project_dir: []const u8, block: *const env_mod.DesignBlock, placement: optimizer.Placement, params: router.RouteParams, options: *route_policy.Options, ) std.mem.Allocator.Error!SubcircuitRouteSeedStats
+src/serve/pcb_layout_page.zig::applyDeferred | fn applyDeferred(ctx: *Server, name: []const u8, placement: optimizer.Placement, view: *ShownView) void
 src/serve/pcb_layout_page.zig::bodyParam | fn bodyParam(req: *httpz.Request, res: *httpz.Response) ?[]const u8
 src/serve/pcb_layout_page.zig::commitNamedLayoutMutation | fn commitNamedLayoutMutation( alloc: std.mem.Allocator, project_dir: []const u8, design: []const u8, sub: ?[]const u8, layouts: []const SavedLayout, disk_rev: i64, ) i64
 src/serve/pcb_layout_page.zig::deleteNamedLayoutApi | fn deleteNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
@@ -3642,6 +3663,7 @@ src/serve/pcb_layout_page.zig::readLayouts | fn readLayouts(alloc: std.mem.Alloc
 src/serve/pcb_layout_page.zig::readLayoutsSub | fn readLayoutsSub(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8) []const SavedLayout
 src/serve/pcb_layout_page.zig::renameNamedLayoutApi | fn renameNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::renderDesignPng | fn renderDesignPng( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: PngRequest, ) PngError![]u8
+src/serve/pcb_layout_page.zig::renderLayoutPage | fn renderLayoutPage( ctx: *Server, req: ?*httpz.Request, res: ?*httpz.Response, job: RenderJob, ) HandlerError!?[]const u8
 src/serve/pcb_layout_page.zig::rescoreLayoutsApi | fn rescoreLayoutsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::restoreLayoutHistoryApi | fn restoreLayoutHistoryApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::restoreRoutes | fn restoreRoutes(alloc: std.mem.Allocator, sr: SavedRoutes, nets: []const export_kicad.FlatNet) ?router.RouteResult
@@ -3665,21 +3687,23 @@ src/serve/pcb_layout_page.zig::thermalCopper | fn thermalCopper(solved: SolvedRe
 src/serve/pcb_layout_page.zig::thermalHeatsink | fn thermalHeatsink(solved: SolvedRequest, bt: thermal.BoardThermal) ?thermal_scenarios.Heatsink
 src/serve/pcb_layout_page.zig::unknownLayoutMsg | fn unknownLayoutMsg( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8, want: []const u8, ) []const u8
 src/serve/pcb_layout_page.zig::viasForPoses | fn viasForPoses( alloc: std.mem.Allocator, block: *const env_mod.DesignBlock, project_dir: []const u8, seed: optimizer.PoseSeed, params: optimizer.Params, ) ?[]const SyncVia
-src/serve/pcb_layout_page.zig::warmPage | fn warmPage(ctx: *Server, scratch: std.mem.Allocator, name: []const u8) bool
 src/serve/pcb_layout_page.zig::writeJsonStr | fn writeJsonStr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void
 src/serve/pcb_layout_page.zig::writeLayoutsFileJsonRev | fn writeLayoutsFileJsonRev(w: *std.Io.Writer, layouts: []const SavedLayout, cache: ?CacheSlot, rev: i64) std.Io.Writer.Error!void
+src/serve/pcb_layout_page.zig::writePcbDerivedData | fn writePcbDerivedData(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placement, rv: ShownView, opts: PcbDataOpts) HandlerError!void
 src/serve/pcb_layout_page.zig::writePerNetJson | fn writePerNetJson(w: *std.Io.Writer, per_net: []const router.NetRouted) std.Io.Writer.Error!void
 src/serve/pcb_layout_page.zig::writeRoutePayload | fn writeRoutePayload( w: *std.Io.Writer, prep: RoutePrep, outcome: RouteOutcome, ) std.Io.Writer.Error!void
 src/serve/pcb_layout_page.zig::writeSavedRoutesJson | fn writeSavedRoutesJson(w: *std.Io.Writer, sr: SavedRoutes) std.Io.Writer.Error!void
 src/serve/pcb_layout_sync.zig::importKicadLayoutApi value
+src/serve/pcb_page_cache.zig::Retain struct_
 src/serve/pcb_page_cache.zig::Store struct_
+src/serve/pcb_page_cache.zig::WarmKind enum_
 src/serve/pcb_page_cache.zig::deinit | fn deinit(self: *Store) void
-src/serve/pcb_page_cache.zig::finishWarm | fn finishWarm(self: *Store, scratch: std.mem.Allocator, name: []const u8) void
+src/serve/pcb_page_cache.zig::finishWarm | fn finishWarm(self: *Store, scratch: std.mem.Allocator, name: []const u8, kind: WarmKind) void
 src/serve/pcb_page_cache.zig::moved | fn moved(self: StubRev) bool
-src/serve/pcb_page_cache.zig::reserveWarm | fn reserveWarm(self: *Store, scratch: std.mem.Allocator, name: []const u8) bool
+src/serve/pcb_page_cache.zig::reserveWarm | fn reserveWarm(self: *Store, scratch: std.mem.Allocator, name: []const u8, kind: WarmKind, live_version: u32) bool
 src/serve/pcb_page_cache.zig::serve | fn serve(self: *Store, in: ServeIn, req: *httpz.Request, res: *httpz.Response, miss_version: *?u32) bool
 src/serve/pcb_page_cache.zig::store | fn store(self: *Store, in: anytype) void
-src/serve/pcb_page_cache.zig::warm | fn warm(self: *Store, in: Retain, html: []const u8, layout_rev: anytype) void
+src/serve/pcb_page_cache.zig::warm | fn warm(self: *Store, in: Retain, kind: WarmKind, body: []const u8, layout_rev: anytype) void
 src/serve/pcb_part_json.zig::buildEditSources | fn buildEditSources( allocator: std.mem.Allocator, block: *const env_mod.DesignBlock, root_source: []const u8, ) []const u8
 src/serve/pcb_part_json.zig::writeComponentField | fn writeComponentField(w: *std.Io.Writer, instances: []const export_kicad.FlatInstance, index: usize) std.Io.Writer.Error!void
 src/serve/pcb_part_json.zig::writePadRect | fn writePadRect(w: *std.Io.Writer, pr: optimizer.PadRect) std.Io.Writer.Error!void

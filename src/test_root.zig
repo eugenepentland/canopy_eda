@@ -385,6 +385,7 @@ test {
     _ = @import("serve/pcb_fence.zig");
     _ = @import("serve/pcb_keepout_json.zig");
     _ = @import("serve/pcb_layout_import.zig");
+    _ = @import("serve/pcb_derived.zig");
     _ = @import("serve/pcb_layout_page.zig");
     _ = @import("serve/pcb_subseeds.zig");
     _ = @import("serve/pcb_layout_sync.zig");
@@ -552,7 +553,8 @@ test "shard manifest runs every named test exactly once" {
     try std.testing.expect(names.items.len > 2000);
     // New serve modules must be assigned explicitly rather than disappearing
     // behind the broad integrity loop when their test-root import first lands.
-    try std.testing.expectEqual(@as(usize, 1), claimingShards("serve.warmup.test.startup prioritizes PCB pages over progress ladders"));
+    try std.testing.expectEqual(@as(usize, 1), claimingShards("serve.warmup.test.startup prioritizes PCB pages over deferred payloads over progress ladders"));
+    try std.testing.expectEqual(@as(usize, 1), claimingShards("serve.pcb_derived.test.deferred warm slots are capped and released"));
     try std.testing.expectEqual(@as(usize, 1), claimingShards("shape_sketch.test.outline sketch compiles an ordered line profile"));
     try std.testing.expectEqual(@as(usize, 1), claimingShards("serve.shape_sketch_json.test.outline sketch JSON round trips stable entities and dimensions"));
 

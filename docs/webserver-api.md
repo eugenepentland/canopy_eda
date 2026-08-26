@@ -154,6 +154,22 @@ Local dev still uses `http://localhost:7050`.
   nets connected to the sub-circuit remain in place; ratsnest and DRC show any
   gap created by a moved pad. Nets touching a locked (not-moved) member are
   skipped.
+- **Three-tier editor payload (2026-08-26)**: `GET /pcb-layout/<design>` answers
+  in three dependency-cached responses, each keyed separately in the PCB page
+  cache. The **page** carries placement and saved copper and paints
+  immediately. **`?derived=1`** follows after first paint with everything
+  derived from that copper — poured fills, the reporting DRC, mask relief,
+  trace EM, the power-handling screen, the fab-identity mark. **`?pdn=1`**
+  follows *that* with the PDN impedance sweep alone, which is the single most
+  expensive analysis the server runs (barracuda: 6.3 s against 6.6 s for
+  everything else combined) and is read only by the PDN section of the
+  track/via properties inspector. `"power_integrity": {"ac": null}` in the
+  `?derived=1` body is the marker the viewer reads as "the sweep exists, fetch
+  it"; an absent `ac` key means the board has no routed copper to sweep and
+  nothing is fetched. The startup warm-up fills all three — pages first (about
+  a second for the whole corpus), then the two analysis tiers — and a
+  plain-page cache miss starts a capped background warm, so an edit's payloads
+  are usually already rendering before the browser asks.
 - **Named layouts + per-layout URLs (2026-07-27)**: every block — top-level
   DESIGNS included — keeps as many named saved layouts as you save, listed in
   the Sub-circuits pane's Layouts panel. (This *replaces* the 2026-07-02

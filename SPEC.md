@@ -738,7 +738,9 @@ times the production seams per board — design evaluation, `.layouts.json`
 read+parse, `solveForRequest` (verbatim ★ restore + copper restore), the
 reporting DRC (`drc_rules.checkFilteredZones`, `net_open` included), the
 geometry-only `drc.check` (native twin of the client WASM engine), and the
-complete cold page render through `warmPage` on a fresh cache — and prints
+complete cold page render through the boot warm-up's page-scoped seam
+(`pcb_derived.warmPage(…, .page)`) on a fresh cache, which stops where the
+reader's first paint does and leaves the `?derived=1` analyses out — and prints
 per-board phase medians plus the DRC counts, rendered-page size, and whether
 the render was admitted to the page cache. The corpus is every design with a
 saved-layout sidecar (the boot warm-up's own guard), so nothing is
@@ -768,6 +770,7 @@ hand-set absolute budget in the baseline's `budgets` object, moved DRC counts
 - a missing or corrupt baseline is a gate failure, never a pass
 - a failed board renders as FAILED in the table and carries ok=false in JSON
 - a page render the cache refused is flagged in the table so a silent every-load-cold regression is visible
+- the page-cache retention probe asks under the same entry and live version the page warm admitted, so a cached page is never reported as NOT retained
 - completeness-waiver: empty inputs (an empty corpus prints an empty table; a zero-baseline phase is ratio-floored so it cannot divide by zero)
 - completeness-waiver: large inputs (each rep runs in its own arena, freed before the next; the corpus peaks at one rep's render)
 - completeness-waiver: unauthorized access (a local CLI over a project directory the invoking user already owns; no network or auth surface)
@@ -6008,6 +6011,13 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The home page's data gather runs without a request, so the startup warm-up fills exactly the caches a render reads
 - The PCB layout page renders without a request, reading a missing request as the plain no-query page, so the startup warm-up can retain it under the same cache entry a bare URL looks up
 - Startup warms PCB editor pages before the slower progress ladders, so an unrelated lazy diagnostic cannot leave every editor cache cold after a deploy
+- Startup warms every PCB page before any deferred payload, so a deploy has the pages a reader blocks on cached in about a second rather than behind twelve boards of analyses
+- One warm-up render answers both the PCB page and its deferred payload, each reserved and retained under its own cache identity
+- A deferred-payload warm reserves the SAME cache entry the editor's `?derived=1` fetch looks up, so the browser joins that render instead of starting a second one
+- Background PCB deferred-payload warms are capped, so a burst of saves cannot put the heaviest read-only render on every core
+- A warm-up reservation drops a retained PCB entry an edit has already invalidated, so the warm that edit triggered actually runs instead of deferring to the dead entry
+- The PDN impedance sweep rides its own response behind the after-paint payload, marked by a null `ac`, so the board's own diagnostics never wait on the editor's most expensive analysis
+- The PDN sweep is keyed apart from the after-paint payload, so the viewer's two fetches never collide on one cache entry
 - The progress store accepts a ladder computed off-request under the same size and read-set rules as a served one
 
 - completeness-waiver: concurrent access (the umbrella section owns no single mutable store; endpoint-specific locking, revision conflicts, atomic sidecar writes, and request-local state are specified and tested in their dedicated serve sections)

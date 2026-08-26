@@ -160,12 +160,37 @@ function loadDeferredAnalysis(){
     PCB.mask_relief=j.mask_relief||{openings:[],strokes:[],joints:[]};PCB.mask_merges=j.mask_merges||[];
     PCB.antipads=j.antipads||[];PCB.trace_em=j.trace_em||{analyses:[]};
     PCB.power_integrity=j.power_integrity||{nets:[]};PCB.fab_text=j.fab_text||null;
+    if(PCB.power_integrity.ac===null)loadPdnSweep();
     PCB.analysis_deferred=false;traceEmIdx=null;powerIntegrityIdx=null;traceEmDirty=false;powerIntegrityDirty=false;
     routeSummaryFrom(j);pourGeomDrop();dragCacheDrop();paintSoon();drawDrc();drcChip(PCB.drc.length);poursFresh();drawRfRetrofitSchedule();})
    .catch(function(){if(!current())return;PCB.analysis_deferred=false;runDrcNow();drawRfRetrofitSchedule();});}
  var start=function(){pourCacheRead(function(j){if(!current())return;
    if(j){pourFillApply(j);poursFresh();analysis();return;}
    if(poursDeclared())refillPours({deferred:true,done:analysis});else analysis();});};
+ requestAnimationFrame(function(){requestAnimationFrame(start);});}
+var pdnPending=false;
+// The PDN impedance sweep is the heaviest analysis this board runs — on
+// barracuda it was 6.3 s of a 13.5 s deferred payload, because it rasters every
+// relevant plane and then walks each decoupling loop against it — and the only
+// thing that reads it is the PDN section of the track/via inspector. Nothing
+// paints from it and no chip counts it, so it rides its OWN dependency-cached
+// response behind the diagnostics that do. `"ac":null` in the payload above is
+// the server saying "it exists, fetch it"; an absent key means this board has
+// no copper to sweep. Two frames of slack again, so the fetch cannot compete
+// with the repaint the payload just triggered.
+function loadPdnSweep(){
+ if(pdnPending)return;pdnPending=true;
+ var generation=dirtyGeneration,rev=PCB.rev;
+ function current(){return generation===dirtyGeneration&&rev===PCB.rev;}
+ function settle(ac){pdnPending=false;if(!current())return;
+  if(PCB.power_integrity)PCB.power_integrity.ac=ac;renderProps();}
+ var start=function(){if(!current()){pdnPending=false;return;}
+  var u=new URL(window.location.href);u.hash="";u.searchParams.set("pdn","1");
+  fetch(u.pathname+u.search).then(function(r){if(!r.ok)throw 0;return r.json();})
+   .then(function(j){settle(j&&j.rev===rev?(j.ac||undefined):undefined);})
+   // Undefined, not null: null is the pending marker, and a failed sweep must
+   // stop the panel promising one rather than spin forever.
+   .catch(function(){settle(undefined);});};
  requestAnimationFrame(function(){requestAnimationFrame(start);});}
 // Persistent assembly sprites are registered by pcb_model_sprites.js after
 // the bare board has painted. The map stays empty on every other PCB surface,
@@ -8866,7 +8891,9 @@ function pdnChart(a){var s=a.points||[];if(s.length<2)return "";var W=286,H=116,
  function yy(v){return T+(H-T-B)*(1-(Math.log(Math.max(lo,v)/lo)/Math.log(hi/lo)));}var pts=[];zs.forEach(function(z,i){pts.push((L+(W-L-R)*i/(zs.length-1)).toFixed(1)+","+yy(z).toFixed(1));});
  var targetLine=target==null?"":'<path d="M'+L+' '+yy(target).toFixed(1)+'H'+(W-R)+'" stroke="#e3b341" stroke-width="1.3" stroke-dasharray="4 3"/><text x="'+(L+3)+'" y="'+(yy(target)-3).toFixed(1)+'">target '+pEsc(pdnOhms(target))+'</text>',marks="";(a.peaks||[]).forEach(function(q){var fi=0,best=Infinity;s.forEach(function(p,i){var d=Math.abs(Math.log(Number(p[0])/Number(q.frequency_hz)));if(d<best){best=d;fi=i;}});var x=L+(W-L-R)*fi/(s.length-1),y=yy(Number(q.magnitude_ohm));marks+='<circle cx="'+x.toFixed(1)+'" cy="'+y.toFixed(1)+'" r="2.7" fill="'+(q.above_target?'#f08888':'#e3b341')+'"/>';});
  return '<div class="em-chart"><div class="em-chart-title"><span>Z(f) at load · log scale</span><b>'+pEsc(pdnOhms(lo))+' – '+pEsc(pdnOhms(hi))+'</b></div><svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="PDN impedance across frequency"><path class="em-grid" d="M'+L+' '+T+'V'+(H-B)+'H'+(W-R)+'M'+L+' '+yy(Math.sqrt(lo*hi)).toFixed(1)+'H'+(W-R)+'"/>'+targetLine+'<polyline fill="none" stroke="#6fb1ff" stroke-width="2" points="'+pts.join(" ")+'"/>'+marks+'<text x="'+L+'" y="'+(H-5)+'">'+pEsc(emFreq(s[0][0]))+'</text><text text-anchor="end" x="'+(W-R)+'" y="'+(H-5)+'">'+pEsc(emFreq(s[s.length-1][0]))+'</text></svg></div>';}
-function pdnPanel(net){var a=pdnInfo(net);if(!a)return "";if(powerIntegrityDirty)return '<section class="em-panel"><div class="em-head">PDN impedance</div><div class="em-state bad">Copper changed after this sweep was computed. Save and reload to refresh mounting inductance and Z(f).</div></section>';
+function pdnPanel(net){
+ if((PCB.power_integrity||{}).ac===null)return '<section class="em-panel"><div class="em-head">PDN impedance</div><div class="em-state busy">Computing the routed RLC sweep — it runs behind the diagnostics above and fills in here.</div></section>';
+ var a=pdnInfo(net);if(!a)return "";if(powerIntegrityDirty)return '<section class="em-panel"><div class="em-head">PDN impedance</div><div class="em-state bad">Copper changed after this sweep was computed. Save and reload to refresh mounting inductance and Z(f).</div></section>';
  var pass=a.passes===true,known=a.passes!==null,covered=a.path_coverage_complete!==false,pill=!covered?'<span class="em-pill warn">path unproven</span>':'<span class="em-pill'+(known?(pass?' pass':' fail'):'')+'">'+(known?(pass?'meets target':'exceeds target'):'target incomplete')+'</span>',rows=pRow("Ripple budget",n2(Number(a.ripple_v)*1000)+" mV")+pRow("Load step",a.step_current_a==null?"not declared":powerIntegrityAmps(a.step_current_a)+(a.step_assumed?" (inferred)":""))+pRow("Target Z",a.target_ohm==null?"—":pdnOhms(a.target_ohm))+pRow("Valid through",emFreq(a.verdict_max_hz))+pRow("Source model",pdnOhms(a.source_resistance_ohm)+" + "+n2(Number(a.source_inductance_h)*1e9)+" nH"+(a.source_assumed?" (estimated)":""));
  var state="";if(!covered)state='<div class="em-state warn">'+pEsc(a.path_coverage_reason||"At least one capacitor mounting path uses fallback geometry.")+' The plotted estimate remains diagnostic and cannot produce a green target-impedance verdict.</div>';else if(!known)state='<div class="em-state warn">Add a positive <code>step-current-a</code>, or annotate typical/maximum rail current, to obtain a target-impedance verdict.</div>';else if(!pass)state='<div class="em-state bad">The worst impedance exceeds ΔV/ΔI. Inspect the marked anti-resonances and low-impact capacitors below.</div>';
  var caps=(a.capacitors||[]).slice().sort(function(x,y){return Number(x.removal_impact_db)-Number(y.removal_impact_db);}),capRows="";caps.slice(0,12).forEach(function(c){var bad=c.ineffective?' class="pdn-cap-bad"':'',why=c.ineffective?' · mounting-limited':'',model=c.model_estimated?' · estimated model':'',pin=c.target_pin?(' pin '+c.target_pin):"",pk=c.power_path_kind||'fallback',gk=c.ground_path_kind||'fallback';capRows+='<div'+bad+'><strong>'+pEsc(c.ref)+' · '+pEsc(c.value)+'</strong><span>'+n2(Number(c.mounting_inductance_h)*1e9)+' nH mount · SRF '+pEsc(emFreq(c.mounted_srf_hz))+' · removal '+n2(c.removal_impact_db)+' dB'+why+model+'</span><small>to '+pEsc(c.target_ref)+pEsc(pin)+' · power '+n2(c.power_path_mm)+' mm ('+pEsc(pk)+') · ground '+n2(c.ground_path_mm)+' mm ('+pEsc(gk)+') · '+pEsc(c.model_source)+'</small></div>';});

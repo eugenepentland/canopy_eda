@@ -715,6 +715,66 @@ fn groundViaLegs(alloc: std.mem.Allocator, p: optimizer.Placement, routed: route
     return legs.toOwnedSlice(alloc);
 }
 
+/// One `computedPaths` call's memo of `groundViaLegs`.
+///
+/// The legs a ground land reaches are a pure function of the land, its signal
+/// layer and the plane net — the poured surface's own raster never enters that
+/// scan. `computedPaths` nevertheless asks the same question once per (inner
+/// ground plane x decoupling loop x hub ground land), and every answer walks
+/// each routed via and, for the vias the land does not overlap, builds a
+/// per-layer track list and searches it. On barracuda that repetition WAS the
+/// editor's deferred payload: 7.9 s of a 16 s response. Memoising per call
+/// leaves one scan per distinct land.
+const LegMemo = struct {
+    /// Retained answers. `computedPaths` recycles its per-surface arena between
+    /// surfaces, and these must outlive that reset.
+    retain: std.mem.Allocator,
+    /// Recycled after every miss: a miss builds a whole per-layer track list per
+    /// candidate via, which must not accumulate across the call.
+    work: *std.heap.ArenaAllocator,
+    entries: std.ArrayList(Entry) = .empty,
+
+    const Entry = struct { key: Key, legs: []const ViaLeg };
+
+    /// Everything `groundViaLegs` reads beyond the placement and the routing.
+    /// The part is held as its placement index so the key stays comparable.
+    const Key = struct {
+        part: usize,
+        pad: optimizer.PadRect,
+        layer: u8,
+        plane_net: []const u8,
+
+        fn eql(a: Key, b: Key) bool {
+            return a.part == b.part and a.layer == b.layer and
+                a.pad.x == b.pad.x and a.pad.y == b.pad.y and
+                a.pad.w == b.pad.w and a.pad.h == b.pad.h and
+                std.mem.eql(u8, a.plane_net, b.plane_net);
+        }
+    };
+
+    fn legs(
+        self: *LegMemo,
+        p: optimizer.Placement,
+        routed: router.RouteResult,
+        key: Key,
+    ) std.mem.Allocator.Error![]const ViaLeg {
+        for (self.entries.items) |entry| if (entry.key.eql(key)) return entry.legs;
+        const fresh = try groundViaLegs(self.work.allocator(), p, routed, .{
+            .part = p.parts[key.part],
+            .pad = key.pad,
+            .layer = key.layer,
+            .plane_net = key.plane_net,
+        });
+        // ViaLeg is plain data (a Via plus a RoutePath whose only slice is a
+        // static provenance literal), so one dupe carries the answer out of the
+        // work arena intact.
+        const owned = try self.retain.dupe(ViaLeg, fresh);
+        _ = self.work.reset(.retain_capacity);
+        try self.entries.append(self.retain, .{ .key = key, .legs = owned });
+        return owned;
+    }
+};
+
 /// Prove the actual return topology used by an SMD bypass loop: the capacitor
 /// ground land and any actual ground land on the target IC must each reach a
 /// same-net through via through authored surface copper (or direct land
@@ -725,6 +785,7 @@ fn groundViaLegs(alloc: std.mem.Allocator, p: optimizer.Placement, routed: route
 /// nearer the supply pin. No nearest-via or equipotential-plane credit.
 fn groundViaPlanePath(
     alloc: std.mem.Allocator,
+    memo: *LegMemo,
     p: optimizer.Placement,
     routed: router.RouteResult,
     surface: PouredSurface,
@@ -738,14 +799,12 @@ fn groundViaPlanePath(
     const signal_layer: u8 = if (cap_part.side == .top) 0 else 1;
     const signal_stack: u8 = if (cap_part.side == .top) 1 else @max(@as(u8, 2), p.rules.physical.stack.layers);
     const h_ref = @max(stackSpanMm(p.rules.physical.stack, signal_stack, surface.stack), 0.02);
-    const cap_legs = try groundViaLegs(alloc, p, routed, .{ .part = cap_part, .pad = lp.cap_gnd, .layer = signal_layer, .plane_net = surface.net });
-    defer alloc.free(cap_legs);
+    const cap_legs = try memo.legs(p, routed, .{ .part = lp.cap, .pad = lp.cap_gnd, .layer = signal_layer, .plane_net = surface.net });
     var hub_legs: std.ArrayList(ViaLeg) = .empty;
     defer hub_legs.deinit(alloc);
     const hub_ground_pads = if (lp.hub_gnd.len > 0) lp.hub_gnd else &.{lp.hub_gnd_pin};
     for (hub_ground_pads) |hub_pad| {
-        const pad_legs = try groundViaLegs(alloc, p, routed, .{ .part = hub_part, .pad = hub_pad, .layer = signal_layer, .plane_net = surface.net });
-        defer alloc.free(pad_legs);
+        const pad_legs = try memo.legs(p, routed, .{ .part = lp.hub, .pad = hub_pad, .layer = signal_layer, .plane_net = surface.net });
         try hub_legs.appendSlice(alloc, pad_legs);
     }
     var best: ?RoutePath = null;
@@ -826,6 +885,14 @@ fn computedPaths(
     // before rasterizing the next one.
     var scratch_state = std.heap.ArenaAllocator.init(scratch_alloc);
     defer scratch_state.deinit();
+    // The ground-return leg memo spans every surface (its answers do not depend
+    // on which surface asked), so it owns two arenas of its own rather than
+    // riding the per-surface one recycled below.
+    var memo_retain = std.heap.ArenaAllocator.init(scratch_alloc);
+    defer memo_retain.deinit();
+    var memo_work = std.heap.ArenaAllocator.init(scratch_alloc);
+    defer memo_work.deinit();
+    var memo = LegMemo{ .retain = memo_retain.allocator(), .work = &memo_work };
     for (metas.items) |meta| {
         const surface = PouredSurface{
             .net = meta.net,
@@ -837,7 +904,7 @@ fn computedPaths(
             const requests = loopPourRequests(p, lp) orelse continue;
             try considerSurfacePath(scratch_state.allocator(), &power[i], surface, requests.power);
             try considerSurfacePath(scratch_state.allocator(), &ground[i], surface, requests.ground);
-            if (try groundViaPlanePath(scratch_state.allocator(), p, routed, surface, lp)) |candidate| {
+            if (try groundViaPlanePath(scratch_state.allocator(), &memo, p, routed, surface, lp)) |candidate| {
                 if (ground[i] == null or pathInductanceNh(candidate, requests.ground.reference_height) < pathInductanceNh(ground[i].?, requests.ground.reference_height)) ground[i] = candidate;
             }
         }
@@ -1384,7 +1451,16 @@ test "ground return proves pad via plane via topology" {
         .pwr_net = 0,
         .explicit_pin = "1",
     };
-    const path = (try groundViaPlanePath(std.testing.allocator, placement, routed, surface, lp)).?;
+    // Both calls share one memo, as `computedPaths` does: the second surface
+    // differs only in its raster, and the legs it reuses must still be the legs
+    // the first call proved — the memo answers a land, not a surface.
+    var memo_retain = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer memo_retain.deinit();
+    var memo_work = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer memo_work.deinit();
+    var memo = LegMemo{ .retain = memo_retain.allocator(), .work = &memo_work };
+
+    const path = (try groundViaPlanePath(std.testing.allocator, &memo, placement, routed, surface, lp)).?;
     try std.testing.expectEqualStrings("computed-via-plane", path.provenance);
     try std.testing.expect(path.inductance_nh.? > 0);
 
@@ -1392,7 +1468,7 @@ test "ground return proves pad via plane via topology" {
     for (0..4) |y| split_labels[y * 10 + 5] = -1;
     var split_surface = surface;
     split_surface.fill.labels = &split_labels;
-    try std.testing.expect((try groundViaPlanePath(std.testing.allocator, placement, routed, split_surface, lp)) == null);
+    try std.testing.expect((try groundViaPlanePath(std.testing.allocator, &memo, placement, routed, split_surface, lp)) == null);
 }
 
 test "diagonal computed-pour neck retains finite transverse width" {

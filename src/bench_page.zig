@@ -22,10 +22,14 @@
 //!               describe, the fab gate.
 //!   drc_geom    drc.check on the same copper — the geometry-only hot path,
 //!               the native twin of the client's interactive WASM engine.
-//!   page        pcb_layout_page.warmPage on a fresh cache — the complete
-//!               cold plain-page render: eval, sidecar, placement, DRC, HTML
-//!               serialization, cache admission, and the gzip memo. This is
-//!               the first-visitor cost after a deploy or an edit.
+//!   page        pcb_derived.warmPage(…, .page) on a fresh cache — the
+//!               complete cold plain-page render: eval, sidecar, placement,
+//!               DRC, HTML serialization, cache admission, and the gzip memo.
+//!               This is the first-visitor cost after a deploy or an edit.
+//!               `.page` scope deliberately stops where the reader's first
+//!               paint does: the analyses behind `?derived=1` are a second
+//!               response with its own cache entry, and folding them in here
+//!               would stop this number tracking what a visitor waits for.
 //!
 //! Phases NEST: eval ⊂ solve ⊂ page. The DRC phases are timed standalone on
 //! the solve's output, so `page` includes another run of them. Medians over
@@ -63,6 +67,7 @@
 //! claim is only valid over identical work).
 
 const std = @import("std");
+const httpz = @import("httpz");
 const clock = @import("infra/clock.zig");
 const infra_fs = @import("infra/fs.zig");
 const log = @import("infra/log.zig");
@@ -72,6 +77,8 @@ const optimizer = @import("placement/optimizer.zig");
 const drc = @import("placement/drc.zig");
 const drc_rules = @import("serve/drc_rules.zig");
 const pcb_layout_page = @import("serve/pcb_layout_page.zig");
+const pcb_derived = @import("serve/pcb_derived.zig");
+const pcb_page_cache = @import("serve/pcb_page_cache.zig");
 const bench_route = @import("bench_route.zig");
 const serve_root = @import("serve.zig");
 const router = @import("placement/router.zig");
@@ -280,19 +287,39 @@ fn benchRep(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8)
             .state = &state,
         };
         const t0 = clock.nanoTimestamp();
-        const rendered = pcb_layout_page.warmPage(&srv, alloc, name);
+        const rendered = pcb_derived.warmPage(&srv, alloc, name, .page);
         out.phases.page_ms = nsToMs(clock.nanoTimestamp() - t0);
         if (!rendered) return out;
-        // Retention probe: a second reservation is refused exactly when the
-        // render was admitted. When it is granted instead, the page was NOT
-        // retained — release the probe's claim and report the miss.
-        out.facts.cached = !state.caches.pcb_pages.reserveWarm(alloc, name);
-        if (!out.facts.cached) state.caches.pcb_pages.finishWarm(alloc, name);
+        out.facts.cached = pageRetained(&state.caches.pcb_pages, alloc, name);
         out.facts.html_bytes = state.caches.pcb_pages.bytes;
     }
 
     out.ok = true;
     return out;
+}
+
+/// Did the render just timed actually land in the page cache? Asked by
+/// re-reserving the entry it should have filled: `reserveWarm` declines only
+/// for an entry that is still VALID, so a refused reservation is the proof of
+/// retention, and a granted one means the page was dropped — the silent
+/// regression that turns every reload cold while every timing column still
+/// looks fine.
+///
+/// The probe has to name the same entry the warm did. `.page` is the identity
+/// `warmPage(…, .page)` admits under, and the deferred payload's entries are
+/// separate keys the page phase never fills — probing one of those would report
+/// a miss on a perfectly cached page. The live version is re-read for the same
+/// reason: `reserveWarm` treats an entry recorded at a different version as
+/// dead, and nothing edits a design mid-benchmark, so this is the version the
+/// render captured.
+///
+/// A granted probe is released before returning: the bench must not leave a
+/// reservation behind for the next rep to trip over.
+fn pageRetained(pages: *pcb_page_cache.Store, scratch: std.mem.Allocator, name: []const u8) bool {
+    const kind: pcb_page_cache.WarmKind = .page;
+    if (!pages.reserveWarm(scratch, name, kind, serve_root.getLiveVersion(name))) return true;
+    pages.finishWarm(scratch, name, kind);
+    return false;
 }
 
 fn nsToMs(ns: i128) f64 {
@@ -1000,4 +1027,57 @@ test "table flags a render the page cache did not retain" {
     uncached.facts.cached = false;
     try writeTable(&w, &.{uncached}, 3);
     try testing.expect(std.mem.indexOf(u8, w.buffered(), "NOT retained") != null);
+}
+
+// spec: bench-page - the page-cache retention probe asks under the same entry and live version the page warm admitted, so a cached page is never reported as NOT retained
+test "retention probe answers for the entry the page warm filled" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(testing.io, "src", .default_dir);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/demo.sexp", .data = "(design demo)" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/demo.layouts.json", .data = "{}" });
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+
+    // The layout-sidecar freshness check `store` asks after stamping. The page
+    // phase renders boards whose sidecar nobody is editing, so this test wants
+    // the "nothing moved" answer. Local to the test: a stub is not API.
+    const StubRev = struct {
+        pub fn moved(_: @This()) bool {
+            return false;
+        }
+    };
+
+    var cache: pcb_page_cache.Store = .{ .allocator = testing.allocator };
+    defer cache.deinit();
+
+    // A board no render admitted: the probe reports the miss AND releases the
+    // claim it took to find out, so asking twice cannot answer differently.
+    try testing.expect(!pageRetained(&cache, testing.allocator, "demo"));
+    try testing.expect(!pageRetained(&cache, testing.allocator, "demo"));
+
+    // Admit the plain page exactly as the warm does, then probe: the refusal
+    // is the retention. A probe naming another entry or another version would
+    // be granted here and call this cached page cold.
+    var eval = Evaluator.init(testing.allocator, root);
+    defer eval.deinit();
+    var page = httpz.testing.init(.{});
+    defer page.deinit();
+    var version: ?u32 = null;
+    try testing.expect(!cache.serve(.{ .scratch = page.arena, .name = "demo", .live_version = 0 }, page.req, page.res, &version));
+    page.res.status = 200;
+    page.res.content_type = .HTML;
+    page.res.body = "<html></html>";
+    cache.store(.{
+        .scratch = page.arena,
+        .project_dir = root,
+        .name = "demo",
+        .req = page.req,
+        .eval = &eval,
+        .res = page.res,
+        .live_version = version,
+        .current_version = @as(u32, 0),
+        .layout_rev = StubRev{},
+    });
+    try testing.expect(pageRetained(&cache, testing.allocator, "demo"));
 }
