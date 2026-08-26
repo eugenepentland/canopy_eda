@@ -3160,7 +3160,7 @@ is enlarged only as far as the derived drill and annular-ring rules require.
 - a power pour's effective minimum neck is raised above the board fabrication floor by the rail maximum and actual stack foil
 - board rules derive the worst-layer trace width and one-barrel drill from maximum rail load
 - an unpoured rail reserves its whole maximum-current width while a pour-backed rail leaves short fanouts to the post-route branch-current proof
-- a solved plane-aware rail exposes an index-aligned required width for each local-current branch, while an incomplete rail exposes no relaxation
+- a solved plane-aware rail exposes an index-aligned required width for each local-current branch, while an incomplete opted-in rail screens every segment at the whole-rail current
 - a rail with no annotated load routes for its declared source capacity, so a standalone regulator page sizes copper from its own output rating
 - declared loads outrank source capacity, so a rail routes for what the board draws rather than what its supply could deliver
 - a standalone module that rates its own output port and declares a bare layer count gets an IPC-2221 width for that rail; without the stackup no width is invented
