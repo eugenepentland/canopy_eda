@@ -1143,7 +1143,7 @@ test "generated auxiliary STEP bodies remain faceted B-reps rather than presenta
     try std.testing.expect(std.mem.indexOf(u8, pcb_step_export_js, "TESSELLATED_SHAPE_REPRESENTATION(") == null);
 }
 
-// spec: Web Server - the PCB 3D viewer asks the server for a self-contained millimetre-based AP242 assembly: each unique library STEP entity graph is embedded once without tessellation and reused through rigid component occurrences, the board outline/thickness/mechanical holes become one green analytic manifold B-rep rather than a faceted mesh, native board-outline arcs become circular edge curves and cylindrical side faces rather than chorded corner facets, and an unchecked heatsink is omitted from the assembly
+// spec: Web Server - the PCB 3D viewer asks the server for a self-contained millimetre-based AP242 assembly: each unique library STEP entity graph is embedded once without tessellation and reused through rigid component occurrences, the board outline/thickness/mechanical holes become one green analytic manifold B-rep rather than a faceted mesh, native board-outline arcs become circular edge curves and cylindrical side faces rather than chorded corner facets, an unchecked heatsink is omitted from the assembly, and its download name ends in `_ID_XXXXXXXX.step` using the exact eight-hex fabrication identity printed on that PCB
 test "PCB 3D viewer sends an analytic board recipe and exact component occurrences to the server" {
     const viewer_markers = [_][]const u8{
         "function collectGeneratedStepBodies()",
@@ -1165,6 +1165,9 @@ test "PCB 3D viewer sends an analytic board recipe and exact component occurrenc
         "new THREE.Matrix4().multiplyMatrices(mount.matrixWorld, local.matrix)",
         "matrix: Array.prototype.slice.call(world.elements)",
         "window.PCBStepExport.prepareBodies(out)",
+        "function stepFabricationId()",
+        "text.fabrication_id",
+        "window.PCBStepExport.fileName(DATA.name, stepFabricationId())",
         "fetch(\"/api/pcb-step/\"",
         "downloadBlob(blob, stepFileName())",
     };
@@ -1173,6 +1176,15 @@ test "PCB 3D viewer sends an analytic board recipe and exact component occurrenc
     try std.testing.expect(std.mem.indexOf(u8, pcb_3d_viewer_js, "collectStepMeshes(boardGroup, \"PCB\")") == null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_3d_viewer_js, "stepArtwork") == null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_3d_viewer_js, "window.PCBStepExport.build(DATA.name") == null);
+}
+
+test "PCB STEP filename carries the printed fabrication identity" {
+    const markers = [_][]const u8{
+        "function fileName(name, fabricationId)",
+        "replace(/^ID[\\s_-]*/i, \"\")",
+        "if (/^[0-9a-f]{8}$/i.test(id)) base += \"_ID_\" + id.toUpperCase()",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_step_export_js, marker) != null);
 }
 
 // spec: Web Server - the PCB 3D viewer composites each face's outer copper, soldermask, and silkscreen—including generated sub-circuit, test-point, and pin-1 artwork—into one non-overlapping visible canvas cap; the regular STEP export omits that raster artwork instead of turning it into selectable geometry, and only mechanical drills strictly larger than 1 mm are cut through the board

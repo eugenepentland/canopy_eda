@@ -225,9 +225,11 @@
     return out;
   }
 
-  function fileName(name) {
+  function fileName(name, fabricationId) {
     var base = String(name || "pcb").replace(/[^A-Za-z0-9._-]+/g, "-");
     base = base.replace(/^-+|-+$/g, "") || "pcb";
+    var id = String(fabricationId || "").trim().replace(/^ID[\s_-]*/i, "");
+    if (/^[0-9a-f]{8}$/i.test(id)) base += "_ID_" + id.toUpperCase();
     return base + ".step";
   }
 

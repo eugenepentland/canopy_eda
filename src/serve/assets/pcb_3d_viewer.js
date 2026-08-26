@@ -270,8 +270,20 @@
   // server reads each untouched library STEP and instances its original B-rep.
   var STEP_PROXY_FACE_THRESHOLD = 32, STEP_PROXY_MAX_SIZE_MM = 10;
 
+  function stepFabricationId() {
+    // fab_text is the freshly derived mark that fabrication writes. An adopted
+    // text supplies the same value while derived data is still loading.
+    var mark = DATA.fab_text || null;
+    if (!mark) (DATA.texts || []).some(function (text) {
+      if (text && text.fabrication_id) { mark = text; return true; }
+      return false;
+    });
+    var match = /^ID\s+([0-9a-f]{8})$/i.exec(String(mark && mark.text || "").trim());
+    return match ? match[1].toUpperCase() : "";
+  }
+
   function stepFileName() {
-    return window.PCBStepExport.fileName(DATA.name);
+    return window.PCBStepExport.fileName(DATA.name, stepFabricationId());
   }
 
   function stepMaterialColor(material) {
