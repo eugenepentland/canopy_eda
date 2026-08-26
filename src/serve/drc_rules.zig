@@ -435,6 +435,14 @@ test "viewer consolidates net-open findings by exact net" {
     try std.testing.expect(std.mem.indexOf(u8, js, "open net\"+(sum.open>1?\"s\":\"\")") != null);
 }
 
+// spec: Web Server - Net-open DRC rows and their expanded missing connections sort by shortest gap first
+test "viewer sorts net-open findings by shortest distance" {
+    const js = @embedFile("assets/pcb_board.js");
+    try std.testing.expect(std.mem.indexOf(u8, js, "function drcOpenGap(d){var gap=Number(d&&d.gap);return isFinite(gap)?gap:Infinity;}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "g.idxs.sort(function(a,b){var delta=drcOpenGap(v[a])-drcOpenGap(v[b])") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "drcOpenGap(v[a.idxs[0]])-drcOpenGap(v[b.idxs[0]])") != null);
+}
+
 // spec: Web Server - DRC error and warning markers have independent persisted visibility controls in the PCB Appearance objects list
 test "viewer controls DRC error and warning marker visibility independently" {
     const js = @embedFile("assets/pcb_board.js");

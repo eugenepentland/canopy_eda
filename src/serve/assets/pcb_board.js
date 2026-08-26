@@ -8196,13 +8196,18 @@ var drcCollapsed={};
 // records for inspection, but present one collapsed row per exact (unshortened)
 // net name so an unrouted rail with 40 isolated pads reads as one open net, not
 // 39 unrelated errors. A net row expands on demand to expose its individual
-// gaps and their stable violation ids.
+// gaps and their stable violation ids. Both levels put the shortest repair
+// first: nets by their nearest gap, then each net's missing joins by distance.
 var drcOpenExpanded=Object.create(null);
 function drcOpenNetName(d){return d&&d.k==="net open"&&d.a&&d.a.net?String(d.a.net):"";}
+function drcOpenGap(d){var gap=Number(d&&d.gap);return isFinite(gap)?gap:Infinity;}
 function drcOpenNetGroups(idxs){var v=PCB.drc||[],by=Object.create(null),out=[];
  idxs.forEach(function(i){var name=drcOpenNetName(v[i]),key="$"+name,g=by[key];
   if(!g){g=by[key]={name:name,idxs:[]};out.push(g);}g.idxs.push(i);});
- out.sort(function(a,b){return a.name<b.name?-1:a.name>b.name?1:0;});return out;}
+ out.forEach(function(g){g.idxs.sort(function(a,b){var delta=drcOpenGap(v[a])-drcOpenGap(v[b]);
+  return delta||a-b;});});
+ out.sort(function(a,b){var delta=drcOpenGap(v[a.idxs[0]])-drcOpenGap(v[b.idxs[0]]);
+  if(delta)return delta;return a.name<b.name?-1:a.name>b.name?1:0;});return out;}
 // A type-group counts as an error (sorts first, red badge) unless every one of
 // its violations is a warning — matching the on-board marker colour split.
 function grpSev(idxs){var v=PCB.drc||[];
