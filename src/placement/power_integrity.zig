@@ -655,13 +655,14 @@ pub fn analyze(
 
 /// Maximum (or typical-only) IPC-2221 width required by each routed track's
 /// solved LOCAL current. The result is index-aligned with `routed.tracks`;
-/// null means the trace-only graph could not conservatively prove a branch
-/// current, so a caller must retain its whole-net/class requirement.
+/// null means the copper graph could not conservatively prove a branch current,
+/// so a caller must retain its whole-net/class requirement.
 ///
-/// This deliberately omits plane/pour sheets. DRC can therefore relax a
-/// hand-routed branch only when ordinary trace/via copper alone connects every
-/// annotated load to a physical source. A rail relying on a sheet falls back
-/// to its authored net class instead of manufacturing an optimistic split.
+/// Ordinary rails use the trace/via graph. A net that explicitly declares a
+/// `power_branch_width` and has a fabricated plane also includes the computed
+/// plane sheet, allowing its short pad-to-plane fanouts to be judged by their
+/// actual local load. Saved user zones are not available at this DRC seam, so a
+/// zone-only carrier deliberately remains on the conservative class fallback.
 pub fn routedTrackRequiredWidths(
     alloc: std.mem.Allocator,
     placement: optimizer.Placement,
@@ -669,10 +670,23 @@ pub fn routedTrackRequiredWidths(
 ) std.mem.Allocator.Error![]const ?f64 {
     const required = try alloc.alloc(?f64, routed.tracks.len);
     @memset(required, null);
+    var plane_surfaces: ?[]const Surface = null;
     for (placement.nets, 0..) |net, net_index| {
         const demand = demandFor(placement.rules.physical.rails, net.name);
         if (demand.typical_a == null and demand.maximum_a == null) continue;
-        const flow = try solveCurrent(alloc, placement, routed, net_index, demand, &.{});
+        const branch_opted = net_index < placement.rules.net.len and
+            placement.rules.net[net_index].pad_neck.power_branch_width > 0;
+        const use_plane = branch_opted and router.netHasPlane(placement, net.name);
+        if (use_plane and plane_surfaces == null)
+            plane_surfaces = try buildSurfaces(alloc, placement, routed, &.{}, null);
+        const flow = try solveCurrent(
+            alloc,
+            placement,
+            routed,
+            net_index,
+            demand,
+            if (use_plane) plane_surfaces.? else &.{},
+        );
         // Never substitute the smaller typical axis when a declared maximum
         // axis is unprovable (for example, because a max-only consumer is
         // disconnected). Typical is sufficient only on a typical-only rail.
@@ -681,7 +695,11 @@ pub fn routedTrackRequiredWidths(
         for (routed.tracks, 0..) |track, route_index| {
             if (track.net != @as(i32, @intCast(net_index))) continue;
             const amps = axis.track_current_a[route_index];
-            if (!(amps > 0) or !std.math.isFinite(amps)) continue;
+            if (!std.math.isFinite(amps) or amps < 0) continue;
+            if (amps == 0) {
+                required[route_index] = 0;
+                continue;
+            }
             const physical = placement.rules.signalStackIndex(track.layer);
             const foil = placement.rules.physical.stack.foilMm(physical);
             const outer = physical == 1 or physical == placement.rules.layerStack().stackCount();
@@ -845,7 +863,7 @@ test "analysis joins routed geometry to stack foil rail load and declared plane"
     try testing.expect(net.planes[0].required_neck_maximum_mm.? > 1.0);
 }
 
-// spec: placement/power-routing - a trace-only solved rail exposes an index-aligned required width for each local-current branch, while an incomplete or sheet-dependent rail exposes no relaxation
+// spec: placement/power-routing - a solved plane-aware rail exposes an index-aligned required width for each local-current branch, while an incomplete rail exposes no relaxation
 test "analysis assigns split branch currents and required widths from physical source and load pads" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
@@ -876,6 +894,8 @@ test "analysis assigns split branch currents and required widths from physical s
     }};
     const nets = [_]optimizer.FlatNet{.{ .name = "VDD", .pins = &pins }};
     const foils = [_]@import("impedance.zig").Foil{.{ .index = 1, .thickness_mm = 0.035 }};
+    const planes = [_]optimizer.PlaneAt{.{ .index = 2, .net = "VDD" }};
+    const net_rules = [_]optimizer.NetRule{.{ .width = 0.3048, .pad_neck = .{ .power_branch_width = 0.1524 } }};
     const placement = optimizer.Placement{
         .parts = @constCast(&parts),
         .links = &.{},
@@ -889,7 +909,13 @@ test "analysis assigns split branch currents and required widths from physical s
         .maxx = 2,
         .maxy = 1,
         .generated = true,
-        .rules = .{ .copper_layers = 2, .physical = .{ .stack = .{ .layers = 2, .foils = &foils }, .rails = &rails } },
+        .rules = .{
+            .plane_nets = &.{"VDD"},
+            .net = &net_rules,
+            .copper_layers = 2,
+            .planes = .{ .declared = &planes },
+            .physical = .{ .stack = .{ .layers = 2, .foils = &foils }, .rails = &rails },
+        },
     };
     const tracks = [_]router.Track{
         .{ .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.3, .net = 0 },

@@ -104,7 +104,8 @@ function buildDrcInput(PCB, live) {
       // without the identity the browser would flag every filter-chain neighbour
       // the server passes.
       return {
-        net: collapseNet(c.net), class: c.class, width: c.width, clearance: c.clearance,
+        net: collapseNet(c.net), class: c.class, width: c.width,
+        power_branch_width: c.power_branch_width, clearance: c.clearance,
         via_dia: c.via_dia, via_drill: c.via_drill,
         max_freq_hz: c.max_freq_hz, impedance_ohms: c.impedance_ohms,
         diff_impedance_ohms: c.diff_impedance_ohms,

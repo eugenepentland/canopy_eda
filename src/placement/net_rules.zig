@@ -258,6 +258,12 @@ const ProfileRank = struct {
     }
 };
 
+fn mergePowerBranchWidth(out: *NetRule, p: ClassProfileDecl, rank: *ProfileRank) void {
+    if (p.spec.pad_neck.power_branch_width <= 0 or !rank.better(p)) return;
+    out.pad_neck.power_branch_width = p.spec.pad_neck.power_branch_width;
+    rank.take(p);
+}
+
 /// Depth/order tie-break bookkeeping for the `(fence …)` / `(keepout MM …)`
 /// merge, held in its own struct so those three winners live outside
 /// `profileRule`'s already-wide local set. `escape_declared` records whether any
@@ -310,6 +316,7 @@ fn mergeFenceProfile(out: *NetRule, p: ClassProfileDecl, st: *FenceMerge) void {
 fn profileRule(profiles: []const ClassProfileDecl, win: WinningClass, conflict: bool) NetRule {
     var out = NetRule{ .class = .{ .name = win.class_name, .source = win.source, .conflict = conflict } };
     var width_rank = ProfileRank{};
+    var power_branch_width_rank = ProfileRank{};
     var neck_width_rank = ProfileRank{};
     var neck_length_rank = ProfileRank{};
     var taper_length_rank = ProfileRank{};
@@ -373,6 +380,7 @@ fn profileRule(profiles: []const ClassProfileDecl, win: WinningClass, conflict: 
             out.width = p.spec.width;
             width_rank.take(p);
         }
+        mergePowerBranchWidth(&out, p, &power_branch_width_rank);
         if (p.spec.pad_neck.width > 0 and neck_width_rank.better(p)) {
             out.pad_neck.width = p.spec.pad_neck.width;
             neck_width_rank.take(p);
@@ -527,6 +535,7 @@ test "inherited net class resolves through canonical bridge names" {
     const child_classes = [_]env.NetClassSpec{.{
         .name = "rf-cpwg-50",
         .width = 0.20,
+        .pad_neck = .{ .power_branch_width = 0.15 },
         .clearance = 0.15,
         .via_dia = 0.45,
         .return_path = .{ .declared = true, .reference_net = "AGND", .stitch_radius_mm = 2 },
@@ -548,6 +557,7 @@ test "inherited net class resolves through canonical bridge names" {
     const root_classes = [_]env.NetClassSpec{.{
         .name = "rf-cpwg-50",
         .width = 0.38,
+        .pad_neck = .{ .power_branch_width = 0.18 },
         .clearance = 0.20,
         .via_drill = 0.30,
         .return_path = .{ .declared = true, .reference_net = "GND", .stitch_radius_mm = 1 },
@@ -576,6 +586,7 @@ test "inherited net class resolves through canonical bridge names" {
     try std.testing.expectEqualStrings("rf-cpwg-50", rules[0].class.name);
     try std.testing.expectEqualStrings("lna1", rules[0].class.source);
     try std.testing.expectEqual(@as(f64, 0.38), rules[0].width);
+    try std.testing.expectEqual(@as(f64, 0.18), rules[0].pad_neck.power_branch_width);
     try std.testing.expectEqual(@as(f64, 0.20), rules[0].clearance);
     try std.testing.expectEqual(@as(f64, 0.45), rules[0].via_dia);
     try std.testing.expectEqual(@as(f64, 0.30), rules[0].via_drill);

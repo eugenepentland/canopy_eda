@@ -8227,9 +8227,11 @@ function renderDrcList(){drcTabBadge();var lst=ensureDrcList();if(!lst)return;
  var v=PCB.drc||[];
  var g=drcGroups(),groups=g.groups,order=g.order;
  var nt=order.length,sum=drcSummary(),issues=sum.err+sum.warn,other=sum.otherErr+sum.otherWarn;
+ var power=powerWidthStatus(),powerClasses=(PCB.netclasses||[]).some(function(c){return +c.power_branch_width>0;});
  var h='<div class="drc-row" style="cursor:default;font-weight:600"><span class="drc-k">'+
   (v.length?((sum.open?(sum.open+" open net"+(sum.open>1?"s":"")+(other?(" · "+other+" other issue"+(other>1?"s":"")):"")):
    (issues+" issue"+(issues>1?"s":"")))+(nt>1?" · "+nt+" types":"")):"No DRC violations")+'</span>'+
+  (powerClasses?'<button id="drc-power-width" class="btn" style="font-size:11px"'+(power.changed?'':' disabled')+' title="Widen only current-aware power segments that the latest post-route current check found undersized. Unsolved branches use the conservative full-rail width. Undoable.">'+(power.changed?('Widen power ('+power.tracks+')'):'Power widths ✓')+'</button>':'')+
   '<button id="drc-cog" class="btn" style="font-size:11px" title="Choose which checks count as errors or warnings, or are ignored — saved with the design, honoured by the APIs and the fab gate too">\u2699 Rules</button></div>';
  if(drcRulesOpen)h+=drcRulesHtml();
  order.forEach(function(k){var idxs=groups[k],err=grpSev(idxs)===0,coll=!!drcCollapsed[k];
@@ -8252,6 +8254,8 @@ function renderDrcList(){drcTabBadge();var lst=ensureDrcList();if(!lst)return;
  lst.innerHTML=h;
  var cog=document.getElementById("drc-cog");
  if(cog)cog.addEventListener("click",function(){drcRulesOpen=!drcRulesOpen;renderDrcList();});
+ var widen=document.getElementById("drc-power-width");
+ if(widen)widen.addEventListener("click",function(){applyPowerWidths();});
  lst.querySelectorAll("[data-drck]").forEach(function(sl){
   sl.addEventListener("change",function(){var kk=(PCB.drc_kinds||[])[+sl.getAttribute("data-drck")];
    if(!kk)return;kk.ov=(sl.value===kk.def)?null:sl.value;drcRulesPost();});});
@@ -8601,6 +8605,9 @@ function netClassInfo(net){var ix=ncIndex();
 // refill + DRC after apply consume those values directly from the same class.
 function netClassGeometryPlan(tracks,vias){var tp=[],vp=[],nets=Object.create(null),eps=1e-7;
  (tracks||[]).forEach(function(t){var c=netClassInfo(t.net||""),w=c&&+c.width;
+  // Current-aware power widths are per segment, not a class-wide geometry to
+  // synchronize. Their DRC findings feed the separate widen action below.
+  if(c&&+c.power_branch_width>0)return;
   if(!(w>0)||Math.abs((+t.w||0)-w)<=eps)return;
   tp.push({track:t,width:w});nets[t.net||""]=1;});
  (vias||[]).forEach(function(v){var c=netClassInfo(v.net||"");if(!c)return;
@@ -8633,6 +8640,37 @@ function applyNetClassGeometry(){if(RO)return netClassGeometryStatus();
 window.PCBNetClassGeometryPlan=netClassGeometryPlan;
 window.PCBNetClassGeometryStatus=netClassGeometryStatus;
 window.PCBApplyNetClassGeometry=applyNetClassGeometry;
+
+// Turn current-aware power `track width` findings into an exact, non-mutating
+// edit plan. The server DRC has already solved each segment's DC current (or
+// conservatively fallen back to the full class width when it could not), so
+// the client only has to match each midpoint back to saved editable copper.
+// Targets round upward to a 1 mil manufacturing increment and never shrink.
+function powerWidthPlan(){var fixes=[],seen=[],step=0.0254,eps=1e-7;if(!powerWidthDrcFresh)return {tracks:fixes,nets:0};
+ (PCB.drc||[]).forEach(function(d){if(d.k!=="track width"||!d.a||!d.a.net||!(+d.clr>0))return;
+  var c=netClassInfo(d.a.net);if(!c||!(+c.power_branch_width>0))return;
+  var best=null,score=1e9;
+  (PCB.tracks||[]).forEach(function(t){if(netCollapse(t.net||"")!==netCollapse(d.a.net))return;
+   if(d.l!=null&&Number(t.l||0)!==Number(d.l))return;
+   var mx=((+t.x1)+(+t.x2))/2,my=((+t.y1)+(+t.y2))/2,dist=Math.hypot(mx-(+d.x),my-(+d.y));
+   if(dist>1e-4)return;var s=dist+Math.abs((+t.w||0)-(+d.gap||0));if(s<score){score=s;best=t;}});
+  if(!best||seen.indexOf(best)>=0)return;
+  var target=Math.ceil(((+d.clr)-eps)/step)*step;
+  target=Math.max(target,+c.power_branch_width||0);
+  if(target<=(+best.w||0)+eps)return;
+  seen.push(best);fixes.push({track:best,width:target,required:+d.clr,net:d.a.net});});
+ return {tracks:fixes,nets:(function(){var n=Object.create(null);fixes.forEach(function(f){n[f.net]=1;});return Object.keys(n).length;})()};}
+function powerWidthStatus(){var p=powerWidthPlan();return {tracks:p.tracks.length,nets:p.nets,changed:p.tracks.length,editable:!RO};}
+function applyPowerWidths(){if(RO)return powerWidthStatus();var p=powerWidthPlan();
+ if(!p.tracks.length){routeStatMsg("current-aware power widths already pass DRC");return powerWidthStatus();}
+ var before=snapAll(),changed=p.tracks.map(function(q){return q.track;});recordUndo(before);rfDropForTracks(changed);
+ p.tracks.forEach(function(q){q.track.w=q.width;});PCB.drc=[];drawRoute();drawClr();drawDrc();scheduleDrc();
+ if(poursDeclared())refillPours();
+ routeStatMsg("widened "+p.tracks.length+" current-aware power segment"+(p.tracks.length===1?"":"s")+" across "+p.nets+" net"+(p.nets===1?"":"s")+" — DRC and pours are refreshing; Save/Update to keep");
+ return powerWidthStatus();}
+window.PCBPowerWidthPlan=powerWidthPlan;
+window.PCBPowerWidthStatus=powerWidthStatus;
+window.PCBApplyPowerWidths=applyPowerWidths;
 var traceEmIdx=null,traceEmDirty=false,powerIntegrityIdx=null,powerIntegrityDirty=false;
 function traceEmInfo(net){if(!traceEmIdx){traceEmIdx={exact:{},coll:{}};
  ((PCB.trace_em&&PCB.trace_em.analyses)||[]).forEach(function(a){traceEmIdx.exact[a.net]=a;var k=netCollapse(a.net);if(traceEmIdx.coll[k]===undefined)traceEmIdx.coll[k]=a;});}
@@ -8907,7 +8945,7 @@ function paintPickPreview(ctx){var d=pickPreview;if(!d)return;
 // the DRC markers + count chip stay honest without waiting for a Route click.
 // The live client-side check blocks obvious shorts during drawing; this is the
 // authoritative re-check (all 8 checks, incl. annular + board-edge).
-var drcTimer=null,drcSeq=0;
+var drcTimer=null,drcSeq=0,powerWidthDrcFresh=true;
 // Chip splits the count by severity while rolling a net's many open gaps into
 // one actionable open-net count. The underlying raw violations still gate fab.
 function drcChip(n){var e=document.getElementById("r-drc");if(!e)return;
@@ -8930,8 +8968,9 @@ function runDrcNow(){if(RO)return;var seq=++drcSeq;drcChip(-1);
     // log both so wasm/server drift is visible (wave-2 audit).
     if(!wasmDrc.failed&&wasmDrc.lastN!=null&&(srv.length!==wasmDrc.lastN||!idSetEq(drcIdSet(srv),wasmDrc.lastIds)))
      console.warn("[drc] wasm/server mismatch",{wasm:wasmDrc.lastN,server:srv.length});
+    powerWidthDrcFresh=true;
     var shown=drawRfRetrofitDrcMerge(srv),oldIds=drcIdSet(PCB.drc||[]),changed=shown.length!==(PCB.drc||[]).length||!idSetEq(drcIdSet(shown),oldIds);
-    PCB.drc=shown;if(changed)drawDrc();drcChip(shown.length);routeSummaryFrom(j);}) // server wins
+    PCB.drc=shown;if(changed)drawDrc();else renderDrcList();drcChip(shown.length);routeSummaryFrom(j);}) // server wins
   .catch(function(){if(seq===drcSeq)drcChip(0);});}
 function boardStatePayload(){var vg=viaGeo();return {
  parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,side:p.side||"top"};}),
@@ -9055,6 +9094,7 @@ pourBtns().forEach(function(b){b.addEventListener("click",refillPours);});
 (function(){groundViasBtnInstall();var b=document.getElementById("pcb-ground-vias");if(b&&!RO)b.addEventListener("click",groundViasRun);})();
 (function(){var b=fenceBtn();if(b&&!RO)b.addEventListener("click",fenceRun);})();
 function scheduleDrc(){if(RO)return;
+ powerWidthDrcFresh=false;
  copperTouched(); // every copper/pose edit funnels here — refresh airwire doneness
  drcGateSessionDefer(); // mid-drag session back in step with the edit, off THIS frame
  wasmDrcInit();   // lazily spin up the worker on the first edit

@@ -1340,6 +1340,8 @@ pub const NetClassSpec = struct {
     /// routed trunk width; generated copper may use `width` for at most
     /// `max_length` from an SMD land centre, then grows back to the trunk over
     /// `taper_length`. A zero width leaves necking disabled.
+    /// This compact trace-width profile also carries the independently authored
+    /// `(power-branch-width MM)` reduction for plane-backed rail fanouts.
     pad_neck: PadNeck = .{},
     clearance: f64 = 0,
     via_dia: f64 = 0,

@@ -404,6 +404,7 @@ fn buildNetClassOverrides(arena: std.mem.Allocator, v: ?std.json.Value, nettab: 
                     .width = jNum(o.get("pad_neck_width")),
                     .max_length = jNum(o.get("pad_neck_max_length")),
                     .taper_length = jNum(o.get("pad_neck_taper_length")),
+                    .power_branch_width = jNum(o.get("power_branch_width")),
                 },
                 // The resolved RF same-layer keepout halo + its pad-escape
                 // exemption. Both must cross the bridge or the client silently

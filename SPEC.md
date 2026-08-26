@@ -3147,8 +3147,11 @@ declared load envelope, the actual stack foil, the 10 °C IPC-2221 screening
 target, and the board's via-plating rule. Shared traces without plane or pour
 support reserve the full rail load. For a rail carried by an explicitly
 declared plane or copper zone, the fill reserves the full-current neck while
-short pad fanouts retain their authored width and are judged after routing at
-the local branch current solved by the power-integrity analysis. The router
+short pad fanouts may opt into `(power-branch-width MM)` and are judged after
+routing at the local branch current solved by the power-integrity analysis.
+The ordinary class width remains the fallback whenever that solve is
+incomplete, and the PCB DRC panel can widen only failing opted-in segments on
+1 mil increments without moving their centre lines. The router
 does not invent planes on arbitrary layers, and a required single-barrel via
 is enlarged only as far as the derived drill and annular-ring rules require.
 
@@ -3156,7 +3159,7 @@ is enlarged only as far as the derived drill and annular-ring rules require.
 - a power pour's effective minimum neck is raised above the board fabrication floor by the rail maximum and actual stack foil
 - board rules derive the worst-layer trace width and one-barrel drill from maximum rail load
 - an unpoured rail reserves its whole maximum-current width while a pour-backed rail leaves short fanouts to the post-route branch-current proof
-- a trace-only solved rail exposes an index-aligned required width for each local-current branch, while an incomplete or sheet-dependent rail exposes no relaxation
+- a solved plane-aware rail exposes an index-aligned required width for each local-current branch, while an incomplete rail exposes no relaxation
 - a rail with no annotated load routes for its declared source capacity, so a standalone regulator page sizes copper from its own output rating
 - declared loads outrank source capacity, so a rail routes for what the board draws rather than what its supply could deliver
 - a standalone module that rates its own output port and declares a bare layer count gets an IPC-2221 width for that rail; without the stackup no width is invented

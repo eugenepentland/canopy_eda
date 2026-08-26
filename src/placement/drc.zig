@@ -1672,7 +1672,7 @@ const TrackWidthInput = struct {
     routed: router.RouteResult,
     tracks: []const router.Track,
     min_width: f64,
-    /// Index-aligned IPC-2221 widths from a solved trace-only power graph.
+    /// Index-aligned IPC-2221 widths from a solved power-copper graph.
     /// Null entries retain the conservative whole-net class rule.
     local_power_widths: []const ?f64 = &.{},
 };
@@ -1687,7 +1687,13 @@ fn checkTrackWidth(arena: std.mem.Allocator, out: *Viol, in: TrackWidthInput) st
             if (ni < nrules.len and nrules[ni].width > 0) want = nrules[ni].width;
         }
         const local_power_width = if (track_index < in.local_power_widths.len) in.local_power_widths[track_index] else null;
-        if (local_power_width) |local| want = @max(in.min_width, local);
+        if (local_power_width) |local| {
+            const branch_floor = if (t.net >= 0 and @as(usize, @intCast(t.net)) < nrules.len)
+                nrules[@intCast(t.net)].pad_neck.power_branch_width
+            else
+                0;
+            want = @max(in.min_width, @max(branch_floor, local));
+        }
         const under_width = t.width < want - eps;
         // A solved local-current width is already the electrical exception to
         // the whole-net class. Do not then let a geometric pad-neck exception
@@ -1699,7 +1705,7 @@ fn checkTrackWidth(arena: std.mem.Allocator, out: *Viol, in: TrackWidthInput) st
                 .gap = t.width,
                 .clearance = want,
                 .kind = .track_width,
-                .who = .{ .net_a = t.net },
+                .who = .{ .net_a = t.net, .track_a = partyIndex(track_index) },
                 .layer = layerOf(t.layer),
             });
             continue;
@@ -1711,7 +1717,7 @@ fn checkTrackWidth(arena: std.mem.Allocator, out: *Viol, in: TrackWidthInput) st
         const taper_ok = portFramePadTaper(in.routed, t, want);
         if (!under_width) continue;
         if (neck_ok or taper_ok) continue;
-        try out.append(arena, .{ .x = (t.x1 + t.x2) / 2, .y = (t.y1 + t.y2) / 2, .gap = t.width, .clearance = want, .kind = .track_width, .who = .{ .net_a = t.net }, .layer = layerOf(t.layer) });
+        try out.append(arena, .{ .x = (t.x1 + t.x2) / 2, .y = (t.y1 + t.y2) / 2, .gap = t.width, .clearance = want, .kind = .track_width, .who = .{ .net_a = t.net, .track_a = partyIndex(track_index) }, .layer = layerOf(t.layer) });
     }
 }
 
@@ -3299,7 +3305,7 @@ test "track width accepts a solved narrow power branch but enforces its local re
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
-    const net_rules = [_]optimizer.NetRule{.{ .width = 0.3048 }};
+    const net_rules = [_]optimizer.NetRule{.{ .width = 0.3048, .pad_neck = .{ .power_branch_width = 0.1524 } }};
     const nets = [_]FlatNet{.{ .name = "V3P3", .pins = &.{} }};
     var placement = partsOnly(&.{});
     placement.nets = &nets;
@@ -3321,7 +3327,7 @@ test "track width accepts a solved narrow power branch but enforces its local re
     });
     try testing.expectEqual(@as(usize, 1), violations.items.len);
     try testing.expectApproxEqAbs(@as(f64, 0.08), violations.items[0].gap, 1e-12);
-    try testing.expectApproxEqAbs(@as(f64, 0.127), violations.items[0].clearance, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.1524), violations.items[0].clearance, 1e-12);
 }
 
 // spec: placement/rf-port-frame-routing - a solver-proven one-width pad taper may narrow below the controlled line width, but thin copper away from the land still fails DRC
