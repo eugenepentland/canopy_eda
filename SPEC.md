@@ -6058,7 +6058,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - PCB passive footprint edits update the exact owning schematic source
 - tangent trace bends and outline fillets remain native editable arcs in the PCB editor
 - While hand-routing, the PCB editor can toggle the preview and committed path between 45-degree octilinear and 90-degree Manhattan bends
-- The PCB hand router starts opted-in current-aware power nets at their branch width and defers only that width verdict from its zone-blind synchronous gate to authoritative server DRC
+- The PCB hand router starts opted-in current-aware power nets at their branch width and defers only that width verdict from its zone-blind synchronous gate and fast WASM marker list to authoritative server DRC
 - The PCB editor places repeated standalone vias on a chosen net without creating trace segments, using grid/copper snapping, net-class geometry, the live DRC gate, and one undo step per via
 - Escape cancels an active manual route even when automatic pad-taper DRC rejects finishing it, restoring the route-start copper and exiting Draw instead of retrying the blocked finish
 - Every saved trace segment and via has a stable inspector-visible ID that survives saves and retained-copper rewrites, with deterministic IDs backfilled for legacy copper
