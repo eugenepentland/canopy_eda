@@ -39,17 +39,22 @@ const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const StoreRevCheck = pcb_layout_page.StoreRevCheck;
 const log = @import("../infra/log.zig");
 
-/// How a both-payload render hands the finished page back mid-call, so a
+/// How a multi-payload render hands each finished body back mid-call, so a
 /// warm-up admits it immediately instead of holding it until the analyses
 /// behind it complete. Erased to `*anyopaque` because the only implementation
 /// lives with the render's own cache-retention state.
+///
+/// Order is the point: the page goes out before the DRC runs, and the
+/// after-paint payload goes out before the impedance sweep behind IT runs. A
+/// reader waiting on either gets it as soon as it exists rather than at the end
+/// of everything the same solve happens to be producing.
 pub const PageSink = struct {
     context: *anyopaque,
-    publish: *const fn (context: *anyopaque, html: []const u8) void,
+    publish: *const fn (context: *anyopaque, kind: pcb_page_cache.WarmKind, body: []const u8) void,
 
-    /// Hand the finished page to whoever asked for both payloads.
-    pub fn call(self: PageSink, html: []const u8) void {
-        self.publish(self.context, html);
+    /// Hand one finished body to whoever asked for it.
+    pub fn call(self: PageSink, kind: pcb_page_cache.WarmKind, body: []const u8) void {
+        self.publish(self.context, kind, body);
     }
 };
 
@@ -60,7 +65,12 @@ pub const PageSink = struct {
 /// tells the two bodies apart.
 pub const BothPayloads = struct {
     publish: PageSink,
-    took: *bool,
+    /// Continue past the page into the after-paint payload.
+    want_derived: bool,
+    /// Continue past that into the impedance sweep. Both extras come off the
+    /// SAME solved view, so asking for them costs only the analyses themselves
+    /// — never another eval, sidecar parse, solve or DRC.
+    want_pdn: bool,
 };
 
 /// One warm-up's retention state, and the `PageSink` a both-payload render
@@ -78,9 +88,20 @@ const PageWarm = struct {
     /// served stale, exactly as on the request path.
     live_version: u32,
     rev: *const StoreRevCheck,
-    /// False when the request path already holds (or has cached) the page and
-    /// this render is warming only the deferred half.
-    admit_page: bool,
+    /// Which entries this warm actually reserved. A body for an entry someone
+    /// else already holds is still produced — it comes free off the same solve —
+    /// but never admitted; the holder is the one that gets to retain it.
+    hold_page: bool,
+    hold_derived: bool,
+    hold_pdn: bool,
+
+    fn holds(self: *const PageWarm, kind: pcb_page_cache.WarmKind) bool {
+        return switch (kind) {
+            .page => self.hold_page,
+            .derived => self.hold_derived,
+            .pdn => self.hold_pdn,
+        };
+    }
 
     fn retain(self: *const PageWarm) pcb_page_cache.Retain {
         return .{
@@ -93,20 +114,21 @@ const PageWarm = struct {
         };
     }
 
-    fn publishPage(context: *anyopaque, html: []const u8) void {
+    fn publishBody(context: *anyopaque, kind: pcb_page_cache.WarmKind, body: []const u8) void {
         const self: *PageWarm = @ptrCast(@alignCast(context));
-        if (!self.admit_page) return;
-        self.ctx.state.caches.pcb_pages.warm(self.retain(), .page, html, self.rev.*);
+        if (!self.holds(kind)) return;
+        self.ctx.state.caches.pcb_pages.warm(self.retain(), kind, body, self.rev.*);
+        if (kind != .page) return;
         // The response filter gzips every page after the handler returns, and a
         // megabyte board costs ~150 ms of deflate — more than the cached render
         // it wraps. That memo is keyed on the body itself and a cache hit serves
         // these exact bytes, so compressing once here retires that cost for the
         // first reader too. The stream is discarded; the memo entry is the point.
-        _ = self.ctx.state.caches.gzip.compress(self.scratch, html) catch return;
+        _ = self.ctx.state.caches.gzip.compress(self.scratch, body) catch return;
     }
 
     fn sink(self: *PageWarm) PageSink {
-        return .{ .context = self, .publish = publishPage };
+        return .{ .context = self, .publish = publishBody };
     }
 };
 
@@ -153,7 +175,10 @@ pub fn warmPage(ctx: *Server, scratch: std.mem.Allocator, name: []const u8, scop
     // own analyses would put the last board's page twenty seconds out.
     const hold_derived = scope == .derived and pages.reserveWarm(scratch, name, .derived, live_version);
     defer if (hold_derived) pages.finishWarm(scratch, name, .derived);
-    if (!hold_page and !hold_derived) return true;
+    const hold_pdn = scope == .derived and pages.reserveWarm(scratch, name, .pdn, live_version);
+    defer if (hold_pdn) pages.finishWarm(scratch, name, .pdn);
+    const holds_nothing = !hold_page and !hold_derived;
+    if (holds_nothing and !hold_pdn) return true;
 
     var page_ctx = ctx.*;
     page_ctx.allocator = scratch;
@@ -172,23 +197,19 @@ pub fn warmPage(ctx: *Server, scratch: std.mem.Allocator, name: []const u8, scop
         .eval = &eval,
         .live_version = live_version,
         .rev = &rev_check,
-        .admit_page = hold_page,
+        .hold_page = hold_page,
+        .hold_derived = hold_derived,
+        .hold_pdn = hold_pdn,
     };
-    var took_both = false;
-    const body = (pcb_layout_page.renderLayoutPage(&page_ctx, null, null, .{
+    // Every body reaches the cache through `warm.sink()`, in the order the
+    // render produces them, so nothing waits behind work it does not need.
+    _ = (pcb_layout_page.renderLayoutPage(&page_ctx, null, null, .{
         .name = name,
         .eval = &eval,
         .module_res_out = &module_res,
         .rev = &rev_check,
-        .both = if (hold_derived) .{ .publish = warm.sink(), .took = &took_both } else null,
+        .both = .{ .publish = warm.sink(), .want_derived = hold_derived, .want_pdn = hold_pdn },
     }) catch return false) orelse return false;
-    // The render returns the deferred JSON only when it actually took the
-    // both-payload path; otherwise `body` is the page and nothing published it.
-    if (!took_both) {
-        PageWarm.publishPage(&warm, body);
-        return true;
-    }
-    pages.warm(warm.retain(), .derived, body, rev_check);
     return true;
 }
 
@@ -199,6 +220,47 @@ pub fn warmPage(ctx: *Server, scratch: std.mem.Allocator, name: []const u8, scop
 pub fn warmsDeferred(req: *httpz.Request) bool {
     const q = req.query() catch return false;
     return q.len == 0;
+}
+
+/// The solved state a both-payload render carries past its finished page.
+const DeferredJob = pcb_layout_page.DeferredJob;
+
+/// Answer a warm-up that asked for every response this solve can give: hand it
+/// the page now — retaining it must not wait on the analyses — then complete the
+/// SAME solved view and hand back each deferred body as it is built. Always
+/// returns the page; the extras reach the caller through the sink.
+pub fn bothPayloads(ctx: *Server, name: []const u8, page: []const u8, job: DeferredJob) pcb_layout_page.HandlerError![]const u8 {
+    const sink = job.both orelse return page;
+    sink.publish.call(.page, page);
+    const wants_more = sink.want_derived or sink.want_pdn;
+    if (!job.deferrable or !wants_more) return page;
+    var view = job.view;
+    pcb_layout_page.applyDeferred(ctx, name, job.placement, &view);
+    // `writePcbDerivedData` reads only `rev`, `base_edge`, `saved_routes`,
+    // `texts` and `scratch_allocator` off these options, plus the two
+    // read-only-surface flags that are false on any deferrable page — so the
+    // page's own options, with the two fields the deferral emptied filled back
+    // in, ARE the options a `?derived=1` request would have built.
+    var opts = job.opts;
+    opts.base_edge = view.base_edge;
+    opts.analysis_deferred = false;
+    opts.pdn_deferred = true;
+    // The after-paint payload FIRST, and published before the sweep starts: a
+    // reader joining this render for its board diagnostics must not wait on the
+    // impedance analysis they did not ask for.
+    if (sink.want_derived) {
+        var out: std.Io.Writer.Allocating = .init(ctx.allocator);
+        try pcb_layout_page.writePcbDerivedData(&out.writer, ctx.allocator, job.placement, view, opts);
+        sink.publish.call(.derived, out.written());
+    }
+    if (sink.want_pdn) {
+        var sweep = opts;
+        sweep.pdn_only = true;
+        var out: std.Io.Writer.Allocating = .init(ctx.allocator);
+        try pcb_layout_page.writePcbDerivedData(&out.writer, ctx.allocator, job.placement, view, sweep);
+        sink.publish.call(.pdn, out.written());
+    }
+    return page;
 }
 
 /// Background deferred-payload warms in flight, held on `ServerState` rather

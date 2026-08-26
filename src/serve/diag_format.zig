@@ -9,6 +9,7 @@
 const std = @import("std");
 const json_writer = @import("../json_writer.zig");
 const infra_fs = @import("../infra/fs.zig");
+const paths = @import("../paths.zig");
 const evaluator_mod = @import("../eval/evaluator.zig");
 
 const max_source_bytes: usize = 10 * 1024 * 1024;
@@ -243,4 +244,67 @@ test "build omits the source line on span/buffer mismatch" {
         a.free(d.source_line);
     }
     try std.testing.expectEqualStrings("", d.source_line);
+}
+
+/// Render the evaluator diagnostic left behind by a failed design load, as the
+/// standalone build-error page a GET answers with. Null means no source-located
+/// failure was recorded, which is how the caller distinguishes a genuinely
+/// unknown design/module name from a broken one.
+pub fn designLoadPage(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    eval: *const evaluator_mod.Evaluator,
+) (std.mem.Allocator.Error || error{WriteFailed})!?[]const u8 {
+    if (eval.last_error == null) return null;
+    const source_path = paths.designSourcePath(allocator, project_dir, name) catch return null;
+    defer allocator.free(source_path);
+    const d = try load(allocator, source_path, "BuildError", eval.last_error);
+    return try renderErrorPage(allocator, name, d);
+}
+
+// spec: Web Server - A /pcb-layout design that exists but fails to parse or evaluate returns a compiler-style build-error page with file, line, column, failing source line/caret when available, and the evaluator message; only a genuinely unknown design/module name returns the not-found message
+test "design load failure identifies the imported module and source location" {
+    // Evaluator source/AST storage follows the project's arena-lifetime
+    // convention; keep the fixture under one arena so the leak-checking test
+    // allocator sees the complete lifetime end at deinit.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    defer allocator.free(project_dir);
+
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    try tmp.dir.createDirPath(std.testing.io, "lib/modules");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/demo.sexp",
+        .data = "(import broken-module)\n(design-block \"Demo\")\n",
+    });
+    // The regression fixture: an import path exists but contains no parseable
+    // module, so evaluation fails after resolving the design name itself.
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/modules/broken-module.sexp",
+        .data = "",
+    });
+
+    const source_path = try paths.designSourcePath(allocator, project_dir, "demo");
+    defer allocator.free(source_path);
+    var eval = evaluator_mod.Evaluator.init(allocator, project_dir);
+    defer eval.deinit();
+    try std.testing.expectError(error.ImportError, eval.evalFile(source_path));
+
+    const html = (try designLoadPage(allocator, project_dir, "demo", &eval)) orelse
+        return error.TestExpectedDiagnostic;
+    defer allocator.free(html);
+    try std.testing.expect(std.mem.indexOf(u8, html, "Build error — demo") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "cannot import 'broken-module'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "src/demo.sexp:1:9") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "(import broken-module)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "<span class=\"caret\">") != null);
+
+    var missing_eval = evaluator_mod.Evaluator.init(allocator, project_dir);
+    defer missing_eval.deinit();
+    try std.testing.expect((try designLoadPage(allocator, project_dir, "not-there", &missing_eval)) == null);
 }

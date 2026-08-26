@@ -1754,6 +1754,21 @@ test "PDN inspector exposes path provenance and refuses unproven green verdicts"
     try std.testing.expect(std.mem.indexOf(u8, json, "no bound decoupling capacitors were extracted") != null);
 }
 
+// spec: Web Server - The PDN impedance sweep rides its own response behind the after-paint payload, marked by a null `ac`, so the board's own diagnostics never wait on the editor's most expensive analysis
+test "PDN sweep is deferred by the payload and fetched by the viewer" {
+    const js = @embedFile("assets/pcb_board.js");
+    const json = @embedFile("../power_integrity_json.zig");
+    // Server: a null `ac` where the sweep would have been, plus the response
+    // that carries it. An ABSENT key is the other case (no copper to sweep) and
+    // must stay distinguishable, so the deferral spells the null explicitly.
+    try std.testing.expect(std.mem.indexOf(u8, json, "writeAcResponse") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "null}") != null);
+    // Viewer: reads that exact marker, and asks for the sweep under `?pdn=1`.
+    try std.testing.expect(std.mem.indexOf(u8, js, "PCB.power_integrity.ac===null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "loadPdnSweep") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "searchParams.set(\"pdn\",\"1\")") != null);
+}
+
 /// How many `net_open` findings a violation list carries.
 fn countOpen(list: []const drc.Violation) usize {
     var n: usize = 0;

@@ -781,9 +781,10 @@ pub const RenderJob = struct {
     eval: *Evaluator,
     module_res_out: *?modules_mod.ResolvedBlock,
     rev: *StoreRevCheck,
-    /// Set to take BOTH of the editor's responses out of ONE solve — see
-    /// `pcb_derived`. Only the deferrable editor page answers it; every other
-    /// surface returns its own body and leaves `both.took` false.
+    /// Set to take EVERY response one solve can answer — the page, the
+    /// after-paint payload, the impedance sweep — publishing each through the
+    /// sink as it lands. See `pcb_derived`. Only the deferrable editor page
+    /// produces the extras; every other surface publishes just its page.
     both: ?pcb_derived.BothPayloads = null,
 };
 
@@ -898,68 +899,6 @@ fn refuse(res: ?*httpz.Response, status: u16, body: []const u8) ?[]const u8 {
     return null;
 }
 
-/// Render the evaluator diagnostic left behind by a failed design load.
-/// Null means no source-located failure was recorded, which is how the caller
-/// distinguishes a genuinely unknown design/module name from a broken one.
-fn renderBlockLoadDiagnostic(
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    name: []const u8,
-    eval: *const Evaluator,
-) HandlerError!?[]const u8 {
-    if (eval.last_error == null) return null;
-    const source_path = paths.designSourcePath(allocator, project_dir, name) catch return null;
-    defer allocator.free(source_path);
-    const d = try diag_format.load(allocator, source_path, "BuildError", eval.last_error);
-    return try diag_format.renderErrorPage(allocator, name, d);
-}
-
-// spec: Web Server - A /pcb-layout design that exists but fails to parse or evaluate returns a compiler-style build-error page with file, line, column, failing source line/caret when available, and the evaluator message; only a genuinely unknown design/module name returns the not-found message
-test "PCB page load failure identifies the imported module and source location" {
-    // Evaluator source/AST storage follows the project's arena-lifetime
-    // convention; keep the fixture under one arena so the leak-checking test
-    // allocator sees the complete lifetime end at deinit.
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const allocator = arena_state.allocator();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
-    defer allocator.free(project_dir);
-
-    try tmp.dir.createDirPath(std.testing.io, "src");
-    try tmp.dir.createDirPath(std.testing.io, "lib/modules");
-    try tmp.dir.writeFile(std.testing.io, .{
-        .sub_path = "src/demo.sexp",
-        .data = "(import broken-module)\n(design-block \"Demo\")\n",
-    });
-    // The regression fixture: an import path exists but contains no parseable
-    // module, so evaluation fails after resolving the design name itself.
-    try tmp.dir.writeFile(std.testing.io, .{
-        .sub_path = "lib/modules/broken-module.sexp",
-        .data = "",
-    });
-
-    const source_path = try paths.designSourcePath(allocator, project_dir, "demo");
-    defer allocator.free(source_path);
-    var eval = Evaluator.init(allocator, project_dir);
-    defer eval.deinit();
-    try std.testing.expectError(error.ImportError, eval.evalFile(source_path));
-
-    const html = (try renderBlockLoadDiagnostic(allocator, project_dir, "demo", &eval)) orelse
-        return error.TestExpectedDiagnostic;
-    defer allocator.free(html);
-    try std.testing.expect(std.mem.indexOf(u8, html, "Build error — demo") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html, "cannot import 'broken-module'") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html, "src/demo.sexp:1:9") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html, "(import broken-module)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html, "<span class=\"caret\">") != null);
-
-    var missing_eval = Evaluator.init(allocator, project_dir);
-    defer missing_eval.deinit();
-    try std.testing.expect((try renderBlockLoadDiagnostic(allocator, project_dir, "not-there", &missing_eval)) == null);
-}
-
 /// Render the page body, or null when a guard refused (the status is written
 /// into `res` when there is one). Split out of the handler so the boot warm-up
 /// can pre-render a page with no live request: a null `req` reads through every
@@ -986,7 +925,7 @@ pub fn renderLayoutPage(
         // so the PCB page identifies the failing form/import just like the
         // schematic page and CLI do. A genuinely unknown name has no
         // diagnostic and remains the terse not-found response.
-        if (try renderBlockLoadDiagnostic(ctx.allocator, ctx.project_dir, name, eval)) |html| {
+        if (try diag_format.designLoadPage(ctx.allocator, ctx.project_dir, name, eval)) |html| {
             if (res) |r| {
                 r.status = 500;
                 r.content_type = .HTML;
@@ -1033,7 +972,11 @@ pub fn renderLayoutPage(
     // second, dependency-cached response after first paint. `?derived=1` runs
     // the complete calculation but emits only those fields, not a second page.
     const derived_only = queryFlag(req, "derived");
-    const lean_read_only = physical_review or thermal_overlay or derived_only;
+    // `?pdn=1` is the third tier: the PDN impedance sweep alone, which the
+    // viewer fetches for itself once the board's own diagnostics have landed.
+    const pdn_only = queryFlag(req, "pdn");
+    const lean_payload = derived_only or pdn_only;
+    const lean_read_only = physical_review or thermal_overlay or lean_payload;
     const review_toggles = parseToggles(req);
 
     // Tuning weights come from the query (?w_align=… etc) — any present (or
@@ -1055,7 +998,7 @@ pub fn renderLayoutPage(
     // Only stable, saved-state editor views split their payload. One-shot
     // solve/route/refine requests keep their result atomic, while embeds retain
     // their existing purpose-built lean paths.
-    const defer_analysis = !derived_only and !embed and sub == null and
+    const defer_analysis = !lean_payload and !embed and sub == null and
         !tune.regen and sel.refine == null and !queryFlag(req, "route");
     // The layout sidecar of a routed board runs to megabytes — read + parse it
     // ONCE here and derive everything below (the choose ladder, the panel
@@ -1108,6 +1051,9 @@ pub fn renderLayoutPage(
         // surface, and computing hundreds of hidden markers delayed the first
         // board paint. Editable/full pages still receive the complete check.
         .check_drc = !physical_review or review_toggles.drc,
+        // `?pdn=1` reads copper and the shared edge field, never markers. Its
+        // caller already has the DRC from the payload before it.
+        .reporting = !pdn_only,
         // The exclusive heat overlay never paints routed copper or DRC. The
         // field endpoint already resolved that copper for its thermal inputs,
         // so restoring and checking it again in this iframe is dead work.
@@ -1125,6 +1071,8 @@ pub fn renderLayoutPage(
         .thermal_overlay = thermal_overlay,
         .assembly_review = physical_review and !thermal_overlay,
         .analysis_deferred = defer_analysis,
+        .pdn_deferred = derived_only,
+        .pdn_only = pdn_only,
         // The thermal overlay paints its own field over the semantic board
         // and explicitly suppresses copper/DRC. Generating every Gerber and
         // Excellon layer, parsing it back, and shipping the resulting CAM
@@ -1162,10 +1110,10 @@ pub fn renderLayoutPage(
         .rev = doc.rev,
     };
 
-    if (derived_only) {
-        var derived: std.Io.Writer.Allocating = .init(ctx.allocator);
-        try writePcbDerivedData(&derived.writer, ctx.allocator, placement, rv, data_opts);
-        return derived.written();
+    if (lean_payload) {
+        var body: std.Io.Writer.Allocating = .init(ctx.allocator);
+        try writePcbDerivedData(&body.writer, ctx.allocator, placement, rv, data_opts);
+        return body.written();
     }
 
     const view = View.init(placement);
@@ -1251,7 +1199,7 @@ pub fn renderLayoutPage(
     });
     try w.writeAll("</body></html>");
 
-    return try bothPayloads(ctx, name, aw.written(), .{
+    return try pcb_derived.bothPayloads(ctx, name, aw.written(), .{
         .both = job.both,
         .deferrable = defer_analysis,
         .placement = placement,
@@ -1260,8 +1208,10 @@ pub fn renderLayoutPage(
     });
 }
 
-/// The solved state a both-payload render carries past its finished page.
-const DeferredJob = struct {
+/// The solved state a multi-payload render carries past its finished page.
+/// Declared here so its fields keep their own module's types private:
+/// `pcb_derived` sequences the publishing without naming any of them.
+pub const DeferredJob = struct {
     both: ?pcb_derived.BothPayloads,
     /// False on any surface that already emits its derived fields inline, and
     /// therefore has no second response to produce.
@@ -1270,30 +1220,6 @@ const DeferredJob = struct {
     view: ShownView,
     opts: PcbDataOpts,
 };
-
-/// Answer a warm-up that asked for BOTH of the editor's responses: hand it the
-/// page now — retaining it must not wait on the analyses — then finish the SAME
-/// solved view and return the deferred JSON in the page's place. With no such
-/// caller the page is the answer and nothing is published.
-fn bothPayloads(ctx: *Server, name: []const u8, page: []const u8, job: DeferredJob) HandlerError![]const u8 {
-    const sink = job.both orelse return page;
-    if (!job.deferrable) return page;
-    sink.publish.call(page);
-    sink.took.* = true;
-    var view = job.view;
-    applyDeferred(ctx, name, job.placement, &view);
-    // `writePcbDerivedData` reads only `rev`, `base_edge`, `saved_routes`,
-    // `texts` and `scratch_allocator` off these options, plus the two
-    // read-only-surface flags that are false on any deferrable page — so the
-    // page's own options, with the two fields the deferral emptied filled back
-    // in, ARE the options a `?derived=1` request would have built.
-    var opts = job.opts;
-    opts.base_edge = view.base_edge;
-    opts.analysis_deferred = false;
-    var derived: std.Io.Writer.Allocating = .init(ctx.allocator);
-    try writePcbDerivedData(&derived.writer, ctx.allocator, job.placement, view, opts);
-    return derived.written();
-}
 
 const PageScripts = struct {
     physical_review: bool,
@@ -6463,6 +6389,10 @@ const ShownInputs = struct {
     /// The ordinary editor uses this for a fast first response; `?derived=1`
     /// computes and returns the postponed fields after the board has painted.
     defer_derived: bool = false,
+    /// Whether to run the reporting half at all. False keeps the shared
+    /// board-edge field — every pour still needs it — but skips the DRC and
+    /// the connectivity tally, which `?pdn=1` has no reader for.
+    reporting: bool = true,
 };
 
 /// Resolve everything the shown saved layout contributes to the page: apply
@@ -6523,7 +6453,7 @@ fn resolveShownView(ctx: *Server, req: ?*httpz.Request, in: ShownInputs) ShownVi
     // The deferred half owns the connectivity oracle every completion count
     // reads (see `drc_rules.Deferred.reconcile`); running it for a bare board
     // too gives the header the useful 0/N starting state.
-    const deferred: drc_rules.Deferred = if (in.omit_copper or in.defer_derived)
+    const deferred: drc_rules.Deferred = if (in.omit_copper or in.defer_derived or !in.reporting)
         .{}
     else
         drc_rules.resolveDeferred(ctx.allocator, ctx.project_dir, name, .{
@@ -6545,7 +6475,7 @@ fn resolveShownView(ctx: *Server, req: ?*httpz.Request, in: ShownInputs) ShownVi
 /// already restored into `view`. This is the ONLY work `?derived=1` does that
 /// the page render ahead of it did not — which is what lets one warm-up solve
 /// answer both (see `pcb_derived`).
-fn applyDeferred(ctx: *Server, name: []const u8, placement: optimizer.Placement, view: *ShownView) void {
+pub fn applyDeferred(ctx: *Server, name: []const u8, placement: optimizer.Placement, view: *ShownView) void {
     view.base_edge = pour.sharedEdgeField(ctx.allocator, placement) catch null;
     const deferred = drc_rules.resolveDeferred(ctx.allocator, ctx.project_dir, name, .{
         .placement = placement,
@@ -9327,6 +9257,12 @@ const PcbDataOpts = struct {
     /// fabrication identity, mask relief, and electrical analyses are fetched
     /// from the matching dependency-cached derived payload after first paint.
     analysis_deferred: bool = false,
+    /// Emit `"ac": null` instead of the PDN impedance sweep, leaving it for the
+    /// viewer's own `?pdn=1` fetch. Set on the after-paint payload only: every
+    /// other surface either emits its analyses inline or emits none at all.
+    pdn_deferred: bool = false,
+    /// Emit ONLY that sweep — the `?pdn=1` answer itself.
+    pdn_only: bool = false,
     /// Emit a cacheable API URL and fetch exact CAM after the semantic board's
     /// first frame instead of blocking HTML generation on Gerber read-back.
     cam_lazy: bool = false,
@@ -9553,10 +9489,7 @@ fn writePayloadAnalysis(
     try power_integrity_json.write(
         w,
         .{ .output = alloc, .scratch = opts.scratch_allocator orelse alloc },
-        p,
-        routed,
-        userZonesFrom(alloc, p.rules, shownZones(opts.saved_routes)),
-        opts.base_edge,
+        payloadPowerInputs(alloc, p, routed, opts),
     );
 }
 
@@ -9578,7 +9511,12 @@ fn writeCamFields(w: *std.Io.Writer, name: []const u8, opts: PcbDataOpts) std.Io
 /// derived from the already-embedded placement and saved copper. The normal
 /// page and this response share the dependency-aware PCB cache, so reloads
 /// reuse both halves until the design or layout sidecar changes.
-fn writePcbDerivedData(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placement, rv: ShownView, opts: PcbDataOpts) HandlerError!void {
+pub fn writePcbDerivedData(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placement, rv: ShownView, opts: PcbDataOpts) HandlerError!void {
+    const allocators: power_integrity_json.Allocators = .{ .output = alloc, .scratch = opts.scratch_allocator orelse alloc };
+    // `?pdn=1` is this payload's own deferral: the PDN impedance sweep alone,
+    // over the same solved state, because it is the most expensive analysis the
+    // editor runs and the only reader is the track/via inspector.
+    if (opts.pdn_only) return power_integrity_json.writeAcResponse(w, allocators, payloadPowerInputs(alloc, p, rv.routed, opts), opts.rev);
     const routed = rv.routed;
     const copper: pour.Copper = if (routed) |r| .{ .tracks = r.tracks, .vias = r.vias } else .{};
     const zones = userZonesFrom(alloc, p.rules, shownZones(opts.saved_routes));
@@ -9605,6 +9543,17 @@ fn writePcbDerivedData(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer
     try w.writeAll(",\"fab_text\":");
     try writeOptionalBoardTextJson(w, fab_text);
     try w.writeByte('}');
+}
+
+/// The solved board both power screens read, assembled once.
+fn payloadPowerInputs(alloc: std.mem.Allocator, p: optimizer.Placement, routed: ?router.RouteResult, opts: PcbDataOpts) power_integrity_json.Inputs {
+    return .{
+        .placement = p,
+        .routed = routed,
+        .zones = userZonesFrom(alloc, p.rules, shownZones(opts.saved_routes)),
+        .base_edge = opts.base_edge,
+        .ac = if (opts.pdn_deferred) .deferred else .included,
+    };
 }
 
 fn writePcbData(

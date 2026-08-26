@@ -15,23 +15,46 @@ pub const Allocators = struct {
     scratch: std.mem.Allocator,
 };
 
-/// Emit the model metadata and routed power-copper screen into a page blob.
-pub fn write(
-    w: *std.Io.Writer,
-    allocators: Allocators,
+/// Whether the AC impedance sweep rides this payload or is left for a separate
+/// `?pdn=1` response.
+///
+/// The sweep is the most expensive thing in the editor's deferred payload —
+/// 6.3 s of 13.5 s on barracuda, because `pdn_impedance` rasters every relevant
+/// plane and then walks each decoupling loop against it — and the ONLY thing
+/// that reads it is the PDN section of the track/via properties inspector.
+/// Nothing paints, no chip counts, and no export depends on it, so making the
+/// board's visible diagnostics wait behind it was pure cost.
+pub const AcMode = enum {
+    /// Compute and embed it here (a one-shot or non-deferring render).
+    included,
+    /// Emit `"ac": null` — the marker the viewer reads as "fetch it yourself".
+    deferred,
+};
+
+/// The solved board every screen below reads.
+pub const Inputs = struct {
     placement: optimizer.Placement,
     routed: ?router.RouteResult,
     zones: []const pour.UserZone,
     base_edge: ?pour.EdgeField,
-) std.Io.Writer.Error!void {
+    /// Whether the AC sweep rides this payload. Ignored by `writeAcResponse`,
+    /// which IS the deferred answer.
+    ac: AcMode = .included,
+};
+
+/// Emit the model metadata and routed power-copper screen into a page blob.
+pub fn write(w: *std.Io.Writer, allocators: Allocators, in: Inputs) std.Io.Writer.Error!void {
     const alloc = allocators.output;
+    const placement = in.placement;
+    const zones = in.zones;
+    const base_edge = in.base_edge;
     try w.print(
         ",\"power_integrity\":{{\"model\":\"IPC-2221 continuous-current screen\"," ++
             "\"assumptions\":{{\"temperature_rise_c\":{d},\"via_plating_mm\":{d}," ++
             "\"branch_mode\":\"resistive KCL over traces, vias, and computed fill components with conservative fallback\",\"plane_mode\":\"computed fill connectivity plus enforced-minimum-width capacity proof; no sheet current-density mesh\"}},\"nets\":[",
         .{ power_integrity.temperature_rise_c, placement.rules.physical.via_plating_mm },
     );
-    const route = routed orelse {
+    const route = in.routed orelse {
         try w.writeAll("]}");
         return;
     };
@@ -130,7 +153,29 @@ pub fn write(
         try w.writeAll("]}");
     }
     try w.writeAll("],\"ac\":");
+    // A null here is not "no PDN" — an absent key is. It tells the viewer the
+    // sweep exists and is one `?pdn=1` fetch away (see `pcb_board.js`'s
+    // `loadPdnSweep`), which is why the unrouted early return above emits
+    // neither: there is nothing to fetch for a board with no copper.
+    if (in.ac == .deferred) {
+        try w.writeAll("null}");
+        return;
+    }
     try writeAc(w, allocators, placement, route, zones, base_edge);
+    try w.writeByte('}');
+}
+
+/// The complete `?pdn=1` response: the sweep alone, under the layout rev the
+/// viewer checks it against. The `ac` value is the same object `write` embeds
+/// when it is not deferred, so a viewer that fetched it drops the value
+/// straight into `PCB.power_integrity.ac`.
+pub fn writeAcResponse(w: *std.Io.Writer, allocators: Allocators, in: Inputs, rev: i64) std.Io.Writer.Error!void {
+    try w.print("{{\"rev\":{d},\"ac\":", .{rev});
+    if (in.routed) |route| {
+        try writeAc(w, allocators, in.placement, route, in.zones, in.base_edge);
+    } else {
+        try w.writeAll("null");
+    }
     try w.writeByte('}');
 }
 

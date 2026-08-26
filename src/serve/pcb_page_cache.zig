@@ -30,18 +30,18 @@ const cache_header = "X-Netlisp-PCB-Page-Cache";
 /// `thermal` adds one script tag to that same iframe for the thermal page's
 /// board pane, so it keys rather than bypasses — a thermal reader dialling
 /// scenarios reloads that frame repeatedly.
-const keyed_params = [_][]const u8{ "embed", "review", "drc", "edit", "model_sprites", "thermal", "cam", "derived" };
+const keyed_params = [_][]const u8{ "embed", "review", "drc", "edit", "model_sprites", "thermal", "cam", "derived", "pdn" };
 
 const Identity = struct { layout: ?[]const u8, keyed: [keyed_params.len]?[]const u8 };
 
-/// Position of `derived` in `keyed_params`, resolved once so `WarmKind` spells
-/// the editor's deferred-payload query in exactly one place.
-const derived_key_index: usize = index: {
-    for (keyed_params, 0..) |param, i| {
-        if (std.mem.eql(u8, param, "derived")) break :index i;
+/// Position of a `WarmKind`'s query flag in `keyed_params`, resolved once so
+/// each request-less warm spells its query in exactly one place.
+fn keyIndex(comptime param: []const u8) usize {
+    for (keyed_params, 0..) |candidate, i| {
+        if (std.mem.eql(u8, candidate, param)) return i;
     }
-    @compileError("keyed_params must carry \"derived\" for WarmKind.derived");
-};
+    @compileError("keyed_params must carry \"" ++ param ++ "\" for its WarmKind");
+}
 
 /// What a request-less render is warming. The editor asks for two responses
 /// per page — the page itself, then `?derived=1` after first paint — and one
@@ -50,17 +50,22 @@ const derived_key_index: usize = index: {
 pub const WarmKind = enum {
     page,
     derived,
+    pdn,
 
     fn identity(self: WarmKind) Identity {
         var ident = Identity{ .layout = null, .keyed = @splat(null) };
-        if (self == .derived) ident.keyed[derived_key_index] = "1";
+        switch (self) {
+            .page => {},
+            .derived => ident.keyed[comptime keyIndex("derived")] = "1",
+            .pdn => ident.keyed[comptime keyIndex("pdn")] = "1",
+        }
         return ident;
     }
 
     fn contentType(self: WarmKind) httpz.ContentType {
         return switch (self) {
             .page => .HTML,
-            .derived => .JSON,
+            .derived, .pdn => .JSON,
         };
     }
 };
@@ -434,6 +439,12 @@ pub const Store = struct {
         gop.value_ptr.* = .{ .html = body, .content_type = content_type, .files = captured.files, .live_version = live_version, .used = self.nextUse(), .plain = isPlain(ident) };
         self.bytes += body.len;
         self.trim(allocator);
+        // One warm-up render admits several entries — the page, then the
+        // after-paint payload, then the impedance sweep — and keeps every
+        // reservation until the last of them is done. A request already asleep
+        // on one of those keys must wake HERE, when its own entry lands, not at
+        // the end of analyses it never asked for.
+        self.changed.broadcast();
     }
 };
 
@@ -546,6 +557,27 @@ test "PCB page cache keys separate the default, named-layout, and embed pages" {
     const derived_key = try cacheKey(testing.allocator, "black-canyon", .{ .layout = null, .keyed = derived });
     defer testing.allocator.free(derived_key);
     try testing.expect(!std.mem.eql(u8, dflt, derived_key));
+}
+
+// spec: Web Server - The PDN sweep is keyed apart from the after-paint payload, so the viewer's two fetches never collide on one cache entry
+test "deferred payload and PDN sweep occupy distinct cache entries" {
+    var derived = httpz.testing.init(.{});
+    defer derived.deinit();
+    derived.query("derived", "1");
+    var sweep = httpz.testing.init(.{});
+    defer sweep.deinit();
+    sweep.query("pdn", "1");
+    const derived_key = try cacheKey(std.testing.allocator, "demo", identity(derived.req).?);
+    defer std.testing.allocator.free(derived_key);
+    const sweep_key = try cacheKey(std.testing.allocator, "demo", identity(sweep.req).?);
+    defer std.testing.allocator.free(sweep_key);
+    try std.testing.expect(!std.mem.eql(u8, derived_key, sweep_key));
+
+    // And each warm reserves the entry its own fetch looks up.
+    const warm_key = try cacheKey(std.testing.allocator, "demo", WarmKind.pdn.identity());
+    defer std.testing.allocator.free(warm_key);
+    try std.testing.expectEqualStrings(sweep_key, warm_key);
+    try std.testing.expectEqual(httpz.ContentType.JSON, WarmKind.pdn.contentType());
 }
 
 test "PCB page cache coalesces duplicate warm-up reservations" {

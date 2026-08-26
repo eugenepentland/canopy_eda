@@ -5927,6 +5927,8 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - A deferred-payload warm reserves the SAME cache entry the editor's `?derived=1` fetch looks up, so the browser joins that render instead of starting a second one
 - Background PCB deferred-payload warms are capped, so a burst of saves cannot put the heaviest read-only render on every core
 - A warm-up reservation drops a retained PCB entry an edit has already invalidated, so the warm that edit triggered actually runs instead of deferring to the dead entry
+- The PDN impedance sweep rides its own response behind the after-paint payload, marked by a null `ac`, so the board's own diagnostics never wait on the editor's most expensive analysis
+- The PDN sweep is keyed apart from the after-paint payload, so the viewer's two fetches never collide on one cache entry
 - The progress store accepts a ladder computed off-request under the same size and read-set rules as a served one
 
 - completeness-waiver: concurrent access (the umbrella section owns no single mutable store; endpoint-specific locking, revision conflicts, atomic sidecar writes, and request-local state are specified and tested in their dedicated serve sections)
