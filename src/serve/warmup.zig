@@ -28,6 +28,16 @@
 //! deploy lands, and rendering one would run a fresh solve that the page path then
 //! persists, writing layout files for boards nobody asked about.
 //!
+//! The editor's DEFERRED payload (`?derived=1` — pours, the reporting DRC,
+//! mask relief, trace EM, power integrity) is warmed the same way, in a second
+//! board pass. It is fetched automatically right after every editor page paints
+//! and costs far more than the page it follows (barracuda: ~15 s against
+//! ~0.3 s), so a cold one is the longest wait the editor has. It is a second
+//! pass rather than part of the first because a reader BLOCKS on the page: one
+//! render can produce both halves, but holding each page back until its own
+//! analyses finished would put the last board's page twenty seconds out instead
+//! of one.
+//!
 //! Everything here is best-effort. A failure warms less, never breaks the
 //! server: the request path is unchanged and simply finds a cold cache.
 
@@ -36,6 +46,7 @@ const Server = @import("../serve.zig").Server;
 const serve_root = @import("../serve.zig");
 const pages = @import("pages.zig");
 const pcb_describe = @import("pcb_describe.zig");
+const pcb_derived = @import("pcb_derived.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
 const page_cache = @import("page_cache.zig");
 const paths = @import("../paths.zig");
@@ -51,14 +62,15 @@ const mcp_tools = @import("mcp_tools.zig");
 /// page and gzip stores serialize only their short admission sections.
 const pcb_warm_workers: usize = 3;
 
-const WarmPhase = enum { pcb_pages, progress_ladders };
+const WarmPhase = enum { pcb_pages, pcb_derived, progress_ladders };
 /// This array drives `run`, rather than merely documenting it, so the test at
 /// the foot of the file pins the user-visible startup priority.
-const warm_phase_order = [_]WarmPhase{ .pcb_pages, .progress_ladders };
+const warm_phase_order = [_]WarmPhase{ .pcb_pages, .pcb_derived, .progress_ladders };
 
 const BoardWarmWork = struct {
     ctx: *Server,
     summaries: []const mcp_tools.DesignSummary,
+    scope: pcb_derived.WarmScope,
     next: std.atomic.Value(usize) = .init(0),
     warmed: std.atomic.Value(usize) = .init(0),
 
@@ -68,10 +80,28 @@ const BoardWarmWork = struct {
             if (i >= self.summaries.len) return;
             const summary = self.summaries[i];
             if (!summary.build_ok) continue;
-            if (warmPcbPage(self.ctx, summary.name)) _ = self.warmed.fetchAdd(1, .monotonic);
+            if (warmPcbPage(self.ctx, summary.name, self.scope)) _ = self.warmed.fetchAdd(1, .monotonic);
         }
     }
 };
+
+/// Run one pass of `warmPcbPage` over every buildable design on a small worker
+/// set, and return how many it retained. Both board phases share this: the
+/// pass is what `pcb_derived.warmPage` makes of the entries it finds free,
+/// so the second one lands on the deferred halves the first one left.
+fn warmBoards(ctx: *Server, summaries: []const mcp_tools.DesignSummary, scope: pcb_derived.WarmScope) usize {
+    var work = BoardWarmWork{ .ctx = ctx, .summaries = summaries, .scope = scope };
+    var threads: [pcb_warm_workers - 1]std.Thread = undefined;
+    var spawned: usize = 0;
+    while (spawned < threads.len) : (spawned += 1) {
+        threads[spawned] = std.Thread.spawn(.{}, BoardWarmWork.run, .{&work}) catch break;
+    }
+    // The warm-up thread is a worker too. If either spawn failed, it claims
+    // more indices and preserves the serial best-effort fallback.
+    work.run();
+    for (threads[0..spawned]) |thread| thread.join();
+    return work.warmed.load(.monotonic);
+}
 
 /// Start the warm-up on its own thread and return immediately. Called just
 /// before `listen()`, so warming overlaps with serving rather than delaying
@@ -110,19 +140,29 @@ fn run(ctx: *Server) void {
             // completed. A small worker set also starts common adjacent boards
             // (barracuda / barracuda-base included) together.
             const boards_started = clock.nanoTimestamp();
-            var board_work = BoardWarmWork{ .ctx = ctx, .summaries = home.summaries };
-            var board_threads: [pcb_warm_workers - 1]std.Thread = undefined;
-            var spawned: usize = 0;
-            while (spawned < board_threads.len) : (spawned += 1) {
-                board_threads[spawned] = std.Thread.spawn(.{}, BoardWarmWork.run, .{&board_work}) catch break;
-            }
-            // The warm-up thread is a worker too. If either spawn failed, it
-            // claims more indices and preserves the serial best-effort fallback.
-            board_work.run();
-            for (board_threads[0..spawned]) |thread| thread.join();
-            boards = board_work.warmed.load(.monotonic);
+            boards = warmBoards(ctx, home.summaries, .page);
             const board_ms = @divTrunc(clock.nanoTimestamp() - boards_started, std.time.ns_per_ms);
             log.progress("warmup: {d} pcb page(s) ready in {d} ms", .{ boards, board_ms });
+        },
+        .pcb_derived => {
+            // A SECOND pass over the same boards, after every page is retained.
+            // The editor fetches `?derived=1` right after first paint and that
+            // response — pours, the reporting DRC, mask relief, trace EM, power
+            // integrity — is by far the most expensive thing this server
+            // computes (barracuda: ~15 s against ~0.3 s for its page). Warming
+            // it matters as much as warming the page.
+            //
+            // It is a separate phase rather than part of the pass above so a
+            // deploy still has every editor PAGE cached in about a second. One
+            // render can answer both halves (`pcb_derived.warmPage`), but
+            // holding each page back until its own analyses finished would put
+            // the last board's page twenty seconds out — and the page is what a
+            // reader blocks on. The repeated solve this costs is ~0.3 s per
+            // board against the ~6 s of analyses behind it.
+            const derived_started = clock.nanoTimestamp();
+            const derived = warmBoards(ctx, home.summaries, .derived);
+            const derived_ms = @divTrunc(clock.nanoTimestamp() - derived_started, std.time.ns_per_ms);
+            log.progress("warmup: {d} pcb deferred payload(s) ready in {d} ms", .{ derived, derived_ms });
         },
         .progress_ladders => {
             // A card with no ladder issues no request, so warming one would be
@@ -175,17 +215,19 @@ fn warmLadder(ctx: *Server, name: []const u8) bool {
 /// Pre-render one design's plain PCB layout page into the page cache. Skipped
 /// unless the design already has a saved-layout sidecar — see the file header
 /// for why an unlaid-out board is deliberately left cold.
-fn warmPcbPage(ctx: *Server, name: []const u8) bool {
+fn warmPcbPage(ctx: *Server, name: []const u8, scope: pcb_derived.WarmScope) bool {
     var arena = std.heap.ArenaAllocator.init(ctx.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
     const sidecar = paths.designSiblingPath(scratch, ctx.project_dir, name, ".layouts.json") catch return false;
     _ = infra_fs.cwd().statFile(sidecar) catch return false;
-    return pcb_layout_page.warmPage(ctx, scratch, name);
+    return pcb_derived.warmPage(ctx, scratch, name, scope);
 }
 
 // spec: Web Server - Startup warms PCB editor pages before the slower progress ladders, so an unrelated lazy diagnostic cannot leave every editor cache cold after a deploy
-test "startup prioritizes PCB pages over progress ladders" {
+// spec: Web Server - Startup warms every PCB page before any deferred payload, so a deploy has the pages a reader blocks on cached in about a second rather than behind twelve boards of analyses
+test "startup prioritizes PCB pages over deferred payloads over progress ladders" {
     try std.testing.expectEqual(WarmPhase.pcb_pages, warm_phase_order[0]);
-    try std.testing.expectEqual(WarmPhase.progress_ladders, warm_phase_order[1]);
+    try std.testing.expectEqual(WarmPhase.pcb_derived, warm_phase_order[1]);
+    try std.testing.expectEqual(WarmPhase.progress_ladders, warm_phase_order[2]);
 }

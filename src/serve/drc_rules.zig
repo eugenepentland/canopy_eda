@@ -175,6 +175,75 @@ pub fn checkFilteredZonesTally(
 /// `placement/drc_compose.zig` — every input they read is a placement type, and
 /// `kicad_pcb/route_command.zig` scores a board with them without wanting the
 /// server — and re-exported here so the serve-layer callers are unchanged.
+/// The two view fields a deferring render leaves empty. Both come out of one
+/// pass: connectivity is the expensive half of the DRC *and* of the route
+/// summary, so the tally is retained from the DRC rather than rasterizing the
+/// same zones a second time for a standalone count.
+pub const Deferred = struct {
+    tally: ?fab_readiness.Tally = null,
+    violations: []const drc.Violation = &.{},
+
+    /// Persisted routes store geometry, not cached counters, so a restored
+    /// `RouteResult` starts at 0/0 and every UI that reports completion reads
+    /// it. Reconcile it against the connectivity oracle this pass already ran.
+    /// A view whose deferred half has not run keeps the honest 0/0 rather than
+    /// a wrong count, and is reconciled when that half arrives.
+    pub fn reconcile(self: Deferred, routed: *?router.RouteResult) void {
+        const tally = self.tally orelse return;
+        if (routed.*) |*r| {
+            r.routed = tally.unique_routed;
+            r.total = tally.unique_total;
+            r.failed = tally.open;
+        }
+    }
+};
+
+/// Everything the deferred half reads. The board-edge margin field is passed
+/// in rather than seeded here: it is the render's ONE field, shared by every
+/// pour in the response (see `pour.sharedEdgeField`), and seeding a second one
+/// would repeat the outline walk that sharing exists to avoid.
+pub const DeferredInputs = struct {
+    placement: optimizer.Placement,
+    routed: ?router.RouteResult,
+    clearance: f64,
+    zones: []const pour.UserZone,
+    texts: []const font.BoardText,
+    base_edge: ?pour.EdgeField,
+    /// Read-only physical review opens with markers disabled and has no
+    /// surface that consumes them, so its first paint skips the check and
+    /// takes the cheap routable tally instead.
+    check_drc: bool = true,
+};
+
+/// Compute the deferred half over already-solved state. Called in line by a
+/// render that is not deferring, and — over the SAME placement and copper —
+/// by `applyDeferred` for a warm-up that has already emitted its page.
+pub fn resolveDeferred(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    in: DeferredInputs,
+) Deferred {
+    if (in.check_drc) if (in.routed) |routed| {
+        const report = checkFilteredZonesTally(alloc, project_dir, name, .{
+            .placement = in.placement,
+            .routed = routed,
+            .clearance = in.clearance,
+            .zones = in.zones,
+            .texts = in.texts,
+            .base_edge = in.base_edge,
+        });
+        return .{ .tally = report.tally, .violations = report.violations };
+    };
+    return .{
+        .tally = fab_readiness.routableTally(alloc, in.placement, .{
+            .tracks = if (in.routed) |r| r.tracks else &.{},
+            .vias = if (in.routed) |r| r.vias else &.{},
+            .zones = in.zones,
+        }) catch null,
+    };
+}
+
 pub const CopperCheck = drc_compose.CopperCheck;
 pub const checkDefaultRules = drc_compose.checkDefaultRules;
 

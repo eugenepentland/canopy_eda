@@ -47,6 +47,8 @@ const pour = @import("../placement/pour.zig");
 const pour_json = @import("pour_json.zig");
 const pcb_rules_json = @import("pcb_rules_json.zig");
 const pcb_query = @import("pcb_query.zig");
+const pcb_derived = @import("pcb_derived.zig");
+const pcb_page_cache = @import("pcb_page_cache.zig");
 const trace_em_json = @import("trace_em_json.zig");
 const power_integrity_json = @import("../power_integrity_json.zig");
 const export_fab = @import("../export_fab.zig");
@@ -755,7 +757,7 @@ fn pageSubBlock(
 /// probe runs AFTER stamping, which is what leaves no window (a save landing
 /// later is a write the stamps predate, so it invalidates the entry the
 /// ordinary way).
-const StoreRevCheck = struct {
+pub const StoreRevCheck = struct {
     rendered: i64,
     ctx: *Server,
     name: []const u8,
@@ -774,11 +776,15 @@ const StoreRevCheck = struct {
 /// store-time freshness check: the render fills in the layout sidecar's rev
 /// and `?sub=` scope it read, and the page cache asks `moved()` after
 /// stamping (see `StoreRevCheck`).
-const RenderJob = struct {
+pub const RenderJob = struct {
     name: []const u8,
     eval: *Evaluator,
     module_res_out: *?modules_mod.ResolvedBlock,
     rev: *StoreRevCheck,
+    /// Set to take BOTH of the editor's responses out of ONE solve — see
+    /// `pcb_derived`. Only the deferrable editor page answers it; every other
+    /// surface returns its own body and leaves `both.took` false.
+    both: ?pcb_derived.BothPayloads = null,
 };
 
 /// GET /pcb-layout/:name — evaluate the design, run the optimizer, and return
@@ -808,6 +814,12 @@ pub fn pcbLayoutPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
     })) orelse return;
     res.content_type = if (queryFlag(req, "derived")) .JSON else .HTML;
     res.body = html;
+    // This render was a cache MISS on the plain editor page, which means an
+    // edit just invalidated BOTH halves — and the browser about to receive this
+    // HTML will ask for the second one as soon as it has painted. Start that
+    // render now instead of at the end of the download-parse-paint gap; the
+    // cache's in-flight reservation makes the browser's fetch join it.
+    if (cache_version != null and pcb_derived.warmsDeferred(req)) pcb_derived.spawn(ctx, name);
 }
 
 /// GET /api/pcb-cam/:name — exact Gerber/Excellon read-back for Assembly.
@@ -959,7 +971,7 @@ test "PCB page load failure identifies the imported module and source location" 
 /// `job.rev` receives the layout sidecar's rev and `?sub=` scope this render
 /// read, which the handler's store-time freshness check asks about after the
 /// page is stamped.
-fn renderLayoutPage(
+pub fn renderLayoutPage(
     ctx: *Server,
     req: ?*httpz.Request,
     res: ?*httpz.Response,
@@ -1239,7 +1251,48 @@ fn renderLayoutPage(
     });
     try w.writeAll("</body></html>");
 
-    return aw.written();
+    return try bothPayloads(ctx, name, aw.written(), .{
+        .both = job.both,
+        .deferrable = defer_analysis,
+        .placement = placement,
+        .view = rv,
+        .opts = data_opts,
+    });
+}
+
+/// The solved state a both-payload render carries past its finished page.
+const DeferredJob = struct {
+    both: ?pcb_derived.BothPayloads,
+    /// False on any surface that already emits its derived fields inline, and
+    /// therefore has no second response to produce.
+    deferrable: bool,
+    placement: optimizer.Placement,
+    view: ShownView,
+    opts: PcbDataOpts,
+};
+
+/// Answer a warm-up that asked for BOTH of the editor's responses: hand it the
+/// page now — retaining it must not wait on the analyses — then finish the SAME
+/// solved view and return the deferred JSON in the page's place. With no such
+/// caller the page is the answer and nothing is published.
+fn bothPayloads(ctx: *Server, name: []const u8, page: []const u8, job: DeferredJob) HandlerError![]const u8 {
+    const sink = job.both orelse return page;
+    if (!job.deferrable) return page;
+    sink.publish.call(page);
+    sink.took.* = true;
+    var view = job.view;
+    applyDeferred(ctx, name, job.placement, &view);
+    // `writePcbDerivedData` reads only `rev`, `base_edge`, `saved_routes`,
+    // `texts` and `scratch_allocator` off these options, plus the two
+    // read-only-surface flags that are false on any deferrable page — so the
+    // page's own options, with the two fields the deferral emptied filled back
+    // in, ARE the options a `?derived=1` request would have built.
+    var opts = job.opts;
+    opts.base_edge = view.base_edge;
+    opts.analysis_deferred = false;
+    var derived: std.Io.Writer.Allocating = .init(ctx.allocator);
+    try writePcbDerivedData(&derived.writer, ctx.allocator, job.placement, view, opts);
+    return derived.written();
 }
 
 const PageScripts = struct {
@@ -1267,57 +1320,6 @@ fn writePageScripts(w: *std.Io.Writer, mode: PageScripts) std.Io.Writer.Error!vo
     if (mode.model_sprites) try w.writeAll("<script src=\"/static/pcb_model_sprites.js\"></script>");
     if (mode.thermal_overlay) try w.writeAll("<script src=\"/static/pcb_thermal.js\"></script>");
     if (!mode.embed) try w.writeAll(pcb_3d_toggle_js);
-}
-
-/// Pre-render the plain `/pcb-layout/<name>` page — no query, no request — and
-/// retain it in the page cache. This is the most expensive read-only page the
-/// server has (a routed board spends hundreds of milliseconds in placement,
-/// DRC and HTML before a byte reaches the wire), and every cache it lands in is
-/// process-lifetime, so a deploy makes the next visitor pay all of it. Called
-/// off the request path by the boot warm-up; best-effort, returns whether an
-/// entry was retained. `scratch` need only outlive the call: the cache dupes
-/// the HTML it keeps and the file stamps own their own memory.
-pub fn warmPage(ctx: *Server, scratch: std.mem.Allocator, name: []const u8) bool {
-    // Warm-up and the already-listening request path share one render lease.
-    // If either side has the plain page cached or in progress, the other does
-    // no duplicate evaluator/pour/serialization work.
-    if (!ctx.state.caches.pcb_pages.reserveWarm(scratch, name)) return true;
-    defer ctx.state.caches.pcb_pages.finishWarm(scratch, name);
-    var page_ctx = ctx.*;
-    page_ctx.allocator = scratch;
-    const live_version = serve_root.getLiveVersion(name);
-    var eval = Evaluator.init(scratch, ctx.project_dir);
-    defer eval.deinit();
-    var module_res: ?modules_mod.ResolvedBlock = null;
-    defer if (module_res) |mr| {
-        mr.eval.deinit();
-        scratch.destroy(mr.eval);
-    };
-    var rev_check = StoreRevCheck{ .rendered = -1, .ctx = &page_ctx, .name = name, .sub = null };
-    const html = (renderLayoutPage(&page_ctx, null, null, .{
-        .name = name,
-        .eval = &eval,
-        .module_res_out = &module_res,
-        .rev = &rev_check,
-    }) catch return false) orelse return false;
-    ctx.state.caches.pcb_pages.warm(.{
-        .scratch = scratch,
-        .project_dir = ctx.project_dir,
-        .name = name,
-        .eval = &eval,
-        // Captured BEFORE the render: an edit that lands mid-render leaves
-        // `current_version` ahead of it and the entry is dropped rather than
-        // served stale, exactly as on the request path.
-        .live_version = live_version,
-        .current_version = serve_root.getLiveVersion(name),
-    }, html, rev_check);
-    // The response filter gzips every page after the handler returns, and a
-    // megabyte board costs ~150 ms of deflate — more than the cached render it
-    // wraps. That memo is keyed on the body itself and a cache hit serves these
-    // exact bytes, so compressing once here retires that cost for the first
-    // reader too. The stream is discarded; what matters is the memo entry.
-    _ = ctx.state.caches.gzip.compress(scratch, html) catch return true;
-    return true;
 }
 
 /// Resolve `name` to a renderable design block. Preference: a design source
@@ -6516,45 +6518,46 @@ fn resolveShownView(ctx: *Server, req: ?*httpz.Request, in: ShownInputs) ShownVi
         saved = shown_sr;
         if (saved) |sr| routed = restoreRoutes(ctx.allocator, sr, in.placement.nets);
     }
-    // Persisted routes intentionally store geometry, not cached counters, so a
-    // restored RouteResult starts at 0/0. Reconcile every shown board through
-    // the shared connectivity oracle before any UI reports completion. Running
-    // it for a bare board too gives the header the useful 0/N starting state.
     const user_zones = userZonesFrom(ctx.allocator, in.placement.*.rules, shown_zs);
     const texts = shownTexts(in.layouts, in.shown);
-    var tally: ?fab_readiness.Tally = null;
-    var violations: []const drc.Violation = &.{};
-    if (!in.omit_copper and !in.defer_derived) {
-        if (in.check_drc and routed != null) {
-            // Connectivity is the expensive half of both DRC and the route
-            // summary. Retain it from the DRC pass instead of rasterizing the
-            // same zones a second time for a standalone tally.
-            const report = drc_rules.checkFilteredZonesTally(ctx.allocator, ctx.project_dir, name, .{
-                .placement = in.placement.*,
-                .routed = routed.?,
-                .clearance = ro.params.clearance,
-                .zones = user_zones,
-                .texts = texts,
-                .base_edge = base_edge,
-            });
-            tally = report.tally;
-            violations = report.violations;
-        } else {
-            tally = fab_readiness.routableTally(ctx.allocator, in.placement.*, .{
-                .tracks = if (routed) |r| r.tracks else &.{},
-                .vias = if (routed) |r| r.vias else &.{},
-                .zones = user_zones,
-            }) catch null;
-        }
-    }
-    if (routed) |*r| if (tally) |t| {
-        // RouteResult keeps the count displayed by this page. The detailed
-        // connection tally remains on `ShownView.tally` for non-UI consumers.
-        r.routed = t.unique_routed;
-        r.total = t.unique_total;
-        r.failed = t.open;
-    };
-    return .{ .ro = ro, .routed = routed, .tally = tally, .violations = violations, .outline_drawn = outline_drawn, .base_edge = base_edge, .outline = shownOutline(in.layouts, in.shown), .fabrication_layers = fabrication_layers, .heatsink = shownHeatsink(in.layouts, in.shown), .saved = saved, .texts = texts, .dimensions = shownDimensions(in.layouts, in.shown) };
+    // The deferred half owns the connectivity oracle every completion count
+    // reads (see `drc_rules.Deferred.reconcile`); running it for a bare board
+    // too gives the header the useful 0/N starting state.
+    const deferred: drc_rules.Deferred = if (in.omit_copper or in.defer_derived)
+        .{}
+    else
+        drc_rules.resolveDeferred(ctx.allocator, ctx.project_dir, name, .{
+            .placement = in.placement.*,
+            .routed = routed,
+            .clearance = ro.params.clearance,
+            .zones = user_zones,
+            .texts = texts,
+            .base_edge = base_edge,
+            .check_drc = in.check_drc,
+        });
+    var view = ShownView{ .ro = ro, .routed = routed, .tally = deferred.tally, .violations = deferred.violations, .outline_drawn = outline_drawn, .base_edge = base_edge, .outline = shownOutline(in.layouts, in.shown), .fabrication_layers = fabrication_layers, .heatsink = shownHeatsink(in.layouts, in.shown), .saved = saved, .texts = texts, .dimensions = shownDimensions(in.layouts, in.shown) };
+    deferred.reconcile(&view.routed);
+    return view;
+}
+
+/// Complete a view resolved with `defer_derived`: the board-edge field every
+/// pour of the deferred payload shares, then the reporting DRC over the copper
+/// already restored into `view`. This is the ONLY work `?derived=1` does that
+/// the page render ahead of it did not — which is what lets one warm-up solve
+/// answer both (see `pcb_derived`).
+fn applyDeferred(ctx: *Server, name: []const u8, placement: optimizer.Placement, view: *ShownView) void {
+    view.base_edge = pour.sharedEdgeField(ctx.allocator, placement) catch null;
+    const deferred = drc_rules.resolveDeferred(ctx.allocator, ctx.project_dir, name, .{
+        .placement = placement,
+        .routed = view.routed,
+        .clearance = view.ro.params.clearance,
+        .zones = userZonesFrom(ctx.allocator, placement.rules, shownZones(view.saved)),
+        .texts = view.texts,
+        .base_edge = view.base_edge,
+    });
+    view.tally = deferred.tally;
+    view.violations = deferred.violations;
+    deferred.reconcile(&view.routed);
 }
 
 fn shownOutline(layouts: []const SavedLayout, shown: ?[]const u8) ?SavedOutline {

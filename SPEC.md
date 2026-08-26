@@ -5922,6 +5922,11 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The home page's data gather runs without a request, so the startup warm-up fills exactly the caches a render reads
 - The PCB layout page renders without a request, reading a missing request as the plain no-query page, so the startup warm-up can retain it under the same cache entry a bare URL looks up
 - Startup warms PCB editor pages before the slower progress ladders, so an unrelated lazy diagnostic cannot leave every editor cache cold after a deploy
+- Startup warms every PCB page before any deferred payload, so a deploy has the pages a reader blocks on cached in about a second rather than behind twelve boards of analyses
+- One warm-up render answers both the PCB page and its deferred payload, each reserved and retained under its own cache identity
+- A deferred-payload warm reserves the SAME cache entry the editor's `?derived=1` fetch looks up, so the browser joins that render instead of starting a second one
+- Background PCB deferred-payload warms are capped, so a burst of saves cannot put the heaviest read-only render on every core
+- A warm-up reservation drops a retained PCB entry an edit has already invalidated, so the warm that edit triggered actually runs instead of deferring to the dead entry
 - The progress store accepts a ladder computed off-request under the same size and read-set rules as a served one
 
 - completeness-waiver: concurrent access (the umbrella section owns no single mutable store; endpoint-specific locking, revision conflicts, atomic sidecar writes, and request-local state are specified and tested in their dedicated serve sections)
