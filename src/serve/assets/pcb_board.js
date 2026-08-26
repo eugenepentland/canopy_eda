@@ -7719,9 +7719,10 @@ function drawTargetNearest(t,head){if(t.kind==="pad"){var c=wpt(t.d.i,t.d.x,t.d.
  if(t.kind==="fill"){var f=drawFillNearest(t.o,head.x,head.y);if(f)f.kind=t.kind;return f;}
  var best=null;trackChords(t.o).forEach(function(s){var q=drawSegNearest(head.x,head.y,s.x1,s.y1,s.x2,s.y2);if(!best||q.d<best.d)best=q;});
  if(best)best.kind=t.kind;return best;}
-function drawNearestRatTarget(head,limit){if(!dtrace||!dtrace.ratTargets)return null;var best=null;
- dtrace.ratTargets.forEach(function(t){var q=drawTargetNearest(t,head);if(q&&(!best||q.d<best.d)){q.target=t;best=q;}});
+function drawNearestRatTargetFor(tr,head,limit){if(!tr||!tr.ratTargets)return null;var best=null;
+ tr.ratTargets.forEach(function(t){var q=drawTargetNearest(t,head);if(q&&(!best||q.d<best.d)){q.target=t;best=q;}});
  return best&&(limit==null||best.d<limit)?best:null;}
+function drawNearestRatTarget(head,limit){return drawNearestRatTargetFor(dtrace,head,limit);}
 // ── Autorouted hand-route remainder ─────────────────────────────────────
 // The server's scoped autorouter returns the whole preserved board plus the
 // newly routed selected net. Split physical geometry at the two hard waypoints
@@ -7741,11 +7742,11 @@ function drawAutoPieces(track,cuts){var out=[],eps=0.025;
    if(u>1e-7&&u<1-1e-7&&Math.hypot(p.x-(c.x1+u*dx),p.y-(c.y1+u*dy))<=eps)at.push(u);});
   at.sort(function(a,b){return a-b;});for(var i=1;i<at.length;i++){var a=at[i-1],b=at[i];if(b-a<1e-8)continue;
    out.push({x1:c.x1+a*dx,y1:c.y1+a*dy,x2:c.x1+b*dx,y2:c.y1+b*dy,l:c.l||0,w:c.w||track.w,net:c.net||track.net,source:"autorouter"});}});return out;}
-function drawAutoPath(allTracks,allVias,tr,head,target){var adj={},nodes={};
+function drawAutoPath(allTracks,allVias,net,head,target){var adj={},nodes={},key=String(net||"");
  function edge(a,b,e,w){nodes[a]=1;nodes[b]=1;(adj[a]=adj[a]||[]).push({to:b,e:e,w:w});(adj[b]=adj[b]||[]).push({to:a,e:e,w:w});}
- (allTracks||[]).forEach(function(t){if(!drawAutoOwn(t.net,tr))return;drawAutoPieces(t,[head,target]).forEach(function(s){
+ (allTracks||[]).forEach(function(t){if(String(t.net||"")!==key)return;drawAutoPieces(t,[head,target]).forEach(function(s){
   edge(drawAutoNode(s.x1,s.y1,s.l),drawAutoNode(s.x2,s.y2,s.l),{kind:"track",o:s},Math.hypot(s.x2-s.x1,s.y2-s.y1));});});
- (allVias||[]).forEach(function(v){if(v.f||!drawAutoOwn(v.net,tr))return;for(var l=1;l<NSIG;l++)
+ (allVias||[]).forEach(function(v){if(v.f||String(v.net||"")!==key)return;for(var l=1;l<NSIG;l++)
   edge(drawAutoNode(v.x,v.y,l-1),drawAutoNode(v.x,v.y,l),{kind:"via",o:v},0.4);});
  function nearest(p){var best=null,bd=0.08;Object.keys(nodes).forEach(function(k){var a=k.split(","),l=+a[2];if(l!==p.l)return;
    var d=Math.hypot(+a[0]/100000-p.x,+a[1]/100000-p.y);if(d<bd){bd=d;best=k;}});return best;}
@@ -7757,34 +7758,37 @@ function drawAutoPath(allTracks,allVias,tr,head,target){var adj={},nodes={};
  while(k!==start){var p=prev[k];if(!p)return null;if(p.e.kind==="track")tracks.push(p.e.o);else{var v=p.e.o,id=drawAutoQ(v.x)+","+drawAutoQ(v.y);if(!seen[id]){seen[id]=1;vias.push(v);}}k=p.k;}
  tracks.reverse();vias.reverse();return {tracks:tracks,vias:vias,rf_paths:[]};}
 function drawAutoReset(){drawAutoVersion++;if(drawAutoTimer){clearTimeout(drawAutoTimer);drawAutoTimer=null;}if(dtrace)dtrace.auto=null;}
-function drawAutoSchedule(now,accept){if(!dtrace||dtrace.pair||!dtrace.ratTargets||!dtrace.ratTargets.length)return;
- var tr=dtrace,target=drawNearestRatTarget({x:tr.lx,y:tr.ly});if(!target)return;
- target={x:target.x,y:target.y,l:drawAutoTargetLayer(target,tr)};var head={x:tr.lx,y:tr.ly,l:tr.l},token=++drawAutoVersion;if(drawAutoTimer)clearTimeout(drawAutoTimer);
- tr.auto={state:"queued",token:token,accept:!!accept,tracks:[],vias:[],rf_paths:[],head:head,target:target};
- drawAutoTimer=setTimeout(function(){drawAutoTimer=null;drawAutoLaunch(tr,token);},now?0:280);ovPaintSoon();}
+function drawAutoSchedule(now,accept){if(!dtrace)return false;var tr=dtrace,raw=drawNearestRatTargetFor(tr,{x:tr.lx,y:tr.ly});if(!raw)return false;
+ var target={x:raw.x,y:raw.y,l:drawAutoTargetLayer(raw,tr)},head={x:tr.lx,y:tr.ly,l:tr.l},legs=[{net:tr.net,head:head,target:target}];
+ if(tr.pair){var pr=tr.pair,raw2=null;
+  if(raw.target&&raw.target.kind==="pad"){var mate=dpPartnerPad(raw.x,raw.y,pr.net,raw.target.d.i);if(mate)raw2={x:mate.x,y:mate.y,target:{kind:"pad",d:mate}};}
+  if(!raw2)raw2=drawNearestRatTargetFor(pr,{x:pr.lx,y:pr.ly});if(!raw2)return false;
+  legs.push({net:pr.net,head:{x:pr.lx,y:pr.ly,l:tr.l},target:{x:raw2.x,y:raw2.y,l:drawAutoTargetLayer(raw2,pr)}});}
+ var token=++drawAutoVersion;if(drawAutoTimer)clearTimeout(drawAutoTimer);
+ tr.auto={state:"queued",token:token,accept:!!accept,tracks:[],vias:[],rf_paths:[],head:head,target:target,legs:legs};
+ drawAutoTimer=setTimeout(function(){drawAutoTimer=null;drawAutoLaunch(tr,token);},now?0:280);ovPaintSoon();return true;}
 function drawAutoLaunch(tr,token){if(dtrace!==tr||!tr.auto||tr.auto.token!==token||tr.auto.state!=="queued")return;
  if(drawAutoBusy){drawAutoTimer=setTimeout(function(){drawAutoTimer=null;drawAutoLaunch(tr,token);},120);return;}
  drawAutoBusy=true;tr.auto.state="loading";routeStatMsg("autorouter planning the remainder…");
- var payload=boardStatePayload();payload.nets=drawAutoNets(tr);payload.resume_points=[
-  {net:tr.net,x:tr.auto.head.x,y:tr.auto.head.y,layer:tr.auto.head.l},
-  {net:tr.net,x:tr.auto.target.x,y:tr.auto.target.y,layer:tr.auto.target.l}];payload.effort="one_shot";payload.track_width=tr.w;
+ var payload=boardStatePayload();payload.nets=drawAutoNets(tr);payload.resume_points=[];
+ tr.auto.legs.forEach(function(g){payload.resume_points.push({net:g.net,x:g.head.x,y:g.head.y,layer:g.head.l},{net:g.net,x:g.target.x,y:g.target.y,layer:g.target.l});});
+ payload.effort="one_shot";payload.track_width=tr.w;
  fetch("/api/pcb-route/"+encodeURIComponent(PCB.name)+subq(),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
   .then(function(r){if(!r.ok)throw 0;return r.json();})
   .then(function(j){if(dtrace!==tr||!tr.auto||tr.auto.token!==token)return;
    var failed=!!j.grid_overflow||(j.unrouted||[]).some(function(n){return drawAutoOwn(n,tr);});
    if(failed){tr.auto.state="failed";routeStatMsg("autorouter could not finish from here — keep routing by hand",true);ovPaintSoon();return;}
-   var path=drawAutoPath(j.tracks,j.vias,tr,tr.auto.head,tr.auto.target);if(!path){tr.auto.state="failed";
-    routeStatMsg("autorouter could not join this head to the target — keep routing by hand",true);ovPaintSoon();return;}
-   tr.auto.tracks=path.tracks;tr.auto.vias=path.vias;tr.auto.rf_paths=path.rf_paths;tr.auto.state="ready";
+   var tracks=[],vias=[],paths=[];for(var i=0;i<tr.auto.legs.length;i++){var g=tr.auto.legs[i],path=drawAutoPath(j.tracks,j.vias,g.net,g.head,g.target);if(!path){tr.auto.state="failed";
+     routeStatMsg("autorouter could not join this head to the target — keep routing by hand",true);ovPaintSoon();return;}tracks=tracks.concat(path.tracks);vias=vias.concat(path.vias);paths=paths.concat(path.rf_paths);}
+   tr.auto.tracks=tracks;tr.auto.vias=vias;tr.auto.rf_paths=paths;tr.auto.state="ready";
    routeStatMsg("autorouter suggestion ready — Enter routes the rest");ovPaintSoon();if(tr.auto.accept)drawAutoAccept();})
   .catch(function(){if(dtrace===tr&&tr.auto&&tr.auto.token===token){tr.auto.state="failed";
     routeStatMsg("autorouter suggestion unavailable — keep routing by hand",true);ovPaintSoon();}})
   .then(function(){drawAutoBusy=false;if(dtrace&&dtrace.auto&&dtrace.auto.state==="queued")drawAutoLaunch(dtrace,dtrace.auto.token);});}
 function drawAutoAccept(){if(!dtrace)return false;var tr=dtrace,a=tr.auto;
- if(tr.pair)return drawEnd();
- if(!tr.ratTargets||!tr.ratTargets.length)return drawEnd();
- if(!a||a.state!=="ready"){drawAutoSchedule(true,true);routeStatMsg("autorouter finishing the remainder…");return true;}
- rfDropNet(tr.net);
+ if(!a||a.state!=="ready"){if(drawAutoSchedule(true,true))routeStatMsg("autorouter finishing the remainder…");
+  else routeStatMsg("no autorouter completion target from this head — keep routing or double-click to finish",true);return true;}
+ rfDropNet(tr.net);if(tr.pair)rfDropNet(tr.pair.net);
  var tapered={ok:true,changed:false};if(tr.n>0){tapered=drawApplyAutomaticTapers();if(!tapered.ok)return true;}
  PCB.tracks=PCB.tracks||[];PCB.vias=PCB.vias||[];PCB.rf_paths=PCB.rf_paths||[];
  a.tracks.forEach(function(t){t.source="autorouter";trackIdEnsure(t);PCB.tracks.push(t);});
@@ -7972,7 +7976,8 @@ function dpViaPair(){var pr=dtrace.pair,vg=viaGeo(dtrace.net);
  rfDropNet(dtrace.net);rfDropNet(pr.net);
  PCB.vias=PCB.vias||[];PCB.vias.push(candV[0]);PCB.vias.push(candV[1]);
  gpuCuEdit();
- dtrace.l=nextDrawLayer(dtrace.l);activeLayer=dtrace.l;syncActiveLayer();dtrace.ratTargets=drawRatTargets(dtrace);drawBtnSync();ovPaintSoon();}
+ dtrace.l=nextDrawLayer(dtrace.l);activeLayer=dtrace.l;syncActiveLayer();dtrace.ratTargets=drawRatTargets(dtrace);
+ pr.l=dtrace.l;pr.ratTargets=drawRatTargets(pr);drawBtnSync();ovPaintSoon();}
 // Backspace in pair mode unwinds the last CLICK as a unit — both legs' segs
 // popped by identity, an inside-corner trim restored, both heads and the
 // junction direction put back.
@@ -7999,7 +8004,9 @@ function drawStart(net,layer,x,y,pi,pd){
  var dp=diffPairInfo(net),ns=null;
  if(dp)ns=(pi!=null&&pd)?dpPartnerPad(x,y,dp.partner,null):dpPartnerCopper(x,y,dp.partner,layer);
  if(ns&&Math.hypot(ns.x-x,ns.y-y)<=5){
-  tr.pair={net:ns.net,lx:ns.x,ly:ns.y,laid:[],s:0,gap:dp.gap>0?dp.gap:(PCB.clr||0.127),start:ns};
+  tr.pair={net:ns.net,l:layer,w:tr.w,lx:ns.x,ly:ns.y,laid:[],s:0,gap:dp.gap>0?dp.gap:(PCB.clr||0.127),start:ns,
+   dest:drawDests(ns.i,ns.pd,ns.net,layer,ns.x,ns.y),startRoot:drawStartRoot(ns.i,ns.pd,ns.net,layer,ns.x,ns.y),ratTargets:[]};
+  tr.pair.ratTargets=drawRatTargets(tr.pair);
   routeStatMsg("coupled pair "+nLeaf(net)+" ⇄ "+nLeaf(ns.net)+" — press P to uncouple");}
  return tr;}
 function drawClick(m,shift){
