@@ -877,6 +877,44 @@ fn renderPage(allocator: std.mem.Allocator, name: []const u8, index: Index, layo
     return aw.written();
 }
 
+/// Build the exact index embedded into both live and benchmark page renders.
+fn buildPageIndex(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    block: *const env_mod.DesignBlock,
+) !Index {
+    const bom_path = paths.designSiblingPath(allocator, project_dir, name, ".bom") catch null;
+    const entries: []const bom.BomEntry = if (bom_path) |path|
+        bom.loadBom(allocator, path) catch &.{}
+    else
+        &.{};
+    var index = try buildIndex(allocator, project_dir, block, entries);
+    index.guides = rework_guide.loadAll(allocator, project_dir, name);
+    return index;
+}
+
+/// Render the default assembly workspace without consulting or populating the
+/// long-lived HTML cache. The page-latency gate uses this request-less seam so
+/// every repetition measures the same cold evaluation, BOM/search indexing,
+/// guide discovery and HTML serialization as `/assembly-debug/:name`.
+pub fn benchColdPage(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?usize {
+    if (!isSafeName(name)) return null;
+    const source_path = paths.designSourcePath(allocator, project_dir, name) catch return null;
+
+    var eval = Evaluator.init(allocator, project_dir);
+    defer eval.deinit();
+    const value = eval.evalFile(source_path) catch return null;
+    const block: *env_mod.DesignBlock = switch (value) {
+        .design_block => |design| design,
+        else => return null,
+    };
+
+    const index = buildPageIndex(allocator, project_dir, name, block) catch return null;
+    const html = renderPage(allocator, name, index, null) catch return null;
+    return html.len;
+}
+
 /// GET /assembly-debug/:name — evaluate and render the read-only workspace.
 pub fn assemblyDebugPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const allocator = req.arena;
@@ -928,17 +966,11 @@ pub fn assemblyDebugPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response
         },
     };
 
-    const bom_path = paths.designSiblingPath(allocator, ctx.project_dir, name, ".bom") catch null;
-    const entries: []const bom.BomEntry = if (bom_path) |path| blk: {
-        break :blk bom.loadBom(allocator, path) catch &.{};
-    } else &.{};
-
-    var index = buildIndex(allocator, ctx.project_dir, block, entries) catch |err| {
+    const index = buildPageIndex(allocator, ctx.project_dir, name, block) catch |err| {
         res.status = 500;
         res.body = try std.fmt.allocPrint(allocator, "Could not index design: {s}", .{@errorName(err)});
         return;
     };
-    index.guides = rework_guide.loadAll(allocator, ctx.project_dir, name);
     res.content_type = .HTML;
     res.body = try renderPage(allocator, name, index, layout);
 }

@@ -23,7 +23,7 @@ zig build --seed=1 test      # unit tests + Guardian gate
 zig build docs               # regenerate language reference after any DSL change
 zig build test-affected      # default dev check: tests affected by your diff
 zig build run -- serve --project-dir projects/designs   # web server :7050
-scripts/perf_gate.sh         # PCB-page latency gate vs committed baseline
+scripts/perf_gate.sh         # Four primary-page latency gates vs committed baseline
                              # (pre-push on main runs this; --record re-baselines)
 ```
 

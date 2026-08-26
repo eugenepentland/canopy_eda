@@ -174,6 +174,32 @@ pub fn thermalPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
     res.body = body;
 }
 
+/// Render the default thermal review without a published server cache. The
+/// page-latency gate uses this request-less seam so every repetition measures a
+/// cold evaluation, layout-aware scenario solve, summary build and HTML render
+/// matching `/thermal/:name`, without inheriting a prior repetition's solve.
+pub fn benchColdPage(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?usize {
+    var eval = Evaluator.init(allocator, project_dir);
+    defer eval.deinit();
+    const nb = mcp_tools.evalNamedBlock(allocator, project_dir, name, &eval) catch return null;
+    const ambient = thermal.default_ambient_c;
+    const bt = thermal.analyze(allocator, nb.block, ambient) catch return null;
+    const layouts = pcb_layout_page.readLayouts(allocator, project_dir, name);
+    const scenarios = thermal_api.scenariosFor(allocator, project_dir, name, bt, ambient, null) catch return null;
+    const view = View{
+        .name = name,
+        .is_module = nb.is_module,
+        .ambient_c = ambient,
+        .scenario = .natural,
+        .bt = bt,
+        .scenarios = scenarios,
+        .lines = review_thermal.summaryLines(allocator, bt, scenarios) catch return null,
+        .layouts = layouts,
+    };
+    const body = render(allocator, view, nb.block.name, false) catch return null;
+    return body.len;
+}
+
 fn plainError(res: *httpz.Response, status: u16, body: []const u8) void {
     res.status = status;
     res.body = body;

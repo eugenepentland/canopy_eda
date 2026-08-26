@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Build netlisp and run the PCB-page latency benchmark — enforcing or recording.
+# Build netlisp and run the primary-page latency benchmark — enforcing or recording.
 #
 #   scripts/perf_gate.sh            # enforce against the committed baseline
 #                                   # (non-zero exit on any regression)
 #   scripts/perf_gate.sh --record   # re-record the baseline in place; review
 #                                   # and commit the diff deliberately
 #
-# The gate compares `netlisp bench-page` phase medians (page load, DRC report,
-# solve, eval, sidecar parse) against docs/benchmarks/pcb-page/baseline.json —
-# see that directory's README for the rules and the workflow, and
-# src/bench_page.zig for what each phase measures.
+# The gate compares `netlisp bench-page` phase medians (PCB, assembly, thermal,
+# and schematic cold renders plus DRC, solve, eval, and sidecar parse) against
+# docs/benchmarks/pcb-page/baseline.json. See that directory's README for the
+# rules and workflow, and src/bench_page.zig for the exact measured seams.
 #
 # It runs under scripts/gate.sh's machine-wide lock: a concurrent `zig build
 # test` roughly doubles wall times (docs/testing-guide.md), which would fail
