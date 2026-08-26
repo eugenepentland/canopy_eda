@@ -35,11 +35,13 @@ function ruleGraphic(key,name,value,description){var art="";
  else if(key==="min_drill")art='<circle class="ds-rg-copper" cx="62" cy="27" r="19"/><circle class="ds-rg-hole" cx="62" cy="27" r="5"/>'+hdim(57,67,53,value);
  else if(key==="min_annular")art='<circle class="ds-rg-copper" cx="53" cy="28" r="21"/><circle class="ds-rg-hole" cx="53" cy="28" r="10"/><path class="ds-rg-dim" d="M63 28H74M63 24V32M74 24V32"/><text class="ds-rg-label" x="96" y="25">ring</text><text class="ds-rg-label" x="96" y="37">'+esc(value)+'</text>';
  else if(key==="hole_to_hole")art='<circle class="ds-rg-hole" cx="34" cy="26" r="10"/><circle class="ds-rg-hole" cx="90" cy="26" r="10"/>'+hdim(44,80,50,value);
+ else if(key==="via_to_via")art='<circle class="ds-rg-copper" cx="32" cy="26" r="14"/><circle class="ds-rg-hole" cx="32" cy="26" r="5"/><circle class="ds-rg-copper" cx="100" cy="26" r="14"/><circle class="ds-rg-hole" cx="100" cy="26" r="5"/>'+hdim(46,86,53,value);
  else if(key==="copper_edge")art='<rect class="ds-rg-board" x="12" y="9" width="108" height="35" rx="2"/><rect class="ds-rg-copper" x="22" y="16" width="69" height="21" rx="3"/>'+hdim(91,120,53,value);
  else if(key==="component_edge")art='<rect class="ds-rg-board" x="12" y="9" width="108" height="35" rx="2"/><rect class="ds-rg-mask" x="28" y="15" width="48" height="23" rx="3"/>'+hdim(12,28,53,value);
  else if(key==="pour_clearance"||key==="pour_clearance_outer")art='<rect class="ds-rg-board" x="12" y="9" width="108" height="35" rx="2"/><path class="ds-rg-pour" fill-rule="evenodd" d="M14 11H118V42H14Z M51 15H79V38H51Z"/><rect class="ds-rg-copper" x="59" y="20" width="12" height="13" rx="2"/>'+hdim(51,59,53,value);
  else if(key==="pour_min_width")art='<path class="ds-rg-pour" d="M18 18H114V42H18Z"/><path class="ds-rg-copper" d="M18 30H114"/><path class="ds-rg-dim" d="M62 24V36M58 24H66M58 36H66"/><text class="ds-rg-label" x="70" y="34">'+esc(value)+'</text>';
  else if(key==="pour_corner_radius")art='<path class="ds-rg-pour" d="M20 42V22Q20 16 26 16H112"/><path class="ds-rg-dim" d="M20 12H26M20 8V16M26 8V16"/><text class="ds-rg-label" x="31" y="12">'+esc(value)+'</text>';
+ else if(key==="ground_via_max")art='<rect class="ds-rg-copper" x="13" y="16" width="31" height="22" rx="3"/><circle class="ds-rg-copper" cx="101" cy="27" r="14"/><circle class="ds-rg-hole" cx="101" cy="27" r="5"/>'+hdim(29,101,53,value);
  else if(key==="mask_margin")art='<rect class="ds-rg-board" x="12" y="9" width="108" height="35" rx="2"/><rect class="ds-rg-mask" x="37" y="13" width="58" height="31" rx="5"/><rect class="ds-rg-copper" x="44" y="19" width="44" height="19" rx="3"/>'+hdim(37,44,53,value);
  else if(key==="mask_relief_corner_radius")art='<path class="ds-rg-mask" d="M14 12H82V18Q82 24 88 24H118V42H14Z"/><path class="ds-rg-copper-line" d="M14 33H118"/><path class="ds-rg-dim" d="M82 9V18M82 9H91"/><text class="ds-rg-label" x="96" y="12">'+esc(value)+'</text>';
  else if(key==="mask_web")art='<rect class="ds-rg-board" x="10" y="8" width="112" height="37" rx="2"/><rect class="ds-rg-mask" x="16" y="13" width="39" height="29" rx="5"/><rect class="ds-rg-mask" x="77" y="13" width="39" height="29" rx="5"/><rect class="ds-rg-copper" x="22" y="19" width="27" height="17" rx="3"/><rect class="ds-rg-copper" x="83" y="19" width="27" height="17" rx="3"/>'+hdim(55,77,53,value);
@@ -257,6 +259,25 @@ var DRC_HELP={
  bypass_open:"A bypass capacitor's rail pad has no continuous same-face copper path to the exact IC supply pad it is authored to decouple. A remote pour or separate plane drops do not replace this local high-frequency connection.",
  net_open:"A net's copper splits into islands that never join — the connection is missing on the fabbed board."
 };
+// The Properties inspector consumes the same prose and the same ruleGraphic
+// renderer as Design Settings.  Violation JSON carries the human label (`k`),
+// while DRC_HELP is deliberately keyed by the stable enum id, so resolve the
+// label through PCB.drc_kinds instead of maintaining a second label map.
+var DRC_GRAPHIC_RULE={
+ track_track:"clearance",track_pad:"clearance",pad_pad:"clearance",
+ via_track:"clearance",via_pad:"clearance",via_via:"clearance",
+ via_spacing:"via_to_via",annular:"min_annular",pad_annular:"min_annular",
+ hole_hole:"hole_to_hole",min_drill:"min_drill",track_width:"min_width",
+ board_edge:"copper_edge",component_edge:"component_edge",
+ ground_via_distance:"ground_via_max"
+};
+function drcHelpForViolation(d){var meta=null,label=String(d&&d.k||"");
+ (PCB.drc_kinds||[]).some(function(k){if(k.label===label){meta=k;return true;}return false;});
+ var kind=meta&&meta.k||"",description=DRC_HELP[kind]||"",rule=DRC_GRAPHIC_RULE[kind]||"";
+ var required=d&&typeof d.clr==="number"&&isFinite(d.clr)?mm(d.clr):"rule limit";
+ return {description:description,graphic:rule?ruleGraphic(rule,label,required,description):""};
+}
+window.PCBDrcHelpForViolation=drcHelpForViolation;
 var DRC_ACTIONS=[["err","Error"],["warn","Warning"],["ignore","Ignored"]];
 function drcKindIndex(){var m={};(PCB.drc_kinds||[]).forEach(function(k,i){m[k.k]=i;});return m;}
 function drcLiveCounts(){var m={};(PCB.drc||[]).forEach(function(d){var k=String(d.k||"");m[k]=(m[k]||0)+1;});return m;}

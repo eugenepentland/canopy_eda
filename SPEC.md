@@ -6431,6 +6431,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The DRC policy table advertises the same built-in severity the checker emits, differential-pair rules included
 - A DRC check for copper outside any project design still layers the net-open connectivity rule onto the built-in severities
 - The /pcb-layout Properties dock hosts the inspector with segment editing and DRC rule settings
+- Selecting a DRC violation in Properties explains the check, distinguishes the concrete occurrence, and reuses the Design Settings rule illustration when that check has one
 - Segment drags preserve neighbouring trace support lines: compatible neighbours only stretch or shrink, while collinear runs, arcs, and ambiguous junctions remain anchored behind a connector
 - Dragging a native trace fillet re-solves its circle against both neighbouring support lines so both joins remain tangent
 - The hand-route head dodges or clips at clearance obstacles instead of drawing violating copper

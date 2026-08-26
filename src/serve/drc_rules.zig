@@ -828,6 +828,19 @@ test "viewer JS wires the docked inspector, segment editing, and the DRC rules m
     try std.testing.expect(std.mem.indexOf(u8, js, "drc-cog") != null);
 }
 
+// spec: Web Server - Selecting a DRC violation in Properties explains the check, distinguishes the concrete occurrence, and reuses the Design Settings rule illustration when that check has one
+test "DRC Properties inspector shows shared check help and rule graphics" {
+    const board = @embedFile("assets/pcb_board.js");
+    const settings = @embedFile("assets/pcb_settings.js");
+    const css = @embedFile("assets/pcb_layout.css");
+    try std.testing.expect(std.mem.indexOf(u8, settings, "window.PCBDrcHelpForViolation=drcHelpForViolation") != null);
+    try std.testing.expect(std.mem.indexOf(u8, settings, "rule?ruleGraphic(rule,label,required,description)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, board, "window.PCBDrcHelpForViolation(o)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, board, "What this check catches") != null);
+    try std.testing.expect(std.mem.indexOf(u8, board, "This occurrence") != null);
+    try std.testing.expect(std.mem.indexOf(u8, css, ".prop-drc-help-body .ds-rule-svg") != null);
+}
+
 /// Substrings that prove the settings drawer's DRC policy section can edit
 /// every check: the three action labels plus a `DRC_HELP` entry per
 /// `drc.Kind`. Built from the enum itself, so adding a kind fails the test
