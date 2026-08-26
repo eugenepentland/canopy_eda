@@ -130,10 +130,10 @@ Local dev still uses `http://localhost:7050`.
   persists it like any routed copper (works on module pages → the module's
   `.layouts.json`). A click that magnetically snaps to a same-net pad or
   existing trace endpoint finishes the manual trace only after the path reaches
-  that endpoint. While a trace is live, its ratsnest line follows the legal
-  preview endpoint to the closest unresolved same-net pad, trace body, via, or
-  filled-pour point outside the launch island (and remains available when
-  routing resumes from existing copper).
+  that endpoint. While a trace is live, a faded dashed ratsnest line follows
+  the legal preview endpoint to the closest unresolved same-net pad, trace body,
+  via, or filled-pour point outside the launch island (and remains available
+  when routing resumes from existing copper).
   **Rigid sub-circuits**: parts sharing a sub-block prefix
   drag/rotate as one unit (G explodes/re-coheres; per-design localStorage),
   and the sidebar Sub-circuits palette **Stamp**s a whole module ★ layout
