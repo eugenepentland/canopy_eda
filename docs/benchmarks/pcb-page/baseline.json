@@ -266,9 +266,9 @@
     }
   ],
   "budgets": {
-    "page_ms": 1500,
-    "assembly_page_ms": 250,
-    "thermal_page_ms": 2500,
-    "schematic_page_ms": 750
+    "page_ms": 1000,
+    "assembly_page_ms": 150,
+    "thermal_page_ms": 2250,
+    "schematic_page_ms": 500
   }
 }

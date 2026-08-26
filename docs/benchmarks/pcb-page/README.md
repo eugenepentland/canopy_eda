@@ -41,7 +41,7 @@ A gated run fails (non-zero exit, refusing the push) when any of:
    per-board rule alone would wave through.
 3. **Hand-set budgets** — the optional top-level `"budgets"` object in
    `baseline.json` caps every board absolutely. The committed page ceilings are
-   1500 ms for PCB, 250 ms for assembly, 2500 ms for thermal, and 750 ms for
+   1000 ms for PCB, 150 ms for assembly, 2250 ms for thermal, and 500 ms for
    schematics. The recorder never writes this object — only a human adds or
    changes a budget, so re-recording cannot silently raise one.
 4. **Unlike work** — a board's DRC counts moved vs the baseline. Wall times
