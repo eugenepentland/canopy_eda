@@ -5941,6 +5941,9 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The layout-progress ladder endpoint bypasses its cache for any query parameter
 - The layout-progress ladder endpoint reuses a dependency-validated JSON body and invalidates it when the design or its sidecars change
 - The layout-progress cache refuses a body whose dependency set stamps nothing
+- The PCB-describe endpoint reuses a dependency-validated facts document and invalidates it when the design or its sidecars change
+- The PCB-describe endpoint caches only its allow-listed query modes and bypasses fresh-solve and sub-scoped requests
+- The PCB-describe cache refuses a body whose dependency set stamps nothing
 - The layout-status reader reuses a parsed layouts sidecar until that file's mtime or size changes
 - The fab-readiness gate reuses caller-supplied net connectivity instead of recomputing it
 - The navigation bar routes home through the Netlisp brand and carries no separate Designs tab

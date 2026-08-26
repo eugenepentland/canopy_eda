@@ -76,8 +76,22 @@ pub fn pcbDescribeApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) p
         res.status = 404;
         return;
     };
+    // Read the live version BEFORE computing, so a design edit that lands
+    // mid-request is treated as a miss next time instead of being baked in.
+    const live_version = serve_root.getLiveVersion(name);
+    var miss_version: ?u32 = null;
+    if (ctx.state.caches.describe_json.serve(.{
+        .scratch = arena,
+        .req = req,
+        .res = res,
+        .name = name,
+        .live_version = live_version,
+    }, &miss_version)) return;
+
     const opts = pcb_layout_page.pngRequestFromQuery(arena, req);
-    const body = describeDesign(arena, ctx.project_dir, name, opts) catch |e| {
+    var deps: ?page_cache.FileSet = null;
+    const body = describeDesign(arena, ctx.project_dir, name, opts, &deps) catch |e| {
+        if (deps) |d| d.deinit();
         const fail = pcb_layout_page.pngFailure(e);
         res.status = fail.status;
         res.content_type = .JSON;
@@ -86,6 +100,16 @@ pub fn pcbDescribeApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) p
     };
     res.content_type = .JSON;
     res.body = body;
+    ctx.state.caches.describe_json.store(.{
+        .scratch = arena,
+        .req = req,
+        .res = res,
+        .name = name,
+        .json = body,
+        .files = deps,
+        .live_version = miss_version,
+        .current_version = serve_root.getLiveVersion(name),
+    });
 }
 
 /// GET /api/layout-progress/:name — the compact six-stage completion ladder
@@ -134,11 +158,17 @@ pub fn layoutProgressApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response
 
 /// Solve (or load) the placement exactly as the PNG endpoint would and return
 /// the facts JSON. Bytes are owned by `alloc` (callers pass an arena).
+/// `deps`, when non-null, receives the file dependency set of this computation
+/// — the same one `describeProgress` captures, because these facts EMBED that
+/// ladder and read no sidecar it doesn't — so the caller can cache the body
+/// against it. The capture happens while the evaluators are still alive; the
+/// caller owns the returned set and must `deinit` it.
 pub fn describeDesign(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
     opts: pcb_layout_page.PngRequest,
+    deps: ?*?page_cache.FileSet,
 ) pcb_layout_page.PngError![]u8 {
     var eval = Evaluator.init(alloc, project_dir);
     defer eval.deinit();
@@ -146,6 +176,14 @@ pub fn describeDesign(
     defer if (module_res) |mr| {
         mr.eval.deinit();
         alloc.destroy(mr.eval);
+    };
+    // Captured before the deferred `deinit`s above run, and before any early
+    // error return, so a caller's cache never keys on a half-built read-set.
+    defer if (deps) |out| {
+        out.* = if (module_res) |mr|
+            progress_cache.captureDeps(alloc, &.{ &eval, mr.eval }, project_dir, name)
+        else
+            progress_cache.captureDeps(alloc, &.{&eval}, project_dir, name);
     };
     const solved = try pcb_layout_page.solveForRequest(alloc, project_dir, name, opts, &eval, &module_res);
 
@@ -2377,7 +2415,7 @@ test "describeDesign solves a sub-block-only design and 404s an unknown name" {
     });
     const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
 
-    const out = try describeDesign(alloc, project, "power-mini", .{});
+    const out = try describeDesign(alloc, project, "power-mini", .{}, null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"title\":\"Mini Power\"") != null);
     // Both sub-blocks' parts made it into the facts, with prefixed refs.
     try std.testing.expect(std.mem.indexOf(u8, out, "\"ref\":\"a/") != null);
@@ -2385,5 +2423,5 @@ test "describeDesign solves a sub-block-only design and 404s an unknown name" {
 
     // A name that resolves to nothing surfaces BlockNotFound (the handler's
     // 404), not a generic failure.
-    try std.testing.expectError(error.BlockNotFound, describeDesign(alloc, project, "no-such-design", .{}));
+    try std.testing.expectError(error.BlockNotFound, describeDesign(alloc, project, "no-such-design", .{}, null));
 }
