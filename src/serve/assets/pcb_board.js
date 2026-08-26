@@ -8266,9 +8266,11 @@ function drcMsg(d){
  return tag+d.k+on+" — gap "+drcMm(d.gap)+" mm < "+drcMm(d.clr)+" mm";}
 // Marker colour keeps the panel's err/warn split (warn markers read amber).
 function drcMarkColor(d){return (d&&(d.sev==="warn"||d.sev==="warning"))?"#e3b341":TH.drc;}
-// Connectivity remains actionable in the DRC sidebar, but its island-gap
-// coordinates are not useful board annotations and can overwhelm the copper.
-function drcOnBoard(d){return !!d&&d.k!=="net open";}
+// Every DRC finding is locatable on the board. Net-open findings carry the
+// nearest points on the two disconnected copper islands in `bridge`; drawing
+// that exact gap is substantially more useful than asking the user to infer a
+// location from a synthetic per-pin net name such as VDD.U24.60.
+function drcOnBoard(d){return !!d;}
 // A layer-scoped finding is an annotation of that copper, so the same eye or
 // Front/Back preset hides both. Layerless findings describe physical features
 // spanning the board (holes/vias/edge) or the whole assembly and stay visible.
@@ -8281,6 +8283,14 @@ function drawDrc(){while(gD.firstChild)gD.removeChild(gD.firstChild);
  // spot without the fat opaque disc smothering the copper you're trying to read.
  (PCB.drc||[]).forEach(function(d){if(!drcMarkerVisible(d))return;var cx=X(d.x),cy=Y(d.y),col=drcMarkColor(d);
    var t=el("title",{}); t.textContent=drcMsg(d);
+   if(d.k==="net open"&&d.bridge&&d.bridge.length===4){
+    var x1=X(d.bridge[0]),y1=Y(d.bridge[1]),x2=X(d.bridge[2]),y2=Y(d.bridge[3]);
+    var line=el("line",{x1:x1.toFixed(1),y1:y1.toFixed(1),x2:x2.toFixed(1),y2:y2.toFixed(1),
+     stroke:col,"stroke-width":1.1,"stroke-dasharray":"5 4","vector-effect":"non-scaling-stroke",opacity:0.72});
+    line.appendChild(t);gD.appendChild(line);
+    [ [x1,y1],[x2,y2] ].forEach(function(p){gD.appendChild(el("circle",{cx:p[0].toFixed(1),cy:p[1].toFixed(1),r:4,
+     fill:"none",stroke:col,"stroke-width":1.4,"vector-effect":"non-scaling-stroke",opacity:0.9}));});
+   }
    var c=el("circle",{cx:cx.toFixed(1),cy:cy.toFixed(1),r:6,fill:"none",stroke:col,
     "stroke-width":1.1,"vector-effect":"non-scaling-stroke",opacity:0.6}); c.appendChild(t);
    gD.appendChild(c);
@@ -8412,10 +8422,13 @@ function renderDrcList(){drcTabBadge();var lst=ensureDrcList();if(!lst)return;
    '<span class="drc-gc '+(err?"err":"warn")+'">'+countText+'</span></div>';
   if(coll)return;
   if(openNets){openNets.forEach(function(ng){var expanded=!!drcOpenExpanded[ng.name],first=v[ng.idxs[0]],sc=drcSevClass(first);
+   var nearest=drcPads(first),nearGap=drcOpenGap(first);
    h+='<div class="drc-net'+(sc?' '+sc:'')+(expanded?'':' coll')+'" data-drcnet="'+pEsc(ng.name)+'" data-drcfirst="'+ng.idxs[0]+'" title="'+
     (expanded?'Hide':'Show')+' '+ng.idxs.length+' connection'+(ng.idxs.length>1?'s':'')+' needed for '+pEsc(ng.name||'unnamed net')+'">'+
     '<span class="drc-tw">'+(expanded?'▾':'▸')+'</span><span class="drc-loc">'+pEsc(ng.name||'(unnamed net)')+'</span>'+
-    '<span class="drc-net-count">'+ng.idxs.length+' connection'+(ng.idxs.length>1?'s':'')+' needed</span></div>';
+    (nearest?'<span class="drc-ref">'+pEsc(nearest)+'</span>':'')+
+    '<span class="drc-net-count">'+ng.idxs.length+' connection'+(ng.idxs.length>1?'s':'')+' needed'+
+    (isFinite(nearGap)?(' · nearest '+(Math.round(nearGap*1000)/1000)+' mm'):'')+'</span></div>';
    if(!expanded)return;
    ng.idxs.forEach(function(i){h+=drcViolationRow(v[i],i);});});return;}
   idxs.forEach(function(i){h+=drcViolationRow(v[i],i);});});

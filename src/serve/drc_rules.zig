@@ -484,10 +484,13 @@ test "viewer JS wires the WASM DRC worker, server reconciliation, and the overri
     try std.testing.expect(std.mem.indexOf(u8, rules, "fab_readiness.routableTally(alloc, in.placement") != null);
 }
 
-// spec: Web Server - Net-open DRC findings remain in the sidebar and counts but do not draw or hit-test as PCB markers
-test "viewer keeps net-open findings off the board while retaining the DRC list" {
+// spec: Web Server - Net-open DRC findings draw their exact missing bridge and endpoint rings, remain board-clickable, and retain the grouped DRC list
+test "viewer locates net-open findings on the board and in the DRC list" {
     const js = @embedFile("assets/pcb_board.js");
-    try std.testing.expect(std.mem.indexOf(u8, js, "function drcOnBoard(d){return !!d&&d.k!==\"net open\";}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "function drcOnBoard(d){return !!d;}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(d.k===\"net open\"&&d.bridge&&d.bridge.length===4)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "stroke-dasharray\":\"5 4\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "[ [x1,y1],[x2,y2] ].forEach") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "forEach(function(d){if(!drcMarkerVisible(d))return;var cx=X(d.x)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "function renderDrcList(){drcTabBadge();var lst=ensureDrcList();if(!lst)return;") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "var v=PCB.drc||[];") != null);
@@ -500,6 +503,8 @@ test "viewer consolidates net-open findings by exact net" {
     try std.testing.expect(std.mem.indexOf(u8, js, "function drcOpenNetGroups(idxs)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "if(k===\"net open\"){drcOpenNetGroups(g.groups[k])") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "connection'+(ng.idxs.length>1?'s':'')+' needed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "var nearest=drcPads(first),nearGap=drcOpenGap(first);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "nearest '+(Math.round(nearGap*1000)/1000)+' mm") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "var sum=drcSummary(),err=sum.err,warn=sum.warn,bits=[];") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "open net\"+(sum.open>1?\"s\":\"\")") != null);
 }

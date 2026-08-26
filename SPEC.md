@@ -6302,7 +6302,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Net-open DRC rows and their expanded missing connections sort by shortest gap first
 - Selecting a grouped net-open row or one of its gaps frames and draws a net-coloured line between that finding's nearest island probes
 - The selected net-open bridge uses a screen-space hairline and hollow endpoint rings that shrink for short gaps
-- Net-open DRC findings remain in the sidebar and counts but do not draw or hit-test as PCB markers
+- Net-open DRC findings draw their exact missing bridge and endpoint rings, remain board-clickable, and retain the grouped DRC list
 - The /pcb-layout accordion carries no optimizer tuning or score-reweigh panel
 - The /pcb-layout saved-version navigator sits inside Autorouter, immediately after the route controls
 - ?layout=<name> shows that saved layout verbatim, outranking the starred default, while ?refine= re-solves from it
