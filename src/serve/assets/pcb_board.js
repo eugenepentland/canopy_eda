@@ -3520,8 +3520,13 @@ function commitMove(idxs,copper){if(!idxs.length&&!copper)return;
  dragCacheDrop();paintSoon();scheduleDrc();updatePropLive();
  if(window.PCB3D&&window.PCB3D.sync)window.PCB3D.sync();}
 // Translate a carried-copper set in place — the panel-move twin of the drag's
-// per-frame translate.
+// per-frame translate. Generated RF polygons are proofs of their original
+// centreline geometry, not independently editable copper. Drop them before
+// changing endpoints (while legacy paths without track_ids can still be
+// matched geometrically), so Move/Align/Pad-align cannot strand an untouchable
+// taper at the old connector position.
 function shiftCopper(cu,dx,dy){
+ rfDropForTracks(cu.t);
  cu.t.forEach(function(t){t.x1+=dx;t.y1+=dy;if(t.xm!=null){t.xm+=dx;t.ym+=dy;}t.x2+=dx;t.y2+=dy;});
  cu.v.forEach(function(v){v.x+=dx;v.y+=dy;});
  (cu.z||[]).forEach(function(z){(z.poly||[]).forEach(function(p){p[0]+=dx;p[1]+=dy;});});

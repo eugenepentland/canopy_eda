@@ -1069,6 +1069,16 @@ test "viewer JS panel moves carry per-entity copper and never shift one object t
     try std.testing.expect(std.mem.indexOf(u8, js, "commitMove(moveEntities(ents,deltas));") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "var cu=carriedCopper(e.idxs,e.g,false),t=[],v=[],z=[];") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "shiftCopper({t:t,v:v,z:z},d.dx,d.dy);") != null);
+    // Moving an owned centreline invalidates its generated RF taper before
+    // changing endpoints. The order matters for old saved paths that have no
+    // track_ids and can only be associated by their original geometry.
+    const shift_start = std.mem.indexOf(u8, js, "function shiftCopper(cu,dx,dy)") orelse return error.TestShiftCopperMissing;
+    const shift_tail = js[shift_start..];
+    const shift_end = std.mem.indexOf(u8, shift_tail, "// Move entities") orelse return error.TestShiftCopperEndMissing;
+    const shift_body = shift_tail[0..shift_end];
+    const rf_drop = std.mem.indexOf(u8, shift_body, "rfDropForTracks(cu.t);") orelse return error.TestRfDropMissing;
+    const endpoint_move = std.mem.indexOf(u8, shift_body, "t.x1+=dx") orelse return error.TestTrackShiftMissing;
+    try std.testing.expect(rf_drop < endpoint_move);
     // An entity knows its group, so its stamped copper rides with it.
     try std.testing.expect(std.mem.indexOf(u8, js, "if(idxs.length)ents.push({idxs:idxs,g:key});") != null);
     // One claim set spans the operation: two entities cannot both shift an
