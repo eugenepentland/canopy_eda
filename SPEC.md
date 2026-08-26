@@ -6433,6 +6433,9 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Design Settings edits board-level numeric rules in the GUI, preserves unrelated source forms, rebuilds, and reloads the shown layout
 - Design Settings renders validated numeric rule inputs with save-and-rebuild feedback
 - Design Settings creates a design-rules source form when a board previously relied entirely on defaults
+- Design Settings adds, edits, and deletes whole-layer copper planes without replacing physical stackup construction or comments
+- Saving plane controls on an implicit board authors the visible copper count and supports an explicitly plane-free stack
+- Design Settings exposes whole-layer copper assignments with add, edit, delete, validated save, and read-only states
 - Assembly mask relief retains one authored-radius terminal fillet where a pad terminates or crosses the RF route
 - Assembly and 3D mask relief restore a local pad-shaped web without interrupting the exposed trace
 - The PCB page blob names the declared plane nets, and omits the key entirely when the design declares no stackup

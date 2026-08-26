@@ -761,6 +761,7 @@ pub fn serve(
     // Edit
     router.post("/api/edit-value/:name", edit.editValueApi, .{});
     router.post("/api/design-rules/:name", design_rules_edit.editDesignRulesApi, .{});
+    router.post("/api/stackup-planes/:name", design_rules_edit.editStackupPlanesApi, .{});
     router.get("/api/board-role/:name", edit.getBoardRoleApi, .{});
     router.post("/api/board-role/:name", edit.setBoardRoleApi, .{});
     router.post("/api/power-plane/:name", edit.setPowerPlaneApi, .{});

@@ -3189,6 +3189,7 @@ src/serve/design_diff.zig::diffBlocks | fn diffBlocks( allocator: std.mem.Alloca
 src/serve/design_diff.zig::historyApi | fn historyApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/design_diff.zig::writeDiffJson | fn writeDiffJson(w: anytype, diff: DesignDiff) (std.mem.Allocator.Error || std.Io.Writer.Error)!void
 src/serve/design_rules_edit.zig::editDesignRulesApi | fn editDesignRulesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) std.mem.Allocator.Error!void
+src/serve/design_rules_edit.zig::editStackupPlanesApi | fn editStackupPlanesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) std.mem.Allocator.Error!void
 src/serve/diag_format.zig::Diagnostic struct_
 src/serve/diag_format.zig::build | fn build( allocator: std.mem.Allocator, file_path: []const u8, source: []const u8, err_name: []const u8, last_error: ?evaluator_mod.EvalDiagnostic, ) std.mem.Allocator.Error!Diagnostic
 src/serve/diag_format.zig::caretLine | fn caretLine(allocator: std.mem.Allocator, source_line: []const u8, col: u32) std.mem.Allocator.Error![]u8

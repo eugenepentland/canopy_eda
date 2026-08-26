@@ -1159,6 +1159,16 @@ test "PCB settings expose numeric rule editors and the save-rebuild action" {
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_settings_js, marker) != null);
 }
 
+// spec: Web Server - Design Settings exposes whole-layer copper assignments with add, edit, delete, validated save, and read-only states
+test "PCB settings edit whole-layer copper assignments" {
+    const markers = [_][]const u8{
+        "Whole-layer copper", "Add whole-layer pour", "ds-plane-layer",
+        "ds-plane-net",       "ds-plane-delete",      "/api/stackup-planes/",
+        "Save plane changes", "planes:vals",          "This layout is read-only.",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_settings_js, marker) != null);
+}
+
 // spec: Web Server - The PCB replay client streams the live-route endpoint into the timeline player, follows the head, and reattaches to a running job through the overlay seam
 test "PCB replay client streams the live route and follows the head" {
     const markers = [_][]const u8{
