@@ -101,6 +101,7 @@ test {
     _ = @import("fab_preview.zig");
     _ = @import("fab_readiness.zig");
     _ = @import("route_repair.zig");
+    _ = @import("route_resume.zig");
     _ = @import("flat_netlist.zig");
     _ = @import("font5x7.zig");
     _ = @import("gerber_verify.zig");

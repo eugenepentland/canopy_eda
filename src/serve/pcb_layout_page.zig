@@ -82,6 +82,7 @@ const pages_tmpl = @import("templates/pages.zig");
 const diag_format = @import("diag_format.zig");
 const serve_root = @import("../serve.zig");
 const route_plan = @import("route_plan.zig");
+const route_resume = @import("../route_resume.zig").ManualCompletion;
 const subcircuit_route = @import("subcircuit_route.zig");
 const subcircuit_seed_drc = @import("../subcircuit_seed_drc.zig");
 const placement_outline = @import("placement_outline.zig");
@@ -4272,7 +4273,10 @@ pub const RoutePrep = struct {
     /// block's authored `(route (effort …))`. The viewer's "Route plan" action
     /// sends `one_shot` so a preview of a fresh seed answers in seconds instead
     /// of climbing the rescue ladder; nothing is persisted either way.
-    effort: ?route_policy.Effort = null,
+    steering: struct {
+        effort: ?route_policy.Effort = null,
+        resume_points: []const route_resume.Point = &.{},
+    } = .{},
 };
 
 /// Why `prepareRouteFromJson` could not build a `RoutePrep` — each variant maps
@@ -4373,6 +4377,7 @@ pub fn prepareRouteFromJson(
     // scope ⇒ the empty ScopedRoute, i.e. a whole-board route (unchanged).
     const vscope = parseViewerRouteScope(alloc, root, eff_block, placement) catch
         return error.ScopeFailed;
+    const resume_points = try route_resume.parse(alloc, root, placement);
     // Hand-drawn user copper pours the client posted: seed the maze with them as
     // same-net source copper (and credit them toward the connectivity DRC).
     const posted_zones = shownZones(parseSavedRoutes(alloc, root));
@@ -4385,27 +4390,8 @@ pub fn prepareRouteFromJson(
         .scoped = scoped,
         .user_zones = userZonesFrom(alloc, placement.rules, posted_zones),
         .echo = .{ .selected = vscope.selected, .unknown = vscope.unknown },
-        .effort = resolvedBodyEffort(root, in.default_effort),
+        .steering = .{ .effort = route_resume.effort(root, in.default_effort), .resume_points = resume_points },
     };
-}
-
-/// The body's optional `"effort"` tier override. An absent field, a non-string,
-/// or a word that is not a tier name all mean "keep the block's authored
-/// effort", so every caller written before the field existed routes byte-
-/// identically. (`route_experiment` is the surface that REJECTS a typo — here a
-/// preview must never fail over a spelling, it just routes as the plan says.)
-fn bodyEffort(root: std.json.Value) ?route_policy.Effort {
-    if (root != .object) return null;
-    const v = root.object.get("effort") orelse return null;
-    if (v != .string) return null;
-    return route_policy.Effort.fromName(v.string);
-}
-
-/// Resolve a surface's request policy without letting its fallback overwrite
-/// an explicit tier. In particular, an API client's `standard` must beat the
-/// editor endpoints' bounded one-shot default.
-fn resolvedBodyEffort(root: std.json.Value, default: ?route_policy.Effort) ?route_policy.Effort {
-    return bodyEffort(root) orelse default;
 }
 
 /// The routed half of the shared pipeline's output: the router's run (timeline
@@ -4437,7 +4423,8 @@ fn preparedRouteOptions(alloc: std.mem.Allocator, prep: RoutePrep) route_policy.
     options.existing_tracks = prep.scoped.existing_tracks;
     options.existing_vias = prep.scoped.existing_vias;
     options.existing_zones = prep.scoped.existing_zones;
-    if (prep.effort) |e| options.effort = e;
+    if (prep.steering.effort) |e| options.effort = e;
+    options.net = route_resume.apply(alloc, prep.placement, options.net, prep.steering.resume_points);
     return options;
 }
 
@@ -4514,6 +4501,9 @@ pub fn routePrepFailure(e: RoutePrepError) struct { status: u16, msg: ?[]const u
 /// `clearance`, `via_drill`, `via_dia` (mm; absent/0 → the router default). An
 /// optional `groups`/`nets` scope (+ the current `tracks`/`vias`) makes it an
 /// incremental re-route of just those nets, preserving the rest of the board.
+/// Ordered `resume_points` additionally steer a selected net through the
+/// manual route's fixed head and chosen destination-copper point; the client
+/// extracts only the path between those hard points as its autocomplete.
 /// The current `zones` array is always submitted, so whole-board and scoped
 /// routes can use hand-drawn same-net pours as routing terminals.
 /// An optional `"effort"` (`one_shot` / `one-shot` / `standard`) picks the retry
@@ -8300,7 +8290,7 @@ test "M binds the move-by-distance dialog and D binds the ruler, and the toolstr
 // while outline sketches retain their vertical constraint shortcut.
 test "V opens the View sidebar outside an active trace or outline sketch" {
     const js = @embedFile("assets/pcb_board.js");
-    try std.testing.expect(std.mem.indexOf(u8, js, "if(dtrace&&(ev.key==\"v\"||ev.key==\"V\")){ev.preventDefault();drawViaHere();return;}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(dtrace&&(ev.key==\"v\"||ev.key==\"V\")){ev.preventDefault();drawViaHere();if(dtrace)drawAutoSchedule(false,false);return;}") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "if(dtrace||viaMode||outlineMode||activeSketchIsArea())return;") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "compactDockSet(\"appearance\",true,\"\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "mobilePanelSet(\"layers\",true)") != null);
@@ -17377,7 +17367,7 @@ test "the route body's effort field overrides the tier for that run only" {
     const parse = struct {
         fn go(a: std.mem.Allocator, body: []const u8) ?route_policy.Effort {
             const v = std.json.parseFromSliceLeaky(std.json.Value, a, body, .{}) catch return null;
-            return bodyEffort(v);
+            return route_resume.effort(v, null);
         }
     }.go;
     // Both spellings of the cheap tier — the viewer sends the enum's own, the
@@ -17393,7 +17383,7 @@ test "the route body's effort field overrides the tier for that run only" {
     try std.testing.expect(parse(alloc, "{\"effort\":null}") == null);
     try std.testing.expect(parse(alloc, "{\"effort\":\"turbo\"}") == null);
     // A non-object body (the parts check rejects it upstream) is not a crash.
-    try std.testing.expect(bodyEffort(.{ .string = "one_shot" }) == null);
+    try std.testing.expect(route_resume.effort(.{ .string = "one_shot" }, null) == null);
 }
 
 // spec: Web Server - Route board is bounded on the server even for an already-open legacy page that omits effort, while an explicit API standard tier wins over that default
@@ -17406,15 +17396,15 @@ test "the viewer route default is one-shot and explicit standard still wins" {
 
     try std.testing.expectEqual(
         route_policy.Effort.one_shot,
-        resolvedBodyEffort(missing, .one_shot) orelse return error.TestNoEffort,
+        route_resume.effort(missing, .one_shot) orelse return error.TestNoEffort,
     );
     try std.testing.expectEqual(
         route_policy.Effort.standard,
-        resolvedBodyEffort(deep, .one_shot) orelse return error.TestNoEffort,
+        route_resume.effort(deep, .one_shot) orelse return error.TestNoEffort,
     );
     // Non-viewer consumers opt out of the fallback and preserve authored
     // policy exactly as before.
-    try std.testing.expect(resolvedBodyEffort(missing, null) == null);
+    try std.testing.expect(route_resume.effort(missing, null) == null);
 }
 
 // spec: Web Server - The route_pcb CLI tool can select a bounded retry tier, checkpoints routed copper before optional deferred DRC, and rejects unknown tiers
@@ -17471,7 +17461,7 @@ test "prepared route options carry the body's scope, copper and effort together"
     try std.testing.expectEqual(@as(usize, 2), plain.selected_nets.len);
     try std.testing.expect(plain.selected_nets[0] and !plain.selected_nets[1]);
 
-    prep.effort = .one_shot;
+    prep.steering.effort = .one_shot;
     const cheap = preparedRouteOptions(alloc, prep);
     try std.testing.expectEqual(route_policy.Effort.one_shot, cheap.effort);
     try std.testing.expect(!cheap.effort.retries());
