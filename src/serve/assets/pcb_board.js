@@ -7612,21 +7612,28 @@ function drawCancel(){var snap=dtrace&&dtrace.undo;dtrace=null;
  if(snap){restoreCopperSnap(snap);linksDirty=true;traceEmDirty=true;powerIntegrityDirty=true;ovsRev++;
   keepoutGeomDrop();cuGeomDrop();gpuCuEdit();rats();drcGateSessionDefer();}
  drawModeSet(false);routeStatMsg("routing cancelled");}
-// Destination pads for a trace started on pad (pi,pd): the far end of every
-// still-unrouted airwire touching that pad — where this trace is *supposed*
-// to land. paintDraw pulses them amber (the click-highlight treatment), and
-// the whole net lights up hoverNet-style while the trace is live.
-function drawDests(pi,pd){var out=[];
- if(pi==null||!pd)return out;
+// Destination pads for a live trace: the far end of every still-unrouted
+// airwire leaving its starting copper island. A bare pad has no connectivity
+// root yet, so its directly-attached links are the fallback. This also keeps
+// the guide alive when routing resumes from an existing track endpoint or via.
+function drawDestAdd(out,seen,i,x,y){if(i<0||!P[i])return;
+ var key=i+":"+x+":"+y;if(seen[key])return;seen[key]=1;var opd=null;
+ (P[i].pads||[]).forEach(function(q){if(Math.abs(q.x-x)<1e-6&&Math.abs(q.y-y)<1e-6)opd=q;});
+ out.push({i:i,pd:opd,x:x,y:y});}
+function drawDests(pi,pd,net,layer,x,y){var out=[],seen={};
  if(linksDirty)linksRecompute();
+ var nk=netCollapse(net||(pd&&pd.net)||""),conn=linkConnCache[nk],startRoot;
+ if(conn&&conn.roots){
+  if(pi!=null&&pd){var pn=connPadNode(pi,pd.x,pd.y);if(pn)startRoot=conn.roots[pn];}
+  if(startRoot===undefined&&x!=null&&y!=null)startRoot=conn.roots[connKey(x,y,layer||0)];}
  (PCB.links||[]).forEach(function(l){if(l.done)return;
-  var oi=-1,ox=0,oy=0;
-  if(l.a===pi&&Math.abs(l.ax-pd.x)<1e-6&&Math.abs(l.ay-pd.y)<1e-6){oi=l.b;ox=l.bx;oy=l.by;}
-  else if(l.b===pi&&Math.abs(l.bx-pd.x)<1e-6&&Math.abs(l.by-pd.y)<1e-6){oi=l.a;ox=l.ax;oy=l.ay;}
-  if(oi<0||!P[oi])return;
-  var opd=null;
-  (P[oi].pads||[]).forEach(function(q){if(Math.abs(q.x-ox)<1e-6&&Math.abs(q.y-oy)<1e-6)opd=q;});
-  out.push({i:oi,pd:opd,x:ox,y:oy});});
+  if(netCollapse(l.net||"")!==nk)return;
+  if(pi!=null&&pd&&l.a===pi&&Math.abs(l.ax-pd.x)<1e-6&&Math.abs(l.ay-pd.y)<1e-6){drawDestAdd(out,seen,l.b,l.bx,l.by);return;}
+  if(pi!=null&&pd&&l.b===pi&&Math.abs(l.bx-pd.x)<1e-6&&Math.abs(l.by-pd.y)<1e-6){drawDestAdd(out,seen,l.a,l.ax,l.ay);return;}
+  if(startRoot===undefined||!conn)return;
+  var ra=conn.roots[connPadNode(l.a,l.ax,l.ay)],rb=conn.roots[connPadNode(l.b,l.bx,l.by)];
+  if(ra===startRoot&&rb!==startRoot)drawDestAdd(out,seen,l.b,l.bx,l.by);
+  else if(rb===startRoot&&ra!==startRoot)drawDestAdd(out,seen,l.a,l.ax,l.ay);});
  return out;}
 // ── Coupled differential-pair drawing ───────────────────────────────────
 // Starting a trace on a pad, via, or track whose net belongs to a
@@ -7821,7 +7828,7 @@ function dpBack(){var pr=dtrace.pair,st=dtrace.steps.pop();
  dtrace.n-=st.np;dtrace.lx=st.plx;dtrace.ly=st.ply;pr.lx=st.nlx;pr.ly=st.nly;dtrace.pdir=st.pdir;
  gpuCuEdit();ovPaintSoon();}
 function drawStart(net,layer,x,y,pi,pd){
- var dests=drawDests(pi,pd);
+ var dests=drawDests(pi,pd,net,layer,x,y);
  if(dests.length)routeStatMsg("route "+nLeaf(net)+" → "+
   dests.map(function(d){return refLabel(P[d.i].ref);}).join(", "));
  var tr={net:net,l:layer,w:trackW(net),lx:x,ly:y,n:0,undo:snapAll(),laid:[],dest:dests,pdir:null,steps:[],
@@ -7933,12 +7940,21 @@ function paintViaTool(ctx){if(!viaMode||!viaCur)return;var q=viaNet?viaSnap(viaC
  ctx.beginPath();ctx.arc(X(q.x),Y(q.y),r,0,6.2832);ctx.fill();ctx.fillStyle=TH.viaHole;
  ctx.beginPath();ctx.arc(X(q.x),Y(q.y),rh,0,6.2832);ctx.fill();ctx.strokeStyle=blocked?"#ff4d4d":"#7ee787";
  ctx.lineWidth=1.3;ctx.setLineDash(viaNet?[]:[3,2]);ctx.beginPath();ctx.arc(X(q.x),Y(q.y),r+3,0,6.2832);ctx.stroke();ctx.restore();}
+// Keep one live ratsnest line attached to the ROUTABLE preview head, aimed at
+// the closest destination pad centre. Using the clipped preview endpoint (not
+// the raw cursor) makes the line say exactly where legal copper currently ends.
+function drawNearestDest(head){if(!head||!dtrace||!dtrace.dest)return null;
+ var best=null,bd=1e100;dtrace.dest.forEach(function(d){var c=wpt(d.i,d.x,d.y),dd=Math.hypot(c.x-head.x,c.y-head.y);
+  if(dd<bd){bd=dd;best={x:c.x,y:c.y,d:d};}});return best;}
+function paintDrawRatline(ctx,head){var q=drawNearestDest(head);if(!q)return;
+ ctx.save();ctx.setLineDash([]);ctx.strokeStyle=(netColOn&&netColorOf(netCollapse(dtrace.net)))||TH.ratsLine;
+ ctx.globalAlpha=0.72;ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(X(head.x),Y(head.y));ctx.lineTo(X(q.x),Y(q.y));ctx.stroke();ctx.restore();}
 // Route-head preview: the exact leg chain a click will commit (posture legs
 // from drawPath), drawn SOLID at the real track width with round caps —
 // KiCad-style, so what you see is precisely the copper you get. Only a
 // clearance-violating head goes RED + dashed (the "won't commit" signal).
-// The airwire's far pad(s) pulse amber the whole time the trace is live —
-// the "connect me HERE" target.
+// The airwire's far pad(s) pulse amber and a live ratsnest line joins the
+// legal preview head to the closest one — the "connect me HERE" target.
 function paintDraw(ctx){paintViaTool(ctx);if(!drawMode||!dtrace)return;
  if(drawFlash){if(Date.now()<drawFlash.until){ // engine gate refused this click
    ctx.save();ctx.lineCap="round";ctx.lineJoin="round";ctx.setLineDash([]);
@@ -7961,13 +7977,15 @@ function paintDraw(ctx){paintViaTool(ctx);if(!drawMode||!dtrace)return;
   ctx.restore();
   setTimeout(paintSoon,60); // keep the target pulse alive while routing
  }
- if(!drawCur)return;
+ if(!drawCur){paintDrawRatline(ctx,{x:dtrace.lx,y:dtrace.ly});return;}
  var dl=dtrace.pair?dpLegs(drawCur,drawShift):drawLegs(drawCur,drawShift),s=dl.t;
  // Pair preview fans into the far pads while hovering a member pad — the exact
  // chains the finish click will commit.
  if(dtrace.pair&&!dl.blocked){var hp=padTarget(drawCur);
   if(hp&&hp.net===dtrace.net){var fq=dpPartnerPad(hp.x,hp.y,dtrace.pair.net,hp.i);
    if(fq)dl.nl=dpChainFor(dl.legs,fq);}}
+ var head=dl.legs.length?dl.legs[dl.legs.length-1]:{x:dtrace.lx,y:dtrace.ly};
+ paintDrawRatline(ctx,head);
  ctx.save();ctx.lineCap="round";ctx.lineJoin="round";
  if(dl.legs.length){ctx.globalAlpha=0.75;ctx.setLineDash(dl.blocked?[4,3]:[]);
   ctx.strokeStyle=dl.blocked?"#ff4d4d":layerColor(dtrace.l);
