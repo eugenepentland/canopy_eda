@@ -2941,6 +2941,7 @@ Public functions: check, checkTopology, checkWithZones, countKind, defaultSeveri
 - silk-over-pad checks authored footprint silk rather than inventing reference-designator artwork
 - flags a plated through-hole pad whose annular ring is under the minimum; NPTH pads exempt
 - flags a track narrower than its net-class width, else the board minimum, as an error
+- a solved local-current requirement replaces the whole-net class width for that power track, but never permits copper below its own IPC-2221 requirement
 - flags a routed trace endpoint that reaches no same-net copper as a copper-stub error when its section still carries support connectivity
 - warns once when same-net trace capsules touch across separate explicit centreline components
 - warns once per stored trace section whose deletion preserves all pad, live-via, and pour connectivity
@@ -3060,7 +3061,7 @@ Public functions: analyze, classifyNetName, isInductor
 
 Public functions: capacityForArea, traceCapacityA, requiredTraceWidthMm,
 viaCapacityA, requiredViaDrillMm, routingCurrentA, powerWidthForNet,
-powerViaDrillForNet
+powerViaDrillForNet, routedTrackRequiredWidths
 
 Power routing derives conservative pre-route copper geometry from the rail's
 declared load envelope, the actual stack foil, the 10 °C IPC-2221 screening
@@ -3076,6 +3077,7 @@ is enlarged only as far as the derived drill and annular-ring rules require.
 - a power pour's effective minimum neck is raised above the board fabrication floor by the rail maximum and actual stack foil
 - board rules derive the worst-layer trace width and one-barrel drill from maximum rail load
 - an unpoured rail reserves its whole maximum-current width while a pour-backed rail leaves short fanouts to the post-route branch-current proof
+- a trace-only solved rail exposes an index-aligned required width for each local-current branch, while an incomplete or sheet-dependent rail exposes no relaxation
 - a rail with no annotated load routes for its declared source capacity, so a standalone regulator page sizes copper from its own output rating
 - declared loads outrank source capacity, so a rail routes for what the board draws rather than what its supply could deliver
 - a standalone module that rates its own output port and declares a bare layer count gets an IPC-2221 width for that rail; without the stackup no width is invented
@@ -6130,6 +6132,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Selecting a rigid sub-circuit exposes its Stamp and layout-page actions directly in Properties
 - The PCB Sub-circuits palette and Properties expose Save to sub-circuit, which fetches a fresh target revision before capturing that group's poses, stamped copper, and locally connected traces/vias as a new layout
 - the PCB hand router defaults to the active net class while the sidebar keeps its resolved geometry controls hidden
+- the PCB hand router previews and clearance-checks an authored pad neck at its tapered physical width before committing either a pad-out or pad-in gesture
 - The /pcb-layout Route panel presents Route board, Stop, status, and live replay without cached-load, interactive-session, scope, or advanced-routing controls
 - A completed Route board run persists its applied copper to the active layout, or creates the conventional first `layout` snapshot; Route plan remains temporary
 - The PCB replay client streams the live-route endpoint into the timeline player, follows the head, and reattaches to a running job through the overlay seam

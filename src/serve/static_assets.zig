@@ -844,6 +844,22 @@ test "PCB editor automatically lowers every local controlled-impedance pad taper
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "function drawReplaceLaid") == null);
 }
 
+// spec: Web Server - the PCB hand router previews and clearance-checks an authored pad neck at its tapered physical width before committing either a pad-out or pad-in gesture
+test "PCB hand router gates pad entry and exit at the prospective tapered width" {
+    const markers = [_][]const u8{
+        "function drawAutomaticTaperPlan",
+        "window.PCBDrawAutomaticTaperPlan",
+        "function drawProspectiveTaperPlan",
+        "dtrace.n===0?dtrace.startPad:null",
+        "candF=drawProspectiveTaperPlan(planF).tracks",
+        "candC=drawProspectiveTaperPlan(planC).tracks",
+        "tracks=drawProspectiveTaperPlan(drawRoutePlan(legs)).tracks",
+        "preview=drawProspectiveTaperPlan(drawRoutePlan(dl.legs)).tracks",
+        "Math.max((t.w||dtrace.w)*S,1.2)",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+}
+
 // spec: Web Server - Escape cancels an active manual route even when automatic pad-taper DRC rejects finishing it, restoring the route-start copper and exiting Draw instead of retrying the blocked finish
 test "PCB editor Escape cancels a DRC-blocked manual route" {
     const markers = [_][]const u8{

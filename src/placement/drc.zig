@@ -22,6 +22,7 @@ const land_transit = @import("land_transit.zig");
 const net_identity = @import("net_identity.zig");
 const pad_shape = @import("pad_shape.zig");
 const pad_neck = @import("pad_neck.zig");
+const power_integrity = @import("power_integrity.zig");
 const path_copper = @import("path_copper.zig");
 const pose_math = @import("pose_math.zig");
 const outline = @import("outline.zig");
@@ -649,7 +650,16 @@ fn checkImpl(
     try checkComponentEdge(arena, &out, placement, rules.edge.component);
     try checkCourtyards(arena, &out, placement);
     try checkSilkOverPad(arena, &out, placement, pads, &pad_grid, rules.mask.margin);
-    try checkTrackWidth(arena, &out, .{ .placement = placement, .routed = routed, .tracks = tracks, .min_width = rules.min_width });
+    var current_routed = routed;
+    current_routed.tracks = tracks;
+    const local_power_widths = try power_integrity.routedTrackRequiredWidths(arena, placement, current_routed);
+    try checkTrackWidth(arena, &out, .{
+        .placement = placement,
+        .routed = routed,
+        .tracks = tracks,
+        .min_width = rules.min_width,
+        .local_power_widths = local_power_widths,
+    });
     // Topology still needs the private chords as physical support (a curved or
     // flared path may touch something its compact handle does not), but finding
     // identity must remain in the persisted track domain.  The topology checker
@@ -1662,18 +1672,38 @@ const TrackWidthInput = struct {
     routed: router.RouteResult,
     tracks: []const router.Track,
     min_width: f64,
+    /// Index-aligned IPC-2221 widths from a solved trace-only power graph.
+    /// Null entries retain the conservative whole-net class rule.
+    local_power_widths: []const ?f64 = &.{},
 };
 
 fn checkTrackWidth(arena: std.mem.Allocator, out: *Viol, in: TrackWidthInput) std.mem.Allocator.Error!void {
     const nrules = in.placement.rules.net;
-    for (in.tracks) |t| {
+    for (in.tracks, 0..) |t, track_index| {
         if (t.width <= eps) continue; // no recorded width — not a real defect
         var want = in.min_width;
         if (t.net >= 0) {
             const ni: usize = @intCast(t.net);
             if (ni < nrules.len and nrules[ni].width > 0) want = nrules[ni].width;
         }
+        const local_power_width = if (track_index < in.local_power_widths.len) in.local_power_widths[track_index] else null;
+        if (local_power_width) |local| want = @max(in.min_width, local);
         const under_width = t.width < want - eps;
+        // A solved local-current width is already the electrical exception to
+        // the whole-net class. Do not then let a geometric pad-neck exception
+        // shrink below that proven current requirement.
+        if (local_power_width != null) {
+            if (under_width) try out.append(arena, .{
+                .x = (t.x1 + t.x2) / 2,
+                .y = (t.y1 + t.y2) / 2,
+                .gap = t.width,
+                .clearance = want,
+                .kind = .track_width,
+                .who = .{ .net_a = t.net },
+                .layer = layerOf(t.layer),
+            });
+            continue;
+        }
         const neck_ok = if (under_width)
             try pad_neck.allowsTrack(arena, in.placement, t, want, in.min_width)
         else
@@ -3262,6 +3292,36 @@ test "check flags sub-width tracks against class and board rules" {
     };
     const wr = router.RouteResult{ .tracks = &wide, .vias = &.{}, .routed = 0, .total = 0 };
     try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, wr, 0.127), .track_width));
+}
+
+// spec: placement/drc - a solved local-current requirement replaces the whole-net class width for that power track, but never permits copper below its own IPC-2221 requirement
+test "track width accepts a solved narrow power branch but enforces its local requirement" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const net_rules = [_]optimizer.NetRule{.{ .width = 0.3048 }};
+    const nets = [_]FlatNet{.{ .name = "V3P3", .pins = &.{} }};
+    var placement = partsOnly(&.{});
+    placement.nets = &nets;
+    placement.rules.net = &net_rules;
+    const tracks = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.30, .net = 0 },
+        .{ .x1 = 1, .y1 = 0, .x2 = 2, .y2 = 1, .layer = 0, .width = 0.1524, .net = 0 },
+        .{ .x1 = 1, .y1 = 0, .x2 = 2, .y2 = -1, .layer = 0, .width = 0.08, .net = 0 },
+    };
+    const routed = router.RouteResult{ .tracks = &tracks, .vias = &.{}, .routed = 1, .total = 1 };
+    const local = [_]?f64{ 0.2727, 0.10, 0.10 };
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkTrackWidth(arena, &violations, .{
+        .placement = placement,
+        .routed = routed,
+        .tracks = &tracks,
+        .min_width = 0.127,
+        .local_power_widths = &local,
+    });
+    try testing.expectEqual(@as(usize, 1), violations.items.len);
+    try testing.expectApproxEqAbs(@as(f64, 0.08), violations.items[0].gap, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.127), violations.items[0].clearance, 1e-12);
 }
 
 // spec: placement/rf-port-frame-routing - a solver-proven one-width pad taper may narrow below the controlled line width, but thin copper away from the land still fails DRC

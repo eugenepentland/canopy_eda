@@ -7143,14 +7143,17 @@ function drawRfTaperPlan(tracks,start,end,nominal){var n=tracks.length,head=0,ta
   shaped=shaped.concat(drawTaperTracks(last,null,end,nominal));paths=paths.concat(drawTaperPathSet(last,null,end,nominal));}
  return {tracks:shaped,paths:paths};}
 window.PCBDrawRfTaperPlan=drawRfTaperPlan;
-function drawApplyAutomaticTapers(){if(!dtrace||dtrace.pair||!dtrace.laid||!dtrace.laid.length)return {ok:true,changed:false};
- var old=dtrace.laid.slice(),nominal=dtrace.w;
- var sp=dtrace.startPad,ep=drawEndpointPad(dtrace.net,dtrace.l,dtrace.lx,dtrace.ly),
-  sr=drawTaperProfile(dtrace.net,sp,nominal,drawPathPadLaunch(old,sp,true)||drawTrackEndDirection(old[0],true)),
-  er=drawTaperProfile(dtrace.net,ep,nominal,drawPathPadLaunch(old,ep,false)||drawTrackEndDirection(old[old.length-1],false));
- if(!sr&&!er)return {ok:true,changed:false};var shaped,paths=[];
- // Authored pad_neck shapes only the pad-ended segment. RF port tapering is a
- // path-length profile and may continue over several short gesture pieces.
+// Pure physical-copper plan for one ordered hand-route run. The live clearance
+// gate and the final lowering call share this exact answer, so a narrow pad
+// neck is useful WHILE entering the land instead of appearing only after a
+// nominal-width candidate has already been rejected. A gesture with existing
+// committed legs supplies only the active end pad; the route-start taper was
+// already gated when its first leg was committed.
+function drawAutomaticTaperPlan(tracks,startPad,endPad,nominal){var old=(tracks||[]).slice();
+ if(!old.length)return {tracks:old,paths:[]};
+ var sr=drawTaperProfile(old[0].net,startPad,nominal,drawPathPadLaunch(old,startPad,true)||drawTrackEndDirection(old[0],true)),
+  er=drawTaperProfile(old[old.length-1].net,endPad,nominal,drawPathPadLaunch(old,endPad,false)||drawTrackEndDirection(old[old.length-1],false));
+ if(!sr&&!er)return {tracks:old,paths:[]};var shaped,paths=[];
  if((sr&&sr.kind==="neck")||(er&&er.kind==="neck")){
   if(old.length===1)shaped=drawTaperTracks(old,sr,er,nominal);
   else{shaped=old.slice();if(sr)shaped.splice.apply(shaped,[0,1].concat(drawTaperTracks([old[0]],sr,null,nominal)));
@@ -7159,6 +7162,16 @@ function drawApplyAutomaticTapers(){if(!dtrace||dtrace.pair||!dtrace.laid||!dtra
   else{if(sr)paths=paths.concat(drawTaperPathSet([old[0]],sr,null,nominal));
    if(er)paths=paths.concat(drawTaperPathSet([old[old.length-1]],null,er,nominal));}
  }else{var rfPlan=drawRfTaperPlan(old,sr,er,nominal);shaped=rfPlan.tracks;paths=rfPlan.paths;}
+ return {tracks:shaped,paths:paths};}
+window.PCBDrawAutomaticTaperPlan=drawAutomaticTaperPlan;
+function drawProspectiveTaperPlan(plan){if(!dtrace||dtrace.pair||!plan||!plan.tracks||!plan.tracks.length)return {tracks:(plan&&plan.tracks)||[],paths:[]};
+ var tracks=plan.tracks,last=tracks[tracks.length-1],ep=drawEndpointPad(last.net,last.l||0,last.x2,last.y2);
+ return drawAutomaticTaperPlan(tracks,dtrace.n===0?dtrace.startPad:null,ep,dtrace.w);}
+function drawApplyAutomaticTapers(){if(!dtrace||dtrace.pair||!dtrace.laid||!dtrace.laid.length)return {ok:true,changed:false};
+ var old=dtrace.laid.slice(),nominal=dtrace.w;
+ var ep=drawEndpointPad(dtrace.net,dtrace.l,dtrace.lx,dtrace.ly),physical=drawAutomaticTaperPlan(old,dtrace.startPad,ep,nominal),
+  shaped=physical.tracks,paths=physical.paths;
+ if(!paths.length)return {ok:true,changed:false};
  var board=PCB.tracks||[],after=board.filter(function(t){return old.indexOf(t)<0;}).concat(shaped,drawTaperPortalProbes(paths)),base=dtrace.undo||{};
  if(drcGateDiffBlocks(base.tracks||[],base.vias||[],after,PCB.vias||[])){
   routeStatMsg("automatic pad taper would violate DRC — adjust the launch before finishing",true);return {ok:false,changed:false};}
@@ -7870,7 +7883,7 @@ function drawClick(m,shift){
    var pa=drawPath(dtrace.lx,dtrace.ly,{x:pt2.x,y:pt2.y},drawPosture^1);
    if(drawLegsViolate(pa)){routeStatMsg("that would violate clearance — reroute the last leg",true);return;}
    pl=pa;}
-  var planF=drawRoutePlan(pl),candF=planF.tracks;
+  var planF=drawRoutePlan(pl),candF=drawProspectiveTaperPlan(planF).tracks;
   if(drcGateBlocks(candF,null)){routeStatMsg("that would create a DRC error — reroute the last leg",true);drawFlashSet(candF);return;}
   drawCommitPlan(planF);drawEnd();return;}
  if(pt2&&pt2.net&&pt2.net!==dtrace.net){
@@ -7881,7 +7894,7 @@ function drawClick(m,shift){
   return;}
  var dl=drawLegs(m,shift);
  if(!dl.legs.length){routeStatMsg("blocked by clearance — no room toward that point",true);return;}
- var planC=drawRoutePlan(dl.legs),candC=planC.tracks;
+ var planC=drawRoutePlan(dl.legs),candC=drawProspectiveTaperPlan(planC).tracks;
  if(drcGateBlocks(candC,null)){routeStatMsg("that would create a DRC error — route around it",true);drawFlashSet(candC);return;}
  if(dl.clipped)routeStatMsg("head clipped at the clearance boundary — route around the obstacle",true);
  drawCommitPlan(planC);
@@ -7897,13 +7910,10 @@ function drawTarget(m,shift){if(!shift){var mg=magSnap(m,dtrace&&dtrace.net);if(
 // reload), and an inside-corner stub about to be trimmed must not false-block
 // the P leg — the trim-aware commit gate stays the final word on both nets.
 function drawLegsViolate(legs){if(!dtrace)return false;
- var fx=dtrace.lx,fy=dtrace.ly,skip=dtrace.pair?dtrace.laid.concat(dtrace.pair.laid):dtrace.laid;
- if(drawArcOn()&&!dtrace.pair){var ap=drawRoutePlan(legs);
-  for(var k=0;k<ap.tracks.length;k++){var t=ap.tracks[k];
-   if(segViolation(t.x1,t.y1,t.x2,t.y2,t.l,t.net,t.w/2,skip))return true;}return false;}
- for(var i=0;i<legs.length;i++){
-  if(segViolation(fx,fy,legs[i].x,legs[i].y,dtrace.l,dtrace.net,dtrace.w/2,skip))return true;
-  fx=legs[i].x;fy=legs[i].y;}
+ var skip=dtrace.pair?dtrace.laid.concat(dtrace.pair.laid):dtrace.laid,
+  tracks=drawProspectiveTaperPlan(drawRoutePlan(legs)).tracks;
+ for(var i=0;i<tracks.length;i++){var t=tracks[i];
+  if(segViolation(t.x1,t.y1,t.x2,t.y2,t.l,t.net,t.w/2,skip))return true;}
  return false;}
 // The signal layer a via drop lands the trace on: the ACTIVE layer when the
 // user parked it somewhere other than the trace's current layer (explicit
@@ -7955,10 +7965,10 @@ function paintViaTool(ctx){if(!viaMode||!viaCur)return;var q=viaNet?viaSnap(viaC
 function paintDraw(ctx){paintViaTool(ctx);if(!drawMode||!dtrace)return;
  if(drawFlash){if(Date.now()<drawFlash.until){ // engine gate refused this click
    ctx.save();ctx.lineCap="round";ctx.lineJoin="round";ctx.setLineDash([]);
-   ctx.strokeStyle="#ff4d4d";ctx.lineWidth=Math.max(dtrace.w*S,1.4);
+   ctx.strokeStyle="#ff4d4d";
    ctx.globalAlpha=0.4+0.5*Math.abs(Math.sin(Date.now()/120));
-   ctx.beginPath();drawFlash.legs.forEach(function(g){ctx.moveTo(X(g.x1),Y(g.y1));ctx.lineTo(X(g.x2),Y(g.y2));});
-   ctx.stroke();ctx.restore();setTimeout(paintSoon,60);}
+   drawFlash.legs.forEach(function(g){ctx.lineWidth=Math.max((g.w||dtrace.w)*S,1.4);ctx.beginPath();trackPath(ctx,g);ctx.stroke();});
+   ctx.restore();setTimeout(paintSoon,60);}
   else drawFlash=null;}
  if(dtrace.dest&&dtrace.dest.length){
   ctx.save();ctx.setLineDash([]);
@@ -7982,14 +7992,10 @@ function paintDraw(ctx){paintViaTool(ctx);if(!drawMode||!dtrace)return;
   if(hp&&hp.net===dtrace.net){var fq=dpPartnerPad(hp.x,hp.y,dtrace.pair.net,hp.i);
    if(fq)dl.nl=dpChainFor(dl.legs,fq);}}
  ctx.save();ctx.lineCap="round";ctx.lineJoin="round";
- ctx.lineWidth=Math.max(dtrace.w*S,1.2);
  if(dl.legs.length){ctx.globalAlpha=0.75;ctx.setLineDash(dl.blocked?[4,3]:[]);
   ctx.strokeStyle=dl.blocked?"#ff4d4d":layerColor(dtrace.l);
-  ctx.beginPath();
-  if(drawArcOn()&&!dtrace.pair){var ap=drawRoutePlan(dl.legs);
-   ap.tracks.forEach(function(t){trackPath(ctx,t);});}
-  else{ctx.moveTo(X(dtrace.lx),Y(dtrace.ly));dl.legs.forEach(function(q){ctx.lineTo(X(q.x),Y(q.y));});}
-  ctx.stroke();}
+  var preview=drawProspectiveTaperPlan(drawRoutePlan(dl.legs)).tracks;
+  preview.forEach(function(t){ctx.lineWidth=Math.max((t.w||dtrace.w)*S,1.2);ctx.beginPath();trackPath(ctx,t);ctx.stroke();});}
  if(dtrace.pair&&dl.nl&&dl.nl.legs.length){var prv=dtrace.pair;
   var n0=dl.nl.trim||{x:prv.lx,y:prv.ly};
   ctx.globalAlpha=dl.blocked?0.75:0.55;ctx.setLineDash(dl.blocked?[4,3]:[]);
@@ -7999,7 +8005,7 @@ function paintDraw(ctx){paintViaTool(ctx);if(!drawMode||!dtrace)return;
   ctx.stroke();ctx.setLineDash([]);}
  if(dl.clipped){ // blocked remainder: red dashed ghost to the cursor target
   var lp=dl.legs.length?dl.legs[dl.legs.length-1]:{x:dtrace.lx,y:dtrace.ly};
-  ctx.globalAlpha=0.9;ctx.setLineDash([4,3]);ctx.strokeStyle="#ff4d4d";
+  ctx.globalAlpha=0.9;ctx.setLineDash([4,3]);ctx.strokeStyle="#ff4d4d";ctx.lineWidth=Math.max(dtrace.w*S,1.2);
   ctx.beginPath();ctx.moveTo(X(lp.x),Y(lp.y));ctx.lineTo(X(s.x),Y(s.y));ctx.stroke();}
  // magnet indicator: a small ring at a snapped target
  if(s.mag){ctx.setLineDash([]);ctx.globalAlpha=0.95;ctx.strokeStyle="#7ee787";ctx.lineWidth=1.4;

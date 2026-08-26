@@ -30,7 +30,6 @@ const power_budget = @import("../eval/power_budget.zig");
 const net_names = @import("../net_name.zig");
 const numeric = @import("../numeric.zig");
 const power_current = @import("power_current.zig");
-const drc = @import("drc.zig");
 const pour = @import("pour.zig");
 const implicit_plane = @import("implicit_plane.zig");
 const power_capacity = @import("power_capacity.zig");
@@ -42,6 +41,7 @@ pub const temperature_rise_c: f64 = power_capacity.temperature_rise_c;
 pub const via_plating_mm: f64 = env.default_via_plating_mm;
 /// Copper resistivity used for the room-temperature voltage-drop estimate.
 const copper_resistivity_ohm_m: f64 = 1.724e-8;
+const geometry_eps_mm: f64 = 1e-6;
 
 /// Declared whole-rail load and source envelope matched to routed copper.
 const Demand = struct {
@@ -258,7 +258,7 @@ fn descendantOf(ref_des: []const u8, prefix: []const u8) bool {
 
 fn appendContact(alloc: std.mem.Allocator, out: *std.ArrayList(power_current.Contact), contact: power_current.Contact) std.mem.Allocator.Error!void {
     for (out.items) |old| {
-        if (old.layer == contact.layer and std.math.hypot(old.at[0] - contact.at[0], old.at[1] - contact.at[1]) < drc.eps) return;
+        if (old.layer == contact.layer and std.math.hypot(old.at[0] - contact.at[0], old.at[1] - contact.at[1]) < geometry_eps_mm) return;
     }
     try out.append(alloc, contact);
 }
@@ -416,7 +416,7 @@ fn sheetLayer(surface: Surface) u8 {
 }
 
 fn appendPoint(alloc: std.mem.Allocator, out: *std.ArrayList([2]f64), at: [2]f64) std.mem.Allocator.Error!void {
-    for (out.items) |old| if (std.math.hypot(old[0] - at[0], old[1] - at[1]) < drc.eps) return;
+    for (out.items) |old| if (std.math.hypot(old[0] - at[0], old[1] - at[1]) < geometry_eps_mm) return;
     try out.append(alloc, at);
 }
 
@@ -635,8 +635,12 @@ fn analyzePlanes(
 fn surfaceCapacityStatus(fill: pour.Fill, design_min: f64, required: ?f64) SurfaceCapacityStatus {
     const width = required orelse return .no_current;
     if (fill.n_comp == 0 or fill.coarsened) return .not_proven;
-    if (!(design_min > 0) or design_min + drc.eps < width) return .not_proven;
+    if (!(design_min > 0) or design_min + geometry_eps_mm < width) return .not_proven;
     return .verified;
+}
+
+fn expectNoRequiredWidths(widths: []const ?f64) !void {
+    for (widths) |width| try testing.expect(width == null);
 }
 
 /// Analyze only nets that are electrically power-like, plane-carried, or have
@@ -647,6 +651,44 @@ pub fn analyze(
     routed: router.RouteResult,
 ) std.mem.Allocator.Error!Analysis {
     return analyzeCopper(alloc, placement, routed, &.{}, null);
+}
+
+/// Maximum (or typical-only) IPC-2221 width required by each routed track's
+/// solved LOCAL current. The result is index-aligned with `routed.tracks`;
+/// null means the trace-only graph could not conservatively prove a branch
+/// current, so a caller must retain its whole-net/class requirement.
+///
+/// This deliberately omits plane/pour sheets. DRC can therefore relax a
+/// hand-routed branch only when ordinary trace/via copper alone connects every
+/// annotated load to a physical source. A rail relying on a sheet falls back
+/// to its authored net class instead of manufacturing an optimistic split.
+pub fn routedTrackRequiredWidths(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+) std.mem.Allocator.Error![]const ?f64 {
+    const required = try alloc.alloc(?f64, routed.tracks.len);
+    @memset(required, null);
+    for (placement.nets, 0..) |net, net_index| {
+        const demand = demandFor(placement.rules.physical.rails, net.name);
+        if (demand.typical_a == null and demand.maximum_a == null) continue;
+        const flow = try solveCurrent(alloc, placement, routed, net_index, demand, &.{});
+        // Never substitute the smaller typical axis when a declared maximum
+        // axis is unprovable (for example, because a max-only consumer is
+        // disconnected). Typical is sufficient only on a typical-only rail.
+        const axis = if (demand.maximum_a != null) flow.maximum else flow.typical;
+        if (axis.status != .solved) continue;
+        for (routed.tracks, 0..) |track, route_index| {
+            if (track.net != @as(i32, @intCast(net_index))) continue;
+            const amps = axis.track_current_a[route_index];
+            if (!(amps > 0) or !std.math.isFinite(amps)) continue;
+            const physical = placement.rules.signalStackIndex(track.layer);
+            const foil = placement.rules.physical.stack.foilMm(physical);
+            const outer = physical == 1 or physical == placement.rules.layerStack().stackCount();
+            required[route_index] = requiredTraceWidthMm(amps, foil, outer);
+        }
+    }
+    return required;
 }
 
 /// Analyze routed copper together with the exact saved user pours and the
@@ -803,7 +845,8 @@ test "analysis joins routed geometry to stack foil rail load and declared plane"
     try testing.expect(net.planes[0].required_neck_maximum_mm.? > 1.0);
 }
 
-test "analysis assigns split branch currents from physical source and load pads" {
+// spec: placement/power-routing - a trace-only solved rail exposes an index-aligned required width for each local-current branch, while an incomplete or sheet-dependent rail exposes no relaxation
+test "analysis assigns split branch currents and required widths from physical source and load pads" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const pad = @import("geometry.zig").Pad{ .number = "1", .x = 0, .y = 0, .w = 0.2, .h = 0.2 };
@@ -861,6 +904,32 @@ test "analysis assigns split branch currents from physical source and load pads"
     try testing.expectApproxEqAbs(@as(f64, 0.8), result.nets[0].tracks[1].current_typical_a.?, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 0.2), result.nets[0].tracks[2].current_typical_a.?, 1e-9);
     try testing.expect(result.nets[0].tracks[2].required_width_typical_mm.? < result.nets[0].tracks[1].required_width_typical_mm.?);
+
+    const widths = try routedTrackRequiredWidths(arena_inst.allocator(), placement, routed);
+    try testing.expectEqual(@as(usize, tracks.len), widths.len);
+    try testing.expect(widths[0].? > widths[1].?);
+    try testing.expect(widths[1].? > widths[2].?);
+    try testing.expect(widths[2].? < 0.1524);
+
+    var incomplete = rails[0];
+    incomplete.source_terminals = &.{"missing/VOUT"};
+    var incomplete_placement = placement;
+    incomplete_placement.rules.physical.rails = &.{incomplete};
+    const conservative = try routedTrackRequiredWidths(arena_inst.allocator(), incomplete_placement, routed);
+    try expectNoRequiredWidths(conservative);
+
+    const max_only_consumers = [_]power_budget.RailConsumer{
+        .{ .ref_des = "load_a/U1", .net = "VDD", .pins = &.{"1"}, .i_typ = 0.8, .i_max = 0.8 },
+        .{ .ref_des = "load_b/U1", .net = "VDD", .pins = &.{"1"}, .i_typ = null, .i_max = 0.2 },
+    };
+    var max_incomplete = rails[0];
+    max_incomplete.consumers = &max_only_consumers;
+    var max_incomplete_placement = placement;
+    max_incomplete_placement.rules.physical.rails = &.{max_incomplete};
+    var max_incomplete_routed = routed;
+    max_incomplete_routed.tracks = tracks[0..2];
+    const max_conservative = try routedTrackRequiredWidths(arena_inst.allocator(), max_incomplete_placement, max_incomplete_routed);
+    try expectNoRequiredWidths(max_conservative);
 }
 
 test "external power source terminals resolve only top-level connector pads" {

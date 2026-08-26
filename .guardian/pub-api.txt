@@ -2280,6 +2280,7 @@ src/placement/power_integrity.zig::analyze | fn analyze( alloc: std.mem.Allocato
 src/placement/power_integrity.zig::analyzeCopper | fn analyzeCopper( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, zones: []const pour.UserZone, base_edge: ?pour.EdgeField, ) std.mem.Allocator.Error!Analysis
 src/placement/power_integrity.zig::name | fn name(self: SurfaceCapacityStatus) []const u8
 src/placement/power_integrity.zig::name | fn name(self: SurfaceKind) []const u8
+src/placement/power_integrity.zig::routedTrackRequiredWidths | fn routedTrackRequiredWidths( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, ) std.mem.Allocator.Error![]const ?f64
 src/placement/power_integrity.zig::temperature_rise_c value
 src/placement/power_integrity.zig::via_plating_mm value
 src/placement/progress.zig::Inputs struct_
