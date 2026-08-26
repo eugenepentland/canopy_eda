@@ -133,12 +133,15 @@ Local dev still uses `http://localhost:7050`.
   that endpoint. While a trace is live, a faded dashed ratsnest line follows
   the legal preview endpoint to the closest unresolved same-net pad, trace body,
   via, or filled-pour point outside the launch island (and remains available
-  when routing resumes from existing copper). For a single-ended trace, after
-  each fixed corner a bounded single-net autorouter run preserves the manual prefix and replaces
-  that straight guide with a faded dashed preview of the proposed remainder;
+  when routing resumes from existing copper). After each fixed corner, a
+  bounded scoped autorouter run preserves the manual prefix and replaces that
+  straight guide with a faded dashed preview of the proposed remainder (both
+  nets are previewed and committed together for a coupled differential pair);
   **Enter** commits that remainder, including proposed vias, as the trace's one
   undoable completion. If the autorouter has not answered yet, Enter waits for
-  the in-flight proposal; double-click still finishes manually without it.
+  the in-flight proposal. If there is no completion target, Enter keeps the
+  trace live rather than silently saving a partial route; double-click still
+  performs that explicit manual finish.
   **Rigid sub-circuits**: parts sharing a sub-block prefix
   drag/rotate as one unit (G explodes/re-coheres; per-design localStorage),
   and the sidebar Sub-circuits palette **Stamp**s a whole module ★ layout

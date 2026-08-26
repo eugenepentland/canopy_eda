@@ -874,13 +874,16 @@ test "PCB editor carries the live route ratsnest to the nearest destination" {
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
-// spec: Web Server - While hand-routing a single-ended trace, the scoped autorouter preserves the fixed manual prefix, previews only its proposed remainder as faded dashed tracks and vias, and Enter commits that proposal as one undoable trace completion; double-click remains the manual finish action.
+// spec: Web Server - While hand-routing a single trace or coupled differential pair, the scoped autorouter preserves the fixed manual prefix, previews only its proposed remainder as faded dashed tracks and vias, and Enter commits that proposal as one undoable trace completion; Enter never substitutes a manual partial finish when no proposal is ready, while double-click remains the explicit manual finish action.
 test "PCB editor previews and accepts an autorouted route remainder" {
     const markers = [_][]const u8{
         "function drawAutoSchedule(now,accept)",
-        "payload.resume_points=[",
+        "payload.resume_points=[]",
         "payload.nets=drawAutoNets(tr)",
-        "function drawAutoPath(allTracks,allVias,tr,head,target)",
+        "function drawAutoPath(allTracks,allVias,net,head,target)",
+        "legs.push({net:pr.net",
+        "tr.pair.ratTargets=drawRatTargets(tr.pair)",
+        "tr.auto.legs.forEach(function(g){payload.resume_points.push(",
         "function paintDrawAutoRoute(ctx)",
         "ctx.globalAlpha=0.34",
         "ctx.setLineDash([6,4])",
@@ -889,6 +892,8 @@ test "PCB editor previews and accepts an autorouted route remainder" {
         "if(ev.key==\"Enter\"&&dtrace){ev.preventDefault();drawAutoAccept();return;}",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "if(tr.pair)return drawEnd()") == null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "if(!tr.ratTargets||!tr.ratTargets.length)return drawEnd()") == null);
 }
 
 test "PCB editor styles the two-trace fillet radius menu" {

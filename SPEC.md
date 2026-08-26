@@ -6456,7 +6456,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Routing toward a same-net pad snaps the whole approach onto the pad centreline
 - A click that magnetically snaps to a same-net pad or existing trace endpoint finishes the manual trace only after the path reaches that endpoint.
 - While hand-routing, one faded dashed ratsnest line follows the legal preview endpoint to the closest unresolved same-net pad, trace body, via, or filled-pour point outside the launch island, including when routing resumes from existing copper.
-- While hand-routing a single-ended trace, the scoped autorouter preserves the fixed manual prefix, previews only its proposed remainder as faded dashed tracks and vias, and Enter commits that proposal as one undoable trace completion; double-click remains the manual finish action.
+- While hand-routing a single trace or coupled differential pair, the scoped autorouter preserves the fixed manual prefix, previews only its proposed remainder as faded dashed tracks and vias, and Enter commits that proposal as one undoable trace completion; Enter never substitutes a manual partial finish when no proposal is ready, while double-click remains the explicit manual finish action.
 - hand-routing starts and continues only from pads and traces on the active copper layer, so opposite-face lands cannot steal a route click
 - The hand-route tool lays both legs of a differential pair together with mitered offset corners
 - The auto-commit author is the ward user, falling back to the dev-admin identity
