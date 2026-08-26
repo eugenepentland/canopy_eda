@@ -22,6 +22,7 @@ const land_transit = @import("land_transit.zig");
 const net_identity = @import("net_identity.zig");
 const pad_shape = @import("pad_shape.zig");
 const pad_neck = @import("pad_neck.zig");
+const plane_stitch = @import("plane_stitch.zig");
 const power_integrity = @import("power_integrity.zig");
 const pour = @import("pour.zig");
 const path_copper = @import("path_copper.zig");
@@ -865,15 +866,19 @@ fn checkCopperTopology(
     const endpoint_pours = support.branch.pour_layers;
     const endpoint_components = support.branch.pour_components;
     const via_candidates = try arena.alloc(bool, vias.len);
+    const via_ground_poured = try arena.alloc(bool, vias.len);
     const via_components = try arena.alloc([]const u64, vias.len);
     for (vias, 0..) |via, via_i| {
         const canonical_net = identity.canonical(via.net);
-        const non_ground = canonical_net >= 0 and @as(usize, @intCast(canonical_net)) < placement.nets.len and
-            !optimizer.isGroundName(router.shortName(placement.nets[@intCast(canonical_net)].name));
+        const valid_net = canonical_net >= 0 and @as(usize, @intCast(canonical_net)) < placement.nets.len;
+        const net_name = if (valid_net) placement.nets[@intCast(canonical_net)].name else "";
+        const ground = valid_net and optimizer.isGroundName(router.shortName(net_name));
+        const poured = if (ground) plane_stitch.netPourLayers(placement, net_name) else .{ false, false };
+        via_ground_poured[via_i] = poured[0] or poured[1];
         via_components[via_i] = try copper_support.componentsAt(arena, placement, canonical_net, zones, .{ via.x, via.y }, null);
         const unobserved_fill = (support.via_poured[via_i] != 0 or support.via_planes[via_i] != 0) and
             via_components[via_i].len == 0;
-        via_candidates[via_i] = non_ground and !unobserved_fill;
+        via_candidates[via_i] = valid_net and !ground and !unobserved_fill;
     }
     const terminal_components = try arena.alloc([]const u64, terminals.len);
     for (terminals, terminal_components) |terminal, *components| {
@@ -947,7 +952,12 @@ fn checkCopperTopology(
     }
     for (vias, 0..) |via, via_i| {
         const use_count = via_use_counts[via_i];
-        if (use_count < 2) {
+        // A same-net outer ground pour makes a GND barrel intentional stitching
+        // copper rather than a disposable layer transition. Fill-blind callers
+        // (the WASM checker and route gates) cannot prove its exact contour, so
+        // use the authored stackup declaration; exact filled DRC still judges
+        // every other topology rule against the computed pour components.
+        if (use_count < 2 and !via_ground_poured[via_i]) {
             try out.append(arena, .{
                 .x = via.x,
                 .y = via.y,
@@ -4090,6 +4100,37 @@ test "check warns on a one-layer via and clears it when bottom copper arrives" {
         @as(usize, 0),
         countKind(try check(arena, placement, .{ .tracks = &both, .vias = &via, .routed = 1, .total = 1 }, 0.127), .single_layer_via),
     );
+}
+
+// spec: placement/copper-topology - a ground via backed by its net's authored outer-face pour is not reported as a single-layer routing artifact
+test "check exempts only ground vias backed by their own declared pour" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    var parts = [_]optimizer.Part{};
+    var placement = partsOnly(&parts);
+    const via = [_]router.Via{.{ .x = 0, .y = 0, .dia = 0.4, .net = 0 }};
+    const top = [_]router.Track{.{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 }};
+    const routed = router.RouteResult{ .tracks = &top, .vias = &via, .routed = 1, .total = 1 };
+
+    const ground_nets = [_]FlatNet{.{ .name = "GND", .pins = &.{} }};
+    placement.nets = &ground_nets;
+    placement.rules = .{ .plane_nets = &.{}, .copper_layers = 2 };
+    try testing.expectEqual(@as(usize, 1), countKind(try check(arena, placement, routed, 0.127), .single_layer_via));
+
+    const gnd_pour = [_]optimizer.PlaneAt{.{ .index = 1, .net = "GND" }};
+    placement.rules = .{ .plane_nets = &.{"GND"}, .copper_layers = 2, .planes = .{ .declared = &gnd_pour } };
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, routed, 0.127), .single_layer_via));
+
+    const signal_nets = [_]FlatNet{.{ .name = "SIG", .pins = &.{} }};
+    const signal_pour = [_]optimizer.PlaneAt{.{ .index = 1, .net = "SIG" }};
+    placement.nets = &signal_nets;
+    placement.rules = .{ .plane_nets = &.{"SIG"}, .copper_layers = 2, .planes = .{ .declared = &signal_pour } };
+    try testing.expectEqual(@as(usize, 1), countKind(try check(arena, placement, routed, 0.127), .single_layer_via));
+
+    placement.nets = &ground_nets;
+    placement.rules = .{ .plane_nets = &.{"SIG"}, .copper_layers = 2, .planes = .{ .declared = &signal_pour } };
+    try testing.expectEqual(@as(usize, 1), countKind(try check(arena, placement, routed, 0.127), .single_layer_via));
 }
 
 // spec: placement/drc - a jointly safe subset of multi-layer non-ground vias is reported for cleanup while every ground via is protected

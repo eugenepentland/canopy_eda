@@ -2907,6 +2907,7 @@ Public functions: BranchSupport, ViaSupport, RedundancyAnalysis, ImplicitJoin, l
 - overlapping round caps remain electrically open until a real centreline bridge gives them a full-width junction
 - a trace crossing a same-net land at mid-span electrically supports that land
 - a via used by one routed layer is dangling while a second layer, pad, pour, or plane makes it useful
+- a ground via backed by its net's authored outer-face pour is not reported as a single-layer routing artifact
 - redundant-via pruning preserves every persistent copper component and chooses a jointly safe subset of parallel layer jumps
 - a via that is the only robust bridge between persistent copper features is never deletion-invariant
 - a via that is the sole support for a trace endpoint remains even when deleting its graph leaf would not split a component
