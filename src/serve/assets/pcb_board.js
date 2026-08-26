@@ -449,9 +449,9 @@ function drawHeatsink(){var s=heatsinkRect();if(!viewSt.vis.heatsink&&!heatsinkM
   else gB.appendChild(el("line",{x1:x.toFixed(1),y1:(y+q*h).toFixed(1),x2:(x+w).toFixed(1),y2:(y+q*h).toFixed(1),stroke:col,"stroke-width":1,opacity:.7}));}
  var t=el("text",{x:(x+5).toFixed(1),y:(y+13).toFixed(1),fill:col,"font-size":"10","font-weight":"700"});t.textContent="HEATSINK · "+(s.side||"bottom").toUpperCase()+(s.target_ref?" · "+s.target_ref:"");gB.appendChild(t);
  if(heatsinkMode&&!heatsinkDraw&&!RO){[[x,y],[x+w,y],[x+w,y+h],[x,y+h]].forEach(function(p){gB.appendChild(el("rect",{x:(p[0]-4).toFixed(1),y:(p[1]-4).toFixed(1),width:8,height:8,fill:TH.bg,stroke:col,"stroke-width":1.5,class:"heatsink-handle"}));});}}
-var OUTLINE_STROKE=1.4;
+var OUTLINE_STROKE=1.4,OUTLINE_VERTEX_SIZE=3;
 function drawOutlineVertexDot(p,col){gB.appendChild(el("circle",{
- cx:X(p[0]).toFixed(1),cy:Y(p[1]).toFixed(1),r:OUTLINE_STROKE/2,fill:col,opacity:0.9}));}
+ cx:X(p[0]).toFixed(1),cy:Y(p[1]).toFixed(1),r:OUTLINE_VERTEX_SIZE/2,fill:col,opacity:0.9}));}
 function drawBoardRect(tmp){
  while(gB.firstChild)gB.removeChild(gB.firstChild);
  drawBacking();
@@ -496,18 +496,18 @@ function drawBoardRect(tmp){
     d+=" A "+(f.radius*S).toFixed(3)+" "+(f.radius*S).toFixed(3)+" 0 0 "+(f.sweep>0?1:0)+" "+X(f.p2.x).toFixed(3)+" "+Y(f.p2.y).toFixed(3);}
    d+=" Z";gB.appendChild(el("path",{d:d,fill:"none",stroke:SC,"stroke-width":OUTLINE_STROKE,opacity:0.9}));}
   else gB.appendChild(el("polygon",{points:str,fill:"none",stroke:SC,"stroke-width":OUTLINE_STROKE,opacity:0.9}));
-  // Keep normal vertices no wider than the outline itself. Pointer handlers
-  // coordinate-test a much larger invisible area, so the tiny dots stay easy
-  // to grab; an actively selected vertex still receives its larger ring.
-  if((drawn||editing)&&!RO)(nominal||pts).forEach(function(p){drawOutlineVertexDot(p,SC);});
+  // Show compact vertex dots only while the board outline editor is active.
+  // Pointer handlers coordinate-test a larger invisible area, so the 3 px
+  // circles stay easy to grab; a selected vertex still gets its larger ring.
+  if(editing)(nominal||pts).forEach(function(p){drawOutlineVertexDot(p,SC);});
  if(geom&&geom.sketch){if(!activeSketchIsArea()&&(outlineMode||outlineOnlyFilter()))drawOutlineSketchSelection(geom.sketch,PCB.outline.sketch);if(outlineMode)drawOutlineSketchInfo(geom.sketch,SC,PCB.outline.sketch);}
  }else{
   gB.appendChild(el("rect",{x:X(br.x).toFixed(1),y:Y(br.y).toFixed(1),width:(br.w*S).toFixed(1),
     height:(br.h*S).toFixed(1),fill:"none",stroke:EC,"stroke-width":tmp?1.6:OUTLINE_STROKE,opacity:0.9,
     "stroke-dasharray":tmp?"6 4":"0"}));
-  // A DRAWN rect outline also shows corner handles, so it's discoverably
-  // vertex/edge-editable (the first edit promotes it to a real polygon).
-  if((drawn||editing)&&!tmp&&!RO){var rc=outlinePtsOf(outlineEditable());
+  // An edited rect shows corner handles; the first edit promotes it to a real
+  // polygon. Outside Outline mode the committed edge stays visually clean.
+  if(editing){var rc=outlinePtsOf(outlineEditable());
    if(rc)rc.forEach(function(p){drawOutlineVertexDot(p,EC);});}
  }
  if(linePreview)polySketch(); // connected Line preview stays over the outline it may snap to

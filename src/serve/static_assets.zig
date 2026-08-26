@@ -437,12 +437,14 @@ test "PCB board editor shows the Board outline properties on a plain outline edg
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
-// Normal PCB outline vertex marks are only as wide as the outline stroke while
-// retaining the existing larger coordinate-tested drag target.
-test "PCB board outline vertex dots stay visually unobtrusive without shrinking hit targets" {
+// PCB outline vertex marks appear only during outline editing and retain the
+// existing larger coordinate-tested drag target.
+test "PCB board outline editing shows compact vertex dots without shrinking hit targets" {
     const markers = [_][]const u8{
-        "var OUTLINE_STROKE=1.4;",
-        "r:OUTLINE_STROKE/2,fill:col",
+        "OUTLINE_VERTEX_SIZE=3;",
+        "r:OUTLINE_VERTEX_SIZE/2,fill:col",
+        "if(editing)(nominal||pts).forEach",
+        "if(editing){var rc=outlinePtsOf(outlineEditable());",
         "function vtxAt(m)",
         "var bd=7/S,best=-1;",
     };
