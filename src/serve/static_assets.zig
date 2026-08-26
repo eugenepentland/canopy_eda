@@ -437,6 +437,18 @@ test "PCB board editor shows the Board outline properties on a plain outline edg
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
+// Normal PCB outline vertex marks are only as wide as the outline stroke while
+// retaining the existing larger coordinate-tested drag target.
+test "PCB board outline vertex dots stay visually unobtrusive without shrinking hit targets" {
+    const markers = [_][]const u8{
+        "var OUTLINE_STROKE=1.4;",
+        "r:OUTLINE_STROKE/2,fill:col",
+        "function vtxAt(m)",
+        "var bd=7/S,best=-1;",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+}
+
 // spec: Web Server - Selecting a board outline exposes editable dimensions, slides horizontal/vertical edges only perpendicular to themselves, and uses Shift to constrain non-axis-aligned edge slides to their dominant axis
 test "PCB board editor edits dimensions and slides outline edges along their normal" {
     const markers = [_][]const u8{
