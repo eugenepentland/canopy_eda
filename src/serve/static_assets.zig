@@ -827,7 +827,7 @@ test "PCB editor carries persistent 45 and 90 degree manual bend modes" {
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
-// spec: Web Server - The PCB hand router starts opted-in current-aware power nets at their branch width and defers only that width verdict from its zone-blind synchronous gate to authoritative server DRC
+// spec: Web Server - The PCB hand router starts opted-in current-aware power nets at their branch width and defers only that width verdict from its zone-blind synchronous gate and fast WASM marker list to authoritative server DRC
 test "PCB hand router uses current-aware branch width without weakening geometry gates" {
     const markers = [_][]const u8{
         "v=c&&parseFloat(c.power_branch_width)",
@@ -836,6 +836,7 @@ test "PCB hand router uses current-aware branch width without weakening geometry
         "d.k!==\"track width\"",
         "w>0&&+d.gap+1e-7>=w",
         "!DRC_BLOCK[d.k]||drcGateDefersPowerWidth(d)",
+        "applyDrcOverrides(resp.drc).filter(function(d){return !drcGateDefersPowerWidth(d);})",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }

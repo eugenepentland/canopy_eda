@@ -8716,7 +8716,7 @@ window.PCBApplyNetClassGeometry=applyNetClassGeometry;
 
 // Turn current-aware power `track width` findings into an exact, non-mutating
 // edit plan. The server DRC has already solved each segment's DC current (or
-// conservatively fallen back to the full class width when it could not), so
+// conservatively charged it with the full rail current when it could not), so
 // the client only has to match each midpoint back to saved editable copper.
 // Targets round upward to a 1 mil manufacturing increment and never shrink.
 function powerWidthPlan(){var fixes=[],seen=[],step=0.0254,eps=1e-7;if(!powerWidthDrcFresh)return {tracks:fixes,nets:0};
@@ -9232,7 +9232,12 @@ function applyDrcOverrides(list){var ov=drcOverrideByLabel(),out=[];
   out.push(v);}
  return out;}
 function applyWasmDrc(resp){if(!resp||!resp.drc)return;
- var engine=applyDrcOverrides(resp.drc),list=engine.slice();
+ // The zone-blind WASM checker cannot perform the current/fill solve that
+ // decides an opted-in power branch's local width. Hide that same deferred
+ // verdict from the fast marker list as well as from the synchronous commit
+ // gate; the shortly-following server reconcile remains authoritative. Widths
+ // below the declared branch floor are not deferred and still appear at once.
+ var engine=applyDrcOverrides(resp.drc).filter(function(d){return !drcGateDefersPowerWidth(d);}),list=engine.slice();
  // Connectivity (`net open`) is server-only. Keep the last authoritative rows
  // through the fast geometry refresh instead of tearing them down for 150 ms
  // and recreating them when the reconcile arrives.
