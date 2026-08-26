@@ -19,6 +19,7 @@
 const std = @import("std");
 const drc = @import("drc.zig");
 const drc_return_path = @import("drc_return_path.zig");
+const fill_cache = @import("fill_cache.zig");
 const bypass_open = @import("bypass_open.zig");
 const net_open = @import("net_open.zig");
 const optimizer = @import("optimizer.zig");
@@ -70,19 +71,26 @@ pub const CheckReport = struct {
 /// Compose all DRC layers while retaining the net-open layer's reusable
 /// connectivity report for a caller that also needs a routed tally.
 pub fn checkDefaultRulesReport(alloc: std.mem.Allocator, in: CopperCheck) CheckReport {
-    const filled = checkFilledReport(alloc, in);
-    const geom = filled.violations;
+    // ONE borrow spans every layer below, because the connectivity layer reads
+    // the same fill the topology rules judged. It is released on the way out —
+    // every violation, status and string this returns is built from the
+    // placement, never from the fill (see `fill_cache`'s header).
+    var board = boardFills(alloc, in);
+    defer board.release();
+    const geom = filledViolations(alloc, in, board);
     const silk = withBoardText(alloc, in.placement, geom, in.texts);
     const bypass = withBypassOpen(alloc, in.placement, in.routed, silk);
-    return withNetOpenReport(alloc, in, bypass, filled.plane_fills);
+    return withNetOpenReport(alloc, in, bypass, board);
 }
 
 /// Run only copper-topology findings against the fabricated fill components.
 /// Persisted cleanup uses this to obtain the exact same jointly-safe removal
 /// plan as full DRC without paying for unrelated geometry findings each round.
 pub fn checkTopologyFilled(alloc: std.mem.Allocator, in: CopperCheck) []const drc.Violation {
-    const filled = filledTopology(alloc, in) catch return &.{};
-    return drc.checkTopology(alloc, in.placement, in.routed, filled.zones) catch &.{};
+    var board = boardFills(alloc, in);
+    defer board.release();
+    if (board.failed) return &.{};
+    return drc.checkTopology(alloc, in.placement, in.routed, board.fills.zones) catch &.{};
 }
 
 /// Append exact-target bypass connectivity warnings. This stays beside the
@@ -164,36 +172,61 @@ fn withBoardText(
 /// `copper_stub` — an ERROR — to the zone-blind spelling. A caller that pours a
 /// rail and then judges its copper without the pour is contradicting itself.
 pub fn checkFilled(alloc: std.mem.Allocator, in: CopperCheck) []const drc.Violation {
-    return checkFilledReport(alloc, in).violations;
+    var board = boardFills(alloc, in);
+    defer board.release();
+    return filledViolations(alloc, in, board);
 }
 
-const FilledCheck = struct {
-    violations: []const drc.Violation,
-    plane_fills: []const pour.NetFills,
+/// The geometry rules plus the return-path rule, judged against `board`'s fill.
+/// A board whose fill could not be built degrades to the ZONE-BLIND rules
+/// rather than to an EMPTY fill: an empty fill is not "no pours", it is "every
+/// pour vanished", and it would report every trace that terminates on its own
+/// rail's copper as an unattached stub.
+fn filledViolations(alloc: std.mem.Allocator, in: CopperCheck, board: BoardFills) []const drc.Violation {
+    if (board.failed) return drc.check(alloc, in.placement, in.routed, in.clearance) catch &.{};
+    const zones = board.fills.zones;
+    const base = drc.checkWithZones(alloc, in.placement, in.routed, in.clearance, zones) catch &.{};
+    var out: std.ArrayList(drc.Violation) = .empty;
+    out.appendSlice(alloc, base) catch return base;
+    drc_return_path.check(alloc, &out, in.placement, in.routed, zones) catch return base;
+    return out.items;
+}
+
+/// This board's reduced fill for one DRC pass: either borrowed from the memo or
+/// freshly poured into the caller's arena. `release` ends a borrow.
+const BoardFills = struct {
+    fills: fill_cache.Fills = .{},
+    held: fill_cache.Held = .{},
+    /// The fill could not be built at all (allocation failure). Distinguished
+    /// from an empty fill, which is a legitimate answer for a board with no
+    /// planes, pours or zones — see `filledViolations`.
+    failed: bool = false,
+
+    fn release(self: *BoardFills) void {
+        self.held.release();
+    }
 };
 
-fn checkFilledReport(alloc: std.mem.Allocator, in: CopperCheck) FilledCheck {
-    const filled = filledTopology(alloc, in) catch return .{
-        .violations = drc.check(alloc, in.placement, in.routed, in.clearance) catch &.{},
-        .plane_fills = &.{},
-    };
-    const base = drc.checkWithZones(alloc, in.placement, in.routed, in.clearance, filled.zones) catch &.{};
-    var out: std.ArrayList(drc.Violation) = .empty;
-    out.appendSlice(alloc, base) catch return .{ .violations = base, .plane_fills = filled.plane_fills };
-    drc_return_path.check(alloc, &out, in.placement, in.routed, filled.zones) catch
-        return .{ .violations = base, .plane_fills = filled.plane_fills };
-    return .{ .violations = out.items, .plane_fills = filled.plane_fills };
+/// The board's fill, memoised on the board's own bytes. A hit skips the whole
+/// per-net raster; a miss pours exactly as before and retains a copy for the
+/// next surface to ask about the same board (`fill_cache`).
+fn boardFills(alloc: std.mem.Allocator, in: CopperCheck) BoardFills {
+    const key = fill_cache.key(in.placement, in.routed, in.zones);
+    var held = fill_cache.acquire(key);
+    if (held.entry != null) return .{ .fills = held.fills(), .held = held };
+    const fresh = filledTopology(alloc, in) catch return .{ .failed = true };
+    fill_cache.put(key, fresh);
+    return .{ .fills = fresh };
 }
 
 /// Reduce every declared plane/pour and hand-authored zone to the exact kept
 /// fill components the Gerber uses. The DRC topology graph receives one node
 /// per component (and its holes), never one outline-wide conductor.
-const FilledTopology = struct {
-    zones: []const drc.TopologyZone,
-    plane_fills: []const pour.NetFills,
-};
-
-fn filledTopology(alloc: std.mem.Allocator, in: CopperCheck) std.mem.Allocator.Error!FilledTopology {
+///
+/// This is the expensive half of the reporting seam — one raster per net per
+/// carrying layer plus one per user zone — so `boardFills` memoises its result
+/// and this runs only for a board no surface has poured yet.
+fn filledTopology(alloc: std.mem.Allocator, in: CopperCheck) std.mem.Allocator.Error!fill_cache.Fills {
     var out: std.ArrayList(drc.TopologyZone) = .empty;
     var plane_fills: std.ArrayList(pour.NetFills) = .empty;
     var component: u64 = 1;
@@ -246,9 +279,19 @@ fn filledTopology(alloc: std.mem.Allocator, in: CopperCheck) std.mem.Allocator.E
             component += 1;
         }
     }
+    // The connectivity layer's own whole-board raster, taken here so the memo
+    // retains BOTH halves of the seam's fill work under one board key. It reads
+    // the same physical tracks and the same edge field this loop just used.
+    const zone_fills = try net_open.zoneFills(
+        alloc,
+        in.placement,
+        .{ .tracks = physical_tracks, .vias = in.routed.vias, .zones = in.zones },
+        base,
+    );
     return .{
         .zones = try out.toOwnedSlice(alloc),
         .plane_fills = try plane_fills.toOwnedSlice(alloc),
+        .zone_fills = zone_fills,
     };
 }
 
@@ -259,11 +302,19 @@ fn withNetOpenReport(
     alloc: std.mem.Allocator,
     in: CopperCheck,
     geom: []const drc.Violation,
-    plane_fills: []const pour.NetFills,
+    board: BoardFills,
 ) CheckReport {
     const empty: net_open.Report = .{ .violations = &.{}, .connectivity = &.{} };
     const tracks = connectivityTracks(alloc, in.routed) catch return .{ .violations = geom, .net_report = empty };
-    const report = net_open.checkWithConnectivity(alloc, in.placement, .{ .tracks = tracks, .vias = in.routed.vias, .zones = in.zones }, in.base_edge, plane_fills) catch
+    const prepared: net_open.Prepared = .{
+        .base = in.base_edge,
+        .plane_fills = board.fills.plane_fills,
+        // A board whose fill could not be built has no PREPARED zone rasters —
+        // which is not the same fact as a board that rasters to none, so the
+        // failed pass asks for its own rather than claiming there are no zones.
+        .zone_fills = if (board.failed) null else board.fills.zone_fills,
+    };
+    const report = net_open.checkWithConnectivity(alloc, in.placement, .{ .tracks = tracks, .vias = in.routed.vias, .zones = in.zones }, prepared) catch
         return .{ .violations = geom, .net_report = empty };
     if (report.violations.len == 0) return .{ .violations = geom, .net_report = report };
     var all: std.ArrayList(drc.Violation) = .empty;
@@ -279,4 +330,75 @@ fn withNetOpenReport(
 /// reclassifying its implementation samples as editable track segments.
 fn connectivityTracks(alloc: std.mem.Allocator, r: router.RouteResult) std.mem.Allocator.Error![]const router.Track {
     return path_copper.tracks(alloc, r);
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────
+
+// spec: placement/fill-cache - a second reporting DRC over an unchanged board reuses the retained fill instead of re-pouring it and returns the identical verdict
+test "a memoised board fill returns the verdict the pour that built it returned" {
+    const testing = std.testing;
+    const geometry = @import("geometry.zig");
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const alloc = arena_inst.allocator();
+    // Two GND pads under one hand-drawn GND pour: the pour is what joins them,
+    // so a verdict taken against a wrong or missing fill would differ loudly.
+    const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 1, .y = 1 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 4, .y = 1 },
+    };
+    const pins = [_]@import("../flat_netlist.zig").FlatPin{ .{ .ref_des = "R1", .pin = "1" }, .{ .ref_des = "R2", .pin = "1" } };
+    const nets = [_]optimizer.FlatNet{.{ .name = "GND", .pins = &pins }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 5,
+        .maxy = 2,
+        .generated = true,
+        .board_rect = .{ .minx = 0, .miny = 0, .w = 5, .h = 2 },
+    };
+    const drawn = [_][2]f64{ .{ 0.2, 0.2 }, .{ 4.8, 0.2 }, .{ 4.8, 1.8 }, .{ 0.2, 1.8 } };
+    const zones = [_]pour.UserZone{.{ .net = "GND", .layer = 0, .poly = &drawn }};
+    const empty = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 1 };
+    const in: CopperCheck = .{ .placement = placement, .routed = empty, .clearance = 0.127, .zones = &zones };
+
+    const poured = checkDefaultRules(alloc, in);
+    // The pour is load-bearing in this fixture: the identical board judged
+    // WITHOUT it reads differently, so the comparison below cannot pass by
+    // accident on a memo that handed back the wrong fill (or none).
+    const unpoured = checkDefaultRules(alloc, .{ .placement = placement, .routed = empty, .clearance = 0.127 });
+    try testing.expect(drc.countKind(unpoured, .net_open) != drc.countKind(poured, .net_open));
+
+    // The board is retained now, so the pass below borrows its fill rather
+    // than rastering the pour a second time.
+    var held = fill_cache.acquire(fill_cache.key(placement, empty, &zones));
+    defer held.release();
+    try testing.expect(held.entry != null);
+
+    const memoised = checkDefaultRules(alloc, in);
+    try testing.expectEqual(poured.len, memoised.len);
+    try testing.expectEqual(drc.errorCount(poured), drc.errorCount(memoised));
+    try testing.expectEqual(drc.countKind(poured, .net_open), drc.countKind(memoised, .net_open));
+    for (poured, memoised) |a, b| {
+        try testing.expectEqual(a.kind, b.kind);
+        try testing.expectEqual(a.severity, b.severity);
+        try testing.expectEqual(a.x, b.x);
+        try testing.expectEqual(a.y, b.y);
+        try testing.expectEqual(a.gap, b.gap);
+        try testing.expectEqualStrings(a.who.pad_a, b.who.pad_a);
+        try testing.expectEqualStrings(a.who.pad_b, b.who.pad_b);
+    }
+    // A board that MOVED is a different board, and its fill is not that one.
+    parts[1].x = 4.5;
+    var moved = fill_cache.acquire(fill_cache.key(placement, empty, &zones));
+    defer moved.release();
+    try testing.expect(moved.entry == null);
 }

@@ -3097,6 +3097,34 @@ connectivity model.
 
 - completeness-waiver: concurrent access (each fill owns its allocator-backed grids and reads an immutable placement snapshot; callers serialize mutations to the copper handed into a later fill)
 
+## placement/fill-cache
+
+Public functions: acquire, key, put
+
+- one board fingerprints identically from two independently built copies and differently after any change to its copper
+- the fingerprint ignores the objective score and whether the optimizer ran, so one saved board shares an entry across the surfaces that resolve it
+- a retained fill is copied out of the request arena that poured it and stays readable after that arena is gone
+- an evicted board is freed only once its last reader releases it, so a DRC pass reading a fill is never overtaken by a newer board
+- a board already retained is never duplicated, and the least recently borrowed board is the one eviction takes
+- a board with no planes, pours or zones retains its empty fill so the surfaces after it skip the pour attempt too
+- a board whose fill alone exceeds the whole store's byte ceiling is declined rather than retained, and every later pass simply pours it again
+- a second reporting DRC over an unchanged board reuses the retained fill instead of re-pouring it and returns the identical verdict
+
+The reporting DRC seam pours every declared plane, every pour and every drawn
+zone of a board before it can judge copper topology or connectivity, and that
+raster is the whole cost of the seam. It is a pure function of the board, so it
+is retained under a 128-bit content fingerprint of the placement, the routed
+copper and the user zones, and borrowed rather than re-poured by every later
+pass over the same board.
+
+- completeness-waiver: large inputs (a single board's fill is refused outright when it exceeds the store's whole byte ceiling, and the retained set is bounded by both a board count and that ceiling; the fill itself is already cell-capped by placement/pour)
+- completeness-waiver: unauthorized access (an in-process memo over boards a caller already holds; entries are reachable only through a fingerprint of the exact board's own bytes, so nothing can read copper it did not already have, and there is no file, request, or auth surface)
+- completeness-waiver: concurrent access (the store is mutex-guarded and every borrow is refcounted, so an entry evicted under a reader is unlinked and freed by that reader's release rather than under it; a published entry is immutable, so passes over one board share it with no lock held while they read)
+- completeness-waiver: i/o failure (no I/O — the memo copies typed in-memory fills and reads no path; an allocation failure declines the entry and leaves the caller's freshly poured fill standing)
+- completeness-waiver: malformed encoding (typed placement and pour values only; design parsing and board-file rejection happen long before a fill exists to retain)
+- completeness-waiver: integer overflow (the fingerprint widens every scalar to its own storage width before hashing and does no arithmetic on it; the byte total only ever adds a measured arena capacity and subtracts the same value on eviction)
+- completeness-waiver: panic-free (every failure path degrades to a miss — a failed allocation, an oversized board, and a key another thread published first all return without retaining, and the DRC pass pours its own fill as it always did)
+
 ## placement/module_policy
 
 Public functions: analyze, classifyNetName, isInductor

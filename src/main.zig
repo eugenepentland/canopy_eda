@@ -671,6 +671,7 @@ test {
     _ = @import("ground_via_seed.zig");
     _ = @import("placement/pad_exit.zig");
     _ = @import("placement/drc_compose.zig");
+    _ = @import("placement/fill_cache.zig");
     _ = @import("placement/bypass_intent.zig");
     _ = @import("placement/bypass_open.zig");
     _ = @import("placement/routed_copper.zig");

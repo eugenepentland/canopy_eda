@@ -1647,6 +1647,19 @@ src/placement/escape_assign.zig::plan | fn plan(arena: Allocator, placement: opt
 src/placement/escape_assign.zig::refused | fn refused(self: Contention) usize
 src/placement/escape_assign.zig::reservedLanes | fn reservedLanes( arena: Allocator, p: Plan, run_mm: f64, ) Allocator.Error![]const route_policy.ReservedLane
 src/placement/escape_assign.zig::suggestDsl | fn suggestDsl( arena: Allocator, placement: optimizer.Placement, c: Contention, ) Allocator.Error![]const u8
+src/placement/fill_cache.zig::Entry struct_
+src/placement/fill_cache.zig::Fills struct_
+src/placement/fill_cache.zig::Held struct_
+src/placement/fill_cache.zig::Key struct_
+src/placement/fill_cache.zig::Store struct_
+src/placement/fill_cache.zig::acquire | fn acquire(k: Key) Held
+src/placement/fill_cache.zig::acquire | fn acquire(self: *Store, k: Key) Held
+src/placement/fill_cache.zig::deinit | fn deinit(self: *Store) void
+src/placement/fill_cache.zig::fills | fn fills(self: Held) Fills
+src/placement/fill_cache.zig::key | fn key( placement: optimizer.Placement, routed: router.RouteResult, zones: []const pour.UserZone, ) Key
+src/placement/fill_cache.zig::put | fn put(k: Key, fills: Fills) void
+src/placement/fill_cache.zig::put | fn put(self: *Store, k: Key, fills: Fills) void
+src/placement/fill_cache.zig::release | fn release(self: *Held) void
 src/placement/fine_accept.zig::Attempt struct_
 src/placement/fine_accept.zig::Board struct_
 src/placement/fine_accept.zig::Connectivity struct_
@@ -1931,9 +1944,11 @@ src/placement/net_identity.zig::canonical | fn canonical(self: Identity, net: i3
 src/placement/net_identity.zig::canonicalName | fn canonicalName(self: Identity, nets: []const optimizer.FlatNet, net: i32) []const u8
 src/placement/net_identity.zig::init | fn init(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error!Identity
 src/placement/net_identity.zig::same | fn same(self: Identity, a: i32, b: i32) bool
+src/placement/net_open.zig::Prepared struct_
 src/placement/net_open.zig::Report struct_
 src/placement/net_open.zig::check | fn check( arena: std.mem.Allocator, placement: optimizer.Placement, copper: routed_copper.Copper, base: ?pour.EdgeField, ) std.mem.Allocator.Error![]drc.Violation
-src/placement/net_open.zig::checkWithConnectivity | fn checkWithConnectivity( arena: std.mem.Allocator, placement: optimizer.Placement, copper: routed_copper.Copper, base: ?pour.EdgeField, plane_fills: []const pour.NetFills, ) std.mem.Allocator.Error!Report
+src/placement/net_open.zig::checkWithConnectivity | fn checkWithConnectivity( arena: std.mem.Allocator, placement: optimizer.Placement, copper: routed_copper.Copper, prepared: Prepared, ) std.mem.Allocator.Error!Report
+src/placement/net_open.zig::zoneFills | fn zoneFills( arena: std.mem.Allocator, placement: optimizer.Placement, copper: routed_copper.Copper, base: ?pour.EdgeField, ) std.mem.Allocator.Error![]const pour.Fill
 src/placement/net_rules.zig::FenceRule struct_
 src/placement/net_rules.zig::ImpedanceRule value
 src/placement/net_rules.zig::NetRule struct_

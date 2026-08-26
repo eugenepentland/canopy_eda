@@ -15,7 +15,7 @@ own corpus rule), medians over 3 reps, in ms:
 | `eval_ms` | design evaluation (`Evaluator.evalFile`) |
 | `sidecar_ms` | `.layouts.json` read + JSON parse (7 MB on barracuda) |
 | `solve_ms` | `solveForRequest` — eval + sidecar + ★ verbatim restore + copper restore |
-| `drc_report_ms` | `drc_rules.checkFilteredZones` — the reporting DRC (geometry + pour topology + `net_open` + severity overrides) behind `/api/pcb-drc`, the page blob, describe, and the fab gate |
+| `drc_report_ms` | `drc_rules.checkFilteredZones` — the reporting DRC (geometry + pour topology + `net_open` + severity overrides) behind `/api/pcb-drc`, the page blob, describe, and the fab gate. **Reps are not independent**: the seam memoises a board's poured copper while the board is unchanged (`src/placement/fill_cache.zig`), so rep 1 pours it and the rest borrow it, and the median is the RECONCILE cost — what an editor DRC loop and every derived fetch pay over a board that has not moved. |
 | `drc_geom_ms` | `drc.check` — geometry only, the native twin of the client's interactive WASM DRC |
 | `page_ms` | `warmPage` on a fresh cache — the complete cold `/pcb-layout/:name` render: eval, sidecar, placement, DRC, HTML, cache admission, gzip memo |
 
@@ -88,6 +88,10 @@ docs/testing-guide.md), which would fail honest commits.
   another machine or a ReleaseSafe binary compares nothing.
 - **Idle machine or gated.** Never read numbers taken beside a compile.
 - **Medians of ≥ 3.** One rep proves nothing; the harness defaults to 3.
+- **`drc_report_ms` is a warm number** (see the table). A change that only
+  makes the FIRST pour of a board cheaper will barely move it; a change that
+  breaks the fill memo's key will move it several-fold and should be read as a
+  regression in the memo, not in the pour.
 - The client half of DRC latency (the browser's WASM worker) is the same
   `placement/drc.zig` compiled to wasm; `drc_geom_ms` is its native proxy.
   Browser-side costs (JS parse of the ~1 MB page, worker marshaling) are not

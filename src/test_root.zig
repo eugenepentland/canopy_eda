@@ -193,6 +193,7 @@ test {
     _ = @import("placement/dive_elide.zig");
     _ = @import("placement/diff_shape.zig");
     _ = @import("placement/drc.zig");
+    _ = @import("placement/drc_compose.zig");
     _ = @import("placement/drc_diffpair.zig");
     _ = @import("placement/drc_keepout.zig");
     _ = @import("placement/drc_match.zig");
@@ -200,6 +201,7 @@ test {
     _ = @import("placement/edge_rotation.zig");
     _ = @import("placement/escalate_retry.zig");
     _ = @import("placement/escape_assign.zig");
+    _ = @import("placement/fill_cache.zig");
     _ = @import("placement/fine_accept.zig");
     _ = @import("placement/fine_window.zig");
     _ = @import("placement/gap_close_route.zig");

@@ -32,6 +32,16 @@
 //! `--reps` runs (default 3); the page phase gets a fresh cache per rep so
 //! every rep is a true cold render.
 //!
+//! `drc_report` is the ONE phase whose reps are deliberately not independent.
+//! The reporting seam memoises a board's poured copper for as long as the board
+//! is unchanged (`placement/fill_cache.zig`), so the first rep pours the fill
+//! and the rest borrow it — and the median of three is therefore the RECONCILE
+//! cost, what the editor's DRC loop and every derived fetch pay over a board
+//! that has not moved. That is the number this phase exists to track: a cold
+//! first pour happens once per edit, the reconcile happens continuously. The
+//! cold pour is still visible in `page`, whose per-rep cache reset makes each
+//! render a first visit.
+//!
 //! Read-only in the bench_route sense: it renders through the same warm-up
 //! seam the server boot uses, which only touches boards that already have a
 //! saved-layout sidecar — the corpus below applies the same guard, so no
