@@ -3174,6 +3174,10 @@ src/serve/datasheet_attach.zig::datasheetStem | fn datasheetStem(name: []const u
 src/serve/datasheet_attach.zig::linksDatasheet | fn linksDatasheet(component_form: []const u8, pdf: []const u8) bool
 src/serve/datasheet_attach.zig::spliceDatasheet | fn spliceDatasheet( allocator: std.mem.Allocator, source: []const u8, pdf: []const u8, ) SpliceError![]u8
 src/serve/datasheet_review_json.zig::write | fn write(writer: anytype, root_body: []const ast.Node) !void
+src/serve/describe_cache.zig::Store struct_
+src/serve/describe_cache.zig::deinit | fn deinit(self: *Store) void
+src/serve/describe_cache.zig::serve | fn serve(self: *Store, in: anytype, miss_version: *?u32) bool
+src/serve/describe_cache.zig::store | fn store(self: *Store, in: anytype) void
 src/serve/design_diff.zig::DesignDiff struct_
 src/serve/design_diff.zig::DiffError value
 src/serve/design_diff.zig::FieldChange struct_
@@ -3486,7 +3490,7 @@ src/serve/pcb_describe.zig::DescribeError value
 src/serve/pcb_describe.zig::Side enum_
 src/serve/pcb_describe.zig::aabbHalf | fn aabbHalf(part: optimizer.Part) [2]f64
 src/serve/pcb_describe.zig::anchorIndex | fn anchorIndex(parts: []const optimizer.Part, nets: []const optimizer.FlatNet) ?usize
-src/serve/pcb_describe.zig::describeDesign | fn describeDesign( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: pcb_layout_page.PngRequest, ) pcb_layout_page.PngError![]u8
+src/serve/pcb_describe.zig::describeDesign | fn describeDesign( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: pcb_layout_page.PngRequest, deps: ?*?page_cache.FileSet, ) pcb_layout_page.PngError![]u8
 src/serve/pcb_describe.zig::describeProgress | fn describeProgress( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: pcb_layout_page.PngRequest, deps: ?*?page_cache.FileSet, ) pcb_layout_page.PngError![]u8
 src/serve/pcb_describe.zig::layoutProgressApi | fn layoutProgressApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void
 src/serve/pcb_describe.zig::originOf | fn originOf(p: optimizer.Placement, pi: usize) []const u8
