@@ -21,6 +21,24 @@ from concurrent worktrees. The hook also migrates the exact shared-cache
 symlink created by its previous implementation; custom cache links are left
 alone.
 
+After a feature is merged into `main`, `post-merge` clears the `.zig-cache` in
+the worktree parked at the merged feature tip. It requires that worktree to be
+clean, skips locked worktrees and custom cache symlinks, and leaves the source,
+worktree registration, and branch intact. This uses merge rather than commit as
+the completion boundary so WIP commits and pre-release fixes retain their warm
+development cache. To preview or reclaim caches from older clean worktrees
+whose commits are already in `main`, run:
+
+```sh
+.githooks/prune-worktree-caches.sh --all --dry-run
+.githooks/prune-worktree-caches.sh --all
+```
+
+The script also runs `git worktree prune`, which removes stale administrative
+records for directories that are already gone; it never deletes a live
+worktree or branch. Retire those separately with `git worktree remove` once no
+agent or shell still uses them.
+
 The committed `post-merge` and `post-commit` bridge hooks forward to matching
 machine-local hooks under `.git/hooks/`. Release preparation gives the parallel
 test and production build separate local caches under

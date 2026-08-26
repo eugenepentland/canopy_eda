@@ -18,5 +18,11 @@ This repo routinely has several git worktrees in flight under `.claude/worktrees
 - **Commit WIP; don't leave it dangling.** Across-session work should land as a `WIP: ...` commit on the feature branch (fine to squash later), never as loose edits in a worktree. Stashes are invisible to automation and to a future you — prefer a commit.
 - **Rebase worktree branches onto main weekly or before handoff.** Branches that drift more than a few commits behind main produce wide conflicts and, worse, context-line drift (e.g. a function call surviving a rebase after the function itself was deleted upstream). Small, frequent rebases keep the delta legible.
 - **Before bulk-merging worktrees, inventory them.** Run `git status` in each worktree (a `git worktree list` + loop works well). Flag any uncommitted work and decide commit-vs-discard *per worktree* before anything touches main.
-- **Retire merged worktrees.** `git worktree remove <path> && git branch -D <branch>` once a branch is in main. Fewer live worktrees = fewer places for drift to hide.
+- **Retire merged worktrees.** The `post-merge` hook automatically clears the
+  just-merged clean worktree's `.zig-cache`; use
+  `.githooks/prune-worktree-caches.sh --all --dry-run` and then `--all` to
+  reclaim caches from older merged worktrees. This does not delete source or a
+  branch. Once no agent or shell still uses one, fully retire it with
+  `git worktree remove <path> && git branch -D <branch>`. Fewer live worktrees =
+  fewer places for drift to hide.
 - **Audit `git stash list` periodically.** Stashes labelled against deleted branches are almost always forgotten work worth reviewing or dropping.
