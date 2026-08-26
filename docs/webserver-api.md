@@ -125,7 +125,7 @@ Local dev still uses `http://localhost:7050`.
   ✎ Draw button (key **X**) draws tracks/vias onto the same model — click a
   pad to start (net/layer/width from pad + Route panel's track-width), click
   to fix 45°/grid-snapped corners (Shift = free angle), **V** drops a via +
-  flips layer, finish on a same-net pad / double-click / Enter, Backspace
+  flips layer, finish on a same-net pad / double-click, Backspace
   steps back, right-click deletes copper under the cursor; Save/Update
   persists it like any routed copper (works on module pages → the module's
   `.layouts.json`). A click that magnetically snaps to a same-net pad or
@@ -133,7 +133,12 @@ Local dev still uses `http://localhost:7050`.
   that endpoint. While a trace is live, a faded dashed ratsnest line follows
   the legal preview endpoint to the closest unresolved same-net pad, trace body,
   via, or filled-pour point outside the launch island (and remains available
-  when routing resumes from existing copper).
+  when routing resumes from existing copper). For a single-ended trace, after
+  each fixed corner a bounded single-net autorouter run preserves the manual prefix and replaces
+  that straight guide with a faded dashed preview of the proposed remainder;
+  **Enter** commits that remainder, including proposed vias, as the trace's one
+  undoable completion. If the autorouter has not answered yet, Enter waits for
+  the in-flight proposal; double-click still finishes manually without it.
   **Rigid sub-circuits**: parts sharing a sub-block prefix
   drag/rotate as one unit (G explodes/re-coheres; per-design localStorage),
   and the sidebar Sub-circuits palette **Stamp**s a whole module ★ layout

@@ -400,7 +400,7 @@ fn subcircuitsOnlyOutcome(
     options.existing_zones = run.prep.scoped.existing_zones;
     options.stop.cancel = run.cancel;
     options.sink = live.sink;
-    if (run.prep.effort) |effort| options.effort = effort;
+    if (run.prep.steering.effort) |effort| options.effort = effort;
     if (options.stop.deadline_ns == 0 and options.stop.max_route_ms > 0)
         options.stop.deadline_ns = clock.nanoTimestamp() +
             @as(i128, @intCast(options.stop.max_route_ms)) * @as(i128, clock.ns_per_ms);

@@ -4005,7 +4005,8 @@ function kbdToggle(){
   '<div class="kbd-row"><span>Toggle 45&deg; / 90&deg; trace bends (while routing)</span><kbd>E</kbd></div>'+
   '<div class="kbd-row"><span>Switch corner posture (while routing)</span><kbd>/</kbd></div>'+
   '<div class="kbd-row"><span>Toggle sharp / rounded tangent-arc bends</span><kbd>A</kbd></div>'+
-  '<div class="kbd-row"><span>Step back / finish trace</span><kbd>Backspace / Enter &middot; dbl-click</kbd></div>'+
+  '<div class="kbd-row"><span>Step back / autoroute the remainder</span><kbd>Backspace / Enter</kbd></div>'+
+  '<div class="kbd-row"><span>Finish without autocomplete</span><kbd>double-click</kbd></div>'+
   '<div class="kbd-row"><span>Cancel active trace and exit Draw</span><kbd>Esc</kbd></div>'+
   '<div class="kbd-row"><span>Delete track or via (in route mode)</span><kbd>right-click</kbd></div>'+
   '<div class="kbd-row"><span>Inspect copper / DRC marker (Select mode)</span><kbd>click it</kbd></div>'+
@@ -5923,7 +5924,7 @@ svg.addEventListener("pointerdown",function(ev){
    marqEl=el("rect",{"class":"marquee",x:0,y:0,width:0,height:0});gU.appendChild(marqEl);}
   pcap(ev);return;}
  if(viaMode&&ev.button===0){viaPlaceAt(mm(ev));return;}
- if(drawMode&&ev.button===0){drawClick(mm(ev),ev.shiftKey);return;}
+ if(drawMode&&ev.button===0){drawClick(mm(ev),ev.shiftKey);if(dtrace)drawAutoSchedule(false,false);return;}
  if(ev.pointerType==="touch"){
   if(!RO&&!anyDrawTool()&&ev.button===0&&touchCount()===0)pickHoldArm(ev,mm(ev));else pickHoldCancel();
   touchDown(ev);return;}
@@ -6766,13 +6767,19 @@ if(clrIn)clrIn.addEventListener("input",drawClr);
 // KiCad-style manual routing on the same PCB.tracks/PCB.vias model the
 // autorouter fills: click a pad to start (net + layer come from the pad),
 // click to fix 45° or 90° grid-snapped corners (Shift = free angle), V drops a via
-// and flips layer, click a same-net pad / double-click / Enter to finish,
+// and flips layer, click a same-net pad / double-click to finish, or Enter to
+// accept the asynchronously previewed autorouter remainder,
 // Backspace steps back, and Esc cancels the active trace and exits the mode.
 // Right-click deletes
 // the track/via under the cursor. Copper persists through the normal layout
 // Save/Update (routes ride the sidecar), so a module's hand routing saved on
 // its own page is exactly what Stamp later carries onto a parent board.
 var drawMode=false,dtrace=null,drawCur=null,drawShift=false;
+// One bounded autorouter request at a time supplies the optional remainder of
+// the live hand route. A newer click invalidates the old answer and queues the
+// new head; requests are serialized so fast clicking cannot launch several
+// expensive maze runs in parallel.
+var drawAutoTimer=null,drawAutoBusy=false,drawAutoVersion=0;
 var viaMode=false,viaNet="",viaCur=null;
 // Transient red flash of a commit the engine gate refused (see drcGateBlocks):
 // the draw head stays live, and paintDraw pulses these world-space legs red so
@@ -6896,7 +6903,7 @@ function drawBtnSync(){var b=document.getElementById("pcb-draw");if(!b)return;
   b.title=drawMode?lbl:b.getAttribute("data-tip");}
  else b.textContent=lbl;
  drawArcControlSync();drawAngleControlSync();toolSync();}
-function drawModeSet(on){if(RO)return;drawMode=on;if(!on)dtrace=null;
+function drawModeSet(on){if(RO)return;if(!on)drawAutoReset();drawMode=on;if(!on)dtrace=null;
  if(on&&viaMode)viaModeSet(false);
  if(on&&heatsinkMode)heatsinkArm(false);
  if(on){drcGateInit();drcGateSessionEnsure();} // warm/reload only when copper is about to need it
@@ -7629,13 +7636,13 @@ function drawCommitPlan(plan){if(!plan||!plan.tracks.length)return false;
  return true;}
 function drawEnd(){var tapered={ok:true,changed:false};if(dtrace&&dtrace.n>0){tapered=drawApplyAutomaticTapers();if(!tapered.ok)return false;
   recordUndo(dtrace.undo);scheduleDrc();}
- dtrace=null;drawBtnSync();ovPaintSoon();routeStatMsg(tapered.changed?"automatic pad tapers added":null);return true;}
+ drawAutoReset();dtrace=null;drawBtnSync();ovPaintSoon();routeStatMsg(tapered.changed?"automatic pad tapers added":null);return true;}
 // Escape is cancellation, not another finish attempt. In particular, a DRC-
 // blocked automatic taper deliberately keeps drawEnd() live so the user can
 // adjust it; Escape must still provide a guaranteed way out. Restore the exact
 // route-start copper snapshot because a gesture can add vias, replace rounded
 // segments, and temporarily drop a pre-existing RF path as it is extended.
-function drawCancel(){var snap=dtrace&&dtrace.undo;dtrace=null;
+function drawCancel(){var snap=dtrace&&dtrace.undo;drawAutoReset();dtrace=null;
  if(snap){restoreCopperSnap(snap);linksDirty=true;traceEmDirty=true;powerIntegrityDirty=true;ovsRev++;
   keepoutGeomDrop();cuGeomDrop();gpuCuEdit();rats();drcGateSessionDefer();}
  drawModeSet(false);routeStatMsg("routing cancelled");}
@@ -7713,8 +7720,78 @@ function drawTargetNearest(t,head){if(t.kind==="pad"){var c=wpt(t.d.i,t.d.x,t.d.
  var best=null;trackChords(t.o).forEach(function(s){var q=drawSegNearest(head.x,head.y,s.x1,s.y1,s.x2,s.y2);if(!best||q.d<best.d)best=q;});
  if(best)best.kind=t.kind;return best;}
 function drawNearestRatTarget(head,limit){if(!dtrace||!dtrace.ratTargets)return null;var best=null;
- dtrace.ratTargets.forEach(function(t){var q=drawTargetNearest(t,head);if(q&&(!best||q.d<best.d))best=q;});
+ dtrace.ratTargets.forEach(function(t){var q=drawTargetNearest(t,head);if(q&&(!best||q.d<best.d)){q.target=t;best=q;}});
  return best&&(limit==null||best.d<limit)?best:null;}
+// ── Autorouted hand-route remainder ─────────────────────────────────────
+// The server's scoped autorouter returns the whole preserved board plus the
+// newly routed selected net. Split physical geometry at the two hard waypoints
+// and retain their shortest connected path so the overlay/commit contains ONLY
+// the proposed remainder, never a replacement for the user's fixed prefix.
+function drawAutoNets(tr){var out=[tr.net];if(tr.pair&&tr.pair.net)out.push(tr.pair.net);return out;}
+function drawAutoOwn(net,tr){var key=netCollapse(net||""),nets=drawAutoNets(tr);
+ for(var i=0;i<nets.length;i++)if(netCollapse(nets[i]||"")===key)return true;return false;}
+function drawAutoQ(v){v=+v;return Math.round((isFinite(v)?v:0)*100000);}
+function drawAutoTargetLayer(q,tr){var t=q&&q.target;if(!t)return tr.l;
+ if(t.kind==="track")return t.o.l||0;if(t.kind==="fill")return reviewAreaLayer(t.o.q);
+ if(t.kind==="pad"&&t.d.pd){var l=drawPadLayer(P[t.d.i],t.d.pd);return l<0?tr.l:l;}return tr.l;}
+function drawAutoNode(x,y,l){return drawAutoQ(x)+","+drawAutoQ(y)+","+l;}
+function drawAutoPieces(track,cuts){var out=[],eps=0.025;
+ trackChords(track).forEach(function(c){var dx=c.x2-c.x1,dy=c.y2-c.y1,l2=dx*dx+dy*dy,at=[0,1];
+  (cuts||[]).forEach(function(p){if(p.l!==(c.l||0)||l2<1e-12)return;var u=((p.x-c.x1)*dx+(p.y-c.y1)*dy)/l2;
+   if(u>1e-7&&u<1-1e-7&&Math.hypot(p.x-(c.x1+u*dx),p.y-(c.y1+u*dy))<=eps)at.push(u);});
+  at.sort(function(a,b){return a-b;});for(var i=1;i<at.length;i++){var a=at[i-1],b=at[i];if(b-a<1e-8)continue;
+   out.push({x1:c.x1+a*dx,y1:c.y1+a*dy,x2:c.x1+b*dx,y2:c.y1+b*dy,l:c.l||0,w:c.w||track.w,net:c.net||track.net,source:"autorouter"});}});return out;}
+function drawAutoPath(allTracks,allVias,tr,head,target){var adj={},nodes={};
+ function edge(a,b,e,w){nodes[a]=1;nodes[b]=1;(adj[a]=adj[a]||[]).push({to:b,e:e,w:w});(adj[b]=adj[b]||[]).push({to:a,e:e,w:w});}
+ (allTracks||[]).forEach(function(t){if(!drawAutoOwn(t.net,tr))return;drawAutoPieces(t,[head,target]).forEach(function(s){
+  edge(drawAutoNode(s.x1,s.y1,s.l),drawAutoNode(s.x2,s.y2,s.l),{kind:"track",o:s},Math.hypot(s.x2-s.x1,s.y2-s.y1));});});
+ (allVias||[]).forEach(function(v){if(v.f||!drawAutoOwn(v.net,tr))return;for(var l=1;l<NSIG;l++)
+  edge(drawAutoNode(v.x,v.y,l-1),drawAutoNode(v.x,v.y,l),{kind:"via",o:v},0.4);});
+ function nearest(p){var best=null,bd=0.08;Object.keys(nodes).forEach(function(k){var a=k.split(","),l=+a[2];if(l!==p.l)return;
+   var d=Math.hypot(+a[0]/100000-p.x,+a[1]/100000-p.y);if(d<bd){bd=d;best=k;}});return best;}
+ var start=nearest(head),goal=nearest(target);if(!start||!goal)return null;
+ var dist={},prev={},done={},pq=[{k:start,d:0}];dist[start]=0;
+ while(pq.length){pq.sort(function(a,b){return b.d-a.d;});var cur=pq.pop();if(done[cur.k])continue;done[cur.k]=1;if(cur.k===goal)break;
+  (adj[cur.k]||[]).forEach(function(e){var nd=cur.d+e.w;if(dist[e.to]==null||nd<dist[e.to]-1e-9){dist[e.to]=nd;prev[e.to]={k:cur.k,e:e.e};pq.push({k:e.to,d:nd});}});}
+ if(!done[goal])return null;var tracks=[],vias=[],seen={},k=goal;
+ while(k!==start){var p=prev[k];if(!p)return null;if(p.e.kind==="track")tracks.push(p.e.o);else{var v=p.e.o,id=drawAutoQ(v.x)+","+drawAutoQ(v.y);if(!seen[id]){seen[id]=1;vias.push(v);}}k=p.k;}
+ tracks.reverse();vias.reverse();return {tracks:tracks,vias:vias,rf_paths:[]};}
+function drawAutoReset(){drawAutoVersion++;if(drawAutoTimer){clearTimeout(drawAutoTimer);drawAutoTimer=null;}if(dtrace)dtrace.auto=null;}
+function drawAutoSchedule(now,accept){if(!dtrace||dtrace.pair||!dtrace.ratTargets||!dtrace.ratTargets.length)return;
+ var tr=dtrace,target=drawNearestRatTarget({x:tr.lx,y:tr.ly});if(!target)return;
+ target={x:target.x,y:target.y,l:drawAutoTargetLayer(target,tr)};var head={x:tr.lx,y:tr.ly,l:tr.l},token=++drawAutoVersion;if(drawAutoTimer)clearTimeout(drawAutoTimer);
+ tr.auto={state:"queued",token:token,accept:!!accept,tracks:[],vias:[],rf_paths:[],head:head,target:target};
+ drawAutoTimer=setTimeout(function(){drawAutoTimer=null;drawAutoLaunch(tr,token);},now?0:280);ovPaintSoon();}
+function drawAutoLaunch(tr,token){if(dtrace!==tr||!tr.auto||tr.auto.token!==token||tr.auto.state!=="queued")return;
+ if(drawAutoBusy){drawAutoTimer=setTimeout(function(){drawAutoTimer=null;drawAutoLaunch(tr,token);},120);return;}
+ drawAutoBusy=true;tr.auto.state="loading";routeStatMsg("autorouter planning the remainder…");
+ var payload=boardStatePayload();payload.nets=drawAutoNets(tr);payload.resume_points=[
+  {net:tr.net,x:tr.auto.head.x,y:tr.auto.head.y,layer:tr.auto.head.l},
+  {net:tr.net,x:tr.auto.target.x,y:tr.auto.target.y,layer:tr.auto.target.l}];payload.effort="one_shot";payload.track_width=tr.w;
+ fetch("/api/pcb-route/"+encodeURIComponent(PCB.name)+subq(),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
+  .then(function(r){if(!r.ok)throw 0;return r.json();})
+  .then(function(j){if(dtrace!==tr||!tr.auto||tr.auto.token!==token)return;
+   var failed=!!j.grid_overflow||(j.unrouted||[]).some(function(n){return drawAutoOwn(n,tr);});
+   if(failed){tr.auto.state="failed";routeStatMsg("autorouter could not finish from here — keep routing by hand",true);ovPaintSoon();return;}
+   var path=drawAutoPath(j.tracks,j.vias,tr,tr.auto.head,tr.auto.target);if(!path){tr.auto.state="failed";
+    routeStatMsg("autorouter could not join this head to the target — keep routing by hand",true);ovPaintSoon();return;}
+   tr.auto.tracks=path.tracks;tr.auto.vias=path.vias;tr.auto.rf_paths=path.rf_paths;tr.auto.state="ready";
+   routeStatMsg("autorouter suggestion ready — Enter routes the rest");ovPaintSoon();if(tr.auto.accept)drawAutoAccept();})
+  .catch(function(){if(dtrace===tr&&tr.auto&&tr.auto.token===token){tr.auto.state="failed";
+    routeStatMsg("autorouter suggestion unavailable — keep routing by hand",true);ovPaintSoon();}})
+  .then(function(){drawAutoBusy=false;if(dtrace&&dtrace.auto&&dtrace.auto.state==="queued")drawAutoLaunch(dtrace,dtrace.auto.token);});}
+function drawAutoAccept(){if(!dtrace)return false;var tr=dtrace,a=tr.auto;
+ if(tr.pair)return drawEnd();
+ if(!tr.ratTargets||!tr.ratTargets.length)return drawEnd();
+ if(!a||a.state!=="ready"){drawAutoSchedule(true,true);routeStatMsg("autorouter finishing the remainder…");return true;}
+ rfDropNet(tr.net);
+ var tapered={ok:true,changed:false};if(tr.n>0){tapered=drawApplyAutomaticTapers();if(!tapered.ok)return true;}
+ PCB.tracks=PCB.tracks||[];PCB.vias=PCB.vias||[];PCB.rf_paths=PCB.rf_paths||[];
+ a.tracks.forEach(function(t){t.source="autorouter";trackIdEnsure(t);PCB.tracks.push(t);});
+ a.vias.forEach(function(v){v.source="autorouter";viaIdEnsure(v);PCB.vias.push(v);});
+ Array.prototype.push.apply(PCB.rf_paths,a.rf_paths);var nt=a.tracks.length,nv=a.vias.length,undo=tr.undo;
+ drawAutoReset();dtrace=null;recordUndo(undo);scheduleDrc();drawBtnSync();drawRoute();rats();ovPaintSoon();
+ routeStatMsg("autorouter completed the trace · "+nt+" segment"+(nt===1?"":"s")+(nv?(" · "+nv+" via"+(nv===1?"":"s")):"")+(tapered.changed?" · pad tapers added":""));return true;}
 // ── Coupled differential-pair drawing ───────────────────────────────────
 // Starting a trace on a pad, via, or track whose net belongs to a
 // `(net-class … (diff-pair))` pair auto-couples the ✎ Draw tool (P uncouples):
@@ -8026,7 +8103,12 @@ function paintViaTool(ctx){if(!viaMode||!viaCur)return;var q=viaNet?viaSnap(viaC
 // the closest point on destination copper. Using the clipped preview endpoint
 // (not the raw cursor) makes the line say exactly where legal copper ends.
 function drawNearestDest(head){return head?drawNearestRatTarget(head):null;}
-function paintDrawRatline(ctx,head){var q=drawNearestDest(head);if(!q)return;
+function paintDrawAutoRoute(ctx){var a=dtrace&&dtrace.auto;if(!a||a.state!=="ready"||(!a.tracks.length&&!a.vias.length))return false;
+ ctx.save();ctx.globalAlpha=0.34;ctx.lineCap="round";ctx.lineJoin="round";ctx.setLineDash([6,4]);
+ a.tracks.forEach(function(t){ctx.strokeStyle=layerColor(t.l||0);ctx.lineWidth=Math.max((t.w||dtrace.w)*S,1.1);ctx.beginPath();trackPath(ctx,t);ctx.stroke();});
+ a.vias.forEach(function(v){ctx.strokeStyle=(netColOn&&netColorOf(netCollapse(v.net||"")))||TH.via;ctx.lineWidth=1.2;
+  ctx.beginPath();ctx.arc(X(v.x),Y(v.y),viaRenderRadius(v.d||0.4),0,6.2832);ctx.stroke();});ctx.restore();return true;}
+function paintDrawRatline(ctx,head){if(paintDrawAutoRoute(ctx))return;var q=drawNearestDest(head);if(!q)return;
  ctx.save();ctx.setLineDash([5,4]);ctx.strokeStyle=(netColOn&&netColorOf(netCollapse(dtrace.net)))||TH.ratsLine;
  ctx.globalAlpha=0.42;ctx.lineWidth=0.8;ctx.beginPath();ctx.moveTo(X(head.x),Y(head.y));ctx.lineTo(X(q.x),Y(q.y));ctx.stroke();ctx.restore();}
 // Route-head preview: the exact leg chain a click will commit (posture legs
@@ -8123,17 +8205,17 @@ document.addEventListener("keydown",function(ev){if(RO||kbTyping(ev.target))retu
  if((ev.key=="x"||ev.key=="X")&&!ev.ctrlKey&&!ev.metaKey){ev.preventDefault();drawModeSet(!drawMode);return;}
  if(!drawMode&&(ev.key=="v"||ev.key=="V")&&ev.shiftKey&&!ev.ctrlKey&&!ev.metaKey){ev.preventDefault();viaModeSet(!viaMode);return;}
  if(!drawMode)return;
- if(dtrace&&(ev.key=="v"||ev.key=="V")){ev.preventDefault();drawViaHere();return;}
+ if(dtrace&&(ev.key=="v"||ev.key=="V")){ev.preventDefault();drawViaHere();if(dtrace)drawAutoSchedule(false,false);return;}
  if((ev.key=="p"||ev.key=="P")&&dtrace&&dtrace.pair){ev.preventDefault();
-  dtrace.pair=null;routeStatMsg("pair uncoupled — routing "+nLeaf(dtrace.net)+" alone");drawBtnSync();ovPaintSoon();return;}
+  dtrace.pair=null;routeStatMsg("pair uncoupled — routing "+nLeaf(dtrace.net)+" alone");drawBtnSync();drawAutoSchedule(false,false);ovPaintSoon();return;}
  if(ev.key=="/"){ev.preventDefault();drawPosture^=1;
   routeStatMsg("corner posture: "+(drawAngle==="90"?(drawPosture?"vertical then horizontal":"horizontal then vertical"):(drawPosture?"45° then line":"line then 45°")));ovPaintSoon();return;}
  if(ev.key=="e"||ev.key=="E"){ev.preventDefault();drawAngleSet(drawAngle==="45"?"90":"45",true);return;}
  if(ev.key=="a"||ev.key=="A"){ev.preventDefault();var bs=document.getElementById("r-bend");
   if(bs){bs.value=bs.value==="arc"?"sharp":"arc";bs.dispatchEvent(new Event("change"));
    routeStatMsg(bs.value==="arc"?"rounded tangent-arc bends":("sharp "+drawAngle+"° bends"));}return;}
- if(ev.key=="Backspace"){ev.preventDefault();drawBack();return;}
- if(ev.key=="Enter"&&dtrace){ev.preventDefault();drawEnd();return;}});
+ if(ev.key=="Backspace"){ev.preventDefault();drawBack();if(dtrace)drawAutoSchedule(false,false);return;}
+ if(ev.key=="Enter"&&dtrace){ev.preventDefault();drawAutoAccept();return;}});
 // ── Who a violation is between ──────────────────────────────────────────
 // The server names the parties of every violation it can (drc_json.zig): `a`
 // and `b` carry `net` / `ref` / `pad`, each absent when that rule has no such
