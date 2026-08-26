@@ -81,6 +81,7 @@ const read_only_posts = [_][]const u8{
     "/api/pcb-score/",
     "/api/pcb-score-batch/",
     "/api/pcb-route/",
+    "/api/pcb-route-complete/",
     // Live-route start/cancel: the same compute-only routing as /api/pcb-route
     // run on a background thread (the finished run's cached-replay write is
     // the same best-effort out/ cache the review path performs).

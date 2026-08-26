@@ -3821,6 +3821,7 @@ src/serve/route_review.zig::writeParts | fn writeParts(arena: std.mem.Allocator,
 src/serve/route_review.zig::writeTimelineArray | fn writeTimelineArray( w: *std.Io.Writer, placement: optimizer.Placement, timeline: []const router.RouteEvent, ) HandlerError!void
 src/serve/route_review.zig::writeTimelineEvent | fn writeTimelineEvent( w: *std.Io.Writer, placement: optimizer.Placement, event: router.RouteEvent, seq: usize, ) HandlerError!void
 src/serve/route_session_api.zig::Store struct_
+src/serve/route_session_api.zig::completeApi | fn completeApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/route_session_api.zig::deleteSessionApi | fn deleteSessionApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/route_session_api.zig::distillSessionApi | fn distillSessionApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/route_session_api.zig::getSessionApi | fn getSessionApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void

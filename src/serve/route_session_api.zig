@@ -17,6 +17,7 @@ const optimizer = @import("../placement/optimizer.zig");
 const board_layers = @import("../board_layers.zig");
 const router = @import("../placement/router.zig");
 const route_policy = @import("../placement/route_policy.zig");
+const route_resume = @import("../route_resume.zig").ManualCompletion;
 const drc_rules = @import("drc_rules.zig");
 const layer_table_json = @import("layer_table_json.zig");
 const env_mod = @import("../eval/env.zig");
@@ -714,12 +715,228 @@ fn writeSexprEscaped(w: *std.Io.Writer, value: []const u8) HandlerError!void {
     };
 }
 
+// ── manual-route completion API ───────────────────────────────────────────
+
+// A dashed editor suggestion asks a much smaller question than Route board:
+// join this trace head to its selected destination without disturbing existing
+// copper. Reuse the gap router already owned by this interactive-routing module
+// so the request avoids subcircuit routing and whole-board reporting passes.
+const completion_margin_mm: f64 = 6.0;
+const completion_deadline_ms: u64 = 1200;
+const completion_bad_json = "invalid route completion request";
+const completion_failed = "route completion failed";
+const CompletionError = error{InvalidPoints} || std.mem.Allocator.Error;
+
+fn completionPoint(p: route_resume.Point) router.NetPt {
+    return .{ .x = p.point.x, .y = p.point.y, .layer = p.point.layer };
+}
+
+fn completionGap(from: route_resume.Point, to: route_resume.Point) CompletionError!router.Gap {
+    if (from.net != to.net) return error.InvalidPoints;
+    return .{ .net_i = from.net, .from = completionPoint(from), .to = completionPoint(to) };
+}
+
+fn completionWindow(points: []const route_resume.Point) CompletionError!router.GapWindow {
+    if (points.len < 2 or points.len % 2 != 0) return error.InvalidPoints;
+    var window = router.GapWindow.around(try completionGap(points[0], points[1]), completion_margin_mm);
+    var i: usize = 2;
+    while (i < points.len) : (i += 2) {
+        const next = router.GapWindow.around(try completionGap(points[i], points[i + 1]), completion_margin_mm);
+        window.x0 = @min(window.x0, next.x0);
+        window.y0 = @min(window.y0, next.y0);
+        window.x1 = @max(window.x1, next.x1);
+        window.y1 = @max(window.y1, next.y1);
+    }
+    return window;
+}
+
+fn completionZones(
+    alloc: std.mem.Allocator,
+    prep: pcb_layout_page.RoutePrep,
+    gaps: []const router.Gap,
+    window: router.GapWindow,
+    options: route_policy.Options,
+) CompletionError![]const route_policy.ExistingZone {
+    var allowed: u64 = 0;
+    var constrained = false;
+    for (gaps) |gap| {
+        if (gap.net_i >= options.net.len) continue;
+        const mask = options.net[gap.net_i].allowed_layers;
+        if (mask == 0) continue;
+        allowed = if (constrained) allowed & mask else mask;
+        constrained = true;
+    }
+    if (!constrained) return prep.scoped.existing_zones;
+    const polygon = try alloc.dupe([2]f64, &.{
+        .{ window.x0, window.y0 }, .{ window.x1, window.y0 },
+        .{ window.x1, window.y1 }, .{ window.x0, window.y1 },
+    });
+    var zones: std.ArrayList(route_policy.ExistingZone) = .empty;
+    try zones.appendSlice(alloc, prep.scoped.existing_zones);
+    for (0..prep.placement.rules.signalLayerCount()) |layer| {
+        if (layer < 64 and allowed & (@as(u64, 1) << @intCast(layer)) != 0) continue;
+        try zones.append(alloc, .{
+            .polygon = polygon,
+            .layer = @intCast(layer),
+            .net = -2,
+            .tracks_blocked = true,
+            .copper = false,
+        });
+    }
+    return zones.toOwnedSlice(alloc);
+}
+
+fn completeRoute(
+    alloc: std.mem.Allocator,
+    prep: pcb_layout_page.RoutePrep,
+    submitted: router.RouteResult,
+) CompletionError!router.RouteResult {
+    const points = prep.steering.resume_points;
+    const window = try completionWindow(points);
+    const gaps = try alloc.alloc(router.Gap, points.len / 2);
+    for (gaps, 0..) |*gap, i| gap.* = try completionGap(points[i * 2], points[i * 2 + 1]);
+    const options = route_plan.lowerOrEmpty(alloc, prep.eff_block, prep.placement);
+    const completions = try router.closeGaps(alloc, prep.placement, prep.rp, .{
+        .tracks = submitted.tracks,
+        .vias = submitted.vias,
+        .zones = try completionZones(alloc, prep, gaps, window, options),
+        .reserved_lanes = options.guides.reserved,
+    }, gaps, .{
+        .ripup = false,
+        .shape = .fallback,
+        .raster = .{
+            .window = window,
+            .stop = .{ .deadline_ns = clock.nanoTimestamp() + @as(i128, completion_deadline_ms) * @as(i128, clock.ns_per_ms) },
+        },
+    });
+
+    var tracks: std.ArrayList(router.Track) = .empty;
+    var vias: std.ArrayList(router.Via) = .empty;
+    var failed: std.ArrayList([]const u8) = .empty;
+    var routed: usize = 0;
+    for (completions, gaps) |path, gap| {
+        if (path) |p| {
+            try tracks.appendSlice(alloc, p.tracks);
+            try vias.appendSlice(alloc, p.vias);
+            routed += 1;
+        } else if (gap.net_i < prep.placement.nets.len) {
+            try failed.append(alloc, prep.placement.nets[gap.net_i].name);
+        }
+    }
+    return .{
+        .tracks = try tracks.toOwnedSlice(alloc),
+        .vias = try vias.toOwnedSlice(alloc),
+        .routed = routed,
+        .total = gaps.len,
+        .failed = try failed.toOwnedSlice(alloc),
+    };
+}
+
+fn completionNetName(prep: pcb_layout_page.RoutePrep, index: i32) []const u8 {
+    if (index < 0 or index >= prep.placement.nets.len) return "";
+    return prep.placement.nets[@intCast(index)].name;
+}
+
+fn writeCompletion(w: *std.Io.Writer, prep: pcb_layout_page.RoutePrep, result: router.RouteResult) std.Io.Writer.Error!void {
+    try w.writeAll("{\"tracks\":[");
+    for (result.tracks, 0..) |track, i| {
+        if (i > 0) try w.writeByte(',');
+        try w.print("{{\"x1\":{d},\"y1\":{d},\"x2\":{d},\"y2\":{d},\"l\":{d},\"w\":{d},\"net\":", .{
+            track.x1, track.y1, track.x2, track.y2, track.layer, track.width,
+        });
+        try pcb_layout_page.writeJsonStr(w, completionNetName(prep, track.net));
+        try w.writeAll(",\"source\":\"autorouter\"}");
+    }
+    try w.writeAll("],\"vias\":[");
+    for (result.vias, 0..) |via, i| {
+        if (i > 0) try w.writeByte(',');
+        try w.print("{{\"x\":{d},\"y\":{d},\"d\":{d},\"drill\":{d},\"net\":", .{ via.x, via.y, via.dia, via.drill });
+        try pcb_layout_page.writeJsonStr(w, completionNetName(prep, via.net));
+        try w.writeAll(",\"source\":\"autorouter\"}");
+    }
+    try w.writeAll("],\"rf_paths\":[],\"unrouted\":[");
+    for (result.failed, 0..) |name, i| {
+        if (i > 0) try w.writeByte(',');
+        try pcb_layout_page.writeJsonStr(w, name);
+    }
+    try w.print("],\"routed\":{d},\"total\":{d}}}", .{ result.routed, result.total });
+}
+
+/// POST /api/pcb-route-complete/:name — route only the explicit head→target
+/// pairs in `resume_points`, returning only newly proposed copper.
+pub fn completeApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = pcb_layout_page.nameParam(req, res) orelse return;
+    const body = pcb_layout_page.bodyParam(req, res) orelse return;
+    const root = std.json.parseFromSliceLeaky(std.json.Value, req.arena, body, .{}) catch {
+        res.status = 400;
+        res.body = completion_bad_json;
+        return;
+    };
+    var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
+    defer eval.deinit();
+    var module_res: ?modules_mod.ResolvedBlock = null;
+    defer if (module_res) |resolved| {
+        resolved.eval.deinit();
+        ctx.allocator.destroy(resolved.eval);
+    };
+    const prep = pcb_layout_page.prepareRouteFromJson(ctx.allocator, .{
+        .project_dir = ctx.project_dir,
+        .name = name,
+        .sub = pcb_layout_page.subSlug(req),
+        .root = root,
+        .default_effort = .one_shot,
+    }, &eval, &module_res) catch |err| {
+        const failure = pcb_layout_page.routePrepFailure(err);
+        res.status = failure.status;
+        if (failure.msg) |message| res.body = message;
+        return;
+    };
+    const empty = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
+    const submitted = if (pcb_layout_page.parseSavedRoutes(ctx.allocator, root)) |saved|
+        pcb_layout_page.restoreRoutes(ctx.allocator, saved, prep.placement.nets) orelse empty
+    else
+        empty;
+    const result = completeRoute(ctx.allocator, prep, submitted) catch |err| {
+        res.status = if (err == error.InvalidPoints) 400 else 500;
+        res.body = if (err == error.InvalidPoints) completion_bad_json else completion_failed;
+        return;
+    };
+    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
+    try writeCompletion(&aw.writer, prep, result);
+    res.content_type = .JSON;
+    res.body = aw.written();
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
 const geometry = @import("../placement/geometry.zig");
 const export_kicad = @import("../export_kicad.zig");
 const parser = @import("../sexpr/parser.zig");
+
+test "manual completion bounds the search around every head and target" {
+    const points = [_]route_resume.Point{
+        .{ .net = 2, .point = .{ .x = 10, .y = 20, .layer = 0 } },
+        .{ .net = 2, .point = .{ .x = 18, .y = 24, .layer = 0 } },
+        .{ .net = 3, .point = .{ .x = 9, .y = 19, .layer = 0 } },
+        .{ .net = 3, .point = .{ .x = 19, .y = 25, .layer = 0 } },
+    };
+    const window = try completionWindow(&points);
+    try testing.expectEqual(@as(f64, 3), window.x0);
+    try testing.expectEqual(@as(f64, 13), window.y0);
+    try testing.expectEqual(@as(f64, 25), window.x1);
+    try testing.expectEqual(@as(f64, 31), window.y1);
+}
+
+test "manual completion rejects unpaired and cross-net points" {
+    const odd = [_]route_resume.Point{.{ .net = 1, .point = .{ .x = 0, .y = 0, .layer = 0 } }};
+    try testing.expectError(error.InvalidPoints, completionWindow(&odd));
+    const crossed = [_]route_resume.Point{
+        .{ .net = 1, .point = .{ .x = 0, .y = 0, .layer = 0 } },
+        .{ .net = 2, .point = .{ .x = 1, .y = 1, .layer = 0 } },
+    };
+    try testing.expectError(error.InvalidPoints, completionWindow(&crossed));
+}
 
 const fixture_pins = [_]export_kicad.FlatPin{
     .{ .ref_des = "R1", .pin = "1" },
@@ -749,6 +966,38 @@ fn buildFixture(a: std.mem.Allocator) std.mem.Allocator.Error!optimizer.Placemen
         .maxy = 0.5,
         .generated = true,
     };
+}
+
+test "manual completion returns only the requested fixture bridge" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const placement = try buildFixture(arena);
+    const points = [_]route_resume.Point{
+        .{ .net = 0, .point = .{ .x = 0, .y = 0, .layer = 0 } },
+        .{ .net = 0, .point = .{ .x = 3, .y = 0, .layer = 0 } },
+    };
+    const prep = pcb_layout_page.RoutePrep{
+        .eff_block = &route_review_fixture_block,
+        .placement = placement,
+        .rp = placement.rules.design.routeParams(),
+        .scoped = .{},
+        .user_zones = &.{},
+        .steering = .{ .resume_points = &points },
+    };
+    const empty = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
+    const result = try completeRoute(arena, prep, empty);
+    try testing.expectEqual(@as(usize, 1), result.routed);
+    try testing.expectEqual(@as(usize, 1), result.total);
+    try testing.expect(result.tracks.len > 0);
+    try testing.expectEqual(@as(usize, 0), result.failed.len);
+
+    var json: std.Io.Writer.Allocating = .init(arena);
+    try writeCompletion(&json.writer, prep, result);
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, arena, json.written(), .{});
+    try testing.expectEqual(result.tracks.len, root.object.get("tracks").?.array.items.len);
+    try testing.expectEqual(@as(usize, 0), root.object.get("vias").?.array.items.len);
+    try testing.expectEqual(@as(i64, 1), root.object.get("routed").?.integer);
 }
 
 // spec: serve/route-session - a hint's layer name resolves through the shared board layer lookup, so a plane-claimed inner names no bit

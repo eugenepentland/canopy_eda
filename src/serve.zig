@@ -613,6 +613,7 @@ fn registerPcbRoutes(router: anytype) void {
     router.post("/api/pcb-score/:name", pcb_layout_page.pcbScoreApi, .{});
     router.post("/api/pcb-score-batch/:name", pcb_layout_page.pcbScoreBatchApi, .{});
     router.post("/api/pcb-route/:name", pcb_layout_page.pcbRouteApi, .{});
+    router.post("/api/pcb-route-complete/:name", route_session_api.completeApi, .{});
     router.post("/api/route-live/:name/start", route_live.routeLiveStartApi, .{});
     router.get("/api/route-live/:name", route_live.routeLivePollApi, .{});
     router.post("/api/route-live/:name/cancel", route_live.routeLiveCancelApi, .{});
