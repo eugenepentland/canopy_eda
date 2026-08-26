@@ -9269,9 +9269,10 @@ function drcSessClipSeg(x1,y1,x2,y2,layer,net,hw){
  return (t<0)?null:t;}
 // Run the wasm engine synchronously over explicit copper overrides → drc list
 // (override-filtered, same as the worker path). Two-call ABI mirrors drc_worker.js.
-function drcGateRun(tracks,vias,parts){
+function drcGateRun(tracks,vias,parts,rfPaths){
  var ex=drcGate.inst.exports;
- var input=JSON.stringify(buildDrcInput(PCB,{clearance:clrVal(),outline:PCB.outline||null,parts:parts||P,tracks:tracks,vias:vias}));
+ var input=JSON.stringify(buildDrcInput(PCB,{clearance:clrVal(),outline:PCB.outline||null,parts:parts||P,tracks:tracks,vias:vias,
+  rf_paths:rfPaths==null?(PCB.rf_paths||[]):rfPaths}));
  var bytes=new TextEncoder().encode(input);
  var p=ex.wasm_alloc(bytes.length);
  new Uint8Array(drcGate.mem.buffer).set(bytes,p);
@@ -9302,6 +9303,9 @@ function drcCuBox(o,via){var r=(via?(o.d||0.4):(o.w||0.25))/2;
 function drcBoxAdd(a,b){if(!a)return {x0:b.x0,y0:b.y0,x1:b.x1,y1:b.y1};
  a.x0=Math.min(a.x0,b.x0);a.y0=Math.min(a.y0,b.y0);a.x1=Math.max(a.x1,b.x1);a.y1=Math.max(a.y1,b.y1);return a;}
 function drcBoxHit(a,b){return a.x0<=b.x1&&a.x1>=b.x0&&a.y0<=b.y1&&a.y1>=b.y0;}
+function drcRfBox(path){var box=null;(path&&path.samples||[]).forEach(function(s){var x=+s[0],y=+s[1],r=Math.max(0,+s[2]||0)/2;
+ if(!isFinite(x)||!isFinite(y))return;box=drcBoxAdd(box,{x0:x-r,y0:y-r,x1:x+r,y1:y+r});});return box;}
+function drcRfScope(box){return (PCB.rf_paths||[]).filter(function(path){var pb=drcRfBox(path);return pb&&drcBoxHit(pb,box);});}
 function drcGateReach(){var m=clrVal(),rules=PCB.rules||{};
  function scan(o){if(!o||typeof o!=="object")return;for(var k in o){var v=o[k];
   if(typeof v==="number"&&/(clearance|via_to_via|hole_to_hole|min_annular)/.test(k))m=Math.max(m,v);
@@ -9313,11 +9317,11 @@ function drcGateScope(baseTracks,baseVias,afterTracks,afterVias){
  if(!box)return null;var reach=drcGateReach();box={x0:box.x0-reach,y0:box.y0-reach,x1:box.x1+reach,y1:box.y1+reach};
  function pick(a,via){return a.filter(function(o){return drcBoxHit(drcCuBox(o,via),box);});}
  var parts=P.filter(function(p,i){return (p.pads||[]).some(function(pd){return drcBoxHit(wrect(i,pd),box);});});
- return {bt:pick(baseTracks,false),bv:pick(baseVias,true),at:pick(afterTracks,false),av:pick(afterVias,true),parts:parts};}
+ return {bt:pick(baseTracks,false),bv:pick(baseVias,true),at:pick(afterTracks,false),av:pick(afterVias,true),parts:parts,rf:drcRfScope(box)};}
 function drcGateDiffBlocks(baseTracks,baseVias,afterTracks,afterVias){
  if(!drcGate.ready)return false; // wasm not up → tier-1 only
  var base,after,scope=drcGateScope(baseTracks,baseVias,afterTracks,afterVias);if(!scope)return false;
- try{base=drcGateRun(scope.bt,scope.bv,scope.parts);after=drcGateRun(scope.at,scope.av,scope.parts);}
+ try{base=drcGateRun(scope.bt,scope.bv,scope.parts,scope.rf);after=drcGateRun(scope.at,scope.av,scope.parts,scope.rf);}
  catch(e){drcGate.failed=true;return false;}
  var bc=drcBlockCounts(base),ac=drcBlockCounts(after);
  for(var id in ac){if(ac[id]>(bc[id]||0))return true;}
