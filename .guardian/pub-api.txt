@@ -2150,6 +2150,7 @@ src/placement/perimeter_fence.zig::keepoutAllowsNet | fn keepoutAllowsNet(p: opt
 src/placement/perimeter_fence.zig::keepoutLimit | fn keepoutLimit(p: optimizer.Placement) f64
 src/placement/perimeter_fence.zig::maskSegments | fn maskSegments(alloc: std.mem.Allocator, p: optimizer.Placement) std.mem.Allocator.Error![]const MaskSegment
 src/placement/perimeter_fence.zig::maskSegmentsForFace | fn maskSegmentsForFace( alloc: std.mem.Allocator, p: optimizer.Placement, tracks: []const router.Track, side: ?optimizer.Side, ) std.mem.Allocator.Error![]const MaskSegment
+src/placement/perimeter_fence.zig::maskSegmentsForFaceWithVias | fn maskSegmentsForFaceWithVias( alloc: std.mem.Allocator, p: optimizer.Placement, tracks: []const router.Track, vias: []const router.Via, side: ?optimizer.Side, ) std.mem.Allocator.Error![]const MaskSegment
 src/placement/perimeter_fence.zig::outlinePoints | fn outlinePoints(alloc: std.mem.Allocator, p: optimizer.Placement) std.mem.Allocator.Error![]const [2]f64
 src/placement/perimeter_fence.zig::provenance value
 src/placement/perimeter_fence.zig::viaServesPad | fn viaServesPad( alloc: std.mem.Allocator, p: optimizer.Placement, net_name: []const u8, x: f64, y: f64, dia: f64, ) bool

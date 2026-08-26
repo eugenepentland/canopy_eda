@@ -471,7 +471,7 @@ literals = [
   "pour_clearance", "pour_min_width", "pour_corner_radius",
   "mask_relief_corner_radius", "mask_web",
 ]
-owner = ["src/serve/design_rules_edit.zig"]
+owner = ["src/serve/design_rules_edit.zig", "src/serve/assets/pcb_3d_surface.js"]
 files = ["src/*.zig", "src/*.js"]
 reason = "design-rule wire keys belong to the design_rules_edit key table — the editor, the board blob, the wasm DRC and the fab gate must judge a board by one spelling"
 

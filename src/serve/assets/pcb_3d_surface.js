@@ -257,6 +257,25 @@
     return {x0:x0,y0:y0,x1:x1,y1:y1};
   }
 
+  function maskSameNet(a,b) {
+    a=String(a||"").toUpperCase();b=String(b||"").toUpperCase();
+    if(a===b)return true;var ai=a.lastIndexOf("/"),bi=b.lastIndexOf("/");
+    return (ai>=0?a.slice(ai+1):a)===(bi>=0?b.slice(bi+1):b);
+  }
+
+  function maskGroundName(data,name) {
+    var text=String(name||""),leaf=text.slice(text.lastIndexOf("/")+1).toUpperCase(),tokens=data.ground_names||[];
+    for(var i=0;i<tokens.length;i++){var token=String(tokens[i]).toUpperCase();if(leaf.slice(0,token.length)!==token)continue;
+      var rest=leaf.slice(token.length);if(rest==="")return true;if(rest[0]==="_"||rest[0]==="-")rest=rest.slice(1);if(rest!==""&&/^\d+$/.test(rest))return true;}
+    return false;
+  }
+
+  function maskFacePour(data,side) {
+    var rows=data.layer_table||[],row=side==="bottom"?rows[rows.length-1]:rows[0],net=row&&row.kind==="plane"&&row.net,
+      rule=(data.rules&&data.rules.perimeter_mask_net)||"GND";
+    return net&&maskGroundName(data,net)&&maskSameNet(net,rule)?net:null;
+  }
+
   function maskBoxInterval(a,b,q) {
     var lo=0,hi=1;
     function axis(o,d,mn,mx) { if(Math.abs(d)<=1e-12)return o>=mn&&o<=mx;
@@ -265,11 +284,19 @@
   }
 
   function maskPerimeterSegments(data,pts,width,side) {
-    var out=[],margin=Math.max(0,+(data.rules&&data.rules.mask_margin)||0),
-      islandGrow=window.PCBMaskPadIslandGrow?window.PCBMaskPadIslandGrow():margin,web=Math.max(.2,islandGrow-margin);
+    var pour=maskFacePour(data,side);if(!pour)return [];
+    var out=[],layer=side==="bottom"?1:0,rules=data.rules||{},margin=Math.max(0,+rules.mask_margin||0),
+      islandGrow=window.PCBMaskPadIslandGrow?window.PCBMaskPadIslandGrow():margin,web=Math.max(.2,islandGrow-margin),
+      base=Math.max(web,+rules.pour_clearance_outer||0),netclr=data.netclr||{};
+    function clearance(net){var key=String(net||""),dot=key.indexOf(".");if(dot>=0)key=key.slice(0,dot);return Math.max(base,+netclr[key]||0);}
     for(var ei=0;ei<pts.length;ei++) { var a=pts[ei],b=pts[(ei+1)%pts.length],blocked=[];
       (data.parts||[]).forEach(function(part){(part.pads||[]).forEach(function(pad){if(!(+pad.drill>0)&&(part.side||"top")!==side)return;
         var q=maskPadBox(part,pad),grow=width+margin+web,iv=maskBoxInterval(a,b,{x0:q.x0-grow,y0:q.y0-grow,x1:q.x1+grow,y1:q.y1+grow});if(iv)blocked.push(iv);});});
+      (data.tracks||[]).forEach(function(t){if((+t.l||0)!==layer||!(+t.w>0)||maskSameNet(t.net,pour))return;
+        var grow=width+(+t.w)/2+clearance(t.net),xs=[+t.x1,+t.x2],ys=[+t.y1,+t.y2];if(isFinite(+t.xm)){xs.push(+t.xm);ys.push(+t.ym);}
+        var iv=maskBoxInterval(a,b,{x0:Math.min.apply(null,xs)-grow,y0:Math.min.apply(null,ys)-grow,x1:Math.max.apply(null,xs)+grow,y1:Math.max.apply(null,ys)+grow});if(iv)blocked.push(iv);});
+      (data.vias||[]).forEach(function(v){if(!(+(v.d||0)>0)||maskSameNet(v.net,pour))return;var grow=width+(+v.d)/2+clearance(v.net),
+        iv=maskBoxInterval(a,b,{x0:+v.x-grow,y0:+v.y-grow,x1:+v.x+grow,y1:+v.y+grow});if(iv)blocked.push(iv);});
       blocked.sort(function(u,v){return u[0]-v[0];});var cursor=0;
       blocked.forEach(function(iv){var lo=Math.max(0,Math.min(1,iv[0])),hi=Math.max(0,Math.min(1,iv[1]));
         if(lo>cursor+1e-9)out.push([a[0]+(b[0]-a[0])*cursor,a[1]+(b[1]-a[1])*cursor,a[0]+(b[0]-a[0])*lo,a[1]+(b[1]-a[1])*lo]);cursor=Math.max(cursor,hi);});

@@ -1486,12 +1486,26 @@ function perimeterMaskBoxInterval(a,b,q){var lo=0,hi=1;
  function axis(o,d,mn,mx){if(Math.abs(d)<=1e-12)return o>=mn&&o<=mx;
   var ta=(mn-o)/d,tb=(mx-o)/d;lo=Math.max(lo,Math.min(ta,tb));hi=Math.min(hi,Math.max(ta,tb));return lo<=hi;}
  return axis(a[0],b[0]-a[0],q.x0,q.x1)&&axis(a[1],b[1]-a[1],q.y0,q.y1)?[lo,hi]:null;}
+function perimeterMaskSameNet(a,b){a=String(a||"").toUpperCase();b=String(b||"").toUpperCase();
+ if(a===b)return true;var ai=a.lastIndexOf("/"),bi=b.lastIndexOf("/");
+ return (ai>=0?a.slice(ai+1):a)===(bi>=0?b.slice(bi+1):b);}
+function perimeterMaskPourNet(){if(activeLayer!==0&&activeLayer!==1)return null;
+ var st=stackForSignal(activeLayer),net=st&&st.kind==="plane"&&st.plane,rule=(PCB.rules||{}).perimeter_mask_net||"GND";
+ if(!net||!perimeterMaskSameNet(net,rule))return null;
+ var leaf=String(net).slice(String(net).lastIndexOf("/")+1).toUpperCase();return isGroundNetName(leaf)?net:null;}
 function perimeterMaskSegments(){var mw=Number(PCB.rules&&PCB.rules.perimeter_mask_width)||0;
  if(perimeterMaskGeom&&perimeterMaskOvs===ovsRev&&perimeterMaskOutline===outlineGeomRev&&perimeterMaskWidth===mw&&perimeterMaskLayer===activeLayer&&perimeterMaskRouteRev===keepoutGeomRev)return perimeterMaskGeom;
- var margin=Math.max(0,Number(PCB.rules&&PCB.rules.mask_margin)||0),web=Math.max(.2,Number(PCB.rules&&PCB.rules.mask_web)||0);
+ var pour=perimeterMaskPourNet();if(!pour)return [];
+ var margin=Math.max(0,Number(PCB.rules&&PCB.rules.mask_margin)||0),web=Math.max(.2,Number(PCB.rules&&PCB.rules.mask_web)||0),
+  base=Math.max(web,Number(PCB.rules&&PCB.rules.pour_clearance_outer)||0);
  var pts=reviewBoardPoints(),out=[];if(mw>0&&pts.length>=3)for(var ei=0;ei<pts.length;ei++){var a=pts[ei],b=pts[(ei+1)%pts.length],blocked=[];
   P.forEach(function(p,pi){(p.pads||[]).forEach(function(pd){if(!(pd.drill>0)&&(p.side==="bottom"?1:0)!==activeLayer)return;
    var q=wrect(pi,pd),grow=mw+margin+web,iv=perimeterMaskBoxInterval(a,b,{x0:q.x0-grow,y0:q.y0-grow,x1:q.x1+grow,y1:q.y1+grow});if(iv)blocked.push(iv);});});
+  (PCB.tracks||[]).forEach(function(t){if((+t.l||0)!==activeLayer||!(+t.w>0)||perimeterMaskSameNet(t.net,pour))return;
+   var grow=mw+(+t.w)/2+Math.max(base,netClrFor(t.net));trackChords(t).forEach(function(s){
+    var iv=perimeterMaskBoxInterval(a,b,{x0:Math.min(+s.x1,+s.x2)-grow,y0:Math.min(+s.y1,+s.y2)-grow,x1:Math.max(+s.x1,+s.x2)+grow,y1:Math.max(+s.y1,+s.y2)+grow});if(iv)blocked.push(iv);});});
+  (PCB.vias||[]).forEach(function(v){if(!(+(v.d||0)>0)||perimeterMaskSameNet(v.net,pour))return;
+   var grow=mw+(+v.d)/2+Math.max(base,netClrFor(v.net)),iv=perimeterMaskBoxInterval(a,b,{x0:+v.x-grow,y0:+v.y-grow,x1:+v.x+grow,y1:+v.y+grow});if(iv)blocked.push(iv);});
   blocked.sort(function(u,v){return u[0]-v[0];});var cursor=0;blocked.forEach(function(iv){var lo=Math.max(0,Math.min(1,iv[0])),hi=Math.max(0,Math.min(1,iv[1]));
    if(lo>cursor+1e-9)out.push([a[0]+(b[0]-a[0])*cursor,a[1]+(b[1]-a[1])*cursor,a[0]+(b[0]-a[0])*lo,a[1]+(b[1]-a[1])*lo]);cursor=Math.max(cursor,hi);});
   if(cursor<1-1e-9)out.push([a[0]+(b[0]-a[0])*cursor,a[1]+(b[1]-a[1])*cursor,b[0],b[1]]);}

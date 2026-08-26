@@ -3735,17 +3735,24 @@ fn syncPerimeterMaskSegments(
             .poly = mask.outline,
         } },
     }, .{}) catch return null;
-    const tracks = if (pcb_layout.loadSyncRoutes(alloc, project_dir, name)) |saved|
-        if (pcb_layout.restoreRoutes(alloc, saved, placement.nets)) |routes| routes.tracks else &.{}
+    const routes = if (pcb_layout.loadSyncRoutes(alloc, project_dir, name)) |saved|
+        pcb_layout.restoreRoutes(alloc, saved, placement.nets)
     else
-        &.{};
-    return perimeter_fence.maskSegmentsForFace(alloc, placement, tracks, side) catch null;
+        null;
+    return perimeter_fence.maskSegmentsForFaceWithVias(
+        alloc,
+        placement,
+        if (routes) |r| r.tracks else &.{},
+        if (routes) |r| r.vias else &.{},
+        side,
+    ) catch null;
 }
 
 /// Seed the DSL-authored edge mask opening into a new KiCad board as F.Mask
 /// and B.Mask graphic strokes. The stroke is centred on Edge.Cuts, so a width
 /// of `2*mask-width` exposes exactly the authored band inside the board;
-/// pad-clipped fragments leave a 0.2 mm web around nearby pad apertures.
+/// clipped fragments retain mask over non-GND pads, tracks, vias, and their
+/// GND-pour clearance; a face without the matching GND pour emits no band.
 /// Board graphics are emitted only on first insertion: the board snapshot has
 /// no update identity for existing graphics, so repeating them would stack
 /// duplicates.

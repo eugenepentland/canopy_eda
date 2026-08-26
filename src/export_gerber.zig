@@ -734,9 +734,9 @@ fn thermalRelief(g: *Gx, p: optimizer.Part, pad: geometry.Pad, gap: f64) Error!v
 /// so the trace exposure remains continuous around it. A declared perimeter
 /// fence adds openings centred on the exact finished edge; CAM clips the
 /// outside half, leaving the authored `mask-width` band inward on both faces.
-/// Pads on each face split that stroke, retaining at least 0.2 mm of finished
-/// mask between their apertures and the perimeter opening. Component bodies
-/// and routed traces do not create unrelated gaps in the edge opening.
+/// The stroke exists only on a face carrying a matching GND pour. Pads and
+/// foreign routed copper split it, retaining finished mask over every non-GND
+/// feature and the pour-clearance antipad around it.
 fn writeMask(g: *Gx, placement: optimizer.Placement, copper: Copper, side: optimizer.Side) Error!void {
     const margin = placement.rules.design.mask.margin;
     const had_relief = try writeMaskRelief(g, placement, copper, side);
@@ -772,7 +772,7 @@ fn writeMask(g: *Gx, placement: optimizer.Placement, copper: Copper, side: optim
     }
     const fence = placement.rules.perimeter_fence;
     if (fence.mask_width > 0) {
-        const segments = try perimeter_fence.maskSegmentsForFace(g.arena, placement, physical.tracks, side);
+        const segments = try perimeter_fence.maskSegmentsForFaceWithVias(g.arena, placement, physical.tracks, physical.vias, side);
         if (segments.len > 0) {
             try g.use(.c, 2 * fence.mask_width, 0);
             for (segments) |segment| try g.line(segment.a[0], segment.a[1], segment.b[0], segment.b[1]);
@@ -2432,12 +2432,17 @@ test "a fiducial's pad overrides open the mask and skip the stencil" {
     try testing.expect(std.mem.indexOf(u8, paste, "X13000000Y5000000D03*") != null);
 }
 
-// spec: placement/perimeter-fence - Gerber opens the authored-width solder-mask band around the exact board outline on both faces
+// spec: placement/perimeter-fence - Gerber opens at most the authored-width solder-mask band around the exact board outline, clipped to matching outer-face GND pour copper
 test "mask opens a perimeter-fence band" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
-    var placement = testPlacement(&.{}, &.{});
+    const nets = [_]export_kicad.FlatNet{.{ .name = "GND", .pins = &.{} }};
+    var placement = testPlacement(&.{}, &nets);
+    const planes = [_]optimizer.PlaneAt{ .{ .index = 1, .net = "GND" }, .{ .index = 2, .net = "GND" } };
+    placement.rules.copper_layers = 2;
+    placement.rules.plane_nets = &.{"GND"};
+    placement.rules.planes.declared = &planes;
     placement.rules.perimeter_fence = .{
         .via_dia = 0.4,
         .via_drill = 0.2,
@@ -2445,10 +2450,13 @@ test "mask opens a perimeter-fence band" {
         .edge_offset = 0.5,
         .mask_width = 0.7,
     };
+    const tracks = [_]router.Track{.{ .x1 = 10, .y1 = 0, .x2 = 10, .y2 = 2, .layer = 0, .width = 0.2, .net = 0 }};
+    const vias = [_]router.Via{.{ .x = 12, .y = 0.5, .dia = 0.4, .drill = 0.2, .net = 0 }};
     var mw: std.Io.Writer.Allocating = .init(arena);
-    try writeLayer(&mw.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .mask = .top }, .{ .function = "Soldermask,Top" });
+    try writeLayer(&mw.writer, arena, placement, .{ .tracks = &tracks, .vias = &vias }, &.{}, export_fab.frameFor(placement), .{ .mask = .top }, .{ .function = "Soldermask,Top" });
     const mask = mw.written();
     try testing.expect(std.mem.indexOf(u8, mask, "C,1.400000*%") != null);
+    // Same-net GND copper remains inside the exposed GND-pour band.
     try testing.expect(std.mem.indexOf(u8, mask, "X0Y10000000D02*\nX20000000Y10000000D01*") != null);
 }
 
@@ -2467,7 +2475,12 @@ test "perimeter mask band ignores a pad-free component body" {
         .pads = &.{},
         .fallback = false,
     }};
-    var placement = testPlacement(&parts, &.{});
+    const nets = [_]export_kicad.FlatNet{.{ .name = "GND", .pins = &.{} }};
+    var placement = testPlacement(&parts, &nets);
+    const planes = [_]optimizer.PlaneAt{ .{ .index = 1, .net = "GND" }, .{ .index = 2, .net = "GND" } };
+    placement.rules.copper_layers = 2;
+    placement.rules.plane_nets = &.{"GND"};
+    placement.rules.planes.declared = &planes;
     placement.rules.perimeter_fence = .{
         .via_dia = 0.4,
         .via_drill = 0.2,
@@ -2482,8 +2495,8 @@ test "perimeter mask band ignores a pad-free component body" {
     try testing.expect((try perimeter_fence.maskSegments(arena, placement)).len > 0);
 }
 
-// spec: placement/perimeter-fence - each face's perimeter opening stops at least 0.2 mm before pad apertures, while routed traces do not interrupt it
-test "perimeter mask and vias keep a face-aware pad gap" {
+// spec: placement/perimeter-fence - each face's perimeter opening retains mask over foreign pads, routed traces, vias, and the matching GND pour's clearance around them, without suppressing otherwise-valid fence sites
+test "perimeter mask stays on non-ground copper while fence vias remain independent" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
@@ -2504,8 +2517,12 @@ test "perimeter mask and vias keep a face-aware pad gap" {
         .pads = &pads,
         .fallback = false,
     }};
-    const nets = [_]export_kicad.FlatNet{.{ .name = "GND", .pins = &.{} }};
+    const nets = [_]export_kicad.FlatNet{ .{ .name = "GND", .pins = &.{} }, .{ .name = "SIG", .pins = &.{} } };
     var placement = testPlacement(&parts, &nets);
+    const planes = [_]optimizer.PlaneAt{ .{ .index = 1, .net = "GND" }, .{ .index = 2, .net = "GND" } };
+    placement.rules.copper_layers = 2;
+    placement.rules.plane_nets = &.{"GND"};
+    placement.rules.planes.declared = &planes;
     placement.rules.perimeter_fence = .{
         .via_dia = 0.4,
         .via_drill = 0.2,
@@ -2520,23 +2537,30 @@ test "perimeter mask and vias keep a face-aware pad gap" {
         .y2 = 2,
         .layer = 0,
         .width = 0.2,
-        .net = -1,
+        .net = 1,
     }};
+    const vias = [_]router.Via{.{ .x = 17, .y = 0.5, .dia = 0.4, .drill = 0.2, .net = 1 }};
 
     var top_writer: std.Io.Writer.Allocating = .init(arena);
-    try writeLayer(&top_writer.writer, arena, placement, .{ .tracks = &tracks }, &.{}, export_fab.frameFor(placement), .{ .mask = .top }, .{ .function = "Soldermask,Top" });
+    try writeLayer(&top_writer.writer, arena, placement, .{ .tracks = &tracks, .vias = &vias }, &.{}, export_fab.frameFor(placement), .{ .mask = .top }, .{ .function = "Soldermask,Top" });
     const top = top_writer.written();
     // The pad aperture ends at x=5.55 (0.5 mm copper radius + 0.05 mm mask
     // margin); its nearest perimeter-stroke cap ends at x=5.35, leaving the
-    // local 0.2 mm web. The routed trace does not interrupt the edge opening.
+    // local 0.2 mm web. The SIG trace carves x=13..15 and the SIG via carves
+    // x=15.9..18.1, so neither foreign feature is uncovered by the GND band.
     try testing.expect(std.mem.indexOf(u8, top, "X0Y10000000D02*\nX3550000Y10000000D01*") != null);
-    try testing.expect(std.mem.indexOf(u8, top, "X6450000Y10000000D02*\nX20000000Y10000000D01*") != null);
+    try testing.expect(std.mem.indexOf(u8, top, "X6450000Y10000000D02*\nX13000000Y10000000D01*") != null);
+    try testing.expect(std.mem.indexOf(u8, top, "X15000000Y10000000D02*\nX15900000Y10000000D01*") != null);
+    try testing.expect(std.mem.indexOf(u8, top, "X18100000Y10000000D02*\nX20000000Y10000000D01*") != null);
 
     var bottom_writer: std.Io.Writer.Allocating = .init(arena);
-    try writeLayer(&bottom_writer.writer, arena, placement, .{ .tracks = &tracks }, &.{}, export_fab.frameFor(placement), .{ .mask = .bottom }, .{ .function = "Soldermask,Bot" });
-    // The pad is top-only, so it does not remove bottom-face mask.
-    try testing.expect(std.mem.indexOf(u8, bottom_writer.written(), "X0Y10000000D02*\nX20000000Y10000000D01*") != null);
+    try writeLayer(&bottom_writer.writer, arena, placement, .{ .tracks = &tracks, .vias = &vias }, &.{}, export_fab.frameFor(placement), .{ .mask = .bottom }, .{ .function = "Soldermask,Bot" });
+    // The top-only pad/track do not affect the bottom. The through via does.
+    try testing.expect(std.mem.indexOf(u8, bottom_writer.written(), "X0Y10000000D02*\nX15900000Y10000000D01*") != null);
+    try testing.expect(std.mem.indexOf(u8, bottom_writer.written(), "X18100000Y10000000D02*\nX20000000Y10000000D01*") != null);
+    try testing.expect(std.mem.indexOf(u8, bottom_writer.written(), "X0Y10000000D02*\nX20000000Y10000000D01*") == null);
 
+    // Fence generation remains a copper/DRC concern, independent of mask gaps.
     const sites = try perimeter_fence.generate(arena, placement);
     try testing.expect(sites.len < 56);
     const shape = try pad_shape.worldShape(arena, parts[0], pads[0]);
@@ -2544,6 +2568,34 @@ test "perimeter mask and vias keep a face-aware pad gap" {
         const gap = pad_shape.pointDist(shape.x0, shape.y0, shape.x1, shape.y1, shape.poly, via.x, via.y, std.math.inf(f64)) - via.dia / 2;
         try testing.expect(gap >= 0.2 - 1e-9);
     }
+}
+
+// spec: placement/perimeter-fence - a face without a declared ground pour matching the fence net has no perimeter mask opening
+test "perimeter mask is absent on a face without the matching ground pour" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const nets = [_]export_kicad.FlatNet{.{ .name = "GND", .pins = &.{} }};
+    var placement = testPlacement(&.{}, &nets);
+    const planes = [_]optimizer.PlaneAt{.{ .index = 1, .net = "GND" }};
+    placement.rules.copper_layers = 2;
+    placement.rules.plane_nets = &.{"GND"};
+    placement.rules.planes.declared = &planes;
+    placement.rules.perimeter_fence = .{
+        .via_dia = 0.4,
+        .via_drill = 0.2,
+        .spacing = 1,
+        .edge_offset = 0.5,
+        .mask_width = 0.7,
+    };
+
+    var top_writer: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&top_writer.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .mask = .top }, .{ .function = "Soldermask,Top" });
+    try testing.expect(std.mem.indexOf(u8, top_writer.written(), "C,1.400000*%") != null);
+
+    var bottom_writer: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&bottom_writer.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .mask = .bottom }, .{ .function = "Soldermask,Bot" });
+    try testing.expect(std.mem.indexOf(u8, bottom_writer.written(), "C,1.400000*%") == null);
 }
 
 // spec: export_gerber - the mask margin comes from (design-rules …), defaulting byte-identically to 0.05 mm

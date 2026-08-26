@@ -9948,12 +9948,14 @@ fn writeBlobHead(
     const perimeter_mask_width = p.rules.perimeter_fence.mask_width;
     try w.print(
         "\"pour_clearance\":{d},\"pour_clearance_outer\":{d},\"pour_min_width\":{d},\"pour_corner_radius\":{d},\"ground_via_max\":{d},\"track_width\":{d},\"via_dia\":{d}," ++
-            "\"via_drill\":{d},\"via_plating\":{d},\"board_thickness\":{d},\"perimeter_mask_width\":{d}}},",
+            "\"via_drill\":{d},\"via_plating\":{d},\"board_thickness\":{d},\"perimeter_mask_width\":{d},\"perimeter_mask_net\":",
         .{
             dr.pour_clearance,                                                                   dr.pour.clearance_outer, dr.pour.min_width, dr.pour.corner_radius, dr.pour.ground_via_max, dr.track_width, dr.via_dia, dr.via_drill, p.rules.physical.via_plating_mm,
             if (p.rules.physical.board_thickness > 0) p.rules.physical.board_thickness else 1.6, perimeter_mask_width,
         },
     );
+    try writeJsonStr(w, p.rules.perimeter_fence.net);
+    try w.writeAll("},");
     // Outline rectangle (world mm) — authored `(board …)` or a drawn outline;
     // a non-rectangular board also carries its exact `board_poly` (rect = bbox).
     if (p.board_rect) |br| {
@@ -15157,6 +15159,7 @@ test "board-rule json carries fab-floor scalars and the perimeter mask width" {
     try std.testing.expect(std.mem.indexOf(u8, d, "\"clearance\":0.127") != null);
     try std.testing.expect(std.mem.indexOf(u8, d, "\"component_edge\":0.2") != null);
     try std.testing.expect(std.mem.indexOf(u8, d, "\"perimeter_mask_width\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, d, "\"perimeter_mask_net\":\"GND\"") != null);
     const legacy_start = std.mem.indexOf(u8, d, "\"rules\":{").?;
     const legacy_end = std.mem.indexOfScalarPos(u8, d, legacy_start, '}').?;
     try std.testing.expect(std.mem.indexOf(u8, d[legacy_start..legacy_end], "copper_edge") == null);
@@ -15171,6 +15174,7 @@ test "board-rule json carries fab-floor scalars and the perimeter mask width" {
         .spacing = 1,
         .edge_offset = 0.5,
         .mask_width = 0.7,
+        .net = "CHASSIS",
         .keepout = .{
             .clearance = 0.3,
             .blocks = .{ .components = true, .tracks = true, .vias = true },
@@ -15182,6 +15186,7 @@ test "board-rule json carries fab-floor scalars and the perimeter mask width" {
     try std.testing.expect(std.mem.indexOf(u8, aw2.written(), "\"copper_edge\":0.3") != null);
     try std.testing.expect(std.mem.indexOf(u8, aw2.written(), "\"component_edge\":1.25") != null);
     try std.testing.expect(std.mem.indexOf(u8, aw2.written(), "\"perimeter_mask_width\":0.7") != null);
+    try std.testing.expect(std.mem.indexOf(u8, aw2.written(), "\"perimeter_mask_net\":\"CHASSIS\"") != null);
 
     // Each pour scalar is written EXACTLY ONCE into the one `rules` object.
     // Both were emitted twice with the same value until 2026-08-14 — harmless

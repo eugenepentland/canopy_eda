@@ -56,6 +56,29 @@ fn netIndex(p: optimizer.Placement) ?i32 {
     return null;
 }
 
+fn sameNetName(a: []const u8, b: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(a, b) or
+        std.ascii.eqlIgnoreCase(shortName(a), b) or
+        std.ascii.eqlIgnoreCase(a, shortName(b)) or
+        std.ascii.eqlIgnoreCase(shortName(a), shortName(b));
+}
+
+fn routedNetMatches(p: optimizer.Placement, net: i32, name: []const u8) bool {
+    if (net < 0) return false;
+    const i: usize = @intCast(net);
+    return i < p.nets.len and sameNetName(p.nets[i].name, name);
+}
+
+/// The matching ground pour on this outer face. A perimeter mask declaration
+/// is not permission to uncover arbitrary copper or bare laminate: its opening
+/// exists only where the fence net is the face's declared ground pour.
+fn faceGroundPour(p: optimizer.Placement, side: optimizer.Side) ?[]const u8 {
+    const pour_net = p.rules.pourNetOnSide(side) orelse return null;
+    if (!optimizer.isGroundName(shortName(pour_net))) return null;
+    if (!sameNetName(pour_net, p.rules.perimeter_fence.net)) return null;
+    return pour_net;
+}
+
 /// Exact finished-edge polygon. A plain board rectangle is materialized into
 /// four vertices; authored and viewer-drawn polygons are returned unchanged.
 pub fn outlinePoints(alloc: std.mem.Allocator, p: optimizer.Placement) std.mem.Allocator.Error![]const [2]f64 {
@@ -229,29 +252,44 @@ fn retainedWeb(p: optimizer.Placement) f64 {
     return @max(pad_clearance_mm, p.rules.design.mask.web);
 }
 
-/// Perimeter mask strokes with pad-only gaps on both faces.
+/// Perimeter mask strokes with pad-only gaps on both faces. This side-agnostic
+/// compatibility form does not know which face pour will receive the opening.
 pub fn maskSegments(alloc: std.mem.Allocator, p: optimizer.Placement) std.mem.Allocator.Error![]const MaskSegment {
     return maskSegmentsForFace(alloc, p, &.{}, null);
 }
 
 /// Face-aware perimeter mask artwork. The opening stops before every pad
-/// aperture on this outer face. The central stroke is clipped by its radius
-/// plus the requested web, so its round caps also leave the full web. Pad growth
-/// includes the normal aperture margin because the useful dam lies BETWEEN the
-/// pad opening and perimeter opening, not merely between their copper shapes.
-///
-/// `tracks` remains in the public signature for source compatibility; routed
-/// copper does not interrupt the perimeter opening. Passing `null` includes
-/// the pads from both faces.
+/// aperture and every foreign track on this outer face. The central stroke
+/// is clipped by its radius plus the requested web or pour clearance, so its
+/// round caps cannot uncover non-ground copper or the GND antipad around it.
+/// Pad growth includes the normal aperture margin because the useful dam lies
+/// BETWEEN the pad opening and perimeter opening, not merely between copper
+/// shapes. A concrete face emits no perimeter opening unless that face has a
+/// declared ground pour matching the fence net. Passing `null` includes pads
+/// from both faces and retains the compatibility behavior used by geometry-only
+/// callers.
 pub fn maskSegmentsForFace(
     alloc: std.mem.Allocator,
     p: optimizer.Placement,
     tracks: []const router.Track,
     side: ?optimizer.Side,
 ) std.mem.Allocator.Error![]const MaskSegment {
-    _ = tracks;
+    return maskSegmentsForFaceWithVias(alloc, p, tracks, &.{}, side);
+}
+
+/// Full routed-copper form used by fabrication, KiCad sync, and the physical
+/// renderers. Kept separate so the existing track-only public call remains
+/// source-compatible for downstream geometry consumers.
+pub fn maskSegmentsForFaceWithVias(
+    alloc: std.mem.Allocator,
+    p: optimizer.Placement,
+    tracks: []const router.Track,
+    vias: []const router.Via,
+    side: ?optimizer.Side,
+) std.mem.Allocator.Error![]const MaskSegment {
     const width = p.rules.perimeter_fence.mask_width;
     if (!(width > 0) or p.board_rect == null) return &.{};
+    const ground_net = if (side) |face| faceGroundPour(p, face) orelse return &.{} else null;
     const poly = try outlinePoints(alloc, p);
     defer if (p.board_poly == null and poly.len > 0) alloc.free(poly);
     if (poly.len < 3) return &.{};
@@ -275,6 +313,40 @@ pub fn maskSegmentsForFace(
                     b,
                     .{ .x0 = shape.x0, .y0 = shape.y0, .x1 = shape.x1, .y1 = shape.y1 },
                     width + aperture_margin + retainedWeb(p),
+                );
+            }
+        }
+        if (side) |face| {
+            const layer: u8 = if (face == .bottom) 1 else 0;
+            for (tracks) |track| {
+                if (track.layer != layer or !(track.width > 0)) continue;
+                if (ground_net) |name| if (routedNetMatches(p, track.net, name)) continue;
+                const clearance = @max(retainedWeb(p), p.rules.clearanceForNet(track.net, p.rules.design.pour.clearance_outer));
+                try appendBoxInterval(
+                    &blocked,
+                    alloc,
+                    a,
+                    b,
+                    .{
+                        .x0 = @min(track.x1, track.x2),
+                        .y0 = @min(track.y1, track.y2),
+                        .x1 = @max(track.x1, track.x2),
+                        .y1 = @max(track.y1, track.y2),
+                    },
+                    width + track.width / 2 + clearance,
+                );
+            }
+            for (vias) |via| {
+                if (!(via.dia > 0)) continue;
+                if (ground_net) |name| if (routedNetMatches(p, via.net, name)) continue;
+                const clearance = @max(retainedWeb(p), p.rules.clearanceForNet(via.net, p.rules.design.pour.clearance_outer));
+                try appendBoxInterval(
+                    &blocked,
+                    alloc,
+                    a,
+                    b,
+                    .{ .x0 = via.x, .y0 = via.y, .x1 = via.x, .y1 = via.y },
+                    width + via.dia / 2 + clearance,
                 );
             }
         }

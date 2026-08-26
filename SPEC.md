@@ -2077,16 +2077,17 @@ the owning switch pad axis.
 
 ## placement/perimeter-fence
 
-Public functions: generate, append, outlinePoints, maskSegments, maskSegmentsForFace, isGenerated
+Public functions: generate, append, outlinePoints, maskSegments, maskSegmentsForFace, maskSegmentsForFaceWithVias, isGenerated
 
 A `(board … (perimeter-fence …))` declaration generates a plated via ring from
 the board's exact finished outline. Its `(via DIA DRILL)` values are finished
 copper and hole diameters in millimetres, `(spacing PITCH)` is the maximum
 centre-to-centre pitch, `(edge-offset OFFSET)` is the via-centre distance inward
-from Edge.Cuts, `(mask-width WIDTH)` is the exposed band measured inward from
-the edge on both outer faces, and `(net "NAME")` selects the stitch net (GND by
-default). All geometry is derived: saved `@perimeter` vias are replaced from the
-current outline and declaration, not accumulated as hand-authored copper.
+from Edge.Cuts, `(mask-width WIDTH)` is the maximum exposed band measured inward
+from the edge on each outer face carrying a matching ground pour, and
+`(net "NAME")` selects the stitch net (GND by default). All geometry is derived:
+saved `@perimeter` vias are replaced from the current outline and declaration,
+not accumulated as hand-authored copper.
 
 - a rectangular fence closes at no more than the declared pitch and keeps every centre at its exact edge offset
 - exact rounded/polygon outlines, not their bounding boxes, drive perimeter sites
@@ -2094,9 +2095,10 @@ current outline and declaration, not accumulated as hand-authored copper.
 - component bodies and courtyards do not interrupt generated perimeter vias
 - component bodies and courtyards do not interrupt the exposed perimeter mask band
 - pad proximity is the only component-derived reason to suppress a perimeter via site, retaining 0.2 mm from pad copper to the via annulus; ordinary copper and drill DRC legality still applies
-- each face's perimeter opening stops at least 0.2 mm before pad apertures, while routed traces do not interrupt it
+- a face without a declared ground pour matching the fence net has no perimeter mask opening
+- each face's perimeter opening retains mask over foreign pads, routed traces, vias, and the matching GND pour's clearance around them, without suppressing otherwise-valid fence sites
 - a perimeter keepout begins at the fence via's inward copper edge, carries typed block policy, and admits named nets
-- Gerber opens the authored-width solder-mask band around the exact board outline on both faces
+- Gerber opens at most the authored-width solder-mask band around the exact board outline, clipped to matching outer-face GND pour copper
 - completeness-waiver: empty inputs (no effective board outline, incomplete dimensions, or an unresolved net produce an empty site set)
 - completeness-waiver: large inputs (work is linear in outline vertices plus generated sites; site count is perimeter divided by a positive authored spacing)
 - completeness-waiver: unauthorized access (pure placement geometry; HTTP and CLI authorization remains at the existing serve boundary)
