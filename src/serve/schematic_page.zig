@@ -164,6 +164,81 @@ fn isModuleOnly(ctx: *Server, name: []const u8, board_path: []const u8) bool {
     return true;
 }
 
+/// Finish a design render after evaluation. Shared by the HTTP miss path and
+/// the cold page benchmark so added ERC/review/render work is measured without
+/// needing a browser or a live socket.
+const EvaluatedPage = struct {
+    project_dir: []const u8,
+    name: []const u8,
+    bom_path: []const u8,
+    schematic_view: render_html.SchematicView,
+    embed: bool,
+};
+
+fn renderEvaluatedPage(
+    allocator: std.mem.Allocator,
+    eval: *Evaluator,
+    block: *env_mod.DesignBlock,
+    page_input: EvaluatedPage,
+) ![]const u8 {
+    bom.resolveIdentities(allocator, block, page_input.bom_path, page_input.project_dir) catch |e| {
+        log.warn("resolveIdentities {s} failed: {s}", .{ page_input.name, @errorName(e) });
+    };
+    const violations = erc_mod.runErc(allocator, block, page_input.project_dir) catch &[_]erc_mod.Violation{};
+    const status = computeStatus(violations, eval.assertions.items);
+
+    // Run requirement-attached checks before review assembly so verified
+    // status reaches both the page controls and the embedded review JSON.
+    var check_results = req_checks.runChecks(allocator, eval, block) catch
+        std.StringHashMapUnmanaged([]req_checks.Result).empty;
+    req_checks.applyVerifications(&check_results, block, block.instances);
+    const review_doc: ?review.ReviewDoc = review.buildReview(
+        allocator,
+        page_input.name,
+        block,
+        eval.assertions.items,
+        violations,
+        &check_results,
+    ) catch null;
+    return render_html.renderToHtml(
+        allocator,
+        block,
+        page_input.project_dir,
+        page_input.name,
+        assets_css.navbar_css,
+        status,
+        review_doc,
+        &check_results,
+        .{ .path = "/schematics/", .view = page_input.schematic_view, .embed = page_input.embed },
+    );
+}
+
+/// Render the default design schematic without consulting or populating the
+/// process-wide HTML cache. The page-latency gate uses this request-less seam
+/// so each repetition includes the cold evaluation, identity resolution, ERC,
+/// attached checks, review assembly and HTML/SVG serialization performed by
+/// `/schematics/:name`.
+pub fn benchColdPage(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?usize {
+    const board_path = paths.designSourcePath(allocator, project_dir, name) catch return null;
+    var eval = Evaluator.init(allocator, project_dir);
+    defer eval.deinit();
+    const result = eval.evalFile(board_path) catch return null;
+    const block: *env_mod.DesignBlock = switch (result) {
+        .design_block => |b| b,
+        else => return null,
+    };
+
+    const bom_path = paths.designSiblingPath(allocator, project_dir, name, ".bom") catch return null;
+    const html = renderEvaluatedPage(allocator, &eval, block, .{
+        .project_dir = project_dir,
+        .name = name,
+        .bom_path = bom_path,
+        .schematic_view = .functional,
+        .embed = false,
+    }) catch return null;
+    return html.len;
+}
+
 /// GET /schematics/:name — HTML schematic page. Evaluates the design, runs
 /// ERC for the status banner, then hands off to render_html.renderToHtml.
 pub fn schematicPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
@@ -231,45 +306,13 @@ pub fn schematicPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
         return;
     };
     defer ctx.allocator.free(bom_path);
-    bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch |e| {
-        log.warn("resolveIdentities {s} failed: {s}", .{ name, @errorName(e) });
-    };
-
-    const violations = erc_mod.runErc(ctx.allocator, block, ctx.project_dir) catch &[_]erc_mod.Violation{};
-    const status = computeStatus(violations, eval.assertions.items);
-
-    // Run the requirement-attached (check ...) primitives once per design
-    // load so the per-hub dropdown can show ✓/✗ next to each library-
-    // declared rule. Keyed by ref_des; same-order alignment with
-    // `inst.requirements`. Computed before buildReview so verified-status
-    // surfaces in the embedded review JSON too.
-    var check_results = req_checks.runChecks(ctx.allocator, &eval, block) catch blk: {
-        break :blk std.StringHashMapUnmanaged([]req_checks.Result).empty;
-    };
-    req_checks.applyVerifications(&check_results, block, block.instances);
-
-    // Build the review doc too — the schematic page embeds its content
-    // (summary, power budget/sequencing, test points, ERC, assertions) below
-    // the section cards so a single URL covers both "what it is" and
-    // "whether it's correct."
-    //
-    // `buildReview` is a pure read of the block, which is the whole point: this
-    // page renders the design's `.sexp` and nothing else. The thermal panel used
-    // to be attached here from the saved layouts, and that one call made a cold
-    // barracuda render parse 6.7 MB of routed copper to read a few kilobytes of
-    // part poses. Thermal lives at `/thermal/:name` now — a nav tab away.
-    const review_doc: ?review.ReviewDoc = review.buildReview(ctx.allocator, name, block, eval.assertions.items, violations, &check_results) catch null;
-    const html = render_html.renderToHtml(
-        ctx.allocator,
-        block,
-        ctx.project_dir,
-        name,
-        assets_css.navbar_css,
-        status,
-        review_doc,
-        &check_results,
-        .{ .path = "/schematics/", .view = schematic_view, .embed = embed },
-    ) catch |err| {
+    const html = renderEvaluatedPage(ctx.allocator, &eval, block, .{
+        .project_dir = ctx.project_dir,
+        .name = name,
+        .bom_path = bom_path,
+        .schematic_view = schematic_view,
+        .embed = embed,
+    }) catch |err| {
         res.status = 500;
         res.body = try std.fmt.allocPrint(ctx.allocator, "Render error: {s}", .{@errorName(err)});
         return;

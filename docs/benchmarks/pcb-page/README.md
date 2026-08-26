@@ -1,4 +1,4 @@
-# PCB-page latency baseline — the pre-push gate for main
+# Primary-page latency baseline — the pre-push gate for main
 
 `baseline.json` here is the committed recording that `netlisp bench-page
 --baseline` (and therefore the `pre-push` hook, via `scripts/perf_gate.sh`)
@@ -18,8 +18,11 @@ own corpus rule), medians over 3 reps, in ms:
 | `drc_report_ms` | `drc_rules.checkFilteredZones` — the reporting DRC (geometry + pour topology + `net_open` + severity overrides) behind `/api/pcb-drc`, the page blob, describe, and the fab gate. **Reps are not independent**: the seam memoises a board's poured copper while the board is unchanged (`src/placement/fill_cache.zig`), so rep 1 pours it and the rest borrow it, and the median is the RECONCILE cost — what an editor DRC loop and every derived fetch pay over a board that has not moved. |
 | `drc_geom_ms` | `drc.check` — geometry only, the native twin of the client's interactive WASM DRC |
 | `page_ms` | `pcb_derived.warmPage(…, .page)` on a fresh cache — the complete cold `/pcb-layout/:name` render: eval, sidecar, placement, DRC, HTML, cache admission, gzip memo. The `.page` scope stops where the reader's first paint does; the analyses behind `?derived=1` are a separate response with its own cache entry and are not in this number. |
+| `assembly_page_ms` | Cold default `/assembly-debug/:name` parent render: eval, BOM/search indexing, rework-guide discovery and HTML. Its PCB iframe is covered by `page_ms`, so the same board render is not counted twice. |
+| `thermal_page_ms` | Cold default `/thermal/:name` render: eval, lumped screen, default-layout cooling-scenario fields, review summary and HTML. No published server cache exists in the benchmark process, so every rep solves cold. |
+| `schematic_page_ms` | Cold default `/schematics/:name` render: eval, identity resolution, ERC, attached checks, review assembly, inline SVG and HTML. The process-wide HTTP cache is deliberately bypassed. |
 
-Phases nest (`eval ⊂ solve ⊂ page`); the DRC phases are timed standalone.
+The PCB phases nest (`eval ⊂ solve ⊂ page`); the DRC and other page phases are timed standalone.
 Alongside the timings each row records the DRC counts (errors / total /
 net_open), whether the rendered page was **admitted to the page cache** (a
 page too big or refused turns *every* reload cold — a regression no timing
@@ -37,9 +40,10 @@ A gated run fails (non-zero exit, refusing the push) when any of:
    phase exceeds **1.10**: ten boards each 20 % slower is a regression the
    per-board rule alone would wave through.
 3. **Hand-set budgets** — the optional top-level `"budgets"` object in
-   `baseline.json` (e.g. `"budgets": {"page_ms": 1500, "drc_report_ms": 500}`)
-   caps every board absolutely. The recorder never writes this object — only a
-   human adds or changes a budget, so re-recording cannot silently raise one.
+   `baseline.json` caps every board absolutely. The committed page ceilings are
+   1500 ms for PCB, 250 ms for assembly, 2500 ms for thermal, and 750 ms for
+   schematics. The recorder never writes this object — only a human adds or
+   changes a budget, so re-recording cannot silently raise one.
 4. **Unlike work** — a board's DRC counts moved vs the baseline. Wall times
    over different work prove nothing; the fix is to re-record (below) if the
    *designs* changed, or to find what your *code* change did to DRC if they
@@ -47,10 +51,12 @@ A gated run fails (non-zero exit, refusing the push) when any of:
 5. **Retention lost** — a board whose page the baseline run cached is no
    longer admitted.
 
-A board **without a blessed (starred/named-restorable) layout** is reported
-but never gated: its cold render re-solves the placement — and the render
-path persists that solve into the sidecar, exactly as the boot warm-up does —
-so neither its wall times nor its DRC counts are stable across runs
+A board **without a blessed (starred/named-restorable) layout** has its PCB,
+thermal, solve, and DRC phases reported but not gated: those paths re-solve the
+placement — and the render path persists that solve into the sidecar, exactly
+as the boot warm-up does — so neither those wall times nor its DRC counts are
+stable across runs. Its assembly and schematic page timings remain gated,
+because those renders do not depend on PCB placement
 (discovered the hard way: barracuda-base's counts moved between the first two
 recordings). New boards are noted (`unlined`), never silently passed;
 vanished boards are noted (`missing`), never failed — a designs-repo rename
@@ -92,6 +98,9 @@ docs/testing-guide.md), which would fail honest commits.
   makes the FIRST pour of a board cheaper will barely move it; a change that
   breaks the fill memo's key will move it several-fold and should be read as a
   regression in the memo, not in the pour.
+- These are server-to-complete-HTML timings. They intentionally need no browser
+  or live socket, which keeps the commit gate repeatable; JS execution, paint,
+  and dependent asset transfer are outside this gate.
 - The client half of DRC latency (the browser's WASM worker) is the same
   `placement/drc.zig` compiled to wasm; `drc_geom_ms` is its native proxy.
   Browser-side costs (JS parse of the ~1 MB page, worker marshaling) are not

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pre-push — the PCB-page latency gate for main.
+# pre-push — the primary-page latency gate for main.
 #
 # Pushing main is the moment a commit becomes everyone's problem, so this is
 # where the page-load / DRC-latency budget is enforced: build netlisp at the
@@ -32,11 +32,11 @@ done
 [ "$gate_main" = 1 ] || exit 0
 
 if [ "${EDA_PERF_SKIP:-0}" = "1" ]; then
-  echo "pre-push: EDA_PERF_SKIP=1 — PCB-page latency gate SKIPPED for this push" >&2
+  echo "pre-push: EDA_PERF_SKIP=1 — page-load latency gate SKIPPED for this push" >&2
   exit 0
 fi
 if [ ! -d "$PROJECT_DIR/src" ]; then
-  echo "pre-push: designs repo not at $PROJECT_DIR — PCB-page latency gate skipped (nothing to measure here)" >&2
+  echo "pre-push: designs repo not at $PROJECT_DIR — page-load latency gate skipped (nothing to measure here)" >&2
   exit 0
 fi
 if [ ! -f "$BASELINE" ]; then
@@ -46,7 +46,7 @@ if [ ! -f "$BASELINE" ]; then
   exit 1
 fi
 
-echo "pre-push: PCB-page latency gate for main (bench-page vs $BASELINE) — queueing behind the machine gate lock…"
+echo "pre-push: PCB/assembly/thermal/schematic latency gate for main (bench-page vs $BASELINE) — queueing behind the machine gate lock…"
 bash scripts/perf_gate.sh
 status=$?
 if [ "$status" -ne 0 ]; then

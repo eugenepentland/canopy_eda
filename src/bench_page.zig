@@ -1,4 +1,4 @@
-//! PCB-page latency benchmark — the harness that makes "the PCB layout page
+//! Page-load latency benchmark — the harness that makes "a primary design page
 //! got slower" a checkable claim before it reaches main.
 //!
 //! The costs a reader actually feels on `/pcb-layout/:name` have regressed
@@ -8,8 +8,8 @@
 //! `--baseline` turns a committed recording into a non-zero-exit regression
 //! gate (the `bench-route --baseline` pattern, applied to wall time).
 //!
-//! What is measured, per board — each phase is the REAL production seam, not a
-//! reconstruction:
+//! What is measured, per board — each phase is a production render seam, not a
+//! synthetic workload:
 //!
 //!   eval        Evaluator.init + evalFile — the design evaluation alone.
 //!   sidecar     read + std.json parse of `<design>.layouts.json` — the cost
@@ -30,6 +30,13 @@
 //!               paint does: the analyses behind `?derived=1` are a second
 //!               response with its own cache entry, and folding them in here
 //!               would stop this number tracking what a visitor waits for.
+//!   assembly    assembly_debug.benchColdPage — evaluate, build the BOM/search
+//!               index and render the parent `/assembly-debug/:name` HTML. Its
+//!               PCB iframe is covered independently by `page`.
+//!   thermal     thermal_page.benchColdPage — evaluate, solve the default
+//!               layout-aware cooling scenarios and render `/thermal/:name`.
+//!   schematic   schematic_page.benchColdPage — evaluate, run ERC and attached
+//!               checks, build review data and render `/schematics/:name`.
 //!
 //! Phases NEST: eval ⊂ solve ⊂ page. The DRC phases are timed standalone on
 //! the solve's output, so `page` includes another run of them. Medians over
@@ -76,9 +83,12 @@ const json_writer = @import("json_writer.zig");
 const optimizer = @import("placement/optimizer.zig");
 const drc = @import("placement/drc.zig");
 const drc_rules = @import("serve/drc_rules.zig");
+const assembly_debug = @import("serve/assembly_debug.zig");
 const pcb_layout_page = @import("serve/pcb_layout_page.zig");
 const pcb_derived = @import("serve/pcb_derived.zig");
 const pcb_page_cache = @import("serve/pcb_page_cache.zig");
+const schematic_page = @import("serve/schematic_page.zig");
+const thermal_page = @import("serve/thermal_page.zig");
 const bench_route = @import("bench_route.zig");
 const serve_root = @import("serve.zig");
 const router = @import("placement/router.zig");
@@ -122,12 +132,45 @@ pub const Phases = struct {
     solve_ms: f64 = 0,
     drc_report_ms: f64 = 0,
     drc_geom_ms: f64 = 0,
-    page_ms: f64 = 0,
+    pages: struct {
+        pcb: f64 = 0,
+        assembly: f64 = 0,
+        thermal: f64 = 0,
+        schematic: f64 = 0,
+    } = .{},
 
-    pub const names = @typeInfo(Phases).@"struct".field_names;
+    pub const names = [_][]const u8{
+        "eval_ms",
+        "sidecar_ms",
+        "solve_ms",
+        "drc_report_ms",
+        "drc_geom_ms",
+        "page_ms",
+        "assembly_page_ms",
+        "thermal_page_ms",
+        "schematic_page_ms",
+    };
 
     fn get(self: Phases, comptime name: []const u8) f64 {
+        if (comptime std.mem.eql(u8, name, "page_ms")) return self.pages.pcb;
+        if (comptime std.mem.eql(u8, name, "assembly_page_ms")) return self.pages.assembly;
+        if (comptime std.mem.eql(u8, name, "thermal_page_ms")) return self.pages.thermal;
+        if (comptime std.mem.eql(u8, name, "schematic_page_ms")) return self.pages.schematic;
         return @field(self, name);
+    }
+
+    fn set(self: *Phases, comptime name: []const u8, value: f64) void {
+        if (comptime std.mem.eql(u8, name, "page_ms")) {
+            self.pages.pcb = value;
+        } else if (comptime std.mem.eql(u8, name, "assembly_page_ms")) {
+            self.pages.assembly = value;
+        } else if (comptime std.mem.eql(u8, name, "thermal_page_ms")) {
+            self.pages.thermal = value;
+        } else if (comptime std.mem.eql(u8, name, "schematic_page_ms")) {
+            self.pages.schematic = value;
+        } else {
+            @field(self, name) = value;
+        }
     }
 };
 
@@ -288,10 +331,31 @@ fn benchRep(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8)
         };
         const t0 = clock.nanoTimestamp();
         const rendered = pcb_derived.warmPage(&srv, alloc, name, .page);
-        out.phases.page_ms = nsToMs(clock.nanoTimestamp() - t0);
+        out.phases.pages.pcb = nsToMs(clock.nanoTimestamp() - t0);
         if (!rendered) return out;
         out.facts.cached = pageRetained(&state.caches.pcb_pages, alloc, name);
         out.facts.html_bytes = state.caches.pcb_pages.bytes;
+    }
+
+    // The other three primary pages are measured cold through request-less
+    // benchmark seams that share their production evaluation/index/render
+    // functions. Each call owns fresh state, so an earlier rep cannot turn a
+    // later one into a cache hit. Assembly's child PCB iframe is deliberately
+    // excluded here because the complete PCB render is already `page_ms`.
+    {
+        const t0 = clock.nanoTimestamp();
+        _ = assembly_debug.benchColdPage(alloc, project_dir, name) orelse return out;
+        out.phases.pages.assembly = nsToMs(clock.nanoTimestamp() - t0);
+    }
+    {
+        const t0 = clock.nanoTimestamp();
+        _ = thermal_page.benchColdPage(alloc, project_dir, name) orelse return out;
+        out.phases.pages.thermal = nsToMs(clock.nanoTimestamp() - t0);
+    }
+    {
+        const t0 = clock.nanoTimestamp();
+        _ = schematic_page.benchColdPage(alloc, project_dir, name) orelse return out;
+        out.phases.pages.schematic = nsToMs(clock.nanoTimestamp() - t0);
     }
 
     out.ok = true;
@@ -354,8 +418,8 @@ pub fn benchOne(
     }
     inline for (Phases.names) |fname| {
         const vals = try arena.alloc(f64, samples.items.len);
-        for (samples.items, 0..) |rep, i| vals[i] = @field(rep.phases, fname);
-        @field(out.phases, fname) = median(vals);
+        for (samples.items, 0..) |rep, i| vals[i] = rep.phases.get(fname);
+        out.phases.set(fname, median(vals));
     }
     return out;
 }
@@ -377,9 +441,9 @@ pub fn corpus(arena: std.mem.Allocator, project_dir: []const u8) std.mem.Allocat
 /// Render the corpus table a reviewer reads. Columns are the phase medians in
 /// milliseconds; the trailing flags call out the states a number can't show.
 pub fn writeTable(w: *std.Io.Writer, results: []const BoardResult, reps: usize) std.Io.Writer.Error!void {
-    try w.print("phase medians over {d} rep(s), ms — phases nest: eval ⊂ solve ⊂ page\n", .{reps});
-    try w.print("{s:<24} {s:>5} {s:>9} {s:>8} {s:>8} {s:>8} {s:>8} {s:>8} {s:>9} {s:>9} {s:>13}\n", .{
-        "board", "parts", "sidecar", "eval", "sidecar", "solve", "drcRep", "drcGeom", "page", "page_kb", "drc e/t/open",
+    try w.print("phase medians over {d} rep(s), ms — eval ⊂ solve ⊂ pcbPage; other pages are independent cold renders\n", .{reps});
+    try w.print("{s:<24} {s:>5} {s:>9} {s:>8} {s:>8} {s:>8} {s:>8} {s:>8} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>13}\n", .{
+        "board", "parts", "sidecar", "eval", "sidecar", "solve", "drcRep", "drcGeom", "pcbPage", "assembly", "thermal", "schematic", "pcb_kb", "drc e/t/open",
     });
     for (results) |r| {
         if (!r.ok) {
@@ -388,7 +452,7 @@ pub fn writeTable(w: *std.Io.Writer, results: []const BoardResult, reps: usize) 
         }
         var drc_buf: [48]u8 = undefined;
         const drc_col = std.fmt.bufPrint(&drc_buf, "{d}/{d}/{d}", .{ r.drc.errors, r.drc.total, r.drc.net_open }) catch "?";
-        try w.print("{s:<24} {d:>5} {d:>8.1}k {d:>8.1} {d:>8.1} {d:>8.1} {d:>8.1} {d:>8.1} {d:>9.1} {d:>9.1} {s:>13}{s}{s}{s}\n", .{
+        try w.print("{s:<24} {d:>5} {d:>8.1}k {d:>8.1} {d:>8.1} {d:>8.1} {d:>8.1} {d:>8.1} {d:>9.1} {d:>9.1} {d:>9.1} {d:>9.1} {d:>9.1} {s:>13}{s}{s}{s}\n", .{
             r.name,
             r.facts.parts,
             @as(f64, @floatFromInt(r.facts.sidecar_bytes)) / 1024.0,
@@ -397,12 +461,15 @@ pub fn writeTable(w: *std.Io.Writer, results: []const BoardResult, reps: usize) 
             r.phases.solve_ms,
             r.phases.drc_report_ms,
             r.phases.drc_geom_ms,
-            r.phases.page_ms,
+            r.phases.pages.pcb,
+            r.phases.pages.assembly,
+            r.phases.pages.thermal,
+            r.phases.pages.schematic,
             @as(f64, @floatFromInt(r.facts.html_bytes)) / 1024.0,
             drc_col,
             if (r.facts.cached) "" else "   (NOT retained by page cache)",
             if (r.facts.unstable) "   (UNSTABLE drc counts across reps)" else "",
-            if (r.facts.placed) "" else "   (no blessed layout — re-solves per render, not gated)",
+            if (r.facts.placed) "" else "   (no blessed layout — PCB/thermal not gated)",
         });
     }
 }
@@ -420,7 +487,7 @@ pub fn writeResultsJson(w: *std.Io.Writer, results: []const BoardResult) json_wr
             if (r.ok) "true" else "false", if (r.facts.placed) "true" else "false", r.facts.parts, r.facts.sidecar_bytes,
         });
         inline for (Phases.names) |fname| {
-            try w.print(",\"{s}\":{d:.3}", .{ fname, @field(r.phases, fname) });
+            try w.print(",\"{s}\":{d:.3}", .{ fname, r.phases.get(fname) });
         }
         try w.print(",\"drc_total\":{d},\"drc_errors\":{d},\"{s}\":{d},\"cached\":{s},\"html_bytes\":{d},\"unstable\":{s}}}", .{
             r.drc.total,
@@ -523,7 +590,7 @@ fn parseBaseline(arena: std.mem.Allocator, data: []const u8) !Baseline {
                 .cached = jsonBool(it.object.get("cached")),
             };
             inline for (Phases.names) |fname| {
-                @field(b.phases, fname) = jsonF64(it.object.get(fname));
+                b.phases.set(fname, jsonF64(it.object.get(fname)));
             }
             try boards.append(arena, b);
         }
@@ -561,9 +628,9 @@ const BaselineReport = struct {
     /// A board the baseline retained that this run does not — every later
     /// load turned cold. As much a page-load regression as any timing.
     retention_lost: []const []const u8 = &.{},
-    /// Boards without a blessed layout (this run or the baseline's): they
-    /// re-solve — and persist that solve — on every cold render, so neither
-    /// their wall times nor their DRC counts are comparable. Noted, not gated.
+    /// Boards without a blessed layout (this run or the baseline's): their PCB
+    /// and thermal timings and DRC counts are not comparable. Assembly and
+    /// schematic remain gated because neither depends on PCB placement.
     unplaced: []const []const u8 = &.{},
     /// Measured now but absent from the baseline — noted, never a silent pass.
     unlined: []const []const u8 = &.{},
@@ -577,6 +644,13 @@ const BaselineReport = struct {
 /// millisecond-scale boards from failing on jitter).
 fn phaseAllowance(base: f64) f64 {
     return @max(base * ratio_limit, base + abs_floor_ms);
+}
+
+/// These renders depend only on the evaluated design and its review/BOM
+/// siblings, so a board's unstable generated placement cannot make them noisy.
+fn placementIndependent(comptime phase: []const u8) bool {
+    return comptime (std.mem.eql(u8, phase, "assembly_page_ms") or
+        std.mem.eql(u8, phase, "schematic_page_ms"));
 }
 
 /// Compare the run against a committed baseline: per-board phase allowances,
@@ -594,7 +668,7 @@ fn checkBaseline(
     var unlined: std.ArrayList([]const u8) = .empty;
     var missing: std.ArrayList([]const u8) = .empty;
     var drift_sum: [Phases.names.len]f64 = @splat(0);
-    var drift_n: usize = 0;
+    var drift_n: [Phases.names.len]usize = @splat(0);
 
     for (results) |r| {
         if (!r.ok) continue;
@@ -602,43 +676,45 @@ fn checkBaseline(
             try unlined.append(arena, r.name);
             continue;
         };
-        if (!r.facts.placed or !base.placed) {
+        const placed = r.facts.placed and base.placed;
+        if (!placed) {
             try unplaced.append(arena, r.name);
-            continue; // re-solved per render — nothing about it is comparable
         }
-        if (!r.drc.eql(base.drc)) {
+        const same_drc = r.drc.eql(base.drc);
+        if (placed and !same_drc) {
             try work_changed.append(arena, r.name);
-            continue; // unlike work — its wall times prove nothing either way
         }
-        if (base.cached and !r.facts.cached) try retention_lost.append(arena, r.name);
-        drift_n += 1;
+        if (placed and base.cached and !r.facts.cached) try retention_lost.append(arena, r.name);
         inline for (Phases.names, 0..) |fname, i| {
-            const now = r.phases.get(fname);
-            const was = base.phases.get(fname);
-            if (now > phaseAllowance(was)) try breaches.append(arena, .{
-                .board = r.name,
-                .phase = fname,
-                .now_ms = now,
-                .limit_ms = phaseAllowance(was),
-                .rule = .allowance,
-            });
-            if (baseline.budgets.get(fname)) |cap| {
-                if (now > cap) try breaches.append(arena, .{
+            // PCB/DRC/thermal numbers require the same blessed placement and
+            // identical DRC work. Assembly and schematic remain comparable
+            // even when either of those physical-layout invariants moves.
+            const comparable = placementIndependent(fname) or (placed and same_drc);
+            if (comparable) {
+                const now = r.phases.get(fname);
+                const was = base.phases.get(fname);
+                if (now > phaseAllowance(was)) try breaches.append(arena, .{
                     .board = r.name,
                     .phase = fname,
                     .now_ms = now,
-                    .limit_ms = cap,
-                    .rule = .budget,
+                    .limit_ms = phaseAllowance(was),
+                    .rule = .allowance,
                 });
-            }
-            // Drift deadband: a delta inside the absolute noise floor is not
-            // evidence in either direction and contributes ratio 1.0 — the
-            // same floor the per-board rule applies, so a corpus of small
-            // boards jittering by milliseconds cannot trip the drift bound,
-            // while a real 20% on a 900 ms phase counts in full. The divisor
-            // floor keeps a 0-baseline phase from dividing by zero.
-            if (@abs(now - was) > abs_floor_ms) {
-                drift_sum[i] += @log(@max(now, 0.001) / @max(was, 0.001));
+                if (baseline.budgets.get(fname)) |cap| {
+                    if (now > cap) try breaches.append(arena, .{
+                        .board = r.name,
+                        .phase = fname,
+                        .now_ms = now,
+                        .limit_ms = cap,
+                        .rule = .budget,
+                    });
+                }
+                // Drift deadband: a delta inside the absolute noise floor is
+                // not evidence in either direction and contributes ratio 1.0.
+                if (@abs(now - was) > abs_floor_ms) {
+                    drift_sum[i] += @log(@max(now, 0.001) / @max(was, 0.001));
+                }
+                drift_n[i] += 1;
             }
         }
     }
@@ -652,9 +728,9 @@ fn checkBaseline(
     }
 
     var report = BaselineReport{ .pass = true };
-    if (drift_n > 0) {
-        inline for (Phases.names, 0..) |_, i| {
-            report.drift[i] = @exp(drift_sum[i] / @as(f64, @floatFromInt(drift_n)));
+    inline for (Phases.names, 0..) |_, i| {
+        if (drift_n[i] > 0) {
+            report.drift[i] = @exp(drift_sum[i] / @as(f64, @floatFromInt(drift_n[i])));
             if (report.drift[i] > drift_limit) report.drift_failed = true;
         }
     }
@@ -695,7 +771,7 @@ fn writeBaselineReport(w: *std.Io.Writer, report: BaselineReport, baseline_path:
         try w.writeAll("\n");
     }
     if (report.unplaced.len > 0) {
-        try w.writeAll("  note: no blessed layout — re-solves per render, not gated:");
+        try w.writeAll("  note: no blessed layout — PCB/thermal phases not gated; assembly/schematic still gated:");
         for (report.unplaced) |n| try w.print(" {s}", .{n});
         try w.writeAll("\n");
     }
@@ -790,7 +866,14 @@ fn sampleResult(name: []const u8) BoardResult {
     return .{
         .name = name,
         .ok = true,
-        .phases = .{ .eval_ms = 40, .sidecar_ms = 90, .solve_ms = 200, .drc_report_ms = 300, .drc_geom_ms = 40, .page_ms = 900 },
+        .phases = .{
+            .eval_ms = 40,
+            .sidecar_ms = 90,
+            .solve_ms = 200,
+            .drc_report_ms = 300,
+            .drc_geom_ms = 40,
+            .pages = .{ .pcb = 900, .assembly = 120, .thermal = 450, .schematic = 180 },
+        },
         .drc = .{ .total = 12, .errors = 1, .net_open = 3 },
         .facts = .{ .parts = 100, .sidecar_bytes = 7 << 20, .html_bytes = 1 << 20, .cached = true, .placed = true },
     };
@@ -836,7 +919,10 @@ test "baseline JSON round-trips the recorded run" {
     const json = try sampleBaselineJson(arena);
     const base = try parseBaseline(arena, json);
     const b = base.board("barracuda").?;
-    try testing.expectEqual(@as(f64, 900), b.phases.page_ms);
+    try testing.expectEqual(@as(f64, 900), b.phases.pages.pcb);
+    try testing.expectEqual(@as(f64, 120), b.phases.pages.assembly);
+    try testing.expectEqual(@as(f64, 450), b.phases.pages.thermal);
+    try testing.expectEqual(@as(f64, 180), b.phases.pages.schematic);
     try testing.expectEqual(@as(f64, 300), b.phases.drc_report_ms);
     try testing.expectEqual(@as(usize, 12), b.drc.total);
     try testing.expectEqual(@as(usize, 3), b.drc.net_open);
@@ -865,7 +951,7 @@ test "baseline gate fails a real phase regression" {
     const arena = arena_state.allocator();
     const base = try parseBaseline(arena, try sampleBaselineJson(arena));
     var slower = sampleResult("barracuda");
-    slower.phases.page_ms = 1400; // baseline 900: past 900×1.30=1170 and 900+25
+    slower.phases.pages.pcb = 1400; // baseline 900: past 900×1.30=1170 and 900+25
     const report = try checkBaseline(arena, &.{slower}, &base);
     try testing.expect(!report.pass);
     try testing.expectEqual(@as(usize, 1), report.breaches.len);
@@ -897,7 +983,7 @@ test "baseline gate fails on corpus drift below the per-board allowance" {
     var now: [3]BoardResult = .{ sampleResult("a"), sampleResult("b"), sampleResult("c") };
     // Every page median 20% up: inside the 1.30 per-board ratio, over the
     // 1.10 corpus drift bound (the floor doesn't shelter 900ms boards).
-    for (&now) |*r| r.phases.page_ms = 1080;
+    for (&now) |*r| r.phases.pages.pcb = 1080;
     const report = try checkBaseline(arena, &now, &base);
     try testing.expect(!report.pass);
     try testing.expect(report.drift_failed);
@@ -925,7 +1011,7 @@ test "baseline gate enforces hand-set absolute budgets" {
     try testing.expect(report.breaches[0].rule == .budget);
 }
 
-// spec: bench-page - a board without a blessed layout is reported but kept out of the gate, since its per-render re-solve is neither stable nor comparable
+// spec: bench-page - a board without a blessed layout skips layout-dependent PCB/thermal phases but still gates its stable assembly and schematic renders
 test "baseline gate skips an unblessed board with a note" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -940,13 +1026,32 @@ test "baseline gate skips an unblessed board with a note" {
     // triple the wall — and the gate still passes, with it named in the note.
     var wild = loose;
     wild.drc.total = 999;
-    wild.phases.page_ms = 2700;
+    wild.phases.pages.pcb = 2700;
     const results = [_]BoardResult{ sampleResult("blessed"), wild };
     const report = try checkBaseline(arena, &results, &base);
     try testing.expect(report.pass);
     try testing.expectEqual(@as(usize, 1), report.unplaced.len);
     try testing.expectEqualStrings("free-solver", report.unplaced[0]);
     try testing.expectEqual(@as(usize, 0), report.work_changed.len);
+}
+
+// The positive half of the spec above: stable page regressions still fail.
+test "baseline gate still checks stable pages on an unblessed board" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var base_row = sampleResult("free-solver");
+    base_row.facts.placed = false;
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    try writeResultsJson(&aw.writer, &.{base_row});
+    const base = try parseBaseline(arena, aw.written());
+
+    var slower = base_row;
+    slower.phases.pages.assembly = 300;
+    slower.phases.pages.schematic = 500;
+    const report = try checkBaseline(arena, &.{slower}, &base);
+    try testing.expect(!report.pass);
+    try testing.expectEqual(@as(usize, 2), report.breaches.len);
 }
 
 // spec: bench-page - moved DRC counts mean unlike work, which fails the gate with a re-record hint instead of comparing wall times
@@ -957,7 +1062,7 @@ test "baseline gate refuses to compare unlike work" {
     const base = try parseBaseline(arena, try sampleBaselineJson(arena));
     var changed = sampleResult("barracuda");
     changed.drc.total = 13;
-    changed.phases.page_ms = 1; // even a huge speedup is not comparable
+    changed.phases.pages.pcb = 1; // even a huge speedup is not comparable
     const report = try checkBaseline(arena, &.{changed}, &base);
     try testing.expect(!report.pass);
     try testing.expectEqual(@as(usize, 1), report.work_changed.len);

@@ -730,7 +730,7 @@ one-board anecdote.
 
 Public functions: benchOne, corpus, writeTable, writeResultsJson, cmdBenchPage
 
-The PCB-page latency benchmark that makes "the page got slower" a checkable
+The primary-page latency benchmark that makes "a page got slower" a checkable
 claim before it reaches main. Page-load and DRC-update latency regressed
 repeatedly because nothing measured them. `netlisp bench-page
 [--project-dir <dir>] [--reps <n>] [--json] [--baseline <file>] [<design> …]`
@@ -738,12 +738,14 @@ times the production seams per board — design evaluation, `.layouts.json`
 read+parse, `solveForRequest` (verbatim ★ restore + copper restore), the
 reporting DRC (`drc_rules.checkFilteredZones`, `net_open` included), the
 geometry-only `drc.check` (native twin of the client WASM engine), and the
-complete cold page render through the boot warm-up's page-scoped seam
+complete cold PCB page render through the boot warm-up's page-scoped seam
 (`pcb_derived.warmPage(…, .page)`) on a fresh cache, which stops where the
-reader's first paint does and leaves the `?derived=1` analyses out — and prints
-per-board phase medians plus the DRC counts, rendered-page size, and whether
-the render was admitted to the page cache. The corpus is every design with a
-saved-layout sidecar (the boot warm-up's own guard), so nothing is
+reader's first paint does and leaves the `?derived=1` analyses out. It also
+times cold default renders of `/assembly-debug/:name` (parent workspace only;
+the iframe is the separately measured PCB page), `/thermal/:name`, and
+`/schematics/:name`, and prints per-board phase medians plus the DRC counts,
+rendered PCB-page size, and whether that render was admitted to the page cache.
+The corpus is every design with a saved-layout sidecar (the boot warm-up's own guard), so nothing is
 solved-and-persisted for a board nobody laid out.
 
 `--baseline <file>` is the durable regression gate the tracked `pre-push` hook
@@ -763,7 +765,7 @@ hand-set absolute budget in the baseline's `budgets` object, moved DRC counts
 - millisecond-scale jitter under the absolute floor never fails the ratio rule
 - corpus-wide drift fails the gate even when every board stays inside its own allowance
 - a hand-set absolute budget in the baseline file caps every board regardless of the recorded medians
-- a board without a blessed layout is reported but kept out of the gate, since its per-render re-solve is neither stable nor comparable
+- a board without a blessed layout skips layout-dependent PCB/thermal phases but still gates its stable assembly and schematic renders
 - moved DRC counts mean unlike work, which fails the gate with a re-record hint instead of comparing wall times
 - losing page-cache retention fails the gate even when every timing column improved
 - new and vanished boards are noted rather than silently passing or failing the gate
