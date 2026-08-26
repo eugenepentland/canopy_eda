@@ -5943,7 +5943,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The navigation bar routes home through the Netlisp brand and carries no separate Designs tab
 - A standalone module opened through the schematic page exposes direct pin-net editing and deletion for source-backed parts
 - The PCB editor can explicitly make one named saved layout authoritative in KiCad after a destructive-change preview
-- The PCB editor defers whole-board diagnostics until the user requests them or edits the board
+- The PCB editor paints saved geometry before launching whole-board analyses
 - A plain click on the board outline's edge or a corner handle shows its properties instead of being swallowed by the outline-edit drag arming
 - The PCB editor's DXF import assembles a line/arc contour into a closed outline even when the export left sub-µm endpoint seams, mixed winding, or a duplicated contour
 - The PCB editor imports a DXF board outline: the page ships a DXF button (toolstrip + embed action bar) and the importer script, whose client-side parser exposes the loops a picked .dxf found (LWPOLYLINE/POLYLINE loops, LINE/ARC chains, $INSUNITS units, Y-flip to the board frame)

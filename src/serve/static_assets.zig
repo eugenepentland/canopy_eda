@@ -399,14 +399,17 @@ fn registryHasAsset(name: []const u8) bool {
     return false;
 }
 
-// spec: Web Server - The PCB editor defers whole-board diagnostics until the user requests them or edits the board
-test "PCB editor does not launch optional whole-board analyses during boot" {
+// spec: Web Server - The PCB editor paints saved geometry before launching whole-board analyses
+test "PCB editor defers whole-board analyses until after its first paint" {
     const checks = [_]struct { marker: []const u8, present: bool }{
         .{ .marker = "function loadStarMatch()", .present = true },
         .{ .marker = "el.addEventListener(\"click\",loadStarMatch)", .present = true },
         .{ .marker = "fetch(\"/api/layout-progress/\"", .present = true },
         .{ .marker = "progEnsureChip(); // cheap placeholder; the first click performs the analysis", .present = true },
-        .{ .marker = "if(!RO)drcChip((PCB.drc||[]).length)", .present = true },
+        .{ .marker = "function loadDeferredAnalysis()", .present = true },
+        .{ .marker = "u.searchParams.set(\"derived\",\"1\")", .present = true },
+        .{ .marker = "requestAnimationFrame(function(){requestAnimationFrame(start);});", .present = true },
+        .{ .marker = "drcChip(PCB.analysis_deferred?-1:(PCB.drc||[]).length)", .present = true },
         .{ .marker = "loadLayoutScores();", .present = false },
         .{ .marker = "fetch(\"/api/pcb-describe/\"", .present = false },
         .{ .marker = "progFetch(); // initial pull on page load", .present = false },
