@@ -3699,9 +3699,48 @@ fn emitLayoutVias(
     }
 }
 
-/// Seed the DSL-authored edge mask opening into a new KiCad board as closed
-/// F.Mask and B.Mask graphic strokes. The stroke is centred on Edge.Cuts, so a
-/// width of `2*mask-width` exposes exactly the authored band inside the board.
+fn syncPerimeterMaskSegments(
+    alloc: std.mem.Allocator,
+    block: *const env_mod.DesignBlock,
+    project_dir: []const u8,
+    name: []const u8,
+    mask: pcb_layout.SyncPerimeterMask,
+) ?[]const perimeter_fence.MaskSegment {
+    var layout = pcb_layout.loadSyncLayout(alloc, project_dir, name) orelse return null;
+    var poses: std.ArrayList(optimizer.RefPose) = .empty;
+    var it = layout.iterator();
+    while (it.next()) |entry| poses.append(alloc, .{
+        .ref = entry.key_ptr.*,
+        .x = entry.value_ptr.x,
+        .y = entry.value_ptr.y,
+        .rot = entry.value_ptr.rot,
+        .side = entry.value_ptr.side,
+    }) catch return null;
+    if (mask.outline.len < 3) return null;
+    var minx = mask.outline[0][0];
+    var miny = mask.outline[0][1];
+    var maxx = minx;
+    var maxy = miny;
+    for (mask.outline[1..]) |point| {
+        minx = @min(minx, point[0]);
+        miny = @min(miny, point[1]);
+        maxx = @max(maxx, point[0]);
+        maxy = @max(maxy, point[1]);
+    }
+    const placement = optimizer.placeFromPoses(alloc, block, project_dir, .{
+        .poses = poses.items,
+        .outline = .{ .drawn = .{
+            .rect = .{ .minx = minx, .miny = miny, .w = maxx - minx, .h = maxy - miny },
+            .poly = mask.outline,
+        } },
+    }, .{}) catch return null;
+    return perimeter_fence.maskSegments(alloc, placement) catch null;
+}
+
+/// Seed the DSL-authored edge mask opening into a new KiCad board as F.Mask
+/// and B.Mask graphic strokes. The stroke is centred on Edge.Cuts, so a width
+/// of `2*mask-width` exposes exactly the authored band inside the board;
+/// courtyard-clipped fragments leave solder mask beneath edge hardware.
 /// Board graphics are emitted only on first insertion: the board snapshot has
 /// no update identity for existing graphics, so repeating them would stack
 /// duplicates.
@@ -3715,9 +3754,18 @@ fn emitPerimeterMask(
 ) !void {
     if (!d.board_fresh or !seedsWholeLayout(d)) return;
     const mask = pcb_layout.loadSyncPerimeterMask(d.spc.arena, block, project_dir, name) orelse return;
+    const clipped = syncPerimeterMaskSegments(d.spc.arena, block, project_dir, name, mask);
     const layers = [_][]const u8{ proto_layer_f_mask, proto_layer_b_mask };
     for (layers) |layer| {
-        for (mask.outline, 0..) |a, i| {
+        if (clipped) |segments| for (segments) |segment| {
+            if (!first.*) try w.writeAll(",");
+            first.* = false;
+            try w.writeAll(board_item_op_open);
+            var item_first = true;
+            try writeBoardShapeOpen(w, layer, 2 * mask.width, &item_first);
+            try writeSegmentGeom(w, segment.a[0], segment.a[1], segment.b[0], segment.b[1]);
+            try w.writeAll("}}}");
+        } else for (mask.outline, 0..) |a, i| {
             const b = mask.outline[(i + 1) % mask.outline.len];
             if (!first.*) try w.writeAll(",");
             first.* = false;
@@ -3726,7 +3774,7 @@ fn emitPerimeterMask(
             try writeBoardShapeOpen(w, layer, 2 * mask.width, &item_first);
             try writeSegmentGeom(w, a[0], a[1], b[0], b[1]);
             try w.writeAll("}}}");
-        }
+        };
     }
 }
 

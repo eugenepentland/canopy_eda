@@ -1481,6 +1481,22 @@ function paintGridDots(ctx,k){
 function physicalBoardPath(ctx){var pts=reviewBoardPoints();if(pts.length<3)return false;
  ctx.beginPath();ctx.moveTo(X(pts[0][0]),Y(pts[0][1]));
  for(var i=1;i<pts.length;i++)ctx.lineTo(X(pts[i][0]),Y(pts[i][1]));ctx.closePath();return true;}
+var perimeterMaskGeom=null,perimeterMaskOvs=-1,perimeterMaskOutline=-1,perimeterMaskWidth=-1;
+function perimeterMaskBoxInterval(a,b,q){var lo=0,hi=1;
+ function axis(o,d,mn,mx){if(Math.abs(d)<=1e-12)return o>=mn&&o<=mx;
+  var ta=(mn-o)/d,tb=(mx-o)/d;lo=Math.max(lo,Math.min(ta,tb));hi=Math.min(hi,Math.max(ta,tb));return lo<=hi;}
+ return axis(a[0],b[0]-a[0],q.x0,q.x1)&&axis(a[1],b[1]-a[1],q.y0,q.y1)?[lo,hi]:null;}
+function perimeterMaskSegments(){var mw=Number(PCB.rules&&PCB.rules.perimeter_mask_width)||0;
+ if(perimeterMaskGeom&&perimeterMaskOvs===ovsRev&&perimeterMaskOutline===outlineGeomRev&&perimeterMaskWidth===mw)return perimeterMaskGeom;
+ var pts=reviewBoardPoints(),out=[];if(mw>0&&pts.length>=3)for(var ei=0;ei<pts.length;ei++){var a=pts[ei],b=pts[(ei+1)%pts.length],blocked=[];
+  P.forEach(function(p,pi){var q=partAABB(pi),iv=perimeterMaskBoxInterval(a,b,{x0:q.x0-mw,y0:q.y0-mw,x1:q.x1+mw,y1:q.y1+mw});if(iv)blocked.push(iv);});
+  blocked.sort(function(u,v){return u[0]-v[0];});var cursor=0;blocked.forEach(function(iv){var lo=Math.max(0,Math.min(1,iv[0])),hi=Math.max(0,Math.min(1,iv[1]));
+   if(lo>cursor+1e-9)out.push([a[0]+(b[0]-a[0])*cursor,a[1]+(b[1]-a[1])*cursor,a[0]+(b[0]-a[0])*lo,a[1]+(b[1]-a[1])*lo]);cursor=Math.max(cursor,hi);});
+  if(cursor<1-1e-9)out.push([a[0]+(b[0]-a[0])*cursor,a[1]+(b[1]-a[1])*cursor,b[0],b[1]]);}
+ perimeterMaskGeom=out;perimeterMaskOvs=ovsRev;perimeterMaskOutline=outlineGeomRev;perimeterMaskWidth=mw;return out;}
+function strokePerimeterMask(ctx){var ss=perimeterMaskSegments();
+ ctx.beginPath();for(var i=0;i<ss.length;i++){var s=ss[i];if(!s||s.length<4)continue;
+  ctx.moveTo(X(s[0]),Y(s[1]));ctx.lineTo(X(s[2]),Y(s[3]));}ctx.stroke();}
 // Paint an opposite-face sink before the physical board. The board and thermal
 // field therefore occlude its footprint while any real overhang remains
 // visible around the edge — the depth cue that the retained SVG could not
@@ -1506,7 +1522,7 @@ function paintPhysicalBoard(ctx,k){if(!PHYSICAL_REVIEW||!physicalBoardPath(ctx))
  // stroke to the board so the physical review shows exactly WIDTH inward,
  // without painting an amber halo outside the finished edge.
  if(mw>0){ctx.clip();physicalBoardPath(ctx);ctx.strokeStyle=PH.opening;
-  ctx.lineWidth=2*mw*S;ctx.lineJoin="round";ctx.stroke();}
+  ctx.lineWidth=2*mw*S;ctx.lineJoin="round";strokePerimeterMask(ctx);}
  ctx.restore();ctx.save();physicalBoardPath(ctx);
  ctx.strokeStyle=PH.edge;ctx.lineWidth=Math.max(1.4*ik,0.16*S);ctx.lineJoin="round";ctx.stroke();
  ctx.globalAlpha=0.22;ctx.strokeStyle="#8bc49a";ctx.lineWidth=Math.max(0.7*ik,0.05*S);ctx.stroke();
@@ -2202,8 +2218,8 @@ function paintMaskRelief(ctx){if(!PHYSICAL_REVIEW||reviewFocusHasNets())return;
   // through that opening below; in particular a GND pour remains copper-gold
   // instead of being replaced by the old amber opening silhouette.
   mc.strokeStyle=PH.substrate;mc.fillStyle=PH.substrate;
-  if(mw>0){mc.save();physicalBoardPath(mc);mc.clip();physicalBoardPath(mc);
-   mc.strokeStyle=PH.substrate;mc.lineWidth=2*mw*S;mc.lineJoin="round";mc.stroke();mc.restore();}
+  if(mw>0){mc.save();physicalBoardPath(mc);mc.clip();
+   mc.strokeStyle=PH.substrate;mc.lineWidth=2*mw*S;mc.lineJoin="round";strokePerimeterMask(mc);mc.restore();}
   if(layerHasOutline)os.forEach(function(o){if((o.l||0)!==L)return;if(reliefOutlinePath(mc,o))mc.fill();});
   else{
    ss.forEach(function(s){if((s.l||0)!==L)return;

@@ -734,9 +734,10 @@ fn thermalRelief(g: *Gx, p: optimizer.Part, pad: geometry.Pad, gap: f64) Error!v
 /// RF opening, a clear-polarity copy of that pad's aperture plus one web puts
 /// back only a local pad-shaped mask island; the pad aperture is then reopened,
 /// so the trace exposure remains continuous around it. A declared perimeter
-/// fence adds one continuous
-/// opening centred on the exact finished edge; CAM clips the outside half,
-/// leaving the authored `mask-width` band inward on both faces.
+/// fence adds openings centred on the exact finished edge; CAM clips the
+/// outside half, leaving the authored `mask-width` band inward on both faces.
+/// Edge-mounted component courtyards split that stroke automatically, keeping
+/// mask beneath the hardware without an authored exclusion list.
 fn writeMask(g: *Gx, placement: optimizer.Placement, copper: Copper, side: optimizer.Side) Error!void {
     const margin = placement.rules.design.mask.margin;
     var physical = copper;
@@ -772,13 +773,10 @@ fn writeMask(g: *Gx, placement: optimizer.Placement, copper: Copper, side: optim
     }
     const fence = placement.rules.perimeter_fence;
     if (fence.mask_width > 0) {
-        const poly = try perimeter_fence.outlinePoints(g.arena, placement);
-        if (poly.len >= 3) {
+        const segments = try perimeter_fence.maskSegments(g.arena, placement);
+        if (segments.len > 0) {
             try g.use(.c, 2 * fence.mask_width, 0);
-            for (poly, 0..) |a, i| {
-                const b = poly[(i + 1) % poly.len];
-                try g.line(a[0], a[1], b[0], b[1]);
-            }
+            for (segments) |segment| try g.line(segment.a[0], segment.a[1], segment.b[0], segment.b[1]);
         }
     }
     // The paddle flashes above can uncover ordinary routed copper on this
@@ -2435,7 +2433,7 @@ test "a fiducial's pad overrides open the mask and skip the stencil" {
 }
 
 // spec: placement/perimeter-fence - Gerber opens the authored-width solder-mask band around the exact board outline on both faces
-test "mask opens a continuous perimeter-fence band" {
+test "mask opens a perimeter-fence band" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
@@ -2452,6 +2450,39 @@ test "mask opens a continuous perimeter-fence band" {
     const mask = mw.written();
     try testing.expect(std.mem.indexOf(u8, mask, "C,1.400000*%") != null);
     try testing.expect(std.mem.indexOf(u8, mask, "X0Y10000000D02*\nX20000000Y10000000D01*") != null);
+}
+
+// spec: placement/perimeter-fence - component courtyards automatically interrupt both the generated vias and exposed mask band
+test "perimeter mask band leaves an automatic edge-component gap" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    var parts = [_]optimizer.Part{.{
+        .ref_des = "J1",
+        .kind = .hub,
+        .x = 10,
+        .y = 0.5,
+        .hw = 1,
+        .hh = 1,
+        .pads = &.{},
+        .fallback = false,
+    }};
+    var placement = testPlacement(&parts, &.{});
+    placement.rules.perimeter_fence = .{
+        .via_dia = 0.4,
+        .via_drill = 0.2,
+        .spacing = 1,
+        .edge_offset = 0.5,
+        .mask_width = 0.7,
+    };
+    var mw: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&mw.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .mask = .top }, .{ .function = "Soldermask,Top" });
+    const mask = mw.written();
+    // J1's x=9..11 courtyard expands by the 0.7 mm stroke radius, so the
+    // bottom edge is split at x=8.3 and x=11.7 instead of crossing J1.
+    try testing.expect(std.mem.indexOf(u8, mask, "X0Y10000000D02*\nX8300000Y10000000D01*") != null);
+    try testing.expect(std.mem.indexOf(u8, mask, "X11700000Y10000000D02*\nX20000000Y10000000D01*") != null);
+    try testing.expect(std.mem.indexOf(u8, mask, "X0Y10000000D02*\nX20000000Y10000000D01*") == null);
 }
 
 // spec: export_gerber - the mask margin comes from (design-rules …), defaulting byte-identically to 0.05 mm
