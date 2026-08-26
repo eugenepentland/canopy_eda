@@ -20,7 +20,10 @@ zig build run -- serve --project-dir projects/designs
 # Dev server / feature review at production speed (~1.5x Debug, builds in
 # seconds): the pinned production compiler in ReleaseSafe. Never pass
 # -Doptimize=safe to the PATH zig — that selects the multi-minute LLVM build.
-scripts/zig-prod build --seed=1 -Doptimize=safe -p /tmp/my-prefix
+# Prefixes go under ~/.cache/netlisp/prod/, NOT /tmp: /tmp has a per-user
+# quota here and stale prefixes filled it once (2026-08-26), breaking every
+# tool needing tmpfile space. Prune old ones from ~/.cache/netlisp/prod/.
+scripts/zig-prod build --seed=1 -Doptimize=safe -p ~/.cache/netlisp/prod/my-prefix
 
 # Build a design (stdout), --push sends to running server
 zig build run -- build --project-dir projects/designs --push <design-name>

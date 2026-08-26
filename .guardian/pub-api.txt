@@ -6,6 +6,17 @@ src/allocating_writer.zig::writeByte | fn writeByte(self: AllocatingWriter, byte
 src/asserted_fns.zig::buildMap | fn buildMap(allocator: Allocator, block: *const DesignBlock) Allocator.Error!Map
 src/bench_layout.zig::main | fn main(init: std.process.Init) !void
 src/bench_layout.zig::process_io value
+src/bench_page.zig::BenchError value
+src/bench_page.zig::BoardResult struct_
+src/bench_page.zig::DrcCounts struct_
+src/bench_page.zig::Facts struct_
+src/bench_page.zig::Phases struct_
+src/bench_page.zig::benchOne | fn benchOne( allocator: std.mem.Allocator, arena: std.mem.Allocator, project_dir: []const u8, name: []const u8, reps: usize, ) std.mem.Allocator.Error!BoardResult
+src/bench_page.zig::cmdBenchPage | fn cmdBenchPage(allocator: std.mem.Allocator, args: []const []const u8) BenchError!void
+src/bench_page.zig::corpus | fn corpus(arena: std.mem.Allocator, project_dir: []const u8) std.mem.Allocator.Error![]const []const u8
+src/bench_page.zig::names value
+src/bench_page.zig::writeResultsJson | fn writeResultsJson(w: *std.Io.Writer, results: []const BoardResult) json_writer.WriteError!void
+src/bench_page.zig::writeTable | fn writeTable(w: *std.Io.Writer, results: []const BoardResult, reps: usize) std.Io.Writer.Error!void
 src/bench_route.zig::BenchError value
 src/bench_route.zig::BoardResult struct_
 src/bench_route.zig::Copper struct_

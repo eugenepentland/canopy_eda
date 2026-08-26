@@ -33,6 +33,7 @@ test {
     // declare run. No test-bearing module in src/ is skipped any more, which is
     // why nothing below consults an exemption list.
     _ = @import("bench_route.zig");
+    _ = @import("bench_page.zig");
     _ = @import("board_layers.zig");
     _ = @import("board_theme.zig");
     _ = @import("bom.zig");

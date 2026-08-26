@@ -55,6 +55,7 @@ pub const shards: []const []const []const u8 = &.{
         "placement.fine_accept.test.a n",
         "serve.ground_vias.test.",
         "serve.pcb_step_export.test.",
+        "bench_page.test.",
     },
     // shard 1
     &.{

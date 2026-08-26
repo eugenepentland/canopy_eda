@@ -726,6 +726,57 @@ one-board anecdote.
 - completeness-waiver: integer overflow (counts come from routed slices; the score arithmetic widens to f64 before any accumulation)
 - completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
 
+## bench-page
+
+Public functions: benchOne, corpus, writeTable, writeResultsJson, cmdBenchPage
+
+The PCB-page latency benchmark that makes "the page got slower" a checkable
+claim before it reaches main. Page-load and DRC-update latency regressed
+repeatedly because nothing measured them. `netlisp bench-page
+[--project-dir <dir>] [--reps <n>] [--json] [--baseline <file>] [<design> …]`
+times the production seams per board — design evaluation, `.layouts.json`
+read+parse, `solveForRequest` (verbatim ★ restore + copper restore), the
+reporting DRC (`drc_rules.checkFilteredZones`, `net_open` included), the
+geometry-only `drc.check` (native twin of the client WASM engine), and the
+complete cold page render through `warmPage` on a fresh cache — and prints
+per-board phase medians plus the DRC counts, rendered-page size, and whether
+the render was admitted to the page cache. The corpus is every design with a
+saved-layout sidecar (the boot warm-up's own guard), so nothing is
+solved-and-persisted for a board nobody laid out.
+
+`--baseline <file>` is the durable regression gate the tracked `pre-push` hook
+runs for main (via `scripts/perf_gate.sh`, behind `scripts/gate.sh`'s
+machine-wide lock): it compares each board's phase medians against a committed
+`--json` recording and exits non-zero on a per-board allowance breach
+(`max(base×1.30, base+25 ms)`), a corpus-wide geomean drift past 1.10, a
+hand-set absolute budget in the baseline's `budgets` object, moved DRC counts
+(unlike work is not comparable), or lost page-cache retention. Full workflow:
+`docs/benchmarks/pcb-page/README.md`.
+
+- the CLI parses project dir, reps, output and baseline flags with positionals as design names
+- phase medians are the outlier-tolerant middle of the rep samples
+- the JSON recording round-trips through the baseline loader with every phase and invariant intact
+- the --baseline gate passes a run identical to its committed baseline
+- a phase past both the ratio and absolute allowance fails the gate and names the board, phase, and limit
+- millisecond-scale jitter under the absolute floor never fails the ratio rule
+- corpus-wide drift fails the gate even when every board stays inside its own allowance
+- a hand-set absolute budget in the baseline file caps every board regardless of the recorded medians
+- a board without a blessed layout is reported but kept out of the gate, since its per-render re-solve is neither stable nor comparable
+- moved DRC counts mean unlike work, which fails the gate with a re-record hint instead of comparing wall times
+- losing page-cache retention fails the gate even when every timing column improved
+- new and vanished boards are noted rather than silently passing or failing the gate
+- a missing or corrupt baseline is a gate failure, never a pass
+- a failed board renders as FAILED in the table and carries ok=false in JSON
+- a page render the cache refused is flagged in the table so a silent every-load-cold regression is visible
+- completeness-waiver: empty inputs (an empty corpus prints an empty table; a zero-baseline phase is ratio-floored so it cannot divide by zero)
+- completeness-waiver: large inputs (each rep runs in its own arena, freed before the next; the corpus peaks at one rep's render)
+- completeness-waiver: unauthorized access (a local CLI over a project directory the invoking user already owns; no network or auth surface)
+- completeness-waiver: i/o failure (a design that fails to load or solve is an ok=false FAILED row rather than aborting the corpus; an unreadable baseline fails the gate, never passes it)
+- completeness-waiver: concurrent access (renders through the same warm-up seam the server boot uses, against this process's own fresh cache; sidecar writes are the render path's own, identical to boot warm-up)
+- completeness-waiver: malformed encoding (a sidecar that fails to parse is logged and still timed — the parse work it measured is real; design-parse diagnostics belong to the evaluator)
+- completeness-waiver: integer overflow (all timing arithmetic widens to f64; counts come from slice lengths)
+- completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
+
 ## placement/route-timing
 
 Public functions: PhaseTimer (begin, end, beginNet, endNet, noteAttempt, elapsed, total, label)

@@ -170,6 +170,20 @@ the same lock itself, so release preparations queue without being asked — its
 `-Dtest-filter=…`, or use `zig build test-compile`; these short jobs
 should never wait behind someone's full suite.
 
+### The PCB-page latency gate (pre-push on main)
+
+Page-load and DRC latency regressed repeatedly because nothing measured them.
+`netlisp bench-page` (src/bench_page.zig) now times the production seams per
+board — design eval, sidecar parse, placement restore, reporting DRC, geometry
+DRC, and the complete cold page render — and `--baseline` compares the medians
+against the committed recording in `docs/benchmarks/pcb-page/baseline.json`,
+failing on per-board allowances, corpus-wide drift, hand-set absolute budgets,
+moved DRC counts (unlike work), or lost page-cache retention. The tracked
+`.githooks/pre-push` hook runs it (via `scripts/perf_gate.sh`, behind the
+machine gate lock) whenever main is pushed; feature-branch pushes are never
+gated. Re-record deliberately with `scripts/perf_gate.sh --record` and commit
+the diff. Full rules and workflow: `docs/benchmarks/pcb-page/README.md`.
+
 ### Validating without touching `zig-out`
 
 **`zig build test` never writes `zig-out/`.** You can fire a test run — full or
