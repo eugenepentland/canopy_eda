@@ -1,11 +1,14 @@
-//! Add the autorouter's via-in-pad ground candidates to hand-authored copper.
+//! Add the autorouter's ground-via candidates to hand-authored copper.
 //!
 //! The full plane pass also emits fan-out barrels joined by temporary stubs.
 //! A hand-routing seed must not silently invent those traces, so this seam
-//! keeps only candidates whose complete annulus lands on their own GND pad:
-//! exposed-pad thermal fields and ordinary centred ground-pad drops. Ordinary
-//! drops prefer the pad's exact world centre before the incremental DRC gate;
-//! this removes routing-grid offsets introduced by flattened subcircuits.
+//! first keeps candidates whose complete annulus lands on their own GND pad:
+//! exposed-pad thermal fields and ordinary centred ground-pad drops. It then
+//! applies the router's final ground-distance pass, which searches for the
+//! nearest legal site beside every still-unserved pad and adds the short join
+//! needed when that face has no same-net pour. Ordinary in-pad drops prefer the
+//! pad's exact world centre before the incremental DRC gate; this removes
+//! routing-grid offsets introduced by flattened subcircuits.
 
 const std = @import("std");
 const drc = @import("placement/drc.zig");
@@ -19,9 +22,11 @@ const router = @import("placement/router.zig");
 /// were left alone. `vias` never contains copper supplied in `routed`.
 const Outcome = struct {
     vias: []const router.Via = &.{},
+    tracks: []const router.Track = &.{},
     candidates: usize = 0,
     duplicates: usize = 0,
     blocked: usize = 0,
+    nearby: usize = 0,
 };
 
 fn groundNet(placement: optimizer.Placement, via: router.Via) ?usize {
@@ -83,13 +88,13 @@ fn hasSameVia(vias: []const router.Via, candidate: router.Via) bool {
     return false;
 }
 
-/// Generate the same exposed-pad arrays and ordinary GND-pad barrels as the
-/// autorouter's plane pass, without routing any trace or replacing existing
+/// Generate the same exposed-pad arrays, ordinary GND-pad barrels, and final
+/// ground-distance stitches as the autorouter, without replacing existing
 /// copper. An ordinary barrel is offered at its pad's exact world centre first,
-/// then falls back to the router's site if the submitted board blocks it.
-/// Thermal-array cells retain their regular field. Exact existing barrels make
-/// the operation idempotent; the shared incremental DRC gate rejects any
-/// candidate that would add a fab error.
+/// then falls back to the router's nearest legal site if the submitted board
+/// blocks it. Thermal-array cells retain their regular field. Exact existing
+/// barrels make the operation idempotent; the shared incremental DRC gate
+/// rejects any via-in-pad candidate that would add a fab error.
 fn generate(
     arena: std.mem.Allocator,
     placement: optimizer.Placement,
@@ -97,46 +102,66 @@ fn generate(
     params: router.RouteParams,
 ) std.mem.Allocator.Error!Outcome {
     const proposed = try router.groundVias(arena, placement, params);
-    if (proposed.len == 0) return .{};
 
     var accepted: std.ArrayList(router.Via) = .empty;
     var out = Outcome{};
-    var gate = try drc.ViaAdditionGate.build(arena, placement, routed, params.clearance, proposed[0]);
+    if (proposed.len > 0) {
+        var gate = try drc.ViaAdditionGate.build(arena, placement, routed, params.clearance, proposed[0]);
 
-    for (proposed) |proposed_candidate| {
-        const net_i = groundNet(placement, proposed_candidate) orelse continue;
-        const own_pad = try ownPadAt(arena, placement, net_i, proposed_candidate) orelse continue;
-        out.candidates += 1;
+        for (proposed) |proposed_candidate| {
+            const net_i = groundNet(placement, proposed_candidate) orelse continue;
+            const own_pad = try ownPadAt(arena, placement, net_i, proposed_candidate) orelse continue;
+            out.candidates += 1;
 
-        var candidate = proposed_candidate;
-        if (!own_pad.thermal and plane_via.barrelFits(own_pad.shape, own_pad.centre, candidate.dia)) {
-            candidate.x = own_pad.centre[0];
-            candidate.y = own_pad.centre[1];
-        }
-
-        if (hasSameVia(gate.others.items, candidate)) {
-            out.duplicates += 1;
-            continue;
-        }
-        if (try gate.addsError(arena, candidate)) {
-            if (sameVia(candidate, proposed_candidate)) {
-                out.blocked += 1;
-                continue;
+            var candidate = proposed_candidate;
+            if (!own_pad.thermal and plane_via.barrelFits(own_pad.shape, own_pad.centre, candidate.dia)) {
+                candidate.x = own_pad.centre[0];
+                candidate.y = own_pad.centre[1];
             }
-            candidate = proposed_candidate;
+
             if (hasSameVia(gate.others.items, candidate)) {
                 out.duplicates += 1;
                 continue;
             }
             if (try gate.addsError(arena, candidate)) {
-                out.blocked += 1;
-                continue;
+                if (sameVia(candidate, proposed_candidate)) {
+                    out.blocked += 1;
+                    continue;
+                }
+                candidate = proposed_candidate;
+                if (hasSameVia(gate.others.items, candidate)) {
+                    out.duplicates += 1;
+                    continue;
+                }
+                if (try gate.addsError(arena, candidate)) {
+                    out.blocked += 1;
+                    continue;
+                }
             }
+            try gate.accept(arena, candidate);
+            try accepted.append(arena, candidate);
         }
-        try gate.accept(arena, candidate);
-        try accepted.append(arena, candidate);
     }
-    out.vias = try accepted.toOwnedSlice(arena);
+
+    // Keep the button's existing exposed-pad arrays and exact via-in-pad
+    // drops, then run the autorouter's final ground-reference pass over the
+    // resulting live copper. That second pass is what searches outward from
+    // every pad still failing `(ground-via-max MM)` and uses the closest
+    // legal site it can find (plus a short surface join when there is no
+    // same-face pour).
+    var seeded_vias = std.ArrayList(router.Via).fromOwnedSlice(try arena.dupe(router.Via, routed.vias));
+    try seeded_vias.appendSlice(arena, accepted.items);
+    var seeded = routed;
+    seeded.vias = try seeded_vias.toOwnedSlice(arena);
+    var stitch_placement = placement;
+    stitch_placement.rules.design.track_width = params.track_width;
+    stitch_placement.rules.design.clearance = params.clearance;
+    stitch_placement.rules.design.via_dia = params.via_dia;
+    stitch_placement.rules.design.via_drill = params.via_drill;
+    const stitched = try router.addGroundPadStitches(arena, stitch_placement, seeded);
+    out.nearby = stitched.vias.len - seeded.vias.len;
+    out.vias = stitched.vias[routed.vias.len..];
+    out.tracks = stitched.tracks[routed.tracks.len..];
     return out;
 }
 
@@ -149,13 +174,27 @@ pub const NamedVia = struct {
     net: []const u8,
 };
 
-/// Browser-facing seed result. Only `vias` are additions; submitted copper is
-/// deliberately absent so the client cannot replace it by applying this reply.
+/// One generated surface join with its stable net name for JSON persistence.
+const NamedTrack = struct {
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+    layer: u8,
+    width: f64,
+    net: []const u8,
+};
+
+/// Browser-facing seed result. Only `vias` and short `tracks` are additions;
+/// submitted copper is deliberately absent so the client cannot replace it by
+/// applying this reply.
 pub const LiveOutcome = struct {
     vias: []const NamedVia,
+    tracks: []const NamedTrack,
     candidates: usize,
     duplicates: usize,
     blocked: usize,
+    nearby: usize,
 };
 
 /// Rebuild the placement at the submitted browser poses, retain its submitted
@@ -203,11 +242,26 @@ pub fn generateLive(
         else
             "",
     };
+    const named_tracks = try arena.alloc(NamedTrack, seeded.tracks.len);
+    for (seeded.tracks, 0..) |track, i| named_tracks[i] = .{
+        .x1 = track.x1,
+        .y1 = track.y1,
+        .x2 = track.x2,
+        .y2 = track.y2,
+        .layer = track.layer,
+        .width = track.width,
+        .net = if (track.net >= 0 and @as(usize, @intCast(track.net)) < placement.nets.len)
+            placement.nets[@intCast(track.net)].name
+        else
+            "",
+    };
     return .{
         .vias = named,
+        .tracks = named_tracks,
         .candidates = seeded.candidates,
         .duplicates = seeded.duplicates,
         .blocked = seeded.blocked,
+        .nearby = seeded.nearby,
     };
 }
 
@@ -317,4 +371,79 @@ test "ground via seed leaves a DRC-blocked field cell alone" {
     try testing.expectEqual(@as(usize, 10), result.candidates);
     try testing.expectEqual(@as(usize, 1), result.blocked);
     try testing.expectEqual(@as(usize, 9), result.vias.len);
+}
+
+// spec: placement/ground-via-seed - after via-in-pad seeding, hand routing places the nearest legal barrel within the authored ground-via maximum beside every still-unserved ground pad and adds its surface join when that face has no same-net pour
+test "ground via seed clears a distance warning at the nearest legal off-pad site" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const ground_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.3, .h = 0.3 }};
+    const foreign_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.2, .h = 0.2 }};
+    var parts = [_]optimizer.Part{
+        .{
+            .ref_des = "C1",
+            .kind = .passive,
+            .hw = 0.3,
+            .hh = 0.3,
+            .pads = &ground_pad,
+            .fallback = false,
+        },
+        // Its land starts at x=0.3: far enough to clear C1's 0.15-mm land
+        // edge, but close enough to block a 0.4-mm via centred on C1.
+        .{
+            .ref_des = "R1",
+            .kind = .passive,
+            .hw = 0.2,
+            .hh = 0.2,
+            .pads = &foreign_pad,
+            .fallback = false,
+            .x = 0.4,
+        },
+    };
+    const ground_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "C1", .pin = "1" }};
+    const signal_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "R1", .pin = "1" }};
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "GND", .pins = &ground_pins },
+        .{ .name = "SIG", .pins = &signal_pins },
+    };
+    const plane_nets = [_][]const u8{"GND"};
+    const planes = [_]optimizer.PlaneAt{.{ .index = 1, .net = "GND" }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -2,
+        .miny = -2,
+        .maxx = 2,
+        .maxy = 2,
+        .generated = true,
+        .rules = .{
+            .plane_nets = &plane_nets,
+            .copper_layers = 4,
+            .planes = .{ .declared = &planes },
+            .design = .{ .pour = .{ .ground_via_max = 1.0 } },
+        },
+    };
+    const params = placement.rules.design.routeParams();
+    const empty = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
+    try testing.expectEqual(@as(usize, 1), drc.countKind(try drc.check(arena, placement, empty, params.clearance), .ground_via_distance));
+
+    const result = try generate(arena, placement, empty, params);
+    try testing.expectEqual(@as(usize, 1), result.nearby);
+    try testing.expectEqual(@as(usize, 1), result.vias.len);
+    const distance = std.math.hypot(result.vias[0].x, result.vias[0].y);
+    try testing.expect(distance > 1e-6);
+    try testing.expect(distance <= 1.0 + 1e-9);
+    const stitched = router.RouteResult{ .tracks = result.tracks, .vias = result.vias, .routed = 0, .total = 0 };
+    try testing.expectEqual(@as(usize, 0), drc.countKind(try drc.check(arena, placement, stitched, params.clearance), .ground_via_distance));
+
+    const again = try generate(arena, placement, stitched, params);
+    try testing.expectEqual(@as(usize, 0), again.vias.len);
+    try testing.expectEqual(@as(usize, 0), again.tracks.len);
 }

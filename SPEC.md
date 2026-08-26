@@ -3632,6 +3632,7 @@ Public functions: load, isGroundFn, isSupplyFn, strapPads, padRequirements
 Public functions: generateLive
 
 - hand routing can seed one legal exposed-pad field and one centred GND-pad barrel without replacing existing copper, preserving the exact centre of an off-grid transformed subcircuit pad when it is legal
+- after via-in-pad seeding, hand routing places the nearest legal barrel within the authored ground-via maximum beside every still-unserved ground pad and adds its surface join when that face has no same-net pour
 - running the ground-via seed repeatedly adds each eligible barrel at most once
 - a candidate that would add a fabrication DRC error is reported as blocked and is not returned
 - completeness-waiver: empty inputs (a board with no eligible ground-plane pads returns an empty outcome, unit-tested by the plane-via candidate contract)
@@ -6539,7 +6540,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The PCB page blob names the implicit model's supply-rail plane so the client DRC shares the server's plane-carried verdict
 - The PCB page blob always carries the ground-name token vocabulary so the browser's ground test cannot drift from the server's
 - The PCB viewer offers a Fence action that lays (and regenerates) the RF ground via fence onto the active layout's routed RF traces — declared (fence …) classes and max-freq classes alike
-- The PCB hand-routing editor offers one undoable GND-vias action that seeds DRC-legal exposed-pad arrays and centred ground-pad barrels without replacing submitted copper
+- The PCB hand-routing editor offers one undoable GND-vias action that seeds DRC-legal exposed-pad arrays and centred ground-pad barrels, then places nearest-legal barrels beside pads still failing the ground-via-distance rule without replacing submitted copper
 - GET /api/schematic-pdf/:name returns the composed review PDF as an application/pdf attachment that passes the writer's structural self-check
 - GET /api/schematic-pdf/:name answers an unknown design or module name with a 404 whose body never reads as a PDF
 - GET /api/schematic-pdf/:name?theme=light composes the print palette, yielding different bytes over the same pages as the default screen palette

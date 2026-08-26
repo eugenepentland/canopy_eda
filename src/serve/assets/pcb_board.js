@@ -9240,14 +9240,15 @@ function markPoursStale(){pourGeomDrop(); // every copper/pose edit funnels here
  poursReqSeq++; // an edit supersedes any in-flight refill's freshness
  if(PCB.poursStale)return;PCB.poursStale=true;pourBtnSync();}
 function poursFresh(){PCB.poursStale=false;pourBtnSync();}
-// Seed only via-in-pad ground barrels from the autorouter's plane pass: QFN
-// exposed-pad arrays and exact GND-pad centres. The server judges each addition
-// against the submitted hand copper; no trace or existing via is replaced.
+// Seed the autorouter's via-in-pad ground barrels, then run its final
+// ground-via-distance pass over the remaining pads. A blocked centre therefore
+// gets the nearest legal barrel within the authored maximum (and, when needed,
+// a short surface join). Existing submitted copper is never replaced.
 var groundViasInFlight=false;
 function groundViasBtnInstall(){if(RO||document.getElementById("pcb-ground-vias"))return;
  var anchor=document.getElementById("pcb-fence")||document.getElementById("pcb-pour");if(!anchor||!anchor.parentNode)return;
  var b=document.createElement("button");b.className="btn";b.id="pcb-ground-vias";b.textContent="⊙ GND vias";
- b.title="Seed exposed-pad thermal arrays and centred GND via-in-pad drops without autorouting";
+ b.title="Seed thermal/via-in-pad barrels and place the nearest legal GND via beside pads that still exceed the ground-via maximum";
  anchor.parentNode.insertBefore(b,anchor);}
 function groundViasRun(){if(groundViasInFlight||RO)return;var b=document.getElementById("pcb-ground-vias");if(!b)return;
  groundViasInFlight=true;b.disabled=true;routeStatMsg("seeding GND vias…");
@@ -9257,11 +9258,16 @@ function groundViasRun(){if(groundViasInFlight||RO)return;var b=document.getElem
   .then(function(r){if(!r.ok)throw 0;return r.json();})
   .then(function(j){groundViasInFlight=false;b.disabled=false;
    if(JSON.stringify(boardStatePayload())!==sent){routeStatMsg("board changed — click GND vias again");return;}
-   var g=j||{},added=g.added||[];
-   if(added.length){recordUndo();PCB.vias=PCB.vias||[];added.forEach(function(v){PCB.vias.push({x:v.x,y:v.y,d:v.d,
+   var g=j||{},added=g.added||[],tracks=g.tracks||[];
+   if(added.length||tracks.length){recordUndo();PCB.tracks=PCB.tracks||[];PCB.vias=PCB.vias||[];
+    tracks.forEach(function(t){PCB.tracks.push({x1:t.x1,y1:t.y1,x2:t.x2,y2:t.y2,l:t.l||0,w:t.w,
+     net:t.net||"",source:"autorouter",id:trackIdNew()});});
+    added.forEach(function(v){PCB.vias.push({x:v.x,y:v.y,d:v.d,
      drill:v.drill,net:v.net||"",source:"autorouter",id:viaIdNew()});});
     copperIdsEnsureAll();drawRoute();scheduleDrc();}
    var msg="GND vias: "+added.length+" added";
+   if(tracks.length)msg+=" · "+tracks.length+" pad join"+(tracks.length===1?"":"s");
+   if(g.nearby)msg+=" · "+g.nearby+" placed near warned pads";
    if(g.duplicates)msg+=" · "+g.duplicates+" already present";
    if(g.blocked)msg+=" · "+g.blocked+" blocked by DRC";
    routeStatMsg(msg,!!g.blocked&&!added.length);})

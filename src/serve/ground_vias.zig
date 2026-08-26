@@ -33,8 +33,9 @@ fn posesFrom(arena: std.mem.Allocator, root: std.json.Value) std.mem.Allocator.E
     return poses.toOwnedSlice(arena);
 }
 
-/// POST `/api/pcb-drc/:name/ground-vias`: return only the legal GND vias that
-/// are absent from the submitted live board. Nothing is persisted server-side.
+/// POST `/api/pcb-drc/:name/ground-vias`: return only the legal GND vias and
+/// short pad joins that are absent from the submitted live board. Nothing is
+/// persisted server-side.
 pub fn api(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = page.nameParam(req, res) orelse return;
     const body = page.bodyParam(req, res) orelse return;
@@ -96,11 +97,26 @@ pub fn api(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError
 
     var aw: std.Io.Writer.Allocating = .init(req.arena);
     const w = &aw.writer;
-    try w.print("{{\"candidates\":{d},\"duplicates\":{d},\"blocked\":{d},\"added\":[", .{
+    try w.print("{{\"candidates\":{d},\"duplicates\":{d},\"blocked\":{d},\"nearby\":{d},\"tracks\":[", .{
         outcome.candidates,
         outcome.duplicates,
         outcome.blocked,
+        outcome.nearby,
     });
+    for (outcome.tracks, 0..) |track, i| {
+        if (i > 0) try w.writeByte(',');
+        try w.print("{{\"x1\":{d},\"y1\":{d},\"x2\":{d},\"y2\":{d},\"l\":{d},\"w\":{d},\"net\":", .{
+            track.x1,
+            track.y1,
+            track.x2,
+            track.y2,
+            track.layer,
+            track.width,
+        });
+        try json_writer.writeString(w, track.net);
+        try w.writeByte('}');
+    }
+    try w.writeAll("],\"added\":[");
     for (outcome.vias, 0..) |via, i| {
         if (i > 0) try w.writeByte(',');
         try w.print("{{\"x\":{d},\"y\":{d},\"d\":{d},\"drill\":{d},\"net\":", .{
@@ -117,11 +133,12 @@ pub fn api(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError
     res.body = aw.written();
 }
 
-// spec: Web Server - The PCB hand-routing editor offers one undoable GND-vias action that seeds DRC-legal exposed-pad arrays and centred ground-pad barrels without replacing submitted copper
+// spec: Web Server - The PCB hand-routing editor offers one undoable GND-vias action that seeds DRC-legal exposed-pad arrays and centred ground-pad barrels, then places nearest-legal barrels beside pads still failing the ground-via-distance rule without replacing submitted copper
 test "ground-via endpoint asset uses its non-persisting DRC route" {
     const js = @embedFile("assets/pcb_board.js");
     try std.testing.expect(std.mem.indexOf(u8, js, "/api/pcb-drc/") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "/ground-vias") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "pcb-ground-vias") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "if(added.length){recordUndo();") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(added.length||tracks.length){recordUndo();") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "g.tracks||[]") != null);
 }
