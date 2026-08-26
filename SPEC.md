@@ -6343,6 +6343,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Editable sub-circuit PCB embeds expose the pad aligner's Same X and Same Y controls
 - physical board navigation exposes stable 3D and a read-only assembly workspace
 - the PCB 3D viewer extrudes the physical outline at the authored thickness and mounts bottom-side footprints beneath it
+- the PCB 3D viewer places its visible axis origin at the PCB outline bounding-box centre in X/Y and the board thickness mid-plane in Z, and its camera orbits that same datum
 - the PCB 3D viewer asks the server for a self-contained millimetre-based AP242 assembly: each unique library STEP entity graph is embedded once without tessellation and reused through rigid component occurrences, the board outline/thickness/mechanical holes become one green analytic manifold B-rep rather than a faceted mesh, native board-outline arcs become circular edge curves and cylindrical side faces rather than chorded corner facets, and an unchecked heatsink is omitted from the assembly
 - the PCB STEP assembly places its origin at the PCB outline bounding-box centre in X/Y and the board thickness mid-plane in Z, translating component occurrences and generated solids by the same offset
 - the PCB STEP download name ends in `_ID_XXXXXXXX.step` using the exact eight-hex fabrication identity printed on that PCB

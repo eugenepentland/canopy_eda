@@ -33,7 +33,7 @@
   // local Y rotation moves a top-side footprint onto the bottom face.
   var partGroups = [];
   var built = false, looping = false;
-  var center = { x: 0, y: 0 }, span = 20;
+  var center = { x: 0, y: 0, z: 0 }, span = 20;
   // Signature of the poses 3D last rendered; lets onShow() detect a layout that
   // changed in 2D (Load/reset/drag) and re-fit the camera only when it did.
   var lastSig = "";
@@ -80,8 +80,9 @@
     return new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false }));
   }
   // Origin gizmo: R/G/B arrows for +X/+Y/+Z (arrowheads point the positive way),
-  // an X/Y/Z label at each tip, and a white dot marking (0,0,0) — the board's
-  // placement origin, so it's clear which way parts move/rotate.
+  // an X/Y/Z label at each tip, and a white dot marking the centered board
+  // datum. Keep it visible through the substrate because its true Z origin is
+  // the PCB thickness mid-plane rather than either outer copper face.
   function buildAxisGizmo(len) {
     var g = new THREE.Group();
     var O = new THREE.Vector3(0, 0, 0);
@@ -99,6 +100,11 @@
       g.add(lb);
     });
     g.add(new THREE.Mesh(new THREE.SphereGeometry(len * 0.05, 16, 12), new THREE.MeshBasicMaterial({ color: 0xffffff })));
+    g.traverse(function (obj) {
+      if (!obj.material) return;
+      obj.material.depthTest = false; obj.material.depthWrite = false;
+      obj.renderOrder = 10;
+    });
     return g;
   }
   function rectPoints(r) {
@@ -639,6 +645,7 @@
   // outlines, slots and circular holes are all triangulated into the same
   // extrusion. Legacy scenes with no outline retain the courtyard rectangle.
   function rebuildBoard() {
+    var previousCenter = { x: center.x, y: center.y, z: center.z };
     var pts = outlinePoints();
     if (!pts) {
       var partBB = computePartBounds(), mg = 2.0;
@@ -667,6 +674,14 @@
     addBoardFace(shape, pts, "bottom", -thickness);
     updateExportButton();
     center.x = (bb.minx + bb.maxx) / 2; center.y = (bb.miny + bb.maxy) / 2;
+    center.z = -thickness / 2;
+    if (axes) axes.position.set(center.x, center.y, center.z);
+    if (controls && camera) {
+      camera.position.x += center.x - previousCenter.x;
+      camera.position.y += center.y - previousCenter.y;
+      camera.position.z += center.z - previousCenter.z;
+      controls.target.set(center.x, center.y, center.z); controls.update();
+    }
     span = Math.max(bb.maxx - bb.minx, bb.maxy - bb.miny, 8);
   }
 
@@ -795,7 +810,7 @@
   function frame(dx, dy, dz) {
     var dir = new THREE.Vector3(dx, dy, dz).normalize();
     var d = span * 1.9;
-    var c = new THREE.Vector3(center.x, center.y, 0);
+    var c = new THREE.Vector3(center.x, center.y, center.z);
     camera.position.copy(c).add(dir.multiplyScalar(d));
     controls.target.copy(c); controls.update();
   }
@@ -849,9 +864,10 @@
     },
     // Re-read PCB.parts and re-pose the scene in place. Called from the 2D board
     // whenever a Load/reset changes the placement while 3D is already built, so
-    // loading a specific saved layout updates the 3D preview live. The camera is
-    // deliberately left untouched (no re-fit) — only the initial build() frames
-    // the board; after that the user's current orbit is preserved across loads.
+    // loading a specific saved layout updates the 3D preview live. The camera
+    // is not re-fit — only the initial build() frames the board. If an outline
+    // edit moves the centered datum, the camera translates with it so the
+    // user's relative orbit is preserved across loads.
     sync: function () { if (built) applyPoses(); },
     modelAdded: function (fp, transform) { if (fp) refreshModel(fp, transform); },
     onShow: function () {

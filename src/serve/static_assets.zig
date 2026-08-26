@@ -1115,6 +1115,18 @@ test "PCB 3D viewer uses the physical board profile and component side" {
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_3d_viewer_js, marker) != null);
 }
 
+// spec: Web Server - the PCB 3D viewer places its visible axis origin at the PCB outline bounding-box centre in X/Y and the board thickness mid-plane in Z, and its camera orbits that same datum
+test "PCB 3D viewer centers its visible origin on the board" {
+    const markers = [_][]const u8{
+        "center.z = -thickness / 2",
+        "axes.position.set(center.x, center.y, center.z)",
+        "controls.target.set(center.x, center.y, center.z)",
+        "new THREE.Vector3(center.x, center.y, center.z)",
+        "obj.material.depthTest = false; obj.material.depthWrite = false",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_3d_viewer_js, marker) != null);
+}
+
 test "generated auxiliary STEP bodies remain faceted B-reps rather than presentation tessellation" {
     const writer_markers = [_][]const u8{
         "function splitComponents(body)",
