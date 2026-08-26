@@ -397,7 +397,7 @@ fn registryHasAsset(name: []const u8) bool {
     return false;
 }
 
-// spec: Web Server - The PCB editor paints saved geometry before launching whole-board analyses
+// spec: Web Server - The PCB editor paints saved geometry, restores exact-state copper fills from persistent browser storage or the fast refill endpoint, then launches whole-board diagnostics and electrical analyses
 test "PCB editor defers whole-board analyses until after its first paint" {
     const checks = [_]struct { marker: []const u8, present: bool }{
         .{ .marker = "function loadStarMatch()", .present = true },
@@ -405,7 +405,10 @@ test "PCB editor defers whole-board analyses until after its first paint" {
         .{ .marker = "fetch(\"/api/layout-progress/\"", .present = true },
         .{ .marker = "progEnsureChip(); // cheap placeholder; the first click performs the analysis", .present = true },
         .{ .marker = "function loadDeferredAnalysis()", .present = true },
+        .{ .marker = "function pourCacheRead(done)", .present = true },
+        .{ .marker = "refillPours({deferred:true,done:analysis})", .present = true },
         .{ .marker = "u.searchParams.set(\"derived\",\"1\")", .present = true },
+        .{ .marker = "if(!opts.deferred)scheduleServerReconcile()", .present = true },
         .{ .marker = "requestAnimationFrame(function(){requestAnimationFrame(start);});", .present = true },
         .{ .marker = "drcChip(PCB.analysis_deferred?-1:(PCB.drc||[]).length)", .present = true },
         .{ .marker = "loadLayoutScores();", .present = false },
@@ -818,21 +821,23 @@ test "PCB editor styles the two-trace fillet radius menu" {
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_layout_css, marker) != null);
 }
 
+// spec: Web Server - The PCB editor batches attributable saved-layout RF taper migration candidates into at most two whole-board DRC passes, conservatively falls back for unlocated errors, and reuses rejected results while the submitted board state is unchanged
 test "PCB editor automatically lowers every local controlled-impedance pad taper" {
     const markers = [_][]const u8{
-        "function drawTaperProfile",                                 "Math.abs(span-nominal)<=1e-9",   "pad_neck_width",                      "kind:\"rf\"",
-        "nominal*1.2",                                               "function drawTaperTracks",       "function drawApplyAutomaticTapers",   "automatic pad tapers added",
-        "window.PCBDrawTaperTracks",                                 "function drawTaperPath",         "track_ids:tracks.map(trackIdEnsure)", "window.PCBDrawPadLaunch",
-        "function drawRfTaperPlan",                                  "window.PCBDrawRfTaperPlan",      "vias, opposite-side terminals",       "function drawTrackEndDirection",
-        "function rfFallbackRegions",                                "function rfRingFolded",          "overlapping simple segment",          "polys=rfFallbackRegions(pts,ws,poly)",
-        "function rfCleanSamples",                                   "function rfCompactRing",         "ws[last]=Math.max(ws[last],w)",       "clean.pts.length<2",
-        "function drawPathPadLaunch",                                "window.PCBDrawPathPadLaunch",    "first box-boundary",                  "span:2*f.half(-wy,wx)",
-        "function drawPadPortal",                                    "function drawTaperPortalPath",   "function drawRfMissingPortalGroups",  "drawTaperPortalProbes(paths)",
-        "pd.shape===\"roundrect\"||pd.shape===\"oval\"",             "ctx.arcTo(hw,-hh,hw,-hh+rr,rr)", "acceptedBundles++",                   "track_ids:(ownerIds||[]).slice()",
-        "a.net||\"\"",                                               "planned.push(collar)",           "PCB.rf_paths||[]).length",            "drawSamePortalPath",
-        "function rfPathBelongsToTrack",                             "p.portal",                       "portal:!!p.portal",                   "rfPathBelongsToTrack(p,t)",
-        "shape===\"rect\"||shape===\"roundrect\"||shape===\"oval\"", "if(path.portal)return",          "path.track_ids=ownerIds.slice()",     "if(RO||!curLayout||",
-        "if(!RO)setTimeout(drawRfRetrofitSaved,0);",
+        "function drawTaperProfile",                                 "Math.abs(span-nominal)<=1e-9",           "pad_neck_width",                                       "kind:\"rf\"",
+        "nominal*1.2",                                               "function drawTaperTracks",               "function drawApplyAutomaticTapers",                    "automatic pad tapers added",
+        "window.PCBDrawTaperTracks",                                 "function drawTaperPath",                 "track_ids:tracks.map(trackIdEnsure)",                  "window.PCBDrawPadLaunch",
+        "function drawRfTaperPlan",                                  "window.PCBDrawRfTaperPlan",              "vias, opposite-side terminals",                        "function drawTrackEndDirection",
+        "function rfFallbackRegions",                                "function rfRingFolded",                  "overlapping simple segment",                           "polys=rfFallbackRegions(pts,ws,poly)",
+        "function rfCleanSamples",                                   "function rfCompactRing",                 "ws[last]=Math.max(ws[last],w)",                        "clean.pts.length<2",
+        "function drawPathPadLaunch",                                "window.PCBDrawPathPadLaunch",            "first box-boundary",                                   "span:2*f.half(-wy,wx)",
+        "function drawPadPortal",                                    "function drawTaperPortalPath",           "function drawRfMissingPortalGroups",                   "drawTaperPortalProbes(paths)",
+        "pd.shape===\"roundrect\"||pd.shape===\"oval\"",             "ctx.arcTo(hw,-hh,hw,-hh+rr,rr)",         "acceptedBundles++",                                    "track_ids:(ownerIds||[]).slice()",
+        "a.net||\"\"",                                               "planned.push(collar)",                   "PCB.rf_paths||[]).length",                             "drawSamePortalPath",
+        "function rfPathBelongsToTrack",                             "p.portal",                               "portal:!!p.portal",                                    "rfPathBelongsToTrack(p,t)",
+        "shape===\"rect\"||shape===\"roundrect\"||shape===\"oval\"", "if(path.portal)return",                  "path.track_ids=ownerIds.slice()",                      "if(RO||PCB.analysis_deferred||!curLayout||",
+        "if(!RO)setTimeout(drawRfRetrofitSaved,0);",                 "function drawRfRetrofitCached(pending)", "sig:drawRfRetrofitSignature(pending),blocked:blocked", "function drawRfRetrofitBlockGroups(pending,blocks)",
+        "drawRfRetrofitCheck(original.concat(proposed))",            "pcb-rf-retrofit-v2:",                    "routeStatMsg(\"confirming \"+clean.length",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "function drawRfTaperAllowed") == null);

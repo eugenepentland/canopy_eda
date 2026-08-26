@@ -142,25 +142,30 @@ function loadCamReview(){
    PCB.cam=cam;CAM_REVIEW=true;camLayerCache={};dragCacheDrop();paintSoon();})
   .catch(function(){});};
  requestAnimationFrame(function(){requestAnimationFrame(start);});}
-// Full editable pages paint placement + saved tracks/vias first. Copper fills,
-// connectivity/DRC, mask artwork, and electrical analyses are one separately
-// dependency-cached response, requested only after two real frames. If the user
-// edits while it is running, its saved-state result is stale and is discarded.
+// Full editable pages paint placement + saved tracks/vias first. Exact-state
+// copper fills come from persistent browser storage when available; otherwise
+// the fast refill endpoint computes them before the dependency-cached whole-
+// board diagnostics start. If the user edits meanwhile, the saved-state result
+// is stale and is discarded.
 function loadDeferredAnalysis(){
  if(RO||!PCB.analysis_deferred)return;
  var generation=dirtyGeneration,rev=PCB.rev;
  function current(){return generation===dirtyGeneration&&rev===PCB.rev;}
- var start=function(){var u=new URL(window.location.href);u.hash="";u.searchParams.set("derived","1");
+ function analysis(){if(!current())return;
+  var u=new URL(window.location.href);u.hash="";u.searchParams.set("derived","1");
   fetch(u.pathname+u.search).then(function(r){if(!r.ok)throw 0;return r.json();})
    .then(function(j){if(!current()||!j||j.rev!==rev)return;
-    PCB.pours=j.pours||[];PCB.plane_fills=j.plane_fills||[];PCB.zone_fills=j.zone_fills||[];
+    PCB.pours=j.pours||[];PCB.plane_fills=j.plane_fills||[];PCB.zone_fills=j.zone_fills||[];pourCacheStore(j);
     PCB.drc=drawRfRetrofitDrcMerge(j.drc||[]);
     PCB.mask_relief=j.mask_relief||{openings:[],strokes:[],joints:[]};PCB.mask_merges=j.mask_merges||[];
     PCB.antipads=j.antipads||[];PCB.trace_em=j.trace_em||{analyses:[]};
     PCB.power_integrity=j.power_integrity||{nets:[]};PCB.fab_text=j.fab_text||null;
     PCB.analysis_deferred=false;traceEmIdx=null;powerIntegrityIdx=null;traceEmDirty=false;powerIntegrityDirty=false;
-    routeSummaryFrom(j);pourGeomDrop();dragCacheDrop();paintSoon();drawDrc();drcChip(PCB.drc.length);poursFresh();})
-   .catch(function(){if(!current())return;runDrcNow();if(poursDeclared())refillPours();});};
+    routeSummaryFrom(j);pourGeomDrop();dragCacheDrop();paintSoon();drawDrc();drcChip(PCB.drc.length);poursFresh();drawRfRetrofitSchedule();})
+   .catch(function(){if(!current())return;PCB.analysis_deferred=false;runDrcNow();drawRfRetrofitSchedule();});}
+ var start=function(){pourCacheRead(function(j){if(!current())return;
+   if(j){pourFillApply(j);poursFresh();analysis();return;}
+   if(poursDeclared())refillPours({deferred:true,done:analysis});else analysis();});};
  requestAnimationFrame(function(){requestAnimationFrame(start);});}
 // Persistent assembly sprites are registered by pcb_model_sprites.js after
 // the bare board has painted. The map stays empty on every other PCB surface,
@@ -7237,27 +7242,59 @@ function drawRfRetrofitNotice(paths,blocks,index){var samples=[],best=blocks[0]|
  return {id:"taper-"+(index+1),k:"impedance taper blocked",sev:"err",rf_taper_block:true,cause:best.k,
   x:best.x==null?fallback[0]:best.x,y:best.y==null?fallback[1]:best.y,l:best.l==null?(first.l||0):best.l,
   gap:best.gap,clr:best.clr,a:best.a,b:best.b};}
+function drawRfRetrofitBlockGroups(pending,blocks){var grouped=pending.map(function(){return [];});
+ for(var b=0;b<(blocks||[]).length;b++)if(blocks[b].x==null||blocks[b].y==null)return null;
+ (blocks||[]).forEach(function(d){
+  var best=0,bestDist=1/0;pending.forEach(function(paths,index){(paths||[]).forEach(function(path){(path.samples||[]).forEach(function(s){
+    var dist=Math.hypot(d.x-s[0],d.y-s[1]);if(dist<bestDist){bestDist=dist;best=index;}});});});grouped[best].push(d);});return grouped;}
 function drawRfRetrofitCheck(paths){var payload=boardStatePayload();payload.rf_paths=paths;
  return fetch("/api/pcb-drc/"+encodeURIComponent(PCB.name)+subq(),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
   .then(function(r){if(!r.ok)throw 0;return r.json();});}
+var drawRfRetrofitScheduledFor="";
+function drawRfRetrofitSchedule(){if(RO||!curLayout)return;var key=curLayout+":"+PCB.rev+":"+dirtyGeneration;
+ if(drawRfRetrofitScheduledFor===key)return;drawRfRetrofitScheduledFor=key;setTimeout(drawRfRetrofitSaved,0);}
+function drawRfRetrofitCacheKey(){return "pcb-rf-retrofit-v2:"+PCB.name+":"+curLayout;}
+function drawRfRetrofitSignature(pending){return boardStateSignature(JSON.stringify({board:boardStatePayload(),pending:pending}));}
+function drawRfRetrofitCached(pending){try{var hit=JSON.parse(localStorage.getItem(drawRfRetrofitCacheKey())||"null");
+ return hit&&hit.sig===drawRfRetrofitSignature(pending)&&Array.isArray(hit.blocked)?hit.blocked:null;}catch(e){return null;}}
+function drawRfRetrofitCacheStore(pending,blocked){try{localStorage.setItem(drawRfRetrofitCacheKey(),JSON.stringify({sig:drawRfRetrofitSignature(pending),blocked:blocked}));}catch(e){}}
 function drawRfRetrofitSaved(){
- if(RO||!curLayout||(!((PCB.tracks||[]).length)&&!((PCB.rf_paths||[]).length)))return;
- var pending=drawRfMissingPortalGroups().concat(drawRfRetrofitGroups());if(!pending.length)return;var generation=dirtyGeneration,layout=curLayout,
-  original=(PCB.rf_paths||[]).slice(),accepted=[],acceptedBundles=0,blocked=[],baseline=(PCB.drc||[]).filter(function(d){return !d.rf_taper_block;});
+ if(RO||PCB.analysis_deferred||!curLayout||(!((PCB.tracks||[]).length)&&!((PCB.rf_paths||[]).length)))return;
+ var pending=drawRfMissingPortalGroups().concat(drawRfRetrofitGroups());if(!pending.length)return;
+ var cached=drawRfRetrofitCached(pending);if(cached){drawRfRetrofitDrc=cached;PCB.drc=drawRfRetrofitDrcMerge(PCB.drc||[]);drawDrc();drcChip(PCB.drc.length);
+  routeStatMsg(cached.length+" saved impedance taper"+(cached.length===1?"":"s")+" need attention — cached for this unchanged layout",true);return;}
+ var generation=dirtyGeneration,layout=curLayout,original=(PCB.rf_paths||[]).slice(),
+  acceptedGroups=[],blocked=[],baseline=(PCB.drc||[]).filter(function(d){return !d.rf_taper_block;});
  function current(){return generation===dirtyGeneration&&layout===curLayout;}
- function finish(){if(!current())return;
+ function finish(acceptedBundles){if(!current())return;if(acceptedBundles==null)acceptedBundles=acceptedGroups.length;
+  var accepted=[];acceptedGroups.forEach(function(group){Array.prototype.push.apply(accepted,group);});
   if(acceptedBundles){var before=snapAll();PCB.rf_paths=original.concat(accepted);copperTouched();recordUndo(before);drawRoute();}
   drawRfRetrofitDrc=blocked;PCB.drc=drawRfRetrofitDrcMerge(baseline);drawDrc();drcChip(PCB.drc.length);
-  if(!acceptedBundles){routeStatMsg(blocked.length+" saved impedance taper"+(blocked.length===1?"":"s")+" need attention — click the DRC errors to locate",true);return;}
+  if(!acceptedBundles){drawRfRetrofitCacheStore(pending,blocked);routeStatMsg(blocked.length+" saved impedance taper"+(blocked.length===1?"":"s")+" need attention — click the DRC errors to locate",true);return;}
+  var remaining=drawRfMissingPortalGroups().concat(drawRfRetrofitGroups());if(remaining.length===blocked.length)drawRfRetrofitCacheStore(remaining,blocked);
   routeStatMsg(acceptedBundles+" saved impedance taper"+(acceptedBundles===1?"":"s")+" added"+(blocked.length?" · "+blocked.length+" need attention in DRC":""));scheduleDrc();}
- function next(i){if(!current())return;if(i>=pending.length){finish();return;}
-  routeStatMsg("checking saved impedance tapers "+(i+1)+"/"+pending.length+"…");
-  drawRfRetrofitCheck(original.concat(accepted,pending[i])).then(function(j){if(!current())return;
-   var newBlocks=drawRfRetrofitNewBlocks(baseline,j.drc||[]);
-   if(!newBlocks.length){Array.prototype.push.apply(accepted,pending[i]);acceptedBundles++;baseline=j.drc||[];}
-   else blocked.push(drawRfRetrofitNotice(pending[i],newBlocks,i));next(i+1);})
-   .catch(function(){if(current())routeStatMsg("saved impedance taper check interrupted — reload to retry",true);});}
- next(0);}
+ function sequential(){var accepted=[],acceptedBundles=0;
+  function next(i){if(!current())return;if(i>=pending.length){finish(acceptedBundles);return;}
+   routeStatMsg("checking saved impedance tapers "+(i+1)+"/"+pending.length+"…");
+   drawRfRetrofitCheck(original.concat(accepted,pending[i])).then(function(j){if(!current())return;
+    var newBlocks=drawRfRetrofitNewBlocks(baseline,j.drc||[]);
+    if(!newBlocks.length){Array.prototype.push.apply(accepted,pending[i]);acceptedBundles++;acceptedGroups.push(pending[i]);baseline=j.drc||[];}
+    else blocked.push(drawRfRetrofitNotice(pending[i],newBlocks,i));next(i+1);})
+    .catch(function(){if(current())routeStatMsg("saved impedance taper check interrupted — reload to retry",true);});}next(0);}
+ function classify(groups,blocks){var byGroup=drawRfRetrofitBlockGroups(groups,blocks),clean=[];if(!byGroup)return null;
+  groups.forEach(function(group,index){if(byGroup[index].length)blocked.push(drawRfRetrofitNotice(group,byGroup[index],pending.indexOf(group)));else clean.push(group);});return clean;}
+ var proposed=[];pending.forEach(function(group){Array.prototype.push.apply(proposed,group);});
+ routeStatMsg("checking "+pending.length+" saved impedance taper"+(pending.length===1?"":"s")+" in one DRC pass…");
+ drawRfRetrofitCheck(original.concat(proposed)).then(function(j){if(!current())return;
+  var firstBlocks=drawRfRetrofitNewBlocks(baseline,j.drc||[]);if(!firstBlocks.length){acceptedGroups=pending;finish();return;}
+  var clean=classify(pending,firstBlocks);if(!clean){blocked=[];sequential();return;}if(!clean.length){finish();return;}
+  var accepted=[];clean.forEach(function(group){Array.prototype.push.apply(accepted,group);});
+  routeStatMsg("confirming "+clean.length+" non-blocking taper"+(clean.length===1?"":"s")+"…");
+  drawRfRetrofitCheck(original.concat(accepted)).then(function(confirmed){if(!current())return;
+   var secondBlocks=drawRfRetrofitNewBlocks(baseline,confirmed.drc||[]),secondClean=secondBlocks.length?classify(clean,secondBlocks):clean;
+   if(!secondClean){clean.forEach(function(group){blocked.push(drawRfRetrofitNotice(group,secondBlocks,pending.indexOf(group)));});acceptedGroups=[];}else acceptedGroups=secondClean;finish();})
+   .catch(function(){if(current())routeStatMsg("saved impedance taper check interrupted — reload to retry",true);});})
+  .catch(function(){if(current())routeStatMsg("saved impedance taper check interrupted — reload to retry",true);});}
 window.PCBDrawRfRetrofitPlan=drawRfRetrofitPlan;
 // Exact candidate copper for the current click. Including the last committed
 // segment lets the next click round the corner at the current route head; the
@@ -8915,6 +8952,23 @@ function boardStatePayload(){var vg=viaGeo();return {
  parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,side:p.side||"top"};}),
  tracks:PCB.tracks||[],vias:PCB.vias||[],zones:PCB.zones||[],rf_paths:PCB.rf_paths||[],clearance:clrVal(),
  via_dia:vg.dia,via_drill:vg.drill,outline:PCB.outline||null};}
+function boardStateSignature(text){var h=2166136261;text=text||JSON.stringify(boardStatePayload());
+ for(var i=0;i<text.length;i++)h=Math.imul(h^text.charCodeAt(i),16777619);return (h>>>0).toString(36)+":"+text.length;}
+function pourStateSignature(board){return boardStateSignature((board||JSON.stringify(boardStatePayload()))+"\n"+JSON.stringify({
+ parts:P,rules:PCB.rules||{},netclr:PCB.netclr||{},netclasses:PCB.netclasses||[],stack:LT,keepouts:PCB.keepouts||[],
+ board:PCB.board||null,board_poly:PCB.board_poly||null,board_arcs:PCB.board_arcs||[]}));}
+function pourCacheUrl(){var u=new URL("/api/pcb-drc/"+encodeURIComponent(PCB.name)+"/cached-pours",window.location.origin);
+ u.searchParams.set("layout",curLayout||"");u.searchParams.set("sub",subq());return u.href;}
+function pourCacheRead(done){if(!window.caches){done(null);return;}var sig=pourStateSignature();
+ window.caches.open("pcb-pours-v1").then(function(c){return c.match(pourCacheUrl());})
+  .then(function(r){return r?r.json():null;}).then(function(j){return j&&j.rev===PCB.rev&&j.sig===sig?j:null;})
+  .catch(function(){return null;}).then(done);}
+function pourCacheStore(j,sig){if(!window.caches||!j)return;var saved={rev:PCB.rev,sig:sig||pourStateSignature(),
+ pours:j.pours||[],plane_fills:j.plane_fills||[],zone_fills:j.zone_fills||[]};
+ window.caches.open("pcb-pours-v1").then(function(c){return c.put(pourCacheUrl(),new Response(JSON.stringify(saved),
+  {headers:{"Content-Type":"application/json"}}));}).catch(function(){});}
+function pourFillApply(j){PCB.pours=j.pours||[];PCB.plane_fills=j.plane_fills||[];PCB.zone_fills=j.zone_fills||[];
+ pourGeomDrop();dragCacheDrop();paintSoon();}
 // ── Declared-pour refill + staleness ─────────────────────────────────────
 // Pours delivered by the server (page load) or a refill reflect the board
 // state at that instant; any later edit feeding boardStatePayload() (part
@@ -8995,22 +9049,23 @@ function groundViasRun(){if(groundViasInFlight||RO)return;var b=document.getElem
    if(g.blocked)msg+=" · "+g.blocked+" blocked by DRC";
    routeStatMsg(msg,!!g.blocked&&!added.length);})
   .catch(function(){groundViasInFlight=false;b.disabled=false;routeStatMsg("GND via seed failed",true);});}
-function refillPours(){if(poursInFlight)return;var bs=pourBtns();if(!bs.length)return;
+function refillPours(opts){opts=opts&&opts.deferred?opts:{};var done=typeof opts.done==="function"?opts.done:function(){};
+ if(poursInFlight){done(false);return;}var bs=pourBtns();if(!bs.length){done(false);return;}
  poursInFlight=true;var seq=++poursReqSeq;bs.forEach(function(b){b.disabled=true;});
- setStat("r-pour-stat","","refilling…");var q=subq();
+ setStat("r-pour-stat","","refilling…");var q=subq(),payload=JSON.stringify(boardStatePayload()),sig=pourStateSignature(payload);
  fetch("/api/pcb-drc/"+encodeURIComponent(PCB.name)+q+(q?"&":"?")+"pours=1&pours_only=1",{method:"POST",
-  headers:{"Content-Type":"application/json"},body:JSON.stringify(boardStatePayload())})
+  headers:{"Content-Type":"application/json"},body:payload})
   .then(function(r){if(!r.ok)throw 0;return r.json();})
-  .then(function(j){PCB.pours=j.pours||[];PCB.plane_fills=j.plane_fills||[];PCB.zone_fills=j.zone_fills||[];routeSummaryFrom(j);pourGeomDrop();dragCacheDrop();paintSoon();
-   if(seq===poursReqSeq)poursFresh(); // no edit landed while in flight → fresh
+  .then(function(j){var fresh=seq===poursReqSeq;
+   if(!opts.deferred||fresh){pourFillApply(j);routeSummaryFrom(j);}if(fresh){poursFresh();pourCacheStore(j,sig);}
    var nfill=PCB.pours.length+(PCB.plane_fills||[]).length+(PCB.zone_fills||[]).length;
    setStat("r-pour-stat",nfill?"ok":"warn",nfill?"pours refilled ✓":"no pours to fill");
    poursInFlight=false;bs.forEach(function(b){b.disabled=false;});
    // The fast response intentionally omits DRC/connectivity. Reconcile those
    // after the new fill is already visible instead of holding up this button.
-   scheduleServerReconcile();})
+   if(!opts.deferred)scheduleServerReconcile();done(fresh);})
   .catch(function(){setStat("r-pour-stat","err","refill failed");
-   poursInFlight=false;bs.forEach(function(b){b.disabled=false;});});}
+   poursInFlight=false;bs.forEach(function(b){b.disabled=false;});done(false);});}
 pourBtns().forEach(function(b){b.addEventListener("click",refillPours);});
 (function(){groundViasBtnInstall();var b=document.getElementById("pcb-ground-vias");if(b&&!RO)b.addEventListener("click",groundViasRun);})();
 (function(){var b=fenceBtn();if(b&&!RO)b.addEventListener("click",fenceRun);})();

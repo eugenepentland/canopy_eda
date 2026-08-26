@@ -620,7 +620,7 @@ test "pour refill takes the fills-only API path and shares its edge raster" {
     const js = @embedFile("assets/pcb_board.js");
     const page = @embedFile("pcb_layout_page.zig");
     try std.testing.expect(std.mem.indexOf(u8, js, "pours=1&pours_only=1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "scheduleServerReconcile();})") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(!opts.deferred)scheduleServerReconcile();done(fresh);") != null);
 
     const fast = std.mem.indexOf(u8, page, "if (queryFlag(req, \"pours_only\")) {") orelse return error.TestExpectedEqual;
     const full_drc = std.mem.indexOf(u8, page[fast..], "const report = drc_rules.checkFilteredZonesTally") orelse return error.TestExpectedEqual;
