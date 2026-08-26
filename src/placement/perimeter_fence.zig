@@ -25,6 +25,13 @@ pub const MaskSegment = struct {
     b: [2]f64,
 };
 
+/// Perimeter openings retain at least this much finished solder mask between
+/// their rounded stroke and ordinary outer-layer copper. This local floor is
+/// intentionally independent of the board-wide general dam rule: fine-pitch pad
+/// apertures may need a smaller global dam, while exposed board-edge copper
+/// still needs a robust strip over nearby launches and traces.
+const minimum_retained_dam_mm: f64 = 0.2;
+
 /// Whether a placement carries an effective perimeter-fence declaration.
 fn declared(p: optimizer.Placement) bool {
     const f = p.rules.perimeter_fence;
@@ -179,6 +186,7 @@ fn pointAt(poly: []const [2]f64, distance: f64) [2]f64 {
 }
 
 const Interval = struct { lo: f64, hi: f64 };
+const Box = struct { x0: f64, y0: f64, x1: f64, y1: f64 };
 
 fn intervalLessThan(_: void, a: Interval, b: Interval) bool {
     return a.lo < b.lo;
@@ -206,12 +214,46 @@ fn lerp(a: [2]f64, b: [2]f64, t: f64) [2]f64 {
     return .{ a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t };
 }
 
+fn appendBoxInterval(
+    blocked: *std.ArrayList(Interval),
+    alloc: std.mem.Allocator,
+    a: [2]f64,
+    b: [2]f64,
+    box: Box,
+    grow: f64,
+) std.mem.Allocator.Error!void {
+    if (boxInterval(a, b, box.x0 - grow, box.y0 - grow, box.x1 + grow, box.y1 + grow)) |interval|
+        try blocked.append(alloc, interval);
+}
+
+fn retainedWeb(p: optimizer.Placement) f64 {
+    return @max(minimum_retained_dam_mm, p.rules.design.mask.web);
+}
+
 /// Perimeter mask strokes with automatic gaps wherever their circular stroke
 /// would enter a placed component courtyard. Expanding each courtyard by the
 /// stroke radius before clipping also keeps the round stroke caps outside the
 /// real courtyard. The result is intentionally side-independent: a connector
 /// interrupts the through-board via ring and therefore masks both faces.
 pub fn maskSegments(alloc: std.mem.Allocator, p: optimizer.Placement) std.mem.Allocator.Error![]const MaskSegment {
+    return maskSegmentsForFace(alloc, p, &.{}, null);
+}
+
+/// Face-aware perimeter mask artwork. In addition to the mechanical courtyard
+/// gaps, the opening stops before every pad aperture and routed trace on this
+/// outer face. The central stroke is clipped by its radius plus the requested
+/// web, so its round caps also leave the full web. Pad growth includes the
+/// normal aperture margin because the useful dam lies BETWEEN the pad opening
+/// and perimeter opening, not merely between their copper centre shapes.
+///
+/// Passing `null` retains the historical courtyard-only form used by callers
+/// that do not have a routed-copper view.
+pub fn maskSegmentsForFace(
+    alloc: std.mem.Allocator,
+    p: optimizer.Placement,
+    tracks: []const router.Track,
+    side: ?optimizer.Side,
+) std.mem.Allocator.Error![]const MaskSegment {
     const width = p.rules.perimeter_fence.mask_width;
     if (!(width > 0) or p.board_rect == null) return &.{};
     const poly = try outlinePoints(alloc, p);
@@ -226,14 +268,47 @@ pub fn maskSegments(alloc: std.mem.Allocator, p: optimizer.Placement) std.mem.Al
         blocked.clearRetainingCapacity();
         for (p.parts) |part| {
             const c = optimizer.worldCourtyard(&part);
-            if (boxInterval(
-                a,
-                b,
-                c.minx - width,
-                c.miny - width,
-                c.minx + c.w + width,
-                c.miny + c.h + width,
-            )) |interval| try blocked.append(alloc, interval);
+            try appendBoxInterval(&blocked, alloc, a, b, .{
+                .x0 = c.minx,
+                .y0 = c.miny,
+                .x1 = c.minx + c.w,
+                .y1 = c.miny + c.h,
+            }, width);
+            if (side) |face| for (part.pads) |pad| {
+                const face_only = !pad.thru and !pad.npth;
+                if (face_only and part.side != face) continue;
+                const shape = try pad_shape.worldShape(alloc, part, pad);
+                const aperture_margin = @max(@as(f64, 0), pad.maskMargin(p.rules.design.mask.margin));
+                try appendBoxInterval(
+                    &blocked,
+                    alloc,
+                    a,
+                    b,
+                    .{ .x0 = shape.x0, .y0 = shape.y0, .x1 = shape.x1, .y1 = shape.y1 },
+                    width + aperture_margin + retainedWeb(p),
+                );
+            };
+        }
+        if (side) |face| {
+            const layer: u8 = if (face == .bottom) 1 else 0;
+            for (tracks) |track| {
+                if (track.layer != layer) continue;
+                if (!(track.width > 0)) continue;
+                const copper_radius = track.width / 2;
+                try appendBoxInterval(
+                    &blocked,
+                    alloc,
+                    a,
+                    b,
+                    .{
+                        .x0 = @min(track.x1, track.x2),
+                        .y0 = @min(track.y1, track.y2),
+                        .x1 = @max(track.x1, track.x2),
+                        .y1 = @max(track.y1, track.y2),
+                    },
+                    width + copper_radius + retainedWeb(p),
+                );
+            }
         }
         std.mem.sort(Interval, blocked.items, {}, intervalLessThan);
         var cursor: f64 = 0;

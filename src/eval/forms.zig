@@ -574,7 +574,9 @@ pub const scope_form_docs = blk: {
             "PITCH is their nominal centre spacing, OFFSET is the via-centre distance from the " ++
             "finished edge, and WIDTH removes solder mask inward from the edge on " ++ board_layers.f_mask ++
             " and " ++ board_layers.b_mask ++ ". A placed component courtyard automatically interrupts both the via ring " ++
-            "and mask opening, so edge hardware needs no exclusion list. The fence net defaults to GND. " ++
+            "and mask opening, so edge hardware needs no exclusion list. On each face, routed traces and pad apertures " ++
+            "interrupt only the mask opening and retain at least 0.2 mm of mask; they do not suppress otherwise-valid " ++
+            "GND via sites. The fence net defaults to GND. " ++
             "(keepout CLEARANCE …) reserves a visible " ++
             "band beyond the vias' inward copper edge; (blocks …) chooses whether components, " ++
             "tracks, and/or vias are forbidden there (all three by default), while (allow-nets …) " ++
