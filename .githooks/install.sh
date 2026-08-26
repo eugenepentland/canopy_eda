@@ -172,7 +172,7 @@ echo "netlisp hook install — repo: $TOP"
 if [ "$MODE" = "check" ]; then
   [ "$(git -C "$TOP" config --get core.hooksPath)" = "$HOOKS" ] \
     && ok "core.hooksPath -> .githooks" || bad "core.hooksPath NOT set to $HOOKS"
-  for h in pre-commit pre-push post-merge post-commit post-checkout; do
+  for h in pre-commit pre-push post-merge post-commit post-checkout prune-worktree-caches.sh; do
     [ -x "$HOOKS/$h" ] && ok "hook $h executable" || warn "hook $h missing/not executable"
   done
   [ -x "$TOP/.git/hooks/post-merge" ] \
