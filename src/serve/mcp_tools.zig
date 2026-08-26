@@ -805,7 +805,7 @@ fn toolDescribePcbLayout(allocator: std.mem.Allocator, project_dir: []const u8, 
     // `cropnet` (array or comma-string) — the net-bbox zoom lens; describe emits
     // its resolved world bbox as `crop_bbox`, the twin of the PNG viewport.
     opts.crop_nets = jsonStrList(allocator, args_val, "cropnet");
-    const body = pcb_describe.describeDesign(allocator, project_dir, name, opts) catch |e| {
+    const body = pcb_describe.describeDesign(allocator, project_dir, name, opts, null) catch |e| {
         try out.appendSlice(allocator, try std.fmt.allocPrint(allocator, "error describing pcb layout: {s}", .{@errorName(e)}));
         return false;
     };

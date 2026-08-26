@@ -155,7 +155,8 @@ fn worldRoundrect(
 /// World collision shape of `pad` on `part`, honouring the part's pose. A custom
 /// pad carries its outline transformed into world space and simplified (box from
 /// the full outline's bounds); a rectangular pad carries its four real corners
-/// once the pose leaves a quarter turn; a circle/oval keeps the bounding box.
+/// once the pose leaves a quarter turn; a circle carries a conservative round
+/// outline; an oval keeps the bounding box.
 pub fn worldShape(arena: std.mem.Allocator, part: optimizer.Part, pad: geometry.Pad) std.mem.Allocator.Error!Shape {
     if (pad.poly.len >= 3) {
         const wp = try arena.alloc([2]f64, pad.poly.len);
@@ -175,6 +176,7 @@ pub fn worldShape(arena: std.mem.Allocator, part: optimizer.Part, pad: geometry.
     }
     if (std.mem.eql(u8, pad.shape, "roundrect")) return worldRoundrect(arena, part, pad);
     const c = optimizer.worldPadCenter(&part, pad.x, pad.y);
+    if (std.mem.eql(u8, pad.shape, "circle") and pad.w == pad.h) return worldCircle(arena, c, pad.w / 2);
     // Total pad orientation = part pose + the pad's own `(pos … ROT)`. A
     // quarter turn keeps the exact axis-aligned box (byte-identical to the old
     // path).
@@ -201,15 +203,6 @@ pub fn worldShape(arena: std.mem.Allocator, part: optimizer.Part, pad: geometry.
     // walk an outline once the box is within the caller's slack, so the exact
     // corners cost nothing until a neighbour is close enough for them to matter.
     //
-    // A round land is the other half of the same error: a circle is
-    // rotation-INVARIANT, so the rectangle formula below inflates it by up to √2
-    // for an angle it does not even have. Its box is its copper at every pose.
-    // (`w != h` is an ellipse the parser only ever produces as an `oval`, so it
-    // falls through rather than being claimed exact.)
-    if (std.mem.eql(u8, pad.shape, "circle") and pad.w == pad.h) {
-        const r = pad.w / 2;
-        return .{ .x0 = c[0] - r, .y0 = c[1] - r, .x1 = c[0] + r, .y1 = c[1] + r, .poly = &.{} };
-    }
     // An `oval` is a stadium whose corners a rectangle would invent, so it keeps
     // the conservative box: over-stating round copper is the safe direction, and
     // this module has no arc primitive to state it exactly.
@@ -237,6 +230,32 @@ pub fn worldShape(arena: std.mem.Allocator, part: optimizer.Part, pad: geometry.
     const hw = (pad.w / 2) * ca + (pad.h / 2) * sa;
     const hh = (pad.w / 2) * sa + (pad.h / 2) * ca;
     return .{ .x0 = c[0] - hw, .y0 = c[1] - hh, .x1 = c[0] + hw, .y1 = c[1] + hh, .poly = &.{} };
+}
+
+/// A circle as a small circumscribed polygon. The half-step phase puts an EDGE
+/// tangent to every cardinal point, so the polygon's box stays exactly the
+/// circle's box while the outline contains (never under-states) the true land.
+/// That conservative direction is important for DRC and pour clearance: the
+/// approximation may hold copper off by a few microns, but can never admit it
+/// inside the authored circle. Thirty-two sides keep the largest excess below
+/// 0.5% of the radius without burdening common BGA footprints with dense rings.
+const circle_steps: usize = 32;
+
+fn worldCircle(arena: std.mem.Allocator, c: [2]f64, radius: f64) std.mem.Allocator.Error!Shape {
+    const poly = try arena.alloc([2]f64, circle_steps);
+    const step = 2 * std.math.pi / @as(f64, @floatFromInt(circle_steps));
+    const vertex_radius = radius / @cos(step / 2);
+    for (poly, 0..) |*point, i| {
+        const angle = (@as(f64, @floatFromInt(i)) + 0.5) * step;
+        point.* = .{ c[0] + vertex_radius * @cos(angle), c[1] + vertex_radius * @sin(angle) };
+    }
+    return .{
+        .x0 = c[0] - radius,
+        .y0 = c[1] - radius,
+        .x1 = c[0] + radius,
+        .y1 = c[1] + radius,
+        .poly = poly,
+    };
 }
 
 /// Douglas–Peucker simplification of the closed ring `pts` to within `tol` mm:
@@ -744,8 +763,8 @@ test "a rotated land on a bottom-side part mirrors its corners with the part" {
     try testing.expectEqual(@as(f64, 0), pointDist(bs.x0, bs.y0, bs.x1, bs.y1, bs.poly, bc[0], bc[1], 5.0));
 }
 
-// spec: placement/pad_shape - a circle or oval pad off a quarter turn keeps its bounding box, which no rectangle can tighten
-test "a circle or oval land off a quarter turn keeps its bounding box" {
+// spec: placement/pad_shape - a circle carries a round collision outline while an oval conservatively keeps its bounding box
+test "a circle measures against its round outline while an oval keeps its box" {
     const part = optimizer.Part{
         .ref_des = "J2",
         .kind = .hub,
@@ -753,19 +772,24 @@ test "a circle or oval land off a quarter turn keeps its bounding box" {
         .hh = 1,
         .pads = &.{},
         .fallback = false,
-        .rot = 45,
+        .rot = 0,
     };
-    // A circle is rotation-invariant: a rectangle through its corners would cut
-    // copper off its axis-aligned flanks.
+    // The circle's broad-phase box is exact, while its conservative polygon
+    // frees the box corner that used to produce a square copper-pour antipad.
     const circle = geometry.Pad{ .number = "1", .x = 0, .y = 0, .w = 1, .h = 1, .shape = "circle" };
     const cs = try worldShape(testing.allocator, part, circle);
-    try testing.expectEqual(@as(usize, 0), cs.poly.len);
+    defer testing.allocator.free(cs.poly);
+    try testing.expectEqual(@as(usize, circle_steps), cs.poly.len);
     try testing.expectApproxEqAbs(@as(f64, -0.5), cs.x0, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 0.5), cs.x1, 1e-9);
+    try testing.expectEqual(@as(f64, 0), pointDist(cs.x0, cs.y0, cs.x1, cs.y1, cs.poly, 0, 0, 5));
+    try testing.expect(pointDist(cs.x0, cs.y0, cs.x1, cs.y1, cs.poly, 0.5, 0.5, 5) > 0.20);
 
     // An oval's ends are round, so its corners are the rectangle's invention.
+    var angled = part;
+    angled.rot = 45;
     const oval = geometry.Pad{ .number = "2", .x = 0, .y = 0, .w = 2, .h = 1, .shape = "oval" };
-    const os = try worldShape(testing.allocator, part, oval);
+    const os = try worldShape(testing.allocator, angled, oval);
     try testing.expectEqual(@as(usize, 0), os.poly.len);
     try testing.expectApproxEqAbs(@as(f64, (1.0 + 0.5) * @cos(std.math.pi / 4.0)), os.x1, 1e-9);
 }

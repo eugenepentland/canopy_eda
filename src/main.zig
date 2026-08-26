@@ -807,6 +807,7 @@ test {
     _ = @import("serve/gzip_cache.zig");
     _ = @import("serve/pcb_page_cache.zig");
     _ = @import("serve/progress_cache.zig");
+    _ = @import("serve/describe_cache.zig");
     _ = @import("deflate.zig");
     _ = @import("png.zig");
     _ = @import("font5x7.zig");

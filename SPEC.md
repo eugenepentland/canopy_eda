@@ -2992,6 +2992,7 @@ Public functions: check, checkTopology, checkWithZones, countKind, defaultSeveri
 - silk-over-pad checks authored footprint silk rather than inventing reference-designator artwork
 - flags a plated through-hole pad whose annular ring is under the minimum; NPTH pads exempt
 - flags a track narrower than its net-class width, else the board minimum, as an error
+- a solved local-current requirement replaces the whole-net class width for that power track, but never permits copper below its own IPC-2221 requirement
 - flags a routed trace endpoint that reaches no same-net copper as a copper-stub error when its section still carries support connectivity
 - warns once when same-net trace capsules touch across separate explicit centreline components
 - warns once per stored trace section whose deletion preserves all pad, live-via, and pour connectivity
@@ -3077,6 +3078,7 @@ Public functions: compute, computeMaskShared, computeMasks, initMargin, planeCon
 - every emitted contour point keeps at least the pour clearance from foreign copper
 - contour vertices interpolate the clearance iso-line instead of snapping to grid corners
 - a foreign via interior to a seeded pour punches an antipad hole that encircles it at clearance
+- a round NPTH on an outer face punches a round antipad instead of its bounding square
 - a foreign trace that splits a plane leaves its same-net pads in separate components
 - a track crossing a fill is assigned to every fabricated component it traverses even when both endpoints lie outside
 - the fill respects a non-rectangular board outline
@@ -3138,7 +3140,7 @@ Public functions: analyze, classifyNetName, isInductor
 
 Public functions: capacityForArea, traceCapacityA, requiredTraceWidthMm,
 viaCapacityA, requiredViaDrillMm, routingCurrentA, powerWidthForNet,
-powerViaDrillForNet
+powerViaDrillForNet, routedTrackRequiredWidths
 
 Power routing derives conservative pre-route copper geometry from the rail's
 declared load envelope, the actual stack foil, the 10 °C IPC-2221 screening
@@ -3154,6 +3156,7 @@ is enlarged only as far as the derived drill and annular-ring rules require.
 - a power pour's effective minimum neck is raised above the board fabrication floor by the rail maximum and actual stack foil
 - board rules derive the worst-layer trace width and one-barrel drill from maximum rail load
 - an unpoured rail reserves its whole maximum-current width while a pour-backed rail leaves short fanouts to the post-route branch-current proof
+- a trace-only solved rail exposes an index-aligned required width for each local-current branch, while an incomplete or sheet-dependent rail exposes no relaxation
 - a rail with no annotated load routes for its declared source capacity, so a standalone regulator page sizes copper from its own output rating
 - declared loads outrank source capacity, so a rail routes for what the board draws rather than what its supply could deliver
 - a standalone module that rates its own output port and declares a bare layer count gets an IPC-2221 width for that rail; without the stackup no width is invented
@@ -3981,7 +3984,7 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - simplifies a dense outline to a few corners within tolerance
 - a rectangular pad off a quarter turn carries its four rotated corners, so its keepout is the land and not the land's square bounding box
 - a rotated rectangular pad on a bottom-side part carries corners mirrored with the part
-- a circle or oval pad off a quarter turn keeps its bounding box, which no rectangle can tighten
+- a circle carries a round collision outline while an oval conservatively keeps its bounding box
 
 ## eval/builtins
 
@@ -6017,6 +6020,9 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The layout-progress ladder endpoint bypasses its cache for any query parameter
 - The layout-progress ladder endpoint reuses a dependency-validated JSON body and invalidates it when the design or its sidecars change
 - The layout-progress cache refuses a body whose dependency set stamps nothing
+- The PCB-describe endpoint reuses a dependency-validated facts document and invalidates it when the design or its sidecars change
+- The PCB-describe endpoint caches only its allow-listed query modes and bypasses fresh-solve and sub-scoped requests
+- The PCB-describe cache refuses a body whose dependency set stamps nothing
 - The layout-status reader reuses a parsed layouts sidecar until that file's mtime or size changes
 - The fab-readiness gate reuses caller-supplied net connectivity instead of recomputing it
 - The navigation bar routes home through the Netlisp brand and carries no separate Designs tab
@@ -6208,6 +6214,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Selecting a rigid sub-circuit exposes its Stamp and layout-page actions directly in Properties
 - The PCB Sub-circuits palette and Properties expose Save to sub-circuit, which fetches a fresh target revision before capturing that group's poses, stamped copper, and locally connected traces/vias as a new layout
 - the PCB hand router defaults to the active net class while the sidebar keeps its resolved geometry controls hidden
+- the PCB hand router previews and clearance-checks an authored pad neck at its tapered physical width before committing either a pad-out or pad-in gesture
 - The /pcb-layout Route panel presents Route board, Stop, status, and live replay without cached-load, interactive-session, scope, or advanced-routing controls
 - A completed Route board run persists its applied copper to the active layout, or creates the conventional first `layout` snapshot; Route plan remains temporary
 - The PCB replay client streams the live-route endpoint into the timeline player, follows the head, and reattaches to a running job through the overlay seam
@@ -6505,6 +6512,9 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Design Settings edits board-level numeric rules in the GUI, preserves unrelated source forms, rebuilds, and reloads the shown layout
 - Design Settings renders validated numeric rule inputs with save-and-rebuild feedback
 - Design Settings creates a design-rules source form when a board previously relied entirely on defaults
+- Design Settings adds, edits, and deletes whole-layer copper planes without replacing physical stackup construction or comments
+- Saving plane controls on an implicit board authors the visible copper count and supports an explicitly plane-free stack
+- Design Settings exposes whole-layer copper assignments with add, edit, delete, validated save, and read-only states
 - Assembly mask relief retains one authored-radius terminal fillet where a pad terminates or crosses the RF route
 - Assembly and 3D mask relief restore a local pad-shaped web without interrupting the exposed trace
 - The PCB page blob names the declared plane nets, and omits the key entirely when the design declares no stackup

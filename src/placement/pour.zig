@@ -3090,6 +3090,51 @@ fn holeEnclosing(holes: []const Contour, x: f64, y: f64) ?Contour {
     return null;
 }
 
+// spec: placement/pour - a round NPTH on an outer face punches a round antipad instead of its bounding square
+test "outer pour keeps a round antipad around a circular NPTH" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    const seed_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    const hole_pad = [_]geometry.Pad{.{
+        .number = "None",
+        .x = 0,
+        .y = 0,
+        .w = 1,
+        .h = 1,
+        .shape = "circle",
+        .thru = true,
+        .npth = true,
+        .drill = 1,
+    }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &seed_pad, .fallback = false, .x = 3, .y = 3, .side = .top },
+        .{ .ref_des = "H1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &hole_pad, .fallback = false, .x = 10, .y = 10, .side = .top },
+    };
+    const gnd_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "C1", .pin = "1" }};
+    const nets = [_]flat_netlist.FlatNet{.{ .name = "GND", .pins = &gnd_pins }};
+    const placement = testPlacement(&parts, &nets, .{
+        .design = .{ .pour = .{ .clearance_outer = 0.3 } },
+    });
+
+    const fill = try compute(arena, placement, .{}, .{ .net = .{ .named = "GND" }, .side = .top, .track_layer = 0 });
+    try testing.expectEqual(@as(usize, 1), fill.contours.len);
+    const ring = holeEnclosing(fill.holes[0], 10, 10) orelse return error.TestExpectedRoundAntipad;
+
+    var min_radius = std.math.inf(f64);
+    var max_radius: f64 = 0;
+    for (ring) |point| {
+        const radius = std.math.hypot(point[0] - 10, point[1] - 10);
+        min_radius = @min(min_radius, radius);
+        max_radius = @max(max_radius, radius);
+    }
+    // The old bounding-box stamp reached about 0.2 mm farther on the diagonals.
+    // A round stamp varies only by the contour lattice/interpolation tolerance.
+    try testing.expect(max_radius - min_radius < 0.08);
+    try testing.expect(min_radius >= 0.8 - 1e-6); // 0.5 mm bore + 0.3 mm clearance
+}
+
 // spec: placement/pour - a foreign via interior to a seeded pour punches an antipad hole that encircles it at clearance
 test "interior foreign via punches an antipad hole in the pour" {
     var arena_i = std.heap.ArenaAllocator.init(testing.allocator);

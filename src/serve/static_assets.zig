@@ -437,6 +437,20 @@ test "PCB board editor shows the Board outline properties on a plain outline edg
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
+// PCB outline vertex marks appear only during outline editing and retain the
+// existing larger coordinate-tested drag target.
+test "PCB board outline editing shows compact vertex dots without shrinking hit targets" {
+    const markers = [_][]const u8{
+        "OUTLINE_VERTEX_SIZE=3;",
+        "r:OUTLINE_VERTEX_SIZE/2,fill:col",
+        "if(editing)(nominal||pts).forEach",
+        "if(editing){var rc=outlinePtsOf(outlineEditable());",
+        "function vtxAt(m)",
+        "var bd=7/S,best=-1;",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+}
+
 // spec: Web Server - Selecting a board outline exposes editable dimensions, slides horizontal/vertical edges only perpendicular to themselves, and uses Shift to constrain non-axis-aligned edge slides to their dominant axis
 test "PCB board editor edits dimensions and slides outline edges along their normal" {
     const markers = [_][]const u8{
@@ -844,6 +858,22 @@ test "PCB editor automatically lowers every local controlled-impedance pad taper
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "function drawReplaceLaid") == null);
 }
 
+// spec: Web Server - the PCB hand router previews and clearance-checks an authored pad neck at its tapered physical width before committing either a pad-out or pad-in gesture
+test "PCB hand router gates pad entry and exit at the prospective tapered width" {
+    const markers = [_][]const u8{
+        "function drawAutomaticTaperPlan",
+        "window.PCBDrawAutomaticTaperPlan",
+        "function drawProspectiveTaperPlan",
+        "dtrace.n===0?dtrace.startPad:null",
+        "candF=drawProspectiveTaperPlan(planF).tracks",
+        "candC=drawProspectiveTaperPlan(planC).tracks",
+        "tracks=drawProspectiveTaperPlan(drawRoutePlan(legs)).tracks",
+        "preview=drawProspectiveTaperPlan(drawRoutePlan(dl.legs)).tracks",
+        "Math.max((t.w||dtrace.w)*S,1.2)",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+}
+
 // spec: Web Server - Escape cancels an active manual route even when automatic pad-taper DRC rejects finishing it, restoring the route-start copper and exiting Draw instead of retrying the blocked finish
 test "PCB editor Escape cancels a DRC-blocked manual route" {
     const markers = [_][]const u8{
@@ -1125,6 +1155,16 @@ test "PCB settings include an SVG explanation for every design rule" {
 test "PCB settings expose numeric rule editors and the save-rebuild action" {
     const markers = [_][]const u8{
         "data-ds-rule", "/api/design-rules/", "Save changes", "Saving and rebuilding", "location.reload()",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_settings_js, marker) != null);
+}
+
+// spec: Web Server - Design Settings exposes whole-layer copper assignments with add, edit, delete, validated save, and read-only states
+test "PCB settings edit whole-layer copper assignments" {
+    const markers = [_][]const u8{
+        "Whole-layer copper", "Add whole-layer pour", "ds-plane-layer",
+        "ds-plane-net",       "ds-plane-delete",      "/api/stackup-planes/",
+        "Save plane changes", "planes:vals",          "This layout is read-only.",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_settings_js, marker) != null);
 }
