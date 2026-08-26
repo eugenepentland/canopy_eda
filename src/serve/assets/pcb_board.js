@@ -3775,9 +3775,11 @@ function flipParts(idxs,wantAnchor){var mv=idxs.filter(function(i){return !P[i].
  var xf=stampPoseCompose(after,stampPoseInverse(before));
  mv.forEach(function(i){var np=stampPoseCompose(xf,stampPoseOf(P[i]));
   P[i].x=np.x;P[i].y=np.y;P[i].rot=np.rot;P[i].side=np.back?"bottom":"top";setT(i);});
- // A side change mirrors each footprint's pads, so its old routing is no
- // longer geometrically valid. Remove all affected nets once for the target.
- clearRouteFor(mv);markPoursStale();ratsUpdate(mv);drawClr();fetchScore();refreshUnplaced();
+ // Keep routed copper in place, just like an ordinary move or rotation. A
+ // side change can disconnect SMD pads or leave a trace on the wrong layer;
+ // ratsnest and DRC expose those exact repairs without destroying unrelated
+ // branches elsewhere on the same net.
+ markPoursStale();ratsUpdate(mv);drawClr();fetchScore();refreshUnplaced();
  scheduleDrc();updatePropLive();
  if(window.PCB3D&&window.PCB3D.sync)window.PCB3D.sync();return true;}
 // The pose algebra used when a module snapshot is re-anchored on the board.
@@ -6711,35 +6713,10 @@ function viaGeo(net){var va=parseFloat((document.getElementById("r-va")||{}).val
 function drawVia(g,wx,wy,dia,drill){var r=viaRenderRadius(dia),rh=viaRenderRadius(drill);
  g.appendChild(el("circle",{cx:X(wx).toFixed(1),cy:Y(wy).toFixed(1),r:r.toFixed(1),fill:TH.via}));
  g.appendChild(el("circle",{cx:X(wx).toFixed(1),cy:Y(wy).toFixed(1),r:rh.toFixed(1),fill:TH.viaHole}));}
-// Drop only the copper belonging to the given parts' nets (a moved part
-// invalidates its own routing, everything else stays drawn). Falls back to
-// keeping legacy net-less copper ("" — old saves) untouched.
-// Copper tagged with a stamp group (t.g — module copper carried in by Stamp)
-// survives net-based clearing and rides along when its whole group drags or
-// rotates (keepG names the group; the caller transforms that copper itself).
-// clearRouteFor is reserved for deliberately copper-invalidating operations
-// such as flipping a component or replacing a group's module-layout stamp;
-// ordinary pose edits retain copper and let ratsnest/DRC show disconnections.
 function anyCopper(){return (PCB.tracks||[]).length>0||(PCB.vias||[]).length>0||(PCB.rf_paths||[]).length>0;}
-function clearRouteFor(idxs,keepG){
- if(!((PCB.tracks||[]).length)&&!((PCB.vias||[]).length)&&!((PCB.rf_paths||[]).length))return;
- var nets={};idxs.forEach(function(i){(P[i].pads||[]).forEach(function(pd){if(pd.net)nets[pd.net]=1;});});
- var gs={};idxs.forEach(function(i){var g=grpOf(P[i].ref);if(g&&g!==keepG)gs[g]=1;});
- PCB.tracks=(PCB.tracks||[]).filter(function(t){
-  if(t.g)return !gs[t.g];
-  return !(t.net&&nets[t.net]);});
- PCB.vias=(PCB.vias||[]).filter(function(v){
-  // Fence provenance is checked FIRST: a fence via's own net is GND (which a
-  // moved RF part never invalidates) while v.f names the RF trace it hugs, and
-  // it carries no group tag, so the v.g branch below would never see it.
-  if(v.f)return !nets[v.f];
-  if(v.g)return !gs[v.g];
-  return !(v.net&&nets[v.net]);});
- PCB.rf_paths=(PCB.rf_paths||[]).filter(function(p){return !(p.net&&nets[p.net]);});
- PCB.drc=[];selCuClear();drawRoute();drawDrc();}
 function drawRoute(){cuGeomDrop();if(gpuOn)PCBGpu.rebuildCopper();dragCacheDrop();ovPaintSoon();} // routed copper lives on the canvas overlay
 // (every wholesale PCB.tracks/PCB.vias replacement — Load, draft, undo, route
-//  apply, clearRouteFor — funnels through here, so the batch drops with it)
+//  apply — funnels through here, so the batch drops with it)
 function clrVal(){var ci=document.getElementById("r-cl"),c=ci?parseFloat(ci.value):NaN;
  return (c>0)?c:(PCB.clr||0.127);}
 function drawClr(){ovPaintSoon();} // clearance halos live on the canvas overlay

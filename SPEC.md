@@ -6424,7 +6424,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Ctrl/Cmd+C and Ctrl/Cmd+V copy and paste a selected trace, via, or mixed copper selection as one undoable edit with fresh identities
 - L locks or unlocks every footprint in an explicit multi-selection without requiring a hovered member
 - Two selected connected trace segments expose a right-click Fillet command that applies an exact native-arc radius through the normal copper edit gates
-- F rigidly mirrors a selected sub-circuit or marquee group to the opposite board side around one stable anchor, preserving relative positions and orientations in one undo
+- F rigidly mirrors a selected sub-circuit or marquee group to the opposite board side around one stable anchor, preserving relative positions, orientations, and routed copper in one undo
 - A multi-part drag or rotate carries copper on nets private to the moving parts and leaves shared-net copper in place
 - Align, distribute, and pad-align carry each entity's own copper by that entity's own delta
 - A press on marquee-selected copper drags the whole selection instead of sliding that one segment

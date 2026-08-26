@@ -512,8 +512,8 @@ test "PCB pad alignment uses component ownership inside a sub-circuit editor" {
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "moving.idxs.indexOf(hit.i)>=0") != null);
 }
 
-// spec: Web Server - F rigidly mirrors a selected sub-circuit or marquee group to the opposite board side around one stable anchor, preserving relative positions and orientations in one undo
-test "PCB editor rigidly mirrors the complete selected part target" {
+// spec: Web Server - F rigidly mirrors a selected sub-circuit or marquee group to the opposite board side around one stable anchor, preserving relative positions, orientations, and routed copper in one undo
+test "PCB editor rigidly mirrors the complete selected part target without deleting copper" {
     const markers = [_][]const u8{
         "function flipAnchor(mv,want)",
         "function flipParts(idxs,wantAnchor)",
@@ -531,6 +531,19 @@ test "PCB editor rigidly mirrors the complete selected part target" {
         "flipParts([fi],fi)",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+
+    const flip_start = std.mem.indexOf(u8, pcb_board_js, "function flipParts(idxs,wantAnchor)") orelse
+        return error.FlipPartsMissing;
+    const flip_tail = pcb_board_js[flip_start..];
+    const flip_end = std.mem.indexOf(u8, flip_tail, "function stampPoseNorm") orelse
+        return error.FlipPartsEndMissing;
+    const flip_body = flip_tail[0..flip_end];
+    try std.testing.expect(std.mem.indexOf(u8, flip_body, "clearRouteFor") == null);
+    try std.testing.expect(std.mem.indexOf(u8, flip_body, "PCB.tracks") == null);
+    try std.testing.expect(std.mem.indexOf(u8, flip_body, "PCB.vias") == null);
+    try std.testing.expect(std.mem.indexOf(u8, flip_body, "PCB.rf_paths") == null);
+    try std.testing.expect(std.mem.indexOf(u8, flip_body, "ratsUpdate(mv)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, flip_body, "scheduleDrc()") != null);
 }
 
 // spec: Web Server - Generated RF fence sites render, select, and edit as ordinary vias; provenance remains internal for safe regeneration
@@ -544,9 +557,9 @@ test "PCB editor carries the RF via-fence action as ordinary vias" {
         .{ .marker = "[\"via\",\"Vias\"" },
         .{ .marker = "var byL={},barrel=[],holes=new Path2D(),nb=0;" },
         .{ .marker = "via:anyCopperVisible()?1:0" },
-        // The provenance tag survives undo/redo and net-keyed invalidation.
+        // The provenance tag survives undo/redo so fence regeneration can
+        // still distinguish generated sites from ordinary ground vias.
         .{ .marker = "g:v.g,f:v.f" },
-        .{ .marker = "if(v.f)return !nets[v.f];" },
         // The action: POST, then reload onto the row the server just wrote.
         .{ .marker = "function fenceRun" },
         .{ .marker = "/api/pcb-fence/" },
