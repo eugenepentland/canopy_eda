@@ -643,6 +643,10 @@ fn expectNoRequiredWidths(widths: []const ?f64) !void {
     for (widths) |width| try testing.expect(width == null);
 }
 
+fn expectRequiredWidths(widths: []const ?f64, expected: f64) !void {
+    for (widths) |width| try testing.expectApproxEqAbs(expected, width.?, 1e-12);
+}
+
 /// Analyze only nets that are electrically power-like, plane-carried, or have
 /// declared load current. Signal nets add no payload and pay no per-track work.
 pub fn analyze(
@@ -654,9 +658,12 @@ pub fn analyze(
 }
 
 /// Maximum (or typical-only) IPC-2221 width required by each routed track's
-/// solved LOCAL current. The result is index-aligned with `routed.tracks`;
-/// null means the copper graph could not conservatively prove a branch current,
-/// so a caller must retain its whole-net/class requirement.
+/// solved LOCAL current. The result is index-aligned with `routed.tracks`.
+/// When an opted-in power branch cannot be localized, every segment receives
+/// the width for the WHOLE declared rail current instead. That remains a safe
+/// ampacity upper bound without making one unresolved terminal reinstate the
+/// unrelated net-class trunk width across the board. Null is reserved for nets
+/// that did not explicitly opt into current-aware branch sizing.
 ///
 /// Ordinary rails use the trace/via graph. A net that explicitly declares a
 /// `power_branch_width` and has a fabricated plane or saved copper zone also
@@ -753,7 +760,25 @@ fn routedTrackRequiredWidthsFromSurfaces(
         // axis is unprovable (for example, because a max-only consumer is
         // disconnected). Typical is sufficient only on a typical-only rail.
         const axis = if (demand.maximum_a != null) flow.maximum else flow.typical;
-        if (axis.status != .solved) continue;
+        if (axis.status != .solved) {
+            // A failed topology solve means we cannot divide current among
+            // branches, not that IPC-2221 has no answer. For a net whose
+            // author explicitly supplied `power_branch_width`, conservatively
+            // charge EVERY segment with the full rail envelope. This is an
+            // upper bound on any one branch and lets DRC retain the fabrication
+            // minimum + branch floor instead of reverting to an often much
+            // wider trunk class because one load pad was renamed or omitted.
+            if (!branch_opted) continue;
+            const amps = if (demand.maximum_a != null) demand.maximum_a else demand.typical_a;
+            for (routed.tracks, 0..) |track, route_index| {
+                if (track.net != @as(i32, @intCast(net_index))) continue;
+                const physical = placement.rules.signalStackIndex(track.layer);
+                const foil = placement.rules.physical.stack.foilMm(physical);
+                const outer = physical == 1 or physical == placement.rules.layerStack().stackCount();
+                required[route_index] = requiredTraceWidthMm(amps.?, foil, outer);
+            }
+            continue;
+        }
         for (routed.tracks, 0..) |track, route_index| {
             if (track.net != @as(i32, @intCast(net_index))) continue;
             const amps = axis.track_current_a[route_index];
@@ -925,7 +950,7 @@ test "analysis joins routed geometry to stack foil rail load and declared plane"
     try testing.expect(net.planes[0].required_neck_maximum_mm.? > 1.0);
 }
 
-// spec: placement/power-routing - a solved plane-aware rail exposes an index-aligned required width for each local-current branch, while an incomplete rail exposes no relaxation
+// spec: placement/power-routing - a solved plane-aware rail exposes an index-aligned required width for each local-current branch, while an incomplete opted-in rail screens every segment at the whole-rail current
 test "analysis assigns split branch currents and required widths from physical source and load pads" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
@@ -1004,7 +1029,14 @@ test "analysis assigns split branch currents and required widths from physical s
     var incomplete_placement = placement;
     incomplete_placement.rules.physical.rails = &.{incomplete};
     const conservative = try routedTrackRequiredWidths(arena_inst.allocator(), incomplete_placement, routed);
-    try expectNoRequiredWidths(conservative);
+    const whole_rail_width = requiredTraceWidthMm(1, 0.035, true).?;
+    try expectRequiredWidths(conservative, whole_rail_width);
+
+    var unopted_rules = net_rules;
+    unopted_rules[0].pad_neck.power_branch_width = 0;
+    var unopted_placement = incomplete_placement;
+    unopted_placement.rules.net = &unopted_rules;
+    try expectNoRequiredWidths(try routedTrackRequiredWidths(arena_inst.allocator(), unopted_placement, routed));
 
     const max_only_consumers = [_]power_budget.RailConsumer{
         .{ .ref_des = "load_a/U1", .net = "VDD", .pins = &.{"1"}, .i_typ = 0.8, .i_max = 0.8 },
@@ -1017,7 +1049,7 @@ test "analysis assigns split branch currents and required widths from physical s
     var max_incomplete_routed = routed;
     max_incomplete_routed.tracks = tracks[0..2];
     const max_conservative = try routedTrackRequiredWidths(arena_inst.allocator(), max_incomplete_placement, max_incomplete_routed);
-    try expectNoRequiredWidths(max_conservative);
+    try expectRequiredWidths(max_conservative, whole_rail_width);
 
     // The same source and loads joined only through a saved user zone are
     // unsolved in the zone-blind spelling, then become locally measurable when
@@ -1031,7 +1063,10 @@ test "analysis assigns split branch currents and required widths from physical s
         .{ .x1 = 1.2, .y1 = 0, .x2 = 2, .y2 = -1, .layer = 0, .width = 0.1524, .net = 0 },
     };
     const zone_routed = router.RouteResult{ .tracks = &zone_tracks, .vias = &.{}, .routed = 1, .total = 1 };
-    try expectNoRequiredWidths(try routedTrackRequiredWidths(arena_inst.allocator(), zone_placement, zone_routed));
+    try expectRequiredWidths(
+        try routedTrackRequiredWidths(arena_inst.allocator(), zone_placement, zone_routed),
+        whole_rail_width,
+    );
     const zone_poly = [_][2]f64{ .{ 0.5, -0.5 }, .{ 1.5, -0.5 }, .{ 1.5, 0.5 }, .{ 0.5, 0.5 } };
     const zones = [_]pour.UserZone{.{ .net = "VDD", .layer = 0, .poly = &zone_poly }};
     const labels: [100]i32 = @splat(0);
