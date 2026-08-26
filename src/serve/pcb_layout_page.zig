@@ -46,6 +46,7 @@ const pcb_keepout_json = @import("pcb_keepout_json.zig");
 const pour = @import("../placement/pour.zig");
 const pour_json = @import("pour_json.zig");
 const pcb_rules_json = @import("pcb_rules_json.zig");
+const pcb_query = @import("pcb_query.zig");
 const trace_em_json = @import("trace_em_json.zig");
 const power_integrity_json = @import("../power_integrity_json.zig");
 const export_fab = @import("../export_fab.zig");
@@ -805,7 +806,7 @@ pub fn pcbLayoutPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
         .module_res_out = &module_res,
         .rev = &rev_check,
     })) orelse return;
-    res.content_type = .HTML;
+    res.content_type = if (queryFlag(req, "derived")) .JSON else .HTML;
     res.body = html;
 }
 
@@ -1016,7 +1017,11 @@ fn renderLayoutPage(
     // read-only review embed: a heat field over an EDITABLE board would invite
     // dragging parts against numbers solved for where they used to be.
     const thermal_overlay = physical_review and queryFlag(req, "thermal");
-    const lean_read_only = physical_review or thermal_overlay;
+    // The ordinary editor's expensive copper-derived fields arrive from a
+    // second, dependency-cached response after first paint. `?derived=1` runs
+    // the complete calculation but emits only those fields, not a second page.
+    const derived_only = queryFlag(req, "derived");
+    const lean_read_only = physical_review or thermal_overlay or derived_only;
     const review_toggles = parseToggles(req);
 
     // Tuning weights come from the query (?w_align=… etc) — any present (or
@@ -1035,6 +1040,11 @@ fn renderLayoutPage(
         .view = queryRaw(req, "layout"),
         .refine = queryRaw(req, "refine"),
     };
+    // Only stable, saved-state editor views split their payload. One-shot
+    // solve/route/refine requests keep their result atomic, while embeds retain
+    // their existing purpose-built lean paths.
+    const defer_analysis = !derived_only and !embed and sub == null and
+        !tune.regen and sel.refine == null and !queryFlag(req, "route");
     // The layout sidecar of a routed board runs to megabytes — read + parse it
     // ONCE here and derive everything below (the choose ladder, the panel
     // list, the shown tuning params, the embedded save rev) from this doc
@@ -1090,9 +1100,61 @@ fn renderLayoutPage(
         // field endpoint already resolved that copper for its thermal inputs,
         // so restoring and checking it again in this iframe is dead work.
         .omit_copper = thermal_overlay,
+        .defer_derived = defer_analysis,
     });
     const ro = rv.ro;
     const routed = rv.routed;
+    const src_class = classifyLayoutSource(sub, choice.grid_only, choice.spec_drives, sel, starred_name, choice.cached);
+
+    const data_opts = PcbDataOpts{
+        .read_only = embed and !edit_embed,
+        .embed = embed,
+        .model_sprites = model_sprites,
+        .thermal_overlay = thermal_overlay,
+        .assembly_review = physical_review and !thermal_overlay,
+        .analysis_deferred = defer_analysis,
+        // The thermal overlay paints its own field over the semantic board
+        // and explicitly suppresses copper/DRC. Generating every Gerber and
+        // Excellon layer, parsing it back, and shipping the resulting CAM
+        // program only to hide it cost several seconds on Barracuda.
+        .cam_lazy = needsCamPreview(physical_review, thermal_overlay),
+        .sub = sub,
+        .subseeds_json = subseeds.poses,
+        .subseedinfo_json = subseeds.info,
+        .submodules_json = subseeds.mods,
+        .part_edits_json = if (lean_read_only)
+            "{}"
+        else
+            pcb_part_json.buildEditSources(ctx.allocator, eff_block, if (sub_block) |sb| sb.source else name),
+        .outline_drawn = rv.outline_drawn,
+        .saved_outline = rv.outline,
+        .saved_fabrication_layers = rv.fabrication_layers,
+        .saved_heatsink = rv.heatsink,
+        .saved_dimensions = rv.dimensions,
+        .base_edge = rv.base_edge,
+        .scratch_allocator = ctx.scratch_allocator,
+        .top_design = top_design,
+        .shown_layout = if (sub == null) adoptedLayoutName(sel, starred_name) else null,
+        .src = src_class,
+        .saved_routes = rv.saved,
+        .omit_pours = thermal_overlay or defer_analysis,
+        .subroutes_json = subseeds.routes,
+        // Resolved effective plan (authored waves or the synthesized default)
+        // for the settings drawer's routing-plan section.
+        .plan_json = if (lean_read_only) "{}" else buildPlanJson(ctx.allocator, eff_block, placement),
+        .texts = rv.texts,
+        // Every render-path write above (persistGeneratedLayout,
+        // displayLayouts dedup, recordAutoLayout) PRESERVES the rev, so the
+        // doc read at the top of the handler still matches what's on disk —
+        // only a user Save/Update bumps it.
+        .rev = doc.rev,
+    };
+
+    if (derived_only) {
+        var derived: std.Io.Writer.Allocating = .init(ctx.allocator);
+        try writePcbDerivedData(&derived.writer, ctx.allocator, placement, rv, data_opts);
+        return derived.written();
+    }
 
     const view = View.init(placement);
 
@@ -1112,7 +1174,6 @@ fn renderLayoutPage(
         .caps = placement.score.loop_caps,
         .objective = placement.breakdown.objective,
     };
-    const src_class = classifyLayoutSource(sub, choice.grid_only, choice.spec_drives, sel, starred_name, choice.cached);
     // Full page: the left dock's Properties / Autorouter / Sub-circuits tabs
     // plus the saved-layouts history (KiCad-style docked column).
     if (!embed) try writeSidebar(w, ctx.allocator, placement, sch_base, .{
@@ -1168,48 +1229,7 @@ fn renderLayoutPage(
         routed,
         ro.params.clearance,
         rv.violations,
-        .{
-            .read_only = embed and !edit_embed,
-            .embed = embed,
-            .model_sprites = model_sprites,
-            .thermal_overlay = thermal_overlay,
-            .assembly_review = physical_review and !thermal_overlay,
-            // The thermal overlay paints its own field over the semantic board
-            // and explicitly suppresses copper/DRC. Generating every Gerber and
-            // Excellon layer, parsing it back, and shipping the resulting CAM
-            // program only to hide it cost several seconds on Barracuda.
-            .cam_lazy = needsCamPreview(physical_review, thermal_overlay),
-            .sub = sub,
-            .subseeds_json = subseeds.poses,
-            .subseedinfo_json = subseeds.info,
-            .submodules_json = subseeds.mods,
-            .part_edits_json = if (lean_read_only)
-                "{}"
-            else
-                pcb_part_json.buildEditSources(ctx.allocator, eff_block, if (sub_block) |sb| sb.source else name),
-            .outline_drawn = rv.outline_drawn,
-            .saved_outline = rv.outline,
-            .saved_fabrication_layers = rv.fabrication_layers,
-            .saved_heatsink = rv.heatsink,
-            .saved_dimensions = rv.dimensions,
-            .base_edge = rv.base_edge,
-            .scratch_allocator = ctx.scratch_allocator,
-            .top_design = top_design,
-            .shown_layout = if (sub == null) adoptedLayoutName(sel, starred_name) else null,
-            .src = src_class,
-            .saved_routes = rv.saved,
-            .omit_pours = thermal_overlay,
-            .subroutes_json = subseeds.routes,
-            // Resolved effective plan (authored waves or the synthesized
-            // default) for the settings drawer's routing-plan section.
-            .plan_json = if (lean_read_only) "{}" else buildPlanJson(ctx.allocator, eff_block, placement),
-            .texts = rv.texts,
-            // Every render-path write above (persistGeneratedLayout,
-            // displayLayouts dedup, recordAutoLayout) PRESERVES the rev, so the
-            // doc read at the top of the handler still matches what's on disk —
-            // only a user Save/Update bumps it.
-            .rev = doc.rev,
-        },
+        data_opts,
     );
     try writePageScripts(w, .{
         .physical_review = physical_review,
@@ -1258,6 +1278,11 @@ fn writePageScripts(w: *std.Io.Writer, mode: PageScripts) std.Io.Writer.Error!vo
 /// entry was retained. `scratch` need only outlive the call: the cache dupes
 /// the HTML it keeps and the file stamps own their own memory.
 pub fn warmPage(ctx: *Server, scratch: std.mem.Allocator, name: []const u8) bool {
+    // Warm-up and the already-listening request path share one render lease.
+    // If either side has the plain page cached or in progress, the other does
+    // no duplicate evaluator/pour/serialization work.
+    if (!ctx.state.caches.pcb_pages.reserveWarm(scratch, name)) return true;
+    defer ctx.state.caches.pcb_pages.finishWarm(scratch, name);
     var page_ctx = ctx.*;
     page_ctx.allocator = scratch;
     const live_version = serve_root.getLiveVersion(name);
@@ -1392,36 +1417,6 @@ test "PCB PDN analysis resolves the selected BOM electrical model" {
     try std.testing.expect(found_esr and found_esl);
 }
 
-/// Longest `?sub=` value accepted. A slug is a sub-block name run through
-/// `review.slugify`; a few dozen characters is already an unusually long one,
-/// and the cap keeps a hostile value from being pasted into a path at all.
-const sub_slug_max_len = 128;
-
-/// Whether `s` is spelled like a real sub-block slug — i.e. like something
-/// `review.slugify` could have produced.
-///
-/// This is a SECURITY boundary, not a tidiness rule. `layoutsSidecar` pastes the
-/// value straight into `<dir>/<design>.<sub>.layouts.json` and `writeLayoutsSub`
-/// writes that path, and httpz hands query values over already percent-decoded —
-/// so `?sub=../../../../tmp/x` arrived decoded and escaped the project directory
-/// into an arbitrary file write.
-///
-/// The alphabet is `review.slugify`'s exact output: lowercase alphanumerics and
-/// `-` (it lowercases, replaces every other run with a single hyphen, and trims
-/// leading/trailing hyphens), plus `_`, the single character it emits when a name
-/// slugifies to nothing. Slugs are matched against TOP-LEVEL sub-blocks only
-/// (`descendToSub`), so they never nest and `/` is never legitimate — which makes
-/// this whitelist strictly narrower than "reject traversal": `.`, `/`, `\`, NUL,
-/// and every other separator fall out of the alphabet rather than needing a rule.
-fn isValidSubSlug(s: []const u8) bool {
-    if (s.len == 0 or s.len > sub_slug_max_len) return false;
-    for (s) |c| {
-        const ok = (c >= 'a' and c <= 'z') or (c >= '0' and c <= '9') or c == '-' or c == '_';
-        if (!ok) return false;
-    }
-    return true;
-}
-
 /// The `?sub=<slug>` query value (a slugified sub-block name), or null when the
 /// request targets the whole design. Empty values count as absent, and so does
 /// anything that is not spelled like a slug (`isValidSubSlug`) — every one of
@@ -1431,25 +1426,18 @@ fn isValidSubSlug(s: []const u8) bool {
 /// are helpers deep in the render/save paths with no response to write, and a
 /// design-scoped request is one the caller could have made by omitting `?sub=`
 /// entirely, so nothing is reachable that was not already.
-pub fn subSlug(req: ?*httpz.Request) ?[]const u8 {
-    const r = req orelse return null;
-    const q = r.query() catch return null;
-    const s = q.get("sub") orelse return null;
-    return if (isValidSubSlug(s)) s else null;
-}
+pub const subSlug = pcb_query.subSlug;
+const isValidSubSlug = pcb_query.isValidSubSlug;
+const sub_slug_max_len = pcb_query.sub_slug_max_len;
 
 /// True when `?embed=1` is present — render the trimmed, read-only chrome used
 /// by the schematic page's inline per-sub-block preview frame.
 fn isEmbed(req: ?*httpz.Request) bool {
-    const r = req orelse return false;
-    const q = r.query() catch return false;
-    return q.get("embed") != null;
+    return pcb_query.raw(req, "embed") != null;
 }
 
 fn isPhysicalReview(req: ?*httpz.Request, embed: bool, edit_embed: bool) bool {
-    if (!embed) return false;
-    if (edit_embed) return false;
-    return queryFlag(req, "review");
+    return embed and !edit_embed and queryFlag(req, "review");
 }
 
 fn needsCamPreview(physical_review: bool, thermal_overlay: bool) bool {
@@ -3696,20 +3684,13 @@ test "assembly iframe defers CAM and omits editor-only clients" {
 }
 
 /// True when query `key` is present and not "0"/empty (a boolean toggle).
-pub fn queryFlag(req: ?*httpz.Request, key: []const u8) bool {
-    const r = req orelse return false;
-    const q = r.query() catch return false;
-    const v = q.get(key) orelse return false;
-    return !(v.len == 0 or std.mem.eql(u8, v, "0"));
-}
+pub const queryFlag = pcb_query.flag;
 
 /// True when the request asks to KEEP Do-Not-Populate parts in the centroid
 /// CSV (`?dnp=keep`). Default (absent / any other value) drops them — the
 /// assembler's pick-and-place file should only carry stuffed parts.
 fn queryKeepDnp(req: *httpz.Request) bool {
-    const q = req.query() catch return false;
-    const v = q.get("dnp") orelse return false;
-    return std.mem.eql(u8, v, "keep");
+    return if (pcb_query.raw(req, "dnp")) |value| std.mem.eql(u8, value, "keep") else false;
 }
 
 /// `?dnp=keep` → keep DNP parts in the centroid; anything else drops them.
@@ -3719,42 +3700,19 @@ fn dnpMode(req: *httpz.Request) export_fab.DnpMode {
 
 /// Query `key` as a float, or -1 when absent/unparseable — the "unset" sentinel
 /// the PNG path uses to keep the optimizer's own default for a group knob.
-fn pngFloatOpt(req: *httpz.Request, key: []const u8) f64 {
-    const q = req.query() catch return -1;
-    const v = q.get(key) orelse return -1;
-    return std.fmt.parseFloat(f64, v) catch -1;
-}
+const pngFloatOpt = pcb_query.floatOpt;
 
 /// Query `key` exactly as sent, keeping a present-but-empty value distinct
 /// from an absent one — the layout selectors treat `?layout=` as naming a
 /// layout (and 404 on it) rather than as no selection at all.
-fn queryRaw(req: ?*httpz.Request, key: []const u8) ?[]const u8 {
-    const r = req orelse return null;
-    const q = r.query() catch return null;
-    return q.get(key);
-}
+const queryRaw = pcb_query.raw;
 
 /// Query `key` as an optional string (absent/empty → null).
-pub fn queryOpt(req: ?*httpz.Request, key: []const u8) ?[]const u8 {
-    const r = req orelse return null;
-    const q = r.query() catch return null;
-    const v = q.get(key) orelse return null;
-    return if (v.len == 0) null else v;
-}
+pub const queryOpt = pcb_query.opt;
 
 /// Split a comma-separated query parameter into trimmed, non-empty tokens
 /// (slices into the request's query buffer). Empty/absent → empty slice.
-fn csvParam(arena: std.mem.Allocator, req: *httpz.Request, key: []const u8) []const []const u8 {
-    const q = req.query() catch return &.{};
-    const v = q.get(key) orelse return &.{};
-    var list: std.ArrayList([]const u8) = .empty;
-    var it = std.mem.tokenizeScalar(u8, v, ',');
-    while (it.next()) |tok| {
-        const t = std.mem.trim(u8, tok, " \t");
-        if (t.len > 0) list.append(arena, t) catch break;
-    }
-    return list.toOwnedSlice(arena) catch &.{};
-}
+const csvParam = pcb_query.csv;
 
 /// Serialize a placement for the JSON export: name, generated flag, the steering
 /// weights, the visible `score`, the full objective `breakdown` (raw terms plus
@@ -6499,6 +6457,10 @@ const ShownInputs = struct {
     /// Preserve the shown layout's placement/outline, but begin with no saved
     /// or freshly generated copper (a bare-board autorouter starting state).
     omit_copper: bool = false,
+    /// Restore saved tracks/vias but postpone every field derived from them.
+    /// The ordinary editor uses this for a fast first response; `?derived=1`
+    /// computes and returns the postponed fields after the board has painted.
+    defer_derived: bool = false,
 };
 
 /// Resolve everything the shown saved layout contributes to the page: apply
@@ -6525,7 +6487,7 @@ fn resolveShownView(ctx: *Server, req: ?*httpz.Request, in: ShownInputs) ShownVi
     // and thread it through the DRC pours in this call and the blob/fab pours
     // in `writePcbData` (carried out on the return). On barracuda that outline
     // walk was ~36% of the render, repeated per caller and per net.
-    const base_edge = if (in.omit_copper)
+    const base_edge = if (in.omit_copper or in.defer_derived)
         null
     else
         pour.sharedEdgeField(ctx.allocator, in.placement.*) catch null;
@@ -6559,14 +6521,32 @@ fn resolveShownView(ctx: *Server, req: ?*httpz.Request, in: ShownInputs) ShownVi
     // the shared connectivity oracle before any UI reports completion. Running
     // it for a bare board too gives the header the useful 0/N starting state.
     const user_zones = userZonesFrom(ctx.allocator, in.placement.*.rules, shown_zs);
-    const tally: ?fab_readiness.Tally = if (in.omit_copper)
-        null
-    else
-        fab_readiness.routableTally(ctx.allocator, in.placement.*, .{
-            .tracks = if (routed) |r| r.tracks else &.{},
-            .vias = if (routed) |r| r.vias else &.{},
-            .zones = user_zones,
-        }) catch null;
+    const texts = shownTexts(in.layouts, in.shown);
+    var tally: ?fab_readiness.Tally = null;
+    var violations: []const drc.Violation = &.{};
+    if (!in.omit_copper and !in.defer_derived) {
+        if (in.check_drc and routed != null) {
+            // Connectivity is the expensive half of both DRC and the route
+            // summary. Retain it from the DRC pass instead of rasterizing the
+            // same zones a second time for a standalone tally.
+            const report = drc_rules.checkFilteredZonesTally(ctx.allocator, ctx.project_dir, name, .{
+                .placement = in.placement.*,
+                .routed = routed.?,
+                .clearance = ro.params.clearance,
+                .zones = user_zones,
+                .texts = texts,
+                .base_edge = base_edge,
+            });
+            tally = report.tally;
+            violations = report.violations;
+        } else {
+            tally = fab_readiness.routableTally(ctx.allocator, in.placement.*, .{
+                .tracks = if (routed) |r| r.tracks else &.{},
+                .vias = if (routed) |r| r.vias else &.{},
+                .zones = user_zones,
+            }) catch null;
+        }
+    }
     if (routed) |*r| if (tally) |t| {
         // RouteResult keeps the count displayed by this page. The detailed
         // connection tally remains on `ShownView.tally` for non-UI consumers.
@@ -6574,11 +6554,6 @@ fn resolveShownView(ctx: *Server, req: ?*httpz.Request, in: ShownInputs) ShownVi
         r.total = t.unique_total;
         r.failed = t.open;
     };
-    const texts = shownTexts(in.layouts, in.shown);
-    const violations: []const drc.Violation = if (in.check_drc and routed != null)
-        drc_rules.checkFilteredZones(ctx.allocator, ctx.project_dir, name, .{ .placement = in.placement.*, .routed = routed.?, .clearance = ro.params.clearance, .zones = user_zones, .texts = texts, .base_edge = base_edge })
-    else
-        &.{};
     return .{ .ro = ro, .routed = routed, .tally = tally, .violations = violations, .outline_drawn = outline_drawn, .base_edge = base_edge, .outline = shownOutline(in.layouts, in.shown), .fabrication_layers = fabrication_layers, .heatsink = shownHeatsink(in.layouts, in.shown), .saved = saved, .texts = texts, .dimensions = shownDimensions(in.layouts, in.shown) };
 }
 
@@ -9345,6 +9320,10 @@ const PcbDataOpts = struct {
     /// Read-only assembly payload: keep cross-probe and board geometry, omit
     /// editor/analysis fields that have no UI on this surface.
     assembly_review: bool = false,
+    /// The first editor response carries editable state only. Pours, DRC,
+    /// fabrication identity, mask relief, and electrical analyses are fetched
+    /// from the matching dependency-cached derived payload after first paint.
+    analysis_deferred: bool = false,
     /// Emit a cacheable API URL and fetch exact CAM after the semantic board's
     /// first frame instead of blocking HTML generation on Gerber read-back.
     cam_lazy: bool = false,
@@ -9536,7 +9515,7 @@ fn buildPayloadFabText(
     routed: ?router.RouteResult,
     opts: PcbDataOpts,
 ) HandlerError!?font5x7.BoardText {
-    if (opts.thermal_overlay or opts.assembly_review) return null;
+    if (opts.thermal_overlay or opts.assembly_review or opts.analysis_deferred) return null;
     return buildPcbFabText(alloc, placement, routed, opts.saved_routes, opts.texts, opts.base_edge);
 }
 
@@ -9562,7 +9541,7 @@ fn writePayloadAnalysis(
     routed: ?router.RouteResult,
     opts: PcbDataOpts,
 ) std.Io.Writer.Error!void {
-    if (opts.assembly_review) {
+    if (opts.assembly_review or opts.analysis_deferred) {
         try w.writeAll(",\"antipads\":[],\"trace_em\":{\"analyses\":[]},\"power_integrity\":{\"nets\":[]}");
         return;
     }
@@ -9589,6 +9568,40 @@ fn writeCamFields(w: *std.Io.Writer, name: []const u8, opts: PcbDataOpts) std.Io
         try writeUrlEncoded(w, layout);
     }
     try w.writeAll("\",\"cam\":null");
+}
+
+/// The deferred half of an editable PCB page. This is intentionally a small
+/// JSON object rather than a second HTML document: it contains only values
+/// derived from the already-embedded placement and saved copper. The normal
+/// page and this response share the dependency-aware PCB cache, so reloads
+/// reuse both halves until the design or layout sidecar changes.
+fn writePcbDerivedData(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placement, rv: ShownView, opts: PcbDataOpts) HandlerError!void {
+    const routed = rv.routed;
+    const copper: pour.Copper = if (routed) |r| .{ .tracks = r.tracks, .vias = r.vias } else .{};
+    const zones = userZonesFrom(alloc, p.rules, shownZones(opts.saved_routes));
+    const fab_text = try buildPcbFabText(alloc, p, routed, opts.saved_routes, opts.texts, opts.base_edge);
+
+    try w.print("{{\"rev\":{d},\"pours\":", .{opts.rev});
+    try pour_json.writePours(w, alloc, p, copper, zones, opts.base_edge);
+    try pour_json.writePlaneFillsField(w, alloc, p, copper, false, opts.base_edge);
+    try w.writeAll(",\"zone_fills\":");
+    try pour_json.writeZoneFills(w, alloc, p, copper, zoneFillReqsFrom(alloc, p.rules, shownZones(opts.saved_routes)), opts.base_edge);
+    try w.writeAll(",\"drc\":[");
+    for (rv.violations, 0..) |violation, i| {
+        if (i > 0) try w.writeByte(',');
+        try writeViolation(w, violation, .{ .nets = p.nets, .parts = p.parts });
+    }
+    try w.writeByte(']');
+    if (rv.tally) |t| try w.print(",\"routed\":{d},\"total\":{d},\"unique_routed\":{d},\"unique_total\":{d}", .{
+        t.routed, t.total, t.unique_routed, t.unique_total,
+    });
+    try pcb_rules_json.writeMaskRelief(w, alloc, p, routed);
+    var full_opts = opts;
+    full_opts.analysis_deferred = false;
+    try writePayloadAnalysis(w, alloc, p, routed, full_opts);
+    try w.writeAll(",\"fab_text\":");
+    try writeOptionalBoardTextJson(w, fab_text);
+    try w.writeByte('}');
 }
 
 fn writePcbData(
@@ -9701,7 +9714,11 @@ fn writePcbData(
     // Solder-mask relief for the SHOWN copper — the assembly view draws these
     // served opening polygons and construction strokes verbatim (the same mask_relief.compute the
     // Gerber mask writer runs), so the browser can never drift from the fab.
-    try pcb_rules_json.writeMaskRelief(w, alloc, p, routed);
+    if (opts.analysis_deferred) {
+        try w.writeAll(",\"mask_relief\":{\"openings\":[],\"strokes\":[],\"joints\":[]},\"mask_merges\":[]");
+    } else {
+        try pcb_rules_json.writeMaskRelief(w, alloc, p, routed);
+    }
 
     // Solved controlled-impedance via antipads for the viewer's Antipads
     // overlay (see writeAntipadsField).
@@ -10077,7 +10094,7 @@ fn writeBlobHead(
     try w.writeAll(",");
     // Optimistic-concurrency rev the page loaded — Save/Update echoes it to 409 a
     // stale write from another window.
-    try w.print("\"rev\":{d},", .{opts.rev});
+    try w.print("\"rev\":{d},\"analysis_deferred\":{},", .{ opts.rev, opts.analysis_deferred });
     // Per-sub-block module-layout seed poses for the palette's Stamp button.
     try w.writeAll("\"subseeds\":");
     try w.writeAll(if (opts.subseeds_json.len > 0) opts.subseeds_json else "{}");

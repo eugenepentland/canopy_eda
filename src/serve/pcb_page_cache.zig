@@ -14,10 +14,13 @@ const paths = @import("../paths.zig");
 const page_cache = @import("page_cache.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 
-const max_entries: usize = 16;
+// Eleven plain design pages are warmed at boot. Leave room for named layouts,
+// assembly/CAM, and the editor's deferred derived payload without allowing a
+// short variant burst to evict those common pages immediately.
+const max_entries: usize = 48;
 /// Total byte budget of this in-memory page store, and the largest single
 /// rendered page it will admit. A memory budget, not a file-read cap.
-const max_cache_bytes: usize = 64 * 1024 * 1024;
+const max_cache_bytes: usize = 128 * 1024 * 1024;
 const cache_header = "X-Netlisp-PCB-Page-Cache";
 
 /// Query keys that change the rendered HTML deterministically (chrome trims,
@@ -27,7 +30,7 @@ const cache_header = "X-Netlisp-PCB-Page-Cache";
 /// `thermal` adds one script tag to that same iframe for the thermal page's
 /// board pane, so it keys rather than bypasses — a thermal reader dialling
 /// scenarios reloads that frame repeatedly.
-const keyed_params = [_][]const u8{ "embed", "review", "drc", "edit", "model_sprites", "thermal", "cam" };
+const keyed_params = [_][]const u8{ "embed", "review", "drc", "edit", "model_sprites", "thermal", "cam", "derived" };
 
 const Identity = struct { layout: ?[]const u8, keyed: [keyed_params.len]?[]const u8 };
 
@@ -37,7 +40,16 @@ const Entry = struct {
     files: page_cache.FileSet,
     live_version: u32,
     used: u64,
+    /// Query-free/default pages are the navigation hot path and boot-warmed.
+    /// Variant pressure evicts another variant before displacing one of these.
+    plain: bool,
 };
+
+fn isPlain(ident: Identity) bool {
+    if (ident.layout != null) return false;
+    for (ident.keyed) |value| if (value != null) return false;
+    return true;
+}
 
 /// Only query values that the browser consumes without changing server-rendered
 /// HTML (`focus`, `gpu`), or that change it deterministically (`layout` and
@@ -115,6 +127,10 @@ pub const Store = struct {
     allocator: ?std.mem.Allocator = null,
     mutex: infra_fs.Mutex = .{},
     entries: std.StringHashMapUnmanaged(Entry) = .empty,
+    /// Keys currently being rendered. A waiter sleeps until the leader either
+    /// admits the page or finishes without one, then retries atomically.
+    in_flight: std.StringHashMapUnmanaged(void) = .empty,
+    changed: infra_fs.Condition = .{},
     bytes: usize = 0,
     use_clock: u64 = 0,
 
@@ -134,14 +150,20 @@ pub const Store = struct {
         while (self.entries.count() > max_entries or self.bytes > max_cache_bytes) {
             var oldest_key: ?[]const u8 = null;
             var oldest_use: u64 = std.math.maxInt(u64);
+            var oldest_variant_key: ?[]const u8 = null;
+            var oldest_variant_use: u64 = std.math.maxInt(u64);
             var it = self.entries.iterator();
             while (it.next()) |kv| {
                 if (kv.value_ptr.used < oldest_use) {
                     oldest_key = kv.key_ptr.*;
                     oldest_use = kv.value_ptr.used;
                 }
+                if (!kv.value_ptr.plain and kv.value_ptr.used < oldest_variant_use) {
+                    oldest_variant_key = kv.key_ptr.*;
+                    oldest_variant_use = kv.value_ptr.used;
+                }
             }
-            const key = oldest_key orelse return;
+            const key = oldest_variant_key orelse oldest_key orelse return;
             const removed = self.entries.fetchRemove(key) orelse return;
             self.freeEntry(allocator, removed.key, removed.value);
         }
@@ -157,7 +179,50 @@ pub const Store = struct {
             kv.value_ptr.files.deinit();
         }
         self.entries.deinit(allocator);
+        var flight_it = self.in_flight.iterator();
+        while (flight_it.next()) |kv| allocator.free(kv.key_ptr.*);
+        self.in_flight.deinit(allocator);
         self.* = .{};
+    }
+
+    /// Mark `key` as the one active render. Caller holds `mutex`.
+    fn claim(self: *Store, allocator: std.mem.Allocator, key: []const u8) bool {
+        const owned = allocator.dupe(u8, key) catch return false;
+        self.in_flight.put(allocator, owned, {}) catch {
+            allocator.free(owned);
+            return false;
+        };
+        return true;
+    }
+
+    /// Release one render reservation and wake every waiter so one may retry
+    /// or become the next leader when the completed response was uncacheable.
+    fn finishIdentity(self: *Store, scratch: std.mem.Allocator, name: []const u8, ident: Identity) void {
+        const allocator = self.allocator orelse return;
+        const key = cacheKey(scratch, name, ident) catch return;
+        defer scratch.free(key);
+        self.mutex.lock();
+        if (self.in_flight.fetchRemove(key)) |removed| allocator.free(removed.key);
+        self.changed.broadcast();
+        self.mutex.unlock();
+    }
+
+    /// Reserve the query-free entry for startup warm-up. A live request that
+    /// arrives during that render joins it rather than duplicating the work.
+    pub fn reserveWarm(self: *Store, scratch: std.mem.Allocator, name: []const u8) bool {
+        const allocator = self.allocator orelse return false;
+        const ident = Identity{ .layout = null, .keyed = @splat(null) };
+        const key = cacheKey(scratch, name, ident) catch return false;
+        defer scratch.free(key);
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.entries.contains(key) or self.in_flight.contains(key)) return false;
+        return self.claim(allocator, key);
+    }
+
+    /// Complete a reservation created by `reserveWarm`, on success or error.
+    pub fn finishWarm(self: *Store, scratch: std.mem.Allocator, name: []const u8) void {
+        self.finishIdentity(scratch, name, .{ .layout = null, .keyed = @splat(null) });
     }
 
     /// Serve a valid cache hit and return true. `req`/`res` are the live
@@ -175,34 +240,40 @@ pub const Store = struct {
 
         self.mutex.lock();
         defer self.mutex.unlock();
-        const entry = self.entries.getPtr(key) orelse {
-            miss_version.* = in.live_version;
-            res.header(cache_header, "miss");
-            return false;
-        };
-        if (entry.live_version != in.live_version or !entry.files.isValid()) {
-            const removed = self.entries.fetchRemove(key).?;
-            self.freeEntry(allocator, removed.key, removed.value);
+        while (true) {
+            if (self.entries.getPtr(key)) |entry| {
+                if (entry.live_version != in.live_version or !entry.files.isValid()) {
+                    const removed = self.entries.fetchRemove(key).?;
+                    self.freeEntry(allocator, removed.key, removed.value);
+                } else if (in.scratch.dupe(u8, entry.html)) |body| {
+                    entry.used = self.nextUse();
+                    res.header(cache_header, "hit");
+                    res.content_type = entry.content_type;
+                    res.body = body;
+                    return true;
+                } else |_| {}
+            }
+            if (self.in_flight.contains(key)) {
+                self.changed.wait(&self.mutex);
+                continue;
+            }
+            // An allocation failure merely disables coalescing for this miss;
+            // rendering is still preferable to refusing the request.
+            _ = self.claim(allocator, key);
             miss_version.* = in.live_version;
             res.header(cache_header, "miss");
             return false;
         }
-        const body = in.scratch.dupe(u8, entry.html) catch {
-            miss_version.* = in.live_version;
-            res.header(cache_header, "miss");
-            return false;
-        };
-        entry.used = self.nextUse();
-        res.header(cache_header, "hit");
-        res.content_type = entry.content_type;
-        res.body = body;
-        return true;
     }
 
     /// Retain a freshly rendered cacheable page. The input also carries the
     /// current live version so an edit racing the render prevents insertion,
     /// and the duck-typed `layout_rev` freshness check asked after stamping.
     pub fn store(self: *Store, in: anytype) void {
+        const release_ident = identity(in.req);
+        defer {
+            if (release_ident) |ident| self.finishIdentity(in.scratch, in.name, ident);
+        }
         if (in.res.status != 200) return;
         const content_type = in.res.content_type orelse return;
         const retain = Retain{
@@ -315,7 +386,7 @@ pub const Store = struct {
             allocator.free(gop.value_ptr.html);
             gop.value_ptr.files.deinit();
         }
-        gop.value_ptr.* = .{ .html = body, .content_type = content_type, .files = captured.files, .live_version = live_version, .used = self.nextUse() };
+        gop.value_ptr.* = .{ .html = body, .content_type = content_type, .files = captured.files, .live_version = live_version, .used = self.nextUse(), .plain = isPlain(ident) };
         self.bytes += body.len;
         self.trim(allocator);
     }
@@ -357,6 +428,13 @@ test "PCB page cache allows only HTML-stable query modes" {
     defer cam.deinit();
     cam.query("cam", "1");
     try std.testing.expect(identity(cam.req) != null);
+
+    // The editor's after-paint JSON has its own deterministic cache key and
+    // cannot collide with the lightweight HTML first response.
+    var derived = httpz.testing.init(.{});
+    defer derived.deinit();
+    derived.query("derived", "1");
+    try std.testing.expect(identity(derived.req) != null);
 
     // The thermal page's board frame is the same embed plus one script tag, and
     // the rung / ambient it opens on are read by that script rather than
@@ -417,6 +495,22 @@ test "PCB page cache keys separate the default, named-layout, and embed pages" {
     const cam_key = try cacheKey(testing.allocator, "black-canyon", .{ .layout = null, .keyed = cam });
     defer testing.allocator.free(cam_key);
     try testing.expect(!std.mem.eql(u8, dflt, cam_key));
+
+    var derived = none;
+    derived[7] = "1"; // derived=1
+    const derived_key = try cacheKey(testing.allocator, "black-canyon", .{ .layout = null, .keyed = derived });
+    defer testing.allocator.free(derived_key);
+    try testing.expect(!std.mem.eql(u8, dflt, derived_key));
+}
+
+test "PCB page cache coalesces duplicate warm-up reservations" {
+    var cache: Store = .{ .allocator = std.testing.allocator };
+    defer cache.deinit();
+    try std.testing.expect(cache.reserveWarm(std.testing.allocator, "demo"));
+    try std.testing.expect(!cache.reserveWarm(std.testing.allocator, "demo"));
+    cache.finishWarm(std.testing.allocator, "demo");
+    try std.testing.expect(cache.reserveWarm(std.testing.allocator, "demo"));
+    cache.finishWarm(std.testing.allocator, "demo");
 }
 
 test "PCB page cache preserves JSON content type for deferred CAM" {

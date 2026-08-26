@@ -3593,8 +3593,8 @@ src/serve/pcb_layout_page.zig::pcbSettingsApi | fn pcbSettingsApi(ctx: *Server, 
 src/serve/pcb_layout_page.zig::pngFailure | fn pngFailure(e: PngError) PngFail
 src/serve/pcb_layout_page.zig::pngRequestFromQuery | fn pngRequestFromQuery(arena: std.mem.Allocator, req: *httpz.Request) PngRequest
 src/serve/pcb_layout_page.zig::prepareRouteFromJson | fn prepareRouteFromJson( alloc: std.mem.Allocator, in: RoutePrepInputs, eval: *Evaluator, module_res: *?modules_mod.ResolvedBlock, ) RoutePrepError!RoutePrep
-src/serve/pcb_layout_page.zig::queryFlag | fn queryFlag(req: ?*httpz.Request, key: []const u8) bool
-src/serve/pcb_layout_page.zig::queryOpt | fn queryOpt(req: ?*httpz.Request, key: []const u8) ?[]const u8
+src/serve/pcb_layout_page.zig::queryFlag value
+src/serve/pcb_layout_page.zig::queryOpt value
 src/serve/pcb_layout_page.zig::readCacheSlot | fn readCacheSlot(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?CacheSlot
 src/serve/pcb_layout_page.zig::readLayoutPosesFor | fn readLayoutPosesFor( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, want: []const u8, block: *env_mod.DesignBlock, sub: ?[]const u8, ) ?[]const optimizer.RefPose
 src/serve/pcb_layout_page.zig::readLayoutRev | fn readLayoutRev(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8) i64
@@ -3620,7 +3620,7 @@ src/serve/pcb_layout_page.zig::shownLayoutCopper | fn shownLayoutCopper( alloc: 
 src/serve/pcb_layout_page.zig::sidecar_max_bytes value
 src/serve/pcb_layout_page.zig::solveForRequest | fn solveForRequest( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: PngRequest, eval: *Evaluator, module_res: *?modules_mod.ResolvedBlock, ) PngError!SolvedRequest
 src/serve/pcb_layout_page.zig::subBlockPoseByOriginKey | fn subBlockPoseByOriginKey( alloc: std.mem.Allocator, project_dir: []const u8, sub_block: env_mod.SubBlock, ) ?SubBlockSeeds
-src/serve/pcb_layout_page.zig::subSlug | fn subSlug(req: ?*httpz.Request) ?[]const u8
+src/serve/pcb_layout_page.zig::subSlug value
 src/serve/pcb_layout_page.zig::thermalCopper | fn thermalCopper(solved: SolvedRequest) thermal_scenarios.Copper
 src/serve/pcb_layout_page.zig::thermalHeatsink | fn thermalHeatsink(solved: SolvedRequest, bt: thermal.BoardThermal) ?thermal_scenarios.Heatsink
 src/serve/pcb_layout_page.zig::unknownLayoutMsg | fn unknownLayoutMsg( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8, want: []const u8, ) []const u8
@@ -3634,7 +3634,9 @@ src/serve/pcb_layout_page.zig::writeSavedRoutesJson | fn writeSavedRoutesJson(w:
 src/serve/pcb_layout_sync.zig::importKicadLayoutApi value
 src/serve/pcb_page_cache.zig::Store struct_
 src/serve/pcb_page_cache.zig::deinit | fn deinit(self: *Store) void
+src/serve/pcb_page_cache.zig::finishWarm | fn finishWarm(self: *Store, scratch: std.mem.Allocator, name: []const u8) void
 src/serve/pcb_page_cache.zig::moved | fn moved(self: StubRev) bool
+src/serve/pcb_page_cache.zig::reserveWarm | fn reserveWarm(self: *Store, scratch: std.mem.Allocator, name: []const u8) bool
 src/serve/pcb_page_cache.zig::serve | fn serve(self: *Store, in: ServeIn, req: *httpz.Request, res: *httpz.Response, miss_version: *?u32) bool
 src/serve/pcb_page_cache.zig::store | fn store(self: *Store, in: anytype) void
 src/serve/pcb_page_cache.zig::warm | fn warm(self: *Store, in: Retain, html: []const u8, layout_rev: anytype) void
@@ -3646,6 +3648,14 @@ src/serve/pcb_part_json.zig::writePadsJson | fn writePadsJson( w: *std.Io.Writer
 src/serve/pcb_part_json.zig::writePartJson | fn writePartJson( w: *std.Io.Writer, alloc: std.mem.Allocator, placement: optimizer.Placement, index: usize, blame: f64, pin_net: std.StringHashMapUnmanaged([]const u8), ) (std.mem.Allocator.Error || std.Io.Writer.Error)!void
 src/serve/pcb_part_json.zig::writePoseSideLocked | fn writePoseSideLocked(w: *std.Io.Writer, side: optimizer.Side, locked: bool) std.Io.Writer.Error!void
 src/serve/pcb_progress.zig::assemble | fn assemble( arena: Allocator, project_dir: []const u8, name: []const u8, solved: pcb_layout_page.SolvedRequest, opts: pcb_layout_page.PngRequest, policy: module_policy.ModulePolicy, ) Allocator.Error!progress.Report
+src/serve/pcb_query.zig::csv | fn csv(arena: std.mem.Allocator, req: *httpz.Request, key: []const u8) []const []const u8
+src/serve/pcb_query.zig::flag | fn flag(req: ?*httpz.Request, key: []const u8) bool
+src/serve/pcb_query.zig::floatOpt | fn floatOpt(req: *httpz.Request, key: []const u8) f64
+src/serve/pcb_query.zig::isValidSubSlug | fn isValidSubSlug(s: []const u8) bool
+src/serve/pcb_query.zig::opt | fn opt(req: ?*httpz.Request, key: []const u8) ?[]const u8
+src/serve/pcb_query.zig::raw | fn raw(req: ?*httpz.Request, key: []const u8) ?[]const u8
+src/serve/pcb_query.zig::subSlug | fn subSlug(req: ?*httpz.Request) ?[]const u8
+src/serve/pcb_query.zig::sub_slug_max_len value
 src/serve/pcb_rules_json.zig::writeGroundNames | fn writeGroundNames(w: *std.Io.Writer) std.Io.Writer.Error!void
 src/serve/pcb_rules_json.zig::writeMaskRelief | fn writeMaskRelief( w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placement, routed: ?router.RouteResult, ) std.Io.Writer.Error!void
 src/serve/pcb_rules_json.zig::writeNetClasses | fn writeNetClasses(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.Error!void
