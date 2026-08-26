@@ -283,6 +283,7 @@ test "the shared parametric shape sketch engine is registered with its editor co
         .{ .bytes = shape_sketch_js, .marker = "function fromSegments(segments)" },
         .{ .bytes = shape_sketch_js, .marker = "function pointDragAxis(s,id,x,y,origin)" },
         .{ .bytes = shape_sketch_js, .marker = "function pointDragTarget(s,id,x,y,axis)" },
+        .{ .bytes = shape_sketch_js, .marker = "moveGeometry:moveGeometry" },
         .{ .bytes = shape_sketch_js, .marker = "filletPoint:filletPoint" },
         .{ .bytes = shape_sketch_js, .marker = "chamferPoint:chamferPoint" },
         .{ .bytes = shape_sketch_js, .marker = "offset:offset" },

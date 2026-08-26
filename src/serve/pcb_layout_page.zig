@@ -8089,7 +8089,7 @@ const tip_backing = "Edit fabrication backing regions with the shared shape-sket
     "The authored side, material, thickness, and automatic footprint cutouts remain unchanged. Saved with the layout and emitted in its named Gerber.";
 const tip_heatsink = "Draw or edit a physical heatsink. Drag its body to move it, drag corner handles to resize it, or click it to edit its face, target, material, fin count/dimensions, and thermal pad. Saved with the layout; the thermal ladder and 3D view use it.";
 const tip_ruler = "Ruler / dimension (D): drag to measure, or select a footprint first and drag its origin to a straight board edge to create a driving dimension.";
-const tip_move = "Move selected parts by an X/Y distance (M): marquee or Ctrl/Cmd+click parts, then press M (or this button) and type how far to move them; copper that belongs to the selection rides along, one undo step.";
+const tip_move = "Move the selection by an X/Y distance (M): select footprints, tracks, vias, or outline-sketch geometry, then press M (or this button) and type how far to move it; one undo step.";
 const pad_align_tool_html = @embedFile("assets/pcb_pad_align_tool.html");
 const alignment_tools_html = @embedFile("assets/pcb_alignment_tools.html");
 
@@ -8199,7 +8199,7 @@ test "PCB editor ships a standalone manual via tool" {
     }) |marker| try std.testing.expect(std.mem.indexOf(u8, js, marker) != null);
 }
 
-// spec: Web Server - M opens a move-by-distance dialog for the selected parts (X and/or Y in the current units, one undo step, carried copper) and D arms the ruler/measure tool
+// spec: Web Server - M opens a move-by-distance dialog for mixed footprints/copper or selected outline geometry (X and/or Y in the current units, one undo step) and D arms the ruler/measure tool
 test "M binds the move-by-distance dialog and D binds the ruler, and the toolstrip ships a Move button" {
     const js = @embedFile("assets/pcb_board.js");
     // M is the move command (a dialog), D is the measure tool — the ruler's
@@ -8207,16 +8207,23 @@ test "M binds the move-by-distance dialog and D binds the ruler, and the toolstr
     try std.testing.expect(std.mem.indexOf(u8, js, "(ev.key===\"m\"||ev.key===\"M\")&&!ev.ctrlKey&&!ev.metaKey&&!RO){ev.preventDefault();rulerArm(!rulerMode);return;}") == null);
     try std.testing.expect(std.mem.indexOf(u8, js, "(ev.key===\"d\"||ev.key===\"D\")&&!ev.ctrlKey&&!ev.metaKey&&!RO){ev.preventDefault();rulerArm(!rulerMode);return;}") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "(ev.key===\"m\"||ev.key===\"M\")&&!ev.ctrlKey&&!ev.metaKey&&!RO){ev.preventDefault();moveDialog();return;}") != null);
-    // One shared delta for every selected entity, so the move carries the
-    // marquee band exactly like a group drag (moveEntities' banded opt-in).
+    // One shared delta moves explicit copper independently, including a
+    // copper-only selection, without letting carried/private copper move twice.
     try std.testing.expect(std.mem.indexOf(u8, js, "function moveEntities(ents,deltas,banded)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "var moved=moveEntities(ents,ents.map(function(){return {dx:dx,dy:dy};}),true);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "shiftCopper(band,deltas[0].dx,deltas[0].dy)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(!deltas.length)deltas.push({dx:dx,dy:dy})") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "commitMove(moved,target.copper.t.length+target.copper.v.length)") != null);
+    // Outline selection wins while its sketch editor is active and goes
+    // through the constraint-aware batch mover and normal sketch undo seam.
+    try std.testing.expect(std.mem.indexOf(u8, js, "function moveOutlineActive()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "cs.length===1?OS.moveCurve(sk,cs[0],dx,dy):OS.moveGeometry(sk,ps,cs,dx,dy)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "move blocked — the selected sketch geometry is fixed or fully constrained") != null);
     // The toolstrip ships the Move button the script wires by id.
     try std.testing.expect(std.mem.indexOf(u8, toolstrip_html, "id=\"pcb-move-btn\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, toolstrip_html, "id=\"pcb-ruler-btn\"") != null);
     // Tooltips name the NEW keys so a user pressing M finds the move dialog.
     try std.testing.expect(std.mem.indexOf(u8, tip_ruler, "Ruler / dimension (D)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, tip_move, "Move selected parts by an X/Y distance (M)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tip_move, "Move the selection by an X/Y distance (M)") != null);
 }
 
 // V opens the PCB View sidebar unless an active trace needs it to drop a via,

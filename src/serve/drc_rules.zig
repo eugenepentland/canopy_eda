@@ -1070,6 +1070,10 @@ test "viewer JS panel moves carry per-entity copper and never shift one object t
     // object, so nothing ever travels twice in a single align/distribute.
     try std.testing.expect(std.mem.indexOf(u8, js, "var claimed=new Set(),moved=[],ncu=0;") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "cu.t.forEach(function(o){if(!claimed.has(o)){claimed.add(o);t.push(o);}});") != null);
+    // Explicitly selected copper is pre-claimed and translated once by the
+    // shared command delta, including when the selection has no footprints.
+    try std.testing.expect(std.mem.indexOf(u8, js, "shiftCopper(band,deltas[0].dx,deltas[0].dy)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "band.t.forEach(function(o){claimed.add(o);})") != null);
     // The pad-align tool goes through the same mover instead of its old
     // group-tag-only hand-rolled translation.
     try std.testing.expect(std.mem.indexOf(u8, js, "var moved=moveEntities([{idxs:owner.idxs,g:owner.g}],[{dx:dx,dy:dy}]);") != null);

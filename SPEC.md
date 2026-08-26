@@ -6278,7 +6278,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Custom pads use the exact Canvas2D polygon path instead of the WebGPU triangle fan
 - The PCB status bar carries a live renderer chip that reads GPU or 2D and follows device loss
 - Hovering visible routed copper, vias, pours, or unrouted airwires identifies their net in the PCB status bar while pad hover retains its component context
-- M opens a move-by-distance dialog for the selected parts (X and/or Y in the current units, one undo step, carried copper) and D arms the ruler/measure tool
+- M opens a move-by-distance dialog for mixed footprints/copper or selected outline geometry (X and/or Y in the current units, one undo step) and D arms the ruler/measure tool
 - With one footprint selected, D authors a persistent driving dimension from that footprint origin to a perpendicular straight outline edge
 - Double-clicking a saved PCB driving dimension line or value reopens its exact-distance editor
 - The ruler drag keeps its live measurement across redraws: the drawn overlay clears per frame but the drag's start/end state survives until the gesture ends

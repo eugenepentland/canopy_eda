@@ -63,4 +63,34 @@ disconnected.points.push({ id: 20, x: 20, y: 20 }, { id: 21, x: 21, y: 20 });
 disconnected.curves.push({ id: 22, kind: "line", a: 20, b: 21 });
 assert.equal(OS.closingEndpointTarget(disconnected, 20, 0, 0, 50), null);
 
-console.log("Shape sketch: co-linear solve and dragged endpoint closure pass");
+const moved = {
+  version: 1,
+  points: [
+    { id: 1, x: 0, y: 0 },
+    { id: 2, x: 10, y: 0 },
+    { id: 3, x: 10, y: 10 },
+  ],
+  curves: [
+    { id: 11, kind: "line", a: 1, b: 2 },
+    { id: 12, kind: "line", a: 2, b: 3 },
+  ],
+  constraints: [],
+};
+const movedCurves = OS.physicalCurves(moved);
+const shared = OS.point(moved, movedCurves[0].b);
+const oldShared = { x: shared.x, y: shared.y };
+const batch = OS.moveGeometry(moved, [], [movedCurves[0].id, movedCurves[1].id], 2.5, -1.25);
+assert.equal(batch.conflict, false);
+assert.equal(batch.moved, true);
+assert.ok(Math.abs(shared.x - (oldShared.x + 2.5)) < 1e-4);
+assert.ok(Math.abs(shared.y - (oldShared.y - 1.25)) < 1e-4);
+
+const fixed = OS.fromPolygon([[0, 0], [5, 0], [5, 5], [0, 5]]);
+const fixedCurve = OS.physicalCurves(fixed)[0];
+assert.ok(OS.addConstraint(fixed, "fixed", fixedCurve.a));
+assert.ok(OS.addConstraint(fixed, "fixed", fixedCurve.b));
+const blocked = OS.moveGeometry(fixed, [], [fixedCurve.id], 0, 3);
+assert.equal(blocked.conflict, true);
+assert.equal(blocked.moved, false);
+
+console.log("Shape sketch: constraints, endpoint closure, and batch move pass");

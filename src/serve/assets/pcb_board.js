@@ -3496,14 +3496,15 @@ document.querySelectorAll("[data-pad-axis]").forEach(function(b){b.addEventListe
 // as a single unit (its whole member set translates together) and skipping
 // locked parts. Align uses courtyard-box edges; distribute evens out origin
 // spacing between the two extremes.
-function selEntities(){var claimed={},ents=[];
- sel.forEach(function(i){if(P[i].locked||!partOnVisibleFace(P[i]))return;
+function partEntities(idxs){var claimed={},ents=[];
+ idxs.forEach(function(i){if(P[i].locked||!partOnVisibleFace(P[i]))return;
   var g=grpIdxs(i); // rigid-group member indices, or null for a lone part
   if(g){var key=grpOf(P[i].ref);if(claimed[key])return;claimed[key]=1;
    var idxs=g.filter(function(k){return !P[k].locked&&partOnVisibleFace(P[k]);});
    if(idxs.length)ents.push({idxs:idxs,g:key});} // g: whose stamped copper rides
   else ents.push({idxs:[i],g:null});});
  return ents;}
+function selEntities(){return partEntities(sel);}
 function entBox(e){var x0=1e18,y0=1e18,x1=-1e18,y1=-1e18,sx=0,sy=0;
  e.idxs.forEach(function(i){var b=partAABB(i);
   x0=Math.min(x0,b.x0);y0=Math.min(y0,b.y0);x1=Math.max(x1,b.x1);y1=Math.max(y1,b.y1);
@@ -3513,9 +3514,9 @@ function entBox(e){var x0=1e18,y0=1e18,x1=-1e18,y1=-1e18,sx=0,sy=0;
 // repaint, re-DRC. Copper the move CARRIED has already been translated by
 // moveEntities; copper left behind (a rail, a bus leaving the block) shows up
 // as an airwire/DRC finding instead of being destructively deleted.
-function commitMove(idxs){if(!idxs.length)return;
- var driven=partDimensionsApply();driven.forEach(function(i){if(idxs.indexOf(i)<0)idxs.push(i);});
- ratsUpdate(idxs);drawClr();fetchScore();refreshUnplaced();
+function commitMove(idxs,copper){if(!idxs.length&&!copper)return;
+ var driven=idxs.length?partDimensionsApply():[];driven.forEach(function(i){if(idxs.indexOf(i)<0)idxs.push(i);});
+ if(idxs.length)ratsUpdate(idxs);drawClr();if(idxs.length)fetchScore();refreshUnplaced();
  dragCacheDrop();paintSoon();scheduleDrc();updatePropLive();
  if(window.PCB3D&&window.PCB3D.sync)window.PCB3D.sync();}
 // Translate a carried-copper set in place — the panel-move twin of the drag's
@@ -3535,11 +3536,15 @@ function shiftCopper(cu,dx,dy){
 // align/distribute refuse. The claim set spans the whole operation, so no
 // object is ever translated twice when two entities could both claim it.
 function moveEntities(ents,deltas,banded){var claimed=new Set(),moved=[],ncu=0;
- var band=banded?selCuCopper():null;
+ var band=banded?(banded===true?selCuCopper():banded):null;
+ // Explicitly selected copper is an independent member of the move set. Move
+ // it once by the command's shared delta even when there are no footprints (or
+ // all selected footprints are dimension-locked), then keep carried/private
+ // copper from claiming the same objects below.
+ if(band&&deltas.length){band.t.forEach(function(o){claimed.add(o);});band.v.forEach(function(o){claimed.add(o);});
+  shiftCopper(band,deltas[0].dx,deltas[0].dy);ncu+=band.t.length+band.v.length;}
  ents.forEach(function(e,k){var src=deltas[k];if(!src)return;var d={dx:entityDimensionLocked(e,"x")?0:src.dx,dy:entityDimensionLocked(e,"y")?0:src.dy};if(!d.dx&&!d.dy)return;
   var cu=carriedCopper(e.idxs,e.g,false),t=[],v=[],z=[];
-  if(band){band.t.forEach(function(o){if(!claimed.has(o)){claimed.add(o);t.push(o);}});
-   band.v.forEach(function(o){if(!claimed.has(o)){claimed.add(o);v.push(o);}});}
   cu.t.forEach(function(o){if(!claimed.has(o)){claimed.add(o);t.push(o);}});
   cu.v.forEach(function(o){if(!claimed.has(o)){claimed.add(o);v.push(o);}});
   cu.z.forEach(function(o){if(!claimed.has(o)){claimed.add(o);z.push(o);}});
@@ -10473,59 +10478,70 @@ function apPresetApply(n){
   cancel.addEventListener("click",closePartDimensionDialog);ok.addEventListener("click",commit);dlg.addEventListener("keydown",function(ev){ev.stopPropagation();if(ev.key==="Enter"){ev.preventDefault();commit();}else if(ev.key==="Escape"){ev.preventDefault();closePartDimensionDialog();}});svg.parentNode.appendChild(dlg);field.focus();field.select();}
  PCB.partDimensionDblClick=function(ev){if(anyDrawTool())return false;var at=mm(ev),hit=partDimensionAt(at);if(!hit)return false;
   ev.preventDefault();pickCycleClear();selectComp(hit.dimension.ref);openPartDimensionDialog({ref:hit.dimension.ref,axis:hit.dimension.axis,target:{id:hit.edge.curve.id,coord:hit.edge.coord},cursor:at,b:at,existing:hit.dimension});return true;};
- // ── Move selected parts by an X/Y distance (M) ────────────────────────
- // M with parts selected opens a small dialog for X and Y distances in the
- // current display units. One shared delta for every selected entity, so the
- // copper the drag would carry (stamped group copper, the marquee band, nets
- // private to the moving parts) rides the same way — and it records ONE undo
- // step, exactly like a group drag's release.
+ // ── Move the current selection by an X/Y distance (M) ──────────────────
+ // The same command accepts mixed footprints/tracks/vias, copper-only picks,
+ // and selected outline-sketch geometry. Every member receives one shared
+ // exact delta and the whole command records one undo step.
  var moveDlg=null;
  function closeMoveDialog(){if(moveDlg&&moveDlg.parentNode)moveDlg.parentNode.removeChild(moveDlg);moveDlg=null;}
- // The entity set M operates on: the marquee/Ctrl-click selection, falling
- // back to a clicked rigid sub-circuit (which selects via selGroup, not sel).
- function moveSelection(){var ents=selEntities();
-  if(!ents.length&&selGroup&&grpRigid(selGroup)){
-   var gi=GRPS[selGroup].filter(function(i){return !P[i].locked&&partOnVisibleFace(P[i]);});
-   if(gi.length)ents=[{idxs:gi,g:selGroup}];}
-  return ents;}
+ function moveOutlineActive(){return !!(outlineSelection.length&&(outlineMode||activeSketchIsArea()||outlineOnlyFilter()));}
+ // Promote the richer plain-click selection (selRef / selGroup / inspector)
+ // through selectionSeed as well as consuming marquee/Ctrl-click arrays.
+ function moveSelection(){if(moveOutlineActive())return {kind:"outline",ents:[],copper:{t:[],v:[]}};
+  var seed=selectionSeed();return {kind:"board",ents:partEntities(seed.p),copper:{t:seed.t,v:seed.v}};}
+ function moveSelectionCount(target){if(target.kind==="outline")return outlineSelection.length;
+  return target.ents.reduce(function(n,e){return n+e.idxs.length;},0)+target.copper.t.length+target.copper.v.length;}
+ function moveSelectionLabel(target){if(target.kind==="outline")return outlineSelection.length+" selected "+activeSketchName()+" sketch "+(outlineSelection.length===1?"entity":"entities");
+  var np=target.ents.reduce(function(n,e){return n+e.idxs.length;},0),nt=target.copper.t.length,nv=target.copper.v.length,out=[];
+  if(np)out.push(np+" footprint"+(np===1?"":"s"));if(nt)out.push(nt+" track"+(nt===1?"":"s"));if(nv)out.push(nv+" via"+(nv===1?"":"s"));return out.join(" · ");}
+ function moveSelectionBounds(target){var b={x0:1e18,y0:1e18,x1:-1e18,y1:-1e18};
+  function add(x,y){if(!isFinite(x)||!isFinite(y))return;b.x0=Math.min(b.x0,x);b.y0=Math.min(b.y0,y);b.x1=Math.max(b.x1,x);b.y1=Math.max(b.y1,y);}
+  target.ents.forEach(function(e){var q=entBox(e);add(q.x0,q.y0);add(q.x1,q.y1);});
+  target.copper.t.forEach(function(t){add(t.x1,t.y1);if(t.xm!=null)add(t.xm,t.ym);add(t.x2,t.y2);});target.copper.v.forEach(function(v){add(v.x,v.y);});
+  if(target.kind==="outline"&&OS){var sh=activeSketchShape(),sk=sh&&sh.sketch;if(sk){outlineSelected("point").forEach(function(id){var p=OS.point(sk,id);if(p)add(p.x,p.y);});outlineSelected("curve").forEach(function(id){var c=OS.curve(sk,id),a=c&&OS.point(sk,c.a),z=c&&OS.point(sk,c.b);if(a)add(a.x,a.y);if(z)add(z.x,z.y);if(c&&c.mid)add(c.mid[0],c.mid[1]);});}}
+  return b.x0<=b.x1?b:null;}
  function moveSelBy(dx,dy){if(RO)return;
-  var ents=moveSelection();
-  if(!ents.length){
+  var target=moveSelection();
+  if(!moveSelectionCount(target)){
    var mz=document.getElementById("pcb-savemsg");
    if(mz){mz.style.color="#e3b341";
-    mz.textContent="move: nothing to move \u2014 select unlocked parts first (marquee or Ctrl/Cmd+click), then press M";}
+    mz.textContent="move: nothing to move \u2014 select footprints, tracks, vias, or outline geometry first, then press M";}
    return;}
   if((!dx&&!dy)){
    var mw=document.getElementById("pcb-savemsg");
    if(mw){mw.style.color="#e3b341";mw.textContent="move: enter an X and/or Y distance first";}
    return;}
+  if(target.kind==="outline"){
+   var ok=outlineSketchMutate("selected "+activeSketchName()+" geometry moved by "+fmtLen(dx)+" × "+fmtLen(dy),function(sk){
+    var ps=outlineSelected("point"),cs=outlineSelected("curve"),result=!ps.length&&cs.length===1?OS.moveCurve(sk,cs[0],dx,dy):OS.moveGeometry(sk,ps,cs,dx,dy);
+    if(!result||result.conflict||!result.moved){outlineMsg("move blocked — the selected sketch geometry is fixed or fully constrained");return false;}return true;});
+   if(ok){var om=document.getElementById("pcb-savemsg");if(om)om.style.color="#7ee787";}return;}
   recordUndo();
-  var moved=moveEntities(ents,ents.map(function(){return {dx:dx,dy:dy};}),true);
-  var n=moved.length,m=document.getElementById("pcb-savemsg");
+  // copperMoved preserves selCu; promote a lone inspector pick into it first.
+  selCuTo(target.copper.t,target.copper.v);
+  var deltas=target.ents.map(function(){return {dx:dx,dy:dy};});if(!deltas.length)deltas.push({dx:dx,dy:dy});
+  var moved=moveEntities(target.ents,deltas,target.copper),n=moveSelectionCount(target),m=document.getElementById("pcb-savemsg");
   if(m){m.style.color="#7ee787";
-   m.textContent="moved "+n+" part"+(n===1?"":"s")+" by "+fmtLen(dx)+" \u00d7 "+fmtLen(dy)+" \u2014 one undo step";}
-  commitMove(moved);}
+   m.textContent="moved "+n+" selected object"+(n===1?"":"s")+" by "+fmtLen(dx)+" \u00d7 "+fmtLen(dy)+" \u2014 one undo step";}
+  commitMove(moved,target.copper.t.length+target.copper.v.length);}
  function moveDialog(){
   if(RO)return;
   if(PCB.rulerOff)PCB.rulerOff();
   closeMoveDialog();
-  var ents=moveSelection();
+  var target=moveSelection(),count=moveSelectionCount(target);
   var dlg=document.createElement("div");moveDlg=dlg;
   dlg.style.cssText="position:absolute;z-index:60;background:#161b22;border:1px solid #30363d;"+
    "border-radius:6px;padding:10px;font:12px system-ui;color:#c9d1d9;box-shadow:0 6px 22px rgba(0,0,0,.6);min-width:220px";
   var sx=svg.getBoundingClientRect(),vb2=svg.viewBox.baseVal,kx=sx.width/vb2.w,ky=sx.height/vb2.h;
-  var bx={x0:1e18,y0:1e18,x1:-1e18,y1:-1e18};
-  ents.forEach(function(e){var b=entBox(e);
-   bx.x0=Math.min(bx.x0,b.x0);bx.y0=Math.min(bx.y0,b.y0);bx.x1=Math.max(bx.x1,b.x1);bx.y1=Math.max(bx.y1,b.y1);});
-  var ax=ents.length?((bx.x0+bx.x1)/2):vb2.x+vb2.w/2,ay=ents.length?((bx.y0+bx.y1)/2):vb2.y+vb2.h/2;
+  var bx=moveSelectionBounds(target),ax=bx?(bx.x0+bx.x1)/2:(vb2.x+vb2.w/2)/S+MX-M,ay=bx?(bx.y0+bx.y1)/2:(vb2.y+vb2.h/2)/S+MY-M;
   dlg.style.left=(svg.offsetLeft+(X(ax)-vb2.x)*kx)+"px";
   dlg.style.top=(svg.offsetTop+(Y(ay)-vb2.y)*ky)+"px";
   var title=document.createElement("div");title.textContent="Move selection";
   title.style.cssText="font-weight:600;margin-bottom:6px";dlg.appendChild(title);
   var hint=document.createElement("div");
   hint.style.cssText="margin:0 2px 8px;color:#8b949e;font-size:11px;line-height:1.35;max-width:250px";
-  hint.textContent=ents.length?("Move "+ents.length+" selected part"+(ents.length===1?"":"s")+" by an X and/or Y distance ("+(viewSt.units==="mil"?"mil":"mm")+"). Copper that belongs to the selection rides along; one undo step.")
-   :"Nothing selected \u2014 marquee-drag or Ctrl/Cmd+click parts first, then press M again.";
+  hint.textContent=count?("Move "+moveSelectionLabel(target)+" by an X and/or Y distance ("+(viewSt.units==="mil"?"mil":"mm")+"). One undo step.")
+   :"Nothing selected \u2014 select footprints, tracks, vias, or outline geometry first, then press M again.";
   dlg.appendChild(hint);
   var unit=viewSt.units==="mil"?0.0254:1;
   function row(label,node){var r=document.createElement("label");

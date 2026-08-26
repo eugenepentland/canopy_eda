@@ -234,14 +234,25 @@
     if(hit.length!==1||hit[0].kind!=="arc")return null;var arc=hit[0],farId=arc.a===pid?arc.b:arc.a,outer=pcs.filter(function(c){return c!==arc&&(c.a===farId||c.b===farId);});
     if(outer.length!==1||outer[0].kind!=="line"||!arcCircle(s,arc))return null;
     var near=point(s,pid),far=point(s,farId);return {arc:arc,near:near,far:far,nx:near.x,ny:near.y,fx:far.x,fy:far.y,mx:+arc.mid[0],my:+arc.mid[1]};}
-  function moveCurve(s,id,dx,dy){var c=curve(s,id);if(!c)return null;var a=point(s,c.a),b=point(s,c.b),fillets=[],fa=rigidFilletAt(s,c,c.a),fb=rigidFilletAt(s,c,c.b),targets=[{id:a.id,x:a.x+dx,y:a.y+dy,weight:50},{id:b.id,x:b.x+dx,y:b.y+dy,weight:50}];
+  function moveCurve(s,id,dx,dy){var c=curve(s,id);if(!c)return null;var a=point(s,c.a),b=point(s,c.b),ax=a.x,ay=a.y,bx=b.x,by=b.y,fillets=[],fa=rigidFilletAt(s,c,c.a),fb=rigidFilletAt(s,c,c.b),targets=[{id:a.id,x:a.x+dx,y:a.y+dy,weight:50},{id:b.id,x:b.x+dx,y:b.y+dy,weight:50}];
     if(fa)fillets.push(fa);if(fb&&(!fa||fb.arc!==fa.arc))fillets.push(fb);fillets.forEach(function(f){targets.push({id:f.far.id,x:f.fx+dx,y:f.fy+dy,weight:50},{arc:f.arc.id,x:f.mx+dx,y:f.my+dy,weight:50});});
     var result=solve(s,{targets:targets,iterations:10,stay:1e-4});if(result.conflict)return result;
     // The solver honours surrounding dimensions/axes, then the actual motion
     // of the shared corner point supplies one exact translation for all three
     // arc points. This last assignment keeps radius, sweep and shape invariant
     // instead of leaving them merely close under a weighted numeric solve.
-    fillets.forEach(function(f){var tx=f.near.x-f.nx,ty=f.near.y-f.ny;f.far.x=f.fx+tx;f.far.y=f.fy+ty;f.arc.mid[0]=f.mx+tx;f.arc.mid[1]=f.my+ty;});return result;}
+    fillets.forEach(function(f){var tx=f.near.x-f.nx,ty=f.near.y-f.ny;f.far.x=f.fx+tx;f.far.y=f.fy+ty;f.arc.mid[0]=f.mx+tx;f.arc.mid[1]=f.my+ty;});result.moved=Math.hypot(a.x-ax,a.y-ay)>1e-7||Math.hypot(b.x-bx,b.y-by)>1e-7;return result;}
+  // Translate one sketch selection with a single solve. Curve endpoints and
+  // arc midpoints join explicitly selected points; shared endpoints are
+  // targeted once, so two adjacent selected lines never move their corner
+  // twice. Existing dimensions/fixed constraints remain authoritative.
+  function moveGeometry(s,pointIds,curveIds,dx,dy){var wanted={},arcWanted={},targets=[],before=[];
+    (pointIds||[]).forEach(function(id){if(point(s,id))wanted[id]=1;});
+    (curveIds||[]).forEach(function(id){var c=curve(s,id);if(!c||c.construction)return;wanted[c.a]=1;wanted[c.b]=1;if(c.kind==="arc"&&c.mid)arcWanted[c.id]=1;});
+    Object.keys(wanted).forEach(function(id){var p=point(s,+id);if(!p)return;before.push({p:p,x:p.x,y:p.y});targets.push({id:p.id,x:p.x+dx,y:p.y+dy,weight:50});});
+    Object.keys(arcWanted).forEach(function(id){var c=curve(s,+id);if(!c)return;before.push({c:c,x:c.mid[0],y:c.mid[1]});targets.push({arc:c.id,x:c.mid[0]+dx,y:c.mid[1]+dy,weight:50});});
+    if(!targets.length)return null;var result=solve(s,{targets:targets,iterations:12,stay:1e-4}),moved=false;
+    before.forEach(function(q){var x=q.p?q.p.x:q.c.mid[0],y=q.p?q.p.y:q.c.mid[1];if(Math.hypot(x-q.x,y-q.y)>1e-7)moved=true;});result.moved=moved;return result;}
   function insertPoint(s,curveId,x,y){var idx=s.curves.findIndex(function(c){return c.id===curveId;}),c=idx>=0?s.curves[idx]:null;if(!c||c.construction)return null;
     var pid=nextId(s),cid=pid+1,oldb=c.b;c.b=pid;c.kind="line";delete c.mid;s.points.push({id:pid,x:x,y:y});s.curves.splice(idx+1,0,{id:cid,kind:"line",a:pid,b:oldb});return pid;}
   function dropEntities(s,pointIds,curveIds){var ps={},cs={};(pointIds||[]).forEach(function(id){ps[id]=1;});(curveIds||[]).forEach(function(id){cs[id]=1;});
@@ -334,7 +345,7 @@
 
   return {VERSION:VERSION,clone:cp,valid:validSketch,closed:isClosed,normalize:normalize,fromSegments:fromSegments,fromOutline:fromOutline,fromPolygon:fromPolygon,ensure:ensure,ensurePolygon:ensurePolygon,compile:compile,syncOutline:syncOutline,syncPolygon:syncPolygon,
     point:point,curve:curve,physicalCurves:physicalCurves,physicalPoints:physicalPoints,nextId:nextId,arcCircle:arcCircle,
-    solve:solve,state:state,addConstraint:addConstraint,removeConstraint:removeConstraint,pointDragAxis:pointDragAxis,pointDragTarget:pointDragTarget,movePoint:movePoint,moveCurve:moveCurve,
+    solve:solve,state:state,addConstraint:addConstraint,removeConstraint:removeConstraint,pointDragAxis:pointDragAxis,pointDragTarget:pointDragTarget,movePoint:movePoint,moveCurve:moveCurve,moveGeometry:moveGeometry,
     insertPoint:insertPoint,deletePoint:deletePoint,deleteSegment:deleteSegment,addLinePath:addLinePath,closeProfile:closeProfile,canCloseProfile:canCloseProfile,closingEndpointTarget:closingEndpointTarget,closeByMergingEndpoints:closeByMergingEndpoints,toArc:toArc,toLine:toLine,filletPoint:filletPoint,chamferPoint:chamferPoint,removeFillet:removeFillet,snapLinePoint:snapLinePoint,
     offset:offset,mirror:mirror,annotations:annotations,dimensionValue:dimensionValue};
 });
