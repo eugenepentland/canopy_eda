@@ -6757,7 +6757,8 @@ function drawFlashSet(segs){drawFlash={legs:segs,until:Date.now()+520};ovPaintSo
 var DRAW_W_KEY="pcb-draw-width:"+(PCB.name||"");
 function baseTrackW(){var v=parseFloat((document.getElementById("r-tw")||{}).value);return v>0?v:0.25;}
 function trackW(net){var s=document.getElementById("r-dw"),mode=s?s.value:"net",v;
- if(mode==="net"){var c=netClassInfo(net||"");v=c&&parseFloat(c.width);return v>0?v:baseTrackW();}
+ if(mode==="net"){var c=netClassInfo(net||"");v=c&&parseFloat(c.power_branch_width);
+  if(!(v>0))v=c&&parseFloat(c.width);return v>0?v:baseTrackW();}
  if(mode==="custom")return baseTrackW();v=parseFloat(mode);return v>0?v:baseTrackW();}
 function drawWidthInit(){var s=document.getElementById("r-dw");if(!s)return;
  try{var saved=localStorage.getItem(DRAW_W_KEY);if(saved&&s.querySelector('option[value="'+saved+'"]'))s.value=saved;}catch(e){}
@@ -9319,9 +9320,15 @@ function drcGateRun(tracks,vias,parts,rfPaths){
 // base and after differ ONLY by the candidate, so the id multiset difference is
 // exactly the candidate's contribution — a board with pre-existing violations
 // keeps drawing elsewhere (those ids appear in both, so never count as new).
+// The WASM probe deliberately has no fabricated-zone/current solve. For an
+// opted-in power branch only, leave width to the debounced server DRC that has
+// those exact fills; every geometric/fabrication finding remains synchronous.
+function drcGateDefersPowerWidth(d){if(!d||d.k!=="track width"||!d.a||!d.a.net)return false;
+ var c=netClassInfo(d.a.net),w=c&&+c.power_branch_width;
+ return !!(w>0&&+d.gap+1e-7>=w);}
 function drcBlockCounts(list){var c={};
  for(var i=0;i<list.length;i++){var d=list[i];
-  if(!d.id||d.sev==="warn"||d.sev==="warning"||!DRC_BLOCK[d.k])continue;
+  if(!d.id||d.sev==="warn"||d.sev==="warning"||!DRC_BLOCK[d.k]||drcGateDefersPowerWidth(d))continue;
   c[d.id]=(c[d.id]||0)+1;}
  return c;}
 function drcCuSig(o,via){return via?[o.x,o.y,o.d||0,o.drill||0,o.net||""].join("|"):

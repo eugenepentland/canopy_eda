@@ -23,6 +23,7 @@ const net_identity = @import("net_identity.zig");
 const pad_shape = @import("pad_shape.zig");
 const pad_neck = @import("pad_neck.zig");
 const power_integrity = @import("power_integrity.zig");
+const pour = @import("pour.zig");
 const path_copper = @import("path_copper.zig");
 const pose_math = @import("pose_math.zig");
 const outline = @import("outline.zig");
@@ -398,7 +399,7 @@ pub fn check(
     routed: router.RouteResult,
     clearance: f64,
 ) std.mem.Allocator.Error![]Violation {
-    return checkImpl(arena, placement, routed, clearance, &.{});
+    return checkImpl(arena, placement, routed, clearance, &.{}, null);
 }
 
 /// `check` with hand-authored copper zones credited as real same-net copper
@@ -410,8 +411,30 @@ pub fn checkWithZones(
     clearance: f64,
     zones: []const TopologyZone,
 ) std.mem.Allocator.Error![]Violation {
-    return checkImpl(arena, placement, routed, clearance, zones);
+    return checkImpl(arena, placement, routed, clearance, zones, null);
 }
+
+/// `checkWithZones` plus the exact prepared fills already owned by the
+/// reporting DRC seam. Local-current power-width checks consume these fills so
+/// a hand-authored copper zone is as authoritative as a declared plane.
+pub fn checkWithPreparedCopper(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    clearance: f64,
+    prepared: PreparedCopper,
+) std.mem.Allocator.Error![]Violation {
+    return checkImpl(arena, placement, routed, clearance, prepared.topology_zones, prepared);
+}
+
+/// Exact fabricated copper rasters shared by reporting DRC's topology,
+/// connectivity, and local-current width checks.
+pub const PreparedCopper = struct {
+    topology_zones: []const TopologyZone,
+    plane_fills: []const pour.NetFills,
+    zones: []const pour.UserZone,
+    zone_fills: []const pour.Fill,
+};
 
 /// Run only the final-state copper topology rules. This is the authoritative
 /// oracle used by post-router additive gates before copper is persisted.
@@ -615,6 +638,7 @@ fn checkImpl(
     routed: router.RouteResult,
     clearance: f64,
     topology_zones: []const TopologyZone,
+    prepared_power: ?PreparedCopper,
 ) std.mem.Allocator.Error![]Violation {
     var out: std.ArrayList(Violation) = .empty;
     const pads = try padBoxes(arena, placement);
@@ -652,7 +676,17 @@ fn checkImpl(
     try checkSilkOverPad(arena, &out, placement, pads, &pad_grid, rules.mask.margin);
     var current_routed = routed;
     current_routed.tracks = tracks;
-    const local_power_widths = try power_integrity.routedTrackRequiredWidths(arena, placement, current_routed);
+    const local_power_widths = if (prepared_power) |prepared|
+        try power_integrity.routedTrackRequiredWidthsPrepared(
+            arena,
+            placement,
+            current_routed,
+            prepared.plane_fills,
+            prepared.zones,
+            prepared.zone_fills,
+        )
+    else
+        try power_integrity.routedTrackRequiredWidths(arena, placement, current_routed);
     try checkTrackWidth(arena, &out, .{
         .placement = placement,
         .routed = routed,
@@ -3328,6 +3362,22 @@ test "track width accepts a solved narrow power branch but enforces its local re
     try testing.expectEqual(@as(usize, 1), violations.items.len);
     try testing.expectApproxEqAbs(@as(f64, 0.08), violations.items[0].gap, 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 0.1524), violations.items[0].clearance, 1e-12);
+}
+
+// spec: placement/drc - reporting DRC reuses its exact cached plane, pour, and user-zone fills when solving local power-track current
+test "reporting DRC accepts its prepared fabricated copper fills" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    var parts: [0]optimizer.Part = .{};
+    const placement = partsOnly(&parts);
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
+    const violations = try checkWithPreparedCopper(arena_inst.allocator(), placement, routed, 0.127, .{
+        .topology_zones = &.{},
+        .plane_fills = &.{},
+        .zones = &.{},
+        .zone_fills = &.{},
+    });
+    try testing.expectEqual(@as(usize, 0), violations.len);
 }
 
 // spec: placement/rf-port-frame-routing - a solver-proven one-width pad taper may narrow below the controlled line width, but thin copper away from the land still fails DRC

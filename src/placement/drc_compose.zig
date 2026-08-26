@@ -185,7 +185,18 @@ pub fn checkFilled(alloc: std.mem.Allocator, in: CopperCheck) []const drc.Violat
 fn filledViolations(alloc: std.mem.Allocator, in: CopperCheck, board: BoardFills) []const drc.Violation {
     if (board.failed) return drc.check(alloc, in.placement, in.routed, in.clearance) catch &.{};
     const zones = board.fills.zones;
-    const base = drc.checkWithZones(alloc, in.placement, in.routed, in.clearance, zones) catch &.{};
+    const base = drc.checkWithPreparedCopper(
+        alloc,
+        in.placement,
+        in.routed,
+        in.clearance,
+        .{
+            .topology_zones = zones,
+            .plane_fills = board.fills.plane_fills,
+            .zones = in.zones,
+            .zone_fills = board.fills.zone_fills,
+        },
+    ) catch &.{};
     var out: std.ArrayList(drc.Violation) = .empty;
     out.appendSlice(alloc, base) catch return base;
     drc_return_path.check(alloc, &out, in.placement, in.routed, zones) catch return base;

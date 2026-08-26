@@ -1572,6 +1572,7 @@ src/placement/dive_elide.zig::policyAdmits | fn policyAdmits(policy: route_polic
 src/placement/dive_elide.zig::strandedAt | fn strandedAt(d: f64, other_reach: f64, via_r: f64, trace_w: f64) bool
 src/placement/drc.zig::Kind enum_
 src/placement/drc.zig::Parties struct_
+src/placement/drc.zig::PreparedCopper struct_
 src/placement/drc.zig::Severity enum_
 src/placement/drc.zig::TopologyZone value
 src/placement/drc.zig::TrackAdditionGate struct_
@@ -1583,6 +1584,7 @@ src/placement/drc.zig::build | fn build( arena: std.mem.Allocator, placement: op
 src/placement/drc.zig::build | fn build( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, clearance: f64, probe: router.Via, ) std.mem.Allocator.Error!ViaAdditionGate
 src/placement/drc.zig::check | fn check( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, clearance: f64, ) std.mem.Allocator.Error![]Violation
 src/placement/drc.zig::checkTopology | fn checkTopology( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, zones: []const TopologyZone, ) std.mem.Allocator.Error![]Violation
+src/placement/drc.zig::checkWithPreparedCopper | fn checkWithPreparedCopper( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, clearance: f64, prepared: PreparedCopper, ) std.mem.Allocator.Error![]Violation
 src/placement/drc.zig::checkWithZones | fn checkWithZones( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, clearance: f64, zones: []const TopologyZone, ) std.mem.Allocator.Error![]Violation
 src/placement/drc.zig::clear | fn clear(self: TrackAdditionGate, candidate: router.Track) bool
 src/placement/drc.zig::countKind | fn countKind(v: []const Violation, k: Kind) usize
@@ -2307,6 +2309,7 @@ src/placement/power_integrity.zig::analyzeCopper | fn analyzeCopper( alloc: std.
 src/placement/power_integrity.zig::name | fn name(self: SurfaceCapacityStatus) []const u8
 src/placement/power_integrity.zig::name | fn name(self: SurfaceKind) []const u8
 src/placement/power_integrity.zig::routedTrackRequiredWidths | fn routedTrackRequiredWidths( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, ) std.mem.Allocator.Error![]const ?f64
+src/placement/power_integrity.zig::routedTrackRequiredWidthsPrepared | fn routedTrackRequiredWidthsPrepared( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, plane_fills: []const pour.NetFills, zones: []const pour.UserZone, zone_fills: []const pour.Fill, ) std.mem.Allocator.Error![]const ?f64
 src/placement/power_integrity.zig::temperature_rise_c value
 src/placement/power_integrity.zig::via_plating_mm value
 src/placement/progress.zig::Inputs struct_

@@ -659,33 +659,95 @@ pub fn analyze(
 /// so a caller must retain its whole-net/class requirement.
 ///
 /// Ordinary rails use the trace/via graph. A net that explicitly declares a
-/// `power_branch_width` and has a fabricated plane also includes the computed
-/// plane sheet, allowing its short pad-to-plane fanouts to be judged by their
-/// actual local load. Saved user zones are not available at this DRC seam, so a
-/// zone-only carrier deliberately remains on the conservative class fallback.
+/// `power_branch_width` and has a fabricated plane or saved copper zone also
+/// includes that computed sheet, allowing its short fanouts to be judged by
+/// their actual local load.
 pub fn routedTrackRequiredWidths(
     alloc: std.mem.Allocator,
     placement: optimizer.Placement,
     routed: router.RouteResult,
 ) std.mem.Allocator.Error![]const ?f64 {
+    var needs_surfaces = false;
+    for (placement.nets, 0..) |net, net_index| {
+        const demand = demandFor(placement.rules.physical.rails, net.name);
+        const has_demand = demand.typical_a != null or demand.maximum_a != null;
+        const branch_opted = net_index < placement.rules.net.len and
+            placement.rules.net[net_index].pad_neck.power_branch_width > 0;
+        if (has_demand and branch_opted and router.netHasPlane(placement, net.name)) {
+            needs_surfaces = true;
+            break;
+        }
+    }
+    const surfaces = if (needs_surfaces)
+        try buildSurfaces(alloc, placement, routed, &.{}, null)
+    else
+        &.{};
+    return routedTrackRequiredWidthsFromSurfaces(alloc, placement, routed, surfaces);
+}
+
+/// The reporting DRC spelling: consume the exact carrying-layer and user-zone
+/// fills it already computed and cached for topology/connectivity. This keeps
+/// the local-current verdict tied to fabricated copper without rastering the
+/// board a second time.
+pub fn routedTrackRequiredWidthsPrepared(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    plane_fills: []const pour.NetFills,
+    zones: []const pour.UserZone,
+    zone_fills: []const pour.Fill,
+) std.mem.Allocator.Error![]const ?f64 {
+    var surfaces: std.ArrayList(Surface) = .empty;
+    for (plane_fills) |net_fills| {
+        for (net_fills.layers, net_fills.fills) |layer, fill| try surfaces.append(alloc, .{
+            .net = net_fills.net_name,
+            .kind = if (layer.track_layer == null) .plane else .pour,
+            .physical_layer = if (layer.stack > 0) layer.stack else if (layer.track_layer) |signal|
+                placement.rules.signalStackIndex(signal)
+            else
+                0,
+            .signal_layer = layer.track_layer,
+            .fill = fill,
+        });
+    }
+    const zone_count = @min(zones.len, zone_fills.len);
+    for (zones[0..zone_count], zone_fills[0..zone_count]) |zone, fill| try surfaces.append(alloc, .{
+        .net = zone.net,
+        .kind = .zone,
+        .physical_layer = placement.rules.signalStackIndex(zone.layer),
+        .signal_layer = zone.layer,
+        .fill = fill,
+    });
+    return routedTrackRequiredWidthsFromSurfaces(alloc, placement, routed, surfaces.items);
+}
+
+fn routedTrackRequiredWidthsFromSurfaces(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    surfaces: []const Surface,
+) std.mem.Allocator.Error![]const ?f64 {
     const required = try alloc.alloc(?f64, routed.tracks.len);
     @memset(required, null);
-    var plane_surfaces: ?[]const Surface = null;
     for (placement.nets, 0..) |net, net_index| {
         const demand = demandFor(placement.rules.physical.rails, net.name);
         if (demand.typical_a == null and demand.maximum_a == null) continue;
         const branch_opted = net_index < placement.rules.net.len and
             placement.rules.net[net_index].pad_neck.power_branch_width > 0;
-        const use_plane = branch_opted and router.netHasPlane(placement, net.name);
-        if (use_plane and plane_surfaces == null)
-            plane_surfaces = try buildSurfaces(alloc, placement, routed, &.{}, null);
+        var has_surface = false;
+        if (branch_opted) for (surfaces) |surface| {
+            if (sameNet(surface.net, net.name) and surface.fill.n_comp > 0) {
+                has_surface = true;
+                break;
+            }
+        };
         const flow = try solveCurrent(
             alloc,
             placement,
             routed,
             net_index,
             demand,
-            if (use_plane) plane_surfaces.? else &.{},
+            if (has_surface) surfaces else &.{},
         );
         // Never substitute the smaller typical axis when a declared maximum
         // axis is unprovable (for example, because a max-only consumer is
@@ -956,6 +1018,42 @@ test "analysis assigns split branch currents and required widths from physical s
     max_incomplete_routed.tracks = tracks[0..2];
     const max_conservative = try routedTrackRequiredWidths(arena_inst.allocator(), max_incomplete_placement, max_incomplete_routed);
     try expectNoRequiredWidths(max_conservative);
+
+    // The same source and loads joined only through a saved user zone are
+    // unsolved in the zone-blind spelling, then become locally measurable when
+    // reporting DRC supplies its already-computed fabricated fill.
+    var zone_placement = placement;
+    zone_placement.rules.planes = .{};
+    zone_placement.rules.plane_nets = &.{};
+    const zone_tracks = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 0.8, .y2 = 0, .layer = 0, .width = 0.1524, .net = 0 },
+        .{ .x1 = 1.2, .y1 = 0, .x2 = 2, .y2 = 1, .layer = 0, .width = 0.1524, .net = 0 },
+        .{ .x1 = 1.2, .y1 = 0, .x2 = 2, .y2 = -1, .layer = 0, .width = 0.1524, .net = 0 },
+    };
+    const zone_routed = router.RouteResult{ .tracks = &zone_tracks, .vias = &.{}, .routed = 1, .total = 1 };
+    try expectNoRequiredWidths(try routedTrackRequiredWidths(arena_inst.allocator(), zone_placement, zone_routed));
+    const zone_poly = [_][2]f64{ .{ 0.5, -0.5 }, .{ 1.5, -0.5 }, .{ 1.5, 0.5 }, .{ 0.5, 0.5 } };
+    const zones = [_]pour.UserZone{.{ .net = "VDD", .layer = 0, .poly = &zone_poly }};
+    const labels: [100]i32 = @splat(0);
+    const zone_fill = pour.Fill{
+        .frame = .{ .minx = 0.5, .miny = -0.5, .pitch = 0.1, .nx = 10, .ny = 10 },
+        .labels = &labels,
+        .n_comp = 1,
+        .contours = &.{},
+        .holes = &.{},
+        .coarsened = false,
+    };
+    const zone_widths = try routedTrackRequiredWidthsPrepared(
+        arena_inst.allocator(),
+        zone_placement,
+        zone_routed,
+        &.{},
+        &zones,
+        &.{zone_fill},
+    );
+    try testing.expect(zone_widths[0] != null);
+    try testing.expect(zone_widths[1] != null);
+    try testing.expect(zone_widths[2] != null);
 }
 
 test "external power source terminals resolve only top-level connector pads" {
