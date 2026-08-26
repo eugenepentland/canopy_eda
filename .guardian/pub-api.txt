@@ -3096,6 +3096,11 @@ src/route_repair.zig::Outcome struct_
 src/route_repair.zig::Trial struct_
 src/route_repair.zig::run | fn run(alloc: std.mem.Allocator, in: Input) std.mem.Allocator.Error!Outcome
 src/route_repair.zig::writeRepairJson | fn writeRepairJson(w: *std.Io.Writer, placement: optimizer.Placement, out: Outcome) json_writer.WriteError!void
+src/route_resume.zig::ManualCompletion struct_
+src/route_resume.zig::Point struct_
+src/route_resume.zig::apply | fn apply( alloc: std.mem.Allocator, placement: optimizer.Placement, base: []const route_policy.NetPolicy, resume_points: []const Point, ) []const route_policy.NetPolicy
+src/route_resume.zig::effort | fn effort(root: std.json.Value, default: ?route_policy.Effort) ?route_policy.Effort
+src/route_resume.zig::parse | fn parse( alloc: std.mem.Allocator, root: std.json.Value, placement: optimizer.Placement, ) std.mem.Allocator.Error![]const Point
 src/serve.zig::Caches struct_
 src/serve.zig::JobOutcome enum_
 src/serve.zig::PcbJob struct_

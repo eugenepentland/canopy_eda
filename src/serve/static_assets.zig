@@ -874,6 +874,23 @@ test "PCB editor carries the live route ratsnest to the nearest destination" {
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
+// spec: Web Server - While hand-routing a single-ended trace, the scoped autorouter preserves the fixed manual prefix, previews only its proposed remainder as faded dashed tracks and vias, and Enter commits that proposal as one undoable trace completion; double-click remains the manual finish action.
+test "PCB editor previews and accepts an autorouted route remainder" {
+    const markers = [_][]const u8{
+        "function drawAutoSchedule(now,accept)",
+        "payload.resume_points=[",
+        "payload.nets=drawAutoNets(tr)",
+        "function drawAutoPath(allTracks,allVias,tr,head,target)",
+        "function paintDrawAutoRoute(ctx)",
+        "ctx.globalAlpha=0.34",
+        "ctx.setLineDash([6,4])",
+        "function drawAutoAccept()",
+        "a.tracks.forEach(function(t){t.source=\"autorouter\"",
+        "if(ev.key==\"Enter\"&&dtrace){ev.preventDefault();drawAutoAccept();return;}",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+}
+
 test "PCB editor styles the two-trace fillet radius menu" {
     const markers = [_][]const u8{
         ".pcb-trace-menu{",
@@ -927,9 +944,9 @@ test "PCB hand router gates pad entry and exit at the prospective tapered width"
 // spec: Web Server - Escape cancels an active manual route even when automatic pad-taper DRC rejects finishing it, restoring the route-start copper and exiting Draw instead of retrying the blocked finish
 test "PCB editor Escape cancels a DRC-blocked manual route" {
     const markers = [_][]const u8{
-        "function drawCancel()",                                                "restoreCopperSnap(snap)",
-        "if(dtrace)drawCancel();else drawModeSet(false)",                       "routeStatMsg(\"routing cancelled\")",
-        "if(ev.key==\"Enter\"&&dtrace){ev.preventDefault();drawEnd();return;}", "Cancel active trace and exit Draw",
+        "function drawCancel()",                          "restoreCopperSnap(snap)",
+        "if(dtrace)drawCancel();else drawModeSet(false)", "routeStatMsg(\"routing cancelled\")",
+        "function drawAutoReset()",                       "Cancel active trace and exit Draw",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }

@@ -289,6 +289,7 @@ pub const shards: []const []const []const u8 = &.{
         "exit.test.",
         "fab_readiness.test.",
         "route_repair.test.",
+        "route_resume.test.",
         "kicad_pcb.import_layout_command.test.",
         "kicad_pcb.net_aliases.test.",
         "leak_tests.placement.test.",
