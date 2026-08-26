@@ -81,6 +81,8 @@ const pad_shape = @import("pad_shape.zig");
 const via_guide = @import("via_guide.zig");
 const outline_mod = @import("outline.zig");
 const via_antipad = @import("via_antipad.zig");
+const rf_port_report = @import("rf_port_report.zig");
+const variable_width_copper = @import("variable_width_copper.zig");
 const numeric = @import("../numeric.zig");
 
 const NetRule = optimizer.NetRule;
@@ -415,6 +417,9 @@ pub const Input = struct {
     placement: optimizer.Placement,
     tracks: []const router.Track = &.{},
     vias: []const router.Via = &.{},
+    /// Restored sampled variable-width paths. Their exact swept polygons
+    /// replace their compact editor handles in the guide's copper union.
+    rf_paths: []const rf_port_report.Outcome = &.{},
     only: []const []const u8 = &.{},
     /// How hard each ring site is vetted. `.legal` — only sites the board's own
     /// rules accept — is the default; `.all` is the debug view of the raw ring.
@@ -826,8 +831,26 @@ fn hasTracks(tracks: []const router.Track, net_i: i32) bool {
     return false;
 }
 
-/// The fenced net's whole copper, as the union `via_guide` wraps: every track
-/// segment as a capsule, every pad the net lands on, and its own via barrels.
+fn hasRfPath(paths: []const rf_port_report.Outcome, net_i: i32) bool {
+    for (paths) |path| {
+        if (path.net != net_i or !path.success) continue;
+        if (!path.physical.gate_removed and path.physical.samples.len >= 2) return true;
+    }
+    return false;
+}
+
+fn rfPathOwnsTrack(paths: []const rf_port_report.Outcome, track: router.Track) bool {
+    for (paths) |path| {
+        if (!path.success or path.physical.gate_removed) continue;
+        if (path.net != track.net or path.physical.layer != track.layer) continue;
+        if (variable_width_copper.ownsTrack(path.physical.samples, track)) return true;
+    }
+    return false;
+}
+
+/// The fenced net's whole copper, as the union `via_guide` wraps: ordinary
+/// tracks as capsules, sampled variable-width paths as swept polygons, every
+/// pad the net lands on, and its own via barrels.
 ///
 /// Every LAYER at once, deliberately. A fence via is a through barrel, so the
 /// region it must stay out of is the net's copper on all of them: a top-routed
@@ -849,7 +872,13 @@ fn netUnion(
     var caps: std.ArrayList(via_guide.Capsule) = .empty;
     for (in.tracks) |t| {
         if (t.net != net_i) continue;
+        if (rfPathOwnsTrack(in.rf_paths, t)) continue;
         try caps.append(arena, .{ .x1 = t.x1, .y1 = t.y1, .x2 = t.x2, .y2 = t.y2, .half = t.width / 2 });
+    }
+    var polys: std.ArrayList([]const [2]f64) = .empty;
+    for (in.rf_paths) |path| {
+        if (path.net != net_i or !path.success or path.physical.gate_removed) continue;
+        for (try variable_width_copper.pieces(arena, path.physical.samples)) |piece| try polys.append(arena, piece.poly);
     }
     var discs: std.ArrayList(via_guide.Disc) = .empty;
     for (in.vias) |v| {
@@ -865,6 +894,7 @@ fn netUnion(
         .caps = try caps.toOwnedSlice(arena),
         .discs = try discs.toOwnedSlice(arena),
         .pads = try shapes.toOwnedSlice(arena),
+        .polys = try polys.toOwnedSlice(arena),
     };
 }
 
@@ -1111,7 +1141,7 @@ fn selected(only: []const []const u8, name: []const u8) bool {
 /// of them. Each contour is marched against the sites the earlier ones accepted, so
 /// two blobs of the same net that pass close by stitch their shared corridor once.
 fn fenceNet(pass: *Pass, net_i: i32, plan: FencePlan, rep: *NetReport) std.mem.Allocator.Error!void {
-    if (!hasTracks(pass.in.tracks, net_i)) return;
+    if (!hasTracks(pass.in.tracks, net_i) and !hasRfPath(pass.in.rf_paths, net_i)) return;
     const copper = try netUnion(pass.arena, pass.in, pass.pads, net_i);
     if (copper.isEmpty()) return;
 
@@ -1452,6 +1482,47 @@ test "a fenced trace is fenced by an evenly spaced closed guide" {
     const gaps = wrapGapRange(res.sites);
     try testing.expect(gaps[1] <= spacing * 1.01);
     try testing.expect(gaps[0] >= spacing * 0.9);
+}
+
+// spec: placement/via-fence - restored variable-width RF paths replace their compact edit handles in the fenced copper union, so fence rows follow the final taper outline
+test "a fence row opens from the narrow end along a restored taper" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const samples = [_]@import("rf_path_solver.zig").Sample{
+        .{ .at = .{ 10, 10 }, .s_mm = 0, .curvature = 0, .width_mm = 2 },
+        .{ .at = .{ 20, 10 }, .s_mm = 10, .curvature = 0, .width_mm = 0.2 },
+    };
+    const paths = [_]rf_port_report.Outcome{.{
+        .net = 0,
+        .chosen = 0,
+        .feasible = true,
+        .success = true,
+        .metrics = .{},
+        .trials = &.{},
+        .physical = .{ .sample_count = samples.len, .samples = &samples, .layer = 0 },
+    }};
+    const handle = [_]router.Track{straight(10, 20, 10)};
+    var parts = [_]optimizer.Part{};
+    const res = try generate(arena, .{
+        .placement = rfFixture(&parts),
+        .tracks = &handle,
+        .rf_paths = &paths,
+        .mode = .all,
+    });
+    try testing.expectEqual(@as(usize, 1), res.nets[0].contours);
+
+    var broad: f64 = 0;
+    var narrow: f64 = 0;
+    for (res.sites) |site| {
+        const offset = @abs(site.y - 10);
+        if (site.x > 11 and site.x < 13) broad = @max(broad, offset);
+        if (site.x > 17 and site.x < 19) narrow = @max(narrow, offset);
+    }
+    try testing.expect(broad > 1.6);
+    try testing.expect(narrow < 1.3);
+    try testing.expect(broad > narrow + 0.45);
 }
 
 // spec: placement/via-fence - (fence (layers N)) marches N concentric closed rows one effective pitch apart while the default remains one

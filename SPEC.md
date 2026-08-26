@@ -2136,8 +2136,9 @@ rows without changing the generated fence or its routing reservation.
 
 The generator reads a solved placement plus a saved layout's persisted copper.
 **A fence wraps copper, not centrelines.** Per fenced net, `placement/via_guide`
-builds the net's copper UNION — its track segments as capsules, every pad the net
-lands on, its own via barrels — and traces the level set at the resolved distance
+builds the net's copper UNION — ordinary track segments as capsules, sampled
+variable-width paths as exact swept polygons, every pad the net lands on, its
+own via barrels — and traces the level set at the resolved distance
 from that union's boundary: an exact distance field over the copper's
 bounds (0.05 mm cell, stamped per primitive so cost follows copper area) run
 through marching squares with linearly interpolated crossings, the same
@@ -2163,6 +2164,8 @@ between candidates. A contour too short or a pitch too coarse for even one
 division still takes a whole minimum ring rather than a lone via.
 
 - in legal mode the uniform contour lattice shifts in eighth-pitch steps when the contour's arbitrary first vertex misses usable sites, retaining the phase that places the most vias without changing pitch
+- a guide around a variable-width path follows the swept polygon's sloped copper edge instead of its compact constant-width edit handle
+- restored variable-width RF paths replace their compact edit handles in the fenced copper union, so fence rows follow the final taper outline
 
 How hard each ring site is vetted is the caller's mode. `legal`, the DEFAULT, vets
 each site against the board, where **gaps are preferred over conflicts**: a
@@ -3080,6 +3083,7 @@ Public functions: compute, computeMaskShared, computeMasks, initMargin, planeCon
 - a foreign net-class clearance widens the ground-pour gap around its track
 - a grounded-coplanar ground gap overrides the generic ground-pour clearance without changing non-ground pours
 - an opt-in CPWG gap profile follows taper width and stops at its authored maximum
+- restored variable-width RF paths carve their exact swept taper polygon instead of the compact constant-width editor handle
 - a bottom CPWG gap uses the bottom physical stackup on multilayer boards
 - a single-ended controlled-impedance via gets the same stackup-derived antipad clearance on every foreign pour
 - a max-freq via with no authored impedance target synthesizes its antipad at the 50 ohm default

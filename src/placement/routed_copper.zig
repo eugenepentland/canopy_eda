@@ -11,7 +11,7 @@
 //! fills it in and the layers that render it. `export_gerber.zig` re-exports
 //! `Copper`, so callers in the export and serve layers keep their spelling.
 //!
-//! `pour.Copper` stays a separate three-field mirror. It cannot be this type:
+//! `pour.Copper` stays a separate fill-input mirror. It cannot be this type:
 //! `Copper` names `pour.UserZone`, so this module imports `pour.zig` and `pour`
 //! importing it back would be a cycle — which is exactly what that mirror's own
 //! comment says it exists to avoid.

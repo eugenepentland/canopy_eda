@@ -358,6 +358,7 @@ pub fn run(
         .placement = placement,
         .tracks = if (restored) |r| r.tracks else &.{},
         .vias = if (restored) |r| r.vias else &.{},
+        .rf_paths = if (restored) |r| r.rf_port_outcomes else &.{},
         .only = only,
         .mode = opt.mode,
     });

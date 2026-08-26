@@ -4598,7 +4598,7 @@ pub fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
     const w = &aw.writer;
     if (queryFlag(req, "pours_only")) {
-        const live_copper: pour.Copper = .{ .tracks = rr.tracks, .vias = rr.vias };
+        const live_copper: pour.Copper = .{ .tracks = rr.tracks, .vias = rr.vias, .rf_paths = rr.rf_port_outcomes };
         // Share one board-edge raster across every returned fill family.
         const base_edge = pour.sharedEdgeField(req.arena, placement) catch null;
         try w.writeAll("{\"pours\":");
@@ -4623,7 +4623,7 @@ pub fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
     try w.print("],\"n\":{d}", .{violations.len});
     if (tally) |t| try w.print(",\"routed\":{d},\"total\":{d},\"unique_routed\":{d},\"unique_total\":{d}", .{ t.routed, t.total, t.unique_routed, t.unique_total });
     if (queryFlag(req, "pours")) {
-        const live_copper: pour.Copper = .{ .tracks = rr.tracks, .vias = rr.vias };
+        const live_copper: pour.Copper = .{ .tracks = rr.tracks, .vias = rr.vias, .rf_paths = rr.rf_port_outcomes };
         const base_edge = pour.sharedEdgeField(req.arena, placement) catch null;
         try w.writeAll(",\"pours\":");
         try pour_json.writePours(w, req.arena, placement, live_copper, user_zones, base_edge);
@@ -9516,7 +9516,7 @@ pub fn writePcbDerivedData(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optim
     // editor runs and the only reader is the track/via inspector.
     if (opts.pdn_only) return power_integrity_json.writeAcResponse(w, allocators, payloadPowerInputs(alloc, p, rv.routed, opts), opts.rev);
     const routed = rv.routed;
-    const copper: pour.Copper = if (routed) |r| .{ .tracks = r.tracks, .vias = r.vias } else .{};
+    const copper: pour.Copper = if (routed) |r| .{ .tracks = r.tracks, .vias = r.vias, .rf_paths = r.rf_port_outcomes } else .{};
     const zones = userZonesFrom(alloc, p.rules, shownZones(opts.saved_routes));
     const fab_text = try buildPcbFabText(alloc, p, routed, opts.saved_routes, opts.texts, opts.base_edge);
 
@@ -9584,7 +9584,7 @@ fn writePcbData(
     blob_opts.fab_text = fab_text;
 
     try w.writeAll("<script>const PCB=");
-    const pour_copper: pour.Copper = if (routed) |r| .{ .tracks = r.tracks, .vias = r.vias } else .{};
+    const pour_copper: pour.Copper = if (routed) |r| .{ .tracks = r.tracks, .vias = r.vias, .rf_paths = r.rf_port_outcomes } else .{};
     try writeBlobHead(w, alloc, v, clearance, p, pour_copper, blob_opts);
     // Server-computed objective breakdown of the layout on screen — the baseline
     // the live score deltas against. Same shape the /api/pcb-score endpoint returns.

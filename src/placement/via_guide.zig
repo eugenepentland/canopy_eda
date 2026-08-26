@@ -9,8 +9,8 @@
 //! ground pour's edge takes as it wraps an RF chain.
 //!
 //! So this module answers one question: given a net's copper as a `Union` of
-//! capsules (tracks), discs (via barrels) and pad shapes, where is the set of
-//! points exactly `dist` mm from that union's boundary?
+//! capsules (tracks), discs (via barrels), pad shapes and swept path polygons,
+//! where is the set of points exactly `dist` mm from that union's boundary?
 //!
 //!   1. **Field.** An exact distance field over the union's bounding box grown
 //!      by `dist` + a border, sampled at grid NODES. Each primitive lowers only
@@ -54,10 +54,13 @@ pub const Union = struct {
     caps: []const Capsule = &.{},
     discs: []const Disc = &.{},
     pads: []const pad_shape.Shape = &.{},
+    /// Exact filled regions for variable-width paths. Multiple overlapping
+    /// polygons are one copper union, just like overlapping track capsules.
+    polys: []const []const [2]f64 = &.{},
 
     /// True when there is no copper here at all, so there is nothing to wrap.
     pub fn isEmpty(self: Union) bool {
-        return self.caps.len == 0 and self.discs.len == 0 and self.pads.len == 0;
+        return self.caps.len == 0 and self.discs.len == 0 and self.pads.len == 0 and self.polys.len == 0;
     }
 };
 
@@ -161,6 +164,7 @@ fn unionBounds(u: Union) ?[4]f64 {
         grow(&b, p.x0, p.y0);
         grow(&b, p.x1, p.y1);
     }
+    for (u.polys) |poly| for (poly) |p| grow(&b, p[0], p[1]);
     if (!std.math.isFinite(b[0])) return null;
     return b;
 }
@@ -216,6 +220,7 @@ fn stampAll(f: Field, u: Union, dist: f64) void {
     for (u.caps) |c| stampCapsule(f, c, reach);
     for (u.discs) |d| stampDisc(f, d, reach);
     for (u.pads) |p| stampPad(f, p, reach);
+    for (u.polys) |poly| stampPolygon(f, poly, reach);
 }
 
 /// Lower the field around one track capsule.
@@ -264,6 +269,32 @@ fn stampPad(f: Field, s: pad_shape.Shape, reach: f64) void {
         var i = w.i0;
         while (i <= w.i1) : (i += 1) {
             f.lower(i, j, pad_shape.pointDist(s.x0, s.y0, s.x1, s.y1, s.poly, f.xAt(i), y, reach + f.cell));
+        }
+    }
+}
+
+/// Lower the field around an exact filled polygon. `pointDist` returns zero
+/// inside the polygon and the true edge distance outside, which is precisely
+/// the unsigned union field needed for a positive-distance guide contour.
+fn stampPolygon(f: Field, poly: []const [2]f64, reach: f64) void {
+    if (poly.len < 3) return;
+    var x0 = poly[0][0];
+    var y0 = poly[0][1];
+    var x1 = x0;
+    var y1 = y0;
+    for (poly[1..]) |p| {
+        x0 = @min(x0, p[0]);
+        y0 = @min(y0, p[1]);
+        x1 = @max(x1, p[0]);
+        y1 = @max(y1, p[1]);
+    }
+    const w = windowOf(f, x0 - reach, y0 - reach, x1 + reach, y1 + reach) orelse return;
+    var j = w.j0;
+    while (j <= w.j1) : (j += 1) {
+        const y = f.yAt(j);
+        var i = w.i0;
+        while (i <= w.i1) : (i += 1) {
+            f.lower(i, j, pad_shape.pointDist(x0, y0, x1, y1, poly, f.xAt(i), y, reach + f.cell));
         }
     }
 }
@@ -570,6 +601,29 @@ test "the guide follows a wide pad's edge at the same distance as the trace's" {
     // The contour has to bulge past the pad, which reaches 0.3 mm further out
     // than the trace's 0.15 mm flank.
     try testing.expectApproxEqAbs(@as(f64, 0.7), topAbove(g.contours[0], 10), 0.02);
+}
+
+// spec: placement/via-fence - a guide around a variable-width path follows the swept polygon's sloped copper edge instead of its compact constant-width edit handle
+test "the guide follows a tapered polygon from its wide flank to its narrow flank" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const taper = [_][2]f64{ .{ 10, 11 }, .{ 20, 10.1 }, .{ 20, 9.9 }, .{ 10, 9 } };
+    const g = try trace(arena, .{ .polys = &.{&taper} }, 0.4);
+    try testing.expectEqual(@as(usize, 1), g.contours.len);
+
+    var broad: f64 = 0;
+    var narrow: f64 = 0;
+    for (g.contours[0]) |p| {
+        const offset = @abs(p[1] - 10);
+        if (p[0] > 11 and p[0] < 13) broad = @max(broad, offset);
+        if (p[0] > 17 and p[0] < 19) narrow = @max(narrow, offset);
+    }
+    try testing.expect(broad > 1.1);
+    try testing.expect(narrow > 0.45);
+    try testing.expect(narrow < 0.8);
+    try testing.expect(broad > narrow + 0.5);
 }
 
 // spec: placement/via-fence - copper the net shares merges into one guide contour, so two chains joined by a pad are wrapped once instead of ringed separately

@@ -443,7 +443,6 @@ pub fn writeLayer(
 fn writeCopper(g: *Gx, placement: optimizer.Placement, copper: Copper, side: optimizer.Side) Error!void {
     const li: u8 = if (side == .bottom) 1 else 0;
     const stack_idx: u8 = if (side == .top) 1 else bottomIndex(placement.rules);
-    const physical_tracks = try physicalTracks(g.arena, copper);
     const physical_arcs = try physicalArcs(g.arena, copper);
 
     // A `(plane IDX "NET")` declared on this OUTER layer: pour the COMPUTED
@@ -458,14 +457,14 @@ fn writeCopper(g: *Gx, placement: optimizer.Placement, copper: Copper, side: opt
         // so the declared copper recedes by the clearance around it (no short).
         var pspec: pour.LayerSpec = .{ .net = pnet, .side = side, .track_layer = li };
         pspec.higher = try pour.higherThanDeclared(g.arena, copper.zones, li, pnet);
-        const fill = try pour.computeShared(g.arena, placement, .{ .tracks = physical_tracks, .vias = copper.vias }, pspec, g.edge);
+        const fill = try pour.computeShared(g.arena, placement, .{ .tracks = copper.tracks, .vias = copper.vias, .rf_paths = copper.rf_paths }, pspec, g.edge);
         try writeComputedFill(g, fill);
     }
 
     // Hand-drawn user copper pours on this outer face (see `writeUserZone`).
     for (copper.zones, 0..) |z, zi| {
         if (z.layer != li) continue;
-        try writeUserZone(g, placement, copper, physical_tracks, side, zi);
+        try writeUserZone(g, placement, copper, side, zi);
     }
 
     for (placement.parts) |p| {
@@ -550,12 +549,12 @@ fn writePlaneClearanceArcs(g: *Gx, placement: optimizer.Placement, arcs: []const
 /// barrels/vias + same-layer inner tracks, never SMD pads). Emits the carved
 /// fill as dark G36 regions and punches its interior antipad loops in clear
 /// polarity. Own-net through-hole pads stay solidly joined without thermals.
-fn writeUserZone(g: *Gx, placement: optimizer.Placement, copper: Copper, physical_tracks: []const router.Track, side: ?optimizer.Side, zi: usize) Error!void {
+fn writeUserZone(g: *Gx, placement: optimizer.Placement, copper: Copper, side: ?optimizer.Side, zi: usize) Error!void {
     const z = copper.zones[zi];
     var spec = pour.zoneLayerSpec(z.net, side, z.layer, z.poly);
     // Clear the fill back from any higher-priority overlapping pour on this layer.
     spec.higher = try pour.higherPolys(g.arena, copper.zones, zi);
-    const fill = try pour.computeShared(g.arena, placement, .{ .tracks = physical_tracks, .vias = copper.vias }, spec, g.edge);
+    const fill = try pour.computeShared(g.arena, placement, .{ .tracks = copper.tracks, .vias = copper.vias, .rf_paths = copper.rf_paths }, spec, g.edge);
     if (fill.contours.len == 0) return;
     try writeComputedFill(g, fill);
 }
@@ -599,13 +598,12 @@ fn contourAreaDesc(contours: []const []const [2]f64, a: usize, b: usize) bool {
 /// may terminate on it). SMD pads live only on their outer face and never
 /// appear here.
 fn writeInnerCopper(g: *Gx, placement: optimizer.Placement, copper: Copper, sig: u8) Error!void {
-    const physical_tracks = try physicalTracks(g.arena, copper);
     const physical_arcs = try physicalArcs(g.arena, copper);
     // Poured base first, so the pad/track/via copper below re-lands on the
     // cleaned fill — the same ordering `writeCopper` uses for an outer face.
     for (copper.zones, 0..) |z, zi| {
         if (z.layer != sig) continue;
-        try writeUserZone(g, placement, copper, physical_tracks, null, zi);
+        try writeUserZone(g, placement, copper, null, zi);
     }
     for (placement.parts) |p| {
         for (p.pads) |pad| {

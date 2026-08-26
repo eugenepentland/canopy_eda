@@ -9,6 +9,7 @@ const std = @import("std");
 const polygon_outline = @import("outline.zig");
 const router = @import("router.zig");
 const rf_port_report = @import("rf_port_report.zig");
+const variable_width_copper = @import("variable_width_copper.zig");
 const Sample = @import("rf_path_solver.zig").Sample;
 
 const eps: f64 = 1e-9;
@@ -16,33 +17,6 @@ const miter_limit: f64 = 2;
 
 fn samePoint(a: [2]f64, b: [2]f64) bool {
     return @abs(a[0] - b[0]) <= 1e-7 and @abs(a[1] - b[1]) <= 1e-7;
-}
-
-fn onSegment(point: [2]f64, a: [2]f64, b: [2]f64) bool {
-    const dx = b[0] - a[0];
-    const dy = b[1] - a[1];
-    const len = std.math.hypot(dx, dy);
-    if (len <= 1e-9) return samePoint(point, a);
-    const cross = @abs((point[0] - a[0]) * dy - (point[1] - a[1]) * dx) / len;
-    const dot = (point[0] - a[0]) * dx + (point[1] - a[1]) * dy;
-    return cross <= 1e-7 and dot >= -1e-7 and dot <= len * len + 1e-7;
-}
-
-fn ownsSampleSpan(samples: []const Sample, a: [2]f64, b: [2]f64) bool {
-    for (samples, 0..) |start, i| {
-        if (!samePoint(start.at, a)) continue;
-        for (samples[i + 1 ..], i + 1..) |finish, j| {
-            if (!samePoint(finish.at, b)) continue;
-            var straight = true;
-            for (samples[i + 1 .. j]) |middle| {
-                if (onSegment(middle.at, a, b)) continue;
-                straight = false;
-                break;
-            }
-            if (straight) return true;
-        }
-    }
-    return false;
 }
 
 fn unit(v: [2]f64) [2]f64 {
@@ -353,9 +327,7 @@ pub fn ownsTrack(paths: []const rf_port_report.Outcome, track: anytype) bool {
         if (path.net != track.net or path.physical.layer != track.layer) continue;
         const samples = path.physical.samples;
         if (samples.len < 2) continue;
-        const a = [2]f64{ track.x1, track.y1 };
-        const b = [2]f64{ track.x2, track.y2 };
-        if (ownsSampleSpan(samples, a, b) or ownsSampleSpan(samples, b, a)) return true;
+        if (variable_width_copper.ownsTrack(samples, track)) return true;
     }
     return false;
 }

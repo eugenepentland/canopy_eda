@@ -36,8 +36,9 @@ const mask_relief = @import("placement/mask_relief.zig");
 
 /// Replace an RF path's compact editor handles with the conservative physical
 /// chords/collars consumed by render-time geometry, and suppress any native
-/// arc whose copper is already represented by those samples. Clearing the RF
-/// outcomes makes the returned view idempotent at downstream helper seams.
+/// arc whose copper is already represented by those samples. The sampled proof
+/// remains attached for exact pour geometry; re-lowering first removes every
+/// proof-owned chord, so the returned view stays idempotent.
 fn physicalRoute(arena: std.mem.Allocator, routed: router.RouteResult) std.mem.Allocator.Error!router.RouteResult {
     if (routed.rf_port_outcomes.len == 0) return routed;
     const copper = try export_gerber.physicalCopper(arena, .{
@@ -49,7 +50,10 @@ fn physicalRoute(arena: std.mem.Allocator, routed: router.RouteResult) std.mem.A
     var physical = routed;
     physical.tracks = copper.tracks;
     physical.arcs = copper.arcs;
-    physical.rf_port_outcomes = &.{};
+    // Retain the sampled proof alongside the private draw chords: pours need
+    // its exact swept polygon. Re-lowering stays idempotent because
+    // `path_copper.tracks` first removes every chord the proof owns.
+    physical.rf_port_outcomes = routed.rf_port_outcomes;
     return physical;
 }
 
@@ -672,7 +676,7 @@ fn precomputePours(arena: std.mem.Allocator, p: optimizer.Placement, routed: ?ro
     var out: std.ArrayList(PrecomputedPour) = .empty;
     const copper: pour.Copper = if (routed) |rt| blk: {
         const physical = physicalRoute(arena, rt) catch return &.{};
-        break :blk .{ .tracks = physical.tracks, .vias = physical.vias };
+        break :blk .{ .tracks = physical.tracks, .vias = physical.vias, .rf_paths = rt.rf_port_outcomes };
     } else .{};
     for ([_]optimizer.Side{ .bottom, .top }) |side| {
         const net = p.rules.pourNetOnSide(side) orelse continue;
@@ -938,7 +942,7 @@ const Ctx = struct {
     /// uncarved pour is consistent with a picture showing no routed copper.
     fn shownCopper(self: *Ctx) pour.Copper {
         const rt = self.opts.routed orelse return .{};
-        return .{ .tracks = rt.tracks, .vias = rt.vias };
+        return .{ .tracks = rt.tracks, .vias = rt.vias, .rf_paths = rt.rf_port_outcomes };
     }
 
     /// "NET <kind> - <layer>", stacked up from the board's bottom edge so every
@@ -1412,7 +1416,7 @@ const Ctx = struct {
         if (self.opts.precomputed_pours) |pre| {
             for (pre) |pp| if (pp.side == side) return pp.fill;
         }
-        const copper: pour.Copper = if (self.opts.routed) |rt| .{ .tracks = rt.tracks, .vias = rt.vias } else .{};
+        const copper: pour.Copper = if (self.opts.routed) |rt| .{ .tracks = rt.tracks, .vias = rt.vias, .rf_paths = rt.rf_port_outcomes } else .{};
         var spec = pour.outerSpec(net, side);
         // Ranked user pours on this face clear the declared background pour.
         spec.higher = pour.higherThanDeclared(arena, self.opts.user_zones, if (side == .top) 0 else 1, spec.net) catch &.{};

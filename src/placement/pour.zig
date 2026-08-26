@@ -39,6 +39,8 @@ const router = @import("router.zig");
 const outline = @import("outline.zig");
 const via_antipad = @import("via_antipad.zig");
 const impedance = @import("impedance.zig");
+const rf_port_report = @import("rf_port_report.zig");
+const variable_width_copper = @import("variable_width_copper.zig");
 const numeric = @import("../numeric.zig");
 
 /// Which net a poured/plane layer carries: a declared `(plane IDX "NET")` name,
@@ -674,7 +676,7 @@ fn computeFill(
     if (spec.clip.len >= 3) clipMargin(grid, spec.clip);
 
     const nets = try padNets(arena, placement);
-    stampForeign(grid, placement, copper, spec, nets);
+    try stampForeign(arena, grid, placement, copper, spec, nets);
     try stampFootprintKeepouts(arena, grid, placement, spec);
     // Knock this fill back from any higher-priority overlapping pour on the same
     // layer (different net), so it leaves a clearance gap instead of shorting to
@@ -732,6 +734,10 @@ fn effectiveMinimumWidth(placement: optimizer.Placement, spec: LayerSpec) f64 {
 pub const Copper = struct {
     tracks: []const router.Track = &.{},
     vias: []const router.Via = &.{},
+    /// Successful sampled variable-width paths. Their exact swept polygons
+    /// replace the compact editor handles in `tracks` when foreign copper is
+    /// carved, so a pour follows a taper's finished sloped flanks.
+    rf_paths: []const rf_port_report.Outcome = &.{},
     /// The board's hand-drawn/imported user copper pours. A DECLARED plane fill
     /// recedes around these (`higherThanDeclared`), so plane connectivity sees
     /// the same copper the Gerber emits. Defaults empty — callers that only
@@ -1124,12 +1130,13 @@ fn padOnLayer(part: optimizer.Part, pad: geometry.Pad, spec: LayerSpec) bool {
 /// (a disc/seg reach folds in the feature's own half-width); the stamps write
 /// `distance − reach` so the field's zero contour is the true clearance line.
 fn stampForeign(
+    arena: std.mem.Allocator,
     g: Grid,
     placement: optimizer.Placement,
     copper: Copper,
     spec: LayerSpec,
     nets: std.StringHashMapUnmanaged([]const u8),
-) void {
+) std.mem.Allocator.Error!void {
     const inner = spec.side == null;
     const base = baseGapFor(placement.rules.design, spec);
     const active = foreignActiveBounds(g, spec.clip);
@@ -1150,9 +1157,28 @@ fn stampForeign(
     if (spec.track_layer) |tl| {
         for (copper.tracks) |t| {
             if (t.layer != tl) continue;
+            if (rfPathOwnsTrack(copper.rf_paths, t)) continue;
             if (planeCarries(spec.net, netName(placement, t.net))) continue;
             const reach = trackPourClearance(placement, t, spec.net, base);
             stampSegWithin(g, active, .{ t.x1, t.y1 }, .{ t.x2, t.y2 }, t.width / 2 + reach);
+        }
+        for (copper.rf_paths) |path| {
+            if (!path.success or path.physical.gate_removed) continue;
+            if (path.physical.layer != tl or path.physical.samples.len < 2) continue;
+            if (planeCarries(spec.net, netName(placement, path.net))) continue;
+            for (try variable_width_copper.pieces(arena, path.physical.samples)) |piece| {
+                const probe = router.Track{
+                    .x1 = 0,
+                    .y1 = 0,
+                    .x2 = 0,
+                    .y2 = 0,
+                    .layer = path.physical.layer,
+                    .width = piece.width_mm,
+                    .net = path.net,
+                };
+                const reach = trackPourClearance(placement, probe, spec.net, base);
+                stampPolygonWithin(g, active, piece.poly, reach);
+            }
         }
     }
     for (copper.vias) |v| {
@@ -1160,6 +1186,15 @@ fn stampForeign(
         const reach = viaPlaneClearance(placement, v, spec.net, base);
         stampDiscWithin(g, active, v.x, v.y, v.dia / 2 + reach);
     }
+}
+
+fn rfPathOwnsTrack(paths: []const rf_port_report.Outcome, track: router.Track) bool {
+    for (paths) |path| {
+        if (!path.success or path.physical.gate_removed) continue;
+        if (path.net != track.net or path.physical.layer != track.layer) continue;
+        if (variable_width_copper.ownsTrack(path.physical.samples, track)) return true;
+    }
+    return false;
 }
 
 /// The only clipped-fill cells whose obstacle margins can affect membership or
@@ -1539,6 +1574,14 @@ pub fn stampPadShape(g: Grid, sh: pad_shape.Shape, reach: f64) void {
 pub fn stampPolygon(g: Grid, poly: []const [2]f64, clearance: f64) void {
     const one = [_][]const [2]f64{poly};
     stampHigher(g, &one, clearance);
+}
+
+fn stampPolygonWithin(g: Grid, active: ?[4]f64, poly: []const [2]f64, clearance: f64) void {
+    if (poly.len < 3) return;
+    const bounds = polyBounds(poly);
+    const win = clearance + window_cells * g.pitch;
+    if (!stampWindowActive(active, bounds[0] - win, bounds[1] - win, bounds[2] + win, bounds[3] + win)) return;
+    stampPolygon(g, poly, clearance);
 }
 
 /// Clamp world (x,y) to a grid cell index (saturating at 0 — the callers clamp
@@ -2850,6 +2893,65 @@ test "ground pour gap follows controlled-impedance taper up to its cap" {
     try testing.expectApproxEqAbs(@as(f64, 0.29747), trackPourClearance(placement, taper, .{ .named = "GND" }, 0.3), 0.0001);
     try testing.expectEqual(@as(f64, 1.75), trackPourClearance(placement, launch, .{ .named = "GND" }, 0.3));
     try testing.expectEqual(placement.rules.clearanceForNet(1, 0.3), trackPourClearance(placement, launch, .{ .named = "VCC" }, 0.3));
+}
+
+// spec: placement/pour - restored variable-width RF paths carve their exact swept taper polygon instead of the compact constant-width editor handle
+test "a pour opening follows a restored taper from its wide edge to its narrow edge" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{.{
+        .ref_des = "C1",
+        .kind = .passive,
+        .hw = 0.5,
+        .hh = 0.5,
+        .pads = &pad,
+        .fallback = false,
+        .x = 3,
+        .y = 3,
+        .side = .bottom,
+    }};
+    const gnd_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "C1", .pin = "1" }};
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "GND", .pins = &gnd_pins },
+        .{ .name = "RF", .pins = &.{} },
+    };
+    const placement = testPlacement(&parts, &nets, .{
+        .design = .{ .pour = .{ .clearance_outer = 0.3 } },
+        .copper_layers = 2,
+        .net = &.{ .{}, .{} },
+    });
+    const samples = [_]@import("rf_path_solver.zig").Sample{
+        .{ .at = .{ 5, 10 }, .s_mm = 0, .curvature = 0, .width_mm = 2 },
+        .{ .at = .{ 15, 10 }, .s_mm = 10, .curvature = 0, .width_mm = 0.2 },
+    };
+    const paths = [_]rf_port_report.Outcome{.{
+        .net = 1,
+        .chosen = 0,
+        .feasible = true,
+        .success = true,
+        .metrics = .{},
+        .trials = &.{},
+        .physical = .{ .sample_count = samples.len, .samples = &samples, .layer = 1 },
+    }};
+    const handle = [_]router.Track{.{
+        .x1 = 5,
+        .y1 = 10,
+        .x2 = 15,
+        .y2 = 10,
+        .layer = 1,
+        .width = 0.2,
+        .net = 1,
+    }};
+    const fill = try compute(arena, placement, .{ .tracks = &handle, .rf_paths = &paths }, .{
+        .net = .{ .named = "GND" },
+        .side = .bottom,
+        .track_layer = 1,
+    });
+    try testing.expect(fill.componentAt(6, 10.8) < 0);
+    try testing.expect(fill.componentAt(14, 10.8) >= 0);
 }
 
 // spec: placement/pour - a bottom CPWG gap uses the bottom physical stackup on multilayer boards

@@ -2812,6 +2812,9 @@ src/placement/vacate_policy.zig::judgeAll | fn judgeAll(f: NetFacts, seeds: []co
 src/placement/vacate_policy.zig::refusal | fn refusal(self: Protected) ?Refusal
 src/placement/vacate_policy.zig::select | fn select( alloc: std.mem.Allocator, facts: []const NetFacts, seed: Seed, lim: Limits, ) std.mem.Allocator.Error!Decision
 src/placement/vacate_policy.zig::selectMany | fn selectMany( alloc: std.mem.Allocator, facts: []const NetFacts, seeds: []const Seed, lim: Limits, ) std.mem.Allocator.Error!Decision
+src/placement/variable_width_copper.zig::Piece struct_
+src/placement/variable_width_copper.zig::ownsTrack | fn ownsTrack(samples: []const Sample, track: anytype) bool
+src/placement/variable_width_copper.zig::pieces | fn pieces(arena: std.mem.Allocator, samples: []const Sample) std.mem.Allocator.Error![]const Piece
 src/placement/via_antipad.zig::Result struct_
 src/placement/via_antipad.zig::default_system_ohms value
 src/placement/via_antipad.zig::solve | fn solve( stack: impedance.Stack, target_ohms: f64, pad_dia_mm: f64, drill_mm: f64, min_clearance_mm: f64, ) ?Result
