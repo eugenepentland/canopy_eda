@@ -6351,7 +6351,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - A PCB plane layer carries its own visibility eye, still renders when it is not the viewed row, and keeps vias drawn when it is the only visible copper
 - The Appearance Layers tab offers All, Front, Back and Copper-only presets that rewrite the layer visibility map in one click
 - The Objects filter disables sub-circuit hits so overlapping traces remain selectable
-- The Objects filter picks pour and keepout interiors and offers enable-all and disable-all actions
+- The Objects filter picks pours and keepouts only at their visible edges and offers enable-all and disable-all actions
 - Routing toward a same-net pad snaps the whole approach onto the pad centreline
 - A click that magnetically snaps to a same-net pad or existing trace endpoint finishes the manual trace only after the path reaches that endpoint.
 - hand-routing starts and continues only from pads and traces on the active copper layer, so opposite-face lands cannot steal a route click

@@ -1442,13 +1442,17 @@ test "viewer JS wires freeform outline segment editing" {
 
 // spec: Web Server - The Objects tab offers a selection filter that skips unchecked object types when clicking
 // spec: Web Server - The Objects filter disables sub-circuit hits so overlapping traces remain selectable
-// spec: Web Server - The Objects filter picks pour and keepout interiors and offers enable-all and disable-all actions
+// spec: Web Server - The Objects filter picks pours and keepouts only at their visible edges and offers enable-all and disable-all actions
 test "viewer wires a selection filter that gates the hit-testers" {
     const js = @embedFile("assets/pcb_board.js");
     try std.testing.expect(std.mem.indexOf(u8, js, "filt:{fp:1,sub:1,pad:1,track:1,via:1,zone:1,drc:1,outline:1}") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "if(!viewSt.filt.track)return null") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "if(RO||!viewSt.filt.zone)return null") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "polyContains(poly,m.x,m.y)||nearPolyEdge") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(nearPolyEdge(poly,m.x,m.y,7/S))return z") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(nearPolyEdge(poly,m.x,m.y,tol))return {t:z.keepout?") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(nearPolyEdge(poly,m.x,m.y,zt))add(z.keepout?") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(nearPolyEdge(outer,m.x,m.y,tol)||(inner&&inner.length>=3&&nearPolyEdge(inner,m.x,m.y,tol)))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "var band=polyContains(outer,m.x,m.y)") == null);
     try std.testing.expect(std.mem.indexOf(u8, js, "[\"zone\",\"Pours / keepouts\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "data-ap-filt-all=\"1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "data-ap-filt-all=\"0\"") != null);

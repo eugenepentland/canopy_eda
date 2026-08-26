@@ -5469,7 +5469,7 @@ function pourArm(on){if(RO&&on)return;
  outlineSketchPanelSync();toolSync();
  drawBoardRect();}
 function pourAt(m){var zs=PCB.zones||[];for(var i=zs.length-1;i>=0;i--){var z=zs[i],poly=z&&z.poly;if(!poly||poly.length<3)continue;
- if(polyContains(poly,m.x,m.y)||nearPolyEdge(poly,m.x,m.y,7/S))return z;}return null;}
+ if(nearPolyEdge(poly,m.x,m.y,7/S))return z;}return null;}
 function pourBeginEdit(z){if(!z)return false;pourEdit=z;pourPts=null;pourCur=null;outlineSelection=[];outlineRectArmed=false;
  outlineSketchPanelSync();drawBoardRect();outlineMsg((z.keepout?"copper keepout":"copper pour")+" sketch: select geometry or use Rectangle/Line, constraints and modify tools; click empty space to box-select vertices");return true;}
 // The in-progress pour sketch: placed vertices as an amber dashed open path, a
@@ -8397,21 +8397,19 @@ function selectedCopperHit(m){
 function priorityCopperHit(m){var selected=selectedCopperHit(m),v=inspHitVia(m);
  if(v)return selected&&selected.t==="via"?selected:{t:"via",o:v};
  var t=inspHitTrack(m);if(t)return selected&&selected.t==="track"?selected:{t:"track",o:t};return null;}
-// Pours / keepouts follow components and groups but precede DRC. Their whole
-// visible area is clickable: the Objects filter can isolate them without
-// forcing the user to catch a one-pixel dashed
-// rim. Editable copper zones open their pour dialog; imported/fixed keepouts
-// select into the read-only Properties inspector. A hidden layer/overlay never
-// leaves invisible geometry clickable.
+// Pours / keepouts follow components and groups but precede DRC. Only their
+// visible rims are clickable, with a screen-sized tolerance so the target does
+// not collapse to a one-pixel line. Editable copper zones open their pour
+// dialog; imported/fixed keepouts select into the read-only Properties
+// inspector. A hidden layer/overlay never leaves invisible geometry clickable.
 function inspHitZone(m){if(RO||!viewSt.filt.zone)return null;var zs=PCB.zones||[];var tol=Math.max(pxTolMm(6),0.2);
  for(var i=zs.length-1;i>=0;i--){var z=zs[i],poly=z.poly;if(!poly||poly.length<3)continue;
   var L=reviewAreaLayer(z);if(L!=null&&layerAlpha(L)<=0)continue;
-  if(polyContains(poly,m.x,m.y)||nearPolyEdge(poly,m.x,m.y,tol))return {t:z.keepout?"keepout":"zone",o:z};}
+  if(nearPolyEdge(poly,m.x,m.y,tol))return {t:z.keepout?"keepout":"zone",o:z};}
  if(viewSt.vis.keepouts){var ks=PCB.keepouts||[];
   for(var j=ks.length-1;j>=0;j--){var q=ks[j],outer=q.outer,inner=q.inner;
    if(!outer||outer.length<3)continue;
-   var band=polyContains(outer,m.x,m.y)&&(!inner||inner.length<3||!polyContains(inner,m.x,m.y));
-   if(band||nearPolyEdge(outer,m.x,m.y,tol)||(inner&&inner.length>=3&&nearPolyEdge(inner,m.x,m.y,tol)))
+   if(nearPolyEdge(outer,m.x,m.y,tol)||(inner&&inner.length>=3&&nearPolyEdge(inner,m.x,m.y,tol)))
     return {t:"keepout",o:q};}}
  return null;}
 function inspHit(m){var v=inspHitVia(m);if(v)return {t:"via",o:v};
@@ -8487,10 +8485,9 @@ function pickCandidates(m){var out=[];
    n2(t.x1)+", "+n2(t.y1)+") → ("+n2(t.x2)+", "+n2(t.y2)+")",{t:"track",o:t});});}
  if(viewSt.filt.zone&&!RO){var zt=Math.max(pxTolMm(6),0.2);(PCB.zones||[]).forEach(function(z){var poly=z.poly;
   if(!poly||poly.length<3)return;var L=reviewAreaLayer(z);if(L!=null&&layerAlpha(L)<=0)return;
-  if(polyContains(poly,m.x,m.y)||nearPolyEdge(poly,m.x,m.y,zt))add(z.keepout?"Keepout":"Pour",z.name||(z.net?nLeaf(z.net):"no net"),reviewAreaLayerName(z,L),{t:z.keepout?"keepout":"zone",o:z});});
+  if(nearPolyEdge(poly,m.x,m.y,zt))add(z.keepout?"Keepout":"Pour",z.name||(z.net?nLeaf(z.net):"no net"),reviewAreaLayerName(z,L),{t:z.keepout?"keepout":"zone",o:z});});
   if(viewSt.vis.keepouts)(PCB.keepouts||[]).forEach(function(q){var outer=q.outer,inner=q.inner;if(!outer||outer.length<3)return;
-   var band=polyContains(outer,m.x,m.y)&&(!inner||inner.length<3||!polyContains(inner,m.x,m.y));
-   if(band||nearPolyEdge(outer,m.x,m.y,zt)||(inner&&inner.length>=3&&nearPolyEdge(inner,m.x,m.y,zt)))
+   if(nearPolyEdge(outer,m.x,m.y,zt)||(inner&&inner.length>=3&&nearPolyEdge(inner,m.x,m.y,zt)))
     add("Keepout",q.name||"Keepout area",reviewAreaLayerName(q,reviewAreaLayer(q)),{t:"keepout",o:q});});}
  if(viewSt.filt.drc){var dt=Math.max(pxTolMm(12),0.3);(PCB.drc||[]).forEach(function(d){
   if(!drcMarkerVisible(d)||d.x==null||Math.hypot(m.x-d.x,m.y-d.y)>=dt)return;
