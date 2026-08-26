@@ -3346,6 +3346,7 @@ no surface can disagree about where the board ships bare.
 - a rotated land's dam follows its outline, so relief runs up to the pad and not to its bounding box
 - a bend between two exposed runs emits a rounding disc at the shared vertex
 - a continuous exposure run emits one closed offset polygon whose actual boundary vertices receive the editable corner radius
+- a solver-authored variable-width pad taper stays fully tented while its uniform trace run opens from one exact, non-rasterized boundary
 - a pad-dam termination uses the authored mask-relief corner radius without weakening the mask web
 - a pad-dam terminal keeps its authored fillet when the dam boundary lands between short route chords
 - overlapping round caps from short route chords are replaced by one authored-radius terminal fillet
@@ -4417,6 +4418,7 @@ Public functions: planLayers, writeLayer
 - non-ground outer-face traces and vias remain masked where they cross an opposite-face exposed-paddle window, and a non-ground pour suppresses that window
 - a pad's own (mask-margin …) sizes its mask opening instead of the board rule, and a no-paste pad gets no stencil aperture
 - a relieved max-freq net opens solder mask only with layer polygons, never via flashes
+- a solver-authored pad taper remains mask-covered while the following uniform RF trace opens without sampled-width stair steps
 - mask relief restores a local pad-shaped web and then reopens the pad without interrupting the exposed trace
 - mask-relief pad-dam terminations use the authored corner fillet in the fabrication layer
 - fence vias never emit solder-mask apertures; the widened RF polygon alone exposes overlapping copper
@@ -6535,6 +6537,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The PCB page blob carries both the authored keepout halo and the full RF fence corridor through the far edge of its vias
 - The PCB page blob carries each net class's resolved mask relief and fence untent reach so the assembly view shows the shipped mask
 - The PCB page blob serves each continuous mask-relief run as one closed filleted polygon so the assembly view draws the shipped mask
+- The PCB page blob keeps solver-authored pad tapers fully masked and begins RF relief at the exact uniform-trace boundary
 - The Assembly board substrate paints parsed Gerber/Excellon operations instead of rebuilding fabrication artwork from browser fonts and placement objects
 - The Assembly board paints its lightweight semantic view before asynchronously loading dependency-cached Gerber/Excellon artwork, and its initial iframe omits hidden DRC, editable-layout metadata, and editor-only scripts
 - Assembly layer controls independently toggle face copper, every physical inner copper layer, solder mask, paste, silkscreen, drills, board outline, and component overlays

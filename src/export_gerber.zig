@@ -318,12 +318,12 @@ pub fn planSilk(
     texts: []const font.BoardText,
 ) Error!SilkPlan {
     const tracks = try physicalTracks(arena, copper);
-    const arcs = try physicalArcs(arena, copper);
     // Generated annotations and test-point labels are placed first so the
     // pin-one search can reserve every board-level silk box around pad 1.
     const relief = try mask_relief.computeRouted(arena, placement, .{
-        .tracks = tracks,
-        .arcs = arcs,
+        .tracks = copper.tracks,
+        .arcs = copper.arcs,
+        .rf_paths = copper.rf_paths,
     }, copper.vias);
     const annotations = try subcircuit_silkscreen.collectWithBoardTexts(arena, placement, &.{}, copper.silk_keepouts, relief, texts);
     const testpoint_labels = try testpoint_silkscreen.collectWithKeepouts(arena, placement, &.{}, copper.silk_keepouts, annotations, texts);
@@ -740,11 +740,11 @@ fn thermalRelief(g: *Gx, p: optimizer.Part, pad: geometry.Pad, gap: f64) Error!v
 /// finished mask between their copper/apertures and the perimeter opening.
 fn writeMask(g: *Gx, placement: optimizer.Placement, copper: Copper, side: optimizer.Side) Error!void {
     const margin = placement.rules.design.mask.margin;
+    const had_relief = try writeMaskRelief(g, placement, copper, side);
     var physical = copper;
     physical.tracks = try physicalTracks(g.arena, copper);
     physical.arcs = try physicalArcs(g.arena, copper);
     physical.rf_paths = &.{};
-    const had_relief = try writeMaskRelief(g, placement, physical, side);
     if (had_relief) try writeMaskPadIslands(g, placement, physical, side);
     for (placement.parts) |p| {
         for (p.pads) |pad| {
@@ -827,6 +827,7 @@ fn writeMaskRelief(g: *Gx, placement: optimizer.Placement, copper: Copper, side:
     const relief = try mask_relief.computeRouted(g.arena, placement, .{
         .tracks = copper.tracks,
         .arcs = copper.arcs,
+        .rf_paths = copper.rf_paths,
     }, copper.vias);
     var any = false;
     var layer_has_outline = false;
@@ -2669,6 +2670,35 @@ test "max-freq mask relief emits polygons and no via flashes" {
     // The same plated barrel remains tented on the opposite face.
     const bottom = try reliefMaskSide(arena, &.{}, &nets, &rules, copper, .bottom);
     try testing.expect(std.mem.indexOf(u8, bottom, "X5000000Y5000000D03*") == null);
+}
+
+// spec: export_gerber - a solver-authored pad taper remains mask-covered while the following uniform RF trace opens without sampled-width stair steps
+test "solver RF pad taper stays masked in the fabrication layer" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const nets = [_]export_kicad.FlatNet{.{ .name = "RF", .pins = &.{} }};
+    const rules = [_]optimizer.NetRule{.{ .class = .{ .name = "rf" }, .rf = .{ .mask_relief_mm = 0.2 } }};
+    const samples = [_]@import("placement/rf_path_solver.zig").Sample{
+        .{ .at = .{ 2, 5 }, .s_mm = 0, .curvature = 0, .width_mm = 1.2 },
+        .{ .at = .{ 5, 5 }, .s_mm = 3, .curvature = 0, .width_mm = 0.2 },
+        .{ .at = .{ 8, 5 }, .s_mm = 6, .curvature = 0, .width_mm = 0.2 },
+    };
+    const paths = [_]rf_port_report.Outcome{.{
+        .net = 0,
+        .chosen = 0,
+        .feasible = true,
+        .success = true,
+        .metrics = .{},
+        .trials = &.{},
+        .physical = .{ .sample_count = samples.len, .samples = &samples, .layer = 0 },
+    }};
+    const mask = try reliefMask(arena, &.{}, &nets, &rules, .{ .rf_paths = &paths });
+
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, mask, "G36*"));
+    try testing.expect(std.mem.indexOf(u8, mask, "X5000000") != null);
+    try testing.expect(std.mem.indexOf(u8, mask, "X2000000") == null);
 }
 
 // spec: export_gerber - mask relief restores a local pad-shaped web and then reopens the pad without interrupting the exposed trace

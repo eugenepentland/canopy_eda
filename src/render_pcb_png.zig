@@ -66,8 +66,12 @@ fn physicalOptions(arena: std.mem.Allocator, input: Options) std.mem.Allocator.E
 /// The shown copper's mask relief for the sub-circuit silk pass — empty when
 /// nothing is routed, so an unrouted preview pays nothing.
 fn silkRelief(arena: std.mem.Allocator, p: optimizer.Placement, routed: ?router.RouteResult) std.mem.Allocator.Error!mask_relief.Relief {
-    const r = try physicalRoute(arena, routed orelse return .{});
-    return mask_relief.computeRouted(arena, p, .{ .tracks = r.tracks, .arcs = r.arcs }, r.vias);
+    const r = routed orelse return .{};
+    return mask_relief.computeRouted(arena, p, .{
+        .tracks = r.tracks,
+        .arcs = r.arcs,
+        .rf_paths = r.rf_port_outcomes,
+    }, r.vias);
 }
 
 const Rgb = raster.Rgb;

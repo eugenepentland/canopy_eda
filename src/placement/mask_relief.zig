@@ -28,6 +28,9 @@ const router = @import("router.zig");
 const outline = @import("outline.zig");
 const pad_shape = @import("pad_shape.zig");
 const bend_smooth = @import("bend_smooth.zig");
+const path_copper = @import("path_copper.zig");
+const rf_port_report = @import("rf_port_report.zig");
+const RfSample = @import("rf_path_solver.zig").Sample;
 const via_fence = @import("via_fence.zig");
 const via_antipad = @import("via_antipad.zig");
 const numeric = @import("../numeric.zig");
@@ -107,6 +110,9 @@ pub const Relief = struct {
 pub const Copper = struct {
     tracks: []const router.Track = &.{},
     arcs: []const router.Arc = &.{},
+    /// Exact sampled RF paths. Variable-width spans are pad tapers and stay
+    /// tented; only their constant-width trace runs participate in relief.
+    rf_paths: []const rf_port_report.Outcome = &.{},
 };
 
 /// The concrete per-side pullback `rule`'s routed copper opens at (mm; 0 =
@@ -348,10 +354,73 @@ const RunSpec = struct { net: i32, layer: u8, relief: f64, corner_radius: f64 };
 /// the joint pass and the run builder share it without a six-parameter call.
 const Run = struct {
     segs: []const router.Track,
+    terminals: []const ProfileTerminals,
     ivals: []const Interval,
     comp: []usize,
     total: []const f64,
 };
+
+const ProfileTerminals = struct {
+    trim_start: bool = false,
+    trim_end: bool = false,
+};
+
+const profile_width_eps_mm: f64 = 1e-6;
+
+fn profileTapers(a: f64, b: f64) bool {
+    return @abs(a - b) > profile_width_eps_mm;
+}
+
+fn appendSegment(
+    arena: std.mem.Allocator,
+    segs: *std.ArrayList(router.Track),
+    terminals: *std.ArrayList(ProfileTerminals),
+    track: router.Track,
+    terminal: ProfileTerminals,
+) std.mem.Allocator.Error!void {
+    try segs.append(arena, track);
+    try terminals.append(arena, terminal);
+}
+
+/// Append only the uniform-width parts of one solver path. A changing-width
+/// span is the launch taper itself: it remains covered by mask instead of
+/// inheriting the DRC lowering's staircase of maximum-width capsules.
+fn appendRfTraceRuns(
+    arena: std.mem.Allocator,
+    segs: *std.ArrayList(router.Track),
+    terminals: *std.ArrayList(ProfileTerminals),
+    path: rf_port_report.Outcome,
+) std.mem.Allocator.Error!void {
+    if (!path.success or path.physical.gate_removed) return;
+    var samples: std.ArrayList(RfSample) = .empty;
+    for (path.physical.samples) |sample| {
+        if (samples.items.len > 0) {
+            const last = &samples.items[samples.items.len - 1];
+            if (std.math.hypot(sample.at[0] - last.at[0], sample.at[1] - last.at[1]) <= 1e-9) {
+                last.width_mm = @max(last.width_mm, sample.width_mm);
+                continue;
+            }
+        }
+        try samples.append(arena, sample);
+    }
+    if (samples.items.len < 2) return;
+    for (samples.items[1..], 1..) |sample, i| {
+        const before = samples.items[i - 1];
+        if (profileTapers(before.width_mm, sample.width_mm)) continue;
+        try appendSegment(arena, segs, terminals, .{
+            .x1 = before.at[0],
+            .y1 = before.at[1],
+            .x2 = sample.at[0],
+            .y2 = sample.at[1],
+            .layer = path.physical.layer,
+            .width = @max(before.width_mm, sample.width_mm),
+            .net = path.net,
+        }, .{
+            .trim_start = i > 1 and profileTapers(samples.items[i - 2].width_mm, before.width_mm),
+            .trim_end = i + 1 < samples.items.len and profileTapers(sample.width_mm, samples.items[i + 1].width_mm),
+        });
+    }
+}
 
 const RunOutput = struct {
     openings: *std.ArrayList(Opening),
@@ -373,14 +442,21 @@ fn reliefRuns(
     output: RunOutput,
 ) std.mem.Allocator.Error!void {
     var segs: std.ArrayList(router.Track) = .empty;
+    var terminals: std.ArrayList(ProfileTerminals) = .empty;
     for (copper.tracks) |t| {
         if (t.net != spec.net or t.layer != spec.layer) continue;
+        if (path_copper.ownsTrack(copper.rf_paths, t)) continue;
         if (arcOwned(copper.arcs, t)) continue;
-        try segs.append(arena, t);
+        try appendSegment(arena, &segs, &terminals, t, .{});
     }
-    for (copper.arcs) |a| {
+    for (try path_copper.filterArcs(arena, copper.rf_paths, copper.arcs)) |a| {
         if (a.net != spec.net or a.layer != spec.layer) continue;
-        try segs.appendSlice(arena, try bend_smooth.tessellate(arena, a, arc_sagitta_mm));
+        for (try bend_smooth.tessellate(arena, a, arc_sagitta_mm)) |track|
+            try appendSegment(arena, &segs, &terminals, track, .{});
+    }
+    for (copper.rf_paths) |path| {
+        if (path.net != spec.net or path.physical.layer != spec.layer) continue;
+        try appendRfTraceRuns(arena, &segs, &terminals, path);
     }
     if (segs.items.len == 0) return;
 
@@ -423,6 +499,7 @@ fn reliefRuns(
 
     const run = Run{
         .segs = try segs.toOwnedSlice(arena),
+        .terminals = try terminals.toOwnedSlice(arena),
         .ivals = try ivals.toOwnedSlice(arena),
         .comp = comp,
         .total = total,
@@ -492,6 +569,9 @@ fn intervalTerminal(dams: []const Dam, layer: u8, run: Run, index: usize, at_sta
     if (!at_start and len - iv.t1 > join_tol_mm) return true;
     const t = if (at_start) iv.t0 else iv.t1;
     if (endpointHasExposedContinuation(run, index, t)) return false;
+    const profile = run.terminals[iv.seg];
+    const profile_terminal = if (at_start) profile.trim_start else profile.trim_end;
+    if (profile_terminal) return true;
     const probe = if (at_start) t - sample_mm - join_tol_mm else t + sample_mm + join_tol_mm;
     const x = s.x1 + (s.x2 - s.x1) * probe / len;
     const y = s.y1 + (s.y2 - s.y1) * probe / len;
@@ -1423,6 +1503,44 @@ test "continuous run emits one filleted opening polygon" {
     try testing.expect(relief.openings[0].poly.len > 6);
     try testing.expect(relief.openings[0].arcs.len >= 4);
     try testing.expect(!outline.selfIntersects(relief.openings[0].poly));
+}
+
+// spec: placement/mask-relief - a solver-authored variable-width pad taper stays fully tented while its uniform trace run opens from one exact, non-rasterized boundary
+test "sampled pad taper stays tented before the uniform RF trace" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const rules = [_]optimizer.NetRule{
+        .{ .class = .{ .name = "rf" }, .rf = .{ .mask_relief_mm = 0.2 } },
+        .{},
+    };
+    const placement = testPlacement(&.{}, &two_nets, &rules);
+    const tracks = [_]router.Track{.{ .x1 = 2, .y1 = 5, .x2 = 8, .y2 = 5, .layer = 0, .width = 0.2, .net = 0 }};
+    const samples = [_]RfSample{
+        .{ .at = .{ 2, 5 }, .s_mm = 0, .curvature = 0, .width_mm = 1.2 },
+        .{ .at = .{ 5, 5 }, .s_mm = 3, .curvature = 0, .width_mm = 0.2 },
+        .{ .at = .{ 8, 5 }, .s_mm = 6, .curvature = 0, .width_mm = 0.2 },
+    };
+    const paths = [_]rf_port_report.Outcome{.{
+        .net = 0,
+        .chosen = 0,
+        .feasible = true,
+        .success = true,
+        .metrics = .{},
+        .trials = &.{},
+        .physical = .{ .sample_count = samples.len, .samples = &samples, .layer = 0 },
+    }};
+    const relief = try compute(arena, placement, .{ .tracks = &tracks, .rf_paths = &paths });
+
+    try testing.expectEqual(@as(usize, 1), relief.strokes.len);
+    try testing.expectEqual(@as(usize, 1), relief.openings.len);
+    try testing.expectApproxEqAbs(@as(f64, 5), relief.strokes[0].x1, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 8), relief.strokes[0].x2, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0.2), relief.strokes[0].widths.copper, 1e-9);
+    try testing.expect(relief.strokes[0].terminal.trim_start);
+    try testing.expect(!relief.strokes[0].terminal.trim_end);
+    for (relief.openings[0].poly) |point| try testing.expect(point[0] >= 5 - 1e-9);
 }
 
 // spec: placement/mask-relief - a pad-dam termination uses the authored mask-relief corner radius without weakening the mask web
