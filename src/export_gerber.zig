@@ -125,7 +125,7 @@ pub const matlab_rf_paths = struct {
 /// callers in the export and serve layers keep their historical spelling.
 pub const Copper = routed_copper.Copper;
 
-pub const Error = std.Io.Writer.Error || std.mem.Allocator.Error;
+pub const Error = std.Io.Writer.Error || std.mem.Allocator.Error || error{InvalidCopperRegion};
 
 /// Rebuild the router-shaped view `path_copper` consumes from the persisted
 /// export bundle. The returned slices still belong to `copper`; only the
@@ -457,7 +457,7 @@ fn writeCopper(g: *Gx, placement: optimizer.Placement, copper: Copper, side: opt
         // so the declared copper recedes by the clearance around it (no short).
         var pspec: pour.LayerSpec = .{ .net = pnet, .side = side, .track_layer = li };
         pspec.higher = try pour.higherThanDeclared(g.arena, copper.zones, li, pnet);
-        const fill = try pour.computeShared(g.arena, placement, .{ .tracks = copper.tracks, .vias = copper.vias, .rf_paths = copper.rf_paths }, pspec, g.edge);
+        const fill = try pour.computeShared(g.arena, placement, .{ .tracks = copper.tracks, .vias = copper.vias, .arcs = copper.arcs, .rf_paths = copper.rf_paths }, pspec, g.edge);
         try writeComputedFill(g, fill);
     }
 
@@ -554,8 +554,7 @@ fn writeUserZone(g: *Gx, placement: optimizer.Placement, copper: Copper, side: ?
     var spec = pour.zoneLayerSpec(z.net, side, z.layer, z.poly);
     // Clear the fill back from any higher-priority overlapping pour on this layer.
     spec.higher = try pour.higherPolys(g.arena, copper.zones, zi);
-    const fill = try pour.computeShared(g.arena, placement, .{ .tracks = copper.tracks, .vias = copper.vias, .rf_paths = copper.rf_paths }, spec, g.edge);
-    if (fill.contours.len == 0) return;
+    const fill = try pour.computeShared(g.arena, placement, .{ .tracks = copper.tracks, .vias = copper.vias, .arcs = copper.arcs, .rf_paths = copper.rf_paths }, spec, g.edge);
     try writeComputedFill(g, fill);
 }
 
@@ -570,6 +569,7 @@ fn writeUserZone(g: *Gx, placement: optimizer.Placement, copper: Copper, side: ?
 /// descending area order. A later nested contour then restores its copper
 /// after the parent's clear pass, matching the fill's even-odd geometry.
 fn writeComputedFill(g: *Gx, fill: pour.Fill) Error!void {
+    if (!fill.integrity_ok) return error.InvalidCopperRegion;
     const order = try g.arena.alloc(usize, fill.contours.len);
     for (order, 0..) |*idx, i| idx.* = i;
     std.mem.sort(usize, order, fill.contours, contourAreaDesc);
@@ -628,24 +628,48 @@ fn writeInnerCopper(g: *Gx, placement: optimizer.Placement, copper: Copper, sig:
 
 /// Inner plane: the COMPUTED fill (kept components only — orphan islands and a
 /// plane split by a foreign trace are dropped, not shipped as believed copper)
-/// as the dark base, clearance antipads punched over every foreign drilled hole
-/// / via, then 4-spoke thermal reliefs on the same-net through-hole barrels (so
-/// plane-tied THT pads are reworkable). Same-net vias stay solid.
+/// including its retained clear holes, then guarded 4-spoke thermal reliefs on
+/// same-net through-hole barrels. Full foreign lands plus exact drill/via
+/// clearances are applied LAST, so no dark thermal operation can repaint an
+/// antipad. Emitting the fill's holes is still load-bearing for every other
+/// retained void and for byte parity with the editor.
 fn writePlane(g: *Gx, placement: optimizer.Placement, copper: Copper, pl: PlaneLayer) Error!void {
-    const pc = placement.rules.design.pour_clearance;
     const pnet: pour.PlaneNet = if (pl.net == .ground) .ground else .{ .named = pl.net.named };
     const physical_tracks = try physicalTracks(g.arena, copper);
-    const fill = try pour.computeShared(g.arena, placement, .{ .tracks = physical_tracks, .vias = copper.vias }, .{ .net = pnet }, g.edge);
-    for (fill.contours) |poly| try regionPoly(g, poly);
-    try g.polarity(false);
+    const physical_arcs = try physicalArcs(g.arena, copper);
+    const fill = try pour.computeShared(g.arena, placement, .{ .tracks = physical_tracks, .vias = copper.vias, .arcs = physical_arcs }, .{ .net = pnet }, g.edge);
+    try writeComputedFill(g, fill);
     const nets = try padNets(g.arena, placement);
+    try thermalReliefs(g, placement, nets, pl.net, fill);
+    try planeForeignClearances(g, placement, copper, pl, nets);
+}
+
+/// Final clear-polarity guard for an inner plane. A plated through-hole's
+/// foreign copper is its full expanded land, not merely its drill. The exact
+/// drill/slot and via apertures are repeated as well. This pass deliberately
+/// follows every dark thermal operation, making a late spoke unable to restore
+/// copper inside any foreign feature even when the fill's void is an
+/// exterior-connected notch rather than an interior `fill.holes` loop.
+fn planeForeignClearances(
+    g: *Gx,
+    placement: optimizer.Placement,
+    copper: Copper,
+    pl: PlaneLayer,
+    nets: std.StringHashMapUnmanaged(usize),
+) Error!void {
+    const base = placement.rules.design.pour_clearance;
+    const pnet: pour.PlaneNet = if (pl.net == .ground) .ground else .{ .named = pl.net.named };
+    try g.polarity(false);
     for (placement.parts) |p| {
         for (p.pads) |pad| {
-            if (pad.drill <= 0) continue;
+            const plated_land = pad.thru and !pad.npth;
+            if (pad.drill <= 0 and !plated_land) continue;
             const pad_net = netOfPad(nets, placement, p.ref_des, pad.number);
             const foreign = pad.npth or !planeCarries(pl.net, pad_net);
             if (!foreign) continue;
-            const gap = pourClearanceNamed(placement, pad_net, pc);
+            const gap = pourClearanceNamed(placement, pad_net, base);
+            if (plated_land) try clearPadLand(g, p, pad, gap);
+            if (pad.drill <= 0) continue;
             try g.use(.c, pad.drill + 2 * gap, 0);
             if (pad.isSlot()) {
                 // An oval hole's antipad is the capsule swept by the cleared
@@ -661,12 +685,21 @@ fn writePlane(g: *Gx, placement: optimizer.Placement, copper: Copper, pl: PlaneL
     }
     for (copper.vias) |v| {
         if (planeCarries(pl.net, netName(placement, v.net))) continue;
-        const gap = pour.viaPlaneClearance(placement, v, pnet, pc);
+        const gap = pour.viaPlaneClearance(placement, v, pnet, base);
         try g.use(.c, v.dia + 2 * gap, 0);
         try g.flash(v.x, v.y);
     }
     try g.polarity(true);
-    try thermalReliefs(g, placement, nets, pl.net);
+}
+
+/// Flash an expanded pad as unclassified CLEAR geometry. `flashPad` ordinarily
+/// tags a copper aperture as ComponentPad; an antipad is not a component pad,
+/// so temporarily use the same unclassified path mask/paste calls take.
+fn clearPadLand(g: *Gx, p: optimizer.Part, pad: geometry.Pad, gap: f64) Error!void {
+    const copper = g.copper;
+    g.copper = false;
+    defer g.copper = copper;
+    try flashPad(g, p, pad, gap);
 }
 
 fn pourClearanceNamed(placement: optimizer.Placement, name: []const u8, base: f64) f64 {
@@ -683,37 +716,107 @@ fn pourClearanceNamed(placement: optimizer.Placement, name: []const u8, base: f6
 /// author-tunable this round).
 const thermal_spoke_mm: f64 = @max(0.3, (router.RouteParams{}).track_width);
 
-/// Emit 4-spoke thermal reliefs for every same-net THROUGH-HOLE pad the plane
-/// `net` carries: clear an isolation ring (gap = pour clearance) around each,
-/// re-flash its land, and bridge the ring with an axis-aligned copper cross.
-/// SMD same-net pads and vias are left solid (the KiCad default).
-fn thermalReliefs(g: *Gx, pl: optimizer.Placement, nets: std.StringHashMapUnmanaged(usize), net: PlaneNet) Error!void {
+/// Emit guarded 4-spoke thermal reliefs for every same-net THROUGH-HOLE pad the
+/// plane `net` carries. A cross whose conservative bounding square does not fit
+/// wholly inside one retained fill solid falls back to a solid pad flash: that
+/// keeps the required inner land and connection without painting beyond the
+/// computed pour. SMD same-net pads and vias remain solid.
+fn thermalReliefs(g: *Gx, pl: optimizer.Placement, nets: std.StringHashMapUnmanaged(usize), net: PlaneNet, fill: pour.Fill) Error!void {
     const gap = pl.rules.design.pour_clearance;
     for (pl.parts) |p| {
         for (p.pads) |pad| {
             if (pad.npth or !pad.thru or pad.drill <= 0) continue;
             if (!planeCarries(net, netOfPad(nets, pl, p.ref_des, pad.number))) continue;
-            try thermalRelief(g, p, pad, gap);
+            try thermalRelief(g, p, pad, gap, fill);
         }
     }
 }
 
 /// One pad's thermal relief: a clear isolation ring (pad copper + `gap`), then
 /// the dark land re-flash plus a horizontal and vertical spoke crossing it.
-fn thermalRelief(g: *Gx, p: optimizer.Part, pad: geometry.Pad, gap: f64) Error!void {
+/// The spoke caps extend half their width beyond the cleared ring, enough to
+/// join the surrounding plane without the former extra-width overpaint.
+fn thermalRelief(g: *Gx, p: optimizer.Part, pad: geometry.Pad, gap: f64, fill: pour.Fill) Error!void {
     const sh = try pad_shape.worldShape(g.arena, p, pad);
     const cx = (sh.x0 + sh.x1) / 2;
     const cy = (sh.y0 + sh.y1) / 2;
     const rout = @max(sh.x1 - sh.x0, sh.y1 - sh.y0) / 2 + gap;
+    const bound_half = rout + thermal_spoke_mm / 2;
+    if (!thermalSquareInsideFill(fill, cx, cy, bound_half)) {
+        try g.polarity(true);
+        return flashPad(g, p, pad, 0);
+    }
     try g.polarity(false);
     try g.use(.c, 2 * rout, 0);
     try g.flash(cx, cy);
     try g.polarity(true);
     try flashPad(g, p, pad, 0);
-    const reach = rout + thermal_spoke_mm;
     try g.useAs(.c, thermal_spoke_mm, 0, .conductor);
-    try g.line(cx - reach, cy, cx + reach, cy);
-    try g.line(cx, cy - reach, cx, cy + reach);
+    try g.line(cx - rout, cy, cx + rout, cy);
+    try g.line(cx, cy - rout, cx, cy + rout);
+}
+
+const ThermalRect = struct { minx: f64, miny: f64, maxx: f64, maxy: f64 };
+
+fn rectCorners(rect: ThermalRect) [4][2]f64 {
+    return .{
+        .{ rect.minx, rect.miny },
+        .{ rect.maxx, rect.miny },
+        .{ rect.maxx, rect.maxy },
+        .{ rect.minx, rect.maxy },
+    };
+}
+
+fn pointInRect(rect: ThermalRect, point: [2]f64) bool {
+    return point[0] >= rect.minx and point[0] <= rect.maxx and
+        point[1] >= rect.miny and point[1] <= rect.maxy;
+}
+
+fn ringTouchesRect(ring: []const [2]f64, rect: ThermalRect, corners: [4][2]f64) bool {
+    for (ring) |point| if (pointInRect(rect, point)) return true;
+    for (corners, 0..) |a, i| {
+        const b = corners[(i + 1) % corners.len];
+        if (outline.segCrossesEdge(ring, a[0], a[1], b[0], b[1]) != null) return true;
+    }
+    return false;
+}
+
+/// Conservative proof that the whole square enclosing a thermal land and both
+/// round-capped spokes lies inside one final fill component and outside every
+/// one of its holes. Requiring the square (rather than only the cross) may
+/// choose a solid fallback beside a harmless diagonal void, but can never
+/// authorize copper outside the DRC-audited pour surface.
+fn thermalSquareInsideFill(fill: pour.Fill, cx: f64, cy: f64, half: f64) bool {
+    if (!fill.integrity_ok) return false;
+    if (fill.holes.len != fill.contours.len) return false;
+    if (!(half > 0)) return false;
+    const rect = ThermalRect{ .minx = cx - half, .miny = cy - half, .maxx = cx + half, .maxy = cy + half };
+    const corners = rectCorners(rect);
+    for (fill.contours, fill.holes) |outer, holes| {
+        var enclosed = true;
+        for (corners) |point| {
+            if (!outline.contains(outer, point[0], point[1]) or outline.distToEdge(outer, point[0], point[1]) <= 1e-9) {
+                enclosed = false;
+                break;
+            }
+        }
+        if (!enclosed or ringTouchesRect(outer, rect, corners)) continue;
+        var clear = true;
+        for (holes) |hole| {
+            for (corners) |point| {
+                if (outline.contains(hole, point[0], point[1]) or outline.distToEdge(hole, point[0], point[1]) <= 1e-9) {
+                    clear = false;
+                    break;
+                }
+            }
+            if (!clear or ringTouchesRect(hole, rect, corners)) {
+                clear = false;
+                break;
+            }
+        }
+        if (clear) return true;
+    }
+    return false;
 }
 
 /// Solder mask (negative: a flash = an OPENING in the mask). SMD pads open
@@ -1909,6 +2012,27 @@ test "nested pour islands survive Gerber polarity ordering" {
     try testing.expect(dark_pos < island_pos);
 }
 
+// A contour-tracing failure is distinct from an empty pour and hard-stops fabrication output.
+test "invalid computed pour is a hard Gerber export error" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const fill: pour.Fill = .{
+        .integrity_ok = false,
+        .frame = undefined,
+        .labels = &.{},
+        .n_comp = 0,
+        .contours = &.{},
+        .holes = &.{},
+        .coarsened = false,
+    };
+    var body: std.Io.Writer.Allocating = .init(arena);
+    var aps = Apertures{};
+    var g = Gx{ .w = &body.writer, .aps = &aps, .arena = arena, .frame = .{} };
+    try testing.expectError(error.InvalidCopperRegion, writeComputedFill(&g, fill));
+}
+
 // spec: export_gerber - a solver RF taper is emitted as one swept polygon rather than its centreline chord apertures
 test "solver RF chords emit one swept copper region" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
@@ -2906,14 +3030,16 @@ test "mask-relief zero tents and a positive pullback opts in" {
 }
 
 // spec: export_gerber - an inner plane pours solid copper and antipads only foreign holes
+// spec: export_gerber - an inner plane emits the pour engine's retained clear regions, so a foreign plated through-hole clears its full inner copper land rather than only its drill
+// spec: export_gerber - an inner plane applies full foreign-land and drill clearances after thermal copper, so a nearby spoke cannot repaint an antipad
 test "plane layer clears foreign holes and connects same-net barrels" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
 
     const pads = [_]geometry.Pad{
-        .{ .number = "1", .x = -1, .y = 0, .w = 1.4, .h = 1.4, .thru = true, .drill = 0.8 },
-        .{ .number = "2", .x = 1, .y = 0, .w = 1.4, .h = 1.4, .thru = true, .drill = 0.8 },
+        .{ .number = "1", .x = -4, .y = 0, .w = 1.4, .h = 1.4, .shape = "circle", .thru = true, .drill = 0.8 },
+        .{ .number = "2", .x = 4, .y = 0, .w = 1.4, .h = 1.4, .shape = "circle", .thru = true, .drill = 0.8 },
     };
     var parts = [_]optimizer.Part{
         .{ .ref_des = "J1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pads, .fallback = false, .x = 10, .y = 5 },
@@ -2934,8 +3060,8 @@ test "plane layer clears foreign holes and connects same-net barrels" {
     placement.rules.net = &rules;
     placement.rules.physical = .{ .board_thickness = 1.6, .stack = .{ .layers = 4, .board_mm = 1.6 } };
     const vias = [_]router.Via{
-        .{ .x = 5, .y = 5, .dia = 0.4, .drill = 0.2, .net = 0 }, // GND via — connects
-        .{ .x = 6, .y = 5, .dia = 0.4, .drill = 0.2, .net = 1 }, // VIN via — antipad
+        .{ .x = 9, .y = 5, .dia = 0.4, .drill = 0.2, .net = 0 }, // GND via — connects
+        .{ .x = 11, .y = 5, .dia = 0.4, .drill = 0.2, .net = 1 }, // VIN via — antipad
     };
 
     var aw: std.Io.Writer.Allocating = .init(arena);
@@ -2945,21 +3071,54 @@ test "plane layer clears foreign holes and connects same-net barrels" {
 
     try testing.expect(std.mem.indexOf(u8, out, "G36*") != null); // the computed pour region
     try testing.expect(std.mem.indexOf(u8, out, "%LPC*%") != null); // clear pass
-    // Foreign pad hole (J1.2 at world (11,5)→(11,5) y-up) antipadded 0.8+0.6.
+    // The computed full-land hole itself must be emitted in clear polarity;
+    // the later circular flashes are supplemental exact drill/via apertures.
+    const clear_pos = std.mem.indexOf(u8, out, "%LPC*%").?;
+    const clear_region_pos = std.mem.indexOfPos(u8, out, clear_pos, "G36*").?;
+    const dark_again_pos = std.mem.indexOfPos(u8, out, clear_region_pos, "%LPD*%").?;
+    try testing.expect(clear_region_pos < dark_again_pos);
+    // Foreign pad J1.2 at world (14,5): its full 1.4 mm land + 0.3 mm
+    // clearance is emitted after the safe thermal at J1.1, followed by the
+    // exact 0.8 mm drill + clearance. Two final clear flashes at one point
+    // prove the land was not reduced to its drill aperture.
     try testing.expect(std.mem.indexOf(u8, out, "C,1.400000*%") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "X11000000Y5000000D03*") != null);
-    // Same-net GND THT barrel at (9,5) is THERMALLY RELIEVED (not solid): a
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, out, "X14000000Y5000000D03*"));
+    const thermal_line = std.mem.indexOf(u8, out, "X5000000Y5000000D02*\nX7000000Y5000000D01*").?;
+    const final_clear = std.mem.indexOfPos(u8, out, thermal_line, "%LPC*%").?;
+    const foreign_after_thermal = std.mem.indexOfPos(u8, out, final_clear, "X14000000Y5000000D03*").?;
+    try testing.expect(thermal_line < final_clear and final_clear < foreign_after_thermal);
+    // Same-net GND THT barrel at (6,5) is THERMALLY RELIEVED (not solid): a
     // clear isolation ring (pad 1.4 + 0.3 gap ⇒ C,2.0) flashes at its centre,
     // and 0.3 mm spokes bridge the gap.
     try testing.expect(std.mem.indexOf(u8, out, "C,2.000000*%") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "X9000000Y5000000D03*") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "X6000000Y5000000D03*") != null);
     try testing.expect(std.mem.indexOf(u8, out, "C,0.300000*%") != null); // spoke aperture
     // Foreign via antipadded; same-net GND via connects solid (no flash).
     const expected_via_antipad = vias[1].dia + 2 * pour.viaPlaneClearance(placement, vias[1], .ground, placement.rules.design.pour_clearance);
     const aperture = try std.fmt.allocPrint(arena, "C,{d:.6}*%", .{expected_via_antipad});
     try testing.expect(std.mem.indexOf(u8, out, aperture) != null);
-    try testing.expect(std.mem.indexOf(u8, out, "X6000000Y5000000D03*") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "X5000000Y5000000D03*") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "X11000000Y5000000D03*") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "X9000000Y5000000D03*") == null);
+}
+
+// spec: export_gerber - a plane thermal emits dark spokes only when their full bounding square stays inside one retained fill solid; otherwise the same-net land falls back to a safe solid connection
+test "plane thermal bounding square rejects board edges and clearance holes" {
+    const outer = [_][2]f64{ .{ 0, 0 }, .{ 10, 0 }, .{ 10, 10 }, .{ 0, 10 } };
+    const hole = [_][2]f64{ .{ 6, 4 }, .{ 8, 4 }, .{ 8, 6 }, .{ 6, 6 } };
+    const holes = [_][]const [2]f64{&hole};
+    const all_holes = [_][]const []const [2]f64{&holes};
+    const fill = pour.Fill{
+        .frame = undefined,
+        .labels = &.{},
+        .n_comp = 1,
+        .contours = &.{&outer},
+        .holes = &all_holes,
+        .coarsened = false,
+    };
+
+    try testing.expect(thermalSquareInsideFill(fill, 3, 5, 1));
+    try testing.expect(!thermalSquareInsideFill(fill, 0.8, 5, 1));
+    try testing.expect(!thermalSquareInsideFill(fill, 5.5, 5, 1));
 }
 
 // spec: placement/implicit-plane - the implicit rail plane pours In2 and antipads the holes it does not carry

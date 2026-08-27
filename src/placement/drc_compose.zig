@@ -18,6 +18,7 @@
 
 const std = @import("std");
 const drc = @import("drc.zig");
+const drc_pour = @import("drc_pour.zig");
 const drc_return_path = @import("drc_return_path.zig");
 const fill_cache = @import("fill_cache.zig");
 const bypass_open = @import("bypass_open.zig");
@@ -197,20 +198,23 @@ fn filledViolationsReport(alloc: std.mem.Allocator, in: CopperCheck, board: Boar
         return .{ .violations = fallback, .complete = false };
     }
     const zones = board.fills.zones;
+    const prepared = drc.PreparedCopper{
+        .topology_zones = zones,
+        .plane_fills = board.fills.plane_fills,
+        .zones = in.zones,
+        .zone_fills = board.fills.zone_fills,
+    };
     const base = drc.checkWithPreparedCopper(
         alloc,
         in.placement,
         in.routed,
         in.clearance,
-        .{
-            .topology_zones = zones,
-            .plane_fills = board.fills.plane_fills,
-            .zones = in.zones,
-            .zone_fills = board.fills.zone_fills,
-        },
+        prepared,
     ) catch return .{ .violations = &.{}, .complete = false };
     var out: std.ArrayList(drc.Violation) = .empty;
     out.appendSlice(alloc, base) catch return .{ .violations = base, .complete = false };
+    const pour_violations = drc_pour.check(alloc, in.placement, in.routed, prepared) catch return .{ .violations = base, .complete = false };
+    out.appendSlice(alloc, pour_violations) catch return .{ .violations = base, .complete = false };
     drc_return_path.check(alloc, &out, in.placement, in.routed, zones) catch return .{ .violations = base, .complete = false };
     return .{ .violations = out.items, .complete = true };
 }
@@ -253,8 +257,18 @@ fn filledTopology(alloc: std.mem.Allocator, in: CopperCheck) std.mem.Allocator.E
     var out: std.ArrayList(drc.TopologyZone) = .empty;
     var plane_fills: std.ArrayList(pour.NetFills) = .empty;
     var component: u64 = 1;
-    const physical_tracks = try path_copper.tracks(alloc, in.routed);
-    const copper = pour.Copper{ .tracks = physical_tracks, .vias = in.routed.vias, .zones = in.zones };
+    // Keep the compact route plus its geometry proof intact here. Gerber
+    // passes this exact spelling to `computeShared`: the pour engine suppresses
+    // RF-owned handles/native arcs itself and carves the finished swept path.
+    // Pre-lowering to max-width capsules would make reporting DRC retain a
+    // different (over-cleared) fill from the one actually fabricated.
+    const copper = pour.Copper{
+        .tracks = in.routed.tracks,
+        .vias = in.routed.vias,
+        .arcs = in.routed.arcs,
+        .rf_paths = in.routed.rf_port_outcomes,
+        .zones = in.zones,
+    };
     // Every plane, pour and zone below rasters the SAME board on the SAME
     // lattice, so the outline walk that seeds each cell's edge margin is done
     // once here and copied per fill. `base_edge` is the whole render's field
@@ -308,7 +322,13 @@ fn filledTopology(alloc: std.mem.Allocator, in: CopperCheck) std.mem.Allocator.E
     const zone_fills = try net_open.zoneFills(
         alloc,
         in.placement,
-        .{ .tracks = physical_tracks, .vias = in.routed.vias, .zones = in.zones },
+        .{
+            .tracks = in.routed.tracks,
+            .vias = in.routed.vias,
+            .arcs = in.routed.arcs,
+            .rf_paths = in.routed.rf_port_outcomes,
+            .zones = in.zones,
+        },
         base,
     );
     return .{
@@ -329,6 +349,8 @@ fn withNetOpenReport(
 ) CheckReport {
     const empty: net_open.Report = .{ .violations = &.{}, .connectivity = &.{} };
     const tracks = connectivityTracks(alloc, in.routed) catch return .{ .violations = geom.violations, .net_report = empty, .complete = false };
+    const arcs = path_copper.filterArcs(alloc, in.routed.rf_port_outcomes, in.routed.arcs) catch
+        return .{ .violations = geom.violations, .net_report = empty, .complete = false };
     const prepared: net_open.Prepared = .{
         .base = in.base_edge,
         .plane_fills = board.fills.plane_fills,
@@ -337,7 +359,7 @@ fn withNetOpenReport(
         // failed pass asks for its own rather than claiming there are no zones.
         .zone_fills = if (board.failed) null else board.fills.zone_fills,
     };
-    const report = net_open.checkWithConnectivity(alloc, in.placement, .{ .tracks = tracks, .vias = in.routed.vias, .zones = in.zones }, prepared) catch
+    const report = net_open.checkWithConnectivity(alloc, in.placement, .{ .tracks = tracks, .vias = in.routed.vias, .arcs = arcs, .zones = in.zones }, prepared) catch
         return .{ .violations = geom.violations, .net_report = empty, .complete = false };
     const connectivity_complete = !board.failed and report.connectivity.len == in.placement.nets.len;
     if (report.violations.len == 0) return .{ .violations = geom.violations, .net_report = report, .complete = geom.complete and connectivity_complete };
@@ -354,6 +376,17 @@ fn withNetOpenReport(
 /// reclassifying its implementation samples as editable track segments.
 fn connectivityTracks(alloc: std.mem.Allocator, r: router.RouteResult) std.mem.Allocator.Error![]const router.Track {
     return path_copper.tracks(alloc, r);
+}
+
+fn exactFillKeepsCopperLoweringRemoves(exact: pour.Fill, lowered: pour.Fill) bool {
+    var y: f64 = 4.0;
+    while (y <= 6.0) : (y += 0.05) {
+        var x: f64 = 2.0;
+        while (x <= 4.0) : (x += 0.05) {
+            if (exact.componentAt(x, y) >= 0 and lowered.componentAt(x, y) < 0) return true;
+        }
+    }
+    return false;
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
@@ -425,4 +458,92 @@ test "a memoised board fill returns the verdict the pour that built it returned"
     var moved = fill_cache.acquire(fill_cache.key(placement, empty, &zones));
     defer moved.release();
     try testing.expect(moved.entry == null);
+}
+
+// spec: placement/drc - reporting DRC retains the same exact variable-width RF carve that Gerber computes from the raw route proof
+test "filled topology and Gerber proof carve the same RF taper" {
+    const testing = std.testing;
+    const rf_path_solver = @import("rf_path_solver.zig");
+    const rf_port_report = @import("rf_port_report.zig");
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const alloc = arena_inst.allocator();
+
+    const nets = [_]optimizer.FlatNet{
+        .{ .name = "GND", .pins = &.{} },
+        .{ .name = "RF", .pins = &.{} },
+    };
+    const placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 10,
+        .maxy = 10,
+        .generated = true,
+        .board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 10 },
+        .rules = .{ .copper_layers = 2, .design = .{ .pour = .{ .clearance_outer = 0.2 } } },
+    };
+    const samples = [_]rf_path_solver.Sample{
+        .{ .at = .{ 2, 5 }, .s_mm = 0, .curvature = 0, .width_mm = 0.2 },
+        .{ .at = .{ 8, 5 }, .s_mm = 6, .curvature = 0, .width_mm = 1.0 },
+    };
+    const outcomes = [_]rf_port_report.Outcome{.{
+        .net = 1,
+        .chosen = 0,
+        .feasible = true,
+        .success = true,
+        .metrics = .{},
+        .trials = &.{},
+        .physical = .{ .sample_count = samples.len, .samples = &samples, .layer = 0 },
+    }};
+    const handle = [_]router.Track{.{
+        .x1 = 2,
+        .y1 = 5,
+        .x2 = 8,
+        .y2 = 5,
+        .layer = 0,
+        .width = 0.2,
+        .net = 1,
+    }};
+    const zone_poly = [_][2]f64{ .{ 0.2, 0.2 }, .{ 9.8, 0.2 }, .{ 9.8, 9.8 }, .{ 0.2, 9.8 } };
+    const zones = [_]pour.UserZone{.{ .net = "GND", .layer = 0, .poly = &zone_poly }};
+    const routed = router.RouteResult{
+        .tracks = &handle,
+        .vias = &.{},
+        .rf_port_outcomes = &outcomes,
+        .routed = 1,
+        .total = 1,
+    };
+    const in: CopperCheck = .{ .placement = placement, .routed = routed, .clearance = 0.127, .zones = &zones };
+    const retained = try filledTopology(alloc, in);
+    try testing.expectEqual(@as(usize, 1), retained.zone_fills.len);
+
+    const base = try pour.sharedEdgeField(alloc, placement);
+    const spec = pour.zoneLayerSpec("GND", .top, 0, &zone_poly);
+    const exact = try pour.computeShared(alloc, placement, .{
+        .tracks = &handle,
+        .rf_paths = &outcomes,
+        .zones = &zones,
+    }, spec, base);
+    try testing.expectEqual(@as(usize, 1), exact.contours.len);
+    try testing.expectEqual(@as(usize, 1), retained.zones.len);
+    try testing.expectEqualSlices([2]f64, exact.contours[0], retained.zones[0].poly);
+    try testing.expectEqual(@as(usize, 1), exact.holes[0].len);
+    try testing.expectEqual(@as(usize, 1), retained.zones[0].holes.len);
+    try testing.expectEqualSlices([2]f64, exact.holes[0][0], retained.zones[0].holes[0]);
+    try testing.expectEqual(exact.integrity_ok, retained.zone_fills[0].integrity_ok);
+    try testing.expectEqual(exact.n_comp, retained.zone_fills[0].n_comp);
+    try testing.expectEqualSlices(i32, exact.labels, retained.zone_fills[0].labels);
+
+    // Prove this fixture catches the old adapter: its max-endpoint-width
+    // capsule removes copper near the narrow end that the tapered film keeps.
+    const lowered_tracks = try path_copper.tracks(alloc, routed);
+    const lowered = try pour.computeShared(alloc, placement, .{ .tracks = lowered_tracks, .zones = &zones }, spec, base);
+    try testing.expect(exactFillKeepsCopperLoweringRemoves(exact, lowered));
 }

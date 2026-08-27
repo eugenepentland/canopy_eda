@@ -908,6 +908,7 @@ src/gerber_verify.zig::Arc struct_
 src/gerber_verify.zig::ExpectFlash struct_
 src/gerber_verify.zig::ExpectSegment struct_
 src/gerber_verify.zig::Flash struct_
+src/gerber_verify.zig::IntegrityError value
 src/gerber_verify.zig::Miss struct_
 src/gerber_verify.zig::Op union_
 src/gerber_verify.zig::ParseError value
@@ -919,6 +920,7 @@ src/gerber_verify.zig::eps_mm value
 src/gerber_verify.zig::ok | fn ok(self: Report) bool
 src/gerber_verify.zig::parse | fn parse(arena: std.mem.Allocator, bytes: []const u8) ParseError!Parsed
 src/gerber_verify.zig::verifyCopperLayer | fn verifyCopperLayer( arena: std.mem.Allocator, gerber_bytes: []const u8, frame: export_fab.Frame, flashes: []const ExpectFlash, segments: []const ExpectSegment, ) ParseError!Report
+src/gerber_verify.zig::verifyRegionIntegrity | fn verifyRegionIntegrity(arena: std.mem.Allocator, bytes: []const u8) IntegrityError!void
 src/githash.zig::fullHash | fn fullHash(io: std.Io, gpa: std.mem.Allocator, repo_root: []const u8) ?[]const u8
 src/githash.zig::shortHash | fn shortHash(io: std.Io, gpa: std.mem.Allocator, repo_root: []const u8) ?[]const u8
 src/githash.zig::short_len value
@@ -1731,6 +1733,7 @@ src/placement/drc_match.zig::Copper struct_
 src/placement/drc_match.zig::check | fn check( arena: std.mem.Allocator, out: *std.ArrayList(drc.Violation), placement: optimizer.Placement, copper: Copper, ) std.mem.Allocator.Error!void
 src/placement/drc_match.zig::measure | fn measure( arena: std.mem.Allocator, placement: optimizer.Placement, copper: Copper, ) std.mem.Allocator.Error![]const match_group.Report
 src/placement/drc_perimeter_keepout.zig::check | fn check( arena: std.mem.Allocator, out: *std.ArrayList(drc.Violation), placement: optimizer.Placement, tracks: []const router.Track, vias: []const router.Via, ) std.mem.Allocator.Error!void
+src/placement/drc_pour.zig::check | fn check( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, prepared: drc.PreparedCopper, ) std.mem.Allocator.Error![]const drc.Violation
 src/placement/drc_return_path.zig::check | fn check( arena: std.mem.Allocator, out: *std.ArrayList(drc.Violation), placement: optimizer.Placement, routed: router.RouteResult, zones: []const copper_support.Zone, ) std.mem.Allocator.Error!void
 src/placement/drc_return_path.zig::default_stitch_radius_mm value
 src/placement/edge_rotation.zig::choose | fn choose(pads: []const geometry.Pad, hw: f64, hh: f64, edge: u2) f64

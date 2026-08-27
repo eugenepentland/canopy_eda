@@ -9,6 +9,7 @@
 const std = @import("std");
 const export_fab = @import("export_fab.zig");
 const export_gerber = @import("export_gerber.zig");
+const gerber_verify = @import("gerber_verify.zig");
 const font = @import("font5x7.zig");
 const mask_relief = @import("placement/mask_relief.zig");
 const optimizer = @import("placement/optimizer.zig");
@@ -16,7 +17,7 @@ const pour = @import("placement/pour.zig");
 const subcircuit_silkscreen = @import("subcircuit_silkscreen.zig");
 const testpoint_silkscreen = @import("testpoint_silkscreen.zig");
 
-pub const Error = export_gerber.Error || error{NoSilkscreenSpace};
+pub const Error = export_gerber.Error || gerber_verify.IntegrityError || error{NoSilkscreenSpace};
 
 /// The compact board mark and its complete lookup digest. `text`, when the
 /// placement is a complete board, and all slices are owned by the allocator
@@ -102,6 +103,10 @@ pub fn build(
     for (layers) |layer| {
         var bytes: std.Io.Writer.Allocating = .init(arena);
         try export_gerber.writeLayer(&bytes.writer, arena, placement, copper, identity_texts, frame, layer.layer, .{ .function = layer.function, .silk = &silk, .edge = edge });
+        switch (layer.layer) {
+            .copper, .plane, .inner_signal => try gerber_verify.verifyRegionIntegrity(arena, bytes.written()),
+            else => {},
+        }
         hashMember(&hash, layer.suffix, bytes.written());
     }
 

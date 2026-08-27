@@ -680,7 +680,7 @@ fn precomputePours(arena: std.mem.Allocator, p: optimizer.Placement, routed: ?ro
     var out: std.ArrayList(PrecomputedPour) = .empty;
     const copper: pour.Copper = if (routed) |rt| blk: {
         const physical = physicalRoute(arena, rt) catch return &.{};
-        break :blk .{ .tracks = physical.tracks, .vias = physical.vias, .rf_paths = rt.rf_port_outcomes };
+        break :blk .{ .tracks = physical.tracks, .vias = physical.vias, .arcs = physical.arcs, .rf_paths = rt.rf_port_outcomes };
     } else .{};
     for ([_]optimizer.Side{ .bottom, .top }) |side| {
         const net = p.rules.pourNetOnSide(side) orelse continue;
@@ -946,7 +946,7 @@ const Ctx = struct {
     /// uncarved pour is consistent with a picture showing no routed copper.
     fn shownCopper(self: *Ctx) pour.Copper {
         const rt = self.opts.routed orelse return .{};
-        return .{ .tracks = rt.tracks, .vias = rt.vias, .rf_paths = rt.rf_port_outcomes };
+        return .{ .tracks = rt.tracks, .vias = rt.vias, .arcs = rt.arcs, .rf_paths = rt.rf_port_outcomes };
     }
 
     /// "NET <kind> - <layer>", stacked up from the board's bottom edge so every
@@ -1420,7 +1420,7 @@ const Ctx = struct {
         if (self.opts.precomputed_pours) |pre| {
             for (pre) |pp| if (pp.side == side) return pp.fill;
         }
-        const copper: pour.Copper = if (self.opts.routed) |rt| .{ .tracks = rt.tracks, .vias = rt.vias, .rf_paths = rt.rf_port_outcomes } else .{};
+        const copper: pour.Copper = if (self.opts.routed) |rt| .{ .tracks = rt.tracks, .vias = rt.vias, .arcs = rt.arcs, .rf_paths = rt.rf_port_outcomes } else .{};
         var spec = pour.outerSpec(net, side);
         // Ranked user pours on this face clear the declared background pour.
         spec.higher = pour.higherThanDeclared(arena, self.opts.user_zones, if (side == .top) 0 else 1, spec.net) catch &.{};

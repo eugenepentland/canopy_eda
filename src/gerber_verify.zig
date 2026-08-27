@@ -66,6 +66,12 @@ pub const Parsed = struct {
 
 pub const ParseError = error{ MalformedCoord, MalformedAperture, MissingFormat, Overflow } || std.mem.Allocator.Error;
 
+/// A copper region that cannot be interpreted as one simple closed boundary is
+/// never safe to hand to a fabricator. This is deliberately separate from the
+/// parser's syntax errors: the Gerber can be perfectly well-formed text while
+/// its G36 polygon is a bow-tie (or collapses after 4.6 quantisation).
+pub const IntegrityError = ParseError || error{InvalidCopperRegion};
+
 /// Parse one RS-274X copper file. Fails only on genuinely malformed input from
 /// our own writer (a coordinate that doesn't fit the 4.6 format, an aperture
 /// def we can't read) — those are the regressions this is meant to catch.
@@ -206,6 +212,159 @@ pub fn parse(arena: std.mem.Allocator, bytes: []const u8) ParseError!Parsed {
         .regions = try regions.toOwnedSlice(arena),
         .ops = try ops.toOwnedSlice(arena),
     };
+}
+
+/// Read back the FINAL 4.6-coordinate region vertices and reject any G36/G37
+/// boundary that is degenerate, retraces itself, touches a non-neighbour edge,
+/// or crosses itself. The check runs on quantised coordinates rather than the
+/// writer's source f64 polygon: two distinct model points may round onto one
+/// CAM point, and it is the bytes a board house receives that must be valid.
+pub fn verifyRegionIntegrity(arena: std.mem.Allocator, bytes: []const u8) IntegrityError!void {
+    try verifyRegionStructure(bytes);
+    const parsed = try parse(arena, bytes);
+    for (parsed.regions) |region| {
+        if (!simpleQuantizedRegion(region.points)) return error.InvalidCopperRegion;
+    }
+}
+
+/// The general CAM-preview parser intentionally tolerates incomplete files so
+/// it can still show whatever a user uploaded. Fabrication identity is
+/// stricter: our writer emits exactly one D02 move, at least three D01 draws
+/// (including its explicit closing draw), and one balanced G36/G37 pair per
+/// boundary. Check that state directly so a short or unterminated region is
+/// not silently omitted from `Parsed.regions` and mistaken for valid output.
+fn verifyRegionStructure(bytes: []const u8) IntegrityError!void {
+    var in_region = false;
+    var moves: usize = 0;
+    var draws: usize = 0;
+    var lines = std.mem.tokenizeAny(u8, bytes, "\r\n");
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t");
+        if (line.len == 0) continue;
+        if (std.mem.eql(u8, line, "G36*")) {
+            if (in_region) return error.InvalidCopperRegion;
+            in_region = true;
+            moves = 0;
+            draws = 0;
+            continue;
+        }
+        if (std.mem.eql(u8, line, "G37*")) {
+            if (!in_region or moves != 1 or draws < 3) return error.InvalidCopperRegion;
+            in_region = false;
+            continue;
+        }
+        if (std.mem.eql(u8, line, "M02*")) {
+            if (in_region) return error.InvalidCopperRegion;
+            break;
+        }
+        if (!in_region) continue;
+        if (std.mem.endsWith(u8, line, "D02*")) {
+            // A second move describes multiple contours inside one G36. Our
+            // writer uses one simple boundary per region and must never emit it.
+            if (moves != 0 or draws != 0) return error.InvalidCopperRegion;
+            moves = 1;
+        } else if (std.mem.endsWith(u8, line, "D01*")) {
+            if (moves != 1) return error.InvalidCopperRegion;
+            draws += 1;
+        } else if (std.mem.endsWith(u8, line, "D03*")) {
+            return error.InvalidCopperRegion;
+        }
+    }
+    if (in_region) return error.InvalidCopperRegion;
+}
+
+const QPoint = [2]i64;
+
+fn quantizedPoint(p: [2]f64) ?QPoint {
+    const scale = 1_000_000.0;
+    const x = p[0] * scale;
+    const y = p[1] * scale;
+    if (!std.math.isFinite(x) or !std.math.isFinite(y)) return null;
+    const min: f64 = @floatFromInt(std.math.minInt(i64));
+    const max: f64 = @floatFromInt(std.math.maxInt(i64));
+    if (x < min or x > max or y < min or y > max) return null;
+    return .{ @intFromFloat(@round(x)), @intFromFloat(@round(y)) };
+}
+
+fn qEq(a: QPoint, b: QPoint) bool {
+    return a[0] == b[0] and a[1] == b[1];
+}
+
+fn qOrient(a: QPoint, b: QPoint, c: QPoint) i128 {
+    return (@as(i128, b[0]) - @as(i128, a[0])) * (@as(i128, c[1]) - @as(i128, a[1])) -
+        (@as(i128, b[1]) - @as(i128, a[1])) * (@as(i128, c[0]) - @as(i128, a[0]));
+}
+
+fn qOnSegment(p: QPoint, a: QPoint, b: QPoint) bool {
+    return qOrient(a, b, p) == 0 and
+        p[0] >= @min(a[0], b[0]) and p[0] <= @max(a[0], b[0]) and
+        p[1] >= @min(a[1], b[1]) and p[1] <= @max(a[1], b[1]);
+}
+
+fn qBoxesOverlap(a: QPoint, b: QPoint, c: QPoint, d: QPoint) bool {
+    return @max(@min(a[0], b[0]), @min(c[0], d[0])) <= @min(@max(a[0], b[0]), @max(c[0], d[0])) and
+        @max(@min(a[1], b[1]), @min(c[1], d[1])) <= @min(@max(a[1], b[1]), @max(c[1], d[1]));
+}
+
+fn qOpposite(a: i128, b: i128) bool {
+    return (a > 0 and b < 0) or (a < 0 and b > 0);
+}
+
+/// Touching counts: a non-adjacent vertex on an edge and a collinear overlap
+/// are just as ambiguous to a region fill as a proper crossing.
+fn qSegmentsTouch(a: QPoint, b: QPoint, c: QPoint, d: QPoint) bool {
+    if (!qBoxesOverlap(a, b, c, d)) return false;
+    const abc = qOrient(a, b, c);
+    const abd = qOrient(a, b, d);
+    const cda = qOrient(c, d, a);
+    const cdb = qOrient(c, d, b);
+    if (qOpposite(abc, abd) and qOpposite(cda, cdb)) return true;
+    if (abc == 0 and qOnSegment(c, a, b)) return true;
+    if (abd == 0 and qOnSegment(d, a, b)) return true;
+    if (cda == 0 and qOnSegment(a, c, d)) return true;
+    return cdb == 0 and qOnSegment(b, c, d);
+}
+
+fn simpleQuantizedRegion(points: []const [2]f64) bool {
+    // One simple writer-owned boundary has at least three distinct vertices
+    // plus exactly one explicit copy of the first. Missing closure is not
+    // repaired here, and a second closing copy is a zero-length Gerber edge.
+    if (points.len < 4) return false;
+    const first = quantizedPoint(points[0]) orelse return false;
+    const last = quantizedPoint(points[points.len - 1]) orelse return false;
+    if (!qEq(first, last)) return false;
+    const n = points.len - 1;
+    const before_close = quantizedPoint(points[n - 1]) orelse return false;
+    if (qEq(first, before_close)) return false;
+    if (n < 3) return false;
+
+    var area2: i128 = 0;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const a = quantizedPoint(points[i]) orelse return false;
+        const b = quantizedPoint(points[(i + 1) % n]) orelse return false;
+        if (qEq(a, b)) return false;
+        area2 += @as(i128, a[0]) * @as(i128, b[1]) - @as(i128, b[0]) * @as(i128, a[1]);
+
+        var j = i + 1;
+        while (j < n) : (j += 1) {
+            const c = quantizedPoint(points[j]) orelse return false;
+            const d = quantizedPoint(points[(j + 1) % n]) orelse return false;
+            const adjacent = (i + 1) % n == j or (j + 1) % n == i;
+            if (adjacent) {
+                // Adjacent collinear edges may continue in the same direction;
+                // reversing direction retraces copper and is not a boundary.
+                const abx = @as(i128, b[0]) - @as(i128, a[0]);
+                const aby = @as(i128, b[1]) - @as(i128, a[1]);
+                const cdx = @as(i128, d[0]) - @as(i128, c[0]);
+                const cdy = @as(i128, d[1]) - @as(i128, c[1]);
+                if (abx * cdy - aby * cdx == 0 and abx * cdx + aby * cdy < 0) return false;
+                continue;
+            }
+            if (qSegmentsTouch(a, b, c, d)) return false;
+        }
+    }
+    return area2 != 0;
 }
 
 /// Flatten one native interpolation while it is part of a G36/G37 contour.
@@ -450,6 +609,124 @@ const router = @import("placement/router.zig");
 const geometry = @import("placement/geometry.zig");
 const export_gerber = @import("export_gerber.zig");
 const export_kicad = @import("export_kicad.zig");
+
+test "copper region integrity rejects a self crossing after Gerber read-back" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    const square =
+        \\%FSLAX46Y46*%
+        \\G36*
+        \\X0Y0D02*
+        \\X1000000Y0D01*
+        \\X1000000Y1000000D01*
+        \\X0Y1000000D01*
+        \\X0Y0D01*
+        \\G37*
+        \\M02*
+    ;
+    try verifyRegionIntegrity(arena, square);
+
+    const bow_tie =
+        \\%FSLAX46Y46*%
+        \\G36*
+        \\X0Y0D02*
+        \\X1000000Y1000000D01*
+        \\X0Y1000000D01*
+        \\X1000000Y0D01*
+        \\X0Y0D01*
+        \\G37*
+        \\M02*
+    ;
+    try testing.expectError(error.InvalidCopperRegion, verifyRegionIntegrity(arena, bow_tie));
+}
+
+test "copper region integrity rejects vertices collapsed by CAM quantisation" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // Two consecutive model vertices have both become X1Y0 in the actual 4.6
+    // byte stream. A pre-write f64 check cannot see this failure mode.
+    const collapsed =
+        \\%FSLAX46Y46*%
+        \\G36*
+        \\X0Y0D02*
+        \\X1Y0D01*
+        \\X1Y0D01*
+        \\X1000000Y1000000D01*
+        \\X0Y1000000D01*
+        \\X0Y0D01*
+        \\G37*
+        \\M02*
+    ;
+    try testing.expectError(error.InvalidCopperRegion, verifyRegionIntegrity(arena, collapsed));
+}
+
+test "strict copper integrity rejects malformed region framing and closure" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    const nested =
+        \\%FSLAX46Y46*%
+        \\G36*
+        \\X0Y0D02*
+        \\G36*
+        \\X0Y0D02*
+        \\X1000000Y0D01*
+        \\X0Y1000000D01*
+        \\X0Y0D01*
+        \\G37*
+        \\M02*
+    ;
+    const short =
+        \\%FSLAX46Y46*%
+        \\G36*
+        \\X0Y0D02*
+        \\X0Y0D01*
+        \\G37*
+        \\M02*
+    ;
+    const unterminated =
+        \\%FSLAX46Y46*%
+        \\G36*
+        \\X0Y0D02*
+        \\X1000000Y0D01*
+        \\X0Y1000000D01*
+        \\X0Y0D01*
+        \\M02*
+    ;
+    const double_close =
+        \\%FSLAX46Y46*%
+        \\G36*
+        \\X0Y0D02*
+        \\X1000000Y0D01*
+        \\X0Y1000000D01*
+        \\X0Y0D01*
+        \\X0Y0D01*
+        \\G37*
+        \\M02*
+    ;
+    const missing_close =
+        \\%FSLAX46Y46*%
+        \\G36*
+        \\X0Y0D02*
+        \\X1000000Y0D01*
+        \\X1000000Y1000000D01*
+        \\X0Y1000000D01*
+        \\G37*
+        \\M02*
+    ;
+    for ([_][]const u8{ nested, short, unterminated, double_close, missing_close }) |bytes|
+        try testing.expectError(error.InvalidCopperRegion, verifyRegionIntegrity(arena, bytes));
+
+    // Preview parsing remains deliberately best-effort: the short boundary is
+    // omitted rather than turning an ordinary CAM preview into a hard error.
+    const preview = try parse(arena, short);
+    try testing.expectEqual(@as(usize, 0), preview.regions.len);
+}
 
 fn testPlacement(parts: []optimizer.Part, nets: []const export_kicad.FlatNet) optimizer.Placement {
     return .{

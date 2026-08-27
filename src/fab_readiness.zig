@@ -1158,9 +1158,9 @@ pub fn netConnectivity(
     placement: optimizer.Placement,
     copper: export_gerber.Copper,
 ) std.mem.Allocator.Error![]const NetStatus {
+    const zone_fills = try userZoneFills(arena, placement, copper, null);
     const physical = try export_gerber.physicalCopper(arena, copper);
     var out: std.ArrayList(NetStatus) = .empty;
-    const zone_fills = try userZoneFills(arena, placement, physical, null);
     const identity = try net_identity.Identity.init(arena, placement);
     for (placement.nets, 0..) |net, net_i| {
         const graph = try buildNetGraphPrepared(arena, placement, physical, net, @intCast(net_i), .{ .zone_fills = zone_fills, .identity = identity });
@@ -1308,9 +1308,9 @@ pub fn openNetsAmong(
     names: ?[]const []const u8,
 ) std.mem.Allocator.Error![]const OpenNet {
     if (names) |wanted| if (wanted.len == 0) return &.{};
+    const zone_fills = try userZoneFills(arena, placement, copper, null);
     const physical = try export_gerber.physicalCopper(arena, copper);
     var out: std.ArrayList(OpenNet) = .empty;
-    const zone_fills = try userZoneFills(arena, placement, physical, null);
     const identity = try net_identity.Identity.init(arena, placement);
     for (placement.nets, 0..) |net, ni| {
         if (names) |wanted| {
@@ -1665,9 +1665,10 @@ pub fn buildNetGraph(
     net: export_kicad.FlatNet,
     net_i: i32,
 ) std.mem.Allocator.Error!NetGraph {
+    const zone_fills = try userZoneFills(arena, placement, copper, null);
     const physical = try export_gerber.physicalCopper(arena, copper);
     return buildNetGraphPrepared(arena, placement, physical, net, net_i, .{
-        .zone_fills = try userZoneFills(arena, placement, physical, null),
+        .zone_fills = zone_fills,
         .identity = try net_identity.Identity.init(arena, placement),
     });
 }
@@ -1682,16 +1683,20 @@ pub fn userZoneFills(
     copper: export_gerber.Copper,
     base: ?pour.EdgeField,
 ) std.mem.Allocator.Error![]const pour.Fill {
-    const physical = try export_gerber.physicalCopper(arena, copper);
-    const fills = try arena.alloc(pour.Fill, physical.zones.len);
+    const fills = try arena.alloc(pour.Fill, copper.zones.len);
     // One board, one lattice: seed the edge-margin field once for all zones.
     // `base` is the caller's shared field when the whole render pours the same
     // board (the page render, the fab gate) — without it we seed our own.
     const base_eff = if (base) |b| b else try pour.sharedEdgeField(arena, placement);
-    for (physical.zones, 0..) |z, zi| {
+    for (copper.zones, 0..) |z, zi| {
         var spec = pour.zoneLayerSpec(z.net, pour.sideOfSignal(z.layer), z.layer, z.poly);
-        spec.higher = try pour.higherPolys(arena, physical.zones, zi);
-        fills[zi] = try pour.computeShared(arena, placement, .{ .tracks = physical.tracks, .vias = physical.vias }, spec, base_eff);
+        spec.higher = try pour.higherPolys(arena, copper.zones, zi);
+        fills[zi] = try pour.computeShared(arena, placement, .{
+            .tracks = copper.tracks,
+            .vias = copper.vias,
+            .arcs = copper.arcs,
+            .rf_paths = copper.rf_paths,
+        }, spec, base_eff);
     }
     return fills;
 }
@@ -1766,7 +1771,7 @@ pub fn buildNetGraphPrepared(
     const join = if (preparedNetFills(fills.plane_fills, physical_name)) |prepared|
         try pour.planeConnectPrepared(arena, query, prepared)
     else
-        try pour.planeConnect(arena, placement, .{ .tracks = physical.tracks, .vias = physical.vias, .zones = physical.zones }, query);
+        try pour.planeConnect(arena, placement, .{ .tracks = physical.tracks, .vias = physical.vias, .arcs = physical.arcs, .zones = physical.zones }, query);
     const n_pads = items.len;
     const n_tracks = segs.items.len;
     const parent = try arena.alloc(usize, n_pads + n_tracks + vs.items.len + join.n_comp);

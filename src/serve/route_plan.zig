@@ -4764,6 +4764,8 @@ fn unblockRetally(
     const zones = try route_close.userZones(run.alloc, run.placement, run.options.existing_zones);
     const tally = try fab_readiness.routableTally(run.alloc, run.placement, .{
         .tracks = board.tracks,
+        .arcs = board.arcs,
+        .rf_paths = board.rf_port_outcomes,
         .vias = board.vias,
         .zones = zones,
     });
@@ -5239,7 +5241,13 @@ fn stripCopper(
     out.arcs = try arcs.toOwnedSlice(alloc);
     out.sharp_bends = try sharp.toOwnedSlice(alloc);
     const zones = try route_close.userZones(alloc, placement, options.existing_zones);
-    const tally = try fab_readiness.routableTally(alloc, placement, .{ .tracks = out.tracks, .vias = out.vias, .zones = zones });
+    const tally = try fab_readiness.routableTally(alloc, placement, .{
+        .tracks = out.tracks,
+        .arcs = out.arcs,
+        .rf_paths = out.rf_port_outcomes,
+        .vias = out.vias,
+        .zones = zones,
+    });
     out.routed = tally.routed;
     out.total = tally.total;
     out.failed = tally.open;
@@ -5954,11 +5962,15 @@ fn pruneGateTopologyOutcome(
         // and everything the oracle agreed about still comes off.
         if (tally_before == null) tally_before = try fab_readiness.routableTally(alloc, placement, .{
             .tracks = routed.tracks,
+            .arcs = routed.arcs,
+            .rf_paths = routed.rf_port_outcomes,
             .vias = routed.vias,
             .zones = user_zones,
         });
         const running = try fab_readiness.routableTally(alloc, placement, .{
             .tracks = current.tracks,
+            .arcs = current.arcs,
+            .rf_paths = current.rf_port_outcomes,
             .vias = current.vias,
             .zones = user_zones,
         });
@@ -5986,6 +5998,8 @@ fn pruneGateTopologyOutcome(
             // wrong somewhere, and the old whole-plan rejection is the answer.
             const recovered = try fab_readiness.routableTally(alloc, placement, .{
                 .tracks = current.tracks,
+                .arcs = current.arcs,
+                .rf_paths = current.rf_port_outcomes,
                 .vias = current.vias,
                 .zones = user_zones,
             });
@@ -6201,6 +6215,8 @@ fn drcSafeResult(
     const zones = try route_close.userZones(alloc, placement, options.existing_zones);
     const tally = try fab_readiness.routableTally(alloc, placement, .{
         .tracks = result.tracks,
+        .arcs = result.arcs,
+        .rf_paths = result.rf_port_outcomes,
         .vias = result.vias,
         .zones = zones,
     });

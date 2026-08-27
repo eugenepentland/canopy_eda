@@ -2976,6 +2976,17 @@ Public functions: check, checkTopology, checkWithZones, checkWithPreparedCopper,
 - a successful swept RF path suppresses only its internal tessellation vertices, not unrelated same-net corners
 - every check stamps its kind's canonical default severity, and each warning kind is proved by a fixture
 - reporting DRC reuses its exact cached plane, pour, and user-zone fills when solving local power-track current
+- malformed final pour outers and holes are fab-blocking DRC errors
+- sibling Gerber clear-hole regions may be disjoint or meet at zero-area tangencies, while proper crossings, positive-area overlap, containment/nesting, malformed rings, and dark-outer contact remain invalid
+- final pour overlap checks subtract holes and allow same-net unions
+- different-net final pour solids may not overlap or touch on one physical copper layer
+- pour overlap compares a zone signal index with a plane's physical stack index
+- independently emitted tracks, vias, and signal-layer pads may not contact a foreign final pour solid, while holes and physical-layer separation remain empty
+- native routed arc strokes are audited against final pours on outer and inner physical layers, subtract holes, and replace their stored chords
+- foreign-pour DRC audits an RF path's exact swept regions and suppresses its compact handles, never replacing a narrow taper end with the widest endpoint capsule
+- implicit ground fills are one physical carrier and a fill whose boundary construction failed remains invalid even when empty
+- a leaf-only net alias is accepted only when unique; sibling flattened nets with the same leaf remain distinct copper
+- reporting DRC retains the same exact variable-width RF carve that Gerber computes from the raw route proof
 - warns when a signal net's own copper laps one of its pads instead of being aimed at the pad centre, while ground nets are exempt
 - reports one own-land warning per swept RF path and physical land rather than one per tessellation chord
 - a match group spreading wider than its tolerance warns once, naming the longest and shortest nets
@@ -3086,6 +3097,8 @@ Public functions: compute, computeMaskShared, computeMasks, initMargin, planeCon
 - a seeded pour keeps its component and drops an unseeded orphan island
 - the configured minimum pour width erodes and regrows the fill, removing a connected neck narrower than the fabrication floor while restoring broad copper to its ordinary clearance boundary
 - the configured pour corner radius fillets emitted contour corners
+- contour tracing closes every boundary, decomposes pinched walks into strict simple regions, allows only zero-area sibling-hole tangency, and fails closed on irreparable topology
+- contour simplification and corner rounding fall back to the last strict simple boundary instead of emitting a crossing
 - a clipped user pour confines the fill to the drawn polygon, carves foreign copper, and keeps its region when no same-net seed lies inside
 - a clipped user pour skips foreign-copper stamp windows wholly outside the clip's boundary halo
 - a small drawn zone lands its copper edge on the clip boundary no matter how much board lies outside it
@@ -3101,12 +3114,14 @@ Public functions: compute, computeMaskShared, computeMasks, initMargin, planeCon
 - a grounded-coplanar ground gap overrides the generic ground-pour clearance without changing non-ground pours
 - an opt-in CPWG gap profile follows taper width and stops at its authored maximum
 - restored variable-width RF paths carve their exact swept taper polygon instead of the compact constant-width editor handle
+- native routed arcs carve their exact directed envelope and suppress only stored implementation chords with matching layer, net, and width
 - a bottom CPWG gap uses the bottom physical stackup on multilayer boards
 - a single-ended controlled-impedance via gets the same stackup-derived antipad clearance on every foreign pour
 - a max-freq via with no authored impedance target synthesizes its antipad at the 50 ohm default
 - every emitted contour point keeps at least the pour clearance from foreign copper
 - contour vertices interpolate the clearance iso-line instead of snapping to grid corners
 - a foreign via interior to a seeded pour punches an antipad hole that encircles it at clearance
+- an inner-layer foreign plated through-hole carves its full copper land rather than only its drill
 - a round NPTH on an outer face punches a round antipad instead of its bounding square
 - a foreign trace that splits a plane leaves its same-net pads in separate components
 - a track crossing a fill is assigned to every fabricated component it traverses even when both endpoints lie outside
@@ -4458,6 +4473,9 @@ Public functions: planLayers, writeLayer
 - fence vias never emit solder-mask apertures; the widened RF polygon alone exposes overlapping copper
 - (mask-relief 0) keeps a max-freq net tented and an authored pullback opts in a class without max-freq
 - an inner plane pours solid copper and antipads only foreign holes
+- an inner plane emits the pour engine's retained clear regions, so a foreign plated through-hole clears its full inner copper land rather than only its drill
+- an inner plane applies full foreign-land and drill clearances after thermal copper, so a nearby spoke cannot repaint an antipad
+- a plane thermal emits dark spokes only when their full bounding square stays inside one retained fill solid; otherwise the same-net land falls back to a safe solid connection
 - an inner signal layer emits its routed tracks, via lands, and through-pad barrels; other layers' tracks stay off it
 - outer and user pours emit the editor's computed contours and holes without rebuilding bounding-box antipads or adding thermal reliefs to own-net through-hole pads
 - a seeded pour island enclosed by another component's clearance hole is restored after the clear-polarity pass

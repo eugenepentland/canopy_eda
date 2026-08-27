@@ -448,6 +448,8 @@ fn routeCandidate(
     const routed = try route_plan.routeLowered(arena, placement, board.params, route_options);
     const gerber_copper = export_gerber.Copper{
         .tracks = routed.tracks,
+        .arcs = routed.arcs,
+        .rf_paths = routed.rf_port_outcomes,
         .vias = routed.vias,
         .zones = board.zones,
     };

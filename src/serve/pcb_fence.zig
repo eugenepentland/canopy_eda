@@ -377,6 +377,8 @@ pub fn run(
     const tally = if (pcb_layout_page.restoreRoutes(alloc, gated.merged, placement.nets)) |rr|
         try fab_readiness.routableTally(alloc, placement, .{
             .tracks = rr.tracks,
+            .arcs = rr.arcs,
+            .rf_paths = rr.rf_port_outcomes,
             .vias = rr.vias,
             .zones = solved.shown_zones.user,
         })

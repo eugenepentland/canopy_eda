@@ -63,7 +63,7 @@ const BuildError = error{
     InvalidManifest,
 };
 
-const Error = std.mem.Allocator.Error || std.Io.Writer.Error || error{EmptyImage} || BuildError;
+const Error = std.mem.Allocator.Error || std.Io.Writer.Error || error{ EmptyImage, InvalidCopperRegion } || BuildError;
 
 const point_tol_mm: f64 = 0.0001;
 const copper_conductivity_s_per_m: f64 = 58_000_000.0;

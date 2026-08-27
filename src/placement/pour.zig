@@ -41,6 +41,7 @@ const via_antipad = @import("via_antipad.zig");
 const impedance = @import("impedance.zig");
 const rf_port_report = @import("rf_port_report.zig");
 const variable_width_copper = @import("variable_width_copper.zig");
+const path_copper = @import("path_copper.zig");
 const numeric = @import("../numeric.zig");
 
 /// Which net a poured/plane layer carries: a declared `(plane IDX "NET")` name,
@@ -273,6 +274,10 @@ const Frame = struct { minx: f64, miny: f64, pitch: f64, nx: usize, ny: usize };
 /// plus the kept components' outer contours and their interior holes (for
 /// emission / painting).
 pub const Fill = struct {
+    /// False when contour tracing found geometry that could not be represented
+    /// as valid simple Gerber regions. Keep this distinct from a legitimate
+    /// empty pour so DRC and fabrication export fail closed.
+    integrity_ok: bool = true,
     /// The raster frame `labels` is indexed in.
     frame: Frame,
     /// Per cell: a kept-component index (0..n_comp) or -1 (blocked / unseeded).
@@ -282,11 +287,11 @@ pub const Fill = struct {
     /// Interior hole loops, PARALLEL to `contours`: `holes[i]` are the loops
     /// fully enclosed by `contours[i]` — an antipad ring around a foreign
     /// via/pad inside the pour, or the slot around an interior foreign track —
-    /// each already simplified (empty slice when the contour has none). A
-    /// viewer paints a face even-odd (`contours[i]` minus `holes[i]`); the
-    /// Gerber ignores this and re-punches the same holes analytically in clear
-    /// polarity, so `contours` keeps its exact prior meaning and every existing
-    /// consumer compiles untouched.
+    /// each already simplified (empty slice when the contour has none). The
+    /// solid is `contours[i]` minus these clear masks. Sibling holes may meet
+    /// only at zero-area point tangencies: Gerber's ordered clear polarity and
+    /// the viewers' even-odd fill then agree. Positive-area overlap, nesting,
+    /// crossing, and shared-edge overlap are rejected fail-closed.
     holes: []const []const Contour,
     /// The pitch was coarsened to stay under `MAX_CELLS` — a surfaced warning
     /// (the fill is lower-resolution than the design's clearance would want).
@@ -702,7 +707,13 @@ fn computeFill(
 
     const n_comp = try remapKept(arena, grid, kept);
     const traced: Traced = if (opts.contours)
-        try traceComponents(arena, grid, n_comp, @max(0, rules.design.pour.corner_radius))
+        traceComponents(arena, grid, n_comp, @max(0, rules.design.pour.corner_radius)) catch |err| switch (err) {
+            // A broken boundary must never reach a G36 Gerber region. Collapse
+            // the whole fill, including its membership labels, so electrical
+            // checks cannot credit copper that fabrication will not receive.
+            error.InvalidBoundary => return invalidFill(r, pitch, coarsened),
+            error.OutOfMemory => return error.OutOfMemory,
+        }
     else
         .{ .contours = &.{}, .holes = &.{} };
     return .{
@@ -734,6 +745,9 @@ fn effectiveMinimumWidth(placement: optimizer.Placement, spec: LayerSpec) f64 {
 pub const Copper = struct {
     tracks: []const router.Track = &.{},
     vias: []const router.Via = &.{},
+    /// Stored native routed arcs. The persisted chord tracks are retained for
+    /// editing, but the physical curved envelope is authoritative for carving.
+    arcs: []const router.Arc = &.{},
     /// Successful sampled variable-width paths. Their exact swept polygons
     /// replace the compact editor handles in `tracks` when foreign copper is
     /// carved, so a pour follows a taper's finished sloped flanks.
@@ -778,6 +792,12 @@ fn gridCount(extent: f64, pitch: f64) usize {
 
 fn emptyFill(r: optimizer.BoardRect, pitch: f64, coarsened: bool) Fill {
     return .{ .frame = .{ .minx = r.minx, .miny = r.miny, .pitch = pitch, .nx = 0, .ny = 0 }, .labels = &.{}, .n_comp = 0, .contours = &.{}, .holes = &.{}, .coarsened = coarsened };
+}
+
+fn invalidFill(r: optimizer.BoardRect, pitch: f64, coarsened: bool) Fill {
+    var fill = emptyFill(r, pitch, coarsened);
+    fill.integrity_ok = false;
+    return fill;
 }
 
 /// Seed each cell's margin from the OUTLINE alone: how far the cell centre sits
@@ -1148,19 +1168,39 @@ fn stampForeign(
             const reach = classPourClearance(placement, net_name, spec.net, base);
             const c = optimizer.worldPadCenter(&p, pad.x, pad.y);
             if (inner) {
-                if (pad.drill > 0) stampDiscWithin(g, active, c[0], c[1], pad.drill / 2 + reach);
+                if (pad.thru and !pad.npth)
+                    stampPadWithin(g, active, p, pad, reach)
+                else if (pad.drill > 0)
+                    stampDiscWithin(g, active, c[0], c[1], pad.drill / 2 + reach);
             } else {
                 stampPadWithin(g, active, p, pad, reach);
             }
         }
     }
     if (spec.track_layer) |tl| {
+        const physical_arcs = try path_copper.filterArcs(arena, copper.rf_paths, copper.arcs);
         for (copper.tracks) |t| {
             if (t.layer != tl) continue;
             if (rfPathOwnsTrack(copper.rf_paths, t)) continue;
+            if (nativeArcOwnsTrack(physical_arcs, t)) continue;
             if (planeCarries(spec.net, netName(placement, t.net))) continue;
             const reach = trackPourClearance(placement, t, spec.net, base);
             stampSegWithin(g, active, .{ t.x1, t.y1 }, .{ t.x2, t.y2 }, t.width / 2 + reach);
+        }
+        for (physical_arcs) |arc| {
+            if (arc.layer != tl) continue;
+            if (planeCarries(spec.net, netName(placement, arc.net))) continue;
+            const probe = router.Track{
+                .x1 = arc.p1[0],
+                .y1 = arc.p1[1],
+                .x2 = arc.p2[0],
+                .y2 = arc.p2[1],
+                .layer = arc.layer,
+                .width = arc.width,
+                .net = arc.net,
+            };
+            const reach = trackPourClearance(placement, probe, spec.net, base);
+            stampArcWithin(g, active, arc, arc.width / 2 + reach);
         }
         for (copper.rf_paths) |path| {
             if (!path.success or path.physical.gate_removed) continue;
@@ -1186,6 +1226,16 @@ fn stampForeign(
         const reach = viaPlaneClearance(placement, v, spec.net, base);
         stampDiscWithin(g, active, v.x, v.y, v.dia / 2 + reach);
     }
+}
+
+fn nativeArcOwnsTrack(arcs: []const router.Arc, track: router.Track) bool {
+    const a = [2]f64{ track.x1, track.y1 };
+    const b = [2]f64{ track.x2, track.y2 };
+    for (arcs) |arc| {
+        if (arc.layer != track.layer or arc.net != track.net or @abs(arc.width - track.width) > 0.0001) continue;
+        if (outline.arcOwnsSegment(.{ .p1 = arc.p1, .pm = arc.pm, .p2 = arc.p2 }, a, b, 0.0001)) return true;
+    }
+    return false;
 }
 
 fn rfPathOwnsTrack(paths: []const rf_port_report.Outcome, track: router.Track) bool {
@@ -1231,6 +1281,75 @@ fn stampSegWithin(g: Grid, active: ?[4]f64, a: [2]f64, b: [2]f64, rad: f64) void
     const win = rad + window_cells * g.pitch;
     if (!stampWindowActive(active, @min(a[0], b[0]) - win, @min(a[1], b[1]) - win, @max(a[0], b[0]) + win, @max(a[1], b[1]) + win)) return;
     stampSeg(g, a[0], a[1], b[0], b[1], rad);
+}
+
+fn arcAngleOnSweep(circle: outline.ArcCircle, angle: f64) bool {
+    if (circle.sweep >= 0)
+        return @mod(angle - circle.start_angle, std.math.tau) <= circle.sweep + 1e-12;
+    return @mod(circle.start_angle - angle, std.math.tau) <= -circle.sweep + 1e-12;
+}
+
+fn routedArcCircle(arc: router.Arc) ?outline.ArcCircle {
+    return outline.arcCircle(.{ .p1 = arc.p1, .pm = arc.pm, .p2 = arc.p2 });
+}
+
+fn arcBounds(arc: router.Arc, circle: outline.ArcCircle) [4]f64 {
+    var bounds = [4]f64{
+        @min(arc.p1[0], arc.p2[0]),
+        @min(arc.p1[1], arc.p2[1]),
+        @max(arc.p1[0], arc.p2[0]),
+        @max(arc.p1[1], arc.p2[1]),
+    };
+    const pi: f64 = std.math.pi;
+    const cardinal = [_]f64{ 0, pi / 2.0, pi, 3.0 * pi / 2.0 };
+    for (cardinal) |angle| {
+        if (!arcAngleOnSweep(circle, angle)) continue;
+        const point = [2]f64{ circle.cx + circle.radius * @cos(angle), circle.cy + circle.radius * @sin(angle) };
+        bounds[0] = @min(bounds[0], point[0]);
+        bounds[1] = @min(bounds[1], point[1]);
+        bounds[2] = @max(bounds[2], point[0]);
+        bounds[3] = @max(bounds[3], point[1]);
+    }
+    return bounds;
+}
+
+fn pointArcDistance(arc: router.Arc, circle: outline.ArcCircle, point: [2]f64) f64 {
+    const dx = point[0] - circle.cx;
+    const dy = point[1] - circle.cy;
+    const radius_at_point = std.math.hypot(dx, dy);
+    if (arcAngleOnSweep(circle, std.math.atan2(dy, dx))) return @abs(radius_at_point - circle.radius);
+    return @min(
+        std.math.hypot(point[0] - arc.p1[0], point[1] - arc.p1[1]),
+        std.math.hypot(point[0] - arc.p2[0], point[1] - arc.p2[1]),
+    );
+}
+
+/// Lower the margin by the exact directed circular-arc envelope. The stamp
+/// uses the same recovered three-point circle/sweep as Gerber G02/G03 output;
+/// an undefined arc follows the writer's p1→p2 straight fallback.
+fn stampArcWithin(g: Grid, active: ?[4]f64, arc: router.Arc, rad: f64) void {
+    if (!(rad > 0)) return;
+    const circle = routedArcCircle(arc) orelse {
+        stampSegWithin(g, active, arc.p1, arc.p2, rad);
+        return;
+    };
+    const bounds = arcBounds(arc, circle);
+    const win = rad + window_cells * g.pitch;
+    if (!stampWindowActive(active, bounds[0] - win, bounds[1] - win, bounds[2] + win, bounds[3] + win)) return;
+    const lo = cellRange(g, bounds[0] - win, bounds[1] - win);
+    const hi = cellRange(g, bounds[2] + win, bounds[3] + win);
+    var j = lo[1];
+    while (j <= hi[1] and j < g.ny) : (j += 1) {
+        const cy = g.miny + (@as(f64, @floatFromInt(j)) + 0.5) * g.pitch;
+        const row = j * g.nx;
+        var i = lo[0];
+        while (i <= hi[0] and i < g.nx) : (i += 1) {
+            const cx = g.minx + (@as(f64, @floatFromInt(i)) + 0.5) * g.pitch;
+            const distance = pointArcDistance(arc, circle, .{ cx, cy });
+            if (distance > win) continue;
+            lowerMargin(g, row + i, distance - rad);
+        }
+    }
 }
 
 /// Carve footprint-authored copper-pour keepouts on their outer face. The
@@ -1657,7 +1776,8 @@ fn remapKept(arena: std.mem.Allocator, g: Grid, kept: []bool) std.mem.Allocator.
 const Dir = enum(u2) { e, s, w, n };
 /// One boundary edge between a kept `comp` cell and an empty neighbour. `a`/`b`
 /// are the lattice corner codes it runs between (the stitcher connects loops on
-/// these); `dir` orients it copper-on-the-right AND names which neighbour is
+/// these); `dir` orients it copper-on-the-left in this y-down grid AND names
+/// which neighbour is
 /// empty; `cell` is the kept cell's linear index (`j*nx+i`), from which — with
 /// `dir` — the interpolation recovers the kept/empty cell-centre pair.
 const Edge = struct { a: u32, b: u32, dir: Dir, cell: u32, used: bool = false };
@@ -1672,15 +1792,21 @@ const TracedComponent = struct { outer: Contour, holes: []const Contour };
 /// (`contours[i]`/`holes[i]` describe the same component) built for `Fill`.
 const Traced = struct { contours: []const Contour, holes: []const []const Contour };
 
+/// Contour tracing can fail geometrically even when every allocation succeeds.
+/// The public fill API handles this internally with an empty `integrity_ok=false`
+/// fill: no invalid polygon is emitted and no connectivity check credits copper
+/// that fabrication cannot receive; DRC/export therefore fail closed.
+const TraceError = std.mem.Allocator.Error || error{InvalidBoundary};
+
 /// Trace every kept component 0..n_comp, dropping the ones that yield no
 /// boundary (degenerate). Keeps `contours` and `holes` parallel — a component
 /// contributes to both or neither.
-fn traceComponents(arena: std.mem.Allocator, g: Grid, n_comp: usize, corner_radius: f64) std.mem.Allocator.Error!Traced {
+fn traceComponents(arena: std.mem.Allocator, g: Grid, n_comp: usize, corner_radius: f64) TraceError!Traced {
     var contours: std.ArrayList(Contour) = .empty;
     var holes: std.ArrayList([]const Contour) = .empty;
     var c: usize = 0;
     while (c < n_comp) : (c += 1) {
-        if (try traceOuter(arena, g, @intCast(c), corner_radius)) |tc| {
+        for (try traceOuters(arena, g, @intCast(c), corner_radius)) |tc| {
             try contours.append(arena, tc.outer);
             try holes.append(arena, tc.holes);
         }
@@ -1689,33 +1815,24 @@ fn traceComponents(arena: std.mem.Allocator, g: Grid, n_comp: usize, corner_radi
 }
 
 /// Trace component `comp`'s boundary loops (the lattice edges between a `comp`
-/// cell and a non-`comp` neighbour, oriented copper-on-the-right, stitched into
+/// cell and a non-`comp` neighbour, oriented copper-on-the-left, stitched into
 /// loops that hug the copper at saddles and realised as one interpolated guard
-/// crossing per edge). The largest-|area| loop is the OUTER contour;
-/// every other loop is an interior HOLE (an antipad ring around a foreign
-/// via/pad enclosed by the pour, or the slot around an interior foreign track).
-/// The Gerber still re-punches these holes analytically in clear polarity; the
-/// viewer paints them even-odd. Null when the component has no boundary.
-fn traceOuter(arena: std.mem.Allocator, g: Grid, comp: i32, corner_radius: f64) std.mem.Allocator.Error!?TracedComponent {
+/// crossing per edge). A raster component may resolve into several simple
+/// outer rings when its iso-line only touches at a point; each emitted outer is
+/// paired with the directly contained holes that belong to it.
+fn traceOuters(arena: std.mem.Allocator, g: Grid, comp: i32, corner_radius: f64) TraceError![]const TracedComponent {
     var edges: std.ArrayList(Edge) = .empty;
     try collectBoundaryEdges(arena, &edges, g, comp);
-    if (edges.items.len == 0) return null;
+    if (edges.items.len == 0) return &.{};
 
     var by_tail: TailMap = .empty;
     try indexTails(arena, &by_tail, edges.items);
     const loops = try realiseLoops(arena, g, edges.items, &by_tail);
-    if (loops.len == 0) return null;
-
-    const best_idx = largestLoop(loops);
-    const outer = try simplify(arena, loops[best_idx], dp_tol);
-    return .{
-        .outer = try roundContour(arena, outer, corner_radius),
-        .holes = try collectHoles(arena, loops, best_idx, g.pitch, corner_radius),
-    };
+    return classifyLoops(arena, loops, g.pitch, corner_radius);
 }
 
 /// Emit every boundary edge of component `comp` (a `comp` cell adjacent to a
-/// non-`comp` neighbour), oriented copper-on-the-right.
+/// non-`comp` neighbour), oriented copper-on-the-left in the y-down grid.
 fn collectBoundaryEdges(arena: std.mem.Allocator, edges: *std.ArrayList(Edge), g: Grid, comp: i32) std.mem.Allocator.Error!void {
     const w: u32 = @intCast(g.nx + 1);
     var j: usize = 0;
@@ -1741,45 +1858,202 @@ fn indexTails(arena: std.mem.Allocator, by_tail: *TailMap, edges: []const Edge) 
 /// Stitch every still-unused boundary edge into a loop and realise it as an
 /// interpolated world polygon. The loops partition the component's boundary into
 /// one outer contour and its interior holes.
-fn realiseLoops(arena: std.mem.Allocator, g: Grid, edges: []Edge, by_tail: *TailMap) std.mem.Allocator.Error![]const Contour {
+fn realiseLoops(arena: std.mem.Allocator, g: Grid, edges: []Edge, by_tail: *TailMap) TraceError![]const Contour {
     var loops: std.ArrayList(Contour) = .empty;
     for (edges, 0..) |_, idx| {
         if (edges[idx].used) continue;
         const loop = try stitchLoop(arena, edges, by_tail, idx);
-        try loops.append(arena, try loopToWorld(arena, g, edges, loop));
+        try resolvePinchedWalk(arena, try loopToWorld(arena, g, edges, loop), g.pitch, &loops);
     }
     return loops.toOwnedSlice(arena);
 }
 
-/// Index of the largest-|area| loop (the component's outer boundary — every
-/// interior hole encloses strictly less area).
-fn largestLoop(loops: []const Contour) usize {
-    var best_idx: usize = 0;
-    var best_area: f64 = -1;
-    for (loops, 0..) |poly, i| {
-        const area = @abs(outline.signedArea2(poly));
-        if (area > best_area) {
-            best_area = area;
-            best_idx = i;
-        }
+/// First non-consecutive recurrence of one exact interpolated point. Distinct
+/// boundary edges can land on the same iso point at a tangency even though the
+/// lattice walk itself is closed and complete.
+fn repeatedVertex(arena: std.mem.Allocator, poly: Contour) std.mem.Allocator.Error!?[2]usize {
+    var seen: std.StringHashMapUnmanaged(usize) = .empty;
+    defer seen.deinit(arena);
+    for (poly, 0..) |_, i| {
+        const gop = try seen.getOrPut(arena, std.mem.asBytes(&poly[i]));
+        if (gop.found_existing) return .{ gop.value_ptr.*, i };
+        gop.value_ptr.* = i;
     }
-    return best_idx;
+    return null;
 }
 
-/// Every non-outer loop with ≥3 vertices and enclosed area above HALF A GRID
-/// CELL (`0.5·pitch²`) becomes a simplified interior hole. The floor rejects a
-/// single-cell rasterisation nick (which a real antipad — a via/pad clearance
-/// disc — dwarfs) so noise never emits a spurious hole. `signedArea2` returns
-/// TWICE the area, so the floor is doubled before the compare.
-fn collectHoles(arena: std.mem.Allocator, loops: []const Contour, best_idx: usize, pitch: f64, corner_radius: f64) std.mem.Allocator.Error![]const Contour {
-    const area2_floor = pitch * pitch;
-    var holes: std.ArrayList(Contour) = .empty;
-    for (loops, 0..) |poly, i| {
-        if (i == best_idx or poly.len < 3) continue;
-        if (@abs(outline.signedArea2(poly)) < area2_floor) continue;
-        try holes.append(arena, try roundContour(arena, try simplify(arena, poly, dp_tol), corner_radius));
+fn withoutVertex(arena: std.mem.Allocator, poly: Contour, skip: usize) std.mem.Allocator.Error!Contour {
+    const out = try arena.alloc([2]f64, poly.len - 1);
+    @memcpy(out[0..skip], poly[0..skip]);
+    @memcpy(out[skip..], poly[skip + 1 ..]);
+    return out;
+}
+
+fn otherCycle(arena: std.mem.Allocator, poly: Contour, first: usize, again: usize) std.mem.Allocator.Error!Contour {
+    const len = first + 1 + poly.len - again - 1;
+    const out = try arena.alloc([2]f64, len);
+    @memcpy(out[0 .. first + 1], poly[0 .. first + 1]);
+    @memcpy(out[first + 1 ..], poly[again + 1 ..]);
+    return out;
+}
+
+/// Resolve an iso-line walk that revisits an exact point without discarding its
+/// valid copper. Same-winding lobes are independent dark outers. Opposite-
+/// winding cycles are an outer and a tangent clearance pocket; removing one
+/// copy of their shared point opens the zero-width pinch as one simple,
+/// conservatively smaller notched ring. Further pinches are handled
+/// iteratively, so every returned walk has unique vertices.
+fn resolvePinchedWalk(arena: std.mem.Allocator, raw: Contour, pitch: f64, out: *std.ArrayList(Contour)) TraceError!void {
+    var pending: std.ArrayList(Contour) = .empty;
+    try pending.append(arena, try cleanContour(arena, raw));
+    while (pending.pop()) |poly| {
+        const pair = try repeatedVertex(arena, poly) orelse {
+            if (poly.len >= 3) try out.append(arena, poly);
+            continue;
+        };
+        if (pair[1] <= pair[0] + 1) return error.InvalidBoundary;
+        const one = poly[pair[0]..pair[1]];
+        const two = try otherCycle(arena, poly, pair[0], pair[1]);
+        const area_one = outline.signedArea2(one);
+        const area_two = outline.signedArea2(two);
+        if (one.len < 3 or @abs(area_one) < 2e-9) {
+            if (two.len >= 3) try pending.append(arena, two);
+            continue;
+        }
+        if (two.len < 3 or @abs(area_two) < 2e-9) {
+            try pending.append(arena, one);
+            continue;
+        }
+        if (area_one * area_two > 0) {
+            if (one.len >= 3) try pending.append(arena, one);
+            if (two.len >= 3) try pending.append(arena, two);
+            continue;
+        }
+
+        const skip_first = try withoutVertex(arena, poly, pair[0]);
+        const skip_again = try withoutVertex(arena, poly, pair[1]);
+        const first_area = @abs(outline.signedArea2(skip_first));
+        const again_area = @abs(outline.signedArea2(skip_again));
+        const original_area = @abs(area_one + area_two);
+        const max_removed_area2 = 2 * pitch * pitch + 1e-9;
+        const first_ok = first_area <= original_area + 1e-9 and original_area - first_area <= max_removed_area2;
+        const again_ok = again_area <= original_area + 1e-9 and original_area - again_area <= max_removed_area2;
+        const chosen = if (first_ok and (!again_ok or first_area >= again_area))
+            skip_first
+        else if (again_ok)
+            skip_again
+        else
+            return error.InvalidBoundary;
+        try pending.append(arena, chosen);
     }
-    return holes.toOwnedSlice(arena);
+}
+
+const LoopInfo = struct {
+    poly: Contour,
+    sample: [2]f64,
+    area2: f64,
+};
+
+fn interiorSample(poly: Contour, pitch: f64) [2]f64 {
+    var edge: usize = 0;
+    var best_len2: f64 = -1;
+    for (poly, 0..) |a, i| {
+        const b = poly[(i + 1) % poly.len];
+        const dx = b[0] - a[0];
+        const dy = b[1] - a[1];
+        const len2 = dx * dx + dy * dy;
+        if (len2 > best_len2) {
+            best_len2 = len2;
+            edge = i;
+        }
+    }
+    const a = poly[edge];
+    const b = poly[(edge + 1) % poly.len];
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const len = @sqrt(best_len2);
+    if (!(len > 0)) return a;
+    const inward_sign: f64 = if (outline.signedArea2(poly) > 0) 1 else -1;
+    const step = @min(pitch * 1e-4, len * 1e-4);
+    return .{
+        (a[0] + b[0]) / 2 - inward_sign * dy / len * step,
+        (a[1] + b[1]) / 2 + inward_sign * dx / len * step,
+    };
+}
+
+/// Classify all simple cycles of one raster component by the winding of its
+/// largest (outer) cycle and geometric containment. This supports several dark
+/// outers for one label component and attaches each opposite-winding hole to
+/// the smallest outer that contains it.
+fn classifyLoops(arena: std.mem.Allocator, loops: []const Contour, pitch: f64, corner_radius: f64) TraceError![]const TracedComponent {
+    return classifyLoopsAtTolerance(arena, loops, pitch, corner_radius, dp_tol);
+}
+
+fn classifyLoopsAtTolerance(
+    arena: std.mem.Allocator,
+    loops: []const Contour,
+    pitch: f64,
+    corner_radius: f64,
+    simplify_tolerance: f64,
+) TraceError![]const TracedComponent {
+    var info: std.ArrayList(LoopInfo) = .empty;
+    for (loops) |poly| {
+        if (poly.len < 3) continue;
+        const final = try finalizeContourAtTolerance(arena, poly, corner_radius, simplify_tolerance);
+        try info.append(arena, .{ .poly = final, .sample = interiorSample(final, pitch), .area2 = outline.signedArea2(final) });
+    }
+    if (info.items.len == 0) return &.{};
+
+    var largest: usize = 0;
+    for (info.items[1..], 1..) |candidate, i| {
+        if (@abs(candidate.area2) > @abs(info.items[largest].area2)) largest = i;
+    }
+    const outer_positive = info.items[largest].area2 > 0;
+    const hole_lists = try arena.alloc(std.ArrayList(Contour), info.items.len);
+    @memset(hole_lists, .empty);
+    const area2_floor = pitch * pitch;
+
+    for (info.items, 0..) |hole, hole_i| {
+        if ((hole.area2 > 0) == outer_positive) continue;
+        if (@abs(hole.area2) < area2_floor) continue;
+        var parent: ?usize = null;
+        for (info.items, 0..) |outer_ring, outer_i| {
+            if ((outer_ring.area2 > 0) != outer_positive) continue;
+            if (!(polySignedInset(outer_ring.poly, hole.sample[0], hole.sample[1]) > 0)) continue;
+            if (parent == null or @abs(outer_ring.area2) < @abs(info.items[parent.?].area2)) parent = outer_i;
+        }
+        const outer_i = parent orelse return error.InvalidBoundary;
+        _ = hole_i;
+        try hole_lists[outer_i].append(arena, hole.poly);
+    }
+
+    var components: std.ArrayList(TracedComponent) = .empty;
+    for (info.items, 0..) |outer_ring, i| {
+        if ((outer_ring.area2 > 0) != outer_positive) continue;
+        try components.append(arena, .{ .outer = outer_ring.poly, .holes = try hole_lists[i].toOwnedSlice(arena) });
+    }
+    const result = try components.toOwnedSlice(arena);
+    if (try tracedComponentsValid(arena, result)) return result;
+
+    // Filleting each simple ring independently is insufficient: in a narrow
+    // clearance pocket two individually valid rounded rings can touch one
+    // another. Preserve the complete copper topology by retrying the component
+    // as sharp rings. A sharp component that is still malformed is irreparable
+    // unless it is the raster's other representation of the same topology: a
+    // clearance hole tangent to its outer. Open that zero-width pinch as a
+    // conservative notch; every other sharp defect remains fail-closed.
+    if (corner_radius > 0) return classifyLoopsAtTolerance(arena, loops, pitch, 0, simplify_tolerance);
+    // Douglas-Peucker can leave every ring individually simple while moving an
+    // outer and a nearby hole through one another. Retry the whole component
+    // with progressively less loss, so the first topology-safe compact form is
+    // retained; exact raw geometry is the final fallback before tangent repair.
+    if (simplify_tolerance > 0) {
+        const next_tolerance = if (simplify_tolerance > 0.0005) simplify_tolerance / 2 else 0;
+        return classifyLoopsAtTolerance(arena, loops, pitch, 0, next_tolerance);
+    }
+    const repaired = try repairTangentHoles(arena, result, pitch);
+    if (try tracedComponentsValid(arena, repaired)) return repaired;
+    return error.InvalidBoundary;
 }
 
 fn emitCellEdges(arena: std.mem.Allocator, edges: *std.ArrayList(Edge), g: Grid, comp: i32, i: usize, j: usize, w: u32) std.mem.Allocator.Error!void {
@@ -1803,11 +2077,13 @@ fn emitCellEdges(arena: std.mem.Allocator, edges: *std.ArrayList(Edge), g: Grid,
 }
 
 /// Follow boundary edges from `start` back to its tail, choosing at each corner
-/// the unused outgoing edge that turns most sharply right (copper on the right)
-/// — the standard rule that keeps 4-connected regions separate at saddles.
+/// the unused outgoing edge that turns most sharply left (copper on the left in
+/// this y-down grid) — the standard rule that keeps 4-connected regions
+/// separate at saddles.
 /// Returns the ordered EDGE indices of the loop (one interpolated vertex each).
-fn stitchLoop(arena: std.mem.Allocator, edges: []Edge, by_tail: *TailMap, start: usize) std.mem.Allocator.Error![]const usize {
+fn stitchLoop(arena: std.mem.Allocator, edges: []Edge, by_tail: *TailMap, start: usize) TraceError![]const usize {
     var idxs: std.ArrayList(usize) = .empty;
+    errdefer idxs.deinit(arena);
     var cur = start;
     const loop_start = edges[start].a;
     while (true) {
@@ -1815,7 +2091,9 @@ fn stitchLoop(arena: std.mem.Allocator, edges: []Edge, by_tail: *TailMap, start:
         try idxs.append(arena, cur);
         const head = edges[cur].b;
         if (head == loop_start) break;
-        const nxt = pickNext(edges, by_tail, head, edges[cur].dir) orelse break;
+        // A boundary chain that cannot get back to its starting corner is not
+        // a polygon. Do not turn the traversed prefix into an open G36 region.
+        const nxt = pickNext(edges, by_tail, head, edges[cur].dir) orelse return error.InvalidBoundary;
         cur = nxt;
     }
     return idxs.toOwnedSlice(arena);
@@ -1837,16 +2115,16 @@ fn pickNext(edges: []Edge, by_tail: *TailMap, tail: u32, din: Dir) ?usize {
 }
 
 /// Preference (0 = best) for turning from `din` to `dout`, hugging copper on
-/// the right: right turn, then straight, then left, then reverse.
+/// the left: left turn, then straight, then right, then reverse.
 fn turnPref(din: Dir, dout: Dir) u8 {
     const d: u8 = @backingInt(din);
     const o: u8 = @backingInt(dout);
     const right = (d + 1) & 3;
     const straight = d;
     const left = (d + 3) & 3;
-    if (o == right) return 0;
+    if (o == left) return 0;
     if (o == straight) return 1;
-    if (o == left) return 2;
+    if (o == right) return 2;
     return 3;
 }
 
@@ -1907,6 +2185,28 @@ fn neighborDelta(dir: Dir) [2]i64 {
 /// chord can ever fall under the true clearance): collapses the interpolated
 /// iso-line's dense per-edge vertices to a compact smooth polygon.
 fn simplify(arena: std.mem.Allocator, pts: []const [2]f64, tol: f64) std.mem.Allocator.Error!Contour {
+    return simplifyClean(arena, try cleanContour(arena, pts), tol);
+}
+
+/// Remove zero-length boundary steps before testing collinearity. Iso-line
+/// interpolation legitimately maps both sides of a grid corner to the kept
+/// cell centre when its margin equals the guard. Treating that repeated point
+/// as two vertices makes each copy appear collinear and can erase the corner —
+/// or, for a loop made entirely of paired crossings, erase the whole ring.
+fn cleanContour(arena: std.mem.Allocator, pts: Contour) std.mem.Allocator.Error!Contour {
+    var clean: std.ArrayList([2]f64) = .empty;
+    for (pts) |p| {
+        if (clean.items.len == 0 or !sameContourPoint(clean.items[clean.items.len - 1], p)) try clean.append(arena, p);
+    }
+    if (clean.items.len > 1 and sameContourPoint(clean.items[0], clean.items[clean.items.len - 1])) _ = clean.pop();
+    return clean.toOwnedSlice(arena);
+}
+
+fn sameContourPoint(a: [2]f64, b: [2]f64) bool {
+    return @abs(a[0] - b[0]) <= 1e-12 and @abs(a[1] - b[1]) <= 1e-12;
+}
+
+fn simplifyClean(arena: std.mem.Allocator, pts: Contour, tol: f64) std.mem.Allocator.Error!Contour {
     if (pts.len < 4) return pts;
     var merged: std.ArrayList([2]f64) = .empty;
     for (pts, 0..) |p, i| {
@@ -1917,6 +2217,335 @@ fn simplify(arena: std.mem.Allocator, pts: []const [2]f64, tol: f64) std.mem.All
     }
     if (merged.items.len < 4) return merged.toOwnedSlice(arena);
     return dp(arena, merged.items, tol);
+}
+
+const contour_eps: f64 = 1e-9;
+
+const OrderedSegment = struct {
+    index: usize,
+    minx: f64,
+    miny: f64,
+    maxx: f64,
+    maxy: f64,
+};
+
+const TaggedSegment = struct {
+    ring: usize,
+    edge: usize,
+    minx: f64,
+    miny: f64,
+    maxx: f64,
+    maxy: f64,
+};
+
+const RingContact = struct {
+    outer_edge: usize,
+    hole_edge: usize,
+    point: [2]f64,
+};
+
+const ContactRing = struct {
+    poly: Contour,
+    contact: usize,
+};
+
+fn segmentOrder(_: void, a: OrderedSegment, b: OrderedSegment) bool {
+    if (a.minx != b.minx) return a.minx < b.minx;
+    if (a.miny != b.miny) return a.miny < b.miny;
+    return a.index < b.index;
+}
+
+fn taggedSegmentOrder(_: void, a: TaggedSegment, b: TaggedSegment) bool {
+    if (a.minx != b.minx) return a.minx < b.minx;
+    if (a.miny != b.miny) return a.miny < b.miny;
+    if (a.ring != b.ring) return a.ring < b.ring;
+    return a.edge < b.edge;
+}
+
+fn contourOrient(a: [2]f64, b: [2]f64, c: [2]f64) f64 {
+    return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+}
+
+fn contourOpposite(a: f64, b: f64, tolerance: f64) bool {
+    return (a > tolerance and b < -tolerance) or (a < -tolerance and b > tolerance);
+}
+
+fn contourPointOnSegment(point: [2]f64, a: [2]f64, b: [2]f64, tolerance: f64) bool {
+    return point[0] >= @min(a[0], b[0]) - tolerance and point[0] <= @max(a[0], b[0]) + tolerance and
+        point[1] >= @min(a[1], b[1]) - tolerance and point[1] <= @max(a[1], b[1]) + tolerance;
+}
+
+fn contourSegmentsTouch(a: [2]f64, b: [2]f64, c: [2]f64, d: [2]f64) bool {
+    const scale = @max(1, @max(std.math.hypot(b[0] - a[0], b[1] - a[1]), std.math.hypot(d[0] - c[0], d[1] - c[1])));
+    const tolerance = contour_eps * scale;
+    const abc = contourOrient(a, b, c);
+    const abd = contourOrient(a, b, d);
+    const cda = contourOrient(c, d, a);
+    const cdb = contourOrient(c, d, b);
+    if (contourOpposite(abc, abd, tolerance) and contourOpposite(cda, cdb, tolerance)) return true;
+    if (@abs(abc) <= tolerance and contourPointOnSegment(c, a, b, tolerance)) return true;
+    if (@abs(abd) <= tolerance and contourPointOnSegment(d, a, b, tolerance)) return true;
+    if (@abs(cda) <= tolerance and contourPointOnSegment(a, c, d, tolerance)) return true;
+    return @abs(cdb) <= tolerance and contourPointOnSegment(b, c, d, tolerance);
+}
+
+fn contourAdjacentRetrace(a: [2]f64, b: [2]f64, c: [2]f64, d: [2]f64) bool {
+    const ab = [2]f64{ b[0] - a[0], b[1] - a[1] };
+    const cd = [2]f64{ d[0] - c[0], d[1] - c[1] };
+    const scale = @max(1, std.math.hypot(ab[0], ab[1]) * std.math.hypot(cd[0], cd[1]));
+    return @abs(ab[0] * cd[1] - ab[1] * cd[0]) <= contour_eps * scale and
+        ab[0] * cd[0] + ab[1] * cd[1] < -contour_eps * scale;
+}
+
+fn finiteContourPoint(point: [2]f64) bool {
+    return std.math.isFinite(point[0]) and std.math.isFinite(point[1]);
+}
+
+/// Strict simple-ring validation with an x-sorted segment sweep. Unlike the
+/// outline authoring predicate this rejects zero edges, repeated endpoint
+/// touches, collinear overlap, and adjacent retrace; unlike the former nested
+/// pair scan it stays near O(n log n) for the long raster boundaries.
+fn validClosedContour(arena: std.mem.Allocator, pts: Contour) std.mem.Allocator.Error!bool {
+    if (pts.len < 3 or @abs(outline.signedArea2(pts)) < 2e-9) return false;
+    const ordered = try arena.alloc(OrderedSegment, pts.len);
+    for (pts, 0..) |a, i| {
+        const b = pts[(i + 1) % pts.len];
+        if (!finiteContourPoint(a) or !finiteContourPoint(b)) return false;
+        const dx = b[0] - a[0];
+        const dy = b[1] - a[1];
+        if (dx * dx + dy * dy <= contour_eps * contour_eps) return false;
+        ordered[i] = .{
+            .index = i,
+            .minx = @min(a[0], b[0]),
+            .miny = @min(a[1], b[1]),
+            .maxx = @max(a[0], b[0]),
+            .maxy = @max(a[1], b[1]),
+        };
+    }
+    std.mem.sort(OrderedSegment, ordered, {}, segmentOrder);
+    for (ordered, 0..) |left, pos| {
+        const a = pts[left.index];
+        const b = pts[(left.index + 1) % pts.len];
+        for (ordered[pos + 1 ..]) |right| {
+            if (right.minx > left.maxx + contour_eps) break;
+            if (right.maxy < left.miny - contour_eps or right.miny > left.maxy + contour_eps) continue;
+            const c = pts[right.index];
+            const d = pts[(right.index + 1) % pts.len];
+            const adjacent = (left.index + 1) % pts.len == right.index or (right.index + 1) % pts.len == left.index;
+            if (adjacent) {
+                if (contourAdjacentRetrace(a, b, c, d)) return false;
+            } else if (contourSegmentsTouch(a, b, c, d)) return false;
+        }
+    }
+    return true;
+}
+
+/// Validate the topology between the already-simple rings of every emitted
+/// component. The combined x sweep rejects outer/hole boundary contact without
+/// reintroducing the old raw-ring O(n^2) scan, and containment proves every
+/// clear ring is strictly inside its dark outer. Sibling clear rings may meet
+/// only at zero-area point tangencies; overlap, nesting, and crossing would
+/// make even-odd viewers disagree with Gerber's ordered clear polarity.
+fn tracedComponentsValid(arena: std.mem.Allocator, components: []const TracedComponent) std.mem.Allocator.Error!bool {
+    for (components) |component| if (!try tracedComponentValid(arena, component)) return false;
+    return true;
+}
+
+fn tracedComponentValid(arena: std.mem.Allocator, component: TracedComponent) std.mem.Allocator.Error!bool {
+    const rings = try arena.alloc(Contour, component.holes.len + 1);
+    rings[0] = component.outer;
+    @memcpy(rings[1..], component.holes);
+
+    var segment_count: usize = 0;
+    for (rings) |ring| segment_count += ring.len;
+    const ordered = try arena.alloc(TaggedSegment, segment_count);
+    var at: usize = 0;
+    for (rings, 0..) |ring, ring_i| {
+        for (ring, 0..) |a, edge_i| {
+            const b = ring[(edge_i + 1) % ring.len];
+            ordered[at] = .{
+                .ring = ring_i,
+                .edge = edge_i,
+                .minx = @min(a[0], b[0]),
+                .miny = @min(a[1], b[1]),
+                .maxx = @max(a[0], b[0]),
+                .maxy = @max(a[1], b[1]),
+            };
+            at += 1;
+        }
+    }
+    std.mem.sort(TaggedSegment, ordered, {}, taggedSegmentOrder);
+    for (ordered, 0..) |left, pos| {
+        const a = rings[left.ring][left.edge];
+        const b = rings[left.ring][(left.edge + 1) % rings[left.ring].len];
+        for (ordered[pos + 1 ..]) |right| {
+            if (right.minx > left.maxx + contour_eps) break;
+            if (right.ring == left.ring or right.maxy < left.miny - contour_eps or right.miny > left.maxy + contour_eps) continue;
+            const c = rings[right.ring][right.edge];
+            const d = rings[right.ring][(right.edge + 1) % rings[right.ring].len];
+            if (!contourSegmentsTouch(a, b, c, d)) continue;
+            if (left.ring == 0 or right.ring == 0) return false;
+            if (siblingContactHasArea(a, b, c, d)) return false;
+        }
+    }
+
+    for (component.holes, 0..) |hole, i| {
+        if (!(polySignedInset(component.outer, hole[0][0], hole[0][1]) > 0)) return false;
+        for (component.holes[0..i]) |prior| {
+            for (hole) |point| if (pointStrictlyInContour(prior, point)) return false;
+            for (prior) |point| if (pointStrictlyInContour(hole, point)) return false;
+        }
+    }
+    return true;
+}
+
+fn pointStrictlyInContour(poly: Contour, point: [2]f64) bool {
+    for (poly, 0..) |a, i| {
+        const b = poly[(i + 1) % poly.len];
+        const tolerance = contour_eps * @max(1, std.math.hypot(b[0] - a[0], b[1] - a[1]));
+        if (@abs(contourOrient(a, b, point)) <= tolerance and contourPointOnSegment(point, a, b, tolerance)) return false;
+    }
+    return polySignedInset(poly, point[0], point[1]) > 0;
+}
+
+fn siblingContactHasArea(a: [2]f64, b: [2]f64, c: [2]f64, d: [2]f64) bool {
+    const scale = @max(1, @max(std.math.hypot(b[0] - a[0], b[1] - a[1]), std.math.hypot(d[0] - c[0], d[1] - c[1])));
+    const tolerance = contour_eps * scale;
+    const abc = contourOrient(a, b, c);
+    const abd = contourOrient(a, b, d);
+    const cda = contourOrient(c, d, a);
+    const cdb = contourOrient(c, d, b);
+    if (contourOpposite(abc, abd, tolerance) and contourOpposite(cda, cdb, tolerance)) return true;
+    if (@abs(abc) > tolerance or @abs(abd) > tolerance or @abs(cda) > tolerance or @abs(cdb) > tolerance) return false;
+
+    const use_x = @abs(b[0] - a[0]) >= @abs(b[1] - a[1]);
+    const a0 = if (use_x) a[0] else a[1];
+    const a1 = if (use_x) b[0] else b[1];
+    const b0 = if (use_x) c[0] else c[1];
+    const b1 = if (use_x) d[0] else d[1];
+    const overlap = @min(@max(a0, a1), @max(b0, b1)) - @max(@min(a0, a1), @min(b0, b1));
+    return overlap > tolerance;
+}
+
+/// Convert a hole that touches its outer at one point into an open clearance
+/// notch. This removes, never adds, at most one raster-pitch square of copper
+/// through `resolvePinchedWalk`; proper crossings, collinear overlap, or a
+/// second non-local outer/hole crossing remain irreparable and fail closed.
+fn repairTangentHoles(arena: std.mem.Allocator, components: []const TracedComponent, pitch: f64) TraceError![]const TracedComponent {
+    var repaired: std.ArrayList(TracedComponent) = .empty;
+    for (components) |component| {
+        var outer = component.outer;
+        var holes: std.ArrayList(Contour) = .empty;
+        for (component.holes) |hole| {
+            const contact = try firstOuterHoleContact(arena, outer, hole) orelse {
+                try holes.append(arena, hole);
+                continue;
+            };
+            outer = try openTangentHole(arena, outer, hole, contact, pitch);
+        }
+        try repaired.append(arena, .{ .outer = outer, .holes = try holes.toOwnedSlice(arena) });
+    }
+    return repaired.toOwnedSlice(arena);
+}
+
+fn firstOuterHoleContact(arena: std.mem.Allocator, outer: Contour, hole: Contour) std.mem.Allocator.Error!?RingContact {
+    const rings = [2]Contour{ outer, hole };
+    const ordered = try arena.alloc(TaggedSegment, outer.len + hole.len);
+    var at: usize = 0;
+    for (&rings, 0..) |ring, ring_i| {
+        for (ring, 0..) |a, edge_i| {
+            const b = ring[(edge_i + 1) % ring.len];
+            ordered[at] = .{
+                .ring = ring_i,
+                .edge = edge_i,
+                .minx = @min(a[0], b[0]),
+                .miny = @min(a[1], b[1]),
+                .maxx = @max(a[0], b[0]),
+                .maxy = @max(a[1], b[1]),
+            };
+            at += 1;
+        }
+    }
+    std.mem.sort(TaggedSegment, ordered, {}, taggedSegmentOrder);
+    for (ordered, 0..) |left, pos| {
+        const a = rings[left.ring][left.edge];
+        const b = rings[left.ring][(left.edge + 1) % rings[left.ring].len];
+        for (ordered[pos + 1 ..]) |right| {
+            if (right.minx > left.maxx + contour_eps) break;
+            if (right.ring == left.ring or right.maxy < left.miny - contour_eps or right.miny > left.maxy + contour_eps) continue;
+            const c = rings[right.ring][right.edge];
+            const d = rings[right.ring][(right.edge + 1) % rings[right.ring].len];
+            const point = segmentContactPoint(a, b, c, d) orelse continue;
+            return if (left.ring == 0)
+                .{ .outer_edge = left.edge, .hole_edge = right.edge, .point = point }
+            else
+                .{ .outer_edge = right.edge, .hole_edge = left.edge, .point = point };
+        }
+    }
+    return null;
+}
+
+fn segmentContactPoint(a: [2]f64, b: [2]f64, c: [2]f64, d: [2]f64) ?[2]f64 {
+    if (!contourSegmentsTouch(a, b, c, d)) return null;
+    const scale = @max(1, @max(std.math.hypot(b[0] - a[0], b[1] - a[1]), std.math.hypot(d[0] - c[0], d[1] - c[1])));
+    const tolerance = contour_eps * scale;
+    if (@abs(contourOrient(c, d, a)) <= tolerance and contourPointOnSegment(a, c, d, tolerance)) return a;
+    if (@abs(contourOrient(c, d, b)) <= tolerance and contourPointOnSegment(b, c, d, tolerance)) return b;
+    if (@abs(contourOrient(a, b, c)) <= tolerance and contourPointOnSegment(c, a, b, tolerance)) return c;
+    if (@abs(contourOrient(a, b, d)) <= tolerance and contourPointOnSegment(d, a, b, tolerance)) return d;
+
+    const ab = [2]f64{ b[0] - a[0], b[1] - a[1] };
+    const cd = [2]f64{ d[0] - c[0], d[1] - c[1] };
+    const denominator = ab[0] * cd[1] - ab[1] * cd[0];
+    if (@abs(denominator) <= tolerance) return null;
+    const ac = [2]f64{ c[0] - a[0], c[1] - a[1] };
+    const t = (ac[0] * cd[1] - ac[1] * cd[0]) / denominator;
+    return .{ a[0] + t * ab[0], a[1] + t * ab[1] };
+}
+
+fn ringWithContact(arena: std.mem.Allocator, ring: Contour, edge: usize, point: [2]f64) std.mem.Allocator.Error!ContactRing {
+    if (sameContourPoint(ring[edge], point)) return .{ .poly = ring, .contact = edge };
+    const next = (edge + 1) % ring.len;
+    if (sameContourPoint(ring[next], point)) return .{ .poly = ring, .contact = next };
+    const inserted = try arena.alloc([2]f64, ring.len + 1);
+    @memcpy(inserted[0 .. edge + 1], ring[0 .. edge + 1]);
+    inserted[edge + 1] = point;
+    @memcpy(inserted[edge + 2 ..], ring[edge + 1 ..]);
+    return .{ .poly = inserted, .contact = edge + 1 };
+}
+
+fn openTangentHole(arena: std.mem.Allocator, outer: Contour, hole: Contour, contact: RingContact, pitch: f64) TraceError!Contour {
+    const a = try ringWithContact(arena, outer, contact.outer_edge, contact.point);
+    const b = try ringWithContact(arena, hole, contact.hole_edge, contact.point);
+    const walk = try arena.alloc([2]f64, a.poly.len + b.poly.len);
+    for (0..a.poly.len) |i| walk[i] = a.poly[(a.contact + i) % a.poly.len];
+    for (0..b.poly.len) |i| walk[a.poly.len + i] = b.poly[(b.contact + i) % b.poly.len];
+
+    var resolved: std.ArrayList(Contour) = .empty;
+    try resolvePinchedWalk(arena, walk, pitch, &resolved);
+    if (resolved.items.len != 1) return error.InvalidBoundary;
+    return finalizeContour(arena, resolved.items[0], 0);
+}
+
+/// Compact and optionally round one authoritative raw boundary without ever
+/// sacrificing its topology. Douglas-Peucker and distant corner fillets can
+/// each introduce a non-local crossing in a narrow, winding loop, so every
+/// lossy stage is accepted only when it remains a valid closed contour.
+fn finalizeContour(arena: std.mem.Allocator, raw: Contour, radius: f64) TraceError!Contour {
+    return finalizeContourAtTolerance(arena, raw, radius, dp_tol);
+}
+
+fn finalizeContourAtTolerance(arena: std.mem.Allocator, raw: Contour, radius: f64, simplify_tolerance: f64) TraceError!Contour {
+    const clean = try cleanContour(arena, raw);
+    const simplified = try simplifyClean(arena, clean, simplify_tolerance);
+    const simple = if (try validClosedContour(arena, simplified))
+        simplified
+    else if (try validClosedContour(arena, clean))
+        clean
+    else
+        return error.InvalidBoundary;
+    const rounded = try roundContour(arena, simple, radius);
+    return if (try validClosedContour(arena, rounded)) rounded else simple;
 }
 
 /// Apply the board-level pour corner radius to a traced contour. The shared
@@ -2283,6 +2912,241 @@ test "emitCellEdges emits the bottom boundary edge for a cell empty below" {
     try testing.expectEqual(@as(u32, 10), edges.items[0].b);
 }
 
+// spec: placement/pour - contour tracing closes every boundary, decomposes pinched walks into strict simple regions, allows only zero-area sibling-hole tangency, and fails closed on irreparable topology
+test "contour topology rejects an incomplete boundary stitch" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // 0->1->2 has no outgoing edge at 2, so it is an open chain rather than a
+    // closed cell boundary. The old stitcher returned both edges as a polygon.
+    var edges = [_]Edge{
+        .{ .a = 0, .b = 1, .dir = .e, .cell = 0 },
+        .{ .a = 1, .b = 2, .dir = .e, .cell = 1 },
+    };
+    var by_tail: TailMap = .empty;
+    try indexTails(arena, &by_tail, &edges);
+    try testing.expectError(error.InvalidBoundary, stitchLoop(arena, &edges, &by_tail, 0));
+}
+
+test "contour topology leaves a diagonal saddle as one simple open notch" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // One 4-connected C-shaped component has diagonal copper cells at the
+    // centre saddle. Copper lies on the LEFT of every y-down boundary edge, so
+    // left-first pairing keeps those diagonal cells disconnected at the saddle
+    // and leaves the empty centre joined to the exterior by one simple notch.
+    var labels = [_]i32{
+        -1, -1, -1, -1,
+        0,  0,  -1, -1,
+        0,  -1, 0,  -1,
+        0,  0,  0,  -1,
+    };
+    var margin = [_]f32{
+        -1, -1, -1, -1,
+        1,  1,  -1, -1,
+        1,  -1, 1,  -1,
+        1,  1,  1,  -1,
+    };
+    const g = Grid{ .minx = 0, .miny = 0, .pitch = 1, .nx = 4, .ny = 4, .labels = &labels, .margin = &margin, .iso = 0 };
+    var edges: std.ArrayList(Edge) = .empty;
+    try collectBoundaryEdges(arena, &edges, g, 0);
+    var by_tail: TailMap = .empty;
+    try indexTails(arena, &by_tail, edges.items);
+    const loops = try realiseLoops(arena, g, edges.items, &by_tail);
+    try testing.expectEqual(@as(usize, 1), loops.len);
+    for (loops) |loop| try testing.expect(try validClosedContour(arena, loop));
+}
+
+test "contour topology removes paired iso duplicates before simplification" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+    const paired = [_][2]f64{
+        .{ 0, 0 }, .{ 0, 0 },
+        .{ 2, 0 }, .{ 2, 0 },
+        .{ 2, 2 }, .{ 2, 2 },
+        .{ 0, 2 }, .{ 0, 2 },
+    };
+    const final = try finalizeContour(arena, &paired, 0);
+    try testing.expectEqual(@as(usize, 4), final.len);
+    try testing.expect(try validClosedContour(arena, final));
+}
+
+test "contour topology rejects contact between an outer and its hole" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    const outer = [_][2]f64{ .{ 0, 0 }, .{ 10, 0 }, .{ 10, 10 }, .{ 0, 10 } };
+    const clear_hole = [_][2]f64{ .{ 2, 2 }, .{ 2, 4 }, .{ 4, 4 }, .{ 4, 2 } };
+    const tangent_hole = [_][2]f64{ .{ 0, 5 }, .{ 2, 6 }, .{ 2, 4 } };
+    const clear = TracedComponent{ .outer = &outer, .holes = &.{&clear_hole} };
+    const tangent = TracedComponent{ .outer = &outer, .holes = &.{&tangent_hole} };
+
+    try testing.expect(try tracedComponentValid(arena, clear));
+    try testing.expect(!try tracedComponentValid(arena, tangent));
+}
+
+test "contour topology allows sibling point tangency but rejects overlap and nesting" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    const outer = [_][2]f64{ .{ 0, 0 }, .{ 10, 0 }, .{ 10, 10 }, .{ 0, 10 } };
+    const left = [_][2]f64{ .{ 2, 2 }, .{ 2, 5 }, .{ 5, 5 }, .{ 5, 2 } };
+    const tangent = [_][2]f64{ .{ 5, 5 }, .{ 5, 8 }, .{ 8, 8 }, .{ 8, 5 } };
+    const crossing = [_][2]f64{ .{ 4, 3 }, .{ 4, 7 }, .{ 7, 7 }, .{ 7, 3 } };
+    const nested = [_][2]f64{ .{ 3, 3 }, .{ 3, 4 }, .{ 4, 4 }, .{ 4, 3 } };
+
+    try testing.expect(try tracedComponentValid(arena, .{ .outer = &outer, .holes = &.{ &left, &tangent } }));
+    try testing.expect(!try tracedComponentValid(arena, .{ .outer = &outer, .holes = &.{ &left, &crossing } }));
+    try testing.expect(!try tracedComponentValid(arena, .{ .outer = &outer, .holes = &.{ &left, &nested } }));
+}
+
+test "contour topology opens a separately traced tangent hole" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    const outer = [_][2]f64{ .{ 0, 0 }, .{ 4, 0 }, .{ 4, 4 }, .{ 0, 4 } };
+    // Opposite winding to `outer`, with its left point tangent to the outer's
+    // left edge. This is the separate-loop form of the same raster saddle as
+    // the repeated-vertex fixture below.
+    const hole = [_][2]f64{ .{ 0, 2 }, .{ 1, 3 }, .{ 2, 2 }, .{ 1, 1 } };
+    const component = TracedComponent{ .outer = &outer, .holes = &.{&hole} };
+    const repaired = try repairTangentHoles(arena, &.{component}, 1);
+
+    try testing.expectEqual(@as(usize, 1), repaired.len);
+    try testing.expectEqual(@as(usize, 0), repaired[0].holes.len);
+    try testing.expect(try tracedComponentValid(arena, repaired[0]));
+    const original_area2 = @abs(outline.signedArea2(&outer) + outline.signedArea2(&hole));
+    const repaired_area2 = @abs(outline.signedArea2(repaired[0].outer));
+    try testing.expect(repaired_area2 <= original_area2 + 1e-9);
+    try testing.expect(original_area2 - repaired_area2 <= 2 + 1e-9);
+}
+
+test "contour topology opens an opposite-winding tangent pocket conservatively" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // A clearance diamond touches the outer square at P. The combined non-zero
+    // winding walk repeats P; the repair removes at most one pitch-squared of
+    // copper per eliminated copy and emits one notch with no retrace/touch.
+    const p = [2]f64{ 0, 2 };
+    const pinched = [_][2]f64{
+        p,
+        .{ 1, 1 },
+        .{ 2, 2 },
+        .{ 1, 3 },
+        p,
+        .{ 0, 4 },
+        .{ 4, 4 },
+        .{ 4, 0 },
+        .{ 0, 0 },
+    };
+    var loops: std.ArrayList(Contour) = .empty;
+    try resolvePinchedWalk(arena, &pinched, 1, &loops);
+    try testing.expectEqual(@as(usize, 1), loops.items.len);
+    const repaired = loops.items[0];
+    try testing.expect(try validClosedContour(arena, repaired));
+    const removed_area2 = @abs(outline.signedArea2(&pinched)) - @abs(outline.signedArea2(repaired));
+    try testing.expect(removed_area2 >= -1e-9);
+    try testing.expect(removed_area2 <= 2 + 1e-9);
+}
+
+// spec: placement/pour - contour simplification and corner rounding fall back to the last strict simple boundary instead of emitting a crossing
+test "contour topology falls back when Douglas-Peucker crosses a simple loop" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // A simple narrow loop whose two low-deviation vertices are both discarded
+    // at the production 0.01 mm tolerance. Their replacement chord crosses a
+    // distant retained edge even though the source polygon is valid.
+    const raw = [_][2]f64{
+        .{ 0.19280, 0.06850 },
+        .{ -0.07305, 0.07275 },
+        .{ -0.05335, 0.09815 },
+        .{ -0.12550, 0.15495 },
+        .{ -0.06625, 0.04995 },
+        .{ 0.03385, -0.10520 },
+        .{ 0.05550, -0.12445 },
+    };
+    try testing.expect(try validClosedContour(arena, &raw));
+    const folded = try simplify(arena, &raw, dp_tol);
+    try testing.expect(outline.selfIntersects(folded));
+
+    const final = try finalizeContour(arena, &raw, 0);
+    try testing.expect(try validClosedContour(arena, final));
+    try testing.expectEqualSlices([2]f64, &raw, final);
+}
+
+test "contour topology falls back when corner fillets cross a simple loop" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // Local 45%-of-edge fillet clamps do not prevent an arc from meeting a
+    // distant edge in a strongly concave polygon. Preserve the last simple
+    // (sharp) contour when that non-local interaction occurs.
+    const raw = [_][2]f64{
+        .{ -3.4510, 1.0645 },
+        .{ -1.4143, 0.5396 },
+        .{ -4.5908, 1.6897 },
+        .{ 2.9951, -2.5165 },
+        .{ 0.6295, -0.0657 },
+    };
+    const simple = try simplify(arena, &raw, dp_tol);
+    try testing.expect(try validClosedContour(arena, simple));
+    const folded = try roundContour(arena, simple, 0.2);
+    try testing.expect(outline.selfIntersects(folded));
+
+    const final = try finalizeContour(arena, &raw, 0.2);
+    try testing.expect(try validClosedContour(arena, final));
+    try testing.expectEqualSlices([2]f64, simple, final);
+}
+
+test "contour topology rejects the known Barracuda Base clearance crossing" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // Exact copper-bottom clearance region captured from Barracuda Base. It has
+    // proper crossings at (192.307635, 81.186883) and
+    // (209.191433, 85.692483), so it must never be accepted as a raw loop or
+    // written as one ambiguous G36 region.
+    const barracuda = [_][2]f64{
+        .{ 187.3293, 79.2355 },
+        .{ 187.4817, 79.3065 },
+        .{ 190.3773, 79.3117 },
+        .{ 193.0443, 81.9025 },
+        .{ 199.6737, 86.7031 },
+        .{ 207.8271, 86.7031 },
+        .{ 209.8845, 85.1791 },
+        .{ 210.0369, 85.102142 },
+        .{ 210.3417, 85.094089 },
+        .{ 210.4941, 85.1791 },
+        .{ 210.5703, 85.2553 },
+        .{ 210.573751, 85.7125 },
+        .{ 209.9607, 85.8649 },
+        .{ 209.8083, 85.7935 },
+        .{ 209.6559, 85.7935 },
+        .{ 194.5683, 82.5121 },
+        .{ 190.1487, 79.9213 },
+        .{ 187.4055, 79.9213 },
+        .{ 187.2531, 80.001779 },
+        .{ 186.9483, 80.002306 },
+        .{ 186.7197, 79.3879 },
+        .{ 186.8721, 79.235364 },
+    };
+    try testing.expect(outline.selfIntersects(&barracuda));
+    try testing.expectError(error.InvalidBoundary, finalizeContour(arena, &barracuda, 0));
+}
+
 fn testPlacement(parts: []optimizer.Part, nets: []const flat_netlist.FlatNet, rules: optimizer.BoardRules) optimizer.Placement {
     return .{
         .parts = parts,
@@ -2495,6 +3359,33 @@ test "clip active bounds retain touching stamp windows and reject distant ones" 
     try testing.expect(stampWindowActive(foreignActiveBounds(g, &.{}), -20, -20, -10, -10));
 }
 
+// spec: placement/pour - native routed arcs carve their exact directed envelope and suppress only stored implementation chords with matching layer, net, and width
+test "native arc stamp follows the directed circle instead of its chord" {
+    var labels: [10_000]i32 = @splat(-1);
+    var margin: [10_000]f32 = @splat(100);
+    const g = Grid{ .minx = 0, .miny = 0, .pitch = 0.1, .nx = 100, .ny = 100, .labels = &labels, .margin = &margin, .iso = 0 };
+    const arc = router.Arc{
+        .p1 = .{ 7, 5 },
+        .pm = .{ 6.414213562, 6.414213562 },
+        .p2 = .{ 5, 7 },
+        .layer = 0,
+        .width = 0.2,
+        .net = 1,
+    };
+    stampArcWithin(g, null, arc, 0.25);
+
+    const curved = cellRange(g, arc.pm[0], arc.pm[1]);
+    const chord = cellRange(g, 6, 6);
+    try testing.expect(margin[curved[1] * g.nx + curved[0]] < 0);
+    try testing.expectEqual(@as(f32, 100), margin[chord[1] * g.nx + chord[0]]);
+
+    const owned = router.Track{ .x1 = arc.p1[0], .y1 = arc.p1[1], .x2 = arc.pm[0], .y2 = arc.pm[1], .layer = arc.layer, .width = arc.width, .net = arc.net };
+    var wider = owned;
+    wider.width *= 2;
+    try testing.expect(nativeArcOwnsTrack(&.{arc}, owned));
+    try testing.expect(!nativeArcOwnsTrack(&.{arc}, wider));
+}
+
 // spec: placement/pour - a small drawn zone lands its copper edge on the clip boundary no matter how much board lies outside it
 test "a corner user zone keeps an exact clip boundary" {
     var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
@@ -2527,24 +3418,30 @@ test "a corner user zone keeps an exact clip boundary" {
 }
 
 // spec: placement/pour - an inner-layer user pour carves a clipped fill, stamping only through-hole/via copper as foreign while SMD pads leave it intact
-test "inner-layer user pour carves a foreign via but ignores an SMD pad" {
+// spec: placement/pour - an inner-layer foreign plated through-hole carves its full copper land rather than only its drill
+test "inner-layer user pour carves foreign plated copper and ignores an SMD pad" {
     var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_i.deinit();
     const arena = arena_i.allocator();
 
     // The barracuda case: an In2.Cu rail pour (signal index 2 on a 4-layer board
     // whose In1 is a GND plane). A same-net V_3V3A THROUGH-HOLE pad seeds it, a
-    // foreign GND VIA is carved out (its barrel reaches the inner layer), and a
-    // foreign GND SMD pad DIRECTLY OVER the pour is left intact (SMD copper lives
-    // on the outer face, never touches an inner layer).
+    // foreign GND VIA and plated through-hole land are carved out (both reach
+    // the inner layer), and a foreign GND SMD pad DIRECTLY OVER the pour is left
+    // intact (SMD copper lives on the outer face, never touches an inner layer).
     const rail_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.9, .h = 0.9, .thru = true, .drill = 0.4 }};
     const smd_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    const foreign_thru_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 1.2, .h = 0.8, .thru = true, .drill = 0.4 }};
     var parts = [_]optimizer.Part{
         .{ .ref_des = "U1", .kind = .hub, .hw = 0.6, .hh = 0.6, .pads = &rail_pad, .fallback = false, .x = 10, .y = 10, .side = .top },
         .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &smd_pad, .fallback = false, .x = 6, .y = 6, .side = .top },
+        .{ .ref_des = "J1", .kind = .passive, .hw = 0.8, .hh = 0.8, .pads = &foreign_thru_pad, .fallback = false, .x = 8, .y = 8, .side = .top },
     };
     const rail_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "U1", .pin = "1" }};
-    const gnd_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "R1", .pin = "1" }};
+    const gnd_pins = [_]flat_netlist.FlatPin{
+        .{ .ref_des = "R1", .pin = "1" },
+        .{ .ref_des = "J1", .pin = "1" },
+    };
     const nets = [_]flat_netlist.FlatNet{
         .{ .name = "V_3V3A", .pins = &rail_pins },
         .{ .name = "GND", .pins = &gnd_pins },
@@ -2563,12 +3460,54 @@ test "inner-layer user pour carves a foreign via but ignores an SMD pad" {
     try testing.expect(fill.componentAt(10, 10) >= 0);
     // The foreign GND via barrel is carved out of the inner copper.
     try testing.expect(fill.componentAt(13, 13) < 0);
+    // A plated through-hole exposes its full copper land on the inner layer;
+    // carving only the drill would leave an annular foreign-copper overlap.
+    try testing.expect(fill.componentAt(8, 8) < 0);
     // The foreign GND SMD pad does NOT reach the inner layer → its footprint is
     // still poured copper (not carved).
     try testing.expect(fill.componentAt(6, 6) >= 0);
     // The clip confines the fill to the drawn polygon.
     try testing.expect(fill.componentAt(2, 2) < 0);
     try testing.expect(fill.componentAt(18, 18) < 0);
+}
+
+// Native routed arcs carve only pours on their matching outer or inner signal layer.
+test "native arcs carve matching outer and inner pours without leaking across layers" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    const seed_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.8, .h = 0.8, .thru = true, .drill = 0.3 }};
+    var parts = [_]optimizer.Part{.{ .ref_des = "J1", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &seed_pad, .fallback = false, .x = 3, .y = 3, .side = .top }};
+    const gnd_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "J1", .pin = "1" }};
+    const nets = [_]flat_netlist.FlatNet{ .{ .name = "GND", .pins = &gnd_pins }, .{ .name = "VIN", .pins = &.{} } };
+    const placement = testPlacement(&parts, &nets, .{ .plane_nets = &.{"GND"}, .copper_layers = 4 });
+    const top_arc = router.Arc{
+        .p1 = .{ 15, 11 },
+        .pm = .{ 13.828427125, 13.828427125 },
+        .p2 = .{ 11, 15 },
+        .layer = 0,
+        .width = 0.2,
+        .net = 1,
+    };
+    const inner_arc = router.Arc{
+        .p1 = top_arc.p1,
+        .pm = top_arc.pm,
+        .p2 = top_arc.p2,
+        .layer = 2,
+        .width = top_arc.width,
+        .net = top_arc.net,
+    };
+
+    const top = try compute(arena, placement, .{ .arcs = &.{top_arc} }, outerSpec("GND", .top));
+    const bottom = try compute(arena, placement, .{ .arcs = &.{top_arc} }, outerSpec("GND", .bottom));
+    const clip = [_][2]f64{ .{ 1, 1 }, .{ 19, 1 }, .{ 19, 19 }, .{ 1, 19 } };
+    const inner = try compute(arena, placement, .{ .arcs = &.{inner_arc} }, zoneLayerSpec("GND", null, 2, &clip));
+
+    try testing.expect(top.integrity_ok and bottom.integrity_ok and inner.integrity_ok);
+    try testing.expect(top.componentAt(top_arc.pm[0], top_arc.pm[1]) < 0);
+    try testing.expect(bottom.componentAt(top_arc.pm[0], top_arc.pm[1]) >= 0);
+    try testing.expect(inner.componentAt(inner_arc.pm[0], inner_arc.pm[1]) < 0);
 }
 
 // spec: placement/pour - a pour outranks a different-net overlapping pour only with strictly greater priority on the same layer

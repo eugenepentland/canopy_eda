@@ -65,6 +65,13 @@ pub const Kind = enum {
     hole_hole,
     min_drill,
     track_width,
+    /// A final plane/pour component cannot be represented as one unambiguous
+    /// solid: an outer or hole is degenerate/self-intersecting, a hole crosses
+    /// or escapes its outer, or sibling holes touch/overlap.
+    pour_invalid,
+    /// Different-net final pour solids overlap or touch on the same physical
+    /// copper layer. Same-net pours intentionally remain free to merge.
+    pour_overlap,
     /// A routed trace endpoint that lands on no same-net pad, via, pour, or
     /// other trace. This is disconnected artifact copper and therefore an
     /// error, even when the net's real terminals are connected elsewhere.

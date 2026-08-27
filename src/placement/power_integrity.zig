@@ -399,7 +399,13 @@ fn buildSurfaces(
         });
     }
 
-    const copper: pour.Copper = .{ .tracks = routed.tracks, .vias = routed.vias, .zones = zones };
+    const copper: pour.Copper = .{
+        .tracks = routed.tracks,
+        .vias = routed.vias,
+        .arcs = routed.arcs,
+        .rf_paths = routed.rf_port_outcomes,
+        .zones = zones,
+    };
     const out = try alloc.alloc(Surface, metas.items.len);
     for (metas.items, 0..) |meta, i| out[i] = .{
         .net = meta.net,

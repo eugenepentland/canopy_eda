@@ -988,6 +988,8 @@ const Work = struct {
         const r = self.copper() orelse return;
         const open = try fab_readiness.openNets(self.alloc, self.placement, .{
             .tracks = r.tracks,
+            .arcs = r.arcs,
+            .rf_paths = r.rf_port_outcomes,
             .vias = r.vias,
             .zones = self.zones,
         });
@@ -1146,6 +1148,8 @@ const Work = struct {
         const r = self.copper() orelse return 0;
         const open = try fab_readiness.openNets(self.alloc, self.placement, .{
             .tracks = r.tracks,
+            .arcs = r.arcs,
+            .rf_paths = r.rf_port_outcomes,
             .vias = r.vias,
             .zones = self.zones,
         });
@@ -1157,6 +1161,8 @@ const Work = struct {
         const r = self.copper() orelse return 0;
         const g = fab_readiness.buildNetGraph(self.alloc, self.placement, .{
             .tracks = r.tracks,
+            .arcs = r.arcs,
+            .rf_paths = r.rf_port_outcomes,
             .vias = r.vias,
             .zones = self.zones,
         }, self.placement.nets[net_i], @intCast(net_i)) catch return 0;
@@ -1170,6 +1176,8 @@ const Work = struct {
         const r = self.copper() orelse return &.{};
         const open = try fab_readiness.openNets(self.alloc, self.placement, .{
             .tracks = r.tracks,
+            .arcs = r.arcs,
+            .rf_paths = r.rf_port_outcomes,
             .vias = r.vias,
             .zones = self.zones,
         });
@@ -1693,6 +1701,8 @@ const Work = struct {
         const r = self.copper() orelse return;
         const open = try fab_readiness.openNets(self.alloc, self.placement, .{
             .tracks = r.tracks,
+            .arcs = r.arcs,
+            .rf_paths = r.rf_port_outcomes,
             .vias = r.vias,
             .zones = self.zones,
         });
@@ -1850,6 +1860,8 @@ const Work = struct {
         const r = self.copper() orelse return &.{};
         const open = try fab_readiness.openNets(self.alloc, self.placement, .{
             .tracks = r.tracks,
+            .arcs = r.arcs,
+            .rf_paths = r.rf_port_outcomes,
             .vias = r.vias,
             .zones = self.zones,
         });
@@ -2881,6 +2893,8 @@ const Work = struct {
         return .{
             .open = try fab_readiness.openNets(self.alloc, self.placement, .{
                 .tracks = r.tracks,
+                .arcs = r.arcs,
+                .rf_paths = r.rf_port_outcomes,
                 .vias = r.vias,
                 .zones = self.zones,
             }),
@@ -2893,6 +2907,8 @@ const Work = struct {
         const r = self.copper() orelse return &.{};
         return fab_readiness.openNets(self.alloc, self.placement, .{
             .tracks = r.tracks,
+            .arcs = r.arcs,
+            .rf_paths = r.rf_port_outcomes,
             .vias = r.vias,
             .zones = self.zones,
         });
@@ -3210,6 +3226,8 @@ fn writeResult(out: *std.ArrayList(u8), o: Outcome) HandlerError!bool {
     }
     const final = try fab_readiness.routableTally(alloc, work.placement, .{
         .tracks = r.tracks,
+        .arcs = r.arcs,
+        .rf_paths = r.rf_port_outcomes,
         .vias = r.vias,
         .zones = work.zones,
     });

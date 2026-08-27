@@ -581,7 +581,13 @@ fn firstPath(paths: []const ?router.GapPath) ?router.GapPath {
 /// The oracle's view of a route's copper: its tracks and vias plus the layout's
 /// pours, which are connecting copper for any rail poured rather than traced.
 fn copperOf(routed: router.RouteResult, zones: []const pour.UserZone) routed_copper.Copper {
-    return .{ .tracks = routed.tracks, .vias = routed.vias, .zones = zones };
+    return .{
+        .tracks = routed.tracks,
+        .arcs = routed.arcs,
+        .rf_paths = routed.rf_port_outcomes,
+        .vias = routed.vias,
+        .zones = zones,
+    };
 }
 
 /// Keep only hops that laid copper WITHOUT ripping any. The gate runs on every

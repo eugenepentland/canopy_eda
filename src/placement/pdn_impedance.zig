@@ -845,7 +845,13 @@ fn computedPaths(
 ) std.mem.Allocator.Error!CopperPaths {
     const Meta = struct { net: []const u8, layer: ?u8, stack: u8, spec: pour.LayerSpec };
     var metas: std.ArrayList(Meta) = .empty;
-    const copper: pour.Copper = .{ .tracks = routed.tracks, .vias = routed.vias, .zones = zones };
+    const copper: pour.Copper = .{
+        .tracks = routed.tracks,
+        .vias = routed.vias,
+        .arcs = routed.arcs,
+        .rf_paths = routed.rf_port_outcomes,
+        .zones = zones,
+    };
     for (p.nets) |net| {
         var relevant = optimizer.isGroundName(net_names.leaf(net.name));
         for (p.rules.physical.pdn_intents) |intent| if (intentMatches(intent.net, net.name)) {

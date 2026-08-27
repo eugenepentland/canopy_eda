@@ -28,6 +28,8 @@ pub fn kindStr(k: drc.Kind) []const u8 {
         .hole_hole => "hole↔hole",
         .min_drill => "min drill",
         .track_width => "track width",
+        .pour_invalid => "invalid copper pour",
+        .pour_overlap => "pour overlap",
         .copper_stub => "copper stub",
         .implicit_junction => "implicit trace junction",
         .hairline_gap => "hairline gap",
@@ -71,7 +73,7 @@ pub const drawer_groups = [_]DrawerGroup{
     .{
         .title = "Copper clearance",
         .blurb = "Edge-to-edge spacing between copper features that belong to different nets.",
-        .kinds = &.{ .track_track, .track_pad, .pad_pad, .via_track, .via_pad, .via_via },
+        .kinds = &.{ .track_track, .track_pad, .pad_pad, .via_track, .via_pad, .via_via, .pour_overlap },
     },
     .{
         .title = "Drill & annular ring",
@@ -81,7 +83,7 @@ pub const drawer_groups = [_]DrawerGroup{
     .{
         .title = "Fabrication limits",
         .blurb = "Board-level minimums, the routed outline, and assembly hygiene.",
-        .kinds = &.{ .track_width, .board_edge, .component_edge, .courtyard, .silk_over_pad },
+        .kinds = &.{ .track_width, .pour_invalid, .board_edge, .component_edge, .courtyard, .silk_over_pad },
     },
     .{
         .title = "Signal integrity",
