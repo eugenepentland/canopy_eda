@@ -52,7 +52,11 @@
 //!
 //! Finite thickness follows Gupta et al., *Microstrip Lines and Slotlines*,
 //! 2nd ed., eq. 7.98–7.100: d=(1.25t/π)(1+ln(4πW/t)), W becomes W+d and
-//! S becomes S−d in the elliptic ratio, followed by their εeff correction.
+//! S becomes S−d in the elliptic ratio. The zero-thickness filling factor is
+//! then reduced a posteriori by
+//!
+//!     εeff,t = εeff − 0.7(εeff−1)(t/S) / (q₁ + 0.7t/S)
+//!
 //! This is the same quasi-static, no-soldermask model used by KiCad's grounded
 //! coplanar calculator; frequency-dependent dispersion and loss are outside
 //! this module's width/impedance contract.
@@ -1155,12 +1159,39 @@ test "mismatchPct measures an authored width against its target" {
 test "grounded coplanar impedance matches the barracuda stackup" {
     const ref: Ref = .{ .microstrip = .{ .h_mm = 0.2104, .er = 4.4 } };
     const z = try groundedCoplanarZ0(0.31, 0.2104, 0.035, 4.4, 0.127);
-    try testing.expectApproxEqAbs(@as(f64, 50.94), z, 0.02);
+    try testing.expectApproxEqAbs(@as(f64, 48.76), z, 0.02);
     try testing.expectEqualStrings("grounded-coplanar", ref.kindNameWithGroundGap(0.127));
 
     const solved = try refWidthForZ0WithGroundGap(ref, 50, 0.035, 0.127);
-    try testing.expectApproxEqAbs(@as(f64, 0.32147), solved, 0.0001);
+    try testing.expectApproxEqAbs(@as(f64, 0.29483), solved, 0.0001);
     try testing.expectApproxEqAbs(@as(f64, 50), try refZ0WithGroundGap(ref, solved, 0.035, 0.127), 1e-9);
+}
+
+test "documented conductor-backed CPWG equations match reference vectors" {
+    // Direct evaluations of the document's closed form. The finite-thickness
+    // vector exercises both W/S adjustment and Gupta's a-posteriori effective-
+    // permittivity reduction.
+    const ref: Ref = .{ .microstrip = .{ .h_mm = 0.5, .er = 4.3 } };
+    try testing.expectApproxEqAbs(
+        @as(f64, 46.5653913947),
+        try refZ0WithGroundGap(ref, 0.9, 0, 0.25),
+        1e-9,
+    );
+    try testing.expectApproxEqAbs(
+        @as(f64, 2.9970777230),
+        try refEffectiveErWithGroundGap(ref, 0.9, 0, 0.25),
+        1e-9,
+    );
+    try testing.expectApproxEqAbs(
+        @as(f64, 45.1686206303),
+        try refZ0WithGroundGap(ref, 0.9, 0.035, 0.25),
+        1e-9,
+    );
+    try testing.expectApproxEqAbs(
+        @as(f64, 2.8054261564),
+        try refEffectiveErWithGroundGap(ref, 0.9, 0.035, 0.25),
+        1e-9,
+    );
 }
 
 // spec: placement/impedance - propagation uses the same grounded coplanar effective permittivity as impedance synthesis
@@ -1177,13 +1208,13 @@ test "grounded coplanar exposes its matched effective permittivity" {
 test "grounded coplanar gap synthesis reaches target or reports its cap" {
     const ref: Ref = .{ .microstrip = .{ .h_mm = 0.2104, .er = 4.4 } };
     const matched = try refGroundGapForZ0(ref, 0.4, 0.035, 50, 0.127, 1.75);
-    try testing.expectApproxEqAbs(@as(f64, 0.29747), matched.gap_mm, 0.0001);
+    try testing.expectApproxEqAbs(@as(f64, 0.36121), matched.gap_mm, 0.0001);
     try testing.expectApproxEqAbs(@as(f64, 50), matched.z0_ohms, 1e-9);
     try testing.expect(!matched.capped);
 
     const limited = try refGroundGapForZ0(ref, 0.5588, 0.035, 50, 0.127, 1.75);
     try testing.expectEqual(@as(f64, 1.75), limited.gap_mm);
-    try testing.expectApproxEqAbs(@as(f64, 44.04), limited.z0_ohms, 0.02);
+    try testing.expectApproxEqAbs(@as(f64, 43.87), limited.z0_ohms, 0.02);
     try testing.expect(limited.capped);
     try testing.expectError(Error.OutOfDomain, refGroundGapForZ0(.{ .stripline = .{ .h1_mm = 0.2, .h2_mm = 0.2, .er = 4.4 } }, 0.4, 0.035, 50, 0.127, 1.75));
 }

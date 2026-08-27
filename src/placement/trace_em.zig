@@ -895,7 +895,7 @@ test "routed CPWG sections synthesize their local gap from exact widths" {
     const dielectrics = [_]impedance.Dielectric{.{ .after_layer = 1, .thickness_mm = 0.2104, .er = 4.4 }};
     const rule = optimizer.NetRule{
         .class = .{ .name = "rf-50ohm" },
-        .width = 0.3214700487624722,
+        .width = 0.29482926552357647,
         .clearance = 0.127,
         .rf = .{
             .max_freq_hz = 6e9,
@@ -925,14 +925,14 @@ test "routed CPWG sections synthesize their local gap from exact widths" {
     // order, establishes the two-port chain.
     const tracks = [_]router.Track{
         .{ .x1 = 1, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.4, .net = 0 },
-        .{ .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.3214700487624722, .net = 0 },
+        .{ .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.29482926552357647, .net = 0 },
     };
     const result = (try analyzeNet(arena, placement, .{ .tracks = &tracks, .vias = &.{}, .routed = 1, .total = 1 }, 0)).?;
     try testing.expectEqual(Status.ok, result.status);
     try testing.expectEqual(@as(usize, sweep_points), result.samples.len);
     try testing.expectApproxEqAbs(@as(f64, 50), result.summary.z0.weighted_ohms, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 0.127), result.summary.ground_gap.min_mm, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 0.29747), result.summary.ground_gap.max_mm, 0.0001);
+    try testing.expectApproxEqAbs(@as(f64, 0.36121), result.summary.ground_gap.max_mm, 0.0001);
     try testing.expectApproxEqAbs(@as(f64, 0), result.summary.ground_gap.capped_length_mm, 1e-9);
     try testing.expect(result.summary.worst_return_loss_db > result.target.band.return_loss_db);
 }
@@ -954,7 +954,7 @@ test "bottom route layer maps to the bottom physical copper" {
     };
     const rule = optimizer.NetRule{
         .class = .{ .name = "rf-50ohm" },
-        .width = 0.18335412052887323,
+        .width = 0.17098977764861645,
         .clearance = 0.127,
         .rf = .{
             .max_freq_hz = 12e9,

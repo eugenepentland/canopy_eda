@@ -323,7 +323,7 @@ test "a ground gap derives grounded-coplanar width and honors clearance" {
     try testing.expectApproxEqAbs(@as(f64, 0.127), rules[0].rf.impedance.ground_gap_mm, 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 1.75), rules[0].rf.impedance.ground_gap_max_mm, 1e-12);
     try testing.expect(rules[0].rf.impedance.width_derived);
-    try testing.expectApproxEqAbs(@as(f64, 0.32147), rules[0].width, 0.0001);
+    try testing.expectApproxEqAbs(@as(f64, 0.29483), rules[0].width, 0.0001);
 }
 
 // spec: placement/impedance_rules - a class with no impedance target, or a board with no stackup, derives no width

@@ -2890,7 +2890,7 @@ test "ground pour gap follows controlled-impedance taper up to its cap" {
     });
     const taper = router.Track{ .x1 = 5, .y1 = 10, .x2 = 10, .y2 = 10, .layer = 0, .width = 0.4, .net = 1 };
     const launch = router.Track{ .x1 = 10, .y1 = 10, .x2 = 15, .y2 = 10, .layer = 0, .width = 0.5588, .net = 1 };
-    try testing.expectApproxEqAbs(@as(f64, 0.29747), trackPourClearance(placement, taper, .{ .named = "GND" }, 0.3), 0.0001);
+    try testing.expectApproxEqAbs(@as(f64, 0.36121), trackPourClearance(placement, taper, .{ .named = "GND" }, 0.3), 0.0001);
     try testing.expectEqual(@as(f64, 1.75), trackPourClearance(placement, launch, .{ .named = "GND" }, 0.3));
     try testing.expectEqual(placement.rules.clearanceForNet(1, 0.3), trackPourClearance(placement, launch, .{ .named = "VCC" }, 0.3));
 }
@@ -2987,7 +2987,7 @@ test "bottom CPWG gap uses the bottom physical stackup" {
             .board_mm = 1.6,
         } },
     });
-    const bottom = router.Track{ .x1 = 5, .y1 = 10, .x2 = 10, .y2 = 10, .layer = 1, .width = 0.18335412052887323, .net = 1 };
+    const bottom = router.Track{ .x1 = 5, .y1 = 10, .x2 = 10, .y2 = 10, .layer = 1, .width = 0.17098977764861645, .net = 1 };
     try testing.expectApproxEqAbs(@as(f64, 0.127), trackPourClearance(placement, bottom, .{ .named = "GND" }, 0.3), 0.0001);
 }
 

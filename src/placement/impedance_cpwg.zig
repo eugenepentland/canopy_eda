@@ -58,6 +58,11 @@ pub fn analyze(w_mm: f64, h_mm: f64, t_mm: f64, er: f64, gap_mm: f64) Error!Resu
     const q3 = try ellipticRatio(k3);
 
     var qz = 1.0 / (q1 + q3);
+    // Gupta's finite-thickness correction below is a posteriori: its
+    // permittivity term starts from this zero-thickness filling factor while
+    // only the impedance factor replaces q1 with the thickness-adjusted qe.
+    // Recomputing this filling factor with qe double-counts part of the copper
+    // thickness effect and raises Z0 by several ohms on ordinary 1 oz CPWG.
     var er_eff = 1.0 + q3 * qz * (er - 1.0);
     var z_factor = eta0 / 2.0 * qz;
 
@@ -74,7 +79,6 @@ pub fn analyze(w_mm: f64, h_mm: f64, t_mm: f64, er: f64, gap_mm: f64) Error!Resu
         const ke = effective_width / (effective_width + 2.0 * effective_gap);
         const qe = try ellipticRatio(ke);
         qz = 1.0 / (qe + q3);
-        er_eff = 1.0 + q3 * qz * (er - 1.0);
         z_factor = eta0 / 2.0 * qz;
         er_eff -= (0.7 * (er_eff - 1.0) * t_mm / gap_mm) /
             (q1 + 0.7 * t_mm / gap_mm);
