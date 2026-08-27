@@ -14,8 +14,8 @@
 const std = @import("std");
 
 const eta0: f64 = 120.0 * std.math.pi;
-const nx: usize = 129;
-const ny: usize = 65;
+const nx: usize = 97;
+const ny: usize = 73;
 const max_iterations: usize = 1600;
 const convergence: f64 = 1e-5;
 

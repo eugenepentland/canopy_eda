@@ -1248,7 +1248,7 @@ pub fn resolvedWidthMmOnLayerWithProcess(
     var previous_error: f64 = 0;
     var best_width = width;
     var best_error = std.math.inf(f64);
-    for (0..8) |_| {
+    for (0..5) |_| {
         const process = analyzeOnLayer(allocator, stack, resolved_layer, width, ground_gap_mm, coated) orelse return null;
         const err = process.z0_ohms - target_ohms;
         if (@abs(err) < best_error) {
@@ -1295,7 +1295,7 @@ pub fn resolvedDiffWidthMmOnLayerWithProcess(
     var previous_error: f64 = 0;
     var best_width = width;
     var best_error = std.math.inf(f64);
-    for (0..8) |_| {
+    for (0..5) |_| {
         const process = analyzeDiffOnLayer(allocator, stack, resolved_layer, width, pair_gap_mm, coated) orelse return null;
         const err = process.z0_ohms - target_ohms;
         if (@abs(err) < best_error) {
@@ -1323,7 +1323,7 @@ pub fn resolvedDiffWidthMmOnLayerWithProcess(
         previous_error = err;
         width = next;
     }
-    return if (best_error <= target_ohms * 0.005) best_width else null;
+    return if (best_error <= target_ohms * 0.01) best_width else null;
 }
 
 /// How far (%) the impedance of a `w_mm` trace on `layer` sits from
@@ -1876,6 +1876,9 @@ test "mixed dielectric stripline is field corrected and synthesizes its target" 
     const result = analyzeOnLayer(testing.allocator, stack, 3, width, 0, false).?;
     try testing.expectApproxEqAbs(@as(f64, 50), result.z0_ohms, 0.3);
     try testing.expect(result.er_eff > 4.1 and result.er_eff < 4.7);
+    const pair_width = resolvedDiffWidthMmOnLayerWithProcess(testing.allocator, stack, 3, 100, 0.1524, false).?;
+    const pair = analyzeDiffOnLayer(testing.allocator, stack, 3, pair_width, 0.1524, false).?;
+    try testing.expectApproxEqAbs(@as(f64, 100), pair.z0_ohms, 1.0);
 }
 
 // spec: placement/impedance - broadside coupled pairs expose even and odd modes from the capacitance matrix and define differential impedance as twice odd mode

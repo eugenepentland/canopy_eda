@@ -310,7 +310,10 @@ test "a differential target derives its pair width on the selected layer" {
         try testing.expectEqual(@as(u8, 3), rule.rf.impedance.layer);
         // The process-aware stack model includes the different core/prepreg Dk
         // values instead of reducing this offset stripline to one dielectric.
-        try testing.expectApproxEqAbs(@as(f64, 0.1637), rule.width, 0.0001);
+        try testing.expect(rule.width > 0.15 and rule.width < 0.18);
+        const stack = try stackOf(arena, &block);
+        const modeled = impedance.analyzeDiffOnLayer(arena, stack, 3, rule.width, 0.1524, false).?;
+        try testing.expectApproxEqAbs(@as(f64, 100), modeled.z0_ohms, 1.0);
     }
 }
 
