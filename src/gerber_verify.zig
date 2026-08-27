@@ -231,11 +231,23 @@ fn appendRegionArc(
     } else {
         while (a1 <= a0) a1 += std.math.tau;
     }
-    // At most 0.02 mm of arc length per edge is comfortably below visible CAM
-    // preview resolution. The cap also keeps malformed third-party input from
-    // manufacturing an unbounded polygon, though our own writer stays far
-    // below it.
-    const raw_steps = @ceil(@abs(a1 - a0) * radius / 0.02);
+    // Bound the CHORD SAGITTA, not merely its length. A fixed 0.02 mm edge is
+    // visibly non-tangent where a small fillet meets its following straight
+    // edge: the final chord cuts inside the circle and leaves a thin triangular
+    // sliver in the generated-Gerber CAM preview. 50 nm is comfortably below
+    // a screen pixel even at inspection zoom while keeping ordinary fillets
+    // compact. Retain the old length ceiling as a second bound for very large
+    // radii. The cap also keeps malformed third-party input from manufacturing
+    // an unbounded polygon, though our own writer stays far below it.
+    const max_sagitta_mm = 0.00005;
+    const max_edge_mm = 0.02;
+    const sagitta_step = if (radius <= max_sagitta_mm)
+        std.math.pi
+    else
+        2 * std.math.acos(std.math.clamp(1 - max_sagitta_mm / radius, -1, 1));
+    const length_step = max_edge_mm / radius;
+    const max_step = @max(@min(sagitta_step, length_step), std.math.floatEps(f64));
+    const raw_steps = @ceil(@abs(a1 - a0) / max_step);
     const steps = @max(@as(usize, 2), @as(usize, @intFromFloat(@min(raw_steps, 4096.0))));
     for (1..steps + 1) |i| {
         if (i == steps) {
@@ -496,6 +508,39 @@ test "parse reads apertures, flashes, segments, and regions" {
     }
     try testing.expect(saw_curved_region_point);
     try testing.expectEqual(@as(usize, 4), p.ops.len);
+}
+
+// spec: export_gerber - generated-Gerber CAM region fillets meet straight edges without a visible chord sliver
+test "region arc read-back bounds the fillet chord sliver" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // A 0.05 mm quarter-circle fillet is the hostile case for the old fixed
+    // 0.02 mm chord length: only four edges represented the curve and the last
+    // one met the following straight with about 1 um of visible sagitta.
+    const g =
+        "%FSLAX46Y46*%\n%MOMM*%\nG01*\n%LPD*%\n" ++
+        "G36*\nX0Y50000D02*\nG02X50000Y0I0J-50000D01*\nG01*\n" ++
+        "X100000Y0D01*\nX0Y50000D01*\nG37*\nM02*\n";
+    const parsed = try parse(arena, g);
+    try testing.expectEqual(@as(usize, 1), parsed.regions.len);
+    const points = parsed.regions[0].points;
+    try testing.expect(points.len > 12);
+
+    // Every flattened chord of the circular portion stays within 50 nm of
+    // the native curve at its midpoint. In particular this covers the final
+    // arc chord immediately before the tangent straight section.
+    const center = [2]f64{ 0, 0 };
+    const radius: f64 = 0.05;
+    var previous = points[0];
+    for (points[1..]) |point| {
+        if (point[0] > radius + 1e-12 or point[1] < -1e-12) break;
+        const mid = [2]f64{ (previous[0] + point[0]) / 2, (previous[1] + point[1]) / 2 };
+        const sagitta = radius - std.math.hypot(mid[0] - center[0], mid[1] - center[1]);
+        try testing.expect(sagitta <= 0.00005 + 1e-12);
+        previous = point;
+    }
 }
 
 // spec: gerber_verify - a written copper layer reads back matching the placement model
