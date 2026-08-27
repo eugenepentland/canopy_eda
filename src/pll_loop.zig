@@ -488,7 +488,7 @@ fn synthesisCandidate(spec: Spec, circuit: Circuit, index: usize) Corner {
         const low = @max(limits.min, nominal * low_factor);
         const high = @min(limits.max, nominal * high_factor);
         const fraction = halton(index, synthesis_primes[i]);
-        value[i] = nearestE24(std.math.pow(f64, 10, @log10(low) + (@log10(high) - @log10(low)) * fraction));
+        value[i] = nearestE24InRange(std.math.pow(f64, 10, @log10(low) + (@log10(high) - @log10(low)) * fraction), .{ .min = low, .max = high });
     }
     return .{ .c_cp = value[0], .r_in = value[1], .r_feedback = value[2], .c_feedback = value[3], .c_feedback_hf = value[4], .r_isolation = value[5], .c_tune = value[6] + circuit.extra_tune_cap.nominal };
 }
@@ -502,7 +502,7 @@ fn synthesisNeighbor(spec: Spec, circuit: Circuit, corner: Corner, component_ind
     const high_factor: f64 = if (component_index == 2) 4 else 8;
     const low = @max(limits.min, original[component_index] * low_factor);
     const high = @min(limits.max, original[component_index] * high_factor);
-    values[component_index] = std.math.clamp(nearestE24(values[component_index] * ratio), low, high);
+    values[component_index] = nearestE24InRange(values[component_index] * ratio, .{ .min = low, .max = high });
     return .{ .c_cp = values[0], .r_in = values[1], .r_feedback = values[2], .c_feedback = values[3], .c_feedback_hf = values[4], .r_isolation = values[5], .c_tune = values[6] + circuit.extra_tune_cap.nominal };
 }
 
@@ -517,14 +517,29 @@ fn halton(input_index: usize, base: usize) f64 {
     return result;
 }
 
-fn nearestE24(value: f64) f64 {
-    const decade = @floor(@log10(value));
-    var best = value;
+fn nearestE24InRange(value: f64, limits: Range) f64 {
+    var best = std.math.clamp(value, limits.min, limits.max);
     var best_error = std.math.inf(f64);
-    for ([_]f64{ decade - 1, decade, decade + 1 }) |power| {
-        const scale = std.math.pow(f64, 10, power);
+    const decade = @floor(@log10(value));
+    for ([_]f64{ decade - 1, decade, decade + 1 }) |exponent| {
+        const scale = std.math.pow(f64, 10, exponent);
         for (e24) |mantissa| {
             const candidate = mantissa * scale;
+            if (candidate < limits.min or candidate > limits.max) continue;
+            const err = @abs(@log(candidate / value));
+            if (err < best_error) {
+                best = candidate;
+                best_error = err;
+            }
+        }
+    }
+    if (std.math.isFinite(best_error)) return best;
+    for (0..49) |index| {
+        const exponent = @as(f64, @floatFromInt(index)) - 24;
+        const scale = std.math.pow(f64, 10, exponent);
+        for (e24) |mantissa| {
+            const candidate = mantissa * scale;
+            if (candidate < limits.min or candidate > limits.max) continue;
             const err = @abs(@log(candidate / value));
             if (err < best_error) {
                 best = candidate;
@@ -610,7 +625,8 @@ fn profileSweep(spec: Spec, corner: Corner, anchor_step: usize, tolerance_edges:
         var point_spec = spec;
         point_spec.circuit.feedback.pll_n = point.pll_n;
         const current = scheduledCurrent(spec, point, anchor_step);
-        const scales = if (tolerance_edges) [_]f64{ 0.975, 1.025 } else [_]f64{ 1, 1 };
+        const tolerance = spec.circuit.charge_pump.tolerance_pct / 100.0;
+        const scales = if (tolerance_edges) [_]f64{ 1.0 - tolerance, 1.0 + tolerance } else [_]f64{ 1, 1 };
         for (scales) |scale| if (analyze(point_spec, corner, current * scale, point.kvco_hz_per_v)) |metrics| sweep.add(metrics);
     }
     return sweep;
@@ -673,7 +689,10 @@ fn mergeSweep(target: *Sweep, source: Sweep) void {
 fn appendSynthesisResult(context: *Context, spec: Spec, circuit: Circuit, result: SynthResult) std.mem.Allocator.Error!void {
     const c = result.corner;
     try append(context, spec, true, "{s}: E24 synthesis replaces C_CP {d:.1}→{d:.1} pF, R_IN {d:.0}→{d:.0} Ω, R_FB {d:.0}→{d:.0} Ω, C_FB {d:.1}→{d:.1} pF, C_FB_HF {d:.1}→{d:.1} pF, R_ISO {d:.0}→{d:.0} Ω, and C_VTUNE {d:.1}→{d:.1} pF", .{ spec.name, circuit.c_cp.nominal * 1e12, c.c_cp * 1e12, circuit.r_in.nominal, c.r_in, circuit.r_feedback.nominal, c.r_feedback, circuit.c_feedback.nominal * 1e12, c.c_feedback * 1e12, circuit.c_feedback_hf.nominal * 1e12, c.c_feedback_hf * 1e12, circuit.r_isolation.nominal, c.r_isolation, circuit.c_tune.nominal * 1e12, (c.c_tune - circuit.extra_tune_cap.nominal) * 1e12 });
-    try append(context, spec, result.tolerance.min_phase_margin_deg >= spec.requirements.phase.target_deg.min, "{s}: synthesized profile gives nominal LBW {d:.3}-{d:.3} MHz / PM {d:.1}-{d:.1}° and tolerance-corner LBW {d:.3}-{d:.3} MHz / PM {d:.1}-{d:.1}°", .{ spec.name, result.nominal.min_bandwidth_hz / 1e6, result.nominal.max_bandwidth_hz / 1e6, result.nominal.min_phase_margin_deg, result.nominal.max_phase_margin_deg, result.tolerance.min_bandwidth_hz / 1e6, result.tolerance.max_bandwidth_hz / 1e6, result.tolerance.min_phase_margin_deg, result.tolerance.max_phase_margin_deg });
+    const synthesis_passes = result.tolerance.min_phase_margin_deg >= spec.requirements.phase.target_deg.min and
+        result.tolerance.max_phase_margin_deg <= spec.requirements.phase.target_deg.max and
+        result.tolerance.max_bandwidth_hz <= synthesisBandwidthMax(spec);
+    try append(context, spec, synthesis_passes, "{s}: synthesized profile gives nominal LBW {d:.3}-{d:.3} MHz / PM {d:.1}-{d:.1}° and tolerance-corner LBW {d:.3}-{d:.3} MHz / PM {d:.1}-{d:.1}°", .{ spec.name, result.nominal.min_bandwidth_hz / 1e6, result.nominal.max_bandwidth_hz / 1e6, result.nominal.min_phase_margin_deg, result.nominal.max_phase_margin_deg, result.tolerance.min_bandwidth_hz / 1e6, result.tolerance.max_bandwidth_hz / 1e6, result.tolerance.min_phase_margin_deg, result.tolerance.max_phase_margin_deg });
     const phase_error = rampPhaseError(spec, result.tolerance.min_bandwidth_hz);
     if (phase_error > 0) try append(context, spec, phase_error <= spec.requirements.ramp.max_phase_error_rad, "{s}: synthesized worst-corner FMCW ramp phase error is {d:.3} rad (limit {d:.3} rad)", .{ spec.name, phase_error, spec.requirements.ramp.max_phase_error_rad });
     try appendSchedule(context, spec, result.anchor_step);
@@ -973,6 +992,7 @@ test "active inverting filter requires negative polarity" {
 
 // spec: pll-loop - E24 synthesis jointly satisfies an authored divider/Kvco curve, tolerance corners, and ramp limit
 test "synthesize active loop filter over operating curve" {
+    try std.testing.expectEqual(@as(f64, 2.4), nearestE24InRange(2.37, .{ .min = 2.2, .max = 2.4 }));
     const p1 = [_]Node{ Node.atom(ast.Span.zero, "point"), Node.float(ast.Span.zero, 25), Node.float(ast.Span.zero, 420e6) };
     const p2 = [_]Node{ Node.atom(ast.Span.zero, "point"), Node.float(ast.Span.zero, 29.25), Node.float(ast.Span.zero, 730e6) };
     const p3 = [_]Node{ Node.atom(ast.Span.zero, "point"), Node.float(ast.Span.zero, 50), Node.float(ast.Span.zero, 340e6) };
