@@ -5855,7 +5855,7 @@ Public functions: uploadDatasheetApi, listDatasheetsApi, serveDatasheetApi, isPd
 - rewire-pin locates the instance by component-token offset
 - rewire-pin splits a multi-pin shorthand to re-wire one pin
 - rewire-pin finds a pin in a section pins map
-- a design saved through writeAndRebuild pins its minted (id …) into the source, so the next save reproduces the same uuid and the .bom's MPN carries forward
+- a design saved through writeAndRebuild pins its minted (id …) into the source, so the next save reproduces the same uuid and its exact selected-row BOM identity
 - restoring a history snapshot pins the restored source's minted ids before identity resolution
 
 ## serve/edit_assist

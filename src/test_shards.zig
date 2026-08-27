@@ -59,6 +59,11 @@ pub const shards: []const []const []const u8 = &.{
         "placement.fill_cache.test.",
         "placement.drc_compose.test.",
         "placement.rf_pad_adapt.test.",
+        "fab_gate.test.",
+        "fab_release.test.",
+        "fab_schematic_gate.test.",
+        "infra.fs.test.",
+        "layout_sidecar_store.test.",
     },
     // shard 1
     &.{

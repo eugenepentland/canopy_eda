@@ -94,3 +94,8 @@ log is not a substitute for reporting an active blocker to the user.
 - **friction:** Saved-layout parsing was intentionally best-effort: malformed records and allocation failures could become skipped tracks, zones, text, or fabrication layers without a parse status. Proving a release snapshot lossless therefore required a second raw-JSON validator, explicit raw-to-typed field/count/geometry parity, and separate fallible lowering evidence across several review cycles.
 - **idea:** Add a strict `layout_sidecar_store` parse mode that returns the typed selected row and structured completeness errors from the same parse, while keeping the existing compatibility mode for normal viewing. The release gate could consume that one result and eliminate duplicate parsing, parity maintenance, and a substantial portion of `pcb_layout_page.zig`'s near-cap release plumbing.
 - **status:** mitigated by `selectedLayoutParsedEvidence` and fail-closed lowering; strict single-pass parsing remains open
+
+## 2026-08-27 · codex · fabrication release full-suite integration
+- **friction:** Focused tests and `test-compile` passed, but the exact-candidate `prepare-release` run failed because newly extracted test-bearing modules were imported without being added to `test_shards.zig`; the manifest integrity test existed but only ran in the full suite. This consumed one full release attempt and a new candidate commit.
+- **idea:** Make `test-compile` run the shard-manifest coverage and import-bridge checks, or add a cheap pre-release target that runs those two tests before the exact-candidate gate, so a missing shard claim is caught during iteration.
+- **status:** mitigated by adding every new module to the shard manifest/import bridge; pipeline preflight remains open

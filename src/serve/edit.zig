@@ -3351,8 +3351,8 @@ fn testBomProp(entry: bom.BomEntry, key: []const u8) ?[]const u8 {
     return null;
 }
 
-// spec: serve/edit - a design saved through writeAndRebuild pins its minted (id …) into the source, so the next save reproduces the same uuid and the .bom's MPN carries forward
-test "writeAndRebuild pins minted ids so uuid and BOM properties survive a second save" {
+// spec: serve/edit - a design saved through writeAndRebuild pins its minted (id …) into the source, so the next save reproduces the same uuid and its exact selected-row BOM identity
+test "writeAndRebuild pins minted ids so uuid and exact BOM selection survive a second save" {
     // page_allocator: the evaluator allocates from it and never frees (AST
     // slices reference source buffers), so testing.allocator would flag those
     // intentional leaks. Same convention as the id_insert persist test.
@@ -3364,6 +3364,7 @@ test "writeAndRebuild pins minted ids so uuid and BOM properties survive a secon
     defer alloc.free(project_dir);
 
     try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.createDirPath(std.testing.io, "lib/parts");
     try tmp.dir.createDirPath(std.testing.io, "src");
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "lib/components/cap.sexp",
@@ -3376,6 +3377,14 @@ test "writeAndRebuild pins minted ids so uuid and BOM properties survive a secon
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "lib/components/0402.sexp",
         .data = "(component 0402 (footprint \"0402.kicad_mod\"))",
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/parts/cap.sexp",
+        .data =
+        \\(parts "cap"
+        \\  (part "100nF" (manufacturer "Murata")
+        \\    (mpn "GRM155R71C104KA88D") preferred))
+        ,
     });
 
     const design_path = try std.fmt.allocPrint(alloc, "{s}/src/idpersist.sexp", .{project_dir});
@@ -3406,8 +3415,12 @@ test "writeAndRebuild pins minted ids so uuid and BOM properties survive a secon
     defer alloc.free(id_token);
     try std.testing.expect(std.mem.indexOf(u8, saved1, id_token) != null);
 
-    // The inline MPN editor writes a property keyed on that identity.
-    try bom_resolve.setBomProperty(alloc, bom_path, "C1", "mpn", "GRM155R71C104KA88D");
+    // The initial build also persisted a current-format, exact parts-table
+    // selection. A later save may carry that evidence only while its source
+    // fingerprint and selected-row fingerprint remain current.
+    const mpn1 = testBomProp(entry1, "mpn") orelse return error.TestMpnMissing;
+    try std.testing.expectEqualStrings("GRM155R71C104KA88D", mpn1);
+    try std.testing.expect(testBomProp(entry1, "selected-part-row-fingerprint") != null);
 
     // Second save: read the file back and store it again, exactly as the editor
     // does. Without the pin, this evaluation mints a FRESH random id and both
@@ -3423,7 +3436,7 @@ test "writeAndRebuild pins minted ids so uuid and BOM properties survive a secon
     // (b) Same instance, same uuid.
     try std.testing.expectEqualStrings(entry1.id, entry2.id);
     try std.testing.expectEqualStrings(entry1.uuid, entry2.uuid);
-    // (c) The MPN survived, because carry-forward is keyed on that stable id.
+    // (c) The exact selected-row MPN survived with that stable source identity.
     const mpn = testBomProp(entry2, "mpn") orelse return error.TestMpnDropped;
     try std.testing.expectEqualStrings("GRM155R71C104KA88D", mpn);
 }

@@ -113,6 +113,7 @@ test {
     _ = @import("import_fold.zig");
     _ = @import("import_fold_emit.zig");
     _ = @import("import_kicad.zig");
+    _ = @import("infra/fs.zig");
     _ = @import("infra/random.zig");
     _ = @import("json_writer.zig");
     _ = @import("kicad_pcb/experiment.zig");
