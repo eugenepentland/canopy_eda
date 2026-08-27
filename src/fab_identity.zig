@@ -1,9 +1,10 @@
 //! Deterministic fabrication identity for a manufactured PCB.
 //!
-//! The digest covers the timestamp-free Gerber and Excellon geometry before
-//! the identity mark is added. That deliberate two-pass scheme avoids a
-//! self-referential hash: the short prefix can be printed on the PCB while the
-//! complete SHA-256 remains available in the fabrication package.
+//! The digest covers the timestamp-free Gerber and Excellon geometry plus an
+//! authored board part number before the generated mark is added. That
+//! deliberate two-pass scheme avoids a self-referential hash: the short prefix
+//! and part number can be printed on the PCB while the complete SHA-256 remains
+//! available in the fabrication package.
 
 const std = @import("std");
 const export_fab = @import("export_fab.zig");
@@ -23,6 +24,7 @@ pub const Error = export_gerber.Error || error{NoSilkscreenSpace};
 pub const Mark = struct {
     short_hex: [8]u8,
     digest_hex: [64]u8,
+    part_number: []const u8 = "",
     /// False for reusable sub-circuits: the digest still identifies the CAM
     /// package, but no generated `ID XXXXXXXX` text is added to board silk.
     printed: bool = true,
@@ -112,6 +114,11 @@ pub fn build(
         try export_fab.excellonDrill(&bytes.writer, arena, placement.parts, copper.vias, .{ .class = drill.class, .copper_layers = copper_layers }, frame);
         hashMember(&hash, drill.suffix, bytes.written());
     }
+    const part_number = std.mem.trim(u8, placement.rules.physical.part_number, " \t\r\n");
+    // Preserve every existing geometry-only identity when no part number was
+    // authored. Once present, the stable shop-floor number is physical board
+    // identity: changing it must never leave the same printed lookup hash.
+    if (part_number.len > 0) hashMember(&hash, "board-part-number", part_number);
 
     var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
     hash.final(&digest);
@@ -121,12 +128,16 @@ pub fn build(
     if (placement.rules.physical.role == .subcircuit) return .{
         .short_hex = short_hex,
         .digest_hex = digest_hex,
+        .part_number = part_number,
         .printed = false,
         .text = null,
     };
     const printed_short = try arena.dupe(u8, &short_hex);
     _ = std.ascii.upperString(printed_short, &short_hex);
-    const printed = try std.fmt.allocPrint(arena, "ID {s}", .{printed_short});
+    const printed = if (part_number.len > 0)
+        try std.fmt.allocPrint(arena, "PN {s}  ID {s}", .{ part_number, printed_short })
+    else
+        try std.fmt.allocPrint(arena, "ID {s}", .{printed_short});
 
     const text = try subcircuit_silkscreen.placeFabricationIdWithPreferred(
         arena,
@@ -140,7 +151,7 @@ pub fn build(
         printed,
         preferred_id,
     ) orelse return error.NoSilkscreenSpace;
-    return .{ .short_hex = short_hex, .digest_hex = digest_hex, .text = text };
+    return .{ .short_hex = short_hex, .digest_hex = digest_hex, .part_number = part_number, .text = text };
 }
 
 fn testPlacement(width: f64) optimizer.Placement {
@@ -191,23 +202,47 @@ test "fabrication identity changes with manufactured board geometry" {
     try std.testing.expect(!std.mem.eql(u8, a.text.?.text, b.text.?.text));
 }
 
+test "fabrication identity prints and binds the board part number" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var a = testPlacement(60);
+    var b = testPlacement(60);
+    a.rules.physical.part_number = "CTRL-1001";
+    b.rules.physical.part_number = "CTRL-1002";
+
+    const mark_a = try build(arena, a, .{}, &.{}, export_fab.frameFor(a), null);
+    const mark_b = try build(arena, b, .{}, &.{}, export_fab.frameFor(b), null);
+    try std.testing.expectEqualStrings("CTRL-1001", mark_a.part_number);
+    try std.testing.expect(std.mem.startsWith(u8, mark_a.text.?.text, "PN CTRL-1001  ID "));
+    try std.testing.expect(!std.mem.eql(u8, &mark_a.digest_hex, &mark_b.digest_hex));
+    try std.testing.expect(!std.mem.eql(u8, &mark_a.short_hex, &mark_b.short_hex));
+}
+
 // spec: export_gerber - an adopted fabrication identity keeps its editable position without entering the identity digest
 test "adopted fabrication identity preserves position and digest" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const p = testPlacement(20);
-    const preferred = font.BoardText{ .x = 4, .y = 3, .rot = 90, .bottom = true, .size = 1.2, .text = "stale", .fabrication_id = true };
+    const p = testPlacement(40);
     const auto = try build(arena, p, .{}, &.{}, export_fab.frameFor(p), null);
+    var preferred = auto.text.?;
+    preferred.x -= 5;
+    preferred.text = "stale";
     const adopted = try build(arena, p, .{}, &.{preferred}, export_fab.frameFor(p), null);
     try std.testing.expectEqualSlices(u8, &auto.digest_hex, &adopted.digest_hex);
-    try std.testing.expectEqual(@as(f64, 4), adopted.text.?.x);
-    try std.testing.expectEqual(@as(f64, 3), adopted.text.?.y);
-    try std.testing.expectEqual(@as(f64, 90), adopted.text.?.rot);
-    try std.testing.expect(adopted.text.?.bottom);
-    try std.testing.expectEqual(@as(f64, 1.2), adopted.text.?.size);
+    try std.testing.expectEqual(preferred.x, adopted.text.?.x);
+    try std.testing.expectEqual(preferred.y, adopted.text.?.y);
+    try std.testing.expectEqual(preferred.rot, adopted.text.?.rot);
+    try std.testing.expectEqual(preferred.bottom, adopted.text.?.bottom);
+    try std.testing.expectEqual(preferred.size, adopted.text.?.size);
     try std.testing.expect(adopted.text.?.fabrication_id);
     try std.testing.expectEqualStrings(auto.text.?.text, adopted.text.?.text);
+
+    var numbered = p;
+    numbered.rules.physical.part_number = "CTRL-1001";
+    const relocated = try build(arena, numbered, .{}, &.{preferred}, export_fab.frameFor(numbered), null);
+    try std.testing.expect(relocated.text.?.x != preferred.x or relocated.text.?.y != preferred.y or relocated.text.?.rot != preferred.rot);
 }
 
 // spec: export_gerber - an adopted fabrication identity is replaced, not duplicated, when composing the final silkscreen texts

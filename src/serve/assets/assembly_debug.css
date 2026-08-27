@@ -31,6 +31,11 @@ button { color: inherit; }
 
 .brand { color: var(--accent); font-weight: 800; text-decoration: none; letter-spacing: .08em; }
 .topbar strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.release-identity { display: flex; align-items: center; gap: 7px; margin-left: auto; min-width: 0; }
+.release-identity span { padding: 3px 7px; color: #c7d1dd; white-space: nowrap; font: 11px/1.25 ui-monospace, "SFMono-Regular", Consolas, monospace; border: 1px solid var(--line); border-radius: 5px; background: rgba(255,255,255,.025); }
+.release-identity b { color: var(--muted); font-weight: 650; }
+.release-identity .release-fab-id { color: #ffd33d; border-color: rgba(255,211,61,.38); background: rgba(255,211,61,.07); }
+.release-identity .release-fab-id b { color: #f2cc60; }
 .topbar nav { display: flex; align-self: stretch; gap: 2px; margin-left: auto; }
 .topbar nav a { display: flex; align-items: center; padding: 0 12px; color: var(--muted); text-decoration: none; border-bottom: 2px solid transparent; }
 .topbar nav a:hover { color: var(--text); background: rgba(255,255,255,.035); }

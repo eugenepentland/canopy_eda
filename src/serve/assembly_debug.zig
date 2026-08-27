@@ -88,6 +88,34 @@ const Index = struct {
     guides: []const rework_guide.Guide = &.{},
 };
 
+/// Immutable identity shown by the self-contained Assembly artifact packaged
+/// with one fabrication release.
+pub const ReleaseIdentity = struct {
+    part_number: []const u8,
+    revision: []const u8,
+    fab_id: []const u8,
+    release_token: []const u8,
+};
+
+const PageMeta = struct {
+    name: []const u8,
+    part_number: []const u8 = "",
+    revision: []const u8 = "",
+    fab_id: []const u8 = "",
+    release_token: []const u8 = "",
+    standalone: bool = false,
+};
+
+const PageOptions = struct {
+    layout: ?[]const u8 = null,
+    browser_benchmark: bool = false,
+    meta: PageMeta,
+    /// Complete read-only PCB review document. Present only in the release
+    /// artifact; it is installed into the iframe as `srcdoc` after the shell's
+    /// listeners are ready.
+    board_html: ?[]const u8 = null,
+};
+
 fn isSafeName(name: []const u8) bool {
     if (name.len == 0 or name.len > 128) return false;
     if (std.mem.indexOf(u8, name, "..") != null) return false;
@@ -675,8 +703,18 @@ fn writeStringArray(w: *std.Io.Writer, values: []const []const u8) !void {
     try w.writeByte(']');
 }
 
-fn writeIndexJson(w: *std.Io.Writer, index: Index) !void {
-    try w.writeAll("{\"parts\":[");
+fn writeIndexJson(w: *std.Io.Writer, index: Index, meta: PageMeta) !void {
+    try w.writeAll("{\"name\":");
+    try writeJsonString(w, meta.name);
+    try w.writeAll(",\"part_number\":");
+    try writeJsonString(w, meta.part_number);
+    try w.writeAll(",\"revision\":");
+    try writeJsonString(w, meta.revision);
+    try w.writeAll(",\"fab_id\":");
+    try writeJsonString(w, meta.fab_id);
+    try w.writeAll(",\"release_token\":");
+    try writeJsonString(w, meta.release_token);
+    try w.print(",\"standalone\":{s},\"parts\":[", .{if (meta.standalone) "true" else "false"});
     for (index.parts, 0..) |part, i| {
         if (i > 0) try w.writeByte(',');
         try w.writeAll("{\"uuid\":");
@@ -775,7 +813,7 @@ fn writeHtmlText(w: *std.Io.Writer, text: []const u8) !void {
     };
 }
 
-fn renderPage(allocator: std.mem.Allocator, name: []const u8, index: Index, layout: ?[]const u8, browser_benchmark: bool) ![]const u8 {
+fn renderPageWithOptions(allocator: std.mem.Allocator, name: []const u8, index: Index, opts: PageOptions) ![]const u8 {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     const w = &aw.writer;
     try w.writeAll("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
@@ -783,29 +821,55 @@ fn renderPage(allocator: std.mem.Allocator, name: []const u8, index: Index, layo
     try w.writeAll("<title>");
     try writeHtmlText(w, name);
     try w.writeAll(" — Assembly</title>");
-    try w.writeAll("<link rel=\"stylesheet\" href=\"/static/assembly_debug.css\"></head>");
-    try w.writeAll("<body><header class=\"topbar\"><a class=\"brand\" href=\"/\">EDA</a>");
+    if (opts.meta.standalone) {
+        try w.writeAll("<style>");
+        try w.writeAll(@embedFile("assets/assembly_debug.css"));
+        try w.writeAll("</style>");
+    } else try w.writeAll("<link rel=\"stylesheet\" href=\"/static/assembly_debug.css\">");
+    try w.writeAll("</head><body><header class=\"topbar\">");
+    if (opts.meta.standalone)
+        try w.writeAll("<span class=\"brand\">Released assembly</span>")
+    else
+        try w.writeAll("<a class=\"brand\" href=\"/\">EDA</a>");
     try w.writeAll("<strong>");
     try writeHtmlText(w, name);
-    try w.writeAll("</strong><nav aria-label=\"Design views\"><a href=\"/schematics/");
-    try writeHtmlText(w, name);
-    try w.writeAll("\">Schematic</a><a href=\"/pcb-layout/");
-    try writeHtmlText(w, name);
-    if (layout) |selected| {
-        try w.writeAll("?layout=");
-        try writeUrlEncoded(w, selected);
+    try w.writeAll("</strong>");
+    if (opts.meta.standalone) {
+        try w.writeAll("<div class=\"release-identity\">");
+        if (opts.meta.part_number.len > 0) {
+            try w.writeAll("<span><b>PN</b> ");
+            try writeHtmlText(w, opts.meta.part_number);
+            try w.writeAll("</span>");
+        }
+        if (opts.meta.revision.len > 0) {
+            try w.writeAll("<span><b>Rev</b> ");
+            try writeHtmlText(w, opts.meta.revision);
+            try w.writeAll("</span>");
+        }
+        try w.writeAll("<span class=\"release-fab-id\"><b>ID</b> ");
+        try writeHtmlText(w, opts.meta.fab_id);
+        try w.writeAll("</span></div>");
+    } else {
+        try w.writeAll("<nav aria-label=\"Design views\"><a href=\"/schematics/");
+        try writeHtmlText(w, name);
+        try w.writeAll("\">Schematic</a><a href=\"/pcb-layout/");
+        try writeHtmlText(w, name);
+        if (opts.layout) |selected| {
+            try w.writeAll("?layout=");
+            try writeUrlEncoded(w, selected);
+        }
+        try w.writeAll("\">PCB Layout</a><a href=\"/pcb-layout/");
+        try writeHtmlText(w, name);
+        try w.writeAll("?view=3d");
+        if (opts.layout) |selected| {
+            try w.writeAll("&amp;layout=");
+            try writeUrlEncoded(w, selected);
+        }
+        try w.writeAll("\">3D</a><a class=\"active\" aria-current=\"page\">Assembly</a>");
+        try w.writeAll("<a href=\"/thermal/");
+        try writeUrlEncoded(w, name);
+        try w.writeAll("\">Thermal</a></nav>");
     }
-    try w.writeAll("\">PCB Layout</a><a href=\"/pcb-layout/");
-    try writeHtmlText(w, name);
-    try w.writeAll("?view=3d");
-    if (layout) |selected| {
-        try w.writeAll("&amp;layout=");
-        try writeUrlEncoded(w, selected);
-    }
-    try w.writeAll("\">3D</a><a class=\"active\" aria-current=\"page\">Assembly</a>");
-    try w.writeAll("<a href=\"/thermal/");
-    try writeUrlEncoded(w, name);
-    try w.writeAll("\">Thermal</a></nav>");
     try w.writeAll("</header><main class=\"workspace\"><aside class=\"panel\">");
     if (index.guides.len > 0) {
         try w.writeAll("<nav class=\"panel-tabs\" aria-label=\"Assembly workspace\">");
@@ -841,8 +905,10 @@ fn renderPage(allocator: std.mem.Allocator, name: []const u8, index: Index, layo
     try w.writeAll("<div id=\"endpoint-list\"></div></section></aside><section class=\"board-pane\">");
     try w.writeAll("<div class=\"board-area\">");
     try w.writeAll("<div class=\"board-controls\" aria-label=\"Board controls\">");
-    try w.writeAll("<label class=\"model-toggle\" title=\"Load cached component model pictures\">");
-    try w.writeAll("<input id=\"load-3d-models\" type=\"checkbox\"> 3D models</label>");
+    if (!opts.meta.standalone) {
+        try w.writeAll("<label class=\"model-toggle\" title=\"Load cached component model pictures\">");
+        try w.writeAll("<input id=\"load-3d-models\" type=\"checkbox\"> 3D models</label>");
+    }
     try w.writeAll("<details class=\"layer-menu\"><summary>Layers</summary><div class=\"layer-menu-pop\">");
     try w.writeAll("<label><input type=\"checkbox\" data-cam-layer=\"copper\" checked> Face copper</label>");
     // The iframe fills this from its shared physical layer table. Keeping the
@@ -862,20 +928,65 @@ fn renderPage(allocator: std.mem.Allocator, name: []const u8, index: Index, layo
     try w.writeAll(" title=\"Rotate right 90 degrees\">↷ 90°</button>");
     try w.writeAll("<span id=\"board-orientation\">Top · 0°</span></div>");
     try w.writeAll("<div id=\"board-stage\" class=\"board-stage\">");
-    try w.writeAll("<iframe id=\"pcb-frame\" title=\"Read-only PCB layout\" src=\"/pcb-layout/");
-    try writeHtmlText(w, name);
-    try w.writeAll("?embed=1&amp;review=1&amp;drc=0");
-    if (layout) |selected| {
-        try w.writeAll("&amp;layout=");
-        try writeUrlEncoded(w, selected);
+    try w.writeAll("<iframe id=\"pcb-frame\" title=\"Read-only PCB layout\"");
+    if (!opts.meta.standalone) {
+        try w.writeAll(" src=\"/pcb-layout/");
+        try writeHtmlText(w, name);
+        try w.writeAll("?embed=1&amp;review=1&amp;drc=0");
+        if (opts.layout) |selected| {
+            try w.writeAll("&amp;layout=");
+            try writeUrlEncoded(w, selected);
+        }
+        if (opts.browser_benchmark) try w.writeAll("&amp;fbench=quick&amp;gpu=1");
+        try w.writeAll("\"");
     }
-    if (browser_benchmark) try w.writeAll("&amp;fbench=quick&amp;gpu=1");
-    try w.writeAll("\"></iframe></div></div>");
+    try w.writeAll("></iframe></div></div>");
     try w.writeAll("</section></main>");
     try w.writeAll("<script id=\"assembly-debug-data\" type=\"application/json\">");
-    try writeIndexJson(w, index);
-    try w.writeAll("</script><script src=\"/static/assembly_debug.js\"></script></body></html>");
+    try writeIndexJson(w, index, opts.meta);
+    try w.writeAll("</script>");
+    if (opts.meta.standalone) {
+        try w.writeAll("<script>");
+        try w.writeAll(@embedFile("assets/assembly_debug.js"));
+        try w.writeAll("</script><script id=\"assembly-board-document\" type=\"application/json\">");
+        try writeJsonString(w, opts.board_html orelse "");
+        try w.writeAll("</script><script>(function(){var f=document.getElementById('pcb-frame'),d=document.getElementById('assembly-board-document');if(f&&d)f.srcdoc=JSON.parse(d.textContent||'\"\"');})();</script>");
+    } else try w.writeAll("<script src=\"/static/assembly_debug.js\"></script>");
+    try w.writeAll("</body></html>");
     return aw.written();
+}
+
+fn renderPage(allocator: std.mem.Allocator, name: []const u8, index: Index, layout: ?[]const u8, browser_benchmark: bool) ![]const u8 {
+    return renderPageWithOptions(allocator, name, index, .{
+        .layout = layout,
+        .browser_benchmark = browser_benchmark,
+        .meta = .{ .name = name },
+    });
+}
+
+/// Build one offline, immutable Assembly workspace for a fabrication release.
+/// All operator data, guides, UI assets and the exact board review document are
+/// embedded in the returned HTML; opening it performs no server lookup.
+pub fn renderReleasePage(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    block: *const env_mod.DesignBlock,
+    board_html: []const u8,
+    identity: ReleaseIdentity,
+) HandlerError![]const u8 {
+    const index = try buildPageIndex(allocator, project_dir, name, block);
+    return renderPageWithOptions(allocator, name, index, .{
+        .meta = .{
+            .name = name,
+            .part_number = identity.part_number,
+            .revision = identity.revision,
+            .fab_id = identity.fab_id,
+            .release_token = identity.release_token,
+            .standalone = true,
+        },
+        .board_html = board_html,
+    });
 }
 
 /// Build the exact index embedded into both live and benchmark page renders.
@@ -1542,7 +1653,7 @@ test "assembly BOM lines union present datasheets and drop the ones nobody uploa
         .bom_groups = groups,
         .entities = &.{},
         .nets = &.{},
-    });
+    }, .{ .name = "demo" });
     try std.testing.expect(std.mem.indexOf(
         u8,
         aw.written(),
@@ -1658,7 +1769,7 @@ test "JSON embedded in script cannot close its script element" {
         .bom_groups = &.{},
         .entities = &.{},
         .nets = &.{},
-    });
+    }, .{ .name = "demo" });
     try std.testing.expect(std.mem.indexOf(u8, aw.written(), "</script>") == null);
     try std.testing.expect(std.mem.indexOf(u8, aw.written(), "\\u003c/script") != null);
 }

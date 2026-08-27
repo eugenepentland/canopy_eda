@@ -4,6 +4,8 @@
   const dataNode = document.getElementById('assembly-debug-data');
   if (!dataNode) return;
   const model = JSON.parse(dataNode.textContent || '{}');
+  const standalone = Boolean(model.standalone);
+  const messageTargetOrigin = standalone ? '*' : window.location.origin;
   const sidebarPanel = document.querySelector('.panel');
   const frame = document.getElementById('pcb-frame');
   const boardSideButton = document.getElementById('board-side');
@@ -63,6 +65,10 @@
     return Array.from(new Set((values || []).filter(Boolean)));
   }
 
+  function replaceUrl(url) {
+    try { history.replaceState(null, '', url); } catch (_) {}
+  }
+
   function leaf(value) {
     const pieces = String(value || '').split('/');
     return pieces[pieces.length - 1];
@@ -95,12 +101,16 @@
     const host = document.createElement('span');
     host.className = 'result-datasheets';
     (sheets || []).forEach((sheet) => {
-      const link = document.createElement('a');
+      const link = document.createElement(standalone ? 'span' : 'a');
       link.className = 'datasheet-link';
-      link.href = `/datasheets/${encodeURIComponent(sheet)}`;
-      link.target = '_blank';
-      link.rel = 'noopener';
-      link.title = `Open ${sheet}`;
+      if (!standalone) {
+        link.href = `/datasheets/${encodeURIComponent(sheet)}`;
+        link.target = '_blank';
+        link.rel = 'noopener';
+        link.title = `Open ${sheet}`;
+      } else {
+        link.title = `${sheet} — datasheet reference from the frozen release`;
+      }
       link.textContent = `📄 ${sheet}`;
       link.addEventListener('click', (event) => event.stopPropagation());
       host.appendChild(link);
@@ -199,7 +209,7 @@
       kind: kind || '',
       fit: fit !== false,
       context: context === true
-    }, window.location.origin);
+    }, messageTargetOrigin);
   }
 
   function refocusForBoardSide() {
@@ -228,7 +238,7 @@
       const innerLayers = frame.contentWindow.PCBReviewInnerLayers;
       if (typeof innerLayers === 'function') populateInnerCopperLayers(innerLayers());
     } catch (_) {}
-    frame.contentWindow.postMessage({ type: 'eda-pcb-parts-request' }, window.location.origin);
+    frame.contentWindow.postMessage({ type: 'eda-pcb-parts-request' }, messageTargetOrigin);
   }
 
   function showWorkspacePanel(name) {
@@ -315,7 +325,7 @@
     else url.searchParams.delete('guide');
     if (target) url.searchParams.set('target', `${target.type}:${target.value}`);
     else url.searchParams.delete('target');
-    history.replaceState(null, '', url);
+    replaceUrl(url);
   }
 
   function clearGuideTarget() {
@@ -570,7 +580,7 @@
         type: 'eda-pcb-orientation',
         side: boardSide,
         rotation: boardRotation
-      }, window.location.origin);
+      }, messageTargetOrigin);
     }
     if (boardSideButton) {
       boardSideButton.textContent = boardSide === 'bottom' ? 'Bottom side' : 'Top side';
@@ -586,7 +596,7 @@
       else url.searchParams.delete('board_side');
       if (boardRotation) url.searchParams.set('board_rotation', String(boardRotation));
       else url.searchParams.delete('board_rotation');
-      history.replaceState(null, '', url);
+      replaceUrl(url);
     }
   }
 
@@ -618,7 +628,7 @@
       const url = new URL(window.location.href);
       if (modelsEnabled) url.searchParams.set('models', '1');
       else url.searchParams.delete('models');
-      history.replaceState(null, '', url);
+      replaceUrl(url);
     }
   }
 
@@ -675,7 +685,7 @@
       frame.contentWindow.postMessage({
         type: 'eda-pcb-cam-visibility',
         layers: camLayerState()
-      }, window.location.origin);
+      }, messageTargetOrigin);
     }
     if (persist) {
       try { localStorage.setItem(`assembly-cam-layers:${model.name || ''}`, JSON.stringify(camLayerState())); } catch (_) {}
@@ -698,7 +708,7 @@
       url.searchParams.delete('type');
       url.searchParams.delete('q');
     }
-    history.replaceState(null, '', url);
+    replaceUrl(url);
   }
 
   function clearSelection(updateUrl) {
@@ -1205,7 +1215,7 @@
     }
   });
   window.addEventListener('message', (event) => {
-    if (event.origin !== window.location.origin || event.source !== frame.contentWindow) return;
+    if ((!standalone && event.origin !== window.location.origin) || event.source !== frame.contentWindow) return;
     const payload = event.data || {};
     if (payload.type === 'eda-pcb-parts') {
       populateInnerCopperLayers(payload.innerLayers);

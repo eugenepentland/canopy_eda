@@ -97,6 +97,8 @@ fn writeJsonWithEdge(
     try writeProfile(w, arena, profile_ops, frame);
     try w.writeAll(",\"fab_id\":");
     if (mark.printed) try json.writeString(w, &mark.short_hex) else try w.writeAll("null");
+    try w.writeAll(",\"part_number\":");
+    try json.writeString(w, mark.part_number);
     try w.writeAll(",\"sha256\":");
     try json.writeString(w, &mark.digest_hex);
     try w.writeByte('}');

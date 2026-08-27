@@ -6515,6 +6515,7 @@ fn boardRulesOf(arena: std.mem.Allocator, block: *const DesignBlock, nets: []con
         .design = designRulesOf(block),
         .physical = .{
             .role = block.board.role,
+            .part_number = block.board.part_number,
             .board_thickness = if (block.stackup.present) block.stackup.thickness else 0,
             .via_plating_mm = if (block.design_rules.via.plating > 0)
                 block.design_rules.via.plating

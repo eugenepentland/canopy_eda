@@ -2177,6 +2177,7 @@ fn parsePerimeterFence(
 /// `parseBoardSides`; this adds the size and corners on top.
 fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.BoardSpec {
     const board_sides = try parseBoardSides(self, form_children);
+    var part_number: []const u8 = "";
     var w: f64 = 0;
     var h: f64 = 0;
     var corner_radius: f64 = 0;
@@ -2186,6 +2187,12 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
         const c = child.asList() orelse continue;
         if (c.len < 1) continue;
         const head = c[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "part-number")) {
+            if (c.len >= 2) {
+                part_number = c[1].asString() orelse c[1].asAtom() orelse "";
+            }
+            continue;
+        }
         if (std.mem.eql(u8, head, "size")) {
             if (c.len >= 3) {
                 w = c[1].asNumber() orelse 0;
@@ -2209,6 +2216,7 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
         }
     }
     return .{
+        .part_number = part_number,
         .w = w,
         .h = h,
         .corner_radius = corner_radius,
@@ -4895,7 +4903,7 @@ test "design-block parses a (board ...) form" {
     const a = std.heap.page_allocator;
     const src =
         \\(design-block "test"
-        \\  (board (size 80 55)
+        \\  (board (part-number "CTRL-1001") (size 80 55)
         \\    (corner-radius 3)
         \\    (perimeter-fence (via 0.4 0.2) (spacing 1.0)
         \\      (edge-offset 0.5) (mask-width 0.7) (net "GND")
@@ -4912,6 +4920,7 @@ test "design-block parses a (board ...) form" {
     defer env.deinit();
     const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
     try testing.expect(block.board.present);
+    try testing.expectEqualStrings("CTRL-1001", block.board.part_number);
     try testing.expectApproxEqAbs(@as(f64, 80), block.board.w, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 55), block.board.h, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 3), block.board.corner_radius, 1e-9);

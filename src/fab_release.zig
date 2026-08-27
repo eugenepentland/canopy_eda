@@ -651,6 +651,8 @@ pub fn writeReadinessJson(
         try writer.writeAll("null");
     try writer.writeAll(",\"revision\":");
     try json_writer.writeString(writer, evidence.design.revision.id);
+    try writer.writeAll(",\"part_number\":");
+    try json_writer.writeString(writer, evidence.mark.part_number);
     try writer.writeAll(",\"fab_id\":");
     try json_writer.writeString(writer, &evidence.mark.short_hex);
     try writer.writeAll(",\"source_sha256\":");
@@ -780,6 +782,8 @@ pub fn writeMachineReport(
     try json_writer.writeString(writer, evidence.design.revision.id);
     try writer.writeAll(",\"revision_date\":");
     try json_writer.writeString(writer, evidence.design.revision.date);
+    try writer.writeAll(",\"part_number\":");
+    try json_writer.writeString(writer, evidence.mark.part_number);
     try writer.writeAll(",\"project_commit\":");
     try json_writer.writeString(writer, lock.project_commit);
     try writer.writeAll(",\"tool_commit\":");
@@ -855,7 +859,8 @@ pub fn writeMachineReport(
 
 /// Write the concise human-readable companion to the machine release audit.
 pub fn writeHumanReport(writer: *std.Io.Writer, evidence: Evidence, lock: Lock, waiver: bool) std.Io.Writer.Error!void {
-    try writer.print("# Fabrication release report\n\nRevision: `{s}` ({s})  \nProject commit: `{s}` ({s})  \nTool commit: `{s}`  \nDesign + checks source closure SHA-256: `{s}`  \nEvaluator read-set SHA-256: `{s}`  \nEvaluated dependency closure SHA-256: `{s}`  \nReviewed non-Git inputs SHA-256: `{s}`  \nLayout `{s}` SHA-256: `{s}`  \nCAM SHA-256: `{s}`  \nBOM SHA-256: `{s}`  \nCentroid SHA-256: `{s}`  \nRules/stackup SHA-256: `{s}`  \nRelease token: `{s}`  \nConfirmation: explicit; waiver: {s}\n\n", .{
+    try writer.print("# Fabrication release report\n\nPart number: `{s}`  \nRevision: `{s}` ({s})  \nProject commit: `{s}` ({s})  \nTool commit: `{s}`  \nDesign + checks source closure SHA-256: `{s}`  \nEvaluator read-set SHA-256: `{s}`  \nEvaluated dependency closure SHA-256: `{s}`  \nReviewed non-Git inputs SHA-256: `{s}`  \nLayout `{s}` SHA-256: `{s}`  \nCAM SHA-256: `{s}`  \nBOM SHA-256: `{s}`  \nCentroid SHA-256: `{s}`  \nRules/stackup SHA-256: `{s}`  \nRelease token: `{s}`  \nConfirmation: explicit; waiver: {s}\n\n", .{
+        evidence.mark.part_number,
         evidence.design.revision.id,
         evidence.design.revision.date,
         lock.project_commit,
@@ -889,7 +894,9 @@ pub fn writeHumanReport(writer: *std.Io.Writer, evidence: Evidence, lock: Lock, 
 pub fn writeRulesJson(writer: *std.Io.Writer, evidence: Evidence) ReportWriteError!void {
     const rules = evidence.design.placement.rules.design;
     const stack = evidence.design.stackup;
-    try writer.writeAll("{\"stackup\":{\"preset\":");
+    try writer.writeAll("{\"part_number\":");
+    try json_writer.writeString(writer, evidence.mark.part_number);
+    try writer.writeAll(",\"stackup\":{\"preset\":");
     try json_writer.writeString(writer, stack.preset);
     try writer.print(",\"layers\":{d},\"finished_thickness_mm\":{d},\"planes\":[", .{ stack.layers, stack.thickness });
     for (stack.planes, 0..) |plane, index| {

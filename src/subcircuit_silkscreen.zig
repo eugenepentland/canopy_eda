@@ -950,9 +950,9 @@ pub fn placeFabricationId(
     return placeFabricationIdWithPreferred(alloc, placement, obstacles, identity, null);
 }
 
-/// As `placeFabricationId`, but preserve a previously adopted editor position.
-/// The persisted mark is still replaced with the newly derived identity, so a
-/// board geometry change cannot leave stale ID text behind.
+/// As `placeFabricationId`, but preserve a previously adopted editor position
+/// while the newly derived text still fits there. A longer part-number mark or
+/// changed obstacle triggers the normal collision-aware search instead.
 pub fn placeFabricationIdWithPreferred(
     alloc: std.mem.Allocator,
     placement: optimizer.Placement,
@@ -960,15 +960,6 @@ pub fn placeFabricationIdWithPreferred(
     identity: []const u8,
     preferred: ?font.BoardText,
 ) std.mem.Allocator.Error!?font.BoardText {
-    if (preferred) |old| return .{
-        .x = old.x,
-        .y = old.y,
-        .rot = old.rot,
-        .bottom = old.bottom,
-        .size = if (old.size > 0) old.size else fabrication_id_size_mm,
-        .text = identity,
-        .fabrication_id = true,
-    };
     const board = placement.board_rect orelse optimizer.BoardRect{
         .minx = placement.minx,
         .miny = placement.miny,
@@ -982,6 +973,18 @@ pub fn placeFabricationIdWithPreferred(
     try appendPadObstacles(alloc, shape_arena_state.allocator(), &pads, placement, &.{}, obstacles.relief);
     const pad_field = try buildPadField(alloc, pads.items);
     defer pad_field.deinit(alloc);
+    if (preferred) |old| {
+        const candidate = font.BoardText{
+            .x = old.x,
+            .y = old.y,
+            .rot = old.rot,
+            .bottom = old.bottom,
+            .size = if (old.size > 0) old.size else fabrication_id_size_mm,
+            .text = identity,
+            .fabrication_id = true,
+        };
+        if (fabricationIdCandidateClear(placement, pad_field, obstacles.keepouts, obstacles.annotations, obstacles.reserved_texts, candidate)) return candidate;
+    }
     return searchFabricationIdOrientation(placement, pad_field, obstacles, identity, board, 0) orelse
         searchFabricationIdOrientation(placement, pad_field, obstacles, identity, board, 90);
 }

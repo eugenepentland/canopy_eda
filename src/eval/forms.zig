@@ -561,7 +561,7 @@ pub const scope_form_docs = blk: {
             "the force / rough solver on /pcb-layout.",
     } };
     t[@backingInt(ScopeForm.board)] = .{ .scope = tl, .doc = .{
-        .syntax = "(board (size W H) [(corner-radius R)] " ++
+        .syntax = "(board [(part-number \"PN\")] (size W H) [(corner-radius R)] " ++
             "[(perimeter-fence (via DIA DRILL) (spacing PITCH) (edge-offset OFFSET) (mask-width WIDTH) [(net \"GND\")] " ++
             "[(keepout CLEARANCE [(blocks components tracks vias)] [(allow-nets \"NET\"…)])])] " ++
             "(left|right|top|bottom \"REF\"… | (rot N \"REF\")…)… [(corners \"REF\"…)])",

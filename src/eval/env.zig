@@ -1233,6 +1233,9 @@ pub const PerimeterFenceSpec = struct {
 /// `(corners …)` (TL, TR, BR, BL in authored order). `(size W H)` is required;
 /// without it the optimizer ignores the form and lint reports it.
 pub const BoardSpec = struct {
+    /// Stable company/shop-floor part number for this board family. The
+    /// fabrication identity prints it beside the geometry hash when present.
+    part_number: []const u8 = "",
     /// Outline size in mm. 0 ⇒ `(size …)` missing → the form is inert.
     w: f64 = 0,
     h: f64 = 0,

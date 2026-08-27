@@ -60,6 +60,7 @@ const fab_readiness = @import("../fab_readiness.zig");
 const fab_gate = @import("../fab_gate.zig");
 const fab_release = @import("../fab_release.zig");
 const fab_filename = @import("fab_filename.zig");
+const standalone_assembly = @import("standalone_assembly.zig");
 const subprocess = @import("subprocess.zig");
 
 // One spelling feeds both the downloaded package and the parsed CAM preview.
@@ -123,7 +124,11 @@ const parseSavedTexts = sidecar_json.parseSavedTexts;
 const parseOutlinePts = sidecar_json.parseOutlinePts;
 pub const writeJsonStr = sidecar_json.writeJsonStr;
 
-pub const HandlerError = fab_preview.Error || error{InvalidReadinessJson};
+pub const HandlerError = fab_preview.Error || error{
+    InvalidReadinessJson,
+    StandaloneAssemblyRenderFailed,
+    AssetMissing,
+};
 
 // SVG framing.
 const scale_min: f64 = 6.0; // px per mm
@@ -4819,6 +4824,57 @@ fn releaseNeedsWaiver(gate: fab_gate.Result) bool {
     return gate.drc.raw.len > gate.drc.effective.len;
 }
 
+fn standaloneReleaseAssemblyHtml(
+    ctx: *Server,
+    req: *httpz.Request,
+    name: []const u8,
+    block: *const env_mod.DesignBlock,
+    fv: FabView,
+    identity: standalone_assembly.ReleaseIdentity,
+) HandlerError![]const u8 {
+    var synthetic = try standalone_assembly.boardRequest(req, fv.selection.name);
+
+    var release_ctx = ctx.*;
+    release_ctx.allocator = req.arena;
+    var evaluator = Evaluator.init(req.arena, ctx.project_dir);
+    defer evaluator.deinit();
+    var module_res: ?modules_mod.ResolvedBlock = null;
+    defer if (module_res) |resolved| {
+        resolved.eval.deinit();
+        req.arena.destroy(resolved.eval);
+    };
+    var rev = StoreRevCheck{ .rendered = -1, .ctx = &release_ctx, .name = name, .sub = null };
+    const page = (try renderLayoutPage(&release_ctx, &synthetic, null, .{
+        .name = name,
+        .eval = &evaluator,
+        .module_res_out = &module_res,
+        .rev = &rev,
+    })) orelse return error.StandaloneAssemblyRenderFailed;
+
+    return standalone_assembly.render(
+        req.arena,
+        ctx.project_dir,
+        name,
+        block,
+        .{
+            .board_page = page,
+            .cam = .{
+                .enabled = true,
+                .placement = fv.placement,
+                .routed = fv.routed,
+                .zones = fv.zones,
+                .silk_keepouts = fv.silk_keepouts,
+                .texts = fv.texts,
+                .package = .{
+                    .frame = export_fab.frameFor(fv.placement),
+                    .drill_suffixes = .{ export_gerber.plated_drill_suffix, export_gerber.non_plated_drill_suffix },
+                },
+            },
+            .identity = identity,
+        },
+    );
+}
+
 /// GET /api/fab-readiness/:name — the pre-fab correctness report for `name`'s
 /// blessed layout (audit item 0.1): `{ok,errors:[…],warnings:[…],stats:{…}}`,
 /// computed against the SAME blessed-layout selection the Gerber export uses.
@@ -5087,12 +5143,21 @@ fn pcbGerbersApiHooked(
     var bw: std.Io.Writer.Allocating = .init(req.arena);
     try export_fab.assemblyBomCsv(&bw.writer, fv.placement.instances, dnpMode(req));
     try pkg.add("bom.csv", bw.written());
+    var displayed_id = mark.short_hex;
+    _ = std.ascii.upperString(&displayed_id, &mark.short_hex);
+    try pkg.add("assembly.html", try standaloneReleaseAssemblyHtml(ctx, req, name, block, fv, .{
+        .part_number = mark.part_number,
+        .revision = fv.authored.revision.id,
+        .fab_id = &displayed_id,
+        .release_token = &lock.token,
+    }));
     const manifest = try std.fmt.allocPrint(req.arena,
+        \\Board part number: {s}
         \\PCB fabrication ID: {s}
         \\Full SHA-256: {s}
-        \\Scope: deterministic Gerber and Excellon geometry before the identity mark
+        \\Scope: deterministic Gerber and Excellon geometry plus board part number before the generated mark
         \\
-    , .{ &mark.short_hex, &mark.digest_hex });
+    , .{ mark.part_number, &displayed_id, &mark.digest_hex });
     try pkg.add("fab-id.txt", manifest);
     var rrj: std.Io.Writer.Allocating = .init(req.arena);
     try fab_release.writeMachineReport(&rrj.writer, evidence, lock, needs_waiver);
@@ -13751,7 +13816,7 @@ fn writeFabReleaseFixture(allocator: std.mem.Allocator, dir: std.Io.Dir, project
         \\(import fixture-part)
         \\(design-block "Fabrication Release Fixture"
         \\  (revision "A" (date "2026-08-27"))
-        \\  (board (size 40 20))
+        \\  (board (part-number "FAB-1001") (size 40 20))
         \\  (design-rules (stackup 4) (plane 2 "GND") (pour top "GND"))
         \\  (assert (== 1 2) "intentional fixture waiver")
         \\  (instance "U1" fixture-part
@@ -13923,6 +13988,7 @@ fn expectFabZipMembers(allocator: std.mem.Allocator, entries: []const StoredZipE
     for ([_][]const u8{
         "fabok-bom.csv",
         "fabok-centroid.csv",
+        "fabok-assembly.html",
         "fabok-fab-id.txt",
         "fabok-release-report.json",
         "fabok-release-report.md",
@@ -13962,6 +14028,7 @@ test "fab release requires confirmation and waiver then emits a checksummed revi
     try std.testing.expect(readiness_json.object.get("internal_checks_complete").?.bool);
     try std.testing.expect(readiness_json.object.get("needs_waiver").?.bool);
     try std.testing.expectEqualStrings("clean", readiness_json.object.get("project_status").?.string);
+    try std.testing.expectEqualStrings("FAB-1001", readiness_json.object.get("part_number").?.string);
     const token = try allocator.dupe(u8, readiness_json.object.get("release_token").?.string);
 
     const absolute_readiness = try callFabEndpoint(allocator, absolute_project, false, null, false);
@@ -13982,16 +14049,28 @@ test "fab release requires confirmation and waiver then emits a checksummed revi
     try std.testing.expect(std.mem.startsWith(u8, package.body, "PK\x03\x04"));
     const entries = try storedZipEntries(allocator, package.body);
     try expectFabZipMembers(allocator, entries);
-    try std.testing.expectEqual(@as(usize, 21), entries.len);
+    try std.testing.expectEqual(@as(usize, 22), entries.len);
     try std.testing.expect(std.mem.indexOf(u8, storedZipEntry(entries, "fabok-bom.csv").?, "U1") != null);
     try std.testing.expect(std.mem.indexOf(u8, storedZipEntry(entries, "fabok-centroid.csv").?, "U1") != null);
+    const assembly_html = storedZipEntry(entries, "fabok-assembly.html").?;
+    try std.testing.expect(std.mem.indexOf(u8, assembly_html, "Released assembly") != null);
+    try std.testing.expect(std.mem.indexOf(u8, assembly_html, "FAB-1001") != null);
+    try std.testing.expect(std.mem.indexOf(u8, assembly_html, "id=\"assembly-search\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, assembly_html, "id=\"pcb-frame\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, assembly_html, "PCB.standalone=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, assembly_html, "PCB.cam=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, assembly_html, "src=\"/pcb-layout/") == null);
+    try std.testing.expect(std.mem.indexOf(u8, assembly_html, "src=\"/static/") == null);
+    try std.testing.expect(std.mem.indexOf(u8, storedZipEntry(entries, "fabok-fab-id.txt").?, "Board part number: FAB-1001") != null);
 
     const release_report = try std.json.parseFromSliceLeaky(std.json.Value, allocator, storedZipEntry(entries, "fabok-release-report.json").?, .{});
     try std.testing.expectEqualStrings("netlisp-fab-release-v1", release_report.object.get("schema").?.string);
     try std.testing.expect(release_report.object.get("confirmed").?.bool);
     try std.testing.expect(release_report.object.get("waiver").?.bool);
     try std.testing.expectEqualStrings("A", release_report.object.get("revision").?.string);
-    _ = try std.json.parseFromSliceLeaky(std.json.Value, allocator, storedZipEntry(entries, "fabok-design-rules.json").?, .{});
+    try std.testing.expectEqualStrings("FAB-1001", release_report.object.get("part_number").?.string);
+    const rules = try std.json.parseFromSliceLeaky(std.json.Value, allocator, storedZipEntry(entries, "fabok-design-rules.json").?, .{});
+    try std.testing.expectEqualStrings("FAB-1001", rules.object.get("part_number").?.string);
 
     const checksums = storedZipEntry(entries, "fabok-checksums.sha256").?;
     try expectFabChecksums(allocator, entries, checksums);

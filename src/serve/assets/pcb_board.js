@@ -25,7 +25,9 @@ function compactDockMode(){
 // Assembly/debug embeds ask for a physical board presentation. Keep it scoped
 // to the read-only `?review=1` surface so the PCB editor retains its authored
 // KiCad layer colours and editing overlays.
-var PHYSICAL_REVIEW=RO&&/(?:^|[?&])review=1(?:&|$)/.test(window.location.search);
+var STANDALONE=!!PCB.standalone;
+var MESSAGE_TARGET_ORIGIN=STANDALONE?"*":window.location.origin;
+var PHYSICAL_REVIEW=RO&&(!!PCB.physical_review||/(?:^|[?&])review=1(?:&|$)/.test(window.location.search));
 // ── WebGPU renderer (default-on, ?gpu=0 opts out) + benchmark (?fbench=1) ──
 // GPU_REQ is decided ONCE at load: on wherever the browser exposes WebGPU,
 // unless ?gpu=0. A browser with no navigator.gpu (and the Node bench, whose
@@ -4781,7 +4783,7 @@ function reviewPickedNet(net){var stats=net?reviewSet({nets:[net],fit:false}):re
  if(window.parent===window)return;
  var matched=(stats.matchedNets||stats.matched_nets||[])[0]||net||"";
  try{window.parent.postMessage({type:"eda-pcb-net-picked",design:PCB.name,
-  net:matched,clear:!net,stats:stats},window.location.origin);}catch(e){}}
+  net:matched,clear:!net,stats:stats},MESSAGE_TARGET_ORIGIN);}catch(e){}}
 function reviewClearOutside(m){var pts=reviewBoardPoints();
  if(!PHYSICAL_REVIEW||pts.length<3||polyContains(pts,m.x,m.y))return false;
  selNet(null);return true;}
@@ -4792,7 +4794,7 @@ function reviewPickedRef(i,pd){var p=P[i],side=reviewPartSide(p);
  var stats=reviewSet({refs:[p.ref],side:side,fit:false});
  if(window.parent===window)return;
  try{window.parent.postMessage({type:"eda-pcb-ref-picked",design:PCB.name,
-  ref:p.ref,side:side,pad:(pd&&pd.num)||"",net:(pd&&pd.net)||"",stats:stats},window.location.origin);}catch(e){}}
+  ref:p.ref,side:side,pad:(pd&&pd.num)||"",net:(pd&&pd.net)||"",stats:stats},MESSAGE_TARGET_ORIGIN);}catch(e){}}
 function reviewInnerLayers(){return STACK.filter(function(r){return r.i>1&&r.i<STACK.length;}).map(function(r){
  return {id:"copper-inner-"+r.i,name:r.name};});}
 // The assembly shell is same-origin. Expose the physical stack directly so
@@ -5075,8 +5077,8 @@ function reviewOrient(side,rotation){var nextSide=side==="bottom"?"bottom":"top"
  dragCacheDrop();drawBoardRect();paintSoon();}
 window.PCBReviewFocus={set:reviewSet,clear:reviewClear};
 window.addEventListener("message",function(ev){var msg=ev.data;
- if(!msg||ev.origin!==window.location.origin)return;
- if(msg.type==="eda-pcb-parts-request"){reviewPostParts(ev.source,ev.origin);return;}
+ if(!msg||(!STANDALONE&&ev.origin!==window.location.origin))return;
+ if(msg.type==="eda-pcb-parts-request"){reviewPostParts(ev.source,STANDALONE?"*":ev.origin);return;}
  if(msg.type==="eda-pcb-orientation"){if(RO)reviewOrient(msg.side,msg.rotation);return;}
  if(msg.type==="eda-pcb-cam-visibility"){reviewCamVisibility(msg.layers);return;}
  if(msg.type!=="eda-pcb-focus")return;
@@ -5084,7 +5086,7 @@ window.addEventListener("message",function(ev){var msg=ev.data;
  var stats=msg.clear?reviewClear():reviewSet(msg),reply={type:"eda-pcb-focus-result",design:PCB.name};
  Object.keys(stats).forEach(function(k){reply[k]=stats[k];});
  if(msg.requestId!=null)reply.requestId=msg.requestId;
- try{if(ev.source&&ev.source.postMessage)ev.source.postMessage(reply,ev.origin);}catch(e){};});
+ try{if(ev.source&&ev.source.postMessage)ev.source.postMessage(reply,STANDALONE?"*":ev.origin);}catch(e){};});
 function vbResize(){svgMetricsDrop();var ar=hostAspect(),cy=vb.y+vb.h/2,h=vb.w*ar;
  vb.y=cy-h/2;vb.h=h;setVB();}
 window.addEventListener("resize",function(){if(reviewOriented)reviewApplyOrientation();else vbResize();paintSoon();});

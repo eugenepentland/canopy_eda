@@ -3301,8 +3301,10 @@ src/serve/api.zig::removeComponentDatasheetApi | fn removeComponentDatasheetApi(
 src/serve/api.zig::removeSectionNoteApi | fn removeSectionNoteApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/api.zig::sceneGraphApi | fn sceneGraphApi(_: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/api.zig::versionApi | fn versionApi(_: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/assembly_debug.zig::ReleaseIdentity struct_
 src/serve/assembly_debug.zig::assemblyDebugPage | fn assemblyDebugPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/assembly_debug.zig::benchColdPage | fn benchColdPage(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?usize
+src/serve/assembly_debug.zig::renderReleasePage | fn renderReleasePage( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, block: *const env_mod.DesignBlock, board_html: []const u8, identity: ReleaseIdentity, ) HandlerError![]const u8
 src/serve/assembly_page_cache.zig::Store struct_
 src/serve/assembly_page_cache.zig::deinit | fn deinit(self: *Store) void
 src/serve/assembly_page_cache.zig::serve | fn serve( self: *Store, in: ServeIn, req: *httpz.Request, res: *httpz.Response, miss_version: *?u32, ) bool
@@ -4020,6 +4022,10 @@ src/serve/schematic_viewer_js.zig::schematic_viewer_js_asset value
 src/serve/shape_sketch_json.zig::matches | fn matches(value: std.json.Value, sketch: sketch_mod.Sketch) bool
 src/serve/shape_sketch_json.zig::parse | fn parse(alloc: std.mem.Allocator, v: ?std.json.Value) ?sketch_mod.Sketch
 src/serve/shape_sketch_json.zig::write | fn write(w: *std.Io.Writer, sketch: sketch_mod.Sketch) std.Io.Writer.Error!void
+src/serve/standalone_assembly.zig::ReleaseIdentity value
+src/serve/standalone_assembly.zig::RenderRequest struct_
+src/serve/standalone_assembly.zig::boardRequest | fn boardRequest(source: *httpz.Request, layout: []const u8) std.mem.Allocator.Error!httpz.Request
+src/serve/standalone_assembly.zig::render | fn render( arena: std.mem.Allocator, project_dir: []const u8, name: []const u8, block: *const env_mod.DesignBlock, request: RenderRequest, ) (fab_preview.Error || error{AssetMissing})![]const u8
 src/serve/static_assets.zig::HandlerError value
 src/serve/static_assets.zig::staticAsset | fn staticAsset(_: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/stuck_json.zig::net_key value

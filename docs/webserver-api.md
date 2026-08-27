@@ -228,9 +228,14 @@ Local dev still uses `http://localhost:7050`.
   paste, silkscreen (footprint art + 5x7 ref-des strokes, mirrored on the
   bottom), and the board profile (the ★ layout's drawn outline > authored
   `(board …)` rect > parts-bbox fallback) — plus the Excellon PTH/NPTH
-  drills and the centroid CSV. KiCad file naming + Protel extensions, so
-  fab CAM auto-detects layers. Writer in `src/export_gerber.zig`, store-only
-  ZIP in `src/zipfile.zig`. Individual pieces stay available: `GET
+  drills, centroid/BOM CSVs, release reports, checksums, and a standalone
+  `<name>-assembly.html`. That HTML embeds the exact released CAM, operator
+  search/BOM data, and rework guides, so it opens directly from disk without
+  the server. An authored `(board (part-number "…") …)` is printed beside the
+  eight-hex fabrication ID on silkscreen and is recorded in every release
+  report; the part number also participates in the fabrication digest. KiCad
+  file naming + Protel extensions let fab CAM auto-detect layers. Writer in
+  `src/export_gerber.zig`, store-only ZIP in `src/zipfile.zig`. Individual pieces stay available: `GET
   /api/pcb-centroid/:name` — side-aware pick-and-place CSV at the blessed
   poses (★ default → newest manual → any → cache, the KiCad-sync
   preference); `GET /api/pcb-drill/:name[?npth=1]` — Excellon drill

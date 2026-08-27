@@ -6,7 +6,7 @@
 8 src/diagram/layout.zig|Route
 12 src/diagram/lod.zig|Entity
 16 src/diagram/types.zig|Node
-9 src/eval/env.zig|BoardSpec
+10 src/eval/env.zig|BoardSpec
 12 src/eval/env.zig|Check
 9 src/eval/env.zig|ClassRf
 27 src/eval/env.zig|DesignBlock
@@ -54,6 +54,7 @@
 8 src/placement/drc.zig|Violation
 8 src/placement/gap_policy.zig|GapOptions
 13 src/placement/geometry.zig|Pad
+8 src/placement/impedance_rules.zig|Physical
 12 src/placement/net_rules.zig|NetRule
 9 src/placement/net_rules.zig|Rf
 8 src/placement/optimizer.zig|BoardRules
