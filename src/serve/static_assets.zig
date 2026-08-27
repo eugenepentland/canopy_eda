@@ -1800,6 +1800,16 @@ test "PCB frame benchmark carries human-readable dwell points outside movement p
         "dwell(\"seek\",250)",
         "dwell(\"turn_\"+(n+1),350)",
         "if(ent.wait)setTimeout",
+        "physical_review:PHYSICAL_REVIEW,cam_review:!!CAM_REVIEW",
+        "FBENCH_QUICK?10:60,PN=FBENCH_QUICK?30:120",
+        "var dx=0.6*VBW/(FBENCH_QUICK?120:PN)",
+        "function fbRunWhenReady()",
+        "if(!PHYSICAL_REVIEW||!PCB.cam_url||CAM_REVIEW){fbRun();return;}",
+        "error:\"CAM payload did not load within 240 seconds\"",
+        "setTimeout(fbRunWhenReady,1000)",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+    // The physical CAM surface keeps the cheaper direct repaint path; the
+    // browser A/B gate showed that rebuilding its 2.56x buffer regresses p95.
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "if(PHYSICAL_REVIEW)return false;       // measured A/B") != null);
 }

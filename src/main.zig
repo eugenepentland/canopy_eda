@@ -323,7 +323,12 @@ fn dispatchServe(io: std.Io, allocator: std.mem.Allocator, scratch_allocator: st
     else
         default_serve_port;
     const auth_dir_override = optionalArg(args, "--auth-dir") orelse readAuthDirEnv(arena, environ);
-    try serve_mod.serve(io, allocator, scratch_allocator, port, project_dir, auth_dir_override);
+    try serve_mod.serve(io, allocator, scratch_allocator, .{
+        .port = port,
+        .project_dir = project_dir,
+        .auth_dir = auth_dir_override,
+        .skip_warmup = hasFlag(args, "--skip-warmup"),
+    });
 }
 
 /// Print the runtime build id (the deployment-provided EDA commit from
@@ -480,7 +485,7 @@ fn printUsage() !void {
         \\  netlisp reference [section]             Print the DSL grammar reference (docs/language-forms.md)
         \\  netlisp tool list                       List every structured CLI tool and its JSON schema
         \\  netlisp tool <name> [--project-dir <d>] [--args <json> | --args-file <path>] [--output <path|->]  Invoke any structured tool
-        \\  netlisp serve [--project-dir <d>] [--port <n>]  Start web server (default port 7050)
+        \\  netlisp serve [--project-dir <d>] [--port <n>] [--skip-warmup]  Start web server (default port 7050)
         \\  netlisp mint-plugin-token [--project-dir <d>] [--label <l>]  Mint a bearer token for the KiCad plugin
         \\  netlisp import-kicad <board.kicad_pcb> [--project-dir <d>] [--name <n>] [--title <t>] [--dry-run]  Migrate a KiCad board into a netlisp design
         \\  netlisp import-kicad-layout [--project-dir <d>] <design> [--board <path>] [--dry-run] [--chord-tol-mm <mm>]  Import a routed board's placement/outline/copper as the design's starred layout (board read-only)

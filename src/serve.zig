@@ -11,6 +11,7 @@
 const std = @import("std");
 const httpz = @import("httpz");
 const infra_fs = @import("infra/fs.zig");
+const log = @import("infra/log.zig");
 const deflate = @import("deflate.zig");
 const gzip_cache = @import("serve/gzip_cache.zig");
 
@@ -23,6 +24,14 @@ pub const ServeError = std.mem.Allocator.Error ||
     @typeInfo(@typeInfo(@TypeOf(httpz.Server(*Server).router)).@"fn".return_type.?).error_union.error_set ||
     @typeInfo(@typeInfo(@TypeOf(httpz.Server(*Server).init)).@"fn".return_type.?).error_union.error_set ||
     error{ InvalidIPAddressFormat, ThreadQuotaExceeded };
+
+/// Startup settings shared by the CLI and the long-running HTTP server.
+pub const ServeOptions = struct {
+    port: u16,
+    project_dir: []const u8,
+    auth_dir: ?[]const u8,
+    skip_warmup: bool = false,
+};
 
 // Sub-modules
 const paths = @import("paths.zig");
@@ -655,10 +664,11 @@ pub fn serve(
     io: std.Io,
     allocator: std.mem.Allocator,
     scratch_allocator: std.mem.Allocator,
-    port: u16,
-    project_dir: []const u8,
-    auth_dir: ?[]const u8,
+    options: ServeOptions,
 ) ServeError!void {
+    const port = options.port;
+    const project_dir = options.project_dir;
+    const auth_dir = options.auth_dir;
     // Set the CSE/DigiKey rate limits from env/.env once, before any request
     // thread can touch the limiters.
     rate_limiter.configureFromEnv(allocator);
@@ -815,7 +825,12 @@ pub fn serve(
 
     std.debug.print("Listening on http://localhost:{d}\nProject: {s}\n", .{ port, project_dir });
     // Fill the read-path caches in the background so the first visitor after a
-    // deploy is not the one who pays for them. Overlaps with listen().
-    warmup.spawn(&handler);
+    // deploy is not the one who pays for them. Overlaps with listen(). A
+    // private performance harness needs an idle machine more than corpus-wide
+    // cache warmth, so its explicit CLI flag can skip that background work.
+    if (options.skip_warmup)
+        log.progress("startup cache warm-up disabled", .{})
+    else
+        warmup.spawn(&handler);
     try server.listen();
 }

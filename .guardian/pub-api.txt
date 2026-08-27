@@ -3118,6 +3118,7 @@ src/serve.zig::PcbJob struct_
 src/serve.zig::PcbJobBegin struct_
 src/serve.zig::PcbJobView struct_
 src/serve.zig::ServeError value
+src/serve.zig::ServeOptions struct_
 src/serve.zig::Server struct_
 src/serve.zig::ServerState struct_
 src/serve.zig::bumpLiveVersion | fn bumpLiveVersion(name: []const u8) u32
@@ -3133,7 +3134,7 @@ src/serve.zig::pcbJobBegin | fn pcbJobBegin(name: []const u8) PcbJobBegin
 src/serve.zig::pcbJobFinish | fn pcbJobFinish(name: []const u8, gen: u32, outcome: JobOutcome) void
 src/serve.zig::pcbJobFrame | fn pcbJobFrame(name: []const u8, gen: u32, json: []const u8) void
 src/serve.zig::pcbJobSnapshot | fn pcbJobSnapshot(alloc: std.mem.Allocator, name: []const u8) ?PcbJobView
-src/serve.zig::serve | fn serve( io: std.Io, allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, port: u16, project_dir: []const u8, auth_dir: ?[]const u8, ) ServeError!void
+src/serve.zig::serve | fn serve( io: std.Io, allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, options: ServeOptions, ) ServeError!void
 src/serve.zig::setLiveLayoutJson | fn setLiveLayoutJson(name: []const u8, data: ?[]const u8) void
 src/serve/api.zig::HandlerError value
 src/serve/api.zig::addComponentDatasheetApi | fn addComponentDatasheetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void

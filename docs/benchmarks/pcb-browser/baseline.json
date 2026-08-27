@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "recorded_at": "2026-08-27T02:57:06.138Z",
+  "reference": {
+    "design": "barracuda-base",
+    "surface": "assembly physical CAM review",
+    "renderer": "Canvas2D",
+    "browser": "Chromium 151.0.7922.34",
+    "viewport": {
+      "width": 1600,
+      "height": 900,
+      "dpr": 1
+    },
+    "iframe": {
+      "width": 1120,
+      "height": 852
+    },
+    "repetitions": 3,
+    "phases": {
+      "zoom_in": {
+        "frames": 10,
+        "p50_ms": 16.5,
+        "p95_ms": 40.9,
+        "worst_p95_ms": 41.3,
+        "max_ms": 41.3
+      },
+      "seek": {
+        "frames": 1,
+        "p50_ms": 26,
+        "p95_ms": 26,
+        "worst_p95_ms": 29.1,
+        "max_ms": 29.1
+      },
+      "pan": {
+        "frames": 90,
+        "p50_ms": 16.7,
+        "p95_ms": 17.6,
+        "worst_p95_ms": 18.2,
+        "max_ms": 29.5
+      },
+      "zoom_out": {
+        "frames": 10,
+        "p50_ms": 18.2,
+        "p95_ms": 27.7,
+        "worst_p95_ms": 27.9,
+        "max_ms": 27.9
+      }
+    },
+    "long_tasks": {
+      "median_count": 2,
+      "worst_count": 3,
+      "median_total_ms": 191,
+      "max_ms": 104
+    },
+    "navigation": {
+      "median_response_ms": 22288.9,
+      "median_load_ms": 22449.4
+    },
+    "median_run_wall_ms": 28178
+  },
+  "budgets": {
+    "phases.pan.p50_ms": 20,
+    "phases.pan.p95_ms": 22,
+    "phases.pan.worst_p95_ms": 24,
+    "phases.pan.max_ms": 40,
+    "phases.zoom_in.worst_p95_ms": 52,
+    "phases.zoom_in.max_ms": 55,
+    "phases.zoom_out.worst_p95_ms": 35,
+    "phases.zoom_out.max_ms": 38
+  }
+}

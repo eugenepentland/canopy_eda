@@ -184,6 +184,11 @@ name = "pcb-3d-surface-geometry"
 command = ["node", "src/serve/assets/pcb_3d_surface.test.js"]
 inputs = ["src/serve/assets/pcb_3d_surface.js", "src/serve/assets/pcb_3d_surface.test.js", "src/serve/assets/three.min.js"]
 
+[[external]]
+name = "pcb-browser-perf-js-syntax"
+command = ["node", "--check", "scripts/pcb_browser_perf/run.js"]
+inputs = ["scripts/pcb_browser_perf/run.js"]
+
 # Completeness checklist (opt-in). Every SPEC.md `## ` feature section must
 # ADDRESS or explicitly WAIVE all 8 scenario categories (empty inputs, large
 # inputs, unauthorized access, I/O failure, concurrent access, malformed

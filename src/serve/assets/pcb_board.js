@@ -42,7 +42,8 @@ var QS=(window.location&&window.location.search)||"";
 // existing inspection gesture.
 var THERMAL_REVIEW=PHYSICAL_REVIEW&&/(?:^|[?&])thermal=1(?:&|$)/.test(QS);
 var GPU_REQ=!/(?:^|[?&])gpu=0(?:&|$)/.test(QS)&&!!(window.navigator&&window.navigator.gpu),
-    FBENCH=/(?:^|[?&])fbench=1(?:&|$)/.test(QS);
+    FBENCH=/(?:^|[?&])fbench=(?:1|quick)(?:&|$)/.test(QS),
+    FBENCH_QUICK=/(?:^|[?&])fbench=quick(?:&|$)/.test(QS);
 // True only once PCBGpu.init has RESOLVED successfully (adapter + device +
 // pipelines). Everything gated on it is therefore off for the whole page life
 // unless the flag was passed AND the browser delivered a device.
@@ -883,7 +884,7 @@ function ovsFp(){
 // full render is always CORRECT, only slower.
 function ovsOn(w,h,kk){
  if(gpuOn)return false;                 // GPU pan is a uniform write; a pixel buffer of a scene the GPU owns would only be stale
- if(PHYSICAL_REVIEW)return false;       // fab-preview embed: async sprites + postMessage focus, and not the surface this fixes
+ if(PHYSICAL_REVIEW)return false;       // measured A/B: the 2.56x CAM bake costs more than direct physical-review repaints
  if(!(Date.now()<vbQuiet))return false; // only inside the viewport-busy window — a quiet frame must render exactly
  if(!(w>0&&h>0&&kk>0))return false;
  if(window.PCBOverlay&&PCBOverlay.paint)return false; // the replay overlay repaints over the scene every frame
@@ -11224,7 +11225,7 @@ function hudStart(){
 // trackpad drag drives, so the harness cannot accidentally measure a path the
 // real viewer never takes.
 function fbProgram(){
- var st=[],i,n,ZN=60,PN=120;
+ var st=[],i,n,ZN=FBENCH_QUICK?10:60,PN=FBENCH_QUICK?30:120;
  var dwell=function(label,ms){st.push({p:"pause",label:label,wait:ms,f:function(){}});};
  var ctr=function(){var m=svgMetricsGet();
   return {x:m.left+m.width/2,y:m.top+m.height/2};};
@@ -11238,7 +11239,10 @@ function fbProgram(){
  // jump is one big non-representative frame and must not pollute `pan`.
  st.push({p:"seek",f:function(){vb.x=0.2*VBW-vb.w/2;setVB();}});
  dwell("seek",250);
- var dx=0.6*VBW/PN;
+ // The quick gate shortens each sweep but keeps the full profile's per-frame
+ // distance. Giant synthetic jumps would miss the retained-pan path a real
+ // pointer drives and benchmark repeated buffer rebuilds instead.
+ var dx=0.6*VBW/(FBENCH_QUICK?120:PN);
  for(n=0;n<3;n++){
   var d=(n%2)?-dx:dx;
   var pstep=function(v){return function(){vb.x+=v;setVB();};}(d);
@@ -11251,7 +11255,9 @@ function fbStat(a){
  return {n:a.length,p50:+fbPct(a,0.5).toFixed(2),p95:+fbPct(a,0.95).toFixed(2),
   max:+Math.max.apply(null,a).toFixed(2)};}
 function fbReport(rec,order){
- var out={mode:gpuOn?"gpu":"2d",design:PCB.name,dpr:window.devicePixelRatio||1};
+ var out={mode:gpuOn?"gpu":"2d",design:PCB.name,dpr:window.devicePixelRatio||1,
+  profile:FBENCH_QUICK?"quick":"full",
+  physical_review:PHYSICAL_REVIEW,cam_review:!!CAM_REVIEW};
  order.forEach(function(p){if(rec[p]&&rec[p].length)out[p]=fbStat(rec[p]);});
  window.__fbench=out;
  try{console.log("fbench "+JSON.stringify(out));}catch(e){}
@@ -11282,6 +11288,19 @@ function fbRun(){
   else requestAnimationFrame(step);};
  fitVB();paintSoon();
  setTimeout(function(){requestAnimationFrame(step);},60);}
+// A physical-review run is only representative after the deferred CAM payload
+// has replaced the semantic preview. A bounded wait publishes a diagnostic
+// error instead of measuring the fallback semantic scene; the headless gate
+// rejects that result.
+function fbRunWhenReady(){
+ var deadline=((window.performance&&performance.now)?performance.now():Date.now())+240000;
+ var ready=function(){
+  var t=(window.performance&&performance.now)?performance.now():Date.now();
+  if(!PHYSICAL_REVIEW||!PCB.cam_url||CAM_REVIEW){fbRun();return;}
+  if(t>=deadline){window.__fbench={error:"CAM payload did not load within 240 seconds",
+   design:PCB.name,physical_review:PHYSICAL_REVIEW,cam_review:false};return;}
+  setTimeout(ready,100);};
+ ready();}
 // ── WebGPU renderer boot (default-on; ?gpu=0 opts out) ─────────────────
 // Async and entirely optional: until it RESOLVES true, gpuOn is false and every
 // seam above is a dead branch, so the page renders exactly as it does today.
@@ -11308,5 +11327,5 @@ if(GPU_REQ&&window.PCBGpu&&navigator.gpu&&CV.parentNode){
   .catch(function(){});
  }catch(e){}}
 if(FBENCH)hudStart(); // HUD is a bench instrument now that GPU is the default
-if(FBENCH)setTimeout(fbRun,1000); // let layout, the first paint and the async GPU init settle
+if(FBENCH)setTimeout(fbRunWhenReady,1000); // layout + exact CAM must settle before measurement
 })();

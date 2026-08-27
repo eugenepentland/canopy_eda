@@ -5,12 +5,15 @@ zig-out/
 # Debug-binary side installs (zig build -p zig-out-dbg); a 200 MB Debug
 # netlisp was once committed from here by a path-scoped commit sweep.
 zig-out-dbg/
+zig-out-browser-perf/
 .zig-cache
 # Isolated per-task build caches (agents pass --cache-dir .zig-cache-<tag>)
 .zig-cache-*/
 *.o
 *.swp
 *~
+/node_modules/
+/test-results/
 
 # Python bytecode
 __pycache__/

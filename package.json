@@ -1,0 +1,10 @@
+{
+  "name": "canopy-eda-browser-gates",
+  "private": true,
+  "scripts": {
+    "perf:assembly": "node scripts/pcb_browser_perf/run.js"
+  },
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}
