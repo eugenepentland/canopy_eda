@@ -5,7 +5,9 @@
 //! shunt, the two feedback branches, the output isolation pole, VCO tune-pin
 //! capacitance, and a one-pole finite-gain op amp.
 //!
-//! This is a linear, continuous-time screen.  It deliberately does not claim
+//! An optional operating curve runs a deterministic E24 inverse search and
+//! quantizes an ADF4159 charge-pump schedule before rechecking exact tolerance
+//! corners. This is a linear, continuous-time screen. It does not claim
 //! sampled-PFD, nonlinear lock acquisition, phase-noise, charge-pump
 //! compliance, or op-amp capacitive-load sign-off.
 
@@ -38,6 +40,14 @@ pub const Components = struct {
 const Range = struct { min: f64 = 0, max: f64 = 0 };
 const ValueTolerance = struct { value: f64 = 0, tolerance_pct: f64 = 0 };
 const Feedback = struct { prescaler: f64 = 0, pll_n: f64 = 0 };
+const Synthesis = struct {
+    enabled: bool = false,
+    resistor_range: Range = .{ .min = 10, .max = 20_000 },
+    capacitor_range: Range = .{ .min = 0.5e-12, .max = 2e-9 },
+};
+const OperatingCurve = struct { point_nodes: []const Node = &.{} };
+const OperatingPoint = struct { pll_n: f64, kvco_hz_per_v: f64 };
+const DesignMode = struct { operating_curve: OperatingCurve = .{}, synthesis: Synthesis = .{} };
 const OpAmp = struct {
     gbw_hz: f64 = 0,
     dc_gain: f64 = 500_000,
@@ -68,6 +78,7 @@ pub const Spec = struct {
     components: Components = .{},
     circuit: CircuitConfig = .{},
     requirements: Requirements = .{},
+    design: DesignMode = .{},
 };
 
 const ParseError = error{InvalidForm};
@@ -110,12 +121,50 @@ fn parseChild(node: Node, out: *Spec) ParseError!void {
         out.circuit.kvco_hz_per_v.max = try positiveAt(c, 2);
     } else if (eq(head, "op-amp")) {
         try parseOpAmp(c, &out.circuit.op_amp);
+    } else if (eq(head, "operating-curve")) {
+        try parseOperatingCurve(c, &out.design.operating_curve);
+    } else if (eq(head, "synthesize")) {
+        try parseSynthesis(c, &out.design.synthesis);
     } else if (eq(head, "phase-margin")) {
         try parsePhaseMargin(c, &out.requirements.phase);
     } else if (eq(head, "polarity")) {
         const word = try atomAt(c, 1);
         out.circuit.polarity = if (eq(word, "negative")) .negative else if (eq(word, "positive")) .positive else return error.InvalidForm;
     } else if (!try parseLimits(c, head, out)) return error.InvalidForm;
+}
+
+fn parseOperatingCurve(c: []const Node, out: *OperatingCurve) ParseError!void {
+    if (c.len < 3 or c.len > 17) return error.InvalidForm;
+    var previous_n: f64 = 0;
+    for (c[1..]) |node| {
+        const point = try parseOperatingPoint(node);
+        if (point.pll_n <= previous_n) return error.InvalidForm;
+        previous_n = point.pll_n;
+    }
+    out.point_nodes = c[1..];
+}
+
+fn parseOperatingPoint(node: Node) ParseError!OperatingPoint {
+    const p = node.asList() orelse return error.InvalidForm;
+    if (p.len != 3 or !eq(try atomAt(p, 0), "point")) return error.InvalidForm;
+    return .{ .pll_n = try positiveAt(p, 1), .kvco_hz_per_v = try positiveAt(p, 2) };
+}
+
+fn parseSynthesis(c: []const Node, out: *Synthesis) ParseError!void {
+    out.enabled = true;
+    for (c[1..]) |node| {
+        const p = node.asList() orelse return error.InvalidForm;
+        const head = try atomAt(p, 0);
+        if (eq(head, "series")) {
+            if (!eq(try atomAt(p, 1), "e24")) return error.InvalidForm;
+        } else if (eq(head, "resistance-range")) {
+            out.resistor_range = .{ .min = try positiveAt(p, 1), .max = try positiveAt(p, 2) };
+        } else if (eq(head, "capacitance-range")) {
+            out.capacitor_range = .{ .min = try positiveAt(p, 1), .max = try positiveAt(p, 2) };
+        } else return error.InvalidForm;
+    }
+    if (out.resistor_range.max < out.resistor_range.min) return error.InvalidForm;
+    if (out.capacitor_range.max < out.capacitor_range.min) return error.InvalidForm;
 }
 
 fn parseLimits(c: []const Node, head: []const u8, out: *Spec) ParseError!bool {
@@ -209,6 +258,7 @@ fn validSpec(out: Spec) bool {
     if (out.circuit.feedback.pll_n <= 0) return false;
     if (out.circuit.kvco_hz_per_v.min <= 0) return false;
     if (out.circuit.kvco_hz_per_v.max < out.circuit.kvco_hz_per_v.min) return false;
+    if (out.design.synthesis.enabled and out.design.operating_curve.point_nodes.len < 2) return false;
     return out.circuit.op_amp.gbw_hz > 0;
 }
 
@@ -218,7 +268,17 @@ fn complete(c: Components) bool {
         c.r_isolation.len > 0 and c.c_tune.len > 0;
 }
 
-const Value = struct { nominal: f64, tolerance_pct: f64, ref: []const u8 };
+const Value = struct {
+    nominal: f64,
+    tolerance_pct: f64,
+    tolerance_abs: f64 = 0,
+    ref: []const u8,
+
+    fn tolerancePctAt(self: Value, nominal: f64) f64 {
+        if (self.tolerance_abs > 0 and nominal > 0) return self.tolerance_abs / nominal * 100.0;
+        return self.tolerance_pct;
+    }
+};
 const Circuit = struct {
     c_cp: Value,
     r_in: Value,
@@ -266,7 +326,7 @@ pub fn evaluate(allocator: std.mem.Allocator, assertions: *std.ArrayList(env.Ass
         try append(&context, spec, false, "{s}: loop-filter component binding failed; every named R/C must exist and have a parseable value", .{spec.name});
         return;
     };
-    try append(&context, spec, true, "{s}: BOM values loaded — {s} {d:.0} pF ±{d:.2}%, {s} {d:.0} Ω ±{d:.2}%, {s} {d:.0} Ω ±{d:.2}% / {s} {d:.1} pF ±{d:.2}%, {s} {d:.1} pF ±{d:.2}%, {s} {d:.0} Ω ±{d:.2}% / {s} {d:.0} pF ±{d:.2}%", .{ spec.name, circuit.c_cp.ref, circuit.c_cp.nominal * 1e12, circuit.c_cp.tolerance_pct, circuit.r_in.ref, circuit.r_in.nominal, circuit.r_in.tolerance_pct, circuit.r_feedback.ref, circuit.r_feedback.nominal, circuit.r_feedback.tolerance_pct, circuit.c_feedback.ref, circuit.c_feedback.nominal * 1e12, circuit.c_feedback.tolerance_pct, circuit.c_feedback_hf.ref, circuit.c_feedback_hf.nominal * 1e12, circuit.c_feedback_hf.tolerance_pct, circuit.r_isolation.ref, circuit.r_isolation.nominal, circuit.r_isolation.tolerance_pct, circuit.c_tune.ref, (circuit.c_tune.nominal + circuit.extra_tune_cap.nominal) * 1e12, @max(circuit.c_tune.tolerance_pct, circuit.extra_tune_cap.tolerance_pct) });
+    try append(&context, spec, true, "{s}: BOM values loaded — {s} {d:.0} pF ±{d:.2}%, {s} {d:.0} Ω ±{d:.2}%, {s} {d:.0} Ω ±{d:.2}% / {s} {d:.1} pF ±{d:.2}%, {s} {d:.1} pF ±{d:.2}%, {s} {d:.0} Ω ±{d:.2}% / {s} {d:.0} pF ±{d:.2}%", .{ spec.name, circuit.c_cp.ref, circuit.c_cp.nominal * 1e12, circuit.c_cp.tolerancePctAt(circuit.c_cp.nominal), circuit.r_in.ref, circuit.r_in.nominal, circuit.r_in.tolerancePctAt(circuit.r_in.nominal), circuit.r_feedback.ref, circuit.r_feedback.nominal, circuit.r_feedback.tolerancePctAt(circuit.r_feedback.nominal), circuit.c_feedback.ref, circuit.c_feedback.nominal * 1e12, circuit.c_feedback.tolerancePctAt(circuit.c_feedback.nominal), circuit.c_feedback_hf.ref, circuit.c_feedback_hf.nominal * 1e12, circuit.c_feedback_hf.tolerancePctAt(circuit.c_feedback_hf.nominal), circuit.r_isolation.ref, circuit.r_isolation.nominal, circuit.r_isolation.tolerancePctAt(circuit.r_isolation.nominal), circuit.c_tune.ref, (circuit.c_tune.nominal + circuit.extra_tune_cap.nominal) * 1e12, @max(circuit.c_tune.tolerancePctAt(circuit.c_tune.nominal), circuit.extra_tune_cap.tolerancePctAt(circuit.extra_tune_cap.nominal)) });
 
     try append(&context, spec, loopCapsAreStable(block, spec.components), "{s}: every frequency-shaping capacitor is C0G/NP0", .{spec.name});
 
@@ -293,9 +353,17 @@ pub fn evaluate(allocator: std.mem.Allocator, assertions: *std.ArrayList(env.Ass
     if (gbw_ratio >= 10 and gbw_ratio < 20) try warning(&context, "{s}: op-amp GBW/LBW ratio {d:.1} passes the hard floor but is below the preferred 20", .{ spec.name, gbw_ratio });
 
     try append(&context, spec, spec.circuit.polarity == .negative, "{s}: inverting active filter requires negative ADF4159 phase-detector polarity", .{spec.name});
+    var tracking_bandwidth_hz = sweep.min_bandwidth_hz;
+    if (spec.design.operating_curve.point_nodes.len >= 2) {
+        const profile = fixedProfileSweep(spec, nominal, false);
+        const profile_tolerance = fixedProfileToleranceSweep(spec, circuit);
+        tracking_bandwidth_hz = profile.min_bandwidth_hz;
+        try append(&context, spec, profile.min_phase_margin_deg >= spec.requirements.phase.hard_min_deg and profile_tolerance.min_phase_margin_deg >= spec.requirements.phase.hard_min_deg, "{s}: populated fixed-I_CP operating curve gives nominal LBW {d:.3}-{d:.3} MHz / PM {d:.1}-{d:.1}° and tolerance-corner LBW {d:.3}-{d:.3} MHz / PM {d:.1}-{d:.1}°", .{ spec.name, profile.min_bandwidth_hz / 1e6, profile.max_bandwidth_hz / 1e6, profile.min_phase_margin_deg, profile.max_phase_margin_deg, profile_tolerance.min_bandwidth_hz / 1e6, profile_tolerance.max_bandwidth_hz / 1e6, profile_tolerance.min_phase_margin_deg, profile_tolerance.max_phase_margin_deg });
+    }
     try outputChecks(&context, spec);
-    try rampChecks(&context, spec, sweep.min_bandwidth_hz);
+    try rampChecks(&context, spec, tracking_bandwidth_hz);
     try chargePumpSuggestion(&context, spec, nominal, sweep.min_phase_margin_deg);
+    if (spec.design.synthesis.enabled) try synthesize(&context, spec, circuit);
 }
 
 const Context = struct {
@@ -346,6 +414,288 @@ fn chargePumpSuggestion(context: *Context, spec: Spec, corner: Corner, current_m
     try warning(context, "{s}: no claim is made that the current population is optimal; best ADF4159 5 mA/16 step is {d:.4} mA with nominal min PM {d:.1}° and LBW {d:.3}-{d:.3} MHz", .{ spec.name, best_current * 1e3, best_min_pm, best_min_bw / 1e6, best_max_bw / 1e6 });
 }
 
+const SynthResult = struct {
+    corner: Corner,
+    anchor_step: usize,
+    nominal: Sweep,
+    tolerance: Sweep,
+};
+
+const e24 = [_]f64{ 1.0, 1.1, 1.2, 1.3, 1.5, 1.6, 1.8, 2.0, 2.2, 2.4, 2.7, 3.0, 3.3, 3.6, 3.9, 4.3, 4.7, 5.1, 5.6, 6.2, 6.8, 7.5, 8.2, 9.1 };
+const synthesis_primes = [_]usize{ 2, 3, 5, 7, 11, 13, 17 };
+
+fn synthesize(context: *Context, spec: Spec, circuit: Circuit) std.mem.Allocator.Error!void {
+    const result = findSynthesis(spec, circuit);
+    try appendSynthesisResult(context, spec, circuit, result);
+}
+
+fn findSynthesis(spec: Spec, circuit: Circuit) SynthResult {
+    const first = parseOperatingPoint(spec.design.operating_curve.point_nodes[0]) catch OperatingPoint{ .pll_n = spec.circuit.feedback.pll_n, .kvco_hz_per_v = spec.circuit.kvco_hz_per_v.min };
+    const anchor_step = synthesisAnchorStep(spec, first);
+    var best_score = std.math.inf(f64);
+    var best_corner = nominalCorner(circuit);
+    for (1..6_001) |index| {
+        const candidate = synthesisCandidate(spec, circuit, index);
+        const score = synthesisScore(spec, circuit, candidate, anchor_step);
+        if (score < best_score) {
+            best_score = score;
+            best_corner = candidate;
+        }
+    }
+    for (0..6) |_| {
+        var improved = false;
+        for (0..7) |component_index| {
+            for ([_]f64{ 1.0 / 1.3, 1.0 / 1.2, 1.0 / 1.1, 1.1, 1.2, 1.3 }) |ratio| {
+                const candidate = synthesisNeighbor(spec, circuit, best_corner, component_index, ratio);
+                const score = synthesisScore(spec, circuit, candidate, anchor_step);
+                if (score < best_score) {
+                    best_score = score;
+                    best_corner = candidate;
+                    improved = true;
+                }
+            }
+        }
+        if (!improved) break;
+    }
+
+    return .{
+        .corner = best_corner,
+        .anchor_step = anchor_step,
+        .nominal = profileSweep(spec, best_corner, anchor_step, false),
+        .tolerance = synthesisToleranceSweep(spec, circuit, best_corner, anchor_step),
+    };
+}
+
+fn synthesisAnchorStep(spec: Spec, first: OperatingPoint) usize {
+    var maximum_ratio: f64 = 1;
+    for (spec.design.operating_curve.point_nodes) |node| {
+        const point = parseOperatingPoint(node) catch continue;
+        const ratio = (point.pll_n / point.kvco_hz_per_v) / (first.pll_n / first.kvco_hz_per_v);
+        maximum_ratio = @max(maximum_ratio, ratio);
+    }
+    const maximum_step: usize = @intFromFloat(@floor(16.0 / maximum_ratio));
+    return @max(1, @min(16, (maximum_step * 4 + 2) / 5));
+}
+
+fn synthesisCandidate(spec: Spec, circuit: Circuit, index: usize) Corner {
+    const base = [_]f64{ circuit.c_cp.nominal, circuit.r_in.nominal, circuit.r_feedback.nominal, circuit.c_feedback.nominal, circuit.c_feedback_hf.nominal, circuit.r_isolation.nominal, circuit.c_tune.nominal };
+    var value: [base.len]f64 = undefined;
+    for (base, 0..) |nominal, i| {
+        const is_resistor = i == 1 or i == 2 or i == 5;
+        const limits = if (is_resistor) spec.design.synthesis.resistor_range else spec.design.synthesis.capacitor_range;
+        const low_factor: f64 = if (i == 2) 0.25 else 0.125;
+        const high_factor: f64 = if (i == 2) 4 else 8;
+        const low = @max(limits.min, nominal * low_factor);
+        const high = @min(limits.max, nominal * high_factor);
+        const fraction = halton(index, synthesis_primes[i]);
+        value[i] = nearestE24(std.math.pow(f64, 10, @log10(low) + (@log10(high) - @log10(low)) * fraction));
+    }
+    return .{ .c_cp = value[0], .r_in = value[1], .r_feedback = value[2], .c_feedback = value[3], .c_feedback_hf = value[4], .r_isolation = value[5], .c_tune = value[6] + circuit.extra_tune_cap.nominal };
+}
+
+fn synthesisNeighbor(spec: Spec, circuit: Circuit, corner: Corner, component_index: usize, ratio: f64) Corner {
+    var values = [_]f64{ corner.c_cp, corner.r_in, corner.r_feedback, corner.c_feedback, corner.c_feedback_hf, corner.r_isolation, corner.c_tune - circuit.extra_tune_cap.nominal };
+    const original = [_]f64{ circuit.c_cp.nominal, circuit.r_in.nominal, circuit.r_feedback.nominal, circuit.c_feedback.nominal, circuit.c_feedback_hf.nominal, circuit.r_isolation.nominal, circuit.c_tune.nominal };
+    const is_resistor = component_index == 1 or component_index == 2 or component_index == 5;
+    const limits = if (is_resistor) spec.design.synthesis.resistor_range else spec.design.synthesis.capacitor_range;
+    const low_factor: f64 = if (component_index == 2) 0.25 else 0.125;
+    const high_factor: f64 = if (component_index == 2) 4 else 8;
+    const low = @max(limits.min, original[component_index] * low_factor);
+    const high = @min(limits.max, original[component_index] * high_factor);
+    values[component_index] = std.math.clamp(nearestE24(values[component_index] * ratio), low, high);
+    return .{ .c_cp = values[0], .r_in = values[1], .r_feedback = values[2], .c_feedback = values[3], .c_feedback_hf = values[4], .r_isolation = values[5], .c_tune = values[6] + circuit.extra_tune_cap.nominal };
+}
+
+fn halton(input_index: usize, base: usize) f64 {
+    var index = input_index;
+    var factor: f64 = 1;
+    var result: f64 = 0;
+    while (index > 0) : (index /= base) {
+        factor /= @floatFromInt(base);
+        result += factor * @as(f64, @floatFromInt(index % base));
+    }
+    return result;
+}
+
+fn nearestE24(value: f64) f64 {
+    const decade = @floor(@log10(value));
+    var best = value;
+    var best_error = std.math.inf(f64);
+    for ([_]f64{ decade - 1, decade, decade + 1 }) |power| {
+        const scale = std.math.pow(f64, 10, power);
+        for (e24) |mantissa| {
+            const candidate = mantissa * scale;
+            const err = @abs(@log(candidate / value));
+            if (err < best_error) {
+                best = candidate;
+                best_error = err;
+            }
+        }
+    }
+    return best;
+}
+
+fn synthesisScore(spec: Spec, circuit: Circuit, corner: Corner, anchor_step: usize) f64 {
+    var score: f64 = 0;
+    const count = profileSampleCount(spec);
+    for (0..count) |index| {
+        const point = profileSample(spec, index) orelse return std.math.inf(f64);
+        var point_spec = spec;
+        point_spec.circuit.feedback.pll_n = point.pll_n;
+        const current = scheduledCurrent(spec, point, anchor_step);
+        const metrics = analyzeSearch(point_spec, corner, current, point.kvco_hz_per_v) orelse return std.math.inf(f64);
+        score += metricPenalty(spec, metrics);
+    }
+    const candidate_values = [_]f64{ corner.c_cp, corner.r_in, corner.r_feedback, corner.c_feedback, corner.c_feedback_hf, corner.r_isolation, corner.c_tune - circuit.extra_tune_cap.nominal };
+    const original_values = [_]f64{ circuit.c_cp.nominal, circuit.r_in.nominal, circuit.r_feedback.nominal, circuit.c_feedback.nominal, circuit.c_feedback_hf.nominal, circuit.r_isolation.nominal, circuit.c_tune.nominal };
+    for (candidate_values, original_values) |candidate, original| score += 0.05 * std.math.pow(f64, @log10(candidate / original), 2);
+    if (corner.c_cp < 2e-12) score += 10 * std.math.pow(f64, 2e-12 / corner.c_cp - 1, 2);
+    if (corner.c_feedback_hf < 1e-12) score += 10 * std.math.pow(f64, 1e-12 / corner.c_feedback_hf - 1, 2);
+    return score;
+}
+
+fn metricPenalty(spec: Spec, metrics: Metrics) f64 {
+    const phase = spec.requirements.phase;
+    const phase_low = phase.target_deg.min + 2;
+    const phase_high = phase.target_deg.max - 2;
+    const phase_mid = (phase.target_deg.min + phase.target_deg.max) / 2;
+    const bandwidth_low = synthesisBandwidthMin(spec) * 1.05;
+    const bandwidth_high = synthesisBandwidthMax(spec) * 0.9;
+    var score = std.math.pow(f64, (metrics.phase_margin_deg - phase_mid) / 3, 2);
+    if (metrics.phase_margin_deg < phase_low) score += 100 * std.math.pow(f64, (phase_low - metrics.phase_margin_deg) / 2, 4);
+    if (metrics.phase_margin_deg > phase_high) score += 30 * std.math.pow(f64, (metrics.phase_margin_deg - phase_high) / 2, 4);
+    if (bandwidth_low > 0 and metrics.crossover_hz < bandwidth_low) score += 100 * std.math.pow(f64, (bandwidth_low - metrics.crossover_hz) / 200e3, 4);
+    if (metrics.crossover_hz > bandwidth_high) score += 100 * std.math.pow(f64, (metrics.crossover_hz - bandwidth_high) / 500e3, 4);
+    return score;
+}
+
+fn synthesisBandwidthMin(spec: Spec) f64 {
+    const ramp = spec.requirements.ramp;
+    if (ramp.span_hz <= 0 or ramp.time_s <= 0 or ramp.max_phase_error_rad <= 0) return 0;
+    const slope = ramp.span_hz / ramp.time_s;
+    return 1.4 * @sqrt(slope / (2.0 * std.math.pi * ramp.max_phase_error_rad));
+}
+
+fn synthesisBandwidthMax(spec: Spec) f64 {
+    return @min(spec.circuit.pfd_hz / 10.0, spec.circuit.op_amp.gbw_hz / 10.0);
+}
+
+fn profileSampleCount(spec: Spec) usize {
+    return (spec.design.operating_curve.point_nodes.len - 1) * 4 + 1;
+}
+
+fn profileSample(spec: Spec, sample_index: usize) ?OperatingPoint {
+    const last_index = profileSampleCount(spec) - 1;
+    if (sample_index > last_index) return null;
+    if (sample_index == last_index) return parseOperatingPoint(spec.design.operating_curve.point_nodes[spec.design.operating_curve.point_nodes.len - 1]) catch null;
+    const segment = sample_index / 4;
+    const fraction = @as(f64, @floatFromInt(sample_index % 4)) / 4.0;
+    const a = parseOperatingPoint(spec.design.operating_curve.point_nodes[segment]) catch return null;
+    const b = parseOperatingPoint(spec.design.operating_curve.point_nodes[segment + 1]) catch return null;
+    return .{ .pll_n = a.pll_n + (b.pll_n - a.pll_n) * fraction, .kvco_hz_per_v = a.kvco_hz_per_v + (b.kvco_hz_per_v - a.kvco_hz_per_v) * fraction };
+}
+
+fn scheduledCurrent(spec: Spec, point: OperatingPoint, anchor_step: usize) f64 {
+    const first = parseOperatingPoint(spec.design.operating_curve.point_nodes[0]) catch return spec.circuit.charge_pump.value;
+    const step_a = 5e-3 / 16.0;
+    const target_gain = @as(f64, @floatFromInt(anchor_step)) * step_a * first.kvco_hz_per_v / first.pll_n;
+    const ideal_step = target_gain * point.pll_n / point.kvco_hz_per_v / step_a;
+    return @as(f64, @floatFromInt(@max(1, @min(16, @as(usize, @intFromFloat(@round(ideal_step))))))) * step_a;
+}
+
+fn profileSweep(spec: Spec, corner: Corner, anchor_step: usize, tolerance_edges: bool) Sweep {
+    var sweep = Sweep{};
+    for (0..profileSampleCount(spec)) |index| {
+        const point = profileSample(spec, index) orelse continue;
+        var point_spec = spec;
+        point_spec.circuit.feedback.pll_n = point.pll_n;
+        const current = scheduledCurrent(spec, point, anchor_step);
+        const scales = if (tolerance_edges) [_]f64{ 0.975, 1.025 } else [_]f64{ 1, 1 };
+        for (scales) |scale| if (analyze(point_spec, corner, current * scale, point.kvco_hz_per_v)) |metrics| sweep.add(metrics);
+    }
+    return sweep;
+}
+
+fn fixedProfileSweep(spec: Spec, corner: Corner, tolerance_edges: bool) Sweep {
+    var sweep = Sweep{};
+    for (0..profileSampleCount(spec)) |index| {
+        const point = profileSample(spec, index) orelse continue;
+        var point_spec = spec;
+        point_spec.circuit.feedback.pll_n = point.pll_n;
+        const scales = if (tolerance_edges) [_]f64{ 1.0 - spec.circuit.charge_pump.tolerance_pct / 100.0, 1.0 + spec.circuit.charge_pump.tolerance_pct / 100.0 } else [_]f64{ 1, 1 };
+        for (scales) |scale| if (analyze(point_spec, corner, spec.circuit.charge_pump.value * scale, point.kvco_hz_per_v)) |metrics| sweep.add(metrics);
+    }
+    return sweep;
+}
+
+fn fixedProfileToleranceSweep(spec: Spec, circuit: Circuit) Sweep {
+    const original = [_]Value{ circuit.c_cp, circuit.r_in, circuit.r_feedback, circuit.c_feedback, circuit.c_feedback_hf, circuit.r_isolation, circuit.c_tune, circuit.extra_tune_cap };
+    const nominal = [_]f64{ circuit.c_cp.nominal, circuit.r_in.nominal, circuit.r_feedback.nominal, circuit.c_feedback.nominal, circuit.c_feedback_hf.nominal, circuit.r_isolation.nominal, circuit.c_tune.nominal, circuit.extra_tune_cap.nominal };
+    var sweep = Sweep{};
+    for (0..(@as(usize, 1) << original.len)) |mask| {
+        var value: [original.len]f64 = undefined;
+        for (original, nominal, 0..) |part, center, i| {
+            const sign: f64 = if ((mask & (@as(usize, 1) << @intCast(i))) == 0) -1 else 1;
+            value[i] = center * (1.0 + sign * part.tolerancePctAt(center) / 100.0);
+        }
+        const corner = Corner{ .c_cp = value[0], .r_in = value[1], .r_feedback = value[2], .c_feedback = value[3], .c_feedback_hf = value[4], .r_isolation = value[5], .c_tune = value[6] + value[7] };
+        const one = fixedProfileSweep(spec, corner, true);
+        if (one.solved > 0) mergeSweep(&sweep, one);
+    }
+    return sweep;
+}
+
+fn synthesisToleranceSweep(spec: Spec, circuit: Circuit, candidate: Corner, anchor_step: usize) Sweep {
+    const original = [_]Value{ circuit.c_cp, circuit.r_in, circuit.r_feedback, circuit.c_feedback, circuit.c_feedback_hf, circuit.r_isolation, circuit.c_tune, circuit.extra_tune_cap };
+    const nominal = [_]f64{ candidate.c_cp, candidate.r_in, candidate.r_feedback, candidate.c_feedback, candidate.c_feedback_hf, candidate.r_isolation, candidate.c_tune - circuit.extra_tune_cap.nominal, circuit.extra_tune_cap.nominal };
+    var sweep = Sweep{};
+    for (0..(@as(usize, 1) << original.len)) |mask| {
+        var value: [original.len]f64 = undefined;
+        for (original, nominal, 0..) |part, center, i| {
+            const sign: f64 = if ((mask & (@as(usize, 1) << @intCast(i))) == 0) -1 else 1;
+            value[i] = center * (1.0 + sign * part.tolerancePctAt(center) / 100.0);
+        }
+        const corner = Corner{ .c_cp = value[0], .r_in = value[1], .r_feedback = value[2], .c_feedback = value[3], .c_feedback_hf = value[4], .r_isolation = value[5], .c_tune = value[6] + value[7] };
+        const one = profileSweep(spec, corner, anchor_step, true);
+        if (one.solved > 0) mergeSweep(&sweep, one);
+    }
+    return sweep;
+}
+
+fn mergeSweep(target: *Sweep, source: Sweep) void {
+    target.min_bandwidth_hz = @min(target.min_bandwidth_hz, source.min_bandwidth_hz);
+    target.max_bandwidth_hz = @max(target.max_bandwidth_hz, source.max_bandwidth_hz);
+    target.min_phase_margin_deg = @min(target.min_phase_margin_deg, source.min_phase_margin_deg);
+    target.max_phase_margin_deg = @max(target.max_phase_margin_deg, source.max_phase_margin_deg);
+    target.solved += source.solved;
+}
+
+fn appendSynthesisResult(context: *Context, spec: Spec, circuit: Circuit, result: SynthResult) std.mem.Allocator.Error!void {
+    const c = result.corner;
+    try append(context, spec, true, "{s}: E24 synthesis replaces C_CP {d:.1}→{d:.1} pF, R_IN {d:.0}→{d:.0} Ω, R_FB {d:.0}→{d:.0} Ω, C_FB {d:.1}→{d:.1} pF, C_FB_HF {d:.1}→{d:.1} pF, R_ISO {d:.0}→{d:.0} Ω, and C_VTUNE {d:.1}→{d:.1} pF", .{ spec.name, circuit.c_cp.nominal * 1e12, c.c_cp * 1e12, circuit.r_in.nominal, c.r_in, circuit.r_feedback.nominal, c.r_feedback, circuit.c_feedback.nominal * 1e12, c.c_feedback * 1e12, circuit.c_feedback_hf.nominal * 1e12, c.c_feedback_hf * 1e12, circuit.r_isolation.nominal, c.r_isolation, circuit.c_tune.nominal * 1e12, (c.c_tune - circuit.extra_tune_cap.nominal) * 1e12 });
+    try append(context, spec, result.tolerance.min_phase_margin_deg >= spec.requirements.phase.target_deg.min, "{s}: synthesized profile gives nominal LBW {d:.3}-{d:.3} MHz / PM {d:.1}-{d:.1}° and tolerance-corner LBW {d:.3}-{d:.3} MHz / PM {d:.1}-{d:.1}°", .{ spec.name, result.nominal.min_bandwidth_hz / 1e6, result.nominal.max_bandwidth_hz / 1e6, result.nominal.min_phase_margin_deg, result.nominal.max_phase_margin_deg, result.tolerance.min_bandwidth_hz / 1e6, result.tolerance.max_bandwidth_hz / 1e6, result.tolerance.min_phase_margin_deg, result.tolerance.max_phase_margin_deg });
+    const phase_error = rampPhaseError(spec, result.tolerance.min_bandwidth_hz);
+    if (phase_error > 0) try append(context, spec, phase_error <= spec.requirements.ramp.max_phase_error_rad, "{s}: synthesized worst-corner FMCW ramp phase error is {d:.3} rad (limit {d:.3} rad)", .{ spec.name, phase_error, spec.requirements.ramp.max_phase_error_rad });
+    try appendSchedule(context, spec, result.anchor_step);
+}
+
+fn appendSchedule(context: *Context, spec: Spec, anchor_step: usize) std.mem.Allocator.Error!void {
+    const first = parseOperatingPoint(spec.design.operating_curve.point_nodes[0]) catch return;
+    const middle = parseOperatingPoint(spec.design.operating_curve.point_nodes[spec.design.operating_curve.point_nodes.len / 2]) catch return;
+    const last = parseOperatingPoint(spec.design.operating_curve.point_nodes[spec.design.operating_curve.point_nodes.len - 1]) catch return;
+    try append(context, spec, true, "{s}: ADF4159 I_CP schedule — N={d:.2}/Kvco={d:.0} MHz/V: step {d} ({d:.4} mA); N={d:.2}/{d:.0}: step {d} ({d:.4} mA); N={d:.2}/{d:.0}: step {d} ({d:.4} mA)", .{ spec.name, first.pll_n, first.kvco_hz_per_v / 1e6, currentStep(spec, first, anchor_step), scheduledCurrent(spec, first, anchor_step) * 1e3, middle.pll_n, middle.kvco_hz_per_v / 1e6, currentStep(spec, middle, anchor_step), scheduledCurrent(spec, middle, anchor_step) * 1e3, last.pll_n, last.kvco_hz_per_v / 1e6, currentStep(spec, last, anchor_step), scheduledCurrent(spec, last, anchor_step) * 1e3 });
+}
+
+fn currentStep(spec: Spec, point: OperatingPoint, anchor_step: usize) usize {
+    return @intFromFloat(@round(scheduledCurrent(spec, point, anchor_step) / (5e-3 / 16.0)));
+}
+
+fn rampPhaseError(spec: Spec, bandwidth_hz: f64) f64 {
+    if (spec.requirements.ramp.span_hz <= 0 or spec.requirements.ramp.time_s <= 0) return 0;
+    const natural_hz = bandwidth_hz / 1.4;
+    return (spec.requirements.ramp.span_hz / spec.requirements.ramp.time_s) / (2.0 * std.math.pi * natural_hz * natural_hz);
+}
+
 fn resolveCircuit(block: *const DesignBlock, spec: Spec) ?Circuit {
     return .{
         .c_cp = capacitor(block, spec.components.c_cp) orelse return null,
@@ -362,14 +712,16 @@ fn resolveCircuit(block: *const DesignBlock, spec: Spec) ?Circuit {
 fn resistor(block: *const DesignBlock, name: []const u8) ?Value {
     const inst = findInstance(block, name) orelse return null;
     const nominal = passive.parseOhms(inst.value) orelse return null;
-    return .{ .nominal = nominal, .tolerance_pct = tolerancePct(inst, nominal, false), .ref = displayRef(inst) };
+    const tolerance = toleranceFor(inst, nominal, false);
+    return .{ .nominal = nominal, .tolerance_pct = tolerance.percent, .tolerance_abs = tolerance.absolute, .ref = displayRef(inst) };
 }
 
 fn capacitor(block: *const DesignBlock, name: []const u8) ?Value {
     const inst = findInstance(block, name) orelse return null;
     const nominal = decouple_key.capFarads(inst.value);
     if (nominal <= 0) return null;
-    return .{ .nominal = nominal, .tolerance_pct = tolerancePct(inst, nominal, true), .ref = displayRef(inst) };
+    const tolerance = toleranceFor(inst, nominal, true);
+    return .{ .nominal = nominal, .tolerance_pct = tolerance.percent, .tolerance_abs = tolerance.absolute, .ref = displayRef(inst) };
 }
 
 fn findInstance(block: *const DesignBlock, name: []const u8) ?Instance {
@@ -381,7 +733,9 @@ fn displayRef(inst: Instance) []const u8 {
     return if (inst.ref_des.len > 0) inst.ref_des else inst.label;
 }
 
-fn tolerancePct(inst: Instance, nominal: f64, is_cap: bool) f64 {
+const ParsedTolerance = struct { percent: f64 = 0, absolute: f64 = 0 };
+
+fn toleranceFor(inst: Instance, nominal: f64, is_cap: bool) ParsedTolerance {
     var raw: []const u8 = "";
     for (inst.properties) |property| if (eq(property.key, "tolerance")) {
         raw = property.value;
@@ -393,13 +747,13 @@ fn tolerancePct(inst: Instance, nominal: f64, is_cap: bool) f64 {
         raw = attr;
         break;
     };
-    if (raw.len == 0) return 0;
-    if (std.mem.endsWith(u8, raw, "%")) return std.fmt.parseFloat(f64, raw[0 .. raw.len - 1]) catch 0;
+    if (raw.len == 0) return .{};
+    if (std.mem.endsWith(u8, raw, "%")) return .{ .percent = std.fmt.parseFloat(f64, raw[0 .. raw.len - 1]) catch 0 };
     if (is_cap) {
         const absolute = decouple_key.capFarads(raw);
-        if (absolute > 0 and nominal > 0) return absolute / nominal * 100.0;
+        if (absolute > 0 and nominal > 0) return .{ .percent = absolute / nominal * 100.0, .absolute = absolute };
     }
-    return 0;
+    return .{};
 }
 
 fn loopCapsAreStable(block: *const DesignBlock, c: Components) bool {
@@ -430,7 +784,7 @@ fn toleranceSweep(spec: Spec, c: Circuit) Sweep {
         var corner_values: [values.len]f64 = undefined;
         for (values, 0..) |value, i| {
             const sign: f64 = if ((mask & (@as(usize, 1) << @intCast(i))) == 0) -1 else 1;
-            corner_values[i] = value.nominal * (1.0 + sign * value.tolerance_pct / 100.0);
+            corner_values[i] = value.nominal * (1.0 + sign * value.tolerancePctAt(value.nominal) / 100.0);
         }
         const corner = Corner{ .c_cp = corner_values[0], .r_in = corner_values[1], .r_feedback = corner_values[2], .c_feedback = corner_values[3], .c_feedback_hf = corner_values[4], .r_isolation = corner_values[5], .c_tune = corner_values[6] + corner_values[7] };
         for ([_]f64{ spec.circuit.kvco_hz_per_v.min, spec.circuit.kvco_hz_per_v.max }) |kvco| {
@@ -480,6 +834,36 @@ fn analyze(spec: Spec, c: Corner, icp_a: f64, kvco_hz_per_v: f64) ?Metrics {
             var lo = previous_f;
             var hi = f;
             for (0..64) |_| {
+                const mid = @sqrt(lo * hi);
+                if (gainDb(spec, c, icp_a, kvco_hz_per_v, mid) >= 0) lo = mid else hi = mid;
+            }
+            const fc = @sqrt(lo * hi);
+            const loop = openLoop(spec, c, icp_a, kvco_hz_per_v, fc);
+            var phase = std.math.atan2(loop.im, loop.re) * 180.0 / std.math.pi;
+            if (phase > 0) phase -= 360;
+            return .{ .crossover_hz = fc, .phase_margin_deg = 180.0 + phase };
+        }
+        previous_f = f;
+        previous_db = db;
+    }
+    return null;
+}
+
+fn analyzeSearch(spec: Spec, c: Corner, icp_a: f64, kvco_hz_per_v: f64) ?Metrics {
+    const f_min: f64 = 100;
+    const f_max = @max(spec.circuit.pfd_hz, spec.circuit.op_amp.gbw_hz * 2.0);
+    const log_min = @log10(f_min);
+    const log_span = @log10(f_max) - log_min;
+    var previous_f = f_min;
+    var previous_db = gainDb(spec, c, icp_a, kvco_hz_per_v, previous_f);
+    for (1..82) |i| {
+        const fraction = @as(f64, @floatFromInt(i)) / 81.0;
+        const f = std.math.pow(f64, 10.0, log_min + log_span * fraction);
+        const db = gainDb(spec, c, icp_a, kvco_hz_per_v, f);
+        if (previous_db >= 0 and db <= 0) {
+            var lo = previous_f;
+            var hi = f;
+            for (0..24) |_| {
                 const mid = @sqrt(lo * hi);
                 if (gainDb(spec, c, icp_a, kvco_hz_per_v, mid) >= 0) lo = mid else hi = mid;
             }
@@ -585,4 +969,44 @@ test "active inverting filter requires negative polarity" {
     const wrong = analyze(spec, c, spec.circuit.charge_pump.value, 200e6).?;
     try std.testing.expect(stable.phase_margin_deg > 40);
     try std.testing.expect(wrong.phase_margin_deg < -100);
+}
+
+// spec: pll-loop - E24 synthesis jointly satisfies an authored divider/Kvco curve, tolerance corners, and ramp limit
+test "synthesize active loop filter over operating curve" {
+    const p1 = [_]Node{ Node.atom(ast.Span.zero, "point"), Node.float(ast.Span.zero, 25), Node.float(ast.Span.zero, 420e6) };
+    const p2 = [_]Node{ Node.atom(ast.Span.zero, "point"), Node.float(ast.Span.zero, 29.25), Node.float(ast.Span.zero, 730e6) };
+    const p3 = [_]Node{ Node.atom(ast.Span.zero, "point"), Node.float(ast.Span.zero, 50), Node.float(ast.Span.zero, 340e6) };
+    const points = [_]Node{ Node.list(ast.Span.zero, &p1), Node.list(ast.Span.zero, &p2), Node.list(ast.Span.zero, &p3) };
+    const spec = Spec{
+        .name = "Barracuda",
+        .topology_active_inverting = true,
+        .circuit = .{
+            .pfd_hz = 100e6,
+            .charge_pump = .{ .value = 2.5e-3, .tolerance_pct = 2.5 },
+            .feedback = .{ .prescaler = 4, .pll_n = 25 },
+            .kvco_hz_per_v = .{ .min = 340e6, .max = 730e6 },
+            .op_amp = .{ .gbw_hz = 145e6, .dc_gain = 500_000 },
+            .polarity = .negative,
+        },
+        .requirements = .{
+            .phase = .{ .target_deg = .{ .min = 45, .max = 55 }, .hard_min_deg = 40 },
+            .ramp = .{ .span_hz = 1.5e9, .time_s = 35e-6, .max_phase_error_rad = 1 },
+        },
+        .design = .{ .operating_curve = .{ .point_nodes = &points }, .synthesis = .{ .enabled = true } },
+    };
+    const circuit = Circuit{
+        .c_cp = .{ .nominal = 12e-12, .tolerance_pct = 2, .ref = "C_CP" },
+        .r_in = .{ .nominal = 220, .tolerance_pct = 1, .ref = "R_IN" },
+        .r_feedback = .{ .nominal = 3000, .tolerance_pct = 1, .ref = "R_FB" },
+        .c_feedback = .{ .nominal = 82e-12, .tolerance_pct = 2, .ref = "C_FB" },
+        .c_feedback_hf = .{ .nominal = 2.7e-12, .tolerance_pct = 3.7, .tolerance_abs = 0.1e-12, .ref = "C_FB_HF" },
+        .r_isolation = .{ .nominal = 120, .tolerance_pct = 1, .ref = "R_ISO" },
+        .c_tune = .{ .nominal = 180e-12, .tolerance_pct = 5, .ref = "C_VTUNE" },
+        .extra_tune_cap = .{ .nominal = 20e-12, .tolerance_pct = 2, .ref = "extra" },
+    };
+    const result = findSynthesis(spec, circuit);
+    try std.testing.expect(result.tolerance.min_phase_margin_deg >= 45);
+    try std.testing.expect(result.tolerance.max_phase_margin_deg <= 55);
+    try std.testing.expect(result.tolerance.max_bandwidth_hz <= synthesisBandwidthMax(spec));
+    try std.testing.expect(rampPhaseError(spec, result.tolerance.min_bandwidth_hz) <= 1);
 }

@@ -823,6 +823,8 @@ pub const scope_form_docs = blk: {
             "(c-feedback \"REF\") (c-feedback-hf \"REF\") (r-isolation \"REF\") (c-tune \"REF\")) " ++
             "[(extra-tune-cap F [TOL_PCT])] (pfd HZ) (charge-pump A [TOL_PCT]) " ++
             "(feedback-divider PRESCALER PLL_N) (kvco MIN_HZ_PER_V MAX_HZ_PER_V) " ++
+            "[(operating-curve (point PLL_N KVCO_HZ_PER_V)…)] " ++
+            "[(synthesize [(series e24)] [(resistance-range MIN MAX)] [(capacitance-range MIN MAX)])] " ++
             "(op-amp (gbw HZ) [(dc-gain RATIO)]) [(phase-margin (target MIN MAX) (hard-min DEG))] " ++
             "(polarity positive|negative) [(supply MIN_V MAX_V)] [(op-amp-max-supply V)] " ++
             "[(vtune MIN_V MAX_V)] [(output-headroom LOW_V HIGH_V)] " ++
@@ -831,6 +833,8 @@ pub const scope_form_docs = blk: {
             "The continuous-time small-signal solver includes finite op-amp gain/GBW, the external prescaler in N_eff, " ++
             "Kvco and deterministic component corners, then emits ordinary build/check assertions for crossover, phase " ++
             "margin, PFD/GBW ratios, polarity, output swing, and an approximate FMCW ramp phase-error/slew screen. " ++
+            "An operating curve plus synthesize form searches E24 passive values and an ADF4159 charge-pump schedule, " ++
+            "then verifies the proposal over interpolated operating points and exact component/current corners. " ++
             "Use advisory mode while Kvco or firmware Icp is provisional; gate mode makes failed limits build-blocking. " ++
             "This is not a sampled-PFD, phase-noise, nonlinear acquisition, SPICE, or capacitive-load-stability sign-off.",
     } };

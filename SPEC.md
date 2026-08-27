@@ -7110,8 +7110,9 @@ export never invents them.
 - AN-2548 active filter model retains the expected crossover and phase trend across Kvco
 - phase detector polarity changes the feedback sign by 180 degrees
 - dynamically formatted validation messages are released with their evaluator
+- E24 synthesis jointly satisfies an authored divider/Kvco curve, tolerance corners, and ramp limit
 - completeness-waiver: empty inputs (the parser rejects a declaration without a name, complete component-role bindings, topology, PFD, charge pump, feedback divider, Kvco range, and op-amp GBW before evaluation)
-- completeness-waiver: large inputs (one declaration resolves exactly seven named parts and sweeps a fixed 256 R/C corners, two charge-pump corners, two Kvco endpoints, and bounded 321-point plus 64-step frequency searches)
+- completeness-waiver: large inputs (one declaration resolves exactly seven named parts; validation sweeps a fixed 256 R/C corners, while optional synthesis admits at most 16 operating-curve points and uses a fixed 6,000-member deterministic E24 search plus bounded coordinate refinement followed by exact tolerance verification)
 - completeness-waiver: unauthorized access (an in-process calculation over an already-authorized evaluated DesignBlock with no request, file, socket, user, or write surface)
 - completeness-waiver: i/o failure (the validator performs no I/O and appends allocator-owned assertion messages; OutOfMemory is propagated)
 - completeness-waiver: concurrent access (all solver state is stack-local or owned by the calling evaluator and there are no globals or shared mutable objects)
