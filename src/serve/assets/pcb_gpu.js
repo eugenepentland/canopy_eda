@@ -54,6 +54,7 @@ var api = {
   init: init, frame: frame, rebuildCopper: rebuildCopper,
   rebuildParts: rebuildParts, rebuildPours: rebuildPours,
   rebuildCam: rebuildCam,
+  camState: camState,
   partsExclIs: partsExclIs,
   dispose: dispose, active: false, error: null,
 };
@@ -80,7 +81,10 @@ var O = null,            // init opts (PCB, S, MX, MY, M, nsig, TH, layerColor, 
     coverBuf = null, coverA = null, pourN = 0,   // pour cover quads, one instance per area
     camGeo = null, camDirty = true, camFailed = false,
     camFilm = null, camFilmView = null, camFilmBg = null, camFilmStencil = null,
-    camFilmW = 0, camFilmH = 0, camFilmKey = "", camSampler = null,
+    camFilmW = 0, camFilmH = 0, camFilmKey = "", camFilmBounds = null,
+    camQuality = null, camQualityView = null, camQualityBg = null, camQualityStencil = null,
+    camQualityW = 0, camQualityH = 0, camQualityKey = "", camQualityBounds = null,
+    camSampler = null, camWarmTimer = 0, camWantedSceneKey = "", camDebug = null,
     partsExcl = null,    // parts left OUT of the pad/bore bake (a live drag — see rebuildParts)
     dirtyCu = true, dirtyPt = true, dirtyPo = true, lastDrill = -1,
     clearCol = { r: 0, g: 0, b: 0, a: 1 };
@@ -417,7 +421,8 @@ var WGSL = [
 "  return premul(v.col.rgb, al);",
 "}",
 "",
-"// CAM retained-film tint and camera composite.",
+"// CAM film tint. The settled view uses a camera-matched supersampled film;",
+"// the full-board film is only the temporary pan/zoom gesture preview.",
 "@vertex fn vsFull(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {",
 "  let p = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));",
 "  return vec4<f32>(p[vi], 0.0, 1.0);",
@@ -608,7 +613,6 @@ function setup(d) {
   });
   camSampler = dev.createSampler({ magFilter: "linear", minFilter: "linear" });
   O.camTextureLayout = bgl2;
-
   camA = new Float32Array(16);
   camBuf = dev.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   drawA = new Float32Array(slotCount() * DFLOATS);
@@ -637,15 +641,18 @@ function setup(d) {
 
 function teardown() {
   api.active = false;
+  if (camWarmTimer) clearTimeout(camWarmTimer); camWarmTimer = 0;
   partsExcl = null;
   camGeoDrop();
   [segBuf, viaBuf, boreBuf, padBuf, polyBuf, fanBuf, coverBuf, camBuf, drawBuf, stTex].forEach(function (b) {
     try { if (b && b.destroy) b.destroy(); } catch (e) {}
   });
   segBuf = viaBuf = boreBuf = padBuf = polyBuf = fanBuf = coverBuf = camBuf = drawBuf = null;
-  [camFilm, camFilmStencil].forEach(function (t) { try { if (t && t.destroy) t.destroy(); } catch (e) {} });
-  camFilm = camFilmView = camFilmBg = camFilmStencil = camSampler = null;
-  camFilmW = camFilmH = 0; camFilmKey = "";
+  [camFilm, camFilmStencil, camQuality, camQualityStencil].forEach(function (t) { try { if (t && t.destroy) t.destroy(); } catch (e) {} });
+  camFilm = camFilmView = camFilmBg = camFilmStencil = null;
+  camQuality = camQualityView = camQualityBg = camQualityStencil = null;
+  camFilmW = camFilmH = camQualityW = camQualityH = 0;
+  camFilmKey = camQualityKey = ""; camFilmBounds = camQualityBounds = null; camSampler = null; camDebug = null;
   stTex = stView = null; stW = stH = 0;
   pipeSeg = pipeCir = pipePad = pipePoly = pipeGrid = pipeFan = pipeCover = bg0 = bg1 = null;
   pipeCamSeg = pipeCamCir = pipeCamPad = pipeCamPoly = pipeCamArc = null;
@@ -655,6 +662,7 @@ function teardown() {
   cvs = null; gctx = null; dev = null;
 }
 function dispose() { teardown(); }
+function camState() { return camDebug; }
 
 function rebuildCopper() { dirtyCu = true; bundle = null; }
 // `exclude` is an index set ({3:1, 7:1, …}) of parts to leave OUT of the pad /
@@ -678,7 +686,10 @@ function partsExclIs(o) {
   return n === m;
 }
 function rebuildPours() { dirtyPo = true; bundle = null; }
-function rebuildCam() { camDirty = true; camFailed = false; }
+function rebuildCam() {
+  camDirty = true; camFailed = false; camFilmKey = camQualityKey = "";
+  if (camWarmTimer) clearTimeout(camWarmTimer); camWarmTimer = 0;
+}
 
 // ── instance buffers ────────────────────────────────────────────────────
 function upload(old, arr) {
@@ -734,7 +745,7 @@ function camGeoDrop() {
    camGeo.heatPadBuf, camGeo.heatSegBuf]
     .forEach(function (b) { try { if (b && b.destroy) b.destroy(); } catch (e) {} });
   camGeo = null;
-  camFilmKey = "";
+  camFilmKey = camQualityKey = "";
 }
 function camOpDark(o) { return o[0] === "r" ? !!o[1] : !!o[o.length - 1]; }
 function camBuild() {
@@ -798,10 +809,10 @@ function camBuild() {
     }
     built.push(desc); byId[desc.id] = desc;
   }
-  // Opposite-face hardware is part of the retained film so it can sit behind
+  // Opposite-face hardware is part of both retained CAM films so it can sit behind
   // the opaque substrate without reviving the Canvas CAM fallback. Its colour
   // is baked per instance; the host decides per frame whether this is the rear
-  // face, causing one film rebuild only when orientation/visibility changes.
+  // face, causing a film refresh only when orientation/visibility changes.
   var heatPad = [], heatSeg = [], heat = null, hs = O.PCB && O.PCB.heatsink;
   if (hs && +hs.w > 0 && +hs.h > 0) {
     var hx0 = ux(+hs.x), hy0 = uy(+hs.y), hx1 = ux(+hs.x + +hs.w), hy1 = uy(+hs.y + +hs.h),
@@ -1202,12 +1213,16 @@ function camEncodeScene(p, base, layers, rearHeatsink) {
 function camBounds(rearHeatsink) {
   var b = camGeo.bounds, h = rearHeatsink && camGeo.heat;
   if (!h) return b;
-  var x0 = Math.min(b.x, h.x0), y0 = Math.min(b.y, h.y0), x1 = Math.max(b.x + b.w, h.x1), y1 = Math.max(b.y + b.h, h.y1);
+  var x0 = Math.min(b.x, h.x0), y0 = Math.min(b.y, h.y0),
+      x1 = Math.max(b.x + b.w, h.x1), y1 = Math.max(b.y + b.h, h.y1);
   return { x: x0, y: y0, w: Math.max(x1 - x0, 1), h: Math.max(y1 - y0, 1) };
 }
+function camQualityBoundsFor(vb) {
+  return { x: vb.x - vb.w * 0.25, y: vb.y - vb.h * 0.25, w: vb.w * 1.5, h: vb.h * 1.5 };
+}
 function camFilmEnsure(b) {
-  var limit = +(dev.limits && dev.limits.maxTextureDimension2D) || 4096;
-  var w = Math.min(limit, Math.max(2048, cvs.width * 3)), h = Math.ceil(w * b.h / b.w);
+  var limit = +(dev.limits && dev.limits.maxTextureDimension2D) || 4096,
+      w = Math.min(limit, Math.max(1024, cvs.width * 2)), h = Math.ceil(w * b.h / b.w);
   if (h > limit) { h = limit; w = Math.ceil(h * b.w / b.h); }
   w = Math.max(1, Math.floor(w)); h = Math.max(1, Math.floor(h));
   if (camFilm && camFilmW === w && camFilmH === h) return true;
@@ -1222,20 +1237,61 @@ function camFilmEnsure(b) {
   ] });
   return true;
 }
-function camBake(base, layers, key, rearHeatsink, b) {
-  if (!camFilmEnsure(b)) return false;
-  camA[0] = b.x; camA[1] = b.y; camA[2] = b.w; camA[3] = b.h;
-  camA[4] = camFilmW; camA[5] = camFilmH;
+function camQualityEnsure() {
+  var limit = +(dev.limits && dev.limits.maxTextureDimension2D) || 4096,
+      scale = Math.min(3, limit / cvs.width, limit / cvs.height),
+      w = Math.max(1, Math.floor(cvs.width * scale)), h = Math.max(1, Math.floor(cvs.height * scale));
+  if (camQuality && camQualityW === w && camQualityH === h) return true;
+  [camQuality, camQualityStencil].forEach(function (t) { try { if (t && t.destroy) t.destroy(); } catch (e) {} });
+  camQuality = dev.createTexture({ size: [w, h], format: colorFmt,
+    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+  camQualityStencil = dev.createTexture({ size: [w, h], format: "stencil8",
+    usage: GPUTextureUsage.RENDER_ATTACHMENT });
+  camQualityView = camQuality.createView(); camQualityW = w; camQualityH = h; camQualityKey = "";
+  camQualityBg = dev.createBindGroup({ layout: O.camTextureLayout, entries: [
+    { binding: 0, resource: camQualityView }, { binding: 1, resource: camSampler },
+  ] });
+  return true;
+}
+function camBakeTarget(view, stencil, w, h, bounds, base, layers, rearHeatsink) {
+  camA[0] = bounds.x; camA[1] = bounds.y; camA[2] = bounds.w; camA[3] = bounds.h;
+  camA[4] = w; camA[5] = h;
   for (var ci = 6; ci < 16; ci++) camA[ci] = 0;
   dev.queue.writeBuffer(camBuf, 0, camA);
   var enc = dev.createCommandEncoder(), p = enc.beginRenderPass({
-    colorAttachments: [{ view: camFilmView,
+    colorAttachments: [{ view: view,
       clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
-    depthStencilAttachment: { view: camFilmStencil.createView(),
+    depthStencilAttachment: { view: stencil.createView(),
       stencilClearValue: 0, stencilLoadOp: "clear", stencilStoreOp: "discard" },
   });
-  camEncodeScene(p, base, layers, rearHeatsink); p.end(); dev.queue.submit([enc.finish()]); camFilmKey = key;
-  return true;
+  camEncodeScene(p, base, layers, rearHeatsink); p.end(); dev.queue.submit([enc.finish()]);
+}
+function camWarmCoarse(base, layers, sceneKey, rearHeatsink) {
+  if (camFilmKey === sceneKey || camWarmTimer) return;
+  camWarmTimer = setTimeout(function () {
+    camWarmTimer = 0;
+    if (!api.active || !camGeo || camWantedSceneKey !== sceneKey || camFilmKey === sceneKey) return;
+    try {
+      var bounds = camBounds(rearHeatsink);
+      if (!camFilmEnsure(bounds)) return;
+      camBakeTarget(camFilmView, camFilmStencil, camFilmW, camFilmH, bounds, base, layers, rearHeatsink);
+      camFilmBounds = bounds; camFilmKey = sceneKey;
+    } catch (e) { camFilmKey = ""; }
+  }, 50);
+}
+function camBlit(vb, cst, bounds, textureBg) {
+  camA[0] = vb.x; camA[1] = vb.y; camA[2] = vb.w; camA[3] = vb.h;
+  camA[4] = cvs.width; camA[5] = cvs.height; camA[6] = camA[7] = 0;
+  camA[8] = bounds.x; camA[9] = bounds.y; camA[10] = bounds.w; camA[11] = bounds.h;
+  for (var i = 12; i < 16; i++) camA[i] = 0;
+  dev.queue.writeBuffer(camBuf, 0, camA);
+  var enc = dev.createCommandEncoder(), bg = rgb(cst.bg), p = enc.beginRenderPass({
+    colorAttachments: [{ view: gctx.getCurrentTexture().createView(),
+      clearValue: { r: bg[0], g: bg[1], b: bg[2], a: 1 }, loadOp: "clear", storeOp: "store" }],
+  });
+  p.setPipeline(pipeCamBlit); p.setBindGroup(0, bg0);
+  p.setBindGroup(1, bg1, [(slotBase() + S_CAM) * DSTRIDE]); p.setBindGroup(2, textureBg); p.draw(3, 1, 0, 0);
+  p.end(); dev.queue.submit([enc.finish()]); return true;
 }
 function camFrame(vb, st) {
   if (camFailed && !camDirty) return false;
@@ -1251,22 +1307,30 @@ function camFrame(vb, st) {
   setCol(base + S_CAM + 1, cst.substrate, 1);
   for (var i = 0; i < layers.length; i++) setCol(base + S_CAM + 2 + i, layers[i].col, layers[i].a);
   dev.queue.writeBuffer(drawBuf, 0, drawA);
-  var rearHeatsink = !!cst.rearHeatsink, bounds = camBounds(rearHeatsink),
-      key = JSON.stringify([cst.substrate, layers, rearHeatsink, cvs.width, cvs.height]);
-  if (!camFilm || camFilmKey !== key) if (!camBake(base, layers, key, rearHeatsink, bounds)) return false;
-  camA[0] = vb.x; camA[1] = vb.y; camA[2] = vb.w; camA[3] = vb.h;
-  camA[4] = cvs.width; camA[5] = cvs.height; camA[6] = camA[7] = 0;
-  camA[8] = bounds.x; camA[9] = bounds.y; camA[10] = bounds.w; camA[11] = bounds.h;
-  for (i = 12; i < 16; i++) camA[i] = 0;
-  dev.queue.writeBuffer(camBuf, 0, camA);
-  var enc = dev.createCommandEncoder(), bg = rgb(cst.bg), p = enc.beginRenderPass({
-    colorAttachments: [{ view: gctx.getCurrentTexture().createView(),
-      clearValue: { r: bg[0], g: bg[1], b: bg[2], a: 1 }, loadOp: "clear", storeOp: "store" }],
-  });
-  p.setPipeline(pipeCamBlit); p.setBindGroup(0, bg0);
-  p.setBindGroup(1, bg1, [(base + S_CAM) * DSTRIDE]); p.setBindGroup(2, camFilmBg); p.draw(3, 1, 0, 0);
-  p.end();
-  dev.queue.submit([enc.finish()]); return true;
+  var rearHeatsink = !!cst.rearHeatsink,
+      sceneKey = JSON.stringify([cst.substrate, layers, rearHeatsink, cvs.width, cvs.height]);
+  camWantedSceneKey = sceneKey;
+  if (cst.gesture) {
+    if (camFilmKey !== sceneKey) {
+      var coarseBounds = camBounds(rearHeatsink);
+      if (!camFilmEnsure(coarseBounds)) return false;
+      camBakeTarget(camFilmView, camFilmStencil, camFilmW, camFilmH, coarseBounds, base, layers, rearHeatsink);
+      camFilmBounds = coarseBounds; camFilmKey = sceneKey;
+    }
+    camDebug = { mode: "gesture", width: camFilmW, height: camFilmH };
+    return camBlit(vb, cst, camFilmBounds, camFilmBg);
+  }
+  var qualityBounds = camQualityBoundsFor(vb),
+      qualityKey = sceneKey + "|" + [vb.x, vb.y, vb.w, vb.h].join(",");
+  if (camQualityKey !== qualityKey) {
+    if (!camQualityEnsure()) return false;
+    camBakeTarget(camQualityView, camQualityStencil, camQualityW, camQualityH, qualityBounds, base, layers, rearHeatsink);
+    camQualityBounds = qualityBounds; camQualityKey = qualityKey;
+  }
+  camWarmCoarse(base, layers, sceneKey, rearHeatsink);
+  camDebug = { mode: "inspection", width: camQualityW, height: camQualityH,
+    samplesPerAxis: Math.min(camQualityW / cvs.width, camQualityH / cvs.height) / 1.5 };
+  return camBlit(vb, cst, camQualityBounds, camQualityBg);
 }
 
 // ── frame ───────────────────────────────────────────────────────────────
@@ -1304,9 +1368,10 @@ function frame(vb, st) {
       stW = cvs.width; stH = cvs.height;
     }
 
-    // Physical review is a separate retained scene: manufacturing operations
-    // bake the host-resolved film stack once. Camera-only frames update one
-    // uniform and sample that film instead of walking Gerber operations.
+    // Physical review is a separate retained scene. A quiet camera gets a
+    // camera-matched supersampled film; only the short viewport-busy window
+    // samples the full-board gesture film, and the trailing paint restores the
+    // inspection-quality view at the new zoom.
     if (st && st.cam) return camFrame(vb, st);
 
     if (st.viaDrill !== lastDrill) { lastDrill = st.viaDrill; dirtyCu = true; }

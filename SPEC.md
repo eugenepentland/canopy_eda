@@ -6579,9 +6579,9 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The PCB page blob keeps solver-authored pad tapers fully masked and begins RF relief at the exact uniform-trace boundary
 - Assembly opens on its compact read-only semantic board and requests no Gerber/Excellon payload until the operator enables CAM Review
 - CAM Review paints parsed Gerber/Excellon operations in WebGPU instead of rebuilding fabrication artwork from browser fonts and placement objects
-- CAM Review WebGPU renders the generated Gerber/Excellon operation stream into a retained manufacturing film and camera frames only sample that film; Canvas2D remains only as the transparent component/interaction overlay and never interprets CAM operations
+- A settled CAM Review rerasterizes retained generated Gerber/Excellon operations into a camera-matched two-samples-per-axis WebGPU film, while only the short pan/zoom gesture window samples a full-board preview and its trailing paint restores inspection quality; Canvas2D remains only as the transparent component/interaction overlay and never interprets CAM operations
 - CAM Review decomposes self-crossing Gerber region contours into simple faces selected by the Gerber non-zero winding rule before triangulation
-- An opposite-face heatsink is retained in the WebGPU manufacturing film behind the opaque board instead of forcing a Canvas CAM fallback
+- An opposite-face heatsink is retained in the WebGPU CAM command stream behind the opaque board instead of forcing a Canvas CAM fallback
 - The Assembly CAM Review toggle lazy-loads dependency-cached Gerber/Excellon artwork, can return instantly to the semantic board, and exposes CAM layer controls only while exact files are active
 - The Assembly CAM Review control visibly distinguishes fast, loading, exact, and failed states and applies same-document mode changes directly with a message fallback
 - The initial Assembly iframe omits hidden DRC, editable-layout metadata, editor-only scripts, and inline CAM while exposing the lazy generated-files URL

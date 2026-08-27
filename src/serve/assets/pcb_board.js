@@ -155,7 +155,7 @@ function camReviewUse(){
  CAM_REVIEW=true;reviewPaintDirty=true;
  // camFrame detects a newly installed PCB.cam object itself. Do not mark the
  // geometry dirty here: leaving and re-entering CAM Review should sample the
- // retained film immediately, not parse, upload and bake the same files again.
+ // retained GPU geometry immediately, not parse and upload the same files again.
  dragCacheDrop();drawBoardRect();paintSoon();
  camReviewPost("active");return true;}
 function camReviewSet(enabled){
@@ -1176,6 +1176,7 @@ function gpuCamState(){var all=PCB.cam&&PCB.cam.layers||[],out=[],cu=camCopperPa
  all.forEach(function(L){if(L.kind==="drill"&&camLayerVisible(L))out.push({id:L.id,col:PH.hole,a:1});});
  all.forEach(function(L){if(L.kind==="outline"&&camLayerVisible(L))out.push({id:L.id,col:PH.edge,a:1});});
  return {cam:{bg:PH.bg,substrate:PH.substrate,layers:out,
+  gesture:Date.now()<vbQuiet,
   rearHeatsink:!!(viewSt.vis.heatsink&&hs&&hs.w>0&&hs.h>0&&heatsinkBehindBoard(hs))}};}
 // Antipads overlay (Layers/Appearance "Antipads"): every single-ended
 // controlled-impedance via the server solved a plane antipad for draws its
@@ -5101,7 +5102,10 @@ function reviewOrient(side,rotation){var nextSide=side==="bottom"?"bottom":"top"
  if(PCB.apSync)PCB.apSync();statusLayer();reviewApplyOrientation();
  // The retained front sink and canvas-painted rear sink trade places with the
  // selected face; refresh both layers even when no copper visibility changed.
- dragCacheDrop();drawBoardRect();paintSoon();}
+ // Treat this like a viewport gesture: publish the new pose from the fast
+ // full-board CAM film, then let vbBusy's trailing paint restore the
+ // camera-matched inspection film 170 ms later.
+ vbBusy();dragCacheDrop();drawBoardRect();paintSoon();}
 window.PCBReviewFocus={set:reviewSet,clear:reviewClear};
 window.addEventListener("message",function(ev){var msg=ev.data;
  if(!msg||(!STANDALONE&&ev.origin!==window.location.origin))return;

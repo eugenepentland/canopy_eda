@@ -166,7 +166,7 @@ async function measureShellControls(page) {
   controls.cam_review_ms = await parentAction(page, () => camReview.click(), async () => {
     await page.waitForFunction(() => document.querySelector("#cam-review")?.getAttribute("aria-pressed") === "true");
     const painted = await waitForReviewPaint(boardFrame, beforeCamRestore.revision, {});
-    if (!painted.cam_review) throw new Error("CAM Review toggle did not restore the retained manufacturing film");
+    if (!painted.cam_review) throw new Error("CAM Review toggle did not restore the generated manufacturing artwork");
   });
   controls.search_ms = await parentAction(page,
     () => page.locator("#assembly-search").fill("U19"),
@@ -530,6 +530,11 @@ async function runOneInContext(context, baseUrl, design) {
     throw new Error(`CAM Review activation published the wrong visible state: ${JSON.stringify(camControl)}`);
   }
   if (network.cam_requests !== 1) throw new Error(`CAM Review expected one lazy payload request, saw ${network.cam_requests}`);
+  await page.waitForFunction(() => {
+    const win = document.getElementById("pcb-frame")?.contentWindow;
+    const state = win?.PCBGpu?.camState?.();
+    return state?.mode === "inspection" && state.samplesPerAxis >= 1.95;
+  }, null, { timeout: 5000 });
   const benchDeadline = Date.now() + 120000;
   let nextProgress = Date.now() + 30000;
   while (Date.now() < benchDeadline) {

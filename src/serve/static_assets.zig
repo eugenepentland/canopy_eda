@@ -50,7 +50,7 @@ const pcb_settings_css = @embedFile("assets/pcb_settings.css");
 const pcb_stuck_js = @embedFile("assets/pcb_stuck.js");
 // WebGPU board renderer — copper, vias and pads as instanced signed-distance
 // quads on a canvas UNDER the 2D overlay, camera = one uniform. The editor can
-// opt out to its Canvas2D scene; Assembly's Gerber film requires this renderer.
+// opt out to its Canvas2D scene; Assembly's exact Gerber view requires this renderer.
 // Script-tagged BEFORE pcb_board.js so window.PCBGpu exists when the board
 // script boots. Earcut and the Gerber-region adapter precede it.
 const pcb_gpu_js = @embedFile("assets/pcb_gpu.js");
@@ -1684,19 +1684,20 @@ test "PCB WebGPU renderer carries its own pipelines and honours the ?gpu=0 opt-o
 }
 
 // spec: Web Server - Assembly opens on its compact read-only semantic board and requests no Gerber/Excellon payload until the operator enables CAM Review
-// spec: Web Server - CAM Review WebGPU renders the generated Gerber/Excellon operation stream into a retained manufacturing film and camera frames only sample that film; Canvas2D remains only as the transparent component/interaction overlay and never interprets CAM operations
+// spec: Web Server - A settled CAM Review rerasterizes retained generated Gerber/Excellon operations into a camera-matched two-samples-per-axis WebGPU film, while only the short pan/zoom gesture window samples a full-board preview and its trailing paint restores inspection quality; Canvas2D remains only as the transparent component/interaction overlay and never interprets CAM operations
 // spec: Web Server - CAM Review decomposes self-crossing Gerber region contours into simple faces selected by the Gerber non-zero winding rule before triangulation
 // spec: Web Server - Assembly requires WebGPU for generated Gerber/Excellon artwork; an unavailable adapter, initialization/render failure, device loss, or Assembly ?gpu=0 displays a blocking requirement message instead of invoking a Canvas manufacturing renderer
-// spec: Web Server - An opposite-face heatsink is retained in the WebGPU manufacturing film behind the opaque board instead of forcing a Canvas CAM fallback
-test "Assembly requires retained WebGPU CAM artwork and keeps Canvas as an overlay" {
+// spec: Web Server - An opposite-face heatsink is retained in the WebGPU CAM command stream behind the opaque board instead of forcing a Canvas CAM fallback
+test "Assembly requires zoom-matched WebGPU CAM artwork and keeps Canvas as an overlay" {
     const markers = [_]struct { haystack: []const u8, marker: []const u8 }{
         .{ .haystack = pcb_gpu_js, .marker = "rebuildCam: rebuildCam" },
         .{ .haystack = pcb_gpu_js, .marker = "function camBuild()" },
         .{ .haystack = pcb_gpu_js, .marker = "window.PCBRegionTriangles(raw)" },
         .{ .haystack = pcb_gpu_js, .marker = "@fragment fn fsStencilArc" },
-        .{ .haystack = pcb_gpu_js, .marker = "function camBake(base, layers, key, rearHeatsink, b)" },
-        .{ .haystack = pcb_gpu_js, .marker = "textureSampleLevel(camFilm, camFilmSampler, uv, 0.0)" },
-        .{ .haystack = pcb_gpu_js, .marker = "if (!camFilm || camFilmKey !== key)" },
+        .{ .haystack = pcb_gpu_js, .marker = "function camQualityBoundsFor(vb)" },
+        .{ .haystack = pcb_gpu_js, .marker = "scale = Math.min(3, limit / cvs.width, limit / cvs.height)" },
+        .{ .haystack = pcb_gpu_js, .marker = "function camWarmCoarse(base, layers, sceneKey, rearHeatsink)" },
+        .{ .haystack = pcb_gpu_js, .marker = "if (cst.gesture)" },
         .{ .haystack = pcb_earcut_js, .marker = "window.PCBEarcut=Ua" },
         .{ .haystack = pcb_region_js, .marker = "window.PCBRegionTriangles = triangulate" },
         .{ .haystack = pcb_region_js, .marker = "if (!winding(ring, sample)) continue" },
@@ -1707,12 +1708,14 @@ test "Assembly requires retained WebGPU CAM artwork and keeps Canvas as an overl
         .{ .haystack = pcb_board_js, .marker = "function assemblyGpuFail(detail)" },
         .{ .haystack = pcb_board_js, .marker = "Assembly requires WebGPU" },
         .{ .haystack = pcb_layout_css, .marker = ".pcb-webgpu-required" },
-        .{ .haystack = pcb_gpu_js, .marker = "function camBounds(rearHeatsink)" },
+        .{ .haystack = pcb_gpu_js, .marker = "function camQualityEnsure()" },
+        .{ .haystack = pcb_gpu_js, .marker = "mode: \"inspection\"" },
         .{ .haystack = pcb_gpu_js, .marker = "camEncodeScene(p, base, layers, rearHeatsink)" },
     };
     for (markers) |entry| try std.testing.expect(std.mem.indexOf(u8, entry.haystack, entry.marker) != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "function paintCamBoard") == null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "function camLayerBitmap") == null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "gesture:Date.now()<vbQuiet") != null);
 }
 
 // spec: Web Server - Custom pads use the exact Canvas2D polygon path instead of the WebGPU triangle fan
