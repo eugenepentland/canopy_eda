@@ -10,8 +10,9 @@
 //! Width steps, delay, skin-effect loss, dielectric loss, and modeled via
 //! mismatch remain visible while keeping the calculation deterministic and
 //! auditable. Radiation, connector launches, via stubs, return-via placement,
-//! solder mask, copper roughness, and coupling to nearby shapes still require
-//! a 3D solver or measurement.
+//! copper roughness and coupling to arbitrary nearby shapes still require a 3D
+//! solver or measurement; declared soldermask and etch profile are included by
+//! the calibrated 2D quasi-static fallback.
 
 const std = @import("std");
 const impedance = @import("impedance.zig");
@@ -190,6 +191,13 @@ const Graph = struct {
     node_count: usize,
     edge_count: usize,
     geometry_ok: bool,
+};
+
+const ProcessCacheEntry = struct {
+    layer: u8,
+    width_mm: f64,
+    ground_gap_mm: f64,
+    result: impedance.ProcessResult,
 };
 
 fn samePoint(a: f64, b: f64) bool {
@@ -399,6 +407,8 @@ fn buildTrackGraph(
         .edge_count = 0,
         .geometry_ok = true,
     };
+    var process_cache: [32]ProcessCacheEntry = undefined;
+    var process_cache_len: usize = 0;
     var section_count: usize = 0;
     for (routed.tracks, 0..) |track, track_index| {
         if (track.net != net) continue;
@@ -432,11 +442,33 @@ fn buildTrackGraph(
             ground_gap = gap_solution.gap_mm;
             gap_capped = gap_solution.capped;
         }
-        const z0 = impedance.refZ0WithGroundGap(ref, track.width, foil, ground_gap) catch {
-            graph.geometry_ok = false;
-            continue;
-        };
-        const er_eff = impedance.refEffectiveErWithGroundGap(ref, track.width, foil, ground_gap) catch {
+        var process: ?impedance.ProcessResult = null;
+        for (process_cache[0..process_cache_len]) |entry| {
+            if (entry.layer == physical_layer and entry.width_mm == track.width and entry.ground_gap_mm == ground_gap) {
+                process = entry.result;
+                break;
+            }
+        }
+        if (process == null) {
+            process = impedance.analyzeOnLayer(
+                alloc,
+                stack,
+                physical_layer,
+                track.width,
+                ground_gap,
+                impedance.traceIsCoated(rule.rf.mask_relief_mm, rule.rf.max_freq_hz),
+            );
+            if (process) |resolved| if (process_cache_len < process_cache.len) {
+                process_cache[process_cache_len] = .{
+                    .layer = physical_layer,
+                    .width_mm = track.width,
+                    .ground_gap_mm = ground_gap,
+                    .result = resolved,
+                };
+                process_cache_len += 1;
+            };
+        }
+        const electrical = process orelse {
             graph.geometry_ok = false;
             continue;
         };
@@ -447,8 +479,8 @@ fn buildTrackGraph(
             .width_mm = track.width,
             .length_mm = std.math.hypot(track.x2 - track.x1, track.y2 - track.y1),
             .electrical = .{
-                .z0_ohms = z0,
-                .er_eff = er_eff,
+                .z0_ohms = electrical.z0_ohms,
+                .er_eff = electrical.er_eff,
                 .structure = ref.kindNameWithGroundGap(ground_gap),
                 .ground_gap_mm = ground_gap,
                 .gap_capped = gap_capped,

@@ -130,14 +130,29 @@ pub fn resolve(allocator: std.mem.Allocator, name: []const u8) std.mem.Allocator
         errdefer allocator.free(copper);
         for (copper, 0..) |*layer, i| {
             const outer = i == 0 or i + 1 == copper.len;
-            layer.* = .{ .index = @intCast(i + 1), .thickness = if (outer) 0.035 else 0.0152 };
+            const index: u8 = @intCast(i + 1);
+            layer.* = .{
+                .index = index,
+                .thickness = if (outer) 0.035 else 0.0152,
+                // JLC's controlled-impedance process table specifies a 0.7 mil
+                // finished top-to-base reduction for every etched trace.
+                .width_reduction = 0.01778,
+                // Copper-clad cores etch away from the core: upper foil faces
+                // up, lower foil faces down; outer foils follow the same rule.
+                .narrow_side = if (index == 1 or (index < definition.entry.layers and index % 2 == 0)) .up else .down,
+            };
         }
         const dielectrics = try allocator.alloc(env.StackupDielectric, definition.gap_count);
         for (dielectrics, 0..) |*gap, i| gap.* = dielectric(definition.gaps[i], @intCast(i + 1));
+        const soldermasks = try allocator.dupe(env.StackupSoldermask, &.{
+            .{ .side = .top, .er = 3.8, .substrate_thickness = 0.03048, .copper_thickness = 0.01524 },
+            .{ .side = .bottom, .er = 3.8, .substrate_thickness = 0.03048, .copper_thickness = 0.01524 },
+        });
         return .{
             .layers = definition.entry.layers,
             .copper = copper,
             .dielectrics = dielectrics,
+            .soldermasks = soldermasks,
             .present = true,
             .thickness = definition.entry.thickness,
             .preset = definition.entry.name,
@@ -166,6 +181,7 @@ test "JLC04161H-7628 resolves the supplied JLC construction" {
     const spec = (try resolve(std.testing.allocator, "jlc04161h-7628")).?;
     defer std.testing.allocator.free(spec.copper);
     defer std.testing.allocator.free(spec.dielectrics);
+    defer std.testing.allocator.free(spec.soldermasks);
     try std.testing.expectEqual(@as(u8, 4), spec.layers);
     try std.testing.expectEqualStrings("JLC04161H-7628", spec.preset);
     try std.testing.expectApproxEqAbs(@as(f64, 0.2104), spec.dielectrics[0].thickness, 1e-9);
@@ -181,6 +197,7 @@ test "catalog contains every supplied JLC controlled-impedance construction" {
         const spec = (try resolve(std.testing.allocator, definition.entry.name)).?;
         defer std.testing.allocator.free(spec.copper);
         defer std.testing.allocator.free(spec.dielectrics);
+        defer std.testing.allocator.free(spec.soldermasks);
         try std.testing.expectEqual(definition.entry.layers, spec.layers);
         try std.testing.expectEqual(@as(usize, definition.entry.layers), spec.copper.len);
         try std.testing.expectEqual(@as(usize, definition.entry.layers - 1), spec.dielectrics.len);

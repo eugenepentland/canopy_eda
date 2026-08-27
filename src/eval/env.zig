@@ -1269,6 +1269,23 @@ pub const StackupCopper = struct {
     index: u8,
     thickness: f64,
     material: []const u8 = "Copper",
+    /// Fabricated trapezoid: base/artwork width minus the finished narrow-face
+    /// width (mm). Zero keeps the rectangular closed-form geometry.
+    width_reduction: f64 = 0,
+    /// Which board-normal face is narrow after etching. `up` points toward
+    /// layer 1; `down` toward the bottom copper layer.
+    narrow_side: enum { up, down } = .up,
+};
+
+/// One outer-face soldermask process profile. JLC and other impedance tables
+/// distinguish coating over laminate from coating over copper; retaining both
+/// heights is necessary to reproduce the real stepped cross-section.
+pub const StackupSoldermask = struct {
+    side: FabricationSide,
+    material: []const u8 = "Soldermask",
+    er: f64,
+    substrate_thickness: f64,
+    copper_thickness: f64,
 };
 
 /// Physical dielectric construction category from the fab stackup table.
@@ -1303,6 +1320,8 @@ pub const StackupSpec = struct {
     copper: []const StackupCopper = &.{},
     /// Optional physical dielectric declarations, one per adjacent-layer gap.
     dielectrics: []const StackupDielectric = &.{},
+    /// Optional top/bottom coating profiles used by process-aware impedance.
+    soldermasks: []const StackupSoldermask = &.{},
     present: bool = false,
     /// Canonical fabricator preset name, or empty for a custom construction.
     preset: []const u8 = "",

@@ -1135,7 +1135,7 @@ fn writeImpedance(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Plac
         if (first) try w.writeAll(",\"impedance\":{\"classes\":[");
         if (!first) try w.writeAll(",");
         first = false;
-        try writeImpedanceClass(w, stack, r, p.rules.design);
+        try writeImpedanceClass(w, alloc, stack, r, p.rules.design);
     }
     if (first) return;
     try w.print(
@@ -1148,6 +1148,7 @@ fn writeImpedance(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Plac
 /// the per-layer geometry/result table.
 fn writeImpedanceClass(
     w: *std.Io.Writer,
+    alloc: std.mem.Allocator,
     stack: impedance.Stack,
     r: optimizer.NetRule,
     design: optimizer.DesignRules,
@@ -1160,6 +1161,7 @@ fn writeImpedanceClass(
         if (r.diff_gap > 0) r.diff_gap else @max(r.clearance, design.clearance),
         @max(r.clearance, design.clearance),
     );
+    const coated = impedance.traceIsCoated(r.rf.mask_relief_mm, r.rf.max_freq_hz);
     try w.print(
         ",\"target_ohms\":{d:.2},\"differential\":{},\"target_layer\":{d},\"width_mm\":{d:.4}," ++
             "\"width_derived\":{},\"ground_gap_mm\":{d:.4},\"ground_gap_max_mm\":{d:.4},\"pair_gap_mm\":{d:.4}",
@@ -1198,29 +1200,30 @@ fn writeImpedanceClass(
         if (i > 0) try w.writeAll(",");
         const kind = if (differential) switch (ref) {
             .stripline => "coupled-stripline",
-            .microstrip => "coupled-microstrip-unsupported",
+            .microstrip => "coupled-microstrip",
         } else ref.kindNameWithGroundGap(r.rf.impedance.ground_gap_mm);
         try w.print(
-            "{{\"layer\":{d},\"kind\":\"{s}\",\"h_mm\":{d:.4},\"er\":{d:.2},\"foil_mm\":{d:.4}",
-            .{ layer, kind, ref.heightMm(), ref.er(), stack.foilMm(layer) },
+            "{{\"layer\":{d},\"kind\":\"{s}\",\"h_mm\":{d:.4},\"er\":{d:.2},\"foil_mm\":{d:.4}," ++
+                "\"coated\":{},\"trapezoidal\":{}",
+            .{ layer, kind, ref.heightMm(), ref.er(), stack.foilMm(layer), coated and stack.mask(layer) != null, stack.foil(layer).width_reduction_mm > 0 },
         );
         // The width that hits the target on THIS layer (they differ per layer —
         // that is the whole point of the table), and, when the author supplied
         // a width, what that width actually is on this layer.
-        const solved_width = if (differential)
-            impedance.refWidthForDiffZ0(ref, target, stack.foilMm(layer), pair_gap)
+        const solved_width: ?f64 = if (differential)
+            impedance.resolvedDiffWidthMmOnLayerWithProcess(alloc, stack, layer, target, pair_gap, coated)
         else
-            impedance.refWidthForZ0WithGroundGap(ref, target, stack.foilMm(layer), r.rf.impedance.ground_gap_mm);
+            impedance.resolvedWidthMmOnLayerWithProcess(alloc, stack, layer, target, r.rf.impedance.ground_gap_mm, coated);
         if (solved_width) |solved| {
             try w.print(",\"width_for_target_mm\":{d:.4}", .{solved});
-        } else |_| try w.writeAll(",\"width_for_target_mm\":null");
-        const computed_z = if (differential)
-            impedance.refDiffZ0(ref, r.width, stack.foilMm(layer), pair_gap)
+        } else try w.writeAll(",\"width_for_target_mm\":null");
+        const computed = if (differential)
+            impedance.analyzeDiffOnLayer(alloc, stack, layer, r.width, pair_gap, coated)
         else
-            impedance.refZ0WithGroundGap(ref, r.width, stack.foilMm(layer), r.rf.impedance.ground_gap_mm);
-        if (computed_z) |z| {
-            try w.print(",\"z0_at_width_ohms\":{d:.2}", .{z});
-        } else |_| try w.writeAll(",\"z0_at_width_ohms\":null");
+            impedance.analyzeOnLayer(alloc, stack, layer, r.width, r.rf.impedance.ground_gap_mm, coated);
+        if (computed) |result| {
+            try w.print(",\"z0_at_width_ohms\":{d:.2},\"effective_er\":{d:.4}", .{ result.z0_ohms, result.er_eff });
+        } else try w.writeAll(",\"z0_at_width_ohms\":null,\"effective_er\":null");
         try w.writeAll("}");
     }
     try w.writeAll("]}");
