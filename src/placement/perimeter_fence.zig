@@ -434,7 +434,7 @@ pub fn viaServesPad(
     x: f64,
     y: f64,
     dia: f64,
-) bool {
+) std.mem.Allocator.Error!bool {
     const reach = dia / 2 + 1e-9;
     for (p.nets) |net| {
         if (!std.mem.eql(u8, net.name, net_name)) continue;
@@ -445,7 +445,7 @@ pub fn viaServesPad(
             const pad = for (part.pads) |pad| {
                 if (std.mem.eql(u8, pad.number, pin.pin)) break pad;
             } else continue;
-            const shape = pad_shape.worldShape(alloc, part, pad) catch continue;
+            const shape = try pad_shape.worldShape(alloc, part, pad);
             if (pad_shape.pointDist(shape.x0, shape.y0, shape.x1, shape.y1, shape.poly, x, y, reach) <= reach) return true;
         }
         return false;

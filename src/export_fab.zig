@@ -14,6 +14,7 @@ const std = @import("std");
 const optimizer = @import("placement/optimizer.zig");
 const router = @import("placement/router.zig");
 const export_kicad = @import("export_kicad.zig");
+const env = @import("eval/env.zig");
 const zipfile = @import("zipfile.zig");
 
 /// The manufacturing package under construction: the archive members a fab
@@ -68,6 +69,19 @@ pub const auto_outline_margin_mm: f64 = 1.0;
 /// parts; `.keep` (the `?dnp=keep` opt-in) lists them (a populated variant).
 pub const DnpMode = enum { drop, keep };
 
+/// True when an evaluated instance belongs in both assembly outputs. Probe
+/// pads and board-only mechanical artwork are never sourced or placed; DNP
+/// rows are included only for an explicitly selected populated variant.
+pub fn assemblyPopulated(instance: export_kicad.FlatInstance, dnp: DnpMode) bool {
+    if (dnp == .drop and instance.dnp) return false;
+    if (env.isTestPoint(instance.component)) return false;
+    const mechanical_names = [_][]const u8{ "mounting-hole", "fiducial", "board-outline" };
+    for (mechanical_names) |name| {
+        if (std.mem.indexOf(u8, instance.component, name) != null) return false;
+    }
+    return true;
+}
+
 /// The board outline every fab writer agrees on: the placement's authored /
 /// drawn `board_rect` when present, else the parts' bounding box grown by
 /// `AUTO_OUTLINE_MARGIN_MM` (so an outline-less design still exports a
@@ -109,7 +123,7 @@ pub fn centroidCsv(
 ) std.Io.Writer.Error!void {
     try w.writeAll("Designator,Val,Package,Mid X,Mid Y,Rotation,Layer\n");
     for (parts, 0..) |p, i| {
-        if (dnp == .drop and i < instances.len and instances[i].dnp) continue;
+        if (i >= instances.len or !assemblyPopulated(instances[i], dnp)) continue;
         try writeCsvField(w, p.ref_des);
         try w.writeByte(',');
         if (i < instances.len) try writeCsvField(w, instances[i].value);
@@ -130,6 +144,39 @@ pub fn centroidCsv(
             @mod(360.0 - p.rot, 360.0),
             if (p.side == .bottom) "Bottom" else "Top",
         });
+    }
+}
+
+/// Write the revision-release BOM from the exact flattened instance array used
+/// by the centroid. One row per populated designator keeps its reference set
+/// unambiguous even when separate sub-blocks both author a local `C1`.
+pub fn assemblyBomCsv(
+    w: *std.Io.Writer,
+    instances: []const export_kicad.FlatInstance,
+    dnp: DnpMode,
+) std.Io.Writer.Error!void {
+    try w.writeAll("Qty,References,Component,Value,Footprint,MPN,Manufacturer,DNP\r\n");
+    for (instances) |instance| {
+        if (!assemblyPopulated(instance, dnp)) continue;
+        try w.writeAll("1,");
+        try writeCsvField(w, instance.ref_des);
+        try w.writeByte(',');
+        try writeCsvField(w, instance.component);
+        try w.writeByte(',');
+        try writeCsvField(w, instance.value);
+        try w.writeByte(',');
+        try writeCsvField(w, instance.footprint);
+        var mpn: []const u8 = "";
+        var manufacturer: []const u8 = "";
+        for (instance.properties) |property| {
+            if (std.ascii.eqlIgnoreCase(property.key, "mpn")) mpn = property.value;
+            if (std.ascii.eqlIgnoreCase(property.key, "manufacturer")) manufacturer = property.value;
+        }
+        try w.writeByte(',');
+        try writeCsvField(w, mpn);
+        try w.writeByte(',');
+        try writeCsvField(w, manufacturer);
+        try w.print(",{s}\r\n", .{if (instance.dnp) "yes" else "no"});
     }
 }
 

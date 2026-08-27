@@ -1,10 +1,11 @@
 //! Pure JSON → saved-layout-type parsers for the `.layouts.json` sidecar
 //! (and the request bodies that reuse its shapes). Split from
-//! `pcb_layout_page.zig`, which holds the types and every read/write path;
+//! `layout_sidecar_types.zig`, which holds the shared data model;
 //! this module is the leaf layer with no filesystem access, so the parse
 //! rules live in one place whichever surface feeds them JSON.
 
 const std = @import("std");
+const json_writer = @import("../json_writer.zig");
 const board_layers = @import("../board_layers.zig");
 const numeric = @import("../numeric.zig");
 const font5x7 = @import("../font5x7.zig");
@@ -13,10 +14,139 @@ const outline_mod = @import("../placement/outline.zig");
 const shape_sketch = @import("../shape_sketch.zig");
 const shape_sketch_json = @import("shape_sketch_json.zig");
 const invalid_zone_sketch: shape_sketch.Sketch = .{ .points = &.{}, .curves = &.{} };
-const page = @import("pcb_layout_page.zig");
+const page = @import("../layout_sidecar_types.zig");
 const saved_zone = @import("saved_zone.zig");
 const env_mod = @import("../eval/env.zig");
 const SavedRfPath = @typeInfo(@FieldType(page.SavedRoutes, "rf_paths")).pointer.child;
+const copper_ids = @import("copper_ids.zig");
+const segment_id_prefix = "seg-";
+const via_id_prefix = "via-";
+const track_json_fmt = "{{\"x1\":{d},\"y1\":{d},\"x2\":{d},\"y2\":{d},\"l\":{d},\"w\":{d},\"net\":";
+const via_json_fmt = "{{\"x\":{d},\"y\":{d},\"d\":{d},\"drill\":{d},\"net\":";
+
+fn segmentIdHashFloat(hash: *std.hash.Wyhash, value: f64) void {
+    hash.update(std.mem.asBytes(&value));
+}
+
+fn fallbackSegmentId(track: page.SavedTrack, ordinal: usize, buf: *[segment_id_prefix.len + 16]u8) []const u8 {
+    var hash = std.hash.Wyhash.init(0x5345474d454e545f);
+    segmentIdHashFloat(&hash, track.x1);
+    segmentIdHashFloat(&hash, track.y1);
+    segmentIdHashFloat(&hash, track.x2);
+    segmentIdHashFloat(&hash, track.y2);
+    const has_mid: u8 = @intFromBool(track.xm != null and track.ym != null);
+    hash.update(std.mem.asBytes(&has_mid));
+    if (track.xm) |xm| segmentIdHashFloat(&hash, xm);
+    if (track.ym) |ym| segmentIdHashFloat(&hash, ym);
+    segmentIdHashFloat(&hash, track.w);
+    const layer = track.l;
+    const stable_ordinal: u64 = @intCast(ordinal);
+    hash.update(std.mem.asBytes(&layer));
+    hash.update(track.net);
+    hash.update(std.mem.asBytes(&stable_ordinal));
+    return std.fmt.bufPrint(buf, segment_id_prefix ++ "{x:0>16}", .{hash.final()}) catch segment_id_prefix ++ "0000000000000000";
+}
+
+/// Write a saved track's persisted or deterministic legacy segment identity.
+pub fn writeTrackSegmentId(w: *std.Io.Writer, track: page.SavedTrack, ordinal: usize) std.Io.Writer.Error!void {
+    var buf: [segment_id_prefix.len + 16]u8 = undefined;
+    try w.writeAll(",\"id\":");
+    return writeJsonStr(w, if (track.id.len > 0) track.id else fallbackSegmentId(track, ordinal, &buf));
+}
+
+/// Write a saved via's persisted or deterministic legacy identity.
+pub fn writeViaId(w: *std.Io.Writer, via: page.SavedVia, ordinal: usize) std.Io.Writer.Error!void {
+    var buf: [via_id_prefix.len + 16]u8 = undefined;
+    try w.writeAll(",\"id\":");
+    return writeJsonStr(w, if (via.id.len > 0) via.id else copper_ids.legacyVia(via, ordinal, &buf));
+}
+
+fn writeStringList(w: *std.Io.Writer, values: []const []const u8) std.Io.Writer.Error!void {
+    try w.writeByte('[');
+    for (values, 0..) |value, i| {
+        if (i > 0) try w.writeByte(',');
+        try writeJsonStr(w, value);
+    }
+    try w.writeByte(']');
+}
+
+/// Serialize persisted RF path swept-region evidence.
+pub fn writeSavedRfPathsJson(w: *std.Io.Writer, saved_paths: []const SavedRfPath) std.Io.Writer.Error!void {
+    try w.writeByte('[');
+    for (saved_paths, 0..) |path, i| {
+        if (i > 0) try w.writeByte(',');
+        try w.writeAll("{\"net\":");
+        try writeJsonStr(w, path.net);
+        try w.print(",\"l\":{d}", .{path.layer});
+        if (path.track_ids.len > 0) {
+            try w.writeAll(",\"track_ids\":");
+            try writeStringList(w, path.track_ids);
+        }
+        if (path.portal) try w.writeAll(",\"portal\":true");
+        try w.writeAll(",\"samples\":[");
+        for (path.samples, 0..) |sample, si| {
+            if (si > 0) try w.writeByte(',');
+            try w.print("[{d},{d},{d}]", .{ sample.at[0], sample.at[1], sample.width_mm });
+        }
+        try w.writeAll("]}");
+    }
+    try w.writeByte(']');
+}
+
+/// Serialize saved routes in the exact shared sidecar/live-JSON shape.
+pub fn writeSavedRoutesJson(w: *std.Io.Writer, sr: page.SavedRoutes) std.Io.Writer.Error!void {
+    try w.writeAll("{\"tracks\":[");
+    for (sr.tracks, 0..) |track, i| {
+        if (i > 0) try w.writeByte(',');
+        try w.print(track_json_fmt, .{ track.x1, track.y1, track.x2, track.y2, track.l, track.w });
+        try writeJsonStr(w, track.net);
+        if (track.xm) |xm| if (track.ym) |ym| try w.print(",\"xm\":{d},\"ym\":{d}", .{ xm, ym });
+        if (track.g.len > 0) {
+            try w.writeAll(",\"g\":");
+            try writeJsonStr(w, track.g);
+        }
+        if (track.source.len > 0) {
+            try w.writeAll(",\"source\":");
+            try writeJsonStr(w, track.source);
+        }
+        try writeTrackSegmentId(w, track, i);
+        try w.writeByte('}');
+    }
+    try w.writeAll("],\"vias\":[");
+    for (sr.vias, 0..) |via, i| {
+        if (i > 0) try w.writeByte(',');
+        try w.print(via_json_fmt, .{ via.x, via.y, via.d, via.drill });
+        try writeJsonStr(w, via.net);
+        if (via.g.len > 0) {
+            try w.writeAll(",\"g\":");
+            try writeJsonStr(w, via.g);
+        }
+        if (via.f.len > 0) {
+            try w.writeAll(",\"f\":");
+            try writeJsonStr(w, via.f);
+        }
+        if (via.source.len > 0) {
+            try w.writeAll(",\"source\":");
+            try writeJsonStr(w, via.source);
+        }
+        if (via.s) |span| try w.print(",\"s\":[{d},{d}]", .{ span[0], span[1] });
+        try writeViaId(w, via, i);
+        try w.writeByte('}');
+    }
+    try w.writeByte(']');
+    if (sr.zones.len > 0) {
+        try w.writeAll(",\"zones\":");
+        try writeSavedZonesJson(w, sr.zones);
+    }
+    if (sr.rf_paths.len > 0) {
+        try w.writeAll(",\"rf_paths\":");
+        try writeSavedRfPathsJson(w, sr.rf_paths);
+    }
+    try w.writeByte('}');
+}
+
+/// Canonical quoted JSON string writer, safe inside an HTML `script` element.
+pub const writeJsonStr = json_writer.writeScriptString;
 
 const ParsedZoneSketch = struct {
     sketch: shape_sketch.Sketch,
@@ -91,6 +221,679 @@ pub fn jsonOptNum(v: ?std.json.Value) ?f64 {
         else => return null,
     };
     return if (std.math.isFinite(n)) n else null;
+}
+
+fn strictNumber(v: ?std.json.Value) ?f64 {
+    return jsonOptNum(v);
+}
+
+fn strictInteger(v: ?std.json.Value, minimum: i64, maximum: i64) bool {
+    const number = strictNumber(v) orelse return false;
+    return number >= @as(f64, @floatFromInt(minimum)) and
+        number <= @as(f64, @floatFromInt(maximum)) and @floor(number) == number;
+}
+
+fn strictString(v: ?std.json.Value, allow_empty: bool) bool {
+    const value = v orelse return false;
+    return value == .string and (allow_empty or value.string.len > 0);
+}
+
+fn strictOptionalString(v: ?std.json.Value) bool {
+    const value = v orelse return true;
+    return value == .string;
+}
+
+fn strictOptionalBool(v: ?std.json.Value) bool {
+    const value = v orelse return true;
+    return value == .bool;
+}
+
+fn objectHasOnlyKeys(value: std.json.Value, comptime allowed: anytype) bool {
+    if (value != .object) return false;
+    var iterator = value.object.iterator();
+    while (iterator.next()) |entry| {
+        var recognized = false;
+        inline for (allowed) |key| {
+            if (std.mem.eql(u8, entry.key_ptr.*, key)) recognized = true;
+        }
+        if (!recognized) return false;
+    }
+    return true;
+}
+
+fn strictStringArray(v: ?std.json.Value) bool {
+    const value = v orelse return true;
+    if (value != .array) return false;
+    for (value.array.items) |item| if (item != .string) return false;
+    return true;
+}
+
+fn strictNonemptyStringSet(v: ?std.json.Value) bool {
+    const value = v orelse return false;
+    if (value != .array or value.array.items.len == 0) return false;
+    for (value.array.items, 0..) |item, index| {
+        if (item != .string or item.string.len == 0) return false;
+        for (value.array.items[0..index]) |earlier| {
+            if (std.ascii.eqlIgnoreCase(earlier.string, item.string)) return false;
+        }
+    }
+    return true;
+}
+
+fn strictPoint(value: std.json.Value) bool {
+    if (value != .array or value.array.items.len != 2) return false;
+    return strictNumber(value.array.items[0]) != null and strictNumber(value.array.items[1]) != null;
+}
+
+fn strictPolygon(v: ?std.json.Value, minimum: usize) bool {
+    const value = v orelse return false;
+    if (value != .array or value.array.items.len < minimum) return false;
+    for (value.array.items) |point| if (!strictPoint(point)) return false;
+    return true;
+}
+
+fn strictPolygonGeometry(alloc: std.mem.Allocator, v: ?std.json.Value) bool {
+    const value = v orelse return false;
+    if (!strictPolygon(value, 3)) return false;
+    const points = alloc.alloc([2]f64, value.array.items.len) catch return false;
+    for (value.array.items, points) |point, *out| {
+        out.* = .{ jsonNum(point.array.items[0]), jsonNum(point.array.items[1]) };
+    }
+    return outline_mod.valid(points);
+}
+
+fn strictSketch(alloc: std.mem.Allocator, v: std.json.Value) bool {
+    const sketch = shape_sketch_json.parse(alloc, v) orelse return false;
+    if (!shape_sketch_json.matches(v, sketch)) return false;
+    _ = shape_sketch.compile(alloc, sketch, shape_sketch.default_sagitta_mm) catch return false;
+    return true;
+}
+
+fn strictPartPose(value: std.json.Value) bool {
+    if (value != .object) return false;
+    if (!objectHasOnlyKeys(value, .{ "ref", "x", "y", "rot", "origin", "locked", "side" })) return false;
+    if (!strictString(value.object.get("ref"), false)) return false;
+    if (strictNumber(value.object.get("x")) == null) return false;
+    if (strictNumber(value.object.get("y")) == null) return false;
+    if (strictNumber(value.object.get("rot")) == null) return false;
+    if (!strictOptionalString(value.object.get("origin"))) return false;
+    if (!strictOptionalBool(value.object.get("locked"))) return false;
+    if (value.object.get("side")) |side| {
+        if (side != .string) return false;
+        if (!std.mem.eql(u8, side.string, "top") and !std.mem.eql(u8, side.string, "bottom")) return false;
+    }
+    return true;
+}
+
+fn strictTrack(value: std.json.Value) bool {
+    if (value != .object) return false;
+    if (!objectHasOnlyKeys(value, .{ "x1", "y1", "x2", "y2", "xm", "ym", "l", "w", "net", "g", "source", "id" })) return false;
+    inline for (.{ "x1", "y1", "x2", "y2" }) |key| {
+        if (strictNumber(value.object.get(key)) == null) return false;
+    }
+    const width = strictNumber(value.object.get("w")) orelse return false;
+    if (!(width > 0)) return false;
+    if (!strictString(value.object.get("net"), false)) return false;
+    if (value.object.get("l") != null and !strictInteger(value.object.get("l"), 0, board_layers.max_sidecar_layer)) return false;
+    const has_xm = value.object.get("xm") != null;
+    const has_ym = value.object.get("ym") != null;
+    if (has_xm != has_ym) return false;
+    if (has_xm) {
+        const xm = strictNumber(value.object.get("xm")) orelse return false;
+        const ym = strictNumber(value.object.get("ym")) orelse return false;
+        const arc: optimizer.BoardArc = .{
+            .p1 = .{ jsonNum(value.object.get("x1")), jsonNum(value.object.get("y1")) },
+            .pm = .{ xm, ym },
+            .p2 = .{ jsonNum(value.object.get("x2")), jsonNum(value.object.get("y2")) },
+        };
+        if (outline_mod.arcCircle(arc) == null) return false;
+    }
+    inline for (.{ "g", "source", "id" }) |key| if (!strictOptionalString(value.object.get(key))) return false;
+    return true;
+}
+
+fn strictVia(value: std.json.Value) bool {
+    if (value != .object) return false;
+    if (!objectHasOnlyKeys(value, .{ "x", "y", "d", "drill", "net", "g", "f", "s", "source", "id" })) return false;
+    if (strictNumber(value.object.get("x")) == null or strictNumber(value.object.get("y")) == null) return false;
+    const diameter = strictNumber(value.object.get("d")) orelse return false;
+    const drill = strictNumber(value.object.get("drill")) orelse return false;
+    if (!(diameter > 0)) return false;
+    if (!(drill > 0)) return false;
+    if (drill > diameter) return false;
+    if (!strictString(value.object.get("net"), false)) return false;
+    inline for (.{ "g", "f", "source", "id" }) |key| if (!strictOptionalString(value.object.get(key))) return false;
+    if (value.object.get("s")) |span| {
+        if (span != .array or span.array.items.len != 2) return false;
+        for (span.array.items) |layer| if (!strictInteger(layer, 0, board_layers.max_sidecar_layer)) return false;
+    }
+    return true;
+}
+
+fn strictZone(alloc: std.mem.Allocator, value: std.json.Value) bool {
+    if (value != .object) return false;
+    if (!objectHasOnlyKeys(value, .{ "net", "layer", "layers", "poly", "filled", "keepout", "g", "sketch", "priority" })) return false;
+    if (!strictOptionalString(value.object.get("net"))) return false;
+    const layer_value = value.object.get("layer");
+    if (layer_value != null and !strictString(layer_value, false)) return false;
+    const has_layer = layer_value != null;
+    const has_layers = value.object.get("layers") != null;
+    if (!has_layer and !has_layers) return false;
+    if (has_layers and !strictNonemptyStringSet(value.object.get("layers"))) return false;
+    if (has_layer and has_layers) {
+        const first = value.object.get("layers").?.array.items[0].string;
+        if (!std.mem.eql(u8, layer_value.?.string, first)) return false;
+    }
+    if (!strictPolygonGeometry(alloc, value.object.get("poly"))) return false;
+    if (value.object.get("sketch")) |sketch| if (!strictSketch(alloc, sketch)) return false;
+    if (!strictOptionalBool(value.object.get("filled"))) return false;
+    if (!strictOptionalBool(value.object.get("keepout"))) return false;
+    if (!strictOptionalString(value.object.get("g"))) return false;
+    if (value.object.get("priority") != null and !strictInteger(value.object.get("priority"), std.math.minInt(i32), std.math.maxInt(i32))) return false;
+    return true;
+}
+
+fn strictRfPath(value: std.json.Value) bool {
+    if (value != .object) return false;
+    if (!objectHasOnlyKeys(value, .{ "net", "l", "track_ids", "portal", "samples" })) return false;
+    if (!strictString(value.object.get("net"), false)) return false;
+    if (value.object.get("l") != null and !strictInteger(value.object.get("l"), 0, board_layers.max_sidecar_layer)) return false;
+    if (!strictStringArray(value.object.get("track_ids"))) return false;
+    if (!strictOptionalBool(value.object.get("portal"))) return false;
+    const samples = value.object.get("samples") orelse return false;
+    if (samples != .array or samples.array.items.len < 2) return false;
+    for (samples.array.items) |sample| {
+        if (sample != .array or sample.array.items.len != 3) return false;
+        if (strictNumber(sample.array.items[0]) == null or strictNumber(sample.array.items[1]) == null) return false;
+        const width = strictNumber(sample.array.items[2]) orelse return false;
+        if (!(width > 0)) return false;
+    }
+    return true;
+}
+
+fn strictRoutes(alloc: std.mem.Allocator, v: ?std.json.Value) bool {
+    const value = v orelse return true;
+    if (value != .object) return false;
+    if (!objectHasOnlyKeys(value, .{ "tracks", "vias", "zones", "rf_paths" })) return false;
+    inline for (.{ "tracks", "vias", "zones", "rf_paths" }) |key| {
+        if (value.object.get(key)) |rows| {
+            if (rows != .array) return false;
+            for (rows.array.items) |row| {
+                const valid = if (std.mem.eql(u8, key, "tracks"))
+                    strictTrack(row)
+                else if (std.mem.eql(u8, key, "vias"))
+                    strictVia(row)
+                else if (std.mem.eql(u8, key, "zones"))
+                    strictZone(alloc, row)
+                else
+                    strictRfPath(row);
+                if (!valid) return false;
+            }
+        }
+    }
+    return true;
+}
+
+fn strictOutline(alloc: std.mem.Allocator, v: ?std.json.Value) bool {
+    const value = v orelse return true;
+    if (value != .object) return false;
+    if (!objectHasOnlyKeys(value, .{ "x", "y", "w", "h", "pts", "radii", "sketch" })) return false;
+    const has_sketch = value.object.get("sketch") != null;
+    if (value.object.get("sketch")) |sketch| if (!strictSketch(alloc, sketch)) return false;
+    inline for (.{ "x", "y", "w", "h" }) |key| {
+        if (value.object.get(key) != null and strictNumber(value.object.get(key)) == null) return false;
+    }
+    if (value.object.get("pts")) |points| {
+        if (!strictPolygonGeometry(alloc, points)) return false;
+        if (value.object.get("radii")) |radii| {
+            if (radii != .array or radii.array.items.len != points.array.items.len) return false;
+            const parsed_points = alloc.alloc([2]f64, points.array.items.len) catch return false;
+            const parsed_radii = alloc.alloc(f64, radii.array.items.len) catch return false;
+            var rounded_corners: usize = 0;
+            for (points.array.items, parsed_points) |point, *parsed| {
+                parsed.* = .{ jsonNum(point.array.items[0]), jsonNum(point.array.items[1]) };
+            }
+            for (radii.array.items, parsed_radii) |radius, *parsed| {
+                const number = strictNumber(radius) orelse return false;
+                if (number < 0) return false;
+                parsed.* = number;
+                if (number > 0) rounded_corners += 1;
+            }
+            const fillet = outline_mod.filletPath(alloc, parsed_points, parsed_radii, 0.01) catch return false;
+            if (fillet.arcs.len != rounded_corners or !outline_mod.valid(fillet.poly)) return false;
+        }
+        return true;
+    }
+    if (value.object.get("radii") != null) return false;
+    if (has_sketch) return true;
+    const width = strictNumber(value.object.get("w")) orelse return false;
+    const height = strictNumber(value.object.get("h")) orelse return false;
+    return strictNumber(value.object.get("x")) != null and strictNumber(value.object.get("y")) != null and
+        width > 0 and height > 0;
+}
+
+fn strictFabricationLayers(alloc: std.mem.Allocator, v: ?std.json.Value) bool {
+    const value = v orelse return true;
+    if (value != .array) return false;
+    for (value.array.items) |layer| {
+        if (layer != .object or !strictString(layer.object.get("name"), false)) return false;
+        if (!objectHasOnlyKeys(layer, .{ "name", "regions", "sketches" })) return false;
+        const regions = layer.object.get("regions") orelse return false;
+        if (regions != .array or regions.array.items.len == 0) return false;
+        for (regions.array.items) |region| if (!strictPolygonGeometry(alloc, region)) return false;
+        if (layer.object.get("sketches")) |sketches| {
+            if (sketches != .array or sketches.array.items.len != regions.array.items.len) return false;
+            for (sketches.array.items) |sketch| {
+                if (sketch == .null) continue;
+                if (!strictSketch(alloc, sketch)) return false;
+            }
+        }
+    }
+    return true;
+}
+
+fn strictTexts(v: ?std.json.Value) bool {
+    const value = v orelse return true;
+    if (value != .array) return false;
+    for (value.array.items) |text| {
+        if (text != .object or !strictString(text.object.get("text"), false)) return false;
+        if (!objectHasOnlyKeys(text, .{ "x", "y", "rot", "side", "size", "text", "subcircuit", "testpoint", "fabrication_id" })) return false;
+        if (strictNumber(text.object.get("x")) == null or strictNumber(text.object.get("y")) == null) return false;
+        const rotation = strictNumber(text.object.get("rot")) orelse return false;
+        if (rotation != 0 and rotation != 90 and rotation != 180 and rotation != 270) return false;
+        const size = strictNumber(text.object.get("size")) orelse return false;
+        if (!(size > 0)) return false;
+        if (text.object.get("side")) |side| {
+            if (side != .string) return false;
+            if (!std.mem.eql(u8, side.string, "top") and !std.mem.eql(u8, side.string, "bottom")) return false;
+        }
+        if (!strictOptionalString(text.object.get("subcircuit"))) return false;
+        if (!strictOptionalString(text.object.get("testpoint"))) return false;
+        const subcircuit = jsonStrField(text.object.get("subcircuit"));
+        const testpoint = jsonStrField(text.object.get("testpoint"));
+        if (subcircuit.len > 0 and testpoint.len > 0) return false;
+        if (!strictOptionalBool(text.object.get("fabrication_id"))) return false;
+    }
+    return true;
+}
+
+fn strictSelectedRow(alloc: std.mem.Allocator, value: std.json.Value) bool {
+    if (value != .object) return false;
+    if (!objectHasOnlyKeys(value, .{
+        "name", "kind", "ts",   "rough",     "routes", "outline", "fabrication_layers", "heatsink", "texts", "dimensions",
+        "hpwl", "loop", "caps", "objective", "parts",  "default",
+    })) return false;
+    if (!strictString(value.object.get("name"), false)) return false;
+    if (value.object.get("kind")) |kind| {
+        if (kind != .string) return false;
+        if (!std.mem.eql(u8, kind.string, "auto") and !std.mem.eql(u8, kind.string, "manual")) return false;
+    }
+    const parts = value.object.get("parts") orelse return false;
+    if (parts != .array or parts.array.items.len == 0) return false;
+    for (parts.array.items, 0..) |part, index| {
+        if (!strictPartPose(part)) return false;
+        const ref = part.object.get("ref").?.string;
+        for (parts.array.items[0..index]) |earlier| {
+            if (std.mem.eql(u8, earlier.object.get("ref").?.string, ref)) return false;
+        }
+    }
+    if (!strictRoutes(alloc, value.object.get("routes"))) return false;
+    if (!strictOutline(alloc, value.object.get("outline"))) return false;
+    if (!strictFabricationLayers(alloc, value.object.get("fabrication_layers"))) return false;
+    return strictTexts(value.object.get("texts"));
+}
+
+/// Prove that the selected manufacturing row was interpreted without dropping
+/// or defaulting any placement, copper, RF-path, zone, or outline record.
+fn selectedLayoutEvidence(alloc: std.mem.Allocator, root: std.json.Value, selected_name: []const u8) bool {
+    if (root != .object) return false;
+    const layouts = root.object.get("layouts") orelse return false;
+    if (layouts != .array) return false;
+    var selected: ?std.json.Value = null;
+    var selected_count: usize = 0;
+    for (layouts.array.items) |row| {
+        if (row != .object) continue;
+        const row_name = row.object.get("name") orelse continue;
+        if (row_name != .string or !std.mem.eql(u8, row_name.string, selected_name)) continue;
+        selected_count += 1;
+        selected = row;
+    }
+    if (selected_count != 1) return false;
+    if (root.object.get("default")) |default| {
+        if (default != .string) return false;
+        var default_count: usize = 0;
+        for (layouts.array.items) |row| {
+            if (row != .object) continue;
+            const row_name = row.object.get("name") orelse continue;
+            if (row_name == .string and std.mem.eql(u8, row_name.string, default.string)) default_count += 1;
+        }
+        if (default_count != 1) return false;
+    }
+    return strictSelectedRow(alloc, selected.?);
+}
+
+fn selectedRow(root: std.json.Value, selected_name: []const u8) ?std.json.Value {
+    if (root != .object) return null;
+    const layouts = root.object.get("layouts") orelse return null;
+    if (layouts != .array) return null;
+    var selected: ?std.json.Value = null;
+    for (layouts.array.items) |row| {
+        if (row != .object) continue;
+        const name = row.object.get("name") orelse continue;
+        if (name != .string or !std.mem.eql(u8, name.string, selected_name)) continue;
+        if (selected != null) return null;
+        selected = row;
+    }
+    return selected;
+}
+
+fn rawArrayLength(object: std.json.Value, key: []const u8) usize {
+    const value = object.object.get(key) orelse return 0;
+    return if (value == .array) value.array.items.len else 0;
+}
+
+fn nearlyEqual(a: f64, b: f64) bool {
+    return @abs(a - b) <= 1e-9;
+}
+
+fn rawPointsMatch(value: std.json.Value, parsed: []const [2]f64) bool {
+    if (value != .array or value.array.items.len != parsed.len) return false;
+    for (value.array.items, parsed) |raw, point| {
+        if (raw != .array or raw.array.items.len != 2) return false;
+        if (!nearlyEqual(jsonNum(raw.array.items[0]), point[0]) or
+            !nearlyEqual(jsonNum(raw.array.items[1]), point[1])) return false;
+    }
+    return true;
+}
+
+fn rawString(value: ?std.json.Value) []const u8 {
+    return jsonStrField(value);
+}
+
+fn partPoseMatches(raw: std.json.Value, parsed: page.PartPose) bool {
+    if (!std.mem.eql(u8, rawString(raw.object.get("ref")), parsed.ref)) return false;
+    if (!nearlyEqual(jsonNum(raw.object.get("x")), parsed.x)) return false;
+    if (!nearlyEqual(jsonNum(raw.object.get("y")), parsed.y)) return false;
+    if (!nearlyEqual(jsonNum(raw.object.get("rot")), parsed.rot)) return false;
+    if (!std.mem.eql(u8, rawString(raw.object.get("origin")), parsed.origin)) return false;
+    if (jsonFlag(raw.object.get("locked")) != parsed.locked) return false;
+    return jsonSide(raw.object.get("side")) == parsed.side;
+}
+
+fn trackMatches(raw: std.json.Value, parsed: page.SavedTrack) bool {
+    if (!nearlyEqual(jsonNum(raw.object.get("x1")), parsed.x1)) return false;
+    if (!nearlyEqual(jsonNum(raw.object.get("y1")), parsed.y1)) return false;
+    if (!nearlyEqual(jsonNum(raw.object.get("x2")), parsed.x2)) return false;
+    if (!nearlyEqual(jsonNum(raw.object.get("y2")), parsed.y2)) return false;
+    if (!nearlyEqual(jsonNum(raw.object.get("w")), parsed.w)) return false;
+    if (jsonOptNum(raw.object.get("xm")) != parsed.xm) return false;
+    if (jsonOptNum(raw.object.get("ym")) != parsed.ym) return false;
+    if (layerIndexFromJson(raw.object.get("l")) != parsed.l) return false;
+    inline for (.{ "net", "g", "source", "id" }) |key| {
+        if (!std.mem.eql(u8, rawString(raw.object.get(key)), @field(parsed, key))) return false;
+    }
+    return true;
+}
+
+fn viaMatches(raw: std.json.Value, parsed: page.SavedVia) bool {
+    if (!nearlyEqual(jsonNum(raw.object.get("x")), parsed.x)) return false;
+    if (!nearlyEqual(jsonNum(raw.object.get("y")), parsed.y)) return false;
+    if (!nearlyEqual(jsonNum(raw.object.get("d")), parsed.d)) return false;
+    if (!nearlyEqual(jsonNum(raw.object.get("drill")), parsed.drill)) return false;
+    const raw_span = parseViaSpan(raw.object.get("s"));
+    if ((raw_span == null) != (parsed.s == null)) return false;
+    if (raw_span) |span| {
+        if (span[0] != parsed.s.?[0] or span[1] != parsed.s.?[1]) return false;
+    }
+    inline for (.{ "net", "g", "f", "source", "id" }) |key| {
+        if (!std.mem.eql(u8, rawString(raw.object.get(key)), @field(parsed, key))) return false;
+    }
+    return true;
+}
+
+fn zoneMatches(raw: std.json.Value, parsed: page.SavedZone) bool {
+    if (!std.mem.eql(u8, rawString(raw.object.get("net")), parsed.net) or
+        !std.mem.eql(u8, rawString(raw.object.get("g")), parsed.g)) return false;
+    if (jsonFlag(raw.object.get("filled")) != parsed.flags.filled or
+        jsonFlag(raw.object.get("keepout")) != parsed.flags.keepout or
+        jsonInt(raw.object.get("priority")) != parsed.priority) return false;
+    if (!rawPointsMatch(raw.object.get("poly").?, parsed.poly)) return false;
+    if (raw.object.get("layers")) |layers| {
+        if (layers.array.items.len != parsed.layers.len) return false;
+        for (layers.array.items, parsed.layers) |raw_layer, parsed_layer| {
+            if (!std.mem.eql(u8, raw_layer.string, parsed_layer)) return false;
+        }
+    } else if (parsed.layers.len != 0) return false;
+    const raw_layer = rawString(raw.object.get("layer"));
+    const expected_layer = if (raw_layer.len > 0) raw_layer else if (parsed.layers.len > 0) parsed.layers[0] else "";
+    if (!std.mem.eql(u8, expected_layer, parsed.layer)) return false;
+    if (raw.object.get("sketch")) |raw_sketch| {
+        const parsed_sketch = parsed.sketch orelse return false;
+        return shape_sketch_json.matches(raw_sketch, parsed_sketch);
+    }
+    return parsed.sketch == null;
+}
+
+fn rfPathMatches(raw: std.json.Value, parsed: SavedRfPath) bool {
+    if (!std.mem.eql(u8, rawString(raw.object.get("net")), parsed.net)) return false;
+    if (layerIndexFromJson(raw.object.get("l")) != parsed.layer) return false;
+    if (jsonFlag(raw.object.get("portal")) != parsed.portal) return false;
+    const samples = raw.object.get("samples").?;
+    if (samples.array.items.len != parsed.samples.len) return false;
+    for (samples.array.items, parsed.samples) |raw_sample, sample| {
+        if (!nearlyEqual(jsonNum(raw_sample.array.items[0]), sample.at[0])) return false;
+        if (!nearlyEqual(jsonNum(raw_sample.array.items[1]), sample.at[1])) return false;
+        if (!nearlyEqual(jsonNum(raw_sample.array.items[2]), sample.width_mm)) return false;
+    }
+    const track_ids = raw.object.get("track_ids");
+    if (track_ids == null) return parsed.track_ids.len == 0;
+    if (track_ids.?.array.items.len != parsed.track_ids.len) return false;
+    for (track_ids.?.array.items, parsed.track_ids) |raw_id, parsed_id| {
+        if (!std.mem.eql(u8, raw_id.string, parsed_id)) return false;
+    }
+    return true;
+}
+
+fn routesMatchParsed(row: std.json.Value, parsed: ?page.SavedRoutes) bool {
+    const raw = row.object.get("routes") orelse return parsed == null;
+    if (raw != .object) return false;
+    const track_count = rawArrayLength(raw, "tracks");
+    const via_count = rawArrayLength(raw, "vias");
+    const zone_count = rawArrayLength(raw, "zones");
+    const rf_count = rawArrayLength(raw, "rf_paths");
+    if (track_count + via_count + zone_count + rf_count == 0) return parsed == null;
+    const routes = parsed orelse return false;
+    if (routes.tracks.len != track_count or routes.vias.len != via_count or
+        routes.zones.len != zone_count or routes.rf_paths.len != rf_count) return false;
+    if (raw.object.get("tracks")) |tracks| for (tracks.array.items, routes.tracks) |row_track, track| {
+        if (!trackMatches(row_track, track)) return false;
+    };
+    if (raw.object.get("vias")) |vias| for (vias.array.items, routes.vias) |raw_via, via| {
+        if (!viaMatches(raw_via, via)) return false;
+    };
+    if (raw.object.get("zones")) |zones| for (zones.array.items, routes.zones) |raw_zone, zone| {
+        if (!zoneMatches(raw_zone, zone)) return false;
+    };
+    if (raw.object.get("rf_paths")) |paths| for (paths.array.items, routes.rf_paths) |raw_path, path| {
+        if (!rfPathMatches(raw_path, path)) return false;
+    };
+    return true;
+}
+
+fn outlineMatchesParsed(row: std.json.Value, parsed: ?page.SavedOutline) bool {
+    const raw = row.object.get("outline") orelse return parsed == null;
+    const outline = parsed orelse return false;
+    inline for (.{ "x", "y", "w", "h" }) |key| if (raw.object.get(key)) |value| {
+        if (!nearlyEqual(jsonNum(value), @field(outline, key))) return false;
+    };
+    if (raw.object.get("sketch")) |raw_sketch| {
+        const parsed_sketch = outline.sketch orelse return false;
+        if (!shape_sketch_json.matches(raw_sketch, parsed_sketch)) return false;
+    } else if (outline.sketch != null) return false;
+    if (raw.object.get("pts")) |points| {
+        const parsed_points = outline.pts orelse return false;
+        if (!rawPointsMatch(points, parsed_points)) return false;
+    } else if (outline.pts != null) {
+        return false;
+    }
+    if (raw.object.get("radii")) |radii| {
+        const parsed_radii = outline.radii orelse return false;
+        if (parsed_radii.len != radii.array.items.len) return false;
+        var rounded: usize = 0;
+        for (radii.array.items, parsed_radii) |radius, parsed_radius| {
+            if (!nearlyEqual(jsonNum(radius), parsed_radius)) return false;
+            if (parsed_radius > 0) rounded += 1;
+        }
+        if (outline.derived.arcs.len != rounded) return false;
+    } else if (outline.radii != null) {
+        return false;
+    }
+    return true;
+}
+
+fn fabricationLayersMatchParsed(row: std.json.Value, parsed: []const page.SavedFabricationLayer) bool {
+    const raw = row.object.get("fabrication_layers") orelse return parsed.len == 0;
+    if (raw.array.items.len != parsed.len) return false;
+    for (raw.array.items, parsed) |raw_layer, layer| {
+        if (!std.mem.eql(u8, rawString(raw_layer.object.get("name")), layer.name)) return false;
+        const regions = raw_layer.object.get("regions").?;
+        if (regions.array.items.len != layer.regions.len) return false;
+        for (regions.array.items, layer.regions) |raw_region, region| {
+            if (!rawPointsMatch(raw_region, region)) return false;
+        }
+        if (raw_layer.object.get("sketches")) |sketches| {
+            if (sketches.array.items.len != layer.sketches.len) return false;
+            for (sketches.array.items, layer.sketches) |raw_sketch, sketch| {
+                if ((raw_sketch != .null) != (sketch != null)) return false;
+                if (raw_sketch != .null and !shape_sketch_json.matches(raw_sketch, sketch.?)) return false;
+            }
+        } else if (layer.sketches.len != 0) return false;
+    }
+    return true;
+}
+
+/// Prove the strict raw row and the separately allocated typed model are a
+/// one-to-one interpretation. This catches allocation failures in the editor's
+/// compatibility parsers that would otherwise turn valid copper or silk into
+/// a partial/empty model after raw validation succeeded.
+pub fn selectedLayoutParsedEvidence(
+    alloc: std.mem.Allocator,
+    root: std.json.Value,
+    layout: page.SavedLayout,
+) bool {
+    if (!selectedLayoutEvidence(alloc, root, layout.name)) return false;
+    const row = selectedRow(root, layout.name) orelse return false;
+    const parts = row.object.get("parts").?;
+    if (parts.array.items.len != layout.parts.len) return false;
+    for (parts.array.items, layout.parts) |raw_part, part| if (!partPoseMatches(raw_part, part)) return false;
+    if (!routesMatchParsed(row, layout.routes)) return false;
+    if (!outlineMatchesParsed(row, layout.outline)) return false;
+    if (!fabricationLayersMatchParsed(row, layout.fabrication_layers)) return false;
+    const raw_texts = row.object.get("texts") orelse return layout.texts.len == 0;
+    if (raw_texts.array.items.len != layout.texts.len) return false;
+    for (raw_texts.array.items, layout.texts) |raw_text, text| {
+        if (!nearlyEqual(jsonNum(raw_text.object.get("x")), text.x)) return false;
+        if (!nearlyEqual(jsonNum(raw_text.object.get("y")), text.y)) return false;
+        if (!nearlyEqual(jsonNum(raw_text.object.get("rot")), text.rot)) return false;
+        if (!nearlyEqual(jsonNum(raw_text.object.get("size")), text.size)) return false;
+        if (!std.mem.eql(u8, rawString(raw_text.object.get("text")), text.text)) return false;
+        if ((std.mem.eql(u8, rawString(raw_text.object.get("side")), "bottom")) != text.bottom) return false;
+        if (jsonFlag(raw_text.object.get("fabrication_id")) != text.fabrication_id) return false;
+        const subcircuit = rawString(raw_text.object.get("subcircuit"));
+        const testpoint = rawString(raw_text.object.get("testpoint"));
+        if (subcircuit.len == 0 and testpoint.len == 0) {
+            if (text.owner != null) return false;
+        } else if (text.owner) |owner| switch (owner) {
+            .subcircuit => |value| if (!std.mem.eql(u8, subcircuit, value)) return false,
+            .testpoint => |value| if (!std.mem.eql(u8, testpoint, value)) return false,
+        } else return false;
+    }
+    return true;
+}
+
+// spec: fabrication-release - selected layout evidence rejects every malformed or silently defaulted manufacturing record before release
+test "strict selected layout evidence rejects dropped manufacturing geometry" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    const valid =
+        "{\"default\":\"release\",\"layouts\":[{\"name\":\"release\",\"kind\":\"manual\"," ++
+        "\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":2,\"rot\":0}],\"routes\":{" ++
+        "\"tracks\":[{\"x1\":0,\"y1\":0,\"x2\":1,\"y2\":1,\"w\":0.2,\"net\":\"N\"}]," ++
+        "\"vias\":[{\"x\":1,\"y\":1,\"d\":0.5,\"drill\":0.25,\"net\":\"N\"}]," ++
+        "\"zones\":[{\"net\":\"GND\",\"layer\":\"F.Cu\",\"poly\":[[0,0],[2,0],[2,2]]}]," ++
+        "\"rf_paths\":[{\"net\":\"RF\",\"samples\":[[0,0,0.2],[1,0,0.2]]}]}," ++
+        "\"outline\":{\"x\":0,\"y\":0,\"w\":10,\"h\":5}}]}";
+    const valid_root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, valid, .{});
+    try std.testing.expect(selectedLayoutEvidence(alloc, valid_root, "release"));
+
+    const invalid = [_][]const u8{
+        "{\"default\":\"release\",\"layouts\":[{\"name\":\"release\",\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":2,\"rot\":0}],\"routes\":{\"tracks\":[{\"x1\":0,\"y1\":0,\"x2\":1,\"y2\":1,\"net\":\"N\"}]}}]}",
+        "{\"default\":\"release\",\"layouts\":[{\"name\":\"release\",\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":2,\"rot\":0}],\"routes\":{\"tracks\":[{\"x1\":0,\"y1\":0,\"x2\":2,\"y2\":2,\"xm\":1,\"ym\":1,\"w\":0.2,\"net\":\"N\"}]}}]}",
+        "{\"default\":\"release\",\"layouts\":[{\"name\":\"release\",\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":2,\"rot\":0}],\"routes\":{\"vias\":[{\"x\":1,\"y\":1,\"d\":0.5,\"drill\":\"bad\",\"net\":\"N\"}]}}]}",
+        "{\"default\":\"release\",\"layouts\":[{\"name\":\"release\",\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":2,\"rot\":0}],\"routes\":{\"zones\":[{\"net\":\"GND\",\"layer\":\"F.Cu\",\"poly\":[[0,0],[1],[1,1]]}]}}]}",
+        "{\"default\":\"release\",\"layouts\":[{\"name\":\"release\",\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":2,\"rot\":0}],\"routes\":{\"zones\":[{\"net\":\"GND\",\"layer\":\"F.Cu\",\"poly\":[[0,0],[1,0],[2,0]]}]}}]}",
+        "{\"default\":\"release\",\"layouts\":[{\"name\":\"release\",\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":2,\"rot\":0}],\"routes\":{\"zones\":[{\"net\":\"GND\",\"layers\":[],\"poly\":[[0,0],[2,0],[2,2]]}]}}]}",
+        "{\"default\":\"release\",\"layouts\":[{\"name\":\"release\",\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":2,\"rot\":0}],\"routes\":{\"zones\":[{\"net\":\"GND\",\"layers\":[\"\"],\"poly\":[[0,0],[2,0],[2,2]]}]}}]}",
+        "{\"default\":\"release\",\"layouts\":[{\"name\":\"release\",\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":2,\"rot\":0}],\"routes\":{\"track\":[{\"x1\":0,\"y1\":0,\"x2\":1,\"y2\":1,\"w\":0.2,\"net\":\"N\"}]}}]}",
+        "{\"default\":\"release\",\"layouts\":[{\"name\":\"release\",\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":2,\"rot\":0}],\"routes\":{\"tracks\":[{\"x1\":0,\"y1\":0,\"x2\":1,\"y2\":1,\"w\":0.2,\"net\":\"N\",\"widht\":0.3}]}}]}",
+        "{\"default\":\"release\",\"layouts\":[{\"name\":\"release\",\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":2,\"rot\":0}],\"routes\":{\"zones\":[{\"net\":\"GND\",\"layer\":42,\"layers\":[\"F.Cu\"],\"poly\":[[0,0],[2,0],[2,2]]}]}}]}",
+        "{\"default\":\"release\",\"layouts\":[{\"name\":\"release\",\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":2,\"rot\":0}],\"routes\":{\"zones\":[{\"net\":\"GND\",\"layer\":\"B.Cu\",\"layers\":[\"F.Cu\"],\"poly\":[[0,0],[2,0],[2,2]]}]}}]}",
+        "{\"default\":\"release\",\"layouts\":[{\"name\":\"release\",\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":2,\"rot\":0}],\"routes\":{\"rf_paths\":[{\"net\":\"RF\",\"samples\":[[0,0],[1,0,0.2]]}]}}]}",
+        "{\"default\":\"release\",\"layouts\":[{\"name\":\"release\",\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":2,\"rot\":0}],\"outline\":{\"pts\":[[0,0],[1],[1,1]]}}]}",
+        "{\"default\":\"release\",\"layouts\":[{\"name\":\"release\",\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":2,\"rot\":0}],\"outline\":{\"pts\":[[0,0],[1,0],[2,0]]}}]}",
+        "{\"default\":\"release\",\"layouts\":[{\"name\":\"release\",\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":2,\"rot\":0}],\"outline\":{\"pts\":[[0,0],[2,0],[2,2],[1,2],[0,2]],\"radii\":[0,0,0,1,0]}}]}",
+        "{\"default\":\"release\",\"layouts\":[{\"name\":\"release\",\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":2,\"rot\":0}],\"fabrication_layers\":[{\"name\":\"adhesive.gbr\",\"regions\":[[[0,0],[1],[1,1]]]}]}]}",
+        "{\"default\":\"release\",\"layouts\":[{\"name\":\"release\",\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":2,\"rot\":0}],\"texts\":[{\"text\":\"REV A\",\"x\":1,\"y\":2,\"rot\":0,\"size\":\"bad\"}]}]}",
+        "{\"default\":\"release\",\"layouts\":[{\"name\":\"release\",\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":2,\"rot\":0}],\"texts\":[{\"text\":\"REV A\",\"x\":1,\"y\":2,\"rot\":45,\"size\":1}]}]}",
+        "{\"default\":\"release\",\"layouts\":[{\"name\":\"release\",\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":2,\"rot\":0}],\"texts\":[{\"text\":\"REV A\",\"x\":1,\"y\":2,\"rot\":0,\"size\":1,\"subcircuit\":\"a\",\"testpoint\":\"b\"}]}]}",
+        "{\"default\":\"release\",\"layouts\":[{\"name\":\"release\",\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":2,\"rot\":0},{\"ref\":\"U1\",\"x\":3,\"y\":4,\"rot\":0}]}]}",
+        "{\"default\":\"release\",\"layouts\":[{\"name\":\"release\",\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":2,\"rot\":0}]},{\"name\":\"release\",\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":2,\"rot\":0}]}]}",
+        "{\"default\":\"missing\",\"layouts\":[{\"name\":\"release\",\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":2,\"rot\":0}]}]}",
+    };
+    for (invalid) |source| {
+        const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, source, .{});
+        try std.testing.expect(!selectedLayoutEvidence(alloc, root, "release"));
+    }
+}
+
+fn parsedEvidenceTestLayout(alloc: std.mem.Allocator, row: std.json.Value) page.SavedLayout {
+    return .{
+        .name = jsonStrField(row.object.get("name")),
+        .kind = jsonStrField(row.object.get("kind")),
+        .ts = jsonInt(row.object.get("ts")),
+        .score = null,
+        .parts = parsePartPoses(alloc, row.object.get("parts")) orelse &.{},
+        .routes = parseSavedRoutes(alloc, row.object.get("routes")),
+        .outline = parseSavedOutline(alloc, row.object.get("outline")),
+        .fabrication_layers = parseSavedFabricationLayers(alloc, row.object.get("fabrication_layers")),
+        .texts = parseSavedTexts(alloc, row.object.get("texts")),
+    };
+}
+
+fn redundantGeometryConflictsAreRejected(alloc: std.mem.Allocator, sources: []const []const u8) !bool {
+    for (sources) |source| {
+        const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, source, .{});
+        const row = root.object.get("layouts").?.array.items[0];
+        if (!selectedLayoutEvidence(alloc, root, "release")) return false;
+        if (selectedLayoutParsedEvidence(alloc, root, parsedEvidenceTestLayout(alloc, row))) return false;
+    }
+    return true;
+}
+
+// spec: fabrication-release - redundant saved polygons and dimensions must match the exact sketch-derived manufacturing geometry or release evidence is incomplete
+test "selected layout rejects conflicting redundant sketch geometry" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const square_sketch =
+        "{\"version\":1,\"points\":[{\"id\":1,\"x\":0,\"y\":0},{\"id\":2,\"x\":4,\"y\":0},{\"id\":3,\"x\":4,\"y\":4},{\"id\":4,\"x\":0,\"y\":4}]," ++
+        "\"curves\":[{\"id\":11,\"kind\":\"line\",\"a\":1,\"b\":2},{\"id\":12,\"kind\":\"line\",\"a\":2,\"b\":3},{\"id\":13,\"kind\":\"line\",\"a\":3,\"b\":4},{\"id\":14,\"kind\":\"line\",\"a\":4,\"b\":1}],\"constraints\":[]}";
+    const sources = [_][]const u8{
+        "{\"layouts\":[{\"name\":\"release\",\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":1,\"rot\":0}],\"routes\":{\"zones\":[{\"net\":\"GND\",\"layer\":\"F.Cu\",\"poly\":[[10,10],[14,10],[14,14],[10,14]],\"sketch\":" ++ square_sketch ++ "}]}}]}",
+        "{\"layouts\":[{\"name\":\"release\",\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":1,\"rot\":0}],\"outline\":{\"x\":10,\"y\":10,\"w\":4,\"h\":4,\"pts\":[[10,10],[14,10],[14,14],[10,14]],\"sketch\":" ++ square_sketch ++ "}}]}",
+        "{\"layouts\":[{\"name\":\"release\",\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":1,\"rot\":0}],\"fabrication_layers\":[{\"name\":\"adhesive.gbr\",\"regions\":[[[10,10],[14,10],[14,14],[10,14]]],\"sketches\":[" ++ square_sketch ++ "]}]}]}",
+    };
+    try std.testing.expect(try redundantGeometryConflictsAreRejected(arena_state.allocator(), &sources));
 }
 
 /// Parse a `[{"ref","x","y","rot"}, …]` JSON array into `page.PartPose`s. Null when
@@ -274,14 +1077,14 @@ pub fn writeSavedZonesJson(w: *std.Io.Writer, zones: []const page.SavedZone) std
     for (zones, 0..) |zone, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"net\":");
-        try page.writeJsonStr(w, zone.net);
+        try writeJsonStr(w, zone.net);
         try w.writeAll(",\"layer\":");
-        try page.writeJsonStr(w, saved_zone.primaryLayer(&zone));
+        try writeJsonStr(w, saved_zone.primaryLayer(&zone));
         if (zone.layers.len > 1) {
             try w.writeAll(",\"layers\":[");
             for (zone.layers, 0..) |layer_name, li| {
                 if (li > 0) try w.writeByte(',');
-                try page.writeJsonStr(w, layer_name);
+                try writeJsonStr(w, layer_name);
             }
             try w.writeByte(']');
         }
@@ -296,7 +1099,7 @@ pub fn writeSavedZonesJson(w: *std.Io.Writer, zones: []const page.SavedZone) std
         });
         if (zone.g.len > 0) {
             try w.writeAll(",\"g\":");
-            try page.writeJsonStr(w, zone.g);
+            try writeJsonStr(w, zone.g);
         }
         if (zone.sketch) |sketch| {
             try w.writeAll(",\"sketch\":");
@@ -314,7 +1117,7 @@ pub fn writeSavedFabricationLayersJson(w: *std.Io.Writer, layers: []const page.S
     for (layers, 0..) |layer, i| {
         if (i > 0) try w.writeByte(',');
         try w.writeAll("{\"name\":");
-        try page.writeJsonStr(w, layer.name);
+        try writeJsonStr(w, layer.name);
         try w.writeAll(",\"regions\":[");
         for (layer.regions, 0..) |region, ri| {
             if (ri > 0) try w.writeByte(',');
@@ -378,9 +1181,9 @@ pub fn writePartEdgeDimensionsJson(w: *std.Io.Writer, dimensions: []const page.S
     for (dimensions, 0..) |dimension, i| {
         if (i > 0) try w.writeByte(',');
         try w.writeAll("{\"ref\":");
-        try page.writeJsonStr(w, dimension.ref);
+        try writeJsonStr(w, dimension.ref);
         try w.writeAll(",\"axis\":");
-        try page.writeJsonStr(w, dimension.axis);
+        try writeJsonStr(w, dimension.axis);
         try w.print(",\"edge_id\":{d},\"offset\":{d}}}", .{ dimension.edge_id, dimension.offset });
     }
     try w.writeByte(']');
@@ -389,28 +1192,28 @@ pub fn writePartEdgeDimensionsJson(w: *std.Io.Writer, dimensions: []const page.S
 /// Serialize one saved physical heatsink assembly.
 pub fn writeSavedHeatsinkJson(w: *std.Io.Writer, sink: page.SavedHeatsink) std.Io.Writer.Error!void {
     try w.print("{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d},\"side\":", .{ sink.x, sink.y, sink.w, sink.h });
-    try page.writeJsonStr(w, sink.side);
+    try writeJsonStr(w, sink.side);
     try w.writeAll(",\"target_ref\":");
-    try page.writeJsonStr(w, sink.target_ref);
+    try writeJsonStr(w, sink.target_ref);
     try w.writeAll(",\"material\":");
-    try page.writeJsonStr(w, sink.material);
+    try writeJsonStr(w, sink.material);
     try w.print(",\"base_mm\":{d},\"fin_height_mm\":{d},\"fin_thickness_mm\":{d},\"fin_gap_mm\":{d},\"fin_axis\":", .{ sink.base_mm, sink.fin_height_mm, sink.fin_thickness_mm, sink.fin_gap_mm });
-    try page.writeJsonStr(w, sink.fin_axis);
+    try writeJsonStr(w, sink.fin_axis);
     try w.print(",\"pad_thickness_mm\":{d},\"pad_k_w_mk\":{d}}}", .{ sink.pad_thickness_mm, sink.pad_k_w_mk });
 }
 
 /// Serialize one board-level fabrication text label.
 pub fn writeBoardTextJson(w: *std.Io.Writer, text: font5x7.BoardText) std.Io.Writer.Error!void {
     try w.print("{{\"x\":{d},\"y\":{d},\"rot\":{d},\"side\":\"{s}\",\"size\":{d},\"text\":", .{ text.x, text.y, text.rot, if (text.bottom) "bottom" else "top", text.size });
-    try page.writeJsonStr(w, text.text);
+    try writeJsonStr(w, text.text);
     if (text.owner) |owner| switch (owner) {
         .subcircuit => |subcircuit| {
             try w.writeAll(",\"subcircuit\":");
-            try page.writeJsonStr(w, subcircuit);
+            try writeJsonStr(w, subcircuit);
         },
         .testpoint => |testpoint| {
             try w.writeAll(",\"testpoint\":");
-            try page.writeJsonStr(w, testpoint);
+            try writeJsonStr(w, testpoint);
         },
     };
     if (text.fabrication_id) try w.writeAll(",\"fabrication_id\":true");

@@ -85,6 +85,7 @@ pub fn build(
             const incoming = PowerRail{
                 .name = base,
                 .nominal = nominal,
+                .rated_voltage = resolveRailRatedVoltage(block, base, port),
                 .source_ref_des = sb.name,
                 .source_port = port.name,
                 .source_path = path,
@@ -100,6 +101,29 @@ pub fn build(
             }
             try by_root.put(allocator, root, incoming);
         }
+    }
+
+    // Board-edge input ports are sources too. Historically they appeared only
+    // in the current budget, which meant a release check could not recover the
+    // rated maximum of a raw input rail. Add them when no on-board source won
+    // the same union-find root.
+    for (block.ports) |port| {
+        if (!std.mem.eql(u8, port.direction, "in")) continue;
+        if (port.isDeclaredNonPower() or !port.isPowerSource()) continue;
+        const base = na.baseNetName(if (port.net.len > 0) port.net else port.name);
+        if (std.mem.eql(u8, base, gnd_name)) continue;
+        const root = na.findRoot(&net_parent, base);
+        if (by_root.contains(root)) continue;
+        const path = try std.fmt.allocPrint(allocator, "@external/{s}", .{port.name});
+        try by_root.put(allocator, root, .{
+            .name = base,
+            .nominal = port.nominal orelse midpoint(port.rated_min, port.rated_max),
+            .rated_voltage = .{ .min = port.rated_min, .max = port.rated_max },
+            .source_port = port.name,
+            .source_path = path,
+            .capacity_typ = port.current_typ,
+            .capacity_max = port.current_max,
+        });
     }
 
     // Step 3: attach ferrite-bridged aliases to each rail. Walk net_parent
@@ -285,6 +309,23 @@ fn resolveRailVoltage(block: *const DesignBlock, rail_name: []const u8) ?f64 {
         }
     }
     return null;
+}
+
+fn midpoint(min: ?f64, max: ?f64) ?f64 {
+    if (min != null and max != null) return (min.? + max.?) * rating_midpoint;
+    return max orelse min;
+}
+
+fn resolveRailRatedVoltage(block: *const DesignBlock, rail_name: []const u8, source: Port) PowerRail.RatedVoltage {
+    if (source.rated_min != null or source.rated_max != null) {
+        return .{ .min = source.rated_min, .max = source.rated_max };
+    }
+    for (block.ports) |port| {
+        const port_net = if (port.net.len > 0) port.net else port.name;
+        if (!std.mem.eql(u8, port_net, rail_name)) continue;
+        return .{ .min = port.rated_min, .max = port.rated_max };
+    }
+    return .{};
 }
 
 fn sectionVoltage(sec: env_mod.Section, rail_name: []const u8) ?f64 {
@@ -561,6 +602,32 @@ test "build falls back to top-level design port nominal" {
     const rails = try build(alloc, &outer);
     defer freeRails(alloc, rails);
     try std.testing.expectEqual(@as(?f64, 3.3), rails[0].nominal);
+}
+
+// spec: eval/rails - Preserves a rail's rated voltage range for worst-case release checks
+test "build preserves top-level rated maximum" {
+    const alloc = std.testing.allocator;
+    const top_ports = [_]Port{.{
+        .name = "V_12V",
+        .net = "V_12V",
+        .direction = "in",
+        .kind = "power",
+        .rated_min = 11.4,
+        .rated_max = 12.6,
+    }};
+    const outer: DesignBlock = .{
+        .name = "outer",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &top_ports,
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    const built = try build(alloc, &outer);
+    defer freeRails(alloc, built);
+    try std.testing.expectEqual(@as(usize, 1), built.len);
+    try std.testing.expectEqual(@as(?f64, 12.6), built[0].rated_voltage.max);
 }
 
 // spec: eval/rails - Excludes GND from the derived rail set

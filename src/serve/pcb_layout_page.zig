@@ -57,7 +57,10 @@ const fab_identity = @import("../fab_identity.zig");
 const fab_preview = @import("../fab_preview.zig");
 const subcircuit_silkscreen = @import("../subcircuit_silkscreen.zig");
 const fab_readiness = @import("../fab_readiness.zig");
+const fab_gate = @import("../fab_gate.zig");
+const fab_release = @import("../fab_release.zig");
 const fab_filename = @import("fab_filename.zig");
+const subprocess = @import("subprocess.zig");
 
 // One spelling feeds both the downloaded package and the parsed CAM preview.
 const zipfile = @import("../zipfile.zig");
@@ -96,6 +99,8 @@ const numeric = @import("../numeric.zig");
 const escape = @import("../escape.zig");
 const Server = serve_root.Server;
 const sidecar_json = @import("layout_sidecar_json.zig");
+const sidecar_store = @import("../layout_sidecar_store.zig");
+const sidecar_types = @import("../layout_sidecar_types.zig");
 const saved_zone = @import("saved_zone.zig");
 const layout_layers = @import("layout_layers.zig");
 const copper_ids = @import("copper_ids.zig");
@@ -116,8 +121,9 @@ const parseSavedFabricationLayers = sidecar_json.parseSavedFabricationLayers;
 const parseSavedHeatsink = sidecar_json.parseSavedHeatsink;
 const parseSavedTexts = sidecar_json.parseSavedTexts;
 const parseOutlinePts = sidecar_json.parseOutlinePts;
+pub const writeJsonStr = sidecar_json.writeJsonStr;
 
-pub const HandlerError = fab_preview.Error;
+pub const HandlerError = fab_preview.Error || error{InvalidReadinessJson};
 
 // SVG framing.
 const scale_min: f64 = 6.0; // px per mm
@@ -177,7 +183,7 @@ const checked_glyph = " checked";
 /// snapshots the user named plus an auto-recorded history of optimizer
 /// runs) under `"layouts"`, the KiCad-sync `"default"` marker, and the
 /// single-slot optimizer cache under `"cache"`.
-pub const layouts_ext = ".layouts.json";
+pub const layouts_ext = sidecar_store.layouts_ext;
 
 /// Ceiling on a `.layouts.json` read. A board carrying several ROUTED saved
 /// layouts legitimately runs to megabytes — each one stores its own copper —
@@ -185,17 +191,15 @@ pub const layouts_ext = ".layouts.json";
 /// the viewer, the KiCad sync seed and the fab outputs down with them (they all
 /// resolve the ★ through this same read). Generous on purpose; the read still
 /// refuses to pull an unbounded file into memory.
-pub const sidecar_max_bytes: usize = 16 << 20;
+pub const sidecar_max_bytes = sidecar_store.sidecar_max_bytes;
 
 /// Layout `kind` tags. `manual` = a snapshot the user saved by name; `auto` =
 /// one recorded automatically each time the optimizer regenerated.
-pub const kind_manual = "manual";
-const kind_auto = "auto";
+pub const kind_manual = sidecar_store.kind_manual;
+const kind_auto = sidecar_store.kind_auto;
 
 /// Cap on auto-recorded entries kept per design. On each record the oldest
 /// auto entries past this are pruned; manual snapshots are never auto-pruned.
-const max_auto_layouts: usize = 12;
-
 /// One placed part within a saved layout: ref-des + centre (mm) + rotation,
 /// plus the renumber-stable `origin` (the part's module-local `origin_key`).
 /// The ref-des is volatile — it shifts when the part renumbers or when the
@@ -204,19 +208,7 @@ const max_auto_layouts: usize = 12;
 /// is the module-local source name, invariant across both, so a Load matches
 /// on it first and falls back to `ref` only for legacy entries saved before
 /// `origin` was recorded (empty string). See `rekeyPosesByOrigin`.
-pub const PartPose = struct {
-    ref: []const u8,
-    x: f64,
-    y: f64,
-    rot: f64,
-    origin: []const u8 = "",
-    /// Board side (viewer F-flip state). Persisted as `"side":"bottom"` only
-    /// when bottom, so legacy top-side sidecars stay byte-identical.
-    side: optimizer.Side = .top,
-    /// Editor lock (viewer refuses drag/rotate/flip). Persisted as
-    /// `"locked":true` only when set.
-    locked: bool = false,
-};
+pub const PartPose = sidecar_types.PartPose;
 
 /// One driving PCB-editor dimension from a footprint origin to a straight
 /// board-outline edge. `axis` is `"x"` for a horizontal dimension to a
@@ -224,39 +216,19 @@ pub const PartPose = struct {
 /// `edge_id` is the stable curve id in `SavedOutline.sketch`; `offset` is the
 /// signed origin coordinate minus the edge coordinate, so moving that edge
 /// repositions only the constrained axis of the footprint.
-pub const SavedPartEdgeDimension = struct {
-    ref: []const u8,
-    axis: []const u8,
-    edge_id: u32,
-    offset: f64,
-};
+pub const SavedPartEdgeDimension = sidecar_types.SavedPartEdgeDimension;
 
 /// The weighted `objective` the optimizer minimizes plus its visible HPWL +
 /// decoupling-loop terms, stored with a layout so the list shows "better/worse"
 /// at a glance without re-running the optimizer. `objective` is 0 for legacy
 /// entries saved before it was recorded.
-const LayoutScore = struct { hpwl: f64, loop: f64, caps: usize, objective: f64 = 0 };
+const LayoutScore = sidecar_types.LayoutScore;
 
 /// One physical finned heatsink authored on a saved PCB layout. The rectangle
 /// is the base/contact footprint in board coordinates; `side` is the physical
 /// PCB face, not a package-relative direction. `target_ref` binds that face to
 /// the package whose directional theta-JC path the thermal solver must use.
-pub const SavedHeatsink = struct {
-    x: f64,
-    y: f64,
-    w: f64,
-    h: f64,
-    side: []const u8 = "bottom",
-    target_ref: []const u8 = "",
-    material: []const u8 = "aluminum_6063",
-    base_mm: f64 = 2,
-    fin_height_mm: f64 = 10,
-    fin_thickness_mm: f64 = 1,
-    fin_gap_mm: f64 = 1.5,
-    fin_axis: []const u8 = "length",
-    pad_thickness_mm: f64 = 0.5,
-    pad_k_w_mk: f64 = 6,
-};
+pub const SavedHeatsink = sidecar_types.SavedHeatsink;
 
 /// A named saved layout: name, kind, capture time (unix s, 0 = unknown),
 /// optional score, and the placement itself (newest first within a file).
@@ -264,43 +236,17 @@ pub const SavedHeatsink = struct {
 /// placement + vias from; it's stored once at the top level of the file
 /// (`"default":"<name>"`) and reflected here on the matching entry. At most
 /// one entry has `default = true`.
-pub const SavedLayout = struct {
-    name: []const u8,
-    kind: []const u8,
-    ts: i64,
-    score: ?LayoutScore,
-    parts: []const PartPose,
-    default: bool = false,
-    /// This layout was produced by the Rough seed (`?rough=1`) — the
-    /// AI-friendly module-clustered starting point a human then hand-finishes.
-    /// Recorded so the schematic's Module-layouts panel can show, per
-    /// sub-module, that a rough placement has been seeded (vs. starred/done).
-    rough: bool = false,
-    /// Routed copper captured with the poses (null = never routed/saved).
-    routes: ?SavedRoutes = null,
-    /// User-drawn board outline captured with the poses (null = none drawn).
-    outline: ?SavedOutline = null,
-    /// Visually edited backing polygons; empty keeps the authored defaults.
-    fabrication_layers: []const SavedFabricationLayer = &.{},
-    /// User-authored physical heatsink assembly for this exact board layout.
-    heatsink: ?SavedHeatsink = null,
-    /// Board-level silkscreen text labels placed by the Text tool (empty when
-    /// none). Persisted with the layout so a Save → reload round-trips them,
-    /// and the ★ layout's set is what the Gerber silk / PNG render.
-    texts: []const font5x7.BoardText = &.{},
-    /// PCB-editor driving dimensions from footprint origins to outline edges.
-    dimensions: []const SavedPartEdgeDimension = &.{},
-};
+pub const SavedLayout = sidecar_types.SavedLayout;
 
 /// Canonical creator tags persisted on saved tracks and vias. Known values are
 /// `human` (the PCB editor), `agent` (`add_tracks`), `autorouter` (route/repair
 /// engines), and `imported` (KiCad). The empty default is deliberately
 /// `unknown`: old sidecars predate provenance and must not be relabelled on
 /// their next save.
-pub const route_source_human = "human";
-pub const route_source_agent = "agent";
-pub const route_source_autorouter = "autorouter";
-pub const route_source_imported = "imported";
+pub const route_source_human = sidecar_types.route_source_human;
+pub const route_source_agent = sidecar_types.route_source_agent;
+pub const route_source_autorouter = sidecar_types.route_source_autorouter;
+pub const route_source_imported = sidecar_types.route_source_imported;
 
 /// One persisted routed-copper segment of a saved layout. Field names match
 /// the live route JSON (`l` layer, `w` width; net by NAME — net indices shift
@@ -311,22 +257,7 @@ pub const route_source_imported = "imported";
 /// legacy layout whose provenance is unknown. `id` is the stable, user-visible
 /// segment handle shown by the inspector. Legacy empty IDs are deterministically
 /// derived when serialized, so merely saving an old layout backfills them.
-pub const SavedTrack = struct {
-    x1: f64,
-    y1: f64,
-    x2: f64,
-    y2: f64,
-    /// Native circular-arc midpoint. Both coordinates set = a KiCad-style
-    /// start/mid/end arc; null keeps the legacy straight segment.
-    xm: ?f64 = null,
-    ym: ?f64 = null,
-    l: u8 = 0,
-    w: f64,
-    net: []const u8 = "",
-    g: []const u8 = "",
-    source: []const u8 = "",
-    id: []const u8 = "",
-};
+pub const SavedTrack = sidecar_types.SavedTrack;
 
 /// One persisted via of a saved layout (same shape as the live route JSON).
 /// `f` is fence provenance: an RF-fenced net name, or the reserved
@@ -341,62 +272,45 @@ pub const SavedTrack = struct {
 /// `layout_layers`. `source` has the same creator-tag semantics as SavedTrack.
 /// `id` is the stable, user-visible handle shown by the inspector, with legacy
 /// empty IDs deterministically backfilled on serialization.
-pub const SavedVia = struct {
-    x: f64,
-    y: f64,
-    d: f64,
-    drill: f64 = 0,
-    net: []const u8 = "",
-    g: []const u8 = "",
-    f: []const u8 = "",
-    source: []const u8 = "",
-    s: ?[2]u8 = null,
-    id: []const u8 = "",
-};
+pub const SavedVia = sidecar_types.SavedVia;
 
 /// Persisted custom/KiCad copper-zone geometry shared with sidecar consumers.
-pub const SavedZone = saved_zone.SavedZone;
+pub const SavedZone = sidecar_types.SavedZone;
 const savedZoneLayers = saved_zone.layers;
 const savedZonePrimaryLayer = saved_zone.primaryLayer;
 
 /// A saved layout's persisted copper — routed tracks/vias plus optional
 /// imported KiCad zone polygons. The default keeps old sidecars and existing
 /// struct literals source-compatible.
-pub const SavedRoutes = struct {
-    tracks: []const SavedTrack,
-    vias: []const SavedVia,
-    zones: []const SavedZone = &.{},
-    rf_paths: []const struct {
-        net: []const u8,
-        layer: u8,
-        samples: []const rf_path_solver.Sample,
-        /// Stable editor handles whose geometry owns this swept region. A
-        /// collar repeats its main path's IDs so either one is invalidated
-        /// atomically when any underlying route segment changes.
-        track_ids: []const []const u8 = &.{},
-        /// A pad-face collar belongs to the handles above but never owns them.
-        portal: bool = false,
-    } = &.{},
-};
-const SavedRfPath = @typeInfo(@FieldType(SavedRoutes, "rf_paths")).pointer.child;
+pub const SavedRoutes = sidecar_types.SavedRoutes;
+const SavedRfPath = sidecar_types.SavedRfPath;
 /// Replace any persisted board-derived ring with the ring implied by the
 /// CURRENT outline and DSL. This makes a saved layout a cache of the generated
 /// vias, never their authority: outline/rule edits cannot leave stale barrels.
-fn routesWithPerimeter(alloc: std.mem.Allocator, placement: optimizer.Placement, base: ?SavedRoutes) ?SavedRoutes {
+const SavedRoutesEvidence = struct {
+    routes: ?SavedRoutes,
+    complete: bool,
+};
+
+fn routesWithPerimeterEvidence(alloc: std.mem.Allocator, placement: optimizer.Placement, base: ?SavedRoutes) SavedRoutesEvidence {
     const old = base orelse SavedRoutes{ .tracks = &.{}, .vias = &.{} };
     var vias: std.ArrayList(SavedVia) = .empty;
     for (old.vias) |via| {
         if (std.mem.eql(u8, via.f, perimeter_fence.provenance)) {
-            if (!perimeter_fence.viaServesPad(alloc, placement, via.net, via.x, via.y, via.d)) continue;
+            const serves_pad = perimeter_fence.viaServesPad(alloc, placement, via.net, via.x, via.y, via.d) catch
+                return .{ .routes = base, .complete = false };
+            if (!serves_pad) continue;
             var adopted = via;
             adopted.f = "";
-            vias.append(alloc, adopted) catch return base;
+            vias.append(alloc, adopted) catch return .{ .routes = base, .complete = false };
             continue;
         }
-        vias.append(alloc, via) catch return base;
+        vias.append(alloc, via) catch return .{ .routes = base, .complete = false };
     }
-    const restored = restoreRoutes(alloc, .{ .tracks = old.tracks, .vias = vias.items, .zones = old.zones, .rf_paths = old.rf_paths }, placement.nets) orelse return base;
-    const sites = if (perimeter_fence.append(alloc, placement, restored) catch return base) |result| result.vias else &.{};
+    const restored = restoreRoutes(alloc, .{ .tracks = old.tracks, .vias = vias.items, .zones = old.zones, .rf_paths = old.rf_paths }, placement.nets) orelse
+        return .{ .routes = base, .complete = false };
+    const sites = if (perimeter_fence.append(alloc, placement, restored) catch
+        return .{ .routes = base, .complete = false }) |result| result.vias else &.{};
     for (sites) |site| {
         const net = netNameOf(placement.nets, site.net);
         var found = false;
@@ -416,10 +330,14 @@ fn routesWithPerimeter(alloc: std.mem.Allocator, placement: optimizer.Placement,
             .net = net,
             .f = perimeter_fence.provenance,
             .source = route_source_autorouter,
-        }) catch return base;
+        }) catch return .{ .routes = base, .complete = false };
     }
-    if (base == null and vias.items.len == 0) return null;
-    return .{ .tracks = old.tracks, .vias = vias.items, .zones = old.zones, .rf_paths = old.rf_paths };
+    if (base == null and vias.items.len == 0) return .{ .routes = null, .complete = true };
+    return .{ .routes = .{ .tracks = old.tracks, .vias = vias.items, .zones = old.zones, .rf_paths = old.rf_paths }, .complete = true };
+}
+
+fn routesWithPerimeter(alloc: std.mem.Allocator, placement: optimizer.Placement, base: ?SavedRoutes) ?SavedRoutes {
+    return routesWithPerimeterEvidence(alloc, placement, base).routes;
 }
 
 /// Shared JSON fragments for copper serialization — the sidecar, the page
@@ -435,43 +353,8 @@ const via_id_prefix = "via-";
 /// "ref\x00pad" / "prefix\x00origin" composite hash keys.
 const pin_key_fmt = "{s}\x00{s}";
 
-fn segmentIdHashFloat(hash: *std.hash.Wyhash, value: f64) void {
-    hash.update(std.mem.asBytes(&value));
-}
-
-/// Stable fallback for a legacy segment that predates stored IDs. Geometry,
-/// net, layer, width, and the final list ordinal make duplicate overlapping
-/// segments distinct. Once written, the ID is persisted and survives edits.
-fn fallbackSegmentId(track: SavedTrack, ordinal: usize, buf: *[segment_id_prefix.len + 16]u8) []const u8 {
-    var hash = std.hash.Wyhash.init(0x5345474d454e545f);
-    segmentIdHashFloat(&hash, track.x1);
-    segmentIdHashFloat(&hash, track.y1);
-    segmentIdHashFloat(&hash, track.x2);
-    segmentIdHashFloat(&hash, track.y2);
-    const has_mid: u8 = @intFromBool(track.xm != null and track.ym != null);
-    hash.update(std.mem.asBytes(&has_mid));
-    if (track.xm) |xm| segmentIdHashFloat(&hash, xm);
-    if (track.ym) |ym| segmentIdHashFloat(&hash, ym);
-    segmentIdHashFloat(&hash, track.w);
-    const layer = track.l;
-    const stable_ordinal: u64 = @intCast(ordinal);
-    hash.update(std.mem.asBytes(&layer));
-    hash.update(track.net);
-    hash.update(std.mem.asBytes(&stable_ordinal));
-    return std.fmt.bufPrint(buf, segment_id_prefix ++ "{x:0>16}", .{hash.final()}) catch segment_id_prefix ++ "0000000000000000";
-}
-
-fn writeTrackSegmentId(w: *std.Io.Writer, track: SavedTrack, ordinal: usize) std.Io.Writer.Error!void {
-    var buf: [segment_id_prefix.len + 16]u8 = undefined;
-    try w.writeAll(",\"id\":");
-    return writeJsonStr(w, if (track.id.len > 0) track.id else fallbackSegmentId(track, ordinal, &buf));
-}
-
-fn writeViaId(w: *std.Io.Writer, via: SavedVia, ordinal: usize) std.Io.Writer.Error!void {
-    var buf: [via_id_prefix.len + 16]u8 = undefined;
-    try w.writeAll(",\"id\":");
-    return writeJsonStr(w, if (via.id.len > 0) via.id else copper_ids.legacyVia(via, ordinal, &buf));
-}
+const writeTrackSegmentId = sidecar_json.writeTrackSegmentId;
+const writeViaId = sidecar_json.writeViaId;
 
 /// A user-DRAWN board outline (world mm) captured with a saved layout — the
 /// interactive counterpart of the authored `(board (size W H))` form (the
@@ -481,35 +364,11 @@ fn writeViaId(w: *std.Io.Writer, via: SavedVia, ordinal: usize) std.Io.Writer.Er
 /// `pts` is the closed-polygon vertex list of a ⬠ Poly outline; when set,
 /// x/y/w/h are always its bounding box (derived at parse time, so the two
 /// can never disagree). Null `pts` = a plain drawn rectangle.
-pub const SavedOutline = struct {
-    x: f64,
-    y: f64,
-    w: f64,
-    h: f64,
-    /// Nominal sharp vertices edited by the user.
-    pts: ?[]const [2]f64 = null,
-    /// Per-vertex fillet radii, index-aligned with `pts`.
-    radii: ?[]const f64 = null,
-    /// Internal physical projection, derived while parsing and deliberately
-    /// omitted by the JSON writer.
-    derived: struct {
-        poly: ?[]const [2]f64 = null,
-        arcs: []const optimizer.BoardArc = &.{},
-    } = .{},
-    /// Versioned parametric authoring intent; physical fields above are its
-    /// compiled compatibility projection when present.
-    sketch: ?shape_sketch.Sketch = null,
-};
+pub const SavedOutline = sidecar_types.SavedOutline;
 
 /// Per-layout editable positive polygons for one authored backing layer.
 /// Material, thickness, side, and footprint-cutout policy stay in source.
-pub const SavedFabricationLayer = struct {
-    name: []const u8,
-    regions: []const []const [2]f64,
-    /// Optional index-aligned native authoring geometry. `regions` remains the
-    /// compiled projection used by fabrication, 3D, and thermal consumers.
-    sketches: []const ?shape_sketch.Sketch = &.{},
-};
+pub const SavedFabricationLayer = sidecar_types.SavedFabricationLayer;
 
 /// Which layout state the page is showing — the precedence ladder made
 /// visible in the scorebar chip: source **spec** > saved **snapshot**
@@ -870,7 +729,7 @@ pub fn pcbCamJsonApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
         res.body = refusal.json;
         return;
     };
-    applyFabricationLayerOverrides(ctx.allocator, &solved.placement, solved.shown_zones.fabrication_layers);
+    _ = applyFabricationLayerOverrides(ctx.allocator, &solved.placement, solved.shown_zones.fabrication_layers);
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
     try fab_preview.writeJson(&aw.writer, ctx.allocator, .{
         .enabled = true,
@@ -1255,7 +1114,7 @@ fn writePageScripts(w: *std.Io.Writer, mode: PageScripts) std.Io.Writer.Error!vo
 /// under `src/` (evaluated with `eval`). Fallback: a reusable module under
 /// `lib/modules/` (via `modules_mod.resolveModuleBlock`, whose evaluator is
 /// stashed in `module_res` for the caller to free). Null if neither exists.
-fn resolveBlock(
+pub fn resolveBlock(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
@@ -1267,6 +1126,10 @@ fn resolveBlock(
         if (eval.evalFile(path)) |result| {
             switch (result) {
                 .design_block => |b| {
+                    const bom_path = paths.designSiblingPath(alloc, project_dir, name, ".bom") catch return b;
+                    defer alloc.free(bom_path);
+                    bom.applyExisting(alloc, b, bom_path, project_dir) catch |err|
+                        log.warn("read-only BOM load for {s} failed: {s}", .{ name, @errorName(err) });
                     resolvePdnBom(alloc, project_dir, name, b);
                     return b;
                 },
@@ -1280,8 +1143,8 @@ fn resolveBlock(
 }
 
 /// The PDN extractor consumes the selected BOM row's C/ESR/ESL properties.
-/// Ordinary PCB pages historically needed only geometry and skipped identity
-/// resolution, so pay this cost only for designs that authored AC screens.
+/// Loading is deliberately read-only: opening a page or release report must
+/// never refresh a stale BOM and thereby manufacture its own release evidence.
 fn resolvePdnBom(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
@@ -1291,17 +1154,18 @@ fn resolvePdnBom(
     if (block.pdn_intents.len == 0) return;
     const bom_path = paths.designSiblingPath(alloc, project_dir, name, ".bom") catch return;
     defer alloc.free(bom_path);
-    bom.resolveIdentities(alloc, block, bom_path, project_dir) catch |err|
-        log.warn("PDN BOM resolution for {s} failed: {s}", .{ name, @errorName(err) });
+    bom.applyExisting(alloc, block, bom_path, project_dir) catch |err|
+        log.warn("PDN BOM load for {s} failed: {s}", .{ name, @errorName(err) });
 }
 
 // spec: Web Server - A PCB design with PDN intents resolves selected BOM electrical model properties before placement
 test "PCB PDN analysis resolves the selected BOM electrical model" {
-    const alloc = std.heap.page_allocator;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
-    defer alloc.free(project_dir);
 
     try tmp.dir.createDirPath(std.testing.io, "src");
     try tmp.dir.createDirPath(std.testing.io, "lib/parts");
@@ -1319,7 +1183,7 @@ test "PCB PDN analysis resolves the selected BOM electrical model" {
         ,
     });
 
-    var instances = [_]env_mod.Instance{.{
+    var built_instances = [_]env_mod.Instance{.{
         .ref_des = "C1",
         .component = "cap-fixture",
         .value = "100nF",
@@ -1327,9 +1191,9 @@ test "PCB PDN analysis resolves the selected BOM electrical model" {
         .symbol = "Device:C",
         .id = "ab000001",
     }};
-    var block: env_mod.DesignBlock = .{
+    var built_block: env_mod.DesignBlock = .{
         .name = "Demo",
-        .instances = &instances,
+        .instances = &built_instances,
         .nets = &.{},
         .ports = &.{},
         .notes = &.{},
@@ -1337,11 +1201,18 @@ test "PCB PDN analysis resolves the selected BOM electrical model" {
         .sub_blocks = &.{},
         .pdn_intents = &.{.{ .net = "VDD", .ripple_v = 0.1 }},
     };
+    const bom_path = try paths.designSiblingPath(alloc, project_dir, "demo", ".bom");
+    try bom.resolveIdentities(alloc, &built_block, bom_path, project_dir);
 
-    resolvePdnBom(alloc, project_dir, "demo", &block);
+    var loaded_instances = [_]env_mod.Instance{built_instances[0]};
+    loaded_instances[0].properties = &.{};
+    var loaded_block = built_block;
+    loaded_block.instances = &loaded_instances;
+    resolvePdnBom(alloc, project_dir, "demo", &loaded_block);
+
     var found_esr = false;
     var found_esl = false;
-    for (instances[0].properties) |property| {
+    for (loaded_instances[0].properties) |property| {
         if (std.mem.eql(u8, property.key, "pdn-esr-ohm") and std.mem.eql(u8, property.value, "0.02")) found_esr = true;
         if (std.mem.eql(u8, property.key, "pdn-esl-h") and std.mem.eql(u8, property.value, "4e-10")) found_esl = true;
     }
@@ -4693,12 +4564,20 @@ pub const FabView = struct {
     zones: []const pour.UserZone = &.{},
     silk_keepouts: []const subcircuit_silkscreen.Keepout = &.{},
     texts: []const font5x7.BoardText = &.{},
-    authored: FabAuthored = .{ .stackup = .{}, .revision = .{} },
+    authored: FabAuthored = .{ .stackup = .{}, .revision = .{}, .board = .{} },
     /// True when the blessed poses came from a saved snapshot (★ default →
     /// newest manual → any named), false when they fell back to the bare
     /// optimizer cache — the fab-readiness check surfaces the cache case as a
     /// warning.
-    from_saved: bool = false,
+    selection: struct {
+        from_saved: bool = false,
+        /// Concrete saved row selected for this export, or `optimizer-cache`
+        /// when no persisted snapshot supplied the placement.
+        name: []const u8 = "optimizer-cache",
+        /// True only when the exact parsed selected sidecar row contains no
+        /// malformed/defaulted manufacturing records. Cache-only views are false.
+        evidence_complete: bool = false,
+    } = .{},
 };
 
 /// The saved snapshot the blessed poses come from — the same precedence
@@ -4716,6 +4595,73 @@ fn blessedLayout(layouts: []const SavedLayout) ?*const SavedLayout {
         if (L.parts.len > 0) return L;
     }
     return null;
+}
+
+fn exactPoseCoverage(poses: []const optimizer.RefPose, parts: []const optimizer.Part) bool {
+    if (poses.len != parts.len) return false;
+    for (poses, 0..) |pose, pose_index| {
+        for (poses[0..pose_index]) |earlier| if (std.mem.eql(u8, earlier.ref, pose.ref)) return false;
+        var matches: usize = 0;
+        for (parts) |part| {
+            if (std.mem.eql(u8, part.ref_des, pose.ref)) matches += 1;
+        }
+        if (matches != 1) return false;
+    }
+    return true;
+}
+
+fn savedNetExists(placement: optimizer.Placement, name: []const u8) bool {
+    for (placement.nets) |net| if (std.mem.eql(u8, net.name, name)) return true;
+    return false;
+}
+
+fn savedRoutesResolve(placement: optimizer.Placement, routes: SavedRoutes) bool {
+    const layer_count = placement.rules.signalLayerCount();
+    for (routes.tracks) |track| {
+        if (!savedNetExists(placement, track.net) or track.l >= layer_count) return false;
+    }
+    for (routes.vias) |via| {
+        if (!savedNetExists(placement, via.net)) return false;
+        if (via.s) |span| {
+            if (span[0] != 0 or span[1] + 1 != layer_count) return false;
+        }
+    }
+    for (routes.rf_paths) |path| {
+        if (!savedNetExists(placement, path.net) or path.layer >= layer_count) return false;
+    }
+    for (routes.zones) |zone| {
+        if (!outline_mod.valid(zone.poly)) return false;
+        if (!zone.flags.filled or zone.flags.keepout) continue;
+        if (!savedNetExists(placement, zone.net)) return false;
+        var legacy: [1][]const u8 = undefined;
+        for (saved_zone.layers(&zone, &legacy)) |layer_name| {
+            if (placement.rules.signalIndexOfName(layer_name) == null) return false;
+        }
+    }
+    return true;
+}
+
+fn fabricationOverridesResolve(placement: optimizer.Placement, overrides: []const SavedFabricationLayer) bool {
+    for (overrides, 0..) |saved, index| {
+        for (overrides[0..index]) |earlier| if (std.mem.eql(u8, earlier.name, saved.name)) return false;
+        var matches: usize = 0;
+        for (placement.fabrication_layers) |layer| {
+            if (std.mem.eql(u8, layer.name, saved.name)) matches += 1;
+        }
+        if (matches != 1) return false;
+    }
+    return true;
+}
+
+fn savedLayoutSemanticsComplete(
+    placement: optimizer.Placement,
+    layout: SavedLayout,
+    poses: []const optimizer.RefPose,
+) bool {
+    if (!exactPoseCoverage(poses, placement.parts)) return false;
+    if (!fabricationOverridesResolve(placement, layout.fabrication_layers)) return false;
+    if (layout.routes) |routes| return savedRoutesResolve(placement, routes);
+    return true;
 }
 
 /// The `?layout=<row>` fab view: the named saved row, resolved through the
@@ -4743,31 +4689,16 @@ fn namedFabView(ctx: *Server, req: *httpz.Request, res: *httpz.Response, name: [
 /// about a specific saved board.
 fn blessedFabView(ctx: *Server, req: *httpz.Request, res: *httpz.Response, name: []const u8) ?FabView {
     if (queryOpt(req, "layout")) |want| return namedFabView(ctx, req, res, name, want);
-    var placement = blessedPlacement(ctx, req, res, name) orelse return null;
-    var routed = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
-    var zones: []const pour.UserZone = &.{};
-    var silk_keepouts: []const subcircuit_silkscreen.Keepout = &.{};
-    var from_saved = false;
-    var texts: []const font5x7.BoardText = &.{};
-    if (blessedLayout(readLayouts(req.arena, ctx.project_dir, name))) |L| {
-        from_saved = true;
-        if (L.outline) |o| {
-            placement.board_rect = .{ .minx = o.x, .miny = o.y, .w = o.w, .h = o.h };
-            placement.board_poly = o.derived.poly orelse o.pts;
-            placement.board_arcs = o.derived.arcs;
-        }
-        applyFabricationLayerOverrides(req.arena, &placement, L.fabrication_layers);
-        if (L.routes) |sr| {
-            if (restoreRoutes(req.arena, routesWithPerimeter(req.arena, placement, sr).?, placement.nets)) |r| {
-                routed = r;
-            }
-            zones = userZonesFrom(req.arena, placement.rules, sr.zones);
-            silk_keepouts = silkKeepoutsFrom(req.arena, sr.zones);
-        }
-        texts = L.texts;
-    }
-    routed = (perimeter_fence.append(req.arena, placement, routed) catch null) orelse routed;
-    return .{ .placement = placement, .routed = routed, .zones = zones, .silk_keepouts = silk_keepouts, .texts = texts, .from_saved = from_saved };
+    return fabViewFor(req.arena, ctx.project_dir, name, null) catch |e| {
+        res.status = if (e == error.PlacementFailed) 500 else 404;
+        res.body = switch (e) {
+            error.BlockNotFound => no_block_msg,
+            error.UnknownLayout => no_saved_layout_msg,
+            error.NoSavedLayout => no_saved_layout_msg,
+            error.PlacementFailed => placement_err_msg,
+        };
+        return null;
+    };
 }
 
 /// GET /api/pcb-centroid/:name — the pick-and-place centroid CSV at the
@@ -4799,16 +4730,92 @@ pub fn pcbDrillApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
     res.body = aw.written();
 }
 
-/// Run the fab-readiness report over a resolved `FabView` (the same view the
-/// Gerber export builds), so the check and the files describe the same board.
-fn fabReadinessFor(ctx: *Server, req: *httpz.Request, fv: FabView) HandlerError!fab_readiness.Report {
+fn fabGateFor(
+    ctx: *Server,
+    req: *httpz.Request,
+    fv: FabView,
+    evaluator: *Evaluator,
+    block: ?*const env_mod.DesignBlock,
+) HandlerError!fab_gate.Result {
     const copper = export_gerber.Copper{ .tracks = fv.routed.tracks, .arcs = fv.routed.arcs, .rf_paths = fv.routed.rf_port_outcomes, .vias = fv.routed.vias, .zones = fv.zones, .silk_keepouts = fv.silk_keepouts };
     const name = req.param("name") orelse "";
-    return fab_readiness.check(req.arena, fv.placement, copper, .{
-        .from_saved_layout = fv.from_saved,
-        .keep_dnp = queryKeepDnp(req),
-        .drc_rules = drc_rules.load(req.arena, ctx.project_dir, name),
+    return fab_gate.check(req.arena, .{
+        .project_dir = ctx.project_dir,
+        .name = name,
+        .evaluator = evaluator,
+        .block = block,
+        .physical = .{ .placement = fv.placement, .routed = fv.routed, .zones = fv.zones, .texts = fv.texts, .copper = copper },
+        .release = .{
+            .from_saved = fv.selection.from_saved,
+            .layout_evidence_complete = fv.selection.evidence_complete,
+            .keep_dnp = queryKeepDnp(req),
+            .board = fv.authored.board,
+        },
     });
+}
+
+fn resolvedReleaseView(
+    ctx: *Server,
+    req: *httpz.Request,
+    res: *httpz.Response,
+    name: []const u8,
+    block: *env_mod.DesignBlock,
+) ?FabView {
+    return fabViewForResolved(req.arena, ctx.project_dir, name, queryOpt(req, "layout"), block) catch |err| {
+        res.status = if (err == error.PlacementFailed) 500 else 404;
+        res.body = switch (err) {
+            error.UnknownLayout => if (queryOpt(req, "layout")) |want| unknownLayoutMsg(req.arena, ctx.project_dir, name, null, want) else no_saved_layout_msg,
+            error.NoSavedLayout => no_saved_layout_msg,
+            error.PlacementFailed => placement_err_msg,
+            error.BlockNotFound => no_block_msg,
+        };
+        return null;
+    };
+}
+
+fn releaseIdentityMark(
+    arena: std.mem.Allocator,
+    fv: FabView,
+    copper: export_gerber.Copper,
+    gate: *fab_gate.Result,
+) HandlerError!fab_identity.Mark {
+    return fab_gate.identityMark(arena, .{
+        .placement = fv.placement,
+        .routed = fv.routed,
+        .zones = fv.zones,
+        .texts = fv.texts,
+        .copper = copper,
+    }, gate);
+}
+
+fn releaseLock(
+    ctx: *Server,
+    req: *httpz.Request,
+    res: *httpz.Response,
+    name: []const u8,
+    evidence: fab_release.Evidence,
+) HandlerError!?fab_release.Lock {
+    return fab_release.makeLock(req.arena, ctx.project_dir, name, evidence) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        log.warn("fabrication release identity failed for {s}: {s}", .{ name, @errorName(err) });
+        res.status = 500;
+        res.content_type = .JSON;
+        res.body = "{\"ok\":false,\"internal_checks_complete\":false,\"errors\":[{\"id\":\"release-identity-failed\",\"message\":\"release evidence could not be computed; export is blocked\"}]}";
+        return null;
+    };
+}
+
+fn releaseEvidenceBlocked(gate: fab_gate.Result, lock: fab_release.Lock) bool {
+    if (!gate.drc.complete) return true;
+    if (!gate.internal_complete) return true;
+    if (gate.evaluation.block == null) return true;
+    return lock.project_status != .clean;
+}
+
+fn releaseNeedsWaiver(gate: fab_gate.Result) bool {
+    if (gate.report.errors.len > 0) return true;
+    if (gate.report.warnings.len > 0) return true;
+    return gate.drc.raw.len > gate.drc.effective.len;
 }
 
 /// GET /api/fab-readiness/:name — the pre-fab correctness report for `name`'s
@@ -4818,13 +4825,111 @@ fn fabReadinessFor(ctx: *Server, req: *httpz.Request, fv: FabView) HandlerError!
 /// /pcb-layout permalink shows and the CLI `run_fab_readiness` `layout` arg
 /// selects — and 404s an unknown name instead of silently reporting the ★
 /// board. The viewer fetches this before download and gates on it;
-/// `pcbGerbersApi` enforces it server-side (409 on errors unless `?force=1`).
+/// `pcbGerbersApi` enforces it server-side with a revision-locked confirmation
+/// token; no package is emitted from an unconfirmed or stale report.
 pub fn pcbFabReadinessApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    return pcbFabReadinessApiHooked(ctx, req, res, null);
+}
+
+const ReleaseSnapshotHook = struct {
+    path: []const u8,
+    during: []const u8,
+    restored: []const u8,
+    failed: bool = false,
+};
+
+fn writeReleaseSnapshot(hook: ?*ReleaseSnapshotHook, during: bool) void {
+    const active = hook orelse return;
+    infra_fs.cwd().writeFile(.{
+        .sub_path = active.path,
+        .data = if (during) active.during else active.restored,
+    }) catch {
+        active.failed = true;
+    };
+}
+
+fn pcbFabReadinessApiHooked(
+    ctx: *Server,
+    req: *httpz.Request,
+    res: *httpz.Response,
+    snapshot_hook: ?*ReleaseSnapshotHook,
+) HandlerError!void {
     const name = nameParam(req, res) orelse return;
-    const fv = blessedFabView(ctx, req, res, name) orelse return;
-    const report = try fabReadinessFor(ctx, req, fv);
+    if (subSlug(req) != null) {
+        res.status = 400;
+        res.content_type = .JSON;
+        res.body = "{\"ok\":false,\"errors\":[{\"id\":\"scoped-release-unsupported\",\"message\":\"fabrication release is available only for a complete top-level board\"}]}";
+        return;
+    }
+    const project_before = try fab_release.captureProjectState(req.arena, ctx.project_dir);
+    defer req.arena.free(project_before.commit);
+    const layout_before = try fab_release.savedLayoutDigest(req.arena, ctx.project_dir, name);
+    const bom_before = try fab_release.savedBomDigest(req.arena, ctx.project_dir, name);
+    var read_trace = infra_fs.ReadTrace.init(req.arena);
+    defer read_trace.deinit();
+    defer writeReleaseSnapshot(snapshot_hook, false);
+    read_trace.begin();
+    defer read_trace.end();
+    writeReleaseSnapshot(snapshot_hook, true);
+    var evaluator = Evaluator.init(req.arena, ctx.project_dir);
+    defer evaluator.deinit();
+    var module_res: ?modules_mod.ResolvedBlock = null;
+    defer if (module_res) |resolved| {
+        resolved.eval.deinit();
+        req.arena.destroy(resolved.eval);
+    };
+    const block = resolveBlock(req.arena, ctx.project_dir, name, &evaluator, &module_res) orelse {
+        res.status = 404;
+        res.body = no_block_msg;
+        return;
+    };
+    const gate_evaluator = if (module_res) |resolved| resolved.eval else &evaluator;
+    const fv = resolvedReleaseView(ctx, req, res, name, block) orelse return;
+    var gate = try fabGateFor(ctx, req, fv, gate_evaluator, block);
+    read_trace.end();
+    writeReleaseSnapshot(snapshot_hook, false);
+    const consumed_inputs_sha256 = read_trace.digest();
+    const traced_inputs = try fab_release.tracedInputs(req.arena, &read_trace, ctx.project_dir, name);
+    const source_input_sha256 = traced_inputs.source;
+    const layout_input_sha256 = traced_inputs.layout;
+    const bom_input_sha256 = traced_inputs.bom;
+    const copper = export_gerber.Copper{ .tracks = fv.routed.tracks, .arcs = fv.routed.arcs, .rf_paths = fv.routed.rf_port_outcomes, .vias = fv.routed.vias, .zones = fv.zones, .silk_keepouts = fv.silk_keepouts };
+    const mark = try releaseIdentityMark(req.arena, fv, copper, &gate);
+    const evidence = fab_release.Evidence{
+        .report = gate.report,
+        .design = .{
+            .placement = fv.placement,
+            .revision = fv.authored.revision,
+            .stackup = fv.authored.stackup,
+            .keep_dnp = queryKeepDnp(req),
+            .block = gate.evaluation.block,
+            .layout_name = fv.selection.name,
+            .dependencies = gate.evaluation.dependencies,
+        },
+        .mark = mark,
+        .drc = .{ .raw = gate.drc.raw, .effective = gate.drc.effective, .complete = gate.drc.complete, .internal_complete = gate.internal_complete, .policy = gate.policy },
+        .inputs = .{
+            .evaluation_sha256 = gate.evaluation.sha256,
+            .reviewed_sha256 = gate.evaluation.reviewed_inputs_sha256,
+            .consumed_sha256 = consumed_inputs_sha256,
+            .source_sha256 = source_input_sha256,
+            .layout_sha256 = layout_input_sha256,
+            .bom_sha256 = bom_input_sha256,
+        },
+    };
+    var lock = (try releaseLock(ctx, req, res, name, evidence)) orelse return;
+    fab_release.bindBaseline(&lock, project_before, layout_before, bom_before);
+    fab_release.bindTracedInputs(&lock, traced_inputs, read_trace.verify());
+    if (releaseEvidenceBlocked(gate, lock)) {
+        res.status = 500;
+        var failed_json: std.Io.Writer.Allocating = .init(req.arena);
+        try fab_release.writeReadinessJson(req.arena, &failed_json.writer, evidence, lock);
+        res.content_type = .JSON;
+        res.body = failed_json.written();
+        return;
+    }
     var aw: std.Io.Writer.Allocating = .init(req.arena);
-    try fab_readiness.writeJson(&aw.writer, report);
+    try fab_release.writeReadinessJson(req.arena, &aw.writer, evidence, lock);
     res.content_type = .JSON;
     res.body = aw.written();
 }
@@ -4836,33 +4941,110 @@ pub fn pcbFabReadinessApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
 /// layout's persisted routed copper, in one shared y-up frame. What a board
 /// house needs to build the board, no KiCad in the loop.
 ///
-/// Gated by the fab-readiness report (`/api/fab-readiness`): if that finds
-/// blocking errors, this returns **HTTP 409** with the report JSON and writes
-/// nothing — unless `?force=1` overrides the gate (the viewer's "Download
-/// anyway"). Warnings never block. A clean (or forced) request downloads the
-/// ZIP as before. `?dnp=keep` keeps Do-Not-Populate parts in the centroid CSV
+/// Gated by the fab-readiness report (`/api/fab-readiness`): every request must
+/// echo that exact report's `?confirm=<release_token>`. Remaining findings also
+/// require `?waive=1`; internal check failures are never waivable. `?dnp=keep`
+/// keeps Do-Not-Populate parts in the centroid CSV
 /// (dropped by default). `?layout=<row>` packages the named saved layout —
 /// gate and files built from the same view, so they still agree.
 pub fn pcbGerbersApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = nameParam(req, res) orelse return;
-    const fv = blessedFabView(ctx, req, res, name) orelse return;
+    return pcbGerbersApiHooked(ctx, req, res, null);
+}
 
-    // Pre-fab gate: block on errors unless explicitly forced.
-    if (!queryFlag(req, "force")) {
-        const report = try fabReadinessFor(ctx, req, fv);
-        if (!report.ok()) {
-            res.status = 409;
-            var jw: std.Io.Writer.Allocating = .init(req.arena);
-            try fab_readiness.writeJson(&jw.writer, report);
-            res.content_type = .JSON;
-            res.body = jw.written();
-            return;
-        }
+fn pcbGerbersApiHooked(
+    ctx: *Server,
+    req: *httpz.Request,
+    res: *httpz.Response,
+    snapshot_hook: ?*ReleaseSnapshotHook,
+) HandlerError!void {
+    const name = nameParam(req, res) orelse return;
+    if (subSlug(req) != null) {
+        res.status = 400;
+        res.content_type = .JSON;
+        res.body = "{\"ok\":false,\"errors\":[{\"id\":\"scoped-release-unsupported\",\"message\":\"fabrication release is available only for a complete top-level board\"}]}";
+        return;
     }
+    const project_before = try fab_release.captureProjectState(req.arena, ctx.project_dir);
+    defer req.arena.free(project_before.commit);
+    const layout_before = try fab_release.savedLayoutDigest(req.arena, ctx.project_dir, name);
+    const bom_before = try fab_release.savedBomDigest(req.arena, ctx.project_dir, name);
+    var read_trace = infra_fs.ReadTrace.init(req.arena);
+    defer read_trace.deinit();
+    defer writeReleaseSnapshot(snapshot_hook, false);
+    read_trace.begin();
+    defer read_trace.end();
+    writeReleaseSnapshot(snapshot_hook, true);
+    var evaluator = Evaluator.init(req.arena, ctx.project_dir);
+    defer evaluator.deinit();
+    var module_res: ?modules_mod.ResolvedBlock = null;
+    defer if (module_res) |resolved| {
+        resolved.eval.deinit();
+        req.arena.destroy(resolved.eval);
+    };
+    const block = resolveBlock(req.arena, ctx.project_dir, name, &evaluator, &module_res) orelse {
+        res.status = 404;
+        res.body = no_block_msg;
+        return;
+    };
+    const gate_evaluator = if (module_res) |resolved| resolved.eval else &evaluator;
+    const fv = resolvedReleaseView(ctx, req, res, name, block) orelse return;
 
     const copper = export_gerber.Copper{ .tracks = fv.routed.tracks, .arcs = fv.routed.arcs, .rf_paths = fv.routed.rf_port_outcomes, .vias = fv.routed.vias, .zones = fv.zones, .silk_keepouts = fv.silk_keepouts };
     const frame = export_fab.frameFor(fv.placement);
-    const mark = try fab_identity.build(req.arena, fv.placement, copper, fv.texts, frame, null);
+    var gate = try fabGateFor(ctx, req, fv, gate_evaluator, block);
+    read_trace.end();
+    writeReleaseSnapshot(snapshot_hook, false);
+    const consumed_inputs_sha256 = read_trace.digest();
+    const traced_inputs = try fab_release.tracedInputs(req.arena, &read_trace, ctx.project_dir, name);
+    const source_input_sha256 = traced_inputs.source;
+    const layout_input_sha256 = traced_inputs.layout;
+    const bom_input_sha256 = traced_inputs.bom;
+    const mark = try releaseIdentityMark(req.arena, fv, copper, &gate);
+    const evidence = fab_release.Evidence{
+        .report = gate.report,
+        .design = .{
+            .placement = fv.placement,
+            .revision = fv.authored.revision,
+            .stackup = fv.authored.stackup,
+            .keep_dnp = queryKeepDnp(req),
+            .block = gate.evaluation.block,
+            .layout_name = fv.selection.name,
+            .dependencies = gate.evaluation.dependencies,
+        },
+        .mark = mark,
+        .drc = .{ .raw = gate.drc.raw, .effective = gate.drc.effective, .complete = gate.drc.complete, .internal_complete = gate.internal_complete, .policy = gate.policy },
+        .inputs = .{
+            .evaluation_sha256 = gate.evaluation.sha256,
+            .reviewed_sha256 = gate.evaluation.reviewed_inputs_sha256,
+            .consumed_sha256 = consumed_inputs_sha256,
+            .source_sha256 = source_input_sha256,
+            .layout_sha256 = layout_input_sha256,
+            .bom_sha256 = bom_input_sha256,
+        },
+    };
+    var lock = (try releaseLock(ctx, req, res, name, evidence)) orelse return;
+    fab_release.bindBaseline(&lock, project_before, layout_before, bom_before);
+    fab_release.bindTracedInputs(&lock, traced_inputs, read_trace.verify());
+    if (releaseEvidenceBlocked(gate, lock)) {
+        res.status = 500;
+        var failed_json: std.Io.Writer.Allocating = .init(req.arena);
+        try fab_release.writeReadinessJson(req.arena, &failed_json.writer, evidence, lock);
+        res.content_type = .JSON;
+        res.body = failed_json.written();
+        return;
+    }
+    const confirmed = if (queryOpt(req, "confirm")) |token| std.mem.eql(u8, token, &lock.token) else false;
+    const needs_waiver = releaseNeedsWaiver(gate);
+    const waived = queryFlag(req, "waive");
+    const waiver_missing = needs_waiver and !waived;
+    if (!confirmed or waiver_missing) {
+        res.status = 428;
+        var jw: std.Io.Writer.Allocating = .init(req.arena);
+        try fab_release.writeReadinessJson(req.arena, &jw.writer, evidence, lock);
+        res.content_type = .JSON;
+        res.body = jw.written();
+        return;
+    }
     const fab_texts = try fab_identity.replaceAdoptedText(req.arena, fv.texts, mark);
 
     // The package basename is sanitized ONCE, here, and every member — the
@@ -4901,6 +5083,9 @@ pub fn pcbGerbersApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
     var cw: std.Io.Writer.Allocating = .init(req.arena);
     try export_fab.centroidCsv(&cw.writer, fv.placement.parts, fv.placement.instances, frame, dnpMode(req));
     try pkg.add("centroid.csv", cw.written());
+    var bw: std.Io.Writer.Allocating = .init(req.arena);
+    try export_fab.assemblyBomCsv(&bw.writer, fv.placement.instances, dnpMode(req));
+    try pkg.add("bom.csv", bw.written());
     const manifest = try std.fmt.allocPrint(req.arena,
         \\PCB fabrication ID: {s}
         \\Full SHA-256: {s}
@@ -4908,12 +5093,42 @@ pub fn pcbGerbersApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
         \\
     , .{ &mark.short_hex, &mark.digest_hex });
     try pkg.add("fab-id.txt", manifest);
+    var rrj: std.Io.Writer.Allocating = .init(req.arena);
+    try fab_release.writeMachineReport(&rrj.writer, evidence, lock, needs_waiver);
+    try pkg.add("release-report.json", rrj.written());
+    var rrm: std.Io.Writer.Allocating = .init(req.arena);
+    try fab_release.writeHumanReport(&rrm.writer, evidence, lock, needs_waiver);
+    try pkg.add("release-report.md", rrm.written());
+    var rules: std.Io.Writer.Allocating = .init(req.arena);
+    try fab_release.writeRulesJson(&rules.writer, evidence);
+    try pkg.add("design-rules.json", rules.written());
+    var checksums: std.Io.Writer.Allocating = .init(req.arena);
+    try fab_release.writeChecksums(&checksums.writer, pkg.entries.items);
+    try pkg.add("checksums.sha256", checksums.written());
+
+    // Close the generation-time TOCTOU window: `makeLock` rereads every disk
+    // input. If source/layout/library state moved after the reviewed lock was
+    // computed while CAM files were being rendered, discard the package and
+    // force the browser to review a fresh token instead of labeling stale CAM
+    // with newer dependency hashes.
+    var final_lock = (try releaseLock(ctx, req, res, name, evidence)) orelse return;
+    fab_release.bindBaseline(&final_lock, project_before, layout_before, bom_before);
+    fab_release.bindTracedInputs(&final_lock, traced_inputs, read_trace.verify());
+    if (final_lock.project_status != .clean or !std.mem.eql(u8, &lock.token, &final_lock.token)) {
+        res.status = 428;
+        var changed: std.Io.Writer.Allocating = .init(req.arena);
+        try fab_release.writeReadinessJson(req.arena, &changed.writer, evidence, final_lock);
+        res.content_type = .JSON;
+        res.body = changed.written();
+        return;
+    }
 
     var zw: std.Io.Writer.Allocating = .init(req.arena);
     try zipfile.write(&zw.writer, pkg.entries.items);
     res.header(ct_hdr, "application/zip");
     res.header("x-pcb-fab-id", try req.arena.dupe(u8, &mark.short_hex));
-    res.header("content-disposition", try std.fmt.allocPrint(req.arena, "attachment; filename=\"{s}-{s}-gerbers.zip\"", .{ pkg.prefix, &mark.short_hex }));
+    const revision = try fab_release.safeRevision(req.arena, fv.authored.revision.id);
+    res.header("content-disposition", try std.fmt.allocPrint(req.arena, "attachment; filename=\"{s}-rev-{s}-{s}-release.zip\"", .{ pkg.prefix, revision, &mark.short_hex }));
     res.body = zw.written();
 }
 
@@ -5993,20 +6208,12 @@ fn layoutPosesIn(
 /// caller-controlled. `subSlug`/`isValidSubSlug` is the gate that makes the
 /// assumption true — every handler resolves its scope through it, and anything
 /// outside the slug alphabet reads back as "no sub" and never arrives here.
-fn layoutsSidecar(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8, ext: []const u8) ?[]u8 {
-    const s = sub orelse return (paths.designSiblingPath(alloc, project_dir, name, ext) catch null);
-    const src = paths.designSourcePath(alloc, project_dir, name) catch return null;
-    defer alloc.free(src);
-    const dir = std.fs.path.dirname(src) orelse ".";
-    return std.fmt.allocPrint(alloc, "{s}/{s}.{s}{s}", .{ dir, name, s, ext }) catch null;
-}
+const layoutsSidecar = sidecar_store.layoutsSidecar;
 
 /// Read every saved layout for `name` from its `.layouts.json` sidecar
 /// (newest first). Returns an empty slice when the file doesn't exist or on
 /// parse failure; allocations live on `alloc` (request lifetime).
-pub fn readLayouts(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) []const SavedLayout {
-    return readLayoutsSub(alloc, project_dir, name, null);
-}
+pub const readLayouts = sidecar_store.readLayouts;
 
 /// Whether `name` has a saved layout called `want` (exact match, the same
 /// comparison `layoutPosesIn` selects poses with).
@@ -6014,23 +6221,11 @@ pub fn readLayouts(alloc: std.mem.Allocator, project_dir: []const u8, name: []co
 /// A caller that would otherwise pay for a FRESH placement solve on a name
 /// nobody saved — `solveForRequest` falls through to one — asks here first: a
 /// sidecar parse is the cheap half of that mistake.
-pub fn hasSavedLayout(
-    alloc: std.mem.Allocator,
-    project_dir: []const u8,
-    name: []const u8,
-    want: []const u8,
-) bool {
-    for (readLayouts(alloc, project_dir, name)) |l| {
-        if (std.mem.eql(u8, l.name, want)) return true;
-    }
-    return false;
-}
+pub const hasSavedLayout = sidecar_store.hasSavedLayout;
 
 /// As `readLayouts`, but for a `?sub=` scoped sub circuit reads its per-sub
 /// sidecar (`layoutsSidecar`). `sub == null` is identical to `readLayouts`.
-pub fn readLayoutsSub(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8) []const SavedLayout {
-    return readSidecarDoc(alloc, project_dir, name, sub).layouts;
-}
+pub const readLayoutsSub = sidecar_store.readLayoutsSub;
 
 /// The board-level silkscreen texts of `name`'s shown layout: the layout named
 /// `want` when given, else the starred (★ default) one — empty when nothing
@@ -6055,64 +6250,11 @@ fn layoutTextsIn(layouts: []const SavedLayout, want: ?[]const u8) []const font5x
 /// Parse a `.layouts.json` body (`{"layouts":[…]}`) into a slice of
 /// `SavedLayout`. Each entry needs a `name`; `kind` defaults to auto, `score`
 /// is present only when an `hpwl` field is. Null on malformed top-level JSON.
-pub fn parseLayouts(alloc: std.mem.Allocator, data: []const u8) ?[]const SavedLayout {
-    const root = std.json.parseFromSliceLeaky(std.json.Value, alloc, data, .{}) catch return null;
-    return layoutsFromRoot(alloc, root);
-}
+pub const parseLayouts = sidecar_store.parseLayouts;
 
 /// `parseLayouts` over an already-parsed JSON tree — `readSidecarDoc` parses
 /// the (multi-megabyte on a routed board) sidecar once and derives layouts,
 /// cache slot and rev from the same tree.
-fn layoutsFromRoot(alloc: std.mem.Allocator, root: std.json.Value) ?[]const SavedLayout {
-    if (root != .object) return null;
-    const arr = root.object.get("layouts") orelse return null;
-    if (arr != .array) return null;
-    // Top-level `"default":"<name>"` names the one layout the KiCad sync seeds
-    // from; flag the matching entry below. Absent / empty → no default.
-    const default_name: []const u8 = blk: {
-        const dv = root.object.get("default") orelse break :blk "";
-        break :blk if (dv == .string) dv.string else "";
-    };
-    var list: std.ArrayList(SavedLayout) = .empty;
-    for (arr.array.items) |it| {
-        if (it != .object) continue;
-        const nm = it.object.get("name") orelse continue;
-        if (nm != .string) continue;
-        const kind: []const u8 = blk: {
-            const k = it.object.get("kind") orelse break :blk kind_auto;
-            break :blk if (k == .string and std.mem.eql(u8, k.string, kind_manual)) kind_manual else kind_auto;
-        };
-        var score: ?LayoutScore = null;
-        if (it.object.get("hpwl")) |_| score = .{
-            .hpwl = jsonNum(it.object.get("hpwl")),
-            .loop = jsonNum(it.object.get("loop")),
-            .caps = numeric.toCount(@max(@floor(jsonNum(it.object.get("caps"))), 0)),
-            .objective = jsonNum(it.object.get("objective")), // 0 for legacy entries
-        };
-        const parts = parsePartPoses(alloc, it.object.get("parts")) orelse &[_]PartPose{};
-        const rough = blk: {
-            const rv = it.object.get("rough") orelse break :blk false;
-            break :blk rv == .bool and rv.bool;
-        };
-        list.append(alloc, .{
-            .name = nm.string,
-            .kind = kind,
-            .ts = numeric.checkedInt(i64, jsonNum(it.object.get("ts"))) orelse 0,
-            .score = score,
-            .parts = parts,
-            .default = default_name.len > 0 and std.mem.eql(u8, nm.string, default_name),
-            .rough = rough,
-            .routes = parseSavedRoutes(alloc, it.object.get("routes")),
-            .outline = parseSavedOutline(alloc, it.object.get("outline")),
-            .fabrication_layers = parseSavedFabricationLayers(alloc, it.object.get("fabrication_layers")),
-            .heatsink = parseSavedHeatsink(it.object.get("heatsink")),
-            .texts = parseSavedTexts(alloc, it.object.get("texts")),
-            .dimensions = parsePartEdgeDimensions(alloc, it.object.get("dimensions")),
-        }) catch return list.items;
-    }
-    return list.toOwnedSlice(alloc) catch null;
-}
-
 /// Serialize a `SavedOutline` as the sidecar/page JSON object — the exact
 /// shape `parseSavedOutline` reads back (rect fields always, `pts` only for
 /// polygon outlines). Shared by the sidecar writer and the page blob so the
@@ -6126,28 +6268,6 @@ const writeSavedTextsJson = sidecar_json.writeSavedTextsJson;
 
 /// Serialize zone records in the sidecar/embedded `PCB.zones` shape.
 const writeSavedZonesJson = sidecar_json.writeSavedZonesJson;
-
-fn writeSavedRfPathsJson(w: *std.Io.Writer, saved_paths: []const SavedRfPath) std.Io.Writer.Error!void {
-    try w.writeByte('[');
-    for (saved_paths, 0..) |path, i| {
-        if (i > 0) try w.writeByte(',');
-        try w.writeAll("{\"net\":");
-        try writeJsonStr(w, path.net);
-        try w.print(",\"l\":{d}", .{path.layer});
-        if (path.track_ids.len > 0) {
-            try w.writeAll(",\"track_ids\":");
-            try writeStringList(w, path.track_ids);
-        }
-        if (path.portal) try w.writeAll(",\"portal\":true");
-        try w.writeAll(",\"samples\":[");
-        for (path.samples, 0..) |sample, si| {
-            if (si > 0) try w.writeByte(',');
-            try w.print("[{d},{d},{d}]", .{ sample.at[0], sample.at[1], sample.width_mm });
-        }
-        try w.writeAll("]}");
-    }
-    try w.writeByte(']');
-}
 
 fn writeFreshRfPathsJson(w: *std.Io.Writer, outcomes: []const rf_port_report.Outcome, nets: []const export_kicad.FlatNet) std.Io.Writer.Error!void {
     var first = true;
@@ -6172,57 +6292,8 @@ fn writeFreshRfPathsJson(w: *std.Io.Writer, outcomes: []const rf_port_report.Out
 /// Serialize saved routes in the shared live-JSON shape (see `SavedTrack`) —
 /// the exact bytes `parseSavedRoutes` (already pub, beside it) reads back, so
 /// the pair is testable as one round trip from outside this module.
-pub fn writeSavedRoutesJson(w: *std.Io.Writer, sr: SavedRoutes) std.Io.Writer.Error!void {
-    try w.writeAll("{\"tracks\":[");
-    for (sr.tracks, 0..) |t, i| {
-        if (i > 0) try w.writeAll(",");
-        try w.print(track_json_fmt, .{ t.x1, t.y1, t.x2, t.y2, t.l, t.w });
-        try writeJsonStr(w, t.net);
-        if (t.xm) |xm| if (t.ym) |ym| try w.print(",\"xm\":{d},\"ym\":{d}", .{ xm, ym });
-        if (t.g.len > 0) {
-            try w.writeAll(",\"g\":");
-            try writeJsonStr(w, t.g);
-        }
-        if (t.source.len > 0) {
-            try w.writeAll(",\"source\":");
-            try writeJsonStr(w, t.source);
-        }
-        try writeTrackSegmentId(w, t, i);
-        try w.writeAll("}");
-    }
-    try w.writeAll(vias_arr_open);
-    for (sr.vias, 0..) |vi, i| {
-        if (i > 0) try w.writeAll(",");
-        try w.print(via_json_fmt, .{ vi.x, vi.y, vi.d, vi.drill });
-        try writeJsonStr(w, vi.net);
-        if (vi.g.len > 0) {
-            try w.writeAll(",\"g\":");
-            try writeJsonStr(w, vi.g);
-        }
-        if (vi.f.len > 0) {
-            try w.writeAll(",\"f\":");
-            try writeJsonStr(w, vi.f);
-        }
-        if (vi.source.len > 0) {
-            try w.writeAll(",\"source\":");
-            try writeJsonStr(w, vi.source);
-        }
-        // The optional span remains omitted for ordinary through vias.
-        if (vi.s) |span| try w.print(",\"s\":[{d},{d}]", .{ span[0], span[1] });
-        try writeViaId(w, vi, i);
-        try w.writeAll("}");
-    }
-    try w.writeAll("]");
-    if (sr.zones.len > 0) {
-        try w.writeAll(",\"zones\":");
-        try writeSavedZonesJson(w, sr.zones);
-    }
-    if (sr.rf_paths.len > 0) {
-        try w.writeAll(",\"rf_paths\":");
-        try writeSavedRfPathsJson(w, sr.rf_paths);
-    }
-    try w.writeAll("}");
-}
+pub const writeSavedRoutesJson = sidecar_json.writeSavedRoutesJson;
+const writeSavedRfPathsJson = sidecar_json.writeSavedRfPathsJson;
 
 /// Rebuild a `router.RouteResult` from a layout's persisted copper, resolving
 /// each stored net NAME back to its index in the *current* flattened netlist
@@ -6413,7 +6484,7 @@ fn resolveShownView(ctx: *Server, req: ?*httpz.Request, in: ShownInputs) ShownVi
     const outline_drawn = applyShownOutline(in.placement, in.layouts, in.shown) or
         foldBlessedOutline(ctx.allocator, ctx.project_dir, name, subSlug(req), in.placement);
     const fabrication_layers = shownFabricationLayers(in.layouts, in.shown);
-    applyFabricationLayerOverrides(ctx.allocator, in.placement, fabrication_layers);
+    _ = applyFabricationLayerOverrides(ctx.allocator, in.placement, fabrication_layers);
     // One board, one lattice: the board-edge margin field every fill below
     // seeds from is a pure function of the placement, and the outline above is
     // the placement's FINAL one — so seed it once here, after that mutation,
@@ -6530,19 +6601,20 @@ fn shownHeatsink(layouts: []const SavedLayout, shown: ?[]const u8) ?SavedHeatsin
 /// Replace only the positive regions of matching authored layers. The source
 /// remains authoritative for side/material/thickness and automatic footprint
 /// cutouts, so a visual edit cannot silently change manufacturing semantics.
-fn applyFabricationLayerOverrides(alloc: std.mem.Allocator, placement: *optimizer.Placement, overrides: []const SavedFabricationLayer) void {
-    if (overrides.len == 0 or placement.fabrication_layers.len == 0) return;
-    const specs = alloc.dupe(env_mod.FabricationLayerSpec, placement.fabrication_layers) catch return;
+fn applyFabricationLayerOverrides(alloc: std.mem.Allocator, placement: *optimizer.Placement, overrides: []const SavedFabricationLayer) bool {
+    if (overrides.len == 0 or placement.fabrication_layers.len == 0) return true;
+    const specs = alloc.dupe(env_mod.FabricationLayerSpec, placement.fabrication_layers) catch return false;
     for (specs) |*spec| {
         for (overrides) |saved| {
             if (!std.mem.eql(u8, spec.name, saved.name)) continue;
-            const regions = alloc.alloc(env_mod.FabricationRegion, saved.regions.len) catch break;
+            const regions = alloc.alloc(env_mod.FabricationRegion, saved.regions.len) catch return false;
             for (saved.regions, regions) |points, *region| region.* = .{ .polygon = points };
             spec.regions = regions;
             break;
         }
     }
     placement.fabrication_layers = specs;
+    return true;
 }
 
 /// The shown saved layout's board-level silkscreen texts (empty when the
@@ -6679,77 +6751,21 @@ fn shownSavedRoutes(layouts: []const SavedLayout, shown: ?[]const u8) ?SavedRout
 /// The single-slot optimizer cache: the tuning weights that produced the
 /// last solve plus its part poses. Lives in the `"cache"` key of
 /// `.layouts.json`; never shown as a snapshot row.
-pub const CacheSlot = struct {
-    params: optimizer.Params,
-    /// Null when the slot carried no parts array at all (callers treat
-    /// that as "no cached layout — solve fresh").
-    parts: ?[]const PartPose,
-};
+pub const CacheSlot = sidecar_store.CacheSlot;
+const parseCacheSlot = sidecar_store.parseCacheSlot;
 
 /// Parse a `{"params":{…},"parts":[…]}` cache object (either the `"cache"`
 /// key of `.layouts.json` or the root of a legacy `.autolayout.json`).
-fn parseCacheSlot(alloc: std.mem.Allocator, v: std.json.Value) ?CacheSlot {
-    if (v != .object) return null;
-    var p = optimizer.Params{};
-    if (v.object.get("params")) |po| {
-        if (po == .object) parseCacheParams(po, &p);
-    }
-    return .{ .params = p, .parts = parsePartPoses(alloc, v.object.get("parts")) };
-}
-
-/// Apply the cache's stored tuning weights onto `p`.
-fn parseCacheParams(po: std.json.Value, p: *optimizer.Params) void {
-    if (po.object.get("loop_w")) |v| p.loop_w = jsonNum(v);
-    if (po.object.get("w_congest")) |v| p.w_congest = jsonNum(v);
-    if (po.object.get("cap_w_max")) |v| p.cap_w_max = jsonNum(v);
-    if (po.object.get("grid")) |v| p.grid_courtyards = v == .bool and v.bool;
-    // A negative `w_align` is the auto sentinel current builds write; 0.5 is the
-    // legacy shipped default — the tidiness term has since been pair-normalized
-    // (its weight scale moved to W_ALIGN_TIDINESS), so re-pinning the old number
-    // would silently apply a ~5× weaker alignment than either era intended.
-    // Both resolve to auto; anything else was a deliberate tuning override.
-    if (po.object.get("w_align")) |v| {
-        const a = jsonNum(v);
-        const legacy_default = a == 0.5;
-        if (a >= 0 and !legacy_default) p.w_align = a;
-    }
-}
-
 /// Read the optimizer-cache slot for `name`: the `"cache"` key of
 /// `.layouts.json` first, falling back to the legacy standalone
 /// `.autolayout.json` for boards last solved by an older build.
-pub fn readCacheSlot(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?CacheSlot {
-    return readSidecarDoc(alloc, project_dir, name, null).cache orelse readLegacyCacheSlot(alloc, project_dir, name);
-}
-
-/// The legacy standalone `.autolayout.json` cache slot (boards last solved by
-/// an older build), or null.
-fn readLegacyCacheSlot(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?CacheSlot {
-    const path = paths.designSiblingPath(alloc, project_dir, name, auto_ext) catch return null;
-    defer alloc.free(path);
-    const data = infra_fs.cwd().readFileAlloc(alloc, path, sidecar_max_bytes) catch return null;
-    const root = std.json.parseFromSliceLeaky(std.json.Value, alloc, data, .{}) catch return null;
-    return parseCacheSlot(alloc, root);
-}
+pub const readCacheSlot = sidecar_store.readCacheSlot;
 
 /// The sidecar's optimistic-concurrency `rev` (top-level `"rev"` field), or 0
 /// when the file/field is absent (legacy). Every user Save/Update embeds the
 /// rev the page loaded and the save guard 409s on a mismatch; render-path
 /// writes preserve this value so merely viewing/regenerating never bumps it.
-pub fn readLayoutRev(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8) i64 {
-    return readSidecarDoc(alloc, project_dir, name, sub).rev;
-}
-
-/// The top-level `"rev"` of a parsed sidecar tree (see `readLayoutRev`).
-fn revFromRoot(root: std.json.Value) i64 {
-    if (root != .object) return 0;
-    const rv = root.object.get("rev") orelse return 0;
-    return switch (rv) {
-        .integer => |i| i,
-        .float => |f| numeric.checkedInt(i64, f) orelse 0,
-        else => 0,
-    };
-}
+pub const readLayoutRev = sidecar_store.readLayoutRev;
 
 /// Everything a `.layouts.json` read can answer, from ONE file read and ONE
 /// JSON parse: the saved-layout list, the raw optimizer cache slot (no legacy
@@ -6758,7 +6774,7 @@ fn revFromRoot(root: std.json.Value) i64 {
 /// all delegate here, and the page render reads the doc ONCE — it used to
 /// re-read and re-parse the file for each question, which on a routed
 /// multi-layout board is megabytes of JSON per question.
-const SidecarDoc = struct { layouts: []const SavedLayout = &.{}, cache: ?CacheSlot = null, rev: i64 = 0 };
+const SidecarDoc = sidecar_store.SidecarDoc;
 
 /// The page render's one sidecar read: `readSidecarDoc` plus the same legacy
 /// `.autolayout.json` cache fallback `readCacheSlot` applies (design stores
@@ -6771,11 +6787,7 @@ fn readPageDoc(ctx: *Server, name: []const u8, sub: ?[]const u8) SidecarDoc {
 /// A design store's sidecar doc plus the legacy `.autolayout.json` cache
 /// fallback (boards last solved by an older build). Sub stores carry no cache
 /// slot, so they read through `readSidecarDoc` directly.
-fn readDesignDoc(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) SidecarDoc {
-    var doc = readSidecarDoc(alloc, project_dir, name, null);
-    if (doc.cache == null) doc.cache = readLegacyCacheSlot(alloc, project_dir, name);
-    return doc;
-}
+const readDesignDoc = sidecar_store.readDesignDoc;
 
 /// The tuning params the page displays: explicit tuning and a just-generated
 /// solve show `tune.params` (persistGeneratedLayout just wrote exactly those
@@ -6795,75 +6807,28 @@ fn panelLayouts(ctx: *Server, name: []const u8, sub: ?[]const u8, generated: boo
     return displayLayouts(ctx.allocator, ctx.project_dir, name, sub, raw);
 }
 
-fn readSidecarDoc(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8) SidecarDoc {
-    var doc = SidecarDoc{};
-    const path = layoutsSidecar(alloc, project_dir, name, sub, layouts_ext) orelse return doc;
-    defer alloc.free(path);
-    const data = infra_fs.cwd().readFileAlloc(alloc, path, sidecar_max_bytes) catch |e| {
-        // Only a MISSING sidecar may silently read as "no layouts" — anything
-        // else means a board that HAS layouts reads back empty, which silently
-        // strips the viewer, the KiCad sync seed and the fab outputs of it.
-        if (e != error.FileNotFound) log.warn("layouts: cannot read {s}: {s} — reading as NO saved layouts", .{ path, @errorName(e) });
-        return doc;
-    };
-    const root = std.json.parseFromSliceLeaky(std.json.Value, alloc, data, .{}) catch {
-        log.warn("layouts: {s} did not parse — reading as NO saved layouts", .{path});
-        return doc;
-    };
-    if (layoutsFromRoot(alloc, root)) |list| doc.layouts = list;
-    if (root == .object) {
-        if (root.object.get("cache")) |c| doc.cache = parseCacheSlot(alloc, c);
-    }
-    doc.rev = revFromRoot(root);
-    return doc;
-}
+const readSidecarDoc = sidecar_store.readSidecarDoc;
 
 /// Persist the layout list to `.layouts.json`, carrying the existing cache
 /// slot AND the current `rev` over unchanged (a render-path write, not a user
 /// save — see `readLayoutRev`). Best-effort: a write failure just means the
 /// list reverts to what was last on disk.
-fn writeLayouts(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layouts: []const SavedLayout) void {
-    writeLayoutsFile(alloc, project_dir, name, layouts, readCacheSlot(alloc, project_dir, name), readLayoutRev(alloc, project_dir, name, null));
-}
+const writeLayouts = sidecar_store.writeLayouts;
 
 /// As `writeLayouts`, but for a `?sub=` scoped sub circuit writes its per-sub
 /// sidecar, preserving that sidecar's rev. `sub == null` delegates to
 /// `writeLayouts` (design store, cache preserved).
-fn writeLayoutsSub(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8, layouts: []const SavedLayout) void {
-    writeLayoutsSubRev(alloc, project_dir, name, sub, layouts, readLayoutRev(alloc, project_dir, name, sub));
-}
+const writeLayoutsSub = sidecar_store.writeLayoutsSub;
 
 /// As `writeLayoutsSub`, but stamps an explicit `rev` — the user-save path
 /// passes `disk_rev + 1` to bump the counter; render-path callers pass the
 /// current rev to preserve it. The sub store carries no auto-cache slot (sub
 /// previews always solve fresh), so only the layouts array is persisted;
 /// `sub == null` goes through the design store (cache preserved).
-fn writeLayoutsSubRev(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8, layouts: []const SavedLayout, rev: i64) void {
-    if (sub == null) return writeLayoutsFile(alloc, project_dir, name, layouts, readCacheSlot(alloc, project_dir, name), rev);
-    const path = layoutsSidecar(alloc, project_dir, name, sub, layouts_ext) orelse return;
-    defer alloc.free(path);
-    var aw: std.Io.Writer.Allocating = .init(alloc);
-    const w = &aw.writer;
-    writeLayoutsFileJsonRev(w, dedupedLayouts(alloc, layouts), null, rev) catch return;
-    writeFileAll(path, aw.written()) catch return;
-}
+const writeLayoutsSubRev = sidecar_store.writeLayoutsSubRev;
 
 /// Persist layouts + cache slot + `rev` to `.layouts.json` (the whole sidecar).
-fn writeLayoutsFile(
-    alloc: std.mem.Allocator,
-    project_dir: []const u8,
-    name: []const u8,
-    layouts: []const SavedLayout,
-    cache: ?CacheSlot,
-    rev: i64,
-) void {
-    const path = paths.designSiblingPath(alloc, project_dir, name, layouts_ext) catch return;
-    defer alloc.free(path);
-    var aw: std.Io.Writer.Allocating = .init(alloc);
-    const w = &aw.writer;
-    writeLayoutsFileJsonRev(w, dedupedLayouts(alloc, layouts), cache, rev) catch return;
-    writeFileAll(path, aw.written()) catch return;
-}
+const writeLayoutsFile = sidecar_store.writeLayoutsFile;
 
 /// Drop exactly-duplicated copper from every layout on its way to disk.
 ///
@@ -6876,36 +6841,10 @@ fn writeLayoutsFile(
 /// identical endpoints, layer, width and net carry no information the first one
 /// does not, so the sidecar keeps one. Nothing else is touched: near-identical
 /// or overlapping copper is real routing and stays.
-fn dedupedLayouts(alloc: std.mem.Allocator, layouts: []const SavedLayout) []const SavedLayout {
-    const out = alloc.alloc(SavedLayout, layouts.len) catch return layouts;
-    for (layouts, 0..) |l, i| {
-        out[i] = l;
-        const r = l.routes orelse continue;
-        out[i].routes = .{
-            .tracks = dedupedTracks(alloc, r.tracks),
-            .vias = dedupedVias(alloc, r.vias),
-            .zones = r.zones,
-            .rf_paths = r.rf_paths,
-        };
-    }
-    return out;
-}
+const dedupedLayouts = sidecar_store.dedupedLayouts;
 
 /// `tracks` with byte-identical duplicates removed, order preserved.
-fn dedupedTracks(alloc: std.mem.Allocator, tracks: []const SavedTrack) []const SavedTrack {
-    var seen: std.StringHashMapUnmanaged(void) = .empty;
-    var out: std.ArrayList(SavedTrack) = .empty;
-    for (tracks) |t| {
-        const key = std.fmt.allocPrint(alloc, "{d},{d},{},{d},{d},{d},{d},{d},{d},{s}", .{
-            t.x1, t.y1, t.xm != null and t.ym != null, t.xm orelse 0, t.ym orelse 0,
-            t.x2, t.y2, t.l,                           t.w,           t.net,
-        }) catch return tracks;
-        const gop = seen.getOrPut(alloc, key) catch return tracks;
-        if (gop.found_existing) continue;
-        out.append(alloc, t) catch return tracks;
-    }
-    return out.items;
-}
+const dedupedTracks = sidecar_store.dedupedTracks;
 
 /// `vias` with byte-identical duplicates removed, order preserved.
 ///
@@ -6916,19 +6855,7 @@ fn dedupedTracks(alloc: std.mem.Allocator, tracks: []const SavedTrack) []const S
 /// preservation then decides which row survives — the FIRST one, so
 /// pre-existing (typically untagged, hand-drawn or autorouted) copper keeps its
 /// identity and a later tagged twin is the one dropped.
-fn dedupedVias(alloc: std.mem.Allocator, vias: []const SavedVia) []const SavedVia {
-    var seen: std.StringHashMapUnmanaged(void) = .empty;
-    var out: std.ArrayList(SavedVia) = .empty;
-    for (vias) |v| {
-        const key = std.fmt.allocPrint(alloc, "{d},{d},{d},{d},{s}", .{
-            v.x, v.y, v.d, v.drill, v.net,
-        }) catch return vias;
-        const gop = seen.getOrPut(alloc, key) catch return vias;
-        if (gop.found_existing) continue;
-        out.append(alloc, v) catch return vias;
-    }
-    return out.items;
-}
+const dedupedVias = sidecar_store.dedupedVias;
 
 // spec: Web Server - Copper is de-duplicated on its way to the layout sidecar, so an appender that re-lays a segment cannot persist it twice
 test "the sidecar drops byte-identical duplicate copper and keeps real copper" {
@@ -7024,9 +6951,7 @@ test "perimeter restore replaces stale derived vias but adopts one serving exact
 /// Serialize the sidecar with no optimistic-concurrency rev (rev 0 → omitted).
 /// The rev-free spelling used by the KiCad-sync/export round-trip tests and any
 /// caller that doesn't participate in the save guard.
-fn writeLayoutsFileJson(w: *std.Io.Writer, layouts: []const SavedLayout, cache: ?CacheSlot) std.Io.Writer.Error!void {
-    return writeLayoutsFileJsonRev(w, layouts, cache, 0);
-}
+const writeLayoutsFileJson = sidecar_store.writeLayoutsFileJson;
 
 /// Serialize the sidecar to its on-disk shape: an optional top-level `"rev":N`
 /// optimistic-concurrency counter (omitted when 0 so a never-guarded legacy
@@ -7034,74 +6959,7 @@ fn writeLayoutsFileJson(w: *std.Io.Writer, layouts: []const SavedLayout, cache: 
 /// whose `default` flag is set, if any), the optional `"cache"` slot, then the
 /// `layouts` array. Score fields (hpwl/loop/caps) are flattened onto each entry
 /// and omitted when unscored.
-pub fn writeLayoutsFileJsonRev(w: *std.Io.Writer, layouts: []const SavedLayout, cache: ?CacheSlot, rev: i64) std.Io.Writer.Error!void {
-    try w.writeAll("{");
-    if (rev > 0) try w.print("\"rev\":{d},", .{rev});
-    for (layouts) |L| {
-        if (!L.default) continue;
-        try w.writeAll("\"default\":");
-        try writeJsonStr(w, L.name);
-        try w.writeAll(",");
-        break;
-    }
-    if (cache) |c| {
-        try w.writeAll("\"cache\":");
-        try writeCacheSlotJson(w, c);
-        try w.writeAll(",");
-    }
-    try w.writeAll("\"layouts\":[");
-    for (layouts, 0..) |L, i| {
-        if (i > 0) try w.writeAll(",");
-        try w.writeAll(name_open);
-        try writeJsonStr(w, L.name);
-        try w.writeAll(",\"kind\":");
-        try writeJsonStr(w, L.kind);
-        try w.print(",\"ts\":{d}", .{L.ts});
-        if (L.rough) try w.writeAll(",\"rough\":true");
-        // The SIDECAR always carries every layout's copper in full — it is the
-        // file of record. Only the page blob slims (see `writeLayoutsJson`).
-        if (L.routes) |sr| {
-            try w.writeAll(",\"routes\":");
-            try writeSavedRoutesJson(w, sr);
-        }
-        if (L.outline) |o| {
-            try w.writeAll(outline_open);
-            try writeSavedOutlineJson(w, o);
-        }
-        if (L.fabrication_layers.len > 0) {
-            try w.writeAll(fabrication_layers_open);
-            try sidecar_json.writeSavedFabricationLayersJson(w, L.fabrication_layers);
-        }
-        if (L.heatsink) |sink| {
-            try w.writeAll(",\"heatsink\":");
-            try writeSavedHeatsinkJson(w, sink);
-        }
-        if (L.texts.len > 0) {
-            try w.writeAll(texts_open);
-            try writeSavedTextsJson(w, L.texts);
-        }
-        if (L.dimensions.len > 0) {
-            try w.writeAll(",\"dimensions\":");
-            try writePartEdgeDimensionsJson(w, L.dimensions);
-        }
-        if (L.score) |s| try w.print(",\"hpwl\":{d},\"loop\":{d},\"caps\":{d},\"objective\":{d}", .{ s.hpwl, s.loop, s.caps, s.objective });
-        try w.writeAll(",\"parts\":[");
-        for (L.parts, 0..) |pt, j| {
-            if (j > 0) try w.writeAll(",");
-            try w.writeAll(ref_open);
-            try writeJsonStr(w, pt.ref);
-            try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d}", .{ pt.x, pt.y, pt.rot });
-            try pcb_part_json.writePoseSideLocked(w, pt.side, pt.locked);
-            if (pt.origin.len > 0) {
-                try w.writeAll(origin_open);
-                try writeJsonStr(w, pt.origin);
-            }
-            try w.writeAll("}");
-        }
-        try w.writeAll("]}");
-    }
-    try w.writeAll("]}");
-}
+pub const writeLayoutsFileJsonRev = sidecar_store.writeLayoutsFileJsonRev;
 
 /// Two saved layouts are duplicates when their score matches: the headline
 /// objective and its two visible raw terms (HPWL + loop length) agree to 0.1.
@@ -7111,196 +6969,34 @@ pub fn writeLayoutsFileJsonRev(w: *std.Io.Writer, layouts: []const SavedLayout, 
 /// the deterministic optimizer can reach an equal-score arrangement that differs
 /// by a hair, which the user still sees as the same layout.) Unscored legacy
 /// entries never match — they're kept rather than guessed at.
-fn sameLayoutScore(a: ?LayoutScore, b: ?LayoutScore) bool {
-    const x = a orelse return false;
-    const y = b orelse return false;
-    return @abs(x.objective - y.objective) < 0.1 and @abs(x.hpwl - y.hpwl) < 0.1 and @abs(x.loop - y.loop) < 0.1;
-}
-
-/// Panel sort key: the layout edited most recently belongs at the top. A stable
-/// sort preserves sidecar order for same-second saves and legacy rows whose
-/// timestamp is unknown (`ts == 0`).
-fn layoutMoreRecentlyEdited(_: void, a: SavedLayout, b: SavedLayout) bool {
-    return a.ts > b.ts;
-}
-
-/// Collapse saved layouts that are the same arrangement into one, so the panel
-/// never lists a placement twice (chiefly repeated Regenerate runs that
-/// converged identically). Input order is preserved; each group's survivor keeps
-/// a manual name over an auto stamp and the default flag if any member had it.
-fn dedupLayouts(alloc: std.mem.Allocator, layouts: []const SavedLayout) []const SavedLayout {
-    var out: std.ArrayList(SavedLayout) = .empty;
-    for (layouts) |L| {
-        var merged = false;
-        for (out.items) |*K| {
-            if (!sameLayoutScore(K.score, L.score)) continue;
-            // Two MANUAL entries are never merged, however alike they score.
-            // The score measures PLACEMENT only, and the whole point of named
-            // layouts is banking several routings of one placement — collapsing
-            // them here would delete every autoroute candidate but the first,
-            // on the next page load, with no warning.
-            if (std.mem.eql(u8, K.kind, kind_manual) and std.mem.eql(u8, L.kind, kind_manual)) continue;
-            const keep_default = K.default or L.default;
-            // Which duplicate survives (its NAME is the row's permalink):
-            // a manual (named) entry over an auto stamp; between two auto
-            // stamps, the STARRED one — the ★ must never silently migrate to
-            // a different-named row, or the starred permalink stops
-            // reproducing the board it named.
-            const l_manual = std.mem.eql(u8, L.kind, kind_manual);
-            const k_manual = std.mem.eql(u8, K.kind, kind_manual);
-            if (l_manual and !k_manual) {
-                K.* = L;
-            } else if (L.default and !k_manual) {
-                // Both auto here (a manual L was promoted above): the starred
-                // auto row keeps its identity over an unstarred twin.
-                if (!K.default) K.* = L;
-            }
-            K.default = keep_default;
-            merged = true;
-            break;
-        }
-        if (!merged) out.append(alloc, L) catch return layouts;
-    }
-    return out.items;
-}
+const dedupLayouts = sidecar_store.dedupLayouts;
+const sameLayoutScore = sidecar_store.sameLayoutScore;
 
 /// The saved-layout list for the panel: duplicate arrangements collapsed (legacy
 /// histories that accumulated repeated Regenerate runs — the cleanup is persisted
 /// once), then sorted most-recently-edited first. Only this display copy is
 /// sorted; the sidecar's history order stays untouched. Empty for sub-scoped
 /// previews.
-fn displayLayouts(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8, raw: []const SavedLayout) []const SavedLayout {
-    const deduped = dedupLayouts(alloc, raw);
-    if (deduped.len != raw.len) writeLayoutsSub(alloc, project_dir, name, sub, deduped);
-    const sorted = alloc.dupe(SavedLayout, deduped) catch return deduped;
-    std.sort.insertion(SavedLayout, sorted, {}, layoutMoreRecentlyEdited);
-    return sorted;
-}
+const displayLayouts = sidecar_store.displayLayouts;
 
 /// Append an auto-recorded snapshot of the just-generated `placement` to the
 /// layout history — unless that arrangement is *already saved* (under any name,
 /// auto or manual), in which case there is nothing new to record. Then prunes
 /// auto entries past `MAX_AUTO_LAYOUTS`.
-fn recordAutoLayout(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, p: optimizer.Placement, params: optimizer.Params) void {
-    const existing = readLayouts(alloc, project_dir, name);
-    const score = LayoutScore{ .hpwl = p.score.hpwl_mm, .loop = p.score.loop_mm, .caps = p.score.loop_caps, .objective = p.breakdown.objective };
-    const parts = posesFromPlacement(alloc, p) orelse return;
-    // Dedup against EVERY saved layout, not just the newest: a regen that
-    // reproduces an arrangement already in the list (same objective + HPWL +
-    // loop) adds nothing. If the match is the newest entry and predates the
-    // objective field, backfill it in place. A rough solve that reconverges to
-    // an existing (untagged) arrangement still tags it rough so the panel's
-    // "rough seeded" status lights up.
-    for (existing, 0..) |L, i| {
-        if (!sameLayoutScore(L.score, score)) continue;
-        if (params.rough and !L.rough) {
-            tagRough(alloc, project_dir, name, existing, i);
-        } else if (i == 0 and (L.score == null or L.score.?.objective <= 0)) {
-            backfillNewestScore(alloc, project_dir, name, existing, score);
-        }
-        return;
-    }
-    const now = clock.timestamp();
-    const entry = SavedLayout{
-        .name = fmtAutoName(alloc, now) catch return,
-        .kind = kind_auto,
-        .ts = now,
-        .score = score,
-        .parts = parts,
-        .rough = params.rough,
-    };
-    // Newest first; keep every manual entry but only the most-recent autos.
-    // The entry the user marked default is never pruned (else a default that
-    // happens to be an auto run could fall off the cap and dangle the sync).
-    var out: std.ArrayList(SavedLayout) = .empty;
-    out.append(alloc, entry) catch return;
-    var autos: usize = 1;
-    for (existing) |L| {
-        if (std.mem.eql(u8, L.kind, kind_auto)) {
-            if (autos >= max_auto_layouts and !L.default) continue;
-            autos += 1;
-        }
-        out.append(alloc, L) catch break;
-    }
-    writeLayouts(alloc, project_dir, name, out.items);
-}
-
-/// Rewrite the layout list with the `rough` flag set on entry `idx` — used when
-/// a Rough solve reconverges to an arrangement already saved without the flag,
-/// so the schematic's Module-layouts panel still reads "rough seeded" rather
-/// than recording a duplicate row.
-fn tagRough(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, existing: []const SavedLayout, idx: usize) void {
-    var out: std.ArrayList(SavedLayout) = .empty;
-    for (existing, 0..) |L, i| {
-        var e = L;
-        if (i == idx) e.rough = true;
-        out.append(alloc, e) catch return;
-    }
-    writeLayouts(alloc, project_dir, name, out.items);
-}
-
-/// Rewrite the layout list with `score` patched onto the newest entry — used to
-/// backfill the objective onto a pre-objective auto entry a regen re-confirms,
-/// without churning the history with a duplicate row.
-fn backfillNewestScore(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, existing: []const SavedLayout, score: LayoutScore) void {
-    var out: std.ArrayList(SavedLayout) = .empty;
-    for (existing, 0..) |L, i| {
-        var e = L;
-        if (i == 0) e.score = score;
-        out.append(alloc, e) catch return;
-    }
-    writeLayouts(alloc, project_dir, name, out.items);
-}
-
-/// Name for an auto-recorded entry: `auto · Mon D HH:MM:SS` (UTC). The seconds
-/// keep two same-minute regenerations distinct.
-fn fmtAutoName(alloc: std.mem.Allocator, ts: i64) std.mem.Allocator.Error![]const u8 {
-    const es = clock.epoch.EpochSeconds{ .secs = @intCast(ts) };
-    const ds = es.getDaySeconds();
-    const md = es.getEpochDay().calculateYearDay().calculateMonthDay();
-    return std.fmt.allocPrint(alloc, "auto · {s} {d} {d:0>2}:{d:0>2}:{d:0>2}", .{
-        monthAbbrev(md.month),   md.day_index + 1,          ds.getHoursIntoDay(),
-        ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
-    });
-}
-
-fn monthAbbrev(m: clock.epoch.Month) []const u8 {
-    return switch (m) {
-        .jan => "Jan",
-        .feb => "Feb",
-        .mar => "Mar",
-        .apr => "Apr",
-        .may => "May",
-        .jun => "Jun",
-        .jul => "Jul",
-        .aug => "Aug",
-        .sep => "Sep",
-        .oct => "Oct",
-        .nov => "Nov",
-        .dec => "Dec",
-    };
-}
+const recordAutoLayout = sidecar_store.recordAutoLayout;
 
 /// Read the optimizer cache's poses into a slice of `RefPose`, or null if
 /// no cache slot exists. Strings are owned by `alloc` (request lifetime),
 /// which outlives the `solve` call that consumes them.
-fn readAutoPoses(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?[]const optimizer.RefPose {
-    return cachePoses(alloc, readCacheSlot(alloc, project_dir, name));
-}
+const readAutoPoses = sidecar_store.readAutoPoses;
 
 /// `readAutoPoses` over an already-read cache slot (see `SidecarDoc`).
-fn cachePoses(alloc: std.mem.Allocator, cache: ?CacheSlot) ?[]const optimizer.RefPose {
-    const slot = cache orelse return null;
-    const parts = slot.parts orelse return null;
-    const out = alloc.alloc(optimizer.RefPose, parts.len) catch return null;
-    for (parts, 0..) |pt, i| out[i] = .{ .ref = pt.ref, .x = pt.x, .y = pt.y, .rot = pt.rot, .side = pt.side, .locked = pt.locked };
-    return out;
-}
+const cachePoses = sidecar_store.cachePoses;
 
 /// One placed part exported to the KiCad sync: centre (mm) + rotation (deg,
 /// CCW) + board side. The sync stamps these onto a footprint it inserts for
 /// the first time.
-pub const SyncPose = struct { x: f64, y: f64, rot: f64, side: optimizer.Side = .top };
+pub const SyncPose = sidecar_store.SyncPose;
 
 /// Re-export so the KiCad sync can name a module's poses (`loadSubBlockPoses`)
 /// without importing the placement layer directly.
@@ -7313,45 +7009,16 @@ pub const RefPose = optimizer.RefPose;
 /// optimizer-cache slot. Both `loadSyncLayout` (placement) and
 /// `loadSyncVias` (vias) go through this so the vias correspond to exactly the
 /// poses the parts land at. Result lives on `alloc` (request lifetime).
-fn chooseSyncPoses(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?[]const optimizer.RefPose {
-    const layouts = readLayouts(alloc, project_dir, name);
-    const chosen: ?[]const PartPose = blk: {
-        for (layouts) |L| {
-            if (L.default and L.parts.len > 0) break :blk L.parts;
-        }
-        for (layouts) |L| {
-            if (std.mem.eql(u8, L.kind, kind_manual) and L.parts.len > 0) break :blk L.parts;
-        }
-        for (layouts) |L| {
-            if (L.parts.len > 0) break :blk L.parts;
-        }
-        break :blk null;
-    };
-    if (chosen) |parts| return refPosesFromParts(alloc, parts);
-    // No named/recorded layouts — fall back to the bare optimizer cache.
-    const poses = readAutoPoses(alloc, project_dir, name) orelse return null;
-    if (poses.len == 0) return null;
-    return poses;
-}
+const chooseSyncPoses = sidecar_store.chooseSyncPoses;
 
 /// Saved-layout parts as sync `RefPose`s (null on allocation failure).
-fn refPosesFromParts(alloc: std.mem.Allocator, parts: []const PartPose) ?[]const optimizer.RefPose {
-    const out = alloc.alloc(optimizer.RefPose, parts.len) catch return null;
-    for (parts, 0..) |pt, i| out[i] = .{ .ref = pt.ref, .x = pt.x, .y = pt.y, .rot = pt.rot, .side = pt.side, .locked = pt.locked };
-    return out;
-}
+const refPosesFromParts = sidecar_store.refPosesFromParts;
 
 /// `chooseModuleSnapshot` result: the snapshot to seed from, plus — when a
 /// different snapshot covers strictly more of the module's current parts —
 /// that fuller alternative (surfaced as a staleness hint, never auto-taken
 /// over a ★).
-const SnapshotChoice = struct {
-    chosen: *const SavedLayout,
-    /// Fuller non-chosen snapshot (only set when it beats `chosen`).
-    alt: ?*const SavedLayout = null,
-    /// How many module parts `alt` covers.
-    alt_n: usize = 0,
-};
+const SnapshotChoice = sidecar_store.SnapshotChoice;
 
 /// Pick which of a module's saved snapshots to seed a Stamp / sync from,
 /// scoring each by how many of its refs still exist in the module's *current*
@@ -7364,47 +7031,7 @@ const SnapshotChoice = struct {
 /// non-starred snapshot out-covers, that snapshot is reported as `alt` so the
 /// UI can flag the stale star. Null when no snapshot bridges anything (caller
 /// may fall back to the volatile cache slot).
-fn chooseModuleSnapshot(
-    layouts: []const SavedLayout,
-    ok_of: *const std.StringHashMapUnmanaged([]const u8),
-) ?SnapshotChoice {
-    var starred: ?*const SavedLayout = null;
-    var starred_score: usize = 0;
-    var best: ?*const SavedLayout = null;
-    var best_score: usize = 0;
-    for (layouts) |*L| {
-        if (L.parts.len == 0) continue;
-        var score: usize = 0;
-        for (L.parts) |p| {
-            const ok = ok_of.get(p.ref) orelse continue;
-            if (ok.len > 0) score += 1;
-        }
-        if (score == 0) continue;
-        if (L.default) {
-            starred = L;
-            starred_score = score;
-            continue;
-        }
-        const cur = best orelse {
-            best = L;
-            best_score = score;
-            continue;
-        };
-        const manual = std.mem.eql(u8, L.kind, kind_manual);
-        const cur_manual = std.mem.eql(u8, cur.kind, kind_manual);
-        const wins = if (score == best_score) manual and !cur_manual else score > best_score;
-        if (wins) {
-            best = L;
-            best_score = score;
-        }
-    }
-    if (starred) |st| {
-        const stale = best != null and best_score > starred_score;
-        return .{ .chosen = st, .alt = if (stale) best else null, .alt_n = if (stale) best_score else 0 };
-    }
-    const b = best orelse return null;
-    return .{ .chosen = b };
-}
+const chooseModuleSnapshot = sidecar_store.chooseModuleSnapshot;
 
 /// Load the design's premade placement-tool layout for the KiCad sync's
 /// first-insertion path, as a ref-des → pose map (mm + degrees), or null when
@@ -7714,26 +7341,6 @@ fn writeAutoCache(alloc: std.mem.Allocator, project_dir: []const u8, name: []con
             else => {},
         };
     } else |_| {}
-}
-
-/// Serialize a cache slot to `{"params":{…},"parts":[{ref,x,y,rot}, …]}` —
-/// the weights so the controls reflect what produced the layout, the parts
-/// for the cache.
-fn writeCacheSlotJson(w: *std.Io.Writer, c: CacheSlot) std.Io.Writer.Error!void {
-    try w.print("{{\"params\":{{\"loop_w\":{d},\"w_align\":{d},\"w_congest\":{d},\"cap_w_max\":{d},\"grid\":{s}}},", .{
-        c.params.loop_w,                                   c.params.w_align, c.params.w_congest, c.params.cap_w_max,
-        if (c.params.grid_courtyards) "true" else "false",
-    });
-    try w.writeAll(parts_open);
-    for (c.parts orelse &[_]PartPose{}, 0..) |pt, i| {
-        if (i > 0) try w.writeAll(",");
-        try w.writeAll(ref_open);
-        try writeJsonStr(w, pt.ref);
-        try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d}", .{ pt.x, pt.y, pt.rot });
-        try pcb_part_json.writePoseSideLocked(w, pt.side, pt.locked);
-        try w.writeAll("}");
-    }
-    try w.writeAll("]}");
 }
 
 /// Read the tuning weights stored alongside the cached layout, or null when
@@ -10417,37 +10024,6 @@ fn writeHtmlText(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
     };
 }
 
-/// Emit `s` as a quoted, JSON-escaped string to a `std.Io.Writer`. This
-/// serializer's output is emitted verbatim INSIDE a `<script>` element (the
-/// `const PCB=…` data blob), so it must also
-/// neutralize the `<script>`-context breakouts a plain JSON escaper misses:
-/// `<` is escaped to `<` (so a net/ref/value/layout name containing
-/// `</script>` can't close the tag → stored XSS), and U+2028/U+2029 are
-/// escaped (they terminate a JS string literal in older engines).
-pub fn writeJsonStr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
-    try w.writeByte('"');
-    var i: usize = 0;
-    while (i < s.len) : (i += 1) {
-        const c = s[i];
-        switch (c) {
-            '"' => try w.writeAll("\\\""),
-            '\\' => try w.writeAll("\\\\"),
-            '\n' => try w.writeAll("\\n"),
-            '\r' => try w.writeAll("\\r"),
-            '\t' => try w.writeAll("\\t"),
-            '<' => try w.writeAll("\\u003c"),
-            0xE2 => {
-                if (i + 2 < s.len and s[i + 1] == 0x80 and (s[i + 2] == 0xA8 or s[i + 2] == 0xA9)) {
-                    try w.writeAll(if (s[i + 2] == 0xA8) "\\u2028" else "\\u2029");
-                    i += 2;
-                } else try w.writeByte(c);
-            },
-            else => if (c < 0x20) try w.print("\\u{x:0>4}", .{c}) else try w.writeByte(c),
-        }
-    }
-    try w.writeByte('"');
-}
-
 // ── Courtyard editor modal ───────────────────────────────────────────────
 
 /// Hidden-by-default overlay; populated + shown by BOARD_JS when a sidebar
@@ -10516,14 +10092,14 @@ const fp_card_modal =
 // ── Fab-readiness modal ──────────────────────────────────────────────────
 
 /// Hidden-by-default overlay populated by BOARD_JS when the ⤓ Gerbers button
-/// finds the fab-readiness report non-clean. Lists errors + warnings; the
-/// primary action is "Download anyway" (force) on errors, "Continue" on
-/// warnings-only. Reuses the court-modal styling.
+/// receives the revision-locked release report. Every package requires an
+/// explicit confirmation; remaining findings make that action a recorded
+/// waiver. Reuses the court-modal styling.
 const fab_modal =
     \\<div id="fab-modal" class="court-modal" hidden><div class="court-dialog fab-dialog">
     \\<div class="court-h"><span id="fab-title">Fab readiness</span><button id="fab-x" class="court-x" title="Close">×</button></div>
     \\<div id="fab-body" class="fab-body"></div>
-    \\<div class="court-actions"><button id="fab-go" class="btn">Download anyway</button>
+    \\<div class="court-actions"><button id="fab-go" class="btn">Confirm release and export</button>
     \\<button id="fab-cancel" class="btn">Cancel</button></div>
     \\</div></div>
 ;
@@ -13378,7 +12954,103 @@ pub fn fabViewFor(alloc: std.mem.Allocator, project_dir: []const u8, name: []con
         alloc.destroy(mr.eval);
     };
     const block = resolveBlock(alloc, project_dir, name, &eval, &module_res) orelse return error.BlockNotFound;
-    const layouts = readLayouts(alloc, project_dir, name);
+    return fabViewForResolved(alloc, project_dir, name, layout_arg, block);
+}
+
+const UserZoneEvidence = struct {
+    zones: []const pour.UserZone,
+    complete: bool,
+};
+
+fn userZonesEvidence(alloc: std.mem.Allocator, rules: optimizer.BoardRules, saved: []const SavedZone) UserZoneEvidence {
+    const zones = userZonesFrom(alloc, rules, saved);
+    var expected: usize = 0;
+    for (saved) |zone| {
+        if (!zone.flags.filled or zone.flags.keepout) continue;
+        var legacy: [1][]const u8 = undefined;
+        expected += saved_zone.layers(&zone, &legacy).len;
+    }
+    return .{ .zones = zones, .complete = zones.len == expected };
+}
+
+const SilkKeepoutEvidence = struct {
+    keepouts: []const subcircuit_silkscreen.Keepout,
+    complete: bool,
+};
+
+fn silkKeepoutsEvidence(alloc: std.mem.Allocator, saved: []const SavedZone) SilkKeepoutEvidence {
+    const keepouts = silkKeepoutsFrom(alloc, saved);
+    var expected: usize = 0;
+    for (saved) |zone| if (zone.flags.keepout and zone.poly.len >= 3) {
+        expected += 1;
+    };
+    return .{ .keepouts = keepouts, .complete = keepouts.len == expected };
+}
+
+const LayoutLowering = struct {
+    routed: router.RouteResult = .{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 },
+    zones: []const pour.UserZone = &.{},
+    silk_keepouts: []const subcircuit_silkscreen.Keepout = &.{},
+    complete: bool = true,
+};
+
+fn lowerSavedManufacturing(
+    alloc: std.mem.Allocator,
+    placement: *optimizer.Placement,
+    layout: SavedLayout,
+) LayoutLowering {
+    var result = LayoutLowering{};
+    result.complete = applyFabricationLayerOverrides(alloc, placement, layout.fabrication_layers);
+
+    if (layout.routes) |saved| {
+        const perimeter = routesWithPerimeterEvidence(alloc, placement.*, saved);
+        result.complete = result.complete and perimeter.complete;
+        if (perimeter.routes) |routes| {
+            if (restoreRoutes(alloc, routes, placement.nets)) |restored| {
+                result.routed = restored;
+            } else {
+                result.complete = false;
+            }
+        } else {
+            result.complete = false;
+        }
+
+        const zone_evidence = userZonesEvidence(alloc, placement.rules, saved.zones);
+        result.zones = zone_evidence.zones;
+        result.complete = result.complete and zone_evidence.complete;
+
+        const silk_evidence = silkKeepoutsEvidence(alloc, saved.zones);
+        result.silk_keepouts = silk_evidence.keepouts;
+        result.complete = result.complete and silk_evidence.complete;
+    }
+
+    return result;
+}
+
+fn appendPerimeterEvidence(alloc: std.mem.Allocator, placement: optimizer.Placement, lowered: *LayoutLowering) void {
+    const fenced = perimeter_fence.append(alloc, placement, lowered.routed) catch {
+        lowered.complete = false;
+        return;
+    };
+    if (fenced) |routed| {
+        lowered.routed = routed;
+    } else {
+        lowered.complete = false;
+    }
+}
+
+/// Build the physical fab snapshot from the already-resolved block used by the
+/// strict schematic gate. Keeping both halves on this one evaluator snapshot
+/// prevents CAM A from being paired with schematic/BOM evidence B.
+pub fn fabViewForResolved(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    layout_arg: ?[]const u8,
+    block: *env_mod.DesignBlock,
+) FabViewError!FabView {
+    const sidecar = readDesignDoc(alloc, project_dir, name);
+    const layouts = sidecar.layouts;
     const chosen: ?SavedLayout = if (layout_arg) |la| blk: {
         for (layouts) |L| {
             if (std.mem.eql(u8, L.name, la) and L.parts.len > 0) break :blk L;
@@ -13386,11 +13058,12 @@ pub fn fabViewFor(alloc: std.mem.Allocator, project_dir: []const u8, name: []con
         return error.UnknownLayout;
     } else if (blessedLayout(layouts)) |L| L.* else null;
 
-    const poses: []const optimizer.RefPose = if (layout_arg != null) blk: {
-        // A named selection always resolved a row above (else UnknownLayout).
-        const c = chosen orelse return error.UnknownLayout;
-        break :blk rekeyPosesByOrigin(alloc, block, c.parts) orelse (refPosesFromParts(alloc, c.parts) orelse return error.PlacementFailed);
-    } else (chooseSyncPoses(alloc, project_dir, name) orelse return error.NoSavedLayout);
+    const poses: []const optimizer.RefPose = if (chosen) |layout|
+        (rekeyPosesByOrigin(alloc, block, layout.parts) orelse (refPosesFromParts(alloc, layout.parts) orelse return error.PlacementFailed))
+    else if (layout_arg != null)
+        return error.UnknownLayout
+    else
+        (cachePoses(alloc, sidecar.cache) orelse return error.NoSavedLayout);
 
     // The chosen layout's own drawn outline is the fab board edge.
     const oseed: optimizer.OutlineSource = if (chosen) |L|
@@ -13398,30 +13071,34 @@ pub fn fabViewFor(alloc: std.mem.Allocator, project_dir: []const u8, name: []con
     else
         .authored_only;
     var placement = optimizer.placeFromPoses(alloc, block, project_dir, .{ .poses = poses, .outline = oseed }, optimizer.Params{}) catch return error.PlacementFailed;
-    var routed = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
-    var zones: []const pour.UserZone = &.{};
-    var silk_keepouts: []const subcircuit_silkscreen.Keepout = &.{};
+    var layout_evidence_complete = false;
+    if (chosen) |layout| {
+        const structure_complete = if (sidecar.root) |root|
+            sidecar_json.selectedLayoutParsedEvidence(alloc, root, layout)
+        else
+            false;
+        layout_evidence_complete = structure_complete and savedLayoutSemanticsComplete(placement, layout, poses);
+    }
+    var lowered = LayoutLowering{};
     var texts: []const font5x7.BoardText = &.{};
     if (chosen) |L| {
-        applyFabricationLayerOverrides(alloc, &placement, L.fabrication_layers);
-        if (L.routes) |sr| {
-            if (restoreRoutes(alloc, routesWithPerimeter(alloc, placement, sr).?, placement.nets)) |r| {
-                routed = r;
-            }
-            zones = userZonesFrom(alloc, placement.rules, sr.zones);
-            silk_keepouts = silkKeepoutsFrom(alloc, sr.zones);
-        }
+        lowered = lowerSavedManufacturing(alloc, &placement, L);
         texts = L.texts;
     }
-    routed = (perimeter_fence.append(alloc, placement, routed) catch null) orelse routed;
+    appendPerimeterEvidence(alloc, placement, &lowered);
+    layout_evidence_complete = layout_evidence_complete and lowered.complete;
     return .{
         .placement = placement,
-        .routed = routed,
-        .zones = zones,
-        .silk_keepouts = silk_keepouts,
+        .routed = lowered.routed,
+        .zones = lowered.zones,
+        .silk_keepouts = lowered.silk_keepouts,
         .texts = texts,
-        .authored = .{ .stackup = block.stackup, .revision = block.revision },
-        .from_saved = chosen != null,
+        .authored = .{ .stackup = block.stackup, .revision = block.revision, .board = block.board },
+        .selection = .{
+            .from_saved = chosen != null,
+            .name = if (chosen) |layout| layout.name else "optimizer-cache",
+            .evidence_complete = layout_evidence_complete,
+        },
     };
 }
 
@@ -13429,38 +13106,8 @@ pub fn fabViewFor(alloc: std.mem.Allocator, project_dir: []const u8, name: []con
 pub const FabAuthored = struct {
     stackup: env_mod.StackupSpec,
     revision: env_mod.Revision,
+    board: env_mod.BoardSpec,
 };
-
-/// `run_fab_readiness` — the pre-fab correctness report for the design's
-/// blessed (or named) layout: `{ok,errors:[…],warnings:[…],stats:{…}}`,
-/// computed against the SAME fab view the Gerber export builds. Read-only —
-/// the gate `pcbGerbersApi` enforces server-side, surfaced here for the agent.
-pub fn mcpRunFabReadiness(
-    alloc: std.mem.Allocator,
-    project_dir: []const u8,
-    args_val: ?std.json.Value,
-    out: *std.ArrayList(u8),
-) HandlerError!bool {
-    const name = mcpArgStr(args_val, "name") orelse return mcpFail(out, alloc, mcp_err_missing_name);
-    const layout_arg = mcpArgStr(args_val, "layout");
-    const fv = fabViewFor(alloc, project_dir, name, layout_arg) catch |e| return switch (e) {
-        // Name the dead reference — answering with the generic "no saved
-        // layout" would read as "save one", when the fix is picking a row
-        // that exists.
-        error.UnknownLayout => mcpFailFmt(out, alloc, "no saved layout named \"{s}\" — list the design's layouts and pass one of those names", .{layout_arg.?}),
-        else => mcpFail(out, alloc, "no saved layout — set poses and save a layout first"),
-    };
-    const copper = export_gerber.Copper{ .tracks = fv.routed.tracks, .arcs = fv.routed.arcs, .rf_paths = fv.routed.rf_port_outcomes, .vias = fv.routed.vias, .zones = fv.zones, .silk_keepouts = fv.silk_keepouts };
-    const report = fab_readiness.check(alloc, fv.placement, copper, .{
-        .from_saved_layout = fv.from_saved,
-        .drc_rules = drc_rules.load(alloc, project_dir, name),
-    }) catch |e|
-        return mcpFailFmt(out, alloc, "fab-readiness check failed: {s}", .{@errorName(e)});
-    var aw: std.Io.Writer.Allocating = .init(alloc);
-    try fab_readiness.writeJson(&aw.writer, report);
-    try out.appendSlice(alloc, aw.written());
-    return true;
-}
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
@@ -14011,8 +13658,10 @@ fn writeFabSelectionFixture(dir: std.Io.Dir) !void {
     });
 }
 
-/// GET /api/fab-readiness/fabsel[?layout=…] through the real handler; expects
-/// 200 and returns the body duped onto `alloc` (the harness arena dies here).
+/// GET /api/fab-readiness/fabsel[?layout=…] through the real handler. This
+/// deliberately minimal routing fixture has no release revision/BOM evidence,
+/// so the strict endpoint must return 500 while still reporting the selected
+/// row's physical findings for this selection regression.
 fn fabReadinessBody(alloc: std.mem.Allocator, project: []const u8, layout: ?[]const u8) ![]const u8 {
     var state = serve_root.ServerState{};
     var srv = Server{ .allocator = alloc, .project_dir = project, .auth_dir = project, .state = &state };
@@ -14021,7 +13670,8 @@ fn fabReadinessBody(alloc: std.mem.Allocator, project: []const u8, layout: ?[]co
     ht.param("name", "fabsel");
     if (layout) |l| ht.query("layout", l);
     try pcbFabReadinessApi(&srv, ht.req, ht.res);
-    try std.testing.expectEqual(@as(u16, 200), ht.res.status);
+    try std.testing.expectEqual(@as(u16, 500), ht.res.status);
+    try std.testing.expect(std.mem.indexOf(u8, ht.res.body, "\"internal_checks_complete\":false") != null);
     return alloc.dupe(u8, ht.res.body);
 }
 
@@ -14045,8 +13695,14 @@ test "fab-readiness answers about the named saved row and 404s a dead layout lin
     // …while the ★ row has SIG closed by its copper. Before the fix every
     // ?layout= value silently answered with this starred report.
     try std.testing.expect(std.mem.indexOf(u8, starred, sig_airwire) == null);
-    // Naming the starred row reproduces the default answer exactly.
-    try std.testing.expectEqualStrings(starred, routed);
+    // Naming the starred row reproduces the same physical verdict. Release
+    // tokens may also bind request-local evidence ordering, so compare the
+    // stable findings/stats rather than treating the token as presentation.
+    try std.testing.expect(std.mem.indexOf(u8, routed, sig_airwire) == null);
+    for ([_][]const u8{ "\"layout\":\"routed\"", "\"tracks\":3", "\"connected_nets\":1" }) |needle| {
+        try std.testing.expect(std.mem.indexOf(u8, starred, needle) != null);
+        try std.testing.expect(std.mem.indexOf(u8, routed, needle) != null);
+    }
 
     // A ?layout= naming nothing is a dead link: 404 listing the rows that DO
     // exist — never a 200 about a different board.
@@ -14061,6 +13717,376 @@ test "fab-readiness answers about the named saved row and 404s a dead layout lin
     try std.testing.expect(std.mem.indexOf(u8, ht.res.body, "\"nope\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, ht.res.body, "\"routed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, ht.res.body, "\"open\"") != null);
+}
+
+fn writeFabReleaseLayout(dir: std.Io.Dir, timestamp: i64) !void {
+    var bytes: [512]u8 = undefined;
+    const data = try std.fmt.bufPrint(&bytes,
+        \\{{"default":"release","layouts":[{{"name":"release","kind":"manual","ts":{d},"default":true,
+        \\ "parts":[{{"ref":"U1","x":20,"y":10,"rot":0}}]}}]}}
+    , .{timestamp});
+    try dir.writeFile(std.testing.io, .{ .sub_path = "src/fabok.layouts.json", .data = data });
+}
+
+fn writeFabReleaseFixture(allocator: std.mem.Allocator, dir: std.Io.Dir, project: []const u8) !void {
+    try dir.createDirPath(std.testing.io, "lib/components");
+    try dir.createDirPath(std.testing.io, "lib/footprints");
+    try dir.createDirPath(std.testing.io, "lib/modules");
+    try dir.createDirPath(std.testing.io, "src");
+    try dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/fixture-part.sexp", .data =
+        \\(component fixture-part
+        \\  (footprint "onepad")
+        \\  (manufacturer "Fixture Devices")
+        \\  (mpn "FIX-1")
+        \\  (ignore-requirements)
+        \\  (pins (1 "GND")))
+    });
+    try dir.writeFile(std.testing.io, .{ .sub_path = "lib/footprints/onepad.sexp", .data =
+        \\(footprint "onepad"
+        \\  (pad 1 smd roundrect (pos 0 0) (size 1 1))
+        \\  (courtyard (rect -0.8 -0.8 0.8 0.8)))
+    });
+    try dir.writeFile(std.testing.io, .{ .sub_path = "src/fabok.sexp", .data =
+        \\(import fixture-part)
+        \\(design-block "Fabrication Release Fixture"
+        \\  (revision "A" (date "2026-08-27"))
+        \\  (board (size 40 20))
+        \\  (design-rules (stackup 4) (plane 2 "GND") (pour top "GND"))
+        \\  (assert (== 1 2) "intentional fixture waiver")
+        \\  (instance "U1" fixture-part
+        \\    (id fab00001)
+        \\    (pin 1 "GND")))
+    });
+    try writeFabReleaseLayout(dir, 1);
+
+    const source_path = try paths.designSourcePath(allocator, project, "fabok");
+    defer allocator.free(source_path);
+    const bom_path = try paths.designSiblingPath(allocator, project, "fabok", ".bom");
+    defer allocator.free(bom_path);
+    var evaluator = Evaluator.init(allocator, project);
+    defer evaluator.deinit();
+    const evaluated = try evaluator.evalFile(source_path);
+    const block = switch (evaluated) {
+        .design_block => |value| value,
+        else => return error.TestExpectedDesignBlock,
+    };
+    try bom.resolveIdentities(allocator, block, bom_path, project);
+}
+
+fn runFabTestGit(allocator: std.mem.Allocator, project: []const u8, tail: []const []const u8) !void {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    try argv.append(allocator, "git");
+    try argv.append(allocator, "-C");
+    try argv.append(allocator, project);
+    try argv.appendSlice(allocator, tail);
+    const result = try subprocess.runCaptured(allocator, argv.items, 64 * 1024, 5_000);
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(subprocess.Outcome.ok, result.outcome);
+    try std.testing.expectEqual(@as(?u8, 0), result.exit_code);
+}
+
+const FabEndpointResponse = struct {
+    status: u16,
+    body: []const u8,
+    content_type: ?[]const u8,
+};
+
+fn callFabEndpoint(
+    allocator: std.mem.Allocator,
+    project: []const u8,
+    gerbers: bool,
+    confirm: ?[]const u8,
+    waive: bool,
+) !FabEndpointResponse {
+    return callFabEndpointHooked(allocator, project, gerbers, confirm, waive, null);
+}
+
+fn callFabEndpointHooked(
+    allocator: std.mem.Allocator,
+    project: []const u8,
+    gerbers: bool,
+    confirm: ?[]const u8,
+    waive: bool,
+    snapshot_hook: ?*ReleaseSnapshotHook,
+) !FabEndpointResponse {
+    var state = serve_root.ServerState{};
+    var server = Server{ .allocator = allocator, .project_dir = project, .auth_dir = project, .state = &state };
+    var request = httpz.testing.init(.{});
+    defer request.deinit();
+    request.param("name", "fabok");
+    request.query("layout", "release");
+    if (confirm) |token| request.query("confirm", token);
+    if (waive) request.query("waive", "1");
+    paths.beginRequest();
+    if (gerbers)
+        try pcbGerbersApiHooked(&server, request.req, request.res, snapshot_hook)
+    else
+        try pcbFabReadinessApiHooked(&server, request.req, request.res, snapshot_hook);
+    return .{
+        .status = request.res.status,
+        .body = try allocator.dupe(u8, request.res.body),
+        .content_type = if (request.res.headers.get(ct_hdr)) |value| try allocator.dupe(u8, value) else null,
+    };
+}
+
+fn setupFabReleaseTest(allocator: std.mem.Allocator, dir: std.Io.Dir, project: []const u8) !void {
+    try writeFabReleaseFixture(allocator, dir, project);
+}
+
+fn gitFabReleaseTest(allocator: std.mem.Allocator, project: []const u8, tail: []const []const u8) !void {
+    try runFabTestGit(allocator, project, tail);
+}
+
+fn readinessFabReleaseTest(allocator: std.mem.Allocator, project: []const u8) ![]const u8 {
+    const response = try callFabEndpoint(allocator, project, false, null, false);
+    if (response.status != 200) return error.TestExpectedReadyResponse;
+    return response.body;
+}
+
+fn readinessResponseFabReleaseTest(allocator: std.mem.Allocator, project: []const u8) !FabEndpointResponse {
+    return callFabEndpoint(allocator, project, false, null, false);
+}
+
+/// Cross-module support for the HTTP/MCP manufacturing-gate parity test.
+pub const FabReleaseTestSupport = struct {
+    pub const setup = setupFabReleaseTest;
+    pub const git = gitFabReleaseTest;
+    pub const readiness = readinessFabReleaseTest;
+    pub const readiness_response = readinessResponseFabReleaseTest;
+};
+
+const StoredZipEntry = struct { name: []const u8, data: []const u8 };
+
+fn storedZipEntries(allocator: std.mem.Allocator, bytes: []const u8) ![]const StoredZipEntry {
+    var result: std.ArrayList(StoredZipEntry) = .empty;
+    var offset: usize = 0;
+    while (offset + 30 <= bytes.len and std.mem.eql(u8, bytes[offset .. offset + 4], "PK\x03\x04")) {
+        const method = std.mem.readInt(u16, bytes[offset + 8 ..][0..2], .little);
+        if (method != 0) return error.TestExpectedStoredZip;
+        const size: usize = std.mem.readInt(u32, bytes[offset + 18 ..][0..4], .little);
+        const name_len: usize = std.mem.readInt(u16, bytes[offset + 26 ..][0..2], .little);
+        const extra_len: usize = std.mem.readInt(u16, bytes[offset + 28 ..][0..2], .little);
+        const data_offset = offset + 30 + name_len + extra_len;
+        const end = data_offset + size;
+        if (end > bytes.len) return error.TestTruncatedZip;
+        try result.append(allocator, .{
+            .name = bytes[offset + 30 ..][0..name_len],
+            .data = bytes[data_offset..end],
+        });
+        offset = end;
+    }
+    if (result.items.len == 0) return error.TestExpectedZip;
+    return result.toOwnedSlice(allocator);
+}
+
+fn storedZipEntry(entries: []const StoredZipEntry, name: []const u8) ?[]const u8 {
+    for (entries) |entry| if (std.mem.eql(u8, entry.name, name)) return entry.data;
+    return null;
+}
+
+fn storedZipEntrySuffix(entries: []const StoredZipEntry, suffix: []const u8) ?[]const u8 {
+    for (entries) |entry| if (std.mem.endsWith(u8, entry.name, suffix)) return entry.data;
+    return null;
+}
+
+fn hasZipSuffix(entries: []const StoredZipEntry, suffix: []const u8) bool {
+    for (entries) |entry| if (std.mem.endsWith(u8, entry.name, suffix)) return true;
+    return false;
+}
+
+fn expectFabIdentityParity(relative: std.json.Value, absolute: std.json.Value) !void {
+    for ([_][]const u8{
+        "release_token",
+        "evaluation_read_set_sha256",
+        "consumed_inputs_sha256",
+        "source_sha256",
+        "layout_sha256",
+        "bom_evidence_sha256",
+        "reviewed_inputs_sha256",
+    }) |key| try std.testing.expectEqualStrings(relative.object.get(key).?.string, absolute.object.get(key).?.string);
+}
+
+fn expectPrefixedFabMember(allocator: std.mem.Allocator, entries: []const StoredZipEntry, suffix: []const u8) !void {
+    const name = try std.fmt.allocPrint(allocator, "fabok-{s}", .{suffix});
+    defer allocator.free(name);
+    try std.testing.expect(storedZipEntry(entries, name) != null);
+}
+
+fn expectFabZipMembers(allocator: std.mem.Allocator, entries: []const StoredZipEntry) !void {
+    const layer_table = (board_layers.Stack{}).table();
+    for (layer_table.rows()) |*row| try expectPrefixedFabMember(allocator, entries, row.gerberSuffix());
+    try expectPrefixedFabMember(allocator, entries, export_gerber.job_file_suffix);
+    try expectPrefixedFabMember(allocator, entries, export_gerber.plated_drill_suffix);
+    try expectPrefixedFabMember(allocator, entries, export_gerber.non_plated_drill_suffix);
+    for ([_][]const u8{
+        "fabok-bom.csv",
+        "fabok-centroid.csv",
+        "fabok-fab-id.txt",
+        "fabok-release-report.json",
+        "fabok-release-report.md",
+        "fabok-design-rules.json",
+        "fabok-checksums.sha256",
+    }) |member| try std.testing.expect(storedZipEntry(entries, member) != null);
+}
+
+fn expectFabChecksums(allocator: std.mem.Allocator, entries: []const StoredZipEntry, checksums: []const u8) !void {
+    for (entries) |entry| {
+        if (std.mem.eql(u8, entry.name, "fabok-checksums.sha256")) continue;
+        var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(entry.data, &digest, .{});
+        const hex = std.fmt.bytesToHex(digest, .lower);
+        const line = try std.fmt.allocPrint(allocator, "{s}  {s}\n", .{ &hex, entry.name });
+        try std.testing.expect(std.mem.indexOf(u8, checksums, line) != null);
+    }
+}
+
+test "fab release requires confirmation and waiver then emits a checksummed revision lock" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const absolute_project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    try writeFabReleaseFixture(allocator, tmp.dir, absolute_project);
+    try runFabTestGit(allocator, absolute_project, &.{ "init", "-q" });
+    try runFabTestGit(allocator, absolute_project, &.{ "add", "." });
+    try runFabTestGit(allocator, absolute_project, &.{ "-c", "user.name=Fab Test", "-c", "user.email=fab@test.invalid", "commit", "-q", "-m", "fixture" });
+
+    const current = try infra_fs.canonicalPathAlloc(allocator, ".");
+    const relative_project = try std.fs.path.relative(allocator, current, null, current, absolute_project);
+    const readiness = try callFabEndpoint(allocator, relative_project, false, null, false);
+    try std.testing.expectEqual(@as(u16, 200), readiness.status);
+    const readiness_json = try std.json.parseFromSliceLeaky(std.json.Value, allocator, readiness.body, .{});
+    try std.testing.expect(readiness_json.object.get("internal_checks_complete").?.bool);
+    try std.testing.expect(readiness_json.object.get("needs_waiver").?.bool);
+    try std.testing.expectEqualStrings("clean", readiness_json.object.get("project_status").?.string);
+    const token = try allocator.dupe(u8, readiness_json.object.get("release_token").?.string);
+
+    const absolute_readiness = try callFabEndpoint(allocator, absolute_project, false, null, false);
+    try std.testing.expectEqual(@as(u16, 200), absolute_readiness.status);
+    const absolute_json = try std.json.parseFromSliceLeaky(std.json.Value, allocator, absolute_readiness.body, .{});
+    try expectFabIdentityParity(readiness_json, absolute_json);
+
+    const unconfirmed = try callFabEndpoint(allocator, relative_project, true, null, false);
+    try std.testing.expectEqual(@as(u16, 428), unconfirmed.status);
+    const not_waived = try callFabEndpoint(allocator, relative_project, true, token, false);
+    try std.testing.expectEqual(@as(u16, 428), not_waived.status);
+    const wrong_token = try callFabEndpoint(allocator, relative_project, true, "wrong-token", true);
+    try std.testing.expectEqual(@as(u16, 428), wrong_token.status);
+
+    const package = try callFabEndpoint(allocator, relative_project, true, token, true);
+    try std.testing.expectEqual(@as(u16, 200), package.status);
+    try std.testing.expectEqualStrings("application/zip", package.content_type.?);
+    try std.testing.expect(std.mem.startsWith(u8, package.body, "PK\x03\x04"));
+    const entries = try storedZipEntries(allocator, package.body);
+    try expectFabZipMembers(allocator, entries);
+    try std.testing.expectEqual(@as(usize, 21), entries.len);
+    try std.testing.expect(std.mem.indexOf(u8, storedZipEntry(entries, "fabok-bom.csv").?, "U1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, storedZipEntry(entries, "fabok-centroid.csv").?, "U1") != null);
+
+    const release_report = try std.json.parseFromSliceLeaky(std.json.Value, allocator, storedZipEntry(entries, "fabok-release-report.json").?, .{});
+    try std.testing.expectEqualStrings("netlisp-fab-release-v1", release_report.object.get("schema").?.string);
+    try std.testing.expect(release_report.object.get("confirmed").?.bool);
+    try std.testing.expect(release_report.object.get("waiver").?.bool);
+    try std.testing.expectEqualStrings("A", release_report.object.get("revision").?.string);
+    _ = try std.json.parseFromSliceLeaky(std.json.Value, allocator, storedZipEntry(entries, "fabok-design-rules.json").?, .{});
+
+    const checksums = storedZipEntry(entries, "fabok-checksums.sha256").?;
+    try expectFabChecksums(allocator, entries, checksums);
+
+    try writeFabReleaseLayout(tmp.dir, 2);
+    try runFabTestGit(allocator, absolute_project, &.{ "add", "src/fabok.layouts.json" });
+    try runFabTestGit(allocator, absolute_project, &.{ "-c", "user.name=Fab Test", "-c", "user.email=fab@test.invalid", "commit", "-q", "-m", "layout update" });
+    const stale = try callFabEndpoint(allocator, relative_project, true, token, true);
+    try std.testing.expectEqual(@as(u16, 428), stale.status);
+    const stale_json = try std.json.parseFromSliceLeaky(std.json.Value, allocator, stale.body, .{});
+    try std.testing.expect(!std.mem.eql(u8, token, stale_json.object.get("release_token").?.string));
+
+    try writeFabReleaseLayout(tmp.dir, 3);
+    const dirty = try callFabEndpoint(allocator, relative_project, false, null, false);
+    try std.testing.expectEqual(@as(u16, 500), dirty.status);
+    const dirty_json = try std.json.parseFromSliceLeaky(std.json.Value, allocator, dirty.body, .{});
+    try std.testing.expectEqualStrings("dirty", dirty_json.object.get("project_status").?.string);
+    try std.testing.expect(dirty_json.object.get("release_token").? == .null);
+    try std.testing.expect(!dirty_json.object.get("internal_checks_complete").?.bool);
+    try std.testing.expect(std.mem.indexOf(u8, dirty.body, "source-worktree-dirty") != null);
+    try std.testing.expect(std.mem.indexOf(u8, dirty.body, "intentional fixture waiver") != null);
+    try std.testing.expect(dirty_json.object.get("raw_drc_count").?.integer > 0);
+    const dirty_export = try callFabEndpoint(allocator, relative_project, true, token, true);
+    try std.testing.expectEqual(@as(u16, 500), dirty_export.status);
+    try std.testing.expect(!std.mem.startsWith(u8, dirty_export.body, "PK\x03\x04"));
+    const dirty_export_json = try std.json.parseFromSliceLeaky(std.json.Value, allocator, dirty_export.body, .{});
+    try std.testing.expect(dirty_export_json.object.get("release_token").? == .null);
+}
+
+fn initializeFabReleaseGit(allocator: std.mem.Allocator, project: []const u8) !void {
+    try runFabTestGit(allocator, project, &.{ "init", "-q" });
+    try runFabTestGit(allocator, project, &.{ "add", "." });
+    try runFabTestGit(allocator, project, &.{ "-c", "user.name=Fab Test", "-c", "user.email=fab@test.invalid", "commit", "-q", "-m", "fixture" });
+}
+
+// spec: fabrication-release - duplicate design basenames are a non-waivable source-bundle ambiguity while all independent release findings remain visible
+test "duplicate release source basename blocks HTTP token and ZIP without hiding findings" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    try writeFabReleaseFixture(allocator, tmp.dir, project);
+    try tmp.dir.createDirPath(std.testing.io, "src/duplicate");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/duplicate/fabok.sexp",
+        .data = "(design-block \"Ambiguous Duplicate\" (revision \"A\") (board (size 1 1)))",
+    });
+    try initializeFabReleaseGit(allocator, project);
+
+    const readiness_response = try callFabEndpoint(allocator, project, false, null, false);
+    try std.testing.expectEqual(@as(u16, 500), readiness_response.status);
+    const readiness_json = try std.json.parseFromSliceLeaky(std.json.Value, allocator, readiness_response.body, .{});
+    try std.testing.expect(readiness_json.object.get("release_token").? == .null);
+    try std.testing.expectEqualStrings("ambiguous", readiness_json.object.get("project_status").?.string);
+    try std.testing.expect(std.mem.indexOf(u8, readiness_response.body, "source-bundle-ambiguous") != null);
+    try std.testing.expect(std.mem.indexOf(u8, readiness_response.body, "intentional fixture waiver") != null);
+
+    const package_response = try callFabEndpoint(allocator, project, true, "not-an-authorization", true);
+    try std.testing.expectEqual(@as(u16, 500), package_response.status);
+    try std.testing.expect(!std.mem.startsWith(u8, package_response.body, "PK\x03\x04"));
+}
+
+// spec: fabrication-release - an in-request A/B/A sidecar mutation invalidates HTTP readiness and export without granting an authorization token
+test "in-request layout ABA invalidates HTTP readiness and export" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    try writeFabReleaseFixture(allocator, tmp.dir, project);
+    try initializeFabReleaseGit(allocator, project);
+    const layout_path = try std.fmt.allocPrint(allocator, "{s}/src/fabok.layouts.json", .{project});
+    const original = try infra_fs.cwd().readFileAlloc(allocator, layout_path, 64 * 1024);
+    const during = try std.fmt.allocPrint(allocator,
+        \\{{"default":"release","layouts":[{{"name":"release","kind":"manual","ts":2,"default":true,
+        \\ "parts":[{{"ref":"U1","x":21,"y":10,"rot":0}}]}}]}}
+    , .{});
+    var hook = ReleaseSnapshotHook{ .path = layout_path, .during = during, .restored = original };
+
+    const readiness_response = try callFabEndpointHooked(allocator, project, false, null, false, &hook);
+    try std.testing.expect(!hook.failed);
+    try std.testing.expectEqual(@as(u16, 500), readiness_response.status);
+    const readiness_json = try std.json.parseFromSliceLeaky(std.json.Value, allocator, readiness_response.body, .{});
+    try std.testing.expect(readiness_json.object.get("release_token").? == .null);
+    try std.testing.expectEqualStrings("changed", readiness_json.object.get("project_status").?.string);
+    try std.testing.expect(std.mem.indexOf(u8, readiness_response.body, "intentional fixture waiver") != null);
+    try std.testing.expect(readiness_json.object.get("raw_drc_count").?.integer > 0);
+
+    hook.failed = false;
+    const package_response = try callFabEndpointHooked(allocator, project, true, "stale-token", true, &hook);
+    try std.testing.expect(!hook.failed);
+    try std.testing.expectEqual(@as(u16, 500), package_response.status);
+    try std.testing.expect(!std.mem.startsWith(u8, package_response.body, "PK\x03\x04"));
 }
 
 // spec: Web Server - An unscoped route_pcb call immediately after clear_routes routes the whole board and echoes scope "all"
@@ -16751,6 +16777,117 @@ fn addTracksFixture(parts: []optimizer.Part, nets: []const export_kicad.FlatNet,
         .board_rect = .{ .minx = -2, .miny = -2, .w = 16, .h = 10 },
         .rules = .{ .plane_nets = &.{}, .copper_layers = 2, .net = rules },
     };
+}
+
+test "release layout semantics require exact poses and resolvable physical references" {
+    var parts = [_]optimizer.Part{.{
+        .ref_des = "U1",
+        .kind = .hub,
+        .hw = 1,
+        .hh = 1,
+        .pads = &.{},
+        .fallback = false,
+    }};
+    const nets = [_]export_kicad.FlatNet{.{ .name = "N", .pins = &.{} }};
+    const placement = addTracksFixture(&parts, &nets, &.{});
+    const poses = [_]optimizer.RefPose{.{ .ref = "U1", .x = 0, .y = 0, .rot = 0 }};
+    const valid_routes = SavedRoutes{
+        .tracks = &.{.{ .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 0, .l = 0, .w = 0.2, .net = "N" }},
+        .vias = &.{},
+    };
+    const valid = SavedLayout{ .name = "release", .kind = kind_manual, .ts = 1, .score = null, .parts = &.{}, .routes = valid_routes };
+    try std.testing.expect(savedLayoutSemanticsComplete(placement, valid, &poses));
+    try std.testing.expect(!savedLayoutSemanticsComplete(placement, valid, &.{}));
+    try std.testing.expect(!savedLayoutSemanticsComplete(placement, valid, &.{.{ .ref = "UNKNOWN", .x = 0, .y = 0, .rot = 0 }}));
+    try std.testing.expect(!savedLayoutSemanticsComplete(placement, valid, &.{
+        .{ .ref = "U1", .x = 0, .y = 0, .rot = 0 },
+        .{ .ref = "U1", .x = 1, .y = 0, .rot = 0 },
+    }));
+
+    const unknown_rf = SavedLayout{
+        .name = "release",
+        .kind = kind_manual,
+        .ts = 1,
+        .score = null,
+        .parts = &.{},
+        .routes = .{ .tracks = &.{}, .vias = &.{}, .rf_paths = &.{.{
+            .net = "UNKNOWN",
+            .layer = 0,
+            .samples = &.{
+                .{ .at = .{ 0, 0 }, .s_mm = 0, .curvature = 0, .width_mm = 0.2 },
+                .{ .at = .{ 1, 0 }, .s_mm = 1, .curvature = 0, .width_mm = 0.2 },
+            },
+        }} },
+    };
+    try std.testing.expect(!savedLayoutSemanticsComplete(placement, unknown_rf, &poses));
+    const unknown_layer = SavedLayout{
+        .name = "release",
+        .kind = kind_manual,
+        .ts = 1,
+        .score = null,
+        .parts = &.{},
+        .fabrication_layers = &.{.{ .name = "unknown.gbr", .regions = &.{} }},
+    };
+    try std.testing.expect(!savedLayoutSemanticsComplete(placement, unknown_layer, &poses));
+}
+
+// spec: fabrication-release - allocation failure while lowering saved fabrication layers, copper, zones, keepouts, or perimeter vias blocks release rather than certifying a partial board
+test "release layout lowering fails closed across every manufacturing adapter" {
+    const poly = [_][2]f64{ .{ 0, 0 }, .{ 4, 0 }, .{ 4, 4 }, .{ 0, 4 } };
+    const nets = [_]export_kicad.FlatNet{.{ .name = "GND", .pins = &.{} }};
+    var placement = addTracksFixture(&.{}, &nets, &.{});
+    placement.fabrication_layers = &.{.{
+        .name = "backing.gbr",
+        .side = .bottom,
+        .material = "tape",
+        .thickness = 0.1,
+        .regions = &.{.board},
+    }};
+    placement.rules.perimeter_fence = .{
+        .via_dia = 0.4,
+        .via_drill = 0.2,
+        .spacing = 1,
+        .edge_offset = 0.5,
+        .net = "GND",
+    };
+    const saved_zones = [_]SavedZone{
+        .{ .net = "GND", .layer = "F.Cu", .poly = &poly, .flags = .{ .filled = true } },
+        .{ .layer = "F.Cu", .poly = &poly, .flags = .{ .keepout = true } },
+    };
+    const saved = SavedRoutes{
+        .tracks = &.{.{ .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 0, .l = 0, .w = 0.2, .net = "GND" }},
+        .vias = &.{},
+        .zones = &saved_zones,
+    };
+
+    var fab_alloc = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expect(!applyFabricationLayerOverrides(fab_alloc.allocator(), &placement, &.{.{ .name = "backing.gbr", .regions = &.{&poly} }}));
+
+    var route_alloc = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expect(!routesWithPerimeterEvidence(route_alloc.allocator(), placement, saved).complete);
+
+    var zone_alloc = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expect(!userZonesEvidence(zone_alloc.allocator(), placement.rules, saved_zones[0..1]).complete);
+
+    var silk_alloc = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expect(!silkKeepoutsEvidence(silk_alloc.allocator(), saved_zones[1..2]).complete);
+
+    var fence_alloc = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var lowered = LayoutLowering{};
+    appendPerimeterEvidence(fence_alloc.allocator(), placement, &lowered);
+    try std.testing.expect(!lowered.complete);
+
+    var aggregate_alloc = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const layout = SavedLayout{
+        .name = "release",
+        .kind = kind_manual,
+        .ts = 1,
+        .score = null,
+        .parts = &.{},
+        .routes = saved,
+        .fabrication_layers = &.{.{ .name = "backing.gbr", .regions = &.{&poly} }},
+    };
+    try std.testing.expect(!lowerSavedManufacturing(aggregate_alloc.allocator(), &placement, layout).complete);
 }
 
 const add_tracks_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};

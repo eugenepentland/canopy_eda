@@ -36,6 +36,7 @@ const mcp_import_tools = @import("mcp_import_tools.zig");
 const mcp_kicad_sch = @import("mcp_kicad_sch.zig");
 const sync_kicad_sch = @import("sync_kicad_sch.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
+const mcp_fab_readiness = @import("mcp_fab_readiness.zig");
 const pcb_describe = @import("pcb_describe.zig");
 const mcp_route_experiment = @import("mcp_route_experiment.zig");
 const mcp_route_order = @import("mcp_route_order.zig");
@@ -433,7 +434,7 @@ fn dispatchPcbLayout(
     if (std.mem.eql(u8, tool_name, "generate_fence")) return try pcb_fence.mcpGenerateFence(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "placement_sensitivity")) return try mcp_placement_sensitivity.mcpPlacementSensitivity(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "preview_escape_assignment")) return try mcp_escape_assign.mcpPreviewEscapeAssignment(allocator, project_dir, args_val, out);
-    if (std.mem.eql(u8, tool_name, "run_fab_readiness")) return try pcb_layout_page.mcpRunFabReadiness(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "run_fab_readiness")) return try mcp_fab_readiness.run(allocator, project_dir, args_val, out);
     return null;
 }
 

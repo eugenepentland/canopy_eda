@@ -95,6 +95,22 @@ pub fn load(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8)
     return rules;
 }
 
+const ReleaseRules = struct { rules: Rules = .{}, complete: bool = true };
+
+/// Release loading distinguishes an absent optional sidecar from an unreadable
+/// or malformed one. Interactive views keep their historical default fallback;
+/// manufacturing must not silently discard a policy file the user authored.
+fn loadRelease(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ReleaseRules {
+    const path = paths.designSiblingPath(alloc, project_dir, name, rules_ext) catch return .{ .complete = false };
+    defer alloc.free(path);
+    const data = infra_fs.cwd().readFileAlloc(alloc, path, 1 << 16) catch |err| {
+        return .{ .complete = err == error.FileNotFound };
+    };
+    var rules = Rules{};
+    if (!parseInto(&rules, alloc, data)) return .{ .complete = false };
+    return .{ .rules = rules };
+}
+
 /// Run DRC and apply the design's overrides in one step — the wrapper every
 /// serve-layer violation producer calls. This seam (NOT `drc.check`) is where
 /// the `net_open` connectivity check joins the geometric rules: the router's
@@ -139,6 +155,36 @@ pub fn checkFilteredZonesReport(
     return .{
         .violations = apply(alloc, load(alloc, project_dir, name), raw.violations),
         .net_report = raw.net_report,
+        .complete = raw.complete,
+    };
+}
+
+/// Unfiltered evidence plus the policy-adjusted list used by a manufacturing
+/// gate. Ignored findings remain in `raw` for the release audit even though
+/// they do not block the effective DRC verdict.
+pub const ReleaseCheck = struct {
+    raw: []const drc.Violation,
+    effective: []const drc.Violation,
+    net_report: net_open.Report,
+    complete: bool,
+    rules: Rules,
+};
+
+/// Run full composed DRC and retain both raw and policy-adjusted evidence.
+pub fn checkRelease(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    in: CopperCheck,
+) ReleaseCheck {
+    const raw = drc_compose.checkDefaultRulesReport(alloc, in);
+    const loaded = loadRelease(alloc, project_dir, name);
+    return .{
+        .raw = raw.violations,
+        .effective = apply(alloc, loaded.rules, raw.violations),
+        .net_report = raw.net_report,
+        .complete = raw.complete and loaded.complete,
+        .rules = loaded.rules,
     };
 }
 

@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const httpz = @import("httpz");
+const rule_fields = @import("../design_rule_fields.zig");
 const infra_fs = @import("../infra/fs.zig");
 const paths = @import("../paths.zig");
 const serve_root = @import("../serve.zig");
@@ -17,30 +18,8 @@ const PlaneAssignment = struct {
     net: []const u8,
 };
 
-const Rule = struct {
-    key: []const u8,
-    head: []const u8,
-};
-
-const scalar_rules = [_]Rule{
-    .{ .key = "clearance", .head = "clearance" },
-    .{ .key = "track_width", .head = "track-width" },
-    .{ .key = "min_width", .head = "min-width" },
-    .{ .key = "min_drill", .head = "min-drill" },
-    .{ .key = "min_annular", .head = "min-annular" },
-    .{ .key = "hole_to_hole", .head = "hole-to-hole" },
-    .{ .key = "via_to_via", .head = "via-to-via" },
-    .{ .key = "via_plating", .head = "via-plating" },
-    .{ .key = "copper_edge", .head = "copper-edge" },
-    .{ .key = "component_edge", .head = "component-edge" },
-    .{ .key = "pour_clearance", .head = "pour-clearance" },
-    .{ .key = "pour_min_width", .head = "pour-min-width" },
-    .{ .key = "pour_corner_radius", .head = "pour-corner-radius" },
-    .{ .key = "ground_via_max", .head = "ground-via-max" },
-    .{ .key = "mask_margin", .head = "mask-margin" },
-    .{ .key = "mask_relief_corner_radius", .head = "mask-relief-corner-radius" },
-    .{ .key = "mask_web", .head = "mask-web" },
-};
+const Rule = rule_fields.Rule;
+const scalar_rules = rule_fields.scalar;
 
 fn ruleForKey(key: []const u8) ?Rule {
     for (scalar_rules) |rule| if (std.mem.eql(u8, key, rule.key)) return rule;

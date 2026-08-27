@@ -10983,18 +10983,33 @@ function focusPart(want,keepPane){
 })();
 // ── Fab-readiness gate (⤓ Gerbers) ──────────────────────────────────────
 // The Gerbers button no longer downloads blindly: it first fetches the
-// pre-fab readiness report (/api/fab-readiness) and, when there are errors
-// or warnings, opens a modal listing them. Errors offer "Download anyway"
-// (?force=1); warnings-only offer "Continue". A clean board downloads
-// straight through, no modal.
-function fabZipUrl(force){
- var q=subq();
- if(force)q=q?q+"&force=1":"?force=1";
+// pre-fab readiness report (/api/fab-readiness) and opens a confirmation modal
+// for every manufacturing release. The echoed token locks confirmation to the
+// exact revision/report just reviewed; remaining findings add an explicit
+// waiver. A stale token cannot download a changed board.
+function fabZipUrl(rep){
+ var q=fabq();
+ var add=function(k,v){q+=q?"&":"?";q+=k+"="+encodeURIComponent(v);};
+ add("confirm",rep.release_token||"");
+ if(rep.needs_waiver)add("waive","1");
  return "/api/pcb-gerbers/"+encodeURIComponent(PCB.name)+q;}
-function fabDownload(force){
- var a=document.createElement("a");
- a.href=fabZipUrl(force);a.download="";
- document.body.appendChild(a);a.click();document.body.removeChild(a);}
+function fabq(){var fields=[];
+ var layout=curLayout||PCB.shown_layout;if(layout)fields.push("layout="+encodeURIComponent(layout));
+ return fields.length?"?"+fields.join("&"):"";}
+function fabDownload(rep){
+ var go=document.getElementById("fab-go"),refreshed=false;if(go)go.disabled=true;
+ fetch(fabZipUrl(rep)).then(function(r){
+  if(!r.ok)return r.json().catch(function(){return null;}).then(function(fresh){
+   if(fresh&&(fresh.errors||fresh.raw_drc)){refreshed=true;fabOpenModal(fresh);return null;}
+   throw new Error("release export failed (HTTP "+r.status+")");});
+  var media=(r.headers.get("Content-Type")||"").toLowerCase(),fabid=r.headers.get("x-pcb-fab-id")||"";
+  if(media.indexOf("application/zip")<0||!fabid)throw new Error("release endpoint did not return an identified ZIP");
+  var disposition=r.headers.get("Content-Disposition")||"",match=/filename="?([^";]+)"?/i.exec(disposition);
+  return r.blob().then(function(blob){return {blob:blob,name:match?match[1]:"pcb-release.zip"};});
+ }).then(function(file){if(!file)return;var url=URL.createObjectURL(file.blob),a=document.createElement("a");
+  a.href=url;a.download=file.name;document.body.appendChild(a);a.click();a.remove();setTimeout(function(){URL.revokeObjectURL(url);},0);fabModalClose();
+ }).catch(function(){alert("Fabrication release could not be exported. No package was downloaded.");})
+ .then(function(){if(go&&!refreshed)go.disabled=false;});}
 function fabModalClose(){var m=document.getElementById("fab-modal");if(m)m.hidden=true;}
 function fabRenderReport(rep){
  var h="";
@@ -11007,38 +11022,51 @@ function fabRenderReport(rep){
    else if(it.ref)extra=' <code>'+pEsc(it.ref)+'</code>';
    s+='<li>'+pEsc(it.message)+extra+'</li>';});
   return s+'</ul>';}
- h+=list("err","Errors — these block the fab package",rep.errors);
+ h+=list("err",rep.internal_checks_complete?"Remaining errors — explicit waiver required":"Non-waivable release blockers",rep.errors);
  h+=list("warn","Warnings",rep.warnings);
+ if(rep.raw_drc&&rep.raw_drc.length){
+  h+='<details class="fab-drc"><summary>Full composed DRC findings ('+rep.raw_drc.length+')</summary><ul>';
+  rep.raw_drc.forEach(function(d){var parties=[];
+   if(d.net_a_name)parties.push(d.net_a_name);if(d.net_b_name)parties.push(d.net_b_name);
+   if(d.part_a_ref)parties.push(d.part_a_ref+(d.pad_a?" pad "+d.pad_a:""));
+   if(d.part_b_ref)parties.push(d.part_b_ref+(d.pad_b?" pad "+d.pad_b:""));
+   var where=(d.x_mm==null||d.y_mm==null)?"":(" @ "+Number(d.x_mm).toFixed(3)+", "+Number(d.y_mm).toFixed(3)+" mm");
+   var layer=d.layer==null?"":(" · layer "+d.layer),gap=d.gap_mm==null?"":(" · gap "+Number(d.gap_mm).toFixed(3)+" / "+Number(d.required_mm).toFixed(3)+" mm");
+   h+='<li><code>'+pEsc(d.severity||"")+' · '+pEsc(d.kind||"DRC")+'</code>'+pEsc(where+layer+gap)+(parties.length?' — '+pEsc(parties.join(' ↔ ')):'')+'</li>';});
+  h+='</ul></details>';}
  if((!rep.errors||!rep.errors.length)&&(!rep.warnings||!rep.warnings.length))
   h+='<div class="fab-sec ok">Board is fab-ready.</div>';
  var s=rep.stats||{};
  h+='<div class="fab-stats">'+(s.parts||0)+' parts · '+
   (s.connected_nets||0)+'/'+(s.routable_nets||0)+' routable nets connected · '+
-  (s.tracks||0)+' tracks · '+(s.vias||0)+' vias · '+
+ (s.tracks||0)+' tracks · '+(s.vias||0)+' vias · '+
   (s.drc_violations||0)+' DRC · outline: '+(s.has_outline?"yes":"no")+'</div>';
+ h+='<div class="fab-stats">Revision <code>'+pEsc(rep.revision||"missing")+'</code> · fab ID <code>'+pEsc(rep.fab_id||"unknown")+'</code> · '+
+  (rep.ignored_drc_count||0)+' policy-ignored DRC finding(s) retained in the release report</div>';
  return h;}
 function fabOpenModal(rep){
  var m=document.getElementById("fab-modal");if(!m)return;
  var body=document.getElementById("fab-body"),go=document.getElementById("fab-go"),
   title=document.getElementById("fab-title");
  body.innerHTML=fabRenderReport(rep);
- var hasErr=rep.errors&&rep.errors.length;
- title.textContent=hasErr?"Fab readiness — problems found":"Fab readiness — warnings";
- go.textContent=hasErr?"Download anyway":"Continue — download";
- go.className=hasErr?"btn fab-danger":"btn";
- go.onclick=function(){fabModalClose();fabDownload(!!hasErr);};
+ var hasErr=rep.errors&&rep.errors.length,hasWarn=rep.needs_waiver;
+ title.textContent=hasErr?"Fabrication release — problems found":hasWarn?"Fabrication release — waiver required":"Fabrication release — ready to confirm";
+ go.textContent=hasWarn?"Confirm waiver and export":"Confirm release and export";
+ go.className=hasWarn?"btn fab-danger":"btn";
+ go.disabled=!rep.internal_checks_complete||!rep.release_token;
+ go.onclick=function(){fabDownload(rep);};
  m.hidden=false;}
 (function(){
  var btn=document.getElementById("pcb-fab");if(!btn)return;
+ if(PCB.sub&&PCB.sub.length){btn.hidden=true;return;}
  btn.addEventListener("click",function(){
   btn.disabled=true;
-  fetch("/api/fab-readiness/"+encodeURIComponent(PCB.name)+subq())
-   .then(function(r){return r.ok?r.json():null;})
+  fetch("/api/fab-readiness/"+encodeURIComponent(PCB.name)+fabq())
+   .then(function(r){return r.json().catch(function(){return null;});})
    .then(function(rep){
-    if(!rep){fabDownload(false);return;} // no report (e.g. no saved layout) — let the ZIP endpoint answer
-    var clean=rep.ok&&(!rep.warnings||!rep.warnings.length);
-    if(clean)fabDownload(false);else fabOpenModal(rep);})
-   .catch(function(){fabDownload(false);})
+    if(!rep)throw new Error("release report unavailable");
+    fabOpenModal(rep);})
+   .catch(function(){alert("Fabrication release checks could not complete. No package was exported.");})
    .then(function(){btn.disabled=false;});});
  var fx=document.getElementById("fab-x"),fc=document.getElementById("fab-cancel"),
   fm=document.getElementById("fab-modal");

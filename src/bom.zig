@@ -18,6 +18,8 @@ const Net = env_mod.Net;
 const bom_resolve = @import("bom_resolve.zig");
 
 pub const resolveIdentities = bom_resolve.resolveIdentities;
+pub const applyExisting = bom_resolve.applyExisting;
+pub const existingSidecarMatches = bom_resolve.existingSidecarMatches;
 
 // ── Constants ─────────────────────────────────────────────────────
 // UUID v4 byte indices (RFC 4122)
@@ -45,6 +47,8 @@ pub const BomEntry = struct {
     ref_des: []const u8,
     uuid: []const u8,
     component: []const u8,
+    value: []const u8 = "",
+    source_fingerprint: []const u8 = "",
     properties: []const Property,
     id: []const u8 = "",
     nets: []const []const u8 = &.{},
@@ -104,6 +108,8 @@ pub fn loadBom(allocator: std.mem.Allocator, bom_path: []const u8) BomError![]co
 
         // Parse sub-forms: (id "..."), (key "val"), ...
         var entry_id: []const u8 = "";
+        var entry_value: []const u8 = "";
+        var source_fingerprint: []const u8 = "";
         var props: std.ArrayList(Property) = .empty;
         var entry_nets: std.ArrayList([]const u8) = .empty;
         const start_idx: usize = if (has_component) 4 else 3;
@@ -125,6 +131,10 @@ pub fn loadBom(allocator: std.mem.Allocator, bom_path: []const u8) BomError![]co
                 } else if (std.mem.eql(u8, key, "id")) {
                     entry_id = try allocator.dupe(u8, value);
                 } else if (std.mem.eql(u8, key, "value")) {
+                    entry_value = try decodeOwned(allocator, value);
+                    continue;
+                } else if (std.mem.eql(u8, key, "source-fingerprint")) {
+                    source_fingerprint = try allocator.dupe(u8, value);
                     continue;
                 } else {
                     try props.append(allocator, .{
@@ -139,6 +149,8 @@ pub fn loadBom(allocator: std.mem.Allocator, bom_path: []const u8) BomError![]co
             .ref_des = try decodeOwned(allocator, ref_des),
             .uuid = try allocator.dupe(u8, uuid),
             .component = if (component.len > 0) try decodeOwned(allocator, component) else "",
+            .value = entry_value,
+            .source_fingerprint = source_fingerprint,
             .properties = props.toOwnedSlice(allocator) catch &.{},
             .id = entry_id,
             .nets = entry_nets.toOwnedSlice(allocator) catch &.{},

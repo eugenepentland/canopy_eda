@@ -72,6 +72,7 @@ pub const ViolationKind = enum {
     voltage_domain_incompatible,
     missing_requirements,
     direct_component_implementation,
+    module_metadata_incomplete,
     layout_class_inferred,
     components_not_grouped,
     verification_orphaned,
@@ -122,7 +123,7 @@ pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_d
         const module_findings = try canonical_module_check.run(allocator, block, project_dir);
         defer if (module_findings.len > 0) allocator.free(module_findings);
         for (module_findings) |finding| try violations.append(allocator, .{
-            .kind = .direct_component_implementation,
+            .kind = if (finding.metadata_incomplete) .module_metadata_incomplete else .direct_component_implementation,
             .severity = finding.severity,
             .message = finding.message,
             .ref_des = finding.ref_des,

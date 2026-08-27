@@ -35,7 +35,11 @@ const copper_contact = @import("placement/copper_contact.zig");
 const outline_mod = @import("placement/outline.zig");
 const board_layers = @import("board_layers.zig");
 const net_analysis = @import("eval/net_analysis.zig");
+const env_mod = @import("eval/env.zig");
+const power_budget = @import("eval/power_budget.zig");
+const flat_netlist = @import("flat_netlist.zig");
 const net_identity = @import("placement/net_identity.zig");
+const req_checks = @import("req_checks.zig");
 
 /// A part is treated as off-board (staged, not on the real board) when its
 /// courtyard centre sits more than this far outside the board outline — the
@@ -97,6 +101,17 @@ pub const Report = struct {
 /// blessed layout came from a saved/starred snapshot (vs. the optimizer cache),
 /// and whether the centroid CSV keeps DNP parts (`?dnp=keep`). Defaults keep the
 /// pure/test path free of server concerns.
+pub const ReleaseContext = struct {
+    /// The exact full composed result is mandatory in release mode. Null is a
+    /// check failure, never permission to fall back to geometry-only DRC.
+    composed_drc: ?[]const drc.Violation = null,
+    composed_drc_complete: bool = false,
+    authored_board_w: f64 = 0,
+    authored_board_h: f64 = 0,
+    authored_corner_radius: f64 = 0,
+};
+
+/// Saved-layout and DNP policy supplied by fabrication-export callers.
 pub const Context = struct {
     /// False ⇒ the layout is the single-slot optimizer cache, not a saved
     /// snapshot — a soft warning (a fab run should come off a blessed layout).
@@ -117,6 +132,9 @@ pub const Context = struct {
     /// request on barracuda-base, paid twice). Null ⇒ compute it, which keeps
     /// every existing caller and the pure/test path unchanged.
     conn: ?[]const NetStatus = null,
+    /// Non-null only for a manufacturing handoff. It carries the mandatory
+    /// composed DRC and enables identity/rating/outline release checks.
+    release: ?ReleaseContext = null,
 };
 
 /// Run the readiness report. `copper` is the blessed layout's persisted routed
@@ -147,6 +165,11 @@ pub fn check(
             .message = "no board outline — the " ++ board_layers.edge_cuts ++ " profile would be guessed from the parts bounding box; draw or author a board outline first",
         });
     }
+    if (ctx.release) |release| {
+        try appendReleaseIdentityChecks(arena, &errors, placement, ctx.keep_dnp);
+        try appendOutlineDrift(arena, &errors, placement, release.authored_board_w, release.authored_board_h, release.authored_corner_radius);
+        try appendRailRatingChecks(arena, &errors, &warnings, placement, ctx.keep_dnp);
+    }
 
     // A flattened net pin that no longer resolves to a footprint land must not
     // disappear from the denominator. This is the renamed-pad failure mode:
@@ -154,40 +177,7 @@ pub fn check(
     // appears to need no copper at all.
     try appendUnresolvablePins(arena, &errors, placement);
 
-    // ── Placement: unplaced / off-board parts ───────────────────────────────
-    // A part whose courtyard centre is far outside the outline is stranded in
-    // the staging band (or was never placed). It still lands in the centroid /
-    // copper, so it would ship at a nonsense location.
-    if (placement.board_rect) |br| {
-        for (placement.parts) |p| {
-            const cc = optimizer.worldPadCenter(&p, p.ccx, p.ccy);
-            const inset = boardInset(br, placement.board_poly, cc[0], cc[1]);
-            if (inset < -staging_band_mm) {
-                try errors.append(arena, .{
-                    .id = "part-off-board",
-                    .message = try std.fmt.allocPrint(arena, "{s} sits outside the board outline (staging band)" ++
-                        " — place it on the board or remove it", .{p.ref_des}),
-                    .ref = p.ref_des,
-                });
-            }
-        }
-    }
-
-    // ── Vias with no drill (legacy synthetic) ───────────────────────────────
-    // A drill = 0 via would emit a bad Excellon hole (and its annular ring is
-    // unknowable). Count them once; report if any.
-    var bad_vias: usize = 0;
-    for (copper.vias) |v| {
-        if (v.drill <= 0) bad_vias += 1;
-    }
-    if (bad_vias > 0) {
-        try errors.append(arena, .{
-            .id = "via-no-drill",
-            .message = try std.fmt.allocPrint(arena, "{d} via(s) have no drill diameter (legacy synthetic)" ++
-                " — they would emit bad drill data; re-route to regenerate them", .{bad_vias}),
-            .count = bad_vias,
-        });
-    }
+    try appendPlacementAndViaChecks(arena, &errors, placement, copper.vias);
 
     // ── DRC against the persisted copper at the current poses ───────────────
     // The router/DRC normally only run on the Route button; here we DRC the
@@ -209,7 +199,20 @@ pub fn check(
         .routed = 0,
         .total = 0,
     };
-    const violations = drc_rules.apply(arena, ctx.drc_rules, drc.check(arena, placement, routed, clearance) catch &.{});
+    const violations = if (ctx.release) |release| blk: {
+        const composed = release.composed_drc orelse {
+            try errors.append(arena, .{
+                .id = "drc-missing",
+                .message = "the mandatory full fabricated-fill DRC produced no report — export is blocked",
+            });
+            break :blk &.{};
+        };
+        if (!release.composed_drc_complete) try errors.append(arena, .{
+            .id = "drc-incomplete",
+            .message = "the full fabricated-fill DRC did not complete — export is blocked rather than trusting a partial report",
+        });
+        break :blk composed;
+    } else drc_rules.apply(arena, ctx.drc_rules, drc.check(arena, placement, routed, clearance) catch &.{});
     stats.connectivity.drc_violations = violations.len;
     // Partition by severity: error-severity violations block the gate; warnings
     // (courtyard overlap, silkscreen over a pad) flow through as
@@ -265,6 +268,12 @@ pub fn check(
     }
     stats.routable_nets = routable;
     stats.connected_nets = connected;
+    if (ctx.release != null and stats.connectivity.coarsened) {
+        try warnings.append(arena, .{
+            .id = "connectivity-coarsened",
+            .message = "at least one plane/pour connectivity verdict used a coarsened raster to stay within the fill-cell budget — review or waive this approximation before release",
+        });
+    }
     if (stats.connectivity.hairline_gaps > 0) {
         try errors.append(arena, .{
             .id = "hairline-gap",
@@ -315,6 +324,680 @@ pub fn check(
         .warnings = try warnings.toOwnedSlice(arena),
         .stats = stats,
     };
+}
+
+fn appendPlacementAndViaChecks(
+    arena: std.mem.Allocator,
+    errors: *std.ArrayList(Item),
+    placement: optimizer.Placement,
+    vias: []const router.Via,
+) std.mem.Allocator.Error!void {
+    // A part whose courtyard centre is far outside the outline is stranded in
+    // the staging band (or was never placed). It still lands in the centroid /
+    // copper, so it would ship at a nonsense location.
+    if (placement.board_rect) |board| for (placement.parts) |part| {
+        const center = optimizer.worldPadCenter(&part, part.ccx, part.ccy);
+        const inset = boardInset(board, placement.board_poly, center[0], center[1]);
+        if (inset < -staging_band_mm) try errors.append(arena, .{
+            .id = "part-off-board",
+            .message = try std.fmt.allocPrint(arena, "{s} sits outside the board outline (staging band)" ++
+                " — place it on the board or remove it", .{part.ref_des}),
+            .ref = part.ref_des,
+        });
+    };
+
+    // A drill = 0 via would emit a bad Excellon hole (and its annular ring is
+    // unknowable). Count them once; report if any.
+    var bad_vias: usize = 0;
+    for (vias) |via| if (via.drill <= 0) {
+        bad_vias += 1;
+    };
+    if (bad_vias == 0) return;
+    try errors.append(arena, .{
+        .id = "via-no-drill",
+        .message = try std.fmt.allocPrint(arena, "{d} via(s) have no drill diameter (legacy synthetic)" ++
+            " — they would emit bad drill data; re-route to regenerate them", .{bad_vias}),
+        .count = bad_vias,
+    });
+}
+
+fn propertyValue(inst: anytype, key: []const u8) ?[]const u8 {
+    for (inst.properties) |prop| if (std.ascii.eqlIgnoreCase(prop.key, key)) return prop.value;
+    return null;
+}
+
+fn appendReleaseIdentityChecks(
+    arena: std.mem.Allocator,
+    errors: *std.ArrayList(Item),
+    placement: optimizer.Placement,
+    keep_dnp: bool,
+) std.mem.Allocator.Error!void {
+    if (placement.instances.len != placement.parts.len) {
+        try errors.append(arena, .{
+            .id = "centroid-parity",
+            .message = try std.fmt.allocPrint(arena, "the evaluated BOM has {d} instances but placement has {d} footprints", .{ placement.instances.len, placement.parts.len }),
+        });
+    }
+    var seen = std.StringHashMapUnmanaged([]const u8).empty;
+    for (placement.parts) |part| {
+        if (!part.fallback) continue;
+        try errors.append(arena, .{
+            .id = "footprint-geometry-unresolved",
+            .message = try std.fmt.allocPrint(arena, "{s} uses synthesized fallback geometry because its footprint could not be loaded", .{part.ref_des}),
+            .ref = part.ref_des,
+        });
+    }
+    for (placement.instances, 0..) |inst, index| {
+        // Match export_fab.centroidCsv exactly: default export suppresses DNP
+        // rows; ?dnp=keep emits them. A missing populated instance is never
+        // hidden by comparing the two raw backing-array lengths.
+        const emitted = export_fab.assemblyPopulated(inst, if (keep_dnp) .keep else .drop);
+        if (emitted and index >= placement.parts.len) {
+            try errors.append(arena, .{
+                .id = "centroid-parity",
+                .message = try std.fmt.allocPrint(arena, "populated BOM row {s} has no centroid footprint", .{inst.ref_des}),
+                .ref = inst.ref_des,
+            });
+        } else if (emitted and !std.mem.eql(u8, inst.ref_des, placement.parts[index].ref_des)) {
+            try errors.append(arena, .{
+                .id = "centroid-parity",
+                .message = try std.fmt.allocPrint(arena, "centroid row {d} names {s}, but the placed footprint is {s}", .{ index + 1, inst.ref_des, placement.parts[index].ref_des }),
+                .ref = inst.ref_des,
+            });
+        }
+        if (inst.uuid.len == 0) {
+            try errors.append(arena, .{
+                .id = "missing-identity",
+                .message = try std.fmt.allocPrint(arena, "{s} has no stable PCB identity", .{inst.ref_des}),
+                .ref = inst.ref_des,
+            });
+        } else if (seen.get(inst.uuid)) |first| {
+            try errors.append(arena, .{
+                .id = "duplicate-identity",
+                .message = try std.fmt.allocPrint(arena, "{s} and {s} share PCB identity {s}", .{ first, inst.ref_des, inst.uuid }),
+                .ref = inst.ref_des,
+            });
+        } else try seen.put(arena, inst.uuid, inst.ref_des);
+
+        if (inst.footprint.len == 0 or !emitted) continue;
+        const mpn = propertyValue(inst, "mpn") orelse "";
+        const maker = propertyValue(inst, "manufacturer") orelse "";
+        if (mpn.len == 0 or maker.len == 0) {
+            const item = Item{
+                .id = "bom-identity",
+                .message = try std.fmt.allocPrint(arena, "{s} ({s} {s}) has no complete manufacturer/MPN selection", .{ inst.ref_des, inst.component, inst.value }),
+                .ref = inst.ref_des,
+            };
+            try errors.append(arena, item);
+        }
+    }
+}
+
+const Rating = struct { value: f64, present: bool };
+
+fn ratingByte(c: u8) bool {
+    if (std.ascii.isDigit(c)) return true;
+    return switch (c) {
+        '.', '+', '-', 'e', 'E' => true,
+        else => false,
+    };
+}
+
+fn ratingUnit(text: []const u8) bool {
+    return text.len == 0 or
+        std.ascii.eqlIgnoreCase(text, "W") or
+        std.ascii.eqlIgnoreCase(text, "A") or
+        std.ascii.eqlIgnoreCase(text, "V") or
+        std.ascii.eqlIgnoreCase(text, "ohm") or
+        std.mem.eql(u8, text, "Ω");
+}
+
+fn parseRating(raw: ?[]const u8) Rating {
+    const text = raw orelse return .{ .value = 0, .present = false };
+    var end: usize = 0;
+    while (end < text.len and ratingByte(text[end])) : (end += 1) {}
+    if (end == 0) return .{ .value = 0, .present = false };
+    const parsed = std.fmt.parseFloat(f64, text[0..end]) catch return .{ .value = 0, .present = false };
+    const suffix = std.mem.trim(u8, text[end..], " \t");
+    const scale: f64 = if (ratingUnit(suffix))
+        1
+    else if (suffix.len > 1 and suffix[0] == 'm' and ratingUnit(suffix[1..]))
+        1e-3
+    else if (suffix.len > 1 and suffix[0] == 'u' and ratingUnit(suffix[1..]))
+        @as(f64, 1.0) / 1_000_000.0
+    else if (std.mem.startsWith(u8, suffix, "µ") and ratingUnit(suffix["µ".len..]))
+        @as(f64, 1.0) / 1_000_000.0
+    else if (suffix.len > 1 and suffix[0] == 'k' and ratingUnit(suffix[1..]))
+        1e3
+    else
+        return .{ .value = 0, .present = false };
+    const value = parsed * scale;
+    return .{ .value = value, .present = std.math.isFinite(value) and value > 0 };
+}
+
+// spec: fabrication-release - SI-prefixed passive ratings are parsed with case-insensitive unit names, including the common `mOhm` spelling
+test "passive rating parser treats mOhm as milliohms" {
+    const parsed = parseRating("50mOhm");
+    try std.testing.expect(parsed.present);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.05), parsed.value, 1e-12);
+    try std.testing.expect(!parseRating("50mMystery").present);
+    try std.testing.expect(!parseRating("1e5000V").present);
+    try std.testing.expect(!parseRating("1e5000kV").present);
+}
+
+const VoltageRange = struct { min: f64, max: f64 };
+
+fn railVoltage(placement: optimizer.Placement, name: []const u8) ?VoltageRange {
+    if (net_analysis.isGroundName(name)) return .{ .min = 0, .max = 0 };
+    const base = net_analysis.baseNetName(name);
+    for (placement.rules.physical.rail_specs) |rail| {
+        const minimum = rail.rated_voltage.min orelse rail.nominal orelse continue;
+        const maximum = rail.rated_voltage.max orelse rail.nominal orelse continue;
+        const range = VoltageRange{ .min = @min(minimum, maximum), .max = @max(minimum, maximum) };
+        if (std.ascii.eqlIgnoreCase(base, rail.name)) return range;
+        for (rail.aliases) |alias| if (std.ascii.eqlIgnoreCase(base, alias)) return range;
+    }
+    return null;
+}
+
+const EndpointEvidence = struct {
+    connected: usize = 0,
+    known: usize = 0,
+    low: f64 = 0,
+    high: f64 = 0,
+};
+
+fn endpointEvidence(placement: optimizer.Placement, ref: []const u8) EndpointEvidence {
+    var result = EndpointEvidence{};
+    for (placement.nets) |net| {
+        var owns = false;
+        for (net.pins) |pin| if (std.mem.eql(u8, pin.ref_des, ref)) {
+            owns = true;
+            break;
+        };
+        if (!owns) continue;
+        result.connected += 1;
+        const volts = railVoltage(placement, net.name) orelse continue;
+        if (result.known == 0) result.low = volts.min;
+        if (result.known == 0) result.high = volts.max;
+        result.low = @min(result.low, volts.min);
+        result.high = @max(result.high, volts.max);
+        result.known += 1;
+    }
+    return result;
+}
+
+fn propertyAny(inst: flat_netlist.FlatInstance, keys: []const []const u8) ?[]const u8 {
+    for (keys) |key| if (propertyValue(inst, key)) |value| return value;
+    return null;
+}
+
+fn requireProperty(
+    arena: std.mem.Allocator,
+    errors: *std.ArrayList(Item),
+    inst: flat_netlist.FlatInstance,
+    keys: []const []const u8,
+    label: []const u8,
+) std.mem.Allocator.Error!bool {
+    if (propertyAny(inst, keys) != null) return true;
+    try errors.append(arena, .{
+        .id = "component-rating-missing",
+        .message = try std.fmt.allocPrint(arena, "{s} selected MPN has no {s} property", .{ inst.ref_des, label }),
+        .ref = inst.ref_des,
+    });
+    return false;
+}
+
+fn requirePositiveRating(
+    arena: std.mem.Allocator,
+    errors: *std.ArrayList(Item),
+    inst: flat_netlist.FlatInstance,
+    keys: []const []const u8,
+    label: []const u8,
+) std.mem.Allocator.Error!bool {
+    const raw = propertyAny(inst, keys) orelse return requireProperty(arena, errors, inst, keys, label);
+    if (parseRating(raw).present) return true;
+    try errors.append(arena, .{
+        .id = "component-rating-invalid",
+        .message = try std.fmt.allocPrint(arena, "{s} selected MPN has invalid/nonpositive {s} '{s}'", .{ inst.ref_des, label, raw }),
+        .ref = inst.ref_des,
+    });
+    return false;
+}
+
+fn netMatchesRailName(name: []const u8, rail_name: []const u8) bool {
+    const base = net_analysis.baseNetName(name);
+    return std.ascii.eqlIgnoreCase(base, net_analysis.baseNetName(rail_name));
+}
+
+fn railCurrentForRef(placement: optimizer.Placement, ref: []const u8) ?f64 {
+    var result: ?f64 = null;
+    for (placement.nets) |net| {
+        var owns = false;
+        for (net.pins) |pin| if (std.mem.eql(u8, pin.ref_des, ref)) {
+            owns = true;
+            break;
+        };
+        if (!owns) continue;
+        for (placement.rules.physical.rails) |rail| {
+            var matches = netMatchesRailName(net.name, rail.net);
+            if (!matches) for (rail.consumers) |consumer| {
+                if (netMatchesRailName(net.name, consumer.net)) {
+                    matches = true;
+                    break;
+                }
+            };
+            if (!matches) continue;
+            if (!rail.any_max_load) continue;
+            if (!(rail.load_max_a > 0)) continue;
+            result = @max(result orelse 0, rail.load_max_a);
+        }
+    }
+    return result;
+}
+
+fn appendUnproven(
+    arena: std.mem.Allocator,
+    errors: *std.ArrayList(Item),
+    inst: flat_netlist.FlatInstance,
+    subject: []const u8,
+) std.mem.Allocator.Error!void {
+    try errors.append(arena, .{
+        .id = "component-rating-unproven",
+        .message = try std.fmt.allocPrint(arena, "{s} touches a power rail, but {s} cannot be proved from declared worst-case rail data", .{ inst.ref_des, subject }),
+        .ref = inst.ref_des,
+    });
+}
+
+const RatingContext = struct {
+    arena: std.mem.Allocator,
+    errors: *std.ArrayList(Item),
+    warnings: *std.ArrayList(Item),
+    placement: optimizer.Placement,
+};
+
+fn checkCapacitorRating(ctx: RatingContext, inst: flat_netlist.FlatInstance) std.mem.Allocator.Error!void {
+    _ = try requireProperty(ctx.arena, ctx.errors, inst, &.{"dielectric"}, "dielectric");
+    _ = try requireProperty(ctx.arena, ctx.errors, inst, &.{"tolerance"}, "tolerance");
+    const has_voltage = try requirePositiveRating(ctx.arena, ctx.errors, inst, &.{"voltage"}, "voltage rating");
+    const endpoints = endpointEvidence(ctx.placement, inst.ref_des);
+    if (endpoints.known == 0) return;
+    if (endpoints.connected < 2 or endpoints.known < endpoints.connected) {
+        try appendUnproven(ctx.arena, ctx.errors, inst, "applied capacitor voltage");
+        return;
+    }
+    const applied = @abs(endpoints.high - endpoints.low);
+    if (!has_voltage or !(applied > 0)) return;
+    const rated = parseRating(propertyValue(inst, "voltage"));
+    if (rated.present and rated.value + 1e-9 < applied) {
+        try ctx.errors.append(ctx.arena, .{
+            .id = "component-underrated",
+            .message = try std.fmt.allocPrint(ctx.arena, "{s} is rated {d:.3} V but is exposed to {d:.3} V", .{ inst.ref_des, rated.value, applied }),
+            .ref = inst.ref_des,
+        });
+    } else if (rated.value < applied * 1.25) {
+        try ctx.warnings.append(ctx.arena, .{
+            .id = "component-rating-margin",
+            .message = try std.fmt.allocPrint(ctx.arena, "{s} voltage rating {d:.3} V has less than 25% margin over {d:.3} V applied", .{ inst.ref_des, rated.value, applied }),
+            .ref = inst.ref_des,
+        });
+    }
+}
+
+fn checkJumperRating(ctx: RatingContext, inst: flat_netlist.FlatInstance, has_power: bool) std.mem.Allocator.Error!void {
+    const has_current = try requirePositiveRating(ctx.arena, ctx.errors, inst, &.{ "rated-current", "current-rating", "current" }, "jumper rated current");
+    const has_max_resistance = try requirePositiveRating(ctx.arena, ctx.errors, inst, &.{ "max-resistance", "resistance-max" }, "maximum jumper resistance");
+    // A signal/configuration jumper has no rail load to compare. Its intrinsic
+    // selection evidence is still validated above, but absence of a power-rail
+    // model is not itself a release error.
+    if (endpointEvidence(ctx.placement, inst.ref_des).known == 0) return;
+    const actual_current = railCurrentForRef(ctx.placement, inst.ref_des) orelse {
+        try appendUnproven(ctx.arena, ctx.errors, inst, "zero-ohm jumper current");
+        return;
+    };
+    if (has_current) {
+        const rated_current = parseRating(propertyAny(inst, &.{ "rated-current", "current-rating", "current" }));
+        if (rated_current.present and actual_current > rated_current.value + 1e-9) try ctx.errors.append(ctx.arena, .{
+            .id = "component-underrated",
+            .message = try std.fmt.allocPrint(ctx.arena, "{s} carries up to {d:.3} A but its zero-ohm jumper rating is {d:.3} A", .{ inst.ref_des, actual_current, rated_current.value }),
+            .ref = inst.ref_des,
+        });
+    }
+    if (!has_max_resistance or !has_power) return;
+    const max_resistance = parseRating(propertyAny(inst, &.{ "max-resistance", "resistance-max" }));
+    const power_rating = parseRating(propertyValue(inst, "power"));
+    const dissipation = actual_current * actual_current * max_resistance.value;
+    if (max_resistance.present and power_rating.present and dissipation > power_rating.value + 1e-12) try ctx.errors.append(ctx.arena, .{
+        .id = "component-underrated",
+        .message = try std.fmt.allocPrint(ctx.arena, "{s} may dissipate {d:.4} W at maximum jumper resistance, above its {d:.4} W rating", .{ inst.ref_des, dissipation, power_rating.value }),
+        .ref = inst.ref_des,
+    });
+}
+
+fn checkResistorRating(ctx: RatingContext, inst: flat_netlist.FlatInstance) std.mem.Allocator.Error!void {
+    const resistance = req_checks.parseOhms(inst.value);
+    const zero_ohm = resistance != null and resistance.? == 0;
+    if (!zero_ohm) _ = try requireProperty(ctx.arena, ctx.errors, inst, &.{"tolerance"}, "tolerance");
+    const has_power = try requirePositiveRating(ctx.arena, ctx.errors, inst, &.{"power"}, "power rating");
+    const has_voltage = try requirePositiveRating(ctx.arena, ctx.errors, inst, &.{ "voltage", "working-voltage", "rated-voltage" }, "working voltage");
+    // Current and maximum-resistance are intrinsic jumper evidence, so prove
+    // they are positive and parseable even when neither endpoint is a declared
+    // power rail. The rail load, when known, is an additional underrating test.
+    if (zero_ohm) return checkJumperRating(ctx, inst, has_power);
+    const endpoints = endpointEvidence(ctx.placement, inst.ref_des);
+    if (endpoints.known == 0) return;
+    if (endpoints.connected < 2) {
+        try appendUnproven(ctx.arena, ctx.errors, inst, "resistor dissipation");
+        return;
+    }
+    const ohms = resistance orelse {
+        try appendUnproven(ctx.arena, ctx.errors, inst, "resistor dissipation");
+        return;
+    };
+    if (endpoints.known != endpoints.connected) {
+        try appendUnproven(ctx.arena, ctx.errors, inst, "resistor dissipation");
+        return;
+    }
+    const delta = @abs(endpoints.high - endpoints.low);
+    if (has_voltage and delta > 0) {
+        const voltage_rating = parseRating(propertyAny(inst, &.{ "voltage", "working-voltage", "rated-voltage" }));
+        if (voltage_rating.present and voltage_rating.value + 1e-9 < delta) try ctx.errors.append(ctx.arena, .{
+            .id = "component-underrated",
+            .message = try std.fmt.allocPrint(ctx.arena, "{s} sees up to {d:.3} V but is rated only {d:.3} V", .{ inst.ref_des, delta, voltage_rating.value }),
+            .ref = inst.ref_des,
+        });
+    }
+    if (!(ohms > 0) or !has_power) return;
+    const actual = delta * delta / ohms;
+    const rated = parseRating(propertyValue(inst, "power"));
+    if (rated.present and actual > rated.value + 1e-12) {
+        try ctx.errors.append(ctx.arena, .{
+            .id = "component-underrated",
+            .message = try std.fmt.allocPrint(ctx.arena, "{s} dissipates up to {d:.4} W from declared rail endpoints, above its {d:.4} W rating", .{ inst.ref_des, actual, rated.value }),
+            .ref = inst.ref_des,
+        });
+    } else if (rated.present and actual > rated.value * 0.8) {
+        try ctx.warnings.append(ctx.arena, .{
+            .id = "component-rating-margin",
+            .message = try std.fmt.allocPrint(ctx.arena, "{s} worst-case dissipation {d:.4} W uses over 80% of its {d:.4} W rating", .{ inst.ref_des, actual, rated.value }),
+            .ref = inst.ref_des,
+        });
+    }
+}
+
+fn checkMagneticRating(ctx: RatingContext, inst: flat_netlist.FlatInstance) std.mem.Allocator.Error!void {
+    const has_current = try requirePositiveRating(ctx.arena, ctx.errors, inst, &.{ "rated-current", "current-rating", "current" }, "rated current");
+    const has_dcr = try requirePositiveRating(ctx.arena, ctx.errors, inst, &.{ "dcr-max", "dcr" }, "maximum DCR");
+    if (std.mem.startsWith(u8, inst.component, "ind-")) _ = try requireProperty(ctx.arena, ctx.errors, inst, &.{"tolerance"}, "tolerance");
+    const current = railCurrentForRef(ctx.placement, inst.ref_des) orelse {
+        if (endpointEvidence(ctx.placement, inst.ref_des).known > 0) try appendUnproven(ctx.arena, ctx.errors, inst, "inductor/ferrite current rating");
+        return;
+    };
+    if (has_current) {
+        const rated = parseRating(propertyAny(inst, &.{ "rated-current", "current-rating", "current" }));
+        if (rated.present and current > rated.value + 1e-9) try ctx.errors.append(ctx.arena, .{
+            .id = "component-underrated",
+            .message = try std.fmt.allocPrint(ctx.arena, "{s} carries up to {d:.3} A but is rated only {d:.3} A", .{ inst.ref_des, current, rated.value }),
+            .ref = inst.ref_des,
+        });
+    }
+    if (!has_dcr) return;
+    const dcr = parseRating(propertyAny(inst, &.{ "dcr-max", "dcr" }));
+    const endpoint_range = endpointEvidence(ctx.placement, inst.ref_des);
+    const rail_v = @max(@abs(endpoint_range.low), @abs(endpoint_range.high));
+    const drop = if (dcr.present) current * dcr.value else 0;
+    if (dcr.present and rail_v > 0 and drop > rail_v * 0.05) try ctx.warnings.append(ctx.arena, .{
+        .id = "component-rating-margin",
+        .message = try std.fmt.allocPrint(ctx.arena, "{s} maximum DCR implies {d:.3} V drop at {d:.3} A ({d:.3} ohm)", .{ inst.ref_des, drop, current, dcr.value }),
+        .ref = inst.ref_des,
+    });
+}
+
+fn appendRailRatingChecks(
+    arena: std.mem.Allocator,
+    errors: *std.ArrayList(Item),
+    warnings: *std.ArrayList(Item),
+    placement: optimizer.Placement,
+    keep_dnp: bool,
+) std.mem.Allocator.Error!void {
+    const ctx: RatingContext = .{ .arena = arena, .errors = errors, .warnings = warnings, .placement = placement };
+    for (placement.instances) |inst| {
+        if (!export_fab.assemblyPopulated(inst, if (keep_dnp) .keep else .drop)) continue;
+        if (std.mem.startsWith(u8, inst.component, "cap-")) {
+            try checkCapacitorRating(ctx, inst);
+        } else if (std.mem.startsWith(u8, inst.component, "res-")) {
+            try checkResistorRating(ctx, inst);
+        } else if (std.mem.startsWith(u8, inst.component, "ferrite-") or std.mem.startsWith(u8, inst.component, "ind-")) {
+            try checkMagneticRating(ctx, inst);
+        }
+    }
+}
+
+fn appendOutlineDrift(
+    arena: std.mem.Allocator,
+    errors: *std.ArrayList(Item),
+    placement: optimizer.Placement,
+    authored_w: f64,
+    authored_h: f64,
+    authored_radius: f64,
+) std.mem.Allocator.Error!void {
+    if (!(authored_w > 0 and authored_h > 0)) return;
+    const saved = placement.board_rect orelse return;
+    const dimensions_match = @abs(saved.w - authored_w) <= 0.01 and @abs(saved.h - authored_h) <= 0.01;
+    const corners = [_][2]f64{
+        .{ saved.minx, saved.miny },
+        .{ saved.minx + saved.w, saved.miny },
+        .{ saved.minx + saved.w, saved.miny + saved.h },
+        .{ saved.minx, saved.miny + saved.h },
+    };
+    var shape_matches: bool = false;
+    if (!(authored_radius > 0)) {
+        shape_matches = placement.board_arcs.len == 0 and
+            (placement.board_poly == null or polygonEquivalent(placement.board_poly.?, &corners, 0.01));
+    } else {
+        const radii = [_]f64{ authored_radius, authored_radius, authored_radius, authored_radius };
+        const expected = try outline_mod.filletPath(arena, &corners, &radii, 0.01);
+        shape_matches = placement.board_poly != null and
+            polygonEquivalent(placement.board_poly.?, expected.poly, 0.01) and
+            arcsEquivalent(placement.board_arcs, expected.arcs, 0.01);
+    }
+    if (dimensions_match and shape_matches) return;
+    try errors.append(arena, .{
+        .id = "outline-drift",
+        .message = try std.fmt.allocPrint(arena, "saved fabrication outline is {d:.3} x {d:.3} mm with {d} native arcs, but source declares {d:.3} x {d:.3} mm and {d:.3} mm corner radius", .{ saved.w, saved.h, placement.board_arcs.len, authored_w, authored_h, authored_radius }),
+    });
+}
+
+fn hasItemRef(items: []const Item, id: []const u8, ref: []const u8) bool {
+    for (items) |item| {
+        if (!std.mem.eql(u8, item.id, id)) continue;
+        if (item.ref) |item_ref| if (std.mem.eql(u8, item_ref, ref)) return true;
+    }
+    return false;
+}
+
+fn hasItemRefMessage(items: []const Item, id: []const u8, ref: []const u8, text: []const u8) bool {
+    for (items) |item| {
+        if (!std.mem.eql(u8, item.id, id)) continue;
+        if (item.ref == null or !std.mem.eql(u8, item.ref.?, ref)) continue;
+        if (std.mem.indexOf(u8, item.message, text) != null) return true;
+    }
+    return false;
+}
+
+// spec: fabrication-release - rail checks use worst-case voltage, reject underrating, preserve unknown endpoints, and size zero-ohm jumpers by rail current
+test "rail-aware passive ratings cover voltage unknown endpoints and zero-ohm current" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const bad_cap_properties = [_]env_mod.Property{
+        .{ .key = "voltage", .value = "6.3V" }, .{ .key = "dielectric", .value = "X7R" }, .{ .key = "tolerance", .value = "10%" },
+    };
+    const good_cap_properties = [_]env_mod.Property{
+        .{ .key = "voltage", .value = "16V" }, .{ .key = "dielectric", .value = "X7R" }, .{ .key = "tolerance", .value = "10%" },
+    };
+    const resistor_properties = [_]env_mod.Property{
+        .{ .key = "power", .value = "63mW" }, .{ .key = "voltage", .value = "25V" }, .{ .key = "tolerance", .value = "1%" },
+    };
+    const jumper_properties = [_]env_mod.Property{
+        .{ .key = "power", .value = "63mW" }, .{ .key = "voltage", .value = "25V" }, .{ .key = "rated-current", .value = "1A" }, .{ .key = "max-resistance", .value = "50mOhm" },
+    };
+    const bad_jumper_properties = [_]env_mod.Property{
+        .{ .key = "power", .value = "63mW" }, .{ .key = "voltage", .value = "25V" }, .{ .key = "rated-current", .value = "invalid" }, .{ .key = "max-resistance", .value = "0Ohm" },
+    };
+    const instances = [_]flat_netlist.FlatInstance{
+        .{ .ref_des = "C_BAD", .component = "cap-0402", .value = "1uF", .footprint = "c0402", .uuid = "bad", .properties = &bad_cap_properties },
+        .{ .ref_des = "C_OK", .component = "cap-0402", .value = "1uF", .footprint = "c0402", .uuid = "good", .properties = &good_cap_properties },
+        .{ .ref_des = "R_UN", .component = "res-0402", .value = "10k", .footprint = "r0402", .uuid = "unknown", .properties = &resistor_properties },
+        .{ .ref_des = "R0", .component = "res-0402", .value = "0R0", .footprint = "r0402", .uuid = "jumper", .properties = &jumper_properties },
+        .{ .ref_des = "R0_BAD", .component = "res-0402", .value = "0R0", .footprint = "r0402", .uuid = "bad-jumper", .properties = &bad_jumper_properties },
+    };
+    const v12_pins = [_]flat_netlist.FlatPin{
+        .{ .ref_des = "C_BAD", .pin = "1" }, .{ .ref_des = "C_OK", .pin = "1" }, .{ .ref_des = "R_UN", .pin = "1" }, .{ .ref_des = "R0", .pin = "1" },
+    };
+    const ground_pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "C_BAD", .pin = "2" }, .{ .ref_des = "C_OK", .pin = "2" } };
+    const signal_pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "R_UN", .pin = "2" }, .{ .ref_des = "R0_BAD", .pin = "1" } };
+    const load_pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "R0", .pin = "2" }, .{ .ref_des = "R0_BAD", .pin = "2" } };
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "V12", .pins = &v12_pins }, .{ .name = "GND", .pins = &ground_pins }, .{ .name = "SIG", .pins = &signal_pins }, .{ .name = "LOAD", .pins = &load_pins },
+    };
+    const rail_specs = [_]env_mod.PowerRail{.{ .name = "V12", .nominal = 12, .rated_voltage = .{ .min = 11.4, .max = 12.6 } }};
+    const rails = [_]power_budget.Rail{.{ .net = "V12", .load_max_a = 2, .any_max_load = true, .status = .no_source }};
+    const placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &instances,
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 1,
+        .maxy = 1,
+        .generated = false,
+        .rules = .{ .physical = .{ .rails = &rails, .rail_specs = &rail_specs } },
+    };
+    var errors: std.ArrayList(Item) = .empty;
+    var warnings: std.ArrayList(Item) = .empty;
+    try appendRailRatingChecks(arena, &errors, &warnings, placement, false);
+    try std.testing.expect(hasItemRef(errors.items, "component-underrated", "C_BAD"));
+    try std.testing.expect(!hasItemRef(errors.items, "component-underrated", "C_OK"));
+    try std.testing.expect(hasItemRef(errors.items, "component-rating-unproven", "R_UN"));
+    try std.testing.expect(hasItemRef(errors.items, "component-underrated", "R0"));
+    try std.testing.expect(!hasItemRef(errors.items, "component-rating-missing", "R0"));
+    try std.testing.expect(hasItemRefMessage(errors.items, "component-rating-invalid", "R0_BAD", "jumper rated current"));
+    try std.testing.expect(hasItemRefMessage(errors.items, "component-rating-invalid", "R0_BAD", "maximum jumper resistance"));
+    try std.testing.expect(!hasItemRef(errors.items, "component-rating-unproven", "R0_BAD"));
+}
+
+// spec: fabrication-release - saved rounded outlines must exactly match authored dimensions, radius, polygon, and native arcs
+test "release outline drift compares exact rounded geometry" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const corners = [_][2]f64{ .{ 0, 0 }, .{ 40, 0 }, .{ 40, 20 }, .{ 0, 20 } };
+    const radii = [_]f64{ 2, 2, 2, 2 };
+    const expected = try outline_mod.filletPath(arena, &corners, &radii, 0.01);
+    var placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 40,
+        .maxy = 20,
+        .generated = false,
+        .board_rect = .{ .minx = 0, .miny = 0, .w = 40, .h = 20 },
+        .board_poly = expected.poly,
+        .board_arcs = expected.arcs,
+    };
+    var errors: std.ArrayList(Item) = .empty;
+    try appendOutlineDrift(arena, &errors, placement, 40, 20, 2);
+    try std.testing.expectEqual(@as(usize, 0), errors.items.len);
+    try appendOutlineDrift(arena, &errors, placement, 41, 20, 2);
+    try std.testing.expectEqual(@as(usize, 1), errors.items.len);
+    errors.clearRetainingCapacity();
+    try appendOutlineDrift(arena, &errors, placement, 40, 20, 3);
+    try std.testing.expectEqual(@as(usize, 1), errors.items.len);
+    const deformed = try arena.dupe([2]f64, expected.poly);
+    deformed[0][0] += 0.5;
+    placement.board_poly = deformed;
+    errors.clearRetainingCapacity();
+    try appendOutlineDrift(arena, &errors, placement, 40, 20, 2);
+    try std.testing.expectEqual(@as(usize, 1), errors.items.len);
+}
+
+// spec: fabrication-release - synthesized footprint fallback geometry is a non-waivable release identity failure
+test "release identity rejects fallback footprint geometry" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var parts = [_]optimizer.Part{.{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = true, .x = 5, .y = 5 }};
+    const properties = [_]env_mod.Property{ .{ .key = "manufacturer", .value = "Maker" }, .{ .key = "mpn", .value = "PART-1" } };
+    const instances = [_]flat_netlist.FlatInstance{.{ .ref_des = "U1", .component = "fixture", .value = "fixture", .footprint = "missing", .uuid = "uuid-1", .properties = &properties }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &instances,
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 10,
+        .maxy = 10,
+        .generated = false,
+        .board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 10 },
+    };
+    var errors: std.ArrayList(Item) = .empty;
+    try appendReleaseIdentityChecks(arena, &errors, placement, false);
+    try std.testing.expect(hasItemRef(errors.items, "footprint-geometry-unresolved", "U1"));
+}
+
+fn pointNear(a: [2]f64, b: [2]f64, tolerance: f64) bool {
+    return @abs(a[0] - b[0]) <= tolerance and @abs(a[1] - b[1]) <= tolerance;
+}
+
+fn polygonEquivalent(a: []const [2]f64, b: []const [2]f64, tolerance: f64) bool {
+    if (a.len != b.len or a.len == 0) return false;
+    for (b, 0..) |candidate, offset| {
+        if (!pointNear(a[0], candidate, tolerance)) continue;
+        var forward = true;
+        var reverse = true;
+        for (a, 0..) |point, index| {
+            if (!pointNear(point, b[(offset + index) % b.len], tolerance)) forward = false;
+            if (!pointNear(point, b[(offset + b.len - index) % b.len], tolerance)) reverse = false;
+        }
+        if (forward or reverse) return true;
+    }
+    return false;
+}
+
+fn arcNear(a: optimizer.BoardArc, b: optimizer.BoardArc, tolerance: f64) bool {
+    const forward = pointNear(a.p1, b.p1, tolerance) and pointNear(a.pm, b.pm, tolerance) and pointNear(a.p2, b.p2, tolerance);
+    const reverse = pointNear(a.p1, b.p2, tolerance) and pointNear(a.pm, b.pm, tolerance) and pointNear(a.p2, b.p1, tolerance);
+    return forward or reverse;
+}
+
+fn arcsEquivalent(a: []const optimizer.BoardArc, b: []const optimizer.BoardArc, tolerance: f64) bool {
+    if (a.len != b.len or a.len == 0) return false;
+    for (b, 0..) |candidate, offset| {
+        if (!arcNear(a[0], candidate, tolerance)) continue;
+        var forward = true;
+        var reverse = true;
+        for (a, 0..) |arc, index| {
+            if (!arcNear(arc, b[(offset + index) % b.len], tolerance)) forward = false;
+            if (!arcNear(arc, b[(offset + b.len - index) % b.len], tolerance)) reverse = false;
+        }
+        if (forward or reverse) return true;
+    }
+    return false;
 }
 
 /// Serialize a report to the JSON the endpoint returns / the modal reads:

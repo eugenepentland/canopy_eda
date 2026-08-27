@@ -369,17 +369,14 @@ modules = [
 # same-file call. Scope is the whole tree (no `paths`) with `allow` naming the
 # files that hold a call today.
 #
-# What this can and cannot catch: `writeLayoutsFileJsonRev` is `pub`, so it is
-# the only spelling that can escape the module today and the only rule with
-# external holders. The other four are private to pcb_layout_page.zig — a call
-# from elsewhere is a compile error, not a ban violation. Their rules exist to
-# cover the refactor that WOULD make one reachable: promoting a wrapper to `pub`
-# and calling it from a new file now fails the gate instead of quietly adding a
-# tenth unguarded write path.
+# All raw writer spellings remain covered after their cohesive store extraction.
+# The store and page are the only internal holders; a call from any new file now
+# fails the gate instead of quietly adding an unguarded write path.
 
 [[ban]]
 chain = ["writeLayoutsFileJsonRev"]
 allow = [
+  "src/layout_sidecar_store.zig",
   "src/serve/pcb_layout_page.zig",
   "src/serve/layout_backfill.zig",
   "src/serve/pcb_layout_import.zig",
@@ -387,24 +384,34 @@ allow = [
 reason = "the raw sidecar serializer applies no rev check, no history snapshot and no outline validation — persist layouts through the guarded save path in src/serve/pcb_layout_page.zig instead"
 
 [[ban]]
+chain = ["writeLayoutsFileJson"]
+allow = ["src/layout_sidecar_store.zig", "src/serve/pcb_layout_page.zig"]
+reason = "the rev-free raw sidecar serializer applies no concurrency, history, or outline guard — keep it inside the reviewed sidecar/page implementation"
+
+[[ban]]
 chain = ["writeLayoutsFile"]
-allow = ["src/serve/pcb_layout_page.zig"]
+allow = ["src/layout_sidecar_store.zig", "src/serve/pcb_layout_page.zig"]
 reason = "raw `.layouts.json` disk write (no rev check, no history snapshot) — persist layouts through the guarded save path in src/serve/pcb_layout_page.zig instead"
 
 [[ban]]
 chain = ["writeLayoutsSubRev"]
-allow = ["src/serve/pcb_layout_page.zig"]
+allow = ["src/layout_sidecar_store.zig", "src/serve/pcb_layout_page.zig"]
 reason = "raw per-sub sidecar disk write (no rev check, no history snapshot) — persist layouts through the guarded save path in src/serve/pcb_layout_page.zig instead"
 
 [[ban]]
 chain = ["writeLayoutsSub"]
-allow = ["src/serve/pcb_layout_page.zig"]
+allow = ["src/layout_sidecar_store.zig", "src/serve/pcb_layout_page.zig"]
 reason = "rev-reading wrapper over the raw per-sub sidecar write — persist layouts through the guarded save path in src/serve/pcb_layout_page.zig instead"
 
 [[ban]]
 chain = ["writeLayouts"]
-allow = ["src/serve/pcb_layout_page.zig"]
+allow = ["src/layout_sidecar_store.zig", "src/serve/pcb_layout_page.zig"]
 reason = "rev-reading wrapper over the raw sidecar write — persist layouts through the guarded save path in src/serve/pcb_layout_page.zig instead"
+
+[[ban]]
+chain = ["active_read_trace"]
+allow = ["src/infra/fs.zig"]
+reason = "the release read capability is one synchronous thread-local scope owned by the filesystem adapter; begin/end reject nesting and cross-thread lifetime, and no parser may introduce another ambient trace"
 
 # ── Owned concepts ────────────────────────────────────────────────────────
 # A [[concept]] names a set of magic spellings that model ONE domain fact, the
@@ -529,7 +536,7 @@ literals = [
   "pour_clearance", "pour_min_width", "pour_corner_radius",
   "mask_relief_corner_radius", "mask_web",
 ]
-owner = ["src/serve/design_rules_edit.zig", "src/serve/assets/pcb_3d_surface.js"]
+owner = ["src/design_rule_fields.zig", "src/serve/design_rules_edit.zig", "src/serve/assets/pcb_3d_surface.js"]
 files = ["src/*.zig", "src/*.js"]
 reason = "design-rule wire keys belong to the design_rules_edit key table — the editor, the board blob, the wasm DRC and the fab gate must judge a board by one spelling"
 

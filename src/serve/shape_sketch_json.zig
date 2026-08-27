@@ -39,6 +39,79 @@ fn pointPair(v: ?std.json.Value) ?[2]f64 {
     };
 }
 
+fn hasOnlyKeys(value: std.json.Value, comptime allowed: anytype) bool {
+    if (value != .object) return false;
+    var iterator = value.object.iterator();
+    while (iterator.next()) |entry| {
+        var known = false;
+        inline for (allowed) |key| if (std.mem.eql(u8, entry.key_ptr.*, key)) {
+            known = true;
+        };
+        if (!known) return false;
+    }
+    return true;
+}
+
+fn pointMatches(value: std.json.Value, point: sketch_mod.Point) bool {
+    if (!hasOnlyKeys(value, .{ "id", "x", "y", "construction" })) return false;
+    if (value.object.get("construction")) |construction| if (construction != .bool) return false;
+    return id(value.object.get("id")) == point.id and
+        number(value.object.get("x")) == point.x and
+        number(value.object.get("y")) == point.y and
+        flag(value.object.get("construction"), false) == point.construction;
+}
+
+fn curveMatches(value: std.json.Value, curve: sketch_mod.Curve) bool {
+    if (!hasOnlyKeys(value, .{ "id", "kind", "a", "b", "mid", "construction" })) return false;
+    const kind_value = value.object.get("kind") orelse return false;
+    if (kind_value != .string or std.meta.stringToEnum(sketch_mod.CurveKind, kind_value.string) != curve.kind) return false;
+    if (value.object.get("construction")) |construction| if (construction != .bool) return false;
+    if (id(value.object.get("id")) != curve.id or id(value.object.get("a")) != curve.a or
+        id(value.object.get("b")) != curve.b or flag(value.object.get("construction"), false) != curve.construction) return false;
+    if (curve.mid) |mid| {
+        const raw_mid = pointPair(value.object.get("mid")) orelse return false;
+        return raw_mid[0] == mid[0] and raw_mid[1] == mid[1];
+    }
+    return value.object.get("mid") == null;
+}
+
+fn constraintMatches(value: std.json.Value, constraint: sketch_mod.Constraint) bool {
+    if (!hasOnlyKeys(value, .{ "id", "kind", "a", "b", "c", "value", "enabled", "driving" })) return false;
+    const kind_value = value.object.get("kind") orelse return false;
+    if (kind_value != .string or std.meta.stringToEnum(sketch_mod.ConstraintKind, kind_value.string) != constraint.kind) return false;
+    inline for (.{ "enabled", "driving" }) |key| if (value.object.get(key)) |state| if (state != .bool) return false;
+    if (id(value.object.get("id")) != constraint.id or id(value.object.get("a")) != constraint.a) return false;
+    const raw_b = if (value.object.get("b")) |b| id(b) orelse return false else null;
+    const raw_c = if (value.object.get("c")) |c| id(c) orelse return false else null;
+    const raw_value = if (value.object.get("value")) |n| number(n) orelse return false else null;
+    const raw_mode: sketch_mod.ConstraintMode = if (!flag(value.object.get("enabled"), true))
+        .disabled
+    else if (!flag(value.object.get("driving"), true))
+        .reference
+    else
+        .driving;
+    return raw_b == constraint.b and raw_c == constraint.c and raw_value == constraint.value and raw_mode == constraint.mode;
+}
+
+/// Return true only when `sketch` is an exact, lossless interpretation of the
+/// raw v1 object. Release evidence uses this after the compatibility parser so
+/// allocation failure cannot be mistaken for a valid fallback polygon.
+pub fn matches(value: std.json.Value, sketch: sketch_mod.Sketch) bool {
+    if (!hasOnlyKeys(value, .{ "version", "points", "curves", "constraints" })) return false;
+    if (id(value.object.get("version")) != sketch.version) return false;
+    const points = value.object.get("points") orelse return false;
+    const curves = value.object.get("curves") orelse return false;
+    if (points != .array or curves != .array) return false;
+    if (points.array.items.len != sketch.points.len or curves.array.items.len != sketch.curves.len) return false;
+    for (points.array.items, sketch.points) |raw, parsed| if (!pointMatches(raw, parsed)) return false;
+    for (curves.array.items, sketch.curves) |raw, parsed| if (!curveMatches(raw, parsed)) return false;
+    const constraints = value.object.get("constraints");
+    if (constraints == null) return sketch.constraints.len == 0;
+    if (constraints.? != .array or constraints.?.array.items.len != sketch.constraints.len) return false;
+    for (constraints.?.array.items, sketch.constraints) |raw, parsed| if (!constraintMatches(raw, parsed)) return false;
+    return true;
+}
+
 /// Parse a strict v1 sketch. Structural/profile validity is deliberately left
 /// to `shape_sketch.compile`, which returns a specific geometry error.
 pub fn parse(alloc: std.mem.Allocator, v: ?std.json.Value) ?sketch_mod.Sketch {

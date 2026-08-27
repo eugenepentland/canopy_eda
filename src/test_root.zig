@@ -98,8 +98,11 @@ test {
     _ = @import("export_matlab_rf.zig");
     _ = @import("export_pdf.zig");
     _ = @import("fab_identity.zig");
+    _ = @import("fab_gate.zig");
     _ = @import("fab_preview.zig");
     _ = @import("fab_readiness.zig");
+    _ = @import("fab_release.zig");
+    _ = @import("fab_schematic_gate.zig");
     _ = @import("route_repair.zig");
     _ = @import("route_resume.zig");
     _ = @import("flat_netlist.zig");
@@ -363,6 +366,7 @@ test {
     _ = @import("serve/layout_match.zig");
     _ = @import("serve/layout_merge_command.zig");
     _ = @import("serve/layout_sidecar_json.zig");
+    _ = @import("layout_sidecar_store.zig");
     _ = @import("serve/library.zig");
     _ = @import("serve/library_3d.zig");
     _ = @import("serve/mcp_checks.zig");
@@ -381,6 +385,7 @@ test {
     _ = @import("serve/mcp_route_trials.zig");
     _ = @import("serve/mcp_schematic_view.zig");
     _ = @import("serve/mcp_tools.zig");
+    _ = @import("serve/mcp_fab_readiness.zig");
     _ = @import("serve/modules.zig");
     _ = @import("serve/notes.zig");
     _ = @import("serve/page_cache.zig");

@@ -58,6 +58,11 @@ const log = @import("infra/log.zig");
 /// design-name contract violation. See the module doc for the contract.
 pub const PathError = std.mem.Allocator.Error || error{InvalidName};
 
+/// Release-only source lookup additionally refuses a basename collision. The
+/// ordinary editor retains its historical warn-and-first behavior, while a
+/// revision lock never certifies a nondeterministically selected source.
+pub const UniquePathError = PathError || error{AmbiguousName};
+
 /// Reject any `name` that is not a bare basename — a path separator, a
 /// parent-traversal `..`, or a leading `.` would let a URL-supplied name
 /// escape `src/` (traversal) or address a hidden sibling. This is the
@@ -80,6 +85,35 @@ pub fn designSourcePath(
     return designSiblingPath(allocator, project_dir, name, ".sexp");
 }
 
+fn moduleSourcePath(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) std.mem.Allocator.Error!?[]u8 {
+    const path = try std.fmt.allocPrint(allocator, "{s}/lib/modules/{s}.sexp", .{ project_dir, name });
+    if (infra_fs.cwd().access(path, .{})) |_| return path else |_| {
+        allocator.free(path);
+        return null;
+    }
+}
+
+fn siblingOfSource(allocator: std.mem.Allocator, source: []const u8, name: []const u8, ext: []const u8) std.mem.Allocator.Error![]u8 {
+    const parent = std.fs.path.dirname(source) orelse ".";
+    return std.fmt.allocPrint(allocator, "{s}/{s}{s}", .{ parent, name, ext });
+}
+
+/// Resolve one unambiguous source for a manufacturing release. Every sidecar
+/// is then derived beside this path; callers must not perform another basename
+/// search for a different extension.
+pub fn designSourcePathUnique(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+) UniquePathError![]u8 {
+    try validateName(name);
+    const filename = try std.fmt.allocPrint(allocator, "{s}.sexp", .{name});
+    defer allocator.free(filename);
+    if (try findStrictlyUniqueInSrc(allocator, project_dir, filename)) |found| return found;
+    if (try moduleSourcePath(allocator, project_dir, name)) |module| return module;
+    return std.fmt.allocPrint(allocator, "{s}/src/{s}", .{ project_dir, filename });
+}
+
 /// Path to `<name><ext>` next to the design source file. `ext` includes
 /// the leading dot (`".bom"`, `".layout"`, `".ids"`, `".kicad.json"`,
 /// `".checks.sexp"`). Falls back to the flat-layout path when the file
@@ -97,19 +131,50 @@ pub fn designSiblingPath(
     const filename = try std.fmt.allocPrint(allocator, "{s}{s}", .{ name, ext });
     defer allocator.free(filename);
 
-    if (try findUniqueInSrc(allocator, project_dir, filename)) |found| return found;
+    if (std.mem.eql(u8, ext, ".sexp")) {
+        if (try findUniqueInSrc(allocator, project_dir, filename)) |found| return found;
+    } else {
+        const source_filename = try std.fmt.allocPrint(allocator, "{s}.sexp", .{name});
+        defer allocator.free(source_filename);
+        if (try findUniqueInSrc(allocator, project_dir, source_filename)) |source| {
+            defer allocator.free(source);
+            return siblingOfSource(allocator, source, name, ext);
+        }
+    }
 
     // A `lib/modules/<name>.sexp` defmodule is editable too (the schematic
     // viewer's "Edit src" works on module pages). When no design source exists
     // under `src/` but a module of that name does, resolve the sibling next to
     // the module file so reads, snapshots, and saves all target it.
-    const mod_sexp = try std.fmt.allocPrint(allocator, "{s}/lib/modules/{s}.sexp", .{ project_dir, name });
-    defer allocator.free(mod_sexp);
-    if (infra_fs.cwd().access(mod_sexp, .{})) |_| {
-        return std.fmt.allocPrint(allocator, "{s}/lib/modules/{s}{s}", .{ project_dir, name, ext });
-    } else |_| {}
+    if (try moduleSourcePath(allocator, project_dir, name)) |module| {
+        defer allocator.free(module);
+        return siblingOfSource(allocator, module, name, ext);
+    }
+
+    // Preserve construction/read compatibility for an orphan artifact when no
+    // design or module source exists at all. A resolved release never reaches
+    // this branch because it requires the uniquely selected source above.
+    if (!std.mem.eql(u8, ext, ".sexp")) {
+        if (try findUniqueInSrc(allocator, project_dir, filename)) |found| return found;
+    }
 
     return std.fmt.allocPrint(allocator, "{s}/src/{s}", .{ project_dir, filename });
+}
+
+fn findStrictlyUniqueInSrc(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    filename: []const u8,
+) (std.mem.Allocator.Error || error{AmbiguousName})!?[]u8 {
+    const src_path = try std.fmt.allocPrint(allocator, "{s}/src", .{project_dir});
+    defer allocator.free(src_path);
+
+    SrcIndex.mutex.lock();
+    defer SrcIndex.mutex.unlock();
+    if (!srcIndexIsFresh(src_path)) rebuildSrcIndex(src_path);
+    const hit = SrcIndex.files.get(filename) orelse return null;
+    if (hit.shadowed != null) return error.AmbiguousName;
+    return try allocator.dupe(u8, hit.path);
 }
 
 /// Walk `<project_dir>/src/` and return the path whose basename equals
@@ -369,6 +434,38 @@ test "src index resolves siblings and rebuilds when the tree's shape changes" {
     const found = try designSiblingPath(testing.allocator, root, "beta", ".bom");
     defer testing.allocator.free(found);
     try testing.expect(std.mem.endsWith(u8, found, "src/boards/beta.bom"));
+}
+
+// spec: paths - A release source lookup rejects duplicate design basenames instead of selecting the first directory walk result
+test "release source lookup rejects duplicate basenames" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "src/a");
+    try tmp.dir.createDirPath(std.testing.io, "src/b");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/a/twin.sexp", .data = "(design-block \"A\")" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/b/twin.sexp", .data = "(design-block \"B\")" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    bustSrcIndexStamps();
+    try testing.expectError(error.AmbiguousName, designSourcePathUnique(testing.allocator, root, "twin"));
+}
+
+// spec: paths - Module release sidecars resolve beside the selected module source even when an orphan artifact with the same basename exists under src
+test "module sidecars cannot cross-pair with orphan src artifacts" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "src/orphan");
+    try tmp.dir.createDirPath(std.testing.io, "lib/modules");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/modules/radio.sexp", .data = "(defmodule radio () (design-block \"Radio\"))" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/orphan/radio.layouts.json", .data = "{}" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    bustSrcIndexStamps();
+    const sidecar = try designSiblingPath(testing.allocator, root, "radio", ".layouts.json");
+    defer testing.allocator.free(sidecar);
+    try testing.expect(std.mem.endsWith(u8, sidecar, "lib/modules/radio.layouts.json"));
 }
 
 /// Force the next lookup to revalidate, as a new request would.

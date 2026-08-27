@@ -54,6 +54,39 @@ pub const PartsDb = struct {
     /// Look up a part by family name, value, and optional attrs.
     /// Returns the best matching PartEntry, or null if no match.
     pub fn lookup(self: *PartsDb, family: []const u8, value: []const u8, attrs: []const []const u8) ?*const PartEntry {
+        return self.lookupMode(family, value, attrs, false);
+    }
+
+    /// Release-gate lookup: every attribute authored on the instance must be
+    /// present on the selected library row.  The ordinary authoring lookup is
+    /// intentionally lenient for compatibility (it falls back to a value-only
+    /// row while a library is being filled in); a manufacturing handoff must
+    /// never silently erase a requested dielectric, tolerance, voltage, power,
+    /// or current rating in that way.
+    pub fn lookupStrict(self: *PartsDb, family: []const u8, value: []const u8, attrs: []const []const u8) ?*const PartEntry {
+        return self.lookupMode(family, value, attrs, true);
+    }
+
+    /// Whether this component is backed by a parts-table file. Fixed
+    /// IC/connector components have no such family and may use their inline
+    /// procurement identity. An unreadable, malformed, or empty table still
+    /// counts as a family: release callers must fail closed when its exact row
+    /// cannot be selected instead of treating it as an inline-only component.
+    pub fn hasFamily(self: *PartsDb, family: []const u8) bool {
+        if (!self.entries.contains(family)) self.loadFamily(family) catch return true;
+        const family_entries = self.entries.get(family) orelse return true;
+        if (family_entries.len > 0) return true;
+
+        const path = std.fmt.allocPrint(self.allocator, "{s}/lib/parts/{s}.sexp", .{ self.project_dir, family }) catch return true;
+        defer self.allocator.free(path);
+        infra_fs.cwd().access(path, .{}) catch |err| return switch (err) {
+            error.FileNotFound => false,
+            else => true,
+        };
+        return true;
+    }
+
+    fn lookupMode(self: *PartsDb, family: []const u8, value: []const u8, attrs: []const []const u8, strict: bool) ?*const PartEntry {
         // Lazy-load the parts file for this family
         if (!self.entries.contains(family)) {
             self.loadFamily(family) catch return null;
@@ -84,6 +117,7 @@ pub const PartsDb = struct {
             if (attr_matches.items.len > 0) {
                 return pickPreferred(attr_matches.items);
             }
+            if (strict) return null;
         }
 
         return pickPreferred(value_matches.items);
@@ -206,6 +240,32 @@ test "attrs match" {
     try std.testing.expect(PartsDb.attrsMatch(&attrs, &[_][]const u8{"x7r"}));
     try std.testing.expect(!PartsDb.attrsMatch(&attrs, &[_][]const u8{"np0"}));
     try std.testing.expect(PartsDb.attrsMatch(&attrs, &[_][]const u8{}));
+}
+
+// spec: bom-resolve - manufacturing lookup refuses a value-only fallback when an authored passive specification has no exact row
+test "strict lookup never drops requested attributes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "lib/parts");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/parts/cap-demo.sexp",
+        .data =
+        \\(parts "cap-demo"
+        \\  (part "10uF" (manufacturer "A") (mpn "A-10")
+        \\    (dielectric "x5r") (voltage "6.3V") preferred))
+        ,
+    });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    var db = PartsDb.init(alloc, root);
+    defer db.deinit();
+
+    // Authoring remains backward compatible while release selection is exact.
+    try std.testing.expect(db.lookup("cap-demo", "10uF", &.{ "x5r", "16V" }) != null);
+    try std.testing.expect(db.lookupStrict("cap-demo", "10uF", &.{ "x5r", "16V" }) == null);
+    try std.testing.expectEqualStrings("A-10", db.lookupStrict("cap-demo", "10uF", &.{ "x5r", "6.3V" }).?.mpn);
 }
 
 // spec: parts - Picks the preferred component from matching candidates

@@ -79,7 +79,31 @@ pub fn writeNetClasses(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.
             },
         );
         try writeJsonStr(w, rule.rf.fence.net);
-        try w.print(",\"conflict\":{s}}}", .{if (rule.class.conflict) "true" else "false"});
+        try w.print(",\"resolution_mm\":{d},\"escape_mm\":{d},\"min_bend_ratio\":{d}," ++
+            "\"fence_declared\":{s},\"fence_pitch_mm\":{d},\"fence_rows\":{d},\"fence_mask_rows\":{d}," ++
+            "\"fence_offset_mm\":{d},\"fence_via_dia_mm\":{d},\"fence_via_drill_mm\":{d},\"match_group\":", .{
+            rule.resolution_mm,
+            rule.rf.escape_mm,
+            rule.rf.min_bend_ratio,
+            if (rule.rf.fence.declared) "true" else "false",
+            rule.rf.fence.pitch_mm,
+            rule.rf.fence.rows.generated,
+            rule.rf.fence.rows.mask_open,
+            rule.rf.fence.offset_mm,
+            rule.rf.fence.via_dia,
+            rule.rf.fence.via_drill,
+        });
+        try writeJsonStr(w, rule.match.group);
+        try w.print(",\"match_tolerance_mm\":{d},\"return_path_declared\":{s},\"return_path_reference\":", .{
+            rule.match.tolerance_mm,
+            if (rule.return_path.declared) "true" else "false",
+        });
+        try writeJsonStr(w, rule.return_path.reference_net);
+        try w.print(",\"return_path_stitch_radius_mm\":{d},\"return_path_max_loop_area_mm2\":{d},\"conflict\":{s}}}", .{
+            rule.return_path.stitch_radius_mm,
+            rule.return_path.max_loop_area_mm2,
+            if (rule.class.conflict) "true" else "false",
+        });
     }
     try w.writeByte(']');
 }

@@ -1022,6 +1022,12 @@ pub const TestPoint = struct {
 /// power_sequencing, ERC checks, tree visualisation) sees the same canonical
 /// rail set instead of recomputing rail identity from emergent topology.
 pub const PowerRail = struct {
+    /// Proven lower and upper operating bounds for release rating checks.
+    pub const RatedVoltage = struct {
+        min: ?f64 = null,
+        max: ?f64 = null,
+    };
+
     /// Canonical top-level net name on the source side (e.g. "V1P8").
     /// When ferrite beads bridge nets, this is the source-side name; the
     /// bridged downstream names appear in `aliases`.
@@ -1035,6 +1041,9 @@ pub const PowerRail = struct {
     ///   3. Top-level design port `nominal` or `(rated min max)` midpoint.
     /// Null when no declarer supplied a voltage.
     nominal: ?f64 = null,
+    /// Authored operating range for the rail. Release checks use `max`, not
+    /// the nominal/midpoint, when proving voltage ratings.
+    rated_voltage: RatedVoltage = .{},
     /// Sub-block name that sources this rail (e.g. "buck"). Empty when the
     /// rail enters from a board-edge port rather than a regulator.
     source_ref_des: []const u8 = "",

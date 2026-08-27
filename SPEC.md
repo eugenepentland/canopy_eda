@@ -4550,6 +4550,12 @@ Public functions: write
 - identity is deterministic: each part takes uuidFromId(its stable id), independent of any prior .bom contents
 - automatically assigned refdes reuse the prior BOM label by stable ID while newly inserted parts take numbers above the prior range
 - a selected parts-table row persists its complete rated and analysis properties, replaces the previous row's managed properties, and may migrate an exact legacy MPN to its declared current MPN
+- a same-MPN parts-row rating correction invalidates persisted selected-row evidence
+- a stable id cannot carry an old MPN across a value or canonical-net change
+- a fixed component sidecar cannot override source-authored manufacturer/MPN, including through differently-cased duplicate keys
+- a non-passive component with a parts table round-trips its exact selected row instead of being mistaken for inline-only fixed identity
+- a non-passive component with a parts table cannot fall back to inline fixed identity when its authored selection has no exact row
+- manufacturing lookup refuses a value-only fallback when an authored passive specification has no exact row
 
 ## render_html
 
@@ -4956,6 +4962,7 @@ Public functions: build
 - Falls back to top-level design port nominal when neither sub-block nor section voltage declared
 - Excludes GND from the derived rail set
 - Records source_ref_des and source_port on each rail from the source instance
+- Preserves a rail's rated voltage range for worst-case release checks
 - Returns empty slice when design declares no rails
 
 ## coverage
@@ -5972,10 +5979,12 @@ Public functions: cseEmail, csePassword, digikeyClientId, digikeyClientSecret, d
 
 ## paths
 
-Public functions: designSourcePath, designSiblingPath
+Public functions: designSourcePath, designSourcePathUnique, designSiblingPath
 
 - Resolves <name>.sexp via designSourcePath, falling back to flat layout when missing
 - Resolves sibling artifacts via designSiblingPath using the supplied extension
+- A release source lookup rejects duplicate design basenames instead of selecting the first directory walk result
+- Module release sidecars resolve beside the selected module source even when an orphan artifact with the same basename exists under src
 
 ## lib_limits
 
@@ -6627,6 +6636,39 @@ Public functions: check, writeJson
 - a warning-severity DRC finding flows through as a gate warning; an error-severity one blocks
 - a custom outline polygon with fewer than 3 points warns that the profile fell back to a rect
 - a part in a concave notch is flagged off-board by the polygon inset, not just the bbox rect
+- release confirmation tokens bind report findings, CAM identity, source and evaluated BOM
+
+## fabrication-release
+
+- revision, source-ID, BOM/centroid, and fallback-geometry identity failures can never be waived
+- consumed-input closure identity is independent of filesystem read order
+- exact read tracing retains child-directory identity and rejects an A/B/A byte sequence
+- release tracing binds directory membership and absent optional inputs to the exact evaluated snapshot
+- logical file and directory aliases retain their exact resolved target through release verification
+- relative project roots resolve to the canonical absolute path identity recorded by the exact read trace
+- rail checks use worst-case voltage, reject underrating, preserve unknown endpoints, and size zero-ohm jumpers by rail current
+- saved rounded outlines must exactly match authored dimensions, radius, polygon, and native arcs
+- synthesized footprint fallback geometry is a non-waivable release identity failure
+- 0R0 is a zero-ohm jumper that requires authored current and maximum-resistance evidence, never tolerance
+- HTTP and MCP readiness expose the same revision lock independent of canonical project-root spelling
+- strict canonical-module policy is incomplete, and therefore release-blocking, when any module source is malformed
+- SI-prefixed passive ratings are parsed with case-insensitive unit names, including the common `mOhm` spelling
+- selected layout evidence rejects every malformed or silently defaulted manufacturing record before release
+- allocation failure while lowering saved fabrication layers, copper, zones, keepouts, or perimeter vias blocks release rather than certifying a partial board
+- allocation failure while parsing a valid selected sidecar row is non-waivable incomplete evidence rather than silently dropped copper or silk
+- redundant saved polygons and dimensions must match the exact sketch-derived manufacturing geometry or release evidence is incomplete
+- duplicate design basenames are a non-waivable source-bundle ambiguity while all independent release findings remain visible
+- MCP preserves the full release report and null authorization token for an ambiguous source bundle
+- an in-request A/B/A sidecar mutation invalidates HTTP readiness and export without granting an authorization token
+- release tokens bind finding counts, report statistics, and complete DRC bridge evidence
+- completeness-waiver: empty inputs (an empty/missing selection has no exact manufacturing row and is a non-waivable evidence failure)
+- completeness-waiver: large inputs (the sidecar read is capped at 16 MiB before the strict JSON tree and entity validation run)
+- completeness-waiver: unauthorized access (the validator is read-only; HTTP authorization remains at the manufacturing endpoint boundary)
+- completeness-waiver: i/o failure (missing, unreadable, or changing source/sidecar/review inputs make evidence incomplete and block release)
+- completeness-waiver: concurrent access (the exact read trace binds consumed bytes, directory membership, aliases, and absent candidates, then verifies them again before packaging)
+- completeness-waiver: malformed encoding (invalid JSON or invalid typed manufacturing fields are rejected as incomplete evidence)
+- completeness-waiver: integer overflow (layer/revision/count conversions are finite, range-checked, and never lossy in the strict release validator)
+- completeness-waiver: panic-free (release evidence failures are structured non-waivable findings; the gate contains no intentional panic path)
 
 ## serve/fab_filename
 

@@ -36,6 +36,15 @@ pub fn shortHash(io: std.Io, gpa: std.mem.Allocator, repo_root: []const u8) ?[]c
     return gpa.dupe(u8, full[0..short_len]) catch null;
 }
 
+/// Resolve `repo_root` to the complete 40-hex HEAD object identity.
+pub fn fullHash(io: std.Io, gpa: std.mem.Allocator, repo_root: []const u8) ?[]const u8 {
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const full = resolveHead(io, arena_state.allocator(), repo_root) orelse return null;
+    if (full.len != 40 or !isHex(full)) return null;
+    return gpa.dupe(u8, full) catch null;
+}
+
 fn resolveHead(io: std.Io, arena: std.mem.Allocator, repo_root: []const u8) ?[]const u8 {
     const gitdir = gitDir(io, arena, repo_root) orelse return null;
     const head = readTrimmed(io, arena, gitdir, "HEAD", max_meta_bytes) orelse return null;
@@ -128,6 +137,9 @@ test "shortHash resolves a loose branch ref without spawning git" {
     defer std.testing.allocator.free(root);
     const hash = shortHash(std.testing.io, std.testing.allocator, root).?;
     defer std.testing.allocator.free(hash);
+    const full = fullHash(std.testing.io, std.testing.allocator, root).?;
+    defer std.testing.allocator.free(full);
+    try std.testing.expectEqualStrings("0123456789abcdef0123456789abcdef01234567", full);
     try std.testing.expectEqualStrings("012345678", hash);
     // This checkout itself resolves through the same reads (tests run from the
     // repository root, which is always a git checkout or linked worktree here).

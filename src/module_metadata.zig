@@ -61,17 +61,16 @@ pub const Definition = struct {
     source_sha256: [64]u8 = @splat('0'),
 };
 
-/// Parse the first module definition in `source`. The `(implements …)` form
-/// must be a direct child of the definition, which prevents an implementation
-/// nested inside a conditional/sub-block from becoming library policy.
-pub fn parse(allocator: std.mem.Allocator, source: []const u8) Definition {
+fn sourceDefinition(source: []const u8) Definition {
     var result: Definition = .{};
     var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(source, &digest, .{});
     result.source_sha256 = std.fmt.bytesToHex(digest, .lower);
+    return result;
+}
 
-    const nodes = parser.parse(allocator, source) catch return result;
-    defer parser.freeNodes(allocator, nodes);
+fn definitionFromNodes(source: []const u8, nodes: []const ast.Node) Definition {
+    var result = sourceDefinition(source);
     for (nodes) |node| {
         const children = node.asList() orelse continue;
         if (children.len < 3) continue;
@@ -96,6 +95,38 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) Definition {
         return result;
     }
     return result;
+}
+
+fn implementationFormsValid(nodes: []const ast.Node) bool {
+    for (nodes) |node| {
+        const children = node.asList() orelse continue;
+        if (children.len < 3) continue;
+        const head = children[0].asAtom() orelse continue;
+        if (!std.mem.eql(u8, head, "defmodule") and !std.mem.eql(u8, head, "block")) continue;
+        for (children[3..]) |body| {
+            if (!body.isForm("implements")) continue;
+            if (parseImplementation(body) == null) return false;
+            const implementation = body.asList() orelse return false;
+            for (implementation[2..]) |option| {
+                const fields = option.asList() orelse continue;
+                if (fields.len < 2) continue;
+                const key = fields[0].asAtom() orelse continue;
+                if (!std.mem.eql(u8, key, "policy")) continue;
+                const value = fields[1].asText() orelse return false;
+                if (ImplementationPolicy.parse(value) == null) return false;
+            }
+        }
+    }
+    return true;
+}
+
+/// Parse the first module definition in `source`. The `(implements …)` form
+/// must be a direct child of the definition, which prevents an implementation
+/// nested inside a conditional/sub-block from becoming library policy.
+pub fn parse(allocator: std.mem.Allocator, source: []const u8) Definition {
+    const nodes = parser.parse(allocator, source) catch return sourceDefinition(source);
+    defer parser.freeNodes(allocator, nodes);
+    return definitionFromNodes(source, nodes);
 }
 
 /// Render the defmodule doc and implementation metadata as one searchable
@@ -153,14 +184,23 @@ pub const Match = struct {
     source_sha256: [64]u8,
 };
 
+/// Module metadata plus proof that every candidate source was readable and
+/// syntactically valid. Strict release checks consume `complete`; discovery
+/// callers may still display the readable subset.
+pub const Collection = struct {
+    matches: []Match,
+    complete: bool,
+};
+
 /// Collect every module with explicit implementation metadata, sorted by
-/// module name for stable CLI/ERC output.
-pub fn collect(allocator: std.mem.Allocator, project_dir: []const u8) std.mem.Allocator.Error![]Match {
+/// module name for stable CLI/ERC output, and preserve collection failures.
+pub fn collectWithStatus(allocator: std.mem.Allocator, project_dir: []const u8) std.mem.Allocator.Error!Collection {
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/lib/modules", .{project_dir});
     defer allocator.free(dir_path);
-    var dir = infra_fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return &.{};
+    var dir = infra_fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return .{ .matches = &.{}, .complete = false };
     defer dir.close();
 
+    var complete = true;
     var matches: std.ArrayList(Match) = .empty;
     errdefer {
         for (matches.items) |match| {
@@ -172,12 +212,31 @@ pub fn collect(allocator: std.mem.Allocator, project_dir: []const u8) std.mem.Al
         matches.deinit(allocator);
     }
     var it = dir.iterate();
-    while (it.next() catch null) |entry| {
+    while (true) {
+        const entry = it.next() catch {
+            complete = false;
+            break;
+        } orelse break;
         if (entry.kind != .file and entry.kind != .sym_link) continue;
         if (!std.mem.endsWith(u8, entry.name, ".sexp")) continue;
-        const source = dir.readFileAlloc(allocator, entry.name, max_module_bytes) catch continue;
+        const source = dir.readFileAlloc(allocator, entry.name, max_module_bytes) catch {
+            complete = false;
+            continue;
+        };
         defer allocator.free(source);
-        const definition = parse(allocator, source);
+        const nodes = parser.parse(allocator, source) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                complete = false;
+                continue;
+            },
+        };
+        defer parser.freeNodes(allocator, nodes);
+        const definition = definitionFromNodes(source, nodes);
+        if (definition.name.len == 0 or !implementationFormsValid(nodes)) {
+            complete = false;
+            continue;
+        }
         const implementation = definition.implementation orelse continue;
         const fallback_name = entry.name[0 .. entry.name.len - ".sexp".len];
         try appendMatch(
@@ -194,7 +253,13 @@ pub fn collect(allocator: std.mem.Allocator, project_dir: []const u8) std.mem.Al
             return std.mem.lessThan(u8, a.module, b.module);
         }
     }.lessThan);
-    return matches.toOwnedSlice(allocator);
+    return .{ .matches = try matches.toOwnedSlice(allocator), .complete = complete };
+}
+
+/// Compatibility collector for library discovery surfaces. Strict checking
+/// uses `collectWithStatus` so malformed policy sources cannot disappear.
+pub fn collect(allocator: std.mem.Allocator, project_dir: []const u8) std.mem.Allocator.Error![]Match {
+    return (try collectWithStatus(allocator, project_dir)).matches;
 }
 
 fn appendMatch(

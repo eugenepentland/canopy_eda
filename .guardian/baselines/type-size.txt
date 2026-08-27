@@ -1,5 +1,6 @@
 # guardian-snapshot v2
 10 src/bench_route.zig|BoardResult
+8 src/bom.zig|BomEntry
 9 src/bom.zig|FlatInfo
 8 src/diagram/layout.zig|PowerBox
 8 src/diagram/layout.zig|Route
@@ -17,7 +18,7 @@
 10 src/eval/env.zig|PlaceholderPart
 13 src/eval/env.zig|PlanWave
 15 src/eval/env.zig|Port
-9 src/eval/env.zig|PowerRail
+10 src/eval/env.zig|PowerRail
 14 src/eval/env.zig|Section
 10 src/eval/env.zig|SectionPort
 8 src/eval/env.zig|Value
@@ -42,6 +43,11 @@
 12 src/kicad_pcb/snapshot.zig|Summary
 10 src/kicad_pcb/snapshot.zig|Zone
 10 src/kicad_pcb/writer.zig|ApplyStats
+14 src/layout_sidecar_types.zig|SavedHeatsink
+13 src/layout_sidecar_types.zig|SavedLayout
+8 src/layout_sidecar_types.zig|SavedOutline
+12 src/layout_sidecar_types.zig|SavedTrack
+10 src/layout_sidecar_types.zig|SavedVia
 8 src/placement/copper_support.zig|Zone
 8 src/placement/drc.zig|Parties
 8 src/placement/drc.zig|Violation
@@ -82,11 +88,6 @@
 12 src/serve/library.zig|LibraryRow
 14 src/serve/mcp_tools.zig|DesignSummary
 27 src/serve/pcb_layout_page.zig|PngRequest
-14 src/serve/pcb_layout_page.zig|SavedHeatsink
-13 src/serve/pcb_layout_page.zig|SavedLayout
-8 src/serve/pcb_layout_page.zig|SavedOutline
-12 src/serve/pcb_layout_page.zig|SavedTrack
-10 src/serve/pcb_layout_page.zig|SavedVia
 8 src/serve/pcb_layout_page.zig|SavedZone
 9 src/serve/pcb_layout_page.zig|SolvedRequest
 8 src/serve/saved_zone.zig|SavedZone

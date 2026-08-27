@@ -12,6 +12,7 @@ pub const Finding = struct {
     severity: checks.Severity,
     message: []const u8,
     ref_des: []const u8,
+    metadata_incomplete: bool = false,
 };
 
 /// Load module metadata and check a complete design tree. The implementing
@@ -22,15 +23,21 @@ pub fn run(
     block: *const env.DesignBlock,
     project_dir: []const u8,
 ) std.mem.Allocator.Error![]Finding {
-    const matches = try module_metadata.collect(allocator, project_dir);
+    const collection = try module_metadata.collectWithStatus(allocator, project_dir);
+    const matches = collection.matches;
     defer module_metadata.freeMatches(allocator, matches);
-    if (matches.len == 0) return &.{};
     var findings: std.ArrayList(Finding) = .empty;
     errdefer {
         for (findings.items) |finding| allocator.free(finding.message);
         findings.deinit(allocator);
     }
-    try checkBlock(allocator, block, matches, "", true, &findings);
+    if (!collection.complete) try findings.append(allocator, .{
+        .severity = .@"error",
+        .message = try allocator.dupe(u8, "canonical module metadata is missing, unreadable, oversized, or malformed; strict policy validation is incomplete"),
+        .ref_des = "",
+        .metadata_incomplete = true,
+    });
+    if (matches.len > 0) try checkBlock(allocator, block, matches, "", true, &findings);
     return findings.toOwnedSlice(allocator);
 }
 
@@ -269,4 +276,67 @@ test "recommended warns while example remains discovery only" {
     implementation.policy = .example;
     try checkBlock(std.testing.allocator, &block, &.{implementation}, "", true, &findings);
     try std.testing.expectEqual(@as(usize, 0), findings.items.len);
+}
+
+// spec: fabrication-release - strict canonical-module policy is incomplete, and therefore release-blocking, when any module source is malformed
+test "malformed module metadata is an explicit strict finding" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "lib/modules");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/modules/broken.sexp",
+        .data = "(defmodule broken (",
+    });
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    defer allocator.free(project);
+    const block: env.DesignBlock = .{
+        .name = "board",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    const findings = try run(allocator, &block, project);
+    defer freeFindingSlice(allocator, findings);
+    try std.testing.expectEqual(@as(usize, 1), findings.len);
+    try std.testing.expect(findings[0].metadata_incomplete);
+    try std.testing.expectEqual(checks.Severity.@"error", findings[0].severity);
+}
+
+test "valid syntax cannot hide invalid module policy metadata" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "lib/modules");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/modules/broken.sexp",
+        .data = "(design-block \"not a module\")",
+    });
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    defer allocator.free(project);
+    const block: env.DesignBlock = .{
+        .name = "board",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    const wrong_form = try run(allocator, &block, project);
+    defer freeFindingSlice(allocator, wrong_form);
+    try std.testing.expectEqual(@as(usize, 1), wrong_form.len);
+    try std.testing.expect(wrong_form[0].metadata_incomplete);
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/modules/broken.sexp",
+        .data = "(defmodule broken () (implements chip (policy canoncial)) (design-block \"broken\"))",
+    });
+    const typo_policy = try run(allocator, &block, project);
+    defer freeFindingSlice(allocator, typo_policy);
+    try std.testing.expectEqual(@as(usize, 1), typo_policy.len);
+    try std.testing.expect(typo_policy[0].metadata_incomplete);
 }

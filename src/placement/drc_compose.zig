@@ -66,6 +66,15 @@ pub fn checkDefaultRules(alloc: std.mem.Allocator, in: CopperCheck) []const drc.
 pub const CheckReport = struct {
     violations: []const drc.Violation,
     net_report: net_open.Report,
+    /// False when a fill/topology/connectivity stage failed and the ordinary
+    /// interactive surface therefore received only a best-effort partial
+    /// report.  Fab export consumes this bit and fails closed.
+    complete: bool = true,
+};
+
+const ViolationStage = struct {
+    violations: []const drc.Violation,
+    complete: bool,
 };
 
 /// Compose all DRC layers while retaining the net-open layer's reusable
@@ -77,9 +86,9 @@ pub fn checkDefaultRulesReport(alloc: std.mem.Allocator, in: CopperCheck) CheckR
     // placement, never from the fill (see `fill_cache`'s header).
     var board = boardFills(alloc, in);
     defer board.release();
-    const geom = filledViolations(alloc, in, board);
-    const silk = withBoardText(alloc, in.placement, geom, in.texts);
-    const bypass = withBypassOpen(alloc, in.placement, in.routed, silk);
+    const geom = filledViolationsReport(alloc, in, board);
+    const silk = withBoardTextReport(alloc, in.placement, geom, in.texts);
+    const bypass = withBypassOpenReport(alloc, in.placement, in.routed, silk);
     return withNetOpenReport(alloc, in, bypass, board);
 }
 
@@ -96,18 +105,18 @@ pub fn checkTopologyFilled(alloc: std.mem.Allocator, in: CopperCheck) []const dr
 /// Append exact-target bypass connectivity warnings. This stays beside the
 /// net-open layer, outside `drc.check`, so router candidates and client WASM do
 /// not rebuild a surface graph for every tentative edit.
-fn withBypassOpen(
+fn withBypassOpenReport(
     alloc: std.mem.Allocator,
     placement: optimizer.Placement,
     r: router.RouteResult,
-    base: []const drc.Violation,
-) []const drc.Violation {
-    const warnings = bypass_open.check(alloc, placement, r.tracks) catch return base;
+    base: ViolationStage,
+) ViolationStage {
+    const warnings = bypass_open.check(alloc, placement, r.tracks) catch return .{ .violations = base.violations, .complete = false };
     if (warnings.len == 0) return base;
     var all: std.ArrayList(drc.Violation) = .empty;
-    all.appendSlice(alloc, base) catch return base;
-    all.appendSlice(alloc, warnings) catch return base;
-    return all.items;
+    all.appendSlice(alloc, base.violations) catch return .{ .violations = base.violations, .complete = false };
+    all.appendSlice(alloc, warnings) catch return .{ .violations = base.violations, .complete = false };
+    return .{ .violations = all.items, .complete = base.complete };
 }
 
 fn textBox(t: font.BoardText) [4]f64 {
@@ -133,15 +142,15 @@ fn boxOverlap(a: [4]f64, b: optimizer.BoardRect) ?[2]f64 {
 /// Add one warning for each board-level silk label whose printed bounding box
 /// crosses a same-side component courtyard. Footprint-owned silk already has
 /// the exact pad-opening check in `drc.zig`; this covers the layout Text tool.
-fn withBoardText(
+fn withBoardTextReport(
     alloc: std.mem.Allocator,
     placement: optimizer.Placement,
-    base: []const drc.Violation,
+    base: ViolationStage,
     texts: []const font.BoardText,
-) []const drc.Violation {
+) ViolationStage {
     if (texts.len == 0) return base;
     var out: std.ArrayList(drc.Violation) = .empty;
-    out.appendSlice(alloc, base) catch return base;
+    out.appendSlice(alloc, base.violations) catch return .{ .violations = base.violations, .complete = false };
     for (texts) |t| {
         if (t.text.len == 0 or !(t.size > 0)) continue;
         const tb = textBox(t);
@@ -156,10 +165,10 @@ fn withBoardText(
                 .kind = .silk_over_pad,
                 .severity = drc.defaultSeverity(.silk_over_pad),
                 .who = .{ .part_a = drc.partyIndex(i) },
-            }) catch return base;
+            }) catch return .{ .violations = base.violations, .complete = false };
         }
     }
-    return out.items;
+    return .{ .violations = out.items, .complete = base.complete };
 }
 
 /// The FULL geometry + copper-topology check against the fabricated fill — the
@@ -174,7 +183,7 @@ fn withBoardText(
 pub fn checkFilled(alloc: std.mem.Allocator, in: CopperCheck) []const drc.Violation {
     var board = boardFills(alloc, in);
     defer board.release();
-    return filledViolations(alloc, in, board);
+    return filledViolationsReport(alloc, in, board).violations;
 }
 
 /// The geometry rules plus the return-path rule, judged against `board`'s fill.
@@ -182,8 +191,11 @@ pub fn checkFilled(alloc: std.mem.Allocator, in: CopperCheck) []const drc.Violat
 /// rather than to an EMPTY fill: an empty fill is not "no pours", it is "every
 /// pour vanished", and it would report every trace that terminates on its own
 /// rail's copper as an unattached stub.
-fn filledViolations(alloc: std.mem.Allocator, in: CopperCheck, board: BoardFills) []const drc.Violation {
-    if (board.failed) return drc.check(alloc, in.placement, in.routed, in.clearance) catch &.{};
+fn filledViolationsReport(alloc: std.mem.Allocator, in: CopperCheck, board: BoardFills) ViolationStage {
+    if (board.failed) {
+        const fallback = drc.check(alloc, in.placement, in.routed, in.clearance) catch &.{};
+        return .{ .violations = fallback, .complete = false };
+    }
     const zones = board.fills.zones;
     const base = drc.checkWithPreparedCopper(
         alloc,
@@ -196,11 +208,11 @@ fn filledViolations(alloc: std.mem.Allocator, in: CopperCheck, board: BoardFills
             .zones = in.zones,
             .zone_fills = board.fills.zone_fills,
         },
-    ) catch &.{};
+    ) catch return .{ .violations = &.{}, .complete = false };
     var out: std.ArrayList(drc.Violation) = .empty;
-    out.appendSlice(alloc, base) catch return base;
-    drc_return_path.check(alloc, &out, in.placement, in.routed, zones) catch return base;
-    return out.items;
+    out.appendSlice(alloc, base) catch return .{ .violations = base, .complete = false };
+    drc_return_path.check(alloc, &out, in.placement, in.routed, zones) catch return .{ .violations = base, .complete = false };
+    return .{ .violations = out.items, .complete = true };
 }
 
 /// This board's reduced fill for one DRC pass: either borrowed from the memo or
@@ -312,11 +324,11 @@ fn filledTopology(alloc: std.mem.Allocator, in: CopperCheck) std.mem.Allocator.E
 fn withNetOpenReport(
     alloc: std.mem.Allocator,
     in: CopperCheck,
-    geom: []const drc.Violation,
+    geom: ViolationStage,
     board: BoardFills,
 ) CheckReport {
     const empty: net_open.Report = .{ .violations = &.{}, .connectivity = &.{} };
-    const tracks = connectivityTracks(alloc, in.routed) catch return .{ .violations = geom, .net_report = empty };
+    const tracks = connectivityTracks(alloc, in.routed) catch return .{ .violations = geom.violations, .net_report = empty, .complete = false };
     const prepared: net_open.Prepared = .{
         .base = in.base_edge,
         .plane_fills = board.fills.plane_fills,
@@ -326,12 +338,13 @@ fn withNetOpenReport(
         .zone_fills = if (board.failed) null else board.fills.zone_fills,
     };
     const report = net_open.checkWithConnectivity(alloc, in.placement, .{ .tracks = tracks, .vias = in.routed.vias, .zones = in.zones }, prepared) catch
-        return .{ .violations = geom, .net_report = empty };
-    if (report.violations.len == 0) return .{ .violations = geom, .net_report = report };
+        return .{ .violations = geom.violations, .net_report = empty, .complete = false };
+    const connectivity_complete = !board.failed and report.connectivity.len == in.placement.nets.len;
+    if (report.violations.len == 0) return .{ .violations = geom.violations, .net_report = report, .complete = geom.complete and connectivity_complete };
     var all: std.ArrayList(drc.Violation) = .empty;
-    all.appendSlice(alloc, geom) catch return .{ .violations = geom, .net_report = report };
-    all.appendSlice(alloc, report.violations) catch return .{ .violations = geom, .net_report = report };
-    return .{ .violations = all.items, .net_report = report };
+    all.appendSlice(alloc, geom.violations) catch return .{ .violations = geom.violations, .net_report = report, .complete = false };
+    all.appendSlice(alloc, report.violations) catch return .{ .violations = geom.violations, .net_report = report, .complete = false };
+    return .{ .violations = all.items, .net_report = report, .complete = geom.complete and connectivity_complete };
 }
 
 /// A persisted RF path intentionally omits its solver chords: the compact

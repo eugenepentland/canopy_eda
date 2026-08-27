@@ -16,6 +16,7 @@ const export_kicad = @import("export_kicad.zig");
 const kicad_format = @import("kicad_pcb/format.zig");
 const FlatInfo = bom_mod.FlatInfo;
 const refdes_stability = @import("refdes_stability.zig");
+const Sha256 = std.crypto.hash.sha2.Sha256;
 
 // ── Constants ─────────────────────────────────────────────────────
 
@@ -28,30 +29,25 @@ pub const ResolveError = std.mem.Allocator.Error ||
     infra_fs.File.WriteError ||
     error{ FileTooBig, StreamTooLong, EndOfStream, WriteFailed, DiskQuota, BrokenPipe, NotOpenForWriting, EntropyUnavailable };
 
-/// Drop `manufacturer` and `mpn` from a property list. Used when the
-/// component family on an instance changes: the UUID stays stable for PCB
-/// identity, but the stored part info is now stale and must be re-resolved
-/// from the new component's definition.
+/// Drop every property owned by the previous parts-table selection. Used when
+/// component, value, or canonical net set changes under a stable id: the PCB
+/// UUID remains stable, but the prior MPN/rating evidence must not survive.
 fn filterOutPartProps(allocator: std.mem.Allocator, props: []const Property) ![]const Property {
     var out: std.ArrayList(Property) = .empty;
+    const selected_keys = propertyValue(props, selected_part_keys_property) orelse "";
     for (props) |p| {
-        if (std.mem.eql(u8, p.key, "manufacturer")) continue;
-        if (std.mem.eql(u8, p.key, "mpn")) continue;
+        if (std.ascii.eqlIgnoreCase(p.key, "manufacturer")) continue;
+        if (std.ascii.eqlIgnoreCase(p.key, "mpn")) continue;
+        if (std.ascii.eqlIgnoreCase(p.key, selected_part_keys_property)) continue;
+        if (std.ascii.eqlIgnoreCase(p.key, selected_part_row_fingerprint_property)) continue;
+        if (listedProperty(selected_keys, p.key)) continue;
         try out.append(allocator, p);
     }
     return out.toOwnedSlice(allocator);
 }
 
-/// Decide which properties from the old BOM entry to carry forward onto the
-/// new instance. Same component → full passthrough. Different component
-/// (family swap) → drop manufacturer/mpn so the new component's freshly-
-/// evaluated values (or Pass 4's parts-DB lookup) take effect. Empty
-/// `old_entry.component` is treated as "same" so legacy .bom files
-/// written before saveBom started persisting the component field don't
-/// lose their MPN/manufacturer on first reload — and so the inline
-/// edit-mpn endpoint (which writes via setBomProperty without knowing
-/// the component) keeps the user's edit until the next full save
-/// migrates the entry.
+/// Carry a prior selection only when its full source signature still matches.
+/// Old sidecars lacking value/net identity deliberately cannot donate an MPN.
 fn carryForwardProps(
     allocator: std.mem.Allocator,
     props_map: *std.StringHashMapUnmanaged([]const Property),
@@ -59,14 +55,58 @@ fn carryForwardProps(
     old_entry: bom_mod.BomEntry,
 ) !void {
     if (old_entry.properties.len == 0) return;
-    const same_component = old_entry.component.len == 0 or
-        std.mem.eql(u8, old_entry.component, info.component);
-    const props_to_keep = if (same_component)
+    // Fixed components carry their complete authored properties in `info`.
+    // Their sidecar is identity evidence, never an alternate source of MPN or
+    // manufacturer truth, so rebuilding also repairs any hand-edited row.
+    if (!parameterizedPassive(info.component)) return;
+    const current_fingerprint = sourceFingerprint(info);
+    const same_source = old_entry.component.len > 0 and
+        old_entry.value.len > 0 and
+        old_entry.source_fingerprint.len == current_fingerprint.len and
+        std.mem.eql(u8, old_entry.component, info.component) and
+        std.mem.eql(u8, old_entry.value, info.value) and
+        std.mem.eql(u8, old_entry.source_fingerprint, &current_fingerprint) and
+        sameStringSet(old_entry.nets, info.nets);
+    const props_to_keep = if (same_source)
         old_entry.properties
     else
         try filterOutPartProps(allocator, old_entry.properties);
     if (props_to_keep.len == 0) return;
     try props_map.put(allocator, info.ref_des, props_to_keep);
+}
+
+fn fingerprintField(hash: *Sha256, value: []const u8) void {
+    var length: [8]u8 = undefined;
+    std.mem.writeInt(u64, &length, @intCast(value.len), .little);
+    hash.update(&length);
+    hash.update(value);
+}
+
+fn parameterizedPassive(component: []const u8) bool {
+    return std.mem.startsWith(u8, component, "cap-") or
+        std.mem.startsWith(u8, component, "res-") or
+        std.mem.startsWith(u8, component, "ferrite-") or
+        std.mem.startsWith(u8, component, "ind-");
+}
+
+/// Hash source-authored selection inputs, excluding properties donated by the
+/// previous BOM. Fixed parts include inline manufacturer/MPN identity; parts-
+/// table passives prove those through strict lookup instead.
+fn sourceFingerprint(info: FlatInfo) [64]u8 {
+    var hash = Sha256.init(.{});
+    fingerprintField(&hash, info.component);
+    fingerprintField(&hash, info.value);
+    fingerprintField(&hash, info.footprint);
+    for (info.attrs) |attribute| fingerprintField(&hash, attribute);
+    if (!parameterizedPassive(info.component)) for (info.properties) |property| {
+        const identity = std.ascii.eqlIgnoreCase(property.key, "manufacturer") or std.ascii.eqlIgnoreCase(property.key, "mpn");
+        if (!identity) continue;
+        fingerprintField(&hash, if (std.ascii.eqlIgnoreCase(property.key, "mpn")) "mpn" else "manufacturer");
+        fingerprintField(&hash, property.value);
+    };
+    var digest: [Sha256.digest_length]u8 = undefined;
+    hash.final(&digest);
+    return std.fmt.bytesToHex(digest, .lower);
 }
 
 fn stabilizeRefdes(
@@ -81,16 +121,94 @@ fn stabilizeRefdes(
 }
 
 const selected_part_keys_property = "selected-part-property-keys";
+const selected_part_row_fingerprint_property = "selected-part-row-fingerprint";
 
 fn propertyValue(props: []const Property, key: []const u8) ?[]const u8 {
-    for (props) |prop| if (std.mem.eql(u8, prop.key, key)) return prop.value;
+    for (props) |prop| if (std.ascii.eqlIgnoreCase(prop.key, key)) return prop.value;
     return null;
 }
 
 fn listedProperty(keys: []const u8, key: []const u8) bool {
     var it = std.mem.splitScalar(u8, keys, ',');
-    while (it.next()) |candidate| if (std.mem.eql(u8, candidate, key)) return true;
+    while (it.next()) |candidate| if (std.ascii.eqlIgnoreCase(candidate, key)) return true;
     return false;
+}
+
+fn selectedPartFingerprint(part: *const parts_mod.PartEntry) [64]u8 {
+    var hash = Sha256.init(.{});
+    fingerprintField(&hash, part.value);
+    fingerprintField(&hash, part.manufacturer);
+    fingerprintField(&hash, part.mpn);
+    hash.update(&.{@intFromBool(part.preferred)});
+    for (part.attrs) |attribute| {
+        fingerprintField(&hash, attribute.key);
+        fingerprintField(&hash, attribute.value);
+    }
+    var digest: [Sha256.digest_length]u8 = undefined;
+    hash.final(&digest);
+    return std.fmt.bytesToHex(digest, .lower);
+}
+
+fn selectedPartMatches(properties: []const Property, part: *const parts_mod.PartEntry) bool {
+    const stored = propertyValue(properties, selected_part_row_fingerprint_property) orelse return false;
+    const current = selectedPartFingerprint(part);
+    if (!std.mem.eql(u8, stored, &current)) return false;
+    if (!std.mem.eql(u8, propertyValue(properties, "manufacturer") orelse "", part.manufacturer)) return false;
+    if (!std.mem.eql(u8, propertyValue(properties, "mpn") orelse "", part.mpn)) return false;
+    const managed = propertyValue(properties, selected_part_keys_property) orelse return part.attrs.len == 0;
+    var managed_count: usize = 0;
+    var iterator = std.mem.splitScalar(u8, managed, ',');
+    while (iterator.next()) |key| {
+        if (key.len == 0) continue;
+        managed_count += 1;
+        var found = false;
+        for (part.attrs) |attribute| {
+            if (std.ascii.eqlIgnoreCase(key, attribute.key)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    if (managed_count != part.attrs.len) return false;
+    for (part.attrs) |attribute| {
+        if (!listedProperty(managed, attribute.key)) return false;
+        if (!std.mem.eql(u8, propertyValue(properties, attribute.key) orelse "", attribute.value)) return false;
+    }
+    return true;
+}
+
+fn selectedRowMatches(current: FlatInfo, properties: []const Property, part: *const parts_mod.PartEntry) bool {
+    if (!propertyKeysUnique(current.properties) or !propertyKeysUnique(properties)) return false;
+    if (!selectedPartMatches(properties, part)) return false;
+    if (parameterizedPassive(current.component)) return true;
+    for (current.properties) |source| {
+        if (std.ascii.eqlIgnoreCase(source.key, "manufacturer")) {
+            if (source.value.len > 0 and !std.mem.eql(u8, source.value, part.manufacturer)) return false;
+            continue;
+        }
+        if (std.ascii.eqlIgnoreCase(source.key, "mpn")) {
+            if (source.value.len > 0 and !std.mem.eql(u8, source.value, part.mpn)) return false;
+            continue;
+        }
+        // A table selection may add properties, but a persisted row may never
+        // alter a component-authored property under the same key. `mergeProps`
+        // gives the BOM precedence, so this equality is the proof that an
+        // inline electrical rating cannot be hand-edited upward in the sidecar.
+        if (propertyValue(properties, source.key)) |persisted| {
+            if (!std.mem.eql(u8, persisted, source.value)) return false;
+        }
+    }
+    return true;
+}
+
+fn propertyKeysUnique(properties: []const Property) bool {
+    for (properties, 0..) |property, index| {
+        for (properties[0..index]) |prior| {
+            if (std.ascii.eqlIgnoreCase(property.key, prior.key)) return false;
+        }
+    }
+    return true;
 }
 
 fn appendSelectedPartProperties(
@@ -100,7 +218,7 @@ fn appendSelectedPartProperties(
 ) !void {
     for (attrs) |attr| {
         var present = false;
-        for (out.items) |old| if (std.mem.eql(u8, old.key, attr.key)) {
+        for (out.items) |old| if (std.ascii.eqlIgnoreCase(old.key, attr.key)) {
             present = true;
             break;
         };
@@ -126,34 +244,31 @@ fn selectedPartProperties(
     allocator: std.mem.Allocator,
     existing_props: []const Property,
     part: *const parts_mod.PartEntry,
-    has_mpn_from_component: bool,
 ) ![]const Property {
-    const legacy_mpn = propertyValue(part.attrs, "legacy-mpn");
-    const upgrade_legacy = if (legacy_mpn) |legacy|
-        if (propertyValue(existing_props, "mpn")) |old| std.mem.eql(u8, old, legacy) else false
-    else
-        false;
-    var has_mpn = propertyValue(existing_props, "mpn") != null or has_mpn_from_component;
-    if (upgrade_legacy) has_mpn = false;
-
     var out: std.ArrayList(Property) = .empty;
     const old_selected_keys = propertyValue(existing_props, selected_part_keys_property) orelse "";
     for (existing_props) |prop| {
-        if (std.mem.startsWith(u8, prop.key, "pdn-")) continue;
-        if (std.mem.eql(u8, prop.key, selected_part_keys_property)) continue;
+        if (startsWithIgnoreCase(prop.key, "pdn-")) continue;
+        if (std.ascii.eqlIgnoreCase(prop.key, "manufacturer") or std.ascii.eqlIgnoreCase(prop.key, "mpn")) continue;
+        if (std.ascii.eqlIgnoreCase(prop.key, selected_part_keys_property)) continue;
+        if (std.ascii.eqlIgnoreCase(prop.key, selected_part_row_fingerprint_property)) continue;
         if (listedProperty(old_selected_keys, prop.key)) continue;
-        if (upgrade_legacy and (std.mem.eql(u8, prop.key, "manufacturer") or std.mem.eql(u8, prop.key, "mpn"))) continue;
         try out.append(allocator, prop);
     }
-    if (!has_mpn and part.manufacturer.len > 0) try out.append(allocator, .{
+    if (part.manufacturer.len > 0) try out.append(allocator, .{
         .key = try allocator.dupe(u8, "manufacturer"),
         .value = try allocator.dupe(u8, part.manufacturer),
     });
-    if (!has_mpn and part.mpn.len > 0) try out.append(allocator, .{
+    if (part.mpn.len > 0) try out.append(allocator, .{
         .key = try allocator.dupe(u8, "mpn"),
         .value = try allocator.dupe(u8, part.mpn),
     });
     try appendSelectedPartProperties(allocator, &out, part.attrs);
+    const fingerprint = selectedPartFingerprint(part);
+    try out.append(allocator, .{
+        .key = try allocator.dupe(u8, selected_part_row_fingerprint_property),
+        .value = try allocator.dupe(u8, &fingerprint),
+    });
     return out.toOwnedSlice(allocator);
 }
 
@@ -180,12 +295,37 @@ test "selected part properties and exact legacy MPN migration" {
         .attrs = &attrs,
         .preferred = true,
     };
-    const out = try selectedPartProperties(alloc, &old, &part, false);
+    const out = try selectedPartProperties(alloc, &old, &part);
     try std.testing.expectEqualStrings("Current Maker", propertyValue(out, "manufacturer").?);
     try std.testing.expectEqualStrings("NEW-1", propertyValue(out, "mpn").?);
     try std.testing.expectEqualStrings("x7r", propertyValue(out, "dielectric").?);
     try std.testing.expectEqualStrings("0.018", propertyValue(out, "pdn-esr-ohm").?);
     try std.testing.expectEqualStrings("0:1,5:0.4", propertyValue(out, "pdn-dc-bias-curve").?);
+    try std.testing.expect(selectedPartMatches(out, &part));
+}
+
+// spec: bom-resolve - a same-MPN parts-row rating correction invalidates persisted selected-row evidence
+test "selected row fingerprint rejects same-MPN rating drift and duplicate managed keys" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const old_attrs = [_]Property{
+        .{ .key = "voltage", .value = "50V" },
+        .{ .key = "tolerance", .value = "10%" },
+    };
+    const new_attrs = [_]Property{
+        .{ .key = "voltage", .value = "25V" },
+        .{ .key = "tolerance", .value = "10%" },
+    };
+    const old_part = parts_mod.PartEntry{ .value = "1uF", .manufacturer = "Maker", .mpn = "SAME-MPN", .attrs = &old_attrs, .preferred = true };
+    const new_part = parts_mod.PartEntry{ .value = "1uF", .manufacturer = "Maker", .mpn = "SAME-MPN", .attrs = &new_attrs, .preferred = true };
+    const persisted = try selectedPartProperties(alloc, &.{}, &old_part);
+    try std.testing.expect(selectedPartMatches(persisted, &old_part));
+    try std.testing.expect(!selectedPartMatches(persisted, &new_part));
+    var duplicated: std.ArrayList(Property) = .empty;
+    try duplicated.appendSlice(alloc, persisted);
+    try duplicated.append(alloc, .{ .key = "MPN", .value = "WRONG" });
+    try std.testing.expect(!propertyKeysUnique(duplicated.items));
 }
 
 /// Resolve identities and BOM data for all instances in a design block.
@@ -201,7 +341,11 @@ pub fn resolveIdentities(
             if (e.ref_des.len > 0) allocator.free(e.ref_des);
             if (e.uuid.len > 0) allocator.free(e.uuid);
             if (e.component.len > 0) allocator.free(e.component);
+            if (e.value.len > 0) allocator.free(e.value);
+            if (e.source_fingerprint.len > 0) allocator.free(e.source_fingerprint);
             if (e.id.len > 0) allocator.free(e.id);
+            for (e.nets) |net| allocator.free(net);
+            if (e.nets.len > 0) allocator.free(e.nets);
             for (e.properties) |p| {
                 allocator.free(p.key);
                 allocator.free(p.value);
@@ -284,22 +428,179 @@ pub fn resolveIdentities(
             }
             continue;
         }
-        var has_mpn_from_component = false;
-        for (info.properties) |p| {
-            if (std.mem.eql(u8, p.key, "mpn")) {
-                has_mpn_from_component = true;
-                break;
-            }
-        }
         if (parts_db.lookup(info.component, info.value, info.attrs)) |part| {
             // Persist the complete selected row: procurement/review needs the
             // rated properties, and physical analysis needs its PDN columns.
-            try props_map.put(allocator, info.ref_des, try selectedPartProperties(allocator, existing_props, part, has_mpn_from_component));
+            try props_map.put(allocator, info.ref_des, try selectedPartProperties(allocator, existing_props, part));
         }
     }
 
     try applyBom(allocator, block, &result_map, &props_map, "");
     try saveBom(allocator, bom_path, flat_list.items, &result_map, &props_map);
+}
+
+/// Apply an already-generated BOM sidecar to a freshly evaluated block without
+/// selecting parts, minting identities, or rewriting any project file.  Fab
+/// export is a read-only release operation; it needs the exact MPN/rating data
+/// captured by the last explicit build, but must not make a hidden BOM update
+/// while the user is reviewing a release report.
+pub fn applyExisting(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    bom_path: []const u8,
+    project_dir: []const u8,
+) ResolveError!void {
+    const entries = try bom_mod.loadBom(allocator, bom_path);
+    defer {
+        for (entries) |entry| {
+            if (entry.ref_des.len > 0) allocator.free(entry.ref_des);
+            if (entry.uuid.len > 0) allocator.free(entry.uuid);
+            if (entry.component.len > 0) allocator.free(entry.component);
+            if (entry.value.len > 0) allocator.free(entry.value);
+            if (entry.source_fingerprint.len > 0) allocator.free(entry.source_fingerprint);
+            if (entry.id.len > 0) allocator.free(entry.id);
+            for (entry.nets) |net| allocator.free(net);
+            if (entry.nets.len > 0) allocator.free(entry.nets);
+            for (entry.properties) |prop| {
+                allocator.free(prop.key);
+                allocator.free(prop.value);
+            }
+            if (entry.properties.len > 0) allocator.free(entry.properties);
+        }
+        allocator.free(entries);
+    }
+    var uuids = std.StringHashMapUnmanaged([]const u8).empty;
+    defer uuids.deinit(allocator);
+    var props = std.StringHashMapUnmanaged([]const Property).empty;
+    defer props.deinit(allocator);
+    var flat: std.ArrayList(FlatInfo) = .empty;
+    defer flat.deinit(allocator);
+    try bom_mod.collectFlatInstances(allocator, block, "", &flat);
+    var source = std.StringHashMapUnmanaged(FlatInfo).empty;
+    defer source.deinit(allocator);
+    var parts_db = parts_mod.PartsDb.init(allocator, project_dir);
+    defer parts_db.deinit();
+    for (flat.items) |info| try source.put(allocator, info.ref_des, info);
+    for (entries) |entry| {
+        const current = source.get(entry.ref_des) orelse continue;
+        // A sidecar row belongs to the source identity, not merely to the
+        // ref-des currently occupying that label.  Ref-des reuse after a
+        // component swap must never attach the old MPN/rating to the new part.
+        if (entry.component.len == 0 or !std.mem.eql(u8, entry.component, current.component)) continue;
+        if (entry.id.len == 0 or current.id.len == 0 or !std.mem.eql(u8, entry.id, current.id)) continue;
+        if (!std.mem.eql(u8, entry.value, current.value)) continue;
+        const fingerprint = sourceFingerprint(current);
+        if (!std.mem.eql(u8, entry.source_fingerprint, &fingerprint)) continue;
+        if (!sameStringSet(entry.nets, current.nets)) continue;
+        if (entry.uuid.len > 0) try uuids.put(allocator, entry.ref_des, entry.uuid);
+        const has_family = parts_db.hasFamily(current.component);
+        const selected = parts_db.lookupStrict(current.component, current.value, current.attrs);
+        const row_matches = propertyKeysUnique(entry.properties) and if (selected) |part|
+            selectedRowMatches(current, entry.properties, part)
+        else if (has_family)
+            false
+        else
+            fixedPropertiesMatch(current.properties, entry.properties);
+        if (row_matches and entry.properties.len > 0) try props.put(allocator, entry.ref_des, entry.properties);
+    }
+    try applyBom(allocator, block, &uuids, &props, "");
+}
+
+/// Prove that the persisted BOM sidecar describes this exact evaluated source
+/// identity. Missing, malformed, legacy (value-less), duplicate, or stale rows
+/// return false; manufacturing uses this as non-waivable evidence completeness.
+pub fn existingSidecarMatches(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    bom_path: []const u8,
+    project_dir: []const u8,
+) ResolveError!bool {
+    const entries = try bom_mod.loadBom(allocator, bom_path);
+    defer freeEntries(allocator, entries);
+    var flat: std.ArrayList(FlatInfo) = .empty;
+    defer flat.deinit(allocator);
+    try bom_mod.collectFlatInstances(allocator, block, "", &flat);
+    var parts_db = parts_mod.PartsDb.init(allocator, project_dir);
+    defer parts_db.deinit();
+    if (entries.len != flat.items.len) return false;
+    for (flat.items) |current| {
+        var matches: usize = 0;
+        for (entries) |entry| {
+            if (!std.mem.eql(u8, entry.ref_des, current.ref_des)) continue;
+            if (entry.id.len == 0 or current.id.len == 0) continue;
+            if (!std.mem.eql(u8, entry.id, current.id)) continue;
+            if (!std.mem.eql(u8, entry.component, current.component)) continue;
+            if (!std.mem.eql(u8, entry.value, current.value)) continue;
+            const fingerprint = sourceFingerprint(current);
+            if (!std.mem.eql(u8, entry.source_fingerprint, &fingerprint)) continue;
+            if (!sameStringSet(entry.nets, current.nets)) continue;
+            if (entry.uuid.len == 0) continue;
+            if (!propertyKeysUnique(entry.properties)) continue;
+            const has_family = parts_db.hasFamily(current.component);
+            if (parts_db.lookupStrict(current.component, current.value, current.attrs)) |selected| {
+                if (!selectedRowMatches(current, entry.properties, selected)) continue;
+            } else if (has_family or !fixedPropertiesMatch(current.properties, entry.properties)) {
+                continue;
+            }
+            matches += 1;
+        }
+        if (matches != 1) return false;
+    }
+    return true;
+}
+
+fn freeEntries(allocator: std.mem.Allocator, entries: []const bom_mod.BomEntry) void {
+    for (entries) |entry| {
+        if (entry.ref_des.len > 0) allocator.free(entry.ref_des);
+        if (entry.uuid.len > 0) allocator.free(entry.uuid);
+        if (entry.component.len > 0) allocator.free(entry.component);
+        if (entry.value.len > 0) allocator.free(entry.value);
+        if (entry.source_fingerprint.len > 0) allocator.free(entry.source_fingerprint);
+        if (entry.id.len > 0) allocator.free(entry.id);
+        for (entry.nets) |net| allocator.free(net);
+        if (entry.nets.len > 0) allocator.free(entry.nets);
+        for (entry.properties) |property| {
+            allocator.free(property.key);
+            allocator.free(property.value);
+        }
+        if (entry.properties.len > 0) allocator.free(entry.properties);
+    }
+    allocator.free(entries);
+}
+
+fn sameStringSet(a: []const []const u8, b: []const []const u8) bool {
+    if (a.len != b.len) return false;
+    // Compare as a multiset: a two-pin part can legally have the same net on
+    // both pins, and a simple membership test would let {A,A} match {A,B}.
+    for (a, 0..) |item, item_index| {
+        var required: usize = 1;
+        for (a[0..item_index]) |prior| {
+            if (std.mem.eql(u8, item, prior)) required += 1;
+        }
+        var available: usize = 0;
+        for (b) |candidate| {
+            if (std.mem.eql(u8, item, candidate)) available += 1;
+        }
+        if (available < required) return false;
+    }
+    return true;
+}
+
+/// Fixed components source their procurement identity directly from the
+/// component definition. A sidecar may restore UUIDs, but it cannot introduce
+/// or override properties that are absent or different in that source.
+fn fixedPropertiesMatch(source: []const Property, persisted: []const Property) bool {
+    if (!propertyKeysUnique(source) or !propertyKeysUnique(persisted)) return false;
+    if (source.len != persisted.len) return false;
+    for (source) |expected| {
+        const actual = propertyValue(persisted, expected.key) orelse return false;
+        if (!std.mem.eql(u8, actual, expected.value)) return false;
+    }
+    return true;
+}
+
+fn startsWithIgnoreCase(value: []const u8, prefix: []const u8) bool {
+    return value.len >= prefix.len and std.ascii.eqlIgnoreCase(value[0..prefix.len], prefix);
 }
 
 /// Merge component-defined properties with the .bom-resident ones (the .bom
@@ -313,7 +614,7 @@ fn mergeProps(
     for (inst_props) |cp| {
         var overridden = false;
         for (bom_props) |ip| {
-            if (std.mem.eql(u8, cp.key, ip.key)) {
+            if (std.ascii.eqlIgnoreCase(cp.key, ip.key)) {
                 overridden = true;
                 break;
             }
@@ -390,6 +691,9 @@ fn saveBom(
             try kicad_format.sexprEscape(allocator, info.component),
         });
         try w.print("  (id \"{s}\")\n", .{info.id});
+        try w.print("  (value \"{s}\")\n", .{try kicad_format.sexprEscape(allocator, info.value)});
+        const fingerprint = sourceFingerprint(info);
+        try w.print("  (source-fingerprint \"{s}\")\n", .{fingerprint});
         if (info.nets.len > 0) {
             try w.writeAll("  (nets");
             for (info.nets) |net| {
@@ -450,6 +754,8 @@ fn writeBomEntries(
             try kicad_format.sexprEscape(allocator, entry.component),
         });
         if (entry.id.len > 0) try w.print("  (id \"{s}\")\n", .{entry.id});
+        if (entry.value.len > 0) try w.print("  (value \"{s}\")\n", .{try kicad_format.sexprEscape(allocator, entry.value)});
+        if (entry.source_fingerprint.len > 0) try w.print("  (source-fingerprint \"{s}\")\n", .{entry.source_fingerprint});
         if (entry.nets.len > 0) {
             try w.writeAll("  (nets");
             for (entry.nets) |net| try w.print(" \"{s}\"", .{try kicad_format.sexprEscape(allocator, net)});
@@ -491,6 +797,8 @@ pub fn setBomProperty(
             if (e.ref_des.len > 0) allocator.free(e.ref_des);
             if (e.uuid.len > 0) allocator.free(e.uuid);
             if (e.component.len > 0) allocator.free(e.component);
+            if (e.value.len > 0) allocator.free(e.value);
+            if (e.source_fingerprint.len > 0) allocator.free(e.source_fingerprint);
             if (e.id.len > 0) allocator.free(e.id);
             for (e.properties) |p| {
                 allocator.free(p.key);
@@ -543,6 +851,8 @@ pub fn setBomProperty(
             .ref_des = entry.ref_des,
             .uuid = entry.uuid,
             .component = entry.component,
+            .value = entry.value,
+            .source_fingerprint = entry.source_fingerprint,
             .id = entry.id,
             .nets = entry.nets,
             .properties = owned,
@@ -559,6 +869,8 @@ pub fn setBomProperty(
             .ref_des = ref_des,
             .uuid = new_uuid,
             .component = "",
+            .value = "",
+            .source_fingerprint = "",
             .id = "",
             .nets = &.{},
             .properties = props,
@@ -571,6 +883,13 @@ pub fn setBomProperty(
 // ── Phase C.2 tests ────────────────────────────────────────────────
 
 const test_evaluator = @import("eval/evaluator.zig");
+
+fn testDesignBlock(value: env_mod.Value) error{TestExpectedDesignBlock}!*DesignBlock {
+    return switch (value) {
+        .design_block => |block| block,
+        else => error.TestExpectedDesignBlock,
+    };
+}
 
 // spec: bom-resolve - identity resolution is a fixed point: two consecutive resolveIdentities calls produce a byte-identical BOM
 test "resolveIdentities idempotent across two consecutive evaluations" {
@@ -652,6 +971,273 @@ test "resolveIdentities idempotent across two consecutive evaluations" {
     defer alloc.free(bom2);
 
     try std.testing.expectEqualStrings(bom1, bom2);
+}
+
+// spec: bom-resolve - a stable id cannot carry an old MPN across a value or canonical-net change
+test "resolveIdentities replaces stale same-id passive selection" {
+    const alloc = std.heap.page_allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(project_dir);
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.createDirPath(std.testing.io, "lib/parts");
+    try tmp.dir.createDirPath(std.testing.io, "src/demo");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/cap.sexp",
+        .data =
+        \\(component-family cap
+        \\  (param-type capacitance)
+        \\  (footprint "0402"))
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/0402.sexp",
+        .data = "(component 0402 (footprint \"0402.kicad_mod\"))\n",
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/parts/cap.sexp",
+        .data =
+        \\(parts "cap"
+        \\  (part "100pF" (manufacturer "Murata") (mpn "OLD-100") preferred)
+        \\  (part "1000pF" (manufacturer "Murata") (mpn "NEW-1000") preferred))
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/demo/demo.sexp",
+        .data =
+        \\(import cap)
+        \\(design-block "Demo"
+        \\  (instance "C1" (cap "100pF")
+        \\    (id e1d4ce3c)
+        \\    (pin 1 "VDD_OLD")
+        \\    (pin 2 "GND")))
+        ,
+    });
+    const design_path = try std.fmt.allocPrint(alloc, "{s}/src/demo/demo.sexp", .{project_dir});
+    defer alloc.free(design_path);
+    const bom_path = try std.fmt.allocPrint(alloc, "{s}/src/demo/demo.bom", .{project_dir});
+    defer alloc.free(bom_path);
+    {
+        var evaluator = test_evaluator.Evaluator.init(alloc, project_dir);
+        defer evaluator.deinit();
+        const evaluated = try evaluator.evalFile(design_path);
+        const block = try testDesignBlock(evaluated);
+        try resolveIdentities(alloc, block, bom_path, project_dir);
+    }
+    const initial = try infra_fs.cwd().readFileAlloc(alloc, bom_path, 1024 * 1024);
+    defer alloc.free(initial);
+    try std.testing.expect(std.mem.indexOf(u8, initial, "OLD-100") != null);
+    try std.testing.expect(std.mem.indexOf(u8, initial, "source-fingerprint") != null);
+    try std.testing.expect(std.mem.indexOf(u8, initial, "selected-part-row-fingerprint") != null);
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/demo/demo.sexp",
+        .data =
+        \\(import cap)
+        \\(design-block "Demo"
+        \\  (instance "C1" (cap "1000pF")
+        \\    (id e1d4ce3c)
+        \\    (pin 1 "VDD_NEW")
+        \\    (pin 2 "GND")))
+        ,
+    });
+    {
+        var evaluator = test_evaluator.Evaluator.init(alloc, project_dir);
+        defer evaluator.deinit();
+        const evaluated = try evaluator.evalFile(design_path);
+        const block = try testDesignBlock(evaluated);
+        try resolveIdentities(alloc, block, bom_path, project_dir);
+    }
+    const rewritten = try infra_fs.cwd().readFileAlloc(alloc, bom_path, 1024 * 1024);
+    defer alloc.free(rewritten);
+    try std.testing.expect(std.mem.indexOf(u8, rewritten, "NEW-1000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rewritten, "OLD-100") == null);
+    try std.testing.expect(std.mem.indexOf(u8, rewritten, "(value \"1000pF\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rewritten, "VDD_NEW") != null);
+}
+
+// spec: bom-resolve - a fixed component sidecar cannot override source-authored manufacturer/MPN, including through differently-cased duplicate keys
+test "fixed component rejects tampered BOM identity and case duplicate" {
+    const alloc = std.heap.page_allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(project_dir);
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.createDirPath(std.testing.io, "src/demo");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/fixed-chip.sexp",
+        .data =
+        \\(component fixed-chip
+        \\  (footprint "chip-qfn")
+        \\  (manufacturer "Acme")
+        \\  (mpn "GOOD-MPN"))
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/demo/demo.sexp",
+        .data =
+        \\(import fixed-chip)
+        \\(design-block "Demo"
+        \\  (instance "U1" fixed-chip
+        \\    (id f1ced001)
+        \\    (pin 1 "VDD")
+        \\    (pin 2 "GND")))
+        ,
+    });
+    const design_path = try std.fmt.allocPrint(alloc, "{s}/src/demo/demo.sexp", .{project_dir});
+    defer alloc.free(design_path);
+    const bom_path = try std.fmt.allocPrint(alloc, "{s}/src/demo/demo.bom", .{project_dir});
+    defer alloc.free(bom_path);
+    {
+        var evaluator = test_evaluator.Evaluator.init(alloc, project_dir);
+        defer evaluator.deinit();
+        const evaluated = try evaluator.evalFile(design_path);
+        const block = try testDesignBlock(evaluated);
+        try resolveIdentities(alloc, block, bom_path, project_dir);
+    }
+    try setBomProperty(alloc, bom_path, "U1", "mpn", "TAMPERED");
+    try setBomProperty(alloc, bom_path, "U1", "MPN", "CASE-DUPLICATE");
+
+    var evaluator = test_evaluator.Evaluator.init(alloc, project_dir);
+    defer evaluator.deinit();
+    const evaluated = try evaluator.evalFile(design_path);
+    const block = try testDesignBlock(evaluated);
+    try std.testing.expect(!(try existingSidecarMatches(alloc, block, bom_path, project_dir)));
+    try applyExisting(alloc, block, bom_path, project_dir);
+    try std.testing.expectEqualStrings("GOOD-MPN", propertyValue(block.instances[0].properties, "mpn").?);
+    try std.testing.expectEqualStrings("Acme", propertyValue(block.instances[0].properties, "manufacturer").?);
+}
+
+// spec: bom-resolve - a non-passive component with a parts table round-trips its exact selected row instead of being mistaken for inline-only fixed identity
+test "non-passive parts-table selection round trips exact row" {
+    const alloc = std.heap.page_allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(project_dir);
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.createDirPath(std.testing.io, "lib/parts");
+    try tmp.dir.createDirPath(std.testing.io, "src/demo");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/regulator.sexp",
+        .data =
+        \\(component regulator
+        \\  (footprint "reg-qfn")
+        \\  (manufacturer "Acme")
+        \\  (mpn "REG-1")
+        \\  (rated-current "1A"))
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/parts/regulator.sexp",
+        .data =
+        \\(parts "regulator"
+        \\  (part "" (manufacturer "Acme") (mpn "REG-1")
+        \\    (thermal-class "high") preferred))
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/demo/demo.sexp",
+        .data =
+        \\(import regulator)
+        \\(design-block "Demo"
+        \\  (instance "U1" regulator
+        \\    (id 2ab1e001)
+        \\    (pin 1 "VIN")
+        \\    (pin 2 "GND")))
+        ,
+    });
+    const design_path = try std.fmt.allocPrint(alloc, "{s}/src/demo/demo.sexp", .{project_dir});
+    defer alloc.free(design_path);
+    const bom_path = try std.fmt.allocPrint(alloc, "{s}/src/demo/demo.bom", .{project_dir});
+    defer alloc.free(bom_path);
+    {
+        var evaluator = test_evaluator.Evaluator.init(alloc, project_dir);
+        defer evaluator.deinit();
+        const evaluated = try evaluator.evalFile(design_path);
+        const block = try testDesignBlock(evaluated);
+        try resolveIdentities(alloc, block, bom_path, project_dir);
+    }
+
+    var evaluator = test_evaluator.Evaluator.init(alloc, project_dir);
+    defer evaluator.deinit();
+    const evaluated = try evaluator.evalFile(design_path);
+    const block = try testDesignBlock(evaluated);
+    try std.testing.expect(try existingSidecarMatches(alloc, block, bom_path, project_dir));
+    try applyExisting(alloc, block, bom_path, project_dir);
+    try std.testing.expectEqualStrings("REG-1", propertyValue(block.instances[0].properties, "mpn").?);
+    try std.testing.expectEqualStrings("1A", propertyValue(block.instances[0].properties, "rated-current").?);
+    try std.testing.expectEqualStrings("high", propertyValue(block.instances[0].properties, "thermal-class").?);
+
+    try setBomProperty(alloc, bom_path, "U1", "rated-current", "10A");
+    var tampered_evaluator = test_evaluator.Evaluator.init(alloc, project_dir);
+    defer tampered_evaluator.deinit();
+    const tampered_evaluated = try tampered_evaluator.evalFile(design_path);
+    const tampered_block = try testDesignBlock(tampered_evaluated);
+    try std.testing.expect(!(try existingSidecarMatches(alloc, tampered_block, bom_path, project_dir)));
+    try applyExisting(alloc, tampered_block, bom_path, project_dir);
+    try std.testing.expectEqualStrings("1A", propertyValue(tampered_block.instances[0].properties, "rated-current").?);
+}
+
+// spec: bom-resolve - a non-passive component with a parts table cannot fall back to inline fixed identity when its authored selection has no exact row
+test "non-passive parts-table mismatch cannot use fixed identity fallback" {
+    const alloc = std.heap.page_allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(project_dir);
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.createDirPath(std.testing.io, "lib/parts");
+    try tmp.dir.createDirPath(std.testing.io, "src/demo");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/regulator.sexp",
+        .data =
+        \\(component regulator
+        \\  (footprint "reg-qfn")
+        \\  (manufacturer "Acme")
+        \\  (mpn "REG-INLINE")
+        \\  (rated-current "1A"))
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/demo/demo.sexp",
+        .data =
+        \\(import regulator)
+        \\(design-block "Demo"
+        \\  (instance "U1" regulator
+        \\    (id 2ab1e002)
+        \\    (pin 1 "VIN")
+        \\    (pin 2 "GND")))
+        ,
+    });
+    const design_path = try std.fmt.allocPrint(alloc, "{s}/src/demo/demo.sexp", .{project_dir});
+    defer alloc.free(design_path);
+    const bom_path = try std.fmt.allocPrint(alloc, "{s}/src/demo/demo.bom", .{project_dir});
+    defer alloc.free(bom_path);
+    {
+        var evaluator = test_evaluator.Evaluator.init(alloc, project_dir);
+        defer evaluator.deinit();
+        const evaluated = try evaluator.evalFile(design_path);
+        const block = try testDesignBlock(evaluated);
+        // The first build intentionally has no parts table, so it persists a
+        // valid current-format inline-fixed row.
+        try resolveIdentities(alloc, block, bom_path, project_dir);
+    }
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/parts/regulator.sexp",
+        .data =
+        \\(parts "regulator"
+        \\  (part "different-variant" (manufacturer "Acme") (mpn "REG-TABLE") preferred))
+        ,
+    });
+
+    var evaluator = test_evaluator.Evaluator.init(alloc, project_dir);
+    defer evaluator.deinit();
+    const evaluated = try evaluator.evalFile(design_path);
+    const block = try testDesignBlock(evaluated);
+    try std.testing.expect(!(try existingSidecarMatches(alloc, block, bom_path, project_dir)));
 }
 
 // spec: bom-resolve - identity is deterministic: each part takes uuidFromId(its stable id), independent of any prior .bom contents
@@ -769,6 +1355,8 @@ test "setBomProperty escapes a value with a quote and reloads cleanly" {
             if (e.ref_des.len > 0) alloc.free(e.ref_des);
             if (e.uuid.len > 0) alloc.free(e.uuid);
             if (e.component.len > 0) alloc.free(e.component);
+            if (e.value.len > 0) alloc.free(e.value);
+            if (e.source_fingerprint.len > 0) alloc.free(e.source_fingerprint);
             if (e.id.len > 0) alloc.free(e.id);
             for (e.properties) |p| {
                 alloc.free(p.key);
@@ -798,6 +1386,8 @@ test "setBomProperty escapes a value with a quote and reloads cleanly" {
             if (e.ref_des.len > 0) alloc.free(e.ref_des);
             if (e.uuid.len > 0) alloc.free(e.uuid);
             if (e.component.len > 0) alloc.free(e.component);
+            if (e.value.len > 0) alloc.free(e.value);
+            if (e.source_fingerprint.len > 0) alloc.free(e.source_fingerprint);
             if (e.id.len > 0) alloc.free(e.id);
             for (e.properties) |p| {
                 alloc.free(p.key);
