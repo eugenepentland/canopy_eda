@@ -2331,6 +2331,7 @@ src/placement/return_path.zig::isGndVia | fn isGndVia(placement: optimizer.Place
 src/placement/return_path.zig::returnPathViolations | fn returnPathViolations(placement: optimizer.Placement, routed: RouteResult, radius: f64) usize
 src/placement/return_path.zig::returnPathViolationsForNets | fn returnPathViolationsForNets( placement: optimizer.Placement, routed: RouteResult, radius: f64, selected_names: []const []const u8, ) usize
 src/placement/return_path.zig::return_path_radius_mm value
+src/placement/rf_pad_adapt.zig::apply | fn apply( arena: std.mem.Allocator, parts: anytype, nets: []const flat_netlist.FlatNet, rules: []const net_rules.NetRule, ) std.mem.Allocator.Error!void
 src/placement/rf_path_solver.zig::EndSection struct_
 src/placement/rf_path_solver.zig::FrameFit struct_
 src/placement/rf_path_solver.zig::Input struct_

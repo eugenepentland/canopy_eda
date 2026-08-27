@@ -203,6 +203,7 @@ candidate for deployment.
 - Roots unit tests separately from the production executable
 - Runs the unit-test suite as concurrent shards whose filters claim every named test, including local-first routing regressions, exactly once
 - Ground-via seed model and endpoint tests remain claimed by the shard manifest
+- RF pad adaptation tests remain claimed by the shard manifest
 - The live sub-circuit Stamp endpoint regression remains claimed by the shard manifest
 - Bridges every test-bearing module into the shard import graph so filters alone decide a shard's contents
 - Rejects a shard filter that no longer names a test in the tree

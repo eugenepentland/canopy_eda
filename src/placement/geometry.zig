@@ -59,7 +59,7 @@ pub const Pad = struct {
     /// `Overrides`).
     overrides: Overrides = .{},
 
-    /// The three `(pad …)` declarations that each OVERRIDE a default the pad
+    /// The `(pad …)` declarations that each override nominal/default geometry
     /// would otherwise inherit — grouped because that is exactly what they
     /// have in common, and because each is resolved through an accessor
     /// rather than read raw.
@@ -78,6 +78,11 @@ pub const Pad = struct {
         /// "every SMD pad is pasted". Through-hole and NPTH pads never get
         /// paste regardless.
         no_paste: bool = false,
+        /// Smallest assembly-qualified copper land this pad may use when its
+        /// footprint instance touches a controlled-impedance net. Parsed from
+        /// `(rf-min-size W H)`. Both dimensions use the pad's own unrotated
+        /// frame; zeroes keep the nominal `(size W H)` geometry.
+        rf_min_size: [2]f64 = .{ 0, 0 },
     };
 
     /// True when the pad's hole is an oval slot rather than a round bore.
@@ -317,6 +322,7 @@ fn parsePad(arena: std.mem.Allocator, node: Node) ?Pad {
     var rratio: f64 = 0;
     var mask_margin: ?f64 = null;
     var no_paste = false;
+    var rf_min_size: [2]f64 = .{ 0, 0 };
     var poly: []const [2]f64 = &.{};
     for (cl[2..]) |c| {
         // `no-paste` is a bare keyword, not a form. The type/shape atoms are in
@@ -337,6 +343,8 @@ fn parsePad(arena: std.mem.Allocator, node: Node) ?Pad {
             const sl = c.asList() orelse continue;
             if (sl.len >= 2) w = sl[1].asNumber() orelse 0;
             if (sl.len >= 3) h = sl[2].asNumber() orelse 0;
+        } else if (c.isForm("rf-min-size")) {
+            rf_min_size = parseRfMinSize(c);
         } else if (c.isForm("poly")) {
             poly = parsePadPoly(arena, c) orelse poly;
         } else if (c.isForm("roundrect_rratio")) {
@@ -374,8 +382,18 @@ fn parsePad(arena: std.mem.Allocator, node: Node) ?Pad {
         .npth = npth,
         .drill = drill,
         .slot_half = slot_half,
-        .overrides = .{ .rratio = rratio, .mask_margin = mask_margin, .no_paste = no_paste },
+        .overrides = .{ .rratio = rratio, .mask_margin = mask_margin, .no_paste = no_paste, .rf_min_size = rf_min_size },
     };
+}
+
+/// Parse the optional RF land floor as one validated pair. A malformed bound
+/// disables adaptation instead of letting one bad dimension collapse copper.
+fn parseRfMinSize(node: Node) [2]f64 {
+    const sl = node.asList() orelse return .{ 0, 0 };
+    if (sl.len < 3) return .{ 0, 0 };
+    const w = sl[1].asNumber() orelse return .{ 0, 0 };
+    const h = sl[2].asNumber() orelse return .{ 0, 0 };
+    return if (w > 0 and h > 0) .{ w, h } else .{ 0, 0 };
 }
 
 /// True when `n` is the bare atom `s` (e.g. the `oval` keyword in a drill form).
@@ -560,6 +578,27 @@ test "parsePad reads a per-pad mask margin and the no-paste keyword" {
     try testing.expect(plain.overrides.mask_margin == null);
     try testing.expect(!plain.noPaste());
     try testing.expectApproxEqAbs(@as(f64, 0.05), plain.maskMargin(0.05), 1e-9);
+}
+
+test "parsePad reads an RF minimum size independently of nominal size" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const nodes = try parser.parse(arena,
+        \\(footprint "C_0402"
+        \\  (pad 1 smd roundrect (pos -0.48 0) (size 0.56 0.62) (rf-min-size 0.45 0.50))
+        \\  (pad 2 smd roundrect (pos 0.48 0) (size 0.56 0.62) (rf-min-size -1 0.50)))
+    );
+    const children = nodes[0].asList().?;
+    const qualified = parsePad(arena, children[2]).?;
+    const malformed = parsePad(arena, children[3]).?;
+
+    try testing.expectApproxEqAbs(@as(f64, 0.56), qualified.w, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0.62), qualified.h, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0.45), qualified.overrides.rf_min_size[0], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0.50), qualified.overrides.rf_min_size[1], 1e-9);
+    try testing.expectEqual([2]f64{ 0, 0 }, malformed.overrides.rf_min_size);
 }
 
 test "parseCopperPourKeepout reads its face and polygon" {

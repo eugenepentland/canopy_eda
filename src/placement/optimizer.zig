@@ -46,6 +46,7 @@ const decouple_key = @import("../decouple_key.zig");
 const flat_netlist = @import("../flat_netlist.zig");
 const near_bind = @import("near_bind.zig");
 const geometry = @import("geometry.zig");
+const rf_pad_adapt = @import("rf_pad_adapt.zig");
 const pin_roles = @import("pin_roles.zig");
 const module_policy = @import("module_policy.zig");
 const router = @import("router.zig");
@@ -7413,6 +7414,14 @@ fn prepare(
         };
         try idx_of.put(arena, inst.ref_des, i);
     }
+
+    // Footprints remain nominal library geometry until their INSTANCE has
+    // electrical context. A pad carrying `(rf-min-size W H)` may shrink only
+    // when one of this part's pins resolves onto a controlled-impedance class.
+    // The pass clones per-instance pads, so a C_0402 on RF and another on a DC
+    // rail never contaminate each other through the footprint cache.
+    const effective_net_rules = try net_rules.resolvedNetRules(arena, block, nets);
+    try rf_pad_adapt.apply(arena, parts, nets, effective_net_rules);
 
     // Per-part priority rank (0 = unranked everywhere now — `(placement-order …)`
     // was removed) and the explicit hub pin a cap's decoupling loop should target.

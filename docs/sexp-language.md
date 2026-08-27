@@ -388,6 +388,25 @@ Library forms. A `component` is a fixed part (`tpsm84338rcjr`, `res-0402`); a `c
 
 These are *defined* in library files and *used* in designs — you don't write them inline in a design.
 
+Footprints live separately in `lib/footprints/*.sexp`. An SMD pad may attach an
+assembly-qualified RF floor to its ordinary land geometry:
+
+```scheme
+(pad 1 smd roundrect
+  (pos -0.48 0.00)
+  (size 0.56 0.62)
+  (rf-min-size 0.45 0.50))
+```
+
+`(size W H)` remains the nominal land used everywhere else. When any pin on a
+footprint instance belongs to a single-ended or differential
+controlled-impedance net class, the PCB engine clones that instance and reduces
+all its annotated SMD lands to `(rf-min-size W H)`. Applying the whole annotated
+footprint keeps a two-terminal part symmetric even when its other pin is ground.
+The RF size can only shrink nominal copper; it never grows a land, moves its
+centre, changes its courtyard, or resizes through-hole/custom-polygon pads. A
+footprint without the annotation is unchanged.
+
 ### `(connect "FN" "NET")` and `(pin … as "FN" …)`
 
 Inside an instance, `(connect "FN" "NET")` binds a net to a pin by *function name* (e.g. `"SDIO_D0"`) instead of pin number, looking the function up in the component's pinout. `(as "FN1" "FN2")` inside a `(pin …)` form asserts which alternate functions the pin is being used for — checked against the pinout's alternate-function table by the `pin_function_*` ERC checks.

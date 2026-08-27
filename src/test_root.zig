@@ -208,6 +208,7 @@ test {
     _ = @import("placement/gap_close_route.zig");
     _ = @import("placement/gap_policy.zig");
     _ = @import("placement/geometry.zig");
+    _ = @import("placement/rf_pad_adapt.zig");
     _ = @import("ground_via_seed.zig");
     _ = @import("placement/guide_branch.zig");
     _ = @import("placement/impedance.zig");
