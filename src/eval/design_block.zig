@@ -31,6 +31,7 @@ const board_role_mod = @import("board_role.zig");
 const net_analysis = @import("net_analysis.zig");
 const section_maturity = @import("section_maturity.zig");
 const stackup_presets = @import("stackup_presets.zig");
+const pll_loop = @import("../pll_loop.zig");
 const ScopeForm = forms_mod.ScopeForm;
 
 const Node = ast.Node;
@@ -136,6 +137,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     var pdn_intents: std.ArrayList(env_mod.PdnIntent) = .empty;
     var fabrication_layers: std.ArrayList(env_mod.FabricationLayerSpec) = .empty;
     var net_class_specs: std.ArrayList(env_mod.NetClassSpec) = .empty;
+    var pll_loop_specs: std.ArrayList(pll_loop.Spec) = .empty;
     var design_rules_spec: env_mod.DesignRulesSpec = .{};
     var pcb_plan_spec: ?env_mod.PcbPlanSpec = null;
     var kicad_pcb_path: ?[]const u8 = null;
@@ -186,6 +188,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
         .pdn_intents = &pdn_intents,
         .fabrication_layers = &fabrication_layers,
         .net_class_specs = &net_class_specs,
+        .pll_loop_specs = &pll_loop_specs,
         .design_rules_spec = &design_rules_spec,
         .pcb_plan_spec = &pcb_plan_spec,
         .kicad_pcb_path = &kicad_pcb_path,
@@ -250,6 +253,11 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     // Validate: warn about dead-end nets, etc.
     try validate.validateDesign(self, block);
 
+    // Domain-specific engineering declarations run after the complete local
+    // block exists, so their component roles resolve against actual instance
+    // values/tolerances regardless of source order.
+    for (pll_loop_specs.items) |spec| pll_loop.evaluate(self.allocator, &self.assertions, block, spec) catch return EvalError.OutOfMemory;
+
     // Derive first-class power-rail entries from sub-block output ports +
     // ferrite-bead union-find. Downstream analyses (power_budget,
     // power_sequencing, ERC integrity checks) consume `block.rails`
@@ -285,6 +293,7 @@ const BlockBuildState = struct {
     pdn_intents: *std.ArrayList(env_mod.PdnIntent),
     fabrication_layers: *std.ArrayList(env_mod.FabricationLayerSpec),
     net_class_specs: *std.ArrayList(env_mod.NetClassSpec),
+    pll_loop_specs: *std.ArrayList(pll_loop.Spec),
     design_rules_spec: *env_mod.DesignRulesSpec,
     pcb_plan_spec: *?env_mod.PcbPlanSpec,
     kicad_pcb_path: *?[]const u8,
@@ -502,6 +511,13 @@ fn evalBlockBodyForm(
             build.fabrication_layers.append(self.allocator, layer) catch return EvalError.OutOfMemory,
         .net_class => if (try parseNetClass(self, form_children)) |nc|
             build.net_class_specs.append(self.allocator, nc) catch return EvalError.OutOfMemory,
+        .pll_loop => {
+            const spec = pll_loop.parse(form_children) catch {
+                self.setError(form.span, "malformed (pll-loop …); see `netlisp reference pll-loop`");
+                return EvalError.InvalidForm;
+            };
+            build.pll_loop_specs.append(self.allocator, spec) catch return EvalError.OutOfMemory;
+        },
         .design_rules => build.design_rules_spec.* = parseDesignRules(self, form_children),
         .pcb_plan => build.pcb_plan_spec.* = try takeFirstPcbPlan(self, form_children, form.span, build.pcb_plan_spec.*),
         // Section-only forms are ignored at the top level — a
@@ -1192,6 +1208,7 @@ fn evalSection(
             .pdn,
             .fabrication_layer,
             .net_class,
+            .pll_loop,
             .design_rules,
             .pcb_plan,
             => self.warnFmt(sf.span, "({s} …) is top-level-only — ignored inside (section …)", .{sf_name}),

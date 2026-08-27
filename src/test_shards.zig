@@ -121,6 +121,7 @@ pub const shards: []const []const []const u8 = &.{
         "placement.via_antipad.test.",
         "placement.via_centre.test.",
         "placement.via_fence.test.",
+        "pll_loop.test.",
         "raster.test.",
         "render_json.test.",
         "render_order.test.",

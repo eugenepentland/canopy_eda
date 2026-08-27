@@ -7104,3 +7104,16 @@ export never invents them.
 - completeness-waiver: malformed encoding (names go through the shared strict JSON string writer and archive tokens admit only ASCII letters, digits, dash, and underscore; generated JSON is parsed again before packaging)
 - completeness-waiver: integer overflow (Gerber coordinates are bounded by finite PCB millimetre geometry before their fixed 1e6 conversion, entry counts come from bounded in-memory slices, and the shared ZIP writer validates its own fixed-width casts)
 - completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
+
+## pll-loop
+
+- AN-2548 active filter model retains the expected crossover and phase trend across Kvco
+- phase detector polarity changes the feedback sign by 180 degrees
+- completeness-waiver: empty inputs (the parser rejects a declaration without a name, complete component-role bindings, topology, PFD, charge pump, feedback divider, Kvco range, and op-amp GBW before evaluation)
+- completeness-waiver: large inputs (one declaration resolves exactly seven named parts and sweeps a fixed 256 R/C corners, two charge-pump corners, two Kvco endpoints, and bounded 321-point plus 64-step frequency searches)
+- completeness-waiver: unauthorized access (an in-process calculation over an already-authorized evaluated DesignBlock with no request, file, socket, user, or write surface)
+- completeness-waiver: i/o failure (the validator performs no I/O and appends allocator-owned assertion messages; OutOfMemory is propagated)
+- completeness-waiver: concurrent access (all solver state is stack-local or owned by the calling evaluator and there are no globals or shared mutable objects)
+- completeness-waiver: malformed encoding (the existing s-expression parser supplies typed nodes; malformed forms and non-finite or out-of-range numeric fields are rejected before evaluation)
+- completeness-waiver: integer overflow (loop bounds are fixed constants except the seven-element tolerance mask, whose shift count is compile-time bounded)
+- completeness-waiver: panic-free (component lookup, value parsing, and crossover failure use optional/error returns; panic-freedom is also enforced repo-wide by Guardian's panic-budget snapshot)

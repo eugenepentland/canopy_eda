@@ -156,6 +156,7 @@ pub const ScopeForm = enum {
     pdn,
     fabrication_layer,
     net_class,
+    pll_loop,
     design_rules,
     pcb_plan,
 
@@ -207,6 +208,7 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "pdn", .pdn },
     .{ "fabrication-layer", .fabrication_layer },
     .{ "net-class", .net_class },
+    .{ "pll-loop", .pll_loop },
     .{ "design-rules", .design_rules },
     .{ "pcb-plan", .pcb_plan },
 });
@@ -814,6 +816,23 @@ pub const scope_form_docs = blk: {
             "signal layers remain stripline. A stackup with no reference plane for the layer, or a target " ++
             "no width in the formula's published domain reaches, derives nothing and says so rather " ++
             "than extrapolating. Repeat the form for more classes.",
+    } };
+    t[@backingInt(ScopeForm.pll_loop)] = .{ .scope = tl, .doc = .{
+        .syntax = "(pll-loop \"name\" (mode advisory|gate) (topology active-inverting) " ++
+            "(components (c-cp \"REF\") (r-in \"REF\") (r-feedback \"REF\") " ++
+            "(c-feedback \"REF\") (c-feedback-hf \"REF\") (r-isolation \"REF\") (c-tune \"REF\")) " ++
+            "[(extra-tune-cap F [TOL_PCT])] (pfd HZ) (charge-pump A [TOL_PCT]) " ++
+            "(feedback-divider PRESCALER PLL_N) (kvco MIN_HZ_PER_V MAX_HZ_PER_V) " ++
+            "(op-amp (gbw HZ) [(dc-gain RATIO)]) [(phase-margin (target MIN MAX) (hard-min DEG))] " ++
+            "(polarity positive|negative) [(supply MIN_V MAX_V)] [(op-amp-max-supply V)] " ++
+            "[(vtune MIN_V MAX_V)] [(output-headroom LOW_V HIGH_V)] " ++
+            "[(ramp SPAN_HZ TIME_S)] [(max-ramp-phase-error RAD)] [(slew-rate V_PER_S)])",
+        .summary = "Validate an inverting active charge-pump PLL directly from the named BOM R/C values and tolerances. " ++
+            "The continuous-time small-signal solver includes finite op-amp gain/GBW, the external prescaler in N_eff, " ++
+            "Kvco and deterministic component corners, then emits ordinary build/check assertions for crossover, phase " ++
+            "margin, PFD/GBW ratios, polarity, output swing, and an approximate FMCW ramp phase-error/slew screen. " ++
+            "Use advisory mode while Kvco or firmware Icp is provisional; gate mode makes failed limits build-blocking. " ++
+            "This is not a sampled-PFD, phase-noise, nonlinear acquisition, SPICE, or capacitive-load-stability sign-off.",
     } };
     t[@backingInt(ScopeForm.design_rules)] = .{ .scope = tl, .doc = .{
         .syntax = "(design-rules [(clearance MM)] [(min-drill MM)] [(mask-margin MM)] [(mask-relief-corner-radius MM)] [(copper-edge MM)] [(component-edge MM)] " ++

@@ -171,6 +171,7 @@ test {
     _ = @import("pdf.zig");
     _ = @import("pdf_afm.zig");
     _ = @import("pdf_verify.zig");
+    _ = @import("pll_loop.zig");
     _ = @import("power_integrity_json.zig");
     _ = @import("placement/airwire_geometry.zig");
     _ = @import("placement/bend_smooth.zig");

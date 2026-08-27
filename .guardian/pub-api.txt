@@ -3016,6 +3016,12 @@ src/placement/via_guide.zig::trace | fn trace(arena: std.mem.Allocator, u: Union
 src/placement/via_merge.zig::Merge struct_
 src/placement/via_merge.zig::ViaPt struct_
 src/placement/via_merge.zig::plan | fn plan(arena: std.mem.Allocator, vias: []const ViaPt) std.mem.Allocator.Error![]const Merge
+src/pll_loop.zig::Components struct_
+src/pll_loop.zig::Mode enum_
+src/pll_loop.zig::Polarity enum_
+src/pll_loop.zig::Spec struct_
+src/pll_loop.zig::evaluate | fn evaluate(allocator: std.mem.Allocator, assertions: *std.ArrayList(env.AssertionResult), block: *const DesignBlock, spec: Spec) std.mem.Allocator.Error!void
+src/pll_loop.zig::parse | fn parse(form: []const Node) ParseError!Spec
 src/png.zig::Error value
 src/png.zig::encodeRgb | fn encodeRgb(alloc: std.mem.Allocator, width: u32, height: u32, rgb: []const u8) Error![]u8
 src/power_integrity_json.zig::AcMode enum_
