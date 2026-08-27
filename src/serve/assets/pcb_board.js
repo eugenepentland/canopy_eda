@@ -7911,7 +7911,7 @@ function drawAutoReset(){drawAutoVersion++;if(drawAutoTimer){clearTimeout(drawAu
 function drawAutoSchedule(now,accept){if(!dtrace)return false;var tr=dtrace,raw=drawNearestRatTargetFor(tr,{x:tr.lx,y:tr.ly});if(!raw)return false;
  var target={x:raw.x,y:raw.y,l:drawAutoTargetLayer(raw,tr)},head={x:tr.lx,y:tr.ly,l:tr.l},legs=[{net:tr.net,head:head,target:target}];
  if(tr.pair){var pr=tr.pair,raw2=null;
-  if(raw.target&&raw.target.kind==="pad"){var mate=dpPartnerPad(raw.x,raw.y,pr.net,raw.target.d.i);if(mate)raw2={x:mate.x,y:mate.y,target:{kind:"pad",d:mate}};}
+  if(raw.target&&raw.target.kind==="pad"){var mate=dpFinishPad(raw.x,raw.y,raw.target.d.i,pr);if(mate)raw2={x:mate.x,y:mate.y,target:{kind:"pad",d:mate}};}
   if(!raw2)raw2=drawNearestRatTargetFor(pr,{x:pr.lx,y:pr.ly});if(!raw2)return false;
   legs.push({net:pr.net,head:{x:pr.lx,y:pr.ly,l:tr.l},target:{x:raw2.x,y:raw2.y,l:drawAutoTargetLayer(raw2,pr)}});}
  var token=++drawAutoVersion;if(drawAutoTimer)clearTimeout(drawAutoTimer);drawAutoAbort();
@@ -7961,6 +7961,18 @@ function dpPartnerPad(px,py,net,onlyPart){var key=netCollapse(net||""),best=null
   (p.pads||[]).forEach(function(pd){if(!pd.net||netCollapse(pd.net)!==key)return;
    var c=wpt(i,pd.x,pd.y),d=Math.hypot(c.x-px,c.y-py);
    if(d<bd){bd=d;best={i:i,pd:pd,x:c.x,y:c.y,net:pd.net};}});});
+ return best;}
+// The pad where the OTHER leg should finish. A receiver may put both pair
+// members on one component, but series passives put each member on a separate
+// component. Prefer the same-component mate, then use the partner trace's
+// outstanding destination pads; never grab an arbitrary nearer pad from the
+// launch side of a multi-drop pair.
+function dpFinishPad(px,py,nearPart,tr){var same=dpPartnerPad(px,py,tr.net,nearPart);
+ if(same)return same;var key=netCollapse(tr.net||""),best=null,bd=1e18;
+ (tr.dest||[]).forEach(function(d){if(!d.pd||!d.pd.net||netCollapse(d.pd.net)!==key)return;
+  var l=drawPadLayer(P[d.i],d.pd);if(l>=0&&l!==dtrace.l)return;
+  var c=wpt(d.i,d.pd.x,d.pd.y),dd=Math.hypot(c.x-px,c.y-py);
+  if(dd<bd){bd=dd;best={i:d.i,pd:d.pd,x:c.x,y:c.y,net:d.pd.net};}});
  return best;}
 // The matching continuation anchor when Draw starts from existing copper.
 // Vias span every signal layer; track endpoints must be on the active layer.
@@ -8083,23 +8095,27 @@ function dpCommit(legs,nl){var pr=dtrace.pair;
  if(lt){var L=Math.hypot(lt.x2-lt.x1,lt.y2-lt.y1);
   if(L>1e-9)dtrace.pdir={x:(lt.x2-lt.x1)/L,y:(lt.y2-lt.y1)/L};}
  return true;}
-// Finish the pair on a far pad (either member's): each leg fans into its own
-// pad — the clicked one plus its same-part twin. The P leg must land (it is
-// the primary trace); a missing partner pad (an AC-coupling cap carrying only
-// one member) leaves that leg coupled, with a note to finish it by hand.
-function dpFinish(pt2){var pr=dtrace.pair,isP=(pt2.net===dtrace.net);
- var pEnd=isP?{x:pt2.x,y:pt2.y}:dpPartnerPad(pt2.x,pt2.y,dtrace.net,pt2.i);
- if(!pEnd){routeStatMsg("no "+nLeaf(dtrace.net)+" pad on that part — finish on the pair's far pads",true);return;}
- var nEnd=isP?dpPartnerPad(pt2.x,pt2.y,pr.net,pt2.i):{x:pt2.x,y:pt2.y};
- var pl=null,nl=null;
+// Resolve the exact two-pad fan and posture used by both hover preview and
+// commit. `dpFinishPad` lets the lane pitches expand to separate series
+// passives while the preceding vertices remain at the class gap.
+function dpFinishPlan(pt2){var pr=dtrace.pair,isP=(netCollapse(pt2.net)===netCollapse(dtrace.net));
+ var pEnd=isP?{x:pt2.x,y:pt2.y}:dpFinishPad(pt2.x,pt2.y,pt2.i,dtrace);
+ var nEnd=isP?dpFinishPad(pt2.x,pt2.y,pt2.i,pr):{x:pt2.x,y:pt2.y};
+ var pl=null,nl=null;if(!pEnd)return {pEnd:null,nEnd:nEnd,pl:null,nl:null};
  [drawPath(dtrace.lx,dtrace.ly,pEnd),drawPath(dtrace.lx,dtrace.ly,pEnd,drawPosture^1)].some(function(c){
   if(drawLegsViolate(c))return false;
   var nn=dpChainFor(c,nEnd);
   if(dpLegsViolate(nn))return false;
   pl=c;nl=nn;return true;});
- if(!pl){routeStatMsg("that would violate clearance — reroute the last leg",true);return;}
- if(!dpCommit(pl,nl))return;
- var miss=!nEnd?nLeaf(pr.net):null;
+ return {pEnd:pEnd,nEnd:nEnd,pl:pl,nl:nl};}
+// Finish the pair on a far pad (either member's): each leg fans into its own
+// pad. Same-component pin pairs remain the first choice; when each lane owns a
+// separate series passive, the other leg expands to its outstanding far pad.
+function dpFinish(pt2){var pr=dtrace.pair,plan=dpFinishPlan(pt2);
+ if(!plan.pEnd){routeStatMsg("no outstanding "+nLeaf(dtrace.net)+" pad beside that pair endpoint",true);return;}
+ if(!plan.pl){routeStatMsg("that would violate clearance — reroute the last leg",true);return;}
+ if(!dpCommit(plan.pl,plan.nl))return;
+ var miss=!plan.nEnd?nLeaf(pr.net):null;
  drawEnd();
  if(miss)routeStatMsg(miss+" has no pad there — its leg ends coupled; finish it by hand",true);}
 // V in pair mode: a via on each head, side by side. When two barrels plus
@@ -8297,11 +8313,12 @@ function paintDraw(ctx){paintViaTool(ctx);if(!drawMode||!dtrace)return;
  }
  if(!drawCur){paintDrawRatline(ctx,{x:dtrace.lx,y:dtrace.ly});return;}
  var dl=dtrace.pair?dpLegs(drawCur,drawShift):drawLegs(drawCur,drawShift),s=dl.t;
- // Pair preview fans into the far pads while hovering a member pad — the exact
- // chains the finish click will commit.
- if(dtrace.pair&&!dl.blocked){var hp=padTarget(drawCur);
-  if(hp&&hp.net===dtrace.net){var fq=dpPartnerPad(hp.x,hp.y,dtrace.pair.net,hp.i);
-   if(fq)dl.nl=dpChainFor(dl.legs,fq);}}
+ // Pair preview fans into the far pads while hovering EITHER member pad — the
+ // exact two-passive expansion and posture the finish click will commit.
+ if(dtrace.pair){var hp=padTarget(drawCur);
+  if(hp&&(netCollapse(hp.net)===netCollapse(dtrace.net)||netCollapse(hp.net)===netCollapse(dtrace.pair.net))){
+   var fp=dpFinishPlan(hp);if(fp.pl)dl={t:dl.t,legs:fp.pl,nl:fp.nl};
+   else if(fp.pEnd)dl.blocked=true;}}
  var head=dl.legs.length?dl.legs[dl.legs.length-1]:{x:dtrace.lx,y:dtrace.ly};
  paintDrawRatline(ctx,head);
  ctx.save();ctx.lineCap="round";ctx.lineJoin="round";

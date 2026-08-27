@@ -1727,6 +1727,21 @@ test "viewer JS wires the coupled diff-pair hand-draw mode" {
     try std.testing.expect(std.mem.indexOf(u8, js, "function dpBack(") != null);
 }
 
+// spec: Web Server - The hand-route differential pair holds its class gap through the shared run, then fans each leg to its own outstanding destination when the pair terminates on separate series passives
+test "viewer JS fans a hand-routed diff pair to separate passive destinations" {
+    const js = @embedFile("assets/pcb_board.js");
+    // A same-component mate still wins for ordinary receiver pin pairs, while
+    // separate series passives resolve through the twin's outstanding pads.
+    try std.testing.expect(std.mem.indexOf(u8, js, "function dpFinishPad(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "var same=dpPartnerPad(px,py,tr.net,nearPart)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "(tr.dest||[]).forEach") != null);
+    // Hover and commit share one plan, so the widened pad fan shown is exactly
+    // what the all-or-nothing DRC gate receives.
+    try std.testing.expect(std.mem.indexOf(u8, js, "function dpFinishPlan(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "var fp=dpFinishPlan(hp)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "plan=dpFinishPlan(pt2)") != null);
+}
+
 // spec: Web Server - The DRC policy table advertises the same built-in severity the checker emits, differential-pair rules included
 test "the kinds table advertises the checkers' own defaults" {
     var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);

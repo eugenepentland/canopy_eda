@@ -6513,6 +6513,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - While hand-routing a single trace or coupled differential pair, the scoped autorouter preserves the fixed manual prefix, previews only its proposed remainder as faded dashed tracks and vias, and Enter commits that proposal as one undoable trace completion; Enter never substitutes a manual partial finish when no proposal is ready, while double-click remains the explicit manual finish action.
 - hand-routing starts and continues only from pads and traces on the active copper layer, so opposite-face lands cannot steal a route click
 - The hand-route tool lays both legs of a differential pair together with mitered offset corners
+- The hand-route differential pair holds its class gap through the shared run, then fans each leg to its own outstanding destination when the pair terminates on separate series passives
 - The auto-commit author is the ward user, falling back to the dev-admin identity
 - The auto-commit parses porcelain status into a dirty-path set including a rename's source
 - The auto-commit always excludes history snapshots and backup artifacts
