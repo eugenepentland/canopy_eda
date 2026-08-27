@@ -70,10 +70,31 @@ fn boxRayHalfExtent(pad: Pad, direction: [2]f64) f64 {
     return if (std.math.isFinite(extent)) extent else 0;
 }
 
-/// Width of the pad's centre cross-section perpendicular to this launch.
-/// Unlike min(w,h), this follows rotated and diagonal trace entries.
+/// Width of pad copper at the actual exit, perpendicular to this launch.
+/// A centre cross-section is wrong for diagonal entries: on a square land it
+/// grows by sqrt(2) at 45 degrees, then protrudes beyond the pad as a false
+/// flare. The boundary chord shrinks naturally toward a corner while leaving
+/// horizontal and vertical face entries unchanged.
 fn launchSpan(pad: Pad, direction: [2]f64) f64 {
-    return 2 * boxRayHalfExtent(pad, .{ -direction[1], direction[0] });
+    const local = localComponents(pad, direction);
+    const land = boxRayHalfExtent(pad, direction);
+    const point = [2]f64{ local[0] * land, local[1] * land };
+    const normal = [2]f64{ -local[1], local[0] };
+    var lo = -std.math.inf(f64);
+    var hi = std.math.inf(f64);
+    for (point, normal, [2]f64{ pad.half_w, pad.half_h }) |p, n, half| {
+        if (@abs(n) <= eps) {
+            if (@abs(p) > half + eps) return 0;
+            continue;
+        }
+        var a = (-half - p) / n;
+        var b = (half - p) / n;
+        if (a > b) std.mem.swap(f64, &a, &b);
+        lo = @max(lo, a);
+        hi = @min(hi, b);
+        if (hi < lo - eps) return 0;
+    }
+    return @max(0, hi - lo);
 }
 
 fn needsNeck(profile: pad_neck_profile.Profile, nominal: f64, pad: Pad, direction: [2]f64) bool {
@@ -468,7 +489,7 @@ test "DRC allowance accepts only neck-profile copper beside its own undersized S
     try testing.expect(!try allowsTrack(arena, placement, far, 0.2532, 0.127));
 }
 
-// spec: placement/rf-port-frame-routing - every single-ended controlled-impedance SMD launch tapers between the actual path-crossing land span and nominal width, including wider lands, bends inside the pad, full flat-face collars on rectangular and oval pads, and via-fed or branched nets
+// spec: placement/rf-port-frame-routing - every single-ended controlled-impedance SMD launch tapers between the pad-boundary chord available at its actual path crossing and nominal width, including wider lands, bends inside the pad, full flat-face collars on rectangular and oval pads, and via-fed or branched nets, without diagonal centre-chord flares
 test "pad launch span and edge distance follow a diagonal entry" {
     const root = @sqrt(0.5);
     const pad = Pad{
@@ -480,6 +501,16 @@ test "pad launch span and edge distance follow a diagonal entry" {
     };
     try testing.expectApproxEqAbs(@as(f64, 0.2 * @sqrt(2.0)), launchSpan(pad, .{ root, root }), 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 0.1 * @sqrt(2.0)), boxRayHalfExtent(pad, .{ root, root }), 1e-12);
+
+    const square = Pad{
+        .at = .{ 0, 0 },
+        .layer = 0,
+        .half_w = 0.25,
+        .half_h = 0.25,
+        .axis_x = .{ 1, 0 },
+    };
+    try testing.expectApproxEqAbs(@as(f64, 0), launchSpan(square, .{ root, root }), 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.5), launchSpan(square, .{ 1, 0 }), 1e-12);
 }
 
 test "generated controlled-impedance launch tapers both wider and narrower lands on a branched net" {

@@ -7165,9 +7165,17 @@ function drawPadFrame(pad){if(!pad||!pad.pd)return null;
  function half(dx,dy){var lx=dx*ux+dy*uy,ly=dx*vx+dy*vy,e=1/0;
   if(Math.abs(lx)>1e-10)e=Math.min(e,hw/Math.abs(lx));if(Math.abs(ly)>1e-10)e=Math.min(e,hh/Math.abs(ly));
   return isFinite(e)?e:0;}
+ // Length of the pad chord through an arbitrary local point. At an angled
+ // exit this is deliberately the copper still available at the boundary,
+ // not the longer centre chord that makes square lands flare by sqrt(2).
+ function spanAt(lx,ly,dx,dy){var nx=dx*ux+dy*uy,ny=dx*vx+dy*vy,nl=Math.hypot(nx,ny),lo=-1/0,hi=1/0;
+  if(nl<1e-10)return 0;nx/=nl;ny/=nl;
+  function clip(p,n,h){if(Math.abs(n)<1e-10)return Math.abs(p)<=h+1e-8;
+   var a=(-h-p)/n,b=(h-p)/n;if(a>b){var q=a;a=b;b=q;}lo=Math.max(lo,a);hi=Math.min(hi,b);return hi>=lo-1e-8;}
+  if(!clip(lx,nx,hw)||!clip(ly,ny,hh))return 0;return Math.max(0,hi-lo);}
  function local(p){var dx=p.x-c.x,dy=p.y-c.y;return {x:dx*ux+dy*uy,y:dx*vx+dy*vy};}
  function world(x,y){return {x:c.x+ux*x+vx*y,y:c.y+uy*x+vy*y};}
- return {c:c,ux:ux,uy:uy,vx:vx,vy:vy,hw:hw,hh:hh,radius:radius,portalOk:portalOk,half:half,local:local,world:world};}
+ return {c:c,ux:ux,uy:uy,vx:vx,vy:vy,hw:hw,hh:hh,radius:radius,portalOk:portalOk,half:half,spanAt:spanAt,local:local,world:world};}
 function drawPadPortal(f,lx,ly){if(!f.portalOk)return null;var xface=Math.abs(Math.abs(lx)-f.hw)<=Math.abs(Math.abs(ly)-f.hh);
  if(xface){var sx=lx<0?-1:1,hx=f.hh-f.radius;if(!(hx>1e-9)||Math.abs(ly)>hx+1e-7)return null;
   return {a:f.world(sx*f.hw,-hx),b:f.world(sx*f.hw,hx),out:{x:sx*f.ux,y:sx*f.uy},width:2*hx};}
@@ -7175,7 +7183,7 @@ function drawPadPortal(f,lx,ly){if(!f.portalOk)return null;var xface=Math.abs(Ma
  return {a:f.world(-hy,sy*f.hh),b:f.world(hy,sy*f.hh),out:{x:sy*f.vx,y:sy*f.vy},width:2*hy};}
 function drawPadLaunch(pad,dir){if(!dir)return null;var dl=Math.hypot(dir.x,dir.y),f=drawPadFrame(pad);
  if(!f||dl<1e-10)return null;dir={x:dir.x/dl,y:dir.y/dl};var land=f.half(dir.x,dir.y),exit=f.local({x:f.c.x+dir.x*land,y:f.c.y+dir.y*land});
- return {land:land,span:2*f.half(-dir.y,dir.x),portal:drawPadPortal(f,exit.x,exit.y)};}
+ return {land:land,span:f.spanAt(exit.x,exit.y,-dir.y,dir.x),portal:drawPadPortal(f,exit.x,exit.y)};}
 window.PCBDrawPadLaunch=drawPadLaunch;
 // Measure a bent launch along the ordered centreline rather than projecting
 // one endpoint tangent through the pad forever. The first box-boundary
@@ -7191,7 +7199,7 @@ function drawPathPadLaunch(tracks,pad,start){var f=drawPadFrame(pad);if(!f||!tra
     if(Math.abs(dy)>1e-12){q=((lb.y<0?-f.hh:f.hh)-la.y)/dy;if(q>=-1e-9&&q<=k)k=q;}
     var wx=b.x-a.x,wy=b.y-a.y,wl=Math.hypot(wx,wy);if(wl<1e-10)return null;wx/=wl;wy/=wl;
     k=Math.max(0,Math.min(1,k));var ex=la.x+(lb.x-la.x)*k,ey=la.y+(lb.y-la.y)*k;
-    return {land:total+piece*k,span:2*f.half(-wy,wx),portal:drawPadPortal(f,ex,ey)};}
+    return {land:total+piece*k,span:f.spanAt(ex,ey,-wy,wx),portal:drawPadPortal(f,ex,ey)};}
    total+=piece;}}
  return null;}
 window.PCBDrawPathPadLaunch=drawPathPadLaunch;

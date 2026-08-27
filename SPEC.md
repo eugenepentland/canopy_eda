@@ -2053,7 +2053,7 @@ the owning switch pad axis.
 - G2 route matches both port frames and keeps one-width straight entries
 - a cramped switch launch fits against one trace-width of straight entry even when its pad taper is longer
 - Euler bend has zero-curvature seams and finite curvature-rate energy
-- every single-ended controlled-impedance SMD launch tapers between the actual path-crossing land span and nominal width, including wider lands, bends inside the pad, full flat-face collars on rectangular and oval pads, and via-fed or branched nets
+- every single-ended controlled-impedance SMD launch tapers between the pad-boundary chord available at its actual path crossing and nominal width, including wider lands, bends inside the pad, full flat-face collars on rectangular and oval pads, and via-fed or branched nets, without diagonal centre-chord flares
 - a named saved layout made before automatic tapers reconciles only uncovered nominal-width launch runs, accepts no new routing-class DRC errors, persists the approved RF paths through ordinary autosave, and exposes each rejected taper as a clickable DRC error at the blocking clearance
 - a trace taper remains one logical swept path with compact edit handles while DRC lowers conservative private width-profile chords and folded offset rings lower to overlapping simple fabrication regions
 - solver RF geometry and taper proof survive saved-layout round trips

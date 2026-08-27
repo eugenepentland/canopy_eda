@@ -786,9 +786,10 @@ pub const scope_form_docs = blk: {
             "face over its nearest plane, stripline on an inner layer between two — on the optional " ++
             "1-based copper layer, or the first signal layer with a usable reference when omitted. " ++
             "Every routed SMD launch on a single-ended impedance class transitions between the " ++
-            "actual angle-aware land span and the nominal line over 1.2 trace widths; this local " ++
-            "taper applies to wider and narrower lands even when the net branches, changes sides, " ++
-            "or contains vias elsewhere. " ++
+            "pad-boundary chord available at its actual path crossing and the nominal line over 1.2 trace " ++
+            "widths; this local taper applies to wider and narrower lands even when the net branches, " ++
+            "changes sides, or contains vias elsewhere, without expanding a diagonal launch to the pad's " ++
+            "longer centre chord. " ++
             "For single-ended impedance classes, each routed through-via also gets a circular antipad " ++
             "solved from its actual pad/drill and the stack's finished thickness and thickness-weighted " ++
             "er, floored at the ordinary copper clearance, and applied consistently to every foreign " ++

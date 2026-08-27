@@ -138,6 +138,12 @@ function load(names, globals = {}) {
     assert(!g.drawPadFrame({ i: 0, pd: { x: 0, y: 0, w: 1, h: 0.6, shape } }).portalOk, `${shape} must not expose a flat portal`);
   assert(!g.drawPadFrame({ i: 0, pd: { x: 0, y: 0, w: 1, h: 0.6, shape: "rect", poly: [[0, 0], [1, 0], [0, 1]] } }).portalOk,
     "a custom polygon must not borrow the rectangular portal model");
+
+  const square = { i: 0, pd: { x: 0, y: 0, w: 0.5, h: 0.5, shape: "roundrect" } };
+  const diagonal = g.drawPathPadLaunch([{ x1: 0, y1: 0, x2: 1, y2: 1 }], square, true);
+  assert.equal(diagonal.span, 0, "a 45-degree square-pad exit must not acquire the sqrt(2) centre-chord flare");
+  const horizontal = g.drawPathPadLaunch([{ x1: 0, y1: 0, x2: 1, y2: 0 }], square, true);
+  assert(Math.abs(horizontal.span - 0.5) < 1e-9, "an orthogonal square-pad exit must retain its full face width");
 }
 
 {

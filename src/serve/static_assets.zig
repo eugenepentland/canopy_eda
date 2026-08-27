@@ -1050,7 +1050,7 @@ test "PCB editor automatically lowers every local controlled-impedance pad taper
         "function drawRfTaperPlan",                                  "window.PCBDrawRfTaperPlan",              "vias, opposite-side terminals",                        "function drawTrackEndDirection",
         "function rfFallbackRegions",                                "function rfRingFolded",                  "overlapping simple segment",                           "polys=rfFallbackRegions(pts,ws,poly)",
         "function rfCleanSamples",                                   "function rfCompactRing",                 "ws[last]=Math.max(ws[last],w)",                        "clean.pts.length<2",
-        "function drawPathPadLaunch",                                "window.PCBDrawPathPadLaunch",            "first box-boundary",                                   "span:2*f.half(-wy,wx)",
+        "function drawPathPadLaunch",                                "window.PCBDrawPathPadLaunch",            "first box-boundary",                                   "span:f.spanAt(ex,ey,-wy,wx)",
         "function drawPadPortal",                                    "function drawTaperPortalPath",           "function drawRfMissingPortalGroups",                   "drawTaperPortalProbes(paths)",
         "pd.shape===\"roundrect\"||pd.shape===\"oval\"",             "ctx.arcTo(hw,-hh,hw,-hh+rr,rr)",         "acceptedBundles++",                                    "track_ids:(ownerIds||[]).slice()",
         "a.net||\"\"",                                               "planned.push(collar)",                   "PCB.rf_paths||[]).length",                             "drawSamePortalPath",
