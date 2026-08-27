@@ -1,3 +1,3 @@
 # guardian-snapshot v2
-cohort=fc794be108e11c34
-score_pct=49
+cohort=7f3063749a73a0d8
+score_pct=48
