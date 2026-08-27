@@ -46,6 +46,22 @@ test "clearing schematic net search removes its highlight" {
     try std.testing.expect(std.mem.indexOf(u8, js, "searchInput.value = '';\n      clearHighlight();\n      closeResults();") != null);
 }
 
+// spec: Web Server - the schematic layout's deep semantic-zoom layer reuses existing inset SVGs through references instead of cloning their full DOM during a wheel gesture
+test "semantic zoom reuses schematic insets without cloning their DOM" {
+    const js = schematic_viewer_js_asset;
+    try std.testing.expect(std.mem.indexOf(u8, js, "function deepSourceId(svg)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "document.createElementNS(NS, 'use')") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "cloneNode(true)") == null);
+}
+
+test "semantic zoom defers vector detail until the wheel gesture settles" {
+    const js = schematic_viewer_js_asset;
+    try std.testing.expect(std.mem.indexOf(u8, js, "function beginWheelZoom()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "svg.classList.add('dg-zooming')") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "svg.classList.remove('dg-zooming')") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "beginWheelZoom();\n      zoomAt(") != null);
+}
+
 // spec: Web Server - A standalone module opened through the schematic page exposes direct pin-net editing and deletion for source-backed parts
 test "standalone module schematic exposes structured part edits" {
     const js = schematic_viewer_js_asset;

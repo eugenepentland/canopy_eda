@@ -57,6 +57,11 @@
   var field = null;      // last successful /api/thermal-field payload
   var raster = null;     // that field's cells as a cols x rows offscreen canvas
   var seq = 0;           // request generation; a stale reply is dropped
+  // The parent and performance harness need to distinguish "message applied"
+  // from "those pixels were painted". Keep the last view values that reached
+  // the end of the overlay pass; this avoids animation-frame guesses for the
+  // display-only controls and is useful to same-origin diagnostics as well.
+  var paintedView = { revision: 0, labels: false, opacity: view.opacity, side: view.side, ambient: null, scenario: null };
 
   // ── Colour ramp ───────────────────────────────────────────────────────
   // The stops render_thermal_png.zig paints with, so the PNG export and the
@@ -277,6 +282,15 @@
 
     if (view.labels || view.selectedRef) paintLabels(ctx);
     ctx.restore();
+    paintedView.revision++;
+    paintedView.labels = view.labels;
+    paintedView.opacity = view.opacity;
+    paintedView.side = view.side;
+    // Publish the payload actually drawn, not the requested view. An unrelated
+    // repaint can happen while the replacement field request is still in
+    // flight, and must not claim those old pixels represent the new ambient.
+    paintedView.ambient = field.ambient_c;
+    paintedView.scenario = field.scenario;
   }
 
   // One chip on each part the screen has a junction temperature for. Parts the
@@ -419,7 +433,17 @@
   // exact absolute range behind its colours.
   window.PCBThermal = {
     ramp: rampCss, reload: load, setScale: setScale, view: view,
-    scale: function () { return { minC: view.scaleMinC, maxC: view.scaleMaxC }; }
+    scale: function () { return { minC: view.scaleMinC, maxC: view.scaleMaxC }; },
+    painted: function () {
+      return {
+        revision: paintedView.revision,
+        labels: paintedView.labels,
+        opacity: paintedView.opacity,
+        side: paintedView.side,
+        ambient: paintedView.ambient,
+        scenario: paintedView.scenario
+      };
+    }
   };
   load();
 })();

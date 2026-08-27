@@ -3419,6 +3419,15 @@
   // resets to fit. Drives each diagram SVG's viewBox so it stays crisp at any
   // zoom. A drag past a small threshold suppresses the follow-up click so the
   // node links keep working on a plain click.
+  var deepSourceSerial = 0;
+  function deepSourceId(svg) {
+    if (svg.id) return svg.id;
+    var id;
+    do { id = 'sch-deep-source-' + (++deepSourceSerial); }
+    while (document.getElementById(id));
+    svg.id = id;
+    return id;
+  }
   function setupDiagramZoom(svg) {
     var vb = (svg.getAttribute('viewBox') || '').trim().split(/[ ,]+/).map(Number);
     if (vb.length !== 4 || vb.some(isNaN)) return;
@@ -3452,7 +3461,10 @@
     // <svg> scaled to the node's box, so zooming past the detail level turns
     // each block into a window onto its actual circuit. Built lazily on the
     // first entry into LOD 2; pointer-events stay off so clicks fall through
-    // to the node link (jump to the full card below).
+    // to the node link (jump to the full card below). Reference the page's
+    // existing insets with <use> instead of deep-cloning thousands of SVG
+    // elements on the wheel event. Besides producing the same pixels, this
+    // keeps the LOD transition below a frame instead of blocking zoom.
     function buildDeepLayer() {
       deepBuilt = true;
       var NS = 'http://www.w3.org/2000/svg';
@@ -3477,7 +3489,7 @@
         insets.forEach(function (s) {
           var vb = (s.getAttribute('viewBox') || '').split(/[ ,]+/).map(Number);
           if (vb.length !== 4 || vb.some(isNaN)) return;
-          parts.push({ el: s, w: vb[2], h: vb[3] });
+          parts.push({ id: deepSourceId(s), w: vb[2], h: vb[3] });
         });
         if (!parts.length) return;
         // Pack the card's insets into the row count that wastes the least
@@ -3522,9 +3534,8 @@
         best.grid.forEach(function (g) {
           var off = (W - g.w) / 2;
           g.row.forEach(function (p) {
-            var clone = p.el.cloneNode(true);
-            clone.removeAttribute('class');
-            clone.removeAttribute('id');
+            var clone = document.createElementNS(NS, 'use');
+            clone.setAttribute('href', '#' + p.id);
             clone.setAttribute('x', off);
             clone.setAttribute('y', rowY + (g.h - p.h) / 2);
             clone.setAttribute('width', p.w);
@@ -3558,8 +3569,25 @@
       apply();
     }
 
+    // Semantic LOD 2 contains dozens of referenced pin-level schematics. Keep
+    // the light block layer visible while a wheel sequence is active, then
+    // restore the crisp vector detail once the gesture settles. Otherwise
+    // every viewBox update rerasterizes both layers (plus their cross-fades),
+    // making a continuous zoom alternate between two- and three-frame steps.
+    var wheelSettleTimer = null;
+    function beginWheelZoom() {
+      if (!hasLod) return;
+      if (wheelSettleTimer) clearTimeout(wheelSettleTimer);
+      svg.classList.add('dg-zooming');
+      wheelSettleTimer = setTimeout(function () {
+        wheelSettleTimer = null;
+        svg.classList.remove('dg-zooming');
+      }, 140);
+    }
+
     svg.addEventListener('wheel', function (e) {
       e.preventDefault();
+      beginWheelZoom();
       zoomAt(e.deltaY < 0 ? 0.85 : 1 / 0.85, e.clientX, e.clientY);
     }, { passive: false });
 

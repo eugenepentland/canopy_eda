@@ -145,7 +145,10 @@ The `power_no_cap` violation kind exists in the enum but isn't currently invoked
 
 ### Design-review report
 
-Available as HTML at `GET /review/:name` or JSON at `GET /api/review/:name`. Sections:
+Generated as a Markdown report plus CSV attachments by `netlisp export-review`,
+or downloaded as the same review package from `GET /api/export-review/:name`.
+The former interactive review page and review JSON endpoint are no longer
+served. Report sections include:
 
 - **Summary banner** — overall pass/warn/fail status plus roll-up counts (sections, instances, nets, violations, assertions, requirement coverage, BOM MPN coverage).
 - **Power-budget table** — per-net current sums, total dissipation, sequencing order across sub-blocks.
@@ -171,9 +174,9 @@ Available as HTML at `GET /review/:name` or JSON at `GET /api/review/:name`. Sec
 
 Default port 7050. Dev URL: `http://localhost:7050`. Production URL: `https://co-circuit.eugenepentland.dev`.
 
-**Pages.** `/` (design list), `/schematics/:name` (schematic viewer), `/review/:name` (review viewer), `/library` (library upload), `/pdf-view/:filename` (datasheet viewer). Sign-in and account management are not netlisp pages — the navbar Account link points at ward's admin portal (`https://ward.eugenepentland.dev/admin`).
+**Pages.** `/` (design list), `/schematics/:name` and `/modules/:name` (board and module schematics), `/pcb-layout/:name` (2D and `?view=3d`), `/assembly-debug/:name`, `/thermal/:name`, `/library`, `/library/footprint/:name`, `/library/3d/:footprint`, `/route-review`, and `/pdf-view/:filename`. `/modules` and the retired `/pcb-route-lab/:name` redirect into those current surfaces. The datasheet viewer loads its pinned PDF.js runtime and worker from the embedded same-origin static registry, so it has no CDN dependency. Sign-in and account management are not netlisp pages — the navbar Account link points at ward's admin portal (`https://ward.eugenepentland.dev/admin`).
 
-**Read APIs.** `/api/designs`, `/api/scene-graph/:name`, `/api/review/:name`, `/api/erc/:name`, `/api/version/:name`, `/api/pinout/:name`, `/api/footprint/:name`, `/api/datasheets`, `/datasheets/:filename`.
+**Read APIs.** `/api/designs`, `/api/scene-graph/:name`, `/api/erc/:name`, `/api/version/:name`, `/api/pinout/:name`, `/api/footprint/:name`, `/api/datasheets`, `/datasheets/:filename`.
 
 **Mutation APIs.** `POST /api/push/:name` (rebuild + bump version), `POST /api/edit-value/:name` (edit a component value in-place), `POST /api/section-note/:name/{add,remove}` (annotate a section), `POST /api/component-datasheet/:component/{add,remove}` (link/unlink datasheet), `POST /api/upload-datasheet`, `POST /api/upload-symbol`, `POST /api/upload-footprint`.
 
@@ -324,7 +327,6 @@ has the board open:
 | GET | `/` | Design list. |
 | GET | `/style.css` | UI stylesheet. |
 | GET | `/schematics/:name` | Schematic viewer page. |
-| GET | `/review/:name` | Review-doc HTML page. |
 | GET | `/library` | Library upload page. |
 | POST | `/api/library-courtyard/:name` | Rewrite a library footprint's rectangular courtyard from the Library editor. |
 | GET | `/pdf-view/:filename` | Datasheet PDF viewer. |
@@ -340,7 +342,6 @@ netlisp serves no login/account/authorization-server routes — those all live i
 | GET | `/api/designs` | List all designs. |
 | GET | `/api/scene-graph/:name` | Schematic scene-graph JSON. |
 | GET | `/api/version/:name` | Per-design version counter (live-update poll). |
-| GET | `/api/review/:name` | Review-doc JSON. |
 | GET | `/api/erc/:name` | ERC violations JSON. |
 | GET | `/api/pinout/:name` | Component pinout JSON (for the schematic viewer). |
 | GET | `/api/footprint/:name` | Footprint SVG preview. |
@@ -388,7 +389,7 @@ Invoke these with `netlisp tool <name> --args '<json object>'`. Run
 | `list_free_pins` | Unconnected pins on a design. |
 | `get_net` | Pin list and voltage for a named net. |
 | `run_checks` | Execute ERC; return violations. |
-| `generate_review` | Build the full review document (matches `/api/review/:name`). |
+| `generate_review` | Build the full review document used by `export-review` and `/api/export-review/:name`. |
 | `read_file` | Read a project file. |
 | `write_file` | Create/replace a file. |
 | `edit_file` | Targeted edits (S-expression mutations). |

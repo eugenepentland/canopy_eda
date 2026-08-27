@@ -23,17 +23,35 @@ PROJECT_DIR="${EDA_PERF_PROJECT_DIR:-projects/designs}"
 # stdin: "<local ref> <local sha> <remote ref> <remote sha>" per ref being
 # pushed. Gate only when some ref lands on the remote's main (deletes exempt).
 gate_main=0
+pushed_main_sha=""
 zero="0000000000000000000000000000000000000000"
 while read -r _local_ref local_sha remote_ref _remote_sha; do
   [ "$remote_ref" = "refs/heads/main" ] || continue
   [ "$local_sha" = "$zero" ] && continue
   gate_main=1
+  pushed_main_sha="$local_sha"
 done
 [ "$gate_main" = 1 ] || exit 0
 
 if [ "${EDA_PERF_SKIP:-0}" = "1" ]; then
   echo "pre-push: EDA_PERF_SKIP=1 — page-load latency gate SKIPPED for this push" >&2
   exit 0
+fi
+head_sha="$(git rev-parse HEAD)"
+if [ "$head_sha" != "$pushed_main_sha" ]; then
+  echo "pre-push: REFUSED — remote main must be gated from the checked-out HEAD ($head_sha), not $pushed_main_sha" >&2
+  exit 1
+fi
+if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
+  echo "pre-push: REFUSED — the EDA checkout is dirty; commit or isolate changes before measuring the pushed main commit" >&2
+  exit 1
+fi
+if [ ! -d "$PROJECT_DIR/src" ]; then
+  common_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+  shared_checkout="${common_dir%/.git}"
+  if [ -n "$common_dir" ] && [ -d "$shared_checkout/projects/designs/src" ]; then
+    PROJECT_DIR="$shared_checkout/projects/designs"
+  fi
 fi
 if [ ! -d "$PROJECT_DIR/src" ]; then
   echo "pre-push: designs repo not at $PROJECT_DIR — page-load latency gate skipped (nothing to measure here)" >&2
@@ -46,8 +64,8 @@ if [ ! -f "$BASELINE" ]; then
   exit 1
 fi
 
-echo "pre-push: PCB/assembly/thermal/schematic latency gate for main (bench-page vs $BASELINE) — queueing behind the machine gate lock…"
-bash scripts/perf_gate.sh
+echo "pre-push: server-page and browser interaction performance gates for main — queueing behind the machine gate lock…"
+EDA_PERF_PROJECT_DIR="$PROJECT_DIR" bash scripts/perf_gate.sh
 status=$?
 if [ "$status" -ne 0 ]; then
   echo "pre-push: REFUSED — page latency regressed vs $BASELINE (see the gate report above)." >&2

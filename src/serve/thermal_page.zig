@@ -1557,6 +1557,11 @@ test "thermal labels reveal only the clicked IC by default" {
         "if (view.labels || view.selectedRef) paintLabels(ctx)",
         "if (!view.labels && row.ref !== view.selectedRef) return",
         "typeof d.selectedRef === \"string\"",
+        "painted: function ()",
+        "paintedView.labels = view.labels",
+        "paintedView.opacity = view.opacity",
+        "paintedView.ambient = field.ambient_c",
+        "paintedView.scenario = field.scenario",
     }));
     const client = @embedFile("assets/thermal_page.js");
     try testing.expect(containsAll(client, &.{

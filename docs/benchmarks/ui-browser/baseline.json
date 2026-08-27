@@ -1,0 +1,995 @@
+{
+  "schema": 1,
+  "recorded_at": "2026-08-27T08:03:12.555Z",
+  "reference": {
+    "schema": 1,
+    "browser": "Chromium 151.0.7922.34",
+    "viewport": {
+      "width": 1600,
+      "height": 900,
+      "dpr": 1
+    },
+    "designs": {
+      "commit": "4f85d42c35ea4009a9b0606b9341c8fb8da2172c",
+      "fingerprint": "4f85d42c35ea4009a9b0606b9341c8fb8da2172c:b656f483ea4fb82ae1fb74293c8818554314dc02ca1c6df8d2a17b0e8fdba0e4:fd43637e50974245b578247c06b8b0847ec11defbdc2ab753aec6af2c57ae66c:d0ec5eabe155a3321ee5b0619206caff43977e693e5a142e4ce5aa83808969a7",
+      "dirty": false,
+      "source": "git-archive+workload-bundles"
+    },
+    "repetitions": 3,
+    "surfaces": {
+      "home": {
+        "label": "Designs home",
+        "path": "/",
+        "repetitions": 3,
+        "navigation": {
+          "response_p50_ms": 8.5,
+          "response_p95_ms": 16,
+          "response_max_ms": 16,
+          "dom_content_loaded_p50_ms": 16.3,
+          "dom_content_loaded_p95_ms": 25.5,
+          "dom_content_loaded_max_ms": 25.5,
+          "load_p50_ms": 21.1,
+          "load_p95_ms": 29.9,
+          "load_max_ms": 29.9,
+          "ready_p50_ms": 85.7,
+          "ready_p95_ms": 99.8,
+          "ready_max_ms": 99.8
+        },
+        "actions": {
+          "search": {
+            "kind": "local",
+            "p50_ms": 43.1,
+            "p95_ms": 58.1,
+            "max_ms": 58.1
+          },
+          "filter": {
+            "kind": "local",
+            "p50_ms": 75.4,
+            "p95_ms": 80.3,
+            "max_ms": 80.3
+          },
+          "new_design_dialog": {
+            "kind": "local",
+            "p50_ms": 62.8,
+            "p95_ms": 78.3,
+            "max_ms": 78.3
+          },
+          "progress_hydration": {
+            "kind": "async",
+            "p50_ms": 25.5,
+            "p95_ms": 18345,
+            "max_ms": 18345
+          }
+        },
+        "long_tasks": {
+          "median_count": 0,
+          "worst_count": 0,
+          "median_total_ms": 0,
+          "max_ms": 0
+        }
+      },
+      "schematic": {
+        "label": "Board schematic",
+        "path": "/schematics/barracuda-base",
+        "repetitions": 3,
+        "navigation": {
+          "response_p50_ms": 5.3,
+          "response_p95_ms": 131.8,
+          "response_max_ms": 131.8,
+          "dom_content_loaded_p50_ms": 94.3,
+          "dom_content_loaded_p95_ms": 221.4,
+          "dom_content_loaded_max_ms": 221.4,
+          "load_p50_ms": 94.6,
+          "load_p95_ms": 221.8,
+          "load_max_ms": 221.8,
+          "ready_p50_ms": 145.4,
+          "ready_p95_ms": 281.41,
+          "ready_max_ms": 281.41
+        },
+        "actions": {
+          "search": {
+            "kind": "local",
+            "p50_ms": 46.9,
+            "p95_ms": 47.6,
+            "max_ms": 47.6
+          },
+          "diagram_tab": {
+            "kind": "local",
+            "p50_ms": 94.2,
+            "p95_ms": 97.6,
+            "max_ms": 97.6
+          },
+          "source_editor": {
+            "kind": "async",
+            "p50_ms": 95,
+            "p95_ms": 95.2,
+            "max_ms": 95.2
+          },
+          "erc": {
+            "kind": "async",
+            "p50_ms": 180.5,
+            "p95_ms": 180.8,
+            "max_ms": 180.8
+          },
+          "pan": {
+            "kind": "frame",
+            "median_frames": 38,
+            "p50_ms": 16.7,
+            "p95_ms": 16.8,
+            "worst_p95_ms": 16.8,
+            "max_ms": 16.8
+          },
+          "zoom": {
+            "kind": "frame",
+            "median_frames": 32,
+            "p50_ms": 16.7,
+            "p95_ms": 33.3,
+            "worst_p95_ms": 33.3,
+            "max_ms": 50
+          },
+          "view_switch": {
+            "kind": "async",
+            "p50_ms": 166.89,
+            "p95_ms": 301.13,
+            "max_ms": 301.13
+          }
+        },
+        "long_tasks": {
+          "median_count": 0,
+          "worst_count": 0,
+          "median_total_ms": 0,
+          "max_ms": 0
+        }
+      },
+      "module": {
+        "label": "Standalone module schematic",
+        "path": "/modules/lt3045",
+        "repetitions": 3,
+        "navigation": {
+          "response_p50_ms": 5.1,
+          "response_p95_ms": 6.1,
+          "response_max_ms": 6.1,
+          "dom_content_loaded_p50_ms": 35.7,
+          "dom_content_loaded_p95_ms": 38.9,
+          "dom_content_loaded_max_ms": 38.9,
+          "load_p50_ms": 35.8,
+          "load_p95_ms": 39.1,
+          "load_max_ms": 39.1,
+          "ready_p50_ms": 81.51,
+          "ready_p95_ms": 94.05,
+          "ready_max_ms": 94.05
+        },
+        "actions": {
+          "search": {
+            "kind": "local",
+            "p50_ms": 46.8,
+            "p95_ms": 60.3,
+            "max_ms": 60.3
+          },
+          "detail_pick": {
+            "kind": "local",
+            "p50_ms": 71.7,
+            "p95_ms": 86.4,
+            "max_ms": 86.4
+          },
+          "source_editor": {
+            "kind": "async",
+            "p50_ms": 95.3,
+            "p95_ms": 96.4,
+            "max_ms": 96.4
+          },
+          "erc_feedback": {
+            "kind": "async",
+            "p50_ms": 97.2,
+            "p95_ms": 97.8,
+            "max_ms": 97.8
+          }
+        },
+        "long_tasks": {
+          "median_count": 0,
+          "worst_count": 0,
+          "median_total_ms": 0,
+          "max_ms": 0
+        }
+      },
+      "pcb_2d": {
+        "label": "PCB layout 2D",
+        "path": "/pcb-layout/barracuda-base?gpu=0",
+        "repetitions": 3,
+        "navigation": {
+          "response_p50_ms": 210.9,
+          "response_p95_ms": 271.7,
+          "response_max_ms": 271.7,
+          "dom_content_loaded_p50_ms": 315.4,
+          "dom_content_loaded_p95_ms": 494.3,
+          "dom_content_loaded_max_ms": 494.3,
+          "load_p50_ms": 366.8,
+          "load_p95_ms": 494.5,
+          "load_max_ms": 494.5,
+          "ready_p50_ms": 462.85,
+          "ready_p95_ms": 543.27,
+          "ready_max_ms": 543.27
+        },
+        "actions": {
+          "find": {
+            "kind": "local",
+            "p50_ms": 47.5,
+            "p95_ms": 48,
+            "max_ms": 48
+          },
+          "side_panel": {
+            "kind": "local",
+            "p50_ms": 80.2,
+            "p95_ms": 81.2,
+            "max_ms": 81.2
+          },
+          "appearance": {
+            "kind": "local",
+            "p50_ms": 73.4,
+            "p95_ms": 75.5,
+            "max_ms": 75.5
+          },
+          "layout_load": {
+            "kind": "async",
+            "p50_ms": 457.07,
+            "p95_ms": 504.86,
+            "max_ms": 504.86
+          },
+          "layout_save": {
+            "kind": "async",
+            "p50_ms": 325.9,
+            "p95_ms": 342.4,
+            "max_ms": 342.4
+          },
+          "drc_navigation": {
+            "kind": "local",
+            "p50_ms": 58.6,
+            "p95_ms": 59.5,
+            "max_ms": 59.5
+          },
+          "trace_route_cancel": {
+            "kind": "local",
+            "p50_ms": 190.8,
+            "p95_ms": 197.5,
+            "max_ms": 197.5
+          },
+          "via_place_undo": {
+            "kind": "local",
+            "p50_ms": 101.5,
+            "p95_ms": 104.5,
+            "max_ms": 104.5
+          },
+          "pour_zone_cancel": {
+            "kind": "local",
+            "p50_ms": 85.9,
+            "p95_ms": 92.8,
+            "max_ms": 92.8
+          },
+          "pour_refill": {
+            "kind": "async",
+            "p50_ms": 1643.8,
+            "p95_ms": 1676.82,
+            "max_ms": 1676.82
+          },
+          "zoom_controls": {
+            "kind": "local",
+            "p50_ms": 59.9,
+            "p95_ms": 60.9,
+            "max_ms": 60.9
+          },
+          "part_drag_undo": {
+            "kind": "frame",
+            "median_frames": 40,
+            "p50_ms": 16.7,
+            "p95_ms": 16.8,
+            "worst_p95_ms": 16.8,
+            "max_ms": 33.4
+          },
+          "pan": {
+            "kind": "frame",
+            "median_frames": 38,
+            "p50_ms": 16.7,
+            "p95_ms": 16.8,
+            "worst_p95_ms": 16.8,
+            "max_ms": 16.8
+          },
+          "zoom": {
+            "kind": "frame",
+            "median_frames": 30,
+            "p50_ms": 16.7,
+            "p95_ms": 16.8,
+            "worst_p95_ms": 16.8,
+            "max_ms": 16.8
+          }
+        },
+        "long_tasks": {
+          "median_count": 0,
+          "worst_count": 1,
+          "median_total_ms": 0,
+          "max_ms": 51
+        }
+      },
+      "pcb_3d": {
+        "label": "PCB layout 3D",
+        "path": "/pcb-layout/barracuda-base?view=3d&gpu=0",
+        "repetitions": 3,
+        "navigation": {
+          "response_p50_ms": 8.1,
+          "response_p95_ms": 208.2,
+          "response_max_ms": 208.2,
+          "dom_content_loaded_p50_ms": 157.7,
+          "dom_content_loaded_p95_ms": 382.6,
+          "dom_content_loaded_max_ms": 382.6,
+          "load_p50_ms": 575.9,
+          "load_p95_ms": 800.3,
+          "load_max_ms": 800.3,
+          "ready_p50_ms": 608.22,
+          "ready_p95_ms": 833.06,
+          "ready_max_ms": 833.06,
+          "full_scene_ready_p50_ms": 11698.91,
+          "full_scene_ready_p95_ms": 11948.85,
+          "full_scene_ready_max_ms": 11948.85
+        },
+        "actions": {
+          "streaming_orbit": {
+            "kind": "frame",
+            "median_frames": 39,
+            "p50_ms": 16.7,
+            "p95_ms": 16.7,
+            "worst_p95_ms": 16.7,
+            "max_ms": 16.8
+          },
+          "streaming_zoom": {
+            "kind": "frame",
+            "median_frames": 36,
+            "p50_ms": 16.7,
+            "p95_ms": 16.7,
+            "worst_p95_ms": 16.7,
+            "max_ms": 16.8
+          },
+          "preset": {
+            "kind": "local",
+            "p50_ms": 80.5,
+            "p95_ms": 81.1,
+            "max_ms": 81.1
+          },
+          "visibility": {
+            "kind": "local",
+            "p50_ms": 80.9,
+            "p95_ms": 85.2,
+            "max_ms": 85.2
+          },
+          "orbit": {
+            "kind": "frame",
+            "median_frames": 113,
+            "p50_ms": 16.7,
+            "p95_ms": 33.4,
+            "worst_p95_ms": 33.4,
+            "max_ms": 33.4
+          },
+          "zoom": {
+            "kind": "frame",
+            "median_frames": 31,
+            "p50_ms": 16.7,
+            "p95_ms": 33.4,
+            "worst_p95_ms": 33.4,
+            "max_ms": 33.4
+          }
+        },
+        "scene": {
+          "model_instances": 192
+        },
+        "long_tasks": {
+          "median_count": 3,
+          "worst_count": 4,
+          "median_total_ms": 407,
+          "max_ms": 219
+        }
+      },
+      "thermal": {
+        "label": "Thermal review",
+        "path": "/thermal/barracuda-base",
+        "repetitions": 3,
+        "navigation": {
+          "response_p50_ms": 46,
+          "response_p95_ms": 1134,
+          "response_max_ms": 1134,
+          "dom_content_loaded_p50_ms": 79.7,
+          "dom_content_loaded_p95_ms": 1162.4,
+          "dom_content_loaded_max_ms": 1162.4,
+          "load_p50_ms": 168.7,
+          "load_p95_ms": 1348.5,
+          "load_max_ms": 1348.5,
+          "ready_p50_ms": 322.53,
+          "ready_p95_ms": 1433.76,
+          "ready_max_ms": 1433.76
+        },
+        "actions": {
+          "scenario": {
+            "kind": "async",
+            "p50_ms": 111.6,
+            "p95_ms": 121.2,
+            "max_ms": 121.2
+          },
+          "ambient": {
+            "kind": "async",
+            "p50_ms": 415.8,
+            "p95_ms": 417.4,
+            "max_ms": 417.4
+          },
+          "face": {
+            "kind": "local",
+            "p50_ms": 95.6,
+            "p95_ms": 100,
+            "max_ms": 100
+          },
+          "labels": {
+            "kind": "local",
+            "p50_ms": 122.1,
+            "p95_ms": 129.4,
+            "max_ms": 129.4
+          },
+          "opacity": {
+            "kind": "local",
+            "p50_ms": 66.8,
+            "p95_ms": 70.7,
+            "max_ms": 70.7
+          },
+          "pan": {
+            "kind": "frame",
+            "median_frames": 38,
+            "p50_ms": 16.7,
+            "p95_ms": 16.7,
+            "worst_p95_ms": 16.7,
+            "max_ms": 16.8
+          },
+          "zoom": {
+            "kind": "frame",
+            "median_frames": 30,
+            "p50_ms": 16.7,
+            "p95_ms": 16.8,
+            "worst_p95_ms": 16.8,
+            "max_ms": 16.8
+          }
+        },
+        "long_tasks": {
+          "median_count": 1,
+          "worst_count": 1,
+          "median_total_ms": 55,
+          "max_ms": 55
+        }
+      },
+      "library": {
+        "label": "Parts library",
+        "path": "/library",
+        "repetitions": 3,
+        "navigation": {
+          "response_p50_ms": 19.8,
+          "response_p95_ms": 51.9,
+          "response_max_ms": 51.9,
+          "dom_content_loaded_p50_ms": 36.6,
+          "dom_content_loaded_p95_ms": 68.7,
+          "dom_content_loaded_max_ms": 68.7,
+          "load_p50_ms": 41.2,
+          "load_p95_ms": 74.4,
+          "load_max_ms": 74.4,
+          "ready_p50_ms": 104.93,
+          "ready_p95_ms": 140.61,
+          "ready_max_ms": 140.61
+        },
+        "actions": {
+          "search": {
+            "kind": "local",
+            "p50_ms": 46.3,
+            "p95_ms": 48.2,
+            "max_ms": 48.2
+          },
+          "pagination": {
+            "kind": "local",
+            "p50_ms": 92.2,
+            "p95_ms": 93.3,
+            "max_ms": 93.3
+          },
+          "footprint_preview": {
+            "kind": "async",
+            "p50_ms": 99.3,
+            "p95_ms": 100.9,
+            "max_ms": 100.9
+          },
+          "courtyard_editor": {
+            "kind": "local",
+            "p50_ms": 78.3,
+            "p95_ms": 79.3,
+            "max_ms": 79.3
+          }
+        },
+        "long_tasks": {
+          "median_count": 0,
+          "worst_count": 0,
+          "median_total_ms": 0,
+          "max_ms": 0
+        }
+      },
+      "footprint_editor": {
+        "label": "Footprint editor",
+        "path": "/library/footprint/qfn40p1000x1000x90-81n-d",
+        "repetitions": 3,
+        "navigation": {
+          "response_p50_ms": 3.7,
+          "response_p95_ms": 3.9,
+          "response_max_ms": 3.9,
+          "dom_content_loaded_p50_ms": 30.1,
+          "dom_content_loaded_p95_ms": 30.8,
+          "dom_content_loaded_max_ms": 30.8,
+          "load_p50_ms": 30.2,
+          "load_p95_ms": 30.8,
+          "load_max_ms": 30.8,
+          "ready_p50_ms": 71.43,
+          "ready_p95_ms": 74.1,
+          "ready_max_ms": 74.1
+        },
+        "actions": {
+          "select_pad": {
+            "kind": "local",
+            "p50_ms": 79.3,
+            "p95_ms": 79.5,
+            "max_ms": 79.5
+          },
+          "pad_drag_undo": {
+            "kind": "frame",
+            "median_frames": 32,
+            "p50_ms": 16.7,
+            "p95_ms": 16.8,
+            "worst_p95_ms": 16.8,
+            "max_ms": 16.8
+          },
+          "inspector_edit_undo": {
+            "kind": "local",
+            "p50_ms": 60.9,
+            "p95_ms": 61.2,
+            "max_ms": 61.2
+          },
+          "duplicate_undo": {
+            "kind": "local",
+            "p50_ms": 126.9,
+            "p95_ms": 127.2,
+            "max_ms": 127.2
+          },
+          "add_undo": {
+            "kind": "local",
+            "p50_ms": 125.8,
+            "p95_ms": 126.9,
+            "max_ms": 126.9
+          },
+          "grid_units": {
+            "kind": "local",
+            "p50_ms": 40.4,
+            "p95_ms": 43.2,
+            "max_ms": 43.2
+          },
+          "pan": {
+            "kind": "frame",
+            "median_frames": 38,
+            "p50_ms": 16.7,
+            "p95_ms": 16.8,
+            "worst_p95_ms": 16.8,
+            "max_ms": 16.8
+          },
+          "zoom": {
+            "kind": "frame",
+            "median_frames": 30,
+            "p50_ms": 16.7,
+            "p95_ms": 16.8,
+            "worst_p95_ms": 16.8,
+            "max_ms": 16.8
+          }
+        },
+        "long_tasks": {
+          "median_count": 0,
+          "worst_count": 0,
+          "median_total_ms": 0,
+          "max_ms": 0
+        }
+      },
+      "model_alignment_3d": {
+        "label": "Footprint 3D alignment",
+        "path": "/library/3d/mc3007",
+        "repetitions": 3,
+        "navigation": {
+          "response_p50_ms": 4.9,
+          "response_p95_ms": 5,
+          "response_max_ms": 5,
+          "dom_content_loaded_p50_ms": 160.7,
+          "dom_content_loaded_p95_ms": 162.2,
+          "dom_content_loaded_max_ms": 162.2,
+          "load_p50_ms": 160.7,
+          "load_p95_ms": 162.2,
+          "load_max_ms": 162.2,
+          "ready_p50_ms": 449.61,
+          "ready_p95_ms": 460.42,
+          "ready_max_ms": 460.42
+        },
+        "actions": {
+          "preset": {
+            "kind": "local",
+            "p50_ms": 61.1,
+            "p95_ms": 61.3,
+            "max_ms": 61.3
+          },
+          "rotation": {
+            "kind": "local",
+            "p50_ms": 33.4,
+            "p95_ms": 41.8,
+            "max_ms": 41.8
+          },
+          "offset": {
+            "kind": "local",
+            "p50_ms": 41.6,
+            "p95_ms": 59.8,
+            "max_ms": 59.8
+          },
+          "visibility": {
+            "kind": "local",
+            "p50_ms": 73.4,
+            "p95_ms": 75.3,
+            "max_ms": 75.3
+          },
+          "seat_mode": {
+            "kind": "local",
+            "p50_ms": 94.4,
+            "p95_ms": 96.5,
+            "max_ms": 96.5
+          },
+          "move_mode": {
+            "kind": "local",
+            "p50_ms": 78.4,
+            "p95_ms": 94.2,
+            "max_ms": 94.2
+          },
+          "save": {
+            "kind": "async",
+            "p50_ms": 77,
+            "p95_ms": 77.1,
+            "max_ms": 77.1
+          },
+          "reset": {
+            "kind": "local",
+            "p50_ms": 69.5,
+            "p95_ms": 86.7,
+            "max_ms": 86.7
+          },
+          "orbit": {
+            "kind": "frame",
+            "median_frames": 72,
+            "p50_ms": 16.7,
+            "p95_ms": 16.7,
+            "worst_p95_ms": 16.7,
+            "max_ms": 16.8
+          },
+          "zoom": {
+            "kind": "frame",
+            "median_frames": 31,
+            "p50_ms": 16.7,
+            "p95_ms": 16.8,
+            "worst_p95_ms": 16.8,
+            "max_ms": 33.3
+          }
+        },
+        "long_tasks": {
+          "median_count": 2,
+          "worst_count": 2,
+          "median_total_ms": 308,
+          "max_ms": 205
+        }
+      },
+      "route_review": {
+        "label": "Autoroute review",
+        "path": "/route-review",
+        "repetitions": 3,
+        "navigation": {
+          "response_p50_ms": 3.9,
+          "response_p95_ms": 4,
+          "response_max_ms": 4,
+          "dom_content_loaded_p50_ms": 20.5,
+          "dom_content_loaded_p95_ms": 22.6,
+          "dom_content_loaded_max_ms": 22.6,
+          "load_p50_ms": 20.6,
+          "load_p95_ms": 22.6,
+          "load_max_ms": 22.6,
+          "ready_p50_ms": 67.16,
+          "ready_p95_ms": 68.54,
+          "ready_max_ms": 68.54
+        },
+        "actions": {
+          "route": {
+            "kind": "async",
+            "p50_ms": 713,
+            "p95_ms": 714.6,
+            "max_ms": 714.6,
+            "workload": {
+              "parts": 20,
+              "nets": 8,
+              "zones": 2,
+              "decisions": 10,
+              "routed": 8,
+              "tracks": 58,
+              "vias": 18
+            }
+          },
+          "timeline": {
+            "kind": "local",
+            "p50_ms": 87.6,
+            "p95_ms": 89.1,
+            "max_ms": 89.1
+          },
+          "layers": {
+            "kind": "local",
+            "p50_ms": 86.4,
+            "p95_ms": 89.5,
+            "max_ms": 89.5
+          },
+          "pan": {
+            "kind": "frame",
+            "median_frames": 38,
+            "p50_ms": 16.7,
+            "p95_ms": 16.8,
+            "worst_p95_ms": 16.8,
+            "max_ms": 16.8
+          },
+          "zoom": {
+            "kind": "frame",
+            "median_frames": 30,
+            "p50_ms": 16.7,
+            "p95_ms": 16.8,
+            "worst_p95_ms": 16.8,
+            "max_ms": 16.8
+          }
+        },
+        "long_tasks": {
+          "median_count": 0,
+          "worst_count": 0,
+          "median_total_ms": 0,
+          "max_ms": 0
+        }
+      },
+      "pdf_viewer": {
+        "label": "PDF datasheet viewer",
+        "path": "/pdf-view/browser-perf.pdf?highlight=Canopy",
+        "repetitions": 3,
+        "navigation": {
+          "response_p50_ms": 3.4,
+          "response_p95_ms": 3.4,
+          "response_max_ms": 3.4,
+          "dom_content_loaded_p50_ms": 40.2,
+          "dom_content_loaded_p95_ms": 60.5,
+          "dom_content_loaded_max_ms": 60.5,
+          "load_p50_ms": 40.3,
+          "load_p95_ms": 60.6,
+          "load_max_ms": 60.6,
+          "ready_p50_ms": 201.84,
+          "ready_p95_ms": 331.78,
+          "ready_max_ms": 331.78
+        },
+        "actions": {
+          "lazy_scroll": {
+            "kind": "async",
+            "p50_ms": 125.8,
+            "p95_ms": 126.5,
+            "max_ms": 126.5
+          },
+          "next_match": {
+            "kind": "async",
+            "p50_ms": 495.4,
+            "p95_ms": 495.5,
+            "max_ms": 495.5
+          }
+        },
+        "long_tasks": {
+          "median_count": 0,
+          "worst_count": 0,
+          "median_total_ms": 0,
+          "max_ms": 0
+        }
+      }
+    },
+    "responses": {
+      "datasheet_response": {
+        "path": "/datasheets/browser-perf.pdf",
+        "response_ms": 5.47,
+        "bytes": 267327
+      },
+      "modules_redirect": {
+        "path": "/modules",
+        "response_ms": 2.11,
+        "bytes": 0
+      },
+      "route_lab_redirect": {
+        "path": "/pcb-route-lab/barracuda-base",
+        "response_ms": 1.19,
+        "bytes": 0
+      }
+    }
+  },
+  "budgets": {
+    "surfaces.home.navigation.ready_p95_ms": 750,
+    "surfaces.home.long_tasks.max_ms": 250,
+    "surfaces.home.long_tasks.median_total_ms": 1000,
+    "surfaces.home.actions.search.p95_ms": 150,
+    "surfaces.home.actions.search.max_ms": 250,
+    "surfaces.home.actions.filter.p95_ms": 150,
+    "surfaces.home.actions.filter.max_ms": 250,
+    "surfaces.home.actions.new_design_dialog.p95_ms": 150,
+    "surfaces.home.actions.new_design_dialog.max_ms": 250,
+    "surfaces.home.actions.progress_hydration.p95_ms": 25000,
+    "surfaces.home.actions.progress_hydration.max_ms": 25000,
+    "surfaces.schematic.navigation.ready_p95_ms": 2000,
+    "surfaces.schematic.long_tasks.max_ms": 250,
+    "surfaces.schematic.long_tasks.median_total_ms": 500,
+    "surfaces.schematic.actions.search.p95_ms": 150,
+    "surfaces.schematic.actions.search.max_ms": 250,
+    "surfaces.schematic.actions.diagram_tab.p95_ms": 150,
+    "surfaces.schematic.actions.diagram_tab.max_ms": 250,
+    "surfaces.schematic.actions.source_editor.p95_ms": 300,
+    "surfaces.schematic.actions.source_editor.max_ms": 500,
+    "surfaces.schematic.actions.erc.p95_ms": 300,
+    "surfaces.schematic.actions.erc.max_ms": 500,
+    "surfaces.schematic.actions.pan.worst_p95_ms": 35,
+    "surfaces.schematic.actions.pan.max_ms": 65,
+    "surfaces.schematic.actions.zoom.worst_p95_ms": 35,
+    "surfaces.schematic.actions.zoom.max_ms": 65,
+    "surfaces.schematic.actions.view_switch.p95_ms": 750,
+    "surfaces.schematic.actions.view_switch.max_ms": 1000,
+    "surfaces.module.navigation.ready_p95_ms": 750,
+    "surfaces.module.long_tasks.max_ms": 250,
+    "surfaces.module.long_tasks.median_total_ms": 500,
+    "surfaces.module.actions.search.p95_ms": 150,
+    "surfaces.module.actions.search.max_ms": 250,
+    "surfaces.module.actions.detail_pick.p95_ms": 150,
+    "surfaces.module.actions.detail_pick.max_ms": 250,
+    "surfaces.module.actions.source_editor.p95_ms": 300,
+    "surfaces.module.actions.source_editor.max_ms": 500,
+    "surfaces.module.actions.erc_feedback.p95_ms": 300,
+    "surfaces.module.actions.erc_feedback.max_ms": 500,
+    "surfaces.pcb_2d.navigation.ready_p95_ms": 2000,
+    "surfaces.pcb_2d.long_tasks.max_ms": 250,
+    "surfaces.pcb_2d.long_tasks.median_total_ms": 750,
+    "surfaces.pcb_2d.actions.find.p95_ms": 150,
+    "surfaces.pcb_2d.actions.find.max_ms": 250,
+    "surfaces.pcb_2d.actions.side_panel.p95_ms": 150,
+    "surfaces.pcb_2d.actions.side_panel.max_ms": 250,
+    "surfaces.pcb_2d.actions.appearance.p95_ms": 150,
+    "surfaces.pcb_2d.actions.appearance.max_ms": 250,
+    "surfaces.pcb_2d.actions.layout_load.p95_ms": 2000,
+    "surfaces.pcb_2d.actions.layout_load.max_ms": 2500,
+    "surfaces.pcb_2d.actions.layout_save.p95_ms": 750,
+    "surfaces.pcb_2d.actions.layout_save.max_ms": 1000,
+    "surfaces.pcb_2d.actions.drc_navigation.p95_ms": 150,
+    "surfaces.pcb_2d.actions.drc_navigation.max_ms": 250,
+    "surfaces.pcb_2d.actions.trace_route_cancel.p95_ms": 250,
+    "surfaces.pcb_2d.actions.trace_route_cancel.max_ms": 400,
+    "surfaces.pcb_2d.actions.via_place_undo.p95_ms": 150,
+    "surfaces.pcb_2d.actions.via_place_undo.max_ms": 250,
+    "surfaces.pcb_2d.actions.pour_zone_cancel.p95_ms": 150,
+    "surfaces.pcb_2d.actions.pour_zone_cancel.max_ms": 250,
+    "surfaces.pcb_2d.actions.pour_refill.p95_ms": 8000,
+    "surfaces.pcb_2d.actions.pour_refill.max_ms": 10000,
+    "surfaces.pcb_2d.actions.zoom_controls.p95_ms": 150,
+    "surfaces.pcb_2d.actions.zoom_controls.max_ms": 250,
+    "surfaces.pcb_2d.actions.part_drag_undo.worst_p95_ms": 35,
+    "surfaces.pcb_2d.actions.part_drag_undo.max_ms": 65,
+    "surfaces.pcb_2d.actions.pan.worst_p95_ms": 35,
+    "surfaces.pcb_2d.actions.pan.max_ms": 65,
+    "surfaces.pcb_2d.actions.zoom.worst_p95_ms": 35,
+    "surfaces.pcb_2d.actions.zoom.max_ms": 65,
+    "surfaces.pcb_3d.navigation.ready_p95_ms": 2000,
+    "surfaces.pcb_3d.long_tasks.max_ms": 300,
+    "surfaces.pcb_3d.long_tasks.median_total_ms": 1000,
+    "surfaces.pcb_3d.navigation.full_scene_ready_p95_ms": 20000,
+    "surfaces.pcb_3d.navigation.full_scene_ready_max_ms": 25000,
+    "surfaces.pcb_3d.actions.streaming_orbit.worst_p95_ms": 35,
+    "surfaces.pcb_3d.actions.streaming_orbit.max_ms": 65,
+    "surfaces.pcb_3d.actions.streaming_zoom.worst_p95_ms": 35,
+    "surfaces.pcb_3d.actions.streaming_zoom.max_ms": 65,
+    "surfaces.pcb_3d.actions.preset.p95_ms": 150,
+    "surfaces.pcb_3d.actions.preset.max_ms": 250,
+    "surfaces.pcb_3d.actions.visibility.p95_ms": 150,
+    "surfaces.pcb_3d.actions.visibility.max_ms": 250,
+    "surfaces.pcb_3d.actions.orbit.worst_p95_ms": 55,
+    "surfaces.pcb_3d.actions.orbit.max_ms": 75,
+    "surfaces.pcb_3d.actions.zoom.worst_p95_ms": 35,
+    "surfaces.pcb_3d.actions.zoom.max_ms": 65,
+    "surfaces.thermal.navigation.ready_p95_ms": 3000,
+    "surfaces.thermal.long_tasks.max_ms": 250,
+    "surfaces.thermal.long_tasks.median_total_ms": 500,
+    "surfaces.thermal.actions.scenario.p95_ms": 150,
+    "surfaces.thermal.actions.scenario.max_ms": 250,
+    "surfaces.thermal.actions.ambient.p95_ms": 8000,
+    "surfaces.thermal.actions.ambient.max_ms": 10000,
+    "surfaces.thermal.actions.face.p95_ms": 150,
+    "surfaces.thermal.actions.face.max_ms": 250,
+    "surfaces.thermal.actions.labels.p95_ms": 150,
+    "surfaces.thermal.actions.labels.max_ms": 250,
+    "surfaces.thermal.actions.opacity.p95_ms": 150,
+    "surfaces.thermal.actions.opacity.max_ms": 250,
+    "surfaces.thermal.actions.pan.worst_p95_ms": 35,
+    "surfaces.thermal.actions.pan.max_ms": 65,
+    "surfaces.thermal.actions.zoom.worst_p95_ms": 35,
+    "surfaces.thermal.actions.zoom.max_ms": 65,
+    "surfaces.library.navigation.ready_p95_ms": 750,
+    "surfaces.library.long_tasks.max_ms": 250,
+    "surfaces.library.long_tasks.median_total_ms": 500,
+    "surfaces.library.actions.search.p95_ms": 150,
+    "surfaces.library.actions.search.max_ms": 250,
+    "surfaces.library.actions.pagination.p95_ms": 150,
+    "surfaces.library.actions.pagination.max_ms": 250,
+    "surfaces.library.actions.footprint_preview.p95_ms": 300,
+    "surfaces.library.actions.footprint_preview.max_ms": 500,
+    "surfaces.library.actions.courtyard_editor.p95_ms": 150,
+    "surfaces.library.actions.courtyard_editor.max_ms": 250,
+    "surfaces.footprint_editor.navigation.ready_p95_ms": 750,
+    "surfaces.footprint_editor.long_tasks.max_ms": 250,
+    "surfaces.footprint_editor.long_tasks.median_total_ms": 500,
+    "surfaces.footprint_editor.actions.select_pad.p95_ms": 150,
+    "surfaces.footprint_editor.actions.select_pad.max_ms": 250,
+    "surfaces.footprint_editor.actions.pad_drag_undo.worst_p95_ms": 35,
+    "surfaces.footprint_editor.actions.pad_drag_undo.max_ms": 65,
+    "surfaces.footprint_editor.actions.inspector_edit_undo.p95_ms": 150,
+    "surfaces.footprint_editor.actions.inspector_edit_undo.max_ms": 250,
+    "surfaces.footprint_editor.actions.duplicate_undo.p95_ms": 150,
+    "surfaces.footprint_editor.actions.duplicate_undo.max_ms": 250,
+    "surfaces.footprint_editor.actions.add_undo.p95_ms": 150,
+    "surfaces.footprint_editor.actions.add_undo.max_ms": 250,
+    "surfaces.footprint_editor.actions.grid_units.p95_ms": 150,
+    "surfaces.footprint_editor.actions.grid_units.max_ms": 250,
+    "surfaces.footprint_editor.actions.pan.worst_p95_ms": 35,
+    "surfaces.footprint_editor.actions.pan.max_ms": 65,
+    "surfaces.footprint_editor.actions.zoom.worst_p95_ms": 35,
+    "surfaces.footprint_editor.actions.zoom.max_ms": 65,
+    "surfaces.model_alignment_3d.navigation.ready_p95_ms": 1500,
+    "surfaces.model_alignment_3d.long_tasks.max_ms": 250,
+    "surfaces.model_alignment_3d.long_tasks.median_total_ms": 750,
+    "surfaces.model_alignment_3d.actions.preset.p95_ms": 150,
+    "surfaces.model_alignment_3d.actions.preset.max_ms": 250,
+    "surfaces.model_alignment_3d.actions.rotation.p95_ms": 150,
+    "surfaces.model_alignment_3d.actions.rotation.max_ms": 250,
+    "surfaces.model_alignment_3d.actions.offset.p95_ms": 150,
+    "surfaces.model_alignment_3d.actions.offset.max_ms": 250,
+    "surfaces.model_alignment_3d.actions.visibility.p95_ms": 150,
+    "surfaces.model_alignment_3d.actions.visibility.max_ms": 250,
+    "surfaces.model_alignment_3d.actions.seat_mode.p95_ms": 150,
+    "surfaces.model_alignment_3d.actions.seat_mode.max_ms": 250,
+    "surfaces.model_alignment_3d.actions.move_mode.p95_ms": 150,
+    "surfaces.model_alignment_3d.actions.move_mode.max_ms": 250,
+    "surfaces.model_alignment_3d.actions.save.p95_ms": 250,
+    "surfaces.model_alignment_3d.actions.save.max_ms": 400,
+    "surfaces.model_alignment_3d.actions.reset.p95_ms": 150,
+    "surfaces.model_alignment_3d.actions.reset.max_ms": 250,
+    "surfaces.model_alignment_3d.actions.orbit.worst_p95_ms": 35,
+    "surfaces.model_alignment_3d.actions.orbit.max_ms": 65,
+    "surfaces.model_alignment_3d.actions.zoom.worst_p95_ms": 35,
+    "surfaces.model_alignment_3d.actions.zoom.max_ms": 65,
+    "surfaces.route_review.navigation.ready_p95_ms": 750,
+    "surfaces.route_review.long_tasks.max_ms": 250,
+    "surfaces.route_review.long_tasks.median_total_ms": 500,
+    "surfaces.route_review.actions.route.p95_ms": 2000,
+    "surfaces.route_review.actions.route.max_ms": 2500,
+    "surfaces.route_review.actions.timeline.p95_ms": 150,
+    "surfaces.route_review.actions.timeline.max_ms": 250,
+    "surfaces.route_review.actions.layers.p95_ms": 150,
+    "surfaces.route_review.actions.layers.max_ms": 250,
+    "surfaces.route_review.actions.pan.worst_p95_ms": 35,
+    "surfaces.route_review.actions.pan.max_ms": 65,
+    "surfaces.route_review.actions.zoom.worst_p95_ms": 35,
+    "surfaces.route_review.actions.zoom.max_ms": 65,
+    "surfaces.pdf_viewer.navigation.ready_p95_ms": 1500,
+    "surfaces.pdf_viewer.long_tasks.max_ms": 250,
+    "surfaces.pdf_viewer.long_tasks.median_total_ms": 750,
+    "surfaces.pdf_viewer.actions.lazy_scroll.p95_ms": 500,
+    "surfaces.pdf_viewer.actions.lazy_scroll.max_ms": 750,
+    "surfaces.pdf_viewer.actions.next_match.p95_ms": 1000,
+    "surfaces.pdf_viewer.actions.next_match.max_ms": 1500,
+    "responses.datasheet_response.response_ms": 500,
+    "responses.modules_redirect.response_ms": 250,
+    "responses.route_lab_redirect.response_ms": 250
+  }
+}

@@ -542,10 +542,33 @@ test "viewer scopes commit DRC and retains drag-time work across frames" {
     try std.testing.expect(std.mem.indexOf(u8, js, "drcGateRun(scope.bt,scope.bv,scope.parts,scope.rf)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "drcGateRun(scope.at,scope.av,scope.parts,scope.rf)") != null);
     // Worker/session consumers share one full-board serialization generation,
-    // while session refill waits for idle or an explicit copper gesture.
+    // while session refill waits for idle. Arming a copper gesture may request
+    // the refill, but must never synchronously load the full board on that
+    // interaction's main-thread task; the JS preview + scoped exact commit gate
+    // are the correctness-preserving fallback until the idle refill completes.
     try std.testing.expect(std.mem.indexOf(u8, js, "function drcInputJson()") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "requestIdleCallback(run,{timeout:1000})") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "function drcGateSessionEnsure()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(draftGestureLive()){drcSessTimer=setTimeout(run,250);return;}") != null);
+    // Session construction is monolithic in WASM. Dense boards must select the
+    // already-supported JS-preview fallback before scheduling that main-thread
+    // load, while the scoped exact commit gate asserted above remains active.
+    try std.testing.expect(std.mem.indexOf(u8, js, "var DRC_SESS_MAIN_THREAD_MAX=1200,drcSessTimer=null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "function drcGateSessionWork()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "function drcGateSessionAllowed(){return drcGateSessionWork()<=DRC_SESS_MAIN_THREAD_MAX;}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(!drcGate.ready||drcGate.failed||!drcGateSessionAllowed())return;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "drcGate.sLoaded=false;\n if(!drcGateSessionAllowed())return;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(!drcGateSessionAllowed())return;\n  drcGateSessionReload();") != null);
+    const ensure_start = std.mem.indexOf(u8, js, "function drcGateSessionEnsure()") orelse return error.TestUnexpectedResult;
+    const ensure_tail = js[ensure_start..];
+    const ensure_end = std.mem.indexOfScalar(u8, ensure_tail, '}') orelse return error.TestUnexpectedResult;
+    const ensure_body = ensure_tail[0 .. ensure_end + 1];
+    try std.testing.expect(std.mem.indexOf(u8, ensure_body, "drcGateSessionDefer()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ensure_body, "drcGateSessionReload()") == null);
+    // Route-preview posture/clip probes reuse one transformed pad-box table
+    // until the central pose invalidation revision advances.
+    try std.testing.expect(std.mem.indexOf(u8, js, "var padBoxesCache={rev:-1,layers:null}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "padBoxesCache.rev!==ovsRev") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "padBoxesCache.layers[key]=out") != null);
     // Server-only connectivity rows survive the local geometry refresh, which
     // lets unchanged id sets suppress both marker/list DOM rebuilds.
     try std.testing.expect(std.mem.indexOf(u8, js, "if(d.k===\"net open\")list.push(d)") != null);

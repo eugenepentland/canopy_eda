@@ -1,5 +1,7 @@
-import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.mjs';
-pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs';
+// Keep the viewer hermetic: both exact PDF.js 4.10.38 modules are embedded in
+// netlisp and served by the same /static registry as this glue module.
+import * as pdfjsLib from '/static/pdfjs-4.10.38.min.mjs';
+pdfjsLib.GlobalWorkerOptions.workerSrc = '/static/pdfjs-worker-4.10.38.min.mjs';
 
 const filename = document.body.dataset.pdf;
 const params = new URLSearchParams(location.search);
@@ -85,10 +87,13 @@ async function loadPdf() {
       if (firstMatch) {
         const idx = matches.indexOf(firstMatch);
         if (idx >= 0) setCurrent(idx, false);
-        firstMatch.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        // Initial readiness must not overlap a smooth-scroll animation: the
+        // first measured control would otherwise interrupt unfinished setup.
+        firstMatch.scrollIntoView({ behavior: 'auto', block: 'center' });
       }
     }
   }
+  document.body.dataset.pdfReady = 'true';
   setStatus('', true);
 }
 
@@ -131,6 +136,10 @@ async function renderPage(rec) {
 
     rec.rendered = true;
     if (currentQuery) applyHighlightTo(rec);
+    // Browser performance and accessibility checks must not treat the early
+    // canvas insertion as a finished page. Publish completion only after the
+    // raster, extracted text layer, and optional highlights are all installed.
+    rec.container.dataset.renderComplete = 'true';
   } finally {
     rec.rendering = false;
   }

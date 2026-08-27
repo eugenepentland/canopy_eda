@@ -1053,8 +1053,10 @@ pub fn renderLayoutPage(
         // board paint. Editable/full pages still receive the complete check.
         .check_drc = !physical_review or review_toggles.drc,
         // `?pdn=1` reads copper and the shared edge field, never markers. Its
-        // caller already has the DRC from the payload before it.
-        .reporting = !pdn_only,
+        // caller already has the DRC from the payload before it. Assembly has
+        // no route/DRC reporting surface either; its exact CAM and compact
+        // route geometry need no whole-board connectivity raster.
+        .reporting = needsPageReporting(physical_review, pdn_only, review_toggles.drc),
         // The exclusive heat overlay never paints routed copper or DRC. The
         // field endpoint already resolved that copper for its thermal inputs,
         // so restoring and checking it again in this iframe is dead work.
@@ -1152,7 +1154,7 @@ pub fn renderLayoutPage(
     try w.writeAll("<main class=\"pcb-main\">");
     if (embed and !edit_embed) {
         // Ordinary schematic previews get compact score/route chrome. Physical
-        // assembly review keeps only route status and the hidden route values;
+        // assembly review keeps only the hidden route values its painter reads;
         // its parent shell owns the useful board controls.
         try writeReadOnlyEmbedChrome(w, .{
             .module_source = if (sub_block) |sb| sb.source else "",
@@ -1371,6 +1373,10 @@ fn isPhysicalReview(req: ?*httpz.Request, embed: bool, edit_embed: bool) bool {
 
 fn needsCamPreview(physical_review: bool, thermal_overlay: bool) bool {
     return physical_review and !thermal_overlay;
+}
+
+fn needsPageReporting(physical_review: bool, pdn_only: bool, review_drc: bool) bool {
+    return !pdn_only and (!physical_review or review_drc);
 }
 
 fn showEmbedLegend(embed: bool, edit_embed: bool, physical_review: bool) bool {
@@ -3582,6 +3588,10 @@ test "the thermal board frame omits data hidden by its overlay" {
 
 // spec: Web Server - The Assembly board paints its lightweight semantic view before asynchronously loading dependency-cached Gerber/Excellon artwork, and its initial iframe omits hidden DRC, editable-layout metadata, and editor-only scripts
 test "assembly iframe defers CAM and omits editor-only clients" {
+    try std.testing.expect(!needsPageReporting(true, false, false));
+    try std.testing.expect(needsPageReporting(true, false, true));
+    try std.testing.expect(!needsPageReporting(false, true, true));
+    try std.testing.expect(needsPageReporting(false, false, false));
     var cam: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer cam.deinit();
     try writeCamFields(&cam.writer, "demo", .{
@@ -8889,7 +8899,7 @@ fn writeReadOnlyEmbedChrome(w: *std.Io.Writer, o: ReadOnlyEmbedChrome) std.Io.Wr
         .toggles = o.toggles,
         .show_toggles = !o.physical_review,
         .show_drc_status = !o.physical_review,
-        .compact_routed_count = o.physical_review,
+        .show_route_status = !o.physical_review,
     });
 }
 
@@ -8907,7 +8917,7 @@ fn writeEmbedRoute(
         toggles: Toggles,
         show_toggles: bool,
         show_drc_status: bool = true,
-        compact_routed_count: bool = false,
+        show_route_status: bool = true,
     },
 ) std.Io.Writer.Error!void {
     try w.writeAll("<div class=\"pcb-route\">");
@@ -8919,22 +8929,15 @@ fn writeEmbedRoute(
         try w.print("<label class=\"tune-chk\"><input id=\"r-clr-show\" type=\"checkbox\"{s}> show clearance</label>", .{if (display.toggles.clr) checked_glyph else ""});
         try w.print("<label class=\"tune-chk\"><input id=\"r-drc-show\" type=\"checkbox\"{s}> show DRC</label>", .{if (display.toggles.drc) checked_glyph else ""});
     }
+    if (!display.show_route_status) return w.writeAll("</div>");
     if (routed) |r| {
         const cls = if (r.routed == r.total) "ok" else "warn";
-        if (display.compact_routed_count) {
-            try w.print("<span class=\"route-stat {s}\" id=\"r-stat\">{d} net{s} routed", .{
-                cls,
-                r.routed,
-                if (r.routed == 1) "" else "s",
-            });
-        } else {
-            try w.print("<span class=\"route-stat {s}\" id=\"r-stat\">routed {d}/{d} nets · {d} vias", .{ cls, r.routed, r.total, r.vias.len });
-            if (r.failed.len > 0) {
-                try w.writeAll(" · missing: ");
-                for (r.failed, 0..) |fname, i| {
-                    if (i > 0) try w.writeAll(", ");
-                    try writeHtmlText(w, fname);
-                }
+        try w.print("<span class=\"route-stat {s}\" id=\"r-stat\">routed {d}/{d} nets · {d} vias", .{ cls, r.routed, r.total, r.vias.len });
+        if (r.failed.len > 0) {
+            try w.writeAll(" · missing: ");
+            for (r.failed, 0..) |fname, i| {
+                if (i > 0) try w.writeAll(", ");
+                try writeHtmlText(w, fname);
             }
         }
         try w.writeAll("</span>");
@@ -10589,7 +10592,7 @@ const pcb_3d_toggle_js =
     \\ if(loaded)return Promise.resolve();
     \\ if(loading)return loading;
     \\ var seq=Promise.resolve();
-    \\ ["/static/three.min.js","/static/OrbitControls.js","/static/occt-import-js.js","/static/pcb_3d_surface.js","/static/pcb_step_export.js","/static/pcb_3d_viewer.js"]
+    \\ ["/static/three.min.js","/static/OrbitControls.js","/static/pcb_3d_surface.js","/static/pcb_step_export.js","/static/pcb_3d_viewer.js"]
     \\  .forEach(function(u){seq=seq.then(function(){return loadScript(u);});});
     \\ loading=seq.then(function(){loaded=true;});
     \\ return loading;}
@@ -13823,6 +13826,7 @@ test "PCB header links board designs to assembly and keeps modules scoped" {
     const step_export_asset = std.mem.indexOf(u8, pcb_3d_toggle_js, "pcb_step_export.js") orelse return error.TestUnexpectedResult;
     const viewer_asset = std.mem.indexOf(u8, pcb_3d_toggle_js, "pcb_3d_viewer.js") orelse return error.TestUnexpectedResult;
     try std.testing.expect(surface_asset < step_export_asset and step_export_asset < viewer_asset);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_3d_toggle_js, "occt-import-js.js") == null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_3d_toggle_js, "pcb_fusion_bundle.js") == null);
 
     var module: std.Io.Writer.Allocating = .init(std.testing.allocator);
@@ -17021,7 +17025,8 @@ test "shownSavedLayout prefers the named layout, then the starred default" {
     try std.testing.expect(shownSavedLayout(&layouts, .{ .layout = "nope" }) == null);
 }
 
-test "physical review embed omits optimizer scores and route details" {
+// spec: Web Server - The Assembly physical-review embed omits optimizer, DRC, and route-status reporting while retaining the hidden route geometry inputs its read-only painter consumes
+test "physical review embed omits optimizer scores and route reporting" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var aw: std.Io.Writer.Allocating = .init(arena.allocator());
@@ -17044,8 +17049,9 @@ test "physical review embed omits optimizer scores and route details" {
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"r-clr-show\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"r-drc-show\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"r-drc\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "id=\"r-stat\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "type=\"hidden\" id=\"r-cl\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html, ">7 nets routed</span>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "nets routed") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "7/9") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "vias") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "missing") == null);

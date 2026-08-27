@@ -186,6 +186,13 @@ machine gate lock) whenever main is pushed; feature-branch pushes are never
 gated. Re-record deliberately with `scripts/perf_gate.sh --record` and commit
 the diff. Full rules and workflow: `docs/benchmarks/pcb-page/README.md`.
 
+The same pre-push command also runs two headless-Chromium gates. The assembly
+runner measures exact-CAM readiness plus its strict pan/zoom program. The
+all-pages runner covers every interactive route and its normal search,
+control, editor, timeline, and camera gestures; its route manifest fails when
+a newly registered page has no performance scenario. Setup, focused commands,
+and safety rules live in `docs/benchmarks/ui-browser/README.md`.
+
 ### Validating without touching `zig-out`
 
 **`zig build test` never writes `zig-out/`.** You can fire a test run — full or

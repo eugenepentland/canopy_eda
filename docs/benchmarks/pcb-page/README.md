@@ -70,8 +70,8 @@ stops gating is how the regressions this exists to stop got here.
 scripts/perf_gate.sh
 
 # Re-record after an intentional change (a real speedup, a designs-repo
-# update) — then review and COMMIT the diff deliberately; re-add any
-# hand-set "budgets" object, which recording never writes:
+# update) — then review and COMMIT the diff deliberately. The wrapper preserves
+# the existing hand-set "budgets" object while replacing measurements:
 scripts/perf_gate.sh --record
 
 # One board, more reps, by hand:

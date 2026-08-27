@@ -9,6 +9,12 @@ const Server = serve_root.Server;
 
 const pdf_viewer_js = @embedFile("assets/pdf_viewer.js");
 const pdf_viewer_css = @embedFile("assets/pdf_viewer.css");
+// PDF.js 4.10.38 (Apache-2.0), copied verbatim from the matching pdfjs-dist
+// package. The upstream license and provenance live beside these files under
+// assets/vendor/pdfjs-4.10.38/. Keeping both modules embedded makes PDF pages
+// deterministic and usable without a browser-to-CDN network path.
+const pdfjs_lib_js = @embedFile("assets/vendor/pdfjs-4.10.38/pdf.min.mjs");
+const pdfjs_worker_js = @embedFile("assets/vendor/pdfjs-4.10.38/pdf.worker.min.mjs");
 const library_js = @embedFile("assets/library.js");
 // Shared footprint-drawing engine — one renderer for the library preview, the
 // schematic sidebar, and the PCB-layout page (draws from /api/footprint JSON).
@@ -86,6 +92,7 @@ const model_viewer_3d_js = @embedFile("assets/model_viewer_3d.js");
 // only when the tab is first opened.
 const pcb_3d_surface_js = @embedFile("assets/pcb_3d_surface.js");
 const pcb_step_export_js = @embedFile("assets/pcb_step_export.js");
+const pcb_step_worker_js = @embedFile("assets/pcb_step_worker.js");
 const pcb_3d_viewer_js = @embedFile("assets/pcb_3d_viewer.js");
 // Assembly/debug's persistent transparent model-image loader. It reads saved
 // PNGs first and invokes the STEP renderer only to populate a missing/stale
@@ -130,6 +137,8 @@ const Asset = struct {
 const registry = [_]Asset{
     .{ .name = "pdf_viewer.js", .body = pdf_viewer_js, .content_type = .JS },
     .{ .name = "pdf_viewer.css", .body = pdf_viewer_css, .content_type = .CSS },
+    .{ .name = "pdfjs-4.10.38.min.mjs", .body = pdfjs_lib_js, .content_type = .JS },
+    .{ .name = "pdfjs-worker-4.10.38.min.mjs", .body = pdfjs_worker_js, .content_type = .JS },
     .{ .name = "library.js", .body = library_js, .content_type = .JS },
     .{ .name = "footprint_svg.js", .body = footprint_svg_js, .content_type = .JS },
     .{ .name = "footprint_editor.js", .body = footprint_editor_js, .content_type = .JS },
@@ -164,6 +173,7 @@ const registry = [_]Asset{
     .{ .name = "model_viewer_3d.js", .body = model_viewer_3d_js, .content_type = .JS },
     .{ .name = "pcb_3d_surface.js", .body = pcb_3d_surface_js, .content_type = .JS },
     .{ .name = "pcb_step_export.js", .body = pcb_step_export_js, .content_type = .JS },
+    .{ .name = "pcb_step_worker.js", .body = pcb_step_worker_js, .content_type = .JS },
     .{ .name = "pcb_3d_viewer.js", .body = pcb_3d_viewer_js, .content_type = .JS },
     .{ .name = "pcb_model_sprites.js", .body = pcb_model_sprites_js, .content_type = .JS },
     .{ .name = "drc.wasm", .body = drc_wasm, .content_type = .WASM },
@@ -398,6 +408,54 @@ fn registryHasAsset(name: []const u8) bool {
     return false;
 }
 
+// spec: Web Server - The datasheet PDF viewer loads its pinned PDF.js runtime and worker from same-origin embedded assets, so offline/headless browsing never depends on a third-party CDN
+test "the PDF viewer embeds its exact same-origin PDF.js runtime and worker" {
+    try std.testing.expect(registryHasAsset("pdf_viewer.js"));
+    try std.testing.expect(registryHasAsset("pdfjs-4.10.38.min.mjs"));
+    try std.testing.expect(registryHasAsset("pdfjs-worker-4.10.38.min.mjs"));
+
+    try std.testing.expect(std.mem.indexOf(u8, pdf_viewer_js, "from '/static/pdfjs-4.10.38.min.mjs'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pdf_viewer_js, "workerSrc = '/static/pdfjs-worker-4.10.38.min.mjs'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pdf_viewer_js, "://") == null);
+    try std.testing.expect(std.mem.indexOf(u8, pdfjs_lib_js, "Copyright 2024 Mozilla Foundation") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pdfjs_lib_js, "4.10.38") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pdfjs_worker_js, "Copyright 2024 Mozilla Foundation") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pdfjs_worker_js, "4.10.38") != null);
+
+    const raster_done = std.mem.indexOf(u8, pdf_viewer_js, "await page.render(") orelse return error.PdfRasterMissing;
+    const text_done = std.mem.indexOfPos(u8, pdf_viewer_js, raster_done, "await textLayer.render()") orelse return error.PdfTextLayerMissing;
+    const highlights_done = std.mem.indexOfPos(u8, pdf_viewer_js, text_done, "if (currentQuery) applyHighlightTo(rec)") orelse return error.PdfHighlightsMissing;
+    const completion = std.mem.indexOfPos(u8, pdf_viewer_js, highlights_done, "dataset.renderComplete = 'true'") orelse return error.PdfCompletionMissing;
+    try std.testing.expect(raster_done < text_done);
+    try std.testing.expect(text_done < highlights_done);
+    try std.testing.expect(highlights_done < completion);
+    try std.testing.expect(std.mem.indexOf(u8, pdf_viewer_js, "firstMatch.scrollIntoView({ behavior: 'auto'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pdf_viewer_js, "document.body.dataset.pdfReady = 'true'") != null);
+
+    const lib_sha256 = [_]u8{ 0x27, 0xfc, 0x2a, 0x05, 0x7a, 0x00, 0xf9, 0x2a, 0x43, 0x34, 0xad, 0x06, 0xe1, 0x7d, 0xbd, 0x72, 0x59, 0x91, 0x29, 0x54, 0xe9, 0xfb, 0x7f, 0x76, 0x40, 0x0b, 0xcc, 0xa5, 0xfd, 0x19, 0x0a, 0x9c };
+    const worker_sha256 = [_]u8{ 0x1b, 0xaa, 0x18, 0x44, 0xc8, 0x9c, 0x80, 0xa5, 0xb2, 0x79, 0x7c, 0x91, 0x6e, 0x75, 0xab, 0x29, 0x25, 0x4b, 0xe4, 0x6d, 0x8e, 0x9c, 0xb5, 0x3c, 0xb6, 0x36, 0x4d, 0x7a, 0xad, 0x84, 0xbe, 0x36 };
+    var actual: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(pdfjs_lib_js, &actual, .{});
+    try std.testing.expectEqualSlices(u8, &lib_sha256, &actual);
+    std.crypto.hash.sha2.Sha256.hash(pdfjs_worker_js, &actual, .{});
+    try std.testing.expectEqualSlices(u8, &worker_sha256, &actual);
+}
+
+// Keep the dense STEP scene idle between interactions and return its temporary
+// gesture-scale drawing buffer to native resolution after camera movement.
+// spec: Web Server - the footprint 3D alignment viewer renders only after scene or camera changes and temporarily lowers raster density during camera gestures
+test "model alignment viewer is event-driven and restores full idle quality" {
+    const markers = [_][]const u8{
+        "function requestRender()",
+        "controls.addEventListener(\"change\", requestRender)",
+        "setRenderScale(0.6)",
+        "qualityRestoreReady = true",
+        "setRenderScale(1)",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, model_viewer_3d_js, marker) != null);
+    try std.testing.expect(std.mem.indexOf(u8, model_viewer_3d_js, "requestAnimationFrame(loop)") == null);
+}
+
 // spec: Web Server - The PCB editor paints saved geometry, restores exact-state copper fills from persistent browser storage or the fast refill endpoint, then launches whole-board diagnostics and electrical analyses
 test "PCB editor defers whole-board analyses until after its first paint" {
     const checks = [_]struct { marker: []const u8, present: bool }{
@@ -406,6 +464,8 @@ test "PCB editor defers whole-board analyses until after its first paint" {
         .{ .marker = "fetch(\"/api/layout-progress/\"", .present = true },
         .{ .marker = "progEnsureChip(); // cheap placeholder; the first click performs the analysis", .present = true },
         .{ .marker = "function loadDeferredAnalysis()", .present = true },
+        .{ .marker = "var deferredAnalysisSeq=0", .present = true },
+        .{ .marker = "if(run===deferredAnalysisSeq&&PCB.analysis_deferred)loadDeferredAnalysis()", .present = true },
         .{ .marker = "function pourCacheRead(done)", .present = true },
         .{ .marker = "refillPours({deferred:true,done:analysis})", .present = true },
         .{ .marker = "u.searchParams.set(\"derived\",\"1\")", .present = true },
@@ -1056,6 +1116,22 @@ test "PCB review carries the physical board paint pipeline" {
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "var seq=PHYSICAL_REVIEW?REVIEW_STAGES:PAINT_STAGES") != null);
 }
 
+test "Assembly review publishes semantic state at the completed paint seam" {
+    const markers = [_][]const u8{
+        "window.PCBReviewPainted=function()",
+        "reviewPainted={revision:++reviewPaintRevision,side:reviewSide,rotation:reviewRotation",
+        "reviewPainted=null,reviewPaintDirty=true",
+        "if(!PHYSICAL_REVIEW||!reviewPaintDirty)return",
+        "layers:Object.assign({},reviewPainted.layers)",
+        "paintFlash(ctx);\n reviewPaintPublish();",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+    const scene_paint = std.mem.indexOf(u8, pcb_board_js, "function scenePaint()") orelse return error.ScenePaintMissing;
+    const publish = std.mem.indexOfPos(u8, pcb_board_js, scene_paint, "reviewPaintPublish();") orelse return error.ReviewPaintReadinessMissing;
+    const paint_tail = std.mem.indexOfPos(u8, pcb_board_js, scene_paint, "paintFlash(ctx);") orelse return error.ScenePaintTailMissing;
+    try std.testing.expect(paint_tail < publish);
+}
+
 // spec: Web Server - Before its asynchronous CAM profile arrives, Assembly preserves the saved outline's native arcs instead of joining their endpoints as chamfers
 // spec: Web Server - The Assembly board substrate paints parsed Gerber/Excellon operations instead of rebuilding fabrication artwork from browser fonts and placement objects
 // spec: Web Server - Assembly layer controls independently toggle face copper, every physical inner copper layer, solder mask, paste, silkscreen, drills, board outline, and component overlays
@@ -1177,6 +1253,33 @@ test "PCB 3D viewer centers its visible origin on the board" {
         "obj.material.depthTest = false; obj.material.depthWrite = false",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_3d_viewer_js, marker) != null);
+}
+
+// spec: Web Server - the PCB 3D viewer paints its base board before component previews finish, parses vendor STEP models outside the UI thread, renders only after scene or camera changes, and lowers raster density while interacting on a software WebGL renderer
+test "PCB 3D STEP previews parse in a worker" {
+    const worker_markers = [_][]const u8{
+        "importScripts(\"/static/occt-import-js.js\")",
+        "occt.ReadStepFile",
+        "self.postMessage({ id: id, result: result })",
+    };
+    for (worker_markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_step_worker_js, marker) != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_3d_viewer_js, "ReadStepFile") == null);
+}
+
+test "PCB 3D base preview remains interactive while models stream" {
+    const viewer_markers = [_][]const u8{
+        "new Worker(\"/static/pcb_step_worker.js\")",
+        "postMessage({ id: id, buffer: buffer }, [buffer])",
+        "function hasSoftwareWebGL()",
+        "idlePixelRatio = softwareRenderer ? Math.min(nativePixelRatio, 1) : nativePixelRatio",
+        "interactivePixelRatio = softwareRenderer ? Math.min(idlePixelRatio, 0.35) : idlePixelRatio",
+        "controls.addEventListener(\"change\", requestRender)",
+        "modelProgress: modelProgress",
+        "cameraState: cameraState",
+        "setStatus(null)",
+    };
+    for (viewer_markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_3d_viewer_js, marker) != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_3d_viewer_js, "idlePixelRatio = softwareRenderer ? 0.5") == null);
 }
 
 test "generated auxiliary STEP bodies remain faceted B-reps rather than presentation tessellation" {
@@ -1339,6 +1442,15 @@ test "PCB replay client streams the live route and follows the head" {
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_replay_js, marker) != null);
 }
 
+// The timeline transport must be usable as soon as a route finishes. A smooth
+// page scroll keeps every control in motion for hundreds of milliseconds, so
+// browsers (and assistive automation) correctly defer the first click until
+// it settles. Reveal the review synchronously instead.
+test "route review controls are stable immediately after loading a timeline" {
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, route_review_js, "app.scrollIntoView({behavior:\"auto\",block:\"start\"})"));
+    try std.testing.expect(std.mem.indexOf(u8, route_review_js, "app.scrollIntoView({behavior:\"smooth\"") == null);
+}
+
 // spec: Web Server - The PCB live-route Stop action freezes the displayed elapsed time immediately while cooperative cancellation finishes, and resumes live progress if the cancellation request fails
 test "PCB live-route Stop freezes elapsed time while cancellation finishes" {
     const markers = [_][]const u8{
@@ -1427,6 +1539,15 @@ test "PCB board find indexes and activates every phase-one entity kind" {
         "ev.ctrlKey||ev.metaKey",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+}
+
+// Keep the keystroke path proportional to search candidates: copper summaries
+// are presentation data, and belong only on the capped rows being rendered.
+test "PCB board find defers whole-board net summaries until after matching" {
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "findCandidate(\"net\",n.name,\"\",") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "findNetDetails(shown)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "stats[key]={row:r") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "findCandidate(\"net\",n.name,findNetInfo(") == null);
 }
 
 // spec: Web Server - The interactive route-session client bundles the stuck-net, corridor, and frontier surfaces
@@ -1804,11 +1925,16 @@ test "PCB frame benchmark carries human-readable dwell points outside movement p
         "FBENCH_QUICK?10:60,PN=FBENCH_QUICK?30:120",
         "var dx=0.6*VBW/(FBENCH_QUICK?120:PN)",
         "function fbRunWhenReady()",
-        "if(!PHYSICAL_REVIEW||!PCB.cam_url||CAM_REVIEW){fbRun();return;}",
+        "if(!PHYSICAL_REVIEW||(CAM_REVIEW&&window.__fbenchCamReadyMs>0)){fbRun();return;}",
+        "window.__fbenchCamReadyMs=+performance.now().toFixed(2)",
         "error:\"CAM payload did not load within 240 seconds\"",
         "setTimeout(fbRunWhenReady,1000)",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, pcb_board_js, "window.__fbenchCamReadyMs=+performance.now().toFixed(2)"));
+    const scene_paint = std.mem.indexOf(u8, pcb_board_js, "function scenePaint()") orelse return error.ScenePaintMissing;
+    const cam_painted = std.mem.indexOf(u8, pcb_board_js, "window.__fbenchCamReadyMs=+performance.now().toFixed(2)") orelse return error.CamPaintReadinessMissing;
+    try std.testing.expect(scene_paint < cam_painted);
     // The physical CAM surface keeps the cheaper direct repaint path; the
     // browser A/B gate showed that rebuilding its 2.56x buffer regresses p95.
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "if(PHYSICAL_REVIEW)return false;       // measured A/B") != null);

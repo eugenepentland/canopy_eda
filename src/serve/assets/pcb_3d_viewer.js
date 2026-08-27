@@ -20,7 +20,7 @@
 (function () {
   "use strict";
 
-  var THREE, occt, surface; // resolved at init() — scripts load lazily
+  var THREE, surface; // resolved at init() — scripts load lazily
   // The page emits `const PCB = {...}` — a lexical global, NOT a window
   // property — so we read the bare binding (via typeof to stay strict-safe),
   // resolved at init() time when it's guaranteed defined.
@@ -32,7 +32,9 @@
   // walking both arrays. Each pose group owns a nested `mount` group whose
   // local Y rotation moves a top-side footprint onto the bottom face.
   var partGroups = [];
-  var built = false, looping = false;
+  var built = false, renderQueued = false;
+  var softwareRenderer = false, idlePixelRatio = 1, interactivePixelRatio = 1;
+  var restoreQualityTimer = null;
   var center = { x: 0, y: 0, z: 0 }, span = 20;
   // Signature of the poses 3D last rendered; lets onShow() detect a layout that
   // changed in 2D (Load/reset/drag) and re-fit the camera only when it did.
@@ -201,10 +203,44 @@
     return { rot: [-r[0], r[1], r[2]], off: [-o[0], -o[1], -o[2]] };
   }
 
-  var _occtPromise, modelTemplates = {}, modelGenerations = {}, pendingModels = 0;
-  function ensureOcct() {
-    if (_occtPromise) return _occtPromise;
-    return _occtPromise = occt({ locateFile: function (f) { return "/static/" + f; } });
+  var modelWorker = null, modelWorkerSeq = 0, modelWorkerPending = {};
+  var modelTemplates = {}, modelGenerations = {}, pendingModels = 0;
+
+  function rejectModelWorker(error) {
+    var message = error && error.message ? error.message : String(error || "STEP worker failed");
+    Object.keys(modelWorkerPending).forEach(function (id) {
+      modelWorkerPending[id].reject(new Error(message));
+      delete modelWorkerPending[id];
+    });
+    if (modelWorker) modelWorker.terminate();
+    modelWorker = null;
+  }
+
+  function ensureModelWorker() {
+    if (modelWorker) return modelWorker;
+    modelWorker = new Worker("/static/pcb_step_worker.js");
+    modelWorker.onmessage = function (event) {
+      var message = event.data || {}, pending = modelWorkerPending[message.id];
+      if (!pending) return;
+      delete modelWorkerPending[message.id];
+      if (message.error) pending.reject(new Error(message.error));
+      else pending.resolve(message.result);
+    };
+    modelWorker.onerror = rejectModelWorker;
+    modelWorker.onmessageerror = rejectModelWorker;
+    return modelWorker;
+  }
+
+  function parseStepFile(buffer) {
+    return new Promise(function (resolve, reject) {
+      var id = ++modelWorkerSeq;
+      modelWorkerPending[id] = { resolve: resolve, reject: reject };
+      try { ensureModelWorker().postMessage({ id: id, buffer: buffer }, [buffer]); }
+      catch (error) {
+        delete modelWorkerPending[id];
+        reject(error);
+      }
+    });
   }
 
   // Parse a footprint's STEP once into a template Group (shared geometry is
@@ -214,12 +250,10 @@
     var M = (DATA.models || {})[fp];
     if (!M) return modelTemplates[fp] = Promise.resolve(null);
     var url = "/api/model-file/" + encodeURIComponent(fp);
-    var pr = ensureOcct().then(function (o) {
-      return fetch(url).then(function (r) {
-        if (!r.ok) throw new Error("model " + r.status);
-        return r.arrayBuffer();
-      }).then(function (buf) {
-        var res = o.ReadStepFile(new Uint8Array(buf), null);
+    var pr = fetch(url).then(function (r) {
+      if (!r.ok) throw new Error("model " + r.status);
+      return r.arrayBuffer();
+    }).then(parseStepFile).then(function (res) {
         if (!res || !res.success || !res.meshes || !res.meshes.length) return null;
         var g = new THREE.Group();
         res.meshes.forEach(function (m) {
@@ -236,7 +270,6 @@
           g.add(new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: col, metalness: 0.45, roughness: 0.55 })));
         });
         return g;
-      });
     }).catch(function (err) { console.warn("STEP load failed for " + fp, err); return null; });
     return modelTemplates[fp] = pr;
   }
@@ -248,7 +281,6 @@
     var generation = modelGenerations[fp] || 0;
     pendingModels++;
     updateExportButton();
-    setStatus("Loading 3D models…");
     getModelTemplate(fp).then(function (tmpl) {
       // An upload can replace this footprint while its old STEP is still being
       // parsed. Only the current generation may enter the scene.
@@ -262,9 +294,10 @@
         inst.userData.pcb3dFootprint = fp;
         inst.visible = layerVisible.models;
         partGroup.add(inst);
+        requestRender();
       }
     }).catch(function () {}).then(function () {
-      if (--pendingModels <= 0) setStatus(null);
+      pendingModels--;
       updateExportButton();
     });
   }
@@ -529,6 +562,7 @@
       });
       placeModel(mount, part);
     });
+    requestRender();
   }
 
   // ── Bounds / substrate / pose sync ───────────────────────────────
@@ -746,6 +780,61 @@
     rebuildBoard();
     rebuildHeatsink();
     lastSig = sceneSig();
+    requestRender();
+  }
+
+  // Software WebGL can spend more than 100 ms drawing the full assembly at
+  // the CSS viewport's native resolution. Detect it before creating the real
+  // renderer so hardware keeps antialiasing and full density, while a
+  // software-only machine gets a deliberately lower-resolution interactive
+  // preview. The CSS size is unchanged and the idle image returns to at least
+  // one backing pixel per CSS pixel after a gesture.
+  function hasSoftwareWebGL() {
+    var probe = document.createElement("canvas"), gl = null, name = "";
+    try {
+      gl = probe.getContext("webgl2") || probe.getContext("webgl");
+      var info = gl && gl.getExtension("WEBGL_debug_renderer_info");
+      name = info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : "";
+    } catch (_) {}
+    if (gl) {
+      var lose = gl.getExtension("WEBGL_lose_context");
+      if (lose) lose.loseContext();
+    }
+    return /swiftshader|llvmpipe|software rasterizer|microsoft basic render/i.test(name);
+  }
+
+  // Render only when scene or camera state changes. The previous perpetual
+  // loop saturated a software renderer even while the user was reading a
+  // panel, delaying unrelated clicks by whole seconds. OrbitControls' change
+  // event keeps scheduling frames until its damping tail settles.
+  function requestRender() {
+    if (!built || !renderer || renderQueued) return;
+    renderQueued = true;
+    requestAnimationFrame(function () {
+      renderQueued = false;
+      if (controls) controls.update();
+      renderer.render(scene, camera);
+    });
+  }
+
+  function setPixelRatio(ratio) {
+    if (!renderer || renderer.getPixelRatio() === ratio) return;
+    renderer.setPixelRatio(ratio);
+    resize();
+  }
+
+  function beginInteraction() {
+    if (restoreQualityTimer) clearTimeout(restoreQualityTimer);
+    restoreQualityTimer = null;
+    setPixelRatio(interactivePixelRatio);
+  }
+
+  function endInteraction() {
+    if (restoreQualityTimer) clearTimeout(restoreQualityTimer);
+    restoreQualityTimer = setTimeout(function () {
+      restoreQualityTimer = null;
+      setPixelRatio(idlePixelRatio);
+    }, 160);
   }
 
   // ── Scene build ──────────────────────────────────────────────────
@@ -754,8 +843,15 @@
     canvas = document.getElementById("pcb-3d-canvas");
     statusEl = document.getElementById("pcb-3d-status");
 
-    renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
-    renderer.setPixelRatio(window.devicePixelRatio || 1);
+    softwareRenderer = hasSoftwareWebGL();
+    var nativePixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+    // A software renderer may cap a high-DPI display at CSS-pixel density, but
+    // the settled scene remains crisp. Only an active gesture uses the coarse
+    // buffer that keeps orbit/zoom responsive; endInteraction restores 1x.
+    idlePixelRatio = softwareRenderer ? Math.min(nativePixelRatio, 1) : nativePixelRatio;
+    interactivePixelRatio = softwareRenderer ? Math.min(idlePixelRatio, 0.35) : idlePixelRatio;
+    renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: !softwareRenderer });
+    renderer.setPixelRatio(idlePixelRatio);
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0x0d1117);
 
@@ -763,6 +859,9 @@
     camera.up.set(0, 0, 1);
     controls = new THREE.OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true; controls.dampingFactor = 0.12;
+    controls.addEventListener("change", requestRender);
+    controls.addEventListener("start", beginInteraction);
+    controls.addEventListener("end", endInteraction);
 
     scene.add(new THREE.AmbientLight(0xffffff, 0.6));
     var key = new THREE.DirectionalLight(0xffffff, 0.85); key.position.set(40, -30, 80); scene.add(key);
@@ -796,14 +895,11 @@
     wireControls();
     viewIso();
     resize();
-    if (pendingModels === 0) setStatus(null);
-    looping = true;
-    (function loop() {
-      if (!looping) return;
-      requestAnimationFrame(loop);
-      controls.update();
-      renderer.render(scene, camera);
-    })();
+    // The textured board is ready now. Component previews continue to arrive
+    // from the STEP worker; the disabled Export button reports that background
+    // work without covering or blocking the usable scene.
+    setStatus(null);
+    requestRender();
   }
 
   // ── Camera presets + toolbar ─────────────────────────────────────
@@ -830,14 +926,16 @@
     chk("pcb3d-t-models", function (v) {
       layerVisible.models = v;
       partsGroup.traverse(function (ch) { if (ch.userData.pcb3dKind === "models") ch.visible = v; });
+      requestRender();
     });
     chk("pcb3d-t-surface", function (v) {
       layerVisible.surfaces = v;
       boardGroup.traverse(function (ch) { if (ch.userData.pcb3dKind === "surfaces") ch.visible = v; });
+      requestRender();
     });
-    chk("pcb3d-t-board", function (v) { boardGroup.visible = v; });
-    chk("pcb3d-t-heatsink", function (v) { layerVisible.heatsink = v; heatsinkGroup.visible = v; });
-    chk("pcb3d-t-axes", function (v) { axes.visible = v; });
+    chk("pcb3d-t-board", function (v) { boardGroup.visible = v; requestRender(); });
+    chk("pcb3d-t-heatsink", function (v) { layerVisible.heatsink = v; heatsinkGroup.visible = v; requestRender(); });
+    chk("pcb3d-t-axes", function (v) { axes.visible = v; requestRender(); });
   }
 
   function resize() {
@@ -846,14 +944,30 @@
     if (w === 0 || h === 0) return;
     renderer.setSize(w, h, false);
     camera.aspect = w / h; camera.updateProjectionMatrix();
+    requestRender();
   }
   window.addEventListener("resize", function () { if (built) resize(); });
+
+  function modelProgress() {
+    var models = (DATA && DATA.models) || {}, expected = 0, loaded = 0;
+    (DATA && DATA.parts || []).forEach(function (part) { if (models[part.fp]) expected++; });
+    if (partsGroup) partsGroup.traverse(function (child) {
+      if (child.userData && child.userData.pcb3dKind === "models") loaded++;
+    });
+    return { expected: expected, loaded: loaded, pending: pendingModels };
+  }
+
+  function cameraState() {
+    if (!camera || !controls) return null;
+    return [camera.position.x, camera.position.y, camera.position.z,
+      controls.target.x, controls.target.y, controls.target.z];
+  }
 
   // ── Public entry points (called by the toggle wiring) ────────────
   window.PCB3D = {
     init: function () {
       if (built) return;
-      THREE = window.THREE; occt = window.occtimportjs; surface = window.PCB3DSurface;
+      THREE = window.THREE; surface = window.PCB3DSurface;
       // `const PCB` is a lexical global (not on window); read it strict-safely.
       DATA = (typeof window !== "undefined" && window.PCB) ? window.PCB
         : (typeof PCB !== "undefined" ? PCB : {});
@@ -870,6 +984,8 @@
     // user's relative orbit is preserved across loads.
     sync: function () { if (built) applyPoses(); },
     modelAdded: function (fp, transform) { if (fp) refreshModel(fp, transform); },
+    modelProgress: modelProgress,
+    cameraState: cameraState,
     onShow: function () {
       if (!built) return;
       // Reflect any layout change made in 2D since 3D was last shown, but keep

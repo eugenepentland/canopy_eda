@@ -175,6 +175,26 @@ command = ["node", "--check", "src/serve/assets/pcb_3d_viewer.js"]
 inputs = ["src/serve/assets/pcb_3d_viewer.js"]
 
 [[external]]
+name = "model-viewer-3d-js-syntax"
+command = ["node", "--check", "src/serve/assets/model_viewer_3d.js"]
+inputs = ["src/serve/assets/model_viewer_3d.js"]
+
+[[external]]
+name = "schematic-viewer-js-syntax"
+command = ["node", "--check", "src/serve/assets/schematic_viewer.js"]
+inputs = ["src/serve/assets/schematic_viewer.js"]
+
+[[external]]
+name = "route-review-js-syntax"
+command = ["node", "--check", "src/serve/assets/route_review.js"]
+inputs = ["src/serve/assets/route_review.js"]
+
+[[external]]
+name = "pcb-step-worker-js-syntax"
+command = ["node", "--check", "src/serve/assets/pcb_step_worker.js"]
+inputs = ["src/serve/assets/pcb_step_worker.js"]
+
+[[external]]
 name = "pcb-3d-surface-js-syntax"
 command = ["node", "--check", "src/serve/assets/pcb_3d_surface.js"]
 inputs = ["src/serve/assets/pcb_3d_surface.js"]
@@ -188,6 +208,39 @@ inputs = ["src/serve/assets/pcb_3d_surface.js", "src/serve/assets/pcb_3d_surface
 name = "pcb-browser-perf-js-syntax"
 command = ["node", "--check", "scripts/pcb_browser_perf/run.js"]
 inputs = ["scripts/pcb_browser_perf/run.js"]
+
+[[external]]
+name = "ui-browser-perf-js-syntax"
+command = ["node", "--check", "scripts/ui_browser_perf/run.js"]
+inputs = ["scripts/ui_browser_perf/run.js"]
+
+[[external]]
+name = "ui-browser-perf-route-contract"
+command = ["node", "scripts/ui_browser_perf/manifest.test.js"]
+inputs = ["scripts/ui_browser_perf/run.js", "scripts/ui_browser_perf/manifest.js",
+    "scripts/ui_browser_perf/manifest.test.js", "scripts/perf_gate.sh", "package.json",
+    ".githooks/pre-push", "scripts/pcb_browser_perf/run.js",
+    "test/fixtures/browser_perf/route-review.kicad_pcb",
+    "test/fixtures/browser_perf/datasheet.pdf",
+    "test/fixtures/browser_perf/generate_datasheet.js", "src/serve.zig",
+    "src/serve/pcb_layout_page.zig", "src/serve/assets/pcb_pad_align_tool.html",
+    "src/serve/assets/pcb_find_header.html", "src/serve/assets/pcb_drc_pane.html",
+    "docs/benchmarks/ui-browser/baseline.json"]
+
+[[external]]
+name = "pdf-viewer-js-syntax"
+command = ["node", "--check", "src/serve/assets/pdf_viewer.js"]
+inputs = ["src/serve/assets/pdf_viewer.js"]
+
+[[external]]
+name = "pdfjs-runtime-syntax"
+command = ["node", "--check", "src/serve/assets/vendor/pdfjs-4.10.38/pdf.min.mjs"]
+inputs = ["src/serve/assets/vendor/pdfjs-4.10.38/pdf.min.mjs"]
+
+[[external]]
+name = "pdfjs-worker-syntax"
+command = ["node", "--check", "src/serve/assets/vendor/pdfjs-4.10.38/pdf.worker.min.mjs"]
+inputs = ["src/serve/assets/vendor/pdfjs-4.10.38/pdf.worker.min.mjs"]
 
 # Completeness checklist (opt-in). Every SPEC.md `## ` feature section must
 # ADDRESS or explicitly WAIVE all 8 scenario categories (empty inputs, large

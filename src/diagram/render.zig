@@ -1265,6 +1265,9 @@ pub const css =
     \\.dg-svg[data-lod="0"] .dg-base{opacity:0;pointer-events:none;}
     \\.dg-deep{opacity:0;pointer-events:none;transition:opacity .25s ease;}
     \\.dg-svg[data-lod="2"] .dg-deep{opacity:1;}
+    \\.dg-svg.dg-zooming .dg-deep{display:none;}
+    \\.dg-svg.dg-zooming .dg-glance,.dg-svg.dg-zooming .dg-base,
+    \\.dg-svg.dg-zooming .dg-edge-label,.dg-svg.dg-zooming .dg-pill{transition:none;}
     \\.dg-edge-label,.dg-pill{transition:opacity .25s ease;}
     \\.dg-svg[data-lod="2"] .dg-edge-label,.dg-svg[data-lod="2"] .dg-pill{opacity:0;}
     \\.dg-edge,.dg-edge-dot,.dg-edge-arrow,.dg-node{transition:opacity .2s ease;}
@@ -1288,6 +1291,11 @@ pub const css =
 // ── tests ──────────────────────────────────────────────────────────────
 
 const testing = std.testing;
+
+test "semantic zoom CSS keeps vector detail out of active wheel frames" {
+    try testing.expect(std.mem.indexOf(u8, css, ".dg-svg.dg-zooming .dg-deep{display:none;}") != null);
+    try testing.expect(std.mem.indexOf(u8, css, ".dg-svg.dg-zooming .dg-edge-label") != null);
+}
 
 fn mkNode(label: []const u8) types.Node {
     return .{ .label = label, .subtitle = "", .category = .peripheral, .slug = "", .inputs = &.{}, .outputs = &.{} };

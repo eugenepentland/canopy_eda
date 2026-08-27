@@ -43,6 +43,20 @@ pub fn writeJson(
     request: Request,
 ) Error!void {
     if (!request.enabled) return w.writeAll("null");
+    // The fabrication identity and every poured Gerber layer rasterize the
+    // same outline on the same lattice. Seed that board-edge field once for
+    // the whole CAM response; passing it through preserves exact output while
+    // avoiding one full outline walk per copper layer.
+    const edge = try pour.sharedEdgeField(arena, request.placement);
+    return writeJsonWithEdge(w, arena, request, edge);
+}
+
+fn writeJsonWithEdge(
+    w: *std.Io.Writer,
+    arena: std.mem.Allocator,
+    request: Request,
+    edge: ?pour.EdgeField,
+) Error!void {
     const placement = request.placement;
     const frame = request.package.frame;
     const rr = request.routed orelse router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
@@ -54,7 +68,7 @@ pub fn writeJson(
         .zones = request.zones,
         .silk_keepouts = request.silk_keepouts,
     };
-    const mark = try fab_identity.build(arena, placement, copper, request.texts, frame, null);
+    const mark = try fab_identity.build(arena, placement, copper, request.texts, frame, edge);
     const texts = try fab_identity.replaceAdoptedText(arena, request.texts, mark);
     const layers = try export_gerber.planLayers(arena, placement);
     var profile_ops: []const gerber.Op = &.{};
@@ -62,7 +76,7 @@ pub fn writeJson(
     var first = true;
     for (layers) |layer| {
         var bytes: std.Io.Writer.Allocating = .init(arena);
-        try export_gerber.writeLayer(&bytes.writer, arena, placement, copper, texts, frame, layer.layer, .{ .function = layer.function });
+        try export_gerber.writeLayer(&bytes.writer, arena, placement, copper, texts, frame, layer.layer, .{ .function = layer.function, .edge = edge });
         const parsed = try gerber.parse(arena, bytes.written());
         if (std.meta.activeTag(layer.layer) == .edge) profile_ops = parsed.ops;
         if (!first) try w.writeByte(',');
@@ -337,8 +351,8 @@ fn parseDrillPoint(s: []const u8) ?[2]f64 {
     return .{ x, y };
 }
 
-// spec: export_gerber - the Assembly CAM payload is generated from every planned Gerber plus both Excellon drill files and carries their fabrication ID and full digest
-test "CAM preview serializes quantized Gerber silk and Excellon drills" {
+// spec: export_gerber - the Assembly CAM payload shares one board-edge field across its fabrication identity and every planned Gerber, remains byte-identical to independently seeded layers, and carries both Excellon drill files plus the fabrication digest
+test "CAM preview shares its edge field without changing exact artwork" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -376,8 +390,7 @@ test "CAM preview serializes quantized Gerber silk and Excellon drills" {
         .generated = false,
         .board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 10 },
     };
-    var out: std.Io.Writer.Allocating = .init(arena);
-    try writeJson(&out.writer, arena, .{
+    const request = Request{
         .enabled = true,
         .placement = placement,
         .routed = null,
@@ -385,7 +398,12 @@ test "CAM preview serializes quantized Gerber silk and Excellon drills" {
         .silk_keepouts = &.{},
         .texts = &.{},
         .package = .{ .frame = export_fab.frameFor(placement), .drill_suffixes = .{ "PTH", "NPTH" } },
-    });
+    };
+    var out: std.Io.Writer.Allocating = .init(arena);
+    try writeJson(&out.writer, arena, request);
+    var independently_seeded: std.Io.Writer.Allocating = .init(arena);
+    try writeJsonWithEdge(&independently_seeded.writer, arena, request, null);
+    try std.testing.expectEqualStrings(independently_seeded.written(), out.written());
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"source\":\"generated-gerber\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"id\":\"silk-top\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"id\":\"drill-plated\"") != null);

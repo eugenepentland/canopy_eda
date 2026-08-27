@@ -29,7 +29,9 @@
   // ── Scene ────────────────────────────────────────────────────────
   var canvas = document.getElementById("view");
   var renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
-  renderer.setPixelRatio(window.devicePixelRatio || 1);
+  var nativePixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+  var renderScale = 1;
+  renderer.setPixelRatio(nativePixelRatio);
 
   var scene = new THREE.Scene();
   scene.background = new THREE.Color(0x0d1117);
@@ -40,6 +42,57 @@
   var controls = new THREE.OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   controls.dampingFactor = 0.12;
+
+  // Render only when something changes. The previous perpetual RAF loop made
+  // this fairly dense STEP scene consume a full software-rendered frame even
+  // while the user was clicking controls or simply reading the page. During a
+  // camera gesture, temporarily lower the drawing-buffer resolution; CSS size
+  // is unchanged and the next idle frame is restored at native resolution.
+  var renderQueued = false;
+  var controlsActive = false;
+  var qualityRestoreReady = true;
+  var qualityRestoreTimer = null;
+  function requestRender() {
+    if (renderQueued) return;
+    renderQueued = true;
+    requestAnimationFrame(renderFrame);
+  }
+  function setRenderScale(scale) {
+    if (renderScale === scale) return;
+    renderScale = scale;
+    renderer.setPixelRatio(nativePixelRatio * renderScale);
+    resize();
+  }
+  function renderFrame() {
+    renderQueued = false;
+    var changed = controls.update();
+    renderer.render(scene, camera);
+    if (controlsActive || changed) {
+      requestRender();
+    } else if (renderScale !== 1 && qualityRestoreReady) {
+      setRenderScale(1);
+      requestRender();
+    }
+  }
+  controls.addEventListener("change", requestRender);
+  controls.addEventListener("start", function () {
+    controlsActive = true;
+    qualityRestoreReady = false;
+    if (qualityRestoreTimer !== null) clearTimeout(qualityRestoreTimer);
+    qualityRestoreTimer = null;
+    setRenderScale(0.6);
+    requestRender();
+  });
+  controls.addEventListener("end", function () {
+    controlsActive = false;
+    if (qualityRestoreTimer !== null) clearTimeout(qualityRestoreTimer);
+    qualityRestoreTimer = setTimeout(function () {
+      qualityRestoreTimer = null;
+      qualityRestoreReady = true;
+      requestRender();
+    }, 120);
+    requestRender();
+  });
 
   scene.add(new THREE.AmbientLight(0xffffff, 0.55));
   var key = new THREE.DirectionalLight(0xffffff, 0.85); key.position.set(8, -6, 14); scene.add(key);
@@ -219,6 +272,7 @@
     modelGroup.rotation.set(deg2rad(-rot[0]), deg2rad(-rot[1]), deg2rad(-rot[2]), "ZYX");
     modelGroup.position.set(off[0], off[1], off[2]);
     markDirty();
+    requestRender();
   }
 
   var AXES = ["x", "y", "z"];
@@ -260,10 +314,10 @@
   };
 
   // Visibility toggles.
-  document.getElementById("t-model").onchange = function (e) { modelGroup.visible = e.target.checked; };
-  document.getElementById("t-pads").onchange = function (e) { padGroup.visible = e.target.checked; };
-  document.getElementById("t-board").onchange = function (e) { boardGroup.visible = e.target.checked; };
-  document.getElementById("t-axes").onchange = function (e) { axes.visible = e.target.checked; };
+  document.getElementById("t-model").onchange = function (e) { modelGroup.visible = e.target.checked; requestRender(); };
+  document.getElementById("t-pads").onchange = function (e) { padGroup.visible = e.target.checked; requestRender(); };
+  document.getElementById("t-board").onchange = function (e) { boardGroup.visible = e.target.checked; requestRender(); };
+  document.getElementById("t-axes").onchange = function (e) { axes.visible = e.target.checked; requestRender(); };
 
   // ── Align by points (Fusion-style Seat / Move) ───────────────────
   // One pin→pad pick pair poses the part without touching a slider. Two modes:
@@ -409,6 +463,7 @@
     m.renderOrder = 999;
     m.position.copy(world);
     scene.add(m); alignMarkers.push(m);
+    requestRender();
   }
   function clearAlignMarkers() {
     var i;
@@ -416,6 +471,7 @@
     alignMarkers = [];
     if (snapDot) { scene.remove(snapDot); snapDot = null; }
     unhighlight();
+    requestRender();
   }
   function snapColor(kind) {
     if (kind === "pin") return 0x5ad65a;   // green — pin seat
@@ -519,6 +575,7 @@
   canvas.addEventListener("pointerleave", function () {
     if (!alignMode) return;
     unhighlight(); if (snapDot) snapDot.visible = false;
+    requestRender();
   });
 
   function handleHover(px, py) {
@@ -528,6 +585,7 @@
       unhighlight();
       if (snapDot) snapDot.visible = false;
       alignStatus("");
+      requestRender();
       return;
     }
     highlight(snap.mesh, alignStep === 1 ? modelHoverMat : padHoverMat);
@@ -537,6 +595,7 @@
       snapDot.visible = true;
     }
     alignStatus(snapSuffix(snap.kind));
+    requestRender();
   }
 
   function handlePick(px, py) {
@@ -597,10 +656,10 @@
     if (w === 0 || h === 0) return;
     renderer.setSize(w, h, false);
     camera.aspect = w / h; camera.updateProjectionMatrix();
+    requestRender();
   }
   window.addEventListener("resize", resize);
   resize();
-  (function loop() { requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); })();
 
   // ── Load the STEP model via occt-import-js (OpenCASCADE WASM) ─────
   if (!D.modelUrl) { setStatus("No STEP model for this footprint.", true); applyTransform(); return; }

@@ -27,7 +27,7 @@ $("rr-upload").addEventListener("submit",function(e){e.preventDefault();
  var form=new FormData();form.append("board",board,board.name);if(project)form.append("project",project,project.name);
  var run=$("rr-run");run.disabled=true;setStatus("Routing in memory. Dense boards can take a few minutes…","running");
  fetch("/api/kicad-route-review/run",{method:"POST",body:form}).then(parseReview)
- .then(function(j){loadReview(j);setStatus("Timeline ready"+(project?" with project rules":" (no .kicad_pro rules loaded)"),"");app.scrollIntoView({behavior:"smooth",block:"start"});})
+ .then(function(j){loadReview(j);setStatus("Timeline ready"+(project?" with project rules":" (no .kicad_pro rules loaded)"),"");app.scrollIntoView({behavior:"auto",block:"start"});})
  .catch(function(err){setStatus(err.message||"Route review failed","error");})
  .finally(function(){run.disabled=false;});
 });
@@ -41,7 +41,7 @@ designButtons.forEach(function(btn){btn.addEventListener("click",function(){
  fetch("/api/design-route-review/"+(cached?"cached/":"run/")+encodeURIComponent(name)).then(parseReview)
  .then(function(j){loadReview(j);var when=ageText(j.generated_at);
   setStatus(cached?"Saved replay loaded — "+name+(when?" (routed "+when+")":""):"Timeline ready — "+name+" routed fresh and saved for later","");
-  app.scrollIntoView({behavior:"smooth",block:"start"});})
+  app.scrollIntoView({behavior:"auto",block:"start"});})
  .catch(function(err){setStatus(err.message||"Design replay failed","error");})
  .finally(function(){designButtons.forEach(function(b){b.disabled=false;});});
 });});

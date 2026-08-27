@@ -2,7 +2,9 @@
   "name": "canopy-eda-browser-gates",
   "private": true,
   "scripts": {
-    "perf:assembly": "node scripts/pcb_browser_perf/run.js"
+    "perf:assembly": "node scripts/pcb_browser_perf/run.js",
+    "perf:ui": "node scripts/ui_browser_perf/run.js",
+    "test:perf-manifest": "node scripts/ui_browser_perf/manifest.test.js"
   },
   "devDependencies": {
     "playwright": "1.62.1"

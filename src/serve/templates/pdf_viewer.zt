@@ -1,6 +1,7 @@
-// PDF.js datasheet viewer. The actual CSS + JS module live in
-// `/static/pdf_viewer.{css,js}` so this template only carries the bare HTML
-// skeleton and a `data-pdf="…"` hook the script reads on load.
+// PDF.js datasheet viewer. The actual CSS, viewer JS, pinned PDF.js runtime,
+// and worker all live in the embedded same-origin `/static` registry, so this
+// template only carries the bare HTML skeleton and a `data-pdf="…"` hook the
+// script reads on load.
 
 pub templ Page(filename: []const u8) {
     <!DOCTYPE html>

@@ -775,7 +775,7 @@ fn writeHtmlText(w: *std.Io.Writer, text: []const u8) !void {
     };
 }
 
-fn renderPage(allocator: std.mem.Allocator, name: []const u8, index: Index, layout: ?[]const u8) ![]const u8 {
+fn renderPage(allocator: std.mem.Allocator, name: []const u8, index: Index, layout: ?[]const u8, browser_benchmark: bool) ![]const u8 {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     const w = &aw.writer;
     try w.writeAll("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
@@ -869,6 +869,7 @@ fn renderPage(allocator: std.mem.Allocator, name: []const u8, index: Index, layo
         try w.writeAll("&amp;layout=");
         try writeUrlEncoded(w, selected);
     }
+    if (browser_benchmark) try w.writeAll("&amp;fbench=quick&amp;gpu=0");
     try w.writeAll("\"></iframe></div></div>");
     try w.writeAll("</section></main>");
     try w.writeAll("<script id=\"assembly-debug-data\" type=\"application/json\">");
@@ -911,7 +912,7 @@ pub fn benchColdPage(allocator: std.mem.Allocator, project_dir: []const u8, name
     };
 
     const index = buildPageIndex(allocator, project_dir, name, block) catch return null;
-    const html = renderPage(allocator, name, index, null) catch return null;
+    const html = renderPage(allocator, name, index, null, false) catch return null;
     return html.len;
 }
 
@@ -935,6 +936,7 @@ pub fn assemblyDebugPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response
         &cache_version,
     )) return;
     const layout = queryOpt(req, "layout");
+    const browser_benchmark = if (queryOpt(req, "fbench")) |value| std.mem.eql(u8, value, "quick") else false;
     const source_path = paths.designSourcePath(allocator, ctx.project_dir, name) catch {
         res.status = 404;
         return;
@@ -972,7 +974,7 @@ pub fn assemblyDebugPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response
         return;
     };
     res.content_type = .HTML;
-    res.body = try renderPage(allocator, name, index, layout);
+    res.body = try renderPage(allocator, name, index, layout, browser_benchmark);
 }
 
 fn queryOpt(req: *httpz.Request, key: []const u8) ?[]const u8 {
@@ -1150,7 +1152,7 @@ test "page HTML is read-only and carries embed, data, and focus assets" {
         .bom_groups = &.{},
         .entities = &.{},
         .nets = &.{},
-    }, null);
+    }, null, false);
     try std.testing.expect(std.mem.indexOf(u8, html, "/pcb-layout/demo?embed=1&amp;review=1&amp;drc=0") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "model_sprites=1") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "assembly-debug-data") != null);
@@ -1172,10 +1174,17 @@ test "page HTML is read-only and carries embed, data, and focus assets" {
         .bom_groups = &.{},
         .entities = &.{},
         .nets = &.{},
-    }, "an2548-div4-post-ldo");
+    }, "an2548-div4-post-ldo", false);
     try std.testing.expect(std.mem.indexOf(u8, selected, "/pcb-layout/demo?layout=an2548-div4-post-ldo\">PCB Layout") != null);
     try std.testing.expect(std.mem.indexOf(u8, selected, "/pcb-layout/demo?view=3d&amp;layout=an2548-div4-post-ldo\">3D") != null);
     try std.testing.expect(std.mem.indexOf(u8, selected, "/pcb-layout/demo?embed=1&amp;review=1&amp;drc=0&amp;layout=an2548-div4-post-ldo") != null);
+    const benchmark = try renderPage(arena.allocator(), "demo", .{
+        .parts = &.{},
+        .bom_groups = &.{},
+        .entities = &.{},
+        .nets = &.{},
+    }, null, true);
+    try std.testing.expect(std.mem.indexOf(u8, benchmark, "?embed=1&amp;review=1&amp;drc=0&amp;fbench=quick&amp;gpu=0") != null);
     const js = @embedFile("assets/assembly_debug.js");
     try std.testing.expect(std.mem.indexOf(u8, js, "item.type !== 'bom'") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "applyBoardOrientation") != null);
@@ -1266,7 +1275,7 @@ test "assembly rework guides expose interactive Markdown targets" {
             .title = "Bodge",
             .body = "# Bodge\nReplace [[uuid:0b42c42d-94e1-5fa1-a6b5-22bed47f9b63|R44]].",
         }},
-    }, null);
+    }, null, false);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"guide-tab\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"parts-tab\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"rework-guide\"") != null);
@@ -1312,7 +1321,7 @@ test "assembly guide panel lists its guides and opens one at a time" {
             .{ .slug = "demo", .title = "Rev A rework", .body = "# Rev A rework" },
             .{ .slug = "demo-bypass", .title = "ADF4159 bypass", .body = "# ADF4159 bypass" },
         },
-    }, null);
+    }, null, false);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"guide-list\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"guide-view\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"guide-back\"") != null);
@@ -1561,7 +1570,7 @@ test "assembly opens on its parts list with the guide one tab away" {
         .entities = &.{},
         .nets = &.{},
         .guides = &.{.{ .slug = "demo", .title = "Bodge", .body = "# Bodge" }},
-    }, null);
+    }, null, false);
     // Served in the opened state, so the page never flashes the guide first.
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"parts-tab\" class=\"panel-tab active\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"guide-tab\" class=\"panel-tab\"") != null);

@@ -4484,7 +4484,7 @@ Public functions: planLayers, writeLayer
 - Gerber read-back preserves ordered polarity operations, filled contours, and native arcs for the Assembly CAM preview
 - the Assembly CAM profile preserves the authored minor fillets after Gerber write/read-back and coordinate restoration
 - generated-Gerber CAM region fillets meet straight edges without a visible chord sliver
-- the Assembly CAM payload is generated from every planned Gerber plus both Excellon drill files and carries their fabrication ID and full digest
+- the Assembly CAM payload shares one board-edge field across its fabrication identity and every planned Gerber, remains byte-identical to independently seeded layers, and carries both Excellon drill files plus the fabrication digest
 - a roundrect pad emits its rounded outline as a G36 region while a plain rect stays an R aperture
 - a custom polygon pad's mask opening dilates its original fill with a round boundary stroke by the mask margin, preserving concave notches without self-intersecting offset rings
 - custom polygon pad copper and mask preserve every authored outline vertex in Gerber while placement collision math may simplify a private copy
@@ -6356,6 +6356,8 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - physical board navigation exposes stable 3D and a read-only assembly workspace
 - the PCB 3D viewer extrudes the physical outline at the authored thickness and mounts bottom-side footprints beneath it
 - the PCB 3D viewer places its visible axis origin at the PCB outline bounding-box centre in X/Y and the board thickness mid-plane in Z, and its camera orbits that same datum
+- the PCB 3D viewer paints its base board before component previews finish, parses vendor STEP models outside the UI thread, renders only after scene or camera changes, and lowers raster density while interacting on a software WebGL renderer
+- the footprint 3D alignment viewer renders only after scene or camera changes and temporarily lowers raster density during camera gestures
 - the PCB 3D viewer asks the server for a self-contained millimetre-based AP242 assembly: each unique library STEP entity graph is embedded once without tessellation and reused through rigid component occurrences, the board outline/thickness/mechanical holes become one green analytic manifold B-rep rather than a faceted mesh, native board-outline arcs become circular edge curves and cylindrical side faces rather than chorded corner facets, and an unchecked heatsink is omitted from the assembly
 - the PCB STEP assembly places its origin at the PCB outline bounding-box centre in X/Y and the board thickness mid-plane in Z, translating component occurrences and generated solids by the same offset
 - the PCB STEP download name ends in `_ID_XXXXXXXX.step` using the exact eight-hex fabrication identity printed on that PCB
@@ -6392,6 +6394,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - assembly discovers every <design>-<slug>.rework.md companion beside the legacy guide, orders the legacy file first and the rest by filename, and never adopts another design's guide
 - a rework guide whose slug is itself a design in the same directory stays that design's own legacy guide and is never adopted by its name-prefixed neighbour
 - the schematic page serves an embedded pane variant that drops the navbar, page header, and sidebar
+- the schematic layout's deep semantic-zoom layer reuses existing inset SVGs through references instead of cloning their full DOM during a wheel gesture
 - the schematic page HTML cache keys the embedded pane apart from the full page
 - each assembly rework guide takes its title from its first Markdown H1 and falls back to its filename slug
 - the assembly guide panel opens as a clickable list of guide titles, renders one guide at a time, and returns to that list from any guide
@@ -6545,6 +6548,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The PCB page blob keeps solver-authored pad tapers fully masked and begins RF relief at the exact uniform-trace boundary
 - The Assembly board substrate paints parsed Gerber/Excellon operations instead of rebuilding fabrication artwork from browser fonts and placement objects
 - The Assembly board paints its lightweight semantic view before asynchronously loading dependency-cached Gerber/Excellon artwork, and its initial iframe omits hidden DRC, editable-layout metadata, and editor-only scripts
+- The Assembly physical-review embed omits optimizer, DRC, and route-status reporting while retaining the hidden route geometry inputs its read-only painter consumes
 - Assembly layer controls independently toggle face copper, every physical inner copper layer, solder mask, paste, silkscreen, drills, board outline, and component overlays
 - Assembly paints the closest enabled copper film from the viewed face bright gold and every enabled film behind it dim gold
 - Assembly mask openings repaint actual pour copper as bare copper while leaving only copper-free gaps as exposed substrate
@@ -6556,6 +6560,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Design Settings exposes whole-layer copper assignments with add, edit, delete, validated save, and read-only states
 - Assembly mask relief retains one authored-radius terminal fillet where a pad terminates or crosses the RF route
 - Assembly and 3D mask relief restore a local pad-shaped web without interrupting the exposed trace
+- The datasheet PDF viewer loads its pinned PDF.js runtime and worker from same-origin embedded assets, so offline/headless browsing never depends on a third-party CDN
 - The PCB page blob names the declared plane nets, and omits the key entirely when the design declares no stackup
 - The PCB page blob names the implicit model's supply-rail plane so the client DRC shares the server's plane-carried verdict
 - The PCB page blob always carries the ground-name token vocabulary so the browser's ground test cannot drift from the server's

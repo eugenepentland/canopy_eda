@@ -140,7 +140,7 @@ function loadCamReview(){
  if(!PHYSICAL_REVIEW||!PCB.cam_url||CAM_REVIEW)return;
  var start=function(){fetch(PCB.cam_url).then(function(r){if(!r.ok)throw 0;return r.json();})
   .then(function(cam){if(!cam||cam.source!=="generated-gerber"||!Array.isArray(cam.layers))return;
-   PCB.cam=cam;CAM_REVIEW=true;camLayerCache={};dragCacheDrop();paintSoon();})
+   PCB.cam=cam;CAM_REVIEW=true;reviewPaintDirty=true;camLayerCache={};dragCacheDrop();paintSoon();})
   .catch(function(){});};
  requestAnimationFrame(function(){requestAnimationFrame(start);});}
 // Full editable pages paint placement + saved tracks/vias first. Exact-state
@@ -148,14 +148,20 @@ function loadCamReview(){
 // the fast refill endpoint computes them before the dependency-cached whole-
 // board diagnostics start. If the user edits meanwhile, the saved-state result
 // is stale and is discarded.
+var deferredAnalysisSeq=0;
 function loadDeferredAnalysis(){
  if(RO||!PCB.analysis_deferred)return;
- var generation=dirtyGeneration,rev=PCB.rev;
- function current(){return generation===dirtyGeneration&&rev===PCB.rev;}
- function analysis(){if(!current())return;
+ var run=++deferredAnalysisSeq,generation=dirtyGeneration,rev=PCB.rev;
+ function current(){return run===deferredAnalysisSeq&&generation===dirtyGeneration&&rev===PCB.rev;}
+ // A normal Save can bump PCB.rev while the opening deferred request is in
+ // flight. The stale owner must hand work to one fresh generation; otherwise
+ // analysis_deferred stays true forever and every dependent control is stuck.
+ function stale(){if(current())return false;
+  if(run===deferredAnalysisSeq&&PCB.analysis_deferred)loadDeferredAnalysis();return true;}
+ function analysis(){if(stale())return;
   var u=new URL(window.location.href);u.hash="";u.searchParams.set("derived","1");
   fetch(u.pathname+u.search).then(function(r){if(!r.ok)throw 0;return r.json();})
-   .then(function(j){if(!current()||!j||j.rev!==rev)return;
+   .then(function(j){if(stale()||!j||j.rev!==rev)return;
     PCB.pours=j.pours||[];PCB.plane_fills=j.plane_fills||[];PCB.zone_fills=j.zone_fills||[];pourCacheStore(j);
     PCB.drc=drawRfRetrofitDrcMerge(j.drc||[]);
     PCB.mask_relief=j.mask_relief||{openings:[],strokes:[],joints:[]};PCB.mask_merges=j.mask_merges||[];
@@ -164,8 +170,8 @@ function loadDeferredAnalysis(){
     if(PCB.power_integrity.ac===null)loadPdnSweep();
     PCB.analysis_deferred=false;traceEmIdx=null;powerIntegrityIdx=null;traceEmDirty=false;powerIntegrityDirty=false;
     routeSummaryFrom(j);pourGeomDrop();dragCacheDrop();paintSoon();drawDrc();drcChip(PCB.drc.length);poursFresh();drawRfRetrofitSchedule();})
-   .catch(function(){if(!current())return;PCB.analysis_deferred=false;runDrcNow();drawRfRetrofitSchedule();});}
- var start=function(){pourCacheRead(function(j){if(!current())return;
+   .catch(function(){if(stale())return;PCB.analysis_deferred=false;runDrcNow();drawRfRetrofitSchedule();});}
+ var start=function(){pourCacheRead(function(j){if(stale())return;
    if(j){pourFillApply(j);poursFresh();analysis();return;}
    if(poursDeclared())refillPours({deferred:true,done:analysis});else analysis();});};
  requestAnimationFrame(function(){requestAnimationFrame(start);});}
@@ -692,6 +698,19 @@ var cur=-1,hoverGrpName=null,hoverNet=null,flashIdx=-1,flashUntil=0,flashPt=null
 // remains byte-for-byte equivalent when review focus is clear.
 var reviewFocus=null,reviewPickedRefCur=null,reviewPickedRefSide=null;
 var reviewSide="top",reviewRotation=0,reviewOriented=false;
+// Same-origin Assembly controls post orientation / CAM state into this iframe.
+// Their parent DOM changes synchronously, before the message is handled here,
+// so publish a separate snapshot only at the END of scenePaint. Browser tests
+// (and future shell integrations) can then distinguish "control changed" from
+// "the requested board state was actually applied and painted".
+var reviewPaintRevision=0,reviewPainted=null,reviewPaintDirty=true;
+function reviewPaintPublish(){if(!PHYSICAL_REVIEW||!reviewPaintDirty)return;var layers={};reviewPaintDirty=false;
+ Object.keys(camVisibility).forEach(function(k){layers[k]=camVisibility[k]!==false;});
+ reviewPainted={revision:++reviewPaintRevision,side:reviewSide,rotation:reviewRotation,
+  layers:layers,cam_review:!!CAM_REVIEW};}
+window.PCBReviewPainted=function(){if(!reviewPainted)return null;return {
+ revision:reviewPainted.revision,side:reviewPainted.side,rotation:reviewPainted.rotation,
+ layers:Object.assign({},reviewPainted.layers),cam_review:reviewPainted.cam_review};};
 function refLabel(ref){ref=String(ref||"");var slash=ref.lastIndexOf("/");return slash<0?ref:ref.slice(slash+1);}
 function reviewPartSide(p){return p&&p.side==="bottom"?"bottom":"top";}
 // Two-pad RF alignment mode. The first hit owns the moving component or whole
@@ -1322,7 +1341,12 @@ function scenePaint(){paintQueued=false;
   paintPickPreview(ctx);
   paintDraw(ctx);
   paintPadAlign(ctx,k);}
- paintFlash(ctx);}
+ paintFlash(ctx);
+ reviewPaintPublish();
+ // Exact-CAM readiness means pixels, not merely a parsed payload. Publish the
+ // opt-in benchmark timestamp only after the first full scenePaint containing
+ // generated Gerber/Excellon artwork has reached the end of its paint pass.
+ if(FBENCH&&CAM_REVIEW&&!(window.__fbenchCamReadyMs>0))window.__fbenchCamReadyMs=+performance.now().toFixed(2);}
 // One DRAG frame with the GPU live. The movers are baked OUT of the GPU's
 // pad/bore buffers once and drawn in 2D on top. The untouched 2D adornments use
 // a transparent offscreen cache (an opaque bitmap would hide WebGPU), leaving
@@ -4763,7 +4787,7 @@ function reviewPostParts(target,origin){if(!PHYSICAL_REVIEW||!target||!target.po
   innerLayers:reviewInnerLayers()},origin);}catch(e){}}
 function reviewCamVisibility(next){if(!next||typeof next!=="object")return;
  Object.keys(next).forEach(function(k){if(typeof next[k]==="boolean")camVisibility[k]=next[k];});
- dragCacheDrop();paintSoon();}
+ reviewPaintDirty=true;dragCacheDrop();paintSoon();}
 function selNet(net){if(net&&selNetCur===net)net=null;
  if(RO)reviewPickedNet(net);
  stickyNetSet(net);}
@@ -5024,7 +5048,7 @@ function reviewApplyOrientation(){if(!reviewOriented)return;
 function reviewOrient(side,rotation){var nextSide=side==="bottom"?"bottom":"top";
  var raw=parseInt(rotation,10),nextRotation=isFinite(raw)?((Math.round(raw/90)*90)%360+360)%360:0;
  if((reviewRotation%180!==0)!==(nextRotation%180!==0))reviewViewportSwap();
- reviewSide=nextSide;reviewRotation=nextRotation;reviewOriented=true;
+ reviewSide=nextSide;reviewRotation=nextRotation;reviewOriented=true;reviewPaintDirty=true;
  var next=reviewSide==="bottom"&&NSIG>1?1:0;activeLayer=next;var st=stackForSignal(next);if(st)activeStack=st.i;
  var s=document.getElementById("pcb-actlayer");if(s)s.value=String(activeStack);
  if(PCB.apSync)PCB.apSync();statusLayer();reviewApplyOrientation();
@@ -6924,6 +6948,16 @@ function viaSnap(m,net){var g=snapG(),best={x:Math.round(m.x/g)*g,y:Math.round(m
   var dx=c.x2-c.x1,dy=c.y2-c.y1,l2=dx*dx+dy*dy,u=l2?((m.x-c.x1)*dx+(m.y-c.y1)*dy)/l2:0;
   u=Math.max(0,Math.min(1,u));take(c.x1+u*dx,c.y1+u*dy);});});return best;}
 function viaSamePoint(x,y){return (PCB.vias||[]).some(function(v){return Math.hypot(v.x-x,v.y-y)<=1e-7;});}
+// Read-only browser-test/diagnostic seam: resolve one client point through the
+// exact standalone-via snap and legality gates without mutating editor state.
+// The caller still performs one real click to exercise the normal interaction.
+window.PCBViaLegalCandidate=function(clientX,clientY,net){
+ var p=svgScreenPoint(clientX,clientY),m={x:p.x/S+MX-M,y:p.y/S+MY-M},q=viaSnap(m,net),vg=viaGeo(net);
+ if(viaSamePoint(q.x,q.y)||viaViolation(q.x,q.y,net,vg.dia,vg.drill))return null;
+ var cand={x:q.x,y:q.y,d:vg.dia,drill:vg.drill,net:net,source:"human"};
+ if(drcGateBlocks(null,[cand]))return null;
+ try{var sp=svg.createSVGPoint();sp.x=X(q.x);sp.y=Y(q.y);sp=sp.matrixTransform(svg.getScreenCTM());
+  return {x:sp.x,y:sp.y,worldX:q.x,worldY:q.y};}catch(e){return null;}};
 function viaPlaceAt(m){if(!viaNet){var picked=viaPickNetAt(m);if(picked){viaNetSet(picked,true);return;}
   routeStatMsg("choose a via net below, or click a pad / existing copper",true);return;}
  var q=viaSnap(m,viaNet),vg=viaGeo(viaNet);
@@ -7581,13 +7615,19 @@ function edgePointViol(x,y,hw){var ins=boardInsetJS(x,y);if(ins==null)return fal
 // that a concave-polygon mid-cut is caught at the next sample point).
 function segEdgeViol(x1,y1,x2,y2,hw){return edgePointViol(x1,y1,hw)||edgePointViol(x2,y2,hw);}
 // World-space pad boxes on a given signal layer (SMD pads only clash on their
-// own side; thru/drilled pads on every layer). Cached per pointermove burst.
-function padBoxesOn(layer){var out=[];
+// own side; thru/drilled pads on every layer). A preview can ask for the same
+// layer several times (two posture legs, alternate posture, then clipping),
+// but pad poses cannot change during that copper gesture. Reuse the transformed
+// boxes until ovsRev's central pose/style invalidation funnel advances.
+var padBoxesCache={rev:-1,layers:null};
+function padBoxesOn(layer){if(padBoxesCache.rev!==ovsRev){padBoxesCache={rev:ovsRev,layers:Object.create(null)};}
+ var key=String(layer);if(Object.prototype.hasOwnProperty.call(padBoxesCache.layers,key))return padBoxesCache.layers[key];
+ var out=[];
  P.forEach(function(p,i){var bot=(p.side==="bottom")?1:0;
   (p.pads||[]).forEach(function(pd){var thru=(pd.drill>0);
    if(!thru&&bot!==layer)return;
    var r=wrect(i,pd);out.push({x0:r.x0,y0:r.y0,x1:r.x1,y1:r.y1,net:pd.net||"",part:i});});});
- return out;}
+ padBoxesCache.layers[key]=out;return out;}
 // Does a proposed track (x1,y1)-(x2,y2) on `layer`/`net` (half-width hw) come
 // closer than clearance to any FOREIGN copper on the same layer? Returns the
 // nearest foreign feature's clearance breach, else null. `skip` tracks (the
@@ -9514,7 +9554,7 @@ function drcGateInit(){
 // A failed/absent load leaves sLoaded=false, so the JS geometry gate runs
 // unchanged (drawing never blocks on wasm). The commit gate stays the final word.
 function drcGateSessionReload(){
- if(!drcGate.ready||drcGate.failed)return;
+ if(!drcGate.ready||drcGate.failed||!drcGateSessionAllowed())return;
  drcGate.sLoaded=false;
  try{
   var ex=drcGate.inst.exports;
@@ -9532,8 +9572,11 @@ function drcGateSessionReload(){
 // scheduleDrc runs inside the pointerup that ENDS a drag, and the reload above
 // is a whole-board drc_load on the main thread. The edit frame only MARKS the
 // session stale; an idle callback may refill it later, while a track/via/draw
-// gesture explicitly ensures it before the first probe. One refill is pending
-// at a time and always reads the latest live PCB state.
+// gesture only requests that refill before the first probe. It must not run the
+// whole-board drc_load synchronously in the tool click: on a dense board that
+// turns arming Draw/Via into a multi-frame stall. Until idle wins the race, the
+// existing JS geometry gate and exact scoped commit gate remain authoritative.
+// One refill is pending at a time and always reads the latest live PCB state.
 // Deferral is safe because sLoaded=false is the state every probe already
 // handles: drcSessProbeSeg / drcSessProbeVia / drcSessClipSeg return null and
 // segViolation / viaViolation / clipLegs fall back to their JS geometry gate.
@@ -9541,16 +9584,35 @@ function drcGateSessionReload(){
 // or a probe in the gap would answer from PRE-edit copper. The synchronous
 // commit gate (drcGateDiffBlocks, its own full check) is untouched and remains
 // the final word on what copper may land.
-var drcSessTimer=null;
+// Session construction is a single non-yielding WASM call. Count the records
+// copied into its four spatial grids (pads, tracks, vias, and drilled holes)
+// before scheduling it: 1,200 keeps this optional preview accelerator bounded
+// on the browser-perf host, while a dense board such as Barracuda would put
+// roughly four thousand records through one 570–660 ms main-thread task.
+// Dense boards keep the conservative JS preview and the SAME scoped exact WASM
+// commit gate below; only the optional persistent mid-drag accelerator is off.
+var DRC_SESS_MAIN_THREAD_MAX=1200,drcSessTimer=null;
+function drcGateSessionWork(){var n=(PCB.tracks||[]).length+2*(PCB.vias||[]).length;
+ for(var i=0;i<P.length&&n<=DRC_SESS_MAIN_THREAD_MAX;i++)for(var j=0,pads=P[i].pads||[];j<pads.length;j++){
+  n+=1+(pads[j].drill>0?1:0);if(n>DRC_SESS_MAIN_THREAD_MAX)break;}
+ return n;}
+function drcGateSessionAllowed(){return drcGateSessionWork()<=DRC_SESS_MAIN_THREAD_MAX;}
 function drcGateSessionDefer(){
  if(!drcGate.ready||drcGate.failed)return;
  drcGate.sLoaded=false;
+ if(!drcGateSessionAllowed())return;
  if(drcSessTimer)return;
- var run=function(){drcSessTimer=null;if(draftGestureLive())return;drcGateSessionReload();};
+ var run=function(){drcSessTimer=null;
+  // An idle slot can land after the next gesture has already begun. Keep one
+  // low-frequency retry alive instead of abandoning the now-stale session;
+  // the gesture continues on the JS fallback and the refill follows once the
+  // pointer is quiet. setTimeout avoids a requestIdleCallback spin while the
+  // browser reports tiny idle slices between high-rate pointer events.
+  if(draftGestureLive()){drcSessTimer=setTimeout(run,250);return;}
+  if(!drcGateSessionAllowed())return;
+  drcGateSessionReload();};
  drcSessTimer=window.requestIdleCallback?window.requestIdleCallback(run,{timeout:1000}):setTimeout(run,250);}
-function drcGateSessionEnsure(){if(drcGate.ready&&!drcGate.failed&&!drcGate.sLoaded){
- if(drcSessTimer){if(window.cancelIdleCallback)window.cancelIdleCallback(drcSessTimer);else clearTimeout(drcSessTimer);drcSessTimer=null;}
- drcGateSessionReload();}}
+function drcGateSessionEnsure(){if(drcGate.ready&&!drcGate.failed&&!drcGate.sLoaded)drcGateSessionDefer();}
 // A probe net name → its session index (nets collapse the same way pads do); a
 // name absent from the session is -1 (the engine then checks it against every
 // net — conservative, never a missed clearance).
@@ -10829,13 +10891,17 @@ function focusPart(want,keepPane){
  function findCandidate(type,title,detail,fields,data,fieldMap){return {type:type,title:String(title||""),
   detail:String(detail||""),fields:fields.filter(function(v){return !!String(v||"").trim();}),data:data,fieldMap:fieldMap||{}};}
  function findPartDetail(p){var a=[];if(p.val)a.push(p.val);if(p.fp)a.push(p.fp);if(p.side)a.push(p.side);return a.join(" · ");}
- function findNetInfo(net){var key=reviewNetKey(net),parts={},pads=0,tracks=0,vias=0,mm=0;
-  P.forEach(function(p){(p.pads||[]).forEach(function(pd){if(reviewNetKey(pd.net)!==key)return;pads++;parts[p.ref]=1;});});
-  (PCB.tracks||[]).forEach(function(t){if(reviewNetKey(t.net)!==key)return;tracks++;mm+=trackLength(t);});
-  (PCB.vias||[]).forEach(function(v){if(reviewNetKey(v.net)===key)vias++;});
-  var a=[Object.keys(parts).length+" part"+(Object.keys(parts).length===1?"":"s"),pads+" pad"+(pads===1?"":"s")];
-  if(tracks)a.push(tracks+" track"+(tracks===1?"":"s")+" · "+mm.toFixed(1)+" mm");if(vias)a.push(vias+" via"+(vias===1?"":"s"));
-  return a.join(" · ");}
+ function findNetDetails(rows){var stats=Object.create(null),any=false;
+  rows.forEach(function(r){if(r.type!=="net")return;var key=reviewNetKey(r.title);
+   stats[key]={row:r,parts:Object.create(null),pads:0,tracks:0,vias:0,mm:0};any=true;});
+  if(!any)return;
+  P.forEach(function(p){(p.pads||[]).forEach(function(pd){var s=stats[reviewNetKey(pd.net)];if(!s)return;s.pads++;s.parts[p.ref]=1;});});
+  (PCB.tracks||[]).forEach(function(t){var s=stats[reviewNetKey(t.net)];if(!s)return;s.tracks++;s.mm+=trackLength(t);});
+  (PCB.vias||[]).forEach(function(v){var s=stats[reviewNetKey(v.net)];if(s)s.vias++;});
+  Object.keys(stats).forEach(function(key){var s=stats[key],partN=Object.keys(s.parts).length;
+   var a=[partN+" part"+(partN===1?"":"s"),s.pads+" pad"+(s.pads===1?"":"s")];
+   if(s.tracks)a.push(s.tracks+" track"+(s.tracks===1?"":"s")+" · "+s.mm.toFixed(1)+" mm");
+   if(s.vias)a.push(s.vias+" via"+(s.vias===1?"":"s"));s.row.detail=a.join(" · ");});}
  function findBuild(q){var all=[];
   P.forEach(function(p,i){var leaf=reviewLeaf(p.ref),g=grpOf(p.ref),fields=[p.ref,leaf,p.val,p.fp,p.kind,p.side,g];
    all.push(findCandidate("part",refLabel(p.ref),findPartDetail(p),fields,{i:i,ref:p.ref},{
@@ -10843,7 +10909,10 @@ function focusPart(want,keepPane){
   var nets={};[].concat(Array.isArray(PCB.netnames)?PCB.netnames:[],reviewAvailableNets()).forEach(function(n){
    n=String(n||"").trim();if(!n)return;var k=reviewNetKey(n);if(!nets[k])nets[k]={name:netCollapse(n),aliases:[]};
    if(nets[k].aliases.indexOf(n)<0)nets[k].aliases.push(n);});
-  Object.keys(nets).forEach(function(k){var n=nets[k];all.push(findCandidate("net",n.name,findNetInfo(n.name),
+  // Score the cheap name/alias index first. Net details walk every pad,
+  // track, and via, so computing them for every net on every keystroke made an
+  // unrelated component or no-match search scale with all board copper.
+  Object.keys(nets).forEach(function(k){var n=nets[k];all.push(findCandidate("net",n.name,"",
    [n.name].concat(n.aliases),{net:n.aliases[0]||n.name}));});
   (PCB.drc||[]).forEach(function(d,i){var id=d.id?"#"+d.id:"",kind=d.k||"violation",who=drcBetween(d),msg=drcMsg(d);
    all.push(findCandidate("drc",(id?id+" · ":"")+kind,who||msg,[id,d.id,kind,who,drcNets(d),drcPads(d),msg,d.ref,d.net],{i:i}));});
@@ -10874,7 +10943,8 @@ function focusPart(want,keepPane){
   if(!q.tokens.length){findRows=[];findAt=-1;findInput.removeAttribute("aria-activedescendant");
    findMeta.textContent="Search components, nets, DRC violations, sub-circuits, and board text.";
    findResults.innerHTML='<div class="find-empty"><b>Try a reference, net, or rule</b><span>Use <code>ref:</code>, <code>net:</code>, <code>drc:</code>, <code>sub:</code>, <code>text:</code>, <code>value:</code>, or <code>fp:</code> to narrow it.</span><span><code>*</code> and <code>?</code> are wildcards.</span></div>';return;}
-  var matched=findBuild(q),perKind={},shown=matched.filter(function(r){perKind[r.type]=(perKind[r.type]||0)+1;return perKind[r.type]<=20;});findRows=shown;findAt=-1;
+  var matched=findBuild(q),perKind={},shown=matched.filter(function(r){perKind[r.type]=(perKind[r.type]||0)+1;return perKind[r.type]<=20;});
+  findNetDetails(shown);findRows=shown;findAt=-1;
   findMeta.textContent=matched.length+" result"+(matched.length===1?"":"s")+(matched.length>shown.length?" · first "+shown.length:"");
   if(!shown.length){findResults.innerHTML='<div class="find-empty"><b>No board items match</b><span>Check the spelling or remove the type prefix.</span></div>';return;}
   var h="",last=null;shown.forEach(function(r,i){if(r.type!==last){last=r.type;h+='<div class="find-group-h">'+findKinds[r.type][0]+'</div>';}
@@ -11296,7 +11366,7 @@ function fbRunWhenReady(){
  var deadline=((window.performance&&performance.now)?performance.now():Date.now())+240000;
  var ready=function(){
   var t=(window.performance&&performance.now)?performance.now():Date.now();
-  if(!PHYSICAL_REVIEW||!PCB.cam_url||CAM_REVIEW){fbRun();return;}
+  if(!PHYSICAL_REVIEW||(CAM_REVIEW&&window.__fbenchCamReadyMs>0)){fbRun();return;}
   if(t>=deadline){window.__fbench={error:"CAM payload did not load within 240 seconds",
    design:PCB.name,physical_review:PHYSICAL_REVIEW,cam_review:false};return;}
   setTimeout(ready,100);};
