@@ -1219,8 +1219,10 @@ pub fn resolvedDiffWidthMmOnLayer(
 }
 
 /// Process-aware inverse for single-ended width synthesis. Two calibrated
-/// correction passes are enough because the field/closed-form ratio varies
-/// smoothly with width; the final forward solve is the same one reports use.
+/// correction passes converge quickly because the field/closed-form ratio
+/// varies smoothly with width; the final forward solve is the same one reports
+/// use. Thin grounded-coplanar sections need the extra passes because a fixed
+/// slot makes that ratio more width-sensitive than ordinary microstrip.
 pub fn resolvedWidthMmOnLayerWithProcess(
     allocator: std.mem.Allocator,
     stack: Stack,
@@ -1234,8 +1236,9 @@ pub fn resolvedWidthMmOnLayerWithProcess(
     const t = stack.foilMm(resolved_layer);
     var width = refWidthForZ0WithGroundGap(ref, target_ohms, t, ground_gap_mm) catch return null;
     if (!needsField(stack, resolved_layer, coated)) return width;
-    for (0..2) |_| {
+    for (0..4) |_| {
         const process = analyzeOnLayer(allocator, stack, resolved_layer, width, ground_gap_mm, coated) orelse return null;
+        if (@abs(process.z0_ohms - target_ohms) <= 0.01) return width;
         const closed = refZ0WithGroundGap(ref, width, t, ground_gap_mm) catch return null;
         const ratio = process.z0_ohms / closed;
         if (!positive(ratio)) return null;
@@ -1258,8 +1261,9 @@ pub fn resolvedDiffWidthMmOnLayerWithProcess(
     const t = stack.foilMm(resolved_layer);
     var width = refWidthForDiffZ0(ref, target_ohms, t, pair_gap_mm) catch return null;
     if (!needsField(stack, resolved_layer, coated)) return width;
-    for (0..2) |_| {
+    for (0..4) |_| {
         const process = analyzeDiffOnLayer(allocator, stack, resolved_layer, width, pair_gap_mm, coated) orelse return null;
+        if (@abs(process.z0_ohms - target_ohms) <= 0.01) return width;
         const closed = refDiffZ0(ref, width, t, pair_gap_mm) catch return null;
         const ratio = process.z0_ohms / closed;
         if (!positive(ratio)) return null;
@@ -1757,6 +1761,16 @@ test "coated trapezoidal microstrip lowers impedance and round-trips synthesis" 
     const width = resolvedWidthMmOnLayerWithProcess(testing.allocator, stack, 1, 50, 0, true).?;
     const roundtrip = analyzeOnLayer(testing.allocator, stack, 1, width, 0, true).?;
     try testing.expectApproxEqAbs(@as(f64, 50), roundtrip.z0_ohms, 0.25);
+
+    const thin_cpwg = Stack{
+        .layers = 2,
+        .planes = &.{2},
+        .dielectrics = &.{.{ .after_layer = 1, .thickness_mm = 0.0994, .er = 4.1 }},
+        .foils = &foils,
+    };
+    const cpwg_width = resolvedWidthMmOnLayerWithProcess(testing.allocator, thin_cpwg, 1, 50, 0.1524, false).?;
+    const cpwg_roundtrip = analyzeOnLayer(testing.allocator, thin_cpwg, 1, cpwg_width, 0.1524, false).?;
+    try testing.expectApproxEqAbs(@as(f64, 50), cpwg_roundtrip.z0_ohms, 0.1);
 }
 
 // spec: placement/impedance - mixed-dielectric stripline uses each physical interval instead of collapsing the stack to one average Dk
