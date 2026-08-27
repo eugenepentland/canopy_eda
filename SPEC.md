@@ -6319,6 +6319,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The /pcb-layout accordion carries a Stuck-nets chip and its diagnostics dock
 - The Stuck-nets panel client renders the Route response's stuck diagnostics with copyable DSL remedies
 - The /pcb-layout page ships a self-contained WebGPU board renderer, on by default where the browser exposes WebGPU and inert under the ?gpu=0 opt-out
+- Assembly requires WebGPU for generated Gerber/Excellon artwork; an unavailable adapter, initialization/render failure, device loss, or Assembly ?gpu=0 displays a blocking requirement message instead of invoking a Canvas manufacturing renderer
 - Custom pads use the exact Canvas2D polygon path instead of the WebGPU triangle fan
 - The PCB status bar carries a live renderer chip that reads GPU or 2D and follows device loss
 - Hovering visible routed copper, vias, pours, or unrouted airwires identifies their net in the PCB status bar while pad hover retains its component context
@@ -6574,8 +6575,9 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The PCB page blob carries each net class's resolved mask relief and fence untent reach so the assembly view shows the shipped mask
 - The PCB page blob serves each continuous mask-relief run as one closed filleted polygon so the assembly view draws the shipped mask
 - The PCB page blob keeps solver-authored pad tapers fully masked and begins RF relief at the exact uniform-trace boundary
-- The Assembly board substrate paints parsed Gerber/Excellon operations instead of rebuilding fabrication artwork from browser fonts and placement objects
-- Assembly WebGPU renders the generated Gerber/Excellon operation stream into a retained manufacturing film and camera frames only sample that film, with Canvas2D as the unsupported-device fallback
+- The Assembly board substrate paints parsed Gerber/Excellon operations in WebGPU instead of rebuilding fabrication artwork from browser fonts and placement objects
+- Assembly WebGPU renders the generated Gerber/Excellon operation stream into a retained manufacturing film and camera frames only sample that film; Canvas2D remains only as the transparent component/interaction overlay and never interprets CAM operations
+- An opposite-face heatsink is retained in the WebGPU manufacturing film behind the opaque board instead of forcing a Canvas CAM fallback
 - The Assembly board paints its lightweight semantic view before asynchronously loading dependency-cached Gerber/Excellon artwork, and its initial iframe omits hidden DRC, editable-layout metadata, and editor-only scripts
 - The Assembly physical-review embed omits optimizer, DRC, and route-status reporting while retaining the hidden route geometry inputs its read-only painter consumes
 - Assembly layer controls independently toggle face copper, every physical inner copper layer, solder mask, paste, silkscreen, drills, board outline, and component overlays

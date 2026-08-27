@@ -28,10 +28,11 @@ function compactDockMode(){
 var STANDALONE=!!PCB.standalone;
 var MESSAGE_TARGET_ORIGIN=STANDALONE?"*":window.location.origin;
 var PHYSICAL_REVIEW=RO&&(!!PCB.physical_review||/(?:^|[?&])review=1(?:&|$)/.test(window.location.search));
-// ── WebGPU renderer (default-on, ?gpu=0 opts out) + benchmark (?fbench=1) ──
+// ── WebGPU renderer (default-on, ?gpu=0 opts the editor out) + benchmark ──
 // GPU_REQ is decided ONCE at load: on wherever the browser exposes WebGPU,
 // unless ?gpu=0. A browser with no navigator.gpu (and the Node bench, whose
-// stub has none) takes the 2D path with every seam a dead branch. It has to be
+// stub has none) takes the editor's 2D path; Assembly shows its requirement
+// panel. It has to be
 // a synchronous load-time read rather than an init result because it also
 // picks the 2D context's alpha mode, which is fixed for the canvas' lifetime
 // and must be decided before the async PCBGpu.init can answer. Alpha:true on
@@ -49,7 +50,7 @@ var GPU_REQ=!/(?:^|[?&])gpu=0(?:&|$)/.test(QS)&&!!(window.navigator&&window.navi
 // True only once PCBGpu.init has RESOLVED successfully (adapter + device +
 // pipelines). Everything gated on it is therefore off for the whole page life
 // unless the flag was passed AND the browser delivered a device.
-var gpuOn=false,
+var gpuOn=false,gpuStarting=false,gpuInitTimer=null,
     // Per-FRAME: does the GPU own copper+pads for the paint currently running?
     // scenePaint sets it around its static-branch paintScene call and clears it
     // after, so the drag-cache branch and the overscan bake (both of which must
@@ -131,7 +132,12 @@ var PH=themeFrom({bg:"#101815",mask:"#086b43",edge:"#786744",opening:"#a1854e",s
 // Assembly's manufactured artwork comes from ordered operations parsed back
 // from the exact generated Gerber/Excellon bytes. The ordinary PCB editor has
 // no `PCB.cam` payload and keeps its semantic, editable paint pipeline.
-var CAM_REVIEW=PHYSICAL_REVIEW&&PCB.cam&&PCB.cam.source==="generated-gerber"&&Array.isArray(PCB.cam.layers);
+var CAM_REVIEW=PHYSICAL_REVIEW&&PCB.cam&&PCB.cam.source==="generated-gerber"&&Array.isArray(PCB.cam.layers),camLoadStarted=false;
+// A lazy CAM URL identifies the Assembly surface (thermal review deliberately
+// has none). Assembly's manufactured artwork has one renderer: WebGPU. The 2D
+// canvas remains as a transparent interaction/component overlay, but it never
+// interprets Gerber operations and cannot become a manufacturing fallback.
+var ASSEMBLY_WEBGPU_REQUIRED=PHYSICAL_REVIEW&&!!PCB.cam_url;
 var camVisibility={copper:true,inner_copper:false,mask:true,paste:false,silk:true,drills:true,outline:true,components:true};
 function camVisible(k){return camVisibility[k]!==false;}
 // Exact manufacturing artwork is deliberately not in the page HTML. Paint the
@@ -140,11 +146,17 @@ function camVisible(k){return camVisibility[k]!==false;}
 // the first useful assembly view.
 function loadCamReview(){
  if(!PHYSICAL_REVIEW||!PCB.cam_url||CAM_REVIEW)return;
- var start=function(){fetch(PCB.cam_url).then(function(r){if(!r.ok)throw 0;return r.json();})
-  .then(function(cam){if(!cam||cam.source!=="generated-gerber"||!Array.isArray(cam.layers))return;
-   PCB.cam=cam;CAM_REVIEW=true;reviewPaintDirty=true;camLayerCache={};
+ var start=function(){
+  // A hard-required renderer should be proven before asking the server to do
+  // the comparatively expensive CAM generation. Unsupported/opted-out pages
+  // stop at the requirement card; an adapter still starting gets a short poll.
+  if(ASSEMBLY_WEBGPU_REQUIRED&&!gpuOn){if(gpuStarting)setTimeout(start,25);return;}
+  if(camLoadStarted)return;camLoadStarted=true;
+  fetch(PCB.cam_url).then(function(r){if(!r.ok)throw 0;return r.json();})
+  .then(function(cam){if(!cam||cam.source!=="generated-gerber"||!Array.isArray(cam.layers))throw new Error("invalid CAM payload");
+   PCB.cam=cam;CAM_REVIEW=true;reviewPaintDirty=true;
    if(gpuOn&&window.PCBGpu)PCBGpu.rebuildCam();dragCacheDrop();paintSoon();})
-  .catch(function(){});};
+  .catch(function(){assemblyGpuFail("The generated Gerber/Excellon artwork could not be loaded. Reload the Assembly page to try again.");});};
  requestAnimationFrame(function(){requestAnimationFrame(start);});}
 // Full editable pages paint placement + saved tracks/vias first. Exact-state
 // copper fills come from persistent browser storage when available; otherwise
@@ -404,6 +416,16 @@ const CV=document.createElement("canvas");CV.className="pcb-scene";
 (function(){var par=svg.parentNode;if(!par)return;
  if(getComputedStyle(par).position==="static")par.style.position="relative";
  par.insertBefore(CV,svg);})();
+var assemblyGpuError=null;
+function assemblyGpuFail(detail){if(!ASSEMBLY_WEBGPU_REQUIRED)return;
+ if(!assemblyGpuError){assemblyGpuError=document.createElement("div");assemblyGpuError.className="pcb-webgpu-required";
+  assemblyGpuError.setAttribute("role","alert");
+  var card=document.createElement("div"),title=document.createElement("strong"),copy=document.createElement("span");
+  title.textContent="Assembly requires WebGPU";card.appendChild(title);card.appendChild(copy);
+  assemblyGpuError.appendChild(card);sceneHost.appendChild(assemblyGpuError);}
+ var msg=assemblyGpuError.querySelector("span");if(msg)msg.textContent=detail||"WebGPU could not start in this browser. Use a WebGPU-capable browser and reload.";
+ assemblyGpuError.hidden=false;window.__pcbAssemblyWebGpuRequired=true;}
+function assemblyGpuClear(){if(assemblyGpuError)assemblyGpuError.hidden=true;window.__pcbAssemblyWebGpuRequired=false;}
 // One context for the canvas' lifetime. alpha:false — scenePaint always
 // fills the full background, so opaque compositing is free speed. Under
 // ?gpu=1 the background moves to the WebGPU canvas UNDERNEATH this one, so
@@ -1022,11 +1044,9 @@ function gpuLive(){
 // Assembly's exact-CAM renderer is independent of the editor's semantic GPU
 // gate. It owns the manufactured board films while the transparent 2D canvas
 // above retains package sprites, focus marks and every interaction overlay.
-// An opposite-face heatsink must remain behind the board, so that uncommon
-// composition deliberately falls back to the complete Canvas2D painter.
-function gpuCamLive(){var hs=heatsinkRect();
- return gpuOn&&window.PCBGpu&&PCBGpu.active&&PHYSICAL_REVIEW&&CAM_REVIEW&&!ovExclusive()
-  &&!(viewSt.vis.heatsink&&hs&&hs.w>0&&hs.h>0&&heatsinkBehindBoard(hs));}
+// There is deliberately no Canvas manufacturing fallback.
+function gpuCamLive(){
+ return gpuOn&&window.PCBGpu&&PCBGpu.active&&PHYSICAL_REVIEW&&CAM_REVIEW&&!ovExclusive();}
 // A live gesture mutates PCB.tracks / PCB.vias IN PLACE, per pointermove, with
 // no 2D cache to drop (the per-item painters read the model every frame). The
 // GPU's copper instances are BAKED, so every such mutation has to mark them.
@@ -1119,14 +1139,15 @@ function gpuState(){
   // procedural pass doesn't have, so the GPU keeps its grid through a gesture.
   gridPitch:(g>0&&g*S*k>=8)?g*S:0,gridDot:1.4/Math.max(k,0.01),
   viaDrill:viaGeo().drill};}
-function gpuCamState(){var all=PCB.cam&&PCB.cam.layers||[],out=[],cu=camCopperPaintOrder(all);
+function gpuCamState(){var all=PCB.cam&&PCB.cam.layers||[],out=[],cu=camCopperPaintOrder(all),hs=heatsinkRect();
  cu.forEach(function(L,i){out.push({id:L.id,col:PH.copper,a:i===cu.length-1?1:0.24});});
  all.forEach(function(L){if(L.kind==="mask"&&camLayerVisible(L))out.push({id:L.id,col:PH.mask,a:0.94});});
  all.forEach(function(L){if(L.kind==="paste"&&camLayerVisible(L))out.push({id:L.id,col:"#b9c5d1",a:0.72});});
  all.forEach(function(L){if(L.kind==="silk"&&camLayerVisible(L))out.push({id:L.id,col:PH.silk,a:1});});
  all.forEach(function(L){if(L.kind==="drill"&&camLayerVisible(L))out.push({id:L.id,col:PH.hole,a:1});});
  all.forEach(function(L){if(L.kind==="outline"&&camLayerVisible(L))out.push({id:L.id,col:PH.edge,a:1});});
- return {cam:{bg:PH.bg,substrate:PH.substrate,layers:out}};}
+ return {cam:{bg:PH.bg,substrate:PH.substrate,layers:out,
+  rearHeatsink:!!(viewSt.vis.heatsink&&hs&&hs.w>0&&hs.h>0&&heatsinkBehindBoard(hs))}};}
 // Antipads overlay (Layers/Appearance "Antipads"): every single-ended
 // controlled-impedance via the server solved a plane antipad for draws its
 // SOLVED opening (solid amber) and the minimum-clearance ring it is floored
@@ -1269,8 +1290,7 @@ function paintStages(ctx,k,s){
 // overlays. Called verbatim by scenePaint's quiet path and by ovsBuild, so a
 // blit can never disagree with the repaint that replaces it.
 function paintScene(ctx,k){
- if(CAM_REVIEW){if(!gpuScene){paintRearHeatsink(ctx,k);paintCamBoard(ctx,k);}
-  if(camVisible("components")){paintParts(ctx,k);paintGroupBoxes(ctx,k);}return;}
+ if(CAM_REVIEW){if(camVisible("components")){paintParts(ctx,k);paintGroupBoxes(ctx,k);}return;}
  paintStages(ctx,k,QUIET_STATE);}
 // Zoom frames render the FULL scene — a SCALED gesture blit of the previous
 // frame was tried (2026-08-06) and reverted by user preference: the soft zoom
@@ -1307,7 +1327,10 @@ function scenePaint(){paintQueued=false;
   // that would double-draw skip themselves on the same per-frame flag. Set and
   // cleared around straight-line code with no return in between.
   var camGpu=gpuCamLive();gpuScene=camGpu||gpuLive();
-  if(gpuScene&&!PCBGpu.frame(vb,camGpu?gpuCamState():gpuState()))gpuScene=false;
+  if(gpuScene&&!PCBGpu.frame(vb,camGpu?gpuCamState():gpuState())){
+   gpuScene=false;if(camGpu)assemblyGpuFail(PCBGpu.error||"The WebGPU manufacturing renderer stopped. Reload the Assembly page to restart it.");}
+  if(CAM_REVIEW&&ASSEMBLY_WEBGPU_REQUIRED&&!camGpu&&!gpuStarting)
+   assemblyGpuFail((window.PCBGpu&&PCBGpu.error)||"WebGPU could not start in this browser. Use a WebGPU-capable browser and reload.");
   ctx.setTransform(1,0,0,1,0,0);
   if(gpuScene)ctx.clearRect(0,0,w,h);
   else{ctx.fillStyle=PHYSICAL_REVIEW?PH.bg:TH.bg;ctx.fillRect(0,0,w,h);}
@@ -1588,12 +1611,9 @@ function paintPhysicalBoard(ctx,k){if(!PHYSICAL_REVIEW||!physicalBoardPath(ctx))
  ctx.strokeStyle=PH.edge;ctx.lineWidth=Math.max(1.4*ik,0.16*S);ctx.lineJoin="round";ctx.stroke();
  ctx.globalAlpha=0.22;ctx.strokeStyle="#8bc49a";ctx.lineWidth=Math.max(0.7*ik,0.05*S);ctx.stroke();
  ctx.restore();}
-// ── Gerber/Excellon read-back paint (Assembly only) ─────────────────────
-// Each layer is composed on an isolated bitmap because Gerber polarity is
-// ordered: clear operations erase earlier dark copper/opening shapes, and a
-// later dark patch may repaint them. Mask files are negative, so their dark
-// operations punch openings in an initially solid board-shaped mask bitmap.
-var camLayerCache={};
+// ── Gerber/Excellon layer policy (Assembly WebGPU only) ─────────────────
+// Visibility and physical film order stay host-owned. The generated operation
+// stream itself is retained and rendered exclusively by pcb_gpu.js.
 function camLayerVisible(L){if(!L)return false;
  if(L.kind==="copper"){
   if(L.side==="inner")return Object.prototype.hasOwnProperty.call(camVisibility,L.id)?camVisible(L.id):camVisible("inner_copper");
@@ -1601,43 +1621,10 @@ function camLayerVisible(L){if(!L)return false;
  if(L.kind==="mask"||L.kind==="paste"||L.kind==="silk")return camVisible(L.kind)&&L.side===(activeLayer===1?"bottom":"top");
  if(L.kind==="drill")return camVisible("drills");
  if(L.kind==="outline")return camVisible("outline");return false;}
-function camRoundedRect(c,x,y,w,h){var r=Math.min(w,h)/2;c.beginPath();
- if(w>=h){c.moveTo(x-w/2+r,y-h/2);c.lineTo(x+w/2-r,y-h/2);c.arc(x+w/2-r,y,r,-Math.PI/2,Math.PI/2);c.lineTo(x-w/2+r,y+h/2);c.arc(x-w/2+r,y,r,Math.PI/2,3*Math.PI/2);}
- else{c.moveTo(x-w/2,y-h/2+r);c.arc(x,y-h/2+r,r,Math.PI,0);c.lineTo(x+w/2,y+h/2-r);c.arc(x,y+h/2-r,r,0,Math.PI);c.lineTo(x-w/2,y-h/2+r);}c.closePath();}
-function camDrawOp(c,o,col){var t=o[0],dark=t==="r"?!!o[1]:!!o[o.length-1];
- c.globalCompositeOperation=dark?"source-over":"destination-out";c.fillStyle=col;c.strokeStyle=col;
- if(t==="f"){var x=X(o[1]),y=Y(o[2]),w=o[4]*S,h=o[5]*S;c.beginPath();
-  if(o[3]===0)c.arc(x,y,w/2,0,6.2832);else if(o[3]===1)c.rect(x-w/2,y-h/2,w,h);else camRoundedRect(c,x,y,w,h);c.fill();return;}
- if(t==="l"){c.lineWidth=o[5]*S;c.lineCap="round";c.beginPath();c.moveTo(X(o[1]),Y(o[2]));c.lineTo(X(o[3]),Y(o[4]));c.stroke();return;}
- if(t==="a"){var cx=X(o[5]),cy=Y(o[6]),x1=X(o[1]),y1=Y(o[2]),x2=X(o[3]),y2=Y(o[4]);
-  c.lineWidth=o[7]*S;c.lineCap="round";c.beginPath();c.arc(cx,cy,Math.hypot(x1-cx,y1-cy),Math.atan2(y1-cy,x1-cx),Math.atan2(y2-cy,x2-cx),!o[8]);c.stroke();return;}
- if(t==="r"){var ps=o[2];if(!ps||ps.length<3)return;c.beginPath();c.moveTo(X(ps[0][0]),Y(ps[0][1]));
-  for(var i=1;i<ps.length;i++)c.lineTo(X(ps[i][0]),Y(ps[i][1]));c.closePath();c.fill();}}
-function camLayerBitmap(target,L,col){var tr=target.getTransform(),key=[target.canvas.width,target.canvas.height,tr.a,tr.b,tr.c,tr.d,tr.e,tr.f,col].join("|"),hit=camLayerCache[L.id];
- if(hit&&hit.key===key)return hit.cv;var cv=hit&&hit.cv||document.createElement("canvas");cv.width=target.canvas.width;cv.height=target.canvas.height;
- var c=cv.getContext("2d",{alpha:true});c.setTransform(1,0,0,1,0,0);c.clearRect(0,0,cv.width,cv.height);c.setTransform(tr);
- // Finished-board clipping is shared by every artwork film. The visible edge
- // itself is still the parsed Profile Gerber drawn as its own layer below.
- if(physicalBoardPath(c))c.clip();
- if(L.negative){c.globalCompositeOperation="source-over";c.fillStyle=col;physicalBoardPath(c);c.fill();
-  (L.ops||[]).forEach(function(o){var dark=o[0]==="r"?!!o[1]:!!o[o.length-1];
-   var q=o.slice();if(q[0]==="r")q[1]=!dark;else q[q.length-1]=!dark;camDrawOp(c,q,col);});}
- else (L.ops||[]).forEach(function(o){camDrawOp(c,o,col);});
- camLayerCache[L.id]={key:key,cv:cv};return cv;}
-function camPaintLayer(ctx,L,col,a){var cv=camLayerBitmap(ctx,L,col);ctx.save();ctx.setTransform(1,0,0,1,0,0);ctx.globalCompositeOperation="source-over";ctx.globalAlpha=a==null?1:a;ctx.drawImage(cv,0,0);ctx.restore();}
 function camCopperPaintOrder(layers){var shown=layers.filter(function(L){return L.kind==="copper"&&camLayerVisible(L);});
  // CAM arrives in physical top-to-bottom order. Paint far-to-near so the
  // closest enabled film is last (and bright) from either board face.
  if(activeLayer===0)shown.reverse();return shown;}
-function paintCamBoard(ctx,k){if(!CAM_REVIEW)return;ctx.save();if(physicalBoardPath(ctx)){ctx.fillStyle=PH.substrate;ctx.fill();}ctx.restore();
- var layers=PCB.cam.layers||[];
- var copper=camCopperPaintOrder(layers);
- copper.forEach(function(L,i){camPaintLayer(ctx,L,PH.copper,i===copper.length-1?1:0.24);});
- layers.forEach(function(L){if(L.kind==="mask"&&camLayerVisible(L))camPaintLayer(ctx,L,PH.mask,0.94);});
- layers.forEach(function(L){if(L.kind==="paste"&&camLayerVisible(L))camPaintLayer(ctx,L,"#b9c5d1",0.72);});
- layers.forEach(function(L){if(L.kind==="silk"&&camLayerVisible(L))camPaintLayer(ctx,L,PH.silk,1);});
- layers.forEach(function(L){if(L.kind==="drill"&&camLayerVisible(L))camPaintLayer(ctx,L,PH.hole,1);});
- layers.forEach(function(L){if(L.kind==="outline"&&camLayerVisible(L))camPaintLayer(ctx,L,PH.edge,1);});}
 // KiCad-style highlight ladder: hover/selection brighten to white; marquee
 // glows keep their accent; everything else is the dim courtyard magenta.
 // A rigid sub-circuit's hover and selected states belong exclusively to its
@@ -11419,31 +11406,38 @@ function fbRunWhenReady(){
    design:PCB.name,physical_review:PHYSICAL_REVIEW,cam_review:false};return;}
   setTimeout(ready,100);};
  ready();}
-// ── WebGPU renderer boot (default-on; ?gpu=0 opts out) ─────────────────
-// Async and entirely optional: until it RESOLVES true, gpuOn is false and every
-// seam above is a dead branch, so the page renders exactly as it does today.
-// A refusal (no navigator.gpu, no adapter, any throw) or a later device loss
-// simply leaves it that way — the one repaint below restores the full 2D scene.
+// ── WebGPU renderer boot (required by Assembly; optional in the editor) ──
+// The editable PCB page retains its complete 2D path. Assembly does not: no
+// API, adapter, device, or a later device loss produces a visible hard failure
+// instead of interpreting the Gerber operation stream a second way.
 // Status-bar renderer chip (full page only — the id is absent on embeds, so
 // stSet no-ops there). Reflects the LIVE state: "2D" until init resolves,
 // "GPU" after, back to "2D" on device loss.
 function gpuStatusSync(){var e=document.getElementById("st-gpu");if(!e)return;
  e.textContent=gpuOn?"GPU":"2D";e.style.color=gpuOn?"#8be9ff":"";}
 gpuStatusSync();
+if(ASSEMBLY_WEBGPU_REQUIRED&&!GPU_REQ)assemblyGpuFail(/(?:^|[?&])gpu=0(?:&|$)/.test(QS)
+ ?"WebGPU was disabled by this URL. Remove gpu=0 and reload the Assembly page."
+ :"This browser does not expose WebGPU. Use a WebGPU-capable browser and reload the Assembly page.");
 if(GPU_REQ&&window.PCBGpu&&navigator.gpu&&CV.parentNode){
  try{
+  gpuStarting=true;
+  if(ASSEMBLY_WEBGPU_REQUIRED)gpuInitTimer=setTimeout(function(){
+   if(!gpuStarting)return;gpuStarting=false;assemblyGpuFail("WebGPU initialization timed out. Reload the Assembly page to try again.");},15000);
   PCBGpu.init({PCB:PCB,S:S,MX:MX,MY:MY,M:M,nsig:NSIG,TH:TH,
    layerColor:layerColor,ref:CV,host:CV.parentNode,
    // Colour + pour GEOMETRY hooks: the rules stay in this file (one expression,
    // shared with the 2D painters), the renderer only bakes what they return.
    trackColor:gpuTrackColor,trackChords:trackChords,viaColor:gpuViaColor,padColor:gpuPadColor,
    pours:gpuPourGeom,
-   onLost:function(){gpuOn=false;gpuStatusSync();dragCacheDrop();paintSoon();}})
-  .then(function(ok){if(!ok)return;
-   gpuOn=true;gpuStatusSync();
-   dragCacheDrop();paintSoon();})
-  .catch(function(){});
- }catch(e){}}
+   onLost:function(){if(gpuInitTimer)clearTimeout(gpuInitTimer);gpuInitTimer=null;gpuStarting=false;gpuOn=false;gpuStatusSync();
+    assemblyGpuFail((PCBGpu&&PCBGpu.error)||"The WebGPU device was lost. Reload the Assembly page to restart it.");dragCacheDrop();paintSoon();}})
+  .then(function(ok){if(gpuInitTimer)clearTimeout(gpuInitTimer);gpuInitTimer=null;gpuStarting=false;if(!ok){assemblyGpuFail((PCBGpu&&PCBGpu.error)||"WebGPU could not be initialized. Use a WebGPU-capable browser and reload.");return;}
+   gpuOn=true;assemblyGpuClear();gpuStatusSync();
+   loadCamReview();dragCacheDrop();paintSoon();})
+  .catch(function(e){if(gpuInitTimer)clearTimeout(gpuInitTimer);gpuInitTimer=null;gpuStarting=false;assemblyGpuFail(String(e&&e.message||"WebGPU could not be initialized. Reload the Assembly page."));});
+ }catch(e){if(gpuInitTimer)clearTimeout(gpuInitTimer);gpuInitTimer=null;gpuStarting=false;assemblyGpuFail(String(e&&e.message||"WebGPU could not be initialized. Reload the Assembly page."));}}
+else if(ASSEMBLY_WEBGPU_REQUIRED&&GPU_REQ)assemblyGpuFail("The WebGPU renderer did not load. Reload the Assembly page to try again.");
 if(FBENCH)hudStart(); // HUD is a bench instrument now that GPU is the default
 if(FBENCH)setTimeout(fbRunWhenReady,1000); // layout + exact CAM must settle before measurement
 })();

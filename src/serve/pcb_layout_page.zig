@@ -7837,7 +7837,7 @@ const statusbar_html =
     "; PgUp/PgDn cycle\">" ++
     "<i id=\"st-layer-sw\"></i><span id=\"st-layer-nm\"></span></span>" ++
     "<span class=\"st-seg\" id=\"st-gpu\" " ++
-    "title=\"Active renderer — WebGPU where the browser supports it, Canvas2D otherwise (?gpu=0 forces 2D)\"></span>" ++
+    "title=\"Active renderer — WebGPU where available; Assembly requires WebGPU (?gpu=0 opts only the editor into 2D)\"></span>" ++
     "<span class=\"st-seg st-tool\" id=\"st-tool\"></span><label class=\"st-seg st-bend\" id=\"st-bend\" hidden title=\"Manual trace bend angle (E toggles while routing)\">bend <select id=\"pcb-bend-angle\" aria-label=\"Manual trace bend angle\"><option value=\"45\">45\u{b0}</option><option value=\"90\">90\u{b0}</option></select></label>" ++
     "<label class=\"st-seg st-via\" id=\"st-via\" hidden title=\"Electrical net assigned to newly placed vias\">via net <select id=\"pcb-via-net\" aria-label=\"Standalone via net\"></select></label>" ++
     "<span class=\"st-spacer\"></span>" ++

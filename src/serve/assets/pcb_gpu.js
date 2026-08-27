@@ -31,9 +31,9 @@
 //  · Geometry is baked in SVG UNITS (u=(mm−MX+M)·S), the same space the 2D
 //    canvas transform works in, so the camera uniform is literally `vb` and the
 //    two renderers can never disagree about where a thing is.
-//  · Failure is always silent and total: no navigator.gpu, no adapter, a lost
-//    device or any throw ⇒ active=false and the canvas is removed, after which
-//    the page is byte-identical to the 2D-only build.
+//  · Failure is always total: no navigator.gpu, no adapter, a lost device or
+//    any throw ⇒ active=false and the GPU canvas is removed. The editor may
+//    resume its 2D path; Assembly treats that state as a visible hard failure.
 //
 // Buffers are rebuilt WHOLE (no sub-writes yet) and lazily: rebuildCopper /
 // rebuildParts / rebuildPours only set a dirty flag, so pcb_board.js can call
@@ -497,16 +497,17 @@ var ST_KEEP = { compare: "always", failOp: "keep", depthFailOp: "keep", passOp: 
 function init(opts) {
   try {
     api.error = null;
-    if (!opts || !navigator.gpu || !opts.ref || !opts.host) return Promise.resolve(false);
+    if (!opts || !opts.ref || !opts.host) { api.error = "WebGPU renderer options are incomplete"; return Promise.resolve(false); }
+    if (!navigator.gpu) { api.error = "WebGPU is not available"; return Promise.resolve(false); }
     O = opts;
     return navigator.gpu.requestAdapter().then(function (ad) {
-      if (!ad) return false;
+      if (!ad) { api.error = "No WebGPU adapter is available"; return false; }
       return ad.requestDevice().then(function (d) {
-        if (!d) return false;
+        if (!d) { api.error = "No WebGPU device is available"; return false; }
         return setup(d);
       });
-    }).catch(function () { teardown(); return false; });
-  } catch (e) { teardown(); return Promise.resolve(false); }
+    }).catch(function (e) { api.error = String(e && (e.message || e) || "WebGPU initialization failed"); teardown(); return false; });
+  } catch (e) { api.error = String(e && (e.message || e) || "WebGPU initialization failed"); teardown(); return Promise.resolve(false); }
 }
 
 function setup(d) {
@@ -515,7 +516,7 @@ function setup(d) {
   cvs.className = O.ref.className;   // .pcb-scene — absolute, pointer-events:none, z-index 0
   cvs.style.zIndex = "0";
   gctx = cvs.getContext("webgpu");
-  if (!gctx) { teardown(); return false; }
+  if (!gctx) { api.error = "A WebGPU canvas context is not available"; teardown(); return false; }
   var fmt = navigator.gpu.getPreferredCanvasFormat();
   colorFmt = fmt;
   // premultiplied: the 2D canvas above clears to transparent, so this surface
@@ -535,7 +536,7 @@ function setup(d) {
   }).catch(function () {});
   dev.onuncapturederror = function (ev) {
     api.error = String(ev.error && ev.error.message || "uncaptured WebGPU error");
-    console.error("pcb_gpu: device error, falling back to Canvas2D —", ev.error && ev.error.message);
+    console.error("pcb_gpu: device error, renderer disabled —", ev.error && ev.error.message);
     var cb = O && O.onLost;
     dispose();
     try { if (cb) cb(ev.error); } catch (e) {}
@@ -730,7 +731,8 @@ function camBoardRing() {
 }
 function camGeoDrop() {
   if (!camGeo) return;
-  [camGeo.boardBuf, camGeo.segBuf, camGeo.cirBuf, camGeo.padBuf, camGeo.polyBuf, camGeo.arcBuf]
+  [camGeo.boardBuf, camGeo.segBuf, camGeo.cirBuf, camGeo.padBuf, camGeo.polyBuf, camGeo.arcBuf,
+   camGeo.heatPadBuf, camGeo.heatSegBuf]
     .forEach(function (b) { try { if (b && b.destroy) b.destroy(); } catch (e) {} });
   camGeo = null;
   camFilmKey = "";
@@ -797,6 +799,32 @@ function camBuild() {
     }
     built.push(desc); byId[desc.id] = desc;
   }
+  // Opposite-face hardware is part of the retained film so it can sit behind
+  // the opaque substrate without reviving the Canvas CAM fallback. Its colour
+  // is baked per instance; the host decides per frame whether this is the rear
+  // face, causing one film rebuild only when orientation/visibility changes.
+  var heatPad = [], heatSeg = [], heat = null, hs = O.PCB && O.PCB.heatsink;
+  if (hs && +hs.w > 0 && +hs.h > 0) {
+    var hx0 = ux(+hs.x), hy0 = uy(+hs.y), hx1 = ux(+hs.x + +hs.w), hy1 = uy(+hs.y + +hs.h),
+        hc = rgb(hs.side === "top" ? "#f59e0b" : "#38bdf8"),
+        hcx = (hx0 + hx1) / 2, hcy = (hy0 + hy1) / 2;
+    heatPad.push(hcx, hcy, Math.abs(hx1 - hx0) / 2, Math.abs(hy1 - hy0) / 2,
+      1, 0, 0, 0, hc[0], hc[1], hc[2], 0.24);
+    function heatLine(x0, y0, x1, y1, hw, alpha) {
+      heatSeg.push(x0, y0, x1, y1, hw, 0, 0, 0, hc[0], hc[1], hc[2], alpha);
+    }
+    heatLine(hx0, hy0, hx1, hy0, 0.85, 0.24); heatLine(hx1, hy0, hx1, hy1, 0.85, 0.24);
+    heatLine(hx1, hy1, hx0, hy1, 0.85, 0.24); heatLine(hx0, hy1, hx0, hy0, 0.85, 0.24);
+    var axis = hs.fin_axis || "length", gap = Math.max(+hs.fin_gap_mm || 0, 0),
+        pitch = (+hs.fin_thickness_mm || 1) + gap, across = axis === "length" ? +hs.w : +hs.h,
+        hn = Math.min(512, Math.max(1, Math.floor((across + gap) / pitch)));
+    for (var hi = 0; hi < hn; hi++) { var hq = (hi + 0.5) / hn;
+      if (axis === "length") heatLine(hx0 + hq * (hx1 - hx0), hy0, hx0 + hq * (hx1 - hx0), hy1, 0.5, 0.7);
+      else heatLine(hx0, hy0 + hq * (hy1 - hy0), hx1, hy0 + hq * (hy1 - hy0), 0.5, 0.7);
+    }
+    heat = { x0: Math.min(hx0, hx1), y0: Math.min(hy0, hy1), x1: Math.max(hx0, hx1), y1: Math.max(hy0, hy1),
+      padRange: { first: 0, count: heatPad.length / PAD_F }, segRange: { first: 0, count: heatSeg.length / SEG_F } };
+  }
   camGeo = {
     source: src, layers: built, byId: byId,
     bounds: { x: bx0, y: by0, w: Math.max(bx1 - bx0, 1), h: Math.max(by1 - by0, 1) },
@@ -804,6 +832,7 @@ function camBuild() {
     segBuf: upload(null, new Float32Array(seg)), cirBuf: upload(null, new Float32Array(cir)),
     padBuf: upload(null, new Float32Array(pad)), polyBuf: upload(null, new Float32Array(poly)),
     arcBuf: upload(null, new Float32Array(arc)),
+    heat: heat, heatPadBuf: upload(null, new Float32Array(heatPad)), heatSegBuf: upload(null, new Float32Array(heatSeg)),
   };
   camDirty = false; camFailed = false; return true;
 }
@@ -1151,8 +1180,17 @@ function encodeCamLayer(pass, layer, slot) {
   pass.setBindGroup(1, bg1, [slot * DSTRIDE]);
   pass.setStencilReference(3); pass.setPipeline(pipeCamTint); pass.draw(3, 1, 0, 0);
 }
-function camEncodeScene(p, base, layers) {
+function camEncodeScene(p, base, layers, rearHeatsink) {
   p.setBindGroup(0, bg0); p.setBindGroup(1, bg1, [(base + S_CAM) * DSTRIDE]);
+  var heat = rearHeatsink && camGeo.heat;
+  if (heat && camGeo.heatPadBuf && heat.padRange.count) {
+    p.setStencilReference(0); p.setPipeline(pipePad); p.setVertexBuffer(0, camGeo.heatPadBuf);
+    p.draw(4, heat.padRange.count, 0, heat.padRange.first);
+  }
+  if (heat && camGeo.heatSegBuf && heat.segRange.count) {
+    p.setStencilReference(0); p.setPipeline(pipeSeg); p.setVertexBuffer(0, camGeo.heatSegBuf);
+    p.draw(4, heat.segRange.count, 0, heat.segRange.first);
+  }
   p.setStencilReference(0); p.setPipeline(pipeCamBoard); p.setVertexBuffer(0, camGeo.boardBuf);
   p.draw(camGeo.boardRange.count, 1, camGeo.boardRange.first, 0);
   p.setBindGroup(1, bg1, [(base + S_CAM + 1) * DSTRIDE]);
@@ -1162,8 +1200,14 @@ function camEncodeScene(p, base, layers) {
     if (L && want.a > 0) encodeCamLayer(p, L, base + S_CAM + 2 + i);
   }
 }
-function camFilmEnsure() {
-  var b = camGeo.bounds, limit = +(dev.limits && dev.limits.maxTextureDimension2D) || 4096;
+function camBounds(rearHeatsink) {
+  var b = camGeo.bounds, h = rearHeatsink && camGeo.heat;
+  if (!h) return b;
+  var x0 = Math.min(b.x, h.x0), y0 = Math.min(b.y, h.y0), x1 = Math.max(b.x + b.w, h.x1), y1 = Math.max(b.y + b.h, h.y1);
+  return { x: x0, y: y0, w: Math.max(x1 - x0, 1), h: Math.max(y1 - y0, 1) };
+}
+function camFilmEnsure(b) {
+  var limit = +(dev.limits && dev.limits.maxTextureDimension2D) || 4096;
   var w = Math.min(limit, Math.max(2048, cvs.width * 3)), h = Math.ceil(w * b.h / b.w);
   if (h > limit) { h = limit; w = Math.ceil(h * b.w / b.h); }
   w = Math.max(1, Math.floor(w)); h = Math.max(1, Math.floor(h));
@@ -1179,9 +1223,8 @@ function camFilmEnsure() {
   ] });
   return true;
 }
-function camBake(base, layers, key) {
-  if (!camFilmEnsure()) return false;
-  var b = camGeo.bounds;
+function camBake(base, layers, key, rearHeatsink, b) {
+  if (!camFilmEnsure(b)) return false;
   camA[0] = b.x; camA[1] = b.y; camA[2] = b.w; camA[3] = b.h;
   camA[4] = camFilmW; camA[5] = camFilmH;
   for (var ci = 6; ci < 16; ci++) camA[ci] = 0;
@@ -1192,7 +1235,7 @@ function camBake(base, layers, key) {
     depthStencilAttachment: { view: camFilmStencil.createView(),
       stencilClearValue: 0, stencilLoadOp: "clear", stencilStoreOp: "discard" },
   });
-  camEncodeScene(p, base, layers); p.end(); dev.queue.submit([enc.finish()]); camFilmKey = key;
+  camEncodeScene(p, base, layers, rearHeatsink); p.end(); dev.queue.submit([enc.finish()]); camFilmKey = key;
   return true;
 }
 function camFrame(vb, st) {
@@ -1209,9 +1252,9 @@ function camFrame(vb, st) {
   setCol(base + S_CAM + 1, cst.substrate, 1);
   for (var i = 0; i < layers.length; i++) setCol(base + S_CAM + 2 + i, layers[i].col, layers[i].a);
   dev.queue.writeBuffer(drawBuf, 0, drawA);
-  var key = JSON.stringify([cst.substrate, layers, cvs.width, cvs.height]);
-  if (!camFilm || camFilmKey !== key) if (!camBake(base, layers, key)) return false;
-  var bounds = camGeo.bounds;
+  var rearHeatsink = !!cst.rearHeatsink, bounds = camBounds(rearHeatsink),
+      key = JSON.stringify([cst.substrate, layers, rearHeatsink, cvs.width, cvs.height]);
+  if (!camFilm || camFilmKey !== key) if (!camBake(base, layers, key, rearHeatsink, bounds)) return false;
   camA[0] = vb.x; camA[1] = vb.y; camA[2] = vb.w; camA[3] = vb.h;
   camA[4] = cvs.width; camA[5] = cvs.height; camA[6] = camA[7] = 0;
   camA[8] = bounds.x; camA[9] = bounds.y; camA[10] = bounds.w; camA[11] = bounds.h;
@@ -1330,8 +1373,8 @@ function frame(vb, st) {
     dev.queue.submit([enc.finish()]);
     return true;
   } catch (e) {
-    // A validation error or a surface that vanished must never take the page
-    // down: shut the renderer off and let pcb_board.js repaint everything in 2D.
+    // A validation error or a vanished surface shuts the renderer down. The
+    // editor may repaint in 2D; Assembly surfaces the hard WebGPU requirement.
     api.error = String(e && (e.stack || e.message) || e);
     dispose();
     try { if (O && O.onLost) O.onLost(e); } catch (e2) {}

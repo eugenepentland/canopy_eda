@@ -85,6 +85,12 @@ a{color:#6ba1e8;text-decoration:none}a:hover{text-decoration:underline}
 .pcb-svg{position:absolute;inset:0;width:100%;height:100%;display:block;background:transparent;
   touch-action:none;z-index:1}
 .pcb-scene{position:absolute;pointer-events:none;z-index:0}
+.pcb-webgpu-required{position:absolute;inset:0;z-index:120;display:grid;place-items:center;padding:24px;
+  background:rgba(9,14,18,.88);pointer-events:auto;color:#d6d7db;font:13px/1.45 system-ui,sans-serif}
+.pcb-webgpu-required[hidden]{display:none}
+.pcb-webgpu-required>div{display:flex;max-width:430px;flex-direction:column;gap:8px;padding:20px 22px;
+  border:1px solid #8b5a42;border-radius:9px;background:#24211f;box-shadow:0 16px 44px rgba(0,0,0,.55)}
+.pcb-webgpu-required strong{color:#ffb48a;font-size:15px}.pcb-webgpu-required span{color:#c8c3bf}
 /* Stationary-click overlap chooser. It lives in the scene shell so its anchor
    follows the board even when the surrounding dock changes width. */
 .pcb-pick-menu{position:absolute;z-index:90;width:min(310px,calc(100% - 12px));max-height:min(390px,calc(100% - 12px));

@@ -49,10 +49,10 @@ const pcb_settings_css = @embedFile("assets/pcb_settings.css");
 // routes on its own (a full board is minutes of work).
 const pcb_stuck_js = @embedFile("assets/pcb_stuck.js");
 // WebGPU board renderer — copper, vias and pads as instanced signed-distance
-// quads on a canvas UNDER the 2D scene, camera = one uniform. Default-on when
-// available; ?gpu=0, no adapter, or a lost device leaves the Canvas2D fallback
-// in charge. Script-tagged BEFORE pcb_board.js so window.PCBGpu exists when the
-// board script boots. The small Earcut asset precedes it for Gerber regions.
+// quads on a canvas UNDER the 2D overlay, camera = one uniform. The editor can
+// opt out to its Canvas2D scene; Assembly's Gerber film requires this renderer.
+// Script-tagged BEFORE pcb_board.js so window.PCBGpu exists when the board
+// script boots. The small Earcut asset precedes it for Gerber regions.
 const pcb_gpu_js = @embedFile("assets/pcb_gpu.js");
 const pcb_earcut_js = @embedFile("assets/pcb_earcut.js");
 const route_review_js = @embedFile("assets/route_review.js");
@@ -1135,16 +1135,16 @@ test "Assembly review publishes semantic state at the completed paint seam" {
 }
 
 // spec: Web Server - Before its asynchronous CAM profile arrives, Assembly preserves the saved outline's native arcs instead of joining their endpoints as chamfers
-// spec: Web Server - The Assembly board substrate paints parsed Gerber/Excellon operations instead of rebuilding fabrication artwork from browser fonts and placement objects
+// spec: Web Server - The Assembly board substrate paints parsed Gerber/Excellon operations in WebGPU instead of rebuilding fabrication artwork from browser fonts and placement objects
 // spec: Web Server - Assembly layer controls independently toggle face copper, every physical inner copper layer, solder mask, paste, silkscreen, drills, board outline, and component overlays
 // spec: Web Server - Assembly paints the closest enabled copper film from the viewed face bright gold and every enabled film behind it dim gold
-test "Assembly review paints ordered CAM bytes with independent layer visibility" {
+test "Assembly review resolves ordered CAM policy with independent layer visibility" {
     const Check = struct { bytes: []const u8, marker: []const u8 };
     const checks = [_]Check{
         .{ .bytes = pcb_board_js, .marker = "var CAM_REVIEW=PHYSICAL_REVIEW&&PCB.cam" },
-        .{ .bytes = pcb_board_js, .marker = "function paintCamBoard" },
-        .{ .bytes = pcb_board_js, .marker = "function camDrawOp" },
-        .{ .bytes = pcb_board_js, .marker = "if(L.negative)" },
+        .{ .bytes = pcb_board_js, .marker = "function camLayerVisible" },
+        .{ .bytes = pcb_gpu_js, .marker = "function camOpDark" },
+        .{ .bytes = pcb_gpu_js, .marker = "if (L.negative) dark = !dark" },
         .{ .bytes = pcb_board_js, .marker = "if(camVisible(\"components\")){paintParts" },
         .{ .bytes = pcb_board_js, .marker = "eda-pcb-cam-visibility" },
         .{ .bytes = pcb_board_js, .marker = "PCB.cam.profile" },
@@ -1162,9 +1162,11 @@ test "Assembly review paints ordered CAM bytes with independent layer visibility
         .{ .bytes = pcb_board_js, .marker = "hasOwnProperty.call(camVisibility,L.id)" },
         .{ .bytes = pcb_board_js, .marker = "function camCopperPaintOrder" },
         .{ .bytes = pcb_board_js, .marker = "if(activeLayer===0)shown.reverse()" },
-        .{ .bytes = pcb_board_js, .marker = "i===copper.length-1?1:0.24" },
+        .{ .bytes = pcb_board_js, .marker = "i===cu.length-1?1:0.24" },
     };
     for (checks) |check| try std.testing.expect(std.mem.indexOf(u8, check.bytes, check.marker) != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "function paintCamBoard") == null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "function camDrawOp") == null);
     const draw_board = std.mem.indexOf(u8, pcb_board_js, "function drawBoardRect(tmp)") orelse return error.TestUnexpectedResult;
     const physical_return = std.mem.indexOfPos(u8, pcb_board_js, draw_board, "if(PHYSICAL_REVIEW)return;") orelse return error.TestUnexpectedResult;
     const authoring_outline = std.mem.indexOfPos(u8, pcb_board_js, draw_board, "var linePreview=") orelse return error.TestUnexpectedResult;
@@ -1655,23 +1657,32 @@ test "PCB WebGPU renderer carries its own pipelines and honours the ?gpu=0 opt-o
     try std.testing.expect(std.mem.indexOf(u8, js, "getElementById(\"st-gpu\")") != null);
 }
 
-// spec: Web Server - Assembly WebGPU renders the generated Gerber/Excellon operation stream into a retained manufacturing film and camera frames only sample that film, with Canvas2D as the unsupported-device fallback
-test "Assembly WebGPU retains exact CAM artwork instead of rerasterizing it while panning" {
+// spec: Web Server - Assembly WebGPU renders the generated Gerber/Excellon operation stream into a retained manufacturing film and camera frames only sample that film; Canvas2D remains only as the transparent component/interaction overlay and never interprets CAM operations
+// spec: Web Server - Assembly requires WebGPU for generated Gerber/Excellon artwork; an unavailable adapter, initialization/render failure, device loss, or Assembly ?gpu=0 displays a blocking requirement message instead of invoking a Canvas manufacturing renderer
+// spec: Web Server - An opposite-face heatsink is retained in the WebGPU manufacturing film behind the opaque board instead of forcing a Canvas CAM fallback
+test "Assembly requires retained WebGPU CAM artwork and keeps Canvas as an overlay" {
     const markers = [_]struct { haystack: []const u8, marker: []const u8 }{
         .{ .haystack = pcb_gpu_js, .marker = "rebuildCam: rebuildCam" },
         .{ .haystack = pcb_gpu_js, .marker = "function camBuild()" },
         .{ .haystack = pcb_gpu_js, .marker = "PCBEarcut(flat, null, 2)" },
         .{ .haystack = pcb_gpu_js, .marker = "@fragment fn fsStencilArc" },
-        .{ .haystack = pcb_gpu_js, .marker = "function camBake(base, layers, key)" },
+        .{ .haystack = pcb_gpu_js, .marker = "function camBake(base, layers, key, rearHeatsink, b)" },
         .{ .haystack = pcb_gpu_js, .marker = "textureSampleLevel(camFilm, camFilmSampler, uv, 0.0)" },
         .{ .haystack = pcb_gpu_js, .marker = "if (!camFilm || camFilmKey !== key)" },
         .{ .haystack = pcb_earcut_js, .marker = "window.PCBEarcut=Ua" },
         .{ .haystack = pcb_board_js, .marker = "function gpuCamLive()" },
         .{ .haystack = pcb_board_js, .marker = "function gpuCamState()" },
         .{ .haystack = pcb_board_js, .marker = "PCBGpu.rebuildCam()" },
-        .{ .haystack = pcb_board_js, .marker = "if(CAM_REVIEW){if(!gpuScene){paintRearHeatsink(ctx,k);paintCamBoard(ctx,k);}" },
+        .{ .haystack = pcb_board_js, .marker = "var ASSEMBLY_WEBGPU_REQUIRED=PHYSICAL_REVIEW&&!!PCB.cam_url" },
+        .{ .haystack = pcb_board_js, .marker = "function assemblyGpuFail(detail)" },
+        .{ .haystack = pcb_board_js, .marker = "Assembly requires WebGPU" },
+        .{ .haystack = pcb_layout_css, .marker = ".pcb-webgpu-required" },
+        .{ .haystack = pcb_gpu_js, .marker = "function camBounds(rearHeatsink)" },
+        .{ .haystack = pcb_gpu_js, .marker = "camEncodeScene(p, base, layers, rearHeatsink)" },
     };
     for (markers) |entry| try std.testing.expect(std.mem.indexOf(u8, entry.haystack, entry.marker) != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "function paintCamBoard") == null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "function camLayerBitmap") == null);
 }
 
 // spec: Web Server - Custom pads use the exact Canvas2D polygon path instead of the WebGPU triangle fan
