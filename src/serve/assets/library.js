@@ -527,9 +527,9 @@ function linkDatasheet(file,component){
   };
   r.readAsArrayBuffer(file);
 }
-// Attach-datasheet control on component cards: pick an already-uploaded PDF
-// (datalist filled lazily from /api/datasheets) and POST /api/attach-datasheet
-// to splice (datasheet "…") into the component's .sexp. Idempotent server-side
+// Attach-datasheet control on component cards: pick an uploaded PDF or paste
+// an HTTP(S) URL, then POST /api/attach-datasheet to splice `(datasheet "…")`
+// into the component's .sexp. Idempotent server-side
 // — "already linked" comes back as ok with a note.
 var dsOptionsLoaded=false;
 function loadDsOptions(){
@@ -555,7 +555,7 @@ document.addEventListener('click',function(e){
   var comp=card&&card.getAttribute('data-component');
   var file=input?input.value.trim():'';
   if(!comp){showToast('err','This card has no component definition to attach to',5000);return;}
-  if(!file){showToast('err','Pick an uploaded PDF first',4000);return;}
+  if(!file){showToast('err','Pick an uploaded PDF or enter an HTTP(S) URL first',4000);return;}
   showToast('pending','Attaching '+file+' to '+comp+'…');
   fetch('/api/attach-datasheet',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({component:comp,file:file})})

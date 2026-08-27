@@ -3370,6 +3370,9 @@ src/serve/datasheet_attach.zig::attachDatasheetApi | fn attachDatasheetApi(ctx: 
 src/serve/datasheet_attach.zig::datasheetStem | fn datasheetStem(name: []const u8) []const u8
 src/serve/datasheet_attach.zig::linksDatasheet | fn linksDatasheet(component_form: []const u8, pdf: []const u8) bool
 src/serve/datasheet_attach.zig::spliceDatasheet | fn spliceDatasheet( allocator: std.mem.Allocator, source: []const u8, pdf: []const u8, ) SpliceError![]u8
+src/serve/datasheet_ref.zig::isLocal | fn isLocal(value: []const u8) bool
+src/serve/datasheet_ref.zig::isRemote | fn isRemote(value: []const u8) bool
+src/serve/datasheet_ref.zig::isValid | fn isValid(value: []const u8) bool
 src/serve/datasheet_review_json.zig::write | fn write(writer: anytype, root_body: []const ast.Node) !void
 src/serve/describe_cache.zig::Store struct_
 src/serve/describe_cache.zig::deinit | fn deinit(self: *Store) void

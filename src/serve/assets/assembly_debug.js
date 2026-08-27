@@ -94,7 +94,11 @@
     return found;
   }
 
-  // Render `sheets` as links into the existing /datasheets/<file> route. The
+  function datasheetHref(sheet) {
+    return /^https?:\/\//i.test(sheet) ? sheet : `/datasheets/${encodeURIComponent(sheet)}`;
+  }
+
+  // Render local sheets through /datasheets/<file> and HTTP(S) sheets directly. The
   // click is stopped from reaching an enclosing result row so opening a PDF
   // never doubles as a selection change.
   function datasheetLinks(sheets) {
@@ -104,9 +108,9 @@
       const link = document.createElement(standalone ? 'span' : 'a');
       link.className = 'datasheet-link';
       if (!standalone) {
-        link.href = `/datasheets/${encodeURIComponent(sheet)}`;
+        link.href = datasheetHref(sheet);
         link.target = '_blank';
-        link.rel = 'noopener';
+        link.rel = 'noopener noreferrer';
         link.title = `Open ${sheet}`;
       } else {
         link.title = `${sheet} — datasheet reference from the frozen release`;

@@ -7,7 +7,8 @@
 //! schematic-sidebar link endpoints built on it) run on. The HTTP handler
 //! `attachDatasheetApi` (POST `/api/attach-datasheet` `{component, file}`)
 //! is the library page's one-click attach: it validates that both the
-//! component and the uploaded PDF exist, then performs the splice —
+//! component exists and a local PDF exists (or the reference is HTTP(S)),
+//! then performs the splice —
 //! idempotently, an already-linked datasheet returns ok with a note.
 
 const std = @import("std");
@@ -17,6 +18,7 @@ const infra_fs = @import("../infra/fs.zig");
 const edit_mod = @import("edit.zig");
 const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
+const datasheet_ref = @import("datasheet_ref.zig");
 
 /// Error set for the HTTP handler.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
@@ -156,8 +158,8 @@ fn detectIndent(source: []const u8, form_start: usize) []const u8 {
 // ── HTTP handler ─────────────────────────────────────────────────────────
 
 /// POST /api/attach-datasheet — body `{"component":"<lib name>","file":"x.pdf"}`.
-/// Validates that `lib/components/<component>.sexp` and
-/// `lib/datasheets/<file>` both exist, then splices the `(datasheet …)` form
+/// Validates the component and either an uploaded local PDF or an HTTP(S) URL,
+/// then splices the `(datasheet …)` form
 /// into the component. Idempotent: an already-linked file returns
 /// `{"ok":true,"note":"already linked"}`.
 pub fn attachDatasheetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
@@ -179,7 +181,13 @@ pub fn attachDatasheetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
     };
 
     if (!try requireExists(ctx, res, "lib/components/{s}.sexp", component, "component not found in lib/components/")) return;
-    if (!try requireExists(ctx, res, "lib/datasheets/{s}", file, "datasheet not found in lib/datasheets/ — upload it first")) return;
+    if (!datasheet_ref.isValid(file)) {
+        res.status = 400;
+        res.body = "{\"ok\":false,\"error\":\"datasheet must be an uploaded PDF name or an HTTP(S) URL\"}";
+        return;
+    }
+    if (!datasheet_ref.isRemote(file) and
+        !try requireExists(ctx, res, "lib/datasheets/{s}", file, "datasheet not found in lib/datasheets/ — upload it first")) return;
 
     const result = edit_mod.addComponentDatasheetCore(ctx.allocator, ctx.project_dir, component, file) catch |err| {
         if (err == error.DuplicateImport) {

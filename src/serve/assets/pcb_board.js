@@ -9935,7 +9935,7 @@ function wireFpCard(){var st=fpCardState;if(!st)return;
  body.querySelectorAll(".req-toggle").forEach(function(t){
   t.addEventListener("click",function(){card.classList.toggle("open");});
  });
- // Attach-datasheet control (component cards): pick an uploaded PDF.
+ // Attach-datasheet control (component cards): pick an uploaded PDF or paste an HTTP(S) URL.
  var dsTog=body.querySelector(".ds-attach-toggle"),dsBtn=body.querySelector(".ds-attach-btn"),
   dsInput=body.querySelector(".ds-attach-input");
  if(dsTog)dsTog.addEventListener("click",function(){
@@ -9946,7 +9946,7 @@ function wireFpCard(){var st=fpCardState;if(!st)return;
   var comp=card.getAttribute("data-component");
   var file=dsInput?dsInput.value.trim():"";
   if(!comp){fpCardMsg("This card has no component definition to attach to");return;}
-  if(!file){fpCardMsg("Pick an uploaded PDF first");return;}
+  if(!file){fpCardMsg("Pick an uploaded PDF or enter an HTTP(S) URL first");return;}
   fetch("/api/attach-datasheet",{method:"POST",headers:{"Content-Type":"application/json"},
    body:JSON.stringify({component:comp,file:file})})
    .then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j};});})

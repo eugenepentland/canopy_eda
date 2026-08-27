@@ -337,6 +337,7 @@ test {
     _ = @import("serve.zig");
     _ = @import("serve/assembly_debug.zig");
     _ = @import("serve/assembly_page_cache.zig");
+    _ = @import("serve/api.zig");
     _ = @import("serve/pcb_step_export.zig");
     _ = @import("serve/auth_store.zig");
     _ = @import("serve/autocommit.zig");
@@ -346,6 +347,7 @@ test {
     _ = @import("serve/component_search.zig");
     _ = @import("serve/datasheet.zig");
     _ = @import("serve/datasheet_attach.zig");
+    _ = @import("serve/datasheet_ref.zig");
     _ = @import("serve/design_diff.zig");
     _ = @import("serve/design_rules_edit.zig");
     _ = @import("serve/diag_format.zig");

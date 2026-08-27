@@ -6412,7 +6412,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - assembly review derives bare via copper only by clipping it through mask-opening geometry, including the exact authored-width board-edge band
 - Before its asynchronous CAM profile arrives, Assembly preserves the saved outline's native arcs instead of joining their endpoints as chamfers
 - assembly sidebar selections sit beside their row without scrolling a list the row is already visible in, and omit the copper focus report
-- assembly parts, BOM lines, and selections link every datasheet their components declare that is present under lib/datasheets/
+- assembly parts, BOM lines, and selections link uploaded local datasheets and HTTP(S) component datasheet URLs
 - the assembly workspace opens on its parts list, leaving the guide panel one tab click or a deep link away
 - assembly searches keyboard-highlight the first match, wrap through results with arrow keys, and activate the current row with Enter
 - assembly refdes omit connection tables, repeat pad picks select nets, and review copper picks omit reports

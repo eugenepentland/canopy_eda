@@ -6,6 +6,7 @@
 //! `eda-pcb-focus` postMessage protocol.
 
 const std = @import("std");
+const datasheet_ref = @import("datasheet_ref.zig");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
 const paths = @import("../paths.zig");
@@ -499,15 +500,16 @@ fn finishEntities(allocator: std.mem.Allocator, drafts: *std.ArrayList(EntityDra
     return out;
 }
 
-/// Component name -> the datasheet PDFs that component declares and that are
-/// present under `lib/datasheets/`.
+/// Component name -> available component datasheets: uploaded local PDFs and
+/// HTTP(S) URLs.
 const DatasheetMap = std.StringHashMapUnmanaged([]const []const u8);
 
 /// True when `lib/datasheets/<name>` is really on disk. A component may name a
 /// PDF nobody uploaded, and the assembly page links what it lists — so a
 /// missing file is dropped here rather than rendered as a link that 404s.
 fn datasheetPresent(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) bool {
-    if (name.len == 0 or std.mem.indexOfAny(u8, name, "/\\") != null) return false;
+    if (datasheet_ref.isRemote(name)) return true;
+    if (!datasheet_ref.isLocal(name)) return false;
     const path = std.fmt.allocPrint(allocator, "{s}/lib/datasheets/{s}", .{ project_dir, name }) catch return false;
     defer allocator.free(path);
     _ = infra_fs.cwd().statFile(path) catch return false;
@@ -1609,8 +1611,8 @@ test "assembly selection stays beside its row without copper reports" {
     try std.testing.expect(std.mem.indexOf(u8, js, "block: 'start'") == null);
 }
 
-// spec: Web Server - assembly parts, BOM lines, and selections link every datasheet their components declare that is present under lib/datasheets/
-test "assembly BOM lines union present datasheets and drop the ones nobody uploaded" {
+// spec: Web Server - assembly parts, BOM lines, and selections link uploaded local datasheets and HTTP(S) component datasheet URLs
+test "assembly BOM lines union available local and remote datasheets" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1619,7 +1621,9 @@ test "assembly BOM lines union present datasheets and drop the ones nobody uploa
     const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(root);
     try std.testing.expect(datasheetPresent(allocator, root, "adc.pdf"));
+    try std.testing.expect(datasheetPresent(allocator, root, "https" ++ "://example.com/adc.pdf"));
     try std.testing.expect(!datasheetPresent(allocator, root, "never-uploaded.pdf"));
+    try std.testing.expect(!datasheetPresent(allocator, root, "javascript:alert(1)"));
     try std.testing.expect(!datasheetPresent(allocator, root, "../secret.pdf"));
 
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -1662,7 +1666,7 @@ test "assembly BOM lines union present datasheets and drop the ones nobody uploa
 
     const js = @embedFile("assets/assembly_debug.js");
     try std.testing.expect(std.mem.indexOf(u8, js, "function datasheetsForRefs(refs)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "link.href = `/datasheets/${encodeURIComponent(sheet)}`") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "datasheetHref(sheet)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "button.appendChild(datasheetLinks(group.datasheets))") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "selectionDatasheets.appendChild(datasheetLinks(sheets))") != null);
     // Opening a PDF must not double as a selection change on the row it sits in.

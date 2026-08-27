@@ -21,6 +21,7 @@ const history = @import("history.zig");
 const id_insert = @import("../id_insert.zig");
 const sexpr_parser = @import("../sexpr/parser.zig");
 const datasheet_attach = @import("datasheet_attach.zig");
+const datasheet_ref = @import("datasheet_ref.zig");
 const rebuild_design = @import("rebuild_design.zig");
 const modules_mod = @import("modules.zig");
 const SexprNode = @import("../sexpr/ast.zig").Node;
@@ -2713,7 +2714,7 @@ pub fn removeSectionNoteCore(
     return error.NoteNotFound;
 }
 
-/// Splice a `(datasheet "file.pdf")` entry into the component definition at
+/// Splice a local-PDF or HTTP(S) `(datasheet "…")` entry into the component definition at
 /// `lib/components/<component>.sexp`. Dedupes — a filename whose stem already
 /// links (ignoring a re-download counter) returns `DuplicateImport` rather than
 /// re-adding. Lets the schematic sidebar link a PDF to a part with one click
@@ -2731,7 +2732,7 @@ pub fn addComponentDatasheetCore(
 ) EditError!MutationResult {
     if (pdf.len == 0) return error.InvalidSource;
     if (!safeLibName(component_name)) return error.InvalidSource;
-    if (!safePdfName(pdf)) return error.InvalidSource;
+    if (!datasheet_ref.isValid(pdf)) return error.InvalidSource;
 
     const path = try libComponentPath(allocator, project_dir, component_name);
     defer allocator.free(path);
@@ -2763,7 +2764,7 @@ pub fn removeComponentDatasheetCore(
 ) EditError!MutationResult {
     if (pdf.len == 0) return error.InvalidSource;
     if (!safeLibName(component_name)) return error.InvalidSource;
-    if (!safePdfName(pdf)) return error.InvalidSource;
+    if (!datasheet_ref.isValid(pdf)) return error.InvalidSource;
 
     const path = try libComponentPath(allocator, project_dir, component_name);
     defer allocator.free(path);
@@ -2807,17 +2808,6 @@ fn safeLibName(name: []const u8) bool {
     if (name.len == 0) return false;
     if (std.mem.indexOf(u8, name, "..") != null) return false;
     if (std.mem.indexOfAny(u8, name, "/\\") != null) return false;
-    return true;
-}
-
-fn safePdfName(name: []const u8) bool {
-    if (name.len == 0 or name.len > 255) return false;
-    if (std.mem.indexOf(u8, name, "..") != null) return false;
-    if (std.mem.indexOfAny(u8, name, "/\\\"") != null) return false;
-    for (name) |c| {
-        const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_' or c == '-' or c == '.';
-        if (!ok) return false;
-    }
     return true;
 }
 
@@ -3243,6 +3233,36 @@ test "datasheetStem keeps a trailing-digit part number intact" {
     // spec: serve/edit - datasheet stem preserves trailing-digit part numbers
     try std.testing.expectEqualStrings("lm2596", datasheet_attach.datasheetStem("lm2596.pdf"));
     try std.testing.expectEqualStrings("tps55289", datasheet_attach.datasheetStem("tps55289__2_.pdf"));
+}
+
+test "component datasheet mutations accept HTTP URLs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/remote.sexp",
+        .data = "(component remote)\n",
+    });
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    const url = "https" ++ "://example.com/part.pdf";
+
+    _ = try addComponentDatasheetCore(allocator, project_dir, "remote", url);
+    const linked = try tmp.dir.readFileAlloc(std.testing.io, "lib/components/remote.sexp", allocator, .limited64(4096));
+    try std.testing.expect(std.mem.indexOf(u8, linked, url) != null);
+
+    _ = try removeComponentDatasheetCore(allocator, project_dir, "remote", url);
+    const unlinked = try tmp.dir.readFileAlloc(std.testing.io, "lib/components/remote.sexp", allocator, .limited64(4096));
+    try std.testing.expect(std.mem.indexOf(u8, unlinked, url) == null);
+    try std.testing.expectError(error.InvalidSource, addComponentDatasheetCore(
+        allocator,
+        project_dir,
+        "remote",
+        "javascript:alert(1)",
+    ));
 }
 
 test "findInstanceOpen finds a label-declared instance by component offset" {

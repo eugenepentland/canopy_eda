@@ -327,21 +327,36 @@ pub const ComponentDetails = struct {
                 // library.zt:127
                 if (ds.present) {
                     // library.zt:128
-                    try writer.writeAll("<a");
-                    try writer.writeAll(" class=\"tag tag-datasheet\"");
-                    try writer.writeAll(" href=\"");
-                    try writer.writeAll("/datasheets/");
-                    try zt.writeEscaped(writer, ds.name);
-                    try writer.writeAll("\"");
-                    try writer.writeAll(" target=\"_blank\"");
-                    try writer.writeAll(" rel=\"noopener\"");
-                    try writer.writeAll(" title=\"Open PDF\"");
-                    try writer.writeAll(">");
-                    try writer.writeAll("📄 ");
-                    try zt.writeEscaped(writer, ds.name);
-                    try writer.writeAll("</a>");
+                    if (ds.remote) {
+                        // library.zt:129
+                        try writer.writeAll("<a");
+                        try writer.writeAll(" class=\"tag tag-datasheet\"");
+                        try zt.writeAttr(writer, "href", ds.name);
+                        try writer.writeAll(" target=\"_blank\"");
+                        try writer.writeAll(" rel=\"noopener noreferrer\"");
+                        try writer.writeAll(" title=\"Open datasheet URL\"");
+                        try writer.writeAll(">");
+                        try writer.writeAll("🔗 ");
+                        try zt.writeEscaped(writer, ds.name);
+                        try writer.writeAll("</a>");
+                    } else {
+                        // library.zt:131
+                        try writer.writeAll("<a");
+                        try writer.writeAll(" class=\"tag tag-datasheet\"");
+                        try writer.writeAll(" href=\"");
+                        try writer.writeAll("/datasheets/");
+                        try zt.writeEscaped(writer, ds.name);
+                        try writer.writeAll("\"");
+                        try writer.writeAll(" target=\"_blank\"");
+                        try writer.writeAll(" rel=\"noopener\"");
+                        try writer.writeAll(" title=\"Open PDF\"");
+                        try writer.writeAll(">");
+                        try writer.writeAll("📄 ");
+                        try zt.writeEscaped(writer, ds.name);
+                        try writer.writeAll("</a>");
+                    }
                 } else {
-                    // library.zt:130
+                    // library.zt:134
                     try writer.writeAll("<span class=\"tag tag-datasheet-missing\" title=\"PDF declared but not uploaded\">");
                     try writer.writeAll("📄 ");
                     try zt.writeEscaped(writer, ds.name);
@@ -349,30 +364,30 @@ pub const ComponentDetails = struct {
                     try writer.writeAll("</span>");
                 }
             }
-            // library.zt:133
+            // library.zt:137
             try writer.writeAll("</div>");
         }
-        // library.zt:136
+        // library.zt:140
         try writer.writeAll("<div class=\"ds-attach\">");
-        // library.zt:137
-        try writer.writeAll("<span class=\"ds-attach-toggle\" title=\"Link an already-uploaded PDF (lib/datasheets/) to this part\">");
+        // library.zt:141
+        try writer.writeAll("<span class=\"ds-attach-toggle\" title=\"Link an uploaded PDF or an HTTP(S) datasheet URL to this part\">");
         try writer.writeAll("📎 attach datasheet");
         try writer.writeAll("</span>");
-        // library.zt:138
+        // library.zt:142
         try writer.writeAll("<span class=\"ds-attach-row\" hidden>");
-        // library.zt:139
-        try writer.writeAll("<input type=\"text\" class=\"ds-attach-input\" list=\"lib-ds-options\" placeholder=\"uploaded PDF…\">");
-        // library.zt:140
+        // library.zt:143
+        try writer.writeAll("<input type=\"text\" class=\"ds-attach-input\" list=\"lib-ds-options\" placeholder=\"uploaded PDF or https:// URL…\">");
+        // library.zt:144
         try writer.writeAll("<button class=\"ds-attach-btn\" type=\"button\">");
         try writer.writeAll("Attach");
         try writer.writeAll("</button>");
-        // library.zt:141
+        // library.zt:145
         try writer.writeAll("</span>");
-        // library.zt:142
+        // library.zt:146
         try writer.writeAll("</div>");
-        // library.zt:143
+        // library.zt:147
         if (row.footprint) |fp| {
-            // library.zt:144
+            // library.zt:148
             try writer.writeAll("<div");
             try writer.writeAll(" class=\"fp-preview\"");
             try zt.writeAttr(writer, "data-fp", fp);

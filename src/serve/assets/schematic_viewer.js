@@ -1172,8 +1172,9 @@
         '<h4>' + escapeHtml(componentName) + ' pinout</h4>';
       // Datasheet + requirements strip sits under the title, always visible.
       // Datasheets are declared in the component's lib/components/<name>.sexp
-      // as `(datasheet "file.pdf")` and uploaded generically to /api/upload-
-      // datasheet; this panel just links to whatever is declared. Requirements
+      // as either a local PDF filename or an HTTP(S) URL. Local files are
+      // uploaded generically to /api/upload-datasheet; this panel links both.
+      // Requirements
       // are read-only rules ("VDD must be decoupled within 3mm") that tie
       // library parts to validation steps during schematic review.
       var safe = escapeHtml(componentName);
@@ -1183,8 +1184,11 @@
       if (dsList.length) {
         html += '<ul class="sb-ds-list">' + dsList.map(function (d) {
           var name = escapeHtml(d.name);
-          var kb = d.size ? ' <span class="sb-ds-size">(' + Math.round(d.size / 1024) + ' KB)</span>' : ' <span class="sb-ds-missing">(uploaded file missing)</span>';
-          return '<li><a href="/datasheets/' + encodeURIComponent(d.name) + '" target="_blank" rel="noopener">📄 ' + name + '</a>' + kb +
+          var href = d.remote ? name : '/datasheets/' + encodeURIComponent(d.name);
+          var icon = d.remote ? '🔗 ' : '📄 ';
+          var kb = d.remote ? ' <span class="sb-ds-size">(web)</span>' :
+            (d.size ? ' <span class="sb-ds-size">(' + Math.round(d.size / 1024) + ' KB)</span>' : ' <span class="sb-ds-missing">(uploaded file missing)</span>');
+          return '<li><a href="' + href + '" target="_blank" rel="noopener noreferrer">' + icon + name + '</a>' + kb +
             ' <button class="sb-ds-unlink" data-pdf="' + name + '" title="Unlink from ' + safe + '">✕</button></li>';
         }).join('') + '</ul>';
       } else {
@@ -1194,7 +1198,7 @@
       // inline upload for new PDFs. Selecting + clicking Link splices
       // `(datasheet "...")` into lib/components/<component>.sexp.
       html += '<div class="sb-ds-link-row">' +
-        '<input type="text" class="sb-ds-search" list="sb-ds-options" placeholder="search uploaded PDFs…" />' +
+        '<input type="text" class="sb-ds-search" list="sb-ds-options" placeholder="uploaded PDF or https:// URL…" />' +
         '<datalist id="sb-ds-options"></datalist>' +
         '<button class="sb-ds-link-btn">Link</button>' +
         '</div>';

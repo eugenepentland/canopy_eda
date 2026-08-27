@@ -116,7 +116,11 @@ pub templ ComponentDetails(row: LibraryRow) {
         <div class="card-tags">
             for (row.datasheets) |ds| {
                 if (ds.present) {
-                    <a class="tag tag-datasheet" href="/datasheets/{ds.name}" target="_blank" rel="noopener" title="Open PDF">📄 {ds.name}</a>
+                    if (ds.remote) {
+                        <a class="tag tag-datasheet" href={ds.name} target="_blank" rel="noopener noreferrer" title="Open datasheet URL">🔗 {ds.name}</a>
+                    } else {
+                        <a class="tag tag-datasheet" href="/datasheets/{ds.name}" target="_blank" rel="noopener" title="Open PDF">📄 {ds.name}</a>
+                    }
                 } else {
                     <span class="tag tag-datasheet-missing" title="PDF declared but not uploaded">📄 {ds.name} (missing)</span>
                 }
@@ -124,9 +128,9 @@ pub templ ComponentDetails(row: LibraryRow) {
         </div>
     }
     <div class="ds-attach">
-        <span class="ds-attach-toggle" title="Link an already-uploaded PDF (lib/datasheets/) to this part">📎 attach datasheet</span>
+        <span class="ds-attach-toggle" title="Link an uploaded PDF or an HTTP(S) datasheet URL to this part">📎 attach datasheet</span>
         <span class="ds-attach-row" hidden>
-            <input type="text" class="ds-attach-input" list="lib-ds-options" placeholder="uploaded PDF…" />
+            <input type="text" class="ds-attach-input" list="lib-ds-options" placeholder="uploaded PDF or https:// URL…" />
             <button class="ds-attach-btn" type="button">Attach</button>
         </span>
     </div>

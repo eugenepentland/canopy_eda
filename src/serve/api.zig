@@ -52,6 +52,7 @@ const ok_version_template = "{{\"ok\":true,\"version\":{d}}}";
 const err_ok_false_template = "{{\"ok\":false,\"error\":\"{s}\"}}";
 const name_field_prefix = "{\"name\":";
 const empty_datasheets_reqs = ",\"datasheets\":[],\"requirements\":[]";
+const datasheet_ref = @import("datasheet_ref.zig");
 
 /// Error set for HTTP handlers in this module. Wide because handlers
 /// orchestrate many subsystems (eval, render, parser, file IO, BOM resolve)
@@ -318,10 +319,11 @@ fn writeComponentLibInfo(
         const ds = cl[1].asString() orelse (cl[1].asAtom() orelse continue);
         if (!first_ds) try w.writeAll(",");
         first_ds = false;
-        const size = datasheetSize(allocator, project_dir, ds);
+        const remote = datasheet_ref.isRemote(ds);
+        const size = if (remote) 0 else datasheetSize(allocator, project_dir, ds);
         try w.writeAll(name_field_prefix);
         try json_writer.writeString(w, ds);
-        try w.print(",\"size\":{d}}}", .{size});
+        try w.print(",\"size\":{d},\"remote\":{s}}}", .{ size, if (remote) "true" else "false" });
     }
     try w.writeAll("]");
 
@@ -358,12 +360,36 @@ fn writeComponentLibInfo(
 /// Used by the sidebar pinout panel so users can see which declared
 /// datasheets have actually been uploaded without an extra round-trip.
 fn datasheetSize(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) u64 {
+    if (!datasheet_ref.isLocal(name)) return 0;
     const path = std.fmt.allocPrint(allocator, "{s}/lib/datasheets/{s}", .{ project_dir, name }) catch return 0;
     defer allocator.free(path);
     const f = infra_fs.cwd().openFile(path, .{}) catch return 0;
     defer f.close();
     const stat = f.stat() catch return 0;
     return stat.size;
+}
+
+test "component library info marks HTTP datasheets as remote" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/remote.sexp",
+        .data = "(component remote (datasheet \"https" ++ "://example.com/part.pdf\"))\n",
+    });
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    try writeComponentLibInfo(allocator, &out.writer, project_dir, "remote");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        out.written(),
+        "\"name\":\"https" ++ "://example.com/part.pdf\",\"size\":0,\"remote\":true",
+    ) != null);
 }
 
 /// GET /api/export-kicad/:name — build the design, resolve BOM identities,

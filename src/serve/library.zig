@@ -16,6 +16,7 @@ const autocommit = @import("autocommit.zig");
 const footprint_preview = @import("footprint_preview.zig");
 const upload = @import("upload.zig");
 const lib_limits = @import("../lib_limits.zig");
+const datasheet_ref = @import("datasheet_ref.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const sexp_ext_len: usize = ".sexp".len;
@@ -49,19 +50,18 @@ pub const LibraryRow = struct {
     mpn: ?[]const u8 = null,
     pin_count: ?usize = null,
     requirements: []const []const u8 = &.{},
-    /// PDF documents declared by the component via `(datasheet "…")`, rendered
-    /// as links to `/datasheets/<name>` on the library page. Empty when the
-    /// component declares none.
+    /// Documents declared by the component via `(datasheet "…")`. Local PDFs
+    /// link through `/datasheets/<name>`; HTTP(S) references link directly.
     datasheets: []const Datasheet = &.{},
 
     pub const Kind = enum { family, component, pinout, footprint };
 
-    /// One declared datasheet. `present` is false when the PDF is referenced
-    /// but not actually in `lib/datasheets/`, so the template can flag it as
-    /// missing instead of rendering a dead link.
+    /// One declared datasheet. Remote HTTP(S) references are always available;
+    /// `present` distinguishes uploaded and missing local PDFs.
     pub const Datasheet = struct {
         name: []const u8,
         present: bool,
+        remote: bool,
     };
 };
 
@@ -579,10 +579,8 @@ fn extractRequirements(allocator: std.mem.Allocator, content: []const u8) ![]con
     return list.toOwnedSlice(allocator);
 }
 
-/// Scan `content` for `(datasheet "...")` forms and return the quoted PDF
-/// filenames (slices into `content`) paired with whether the file actually
-/// exists in `lib/datasheets/`. A component may declare several, so this
-/// collects every match rather than stopping at the first like `extractField`.
+/// Scan `content` for `(datasheet "...")` forms. HTTP(S) references are
+/// available directly; local filenames are paired with their on-disk state.
 fn extractDatasheets(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
@@ -598,7 +596,12 @@ fn extractDatasheets(
         const end = findClosingQuote(content, pos) orelse break;
         const name = content[pos..end];
         pos = end + 1;
-        try list.append(allocator, .{ .name = name, .present = datasheetExists(allocator, project_dir, name) });
+        const remote = datasheet_ref.isRemote(name);
+        try list.append(allocator, .{
+            .name = name,
+            .present = remote or datasheetExists(allocator, project_dir, name),
+            .remote = remote,
+        });
     }
     return list.toOwnedSlice(allocator);
 }
@@ -606,6 +609,7 @@ fn extractDatasheets(
 /// True when `lib/datasheets/<name>` exists on disk — lets the library page
 /// flag a declared-but-unuploaded PDF instead of rendering a 404 link.
 fn datasheetExists(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) bool {
+    if (!datasheet_ref.isLocal(name)) return false;
     const path = std.fmt.allocPrint(allocator, "{s}/lib/datasheets/{s}", .{ project_dir, name }) catch return false;
     defer allocator.free(path);
     _ = infra_fs.cwd().statFile(path) catch return false;
@@ -740,6 +744,7 @@ test "library card resolves a component before a footprint and carries datasheet
     try std.testing.expectEqualStrings("Acme", row.manufacturer.?);
     try std.testing.expectEqual(@as(usize, 1), row.datasheets.len);
     try std.testing.expectEqualStrings("dup.pdf", row.datasheets[0].name);
+    try std.testing.expect(!row.datasheets[0].remote);
 
     // Footprint-only name still resolves to a footprint card.
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/footprints/only-fp.sexp", .data = "(footprint only-fp)\n" });
@@ -748,6 +753,36 @@ test "library card resolves a component before a footprint and carries datasheet
 
     // Unknown names resolve to nothing.
     try std.testing.expect(rowForName(aa, proj, "nope") == null);
+}
+
+test "library card treats HTTP datasheets as available external links" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/remote.sexp",
+        .data = "(component \"remote\" (datasheet \"https" ++ "://example.com/part.pdf\"))\n",
+    });
+    const proj = try tmp.dir.realPathFileAlloc(std.testing.io, ".", aa);
+
+    const row = rowForName(aa, proj, "remote") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), row.datasheets.len);
+    try std.testing.expect(row.datasheets[0].remote);
+    try std.testing.expect(row.datasheets[0].present);
+
+    var rendered: std.Io.Writer.Allocating = .init(aa);
+    try library_template.Card.render(.{row}, &rendered.writer);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        rendered.written(),
+        "href=\"https" ++ "://example.com/part.pdf\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.written(), "/datasheets/https") == null);
 }
 
 // The PCB editor's sidebar footprint button opens the part's library card; this
