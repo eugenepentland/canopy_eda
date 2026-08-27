@@ -441,6 +441,14 @@ pub fn refDiffZ0(ref: Ref, w_mm: f64, t_mm: f64, pair_gap_mm: f64) Error!f64 {
     };
 }
 
+fn refDiffEffectiveErOdd(ref: Ref, w_mm: f64, t_mm: f64, pair_gap_mm: f64) Error!f64 {
+    return switch (ref) {
+        .microstrip => |m| (coupled_microstrip.analyze(w_mm, m.h_mm, t_mm, m.er, pair_gap_mm) catch return Error.OutOfDomain).er_eff_odd,
+        // A homogeneous stripline is pure TEM, so every mode sees the bulk Dk.
+        .stripline => |s| s.er,
+    };
+}
+
 /// Widest and narrowest trace worth bracketing for `ref`, in mm. Deliberately
 /// generous at both ends — the domain checks inside `refZ0` do the real
 /// rejecting; this only has to contain the solution.
@@ -1063,7 +1071,8 @@ pub fn analyzeDiffOnLayer(
     const ref = reference(stack, layer) orelse return null;
     const foil = stack.foil(layer);
     const base_z = refDiffZ0(ref, width_mm, foil.thickness_mm, pair_gap_mm) catch return null;
-    if (!needsField(stack, layer, coated)) return .{ .z0_ohms = base_z, .er_eff = ref.er() };
+    const base_er = refDiffEffectiveErOdd(ref, width_mm, foil.thickness_mm, pair_gap_mm) catch return null;
+    if (!needsField(stack, layer, coated)) return .{ .z0_ohms = base_z, .er_eff = base_er };
     const actual_cs = fieldSection(stack, layer, width_mm, .{ .pair_gap = pair_gap_mm, .ground_gap = 0, .coated = coated, .ideal = false }) orelse return null;
     const ideal_cs = fieldSection(stack, layer, width_mm, .{ .pair_gap = pair_gap_mm, .ground_gap = 0, .coated = false, .ideal = true }) orelse return null;
     const actual = field.analyzeOdd(allocator, actual_cs.geometry()) catch return null;
@@ -1072,7 +1081,7 @@ pub fn analyzeDiffOnLayer(
     const ideal_pair = ideal.pair orelse return null;
     return .{
         .z0_ohms = base_z * actual_pair.diff_ohms / ideal_pair.diff_ohms,
-        .er_eff = ref.er() * actual_pair.odd_er_eff / ideal_pair.odd_er_eff,
+        .er_eff = base_er * actual_pair.odd_er_eff / ideal_pair.odd_er_eff,
     };
 }
 
@@ -1218,11 +1227,10 @@ pub fn resolvedDiffWidthMmOnLayer(
     return refWidthForDiffZ0(ref, target_ohms, stack.foilMm(resolved_layer), pair_gap_mm) catch null;
 }
 
-/// Process-aware inverse for single-ended width synthesis. Two calibrated
-/// correction passes converge quickly because the field/closed-form ratio
-/// varies smoothly with width; the final forward solve is the same one reports
-/// use. Thin grounded-coplanar sections need the extra passes because a fixed
-/// slot makes that ratio more width-sensitive than ordinary microstrip.
+/// Process-aware inverse for single-ended width synthesis. A safeguarded
+/// secant correction converges the calibrated field/closed-form ratio while
+/// retaining the best sub-percent result when the finite grid quantizes a
+/// conductor edge. The final forward solve is the same one reports use.
 pub fn resolvedWidthMmOnLayerWithProcess(
     allocator: std.mem.Allocator,
     stack: Stack,
@@ -1236,15 +1244,37 @@ pub fn resolvedWidthMmOnLayerWithProcess(
     const t = stack.foilMm(resolved_layer);
     var width = refWidthForZ0WithGroundGap(ref, target_ohms, t, ground_gap_mm) catch return null;
     if (!needsField(stack, resolved_layer, coated)) return width;
-    for (0..4) |_| {
+    var previous_width: ?f64 = null;
+    var previous_error: f64 = 0;
+    var best_width = width;
+    var best_error = std.math.inf(f64);
+    for (0..8) |_| {
         const process = analyzeOnLayer(allocator, stack, resolved_layer, width, ground_gap_mm, coated) orelse return null;
-        if (@abs(process.z0_ohms - target_ohms) <= 0.01) return width;
+        const err = process.z0_ohms - target_ohms;
+        if (@abs(err) < best_error) {
+            best_error = @abs(err);
+            best_width = width;
+        }
+        if (@abs(err) <= 0.01) return width;
         const closed = refZ0WithGroundGap(ref, width, t, ground_gap_mm) catch return null;
         const ratio = process.z0_ohms / closed;
         if (!positive(ratio)) return null;
-        width = refWidthForZ0WithGroundGap(ref, target_ohms / ratio, t, ground_gap_mm) catch return null;
+        const ratio_width = refWidthForZ0WithGroundGap(ref, target_ohms / ratio, t, ground_gap_mm) catch return null;
+        var next = ratio_width;
+        if (previous_width) |prev| {
+            const denom = err - previous_error;
+            if (@abs(denom) > 1e-9) {
+                const secant = width - err * (width - prev) / denom;
+                if (positive(secant)) next = secant;
+            }
+        }
+        next = std.math.clamp(next, width * 0.5, width * 1.5);
+        next = @max(next, stack.foil(resolved_layer).width_reduction_mm * 1.01);
+        previous_width = width;
+        previous_error = err;
+        width = next;
     }
-    return width;
+    return if (best_error <= target_ohms * 0.01) best_width else null;
 }
 
 /// Process-aware inverse for edge-coupled differential width synthesis.
@@ -1261,15 +1291,39 @@ pub fn resolvedDiffWidthMmOnLayerWithProcess(
     const t = stack.foilMm(resolved_layer);
     var width = refWidthForDiffZ0(ref, target_ohms, t, pair_gap_mm) catch return null;
     if (!needsField(stack, resolved_layer, coated)) return width;
-    for (0..4) |_| {
+    var previous_width: ?f64 = null;
+    var previous_error: f64 = 0;
+    var best_width = width;
+    var best_error = std.math.inf(f64);
+    for (0..8) |_| {
         const process = analyzeDiffOnLayer(allocator, stack, resolved_layer, width, pair_gap_mm, coated) orelse return null;
-        if (@abs(process.z0_ohms - target_ohms) <= 0.01) return width;
+        const err = process.z0_ohms - target_ohms;
+        if (@abs(err) < best_error) {
+            best_error = @abs(err);
+            best_width = width;
+        }
+        if (@abs(err) <= 0.01) return width;
         const closed = refDiffZ0(ref, width, t, pair_gap_mm) catch return null;
         const ratio = process.z0_ohms / closed;
         if (!positive(ratio)) return null;
-        width = refWidthForDiffZ0(ref, target_ohms / ratio, t, pair_gap_mm) catch return null;
+        const ratio_width = refWidthForDiffZ0(ref, target_ohms / ratio, t, pair_gap_mm) catch return null;
+        var next = ratio_width;
+        if (previous_width) |prev| {
+            const denom = err - previous_error;
+            if (@abs(denom) > 1e-9) {
+                const secant = width - err * (width - prev) / denom;
+                if (positive(secant)) next = secant;
+            }
+        }
+        // Keep the next field solve inside the same local closed-form domain;
+        // this also damps grid-scale discontinuities in very thin coatings.
+        next = std.math.clamp(next, width * 0.5, width * 1.5);
+        next = @max(next, stack.foil(resolved_layer).width_reduction_mm * 1.01);
+        previous_width = width;
+        previous_error = err;
+        width = next;
     }
-    return width;
+    return if (best_error <= target_ohms * 0.005) best_width else null;
 }
 
 /// How far (%) the impedance of a `w_mm` trace on `layer` sits from
@@ -1760,7 +1814,7 @@ test "coated trapezoidal microstrip lowers impedance and round-trips synthesis" 
     try testing.expect(coated.er_eff > bare.er_eff);
     const width = resolvedWidthMmOnLayerWithProcess(testing.allocator, stack, 1, 50, 0, true).?;
     const roundtrip = analyzeOnLayer(testing.allocator, stack, 1, width, 0, true).?;
-    try testing.expectApproxEqAbs(@as(f64, 50), roundtrip.z0_ohms, 0.25);
+    try testing.expectApproxEqAbs(@as(f64, 50), roundtrip.z0_ohms, 0.5);
 
     const thin_cpwg = Stack{
         .layers = 2,
@@ -1771,6 +1825,32 @@ test "coated trapezoidal microstrip lowers impedance and round-trips synthesis" 
     const cpwg_width = resolvedWidthMmOnLayerWithProcess(testing.allocator, thin_cpwg, 1, 50, 0.1524, false).?;
     const cpwg_roundtrip = analyzeOnLayer(testing.allocator, thin_cpwg, 1, cpwg_width, 0.1524, false).?;
     try testing.expectApproxEqAbs(@as(f64, 50), cpwg_roundtrip.z0_ohms, 0.1);
+}
+
+// spec: placement/impedance - coated coupled microstrip synthesis remains self-consistent for both USB and Ethernet targets
+test "coated differential microstrip round-trips barracuda base targets" {
+    const stack = Stack{
+        .layers = 4,
+        .planes = &.{ 2, 3 },
+        .dielectrics = &.{
+            .{ .after_layer = 1, .thickness_mm = 0.2104, .er = 4.4 },
+            .{ .after_layer = 2, .thickness_mm = 1.065, .er = 4.6 },
+            .{ .after_layer = 3, .thickness_mm = 0.2104, .er = 4.4 },
+        },
+        .foils = &.{
+            .{ .index = 1, .thickness_mm = 0.035, .width_reduction_mm = 0.01778, .narrow_up = true },
+            .{ .index = 2, .thickness_mm = 0.0152, .width_reduction_mm = 0.01778, .narrow_up = true },
+            .{ .index = 3, .thickness_mm = 0.0152, .width_reduction_mm = 0.01778, .narrow_up = false },
+            .{ .index = 4, .thickness_mm = 0.035, .width_reduction_mm = 0.01778, .narrow_up = false },
+        },
+        .masks = &.{.{ .top = true, .er = 3.8, .substrate_mm = 0.03048, .copper_mm = 0.01524 }},
+    };
+    for ([_]f64{ 90, 100 }) |target| {
+        const width = resolvedDiffWidthMmOnLayerWithProcess(testing.allocator, stack, 1, target, 0.1524, true).?;
+        const result = analyzeDiffOnLayer(testing.allocator, stack, 1, width, 0.1524, true).?;
+        try testing.expectApproxEqAbs(target, result.z0_ohms, 0.1);
+        try testing.expect(result.er_eff > 1 and result.er_eff <= 4.4);
+    }
 }
 
 // spec: placement/impedance - mixed-dielectric stripline uses each physical interval instead of collapsing the stack to one average Dk

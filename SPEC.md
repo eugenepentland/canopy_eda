@@ -3246,6 +3246,7 @@ actual/ideal ratio on their closed-form baseline.
 - vacuum capacitance and dielectric capacitance produce the quasi-TEM impedance and effective permittivity of a layered microstrip
 - odd mode drives two conductors oppositely and differential impedance is exactly twice the resulting odd-mode impedance
 - declared soldermask and trapezoidal etch profile correct the closed-form microstrip through a calibrated field ratio
+- coated coupled microstrip synthesis remains self-consistent for both USB and Ethernet targets
 - mixed-dielectric stripline uses each physical interval instead of collapsing the stack to one average Dk
 - broadside coupled pairs expose even and odd modes from the capacitance matrix and define differential impedance as twice odd mode
 - width solved from a target Z0 round-trips back to that Z0
