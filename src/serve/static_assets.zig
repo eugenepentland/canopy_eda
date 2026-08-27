@@ -548,7 +548,7 @@ test "PCB editor rigidly mirrors the complete selected part target without delet
 }
 
 // spec: Web Server - Generated RF fence sites render, select, and edit as ordinary vias; provenance remains internal for safe regeneration
-// spec: Web Server - The PCB viewer offers one Tapers + fence action that replaces stale impedance-taper paths from current pad and route geometry, DRC-gates and saves those rebuilt paths, then regenerates the RF ground via fence around that exact copper — declared (fence …) classes and max-freq classes alike
+// spec: Web Server - The PCB viewer offers one Tapers + fence action that preserves RF route centerlines while refreshing controlled-impedance widths and ground-pour gaps, replaces stale taper paths from current pad and route geometry, DRC-gates and saves the result, then regenerates the RF ground via fence around that exact copper
 // spec: Web Server - The PCB editor always shows the RF via-fence action, regardless of whether the board declares perimeter fencing or currently resolves a fenceable RF class
 test "PCB editor carries the RF via-fence action as ordinary vias" {
     const Check = struct { haystack: []const u8 = pcb_board_js, marker: []const u8, present: bool = true };
@@ -561,11 +561,15 @@ test "PCB editor carries the RF via-fence action as ordinary vias" {
         // The provenance tag survives undo/redo so fence regeneration can
         // still distinguish generated sites from ordinary ground vias.
         .{ .marker = "g:v.g,f:v.f" },
-        // The action: rebuild + save taper copper, POST the fence around that
-        // exact row, then reload onto what the server wrote.
+        // The action: update widths without moving the stored centreline,
+        // rebuild tapers, refill the derived CPWG gap, save that exact copper,
+        // POST the fence around its row, then reload what the server wrote.
         .{ .marker = "function fenceRun" },
-        .{ .marker = "drawRfRetrofitSaved({replace:true" },
+        .{ .marker = "drawRfClassWidthPlan()" },
+        .{ .marker = "drawRfClassWidthsSet(widths,false)" },
+        .{ .marker = "drawRfRetrofitSaved({replace:true,undoBefore:before,widthChanged:!!changed" },
         .{ .marker = "drawRfRetrofitCheck(original)" },
+        .{ .marker = "refillPours({deferred:true" },
         .{ .marker = "persistLayout(curLayout,\"updating\",false)" },
         .{ .marker = "Tapers + fence" },
         .{ .marker = "/api/pcb-fence/" },
@@ -587,14 +591,40 @@ test "PCB editor carries the RF via-fence action as ordinary vias" {
 
     const finish_start = std.mem.indexOf(u8, pcb_board_js, "function fenceRun") orelse
         return error.FenceRunMissing;
+    const width_start = std.mem.indexOf(u8, pcb_board_js, "function drawRfClassWidthPlan") orelse
+        return error.FenceWidthPlanMissing;
+    const width_end = std.mem.indexOfPos(u8, pcb_board_js, width_start, "function drawRfRetrofitSaved") orelse
+        return error.FenceWidthPlanEndMissing;
+    const width_body = pcb_board_js[width_start..width_end];
+    try std.testing.expect(std.mem.indexOf(u8, width_body, "q.track.w=w") != null);
+    try std.testing.expect(std.mem.indexOf(u8, width_body, "q.track.x1=") == null);
+    try std.testing.expect(std.mem.indexOf(u8, width_body, "q.track.y1=") == null);
+    try std.testing.expect(std.mem.indexOf(u8, width_body, "q.track.x2=") == null);
+    try std.testing.expect(std.mem.indexOf(u8, width_body, "q.track.y2=") == null);
     const finish_body = pcb_board_js[finish_start..];
-    const rebuild_at = std.mem.indexOf(u8, finish_body, "drawRfRetrofitSaved({replace:true") orelse
+    const width_at = std.mem.indexOf(u8, finish_body, "drawRfClassWidthsSet(widths,false)") orelse
+        return error.FenceWidthRefreshMissing;
+    const rebuild_at = std.mem.indexOf(u8, finish_body, "drawRfRetrofitSaved({replace:true,undoBefore:before,widthChanged:!!changed") orelse
         return error.FenceTaperRebuildMissing;
-    const save_at = std.mem.indexOf(u8, finish_body, "persistLayout(curLayout,\"updating\",false)") orelse
+    const gap_at = std.mem.indexOf(u8, finish_body, "fenceRefreshGap(b,tapers,changed)") orelse
+        return error.FenceGapRefreshMissing;
+    const gap_start = std.mem.indexOf(u8, pcb_board_js, "function fenceRefreshGap") orelse
+        return error.FenceGapFunctionMissing;
+    const gap_body = pcb_board_js[gap_start..finish_start];
+    const refill_at = std.mem.indexOf(u8, gap_body, "refillPours({deferred:true") orelse
+        return error.FencePourRefillMissing;
+    const gap_save_at = std.mem.indexOf(u8, gap_body, "fenceSave(b,tapers,widths,true)") orelse
+        return error.FenceGapSaveMissing;
+    const save_start = std.mem.indexOf(u8, pcb_board_js, "function fenceSave") orelse
+        return error.FenceSaveFunctionMissing;
+    const save_body = pcb_board_js[save_start..gap_start];
+    const save_at = std.mem.indexOf(u8, save_body, "persistLayout(curLayout,\"updating\",false)") orelse
         return error.FenceTaperSaveMissing;
-    const fence_at = std.mem.indexOf(u8, finish_body, "fencePost(b,tapers)") orelse
+    const fence_at = std.mem.indexOf(u8, save_body, "fencePost(b,tapers,widths,gap)") orelse
         return error.FencePostMissing;
-    try std.testing.expect(rebuild_at < save_at);
+    try std.testing.expect(width_at < rebuild_at);
+    try std.testing.expect(rebuild_at < gap_at);
+    try std.testing.expect(refill_at < gap_save_at);
     try std.testing.expect(save_at < fence_at);
 }
 

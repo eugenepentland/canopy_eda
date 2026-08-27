@@ -7329,7 +7329,19 @@ function drawRfRetrofitCached(pending){try{var hit=JSON.parse(localStorage.getIt
 function drawRfRetrofitCacheStore(pending,blocked){try{localStorage.setItem(drawRfRetrofitCacheKey(),JSON.stringify({sig:drawRfRetrofitSignature(pending),blocked:blocked}));}catch(e){}}
 function drawRfPathRegenerable(path){var c=netClassInfo(path&&path.net||"");
  return !!c&&(+c.impedance_ohms>0)&&!(+c.diff_impedance_ohms>0);}
-function drawRfRetrofitSaved(opts){opts=opts||{};var replace=!!opts.replace,done=typeof opts.done==="function"?opts.done:function(){};
+// Refresh the compact centreline tracks before deriving their variable-width
+// copper. CPWG ground gap is not a track coordinate: the pour refill consumes
+// the current class's solved gap while these endpoints remain byte-for-byte.
+function drawRfClassWidthPlan(){var tracks=[],nets=Object.create(null),eps=1e-7;
+ (PCB.tracks||[]).forEach(function(t){if(!drawRfPathRegenerable({net:t.net}))return;
+  var c=netClassInfo(t.net||""),w=c&&+c.width;if(!(w>0)||Math.abs((+t.w||0)-w)<=eps)return;
+  tracks.push({track:t,old:+t.w||0,width:w});nets[t.net||""]=1;});
+ return {tracks:tracks,nets:Object.keys(nets).length};}
+function drawRfClassWidthsSet(plan,restore){var changed=0;(plan&&plan.tracks||[]).forEach(function(q){
+  var w=restore?q.old:q.width;if(Math.abs((+q.track.w||0)-w)<=1e-7)return;q.track.w=w;changed++;});
+ if(changed){copperTouched();drawRoute();}return changed;}
+window.PCBDrawRfClassWidthPlan=drawRfClassWidthPlan;
+function drawRfRetrofitSaved(opts){opts=opts||{};var replace=!!opts.replace,done=typeof opts.done==="function"?opts.done:function(){},undoBefore=opts.undoBefore||null,widthChanged=!!opts.widthChanged;
  if(RO||PCB.analysis_deferred||!curLayout||(!((PCB.tracks||[]).length)&&!((PCB.rf_paths||[]).length))){done({ok:false,error:"save a routed layout before rebuilding its tapers"});return;}
  // A normal load-time retrofit preserves every proven path and only fills
  // gaps. The explicit RF-finish action instead hides every single-ended RF
@@ -7340,7 +7352,7 @@ function drawRfRetrofitSaved(opts){opts=opts||{};var replace=!!opts.replace,done
   replaced=prior.length-retained.length;
  if(replace){PCB.rf_paths=retained;pending=drawRfRetrofitGroups();PCB.rf_paths=prior;}
  else pending=drawRfMissingPortalGroups().concat(drawRfRetrofitGroups());
- if(!pending.length){if(replace&&replaced){var emptyBefore=snapAll();PCB.rf_paths=retained;copperTouched();recordUndo(emptyBefore);drawRoute();}
+ if(!pending.length){if(replace&&(replaced||widthChanged)){var emptyBefore=snapAll();PCB.rf_paths=retained;copperTouched();recordUndo(undoBefore||emptyBefore);drawRoute();}
   done({ok:true,added:0,replaced:replace?replaced:0,blocked:0});return;}
  var cached=replace?null:drawRfRetrofitCached(pending);if(cached){drawRfRetrofitDrc=cached;PCB.drc=drawRfRetrofitDrcMerge(PCB.drc||[]);drawDrc();drcChip(PCB.drc.length);
   routeStatMsg(cached.length+" saved impedance taper"+(cached.length===1?"":"s")+" need attention — cached for this unchanged layout",true);return;}
@@ -7348,10 +7360,10 @@ function drawRfRetrofitSaved(opts){opts=opts||{};var replace=!!opts.replace,done
   acceptedGroups=[],blocked=[],baseline=(PCB.drc||[]).filter(function(d){return !d.rf_taper_block;}),notified=false;
  function notify(result){if(notified)return;notified=true;done(result);}
  function current(){return generation===dirtyGeneration&&layout===curLayout;}
- function interrupted(){notify({ok:false,error:"board changed — click Tapers + fence again"});}
+ function interrupted(){notify({ok:false,interrupted:true,error:"board changed — click Tapers + fence again"});}
  function finish(acceptedBundles){if(!current()){interrupted();return;}if(acceptedBundles==null)acceptedBundles=acceptedGroups.length;
   var accepted=[];acceptedGroups.forEach(function(group){Array.prototype.push.apply(accepted,group);});
-  if(acceptedBundles||replace){var before=snapAll();PCB.rf_paths=original.concat(accepted);copperTouched();recordUndo(before);drawRoute();}
+  if(acceptedBundles||replace){var before=snapAll();PCB.rf_paths=original.concat(accepted);copperTouched();recordUndo(undoBefore||before);drawRoute();}
   drawRfRetrofitDrc=blocked;PCB.drc=drawRfRetrofitDrcMerge(baseline);drawDrc();drcChip(PCB.drc.length);
   if(!acceptedBundles&&!replace){drawRfRetrofitCacheStore(pending,blocked);routeStatMsg(blocked.length+" saved impedance taper"+(blocked.length===1?"":"s")+" need attention — click the DRC errors to locate",true);return;}
   if(!replace){var remaining=drawRfMissingPortalGroups().concat(drawRfRetrofitGroups());if(remaining.length===blocked.length)drawRfRetrofitCacheStore(remaining,blocked);}
@@ -9267,7 +9279,7 @@ function fenceBtn(){return document.getElementById("pcb-fence");}
 function fenceSkipped(nets){var n=0;(nets||[]).forEach(function(r){var s=r.skipped||{};
  n+=(s.pad||0)+(s.track||0)+(s.via||0)+(s.keepout||0)+(s.outline||0)+(s.dedup||0);});return n;}
 function fenceDone(b,msg,bad){fenceInFlight=false;b.disabled=false;routeStatMsg(msg,!!bad);}
-function fencePost(b,tapers){routeStatMsg("generating the RF via fence…");
+function fencePost(b,tapers,widths,gap){routeStatMsg("generating the RF via fence…");
  var q="/api/pcb-fence/"+encodeURIComponent(PCB.name);
  if(curLayout)q+="?layout="+encodeURIComponent(curLayout);
  fetch(q,{method:"POST"})
@@ -9275,19 +9287,26 @@ function fencePost(b,tapers){routeStatMsg("generating the RF via fence…");
   .then(function(o){
    if(!o.ok||!o.j||!o.j.ok){fenceDone(b,(o.j&&o.j.error)||"fence failed",true);return;}
    var sk=fenceSkipped(o.j.nets);
-   routeStatMsg("RF finish: "+tapers.added+" taper"+(tapers.added===1?"":"s")+" rebuilt, "+o.j.placed+" fence via"+(o.j.placed===1?"":"s")+" placed, "+sk+" site"+
+   routeStatMsg("RF finish: "+widths+" trace width"+(widths===1?"":"s")+" updated, "+tapers.added+" taper"+(tapers.added===1?"":"s")+" rebuilt"+(gap?", ground gaps refreshed":"")+", "+o.j.placed+" fence via"+(o.j.placed===1?"":"s")+" placed, "+sk+" site"+
     (sk===1?"":"s")+" skipped"+(o.j.replaced?" ("+o.j.replaced+" replaced)":""));
    // The fence is already saved, so the row on disk is the authority: reload
    // onto it rather than trying to reconstruct the merged copper client-side.
    location.reload();})
   .catch(function(){fenceDone(b,"fence failed",true);});}
+function fenceSave(b,tapers,widths,gap){routeStatMsg("saving refreshed RF geometry…");
+ persistLayout(curLayout,"updating",false).then(function(saved){
+  if(saved!=="saved"){fenceDone(b,"refreshed RF geometry was not saved — fence not changed",true);return;}
+  fencePost(b,tapers,widths,gap);});}
+function fenceRefreshGap(b,tapers,widths){if(!poursDeclared()){fenceSave(b,tapers,widths,false);return;}
+ routeStatMsg("refilling RF ground gaps…");refillPours({deferred:true,done:function(fresh){
+  if(!fresh){fenceDone(b,"RF ground-gap refill failed — fence not changed",true);return;}
+  fenceSave(b,tapers,widths,true);}});}
 function fenceRun(){if(fenceInFlight)return;var b=fenceBtn();if(!b)return;
- fenceInFlight=true;b.disabled=true;routeStatMsg("rebuilding impedance tapers…");
- drawRfRetrofitSaved({replace:true,done:function(tapers){
-  if(!tapers.ok){fenceDone(b,tapers.error||"taper regeneration failed",true);return;}
-  routeStatMsg("saving rebuilt tapers…");persistLayout(curLayout,"updating",false).then(function(saved){
-   if(saved!=="saved"){fenceDone(b,"rebuilt tapers were not saved — fence not changed",true);return;}
-   fencePost(b,tapers);});}});}
+ fenceInFlight=true;b.disabled=true;var widths=drawRfClassWidthPlan(),before=widths.tracks.length?snapAll():null,changed=drawRfClassWidthsSet(widths,false);
+ routeStatMsg(changed?"updating RF widths and rebuilding impedance tapers…":"rebuilding impedance tapers…");
+ drawRfRetrofitSaved({replace:true,undoBefore:before,widthChanged:!!changed,done:function(tapers){
+  if(!tapers.ok){if(!tapers.interrupted)drawRfClassWidthsSet(widths,true);fenceDone(b,tapers.error||"taper regeneration failed",true);return;}
+  fenceRefreshGap(b,tapers,changed);}});}
 function pourBtns(){var a=[],x=document.getElementById("r-pour"),y=document.getElementById("pcb-pour");
  if(x)a.push(x);if(y)a.push(y);return a;}
 function pourBtnSync(){var b=document.getElementById("pcb-pour");if(!b)return;
