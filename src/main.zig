@@ -78,6 +78,10 @@ fn resolveAuthDir(
     return std.fmt.allocPrint(allocator, "{s}/auth", .{project_dir});
 }
 
+fn oneShotAllocator(process_arena: *std.heap.ArenaAllocator) std.mem.Allocator {
+    return process_arena.allocator();
+}
+
 /// CLI entry point: parses `argv[1]` as the subcommand name and dispatches
 /// to the matching `cmd*` handler in `commands.zig` (or one of the local
 /// `convert-*` / `parse` / `mint-plugin-token` helpers). Prints the usage
@@ -85,8 +89,15 @@ fn resolveAuthDir(
 pub fn main(init: std.process.Init) !void {
     process_io = init.io;
     process_environ_map = init.environ_map;
-    const allocator = init.gpa;
-    const arena = init.arena.allocator();
+    const arena = oneShotAllocator(init.arena);
+    // Evaluated designs deliberately retain their parsed source and AST for
+    // the lifetime of the command. Put every one-shot CLI command on the
+    // process arena, which std cleans automatically on exit, rather than
+    // reporting that process-lifetime storage as a GPA leak in Debug builds.
+    const allocator = arena;
+    // The server outlives individual requests, so it still needs an allocator
+    // whose allocations can be released independently.
+    const service_allocator = init.gpa;
     process_build_id = build_id.load(init.io, arena, ".");
     const args = try init.minimal.args.toSlice(arena);
 
@@ -147,7 +158,7 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, command, "export-pdf")) {
         try commands.cmdExportPdf(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "serve")) {
-        try dispatchServe(init.io, allocator, std.heap.page_allocator, args[2..], arena, init.environ_map);
+        try dispatchServe(init.io, service_allocator, std.heap.page_allocator, args[2..], arena, init.environ_map);
     } else if (std.mem.eql(u8, command, "mint-plugin-token")) {
         const label = optionalArg(args[2..], "--label") orelse "plugin";
         const auth_dir = try resolveAuthDir(arena, init.environ_map, args[2..]);
@@ -511,6 +522,15 @@ fn printUsage() !void {
         \\  netlisp help                            Show this help
         \\
     );
+}
+
+// spec: CLI allocation lifetime - one-shot CLI commands keep process-lifetime evaluation storage on the automatically cleaned process arena
+test "one-shot CLI allocator releases process-lifetime storage in bulk" {
+    var process_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer process_arena.deinit();
+
+    const allocator = oneShotAllocator(&process_arena);
+    _ = try allocator.dupe(u8, "retained AST source");
 }
 
 // Pull in all test declarations

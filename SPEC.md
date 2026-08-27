@@ -2,6 +2,18 @@
 
 CLI-driven electronic design automation for schematic capture using S-expression syntax.
 
+## CLI allocation lifetime
+
+- one-shot CLI commands keep process-lifetime evaluation storage on the automatically cleaned process arena
+- completeness-waiver: empty inputs (allocator selection occurs before command parsing and does not inspect input)
+- completeness-waiver: large inputs (the process arena grows through checked allocator calls and is released in bulk at process exit)
+- completeness-waiver: unauthorized access (allocator selection is internal and grants no file, network, or user capability)
+- completeness-waiver: i/o failure (allocator selection performs no I/O; command-specific I/O errors keep their existing handling)
+- completeness-waiver: concurrent access (each CLI process owns its process arena, while the long-running server retains the thread-safe GPA)
+- completeness-waiver: malformed encoding (allocator selection does not decode command or design bytes)
+- completeness-waiver: integer overflow (the arena delegates size arithmetic to the allocator's checked allocation path)
+- completeness-waiver: panic-free (allocation failure remains an error from command allocations; arena teardown is automatic process infrastructure)
+
 ## sexpr/tokenizer
 
 - Tokenizes parentheses and atoms from S-expression input

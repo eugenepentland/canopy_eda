@@ -64,6 +64,7 @@ pub const shards: []const []const []const u8 = &.{
         "fab_schematic_gate.test.",
         "infra.fs.test.",
         "layout_sidecar_store.test.",
+        "main.test.",
     },
     // shard 1
     &.{
