@@ -1156,7 +1156,7 @@ test "Assembly review publishes semantic state at the completed paint seam" {
 test "Assembly review resolves ordered CAM policy with independent layer visibility" {
     const Check = struct { bytes: []const u8, marker: []const u8 };
     const checks = [_]Check{
-        .{ .bytes = pcb_board_js, .marker = "var CAM_REVIEW=false,camLoadStarted=false" },
+        .{ .bytes = pcb_board_js, .marker = "var CAM_REVIEW=false,camReviewRequested=false,camLoadStarted=false" },
         .{ .bytes = pcb_board_js, .marker = "function camLayerVisible" },
         .{ .bytes = pcb_gpu_js, .marker = "function camOpDark" },
         .{ .bytes = pcb_gpu_js, .marker = "if (L.negative) dark = !dark" },
@@ -1610,15 +1610,21 @@ test "PCB clients read the lexical const PCB blob, never a window property" {
 // server output in assembly_debug.zig and pcb_layout_page.zig.
 test "Assembly board loads exact CAM only on explicit review request" {
     const markers = [_][]const u8{
-        "var CAM_REVIEW=false,camLoadStarted=false",
+        "var CAM_REVIEW=false,camReviewRequested=false,camLoadStarted=false",
         "function camReviewSet(enabled)",
         "if(msg.type===\"eda-pcb-cam-mode\")",
         "function loadCamReview()",
+        "if(!PHYSICAL_REVIEW||CAM_REVIEW||!camReviewRequested)return",
+        "if(!camReviewRequested)return",
         "fetch(PCB.cam_url)",
-        "PCB.cam=cam;camReviewUse()",
+        "PCB.cam=cam;camLoadStarted=false;if(camReviewRequested)camReviewUse()",
         "camReviewPost(\"semantic\")",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+    // There is exactly one call site: camReviewSet(true), reached from the
+    // explicit parent message. A second call here previously eager-loaded CAM
+    // at startup and raced the shell's button state.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, pcb_board_js, "loadCamReview();"));
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "loadCamReview();dragCacheDrop()") == null);
 }
 

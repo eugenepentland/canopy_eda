@@ -136,7 +136,7 @@ var PH=themeFrom({bg:"#101815",mask:"#086b43",edge:"#786744",opening:"#a1854e",s
 // it off returns immediately to the semantic renderer without discarding the
 // parsed payload or retained WebGPU film.
 function camPayloadReady(){return !!(PCB.cam&&PCB.cam.source==="generated-gerber"&&Array.isArray(PCB.cam.layers));}
-var CAM_REVIEW=false,camLoadStarted=false;
+var CAM_REVIEW=false,camReviewRequested=false,camLoadStarted=false;
 // A lazy CAM URL identifies the live Assembly surface (thermal review has
 // none); an embedded CAM payload identifies its offline release. Assembly
 // keeps WebGPU as a hard browser requirement even though its default semantic
@@ -151,7 +151,7 @@ function camReviewPost(state,detail){if(window.parent===window)return;
  try{window.parent.postMessage({type:"eda-pcb-cam-state",design:PCB.name,state:state,
   enabled:CAM_REVIEW,ready:camPayloadReady(),detail:detail||""},MESSAGE_TARGET_ORIGIN);}catch(e){}}
 function camReviewUse(){
- if(!camPayloadReady())return false;
+ if(!camReviewRequested||!camPayloadReady())return false;
  CAM_REVIEW=true;reviewPaintDirty=true;
  // camFrame detects a newly installed PCB.cam object itself. Do not mark the
  // geometry dirty here: leaving and re-entering CAM Review should sample the
@@ -160,23 +160,28 @@ function camReviewUse(){
  camReviewPost("active");return true;}
 function camReviewSet(enabled){
  if(!PHYSICAL_REVIEW)return;
- if(!enabled){CAM_REVIEW=false;reviewPaintDirty=true;dragCacheDrop();drawBoardRect();paintSoon();camReviewPost("semantic");return;}
+ camReviewRequested=!!enabled;
+ if(!camReviewRequested){CAM_REVIEW=false;reviewPaintDirty=true;dragCacheDrop();drawBoardRect();paintSoon();camReviewPost("semantic");return;}
  if(camReviewUse())return;
  loadCamReview();}
 function loadCamReview(){
- if(!PHYSICAL_REVIEW||CAM_REVIEW)return;
+ if(!PHYSICAL_REVIEW||CAM_REVIEW||!camReviewRequested)return;
  if(camPayloadReady()){camReviewUse();return;}
  if(!PCB.cam_url){camReviewPost("error","Generated fabrication files are unavailable in this Assembly document.");return;}
  var start=function(){
+  // The mode may be switched off while this callback waits for WebGPU. Do not
+  // let that stale callback generate or activate CAM behind the semantic view.
+  if(!camReviewRequested)return;
   // A hard-required renderer should be proven before asking the server to do
   // the comparatively expensive CAM generation. Unsupported/opted-out pages
   // stop at the requirement card; an adapter still starting gets a short poll.
-  if(ASSEMBLY_WEBGPU_REQUIRED&&!gpuOn){if(gpuStarting)setTimeout(start,25);return;}
+  if(ASSEMBLY_WEBGPU_REQUIRED&&!gpuOn){if(gpuStarting){setTimeout(start,25);return;}
+   camReviewPost("error",(window.PCBGpu&&PCBGpu.error)||"WebGPU could not start in this browser. Use a WebGPU-capable browser and reload.");return;}
   if(camLoadStarted)return;camLoadStarted=true;camReviewPost("loading");
   fetch(PCB.cam_url).then(function(r){if(!r.ok)throw 0;return r.json();})
   .then(function(cam){if(!cam||cam.source!=="generated-gerber"||!Array.isArray(cam.layers))throw new Error("invalid CAM payload");
-   PCB.cam=cam;camReviewUse();})
-  .catch(function(){camLoadStarted=false;camReviewPost("error","The generated Gerber/Excellon artwork could not be loaded. Try CAM Review again.");});};
+   PCB.cam=cam;camLoadStarted=false;if(camReviewRequested)camReviewUse();})
+  .catch(function(){camLoadStarted=false;if(camReviewRequested)camReviewPost("error","The generated Gerber/Excellon artwork could not be loaded. Try CAM Review again.");});};
  requestAnimationFrame(start);}
 // Full editable pages paint placement + saved tracks/vias first. Exact-state
 // copper fills come from persistent browser storage when available; otherwise
@@ -10403,7 +10408,6 @@ if(rgh)rgh.addEventListener("click",function(ev){ev.preventDefault();if(onSub())
  el.addEventListener("click",loadStarMatch);
 })();
 fitVB(); // initial fit to the container + overlay paint + label visibility
-loadCamReview();
 loadDeferredAnalysis();
 // ── Layers / grid / units / ruler controls (audit 1.5) ──────────────────
 (function(){
