@@ -473,6 +473,7 @@ src/eval/env.zig::StackupCopper struct_
 src/eval/env.zig::StackupDielectric struct_
 src/eval/env.zig::StackupDielectricKind enum_
 src/eval/env.zig::StackupPlane struct_
+src/eval/env.zig::StackupSoldermask struct_
 src/eval/env.zig::StackupSpec struct_
 src/eval/env.zig::StrapOk struct_
 src/eval/env.zig::SubBlock struct_
@@ -1734,19 +1735,27 @@ src/placement/guide_branch.zig::Terminal struct_
 src/placement/guide_branch.zig::Tree struct_
 src/placement/guide_branch.zig::resolve | fn resolve( arena: Allocator, branches: []const route_policy.GuideBranch, terminals: []const Terminal, ) Allocator.Error!Result
 src/placement/guide_branch.zig::tie_mm value
+src/placement/impedance.zig::BroadsideGeometry struct_
+src/placement/impedance.zig::BroadsideResult struct_
 src/placement/impedance.zig::Dielectric struct_
 src/placement/impedance.zig::Error value
 src/placement/impedance.zig::Foil struct_
 src/placement/impedance.zig::GroundGapSolution struct_
+src/placement/impedance.zig::Mask struct_
+src/placement/impedance.zig::ProcessResult struct_
 src/placement/impedance.zig::Ref union_
 src/placement/impedance.zig::Rule struct_
 src/placement/impedance.zig::Stack struct_
+src/placement/impedance.zig::analyzeDiffOnLayer | fn analyzeDiffOnLayer( allocator: std.mem.Allocator, stack: Stack, layer: u8, width_mm: f64, pair_gap_mm: f64, coated: bool, ) ?ProcessResult
+src/placement/impedance.zig::analyzeOnLayer | fn analyzeOnLayer( allocator: std.mem.Allocator, stack: Stack, layer: u8, width_mm: f64, ground_gap_mm: f64, coated: bool, ) ?ProcessResult
 src/placement/impedance.zig::assumed | fn assumed(self: Stack) bool
+src/placement/impedance.zig::broadsideDiffZ0 | fn broadsideDiffZ0( allocator: std.mem.Allocator, stack: Stack, geometry: BroadsideGeometry, ) ?BroadsideResult
 src/placement/impedance.zig::default_board_mm value
 src/placement/impedance.zig::default_er value
 src/placement/impedance.zig::default_foil_mm value
 src/placement/impedance.zig::diffMismatchPct | fn diffMismatchPct(stack: Stack, layer: u8, w_mm: f64, pair_gap_mm: f64, target_ohms: f64) ?f64
 src/placement/impedance.zig::er | fn er(self: Ref) f64
+src/placement/impedance.zig::foil | fn foil(self: Stack, index: u8) Foil
 src/placement/impedance.zig::foilMm | fn foilMm(self: Stack, index: u8) f64
 src/placement/impedance.zig::gapEr | fn gapEr(self: Stack, after: u8) f64
 src/placement/impedance.zig::gapMm | fn gapMm(self: Stack, after: u8) f64
@@ -1755,6 +1764,7 @@ src/placement/impedance.zig::heightMm | fn heightMm(self: Ref) f64
 src/placement/impedance.zig::isPlane | fn isPlane(self: Stack, index: u8) bool
 src/placement/impedance.zig::kindName | fn kindName(self: Ref) []const u8
 src/placement/impedance.zig::kindNameWithGroundGap | fn kindNameWithGroundGap(self: Ref, ground_gap_mm: f64) []const u8
+src/placement/impedance.zig::mask | fn mask(self: Stack, layer: u8) ?Mask
 src/placement/impedance.zig::microstripZ0 | fn microstripZ0(w_mm: f64, h_mm: f64, t_mm: f64, er: f64) Error!f64
 src/placement/impedance.zig::mismatchPct | fn mismatchPct(stack: Stack, layer: u8, w_mm: f64, target_ohms: f64) ?f64
 src/placement/impedance.zig::mismatchPctWithGroundGap | fn mismatchPctWithGroundGap(stack: Stack, layer: u8, w_mm: f64, target_ohms: f64, ground_gap_mm: f64) ?f64
@@ -1770,12 +1780,15 @@ src/placement/impedance.zig::refZ0 | fn refZ0(ref: Ref, w_mm: f64, t_mm: f64) Er
 src/placement/impedance.zig::refZ0WithGroundGap | fn refZ0WithGroundGap(ref: Ref, w_mm: f64, t_mm: f64, ground_gap_mm: f64) Error!f64
 src/placement/impedance.zig::reference | fn reference(stack: Stack, layer: u8) ?Ref
 src/placement/impedance.zig::resolvedDiffWidthMmOnLayer | fn resolvedDiffWidthMmOnLayer( stack: Stack, layer: u8, target_ohms: f64, pair_gap_mm: f64, ) ?f64
+src/placement/impedance.zig::resolvedDiffWidthMmOnLayerWithProcess | fn resolvedDiffWidthMmOnLayerWithProcess( allocator: std.mem.Allocator, stack: Stack, layer: u8, target_ohms: f64, pair_gap_mm: f64, coated: bool, ) ?f64
 src/placement/impedance.zig::resolvedWidthMm | fn resolvedWidthMm(stack: Stack, target_ohms: f64) ?f64
 src/placement/impedance.zig::resolvedWidthMmOnLayerWithGroundGap | fn resolvedWidthMmOnLayerWithGroundGap( stack: Stack, layer: u8, target_ohms: f64, ground_gap_mm: f64, ) ?f64
+src/placement/impedance.zig::resolvedWidthMmOnLayerWithProcess | fn resolvedWidthMmOnLayerWithProcess( allocator: std.mem.Allocator, stack: Stack, layer: u8, target_ohms: f64, ground_gap_mm: f64, coated: bool, ) ?f64
 src/placement/impedance.zig::resolvedWidthMmWithGroundGap | fn resolvedWidthMmWithGroundGap(stack: Stack, target_ohms: f64, ground_gap_mm: f64) ?f64
 src/placement/impedance.zig::signalLayers | fn signalLayers(stack: Stack, out: []u8) []const u8
 src/placement/impedance.zig::striplineZ0 | fn striplineZ0(w_mm: f64, h1_mm: f64, h2_mm: f64, t_mm: f64, er: f64) Error!f64
 src/placement/impedance.zig::targetLayer | fn targetLayer(stack: Stack, authored: u8) ?u8
+src/placement/impedance.zig::traceIsCoated | fn traceIsCoated(mask_relief_mm: f64, max_freq_hz: f64) bool
 src/placement/impedance_coupled_microstrip.zig::Modes struct_
 src/placement/impedance_coupled_microstrip.zig::analyze | fn analyze(w: f64, h: f64, t: f64, er: f64, gap: f64) Error!Modes
 src/placement/impedance_coupled_microstrip.zig::z0 | fn z0(w: f64, h: f64, t: f64, er: f64, gap: f64) Error!f64
@@ -1783,6 +1796,14 @@ src/placement/impedance_coupled_stripline.zig::z0 | fn z0(w: f64, h1: f64, h2: f
 src/placement/impedance_cpwg.zig::Result struct_
 src/placement/impedance_cpwg.zig::analyze | fn analyze(w_mm: f64, h_mm: f64, t_mm: f64, er: f64, gap_mm: f64) Error!Result
 src/placement/impedance_cpwg.zig::z0 | fn z0(w_mm: f64, h_mm: f64, t_mm: f64, er: f64, gap_mm: f64) Error!f64
+src/placement/impedance_field.zig::Band struct_
+src/placement/impedance_field.zig::Conductor struct_
+src/placement/impedance_field.zig::Error value
+src/placement/impedance_field.zig::Geometry struct_
+src/placement/impedance_field.zig::Region struct_
+src/placement/impedance_field.zig::Result struct_
+src/placement/impedance_field.zig::analyze | fn analyze(allocator: std.mem.Allocator, g: Geometry) Error!Result
+src/placement/impedance_field.zig::analyzeOdd | fn analyzeOdd(allocator: std.mem.Allocator, g: Geometry) Error!Result
 src/placement/impedance_microstrip.zig::Analysis struct_
 src/placement/impedance_microstrip.zig::analyze | fn analyze(w: f64, h: f64, t: f64, er: f64) Error!Analysis
 src/placement/impedance_rules.zig::Physical struct_

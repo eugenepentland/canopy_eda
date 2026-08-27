@@ -3197,7 +3197,9 @@ refZ0WithGroundGap, refEffectiveErWithGroundGap, refGroundGapForZ0, refDiffZ0, r
 refWidthForDiffZ0, reference, signalLayers, preferredLayer, targetLayer,
 resolvedWidthMm, resolvedWidthMmWithGroundGap,
 resolvedWidthMmOnLayerWithGroundGap, resolvedDiffWidthMmOnLayer, mismatchPct,
-mismatchPctWithGroundGap, diffMismatchPct
+mismatchPctWithGroundGap, diffMismatchPct, analyzeOnLayer, analyzeDiffOnLayer,
+resolvedWidthMmOnLayerWithProcess, resolvedDiffWidthMmOnLayerWithProcess,
+broadsideDiffZ0, traceIsCoated
 
 Characteristic impedance (Z₀) of a trace against the board's `(stackup …)`
 buildup — the pure math plus the stack model that turns a layer index into a
@@ -3227,6 +3229,12 @@ is twice the calculated odd-mode impedance. An optional nested `(layer IDX)`
 on either target selects the actual 1-based copper layer instead of the first
 usable signal layer.
 
+Declared soldermask, trapezoidal etch profiles, mixed-dielectric stripline and
+broadside pairs use a finite-volume quasi-static capacitance-matrix fallback.
+It solves the same cross-section in vacuum to obtain inductance, excites pair
+odd/even modes directly, and calibrates supported shapes as a field-solver
+actual/ideal ratio on their closed-form baseline.
+
 - microstrip Z0 matches the published 50 ohm width on 1.6 mm FR-4
 - microstrip Z0 matches the published 50 ohm width on thin prepreg
 - grounded coplanar analysis uses the authored ground gap and round-trips its synthesized width
@@ -3235,6 +3243,11 @@ usable signal layer.
 - grounded coplanar analysis refuses a non-positive or copper-closed slot
 - an offset L3 coupled stripline solves the Barracuda 100 ohm LVDS geometry and round-trips
 - an outer differential pair uses coupled microstrip odd mode and round-trips through synthesis
+- vacuum capacitance and dielectric capacitance produce the quasi-TEM impedance and effective permittivity of a layered microstrip
+- odd mode drives two conductors oppositely and differential impedance is exactly twice the resulting odd-mode impedance
+- declared soldermask and trapezoidal etch profile correct the closed-form microstrip through a calibrated field ratio
+- mixed-dielectric stripline uses each physical interval instead of collapsing the stack to one average Dk
+- broadside coupled pairs expose even and odd modes from the capacitance matrix and define differential impedance as twice odd mode
 - width solved from a target Z0 round-trips back to that Z0
 - a stripline is narrower than a microstrip of the same impedance
 - the symmetric stripline reduces to Cohn's published formula
@@ -3253,7 +3266,7 @@ usable signal layer.
 - completeness-waiver: large inputs (a stackup is a handful of layers — the whole model is a fixed number of closed-form evaluations over at most 32 copper layers, with no unbounded input)
 - completeness-waiver: unauthorized access (pure math over caller-supplied numbers; the module reads no file, no network and no user identity)
 - completeness-waiver: i/o failure (the module performs no I/O — the stackup arrives already parsed, as plain slices)
-- completeness-waiver: concurrent access (every function is pure and takes no allocator or mutable state, so it is trivially thread-safe and has nothing to race on)
+- completeness-waiver: concurrent access (the field fallback owns allocator-backed scratch per call and has no global mutable state)
 - completeness-waiver: malformed encoding (inputs are f64 geometry, never bytes or text; a nonsensical value is rejected by the published-domain checks, not by decoding)
 - non-finite or non-positive geometry is rejected by the domain checks rather than overflowing
 - the solver never panics: it is a fixed-count bisection returning an error instead of diverging
@@ -4862,6 +4875,7 @@ Public functions: analyze
 - stackup form captures layer count and plane assignments on the design block
 - pdn form captures an explicit AC-domain target and source model
 - stackup captures per-layer copper foil and core/prepreg construction details
+- stackup process entries capture stepped soldermask and per-layer trapezoidal etch geometry
 - fabrication backing parses an explicit face, editable regions, thickness metadata, and side-scoped footprint cutouts
 - a named fabricator stackup expands to physical construction while board plane and pour roles remain authored locally
 - a stackup dielectric captures its (er X) permittivity and defaults it when absent

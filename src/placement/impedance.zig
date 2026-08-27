@@ -12,7 +12,9 @@
 //!   • **Grounded coplanar waveguide** — the same outer-face trace with
 //!     same-layer ground copper a declared edge-to-edge gap away on both sides.
 //!   • **Stripline** — an INNER signal layer with a reference plane above AND
-//!     below, dielectric on both sides (homogeneous medium).
+//!     below, including offset and mixed-dielectric constructions.
+//!   • **Coupled pairs** — edge-coupled microstrip/stripline and numerical
+//!     broadside even/odd modes.
 //!
 //! An inner layer with a plane on only one side, or any layer with no plane at
 //! all, has no closed-form reference here and is refused rather than guessed.
@@ -53,9 +55,10 @@
 //!
 //!     εeff,t = εeff − 0.7(εeff−1)(t/S) / (q₁ + 0.7t/S)
 //!
-//! This is the same quasi-static, no-soldermask model used by KiCad's grounded
-//! coplanar calculator; frequency-dependent dispersion and loss are outside
-//! this module's width/impedance contract.
+//! This is the ideal bare-trace baseline. Declared soldermask, etched
+//! trapezoids and mixed media are applied by the calibrated capacitance-matrix
+//! fallback below; frequency-dependent dispersion and loss remain outside this
+//! module's width/impedance contract.
 //!
 //! **Symmetric stripline** — Cohn's exact zero-thickness conformal map (S. B.
 //! Cohn, "Characteristic Impedance of the Shielded-Strip Transmission Line",
@@ -118,6 +121,14 @@
 //! 1 ≤ εr ≤ 18. It returns both modes and uses `Zdiff = 2 Zodd`; it never
 //! doubles the isolated single-ended impedance.
 //!
+//! **Numerical fallback** — a finite-volume solution of
+//! `div(epsilon grad(V)) = 0` integrates the Maxwell capacitance matrix. A
+//! vacuum solve gives `L = mu0*epsilon0*C_air^-1`; direct odd/even excitations
+//! give the modal impedances and `Zdiff = 2 Zodd`. For any geometry with a
+//! matching closed form, the solver is used as an actual/ideal ratio on that
+//! baseline, cancelling most finite-box and grid error. Broadside pairs, which
+//! have no baseline in this module, use the matrix result directly.
+//!
 //! ## Inverse
 //!
 //! `refWidthForZ0` solves W from a target Z₀ by bisection. Z₀ is strictly
@@ -132,6 +143,7 @@ const cpwg = @import("impedance_cpwg.zig");
 const microstrip = @import("impedance_microstrip.zig");
 const coupled_microstrip = @import("impedance_coupled_microstrip.zig");
 const coupled_stripline = @import("impedance_coupled_stripline.zig");
+const field = @import("impedance_field.zig");
 
 /// Why an impedance could not be computed. Every one of these is a refusal to
 /// extrapolate: the approximations above have published validity ranges and a
@@ -579,7 +591,21 @@ pub const Rule = struct {
 pub const Dielectric = struct { after_layer: u8, thickness_mm: f64, er: f64 };
 
 /// One copper foil of the buildup.
-pub const Foil = struct { index: u8, thickness_mm: f64 };
+pub const Foil = struct {
+    index: u8,
+    thickness_mm: f64,
+    width_reduction_mm: f64 = 0,
+    narrow_up: bool = true,
+};
+
+/// Stepped outer-face soldermask cross-section. `substrate_mm` is its height
+/// above bare laminate/between traces; `copper_mm` is coating above the trace.
+pub const Mask = struct {
+    top: bool,
+    er: f64,
+    substrate_mm: f64,
+    copper_mm: f64,
+};
 
 /// The board buildup as this module needs to see it — the placement-side
 /// mirror of `(stackup …)`, carrying only what Z₀ depends on. `layers` = 0
@@ -595,6 +621,8 @@ pub const Stack = struct {
     dielectrics: []const Dielectric = &.{},
     /// Authored copper foils. May be empty — `default_foil_mm` then applies.
     foils: []const Foil = &.{},
+    /// Optional outer-face coating process profiles.
+    masks: []const Mask = &.{},
     /// Finished board thickness (mm) from `(stackup … (thickness MM))`;
     /// 0 = unset, and `default_board_mm` applies to the uniform fallback.
     board_mm: f64 = 0,
@@ -611,6 +639,20 @@ pub const Stack = struct {
     pub fn foilMm(self: Stack, index: u8) f64 {
         for (self.foils) |f| if (f.index == index) return f.thickness_mm;
         return default_foil_mm;
+    }
+
+    /// Complete foil/process profile for `index`, with the standard fallback.
+    pub fn foil(self: Stack, index: u8) Foil {
+        for (self.foils) |f| if (f.index == index) return f;
+        return .{ .index = index, .thickness_mm = default_foil_mm };
+    }
+
+    /// Soldermask profile on an outer layer, or null for an uncoated face.
+    pub fn mask(self: Stack, layer: u8) ?Mask {
+        if (layer != 1 and layer != self.layers) return null;
+        const top = layer == 1;
+        for (self.masks) |m| if (m.top == top) return m;
+        return null;
     }
 
     /// True when copper layer `index` is a declared reference plane.
@@ -640,6 +682,399 @@ pub const Stack = struct {
         return default_er;
     }
 };
+
+/// Process-aware result used by synthesis, lint and routed-line analysis.
+pub const ProcessResult = struct { z0_ohms: f64, er_eff: f64 };
+
+/// Nominal coating state implied by the mask-artwork class policy. Positive or
+/// default RF relief exposes copper; explicit zero and ordinary classes remain
+/// coated. Geometry-local pad dams do not change the trunk calculation.
+pub fn traceIsCoated(mask_relief_mm: f64, max_freq_hz: f64) bool {
+    if (mask_relief_mm >= 0) return mask_relief_mm == 0;
+    return max_freq_hz <= 0;
+}
+
+/// Even/odd result for a broadside-coupled pair on two copper layers.
+pub const BroadsideResult = struct {
+    odd_ohms: f64,
+    even_ohms: f64,
+    diff_ohms: f64,
+    common_ohms: f64,
+    odd_er_eff: f64,
+    even_er_eff: f64,
+};
+
+/// Two-layer broadside pair geometry, including lateral registration offset.
+pub const BroadsideGeometry = struct {
+    upper_layer: u8,
+    lower_layer: u8,
+    upper_width_mm: f64,
+    lower_width_mm: f64,
+    offset_mm: f64 = 0,
+};
+
+const CrossSection = struct {
+    bands: [64]field.Band = @splat(.{ .y_min = 0, .y_max = 0, .er = 1 }),
+    band_count: usize = 0,
+    regions: [8]field.Region = @splat(.{ .x_min = 0, .x_max = 0, .y_min = 0, .y_max = 0, .er = 1 }),
+    region_count: usize = 0,
+    conductors: [6]field.Conductor = @splat(.{
+        .x_center = 0,
+        .y_min = 0,
+        .y_max = 0,
+        .width_bottom = 0,
+        .width_top = 0,
+        .terminal = 0,
+    }),
+    conductor_count: usize = 0,
+    x_half: f64 = 0,
+    y_min: f64 = 0,
+    y_max: f64 = 0,
+
+    fn geometry(self: *const CrossSection) field.Geometry {
+        return .{
+            .x_half = self.x_half,
+            .y_min = self.y_min,
+            .y_max = self.y_max,
+            .bands = self.bands[0..self.band_count],
+            .regions = self.regions[0..self.region_count],
+            .conductors = self.conductors[0..self.conductor_count],
+        };
+    }
+
+    fn band(self: *CrossSection, y_min: f64, y_max: f64, er: f64) bool {
+        if (self.band_count >= self.bands.len) return false;
+        if (!(y_max > y_min) or !validEr(er)) return false;
+        self.bands[self.band_count] = .{ .y_min = y_min, .y_max = y_max, .er = er };
+        self.band_count += 1;
+        return true;
+    }
+
+    fn conductor(self: *CrossSection, c: field.Conductor) bool {
+        if (self.conductor_count >= self.conductors.len) return false;
+        self.conductors[self.conductor_count] = c;
+        self.conductor_count += 1;
+        return true;
+    }
+};
+
+fn trapezoid(foil: Foil, layer: u8, layers: u8, width: f64) ?struct { bottom: f64, top: f64 } {
+    if (!positive(width) or foil.width_reduction_mm < 0) return null;
+    if (foil.width_reduction_mm >= width) return null;
+    const narrow_local_top = if (layer == 1)
+        foil.narrow_up
+    else if (layer == layers)
+        !foil.narrow_up
+    else
+        foil.narrow_up;
+    const narrow = width - foil.width_reduction_mm;
+    return if (narrow_local_top)
+        .{ .bottom = width, .top = narrow }
+    else
+        .{ .bottom = narrow, .top = width };
+}
+
+const SignalSpec = struct { x: f64, y: f64, width: f64, terminal: u8 };
+
+fn addSignal(cs: *CrossSection, foil: Foil, layer: u8, layers: u8, signal: SignalSpec) bool {
+    const widths = trapezoid(foil, layer, layers, signal.width) orelse return false;
+    return cs.conductor(.{
+        .x_center = signal.x,
+        .y_min = signal.y,
+        .y_max = signal.y + foil.thickness_mm,
+        .width_bottom = widths.bottom,
+        .width_top = widths.top,
+        .terminal = signal.terminal,
+    });
+}
+
+fn addCoplanarGround(cs: *CrossSection, width: f64, gap: f64, foil: Foil, layer: u8, layers: u8) bool {
+    if (!(gap > 0)) return true;
+    const edge = width / 2 + gap;
+    if (!(cs.x_half > edge)) return false;
+    const side_width = cs.x_half - edge;
+    const widths = trapezoid(foil, layer, layers, side_width) orelse return false;
+    return cs.conductor(.{
+        .x_center = -(edge + side_width / 2),
+        .y_min = 0,
+        .y_max = foil.thickness_mm,
+        .width_bottom = widths.bottom,
+        .width_top = widths.top,
+        .terminal = 0,
+    }) and cs.conductor(.{
+        .x_center = edge + side_width / 2,
+        .y_min = 0,
+        .y_max = foil.thickness_mm,
+        .width_bottom = widths.bottom,
+        .width_top = widths.top,
+        .terminal = 0,
+    });
+}
+
+fn addMask(cs: *CrossSection, mask: Mask, trace_centers: []const f64, width: f64, t: f64) bool {
+    if (cs.region_count >= cs.regions.len or !validEr(mask.er)) return false;
+    // The base coat spans the whole laminate/trace gap. Local over-trace
+    // rectangles extend it to the separately published copper-coat height.
+    if (!cs.band(0, mask.substrate_mm, mask.er)) return false;
+    for (trace_centers) |center| {
+        if (cs.region_count >= cs.regions.len) return false;
+        cs.regions[cs.region_count] = .{
+            .x_min = center - width / 2,
+            .x_max = center + width / 2,
+            .y_min = t,
+            .y_max = t + mask.copper_mm,
+            .er = mask.er,
+        };
+        cs.region_count += 1;
+    }
+    return true;
+}
+
+const SectionOptions = struct { pair_gap: ?f64, ground_gap: f64, coated: bool, ideal: bool };
+
+fn makeOuterSection(stack: Stack, layer: u8, width: f64, options: SectionOptions) ?CrossSection {
+    const ref = reference(stack, layer) orelse return null;
+    const m = switch (ref) {
+        .microstrip => |v| v,
+        else => return null,
+    };
+    const foil = stack.foil(layer);
+    const span_x = if (options.pair_gap) |g| 2 * width + g else width + 2 * options.ground_gap;
+    var cs = CrossSection{};
+    cs.x_half = @max(6 * m.h_mm, 4 * span_x);
+    cs.y_min = -m.h_mm;
+    cs.y_max = foil.thickness_mm + @max(4 * m.h_mm, 4 * (stack.mask(layer) orelse Mask{ .top = true, .er = 1, .substrate_mm = 0, .copper_mm = 0 }).copper_mm);
+    if (!cs.band(-m.h_mm, 0, m.er)) return null;
+    const use_foil = if (options.ideal) Foil{ .index = layer, .thickness_mm = foil.thickness_mm } else foil;
+    if (options.pair_gap) |g| {
+        const center = (width + g) / 2;
+        if (!addSignal(&cs, use_foil, layer, stack.layers, .{ .x = -center, .y = 0, .width = width, .terminal = 1 })) return null;
+        if (!addSignal(&cs, use_foil, layer, stack.layers, .{ .x = center, .y = 0, .width = width, .terminal = 2 })) return null;
+        if (options.coated and !options.ideal) if (stack.mask(layer)) |mask| {
+            if (!addMask(&cs, mask, &.{ -center, center }, width, foil.thickness_mm)) return null;
+        };
+    } else {
+        if (!addSignal(&cs, use_foil, layer, stack.layers, .{ .x = 0, .y = 0, .width = width, .terminal = 1 })) return null;
+        if (!addCoplanarGround(&cs, width, options.ground_gap, use_foil, layer, stack.layers)) return null;
+        if (options.coated and !options.ideal) if (stack.mask(layer)) |mask| {
+            if (!addMask(&cs, mask, &.{0}, width, foil.thickness_mm)) return null;
+        };
+    }
+    return cs;
+}
+
+fn makeInnerSection(stack: Stack, layer: u8, width: f64, options: SectionOptions) ?CrossSection {
+    const ref = reference(stack, layer) orelse return null;
+    const s = switch (ref) {
+        .stripline => |v| v,
+        else => return null,
+    };
+    const pa = nearestPlane(stack, layer, true) orelse return null;
+    const pb = nearestPlane(stack, layer, false) orelse return null;
+    const foil = stack.foil(layer);
+    const span_x = if (options.pair_gap) |g| 2 * width + g else width;
+    var cs = CrossSection{};
+    cs.x_half = @max(3 * @max(s.h1_mm, s.h2_mm), 4 * span_x);
+    cs.y_min = -s.h2_mm;
+    cs.y_max = foil.thickness_mm + s.h1_mm;
+    if (options.ideal) {
+        if (!cs.band(cs.y_min, 0, s.er)) return null;
+        if (!cs.band(foil.thickness_mm, cs.y_max, s.er)) return null;
+    } else {
+        var y = foil.thickness_mm;
+        var i = layer - 1;
+        while (true) {
+            const er = stack.gapEr(i);
+            const gap = stack.gapMm(i);
+            if (!cs.band(y, y + gap, er)) return null;
+            y += gap;
+            if (i == pa) break;
+            const buried = stack.foilMm(i);
+            if (!cs.band(y, y + buried, er)) return null;
+            y += buried;
+            i -= 1;
+        }
+        y = 0;
+        i = layer;
+        while (true) {
+            const er = stack.gapEr(i);
+            const gap = stack.gapMm(i);
+            if (!cs.band(y - gap, y, er)) return null;
+            y -= gap;
+            if (i + 1 == pb) break;
+            const buried = stack.foilMm(i + 1);
+            if (!cs.band(y - buried, y, er)) return null;
+            y -= buried;
+            i += 1;
+        }
+    }
+    const use_foil = if (options.ideal) Foil{ .index = layer, .thickness_mm = foil.thickness_mm } else foil;
+    if (options.pair_gap) |g| {
+        const center = (width + g) / 2;
+        if (!addSignal(&cs, use_foil, layer, stack.layers, .{ .x = -center, .y = 0, .width = width, .terminal = 1 })) return null;
+        if (!addSignal(&cs, use_foil, layer, stack.layers, .{ .x = center, .y = 0, .width = width, .terminal = 2 })) return null;
+    } else if (!addSignal(&cs, use_foil, layer, stack.layers, .{ .x = 0, .y = 0, .width = width, .terminal = 1 })) return null;
+    return cs;
+}
+
+fn layerY(stack: Stack, plane_above: u8, target: u8) ?f64 {
+    if (target <= plane_above) return null;
+    var y: f64 = 0;
+    var i = plane_above;
+    while (i < target) : (i += 1) {
+        y += stack.gapMm(i);
+        if (i + 1 == target) return y;
+        y += stack.foilMm(i + 1);
+    }
+    return null;
+}
+
+/// Numerical broadside-coupled pair analysis. The two signal layers must share
+/// one enclosing plane above and below with no intervening reference plane.
+/// `offset_mm` is their lateral centreline registration error (zero = aligned).
+pub fn broadsideDiffZ0(
+    allocator: std.mem.Allocator,
+    stack: Stack,
+    geometry: BroadsideGeometry,
+) ?BroadsideResult {
+    const upper_layer = geometry.upper_layer;
+    const lower_layer = geometry.lower_layer;
+    const upper_width_mm = geometry.upper_width_mm;
+    const lower_width_mm = geometry.lower_width_mm;
+    const offset_mm = geometry.offset_mm;
+    if (!(upper_layer < lower_layer) or !std.math.isFinite(offset_mm)) return null;
+    if (stack.isPlane(upper_layer) or stack.isPlane(lower_layer)) return null;
+    const pa = nearestPlane(stack, upper_layer, true) orelse return null;
+    const pb = nearestPlane(stack, lower_layer, false) orelse return null;
+    var p = pa + 1;
+    while (p < pb) : (p += 1) if (stack.isPlane(p)) return null;
+    const yu = layerY(stack, pa, upper_layer) orelse return null;
+    const yl = layerY(stack, pa, lower_layer) orelse return null;
+    const enclosure = layerY(stack, pa, pb) orelse return null;
+    var cs = CrossSection{};
+    const span_x = @max(upper_width_mm, lower_width_mm) + @abs(offset_mm);
+    cs.x_half = @max(3 * enclosure, 5 * span_x);
+    cs.y_min = 0;
+    cs.y_max = enclosure;
+    var y: f64 = 0;
+    var i = pa;
+    while (i < pb) : (i += 1) {
+        const er = stack.gapEr(i);
+        const gap = stack.gapMm(i);
+        if (!cs.band(y, y + gap, er)) return null;
+        y += gap;
+        if (i + 1 < pb) {
+            const buried = stack.foilMm(i + 1);
+            if (!cs.band(y, y + buried, er)) return null;
+            y += buried;
+        }
+    }
+    const fu = stack.foil(upper_layer);
+    const fl = stack.foil(lower_layer);
+    const wu = trapezoid(fu, upper_layer, stack.layers, upper_width_mm) orelse return null;
+    const wl = trapezoid(fl, lower_layer, stack.layers, lower_width_mm) orelse return null;
+    if (!cs.conductor(.{
+        .x_center = 0,
+        .y_min = yu,
+        .y_max = yu + fu.thickness_mm,
+        .width_bottom = wu.bottom,
+        .width_top = wu.top,
+        .terminal = 1,
+    })) return null;
+    if (!cs.conductor(.{
+        .x_center = offset_mm,
+        .y_min = yl,
+        .y_max = yl + fl.thickness_mm,
+        .width_bottom = wl.bottom,
+        .width_top = wl.top,
+        .terminal = 2,
+    })) return null;
+    const result = field.analyze(allocator, cs.geometry()) catch return null;
+    const pair = result.pair orelse return null;
+    return .{
+        .odd_ohms = pair.odd_ohms,
+        .even_ohms = pair.even_ohms orelse return null,
+        .diff_ohms = pair.diff_ohms,
+        .common_ohms = pair.common_ohms orelse return null,
+        .odd_er_eff = pair.odd_er_eff,
+        .even_er_eff = pair.even_er_eff orelse return null,
+    };
+}
+
+fn needsField(stack: Stack, layer: u8, coated: bool) bool {
+    if (stack.foil(layer).width_reduction_mm > 0) return true;
+    if (coated and stack.mask(layer) != null) return true;
+    const ref = reference(stack, layer) orelse return false;
+    if (ref == .microstrip) return false;
+    const pa = nearestPlane(stack, layer, true) orelse return false;
+    const pb = nearestPlane(stack, layer, false) orelse return false;
+    const first = stack.gapEr(pa);
+    var i = pa + 1;
+    while (i < pb) : (i += 1) if (@abs(stack.gapEr(i) - first) > 1e-12) return true;
+    return false;
+}
+
+fn fieldSection(stack: Stack, layer: u8, width: f64, options: SectionOptions) ?CrossSection {
+    const ref = reference(stack, layer) orelse return null;
+    return switch (ref) {
+        .microstrip => makeOuterSection(stack, layer, width, options),
+        .stripline => makeInnerSection(stack, layer, width, options),
+    };
+}
+
+/// Process-aware single-ended analysis on one physical copper layer. Bare,
+/// rectangular, homogeneous cases remain exactly on the published closed form;
+/// only additional fabrication effects are obtained from the calibrated field
+/// ratio. `coated` means the class's generated mask artwork covers the trace.
+pub fn analyzeOnLayer(
+    allocator: std.mem.Allocator,
+    stack: Stack,
+    layer: u8,
+    width_mm: f64,
+    ground_gap_mm: f64,
+    coated: bool,
+) ?ProcessResult {
+    const ref = reference(stack, layer) orelse return null;
+    const foil = stack.foil(layer);
+    const base_z = refZ0WithGroundGap(ref, width_mm, foil.thickness_mm, ground_gap_mm) catch return null;
+    const base_er = refEffectiveErWithGroundGap(ref, width_mm, foil.thickness_mm, ground_gap_mm) catch return null;
+    if (!needsField(stack, layer, coated)) return .{ .z0_ohms = base_z, .er_eff = base_er };
+    const actual_cs = fieldSection(stack, layer, width_mm, .{ .pair_gap = null, .ground_gap = ground_gap_mm, .coated = coated, .ideal = false }) orelse return null;
+    const ideal_cs = fieldSection(stack, layer, width_mm, .{ .pair_gap = null, .ground_gap = ground_gap_mm, .coated = false, .ideal = true }) orelse return null;
+    const actual = field.analyze(allocator, actual_cs.geometry()) catch return null;
+    const ideal = field.analyze(allocator, ideal_cs.geometry()) catch return null;
+    const actual_single = actual.single orelse return null;
+    const ideal_single = ideal.single orelse return null;
+    return .{
+        .z0_ohms = base_z * actual_single.ohms / ideal_single.ohms,
+        .er_eff = base_er * actual_single.er_eff / ideal_single.er_eff,
+    };
+}
+
+/// Process-aware edge-coupled differential analysis (`Zdiff = 2*Zodd`).
+pub fn analyzeDiffOnLayer(
+    allocator: std.mem.Allocator,
+    stack: Stack,
+    layer: u8,
+    width_mm: f64,
+    pair_gap_mm: f64,
+    coated: bool,
+) ?ProcessResult {
+    const ref = reference(stack, layer) orelse return null;
+    const foil = stack.foil(layer);
+    const base_z = refDiffZ0(ref, width_mm, foil.thickness_mm, pair_gap_mm) catch return null;
+    if (!needsField(stack, layer, coated)) return .{ .z0_ohms = base_z, .er_eff = ref.er() };
+    const actual_cs = fieldSection(stack, layer, width_mm, .{ .pair_gap = pair_gap_mm, .ground_gap = 0, .coated = coated, .ideal = false }) orelse return null;
+    const ideal_cs = fieldSection(stack, layer, width_mm, .{ .pair_gap = pair_gap_mm, .ground_gap = 0, .coated = false, .ideal = true }) orelse return null;
+    const actual = field.analyzeOdd(allocator, actual_cs.geometry()) catch return null;
+    const ideal = field.analyzeOdd(allocator, ideal_cs.geometry()) catch return null;
+    const actual_pair = actual.pair orelse return null;
+    const ideal_pair = ideal.pair orelse return null;
+    return .{
+        .z0_ohms = base_z * actual_pair.diff_ohms / ideal_pair.diff_ohms,
+        .er_eff = ref.er() * actual_pair.odd_er_eff / ideal_pair.odd_er_eff,
+    };
+}
 
 /// Thickness and thickness-weighted permittivity of the dielectric spanning
 /// copper layers `a`..`b` (exclusive of both foils, inclusive of any copper
@@ -781,6 +1216,56 @@ pub fn resolvedDiffWidthMmOnLayer(
     const resolved_layer = targetLayer(stack, layer) orelse return null;
     const ref = reference(stack, resolved_layer) orelse return null;
     return refWidthForDiffZ0(ref, target_ohms, stack.foilMm(resolved_layer), pair_gap_mm) catch null;
+}
+
+/// Process-aware inverse for single-ended width synthesis. Two calibrated
+/// correction passes are enough because the field/closed-form ratio varies
+/// smoothly with width; the final forward solve is the same one reports use.
+pub fn resolvedWidthMmOnLayerWithProcess(
+    allocator: std.mem.Allocator,
+    stack: Stack,
+    layer: u8,
+    target_ohms: f64,
+    ground_gap_mm: f64,
+    coated: bool,
+) ?f64 {
+    const resolved_layer = targetLayer(stack, layer) orelse return null;
+    const ref = reference(stack, resolved_layer) orelse return null;
+    const t = stack.foilMm(resolved_layer);
+    var width = refWidthForZ0WithGroundGap(ref, target_ohms, t, ground_gap_mm) catch return null;
+    if (!needsField(stack, resolved_layer, coated)) return width;
+    for (0..2) |_| {
+        const process = analyzeOnLayer(allocator, stack, resolved_layer, width, ground_gap_mm, coated) orelse return null;
+        const closed = refZ0WithGroundGap(ref, width, t, ground_gap_mm) catch return null;
+        const ratio = process.z0_ohms / closed;
+        if (!positive(ratio)) return null;
+        width = refWidthForZ0WithGroundGap(ref, target_ohms / ratio, t, ground_gap_mm) catch return null;
+    }
+    return width;
+}
+
+/// Process-aware inverse for edge-coupled differential width synthesis.
+pub fn resolvedDiffWidthMmOnLayerWithProcess(
+    allocator: std.mem.Allocator,
+    stack: Stack,
+    layer: u8,
+    target_ohms: f64,
+    pair_gap_mm: f64,
+    coated: bool,
+) ?f64 {
+    const resolved_layer = targetLayer(stack, layer) orelse return null;
+    const ref = reference(stack, resolved_layer) orelse return null;
+    const t = stack.foilMm(resolved_layer);
+    var width = refWidthForDiffZ0(ref, target_ohms, t, pair_gap_mm) catch return null;
+    if (!needsField(stack, resolved_layer, coated)) return width;
+    for (0..2) |_| {
+        const process = analyzeDiffOnLayer(allocator, stack, resolved_layer, width, pair_gap_mm, coated) orelse return null;
+        const closed = refDiffZ0(ref, width, t, pair_gap_mm) catch return null;
+        const ratio = process.z0_ohms / closed;
+        if (!positive(ratio)) return null;
+        width = refWidthForDiffZ0(ref, target_ohms / ratio, t, pair_gap_mm) catch return null;
+    }
+    return width;
 }
 
 /// How far (%) the impedance of a `w_mm` trace on `layer` sits from
@@ -1244,4 +1729,85 @@ test "differential impedance supports an outer microstrip reference" {
     const isolated = try refZ0(ref, width, 0.035);
     try testing.expectApproxEqAbs(@as(f64, 100), diff, 1e-9);
     try testing.expect(diff < 2.0 * isolated);
+    var stack = twoLayerFr4();
+    stack.dielectrics = &.{.{ .after_layer = 1, .thickness_mm = 0.2104, .er = 4.4 }};
+    const stack_width = resolvedDiffWidthMmOnLayer(stack, 1, 100, gap).?;
+    try testing.expectApproxEqAbs(width, stack_width, 1e-12);
+    try testing.expect(diffMismatchPct(stack, 1, stack_width, gap, 100).? < 0.01);
+}
+
+// spec: placement/impedance - declared soldermask and trapezoidal etch profile correct the closed-form microstrip through a calibrated field ratio
+test "coated trapezoidal microstrip lowers impedance and round-trips synthesis" {
+    const foils = [_]Foil{
+        .{ .index = 1, .thickness_mm = 0.035, .width_reduction_mm = 0.01778, .narrow_up = true },
+        .{ .index = 2, .thickness_mm = 0.035, .width_reduction_mm = 0.01778, .narrow_up = false },
+    };
+    const masks = [_]Mask{.{ .top = true, .er = 3.8, .substrate_mm = 0.03048, .copper_mm = 0.01524 }};
+    const stack = Stack{
+        .layers = 2,
+        .planes = &.{2},
+        .dielectrics = &.{.{ .after_layer = 1, .thickness_mm = 0.2104, .er = 4.4 }},
+        .foils = &foils,
+        .masks = &masks,
+    };
+    const bare = analyzeOnLayer(testing.allocator, stack, 1, 0.30, 0, false).?;
+    const coated = analyzeOnLayer(testing.allocator, stack, 1, 0.30, 0, true).?;
+    try testing.expect(coated.z0_ohms < bare.z0_ohms);
+    try testing.expect(coated.er_eff > bare.er_eff);
+    const width = resolvedWidthMmOnLayerWithProcess(testing.allocator, stack, 1, 50, 0, true).?;
+    const roundtrip = analyzeOnLayer(testing.allocator, stack, 1, width, 0, true).?;
+    try testing.expectApproxEqAbs(@as(f64, 50), roundtrip.z0_ohms, 0.25);
+}
+
+// spec: placement/impedance - mixed-dielectric stripline uses each physical interval instead of collapsing the stack to one average Dk
+test "mixed dielectric stripline is field corrected and synthesizes its target" {
+    const stack = Stack{
+        .layers = 5,
+        .planes = &.{ 2, 5 },
+        .dielectrics = &.{
+            .{ .after_layer = 1, .thickness_mm = 0.1, .er = 4.1 },
+            .{ .after_layer = 2, .thickness_mm = 0.55, .er = 4.6 },
+            .{ .after_layer = 3, .thickness_mm = 0.1088, .er = 4.16 },
+            .{ .after_layer = 4, .thickness_mm = 0.55, .er = 4.6 },
+        },
+        .foils = &.{
+            .{ .index = 1, .thickness_mm = 0.035 },
+            .{ .index = 2, .thickness_mm = 0.0152 },
+            .{ .index = 3, .thickness_mm = 0.0152, .width_reduction_mm = 0.01778, .narrow_up = false },
+            .{ .index = 4, .thickness_mm = 0.0152 },
+            .{ .index = 5, .thickness_mm = 0.0152 },
+        },
+    };
+    const width = resolvedWidthMmOnLayerWithProcess(testing.allocator, stack, 3, 50, 0, false).?;
+    const result = analyzeOnLayer(testing.allocator, stack, 3, width, 0, false).?;
+    try testing.expectApproxEqAbs(@as(f64, 50), result.z0_ohms, 0.3);
+    try testing.expect(result.er_eff > 4.1 and result.er_eff < 4.7);
+}
+
+// spec: placement/impedance - broadside coupled pairs expose even and odd modes from the capacitance matrix and define differential impedance as twice odd mode
+test "broadside pair returns capacitance-matrix modes" {
+    const stack = Stack{
+        .layers = 4,
+        .planes = &.{ 1, 4 },
+        .dielectrics = &.{
+            .{ .after_layer = 1, .thickness_mm = 0.2, .er = 4.2 },
+            .{ .after_layer = 2, .thickness_mm = 0.15, .er = 4.5 },
+            .{ .after_layer = 3, .thickness_mm = 0.2, .er = 4.2 },
+        },
+        .foils = &.{
+            .{ .index = 1, .thickness_mm = 0.035 },
+            .{ .index = 2, .thickness_mm = 0.018 },
+            .{ .index = 3, .thickness_mm = 0.018 },
+            .{ .index = 4, .thickness_mm = 0.035 },
+        },
+    };
+    const modes = broadsideDiffZ0(testing.allocator, stack, .{
+        .upper_layer = 2,
+        .lower_layer = 3,
+        .upper_width_mm = 0.25,
+        .lower_width_mm = 0.25,
+    }).?;
+    try testing.expectApproxEqRel(2 * modes.odd_ohms, modes.diff_ohms, 1e-12);
+    try testing.expectApproxEqRel(modes.even_ohms / 2, modes.common_ohms, 1e-12);
+    try testing.expect(modes.odd_ohms < modes.even_ohms);
 }

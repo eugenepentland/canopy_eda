@@ -212,6 +212,7 @@ test {
     _ = @import("ground_via_seed.zig");
     _ = @import("placement/guide_branch.zig");
     _ = @import("placement/impedance.zig");
+    _ = @import("placement/impedance_field.zig");
     _ = @import("placement/impedance_microstrip.zig");
     _ = @import("placement/impedance_coupled_microstrip.zig");
     _ = @import("placement/impedance_coupled_stripline.zig");

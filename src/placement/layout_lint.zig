@@ -358,27 +358,15 @@ fn lintImpedanceMismatch(alloc: Allocator, p: Placement, out: *std.ArrayList(Fin
             if (r.diff_gap > 0) r.diff_gap else @max(r.clearance, p.rules.design.clearance),
             @max(r.clearance, p.rules.design.clearance),
         );
-        const pct = if (differential)
-            impedance.diffMismatchPct(stack, layer, r.width, pair_gap, target) orelse continue
+        const coated = impedance.traceIsCoated(r.rf.mask_relief_mm, r.rf.max_freq_hz);
+        const process = if (differential)
+            impedance.analyzeDiffOnLayer(alloc, stack, layer, r.width, pair_gap, coated)
         else
-            impedance.mismatchPctWithGroundGap(
-                stack,
-                layer,
-                r.width,
-                target,
-                r.rf.impedance.ground_gap_mm,
-            ) orelse continue;
+            impedance.analyzeOnLayer(alloc, stack, layer, r.width, r.rf.impedance.ground_gap_mm, coated);
+        const z = (process orelse continue).z0_ohms;
+        const pct = @abs(z - target) / target * 100;
         if (pct <= impedance.mismatch_tolerance_pct) continue;
         if ((try seen.getOrPut(alloc, r.class.name)).found_existing) continue;
-        const z = if (differential)
-            impedance.refDiffZ0(ref, r.width, stack.foilMm(layer), pair_gap) catch continue
-        else
-            impedance.refZ0WithGroundGap(
-                ref,
-                r.width,
-                stack.foilMm(layer),
-                r.rf.impedance.ground_gap_mm,
-            ) catch continue;
         var owned_gap_note: ?[]u8 = null;
         defer if (owned_gap_note) |note| alloc.free(note);
         const gap_note = if (differential) blk: {

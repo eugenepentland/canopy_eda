@@ -617,8 +617,10 @@ pub const scope_form_docs = blk: {
     } };
     t[@backingInt(ScopeForm.stackup)] = .{ .scope = tl, .doc = .{
         .syntax = "(stackup N|\"PRESET\" [(plane IDX \"NET\")…] [(pour top|bottom \"NET\")…] " ++
-            "[(copper IDX (thickness MM) [(material \"NAME\")])] " ++
-            "[(dielectric AFTER_IDX core|prepreg (material \"NAME\") (thickness MM) [(er X)])] [(thickness MM)])",
+            "[(copper IDX (thickness MM) [(material \"NAME\")] [(width-reduction MM)] [(narrow-side up|down)])] " ++
+            "[(dielectric AFTER_IDX core|prepreg (material \"NAME\") (thickness MM) [(er X)])] " ++
+            "[(soldermask top|bottom [(material \"NAME\")] (er X) (substrate-thickness MM) (copper-thickness MM))] " ++
+            "[(thickness MM)])",
         .summary = "Declare the board's copper stack: N total copper layers (1-based, 1 = top/" ++
             board_layers.f_cu ++ ", N = bottom/" ++ board_layers.b_cu ++
             "), or name a built-in fabricator construction such as " ++
@@ -631,12 +633,20 @@ pub const scope_form_docs = blk: {
             "copper pour (Gerber + /pcb-layout + PNG), NET pads already on that face connect through " ++
             "the pour with no stitching via, and signal routing prefers the un-poured face. " ++
             "Physical construction is optional and independent of electrical role: `(copper IDX …)` " ++
-            "records each foil's material/thickness, while `(dielectric AFTER_IDX core|prepreg …)` " ++
+            "records each foil's material/thickness. `(width-reduction MM)` describes the fabricated " ++
+            "narrow face of an etched trapezoid relative to its artwork/base width, and " ++
+            "`(narrow-side up|down)` orients it toward layer 1 or layer N. " ++
+            "`(dielectric AFTER_IDX core|prepreg …)` " ++
             "records the interval immediately below that copper layer (valid gaps are 1 through N-1). A " ++
-            "dielectric may also declare its relative permittivity with (er X) — the one purely " ++
-            "ELECTRICAL number in the stackup: nothing about construction, routing or fabrication reads " ++
-            "it, but a (net-class … (impedance OHMS)) width is solved against it. Undeclared, generic " ++
-            "FR-4's 4.4 applies, and a board with no (dielectric …) intervals at all has its heights " ++
+            "dielectric may also declare its relative permittivity with (er X). `(soldermask …)` records " ++
+            "the stepped coating used by impedance control: its height over bare laminate/between traces " ++
+            "and its separate height over copper. Controlled-impedance synthesis uses Hammerstad/Cohn/" ++
+            "Kirschning closed forms for their ideal domains, then a calibrated 2D capacitance-matrix " ++
+            "solve for declared soldermask, trapezoids, mixed-Dk stripline, and other non-ideal " ++
+            "cross-sections. A class whose mask artwork opens the trace is analyzed bare; a tented class " ++
+            "uses the face's soldermask profile. Undeclared dielectric Dk uses generic FR-4's 4.4, " ++
+            "undeclared process geometry stays rectangular/bare, and a board with no dielectric " ++
+            "intervals at all has its heights " ++
             "synthesised by spreading the finished thickness evenly over the gaps. An " ++
             "optional (thickness MM) sets the finished board thickness reported in the Gerber .gbrjob " ++
             "(default 1.6 mm). `(stackup 2)` is a plain 2-layer board with no planes — ground/power " ++

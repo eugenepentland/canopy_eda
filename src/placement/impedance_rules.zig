@@ -64,12 +64,25 @@ pub fn stackOf(
         .er = if (d.er > 0) d.er else impedance.default_er,
     };
     const foils = try arena.alloc(impedance.Foil, s.copper.len);
-    for (s.copper, foils) |c, *out| out.* = .{ .index = c.index, .thickness_mm = c.thickness };
+    for (s.copper, foils) |c, *out| out.* = .{
+        .index = c.index,
+        .thickness_mm = c.thickness,
+        .width_reduction_mm = c.width_reduction,
+        .narrow_up = c.narrow_side == .up,
+    };
+    const masks = try arena.alloc(impedance.Mask, s.soldermasks.len);
+    for (s.soldermasks, masks) |m, *out| out.* = .{
+        .top = m.side == .top,
+        .er = m.er,
+        .substrate_mm = m.substrate_thickness,
+        .copper_mm = m.copper_thickness,
+    };
     return .{
         .layers = s.layers,
         .planes = planes,
         .dielectrics = dielectrics,
         .foils = foils,
+        .masks = masks,
         .board_mm = s.thickness,
     };
 }
@@ -107,25 +120,38 @@ pub fn deriveWidths(
     }
     if (!needs_stack) return; // no target: gap still resolves, no stack needed
     const stack = try stackOf(arena, block);
+    var by_class: std.StringHashMapUnmanaged(f64) = .empty;
+    defer by_class.deinit(arena);
     for (rules) |*r| {
         if (r.rf.impedance.ohms <= 0 and r.rf.impedance.diff_ohms <= 0) continue;
         if (r.width > 0) continue; // an authored width always wins
+        if (by_class.get(r.class.name)) |cached| {
+            r.width = cached;
+            r.rf.impedance.width_derived = true;
+            continue;
+        }
+        const coated = impedance.traceIsCoated(r.rf.mask_relief_mm, r.rf.max_freq_hz);
         const w = if (r.rf.impedance.diff_ohms > 0) blk: {
             if (r.diff_gap < 0) continue;
-            break :blk impedance.resolvedDiffWidthMmOnLayer(
+            break :blk impedance.resolvedDiffWidthMmOnLayerWithProcess(
+                arena,
                 stack,
                 r.rf.impedance.layer,
                 r.rf.impedance.diff_ohms,
                 resolvedPairGap(r.*, board_clearance),
+                coated,
             ) orelse continue;
-        } else impedance.resolvedWidthMmOnLayerWithGroundGap(
+        } else impedance.resolvedWidthMmOnLayerWithProcess(
+            arena,
             stack,
             r.rf.impedance.layer,
             r.rf.impedance.ohms,
             r.rf.impedance.ground_gap_mm,
+            coated,
         ) orelse continue;
         r.width = w;
         r.rf.impedance.width_derived = true;
+        try by_class.put(arena, r.class.name, w);
     }
 }
 
@@ -282,7 +308,9 @@ test "a differential target derives its pair width on the selected layer" {
         try testing.expect(rule.rf.impedance.width_derived);
         try testing.expectEqual(@as(f64, 100), rule.rf.impedance.diff_ohms);
         try testing.expectEqual(@as(u8, 3), rule.rf.impedance.layer);
-        try testing.expectApproxEqAbs(@as(f64, 0.1617), rule.width, 0.0001);
+        // The process-aware stack model includes the different core/prepreg Dk
+        // values instead of reducing this offset stripline to one dielectric.
+        try testing.expectApproxEqAbs(@as(f64, 0.1636), rule.width, 0.0001);
     }
 }
 

@@ -2409,10 +2409,12 @@ fn parseStackup(self: *Evaluator, form_children: []const Node) EvalError!env_mod
     var planes: std.ArrayList(env_mod.StackupPlane) = .empty;
     var copper: std.ArrayList(env_mod.StackupCopper) = .empty;
     var dielectrics: std.ArrayList(env_mod.StackupDielectric) = .empty;
+    var soldermasks: std.ArrayList(env_mod.StackupSoldermask) = .empty;
     if (preset) |resolved| {
         thickness = resolved.thickness;
         copper.appendSlice(self.allocator, resolved.copper) catch return EvalError.OutOfMemory;
         dielectrics.appendSlice(self.allocator, resolved.dielectrics) catch return EvalError.OutOfMemory;
+        soldermasks.appendSlice(self.allocator, resolved.soldermasks) catch return EvalError.OutOfMemory;
     }
     for (form_children[2..]) |child| {
         const c = child.asList() orelse continue;
@@ -2461,6 +2463,10 @@ fn parseStackup(self: *Evaluator, form_children: []const Node) EvalError!env_mod
             }
             continue;
         }
+        if (std.mem.eql(u8, head, "soldermask")) {
+            try appendSoldermaskEntry(self, c, &soldermasks);
+            continue;
+        }
         const entry = if (std.mem.eql(u8, head, "plane"))
             parsePlaneEntry(self, c, layers)
         else if (std.mem.eql(u8, head, "pour"))
@@ -2468,7 +2474,7 @@ fn parseStackup(self: *Evaluator, form_children: []const Node) EvalError!env_mod
         else blk: {
             self.warnFmt(
                 c[0].span,
-                "unknown (stackup …) sub-form ({s} …) — expected plane, pour, copper, dielectric, or thickness",
+                "unknown (stackup …) sub-form ({s} …) — expected plane, pour, copper, dielectric, soldermask, or thickness",
                 .{head},
             );
             break :blk null;
@@ -2480,6 +2486,7 @@ fn parseStackup(self: *Evaluator, form_children: []const Node) EvalError!env_mod
         .planes = planes.toOwnedSlice(self.allocator) catch &.{},
         .copper = copper.toOwnedSlice(self.allocator) catch &.{},
         .dielectrics = dielectrics.toOwnedSlice(self.allocator) catch &.{},
+        .soldermasks = soldermasks.toOwnedSlice(self.allocator) catch &.{},
         .present = true,
         .thickness = thickness,
         .preset = preset_name,
@@ -2555,7 +2562,37 @@ fn parseCopperEntry(self: *Evaluator, c: []const Node, layers: u8) ?env_mod.Stac
         return null;
     }
     const index = stackIndex(self, c[1], layers, "copper", layers) orelse return null;
-    const props = parseStackMaterial(self, c[2..], "copper");
+    var props: StackMaterial = .{};
+    var width_reduction: f64 = 0;
+    var narrow_side: @TypeOf((env_mod.StackupCopper{ .index = 1, .thickness = 1 }).narrow_side) = .up;
+    for (c[2..]) |node| {
+        const p = node.asList() orelse continue;
+        if (p.len == 0) continue;
+        const head = p[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "width-reduction")) {
+            if (p.len < 2) {
+                self.warnFmt(p[0].span, "(width-reduction MM) needs a value", .{});
+            } else if (p[1].asNumber()) |value| {
+                if (value >= 0) width_reduction = value else self.warnFmt(p[1].span, "(width-reduction …) cannot be negative", .{});
+            } else self.warnFmt(p[1].span, "(width-reduction …) must be a number (mm)", .{});
+        } else if (std.mem.eql(u8, head, "narrow-side")) {
+            if (p.len < 2) {
+                self.warnFmt(p[0].span, "(narrow-side up|down) needs a board-normal side", .{});
+            } else if (p[1].asAtom()) |side| {
+                if (std.meta.stringToEnum(@TypeOf(narrow_side), side)) |parsed| {
+                    narrow_side = parsed;
+                } else {
+                    self.warnFmt(p[1].span, "(narrow-side …) must be up or down", .{});
+                }
+            } else self.warnFmt(p[1].span, "(narrow-side …) must be up or down", .{});
+        } else {
+            const one = [_]Node{node};
+            const parsed = parseStackMaterial(self, &one, "copper");
+            if (parsed.thickness > 0) props.thickness = parsed.thickness;
+            if (parsed.material.len > 0) props.material = parsed.material;
+            if (parsed.er > 0) props.er = parsed.er;
+        }
+    }
     if (!(props.thickness > 0)) {
         self.warnFmt(c[0].span, "(copper …) needs a positive (thickness MM)", .{});
         return null;
@@ -2570,7 +2607,75 @@ fn parseCopperEntry(self: *Evaluator, c: []const Node, layers: u8) ?env_mod.Stac
         .index = index,
         .thickness = props.thickness,
         .material = if (props.material.len > 0) props.material else "Copper",
+        .width_reduction = width_reduction,
+        .narrow_side = narrow_side,
     };
+}
+
+fn parseSoldermaskEntry(self: *Evaluator, c: []const Node) ?env_mod.StackupSoldermask {
+    if (c.len < 2) {
+        self.warnFmt(c[0].span, "(soldermask …) needs top|bottom and its process properties", .{});
+        return null;
+    }
+    const side_name = c[1].asAtom() orelse {
+        self.warnFmt(c[1].span, "(soldermask …) side must be top or bottom", .{});
+        return null;
+    };
+    const side = std.meta.stringToEnum(env_mod.FabricationSide, side_name) orelse {
+        self.warnFmt(c[1].span, "(soldermask …) side must be top or bottom", .{});
+        return null;
+    };
+    var material: []const u8 = "Soldermask";
+    var er: f64 = 0;
+    var substrate_thickness: f64 = 0;
+    var copper_thickness: f64 = 0;
+    for (c[2..]) |node| {
+        const p = node.asList() orelse continue;
+        if (p.len == 0) continue;
+        const head = p[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "material")) {
+            if (p.len >= 2) material = p[1].asString() orelse p[1].asAtom() orelse material;
+        } else if (std.mem.eql(u8, head, "er")) {
+            parseStackEr(self, p, "soldermask", &er);
+        } else if (std.mem.eql(u8, head, "substrate-thickness") or std.mem.eql(u8, head, "copper-thickness")) {
+            if (p.len < 2) {
+                self.warnFmt(p[0].span, "({s} MM) needs a value", .{head});
+            } else if (p[1].asNumber()) |value| {
+                if (value > 0) {
+                    if (std.mem.eql(u8, head, "substrate-thickness")) substrate_thickness = value else copper_thickness = value;
+                } else self.warnFmt(p[1].span, "({s} …) must be positive", .{head});
+            } else self.warnFmt(p[1].span, "({s} …) must be a number (mm)", .{head});
+        } else self.warnFmt(
+            p[0].span,
+            "unknown (soldermask …) property ({s} …) — expected material, er, substrate-thickness, or copper-thickness",
+            .{head},
+        );
+    }
+    if (!(er > 0 and substrate_thickness > 0 and copper_thickness > 0)) {
+        self.warnFmt(c[0].span, "(soldermask …) needs (er X), (substrate-thickness MM), and (copper-thickness MM)", .{});
+        return null;
+    }
+    return .{
+        .side = side,
+        .material = material,
+        .er = er,
+        .substrate_thickness = substrate_thickness,
+        .copper_thickness = copper_thickness,
+    };
+}
+
+fn appendSoldermaskEntry(
+    self: *Evaluator,
+    c: []const Node,
+    soldermasks: *std.ArrayList(env_mod.StackupSoldermask),
+) EvalError!void {
+    const entry = parseSoldermaskEntry(self, c) orelse return;
+    for (soldermasks.items) |old| {
+        if (old.side != entry.side) continue;
+        self.warnFmt(c[1].span, "duplicate soldermask details for {s} face — first kept", .{@tagName(entry.side)});
+        return;
+    }
+    soldermasks.append(self.allocator, entry) catch return EvalError.OutOfMemory;
 }
 
 fn parseDielectricEntry(self: *Evaluator, c: []const Node, layers: u8) ?env_mod.StackupDielectric {
@@ -3731,6 +3836,37 @@ test "design-block captures (stackup …)" {
     try testing.expectEqual(@as(u8, 2), block.stackup.planes[0].index);
     try testing.expectEqualStrings("GND", block.stackup.planes[0].net);
     try testing.expectEqualStrings("PWR", block.stackup.planes[1].net);
+}
+
+// spec: eval/design_block - stackup process entries capture stepped soldermask and per-layer trapezoidal etch geometry
+test "stackup captures soldermask and copper etch profile" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (stackup 2
+        \\    (copper 1 (thickness 0.035) (width-reduction 0.01778) (narrow-side up))
+        \\    (dielectric 1 core (material "FR4") (thickness 1.5) (er 4.4))
+        \\    (copper 2 (thickness 0.035) (width-reduction 0.01778) (narrow-side down))
+        \\    (soldermask top (material "JLC green") (er 3.8)
+        \\      (substrate-thickness 0.03048) (copper-thickness 0.01524))))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var scope = env_mod.Env.init(a, null);
+    defer scope.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &scope)).design_block;
+    try testing.expectEqual(@as(usize, 2), block.stackup.copper.len);
+    try testing.expectApproxEqAbs(@as(f64, 0.01778), block.stackup.copper[0].width_reduction, 1e-12);
+    try testing.expectEqual(.up, block.stackup.copper[0].narrow_side);
+    try testing.expectEqual(.down, block.stackup.copper[1].narrow_side);
+    try testing.expectEqual(@as(usize, 1), block.stackup.soldermasks.len);
+    const mask = block.stackup.soldermasks[0];
+    try testing.expectEqual(env_mod.FabricationSide.top, mask.side);
+    try testing.expectApproxEqAbs(@as(f64, 3.8), mask.er, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.03048), mask.substrate_thickness, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.01524), mask.copper_thickness, 1e-12);
 }
 
 // spec: eval/design_block - pdn form captures an explicit AC-domain target and source model
