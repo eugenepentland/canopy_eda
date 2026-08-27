@@ -691,9 +691,10 @@ function upload(old, arr) {
 }
 
 // ── retained manufacturing artwork ───────────────────────────────────────
-// Gerber regions are simple rings in the server wire format. Triangulate each
-// ring once, at CAM install time, so a frame never walks its points. Clear
-// regions remain separate ordered runs and therefore retain Gerber polarity.
+// Triangulate each Gerber region once, at CAM install time, so a frame never
+// walks its points. pcb_region.js takes the fast Earcut path for simple rings
+// and decomposes self-crossing clearance contours by their non-zero winding.
+// Clear regions remain separate ordered runs and therefore retain polarity.
 function camRingClean(raw) {
   var out = [], eps = 1e-10;
   for (var i = 0; i < (raw || []).length; i++) {
@@ -709,13 +710,11 @@ function camRingClean(raw) {
   return out;
 }
 function camTriangulate(raw, out) {
-  var p = camRingClean(raw), flat = [];
-  if (p.length < 3 || typeof PCBEarcut !== "function") return false;
-  for (var i = 0; i < p.length; i++) flat.push(+p[i][0], +p[i][1]);
-  var ids = PCBEarcut(flat, null, 2);
-  if (!ids || ids.length < 3) return false;
-  for (i = 0; i < ids.length; i++) {
-    var q = p[ids[i]];
+  if (typeof window.PCBRegionTriangles !== "function") return false;
+  var triangles = window.PCBRegionTriangles(raw);
+  if (!triangles || triangles.length < 3) return false;
+  for (var i = 0; i < triangles.length; i++) {
+    var q = triangles[i];
     out.push(ux(q[0]), uy(q[1]), 0, 0, 1, 1, 1, 1);
   }
   return true;

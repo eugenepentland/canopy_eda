@@ -52,9 +52,10 @@ const pcb_stuck_js = @embedFile("assets/pcb_stuck.js");
 // quads on a canvas UNDER the 2D overlay, camera = one uniform. The editor can
 // opt out to its Canvas2D scene; Assembly's Gerber film requires this renderer.
 // Script-tagged BEFORE pcb_board.js so window.PCBGpu exists when the board
-// script boots. The small Earcut asset precedes it for Gerber regions.
+// script boots. Earcut and the Gerber-region adapter precede it.
 const pcb_gpu_js = @embedFile("assets/pcb_gpu.js");
 const pcb_earcut_js = @embedFile("assets/pcb_earcut.js");
+const pcb_region_js = @embedFile("assets/pcb_region.js");
 const route_review_js = @embedFile("assets/route_review.js");
 const review_notes_js = @embedFile("assets/review_notes.js");
 const assembly_debug_js = @embedFile("assets/assembly_debug.js");
@@ -157,6 +158,7 @@ const registry = [_]Asset{
     .{ .name = "pcb_stuck.js", .body = pcb_stuck_js, .content_type = .JS },
     .{ .name = "pcb_gpu.js", .body = pcb_gpu_js, .content_type = .JS },
     .{ .name = "pcb_earcut.js", .body = pcb_earcut_js, .content_type = .JS },
+    .{ .name = "pcb_region.js", .body = pcb_region_js, .content_type = .JS },
     .{ .name = "route_review.js", .body = route_review_js, .content_type = .JS },
     .{ .name = "review_notes.js", .body = review_notes_js, .content_type = .JS },
     .{ .name = "assembly_debug.js", .body = assembly_debug_js, .content_type = .JS },
@@ -1676,18 +1678,21 @@ test "PCB WebGPU renderer carries its own pipelines and honours the ?gpu=0 opt-o
 
 // spec: Web Server - Assembly opens on its compact read-only semantic board and requests no Gerber/Excellon payload until the operator enables CAM Review
 // spec: Web Server - CAM Review WebGPU renders the generated Gerber/Excellon operation stream into a retained manufacturing film and camera frames only sample that film; Canvas2D remains only as the transparent component/interaction overlay and never interprets CAM operations
+// spec: Web Server - CAM Review decomposes self-crossing Gerber region contours into simple faces selected by the Gerber non-zero winding rule before triangulation
 // spec: Web Server - Assembly requires WebGPU for generated Gerber/Excellon artwork; an unavailable adapter, initialization/render failure, device loss, or Assembly ?gpu=0 displays a blocking requirement message instead of invoking a Canvas manufacturing renderer
 // spec: Web Server - An opposite-face heatsink is retained in the WebGPU manufacturing film behind the opaque board instead of forcing a Canvas CAM fallback
 test "Assembly requires retained WebGPU CAM artwork and keeps Canvas as an overlay" {
     const markers = [_]struct { haystack: []const u8, marker: []const u8 }{
         .{ .haystack = pcb_gpu_js, .marker = "rebuildCam: rebuildCam" },
         .{ .haystack = pcb_gpu_js, .marker = "function camBuild()" },
-        .{ .haystack = pcb_gpu_js, .marker = "PCBEarcut(flat, null, 2)" },
+        .{ .haystack = pcb_gpu_js, .marker = "window.PCBRegionTriangles(raw)" },
         .{ .haystack = pcb_gpu_js, .marker = "@fragment fn fsStencilArc" },
         .{ .haystack = pcb_gpu_js, .marker = "function camBake(base, layers, key, rearHeatsink, b)" },
         .{ .haystack = pcb_gpu_js, .marker = "textureSampleLevel(camFilm, camFilmSampler, uv, 0.0)" },
         .{ .haystack = pcb_gpu_js, .marker = "if (!camFilm || camFilmKey !== key)" },
         .{ .haystack = pcb_earcut_js, .marker = "window.PCBEarcut=Ua" },
+        .{ .haystack = pcb_region_js, .marker = "window.PCBRegionTriangles = triangulate" },
+        .{ .haystack = pcb_region_js, .marker = "if (!winding(ring, sample)) continue" },
         .{ .haystack = pcb_board_js, .marker = "function gpuCamLive()" },
         .{ .haystack = pcb_board_js, .marker = "function gpuCamState()" },
         .{ .haystack = pcb_gpu_js, .marker = "camGeo.source !== O.PCB.cam" },

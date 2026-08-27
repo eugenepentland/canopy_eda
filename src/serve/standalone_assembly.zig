@@ -89,6 +89,8 @@ fn inlineBoardAssets(
     html = try replaceAsset(arena, html, "<link rel=\"stylesheet\" href=\"/static/pcb_settings.css\">", css);
     for ([_]struct { tag: []const u8, bytes: []const u8 }{
         .{ .tag = "<script src=\"/static/footprint_svg.js\"></script>", .bytes = @embedFile("assets/footprint_svg.js") },
+        .{ .tag = "<script src=\"/static/pcb_earcut.js\"></script>", .bytes = @embedFile("assets/pcb_earcut.js") },
+        .{ .tag = "<script src=\"/static/pcb_region.js\"></script>", .bytes = @embedFile("assets/pcb_region.js") },
         .{ .tag = "<script src=\"/static/pcb_gpu.js\"></script>", .bytes = @embedFile("assets/pcb_gpu.js") },
         .{ .tag = "<script src=\"/static/pcb_board.js\"></script>", .bytes = @embedFile("assets/pcb_board.js") },
     }) |asset| html = try replaceAsset(arena, html, asset.tag, try inlineScript(arena, asset.bytes));

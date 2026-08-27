@@ -1102,8 +1102,10 @@ fn writePageScripts(w: *std.Io.Writer, mode: PageScripts) std.Io.Writer.Error!vo
     // FP.padShape and optional client-DRC marshaling load after `const PCB=…`.
     try w.writeAll("<script src=\"/static/footprint_svg.js\"></script>");
     if (!mode.physical_review) try w.writeAll("<script src=\"/static/drc_marshal.js\"></script>");
-    // Earcut precedes WebGPU's CAM bake; both precede pcb_board.js at boot.
+    // Earcut and the non-zero Gerber-region adapter precede WebGPU's CAM bake;
+    // all three precede pcb_board.js at boot.
     try w.writeAll("<script src=\"/static/pcb_earcut.js\"></script>");
+    try w.writeAll("<script src=\"/static/pcb_region.js\"></script>");
     try w.writeAll("<script src=\"/static/pcb_gpu.js\"></script>");
     if (!mode.physical_review) try w.writeAll("<script src=\"/static/shape_sketch.js\"></script>");
     try w.writeAll("<script src=\"/static/pcb_board.js\"></script>");

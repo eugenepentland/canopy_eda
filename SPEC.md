@@ -6579,6 +6579,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Assembly opens on its compact read-only semantic board and requests no Gerber/Excellon payload until the operator enables CAM Review
 - CAM Review paints parsed Gerber/Excellon operations in WebGPU instead of rebuilding fabrication artwork from browser fonts and placement objects
 - CAM Review WebGPU renders the generated Gerber/Excellon operation stream into a retained manufacturing film and camera frames only sample that film; Canvas2D remains only as the transparent component/interaction overlay and never interprets CAM operations
+- CAM Review decomposes self-crossing Gerber region contours into simple faces selected by the Gerber non-zero winding rule before triangulation
 - An opposite-face heatsink is retained in the WebGPU manufacturing film behind the opaque board instead of forcing a Canvas CAM fallback
 - The Assembly CAM Review toggle lazy-loads dependency-cached Gerber/Excellon artwork, can return instantly to the semantic board, and exposes CAM layer controls only while exact files are active
 - The initial Assembly iframe omits hidden DRC, editable-layout metadata, editor-only scripts, and inline CAM while exposing the lazy generated-files URL
