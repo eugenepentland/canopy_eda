@@ -140,7 +140,8 @@ function loadCamReview(){
  if(!PHYSICAL_REVIEW||!PCB.cam_url||CAM_REVIEW)return;
  var start=function(){fetch(PCB.cam_url).then(function(r){if(!r.ok)throw 0;return r.json();})
   .then(function(cam){if(!cam||cam.source!=="generated-gerber"||!Array.isArray(cam.layers))return;
-   PCB.cam=cam;CAM_REVIEW=true;reviewPaintDirty=true;camLayerCache={};dragCacheDrop();paintSoon();})
+   PCB.cam=cam;CAM_REVIEW=true;reviewPaintDirty=true;camLayerCache={};
+   if(gpuOn&&window.PCBGpu)PCBGpu.rebuildCam();dragCacheDrop();paintSoon();})
   .catch(function(){});};
  requestAnimationFrame(function(){requestAnimationFrame(start);});}
 // Full editable pages paint placement + saved tracks/vias first. Exact-state
@@ -1016,6 +1017,14 @@ function gpuLive(){
   // copper too, use the exact 2D fill instead of rebaking their sample chords.
   &&!(PCB.rf_paths||[]).length
   &&!(viewSt.pourOp>0&&anyUnplaced());}
+// Assembly's exact-CAM renderer is independent of the editor's semantic GPU
+// gate. It owns the manufactured board films while the transparent 2D canvas
+// above retains package sprites, focus marks and every interaction overlay.
+// An opposite-face heatsink must remain behind the board, so that uncommon
+// composition deliberately falls back to the complete Canvas2D painter.
+function gpuCamLive(){var hs=heatsinkRect();
+ return gpuOn&&window.PCBGpu&&PCBGpu.active&&PHYSICAL_REVIEW&&CAM_REVIEW&&!ovExclusive()
+  &&!(viewSt.vis.heatsink&&hs&&hs.w>0&&hs.h>0&&heatsinkBehindBoard(hs));}
 // A live gesture mutates PCB.tracks / PCB.vias IN PLACE, per pointermove, with
 // no 2D cache to drop (the per-item painters read the model every frame). The
 // GPU's copper instances are BAKED, so every such mutation has to mark them.
@@ -1108,6 +1117,14 @@ function gpuState(){
   // procedural pass doesn't have, so the GPU keeps its grid through a gesture.
   gridPitch:(g>0&&g*S*k>=8)?g*S:0,gridDot:1.4/Math.max(k,0.01),
   viaDrill:viaGeo().drill};}
+function gpuCamState(){var all=PCB.cam&&PCB.cam.layers||[],out=[],cu=camCopperPaintOrder(all);
+ cu.forEach(function(L,i){out.push({id:L.id,col:PH.copper,a:i===cu.length-1?1:0.24});});
+ all.forEach(function(L){if(L.kind==="mask"&&camLayerVisible(L))out.push({id:L.id,col:PH.mask,a:0.94});});
+ all.forEach(function(L){if(L.kind==="paste"&&camLayerVisible(L))out.push({id:L.id,col:"#b9c5d1",a:0.72});});
+ all.forEach(function(L){if(L.kind==="silk"&&camLayerVisible(L))out.push({id:L.id,col:PH.silk,a:1});});
+ all.forEach(function(L){if(L.kind==="drill"&&camLayerVisible(L))out.push({id:L.id,col:PH.hole,a:1});});
+ all.forEach(function(L){if(L.kind==="outline"&&camLayerVisible(L))out.push({id:L.id,col:PH.edge,a:1});});
+ return {cam:{bg:PH.bg,substrate:PH.substrate,layers:out}};}
 // Antipads overlay (Layers/Appearance "Antipads"): every single-ended
 // controlled-impedance via the server solved a plane antipad for draws its
 // SOLVED opening (solid amber) and the minimum-clearance ring it is floored
@@ -1250,7 +1267,8 @@ function paintStages(ctx,k,s){
 // overlays. Called verbatim by scenePaint's quiet path and by ovsBuild, so a
 // blit can never disagree with the repaint that replaces it.
 function paintScene(ctx,k){
- if(CAM_REVIEW){paintRearHeatsink(ctx,k);paintCamBoard(ctx,k);if(camVisible("components")){paintParts(ctx,k);paintGroupBoxes(ctx,k);}return;}
+ if(CAM_REVIEW){if(!gpuScene){paintRearHeatsink(ctx,k);paintCamBoard(ctx,k);}
+  if(camVisible("components")){paintParts(ctx,k);paintGroupBoxes(ctx,k);}return;}
  paintStages(ctx,k,QUIET_STATE);}
 // Zoom frames render the FULL scene — a SCALED gesture blit of the previous
 // frame was tried (2026-08-06) and reverted by user preference: the soft zoom
@@ -1286,8 +1304,8 @@ function scenePaint(){paintQueued=false;
   // owns the background — so this surface clears to TRANSPARENT and the passes
   // that would double-draw skip themselves on the same per-frame flag. Set and
   // cleared around straight-line code with no return in between.
-  gpuScene=gpuLive();
-  if(gpuScene)PCBGpu.frame(vb,gpuState());
+  var camGpu=gpuCamLive();gpuScene=camGpu||gpuLive();
+  if(gpuScene&&!PCBGpu.frame(vb,camGpu?gpuCamState():gpuState()))gpuScene=false;
   ctx.setTransform(1,0,0,1,0,0);
   if(gpuScene)ctx.clearRect(0,0,w,h);
   else{ctx.fillStyle=PHYSICAL_REVIEW?PH.bg:TH.bg;ctx.fillRect(0,0,w,h);}

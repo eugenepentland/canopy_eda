@@ -53,8 +53,9 @@ if (typeof window === "undefined") return;
 var api = {
   init: init, frame: frame, rebuildCopper: rebuildCopper,
   rebuildParts: rebuildParts, rebuildPours: rebuildPours,
+  rebuildCam: rebuildCam,
   partsExclIs: partsExclIs,
-  dispose: dispose, active: false,
+  dispose: dispose, active: false, error: null,
 };
 window.PCBGpu = api;
 
@@ -64,6 +65,9 @@ var O = null,            // init opts (PCB, S, MX, MY, M, nsig, TH, layerColor, 
     colorFmt = null, bundle = null, bundleKey = "",
     pipeSeg = null, pipeCir = null, pipePad = null, pipePoly = null,
     pipeGrid = null, pipeFan = null, pipeCover = null,
+    pipeCamSeg = null, pipeCamCir = null, pipeCamPad = null,
+    pipeCamPoly = null, pipeCamArc = null, pipeCamBoard = null,
+    pipeCamReset = null, pipeCamTint = null, pipeCamSub = null, pipeCamBlit = null,
     camBuf = null, drawBuf = null, bg0 = null, bg1 = null,
     camA = null, drawA = null,
     stTex = null, stView = null, stW = 0, stH = 0,   // stencil attachment (pour even-odd)
@@ -74,6 +78,9 @@ var O = null,            // init opts (PCB, S, MX, MY, M, nsig, TH, layerColor, 
     polyBuf = null, polyRange = null,     // polygon pads, same 4 groups, as triangles
     fanBuf = null, pourRange = null,      // pour ring fans (stencil pass), one range per area
     coverBuf = null, coverA = null, pourN = 0,   // pour cover quads, one instance per area
+    camGeo = null, camDirty = true, camFailed = false,
+    camFilm = null, camFilmView = null, camFilmBg = null, camFilmStencil = null,
+    camFilmW = 0, camFilmH = 0, camFilmKey = "", camSampler = null,
     partsExcl = null,    // parts left OUT of the pad/bore bake (a live drag — see rebuildParts)
     dirtyCu = true, dirtyPt = true, dirtyPo = true, lastDrill = -1,
     clearCol = { r: 0, g: 0, b: 0, a: 1 };
@@ -86,8 +93,10 @@ var DSTRIDE = 256, DFLOATS = 64;
 // SMD pads split by the owning part's side for the solid-pour foreign-side fade.
 // Through-hole pads and bores keep parallel top/bottom ranges for a stable
 // layout, but pcb_board.js assigns both groups full opacity on every view.
-var S_THRU_T = 0, S_THRU_B = 1, S_TOP = 2, S_BOT = 3, S_BORE_T = 4, S_BORE_B = 5,
-    S_VIA = 6, S_HOLE = 7, S_POUR = 8, S_GRID = 9, S_EXTRA = 10;
+var CAM_MAX_LAYERS = 32,
+    S_THRU_T = 0, S_THRU_B = 1, S_TOP = 2, S_BOT = 3, S_BORE_T = 4, S_BORE_B = 5,
+    S_VIA = 6, S_HOLE = 7, S_POUR = 8, S_GRID = 9, S_CAM = 10,
+    S_EXTRA = S_CAM + CAM_MAX_LAYERS + 2;
 
 function slotBase() { return O.nsig; }
 function slotCount() { return O.nsig + S_EXTRA; }
@@ -311,7 +320,14 @@ var WGSL = [
 "  let f = 0.5 * onepx();",
 "  let d = v.w - v.c;",
 "  var dist: f32;",
-"  if (v.shape > 0.5) { dist = length(d) - v.h.x; }",
+"  if (v.shape > 1.5) {",
+"    let e2 = vec2<f32>(-v.e1.y, v.e1.x);",
+"    var a = v.c; var b = v.c; var r = v.h.y;",
+"    if (v.h.x >= v.h.y) { a = v.c - v.e1 * (v.h.x - v.h.y); b = v.c + v.e1 * (v.h.x - v.h.y); r = v.h.y; }",
+"    else { a = v.c - e2 * (v.h.y - v.h.x); b = v.c + e2 * (v.h.y - v.h.x); r = v.h.x; }",
+"    dist = segDist(v.w, a, b) - r;",
+"  }",
+"  else if (v.shape > 0.5) { dist = length(d) - v.h.x; }",
 "  else {",
 "    let e2 = vec2<f32>(-v.e1.y, v.e1.x);",
 "    let q = abs(vec2<f32>(dot(d, v.e1), dot(d, e2))) - v.h;",
@@ -320,6 +336,71 @@ var WGSL = [
 "  let al = (1.0 - smoothstep(-f, f, dist)) * v.col.a * du.p.x;",
 "  if (al <= 0.0) { discard; }",
 "  return premul(v.col.rgb, al);",
+"}",
+"",
+"// CAM circular strokes: exact Gerber arcs, never sampled chords.",
+"struct ArcV {",
+"  @builtin(position) pos: vec4<f32>,",
+"  @location(0) w: vec2<f32>, @location(1) c: vec2<f32>,",
+"  @location(2) a: vec2<f32>, @location(3) b: vec2<f32>,",
+"  @location(4) rh: vec2<f32>, @location(5) dir: f32, @location(6) col: vec4<f32>,",
+"};",
+"@vertex fn vsArc(@builtin(vertex_index) vi: u32,",
+"                 @location(0) geo: vec4<f32>, @location(1) ends: vec4<f32>,",
+"                 @location(2) arcInfo: vec4<f32>, @location(3) col: vec4<f32>) -> ArcV {",
+"  let ext = geo.z + geo.w + 1.5 * onepx();",
+"  let w = geo.xy + corner(vi) * ext;",
+"  var o: ArcV; o.pos = clipOf(w); o.w = w; o.c = geo.xy; o.a = ends.xy; o.b = ends.zw;",
+"  o.rh = geo.zw; o.dir = arcInfo.x; o.col = col; return o;",
+"}",
+"@fragment fn fsArc(v: ArcV) -> @location(0) vec4<f32> {",
+"  let tau = 6.28318530718;",
+"  let av = atan2(v.w.y - v.c.y, v.w.x - v.c.x);",
+"  let a0 = atan2(v.a.y - v.c.y, v.a.x - v.c.x);",
+"  let a1 = atan2(v.b.y - v.c.y, v.b.x - v.c.x);",
+"  var span = a1 - a0; span = span - floor(span / tau) * tau;",
+"  var rel = av - a0; rel = rel - floor(rel / tau) * tau;",
+"  if (span < 0.0) { span = span + tau; } if (rel < 0.0) { rel = rel + tau; }",
+"  if (v.dir < 0.0) { span = a0 - a1; span = span - floor(span / tau) * tau;",
+"    rel = a0 - av; rel = rel - floor(rel / tau) * tau;",
+"    if (span < 0.0) { span = span + tau; } if (rel < 0.0) { rel = rel + tau; } }",
+"  var d = abs(distance(v.w, v.c) - v.rh.x);",
+"  if (rel > span) { d = min(distance(v.w, v.a), distance(v.w, v.b)); }",
+"  let f = 0.5 * onepx();",
+"  let al = (1.0 - smoothstep(v.rh.y - f, v.rh.y + f, d)) * v.col.a * du.p.x;",
+"  if (al <= 0.0) { discard; } return premul(v.col.rgb, al);",
+"}",
+"",
+"// Binary analytic coverage for CAM stencil writes. The tint happens later;",
+"// discard at the exact boundary so the colour shader's AA feather does not",
+"// become a fully-covered extra pixel in the film mask.",
+"@fragment fn fsStencilSeg(v: SegV) -> @location(0) vec4<f32> {",
+"  if (segDist(v.w, v.a, v.b) > v.hw) { discard; } return vec4<f32>(0.0);",
+"}",
+"@fragment fn fsStencilCir(v: CirV) -> @location(0) vec4<f32> {",
+"  let d = distance(v.w, v.c);",
+"  if (d > v.r.x || (v.r.y > 0.0 && d < v.r.y)) { discard; } return vec4<f32>(0.0);",
+"}",
+"@fragment fn fsStencilPad(v: PadV) -> @location(0) vec4<f32> {",
+"  let d = v.w - v.c; var dist: f32;",
+"  if (v.shape > 1.5) {",
+"    let e2 = vec2<f32>(-v.e1.y, v.e1.x); var a = v.c; var b = v.c; var r = v.h.y;",
+"    if (v.h.x >= v.h.y) { a = v.c-v.e1*(v.h.x-v.h.y); b = v.c+v.e1*(v.h.x-v.h.y); r = v.h.y; }",
+"    else { a = v.c-e2*(v.h.y-v.h.x); b = v.c+e2*(v.h.y-v.h.x); r = v.h.x; }",
+"    dist = segDist(v.w, a, b) - r;",
+"  } else if (v.shape > 0.5) { dist = length(d) - v.h.x; }",
+"  else { let e2 = vec2<f32>(-v.e1.y, v.e1.x);",
+"    let q = abs(vec2<f32>(dot(d,v.e1), dot(d,e2))) - v.h;",
+"    dist = length(max(q,vec2<f32>(0.0))) + min(max(q.x,q.y),0.0); }",
+"  if (dist > 0.0) { discard; } return vec4<f32>(0.0);",
+"}",
+"@fragment fn fsStencilArc(v: ArcV) -> @location(0) vec4<f32> {",
+"  let tau=6.28318530718; let av=atan2(v.w.y-v.c.y,v.w.x-v.c.x);",
+"  let a0=atan2(v.a.y-v.c.y,v.a.x-v.c.x); let a1=atan2(v.b.y-v.c.y,v.b.x-v.c.x);",
+"  var span=a1-a0; span=span-floor(span/tau)*tau; var rel=av-a0; rel=rel-floor(rel/tau)*tau;",
+"  if (v.dir < 0.0) { span=a0-a1; span=span-floor(span/tau)*tau; rel=a0-av; rel=rel-floor(rel/tau)*tau; }",
+"  var d=abs(distance(v.w,v.c)-v.rh.x); if (rel > span) { d=min(distance(v.w,v.a),distance(v.w,v.b)); }",
+"  if (d > v.rh.y) { discard; } return vec4<f32>(0.0);",
 "}",
 "",
 // ── polygon pads: pre-triangulated, plain flat fill. ──
@@ -334,6 +415,24 @@ var WGSL = [
 "  let al = v.col.a * du.p.x;",
 "  if (al <= 0.0) { discard; }",
 "  return premul(v.col.rgb, al);",
+"}",
+"",
+"// CAM retained-film tint and camera composite.",
+"@vertex fn vsFull(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {",
+"  let p = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));",
+"  return vec4<f32>(p[vi], 0.0, 1.0);",
+"}",
+"@fragment fn fsFull() -> @location(0) vec4<f32> { return premul(vec3<f32>(1.0), du.p.x); }",
+"@fragment fn fsCamTint() -> @location(0) vec4<f32> {",
+"  if (du.p.a <= 0.0) { discard; } return premul(du.p.rgb, du.p.a);",
+"}",
+"@group(2) @binding(0) var camFilm: texture_2d<f32>;",
+"@group(2) @binding(1) var camFilmSampler: sampler;",
+"@fragment fn fsCamBlit(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {",
+"  let w = vec2<f32>(cam.vb.x + p.x / cam.px.x * cam.vb.z, cam.vb.y + p.y / cam.px.y * cam.vb.w);",
+"  let uv = (w - cam.grid.xy) / cam.grid.zw;",
+"  if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) { discard; }",
+"  return textureSampleLevel(camFilm, camFilmSampler, uv, 0.0);",
 "}",
 ].join("\n");
 
@@ -350,7 +449,7 @@ var WGSL = [
 //   poly     stride 32 =  8 f32   @0  x2 (x,y)                                @16 x4 rgba   [per-vertex]
 //   fan      stride  8 =  2 f32   @0  x2 (x,y)                                              [per-vertex]
 //   cover    stride 32 =  8 f32   @0  x4 (x0,y0,x1,y1)                        @16 x4 rgba
-var SEG_F = 12, CIR_F = 8, PAD_F = 12, POLY_F = 8, FAN_F = 2, COVER_F = 8;
+var SEG_F = 12, CIR_F = 8, PAD_F = 12, POLY_F = 8, ARC_F = 16, FAN_F = 2, COVER_F = 8;
 function vbl(stride, attrs, step) {
   return { arrayStride: stride, stepMode: step || "instance", attributes: attrs };
 }
@@ -364,6 +463,10 @@ var L_PAD = vbl(48, [{ shaderLocation: 0, offset: 0, format: "float32x4" },
                      { shaderLocation: 2, offset: 32, format: "float32x4" }]);
 var L_POLY = vbl(32, [{ shaderLocation: 0, offset: 0, format: "float32x2" },
                       { shaderLocation: 1, offset: 16, format: "float32x4" }], "vertex");
+var L_ARC = vbl(64, [{ shaderLocation: 0, offset: 0, format: "float32x4" },
+                     { shaderLocation: 1, offset: 16, format: "float32x4" },
+                     { shaderLocation: 2, offset: 32, format: "float32x4" },
+                     { shaderLocation: 3, offset: 48, format: "float32x4" }]);
 var L_FAN = vbl(8, [{ shaderLocation: 0, offset: 0, format: "float32x2" }], "vertex");
 var L_COVER = vbl(32, [{ shaderLocation: 0, offset: 0, format: "float32x4" },
                        { shaderLocation: 1, offset: 16, format: "float32x4" }]);
@@ -375,20 +478,25 @@ var L_COVER = vbl(32, [{ shaderLocation: 0, offset: 0, format: "float32x4" },
 // the ones that never touch the stencil. Their state is the neutral one:
 // no depth (stencil8 has no depth aspect, so depthWriteEnabled must stay false
 // and depthCompare "always"), compare always, keep everything.
-function ds(front) {
+function ds(front, readMask, writeMask) {
   return { format: "stencil8", depthWriteEnabled: false, depthCompare: "always",
     stencilFront: front, stencilBack: front,
-    stencilReadMask: 0xff, stencilWriteMask: 0xff };
+    stencilReadMask: readMask == null ? 0xff : readMask,
+    stencilWriteMask: writeMask == null ? 0xff : writeMask };
 }
 var ST_KEEP = { compare: "always", failOp: "keep", depthFailOp: "keep", passOp: "keep" },
     ST_INVERT = { compare: "always", failOp: "keep", depthFailOp: "keep", passOp: "invert" },
-    ST_COVER = { compare: "not-equal", failOp: "keep", depthFailOp: "keep", passOp: "replace" };
+    ST_COVER = { compare: "not-equal", failOp: "keep", depthFailOp: "keep", passOp: "replace" },
+    ST_CAM_CLIP = { compare: "equal", failOp: "keep", depthFailOp: "keep", passOp: "keep" },
+    ST_CAM_WRITE = { compare: "equal", failOp: "keep", depthFailOp: "keep", passOp: "replace" },
+    ST_CAM_SHOW = { compare: "equal", failOp: "keep", depthFailOp: "keep", passOp: "keep" };
 
 // ── init / teardown ─────────────────────────────────────────────────────
 // Resolves false — never rejects — on every unsupported path, so the caller's
 // success branch is the only place that can turn the renderer on.
 function init(opts) {
   try {
+    api.error = null;
     if (!opts || !navigator.gpu || !opts.ref || !opts.host) return Promise.resolve(false);
     O = opts;
     return navigator.gpu.requestAdapter().then(function (ad) {
@@ -426,6 +534,7 @@ function setup(d) {
     });
   }).catch(function () {});
   dev.onuncapturederror = function (ev) {
+    api.error = String(ev.error && ev.error.message || "uncaptured WebGPU error");
     console.error("pcb_gpu: device error, falling back to Canvas2D —", ev.error && ev.error.message);
     var cb = O && O.onLost;
     dispose();
@@ -437,19 +546,31 @@ function setup(d) {
   var bgl1 = dev.createBindGroupLayout({ entries: [{ binding: 0,
     visibility: GPUShaderStage.FRAGMENT,
     buffer: { type: "uniform", hasDynamicOffset: true, minBindingSize: 16 } }] });
+  var bgl2 = dev.createBindGroupLayout({ entries: [
+    { binding: 0, visibility: GPUShaderStage.FRAGMENT,
+      texture: { sampleType: "float", viewDimension: "2d", multisampled: false } },
+    { binding: 1, visibility: GPUShaderStage.FRAGMENT,
+      sampler: { type: "filtering" } },
+  ] });
   var pl = dev.createPipelineLayout({ bindGroupLayouts: [bgl0, bgl1] });
+  var plCam = dev.createPipelineLayout({ bindGroupLayouts: [bgl0, bgl1, bgl2] });
   var blend = {
     color: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
     alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
   };
-  var mk = function (vs, fs, layout, topo, stencil, mask) {
-    var target = (mask === 0) ? { format: fmt, writeMask: 0 } : { format: fmt, blend: blend };
+  var eraseBlend = {
+    color: { srcFactor: "zero", dstFactor: "one-minus-src-alpha", operation: "add" },
+    alpha: { srcFactor: "zero", dstFactor: "one-minus-src-alpha", operation: "add" },
+  };
+  var mk = function (vs, fs, layout, topo, stencil, mask, blendMode, readMask, writeMask) {
+    var target = (mask === 0) ? { format: fmt, writeMask: 0 }
+      : { format: fmt, blend: blendMode === "erase" ? eraseBlend : blend };
     return dev.createRenderPipeline({
       layout: pl,
       vertex: { module: sh, entryPoint: vs, buffers: layout ? [layout] : [] },
       fragment: { module: sh, entryPoint: fs, targets: [target] },
       primitive: { topology: topo || "triangle-strip", cullMode: "none" },
-      depthStencil: ds(stencil || ST_KEEP),
+      depthStencil: ds(stencil || ST_KEEP, readMask, writeMask),
     });
   };
   pipeGrid = mk("vsGrid", "fsGrid", null, "triangle-list");
@@ -462,6 +583,30 @@ function setup(d) {
   pipeCir = mk("vsCir", "fsCir", L_CIR);
   pipePad = mk("vsPad", "fsPad", L_PAD);
   pipePoly = mk("vsPoly", "fsPoly", L_POLY, "triangle-list");
+  // CAM bit 0 is the finished-board clip. Bit 1 is the current Gerber film:
+  // dark/clear operations REPLACE only that bit, then one tinted fullscreen
+  // draw composites the finished film where both bits are set. Every film
+  // stays in this one render pass; there are no viewport-sized scratch films.
+  var camStencil = function (vs, fs, layout, topo) {
+    return mk(vs, fs, layout, topo, ST_CAM_WRITE, 0, "paint", 1, 2);
+  };
+  pipeCamBoard = mk("vsFan", "fsFan", L_FAN, "triangle-list", ST_INVERT, 0, "paint", 0xff, 1);
+  pipeCamReset = mk("vsFull", "fsFull", null, "triangle-list", ST_CAM_WRITE, 0, "paint", 1, 2);
+  pipeCamTint = mk("vsFull", "fsCamTint", null, "triangle-list", ST_CAM_SHOW, 1, "paint", 3, 0);
+  pipeCamSub = mk("vsFull", "fsCamTint", null, "triangle-list", ST_CAM_CLIP, 1, "paint", 1, 0);
+  pipeCamSeg = camStencil("vsSeg", "fsStencilSeg", L_SEG);
+  pipeCamCir = camStencil("vsCir", "fsStencilCir", L_CIR);
+  pipeCamPad = camStencil("vsPad", "fsStencilPad", L_PAD);
+  pipeCamPoly = camStencil("vsPoly", "fsPoly", L_POLY, "triangle-list");
+  pipeCamArc = camStencil("vsArc", "fsStencilArc", L_ARC);
+  pipeCamBlit = dev.createRenderPipeline({
+    layout: plCam,
+    vertex: { module: sh, entryPoint: "vsFull", buffers: [] },
+    fragment: { module: sh, entryPoint: "fsCamBlit", targets: [{ format: fmt, blend: blend }] },
+    primitive: { topology: "triangle-list", cullMode: "none" },
+  });
+  camSampler = dev.createSampler({ magFilter: "linear", minFilter: "linear" });
+  O.camTextureLayout = bgl2;
 
   camA = new Float32Array(16);
   camBuf = dev.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -478,10 +623,11 @@ function setup(d) {
   // Under the 2D canvas, inside the same shell — so both follow the identical
   // CSS box and the SVG interaction layer stays on top of both.
   O.host.insertBefore(cvs, O.ref);
-  dirtyCu = dirtyPt = dirtyPo = true;
+  dirtyCu = dirtyPt = dirtyPo = camDirty = true; camFailed = false;
   api.active = true;
   if (dev.lost && dev.lost.then) dev.lost.then(function (info) {
     if (!api.active) return;
+    api.error = "WebGPU device lost: " + String(info && (info.message || info.reason) || "unknown");
     dispose();
     try { if (O && O.onLost) O.onLost(info); } catch (e) {}
   });
@@ -491,12 +637,18 @@ function setup(d) {
 function teardown() {
   api.active = false;
   partsExcl = null;
+  camGeoDrop();
   [segBuf, viaBuf, boreBuf, padBuf, polyBuf, fanBuf, coverBuf, camBuf, drawBuf, stTex].forEach(function (b) {
     try { if (b && b.destroy) b.destroy(); } catch (e) {}
   });
   segBuf = viaBuf = boreBuf = padBuf = polyBuf = fanBuf = coverBuf = camBuf = drawBuf = null;
+  [camFilm, camFilmStencil].forEach(function (t) { try { if (t && t.destroy) t.destroy(); } catch (e) {} });
+  camFilm = camFilmView = camFilmBg = camFilmStencil = camSampler = null;
+  camFilmW = camFilmH = 0; camFilmKey = "";
   stTex = stView = null; stW = stH = 0;
   pipeSeg = pipeCir = pipePad = pipePoly = pipeGrid = pipeFan = pipeCover = bg0 = bg1 = null;
+  pipeCamSeg = pipeCamCir = pipeCamPad = pipeCamPoly = pipeCamArc = null;
+  pipeCamBoard = pipeCamReset = pipeCamTint = pipeCamSub = pipeCamBlit = null;
   bundle = null; bundleKey = ""; colorFmt = null;
   try { if (cvs && cvs.parentNode) cvs.parentNode.removeChild(cvs); } catch (e) {}
   cvs = null; gctx = null; dev = null;
@@ -525,6 +677,7 @@ function partsExclIs(o) {
   return n === m;
 }
 function rebuildPours() { dirtyPo = true; bundle = null; }
+function rebuildCam() { camDirty = true; camFailed = false; }
 
 // ── instance buffers ────────────────────────────────────────────────────
 function upload(old, arr) {
@@ -534,6 +687,125 @@ function upload(old, arr) {
     usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
   dev.queue.writeBuffer(b, 0, arr);
   return b;
+}
+
+// ── retained manufacturing artwork ───────────────────────────────────────
+// Gerber regions are simple rings in the server wire format. Triangulate each
+// ring once, at CAM install time, so a frame never walks its points. Clear
+// regions remain separate ordered runs and therefore retain Gerber polarity.
+function camRingClean(raw) {
+  var out = [], eps = 1e-10;
+  for (var i = 0; i < (raw || []).length; i++) {
+    var p = raw[i], x = +(p && p[0]), y = +(p && p[1]);
+    if (!isFinite(x) || !isFinite(y)) continue;
+    var q = out[out.length - 1];
+    if (!q || Math.abs(q[0] - x) > eps || Math.abs(q[1] - y) > eps) out.push([x, y]);
+  }
+  if (out.length > 2) {
+    var f = out[0], z = out[out.length - 1];
+    if (Math.abs(f[0] - z[0]) <= eps && Math.abs(f[1] - z[1]) <= eps) out.pop();
+  }
+  return out;
+}
+function camTriangulate(raw, out) {
+  var p = camRingClean(raw), flat = [];
+  if (p.length < 3 || typeof PCBEarcut !== "function") return false;
+  for (var i = 0; i < p.length; i++) flat.push(+p[i][0], +p[i][1]);
+  var ids = PCBEarcut(flat, null, 2);
+  if (!ids || ids.length < 3) return false;
+  for (i = 0; i < ids.length; i++) {
+    var q = p[ids[i]];
+    out.push(ux(q[0]), uy(q[1]), 0, 0, 1, 1, 1, 1);
+  }
+  return true;
+}
+function camBoardRing() {
+  var P = O.PCB, p = P.board_poly;
+  if (p && p.length >= 3) return camRingClean(p);
+  p = P.outline && P.outline.pts;
+  if (p && p.length >= 3) return camRingClean(p);
+  var b = P.board;
+  return b && b.w > 0 && b.h > 0 ? [[b.x, b.y], [b.x + b.w, b.y],
+    [b.x + b.w, b.y + b.h], [b.x, b.y + b.h]] : [];
+}
+function camGeoDrop() {
+  if (!camGeo) return;
+  [camGeo.boardBuf, camGeo.segBuf, camGeo.cirBuf, camGeo.padBuf, camGeo.polyBuf, camGeo.arcBuf]
+    .forEach(function (b) { try { if (b && b.destroy) b.destroy(); } catch (e) {} });
+  camGeo = null;
+  camFilmKey = "";
+}
+function camOpDark(o) { return o[0] === "r" ? !!o[1] : !!o[o.length - 1]; }
+function camBuild() {
+  camGeoDrop();
+  api.error = null;
+  var src = O.PCB.cam, layers = src && src.layers;
+  if (!src || src.source !== "generated-gerber" || !Array.isArray(layers) ||
+      layers.length > CAM_MAX_LAYERS) { api.error = "unsupported CAM payload"; camDirty = false; camFailed = true; return false; }
+  var board = camBoardRing();
+  if (board.length < 3) { api.error = "CAM board outline is empty"; camDirty = false; camFailed = true; return false; }
+  var fan = [], v0 = board[0];
+  var bx0 = ux(v0[0]), by0 = uy(v0[1]), bx1 = bx0, by1 = by0;
+  for (var bb = 1; bb < board.length; bb++) {
+    var bxx = ux(board[bb][0]), byy = uy(board[bb][1]);
+    bx0 = Math.min(bx0, bxx); by0 = Math.min(by0, byy);
+    bx1 = Math.max(bx1, bxx); by1 = Math.max(by1, byy);
+  }
+  for (var bi = 1; bi + 1 < board.length; bi++) {
+    fan.push(ux(v0[0]), uy(v0[1]), ux(board[bi][0]), uy(board[bi][1]),
+      ux(board[bi + 1][0]), uy(board[bi + 1][1]));
+  }
+  var seg = [], cir = [], pad = [], poly = [], arc = [], built = [], byId = {};
+  function range(a, stride, emit) { var first = a.length / stride; emit(); return { first: first, count: a.length / stride - first }; }
+  function emitFlash(o) {
+    var shape = o[3] === 0 ? 1 : (o[3] === 1 ? 0 : 2), hw = (+o[4] || 0) * O.S / 2,
+        hh = (shape === 1 ? (+o[4] || 0) : (+o[5] || 0)) * O.S / 2;
+    pad.push(ux(+o[1]), uy(+o[2]), hw, hh, 1, 0, shape, 0, 1, 1, 1, 1);
+  }
+  function emitLine(o) {
+    seg.push(ux(+o[1]), uy(+o[2]), ux(+o[3]), uy(+o[4]), (+o[5] || 0) * O.S / 2,
+      0, 0, 0, 1, 1, 1, 1);
+  }
+  function emitArc(o) {
+    var cx = ux(+o[5]), cy = uy(+o[6]), ax = ux(+o[1]), ay = uy(+o[2]);
+    arc.push(cx, cy, Math.hypot(ax - cx, ay - cy), (+o[7] || 0) * O.S / 2,
+      ax, ay, ux(+o[3]), uy(+o[4]), o[8] ? 1 : -1, 0, 0, 0, 1, 1, 1, 1);
+  }
+  for (var li = 0; li < layers.length; li++) {
+    var L = layers[li], ops = L.ops || [], runs = [], run = null;
+    for (var oi = 0; oi < ops.length; oi++) {
+      var o = ops[oi], dark = camOpDark(o); if (L.negative) dark = !dark;
+      if (!run || run.dark !== dark) { run = { dark: dark, f: [], l: [], a: [], r: [] }; runs.push(run); }
+      if (run[o[0]]) run[o[0]].push(o);
+    }
+    var desc = { id: String(L.id || ("cam-" + li)), negative: !!L.negative, commands: [] };
+    for (var ri = 0; ri < runs.length; ri++) {
+      run = runs[ri];
+      if (run.f.length) desc.commands.push({ kind: "pad", dark: run.dark,
+        range: range(pad, PAD_F, function () { run.f.forEach(emitFlash); }) });
+      if (run.l.length) desc.commands.push({ kind: "seg", dark: run.dark,
+        range: range(seg, SEG_F, function () { run.l.forEach(emitLine); }) });
+      if (run.a.length) desc.commands.push({ kind: "arc", dark: run.dark,
+        range: range(arc, ARC_F, function () { run.a.forEach(emitArc); }) });
+      if (run.r.length) {
+        var first = poly.length / POLY_F, okay = true;
+        for (var rr = 0; rr < run.r.length; rr++) if (!camTriangulate(run.r[rr][2], poly)) { okay = false; break; }
+        if (!okay) { api.error = "CAM region triangulation failed in " + desc.id; camDirty = false; camFailed = true; return false; }
+        desc.commands.push({ kind: "poly", dark: run.dark,
+          range: { first: first, count: poly.length / POLY_F - first } });
+      }
+    }
+    built.push(desc); byId[desc.id] = desc;
+  }
+  camGeo = {
+    source: src, layers: built, byId: byId,
+    bounds: { x: bx0, y: by0, w: Math.max(bx1 - bx0, 1), h: Math.max(by1 - by0, 1) },
+    boardBuf: upload(null, new Float32Array(fan)), boardRange: { first: 0, count: fan.length / FAN_F },
+    segBuf: upload(null, new Float32Array(seg)), cirBuf: upload(null, new Float32Array(cir)),
+    padBuf: upload(null, new Float32Array(pad)), polyBuf: upload(null, new Float32Array(poly)),
+    arcBuf: upload(null, new Float32Array(arc)),
+  };
+  camDirty = false; camFailed = false; return true;
 }
 
 // Copper. Tracks are ordered by layer so each layer is one contiguous instance
@@ -857,6 +1129,104 @@ function rebuildBundle(st, pa, np, key) {
   }
 }
 
+function encodeCamLayer(pass, layer, slot) {
+  var base = slotBase(), unitSlot = base + S_CAM;
+  pass.setBindGroup(0, bg0);
+  pass.setBindGroup(1, bg1, [unitSlot * DSTRIDE]);
+  pass.setStencilReference(layer.negative ? 3 : 1);
+  pass.setPipeline(pipeCamReset); pass.draw(3, 1, 0, 0);
+  for (var i = 0; i < layer.commands.length; i++) {
+    var c = layer.commands[i], pipe = null, buf = null, verts = false;
+    if (c.kind === "seg") { pipe = pipeCamSeg; buf = camGeo.segBuf; }
+    else if (c.kind === "cir") { pipe = pipeCamCir; buf = camGeo.cirBuf; }
+    else if (c.kind === "pad") { pipe = pipeCamPad; buf = camGeo.padBuf; }
+    else if (c.kind === "poly") { pipe = pipeCamPoly; buf = camGeo.polyBuf; verts = true; }
+    else if (c.kind === "arc") { pipe = pipeCamArc; buf = camGeo.arcBuf; }
+    if (!pipe || !buf || !c.range || !c.range.count) continue;
+    pass.setStencilReference(c.dark ? 3 : 1);
+    pass.setPipeline(pipe); pass.setVertexBuffer(0, buf);
+    if (verts) pass.draw(c.range.count, 1, c.range.first, 0);
+    else pass.draw(4, c.range.count, 0, c.range.first);
+  }
+  pass.setBindGroup(1, bg1, [slot * DSTRIDE]);
+  pass.setStencilReference(3); pass.setPipeline(pipeCamTint); pass.draw(3, 1, 0, 0);
+}
+function camEncodeScene(p, base, layers) {
+  p.setBindGroup(0, bg0); p.setBindGroup(1, bg1, [(base + S_CAM) * DSTRIDE]);
+  p.setStencilReference(0); p.setPipeline(pipeCamBoard); p.setVertexBuffer(0, camGeo.boardBuf);
+  p.draw(camGeo.boardRange.count, 1, camGeo.boardRange.first, 0);
+  p.setBindGroup(1, bg1, [(base + S_CAM + 1) * DSTRIDE]);
+  p.setStencilReference(1); p.setPipeline(pipeCamSub); p.draw(3, 1, 0, 0);
+  for (var i = 0; i < layers.length; i++) {
+    var want = layers[i], L = camGeo.byId[String(want.id || "")];
+    if (L && want.a > 0) encodeCamLayer(p, L, base + S_CAM + 2 + i);
+  }
+}
+function camFilmEnsure() {
+  var b = camGeo.bounds, limit = +(dev.limits && dev.limits.maxTextureDimension2D) || 4096;
+  var w = Math.min(limit, Math.max(2048, cvs.width * 3)), h = Math.ceil(w * b.h / b.w);
+  if (h > limit) { h = limit; w = Math.ceil(h * b.w / b.h); }
+  w = Math.max(1, Math.floor(w)); h = Math.max(1, Math.floor(h));
+  if (camFilm && camFilmW === w && camFilmH === h) return true;
+  [camFilm, camFilmStencil].forEach(function (t) { try { if (t && t.destroy) t.destroy(); } catch (e) {} });
+  camFilm = dev.createTexture({ size: [w, h], format: colorFmt,
+    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+  camFilmStencil = dev.createTexture({ size: [w, h], format: "stencil8",
+    usage: GPUTextureUsage.RENDER_ATTACHMENT });
+  camFilmView = camFilm.createView(); camFilmW = w; camFilmH = h; camFilmKey = "";
+  camFilmBg = dev.createBindGroup({ layout: O.camTextureLayout, entries: [
+    { binding: 0, resource: camFilmView }, { binding: 1, resource: camSampler },
+  ] });
+  return true;
+}
+function camBake(base, layers, key) {
+  if (!camFilmEnsure()) return false;
+  var b = camGeo.bounds;
+  camA[0] = b.x; camA[1] = b.y; camA[2] = b.w; camA[3] = b.h;
+  camA[4] = camFilmW; camA[5] = camFilmH;
+  for (var ci = 6; ci < 16; ci++) camA[ci] = 0;
+  dev.queue.writeBuffer(camBuf, 0, camA);
+  var enc = dev.createCommandEncoder(), p = enc.beginRenderPass({
+    colorAttachments: [{ view: camFilmView,
+      clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
+    depthStencilAttachment: { view: camFilmStencil.createView(),
+      stencilClearValue: 0, stencilLoadOp: "clear", stencilStoreOp: "discard" },
+  });
+  camEncodeScene(p, base, layers); p.end(); dev.queue.submit([enc.finish()]); camFilmKey = key;
+  return true;
+}
+function camFrame(vb, st) {
+  if (camFailed && !camDirty) return false;
+  if (camDirty || !camGeo || camGeo.source !== O.PCB.cam) if (!camBuild()) return false;
+  if (camFailed || !camGeo) return false;
+  var cst = st.cam || {}, base = slotBase(), layers = cst.layers || [];
+  if (layers.length > CAM_MAX_LAYERS) return false;
+  drawA.fill(0); drawA[(base + S_CAM) * DFLOATS] = 1;
+  function setCol(slot, col, alpha) {
+    var c = rgb(col), b = slot * DFLOATS;
+    drawA[b] = c[0]; drawA[b + 1] = c[1]; drawA[b + 2] = c[2]; drawA[b + 3] = alpha == null ? 1 : alpha;
+  }
+  setCol(base + S_CAM + 1, cst.substrate, 1);
+  for (var i = 0; i < layers.length; i++) setCol(base + S_CAM + 2 + i, layers[i].col, layers[i].a);
+  dev.queue.writeBuffer(drawBuf, 0, drawA);
+  var key = JSON.stringify([cst.substrate, layers, cvs.width, cvs.height]);
+  if (!camFilm || camFilmKey !== key) if (!camBake(base, layers, key)) return false;
+  var bounds = camGeo.bounds;
+  camA[0] = vb.x; camA[1] = vb.y; camA[2] = vb.w; camA[3] = vb.h;
+  camA[4] = cvs.width; camA[5] = cvs.height; camA[6] = camA[7] = 0;
+  camA[8] = bounds.x; camA[9] = bounds.y; camA[10] = bounds.w; camA[11] = bounds.h;
+  for (i = 12; i < 16; i++) camA[i] = 0;
+  dev.queue.writeBuffer(camBuf, 0, camA);
+  var enc = dev.createCommandEncoder(), bg = rgb(cst.bg), p = enc.beginRenderPass({
+    colorAttachments: [{ view: gctx.getCurrentTexture().createView(),
+      clearValue: { r: bg[0], g: bg[1], b: bg[2], a: 1 }, loadOp: "clear", storeOp: "store" }],
+  });
+  p.setPipeline(pipeCamBlit); p.setBindGroup(0, bg0);
+  p.setBindGroup(1, bg1, [(base + S_CAM) * DSTRIDE]); p.setBindGroup(2, camFilmBg); p.draw(3, 1, 0, 0);
+  p.end();
+  dev.queue.submit([enc.finish()]); return true;
+}
+
 // ── frame ───────────────────────────────────────────────────────────────
 // `st` is the fully-resolved policy blob pcb_board.js builds each frame:
 //   stages[]  the GPU-owned stage NAMES in canonical paint order (its
@@ -868,7 +1238,7 @@ function rebuildBundle(st, pa, np, key) {
 //   gridPitch/gridDot  svg units; gridPitch 0 ⇒ the grid pass is skipped entirely
 //   viaDrill  the Route panel's default drill (a change self-invalidates copper)
 function frame(vb, st) {
-  if (!api.active || !dev || !gctx) return;
+  if (!api.active || !dev || !gctx) return false;
   try {
     var ref = O.ref;
     // Mirror the 2D canvas exactly — device pixels AND the CSS box scenePaint
@@ -879,7 +1249,7 @@ function frame(vb, st) {
     if (cvs.style.height !== ref.style.height) cvs.style.height = ref.style.height;
     if (cvs.style.left !== ref.style.left) cvs.style.left = ref.style.left;
     if (cvs.style.top !== ref.style.top) cvs.style.top = ref.style.top;
-    if (!(cvs.width > 0 && cvs.height > 0)) return;
+    if (!(cvs.width > 0 && cvs.height > 0)) return false;
 
     // The stencil attachment tracks the canvas size. Every pipeline declares the
     // stencil8 format (a pass and a pipeline must agree on it), so this texture
@@ -891,6 +1261,11 @@ function frame(vb, st) {
       stView = stTex.createView();
       stW = cvs.width; stH = cvs.height;
     }
+
+    // Physical review is a separate retained scene: manufacturing operations
+    // bake the host-resolved film stack once. Camera-only frames update one
+    // uniform and sample that film instead of walking Gerber operations.
+    if (st && st.cam) return camFrame(vb, st);
 
     if (st.viaDrill !== lastDrill) { lastDrill = st.viaDrill; dirtyCu = true; }
     if (dirtyCu) { buildCopper(st.viaDrill); dirtyCu = false; }
@@ -953,11 +1328,14 @@ function frame(vb, st) {
     else encodeScene(pass, st, pa, np);
     pass.end();
     dev.queue.submit([enc.finish()]);
+    return true;
   } catch (e) {
     // A validation error or a surface that vanished must never take the page
     // down: shut the renderer off and let pcb_board.js repaint everything in 2D.
+    api.error = String(e && (e.stack || e.message) || e);
     dispose();
     try { if (O && O.onLost) O.onLost(e); } catch (e2) {}
+    return false;
   }
 }
 })();

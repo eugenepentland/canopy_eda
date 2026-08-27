@@ -2,7 +2,7 @@
 
 This gate runs the real `/assembly-debug/barracuda-base` page in headless
 Chromium on Linux. Its `fbench=quick` page query makes the initial PCB iframe
-open with `fbench=quick&gpu=0`; it then waits for the deferred generated-Gerber
+open with `fbench=quick&gpu=1`; it then waits for the deferred generated-Gerber
 CAM payload and measures the same `setVB`/`zoomAt` camera path used by drag and
 wheel input.
 It separately gates the time from iframe navigation until that exact CAM
@@ -67,6 +67,7 @@ HTTP/request failure. Normal same-origin GET, HEAD, and OPTIONS traffic remains
 available to the assembly page and its PCB iframe.
 
 The committed budgets are machine gates, not universal claims about the
-Windows client's GPU or display. A slow Windows interaction can still be
-profiled by opening the same `?fbench=1&gpu=0` iframe there and reading the
-on-screen result; Linux CI's job is to catch code regressions reproducibly.
+Windows client's GPU or display. Linux runs WebGPU through Chromium's bundled
+SwiftShader Vulkan ICD so the exact CAM path is deterministic even on a
+headless host. A slow Windows interaction can still be profiled by opening the
+same `?fbench=1&gpu=1` iframe there and reading the on-screen result.

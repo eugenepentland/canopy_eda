@@ -869,7 +869,7 @@ fn renderPage(allocator: std.mem.Allocator, name: []const u8, index: Index, layo
         try w.writeAll("&amp;layout=");
         try writeUrlEncoded(w, selected);
     }
-    if (browser_benchmark) try w.writeAll("&amp;fbench=quick&amp;gpu=0");
+    if (browser_benchmark) try w.writeAll("&amp;fbench=quick&amp;gpu=1");
     try w.writeAll("\"></iframe></div></div>");
     try w.writeAll("</section></main>");
     try w.writeAll("<script id=\"assembly-debug-data\" type=\"application/json\">");
@@ -1184,7 +1184,7 @@ test "page HTML is read-only and carries embed, data, and focus assets" {
         .entities = &.{},
         .nets = &.{},
     }, null, true);
-    try std.testing.expect(std.mem.indexOf(u8, benchmark, "?embed=1&amp;review=1&amp;drc=0&amp;fbench=quick&amp;gpu=0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, benchmark, "?embed=1&amp;review=1&amp;drc=0&amp;fbench=quick&amp;gpu=1") != null);
     const js = @embedFile("assets/assembly_debug.js");
     try std.testing.expect(std.mem.indexOf(u8, js, "item.type !== 'bom'") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "applyBoardOrientation") != null);

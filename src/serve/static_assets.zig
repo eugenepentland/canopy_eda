@@ -52,8 +52,9 @@ const pcb_stuck_js = @embedFile("assets/pcb_stuck.js");
 // quads on a canvas UNDER the 2D scene, camera = one uniform. Default-on when
 // available; ?gpu=0, no adapter, or a lost device leaves the Canvas2D fallback
 // in charge. Script-tagged BEFORE pcb_board.js so window.PCBGpu exists when the
-// board script boots.
+// board script boots. The small Earcut asset precedes it for Gerber regions.
 const pcb_gpu_js = @embedFile("assets/pcb_gpu.js");
+const pcb_earcut_js = @embedFile("assets/pcb_earcut.js");
 const route_review_js = @embedFile("assets/route_review.js");
 const review_notes_js = @embedFile("assets/review_notes.js");
 const assembly_debug_js = @embedFile("assets/assembly_debug.js");
@@ -155,6 +156,7 @@ const registry = [_]Asset{
     .{ .name = "pcb_settings.css", .body = pcb_settings_css, .content_type = .CSS },
     .{ .name = "pcb_stuck.js", .body = pcb_stuck_js, .content_type = .JS },
     .{ .name = "pcb_gpu.js", .body = pcb_gpu_js, .content_type = .JS },
+    .{ .name = "pcb_earcut.js", .body = pcb_earcut_js, .content_type = .JS },
     .{ .name = "route_review.js", .body = route_review_js, .content_type = .JS },
     .{ .name = "review_notes.js", .body = review_notes_js, .content_type = .JS },
     .{ .name = "assembly_debug.js", .body = assembly_debug_js, .content_type = .JS },
@@ -1642,7 +1644,7 @@ test "PCB WebGPU renderer carries its own pipelines and honours the ?gpu=0 opt-o
     // seam behind that flag.
     const js = pcb_board_js;
     try std.testing.expect(std.mem.indexOf(u8, js, "GPU_REQ=!/(?:^|[?&])gpu=0(?:&|$)/.test(QS)&&!!(window.navigator&&window.navigator.gpu)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "PCBGpu.frame(vb,gpuState())") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "PCBGpu.frame(vb,camGpu?gpuCamState():gpuState())") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "function gpuLive()") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "PCBGpu.rebuildCopper()") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "PCBGpu.rebuildParts()") != null);
@@ -1651,6 +1653,25 @@ test "PCB WebGPU renderer carries its own pipelines and honours the ?gpu=0 opt-o
     // The status-bar chip tracks the LIVE renderer state, device loss included.
     try std.testing.expect(std.mem.indexOf(u8, js, "function gpuStatusSync()") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "getElementById(\"st-gpu\")") != null);
+}
+
+// spec: Web Server - Assembly WebGPU renders the generated Gerber/Excellon operation stream into a retained manufacturing film and camera frames only sample that film, with Canvas2D as the unsupported-device fallback
+test "Assembly WebGPU retains exact CAM artwork instead of rerasterizing it while panning" {
+    const markers = [_]struct { haystack: []const u8, marker: []const u8 }{
+        .{ .haystack = pcb_gpu_js, .marker = "rebuildCam: rebuildCam" },
+        .{ .haystack = pcb_gpu_js, .marker = "function camBuild()" },
+        .{ .haystack = pcb_gpu_js, .marker = "PCBEarcut(flat, null, 2)" },
+        .{ .haystack = pcb_gpu_js, .marker = "@fragment fn fsStencilArc" },
+        .{ .haystack = pcb_gpu_js, .marker = "function camBake(base, layers, key)" },
+        .{ .haystack = pcb_gpu_js, .marker = "textureSampleLevel(camFilm, camFilmSampler, uv, 0.0)" },
+        .{ .haystack = pcb_gpu_js, .marker = "if (!camFilm || camFilmKey !== key)" },
+        .{ .haystack = pcb_earcut_js, .marker = "window.PCBEarcut=Ua" },
+        .{ .haystack = pcb_board_js, .marker = "function gpuCamLive()" },
+        .{ .haystack = pcb_board_js, .marker = "function gpuCamState()" },
+        .{ .haystack = pcb_board_js, .marker = "PCBGpu.rebuildCam()" },
+        .{ .haystack = pcb_board_js, .marker = "if(CAM_REVIEW){if(!gpuScene){paintRearHeatsink(ctx,k);paintCamBoard(ctx,k);}" },
+    };
+    for (markers) |entry| try std.testing.expect(std.mem.indexOf(u8, entry.haystack, entry.marker) != null);
 }
 
 // spec: Web Server - Custom pads use the exact Canvas2D polygon path instead of the WebGPU triangle fan
