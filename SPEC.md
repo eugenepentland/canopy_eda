@@ -3201,14 +3201,17 @@ mismatchPctWithGroundGap, diffMismatchPct
 
 Characteristic impedance (Z₀) of a trace against the board's `(stackup …)`
 buildup — the pure math plus the stack model that turns a layer index into a
-microstrip or stripline reference geometry. Microstrip is Hammerstad (1975)
-with Wheeler's finite-thickness correction; stripline is Cohn's narrow and
-wide branches as published in IPC-2141A, blended over their crossover so the
-curve stays continuous and monotonic; the offset (asymmetric) case is built by
-parallel-capacitance superposition calibrated to reduce exactly to the
-symmetric result. Every formula refuses geometry outside its published domain
-rather than extrapolating, and the inverse (width from a target Z₀) is a
-fixed-iteration bisection so it is deterministic to the last bit.
+microstrip or stripline reference geometry. Microstrip uses the continuous,
+high-accuracy Hammerstad-Jensen homogeneous-impedance and effective-
+permittivity equations with their finite-thickness correction; zero-thickness
+symmetric stripline uses Cohn's exact elliptic-integral conformal map, while
+finite copper uses the Cohn-Wadell narrow and wide reductions as published in
+IPC-2141A, blended over their crossover so the curve stays continuous and
+monotonic. The offset (asymmetric) case is built by parallel-capacitance
+superposition calibrated to reduce exactly to the symmetric result. Every
+formula refuses geometry outside its published domain rather than
+extrapolating, and the inverse (width from a target Z₀) is a fixed-iteration
+bisection so it is deterministic to the last bit.
 
 An outer-layer `(ground-gap MM)` selects the grounded coplanar-waveguide model
 of Ghione and Naldi with Gupta's finite-copper-thickness correction. The same
@@ -3216,12 +3219,13 @@ resolved gap controls the ground pour, and it is raised to the applicable DRC
 clearance floor before synthesis or checking; inner signal layers remain
 stripline.
 
-An inner-layer `(diff-impedance OHMS)` target uses Cohn's shielded
-coupled-strip analysis plus Wadell's offset-strip image correction. The pair's
-authored `(diff-pair GAP)` supplies its edge-to-edge spacing and differential
-impedance is twice the calculated odd-mode impedance. An optional nested
-`(layer IDX)` on either target selects the actual 1-based copper layer instead
-of the first usable signal layer.
+A `(diff-impedance OHMS)` target uses Kirschning-Jansen edge-coupled
+microstrip on an outer layer or Cohn's shielded coupled-strip analysis plus
+Wadell's offset-strip image correction on an inner layer. The pair's authored
+`(diff-pair GAP)` supplies its edge-to-edge spacing and differential impedance
+is twice the calculated odd-mode impedance. An optional nested `(layer IDX)`
+on either target selects the actual 1-based copper layer instead of the first
+usable signal layer.
 
 - microstrip Z0 matches the published 50 ohm width on 1.6 mm FR-4
 - microstrip Z0 matches the published 50 ohm width on thin prepreg
@@ -3230,7 +3234,7 @@ of the first usable signal layer.
 - a widening CPWG trace grows its side-ground slot only until the declared cap
 - grounded coplanar analysis refuses a non-positive or copper-closed slot
 - an offset L3 coupled stripline solves the Barracuda 100 ohm LVDS geometry and round-trips
-- coupled stripline analysis refuses outer microstrip instead of applying the inner-layer field model
+- an outer differential pair uses coupled microstrip odd mode and round-trips through synthesis
 - width solved from a target Z0 round-trips back to that Z0
 - a stripline is narrower than a microstrip of the same impedance
 - the symmetric stripline reduces to Cohn's published formula

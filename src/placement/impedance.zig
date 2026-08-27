@@ -19,26 +19,22 @@
 //!
 //! ## Formulas and citations
 //!
-//! **Microstrip** — Hammerstad's synthesis of Wheeler's analysis
-//! (E. Hammerstad, "Equations for Microstrip Circuit Design", Proc. 5th
-//! European Microwave Conf., 1975, pp. 268–272; reproduced in Hammerstad &
-//! Jensen, "Accurate Models for Microstrip Computer-Aided Design", IEEE MTT-S
-//! Digest, 1980, and in every standard text since). With u = W/h:
+//! **Microstrip** — the continuous Hammerstad-Jensen model (E. Hammerstad and
+//! Ø. Jensen, "Accurate Models for Microstrip Computer-Aided Design", IEEE
+//! MTT-S Digest, 1980). With u = W/h:
 //!
-//!     εeff = (εr+1)/2 + (εr−1)/2 · (1 + 12/u)^(−1/2)      [+ 0.04(1−u)² if u<1]
-//!     Z₀   = (60/√εeff) · ln(8/u + u/4)                    for u ≤ 1
-//!     Z₀   = 120π / (√εeff · (u + 1.393 + 0.667·ln(u + 1.444)))  for u ≥ 1
+//!     Zair = η₀/(2π) · ln(fu/u + √(1 + (2/u)²))
+//!     fu   = 6 + (2π−6) · exp(−(30.666/u)^0.7528)
+//!     εeff = (εr+1)/2 + (εr−1)/2 · (1 + 10/u)^(−a(u)b(εr))
+//!     Z₀   = Zair / √εeff
 //!
-//! Stated accuracy ~1 % over 0.05 ≤ u ≤ 20, 1 ≤ εr ≤ 128 — the domain this
-//! module enforces.
+//! The published accuracy is better than 0.2% for effective permittivity and
+//! 0.03% for impedance over the practical domain. Unlike the former two-branch
+//! approximation, it has no discontinuity for the inverse solver to hide.
 //!
-//! Finite strip thickness is handled by Hammerstad's thickness correction
-//! (after Wheeler): the strip is widened to an equivalent zero-thickness strip
-//!
-//!     ΔW = (t/π)·(1 + ln(2h/t))     for W/h ≥ 1/(2π)
-//!     ΔW = (t/π)·(1 + ln(4πW/t))    for W/h ≤ 1/(2π)
-//!
-//! and W_eff = W + ΔW is used in the equations above. t = 0 skips it.
+//! Finite strip thickness uses Hammerstad-Jensen's distinct homogeneous and
+//! mixed-media normalized delta-width corrections; their ratio also corrects
+//! the phase-velocity effective permittivity.
 //!
 //! **Grounded coplanar waveguide** — the quasi-static conformal-mapping model
 //! of Ghione & Naldi (Electronics Letters 19(18), 1983, eq. 8), with complete
@@ -61,10 +57,17 @@
 //! coplanar calculator; frequency-dependent dispersion and loss are outside
 //! this module's width/impedance contract.
 //!
-//! **Symmetric stripline** — the two published branches of Cohn's analysis
-//! (S. B. Cohn, "Characteristic Impedance of the Shielded-Strip Transmission
-//! Line", IRE Trans. MTT-2, 1954, pp. 52–57), as given in IPC-2141A §4.2.2 with
-//! b the plane-to-plane separation. NARROW strip, W/(b−t) < 0.35:
+//! **Symmetric stripline** — Cohn's exact zero-thickness conformal map (S. B.
+//! Cohn, "Characteristic Impedance of the Shielded-Strip Transmission Line",
+//! IRE Trans. MTT-2, 1954, pp. 52–57), with complete elliptic integrals
+//! evaluated by the arithmetic-geometric mean:
+//!
+//!     Z₀ = 30π/√εr · K(k′)/K(k)
+//!     k = sech(πW/2b),  k′ = tanh(πW/2b)
+//!
+//! Finite copper uses the Cohn/Wadell fringing-capacitance approximation as
+//! published in IPC-2141A §4.2.2, with b the plane-to-plane separation.
+//! NARROW strip, W/(b−t) < 0.35:
 //!
 //!     Z₀ = (60/√εr) · ln( 4b / (0.67π · (0.8W + t)) )
 //!
@@ -109,6 +112,12 @@
 //!
 //! Pair spacing is the routed edge-to-edge gap from `(diff-pair GAP)`.
 //!
+//! **Edge-coupled microstrip** — Kirschning-Jansen's even/odd quasi-static
+//! model (IEEE MTT-32(1), 1984), with Jansen's finite-thickness effective-width
+//! correction. Its published range is 0.1 ≤ W/h ≤ 10, 0.1 ≤ S/h ≤ 10, and
+//! 1 ≤ εr ≤ 18. It returns both modes and uses `Zdiff = 2 Zodd`; it never
+//! doubles the isolated single-ended impedance.
+//!
 //! ## Inverse
 //!
 //! `refWidthForZ0` solves W from a target Z₀ by bisection. Z₀ is strictly
@@ -120,6 +129,8 @@
 
 const std = @import("std");
 const cpwg = @import("impedance_cpwg.zig");
+const microstrip = @import("impedance_microstrip.zig");
+const coupled_microstrip = @import("impedance_coupled_microstrip.zig");
 const coupled_stripline = @import("impedance_coupled_stripline.zig");
 
 /// Why an impedance could not be computed. Every one of these is a refusal to
@@ -131,12 +142,6 @@ pub const Error = error{
     /// No target Z₀ inside the domain reaches the requested value.
     Unreachable,
 };
-
-/// Free-space wave impedance as the microstrip equations are published:
-/// Hammerstad writes the wide-strip case with 120π and the narrow-strip case
-/// with 60 (= 120π/2π · π/…, i.e. the same constant), so both are used here
-/// verbatim rather than substituting the measured 376.730313 Ω.
-const eta0: f64 = 120.0 * std.math.pi;
 
 /// Typical FR-4 relative permittivity used when a `(dielectric …)` entry
 /// declares no `(er …)`. Generic FR-4 laminate is quoted between 4.2 and 4.7
@@ -157,27 +162,6 @@ pub const default_board_mm: f64 = 1.6;
 
 // ── Closed forms ─────────────────────────────────────────────────────────────
 
-/// Hammerstad's equivalent zero-thickness strip width for a strip of finite
-/// thickness `t` at height `h`. Returns the width INCREMENT ΔW (mm).
-fn thicknessWidening(w: f64, h: f64, t: f64) f64 {
-    if (t <= 0) return 0;
-    if (h <= 0) return 0;
-    if (w <= 0) return 0;
-    const inv_2pi = 1.0 / (2.0 * std.math.pi);
-    const arg = if (w / h >= inv_2pi) 2.0 * h / t else 4.0 * std.math.pi * w / t;
-    if (!(arg > 1.0)) return 0; // ln <= 0: the correction is meaningless here
-    return (t / std.math.pi) * (1.0 + @log(arg));
-}
-
-/// Hammerstad's effective permittivity for a microstrip of ratio `u` = W/h.
-fn effectiveEr(er: f64, u: f64) f64 {
-    const a = (er + 1.0) / 2.0;
-    const b = (er - 1.0) / 2.0;
-    var f = 1.0 / @sqrt(1.0 + 12.0 / u);
-    if (u < 1.0) f += 0.04 * (1.0 - u) * (1.0 - u);
-    return a + b * f;
-}
-
 /// A finite, strictly positive length/impedance. Factored out so each domain
 /// guard below stays a single readable comparison.
 fn positive(v: f64) bool {
@@ -194,26 +178,7 @@ fn validEr(er: f64) bool {
 /// dielectric of relative permittivity `er`. See the module header for the
 /// equations and their published domain.
 pub fn microstripZ0(w_mm: f64, h_mm: f64, t_mm: f64, er: f64) Error!f64 {
-    if (!positive(w_mm)) return Error.OutOfDomain;
-    if (!positive(h_mm)) return Error.OutOfDomain;
-    if (t_mm < 0) return Error.OutOfDomain;
-    if (!validEr(er)) return Error.OutOfDomain;
-    const u = (w_mm + thicknessWidening(w_mm, h_mm, t_mm)) / h_mm;
-    // Hammerstad's stated validity range for the pair of expressions below.
-    if (u < 0.05) return Error.OutOfDomain;
-    if (u > 20.0) return Error.OutOfDomain;
-    const sq = @sqrt(effectiveEr(er, u));
-    // Hammerstad's two expressions meet at u = 1 with a ~0.4 % step (70.82 vs
-    // 71.09 Ω on 0.2104 mm FR-4) — within their own accuracy, but a step all
-    // the same, and a step makes a band of target impedances unreachable by
-    // the monotonic inverse solve below. Blend over 0.9 <= u <= 1.1; outside
-    // that band each published branch is used verbatim.
-    const narrow = (60.0 / sq) * @log(8.0 / u + u / 4.0);
-    const wide = eta0 / (sq * (u + 1.393 + 0.667 * @log(u + 1.444)));
-    if (u <= 0.9) return narrow;
-    if (u >= 1.1) return wide;
-    const lambda = (u - 0.9) / 0.2;
-    return (1.0 - lambda) * narrow + lambda * wide;
+    return (microstrip.analyze(w_mm, h_mm, t_mm, er) catch return Error.OutOfDomain).z0_ohms;
 }
 
 /// Ground-backed coplanar-waveguide characteristic impedance (Ω). `gap_mm`
@@ -248,6 +213,35 @@ fn stripWideZ0(w_mm: f64, b_mm: f64, t_mm: f64, er: f64) Error!f64 {
     return (94.15 / @sqrt(er)) / denom;
 }
 
+/// Complete elliptic integral K(k), evaluated by the arithmetic-geometric
+/// mean. The fixed cap is defensive; f64 converges in only a few iterations.
+fn ellipticK(k: f64) Error!f64 {
+    if (!std.math.isFinite(k)) return Error.OutOfDomain;
+    if (k <= 0 or k >= 1) return Error.OutOfDomain;
+    var a: f64 = 1.0;
+    var b = @sqrt(1.0 - k * k);
+    for (0..32) |_| {
+        const next_a = 0.5 * (a + b);
+        const next_b = @sqrt(a * b);
+        if (next_a == a and next_b == b) break;
+        a = next_a;
+        b = next_b;
+    }
+    if (!positive(a)) return Error.OutOfDomain;
+    return std.math.pi / (2.0 * a);
+}
+
+/// Cohn's exact zero-thickness conformal map for a centered stripline.
+fn stripExactZ0(w_mm: f64, b_mm: f64, er: f64) Error!f64 {
+    const x = std.math.pi * w_mm / (2.0 * b_mm);
+    const k = 1.0 / std.math.cosh(x);
+    const k_complement = std.math.tanh(x);
+    const result = 30.0 * std.math.pi / @sqrt(er) *
+        try ellipticK(k_complement) / try ellipticK(k);
+    if (!positive(result)) return Error.OutOfDomain;
+    return result;
+}
+
 /// Symmetric stripline: strip centred between planes `b_mm` apart. Blends the
 /// two Cohn branches over 0.30 ≤ W/(b−t) ≤ 0.40 so the model is continuous and
 /// monotonic in W — see the module header.
@@ -258,6 +252,7 @@ fn symmetricStriplineZ0(w_mm: f64, b_mm: f64, t_mm: f64, er: f64) Error!f64 {
     if (!positive(gap)) return Error.OutOfDomain;
     const ratio = w_mm / gap;
     if (ratio > 10.0) return Error.OutOfDomain; // a strip this wide is a plane
+    if (t_mm == 0) return stripExactZ0(w_mm, b_mm, er);
     if (ratio <= 0.30) return stripNarrowZ0(w_mm, b_mm, t_mm, er);
     if (ratio >= 0.40) return stripWideZ0(w_mm, b_mm, t_mm, er);
     const lambda = (ratio - 0.30) / 0.10;
@@ -365,11 +360,8 @@ pub fn refEffectiveErWithGroundGap(ref: Ref, w_mm: f64, t_mm: f64, ground_gap_mm
     return switch (ref) {
         .microstrip => |m| if (ground_gap_mm > 0)
             (try cpwg.analyze(w_mm, m.h_mm, t_mm, m.er, ground_gap_mm)).er_eff
-        else blk: {
-            const u = (w_mm + thicknessWidening(w_mm, m.h_mm, t_mm)) / m.h_mm;
-            if (u < 0.05 or u > 20.0) return Error.OutOfDomain;
-            break :blk effectiveEr(m.er, u);
-        },
+        else
+            (microstrip.analyze(w_mm, m.h_mm, t_mm, m.er) catch return Error.OutOfDomain).er_eff,
         .stripline => |s| s.er,
     };
 }
@@ -427,12 +419,12 @@ pub fn refGroundGapForZ0(
     };
 }
 
-/// Differential impedance of a pair in this reference geometry. The current
-/// closed form covers homogeneous edge-coupled stripline; an outer coupled
-/// microstrip is refused rather than estimated with the wrong field model.
+/// Differential impedance of a pair in this reference geometry. Outer layers
+/// use Kirschning-Jansen edge-coupled microstrip; inner layers use Cohn/Wadell
+/// edge-coupled stripline. Both return `2 * Zodd`.
 pub fn refDiffZ0(ref: Ref, w_mm: f64, t_mm: f64, pair_gap_mm: f64) Error!f64 {
     return switch (ref) {
-        .microstrip => Error.OutOfDomain,
+        .microstrip => |m| coupled_microstrip.z0(w_mm, m.h_mm, t_mm, m.er, pair_gap_mm) catch return Error.OutOfDomain,
         .stripline => |s| coupled_stripline.z0(w_mm, s.h1_mm, s.h2_mm, t_mm, s.er, pair_gap_mm),
     };
 }
@@ -442,7 +434,7 @@ pub fn refDiffZ0(ref: Ref, w_mm: f64, t_mm: f64, pair_gap_mm: f64) Error!f64 {
 /// rejecting; this only has to contain the solution.
 fn widthBracket(ref: Ref) [2]f64 {
     const h = ref.heightMm();
-    return .{ h * 0.02, h * 20.0 };
+    return .{ h * 0.01, h * 100.0 };
 }
 
 /// Solve the trace width (mm) that gives `target_ohms` in this reference
@@ -889,17 +881,26 @@ test "stripline and microstrip diverge for the same target" {
 }
 
 // spec: placement/impedance - the symmetric stripline reduces to Cohn's published formula
-test "symmetric stripline equals Cohn's closed form" {
-    // W/(b−t) = 0.2/0.8 = 0.25, inside the narrow branch, so the model must
-    // reproduce Cohn's published expression to the last bit.
+test "zero-thickness symmetric stripline equals Cohn's exact elliptic result" {
+    const w = 0.2;
+    const h = 0.4;
+    const er = 4.4;
+    // Independent AGM evaluation of Cohn's K(k')/K(k) reference vector.
+    try testing.expectApproxEqAbs(
+        @as(f64, 30.244372037271955),
+        try striplineZ0(w, h, h, 0, er),
+        1e-12,
+    );
+}
+
+test "finite-thickness narrow stripline uses the Cohn-Wadell reduction" {
     const w = 0.2;
     const h = 0.4;
     const t = 0.035;
     const er = 4.4;
-    const got = try striplineZ0(w, h, h, t, er);
     const b = 2.0 * h + t;
     const want = (60.0 / @sqrt(er)) * @log(4.0 * b / (0.67 * std.math.pi * (0.8 * w + t)));
-    try testing.expectApproxEqRel(want, got, 1e-12);
+    try testing.expectApproxEqRel(want, try striplineZ0(w, h, h, t, er), 1e-12);
 }
 
 // spec: placement/impedance - the narrow and wide stripline branches are blended into one continuous monotonic curve
@@ -938,9 +939,9 @@ test "asymmetric stripline is bracketed by its symmetric endpoints" {
 
 // spec: placement/impedance - geometry outside a formula's published domain is refused, not extrapolated
 test "out-of-domain geometry is refused" {
-    // u = W/h far above Hammerstad's 20.
+    // u = W/h far above Hammerstad-Jensen's common impedance/epsilon domain.
     try testing.expectError(Error.OutOfDomain, microstripZ0(50.0, 0.2, 0.035, 4.4));
-    // u far below 0.05.
+    // u far below 0.01.
     try testing.expectError(Error.OutOfDomain, microstripZ0(0.001, 1.6, 0.0, 4.4));
     // er below 1 is not a dielectric.
     try testing.expectError(Error.OutOfDomain, microstripZ0(0.3, 0.2, 0.035, 0.5));
@@ -955,12 +956,12 @@ test "out-of-domain geometry is refused" {
 
 // spec: placement/impedance - a target Z0 no width in the domain reaches is reported unreachable
 test "an unreachable target Z0 is reported, not clamped" {
-    // 5 Ω on a 1.6 mm FR-4 microstrip needs a strip far wider than u = 20.
+    // 1 Ω on a 1.6 mm FR-4 microstrip needs a strip wider than u = 100.
     try testing.expectError(
         Error.Unreachable,
-        refWidthForZ0(.{ .microstrip = .{ .h_mm = 1.6, .er = 4.4 } }, 5.0, 0.035),
+        refWidthForZ0(.{ .microstrip = .{ .h_mm = 1.6, .er = 4.4 } }, 1.0, 0.035),
     );
-    // 300 Ω needs one far narrower than u = 0.05.
+    // 300 Ω needs one far narrower than u = 0.01.
     try testing.expectError(
         Error.Unreachable,
         refWidthForZ0(.{ .microstrip = .{ .h_mm = 1.6, .er = 4.4 } }, 300.0, 0.035),
@@ -1049,7 +1050,7 @@ test "outer pours remain impedance-capable signal faces" {
     try testing.expectApproxEqAbs(@as(f64, 0.2104), top.heightMm(), 1e-12);
     try testing.expectEqual(@as(?u8, 1), preferredLayer(poured));
     try testing.expectApproxEqAbs(
-        @as(f64, 0.3666),
+        @as(f64, 0.3726),
         resolvedWidthMm(poured, 50).?,
         0.0001,
     );
@@ -1234,8 +1235,13 @@ test "coupled stripline synthesis matches the barracuda L3 reference pair" {
     try testing.expectApproxEqAbs(@as(f64, 100), try refDiffZ0(ref, width, 0.0152, gap), 1e-9);
 }
 
-// spec: placement/impedance - coupled stripline analysis refuses outer microstrip instead of applying the inner-layer field model
-test "differential impedance refuses an outer microstrip reference" {
+// spec: placement/impedance - an outer differential pair uses coupled microstrip odd mode and round-trips through synthesis
+test "differential impedance supports an outer microstrip reference" {
     const ref: Ref = .{ .microstrip = .{ .h_mm = 0.2104, .er = 4.4 } };
-    try testing.expectError(Error.OutOfDomain, refDiffZ0(ref, 0.16, 0.035, 0.1524));
+    const gap = 0.1524;
+    const width = try refWidthForDiffZ0(ref, 100, 0.035, gap);
+    const diff = try refDiffZ0(ref, width, 0.035, gap);
+    const isolated = try refZ0(ref, width, 0.035);
+    try testing.expectApproxEqAbs(@as(f64, 100), diff, 1e-9);
+    try testing.expect(diff < 2.0 * isolated);
 }
