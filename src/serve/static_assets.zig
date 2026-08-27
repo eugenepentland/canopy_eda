@@ -495,21 +495,26 @@ test "PCB editor carries the exact pad alignment workflow" {
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
-// spec: Web Server - A scoped sub-circuit PCB editor aligns one member component to another member's exact pad while the assembled-board editor still moves the source sub-circuit as one owner
-test "PCB pad alignment uses component ownership inside a sub-circuit editor" {
-    const start = std.mem.indexOf(u8, pcb_board_js, "function padAlignOwner(hit)") orelse
+// spec: Web Server - The PCB pad aligner moves only the source footprint when both selected pads belong to the same sub-circuit, while an outside target still moves the source sub-circuit as one owner
+test "PCB pad alignment resolves same-subcircuit targets to footprint ownership" {
+    const start = std.mem.indexOf(u8, pcb_board_js, "function padAlignOwner(hit,target)") orelse
         return error.PadAlignOwnerMissing;
     const tail = pcb_board_js[start..];
     const end = std.mem.indexOf(u8, tail, "function padAlignLabel") orelse
         return error.PadAlignOwnerEndMissing;
     const owner = tail[0..end];
     try std.testing.expect(std.mem.indexOf(u8, owner, "scoped=!!(PCB.sub&&PCB.sub.length)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, owner, "g=scoped?null:grpOf(P[hit.i].ref)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, owner, "sameg=!!(target&&srcg&&srcg===grpOf(P[target.i].ref))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, owner, "g=(scoped||sameg)?null:srcg") != null);
     try std.testing.expect(std.mem.indexOf(u8, owner, "[hit.i]") != null);
 
-    // The second click only rejects a pad on the resolved moving owner. In a
-    // scoped editor that owner contains one component, so another component
-    // with the same flattened sub-circuit prefix remains a valid target.
+    // The second pad participates in ownership resolution both when it is
+    // picked and when the move is applied. Same-subcircuit pads therefore
+    // resolve to the source footprint, while an outside target retains the
+    // assembled board's whole-subcircuit ownership.
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "padAlignOwner(hit,hit)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "padAlignOwner(padAlignA,hit)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "padAlignOwner(padAlignA,padAlignB)") != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "moving.idxs.indexOf(hit.i)>=0") != null);
 }
 

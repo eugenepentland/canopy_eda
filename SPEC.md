@@ -6351,7 +6351,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - PCB design settings expose authored stackup, rules, net classes, and route plan provenance
 - The PCB blob's plan lists the resolved placement and routing waves with member names and the synthesized flag
 - The PCB pad aligner snaps exact pad centers and moves a source sub-circuit as one owner
-- A scoped sub-circuit PCB editor aligns one member component to another member's exact pad while the assembled-board editor still moves the source sub-circuit as one owner
+- The PCB pad aligner moves only the source footprint when both selected pads belong to the same sub-circuit, while an outside target still moves the source sub-circuit as one owner
 - Editable sub-circuit PCB embeds expose the pad aligner's Same X and Same Y controls
 - physical board navigation exposes stable 3D and a read-only assembly workspace
 - the PCB 3D viewer extrudes the physical outline at the authored thickness and mounts bottom-side footprints beneath it

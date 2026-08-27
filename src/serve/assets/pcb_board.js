@@ -3468,12 +3468,14 @@ window.addEventListener("keydown",function(ev){if(RO||kbTyping(ev.target)||!(ev.
  ev.preventDefault();ev.stopImmediatePropagation();if(k==="c")copperCopy();else copperPasteShortcut();},true);
 // Pad-to-pad RF alignment.
 // Dedicated mode avoids the normal hierarchical group/copper click priority:
-// the click names an exact pad. On an assembled board, a pad under a
-// sub-circuit moves that whole sub-circuit regardless of its rigid/exploded
-// display choice. Inside a `?sub=` editor that group is the editing scope
-// itself, so moving it would claim every possible target; there the exact
-// component under the first pad is the owner instead.
-function padAlignOwner(hit){var scoped=!!(PCB.sub&&PCB.sub.length),g=scoped?null:grpOf(P[hit.i].ref),
+// the click names an exact pad. On an assembled board, a target outside the
+// source sub-circuit moves that whole sub-circuit regardless of its
+// rigid/exploded display choice. Two pads inside the same sub-circuit instead
+// align their individual footprints; otherwise the group would claim and
+// reject its own target. Inside a `?sub=` editor the exact source component is
+// always the owner because that group is the editing scope itself.
+function padAlignOwner(hit,target){var scoped=!!(PCB.sub&&PCB.sub.length),srcg=grpOf(P[hit.i].ref),
+ sameg=!!(target&&srcg&&srcg===grpOf(P[target.i].ref)),g=(scoped||sameg)?null:srcg,
  idxs=visiblePartIdxs((g&&GRPS[g])?GRPS[g]:[hit.i]);
  return {g:g,idxs:idxs,label:g?("sub-circuit "+g+" ("+idxs.length+" parts)"):refLabel(P[hit.i].ref)};}
 function padAlignLabel(hit){if(!hit)return "not selected";var pd=hit.pd,p=P[hit.i];
@@ -3499,14 +3501,15 @@ function padAlignArm(on){if(RO&&on)return;
  padAlignRefresh();dragCacheDrop();paintSoon();toolSync();}
 function padAlignPick(m){var hit=padHitAt(m.x,m.y);
  if(!hit){padAlignStatus(viewSt.filt.pad?"No visible pad under the cursor.":"Pad selection is disabled in Objects.",true);return;}
- if(!padAlignA){var owner=padAlignOwner(hit),locked=owner.idxs.some(function(i){return P[i].locked;});
+ if(!padAlignA){var owner=padAlignOwner(hit,hit),locked=owner.idxs.some(function(i){return P[i].locked;});
   if(locked){padAlignStatus("Unlock "+owner.label+" before aligning it.",true);return;}
   padAlignA=hit;padAlignB=null;padAlignRefresh();paintSoon();return;}
- var moving=padAlignOwner(padAlignA);
+ var moving=padAlignOwner(padAlignA,hit);
  if(moving.idxs.indexOf(hit.i)>=0){padAlignStatus("Choose a target outside "+moving.label+".",true);return;}
+ if(moving.idxs.some(function(i){return P[i].locked;})){padAlignStatus("Unlock "+moving.label+" before aligning it.",true);return;}
  padAlignB=hit;padAlignRefresh();paintSoon();}
 function padAlignApply(axis){if(!padAlignA||!padAlignB)return;
- var owner=padAlignOwner(padAlignA),source=wpt(padAlignA.i,padAlignA.pd.x,padAlignA.pd.y),
+ var owner=padAlignOwner(padAlignA,padAlignB),source=wpt(padAlignA.i,padAlignA.pd.x,padAlignA.pd.y),
   target=wpt(padAlignB.i,padAlignB.pd.x,padAlignB.pd.y),dx=axis==="x"?target.x-source.x:0,
   dy=axis==="y"?target.y-source.y:0;
  if(owner.idxs.some(function(i){return P[i].locked;})){padAlignStatus("Unlock "+owner.label+" before aligning it.",true);return;}
