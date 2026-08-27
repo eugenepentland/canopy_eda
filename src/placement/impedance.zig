@@ -1834,14 +1834,34 @@ test "coated differential microstrip round-trips barracuda base targets" {
         .planes = &.{ 2, 3 },
         .dielectrics = &.{
             .{ .after_layer = 1, .thickness_mm = 0.2104, .er = 4.4 },
-            .{ .after_layer = 2, .thickness_mm = 1.065, .er = 4.6 },
+            .{ .after_layer = 2, .thickness_mm = 1.065, .er = 4.43 },
             .{ .after_layer = 3, .thickness_mm = 0.2104, .er = 4.4 },
         },
         .foils = &.{
-            .{ .index = 1, .thickness_mm = 0.035, .width_reduction_mm = 0.01778, .narrow_up = true },
-            .{ .index = 2, .thickness_mm = 0.0152, .width_reduction_mm = 0.01778, .narrow_up = true },
-            .{ .index = 3, .thickness_mm = 0.0152, .width_reduction_mm = 0.01778, .narrow_up = false },
-            .{ .index = 4, .thickness_mm = 0.035, .width_reduction_mm = 0.01778, .narrow_up = false },
+            .{
+                .index = 1,
+                .thickness_mm = 0.04064,
+                .width_reduction_mm = 0.01778,
+                .narrow_up = true,
+            },
+            .{
+                .index = 2,
+                .thickness_mm = 0.01524,
+                .width_reduction_mm = 0.01778,
+                .narrow_up = true,
+            },
+            .{
+                .index = 3,
+                .thickness_mm = 0.01524,
+                .width_reduction_mm = 0.01778,
+                .narrow_up = false,
+            },
+            .{
+                .index = 4,
+                .thickness_mm = 0.04064,
+                .width_reduction_mm = 0.01778,
+                .narrow_up = false,
+            },
         },
         .masks = &.{.{ .top = true, .er = 3.8, .substrate_mm = 0.03048, .copper_mm = 0.01524 }},
     };
@@ -1851,6 +1871,88 @@ test "coated differential microstrip round-trips barracuda base targets" {
         try testing.expectApproxEqAbs(target, result.z0_ohms, 0.1);
         try testing.expect(result.er_eff > 1 and result.er_eff <= 4.4);
     }
+}
+
+test "current JLC Barracuda base process parameters synthesize controlled widths" {
+    const stack = Stack{
+        .layers = 4,
+        .planes = &.{ 2, 3 },
+        .dielectrics = &.{
+            .{ .after_layer = 1, .thickness_mm = 0.2104, .er = 4.4 },
+            .{ .after_layer = 2, .thickness_mm = 1.065, .er = 4.43 },
+            .{ .after_layer = 3, .thickness_mm = 0.2104, .er = 4.4 },
+        },
+        .foils = &.{
+            .{
+                .index = 1,
+                .thickness_mm = 0.04064,
+                .width_reduction_mm = 0.01778,
+                .narrow_up = true,
+            },
+            .{
+                .index = 2,
+                .thickness_mm = 0.01524,
+                .width_reduction_mm = 0.01778,
+                .narrow_up = true,
+            },
+            .{
+                .index = 3,
+                .thickness_mm = 0.01524,
+                .width_reduction_mm = 0.01778,
+                .narrow_up = false,
+            },
+            .{
+                .index = 4,
+                .thickness_mm = 0.04064,
+                .width_reduction_mm = 0.01778,
+                .narrow_up = false,
+            },
+        },
+        .masks = &.{.{ .top = true, .er = 3.8, .substrate_mm = 0.03048, .copper_mm = 0.01524 }},
+        .board_mm = 1.6,
+    };
+    const rectangular_cpwg = refWidthForZ0WithGroundGap(
+        .{ .microstrip = .{ .h_mm = 0.2104, .er = 4.4 } },
+        50,
+        0.04064,
+        0.1524,
+    ) catch unreachable;
+    const bare_cpwg = resolvedWidthMmOnLayerWithProcess(
+        testing.allocator,
+        stack,
+        1,
+        50,
+        0.1524,
+        false,
+    ).?;
+    const ethernet = resolvedDiffWidthMmOnLayerWithProcess(
+        testing.allocator,
+        stack,
+        1,
+        100,
+        0.1524,
+        true,
+    ).?;
+    const usb = resolvedDiffWidthMmOnLayerWithProcess(
+        testing.allocator,
+        stack,
+        1,
+        90,
+        0.1524,
+        true,
+    ).?;
+    try testing.expectApproxEqAbs(@as(f64, 0.31530556), rectangular_cpwg, 1e-8);
+    try testing.expectApproxEqAbs(@as(f64, 0.32308958), bare_cpwg, 1e-8);
+    try testing.expectApproxEqAbs(@as(f64, 0.30530958), bare_cpwg - 0.01778, 1e-8);
+    try testing.expectApproxEqAbs(@as(f64, 0.3058), bare_cpwg - 0.01778, 0.0005);
+    try testing.expectApproxEqAbs(@as(f64, 0.18368047), ethernet, 1e-8);
+    try testing.expectApproxEqAbs(@as(f64, 0.25411094), usb, 1e-8);
+    const bare_result = analyzeOnLayer(testing.allocator, stack, 1, bare_cpwg, 0.1524, false).?;
+    const ethernet_result = analyzeDiffOnLayer(testing.allocator, stack, 1, ethernet, 0.1524, true).?;
+    const usb_result = analyzeDiffOnLayer(testing.allocator, stack, 1, usb, 0.1524, true).?;
+    try testing.expectApproxEqAbs(@as(f64, 50), bare_result.z0_ohms, 0.1);
+    try testing.expectApproxEqAbs(@as(f64, 100), ethernet_result.z0_ohms, 0.5);
+    try testing.expectApproxEqAbs(@as(f64, 90), usb_result.z0_ohms, 0.5);
 }
 
 // spec: placement/impedance - mixed-dielectric stripline uses each physical interval instead of collapsing the stack to one average Dk

@@ -26,11 +26,52 @@ const Definition = struct {
 const empty_ply = Ply{ .material = "", .thickness = 0, .er = 0 };
 const empty_gap = Gap{ .kind = .prepreg, .label = "", .plies = .{ empty_ply, empty_ply, empty_ply }, .len = 0 };
 
+// JLCPCB's impedance calculator uses finished conductor thicknesses rather
+// than the nominal foil values displayed in the construction table.
+const external_copper_1oz_mm: f64 = 0.04064; // 1.6 mil
+const internal_copper_half_oz_mm: f64 = 0.01524; // 0.6 mil
+const etched_width_reduction_mm: f64 = 0.01778; // 0.7 mil
+
 fn prepreg(material: []const u8, thickness: f64, er: f64) Ply {
     return .{ .material = material, .thickness = thickness, .er = er };
 }
 fn corePly(thickness: f64) Ply {
-    return .{ .material = "Core", .thickness = thickness, .er = 4.6 };
+    // Nan Ya NP-155F values published for JLC's current 4–8-layer impedance
+    // calculator. Preset core thicknesses are nominal table entries; the
+    // catch-all is the published value for cores thicker than 0.70 mm.
+    const er: f64 = if (thickness == 0.08)
+        3.99
+    else if (thickness == 0.10)
+        4.36
+    else if (thickness == 0.13)
+        4.17
+    else if (thickness == 0.15)
+        4.36
+    else if (thickness == 0.20)
+        4.36
+    else if (thickness == 0.25)
+        4.23
+    else if (thickness == 0.30)
+        4.41
+    else if (thickness == 0.35)
+        4.36
+    else if (thickness == 0.40)
+        4.36
+    else if (thickness == 0.45)
+        4.36
+    else if (thickness == 0.50)
+        4.48
+    else if (thickness == 0.55)
+        4.41
+    else if (thickness == 0.60)
+        4.36
+    else if (thickness == 0.65)
+        4.36
+    else if (thickness == 0.70)
+        4.53
+    else
+        4.43;
+    return .{ .material = "Nan Ya NP-155F core", .thickness = thickness, .er = er };
 }
 fn one(kind: env.StackupDielectricKind, label: []const u8, a: Ply) Gap {
     return .{ .kind = kind, .label = label, .plies = .{ a, empty_ply, empty_ply }, .len = 1 };
@@ -54,8 +95,8 @@ fn pp2116(thickness: f64) Ply {
     return prepreg("2116*1", thickness, 4.16);
 }
 fn pp2313(thickness: f64) Ply {
-    // The supplied table names 2313 but does not publish its Dk.
-    return prepreg("2313*1", thickness, 4.4);
+    // JLC specifies 2313 and its 3313 replacement at the same Dk.
+    return prepreg("2313*1", thickness, 4.1);
 }
 fn sym4(name: []const u8, face: Gap, middle: Gap) Definition {
     return .{
@@ -133,10 +174,10 @@ pub fn resolve(allocator: std.mem.Allocator, name: []const u8) std.mem.Allocator
             const index: u8 = @intCast(i + 1);
             layer.* = .{
                 .index = index,
-                .thickness = if (outer) 0.035 else 0.0152,
+                .thickness = if (outer) external_copper_1oz_mm else internal_copper_half_oz_mm,
                 // JLC's controlled-impedance process table specifies a 0.7 mil
                 // finished top-to-base reduction for every etched trace.
-                .width_reduction = 0.01778,
+                .width_reduction = etched_width_reduction_mm,
                 // Copper-clad cores etch away from the core: upper foil faces
                 // up, lower foil faces down; outer foils follow the same rule.
                 .narrow_side = if (index == 1 or (index < definition.entry.layers and index % 2 == 0)) .up else .down,
@@ -187,8 +228,22 @@ test "JLC04161H-7628 resolves the supplied JLC construction" {
     try std.testing.expectApproxEqAbs(@as(f64, 0.2104), spec.dielectrics[0].thickness, 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, 4.4), spec.dielectrics[0].er, 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, 1.065), spec.dielectrics[1].thickness, 1e-9);
-    try std.testing.expectApproxEqAbs(@as(f64, 4.6), spec.dielectrics[1].er, 1e-9);
-    try std.testing.expectApproxEqAbs(@as(f64, 1.5862), spec.constructionThickness(), 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 4.43), spec.dielectrics[1].er, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, external_copper_1oz_mm), spec.copper[0].thickness, 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, internal_copper_half_oz_mm), spec.copper[1].thickness, 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, etched_width_reduction_mm), spec.copper[0].width_reduction, 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.59756), spec.constructionThickness(), 1e-9);
+}
+
+test "JLC core and legacy prepreg Dk values follow the current calculator table" {
+    const vectors = [_][2]f64{
+        .{ 0.08, 3.99 }, .{ 0.10, 4.36 }, .{ 0.13, 4.17 }, .{ 0.15, 4.36 },
+        .{ 0.20, 4.36 }, .{ 0.25, 4.23 }, .{ 0.30, 4.41 }, .{ 0.35, 4.36 },
+        .{ 0.40, 4.36 }, .{ 0.45, 4.36 }, .{ 0.50, 4.48 }, .{ 0.55, 4.41 },
+        .{ 0.60, 4.36 }, .{ 0.65, 4.36 }, .{ 0.70, 4.53 }, .{ 1.065, 4.43 },
+    };
+    for (vectors) |vector| try std.testing.expectApproxEqAbs(vector[1], corePly(vector[0]).er, 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 4.1), pp2313(0.0964).er, 1e-12);
 }
 
 test "catalog contains every supplied JLC controlled-impedance construction" {

@@ -3958,8 +3958,10 @@ test "design-block resolves a stackup preset with board electrical roles" {
     try testing.expectEqual(@as(usize, 3), block.stackup.dielectrics.len);
     try testing.expectEqual(@as(usize, 3), block.stackup.planes.len);
     try testing.expectApproxEqAbs(@as(f64, 1.6), block.stackup.thickness, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0.04064), block.stackup.copper[0].thickness, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.01524), block.stackup.copper[1].thickness, 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 4.4), block.stackup.dielectrics[0].er, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 4.6), block.stackup.dielectrics[1].er, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 4.43), block.stackup.dielectrics[1].er, 1e-9);
 }
 
 // spec: eval/design_block - a stackup dielectric captures its (er X) permittivity and defaults it when absent
