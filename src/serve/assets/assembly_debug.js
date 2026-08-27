@@ -13,6 +13,8 @@
   const boardRotateRight = document.getElementById('board-rotate-right');
   const boardOrientation = document.getElementById('board-orientation');
   const load3dModels = document.getElementById('load-3d-models');
+  const camReviewButton = document.getElementById('cam-review');
+  const camLayerMenu = document.getElementById('cam-layer-menu');
   let camLayerInputs = Array.from(document.querySelectorAll('[data-cam-layer]'));
   const innerCopperLayers = document.getElementById('inner-copper-layers');
   const reworkGuide = document.getElementById('rework-guide');
@@ -49,6 +51,9 @@
   let boardSide = 'top';
   let boardRotation = 0;
   let modelsEnabled = false;
+  let camReviewRequested = new URLSearchParams(window.location.search).get('cam') === '1';
+  let camReviewActive = false;
+  let camReviewLoading = false;
   let activeGuideFocus = null;
   const guides = Array.isArray(model.guides) ? model.guides : [];
   let openGuideIndex = -1;
@@ -641,6 +646,44 @@
     setModelsEnabled(params.get('models') === '1', false);
   }
 
+  function syncCamReviewControl(detail) {
+    if (camReviewButton) {
+      camReviewButton.disabled = camReviewLoading;
+      camReviewButton.textContent = camReviewLoading ? 'Loading CAM…' : 'CAM Review';
+      camReviewButton.setAttribute('aria-pressed', camReviewActive ? 'true' : 'false');
+      camReviewButton.setAttribute('aria-busy', camReviewLoading ? 'true' : 'false');
+      camReviewButton.title = detail || (camReviewActive
+        ? 'Return to the fast semantic Assembly board'
+        : 'Load and inspect the exact generated Gerber and Excellon files');
+    }
+    if (camLayerMenu) {
+      camLayerMenu.hidden = !camReviewActive;
+      if (!camReviewActive) camLayerMenu.open = false;
+    }
+  }
+
+  function postCamReviewRequest() {
+    if (!frame || !frame.contentWindow) return;
+    frame.contentWindow.postMessage({
+      type: 'eda-pcb-cam-mode',
+      enabled: camReviewRequested
+    }, messageTargetOrigin);
+  }
+
+  function setCamReviewRequested(enabled, updateUrl) {
+    camReviewRequested = Boolean(enabled);
+    if (!camReviewRequested) camReviewActive = false;
+    camReviewLoading = camReviewRequested && !camReviewActive;
+    syncCamReviewControl();
+    postCamReviewRequest();
+    if (updateUrl) {
+      const url = new URL(window.location.href);
+      if (camReviewRequested) url.searchParams.set('cam', '1');
+      else url.searchParams.delete('cam');
+      replaceUrl(url);
+    }
+  }
+
   function camLayerState() {
     const state = {};
     camLayerInputs.forEach((input) => { state[input.dataset.camLayer] = input.checked; });
@@ -1180,6 +1223,9 @@
   if (load3dModels) load3dModels.addEventListener('change', () => {
     setModelsEnabled(load3dModels.checked, true);
   });
+  if (camReviewButton) camReviewButton.addEventListener('click', () => {
+    setCamReviewRequested(!camReviewActive, true);
+  });
   camLayerInputs.forEach((input) => input.addEventListener('change', () => applyCamLayers(true)));
   if (guideTab) guideTab.addEventListener('click', () => showWorkspacePanel('guide'));
   if (guideBack) guideBack.addEventListener('click', showGuideList);
@@ -1205,6 +1251,7 @@
     requestBoardParts();
     applyBoardOrientation(false);
     applyCamLayers(false);
+    setCamReviewRequested(camReviewRequested, false);
     if (activeGuideFocus) {
       focusMessage(
         activeGuideFocus.refs,
@@ -1221,6 +1268,28 @@
   window.addEventListener('message', (event) => {
     if ((!standalone && event.origin !== window.location.origin) || event.source !== frame.contentWindow) return;
     const payload = event.data || {};
+    if (payload.type === 'eda-pcb-cam-state') {
+      if (payload.state === 'loading') {
+        camReviewLoading = true;
+      } else if (payload.state === 'active') {
+        camReviewRequested = true;
+        camReviewActive = true;
+        camReviewLoading = false;
+      } else if (payload.state === 'semantic') {
+        if (camReviewRequested) return;
+        camReviewActive = false;
+        camReviewLoading = false;
+      } else if (payload.state === 'error') {
+        camReviewRequested = false;
+        camReviewActive = false;
+        camReviewLoading = false;
+        const url = new URL(window.location.href);
+        url.searchParams.delete('cam');
+        replaceUrl(url);
+      }
+      syncCamReviewControl(payload.detail || '');
+      return;
+    }
     if (payload.type === 'eda-pcb-parts') {
       populateInnerCopperLayers(payload.innerLayers);
       partSides.clear();
@@ -1263,6 +1332,7 @@
 
   restoreBoardOrientation();
   restoreModelLoading();
+  syncCamReviewControl();
   restoreCamLayers();
   requestBoardParts();
   renderGuideList();

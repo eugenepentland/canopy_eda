@@ -1147,14 +1147,14 @@ test "Assembly review publishes semantic state at the completed paint seam" {
     try std.testing.expect(paint_tail < publish);
 }
 
-// spec: Web Server - Before its asynchronous CAM profile arrives, Assembly preserves the saved outline's native arcs instead of joining their endpoints as chamfers
-// spec: Web Server - The Assembly board substrate paints parsed Gerber/Excellon operations in WebGPU instead of rebuilding fabrication artwork from browser fonts and placement objects
+// spec: Web Server - Before opt-in CAM Review supplies its exact profile, Assembly preserves the saved outline's native arcs instead of joining their endpoints as chamfers
+// spec: Web Server - CAM Review paints parsed Gerber/Excellon operations in WebGPU instead of rebuilding fabrication artwork from browser fonts and placement objects
 // spec: Web Server - Assembly layer controls independently toggle face copper, every physical inner copper layer, solder mask, paste, silkscreen, drills, board outline, and component overlays
 // spec: Web Server - Assembly paints the closest enabled copper film from the viewed face bright gold and every enabled film behind it dim gold
 test "Assembly review resolves ordered CAM policy with independent layer visibility" {
     const Check = struct { bytes: []const u8, marker: []const u8 };
     const checks = [_]Check{
-        .{ .bytes = pcb_board_js, .marker = "var CAM_REVIEW=PHYSICAL_REVIEW&&PCB.cam" },
+        .{ .bytes = pcb_board_js, .marker = "var CAM_REVIEW=false,camLoadStarted=false" },
         .{ .bytes = pcb_board_js, .marker = "function camLayerVisible" },
         .{ .bytes = pcb_gpu_js, .marker = "function camOpDark" },
         .{ .bytes = pcb_gpu_js, .marker = "if (L.negative) dark = !dark" },
@@ -1604,16 +1604,20 @@ test "PCB clients read the lexical const PCB blob, never a window property" {
     try std.testing.expect(std.mem.indexOf(u8, pcb_replay_js, "(PCB.layer_table && PCB.layer_table.length)") != null);
 }
 
-// Client half of the assembly cold-load contract tested with the server output
-// in pcb_layout_page.zig.
-test "Assembly board defers exact CAM until after its first paint" {
+// Client half of the Assembly opt-in CAM contract tested with the shell and
+// server output in assembly_debug.zig and pcb_layout_page.zig.
+test "Assembly board loads exact CAM only on explicit review request" {
     const markers = [_][]const u8{
+        "var CAM_REVIEW=false,camLoadStarted=false",
+        "function camReviewSet(enabled)",
+        "if(msg.type===\"eda-pcb-cam-mode\")",
         "function loadCamReview()",
-        "requestAnimationFrame(function(){requestAnimationFrame(start);})",
         "fetch(PCB.cam_url)",
-        "PCB.cam=cam;CAM_REVIEW=true",
+        "PCB.cam=cam;camReviewUse()",
+        "camReviewPost(\"semantic\")",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "loadCamReview();dragCacheDrop()") == null);
 }
 
 /// No registered script may gate a read on `window.PCB` — the page's blob is a
@@ -1670,7 +1674,8 @@ test "PCB WebGPU renderer carries its own pipelines and honours the ?gpu=0 opt-o
     try std.testing.expect(std.mem.indexOf(u8, js, "getElementById(\"st-gpu\")") != null);
 }
 
-// spec: Web Server - Assembly WebGPU renders the generated Gerber/Excellon operation stream into a retained manufacturing film and camera frames only sample that film; Canvas2D remains only as the transparent component/interaction overlay and never interprets CAM operations
+// spec: Web Server - Assembly opens on its compact read-only semantic board and requests no Gerber/Excellon payload until the operator enables CAM Review
+// spec: Web Server - CAM Review WebGPU renders the generated Gerber/Excellon operation stream into a retained manufacturing film and camera frames only sample that film; Canvas2D remains only as the transparent component/interaction overlay and never interprets CAM operations
 // spec: Web Server - Assembly requires WebGPU for generated Gerber/Excellon artwork; an unavailable adapter, initialization/render failure, device loss, or Assembly ?gpu=0 displays a blocking requirement message instead of invoking a Canvas manufacturing renderer
 // spec: Web Server - An opposite-face heatsink is retained in the WebGPU manufacturing film behind the opaque board instead of forcing a Canvas CAM fallback
 test "Assembly requires retained WebGPU CAM artwork and keeps Canvas as an overlay" {
@@ -1685,8 +1690,8 @@ test "Assembly requires retained WebGPU CAM artwork and keeps Canvas as an overl
         .{ .haystack = pcb_earcut_js, .marker = "window.PCBEarcut=Ua" },
         .{ .haystack = pcb_board_js, .marker = "function gpuCamLive()" },
         .{ .haystack = pcb_board_js, .marker = "function gpuCamState()" },
-        .{ .haystack = pcb_board_js, .marker = "PCBGpu.rebuildCam()" },
-        .{ .haystack = pcb_board_js, .marker = "var ASSEMBLY_WEBGPU_REQUIRED=PHYSICAL_REVIEW&&!!PCB.cam_url" },
+        .{ .haystack = pcb_gpu_js, .marker = "camGeo.source !== O.PCB.cam" },
+        .{ .haystack = pcb_board_js, .marker = "var ASSEMBLY_WEBGPU_REQUIRED=PHYSICAL_REVIEW&&!!(PCB.cam_url||camPayloadReady())" },
         .{ .haystack = pcb_board_js, .marker = "function assemblyGpuFail(detail)" },
         .{ .haystack = pcb_board_js, .marker = "Assembly requires WebGPU" },
         .{ .haystack = pcb_layout_css, .marker = ".pcb-webgpu-required" },

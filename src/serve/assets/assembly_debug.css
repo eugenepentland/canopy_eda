@@ -68,6 +68,7 @@ button { color: inherit; }
 .board-controls button { padding: 6px 9px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel-2); cursor: pointer; }
 .board-controls button:hover { color: var(--accent); border-color: var(--accent); }
 .board-controls button[aria-pressed="true"] { color: #d2a8ff; border-color: #a371f7; background: rgba(163, 113, 247, .13); }
+.board-controls button[aria-busy="true"] { color: var(--muted); cursor: progress; }
 .model-toggle { display: flex; align-items: center; gap: 5px; padding: 0 6px 0 3px; color: var(--muted); font-size: 11px; cursor: pointer; white-space: nowrap; }
 .model-toggle input { margin: 0; accent-color: var(--accent); }
 .model-toggle:has(input:checked) { color: var(--text); }

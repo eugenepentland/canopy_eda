@@ -26,6 +26,7 @@ const PRIMARY_CONTROLS = Object.freeze({
   "bom_select": { "selector": "#bom-list .bom-row" },
   "selection_clear": { "selector": "#clear-selection" },
   "panel_navigation": { "selector": "#guide-tab, .layer-menu > summary" },
+  "cam_review": { "selector": "#cam-review" },
   "cam_layer_visibility": { "selector": "[data-cam-layer=\"copper\"]" },
   "board_side": { "selector": "#board-side" },
   "rotate": { "selector": "#board-rotate-left, #board-rotate-right" },
@@ -38,7 +39,7 @@ const PRIMARY_CONTROLS = Object.freeze({
 const NON_CONTROL_SCENARIOS = Object.freeze(["exact_cam_ready", "pan", "zoom"]);
 const COVERED_SCENARIOS = Object.freeze([
   "exact_cam_ready", "search", "type_filter", "show_dnp", "bom_select", "selection_clear",
-  "panel_navigation", "cam_layer_visibility", "board_side", "rotate", "model_3d_navigation",
+  "panel_navigation", "cam_review", "cam_layer_visibility", "board_side", "rotate", "model_3d_navigation",
   "pan", "zoom"
 ]);
 
@@ -155,6 +156,18 @@ async function measureShellControls(page) {
   if (!boardFrame) throw new Error("assembly PCB iframe is unavailable");
   const boardScene = boardFrame.locator(".pcb-scene-shell");
   await boardScene.waitFor({ state: "visible" });
+  const camReview = page.locator("#cam-review");
+  if ((await camReview.getAttribute("aria-pressed")) !== "true") throw new Error("CAM Review was not active before control measurement");
+  const beforeSemantic = await reviewPaintState(boardFrame);
+  await camReview.click();
+  await page.waitForFunction(() => document.querySelector("#cam-review")?.getAttribute("aria-pressed") === "false");
+  await waitForReviewPaint(boardFrame, beforeSemantic.revision, {});
+  const beforeCamRestore = await reviewPaintState(boardFrame);
+  controls.cam_review_ms = await parentAction(page, () => camReview.click(), async () => {
+    await page.waitForFunction(() => document.querySelector("#cam-review")?.getAttribute("aria-pressed") === "true");
+    const painted = await waitForReviewPaint(boardFrame, beforeCamRestore.revision, {});
+    if (!painted.cam_review) throw new Error("CAM Review toggle did not restore the retained manufacturing film");
+  });
   controls.search_ms = await parentAction(page,
     () => page.locator("#assembly-search").fill("U19"),
     async () => {
@@ -420,7 +433,7 @@ async function runOne(browser, baseUrl, design) {
 
 async function runOneInContext(context, baseUrl, design) {
   const origin = new URL(baseUrl).origin;
-  const network = { blocked_mutations: [], blocked_external: [], failures: [] };
+  const network = { blocked_mutations: [], blocked_external: [], failures: [], cam_requests: 0 };
   const errors = [];
   const watchedPages = new WeakSet();
   function watchPage(candidate) {
@@ -466,6 +479,7 @@ async function runOneInContext(context, baseUrl, design) {
       return route.abort("blockedbyclient");
     }
     const method = request.method().toUpperCase();
+    if (method === "GET" && url.pathname.startsWith("/api/pcb-cam/")) network.cam_requests++;
     // This POST is a read-only calculation (the same exception used by the
     // all-pages browser gate), not a project mutation. The 3D page requests it
     // while deriving its review status.
@@ -486,6 +500,23 @@ async function runOneInContext(context, baseUrl, design) {
   });
   if (!response || !response.ok()) throw new Error(`assembly page returned ${response ? response.status() : "no response"}`);
   if (!page.url().startsWith(baseUrl)) throw new Error(`assembly page escaped the local server: ${page.url()}`);
+  await page.waitForFunction(() => {
+    const frame = document.getElementById("pcb-frame");
+    const state = frame?.contentWindow?.PCBReviewPainted?.();
+    return state && state.revision > 0 && !state.cam_review;
+  }, null, { timeout: 30000 });
+  if (network.cam_requests !== 0) throw new Error(`default semantic Assembly requested CAM ${network.cam_requests} time(s)`);
+  await page.locator("#cam-review").click();
+  await page.waitForFunction(() => {
+    const button = document.querySelector("#cam-review");
+    return button?.getAttribute("aria-pressed") === "true" || /could not|unavailable/i.test(button?.title || "");
+  }, null, { timeout: 240000 });
+  const camControl = await page.locator("#cam-review").evaluate((button) => ({
+    active: button.getAttribute("aria-pressed") === "true",
+    detail: button.title,
+  }));
+  if (!camControl.active) throw new Error(`CAM Review failed to activate: ${camControl.detail}`);
+  if (network.cam_requests !== 1) throw new Error(`CAM Review expected one lazy payload request, saw ${network.cam_requests}`);
   const benchDeadline = Date.now() + 120000;
   let nextProgress = Date.now() + 30000;
   while (Date.now() < benchDeadline) {
@@ -652,6 +683,8 @@ function requiredBudgets() {
     "controls.selection_clear.max_ms": 250,
     "controls.panel_navigation.p95_ms": 150,
     "controls.panel_navigation.max_ms": 250,
+    "controls.cam_review.p95_ms": 250,
+    "controls.cam_review.max_ms": 350,
     "controls.cam_layer_visibility.p95_ms": 250,
     "controls.cam_layer_visibility.max_ms": 350,
     "controls.board_side.p95_ms": 250,

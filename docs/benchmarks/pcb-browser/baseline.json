@@ -135,6 +135,8 @@
     "controls.selection_clear.max_ms": 250,
     "controls.panel_navigation.p95_ms": 150,
     "controls.panel_navigation.max_ms": 250,
+    "controls.cam_review.p95_ms": 250,
+    "controls.cam_review.max_ms": 350,
     "controls.cam_layer_visibility.p95_ms": 250,
     "controls.cam_layer_visibility.max_ms": 350,
     "controls.board_side.p95_ms": 250,

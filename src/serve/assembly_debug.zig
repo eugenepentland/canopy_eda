@@ -911,7 +911,9 @@ fn renderPageWithOptions(allocator: std.mem.Allocator, name: []const u8, index: 
         try w.writeAll("<label class=\"model-toggle\" title=\"Load cached component model pictures\">");
         try w.writeAll("<input id=\"load-3d-models\" type=\"checkbox\"> 3D models</label>");
     }
-    try w.writeAll("<details class=\"layer-menu\"><summary>Layers</summary><div class=\"layer-menu-pop\">");
+    try w.writeAll("<button id=\"cam-review\" type=\"button\" aria-pressed=\"false\"");
+    try w.writeAll(" title=\"Load and inspect the exact generated Gerber and Excellon files\">CAM Review</button>");
+    try w.writeAll("<details id=\"cam-layer-menu\" class=\"layer-menu\" hidden><summary>CAM Layers</summary><div class=\"layer-menu-pop\">");
     try w.writeAll("<label><input type=\"checkbox\" data-cam-layer=\"copper\" checked> Face copper</label>");
     // The iframe fills this from its shared physical layer table. Keeping the
     // stack in one place means a 4-layer board gets In1/In2 while a 6-layer
@@ -1257,6 +1259,7 @@ test "recursive sections include nested refs and explicitly hosted subcircuits" 
 }
 
 // spec: Web Server - assembly review hides scores, DRC, and clearance, loads 3D models only on request, preserves board appearance when component picks update the sidebar, and retains middle-pan and scene-only orientation
+// spec: Web Server - The Assembly CAM Review toggle lazy-loads dependency-cached Gerber/Excellon artwork, can return instantly to the semantic board, and exposes CAM layer controls only while exact files are active
 test "page HTML is read-only and carries embed, data, and focus assets" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1273,6 +1276,8 @@ test "page HTML is read-only and carries embed, data, and focus assets" {
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"board-side\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"board-rotate-right\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"load-3d-models\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "id=\"cam-review\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "id=\"cam-layer-menu\" class=\"layer-menu\" hidden") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "class=\"layer-menu\"") != null);
     try std.testing.expectEqual(@as(usize, 7), std.mem.count(u8, html, "data-cam-layer="));
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"inner-copper-layers\"") != null);
@@ -1305,6 +1310,9 @@ test "page HTML is read-only and carries embed, data, and focus assets" {
     try std.testing.expect(std.mem.indexOf(u8, js, "url.searchParams.set('model_sprites', '1')") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "url.searchParams.delete('model_sprites')") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "eda-pcb-cam-visibility") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "eda-pcb-cam-mode") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "eda-pcb-cam-state") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "camReviewRequested = new URLSearchParams(window.location.search).get('cam') === '1'") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "assembly-cam-layers:") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "populateInnerCopperLayers(payload.innerLayers)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "frame.contentWindow.PCBReviewInnerLayers") != null);

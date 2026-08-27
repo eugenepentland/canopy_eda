@@ -129,35 +129,55 @@ var TH=themeFrom({bg:"#001023",  // canvas: KiCad dark navy
 var PH=themeFrom({bg:"#101815",mask:"#086b43",edge:"#786744",opening:"#a1854e",substrate:"#544b36",
  copper:"#cfaf62",copperUnder:"#c0aa62",viaMask:"#417b50",npth:"#313c35",
  hole:"#101815",silk:"#f4f3e9",pin1:"#ff3b30"},PCB.theme&&PCB.theme.review);
-// Assembly's manufactured artwork comes from ordered operations parsed back
-// from the exact generated Gerber/Excellon bytes. The ordinary PCB editor has
-// no `PCB.cam` payload and keeps its semantic, editable paint pipeline.
-var CAM_REVIEW=PHYSICAL_REVIEW&&PCB.cam&&PCB.cam.source==="generated-gerber"&&Array.isArray(PCB.cam.layers),camLoadStarted=false;
-// A lazy CAM URL identifies the Assembly surface (thermal review deliberately
-// has none). Assembly's manufactured artwork has one renderer: WebGPU. The 2D
-// canvas remains as a transparent interaction/component overlay, but it never
-// interprets Gerber operations and cannot become a manufacturing fallback.
-var ASSEMBLY_WEBGPU_REQUIRED=PHYSICAL_REVIEW&&!!PCB.cam_url;
+// Assembly opens on its compact semantic board. Exact generated files are a
+// separate, explicit CAM-review mode: the live page fetches them only when the
+// operator asks, while a frozen release already carries the same payload.
+// `CAM_REVIEW` means the exact film is ACTIVE, not merely available, so turning
+// it off returns immediately to the semantic renderer without discarding the
+// parsed payload or retained WebGPU film.
+function camPayloadReady(){return !!(PCB.cam&&PCB.cam.source==="generated-gerber"&&Array.isArray(PCB.cam.layers));}
+var CAM_REVIEW=false,camLoadStarted=false;
+// A lazy CAM URL identifies the live Assembly surface (thermal review has
+// none); an embedded CAM payload identifies its offline release. Assembly
+// keeps WebGPU as a hard browser requirement even though its default semantic
+// board is compact, because exact CAM review has no Canvas manufacturing path.
+var ASSEMBLY_WEBGPU_REQUIRED=PHYSICAL_REVIEW&&!!(PCB.cam_url||camPayloadReady());
 var camVisibility={copper:true,inner_copper:false,mask:true,paste:false,silk:true,drills:true,outline:true,components:true};
 function camVisible(k){return camVisibility[k]!==false;}
-// Exact manufacturing artwork is deliberately not in the page HTML. Paint the
-// semantic board first, then fetch the dependency-cached Gerber/Excellon
-// read-back after two frames so CAM generation and JSON parsing cannot delay
-// the first useful assembly view.
+// Exact manufacturing artwork is deliberately not in the live page HTML. It
+// is fetched only after the Assembly shell explicitly enters CAM Review, so
+// ordinary assembly work never pays its generation, transfer or parse cost.
+function camReviewPost(state,detail){if(window.parent===window)return;
+ try{window.parent.postMessage({type:"eda-pcb-cam-state",design:PCB.name,state:state,
+  enabled:CAM_REVIEW,ready:camPayloadReady(),detail:detail||""},MESSAGE_TARGET_ORIGIN);}catch(e){}}
+function camReviewUse(){
+ if(!camPayloadReady())return false;
+ CAM_REVIEW=true;reviewPaintDirty=true;
+ // camFrame detects a newly installed PCB.cam object itself. Do not mark the
+ // geometry dirty here: leaving and re-entering CAM Review should sample the
+ // retained film immediately, not parse, upload and bake the same files again.
+ dragCacheDrop();drawBoardRect();paintSoon();
+ camReviewPost("active");return true;}
+function camReviewSet(enabled){
+ if(!PHYSICAL_REVIEW)return;
+ if(!enabled){CAM_REVIEW=false;reviewPaintDirty=true;dragCacheDrop();drawBoardRect();paintSoon();camReviewPost("semantic");return;}
+ if(camReviewUse())return;
+ loadCamReview();}
 function loadCamReview(){
- if(!PHYSICAL_REVIEW||!PCB.cam_url||CAM_REVIEW)return;
+ if(!PHYSICAL_REVIEW||CAM_REVIEW)return;
+ if(camPayloadReady()){camReviewUse();return;}
+ if(!PCB.cam_url){camReviewPost("error","Generated fabrication files are unavailable in this Assembly document.");return;}
  var start=function(){
   // A hard-required renderer should be proven before asking the server to do
   // the comparatively expensive CAM generation. Unsupported/opted-out pages
   // stop at the requirement card; an adapter still starting gets a short poll.
   if(ASSEMBLY_WEBGPU_REQUIRED&&!gpuOn){if(gpuStarting)setTimeout(start,25);return;}
-  if(camLoadStarted)return;camLoadStarted=true;
+  if(camLoadStarted)return;camLoadStarted=true;camReviewPost("loading");
   fetch(PCB.cam_url).then(function(r){if(!r.ok)throw 0;return r.json();})
   .then(function(cam){if(!cam||cam.source!=="generated-gerber"||!Array.isArray(cam.layers))throw new Error("invalid CAM payload");
-   PCB.cam=cam;CAM_REVIEW=true;reviewPaintDirty=true;
-   if(gpuOn&&window.PCBGpu)PCBGpu.rebuildCam();dragCacheDrop();paintSoon();})
-  .catch(function(){assemblyGpuFail("The generated Gerber/Excellon artwork could not be loaded. Reload the Assembly page to try again.");});};
- requestAnimationFrame(function(){requestAnimationFrame(start);});}
+   PCB.cam=cam;camReviewUse();})
+  .catch(function(){camLoadStarted=false;camReviewPost("error","The generated Gerber/Excellon artwork could not be loaded. Try CAM Review again.");});};
+ requestAnimationFrame(start);}
 // Full editable pages paint placement + saved tracks/vias first. Exact-state
 // copper fills come from persistent browser storage when available; otherwise
 // the fast refill endpoint computes them before the dependency-cached whole-
@@ -5078,6 +5098,7 @@ window.addEventListener("message",function(ev){var msg=ev.data;
  if(!msg||(!STANDALONE&&ev.origin!==window.location.origin))return;
  if(msg.type==="eda-pcb-parts-request"){reviewPostParts(ev.source,STANDALONE?"*":ev.origin);return;}
  if(msg.type==="eda-pcb-orientation"){if(RO)reviewOrient(msg.side,msg.rotation);return;}
+ if(msg.type==="eda-pcb-cam-mode"){if(RO)camReviewSet(!!msg.enabled);return;}
  if(msg.type==="eda-pcb-cam-visibility"){reviewCamVisibility(msg.layers);return;}
  if(msg.type!=="eda-pcb-focus")return;
  if(msg.design!=null&&String(msg.design)!==String(PCB.name))return;
@@ -11445,7 +11466,7 @@ if(GPU_REQ&&window.PCBGpu&&navigator.gpu&&CV.parentNode){
     assemblyGpuFail((PCBGpu&&PCBGpu.error)||"The WebGPU device was lost. Reload the Assembly page to restart it.");dragCacheDrop();paintSoon();}})
   .then(function(ok){if(gpuInitTimer)clearTimeout(gpuInitTimer);gpuInitTimer=null;gpuStarting=false;if(!ok){assemblyGpuFail((PCBGpu&&PCBGpu.error)||"WebGPU could not be initialized. Use a WebGPU-capable browser and reload.");return;}
    gpuOn=true;assemblyGpuClear();gpuStatusSync();
-   loadCamReview();dragCacheDrop();paintSoon();})
+   camReviewPost(CAM_REVIEW?"active":"semantic");dragCacheDrop();paintSoon();})
   .catch(function(e){if(gpuInitTimer)clearTimeout(gpuInitTimer);gpuInitTimer=null;gpuStarting=false;assemblyGpuFail(String(e&&e.message||"WebGPU could not be initialized. Reload the Assembly page."));});
  }catch(e){if(gpuInitTimer)clearTimeout(gpuInitTimer);gpuInitTimer=null;gpuStarting=false;assemblyGpuFail(String(e&&e.message||"WebGPU could not be initialized. Reload the Assembly page."));}}
 else if(ASSEMBLY_WEBGPU_REQUIRED&&GPU_REQ)assemblyGpuFail("The WebGPU renderer did not load. Reload the Assembly page to try again.");

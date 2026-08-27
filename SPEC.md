@@ -6410,7 +6410,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - assembly part and BOM selections highlight only placements on the currently viewed board face and retarget when that face is switched
 - assembly review hides scores, DRC, and clearance, loads 3D models only on request, preserves board appearance when component picks update the sidebar, and retains middle-pan and scene-only orientation
 - assembly review derives bare via copper only by clipping it through mask-opening geometry, including the exact authored-width board-edge band
-- Before its asynchronous CAM profile arrives, Assembly preserves the saved outline's native arcs instead of joining their endpoints as chamfers
+- Before opt-in CAM Review supplies its exact profile, Assembly preserves the saved outline's native arcs instead of joining their endpoints as chamfers
 - assembly sidebar selections sit beside their row without scrolling a list the row is already visible in, and omit the copper focus report
 - assembly parts, BOM lines, and selections link uploaded local datasheets and HTTP(S) component datasheet URLs
 - the assembly workspace opens on its parts list, leaving the guide panel one tab click or a deep link away
@@ -6576,10 +6576,12 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The PCB page blob carries each net class's resolved mask relief and fence untent reach so the assembly view shows the shipped mask
 - The PCB page blob serves each continuous mask-relief run as one closed filleted polygon so the assembly view draws the shipped mask
 - The PCB page blob keeps solver-authored pad tapers fully masked and begins RF relief at the exact uniform-trace boundary
-- The Assembly board substrate paints parsed Gerber/Excellon operations in WebGPU instead of rebuilding fabrication artwork from browser fonts and placement objects
-- Assembly WebGPU renders the generated Gerber/Excellon operation stream into a retained manufacturing film and camera frames only sample that film; Canvas2D remains only as the transparent component/interaction overlay and never interprets CAM operations
+- Assembly opens on its compact read-only semantic board and requests no Gerber/Excellon payload until the operator enables CAM Review
+- CAM Review paints parsed Gerber/Excellon operations in WebGPU instead of rebuilding fabrication artwork from browser fonts and placement objects
+- CAM Review WebGPU renders the generated Gerber/Excellon operation stream into a retained manufacturing film and camera frames only sample that film; Canvas2D remains only as the transparent component/interaction overlay and never interprets CAM operations
 - An opposite-face heatsink is retained in the WebGPU manufacturing film behind the opaque board instead of forcing a Canvas CAM fallback
-- The Assembly board paints its lightweight semantic view before asynchronously loading dependency-cached Gerber/Excellon artwork, and its initial iframe omits hidden DRC, editable-layout metadata, and editor-only scripts
+- The Assembly CAM Review toggle lazy-loads dependency-cached Gerber/Excellon artwork, can return instantly to the semantic board, and exposes CAM layer controls only while exact files are active
+- The initial Assembly iframe omits hidden DRC, editable-layout metadata, editor-only scripts, and inline CAM while exposing the lazy generated-files URL
 - The Assembly physical-review embed omits optimizer, DRC, and route-status reporting while retaining the hidden route geometry inputs its read-only painter consumes
 - Assembly layer controls independently toggle face copper, every physical inner copper layer, solder mask, paste, silkscreen, drills, board outline, and component overlays
 - Assembly paints the closest enabled copper film from the viewed face bright gold and every enabled film behind it dim gold

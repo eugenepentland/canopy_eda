@@ -28,7 +28,6 @@ pub fn boardRequest(source: *httpz.Request, layout: []const u8) std.mem.Allocato
     query.add("embed", "1");
     query.add("review", "1");
     query.add("drc", "0");
-    query.add("gpu", "0");
     if (layout.len > 0) query.add("layout", layout);
     var request = source.*;
     request.qs = query;

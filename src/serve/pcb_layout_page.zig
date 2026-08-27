@@ -3463,8 +3463,8 @@ test "the thermal board frame omits data hidden by its overlay" {
     try std.testing.expectEqual(@as(usize, 0), payloadLayouts(&layouts, true).len);
 }
 
-// spec: Web Server - The Assembly board paints its lightweight semantic view before asynchronously loading dependency-cached Gerber/Excellon artwork, and its initial iframe omits hidden DRC, editable-layout metadata, and editor-only scripts
-test "assembly iframe defers CAM and omits editor-only clients" {
+// spec: Web Server - The initial Assembly iframe omits hidden DRC, editable-layout metadata, editor-only scripts, and inline CAM while exposing the lazy generated-files URL
+test "assembly iframe exposes lazy CAM and omits editor-only clients" {
     try std.testing.expect(!needsPageReporting(true, false, false));
     try std.testing.expect(needsPageReporting(true, false, true));
     try std.testing.expect(!needsPageReporting(false, true, true));

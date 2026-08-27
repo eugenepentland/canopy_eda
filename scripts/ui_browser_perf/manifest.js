@@ -14,7 +14,7 @@ const routes = {
     runner: "scripts/pcb_browser_perf/run.js",
     scenarios: [
       "exact_cam_ready", "search", "type_filter", "show_dnp", "bom_select", "selection_clear",
-      "panel_navigation", "cam_layer_visibility", "board_side", "rotate", "model_3d_navigation",
+      "panel_navigation", "cam_review", "cam_layer_visibility", "board_side", "rotate", "model_3d_navigation",
       "pan", "zoom",
     ],
   },
