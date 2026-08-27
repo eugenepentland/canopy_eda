@@ -109,3 +109,8 @@ log is not a substitute for reporting an active blocker to the user.
 - **friction:** This independently repeated the missing-shard failure recorded under “fabrication release full-suite integration”: four focused URL-datasheet tests and `test-compile` were green, but the first 38-second exact-candidate run failed only because the new `serve/api.zig` and `serve/datasheet_ref.zig` tests lacked `test_root.zig` imports and `test_shards.zig` claims.
 - **idea:** Make `test-compile` or the ordinary diff-scoped test gate run `test_root.test.shard manifest runs every named test exactly once` and `test_root.test.the shard import bridge lists every module whose tests run` whenever test-bearing Zig files change; two same-day release retries now show this is recurring rather than incidental.
 - **status:** open
+
+## 2026-08-27 · codex · zoom-exact Assembly CAM review
+- **friction:** Tuning the CAM interaction renderer required four roughly 40-second `scripts/pcb_browser_perf/run.js` runs, and every useful render result still ended red on unrelated cold Gerber generation, 3D navigation, and a changed/dirty live-design baseline.
+- **idea:** Add a focused `--only-render` or scenario filter that starts from a warm CAM payload and runs exact-quality, pan, zoom, side, rotate, and layer assertions without 3D navigation or aggregate baseline enforcement. This would preserve the full release gate while cutting iterative renderer measurements to the requested surface.
+- **status:** open
