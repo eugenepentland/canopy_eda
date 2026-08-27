@@ -482,6 +482,11 @@ a.sub-name:hover,a.grp-name:hover{color:#6ba1e8;text-decoration:underline}
 .prop-row{display:flex;justify-content:space-between;gap:10px;padding:2.5px 0;font-size:12px}
 .prop-row .k{color:#9b9ca3}
 .prop-row .v{color:#e4e5e9;font-variant-numeric:tabular-nums;text-align:right}
+.prop-copy{min-width:0;max-width:190px;padding:0;border:0;background:none;color:#8ab8f0;font:inherit;
+  font-variant-numeric:tabular-nums;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:copy}
+.prop-copy:hover,.prop-copy:focus-visible{color:#b7d5f7;text-decoration:underline}
+.prop-copy:focus-visible{outline:1px solid #5a8fd6;outline-offset:2px;border-radius:2px}
+.prop-copy.copied{color:#75c991}.prop-copy.copy-failed{color:#e16969}
 /* Editable properties: numeric mm inputs + preset selects. */
 .prop-row .pv-in{width:96px;font:inherit;font-size:12px;text-align:right;font-variant-numeric:tabular-nums;
   background:#1a1b1e;border:1px solid #3a3b40;color:#e4e5e9;border-radius:4px;padding:1px 5px}

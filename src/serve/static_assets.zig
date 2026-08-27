@@ -500,6 +500,19 @@ test "PCB board editor shows the Board outline properties on a plain outline edg
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
+// spec: Web Server - Clicking a selected PCB part's component name or resolved MPN in Properties copies that exact identifier to the clipboard and reports success
+test "PCB part properties copy component and MPN identifiers" {
+    const markers = [_][]const u8{
+        "pCopyRow(\"Component\",p.component,\"component name\")",
+        "p.mpn?pCopyRow(\"MPN\",p.mpn,\"MPN\")",
+        "navigator.clipboard.writeText(text)",
+        "document.execCommand(\"copy\")",
+        "wirePropCopies(body)",
+        "btn.textContent=ok?\"Copied \\u2713\":\"Copy failed\"",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+}
+
 // PCB outline vertex marks appear only during outline editing and retain the
 // existing larger coordinate-tested drag target.
 test "PCB board outline editing shows compact vertex dots without shrinking hit targets" {

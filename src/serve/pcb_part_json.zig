@@ -35,6 +35,23 @@ pub fn writeComponentField(w: *std.Io.Writer, instances: []const export_kicad.Fl
     try writeJsonString(w, if (index < instances.len) instances[index].component else "");
 }
 
+/// Add the resolved manufacturer part number used by the Properties inspector.
+/// Property keys may come from source-authored fields or KiCad imports, so the
+/// lookup follows the rest of the BOM pipeline and remains case-insensitive.
+fn writeMpnField(w: *std.Io.Writer, inst: ?export_kicad.FlatInstance) std.Io.Writer.Error!void {
+    var mpn: []const u8 = "";
+    if (inst) |item| {
+        for (item.properties) |property| {
+            if (std.ascii.eqlIgnoreCase(property.key, "mpn")) {
+                mpn = property.value;
+                break;
+            }
+        }
+    }
+    try w.writeAll(",\"mpn\":");
+    try writeJsonString(w, mpn);
+}
+
 /// Emit one part's browser pad array, including exact shape/drill metadata and
 /// the net resolved by the caller for each `ref|pad` key.
 pub fn writePadsJson(
@@ -103,6 +120,7 @@ pub fn writePartJson(
     try w.writeAll(",\"val\":");
     try writeJsonString(w, if (inst) |item| instanceLabel(item) else "");
     try writeComponentField(w, placement.instances, index);
+    try writeMpnField(w, inst);
     try writePadsJson(w, alloc, part, pin_net);
     try w.writeAll(",\"silk\":{\"l\":[");
     for (part.features.silk_lines, 0..) |line, j| {
@@ -258,13 +276,14 @@ test "live PCB part JSON carries replacement footprint geometry" {
         .fallback = false,
         .features = .{ .silk_lines = &.{.{ .x1 = -0.2, .y1 = -0.2, .x2 = 0.2, .y2 = -0.2 }} },
     }};
+    const properties = [_]env_mod.Property{.{ .key = "MPN", .value = "GRM155R71C104KA88" }};
     const instances = [_]export_kicad.FlatInstance{.{
         .ref_des = "C1",
         .component = "cap-0201",
         .origin_key = "C_FILTER",
         .value = "100nF",
         .footprint = "c-0201",
-        .properties = &.{},
+        .properties = &properties,
         .uuid = "",
     }};
     const placement = optimizer.Placement{
@@ -286,6 +305,7 @@ test "live PCB part JSON carries replacement footprint geometry" {
     try writePartJson(&writer.writer, alloc, placement, 0, 0, .empty);
     const json = writer.written();
     try std.testing.expect(std.mem.indexOf(u8, json, "\"component\":\"cap-0201\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"mpn\":\"GRM155R71C104KA88\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"fp\":\"c-0201\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"pads\":[{\"x\":-0.5") != null);
     var parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});

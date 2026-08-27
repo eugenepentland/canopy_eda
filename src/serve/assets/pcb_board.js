@@ -3040,6 +3040,15 @@ function pMm(v){return (Math.round(v*100)/100).toFixed(2);}
 function nLeaf(s){var i=String(s).lastIndexOf("/");return i<0?s:s.slice(i+1);}
 function pRow(k,v,id){return '<div class="prop-row"><span class="k">'+k+'</span><span class="v"'+
  (id?(' id="'+id+'"'):'')+'>'+pEsc(v)+'</span></div>';}
+function pCopyRow(k,v,label){return '<div class="prop-row"><span class="k">'+pEsc(k)+'</span>'+
+ '<button type="button" class="prop-copy" data-prop-copy="'+pEsc(v)+'" title="Copy '+pEsc(label)+' to clipboard" aria-label="Copy '+pEsc(label)+' to clipboard">'+pEsc(v)+'</button></div>';}
+function propCopyText(text,done){function fallback(){var ta=document.createElement("textarea"),ok=false;
+ ta.value=text;ta.setAttribute("readonly","");ta.style.cssText="position:fixed;left:-9999px;top:0";document.body.appendChild(ta);ta.select();
+ try{ok=document.execCommand("copy");}catch(e){}document.body.removeChild(ta);done(ok);}
+ if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(text).then(function(){done(true);},fallback);else fallback();}
+function wirePropCopies(body){body.querySelectorAll("[data-prop-copy]").forEach(function(btn){btn.addEventListener("click",function(){var text=btn.getAttribute("data-prop-copy")||"",old=btn.textContent;
+  propCopyText(text,function(ok){btn.textContent=ok?"Copied \u2713":"Copy failed";btn.classList.toggle("copied",ok);btn.classList.toggle("copy-failed",!ok);
+   setTimeout(function(){btn.textContent=old;btn.classList.remove("copied","copy-failed");},1000);});});});}
 // Editable rows for the (edit-only) properties panel: a numeric mm input and a
 // preset select. Committed on Enter/blur/change by wirePropInputs.
 function pNumRow(k,id,val,locked){return '<div class="prop-row"><span class="k">'+k+'</span>'+
@@ -3078,7 +3087,7 @@ function passiveRefreshTopology(index,oldPads,newPads){var next={};newPads.forEa
 function passiveRefreshApply(p,edit,score){var fresh=score&&score.refresh&&score.refresh.part;
  if(!fresh||fresh.ref!==p.ref)throw new Error("Updated footprint geometry was not returned.");
  var index=P.indexOf(p),oldPads=p.pads||[],oldFp=p.fp;passiveRefreshTopology(index,oldPads,fresh.pads||[]);
- var fields=["origin","hw","hh","ccx","ccy","kind","fb","fp","val","component","pads","silk"];
+ var fields=["origin","hw","hh","ccx","ccy","kind","fb","fp","val","component","mpn","pads","silk"];
  fields.forEach(function(k){if(Object.prototype.hasOwnProperty.call(fresh,k))p[k]=fresh[k];else delete p[k];});
  var meta=edit&&edit.part_edits&&edit.part_edits[p.ref];
  if(meta){p.src=meta.src;p.srcName=meta.srcName;p.srcRef=meta.srcRef;}
@@ -3179,7 +3188,9 @@ function renderProps(){var body=document.getElementById("prop-body");if(!body)re
    outlineMsg("corner fillet set to "+fmtLen(radius)+" — Save/Update to keep");});wireOutlineEntityProps(body);return;}
  var rot=(((p.rot||0)%360)+360)%360,fpEdit=passiveFpEditable(p);
  var h='<div class="prop-head"><span class="prop-ref">'+pEsc(refLabel(p.ref))+'</span>'+
-  (p.val?'<span class="prop-val">'+pEsc(p.val)+'</span>':'')+'</div>';
+  (p.val?'<span class="prop-val">'+pEsc(p.val)+'</span>':'')+'</div>'+
+  '<div class="prop-rows prop-identity">'+pCopyRow("Component",p.component,"component name")+
+  (p.mpn?pCopyRow("MPN",p.mpn,"MPN"):"")+'</div>';
  if(!RO&&!mobileInspectMode()){
   h+='<div class="prop-rows">'+
    pNumRow("X (mm)","prop-x",p.x,p.locked)+
@@ -3220,7 +3231,7 @@ function renderProps(){var body=document.getElementById("prop-body");if(!body)re
  var sb=body.getAttribute("data-schbase")||"/schematics/";
  h+='<a class="prop-sch" href="'+sb+encodeURIComponent(PCB.name)+'#comp-'+encodeURIComponent(p.ref)+'" '+
   'title="Open the schematic page scrolled to this part">Show in schematic →</a>';
- body.innerHTML=h;netIdxDrop();
+ body.innerHTML=h;netIdxDrop();wirePropCopies(body);
  if(!RO&&!p.locked)wirePropInputs(p.ref);
  if(!RO)wirePartDimensionProps(body,p);
  if(fpEdit)wirePassiveFootprint(p);
