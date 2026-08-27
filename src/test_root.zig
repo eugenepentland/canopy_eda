@@ -204,6 +204,7 @@ test {
     _ = @import("placement/drc_keepout.zig");
     _ = @import("placement/drc_match.zig");
     _ = @import("placement/drc_perimeter_keepout.zig");
+    _ = @import("placement/drc_pour.zig");
     _ = @import("placement/edge_rotation.zig");
     _ = @import("placement/escalate_retry.zig");
     _ = @import("placement/escape_assign.zig");

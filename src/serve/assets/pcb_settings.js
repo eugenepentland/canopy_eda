@@ -245,6 +245,8 @@ var DRC_HELP={
  sharp_bend:"An RF track turns sharper than its declared maximum frequency tolerates.",
  keepout_violation:"Foreign copper enters an RF net class's advisory same-layer isolation halo.",
  perimeter_keepout:"A component, track, or via enters the fixed perimeter-fence exclusion band. This is a fabrication error by default; only generated fence vias and explicitly allowed nets are admitted.",
+ pour_invalid:"A computed copper pour has malformed or ambiguous final regions and cannot be fabricated safely.",
+ pour_overlap:"A final copper pour touches or overlaps foreign copper on the same physical layer.",
  copper_stub:"A trace endpoint stops without reaching a same-net pad, via, trace, or pour.",
  implicit_junction:"Same-net trace copper touches only because its widths overlap; no stored endpoint lands on the other trace centreline. The board conducts, but the route has no explicit junction and must be canonicalized before generated copper is accepted.",
  hairline_gap:"Same-net copper stops 1–20 µm short. It is electrically open and must be bridged; fabrication must not decide whether it conducts.",
