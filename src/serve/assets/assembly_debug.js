@@ -14,6 +14,7 @@
   const boardOrientation = document.getElementById('board-orientation');
   const load3dModels = document.getElementById('load-3d-models');
   const camReviewButton = document.getElementById('cam-review');
+  const camReviewStatus = document.getElementById('cam-review-status');
   const camLayerMenu = document.getElementById('cam-layer-menu');
   let camLayerInputs = Array.from(document.querySelectorAll('[data-cam-layer]'));
   const innerCopperLayers = document.getElementById('inner-copper-layers');
@@ -54,6 +55,7 @@
   let camReviewRequested = new URLSearchParams(window.location.search).get('cam') === '1';
   let camReviewActive = false;
   let camReviewLoading = false;
+  let camReviewError = '';
   let activeGuideFocus = null;
   const guides = Array.isArray(model.guides) ? model.guides : [];
   let openGuideIndex = -1;
@@ -646,15 +648,25 @@
     setModelsEnabled(params.get('models') === '1', false);
   }
 
-  function syncCamReviewControl(detail) {
+  function syncCamReviewControl() {
+    const detail = camReviewError || (camReviewActive
+      ? 'Return to the fast semantic Assembly board'
+      : 'Load and inspect the exact generated Gerber and Excellon files');
     if (camReviewButton) {
       camReviewButton.disabled = camReviewLoading;
-      camReviewButton.textContent = camReviewLoading ? 'Loading CAM…' : 'CAM Review';
+      camReviewButton.textContent = camReviewLoading
+        ? 'Loading CAM…'
+        : (camReviewActive ? 'Exit CAM Review' : (camReviewError ? 'Retry CAM Review' : 'CAM Review'));
       camReviewButton.setAttribute('aria-pressed', camReviewActive ? 'true' : 'false');
       camReviewButton.setAttribute('aria-busy', camReviewLoading ? 'true' : 'false');
-      camReviewButton.title = detail || (camReviewActive
-        ? 'Return to the fast semantic Assembly board'
-        : 'Load and inspect the exact generated Gerber and Excellon files');
+      camReviewButton.title = detail;
+    }
+    if (camReviewStatus) {
+      const state = camReviewLoading ? 'loading' : (camReviewActive ? 'active' : (camReviewError ? 'error' : 'semantic'));
+      camReviewStatus.dataset.state = state;
+      camReviewStatus.textContent = state === 'loading' ? 'Generating Gerbers…'
+        : (state === 'active' ? 'Exact CAM active' : (state === 'error' ? 'CAM failed — click Retry' : 'Fast board'));
+      camReviewStatus.title = detail;
     }
     if (camLayerMenu) {
       camLayerMenu.hidden = !camReviewActive;
@@ -664,6 +676,12 @@
 
   function postCamReviewRequest() {
     if (!frame || !frame.contentWindow) return;
+    try {
+      if (typeof frame.contentWindow.PCBReviewCamMode === 'function') {
+        frame.contentWindow.PCBReviewCamMode(camReviewRequested);
+        return;
+      }
+    } catch (_) {}
     frame.contentWindow.postMessage({
       type: 'eda-pcb-cam-mode',
       enabled: camReviewRequested
@@ -672,6 +690,7 @@
 
   function setCamReviewRequested(enabled, updateUrl) {
     camReviewRequested = Boolean(enabled);
+    camReviewError = '';
     if (!camReviewRequested) camReviewActive = false;
     camReviewLoading = camReviewRequested && !camReviewActive;
     syncCamReviewControl();
@@ -1270,8 +1289,10 @@
     const payload = event.data || {};
     if (payload.type === 'eda-pcb-cam-state') {
       if (payload.state === 'loading') {
+        camReviewError = '';
         camReviewLoading = true;
       } else if (payload.state === 'active') {
+        camReviewError = '';
         camReviewRequested = true;
         camReviewActive = true;
         camReviewLoading = false;
@@ -1280,6 +1301,7 @@
         camReviewActive = false;
         camReviewLoading = false;
       } else if (payload.state === 'error') {
+        camReviewError = payload.detail || 'The exact CAM view could not be loaded.';
         camReviewRequested = false;
         camReviewActive = false;
         camReviewLoading = false;
@@ -1287,7 +1309,7 @@
         url.searchParams.delete('cam');
         replaceUrl(url);
       }
-      syncCamReviewControl(payload.detail || '');
+      syncCamReviewControl();
       return;
     }
     if (payload.type === 'eda-pcb-parts') {

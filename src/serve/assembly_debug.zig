@@ -827,7 +827,7 @@ fn renderPageWithOptions(allocator: std.mem.Allocator, name: []const u8, index: 
         try w.writeAll("<style>");
         try w.writeAll(@embedFile("assets/assembly_debug.css"));
         try w.writeAll("</style>");
-    } else try w.writeAll("<link rel=\"stylesheet\" href=\"/static/assembly_debug.css\">");
+    } else try w.print("<link rel=\"stylesheet\" href=\"/static/assembly_debug.css?v={x}\">", .{std.hash.Wyhash.hash(0, @embedFile("assets/assembly_debug.css"))});
     try w.writeAll("</head><body><header class=\"topbar\">");
     if (opts.meta.standalone)
         try w.writeAll("<span class=\"brand\">Released assembly</span>")
@@ -911,8 +911,9 @@ fn renderPageWithOptions(allocator: std.mem.Allocator, name: []const u8, index: 
         try w.writeAll("<label class=\"model-toggle\" title=\"Load cached component model pictures\">");
         try w.writeAll("<input id=\"load-3d-models\" type=\"checkbox\"> 3D models</label>");
     }
-    try w.writeAll("<button id=\"cam-review\" type=\"button\" aria-pressed=\"false\"");
+    try w.writeAll("<button id=\"cam-review\" type=\"button\" aria-pressed=\"false\" aria-describedby=\"cam-review-status\"");
     try w.writeAll(" title=\"Load and inspect the exact generated Gerber and Excellon files\">CAM Review</button>");
+    try w.writeAll("<span id=\"cam-review-status\" class=\"cam-review-status\" role=\"status\" aria-live=\"polite\" data-state=\"semantic\">Fast board</span>");
     try w.writeAll("<details id=\"cam-layer-menu\" class=\"layer-menu\" hidden><summary>CAM Layers</summary><div class=\"layer-menu-pop\">");
     try w.writeAll("<label><input type=\"checkbox\" data-cam-layer=\"copper\" checked> Face copper</label>");
     // The iframe fills this from its shared physical layer table. Keeping the
@@ -955,7 +956,7 @@ fn renderPageWithOptions(allocator: std.mem.Allocator, name: []const u8, index: 
         try w.writeAll("</script><script id=\"assembly-board-document\" type=\"application/json\">");
         try writeJsonString(w, opts.board_html orelse "");
         try w.writeAll("</script><script>(function(){var f=document.getElementById('pcb-frame'),d=document.getElementById('assembly-board-document');if(f&&d)f.srcdoc=JSON.parse(d.textContent||'\"\"');})();</script>");
-    } else try w.writeAll("<script src=\"/static/assembly_debug.js\"></script>");
+    } else try w.print("<script src=\"/static/assembly_debug.js?v={x}\"></script>", .{std.hash.Wyhash.hash(0, @embedFile("assets/assembly_debug.js"))});
     try w.writeAll("</body></html>");
     return aw.written();
 }
@@ -1272,11 +1273,12 @@ test "page HTML is read-only and carries embed, data, and focus assets" {
     try std.testing.expect(std.mem.indexOf(u8, html, "/pcb-layout/demo?embed=1&amp;review=1&amp;drc=0") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "model_sprites=1") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "assembly-debug-data") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html, "/static/assembly_debug.js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "/static/assembly_debug.js?v=") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"board-side\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"board-rotate-right\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"load-3d-models\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"cam-review\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "id=\"cam-review-status\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"cam-layer-menu\" class=\"layer-menu\" hidden") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "class=\"layer-menu\"") != null);
     try std.testing.expectEqual(@as(usize, 7), std.mem.count(u8, html, "data-cam-layer="));
@@ -1317,6 +1319,30 @@ test "page HTML is read-only and carries embed, data, and focus assets" {
     try std.testing.expect(std.mem.indexOf(u8, js, "populateInnerCopperLayers(payload.innerLayers)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "frame.contentWindow.PCBReviewInnerLayers") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "frame.style.transform") == null);
+}
+
+// spec: Web Server - The Assembly CAM Review control visibly distinguishes fast, loading, exact, and failed states and applies same-document mode changes directly with a message fallback
+test "CAM Review exposes durable state and a direct same-document control seam" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const html = try renderPage(arena.allocator(), "demo", .{
+        .parts = &.{},
+        .bom_groups = &.{},
+        .entities = &.{},
+        .nets = &.{},
+    }, null, false);
+    const shell_js = @embedFile("assets/assembly_debug.js");
+    const board_js = @embedFile("assets/pcb_board.js");
+    const Check = struct { source: []const u8, marker: []const u8 };
+    const checks = [_]Check{
+        .{ .source = html, .marker = "role=\"status\" aria-live=\"polite\"" },
+        .{ .source = shell_js, .marker = "Retry CAM Review" },
+        .{ .source = shell_js, .marker = "Exact CAM active" },
+        .{ .source = shell_js, .marker = "frame.contentWindow.PCBReviewCamMode" },
+        .{ .source = shell_js, .marker = "frame.contentWindow.postMessage" },
+        .{ .source = board_js, .marker = "window.PCBReviewCamMode=camReviewSet" },
+    };
+    for (checks) |check| try std.testing.expect(std.mem.indexOf(u8, check.source, check.marker) != null);
 }
 
 // spec: Web Server - assembly copper pours retain even-odd antipad holes around foreign traces, vias, and pads

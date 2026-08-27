@@ -507,15 +507,28 @@ async function runOneInContext(context, baseUrl, design) {
   }, null, { timeout: 30000 });
   if (network.cam_requests !== 0) throw new Error(`default semantic Assembly requested CAM ${network.cam_requests} time(s)`);
   await page.locator("#cam-review").click();
+  const pendingCamControl = await page.locator("#cam-review").evaluate((button) => ({
+    label: button.textContent,
+    busy: button.getAttribute("aria-busy"),
+    status: document.querySelector("#cam-review-status")?.textContent || "",
+  }));
+  if (pendingCamControl.label !== "Loading CAM…" || pendingCamControl.busy !== "true" || pendingCamControl.status !== "Generating Gerbers…") {
+    throw new Error(`CAM Review click published no immediate loading feedback: ${JSON.stringify(pendingCamControl)}`);
+  }
   await page.waitForFunction(() => {
     const button = document.querySelector("#cam-review");
     return button?.getAttribute("aria-pressed") === "true" || /could not|unavailable/i.test(button?.title || "");
   }, null, { timeout: 240000 });
   const camControl = await page.locator("#cam-review").evaluate((button) => ({
     active: button.getAttribute("aria-pressed") === "true",
+    label: button.textContent,
+    status: document.querySelector("#cam-review-status")?.textContent || "",
     detail: button.title,
   }));
   if (!camControl.active) throw new Error(`CAM Review failed to activate: ${camControl.detail}`);
+  if (camControl.label !== "Exit CAM Review" || camControl.status !== "Exact CAM active") {
+    throw new Error(`CAM Review activation published the wrong visible state: ${JSON.stringify(camControl)}`);
+  }
   if (network.cam_requests !== 1) throw new Error(`CAM Review expected one lazy payload request, saw ${network.cam_requests}`);
   const benchDeadline = Date.now() + 120000;
   let nextProgress = Date.now() + 30000;

@@ -1612,6 +1612,7 @@ test "Assembly board loads exact CAM only on explicit review request" {
     const markers = [_][]const u8{
         "var CAM_REVIEW=false,camReviewRequested=false,camLoadStarted=false",
         "function camReviewSet(enabled)",
+        "window.PCBReviewCamMode=camReviewSet",
         "if(msg.type===\"eda-pcb-cam-mode\")",
         "function loadCamReview()",
         "if(!PHYSICAL_REVIEW||CAM_REVIEW||!camReviewRequested)return",

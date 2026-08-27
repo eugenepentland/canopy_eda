@@ -164,6 +164,10 @@ function camReviewSet(enabled){
  if(!camReviewRequested){CAM_REVIEW=false;reviewPaintDirty=true;dragCacheDrop();drawBoardRect();paintSoon();camReviewPost("semantic");return;}
  if(camReviewUse())return;
  loadCamReview();}
+// Same-document Assembly shells use this direct seam so their primary control
+// does not depend on a postMessage round trip. The listener below remains the
+// compatibility path for older/cross-document shells.
+window.PCBReviewCamMode=camReviewSet;
 function loadCamReview(){
  if(!PHYSICAL_REVIEW||CAM_REVIEW||!camReviewRequested)return;
  if(camPayloadReady()){camReviewUse();return;}
