@@ -138,6 +138,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     var fabrication_layers: std.ArrayList(env_mod.FabricationLayerSpec) = .empty;
     var net_class_specs: std.ArrayList(env_mod.NetClassSpec) = .empty;
     var pll_loop_specs: std.ArrayList(pll_loop.Spec) = .empty;
+    defer pll_loop_specs.deinit(self.allocator);
     var design_rules_spec: env_mod.DesignRulesSpec = .{};
     var pcb_plan_spec: ?env_mod.PcbPlanSpec = null;
     var kicad_pcb_path: ?[]const u8 = null;

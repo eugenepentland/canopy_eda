@@ -526,12 +526,24 @@ fn transimpedance(spec: Spec, c: Corner, s: Complex) Complex {
 
 fn append(context: *Context, spec: Spec, passed: bool, comptime fmt: []const u8, args: anytype) std.mem.Allocator.Error!void {
     const message = try std.fmt.allocPrint(context.allocator, fmt, args);
-    try context.assertions.append(context.allocator, .{ .passed = passed, .message = message, .is_warning = !passed and spec.mode == .advisory });
+    errdefer context.allocator.free(message);
+    try context.assertions.append(context.allocator, .{
+        .passed = passed,
+        .message = message,
+        .is_warning = !passed and spec.mode == .advisory,
+        .message_owned = true,
+    });
 }
 
 fn warning(context: *Context, comptime fmt: []const u8, args: anytype) std.mem.Allocator.Error!void {
     const message = try std.fmt.allocPrint(context.allocator, fmt, args);
-    try context.assertions.append(context.allocator, .{ .passed = false, .message = message, .is_warning = true });
+    errdefer context.allocator.free(message);
+    try context.assertions.append(context.allocator, .{
+        .passed = false,
+        .message = message,
+        .is_warning = true,
+        .message_owned = true,
+    });
 }
 
 fn eq(a: []const u8, b: []const u8) bool {

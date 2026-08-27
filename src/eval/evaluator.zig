@@ -298,6 +298,9 @@ pub const Evaluator = struct {
     }
 
     pub fn deinit(self: *Evaluator) void {
+        for (self.assertions.items) |assertion| {
+            if (assertion.message_owned) self.allocator.free(assertion.message);
+        }
         self.assertions.deinit(self.allocator);
         self.warnings.deinit(self.allocator);
         self.module_stack.deinit(self.allocator);
@@ -888,6 +891,21 @@ test "eval assert-range fail" {
 
     // Clean up allocated message
     alloc.free(eval.assertions.items[0].message);
+}
+
+// spec: pll-loop - dynamically formatted validation messages are released with their evaluator
+test "evaluator releases owned assertion messages" {
+    const alloc = std.testing.allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+
+    const message = try std.fmt.allocPrint(alloc, "owned result {d}", .{42});
+    try eval.assertions.append(alloc, .{
+        .passed = true,
+        .message = message,
+        .message_owned = true,
+    });
+    try std.testing.expectEqualStrings("owned result 42", eval.assertions.items[0].message);
 }
 
 // ── Passives-prelude fixtures ─────────────────────────────────────────
