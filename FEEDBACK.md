@@ -104,3 +104,8 @@ log is not a substitute for reporting an active blocker to the user.
 - **friction:** `scripts/pcb_gpu_check/run.js` has drifted from the shipped renderer: it still requires fence-specific ordering and polygon-pad GPU ownership that current source deliberately removed, producing more than 22,000 false failures when used to validate the new CAM pipelines. The Assembly browser benchmark also defaulted to a nested `projects/designs` path absent from feature worktrees, so a direct run reported a null workload fingerprint until given the shared checkout explicitly.
 - **idea:** Replace the fake-GPU string harness with a focused WebGPU validation page that checks device errors and transparent Canvas fallback state, and make `pcb_browser_perf/run.js` resolve the shared designs checkout the same way `scripts/perf_gate.sh` does. This would avoid the stale failure flood and two diagnostic reruns on future renderer work.
 - **status:** open
+
+## 2026-08-27 · codex · HTTP(S) component datasheets
+- **friction:** This independently repeated the missing-shard failure recorded under “fabrication release full-suite integration”: four focused URL-datasheet tests and `test-compile` were green, but the first 38-second exact-candidate run failed only because the new `serve/api.zig` and `serve/datasheet_ref.zig` tests lacked `test_root.zig` imports and `test_shards.zig` claims.
+- **idea:** Make `test-compile` or the ordinary diff-scoped test gate run `test_root.test.shard manifest runs every named test exactly once` and `test_root.test.the shard import bridge lists every module whose tests run` whenever test-bearing Zig files change; two same-day release retries now show this is recurring rather than incidental.
+- **status:** open
