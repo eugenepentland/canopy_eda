@@ -3125,11 +3125,13 @@ Public functions: compute, computeMaskShared, computeMasks, initMargin, planeCon
 - a round NPTH on an outer face punches a round antipad instead of its bounding square
 - a foreign trace that splits a plane leaves its same-net pads in separate components
 - a track crossing a fill is assigned to every fabricated component it traverses even when both endpoints lie outside
+- an opposite-winding pinch repair clears every raster cell intersecting its removed wedge, so connectivity cannot credit copper absent from the final contour
+- a repair-cleared articulation cell relabels its surviving sides as different fill components while previously dropped cells stay dropped
 - the fill respects a non-rectangular board outline
 - an isolated same-net pad reports no pour component
 - the vectorised row kernel seeds every lane with the value the scalar outline walk gives
-- a connectivity fill reuses one edge-margin field and skips tracing, labelling the same components as a rendering fill
-- a batch of sampling fills shares one edge field and omits contours
+- a connectivity fill reuses one edge-margin field, applies topology-repair clears, and omits returned contours while labelling exactly what a rendering fill labels
+- a batch of sampling fills shares one edge field, applies topology-repair clears, and omits returned contours
 - a board's fills seed from one shared edge-margin field and each still traces exactly the contours an unshared fill traces
 - carryingLayers resolves declared planes and the implicit ground model
 - gridCount collapses a non-finite extent to zero cells instead of an unchecked narrowing
@@ -3366,7 +3368,7 @@ package, regulator-loop, or full-wave solver.
 - a capacitor and any actual load ground pad earn computed-via-plane proof only when authored surface copper reaches same-net vias in one exact inner-plane fill component
 - characterized capacitor DC-bias curves interpolate at the resolved rail voltage and combine with tolerance and temperature derating
 - completeness-waiver: empty inputs (a design with no PDN intents returns an empty rail list; an intent with no bound capacitors retains an explicit diagnostic rail rather than fabricating a branch)
-- completeness-waiver: large inputs (only PDN and ground fill masks are built; membership-only fills omit contours and share the caller's edge field, while each capacitor corridor is sampled at the fill half-pitch)
+- completeness-waiver: large inputs (only PDN and ground fill masks are built; membership-only fills omit returned contours after applying topology repairs and share the caller's edge field, while each capacitor corridor is sampled at the fill half-pitch)
 - completeness-waiver: unauthorized access (pure analysis of an already-authorized in-memory placement and saved copper; it performs no request or identity work)
 - completeness-waiver: i/o failure (the analyzer performs no I/O; optional SPICE and browser serialization are handled by callers)
 - completeness-waiver: concurrent access (all masks, paths, sweeps, and output belong to the request allocator; there is no mutable global state)

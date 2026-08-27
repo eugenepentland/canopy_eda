@@ -48,7 +48,7 @@ pub fn assemble(
     // board came from (named ?layout=, else the ★ starred default), plus whether
     // that layout is a saved snapshot (vs the auto cache / grid).
     const shown = pcb_layout_page.shownLayoutCopper(arena, project_dir, name, opts, placement);
-    const copper = export_gerber.Copper{ .tracks = shown.tracks, .vias = shown.vias, .zones = shown.zones };
+    const copper = export_gerber.Copper{ .tracks = shown.tracks, .arcs = shown.arcs, .rf_paths = shown.rf_paths, .vias = shown.vias, .zones = shown.zones };
 
     // ONE connectivity pass feeds both the ladder's routing rung and the fab
     // gate's airwire tally: it is a pure function of `(placement, copper)`, and

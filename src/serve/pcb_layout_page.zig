@@ -4487,7 +4487,7 @@ pub fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
     const w = &aw.writer;
     if (queryFlag(req, "pours_only")) {
-        const live_copper: pour.Copper = .{ .tracks = rr.tracks, .vias = rr.vias, .rf_paths = rr.rf_port_outcomes };
+        const live_copper: pour.Copper = .{ .tracks = rr.tracks, .arcs = rr.arcs, .vias = rr.vias, .rf_paths = rr.rf_port_outcomes };
         // Share one board-edge raster across every returned fill family.
         const base_edge = pour.sharedEdgeField(req.arena, placement) catch null;
         try w.writeAll("{\"pours\":");
@@ -4512,7 +4512,7 @@ pub fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
     try w.print("],\"n\":{d}", .{violations.len});
     if (tally) |t| try w.print(",\"routed\":{d},\"total\":{d},\"unique_routed\":{d},\"unique_total\":{d}", .{ t.routed, t.total, t.unique_routed, t.unique_total });
     if (queryFlag(req, "pours")) {
-        const live_copper: pour.Copper = .{ .tracks = rr.tracks, .vias = rr.vias, .rf_paths = rr.rf_port_outcomes };
+        const live_copper: pour.Copper = .{ .tracks = rr.tracks, .arcs = rr.arcs, .vias = rr.vias, .rf_paths = rr.rf_port_outcomes };
         const base_edge = pour.sharedEdgeField(req.arena, placement) catch null;
         try w.writeAll(",\"pours\":");
         try pour_json.writePours(w, req.arena, placement, live_copper, user_zones, base_edge);
@@ -9118,10 +9118,49 @@ fn buildPcbFabText(
         .silk_keepouts = silkKeepoutsFrom(alloc, saved_zones),
     };
     const mark = fab_identity.build(alloc, placement, copper, texts, export_fab.frameFor(placement), base_edge) catch |err| switch (err) {
-        error.NoSilkscreenSpace => return null,
+        error.NoSilkscreenSpace, error.InvalidCopperRegion => return null,
         else => return err,
     };
     return mark.text;
+}
+
+// An invalid copper region must suppress only the optional fabrication mark:
+// the derived response still needs to reach its already-computed pour-invalid
+// DRC payload so the editor can explain why fabrication is blocked.
+test "derived PCB data recovers from an invalid copper region" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    const bow_tie = [_][2]f64{ .{ -1, -1 }, .{ 1, 1 }, .{ -1, 1 }, .{ 1, -1 } };
+    const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 2, .h = 2, .shape = "custom", .poly = &bow_tie }};
+    var parts = [_]optimizer.Part{.{
+        .ref_des = "U1",
+        .kind = .hub,
+        .hw = 2,
+        .hh = 2,
+        .pads = &pads,
+        .fallback = false,
+        .x = 10,
+        .y = 5,
+    }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 20,
+        .maxy = 10,
+        .generated = false,
+        .board_rect = .{ .minx = 0, .miny = 0, .w = 20, .h = 10 },
+    };
+
+    try std.testing.expect((try buildPcbFabText(alloc, placement, null, null, &.{}, null)) == null);
 }
 
 fn buildPayloadFabText(
@@ -9194,7 +9233,7 @@ pub fn writePcbDerivedData(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optim
     // editor runs and the only reader is the track/via inspector.
     if (opts.pdn_only) return power_integrity_json.writeAcResponse(w, allocators, payloadPowerInputs(alloc, p, rv.routed, opts), opts.rev);
     const routed = rv.routed;
-    const copper: pour.Copper = if (routed) |r| .{ .tracks = r.tracks, .vias = r.vias, .rf_paths = r.rf_port_outcomes } else .{};
+    const copper: pour.Copper = if (routed) |r| .{ .tracks = r.tracks, .arcs = r.arcs, .vias = r.vias, .rf_paths = r.rf_port_outcomes } else .{};
     const zones = userZonesFrom(alloc, p.rules, shownZones(opts.saved_routes));
     const fab_text = try buildPcbFabText(alloc, p, routed, opts.saved_routes, opts.texts, opts.base_edge);
 
@@ -9262,7 +9301,7 @@ fn writePcbData(
     blob_opts.fab_text = fab_text;
 
     try w.writeAll("<script>const PCB=");
-    const pour_copper: pour.Copper = if (routed) |r| .{ .tracks = r.tracks, .vias = r.vias, .rf_paths = r.rf_port_outcomes } else .{};
+    const pour_copper: pour.Copper = if (routed) |r| .{ .tracks = r.tracks, .arcs = r.arcs, .vias = r.vias, .rf_paths = r.rf_port_outcomes } else .{};
     try writeBlobHead(w, alloc, v, clearance, p, pour_copper, blob_opts);
     // Server-computed objective breakdown of the layout on screen — the baseline
     // the live score deltas against. Same shape the /api/pcb-score endpoint returns.
@@ -16821,15 +16860,18 @@ test "shownLayoutCopper carries pour zones as connecting copper" {
     defer tmp.cleanup();
     const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     try tmp.dir.createDirPath(std.testing.io, "src");
-    // One saved layout whose copper is a filled B.Cu pour on RAIL, no tracks.
+    // One saved layout with a filled B.Cu rail, a native arc, and exact RF
+    // swept-path evidence — every physical form must reach readiness intact.
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/z.layouts.json", .data =
         \\{"default":"layout","layouts":[{"name":"layout","default":true,"parts":[{"ref":"U1","x":1,"y":1,"rot":0}],
-        \\"routes":{"tracks":[],"vias":[],"zones":[{"net":"RAIL","layer":"B.Cu","filled":true,"keepout":false,
-        \\"priority":1,"poly":[[0,0],[10,0],[10,10],[0,10]]}]}}]}
+        \\"routes":{"tracks":[{"x1":1,"y1":1,"x2":5,"y2":1,"xm":3,"ym":3,"l":0,"w":0.2,"net":"RAIL"}],"vias":[],
+        \\"rf_paths":[{"net":"RAIL","l":0,"samples":[[1,1,0.1],[5,1,0.3]]}],
+        \\"zones":[{"net":"RAIL","layer":"B.Cu","filled":true,"keepout":false,"priority":1,"poly":[[0,0],[10,0],[10,10],[0,10]]}]}}]}
     });
 
     const rules = optimizer.BoardRules{ .plane_nets = &.{}, .copper_layers = 2 };
-    var placement = addTracksFixture(&.{}, &.{}, &.{});
+    const nets = [_]export_kicad.FlatNet{.{ .name = "RAIL", .pins = &.{} }};
+    var placement = addTracksFixture(&.{}, &nets, &.{});
     placement.rules = rules;
     const shown = shownLayoutCopper(alloc, project, "z", .{}, placement);
     try std.testing.expect(shown.from_saved);
@@ -16837,6 +16879,9 @@ test "shownLayoutCopper carries pour zones as connecting copper" {
     try std.testing.expectEqual(@as(usize, 1), shown.zones.len);
     try std.testing.expectEqualStrings("RAIL", shown.zones[0].net);
     try std.testing.expectEqual(@as(u8, 1), shown.zones[0].layer); // B.Cu
+    try std.testing.expectEqual(@as(usize, 1), shown.arcs.len);
+    try std.testing.expectEqual(@as(usize, 1), shown.rf_paths.len);
+    try std.testing.expectEqual(@as(usize, 2), shown.rf_paths[0].physical.samples.len);
 }
 
 /// A 2-layer, plane-free board carrying nets SIG (net 0) and RF (net 1) — the
@@ -17165,6 +17210,8 @@ test "add_tracks rejects an unknown net, unknown layer, or single-point polyline
 /// verdicts describe the SAME board the facts describe.
 pub const ShownCopper = struct {
     tracks: []const router.Track = &.{},
+    arcs: []const router.Arc = &.{},
+    rf_paths: []const rf_port_report.Outcome = &.{},
     vias: []const router.Via = &.{},
     /// True when a saved snapshot supplied the shown placement (named ?layout=
     /// or the ★ default); false when it fell back to the auto cache / grid
@@ -17198,7 +17245,9 @@ pub fn shownLayoutCopper(
         const current = routesWithPerimeter(alloc, placement, sr) orelse sr;
         if (restoreRoutes(alloc, current, placement.nets)) |r| {
             out.tracks = r.tracks;
+            out.arcs = r.arcs;
             out.vias = r.vias;
+            out.rf_paths = r.rf_port_outcomes;
         }
         // Pour zones are CONNECTING COPPER, not decoration: a rail poured
         // instead of traced (barracuda's V_12V/V_5VA/V_6VA/V_3V3A/V_3V3_LMX)

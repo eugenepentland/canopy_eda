@@ -201,8 +201,9 @@ pub fn coverageOf(
     @memset(frac, 0);
 
     // Both faces share the same board lattice. Build its edge-distance field
-    // once and skip contour tracing: coverage only asks whether each thermal
-    // cell centre is inside copper.
+    // once; sampling fills still trace enough to clear any topology-repair
+    // wedge, then omit contours because coverage only asks whether each
+    // thermal cell centre is inside copper.
     var specs: [2]pour.LayerSpec = undefined;
     var n: usize = 0;
     for ([_]optimizer.Side{ .top, .bottom }) |side| {

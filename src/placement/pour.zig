@@ -553,10 +553,10 @@ pub const EdgeField = struct {
     }
 };
 
-/// What a caller wants out of a fill. `planeConnect` reads only `labels` (via
-/// `componentAt` / `padComponent`), so tracing its contours is pure waste — 8 ms
-/// per DRC on barracuda. Rendering callers (Gerber, the PNG, the viewer's pour
-/// JSON) keep the traced boundary, which is the default.
+/// Shared board-edge field supplied by callers that pour several surfaces.
+/// Every fill traces its final boundary so conservative topology repairs can
+/// clear affected raster cells; sampling-only callers omit that traced shape
+/// from the returned Fill after its labels have been corrected.
 const FillOpts = struct {
     base: ?EdgeField = null,
     contours: bool = true,
@@ -599,8 +599,8 @@ pub fn computeShared(
 }
 
 /// Membership-only computed fill seeded from a caller-shared edge field. PDN,
-/// connectivity, and other analysis consumers retain labels but never pay to
-/// trace render contours a second time.
+/// connectivity, and other analysis consumers retain conservatively corrected
+/// labels but omit the traced render contours from the returned Fill.
 pub fn computeMaskShared(
     arena: std.mem.Allocator,
     placement: optimizer.Placement,
@@ -623,8 +623,8 @@ pub fn compute(
 }
 
 /// Fills for several specs over the same board when the caller only samples
-/// membership and never paints their boundaries. The board-edge field is built
-/// once and contours are omitted from every result.
+/// membership. The board-edge field is built once; tracing still corrects any
+/// topology-repair cells, then the public contours are omitted.
 pub fn computeMasks(
     arena: std.mem.Allocator,
     placement: optimizer.Placement,
@@ -706,22 +706,19 @@ fn computeFill(
     if (spec.keep_unseeded and !anyTrue(kept)) @memset(kept, true);
 
     const n_comp = try remapKept(arena, grid, kept);
-    const traced: Traced = if (opts.contours)
-        traceComponents(arena, grid, n_comp, @max(0, rules.design.pour.corner_radius)) catch |err| switch (err) {
-            // A broken boundary must never reach a G36 Gerber region. Collapse
-            // the whole fill, including its membership labels, so electrical
-            // checks cannot credit copper that fabrication will not receive.
-            error.InvalidBoundary => return invalidFill(r, pitch, coarsened),
-            error.OutOfMemory => return error.OutOfMemory,
-        }
-    else
-        .{ .contours = &.{}, .holes = &.{} };
+    const traced = traceComponents(arena, grid, n_comp, @max(0, rules.design.pour.corner_radius)) catch |err| switch (err) {
+        // A broken boundary must never reach a G36 Gerber region. Collapse
+        // the whole fill, including its membership labels, so electrical
+        // checks cannot credit copper that fabrication will not receive.
+        error.InvalidBoundary => return invalidFill(r, pitch, coarsened),
+        error.OutOfMemory => return error.OutOfMemory,
+    };
     return .{
         .frame = .{ .minx = r.minx, .miny = r.miny, .pitch = pitch, .nx = nx, .ny = ny },
         .labels = labels,
-        .n_comp = n_comp,
-        .contours = traced.contours,
-        .holes = traced.holes,
+        .n_comp = traced.n_comp,
+        .contours = if (opts.contours) traced.contours else &.{},
+        .holes = if (opts.contours) traced.holes else &.{},
         .coarsened = coarsened,
     };
 }
@@ -1789,8 +1786,17 @@ const TailMap = std.AutoHashMapUnmanaged(u32, std.ArrayList(usize));
 const TracedComponent = struct { outer: Contour, holes: []const Contour };
 
 /// The kept components' contours and their per-component holes, PARALLEL arrays
-/// (`contours[i]`/`holes[i]` describe the same component) built for `Fill`.
-const Traced = struct { contours: []const Contour, holes: []const []const Contour };
+/// (`contours[i]`/`holes[i]` describe the same final solid) built for `Fill`.
+const Traced = struct {
+    contours: []const Contour,
+    holes: []const []const Contour,
+    n_comp: usize,
+};
+
+/// One triangular sliver deliberately removed when an opposite-winding pinch
+/// is opened. Membership is raster-based, so every labelled cell whose area
+/// intersects this sliver is cleared conservatively after tracing.
+const RepairClear = [3][2]f64;
 
 /// Contour tracing can fail geometrically even when every allocation succeeds.
 /// The public fill API handles this internally with an empty `integrity_ok=false`
@@ -1804,14 +1810,24 @@ const TraceError = std.mem.Allocator.Error || error{InvalidBoundary};
 fn traceComponents(arena: std.mem.Allocator, g: Grid, n_comp: usize, corner_radius: f64) TraceError!Traced {
     var contours: std.ArrayList(Contour) = .empty;
     var holes: std.ArrayList([]const Contour) = .empty;
+    var repair_clears: std.ArrayList(RepairClear) = .empty;
     var c: usize = 0;
     while (c < n_comp) : (c += 1) {
-        for (try traceOuters(arena, g, @intCast(c), corner_radius)) |tc| {
+        for (try traceOuters(arena, g, @intCast(c), corner_radius, &repair_clears)) |tc| {
             try contours.append(arena, tc.outer);
             try holes.append(arena, tc.holes);
         }
     }
-    return .{ .contours = try contours.toOwnedSlice(arena), .holes = try holes.toOwnedSlice(arena) };
+    clearRepairLabels(g, repair_clears.items);
+    const repaired_n_comp = if (repair_clears.items.len > 0)
+        try relabelKeptAfterRepair(arena, g)
+    else
+        n_comp;
+    return .{
+        .contours = try contours.toOwnedSlice(arena),
+        .holes = try holes.toOwnedSlice(arena),
+        .n_comp = repaired_n_comp,
+    };
 }
 
 /// Trace component `comp`'s boundary loops (the lattice edges between a `comp`
@@ -1820,15 +1836,21 @@ fn traceComponents(arena: std.mem.Allocator, g: Grid, n_comp: usize, corner_radi
 /// crossing per edge). A raster component may resolve into several simple
 /// outer rings when its iso-line only touches at a point; each emitted outer is
 /// paired with the directly contained holes that belong to it.
-fn traceOuters(arena: std.mem.Allocator, g: Grid, comp: i32, corner_radius: f64) TraceError![]const TracedComponent {
+fn traceOuters(
+    arena: std.mem.Allocator,
+    g: Grid,
+    comp: i32,
+    corner_radius: f64,
+    repair_clears: *std.ArrayList(RepairClear),
+) TraceError![]const TracedComponent {
     var edges: std.ArrayList(Edge) = .empty;
     try collectBoundaryEdges(arena, &edges, g, comp);
     if (edges.items.len == 0) return &.{};
 
     var by_tail: TailMap = .empty;
     try indexTails(arena, &by_tail, edges.items);
-    const loops = try realiseLoops(arena, g, edges.items, &by_tail);
-    return classifyLoops(arena, loops, g.pitch, corner_radius);
+    const loops = try realiseLoops(arena, g, edges.items, &by_tail, repair_clears);
+    return classifyLoops(arena, loops, g.pitch, corner_radius, repair_clears);
 }
 
 /// Emit every boundary edge of component `comp` (a `comp` cell adjacent to a
@@ -1858,12 +1880,18 @@ fn indexTails(arena: std.mem.Allocator, by_tail: *TailMap, edges: []const Edge) 
 /// Stitch every still-unused boundary edge into a loop and realise it as an
 /// interpolated world polygon. The loops partition the component's boundary into
 /// one outer contour and its interior holes.
-fn realiseLoops(arena: std.mem.Allocator, g: Grid, edges: []Edge, by_tail: *TailMap) TraceError![]const Contour {
+fn realiseLoops(
+    arena: std.mem.Allocator,
+    g: Grid,
+    edges: []Edge,
+    by_tail: *TailMap,
+    repair_clears: *std.ArrayList(RepairClear),
+) TraceError![]const Contour {
     var loops: std.ArrayList(Contour) = .empty;
     for (edges, 0..) |_, idx| {
         if (edges[idx].used) continue;
         const loop = try stitchLoop(arena, edges, by_tail, idx);
-        try resolvePinchedWalk(arena, try loopToWorld(arena, g, edges, loop), g.pitch, &loops);
+        try resolvePinchedWalk(arena, try loopToWorld(arena, g, edges, loop), g.pitch, &loops, repair_clears);
     }
     return loops.toOwnedSlice(arena);
 }
@@ -1903,7 +1931,13 @@ fn otherCycle(arena: std.mem.Allocator, poly: Contour, first: usize, again: usiz
 /// copy of their shared point opens the zero-width pinch as one simple,
 /// conservatively smaller notched ring. Further pinches are handled
 /// iteratively, so every returned walk has unique vertices.
-fn resolvePinchedWalk(arena: std.mem.Allocator, raw: Contour, pitch: f64, out: *std.ArrayList(Contour)) TraceError!void {
+fn resolvePinchedWalk(
+    arena: std.mem.Allocator,
+    raw: Contour,
+    pitch: f64,
+    out: *std.ArrayList(Contour),
+    repair_clears: *std.ArrayList(RepairClear),
+) TraceError!void {
     var pending: std.ArrayList(Contour) = .empty;
     try pending.append(arena, try cleanContour(arena, raw));
     while (pending.pop()) |poly| {
@@ -1938,14 +1972,91 @@ fn resolvePinchedWalk(arena: std.mem.Allocator, raw: Contour, pitch: f64, out: *
         const max_removed_area2 = 2 * pitch * pitch + 1e-9;
         const first_ok = first_area <= original_area + 1e-9 and original_area - first_area <= max_removed_area2;
         const again_ok = again_area <= original_area + 1e-9 and original_area - again_area <= max_removed_area2;
-        const chosen = if (first_ok and (!again_ok or first_area >= again_area))
-            skip_first
+        const Choice = struct { poly: Contour, skipped: usize, area2: f64 };
+        const chosen: Choice = if (first_ok and (!again_ok or first_area >= again_area))
+            .{ .poly = skip_first, .skipped = pair[0], .area2 = first_area }
         else if (again_ok)
-            skip_again
+            .{ .poly = skip_again, .skipped = pair[1], .area2 = again_area }
         else
             return error.InvalidBoundary;
-        try pending.append(arena, chosen);
+        if (original_area - chosen.area2 > contour_eps) {
+            const previous = if (chosen.skipped == 0) poly.len - 1 else chosen.skipped - 1;
+            try repair_clears.append(arena, .{
+                poly[previous],
+                poly[chosen.skipped],
+                poly[(chosen.skipped + 1) % poly.len],
+            });
+        }
+        try pending.append(arena, chosen.poly);
     }
+}
+
+/// Clear every labelled raster cell with positive-area overlap against a
+/// deliberately removed repair triangle. Clearing the whole cell is the safe
+/// direction: it may under-credit at most the local raster pitch, but can never
+/// claim a wedge that the final Gerber contour no longer contains.
+fn clearRepairLabels(g: Grid, repairs: []const RepairClear) void {
+    for (repairs) |repair| {
+        const bounds = polyBounds(&repair);
+        const lo = cellRange(g, bounds[0], bounds[1]);
+        const hi = cellRange(g, bounds[2], bounds[3]);
+        var j = lo[1];
+        while (j <= hi[1] and j < g.ny) : (j += 1) {
+            var i = lo[0];
+            while (i <= hi[0] and i < g.nx) : (i += 1) {
+                const idx = j * g.nx + i;
+                if (g.labels[idx] < 0) continue;
+                const x0 = g.minx + @as(f64, @floatFromInt(i)) * g.pitch;
+                const y0 = g.miny + @as(f64, @floatFromInt(j)) * g.pitch;
+                if (repairIntersectsCell(repair, x0, y0, x0 + g.pitch, y0 + g.pitch)) g.labels[idx] = -1;
+            }
+        }
+    }
+}
+
+/// Rebuild component ids after a conservative repair clear. Only cells that
+/// were already in a kept component participate; blocked cells and components
+/// dropped by the seed/unseeded policy remain blocked. This prevents one old
+/// id from electrically joining islands separated by a cleared articulation
+/// cell while keeping componentAt a constant-time grid lookup.
+fn relabelKeptAfterRepair(arena: std.mem.Allocator, g: Grid) std.mem.Allocator.Error!usize {
+    for (g.labels) |*label| label.* = if (label.* >= 0) unlabeled else blocked_marker;
+    const n_comp = try labelComponents(arena, g);
+    for (g.labels) |*label| if (label.* < 0) {
+        label.* = -1;
+    };
+    return n_comp;
+}
+
+/// Positive-area convex triangle/axis-aligned-cell intersection by separating
+/// axes. Boundary-only contact does not clear the neighbouring cell.
+fn repairIntersectsCell(repair: RepairClear, x0: f64, y0: f64, x1: f64, y1: f64) bool {
+    if (@abs(outline.signedArea2(&repair)) <= contour_eps) return false;
+    const axes = [5][2]f64{
+        .{ 1, 0 },
+        .{ 0, 1 },
+        .{ repair[0][1] - repair[1][1], repair[1][0] - repair[0][0] },
+        .{ repair[1][1] - repair[2][1], repair[2][0] - repair[1][0] },
+        .{ repair[2][1] - repair[0][1], repair[0][0] - repair[2][0] },
+    };
+    const centre = [2]f64{ (x0 + x1) / 2, (y0 + y1) / 2 };
+    const half = [2]f64{ (x1 - x0) / 2, (y1 - y0) / 2 };
+    for (axes) |axis| {
+        const axis_len = std.math.hypot(axis[0], axis[1]);
+        if (!(axis_len > contour_eps)) continue;
+        var tri_min = repair[0][0] * axis[0] + repair[0][1] * axis[1];
+        var tri_max = tri_min;
+        for (repair[1..]) |point| {
+            const projection = point[0] * axis[0] + point[1] * axis[1];
+            tri_min = @min(tri_min, projection);
+            tri_max = @max(tri_max, projection);
+        }
+        const cell_mid = centre[0] * axis[0] + centre[1] * axis[1];
+        const cell_radius = half[0] * @abs(axis[0]) + half[1] * @abs(axis[1]);
+        const overlap = @min(tri_max, cell_mid + cell_radius) - @max(tri_min, cell_mid - cell_radius);
+        if (overlap <= contour_eps * axis_len) return false;
+    }
+    return true;
 }
 
 const LoopInfo = struct {
@@ -1985,8 +2096,14 @@ fn interiorSample(poly: Contour, pitch: f64) [2]f64 {
 /// largest (outer) cycle and geometric containment. This supports several dark
 /// outers for one label component and attaches each opposite-winding hole to
 /// the smallest outer that contains it.
-fn classifyLoops(arena: std.mem.Allocator, loops: []const Contour, pitch: f64, corner_radius: f64) TraceError![]const TracedComponent {
-    return classifyLoopsAtTolerance(arena, loops, pitch, corner_radius, dp_tol);
+fn classifyLoops(
+    arena: std.mem.Allocator,
+    loops: []const Contour,
+    pitch: f64,
+    corner_radius: f64,
+    repair_clears: *std.ArrayList(RepairClear),
+) TraceError![]const TracedComponent {
+    return classifyLoopsAtTolerance(arena, loops, pitch, corner_radius, dp_tol, repair_clears);
 }
 
 fn classifyLoopsAtTolerance(
@@ -1995,6 +2112,7 @@ fn classifyLoopsAtTolerance(
     pitch: f64,
     corner_radius: f64,
     simplify_tolerance: f64,
+    repair_clears: *std.ArrayList(RepairClear),
 ) TraceError![]const TracedComponent {
     var info: std.ArrayList(LoopInfo) = .empty;
     for (loops) |poly| {
@@ -2042,16 +2160,16 @@ fn classifyLoopsAtTolerance(
     // unless it is the raster's other representation of the same topology: a
     // clearance hole tangent to its outer. Open that zero-width pinch as a
     // conservative notch; every other sharp defect remains fail-closed.
-    if (corner_radius > 0) return classifyLoopsAtTolerance(arena, loops, pitch, 0, simplify_tolerance);
+    if (corner_radius > 0) return classifyLoopsAtTolerance(arena, loops, pitch, 0, simplify_tolerance, repair_clears);
     // Douglas-Peucker can leave every ring individually simple while moving an
     // outer and a nearby hole through one another. Retry the whole component
     // with progressively less loss, so the first topology-safe compact form is
     // retained; exact raw geometry is the final fallback before tangent repair.
     if (simplify_tolerance > 0) {
         const next_tolerance = if (simplify_tolerance > 0.0005) simplify_tolerance / 2 else 0;
-        return classifyLoopsAtTolerance(arena, loops, pitch, 0, next_tolerance);
+        return classifyLoopsAtTolerance(arena, loops, pitch, 0, next_tolerance, repair_clears);
     }
-    const repaired = try repairTangentHoles(arena, result, pitch);
+    const repaired = try repairTangentHoles(arena, result, pitch, repair_clears);
     if (try tracedComponentsValid(arena, repaired)) return repaired;
     return error.InvalidBoundary;
 }
@@ -2431,7 +2549,12 @@ fn siblingContactHasArea(a: [2]f64, b: [2]f64, c: [2]f64, d: [2]f64) bool {
 /// notch. This removes, never adds, at most one raster-pitch square of copper
 /// through `resolvePinchedWalk`; proper crossings, collinear overlap, or a
 /// second non-local outer/hole crossing remain irreparable and fail closed.
-fn repairTangentHoles(arena: std.mem.Allocator, components: []const TracedComponent, pitch: f64) TraceError![]const TracedComponent {
+fn repairTangentHoles(
+    arena: std.mem.Allocator,
+    components: []const TracedComponent,
+    pitch: f64,
+    repair_clears: *std.ArrayList(RepairClear),
+) TraceError![]const TracedComponent {
     var repaired: std.ArrayList(TracedComponent) = .empty;
     for (components) |component| {
         var outer = component.outer;
@@ -2441,7 +2564,7 @@ fn repairTangentHoles(arena: std.mem.Allocator, components: []const TracedCompon
                 try holes.append(arena, hole);
                 continue;
             };
-            outer = try openTangentHole(arena, outer, hole, contact, pitch);
+            outer = try openTangentHole(arena, outer, hole, contact, pitch, repair_clears);
         }
         try repaired.append(arena, .{ .outer = outer, .holes = try holes.toOwnedSlice(arena) });
     }
@@ -2514,7 +2637,14 @@ fn ringWithContact(arena: std.mem.Allocator, ring: Contour, edge: usize, point: 
     return .{ .poly = inserted, .contact = edge + 1 };
 }
 
-fn openTangentHole(arena: std.mem.Allocator, outer: Contour, hole: Contour, contact: RingContact, pitch: f64) TraceError!Contour {
+fn openTangentHole(
+    arena: std.mem.Allocator,
+    outer: Contour,
+    hole: Contour,
+    contact: RingContact,
+    pitch: f64,
+    repair_clears: *std.ArrayList(RepairClear),
+) TraceError!Contour {
     const a = try ringWithContact(arena, outer, contact.outer_edge, contact.point);
     const b = try ringWithContact(arena, hole, contact.hole_edge, contact.point);
     const walk = try arena.alloc([2]f64, a.poly.len + b.poly.len);
@@ -2522,7 +2652,7 @@ fn openTangentHole(arena: std.mem.Allocator, outer: Contour, hole: Contour, cont
     for (0..b.poly.len) |i| walk[a.poly.len + i] = b.poly[(b.contact + i) % b.poly.len];
 
     var resolved: std.ArrayList(Contour) = .empty;
-    try resolvePinchedWalk(arena, walk, pitch, &resolved);
+    try resolvePinchedWalk(arena, walk, pitch, &resolved, repair_clears);
     if (resolved.items.len != 1) return error.InvalidBoundary;
     return finalizeContour(arena, resolved.items[0], 0);
 }
@@ -2692,8 +2822,9 @@ pub fn planeConnect(
     const fills = try arena.alloc(Fill, layers.len);
     // Every carrying layer rasters the SAME board on the SAME lattice, so the
     // outline walk that seeds each cell's edge margin is done once here and
-    // copied per layer; and connectivity reads only `labels`, so no layer needs
-    // its boundary traced. Together those were 24 of the 53 ms this call cost.
+    // copied per layer. Connectivity traces the final boundary just long
+    // enough to clear repaired-away copper, then omits it from the returned
+    // sampling fill.
     // `q.base` is the caller's shared field — the net-open sweep calls this per
     // NET, so without it the outline walk repeats for every net on the board.
     const base_eff = if (q.base) |b| b else try edgeField(arena, placement);
@@ -2762,7 +2893,7 @@ fn assignCustomPad(fill: Fill, q: PadQuery, layer_offset: usize, uf: []usize, fi
                 f.miny + (@as(f64, @floatFromInt(j)) + 0.5) * f.pitch,
             };
             if (pad_shape.pointDist(q.shape.x0, q.shape.y0, q.shape.x1, q.shape.y1, q.shape.poly, point[0], point[1], std.math.inf(f64)) != 0) continue;
-            joinPadComponent(fill.labels[j * f.nx + i], layer_offset, uf, first);
+            joinPadComponent(fill.componentAt(point[0], point[1]), layer_offset, uf, first);
         }
     }
 }
@@ -2955,8 +3086,10 @@ test "contour topology leaves a diagonal saddle as one simple open notch" {
     try collectBoundaryEdges(arena, &edges, g, 0);
     var by_tail: TailMap = .empty;
     try indexTails(arena, &by_tail, edges.items);
-    const loops = try realiseLoops(arena, g, edges.items, &by_tail);
+    var repair_clears: std.ArrayList(RepairClear) = .empty;
+    const loops = try realiseLoops(arena, g, edges.items, &by_tail, &repair_clears);
     try testing.expectEqual(@as(usize, 1), loops.len);
+    try testing.expectEqual(@as(usize, 0), repair_clears.items.len);
     for (loops) |loop| try testing.expect(try validClosedContour(arena, loop));
 }
 
@@ -3017,9 +3150,11 @@ test "contour topology opens a separately traced tangent hole" {
     // the repeated-vertex fixture below.
     const hole = [_][2]f64{ .{ 0, 2 }, .{ 1, 3 }, .{ 2, 2 }, .{ 1, 1 } };
     const component = TracedComponent{ .outer = &outer, .holes = &.{&hole} };
-    const repaired = try repairTangentHoles(arena, &.{component}, 1);
+    var repair_clears: std.ArrayList(RepairClear) = .empty;
+    const repaired = try repairTangentHoles(arena, &.{component}, 1, &repair_clears);
 
     try testing.expectEqual(@as(usize, 1), repaired.len);
+    try testing.expectEqual(@as(usize, 1), repair_clears.items.len);
     try testing.expectEqual(@as(usize, 0), repaired[0].holes.len);
     try testing.expect(try tracedComponentValid(arena, repaired[0]));
     const original_area2 = @abs(outline.signedArea2(&outer) + outline.signedArea2(&hole));
@@ -3049,13 +3184,74 @@ test "contour topology opens an opposite-winding tangent pocket conservatively" 
         .{ 0, 0 },
     };
     var loops: std.ArrayList(Contour) = .empty;
-    try resolvePinchedWalk(arena, &pinched, 1, &loops);
+    var repair_clears: std.ArrayList(RepairClear) = .empty;
+    try resolvePinchedWalk(arena, &pinched, 1, &loops, &repair_clears);
     try testing.expectEqual(@as(usize, 1), loops.items.len);
+    try testing.expectEqual(@as(usize, 1), repair_clears.items.len);
     const repaired = loops.items[0];
     try testing.expect(try validClosedContour(arena, repaired));
     const removed_area2 = @abs(outline.signedArea2(&pinched)) - @abs(outline.signedArea2(repaired));
     try testing.expect(removed_area2 >= -1e-9);
     try testing.expect(removed_area2 <= 2 + 1e-9);
+}
+
+// spec: placement/pour - an opposite-winding pinch repair clears every raster cell intersecting its removed wedge, so connectivity cannot credit copper absent from the final contour
+// spec: placement/pour - a repair-cleared articulation cell relabels its surviving sides as different fill components while previously dropped cells stay dropped
+test "opposite-winding notch repair clears removed-wedge membership" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    const p = [2]f64{ 0, 2 };
+    const pinched = [_][2]f64{
+        p,
+        .{ 1, 1 },
+        .{ 2, 2 },
+        .{ 1, 3 },
+        p,
+        .{ 0, 4 },
+        .{ 4, 4 },
+        .{ 4, 0 },
+        .{ 0, 0 },
+    };
+    var loops: std.ArrayList(Contour) = .empty;
+    var repair_clears: std.ArrayList(RepairClear) = .empty;
+    try resolvePinchedWalk(arena, &pinched, 1, &loops, &repair_clears);
+    try testing.expectEqual(@as(usize, 1), repair_clears.items.len);
+
+    var labels: [16]i32 = @splat(2);
+    const g = Grid{ .minx = 0, .miny = 0, .pitch = 1, .nx = 4, .ny = 4, .labels = &labels, .margin = &.{}, .iso = 0 };
+    const removed_wedge = [2]f64{ 0.2, 1 };
+    try testing.expect(polySignedInset(loops.items[0], removed_wedge[0], removed_wedge[1]) < 0);
+    clearRepairLabels(g, repair_clears.items);
+
+    const fill = Fill{
+        .frame = .{ .minx = 0, .miny = 0, .pitch = 1, .nx = 4, .ny = 4 },
+        .labels = &labels,
+        .n_comp = 3,
+        .contours = &.{},
+        .holes = &.{},
+        .coarsened = false,
+    };
+    try testing.expect(fill.componentAt(removed_wedge[0], removed_wedge[1]) < 0);
+    // The triangle only touches this neighbouring cell at one vertex; the SAT
+    // clear must not turn boundary contact into a full extra-cell removal.
+    try testing.expectEqual(@as(i32, 2), fill.componentAt(1.5, 0.5));
+    try testing.expectEqual(@as(i32, 2), fill.componentAt(3, 2));
+
+    // At a coarser sampling pitch the same removed triangle occupies exactly
+    // the middle cell of a three-cell bridge. Clearing it must split the two
+    // surviving sides into distinct component ids, not leave the old id 2 on
+    // both and electrically join them across empty space.
+    var bridge_labels = [_]i32{ -1, 2, 2, 2 };
+    const bridge_grid = Grid{ .minx = -4, .miny = 0, .pitch = 2, .nx = 4, .ny = 1, .labels = &bridge_labels, .margin = &.{}, .iso = 0 };
+    clearRepairLabels(bridge_grid, repair_clears.items);
+    try testing.expectEqual(@as(usize, 2), try relabelKeptAfterRepair(arena, bridge_grid));
+    try testing.expectEqual(@as(i32, -1), bridge_labels[0]);
+    try testing.expect(bridge_labels[1] >= 0);
+    try testing.expectEqual(@as(i32, -1), bridge_labels[2]);
+    try testing.expect(bridge_labels[3] >= 0);
+    try testing.expect(bridge_labels[1] != bridge_labels[3]);
 }
 
 // spec: placement/pour - contour simplification and corner rounding fall back to the last strict simple boundary instead of emitting a crossing
@@ -4443,9 +4639,9 @@ test "polyInsetLanes matches polySignedInset lane for lane" {
     for (groups) |g| try expectLanesMatchScalar(&ring, g[0], 0.37, g[1]);
 }
 
-// spec: placement/pour - a connectivity fill reuses one edge-margin field and skips tracing, labelling the same components as a rendering fill
-// spec: placement/pour - a batch of sampling fills shares one edge field and omits contours
-test "a traceless fill on a shared edge field labels exactly what a rendering fill labels" {
+// spec: placement/pour - a connectivity fill reuses one edge-margin field, applies topology-repair clears, and omits returned contours while labelling exactly what a rendering fill labels
+// spec: placement/pour - a batch of sampling fills shares one edge field, applies topology-repair clears, and omits returned contours
+test "a sampling fill on a shared edge field labels exactly what a rendering fill labels" {
     var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_i.deinit();
     const arena = arena_i.allocator();
