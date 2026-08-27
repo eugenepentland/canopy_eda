@@ -548,7 +548,7 @@ test "PCB editor rigidly mirrors the complete selected part target without delet
 }
 
 // spec: Web Server - Generated RF fence sites render, select, and edit as ordinary vias; provenance remains internal for safe regeneration
-// spec: Web Server - The PCB viewer offers a Fence action that lays (and regenerates) the RF ground via fence onto the active layout's routed RF traces — declared (fence …) classes and max-freq classes alike
+// spec: Web Server - The PCB viewer offers one Tapers + fence action that replaces stale impedance-taper paths from current pad and route geometry, DRC-gates and saves those rebuilt paths, then regenerates the RF ground via fence around that exact copper — declared (fence …) classes and max-freq classes alike
 // spec: Web Server - The PCB editor always shows the RF via-fence action, regardless of whether the board declares perimeter fencing or currently resolves a fenceable RF class
 test "PCB editor carries the RF via-fence action as ordinary vias" {
     const Check = struct { haystack: []const u8 = pcb_board_js, marker: []const u8, present: bool = true };
@@ -561,8 +561,13 @@ test "PCB editor carries the RF via-fence action as ordinary vias" {
         // The provenance tag survives undo/redo so fence regeneration can
         // still distinguish generated sites from ordinary ground vias.
         .{ .marker = "g:v.g,f:v.f" },
-        // The action: POST, then reload onto the row the server just wrote.
+        // The action: rebuild + save taper copper, POST the fence around that
+        // exact row, then reload onto what the server wrote.
         .{ .marker = "function fenceRun" },
+        .{ .marker = "drawRfRetrofitSaved({replace:true" },
+        .{ .marker = "drawRfRetrofitCheck(original)" },
+        .{ .marker = "persistLayout(curLayout,\"updating\",false)" },
+        .{ .marker = "Tapers + fence" },
         .{ .marker = "/api/pcb-fence/" },
         // The action is never hidden based on board metadata. In particular,
         // perimeter-fence and RF-class declarations do not gate visibility.
@@ -579,6 +584,18 @@ test "PCB editor carries the RF via-fence action as ordinary vias" {
         .{ .haystack = pcb_gpu_js, .marker = "S_FENCE", .present = false },
     };
     for (checks) |check| try std.testing.expect((std.mem.indexOf(u8, check.haystack, check.marker) != null) == check.present);
+
+    const finish_start = std.mem.indexOf(u8, pcb_board_js, "function fenceRun") orelse
+        return error.FenceRunMissing;
+    const finish_body = pcb_board_js[finish_start..];
+    const rebuild_at = std.mem.indexOf(u8, finish_body, "drawRfRetrofitSaved({replace:true") orelse
+        return error.FenceTaperRebuildMissing;
+    const save_at = std.mem.indexOf(u8, finish_body, "persistLayout(curLayout,\"updating\",false)") orelse
+        return error.FenceTaperSaveMissing;
+    const fence_at = std.mem.indexOf(u8, finish_body, "fencePost(b,tapers)") orelse
+        return error.FencePostMissing;
+    try std.testing.expect(rebuild_at < save_at);
+    try std.testing.expect(save_at < fence_at);
 }
 
 // spec: Web Server - Drilled via and through-hole pad bores remain board-coloured on every copper view, including generated RF fence sites and the far side of opaque pours

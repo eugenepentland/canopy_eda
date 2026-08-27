@@ -8007,12 +8007,12 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, sr
     // copper/pose edit; the click shares the Route panel's Refill-pours flow.
     try w.writeAll("<button class=\"btn\" id=\"pcb-pour\" title=\"Recompute declared copper pours " ++
         "around the current parts, tracks and vias\">\u{27F3} Pours</button>");
-    // RF ground via fencing — the end-of-design pass over the active layout's
-    // persisted copper. Always visible: board-edge perimeter fencing is not a
-    // prerequisite, and the click POSTs /api/pcb-fence to patch the RF fence
-    // copper back in.
-    try w.writeAll("<button class=\"btn\" id=\"pcb-fence\" title=\"Lay the RF ground via fence " ++
-        "along this layout's routed RF traces (declared (fence …) and max-freq classes; skips any site that would clash)\">\u{2591} Fence</button>");
+    // RF finishing — rebuild and save the active layout's pad tapers before
+    // POSTing /api/pcb-fence, so the regenerated fence follows that exact
+    // variable-width copper. Always visible: board-edge perimeter fencing is
+    // unrelated and the endpoint explains boards with no fenceable classes.
+    try w.writeAll("<button class=\"btn\" id=\"pcb-fence\" title=\"Rebuild impedance tapers from current pads and traces, " ++
+        "save them, then regenerate the RF ground via fence around the resulting copper\">\u{21bb} Tapers + fence</button>");
     // Editable embed keeps the drawing tools in the action bar (it has no
     // vertical tool strip); the full page docks them left of the canvas
     // (TOOLSTRIP_HTML — same ids, so the wiring is shared).
@@ -9065,7 +9065,7 @@ fn writeSidebar(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placem
     try w.writeAll("<div class=\"side-pane\" id=\"side-route\"><div class=\"side-acc\">");
     try writePlacementControls(w, p, o.name, o.src);
     try w.writeAll("<div class=\"side-route-actions\"><button class=\"btn\" id=\"pcb-pour\" title=\"Recompute declared copper pours around the current board\">⟳ Refill pours</button>" ++
-        "<button class=\"btn\" id=\"pcb-fence\" title=\"Lay the RF ground via fence along routed RF traces\">░ Via fence</button></div>");
+        "<button class=\"btn\" id=\"pcb-fence\" title=\"Rebuild impedance tapers, save them, then regenerate the RF ground via fence\">↻ Tapers + fence</button></div>");
     try writeTabsRow(w, route_open, false);
     try w.writeAll("<div class=\"pcb-panels\">");
     // writeRoutePanel now emits the live-route/replay dock inline.

@@ -7327,43 +7327,65 @@ function drawRfRetrofitSignature(pending){return boardStateSignature(JSON.string
 function drawRfRetrofitCached(pending){try{var hit=JSON.parse(localStorage.getItem(drawRfRetrofitCacheKey())||"null");
  return hit&&hit.sig===drawRfRetrofitSignature(pending)&&Array.isArray(hit.blocked)?hit.blocked:null;}catch(e){return null;}}
 function drawRfRetrofitCacheStore(pending,blocked){try{localStorage.setItem(drawRfRetrofitCacheKey(),JSON.stringify({sig:drawRfRetrofitSignature(pending),blocked:blocked}));}catch(e){}}
-function drawRfRetrofitSaved(){
- if(RO||PCB.analysis_deferred||!curLayout||(!((PCB.tracks||[]).length)&&!((PCB.rf_paths||[]).length)))return;
- var pending=drawRfMissingPortalGroups().concat(drawRfRetrofitGroups());if(!pending.length)return;
- var cached=drawRfRetrofitCached(pending);if(cached){drawRfRetrofitDrc=cached;PCB.drc=drawRfRetrofitDrcMerge(PCB.drc||[]);drawDrc();drcChip(PCB.drc.length);
+function drawRfPathRegenerable(path){var c=netClassInfo(path&&path.net||"");
+ return !!c&&(+c.impedance_ohms>0)&&!(+c.diff_impedance_ohms>0);}
+function drawRfRetrofitSaved(opts){opts=opts||{};var replace=!!opts.replace,done=typeof opts.done==="function"?opts.done:function(){};
+ if(RO||PCB.analysis_deferred||!curLayout||(!((PCB.tracks||[]).length)&&!((PCB.rf_paths||[]).length))){done({ok:false,error:"save a routed layout before rebuilding its tapers"});return;}
+ // A normal load-time retrofit preserves every proven path and only fills
+ // gaps. The explicit RF-finish action instead hides every single-ended RF
+ // path it can derive again while preserving differential and ordinary-neck
+ // paths, so changed pad geometry cannot make a stale path look like valid
+ // ownership of its compact centreline tracks.
+ var prior=(PCB.rf_paths||[]).slice(),retained=replace?prior.filter(function(path){return !drawRfPathRegenerable(path);}):prior,pending,
+  replaced=prior.length-retained.length;
+ if(replace){PCB.rf_paths=retained;pending=drawRfRetrofitGroups();PCB.rf_paths=prior;}
+ else pending=drawRfMissingPortalGroups().concat(drawRfRetrofitGroups());
+ if(!pending.length){if(replace&&replaced){var emptyBefore=snapAll();PCB.rf_paths=retained;copperTouched();recordUndo(emptyBefore);drawRoute();}
+  done({ok:true,added:0,replaced:replace?replaced:0,blocked:0});return;}
+ var cached=replace?null:drawRfRetrofitCached(pending);if(cached){drawRfRetrofitDrc=cached;PCB.drc=drawRfRetrofitDrcMerge(PCB.drc||[]);drawDrc();drcChip(PCB.drc.length);
   routeStatMsg(cached.length+" saved impedance taper"+(cached.length===1?"":"s")+" need attention — cached for this unchanged layout",true);return;}
- var generation=dirtyGeneration,layout=curLayout,original=(PCB.rf_paths||[]).slice(),
-  acceptedGroups=[],blocked=[],baseline=(PCB.drc||[]).filter(function(d){return !d.rf_taper_block;});
+ var generation=dirtyGeneration,layout=curLayout,original=replace?retained:prior,
+  acceptedGroups=[],blocked=[],baseline=(PCB.drc||[]).filter(function(d){return !d.rf_taper_block;}),notified=false;
+ function notify(result){if(notified)return;notified=true;done(result);}
  function current(){return generation===dirtyGeneration&&layout===curLayout;}
- function finish(acceptedBundles){if(!current())return;if(acceptedBundles==null)acceptedBundles=acceptedGroups.length;
+ function interrupted(){notify({ok:false,error:"board changed — click Tapers + fence again"});}
+ function finish(acceptedBundles){if(!current()){interrupted();return;}if(acceptedBundles==null)acceptedBundles=acceptedGroups.length;
   var accepted=[];acceptedGroups.forEach(function(group){Array.prototype.push.apply(accepted,group);});
-  if(acceptedBundles){var before=snapAll();PCB.rf_paths=original.concat(accepted);copperTouched();recordUndo(before);drawRoute();}
+  if(acceptedBundles||replace){var before=snapAll();PCB.rf_paths=original.concat(accepted);copperTouched();recordUndo(before);drawRoute();}
   drawRfRetrofitDrc=blocked;PCB.drc=drawRfRetrofitDrcMerge(baseline);drawDrc();drcChip(PCB.drc.length);
-  if(!acceptedBundles){drawRfRetrofitCacheStore(pending,blocked);routeStatMsg(blocked.length+" saved impedance taper"+(blocked.length===1?"":"s")+" need attention — click the DRC errors to locate",true);return;}
-  var remaining=drawRfMissingPortalGroups().concat(drawRfRetrofitGroups());if(remaining.length===blocked.length)drawRfRetrofitCacheStore(remaining,blocked);
-  routeStatMsg(acceptedBundles+" saved impedance taper"+(acceptedBundles===1?"":"s")+" added"+(blocked.length?" · "+blocked.length+" need attention in DRC":""));scheduleDrc();}
+  if(!acceptedBundles&&!replace){drawRfRetrofitCacheStore(pending,blocked);routeStatMsg(blocked.length+" saved impedance taper"+(blocked.length===1?"":"s")+" need attention — click the DRC errors to locate",true);return;}
+  if(!replace){var remaining=drawRfMissingPortalGroups().concat(drawRfRetrofitGroups());if(remaining.length===blocked.length)drawRfRetrofitCacheStore(remaining,blocked);}
+  routeStatMsg(acceptedBundles+" impedance taper"+(acceptedBundles===1?"":"s")+(replace?" rebuilt":" added")+(blocked.length?" · "+blocked.length+" need attention in DRC":""));
+  scheduleDrc();notify({ok:true,added:acceptedBundles,replaced:replace?replaced:0,blocked:blocked.length});}
  function sequential(){var accepted=[],acceptedBundles=0;
-  function next(i){if(!current())return;if(i>=pending.length){finish(acceptedBundles);return;}
+  function next(i){if(!current()){interrupted();return;}if(i>=pending.length){finish(acceptedBundles);return;}
    routeStatMsg("checking saved impedance tapers "+(i+1)+"/"+pending.length+"…");
-   drawRfRetrofitCheck(original.concat(accepted,pending[i])).then(function(j){if(!current())return;
+   drawRfRetrofitCheck(original.concat(accepted,pending[i])).then(function(j){if(!current()){interrupted();return;}
     var newBlocks=drawRfRetrofitNewBlocks(baseline,j.drc||[]);
     if(!newBlocks.length){Array.prototype.push.apply(accepted,pending[i]);acceptedBundles++;acceptedGroups.push(pending[i]);baseline=j.drc||[];}
     else blocked.push(drawRfRetrofitNotice(pending[i],newBlocks,i));next(i+1);})
-    .catch(function(){if(current())routeStatMsg("saved impedance taper check interrupted — reload to retry",true);});}next(0);}
+    .catch(function(){if(current())routeStatMsg("saved impedance taper check interrupted — reload to retry",true);notify({ok:false,error:"impedance taper check failed"});});}next(0);}
  function classify(groups,blocks){var byGroup=drawRfRetrofitBlockGroups(groups,blocks),clean=[];if(!byGroup)return null;
   groups.forEach(function(group,index){if(byGroup[index].length)blocked.push(drawRfRetrofitNotice(group,byGroup[index],pending.indexOf(group)));else clean.push(group);});return clean;}
  var proposed=[];pending.forEach(function(group){Array.prototype.push.apply(proposed,group);});
- routeStatMsg("checking "+pending.length+" saved impedance taper"+(pending.length===1?"":"s")+" in one DRC pass…");
- drawRfRetrofitCheck(original.concat(proposed)).then(function(j){if(!current())return;
+ function checkProposed(){routeStatMsg("checking "+pending.length+" saved impedance taper"+(pending.length===1?"":"s")+" in one DRC pass…");
+ drawRfRetrofitCheck(original.concat(proposed)).then(function(j){if(!current()){interrupted();return;}
   var firstBlocks=drawRfRetrofitNewBlocks(baseline,j.drc||[]);if(!firstBlocks.length){acceptedGroups=pending;finish();return;}
   var clean=classify(pending,firstBlocks);if(!clean){blocked=[];sequential();return;}if(!clean.length){finish();return;}
   var accepted=[];clean.forEach(function(group){Array.prototype.push.apply(accepted,group);});
   routeStatMsg("confirming "+clean.length+" non-blocking taper"+(clean.length===1?"":"s")+"…");
-  drawRfRetrofitCheck(original.concat(accepted)).then(function(confirmed){if(!current())return;
+  drawRfRetrofitCheck(original.concat(accepted)).then(function(confirmed){if(!current()){interrupted();return;}
    var secondBlocks=drawRfRetrofitNewBlocks(baseline,confirmed.drc||[]),secondClean=secondBlocks.length?classify(clean,secondBlocks):clean;
    if(!secondClean){clean.forEach(function(group){blocked.push(drawRfRetrofitNotice(group,secondBlocks,pending.indexOf(group)));});acceptedGroups=[];}else acceptedGroups=secondClean;finish();})
-   .catch(function(){if(current())routeStatMsg("saved impedance taper check interrupted — reload to retry",true);});})
-  .catch(function(){if(current())routeStatMsg("saved impedance taper check interrupted — reload to retry",true);});}
+   .catch(function(){if(current())routeStatMsg("saved impedance taper check interrupted — reload to retry",true);notify({ok:false,error:"impedance taper check failed"});});})
+  .catch(function(){if(current())routeStatMsg("saved impedance taper check interrupted — reload to retry",true);notify({ok:false,error:"impedance taper check failed"});});}
+ // Regeneration compares the new copper against a server DRC of the SAME board
+ // with no taper paths. Existing stale tapers therefore cannot hide or invent
+ // a delta. Load-time additive migration keeps its already-rendered baseline.
+ if(replace){routeStatMsg("checking the taper-free baseline…");drawRfRetrofitCheck(original).then(function(j){if(!current()){interrupted();return;}
+   baseline=(j.drc||[]).filter(function(d){return !d.rf_taper_block;});checkProposed();})
+  .catch(function(){notify({ok:false,error:"impedance taper baseline check failed"});});}
+ else checkProposed();}
 window.PCBDrawRfRetrofitPlan=drawRfRetrofitPlan;
 // Exact candidate copper for the current click. Including the last committed
 // segment lets the next click round the corner at the current route head; the
@@ -9236,31 +9258,36 @@ var poursInFlight=false,poursArmed=false,poursReqSeq=0;
 function poursDeclared(){return !!PCB.pours_declared||((PCB.plane_fills||[]).length>0)||
  STACK.some(function(L){return L.l==null&&!!L.plane;})||((PCB.zones||[]).length>0);}
 // ── RF ground via fence ───────────────────────────────────────────────────
-// End-of-design action: POST the layout being edited to /api/pcb-fence and let
-// the server lay (or regenerate) the RF ground fence along the board's RF
-// traces — every net whose class declares (fence …) or carries (max-freq …).
-// The server PERSISTS it into that row (like the KiCad-sync/autoroute-adopt
-// paths), so the reply describes what is now on disk and the page reloads onto it.
+// End-of-design action: rebuild the impedance tapers from current pad geometry,
+// persist that exact on-screen board, then POST the same row to /api/pcb-fence.
+// The fence therefore wraps the fresh variable-width copper rather than the
+// stale taper polygons a footprint or route edit may have invalidated.
 var fenceInFlight=false;
 function fenceBtn(){return document.getElementById("pcb-fence");}
 function fenceSkipped(nets){var n=0;(nets||[]).forEach(function(r){var s=r.skipped||{};
  n+=(s.pad||0)+(s.track||0)+(s.via||0)+(s.keepout||0)+(s.outline||0)+(s.dedup||0);});return n;}
-function fenceRun(){if(fenceInFlight)return;var b=fenceBtn();if(!b)return;
- fenceInFlight=true;b.disabled=true;routeStatMsg("fencing\u2026");
+function fenceDone(b,msg,bad){fenceInFlight=false;b.disabled=false;routeStatMsg(msg,!!bad);}
+function fencePost(b,tapers){routeStatMsg("generating the RF via fence…");
  var q="/api/pcb-fence/"+encodeURIComponent(PCB.name);
  if(curLayout)q+="?layout="+encodeURIComponent(curLayout);
  fetch(q,{method:"POST"})
   .then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j};});})
   .then(function(o){
-   fenceInFlight=false;b.disabled=false;
-   if(!o.ok||!o.j||!o.j.ok){routeStatMsg((o.j&&o.j.error)||"fence failed",true);return;}
+   if(!o.ok||!o.j||!o.j.ok){fenceDone(b,(o.j&&o.j.error)||"fence failed",true);return;}
    var sk=fenceSkipped(o.j.nets);
-   routeStatMsg("fence: "+o.j.placed+" via"+(o.j.placed===1?"":"s")+" placed, "+sk+" site"+
+   routeStatMsg("RF finish: "+tapers.added+" taper"+(tapers.added===1?"":"s")+" rebuilt, "+o.j.placed+" fence via"+(o.j.placed===1?"":"s")+" placed, "+sk+" site"+
     (sk===1?"":"s")+" skipped"+(o.j.replaced?" ("+o.j.replaced+" replaced)":""));
    // The fence is already saved, so the row on disk is the authority: reload
    // onto it rather than trying to reconstruct the merged copper client-side.
    location.reload();})
-  .catch(function(){fenceInFlight=false;b.disabled=false;routeStatMsg("fence failed",true);});}
+  .catch(function(){fenceDone(b,"fence failed",true);});}
+function fenceRun(){if(fenceInFlight)return;var b=fenceBtn();if(!b)return;
+ fenceInFlight=true;b.disabled=true;routeStatMsg("rebuilding impedance tapers…");
+ drawRfRetrofitSaved({replace:true,done:function(tapers){
+  if(!tapers.ok){fenceDone(b,tapers.error||"taper regeneration failed",true);return;}
+  routeStatMsg("saving rebuilt tapers…");persistLayout(curLayout,"updating",false).then(function(saved){
+   if(saved!=="saved"){fenceDone(b,"rebuilt tapers were not saved — fence not changed",true);return;}
+   fencePost(b,tapers);});}});}
 function pourBtns(){var a=[],x=document.getElementById("r-pour"),y=document.getElementById("pcb-pour");
  if(x)a.push(x);if(y)a.push(y);return a;}
 function pourBtnSync(){var b=document.getElementById("pcb-pour");if(!b)return;
