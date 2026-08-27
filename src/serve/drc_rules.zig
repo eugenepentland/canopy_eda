@@ -210,6 +210,8 @@ pub fn checkFilteredZonesTally(
     else
         fab_readiness.routableTally(alloc, in.placement, .{
             .tracks = in.routed.tracks,
+            .arcs = in.routed.arcs,
+            .rf_paths = in.routed.rf_port_outcomes,
             .vias = in.routed.vias,
             .zones = in.zones,
         }) catch null;
@@ -284,6 +286,8 @@ pub fn resolveDeferred(
     return .{
         .tally = fab_readiness.routableTally(alloc, in.placement, .{
             .tracks = if (in.routed) |r| r.tracks else &.{},
+            .arcs = if (in.routed) |r| r.arcs else &.{},
+            .rf_paths = if (in.routed) |r| r.rf_port_outcomes else &.{},
             .vias = if (in.routed) |r| r.vias else &.{},
             .zones = in.zones,
         }) catch null,

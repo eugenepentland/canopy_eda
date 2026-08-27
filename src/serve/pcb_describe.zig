@@ -251,11 +251,11 @@ pub fn describeDesign(
             .stuck = stuck,
             // Pours count as connecting copper either way — a fresh route and a
             // restored board both sit on the shown layout's zones.
-            .open_nets = fab_readiness.openNets(alloc, solved.placement, .{
-                .tracks = r.tracks,
-                .vias = r.vias,
-                .zones = solved.shown_zones.user,
-            }) catch &.{},
+            .open_nets = fab_readiness.openNets(
+                alloc,
+                solved.placement,
+                routeCopper(r, solved.shown_zones.user),
+            ) catch &.{},
         };
     } else null;
 
@@ -436,11 +436,17 @@ fn connectivityTally(
     r: router.RouteResult,
     zones: []const pour.UserZone,
 ) std.mem.Allocator.Error!fab_readiness.Tally {
-    return fab_readiness.routableTally(alloc, placement, export_gerber.Copper{
+    return fab_readiness.routableTally(alloc, placement, routeCopper(r, zones));
+}
+
+fn routeCopper(r: router.RouteResult, zones: []const pour.UserZone) export_gerber.Copper {
+    return .{
         .tracks = r.tracks,
+        .arcs = r.arcs,
+        .rf_paths = r.rf_port_outcomes,
         .vias = r.vias,
         .zones = zones,
-    });
+    };
 }
 
 /// Errors the facts writer can hit: allocation (scratch maps/lists) + writer.
@@ -2311,6 +2317,36 @@ test "the connectivity tally overrides both the zeroed restored counters and an 
     const fresh_conn = try connectivityTally(alloc, placement, fresh, &.{});
     try std.testing.expectEqual(@as(usize, 1), fresh_conn.routed);
     try std.testing.expectEqualStrings("BARE", fresh_conn.open[0]);
+
+    // A saved RF taper may persist only its sampled path proof. Describe must
+    // feed that proof to the same oracle as DRC instead of falling back to an
+    // empty compact-track list and contradicting the net-open marker.
+    const RfOutcome = @typeInfo(@FieldType(router.RouteResult, "rf_port_outcomes")).pointer.child;
+    const RfPhysical = @FieldType(RfOutcome, "physical");
+    const RfSample = @typeInfo(@FieldType(RfPhysical, "samples")).pointer.child;
+    const rf_samples = [_]RfSample{
+        .{ .at = .{ 0, 0 }, .s_mm = 0, .curvature = 0, .width_mm = 0.2 },
+        .{ .at = .{ 10, 0 }, .s_mm = 10, .curvature = 0, .width_mm = 0.2 },
+    };
+    const rf_paths = [_]rf_port_report.Outcome{.{
+        .net = 0,
+        .chosen = 0,
+        .feasible = true,
+        .success = true,
+        .metrics = .{},
+        .trials = &.{},
+        .physical = .{ .sample_count = rf_samples.len, .samples = &rf_samples },
+    }};
+    const sampled = router.RouteResult{
+        .tracks = &.{},
+        .vias = &.{},
+        .rf_port_outcomes = &rf_paths,
+        .routed = 0,
+        .total = 0,
+    };
+    const sampled_conn = try connectivityTally(alloc, placement, sampled, &.{});
+    try std.testing.expectEqual(@as(usize, 1), sampled_conn.routed);
+    try std.testing.expectEqualStrings("BARE", sampled_conn.open[0]);
 }
 
 test "the facts' drc_errors term counts only fab-blocking geometry" {

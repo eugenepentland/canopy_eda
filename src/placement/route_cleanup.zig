@@ -3515,13 +3515,13 @@ test "dropRedundantSections keeps a component that joins no second support" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
-    // A run whose 0.55 mm copper is wider than the 0.4 mm lands it aims at:
-    // no full cross-section fits, so the fabrication oracle sees NO pad on
-    // this component and calls every section of it redundant. It is still the
-    // net's only route, and this seam is not the place to decide that.
+    // A top-layer run beside bottom-only lands has no visible pad support, so
+    // the fill-blind oracle calls every section of it redundant. It may still
+    // be carried by an omitted pour, and this seam is not the place to decide
+    // that the whole component is dead metal.
     const lands = [_]copper_topology.Terminal{
-        .{ .shape = .{ .x0 = -0.2, .y0 = -0.2, .x1 = 0.2, .y1 = 0.2 }, .net = 0, .layer = 0 },
-        .{ .shape = .{ .x0 = 2.8, .y0 = 0.8, .x1 = 3.2, .y1 = 1.2 }, .net = 0, .layer = 0 },
+        .{ .shape = .{ .x0 = -0.2, .y0 = -0.2, .x1 = 0.2, .y1 = 0.2 }, .net = 0, .layer = 1 },
+        .{ .shape = .{ .x0 = 2.8, .y0 = 0.8, .x1 = 3.2, .y1 = 1.2 }, .net = 0, .layer = 1 },
     };
     var list: std.ArrayList(Track) = .empty;
     try list.appendSlice(arena, &.{

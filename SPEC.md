@@ -6641,7 +6641,7 @@ Public functions: check, writeJson
 - An SMD pad joins routed copper only on its authored outer face; a through-hole pad joins every copper layer
 - Declared plane-carried ground nets default to a 1 mm maximum SMD-pad-to-stitch-via distance
 - A flattened net pin whose part or pad no longer resolves is a fab-readiness error, never a silently dropped terminal
-- pad-to-track connectivity requires a full trace-width cross-section on the land; a capsule-only edge or corner graze stays open
+- pad-to-track connectivity requires a full cross-section of the narrower copper feature; a capsule-only edge or corner graze stays open
 - track-to-track connectivity requires a full cross-section of the narrower trace inside the other trace; a cap-only or parallel-flank graze stays open
 - track-to-via connectivity requires a full cross-section of the narrower copper feature; a tangential land graze stays open
 - a rail net joined only by an inner-layer copper pour passes the unrouted-net gate

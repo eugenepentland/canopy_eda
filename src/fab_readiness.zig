@@ -1781,8 +1781,8 @@ pub fn buildNetGraphPrepared(
     for (segs.items, 0..) |t, ti| {
         // pad ↔ track: SMD lands join only copper on their own outer face;
         // through-hole lands reach every signal layer. A capsule graze is not
-        // enough: one full transverse trace-width cross-section must fit on
-        // the land before it can carry connectivity.
+        // enough: the narrower feature's full transverse cross-section must
+        // fit inside the other before the pair can carry connectivity.
         for (items, 0..) |p, pi| {
             const pad_layer: u8 = if (p.side == .top) 0 else 1;
             if (!copper_contact.padOnLayer(p.thru, pad_layer, t.layer)) continue;
@@ -2174,7 +2174,7 @@ const testing = std.testing;
 const geometry = @import("placement/geometry.zig");
 const export_kicad = @import("export_kicad.zig");
 
-// spec: fab_readiness - pad-to-track connectivity requires a full trace-width cross-section on the land; a capsule-only edge or corner graze stays open
+// spec: fab_readiness - pad-to-track connectivity requires a full cross-section of the narrower copper feature; a capsule-only edge or corner graze stays open
 test "pad connectivity rejects a corner graze and accepts a full-width entry" {
     var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_i.deinit();
@@ -2329,6 +2329,93 @@ test "connectivity flags an unrouted net and passes a routed one" {
     };
     const gapped = try check(arena, placement, .{ .tracks = &gap }, .{});
     try testing.expect(hasError(gapped, "unrouted-net"));
+}
+
+test "Barracuda DIV_RAW sampled taper connects both RF landing pads" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    const cap_pads = [_]geometry.Pad{.{
+        .number = "2",
+        .x = 0.48,
+        .y = 0,
+        // Barracuda's controlled-impedance adaptation has already reduced the
+        // nominal 0.56 x 0.62 mm C0402 land to its qualified RF minimum.
+        .w = 0.46,
+        .h = 0.50,
+        .shape = "roundrect",
+    }};
+    const attenuator_pads = [_]geometry.Pad{.{
+        .number = "2",
+        .x = -1,
+        .y = 0,
+        .w = 0.8,
+        .h = 0.3,
+    }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "C184", .kind = .passive, .hw = 0.85, .hh = 0.35, .pads = &cap_pads, .fallback = false, .x = 149.7, .y = 104.5, .rot = 90 },
+        .{ .ref_des = "A1", .kind = .passive, .hw = 1.45, .hh = 0.85, .pads = &attenuator_pads, .fallback = false, .x = 147.4, .y = 105.5, .rot = 180 },
+    };
+    const pins = [_]export_kicad.FlatPin{ .{ .ref_des = "C184", .pin = "2" }, .{ .ref_des = "A1", .pin = "2" } };
+    const nets = [_]export_kicad.FlatNet{.{ .name = "vco_div4/DIV_RAW", .pins = &pins }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 145,
+        .miny = 103,
+        .maxx = 151,
+        .maxy = 107,
+        .generated = false,
+        .board_rect = .{ .minx = 145, .miny = 103, .w = 6, .h = 4 },
+        .rules = .{ .plane_nets = &.{}, .copper_layers = 2 },
+    };
+    const Sample = @import("placement/rf_path_solver.zig").Sample;
+    const main_samples = [_]Sample{
+        .{
+            .at = .{ 149.7, 104.98 },
+            .s_mm = 0,
+            .curvature = 0,
+            .width_mm = 0.6013448869340359,
+        },
+        .{
+            .at = .{ 149.7, 105 },
+            .s_mm = 0.02,
+            .curvature = 0,
+            .width_mm = 0.6013448869340359,
+        },
+        .{
+            .at = .{ 149.2, 105.5 },
+            .s_mm = 0.73,
+            .curvature = 0,
+            .width_mm = 0.18993671363271875,
+        },
+        .{ .at = .{ 148.8, 105.5 }, .s_mm = 1.13, .curvature = 0, .width_mm = 0.3 },
+        .{ .at = .{ 148.4, 105.5 }, .s_mm = 1.53, .curvature = 0, .width_mm = 0.3 },
+    };
+    const Outcome = @import("placement/rf_port_report.zig").Outcome;
+    const paths = [_]Outcome{.{
+        .net = 0,
+        .chosen = 0,
+        .feasible = true,
+        .success = true,
+        .metrics = .{},
+        .trials = &.{},
+        .physical = .{
+            .sample_count = main_samples.len,
+            .samples = &main_samples,
+            .layer = 0,
+        },
+    }};
+
+    const conn = try netConnectivity(arena, placement, .{ .rf_paths = &paths });
+    try testing.expectEqual(@as(usize, 1), conn.len);
+    try testing.expect(conn[0].connected);
 }
 
 // spec: fab_readiness - An SMD pad joins routed copper only on its authored outer face; a through-hole pad joins every copper layer

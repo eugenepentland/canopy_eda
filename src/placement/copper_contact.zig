@@ -39,10 +39,85 @@ fn clipAxis(interval: *Interval, start: f64, delta: f64, lo: f64, hi: f64) bool 
     return interval.lo <= interval.hi;
 }
 
-/// Does the trace enter `shape` deeply enough that one complete transverse
-/// trace-width cross-section lies on land copper? Mere capsule overlap is not
-/// contact: a round end-cap grazing a land edge leaves less copper in common
-/// than the trace is wide and therefore stays electrically open.
+fn cross(a: [2]f64, b: [2]f64) f64 {
+    return a[0] * b[1] - a[1] * b[0];
+}
+
+fn clipLineAxis(lo: *f64, hi: *f64, start: f64, delta: f64, min: f64, max: f64) bool {
+    if (@abs(delta) <= 1e-12) return start >= min and start <= max;
+    const a = (min - start) / delta;
+    const b = (max - start) / delta;
+    lo.* = @max(lo.*, @min(a, b));
+    hi.* = @min(hi.*, @max(a, b));
+    return lo.* <= hi.*;
+}
+
+const ChordBounds = struct {
+    lo: f64 = -std.math.inf(f64),
+    hi: f64 = std.math.inf(f64),
+    saw_lo: bool = false,
+    saw_hi: bool = false,
+
+    fn include(self: *ChordBounds, anchor: [2]f64, normal: [2]f64, before: [2]f64, point: [2]f64) void {
+        const edge = [2]f64{ point[0] - before[0], point[1] - before[1] };
+        const rel = [2]f64{ before[0] - anchor[0], before[1] - anchor[1] };
+        const denominator = cross(normal, edge);
+        if (@abs(denominator) <= 1e-12) return;
+        const along_edge = cross(rel, normal) / denominator;
+        if (along_edge < -1e-9 or along_edge > 1 + 1e-9) return;
+        const t = cross(rel, edge) / denominator;
+        if (t <= 1e-9 and (!self.saw_lo or t > self.lo)) {
+            self.lo = t;
+            self.saw_lo = true;
+        }
+        if (t >= -1e-9 and (!self.saw_hi or t < self.hi)) {
+            self.hi = t;
+            self.saw_hi = true;
+        }
+    }
+};
+
+/// The complete pad-copper chord through its deterministic copper anchor in
+/// direction `normal`. For a concave custom land this selects the connected
+/// interval containing the anchor, never a remote lobe across a relief notch.
+fn padAnchorChord(shape: pad_shape.Shape, normal: [2]f64) ?[2][2]f64 {
+    const anchor = pad_shape.copperAnchor(shape);
+    var lo = -std.math.inf(f64);
+    var hi = std.math.inf(f64);
+    if (shape.poly.len < 3) {
+        if (!clipLineAxis(&lo, &hi, anchor[0], normal[0], shape.x0, shape.x1) or
+            !clipLineAxis(&lo, &hi, anchor[1], normal[1], shape.y0, shape.y1)) return null;
+    } else {
+        var bounds = ChordBounds{};
+        var before = shape.poly[shape.poly.len - 1];
+        for (shape.poly) |point| {
+            bounds.include(anchor, normal, before, point);
+            before = point;
+        }
+        if (!bounds.saw_lo or !bounds.saw_hi) return null;
+        lo = bounds.lo;
+        hi = bounds.hi;
+    }
+    if (!(hi > lo + 1e-12)) return null;
+    return .{
+        .{ anchor[0] + normal[0] * lo, anchor[1] + normal[1] * lo },
+        .{ anchor[0] + normal[0] * hi, anchor[1] + normal[1] * hi },
+    };
+}
+
+fn padBottleneckConnects(shape: pad_shape.Shape, a: [2]f64, b: [2]f64, normal: [2]f64, radius: f64) bool {
+    const chord = padAnchorChord(shape, normal) orelse return false;
+    for (chord) |point| {
+        if (pad_shape.segPointDist(a[0], a[1], b[0], b[1], point[0], point[1]) >
+            radius + join_slack_mm) return false;
+    }
+    return true;
+}
+
+/// Does the trace and land share a fabrication-robust neck? The narrower
+/// feature is the bottleneck: either one complete transverse trace chord fits
+/// on the land, or the land's complete anchor chord fits in the trace capsule.
+/// Mere edge/corner overlap satisfies neither direction and stays open.
 pub fn padTrackConnects(shape: pad_shape.Shape, a: [2]f64, b: [2]f64, width: f64) bool {
     if (!(width > 0)) return false;
     const dx = b[0] - a[0];
@@ -60,7 +135,8 @@ pub fn padTrackConnects(shape: pad_shape.Shape, a: [2]f64, b: [2]f64, width: f64
     const inset_y = @abs(ny) * radius;
     var interval = Interval{};
     if (!clipAxis(&interval, a[0], dx, shape.x0 + inset_x - join_slack_mm, shape.x1 - inset_x + join_slack_mm) or
-        !clipAxis(&interval, a[1], dy, shape.y0 + inset_y - join_slack_mm, shape.y1 - inset_y + join_slack_mm)) return false;
+        !clipAxis(&interval, a[1], dy, shape.y0 + inset_y - join_slack_mm, shape.y1 - inset_y + join_slack_mm))
+        return padBottleneckConnects(shape, a, b, .{ nx, ny }, radius);
     if (shape.poly.len < 3) return true;
 
     // Rotated, rounded, and custom lands carry exact outlines. Walk only the
@@ -92,7 +168,7 @@ pub fn padTrackConnects(shape: pad_shape.Shape, a: [2]f64, b: [2]f64, width: f64
         }
         if (covered) return true;
     }
-    return false;
+    return padBottleneckConnects(shape, a, b, .{ nx, ny }, radius);
 }
 
 /// Ordinary geometric overlap between two round-capped trace capsules. This
@@ -314,10 +390,11 @@ test "pad contact requires one complete trace-width cross-section on the land" {
     try testing.expect(!padTrackConnects(land, .{ 2, 0 }, .{ 1.124, 0 }, width));
     try testing.expect(padTrackConnects(land, .{ 2, 0 }, .{ 1, 0 }, width));
 
-    // Even a centreline crossing cannot fit a 0.25 mm trace through a land
-    // whose transverse copper is only 0.20 mm wide.
+    // When the land is narrower, its complete anchor chord is the bottleneck
+    // and a centred wide trace carries it. A flank graze still does not.
     const narrow = pad_shape.Shape{ .x0 = 0, .y0 = -0.1, .x1 = 1, .y1 = 0.1 };
-    try testing.expect(!padTrackConnects(narrow, .{ 2, 0 }, .{ 0.5, 0 }, width));
+    try testing.expect(padTrackConnects(narrow, .{ 2, 0 }, .{ 0.5, 0 }, width));
+    try testing.expect(!padTrackConnects(narrow, .{ 2, 0.2 }, .{ 0.5, 0.2 }, width));
 
     // A concave custom pad does not inherit copper from its bounding-box
     // notch. Entering the real right-hand prong by one full width does join.
