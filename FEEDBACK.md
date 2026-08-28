@@ -226,3 +226,36 @@ Worth keeping in mind for the next task in this area: the reconcile fixture in
 `(return-path (max-loop-area …))` net class, so it emits three
 `reference_plane_gap` findings and one `loop_area`. It is the cheapest worked
 example of those forms in the tree.
+
+## 2026-08-28 · claude · "the server takes ten seconds to come up" was never about the boot
+
+A restart on this corpus looked like a nine-second outage, and there was
+nothing in the process's own output to say whether the gap was in front of the
+socket or behind it. It took an external probe (connect-poll separated from the
+first HTTP request) to establish that `netlisp serve` accepts its first
+connection **5 ms** after exec and that the whole nine seconds belonged to the
+first `GET /api/designs`. Two things would have answered that in one command:
+
+1. **A startup line with a number.** The banner said `Listening on
+   http://localhost:PORT` with no elapsed time, so it was consistent with both
+   stories. This branch adds `[I] startup: listening after N ms`, plus a
+   `warmup: N design summary(s) ready in M ms` line for the one warm-up phase a
+   request can actually be blocked on. Any future "the deploy is slow" question
+   is now one `journalctl` grep.
+
+2. **Beware `boot_to_ready_ms` from a polling harness.** The shared interaction
+   benchmark polls `/api/designs` with a 3 s per-attempt abort, so its
+   "boot to ready" was pinned at 9088 ms across every run — three aborted
+   attempts plus change. That is a quantized artifact of the retry interval, not
+   a measurement of anything: the true single-request cold cost was 8.3 s, and
+   each aborted attempt left a *whole additional* corpus scan running server-side
+   (nothing single-flighted them), so the harness was partly measuring its own
+   retries. Measure a cold endpoint with one request and a generous timeout, and
+   treat any figure that repeats to the millisecond across runs as suspect.
+
+Also worth knowing for the next perf task here: with five agent sessions live,
+`scripts/gate.sh` queued a timing run for ~50 minutes behind four other holders.
+Batching every measurement that needs the lock into ONE script (parity check,
+health probe, boot probes, and both benchmark reps) turned four queue waits into
+one. `gate.sh` reporting the current queue depth when it blocks would make that
+choice obvious instead of learned.
