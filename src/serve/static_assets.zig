@@ -362,6 +362,25 @@ test "layout save recovers open copper sketches before rejecting geometry" {
     try std.testing.expect(std.mem.indexOfPos(u8, pcb_board_js, recover_fn, "replacement=OS.fromPolygon(pts)") != null);
 }
 
+// spec: Web Server - Saving an unchanged PCB state rechecks DRC without invalidating a concurrent copper-pour refill for that same state
+test "layout save DRC preserves an in-flight pour refill" {
+    const save_start = std.mem.indexOf(u8, pcb_board_js, "function persistLayoutNow(") orelse
+        return error.TestExpectedSaveHandler;
+    const save_tail = pcb_board_js[save_start..];
+    const save_end = std.mem.indexOf(u8, save_tail, "window.PCBFlushLayout=function") orelse
+        return error.TestExpectedSaveHandlerEnd;
+    const save_body = save_tail[0..save_end];
+    try std.testing.expect(std.mem.indexOf(u8, save_body, "scheduleDrc({stateUnchanged:true})") != null);
+
+    const drc_start = std.mem.indexOf(u8, pcb_board_js, "function scheduleDrc(opts)") orelse
+        return error.TestExpectedDrcScheduler;
+    const drc_tail = pcb_board_js[drc_start..];
+    const drc_end = std.mem.indexOf(u8, drc_tail, "// ── Client-side WASM DRC") orelse
+        return error.TestExpectedDrcSchedulerEnd;
+    const drc_body = drc_tail[0..drc_end];
+    try std.testing.expect(std.mem.indexOf(u8, drc_body, "if(!opts.stateUnchanged)copperTouched()") != null);
+}
+
 // spec: Web Server - While drawing a custom copper area, nearly horizontal or vertical segments snap onto that axis in both the live preview and committed polygon; holding Ctrl bypasses only this axis inference
 test "custom copper area drawing infers axes unless Ctrl is held" {
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "function pourSnap(m,ev)") != null);

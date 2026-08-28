@@ -4685,7 +4685,11 @@ function persistLayoutNow(nm,verb,automatic){var msg=document.getElementById("pc
     syncLayoutUrl(nm);
     if(msg){msg.style.color="#3fb950";
      msg.textContent=(automatic?"saved automatically":(verb==="updating"?"updated":"saved"))+" \u{2713}";}
-    scheduleDrc();/* fast local re-DRC of the just-saved copper (audit 1.1d) */
+    // Saving persisted this exact in-memory state; it did not edit copper.
+    // Preserve any refill already computing for that state. Barracuda's fill
+    // can outlive the 2.5 s autosave delay, and treating save completion as a
+    // copper edit used to supersede that valid response before RF fencing.
+    scheduleDrc({stateUnchanged:true});/* fast local re-DRC of the just-saved copper (audit 1.1d) */
     if(serverReconcileTimer){clearTimeout(serverReconcileTimer);serverReconcileTimer=null;}
     runDrcNow();/* Save fires the server DRC now — the authority of record */
     progressRefresh();/* poses/locks just persisted — re-pull the stage ladder */
@@ -9493,9 +9497,11 @@ function refillPours(opts){opts=opts&&opts.deferred?opts:{};var done=typeof opts
 pourBtns().forEach(function(b){b.addEventListener("click",refillPours);});
 (function(){groundViasBtnInstall();var b=document.getElementById("pcb-ground-vias");if(b&&!RO)b.addEventListener("click",groundViasRun);})();
 (function(){var b=fenceBtn();if(b&&!RO)b.addEventListener("click",fenceRun);})();
-function scheduleDrc(){if(RO)return;
+function scheduleDrc(opts){if(RO)return;opts=opts||{};
  powerWidthDrcFresh=false;
- copperTouched(); // every copper/pose edit funnels here — refresh airwire doneness
+ // Save completion also asks for a check, but the board it persisted is still
+ // the same board. Do not invalidate its caches or an in-flight pour refill.
+ if(!opts.stateUnchanged)copperTouched(); // every real copper/pose edit funnels here
  drcGateSessionDefer(); // mid-drag session back in step with the edit, off THIS frame
  wasmDrcInit();   // lazily spin up the worker on the first edit
  if(wasmDrc.failed){ // no worker/wasm → the original 800 ms server debounce, unchanged
