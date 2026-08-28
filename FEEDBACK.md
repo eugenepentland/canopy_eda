@@ -266,3 +266,41 @@ Two things that would have paid for themselves:
 Also worth knowing: this box runs several agents at once and wall times swing
 2-3x between rounds. Any before/after claim needs alternating old/new runs and a
 median of several, never one run of each.
+
+## 2026-08-28 — the pour's cost was two quadratics, not the raster
+
+Task: make a fill an edit changed cheap to UPDATE instead of re-pouring
+(sub-window re-raster from the previous generation's margin field).
+
+The premise held — the update works and is bit-identical — but the premise
+about WHERE the time went did not, and finding that out cost most of the task.
+A changed barracuda fill cost ~230 ms, and the obstacle walk the whole
+sub-window design targets was 17 ms of it. Contour tracing was ~200 ms, in two
+places that had nothing to do with the raster:
+
+  * `collectBoundaryEdges` scanned the whole label grid once PER COMPONENT
+    (O(components x cells));
+  * `tracedComponentValid` compared every pair of a component's holes point by
+    point with no bounding-box filter (O(holes^2 x points^2)) — 4.5 s of a 5 s
+    pass on a pour with a few hundred via antipads.
+
+Both are three-line fixes and both are pure speedups. The sub-window update is
+worth ~27 ms of the remaining ~67 ms; the two quadratics were worth ~165 ms.
+
+What would have saved the detour: **`netlisp drc-dump` reports per-seam wall
+time but nothing below it.** Every phase number in this task came from hand-
+patching `clock.nanoTimestamp()` counters into `pour.computeFill`, building,
+reading, and stripping them again — four rebuild cycles, and the counters could
+not live in `pour.zig` permanently because that file is compiled into the
+wasm32 DRC engine, which has no clock (importing `infra/clock.zig` there fails
+the build outright). A `--phases` flag on `drc-dump`, or a per-phase tally on
+the `fill_cache` side of the seam where a clock is already available, would
+have made "which part of a pour is expensive" a one-command question. This
+change adds the coarse half of that (`# <board> build patched=N ms=… poured=N
+ms=…`); the phase split inside a single build is still hand-instrumented.
+
+Second, smaller: the machine ran at load average ~10 throughout (parallel
+agents), and the same binary on the same board measured 3.3 s and 6.7 s for the
+same phase within minutes. Any timing claim from a session like this needs
+alternating medians against a baseline binary built from the same tree, not
+absolute numbers — worth stating in the task brief rather than discovering.

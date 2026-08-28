@@ -569,6 +569,17 @@ fn dumpOne(
         memo.fills,
         memo.bytes,
     });
+    // How the fills this process had to BUILD were built: updated from the
+    // previous generation's raster, or poured from nothing — and what each cost.
+    // A patch path that quietly stops matching is invisible in the timings alone.
+    try w.print("# {s} build patched={d} ms={d:.1} poured={d} ms={d:.1} bases={d}\n", .{
+        name,
+        memo.tally.build.patched,
+        @as(f64, @floatFromInt(memo.tally.build.patch_ns)) / ns_per_ms,
+        memo.tally.build.poured,
+        @as(f64, @floatFromInt(memo.tally.build.pour_ns)) / ns_per_ms,
+        memo.bases,
+    });
     return 0;
 }
 
