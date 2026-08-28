@@ -527,7 +527,18 @@ fn errorJson(arena: std.mem.Allocator, msg: []const u8) []const u8 {
     return std.fmt.allocPrint(arena, "{{\"error\":\"{s}\"}}", .{msg}) catch "{\"error\":\"oom\"}";
 }
 
-fn buildAndSerialize(arena: std.mem.Allocator, input: []const u8) ![]const u8 {
+/// The board one marshalled DRC request describes: the placement the client
+/// engine checks, its copper, and the clearance rule that check runs at.
+const Board = struct {
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    clearance: f64,
+};
+
+/// Parse a marshalled board-state payload into the placement + copper
+/// `drc.check` runs over. Split out of `buildAndSerialize` so a test can assert
+/// on the placement itself rather than only on the violations it produces.
+fn buildBoard(arena: std.mem.Allocator, input: []const u8) !Board {
     const root = try std.json.parseFromSliceLeaky(std.json.Value, arena, input, .{});
     const obj = objOf(root) orelse return error.InputNotObject;
 
@@ -601,8 +612,13 @@ fn buildAndSerialize(arena: std.mem.Allocator, input: []const u8) ![]const u8 {
     const body_clearance = jNum(clearanceVal(obj));
     const clearance = if (body_clearance > 0) body_clearance else design.clearance;
 
-    const violations = try drc.check(arena, placement, routed, clearance);
-    return serialize(arena, violations, .{ .nets = placement.nets, .parts = placement.parts });
+    return .{ .placement = placement, .routed = routed, .clearance = clearance };
+}
+
+fn buildAndSerialize(arena: std.mem.Allocator, input: []const u8) ![]const u8 {
+    const board = try buildBoard(arena, input);
+    const violations = try drc.check(arena, board.placement, board.routed, board.clearance);
+    return serialize(arena, violations, .{ .nets = board.placement.nets, .parts = board.placement.parts });
 }
 
 /// `{"drc":[…violations…],"n":N}` — the same envelope `pcbDrcApi` writes, using
@@ -1068,4 +1084,59 @@ test "bridge defaults missing optional fields to an empty clean board" {
     // A bare object (no parts/tracks/vias/rules) has no geometry to violate.
     const out = runDrcJson(arena, "{}");
     try testing.expectEqualStrings("{\"drc\":[],\"n\":0}", out);
+}
+
+/// A DECLARED four-layer board whose In2 is a V_3V3D plane, with that rail's
+/// net class opting into current-aware branch sizing (`power_branch_width`) —
+/// the exact shape that makes the SERVER's geometry pass raster every plane and
+/// pour (barracuda-base). Everything the marshal can say about power is here;
+/// what is missing is the one thing it never sends, the rail's current demand.
+const power_branch_board_json =
+    \\{"clearance":0.127,
+    \\ "rules":{"min_width":0.1,"min_drill":0.2,"min_annular":0.1,"hole_to_hole":0.25},
+    \\ "planes":["V_3V3D"],
+    \\ "layer_table":[{"i":1,"l":0,"kind":"signal","net":null},
+    \\                {"i":2,"l":null,"kind":"plane","net":"V_3V3D"},
+    \\                {"i":3,"l":1,"kind":"signal","net":null},
+    \\                {"i":4,"l":2,"kind":"signal","net":null}],
+    \\ "netclasses":[{"net":"V_3V3D","width":0.3048,"power_branch_width":0.1524}],
+    \\ "board":{"x":-2,"y":-2,"w":20,"h":20},
+    \\ "parts":[{"ref":"U1","kind":"ic","hw":1,"hh":1,"x":0,"y":0,"rot":0,"side":"top",
+    \\           "pads":[{"num":"1","x":0,"y":0,"w":0.4,"h":0.4,"shape":"rect","net":"V_3V3D"}]}],
+    \\ "tracks":[{"x1":0,"y1":0,"x2":4,"y2":0,"l":0,"w":0.1524,"net":"V_3V3D"}]}
+;
+
+// spec: Web Server - The WASM DRC bridge marshals no rail current, so the client engine never rasters the board's planes for a power-branch width verdict
+test "the bridge builds a rail-less placement, so no plane raster is reachable" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const power_integrity = @import("placement/power_integrity.zig");
+
+    const board = try buildBoard(arena, power_branch_board_json);
+
+    // THE INVARIANT. `power_integrity.routedTrackRequiredWidthsMemo` sets
+    // `needs_surfaces` only for a net with a declared current demand, and the
+    // marshal (`drc_marshal.js buildDrcInput`) has no key for one — it sends
+    // geometry, rules, net classes and the layer table, never `(i-typ …)`.
+    // With rails empty that predicate is false on every board, so `buildSurfaces`
+    // — 7.5 s of barracuda-base's 8.2 s server geometry pass — is unreachable
+    // from the client engine, whose worker budget is ~50 ms per edit. Marshalling
+    // rail currents to the client would silently reinstate that raster in the
+    // worker; land the wasm-side skip FIRST if this assertion ever has to move.
+    try testing.expectEqual(@as(usize, 0), board.placement.rules.physical.rails.len);
+
+    // The consequence, stated where the cost lives: every entry null means the
+    // solve produced nothing and no surface was ever poured for it.
+    const widths = try power_integrity.routedTrackRequiredWidths(arena, board.placement, board.routed);
+    try testing.expectEqual(board.routed.tracks.len, widths.len);
+    for (widths) |w| try testing.expectEqual(@as(?f64, null), w);
+
+    // …and the board still checks: this track sits at the class's branch floor,
+    // under its 0.3048 mm class width, so the width rule the client DOES run
+    // reports it. Only the current/fill-derived verdict is absent, and the
+    // viewer defers exactly that one (`pcb_board.js drcGateDefersPowerWidth`).
+    const out = runDrcJson(arena, power_branch_board_json);
+    try testing.expect(std.mem.indexOf(u8, out, "\"track width\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"power width\"") == null);
 }

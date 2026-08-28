@@ -6610,6 +6610,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The WASM DRC bridge applies the same net-gated keepout escape as the server, excusing only a net with its own pad in the zone
 - The WASM DRC bridge carries each net's class identity, so the client waives the keepout halo between one class's own members exactly as the server does
 - The WASM DRC bridge carries typed generic perimeter keepouts and their allowed nets
+- The WASM DRC bridge marshals no rail current, so the client engine never rasters the board's planes for a power-branch width verdict
 - The /pcb-layout viewer runs the WASM DRC in a worker with a server fallback
 - The WASM DRC session load returns the board's net table for probe indexing
 - The WASM DRC session segment probe matches a full drc.check for new routing-class violations
