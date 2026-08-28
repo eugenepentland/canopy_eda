@@ -9,7 +9,7 @@
 //! had to add a throwaway dump command, build two binaries with it, diff the
 //! corpus and then strip the patch again. This is that command, kept.
 //!
-//!   netlisp drc-dump [--project-dir <dir>] [--mutate <k>] [--prime] <design>…
+//!   netlisp drc-dump [--project-dir <dir>] [--mutate <k>] [--prime] [--scoped] <design>…
 //!
 //! It is READ-ONLY: it evaluates the design, restores the saved layout exactly
 //! as the PCB page does, runs the two DRC seams, and writes to stdout. It
@@ -42,12 +42,28 @@
 //! A borrowed fill that is not bit-identical to a poured one shows up here as a
 //! moved contour, a different component count, or a changed connectivity
 //! verdict — all of which are violations that differ.
+//!
+//! ## Proving a scoped recheck
+//!
+//! `--scoped` is the same idea one level up. It primes a full check, then walks
+//! a SEQUENCE of edits through the incremental seam the editor's server
+//! reconcile uses, and after every step also runs a cold full check of the
+//! identical state in the same process:
+//!
+//!   netlisp drc-dump --scoped barracuda > seq.txt
+//!   diff <(grep ' scoped ' seq.txt | cut -d' ' -f3-) \
+//!        <(grep ' full '   seq.txt | cut -d' ' -f3-)   # must be empty
+//!
+//! The three deferred kinds (`reference_plane_gap`, `reference_transition`,
+//! `loop_area`) are excluded from both sides: a scoped pass carries them rather
+//! than recomputing them, which is a decision, not a discrepancy.
 
 const std = @import("std");
 const clock = @import("infra/clock.zig");
 const infra_fs = @import("infra/fs.zig");
 const drc = @import("placement/drc.zig");
 const drc_rules = @import("serve/drc_rules.zig");
+const fab_readiness = @import("fab_readiness.zig");
 const pcb_layout_page = @import("serve/pcb_layout_page.zig");
 const router = @import("placement/router.zig");
 const modules_mod = @import("serve/modules.zig");
@@ -74,6 +90,10 @@ pub const Mutation = enum(u8) {
     delete_via = 4,
     /// Nudge the first via 0.05 mm in +x.
     move_via = 5,
+    /// Shift the LAST track 5 mm in +y — an edit deliberately far from where
+    /// the first one is, so a scoped recheck's fill-stability predicate is
+    /// exercised on copper that reaches a different part of the board.
+    move_far_track = 6,
 };
 
 /// The mutation `--mutate k` names, or null for a number that names none —
@@ -91,6 +111,10 @@ const Args = struct {
     names: []const []const u8 = &.{},
     mutate: Mutation = .none,
     prime: bool = false,
+    /// Run the mutation LIST as a session: prime a full check, then re-check
+    /// scoped after each edit and dump a cold full check of the same state
+    /// beside it. `--mutate` and `--prime` are ignored in this mode.
+    scoped: bool = false,
 };
 
 fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) DumpError!Args {
@@ -108,6 +132,8 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) DumpError!Args 
             out.mutate = mutationOf(k) orelse return error.DrcDumpUsage;
         } else if (std.mem.eql(u8, a, "--prime")) {
             out.prime = true;
+        } else if (std.mem.eql(u8, a, "--scoped")) {
+            out.scoped = true;
         } else if (std.mem.startsWith(u8, a, "--")) {
             return error.DrcDumpUsage;
         } else try names.append(arena, a);
@@ -124,6 +150,13 @@ pub fn mutate(arena: std.mem.Allocator, routed: router.RouteResult, m: Mutation)
     var out = routed;
     switch (m) {
         .none => return out,
+        .move_far_track => {
+            if (routed.tracks.len == 0) return out;
+            const moved = try arena.dupe(router.Track, routed.tracks);
+            moved[moved.len - 1].y1 += 5;
+            moved[moved.len - 1].y2 += 5;
+            out.tracks = moved;
+        },
         .move_track, .add_track => {
             if (routed.tracks.len == 0) return out;
             const grown = try arena.alloc(router.Track, routed.tracks.len + @intFromBool(m == .add_track));
@@ -200,6 +233,132 @@ fn writeSeam(
     for (try lines(arena, violations)) |line| try w.print("{s} {s} {s}\n", .{ name, seam, line });
 }
 
+/// The mutation sequence `--scoped` walks: each edit is applied to the state
+/// the previous one left, so the session is exercised as an editing session is
+/// rather than as a series of independent one-edit boards. A via edit is in
+/// there deliberately — it unsettles every unclipped fill on the board and is
+/// the scoped path's worst case, which a verification run must include and not
+/// avoid.
+const scoped_sequence = [_]Mutation{ .move_track, .add_track, .move_far_track, .move_via, .delete_track, .delete_via, .move_track };
+
+/// Prime a full check, then walk `scoped_sequence`, re-checking scoped after
+/// every edit and dumping a COLD full check of the identical state beside it.
+/// The two seams are labelled `scoped` and `full`, so
+/// `diff <(grep " scoped " out) <(grep " full " out)` — with the kind names
+/// swapped — is the whole claim.
+fn dumpScoped(
+    alloc: std.mem.Allocator,
+    w: *std.Io.Writer,
+    args: Args,
+    name: []const u8,
+    solved: pcb_layout_page.SolvedRequest,
+) DumpError!void {
+    const saved = solved.restored.routes orelse router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
+    const clearance = solved.placement.rules.design.routeParams().clearance;
+    const zones = solved.shown_zones.user;
+    // One board-edge field for the whole session, exactly as the server's
+    // reconcile session holds one: it depends on the placement alone, and the
+    // scoped path runs only over an unchanged placement.
+    const edge = drc_rules.sharedEdgeField(alloc, solved.placement) catch null;
+    const base: drc_rules.CopperCheck = .{ .placement = solved.placement, .routed = saved, .clearance = clearance, .zones = zones, .base_edge = edge };
+
+    const t_prime = clock.nanoTimestamp();
+    var session = drc_rules.checkPrimingZonesTally(alloc, args.project_dir, name, base);
+    try w.print("# {s} scoped prime ms={d:.1} count={d} ok={} fills={d}\n", .{
+        name, @as(f64, @floatFromInt(clock.nanoTimestamp() - t_prime)) / ns_per_ms, session.violations.len, session.scoped, session.reuse.fills,
+    });
+    // The deferred kinds are carried, not recomputed, so the claim about them is
+    // not "equal to a cold full pass" but "equal to the LAST FULL pass". That
+    // pass is the prime, and this is its answer.
+    const deferred_at_prime = try lines(alloc, keepDeferred(alloc, session.violations));
+    var state = saved;
+    for (scoped_sequence, 0..) |m, step| {
+        const next = try mutate(alloc, state, m);
+        const delta = drc_rules.diffCopper(alloc, state, next, solved.placement.nets.len) catch break;
+        const in: drc_rules.CopperCheck = .{ .placement = solved.placement, .routed = next, .clearance = clearance, .zones = zones, .base_edge = edge };
+
+        const t_scoped = clock.nanoTimestamp();
+        const scoped = drc_rules.checkScopedZonesTally(alloc, args.project_dir, name, in, session.prior, delta);
+        const scoped_ns = clock.nanoTimestamp() - t_scoped;
+        if (!scoped.scoped) {
+            try w.print("# {s} step{d} {s} REFUSED\n", .{ name, step, @tagName(m) });
+            break;
+        }
+        const t_full = clock.nanoTimestamp();
+        const full = drc_rules.checkFilteredZonesTally(alloc, args.project_dir, name, in);
+        const full_ns = clock.nanoTimestamp() - t_full;
+
+        const tag = try std.fmt.allocPrint(alloc, "{s}/step{d}/{s}", .{ name, step, @tagName(m) });
+        try w.print("# {s} repoured={d}/{d} delta={d}\n", .{ tag, scoped.reuse.repoured, scoped.reuse.fills, delta.count });
+        try writeSeam(alloc, w, tag, "scoped", scoped_ns, dropDeferred(alloc, scoped.violations));
+        try writeSeam(alloc, w, tag, "full", full_ns, dropDeferred(alloc, full.violations));
+        try writeTally(w, tag, "scoped", scoped.tally);
+        try writeTally(w, tag, "full", full.tally);
+        try writeDeferred(alloc, w, tag, deferred_at_prime, scoped.violations);
+
+        session.held.release();
+        session = scoped;
+        state = next;
+    }
+    session.held.release();
+}
+
+/// The three kinds a scoped recheck defers are excluded from the differential:
+/// they are carried forward by design, so comparing them against a cold full
+/// pass would be comparing the scoped path against the thing it deliberately
+/// does not do. Their carry-forward is asserted separately, by the committed
+/// fixture tests.
+fn dropDeferred(arena: std.mem.Allocator, list: []const drc.Violation) []const drc.Violation {
+    var out: std.ArrayList(drc.Violation) = .empty;
+    for (list) |v| {
+        if (drc_rules.isDeferredKind(v.kind)) continue;
+        out.append(arena, v) catch return out.items;
+    }
+    return out.items;
+}
+
+/// The deferred kinds a scoped pass carried, checked against the last full
+/// pass's answer for them. A mismatch is a carry that lost or invented a
+/// finding, which no timing number would ever show.
+fn writeDeferred(
+    arena: std.mem.Allocator,
+    w: *std.Io.Writer,
+    name: []const u8,
+    expected: []const []const u8,
+    got: []const drc.Violation,
+) DumpError!void {
+    const now = try lines(arena, keepDeferred(arena, got));
+    if (now.len != expected.len) {
+        try w.print("{s} DEFERRED MISMATCH count {d} != {d}\n", .{ name, now.len, expected.len });
+        return;
+    }
+    for (now, expected) |a, b| {
+        if (std.mem.eql(u8, a, b)) continue;
+        try w.print("{s} DEFERRED MISMATCH {s}\n", .{ name, a });
+        return;
+    }
+    try w.print("{s} DEFERRED carried={d}\n", .{ name, now.len });
+}
+
+fn keepDeferred(arena: std.mem.Allocator, list: []const drc.Violation) []const drc.Violation {
+    var out: std.ArrayList(drc.Violation) = .empty;
+    for (list) |v| {
+        if (!drc_rules.isDeferredKind(v.kind)) continue;
+        out.append(arena, v) catch return out.items;
+    }
+    return out.items;
+}
+
+fn writeTally(w: *std.Io.Writer, name: []const u8, seam: []const u8, tally: ?fab_readiness.Tally) DumpError!void {
+    const t = tally orelse {
+        try w.print("{s} {s} TALLY none\n", .{ name, seam });
+        return;
+    };
+    try w.print("{s} {s} TALLY routed={d} total={d} unique_routed={d} unique_total={d} open={d} gaps={d}\n", .{
+        name, seam, t.routed, t.total, t.unique_routed, t.unique_total, t.open.len, t.hairline_gaps,
+    });
+}
+
 fn dumpOne(
     alloc: std.mem.Allocator,
     w: *std.Io.Writer,
@@ -217,6 +376,7 @@ fn dumpOne(
         try w.print("# {s} UNRESOLVED\n", .{name});
         return;
     };
+    if (args.scoped) return dumpScoped(alloc, w, args, name, solved);
     const saved = solved.restored.routes orelse router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
     const clearance = solved.placement.rules.design.routeParams().clearance;
     const zones = solved.shown_zones.user;
@@ -306,6 +466,7 @@ test "drc-dump CLI parses flags and positionals" {
     // rather than a silent empty dump that would "pass" any diff.
     try testing.expectError(error.DrcDumpUsage, parseArgs(arena, &.{"--prime"}));
     try testing.expectError(error.DrcDumpUsage, parseArgs(arena, &.{ "--mutate", "9", "b" }));
+    try testing.expect((try parseArgs(arena, &.{ "--scoped", "b" })).scoped);
 }
 
 // spec: drc-dump - every violation renders one line carrying every field, including the track identity automatic cleanup reads, and the lines sort deterministically
@@ -353,4 +514,7 @@ test "a mutation copies the copper it edits" {
     try testing.expectEqual(@as(usize, 1), (try mutate(arena, saved, .delete_via)).vias.len);
     try testing.expectEqual(@as(f64, 1.05), (try mutate(arena, saved, .move_via)).vias[0].x);
     try testing.expectEqual(@as(f64, 1), vias[0].x);
+    const far = try mutate(arena, saved, .move_far_track);
+    try testing.expectEqual(@as(f64, 5), far.tracks[far.tracks.len - 1].y1);
+    try testing.expectEqual(@as(f64, 0), tracks[tracks.len - 1].y1);
 }

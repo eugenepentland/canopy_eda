@@ -9,6 +9,7 @@
 const std = @import("std");
 const board_layers = @import("../board_layers.zig");
 const drc = @import("drc.zig");
+const drc_scope = @import("drc_scope.zig");
 const net_name = @import("../net_name.zig");
 const numeric = @import("../numeric.zig");
 const net_identity = @import("net_identity.zig");
@@ -70,6 +71,11 @@ const Surface = struct {
     outer: []const Point,
     holes: []const []const Point,
     box: Box,
+    /// Flat index of the fill this component was traced from — planes first (net
+    /// major, carrying layer minor), then the user zones in posted order. It is
+    /// what lets a scoped recheck say "this finding came from a fill the edit
+    /// could not have moved".
+    fill: usize = 0,
 };
 
 const FillTarget = struct {
@@ -134,6 +140,14 @@ const Audit = struct {
     identity: net_identity.Identity,
     violations: *std.ArrayList(drc.Violation),
     surfaces: *std.ArrayList(Surface),
+    /// Parallel to `violations`: what each finding was derived from. Written
+    /// through `cur`, which every check sets before it appends.
+    owners: *std.ArrayList(Owner),
+    cur: *Owner,
+
+    fn record(self: Audit) std.mem.Allocator.Error!void {
+        try self.owners.append(self.arena, self.cur.*);
+    }
 
     fn appendInvalid(self: Audit, net: []const u8, layer: ?board_layers.SignalIndex, at: Point) std.mem.Allocator.Error!void {
         try self.violations.append(self.arena, .{
@@ -146,6 +160,7 @@ const Audit = struct {
             .who = .{ .net_a = namedNetIndex(self.placement, self.identity, net) },
             .layer = layer,
         });
+        try self.record();
     }
 
     fn appendOverlap(self: Audit, surface: Surface, foreign: ForeignParty, at: Point) std.mem.Allocator.Error!void {
@@ -164,16 +179,37 @@ const Audit = struct {
             },
             .layer = surface.layer,
         });
+        try self.record();
     }
 
-    fn appendFill(self: Audit, target: FillTarget, fill: pour.Fill) std.mem.Allocator.Error!void {
+    /// Reduce one fill to its surfaces, reporting the components that are not
+    /// well-formed solids.
+    ///
+    /// `cached` is the per-contour verdict a PREVIOUS audit of this exact fill
+    /// reached. Ring validation is the expensive half of this module — nearly a
+    /// second of a barracuda-class board — and a raster the memo handed back
+    /// unchanged has, by construction, the same rings and therefore the same
+    /// verdict. When it is supplied the verdicts are replayed rather than
+    /// recomputed, and the findings themselves are NOT re-emitted: the caller
+    /// carries those forward from its ledger, so a replayed fill contributes
+    /// exactly its surfaces and no duplicate rows.
+    fn appendFill(
+        self: Audit,
+        target: FillTarget,
+        fill: pour.Fill,
+        index: usize,
+        cached: ?[]const ?Point,
+    ) std.mem.Allocator.Error![]const ?Point {
+        self.cur.* = .{ .fill_a = drc.partyIndex(index) };
         if (!fill.integrity_ok or fill.holes.len != fill.contours.len) {
-            try self.appendInvalid(target.net, target.layer, firstFillPoint(&.{fill}));
-            return;
+            if (cached == null) try self.appendInvalid(target.net, target.layer, firstFillPoint(&.{fill}));
+            return &.{};
         }
-        for (fill.contours, fill.holes) |outer, holes| {
+        const verdicts = try self.arena.alloc(?Point, fill.contours.len);
+        for (fill.contours, fill.holes, verdicts, 0..) |outer, holes, *verdict, i| {
             const box = Box.of(outer) orelse {
-                try self.appendInvalid(target.net, target.layer, .{ 0, 0 });
+                verdict.* = .{ 0, 0 };
+                if (cached == null) try self.appendInvalid(target.net, target.layer, .{ 0, 0 });
                 continue;
             };
             const candidate = Surface{
@@ -185,11 +221,95 @@ const Audit = struct {
                 .outer = outer,
                 .holes = holes,
                 .box = box,
+                .fill = index,
             };
-            if (surfaceIssue(candidate)) |at| {
-                try self.appendInvalid(target.net, target.layer, at);
+            verdict.* = if (cached) |prior|
+                (if (i < prior.len) prior[i] else surfaceIssue(candidate))
+            else
+                surfaceIssue(candidate);
+            if (verdict.*) |at| {
+                if (cached == null) try self.appendInvalid(target.net, target.layer, at);
             } else try self.surfaces.append(self.arena, candidate);
         }
+        return verdicts;
+    }
+};
+
+/// WHICH inputs one pour finding was derived from.
+///
+/// A scoped recheck retires exactly the findings its edit could have moved and
+/// carries the rest, and this is what makes "could have moved" decidable from a
+/// stored row: a finding whose surfaces both came from fills the memo handed
+/// back unchanged, and whose copper feature the edit did not touch, is the same
+/// finding it was last pass.
+pub const Owner = struct {
+    /// Flat index of the fill whose surface this finding is on, or -1 for a
+    /// board-level malformation that belongs to no single fill.
+    fill_a: i32 = -1,
+    /// The second surface's fill, for a solid-against-solid overlap.
+    fill_b: i32 = -1,
+    /// Content key (`drc_scope.trackKey` / `viaKey`) of the copper feature that
+    /// overlapped a pour, or 0 when the finding involves no independently
+    /// editable feature — a pad (poses are fixed on the scoped path), an arc, an
+    /// RF path, or a surface-only finding.
+    feature: u64 = 0,
+};
+
+/// One audit's full result: the findings, what each was derived from, and the
+/// per-fill ring verdicts a later scoped audit of the same rasters can replay.
+pub const Audited = struct {
+    violations: []const drc.Violation = &.{},
+    owners: []const Owner = &.{},
+    /// Per flat fill, per contour: what `surfaceIssue` answered.
+    issues: []const []const ?Point = &.{},
+};
+
+/// What a scoped audit is allowed to skip, and what it carries instead.
+pub const Scope = struct {
+    /// One flag per flat fill (planes first — net major, carrying layer minor —
+    /// then the user zones in posted order): this raster is NOT the one the
+    /// previous audit saw.
+    changed_fill: []const bool = &.{},
+    /// Content keys of every copper feature the edit added or removed.
+    changed_feature: []const u64 = &.{},
+    /// The previous audit's result over the previous board state.
+    prior: Audited = .{},
+
+    fn fillChanged(self: Scope, index: i32) bool {
+        if (index < 0) return false;
+        const i: usize = @intCast(index);
+        // A prior audit that does not cover this fill cannot answer for it, so
+        // it counts as changed. Replay and carry-forward then agree by
+        // construction rather than by the caller passing aligned slices.
+        if (i >= self.changed_fill.len or i >= self.prior.issues.len) return true;
+        return self.changed_fill[i];
+    }
+
+    fn featureChanged(self: Scope, key: u64) bool {
+        if (key == 0) return false;
+        for (self.changed_feature) |k| if (k == key) return true;
+        return false;
+    }
+
+    /// May a previous finding ride through untouched?
+    fn survives(self: Scope, owner: Owner) bool {
+        // A board-level malformation belongs to no fill and is always re-judged,
+        // so it can never be carried and re-emitted at once.
+        if (owner.fill_a < 0) return false;
+        return !self.fillChanged(owner.fill_a) and
+            !self.fillChanged(owner.fill_b) and
+            !self.featureChanged(owner.feature);
+    }
+
+    /// Must this (feature, surface) pair be re-judged? Only when one of the two
+    /// actually moved — otherwise its verdict is already in the ledger.
+    fn pairLive(self: Scope, feature: u64, surface_fill: usize) bool {
+        return self.featureChanged(feature) or self.fillChanged(drc.partyIndex(surface_fill));
+    }
+
+    fn cachedIssues(self: Scope, index: usize) ?[]const ?Point {
+        if (self.fillChanged(drc.partyIndex(index))) return null;
+        return self.prior.issues[index];
     }
 };
 
@@ -202,53 +322,121 @@ pub fn check(
     routed: router.RouteResult,
     prepared: drc.PreparedCopper,
 ) std.mem.Allocator.Error![]const drc.Violation {
+    return (try checkAudited(arena, placement, routed, prepared, null)).violations;
+}
+
+/// `check` with its evidence, and optionally scoped by a copper edit.
+///
+/// With `scope` null this is the full audit and the result is the same multiset
+/// `check` has always returned, plus the bookkeeping a later scoped call reads.
+/// With a scope it re-judges only the fills the edit could have moved and only
+/// the (feature, surface) pairs one of whose sides moved, then merges the
+/// surviving findings of the previous audit back in — the same multiset again,
+/// for a fraction of the ring geometry.
+pub fn checkAudited(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    prepared: drc.PreparedCopper,
+    scope: ?Scope,
+) std.mem.Allocator.Error!Audited {
     var violations: std.ArrayList(drc.Violation) = .empty;
     var surfaces: std.ArrayList(Surface) = .empty;
+    var owners: std.ArrayList(Owner) = .empty;
+    var issues: std.ArrayList([]const ?Point) = .empty;
+    var cur: Owner = .{};
     const identity = try net_identity.Identity.init(arena, placement);
-    const audit = Audit{ .arena = arena, .placement = placement, .identity = identity, .violations = &violations, .surfaces = &surfaces };
+    const a = Audit{
+        .arena = arena,
+        .placement = placement,
+        .identity = identity,
+        .violations = &violations,
+        .surfaces = &surfaces,
+        .owners = &owners,
+        .cur = &cur,
+    };
 
     for (prepared.plane_fills) |net_fills| {
         if (net_fills.layers.len != net_fills.fills.len) {
-            try audit.appendInvalid(net_fills.net_name, null, firstFillPoint(net_fills.fills));
+            cur = .{};
+            try a.appendInvalid(net_fills.net_name, null, firstFillPoint(net_fills.fills));
             continue;
         }
         for (net_fills.layers, net_fills.fills) |spec, fill| {
+            const index = issues.items.len;
             const layer = if (spec.track_layer) |signal| board_layers.SignalIndex.of(signal) else null;
             if (spec.stack == 0 or spec.stack > placement.rules.layerStack().stackCount()) {
-                try audit.appendInvalid(net_fills.net_name, layer, firstFillPoint(&.{fill}));
+                cur = .{ .fill_a = drc.partyIndex(index) };
+                if (cachedFor(scope, index) == null) try a.appendInvalid(net_fills.net_name, layer, firstFillPoint(&.{fill}));
+                try issues.append(arena, &.{});
                 continue;
             }
-            try audit.appendFill(.{ .net = net_fills.net_name, .carrier = spec.net, .stack = spec.stack, .layer = layer }, fill);
+            try issues.append(arena, try a.appendFill(
+                .{ .net = net_fills.net_name, .carrier = spec.net, .stack = spec.stack, .layer = layer },
+                fill,
+                index,
+                cachedFor(scope, index),
+            ));
         }
     }
 
     if (prepared.zones.len != prepared.zone_fills.len) {
+        cur = .{};
         const point = if (prepared.zone_fills.len > 0) firstFillPoint(prepared.zone_fills) else .{ 0, 0 };
-        try audit.appendInvalid("", null, point);
+        try a.appendInvalid("", null, point);
     }
     const zone_count = @min(prepared.zones.len, prepared.zone_fills.len);
     for (prepared.zones[0..zone_count], prepared.zone_fills[0..zone_count]) |zone, fill| {
+        const index = issues.items.len;
         const signal_count = placement.rules.signalLayerCount();
         if (zone.layer >= signal_count) {
-            try audit.appendInvalid(zone.net, null, firstFillPoint(&.{fill}));
+            cur = .{ .fill_a = drc.partyIndex(index) };
+            if (cachedFor(scope, index) == null) try a.appendInvalid(zone.net, null, firstFillPoint(&.{fill}));
+            try issues.append(arena, &.{});
             continue;
         }
         const layer = board_layers.SignalIndex.of(zone.layer);
         const stack = placement.rules.signalStackIndex(zone.layer);
-        try audit.appendFill(.{ .net = zone.net, .carrier = .{ .named = zone.net }, .stack = stack, .layer = layer }, fill);
+        try issues.append(arena, try a.appendFill(
+            .{ .net = zone.net, .carrier = .{ .named = zone.net }, .stack = stack, .layer = layer },
+            fill,
+            index,
+            cachedFor(scope, index),
+        ));
     }
 
-    for (surfaces.items, 0..) |a, i| {
-        for (surfaces.items[i + 1 ..]) |b| {
-            if (a.stack != b.stack or sameCarrier(audit, a, b)) continue;
-            const at = solidContact(a, b) orelse continue;
-            var report_surface = a;
-            report_surface.layer = a.layer orelse b.layer;
-            try audit.appendOverlap(report_surface, .{ .net = b.net_index }, at);
+    for (surfaces.items, 0..) |first, i| {
+        for (surfaces.items[i + 1 ..]) |second| {
+            if (first.stack != second.stack or sameCarrier(a, first, second)) continue;
+            if (scope) |s| {
+                if (!s.fillChanged(drc.partyIndex(first.fill)) and !s.fillChanged(drc.partyIndex(second.fill))) continue;
+            }
+            const at = solidContact(first, second) orelse continue;
+            var report_surface = first;
+            report_surface.layer = first.layer orelse second.layer;
+            cur = .{ .fill_a = drc.partyIndex(first.fill), .fill_b = drc.partyIndex(second.fill) };
+            try a.appendOverlap(report_surface, .{ .net = second.net_index }, at);
         }
     }
-    try checkForeignCopper(audit, routed);
-    return violations.toOwnedSlice(arena);
+    try checkForeignCopper(a, routed, scope);
+    if (scope) |s| {
+        for (s.prior.violations, 0..) |v, i| {
+            const owner = if (i < s.prior.owners.len) s.prior.owners[i] else Owner{};
+            if (!s.survives(owner)) continue;
+            try violations.append(arena, v);
+            try owners.append(arena, owner);
+        }
+    }
+    return .{
+        .violations = try violations.toOwnedSlice(arena),
+        .owners = try owners.toOwnedSlice(arena),
+        .issues = try issues.toOwnedSlice(arena),
+    };
+}
+
+fn cachedFor(scope: ?Scope, index: usize) ?[]const ?Point {
+    const s = scope orelse return null;
+    return s.cachedIssues(index);
 }
 
 fn firstFillPoint(fills: []const pour.Fill) Point {
@@ -298,13 +486,22 @@ fn pointInSolid(surface: Surface, point: Point) bool {
 /// are capsules, RF paths use their exact fabricated swept regions, vias are
 /// discs, and pads use their world collision rings. Pads are considered only
 /// on routable signal layers; vias span the complete physical stack.
-fn checkForeignCopper(audit: Audit, routed: router.RouteResult) std.mem.Allocator.Error!void {
+fn checkForeignCopper(audit: Audit, routed: router.RouteResult, scope: ?Scope) std.mem.Allocator.Error!void {
     const arcs = try path_copper.filterArcs(audit.arena, routed.rf_port_outcomes, routed.arcs);
-    try checkForeignTracks(audit, routed.tracks, routed.rf_port_outcomes, arcs);
-    try checkForeignRfPaths(audit, routed.rf_port_outcomes);
-    try checkForeignArcs(audit, arcs);
-    try checkForeignVias(audit, routed.vias);
-    try checkForeignPads(audit);
+    try checkForeignTracks(audit, routed.tracks, routed.rf_port_outcomes, arcs, scope);
+    try checkForeignRfPaths(audit, routed.rf_port_outcomes, scope);
+    try checkForeignArcs(audit, arcs, scope);
+    try checkForeignVias(audit, routed.vias, scope);
+    try checkForeignPads(audit, scope);
+}
+
+/// Is this (feature, surface) pair one the scoped audit still has to judge? With
+/// no scope every pair is live; with one, only the pairs where the copper or the
+/// raster actually moved — the rest are already recorded in the ledger the
+/// caller merges back in.
+fn live(scope: ?Scope, feature: u64, surface: Surface) bool {
+    const s = scope orelse return true;
+    return s.pairLive(feature, surface.fill);
 }
 
 fn checkForeignTracks(
@@ -312,6 +509,7 @@ fn checkForeignTracks(
     tracks: []const router.Track,
     paths: []const rf_port_report.Outcome,
     arcs: []const router.Arc,
+    scope: ?Scope,
 ) std.mem.Allocator.Error!void {
     const signal_count = audit.placement.rules.signalLayerCount();
     for (tracks) |track| {
@@ -320,9 +518,12 @@ fn checkForeignTracks(
             arcOwnsTrack(arcs, track)) continue;
         const stack = audit.placement.rules.signalStackIndex(track.layer);
         const radius = @max(0, track.width / 2);
+        const key = drc_scope.trackKey(track);
         for (audit.surfaces.items) |surface| {
             if (surface.stack != stack or carrierOwnsNet(audit, surface, track.net)) continue;
+            if (!live(scope, key, surface)) continue;
             const at = solidCapsuleContact(surface, .{ track.x1, track.y1 }, .{ track.x2, track.y2 }, radius) orelse continue;
+            audit.cur.* = .{ .fill_a = drc.partyIndex(surface.fill), .feature = key };
             try audit.appendOverlap(surface, .{ .net = track.net }, at);
         }
     }
@@ -332,7 +533,7 @@ fn checkForeignTracks(
 /// Compact edit handles and solver chords are suppressed by
 /// `checkForeignTracks`, so one physical path has one geometry authority and
 /// a taper's narrow end is never widened to its other endpoint's width.
-fn checkForeignRfPaths(audit: Audit, paths: []const rf_port_report.Outcome) std.mem.Allocator.Error!void {
+fn checkForeignRfPaths(audit: Audit, paths: []const rf_port_report.Outcome, scope: ?Scope) std.mem.Allocator.Error!void {
     const signal_count = audit.placement.rules.signalLayerCount();
     for (paths) |path| {
         if (!path.success or path.physical.gate_removed) continue;
@@ -341,9 +542,11 @@ fn checkForeignRfPaths(audit: Audit, paths: []const rf_port_report.Outcome) std.
         const stack = audit.placement.rules.signalStackIndex(path.physical.layer);
         for (audit.surfaces.items) |surface| {
             if (surface.stack != stack or carrierOwnsNet(audit, surface, path.net)) continue;
+            if (!live(scope, 0, surface)) continue;
             for (regions) |region| {
                 if (region.len < 3) continue;
                 const at = solidRingContact(surface, region) orelse continue;
+                audit.cur.* = .{ .fill_a = drc.partyIndex(surface.fill) };
                 try audit.appendOverlap(surface, .{ .net = path.net }, at);
                 break;
             }
@@ -351,7 +554,7 @@ fn checkForeignRfPaths(audit: Audit, paths: []const rf_port_report.Outcome) std.
     }
 }
 
-fn checkForeignArcs(audit: Audit, arcs: []const router.Arc) std.mem.Allocator.Error!void {
+fn checkForeignArcs(audit: Audit, arcs: []const router.Arc, scope: ?Scope) std.mem.Allocator.Error!void {
     const signal_count = audit.placement.rules.signalLayerCount();
     for (arcs) |arc| {
         if (!validArc(arc, signal_count)) continue;
@@ -359,7 +562,9 @@ fn checkForeignArcs(audit: Audit, arcs: []const router.Arc) std.mem.Allocator.Er
         const probe = ArcProbe.init(arc);
         for (audit.surfaces.items) |surface| {
             if (surface.stack != stack or carrierOwnsNet(audit, surface, arc.net)) continue;
+            if (!live(scope, 0, surface)) continue;
             const at = solidArcContact(surface, probe) orelse continue;
+            audit.cur.* = .{ .fill_a = drc.partyIndex(surface.fill) };
             try audit.appendOverlap(surface, .{ .net = arc.net }, at);
         }
     }
@@ -401,20 +606,23 @@ fn samePoint(a: Point, b: Point) bool {
     return distance2(a, b) <= ring_eps * ring_eps;
 }
 
-fn checkForeignVias(audit: Audit, vias: []const router.Via) std.mem.Allocator.Error!void {
+fn checkForeignVias(audit: Audit, vias: []const router.Via, scope: ?Scope) std.mem.Allocator.Error!void {
     for (vias) |via| {
         const center = Point{ via.x, via.y };
         if (!finitePoint(center) or !std.math.isFinite(via.dia)) continue;
         const radius = @max(0, via.dia / 2);
+        const key = drc_scope.viaKey(via);
         for (audit.surfaces.items) |surface| {
             if (carrierOwnsNet(audit, surface, via.net)) continue;
+            if (!live(scope, key, surface)) continue;
             const at = solidCapsuleContact(surface, center, center, radius) orelse continue;
+            audit.cur.* = .{ .fill_a = drc.partyIndex(surface.fill), .feature = key };
             try audit.appendOverlap(surface, .{ .net = via.net }, at);
         }
     }
 }
 
-fn checkForeignPads(audit: Audit) std.mem.Allocator.Error!void {
+fn checkForeignPads(audit: Audit, scope: ?Scope) std.mem.Allocator.Error!void {
     for (audit.placement.parts, 0..) |part, part_i| {
         for (part.pads) |pad| {
             if (pad.npth) continue;
@@ -423,7 +631,11 @@ fn checkForeignPads(audit: Audit) std.mem.Allocator.Error!void {
             for (audit.surfaces.items) |surface| {
                 if (!padOnSurface(audit.placement.rules, part, pad.thru, surface) or
                     carrierOwnsNet(audit, surface, pad_net)) continue;
+                // A pad has no feature key: the scoped path runs only over an
+                // unchanged placement, so a pad moves exactly never.
+                if (!live(scope, 0, surface)) continue;
                 const at = solidPadContact(surface, shape) orelse continue;
+                audit.cur.* = .{ .fill_a = drc.partyIndex(surface.fill) };
                 try audit.appendOverlap(surface, .{ .net = pad_net, .part = drc.partyIndex(part_i), .pad = pad.number }, at);
             }
         }
@@ -889,7 +1101,17 @@ test "pour audit resolves one unqualified leaf alias to its canonical net" {
     const surface = testSurface("VOUT", &.{ .{ 0, 0 }, .{ 1, 0 }, .{ 1, 1 } }, &.{});
     var violations: std.ArrayList(drc.Violation) = .empty;
     var surfaces: std.ArrayList(Surface) = .empty;
-    const audit = Audit{ .arena = arena, .placement = placement, .identity = identity, .violations = &violations, .surfaces = &surfaces };
+    var owners: std.ArrayList(Owner) = .empty;
+    var cur: Owner = .{};
+    const audit = Audit{
+        .arena = arena,
+        .placement = placement,
+        .identity = identity,
+        .violations = &violations,
+        .surfaces = &surfaces,
+        .owners = &owners,
+        .cur = &cur,
+    };
     try std.testing.expect(carrierOwnsNet(audit, surface, 0));
 }
 

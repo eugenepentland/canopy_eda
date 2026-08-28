@@ -749,6 +749,79 @@ pub fn fillKey(
     return fp.final();
 }
 
+/// Can this fill's content key have MOVED, given the copper an edit changed?
+///
+/// `fillKey` answers that exactly, and answering it exactly is the expensive
+/// part of a warm reporting DRC: the digesting walk is the raster's own
+/// traversal minus the writes, so re-keying a barracuda-class board's fifty-odd
+/// fills to discover that one of them moved costs half a second. This is the
+/// cheap conservative half of that question — it reads only the CHANGED
+/// features, and every `false` it returns is a promise that `fillKey` would
+/// answer with the same key, so the retained raster may be borrowed unkeyed.
+///
+/// It is sound only because each skip below is a skip the walk itself performs,
+/// applied with the walk's own clearance functions rather than an estimate:
+///
+///   * `spec.track_layer == null` — an INNER plane stamps no track at all
+///     (`stampForeign` enters the track loop only for a track-carrying spec),
+///     and `markSeeds` never reads a track, so no track edit can reach it.
+///   * `t.layer != spec.track_layer` — an outer face stamps only its own layer.
+///   * `planeCarries` — a track on the fill's OWN net is skipped as foreign and
+///     is not a seed either, so editing it cannot move this raster.
+///   * the clip window — a hand-drawn pour digests only the features whose
+///     complete stamp window reaches its active box (`stampWindowActive`), so an
+///     edit elsewhere leaves it borrowable even on its own layer.
+///
+/// A VIA is deliberately far less forgiving: `markSeeds` seeds from every
+/// same-net via and is NOT clip-culled, and `stampForeign` stamps every foreign
+/// via on every layer. So a via edit unsettles every unclipped fill on the
+/// board, which is the honest worst case rather than a bug.
+///
+/// Arcs and RF paths are NOT considered: a caller that can change them must
+/// treat every fill as unstable (the server's reconcile refuses the scoped path
+/// outright when they differ), because a predicate that silently ignored an
+/// input would be exactly the unsound shortcut this comment exists to rule out.
+pub fn fillKeyStable(
+    placement: optimizer.Placement,
+    spec: LayerSpec,
+    tracks: []const router.Track,
+    vias: []const router.Via,
+) bool {
+    if (tracks.len == 0 and vias.len == 0) return true;
+    const lat = lattice(placement);
+    // A degenerate lattice digests nothing but its own scalars, which no copper
+    // edit touches (`fillKey` returns before the walk for exactly this case).
+    if (lat.nx < 1 or lat.ny < 1) return true;
+    const rules = placement.rules;
+    const base = baseGapFor(rules.design, spec);
+    const inset = rules.design.pourEdge();
+    const r_min = @max(0.1, @min(smallestPourGap(placement), inset));
+    const guard = isoGuardFor(lat.pitch, r_min);
+    const active = clipHalo(lat.pitch, spec.clip);
+    if (spec.track_layer) |tl| for (tracks) |t| {
+        if (t.layer != tl) continue;
+        if (planeCarries(spec.net, netName(placement, t.net))) continue;
+        const reach = trackPourStampClearance(placement, t, spec.net, base, guard);
+        const win = t.width / 2 + reach + window_cells * lat.pitch;
+        if (!stampWindowActive(
+            active,
+            @min(t.x1, t.x2) - win,
+            @min(t.y1, t.y2) - win,
+            @max(t.x1, t.x2) + win,
+            @max(t.y1, t.y2) + win,
+        )) continue;
+        return false;
+    };
+    for (vias) |v| {
+        // A same-net via is a SEED, and seeding is not clip-culled.
+        if (planeCarries(spec.net, netName(placement, v.net))) return false;
+        const win = v.dia / 2 + viaPlaneClearance(placement, v, spec.net, base) + window_cells * lat.pitch;
+        if (!stampWindowActive(active, v.x - win, v.y - win, v.x + win, v.y + win)) continue;
+        return false;
+    }
+    return true;
+}
+
 /// `computeShared`, memoised per FILL. A hit borrows the exact raster a cold
 /// compute would produce; a miss pours it and retains it. `memo` null is
 /// `computeShared` unchanged, which is what the wasm engine and every
@@ -761,6 +834,33 @@ pub fn computeMemo(
     base: ?EdgeField,
     memo: ?FillMemo,
 ) std.mem.Allocator.Error!Fill {
+    return (try computeMemoKeyed(arena, placement, copper, spec, base, memo)).fill;
+}
+
+/// One fill and the content key it was memoised under.
+///
+/// A caller that wants to ask for this exact raster AGAIN — a server session
+/// re-checking the same board after an edit that could not have reached it —
+/// keeps the key and asks the memo for it, rather than keeping the fill. The
+/// difference matters: the fill is a borrow owned by the memo, and a later pass
+/// that merely copied the value would be reading a raster nothing is holding.
+/// Asking with the key takes a proper reference (or misses, and pours).
+pub const KeyedFill = struct {
+    fill: Fill,
+    key: content_key.Key,
+};
+
+/// `computeMemo`, reporting the key as well. Unmemoised callers get the key the
+/// fill WOULD have had, computed only when they asked for it — with no memo
+/// there is nothing to look it up in, so it is left zero rather than paid for.
+pub fn computeMemoKeyed(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    copper: Copper,
+    spec: LayerSpec,
+    base: ?EdgeField,
+    memo: ?FillMemo,
+) std.mem.Allocator.Error!KeyedFill {
     return computeFillMemo(arena, placement, copper, spec, .{ .base = base }, memo);
 }
 
@@ -771,12 +871,12 @@ fn computeFillMemo(
     spec: LayerSpec,
     opts: FillOpts,
     memo: ?FillMemo,
-) std.mem.Allocator.Error!Fill {
-    const m = memo orelse return computeFill(arena, placement, copper, spec, opts);
+) std.mem.Allocator.Error!KeyedFill {
+    const m = memo orelse return .{ .fill = try computeFill(arena, placement, copper, spec, opts), .key = .{ .lo = 0, .hi = 0 } };
     const k = try fillKey(arena, placement, copper, spec, opts.contours);
-    if (m.get(m.ctx, k)) |hit| return hit;
+    if (m.get(m.ctx, k)) |hit| return .{ .fill = hit, .key = k };
     const fresh = try computeFill(arena, placement, copper, spec, opts);
-    return m.put(m.ctx, k, fresh) orelse fresh;
+    return .{ .fill = m.put(m.ctx, k, fresh) orelse fresh, .key = k };
 }
 
 /// Every obstacle the fill's margin field is lowered by, in ONE traversal —
@@ -1415,9 +1515,16 @@ fn rfPathOwnsTrack(paths: []const rf_port_report.Outcome, track: router.Track) b
 /// the clip box and cannot neighbour kept copper. A full-face pour returns null
 /// and retains the ordinary board-wide stamping path.
 fn foreignActiveBounds(g: Grid, clip: []const [2]f64) ?[4]f64 {
+    return clipHalo(g.pitch, clip);
+}
+
+/// The clip halo itself, from a bare cell pitch — the form `fillKeyStable` asks
+/// for before any raster exists, and the one `foreignActiveBounds` delegates to
+/// so the walk and the stability predicate cull against ONE box.
+fn clipHalo(pitch: f64, clip: []const [2]f64) ?[4]f64 {
     if (clip.len < 3) return null;
     var box = polyBounds(clip);
-    const halo = 4 * g.pitch;
+    const halo = 4 * pitch;
     box[0] -= halo;
     box[1] -= halo;
     box[2] += halo;
