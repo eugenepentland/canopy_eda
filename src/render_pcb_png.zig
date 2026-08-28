@@ -183,6 +183,30 @@ pub const SpecStatus = struct {
 /// tile. Private: only `renderSheet` populates it.
 const PrecomputedPour = struct { side: optimizer.Side, fill: pour.Fill };
 
+/// What one render pours its board with, nested because the two are only ever
+/// set and read together: both exist so a picture rasters each surface of one
+/// lattice ONCE instead of per paint.
+pub const PourInputs = struct {
+    /// Precomputed pour fills (one per poured side) shared across a contact
+    /// sheet's main view + tiles, so `pour.compute` runs once per side per
+    /// request instead of once per tile. Null ⇒ each face computes its own fill
+    /// (the single-view path). Must be allocated to outlive every tile paint.
+    precomputed: ?[]const PrecomputedPour = null,
+    /// The board-edge margin field every fill of this board starts from
+    /// (`pour.sharedEdgeField`), seeded once by the caller. One image pours the
+    /// same lattice a couple of dozen times — both outer faces, every declared
+    /// plane, and every hand-drawn zone — and each of those used to re-walk the
+    /// outline to seed its own field. Measured on `barracuda`, a plain
+    /// `/api/pcb-png` render ran 28 fills; on `barracuda-base`, 8 fills over a
+    /// denser board. Null keeps the historical behaviour (each fill seeds its
+    /// own), and a field built for a different board is rejected by
+    /// `pour.EdgeField.fits` rather than read stale — so this changes latency
+    /// only, never a pixel. The renderer never seeds one itself: the caller
+    /// already pours this board for its DRC, so seeding it there shares one
+    /// walk across both (see `serve/pcb_layout_page.renderDesignPng`).
+    base_edge: ?pour.EdgeField = null,
+};
+
 /// Render options: output size, focus-mode highlight sets, optional routed
 /// copper / DRC overlay, and the caption.
 pub const Options = struct {
@@ -246,15 +270,12 @@ pub const Options = struct {
     /// Saved/imported no-silkscreen polygons. Generated sub-circuit names and
     /// corner strokes are suppressed wherever their ink would enter one.
     silk_keepouts: []const subcircuit_silkscreen.Keepout = &.{},
-    /// Precomputed pour fills (one per poured side) shared across a contact
-    /// sheet's main view + tiles, so `pour.compute` runs once per side per
-    /// request instead of once per tile. Null ⇒ each face computes its own fill
-    /// (the single-view path). Must be allocated to outlive every tile paint.
-    precomputed_pours: ?[]const PrecomputedPour = null,
     /// Hand-drawn user copper pours (filled netted outer zones) — drawn under
     /// the parts exactly like a declared pour (translucent fill + rim + "NET
     /// pour" label), so a screenshot shows the same copper the viewer does.
     user_zones: []const pour.UserZone = &.{},
+    /// The shared pour inputs of this render (see `PourInputs`).
+    pours: PourInputs = .{},
 };
 
 /// Render `p` to PNG bytes owned by `alloc`.
@@ -589,11 +610,11 @@ pub fn renderSheet(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Optio
     // per tile (up to 14× on a two-sided board). Its arena outlives all paints.
     var pour_arena = std.heap.ArenaAllocator.init(alloc);
     defer pour_arena.deinit();
-    const pre = precomputePours(pour_arena.allocator(), p, opts.routed, opts.user_zones);
+    const pre = precomputePours(pour_arena.allocator(), p, opts.routed, opts.user_zones, opts.pours.base_edge);
 
     var main_opts = opts;
     main_opts.crop = null;
-    main_opts.precomputed_pours = pre;
+    main_opts.pours.precomputed = pre;
     var main_cv = try renderPhysicalCanvas(alloc, p, main_opts);
     defer main_cv.deinit();
 
@@ -628,7 +649,7 @@ pub fn renderSheet(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Optio
             .names = opts.names,
             .params = opts.params,
             .routed = opts.routed,
-            .precomputed_pours = pre,
+            .pours = .{ .precomputed = pre, .base_edge = opts.pours.base_edge },
         });
         // Tile caption: which hub this closeup is (ref + origin when distinct).
         var buf: [96]u8 = undefined;
@@ -676,7 +697,13 @@ pub fn renderSheet(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Optio
 /// a pure function of `p` + `routed` copper, so every view (main + crops) shares
 /// it. Arena-owned by the caller (must outlive all tile paints); OOM on a side
 /// drops that entry, so `pourFill` falls back to a per-face compute for it.
-fn precomputePours(arena: std.mem.Allocator, p: optimizer.Placement, routed: ?router.RouteResult, zones: []const pour.UserZone) []const PrecomputedPour {
+fn precomputePours(
+    arena: std.mem.Allocator,
+    p: optimizer.Placement,
+    routed: ?router.RouteResult,
+    zones: []const pour.UserZone,
+    base_edge: ?pour.EdgeField,
+) []const PrecomputedPour {
     var out: std.ArrayList(PrecomputedPour) = .empty;
     const copper: pour.Copper = if (routed) |rt| blk: {
         const physical = physicalRoute(arena, rt) catch return &.{};
@@ -687,7 +714,7 @@ fn precomputePours(arena: std.mem.Allocator, p: optimizer.Placement, routed: ?ro
         var spec = pour.outerSpec(net, side);
         // Ranked user pours on this face clear the declared background pour.
         spec.higher = pour.higherThanDeclared(arena, zones, if (side == .top) 0 else 1, spec.net) catch &.{};
-        const fill = pour.compute(arena, p, copper, spec) catch continue;
+        const fill = pour.computeShared(arena, p, copper, spec, base_edge) catch continue;
         out.append(arena, .{ .side = side, .fill = fill }) catch continue;
     }
     return out.toOwnedSlice(arena) catch &.{};
@@ -930,7 +957,7 @@ const Ctx = struct {
                     .{ .net = .{ .named = named }, .keep_unseeded = true }
                 else
                     .{ .net = .ground, .keep_unseeded = true };
-                if (pour.compute(arena, self.p, self.shownCopper(), spec)) |fill| {
+                if (pour.computeShared(arena, self.p, self.shownCopper(), spec, self.opts.pours.base_edge)) |fill| {
                     self.fillContours(arena, fill, col, alpha);
                 } else |_| {}
                 self.labelLayerFill(net, "plane", row, labels);
@@ -1364,7 +1391,7 @@ const Ctx = struct {
             if (z.layer != sig.int()) continue;
             var spec = pour.zoneLayerSpec(z.net, pour.sideOfSignal(z.layer), z.layer, z.poly);
             spec.higher = pour.higherPolys(arena, self.opts.user_zones, zi) catch &.{};
-            const fill = pour.compute(arena, self.p, self.shownCopper(), spec) catch continue;
+            const fill = pour.computeShared(arena, self.p, self.shownCopper(), spec, self.opts.pours.base_edge) catch continue;
             self.fillContours(arena, fill, col, alpha);
             self.labelUserZone(fill, z.net, col);
         }
@@ -1417,14 +1444,14 @@ const Ctx = struct {
     /// otherwise. Null on OOM, which skips the paint (the label still marks the
     /// face).
     fn pourFill(self: *Ctx, arena: std.mem.Allocator, side: optimizer.Side, net: []const u8) ?pour.Fill {
-        if (self.opts.precomputed_pours) |pre| {
+        if (self.opts.pours.precomputed) |pre| {
             for (pre) |pp| if (pp.side == side) return pp.fill;
         }
         const copper: pour.Copper = if (self.opts.routed) |rt| .{ .tracks = rt.tracks, .vias = rt.vias, .arcs = rt.arcs, .rf_paths = rt.rf_port_outcomes } else .{};
         var spec = pour.outerSpec(net, side);
         // Ranked user pours on this face clear the declared background pour.
         spec.higher = pour.higherThanDeclared(arena, self.opts.user_zones, if (side == .top) 0 else 1, spec.net) catch &.{};
-        return pour.compute(arena, self.p, copper, spec) catch null;
+        return pour.computeShared(arena, self.p, copper, spec, self.opts.pours.base_edge) catch null;
     }
 
     /// Project a pour contour + its holes from world mm to final-px rings

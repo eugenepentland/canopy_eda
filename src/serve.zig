@@ -69,6 +69,7 @@ const thermal_cache = @import("serve/thermal_cache.zig");
 const progress_cache = @import("serve/progress_cache.zig");
 const describe_cache = @import("serve/describe_cache.zig");
 const read_cache = @import("serve/read_cache.zig");
+const png_cache = @import("serve/png_cache.zig");
 const warmup = @import("serve/warmup.zig");
 const pcb_fence = @import("serve/pcb_fence.zig");
 const pcb_step_export = @import("serve/pcb_step_export.zig");
@@ -373,6 +374,11 @@ pub const Caches = struct {
     /// The read-only design surfaces whose whole cost is the FRESH design
     /// evaluation each of their handlers starts with.
     reads: ReadCaches = .{},
+    /// Dependency-validated board images (`/api/pcb-png`), the picture twin of
+    /// those facts — and, until it had this, the last read surface paying its
+    /// whole solve + DRC + raster on every identical repeat (23.7 s hot on
+    /// `barracuda`).
+    png_images: png_cache.Store = .{},
     /// Memoised gzip streams, keyed on the response body itself (see
     /// `gzip_cache`). Held here rather than module-scope so two server
     /// instances stay independent.
@@ -389,6 +395,7 @@ pub const Caches = struct {
             .progress_json = .{ .allocator = allocator },
             .describe_json = .{ .allocator = allocator },
             .reads = .init(allocator),
+            .png_images = .{ .allocator = allocator },
             .gzip = .{ .allocator = allocator },
         };
     }
@@ -401,6 +408,7 @@ pub const Caches = struct {
         self.progress_json.deinit();
         self.describe_json.deinit();
         self.reads.deinit();
+        self.png_images.deinit();
         self.gzip.deinit();
     }
 };

@@ -47,6 +47,7 @@ const pour = @import("../placement/pour.zig");
 const pour_json = @import("pour_json.zig");
 const drc_reconcile = @import("../drc_reconcile.zig");
 const page_cache = @import("page_cache.zig");
+const png_cache = @import("png_cache.zig");
 const pcb_rules_json = @import("pcb_rules_json.zig");
 const pcb_query = @import("pcb_query.zig");
 const pcb_derived = @import("pcb_derived.zig");
@@ -3201,6 +3202,7 @@ fn renderThermalPng(
     project_dir: []const u8,
     name: []const u8,
     opts: PngRequest,
+    deps: ?*?page_cache.FileSet,
 ) PngError![]u8 {
     var eval = Evaluator.init(alloc, project_dir);
     defer eval.deinit();
@@ -3208,6 +3210,9 @@ fn renderThermalPng(
     defer if (module_res) |mr| {
         mr.eval.deinit();
         alloc.destroy(mr.eval);
+    };
+    defer if (deps) |out| {
+        out.* = png_cache.captureRenderDeps(alloc, &eval, module_res, project_dir, name);
     };
     const solved = try solveForRequest(alloc, project_dir, name, opts, &eval, &module_res);
 
@@ -3240,19 +3245,26 @@ fn renderThermalPng(
 }
 
 /// allocation goes through `alloc`; the returned bytes are owned by it.
+/// `deps`, when non-null, receives this render's read-set (see
+/// `png_cache.captureRenderDeps`), captured while the evaluators are still
+/// alive; the caller owns it and must `deinit` it.
 pub fn renderDesignPng(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
     opts: PngRequest,
+    deps: ?*?page_cache.FileSet,
 ) PngError![]u8 {
-    if (opts.thermal.on) return renderThermalPng(alloc, project_dir, name, opts);
+    if (opts.thermal.on) return renderThermalPng(alloc, project_dir, name, opts, deps);
     var eval = Evaluator.init(alloc, project_dir);
     defer eval.deinit();
     var module_res: ?modules_mod.ResolvedBlock = null;
     defer if (module_res) |mr| {
         mr.eval.deinit();
         alloc.destroy(mr.eval);
+    };
+    defer if (deps) |out| {
+        out.* = png_cache.captureRenderDeps(alloc, &eval, module_res, project_dir, name);
     };
     const solved = try solveForRequest(alloc, project_dir, name, opts, &eval, &module_res);
     const placement = solved.placement;
@@ -3276,8 +3288,13 @@ pub fn renderDesignPng(
         break :blk seeded.result;
     } else solved.restored.routes;
     if (opts.route) routed = perimeter_fence.append(alloc, placement, routed) catch routed;
+    // One board, one lattice: every fill below — the reporting DRC's rasters
+    // AND the renderer's paint of the same copper — seeds from this single
+    // outline walk (what `resolveShownView` already does for the page). See
+    // `render_pcb_png.PourInputs`; a null field is the historical behaviour.
+    const base_edge = pour.sharedEdgeField(alloc, placement) catch null;
     const violations: []const drc.Violation = if (routed) |r|
-        drc_rules.checkFilteredZones(alloc, project_dir, name, .{ .placement = placement, .routed = r, .clearance = route_params.clearance, .zones = solved.shown_zones.user })
+        drc_rules.checkFilteredZones(alloc, project_dir, name, .{ .placement = placement, .routed = r, .clearance = route_params.clearance, .zones = solved.shown_zones.user, .base_edge = base_edge })
     else
         &.{};
 
@@ -3321,6 +3338,7 @@ pub fn renderDesignPng(
         .texts = solved.texts,
         .user_zones = solved.shown_zones.user,
         .silk_keepouts = solved.shown_zones.silk_keepouts,
+        .pours = .{ .base_edge = base_edge },
     };
     if (opts.sheet) return render_pcb_png.renderSheet(alloc, placement, ropts);
     return render_pcb_png.render(alloc, placement, ropts);
@@ -3428,19 +3446,11 @@ pub fn pngRequestFromQuery(arena: std.mem.Allocator, req: *httpz.Request) PngReq
 /// Request-scoped allocation uses `req.arena` (freed after the response is sent;
 /// `res.body` stays valid until then) — `ctx.allocator` is the global page
 /// allocator, so a leaked image per call would never be reclaimed.
+///
+/// The body lives in `serve/png_cache.zig`, which answers the allow-listed
+/// query modes from a dependency-validated retention and renders the rest here.
 pub fn pcbPngApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const arena = req.arena;
-    const name = nameParam(req, res) orelse return;
-    const opts = pngRequestFromQuery(arena, req);
-    const png_bytes = renderDesignPng(arena, ctx.project_dir, name, opts) catch |e| {
-        const fail = pngFailure(e);
-        res.status = fail.status;
-        res.body = fail.msg;
-        return;
-    };
-    res.content_type = .PNG;
-    res.header("Cache-Control", "no-store");
-    res.body = png_bytes;
+    return png_cache.serveImage(ctx, req, res);
 }
 
 // spec: Web Server - The PCB layout page renders without a request, reading a missing request as the plain no-query page, so the startup warm-up can retain it under the same cache entry a bare URL looks up
