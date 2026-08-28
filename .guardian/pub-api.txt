@@ -353,25 +353,44 @@ src/drc_reconcile.zig::Board struct_
 src/drc_reconcile.zig::Check struct_
 src/drc_reconcile.zig::Design struct_
 src/drc_reconcile.zig::Lease struct_
+src/drc_reconcile.zig::Publish enum_
 src/drc_reconcile.zig::Report struct_
 src/drc_reconcile.zig::Resolved struct_
+src/drc_reconcile.zig::Snapshot struct_
+src/drc_reconcile.zig::Starter value
 src/drc_reconcile.zig::Store struct_
+src/drc_reconcile.zig::Sweep struct_
+src/drc_reconcile.zig::SweepStatus struct_
+src/drc_reconcile.zig::Sweeps struct_
+src/drc_reconcile.zig::Turn union_
 src/drc_reconcile.zig::acquire | fn acquire( store: *Store, request: std.mem.Allocator, name: []const u8, sub: ?[]const u8, design: Design, ) Lease
 src/drc_reconcile.zig::adopt | fn adopt(self: *Lease, board: optimizer.Placement, files: ?page_cache.FileSet) void
 src/drc_reconcile.zig::arena | fn arena(self: Lease) std.mem.Allocator
 src/drc_reconcile.zig::auxKey | fn auxKey(routed: router.RouteResult) u64
 src/drc_reconcile.zig::deinit | fn deinit(self: *Store) void
 src/drc_reconcile.zig::edgeField | fn edgeField(self: Lease) ?drc_rules.EdgeField
+src/drc_reconcile.zig::endSweep | fn endSweep(store: *Store, name: []const u8, sub: ?[]const u8) void
 src/drc_reconcile.zig::eql | fn eql(a: Board, b: Board) bool
 src/drc_reconcile.zig::eql | fn eql(a: Design, b: Design) bool
 src/drc_reconcile.zig::outlineKey | fn outlineKey(source: optimizer.OutlineSource) u64
 src/drc_reconcile.zig::placement | fn placement(self: Lease) ?optimizer.Placement
 src/drc_reconcile.zig::posesKey | fn posesKey(poses: []const optimizer.RefPose) u64
+src/drc_reconcile.zig::publish | fn publish(store: *Store, snap: Snapshot, sweep: Sweep, now_ns: i128, live_version: u32) Publish
 src/drc_reconcile.zig::reconcile | fn reconcile(self: *Lease, alloc: std.mem.Allocator, in: Check) Report
 src/drc_reconcile.zig::release | fn release(self: *Lease) void
 src/drc_reconcile.zig::resolvePlacement | fn resolvePlacement( ctx: *serve_root.Server, req: *httpz.Request, res: *httpz.Response, body: std.json.Value, poses: []const optimizer.RefPose, name: []const u8, ) ?Resolved
+src/drc_reconcile.zig::snapshotFor | fn snapshotFor(store: *Store, name: []const u8, sub: ?[]const u8, live_version: u32) ?Snapshot
+src/drc_reconcile.zig::sweepTurn | fn sweepTurn(store: *Store, name: []const u8, sub: ?[]const u8, now_ns: i128) Turn
+src/drc_reconcile.zig::sweep_debounce_ns value
 src/drc_reconcile.zig::zonesKey | fn zonesKey(zones: []const pour.UserZone) u64
 src/drc_session.zig::buildDesignRules | fn buildDesignRules(v: ?std.json.Value) optimizer.DesignRules
+src/drc_sweep.zig::Direction enum_
+src/drc_sweep.zig::Discrepancy struct_
+src/drc_sweep.zig::Outcome struct_
+src/drc_sweep.zig::Verdict struct_
+src/drc_sweep.zig::compare | fn compare( alloc: std.mem.Allocator, ledger: []const drc.Violation, swept: []const drc.Violation, ) Verdict
+src/drc_sweep.zig::install | fn install(store: *drc_reconcile.Store) void
+src/drc_sweep.zig::sweepOnce | fn sweepOnce( store: *drc_reconcile.Store, project_dir: []const u8, name: []const u8, sub: ?[]const u8, ) Outcome
 src/elmer_thermal_command.zig::benchCommand | fn benchCommand(alloc: std.mem.Allocator, argv: []const []const u8) void
 src/elmer_thermal_command.zig::compareCommand | fn compareCommand(alloc: std.mem.Allocator, argv: []const []const u8) void
 src/elmer_thermal_command.zig::exportCommand | fn exportCommand(alloc: std.mem.Allocator, argv: []const []const u8) void
@@ -1809,6 +1828,7 @@ src/placement/drc_scope.zig::overlaps | fn overlaps(a: Box, b: Box) bool
 src/placement/drc_scope.zig::touchesNet | fn touchesNet(self: Delta, net: i32) bool
 src/placement/drc_scope.zig::trackKey | fn trackKey(t: router.Track) u64
 src/placement/drc_scope.zig::viaKey | fn viaKey(v: router.Via) u64
+src/placement/drc_scope.zig::violationKey | fn violationKey(v: drc.Violation) u64
 src/placement/edge_rotation.zig::choose | fn choose(pads: []const geometry.Pad, hw: f64, hh: f64, edge: u2) f64
 src/placement/edge_rotation.zig::faceSignalsToward | fn faceSignalsToward( pads: []const geometry.Pad, signal: [2]f64, vertical_edge: bool, target_delta: f64, base_rot: f64, ) f64
 src/placement/edge_rotation.zig::isThroughRow | fn isThroughRow(pads: []const geometry.Pad) bool

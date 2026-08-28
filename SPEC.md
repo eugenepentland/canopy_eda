@@ -6141,6 +6141,13 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The DRC reconcile store keeps two designs and evicts the least recently leased
 - A reconcile session is claimed by one design name and one sub-circuit slug
 - A reconcile snapshot that carries the previous one's deferred findings forward is retained without aliasing the memory it copies from
+- A background full-board DRC sweep refreshes the kinds a scoped recheck defers, and the next reconcile answer carries them
+- A background full-board DRC sweep corrects a ledger that lost a finding or invented one, and counts the disagreement
+- A background DRC sweep answer for a state the session has left is dropped without touching its ledger
+- Background DRC sweeps are one thread per design, capped across designs, and a re-arm during one coalesces into it
+- A background DRC sweep refreshes the deferred kinds and treats a difference in them as the refresh, never as a discrepancy
+- A background DRC sweep reports every non-deferred finding the scoped answer and a full pass disagree about, in both directions
+- A background DRC sweep of a design with nothing accepted does nothing
 - The DRC endpoint re-checks a copper edit against the board state it last accepted and returns the answer a full check returns
 - the schematic page exposes the current board role as a Design type selector on designs but not reusable module pages
 - the schematic Design type control replaces only the design root's board-role form, preserving comments and nested module text

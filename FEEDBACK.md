@@ -192,3 +192,37 @@ and ask again (`pour.computeMemoKeyed`), which takes a proper reference or
 misses and pours. The module header states the borrow rule for the whole-board
 entry; it now also matters for anything that keeps a fill between passes, and
 that is not obvious from the type — a `Fill` looks like a value.
+
+## 2026-08-28 — no fixture exercised the deferred DRC kinds, and the forms that create one are top-level
+
+W4 (the background full-board DRC sweep) exists mainly to refresh the three
+kinds a scoped recheck defers — `reference_plane_gap`, `reference_transition`,
+`loop_area` — so its first test had to be a board that actually emits one. No
+committed fixture did. Every server-side reconcile fixture and every
+`drc_return_path` test builds its placement in Zig, so the only worked examples
+of the DSL that produces those findings are in `docs/language-forms.md`, in a
+single table row several thousand characters long.
+
+Two concrete costs, both avoidable:
+
+1. `(stackup …)` and `(net-class …)` are TOP-LEVEL `design-block` forms, not
+   `(design-rules …)` children. The existing reconcile fixture nested
+   `(stackup 4) (plane 2 "GND")` inside `(design-rules …)`, where it is ignored
+   — the board had no declared stackup at all, and `drc_return_path.check`
+   returns immediately without one. The evaluator does warn, but the endpoint
+   test harness discards evaluator warnings, so the fixture read as fine for as
+   long as nothing depended on the stackup. A fixture that silently loses half
+   its declarations is worse than one that fails.
+
+2. Finding this took a placement dump printed from inside a test. There is no
+   cheap way to ask "what did the evaluator actually make of this design's
+   rules" — `netlisp check` is schematic ERC and `describe_pcb_layout`
+   summarises geometry. A `netlisp describe-rules <design>` printing the
+   resolved stackup, planes and per-net class rules would have answered it in
+   one command.
+
+Worth keeping in mind for the next task in this area: the reconcile fixture in
+`src/drc_reconcile.zig` now declares a real 4-layer stackup and a
+`(return-path (max-loop-area …))` net class, so it emits three
+`reference_plane_gap` findings and one `loop_area`. It is the cheapest worked
+example of those forms in the tree.

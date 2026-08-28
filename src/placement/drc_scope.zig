@@ -22,6 +22,7 @@
 
 const std = @import("std");
 const router = @import("router.zig");
+const drc = @import("drc.zig");
 
 /// An axis-aligned region of the board, in mm.
 pub const Box = struct {
@@ -96,6 +97,42 @@ pub fn viaKey(v: router.Via) u64 {
     var h = std.hash.Wyhash.init(0x76696173); // "vias"
     for ([_]f64{ v.x, v.y, v.dia, v.drill }) |value| h.update(std.mem.asBytes(&value));
     h.update(std.mem.asBytes(&v.net));
+    return h.final();
+}
+
+/// A VIOLATION's identity, on the same terms as the copper keys above: every
+/// field a `drc-dump` line prints, hashed as exact bytes.
+///
+/// It exists for the background sweep (`drc_sweep.zig`), which has to decide
+/// whether a full pass and a scoped answer produced the same findings. That is
+/// the same question the copper diff asks about copper, so it gets the same
+/// answer: content, not position, and no rounding tolerance. Two rules judging
+/// the same board must agree on the bit, and a tolerance here would let a
+/// scoped pass drift by a micron per edit without anything noticing.
+///
+/// `drc_json.violationId` is NOT this: it is a 16-bit UI locator, quantized to
+/// 0.01 mm so a human can quote it, and collisions there are a feature. A
+/// reconciliation keyed on it would call two different findings one.
+pub fn violationKey(v: drc.Violation) u64 {
+    var h = std.hash.Wyhash.init(0x76696f6c); // "viol"
+    h.update(std.mem.asBytes(&@backingInt(v.kind)));
+    h.update(std.mem.asBytes(&@backingInt(v.severity)));
+    for ([_]f64{ v.x, v.y, v.gap, v.clearance }) |value| h.update(std.mem.asBytes(&value));
+    // 255 for a finding with no single layer, the sentinel `drc_json` uses —
+    // `board_layers.max_signal_layers` is 64, so no real index reaches it.
+    const layer: u8 = if (v.layer) |l| l.int() else 255;
+    h.update(std.mem.asBytes(&layer));
+    for ([_]i32{ v.who.net_a, v.who.net_b, v.who.part_a, v.who.part_b, v.who.track_a }) |value| {
+        h.update(std.mem.asBytes(&value));
+    }
+    h.update(v.who.pad_a);
+    h.update("\x00");
+    h.update(v.who.pad_b);
+    h.update("\x00");
+    if (v.who.bridge) |bridge| {
+        h.update("\x01");
+        for (bridge) |value| h.update(std.mem.asBytes(&value));
+    } else h.update("\x00");
     return h.final();
 }
 

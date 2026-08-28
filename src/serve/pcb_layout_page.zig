@@ -4509,8 +4509,12 @@ pub fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
     // Additive only: how the answer was reached. No viewer reads these — they
     // exist so a test (and a human with curl) can tell a scoped recheck from a
     // full one without inferring it from a stopwatch.
-    try w.print(",\"scoped\":{},\"fills\":{d},\"repoured\":{d},\"delta\":{d}", .{
-        outcome.scoped, outcome.fills, outcome.fills_repoured, outcome.delta,
+    // …and, on the same terms, what the background full-board sweep has
+    // established about this session (`drc_sweep.zig`): how many have landed,
+    // which accepted generation the last one agreed about, how long ago, and
+    // the disagreements it has found — a figure meant to stay 0.
+    try w.print(",\"scoped\":{},\"fills\":{d},\"repoured\":{d},\"delta\":{d},\"sweep\":{{\"runs\":{d},\"rev\":{d},\"age_ms\":{d},\"discrepancies_total\":{d}}}", .{
+        outcome.scoped, outcome.fills, outcome.fills_repoured, outcome.delta, outcome.sweep.runs, outcome.sweep.rev, outcome.sweep.age_ms, outcome.sweep.discrepancies_total,
     });
     if (queryFlag(req, "pours")) {
         const live_copper: pour.Copper = .{ .tracks = rr.tracks, .arcs = rr.arcs, .vias = rr.vias, .rf_paths = rr.rf_port_outcomes };
