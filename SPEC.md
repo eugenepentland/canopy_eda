@@ -6640,6 +6640,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The PCB page blob always carries the ground-name token vocabulary so the browser's ground test cannot drift from the server's
 - The PCB viewer offers one Tapers + fence action that preserves RF route centerlines while refreshing controlled-impedance widths and ground-pour gaps, replaces stale taper paths from current pad and route geometry, DRC-gates and saves the result, then regenerates the RF ground via fence around that exact copper
 - Saving an unchanged PCB state rechecks DRC without invalidating a concurrent copper-pour refill for that same state
+- Copper-pour refill responses are accepted only when their exact board and pour inputs still match; the RF finish action waits for an existing refill instead of treating the occupied refill slot as a failure
 - The PCB hand-routing editor offers one undoable GND-vias action that seeds DRC-legal exposed-pad arrays and centred ground-pad barrels, then places nearest-legal barrels beside pads still failing the ground-via-distance rule without replacing submitted copper
 - GET /api/schematic-pdf/:name returns the composed review PDF as an application/pdf attachment that passes the writer's structural self-check
 - GET /api/schematic-pdf/:name answers an unknown design or module name with a 404 whose body never reads as a PDF

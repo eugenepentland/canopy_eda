@@ -9419,9 +9419,9 @@ function pourFillApply(j){PCB.pours=j.pours||[];PCB.plane_fills=j.plane_fills||[
 // next refill. Both the Route-panel button (#r-pour) and the first-class
 // toolbar button (#pcb-pour, hidden when the design declares no pours) run the
 // same flow. poursArmed gates out the load-time DRC pass, which touches copper
-// without changing board state; poursReqSeq lets an edit that lands mid-flight
-// supersede the in-flight refill's "fresh" verdict.
-var poursInFlight=false,poursArmed=false,poursReqSeq=0;
+// without changing board state. An exact input signature, rather than generic
+// invalidation bookkeeping, decides whether an in-flight response is fresh.
+var poursInFlight=false,poursArmed=false;
 // A design "has pours" when the stackup declares one OR the user has drawn a
 // custom copper-pour zone — either way the ⟳ Pours button is live and copper
 // edits mark the fills stale.
@@ -9456,9 +9456,16 @@ function fenceSave(b,tapers,widths,gap){routeStatMsg("saving refreshed RF geomet
   if(saved!=="saved"){fenceDone(b,"refreshed RF geometry was not saved — fence not changed",true);return;}
   fencePost(b,tapers,widths,gap);});}
 function fenceRefreshGap(b,tapers,widths){if(!poursDeclared()){fenceSave(b,tapers,widths,false);return;}
- routeStatMsg("refilling RF ground gaps…");refillPours({deferred:true,done:function(fresh){
-  if(!fresh){fenceDone(b,"RF ground-gap refill failed — fence not changed",true);return;}
-  fenceSave(b,tapers,widths,true);}});}
+ var sig=pourStateSignature();routeStatMsg("refilling RF ground gaps…");
+ function start(){if(!fenceInFlight)return;
+  if(sig!==pourStateSignature()){fenceDone(b,"board changed — click Tapers + fence again",true);return;}
+  // A load-time or manual fill owns the single refill slot. Wait for it, then
+  // request this exact post-taper state instead of reporting a false failure.
+  if(poursInFlight){setTimeout(start,100);return;}
+  refillPours({deferred:true,done:function(fresh){
+   if(!fresh){fenceDone(b,"RF ground-gap refill failed — fence not changed",true);return;}
+   fenceSave(b,tapers,widths,true);}});}
+ start();}
 function fenceRun(){if(fenceInFlight)return;var b=fenceBtn();if(!b)return;
  fenceInFlight=true;b.disabled=true;var widths=drawRfClassWidthPlan(),before=widths.tracks.length?snapAll():null,changed=drawRfClassWidthsSet(widths,false);
  routeStatMsg(changed?"updating RF widths and rebuilding impedance tapers…":"rebuilding impedance tapers…");
@@ -9475,7 +9482,6 @@ function pourBtnSync(){var b=document.getElementById("pcb-pour");if(!b)return;
   :"Recompute declared copper pours around the current parts, tracks and vias";}
 function markPoursStale(){pourGeomDrop(); // every copper/pose edit funnels here — the cached pour paths go with it
  if(!poursArmed||!poursDeclared())return;
- poursReqSeq++; // an edit supersedes any in-flight refill's freshness
  if(PCB.poursStale)return;PCB.poursStale=true;pourBtnSync();}
 function poursFresh(){PCB.poursStale=false;pourBtnSync();}
 // Seed the autorouter's via-in-pad ground barrels, then run its final
@@ -9512,12 +9518,12 @@ function groundViasRun(){if(groundViasInFlight||RO)return;var b=document.getElem
   .catch(function(){groundViasInFlight=false;b.disabled=false;routeStatMsg("GND via seed failed",true);});}
 function refillPours(opts){opts=opts&&opts.deferred?opts:{};var done=typeof opts.done==="function"?opts.done:function(){};
  if(poursInFlight){done(false);return;}var bs=pourBtns();if(!bs.length){done(false);return;}
- poursInFlight=true;var seq=++poursReqSeq;bs.forEach(function(b){b.disabled=true;});
+ poursInFlight=true;bs.forEach(function(b){b.disabled=true;});
  setStat("r-pour-stat","","refilling…");var q=subq(),payload=JSON.stringify(boardStatePayload()),sig=pourStateSignature(payload);
  fetch("/api/pcb-drc/"+encodeURIComponent(PCB.name)+q+(q?"&":"?")+"pours=1&pours_only=1",{method:"POST",
   headers:{"Content-Type":"application/json"},body:payload})
   .then(function(r){if(!r.ok)throw 0;return r.json();})
-  .then(function(j){var fresh=seq===poursReqSeq;
+  .then(function(j){var fresh=sig===pourStateSignature();
    if(!opts.deferred||fresh){pourFillApply(j);routeSummaryFrom(j);}if(fresh){poursFresh();pourCacheStore(j,sig);}
    var nfill=PCB.pours.length+(PCB.plane_fills||[]).length+(PCB.zone_fills||[]).length;
    setStat("r-pour-stat",nfill?"ok":"warn",nfill?"pours refilled ✓":"no pours to fill");

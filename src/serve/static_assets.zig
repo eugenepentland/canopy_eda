@@ -381,6 +381,28 @@ test "layout save DRC preserves an in-flight pour refill" {
     try std.testing.expect(std.mem.indexOf(u8, drc_body, "if(!opts.stateUnchanged)copperTouched()") != null);
 }
 
+// spec: Web Server - Copper-pour refill responses are accepted only when their exact board and pour inputs still match; the RF finish action waits for an existing refill instead of treating the occupied refill slot as a failure
+test "RF finish waits for an active exact-state pour refill" {
+    const refill_start = std.mem.indexOf(u8, pcb_board_js, "function refillPours(opts)") orelse
+        return error.TestExpectedPourRefill;
+    const refill_tail = pcb_board_js[refill_start..];
+    const refill_end = std.mem.indexOf(u8, refill_tail, "pourBtns().forEach") orelse
+        return error.TestExpectedPourRefillEnd;
+    const refill_body = refill_tail[0..refill_end];
+    try std.testing.expect(std.mem.indexOf(u8, refill_body, "var fresh=sig===pourStateSignature()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, refill_body, "seq===poursReqSeq") == null);
+
+    const fence_start = std.mem.indexOf(u8, pcb_board_js, "function fenceRefreshGap") orelse
+        return error.TestExpectedFenceGapRefresh;
+    const fence_tail = pcb_board_js[fence_start..];
+    const fence_end = std.mem.indexOf(u8, fence_tail, "function fenceRun") orelse
+        return error.TestExpectedFenceGapRefreshEnd;
+    const fence_body = fence_tail[0..fence_end];
+    try std.testing.expect(std.mem.indexOf(u8, fence_body, "var sig=pourStateSignature()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fence_body, "if(poursInFlight){setTimeout(start,100);return;}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fence_body, "if(sig!==pourStateSignature())") != null);
+}
+
 // spec: Web Server - While drawing a custom copper area, nearly horizontal or vertical segments snap onto that axis in both the live preview and committed polygon; holding Ctrl bypasses only this axis inference
 test "custom copper area drawing infers axes unless Ctrl is held" {
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "function pourSnap(m,ev)") != null);
