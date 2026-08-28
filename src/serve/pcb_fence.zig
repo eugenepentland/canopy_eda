@@ -22,9 +22,10 @@
 //!     moves, custom pours survive. An illegal site is a counted gap (see
 //!     `via_fence.Skips`), never a forced conflict.
 //!   * **Ratcheted** — in `.legal` mode. The merged board is DRC'd against the
-//!     board as it stood after the drop; if the error-severity geometry count
-//!     rose, the fence vias nearest each new violation are culled and it is
-//!     re-checked, a bounded number of times. Gaps are acceptable by design, so
+//!     board as it stood after the drop; error-severity geometry violations are
+//!     matched by identity, the fence vias nearest each unmatched finding are
+//!     culled, and the board is re-checked a bounded number of times. Gaps are
+//!     acceptable by design, so
 //!     culling a via beats rejecting the batch — and warnings never block (a
 //!     `sharp_bend` on the RF trace is not the fence's fault).
 //!
@@ -36,11 +37,10 @@
 //! nothing left to do and `culled` is 0. A rising `culled` is the signal that some
 //! rule reaches the merged board that a per-candidate check cannot see.
 //!
-//! `via_fence.Mode.all` suspends that contract on purpose: every site the guide
-//! produced is persisted, and the DRC is still measured and REPORTED but never
-//! acted on, so what lands on the board is exactly what the generator drew. It is
-//! the debug view for judging ring geometry — `mode=legal`, the default, is what
-//! puts manufacturable copper on a board.
+//! `via_fence.Mode.all` suspends that contract on purpose: every non-coincident
+//! site the generator produced is persisted, and the DRC is still measured and
+//! REPORTED but never acted on. It is the debug view for judging ring geometry —
+//! `mode=legal`, the default, is what puts manufacturable copper on a board.
 //!
 //! The CLI tool and the HTTP endpoint share one `run`, so the viewer's Fence
 //! button and an agent's `generate_fence` call can never diverge.
@@ -154,15 +154,6 @@ const Ctx = struct {
     /// Whether the DRC this context measures is allowed to cull anything.
     mode: via_fence.Mode,
 
-    /// The pour-aware DRC on a candidate board: every violation plus the
-    /// fab-blocking subset (`before` is the caller's to fill).
-    fn drcOn(self: Ctx, sr: SavedRoutes) DrcDelta {
-        const rr = pcb_layout_page.restoreRoutes(self.alloc, sr, self.solved.placement.nets) orelse
-            return .{};
-        const v = self.violations(rr);
-        return .{ .all = v.len, .errors = drc.errorCount(v) };
-    }
-
     /// The violation list itself, for the ratchet's cull step.
     fn violations(self: Ctx, rr: router.RouteResult) []const drc.Violation {
         return drc_rules.checkFilteredZones(self.alloc, self.project_dir, self.name, .{
@@ -244,7 +235,48 @@ fn withFence(alloc: std.mem.Allocator, base: SavedRoutes, added: []const SavedVi
     return .{ .tracks = base.tracks, .vias = vias, .zones = base.zones, .rf_paths = base.rf_paths };
 }
 
-/// Drop the fence via nearest each error-severity geometry violation. Returns
+fn sameViolation(a: drc.Violation, b: drc.Violation) bool {
+    if (a.kind != b.kind or a.severity != b.severity or a.layer != b.layer) return false;
+    if (@abs(a.x - b.x) > drc.eps or @abs(a.y - b.y) > drc.eps) return false;
+    const aw = a.who;
+    const bw = b.who;
+    return aw.net_a == bw.net_a and aw.net_b == bw.net_b and
+        aw.part_a == bw.part_a and aw.part_b == bw.part_b and
+        aw.track_a == bw.track_a and
+        std.mem.eql(u8, aw.pad_a, bw.pad_a) and std.mem.eql(u8, aw.pad_b, bw.pad_b);
+}
+
+/// Error-severity violations in `after` that have no identity-equivalent entry
+/// in `before`. Matching is a multiset operation: two coincident instances in
+/// the baseline consume two after entries, so a third is still correctly new.
+fn introducedErrors(
+    alloc: std.mem.Allocator,
+    before: []const drc.Violation,
+    after: []const drc.Violation,
+) std.mem.Allocator.Error![]const drc.Violation {
+    const used = try alloc.alloc(bool, before.len);
+    @memset(used, false);
+    var out: std.ArrayList(drc.Violation) = .empty;
+    for (after) |candidate| {
+        if (candidate.severity != .err or candidate.kind == .net_open) continue;
+        var matched = false;
+        for (before, 0..) |prior, i| {
+            if (used[i] or prior.severity != .err or prior.kind == .net_open) continue;
+            if (!sameViolation(prior, candidate)) continue;
+            used[i] = true;
+            matched = true;
+            break;
+        }
+        if (!matched) try out.append(alloc, candidate);
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+fn drcDelta(violations: []const drc.Violation) DrcDelta {
+    return .{ .all = violations.len, .errors = drc.errorCount(violations) };
+}
+
+/// Drop the fence via nearest each NEW error-severity geometry violation. Returns
 /// the surviving vias; `removed` is how many the round cost. Only ever culls
 /// from `fence` — pre-existing copper is not this pass's to delete.
 fn cullNearViolations(
@@ -279,9 +311,9 @@ fn cullNearViolations(
     return .{ .kept = try kept.toOwnedSlice(alloc), .removed = removed };
 }
 
-/// The DRC ratchet: keep as much of `fence` as leaves the error count no worse
-/// than `before`. A rise is answered by culling the vias nearest the new
-/// violations and re-checking, up to `max_cull_rounds` — never by rejecting the
+/// The DRC ratchet: keep as much of `fence` as introduces no new error identity
+/// beyond `baseline`. New findings are answered by culling the nearest vias and
+/// re-checking, up to `max_cull_rounds` — never by rejecting the
 /// whole batch, because a fence with gaps is the accepted outcome here and
 /// throwing away a hundred good vias over one crowded corner is not.
 ///
@@ -294,24 +326,30 @@ fn ratchet(
     ctx: Ctx,
     base: SavedRoutes,
     fence_in: []const SavedVia,
-    before: usize,
+    baseline: []const drc.Violation,
 ) std.mem.Allocator.Error!Gated {
     const alloc = ctx.alloc;
+    const before = drc.errorCount(baseline);
     var fence = fence_in;
     var merged = try withFence(alloc, base, fence);
-    var count = ctx.drcOn(merged);
+    var rr = pcb_layout_page.restoreRoutes(alloc, merged, ctx.solved.placement.nets);
+    var violations = if (rr) |r| ctx.violations(r) else &.{};
+    var count = drcDelta(violations);
     if (ctx.mode == .all) {
         count.before = before;
         return .{ .fence = fence, .merged = merged, .drc = count };
     }
+    var introduced = try introducedErrors(alloc, baseline, violations);
     var round: usize = 0;
-    while (count.errors > before and fence.len > 0 and round < max_cull_rounds) : (round += 1) {
-        const rr = pcb_layout_page.restoreRoutes(alloc, merged, ctx.solved.placement.nets) orelse break;
-        const culled = try cullNearViolations(alloc, fence, ctx.violations(rr));
+    while (introduced.len > 0 and fence.len > 0 and round < max_cull_rounds) : (round += 1) {
+        const culled = try cullNearViolations(alloc, fence, introduced);
         if (culled.removed == 0) break;
         fence = culled.kept;
         merged = try withFence(alloc, base, fence);
-        count = ctx.drcOn(merged);
+        rr = pcb_layout_page.restoreRoutes(alloc, merged, ctx.solved.placement.nets);
+        violations = if (rr) |r| ctx.violations(r) else &.{};
+        count = drcDelta(violations);
+        introduced = try introducedErrors(alloc, baseline, violations);
     }
     count.before = before;
     return .{ .fence = fence, .merged = merged, .drc = count };
@@ -370,9 +408,9 @@ pub fn run(
         .solved = solved,
         .mode = opt.mode,
     };
-    const before = ctx.drcOn(base).errors;
+    const baseline = if (restored) |r| ctx.violations(r) else &.{};
     const fresh = try savedVias(alloc, res.sites);
-    const gated = try ratchet(ctx, base, fresh, before);
+    const gated = try ratchet(ctx, base, fresh, baseline);
 
     const tally = if (pcb_layout_page.restoreRoutes(alloc, gated.merged, placement.nets)) |rr|
         try fab_readiness.routableTally(alloc, placement, .{
@@ -420,7 +458,7 @@ fn unknownModeMsg(alloc: std.mem.Allocator, given: []const u8) []const u8 {
     return std.fmt.allocPrint(
         alloc,
         "unknown mode \"{s}\" — expected \"all\" (place every ring site, DRC reported but not enforced) " ++
-            "or \"legal\" (skip the sites the board vetoes and cull on a DRC rise)",
+            "or \"legal\" (skip vetoed sites and cull vias implicated in newly introduced DRC errors)",
         .{given},
     ) catch err_unknown_mode;
 }
@@ -833,8 +871,8 @@ test "the fence endpoint fences a max-freq RF class that declares no fence" {
     );
 }
 
-// spec: Web Server - A fence run defaults to the vetted mode, placing only sites the board accepts and ending at the DRC error count it started from, while mode=all places every ring site and reports the DRC without culling it
-test "the default fence mode vets every ring site and mode all places them all" {
+// spec: Web Server - A fence run defaults to the vetted mode, placing only sites the board accepts and ending at the DRC error count it started from, while mode=all places every non-coincident site and reports the DRC without culling it
+test "the default fence mode vets every site and mode all keeps every non-coincident one" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const alloc = arena_state.allocator();
@@ -857,13 +895,18 @@ test "the default fence mode vets every ring site and mode all places them all" 
     );
     try testing.expectEqual(@as(i64, 0), resultInt(legal.body, "culled").?);
 
-    // mode=all marches the identical guide and places every site of it, so it lands
-    // strictly more copper and REPORTS the violations that copper causes without
-    // acting on any of them.
+    // mode=all marches the identical guide and places every non-coincident site,
+    // so it lands strictly more copper and REPORTS the violations that copper
+    // causes without acting on any of them. The pad-first anchor deliberately
+    // wins a coincident contour site, which is reported as a dedup rather than a
+    // second barrel in the same hole.
     const all = try fencePost(alloc, project, &.{ .{ "mode", "all" }, .{ "dry_run", "1" } });
     try testing.expect(std.mem.indexOf(u8, all.body, "\"mode\":\"all\"") != null);
     try testing.expectEqual(@as(i64, 0), resultInt(all.body, "culled").?);
-    try testing.expectEqual(resultInt(all.body, "placed"), resultInt(all.body, "candidates"));
+    try testing.expectEqual(
+        resultInt(all.body, "candidates").?,
+        resultInt(all.body, "placed").? + resultInt(all.body, "dedup").?,
+    );
     try testing.expectEqual(resultInt(all.body, "candidates"), resultInt(legal.body, "candidates"));
     try testing.expect(resultInt(legal.body, "placed").? < resultInt(all.body, "placed").?);
     try testing.expect(resultInt(all.body, "drc_errors").? > resultInt(all.body, "drc_errors_before").?);
@@ -906,6 +949,33 @@ test "the fence ratchet culls the vias a new violation implicates, and only thos
     const untouched = try cullNearViolations(alloc, &fence, &distant);
     try testing.expectEqual(@as(usize, 0), untouched.removed);
     try testing.expectEqual(fence.len, untouched.kept.len);
+}
+
+// spec: Web Server - The fence ratchet compares violation identity against the baseline and never culls a new fence via merely because it is near a pre-existing error
+test "the fence ratchet isolates introduced errors from the baseline" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    const before = [_]drc.Violation{
+        .{ .x = 1, .y = 1, .gap = -0.1, .clearance = 0.127, .kind = .via_track, .who = .{ .net_a = 1, .net_b = 2 } },
+    };
+    const after = [_]drc.Violation{
+        before[0],
+        .{ .x = 5, .y = 1, .gap = -0.1, .clearance = 0.127, .kind = .via_pad, .who = .{ .net_a = 1, .net_b = 3 } },
+    };
+    const introduced = try introducedErrors(alloc, &before, &after);
+    try testing.expectEqual(@as(usize, 1), introduced.len);
+    try testing.expectEqual(drc.Kind.via_pad, introduced[0].kind);
+
+    const fence = [_]SavedVia{
+        .{ .x = 1, .y = 1, .d = 0.4, .drill = 0.2, .net = "GND", .f = "SIG" },
+        .{ .x = 5, .y = 1, .d = 0.4, .drill = 0.2, .net = "GND", .f = "SIG" },
+    };
+    const culled = try cullNearViolations(alloc, &fence, introduced);
+    try testing.expectEqual(@as(usize, 1), culled.removed);
+    try testing.expectEqual(@as(usize, 1), culled.kept.len);
+    try testing.expectEqual(@as(f64, 1), culled.kept[0].x);
 }
 
 // spec: Web Server - The fence endpoint and the generate_fence tool reject an unknown mode naming the two spellings that exist

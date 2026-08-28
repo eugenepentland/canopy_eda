@@ -893,15 +893,18 @@ test "PCB editor carries the generic keepout overlay" {
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "keepout_escape_mm") == null);
 }
 
-// spec: Web Server - PCB keepout overlays retain width-batched net-class geometry and a transform-keyed raster so enabling them does not rebuild hundreds of paths on unchanged frames
+// spec: Web Server - PCB keepout overlays retain width-batched net-class geometry and one transform-keyed raster cropped to the visible halo bounds, painting fixed regions directly so a zoom never clears or copies a redundant viewport-sized overlay
 test "PCB keepout rendering retains its batched geometry and raster" {
     const markers = [_][]const u8{
-        "function keepoutBatchGet", "function keepoutStrokeBucket",
-        "keepoutOverlayCache",      "function keepoutTransformKey",
-        "keepoutMaskKey!==key",     "keepoutGeomDrop();if(gpuOn)",
-        "mc.stroke(b.ot[oi].p)",    "ctx.drawImage(keepoutOverlayCv,0,0)",
+        "function keepoutBatchGet",                                          "function keepoutStrokeBucket",
+        "paintFixedKeepouts(ctx,k);paintNetKeepouts(ctx,keepoutBatchGet())", "function keepoutTransformKey",
+        "function keepoutPixelBounds",                                       "mc.clearRect(crop.x,crop.y,crop.w,crop.h)",
+        "keepoutMaskKey!==key",                                              "keepoutGeomDrop();if(gpuOn)",
+        "mc.stroke(b.ot[oi].p)",                                             "ctx.drawImage(cv,crop.x,crop.y,crop.w,crop.h",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "keepoutOverlayCv") == null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "keepoutOverlayCache") == null);
 }
 
 test "PCB clearance halos follow exact rotated pad outlines" {
@@ -1109,7 +1112,7 @@ test "PCB editor automatically lowers every local controlled-impedance pad taper
         "function drawTaperProfile",                                 "Math.abs(span-nominal)<=1e-9",           "pad_neck_width",                                       "kind:\"rf\"",
         "nominal*1.2",                                               "function drawTaperTracks",               "function drawApplyAutomaticTapers",                    "automatic pad tapers added",
         "window.PCBDrawTaperTracks",                                 "function drawTaperPath",                 "track_ids:tracks.map(trackIdEnsure)",                  "window.PCBDrawPadLaunch",
-        "function drawRfTaperPlan",                                  "window.PCBDrawRfTaperPlan",              "vias, opposite-side terminals",                        "function drawTrackEndDirection",
+        "function drawRfTaperPlan",                                  "window.PCBDrawRfTaperPlan",              "through-via contributes its real annulus width",       "function drawTrackEndDirection",
         "function rfFallbackRegions",                                "function rfRingFolded",                  "overlapping simple segment",                           "polys=rfFallbackRegions(pts,ws,poly)",
         "function rfCleanSamples",                                   "function rfCompactRing",                 "ws[last]=Math.max(ws[last],w)",                        "clean.pts.length<2",
         "function drawPathPadLaunch",                                "window.PCBDrawPathPadLaunch",            "first box-boundary",                                   "span:f.spanAt(ex,ey,-wy,wx)",
@@ -1126,18 +1129,50 @@ test "PCB editor automatically lowers every local controlled-impedance pad taper
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "function drawReplaceLaid") == null);
 }
 
-// spec: Web Server - the PCB hand router previews and clearance-checks an authored pad neck at its tapered physical width before committing either a pad-out or pad-in gesture
+// spec: Web Server - the PCB hand router previews an authored pad neck at its tapered physical width, checks wide/short-pad launches against their exact swept regions, and submits compact handles plus those regions to the synchronous DRC gate
 test "PCB hand router gates pad entry and exit at the prospective tapered width" {
     const markers = [_][]const u8{
         "function drawAutomaticTaperPlan",
         "window.PCBDrawAutomaticTaperPlan",
         "function drawProspectiveTaperPlan",
         "dtrace.n===0?dtrace.startPad:null",
-        "candF=drawProspectiveTaperPlan(planF).tracks",
-        "candC=drawProspectiveTaperPlan(planC).tracks",
-        "tracks=drawProspectiveTaperPlan(drawRoutePlan(legs)).tracks",
+        "taperF=drawProspectiveTaperPlan(planF)",
+        "drcGateBlocks(planF.tracks,null,taperF.paths)",
+        "taperC=drawProspectiveTaperPlan(planC)",
+        "drcGateBlocks(planC.tracks,null,taperC.paths)",
+        "function drawTaperPathsPadViolation",
+        "drawTaperPathOwnsProbe(taper.paths,t)",
         "preview=drawProspectiveTaperPlan(drawRoutePlan(dl.legs)).tracks",
         "Math.max((t.w||dtrace.w)*S,1.2)",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+}
+
+// spec: placement/power-routing - the hand router steers an unpoured current-rated rail at ordinary fabrication width, then independently exact-DRC-fits each local interval up to its electrical target with 45-degree tapers from the pad's smaller dimension
+test "PCB hand router adaptively widens power copper after steering" {
+    const markers = [_][]const u8{
+        "adaptive_power_width",
+        "function drawNetGeometry",
+        "powerTarget:geo.target",
+        "function drawAdaptiveClearWidth",
+        "for(var i=0;i<11;i++)",
+        "function drawAdaptiveExactClearWidth",
+        "drawAdaptiveProbePath(a,b,layer,net,w)",
+        "for(var i=0;i<7;i++)",
+        "function drawAdaptiveRefinedClearWidth",
+        "function drawAdaptiveIntervalBlocker",
+        "baseCache[key]=baseCounts",
+        "baseCounts=drcBlockCounts(drcGateRun",
+        "function drawAdaptiveRunClearer",
+        "function drawAdaptivePowerRun",
+        "ss[i-1].w+2*(ss[i].s-ss[i-1].s)",
+        "function drawAdaptivePowerPlan",
+        "window.PCBDrawAdaptivePowerPlan",
+        "window.PCBDrawAdaptivePowerPlanExact",
+        "window.PCBDrawAdaptivePowerGateReady",
+        "initial=power?drawAdaptivePowerPlan",
+        "drawAdaptivePowerPlan(old,dtrace.startPad,ep,nominal,powerTarget,drawAdaptiveRefinedClearWidth)",
+        "power route widened locally up to ",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
@@ -1150,18 +1185,18 @@ test "PCB hand router fits automatic tapers to DRC" {
         "automatic pad taper omitted — no DRC-clean flare fits",
         "compact DRC-safe pad taper added",
         "ax=p.a.x-ox*r",
-        "if(!drcGate.ready||drcGate.failed)return {ok:true,changed:false,paths:[],omitted:true}",
+        "if(!drcGate.ready||drcGate.failed)return {ok:true,changed:false,paths:[],omitted:true",
         "drcGateDiffBlocks(base.tracks||[],base.vias||[],board,PCB.vias||[])",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "automatic pad taper would violate DRC") == null);
 }
 
-// spec: Web Server - A controlled-impedance launch approaching a pad corner never pinches below the smaller of its nominal trace width and the pad's narrow dimension, while a genuinely narrow land still receives its physical-width taper
+// spec: Web Server - A controlled-impedance launch approaching a pad corner substitutes the pad's narrow dimension for a degenerate local chord, retaining a visible wide-land taper while a genuinely narrow land still receives its physical-width taper
 test "PCB RF taper rejects degenerate corner chords" {
     const markers = [_][]const u8{
-        "var padFloor=Math.min(nominal,Math.min(+pad.pd.w||0,+pad.pd.h||0))",
-        "if(padFloor>0)span=Math.max(span,padFloor)",
+        "var padWidth=Math.min(+pad.pd.w||0,+pad.pd.h||0)",
+        "if(padWidth>0)span=Math.max(span,padWidth)",
         "a 0.190 mm line pinched to 0.028 mm",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
@@ -1198,7 +1233,7 @@ test "PCB editor Escape cancels a DRC-blocked manual route" {
 }
 
 test "PCB editor DRC lowers taper polygons to private probe tracks" {
-    for ([_][]const u8{ "var physicalTracks", "window.PCBRfOwnsTrack", "physicalTracks.push", "Math.max(+a[2], +b[2])" }) |marker|
+    for ([_][]const u8{ "var physicalTracks", "window.PCBRfOwnsTrack", "physicalTracks.push", "Math.max(+a[2], +b[2])", "if (live.rf_paths !== undefined) return false" }) |marker|
         try std.testing.expect(std.mem.indexOf(u8, drc_marshal_js, marker) != null or std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 

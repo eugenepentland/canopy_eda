@@ -143,6 +143,39 @@ pub fn maxRouteParams(
     return p;
 }
 
+fn adaptiveSearchWidth(
+    placement: optimizer.Placement,
+    base: router.RouteParams,
+    net_i: usize,
+    authored: f64,
+) f64 {
+    if (net_i >= placement.nets.len) return authored;
+    const name = placement.nets[net_i].name;
+    if (placement.rules.powerWidthForNet(name) == null or router.netHasPlane(placement, name)) return authored;
+    if (net_i < placement.rules.net.len) {
+        const rule = placement.rules.net[net_i];
+        if (rule.rf.impedance.ohms > 0 or rule.rf.impedance.diff_ohms > 0) return authored;
+    }
+    for (placement.diff_pairs) |pair| if (pair.p == net_i or pair.n == net_i) return authored;
+    return @max(placement.rules.design.min_width, @min(authored, base.track_width));
+}
+
+fn maxSearchParams(
+    placement: optimizer.Placement,
+    base: router.RouteParams,
+    selected_nets: []const bool,
+) router.RouteParams {
+    var p = base;
+    for (placement.rules.net, 0..) |rule, i| {
+        if (selected_nets.len > 0 and (i >= selected_nets.len or !selected_nets[i])) continue;
+        const authored = if (rule.width > 0) rule.width else base.track_width;
+        p.track_width = @max(p.track_width, adaptiveSearchWidth(placement, base, i, authored));
+        if (rule.clearance > p.clearance) p.clearance = rule.clearance;
+        if (rule.via_dia > p.via_dia) p.via_dia = rule.via_dia;
+    }
+    return p;
+}
+
 /// The finest lattice pitch any ENABLED net on this board actually needs — the
 /// minimum over each net's own effective `width + clearance`.
 ///
@@ -160,7 +193,8 @@ pub fn narrowestPitch(
     var best = base.track_width + base.clearance;
     for (placement.rules.net, 0..) |r, i| {
         if (selected_nets.len > 0 and (i >= selected_nets.len or !selected_nets[i])) continue;
-        const w = if (r.width > 0) r.width else base.track_width;
+        const authored = if (r.width > 0) r.width else base.track_width;
+        const w = adaptiveSearchWidth(placement, base, i, authored);
         const c = if (r.clearance > 0) r.clearance else base.clearance;
         if (w + c < best) best = w + c;
     }
@@ -225,7 +259,7 @@ fn widestPitch(
     selected_nets: []const bool,
     resolution_scale: f64,
 ) f64 {
-    const maxp = maxRouteParams(placement, params, selected_nets);
+    const maxp = maxSearchParams(placement, params, selected_nets);
     // A one-net experiment has no second fresh route that can occupy an
     // adjacent grid line. Search it at the base pitch while preserving maxp's
     // true width/clearance in obstacle halos and edge inset. This removes the
@@ -439,6 +473,23 @@ test "a mixed-class board rasters finer under the narrowest mode" {
     try testing.expectApproxEqAbs(@as(f64, 0.254), both.narrowest.g, 1e-9);
     try testing.expect(both.narrowest.nx > both.widest.nx);
     try testing.expect(both.narrowest.ny > both.widest.ny);
+}
+
+// spec: placement/class-pitch - a wide current-rated power class keeps the ordinary centreline lattice because its electrical width is added after routing
+test "adaptive power class keeps the ordinary search lattice" {
+    const rules = [_]optimizer.NetRule{.{ .width = 0.8, .clearance = 0.127 }};
+    const nets = [_]optimizer.FlatNet{.{ .name = "VDD", .pins = &.{} }};
+    const rails = [_]@import("../eval/power_budget.zig").Rail{.{
+        .net = "VDD",
+        .load_max_a = 1.2,
+        .any_max_load = true,
+        .status = .no_source,
+    }};
+    var placement = pitchFixture(40, 30, &rules, .widest);
+    placement.nets = &nets;
+    placement.rules.physical = .{ .stack = .{ .layers = 2 }, .rails = &rails };
+    try testing.expectApproxEqAbs(@as(f64, 0.254), routeGridDims(placement, .{}, &.{}, 1).g, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0.8), maxRouteParams(placement, .{}, &.{}).track_width, 1e-9);
 }
 
 // spec: placement/class-pitch - the narrowest lattice is never coarser than the widest-class lattice it replaces

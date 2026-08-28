@@ -2365,7 +2365,7 @@ src/placement/pad_grid.zig::nearSegment | fn nearSegment(idx: *const PadGrid, a:
 src/placement/pad_grid.zig::near_scratch_len value
 src/placement/pad_neck.zig::allowsTrack | fn allowsTrack( arena: std.mem.Allocator, placement: optimizer.Placement, track: router.Track, nominal: f64, fab_min_width: f64, ) std.mem.Allocator.Error!bool
 src/placement/pad_neck.zig::passBoard | fn passBoard(board: router.CleanupBoard) std.mem.Allocator.Error!void
-src/placement/pad_neck.zig::shapeGeneratedTracks | fn shapeGeneratedTracks( arena: std.mem.Allocator, placement: optimizer.Placement, selected_nets: []const bool, tracks: *std.ArrayList(router.Track), ) std.mem.Allocator.Error!bool
+src/placement/pad_neck.zig::shapeGeneratedTracks | fn shapeGeneratedTracks( arena: std.mem.Allocator, placement: optimizer.Placement, selected_nets: []const bool, vias: []const router.Via, tracks: *std.ArrayList(router.Track), ) std.mem.Allocator.Error!bool
 src/placement/pad_shape.zig::SegClosest struct_
 src/placement/pad_shape.zig::Shape struct_
 src/placement/pad_shape.zig::closestOnSeg | fn closestOnSeg(ax: f64, ay: f64, bx: f64, by: f64, px: f64, py: f64) SegClosest
@@ -2533,6 +2533,7 @@ src/placement/pour.zig::computeMemo | fn computeMemo( arena: std.mem.Allocator, 
 src/placement/pour.zig::computeMemoKeyed | fn computeMemoKeyed( arena: std.mem.Allocator, placement: optimizer.Placement, copper: Copper, spec: LayerSpec, base: ?EdgeField, memo: ?FillMemo, ) std.mem.Allocator.Error!KeyedFill
 src/placement/pour.zig::computeShared | fn computeShared( arena: std.mem.Allocator, placement: optimizer.Placement, copper: Copper, spec: LayerSpec, base: ?EdgeField, ) std.mem.Allocator.Error!Fill
 src/placement/pour.zig::contains | fn contains(self: Fill, x: f64, y: f64) bool
+src/placement/pour.zig::diskComponents | fn diskComponents( self: Fill, arena: std.mem.Allocator, cx: f64, cy: f64, radius: f64, slack: f64, ) std.mem.Allocator.Error![]const i32
 src/placement/pour.zig::fillKey | fn fillKey( arena: std.mem.Allocator, placement: optimizer.Placement, copper: Copper, spec: LayerSpec, contours: bool, ) std.mem.Allocator.Error!content_key.Key
 src/placement/pour.zig::fillKeyStable | fn fillKeyStable( placement: optimizer.Placement, spec: LayerSpec, tracks: []const router.Track, vias: []const router.Via, ) bool
 src/placement/pour.zig::higherPolys | fn higherPolys(arena: std.mem.Allocator, zones: []const UserZone, i: usize) std.mem.Allocator.Error![]const []const [2]f64
@@ -2543,6 +2544,7 @@ src/placement/pour.zig::planeConnect | fn planeConnect( arena: std.mem.Allocator
 src/placement/pour.zig::planeConnectPrepared | fn planeConnectPrepared(arena: std.mem.Allocator, q: PlaneQuery, prepared: NetFills) std.mem.Allocator.Error!Join
 src/placement/pour.zig::segmentComponents | fn segmentComponents( arena: std.mem.Allocator, fill: Fill, x1: f64, y1: f64, x2: f64, y2: f64, ) std.mem.Allocator.Error![]const i32
 src/placement/pour.zig::segmentContacts | fn segmentContacts( self: Fill, arena: std.mem.Allocator, x1: f64, y1: f64, x2: f64, y2: f64, ) std.mem.Allocator.Error![]const ComponentContact
+src/placement/pour.zig::shapeComponents | fn shapeComponents( self: Fill, arena: std.mem.Allocator, shape: pad_shape.Shape, slack: f64, ) std.mem.Allocator.Error![]const i32
 src/placement/pour.zig::sharedEdgeField | fn sharedEdgeField(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error!?EdgeField
 src/placement/pour.zig::sideOfSignal | fn sideOfSignal(layer: u8) ?optimizer.Side
 src/placement/pour.zig::stampDisc | fn stampDisc(g: Grid, cx: f64, cy: f64, rad: f64) void
@@ -2580,6 +2582,8 @@ src/placement/power_integrity.zig::routedTrackRequiredWidthsMemo | fn routedTrac
 src/placement/power_integrity.zig::routedTrackRequiredWidthsPrepared | fn routedTrackRequiredWidthsPrepared( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, plane_fills: []const pour.NetFills, zones: []const pour.UserZone, zone_fills: []const pour.Fill, ) std.mem.Allocator.Error![]const ?f64
 src/placement/power_integrity.zig::temperature_rise_c value
 src/placement/power_integrity.zig::via_plating_mm value
+src/placement/power_route_width.zig::adaptiveTargetWidth | fn adaptiveTargetWidth( zones: []const route_policy.ExistingZone, placement: optimizer.Placement, net_i: usize, authored: f64, ) ?f64
+src/placement/power_route_width.zig::exactWidth | fn exactWidth( zones: []const route_policy.ExistingZone, placement: optimizer.Placement, net_i: usize, authored: f64, ) f64
 src/placement/progress.zig::Inputs struct_
 src/placement/progress.zig::Item struct_
 src/placement/progress.zig::NetConn struct_
@@ -2882,6 +2886,7 @@ src/placement/router.zig::Track value
 src/placement/router.zig::Via value
 src/placement/router.zig::VisionInput struct_
 src/placement/router.zig::VisionMask struct_
+src/placement/router.zig::adaptivePowerWidth | fn adaptivePowerWidth(self: CleanupBoard, net_i: usize) ?f64
 src/placement/router.zig::addGroundPadStitches | fn addGroundPadStitches( arena: std.mem.Allocator, placement: optimizer.Placement, routed: RouteResult, ) std.mem.Allocator.Error!RouteResult
 src/placement/router.zig::arena | fn arena(self: CleanupBoard) std.mem.Allocator
 src/placement/router.zig::beginNet | fn beginNet(self: CleanupBoard, net_i: usize) void

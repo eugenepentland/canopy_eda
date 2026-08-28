@@ -102,6 +102,7 @@ const pad_grid = @import("pad_grid.zig");
 const escape_assign = @import("escape_assign.zig");
 const port_escape = @import("port_escape.zig");
 const plane_stitch = @import("plane_stitch.zig");
+const power_route_width = @import("power_route_width.zig");
 
 const Allocator = std.mem.Allocator;
 const Placement = optimizer.Placement;
@@ -536,26 +537,24 @@ fn staticPadInfo(
 
 /// The track width net `net` is routed at: its `(net-class … (width …))` when it
 /// declares one, else the board's `(design-rules (track-width …))` default, then
-/// raised to the IPC-2221 envelope of whatever rail current the net carries —
-/// exactly the resolution `router.setNetParams` performs per net (the class
-/// overlay, then `effectivePowerTrackWidth`). A widened rail measured at its
-/// authored width reports a corridor as clear that the router's real copper
-/// cannot fit down, which is the one failure mode a static gate must not have.
+/// reduced to an ordinary fabrication-legal centreline when an unpoured rail
+/// will be widened adaptively after routing. This is the geometry that must fit
+/// through a corridor; the electrical target is checked on finished copper.
 ///
 /// One deliberate difference: the router also exempts a rail carried by an
 /// EXISTING hand-drawn copper zone, and a `Placement` holds no zones — only the
-/// DECLARED planes are visible here (`plane_stitch.netHasPlane`, the same
-/// predicate the sealed gate's exemption uses). Such a rail is measured at its
-/// full envelope instead, the conservative direction for a warning-only gate.
+/// DECLARED planes are visible here. A saved zone is therefore conservatively
+/// treated as absent and may make a warning measure a narrower search path than
+/// the exact sheet-aware fanout eventually uses.
 fn netWidth(p: Placement, net: i32) f64 {
     if (net < 0) return p.rules.design.track_width;
     const i: usize = @intCast(net);
     var width = p.rules.design.track_width;
     if (i < p.rules.net.len and p.rules.net[i].width > 0) width = p.rules.net[i].width;
     if (i >= p.nets.len) return width;
-    const name = p.nets[i].name;
-    if (plane_stitch.netHasPlane(p, name)) return width;
-    return @max(width, p.rules.powerWidthForNet(name) orelse 0);
+    if (power_route_width.adaptiveTargetWidth(&.{}, p, i, width) != null)
+        return @max(p.rules.design.min_width, @min(width, p.rules.design.track_width));
+    return power_route_width.exactWidth(&.{}, p, i, width);
 }
 
 fn netViaDia(p: Placement, net: i32) f64 {
@@ -1562,8 +1561,8 @@ fn widthRulesPlacement(
     });
 }
 
-// spec: placement/routability_lint - a corridor is measured at the router's effective width, so an unpoured rail's IPC-2221 envelope widens the demand and a plane-carried rail keeps its authored width
-test "netWidth mirrors the router's power-envelope widening" {
+// spec: placement/routability_lint - a corridor is measured at the adaptive router's narrow search width, while a plane-carried rail keeps its authored fanout width
+test "netWidth mirrors adaptive power-route search geometry" {
     const rails = [_]power_budget.Rail{
         .{ .net = "V3P3", .load_max_a = 0.5, .any_max_load = true, .status = .no_source },
         .{ .net = "GND", .load_max_a = 0.5, .any_max_load = true, .status = .no_source },
@@ -1580,7 +1579,7 @@ test "netWidth mirrors the router's power-envelope widening" {
     // Worst layer of a uniform four-layer stack is an inner one.
     const envelope = power_capacity.requiredTraceWidthMm(0.5, impedance.default_foil_mm, false).?;
     try testing.expect(envelope > p.rules.design.track_width);
-    try testing.expectApproxEqAbs(envelope, netWidth(p, 0), 1e-12);
+    try testing.expectEqual(p.rules.design.track_width, netWidth(p, 0));
     // A plane-carried rail fans out into its pour, so the router never widens
     // its surface copper and neither does the gate.
     try testing.expectEqual(p.rules.design.track_width, netWidth(p, 1));
@@ -1589,8 +1588,8 @@ test "netWidth mirrors the router's power-envelope widening" {
     try testing.expectEqual(p.rules.design.track_width, netWidth(p, -1));
 }
 
-// spec: placement/routability_lint - a net class wider than the rail envelope keeps its authored width, so the two rules compose as a maximum rather than one overriding the other
-test "netWidth keeps whichever of the class width and the rail envelope is wider" {
+// spec: placement/routability_lint - an adaptive rail's authored wide class remains an electrical target and does not widen the static route corridor
+test "netWidth keeps a wide adaptive power class out of corridor geometry" {
     const rails = [_]power_budget.Rail{
         .{ .net = "V3P3", .load_max_a = 0.5, .any_max_load = true, .status = .no_source },
     };
@@ -1601,9 +1600,9 @@ test "netWidth keeps whichever of the class width and the rail envelope is wider
     const class = [_]optimizer.NetRule{.{ .width = envelope * 2 }};
     var p = widthRulesPlacement(&parts, &nets, &rails, &.{});
     p.rules.net = &class;
-    try testing.expectApproxEqAbs(envelope * 2, netWidth(p, 0), 1e-12);
+    try testing.expectEqual(p.rules.design.track_width, netWidth(p, 0));
 
     const narrow = [_]optimizer.NetRule{.{ .width = envelope / 2 }};
     p.rules.net = &narrow;
-    try testing.expectApproxEqAbs(envelope, netWidth(p, 0), 1e-12);
+    try testing.expectEqual(p.rules.design.track_width, netWidth(p, 0));
 }

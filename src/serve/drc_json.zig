@@ -28,6 +28,7 @@ pub fn kindStr(k: drc.Kind) []const u8 {
         .hole_hole => "hole↔hole",
         .min_drill => "min drill",
         .track_width => "track width",
+        .power_width => "power width",
         .pour_invalid => "invalid copper pour",
         .pour_overlap => "pour overlap",
         .copper_stub => "copper stub",
@@ -86,9 +87,9 @@ pub const drawer_groups = [_]DrawerGroup{
         .kinds = &.{ .track_width, .pour_invalid, .board_edge, .component_edge, .courtyard, .silk_over_pad },
     },
     .{
-        .title = "Signal integrity",
-        .blurb = "Controlled-impedance and RF routing discipline.",
-        .kinds = &.{ .diff_uncoupled, .diff_skew, .length_mismatch, .sharp_bend, .ground_via_distance, .reference_plane_gap, .reference_transition, .loop_area, .bypass_open },
+        .title = "Electrical quality",
+        .blurb = "Power capacity, controlled-impedance, and RF routing discipline.",
+        .kinds = &.{ .power_width, .diff_uncoupled, .diff_skew, .length_mismatch, .sharp_bend, .ground_via_distance, .reference_plane_gap, .reference_transition, .loop_area, .bypass_open },
     },
     .{
         .title = "Keepouts",

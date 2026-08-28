@@ -28,7 +28,7 @@ pub fn restoreGeneratedTracks(
         const rule = placement.rules.net[ni];
         if (rule.width > 0) track.width = rule.width;
     }
-    _ = try pad_neck.shapeGeneratedTracks(arena, placement, selected, &tracks);
+    _ = try pad_neck.shapeGeneratedTracks(arena, placement, selected, routed.vias, &tracks);
     var out = routed;
     out.tracks = tracks.items;
     return out;

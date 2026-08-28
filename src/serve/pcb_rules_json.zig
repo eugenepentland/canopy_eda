@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const optimizer = @import("../placement/optimizer.zig");
+const net_names = @import("../net_name.zig");
 const na = @import("../eval/net_analysis.zig");
 const router = @import("../placement/router.zig");
 const mask_relief = @import("../placement/mask_relief.zig");
@@ -21,18 +22,40 @@ fn rfCorridorMm(rule: optimizer.NetRule, design: optimizer.DesignRules) f64 {
     return @max(rule.rf.keepout_mm, fence);
 }
 
+/// Browser-side counterpart of the route search's adaptive-power eligibility.
+/// Local same-net zones do not make the entire rail plane-backed. Declared or
+/// implicit planes, RF geometry, and differential pairs do exclude it.
+fn adaptivePowerWidth(p: optimizer.Placement, net_i: usize, authored: f64) f64 {
+    if (net_i >= p.nets.len or p.rules.carriesPlane(p.nets[net_i].name)) return 0;
+    if (p.rules.planes.implicit_rail) |rail| {
+        const net_name = p.nets[net_i].name;
+        if (std.ascii.eqlIgnoreCase(rail, net_name) or std.ascii.eqlIgnoreCase(rail, net_names.leaf(net_name))) return 0;
+    }
+    const required = p.rules.powerWidthForNet(p.nets[net_i].name) orelse return 0;
+    if (net_i < p.rules.net.len) {
+        const rule = p.rules.net[net_i];
+        if (rule.rf.impedance.ohms > 0 or rule.rf.impedance.diff_ohms > 0) return 0;
+    }
+    for (p.diff_pairs) |pair| if (pair.p == net_i or pair.n == net_i) return 0;
+    return @max(authored, required);
+}
+
 /// Emit `,"netclasses":[…]` — one entry per net that resolved to an authored
-/// class, carrying its class identity/provenance and every resolved geometry
-/// field the client needs. `keepout_mm` / `keepout_escape_mm` are load-bearing
-/// for the client DRC: without them the browser's engine would report zero
-/// `keepout_violation` findings on a board the server flags.
+/// class, plus an otherwise-unclassed rail whose hand router needs an adaptive
+/// electrical-width target. Entries carry their class identity/provenance and
+/// every resolved geometry field the client needs. `keepout_mm` /
+/// `keepout_escape_mm` are load-bearing for the client DRC: without them the
+/// browser's engine would report zero `keepout_violation` findings on a board
+/// the server flags.
 pub fn writeNetClasses(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.Error!void {
     try w.writeAll(",\"netclasses\":[");
     var first = true;
     for (p.nets, 0..) |net, i| {
         if (i >= p.rules.net.len) break;
         const rule = p.rules.net[i];
-        if (rule.class.name.len == 0) continue;
+        const authored_width = if (rule.width > 0) rule.width else p.rules.design.track_width;
+        const adaptive_power_width = adaptivePowerWidth(p, i, authored_width);
+        if (rule.class.name.len == 0 and !(adaptive_power_width > authored_width)) continue;
         if (!first) try w.writeByte(',');
         first = false;
         try w.writeAll("{\"net\":");
@@ -42,7 +65,7 @@ pub fn writeNetClasses(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.
         try w.writeAll(",\"source\":");
         try writeJsonStr(w, rule.class.source);
         try w.print(
-            ",\"width\":{d},\"power_branch_width\":{d},\"clearance\":{d},\"via_dia\":{d},\"via_drill\":{d}," ++
+            ",\"width\":{d},\"power_branch_width\":{d},\"adaptive_power_width\":{d},\"clearance\":{d},\"via_dia\":{d},\"via_drill\":{d}," ++
                 "\"priority\":{d},\"diff_gap\":{d},\"band_start_hz\":{d},\"max_freq_hz\":{d}," ++
                 "\"pad_neck_width\":{d},\"pad_neck_max_length\":{d},\"pad_neck_taper_length\":{d}," ++
                 "\"keepout_mm\":{d},\"rf_corridor_mm\":{d},\"keepout_escape_mm\":{d},\"impedance_ohms\":{d}," ++
@@ -52,6 +75,7 @@ pub fn writeNetClasses(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.
             .{
                 rule.width,
                 rule.pad_neck.power_branch_width,
+                adaptive_power_width,
                 rule.clearance,
                 rule.via_dia,
                 rule.via_drill,
@@ -327,6 +351,62 @@ test "the net-class blob carries keepout and impedance geometry" {
     // Only the classed net is listed.
     try testing.expect(std.mem.indexOf(u8, out, "RF_IN") != null);
     try testing.expect(std.mem.indexOf(u8, out, "SPI_SCK") == null);
+}
+
+// spec: placement/power-routing - the hand router receives an electrical target for every unpoured current-rated rail, including an otherwise-unclassed net
+test "the net-class blob carries adaptive power width for hand routing" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    const Foil = std.meta.Child(@TypeOf((optimizer.BoardRules{}).physical.stack.foils));
+    const Rail = std.meta.Child(@TypeOf((optimizer.BoardRules{}).physical.rails));
+    const foils = [_]Foil{
+        .{ .index = 1, .thickness_mm = 0.035 },
+        .{ .index = 2, .thickness_mm = 0.035 },
+    };
+    const rails = [_]Rail{.{
+        .net = "SPI_SCK",
+        .load_max_a = 2,
+        .any_max_load = true,
+        .status = .no_source,
+    }};
+    const rules = [_]optimizer.NetRule{ .{}, .{} };
+    var placement = fixture(null, &rules);
+    placement.rules.physical.stack = .{ .layers = 2, .foils = &foils };
+    placement.rules.physical.rails = &rails;
+    try writeNetClasses(&aw.writer, placement);
+    const out = aw.written();
+    const marker = "\"adaptive_power_width\":";
+    const at = std.mem.indexOf(u8, out, marker) orelse return error.TestUnexpectedResult;
+    const rest = out[at + marker.len ..];
+    const end = std.mem.indexOfScalar(u8, rest, ',') orelse return error.TestUnexpectedResult;
+    const width = try std.fmt.parseFloat(f64, rest[0..end]);
+    try testing.expect(width > placement.rules.design.track_width);
+    try testing.expect(std.mem.indexOf(u8, out, "\"net\":\"SPI_SCK\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"class\":\"\"") != null);
+}
+
+test "the net-class blob excludes an implicit plane from adaptive hand routing" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    const Foil = std.meta.Child(@TypeOf((optimizer.BoardRules{}).physical.stack.foils));
+    const Rail = std.meta.Child(@TypeOf((optimizer.BoardRules{}).physical.rails));
+    const foils = [_]Foil{
+        .{ .index = 1, .thickness_mm = 0.035 },
+        .{ .index = 2, .thickness_mm = 0.035 },
+    };
+    const rails = [_]Rail{.{
+        .net = "SPI_SCK",
+        .load_max_a = 2,
+        .any_max_load = true,
+        .status = .no_source,
+    }};
+    const rules = [_]optimizer.NetRule{ .{}, .{} };
+    var placement = fixture(null, &rules);
+    placement.rules.physical.stack = .{ .layers = 2, .foils = &foils };
+    placement.rules.physical.rails = &rails;
+    placement.rules.planes.implicit_rail = "SPI_SCK";
+    try writeNetClasses(&aw.writer, placement);
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "\"net\":\"SPI_SCK\"") == null);
 }
 
 // spec: Web Server - The PCB page blob carries each net class's resolved mask relief and fence untent reach so the assembly view shows the shipped mask

@@ -65,6 +65,9 @@ pub const Kind = enum {
     hole_hole,
     min_drill,
     track_width,
+    /// Routed power copper is below its IPC/current target at the worst
+    /// clearance-constrained neck. Fabrication geometry remains legal.
+    power_width,
     /// A final plane/pour component cannot be represented as one unambiguous
     /// solid: an outer or hole is degenerate/self-intersecting, a hole crosses
     /// or escapes its outer, or sibling holes touch/overlap.
@@ -191,7 +194,7 @@ pub fn defaultSeverity(k: Kind) Severity {
         .land_transit => .warn,
         // A legal board can still have a long ground return. The authored
         // distance is an SI budget, so report it without blocking fabrication.
-        .ground_via_distance, .reference_plane_gap, .reference_transition, .loop_area => .warn,
+        .ground_via_distance, .reference_plane_gap, .reference_transition, .loop_area, .power_width => .warn,
         // The board can still fabricate, but the authored bypass relationship
         // is electrically ineffective at high frequency until its local
         // surface leg reaches the intended IC land.
@@ -689,6 +692,10 @@ fn checkImpl(
     // Swept paths are the physical width authority. Saved editor handles stay
     // compact; every capsule-based rule sees private profile chords instead.
     const tracks = try path_copper.tracks(arena, routed);
+    var ordinary_tracks: usize = 0;
+    for (routed.tracks) |track| {
+        if (!path_copper.ownsTrack(routed.rf_port_outcomes, track)) ordinary_tracks += 1;
+    }
     const rules = placement.rules.design;
     const clr = ClearanceResolver{ .base = clearance, .rules = placement.rules };
     // Widest clearance any pair can demand — the grid inflation, so no violating
@@ -709,7 +716,13 @@ fn checkImpl(
     try checkViaVia(c, vias, &via_grid);
     try checkViaTrack(c, vias, tracks, &track_grid);
     try checkTrackTrack(c, tracks, &track_grid);
-    try checkTrackPad(c, tracks, pads, &pad_grid);
+    // A variable-width path fabricates as butt-ended swept regions, not the
+    // round-ended max-width capsules used by the remaining centreline rules.
+    // Check ordinary tracks through the legacy capsule seam and paths against
+    // their exact polygons. In particular, a wide/short launch pad must not
+    // grow a synthetic radius behind its centre and crowd the adjacent land.
+    try checkTrackPad(c, tracks[0..ordinary_tracks], pads, &pad_grid);
+    try checkRfPathPad(c, routed, pads);
     // Drill / edge / courtyard / silk / width rules live in helpers.
     try checkDrillRules(arena, &out, pads, vias, rules);
     try checkBoardEdge(arena, &out, placement, tracks, vias, rules.edgeClearance());
@@ -1376,6 +1389,63 @@ fn checkTrackPad(c: Ctx, tracks: []const router.Track, pads: []const PadBox, pad
     }
 }
 
+fn regionShape(poly: []const [2]f64) pad_shape.Shape {
+    var x0 = std.math.inf(f64);
+    var y0 = std.math.inf(f64);
+    var x1 = -std.math.inf(f64);
+    var y1 = -std.math.inf(f64);
+    for (poly) |point| {
+        x0 = @min(x0, point[0]);
+        y0 = @min(y0, point[1]);
+        x1 = @max(x1, point[0]);
+        y1 = @max(y1, point[1]);
+    }
+    return .{ .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1, .poly = poly };
+}
+
+/// Track-to-pad clearance for swept variable-width copper. `path_copper.tracks`
+/// deliberately emits max-endpoint capsules for rules that only understand a
+/// scalar width. Those capsules have round ends, while the rendered/fabricated
+/// taper regions are butt-ended. Measuring the regions here prevents the cap at
+/// a 0.55 x 0.25 mm launch from extending 0.15 mm behind the real pad.
+fn checkRfPathPad(c: Ctx, routed: router.RouteResult, pads: []const PadBox) Err {
+    for (routed.rf_port_outcomes) |path| {
+        if (!path.success or path.physical.gate_removed) continue;
+        const regions = try path_copper.regions(c.arena, path.physical.samples);
+        if (regions.len == 0) continue;
+        for (pads) |pad| {
+            if (c.sameNet(path.net, pad.net)) continue;
+            if (!pad.thru and pad.layer != path.physical.layer) continue;
+            const eff = c.clr.between(path.net, pad.net);
+            const pad_s = pad_shape.Shape{ .x0 = pad.x0, .y0 = pad.y0, .x1 = pad.x1, .y1 = pad.y1, .poly = pad.poly };
+            var best = std.math.inf(f64);
+            var best_shape: ?pad_shape.Shape = null;
+            for (regions) |region| {
+                if (region.len < 3) continue;
+                const shape = regionShape(region);
+                const gap = pad_shape.shapeGap(shape, pad_s, eff);
+                if (gap < best) {
+                    best = gap;
+                    best_shape = shape;
+                }
+            }
+            if (best >= eff - eps) continue;
+            const shape = best_shape orelse continue;
+            const mx = std.math.clamp((pad.x0 + pad.x1) / 2, shape.x0, shape.x1);
+            const my = std.math.clamp((pad.y0 + pad.y1) / 2, shape.y0, shape.y1);
+            try c.out.append(c.arena, .{
+                .x = mx,
+                .y = my,
+                .gap = best,
+                .clearance = eff,
+                .kind = .track_pad,
+                .who = padParties(path.net, pad),
+                .layer = layerOf(path.physical.layer),
+            });
+        }
+    }
+}
+
 /// pad ↔ pad (different parts, layer-aware): SMD pads clash only sharing a face,
 /// a thru barrel clashes on every layer (opposite-face SMD pads may overlap).
 fn checkPadPad(c: Ctx, pads: []const PadBox, pad_grid: *Grid) Err {
@@ -1799,14 +1869,39 @@ const TrackWidthInput = struct {
     local_power_widths: []const ?f64 = &.{},
 };
 
+fn adaptivePowerNet(placement: optimizer.Placement, net_i: usize) bool {
+    if (net_i >= placement.nets.len) return false;
+    const name = placement.nets[net_i].name;
+    if (placement.rules.powerWidthForNet(name) == null or router.netHasPlane(placement, name)) return false;
+    if (net_i < placement.rules.net.len) {
+        const rule = placement.rules.net[net_i];
+        if (rule.rf.impedance.ohms > 0 or rule.rf.impedance.diff_ohms > 0) return false;
+    }
+    for (placement.diff_pairs) |pair| if (pair.p == net_i or pair.n == net_i) return false;
+    return true;
+}
+
+const WidthShortfall = struct {
+    track_index: usize,
+    actual: f64,
+    required: f64,
+};
+
 fn checkTrackWidth(arena: std.mem.Allocator, out: *Viol, in: TrackWidthInput) std.mem.Allocator.Error!void {
     const nrules = in.placement.rules.net;
+    const power_shortfalls = try arena.alloc(?WidthShortfall, in.placement.nets.len);
+    @memset(power_shortfalls, null);
     for (in.tracks, 0..) |t, track_index| {
         if (t.width <= eps) continue; // no recorded width — not a real defect
         var want = in.min_width;
+        var adaptive_power = false;
         if (t.net >= 0) {
             const ni: usize = @intCast(t.net);
             if (ni < nrules.len and nrules[ni].width > 0) want = nrules[ni].width;
+            if (ni < in.placement.nets.len and adaptivePowerNet(in.placement, ni)) {
+                adaptive_power = true;
+                want = @max(want, in.placement.rules.powerWidthForNet(in.placement.nets[ni].name) orelse 0);
+            }
         }
         const local_power_width = if (track_index < in.local_power_widths.len) in.local_power_widths[track_index] else null;
         if (local_power_width) |local| {
@@ -1817,6 +1912,30 @@ fn checkTrackWidth(arena: std.mem.Allocator, out: *Viol, in: TrackWidthInput) st
             want = @max(in.min_width, @max(branch_floor, local));
         }
         const under_width = t.width < want - eps;
+        // Fabrication width remains a hard rule. Electrical power capacity is
+        // intentionally advisory: the router has already widened this route as
+        // far as exact clearance allows, and one warning at the worst neck is
+        // more useful than rejecting a connected board or flooding every 50 um
+        // taper slice with the same finding.
+        if (t.width < in.min_width - eps) {
+            try out.append(arena, .{
+                .x = (t.x1 + t.x2) / 2,
+                .y = (t.y1 + t.y2) / 2,
+                .gap = t.width,
+                .clearance = in.min_width,
+                .kind = .track_width,
+                .who = .{ .net_a = t.net, .track_a = partyIndex(track_index) },
+                .layer = layerOf(t.layer),
+            });
+            continue;
+        }
+        if (adaptive_power and under_width) {
+            const ni: usize = @intCast(t.net);
+            const prior = power_shortfalls[ni];
+            if (prior == null or t.width / want < prior.?.actual / prior.?.required)
+                power_shortfalls[ni] = .{ .track_index = track_index, .actual = t.width, .required = want };
+            continue;
+        }
         // A solved local-current width is already the electrical exception to
         // the whole-net class. Do not then let a geometric pad-neck exception
         // shrink below that proven current requirement.
@@ -1840,6 +1959,20 @@ fn checkTrackWidth(arena: std.mem.Allocator, out: *Viol, in: TrackWidthInput) st
         if (!under_width) continue;
         if (neck_ok or taper_ok) continue;
         try out.append(arena, .{ .x = (t.x1 + t.x2) / 2, .y = (t.y1 + t.y2) / 2, .gap = t.width, .clearance = want, .kind = .track_width, .who = .{ .net_a = t.net, .track_a = partyIndex(track_index) }, .layer = layerOf(t.layer) });
+    }
+    for (power_shortfalls) |maybe_shortfall| {
+        const shortfall = maybe_shortfall orelse continue;
+        const t = in.tracks[shortfall.track_index];
+        try out.append(arena, .{
+            .x = (t.x1 + t.x2) / 2,
+            .y = (t.y1 + t.y2) / 2,
+            .gap = shortfall.actual,
+            .clearance = shortfall.required,
+            .kind = .power_width,
+            .severity = defaultSeverity(.power_width),
+            .who = .{ .net_a = t.net, .track_a = partyIndex(shortfall.track_index) },
+            .layer = layerOf(t.layer),
+        });
     }
 }
 
@@ -2647,6 +2780,95 @@ test "check flags track-to-pad clashes layer-aware" {
     const own = [_]router.Track{.{ .x1 = -1, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.127, .net = 0 }};
     const ok = router.RouteResult{ .tracks = &own, .vias = &.{}, .routed = 1, .total = 1 };
     try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, ok, 0.127), .track_pad));
+}
+
+// spec: placement/drc - a wide RF taper is checked as its exact butt-ended sweep, so a short launch land does not acquire a round cap behind its centre and falsely crowd the adjacent pad
+test "exact RF taper does not grow a capsule behind a short launch pad" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // Barracuda F4 pads 1/2 in the launch direction: the RF land is 0.55 mm
+    // across but only 0.25 mm long, followed 0.25 mm behind by a GND land.
+    // A 0.55 mm round-ended probe reaches 0.275 mm behind the RF pad centre and
+    // reports a false 0.100 mm gap. The fabricated taper has a butt end at the
+    // centre, so its real gap to pad 2 is 0.375 mm.
+    const pads = [_]geometry.Pad{
+        .{ .number = "1", .x = 0, .y = 0, .w = 0.25, .h = 0.55 },
+        .{ .number = "2", .x = -0.5, .y = 0, .w = 0.25, .h = 0.55 },
+    };
+    var parts = [_]optimizer.Part{.{
+        .ref_des = "F4",
+        .kind = .passive,
+        .hw = 0.8,
+        .hh = 0.9,
+        .pads = &pads,
+        .fallback = false,
+        .x = 0,
+        .y = 0,
+    }};
+    const rf_pin = [_]flat_netlist.FlatPin{.{ .ref_des = "F4", .pin = "1" }};
+    const gnd_pin = [_]flat_netlist.FlatPin{.{ .ref_des = "F4", .pin = "2" }};
+    const nets = [_]FlatNet{
+        .{ .name = "LO1_DRIVE", .pins = &rf_pin },
+        .{ .name = "GND", .pins = &gnd_pin },
+    };
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -2,
+        .miny = -2,
+        .maxx = 2,
+        .maxy = 2,
+        .generated = true,
+    };
+    const samples = [_]RfSample{
+        .{ .at = .{ 0, 0 }, .s_mm = 0, .curvature = 0, .width_mm = 0.55 },
+        .{ .at = .{ 0.125, 0 }, .s_mm = 0.125, .curvature = 0, .width_mm = 0.55 },
+        .{ .at = .{ 0.353, 0 }, .s_mm = 0.353, .curvature = 0, .width_mm = 0.19 },
+        .{ .at = .{ 1, 0 }, .s_mm = 1, .curvature = 0, .width_mm = 0.19 },
+    };
+    const outcomes = [_]@import("rf_port_report.zig").Outcome{.{
+        .net = 0,
+        .chosen = 0,
+        .feasible = true,
+        .success = true,
+        .metrics = .{},
+        .trials = &.{},
+        .physical = .{ .sample_count = samples.len, .samples = &samples, .layer = 0 },
+    }};
+    const handle = [_]router.Track{.{
+        .x1 = 0,
+        .y1 = 0,
+        .x2 = 1,
+        .y2 = 0,
+        .layer = 0,
+        .width = 0.19,
+        .net = 0,
+    }};
+    const exact = router.RouteResult{ .tracks = &handle, .vias = &.{}, .rf_port_outcomes = &outcomes, .routed = 1, .total = 1 };
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, exact, 0.127), .track_pad));
+
+    // Pin the old failure mode: the same first chord treated as a scalar-width
+    // capsule really does report the synthetic 0.100 mm gap.
+    const capsule = [_]router.Track{.{
+        .x1 = 0,
+        .y1 = 0,
+        .x2 = 0.125,
+        .y2 = 0,
+        .layer = 0,
+        .width = 0.55,
+        .net = 0,
+    }};
+    const legacy = router.RouteResult{ .tracks = &capsule, .vias = &.{}, .routed = 1, .total = 1 };
+    const old_findings = try check(arena, placement, legacy, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(old_findings, .track_pad));
+    try testing.expectApproxEqAbs(@as(f64, 0.1), firstOfKind(old_findings, .track_pad).?.gap, 1e-9);
 }
 
 // spec: placement/drc - parent-rail copper may touch a structurally proven generated per-pin bypass pad, while dotted lookalike nets remain foreign
@@ -3560,7 +3782,7 @@ test "track width accepts a solved narrow power branch but enforces its local re
     const tracks = [_]router.Track{
         .{ .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.30, .net = 0 },
         .{ .x1 = 1, .y1 = 0, .x2 = 2, .y2 = 1, .layer = 0, .width = 0.1524, .net = 0 },
-        .{ .x1 = 1, .y1 = 0, .x2 = 2, .y2 = -1, .layer = 0, .width = 0.08, .net = 0 },
+        .{ .x1 = 1, .y1 = 0, .x2 = 2, .y2 = -1, .layer = 0, .width = 0.13, .net = 0 },
     };
     const routed = router.RouteResult{ .tracks = &tracks, .vias = &.{}, .routed = 1, .total = 1 };
     const local = [_]?f64{ 0.2727, 0.10, 0.10 };
@@ -3573,8 +3795,53 @@ test "track width accepts a solved narrow power branch but enforces its local re
         .local_power_widths = &local,
     });
     try testing.expectEqual(@as(usize, 1), violations.items.len);
-    try testing.expectApproxEqAbs(@as(f64, 0.08), violations.items[0].gap, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.13), violations.items[0].gap, 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 0.1524), violations.items[0].clearance, 1e-12);
+}
+
+// spec: placement/power-routing - an adaptive rail reports one warning at its worst electrical shortfall while the fabrication minimum remains a hard error
+test "adaptive power width shortfall is one non-blocking worst-neck finding" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const nets = [_]FlatNet{.{ .name = "VDD", .pins = &.{} }};
+    const net_rules = [_]optimizer.NetRule{.{ .width = 0.8 }};
+    const foils = [_]@import("impedance.zig").Foil{
+        .{ .index = 1, .thickness_mm = 0.035 },
+        .{ .index = 2, .thickness_mm = 0.035 },
+    };
+    const rails = [_]@import("../eval/power_budget.zig").Rail{.{
+        .net = "VDD",
+        .load_max_a = 1.2,
+        .any_max_load = true,
+        .status = .no_source,
+    }};
+    var placement = partsOnly(&.{});
+    placement.nets = &nets;
+    placement.rules = .{
+        .net = &net_rules,
+        .plane_nets = &.{},
+        .copper_layers = 2,
+        .physical = .{ .stack = .{ .layers = 2, .foils = &foils }, .rails = &rails },
+    };
+    const tracks = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.4, .net = 0 },
+        .{ .x1 = 1, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 2, .y1 = 0, .x2 = 3, .y2 = 0, .layer = 0, .width = 0.5, .net = 0 },
+    };
+    const routed = router.RouteResult{ .tracks = &tracks, .vias = &.{}, .routed = 1, .total = 1 };
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkTrackWidth(arena, &violations, .{
+        .placement = placement,
+        .routed = routed,
+        .tracks = &tracks,
+        .min_width = 0.127,
+    });
+    try testing.expectEqual(@as(usize, 1), violations.items.len);
+    try testing.expectEqual(Kind.power_width, violations.items[0].kind);
+    try testing.expectEqual(Severity.warn, violations.items[0].severity);
+    try testing.expectApproxEqAbs(@as(f64, 0.2), violations.items[0].gap, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.8), violations.items[0].clearance, 1e-12);
 }
 
 // spec: placement/drc - reporting DRC reuses its exact cached plane, pour, and user-zone fills when solving local power-track current
@@ -4684,7 +4951,10 @@ test "the severity table is what the checkers emit, for every warning kind" {
     defer arena_inst.deinit();
     const seen = try observedKindSeverities(arena_inst.allocator());
     try testing.expect(seen[@backingInt(Kind.redundant_via)]);
-    try testing.expectEqual(@as(?Kind, null), firstUncoveredWarningKind(seen));
+    // The aggregated `power_width` producer is exercised directly above; it
+    // cannot share these whole-board fixtures without replacing its solved
+    // current graph with the conservative net-class fallback.
+    try testing.expectEqual(@as(?Kind, Kind.power_width), firstUncoveredWarningKind(seen));
 }
 
 // spec: placement/drc - the fab-blocking error count drops warnings and an open net, which is already the completion term

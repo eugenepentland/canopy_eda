@@ -956,6 +956,7 @@ area).
 
 - a board whose nets all resolve to one pitch rasters identically under either lattice mode
 - the narrowest mode rasters a mixed-class board at the finest class's own pitch, not the widest
+- a wide current-rated power class keeps the ordinary centreline lattice because its electrical width is added after routing
 - the narrowest lattice is never coarser than the widest-class lattice it replaces
 - a finer class pitch that would overflow the node budget falls back to the finest lattice that fits, never to an overflow
 - a board that cannot afford even its widest-class lattice keeps that lattice rather than being refined into a deeper overflow
@@ -2116,6 +2117,7 @@ the owning switch pad axis.
 - a cramped switch launch fits against one trace-width of straight entry even when its pad taper is longer
 - Euler bend has zero-curvature seams and finite curvature-rate energy
 - every single-ended controlled-impedance SMD launch tapers between the pad-boundary chord available at its actual path crossing and nominal width, including wider lands, bends inside the pad, full flat-face collars on rectangular and oval pads, and via-fed or branched nets, without diagonal centre-chord flares
+- every single-ended controlled-impedance through-via launch tapers between the via's actual annulus diameter and nominal width independently on every connected signal layer
 - a named saved layout made before automatic tapers reconciles only uncovered nominal-width launch runs, accepts no new routing-class DRC errors, persists the approved RF paths through ordinary autosave, and exposes each rejected taper as a clickable DRC error at the blocking clearance
 - a trace taper remains one logical swept path with compact edit handles while DRC lowers conservative private width-profile chords and folded offset rings lower to overlapping simple fabrication regions
 - solver RF geometry and taper proof survive saved-layout round trips
@@ -2285,6 +2287,7 @@ ring of identical violations.
 - a via barrel is copper of the union too, so a net whose only copper is a barrel still traces a circle around it
 - a fence via is a through barrel, so the guide wraps the net's pads on every layer, a bottom-side land under a top-routed trace included
 - every fenced through-via gets first claim on a local return-via ring, so general-contour dedup cannot consume the posts surrounding the transition
+- a part carrying fenced copper gets first-claim legal return-via anchors in each stitch-net pad, searching within the land when its centre is blocked
 - a ground fence via stays outside the signal via's synthesized plane antipad, including the 50-ohm default of a max-freq-only RF class
 - a fenced net with pads but no routed track on any layer is left unfenced, because there is no routed path to shield yet
 - a fence via falls back from the fence geometry to the class via to the board design rules
@@ -3036,6 +3039,7 @@ Public functions: check, checkTopology, checkWithZones, checkWithPreparedCopper,
 - independently emitted tracks, vias, and signal-layer pads may not contact a foreign final pour solid, while holes and physical-layer separation remain empty
 - native routed arc strokes are audited against final pours on outer and inner physical layers, subtract holes, and replace their stored chords
 - foreign-pour DRC audits an RF path's exact swept regions and suppresses its compact handles, never replacing a narrow taper end with the widest endpoint capsule
+- a wide RF taper is checked as its exact butt-ended sweep, so a short launch land does not acquire a round cap behind its centre and falsely crowd the adjacent pad
 - implicit ground fills are one physical carrier and a fill whose boundary construction failed remains invalid even when empty
 - a leaf-only net alias is accepted only when unique; sibling flattened nets with the same leaf remain distinct copper
 - reporting DRC retains the same exact variable-width RF carve that Gerber computes from the raw route proof
@@ -3119,6 +3123,8 @@ Public functions: check, checkTopology, checkWithZones, checkWithPreparedCopper,
 - orphan copper touching no pad is flagged as a net-open island
 - two same-net tracks that cross mid-span with no shared endpoint are one island (no net-open)
 - a user copper pour unites its enclosed same-net copper islands so no net-open is flagged
+- a custom copper pour connects pads by real polygon overlap even when neither pad centre lies inside the pour
+- a custom copper pour connects a via by circular-land overlap even when the via centre lies outside the pour
 - every net earns its own user pour's credit from the run's shared zone raster
 - an inner-layer user pour unites its enclosed same-net through-hole pads but not SMD pads
 - the net-open sweep rasters the board's user pours once for all nets and each net still reads only its own pour
@@ -3264,12 +3270,17 @@ Public functions: analyze, classifyNetName, isInductor
 
 Public functions: capacityForArea, traceCapacityA, requiredTraceWidthMm,
 viaCapacityA, requiredViaDrillMm, routingCurrentA, powerWidthForNet,
-powerViaDrillForNet, routedTrackRequiredWidths, routedTrackRequiredWidthsPrepared
+powerViaDrillForNet, routedTrackRequiredWidths, routedTrackRequiredWidthsPrepared,
+adaptiveTargetWidth, exactWidth
 
 Power routing derives conservative pre-route copper geometry from the rail's
 declared load envelope, the actual stack foil, the 10 °C IPC-2221 screening
 target, and the board's via-plating rule. Shared traces without plane or pour
-support reserve the full rail load. For a rail carried by an explicitly
+support first route a fabrication-legal centreline, then grow toward the full
+rail width wherever exact copper clearance permits; pad-sized and constrained
+necks receive automatic tapers, and one worst-neck warning reports any
+remaining electrical shortfall without turning connectivity into a DRC error.
+For a rail carried by an explicitly
 declared plane or copper zone, the fill reserves the full-current neck while
 short pad fanouts may opt into `(power-branch-width MM)` and are judged after
 routing at the local branch current solved by the power-integrity analysis.
@@ -3282,7 +3293,12 @@ is enlarged only as far as the derived drill and annular-ring rules require.
 - a maximum load is the pre-route envelope, with typical used only when no maximum was authored
 - a power pour's effective minimum neck is raised above the board fabrication floor by the rail maximum and actual stack foil
 - board rules derive the worst-layer trace width and one-barrel drill from maximum rail load
-- an unpoured rail reserves its whole maximum-current width while a pour-backed rail leaves short fanouts to the post-route branch-current proof
+- an unpoured current-rated rail routes through a QFN-sized land at fabrication width, then grows to its electrical target with an automatic pad taper
+- an adaptive power launch uses the pad's smaller physical dimension and the shortest 45-degree taper to nominal width
+- the hand router receives an electrical target for every unpoured current-rated rail, including an otherwise-unclassed net
+- the hand router steers an unpoured current-rated rail at ordinary fabrication width, then independently exact-DRC-fits each local interval up to its electrical target with 45-degree tapers from the pad's smaller dimension
+- adaptive routing retains the full maximum-current target while a pour-backed rail keeps its short authored fanout width
+- an adaptive rail reports one warning at its worst electrical shortfall while the fabrication minimum remains a hard error
 - a solved plane-aware rail exposes an index-aligned required width for each local-current branch, while an incomplete opted-in rail screens every segment at the whole-rail current
 - a rail with no annotated load routes for its declared source capacity, so a standalone regulator page sizes copper from its own output rating
 - declared loads outrank source capacity, so a rail routes for what the board draws rather than what its supply could deliver
@@ -3597,8 +3613,8 @@ completely with every surface calling the board clean. It is measured by
 - an escape fan the corridor seats in full is not flagged
 - an escape fan every net of which an authored assignment already covers is not flagged
 - a port net with no corridor out of the block and no room for a via is flagged, and only when the caller supplies the port mask
-- a corridor is measured at the router's effective width, so an unpoured rail's IPC-2221 envelope widens the demand and a plane-carried rail keeps its authored width
-- a net class wider than the rail envelope keeps its authored width, so the two rules compose as a maximum rather than one overriding the other
+- a corridor is measured at the adaptive router's narrow search width, while a plane-carried rail keeps its authored fanout width
+- an adaptive rail's authored wide class remains an electrical target and does not widen the static route corridor
 - completeness-waiver: empty inputs (a placement with no parts is unit-tested to return an empty finding slice)
 - completeness-waiver: large inputs (the pad table is built once and every scan is bounded by the pad count; findings are bucketed and ref lists capped, so a dense board yields a bounded report)
 - completeness-waiver: unauthorized access (a pure in-memory analysis of an already-resolved placement; access control lives at the serve boundary)
@@ -3698,7 +3714,7 @@ this block has nothing to prove.
 - the port mask names exactly the block's declared port nets, matching a flattened net on its leaf
 - detecting on the same placement twice reports the same findings
 - an empty port mask leaves every net unexamined
-- a port net's corridor is probed at the router's effective width, so an unpoured rail is measured at its IPC-2221 envelope and a plane-carried one is not
+- a port corridor uses the adaptive power router's narrow search width while a plane-carried fanout keeps its authored width
 - completeness-waiver: empty inputs (an empty port mask and a placement with no parts both return an empty finding slice before any lattice is built)
 - completeness-waiver: large inputs (the lattice is refused above a cell cap and the flood stops at the first escape; the pad index bounds every cell test to its own bucket)
 - completeness-waiver: unauthorized access (a pure in-memory analysis of an already-resolved placement; access control lives at the serve boundary)
@@ -6195,7 +6211,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - PCB drag/drop keeps full-board work and retained-overlay rebuilds off the interactive path
 - visible board silkscreen text can be selected and grid-dragged directly in Select mode, with one undo step and refreshed DRC
 - R and Shift-R rotate a held board-silkscreen label live and commit the whole drag as one undo step
-- PCB keepout overlays retain width-batched net-class geometry and a transform-keyed raster so enabling them does not rebuild hundreds of paths on unchanged frames
+- PCB keepout overlays retain width-batched net-class geometry and one transform-keyed raster cropped to the visible halo bounds, painting fixed regions directly so a zoom never clears or copies a redundant viewport-sized overlay
 - Stable PCB layout pages reuse dependency-validated rendered HTML and invalidate it when the design or layout sidecar changes
 - Repeat assembly workspace loads reuse dependency-validated HTML and invalidate when rework-guide availability changes
 - A captured page-cache read-set stamps the evaluated design's own source file, so editing it invalidates the cached result
@@ -6240,7 +6256,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The PCB editor places repeated standalone vias on a chosen net without creating trace segments, using grid/copper snapping, net-class geometry, the live DRC gate, and one undo step per via
 - Escape cancels an active manual route even when its final route-wide DRC check rejects finishing it, restoring the route-start copper and exiting Draw instead of retrying the blocked finish
 - A hand-routed RF launch keeps its generated portal collar inside the source pad, retries a DRC-blocked wide-land taper with progressively shorter flares, and finishes with the independently DRC-confirmed uniform trace when no automatic taper fits
-- A controlled-impedance launch approaching a pad corner never pinches below the smaller of its nominal trace width and the pad's narrow dimension, while a genuinely narrow land still receives its physical-width taper
+- A controlled-impedance launch approaching a pad corner substitutes the pad's narrow dimension for a degenerate local chord, retaining a visible wide-land taper while a genuinely narrow land still receives its physical-width taper
 - Every saved trace segment and via has a stable inspector-visible ID that survives saves and retained-copper rewrites, with deterministic IDs backfilled for legacy copper
 - The PCB editor rotates components, rigid groups, and their carried copper in 45-degree increments
 
@@ -6399,7 +6415,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Selecting a rigid sub-circuit exposes its Stamp and layout-page actions directly in Properties
 - The PCB Sub-circuits palette and Properties expose Save to sub-circuit, which fetches a fresh target revision before capturing that group's poses, stamped copper, and locally connected traces/vias as a new layout
 - the PCB hand router defaults to the active net class while the sidebar keeps its resolved geometry controls hidden
-- the PCB hand router previews and clearance-checks an authored pad neck at its tapered physical width before committing either a pad-out or pad-in gesture
+- the PCB hand router previews an authored pad neck at its tapered physical width, checks wide/short-pad launches against their exact swept regions, and submits compact handles plus those regions to the synchronous DRC gate
 - The /pcb-layout Route panel presents Route board, Stop, status, and live replay without cached-load, interactive-session, scope, or advanced-routing controls
 - A completed Route board run persists its applied copper to the active layout, or creates the conventional first `layout` snapshot; Route plan remains temporary
 - The PCB replay client streams the live-route endpoint into the timeline player, follows the head, and reattaches to a running job through the overlay seam
@@ -6693,8 +6709,9 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - A board whose RF class carries only (max-freq …) — no (fence …) — is still fenced by the endpoint, the pitch deriving as λg/10 and the vias persisting with the flanked net as provenance
 - The fence endpoint accepts a max-freq-only RF board and reports a normal dry run on it, so the Fence action covers RF traces that never spelled (fence) out
 - A fence dry run reports what it would place and writes nothing to the layout
-- A fence run defaults to the vetted mode, placing only sites the board accepts and ending at the DRC error count it started from, while mode=all places every ring site and reports the DRC without culling it
+- A fence run defaults to the vetted mode, placing only sites the board accepts and ending at the DRC error count it started from, while mode=all places every non-coincident site and reports the DRC without culling it
 - The fence's DRC ratchet culls the fence vias implicated in a new error-severity violation and leaves warnings, net-open findings and pre-existing copper alone
+- The fence ratchet compares violation identity against the baseline and never culls a new fence via merely because it is near a pre-existing error
 - The fence endpoint and the generate_fence tool reject an unknown mode naming the two spellings that exist
 - Re-running the fence on a layout replaces the previous fence rather than stacking a second row beside the same trace
 - The fence endpoint 404s an unknown layout naming the rows that exist, and refuses a board that declares no fence

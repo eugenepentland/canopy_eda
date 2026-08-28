@@ -2,10 +2,13 @@
 //!
 //! A net class may keep a wide nominal trunk while authorizing a short narrow
 //! escape at SMD lands. A single-ended controlled-impedance class instead
-//! transitions from every actual SMD launch span, whether wider or narrower,
-//! to its nominal line. The router searches the centreline with its nominal
-//! class geometry. At the final output boundary this pass subdivides pad-ended
-//! straight segments into fabrication-real constant-width slices.
+//! transitions from every actual SMD launch span or through-via annulus,
+//! whether wider or narrower, to its nominal line. Controlled-width signals
+//! search with their nominal class geometry. Current-rated power nets instead
+//! search a fabrication-legal centreline, then this pass grows them toward
+//! their electrical target under exact clearance and adds pad/congestion
+//! tapers. At the final output boundary the pass subdivides only width-changing
+//! spans into fabrication-real constant-width slices.
 //!
 //! Constant-width slices are intentional. They are understood identically by
 //! the route viewer, DRC, Gerber writer, KiCad writer, and saved-layout schema;
@@ -21,6 +24,10 @@ const router = @import("router.zig");
 
 const eps: f64 = 1e-9;
 const taper_step_mm: f64 = 0.025;
+const adaptive_step_mm: f64 = 0.05;
+const adaptive_width_iterations: usize = 14;
+/// A 45-degree copper flank changes full width by twice the axial distance.
+const adaptive_width_per_length: f64 = 2;
 const default_neck_length_mm: f64 = 0.75;
 const default_taper_length_mm: f64 = 0.35;
 const rf_taper_widths: f64 = 1.2;
@@ -285,7 +292,48 @@ fn shapeTrack(arena: std.mem.Allocator, out: *std.ArrayList(router.Track), shape
     }
 }
 
+const EndpointCopper = struct {
+    pads: []const Pad,
+    vias: []const router.Via,
+    net: i32,
+};
+
 fn rfEndpointProfile(
+    copper: EndpointCopper,
+    point: [2]f64,
+    layer: u8,
+    nominal: f64,
+    direction: [2]f64,
+) ?Profile {
+    var found = false;
+    var width: f64 = 0;
+    var land: f64 = 0;
+    for (copper.pads) |pad| {
+        if (pad.layer != layer or !samePoint(pad.at, point)) continue;
+        const span = launchSpan(pad, direction);
+        if (!(span > 0)) continue;
+        found = true;
+        width = @max(width, span);
+        land = @max(land, boxRayHalfExtent(pad, direction));
+    }
+    for (copper.vias) |via| {
+        if (via.net != copper.net or !samePoint(.{ via.x, via.y }, point)) continue;
+        if (!(via.dia > 0)) continue;
+        found = true;
+        width = @max(width, via.dia);
+        land = @max(land, via.dia / 2);
+    }
+    if (!found or @abs(width - nominal) <= eps) return null;
+    return .{ .width = width, .land = land, .taper = nominal * rf_taper_widths };
+}
+
+/// Pad-sized launch for an ordinary power route. Unlike the RF spelling, a
+/// wider land does not flare above the electrical target: this pass grows a
+/// narrow centreline toward that target, never beyond it. Power launches use
+/// the pad's smaller physical dimension independent of route angle: that is
+/// the narrowest copper the land can actually support. The transition then
+/// takes only the distance needed for 45-degree flanks.
+fn powerEndpointProfile(
     pads: []const Pad,
     point: [2]f64,
     layer: u8,
@@ -297,20 +345,200 @@ fn rfEndpointProfile(
     var land: f64 = 0;
     for (pads) |pad| {
         if (pad.layer != layer or !samePoint(pad.at, point)) continue;
-        const span = launchSpan(pad, direction);
+        const span = 2 * @min(pad.half_w, pad.half_h);
         if (!(span > 0)) continue;
         found = true;
-        width = @max(width, span);
+        width = @max(width, @min(span, nominal));
         land = @max(land, boxRayHalfExtent(pad, direction));
     }
-    if (!found or @abs(width - nominal) <= eps) return null;
-    return .{ .width = width, .land = land, .taper = nominal * rf_taper_widths };
+    if (!found or width >= nominal - eps) return null;
+    return .{
+        .width = width,
+        .land = land,
+        .taper = (nominal - width) / adaptive_width_per_length,
+    };
+}
+
+const AdaptiveCell = struct {
+    s0: f64,
+    s1: f64,
+    width: f64,
+};
+
+const AdaptiveShape = struct {
+    probe: router.TautProbe,
+    track: router.Track,
+    floor: f64,
+    target: f64,
+    start: ?Profile,
+    end: ?Profile,
+};
+
+fn pointOnTrack(track: router.Track, distance: f64, len: f64) [2]f64 {
+    const f = if (len > eps) distance / len else 0;
+    return .{
+        track.x1 + (track.x2 - track.x1) * f,
+        track.y1 + (track.y2 - track.y1) * f,
+    };
+}
+
+/// Largest width whose full capsule clears this cell. The existing narrow
+/// route is the proven floor; bisection approaches the target deterministically
+/// without quantizing width to the routing lattice.
+fn widestClear(
+    shape: AdaptiveShape,
+    s0: f64,
+    s1: f64,
+    len: f64,
+) f64 {
+    if (shape.target <= shape.floor + eps) return shape.floor;
+    const a = pointOnTrack(shape.track, s0, len);
+    const b = pointOnTrack(shape.track, s1, len);
+    if (shape.probe.clearWidth(shape.track.layer, a, b, shape.target)) return shape.target;
+    var low = shape.floor;
+    var high = shape.target;
+    for (0..adaptive_width_iterations) |_| {
+        const mid = (low + high) / 2;
+        if (shape.probe.clearWidth(shape.track.layer, a, b, mid))
+            low = mid
+        else
+            high = mid;
+    }
+    return low;
+}
+
+fn adaptiveShapeTrack(
+    arena: std.mem.Allocator,
+    out: *std.ArrayList(router.Track),
+    adaptive: AdaptiveShape,
+) std.mem.Allocator.Error!bool {
+    const track = adaptive.track;
+    const floor = adaptive.floor;
+    const target = adaptive.target;
+    const len = std.math.hypot(track.x2 - track.x1, track.y2 - track.y1);
+    if (len <= eps or target <= floor + eps) {
+        try out.append(arena, track);
+        return false;
+    }
+    const shape = Shape{ .track = track, .nominal = target, .start = adaptive.start, .end = adaptive.end };
+    var cells: std.ArrayList(AdaptiveCell) = .empty;
+    var s0: f64 = 0;
+    while (s0 < len - eps) {
+        const s1 = @min(len, s0 + adaptive_step_mm);
+        // Keep the whole cell inside the pad-local taper envelope. Clearance
+        // then imposes any tighter mid-route neck caused by foreign copper.
+        var cap = @min(localWidth(s0, len, shape), localWidth(s1, len, shape));
+        cap = @max(floor, @min(target, cap));
+        try cells.append(arena, .{
+            .s0 = s0,
+            .s1 = s1,
+            .width = widestClear(.{
+                .probe = adaptive.probe,
+                .track = track,
+                .floor = floor,
+                .target = cap,
+                .start = null,
+                .end = null,
+            }, s0, s1, len),
+        });
+        s0 = s1;
+    }
+
+    // Clearance may jump at an obstacle edge. Pull each side down to a
+    // 45-degree-flank envelope so the emitted 50 um slices form a taper rather
+    // than a width step. Two directional passes compute the greatest profile
+    // beneath those local maxima.
+    for (cells.items[1..], 1..) |*cell, i| {
+        const prior = cells.items[i - 1];
+        const centre_gap = ((prior.s1 - prior.s0) + (cell.s1 - cell.s0)) / 2;
+        cell.width = @min(cell.width, prior.width + adaptive_width_per_length * centre_gap);
+    }
+    var i = cells.items.len;
+    while (i > 1) {
+        i -= 1;
+        const next = cells.items[i];
+        const cell = &cells.items[i - 1];
+        const centre_gap = ((next.s1 - next.s0) + (cell.s1 - cell.s0)) / 2;
+        cell.width = @min(cell.width, next.width + adaptive_width_per_length * centre_gap);
+    }
+
+    var changed = false;
+    for (cells.items) |cell| changed = changed or cell.width > track.width + eps;
+    if (!changed) {
+        try out.append(arena, track);
+        return false;
+    }
+
+    // Collapse the long uniform trunk back into one edit handle. Only the
+    // taper and genuinely clearance-varying neck retain 50 um slices, so a
+    // 100 mm rail does not become 2,000 persisted segments merely because it
+    // had room to reach the same target everywhere.
+    var run_s0 = cells.items[0].s0;
+    var run_width = cells.items[0].width;
+    for (cells.items[1..]) |cell| {
+        if (@abs(cell.width - run_width) <= eps) continue;
+        const a = pointOnTrack(track, run_s0, len);
+        const b = pointOnTrack(track, cell.s0, len);
+        try out.append(arena, .{ .x1 = a[0], .y1 = a[1], .x2 = b[0], .y2 = b[1], .layer = track.layer, .width = run_width, .net = track.net });
+        run_s0 = cell.s0;
+        run_width = cell.width;
+    }
+    const a = pointOnTrack(track, run_s0, len);
+    const b = pointOnTrack(track, len, len);
+    try out.append(arena, .{ .x1 = a[0], .y1 = a[1], .x2 = b[0], .y2 = b[1], .layer = track.layer, .width = run_width, .net = track.net });
+    return true;
+}
+
+/// Route power nets at an ordinary legal centreline, then grow each segment
+/// toward its electrical target under the router's exact width-aware clearance
+/// oracle. Nets are committed one at a time so later rails see earlier widened
+/// copper as a foreign obstacle rather than both claiming the same free space.
+fn adaptPowerTracks(board: router.CleanupBoard) std.mem.Allocator.Error!bool {
+    const arena = board.arena();
+    var any_changed = false;
+    for (board.placement.nets, 0..) |_, net_i| {
+        if (!board.enabled(net_i)) continue;
+        const target = board.adaptivePowerWidth(net_i) orelse continue;
+        board.beginNet(net_i);
+        const floor = board.trackWidth();
+        if (target <= floor + eps) continue;
+        const pads = try netPads(arena, board.placement, @intCast(net_i));
+        const probe = board.tautProbe(@intCast(net_i));
+        var out: std.ArrayList(router.Track) = .empty;
+        var changed = false;
+        for (board.tracks.items) |track| {
+            if (track.net != @as(i32, @intCast(net_i)) or track.width > floor + router.clearance_eps) {
+                try out.append(arena, track);
+                continue;
+            }
+            const direction = unit(.{ track.x2 - track.x1, track.y2 - track.y1 }) orelse {
+                try out.append(arena, track);
+                continue;
+            };
+            const start = powerEndpointProfile(pads, .{ track.x1, track.y1 }, track.layer, target, direction);
+            const end = powerEndpointProfile(pads, .{ track.x2, track.y2 }, track.layer, target, direction);
+            changed = (try adaptiveShapeTrack(arena, &out, .{
+                .probe = probe,
+                .track = track,
+                .floor = floor,
+                .target = target,
+                .start = start,
+                .end = end,
+            })) or changed;
+        }
+        if (!changed) continue;
+        board.tracks.clearRetainingCapacity();
+        try board.tracks.appendSlice(arena, out.items);
+        router.copperCompacted(board.ctx);
+        any_changed = true;
+    }
+    return any_changed;
 }
 
 /// Shape every selected generated net that declares a pad-local neck or a
 /// single-ended controlled-impedance target. Controlled-impedance shaping is
-/// local to each SMD endpoint, so vias and branches elsewhere on the net do
-/// not suppress an otherwise valid launch transition.
+/// local to each SMD or through-via endpoint, so branches elsewhere on the net
+/// do not suppress an otherwise valid launch transition.
 ///
 /// This is the copper-only seam used by scoped route replay before its output
 /// is offered to the assembled-board gate. Normal complete-board routing uses
@@ -319,6 +547,7 @@ pub fn shapeGeneratedTracks(
     arena: std.mem.Allocator,
     placement: optimizer.Placement,
     selected_nets: []const bool,
+    vias: []const router.Via,
     tracks: *std.ArrayList(router.Track),
 ) std.mem.Allocator.Error!bool {
     var out: std.ArrayList(router.Track) = .empty;
@@ -369,7 +598,7 @@ pub fn shapeGeneratedTracks(
         ))
             .{ .width = neck, .land = neck_len, .taper = taper_len }
         else if (controlled_impedance)
-            rfEndpointProfile(pads, .{ track.x1, track.y1 }, track.layer, nominal, direction)
+            rfEndpointProfile(.{ .pads = pads, .vias = vias, .net = track.net }, .{ track.x1, track.y1 }, track.layer, nominal, direction)
         else
             null;
         const end: ?Profile = if (authored and endpointNeedsNeck(
@@ -382,7 +611,7 @@ pub fn shapeGeneratedTracks(
         ))
             .{ .width = neck, .land = neck_len, .taper = taper_len }
         else if (controlled_impedance)
-            rfEndpointProfile(pads, .{ track.x2, track.y2 }, track.layer, nominal, direction)
+            rfEndpointProfile(.{ .pads = pads, .vias = vias, .net = track.net }, .{ track.x2, track.y2 }, track.layer, nominal, direction)
         else
             null;
         if (start == null and end == null) {
@@ -406,8 +635,9 @@ pub fn shapeGeneratedTracks(
 /// Shape a complete router board and notify its cleanup context when the track
 /// list changes.
 pub fn passBoard(board: router.CleanupBoard) std.mem.Allocator.Error!void {
-    if (!try shapeGeneratedTracks(board.ctx.arena, board.placement, board.ctx.selected_nets, board.tracks)) return;
-    router.copperCompacted(board.ctx);
+    const adaptive = try adaptPowerTracks(board);
+    const authored = try shapeGeneratedTracks(board.ctx.arena, board.placement, board.ctx.selected_nets, board.vias.items, board.tracks);
+    if (adaptive or authored) router.copperCompacted(board.ctx);
 }
 
 const testing = std.testing;
@@ -432,6 +662,87 @@ test "pad neck slices form a monotonic taper without exceeding nominal width" {
         prior = slice.width;
     }
     try testing.expectApproxEqAbs(@as(f64, 0.2532), out.items[out.items.len - 1].width, eps);
+}
+
+// spec: placement/power-routing - an unpoured current-rated rail routes through a QFN-sized land at fabrication width, then grows to its electrical target with an automatic pad taper
+test "adaptive power width routes a narrow QFN land then widens the open trunk" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const pad = [_]@import("geometry.zig").Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.2, .h = 0.2 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 0.2, .hh = 0.2, .pads = &pad, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "J1", .kind = .passive, .hw = 0.2, .hh = 0.2, .pads = &pad, .fallback = false, .x = 4, .y = 0 },
+    };
+    const pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "J1", .pin = "1" } };
+    const nets = [_]flat_netlist.FlatNet{.{ .name = "VDD", .pins = &pins }};
+    const foils = [_]@import("impedance.zig").Foil{
+        .{ .index = 1, .thickness_mm = 0.035 },
+        .{ .index = 2, .thickness_mm = 0.035 },
+    };
+    const rails = [_]@import("../eval/power_budget.zig").Rail{.{
+        .net = "VDD",
+        .load_max_a = 1.2,
+        .any_max_load = true,
+        .status = .no_source,
+    }};
+    const rules = [_]optimizer.NetRule{.{ .width = 0.8 }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .rules = .{
+            .net = &rules,
+            .plane_nets = &.{},
+            .copper_layers = 2,
+            .design = .{ .track_width = 0.127, .min_width = 0.127, .clearance = 0.127 },
+            .physical = .{ .stack = .{ .layers = 2, .foils = &foils }, .rails = &rails },
+        },
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -1,
+        .miny = -1,
+        .maxx = 5,
+        .maxy = 1,
+        .generated = true,
+    };
+
+    const routed = try router.route(arena, placement, .{ .track_width = 0.127, .clearance = 0.127 });
+    try testing.expectEqual(@as(usize, 1), routed.routed);
+    try testing.expectEqual(@as(usize, 0), routed.failed.len);
+    var widest: f64 = 0;
+    var launch_width: ?f64 = null;
+    var distinct_widths: usize = 0;
+    var prior: f64 = -1;
+    for (routed.tracks) |track| {
+        if (track.net != 0) continue;
+        widest = @max(widest, track.width);
+        if (samePoint(.{ track.x1, track.y1 }, .{ 0, 0 }) or samePoint(.{ track.x2, track.y2 }, .{ 0, 0 }))
+            launch_width = if (launch_width) |width| @min(width, track.width) else track.width;
+        if (@abs(track.width - prior) > eps) distinct_widths += 1;
+        prior = track.width;
+    }
+    try testing.expect(widest >= 0.8 - 1e-4);
+    try testing.expect(launch_width.? <= 0.2 + 1e-4);
+    try testing.expect(distinct_widths > 4);
+}
+
+// spec: placement/power-routing - an adaptive power launch uses the pad's smaller physical dimension and the shortest 45-degree taper to nominal width
+test "adaptive power launch uses minimum pad dimension and a compact taper" {
+    const root = @sqrt(0.5);
+    const pads = [_]Pad{.{
+        .at = .{ 0, 0 },
+        .layer = 0,
+        .half_w = 1.2,
+        .half_h = 0.15,
+        .axis_x = .{ 1, 0 },
+    }};
+    const profile = powerEndpointProfile(&pads, .{ 0, 0 }, 0, 0.4, .{ root, root }).?;
+    try testing.expectApproxEqAbs(@as(f64, 0.3), profile.width, eps);
+    try testing.expectApproxEqAbs(@as(f64, 0.05), profile.taper, eps);
+    try testing.expectApproxEqAbs(@as(f64, 0.15 * @sqrt(2.0)), profile.land, eps);
 }
 
 test "overlapping endpoint profiles keep a short pad to pad hop narrow" {
@@ -554,12 +865,60 @@ test "generated controlled-impedance launch tapers both wider and narrower lands
     };
     var tracks: std.ArrayList(router.Track) = .empty;
     try tracks.append(arena, .{ .x1 = 0, .y1 = 0, .x2 = 3, .y2 = 0, .layer = 0, .width = 0.4, .net = 0 });
-    try testing.expect(try shapeGeneratedTracks(arena, placement, &.{true}, &tracks));
+    try testing.expect(try shapeGeneratedTracks(arena, placement, &.{true}, &.{}, &tracks));
     try testing.expectApproxEqAbs(@as(f64, 0.6), tracks.items[0].width, eps);
     try testing.expectApproxEqAbs(@as(f64, 0.2), tracks.items[tracks.items.len - 1].width, eps);
     var saw_nominal = false;
     for (tracks.items) |track| saw_nominal = saw_nominal or @abs(track.width - 0.4) <= eps;
     try testing.expect(saw_nominal);
+}
+
+// spec: placement/rf-port-frame-routing - every single-ended controlled-impedance through-via launch tapers between the via's actual annulus diameter and nominal width independently on every connected signal layer
+test "generated controlled-impedance trace tapers into both faces of a through-via" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const nets = [_]flat_netlist.FlatNet{.{ .name = "RF", .pins = &.{} }};
+    const rules = [_]optimizer.NetRule{.{
+        .width = 0.2,
+        .rf = .{ .impedance = .{ .ohms = 50 } },
+    }};
+    const placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .rules = .{ .net = &rules, .design = .{ .track_width = 0.127, .min_width = 0.127 } },
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -2,
+        .miny = -1,
+        .maxx = 2,
+        .maxy = 1,
+        .generated = true,
+    };
+    const vias = [_]router.Via{.{ .x = 0, .y = 0, .dia = 0.6, .drill = 0.3, .net = 0 }};
+    var tracks: std.ArrayList(router.Track) = .empty;
+    try tracks.appendSlice(arena, &.{
+        .{ .x1 = -2, .y1 = 0, .x2 = 0, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 1, .width = 0.2, .net = 0 },
+    });
+
+    try testing.expect(try shapeGeneratedTracks(arena, placement, &.{true}, &vias, &tracks));
+    var top_via_width: ?f64 = null;
+    var bottom_via_width: ?f64 = null;
+    var saw_top_nominal = false;
+    var saw_bottom_nominal = false;
+    for (tracks.items) |track| {
+        if (samePoint(.{ track.x2, track.y2 }, .{ 0, 0 }) and track.layer == 0) top_via_width = track.width;
+        if (samePoint(.{ track.x1, track.y1 }, .{ 0, 0 }) and track.layer == 1) bottom_via_width = track.width;
+        saw_top_nominal = saw_top_nominal or (track.layer == 0 and @abs(track.width - 0.2) <= eps);
+        saw_bottom_nominal = saw_bottom_nominal or (track.layer == 1 and @abs(track.width - 0.2) <= eps);
+    }
+    try testing.expectApproxEqAbs(@as(f64, 0.6), top_via_width.?, eps);
+    try testing.expectApproxEqAbs(@as(f64, 0.6), bottom_via_width.?, eps);
+    try testing.expect(saw_top_nominal and saw_bottom_nominal);
 }
 
 test "generated track keeps nominal width at a land that can carry its launch" {
@@ -596,7 +955,7 @@ test "generated track keeps nominal width at a land that can carry its launch" {
     };
     var tracks: std.ArrayList(router.Track) = .empty;
     try tracks.append(arena, .{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.35, .net = 0 });
-    try testing.expect(try shapeGeneratedTracks(arena, placement, &.{true}, &tracks));
+    try testing.expect(try shapeGeneratedTracks(arena, placement, &.{true}, &.{}, &tracks));
     try testing.expectEqual(@as(f64, 0.20), tracks.items[0].width);
     try testing.expectEqual(@as(f64, 0.35), tracks.items[tracks.items.len - 1].width);
     try testing.expect(!try allowsTrack(arena, placement, .{
