@@ -3202,6 +3202,14 @@ Public functions: compute, computeMaskShared, computeMasks, initMargin, planeCon
 - a board's fills seed from one shared edge-margin field and each still traces exactly the contours an unshared fill traces
 - carryingLayers resolves declared planes and the implicit ground model
 - gridCount collapses a non-finite extent to zero cells instead of an unchecked narrowing
+- a fill updated from the previous generation's raster is bit-identical to the same fill poured cold, across a seeded script of track and via additions, moves and deletions on every carrying layer
+- a fill whose seed set alone moved is still updated from the previous raster, because a seed lowers no margin, and still matches the cold pour exactly
+- a fill update is declined and the fill poured cold when the lattice or a pour rule moved under it, because the retained raster no longer describes the same fill
+- a memo that offers no patch base pours every fill cold and still answers with the same raster, so the update is an optional seam rather than a required one
+- the sub-window base reseed writes exactly the values the full board-edge and clip seeding writes, cell for cell
+- the changed-obstacle diff is a multiset difference over content digests, so a reordered obstacle list asks for no re-raster and a moved obstacle asks for both of its windows
+- a drawn zone's content key and its stability predicate both ignore a same-net via too far outside the clip to seed it, and both still see one that can
+- the indexed ring containment test answers exactly what the signed-inset predicate answers, inside, outside and on the boundary
 
 The low-level signed-margin grid, obstacle stamps, and component labeller give
 pours a consistent board-edge, pad-shape, track, via, and deterministic
@@ -3231,6 +3239,8 @@ Public functions: acquire, beginSession, key, put
 - a pass holding a fill the store could not retain publishes its board by COPYING the fill, never by referencing memory the pass owns
 - retained fills nothing references are given up before a whole board state is, and a fill a live board entry still needs is never freed under it
 - a board rebuilt after a copper edit borrows the fills the edit did not reach, and every borrowed raster is bit-identical to the one a cold pour produces
+- one patch base is retained per fill identity, copied out of the pass's arena, and replaced rather than accumulated when that fill is built again
+- a patch base superseded or evicted while a pass is reading it is unlinked rather than freed, and a base over the whole budget is declined outright
 
 The reporting DRC seam pours every declared plane, every pour and every drawn
 zone of a board before it can judge copper topology or connectivity, and that
@@ -3248,6 +3258,16 @@ across a same-layer edit, and every drawn zone the edit did not reach — and
 pours only the rest. Fills are refcounted independently of the board entries
 that reference them, so consecutive board states share one copy of everything
 between them rather than each holding a whole board's rasters.
+
+A fill the edit DID reach is updated rather than re-poured. One margin field per
+fill IDENTITY is retained beside the fills, together with the obstacle set that
+produced it; the next generation of that fill diffs the two obstacle sets, copies
+the field, throws away only the windows the changed obstacles can write in, and
+rasters those again. The update is bit-identical to a cold pour by construction —
+the field is a pure per-cell `min`, so a cell outside every changed window has
+already seen exactly the obstacles it would see again — and any case that cannot
+be shown to be (a moved lattice, a moved rule, a diff too large to be worth it,
+no previous generation) falls back to the cold pour.
 
 - completeness-waiver: large inputs (a single board's fill is refused outright when it exceeds the store's whole byte ceiling, and the retained set is bounded by both a board count and that ceiling; the fill itself is already cell-capped by placement/pour)
 - completeness-waiver: unauthorized access (an in-process memo over boards a caller already holds; entries are reachable only through a fingerprint of the exact board's own bytes, so nothing can read copper it did not already have, and there is no file, request, or auth surface)

@@ -276,6 +276,7 @@ test {
     _ = @import("placement/pose_math.zig");
     _ = @import("placement/pose_snapshot.zig");
     _ = @import("placement/pour.zig");
+    _ = @import("placement/pour_patch_regression.zig");
     _ = @import("placement/progress.zig");
     _ = @import("placement/rf_path_solver.zig");
     _ = @import("placement/rf_port_finish.zig");

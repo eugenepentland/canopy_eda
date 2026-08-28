@@ -1892,7 +1892,7 @@ src/placement/fill_cache.zig::put | fn put(self: *Store, k: Key, fills: Fills, s
 src/placement/fill_cache.zig::putFill | fn putFill(self: *Store, k: Key, fill: pour.Fill) ?*FillNode
 src/placement/fill_cache.zig::release | fn release(self: *Held) void
 src/placement/fill_cache.zig::release | fn release(self: *Session) void
-src/placement/fill_cache.zig::stats | fn stats() struct { tally: Tally, boards: usize, fills: usize, bytes: usize }
+src/placement/fill_cache.zig::stats | fn stats() struct { tally: Tally, boards: usize, fills: usize, bases: usize, bytes: usize }
 src/placement/fine_accept.zig::Attempt struct_
 src/placement/fine_accept.zig::Board struct_
 src/placement/fine_accept.zig::Connectivity struct_
@@ -2512,6 +2512,7 @@ src/placement/pose_snapshot.zig::restore | fn restore(comptime Part: type, parts
 src/placement/pour.zig::ComponentContact struct_
 src/placement/pour.zig::Copper struct_
 src/placement/pour.zig::EdgeField struct_
+src/placement/pour.zig::FeatureRecord struct_
 src/placement/pour.zig::Fill struct_
 src/placement/pour.zig::FillMemo struct_
 src/placement/pour.zig::Grid struct_
@@ -2522,6 +2523,7 @@ src/placement/pour.zig::NetFills struct_
 src/placement/pour.zig::PadQuery struct_
 src/placement/pour.zig::PlaneNet union_
 src/placement/pour.zig::PlaneQuery struct_
+src/placement/pour.zig::Snapshot struct_
 src/placement/pour.zig::UserZone struct_
 src/placement/pour.zig::carryingLayers | fn carryingLayers(arena: std.mem.Allocator, rules: optimizer.BoardRules, net_name: []const u8) std.mem.Allocator.Error![]const LayerSpec
 src/placement/pour.zig::clippedByHigher | fn clippedByHigher(zones: []const UserZone, i: usize, x: f64, y: f64) bool
@@ -2534,7 +2536,6 @@ src/placement/pour.zig::computeMemoKeyed | fn computeMemoKeyed( arena: std.mem.A
 src/placement/pour.zig::computeShared | fn computeShared( arena: std.mem.Allocator, placement: optimizer.Placement, copper: Copper, spec: LayerSpec, base: ?EdgeField, ) std.mem.Allocator.Error!Fill
 src/placement/pour.zig::contains | fn contains(self: Fill, x: f64, y: f64) bool
 src/placement/pour.zig::diskComponents | fn diskComponents( self: Fill, arena: std.mem.Allocator, cx: f64, cy: f64, radius: f64, slack: f64, ) std.mem.Allocator.Error![]const i32
-src/placement/pour.zig::fillKey | fn fillKey( arena: std.mem.Allocator, placement: optimizer.Placement, copper: Copper, spec: LayerSpec, contours: bool, ) std.mem.Allocator.Error!content_key.Key
 src/placement/pour.zig::fillKeyStable | fn fillKeyStable( placement: optimizer.Placement, spec: LayerSpec, tracks: []const router.Track, vias: []const router.Via, ) bool
 src/placement/pour.zig::higherPolys | fn higherPolys(arena: std.mem.Allocator, zones: []const UserZone, i: usize) std.mem.Allocator.Error![]const []const [2]f64
 src/placement/pour.zig::higherThanDeclared | fn higherThanDeclared( arena: std.mem.Allocator, zones: []const UserZone, layer: u8, net: PlaneNet, ) std.mem.Allocator.Error![]const []const [2]f64
