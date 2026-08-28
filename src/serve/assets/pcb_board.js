@@ -7319,13 +7319,22 @@ function drawTaperPath(tracks,start,end,nominal){if(!tracks.length||(!start&&!en
  return {net:tracks[0].net||"",l:tracks[0].l||0,
   track_ids:tracks.map(trackIdEnsure),samples:samples};}
 // A scalar-width sweep cannot mate both shoulders of an off-centre pad exit.
-// Add a very short full-face collar across the exact oriented pad portal. It
-// overlaps the path at its real crossing, is persisted/fabricated as ordinary
-// RF-path copper, and is included in both the synchronous and server DRC gates.
+// Add a very short near-full-face collar immediately INSIDE the oriented pad
+// portal. Keeping its entire conservative capsule inside copper the pad already
+// owns is load-bearing: centring the collar on the face used to protrude by half
+// its width (and past square-pad corners), so the taper itself could invent a
+// clearance error beside an otherwise DRC-clean land.
 function drawTaperPortalPath(profile,track,nominal,ownerIds){var p=profile&&profile.kind==="rf"&&profile.portal;if(!p)return null;
- var d=Math.max(+((PCB.rules||{}).min_width)||.003,Math.min(.02,nominal*.08));
+ var d=Math.max(+((PCB.rules||{}).min_width)||.003,Math.min(.02,nominal*.08)),r=d/2,
+  ox=p.out&&isFinite(+p.out.x)?+p.out.x:0,oy=p.out&&isFinite(+p.out.y)?+p.out.y:0,
+  ax=p.a.x-ox*r,ay=p.a.y-oy*r,bx=p.b.x-ox*r,by=p.b.y-oy*r,
+  dx=bx-ax,dy=by-ay,dl=Math.hypot(dx,dy);
+ // Pull both ends in by the probe radius as well. The generated RF polygon has
+ // butt ends, but DRC deliberately lowers it to a conservative capsule; this
+ // inset keeps those round probe caps inside rectangular pad corners too.
+ if(dl>d+1e-9){dx/=dl;dy/=dl;ax+=dx*r;ay+=dy*r;bx-=dx*r;by-=dy*r;}
  return {net:track.net||"",l:track.l||0,track_ids:(ownerIds||[]).slice(),portal:true,samples:
-  [[p.a.x,p.a.y,d],[p.b.x,p.b.y,d]]};}
+  [[ax,ay,d],[bx,by,d]]};}
 function drawTaperPathSet(tracks,start,end,nominal){var main=drawTaperPath(tracks,start,end,nominal);if(!main)return [];
  var out=[main],head=drawTaperPortalPath(start,tracks[0],nominal,main.track_ids),tail=drawTaperPortalPath(end,tracks[tracks.length-1],nominal,main.track_ids);
  if(head)out.push(head);if(tail&&!out.some(function(path){return drawSamePortalPath(tail,path);}))out.push(tail);return out;}
@@ -7351,10 +7360,14 @@ window.PCBDrawRfTaperPlan=drawRfTaperPlan;
 // nominal-width candidate has already been rejected. A gesture with existing
 // committed legs supplies only the active end pad; the route-start taper was
 // already gated when its first leg was committed.
-function drawAutomaticTaperPlan(tracks,startPad,endPad,nominal){var old=(tracks||[]).slice();
+function drawCompactTaperProfile(profile,nominal,scale){if(!profile||!(profile.width>nominal+1e-9)||!(scale<1))return profile;
+ var out={};for(var k in profile)out[k]=profile[k];out.taper=profile.taper*scale;out.step=profile.step*scale;return out;}
+function drawAutomaticTaperPlan(tracks,startPad,endPad,nominal,taperScale){var old=(tracks||[]).slice();
  if(!old.length)return {tracks:old,paths:[]};
  var sr=drawTaperProfile(old[0].net,startPad,nominal,drawPathPadLaunch(old,startPad,true)||drawTrackEndDirection(old[0],true)),
-  er=drawTaperProfile(old[old.length-1].net,endPad,nominal,drawPathPadLaunch(old,endPad,false)||drawTrackEndDirection(old[old.length-1],false));
+  er=drawTaperProfile(old[old.length-1].net,endPad,nominal,drawPathPadLaunch(old,endPad,false)||drawTrackEndDirection(old[old.length-1],false)),
+  compactable=!!((sr&&sr.width>nominal+1e-9)||(er&&er.width>nominal+1e-9)),scale=taperScale==null?1:taperScale;
+ sr=drawCompactTaperProfile(sr,nominal,scale);er=drawCompactTaperProfile(er,nominal,scale);
  if(!sr&&!er)return {tracks:old,paths:[]};var shaped,paths=[];
  if((sr&&sr.kind==="neck")||(er&&er.kind==="neck")){
   if(old.length===1)shaped=drawTaperTracks(old,sr,er,nominal);
@@ -7364,21 +7377,36 @@ function drawAutomaticTaperPlan(tracks,startPad,endPad,nominal){var old=(tracks|
   else{if(sr)paths=paths.concat(drawTaperPathSet([old[0]],sr,null,nominal));
    if(er)paths=paths.concat(drawTaperPathSet([old[old.length-1]],null,er,nominal));}
  }else{var rfPlan=drawRfTaperPlan(old,sr,er,nominal);shaped=rfPlan.tracks;paths=rfPlan.paths;}
- return {tracks:shaped,paths:paths};}
+ return {tracks:shaped,paths:paths,compactable:compactable,scale:scale};}
 window.PCBDrawAutomaticTaperPlan=drawAutomaticTaperPlan;
 function drawProspectiveTaperPlan(plan){if(!dtrace||dtrace.pair||!plan||!plan.tracks||!plan.tracks.length)return {tracks:(plan&&plan.tracks)||[],paths:[]};
  var tracks=plan.tracks,last=tracks[tracks.length-1],ep=drawEndpointPad(last.net,last.l||0,last.x2,last.y2);
  return drawAutomaticTaperPlan(tracks,dtrace.n===0?dtrace.startPad:null,ep,dtrace.w);}
 function drawApplyAutomaticTapers(){if(!dtrace||dtrace.pair||!dtrace.laid||!dtrace.laid.length)return {ok:true,changed:false,paths:[]};
  var old=dtrace.laid.slice(),nominal=dtrace.w;
- var ep=drawEndpointPad(dtrace.net,dtrace.l,dtrace.lx,dtrace.ly),physical=drawAutomaticTaperPlan(old,dtrace.startPad,ep,nominal),
-  shaped=physical.tracks,paths=physical.paths;
- if(!paths.length)return {ok:true,changed:false,paths:[]};
- var board=PCB.tracks||[],after=board.filter(function(t){return old.indexOf(t)<0;}).concat(shaped,drawTaperPortalProbes(paths)),base=dtrace.undo||{};
- if(drcGateDiffBlocks(base.tracks||[],base.vias||[],after,PCB.vias||[])){
-  routeStatMsg("automatic pad taper would violate DRC — adjust the launch before finishing",true);return {ok:false,changed:false,paths:[]};}
+ var ep=drawEndpointPad(dtrace.net,dtrace.l,dtrace.lx,dtrace.ly),board=PCB.tracks||[],base=dtrace.undo||{},
+  scales=[1,.75,.5,.25,.125,.0625],physical=null,initial=drawAutomaticTaperPlan(old,dtrace.startPad,ep,nominal,1);
+ if(!initial.paths.length)return {ok:true,changed:false,paths:[]};
+ // Never materialise automatic copper that the exact gate did not inspect. A
+ // still-loading/failed WASM engine leaves the already preview-cleared uniform
+ // route intact; a later explicit taper rebuild can retry it.
+ if(!drcGate.ready||drcGate.failed)return {ok:true,changed:false,paths:[],omitted:true};
+ for(var si=0;si<scales.length;si++){
+  var trial=si===0?initial:drawAutomaticTaperPlan(old,dtrace.startPad,ep,nominal,scales[si]);
+  var trialAfter=board.filter(function(t){return old.indexOf(t)<0;}).concat(trial.tracks,drawTaperPortalProbes(trial.paths));
+  if(!drcGateDiffBlocks(base.tracks||[],base.vias||[],trialAfter,PCB.vias||[])){physical=trial;break;}
+  if(drcGate.failed||!trial.compactable)break;}
+ if(!physical){
+  // The pen's uniform-width copper was independently gated on every commit,
+  // but confirm the complete gesture once more before using it as the fallback.
+  // Thus a taper can never trap Draw, and omitting one can never smuggle in the
+  // unrelated route error that the rejected taper check happened to expose.
+  if(drcGate.failed||drcGateDiffBlocks(base.tracks||[],base.vias||[],board,PCB.vias||[])){
+   routeStatMsg("the completed route would violate DRC — adjust the launch before finishing",true);return {ok:false,changed:false,paths:[]};}
+  return {ok:true,changed:false,paths:[],omitted:true};}
+ var paths=physical.paths;
  if(!paths.length)return {ok:true,changed:false,paths:[]};PCB.rf_paths=PCB.rf_paths||[];
- Array.prototype.push.apply(PCB.rf_paths,paths);cuGeomDrop();gpuCuEdit();return {ok:true,changed:true,paths:paths};}
+ Array.prototype.push.apply(PCB.rf_paths,paths);cuGeomDrop();gpuCuEdit();return {ok:true,changed:true,paths:paths,adjusted:physical.scale<1};}
 // Retrofit saved controlled-impedance copper that predates automatic launch
 // tapering. A saved route is already an arbitrary graph rather than one ordered
 // pen gesture, so start at each uncovered SMD land and follow its unique
@@ -7897,10 +7925,12 @@ function drawEnd(){var tapered={ok:true,changed:false,paths:[]},dropped=0;if(dtr
    newVias=drcChangedAfter(undo.vias||[],PCB.vias||[],true);
   dropped=routeFenceCull(newTracks,newVias,tapered.paths);recordUndo(undo);scheduleDrc();}
  drawAutoReset();dtrace=null;drawBtnSync();ovPaintSoon();
- routeStatMsg((tapered.changed?"automatic pad tapers added":"")+(dropped?((tapered.changed?" · ":"")+dropped+" RF fence via"+(dropped===1?"":"s")+" removed"):"")||null);return true;}
-// Escape is cancellation, not another finish attempt. In particular, a DRC-
-// blocked automatic taper deliberately keeps drawEnd() live so the user can
-// adjust it; Escape must still provide a guaranteed way out. Restore the exact
+ var taperMsg=tapered.omitted?"automatic pad taper omitted — no DRC-clean flare fits":
+  (tapered.adjusted?"compact DRC-safe pad taper added":(tapered.changed?"automatic pad tapers added":""));
+ routeStatMsg(taperMsg+(dropped?((taperMsg?" · ":"")+dropped+" RF fence via"+(dropped===1?"":"s")+" removed"):"")||null);return true;}
+// Escape is cancellation, not another finish attempt. In particular, a final
+// route-wide DRC rejection keeps drawEnd() live so the user can adjust it;
+// Escape must still provide a guaranteed way out. Restore the exact
 // route-start copper snapshot because a gesture can add vias, replace rounded
 // segments, and temporarily drop a pre-existing RF path as it is extended.
 function drawCancel(){var snap=dtrace&&dtrace.undo;drawAutoReset();dtrace=null;

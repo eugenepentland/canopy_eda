@@ -29,6 +29,19 @@ function load(names, globals = {}) {
 }
 
 {
+  const g = load(["drawCompactTaperProfile"]);
+  const wide = { kind: "rf", width: 0.6, land: 0.2, taper: 0.48, step: 0.08, portal: { id: 1 } };
+  const compact = g.drawCompactTaperProfile(wide, 0.4, 0.25);
+  assert.equal(compact.taper, 0.12, "a blocked wide-land flare must be shortened by the requested scale");
+  assert.equal(compact.step, 0.02, "compaction must retain the taper's sampling density");
+  assert.equal(compact.portal, wide.portal, "compaction must preserve the pad-contained portal collar");
+  assert.notEqual(compact, wide, "compaction must not mutate the full-size preview profile");
+  const narrow = { kind: "rf", width: 0.2, taper: 0.48, step: 0.08 };
+  assert.equal(g.drawCompactTaperProfile(narrow, 0.4, 0.25), narrow,
+    "a narrow-land taper must not be shortened toward a wider, less-clear trace");
+}
+
+{
   const g = load(["segsCross", "polySelfIntersects", "polyContains", "rfRingFolded", "rfFallbackRegions"]);
   const points = [
     [143.96, 105.45],
@@ -126,8 +139,13 @@ function load(names, globals = {}) {
   assert(launch.land > 0.28 && launch.land < 0.31, `wrong path land ${launch.land}`);
   const collar = g.drawTaperPortalPath({ kind: "rf", portal: launch.portal }, tracks[0], tracks[0].w);
   const [a, b] = collar.samples;
-  assert(Math.abs(Math.hypot(b[0] - a[0], b[1] - a[1]) - 0.34) < 1e-7, "wrong roundrect flat face");
+  assert(Math.abs(Math.hypot(b[0] - a[0], b[1] - a[1]) - 0.24) < 1e-7, "collar capsule must fit inside the roundrect flat face");
   assert.equal(a[2], 0.1, "collar must meet the fabrication minimum width");
+  const oldMid = { x: (launch.portal.a.x + launch.portal.b.x) / 2, y: (launch.portal.a.y + launch.portal.b.y) / 2 };
+  const newMid = { x: (a[0] + b[0]) / 2, y: (a[1] + b[1]) / 2 };
+  assert(Math.abs(newMid.x - (oldMid.x - launch.portal.out.x * 0.05)) < 1e-7);
+  assert(Math.abs(newMid.y - (oldMid.y - launch.portal.out.y * 0.05)) < 1e-7,
+    "collar centreline must move inward by its probe radius");
   assert(g.drawSamePortalPath(collar, { net: collar.net, l: collar.l, samples: [b, a] }), "reversed saved collar must be recognized after reload");
   assert(!g.drawSamePortalPath(collar, { net: "OTHER", l: 0, samples: [b, a] }), "another net must not suppress a collar");
   assert(!g.drawSamePortalPath(collar, { net: collar.net, l: 1, samples: [b, a] }), "another layer must not suppress a collar");

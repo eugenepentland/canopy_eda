@@ -6149,7 +6149,8 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - While hand-routing, the PCB editor can toggle the preview and committed path between 45-degree octilinear and 90-degree Manhattan bends
 - The PCB hand router starts opted-in current-aware power nets at their branch width and defers only that width verdict from its zone-blind synchronous gate and fast WASM marker list to authoritative server DRC
 - The PCB editor places repeated standalone vias on a chosen net without creating trace segments, using grid/copper snapping, net-class geometry, the live DRC gate, and one undo step per via
-- Escape cancels an active manual route even when automatic pad-taper DRC rejects finishing it, restoring the route-start copper and exiting Draw instead of retrying the blocked finish
+- Escape cancels an active manual route even when its final route-wide DRC check rejects finishing it, restoring the route-start copper and exiting Draw instead of retrying the blocked finish
+- A hand-routed RF launch keeps its generated portal collar inside the source pad, retries a DRC-blocked wide-land taper with progressively shorter flares, and finishes with the independently DRC-confirmed uniform trace when no automatic taper fits
 - Every saved trace segment and via has a stable inspector-visible ID that survives saves and retained-copper rewrites, with deterministic IDs backfilled for legacy copper
 - The PCB editor rotates components, rigid groups, and their carried copper in 45-degree increments
 

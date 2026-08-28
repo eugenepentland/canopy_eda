@@ -1142,6 +1142,21 @@ test "PCB hand router gates pad entry and exit at the prospective tapered width"
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
+// spec: Web Server - A hand-routed RF launch keeps its generated portal collar inside the source pad, retries a DRC-blocked wide-land taper with progressively shorter flares, and finishes with the independently DRC-confirmed uniform trace when no automatic taper fits
+test "PCB hand router fits automatic tapers to DRC" {
+    const markers = [_][]const u8{
+        "function drawCompactTaperProfile",
+        "scales=[1,.75,.5,.25,.125,.0625]",
+        "automatic pad taper omitted — no DRC-clean flare fits",
+        "compact DRC-safe pad taper added",
+        "ax=p.a.x-ox*r",
+        "if(!drcGate.ready||drcGate.failed)return {ok:true,changed:false,paths:[],omitted:true}",
+        "drcGateDiffBlocks(base.tracks||[],base.vias||[],board,PCB.vias||[])",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "automatic pad taper would violate DRC") == null);
+}
+
 // spec: Web Server - Generated RF fence vias are disposable while hand-routing: previews, exact DRC gates, and scoped autocomplete ignore them, committed copper removes only intersecting posts, and perimeter/ordinary vias remain obstacles
 test "PCB hand router routes through generated RF fence vias and culls the crossed posts" {
     const markers = [_][]const u8{
@@ -1162,7 +1177,7 @@ test "PCB hand router routes through generated RF fence vias and culls the cross
     try std.testing.expect(std.mem.indexOf(u8, drc_marshal_js, "!v.f || v.f === \"@perimeter\"") != null);
 }
 
-// spec: Web Server - Escape cancels an active manual route even when automatic pad-taper DRC rejects finishing it, restoring the route-start copper and exiting Draw instead of retrying the blocked finish
+// spec: Web Server - Escape cancels an active manual route even when its final route-wide DRC check rejects finishing it, restoring the route-start copper and exiting Draw instead of retrying the blocked finish
 test "PCB editor Escape cancels a DRC-blocked manual route" {
     const markers = [_][]const u8{
         "function drawCancel()",                          "restoreCopperSnap(snap)",
