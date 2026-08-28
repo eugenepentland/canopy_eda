@@ -39,6 +39,11 @@
 //! tried at a few phase offsets around the closed curve and the phase retaining
 //! the most legal sites wins; an arbitrary marching-squares start vertex must
 //! not make a narrow but usable slot fall between two candidates.
+//! Before that contour march, every stitch-net pad on a part carrying the
+//! fenced net gets first claim on one legal anchor. The pad centre is preferred;
+//! when a buried crossing blocks it, a bounded grid searches the land for a
+//! DRC-clean bore position. These anchors give series filters and launches a
+//! deterministic local return instead of leaving via-in-pad to contour phase.
 //!
 //! How hard a ring site is vetted is the caller's `Mode`:
 //!
@@ -360,6 +365,10 @@ pub const Site = struct {
     drill: f64,
     net: []const u8,
     fenced: []const u8,
+    /// True for a first-claim via deliberately seated in a stitch-net pad on a
+    /// part that also carries this fenced net. Persisted provenance remains the
+    /// fenced net either way; this bit is generation/reporting evidence.
+    anchor: bool = false,
 };
 
 /// What one net's march resolved to, and what it drew: the millimetres actually
@@ -524,6 +533,7 @@ const Bore = struct {
 const PadObs = struct {
     shape: pad_shape.Shape,
     net: i32,
+    part_i: usize,
     drill: f64,
     hx: f64,
     hy: f64,
@@ -540,7 +550,7 @@ fn padObstacles(arena: std.mem.Allocator, placement: optimizer.Placement) std.me
         try pin_net.put(arena, key, @intCast(ni));
     };
     var list: std.ArrayList(PadObs) = .empty;
-    for (placement.parts) |part| for (part.pads) |pad| {
+    for (placement.parts, 0..) |part, part_i| for (part.pads) |pad| {
         const key = try std.fmt.allocPrint(arena, "{s}|{s}", .{ part.ref_des, pad.number });
         const c = optimizer.worldPadCenter(&part, pad.x, pad.y);
         var shx: f64 = 0;
@@ -553,6 +563,7 @@ fn padObstacles(arena: std.mem.Allocator, placement: optimizer.Placement) std.me
         try list.append(arena, .{
             .shape = try pad_shape.worldShape(arena, part, pad),
             .net = pin_net.get(key) orelse -1,
+            .part_i = part_i,
             .drill = pad.drill,
             .hx = c[0],
             .hy = c[1],
@@ -802,7 +813,7 @@ const Pass = struct {
     }
 
     /// Accept a site, recording it so later rings dedupe against it.
-    fn accept(self: *Pass, x: f64, y: f64, plan: FencePlan) std.mem.Allocator.Error!void {
+    fn acceptSite(self: *Pass, x: f64, y: f64, plan: FencePlan, anchor: bool) std.mem.Allocator.Error!void {
         try self.sites.append(self.arena, .{
             .x = x,
             .y = y,
@@ -810,6 +821,7 @@ const Pass = struct {
             .drill = plan.via.drill,
             .net = plan.stitch_name,
             .fenced = plan.fenced_name,
+            .anchor = anchor,
         });
         try self.accepted.append(self.arena, .{
             .x = x,
@@ -818,6 +830,10 @@ const Pass = struct {
             .net = plan.stitch_i,
             .drill = plan.via.drill,
         });
+    }
+
+    fn accept(self: *Pass, x: f64, y: f64, plan: FencePlan) std.mem.Allocator.Error!void {
+        return self.acceptSite(x, y, plan, false);
     }
 };
 
@@ -1130,6 +1146,100 @@ fn planFor(
     };
 }
 
+/// Does one placed part carry a pad on `net_i`? Pad observations retain their
+/// part index so this stays a cheap scan over already-resolved world geometry.
+fn partCarriesNet(pads: []const PadObs, part_i: usize, net_i: i32) bool {
+    for (pads) |pad| {
+        if (pad.part_i == part_i and pad.net == net_i) return true;
+    }
+    return false;
+}
+
+/// True when the proposed drill centre leaves the whole bore on this pad's
+/// copper. The annular ring may overhang a stitch-net land (the DRC permits it),
+/// but the hole itself must remain on copper to be a useful via-in-pad anchor.
+fn padHoldsDrill(pad: PadObs, x: f64, y: f64, drill: f64) bool {
+    const r = drill / 2;
+    if (pad.shape.poly.len >= 3) {
+        return outline_mod.signedInset(pad.shape.poly, x, y) >= r - eps;
+    }
+    return x >= pad.shape.x0 + r - eps and x <= pad.shape.x1 - r + eps and
+        y >= pad.shape.y0 + r - eps and y <= pad.shape.y1 - r + eps;
+}
+
+fn viaCentreInPad(pad: PadObs, x: f64, y: f64) bool {
+    return pad_shape.pointDist(
+        pad.shape.x0,
+        pad.shape.y0,
+        pad.shape.x1,
+        pad.shape.y1,
+        pad.shape.poly,
+        x,
+        y,
+        std.math.inf(f64),
+    ) <= eps;
+}
+
+/// Is this stitch pad already served by a pre-existing or earlier accepted via
+/// whose centre lies on the land? If so, preserve that deliberate anchor and do
+/// not plant a second barrel beside it.
+fn padAlreadyAnchored(pass: Pass, pad: PadObs, stitch: i32) bool {
+    for (pass.in.vias) |via| {
+        if (sameNet(via.net, stitch) and viaCentreInPad(pad, via.x, via.y)) return true;
+    }
+    for (pass.accepted.items) |via| {
+        if (sameNet(via.net, stitch) and viaCentreInPad(pad, via.x, via.y)) return true;
+    }
+    return false;
+}
+
+/// Give each stitch-net land on a part carrying the fenced signal one first-
+/// claim return via. Centre first, then a deterministic 5x5 search across the
+/// land: enough freedom to step around one buried crossing without becoming an
+/// unbounded optimizer. Only one candidate is reported per pad — the accepted
+/// site, or the centre's veto when no legal site exists.
+fn seedGroundPadAnchors(
+    pass: *Pass,
+    net_i: i32,
+    plan: FencePlan,
+    rep: *NetReport,
+) std.mem.Allocator.Error!void {
+    const fractions = [_]f64{ 0, -0.4, 0.4, -0.2, 0.2 };
+    for (pass.pads) |pad| {
+        if (pad.net != plan.stitch_i) continue;
+        if (!partCarriesNet(pass.pads, pad.part_i, net_i)) continue;
+        if (padAlreadyAnchored(pass.*, pad, plan.stitch_i)) continue;
+
+        const cx = (pad.shape.x0 + pad.shape.x1) / 2;
+        const cy = (pad.shape.y0 + pad.shape.y1) / 2;
+        const w = pad.shape.x1 - pad.shape.x0;
+        const h = pad.shape.y1 - pad.shape.y0;
+        var centre_reason: ?SkipReason = null;
+        var accepted = false;
+        outer: for (fractions) |fy| {
+            for (fractions) |fx| {
+                const x = cx + fx * w;
+                const y = cy + fy * h;
+                if (!padHoldsDrill(pad, x, y, plan.via.drill)) continue;
+                const reason = pass.judge(x, y, plan, pass.accepted.items.len);
+                if (fx == 0 and fy == 0) centre_reason = reason;
+                if (reason != null) continue;
+                rep.march.sites += 1;
+                try pass.acceptSite(x, y, plan, true);
+                rep.placed += 1;
+                accepted = true;
+                break :outer;
+            }
+        }
+        if (!accepted) {
+            if (centre_reason) |reason| {
+                rep.march.sites += 1;
+                rep.skipped.bump(reason);
+            }
+        }
+    }
+}
+
 /// True when `name` is in `only`, or `only` is empty (no filter).
 fn selected(only: []const []const u8, name: []const u8) bool {
     if (only.len == 0) return true;
@@ -1144,6 +1254,10 @@ fn fenceNet(pass: *Pass, net_i: i32, plan: FencePlan, rep: *NetReport) std.mem.A
     if (!hasTracks(pass.in.tracks, net_i) and !hasRfPath(pass.in.rf_paths, net_i)) return;
     const copper = try netUnion(pass.arena, pass.in, pass.pads, net_i);
     if (copper.isEmpty()) return;
+
+    // Component-local ground returns are more important than a contour phase:
+    // reserve every legal stitch-pad anchor before transition and guide rings.
+    try seedGroundPadAnchors(pass, net_i, plan, rep);
 
     // Transition rings go first. The later general contour deduplicates against
     // them, so a nearby trace-row post can never consume the limited sites that
@@ -1926,6 +2040,61 @@ test "via-in-pad on a ground pad is legal and a foreign pad still blocks" {
     for (on_foreign.sites) |s| {
         try testing.expect(!(@abs(s.x - 15) < 1 and @abs(s.y - 10) < 1));
     }
+}
+
+// spec: placement/via-fence - a part carrying fenced copper gets first-claim legal return-via anchors in each stitch-net pad, searching within the land when its centre is blocked
+test "a fenced part seeds a legal ground-pad anchor away from a buried crossing" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // One RF land and one broad GND land on the same filter. A foreign vertical
+    // track crosses the centre of the GND land on another signal layer: the
+    // centre is illegal for a through barrel, but either end of the land remains
+    // a valid via-in-pad site.
+    var parts = [_]optimizer.Part{.{
+        .ref_des = "F1",
+        .kind = .passive,
+        .hw = 2.5,
+        .hh = 1,
+        .fallback = false,
+        .x = 15,
+        .y = 10,
+        .pads = &.{
+            .{ .number = "1", .x = 2, .y = 0, .w = 1, .h = 1 },
+            .{ .number = "2", .x = 0, .y = 0, .w = 3, .h = 1 },
+        },
+    }};
+    const rf_pin = [_]flat_netlist.FlatPin{.{ .ref_des = "F1", .pin = "1" }};
+    const gnd_pin = [_]flat_netlist.FlatPin{.{ .ref_des = "F1", .pin = "2" }};
+    const nets = &[_]flat_netlist.FlatNet{
+        .{ .name = "RF", .pins = &rf_pin },
+        .{ .name = "GND", .pins = &gnd_pin },
+        .{ .name = "CLK", .pins = &.{} },
+    };
+    const rules = &[_]NetRule{
+        .{ .rf = .{ .fence = .{ .declared = true, .pitch_mm = 1, .offset_mm = 0.3 } } },
+        .{},
+        .{},
+    };
+    const tracks = [_]router.Track{
+        .{ .x1 = 17, .y1 = 10, .x2 = 20, .y2 = 10, .layer = 0, .width = 0.3, .net = 0 },
+        .{ .x1 = 15, .y1 = 8, .x2 = 15, .y2 = 12, .layer = 1, .width = 0.3, .net = 2 },
+    };
+    const res = try generate(arena, .{ .placement = fixture(&parts, nets, rules), .tracks = &tracks });
+    var anchor: ?Site = null;
+    var anchors: usize = 0;
+    for (res.sites) |site| {
+        if (site.anchor) {
+            anchors += 1;
+            anchor = site;
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), anchors);
+    const a = anchor orelse return error.TestExpectedEqual;
+    try testing.expect(@abs(a.x - 15) > 0.4);
+    try testing.expect(@abs(a.y - 10) < 0.5);
+    try testing.expect(pad_shape.segPointDist(15, 8, 15, 12, a.x, a.y) >= 0.2 + 0.15 + 0.127 - eps);
 }
 
 // spec: placement/via-fence - a fence pitch below the board's copper and hole-to-hole floor is clamped up to it and the clamp is reported

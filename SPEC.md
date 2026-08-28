@@ -2236,6 +2236,7 @@ ring of identical violations.
 - a via barrel is copper of the union too, so a net whose only copper is a barrel still traces a circle around it
 - a fence via is a through barrel, so the guide wraps the net's pads on every layer, a bottom-side land under a top-routed trace included
 - every fenced through-via gets first claim on a local return-via ring, so general-contour dedup cannot consume the posts surrounding the transition
+- a part carrying fenced copper gets first-claim legal return-via anchors in each stitch-net pad, searching within the land when its centre is blocked
 - a ground fence via stays outside the signal via's synthesized plane antipad, including the 50-ohm default of a max-freq-only RF class
 - a fenced net with pads but no routed track on any layer is left unfenced, because there is no routed path to shield yet
 - a fence via falls back from the fence geometry to the class via to the board design rules
@@ -6611,8 +6612,9 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - A board whose RF class carries only (max-freq …) — no (fence …) — is still fenced by the endpoint, the pitch deriving as λg/10 and the vias persisting with the flanked net as provenance
 - The fence endpoint accepts a max-freq-only RF board and reports a normal dry run on it, so the Fence action covers RF traces that never spelled (fence) out
 - A fence dry run reports what it would place and writes nothing to the layout
-- A fence run defaults to the vetted mode, placing only sites the board accepts and ending at the DRC error count it started from, while mode=all places every ring site and reports the DRC without culling it
+- A fence run defaults to the vetted mode, placing only sites the board accepts and ending at the DRC error count it started from, while mode=all places every non-coincident site and reports the DRC without culling it
 - The fence's DRC ratchet culls the fence vias implicated in a new error-severity violation and leaves warnings, net-open findings and pre-existing copper alone
+- The fence ratchet compares violation identity against the baseline and never culls a new fence via merely because it is near a pre-existing error
 - The fence endpoint and the generate_fence tool reject an unknown mode naming the two spellings that exist
 - Re-running the fence on a layout replaces the previous fence rather than stacking a second row beside the same trace
 - The fence endpoint 404s an unknown layout naming the rows that exist, and refuses a board that declares no fence
