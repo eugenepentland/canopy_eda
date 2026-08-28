@@ -93,6 +93,7 @@ const design_diff = @import("serve/design_diff.zig");
 const datasheet_attach = @import("serve/datasheet_attach.zig");
 const rate_limiter = @import("serve/rate_limiter.zig");
 const request_log = @import("serve/request_log.zig");
+const warm_sched = @import("serve/warm_sched.zig");
 
 // ── Global live state ──────────────────────────────────────────────────
 
@@ -436,6 +437,13 @@ pub const Server = struct {
         req: *httpz.Request,
         res: *httpz.Response,
     ) !void {
+        // Count the request for as long as it is being served. Background
+        // sweeps (`serve/warmup.zig`) read this and pause briefly before
+        // claiming their next board, so a reader who arrives during a
+        // post-deploy warm competes with fewer of its workers. Cheap enough to
+        // sit on every request: one relaxed atomic each way.
+        warm_sched.enterInteractive();
+        defer warm_sched.leaveInteractive();
         // A request is a snapshot: revalidate the `src/` basename index once
         // here so the handlers below resolve however many design siblings they
         // need without re-walking the tree per lookup (`paths.beginRequest`).
@@ -986,6 +994,13 @@ pub fn serve(
         defer allocator.free(log_path);
         log.progress("interaction log: {s}", .{log_path});
     }
+    // The one number that says whether a deploy's restart was a gap: everything
+    // above this line runs BEFORE the socket answers — the interaction log's
+    // own open included — and everything below it runs behind an
+    // already-listening server. Kept as its own line (rather than folded into
+    // the banner above) because the banner's exact text is what deploy logs and
+    // humans grep for.
+    log.progress("startup: listening after {d:.2} ms — design scan and page warm run behind the socket", .{warm_sched.sinceStartMs()});
     // Fill the read-path caches in the background so the first visitor after a
     // deploy is not the one who pays for them. Overlaps with listen(). A
     // private performance harness needs an idle machine more than corpus-wide
