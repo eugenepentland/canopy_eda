@@ -449,6 +449,7 @@ test {
     _ = @import("serve/upload_datasheet.zig");
     _ = @import("serve/vfs.zig");
     _ = @import("serve/warmup.zig");
+    _ = @import("serve/warm_sched.zig");
     _ = @import("serve/ward_auth.zig");
     _ = @import("sexpr/ast.zig");
     _ = @import("sexpr/parser.zig");

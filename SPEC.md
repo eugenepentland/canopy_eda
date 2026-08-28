@@ -6206,6 +6206,13 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - One warm-up render answers both the PCB page and its deferred payload, each reserved and retained under its own cache identity
 - A deferred-payload warm reserves the SAME cache entry the editor's `?derived=1` fetch looks up, so the browser joins that render instead of starting a second one
 - Background PCB deferred-payload warms are capped, so a burst of saves cannot put the heaviest read-only render on every core
+- Background warm concurrency is bounded at half the host's cores so a startup sweep cannot occupy the machine it is warming
+- A parallel warm sweep processes every design exactly once regardless of how many workers it runs
+- Concurrent design scans coalesce onto one evaluation per design instead of each starting its own
+- Two different designs never block each other in the scan's single-flight latch
+- A background warm sweep pauses for in-flight requests and still proceeds when the server stays busy
+- A process that never marked a start reports no boot elapsed, so CLI commands carry no server timing
+- The design scan lists every design under src whatever order its parallel fill ran in, and concurrent scans agree
 - A warm-up reservation drops a retained PCB entry an edit has already invalidated, so the warm that edit triggered actually runs instead of deferring to the dead entry
 - The PDN impedance sweep rides its own response behind the after-paint payload, marked by a null `ac`, so the board's own diagnostics never wait on the editor's most expensive analysis
 - The PDN sweep is keyed apart from the after-paint payload, so the viewer's two fetches never collide on one cache entry

@@ -4360,6 +4360,17 @@ src/serve/ward_auth.zig::mapWardRole | fn mapWardRole(role: ward.verdict.Role) R
 src/serve/ward_auth.zig::metadataProtectedResource | fn metadataProtectedResource(ctx: *Server, req: *httpz.Request, res: *httpz.Response) AuthError!void
 src/serve/ward_auth.zig::toString | fn toString(self: Role) []const u8
 src/serve/ward_auth.zig::verify | fn verify( self: *FakeVerifier, allocator: std.mem.Allocator, token: []const u8, ) std.mem.Allocator.Error!ward.verdict.Verdict
+src/serve/warm_sched.zig::Flight struct_
+src/serve/warm_sched.zig::claim | fn claim(self: *Flight, key: []const u8) bool
+src/serve/warm_sched.zig::enterInteractive | fn enterInteractive() void
+src/serve/warm_sched.zig::interactiveInFlight | fn interactiveInFlight() usize
+src/serve/warm_sched.zig::leaveInteractive | fn leaveInteractive() void
+src/serve/warm_sched.zig::markProcessStart | fn markProcessStart() void
+src/serve/warm_sched.zig::release | fn release(self: *Flight, key: []const u8) void
+src/serve/warm_sched.zig::runIndexed | fn runIndexed( comptime Ctx: type, ctx: *Ctx, count: usize, comptime body: fn (*Ctx, usize) void, workers: usize, ) void
+src/serve/warm_sched.zig::sinceStartMs | fn sinceStartMs() i64
+src/serve/warm_sched.zig::workerCount | fn workerCount(cap: usize) usize
+src/serve/warm_sched.zig::yieldToInteractive | fn yieldToInteractive() void
 src/serve/warmup.zig::spawn | fn spawn(ctx: *Server) void
 src/sexpr/ast.zig::Node struct_
 src/sexpr/ast.zig::Span struct_

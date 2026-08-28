@@ -394,6 +394,55 @@ whole-handler figure, so a browser can subtract server work from its own
 `/pcb-layout` page's embedded `PCB` blob carries **`PCB.build_id`** — the build
 that RENDERED the page — which the client echoes as `page_build`, so a tab held
 open across a deploy files its events under the code that drew it.
+### Startup: what is in front of the socket, and what is behind it
+
+A merge deploys, and a deploy restarts this process, so "cold" is a state
+production is in several times a day. The ordering that keeps that from being a
+visible outage:
+
+**Nothing expensive runs before `listen()`.** `serve()` configures rate limits,
+builds `ServerState`, initialises the ward adapter from `WARD_*`, registers the
+routes, and binds. Measured on the four-board corpus (ReleaseSafe, 2026-08-28):
+**8 ms from exec to the first accepted connection.** The startup banner is
+followed by `[I] startup: listening after N ms …`, which is the number to read
+when a restart looks slow — if it is small, the delay is a *request*, not the
+boot.
+
+**The deploy health check never touches a design.** `.githooks/deploy-prod.sh`
+polls `HEALTH_URLS` — `/.well-known/oauth-protected-resource` expecting **200**
+and `/` expecting **302** — for up to `HEALTH_TIMEOUT` (90 s). Both are answered
+ahead of every handler: the metadata route is on the session allowlist and
+returns a static RFC 9728 document, and `/` is answered by
+`ward_auth.authMiddleware`, which redirects an unauthenticated request to the
+ward login *before* `pages.indexPage` is ever called. Neither can be delayed by
+a cold cache, a warm-up sweep, or a design scan. Measured cold, at boot, the
+metadata route answers in 4 ms.
+
+Two things to know when reproducing this locally:
+
+- **`NETLISP_DEV=1` changes what `/` means.** Dev mode bypasses auth for
+  loopback, so `/` renders the actual home page — which on a cold process gathers
+  every design and is the slowest read on the server. The deploy health check
+  never sees that page, because prod does not set `NETLISP_DEV`.
+- **Ward-less local runs answer 503, not 302**, by design (`sessionConfigured` is
+  false → fail closed). That is not a health-check regression; it means the probe
+  cannot be reproduced without `WARD_VERIFY_URL` / `WARD_LOGIN_URL` set. Check
+  the *metadata* URL locally, and check the pair against a ward-configured
+  server.
+
+**Everything else warms behind the socket.** `serve/warmup.zig` runs on its own
+thread: the design-summary gather first (`[I] warmup: N design summary(s) ready
+in M ms`), then PCB editor pages, then their deferred `?derived=1` payloads, then
+the progress ladders. A request that arrives mid-warm is never refused — it joins
+the warm work per design (`serve/warm_sched.zig`'s `Flight`, and the PCB page
+cache's own `reserveWarm`) rather than starting a duplicate render.
+
+**The design scan is the one thing a request blocks on.** `GET /api/designs` and
+`GET /` both evaluate every design under `src/` on a cold process. That scan is
+now parallel across a bounded worker set (half the host's cores, capped at four)
+and single-flighted per design, so a poller retrying during a restart joins the
+scan in progress instead of starting a second one. Its floor is the single
+slowest design in the corpus, since the response needs all of them.
 
 ### Live update workflow
 

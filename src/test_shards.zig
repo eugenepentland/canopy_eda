@@ -363,6 +363,7 @@ pub const shards: []const []const []const u8 = &.{
         "serve.sync.test.",
         "serve.ward_auth.test.",
         "serve.warmup.test.",
+        "serve.warm_sched.test.",
     },
     // shard 5
     &.{

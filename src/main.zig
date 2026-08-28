@@ -14,6 +14,7 @@ const footprint_conv = @import("convert/footprint.zig");
 const symbol_conv = @import("convert/symbol.zig");
 const alt_functions = @import("convert/alt_functions.zig");
 const serve_mod = @import("serve.zig");
+const warm_sched = @import("serve/warm_sched.zig");
 const commands = @import("commands.zig");
 const elmer_thermal_command = @import("elmer_thermal_command.zig");
 const query = @import("query.zig");
@@ -88,6 +89,9 @@ fn oneShotAllocator(process_arena: *std.heap.ArenaAllocator) std.mem.Allocator {
 /// `convert-*` / `parse` / `mint-plugin-token` helpers). Prints the usage
 /// banner and exits 1 on unknown commands.
 pub fn main(init: std.process.Init) !void {
+    // First statement in the process, so `netlisp serve` can report how long
+    // its socket took to come up against a real zero (see serve/warm_sched.zig).
+    warm_sched.markProcessStart();
     process_io = init.io;
     process_environ_map = init.environ_map;
     const arena = oneShotAllocator(init.arena);

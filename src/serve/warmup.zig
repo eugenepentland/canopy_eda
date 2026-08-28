@@ -54,13 +54,17 @@ const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
 const clock = @import("../infra/clock.zig");
 const mcp_tools = @import("mcp_tools.zig");
+const warm_sched = @import("warm_sched.zig");
 
-/// Three page renders use half of the production host's physical cores, making
-/// the editor cache ready promptly without letting startup work occupy the
-/// whole machine when a real request arrives. The request path is already
-/// concurrent, and every render below owns its evaluator + arena; the shared
-/// page and gzip stores serialize only their short admission sections.
-const pcb_warm_workers: usize = 3;
+/// Ceiling on the page renders this sweep runs at once, before the host's core
+/// count halves it (`warm_sched.workerCount`). Bounded for two reasons that
+/// pull the same way: every render owns an evaluator, an arena and a
+/// board-sized raster, so an unbounded fan-out would peak the process at one
+/// board per core; and the request path this exists to serve wants those cores
+/// more than the sweep does. Four rather than three because this corpus's
+/// deferred pass is dominated by a handful of expensive boards and the last one
+/// to start sets the wall.
+const pcb_warm_worker_cap: usize = 4;
 
 const WarmPhase = enum { pcb_pages, pcb_derived, progress_ladders };
 /// This array drives `run`, rather than merely documenting it, so the test at
@@ -71,17 +75,16 @@ const BoardWarmWork = struct {
     ctx: *Server,
     summaries: []const mcp_tools.DesignSummary,
     scope: pcb_derived.WarmScope,
-    next: std.atomic.Value(usize) = .init(0),
     warmed: std.atomic.Value(usize) = .init(0),
 
-    fn run(self: *BoardWarmWork) void {
-        while (true) {
-            const i = self.next.fetchAdd(1, .monotonic);
-            if (i >= self.summaries.len) return;
-            const summary = self.summaries[i];
-            if (!summary.build_ok) continue;
-            if (warmPcbPage(self.ctx, summary.name, self.scope)) _ = self.warmed.fetchAdd(1, .monotonic);
-        }
+    fn one(self: *BoardWarmWork, i: usize) void {
+        const summary = self.summaries[i];
+        if (!summary.build_ok) return;
+        // Between boards, never inside one: a reader who arrived mid-sweep gets
+        // a brief head start on the cores, and abandoning a half-finished
+        // render would waste exactly the work the reader is about to want.
+        warm_sched.yieldToInteractive();
+        if (warmPcbPage(self.ctx, summary.name, self.scope)) _ = self.warmed.fetchAdd(1, .monotonic);
     }
 };
 
@@ -91,15 +94,13 @@ const BoardWarmWork = struct {
 /// so the second one lands on the deferred halves the first one left.
 fn warmBoards(ctx: *Server, summaries: []const mcp_tools.DesignSummary, scope: pcb_derived.WarmScope) usize {
     var work = BoardWarmWork{ .ctx = ctx, .summaries = summaries, .scope = scope };
-    var threads: [pcb_warm_workers - 1]std.Thread = undefined;
-    var spawned: usize = 0;
-    while (spawned < threads.len) : (spawned += 1) {
-        threads[spawned] = std.Thread.spawn(.{}, BoardWarmWork.run, .{&work}) catch break;
-    }
-    // The warm-up thread is a worker too. If either spawn failed, it claims
-    // more indices and preserves the serial best-effort fallback.
-    work.run();
-    for (threads[0..spawned]) |thread| thread.join();
+    warm_sched.runIndexed(
+        BoardWarmWork,
+        &work,
+        summaries.len,
+        BoardWarmWork.one,
+        warm_sched.workerCount(pcb_warm_worker_cap),
+    );
     return work.warmed.load(.monotonic);
 }
 
@@ -128,6 +129,17 @@ fn run(ctx: *Server) void {
     var home_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer home_arena.deinit();
     const home = pages.gatherHome(home_arena.allocator(), ctx.project_dir);
+    // The FIRST thing a restart owes anyone: `GET /` and `GET /api/designs`
+    // both block on this gather, and until it lands they evaluate the whole
+    // corpus themselves. It is reported separately from the phases below
+    // because it is the only part of the warm-up a request can be waiting on
+    // rather than merely benefiting from — and because a request that arrives
+    // during it now JOINS this scan per design instead of starting its own
+    // (see `mcp_tools.ensureSummaryCached`).
+    log.progress("warmup: {d} design summary(s) ready in {d} ms", .{
+        home.summaries.len,
+        @divTrunc(clock.nanoTimestamp() - started, std.time.ns_per_ms),
+    });
 
     var boards: usize = 0;
     var warmed: usize = 0;
