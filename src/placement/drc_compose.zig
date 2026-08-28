@@ -93,6 +93,43 @@ pub fn checkDefaultRulesReport(alloc: std.mem.Allocator, in: CopperCheck) CheckR
     return withNetOpenReport(alloc, in, bypass, board);
 }
 
+/// GEOMETRY-only DRC over a saved board, memoised.
+///
+/// `drc.check` is a clearance sweep with one exception: the power-width rule
+/// asks whether a declared rail's branch is fed by a plane, and answers by
+/// rastering every declared plane and pour of the board. `drc.check` passes no
+/// prepared copper, so it paid that raster in full on every call — 7.5 s of
+/// barracuda-base's 8.2 s geometry pass — and the boards a SERVER checks are
+/// saved boards it re-checks over and over.
+///
+/// This is that same check with the process fill memo wired in. The findings are
+/// identical: a memoised fill is bit-identical to a poured one, and every other
+/// rule is untouched. It lives here, not in `drc.zig`, because `drc.zig` is
+/// compiled into the client's wasm engine, which has no store — nothing in the
+/// wasm target reaches `fill_cache` through this seam.
+///
+/// The router's candidate loop deliberately keeps calling `drc.check`: it
+/// mutates the copper those surfaces depend on between calls, so it would only
+/// ever miss and pay the keys for nothing.
+pub fn checkGeometry(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    clearance: f64,
+) std.mem.Allocator.Error![]drc.Violation {
+    const session = fill_cache.beginSession() orelse
+        return drc.check(alloc, placement, routed, clearance);
+    // Released on the way out: the widths this produces are plain numbers and
+    // no violation points into a fill (`fill_cache`'s borrow rule).
+    defer session.release();
+    return drc.checkMemoised(alloc, placement, routed, clearance, session.memo());
+}
+
+/// What the process-wide copper-fill memo has done and is holding. Re-exported
+/// here rather than reached for directly, so the reporting layers above have one
+/// door into the memo — the same door their fills come through.
+pub const fillMemoStats = fill_cache.stats;
+
 /// Run only copper-topology findings against the fabricated fill components.
 /// Persisted cleanup uses this to obtain the exact same jointly-safe removal
 /// plan as full DRC without paying for unrelated geometry findings each round.
@@ -234,16 +271,30 @@ const BoardFills = struct {
     }
 };
 
-/// The board's fill, memoised on the board's own bytes. A hit skips the whole
-/// per-net raster; a miss pours exactly as before and retains a copy for the
-/// next surface to ask about the same board (`fill_cache`).
+/// The board's fill, memoised on the board's own bytes AND on each fill's own.
+/// A whole-board hit skips even the per-fill keys; a miss pours only the fills
+/// whose own inputs changed and borrows the rest from the board states already
+/// retained, then publishes this board state for the next surface to ask about
+/// (`fill_cache`).
 fn boardFills(alloc: std.mem.Allocator, in: CopperCheck) BoardFills {
     const key = fill_cache.key(in.placement, in.routed, in.zones);
     var held = fill_cache.acquire(key);
     if (held.entry != null) return .{ .fills = held.fills(), .held = held };
-    const fresh = filledTopology(alloc, in) catch return .{ .failed = true };
-    fill_cache.put(key, fresh);
-    return .{ .fills = fresh };
+    const session = fill_cache.beginSession() orelse {
+        // No memo at all this pass: pour it exactly as an unmemoised caller
+        // would. A memo failure is never a DRC failure.
+        const alone = filledTopology(alloc, in, null) catch return .{ .failed = true };
+        return .{ .fills = alone };
+    };
+    const fresh = filledTopology(alloc, in, session.memo()) catch {
+        session.release();
+        return .{ .failed = true };
+    };
+    fill_cache.put(key, fresh, session);
+    // The session, not the entry, is what keeps this pass's rasters alive: the
+    // board entry may have been declined, and either way the fills below point
+    // into the retained nodes the session borrowed.
+    return .{ .fills = fresh, .held = .{ .session = session, .own = fresh } };
 }
 
 /// Reduce every declared plane/pour and hand-authored zone to the exact kept
@@ -253,7 +304,7 @@ fn boardFills(alloc: std.mem.Allocator, in: CopperCheck) BoardFills {
 /// This is the expensive half of the reporting seam — one raster per net per
 /// carrying layer plus one per user zone — so `boardFills` memoises its result
 /// and this runs only for a board no surface has poured yet.
-fn filledTopology(alloc: std.mem.Allocator, in: CopperCheck) std.mem.Allocator.Error!fill_cache.Fills {
+fn filledTopology(alloc: std.mem.Allocator, in: CopperCheck, memo: ?pour.FillMemo) std.mem.Allocator.Error!fill_cache.Fills {
     var out: std.ArrayList(drc.TopologyZone) = .empty;
     var plane_fills: std.ArrayList(pour.NetFills) = .empty;
     var component: u64 = 1;
@@ -283,7 +334,7 @@ fn filledTopology(alloc: std.mem.Allocator, in: CopperCheck) std.mem.Allocator.E
             var spec = layer;
             if (spec.track_layer) |track_layer|
                 spec.higher = try pour.higherThanDeclared(alloc, in.zones, track_layer, spec.net);
-            const fill = try pour.computeShared(alloc, in.placement, copper, spec, base);
+            const fill = try pour.computeMemo(alloc, in.placement, copper, spec, base, memo);
             prepared_layers[fill_i] = spec;
             fills[fill_i] = fill;
             for (fill.contours, 0..) |contour, contour_i| {
@@ -304,7 +355,7 @@ fn filledTopology(alloc: std.mem.Allocator, in: CopperCheck) std.mem.Allocator.E
     for (in.zones, 0..) |zone, zone_i| {
         var spec = pour.zoneLayerSpec(zone.net, pour.sideOfSignal(zone.layer), zone.layer, zone.poly);
         spec.higher = try pour.higherPolys(alloc, in.zones, zone_i);
-        const fill = try pour.computeShared(alloc, in.placement, copper, spec, base);
+        const fill = try pour.computeMemo(alloc, in.placement, copper, spec, base, memo);
         for (fill.contours, 0..) |contour, contour_i| {
             try out.append(alloc, .{
                 .net = zone.net,
@@ -319,7 +370,7 @@ fn filledTopology(alloc: std.mem.Allocator, in: CopperCheck) std.mem.Allocator.E
     // The connectivity layer's own whole-board raster, taken here so the memo
     // retains BOTH halves of the seam's fill work under one board key. It reads
     // the same physical tracks and the same edge field this loop just used.
-    const zone_fills = try net_open.zoneFills(
+    const zone_fills = try net_open.zoneFillsMemo(
         alloc,
         in.placement,
         .{
@@ -330,6 +381,7 @@ fn filledTopology(alloc: std.mem.Allocator, in: CopperCheck) std.mem.Allocator.E
             .zones = in.zones,
         },
         base,
+        memo,
     );
     return .{
         .zones = try out.toOwnedSlice(alloc),
@@ -521,7 +573,7 @@ test "filled topology and Gerber proof carve the same RF taper" {
         .total = 1,
     };
     const in: CopperCheck = .{ .placement = placement, .routed = routed, .clearance = 0.127, .zones = &zones };
-    const retained = try filledTopology(alloc, in);
+    const retained = try filledTopology(alloc, in, null);
     try testing.expectEqual(@as(usize, 1), retained.zone_fills.len);
 
     const base = try pour.sharedEdgeField(alloc, placement);
@@ -546,4 +598,146 @@ test "filled topology and Gerber proof carve the same RF taper" {
     const lowered_tracks = try path_copper.tracks(alloc, routed);
     const lowered = try pour.computeShared(alloc, placement, .{ .tracks = lowered_tracks, .zones = &zones }, spec, base);
     try testing.expect(exactFillKeepsCopperLoweringRemoves(exact, lowered));
+}
+
+/// A two-layer board with copper on both faces and a drawn pour on each: enough
+/// for the per-fill memo to have something it must reuse (the far face) and
+/// something it must not (the edited face).
+fn twoFaceBoard(parts: []optimizer.Part, nets: []const optimizer.FlatNet) optimizer.Placement {
+    return .{
+        .parts = parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 10,
+        .maxy = 6,
+        .generated = true,
+        .board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 6 },
+        .rules = .{ .copper_layers = 2 },
+    };
+}
+
+fn expectSamePolys(a: []const []const [2]f64, b: []const []const [2]f64) !void {
+    try std.testing.expectEqual(a.len, b.len);
+    for (a, b) |pa, pb| try std.testing.expectEqualSlices([2]f64, pa, pb);
+}
+
+/// Bit-identity of one raster: the labels the connectivity layer samples, the
+/// component count, the traced boundary, its holes, and the two flags a
+/// fabrication gate reads. A borrowed fill that differs in ANY of these is a
+/// wrong DRC verdict waiting to happen.
+fn expectSameFill(cold: pour.Fill, warm: pour.Fill) !void {
+    const testing = std.testing;
+    try testing.expectEqual(cold.frame, warm.frame);
+    try testing.expectEqual(cold.n_comp, warm.n_comp);
+    try testing.expectEqual(cold.coarsened, warm.coarsened);
+    try testing.expectEqual(cold.integrity_ok, warm.integrity_ok);
+    try testing.expectEqualSlices(i32, cold.labels, warm.labels);
+    try expectSamePolys(cold.contours, warm.contours);
+    try testing.expectEqual(cold.holes.len, warm.holes.len);
+    for (cold.holes, warm.holes) |ch, wh| try expectSamePolys(ch, wh);
+}
+
+fn expectSameFills(cold: fill_cache.Fills, warm: fill_cache.Fills) !void {
+    const testing = std.testing;
+    try testing.expectEqual(cold.zones.len, warm.zones.len);
+    for (cold.zones, warm.zones) |c, w| {
+        try testing.expectEqualStrings(c.net, w.net);
+        try testing.expectEqual(c.layer, w.layer);
+        try testing.expectEqual(c.stack, w.stack);
+        try testing.expectEqual(c.component, w.component);
+        try testing.expectEqual(c.plane, w.plane);
+        try testing.expectEqualSlices([2]f64, c.poly, w.poly);
+        try expectSamePolys(c.holes, w.holes);
+    }
+    try testing.expectEqual(cold.plane_fills.len, warm.plane_fills.len);
+    for (cold.plane_fills, warm.plane_fills) |c, w| {
+        try testing.expectEqualStrings(c.net_name, w.net_name);
+        try testing.expectEqual(c.fills.len, w.fills.len);
+        for (c.fills, w.fills) |cf, wf| try expectSameFill(cf, wf);
+    }
+    try testing.expectEqual(cold.zone_fills.len, warm.zone_fills.len);
+    for (cold.zone_fills, warm.zone_fills) |c, w| try expectSameFill(c, w);
+}
+
+// spec: placement/fill-cache - a board rebuilt after a copper edit borrows the fills the edit did not reach, and every borrowed raster is bit-identical to the one a cold pour produces
+test "fills borrowed across an edit are bit-identical to a cold pour" {
+    const testing = std.testing;
+    const geometry = @import("geometry.zig");
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const alloc = arena_inst.allocator();
+
+    const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 1.5, .y = 1.5 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 8, .y = 1.5 },
+        .{ .ref_des = "R3", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 1.5, .y = 4.5, .side = .bottom },
+    };
+    const flat = @import("../flat_netlist.zig");
+    const gnd_pins = [_]flat.FlatPin{ .{ .ref_des = "R1", .pin = "1" }, .{ .ref_des = "R3", .pin = "1" } };
+    const sig_pins = [_]flat.FlatPin{.{ .ref_des = "R2", .pin = "1" }};
+    const nets = [_]optimizer.FlatNet{
+        .{ .name = "GND", .pins = &gnd_pins },
+        .{ .name = "SIG", .pins = &sig_pins },
+    };
+    const placement = twoFaceBoard(&parts, &nets);
+
+    // One drawn GND pour per face. The bottom one is what the memo must hand
+    // back untouched when a TOP-layer track moves.
+    const top_poly = [_][2]f64{ .{ 0.4, 0.4 }, .{ 9.6, 0.4 }, .{ 9.6, 2.8 }, .{ 0.4, 2.8 } };
+    const bottom_poly = [_][2]f64{ .{ 0.4, 3.2 }, .{ 9.6, 3.2 }, .{ 9.6, 5.6 }, .{ 0.4, 5.6 } };
+    const zones = [_]pour.UserZone{
+        .{ .net = "GND", .layer = 0, .poly = &top_poly },
+        .{ .net = "GND", .layer = 1, .poly = &bottom_poly },
+    };
+    const saved_tracks = [_]router.Track{
+        .{ .x1 = 2.5, .y1 = 1.5, .x2 = 7.5, .y2 = 1.5, .layer = 0, .width = 0.25, .net = 1 },
+        .{ .x1 = 2.5, .y1 = 4.5, .x2 = 7.5, .y2 = 4.5, .layer = 1, .width = 0.25, .net = 1 },
+    };
+    const saved = router.RouteResult{ .tracks = &saved_tracks, .vias = &.{}, .routed = 1, .total = 2 };
+    const before: CopperCheck = .{ .placement = placement, .routed = saved, .clearance = 0.15, .zones = &zones };
+
+    // The board as saved, poured once through the memo and KEPT borrowed, so
+    // its fills are still retained when the edited state asks for them.
+    var first = fill_cache.beginSession() orelse return error.TestExpectedSession;
+    defer first.release();
+    _ = try filledTopology(alloc, before, first.memo());
+
+    // The edit: the TOP track moves. The bottom face cannot have changed.
+    var edited_tracks = saved_tracks;
+    edited_tracks[0].x1 += 0.4;
+    edited_tracks[0].x2 += 0.4;
+    const after: CopperCheck = .{
+        .placement = placement,
+        .routed = .{ .tracks = &edited_tracks, .vias = &.{}, .routed = 1, .total = 2 },
+        .clearance = 0.15,
+        .zones = &zones,
+    };
+
+    const hits_before = fill_cache.stats().tally.fill_hits;
+    var second = fill_cache.beginSession() orelse return error.TestExpectedSession;
+    defer second.release();
+    const warm = try filledTopology(alloc, after, second.memo());
+    // Something WAS borrowed — otherwise the comparison below would be two
+    // cold pours agreeing with each other, which proves nothing.
+    try testing.expect(fill_cache.stats().tally.fill_hits > hits_before);
+
+    // …and every fill of the edited board matches the fill a caller with no
+    // memo at all computes for that same board.
+    const cold = try filledTopology(alloc, after, null);
+    try expectSameFills(cold, warm);
+
+    // The edit is load-bearing: the top face's raster really did move, so a
+    // memo that wrongly reused it would fail the comparison above rather than
+    // pass it by describing an unchanged board.
+    const unedited = try filledTopology(alloc, before, null);
+    try testing.expectEqual(unedited.zone_fills.len, cold.zone_fills.len);
+    try testing.expect(!std.mem.eql(i32, unedited.zone_fills[0].labels, cold.zone_fills[0].labels));
+    try testing.expectEqualSlices(i32, unedited.zone_fills[1].labels, cold.zone_fills[1].labels);
 }

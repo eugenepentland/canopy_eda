@@ -739,6 +739,46 @@ one-board anecdote.
 - completeness-waiver: integer overflow (counts come from routed slices; the score arithmetic widens to f64 before any accumulation)
 - completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
 
+## drc-dump
+
+Public functions: cmdDrcDump, mutate
+
+The board's WHOLE violation multiset, printed. `netlisp drc-dump
+[--project-dir <dir>] [--mutate <k>] [--prime] <design> …` evaluates a design,
+restores its saved layout exactly as the PCB page does, and writes every field
+of every violation from both DRC seams — the geometry-only pass
+(`drc_rules.checkGeometry`) and the full composed report
+(`drc_rules.checkFilteredZones`, fill-aware topology plus `net_open`
+connectivity plus the design's severity sidecar) — sorted, one per line, with
+each seam's wall time and the copper-fill memo's reuse tally on `#` comment
+lines that `diff -I '^#'` ignores.
+
+It exists because nothing else produces one: `netlisp check` is schematic ERC,
+`bench-page` reports three aggregate DRC counts, and `describe_pcb_layout`
+summarises. Aggregate counts cannot tell "the same NUMBER of findings" from
+"the same findings", which is the only claim a pure DRC speedup makes — three
+consecutive DRC refactors each had to add a throwaway dump command, build two
+binaries with it, diff the corpus, and strip the patch again.
+
+`--mutate <k>` applies one deterministic copper edit IN MEMORY (move / delete /
+add a track, delete / move a via) and `--prime` runs a discarded DRC pass over
+the unmutated board first, so `--mutate k --prime` versus `--mutate k` in a
+fresh process is a direct test that a memo's borrowed fills are bit-identical
+to poured ones. The command is read-only: it writes no file and starts no
+server.
+
+- the CLI parses the project dir, the mutation selector and the priming flag with positionals as design names
+- every violation renders one line carrying every field, including the track identity automatic cleanup reads, and the lines sort deterministically
+- each mutation edits copper in memory only, leaving the board it was given untouched
+- completeness-waiver: empty inputs (a dump with no design named is a usage error rather than an empty dump that would trivially match any comparison; a board that does not resolve prints one marked comment line and the run continues)
+- completeness-waiver: large inputs (each board runs in its own arena, freed before the next, so a corpus dump peaks at one board's DRC)
+- completeness-waiver: unauthorized access (a local read-only CLI over the caller's own project directory; no network, no auth surface, and no file is written)
+- completeness-waiver: concurrent access (single-threaded, and the process-wide fill memo it reads through is itself mutex-guarded and refcounted)
+- completeness-waiver: i/o failure (a design that cannot be evaluated or whose layout cannot be restored prints an UNRESOLVED comment for that board and the remaining boards still dump)
+- completeness-waiver: malformed encoding (the design and its saved layout are parsed by the same seam the PCB page uses, which rejects malformed input long before a violation exists to print)
+- completeness-waiver: integer overflow (no arithmetic on the dump path beyond formatting already-computed violation fields)
+- completeness-waiver: panic-free (every failing stage degrades to a comment line and the next board; a DRC seam that errors contributes an empty list rather than aborting the dump)
+
 ## bench-page
 
 Public functions: benchOne, corpus, writeTable, writeResultsJson, cmdBenchPage
@@ -3152,7 +3192,7 @@ connectivity model.
 
 ## placement/fill-cache
 
-Public functions: acquire, key, put
+Public functions: acquire, beginSession, key, put
 
 - one board fingerprints identically from two independently built copies and differently after any change to its copper
 - the fingerprint ignores the objective score and whether the optimizer ran, so one saved board shares an entry across the surfaces that resolve it
@@ -3162,6 +3202,13 @@ Public functions: acquire, key, put
 - a board with no planes, pours or zones retains its empty fill so the surfaces after it skip the pour attempt too
 - a board whose fill alone exceeds the whole store's byte ceiling is declined rather than retained, and every later pass simply pours it again
 - a second reporting DRC over an unchanged board reuses the retained fill instead of re-pouring it and returns the identical verdict
+- the content fingerprint separates two values that differ in any fold-in and matches two independently built copies of one value
+- a fingerprint tag separates two runs of otherwise identical scalars so adjacent feature kinds cannot alias
+- one fill retained under its own content key is borrowed by the next pass over a DIFFERENT board, so an edit re-pours only what it changed
+- a board entry built from a session references the retained fills instead of copying them, and they stay alive as long as the entry does
+- a pass holding a fill the store could not retain publishes its board by COPYING the fill, never by referencing memory the pass owns
+- retained fills nothing references are given up before a whole board state is, and a fill a live board entry still needs is never freed under it
+- a board rebuilt after a copper edit borrows the fills the edit did not reach, and every borrowed raster is bit-identical to the one a cold pour produces
 
 The reporting DRC seam pours every declared plane, every pour and every drawn
 zone of a board before it can judge copper topology or connectivity, and that
@@ -3169,6 +3216,16 @@ raster is the whole cost of the seam. It is a pure function of the board, so it
 is retained under a 128-bit content fingerprint of the placement, the routed
 copper and the user zones, and borrowed rather than re-poured by every later
 pass over the same board.
+
+That board fingerprint is all-or-nothing, and a board under edit changes on
+every keystroke, so each FILL is also retained under its own content key
+(`placement/pour`'s `fillKey`, computed by the same traversal that stamps the
+raster). A board rebuilt after an edit borrows every fill whose own inputs did
+not move — every inner plane across any track edit, every other layer's fills
+across a same-layer edit, and every drawn zone the edit did not reach — and
+pours only the rest. Fills are refcounted independently of the board entries
+that reference them, so consecutive board states share one copy of everything
+between them rather than each holding a whole board's rasters.
 
 - completeness-waiver: large inputs (a single board's fill is refused outright when it exceeds the store's whole byte ceiling, and the retained set is bounded by both a board count and that ceiling; the fill itself is already cell-capped by placement/pour)
 - completeness-waiver: unauthorized access (an in-process memo over boards a caller already holds; entries are reachable only through a fingerprint of the exact board's own bytes, so nothing can read copper it did not already have, and there is no file, request, or auth surface)

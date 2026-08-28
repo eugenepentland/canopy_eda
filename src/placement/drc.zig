@@ -407,7 +407,32 @@ pub fn check(
     routed: router.RouteResult,
     clearance: f64,
 ) std.mem.Allocator.Error![]Violation {
-    return checkImpl(arena, placement, routed, clearance, &.{}, null);
+    return checkImpl(arena, placement, routed, clearance, &.{}, .{});
+}
+
+/// `check` with a per-fill memo for the ONE rule in it that pours copper.
+///
+/// Geometry DRC looks like a pure clearance sweep and mostly is, but the
+/// power-width rule needs to know whether a declared rail's local branch is fed
+/// by a plane, and `routedTrackRequiredWidths` answers that by rastering every
+/// declared plane and pour of the board from scratch — 7.5 s of barracuda-base's
+/// 8.2 s geometry pass, paid by every caller that never passes prepared copper.
+/// A server-side caller measuring a SAVED board passes a memo here and pays it
+/// once; the findings are identical either way, because a memoised fill is a
+/// memoised fill.
+///
+/// Deliberately a separate entry point rather than a default: `drc.zig` is
+/// compiled into the client's wasm DRC engine, which has no store to consult,
+/// and the router's candidate loop mutates the copper the surfaces depend on
+/// between every call and would only ever miss.
+pub fn checkMemoised(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    clearance: f64,
+    memo: ?pour.FillMemo,
+) std.mem.Allocator.Error![]Violation {
+    return checkImpl(arena, placement, routed, clearance, &.{}, .{ .fills = memo });
 }
 
 /// `check` with hand-authored copper zones credited as real same-net copper
@@ -419,7 +444,7 @@ pub fn checkWithZones(
     clearance: f64,
     zones: []const TopologyZone,
 ) std.mem.Allocator.Error![]Violation {
-    return checkImpl(arena, placement, routed, clearance, zones, null);
+    return checkImpl(arena, placement, routed, clearance, zones, .{});
 }
 
 /// `checkWithZones` plus the exact prepared fills already owned by the
@@ -432,7 +457,7 @@ pub fn checkWithPreparedCopper(
     clearance: f64,
     prepared: PreparedCopper,
 ) std.mem.Allocator.Error![]Violation {
-    return checkImpl(arena, placement, routed, clearance, prepared.topology_zones, prepared);
+    return checkImpl(arena, placement, routed, clearance, prepared.topology_zones, .{ .copper = prepared });
 }
 
 /// Exact fabricated copper rasters shared by reporting DRC's topology,
@@ -640,13 +665,23 @@ fn trackClearsBoardEdge(placement: optimizer.Placement, track: router.Track) boo
     return worst - half >= placement.rules.design.edgeClearance() - eps;
 }
 
+/// How the power-width rule inside `checkImpl` gets at the board's poured
+/// copper: either the caller already holds the exact fills (the reporting seam,
+/// which poured them for topology and connectivity), or it holds a memo the
+/// rule can pour THROUGH, or neither and it pours from scratch. Exactly one of
+/// the two is ever set; both null is the historical behaviour.
+const PowerCopper = struct {
+    copper: ?PreparedCopper = null,
+    fills: ?pour.FillMemo = null,
+};
+
 fn checkImpl(
     arena: std.mem.Allocator,
     placement: optimizer.Placement,
     routed: router.RouteResult,
     clearance: f64,
     topology_zones: []const TopologyZone,
-    prepared_power: ?PreparedCopper,
+    power: PowerCopper,
 ) std.mem.Allocator.Error![]Violation {
     var out: std.ArrayList(Violation) = .empty;
     const pads = try padBoxes(arena, placement);
@@ -684,7 +719,7 @@ fn checkImpl(
     try checkSilkOverPad(arena, &out, placement, pads, &pad_grid, rules.mask.margin);
     var current_routed = routed;
     current_routed.tracks = tracks;
-    const local_power_widths = if (prepared_power) |prepared|
+    const local_power_widths = if (power.copper) |prepared|
         try power_integrity.routedTrackRequiredWidthsPrepared(
             arena,
             placement,
@@ -694,7 +729,7 @@ fn checkImpl(
             prepared.zone_fills,
         )
     else
-        try power_integrity.routedTrackRequiredWidths(arena, placement, current_routed);
+        try power_integrity.routedTrackRequiredWidthsMemo(arena, placement, current_routed, power.fills);
     try checkTrackWidth(arena, &out, .{
         .placement = placement,
         .routed = routed,

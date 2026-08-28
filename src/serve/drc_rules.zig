@@ -33,6 +33,19 @@ pub const checkTopologyFilled = drc_compose.checkTopologyFilled;
 /// in its own chain (see `drc_compose.checkFilled`).
 pub const checkFilled = drc_compose.checkFilled;
 
+/// The same adapter for the GEOMETRY-only check, memoised. The serve layer
+/// re-checks one saved board over and over, and the geometry pass's one
+/// copper-pouring rule (the local-current track width) rasters every declared
+/// plane from scratch unless it is given a memo — `drc_compose.checkGeometry`
+/// is that check with the process fill memo wired in, and its findings are the
+/// findings `drc.check` returns.
+pub const checkGeometry = drc_compose.checkGeometry;
+
+/// What the process-wide copper-fill memo has done and is holding — the reuse
+/// tally `drc-dump` reports beside its wall times, so "this got faster" and
+/// "this reused more" are two separate, checkable claims.
+pub const fillMemoStats = drc_compose.fillMemoStats;
+
 const rules_ext = ".drc-rules.json";
 const kind_count = @typeInfo(drc.Kind).@"enum".field_names.len;
 

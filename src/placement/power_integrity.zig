@@ -345,6 +345,7 @@ fn buildSurfaces(
     routed: router.RouteResult,
     zones: []const pour.UserZone,
     base_edge: ?pour.EdgeField,
+    memo: ?pour.FillMemo,
 ) std.mem.Allocator.Error![]const Surface {
     const Meta = struct { net: []const u8, kind: SurfaceKind, physical_layer: u8, signal_layer: ?u8, spec: pour.LayerSpec };
     var metas: std.ArrayList(Meta) = .empty;
@@ -412,7 +413,7 @@ fn buildSurfaces(
         .kind = meta.kind,
         .physical_layer = meta.physical_layer,
         .signal_layer = meta.signal_layer,
-        .fill = try pour.computeShared(alloc, placement, copper, meta.spec, base_edge),
+        .fill = try pour.computeMemo(alloc, placement, copper, meta.spec, base_edge, memo),
     };
     return out;
 }
@@ -680,6 +681,21 @@ pub fn routedTrackRequiredWidths(
     placement: optimizer.Placement,
     routed: router.RouteResult,
 ) std.mem.Allocator.Error![]const ?f64 {
+    return routedTrackRequiredWidthsMemo(alloc, placement, routed, null);
+}
+
+/// `routedTrackRequiredWidths` with a per-fill memo for the plane surfaces it
+/// needs. Its TRUE inputs are the placement and the routed copper and nothing
+/// else — the zone list it passes `buildSurfaces` is empty and the shared edge
+/// field is null — so every surface here is an ordinary declared plane/pour fill
+/// of this board, keyed and reused exactly like any other. A null memo is the
+/// unmemoised spelling, byte for byte.
+pub fn routedTrackRequiredWidthsMemo(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    memo: ?pour.FillMemo,
+) std.mem.Allocator.Error![]const ?f64 {
     var needs_surfaces = false;
     for (placement.nets, 0..) |net, net_index| {
         const demand = demandFor(placement.rules.physical.rails, net.name);
@@ -692,7 +708,7 @@ pub fn routedTrackRequiredWidths(
         }
     }
     const surfaces = if (needs_surfaces)
-        try buildSurfaces(alloc, placement, routed, &.{}, null)
+        try buildSurfaces(alloc, placement, routed, &.{}, null, memo)
     else
         &.{};
     return routedTrackRequiredWidthsFromSurfaces(alloc, placement, routed, surfaces);
@@ -813,7 +829,7 @@ pub fn analyzeCopper(
     zones: []const pour.UserZone,
     base_edge: ?pour.EdgeField,
 ) std.mem.Allocator.Error!Analysis {
-    const surfaces = try buildSurfaces(alloc, placement, routed, zones, base_edge);
+    const surfaces = try buildSurfaces(alloc, placement, routed, zones, base_edge, null);
     var nets: std.ArrayList(Net) = .empty;
     for (placement.nets, 0..) |net, net_index| {
         const demand = demandFor(placement.rules.physical.rails, net.name);

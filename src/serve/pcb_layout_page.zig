@@ -12094,7 +12094,7 @@ fn mcpCopperViolations(
     const bare = drc_rules.apply(
         alloc,
         drc_rules.load(alloc, project_dir, name),
-        drc.check(alloc, solved.placement, routed, clearance) catch &.{},
+        drc_rules.checkGeometry(alloc, solved.placement, routed, clearance) catch &.{},
     );
     var combined: std.ArrayList(drc.Violation) = .empty;
     combined.appendSlice(alloc, filled) catch return filled;
