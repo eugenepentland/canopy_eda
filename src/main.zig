@@ -20,6 +20,7 @@ const query = @import("query.zig");
 const tool_cli = @import("tool_cli.zig");
 const bench_route = @import("bench_route.zig");
 const bench_page = @import("bench_page.zig");
+const drc_dump = @import("drc_dump.zig");
 const plugin_tokens = @import("serve/plugin_tokens.zig");
 const build_id = @import("build_id.zig");
 
@@ -287,6 +288,10 @@ fn dispatchQueryCommand(
     }
     if (std.mem.eql(u8, command, "bench-page")) {
         try bench_page.cmdBenchPage(allocator, args);
+        return true;
+    }
+    if (std.mem.eql(u8, command, "drc-dump")) {
+        try drc_dump.cmdDrcDump(allocator, args);
         return true;
     }
     return false;
@@ -697,6 +702,8 @@ test {
     _ = @import("placement/pad_exit.zig");
     _ = @import("placement/drc_compose.zig");
     _ = @import("placement/fill_cache.zig");
+    _ = @import("placement/content_key.zig");
+    _ = @import("drc_dump.zig");
     _ = @import("placement/bypass_intent.zig");
     _ = @import("placement/bypass_open.zig");
     _ = @import("placement/routed_copper.zig");

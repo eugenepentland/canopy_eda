@@ -71,7 +71,21 @@ pub fn zoneFills(
     copper: routed_copper.Copper,
     base: ?pour.EdgeField,
 ) std.mem.Allocator.Error![]const pour.Fill {
-    return fab.userZoneFills(arena, placement, copper, base);
+    return zoneFillsMemo(arena, placement, copper, base, null);
+}
+
+/// `zoneFills` through a caller's per-fill memo. The reporting seam passes one,
+/// so a zone whose own inputs did not change across an edit is borrowed rather
+/// than re-rastered — and so that this raster and the topology pass's raster of
+/// the SAME zone spec are computed once between them, not once each.
+pub fn zoneFillsMemo(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    copper: routed_copper.Copper,
+    base: ?pour.EdgeField,
+    memo: ?pour.FillMemo,
+) std.mem.Allocator.Error![]const pour.Fill {
+    return fab.userZoneFillsMemo(arena, placement, copper, base, memo);
 }
 
 /// Board-level fill state a caller may have already built for this exact board,

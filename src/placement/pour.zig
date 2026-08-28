@@ -42,6 +42,7 @@ const impedance = @import("impedance.zig");
 const rf_port_report = @import("rf_port_report.zig");
 const variable_width_copper = @import("variable_width_copper.zig");
 const path_copper = @import("path_copper.zig");
+const content_key = @import("content_key.zig");
 const numeric = @import("../numeric.zig");
 
 /// Which net a poured/plane layer carries: a declared `(plane IDX "NET")` name,
@@ -639,6 +640,167 @@ pub fn computeMasks(
     return fills;
 }
 
+/// A memo of individual fills, injected by a caller that has one. Deliberately
+/// a vtable rather than an import: `pour` is compiled into the client's wasm DRC
+/// engine, which has no OS, no threads and no process-wide store — it passes
+/// null and computes, exactly as before. The server side passes
+/// `fill_cache.sessionMemo`, whose borrows live until that session is released.
+///
+/// `get` BORROWS: the returned fill is owned by the memo and stays valid for the
+/// caller's whole pass. Nothing in a DRC verdict may point into it (the rule
+/// `fill_cache`'s header states for the whole-board memo applies unchanged).
+pub const FillMemo = struct {
+    ctx: *anyopaque,
+    get: *const fn (ctx: *anyopaque, k: content_key.Key) ?Fill,
+    /// Retain `fill` and answer with THE RETAINED COPY (null when it could not
+    /// be retained). The retained copy is what the caller must go on to use: a
+    /// freshly poured fill lives in a per-request arena, so a memo that handed
+    /// back the caller's own copy could not be referenced after the request.
+    put: *const fn (ctx: *anyopaque, k: content_key.Key, fill: Fill) ?Fill,
+};
+
+/// Bumped whenever a change to `computeFill` makes an OLD key describe a fill
+/// this build would no longer produce. A memo keyed on content is only as sound
+/// as the agreement that one key means one raster, and that agreement is between
+/// builds as well as between callers — a retained entry from a process that
+/// poured differently must not be answered. (The store is process-lifetime, so
+/// this guards against a stale key surviving inside one running server across a
+/// hot-reloaded design, not across binaries; it costs one byte to be right.)
+const fill_key_version: u8 = 1;
+
+/// The content key of ONE fill: everything `computeFill` reads to produce it,
+/// and nothing else.
+///
+/// It is computed by the SAME traversal that stamps the raster (`walkObstacles`
+/// / `markSeeds` under a digesting `Sink`), so the set of inputs it covers
+/// cannot drift from the set the raster consumes. What that buys, concretely:
+///
+///   * An INNER plane (`spec.track_layer == null`) never stamps a track, an arc
+///     or an RF path at all — only drilled pads and vias — so moving, adding or
+///     deleting a track cannot change its key, and every inner plane on the
+///     board is borrowed across that edit.
+///   * An OUTER face keys only the tracks/arcs/RF paths on ITS OWN layer, so an
+///     edit on layer 0 leaves every layer-1..n fill borrowable.
+///   * A CLIPPED fill (a hand-drawn zone) keys only the features whose stamp
+///     window reaches its clip box — the identical `foreignActiveBounds` cull
+///     the raster itself applies — so an edit elsewhere on the board leaves it
+///     borrowable even on its own layer.
+///   * Features are folded in by their RESOLVED effect (world shape + reach),
+///     not by their source fields, so a change that cannot move the raster
+///     (renaming a net to another with the same clearance, say) keys the same.
+///
+/// Everything the walk does not see is folded in explicitly below: the lattice,
+/// the guard/inset/clearance scalars, the minimum-width opening, the corner
+/// radius, whether contours are traced, the clip, and the seed-fallback flag.
+pub fn fillKey(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    copper: Copper,
+    spec: LayerSpec,
+    contours: bool,
+) std.mem.Allocator.Error!content_key.Key {
+    const lat = lattice(placement);
+    const rules = placement.rules;
+    const inset = rules.design.pourEdge();
+    const pc = baseGapFor(rules.design, spec);
+    const r_min = @max(0.1, @min(smallestPourGap(placement), inset));
+    var fp: content_key.Fingerprint = .{};
+    fp.tag(fill_key_version);
+    // The lattice and the scalars derived from it — the shape of the raster,
+    // before a single obstacle is stamped.
+    fp.put(f64, lat.r.minx);
+    fp.put(f64, lat.r.miny);
+    fp.put(f64, lat.r.w);
+    fp.put(f64, lat.r.h);
+    fp.put(f64, lat.pitch);
+    fp.put(usize, lat.nx);
+    fp.put(usize, lat.ny);
+    fp.put(bool, lat.coarsened);
+    const guard = isoGuardFor(lat.pitch, r_min);
+    fp.put(f64, guard);
+    fp.put(f64, inset);
+    fp.put(f64, pc);
+    fp.put(f64, effectiveMinimumWidth(placement, spec));
+    fp.put(f64, @max(0, rules.design.pour.corner_radius));
+    fp.put(bool, contours);
+    // `initMargin` reads the outline polygon (or the rect already folded in).
+    fp.put(?[]const [2]f64, placement.board_poly);
+    // `clipMargin` reads the drawn boundary; `markSeeds`' fallback reads the
+    // flag. `spec.stack` is deliberately absent — geometry never reads it (see
+    // `LayerSpec`), so two specs that differ only there pour the same copper and
+    // must share one entry.
+    fp.put([]const [2]f64, spec.clip);
+    fp.put(bool, spec.keep_unseeded);
+    if (lat.nx < 1 or lat.ny < 1) return fp.final();
+    const grid = Grid{
+        .minx = lat.r.minx,
+        .miny = lat.r.miny,
+        .pitch = lat.pitch,
+        .nx = lat.nx,
+        .ny = lat.ny,
+        .labels = &.{},
+        .margin = &.{},
+        .iso = guard,
+    };
+    const sink = Sink{ .g = grid, .fp = &fp };
+    const nets = try padNets(arena, placement);
+    try walkObstacles(arena, sink, placement, copper, spec, nets);
+    markSeeds(sink, placement, copper, spec, nets, &.{});
+    return fp.final();
+}
+
+/// `computeShared`, memoised per FILL. A hit borrows the exact raster a cold
+/// compute would produce; a miss pours it and retains it. `memo` null is
+/// `computeShared` unchanged, which is what the wasm engine and every
+/// router-internal caller pass.
+pub fn computeMemo(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    copper: Copper,
+    spec: LayerSpec,
+    base: ?EdgeField,
+    memo: ?FillMemo,
+) std.mem.Allocator.Error!Fill {
+    return computeFillMemo(arena, placement, copper, spec, .{ .base = base }, memo);
+}
+
+fn computeFillMemo(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    copper: Copper,
+    spec: LayerSpec,
+    opts: FillOpts,
+    memo: ?FillMemo,
+) std.mem.Allocator.Error!Fill {
+    const m = memo orelse return computeFill(arena, placement, copper, spec, opts);
+    const k = try fillKey(arena, placement, copper, spec, opts.contours);
+    if (m.get(m.ctx, k)) |hit| return hit;
+    const fresh = try computeFill(arena, placement, copper, spec, opts);
+    return m.put(m.ctx, k, fresh) orelse fresh;
+}
+
+/// Every obstacle the fill's margin field is lowered by, in ONE traversal —
+/// foreign copper, footprint keepouts, and the higher-priority pours this fill
+/// recedes from. `computeFill` drives it with a stamping sink and `fillKey`
+/// with a digesting one, which is what keeps a fill's content key and a fill's
+/// content from ever describing different input sets.
+fn walkObstacles(
+    arena: std.mem.Allocator,
+    sink: Sink,
+    placement: optimizer.Placement,
+    copper: Copper,
+    spec: LayerSpec,
+    nets: std.StringHashMapUnmanaged([]const u8),
+) std.mem.Allocator.Error!void {
+    try stampForeign(arena, sink, placement, copper, spec, nets);
+    try stampFootprintKeepouts(arena, sink, placement, spec);
+    // Knock this fill back from any higher-priority overlapping pour on the same
+    // layer (different net), so it leaves a clearance gap instead of shorting to
+    // the higher-ranked copper. No-op when `spec.higher` is empty (declared
+    // pours, the top-ranked pour, or any board that sets no priorities).
+    if (spec.higher.len > 0) stampHigherSink(sink, spec.higher, baseGapFor(placement.rules.design, spec));
+}
+
 fn computeFill(
     arena: std.mem.Allocator,
     placement: optimizer.Placement,
@@ -649,7 +811,6 @@ fn computeFill(
     const lat = lattice(placement);
     const r = lat.r;
     const rules = placement.rules;
-    const pc = baseGapFor(rules.design, spec);
     const inset = rules.design.pourEdge();
     const pitch = lat.pitch;
     const coarsened = lat.coarsened;
@@ -681,13 +842,7 @@ fn computeFill(
     if (spec.clip.len >= 3) clipMargin(grid, spec.clip);
 
     const nets = try padNets(arena, placement);
-    try stampForeign(arena, grid, placement, copper, spec, nets);
-    try stampFootprintKeepouts(arena, grid, placement, spec);
-    // Knock this fill back from any higher-priority overlapping pour on the same
-    // layer (different net), so it leaves a clearance gap instead of shorting to
-    // the higher-ranked copper. No-op when `spec.higher` is empty (declared
-    // pours, the top-ranked pour, or any board that sets no priorities).
-    if (spec.higher.len > 0) stampHigher(grid, spec.higher, pc);
+    try walkObstacles(arena, .{ .g = grid }, placement, copper, spec, nets);
     const min_width = effectiveMinimumWidth(placement, spec);
     const k = if (min_width > 0)
         openMinimumWidth(arena, grid, min_width / 2.0) catch return emptyFill(r, pitch, coarsened)
@@ -697,7 +852,7 @@ fn computeFill(
     };
     const kept = try arena.alloc(bool, k);
     @memset(kept, false);
-    markSeeds(grid, placement, copper, spec, nets, kept);
+    markSeeds(.{ .g = grid }, placement, copper, spec, nets, kept);
     // A hand-drawn pour with no same-net copper inside would otherwise drop
     // every component as an unseeded orphan and render nothing; keep them all so
     // the user's polygon fills (its islands are reported honestly, same as any
@@ -1157,12 +1312,13 @@ fn padOnLayer(part: optimizer.Part, pad: geometry.Pad, spec: LayerSpec) bool {
 /// `distance − reach` so the field's zero contour is the true clearance line.
 fn stampForeign(
     arena: std.mem.Allocator,
-    g: Grid,
+    sink: Sink,
     placement: optimizer.Placement,
     copper: Copper,
     spec: LayerSpec,
     nets: std.StringHashMapUnmanaged([]const u8),
 ) std.mem.Allocator.Error!void {
+    const g = sink.g;
     const inner = spec.side == null;
     const base = baseGapFor(placement.rules.design, spec);
     const active = foreignActiveBounds(g, spec.clip);
@@ -1175,11 +1331,11 @@ fn stampForeign(
             const c = optimizer.worldPadCenter(&p, pad.x, pad.y);
             if (inner) {
                 if (pad.thru and !pad.npth)
-                    stampPadWithin(g, active, p, pad, reach)
+                    stampPadWithin(sink, active, p, pad, reach)
                 else if (pad.drill > 0)
-                    stampDiscWithin(g, active, c[0], c[1], pad.drill / 2 + reach);
+                    stampDiscWithin(sink, active, c[0], c[1], pad.drill / 2 + reach);
             } else {
-                stampPadWithin(g, active, p, pad, reach);
+                stampPadWithin(sink, active, p, pad, reach);
             }
         }
     }
@@ -1191,7 +1347,7 @@ fn stampForeign(
             if (nativeArcOwnsTrack(physical_arcs, t)) continue;
             if (planeCarries(spec.net, netName(placement, t.net))) continue;
             const reach = trackPourStampClearance(placement, t, spec.net, base, g.iso);
-            stampSegWithin(g, active, .{ t.x1, t.y1 }, .{ t.x2, t.y2 }, t.width / 2 + reach);
+            stampSegWithin(sink, active, .{ t.x1, t.y1 }, .{ t.x2, t.y2 }, t.width / 2 + reach);
         }
         for (physical_arcs) |arc| {
             if (arc.layer != tl) continue;
@@ -1206,7 +1362,7 @@ fn stampForeign(
                 .net = arc.net,
             };
             const reach = trackPourStampClearance(placement, probe, spec.net, base, g.iso);
-            stampArcWithin(g, active, arc, arc.width / 2 + reach);
+            stampArcWithin(sink, active, arc, arc.width / 2 + reach);
         }
         for (copper.rf_paths) |path| {
             if (!path.success or path.physical.gate_removed) continue;
@@ -1223,14 +1379,14 @@ fn stampForeign(
                     .net = path.net,
                 };
                 const reach = trackPourStampClearance(placement, probe, spec.net, base, g.iso);
-                stampPolygonWithin(g, active, piece.poly, reach);
+                stampPolygonWithin(sink, active, piece.poly, reach);
             }
         }
     }
     for (copper.vias) |v| {
         if (planeCarries(spec.net, netName(placement, v.net))) continue;
         const reach = viaPlaneClearance(placement, v, spec.net, base);
-        stampDiscWithin(g, active, v.x, v.y, v.dia / 2 + reach);
+        stampDiscWithin(sink, active, v.x, v.y, v.dia / 2 + reach);
     }
 }
 
@@ -1277,16 +1433,18 @@ fn stampWindowActive(active: ?[4]f64, x0: f64, y0: f64, x1: f64, y1: f64) bool {
     return x1 >= box[0] and y1 >= box[1] and x0 <= box[2] and y0 <= box[3];
 }
 
-fn stampDiscWithin(g: Grid, active: ?[4]f64, cx: f64, cy: f64, rad: f64) void {
-    const win = rad + window_cells * g.pitch;
+fn stampDiscWithin(sink: Sink, active: ?[4]f64, cx: f64, cy: f64, rad: f64) void {
+    const win = rad + window_cells * sink.g.pitch;
     if (!stampWindowActive(active, cx - win, cy - win, cx + win, cy + win)) return;
-    stampDisc(g, cx, cy, rad);
+    if (sink.fp) |fp| return sink.scalars(fp, 1, &.{ cx, cy, rad });
+    stampDisc(sink.g, cx, cy, rad);
 }
 
-fn stampSegWithin(g: Grid, active: ?[4]f64, a: [2]f64, b: [2]f64, rad: f64) void {
-    const win = rad + window_cells * g.pitch;
+fn stampSegWithin(sink: Sink, active: ?[4]f64, a: [2]f64, b: [2]f64, rad: f64) void {
+    const win = rad + window_cells * sink.g.pitch;
     if (!stampWindowActive(active, @min(a[0], b[0]) - win, @min(a[1], b[1]) - win, @max(a[0], b[0]) + win, @max(a[1], b[1]) + win)) return;
-    stampSeg(g, a[0], a[1], b[0], b[1], rad);
+    if (sink.fp) |fp| return sink.scalars(fp, 2, &.{ a[0], a[1], b[0], b[1], rad });
+    stampSeg(sink.g, a[0], a[1], b[0], b[1], rad);
 }
 
 fn arcAngleOnSweep(circle: outline.ArcCircle, angle: f64) bool {
@@ -1333,15 +1491,17 @@ fn pointArcDistance(arc: router.Arc, circle: outline.ArcCircle, point: [2]f64) f
 /// Lower the margin by the exact directed circular-arc envelope. The stamp
 /// uses the same recovered three-point circle/sweep as Gerber G02/G03 output;
 /// an undefined arc follows the writer's p1→p2 straight fallback.
-fn stampArcWithin(g: Grid, active: ?[4]f64, arc: router.Arc, rad: f64) void {
+fn stampArcWithin(sink: Sink, active: ?[4]f64, arc: router.Arc, rad: f64) void {
     if (!(rad > 0)) return;
+    const g = sink.g;
     const circle = routedArcCircle(arc) orelse {
-        stampSegWithin(g, active, arc.p1, arc.p2, rad);
+        stampSegWithin(sink, active, arc.p1, arc.p2, rad);
         return;
     };
     const bounds = arcBounds(arc, circle);
     const win = rad + window_cells * g.pitch;
     if (!stampWindowActive(active, bounds[0] - win, bounds[1] - win, bounds[2] + win, bounds[3] + win)) return;
+    if (sink.fp) |fp| return sink.scalars(fp, 3, &.{ arc.p1[0], arc.p1[1], arc.pm[0], arc.pm[1], arc.p2[0], arc.p2[1], rad });
     const lo = cellRange(g, bounds[0] - win, bounds[1] - win);
     const hi = cellRange(g, bounds[2] + win, bounds[3] + win);
     var j = lo[1];
@@ -1365,7 +1525,7 @@ fn stampArcWithin(g: Grid, active: ?[4]f64, arc: router.Arc, rad: f64) void {
 /// keepouts.
 fn stampFootprintKeepouts(
     arena: std.mem.Allocator,
-    g: Grid,
+    sink: Sink,
     placement: optimizer.Placement,
     spec: LayerSpec,
 ) std.mem.Allocator.Error!void {
@@ -1380,7 +1540,7 @@ fn stampFootprintKeepouts(
             const world = try arena.alloc([2]f64, keepout.poly.len);
             for (keepout.poly, world) |local, *out| out.* = optimizer.worldPadCenter(&p, local[0], local[1]);
             const one = [_][]const [2]f64{world};
-            stampHigher(g, &one, 0);
+            stampHigherSink(sink, &one, 0);
         }
     }
 }
@@ -1551,35 +1711,36 @@ pub fn viaPlaneClearance(placement: optimizer.Placement, via: router.Via, plane_
 
 /// Mark the component under each same-net SEED (a carried pad/via present on
 /// the layer) KEPT. A component with no seed is an orphan island — dropped.
-fn markSeeds(g: Grid, placement: optimizer.Placement, copper: Copper, spec: LayerSpec, nets: std.StringHashMapUnmanaged([]const u8), kept: []bool) void {
+fn markSeeds(sink: Sink, placement: optimizer.Placement, copper: Copper, spec: LayerSpec, nets: std.StringHashMapUnmanaged([]const u8), kept: []bool) void {
     for (placement.parts) |p| {
         for (p.pads) |pad| {
             if (!padOnLayer(p, pad, spec)) continue;
             if (!planeCarries(spec.net, netOfPad(nets, p.ref_des, pad.number))) continue;
-            seedPad(g, p, pad, kept);
+            seedPad(sink, p, pad, kept);
         }
     }
     for (copper.vias) |v| {
         if (!planeCarries(spec.net, netName(placement, v.net))) continue;
-        seedAt(g, v.x, v.y, kept);
+        seedAt(sink, v.x, v.y, kept);
     }
 }
 
 /// Seed the pour from a same-net pad by sampling its centre and four rotated
 /// edge-midpoints (so a pad whose centre grazes an obstacle/edge cell still
 /// keeps the component its copper actually reaches).
-fn seedPad(g: Grid, p: optimizer.Part, pad: geometry.Pad, kept: []bool) void {
+fn seedPad(sink: Sink, p: optimizer.Part, pad: geometry.Pad, kept: []bool) void {
     const hw = pad.w * 0.4;
     const hh = pad.h * 0.4;
     const local = [_][2]f64{ .{ pad.x, pad.y }, .{ pad.x + hw, pad.y }, .{ pad.x - hw, pad.y }, .{ pad.x, pad.y + hh }, .{ pad.x, pad.y - hh } };
     for (local) |lp| {
         const c = optimizer.worldPadCenter(&p, lp[0], lp[1]);
-        seedAt(g, c[0], c[1], kept);
+        seedAt(sink, c[0], c[1], kept);
     }
 }
 
-fn seedAt(g: Grid, x: f64, y: f64, kept: []bool) void {
-    const lbl = labelAtWorld(g, x, y);
+fn seedAt(sink: Sink, x: f64, y: f64, kept: []bool) void {
+    if (sink.fp) |fp| return sink.scalars(fp, 8, &.{ x, y });
+    const lbl = labelAtWorld(sink.g, x, y);
     if (lbl >= 0) kept[@intCast(lbl)] = true;
 }
 
@@ -1680,16 +1841,24 @@ fn segDelta(a: [2]f64, dir: [2]f64, len2: f64, p: [2]f64) [2]f64 {
 /// slack is the full window radius, so its box early-out stays exact everywhere
 /// the field feeds the iso-line interpolation.
 pub fn stampPad(g: Grid, p: optimizer.Part, pad: geometry.Pad, reach: f64) void {
-    stampPadWithin(g, null, p, pad, reach);
+    stampPadWithin(.{ .g = g }, null, p, pad, reach);
 }
 
-fn stampPadWithin(g: Grid, active: ?[4]f64, p: optimizer.Part, pad: geometry.Pad, reach: f64) void {
+fn stampPadWithin(sink: Sink, active: ?[4]f64, p: optimizer.Part, pad: geometry.Pad, reach: f64) void {
     var arena_buf: [4096]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
     const sh = pad_shape.worldShape(fba.allocator(), p, pad) catch return;
-    const win = reach + window_cells * g.pitch;
+    const win = reach + window_cells * sink.g.pitch;
     if (!stampWindowActive(active, sh.x0 - win, sh.y0 - win, sh.x1 + win, sh.y1 + win)) return;
-    stampPadShape(g, sh, reach);
+    if (sink.fp) |fp| {
+        // The world SHAPE, not the part/pad pair: it is the only thing
+        // `stampPadShape` reads, so two boards whose pads differ only in a field
+        // the shape does not express carve identically and must key identically.
+        sink.scalars(fp, 4, &.{ sh.x0, sh.y0, sh.x1, sh.y1, reach });
+        for (sh.poly) |pt| sink.scalars(fp, 5, &pt);
+        return;
+    }
+    stampPadShape(sink.g, sh, reach);
 }
 
 /// Lower a signed-margin field around one already-world-space pad shape.
@@ -1729,13 +1898,50 @@ pub fn stampPolygon(g: Grid, poly: []const [2]f64, clearance: f64) void {
     stampHigher(g, &one, clearance);
 }
 
-fn stampPolygonWithin(g: Grid, active: ?[4]f64, poly: []const [2]f64, clearance: f64) void {
+fn stampPolygonWithin(sink: Sink, active: ?[4]f64, poly: []const [2]f64, clearance: f64) void {
     if (poly.len < 3) return;
     const bounds = polyBounds(poly);
-    const win = clearance + window_cells * g.pitch;
+    const win = clearance + window_cells * sink.g.pitch;
     if (!stampWindowActive(active, bounds[0] - win, bounds[1] - win, bounds[2] + win, bounds[3] + win)) return;
-    stampPolygon(g, poly, clearance);
+    if (sink.fp) |fp| return sink.polygon(fp, 6, poly, clearance);
+    stampPolygon(sink.g, poly, clearance);
 }
+
+/// `stampHigher` through a sink: the higher-priority pour boundaries and the
+/// footprint keepouts take the same path in both modes.
+fn stampHigherSink(sink: Sink, polys: []const []const [2]f64, clearance: f64) void {
+    if (sink.fp) |fp| {
+        for (polys) |poly| sink.polygon(fp, 7, poly, clearance);
+        return;
+    }
+    stampHigher(sink.g, polys, clearance);
+}
+
+/// Where `computeFill`'s obstacle walk writes. In the ordinary mode it lowers
+/// the margin field of `g`; with `fp` set it folds the EXACT same feature —
+/// after the EXACT same window culls, with the EXACT same resolved clearance —
+/// into a content fingerprint instead, and `g` carries only the lattice the
+/// culls read (its `labels`/`margin` are empty and never touched).
+///
+/// One walk, two modes, deliberately: a fill memo whose key is computed by a
+/// SECOND traversal is a memo that goes stale the day someone stamps a new kind
+/// of feature and forgets the copy. Here a new stamp that is not routed through
+/// this sink cannot reach the raster at all.
+const Sink = struct {
+    g: Grid,
+    fp: ?*content_key.Fingerprint = null,
+
+    fn scalars(_: Sink, fp: *content_key.Fingerprint, marker: u8, values: []const f64) void {
+        fp.tag(marker);
+        fp.add(std.mem.sliceAsBytes(values));
+    }
+
+    fn polygon(self: Sink, fp: *content_key.Fingerprint, marker: u8, poly: []const [2]f64, clearance: f64) void {
+        self.scalars(fp, marker, &.{clearance});
+        fp.put(usize, poly.len);
+        fp.add(std.mem.sliceAsBytes(poly));
+    }
+};
 
 /// Clamp world (x,y) to a grid cell index (saturating at 0 — the callers clamp
 /// the high end against nx/ny in their loops).
@@ -3615,7 +3821,7 @@ test "native arc stamp follows the directed circle instead of its chord" {
         .width = 0.2,
         .net = 1,
     };
-    stampArcWithin(g, null, arc, 0.25);
+    stampArcWithin(.{ .g = g }, null, arc, 0.25);
 
     const curved = cellRange(g, arc.pm[0], arc.pm[1]);
     const chord = cellRange(g, 6, 6);
