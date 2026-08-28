@@ -140,3 +140,9 @@ log is not a substitute for reporting an active blocker to the user.
 - **friction:** The exact-candidate `prepare-release.sh` run passed Guardian, all 1,247 tests, and the ReleaseSafe build, then rejected an editor-only change on one noisy Canvas zoom sample (33.6 ms median versus 30 ms). An immediate isolated rerun against the same stripped binary passed at 25 ms median and 34 ms worst, costing one failed release attempt and about three minutes.
 - **idea:** Let the release script retry only the deterministic editor benchmark once against the preserved exact candidate before discarding it, while still requiring both the retry and the other release evidence to be green. This would absorb transient host contention without rerunning compilation and the full suite.
 - **status:** open
+
+## 2026-08-28 · claude · DRC hot-path speedups (W0)
+- **friction:** Proving that a pure-speedup DRC change emits an identical violation multiset needed a temporary `drc-dump` subcommand plus two extra full binary builds: nothing shipped dumps the violation set. `netlisp check` is schematic ERC, `bench-page` reports only three aggregate DRC counts (total/errors/net_open), and `describe_pcb_layout` summarises rather than enumerating. Aggregate counts cannot distinguish "same number of findings" from "same findings".
+- **idea:** Add a read-only `netlisp drc-dump [--project-dir <d>] <design>…` (or a `--dump-drc` flag on `bench-page`) that prints every violation's kind, coordinates, gap, clearance, severity, layer and parties, sorted deterministically. That single command turns any DRC refactor's correctness claim into one diff, and would have saved two builds and roughly six calls here.
+- **workaround:** Added the subcommand as an uncommitted patch, built base and patched binaries with it, diffed the sorted dumps over eight corpus boards, then removed it before committing.
+- **status:** open

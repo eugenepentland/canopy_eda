@@ -85,14 +85,108 @@ pub fn apply(alloc: std.mem.Allocator, rules: Rules, list: []const drc.Violation
     return out.items;
 }
 
+/// One sidecar read, in the two shapes its two callers need. `rules` is what
+/// `load` hands back (parsed as far as the parser got, matching the historical
+/// partial-parse fallback); `parsed` and `readable` are what `loadRelease`
+/// turns into its `complete` verdict. An absent file is readable, parsed, and
+/// all-default — exactly the interactive fallback.
+const Sidecar = struct {
+    rules: Rules = .{},
+    parsed: bool = true,
+    readable: bool = true,
+};
+
+/// Process-wide memo of the parsed sidecar, keyed by path and validated
+/// against the file's mtime+size on EVERY call.
+///
+/// The sidecar was re-read and re-parsed inside every `checkFiltered*` — dozens
+/// of times per page render, all for a ~30-byte file that almost never exists.
+/// `Rules` is a fixed-size table of optional enums that borrows nothing from
+/// the read buffer, so an entry is a plain value copy; only the key path is
+/// owned (page allocator, like `placement/fill_cache.zig` — every caller's
+/// allocator is a per-request arena that outlives nothing).
+///
+/// A stat is still paid per call, which is what makes an edited or deleted
+/// sidecar visible immediately: a changed mtime or size misses, and a stat
+/// failure of any kind falls through to the original uncached read so the
+/// unusual paths keep their exact historical behaviour.
+const RulesCache = struct {
+    const Entry = struct {
+        path: []const u8,
+        mtime: i128,
+        size: u64,
+        sidecar: Sidecar,
+    };
+    /// Distinct designs whose policy is retained at once. A sidecar is tiny and
+    /// the key is one path, so this is bounded for tidiness, not for memory.
+    const max_entries: usize = 64;
+
+    mutex: infra_fs.Mutex = .{},
+    backing: std.mem.Allocator = std.heap.page_allocator,
+    entries: std.ArrayList(Entry) = .empty,
+
+    fn get(self: *RulesCache, path: []const u8, mtime: i128, size: u64) ?Sidecar {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.entries.items) |e| {
+            if (e.mtime != mtime or e.size != size or !std.mem.eql(u8, e.path, path)) continue;
+            return e.sidecar;
+        }
+        return null;
+    }
+
+    fn put(self: *RulesCache, path: []const u8, mtime: i128, size: u64, sidecar: Sidecar) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.entries.items) |*e| {
+            if (!std.mem.eql(u8, e.path, path)) continue;
+            e.mtime = mtime;
+            e.size = size;
+            e.sidecar = sidecar;
+            return;
+        }
+        // A memo failure is never a policy failure: the caller already holds
+        // the freshly parsed rules it is about to return.
+        const owned = self.backing.dupe(u8, path) catch return;
+        self.entries.append(self.backing, .{ .path = owned, .mtime = mtime, .size = size, .sidecar = sidecar }) catch {
+            self.backing.free(owned);
+            return;
+        };
+        if (self.entries.items.len > max_entries) {
+            const evicted = self.entries.orderedRemove(0);
+            self.backing.free(evicted.path);
+        }
+    }
+};
+
+var rules_cache: RulesCache = .{};
+
+/// The uncached read+parse. Kept whole so the cached path and the fall-through
+/// path can never disagree about what a malformed or unreadable file means.
+fn readSidecar(alloc: std.mem.Allocator, path: []const u8) Sidecar {
+    const data = infra_fs.cwd().readFileAlloc(alloc, path, 1 << 16) catch |err| {
+        return .{ .readable = err == error.FileNotFound };
+    };
+    var out = Sidecar{};
+    out.parsed = parseInto(&out.rules, alloc, data);
+    return out;
+}
+
+/// The design's sidecar, from the memo when its mtime+size still match.
+fn sidecarOf(alloc: std.mem.Allocator, path: []const u8) Sidecar {
+    const st = infra_fs.cwd().statFile(path) catch return readSidecar(alloc, path);
+    const mtime = st.mtime.nanoseconds;
+    if (rules_cache.get(path, mtime, st.size)) |hit| return hit;
+    const fresh = readSidecar(alloc, path);
+    rules_cache.put(path, mtime, st.size, fresh);
+    return fresh;
+}
+
 /// Load the design's override sidecar (default rules when absent/malformed).
 pub fn load(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) Rules {
-    var rules = Rules{};
-    const path = paths.designSiblingPath(alloc, project_dir, name, rules_ext) catch return rules;
+    const path = paths.designSiblingPath(alloc, project_dir, name, rules_ext) catch return .{};
     defer alloc.free(path);
-    const data = infra_fs.cwd().readFileAlloc(alloc, path, 1 << 16) catch return rules;
-    _ = parseInto(&rules, alloc, data);
-    return rules;
+    return sidecarOf(alloc, path).rules;
 }
 
 const ReleaseRules = struct { rules: Rules = .{}, complete: bool = true };
@@ -103,12 +197,11 @@ const ReleaseRules = struct { rules: Rules = .{}, complete: bool = true };
 fn loadRelease(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ReleaseRules {
     const path = paths.designSiblingPath(alloc, project_dir, name, rules_ext) catch return .{ .complete = false };
     defer alloc.free(path);
-    const data = infra_fs.cwd().readFileAlloc(alloc, path, 1 << 16) catch |err| {
-        return .{ .complete = err == error.FileNotFound };
-    };
-    var rules = Rules{};
-    if (!parseInto(&rules, alloc, data)) return .{ .complete = false };
-    return .{ .rules = rules };
+    const s = sidecarOf(alloc, path);
+    // A partial parse is discarded here (unlike `load`): manufacturing must not
+    // run on half a policy file.
+    if (!s.readable or !s.parsed) return .{ .complete = false };
+    return .{ .rules = s.rules };
 }
 
 /// Run DRC and apply the design's overrides in one step — the wrapper every
@@ -429,6 +522,39 @@ test "rules apply: ignore drops, warn retags, unset kinds keep built-in severity
     // Bad action values fail the parse; unknown kinds are skipped.
     try std.testing.expect(!parseInto(&rules, alloc, "{\"silk_over_pad\":\"nope\"}"));
     try std.testing.expect(parseInto(&rules, alloc, "{\"not_a_kind\":\"err\"}"));
+}
+
+// spec: Web Server - The per-design DRC rule sidecar is parsed once per file state, and an edited or deleted sidecar is honoured on the very next check
+test "rules sidecar memo re-reads an edited or deleted policy file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "src", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/demo.sexp", .data = "(design demo)" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/demo.drc-rules.json", .data = "{\"silk_over_pad\":\"ignore\"}" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const alloc = arena_inst.allocator();
+
+    // First read parses; the second is the memo, and must answer the same.
+    try std.testing.expectEqual(Action.ignore, load(alloc, root, "demo").ov[@backingInt(drc.Kind.silk_over_pad)].?);
+    try std.testing.expectEqual(Action.ignore, load(alloc, root, "demo").ov[@backingInt(drc.Kind.silk_over_pad)].?);
+
+    // An edit is visible on the very next call — the entry is validated against
+    // the file, not trusted because it exists.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/demo.drc-rules.json", .data = "{\"hole_hole\":\"warn\",\"track_pad\":\"warn\"}" });
+    const edited = load(alloc, root, "demo");
+    try std.testing.expectEqual(Action.warn, edited.ov[@backingInt(drc.Kind.hole_hole)].?);
+    try std.testing.expectEqual(@as(?Action, null), edited.ov[@backingInt(drc.Kind.silk_over_pad)]);
+
+    // Deleting the sidecar returns the board to the built-in severities, and
+    // the release loader still calls an absent optional file complete.
+    try tmp.dir.deleteFile(std.testing.io, "src/demo.drc-rules.json");
+    try std.testing.expect(load(alloc, root, "demo").isDefault());
+    const release = loadRelease(alloc, root, "demo");
+    try std.testing.expect(release.complete and release.rules.isDefault());
 }
 
 test "rules sidecar JSON round-trips and the kinds table carries defaults + overrides" {
