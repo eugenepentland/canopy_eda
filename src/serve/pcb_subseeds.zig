@@ -20,6 +20,7 @@ const clock = @import("../infra/clock.zig");
 const serve_root = @import("../serve.zig");
 const modules = @import("modules.zig");
 const pcb = @import("pcb_layout_page.zig");
+const layout_score = @import("../layout_score.zig");
 const sidecar_json = @import("layout_sidecar_json.zig");
 const saved_zone = @import("saved_zone.zig");
 
@@ -374,7 +375,9 @@ pub fn saveSubcircuitLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Re
     };
     const net_map = try captureNetMap(req.arena, sub.name, parent_placement, target_placement);
     const routes = try captureRoutes(req.arena, sub.name, pcb.parseSavedRoutes(req.arena, root.object.get("routes")), captured.transform, &net_map);
-    const checked = try pcb.scoreSavedLayout(ctx, req, target_name, target_slug, captured.parts);
+    // No stage sink: this path is the module-layout capture, not the editor's
+    // autosave, so it has no `evt:"stages"` line to contribute phases to.
+    const checked = try layout_score.scoreSavedLayout(ctx, req, target_name, target_slug, captured.parts, null);
     const entry = pcb.SavedLayout{
         .name = layout_name,
         .kind = pcb.kind_manual,

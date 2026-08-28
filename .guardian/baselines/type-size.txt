@@ -86,6 +86,7 @@
 12 src/review.zig|ReviewDoc
 10 src/review.zig|SectionReport
 14 src/review.zig|Summary
+8 src/serve.zig|ServerState
 10 src/serve/digikey.zig|Product
 12 src/serve/library.zig|LibraryRow
 14 src/serve/mcp_tools.zig|DesignSummary

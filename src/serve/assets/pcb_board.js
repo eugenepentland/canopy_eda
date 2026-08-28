@@ -4389,6 +4389,85 @@ window.addEventListener("keydown",function(ev){if(!(ev.ctrlKey||ev.metaKey)||kbT
  if(k==="z"&&!ev.shiftKey){ev.preventDefault();doUndo();}
  else if((k==="z"&&ev.shiftKey)||k==="y"){ev.preventDefault();doRedo();}},true);
 undoBtns();
+// ── Interaction log (autosave latency diagnosis) ────────────────────────
+// A bounded buffer of structured editor events POSTed to /api/client-log/:name,
+// where the server stamps each one with its build id and appends it to the daily
+// interactions JSONL next to its own request/stage timings. It answers "which
+// part of a save was slow" from the browser side: queue wait, request size,
+// round trip, and the server's self-reported handler time. Content is never
+// logged — only sizes, counts and durations.
+// EVERY entry point swallows its own errors: a logger fault must never reach an
+// editor code path, so a broken event is simply dropped.
+var ILOG_CAP=500,    // events held before the oldest is dropped (dropped ones are counted)
+    ILOG_BATCH=200,  // server's per-POST event cap
+    ILOG_EAGER=25,   // flush at once once this many are queued
+    ILOG_MS=3000;    // otherwise flush every 3 s while non-empty
+// The whole logger is inert on the measured profiles: the browser perf
+// harnesses (scripts/pcb_editor_perf, scripts/ui_browser_perf) fail a run on
+// ANY mutating request they do not expect, and the Node viewer bench parses its
+// own stdout as JSON. None of them has a user whose session is worth logging.
+var ILOG_OFF=FBENCH||!!(window.navigator&&(navigator.webdriver||navigator.userAgent==="bench"));
+var ilogBuf=[],ilogPend=null,ilogDropped=0,ilogInFlight=false,ilogEnq=[];
+function ilog(evt,fields){if(ILOG_OFF)return;try{
+ var e={t:Date.now(),evt:evt},k;
+ // Scalars only, and no key at all for an absent measurement — the server
+ // copies remaining fields through verbatim.
+ if(fields)for(k in fields){if(fields[k]!==undefined&&fields[k]!==null)e[k]=fields[k];}
+ if(ilogBuf.length>=ILOG_CAP){ilogBuf.shift();ilogDropped++;}
+ ilogBuf.push(e);
+ try{console.debug("[ilog]",evt,fields||{});}catch(ignore){}
+ if(ilogBuf.length>=ILOG_EAGER)ilogFlush(false);}catch(ignore){}}
+// beacon=true is the page-hide path: sendBeacon first (it outlives the page),
+// falling back to a keepalive fetch. Ordinary flushes keep at most ONE request
+// in flight; a batch that fails is retried exactly once and then dropped, its
+// events counted into the next log.drop.
+function ilogFlush(beacon){if(ILOG_OFF)return;try{
+ if(ilogDropped>0){var n=ilogDropped;ilogDropped=0;ilogBuf.push({t:Date.now(),evt:"log.drop",n:n});}
+ if(ilogInFlight&&!beacon)return;
+ var retry=!!ilogPend,send=retry?ilogPend:[];ilogPend=null;
+ if(!retry||beacon)send=send.concat(ilogBuf.splice(0,ILOG_BATCH-send.length));
+ if(!send.length)return;
+ var url="/api/client-log/"+encodeURIComponent(PCB.name),
+     body=JSON.stringify({page_build:PCB.build_id||"unknown",events:send});
+ if(beacon&&window.navigator&&navigator.sendBeacon){
+  try{if(navigator.sendBeacon(url,new Blob([body],{type:"application/json"})))return;}catch(ignore){}}
+ ilogInFlight=true;
+ fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:body,keepalive:true})
+  .then(function(){ilogInFlight=false;})
+  .catch(function(){ilogInFlight=false;if(retry)ilogDropped+=send.length;else ilogPend=send;});}
+ catch(ignore){ilogInFlight=false;}}
+// Save/DRC instrumentation state. Saves are serialized by saveQueue, so one
+// in-flight record suffices; ilogEnq carries each queued save's enqueue time so
+// persistLayoutNow can report how long it waited behind that queue.
+var ilogSave=null,ilogDrcTrig="manual",ilogWasmT0=0;
+function ilogSaveEnq(){try{if(ilogEnq.length>32)ilogEnq.shift();ilogEnq.push(Date.now());}catch(ignore){}}
+function ilogSaveWait(){try{return ilogEnq.length?(Date.now()-ilogEnq.shift()):0;}catch(ignore){return 0;}}
+function ilogServerMs(r){try{var h=r&&r.headers&&r.headers.get("X-Netlisp-Server-Ms"),v=h?parseFloat(h):NaN;
+ return isFinite(v)?v:undefined;}catch(ignore){return undefined;}}
+// Response headers are in hand the moment the fetch promise settles, which is
+// the honest fetch_ms boundary — the body read/parse follows it.
+function ilogSaveRes(r){try{if(!ilogSave)return;ilogSave.fetch_ms=Date.now()-ilogSave.t0;
+ ilogSave.status=r&&r.status;ilogSave.server_ms=ilogServerMs(r);}catch(ignore){}}
+function ilogSaveEnd(result){try{var s=ilogSave;ilogSave=null;
+ ilog("save.end",{result:result,status:s&&s.status,rev:PCB.rev||0,server_ms:s&&s.server_ms,
+  fetch_ms:s?(s.fetch_ms==null?Date.now()-s.t0:s.fetch_ms):undefined});}catch(ignore){}}
+// scheduleAutosave runs on EVERY markDirty, so an unnamed layout or a staged
+// part would otherwise write one gate line per edit. One line per reason per
+// second keeps the repetition visible (an autosave deferred for 30 s of dragging
+// still shows ~30 lines) without turning the log into an edit trace.
+var ilogGateAt={};
+function ilogGate(why){if(!why)return;var now=Date.now();
+ if(ilogGateAt[why]&&now-ilogGateAt[why]<1000)return;
+ ilogGateAt[why]=now;ilog("autosave.gate",{why:why});}
+function ilogDrcBegin(){var d={t0:Date.now(),done:false};
+ try{ilog("drc.server.start",{trigger:ilogDrcTrig});}catch(ignore){}ilogDrcTrig="manual";return d;}
+function ilogDrcEnd(d,r,seq){try{if(!d||d.done)return;d.done=true;
+ ilog("drc.server.end",{fetch_ms:Date.now()-d.t0,server_ms:ilogServerMs(r),
+  status:r&&r.status,superseded:seq!==drcSeq});}catch(ignore){}}
+if(!ILOG_OFF){setInterval(function(){ilogFlush(false);},ILOG_MS);
+ window.addEventListener("pagehide",function(){ilogFlush(true);});
+ document.addEventListener("visibilitychange",function(){if(document.visibilityState==="hidden")ilogFlush(true);});
+ ilog("page.load",{design:PCB.name,layout:curLayout||PCB.shown_layout||"",rev:PCB.rev||0,build_id:PCB.build_id||"unknown"});}
 // ── Unsaved-work protection ─────────────────────────────────────────────
 // A dirty flag tracks edits since the last successful Save/Update. It arms a
 // beforeunload prompt, a quick localStorage crash draft, and a server autosave
@@ -4400,7 +4479,11 @@ var pcbDirty=false,draftTimer=null,draftIdle=null,autosaveTimer=null,dirtyGenera
 var autosaveQueued=false,saveQueue=Promise.resolve();
 var autosaveRetryMs=2000;
 function autosaveName(){return curLayout;}
-function markDirty(){if(RO)return;pcbDirty=true;dirtyGeneration++;scheduleDraft();scheduleAutosave();}
+// One `dirty` line per dirty BURST (the first edit after a clean/save), never
+// one per pointer move: the burst is what a later save has to carry.
+function markDirty(){if(RO)return;var wasDirty=pcbDirty;pcbDirty=true;dirtyGeneration++;
+ if(!wasDirty)ilog("dirty",{gen:dirtyGeneration});
+ scheduleDraft();scheduleAutosave();}
 function clearDirty(){pcbDirty=false;
  if(draftTimer){clearTimeout(draftTimer);draftTimer=null;}
  if(draftIdle){if(window.cancelIdleCallback)window.cancelIdleCallback(draftIdle);else clearTimeout(draftIdle);draftIdle=null;}
@@ -4420,23 +4503,29 @@ function scheduleDraft(ms){if(RO)return;if(draftTimer)clearTimeout(draftTimer);
  draftTimer=setTimeout(function(){draftTimer=null;
   if(draftGestureLive()){scheduleDraft(500);return;}
   saveDraft();},ms||1000);}
-function scheduleAutosave(ms){if(RO||!autosaveName())return;
+function scheduleAutosave(ms){if(RO)return;if(!autosaveName()){ilogGate("no-name");return;}
  // Unplaced parts = poses the SERVER staged, not ones the user authored. The
  // idle autosave must never write them into the saved row; place them (any
  // move counts) or Save/Update explicitly to accept the staging.
  if(anyUnplaced()){var m=document.getElementById("pcb-savemsg");
-  if(m)m.textContent="autosave paused — place the unplaced parts (or Save as…)";return;}
+  if(m)m.textContent="autosave paused — place the unplaced parts (or Save as…)";ilogGate("unplaced");return;}
  if(autosaveTimer)clearTimeout(autosaveTimer);
  autosaveTimer=setTimeout(runAutosave,ms||2500);}
-function runAutosave(){autosaveTimer=null;if(!pcbDirty||autosaveQueued||anyUnplaced())return;
+function runAutosave(){autosaveTimer=null;
+ // Name the reason an idle save declines, ahead of the unchanged gate below.
+ // Both re-read predicates are trivial (anyUnplaced is a single-key probe,
+ // draftGestureLive a handful of boolean reads) and this runs at most once per
+ // 2.5 s idle tick, so the extra reads cost nothing the save would notice.
+ ilogGate(!pcbDirty?"clean":autosaveQueued?"queued":anyUnplaced()?"unplaced":draftGestureLive()?"gesture":null);
+ if(!pcbDirty||autosaveQueued||anyUnplaced())return;
  if(draftGestureLive()){scheduleAutosave(500);return;}
- var nm=autosaveName();if(!nm)return;var attemptGeneration=dirtyGeneration;autosaveQueued=true;
+ var nm=autosaveName();if(!nm){ilogGate("no-name");return;}var attemptGeneration=dirtyGeneration;autosaveQueued=true;
  persistLayout(nm,"autosaving",true).then(function(result){autosaveQueued=false;
   // A successful request only leaves pcbDirty set when the user made a newer
   // edit while its older payload was in flight. Coalesce that edit into one
   // follow-up save; failures/conflicts keep the draft without request-spamming.
   if(result==="saved"&&pcbDirty)scheduleAutosave();
-  else if(result==="retry"&&pcbDirty){var ms=autosaveRetryMs;autosaveRetryMs=Math.min(30000,autosaveRetryMs*2);scheduleAutosave(ms);}
+  else if(result==="retry"&&pcbDirty){var ms=autosaveRetryMs;autosaveRetryMs=Math.min(30000,autosaveRetryMs*2);scheduleAutosave(ms);ilog("save.retry",{backoff_ms:ms});}
   // A newer edit may have repaired a hard validation failure while the large
   // board's previous request was still being checked. Give that generation
   // its own attempt without retry-spamming the unchanged invalid payload.
@@ -4669,11 +4758,11 @@ function updateLayoutRowScore(nm,s){var rows=document.querySelectorAll(".lay-row
 // with the same optimistic-concurrency rev. Payload capture happens when the
 // queued save starts, so a manual Save behind an autosave still gets the newest
 // board state.
-function persistLayout(nm,verb,automatic){var task=saveQueue.then(function(){
+function persistLayout(nm,verb,automatic){ilogSaveEnq();var task=saveQueue.then(function(){
  return persistLayoutNow(nm,verb,!!automatic);});
  saveQueue=task.then(function(result){return result;},function(){return "failed";});
  return saveQueue;}
-function saveResponse(r){return r.text().then(function(t){
+function saveResponse(r){ilogSaveRes(r);return r.text().then(function(t){
  var body=(t||"").trim();
  if(r.status===409){var j={};try{j=body?JSON.parse(body):{};}catch(ignore){}
   var conflict=new Error("conflict");conflict.conflict=true;if(typeof j.rev==="number")conflict.rev=j.rev;throw conflict;}
@@ -4693,15 +4782,16 @@ function showPourIssue(msg,issue,detail){if(!msg||!issue)return false;msg.style.
 // Persist the current poses to layout nm and update the panel IN PLACE — no
 // page reload, so the camera and view toggles you set while editing stay put.
 function persistLayoutNow(nm,verb,automatic){var msg=document.getElementById("pcb-savemsg");
- if(automatic&&!pcbDirty)return Promise.resolve("clean");
+ var ilogWait=ilogSaveWait();/* how long this save sat behind the save queue */
+ if(automatic&&!pcbDirty){ilogSaveEnd("clean");return Promise.resolve("clean");}
  // Refuse to persist a self-intersecting / degenerate outline (the server would
  // 400 it anyway); the editing state is preserved so the user can fix it.
  if(outlineBad()){if(msg){msg.style.color="#f85149";var og=OS&&PCB.outline&&PCB.outline.sketch&&OS.compile(PCB.outline.sketch);
-   msg.textContent=og&&!og.closed?"outline is open — reconnect its loose endpoints before saving":"outline self-intersects — fix it before saving";}return Promise.resolve("invalid");}
+   msg.textContent=og&&!og.closed?"outline is open — reconnect its loose endpoints before saving":"outline self-intersects — fix it before saving";}ilogSaveEnd("invalid");return Promise.resolve("invalid");}
  recoverOpenPourSketches();
- var pbad=pourSketchBad();if(pbad){if(msg)showPourIssue(msg,pbad,pbad.open?("Zone #"+(pbad.index+1)+" · "+(pbad.zone.net||"keepout")+" on "+(pbad.zone.layer||"")+" is open — click to repair"):("Zone #"+(pbad.index+1)+" · "+(pbad.zone.net||"keepout")+" on "+(pbad.zone.layer||"")+" is invalid — click to inspect"));return Promise.resolve("invalid");}
+ var pbad=pourSketchBad();if(pbad){if(msg)showPourIssue(msg,pbad,pbad.open?("Zone #"+(pbad.index+1)+" · "+(pbad.zone.net||"keepout")+" on "+(pbad.zone.layer||"")+" is open — click to repair"):("Zone #"+(pbad.index+1)+" · "+(pbad.zone.net||"keepout")+" on "+(pbad.zone.layer||"")+" is invalid — click to inspect"));ilogSaveEnd("invalid");return Promise.resolve("invalid");}
  if(backingBad()){if(msg){msg.style.color="#f85149";
-   msg.textContent="backing region sketch is open, conflicted, self-intersecting, or has zero area — fix it before saving";}return Promise.resolve("invalid");}
+   msg.textContent="backing region sketch is open, conflicted, self-intersecting, or has zero area — fix it before saving";}ilogSaveEnd("invalid");return Promise.resolve("invalid");}
  copperIdsEnsureAll();var saveGeneration=dirtyGeneration;
  var parts=P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,origin:p.origin||"",side:p.side||"top",locked:!!p.locked};});
  // Persist the on-screen copper (tracks/vias + user copper-pour zones) + drawn
@@ -4712,8 +4802,15 @@ function persistLayoutNow(nm,verb,automatic){var msg=document.getElementById("pc
  if(msg){msg.style.color="#8b949e";msg.textContent=verb+"\u{2026}";}
  // Echo the sidecar rev the page loaded so the server can 409 a stale write
  // (another window saved since) instead of silently clobbering it.
+ // The body is serialized into a local so the save log can report its exact
+ // size without stringifying the whole board a second time.
+ var ilogBody=JSON.stringify({name:nm,parts:parts,routes:routes,outline:PCB.outline||null,fabrication_layers:PCB.fabrication_layers||[],heatsink:PCB.heatsink||null,texts:texts,dimensions:PCB.dimensions||[],rev:PCB.rev||0});
+ ilog("save.start",{verb:verb,automatic:!!automatic,queue_wait_ms:ilogWait,bytes:ilogBody.length,
+  parts:parts.length,tracks:(PCB.tracks||[]).length,vias:(PCB.vias||[]).length,zones:(PCB.zones||[]).length,
+  rev:PCB.rev||0,gen:saveGeneration});
+ ilogSave={t0:Date.now(),fetch_ms:null,status:null,server_ms:undefined};
  return fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name)+subq(),{method:"POST",
-   headers:{"Content-Type":"application/json"},body:JSON.stringify({name:nm,parts:parts,routes:routes,outline:PCB.outline||null,fabrication_layers:PCB.fabrication_layers||[],heatsink:PCB.heatsink||null,texts:texts,dimensions:PCB.dimensions||[],rev:PCB.rev||0})})
+   headers:{"Content-Type":"application/json"},body:ilogBody})
   .then(saveResponse)
   .then(function(j){
     // Adopt the server's bumped rev so the next Save from this window matches.
@@ -4747,6 +4844,8 @@ function persistLayoutNow(nm,verb,automatic){var msg=document.getElementById("pc
     // copper edit used to supersede that valid response before RF fencing.
     scheduleDrc({stateUnchanged:true});/* fast local re-DRC of the just-saved copper (audit 1.1d) */
     if(serverReconcileTimer){clearTimeout(serverReconcileTimer);serverReconcileTimer=null;}
+    ilogSaveEnd("saved");
+    ilogDrcTrig="save";
     runDrcNow();/* Save fires the server DRC now — the authority of record */
     progressRefresh();/* poses/locks just persisted — re-pull the stage ladder */
     return "saved";})
@@ -4756,11 +4855,12 @@ function persistLayoutNow(nm,verb,automatic){var msg=document.getElementById("pc
      // lost, and do NOT adopt the server rev; the user reloads to pick up the
      // other window's version, then re-saves.
      if(msg){msg.style.color="#d29922";msg.textContent="layout changed in another window \u{2014} reload to continue";}
-     return "conflict";}
+     ilogSaveEnd("conflict");return "conflict";}
     var retryable=!e||e.retryable||typeof e.status!=="number";
-    if(automatic&&retryable){if(msg){msg.style.color="#8b949e";msg.textContent="autosave interrupted \u{2014} retrying\u{2026}";}return "retry";}
+    if(automatic&&retryable){if(msg){msg.style.color="#8b949e";msg.textContent="autosave interrupted \u{2014} retrying\u{2026}";}ilogSaveEnd("retry");return "retry";}
     var issue=pourIssueFromError(e);if(msg&&!showPourIssue(msg,issue,e&&e.message)){msg.style.color="#f85149";msg.textContent=e&&e.message?e.message:
      ((verb==="updating"?"update":"save")+" failed");}
+    ilogSaveEnd("failed");
     return "failed";});}
 // Let external PCB-editor actions serialize behind autosave. Inbound KiCad
 // import uses this before preview and again before apply, so it cannot race an
@@ -9668,9 +9768,10 @@ function drcChip(n){var e=document.getElementById("r-drc");if(!e)return;
  e.textContent=bits.length?bits.join(" · "):"DRC clean ✓";}
 function runDrcNow(){if(RO)return;var seq=++drcSeq;drcChip(-1);
  var payload=boardStatePayload();
+ var idrc=ilogDrcBegin();/* names this call's trigger and starts its clock */
  fetch("/api/pcb-drc/"+encodeURIComponent(PCB.name)+subq(),{method:"POST",
    headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
-  .then(function(r){if(!r.ok)throw 0;return r.json();})
+  .then(function(r){ilogDrcEnd(idrc,r,seq);if(!r.ok)throw 0;return r.json();})
   .then(function(j){if(seq!==drcSeq)return; // a newer check superseded this one
     var srv=j.drc||[];
     // Parity telemetry: the server is the authority-of-record. When its count
@@ -9681,7 +9782,7 @@ function runDrcNow(){if(RO)return;var seq=++drcSeq;drcChip(-1);
     powerWidthDrcFresh=true;
     var shown=drawRfRetrofitDrcMerge(srv),oldIds=drcIdSet(PCB.drc||[]),changed=shown.length!==(PCB.drc||[]).length||!idSetEq(drcIdSet(shown),oldIds);
     PCB.drc=shown;if(changed)drawDrc();else renderDrcList();drcChip(shown.length);routeSummaryFrom(j);}) // server wins
-  .catch(function(){if(seq===drcSeq)drcChip(0);});}
+  .catch(function(){ilogDrcEnd(idrc,null,seq);if(seq===drcSeq)drcChip(0);});}
 function boardStatePayload(){var vg=viaGeo();return {
  parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,side:p.side||"top"};}),
  tracks:PCB.tracks||[],vias:PCB.vias||[],zones:PCB.zones||[],rf_paths:PCB.rf_paths||[],clearance:clrVal(),
@@ -9836,7 +9937,7 @@ function scheduleDrc(opts){if(RO)return;opts=opts||{};
  wasmDrcInit();   // lazily spin up the worker on the first edit
  if(wasmDrc.failed){ // no worker/wasm → the original 800 ms server debounce, unchanged
   if(drcTimer)clearTimeout(drcTimer);
-  drcTimer=setTimeout(function(){drcTimer=null;runDrcNow();},800);
+  drcTimer=setTimeout(function(){drcTimer=null;ilogDrcTrig="reconcile";runDrcNow();},800);
   return;}
  wasmDrcCoalesce();        // near-instant local check (trailing ~50 ms coalesce)
  scheduleServerReconcile();} // server authority-of-record (incl. net_open) after ~300 ms idle
@@ -9868,6 +9969,7 @@ function wasmDrcInit(){
   if(m.type==="result"){
    if(m.seq!==wasmDrc.seq)return;                       // a newer check superseded this one
    if(m.error)return;                                   // this check errored — let the server reconcile
+   ilog("drc.wasm",{ms:Date.now()-ilogWasmT0});          // worker round trip for the SAME state
    applyWasmDrc(m.resp);}};
  wk.onerror=function(){wasmDrcFail();};
  wasmDrc.worker=wk;}
@@ -9880,6 +9982,7 @@ function runWasmDrc(){if(!wasmDrc.worker||wasmDrc.failed)return;
  var input;
  try{input=drcInputJson();}
  catch(e){return;}
+ ilogWasmT0=Date.now();
  wasmDrc.worker.postMessage({type:"check",seq:++wasmDrc.seq,input:input});}
 // Mirror src/serve/drc_rules.zig `apply` on the wasm result: the wasm runs the
 // bare checker (built-in severities), so the per-design overrides in
@@ -9927,7 +10030,7 @@ function idSetEq(a,b){var k;for(k in a)if(!b[k])return false;for(k in b)if(!a[k]
 var server_reconcile_ms=300;
 function scheduleServerReconcile(){if(RO)return;
  if(serverReconcileTimer)clearTimeout(serverReconcileTimer);
- serverReconcileTimer=setTimeout(function(){serverReconcileTimer=null;runDrcNow();},server_reconcile_ms);}
+ serverReconcileTimer=setTimeout(function(){serverReconcileTimer=null;ilogDrcTrig="reconcile";runDrcNow();},server_reconcile_ms);}
 // A rules/severity change re-checks immediately: re-run the wasm (which
 // re-applies the fresh overrides on a full result) when it's up, else the server.
 function drcRefreshNow(){if(!wasmDrc.failed&&wasmDrc.worker){runWasmDrc();scheduleServerReconcile();}else runDrcNow();}

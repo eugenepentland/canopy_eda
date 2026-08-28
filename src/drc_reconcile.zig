@@ -1277,6 +1277,7 @@ fn fail(lease: *Lease, res: *httpz.Response, status: u16, message: []const u8) ?
 
 const testing = std.testing;
 const drc_sweep = @import("drc_sweep.zig");
+const request_log = @import("serve/request_log.zig");
 
 /// A placement with no parts and no nets. Real enough to be retained and
 /// pinned; the retention tests are about arena lifetimes, not about copper.
@@ -1642,6 +1643,51 @@ test "the DRC endpoint scopes a copper edit, matches ?full=1, and re-primes when
     try testing.expectEqualStrings(drcApiFindings(forced), drcApiFindings(unretained));
     // A store that retains nothing sweeps nothing, and says so.
     try testing.expect(std.mem.indexOf(u8, unretained, "\"runs\":0,\"rev\":0,\"age_ms\":-1") != null);
+}
+
+/// The six phases `pcbDrcApi` names, as they appear inside a `"stages":{…}`
+/// object. `resolve` is the one W3 was briefed wrongly about: the design
+/// evaluation and `placeFromPoses` behind this endpoint, not DRC at all.
+const drc_stage_keys = [_][]const u8{ "\"parse\":", "\"resolve\":", "\"restore\":", "\"drc\":", "\"respond\":" };
+
+/// Whether `line` names every phase the DRC endpoint promises to report.
+fn namesEveryDrcStage(line: []const u8) bool {
+    for (drc_stage_keys) |key| {
+        if (std.mem.indexOf(u8, line, key) == null) return false;
+    }
+    return true;
+}
+
+// spec: Web Server - An instrumented handler files its own phase breakdown in the interaction log, naming every stage it ran and the total that covers them
+test "the DRC endpoint writes its phase breakdown to the interaction log" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+    try writeReconcileFixture(tmp.dir);
+
+    // Logging on, exactly as `serve()` turns it on.
+    var state = serve_root.ServerState{ .request_log = .{ .project_dir = project } };
+    _ = try drcApiBody(alloc, &state, project, try drcApiRequestBody(alloc, 0), false);
+
+    const log_path = request_log.currentPath(&state.request_log, alloc, null).?;
+    const logged = try infra_fs.cwd().readFileAlloc(alloc, log_path, 1 << 20);
+    // One line: the handler's own stages. The dispatch seam's `req` line comes
+    // from `serve.dispatch`, which a direct handler call never goes through.
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, logged, "\n"));
+    try testing.expect(std.mem.indexOf(u8, logged, "\"src\":\"server\",\"evt\":\"stages\"") != null);
+    try testing.expect(std.mem.indexOf(u8, logged, "\"design\":\"fabsel\"") != null);
+    try testing.expect(std.mem.indexOf(u8, logged, "\"ms_total\":") != null);
+    try testing.expect(namesEveryDrcStage(logged));
+
+    // A default store logs nowhere, so instrumenting the handler cannot leave
+    // stray files beside a project a test (or the CLI) merely read.
+    var off = serve_root.ServerState{};
+    _ = try drcApiBody(alloc, &off, project, try drcApiRequestBody(alloc, 0.4), false);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, try infra_fs.cwd().readFileAlloc(alloc, log_path, 1 << 20), "\n"));
 }
 
 // spec: Web Server - A reconcile snapshot that carries the previous one's deferred findings forward is retained without aliasing the memory it copies from
