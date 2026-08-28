@@ -6169,7 +6169,8 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The interaction log appends one line per event to a dated file under the project's logs directory, creating it on demand, and writes nothing at all when no project directory is set
 - A handler's stage timer reports every phase it names and a total that covers the work after the last one
 - An instrumented handler files its own phase breakdown in the interaction log, naming every stage it ran and the total that covers them
-- The layout-save endpoint reports its design-resolve and objective phases separately, so an autosave's cost is attributable
+- The layout-save endpoint reports its design-resolve phase separately from the rest of the write, so an autosave's cost is attributable
+- A saved layout is persisted without an objective score, and an identically placed auto run is left alone rather than promoted into it
 - The client-log endpoint appends one line per posted browser event, passing its scalar fields through, and refuses an oversized body or event burst without writing anything
 - the schematic page exposes the current board role as a Design type selector on designs but not reusable module pages
 - the schematic Design type control replaces only the design root's board-role form, preserving comments and nested module text

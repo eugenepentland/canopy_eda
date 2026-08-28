@@ -376,11 +376,13 @@ browser's 2 s version poll does not bury the file.
 Two handlers report their own phase breakdown, because whole-request timing
 could not say which part of an autosave was slow:
 
-- `POST /api/pcb-layouts/:name` → `parse`, `score_resolve`, `score_poses`,
-  `snapshot`, `write`. `score_resolve` is the whole-design re-evaluation inside
-  `layout_score.scoreSavedLayout`, which every save pays; `score_poses` is
-  `optimizer.scorePoses`. They are split precisely so a slow evaluator and a
-  slow solver are distinguishable.
+- `POST /api/pcb-layouts/:name` → `parse`, `resolve`, `snapshot`, `write`.
+  `resolve` is the whole-design re-evaluation inside
+  `layout_save_layers.savedLayoutLayers`, which every save pays for the layer
+  rules it validates a pour against; it is named apart from the rest of the
+  write so a slow evaluator and a slow handler are distinguishable. (A save no
+  longer scores the arrangement, so the old `score_poses` phase is gone — it was
+  27.2 s of a 27.7 s Debug autosave on barracuda.)
 - `POST /api/pcb-drc/:name` → `parse`, `resolve`, `restore`, `drc`, `pours`,
   `respond`. `resolve` is the reconcile session's design evaluation +
   `placeFromPoses` — near zero when the session answered from a retained

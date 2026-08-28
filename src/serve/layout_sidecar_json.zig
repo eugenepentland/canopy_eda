@@ -1656,15 +1656,6 @@ fn jsonStringList(alloc: std.mem.Allocator, v: ?std.json.Value) []const []const 
     return out.toOwnedSlice(alloc) catch out.items;
 }
 
-/// What a layout SAVE learns from resolving the block: the optimizer score for
-/// the posted poses, plus the layer half of that block's board rules — null
-/// when the block did not resolve, which switches the zone-layer check below
-/// off rather than judging a zone against a stackup nobody could read.
-pub const SavedLayoutCheck = struct {
-    score: @FieldType(page.SavedLayout, "score") = null,
-    layers: ?optimizer.BoardRules = null,
-};
-
 /// The layer-NAME half of a block's board rules — copper count and declared
 /// planes, straight off its `(stackup …)` form. That is everything
 /// `BoardRules.signalIndexOfName` reads, and it costs none of the net flatten a

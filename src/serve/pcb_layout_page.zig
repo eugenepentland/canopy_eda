@@ -99,7 +99,7 @@ const stuck_json = @import("stuck_json.zig");
 const pcb_part_json = @import("pcb_part_json.zig");
 const history = @import("history.zig");
 const request_log = @import("request_log.zig");
-const layout_score = @import("../layout_score.zig");
+const layout_save_layers = @import("../layout_save_layers.zig");
 const build_id = @import("../build_id.zig");
 const numeric = @import("../numeric.zig");
 const escape = @import("../escape.zig");
@@ -5224,10 +5224,12 @@ fn pcbGerbersApiHooked(
 }
 
 // POST /api/pcb-layouts/:name — save a named layout snapshot (kind "manual").
-// Body: `{"name","parts":[{ref,x,y,rot,origin?}, …]}`; the score is computed on
-// the server (no client-side metric) by `layout_score.scoreSavedLayout`, which
-// the sub-circuit capture shares. Upserts by name (re-save overwrites in
-// place); a new name is prepended so the newest sits at the top of the list.
+// Body: `{"name","parts":[{ref,x,y,rot,origin?}, …]}`. A save persists what it
+// was given and scores nothing: it resolves the block only for the layer rules
+// a submitted pour is checked against (`layout_save_layers`, which the
+// sub-circuit capture shares), so entries land score-less. Upserts by name
+// (re-save overwrites in place); a new name is prepended so the newest sits at
+// the top of the list.
 
 /// Star a block's very FIRST saved layout. Something must be starred for the
 /// page to reopen on a saved board at all (`chooseLayout` falls through to the
@@ -5243,12 +5245,13 @@ fn starFirstEver(layouts: []SavedLayout) void {
 
 /// `POST /api/pcb-layouts/:name` — persist a named layout: its poses, routed
 /// copper, board outline, and silk texts. Guards an optimistic-concurrency
-/// rev, scores the arrangement, and rejects a self-intersecting / zero-area
-/// custom outline before writing the sidecar.
+/// rev and rejects a self-intersecting / zero-area custom outline before
+/// writing the sidecar. It does not score what it stores.
 pub fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    // Five phases, and the interesting one is inside `scoreSavedLayout`: an
-    // autosave that takes seconds is nearly all `score_resolve`, which no
-    // whole-request timing could have shown (see `serve/request_log.zig`).
+    // Four phases, and the interesting one is `resolve` inside
+    // `savedLayoutLayers`: an autosave that takes seconds is nearly all design
+    // re-evaluation, which no whole-request timing could have shown (see
+    // `serve/request_log.zig`).
     var timer = request_log.StageTimer.start();
     const name = nameParam(req, res) orelse return;
     const root = parseJsonObject(req, res) orelse return;
@@ -5299,9 +5302,9 @@ pub fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
     }
     const new_rev = disk_rev + 1;
     timer.lap("parse");
-    // Score the hand layout with the optimizer's own objective (comparable to
-    // the auto baseline); the same pass hands back the block's layer rules.
-    const checked = try layout_score.scoreSavedLayout(ctx, req, name, sub, parts, &timer);
+    // Resolve the block for its layer rules alone — a pour naming a layer this
+    // board has not got is refused below. Nothing here judges the placement.
+    const layers = layout_save_layers.savedLayoutLayers(ctx, req.arena, name, sub, &timer);
     const outline_value = root.object.get("outline");
     const saved_outline = parseSavedOutline(req.arena, outline_value);
     if (outline_value) |value| if (value == .object and value.object.get("sketch") != null and saved_outline == null) {
@@ -5313,7 +5316,10 @@ pub fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
         .name = nm,
         .kind = kind_manual,
         .ts = clock.timestamp(),
-        .score = checked.score,
+        // Saves are unscored — the objective belongs to the auto-placer, and
+        // re-running it here was 98% of this handler's cost. The panel renders
+        // "—" for the row until `/api/pcb-rescore` fills one in.
+        .score = null,
         .parts = parts,
         .routes = parseSavedRoutes(req.arena, root.object.get("routes")),
         .outline = saved_outline,
@@ -5325,7 +5331,7 @@ pub fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
     // Geometry this WRITE path refuses — a bow-tie board outline, a pour on a
     // layer this board has not got (see `saveRejection` for why each is judged
     // here and nowhere else).
-    if (sidecar_json.saveRejection(req.arena, checked.layers, entry)) |msg| {
+    if (sidecar_json.saveRejection(req.arena, layers, entry)) |msg| {
         res.status = 400;
         res.body = msg;
         return;
@@ -5357,9 +5363,13 @@ pub fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
             // its default status — the user re-captured under the same name.
             entry.default = L.default;
             replaced = true;
-        } else if (open and std.mem.eql(u8, L.kind, kind_auto) and sameLayoutScore(L.score, entry.score)) {
+        } else if (open and entry.score != null and std.mem.eql(u8, L.kind, kind_auto) and sameLayoutScore(L.score, entry.score)) {
             // Same arrangement as an auto run → promote it to this named keeper
-            // rather than leaving a duplicate behind.
+            // rather than leaving a duplicate behind. Score is the only evidence
+            // of sameness there is, and a save no longer computes one, so this
+            // never fires today and a duplicate auto row simply stays. Guarded
+            // explicitly rather than deleted: the check is exact when a score
+            // does exist, and there is no pose-level substitute for it.
             entry.default = L.default;
             replaced = true;
         } else try out.append(req.arena, L);
