@@ -119,3 +119,9 @@ log is not a substitute for reporting an active blocker to the user.
 - **friction:** The first exact-candidate CAM-to-readiness audit exposed a pre-existing stale epoll event after a 3.07 MB response; unregistering only the handler-driven close path still missed curl's keepalive peer-close path and required a second real-server replay to locate the shared lifecycle boundary.
 - **idea:** Keep socket read-unregistration centralized in `Conn.close` and retain the large-response, half-closed-client regression in the ordinary test suite so every HTTP close path shares the same lifetime rule.
 - **status:** resolved in this change
+
+## 2026-08-28 · codex · controlled-impedance Gerber gap audit
+- **friction:** Measuring controlled gaps from the exact Gerber bytes of intentionally unready Barracuda layouts required a temporary `fab_preview` raw-byte tap, a temporary build step, one extra binary build, and roughly six patch/build/extract cleanup calls because `/api/pcb-gerbers` correctly refuses an incomplete release while `/api/pcb-cam` exposes only parsed operations.
+- **idea:** Add a read-only local CLI that writes deterministic, unstamped Gerber layers for a named saved layout without bypassing or weakening the fabrication-release endpoint; this would make pre-release geometry audits reproducible without a diagnostic source patch.
+- **workaround:** Temporarily expose `writeLayer` bytes through the generated-Gerber CAM path, verify native region integrity before encoding them, audit the decoded files, then remove the diagnostic patch before committing.
+- **status:** open
