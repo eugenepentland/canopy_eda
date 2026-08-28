@@ -6159,7 +6159,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The PCB editor places repeated standalone vias on a chosen net without creating trace segments, using grid/copper snapping, net-class geometry, the live DRC gate, and one undo step per via
 - Escape cancels an active manual route even when its final route-wide DRC check rejects finishing it, restoring the route-start copper and exiting Draw instead of retrying the blocked finish
 - A hand-routed RF launch keeps its generated portal collar inside the source pad, retries a DRC-blocked wide-land taper with progressively shorter flares, and finishes with the independently DRC-confirmed uniform trace when no automatic taper fits
-- A controlled-impedance launch approaching a pad corner never pinches below the smaller of its nominal trace width and the pad's narrow dimension, while a genuinely narrow land still receives its physical-width taper
+- A controlled-impedance launch approaching a pad corner substitutes the pad's narrow dimension for a degenerate local chord, retaining a visible wide-land taper while a genuinely narrow land still receives its physical-width taper
 - Every saved trace segment and via has a stable inspector-visible ID that survives saves and retained-copper rewrites, with deterministic IDs backfilled for legacy copper
 - The PCB editor rotates components, rigid groups, and their carried copper in 45-degree increments
 

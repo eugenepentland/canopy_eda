@@ -171,14 +171,15 @@ function load(names, globals = {}) {
 
   const nominal = 0.18993671363271875;
   const c127 = { i: 0, pd: { w: 0.5, h: 0.3, shape: "roundrect" } };
-  assert.equal(g.drawTaperProfile("RF", c127, nominal,
-    { land: 0.212, span: 0.02828427124745862, portal: null }), null,
-  "C127's near-corner chord must not pinch a nominal-width trace into a needle");
+  const c127Profile = g.drawTaperProfile("RF", c127, nominal,
+    { land: 0.212, span: 0.02828427124745862, portal: null });
+  assert(Math.abs(c127Profile.width - 0.3) < 1e-9,
+    "C127's near-corner chord must taper from its 0.3 mm pad instead of pinching or disappearing");
   const narrow = { i: 0, pd: { w: 0.1, h: 0.3, shape: "roundrect" } };
   const narrowProfile = g.drawTaperProfile("RF", narrow, nominal,
     { land: 0.15, span: 0.028, portal: null });
   assert(Math.abs(narrowProfile.width - 0.1) < 1e-9,
-    "a genuinely narrow land must taper to its physical minimum dimension, not its corner chord");
+    "a genuinely narrow land must still taper to its physical minimum dimension, not its corner chord");
 }
 
 {

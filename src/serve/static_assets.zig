@@ -1157,11 +1157,11 @@ test "PCB hand router fits automatic tapers to DRC" {
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "automatic pad taper would violate DRC") == null);
 }
 
-// spec: Web Server - A controlled-impedance launch approaching a pad corner never pinches below the smaller of its nominal trace width and the pad's narrow dimension, while a genuinely narrow land still receives its physical-width taper
+// spec: Web Server - A controlled-impedance launch approaching a pad corner substitutes the pad's narrow dimension for a degenerate local chord, retaining a visible wide-land taper while a genuinely narrow land still receives its physical-width taper
 test "PCB RF taper rejects degenerate corner chords" {
     const markers = [_][]const u8{
-        "var padFloor=Math.min(nominal,Math.min(+pad.pd.w||0,+pad.pd.h||0))",
-        "if(padFloor>0)span=Math.max(span,padFloor)",
+        "var padWidth=Math.min(+pad.pd.w||0,+pad.pd.h||0)",
+        "if(padWidth>0)span=Math.max(span,padWidth)",
         "a 0.190 mm line pinched to 0.028 mm",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);

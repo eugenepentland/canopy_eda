@@ -7269,10 +7269,11 @@ function drawTaperProfile(net,pad,nominal,dir){if(!pad||!pad.pd)return null;
  // the LAND itself is wider than the controlled trace. C127 exposed the bad
  // limit: a 0.190 mm line pinched to 0.028 mm because its 45-degree approach
  // met the rounded pad near one corner. A real narrow land may still request a
- // taper, but an angled crossing may never claim less than the smaller of the
- // nominal trace and the pad's own narrow dimension.
- var padFloor=Math.min(nominal,Math.min(+pad.pd.w||0,+pad.pd.h||0));
- if(padFloor>0)span=Math.max(span,padFloor);
+ // taper, but an angled crossing uses the pad's own narrow dimension instead
+ // of pinching to that incidental corner chord. This keeps a visible wide-land
+ // taper at C127 while still landing a genuinely narrow pad at its real width.
+ var padWidth=Math.min(+pad.pd.w||0,+pad.pd.h||0);
+ if(padWidth>0)span=Math.max(span,padWidth);
  if(!(span>0)||Math.abs(span-nominal)<=1e-9)return null;
  return {kind:"rf",width:span,land:launch?launch.land:Math.max(+pad.pd.w||0,+pad.pd.h||0)/2,
   taper:nominal*1.2,step:nominal*1.2/6,portal:launch&&launch.portal||null};}
