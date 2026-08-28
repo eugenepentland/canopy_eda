@@ -3097,6 +3097,7 @@ Public functions: compute, computeMaskShared, computeMasks, initMargin, planeCon
 - a seeded pour keeps its component and drops an unseeded orphan island
 - the configured minimum pour width erodes and regrows the fill, removing a connected neck narrower than the fabrication floor while restoring broad copper to its ordinary clearance boundary
 - the configured pour corner radius fillets emitted contour corners
+- the configured corner radius rounds exterior copper without scalloping an RF via's signed-distance antipad hole
 - contour tracing closes every boundary, decomposes pinched walks into strict simple regions, allows only zero-area sibling-hole tangency, and fails closed on irreparable topology
 - contour simplification and corner rounding fall back to the last strict simple boundary instead of emitting a crossing
 - a clipped user pour confines the fill to the drawn polygon, carves foreign copper, and keeps its region when no same-net seed lies inside

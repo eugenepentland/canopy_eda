@@ -1071,8 +1071,17 @@ fn openMinimumWidth(arena: std.mem.Allocator, g: Grid, radius: f64) std.mem.Allo
     // Read only this immutable eroded snapshot while writing the regrown
     // labels; otherwise scan order would let newly-grown fringe grow again.
     const core = try arena.dupe(i32, g.labels);
-    const cells: i64 = @intCast(numeric.toCount(@ceil(radius / g.pitch)));
-    const reach2 = radius * radius + 1e-12;
+    // A core is sampled at cell centres but represents the area of its whole
+    // raster cell. Measure dilation to that represented cell, not only to its
+    // centre: otherwise a half-width smaller than one pitch cannot regrow even
+    // its immediate legal fringe and every curved boundary becomes a one-cell
+    // star. Half the cell diagonal is the farthest centre-to-cell correction.
+    // The multi-owner conflict below still blocks a fringe reached by two
+    // disconnected cores, so this sampling correction cannot weld a removed
+    // narrow neck back together.
+    const reach = radius + g.pitch / std.math.sqrt2;
+    const cells: i64 = @intCast(numeric.toCount(@ceil(reach / g.pitch)));
+    const reach2 = reach * reach + 1e-12;
     for (g.labels, 0..) |*lbl, idx| {
         if (lbl.* != fringe_marker) continue;
         const i: i64 = @intCast(idx % g.nx);
@@ -2142,19 +2151,29 @@ fn classifyLoopsAtTolerance(
     simplify_tolerance: f64,
     repair_clears: *std.ArrayList(RepairClear),
 ) TraceError![]const TracedComponent {
+    var largest_raw_area2: f64 = 0;
+    for (loops) |poly| {
+        if (poly.len < 3) continue;
+        const area2 = outline.signedArea2(poly);
+        if (@abs(area2) > @abs(largest_raw_area2)) largest_raw_area2 = area2;
+    }
+    const outer_positive = largest_raw_area2 > 0;
+
     var info: std.ArrayList(LoopInfo) = .empty;
     for (loops) |poly| {
         if (poly.len < 3) continue;
-        const final = try finalizeContourAtTolerance(arena, poly, corner_radius, simplify_tolerance);
+        // The signed-margin field already rounds clearance holes around vias,
+        // tracks and pads at their exact geometric offset. Filleting every
+        // sampled point of one of those holes turns the sampled circle into a
+        // scalloped chain and can pull copper back toward the obstacle. The
+        // authored pour corner radius is a copper-corner treatment: apply it
+        // only to same-winding exterior rings. Opposite-winding holes retain
+        // their compact interpolated iso-line.
+        const radius = if ((outline.signedArea2(poly) > 0) == outer_positive) corner_radius else 0;
+        const final = try finalizeContourAtTolerance(arena, poly, radius, simplify_tolerance);
         try info.append(arena, .{ .poly = final, .sample = interiorSample(final, pitch), .area2 = outline.signedArea2(final) });
     }
     if (info.items.len == 0) return &.{};
-
-    var largest: usize = 0;
-    for (info.items[1..], 1..) |candidate, i| {
-        if (@abs(candidate.area2) > @abs(info.items[largest].area2)) largest = i;
-    }
-    const outer_positive = info.items[largest].area2 > 0;
     const hole_lists = try arena.alloc(std.ArrayList(Contour), info.items.len);
     @memset(hole_lists, .empty);
     const area2_floor = pitch * pitch;
@@ -4541,6 +4560,89 @@ fn ringGap(ring: Contour, cx: f64, cy: f64, dia: f64) f64 {
     var min_gap: f64 = std.math.floatMax(f64);
     for (ring) |v| min_gap = @min(min_gap, std.math.hypot(v[0] - cx, v[1] - cy) - dia / 2);
     return min_gap;
+}
+
+fn ringRadiusRange(ring: Contour, cx: f64, cy: f64) [2]f64 {
+    var minimum = std.math.inf(f64);
+    var maximum: f64 = 0;
+    for (ring, 0..) |a, i| {
+        const b = ring[(i + 1) % ring.len];
+        for (0..9) |sample| {
+            const t = @as(f64, @floatFromInt(sample)) / 8.0;
+            const x = a[0] + t * (b[0] - a[0]);
+            const y = a[1] + t * (b[1] - a[1]);
+            if (x < cx) continue;
+            const radius = std.math.hypot(x - cx, y - cy);
+            minimum = @min(minimum, radius);
+            maximum = @max(maximum, radius);
+        }
+    }
+    return .{ minimum, maximum };
+}
+
+// spec: placement/pour - the configured corner radius rounds exterior copper without scalloping an RF via's signed-distance antipad hole
+test "pour corner radius leaves an RF via antipad radially smooth" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    const gnd_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{.{
+        .ref_des = "C1",
+        .kind = .passive,
+        .hw = 0.5,
+        .hh = 0.5,
+        .pads = &gnd_pad,
+        .fallback = false,
+        .x = 3,
+        .y = 3,
+        .side = .top,
+    }};
+    const gnd_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "C1", .pin = "1" }};
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "GND", .pins = &gnd_pins },
+        .{ .name = "RF", .pins = &.{} },
+    };
+    const net_rules = [_]optimizer.NetRule{
+        .{},
+        .{ .class = .{ .name = "rf-cpwg-50" }, .clearance = 0.127, .rf = .{
+            .impedance = .{ .ohms = 50, .ground_gap_mm = 0.1524 },
+        } },
+    };
+    const dielectrics = [_]@import("impedance.zig").Dielectric{
+        .{ .after_layer = 1, .thickness_mm = 0.0994, .er = 4.1 },
+        .{ .after_layer = 2, .thickness_mm = 0.55, .er = 4.6 },
+        .{ .after_layer = 3, .thickness_mm = 0.1088, .er = 4.16 },
+        .{ .after_layer = 4, .thickness_mm = 0.55, .er = 4.6 },
+        .{ .after_layer = 5, .thickness_mm = 0.0994, .er = 4.1 },
+    };
+    const placement = testPlacement(&parts, &nets, .{
+        .net = &net_rules,
+        .design = .{ .pour = .{ .corner_radius = 0.25, .min_width = 0.127 } },
+        .physical = .{ .board_thickness = 1.6, .stack = .{
+            .layers = 6,
+            .dielectrics = &dielectrics,
+            .board_mm = 1.6,
+        } },
+    });
+    // Match the Barracuda RF transition's sub-cell phase on its 0.0762 mm
+    // lattice; the old contour's scallop depended strongly on that phase.
+    const via = router.Via{ .x = 10.0044, .y = 10.0502, .dia = 0.4, .drill = 0.2, .net = 1 };
+    const track = router.Track{ .x1 = 4, .y1 = 10, .x2 = via.x, .y2 = via.y, .layer = 0, .width = 0.1899, .net = 1 };
+    const fill = try compute(arena, placement, .{ .tracks = &.{track}, .vias = &.{via} }, .{
+        .net = .{ .named = "GND" },
+        .side = .top,
+        .track_layer = 0,
+    });
+    const ring = holeEnclosing(fill.holes[0], via.x, via.y) orelse return error.TestUnexpectedResult;
+    const range = ringRadiusRange(ring, via.x, via.y);
+    const clearance = viaPlaneClearance(placement, via, .{ .named = "GND" }, placement.rules.design.pour.clearance_outer);
+
+    // The final piecewise-linear contour, including its edge interiors, stays
+    // within the simplifier's 0.01 mm sagitta budget instead of the roughly
+    // 0.05 mm peak-to-peak scallop produced by filleting every sampled point.
+    try testing.expect(range[1] - range[0] <= dp_tol + 0.002);
+    try testing.expect(range[0] - via.dia / 2 >= clearance - 1e-6);
 }
 
 // spec: placement/pour - an outer-face pour holds the tighter outer default gap while an inner plane keeps the fab-safe one
