@@ -1148,6 +1148,24 @@ test "PCB hand router gates pad entry and exit at the prospective tapered width"
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
+// spec: placement/power-routing - the hand router steers an unpoured current-rated rail at ordinary fabrication width, then grows each local interval to its largest DRC-clear width with 45-degree tapers from the pad's smaller dimension
+test "PCB hand router adaptively widens power copper after steering" {
+    const markers = [_][]const u8{
+        "adaptive_power_width",
+        "function drawNetGeometry",
+        "powerTarget:geo.target",
+        "function drawAdaptiveClearWidth",
+        "for(var i=0;i<11;i++)",
+        "function drawAdaptivePowerRun",
+        "ss[i-1].w+2*(ss[i].s-ss[i-1].s)",
+        "function drawAdaptivePowerPlan",
+        "window.PCBDrawAdaptivePowerPlan",
+        "initial=power?drawAdaptivePowerPlan",
+        "power route widened locally up to ",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+}
+
 // spec: Web Server - A hand-routed RF launch keeps its generated portal collar inside the source pad, retries a DRC-blocked wide-land taper with progressively shorter flares, and finishes with the independently DRC-confirmed uniform trace when no automatic taper fits
 test "PCB hand router fits automatic tapers to DRC" {
     const markers = [_][]const u8{
@@ -1156,7 +1174,7 @@ test "PCB hand router fits automatic tapers to DRC" {
         "automatic pad taper omitted — no DRC-clean flare fits",
         "compact DRC-safe pad taper added",
         "ax=p.a.x-ox*r",
-        "if(!drcGate.ready||drcGate.failed)return {ok:true,changed:false,paths:[],omitted:true}",
+        "if(!drcGate.ready||drcGate.failed)return {ok:true,changed:false,paths:[],omitted:true",
         "drcGateDiffBlocks(base.tracks||[],base.vias||[],board,PCB.vias||[])",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);

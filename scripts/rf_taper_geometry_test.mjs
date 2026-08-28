@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// Behavioral probes for the browser RF-taper geometry. These use the two
-// Barracuda V2 launches that exposed a folded sweep and an off-centre pad exit.
+// Behavioral probes for the browser's variable-width RF and power geometry.
+// These use the Barracuda launches/corridor that exposed a folded sweep, an
+// off-centre pad exit, and a power trace that could not pass its neighbour.
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -28,6 +29,86 @@ function load(names, globals = {}) {
   const context = vm.createContext({ console, Math, ...globals });
   vm.runInContext(names.map(functionSource).join("\n"), context);
   return context;
+}
+
+{
+  const document = { getElementById() { return { value: "net" }; } };
+  const PCB = { rules: { track_width: 0.127, min_width: 0.1 }, zones: [] };
+  const g = load(["trackW", "drawPowerTarget", "drawNetGeometry"], {
+    PCB,
+    document,
+    netClassInfo() { return { width: 0.4, adaptive_power_width: 0.4 }; },
+    baseTrackW() { return 0.127; },
+  });
+  assert.deepEqual({ ...g.drawNetGeometry("V_12V_RAW") }, { width: 0.127, target: 0.4 },
+    "a current-rated rail must steer at ordinary routing width while retaining its electrical target");
+
+  PCB.zones = [{ net: "V_12V_RAW", keepout: false }];
+  assert.deepEqual({ ...g.drawNetGeometry("V_12V_RAW") }, { width: 0.127, target: 0.4 },
+    "a local eFuse zone must not disable adaptive widening on the rest of the rail");
+}
+
+{
+  const g = load(["drawTaperProfile"], {
+    PCB: { rules: { track_width: 0.127, min_width: 0.1 } },
+    netClassInfo() { return {
+      width: 0.4,
+      adaptive_power_width: 0.4,
+      pad_neck_width: 0.1524,
+      pad_neck_max_length: 0.75,
+      pad_neck_taper_length: 0.35,
+    }; },
+    baseTrackW() { return 0.127; },
+  });
+  const pad = { pd: { w: 0.3, h: 2.4 } };
+  const profile = g.drawTaperProfile("V_12V_RAW", pad, 0.4, { land: 1.2, span: 0.3 });
+  assert.equal(profile.kind, "power");
+  assert.notEqual(profile.width, 0.1524, "a generic authored escape must not override the adaptive pad-sized launch");
+  assert(Math.abs(profile.width - 0.3) < 1e-12,
+    "the power launch must use the pad's smaller physical dimension, independent of route angle");
+  assert(Math.abs(profile.land - 1.2) < 1e-12, "the power taper must begin at the measured pad boundary");
+  assert(Math.abs(profile.taper - 0.05) < 1e-12,
+    "a 0.3-to-0.4 mm launch needs only 0.05 mm for 45-degree copper flanks");
+}
+
+{
+  const floor = 0.127;
+  const target = 0.4;
+  const g = load(["drawProfileWidth", "drawAdaptiveStations", "drawAdaptiveClearWidth", "drawAdaptivePowerRun"], {
+    DRAW_ADAPTIVE_STEP: 0.05,
+    trackLength(t) { return Math.hypot(t.x2 - t.x1, t.y2 - t.y1); },
+    drawTrackPoint(t, f) { return { x: t.x1 + (t.x2 - t.x1) * f, y: t.y1 + (t.y2 - t.y1) * f }; },
+    trackIdEnsure(t) { return t.id; },
+    segViolation(x1, _y1, x2, _y2, _layer, _net, hw) {
+      const x = (x1 + x2) / 2;
+      const limit = x > 1.1 && x < 1.9 ? 0.22 : target;
+      return 2 * hw > limit + 1e-9 ? { k: "clearance" } : null;
+    },
+  });
+  const track = { id: "power-owner", net: "V_12V_RAW", l: 0, x1: 0, y1: 0, x2: 3, y2: 0 };
+  const start = { kind: "power", width: 0.3, land: 0.3, taper: 0.05, step: 0.0125 };
+  const plan = g.drawAdaptivePowerRun([track], start, null, floor, target);
+  assert.equal(plan.paths.length, 1);
+  const samples = plan.paths[0].samples;
+  function widthAt(x) {
+    const sample = samples.find((s) => Math.abs(s[0] - x) < 1e-8);
+    assert(sample, `missing exact adaptive station at ${x}`);
+    return sample[2];
+  }
+  assert(Math.abs(widthAt(0) - 0.3) < 1e-8, "the launch must start at the pad's 0.3 mm minimum dimension");
+  assert(Math.abs(widthAt(0.3) - 0.3) < 1e-8, "the taper must not begin before the pad boundary");
+  assert(Math.abs(widthAt(0.35) - 0.4) < 2e-4, "the compact taper must reach the 0.4 mm target after 0.05 mm");
+  assert(samples.some((s) => s[0] > 1.2 && s[0] < 1.8 && s[2] <= 0.2202),
+    "the physical path must neck down only where the neighbouring trace constrains it");
+  assert(samples.some((s) => s[0] > 2.2 && s[2] > 0.399), "open copper must recover the full electrical target");
+  samples.forEach((s, i) => {
+    assert(s[2] >= floor - 1e-9, "adaptive copper must never fall below the routing floor");
+    if (!i) return;
+    const prior = samples[i - 1];
+    const distance = Math.hypot(s[0] - prior[0], s[1] - prior[1]);
+    assert(Math.abs(s[2] - prior[2]) <= 2 * distance + 1e-8,
+      "adjacent adaptive widths must retain 45-degree-or-shallower flanks");
+  });
 }
 
 {
@@ -328,4 +409,4 @@ function load(names, globals = {}) {
   assert.equal(ownedLegacy.track_ids[0], "legacy-owner");
 }
 
-console.log("RF taper geometry probes PASS");
+console.log("RF and power taper geometry probes PASS");

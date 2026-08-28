@@ -316,7 +316,10 @@ fn rfEndpointProfile(
 
 /// Pad-sized launch for an ordinary power route. Unlike the RF spelling, a
 /// wider land does not flare above the electrical target: this pass grows a
-/// narrow centreline toward that target, never beyond it.
+/// narrow centreline toward that target, never beyond it. Power launches use
+/// the pad's smaller physical dimension independent of route angle: that is
+/// the narrowest copper the land can actually support. The transition then
+/// takes only the distance needed for 45-degree flanks.
 fn powerEndpointProfile(
     pads: []const Pad,
     point: [2]f64,
@@ -329,14 +332,18 @@ fn powerEndpointProfile(
     var land: f64 = 0;
     for (pads) |pad| {
         if (pad.layer != layer or !samePoint(pad.at, point)) continue;
-        const span = launchSpan(pad, direction);
+        const span = 2 * @min(pad.half_w, pad.half_h);
         if (!(span > 0)) continue;
         found = true;
         width = @max(width, @min(span, nominal));
         land = @max(land, boxRayHalfExtent(pad, direction));
     }
     if (!found or width >= nominal - eps) return null;
-    return .{ .width = width, .land = land, .taper = nominal * rf_taper_widths };
+    return .{
+        .width = width,
+        .land = land,
+        .taper = (nominal - width) / adaptive_width_per_length,
+    };
 }
 
 const AdaptiveCell = struct {
@@ -706,6 +713,22 @@ test "adaptive power width routes a narrow QFN land then widens the open trunk" 
     try testing.expect(widest >= 0.8 - 1e-4);
     try testing.expect(launch_width.? <= 0.2 + 1e-4);
     try testing.expect(distinct_widths > 4);
+}
+
+// spec: placement/power-routing - an adaptive power launch uses the pad's smaller physical dimension and the shortest 45-degree taper to nominal width
+test "adaptive power launch uses minimum pad dimension and a compact taper" {
+    const root = @sqrt(0.5);
+    const pads = [_]Pad{.{
+        .at = .{ 0, 0 },
+        .layer = 0,
+        .half_w = 1.2,
+        .half_h = 0.15,
+        .axis_x = .{ 1, 0 },
+    }};
+    const profile = powerEndpointProfile(&pads, .{ 0, 0 }, 0, 0.4, .{ root, root }).?;
+    try testing.expectApproxEqAbs(@as(f64, 0.3), profile.width, eps);
+    try testing.expectApproxEqAbs(@as(f64, 0.05), profile.taper, eps);
+    try testing.expectApproxEqAbs(@as(f64, 0.15 * @sqrt(2.0)), profile.land, eps);
 }
 
 test "overlapping endpoint profiles keep a short pad to pad hop narrow" {

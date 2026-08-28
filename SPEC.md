@@ -3215,6 +3215,9 @@ is enlarged only as far as the derived drill and annular-ring rules require.
 - a power pour's effective minimum neck is raised above the board fabrication floor by the rail maximum and actual stack foil
 - board rules derive the worst-layer trace width and one-barrel drill from maximum rail load
 - an unpoured current-rated rail routes through a QFN-sized land at fabrication width, then grows to its electrical target with an automatic pad taper
+- an adaptive power launch uses the pad's smaller physical dimension and the shortest 45-degree taper to nominal width
+- the hand router receives an electrical target for every unpoured current-rated rail, including an otherwise-unclassed net
+- the hand router steers an unpoured current-rated rail at ordinary fabrication width, then grows each local interval to its largest DRC-clear width with 45-degree tapers from the pad's smaller dimension
 - adaptive routing retains the full maximum-current target while a pour-backed rail keeps its short authored fanout width
 - an adaptive rail reports one warning at its worst electrical shortfall while the fabrication minimum remains a hard error
 - a solved plane-aware rail exposes an index-aligned required width for each local-current branch, while an incomplete opted-in rail screens every segment at the whole-rail current
