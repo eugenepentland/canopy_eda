@@ -114,3 +114,8 @@ log is not a substitute for reporting an active blocker to the user.
 - **friction:** Tuning the CAM interaction renderer required four roughly 40-second `scripts/pcb_browser_perf/run.js` runs, and every useful render result still ended red on unrelated cold Gerber generation, 3D navigation, and a changed/dirty live-design baseline.
 - **idea:** Add a focused `--only-render` or scenario filter that starts from a warm CAM payload and runs exact-quality, pan, zoom, side, rotate, and layer assertions without 3D navigation or aggregate baseline enforcement. This would preserve the full release gate while cutting iterative renderer measurements to the requested surface.
 - **status:** open
+
+## 2026-08-28 · codex · copper-pour fabrication audit
+- **friction:** The first exact-candidate CAM-to-readiness audit exposed a pre-existing stale epoll event after a 3.07 MB response; unregistering only the handler-driven close path still missed curl's keepalive peer-close path and required a second real-server replay to locate the shared lifecycle boundary.
+- **idea:** Keep socket read-unregistration centralized in `Conn.close` and retain the large-response, half-closed-client regression in the ordinary test suite so every HTTP close path shares the same lifetime rule.
+- **status:** resolved in this change
