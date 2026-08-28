@@ -363,6 +363,87 @@ pub const Fill = struct {
         };
         return -1;
     }
+
+    fn appendUniqueComponent(out: *std.ArrayList(i32), arena: std.mem.Allocator, component: i32) std.mem.Allocator.Error!void {
+        if (component < 0) return;
+        for (out.items) |old| if (old == component) return;
+        try out.append(arena, component);
+    }
+
+    fn cellRange(self: Fill, lo: f64, hi: f64, origin: f64, count: usize, slack: f64) ?[2]usize {
+        if (!(self.frame.pitch > 0) or count == 0) return null;
+        const first = @max(@floor((lo - slack - origin) / self.frame.pitch), 0);
+        const last = @min(@floor((hi + slack - origin) / self.frame.pitch), @as(f64, @floatFromInt(count - 1)));
+        const a = numeric.checkedInt(usize, first) orelse return null;
+        const b = numeric.checkedInt(usize, last) orelse return null;
+        return if (a <= b) .{ a, b } else null;
+    }
+
+    /// Every kept fill component whose realised raster copper overlaps a pad's
+    /// actual world-space shape. Connectivity must test copper area, not only
+    /// the pad anchor: a valid pour may enter through one end of a long land
+    /// without enclosing its centre. The fill labels are authoritative after
+    /// zone clipping, priority clearance, minimum-width opening, and topology
+    /// repair, so this cannot credit raw polygon area that Gerber dropped.
+    pub fn shapeComponents(
+        self: Fill,
+        arena: std.mem.Allocator,
+        shape: pad_shape.Shape,
+        slack: f64,
+    ) std.mem.Allocator.Error![]const i32 {
+        var out: std.ArrayList(i32) = .empty;
+        const cols = self.cellRange(shape.x0, shape.x1, self.frame.minx, self.frame.nx, slack) orelse
+            return out.toOwnedSlice(arena);
+        const rows = self.cellRange(shape.y0, shape.y1, self.frame.miny, self.frame.ny, slack) orelse
+            return out.toOwnedSlice(arena);
+        for (rows[0]..rows[1] + 1) |j| {
+            for (cols[0]..cols[1] + 1) |i| {
+                const component = self.labels[j * self.frame.nx + i];
+                if (component < 0) continue;
+                const x0 = self.frame.minx + @as(f64, @floatFromInt(i)) * self.frame.pitch;
+                const y0 = self.frame.miny + @as(f64, @floatFromInt(j)) * self.frame.pitch;
+                const cell = pad_shape.Shape{
+                    .x0 = x0,
+                    .y0 = y0,
+                    .x1 = x0 + self.frame.pitch,
+                    .y1 = y0 + self.frame.pitch,
+                };
+                if (pad_shape.shapeGap(shape, cell, slack) > slack) continue;
+                try appendUniqueComponent(&out, arena, component);
+            }
+        }
+        return out.toOwnedSlice(arena);
+    }
+
+    /// Every kept fill component touched by a circular via land. A via centre
+    /// need not lie inside a custom zone for their copper discs to overlap.
+    pub fn diskComponents(
+        self: Fill,
+        arena: std.mem.Allocator,
+        cx: f64,
+        cy: f64,
+        radius: f64,
+        slack: f64,
+    ) std.mem.Allocator.Error![]const i32 {
+        var out: std.ArrayList(i32) = .empty;
+        const cols = self.cellRange(cx - radius, cx + radius, self.frame.minx, self.frame.nx, slack) orelse
+            return out.toOwnedSlice(arena);
+        const rows = self.cellRange(cy - radius, cy + radius, self.frame.miny, self.frame.ny, slack) orelse
+            return out.toOwnedSlice(arena);
+        for (rows[0]..rows[1] + 1) |j| {
+            for (cols[0]..cols[1] + 1) |i| {
+                const component = self.labels[j * self.frame.nx + i];
+                if (component < 0) continue;
+                const x0 = self.frame.minx + @as(f64, @floatFromInt(i)) * self.frame.pitch;
+                const y0 = self.frame.miny + @as(f64, @floatFromInt(j)) * self.frame.pitch;
+                const nearest_x = std.math.clamp(cx, x0, x0 + self.frame.pitch);
+                const nearest_y = std.math.clamp(cy, y0, y0 + self.frame.pitch);
+                if (std.math.hypot(cx - nearest_x, cy - nearest_y) > radius + slack) continue;
+                try appendUniqueComponent(&out, arena, component);
+            }
+        }
+        return out.toOwnedSlice(arena);
+    }
 };
 
 /// One computed fill-component index and a representative world-space point

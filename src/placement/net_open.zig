@@ -819,6 +819,55 @@ test "a user copper pour joining two same-net islands produces no net_open" {
     try testing.expectEqual(@as(usize, 0), count(vs));
 }
 
+// spec: placement/drc - a custom copper pour connects pads by real polygon overlap even when neither pad centre lies inside the pour
+test "a user copper pour overlapping only the ends of two pads produces no net_open" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &pads, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 1, .pads = &pads, .fallback = false, .x = 10, .y = 0 },
+    };
+    const pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } };
+    const nets = [_]flat_netlist.FlatNet{.{ .name = "SIG", .pins = &pins }};
+    const placement = twoPadPlacement(&parts, &nets);
+
+    // Each 0.6 mm land reaches to x=±0.3 around its centre. The pour begins at
+    // x=0.1 and ends at x=9.9: it overlaps 0.2 mm of each land but contains
+    // neither centre. Centre-only membership reports a false open; polygon-to-
+    // pad copper overlap correctly joins both terminals through the pour.
+    const poly = [_][2]f64{ .{ 0.1, -0.4 }, .{ 9.9, -0.4 }, .{ 9.9, 0.4 }, .{ 0.1, 0.4 } };
+    const zones = [_]pour.UserZone{.{ .net = "SIG", .layer = 0, .poly = &poly }};
+    try testing.expectEqual(@as(usize, 0), count(try check(arena, placement, .{ .zones = &zones }, null)));
+}
+
+// spec: placement/drc - a custom copper pour connects a via by circular-land overlap even when the via centre lies outside the pour
+test "a user copper pour overlapping pad and via edges joins islands across layers" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &pads, .fallback = false, .x = 0, .y = 0, .side = .bottom },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 1, .pads = &pads, .fallback = false, .x = 10, .y = 0 },
+    };
+    const pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } };
+    const nets = [_]flat_netlist.FlatNet{.{ .name = "SIG", .pins = &pins }};
+    const placement = twoPadPlacement(&parts, &nets);
+    const tracks = [_]router.Track{.{ .x1 = 8, .y1 = 0, .x2 = 10, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 }};
+    const vias = [_]router.Via{.{ .x = 8, .y = 0, .dia = 0.4, .drill = 0.2, .net = 0 }};
+
+    // B.Cu pour: 0.2 mm overlap with U1's bottom land at the left and 0.1 mm
+    // overlap with the via's 0.2 mm-radius copper disc at the right. Both
+    // centres remain outside, matching Barracuda U19's saved custom zones.
+    const poly = [_][2]f64{ .{ 0.1, -0.4 }, .{ 7.9, -0.4 }, .{ 7.9, 0.4 }, .{ 0.1, 0.4 } };
+    const zones = [_]pour.UserZone{.{ .net = "SIG", .layer = 1, .poly = &poly }};
+    try testing.expectEqual(@as(usize, 0), count(try check(arena, placement, .{ .tracks = &tracks, .vias = &vias, .zones = &zones }, null)));
+}
+
 // spec: placement/drc - every net earns its own user pour's credit from the run's shared zone raster
 test "a second net still earns its user pour's credit" {
     var arena_i = std.heap.ArenaAllocator.init(testing.allocator);

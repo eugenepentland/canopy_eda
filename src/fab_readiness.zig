@@ -1597,10 +1597,10 @@ fn trackEntersZoneFill(fills: ?[]const pour.Fill, zones: []const pour.UserZone, 
     return pointInZoneFill(fills, zones, zone_i, crossing[0], crossing[1]);
 }
 
-/// Union every same-net pad (on the zone's face) and same-net via whose centre
-/// lies inside a filled, netted, non-keepout user copper pour into one
-/// component per zone. Keepout zones never reach here (the serve layer filters
-/// them before building `copper.zones`); `nodes` is already this net's.
+/// Union every same-net pad (on the zone's face) and same-net via whose copper
+/// overlaps a filled, netted, non-keepout user copper pour into one component
+/// per zone. Keepout zones never reach here (the serve layer filters them
+/// before building `copper.zones`); `nodes` is already this net's.
 /// Each zone's first united member is reported into `anchors` so the graph can
 /// name which nodes sit in pour copper (see `PlaneJoin.nodes`).
 fn uniteUserZones(
@@ -1616,13 +1616,21 @@ fn uniteUserZones(
         var component_anchors: std.AutoHashMapUnmanaged(i32, usize) = .empty;
         for (nodes.items, 0..) |p, pi| {
             if (!padInZoneLayer(p, z.layer)) continue;
-            const component = componentInZoneFill(nodes.fills, zones, zi, p.cx, p.cy);
-            if (component < 0) continue;
-            // A pad inside a higher-priority overlapping pour sits where this
-            // pour's copper receded (the clearance gap) — it is not united here.
-            if (pour.clippedByHigher(zones, zi, p.cx, p.cy)) continue;
-            const gop = try component_anchors.getOrPut(arena, component);
-            if (gop.found_existing) unite(parent, gop.value_ptr.*, pi) else gop.value_ptr.* = pi;
+            const components = if (nodes.fills) |fills|
+                try fills[zi].shapeComponents(arena, .{
+                    .x0 = p.x0,
+                    .y0 = p.y0,
+                    .x1 = p.x1,
+                    .y1 = p.y1,
+                    .poly = p.poly,
+                }, touch_slack_mm)
+            else
+                &[_]i32{componentInZoneFill(null, zones, zi, p.cx, p.cy)};
+            for (components) |component| {
+                if (component < 0) continue;
+                const gop = try component_anchors.getOrPut(arena, component);
+                if (gop.found_existing) unite(parent, gop.value_ptr.*, pi) else gop.value_ptr.* = pi;
+            }
         }
         for (nodes.tracks, 0..) |t, ti| {
             if (t.layer != z.layer) continue;
@@ -1638,12 +1646,16 @@ fn uniteUserZones(
             }
         }
         for (nodes.vias, 0..) |v, vi| {
-            const component = componentInZoneFill(nodes.fills, zones, zi, v.x, v.y);
-            if (component < 0) continue;
-            if (pour.clippedByHigher(zones, zi, v.x, v.y)) continue;
             const node = nodes.via_base + vi;
-            const gop = try component_anchors.getOrPut(arena, component);
-            if (gop.found_existing) unite(parent, gop.value_ptr.*, node) else gop.value_ptr.* = node;
+            const components = if (nodes.fills) |fills|
+                try fills[zi].diskComponents(arena, v.x, v.y, v.dia / 2, touch_slack_mm)
+            else
+                &[_]i32{componentInZoneFill(null, zones, zi, v.x, v.y)};
+            for (components) |component| {
+                if (component < 0) continue;
+                const gop = try component_anchors.getOrPut(arena, component);
+                if (gop.found_existing) unite(parent, gop.value_ptr.*, node) else gop.value_ptr.* = node;
+            }
         }
         var anchor_it = component_anchors.valueIterator();
         while (anchor_it.next()) |anchor| try anchors.append(arena, anchor.*);

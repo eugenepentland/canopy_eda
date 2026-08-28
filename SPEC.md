@@ -3069,6 +3069,8 @@ Public functions: check, checkTopology, checkWithZones, checkWithPreparedCopper,
 - orphan copper touching no pad is flagged as a net-open island
 - two same-net tracks that cross mid-span with no shared endpoint are one island (no net-open)
 - a user copper pour unites its enclosed same-net copper islands so no net-open is flagged
+- a custom copper pour connects pads by real polygon overlap even when neither pad centre lies inside the pour
+- a custom copper pour connects a via by circular-land overlap even when the via centre lies outside the pour
 - every net earns its own user pour's credit from the run's shared zone raster
 - an inner-layer user pour unites its enclosed same-net through-hole pads but not SMD pads
 - the net-open sweep rasters the board's user pours once for all nets and each net still reads only its own pour
