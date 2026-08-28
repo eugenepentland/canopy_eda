@@ -178,9 +178,19 @@ pub fn zonesKey(zones: []const pour.UserZone) u64 {
     return h.final();
 }
 
-/// Digest the copper the scoped diff does not model: arcs and RF path outcomes.
+/// Digest the copper the scoped diff does not model: arcs, RF path outcomes,
+/// and the router's recorded sharp bends (retained for the sweep — a
+/// bends-only change must invalidate the session rather than slip past it).
 pub fn auxKey(routed: router.RouteResult) u64 {
     var h = std.hash.Wyhash.init(0x61757863); // "auxc"
+    for (routed.sharp_bends) |b| {
+        h.update(std.mem.asBytes(&b.x));
+        h.update(std.mem.asBytes(&b.y));
+        h.update(std.mem.asBytes(&b.layer));
+        h.update(std.mem.asBytes(&b.net));
+        h.update(std.mem.asBytes(&b.radius));
+        h.update(std.mem.asBytes(&b.required));
+    }
     for (routed.arcs) |arc| {
         for ([_][2]f64{ arc.p1, arc.pm, arc.p2 }) |p| for (p) |v| h.update(std.mem.asBytes(&v));
         h.update(std.mem.asBytes(&arc.layer));
@@ -1337,6 +1347,11 @@ test "a reconcile identity separates copper edits from every other change" {
     // …but an ARC is, because no scoped rule reasons about one.
     const arcs = [_]router.Arc{.{ .p1 = .{ 0, 0 }, .pm = .{ 1, 1 }, .p2 = .{ 2, 0 }, .layer = 0, .width = 0.2, .net = 0 }};
     try testing.expect(auxKey(.{ .tracks = &.{}, .vias = &.{}, .arcs = &arcs, .routed = 0, .total = 0 }) != auxKey(b));
+
+    // …and so are the recorded sharp bends: the diff does not model them, so a
+    // bends-only change must invalidate the session, not slip past it.
+    const bends = [_]router.SharpBend{.{ .x = 1, .y = 2, .layer = 0, .net = 0, .radius = 0.1, .required = 0.3 }};
+    try testing.expect(auxKey(.{ .tracks = &.{}, .vias = &.{}, .sharp_bends = &bends, .routed = 0, .total = 0 }) != auxKey(b));
 
     const base = Design{ .live_version = 3, .layout_rev = 7, .poses = posesKey(&poses) };
     var bumped = base;
