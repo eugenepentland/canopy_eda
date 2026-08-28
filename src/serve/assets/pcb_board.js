@@ -7021,8 +7021,9 @@ function viaPlaceAt(m){if(!viaNet){var picked=viaPickNetAt(m);if(picked){viaNetS
  if(viaViolation(q.x,q.y,viaNet,vg.dia,vg.drill)){routeStatMsg("a via here violates clearance — choose another point",true);return;}
  var cand={x:q.x,y:q.y,d:vg.dia,drill:vg.drill,net:viaNet,source:"human",id:viaIdNew()};
  if(drcGateBlocks(null,[cand])){routeStatMsg("a via here would create a DRC error — choose another point",true);return;}
- recordUndo();rfDropNet(viaNet);PCB.vias=PCB.vias||[];PCB.vias.push(cand);scheduleDrc();paintSoon();
- routeStatMsg(nLeaf(viaNet)+" via placed — click again or Esc to finish");}
+ recordUndo();rfDropNet(viaNet);PCB.vias=PCB.vias||[];PCB.vias.push(cand);scheduleDrc();
+ var dropped=routeFenceCull(null,[cand],null);paintSoon();
+ routeStatMsg(nLeaf(viaNet)+" via placed"+(dropped?(" · "+dropped+" RF fence via"+(dropped===1?"":"s")+" removed"):"")+" — click again or Esc to finish");}
 viaControlsInit();
 // Tool-strip radio state + the status bar's tool segment. The Select tool
 // lights up whenever no drawing mode is armed.
@@ -7325,16 +7326,16 @@ window.PCBDrawAutomaticTaperPlan=drawAutomaticTaperPlan;
 function drawProspectiveTaperPlan(plan){if(!dtrace||dtrace.pair||!plan||!plan.tracks||!plan.tracks.length)return {tracks:(plan&&plan.tracks)||[],paths:[]};
  var tracks=plan.tracks,last=tracks[tracks.length-1],ep=drawEndpointPad(last.net,last.l||0,last.x2,last.y2);
  return drawAutomaticTaperPlan(tracks,dtrace.n===0?dtrace.startPad:null,ep,dtrace.w);}
-function drawApplyAutomaticTapers(){if(!dtrace||dtrace.pair||!dtrace.laid||!dtrace.laid.length)return {ok:true,changed:false};
+function drawApplyAutomaticTapers(){if(!dtrace||dtrace.pair||!dtrace.laid||!dtrace.laid.length)return {ok:true,changed:false,paths:[]};
  var old=dtrace.laid.slice(),nominal=dtrace.w;
  var ep=drawEndpointPad(dtrace.net,dtrace.l,dtrace.lx,dtrace.ly),physical=drawAutomaticTaperPlan(old,dtrace.startPad,ep,nominal),
   shaped=physical.tracks,paths=physical.paths;
- if(!paths.length)return {ok:true,changed:false};
+ if(!paths.length)return {ok:true,changed:false,paths:[]};
  var board=PCB.tracks||[],after=board.filter(function(t){return old.indexOf(t)<0;}).concat(shaped,drawTaperPortalProbes(paths)),base=dtrace.undo||{};
  if(drcGateDiffBlocks(base.tracks||[],base.vias||[],after,PCB.vias||[])){
-  routeStatMsg("automatic pad taper would violate DRC — adjust the launch before finishing",true);return {ok:false,changed:false};}
- if(!paths.length)return {ok:true,changed:false};PCB.rf_paths=PCB.rf_paths||[];
- Array.prototype.push.apply(PCB.rf_paths,paths);cuGeomDrop();gpuCuEdit();return {ok:true,changed:true};}
+  routeStatMsg("automatic pad taper would violate DRC — adjust the launch before finishing",true);return {ok:false,changed:false,paths:[]};}
+ if(!paths.length)return {ok:true,changed:false,paths:[]};PCB.rf_paths=PCB.rf_paths||[];
+ Array.prototype.push.apply(PCB.rf_paths,paths);cuGeomDrop();gpuCuEdit();return {ok:true,changed:true,paths:paths};}
 // Retrofit saved controlled-impedance copper that predates automatic launch
 // tapering. A saved route is already an arbitrary graph rather than one ordered
 // pen gesture, so start at each uncovered SMD land and follow its unique
@@ -7604,6 +7605,32 @@ function drawHitVia(m){var best=null,bd=1e9;(PCB.vias||[]).forEach(function(v){
 function routeStatMsg(txt,err){var msg=document.getElementById("pcb-savemsg");
  if(msg){msg.style.color=err?"#f85149":"#8b949e";
   msg.textContent=txt||"copper edited — Save/Update to keep";}}
+// RF fence posts are generated cache geometry: routing may cross them and the
+// fence action can reconstruct them afterward. The board-derived perimeter
+// fence is different — it remains a hard fabrication/edge constraint.
+function routeFenceVia(v){return !!(v&&v.f&&v.f!=="@perimeter");}
+function routeFenceClr(a,b){return Math.max(netClrFor((a&&a.net)||""),netClrFor((b&&b.net)||""));}
+function routeFenceHitsTrack(v,t){if(!t||sameNet(v.net,t.net))return false;
+ var need=(v.d||0.4)/2+(t.w||0.25)/2+routeFenceClr(v,t);
+ return trackChords(t).some(function(s){return ptSegDist(v.x,v.y,s.x1,s.y1,s.x2,s.y2)<need-1e-6;});}
+function routeFenceHitsVia(v,q){if(!q||sameNet(v.net,q.net))return false;
+ var dist=Math.hypot(v.x-q.x,v.y-q.y),copper=(v.d||0.4)/2+(q.d||0.4)/2+routeFenceClr(v,q),
+  hole=(v.drill||0)/2+(q.drill||0)/2+(+((PCB.rules||{}).hole_to_hole)||0);
+ return dist<copper-1e-6||(hole>0&&dist<hole-1e-6);}
+function routeFenceHitsPath(v,p){if(!p||sameNet(v.net,p.net))return false;var ss=p.samples||[];
+ for(var i=1;i<ss.length;i++){var t={x1:+ss[i-1][0],y1:+ss[i-1][1],x2:+ss[i][0],y2:+ss[i][1],
+   w:Math.max(+ss[i-1][2]||0,+ss[i][2]||0),net:p.net||""};if(routeFenceHitsTrack(v,t))return true;}return false;}
+// Drop only generated posts whose required clearance envelope the newly
+// committed copper occupies. Returns the count for route-finish feedback; the
+// route-start snapshot still contains every post, so Undo/cancel restores them.
+function routeFenceCull(tracks,vias,paths){var before=PCB.vias||[],dropped=0;
+ tracks=tracks||[];vias=vias||[];paths=paths||[];
+ PCB.vias=before.filter(function(v){if(!routeFenceVia(v))return true;
+  var hit=tracks.some(function(t){return routeFenceHitsTrack(v,t);})||
+   vias.some(function(q){return q!==v&&routeFenceHitsVia(v,q);})||
+   paths.some(function(p){return routeFenceHitsPath(v,p);});
+  if(hit)dropped++;return !hit;});
+ if(dropped){cuGeomDrop();gpuCuEdit();}return dropped;}
 // ── Live DRC while hand-routing ─────────────────────────────────────────
 // A drawn segment/via is validated against SAME-LAYER foreign-net copper
 // (pads, tracks, vias) at the active net's clearance BEFORE it commits — a
@@ -7728,7 +7755,7 @@ function segViolation(x1,y1,x2,y2,layer,net,hw,skip){var clr=netClrFor(net);
   if(d2<clr-1e-6)return {x:midx,y:midy,k:"track↔track"};}
  // foreign vias
  var vs=PCB.vias||[];
- for(var kk=0;kk<vs.length;kk++){var v=vs[kk];if(sameNet(v.net,net))continue;
+ for(var kk=0;kk<vs.length;kk++){var v=vs[kk];if(routeFenceVia(v)||sameNet(v.net,net))continue;
   var d3=ptSegDist(v.x,v.y,x1,y1,x2,y2)-hw-(v.d||0.4)/2;
   if(d3<clr-1e-6)return {x:midx,y:midy,k:"via↔track"};}
  return null;}
@@ -7759,7 +7786,7 @@ function viaViolation(x,y,net,dia,drill){var clr=netClrFor(net),vr=(dia||0.4)/2;
   var d2=segDist(x,y,t)-vr-(t.w||0.25)/2;
   if(d2<clr-1e-6)return {x:x,y:y,k:"via↔track"};}
  var vs=PCB.vias||[];
- for(var kk=0;kk<vs.length;kk++){var v=vs[kk];if(sameNet(v.net,net))continue;
+ for(var kk=0;kk<vs.length;kk++){var v=vs[kk];if(routeFenceVia(v)||sameNet(v.net,net))continue;
   var d3=Math.hypot(v.x-x,v.y-y)-vr-(v.d||0.4)/2;
   if(d3<clr-1e-6)return {x:x,y:y,k:"via↔via"};}
  return null;}
@@ -7822,9 +7849,12 @@ function drawCommitPlan(plan){if(!plan||!plan.tracks.length)return false;
  if(plan.bends){var want=drawArcRadius(),shrunk=plan.minRadius+1e-6<want;
   routeStatMsg((shrunk?"fit-limited arc · R":"tangent arc · R")+plan.minRadius.toFixed(3)+" mm");}
  return true;}
-function drawEnd(){var tapered={ok:true,changed:false};if(dtrace&&dtrace.n>0){tapered=drawApplyAutomaticTapers();if(!tapered.ok)return false;
-  recordUndo(dtrace.undo);scheduleDrc();}
- drawAutoReset();dtrace=null;drawBtnSync();ovPaintSoon();routeStatMsg(tapered.changed?"automatic pad tapers added":null);return true;}
+function drawEnd(){var tapered={ok:true,changed:false,paths:[]},dropped=0;if(dtrace&&dtrace.n>0){tapered=drawApplyAutomaticTapers();if(!tapered.ok)return false;
+  var undo=dtrace.undo||{},newTracks=drcChangedAfter(undo.tracks||[],PCB.tracks||[],false),
+   newVias=drcChangedAfter(undo.vias||[],PCB.vias||[],true);
+  dropped=routeFenceCull(newTracks,newVias,tapered.paths);recordUndo(undo);scheduleDrc();}
+ drawAutoReset();dtrace=null;drawBtnSync();ovPaintSoon();
+ routeStatMsg((tapered.changed?"automatic pad tapers added":"")+(dropped?((tapered.changed?" · ":"")+dropped+" RF fence via"+(dropped===1?"":"s")+" removed"):"")||null);return true;}
 // Escape is cancellation, not another finish attempt. In particular, a DRC-
 // blocked automatic taper deliberately keeps drawEnd() live so the user can
 // adjust it; Escape must still provide a guaranteed way out. Restore the exact
@@ -7935,7 +7965,8 @@ function drawAutoSchedule(now,accept){if(!dtrace)return false;var tr=dtrace,raw=
  drawAutoTimer=setTimeout(function(){drawAutoTimer=null;drawAutoLaunch(tr,token);},now?0:280);ovPaintSoon();return true;}
 function drawAutoLaunch(tr,token){if(dtrace!==tr||!tr.auto||tr.auto.token!==token||tr.auto.state!=="queued")return;
  tr.auto.state="loading";routeStatMsg("autorouter planning the remainder…");
- var payload=boardStatePayload();payload.nets=drawAutoNets(tr);payload.resume_points=[];
+ var payload=boardStatePayload();payload.vias=(payload.vias||[]).filter(function(v){return !routeFenceVia(v);});
+ payload.nets=drawAutoNets(tr);payload.resume_points=[];
  tr.auto.legs.forEach(function(g){payload.resume_points.push({net:g.net,x:g.head.x,y:g.head.y,layer:g.head.l},{net:g.net,x:g.target.x,y:g.target.y,layer:g.target.l});});
  payload.effort="one_shot";payload.track_width=tr.w;var request=new AbortController();drawAutoRequest=request;
  fetch("/api/pcb-route-complete/"+encodeURIComponent(PCB.name)+subq(),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),signal:request.signal})
@@ -7958,9 +7989,11 @@ function drawAutoAccept(){if(!dtrace)return false;var tr=dtrace,a=tr.auto;
  PCB.tracks=PCB.tracks||[];PCB.vias=PCB.vias||[];PCB.rf_paths=PCB.rf_paths||[];
  a.tracks.forEach(function(t){t.source="autorouter";trackIdEnsure(t);PCB.tracks.push(t);});
  a.vias.forEach(function(v){v.source="autorouter";viaIdEnsure(v);PCB.vias.push(v);});
- Array.prototype.push.apply(PCB.rf_paths,a.rf_paths);var nt=a.tracks.length,nv=a.vias.length,undo=tr.undo;
+ Array.prototype.push.apply(PCB.rf_paths,a.rf_paths);var nt=a.tracks.length,nv=a.vias.length,undo=tr.undo||{},
+  newTracks=drcChangedAfter(undo.tracks||[],PCB.tracks||[],false),newVias=drcChangedAfter(undo.vias||[],PCB.vias||[],true),
+  dropped=routeFenceCull(newTracks,newVias,(tapered.paths||[]).concat(a.rf_paths));
  drawAutoReset();dtrace=null;recordUndo(undo);scheduleDrc();drawBtnSync();drawRoute();rats();ovPaintSoon();
- routeStatMsg("autorouter completed the trace · "+nt+" segment"+(nt===1?"":"s")+(nv?(" · "+nv+" via"+(nv===1?"":"s")):"")+(tapered.changed?" · pad tapers added":""));return true;}
+ routeStatMsg("autorouter completed the trace · "+nt+" segment"+(nt===1?"":"s")+(nv?(" · "+nv+" via"+(nv===1?"":"s")):"")+(tapered.changed?" · pad tapers added":"")+(dropped?(" · "+dropped+" RF fence via"+(dropped===1?"":"s")+" removed"):""));return true;}
 // ── Coupled differential-pair drawing ───────────────────────────────────
 // Starting a trace on a pad, via, or track whose net belongs to a
 // `(net-class … (diff-pair))` pair auto-couples the ✎ Draw tool (P uncouples):
@@ -9520,11 +9553,13 @@ function scheduleDrc(opts){if(RO)return;opts=opts||{};
 // to the original 800 ms server-debounce path (no behaviour change there).
 var wasmDrc={worker:null,ready:false,failed:false,seq:0,lastN:null,lastIds:{}};
 var wasmCoalesceTimer=null,serverReconcileTimer=null;
-var drcInputCache={gen:-1,clr:null,outline:null,json:null};
-function drcInputJson(){var clr=clrVal(),outline=PCB.outline||null;
- if(drcInputCache.gen===dirtyGeneration&&drcInputCache.clr===clr&&drcInputCache.outline===outline&&drcInputCache.json)return drcInputCache.json;
- var json=JSON.stringify(buildDrcInput(PCB,{clearance:clr,outline:outline}));
- drcInputCache={gen:dirtyGeneration,clr:clr,outline:outline,json:json};return json;}
+var drcInputCache={gen:-1,clr:null,outline:null,route:false,json:null};
+function drcInputJson(){return drcInputJsonMode(false);}
+function drcRouteInputJson(){return drcInputJsonMode(true);}
+function drcInputJsonMode(ignoreRfFenceVias){var clr=clrVal(),outline=PCB.outline||null,route=!!ignoreRfFenceVias;
+ if(drcInputCache.gen===dirtyGeneration&&drcInputCache.clr===clr&&drcInputCache.outline===outline&&drcInputCache.route===route&&drcInputCache.json)return drcInputCache.json;
+ var json=JSON.stringify(buildDrcInput(PCB,{clearance:clr,outline:outline,ignore_rf_fence_vias:route}));
+ drcInputCache={gen:dirtyGeneration,clr:clr,outline:outline,route:route,json:json};return json;}
 function wasmDrcInit(){
  if(RO||wasmDrc.worker||wasmDrc.failed)return;
  if(typeof Worker==="undefined"||typeof WebAssembly==="undefined"||typeof buildDrcInput!=="function"){wasmDrc.failed=true;return;}
@@ -9641,7 +9676,7 @@ function drcGateSessionReload(){
  drcGate.sLoaded=false;
  try{
   var ex=drcGate.inst.exports;
-  var input=drcInputJson();
+  var input=drcRouteInputJson();
   var bytes=new TextEncoder().encode(input);
   var p=ex.wasm_alloc(bytes.length);
   new Uint8Array(drcGate.mem.buffer).set(bytes,p);
@@ -9675,7 +9710,7 @@ function drcGateSessionReload(){
 // Dense boards keep the conservative JS preview and the SAME scoped exact WASM
 // commit gate below; only the optional persistent mid-drag accelerator is off.
 var DRC_SESS_MAIN_THREAD_MAX=1200,drcSessTimer=null;
-function drcGateSessionWork(){var n=(PCB.tracks||[]).length+2*(PCB.vias||[]).length;
+function drcGateSessionWork(){var n=(PCB.tracks||[]).length+2*(PCB.vias||[]).filter(function(v){return !routeFenceVia(v);}).length;
  for(var i=0;i<P.length&&n<=DRC_SESS_MAIN_THREAD_MAX;i++)for(var j=0,pads=P[i].pads||[];j<pads.length;j++){
   n+=1+(pads[j].drill>0?1:0);if(n>DRC_SESS_MAIN_THREAD_MAX)break;}
  return n;}
@@ -9722,7 +9757,7 @@ function drcSessClipSeg(x1,y1,x2,y2,layer,net,hw){
 function drcGateRun(tracks,vias,parts,rfPaths){
  var ex=drcGate.inst.exports;
  var input=JSON.stringify(buildDrcInput(PCB,{clearance:clrVal(),outline:PCB.outline||null,parts:parts||P,tracks:tracks,vias:vias,
-  rf_paths:rfPaths==null?(PCB.rf_paths||[]):rfPaths}));
+  rf_paths:rfPaths==null?(PCB.rf_paths||[]):rfPaths,ignore_rf_fence_vias:true}));
  var bytes=new TextEncoder().encode(input);
  var p=ex.wasm_alloc(bytes.length);
  new Uint8Array(drcGate.mem.buffer).set(bytes,p);

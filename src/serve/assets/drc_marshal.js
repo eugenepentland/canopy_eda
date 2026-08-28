@@ -25,8 +25,12 @@ function collapseNet(s) {
 // Assemble the wasm DRC input object from the page blob + live state.
 //   PCB  — the /pcb-layout page blob (source of geometry, rules, net-classes).
 //   live — optional overrides captured from the live editor:
-//            {parts, tracks, vias, outline, clearance}. Any field left out
-//            falls back to the blob's own value. Parts already carry live poses
+//            {parts, tracks, vias, outline, clearance, ignore_rf_fence_vias}.
+//            Any geometry field left out falls back to the blob's own value.
+//            `ignore_rf_fence_vias` is reserved for the hand-router's preview
+//            and commit gates: generated RF fence posts are disposable routing
+//            obstacles, while ordinary vias and the perimeter fence remain.
+//            Parts already carry live poses
 //            (the viewer mutates PCB.parts[i].x/y/rot/side in place), so passing
 //            PCB.parts through captures the current placement.
 function buildDrcInput(PCB, live) {
@@ -36,6 +40,9 @@ function buildDrcInput(PCB, live) {
   var tracks = live.tracks || PCB.tracks || [];
   var vias = live.vias || PCB.vias || [];
   var rfPaths = live.rf_paths || PCB.rf_paths || [];
+  if (live.ignore_rf_fence_vias) {
+    vias = vias.filter(function (v) { return !v.f || v.f === "@perimeter"; });
+  }
   function pathOwnsTrack(t) {
     if (typeof window !== "undefined" && window.PCBRfOwnsTrack) return window.PCBRfOwnsTrack(t);
     return rfPaths.some(function (p) {

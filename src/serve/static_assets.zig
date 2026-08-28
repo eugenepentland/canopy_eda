@@ -1099,6 +1099,26 @@ test "PCB hand router gates pad entry and exit at the prospective tapered width"
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
+// spec: Web Server - Generated RF fence vias are disposable while hand-routing: previews, exact DRC gates, and scoped autocomplete ignore them, committed copper removes only intersecting posts, and perimeter/ordinary vias remain obstacles
+test "PCB hand router routes through generated RF fence vias and culls the crossed posts" {
+    const markers = [_][]const u8{
+        "function routeFenceVia(v){return !!(v&&v.f&&v.f!==\"@perimeter\");}",
+        "if(routeFenceVia(v)||sameNet(v.net,net))continue",
+        "function routeFenceCull(tracks,vias,paths)",
+        "dropped=routeFenceCull(newTracks,newVias,tapered.paths)",
+        "dropped=routeFenceCull(newTracks,newVias,(tapered.paths||[]).concat(a.rf_paths))",
+        "payload.vias=(payload.vias||[]).filter(function(v){return !routeFenceVia(v);})",
+        "ignore_rf_fence_vias:true",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+    // Both the segment and via fallback gates skip disposable posts.
+    try std.testing.expect(std.mem.count(u8, pcb_board_js, "if(routeFenceVia(v)||sameNet(v.net,net))continue") >= 2);
+    // The shared marshaler strips only RF-generated posts on route-gate calls;
+    // its ordinary worker/server-parity use still checks the complete board.
+    try std.testing.expect(std.mem.indexOf(u8, drc_marshal_js, "if (live.ignore_rf_fence_vias)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, drc_marshal_js, "!v.f || v.f === \"@perimeter\"") != null);
+}
+
 // spec: Web Server - Escape cancels an active manual route even when automatic pad-taper DRC rejects finishing it, restoring the route-start copper and exiting Draw instead of retrying the blocked finish
 test "PCB editor Escape cancels a DRC-blocked manual route" {
     const markers = [_][]const u8{
