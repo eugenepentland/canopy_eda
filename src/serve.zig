@@ -569,6 +569,116 @@ test "a live scene-graph read survives the push that replaces the slot" {
     try std.testing.expectEqualStrings("{\"v\":2}", fresh);
 }
 
+const HttpCloseRaceHarness = struct {
+    const payload_len = 3_200_000;
+
+    entered: std.Io.Semaphore = .{},
+    release: std.Io.Semaphore = .{},
+
+    fn respond(self: *HttpCloseRaceHarness, _: *httpz.Request, res: *httpz.Response) !void {
+        self.entered.post(std.testing.io);
+        self.release.waitUncancelable(std.testing.io);
+        const body = try res.arena.alloc(u8, payload_len);
+        @memset(body, 'x');
+        res.body = body;
+    }
+};
+
+fn reserveHttpTestPort() !u16 {
+    const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+    var listener = try address.listen(std.testing.io, .{});
+    defer listener.deinit(std.testing.io);
+    return listener.socket.address.getPort();
+}
+
+fn connectHttpTestClient(port: u16) !std.Io.net.Stream {
+    const address = try std.Io.net.IpAddress.parse("127.0.0.1", port);
+    const stream = try address.connect(std.testing.io, .{ .mode = .stream });
+    const timeout = std.mem.toBytes(std.posix.timeval{ .sec = 1, .usec = 0 });
+    try std.posix.setsockopt(stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, &timeout);
+    try std.posix.setsockopt(stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, &timeout);
+    return stream;
+}
+
+fn sendHttpTestRequest(stream: std.Io.net.Stream) !void {
+    var writer = stream.writer(std.testing.io, &.{});
+    try writer.interface.writeAll("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    try writer.interface.flush();
+}
+
+fn readHttpTestResponse(stream: std.Io.net.Stream, buffer: []u8) ![]const u8 {
+    var used: usize = 0;
+    while (used < buffer.len) {
+        const count = std.posix.read(stream.socket.handle, buffer[used..]) catch |err| switch (err) {
+            error.ConnectionResetByPeer => break,
+            else => return err,
+        };
+        if (count == 0) break;
+        used += count;
+        if (std.mem.indexOf(u8, buffer[0..used], "\r\n\r\n")) |header| {
+            const response_len = header + 4 + HttpCloseRaceHarness.payload_len;
+            if (used >= response_len) return buffer[0..response_len];
+        }
+    }
+    return buffer[0..used];
+}
+
+fn expectClosingHttpTestResponse(response: []const u8) !void {
+    try std.testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 200"));
+    const header_end = std.mem.indexOf(u8, response, "\r\n\r\n").? + 4;
+    try std.testing.expectEqual(HttpCloseRaceHarness.payload_len, response.len - header_end);
+}
+
+fn verifyHttpzCloseHandover(allocator: std.mem.Allocator) !void {
+    if (comptime @import("builtin").os.tag == .windows) return;
+
+    const port = try reserveHttpTestPort();
+    var harness = HttpCloseRaceHarness{};
+    var server = try httpz.Server(*HttpCloseRaceHarness).init(std.testing.io, allocator, .{
+        .address = .localhost(port),
+        .workers = .{ .count = 1, .min_conn = 1, .max_conn = 4 },
+        .thread_pool = .{ .count = 1 },
+    }, &harness);
+    var router = try server.router(.{});
+    router.get("/", HttpCloseRaceHarness.respond, .{});
+
+    const server_thread = try server.listenInNewThread();
+    defer {
+        server.stop();
+        server_thread.join();
+        server.deinit();
+    }
+
+    const response_buffer = try allocator.alloc(u8, HttpCloseRaceHarness.payload_len + 1024);
+    defer allocator.free(response_buffer);
+
+    for (0..4) |_| {
+        const stream = try connectHttpTestClient(port);
+        defer stream.close(std.testing.io);
+        try sendHttpTestRequest(stream);
+        harness.entered.waitUncancelable(std.testing.io);
+        try stream.shutdown(std.testing.io, .send);
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(2), .awake);
+        harness.release.post(std.testing.io);
+
+        const response = try readHttpTestResponse(stream, response_buffer);
+        try expectClosingHttpTestResponse(response);
+    }
+
+    // A fresh connection proves the worker survived every forced close race.
+    const final_stream = try connectHttpTestClient(port);
+    defer final_stream.close(std.testing.io);
+    try sendHttpTestRequest(final_stream);
+    harness.entered.waitUncancelable(std.testing.io);
+    harness.release.post(std.testing.io);
+    const final_response = try readHttpTestResponse(final_stream, response_buffer);
+    try expectClosingHttpTestResponse(final_response);
+}
+
+test "httpz close handover cannot leave a stale read event" {
+    try verifyHttpzCloseHandover(std.testing.allocator);
+}
+
 /// Bring up the EDA web server on `port`: registers every page, JSON API,
 /// auth, and OAuth-support route against an httpz instance, then blocks on
 /// `server.listen()`. Project files are served out of `project_dir`; auth

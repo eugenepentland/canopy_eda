@@ -857,15 +857,13 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
                     return;
                 },
                 .close, .unknown => {
-                    // We _have_ to close the connection here in order to avoid
-                    // a bad race condition. By closing it here, we [automatically]
-                    // remove the connection from epoll/kqueue, which ensures that
-                    // in a single loop through ready-event we won't process both
-                    // a signal and a recv message.
-                    // If we don't do this here, then you'd get a segfault if
-                    // the signal cleared the connetion, and then in recv we'd
-                    // try to call conn.getState() after the signal.
-                    posix.close(http_conn.stream.socket.handle);
+                    // Closing removes the fd from epoll/kqueue, but it does not
+                    // guarantee that an already-queued readiness notification is
+                    // withdrawn before this Conn is freed. Deregister first so no
+                    // later event batch can retain the Conn pointer; events already
+                    // copied into the current batch are protected by deferred signal
+                    // processing in run().
+                    conn.close();
                 },
                 .websocket, .disown => {},
             }
@@ -1553,7 +1551,13 @@ pub fn Conn(comptime WSH: type) type {
 
         fn close(self: *Self) void {
             switch (self.protocol) {
-                .http => |http_conn| posix.close(http_conn.stream.socket.handle),
+                .http => |http_conn| {
+                    http_conn.unregisterRead() catch |err| {
+                        log.err("failed to unregister closing connection: {}", .{err});
+                        @panic("cannot safely release registered HTTP connection");
+                    };
+                    posix.close(http_conn.stream.socket.handle);
+                },
                 .websocket => |hc| hc.conn.close(.{}) catch {},
             }
         }
@@ -1735,6 +1739,12 @@ pub const HTTPConn = struct {
     pub fn disown(self: *HTTPConn) !void {
         self.handover = .disown;
 
+        try self.unregisterRead();
+    }
+
+    // Called from worker threads. Removing the read monitor must be synchronous:
+    // the event payload is a Conn pointer whose lifetime ends after handover.
+    fn unregisterRead(self: *HTTPConn) !void {
         if (comptime httpz.blockingMode()) {
             return;
         }
@@ -1743,7 +1753,7 @@ pub const HTTPConn = struct {
         const socket = self.stream.socket.handle;
         switch (comptime loopType()) {
             .kqueue => {
-                _ = try posix.kevent(loop, &.{
+                _ = posix.kevent(loop, &.{
                     .{
                         .ident = @intCast(socket),
                         .filter = posix.system.EVFILT.READ,
@@ -1752,10 +1762,16 @@ pub const HTTPConn = struct {
                         .data = 0,
                         .udata = 0,
                     },
-                }, &.{}, null);
+                }, &.{}, null) catch |err| switch (err) {
+                    error.EventNotFound => return,
+                    else => return err,
+                };
             },
             .epoll => {
-                return posix.epoll_ctl(loop, std.os.linux.EPOLL.CTL_DEL, socket, null);
+                posix.epoll_ctl(loop, std.os.linux.EPOLL.CTL_DEL, socket, null) catch |err| switch (err) {
+                    error.FileDescriptorNotRegistered => return,
+                    else => return err,
+                };
             },
         }
     }
