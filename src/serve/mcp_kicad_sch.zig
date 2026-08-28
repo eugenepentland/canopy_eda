@@ -111,7 +111,9 @@ pub fn mcpExportKicadSch(
         .flat = argBool(args_val, "flat") orelse false,
         .vendor = argBool(args_val, "vendor") orelse true,
     };
-    const result = kicad_sch_export.exportFor(alloc, project_dir, name, opts) catch |e| {
+    // No `deps`: the CLI writes the export to disk once and has no store to
+    // retain it in, so capturing a read-set would be pure cost.
+    const result = kicad_sch_export.exportFor(alloc, project_dir, name, opts, null) catch |e| {
         const msg = try std.fmt.allocPrint(alloc, "error: export failed: {s}", .{@errorName(e)});
         defer alloc.free(msg);
         try out.appendSlice(alloc, msg);

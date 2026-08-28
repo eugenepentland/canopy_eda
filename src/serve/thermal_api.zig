@@ -28,6 +28,8 @@ const thermal = @import("../eval/thermal.zig");
 const thermal_cache = @import("thermal_cache.zig");
 const mcp_tools = @import("mcp_tools.zig");
 const modules_mod = @import("modules.zig");
+const page_cache = @import("page_cache.zig");
+const paths = @import("../paths.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
 const serve_root = @import("../serve.zig");
 const thermal_scenarios = @import("../thermal_scenarios.zig");
@@ -57,16 +59,25 @@ pub const ThermalError = mcp_tools.ToolError || std.mem.Allocator.Error || std.I
 /// This is the WHOLE body both surfaces share — the HTTP endpoint below and the
 /// `describe_thermal` CLI tool — so neither can describe a different board, or
 /// a different ambient, than the other for the same request.
+///
+/// `deps`, when non-null, receives the file dependency set of this computation
+/// (see `captureDeps`) so the caller can retain the body against it. The
+/// capture happens while the evaluator is still alive and before any early
+/// error return, so a cache never keys on a half-built read-set.
 pub fn thermalJson(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
     ambient_c: ?f64,
     layout: ?[]const u8,
+    deps: ?*?page_cache.FileSet,
 ) ThermalError![]const u8 {
     // `eval` owns the arena the block borrows, so it outlives the analysis.
     var eval = Evaluator.init(alloc, project_dir);
     defer eval.deinit();
+    defer if (deps) |out| {
+        out.* = captureDeps(alloc, &eval, project_dir, name);
+    };
     const nb = try mcp_tools.evalNamedBlock(alloc, project_dir, name, &eval);
 
     const ambient = ambient_c orelse thermal.default_ambient_c;
@@ -75,6 +86,29 @@ pub fn thermalJson(
     var aw: std.Io.Writer.Allocating = .init(alloc);
     try review_thermal.writeFactsJson(&aw.writer, result, scenarios);
     return aw.written();
+}
+
+/// The file dependency set of one thermal answer: everything the evaluator read
+/// (design, checks, every transitively imported `lib/` file, plus the `.bom` /
+/// `.refdes.json` / `.notes.md` siblings `page_cache` always stamps) and the two
+/// placement sidecars the solve resolves its board from.
+///
+/// It is deliberately the pair `serve/thermal_cache.zig` stamps for the solved
+/// FIELD: a thermal page, its facts JSON and its cached solve must go stale on
+/// exactly the same edits, or a retained page would outlive the field it
+/// reports. Null when nothing could be stamped, which a caller must treat as
+/// "not cacheable" — a set that stamps no file can never go stale.
+pub fn captureDeps(
+    scratch: std.mem.Allocator,
+    eval: *const Evaluator,
+    project_dir: []const u8,
+    name: []const u8,
+) ?page_cache.FileSet {
+    const layouts = paths.designSiblingPath(scratch, project_dir, name, ".layouts.json") catch return null;
+    defer scratch.free(layouts);
+    const legacy = paths.designSiblingPath(scratch, project_dir, name, ".autolayout.json") catch return null;
+    defer scratch.free(legacy);
+    return page_cache.captureWithExtras(scratch, eval, project_dir, name, &.{ layouts, legacy }) catch null;
 }
 
 /// Said when the lumped screen found nothing that dissipates: a field with no
@@ -290,7 +324,24 @@ pub fn thermalApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
 
     const ambient = ambientFromQuery(req) catch return plainError(res, http_bad_request, err_ambient);
 
-    const body = thermalJson(ctx.allocator, ctx.project_dir, name, ambient, layoutFromQuery(req)) catch |e| {
+    // Read the live version BEFORE computing, so a design edit that lands
+    // mid-request is treated as a miss next time instead of being baked in.
+    const live_version = serve_root.getLiveVersion(name);
+    var miss_version: ?u32 = null;
+    if (ctx.state.caches.reads.thermal_facts.serve(.{
+        .scratch = ctx.allocator,
+        .req = req,
+        .res = res,
+        .name = name,
+        .live_version = live_version,
+    }, &miss_version)) {
+        res.content_type = .JSON;
+        return;
+    }
+
+    var deps: ?page_cache.FileSet = null;
+    const body = thermalJson(ctx.allocator, ctx.project_dir, name, ambient, layoutFromQuery(req), &deps) catch |e| {
+        if (deps) |d| d.deinit();
         switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             error.FileNotFound, error.NotADesign, error.InvalidName => {
@@ -304,6 +355,16 @@ pub fn thermalApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
     };
     res.content_type = .JSON;
     res.body = body;
+    ctx.state.caches.reads.thermal_facts.store(.{
+        .scratch = ctx.allocator,
+        .req = req,
+        .res = res,
+        .name = name,
+        .body = body,
+        .files = deps,
+        .live_version = miss_version,
+        .current_version = serve_root.getLiveVersion(name),
+    });
 }
 
 /// GET /api/thermal-field/:name[?scenario=<tag>][&ambient=NN][&layout=NAME] — one solved
@@ -455,7 +516,9 @@ pub fn mcpDescribeThermal(
     const ambient = argNumber(args_val, "ambient") catch
         return toolError(out, alloc, "ambient must be a number in degrees Celsius");
 
-    const body = thermalJson(alloc, project_dir, name, ambient, argStr(args_val, "layout")) catch |e| switch (e) {
+    // No `deps`: the CLI answers one process-lifetime request and has no store
+    // to retain the body in, so capturing a read-set would be pure cost.
+    const body = thermalJson(alloc, project_dir, name, ambient, argStr(args_val, "layout"), null) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         error.FileNotFound, error.NotADesign, error.InvalidName => return toolErrorFmt(
             out,
@@ -625,6 +688,66 @@ fn serveQuery(alloc: std.mem.Allocator, project: []const u8, name: []const u8, q
         .body = try alloc.dupe(u8, ht.res.body),
         .content_type = ht.res.content_type,
     };
+}
+
+/// Drive the handler against a SHARED server state, so successive calls see the
+/// same response cache. Also reports the cache's own verdict header, which is
+/// the difference between "the second call was fast" and "the second call was
+/// answered from the entry the first one retained".
+fn serveShared(
+    state: *serve_root.ServerState,
+    alloc: std.mem.Allocator,
+    project: []const u8,
+    name: []const u8,
+) !struct { body: []const u8, cache: []const u8 } {
+    var srv = Server{ .allocator = alloc, .project_dir = project, .auth_dir = project, .state = state };
+    var ht = httpz.testing.init(.{});
+    defer ht.deinit();
+    ht.param("name", name);
+    try thermalApi(&srv, ht.req, ht.res);
+    return .{
+        .body = try alloc.dupe(u8, ht.res.body),
+        .cache = try alloc.dupe(u8, ht.res.headers.get("X-Netlisp-Thermal-Cache") orelse ""),
+    };
+}
+
+// spec: Web Server - A cached thermal answer is byte-identical to the freshly computed one it was retained from, and an edit to the design retires it
+test "the thermal endpoint answers a repeat request with the identical bytes it retained" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeThermalFixture(tmp.dir);
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+
+    var state = serve_root.ServerState{ .caches = .init(testing.allocator) };
+    defer state.caches.deinit();
+
+    const fresh = try serveShared(&state, alloc, project, "heater");
+    try testing.expectEqualStrings("miss", fresh.cache);
+    const cached = try serveShared(&state, alloc, project, "heater");
+    try testing.expectEqualStrings("hit", cached.cache);
+    // The whole contract: a cache loss changes latency and nothing else.
+    try testing.expectEqualStrings(fresh.body, cached.body);
+
+    // Editing the design retires the entry, and the recomputed answer reflects
+    // the edit rather than the retained one — 2 W into 60 °C/W, not 1 W.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/heater.sexp", .data =
+        \\(import hot-ic)
+        \\
+        \\(design-block "Heater Board"
+        \\  (instance "U1" hot-ic
+        \\    (pin 1 "VIN")
+        \\    (pin 2 "GND")
+        \\    (power 2.0)))
+    });
+    const edited = try serveShared(&state, alloc, project, "heater");
+    try testing.expectEqualStrings("miss", edited.cache);
+    const root = (try parse(alloc, edited.body)).object;
+    const parts = root.get("parts").?.array.items;
+    try testing.expectEqual(@as(f64, 145), try num(parts[0].object.get("result").?.object.get("tj_at_ambient").?));
 }
 
 fn parse(alloc: std.mem.Allocator, body: []const u8) !std.json.Value {

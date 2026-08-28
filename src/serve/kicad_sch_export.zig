@@ -9,10 +9,23 @@
 //! `fp-lib-table`, `<design>.kicad_pro`, `netlisp.kicad_sym`) only resolve
 //! from the directory holding the `.kicad_pro`.
 //!
-//! Read-only — nothing here writes to the project dir — and composed on
-//! demand. `exportSch` re-parses and structurally checks every sheet before it
-//! returns, so a schematic that fails its own self-check is answered as a 500
-//! rather than served as a broken download.
+//! Read-only — nothing here writes to the project dir. `exportSch` re-parses
+//! and structurally checks every sheet before it returns, so a schematic that
+//! fails its own self-check is answered as a 500 rather than served as a broken
+//! download.
+//!
+//! The finished archive is retained (`serve/read_cache.zig`), keyed by design
+//! and the `?vendor=` / `?flat=` pair. Its dependency set is the evaluator
+//! read-set plus every `lib/sources/*.kicad_sym` — filename listing AND per-file
+//! mtime — because the vendor symbol index is the one input the evaluator never
+//! reads, and `lib/sources/` is writable through the CLI VFS and the library
+//! upload page. That is the invalidation signal this module previously said it
+//! did not have; `page_cache.appendDirFiles` is exactly it, and a vendor symbol
+//! edited, added or removed retires the archive on the next lookup.
+//!
+//! A cached body is served without re-running the export's structural
+//! self-check: these exact bytes passed it when they were built, and nothing
+//! has touched them since.
 //!
 //! Footprint links are the one reference this archive cannot resolve on its
 //! own: `footprints.pretty/` is written by `export-kicad`, so KiCad reports
@@ -26,8 +39,10 @@ const paths = @import("../paths.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const bom = @import("../bom.zig");
 const export_kicad_sch = @import("../export_kicad_sch.zig");
+const sym_library = @import("../kicad_sym/library.zig");
 const zipfile = @import("../zipfile.zig");
 const mcp_tools = @import("mcp_tools.zig");
+const page_cache = @import("page_cache.zig");
 const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
 
@@ -58,23 +73,27 @@ pub const ExportZipError = mcp_tools.ToolError || export_kicad_sch.SchError;
 /// resolution the read-only CLI tools and the review PDF use — and export its
 /// schematic. The caller owns the result and calls `deinit`.
 ///
-/// No cache. The vendor `.kicad_sym` index this rebuilds per call measures
-/// ~0.36 s of a 0.95 s Debug export of the largest board here, so well under
-/// 100 ms in the ReleaseSafe build a server actually runs, against a download
-/// a human triggers by clicking. Caching it would mean a second long-lived
-/// arena (the index's symbols borrow the export's) plus an invalidation
-/// signal `lib/` does not have — and `lib/sources/` is writable through the
-/// CLI VFS and the library upload page, so a stale entry would silently serve
-/// a superseded symbol body.
+/// The vendor `.kicad_sym` index is still rebuilt per call: its symbols borrow
+/// the export's arena, so retaining the index alone would need a second
+/// long-lived one. What the HTTP endpoint retains instead is the finished
+/// ARCHIVE, against `deps` — the evaluator read-set plus the `lib/sources/`
+/// listing and every vendor file's mtime, so a symbol edited through the CLI
+/// VFS or the library upload page can never be served from a stale entry.
 pub fn exportFor(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
     opts: export_kicad_sch.Options,
+    deps: ?*?page_cache.FileSet,
 ) ExportZipError!export_kicad_sch.Output {
     // `eval` owns the arena the block borrows, so it outlives the export.
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
+    // Captured before the deferred `deinit` above and before any early error
+    // return, so a caller's cache never keys on a half-built read-set.
+    defer if (deps) |out| {
+        out.* = captureDeps(allocator, &eval, project_dir, name);
+    };
     const nb = try mcp_tools.evalNamedBlock(allocator, project_dir, name, &eval);
 
     // Merge the persisted BOM identities so each symbol's UUID is the one the
@@ -90,15 +109,41 @@ pub fn exportFor(
     return export_kicad_sch.exportSch(allocator, nb.block, project_dir, name, opts);
 }
 
+/// The dependency set of one export: everything the evaluator read, plus the
+/// vendor symbol library — the `lib/sources/` `.kicad_sym` listing (so an added
+/// or removed file counts) and each of their mtimes (so an edit in place
+/// counts). The index is the one input the evaluator never touches, and it
+/// decides which components are drawn from a real vendor body.
+fn captureDeps(
+    scratch: std.mem.Allocator,
+    eval: *const Evaluator,
+    project_dir: []const u8,
+    name: []const u8,
+) ?page_cache.FileSet {
+    var files = page_cache.capture(scratch, eval, project_dir, name) catch return null;
+    const sources = std.fmt.allocPrint(scratch, "{s}/{s}", .{ project_dir, sym_library.sources_subdir }) catch {
+        files.deinit();
+        return null;
+    };
+    defer scratch.free(sources);
+    page_cache.appendDirFiles(&files, scratch, sources, sym_library.suffix) catch {
+        files.deinit();
+        return null;
+    };
+    return files;
+}
+
 /// The exported sheets plus their sidecars, in the order they belong in the
 /// archive: root sheet, child sheets in page order, then the project files.
+/// `deps` is forwarded to `exportFor`.
 pub fn zipFor(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
     opts: export_kicad_sch.Options,
+    deps: ?*?page_cache.FileSet,
 ) ExportZipError![]const u8 {
-    const out = try exportFor(allocator, project_dir, name, opts);
+    const out = try exportFor(allocator, project_dir, name, opts, deps);
     defer out.deinit(allocator);
 
     var entries: std.ArrayList(zipfile.Entry) = .empty;
@@ -140,7 +185,28 @@ pub fn kicadSchApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
     };
     const name = try urlDecodeAlloc(ctx.allocator, name_raw);
 
-    const zip = zipFor(ctx.allocator, ctx.project_dir, name, optionsFromQuery(req)) catch |e| {
+    // Read the live version BEFORE exporting, so a design edit that lands
+    // mid-request is treated as a miss next time instead of being baked in.
+    const live_version = serve_root.getLiveVersion(name);
+    var miss_version: ?u32 = null;
+    if (ctx.state.caches.reads.kicad_sch.serve(.{
+        .scratch = ctx.allocator,
+        .req = req,
+        .res = res,
+        .name = name,
+        .live_version = live_version,
+    }, &miss_version)) {
+        // The export's structural self-check is NOT re-run: these exact bytes
+        // passed it when they were built, and nothing has touched them since.
+        res.header(header_content_type, content_type_zip);
+        res.header(header_content_disposition, try dispositionFor(ctx.allocator, name));
+        res.header(header_cors_allow_origin, "*");
+        return;
+    }
+
+    var deps: ?page_cache.FileSet = null;
+    const zip = zipFor(ctx.allocator, ctx.project_dir, name, optionsFromQuery(req), &deps) catch |e| {
+        if (deps) |d| d.deinit();
         switch (e) {
             error.FileNotFound, error.NotADesign, error.InvalidName => {
                 res.status = http_not_found;
@@ -155,15 +221,27 @@ pub fn kicadSchApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
         return;
     };
 
-    const disposition = try std.fmt.allocPrint(
-        ctx.allocator,
-        "attachment; filename=\"{s}-kicad-sch.zip\"",
-        .{name},
-    );
     res.header(header_content_type, content_type_zip);
-    res.header(header_content_disposition, disposition);
+    res.header(header_content_disposition, try dispositionFor(ctx.allocator, name));
     res.header(header_cors_allow_origin, "*");
     res.body = zip;
+    ctx.state.caches.reads.kicad_sch.store(.{
+        .scratch = ctx.allocator,
+        .req = req,
+        .res = res,
+        .name = name,
+        .body = zip,
+        .files = deps,
+        .live_version = miss_version,
+        .current_version = serve_root.getLiveVersion(name),
+    });
+}
+
+/// `Content-Disposition` naming the download `<name>-kicad-sch.zip`. Built per
+/// request (it embeds the design name) whether the archive was exported or
+/// recalled, so a cached answer is framed exactly as a fresh one.
+fn dispositionFor(allocator: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error![]const u8 {
+    return std.fmt.allocPrint(allocator, "attachment; filename=\"{s}-kicad-sch.zip\"", .{name});
 }
 
 /// Percent-decode a path param onto `allocator`. httpz passes `:params`

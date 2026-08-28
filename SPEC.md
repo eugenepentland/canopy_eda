@@ -6237,6 +6237,13 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The PCB-describe endpoint reuses a dependency-validated facts document and invalidates it when the design or its sidecars change
 - The PCB-describe endpoint caches only its allow-listed query modes and bypasses fresh-solve and sub-scoped requests
 - The PCB-describe cache refuses a body whose dependency set stamps nothing
+- The read-only response caches reuse a dependency-validated body and invalidate it when the design changes
+- The read-only response caches key their allow-listed query parameters and bypass every other one
+- The read-only response caches refuse a body that stamps no file, that is over budget, or that a live edit raced
+- The read-only response caches are bounded by entry count and by retained bytes, evicting a keyed variant before the plain answer
+- A read-only response cache with no allocator retains nothing, so a handler test computes every answer fresh
+- A cached ERC answer is byte-identical to the freshly computed one it was retained from, and an edit to the design retires it
+- A cached thermal answer is byte-identical to the freshly computed one it was retained from, and an edit to the design retires it
 - The layout-status reader reuses a parsed layouts sidecar until that file's mtime or size changes
 - The fab-readiness gate reuses caller-supplied net connectivity instead of recomputing it
 - The navigation bar routes home through the Netlisp brand and carries no separate Designs tab
