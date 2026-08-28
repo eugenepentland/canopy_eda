@@ -264,13 +264,14 @@ pub const Store = struct {
         const allocator = self.allocator orelse return;
         const live_version = in.live_version orelse return;
         const files = in.files orelse return;
+        const ident = identity(in.req);
         // An image is retained only when it is a complete answer that fits the
         // budget, keys on something that CAN go stale (a non-empty read-set),
         // was not raced by a live edit, and came from a cacheable query mode.
         const admissible = blk: {
             if (in.res.status != 200 or in.png.len > png_max_bytes) break :blk false;
             if (files.stamps.len == 0 or in.current_version != live_version) break :blk false;
-            break :blk identity(in.req) != null;
+            break :blk ident != null;
         };
         if (!admissible) {
             files.deinit();
@@ -279,7 +280,7 @@ pub const Store = struct {
         self.retain(allocator, .{
             .scratch = in.scratch,
             .name = in.name,
-            .ident = identity(in.req).?,
+            .ident = ident.?,
             .png = in.png,
             .files = files,
             .live_version = live_version,
@@ -344,7 +345,7 @@ pub fn serveImage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb_l
     // mid-request is treated as a miss next time instead of being baked in.
     const live_version = serve_root.getLiveVersion(name);
     var miss_version: ?u32 = null;
-    if (ctx.state.caches.png_images.serve(.{
+    if (ctx.state.caches.reads.png_images.serve(.{
         .scratch = arena,
         .req = req,
         .res = res,
@@ -364,7 +365,7 @@ pub fn serveImage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb_l
     res.content_type = .PNG;
     res.header("Cache-Control", "no-store");
     res.body = png_bytes;
-    ctx.state.caches.png_images.store(.{
+    ctx.state.caches.reads.png_images.store(.{
         .scratch = arena,
         .req = req,
         .res = res,
@@ -427,6 +428,16 @@ test "png cache allow-lists its query modes and keys the ones it admits" {
         const variant_key = try cacheKey(testing.allocator, "demo", ident);
         defer testing.allocator.free(variant_key);
         try testing.expect(!std.mem.eql(u8, plain_key, variant_key));
+
+        // …and two VALUES of one admitted parameter are two entries, which is
+        // the property that actually keeps a `?layout=A` image from being
+        // served for `?layout=B` (or a 600 px board for a 2400 px request).
+        var other = httpz.testing.init(.{});
+        defer other.deinit();
+        other.query(param, "y");
+        const other_key = try cacheKey(testing.allocator, "demo", identity(other.req).?);
+        defer testing.allocator.free(other_key);
+        try testing.expect(!std.mem.eql(u8, variant_key, other_key));
     }
 }
 
@@ -518,6 +529,41 @@ test "png cache returns the identical bytes then invalidates after a layout-side
         .name = "demo",
         .live_version = @as(u32, 0),
     }, &version));
+}
+
+// spec: Web Server - The PCB image cache retains nothing when its server gave it no allocator
+test "png cache with no allocator retains nothing and always reports a miss" {
+    const testing = std.testing;
+    // `ServerState{}` — what a handler test constructs — leaves every store
+    // without an allocator, and a store without one must compute every image
+    // fresh rather than half-participate. It is also the state the store is in
+    // before `Caches.init`, so this is the safe default, not just a test aid.
+    var off: Store = .{};
+    defer off.deinit();
+
+    var req = httpz.testing.init(.{});
+    defer req.deinit();
+    var version: ?u32 = null;
+    try testing.expect(!off.serve(.{
+        .scratch = req.arena,
+        .req = req.req,
+        .res = req.res,
+        .name = "demo",
+        .live_version = @as(u32, 0),
+    }, &version));
+    req.res.status = 200;
+    off.store(.{
+        .scratch = req.arena,
+        .req = req.req,
+        .res = req.res,
+        .name = "demo",
+        .png = "\x89PNG",
+        .files = @as(?page_cache.FileSet, try page_cache.captureOne("build.zig")),
+        .live_version = @as(?u32, 0),
+        .current_version = @as(u32, 0),
+    });
+    try testing.expectEqual(@as(usize, 0), off.entries.count());
+    try testing.expectEqual(@as(usize, 0), off.bytes);
 }
 
 // spec: Web Server - The PCB image cache refuses a body whose dependency set stamps nothing

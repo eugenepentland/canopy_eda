@@ -328,6 +328,12 @@ pub const ReadCaches = struct {
     schematic_pdf: read_cache.Store(read_cache.schematic_pdf) = .{},
     /// `GET /api/kicad-sch/:name` — the exported schematic archive.
     kicad_sch: read_cache.Store(read_cache.kicad_sch) = .{},
+    /// `GET /api/pcb-png/:name` — the rendered board image. Grouped here by
+    /// ROLE rather than by mechanism: it is the same read-only design surface
+    /// whose whole cost is a fresh evaluation, but its body is an image with a
+    /// framing allow-list of its own, so it keeps its own store type
+    /// (`serve/png_cache.zig`).
+    png_images: png_cache.Store = .{},
 
     /// Give every store the server's long-lived allocator, which is the switch
     /// that turns retention on.
@@ -338,6 +344,7 @@ pub const ReadCaches = struct {
             .thermal_page = .{ .allocator = allocator },
             .schematic_pdf = .{ .allocator = allocator },
             .kicad_sch = .{ .allocator = allocator },
+            .png_images = .{ .allocator = allocator },
         };
     }
 
@@ -348,6 +355,7 @@ pub const ReadCaches = struct {
         self.thermal_page.deinit();
         self.schematic_pdf.deinit();
         self.kicad_sch.deinit();
+        self.png_images.deinit();
     }
 };
 
@@ -374,11 +382,6 @@ pub const Caches = struct {
     /// The read-only design surfaces whose whole cost is the FRESH design
     /// evaluation each of their handlers starts with.
     reads: ReadCaches = .{},
-    /// Dependency-validated board images (`/api/pcb-png`), the picture twin of
-    /// those facts — and, until it had this, the last read surface paying its
-    /// whole solve + DRC + raster on every identical repeat (23.7 s hot on
-    /// `barracuda`).
-    png_images: png_cache.Store = .{},
     /// Memoised gzip streams, keyed on the response body itself (see
     /// `gzip_cache`). Held here rather than module-scope so two server
     /// instances stay independent.
@@ -395,7 +398,6 @@ pub const Caches = struct {
             .progress_json = .{ .allocator = allocator },
             .describe_json = .{ .allocator = allocator },
             .reads = .init(allocator),
-            .png_images = .{ .allocator = allocator },
             .gzip = .{ .allocator = allocator },
         };
     }
@@ -408,7 +410,6 @@ pub const Caches = struct {
         self.progress_json.deinit();
         self.describe_json.deinit();
         self.reads.deinit();
-        self.png_images.deinit();
         self.gzip.deinit();
     }
 };
