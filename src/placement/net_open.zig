@@ -261,6 +261,10 @@ fn emitOpens(
     const n = islands.len;
     const in_tree = try arena.alloc(bool, n);
     @memset(in_tree, false);
+    // One box + largest radius per island, so a relaxation can prove a pair
+    // cannot beat the frontier without walking its feature cross-product.
+    const bounds = try arena.alloc(Bound, n);
+    for (islands, bounds) |island, *bound| bound.* = boundOf(island);
     // `best[j]` = closest approach from the tree to island j; `link[j]` = the
     // in-tree island that attains it. Seeded from island 0, then relaxed against
     // each newly joined island.
@@ -284,6 +288,12 @@ fn emitOpens(
         in_tree[pick] = true;
         for (0..n) |j| {
             if (in_tree[j]) continue;
+            // Branch and bound. `boundGap` never exceeds the exact approach, and
+            // the frontier only improves on a STRICT `<`, so a pair the bound
+            // proves cannot beat `best_to[j]` would have been discarded by the
+            // comparison below anyway: the frontier — and therefore the emitted
+            // island pair, bridge, and gap — is unchanged.
+            if (boundGap(bounds[pick], bounds[j]) >= best_to[j].dist) continue;
             const a = nearestApproach(islands[pick], islands[j]);
             if (a.dist < best_to[j].dist) {
                 best_to[j] = a;
@@ -323,6 +333,56 @@ const Approach = struct {
 };
 
 const Closest = struct { dist: f64, x: f64, y: f64 };
+
+/// One island's approach geometry in summary: the box containing every point
+/// `nearestApproach` measures FROM (pad lands, track centrelines, via centres)
+/// and the largest radius its kernels ever subtract from a raw distance.
+const Bound = struct {
+    minx: f64 = std.math.inf(f64),
+    miny: f64 = std.math.inf(f64),
+    maxx: f64 = -std.math.inf(f64),
+    maxy: f64 = -std.math.inf(f64),
+    radius: f64 = 0,
+    empty: bool = true,
+};
+
+fn boundPoint(bound: *Bound, x: f64, y: f64) void {
+    bound.minx = @min(bound.minx, x);
+    bound.miny = @min(bound.miny, y);
+    bound.maxx = @max(bound.maxx, x);
+    bound.maxy = @max(bound.maxy, y);
+    bound.empty = false;
+}
+
+fn boundOf(c: *const Comp) Bound {
+    var bound = Bound{};
+    for (c.pads.items) |p| {
+        boundPoint(&bound, p.x0, p.y0);
+        boundPoint(&bound, p.x1, p.y1);
+    }
+    for (c.tracks.items) |t| {
+        boundPoint(&bound, t.x1, t.y1);
+        boundPoint(&bound, t.x2, t.y2);
+        bound.radius = @max(bound.radius, t.width / 2);
+    }
+    for (c.vias.items) |v| {
+        boundPoint(&bound, v.x, v.y);
+        bound.radius = @max(bound.radius, v.dia / 2);
+    }
+    return bound;
+}
+
+/// A lower bound on `nearestApproach(a, b).dist`. Every kernel measures between
+/// a point/segment/land inside one island's box and one inside the other's, so
+/// its raw distance is at least the boxes' gap; and every kernel subtracts at
+/// most one radius per island, so the widest pair bounds the correction. An
+/// island with no copper at all bounds to -inf, i.e. "measure it exactly".
+fn boundGap(a: Bound, b: Bound) f64 {
+    if (a.empty or b.empty) return -std.math.inf(f64);
+    const gx = @max(@max(a.minx - b.maxx, b.minx - a.maxx), 0);
+    const gy = @max(@max(a.miny - b.maxy, b.miny - a.maxy), 0);
+    return std.math.hypot(gx, gy) - a.radius - b.radius;
+}
 
 fn approachInf() Approach {
     return .{ .dist = std.math.inf(f64), .x = 0, .y = 0, .a = .{ 0, 0 }, .b = .{ 0, 0 } };
@@ -506,6 +566,39 @@ fn count(vs: []const drc.Violation) usize {
         n += 1;
     };
     return n;
+}
+
+// spec: placement/drc - the net-open island chain's bounding-box estimate never exceeds the exact nearest approach, so a skipped pair could not have beaten the frontier
+test "the island bound never exceeds the exact nearest approach" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // Islands of every shape the exact kernels handle: a bare pad, a wide
+    // trace run, a barrel, and a mixed island — pairwise, in both orders.
+    var bare = Comp{};
+    try bare.pads.append(arena, .{ .x0 = -0.4, .y0 = -0.4, .x1 = 0.4, .y1 = 0.4 });
+    var run = Comp{};
+    try run.tracks.append(arena, .{ .x1 = 3, .y1 = 0, .x2 = 7, .y2 = 0, .layer = 0, .width = 0.8, .net = 0 });
+    try run.tracks.append(arena, .{ .x1 = 7, .y1 = 0, .x2 = 7, .y2 = 4, .layer = 0, .width = 0.25, .net = 0 });
+    var barrel = Comp{};
+    try barrel.vias.append(arena, .{ .x = 1.5, .y = 5, .dia = 0.6, .drill = 0.3, .net = 0 });
+    var mixed = Comp{};
+    try mixed.pads.append(arena, .{ .x0 = 9.6, .y0 = 5.6, .x1 = 10.4, .y1 = 6.4 });
+    try mixed.tracks.append(arena, .{ .x1 = 10, .y1 = 6, .x2 = 12, .y2 = 6, .layer = 0, .width = 0.5, .net = 0 });
+    try mixed.vias.append(arena, .{ .x = 12, .y = 6, .dia = 0.4, .drill = 0.2, .net = 0 });
+
+    const islands = [_]*Comp{ &bare, &run, &barrel, &mixed };
+    for (islands) |a| {
+        for (islands) |b| {
+            if (a == b) continue;
+            const exact = nearestApproach(a, b).dist;
+            try testing.expect(boundGap(boundOf(a), boundOf(b)) <= exact);
+        }
+    }
+    // An empty island has nothing to measure, so its bound must not prune it.
+    var nothing = Comp{};
+    try testing.expect(boundGap(boundOf(&nothing), boundOf(&run)) == -std.math.inf(f64));
 }
 
 // spec: placement/drc - flags a net whose drawn copper splits into disconnected islands at the nearest-approach gap

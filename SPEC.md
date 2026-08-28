@@ -2919,7 +2919,7 @@ are out of scope.
 
 ## placement/copper-topology
 
-Public functions: BranchSupport, ViaSupport, RedundancyAnalysis, ImplicitJoin, looseEnd, viaUseCount, redundantSections, analyzeRedundancy, analyzeViaRedundancy, implicitJoins, repairableJoins
+Public functions: BranchSupport, ViaSupport, RedundancyAnalysis, ImplicitJoin, looseEnd, looseEnds, viaUseCount, viaUseCounts, redundantSections, analyzeRedundancy, analyzeViaRedundancy, implicitJoins, repairableJoins
 
 - a trace end must land on a same-net pad, via, pour, or trace; a free leaf remains loose
 - a stored trace section is redundant when deleting it preserves the connectivity of every pad, live via, and poured region
@@ -2934,6 +2934,7 @@ Public functions: BranchSupport, ViaSupport, RedundancyAnalysis, ImplicitJoin, l
 - redundant-via pruning preserves every persistent copper component and chooses a jointly safe subset of parallel layer jumps
 - a via that is the only robust bridge between persistent copper features is never deletion-invariant
 - a via that is the sole support for a trace endpoint remains even when deleting its graph leaf would not split a component
+- one shared copper index answers every section's endpoints and every barrel's layer count exactly as the per-feature sweep does
 - completeness-waiver: empty inputs (an empty copper list has no endpoint or via to classify)
 - completeness-waiver: large inputs (bounded section-deletion walks over the already-bounded routed copper and support lists)
 - completeness-waiver: unauthorized access (pure in-memory geometry with no request or persistence surface)
@@ -2967,6 +2968,7 @@ question each caller answers honestly through `Zone.component`.
 
 ## placement/drc
 
+- the net-open island chain's bounding-box estimate never exceeds the exact nearest approach, so a skipped pair could not have beaten the frontier
 - an authored ground-via maximum warns on an SMD ground pad until a same-net plane via falls within the budget
 - an optional NC or input-strap land assigned to ground is excluded from the ground-via maximum because its same-package real ground return owns the required plane connection
 

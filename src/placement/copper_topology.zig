@@ -10,6 +10,7 @@
 //! route additionally names every junction explicitly.
 
 const std = @import("std");
+const numeric = @import("../numeric.zig");
 const pad_shape = @import("pad_shape.zig");
 const copper_contact = @import("copper_contact.zig");
 
@@ -83,17 +84,158 @@ pub fn looseEnd(
         net_terminals += 1;
         sole = terminal;
     }
-    if (net_terminals == 1) {
-        const terminal = sole.?;
+    return looseEndOf(
+        .{ .terminals = terminals, .tracks = tracks, .vias = vias },
+        track_i,
+        pour_layers,
+        .{ .count = net_terminals, .sole = sole },
+        .{ .{}, .{} },
+    );
+}
+
+/// `looseEnd` once the net's terminal census and (optionally) the endpoint's
+/// copper neighbourhood are known. Both entry points funnel through here so the
+/// indexed batch below cannot drift from the single-shot answer.
+fn looseEndOf(
+    copper: Copper,
+    track_i: usize,
+    pour_layers: [2]u64,
+    census: NetCensus.Seen,
+    near: [2]Neighbours,
+) ?[2]f64 {
+    const track = copper.tracks[track_i];
+    if (track.net < 0) return null;
+    if (census.count == 1) {
+        const terminal = census.sole.?;
         if (terminalPointTouch(terminal, track.a[0], track.a[1], track.width / 2, track.layer, track.net) and
             terminalPointTouch(terminal, track.b[0], track.b[1], track.width / 2, track.layer, track.net))
             return track.b;
     }
     for ([_][2]f64{ track.a, track.b }, 0..) |p, end_i| {
-        if (!endSupported(terminals, tracks, vias, track_i, p, pour_layers[end_i])) return p;
+        if (!endSupported(copper, track_i, p, pour_layers[end_i], near[end_i])) return p;
     }
     return null;
 }
+
+/// `looseEnd` for every stored section at once. One copper-locality index over
+/// the lands, traces, and barrels replaces the per-section sweep over all three
+/// arrays, and one census replaces the per-section terminal count; every
+/// verdict is the one `looseEnd` gives for the same section.
+pub fn looseEnds(
+    arena: std.mem.Allocator,
+    terminals: []const Terminal,
+    tracks: []const Track,
+    vias: []const Via,
+    pour_layers: []const [2]u64,
+) std.mem.Allocator.Error![]const ?[2]f64 {
+    const out = try arena.alloc(?[2]f64, tracks.len);
+    var indexes = try FeatureIndexes.build(arena, terminals, tracks, vias);
+    const census = try netCensus(arena, terminals);
+    var terminal_ids: [2]std.ArrayList(u32) = .{ .empty, .empty };
+    var track_ids: [2]std.ArrayList(u32) = .{ .empty, .empty };
+    var via_ids: [2]std.ArrayList(u32) = .{ .empty, .empty };
+    for (tracks, 0..) |track, track_i| {
+        const poured = if (track_i < pour_layers.len) pour_layers[track_i] else .{ 0, 0 };
+        if (track.net < 0) {
+            out[track_i] = null;
+            continue;
+        }
+        var near: [2]Neighbours = .{ .{}, .{} };
+        for ([_][2]f64{ track.a, track.b }, 0..) |p, end_i| {
+            const probe = pointBox(p, track.width / 2);
+            try indexes.terminal.near(arena, &terminal_ids[end_i], probe, touch_slack_mm);
+            try indexes.track.near(arena, &track_ids[end_i], probe, touch_slack_mm);
+            try indexes.via.near(arena, &via_ids[end_i], probe, touch_slack_mm);
+            near[end_i] = .{
+                .terminals = terminal_ids[end_i].items,
+                .tracks = track_ids[end_i].items,
+                .vias = via_ids[end_i].items,
+            };
+        }
+        out[track_i] = looseEndOf(
+            .{ .terminals = terminals, .tracks = tracks, .vias = vias },
+            track_i,
+            poured,
+            census.of(track.net),
+            near,
+        );
+    }
+    return out;
+}
+
+/// How many lands each net owns, and which one when it owns exactly one — the
+/// only two facts `looseEnd`'s one-terminal special case reads.
+const NetCensus = struct {
+    counts: []const usize,
+    sole: []const ?Terminal,
+
+    const Seen = struct { count: usize, sole: ?Terminal };
+
+    fn of(self: NetCensus, net: i32) Seen {
+        if (net < 0) return .{ .count = 0, .sole = null };
+        const i: usize = @intCast(net);
+        if (i >= self.counts.len) return .{ .count = 0, .sole = null };
+        return .{ .count = self.counts[i], .sole = self.sole[i] };
+    }
+};
+
+fn netCensus(arena: std.mem.Allocator, terminals: []const Terminal) std.mem.Allocator.Error!NetCensus {
+    var highest: i32 = -1;
+    for (terminals) |terminal| highest = @max(highest, terminal.net);
+    const span: usize = if (highest < 0) 0 else @as(usize, @intCast(highest)) + 1;
+    const counts = try arena.alloc(usize, span);
+    const sole = try arena.alloc(?Terminal, span);
+    @memset(counts, 0);
+    @memset(sole, null);
+    for (terminals) |terminal| {
+        if (terminal.net < 0) continue;
+        const i: usize = @intCast(terminal.net);
+        counts[i] += 1;
+        sole[i] = terminal;
+    }
+    return .{ .counts = counts, .sole = sole };
+}
+
+/// The three copper arrays every endpoint question reads together.
+const Copper = struct {
+    terminals: []const Terminal,
+    tracks: []const Track,
+    vias: []const Via,
+};
+
+/// Which lands / traces / barrels one endpoint question has to consider. A null
+/// list means "every one of them" — the non-allocating single-shot entry point;
+/// the batch entry narrows each list with the shared copper-locality index. The
+/// predicates below only ever answer "is this end supported at all", so a
+/// narrowed list changes the work, never the answer.
+const Neighbours = struct {
+    terminals: ?[]const u32 = null,
+    tracks: ?[]const u32 = null,
+    vias: ?[]const u32 = null,
+};
+
+/// Walk either an explicit ascending candidate list or the whole array, so one
+/// predicate body serves the indexed and unindexed entry points.
+const IdIter = struct {
+    ids: ?[]const u32,
+    len: usize,
+    i: usize = 0,
+
+    fn init(ids: ?[]const u32, len: usize) IdIter {
+        return .{ .ids = ids, .len = len };
+    }
+
+    fn next(self: *IdIter) ?usize {
+        if (self.ids) |ids| {
+            if (self.i >= ids.len) return null;
+            defer self.i += 1;
+            return ids[self.i];
+        }
+        if (self.i >= self.len) return null;
+        defer self.i += 1;
+        return self.i;
+    }
+};
 
 fn pointOnCenterline(track: Track, p: [2]f64) bool {
     return pad_shape.segPointDist(
@@ -143,6 +285,259 @@ fn tracksJoin(a: Track, b: Track) bool {
     return tracksJoinPhysically(a, b);
 }
 
+// ── Spatial index ────────────────────────────────────────────────────────────
+//
+// Every contact predicate in this file is a LOCAL question: two copper features
+// can only meet when their copper bounding boxes lie within `touch_slack_mm` of
+// each other, because each predicate's own first test is a distance no larger
+// than the sum of the two features' half widths plus that slack. This
+// uniform-cell index answers "which features are near this box", so the
+// all-pairs sweeps it replaces cost O(n · neighbours) instead of O(n²).
+//
+// It only PRUNES: every surviving candidate runs the identical predicate, and
+// the boxes below CONTAIN their feature's copper, so a dropped pair is proven
+// apart. Cells are CSR-packed rather than hashed because this file also
+// compiles to the client's freestanding `drc.wasm`, where the only allocator is
+// the caller's arena; queries return ascending indices, which is the order the
+// nested loops visited.
+
+const Box = [4]f64;
+
+/// A trace's copper AABB: the centreline's box grown by the half width. A
+/// non-positive width grows by nothing, which is still a container.
+fn trackBox(track: Track) Box {
+    const half = @max(track.width, 0) / 2;
+    return .{
+        @min(track.a[0], track.b[0]) - half,
+        @min(track.a[1], track.b[1]) - half,
+        @max(track.a[0], track.b[0]) + half,
+        @max(track.a[1], track.b[1]) + half,
+    };
+}
+
+/// A land's copper AABB. `pad_shape` keeps every outline inside this box, so it
+/// contains a custom polygon's copper as well.
+fn terminalBox(terminal: Terminal) Box {
+    return .{ terminal.shape.x0, terminal.shape.y0, terminal.shape.x1, terminal.shape.y1 };
+}
+
+/// A barrel's outer copper AABB.
+fn viaBox(via: Via) Box {
+    const radius = @max(via.dia, 0) / 2;
+    return .{ via.at[0] - radius, via.at[1] - radius, via.at[0] + radius, via.at[1] + radius };
+}
+
+/// The probe box for a trace ENDPOINT question: every endpoint predicate below
+/// measures from the stored point and allows the probing trace's half width.
+fn pointBox(p: [2]f64, radius: f64) Box {
+    const grown = @max(radius, 0);
+    return .{ p[0] - grown, p[1] - grown, p[0] + grown, p[1] + grown };
+}
+
+/// Cells spanning `span` at `cell` size, clamped so a degenerate extent can
+/// never ask for an unbounded grid.
+fn spanCells(span: f64, cell_mm: f64) usize {
+    if (!(span > 0)) return 1;
+    const wanted = @floor(span / cell_mm) + 1;
+    if (!(wanted < 1.0e6)) return 1_000_000;
+    if (!(wanted > 1)) return 1;
+    return numeric.checkedInt(usize, wanted) orelse 1;
+}
+
+/// Uniform-cell bucket index over feature AABBs. `inv == 0` is the single-cell
+/// fallback used for degenerate (empty or non-finite) input: every query then
+/// returns every feature, which is exactly the loop this replaces.
+const Index = struct {
+    minx: f64 = 0,
+    miny: f64 = 0,
+    inv: f64 = 0,
+    nx: usize = 1,
+    ny: usize = 1,
+    starts: []const u32 = &.{},
+    items: []const u32 = &.{},
+    stamp: []u32 = &.{},
+    generation: u32 = 0,
+
+    fn cellOf(self: Index, value: f64, origin: f64, limit: usize) usize {
+        if (self.inv == 0) return 0;
+        const scaled = @floor((value - origin) * self.inv);
+        if (!(scaled > 0)) return 0; // below the origin, or not a number
+        if (!(scaled < @as(f64, @floatFromInt(limit)))) return limit - 1;
+        return numeric.checkedInt(usize, scaled) orelse 0;
+    }
+
+    /// Fill `out` with the ascending, deduplicated indices whose cells meet
+    /// `box` grown by `delta`. `out` belongs to the caller so two queries may
+    /// be live at once (an endpoint probe inside a feature sweep).
+    fn near(
+        self: *Index,
+        arena: std.mem.Allocator,
+        out: *std.ArrayList(u32),
+        box: Box,
+        delta: f64,
+    ) std.mem.Allocator.Error!void {
+        out.clearRetainingCapacity();
+        if (self.stamp.len == 0) return;
+        if (self.generation == std.math.maxInt(u32)) {
+            @memset(self.stamp, 0);
+            self.generation = 0;
+        }
+        self.generation += 1;
+        const x1 = self.cellOf(box[2] + delta, self.minx, self.nx);
+        const y1 = self.cellOf(box[3] + delta, self.miny, self.ny);
+        var cx = self.cellOf(box[0] - delta, self.minx, self.nx);
+        while (cx <= x1) : (cx += 1) {
+            var cy = self.cellOf(box[1] - delta, self.miny, self.ny);
+            while (cy <= y1) : (cy += 1) {
+                const cell = cx * self.ny + cy;
+                for (self.items[self.starts[cell]..self.starts[cell + 1]]) |item| {
+                    if (self.stamp[item] == self.generation) continue;
+                    self.stamp[item] = self.generation;
+                    try out.append(arena, item);
+                }
+            }
+        }
+        std.mem.sort(u32, out.items, {}, std.sort.asc(u32));
+    }
+};
+
+fn buildIndex(arena: std.mem.Allocator, boxes: []const Box) std.mem.Allocator.Error!Index {
+    var index = Index{};
+    index.stamp = try arena.alloc(u32, boxes.len);
+    @memset(index.stamp, 0);
+    if (boxes.len == 0) {
+        const empty = try arena.alloc(u32, 2);
+        empty[0] = 0;
+        empty[1] = 0;
+        index.starts = empty;
+        return index;
+    }
+
+    var minx = boxes[0][0];
+    var miny = boxes[0][1];
+    var maxx = boxes[0][2];
+    var maxy = boxes[0][3];
+    var extent_sum: f64 = 0;
+    var extent_max: f64 = 0;
+    var finite = true;
+    for (boxes) |box| {
+        for (box) |value| finite = finite and std.math.isFinite(value);
+        minx = @min(minx, box[0]);
+        miny = @min(miny, box[1]);
+        maxx = @max(maxx, box[2]);
+        maxy = @max(maxy, box[3]);
+        const extent = @max(box[2] - box[0], box[3] - box[1]);
+        extent_sum += extent;
+        extent_max = @max(extent_max, extent);
+    }
+    index.minx = minx;
+    index.miny = miny;
+
+    // One feature per cell on average, never finer than the widest feature's
+    // 64th (so a long trace cannot be inserted into unboundedly many cells) and
+    // never so fine that the cell table dwarfs the features it indexes.
+    const count: f64 = @floatFromInt(boxes.len);
+    var cell_mm = @max(
+        @max(extent_sum / count, @sqrt(@max(maxx - minx, 0) * @max(maxy - miny, 0) / count)),
+        extent_max / 64,
+    );
+    if (finite and std.math.isFinite(cell_mm) and cell_mm > 0) {
+        index.inv = 1.0 / cell_mm;
+        const cap = 8 * boxes.len + 64;
+        var guard: usize = 0;
+        while (guard < 64) : (guard += 1) {
+            index.nx = spanCells(maxx - minx, cell_mm);
+            index.ny = spanCells(maxy - miny, cell_mm);
+            if (index.nx * index.ny <= cap) break;
+            cell_mm *= 2;
+            index.inv = 1.0 / cell_mm;
+        }
+        index.nx = spanCells(maxx - minx, cell_mm);
+        index.ny = spanCells(maxy - miny, cell_mm);
+    }
+
+    const cells = index.nx * index.ny;
+    const starts = try arena.alloc(u32, cells + 1);
+    @memset(starts, 0);
+    for (boxes) |box| {
+        const x1 = index.cellOf(box[2], minx, index.nx);
+        const y1 = index.cellOf(box[3], miny, index.ny);
+        var cx = index.cellOf(box[0], minx, index.nx);
+        while (cx <= x1) : (cx += 1) {
+            var cy = index.cellOf(box[1], miny, index.ny);
+            while (cy <= y1) : (cy += 1) starts[cx * index.ny + cy + 1] += 1;
+        }
+    }
+    for (1..starts.len) |i| starts[i] += starts[i - 1];
+    const items = try arena.alloc(u32, starts[cells]);
+    const cursor = try arena.alloc(u32, cells);
+    @memcpy(cursor, starts[0..cells]);
+    for (boxes, 0..) |box, i| {
+        const x1 = index.cellOf(box[2], minx, index.nx);
+        const y1 = index.cellOf(box[3], miny, index.ny);
+        var cx = index.cellOf(box[0], minx, index.nx);
+        while (cx <= x1) : (cx += 1) {
+            var cy = index.cellOf(box[1], miny, index.ny);
+            while (cy <= y1) : (cy += 1) {
+                const cell = cx * index.ny + cy;
+                items[cursor[cell]] = @intCast(i);
+                cursor[cell] += 1;
+            }
+        }
+    }
+    index.starts = starts;
+    index.items = items;
+    return index;
+}
+
+fn trackBoxes(arena: std.mem.Allocator, tracks: []const Track) std.mem.Allocator.Error![]const Box {
+    const out = try arena.alloc(Box, tracks.len);
+    for (tracks, out) |track, *box| box.* = trackBox(track);
+    return out;
+}
+
+fn terminalBoxes(arena: std.mem.Allocator, terminals: []const Terminal) std.mem.Allocator.Error![]const Box {
+    const out = try arena.alloc(Box, terminals.len);
+    for (terminals, out) |terminal, *box| box.* = terminalBox(terminal);
+    return out;
+}
+
+fn viaBoxes(arena: std.mem.Allocator, vias: []const Via) std.mem.Allocator.Error![]const Box {
+    const out = try arena.alloc(Box, vias.len);
+    for (vias, out) |via, *box| box.* = viaBox(via);
+    return out;
+}
+
+/// The three feature indexes one via-redundancy pass shares between its graph
+/// build and its per-candidate endpoint probes, so the board is bucketed once.
+const FeatureIndexes = struct {
+    track_boxes: []const Box,
+    terminal_boxes: []const Box,
+    via_boxes: []const Box,
+    track: Index,
+    terminal: Index,
+    via: Index,
+
+    fn build(
+        arena: std.mem.Allocator,
+        terminals: []const Terminal,
+        tracks: []const Track,
+        vias: []const Via,
+    ) std.mem.Allocator.Error!FeatureIndexes {
+        const track_boxes = try trackBoxes(arena, tracks);
+        const terminal_boxes = try terminalBoxes(arena, terminals);
+        const via_boxes = try viaBoxes(arena, vias);
+        return .{
+            .track_boxes = track_boxes,
+            .terminal_boxes = terminal_boxes,
+            .via_boxes = via_boxes,
+            .track = try buildIndex(arena, track_boxes),
+            .terminal = try buildIndex(arena, terminal_boxes),
+            .via = try buildIndex(arena, via_boxes),
+        };
+    }
+};
+
 fn rootOf(parent: []usize, start: usize) usize {
     var node = start;
     while (parent[node] != node) node = parent[node];
@@ -174,14 +569,24 @@ fn nonExplicitContacts(
 ) std.mem.Allocator.Error![]const ImplicitJoin {
     const parent = try arena.alloc(usize, tracks.len);
     for (parent, 0..) |*p, i| p.* = i;
+    const boxes = try trackBoxes(arena, tracks);
+    var index = try buildIndex(arena, boxes);
+    var near: std.ArrayList(u32) = .empty;
     for (tracks, 0..) |track, i| {
-        for (tracks[i + 1 ..], i + 1..) |other, j| {
-            if (tracksJoinExplicitly(track, other)) unite(parent, i, j);
+        try index.near(arena, &near, boxes[i], touch_slack_mm);
+        for (near.items) |candidate| {
+            const j: usize = candidate;
+            if (j <= i) continue;
+            if (tracksJoinExplicitly(track, tracks[j])) unite(parent, i, j);
         }
     }
     var out: std.ArrayList(ImplicitJoin) = .empty;
     for (tracks, 0..) |track, i| {
-        for (tracks[i + 1 ..], i + 1..) |other, j| {
+        try index.near(arena, &near, boxes[i], touch_slack_mm);
+        for (near.items) |candidate| {
+            const j: usize = candidate;
+            if (j <= i) continue;
+            const other = tracks[j];
             if (rootOf(parent, i) == rootOf(parent, j)) continue;
             if (robust_only) {
                 if (!tracksJoinPhysically(track, other)) continue;
@@ -312,15 +717,28 @@ fn buildSupportGraph(
     const graph = try arena.alloc(std.ArrayList(usize), pour_start + pours.len);
     for (graph) |*neighbours| neighbours.* = .empty;
 
+    const boxes = try trackBoxes(arena, tracks);
+    var track_index = try buildIndex(arena, boxes);
+    var terminal_index = try buildIndex(arena, try terminalBoxes(arena, terminals));
+    var via_index = try buildIndex(arena, try viaBoxes(arena, support.live_vias));
+    var near: std.ArrayList(u32) = .empty;
+
     for (tracks, 0..) |track, i| {
-        for (tracks[i + 1 ..], i + 1..) |other, j| {
-            if (tracksJoin(track, other)) try addNeighbour(arena, graph, i, j);
+        try track_index.near(arena, &near, boxes[i], touch_slack_mm);
+        for (near.items) |candidate| {
+            const j: usize = candidate;
+            if (j <= i) continue;
+            if (tracksJoin(track, tracks[j])) try addNeighbour(arena, graph, i, j);
         }
-        for (terminals, 0..) |terminal, terminal_i| {
-            if (trackTouchesTerminal(track, terminal)) try addNeighbour(arena, graph, i, terminal_start + terminal_i);
+        try terminal_index.near(arena, &near, boxes[i], touch_slack_mm);
+        for (near.items) |candidate| {
+            const terminal_i: usize = candidate;
+            if (trackTouchesTerminal(track, terminals[terminal_i])) try addNeighbour(arena, graph, i, terminal_start + terminal_i);
         }
-        for (support.live_vias, 0..) |via, via_i| {
-            if (trackTouchesVia(track, via)) try addNeighbour(arena, graph, i, via_start + via_i);
+        try via_index.near(arena, &near, boxes[i], touch_slack_mm);
+        for (near.items) |candidate| {
+            const via_i: usize = candidate;
+            if (trackTouchesVia(track, support.live_vias[via_i])) try addNeighbour(arena, graph, i, via_start + via_i);
         }
         const poured = endpointPourLayers(support, i);
         for (0..2) |end_i| {
@@ -378,38 +796,137 @@ fn graphComponents(
     return .{ .id = id, .supports = supports, .first_support = first_support };
 }
 
-const ConnectivityWalk = struct {
-    arena: std.mem.Allocator,
+/// Which trace sections of a support component are the SOLE path from some
+/// support to that component's root support.
+///
+/// This used to be a whole breadth-first re-walk of the component per candidate
+/// section. It is the textbook CUT-VERTEX question, so one depth-first pass
+/// (Tarjan) settles every section of the component at once: rooted at the
+/// component's first support, deleting `v` detaches exactly the child subtrees
+/// `c` with `low[c] >= disc[v]`, so `v` is load bearing exactly when one of
+/// those subtrees still holds a support. A section the walk cannot reach —
+/// its copper already deleted by an accepted removal — detaches nothing, which
+/// is the same verdict the re-walk gave it.
+///
+/// The joint deletion plan mutates the graph, so `analyze` is re-run for a
+/// component when (and only when) a removal inside it is accepted; components
+/// never share an edge, so no other component's answer can go stale.
+const Cuts = struct {
+    /// Discovery index, 0 while unvisited. Only ever compared within one run.
+    disc: []u32,
+    low: []u32,
+    subtree_supports: []u32,
+    /// Does deleting this vertex detach a support from the component root?
+    separates: []bool,
+    parent: []usize,
+    edge: []usize,
     graph: []const std.ArrayList(usize),
-    components: Components,
     track_count: usize,
+    /// The joint plan's live deletion set — read, never written, here.
     removed: []const bool,
-    seen: []usize,
-    queue: std.ArrayList(usize) = .empty,
+    timer: u32 = 0,
+    stack: std.ArrayList(usize) = .empty,
 
-    fn redundant(self: *ConnectivityWalk, candidate: usize, generation: usize) std.mem.Allocator.Error!bool {
-        const component = self.components.id[candidate];
-        if (self.components.supports[component] <= 1) return true;
-        self.queue.clearRetainingCapacity();
-        const start = self.components.first_support[component].?;
-        try self.queue.append(self.arena, start);
-        self.seen[candidate] = generation;
-        self.seen[start] = generation;
-        var reached: usize = 0;
-        var head: usize = 0;
-        while (head < self.queue.items.len) : (head += 1) {
-            const vertex = self.queue.items[head];
-            if (vertex >= self.track_count) reached += 1;
-            for (self.graph[vertex].items) |other| {
-                if (other < self.track_count and self.removed[other]) continue;
-                if (self.seen[other] == generation) continue;
-                self.seen[other] = generation;
-                try self.queue.append(self.arena, other);
-            }
+    fn prepare(
+        arena: std.mem.Allocator,
+        graph: []const std.ArrayList(usize),
+        track_count: usize,
+        removed: []const bool,
+    ) std.mem.Allocator.Error!Cuts {
+        const cuts = Cuts{
+            .disc = try arena.alloc(u32, graph.len),
+            .low = try arena.alloc(u32, graph.len),
+            .subtree_supports = try arena.alloc(u32, graph.len),
+            .separates = try arena.alloc(bool, graph.len),
+            .parent = try arena.alloc(usize, graph.len),
+            .edge = try arena.alloc(usize, graph.len),
+            .graph = graph,
+            .track_count = track_count,
+            .removed = removed,
+        };
+        @memset(cuts.disc, 0);
+        @memset(cuts.separates, false);
+        return cuts;
+    }
+
+    fn analyze(
+        self: *Cuts,
+        arena: std.mem.Allocator,
+        members: []const u32,
+        root: usize,
+    ) std.mem.Allocator.Error!void {
+        const graph = self.graph;
+        const track_count = self.track_count;
+        const removed = self.removed;
+        for (members) |member| {
+            self.disc[member] = 0;
+            self.separates[member] = false;
         }
-        return reached == self.components.supports[component];
+        self.timer = 1;
+        self.discover(root, root, track_count);
+        self.stack.clearRetainingCapacity();
+        try self.stack.append(arena, root);
+        while (self.stack.items.len > 0) {
+            const vertex = self.stack.items[self.stack.items.len - 1];
+            if (self.edge[vertex] < graph[vertex].items.len) {
+                const other = graph[vertex].items[self.edge[vertex]];
+                self.edge[vertex] += 1;
+                if (other < track_count and removed[other]) continue;
+                if (other == self.parent[vertex]) continue;
+                if (self.disc[other] == 0) {
+                    self.discover(other, vertex, track_count);
+                    try self.stack.append(arena, other);
+                } else self.low[vertex] = @min(self.low[vertex], self.disc[other]);
+                continue;
+            }
+            _ = self.stack.pop();
+            if (vertex == root) continue;
+            const up = self.parent[vertex];
+            self.low[up] = @min(self.low[up], self.low[vertex]);
+            self.subtree_supports[up] += self.subtree_supports[vertex];
+            if (self.low[vertex] >= self.disc[up] and self.subtree_supports[vertex] > 0)
+                self.separates[up] = true;
+        }
+    }
+
+    fn discover(self: *Cuts, vertex: usize, from: usize, track_count: usize) void {
+        self.disc[vertex] = self.timer;
+        self.low[vertex] = self.timer;
+        self.timer += 1;
+        self.subtree_supports[vertex] = if (vertex >= track_count) 1 else 0;
+        self.parent[vertex] = from;
+        self.edge[vertex] = 0;
     }
 };
+
+/// The vertices of each component, ascending, CSR-packed — the reset list one
+/// component's cut recompute walks.
+const ComponentMembers = struct {
+    starts: []const u32,
+    items: []const u32,
+
+    fn of(self: ComponentMembers, component: usize) []const u32 {
+        return self.items[self.starts[component]..self.starts[component + 1]];
+    }
+};
+
+fn componentMembers(arena: std.mem.Allocator, ids: []const usize) std.mem.Allocator.Error!ComponentMembers {
+    var highest: usize = 0;
+    for (ids) |id| highest = @max(highest, id);
+    const count = if (ids.len == 0) 0 else highest + 1;
+    const starts = try arena.alloc(u32, count + 1);
+    @memset(starts, 0);
+    for (ids) |id| starts[id + 1] += 1;
+    for (1..starts.len) |i| starts[i] += starts[i - 1];
+    const items = try arena.alloc(u32, ids.len);
+    const cursor = try arena.alloc(u32, count);
+    @memcpy(cursor, starts[0..count]);
+    for (ids, 0..) |id, vertex| {
+        items[cursor[id]] = @intCast(vertex);
+        cursor[id] += 1;
+    }
+    return .{ .starts = starts, .items = items };
+}
 
 /// One result per stored trace section. A section is redundant when deleting
 /// it leaves every pad, live via, and same-net poured region that was connected
@@ -476,6 +993,7 @@ fn buildViaGraph(
     tracks: []const Track,
     vias: []const Via,
     support: ViaSupport,
+    indexes: *FeatureIndexes,
 ) std.mem.Allocator.Error![]std.ArrayList(usize) {
     const terminal_start = tracks.len;
     const via_start = terminal_start + terminals.len;
@@ -484,32 +1002,55 @@ fn buildViaGraph(
     const graph = try arena.alloc(std.ArrayList(usize), component_start + components.len);
     for (graph) |*neighbours| neighbours.* = .empty;
 
+    const track_boxes = indexes.track_boxes;
+    const terminal_boxes = indexes.terminal_boxes;
+    const via_boxes = indexes.via_boxes;
+    const track_index = &indexes.track;
+    const terminal_index = &indexes.terminal;
+    const via_index = &indexes.via;
+    var near: std.ArrayList(u32) = .empty;
+
     for (tracks, 0..) |track, track_i| {
-        for (tracks[track_i + 1 ..], track_i + 1..) |other, other_i| {
-            if (tracksJoin(track, other)) try addNeighbour(arena, graph, track_i, other_i);
+        try track_index.near(arena, &near, track_boxes[track_i], touch_slack_mm);
+        for (near.items) |candidate| {
+            const other_i: usize = candidate;
+            if (other_i <= track_i) continue;
+            if (tracksJoin(track, tracks[other_i])) try addNeighbour(arena, graph, track_i, other_i);
         }
-        for (terminals, 0..) |terminal, terminal_i| {
-            if (trackTouchesTerminal(track, terminal))
+        try terminal_index.near(arena, &near, track_boxes[track_i], touch_slack_mm);
+        for (near.items) |candidate| {
+            const terminal_i: usize = candidate;
+            if (trackTouchesTerminal(track, terminals[terminal_i]))
                 try addNeighbour(arena, graph, track_i, terminal_start + terminal_i);
         }
-        for (vias, 0..) |via, via_i| {
-            if (trackTouchesVia(track, via))
+        try via_index.near(arena, &near, track_boxes[track_i], touch_slack_mm);
+        for (near.items) |candidate| {
+            const via_i: usize = candidate;
+            if (trackTouchesVia(track, vias[via_i]))
                 try addNeighbour(arena, graph, track_i, via_start + via_i);
         }
     }
     for (terminals, 0..) |terminal, terminal_i| {
-        for (terminals[terminal_i + 1 ..], terminal_i + 1..) |other, other_i| {
-            if (terminalsTouch(terminal, other))
+        try terminal_index.near(arena, &near, terminal_boxes[terminal_i], touch_slack_mm);
+        for (near.items) |candidate| {
+            const other_i: usize = candidate;
+            if (other_i <= terminal_i) continue;
+            if (terminalsTouch(terminal, terminals[other_i]))
                 try addNeighbour(arena, graph, terminal_start + terminal_i, terminal_start + other_i);
         }
-        for (vias, 0..) |via, via_i| {
-            if (terminalTouchesVia(terminal, via))
+        try via_index.near(arena, &near, terminal_boxes[terminal_i], touch_slack_mm);
+        for (near.items) |candidate| {
+            const via_i: usize = candidate;
+            if (terminalTouchesVia(terminal, vias[via_i]))
                 try addNeighbour(arena, graph, terminal_start + terminal_i, via_start + via_i);
         }
     }
     for (vias, 0..) |via, via_i| {
-        for (vias[via_i + 1 ..], via_i + 1..) |other, other_i| {
-            if (viasTouch(via, other))
+        try via_index.near(arena, &near, via_boxes[via_i], touch_slack_mm);
+        for (near.items) |candidate| {
+            const other_i: usize = candidate;
+            if (other_i <= via_i) continue;
+            if (viasTouch(via, vias[other_i]))
                 try addNeighbour(arena, graph, via_start + via_i, via_start + other_i);
         }
     }
@@ -594,27 +1135,48 @@ const ViaConnectivityWalk = struct {
     removed: []const bool,
     seen: []usize,
     queue: std.ArrayList(usize) = .empty,
+    /// Copper-locality indexes over the same three feature arrays. They only
+    /// narrow which features each endpoint/barrel question has to ask, never
+    /// what it asks; see the spatial-index header.
+    track_index: *Index,
+    terminal_index: *Index,
+    via_index: *Index,
+    track_boxes: []const Box,
+    via_boxes: []const Box,
+    /// Two live candidate lists, because an endpoint probe runs INSIDE the
+    /// sweep over the barrel's own touching traces.
+    outer: std.ArrayList(u32) = .empty,
+    inner: std.ArrayList(u32) = .empty,
 
     fn active(self: ViaConnectivityWalk, vertex: usize) bool {
         if (vertex < self.via_start or vertex >= self.via_start + self.vias.len) return true;
         return !self.removed[vertex - self.via_start];
     }
 
-    fn endSupportedAfterRemoval(self: ViaConnectivityWalk, track_i: usize, end_i: usize, p: [2]f64) bool {
+    fn endSupportedAfterRemoval(self: *ViaConnectivityWalk, track_i: usize, end_i: usize, p: [2]f64) std.mem.Allocator.Error!bool {
         const track = self.tracks[track_i];
         if (track_i < self.support.track_components.len and self.support.track_components[track_i][end_i] != 0)
             return true;
-        for (self.terminals) |terminal| {
+        const probe = pointBox(p, track.width / 2);
+        try self.terminal_index.near(self.arena, &self.inner, probe, touch_slack_mm);
+        for (self.inner.items) |candidate| {
+            const terminal = self.terminals[candidate];
             if (!terminalPointTouch(terminal, p[0], p[1], track.width / 2, track.layer, track.net)) continue;
             if (trackTouchesTerminal(track, terminal)) return true;
         }
-        for (self.vias, 0..) |via, via_i| {
+        try self.via_index.near(self.arena, &self.inner, probe, touch_slack_mm);
+        for (self.inner.items) |candidate| {
+            const via_i: usize = candidate;
+            const via = self.vias[via_i];
             if (self.removed[via_i] or via.net != track.net) continue;
             if (std.math.hypot(via.at[0] - p[0], via.at[1] - p[1]) >
                 via.dia / 2 + track.width / 2 + touch_slack_mm) continue;
             if (trackTouchesVia(track, via)) return true;
         }
-        for (self.tracks, 0..) |other, other_i| {
+        try self.track_index.near(self.arena, &self.inner, probe, touch_slack_mm);
+        for (self.inner.items) |candidate| {
+            const other_i: usize = candidate;
+            const other = self.tracks[other_i];
             if (other_i == track_i or other.net != track.net or other.layer != track.layer) continue;
             if (pad_shape.segPointDist(other.a[0], other.a[1], other.b[0], other.b[1], p[0], p[1]) >
                 other.width / 2 + track.width / 2 + touch_slack_mm) continue;
@@ -627,21 +1189,26 @@ const ViaConnectivityWalk = struct {
     /// still be the only copper supporting a stored trace endpoint. Removing it
     /// would turn that trace into a new `copper_stub`, so endpoint support is a
     /// second invariant beside component connectivity.
-    fn keepsTrackEnds(self: ViaConnectivityWalk, candidate: usize) bool {
+    fn keepsTrackEnds(self: *ViaConnectivityWalk, candidate: usize) std.mem.Allocator.Error!bool {
         const via = self.vias[candidate];
-        for (self.tracks, 0..) |track, track_i| {
+        try self.track_index.near(self.arena, &self.outer, self.via_boxes[candidate], touch_slack_mm);
+        // Snapshot: the endpoint probes below query this same index again.
+        const touching = try self.arena.dupe(u32, self.outer.items);
+        for (touching) |entry| {
+            const track_i: usize = entry;
+            const track = self.tracks[track_i];
             if (!trackTouchesVia(track, via)) continue;
             for ([_][2]f64{ track.a, track.b }, 0..) |p, end_i| {
                 if (std.math.hypot(via.at[0] - p[0], via.at[1] - p[1]) >
                     via.dia / 2 + track.width / 2 + touch_slack_mm) continue;
-                if (!self.endSupportedAfterRemoval(track_i, end_i, p)) return false;
+                if (!try self.endSupportedAfterRemoval(track_i, end_i, p)) return false;
             }
         }
         return true;
     }
 
     fn redundant(self: *ViaConnectivityWalk, candidate: usize, generation: usize) std.mem.Allocator.Error!bool {
-        if (!self.keepsTrackEnds(candidate)) return false;
+        if (!try self.keepsTrackEnds(candidate)) return false;
         const candidate_node = self.via_start + candidate;
         const component = self.components.id[candidate_node];
         var expected: usize = 0;
@@ -683,7 +1250,8 @@ pub fn analyzeViaRedundancy(
     vias: []const Via,
     support: ViaSupport,
 ) std.mem.Allocator.Error!RedundancyAnalysis {
-    const graph = try buildViaGraph(arena, terminals, tracks, vias, support);
+    var indexes = try FeatureIndexes.build(arena, terminals, tracks, vias);
+    const graph = try buildViaGraph(arena, terminals, tracks, vias, support, &indexes);
     const components = try graphComponents(arena, graph, tracks.len);
     const removed = try arena.alloc(bool, vias.len);
     @memset(removed, false);
@@ -701,6 +1269,11 @@ pub fn analyzeViaRedundancy(
         .via_start = tracks.len + terminals.len,
         .removed = removed,
         .seen = seen,
+        .track_index = &indexes.track,
+        .terminal_index = &indexes.terminal,
+        .via_index = &indexes.via,
+        .track_boxes = indexes.track_boxes,
+        .via_boxes = indexes.via_boxes,
     };
     for (vias, 0..) |via, via_i| {
         const eligible = via.net >= 0 and (support.candidates.len == 0 or
@@ -738,58 +1311,72 @@ pub fn analyzeRedundancy(
     const pours = try pourKeys(arena, tracks, support);
     const graph = try buildSupportGraph(arena, terminals, tracks, support, pours);
     const components = try graphComponents(arena, graph, tracks.len);
+    const members = try componentMembers(arena, components.id);
     const removed = try arena.alloc(bool, tracks.len);
     @memset(removed, false);
     const individual = try arena.alloc(bool, tracks.len);
-    const seen = try arena.alloc(usize, graph.len);
-    @memset(seen, 0);
-    var walk = ConnectivityWalk{
-        .arena = arena,
-        .graph = graph,
-        .components = components,
-        .track_count = tracks.len,
-        .removed = removed,
-        .seen = seen,
-    };
+    var cuts = try Cuts.prepare(arena, graph, tracks.len, removed);
+    // A component reaching at most one support answers "redundant" for every
+    // section in it without any walk, so only the rest are analysed.
+    for (components.first_support, 0..) |first, component| {
+        if (component + 1 >= members.starts.len) break;
+        if (components.supports[component] <= 1) continue;
+        try cuts.analyze(arena, members.of(component), first.?);
+    }
     const spanning = try arena.alloc(bool, tracks.len);
     for (tracks, 0..) |track, i| {
-        individual[i] = track.net >= 0 and try walk.redundant(i, i + 1);
-        spanning[i] = components.supports[components.id[i]] > 1;
+        const component = components.id[i];
+        individual[i] = track.net >= 0 and
+            (components.supports[component] <= 1 or !cuts.separates[i]);
+        spanning[i] = components.supports[component] > 1;
     }
     // Sections are considered newest-first so late detours disappear before
-    // established trunks. Accepted deletions participate in all later checks.
-    var generation: usize = tracks.len + 1;
+    // established trunks. Accepted deletions participate in all later checks —
+    // which is exactly when the component's cut analysis has to be redone.
     var i = tracks.len;
     while (i > 0) {
         i -= 1;
         if (tracks[i].net < 0) continue;
+        const component = components.id[i];
+        if (components.supports[component] <= 1) {
+            removed[i] = true;
+            continue;
+        }
+        if (cuts.separates[i]) continue;
         removed[i] = true;
-        if (!try walk.redundant(i, generation)) removed[i] = false;
-        generation += 1;
+        try cuts.analyze(arena, members.of(component), components.first_support[component].?);
     }
     return .{ .individual = individual, .removal = removed, .spanning = spanning };
 }
 
 fn endSupported(
-    terminals: []const Terminal,
-    tracks: []const Track,
-    vias: []const Via,
+    copper: Copper,
     track_i: usize,
     p: [2]f64,
     pour_layers: u64,
+    near: Neighbours,
 ) bool {
+    const terminals = copper.terminals;
+    const tracks = copper.tracks;
+    const vias = copper.vias;
     const track = tracks[track_i];
     if (pour_layers & layerBit(track.layer) != 0) return true;
-    for (terminals) |terminal| {
+    var terminal_it = IdIter.init(near.terminals, terminals.len);
+    while (terminal_it.next()) |terminal_i| {
+        const terminal = terminals[terminal_i];
         if (!terminalPointTouch(terminal, p[0], p[1], track.width / 2, track.layer, track.net)) continue;
         if (trackTouchesTerminal(track, terminal)) return true;
     }
-    for (vias) |via| {
+    var via_it = IdIter.init(near.vias, vias.len);
+    while (via_it.next()) |via_i| {
+        const via = vias[via_i];
         if (via.net != track.net) continue;
         if (std.math.hypot(via.at[0] - p[0], via.at[1] - p[1]) > via.dia / 2 + track.width / 2 + touch_slack_mm) continue;
         if (trackTouchesVia(track, via)) return true;
     }
-    for (tracks, 0..) |other, other_i| {
+    var track_it = IdIter.init(near.tracks, tracks.len);
+    while (track_it.next()) |other_i| {
+        const other = tracks[other_i];
         if (other_i == track_i or other.net != track.net or other.layer != track.layer) continue;
         if (pad_shape.segPointDist(other.a[0], other.a[1], other.b[0], other.b[1], p[0], p[1]) >
             other.width / 2 + track.width / 2 + touch_slack_mm) continue;
@@ -808,12 +1395,54 @@ pub fn viaUseCount(
     pour_layers: u64,
     plane_contacts: u8,
 ) usize {
+    return viaUseCountNear(terminals, tracks, via, pour_layers, plane_contacts, .{});
+}
+
+/// `viaUseCount` for every barrel at once. One copper-locality index over the
+/// traces and lands replaces the per-barrel sweep over both arrays; the layer
+/// mask each barrel accumulates is an OR, so a narrowed candidate list gives
+/// the identical count.
+pub fn viaUseCounts(
+    arena: std.mem.Allocator,
+    terminals: []const Terminal,
+    tracks: []const Track,
+    vias: []const Via,
+    pour_layers: []const u64,
+    plane_contacts: []const u8,
+) std.mem.Allocator.Error![]const usize {
+    const out = try arena.alloc(usize, vias.len);
+    var indexes = try FeatureIndexes.build(arena, terminals, tracks, vias);
+    var terminal_ids: std.ArrayList(u32) = .empty;
+    var track_ids: std.ArrayList(u32) = .empty;
+    for (vias, 0..) |via, via_i| {
+        try indexes.terminal.near(arena, &terminal_ids, indexes.via_boxes[via_i], touch_slack_mm);
+        try indexes.track.near(arena, &track_ids, indexes.via_boxes[via_i], touch_slack_mm);
+        out[via_i] = viaUseCountNear(terminals, tracks, via, pour_layers[via_i], plane_contacts[via_i], .{
+            .terminals = terminal_ids.items,
+            .tracks = track_ids.items,
+        });
+    }
+    return out;
+}
+
+fn viaUseCountNear(
+    terminals: []const Terminal,
+    tracks: []const Track,
+    via: Via,
+    pour_layers: u64,
+    plane_contacts: u8,
+    near: Neighbours,
+) usize {
     var layers = pour_layers;
     if (via.net < 0) return @popCount(layers) + plane_contacts;
-    for (tracks) |track| {
+    var track_it = IdIter.init(near.tracks, tracks.len);
+    while (track_it.next()) |track_i| {
+        const track = tracks[track_i];
         if (trackTouchesVia(track, via)) layers |= layerBit(track.layer);
     }
-    for (terminals) |terminal| {
+    var terminal_it = IdIter.init(near.terminals, terminals.len);
+    while (terminal_it.next()) |terminal_i| {
+        const terminal = terminals[terminal_i];
         if (terminal.net != via.net) continue;
         if (pad_shape.pointDist(terminal.shape.x0, terminal.shape.y0, terminal.shape.x1, terminal.shape.y1, terminal.shape.poly, via.at[0], via.at[1], std.math.inf(f64)) >
             via.dia / 2 + touch_slack_mm) continue;
@@ -847,6 +1476,86 @@ test "trace endpoints distinguish real terminals and a dangling leaf" {
     const pad_only = [_]Track{.{ .a = .{ 0, 0 }, .b = .{ 0.1, 0 }, .layer = 0, .width = 0.2, .net = 0 }};
     try std.testing.expect(looseEnd(&pads, &pad_only, &.{}, 0, .{ 0, 0 }) != null);
     try std.testing.expect((try redundantSections(arena_inst.allocator(), &pads, &pad_only, .{}))[0]);
+}
+
+/// A lattice fixture for the shared-index checks: eight nets, each a land, a
+/// two-section run to a barrel, a layer jump off that barrel, and one stub that
+/// reaches nothing. Neighbouring cells sit close enough that a bucketed query
+/// has to keep them apart.
+const IndexFixture = struct {
+    terminals: []const Terminal,
+    tracks: []const Track,
+    vias: []const Via,
+    pours: []const [2]u64,
+    poured: []const u64,
+    planes: []const u8,
+};
+
+fn indexFixture(arena: std.mem.Allocator) std.mem.Allocator.Error!IndexFixture {
+    var terminals: std.ArrayList(Terminal) = .empty;
+    var tracks: std.ArrayList(Track) = .empty;
+    var vias: std.ArrayList(Via) = .empty;
+    for (0..8) |cell| {
+        const net: i32 = @intCast(cell);
+        const x0 = @as(f64, @floatFromInt(cell)) * 3.0;
+        try terminals.append(arena, .{
+            .shape = .{ .x0 = x0 - 0.3, .y0 = -0.3, .x1 = x0 + 0.3, .y1 = 0.3 },
+            .net = net,
+            .layer = 0,
+        });
+        try tracks.append(arena, .{ .a = .{ x0, 0 }, .b = .{ x0 + 1, 0 }, .layer = 0, .width = 0.2, .net = net });
+        try tracks.append(arena, .{ .a = .{ x0 + 1, 0 }, .b = .{ x0 + 2, 0 }, .layer = 0, .width = 0.2, .net = net });
+        try tracks.append(arena, .{ .a = .{ x0, 2 }, .b = .{ x0 + 1, 2 }, .layer = 0, .width = 0.2, .net = net });
+        try tracks.append(arena, .{ .a = .{ x0 + 2, 0 }, .b = .{ x0 + 2, 1 }, .layer = 1, .width = 0.2, .net = net });
+        try vias.append(arena, .{ .at = .{ x0 + 2, 0 }, .dia = 0.4, .net = net });
+    }
+    const pours = try arena.alloc([2]u64, tracks.items.len);
+    @memset(pours, .{ 0, 0 });
+    const poured = try arena.alloc(u64, vias.items.len);
+    @memset(poured, 0);
+    const planes = try arena.alloc(u8, vias.items.len);
+    @memset(planes, 0);
+    return .{
+        .terminals = terminals.items,
+        .tracks = tracks.items,
+        .vias = vias.items,
+        .pours = pours,
+        .poured = poured,
+        .planes = planes,
+    };
+}
+
+/// How many of `ends` name a loose endpoint.
+fn looseCount(ends: []const ?[2]f64) usize {
+    var found: usize = 0;
+    for (ends) |end| {
+        if (end != null) found += 1;
+    }
+    return found;
+}
+
+// spec: placement/copper-topology - one shared copper index answers every section's endpoints and every barrel's layer count exactly as the per-feature sweep does
+test "the batch endpoint and barrel queries match the per-feature sweep" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const f = try indexFixture(arena);
+    const batched = try looseEnds(arena, f.terminals, f.tracks, f.vias, f.pours);
+    const counts = try viaUseCounts(arena, f.terminals, f.tracks, f.vias, f.poured, f.planes);
+    for (f.tracks, 0..) |_, i| {
+        const single = looseEnd(f.terminals, f.tracks, f.vias, i, f.pours[i]);
+        try std.testing.expectEqual(single == null, batched[i] == null);
+        if (single) |p| {
+            try std.testing.expectEqual(p[0], batched[i].?[0]);
+            try std.testing.expectEqual(p[1], batched[i].?[1]);
+        }
+        if (i < f.vias.len) {
+            try std.testing.expectEqual(viaUseCount(f.terminals, f.tracks, f.vias[i], 0, 0), counts[i]);
+            try std.testing.expectEqual(@as(usize, 2), counts[i]); // both routed layers land on it
+        }
+    }
+    // The fixture has to carry both verdicts or the agreement proves nothing.
+    try std.testing.expect(looseCount(batched) > 0 and looseCount(batched) < f.tracks.len);
 }
 
 // spec: placement/copper-topology - a redundancy verdict is marked spanning only when the section's component joins more than one support, separating an alternate path from copper that reaches nothing

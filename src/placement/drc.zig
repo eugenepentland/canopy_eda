@@ -912,6 +912,9 @@ fn checkCopperTopology(
         },
     );
     const redundancy = try copper_topology.analyzeRedundancy(arena, terminals, topology_tracks, support.branch);
+    // One batch call so the endpoint sweep buckets the board's copper once
+    // instead of re-walking every land, trace, and barrel per section.
+    const loose_ends = try copper_topology.looseEnds(arena, terminals, topology_tracks, topology_vias, endpoint_pours);
     const redundant = redundancy.individual;
     const removal = redundancy.removal;
     for (tracks, 0..) |track, track_i| {
@@ -920,10 +923,7 @@ fn checkCopperTopology(
         // adjoining pads, tracks, vias, and pours, but none is independently
         // reportable or removable merely because neighbouring samples overlap.
         const stored_i = track_identities[track_i] orelse continue;
-        const loose = copper_topology.looseEnd(terminals, topology_tracks, topology_vias, track_i, .{
-            endpoint_pours[track_i][0],
-            endpoint_pours[track_i][1],
-        });
+        const loose = loose_ends[track_i];
         // The user's unit is the stored route section: one warning for every
         // section whose deletion preserves all support connectivity.
         if (redundant[track_i]) {
