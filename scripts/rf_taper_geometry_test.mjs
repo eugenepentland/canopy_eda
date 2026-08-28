@@ -244,6 +244,44 @@ function load(names, globals = {}) {
 }
 
 {
+  const t1 = { id: "leg-a", net: "RF", l: 0, x1: 0, y1: 0, x2: 5, y2: 0 };
+  const t2 = { id: "leg-b", net: "RF", l: 0, x1: 5, y1: 0, x2: 5, y2: 5 };
+  const arc = { id: "fillet", net: "RF", l: 0, x1: 4, y1: 0,
+    xm: 4 + Math.SQRT1_2, ym: 1 - Math.SQRT1_2, x2: 5, y2: 1 };
+  const main = { net: "RF", l: 0, track_ids: [t1.id, t2.id], samples: [
+    [0, 0, 0.6], [1, 0, 0.2], [5, 0, 0.2], [5, 4, 0.2], [5, 5, 0.5],
+  ] };
+  const collar = { net: "RF", l: 0, portal: true, track_ids: [t1.id, t2.id],
+    samples: [[-0.1, -0.2, 0.1], [-0.1, 0.2, 0.1]] };
+  const unrelated = { net: "RF", l: 0, track_ids: ["elsewhere"], samples: [[8, 0, 0.2], [9, 0, 0.2]] };
+  const g = load([
+    "trackArcGeom", "trackChords", "drawTrackPoint", "rfPathOwnsTrack", "rfPathBelongsToTrack",
+    "traceFilletRfLocate", "traceFilletRfWidth", "traceFilletRfPush", "traceFilletRfCopy",
+    "traceFilletRfPath", "traceFilletRfPaths",
+  ]);
+  const paths = g.traceFilletRfPaths([main, collar, unrelated], [t1, t2], {
+    corner: { x: 5, y: 0 }, arc,
+  });
+  assert.equal(paths.length, 3, "a valid fillet must retain the main taper, its pad collar, and unrelated RF copper");
+  assert.equal(paths[2], unrelated, "unrelated RF geometry must not be rewritten");
+  assert.deepEqual(Array.from(paths[0].track_ids), [t1.id, t2.id, arc.id], "the new native arc must join the taper lifecycle");
+  assert.equal(paths[0].samples[0][2], 0.6, "the first pad taper width must survive the fillet");
+  assert.equal(paths[0].samples.at(-1)[2], 0.5, "the second pad taper width must survive the fillet");
+  assert(!paths[0].samples.some((s) => Math.hypot(s[0] - 5, s[1]) < 1e-9), "the old sharp corner must leave the swept path");
+  assert(paths[0].samples.some((s) => s[0] > 4.1 && s[0] < 4.9 && s[1] > 0.1 && s[1] < 0.9),
+    "the transformed width profile must follow interior stations of the fillet arc");
+  assert.deepEqual(Array.from(paths[1].track_ids), [t1.id, t2.id, arc.id], "the retained pad collar must share arc invalidation");
+  assert.deepEqual(paths[1].samples, collar.samples, "filleting a remote corner must not move the pad-contained collar");
+
+  const reverse = { ...main, samples: main.samples.slice().reverse().map((s) => s.slice()) };
+  const reversed = g.traceFilletRfPaths([reverse], [t1, t2], { corner: { x: 5, y: 0 }, arc })[0];
+  assert.equal(reversed.samples[0][2], 0.5, "reverse-authored routes must keep their first landing taper");
+  assert.equal(reversed.samples.at(-1)[2], 0.6, "reverse-authored routes must keep their far landing taper");
+  assert(!reversed.samples.some((s) => Math.hypot(s[0] - 5, s[1]) < 1e-9),
+    "reverse-authored routes must also replace the sharp corner with the fillet");
+}
+
+{
   let acceptAnyPad = false;
   let ownsLegacyTrack = false;
   let launchCalls = 0;

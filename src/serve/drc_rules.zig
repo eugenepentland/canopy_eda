@@ -1121,6 +1121,8 @@ test "viewer JS toggles the lock state of a multi-part selection with L" {
     try std.testing.expect(selected < hover);
 }
 
+// The same command must reshape controlled-impedance copper through the arc
+// without discarding the endpoint taper proof or its lifecycle ownership.
 // spec: Web Server - Two selected connected trace segments expose a right-click Fillet command that applies an exact native-arc radius through the normal copper edit gates
 test "viewer JS fillets two selected trace segments from the context menu" {
     const js = @embedFile("assets/pcb_board.js");
@@ -1130,12 +1132,14 @@ test "viewer JS fillets two selected trace segments from the context menu" {
         "if(radius>c.maxRadius+1e-9)",
         "xm:cx+radius*Math.cos(am),ym:cy+radius*Math.sin(am)",
         "window.PCBTraceFilletPlan=traceFilletPlan",
+        "function traceFilletRfPaths(paths,pair,plan)",
+        "window.PCBTraceFilletRfPaths=traceFilletRfPaths",
         "function traceFilletSelectionReady(){return selCu.t.length===2&&!selCu.v.length&&!sel.length;}",
         "traceFilletMenuOpen(ev);return;",
         "<b>Fillet…</b>",
         "name=\"radius\" type=\"number\"",
-        "drcGateDiffBlocks(base,PCB.vias||[],after,PCB.vias||[])",
-        "recordUndo(snap);rfDropForTracks(pair);PCB.tracks=after;copperTouched();",
+        "drcGateDiffBlocks(base,PCB.vias||[],after,PCB.vias||[],rfBefore,rfAfter)",
+        "recordUndo(snap);PCB.tracks=after;PCB.rf_paths=rfAfter;copperTouched();",
         "fillet applied · R",
         "if(ev.button===2)return; // context-menu commands own secondary clicks",
     };

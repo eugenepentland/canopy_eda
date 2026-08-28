@@ -7202,8 +7202,52 @@ function traceFilletPlan(t1,t2,radius){var c=traceFilletContext(t1,t2);if(!c.ok)
  if(sgn>0){while(sw<0)sw+=tau;while(sw>tau)sw-=tau;}else{while(sw>0)sw-=tau;while(sw< -tau)sw+=tau;}
  var am=a1+sw/2,arc={x1:p1.x,y1:p1.y,xm:cx+radius*Math.cos(am),ym:cy+radius*Math.sin(am),x2:p2.x,y2:p2.y,
   l:t1.l||0,w:t1.w||.25,net:t1.net||"",g:t1.g&&t1.g===t2.g?t1.g:undefined,source:"human"};
- return {ok:true,radius:radius,maxRadius:c.maxRadius,first:traceFilletLine(t1,c.e1,p1),arc:arc,second:traceFilletLine(t2,c.e2,p2)};}
+ return {ok:true,radius:radius,maxRadius:c.maxRadius,corner:c.b,first:traceFilletLine(t1,c.e1,p1),arc:arc,second:traceFilletLine(t2,c.e2,p2)};}
 window.PCBTraceFilletPlan=traceFilletPlan;
+// Locate a world point on a sampled RF centreline. Besides the closest path
+// station, retain every sample's cumulative station so a local edit can splice
+// exact new geometry into the old width profile without re-inventing its pad
+// launch parameters.
+function traceFilletRfLocate(samples,p){if(!samples||samples.length<2)return null;var at=[0],total=0,best=null;
+ for(var i=1;i<samples.length;i++){var a=samples[i-1],b=samples[i],dx=+b[0]-+a[0],dy=+b[1]-+a[1],len=Math.hypot(dx,dy);
+  total+=len;at.push(total);if(len<=1e-12)continue;var f=((p.x-a[0])*dx+(p.y-a[1])*dy)/(len*len);f=Math.max(0,Math.min(1,f));
+  var x=+a[0]+dx*f,y=+a[1]+dy*f,d=Math.hypot(p.x-x,p.y-y);
+  if(!best||d<best.d)best={d:d,s:at[i-1]+len*f,w:+a[2]+(+b[2]-+a[2])*f};}
+ return best&&best.d<=1e-5?{s:best.s,w:best.w,total:total,at:at}:null;}
+function traceFilletRfWidth(samples,at,s){if(s<=0)return +samples[0][2];var last=samples.length-1;if(s>=at[last])return +samples[last][2];
+ for(var i=1;i<samples.length;i++)if(s<=at[i]+1e-10){var span=at[i]-at[i-1],f=span>1e-12?(s-at[i-1])/span:0;
+  return +samples[i-1][2]+(+samples[i][2]-+samples[i-1][2])*f;}return +samples[last][2];}
+function traceFilletRfPush(out,s){var last=out.length&&out[out.length-1];if(last&&Math.hypot(+last[0]-+s[0],+last[1]-+s[1])<=1e-9){last[2]=Math.max(+last[2],+s[2]);return;}
+ out.push([+s[0],+s[1],+s[2]]);}
+function traceFilletRfCopy(path,samples,ownerIds){var out={};for(var k in path)out[k]=path[k];out.samples=samples;
+ out.track_ids=(path.track_ids||[]).slice();(ownerIds||[]).forEach(function(id){if(id&&out.track_ids.indexOf(id)<0)out.track_ids.push(id);});return out;}
+// A fillet is a topology-preserving edit, so keep the generated RF taper proof
+// and replace only the sharp-corner interval with sampled native-arc geometry.
+// Widths on the arc come from the same interval of the old profile; launch and
+// landing widths therefore remain unchanged even when the corner is close to a
+// taper. Portal collars do not move, but share the new arc owner for lifecycle
+// invalidation if that arc is later edited or deleted.
+function traceFilletRfPath(path,pair,plan){var owns1=rfPathBelongsToTrack(path,pair[0]),owns2=rfPathBelongsToTrack(path,pair[1]);
+ if(!owns1&&!owns2)return path;var ownerIds=[];if(owns1)ownerIds.push(pair[0].id);if(owns2)ownerIds.push(pair[1].id);
+ if(owns1&&owns2)ownerIds.push(plan.arc.id);if(path.portal)return owns1&&owns2?traceFilletRfCopy(path,path.samples,ownerIds):path;
+ var samples=path.samples||[];if(samples.length<2)return null;
+ if(owns1&&owns2){var a=traceFilletRfLocate(samples,{x:plan.arc.x1,y:plan.arc.y1}),b=traceFilletRfLocate(samples,{x:plan.arc.x2,y:plan.arc.y2});
+  if(!a||!b||Math.abs(a.s-b.s)<=1e-9)return null;var lo=Math.min(a.s,b.s),hi=Math.max(a.s,b.s),forward=a.s<b.s,out=[];
+  for(var i=0;i<samples.length;i++)if(a.at[i]<lo-1e-9)traceFilletRfPush(out,samples[i]);
+  var start=forward?plan.arc:{x1:plan.arc.x2,y1:plan.arc.y2,xm:plan.arc.xm,ym:plan.arc.ym,x2:plan.arc.x1,y2:plan.arc.y1},n=trackChords(start).length;
+  for(var j=0;j<=n;j++){var f=j/n,p=drawTrackPoint(start,f),oldS=lo+(hi-lo)*f;
+   traceFilletRfPush(out,[p.x,p.y,traceFilletRfWidth(samples,a.at,oldS)]);}
+  for(var q=0;q<samples.length;q++)if(a.at[q]>hi+1e-9)traceFilletRfPush(out,samples[q]);
+  return out.length>=2?traceFilletRfCopy(path,out,ownerIds):null;}
+ // Separate one-leg taper proofs remain valid after trimming their corner end;
+ // the uniform native arc stays ordinary visible copper between the two paths.
+ var tangent=owns1?{x:plan.arc.x1,y:plan.arc.y1}:{x:plan.arc.x2,y:plan.arc.y2},cut=traceFilletRfLocate(samples,tangent),corner=traceFilletRfLocate(samples,plan.corner);
+ if(!cut||!corner)return null;var trimmed=[];
+ if(corner.s<=1e-8){traceFilletRfPush(trimmed,[tangent.x,tangent.y,cut.w]);for(var x=0;x<samples.length;x++)if(cut.at[x]>cut.s+1e-9)traceFilletRfPush(trimmed,samples[x]);}
+ else if(corner.total-corner.s<=1e-8){for(var y=0;y<samples.length;y++)if(cut.at[y]<cut.s-1e-9)traceFilletRfPush(trimmed,samples[y]);traceFilletRfPush(trimmed,[tangent.x,tangent.y,cut.w]);}
+ else return null;return trimmed.length>=2?traceFilletRfCopy(path,trimmed,ownerIds):null;}
+function traceFilletRfPaths(paths,pair,plan){var out=[];(paths||[]).forEach(function(path){var next=traceFilletRfPath(path,pair,plan);if(next)out.push(next);});return out;}
+window.PCBTraceFilletRfPaths=traceFilletRfPaths;
 // Automatic land tapers for completed hand routes. Two policies share this
 // lowering seam:
 //  · an authored pad neck stays at pad_neck_width for max_length, then grows
@@ -9053,9 +9097,9 @@ function traceFilletDefault(c){var custom=parseFloat((document.getElementById("r
  return Math.max(.001,traceFilletRadiusLimit(Math.min(r,c.maxRadius)));}
 function traceFilletReplace(pair,radius){var t1=pair[0],t2=pair[1],plan=traceFilletPlan(t1,t2,radius);
  if(!plan.ok)return plan;var base=PCB.tracks||[],after=base.filter(function(t){return t!==t1&&t!==t2;});
- plan.arc.id=trackIdNew();after=after.concat([plan.first,plan.arc,plan.second]);
- if(drcGateDiffBlocks(base,PCB.vias||[],after,PCB.vias||[]))return {ok:false,error:"Fillet would create a DRC error."};
- var snap=snapAll();recordUndo(snap);rfDropForTracks(pair);PCB.tracks=after;copperTouched();
+ plan.arc.id=trackIdNew();after=after.concat([plan.first,plan.arc,plan.second]);var rfBefore=PCB.rf_paths||[],rfAfter=traceFilletRfPaths(rfBefore,pair,plan);
+ if(drcGateDiffBlocks(base,PCB.vias||[],after,PCB.vias||[],rfBefore,rfAfter))return {ok:false,error:"Fillet would create a DRC error."};
+ var snap=snapAll();recordUndo(snap);PCB.tracks=after;PCB.rf_paths=rfAfter;copperTouched();
  routeStatMsg("fillet applied · R"+plan.radius.toFixed(3)+" mm — Save/Update to keep");scheduleDrc();paintSoon();return plan;}
 function traceFilletMenuPosition(menu,at){var hr=sceneShell.getBoundingClientRect(),x=at.clientX-hr.left+12,y=at.clientY-hr.top+12;
  x=Math.max(6,Math.min(x,Math.max(6,hr.width-menu.offsetWidth-6)));y=Math.max(6,Math.min(y,Math.max(6,hr.height-menu.offsetHeight-6)));
