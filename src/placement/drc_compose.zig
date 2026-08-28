@@ -352,7 +352,8 @@ pub fn checkPrimingReport(alloc: std.mem.Allocator, in: CopperCheck) ScopedRepor
 /// `drc.check` is a clearance sweep with one exception: the power-width rule
 /// asks whether a declared rail's branch is fed by a plane, and answers by
 /// rastering every declared plane and pour of the board. `drc.check` passes no
-/// prepared copper, so it paid that raster in full on every call — 7.5 s of
+/// prepared copper, so a caller whose placement carries the design's `(i-typ …)`
+/// rail demands paid that raster in full on every call — 7.5 s of
 /// barracuda-base's 8.2 s geometry pass — and the boards a SERVER checks are
 /// saved boards it re-checks over and over.
 ///
@@ -360,7 +361,9 @@ pub fn checkPrimingReport(alloc: std.mem.Allocator, in: CopperCheck) ScopedRepor
 /// identical: a memoised fill is bit-identical to a poured one, and every other
 /// rule is untouched. It lives here, not in `drc.zig`, because `drc.zig` is
 /// compiled into the client's wasm engine, which has no store — nothing in the
-/// wasm target reaches `fill_cache` through this seam.
+/// wasm target reaches `fill_cache` through this seam. Nor does it need to:
+/// `wasm_drc.zig` marshals no rail demand, so the raster this memo exists to
+/// amortise is unreachable there (that file's own test pins it).
 ///
 /// The router's candidate loop deliberately keeps calling `drc.check`: it
 /// mutates the copper those surfaces depend on between calls, so it would only

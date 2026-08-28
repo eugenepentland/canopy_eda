@@ -304,3 +304,37 @@ agents), and the same binary on the same board measured 3.3 s and 6.7 s for the
 same phase within minutes. Any timing claim from a session like this needs
 alternating medians against a baseline binary built from the same tree, not
 absolute numbers — worth stating in the task brief rather than discovering.
+
+## 2026-08-28 · claude · two open wasm/server DRC width divergences on power boards
+
+Investigating whether the client wasm DRC pays the plane raster (it does not —
+`wasm_drc.zig` marshals no rail current, so `needs_surfaces` is false there;
+now pinned by a test) surfaced two pre-existing items worth recording. Neither
+is fixed here.
+
+1. `scripts/drc_wasm_parity.mjs` reports a phantom divergence on any board with
+   a current-aware power net. It compares the wasm result against the server
+   after applying only `PCB.drc_kinds` overrides (`applyOverrides`), but the
+   viewer additionally filters the wasm list through
+   `pcb_board.js drcGateDefersPowerWidth` before showing or gating anything.
+   Run against `barracuda-base` the harness would flag ~103 findings of
+   "drift" that no user ever sees: 99 `track width` on `V_3V3D` at its
+   `power-branch-width`, 2 on `V_12V`, and 2 server-only `power width` warns.
+   The script is wired into no gate today; it must learn that filter before it
+   becomes one, or it will fail on its first real power board.
+
+2. A rail with a declared current but NO `power-branch-width` produces
+   transient false errors in the fast tier. On `barracuda-base`, `V_12V` (class
+   `base-input-power`, width 0.400 mm) has two 0.127 mm segments. The server
+   aggregates them into one advisory `power width` WARNING; the wasm, having no
+   rail model, reports them as `track width` ERRORS against the 0.400 mm class
+   width, and `drcGateDefersPowerWidth` does not suppress them because the
+   class declares no branch floor to compare against. The user sees two errors
+   for ~300 ms after every edit until the reconcile replaces them. Related:
+   `applyWasmDrc` carries only `net open` rows across a wasm refresh, so every
+   other server-only kind (`power width`, `reference_plane_gap`, `loop_area`,
+   `bypass_open`) is torn down and recreated on each edit too.
+
+Reproduction for both, no server needed: `netlisp drc-dump <board>` prints the
+server's geometry seam; the wasm's answer is the same seam over a placement
+with `rules.physical.rails` emptied.
