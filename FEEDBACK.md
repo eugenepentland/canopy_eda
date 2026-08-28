@@ -226,3 +226,43 @@ Worth keeping in mind for the next task in this area: the reconcile fixture in
 `(return-path (max-loop-area …))` net class, so it emits three
 `reference_plane_gap` findings and one `loop_area`. It is the cheapest worked
 example of those forms in the tree.
+
+## Profiling a hot path with no profiler
+
+`perf_event_paranoid` is 4 on this machine and the agent account cannot lower
+it, so `perf record` fails outright ("Failure to open any events"). Every
+attribution in the incremental-DRC headroom work therefore had to come from
+hand-placed timers, and the cost of that showed up twice.
+
+First, it made the WRONG suspects expensive to rule out. The W3 report
+attributed the residual scoped-reconcile time to `drc_pour`'s per-pass rebuild
+(~300–400 ms) and to the Tarjan pass inside `copper_topology`. Both were wrong,
+and each took a build-measure-rebuild cycle of its own to disprove: on an
+identical repost `drc_pour` costs 44 ms of a 518 ms pass, and the two redundancy
+analyses spend 0.2 ms in Tarjan and 40 ms each in the graph BUILD. The actual
+hot spot was one predicate three call sites below any of that
+(`copper_contact.directedTrackContact`, 56 ternary iterations = 224 segment
+distances per same-net track pair, ~9 µs a call, several thousand calls a pass).
+A five-minute sampling profile would have named it immediately.
+
+Second, the scaffolding is not reusable. The timers went into `drc_scope.zig`,
+`drc.zig`, `drc_pour.zig`, `drc_compose.zig` and `copper_topology.zig`, had to
+be guarded for the freestanding `drc.wasm` build (no `std.time.nanoTimestamp`),
+and were then stripped again — the same throwaway-patch cycle `drc-dump`'s own
+header records for three previous DRC refactors.
+
+Two things that would have paid for themselves:
+
+1. A standing `NETLISP_PROFILE=1` stage-timer seam on the reporting DRC
+   composition (`drc_compose`'s five stages plus `checkImpl`'s dozen), printed
+   on exit. The stages are stable and already named in the code; the whole
+   patch was about 60 lines and is worth keeping rather than re-deriving.
+2. `netlisp drc-dump --bench <reps>` is now committed and is the cheap half of
+   this: it primes a session and times the SCOPED seam alone over a drag, an
+   identical repost and a via drag, with no cold full pass beside it. Reach for
+   it before adding timers — an identical repost is the whole fixed cost of a
+   reconcile, isolated, and it is one command.
+
+Also worth knowing: this box runs several agents at once and wall times swing
+2-3x between rounds. Any before/after claim needs alternating old/new runs and a
+median of several, never one run of each.

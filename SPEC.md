@@ -777,7 +777,7 @@ that diff and checked separately against the priming pass's answer for them,
 because carrying them forward is the decision under test rather than a
 discrepancy.
 
-- the CLI parses the project dir, the mutation selector and the priming flag with positionals as design names
+- the CLI parses the project dir, the mutation selector, the priming flag and the scoped-seam benchmark repetition count with positionals as design names
 - every violation renders one line carrying every field, including the track identity automatic cleanup reads, and the lines sort deterministically
 - each mutation edits copper in memory only, leaving the board it was given untouched
 - completeness-waiver: empty inputs (a dump with no design named is a usage error rather than an empty dump that would trivially match any comparison; a board that does not resolve prints one marked comment line and the run continues)
@@ -3021,6 +3021,10 @@ question each caller answers honestly through `Zone.component`.
 
 ## placement/drc
 
+- a bottleneck cross-section is judged by the same verdict whether it is found at a trace end, in mid-span, or refused as a flank graze
+- a scoped connectivity pass carries the nets one copper edit could not reach and reports exactly what a cold pass over the same board reports
+- a pour audit given the placement's retained pad shapes reports exactly what one that builds them per pass reports, and a scoped audit whose fills all held builds none at all
+- a surface's measured ring bounds only skip contact tests that could not have found anything, so a boxed surface answers every contact question exactly as an unmeasured one
 - the net-open island chain's bounding-box estimate never exceeds the exact nearest approach, so a skipped pair could not have beaten the frontier
 - an authored ground-via maximum warns on an SMD ground pad until a same-net plane via falls within the budget
 - an optional NC or input-strap land assigned to ground is excluded from the ground-via maximum because its same-package real ground return owns the required plane connection

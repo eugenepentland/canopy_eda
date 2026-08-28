@@ -1787,6 +1787,8 @@ src/placement/drc_compose.zig::EdgeField value
 src/placement/drc_compose.zig::FillHold value
 src/placement/drc_compose.zig::FillKey value
 src/placement/drc_compose.zig::FillReuse struct_
+src/placement/drc_compose.zig::NetAnswer value
+src/placement/drc_compose.zig::PadShapes value
 src/placement/drc_compose.zig::PourAudit value
 src/placement/drc_compose.zig::PourOwner value
 src/placement/drc_compose.zig::Prior struct_
@@ -1803,6 +1805,7 @@ src/placement/drc_compose.zig::deferredOf | fn deferredOf(alloc: std.mem.Allocat
 src/placement/drc_compose.zig::diffCopper value
 src/placement/drc_compose.zig::fillMemoStats value
 src/placement/drc_compose.zig::isDeferredKind | fn isDeferredKind(kind: drc.Kind) bool
+src/placement/drc_compose.zig::padShapes value
 src/placement/drc_compose.zig::sharedEdgeField value
 src/placement/drc_diffpair.zig::Copper struct_
 src/placement/drc_diffpair.zig::check | fn check( arena: std.mem.Allocator, out: *std.ArrayList(drc.Violation), placement: optimizer.Placement, copper: Copper, clearance: f64, ) std.mem.Allocator.Error!void
@@ -1814,9 +1817,11 @@ src/placement/drc_match.zig::measure | fn measure( arena: std.mem.Allocator, pla
 src/placement/drc_perimeter_keepout.zig::check | fn check( arena: std.mem.Allocator, out: *std.ArrayList(drc.Violation), placement: optimizer.Placement, tracks: []const router.Track, vias: []const router.Via, ) std.mem.Allocator.Error!void
 src/placement/drc_pour.zig::Audited struct_
 src/placement/drc_pour.zig::Owner struct_
+src/placement/drc_pour.zig::PadShapes value
 src/placement/drc_pour.zig::Scope struct_
 src/placement/drc_pour.zig::check | fn check( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, prepared: drc.PreparedCopper, ) std.mem.Allocator.Error![]const drc.Violation
-src/placement/drc_pour.zig::checkAudited | fn checkAudited( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, prepared: drc.PreparedCopper, scope: ?Scope, ) std.mem.Allocator.Error!Audited
+src/placement/drc_pour.zig::checkAudited | fn checkAudited( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, prepared: drc.PreparedCopper, scope: ?Scope, pads: ?PadShapes, ) std.mem.Allocator.Error!Audited
+src/placement/drc_pour.zig::padShapes | fn padShapes(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error!PadShapes
 src/placement/drc_return_path.zig::check | fn check( arena: std.mem.Allocator, out: *std.ArrayList(drc.Violation), placement: optimizer.Placement, routed: router.RouteResult, zones: []const copper_support.Zone, ) std.mem.Allocator.Error!void
 src/placement/drc_return_path.zig::default_stitch_radius_mm value
 src/placement/drc_scope.zig::Box struct_
@@ -2205,10 +2210,14 @@ src/placement/net_identity.zig::canonical | fn canonical(self: Identity, net: i3
 src/placement/net_identity.zig::canonicalName | fn canonicalName(self: Identity, nets: []const optimizer.FlatNet, net: i32) []const u8
 src/placement/net_identity.zig::init | fn init(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error!Identity
 src/placement/net_identity.zig::same | fn same(self: Identity, a: i32, b: i32) bool
+src/placement/net_open.zig::NetAnswer struct_
 src/placement/net_open.zig::Prepared struct_
 src/placement/net_open.zig::Report struct_
+src/placement/net_open.zig::Scope struct_
+src/placement/net_open.zig::ScopedReport struct_
 src/placement/net_open.zig::check | fn check( arena: std.mem.Allocator, placement: optimizer.Placement, copper: routed_copper.Copper, base: ?pour.EdgeField, ) std.mem.Allocator.Error![]drc.Violation
 src/placement/net_open.zig::checkWithConnectivity | fn checkWithConnectivity( arena: std.mem.Allocator, placement: optimizer.Placement, copper: routed_copper.Copper, prepared: Prepared, ) std.mem.Allocator.Error!Report
+src/placement/net_open.zig::checkWithConnectivityScoped | fn checkWithConnectivityScoped( arena: std.mem.Allocator, placement: optimizer.Placement, copper: routed_copper.Copper, prepared: Prepared, scope: ?Scope, ) std.mem.Allocator.Error!ScopedReport
 src/placement/net_open.zig::zoneFills | fn zoneFills( arena: std.mem.Allocator, placement: optimizer.Placement, copper: routed_copper.Copper, base: ?pour.EdgeField, ) std.mem.Allocator.Error![]const pour.Fill
 src/placement/net_open.zig::zoneFillsMemo | fn zoneFillsMemo( arena: std.mem.Allocator, placement: optimizer.Placement, copper: routed_copper.Copper, base: ?pour.EdgeField, memo: ?pour.FillMemo, ) std.mem.Allocator.Error![]const pour.Fill
 src/placement/net_rules.zig::FenceRule struct_
@@ -3554,6 +3563,8 @@ src/serve/drc_rules.zig::Delta value
 src/serve/drc_rules.zig::EdgeField value
 src/serve/drc_rules.zig::FillHold value
 src/serve/drc_rules.zig::FillKey value
+src/serve/drc_rules.zig::NetAnswer value
+src/serve/drc_rules.zig::PadShapes value
 src/serve/drc_rules.zig::PourAudit value
 src/serve/drc_rules.zig::PourOwner value
 src/serve/drc_rules.zig::Prior value
@@ -3577,6 +3588,7 @@ src/serve/drc_rules.zig::fillMemoStats value
 src/serve/drc_rules.zig::getApi | fn getApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/drc_rules.zig::isDeferredKind value
 src/serve/drc_rules.zig::load | fn load(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) Rules
+src/serve/drc_rules.zig::padShapes value
 src/serve/drc_rules.zig::reconcile | fn reconcile(self: Deferred, routed: *?router.RouteResult) void
 src/serve/drc_rules.zig::resolveDeferred | fn resolveDeferred( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, in: DeferredInputs, ) Deferred
 src/serve/drc_rules.zig::setApi | fn setApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
