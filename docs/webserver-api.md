@@ -269,6 +269,13 @@ Local dev still uses `http://localhost:7050`.
 - **Cross-probing**: `/pcb-layout/:name?focus=REF` (or `#REF`) zooms/flashes a part (leaf-matching like `?refs=`); PCB sidebar rows link "Show in schematic →" (`#comp-REF` scroll+flash), schematic component detail links "Locate on PCB →". **Two-window live sync**: with `/pcb-layout/<name>` and `/schematics/<name>` open in separate tabs/windows of the same browser (the KiCad two-monitor workflow), clicking a part on one page highlights it on the other through the `BroadcastChannel("netlisp-xprobe")` bridge in `pcb_board.js` and `schematic_viewer.js` (messages carry the design and ref; receivers ignore other designs; no server round-trip).
 - **PCB Find**: the full `/pcb-layout/:name` editor has a dock-wide Find field above its four workflow tabs (`Ctrl/Cmd+F`; arrows preview; Enter locates; F3 / Shift+F3 steps). Its client-only index covers component refs/values/footprints, collapsed nets, DRC ids/kinds/parties, sub-circuits, and board text; results reuse the normal part selection, review-focus, DRC locator, and point-focus paths. Prefixes `ref:`, `net:`, `drc:`, `sub:`, `text:`, `value:`, and `fp:` narrow a query, and `*` / `?` provide simple wildcards. Embeds omit the dock and keep native browser Find.
 - **Version polling**: `GET /api/version/:name` — returns `{"version":N}`
+- **Client interaction log**: `POST /api/client-log/:name` — ingest a batch of
+  browser events into the server's interaction log (see **Interaction log**
+  below). Body `{"page_build":"<9hex|unknown>","events":[{"t":<client epoch
+  ms>,"evt":"<name>", …scalars}, …]}`; answers `{"ok":true,"n":<lines
+  written>}`. Caps: body > 256 KiB → 413, more than 200 events → 400, non-JSON
+  or no `events` array → 400. Same auth as every other `/api` route
+  (`src/serve/request_log.zig`).
 - **Value editing**: `POST /api/edit-value/:name` — edit component value in .sexp file
 - **ERC**: `GET /api/erc/:name` — electrical-rule violations
 - **Thermal facts**: `GET /api/thermal/:name[?ambient=NN][?layout=<saved>]` — the lumped
@@ -339,6 +346,52 @@ Local dev still uses `http://localhost:7050`.
   netlist-only bundle this endpoint used to serve, byte-identical. The CLI's
   directory flow is the other way round — opt in with `--with-schematic`.
 - **Library upload**: `GET /library`, `POST /api/upload-symbol`, `POST /api/upload-footprint`
+
+### Interaction log
+
+`netlisp serve` appends a structured record of what it did to
+**`<project_dir>/logs/interactions-YYYY-MM-DD.jsonl`** — one JSON object per
+line, one file per UTC day, created on demand (production's `projects/designs`
+is gitignored under `/projects/`, so the logs never reach a commit). The path
+is printed on stderr at startup. Writer: `src/serve/request_log.zig`; it is
+best-effort throughout — a write failure can never fail a request — and it
+records sizes, counts, names and timings only, never design content.
+
+Every line carries four common fields: `ts` (ISO-8601 UTC with milliseconds),
+`build` (`build_id.current()`, the 9-hex git short hash of the code that
+produced the line), `src` (`server` or `client`) and `evt`.
+
+| `evt` | Written by | Extra fields |
+| --- | --- | --- |
+| `server.start` | `serve()`, once per process | `port`, `project_dir` |
+| `req` | the dispatch seam, once per request | `method`, `path`, `status`, `ms`, `bytes_in`, `bytes_out` |
+| `stages` | an instrumented handler | `path`, `design`, `ms_total`, `stages:{<phase>:<ms>, …}` |
+| *(client event name)* | `POST /api/client-log/:name` | `design`, `page_build`, `t_client`, plus the event's own scalar fields |
+
+`ms` on a `req` line is the whole cost of answering — auth middleware, handler
+and gzip included — measured on the monotonic clock. Fast requests under
+`/api/version/`, `/assets/` and `/static/` are skipped below 100 ms, so the
+browser's 2 s version poll does not bury the file.
+
+Two handlers report their own phase breakdown, because whole-request timing
+could not say which part of an autosave was slow:
+
+- `POST /api/pcb-layouts/:name` → `parse`, `score_resolve`, `score_poses`,
+  `snapshot`, `write`. `score_resolve` is the whole-design re-evaluation inside
+  `layout_score.scoreSavedLayout`, which every save pays; `score_poses` is
+  `optimizer.scorePoses`. They are split precisely so a slow evaluator and a
+  slow solver are distinguishable.
+- `POST /api/pcb-drc/:name` → `parse`, `resolve`, `restore`, `drc`, `pours`,
+  `respond`. `resolve` is the reconcile session's design evaluation +
+  `placeFromPoses` — near zero when the session answered from a retained
+  placement, seconds when it had to build one.
+
+Every `/api/*` response also carries **`X-Netlisp-Server-Ms`**, the same
+whole-handler figure, so a browser can subtract server work from its own
+`fetch` timing and post the difference back as a client event. The
+`/pcb-layout` page's embedded `PCB` blob carries **`PCB.build_id`** — the build
+that RENDERED the page — which the client echoes as `page_build`, so a tab held
+open across a deploy files its events under the code that drew it.
 
 ### Live update workflow
 

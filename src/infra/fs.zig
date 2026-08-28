@@ -469,6 +469,17 @@ pub const File = struct {
         try self.f.writeStreamingAll(currentIo(), bytes);
     }
 
+    /// Write every byte at `offset`, leaving what precedes it untouched.
+    ///
+    /// This is how an append-only log line is added: `writeAll` streams from
+    /// the handle's own position, which is 0 on a file opened with
+    /// `.truncate = false`, so it would overwrite the head of the file instead
+    /// of extending it. Positioned writes leave the handle's cursor alone,
+    /// which also makes the call safe to repeat on one handle.
+    pub fn writeAllAt(self: File, bytes: []const u8, offset: u64) std.Io.File.WritePositionalError!void {
+        return self.f.writePositionalAll(currentIo(), bytes, offset);
+    }
+
     /// Read metadata for this open file.
     pub fn stat(self: File) std.Io.File.StatError!std.Io.File.Stat {
         return self.f.stat(currentIo());

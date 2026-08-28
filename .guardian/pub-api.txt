@@ -1002,6 +1002,7 @@ src/import_kicad.zig::sanitizeNetName | fn sanitizeNetName(arena: std.mem.Alloca
 src/import_kicad.zig::unconnected_prefix value
 src/infra/clock.zig::epoch value
 src/infra/clock.zig::milliTimestamp | fn milliTimestamp() i64
+src/infra/clock.zig::monotonicNanos | fn monotonicNanos() i128
 src/infra/clock.zig::nanoTimestamp | fn nanoTimestamp() i128
 src/infra/clock.zig::ns_per_ms value
 src/infra/clock.zig::ns_per_s value
@@ -1071,6 +1072,7 @@ src/infra/fs.zig::verify | fn verify(self: *const ReadTrace) bool
 src/infra/fs.zig::wait | fn wait(self: *Condition, mutex: *Mutex) void
 src/infra/fs.zig::walk | fn walk(self: Dir, allocator: std.mem.Allocator) std.mem.Allocator.Error!Walker
 src/infra/fs.zig::writeAll | fn writeAll(self: File, bytes: []const u8) WriteError!void
+src/infra/fs.zig::writeAllAt | fn writeAllAt(self: File, bytes: []const u8, offset: u64) std.Io.File.WritePositionalError!void
 src/infra/fs.zig::writeFile | fn writeFile(self: Dir, options: std.Io.Dir.WriteFileOptions) std.Io.Dir.WriteFileError!void
 src/infra/log.zig::progress | fn progress(comptime fmt: []const u8, args: anytype) void
 src/infra/log.zig::warn | fn warn(comptime fmt: []const u8, args: anytype) void
@@ -1358,6 +1360,7 @@ src/kicad_sym/reader.zig::Unit struct_
 src/kicad_sym/reader.zig::max_coord value
 src/kicad_sym/reader.zig::parseLibrary | fn parseLibrary(arena: std.mem.Allocator, source: []const u8) ReadError![]const Symbol
 src/kicad_sym/reader.zig::per_mm value
+src/layout_score.zig::scoreSavedLayout | fn scoreSavedLayout( ctx: *Server, req: *httpz.Request, name: []const u8, sub: ?[]const u8, parts: []const page.PartPose, stages: ?*request_log.StageTimer, ) page.HandlerError!sidecar_json.SavedLayoutCheck
 src/layout_sidecar_store.zig::CacheSlot struct_
 src/layout_sidecar_store.zig::SidecarDoc struct_
 src/layout_sidecar_store.zig::SnapshotChoice struct_
@@ -3977,6 +3980,7 @@ src/serve/pcb_layout_page.zig::pngRequestFromQuery | fn pngRequestFromQuery(aren
 src/serve/pcb_layout_page.zig::prepareRouteFromJson | fn prepareRouteFromJson( alloc: std.mem.Allocator, in: RoutePrepInputs, eval: *Evaluator, module_res: *?modules_mod.ResolvedBlock, ) RoutePrepError!RoutePrep
 src/serve/pcb_layout_page.zig::queryFlag value
 src/serve/pcb_layout_page.zig::queryOpt value
+src/serve/pcb_layout_page.zig::readAutoParams | fn readAutoParams(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?optimizer.Params
 src/serve/pcb_layout_page.zig::readCacheSlot value
 src/serve/pcb_layout_page.zig::readLayoutPosesFor | fn readLayoutPosesFor( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, want: []const u8, block: *env_mod.DesignBlock, sub: ?[]const u8, ) ?[]const optimizer.RefPose
 src/serve/pcb_layout_page.zig::readLayoutRev value
@@ -3984,6 +3988,7 @@ src/serve/pcb_layout_page.zig::readLayouts value
 src/serve/pcb_layout_page.zig::readLayoutsSub value
 src/serve/pcb_layout_page.zig::readiness value
 src/serve/pcb_layout_page.zig::readiness_response value
+src/serve/pcb_layout_page.zig::refPosesFromPartPoses | fn refPosesFromPartPoses(alloc: std.mem.Allocator, parts: []const PartPose) std.mem.Allocator.Error![]optimizer.RefPose
 src/serve/pcb_layout_page.zig::renameNamedLayoutApi | fn renameNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::renderDesignPng | fn renderDesignPng( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: PngRequest, ) PngError![]u8
 src/serve/pcb_layout_page.zig::renderLayoutPage | fn renderLayoutPage( ctx: *Server, req: ?*httpz.Request, res: ?*httpz.Response, job: RenderJob, ) HandlerError!?[]const u8
@@ -4000,7 +4005,6 @@ src/serve/pcb_layout_page.zig::route_source_human value
 src/serve/pcb_layout_page.zig::route_source_imported value
 src/serve/pcb_layout_page.zig::saveNamedLayoutApi | fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::savePcbCourtyardApi | fn savePcbCourtyardApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/pcb_layout_page.zig::scoreSavedLayout | fn scoreSavedLayout( ctx: *Server, req: *httpz.Request, name: []const u8, sub: ?[]const u8, parts: []const PartPose, ) HandlerError!sidecar_json.SavedLayoutCheck
 src/serve/pcb_layout_page.zig::setDefaultLayoutApi | fn setDefaultLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::setup value
 src/serve/pcb_layout_page.zig::shownLayoutCopper | fn shownLayoutCopper( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: PngRequest, placement: optimizer.Placement, ) ShownCopper
@@ -4082,6 +4086,25 @@ src/serve/rebuild_design.zig::BuildReport struct_
 src/serve/rebuild_design.zig::BuildWarning struct_
 src/serve/rebuild_design.zig::deinitPreflight | fn deinitPreflight(self: BuildReport, allocator: std.mem.Allocator) void
 src/serve/rebuild_design.zig::run | fn run( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, profile: preflight.Profile, ) BuildReport
+src/serve/request_log.zig::Field struct_
+src/serve/request_log.zig::Source enum_
+src/serve/request_log.zig::Stage struct_
+src/serve/request_log.zig::StageTimer struct_
+src/serve/request_log.zig::Store struct_
+src/serve/request_log.zig::Value union_
+src/serve/request_log.zig::clientLogApi | fn clientLogApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) std.mem.Allocator.Error!void
+src/serve/request_log.zig::currentPath | fn currentPath(store: *const Store, alloc: std.mem.Allocator, at_ms: ?i64) ?[]u8
+src/serve/request_log.zig::emit | fn emit( store: *Store, alloc: std.mem.Allocator, source: Source, evt: []const u8, fields: []const Field, ) bool
+src/serve/request_log.zig::emitRequest | fn emitRequest( store: *Store, alloc: std.mem.Allocator, req: *httpz.Request, res: *httpz.Response, started_ns: i128, ) void
+src/serve/request_log.zig::emitServerStart | fn emitServerStart(store: *Store, alloc: std.mem.Allocator, port: u16) void
+src/serve/request_log.zig::emitStages | fn emitStages( store: *Store, alloc: std.mem.Allocator, path: []const u8, design: []const u8, timer: *const StageTimer, ) void
+src/serve/request_log.zig::enabled | fn enabled(self: *const Store) bool
+src/serve/request_log.zig::lap | fn lap(self: *StageTimer, name: []const u8) void
+src/serve/request_log.zig::max_stages value
+src/serve/request_log.zig::stages | fn stages(self: *const StageTimer) []const Stage
+src/serve/request_log.zig::stampServerMs | fn stampServerMs(req: *httpz.Request, res: *httpz.Response, started_ns: i128) void
+src/serve/request_log.zig::start | fn start() StageTimer
+src/serve/request_log.zig::totalMs | fn totalMs(self: *const StageTimer) f64
 src/serve/rework_guide.zig::Guide struct_
 src/serve/rework_guide.zig::loadAll | fn loadAll( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) []const Guide
 src/serve/rough_best.zig::bestRoughApi | fn bestRoughApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void

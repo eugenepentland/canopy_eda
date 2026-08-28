@@ -98,6 +98,9 @@ const route_result_stats = @import("route_result_stats.zig");
 const stuck_json = @import("stuck_json.zig");
 const pcb_part_json = @import("pcb_part_json.zig");
 const history = @import("history.zig");
+const request_log = @import("request_log.zig");
+const layout_score = @import("../layout_score.zig");
+const build_id = @import("../build_id.zig");
 const numeric = @import("../numeric.zig");
 const escape = @import("../escape.zig");
 const Server = serve_root.Server;
@@ -4395,6 +4398,12 @@ pub fn pcbRouteApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
 /// Save) instead of only when the user clicks Route; `?pours=1` also recomputes live pours.
 /// `?pours_only=1` returns fills before the editor's independent DRC refresh.
 pub fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    // Six phases. FEEDBACK.md (2026-08-28) measured this endpoint at 7.0-11.4 s
+    // on barracuda, of which ~3.5 s was resolving the design and 4.3-5.3 s was
+    // `placeFromPoses` — neither of them DRC. `resolve` is both of those (the
+    // reconcile session's build), so a line where `resolve` is near zero is one
+    // that answered from a retained placement.
+    var timer = request_log.StageTimer.start();
     const name = nameParam(req, res) orelse return;
     const body = bodyParam(req, res) orelse return;
     const root = std.json.parseFromSliceLeaky(std.json.Value, req.arena, body, .{}) catch {
@@ -4435,6 +4444,7 @@ pub fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
     // client's PCB.clr). Per-net `(net-class …)` overrides are applied inside
     // `drc.check` from `placement.rules.net`.
     const body_clearance = jsonNum(root.object.get(clearance_key));
+    timer.lap("parse");
 
     // Lease this design's reconcile session and take its placement, or build one
     // into it. Evaluating and placing the design is seven to nine seconds of a
@@ -4443,6 +4453,7 @@ pub fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
     var resolved = drc_reconcile.resolvePlacement(ctx, req, res, root, poses.items, name) orelse return;
     defer resolved.lease.release();
     const placement = resolved.placement;
+    timer.lap("resolve");
 
     // Restore the client's copper into the current netlist (net NAME → index),
     // exactly as a saved layout's persisted copper is restored on page open.
@@ -4460,6 +4471,7 @@ pub fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
 
     const clearance = if (body_clearance > 0) body_clearance else placement.rules.design.clearance;
     const user_zones = userZonesFrom(ctx.allocator, placement.rules, posted_zones);
+    timer.lap("restore");
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
     const w = &aw.writer;
     if (queryFlag(req, "pours_only")) {
@@ -4474,6 +4486,8 @@ pub fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
         try w.writeByte('}');
         res.content_type = .JSON;
         res.body = aw.written();
+        timer.lap("pours");
+        request_log.emitStages(&ctx.state.request_log, req.arena, req.url.path, name, &timer);
         return;
     }
     // Re-check what the edit can reach, against the board this session last
@@ -4498,6 +4512,7 @@ pub fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
     });
     const violations = outcome.report.violations;
     const tally = outcome.report.tally;
+    timer.lap("drc");
 
     try w.writeAll("{\"drc\":[");
     for (violations, 0..) |vio, i| {
@@ -4525,10 +4540,13 @@ pub fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
         // User-zone carved fills, `zone` indexing the POSTED zones order.
         try w.writeAll(",\"zone_fills\":");
         try pour_json.writeZoneFills(w, req.arena, placement, live_copper, zoneFillReqsFrom(req.arena, placement.rules, posted_zones), base_edge);
+        timer.lap("pours");
     }
     try w.writeByte('}');
     res.content_type = .JSON;
     res.body = aw.written();
+    timer.lap("respond");
+    request_log.emitStages(&ctx.state.request_log, req.arena, req.url.path, name, &timer);
 }
 
 /// Resolve `name`'s design block and build a placement at its blessed poses
@@ -5205,49 +5223,11 @@ fn pcbGerbersApiHooked(
     res.body = zw.written();
 }
 
-/// POST /api/pcb-layouts/:name — save a named layout snapshot (kind "manual").
-/// Body: `{"name","parts":[{ref,x,y,rot,origin?}, …]}`; the score is computed on the
-/// server (no client-side metric). Upserts by name (re-save overwrites in
-/// place); a new name is prepended so the newest sits at the top of the list.
-/// Score a hand/CLI-saved layout on the server with the optimizer's own
-/// objective — the same code the live `/api/pcb-score` endpoint uses — so a
-/// saved layout is directly comparable to the auto baseline (HPWL + real
-/// routed-trace loop). For a `?sub` circuit the score is against the scoped
-/// sub-block. A resolve/score failure just leaves it unscored. Extracted from
-/// `saveNamedLayoutApi` to keep that handler focused.
-pub fn scoreSavedLayout(
-    ctx: *Server,
-    req: *httpz.Request,
-    name: []const u8,
-    sub: ?[]const u8,
-    parts: []const PartPose,
-) HandlerError!sidecar_json.SavedLayoutCheck {
-    var out: sidecar_json.SavedLayoutCheck = .{};
-    var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
-    defer eval.deinit();
-    var module_res: ?modules_mod.ResolvedBlock = null;
-    defer if (module_res) |mr| {
-        mr.eval.deinit();
-        ctx.allocator.destroy(mr.eval);
-    };
-    if (resolveBlock(ctx.allocator, ctx.project_dir, name, &eval, &module_res)) |block| {
-        // For a sub circuit, score against the scoped sub-block (its parts),
-        // not the whole parent design — null when the slug no longer resolves.
-        const score_block: ?*env_mod.DesignBlock = if (sub) |s| blk: {
-            const sb = descendToSub(ctx.allocator, block, s) orelse break :blk null;
-            break :blk sb.block;
-        } else block;
-        if (score_block) |sblk| {
-            out.layers = sidecar_json.stackupLayerRules(req.arena, sblk) catch null;
-            const params = readAutoParams(ctx.allocator, ctx.project_dir, name) orelse optimizer.Params{};
-            const poses = try refPosesFromPartPoses(req.arena, parts);
-            if (optimizer.scorePoses(ctx.allocator, sblk, ctx.project_dir, poses, params)) |bd| {
-                out.score = .{ .hpwl = bd.hpwl, .loop = bd.loop_raw, .caps = 0, .objective = bd.objective };
-            } else |_| {}
-        }
-    }
-    return out;
-}
+// POST /api/pcb-layouts/:name — save a named layout snapshot (kind "manual").
+// Body: `{"name","parts":[{ref,x,y,rot,origin?}, …]}`; the score is computed on
+// the server (no client-side metric) by `layout_score.scoreSavedLayout`, which
+// the sub-circuit capture shares. Upserts by name (re-save overwrites in
+// place); a new name is prepended so the newest sits at the top of the list.
 
 /// Star a block's very FIRST saved layout. Something must be starred for the
 /// page to reopen on a saved board at all (`chooseLayout` falls through to the
@@ -5266,6 +5246,10 @@ fn starFirstEver(layouts: []SavedLayout) void {
 /// rev, scores the arrangement, and rejects a self-intersecting / zero-area
 /// custom outline before writing the sidecar.
 pub fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    // Five phases, and the interesting one is inside `scoreSavedLayout`: an
+    // autosave that takes seconds is nearly all `score_resolve`, which no
+    // whole-request timing could have shown (see `serve/request_log.zig`).
+    var timer = request_log.StageTimer.start();
     const name = nameParam(req, res) orelse return;
     const root = parseJsonObject(req, res) orelse return;
     const nm_v = root.object.get("name") orelse {
@@ -5314,9 +5298,10 @@ pub fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
         };
     }
     const new_rev = disk_rev + 1;
+    timer.lap("parse");
     // Score the hand layout with the optimizer's own objective (comparable to
     // the auto baseline); the same pass hands back the block's layer rules.
-    const checked = try scoreSavedLayout(ctx, req, name, sub, parts);
+    const checked = try layout_score.scoreSavedLayout(ctx, req, name, sub, parts, &timer);
     const outline_value = root.object.get("outline");
     const saved_outline = parseSavedOutline(req.arena, outline_value);
     if (outline_value) |value| if (value == .object and value.object.get("sketch") != null and saved_outline == null) {
@@ -5354,6 +5339,7 @@ pub fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
             _ = history.snapshotLayouts(req.arena, ctx.project_dir, name, scp) catch null;
         }
     }
+    timer.lap("snapshot");
     const existing = readLayoutsSub(req.arena, ctx.project_dir, name, sub);
     var out: std.ArrayList(SavedLayout) = .empty;
     // `replaced` = found a matching row (same name, or an auto run of this
@@ -5383,6 +5369,8 @@ pub fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
     writeLayoutsSubRev(req.arena, ctx.project_dir, name, sub, out.items, new_rev);
     res.content_type = .JSON;
     res.body = try std.fmt.allocPrint(req.arena, "{{\"ok\":true,\"rev\":{d}}}", .{new_rev});
+    timer.lap("write");
+    request_log.emitStages(&ctx.state.request_log, req.arena, req.url.path, name, &timer);
 }
 
 /// GET /api/pcb-layout-history/:name — list the design's `.layouts.json`
@@ -6060,7 +6048,7 @@ fn posesFromPlacement(alloc: std.mem.Allocator, p: optimizer.Placement) ?[]PartP
 
 /// PartPose slice → RefPose slice, carrying side/locked — shared by the
 /// scoring endpoints so a saved layout's board sides survive the conversion.
-fn refPosesFromPartPoses(alloc: std.mem.Allocator, parts: []const PartPose) std.mem.Allocator.Error![]optimizer.RefPose {
+pub fn refPosesFromPartPoses(alloc: std.mem.Allocator, parts: []const PartPose) std.mem.Allocator.Error![]optimizer.RefPose {
     const out = try alloc.alloc(optimizer.RefPose, parts.len);
     for (parts, 0..) |p, i| out[i] = .{ .ref = p.ref, .x = p.x, .y = p.y, .rot = p.rot, .side = p.side, .locked = p.locked };
     return out;
@@ -7418,7 +7406,7 @@ fn writeAutoCache(alloc: std.mem.Allocator, project_dir: []const u8, name: []con
 
 /// Read the tuning weights stored alongside the cached layout, or null when
 /// no cache slot exists.
-fn readAutoParams(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?optimizer.Params {
+pub fn readAutoParams(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?optimizer.Params {
     const slot = readCacheSlot(alloc, project_dir, name) orelse return null;
     return slot.params;
 }
@@ -9308,6 +9296,11 @@ fn writePcbData(
     try w.writeAll("<script>const PCB=");
     const pour_copper: pour.Copper = if (routed) |r| .{ .tracks = r.tracks, .arcs = r.arcs, .vias = r.vias, .rf_paths = r.rf_port_outcomes } else .{};
     try writeBlobHead(w, alloc, v, clearance, p, pour_copper, blob_opts);
+    // The build that RENDERED this page. Every client event posted to
+    // `/api/client-log/:name` carries it back, so a tab held open across a
+    // deploy files its events under the code that drew it rather than the code
+    // that received them (`serve/request_log.zig`).
+    try w.print("\"build_id\":\"{s}\",", .{build_id.current()});
     // Server-computed objective breakdown of the layout on screen — the baseline
     // the live score deltas against. Same shape the /api/pcb-score endpoint returns.
     try w.print("\"caps\":{d},\"auto\":", .{p.score.loop_caps});

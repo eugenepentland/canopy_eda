@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const httpz = @import("httpz");
+const clock = @import("infra/clock.zig");
 const infra_fs = @import("infra/fs.zig");
 const log = @import("infra/log.zig");
 const deflate = @import("deflate.zig");
@@ -91,6 +92,7 @@ const notes = @import("serve/notes.zig");
 const design_diff = @import("serve/design_diff.zig");
 const datasheet_attach = @import("serve/datasheet_attach.zig");
 const rate_limiter = @import("serve/rate_limiter.zig");
+const request_log = @import("serve/request_log.zig");
 
 // ── Global live state ──────────────────────────────────────────────────
 
@@ -386,6 +388,12 @@ pub const ServerState = struct {
     /// retains nothing, so a handler test's bare `ServerState` takes the full
     /// check on every request.
     drc_sessions: drc_reconcile.Store = .{},
+    /// Append-only interaction log (`serve/request_log.zig`): one JSONL line
+    /// per request, per instrumented handler's stage breakdown, and per
+    /// browser event posted to `/api/client-log/:name`. A default-constructed
+    /// store names no project directory and writes nothing, so a handler test
+    /// logs nowhere unless it asks to; `serve()` is what turns it on.
+    request_log: request_log.Store = .{},
 };
 
 // ── Server ─────────────────────────────────────────────────────────────
@@ -451,9 +459,19 @@ pub const Server = struct {
             // so every route handler reaches the same stores/caches/limiters.
             .state = self.state,
         };
+        // One monotonic reading opens the request and every timing below is a
+        // delta from it. The `defer` is what makes the log honest: an auth
+        // refusal and a handler that returned an error are exactly the
+        // requests an investigation wants to see, and both leave by a path
+        // that never reaches the bottom of this function.
+        const started_ns = clock.monotonicNanos();
+        defer request_log.emitRequest(&self.state.request_log, res.arena, req, res, started_ns);
         // Auth middleware: check before dispatching to route handler
         if (!try auth.authMiddleware(&req_handler, req, res)) return;
         try action(&req_handler, req, res);
+        // Hand the browser the server's own cost for this request, so a client
+        // `save.end` line can separate server work from network and parse.
+        request_log.stampServerMs(req, res, started_ns);
         // gzip text responses for clients that accept it. The compressed buffer
         // lives in res.arena (dies with the request) — stateless, nothing to
         // invalidate. Biggest win for remote clients where transfer dominates.
@@ -801,6 +819,10 @@ pub fn serve(
         // board's worth of pour borrows per session, so it takes the server's
         // long-lived allocator for the same reason the page caches do.
         .drc_sessions = .{ .allocator = allocator },
+        // Naming the project directory is what turns the interaction log on —
+        // it writes into `<project_dir>/logs/`, which production keeps
+        // gitignored under `/projects/`.
+        .request_log = .{ .project_dir = project_dir },
     }; // owned here; shared by pointer
     defer state.caches.deinit();
     // A real server may run background full-board DRC sweeps behind the
@@ -844,6 +866,11 @@ pub fn serve(
     router.post("/api/push/:name", api.pushApi, .{});
     router.get("/api/module-source", modules_page.moduleSourceApi, .{});
     router.get("/api/version/:name", api.versionApi, .{});
+    // Browser-side interaction events (page load, dirty bursts, autosave and
+    // DRC round trips) land in the same JSONL file the server writes its own
+    // request and stage lines to, so one file answers what the user did and
+    // what it cost.
+    router.post("/api/client-log/:name", request_log.clientLogApi, .{});
     router.get("/api/export-kicad/:name", api.exportKicadApi, .{});
     router.get("/api/export-netlist/:name", api.exportNetlistApi, .{});
     // File-based KiCad sync — server writes the .kicad_pcb at the
@@ -952,6 +979,13 @@ pub fn serve(
     router.get("/.well-known/oauth-protected-resource", ward_auth.metadataProtectedResource, .{});
 
     std.debug.print("Listening on http://localhost:{d}\nProject: {s}\n", .{ port, project_dir });
+    // Open the day's interaction log with a line naming this process, and say
+    // on stderr where it is — a log nobody can find diagnoses nothing.
+    request_log.emitServerStart(&state.request_log, allocator, port);
+    if (request_log.currentPath(&state.request_log, allocator, null)) |log_path| {
+        defer allocator.free(log_path);
+        log.progress("interaction log: {s}", .{log_path});
+    }
     // Fill the read-path caches in the background so the first visitor after a
     // deploy is not the one who pays for them. Overlaps with listen(). A
     // private performance harness needs an idle machine more than corpus-wide

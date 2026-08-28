@@ -377,6 +377,7 @@ test {
     _ = @import("serve/layout_match.zig");
     _ = @import("serve/layout_merge_command.zig");
     _ = @import("serve/layout_sidecar_json.zig");
+    _ = @import("layout_score.zig");
     _ = @import("layout_sidecar_store.zig");
     _ = @import("serve/library.zig");
     _ = @import("serve/library_3d.zig");
@@ -419,6 +420,7 @@ test {
     _ = @import("serve/shape_sketch_json.zig");
     _ = @import("serve/pour_json.zig");
     _ = @import("serve/rate_limiter.zig");
+    _ = @import("serve/request_log.zig");
     _ = @import("serve/rework_guide.zig");
     _ = @import("serve/rough_best.zig");
     _ = @import("serve/route_analyze_api.zig");

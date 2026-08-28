@@ -6165,6 +6165,12 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - A background DRC sweep reports every non-deferred finding the scoped answer and a full pass disagree about, in both directions
 - A background DRC sweep of a design with nothing accepted does nothing
 - The DRC endpoint re-checks a copper edit against the board state it last accepted and returns the answer a full check returns
+- Every interaction-log line carries an ISO-8601 timestamp, the build id, its source and its event name, with JSON-escaped values
+- The interaction log appends one line per event to a dated file under the project's logs directory, creating it on demand, and writes nothing at all when no project directory is set
+- A handler's stage timer reports every phase it names and a total that covers the work after the last one
+- An instrumented handler files its own phase breakdown in the interaction log, naming every stage it ran and the total that covers them
+- The layout-save endpoint reports its design-resolve and objective phases separately, so an autosave's cost is attributable
+- The client-log endpoint appends one line per posted browser event, passing its scalar fields through, and refuses an oversized body or event burst without writing anything
 - the schematic page exposes the current board role as a Design type selector on designs but not reusable module pages
 - the schematic Design type control replaces only the design root's board-role form, preserving comments and nested module text
 - the schematic Design type control adds an explicit role when a string-named block currently relies on the subcircuit default
