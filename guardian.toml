@@ -215,6 +215,11 @@ command = ["node", "--check", "scripts/pcb_browser_perf/run.js"]
 inputs = ["scripts/pcb_browser_perf/run.js"]
 
 [[external]]
+name = "pcb-editor-perf-js-syntax"
+command = ["node", "--check", "scripts/pcb_editor_perf/run.js"]
+inputs = ["scripts/pcb_editor_perf/run.js"]
+
+[[external]]
 name = "ui-browser-perf-js-syntax"
 command = ["node", "--check", "scripts/ui_browser_perf/run.js"]
 inputs = ["scripts/ui_browser_perf/run.js"]
@@ -224,13 +229,14 @@ name = "ui-browser-perf-route-contract"
 command = ["node", "scripts/ui_browser_perf/manifest.test.js"]
 inputs = ["scripts/ui_browser_perf/run.js", "scripts/ui_browser_perf/manifest.js",
     "scripts/ui_browser_perf/manifest.test.js", "scripts/perf_gate.sh", "package.json",
-    ".githooks/pre-push", "scripts/pcb_browser_perf/run.js",
+    ".githooks/pre-push", ".githooks/prepare-release.sh", ".githooks/deploy-prod.sh",
+    "scripts/pcb_browser_perf/run.js", "scripts/pcb_editor_perf/run.js",
     "test/fixtures/browser_perf/route-review.kicad_pcb",
     "test/fixtures/browser_perf/datasheet.pdf",
     "test/fixtures/browser_perf/generate_datasheet.js", "src/serve.zig",
     "src/serve/pcb_layout_page.zig", "src/serve/assets/pcb_pad_align_tool.html",
     "src/serve/assets/pcb_find_header.html", "src/serve/assets/pcb_drc_pane.html",
-    "docs/benchmarks/ui-browser/baseline.json"]
+    "docs/benchmarks/ui-browser/baseline.json", "docs/benchmarks/pcb-editor/baseline.json"]
 
 [[external]]
 name = "pdf-viewer-js-syntax"

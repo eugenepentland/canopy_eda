@@ -186,12 +186,18 @@ machine gate lock) whenever main is pushed; feature-branch pushes are never
 gated. Re-record deliberately with `scripts/perf_gate.sh --record` and commit
 the diff. Full rules and workflow: `docs/benchmarks/pcb-page/README.md`.
 
-The same pre-push command also runs two headless-Chromium gates. The assembly
+The same pre-push command also runs three headless-Chromium gates. The assembly
 runner measures exact-CAM readiness plus its strict pan/zoom program. The
 all-pages runner covers every interactive route and its normal search,
 control, editor, timeline, and camera gestures; its route manifest fails when
-a newly registered page has no performance scenario. Setup, focused commands,
-and safety rules live in `docs/benchmarks/ui-browser/README.md`.
+a newly registered page has no performance scenario. The focused PCB-editor
+runner prevents wheel coalescing from hiding expensive Barracuda zoom paints,
+gates the high-density Canvas fallback, and asserts that swept RF copper stays
+on retained WebGPU. It also runs against the exact stripped release candidate,
+so a local merge cannot deploy before this check merely because main has not
+been pushed. Setup, focused commands, and safety rules live in
+`docs/benchmarks/ui-browser/README.md` and
+`docs/benchmarks/pcb-editor/README.md`.
 
 ### Validating without touching `zig-out`
 

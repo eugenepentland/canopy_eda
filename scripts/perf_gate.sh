@@ -9,8 +9,9 @@
 # The first gate compares `netlisp bench-page` phase medians against
 # docs/benchmarks/pcb-page/baseline.json. The second starts a private loopback
 # server and drives the real Barracuda Base assembly iframe in headless Chromium
-# against docs/benchmarks/pcb-browser/baseline.json. The third walks every
-# interactive page surface against docs/benchmarks/ui-browser/baseline.json.
+# against docs/benchmarks/pcb-browser/baseline.json. The third gates the PCB
+# editor's exact high-DPI zoom path; the fourth walks every interactive page
+# surface against docs/benchmarks/ui-browser/baseline.json.
 #
 # It runs under scripts/gate.sh's machine-wide lock: a concurrent `zig build
 # test` roughly doubles wall times (docs/testing-guide.md), which would fail
@@ -18,19 +19,23 @@
 # pinned ReleaseSafe build; both are same-machine numbers, so a baseline
 # recorded elsewhere or in another build mode compares nothing.
 #
-# Env: NETLISP_PERF_BASELINE, NETLISP_BROWSER_PERF_BASELINE, NETLISP_UI_PERF_BASELINE,
+# Env: NETLISP_PERF_BASELINE, NETLISP_BROWSER_PERF_BASELINE,
+# NETLISP_EDITOR_PERF_BASELINE, NETLISP_UI_PERF_BASELINE,
 # NETLISP_PERF_PROJECT_DIR (default projects/designs), NETLISP_PERF_REPS (default 3),
-# NETLISP_BROWSER_PERF_REPS (default 3), NETLISP_UI_PERF_REPS (default 3),
+# NETLISP_BROWSER_PERF_REPS (default 3), NETLISP_EDITOR_PERF_REPS (default 3),
+# NETLISP_UI_PERF_REPS (default 3),
 # NETLISP_BROWSER_PERF_BINARY.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 BASELINE="${NETLISP_PERF_BASELINE:-docs/benchmarks/pcb-page/baseline.json}"
 BROWSER_BASELINE="${NETLISP_BROWSER_PERF_BASELINE:-docs/benchmarks/pcb-browser/baseline.json}"
+EDITOR_BASELINE="${NETLISP_EDITOR_PERF_BASELINE:-docs/benchmarks/pcb-editor/baseline.json}"
 UI_BASELINE="${NETLISP_UI_PERF_BASELINE:-docs/benchmarks/ui-browser/baseline.json}"
 PROJECT_DIR="${NETLISP_PERF_PROJECT_DIR:-projects/designs}"
 REPS="${NETLISP_PERF_REPS:-3}"
 BROWSER_REPS="${NETLISP_BROWSER_PERF_REPS:-3}"
+EDITOR_REPS="${NETLISP_EDITOR_PERF_REPS:-3}"
 UI_REPS="${NETLISP_UI_PERF_REPS:-3}"
 BROWSER_BINARY="${NETLISP_BROWSER_PERF_BINARY:-zig-out-browser-perf/bin/netlisp}"
 PERF_PROJECT_SNAPSHOT=""
@@ -134,6 +139,8 @@ NODE
   echo "perf_gate: recorded $BASELINE — review the diff and commit it deliberately"
   node scripts/pcb_browser_perf/run.js --project-dir "$PROJECT_DIR" --binary "$BROWSER_BINARY" --reps "$BROWSER_REPS" \
     --baseline "$BROWSER_BASELINE" --record
+  node scripts/pcb_editor_perf/run.js --project-dir "$PROJECT_DIR" --binary "$BROWSER_BINARY" --reps "$EDITOR_REPS" \
+    --baseline "$EDITOR_BASELINE" --record
   node scripts/ui_browser_perf/run.js --project-dir "$PROJECT_DIR" --binary "$BROWSER_BINARY" --reps "$UI_REPS" \
     --baseline "$UI_BASELINE" --record
   exit 0
@@ -141,14 +148,17 @@ fi
 
 page_status=0
 browser_status=0
+editor_status=0
 ui_status=0
 zig-out/bin/netlisp bench-page --project-dir "$PROJECT_DIR" --reps "$REPS" --baseline "$BASELINE" || page_status=$?
 node scripts/pcb_browser_perf/run.js --project-dir "$PROJECT_DIR" --binary "$BROWSER_BINARY" --reps "$BROWSER_REPS" \
   --baseline "$BROWSER_BASELINE" || browser_status=$?
+node scripts/pcb_editor_perf/run.js --project-dir "$PROJECT_DIR" --binary "$BROWSER_BINARY" --reps "$EDITOR_REPS" \
+  --baseline "$EDITOR_BASELINE" || editor_status=$?
 node scripts/ui_browser_perf/run.js --project-dir "$PROJECT_DIR" --binary "$BROWSER_BINARY" --reps "$UI_REPS" \
   --baseline "$UI_BASELINE" || ui_status=$?
-if [ "$page_status" -ne 0 ] || [ "$browser_status" -ne 0 ] || [ "$ui_status" -ne 0 ]; then
-  echo "perf_gate: FAIL (page=$page_status assembly_browser=$browser_status ui_browser=$ui_status)" >&2
+if [ "$page_status" -ne 0 ] || [ "$browser_status" -ne 0 ] || [ "$editor_status" -ne 0 ] || [ "$ui_status" -ne 0 ]; then
+  echo "perf_gate: FAIL (page=$page_status assembly_browser=$browser_status pcb_editor=$editor_status ui_browser=$ui_status)" >&2
   exit 1
 fi
 echo "perf_gate: PASS"

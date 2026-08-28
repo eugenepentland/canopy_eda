@@ -1779,6 +1779,36 @@ test "PCB WebGPU renderer caches its static command stream as a render bundle" {
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_gpu_js, marker) != null);
 }
 
+// spec: Web Server - Swept variable-width RF paths remain on WebGPU as exact triangulated stencil unions, while their hidden centreline tracks are omitted from the GPU copper stream
+test "PCB WebGPU renderer retains exact swept RF copper" {
+    const gpu_markers = [_][]const u8{
+        "ST_UNION",
+        "pipeUnion",
+        "window.PCBRegionTriangles(ring)",
+        "if (O.rfOwnsTrack && O.rfOwnsTrack(raw[i])) continue;",
+        "rfPaths:rfPathGeom,rfOwnsTrack:rfOwnsTrack",
+    };
+    for (gpu_markers) |marker| {
+        const haystack = if (std.mem.indexOf(u8, marker, "rfPaths:") != null) pcb_board_js else pcb_gpu_js;
+        try std.testing.expect(std.mem.indexOf(u8, haystack, marker) != null);
+    }
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "&&!(PCB.rf_paths||[]).length") == null);
+}
+
+// spec: Web Server - The deterministic PCB-editor zoom gate measures fit-to-8×-to-fit paints in both directions, covers the DPR-2 Canvas fallback, asserts an RF-heavy Barracuda workload stays on WebGPU, and is required metadata on every deployable release candidate
+test "PCB editor zoom gate covers both renderers and certifies release candidates" {
+    const board_markers = [_][]const u8{
+        "FBENCH_ZOOM",
+        "if(FBENCH_ZOOM){",
+        "profile:FBENCH_ZOOM?\"zoom\"",
+        "rf_paths:(PCB.rf_paths||[]).length",
+        "WebGPU did not become active",
+    };
+    for (board_markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+    // scripts/ui_browser_perf/manifest.test.js complements this asset-level
+    // test by checking the runner budgets and the prepare/deploy marker chain.
+}
+
 // spec: Web Server - The WebGPU renderer drops a track whose layer the board does not have instead of repainting it on F.Cu
 test "PCB WebGPU renderer skips out-of-range track layers as the 2D path does" {
     // The bucket loop guards the push instead of clamping the index to 0.
@@ -2026,10 +2056,11 @@ test "PCB frame benchmark carries human-readable dwell points outside movement p
         "dwell(\"turn_\"+(n+1),350)",
         "if(ent.wait)setTimeout",
         "physical_review:PHYSICAL_REVIEW,cam_review:!!CAM_REVIEW",
-        "FBENCH_QUICK?10:60,PN=FBENCH_QUICK?30:120",
+        "ZN=(FBENCH_QUICK||FBENCH_ZOOM)?10:60,PN=FBENCH_QUICK?30:120",
         "var dx=0.6*VBW/(FBENCH_QUICK?120:PN)",
         "function fbRunWhenReady()",
-        "if(!PHYSICAL_REVIEW||(CAM_REVIEW&&window.__fbenchCamReadyMs>0)){fbRun();return;}",
+        "if(!GPU_REQ||gpuOn){fbRun();return;}",
+        "else if(CAM_REVIEW&&window.__fbenchCamReadyMs>0){fbRun();return;}",
         "window.__fbenchCamReadyMs=+performance.now().toFixed(2)",
         "error:\"CAM payload did not load within 240 seconds\"",
         "setTimeout(fbRunWhenReady,1000)",

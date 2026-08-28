@@ -239,6 +239,7 @@ candidate_valid() {
   [ -f "$candidate/commit" ] || return 1
   [ "$(cat "$candidate/commit")" = "$expected" ] || return 1
   [ -f "$candidate/verified" ] || return 1
+  grep -qx 'pcb_editor_perf=passed' "$candidate/verified" || return 1
   [ -f "$candidate/zig-version" ] || return 1
   [ "$(cat "$candidate/zig-version")" = "$REQUIRED_ZIG" ] || return 1
   [ -f "$candidate/compiler-sha256" ] || return 1

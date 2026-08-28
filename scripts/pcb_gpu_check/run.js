@@ -331,8 +331,8 @@ function cirSplit(rc, bufs) {
   return { bore: ids.length ? ids[0] : null, via: ids.length > 1 ? ids[1] : null };
 }
 
-const STRIDE = { vsSeg: 12, vsCir: 8, vsPad: 12, vsPoly: 8, vsFan: 2, vsCover: 8 };
-const PER_VERTEX = { vsPoly: 1, vsFan: 1 };   // draw(count,1,first,0) vs draw(4,count,0,first)
+const STRIDE = { vsSeg: 12, vsCir: 8, vsPad: 12, vsPoly: 8, vsFan: 2, vsUnion: 2, vsCover: 8 };
+const PER_VERTEX = { vsPoly: 1, vsFan: 1, vsUnion: 1 };   // draw(count,1,first,0) vs draw(4,count,0,first)
 
 // ── A: instance transforms + colours, compared in emission order ────────
 function checkInstances(rc) {

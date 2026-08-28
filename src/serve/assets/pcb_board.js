@@ -45,8 +45,9 @@ var QS=(window.location&&window.location.search)||"";
 // existing inspection gesture.
 var THERMAL_REVIEW=PHYSICAL_REVIEW&&/(?:^|[?&])thermal=1(?:&|$)/.test(QS);
 var GPU_REQ=!/(?:^|[?&])gpu=0(?:&|$)/.test(QS)&&!!(window.navigator&&window.navigator.gpu),
-    FBENCH=/(?:^|[?&])fbench=(?:1|quick)(?:&|$)/.test(QS),
-    FBENCH_QUICK=/(?:^|[?&])fbench=quick(?:&|$)/.test(QS);
+    FBENCH=/(?:^|[?&])fbench=(?:1|quick|zoom)(?:&|$)/.test(QS),
+    FBENCH_QUICK=/(?:^|[?&])fbench=quick(?:&|$)/.test(QS),
+    FBENCH_ZOOM=/(?:^|[?&])fbench=zoom(?:&|$)/.test(QS);
 // True only once PCBGpu.init has RESOLVED successfully (adapter + device +
 // pipelines). Everything gated on it is therefore off for the whole page life
 // unless the flag was passed AND the browser delivered a device.
@@ -1066,9 +1067,6 @@ function ovsFrame(ctx,w,h,k,kk,zoomHeld){
 function gpuLive(){
  return gpuOn&&window.PCBGpu&&PCBGpu.active
   &&!PHYSICAL_REVIEW&&!reviewFocusActive()&&!ovExclusive()
-  // RF paths are swept variable-width polygons. Until the GPU owns polygon
-  // copper too, use the exact 2D fill instead of rebaking their sample chords.
-  &&!(PCB.rf_paths||[]).length
   &&!(viewSt.pourOp>0&&anyUnplaced());}
 // Assembly's exact-CAM renderer is independent of the editor's semantic GPU
 // gate. It owns the manufactured board films while the transparent 2D canvas
@@ -2680,10 +2678,12 @@ function rfPathGeom(data){var src=data&&data.rf_paths||PCB.rf_paths||[];
  if(rfGeom&&rfGeom.src===src&&rfGeom.n===src.length)return rfGeom.p;
  var runs=[];
  src.forEach(function(cur){var clean=rfCleanSamples(cur.samples);if(clean.pts.length<2)return;
-  var pts=clean.pts,ws=clean.ws,poly=rfCompactRing(pts,ws),polys=rfFallbackRegions(pts,ws,poly),path=new Path2D();
+  var pts=clean.pts,ws=clean.ws,poly=rfCompactRing(pts,ws),polys=rfFallbackRegions(pts,ws,poly),path=new Path2D(),
+   x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
   polys.forEach(function(ring){if(ring.length<3)return;path.moveTo(X(ring[0][0]),Y(ring[0][1]));
-   for(var j=1;j<ring.length;j++)path.lineTo(X(ring[j][0]),Y(ring[j][1]));path.closePath();});
-  runs.push({l:cur.l||0,net:cur.net,poly:poly,polys:polys,path:path});});
+   for(var j=1;j<ring.length;j++)path.lineTo(X(ring[j][0]),Y(ring[j][1]));path.closePath();
+   ring.forEach(function(q){x0=Math.min(x0,q[0]);y0=Math.min(y0,q[1]);x1=Math.max(x1,q[0]);y1=Math.max(y1,q[1]);});});
+  runs.push({l:cur.l||0,net:cur.net,poly:poly,polys:polys,path:path,x0:x0,y0:y0,x1:x1,y1:y1});});
  rfGeom={src:src,n:src.length,p:runs};return runs;}
 // The 3D face compositor must paint the exact same swept RF copper as the
 // assembly view. Keep the world-space rings here, beside the one lowering
@@ -2769,7 +2769,7 @@ function paintTracks(ctx,cop,only){
   return;}
  var CB=cuBatchOn(cop)?cuBatchGet():null;
  trackLayerOrder().forEach(function(L){
-  rfPathGeom().forEach(function(r){if(r.l!==L||cop&&only)return;
+  rfPathGeom().forEach(function(r){if(r.l!==L||cop&&only||r.x1<cullRect.x0||r.x0>cullRect.x1||r.y1<cullRect.y0||r.y0>cullRect.y1)return;
    var hit=reviewFocusNet(r.net),a=PHYSICAL_REVIEW?(reviewFocusHasNets()?(hit?.98:.07):(L===activeLayer?.32:0)):layerAlpha(L)*pourLayerFade(L);
    if(reviewFocusActive()&&!PHYSICAL_REVIEW)a*=hit?1:.1;if(a<=0)return;ctx.globalAlpha=a;
    ctx.fillStyle=hit?layerHighlightColor(L):(netColOn&&netColorOf(netCollapse(r.net))||layerColor(L));ctx.fill(r.path);});
@@ -11440,7 +11440,7 @@ function hudStart(){
 // trackpad drag drives, so the harness cannot accidentally measure a path the
 // real viewer never takes.
 function fbProgram(){
- var st=[],i,n,ZN=FBENCH_QUICK?10:60,PN=FBENCH_QUICK?30:120;
+ var st=[],i,n,ZN=(FBENCH_QUICK||FBENCH_ZOOM)?10:60,PN=FBENCH_QUICK?30:120;
  var dwell=function(label,ms){st.push({p:"pause",label:label,wait:ms,f:function(){}});};
  var ctr=function(){var m=svgMetricsGet();
   return {x:m.left+m.width/2,y:m.top+m.height/2};};
@@ -11449,6 +11449,7 @@ function fbProgram(){
  dwell("fit",300);
  for(i=0;i<ZN;i++)st.push({p:"zoom_in",f:zstep(zin)});
  dwell("max_zoom",550);
+ if(FBENCH_ZOOM){for(i=0;i<ZN;i++)st.push({p:"zoom_out",f:zstep(zout)});dwell("fit_end",100);return st;}
  // Park the viewport at the left end of the sweep so all three sweeps stay
  // over board content instead of running off the edge. Its own phase — the
  // jump is one big non-representative frame and must not pollute `pan`.
@@ -11471,8 +11472,9 @@ function fbStat(a){
   max:+Math.max.apply(null,a).toFixed(2)};}
 function fbReport(rec,order){
  var out={mode:gpuOn?"gpu":"2d",design:PCB.name,dpr:window.devicePixelRatio||1,
-  profile:FBENCH_QUICK?"quick":"full",
-  physical_review:PHYSICAL_REVIEW,cam_review:!!CAM_REVIEW};
+  profile:FBENCH_ZOOM?"zoom":(FBENCH_QUICK?"quick":"full"),
+  physical_review:PHYSICAL_REVIEW,cam_review:!!CAM_REVIEW,
+  workload:{rf_paths:(PCB.rf_paths||[]).length,tracks:(PCB.tracks||[]).length,vias:(PCB.vias||[]).length}};
  order.forEach(function(p){if(rec[p]&&rec[p].length)out[p]=fbStat(rec[p]);});
  window.__fbench=out;
  try{console.log("fbench "+JSON.stringify(out));}catch(e){}
@@ -11511,7 +11513,10 @@ function fbRunWhenReady(){
  var deadline=((window.performance&&performance.now)?performance.now():Date.now())+240000;
  var ready=function(){
   var t=(window.performance&&performance.now)?performance.now():Date.now();
-  if(!PHYSICAL_REVIEW||(CAM_REVIEW&&window.__fbenchCamReadyMs>0)){fbRun();return;}
+  if(!PHYSICAL_REVIEW){
+   if(!GPU_REQ||gpuOn){fbRun();return;}
+   if(!gpuStarting){window.__fbench={error:(window.PCBGpu&&PCBGpu.error)||"WebGPU did not become active",design:PCB.name};return;}}
+  else if(CAM_REVIEW&&window.__fbenchCamReadyMs>0){fbRun();return;}
   if(t>=deadline){window.__fbench={error:"CAM payload did not load within 240 seconds",
    design:PCB.name,physical_review:PHYSICAL_REVIEW,cam_review:false};return;}
   setTimeout(ready,100);};
@@ -11539,7 +11544,7 @@ if(GPU_REQ&&window.PCBGpu&&navigator.gpu&&CV.parentNode){
    // Colour + pour GEOMETRY hooks: the rules stay in this file (one expression,
    // shared with the 2D painters), the renderer only bakes what they return.
    trackColor:gpuTrackColor,trackChords:trackChords,viaColor:gpuViaColor,padColor:gpuPadColor,
-   pours:gpuPourGeom,
+   rfPaths:rfPathGeom,rfOwnsTrack:rfOwnsTrack,pours:gpuPourGeom,
    onLost:function(){if(gpuInitTimer)clearTimeout(gpuInitTimer);gpuInitTimer=null;gpuStarting=false;gpuOn=false;gpuStatusSync();
     assemblyGpuFail((PCBGpu&&PCBGpu.error)||"The WebGPU device was lost. Reload the Assembly page to restart it.");dragCacheDrop();paintSoon();}})
   .then(function(ok){if(gpuInitTimer)clearTimeout(gpuInitTimer);gpuInitTimer=null;gpuStarting=false;if(!ok){assemblyGpuFail((PCBGpu&&PCBGpu.error)||"WebGPU could not be initialized. Use a WebGPU-capable browser and reload.");return;}

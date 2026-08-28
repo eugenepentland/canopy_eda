@@ -6367,6 +6367,8 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Front-only and Back-only PCB presets hide opposite-face sub-circuit bounding boxes and remove their empty-area hit targets
 - Front-only and Back-only PCB views exclude opposite-face footprints from hover, direct and exact-pad clicks, marquee and select-all selection, and every part/group transform
 - WebGPU pan and zoom frames replay a cached render bundle until geometry, layer order, or visible-pour membership changes
+- Swept variable-width RF paths remain on WebGPU as exact triangulated stencil unions, while their hidden centreline tracks are omitted from the GPU copper stream
+- The deterministic PCB-editor zoom gate measures fit-to-8×-to-fit paints in both directions, covers the DPR-2 Canvas fallback, asserts an RF-heavy Barracuda workload stays on WebGPU, and is required metadata on every deployable release candidate
 - The WebGPU renderer drops a track whose layer the board does not have instead of repainting it on F.Cu
 - A new copper pour defaults to the active copper layer and its picker lists every routable layer
 - Custom copper pours and board outlines use one versioned shape-sketch engine: a pour exposes the outline editor's rectangle/line creation, vertex and edge editing, dimensions, geometric constraints, arc/line conversion, fillet removal/addition, chamfer, offset, mirror, selection deletion and undo/redo; its native sketch round-trips while fill, routing, DRC and export consume the compiled polygon

@@ -14,11 +14,12 @@
 // this file draws is an analytic shape — capsule, annulus, rounded rect — so it
 // renders as one instanced quad with a signed-distance fragment shader:
 // resolution-independent AA, a handful of draw calls, and a pan/zoom that is a
-// 64-byte uniform write rather than a re-raster. The two classes that are NOT
-// analytic get the two techniques that need no triangulator: the grid is
-// procedural (a full-screen triangle that computes its own dots), and a pour is
-// stencil INVERT + cover, which reproduces `fill(path,"evenodd")` exactly from
-// nothing but a triangle fan per ring.
+// 64-byte uniform write rather than a re-raster. The grid is procedural (a
+// full-screen triangle that computes its own dots), and a pour is stencil
+// INVERT + cover, which reproduces `fill(path,"evenodd")` exactly from nothing
+// but a triangle fan per ring. Swept variable-width RF copper is triangulated
+// once and stencil-REPLACE-unioned by layer/colour before its cover, preserving
+// folded-path overlap without a per-frame polygon walk.
 //
 // INVARIANTS this file is written to keep:
 //  · It never touches board state. pcb_board.js hands it read-only structures at
@@ -65,7 +66,7 @@ var O = null,            // init opts (PCB, S, MX, MY, M, nsig, TH, layerColor, 
     dev = null, gctx = null, cvs = null,
     colorFmt = null, bundle = null, bundleKey = "",
     pipeSeg = null, pipeCir = null, pipePad = null, pipePoly = null,
-    pipeGrid = null, pipeFan = null, pipeCover = null,
+    pipeGrid = null, pipeFan = null, pipeUnion = null, pipeCover = null,
     pipeCamSeg = null, pipeCamCir = null, pipeCamPad = null,
     pipeCamPoly = null, pipeCamArc = null, pipeCamBoard = null,
     pipeCamReset = null, pipeCamTint = null, pipeCamSub = null, pipeCamBlit = null,
@@ -73,6 +74,8 @@ var O = null,            // init opts (PCB, S, MX, MY, M, nsig, TH, layerColor, 
     camA = null, drawA = null,
     stTex = null, stView = null, stW = 0, stH = 0,   // stencil attachment (pour even-odd)
     segBuf = null, segRange = null,       // tracks, one contiguous range per layer
+    rfBuf = null, rfRange = null,         // swept RF triangles grouped by layer/colour
+    rfCoverBuf = null,
     viaBuf = null, viaRange = null,       // [barrels, holes]
     boreBuf = null, boreRange = null,     // drill bores (pads), split by part side
     padBuf = null, padRange = null,       // [thru/top part, thru/bottom part, top SMD, bottom SMD]
@@ -205,6 +208,9 @@ var WGSL = [
 // times, and a hole ring inverts its interior a second time, so what survives
 // as odd is exactly the even-odd interior. No triangulator anywhere. ──
 "@vertex fn vsFan(@location(0) p: vec2<f32>) -> @builtin(position) vec4<f32> {",
+"  return clipOf(p);",
+"}",
+"@vertex fn vsUnion(@location(0) p: vec2<f32>) -> @builtin(position) vec4<f32> {",
 "  return clipOf(p);",
 "}",
 "@fragment fn fsFan() -> @location(0) vec4<f32> { return vec4<f32>(0.0, 0.0, 0.0, 0.0); }",
@@ -491,6 +497,7 @@ function ds(front, readMask, writeMask) {
 }
 var ST_KEEP = { compare: "always", failOp: "keep", depthFailOp: "keep", passOp: "keep" },
     ST_INVERT = { compare: "always", failOp: "keep", depthFailOp: "keep", passOp: "invert" },
+    ST_UNION = { compare: "always", failOp: "keep", depthFailOp: "keep", passOp: "replace" },
     ST_COVER = { compare: "not-equal", failOp: "keep", depthFailOp: "keep", passOp: "replace" },
     ST_CAM_CLIP = { compare: "equal", failOp: "keep", depthFailOp: "keep", passOp: "keep" },
     ST_CAM_WRITE = { compare: "equal", failOp: "keep", depthFailOp: "keep", passOp: "replace" },
@@ -584,6 +591,10 @@ function setup(d) {
   // fire for both windings or a hole ring drawn the "wrong" way round would not
   // cancel its parent.
   pipeFan = mk("vsFan", "fsFan", L_FAN, "triangle-list", ST_INVERT, 0);
+  // Swept RF paths may be lowered as several overlapping simple polygons.
+  // REPLACE unions those triangles in stencil instead of toggling overlap out
+  // (INVERT is correct for pour holes, but wrong for a compound copper union).
+  pipeUnion = mk("vsUnion", "fsFan", L_FAN, "triangle-list", ST_UNION, 0);
   pipeCover = mk("vsCover", "fsCover", L_COVER, "triangle-strip", ST_COVER);
   pipeSeg = mk("vsSeg", "fsSeg", L_SEG);
   pipeCir = mk("vsCir", "fsCir", L_CIR);
@@ -644,17 +655,17 @@ function teardown() {
   if (camWarmTimer) clearTimeout(camWarmTimer); camWarmTimer = 0;
   partsExcl = null;
   camGeoDrop();
-  [segBuf, viaBuf, boreBuf, padBuf, polyBuf, fanBuf, coverBuf, camBuf, drawBuf, stTex].forEach(function (b) {
+  [segBuf, rfBuf, rfCoverBuf, viaBuf, boreBuf, padBuf, polyBuf, fanBuf, coverBuf, camBuf, drawBuf, stTex].forEach(function (b) {
     try { if (b && b.destroy) b.destroy(); } catch (e) {}
   });
-  segBuf = viaBuf = boreBuf = padBuf = polyBuf = fanBuf = coverBuf = camBuf = drawBuf = null;
+  segBuf = rfBuf = rfCoverBuf = viaBuf = boreBuf = padBuf = polyBuf = fanBuf = coverBuf = camBuf = drawBuf = null;
   [camFilm, camFilmStencil, camQuality, camQualityStencil].forEach(function (t) { try { if (t && t.destroy) t.destroy(); } catch (e) {} });
   camFilm = camFilmView = camFilmBg = camFilmStencil = null;
   camQuality = camQualityView = camQualityBg = camQualityStencil = null;
   camFilmW = camFilmH = camQualityW = camQualityH = 0;
   camFilmKey = camQualityKey = ""; camFilmBounds = camQualityBounds = null; camSampler = null; camDebug = null;
   stTex = stView = null; stW = stH = 0;
-  pipeSeg = pipeCir = pipePad = pipePoly = pipeGrid = pipeFan = pipeCover = bg0 = bg1 = null;
+  pipeSeg = pipeCir = pipePad = pipePoly = pipeGrid = pipeFan = pipeUnion = pipeCover = bg0 = bg1 = null;
   pipeCamSeg = pipeCamCir = pipeCamPad = pipeCamPoly = pipeCamArc = null;
   pipeCamBoard = pipeCamReset = pipeCamTint = pipeCamSub = pipeCamBlit = null;
   bundle = null; bundleKey = ""; colorFmt = null;
@@ -859,6 +870,10 @@ function buildCopper(viaDrill) {
   var P = O.PCB, S = O.S, TH = O.TH, i;
   var raw = P.tracks || [], ts = [], vs = P.vias || [];
   for (i = 0; i < raw.length; i++) {
+    // The swept polygon is the authoritative copper for an RF path. Its hidden
+    // centreline chords stay in the model for editing/connectivity, but drawing
+    // both would double-composite the same copper at reduced layer alpha.
+    if (O.rfOwnsTrack && O.rfOwnsTrack(raw[i])) continue;
     var chords = O.trackChords ? O.trackChords(raw[i]) : [raw[i]];
     for (var ci = 0; ci < chords.length; ci++) ts.push(chords[ci]);
   }
@@ -885,6 +900,45 @@ function buildCopper(viaDrill) {
     }
   }
   segBuf = upload(segBuf, arr);
+
+  // Swept RF copper. pcb_board.js lowers every path to one or more exact
+  // world-space rings; PCBRegionTriangles handles concave rings, while stencil
+  // REPLACE unions overlapping fallback pieces without dark seams. One cover
+  // draw then applies the path colour and the layer's live alpha in a single
+  // blend, matching Canvas2D's compound non-zero fill.
+  var rfByL = [], rfTri = [], rfCover = [], rf = (O.rfPaths && O.rfPaths()) || [];
+  for (i = 0; i < O.nsig; i++) rfByL.push([]);
+  for (i = 0; i < rf.length; i++) {
+    var path = rf[i], rl = path.l || 0;
+    if (rl < 0 || rl >= O.nsig) continue;
+    var col = rgb(trackCol(path, rl)), key = col.join(","), group = null;
+    for (var gi = 0; gi < rfByL[rl].length; gi++) if (rfByL[rl][gi].key === key) { group = rfByL[rl][gi]; break; }
+    if (!group) { group = { key: key, col: col, tri: [], x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity }; rfByL[rl].push(group); }
+    var polys = path.polys || [];
+    for (var pi = 0; pi < polys.length; pi++) {
+      var ring = polys[pi], triangles = window.PCBRegionTriangles && window.PCBRegionTriangles(ring);
+      if (!triangles || triangles.length < 3) throw new Error("RF path triangulation failed on layer " + rl);
+      for (var ti = 0; ti < triangles.length; ti++) {
+        var q = triangles[ti], qx = ux(q[0]), qy = uy(q[1]);
+        group.tri.push(qx, qy); group.x0 = Math.min(group.x0, qx); group.y0 = Math.min(group.y0, qy);
+        group.x1 = Math.max(group.x1, qx); group.y1 = Math.max(group.y1, qy);
+      }
+    }
+  }
+  rfRange = [];
+  for (i = 0; i < O.nsig; i++) {
+    var ranges = [];
+    for (var rgi = 0; rgi < rfByL[i].length; rgi++) {
+      var rg = rfByL[i][rgi]; if (!rg.tri.length) continue;
+      var rfFirst = rfTri.length / FAN_F, rfCoverIndex = rfCover.length / COVER_F;
+      Array.prototype.push.apply(rfTri, rg.tri);
+      rfCover.push(rg.x0, rg.y0, rg.x1, rg.y1, rg.col[0], rg.col[1], rg.col[2], 1);
+      ranges.push({ first: rfFirst, count: rg.tri.length / FAN_F, cover: rfCoverIndex });
+    }
+    rfRange.push(ranges);
+  }
+  rfBuf = upload(rfBuf, new Float32Array(rfTri));
+  rfCoverBuf = upload(rfCoverBuf, new Float32Array(rfCover));
 
   var barrel = [], hole = [], ch = rgb(TH.viaHole);
   for (i = 0; i < vs.length; i++) {
@@ -1113,13 +1167,27 @@ var STAGE_PASS = {
   },
   copper: function (pass, ctx) {
     var layers = ctx.layers, i;
-    if (segBuf) {
-      pass.setPipeline(pipeSeg); pass.setVertexBuffer(0, segBuf);
-      for (i = 0; i < layers.length; i++) {
-        var li = layers[i].l;
-        // Alpha is dynamic. Recording a zero-alpha layer keeps visibility and
-        // opacity changes on the uniform-only fast path.
-        if (li >= 0 && li < segRange.length) ctx.draw(segRange[li], li);
+    for (i = 0; i < layers.length; i++) {
+      var li = layers[i].l;
+      if (li < 0 || li >= segRange.length) continue;
+      // The 2D painter fills swept RF paths before stroking the remaining
+      // tracks of this same layer. Each path writes the union of its exact
+      // triangles to stencil at reference 1; its immediately-following cover
+      // paints once and clears that stencil back to 0.
+      var paths = rfRange && rfRange[li] || [];
+      for (var ri = 0; ri < paths.length; ri++) {
+        var rr = paths[ri];
+        pass.setBindGroup(1, bg1, [li * DSTRIDE]);
+        pass.setStencilReference(1); pass.setPipeline(pipeUnion); pass.setVertexBuffer(0, rfBuf);
+        pass.draw(rr.count, 1, rr.first, 0);
+        pass.setStencilReference(0); pass.setPipeline(pipeCover); pass.setVertexBuffer(0, rfCoverBuf);
+        pass.draw(4, 1, 0, rr.cover);
+      }
+      // Alpha is dynamic. Recording a zero-alpha layer keeps visibility and
+      // opacity changes on the uniform-only fast path.
+      if (segBuf) {
+        pass.setPipeline(pipeSeg); pass.setVertexBuffer(0, segBuf);
+        ctx.draw(segRange[li], li);
       }
     }
     if (viaBuf) {

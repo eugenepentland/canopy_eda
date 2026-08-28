@@ -10,9 +10,11 @@ const {
 
 const root = path.resolve(__dirname, "..", "..");
 const serveSource = fs.readFileSync(path.join(root, "src", "serve.zig"), "utf8");
-const registered = Array.from(serveSource.matchAll(/router\.get\("([^"]+)"/g), (match) => match[1])
-  .filter((route) => !route.startsWith("/api/"))
-  .sort();
+// A server lifecycle test owns a private `GET /` router too. Route coverage is
+// about the unique production surface, not how often a literal occurs in this
+// source file.
+const registered = [...new Set(Array.from(serveSource.matchAll(/router\.get\("([^"]+)"/g), (match) => match[1])
+  .filter((route) => !route.startsWith("/api/")))].sort();
 assert.deepStrictEqual(Object.keys(routes).sort(), registered,
   "manifest.js must classify every non-API GET route in src/serve.zig");
 
@@ -261,10 +263,12 @@ assert.strictEqual(pdfBytes.length, generatedPdf.length,
 assert.deepStrictEqual(pdfBytes, generatedPdf,
   "PDF fixture bytes drifted from their deterministic copyright-clean generator");
 assert.strictEqual(require("crypto").createHash("sha256").update(pdfBytes).digest("hex"),
-  "c8f0d3baff2403625fea4eb826749fcb33e8d09cb092fe987d5a2dcdeaa3ec49",
+  "0d58f1ce70dc53a40c6cd872f7ea1f20a1d1bffa1136cdd4efd1f1dcb857a75b",
   "PDF fixture workload digest changed; review the generated rendering work before accepting it");
 assert((gate.match(/node scripts\/ui_browser_perf\/run\.js/g) || []).length >= 2,
   "perf_gate.sh must run the all-pages matrix in both record and enforce modes");
+assert((gate.match(/node scripts\/pcb_editor_perf\/run\.js/g) || []).length >= 2,
+  "perf_gate.sh must run deterministic PCB editor zoom in both record and enforce modes");
 assert(gate.includes("archive --format=tar") && gate.includes("NETLISP_PERF_DESIGNS_COMMIT"),
   "perf_gate.sh must measure a clean, identified designs HEAD snapshot");
 assert(gate.includes("*.layouts.json") && gate.includes("layouts_fingerprint") && gate.includes("--reflink=auto") &&
@@ -274,6 +278,17 @@ assert(!gate.includes('ln -s "$source_project_dir/lib/models"'),
   "perf_gate.sh must never expose the live model bundle to benchmark writes");
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 assert.strictEqual(packageJson.scripts["perf:ui"], "node scripts/ui_browser_perf/run.js");
+assert.strictEqual(packageJson.scripts["perf:pcb-editor"], "node scripts/pcb_editor_perf/run.js");
+const editorBaseline = JSON.parse(fs.readFileSync(path.join(root, "docs", "benchmarks", "pcb-editor", "baseline.json"), "utf8"));
+assert(editorBaseline.budgets["canvas.zoom_in.worst_p95_ms"] <= 45 &&
+  editorBaseline.budgets["canvas.zoom_out.worst_p95_ms"] <= 45,
+  "the DPR-2 editor fallback needs reviewed in/out frame budgets");
+const prepareRelease = fs.readFileSync(path.join(root, ".githooks", "prepare-release.sh"), "utf8");
+const deployProd = fs.readFileSync(path.join(root, ".githooks", "deploy-prod.sh"), "utf8");
+assert(prepareRelease.includes("scripts/pcb_editor_perf/run.js") && prepareRelease.includes("pcb_editor_perf=passed"),
+  "release preparation must run and certify the PCB editor zoom gate");
+assert(deployProd.includes("pcb_editor_perf=passed"),
+  "deployment must reject a candidate that lacks PCB editor performance certification");
 const prePush = fs.readFileSync(path.join(root, ".githooks", "pre-push"), "utf8");
 assert(prePush.includes("git-common-dir") && prePush.includes("bash scripts/perf_gate.sh"),
   "linked-worktree pushes must resolve the shared designs checkout and invoke the full gate");

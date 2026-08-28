@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "recorded_at": "2026-08-28T13:00:49.453Z",
+  "reference": {
+    "schema": 1,
+    "design": "barracuda-base",
+    "viewport": {
+      "width": 1600,
+      "height": 900
+    },
+    "repetitions": 3,
+    "canvas": {
+      "zoom_in": {
+        "median_p50_ms": 23,
+        "worst_p95_ms": 35.1,
+        "max_ms": 35.1
+      },
+      "zoom_out": {
+        "median_p50_ms": 23.1,
+        "worst_p95_ms": 41.3,
+        "max_ms": 41.3
+      },
+      "dpr": 2,
+      "renderer": "2d"
+    },
+    "workload": {
+      "rf_paths": 62,
+      "tracks": 1309,
+      "vias": 923
+    },
+    "gpu": {
+      "zoom_in": {
+        "median_p50_ms": 95.2,
+        "worst_p95_ms": 131.4,
+        "max_ms": 131.4
+      },
+      "zoom_out": {
+        "median_p50_ms": 89.6,
+        "worst_p95_ms": 130.3,
+        "max_ms": 130.3
+      },
+      "dpr": 1,
+      "renderer": "gpu"
+    }
+  },
+  "budgets": {
+    "canvas.zoom_in.median_p50_ms": 30,
+    "canvas.zoom_in.worst_p95_ms": 45,
+    "canvas.zoom_in.max_ms": 55,
+    "canvas.zoom_out.median_p50_ms": 30,
+    "canvas.zoom_out.worst_p95_ms": 45,
+    "canvas.zoom_out.max_ms": 55,
+    "gpu.zoom_in.median_p50_ms": 110,
+    "gpu.zoom_in.worst_p95_ms": 150,
+    "gpu.zoom_in.max_ms": 160,
+    "gpu.zoom_out.median_p50_ms": 110,
+    "gpu.zoom_out.worst_p95_ms": 150,
+    "gpu.zoom_out.max_ms": 160
+  }
+}

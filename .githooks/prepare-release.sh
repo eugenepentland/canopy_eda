@@ -105,6 +105,7 @@ candidate_valid() {
   [ -f "$CANDIDATE/tree" ] || return 1
   [ "$(cat "$CANDIDATE/tree")" = "$HEAD_TREE" ] || return 1
   [ -f "$CANDIDATE/verified" ] || return 1
+  grep -qx 'pcb_editor_perf=passed' "$CANDIDATE/verified" || return 1
   [ -f "$CANDIDATE/zig-version" ] || return 1
   [ "$(cat "$CANDIDATE/zig-version")" = "$REQUIRED_ZIG" ] || return 1
   [ -f "$CANDIDATE/compiler-sha256" ] || return 1
@@ -125,6 +126,7 @@ candidate_tree_verified() {
   [ -f "$dir/tree" ] || return 1
   [ "$(cat "$dir/tree")" = "$HEAD_TREE" ] || return 1
   [ -f "$dir/verified" ] || return 1
+  grep -qx 'pcb_editor_perf=passed' "$dir/verified" || return 1
   [ -f "$dir/zig-version" ] || return 1
   [ "$(cat "$dir/zig-version")" = "$REQUIRED_ZIG" ] || return 1
   [ -f "$dir/compiler-sha256" ] || return 1
@@ -148,6 +150,7 @@ publish_staging() {
   [ -f "$staging/tree" ] || return 1
   [ "$(cat "$staging/tree")" = "$HEAD_TREE" ] || return 1
   [ -f "$staging/verified" ] || return 1
+  grep -qx 'pcb_editor_perf=passed' "$staging/verified" || return 1
   [ -f "$staging/compiler-sha256" ] || return 1
   [ "$(cat "$staging/compiler-sha256")" = "$ZIG_SHA256" ] || return 1
   [ -f "$staging/build-id" ] || return 1
@@ -371,6 +374,38 @@ if [ "$strip_failed" -ne 0 ] ||
   exit 1
 fi
 
+# The full test suite proves renderer semantics, but only a real browser can
+# prove that Barracuda's current RF-heavy editor remains interactive. Run the
+# deterministic DPR-2 Canvas + retained-WebGPU zoom gate against the exact
+# stripped candidate before it becomes adoptable or deployable. Resolve the
+# shared designs checkout from a feature worktree the same way perf_gate.sh
+# does; a release host without the workload fails closed.
+PERF_PROJECT_DIR="${NETLISP_PERF_PROJECT_DIR:-$TOP/projects/designs}"
+if [ ! -d "$PERF_PROJECT_DIR/src" ]; then
+  shared_checkout="${COMMON_DIR%/.git}"
+  if [ -d "$shared_checkout/projects/designs/src" ]; then
+    PERF_PROJECT_DIR="$shared_checkout/projects/designs"
+  fi
+fi
+if [ ! -d "$PERF_PROJECT_DIR/src" ]; then
+  echo "prepare-release: Barracuda performance workload not found at $PERF_PROJECT_DIR" >&2
+  exit 1
+fi
+echo "[$(ts)] prepare-release: running deterministic Barracuda editor zoom gate"
+editor_perf_started="$(date +%s)"
+if ! node scripts/pcb_editor_perf/run.js --project-dir "$PERF_PROJECT_DIR" \
+  --binary "$staging/install/bin/netlisp" --reps "${NETLISP_EDITOR_PERF_REPS:-3}" \
+  >"$staging/pcb-editor-perf.log" 2>&1; then
+  echo "prepare-release: Barracuda editor zoom gate failed:" >&2
+  tail -n 120 "$staging/pcb-editor-perf.log" >&2
+  failed="$FAILURE_ROOT/$HEAD_HASH-$(date +%Y%m%d-%H%M%S)-$$"
+  mv "$staging" "$failed"
+  staging=""
+  echo "prepare-release: full logs kept at $failed" >&2
+  exit 1
+fi
+editor_perf_elapsed=$(( $(date +%s) - editor_perf_started ))
+
 # Fail closed: a green test job must have EXECUTED the suite. Guardian's
 # counting test runner prints this line before the first test; a log without
 # it means the run step was replayed from a cache and nothing actually ran —
@@ -392,14 +427,14 @@ printf '%s\n' "$REQUIRED_ZIG" >"$staging/zig-version"
 printf '%s\n' "$ZIG_SHA256" >"$staging/compiler-sha256"
 printf '%s\n' "$SHORT_HASH" >"$staging/build-id"
 printf '%s\n' "$ARTIFACT_POLICY" >"$staging/artifact-policy"
-printf 'guardian=passed\ntest=passed\nbuild=passed\n' >"$staging/verified"
-printf 'test_seconds=%s\nbuild_seconds=%s\nwall_seconds=%s\n' \
-  "$test_elapsed" "$build_elapsed" "$(( $(date +%s) - started ))" >"$staging/timing"
+printf 'guardian=passed\ntest=passed\nbuild=passed\npcb_editor_perf=passed\n' >"$staging/verified"
+printf 'test_seconds=%s\nbuild_seconds=%s\npcb_editor_perf_seconds=%s\nwall_seconds=%s\n' \
+  "$test_elapsed" "$build_elapsed" "$editor_perf_elapsed" "$(( $(date +%s) - started ))" >"$staging/timing"
 
 if ! publish_staging; then
   echo "prepare-release: could not publish the candidate for $SHORT_HASH" >&2
   exit 1
 fi
 echo "[$(ts)] prepare-release: candidate ready for $SHORT_HASH (tree $SHORT_TREE)"
-echo "  tests: ${test_elapsed}s; build: ${build_elapsed}s; concurrent wall: $(( $(date +%s) - started ))s"
+echo "  tests: ${test_elapsed}s; build: ${build_elapsed}s; editor perf: ${editor_perf_elapsed}s; wall: $(( $(date +%s) - started ))s"
 echo "  $CANDIDATE/install/bin/netlisp"
