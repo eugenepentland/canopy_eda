@@ -159,3 +159,36 @@ log is not a substitute for reporting an active blocker to the user.
 - **finding:** Wall-clock on this machine is noisy enough to mislead: repeated identical barracuda reporting-DRC runs spanned 3.4–6.3 s (±30%). Every number in this change is a median of three alternating runs, and single-sample comparisons between two binaries were actively wrong twice before that discipline was adopted.
 - **finding:** Two independent whole-board rasters of the SAME user-zone spec were being computed per reporting pass — `drc_compose.filledTopology`'s zone loop and `net_open.zoneFills` build identical `LayerSpec`s over identical copper. Content-keying the fill collapsed them, which is most of why COLD reporting DRC also got faster (barracuda 5951 ms → 3588 ms) rather than only the warm path.
 - **status:** resolved in this change
+
+## 2026-08-28 — the reconcile endpoint's cost was never where the DRC work was
+
+Workstream W3 was briefed as "the editor's server reconcile runs a full DRC on
+every POST /api/pcb-drc, ~300 ms after edit idle; get it well under 300 ms".
+Measured on this tree before touching anything (ReleaseSafe, barracuda): the
+endpoint took 7.0-11.4 s, of which 3.5 s was resolving the design and 4.3-5.3 s
+was `placeFromPoses` — neither of them DRC at all. The DRC seam itself was
+1.8-3.5 s. The 300 ms figure appears to have been carried forward from a
+different measurement and set the whole plan's target an order of magnitude off.
+
+Two things would have caught it in one command instead of an afternoon:
+
+1. There is no way to time an ENDPOINT's stages. `bench-page` measures page
+   renders; `drc-dump` measures the two DRC seams. Neither sees the handler, so
+   "which part of this request is slow" needed a throwaway instrumentation
+   patch, three rebuilds, and a scratch file to print into because
+   `std.debug.print` from a serve thread does not reach the server log. A
+   `netlisp bench-api <endpoint> <design> --body <file>` that posts a recorded
+   body and prints per-stage wall time would be the drc-dump of the HTTP layer.
+
+2. Nothing in the repo records what an endpoint currently costs, so a brief can
+   quote a stale number and nobody notices. `scripts/perf_gate.sh` gates four
+   PAGE latencies; the editor's reconcile — the request a user makes most — is
+   not among them.
+
+Also worth writing down, because it cost real time: `fill_cache`'s per-fill memo
+hands back a BORROW, and a caller that retains the `pour.Fill` value across
+requests keeps a pointer nothing is holding. The fix is to retain the memo KEY
+and ask again (`pour.computeMemoKeyed`), which takes a proper reference or
+misses and pours. The module header states the borrow rule for the whole-board
+entry; it now also matters for anything that keeps a fill between passes, and
+that is not obvious from the type — a `Fill` looks like a value.
