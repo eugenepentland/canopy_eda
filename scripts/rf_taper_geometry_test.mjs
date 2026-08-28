@@ -5,10 +5,12 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
 const boardPath = fileURLToPath(new URL("../src/serve/assets/pcb_board.js", import.meta.url));
 const source = fs.readFileSync(boardPath, "utf8");
+const require = createRequire(import.meta.url);
 
 function functionSource(name) {
   const start = source.indexOf(`function ${name}(`);
@@ -90,6 +92,42 @@ function load(names, globals = {}) {
   assert.equal(coincident.ws[0], 0.5, "all-coincident cleaning must retain the maximum width");
   assert.equal(g.rfCompactRing(coincident.pts, coincident.ws).length, 0, "an all-coincident path must not emit a ring");
   assert.equal(g.rfFallbackRegions(coincident.pts, coincident.ws, []).length, 0, "an all-coincident path must not emit fallback copper");
+}
+
+{
+  // Barracuda F4.1 is 0.55 mm wide across the route but only 0.25 mm long.
+  // Its adjacent F4.2 ground land begins 0.375 mm behind the RF pad centre.
+  // The old max-width capsule invented a 0.275 mm round cap and saw only a
+  // 0.100 mm gap; the actual butt-ended taper is comfortably clear at 0.127 mm.
+  const P = [{ side: "top", pads: [{ net: "GND" }] }];
+  const g = load([
+    "polyContains", "ptSegDist", "segSegDist", "rfCleanSamples", "rfRingFolded",
+    "rfFallbackRegions", "rfCompactRing", "drawPolyRectGap", "drawTaperPathsPadViolation",
+  ], {
+    P,
+    netClrFor() { return 0.127; },
+    sameNet(a, b) { return a && b && a === b; },
+    wrect() { return { x0: -0.625, y0: -0.275, x1: -0.375, y1: 0.275 }; },
+  });
+  const path = [{ net: "LO1_DRIVE", l: 0, samples: [
+    [0, 0, 0.55], [0.125, 0, 0.55], [0.353, 0, 0.19], [1, 0, 0.19],
+  ] }];
+  assert(!g.drawTaperPathsPadViolation(path, 0, "LO1_DRIVE"),
+    "F4.1's exact butt-ended taper must clear the adjacent F4.2 ground land");
+}
+
+{
+  const { buildDrcInput } = require("../src/serve/assets/drc_marshal.js");
+  const PCB = {
+    tracks: [{ id: "old", x1: 0, y1: 0, x2: 1, y2: 0, l: 0, w: 0.2, net: "RF" }],
+    rf_paths: [{ net: "RF", l: 0, track_ids: ["old"], samples: [[0, 0, 0.3], [1, 0, 0.2]] }],
+  };
+  const candidateTrack = { id: "new", x1: 2, y1: 0, x2: 3, y2: 0, l: 0, w: 0.2, net: "RF" };
+  const candidatePath = { net: "RF", l: 0, track_ids: ["new"], samples: [[2, 0, 0.4], [3, 0, 0.2]] };
+  const input = buildDrcInput(PCB, { tracks: [candidateTrack], rf_paths: [candidatePath] });
+  assert.equal(input.tracks.length, 1, "an explicit trial RF path must replace its own compact handle");
+  assert.equal(input.tracks[0].x1, 2);
+  assert.equal(input.tracks[0].w, 0.4);
 }
 
 {

@@ -657,6 +657,10 @@ fn checkImpl(
     // Swept paths are the physical width authority. Saved editor handles stay
     // compact; every capsule-based rule sees private profile chords instead.
     const tracks = try path_copper.tracks(arena, routed);
+    var ordinary_tracks: usize = 0;
+    for (routed.tracks) |track| {
+        if (!path_copper.ownsTrack(routed.rf_port_outcomes, track)) ordinary_tracks += 1;
+    }
     const rules = placement.rules.design;
     const clr = ClearanceResolver{ .base = clearance, .rules = placement.rules };
     // Widest clearance any pair can demand — the grid inflation, so no violating
@@ -677,7 +681,13 @@ fn checkImpl(
     try checkViaVia(c, vias, &via_grid);
     try checkViaTrack(c, vias, tracks, &track_grid);
     try checkTrackTrack(c, tracks, &track_grid);
-    try checkTrackPad(c, tracks, pads, &pad_grid);
+    // A variable-width path fabricates as butt-ended swept regions, not the
+    // round-ended max-width capsules used by the remaining centreline rules.
+    // Check ordinary tracks through the legacy capsule seam and paths against
+    // their exact polygons. In particular, a wide/short launch pad must not
+    // grow a synthetic radius behind its centre and crowd the adjacent land.
+    try checkTrackPad(c, tracks[0..ordinary_tracks], pads, &pad_grid);
+    try checkRfPathPad(c, routed, pads);
     // Drill / edge / courtyard / silk / width rules live in helpers.
     try checkDrillRules(arena, &out, pads, vias, rules);
     try checkBoardEdge(arena, &out, placement, tracks, vias, rules.edgeClearance());
@@ -1322,6 +1332,63 @@ fn checkTrackPad(c: Ctx, tracks: []const router.Track, pads: []const PadBox, pad
                 const my = std.math.clamp((p.y0 + p.y1) / 2, @min(t.y1, t.y2), @max(t.y1, t.y2));
                 try c.out.append(c.arena, .{ .x = mx, .y = my, .gap = gap, .clearance = eff, .kind = .track_pad, .who = padParties(t.net, p), .layer = layerOf(t.layer) });
             }
+        }
+    }
+}
+
+fn regionShape(poly: []const [2]f64) pad_shape.Shape {
+    var x0 = std.math.inf(f64);
+    var y0 = std.math.inf(f64);
+    var x1 = -std.math.inf(f64);
+    var y1 = -std.math.inf(f64);
+    for (poly) |point| {
+        x0 = @min(x0, point[0]);
+        y0 = @min(y0, point[1]);
+        x1 = @max(x1, point[0]);
+        y1 = @max(y1, point[1]);
+    }
+    return .{ .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1, .poly = poly };
+}
+
+/// Track-to-pad clearance for swept variable-width copper. `path_copper.tracks`
+/// deliberately emits max-endpoint capsules for rules that only understand a
+/// scalar width. Those capsules have round ends, while the rendered/fabricated
+/// taper regions are butt-ended. Measuring the regions here prevents the cap at
+/// a 0.55 x 0.25 mm launch from extending 0.15 mm behind the real pad.
+fn checkRfPathPad(c: Ctx, routed: router.RouteResult, pads: []const PadBox) Err {
+    for (routed.rf_port_outcomes) |path| {
+        if (!path.success or path.physical.gate_removed) continue;
+        const regions = try path_copper.regions(c.arena, path.physical.samples);
+        if (regions.len == 0) continue;
+        for (pads) |pad| {
+            if (c.sameNet(path.net, pad.net)) continue;
+            if (!pad.thru and pad.layer != path.physical.layer) continue;
+            const eff = c.clr.between(path.net, pad.net);
+            const pad_s = pad_shape.Shape{ .x0 = pad.x0, .y0 = pad.y0, .x1 = pad.x1, .y1 = pad.y1, .poly = pad.poly };
+            var best = std.math.inf(f64);
+            var best_shape: ?pad_shape.Shape = null;
+            for (regions) |region| {
+                if (region.len < 3) continue;
+                const shape = regionShape(region);
+                const gap = pad_shape.shapeGap(shape, pad_s, eff);
+                if (gap < best) {
+                    best = gap;
+                    best_shape = shape;
+                }
+            }
+            if (best >= eff - eps) continue;
+            const shape = best_shape orelse continue;
+            const mx = std.math.clamp((pad.x0 + pad.x1) / 2, shape.x0, shape.x1);
+            const my = std.math.clamp((pad.y0 + pad.y1) / 2, shape.y0, shape.y1);
+            try c.out.append(c.arena, .{
+                .x = mx,
+                .y = my,
+                .gap = best,
+                .clearance = eff,
+                .kind = .track_pad,
+                .who = padParties(path.net, pad),
+                .layer = layerOf(path.physical.layer),
+            });
         }
     }
 }
@@ -2609,6 +2676,95 @@ test "check flags track-to-pad clashes layer-aware" {
     const own = [_]router.Track{.{ .x1 = -1, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.127, .net = 0 }};
     const ok = router.RouteResult{ .tracks = &own, .vias = &.{}, .routed = 1, .total = 1 };
     try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, ok, 0.127), .track_pad));
+}
+
+// spec: placement/drc - a wide RF taper is checked as its exact butt-ended sweep, so a short launch land does not acquire a round cap behind its centre and falsely crowd the adjacent pad
+test "exact RF taper does not grow a capsule behind a short launch pad" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // Barracuda F4 pads 1/2 in the launch direction: the RF land is 0.55 mm
+    // across but only 0.25 mm long, followed 0.25 mm behind by a GND land.
+    // A 0.55 mm round-ended probe reaches 0.275 mm behind the RF pad centre and
+    // reports a false 0.100 mm gap. The fabricated taper has a butt end at the
+    // centre, so its real gap to pad 2 is 0.375 mm.
+    const pads = [_]geometry.Pad{
+        .{ .number = "1", .x = 0, .y = 0, .w = 0.25, .h = 0.55 },
+        .{ .number = "2", .x = -0.5, .y = 0, .w = 0.25, .h = 0.55 },
+    };
+    var parts = [_]optimizer.Part{.{
+        .ref_des = "F4",
+        .kind = .passive,
+        .hw = 0.8,
+        .hh = 0.9,
+        .pads = &pads,
+        .fallback = false,
+        .x = 0,
+        .y = 0,
+    }};
+    const rf_pin = [_]flat_netlist.FlatPin{.{ .ref_des = "F4", .pin = "1" }};
+    const gnd_pin = [_]flat_netlist.FlatPin{.{ .ref_des = "F4", .pin = "2" }};
+    const nets = [_]FlatNet{
+        .{ .name = "LO1_DRIVE", .pins = &rf_pin },
+        .{ .name = "GND", .pins = &gnd_pin },
+    };
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -2,
+        .miny = -2,
+        .maxx = 2,
+        .maxy = 2,
+        .generated = true,
+    };
+    const samples = [_]RfSample{
+        .{ .at = .{ 0, 0 }, .s_mm = 0, .curvature = 0, .width_mm = 0.55 },
+        .{ .at = .{ 0.125, 0 }, .s_mm = 0.125, .curvature = 0, .width_mm = 0.55 },
+        .{ .at = .{ 0.353, 0 }, .s_mm = 0.353, .curvature = 0, .width_mm = 0.19 },
+        .{ .at = .{ 1, 0 }, .s_mm = 1, .curvature = 0, .width_mm = 0.19 },
+    };
+    const outcomes = [_]@import("rf_port_report.zig").Outcome{.{
+        .net = 0,
+        .chosen = 0,
+        .feasible = true,
+        .success = true,
+        .metrics = .{},
+        .trials = &.{},
+        .physical = .{ .sample_count = samples.len, .samples = &samples, .layer = 0 },
+    }};
+    const handle = [_]router.Track{.{
+        .x1 = 0,
+        .y1 = 0,
+        .x2 = 1,
+        .y2 = 0,
+        .layer = 0,
+        .width = 0.19,
+        .net = 0,
+    }};
+    const exact = router.RouteResult{ .tracks = &handle, .vias = &.{}, .rf_port_outcomes = &outcomes, .routed = 1, .total = 1 };
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, exact, 0.127), .track_pad));
+
+    // Pin the old failure mode: the same first chord treated as a scalar-width
+    // capsule really does report the synthetic 0.100 mm gap.
+    const capsule = [_]router.Track{.{
+        .x1 = 0,
+        .y1 = 0,
+        .x2 = 0.125,
+        .y2 = 0,
+        .layer = 0,
+        .width = 0.55,
+        .net = 0,
+    }};
+    const legacy = router.RouteResult{ .tracks = &capsule, .vias = &.{}, .routed = 1, .total = 1 };
+    const old_findings = try check(arena, placement, legacy, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(old_findings, .track_pad));
+    try testing.expectApproxEqAbs(@as(f64, 0.1), firstOfKind(old_findings, .track_pad).?.gap, 1e-9);
 }
 
 // spec: placement/drc - parent-rail copper may touch a structurally proven generated per-pin bypass pad, while dotted lookalike nets remain foreign

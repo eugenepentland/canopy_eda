@@ -44,10 +44,14 @@ function buildDrcInput(PCB, live) {
     vias = vias.filter(function (v) { return !v.f || v.f === "@perimeter"; });
   }
   function pathOwnsTrack(t) {
-    if (typeof window !== "undefined" && window.PCBRfOwnsTrack) return window.PCBRfOwnsTrack(t);
-    return rfPaths.some(function (p) {
+    if (rfPaths.some(function (p) {
       return !p.portal && (p.track_ids || []).length && t.id && p.track_ids.indexOf(t.id) >= 0;
-    });
+    })) return true;
+    // An explicit candidate path set must be self-contained: consulting the
+    // live board here would retain its old paths and miss the trial paths whose
+    // compact handles the synchronous commit gate is trying to replace.
+    if (live.rf_paths !== undefined) return false;
+    return typeof window !== "undefined" && window.PCBRfOwnsTrack ? window.PCBRfOwnsTrack(t) : false;
   }
   function cleanRfSamples(samples) {
     return (samples || []).reduce(function (out, sample) {

@@ -1129,16 +1129,19 @@ test "PCB editor automatically lowers every local controlled-impedance pad taper
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "function drawReplaceLaid") == null);
 }
 
-// spec: Web Server - the PCB hand router previews and clearance-checks an authored pad neck at its tapered physical width before committing either a pad-out or pad-in gesture
+// spec: Web Server - the PCB hand router previews an authored pad neck at its tapered physical width, checks wide/short-pad launches against their exact swept regions, and submits compact handles plus those regions to the synchronous DRC gate
 test "PCB hand router gates pad entry and exit at the prospective tapered width" {
     const markers = [_][]const u8{
         "function drawAutomaticTaperPlan",
         "window.PCBDrawAutomaticTaperPlan",
         "function drawProspectiveTaperPlan",
         "dtrace.n===0?dtrace.startPad:null",
-        "candF=drawProspectiveTaperPlan(planF).tracks",
-        "candC=drawProspectiveTaperPlan(planC).tracks",
-        "tracks=drawProspectiveTaperPlan(drawRoutePlan(legs)).tracks",
+        "taperF=drawProspectiveTaperPlan(planF)",
+        "drcGateBlocks(planF.tracks,null,taperF.paths)",
+        "taperC=drawProspectiveTaperPlan(planC)",
+        "drcGateBlocks(planC.tracks,null,taperC.paths)",
+        "function drawTaperPathsPadViolation",
+        "drawTaperPathOwnsProbe(taper.paths,t)",
         "preview=drawProspectiveTaperPlan(drawRoutePlan(dl.legs)).tracks",
         "Math.max((t.w||dtrace.w)*S,1.2)",
     };
@@ -1201,7 +1204,7 @@ test "PCB editor Escape cancels a DRC-blocked manual route" {
 }
 
 test "PCB editor DRC lowers taper polygons to private probe tracks" {
-    for ([_][]const u8{ "var physicalTracks", "window.PCBRfOwnsTrack", "physicalTracks.push", "Math.max(+a[2], +b[2])" }) |marker|
+    for ([_][]const u8{ "var physicalTracks", "window.PCBRfOwnsTrack", "physicalTracks.push", "Math.max(+a[2], +b[2])", "if (live.rf_paths !== undefined) return false" }) |marker|
         try std.testing.expect(std.mem.indexOf(u8, drc_marshal_js, marker) != null or std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 

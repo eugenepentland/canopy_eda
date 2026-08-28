@@ -333,7 +333,8 @@ pub fn ownsTrack(paths: []const rf_port_report.Outcome, track: anytype) bool {
 }
 
 /// Return capsule probes matching the swept path, without exposing them as
-/// persisted or editor-visible trace objects.
+/// persisted or editor-visible trace objects. Ordinary persisted copper is
+/// always the prefix and the private path probes follow it.
 pub fn tracks(arena: std.mem.Allocator, routed: router.RouteResult) std.mem.Allocator.Error![]const router.Track {
     if (routed.rf_port_outcomes.len == 0) return routed.tracks;
     var out: std.ArrayList(router.Track) = .empty;

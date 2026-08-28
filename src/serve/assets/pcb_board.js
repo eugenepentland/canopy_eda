@@ -7404,6 +7404,28 @@ window.PCBDrawAutomaticTaperPlan=drawAutomaticTaperPlan;
 function drawProspectiveTaperPlan(plan){if(!dtrace||dtrace.pair||!plan||!plan.tracks||!plan.tracks.length)return {tracks:(plan&&plan.tracks)||[],paths:[]};
  var tracks=plan.tracks,last=tracks[tracks.length-1],ep=drawEndpointPad(last.net,last.l||0,last.x2,last.y2);
  return drawAutomaticTaperPlan(tracks,dtrace.n===0?dtrace.startPad:null,ep,dtrace.w);}
+function drawTaperPathOwnsProbe(paths,t){return (paths||[]).some(function(p){if(p.portal||+(p.l||0)!==+(t.l||0)||(p.net||"")!==(t.net||""))return false;
+ var ss=p.samples||[];return ss.length>1&&(rfPathCoversTrack(ss,t,[t.x1,t.y1],[t.x2,t.y2])||rfPathCoversTrack(ss,t,[t.x2,t.y2],[t.x1,t.y1]));});}
+function drawPolyRectGap(poly,b){if(!poly||poly.length<3)return 1/0;
+ if(poly.some(function(q){return q[0]>=b.x0&&q[0]<=b.x1&&q[1]>=b.y0&&q[1]<=b.y1;}))return 0;
+ var rect=[[b.x0,b.y0],[b.x1,b.y0],[b.x1,b.y1],[b.x0,b.y1]];
+ if(rect.some(function(q){return polyContains(poly,q[0],q[1]);}))return 0;
+ var best=1/0,pa=poly[poly.length-1];for(var i=0;i<poly.length;i++){var pb=poly[i],ra=rect[rect.length-1];
+  for(var j=0;j<rect.length;j++){var rb=rect[j];best=Math.min(best,segSegDist(pa[0],pa[1],pb[0],pb[1],ra[0],ra[1],rb[0],rb[1]));ra=rb;}pa=pb;}return best;}
+// Exact pad-clearance fallback for the dense-board hand router. Its optional
+// persistent WASM session is intentionally disabled on Barracuda, so the fast
+// JS preview normally sees max-width round capsules. A wide, short land (F4.1)
+// makes that cap extend behind the real pad; judge only that pad verdict against
+// the same butt-ended swept regions fabrication and the final WASM gate use.
+function drawTaperPathsPadViolation(paths,layer,net){var clr=netClrFor(net),regions=[];
+ (paths||[]).forEach(function(path){if(+(path.l||0)!==+layer||(path.net||"")!==(net||""))return;
+  var clean=rfCleanSamples(path.samples),ring=rfCompactRing(clean.pts,clean.ws);
+  rfFallbackRegions(clean.pts,clean.ws,ring).forEach(function(poly){if(poly.length>=3)regions.push(poly);});});
+ if(!regions.length)return false;
+ for(var i=0;i<P.length;i++){var p=P[i],bot=p.side==="bottom"?1:0,pads=p.pads||[];
+  for(var j=0;j<pads.length;j++){var pd=pads[j];if(!pd.thru&&bot!==layer||sameNet(pd.net||"",net))continue;var b=wrect(i,pd);
+   for(var k=0;k<regions.length;k++)if(drawPolyRectGap(regions[k],b)<clr-1e-6)return true;}}
+ return false;}
 function drawApplyAutomaticTapers(){if(!dtrace||dtrace.pair||!dtrace.laid||!dtrace.laid.length)return {ok:true,changed:false,paths:[]};
  var old=dtrace.laid.slice(),nominal=dtrace.w;
  var ep=drawEndpointPad(dtrace.net,dtrace.l,dtrace.lx,dtrace.ly),board=PCB.tracks||[],base=dtrace.undo||{},
@@ -7415,8 +7437,8 @@ function drawApplyAutomaticTapers(){if(!dtrace||dtrace.pair||!dtrace.laid||!dtra
  if(!drcGate.ready||drcGate.failed)return {ok:true,changed:false,paths:[],omitted:true};
  for(var si=0;si<scales.length;si++){
   var trial=si===0?initial:drawAutomaticTaperPlan(old,dtrace.startPad,ep,nominal,scales[si]);
-  var trialAfter=board.filter(function(t){return old.indexOf(t)<0;}).concat(trial.tracks,drawTaperPortalProbes(trial.paths));
-  if(!drcGateDiffBlocks(base.tracks||[],base.vias||[],trialAfter,PCB.vias||[])){physical=trial;break;}
+  var trialAfter=board.filter(function(t){return old.indexOf(t)<0;}).concat(old),trialPaths=(PCB.rf_paths||[]).concat(trial.paths);
+  if(!drcGateDiffBlocks(base.tracks||[],base.vias||[],trialAfter,PCB.vias||[],base.rf_paths||[],trialPaths)){physical=trial;break;}
   if(drcGate.failed||!trial.compactable)break;}
  if(!physical){
   // The pen's uniform-width copper was independently gated on every commit,
@@ -8342,8 +8364,8 @@ function drawClick(m,shift){
    var pa=drawPath(dtrace.lx,dtrace.ly,{x:pt2.x,y:pt2.y},drawPosture^1);
    if(drawLegsViolate(pa)){routeStatMsg("that would violate clearance — reroute the last leg",true);return;}
    pl=pa;}
-  var planF=drawRoutePlan(pl),candF=drawProspectiveTaperPlan(planF).tracks;
-  if(drcGateBlocks(candF,null)){routeStatMsg("that would create a DRC error — reroute the last leg",true);drawFlashSet(candF);return;}
+  var planF=drawRoutePlan(pl),taperF=drawProspectiveTaperPlan(planF);
+  if(drcGateBlocks(planF.tracks,null,taperF.paths)){routeStatMsg("that would create a DRC error — reroute the last leg",true);drawFlashSet(taperF.tracks);return;}
   drawCommitPlan(planF);drawEnd();return;}
  if(pt2&&pt2.net&&pt2.net!==dtrace.net){
   routeStatMsg("that pad is on "+nLeaf(pt2.net)+" — trace is on "+nLeaf(dtrace.net),true);return;}
@@ -8353,8 +8375,8 @@ function drawClick(m,shift){
   return;}
  var dl=drawLegs(m,shift);
  if(!dl.legs.length){routeStatMsg("blocked by clearance — no room toward that point",true);return;}
- var planC=drawRoutePlan(dl.legs),candC=drawProspectiveTaperPlan(planC).tracks;
- if(drcGateBlocks(candC,null)){routeStatMsg("that would create a DRC error — route around it",true);drawFlashSet(candC);return;}
+ var planC=drawRoutePlan(dl.legs),taperC=drawProspectiveTaperPlan(planC);
+ if(drcGateBlocks(planC.tracks,null,taperC.paths)){routeStatMsg("that would create a DRC error — route around it",true);drawFlashSet(taperC.tracks);return;}
  if(dl.clipped)routeStatMsg("head clipped at the clearance boundary — route around the obstacle",true);
  drawCommitPlan(planC);
  if(dl.t.finish&&!dl.clipped){drawEnd();return;}
@@ -8370,9 +8392,13 @@ function drawTarget(m,shift){if(!shift){var mg=magSnap(m,dtrace&&dtrace.net);if(
 // the P leg — the trim-aware commit gate stays the final word on both nets.
 function drawLegsViolate(legs){if(!dtrace)return false;
  var skip=dtrace.pair?dtrace.laid.concat(dtrace.pair.laid):dtrace.laid,
-  tracks=drawProspectiveTaperPlan(drawRoutePlan(legs)).tracks;
+  taper=drawProspectiveTaperPlan(drawRoutePlan(legs)),tracks=taper.tracks,padViolation=null;
  for(var i=0;i<tracks.length;i++){var t=tracks[i];
-  if(segViolation(t.x1,t.y1,t.x2,t.y2,t.l,t.net,t.w/2,skip))return true;}
+  var violation=segViolation(t.x1,t.y1,t.x2,t.y2,t.l,t.net,t.w/2,skip);if(!violation)continue;
+  if(violation.k==="track↔pad"&&drawTaperPathOwnsProbe(taper.paths,t)){
+   if(padViolation==null)padViolation=drawTaperPathsPadViolation(taper.paths,t.l,t.net);
+   if(!padViolation)continue;}
+  return true;}
  return false;}
 // The signal layer a via drop lands the trace on: the ACTIVE layer when the
 // user parked it somewhere other than the trace's current layer (explicit
@@ -9897,32 +9923,39 @@ function drcBoxAdd(a,b){if(!a)return {x0:b.x0,y0:b.y0,x1:b.x1,y1:b.y1};
 function drcBoxHit(a,b){return a.x0<=b.x1&&a.x1>=b.x0&&a.y0<=b.y1&&a.y1>=b.y0;}
 function drcRfBox(path){var box=null;(path&&path.samples||[]).forEach(function(s){var x=+s[0],y=+s[1],r=Math.max(0,+s[2]||0)/2;
  if(!isFinite(x)||!isFinite(y))return;box=drcBoxAdd(box,{x0:x-r,y0:y-r,x1:x+r,y1:y+r});});return box;}
-function drcRfScope(box){return (PCB.rf_paths||[]).filter(function(path){var pb=drcRfBox(path);return pb&&drcBoxHit(pb,box);});}
+function drcRfScope(box,paths){return (paths||[]).filter(function(path){var pb=drcRfBox(path);return pb&&drcBoxHit(pb,box);});}
+function drcRfSig(path){return [path.net||"",path.l||0,(path.samples||[]).map(function(s){return [+s[0],+s[1],+s[2]].join(",");}).join(";")].join("|");}
+function drcRfChanged(base,after){var counts={},out=[];(base||[]).forEach(function(path){var k=drcRfSig(path);counts[k]=(counts[k]||0)+1;});
+ (after||[]).forEach(function(path){var k=drcRfSig(path);if(counts[k])counts[k]--;else out.push(path);});return out;}
 function drcGateReach(){var m=clrVal(),rules=PCB.rules||{};
  function scan(o){if(!o||typeof o!=="object")return;for(var k in o){var v=o[k];
   if(typeof v==="number"&&/(clearance|via_to_via|hole_to_hole|min_annular)/.test(k))m=Math.max(m,v);
   else if(v&&typeof v==="object")scan(v);}}
  scan(rules);(PCB.netclasses||[]).forEach(function(n){if(n.clearance>m)m=n.clearance;});return m;}
-function drcGateScope(baseTracks,baseVias,afterTracks,afterVias){
+function drcGateScope(baseTracks,baseVias,afterTracks,afterVias,baseRfPaths,afterRfPaths){
+ baseRfPaths=baseRfPaths==null?(PCB.rf_paths||[]):baseRfPaths;afterRfPaths=afterRfPaths==null?(PCB.rf_paths||[]):afterRfPaths;
  var ct=drcChangedAfter(baseTracks,afterTracks,false),cv=drcChangedAfter(baseVias,afterVias,true),box=null;
  ct.forEach(function(o){box=drcBoxAdd(box,drcCuBox(o,false));});cv.forEach(function(o){box=drcBoxAdd(box,drcCuBox(o,true));});
+ drcRfChanged(baseRfPaths,afterRfPaths).forEach(function(path){var pb=drcRfBox(path);if(pb)box=drcBoxAdd(box,pb);});
  if(!box)return null;var reach=drcGateReach();box={x0:box.x0-reach,y0:box.y0-reach,x1:box.x1+reach,y1:box.y1+reach};
  function pick(a,via){return a.filter(function(o){return drcBoxHit(drcCuBox(o,via),box);});}
  var parts=P.filter(function(p,i){return (p.pads||[]).some(function(pd){return drcBoxHit(wrect(i,pd),box);});});
- return {bt:pick(baseTracks,false),bv:pick(baseVias,true),at:pick(afterTracks,false),av:pick(afterVias,true),parts:parts,rf:drcRfScope(box)};}
-function drcGateDiffBlocks(baseTracks,baseVias,afterTracks,afterVias){
+ return {bt:pick(baseTracks,false),bv:pick(baseVias,true),at:pick(afterTracks,false),av:pick(afterVias,true),parts:parts,
+  brf:drcRfScope(box,baseRfPaths),arf:drcRfScope(box,afterRfPaths)};}
+function drcGateDiffBlocks(baseTracks,baseVias,afterTracks,afterVias,baseRfPaths,afterRfPaths){
  if(!drcGate.ready)return false; // wasm not up → tier-1 only
- var base,after,scope=drcGateScope(baseTracks,baseVias,afterTracks,afterVias);if(!scope)return false;
- try{base=drcGateRun(scope.bt,scope.bv,scope.parts,scope.rf);after=drcGateRun(scope.at,scope.av,scope.parts,scope.rf);}
+ var live=PCB.rf_paths||[];baseRfPaths=baseRfPaths==null?live:baseRfPaths;afterRfPaths=afterRfPaths==null?live:afterRfPaths;
+ var base,after,scope=drcGateScope(baseTracks,baseVias,afterTracks,afterVias,baseRfPaths,afterRfPaths);if(!scope)return false;
+ try{base=drcGateRun(scope.bt,scope.bv,scope.parts,scope.brf);after=drcGateRun(scope.at,scope.av,scope.parts,scope.arf);}
  catch(e){drcGate.failed=true;return false;}
  var bc=drcBlockCounts(base),ac=drcBlockCounts(after);
  for(var id in ac){if(ac[id]>(bc[id]||0))return true;}
  return false;}
 // Appending candidate copper to the CURRENT model (used by the draw-tool commits,
 // where the candidate isn't in PCB.* yet).
-function drcGateBlocks(candTracks,candVias){
- var bt=PCB.tracks||[],bv=PCB.vias||[];
- return drcGateDiffBlocks(bt,bv,bt.concat(candTracks||[]),bv.concat(candVias||[]));}
+function drcGateBlocks(candTracks,candVias,candRfPaths){
+ var bt=PCB.tracks||[],bv=PCB.vias||[],brf=PCB.rf_paths||[],arf=candRfPaths&&candRfPaths.length?brf.concat(candRfPaths):brf;
+ return drcGateDiffBlocks(bt,bv,bt.concat(candTracks||[]),bv.concat(candVias||[]),brf,arf);}
 // A leg chain from (fx,fy) as candidate track records for the gate.
 function legsToTracks(fx,fy,legs,layer,w,net){var out=[],px=fx,py=fy;
  legs.forEach(function(q){out.push({x1:px,y1:py,x2:q.x,y2:q.y,l:layer,w:w,net:net,source:"human"});px=q.x;py=q.y;});
