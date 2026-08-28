@@ -33,6 +33,19 @@ pub const checkTopologyFilled = drc_compose.checkTopologyFilled;
 /// in its own chain (see `drc_compose.checkFilled`).
 pub const checkFilled = drc_compose.checkFilled;
 
+/// The same adapter for the GEOMETRY-only check, memoised. The serve layer
+/// re-checks one saved board over and over, and the geometry pass's one
+/// copper-pouring rule (the local-current track width) rasters every declared
+/// plane from scratch unless it is given a memo — `drc_compose.checkGeometry`
+/// is that check with the process fill memo wired in, and its findings are the
+/// findings `drc.check` returns.
+pub const checkGeometry = drc_compose.checkGeometry;
+
+/// What the process-wide copper-fill memo has done and is holding — the reuse
+/// tally `drc-dump` reports beside its wall times, so "this got faster" and
+/// "this reused more" are two separate, checkable claims.
+pub const fillMemoStats = drc_compose.fillMemoStats;
+
 const rules_ext = ".drc-rules.json";
 const kind_count = @typeInfo(drc.Kind).@"enum".field_names.len;
 
@@ -85,14 +98,108 @@ pub fn apply(alloc: std.mem.Allocator, rules: Rules, list: []const drc.Violation
     return out.items;
 }
 
+/// One sidecar read, in the two shapes its two callers need. `rules` is what
+/// `load` hands back (parsed as far as the parser got, matching the historical
+/// partial-parse fallback); `parsed` and `readable` are what `loadRelease`
+/// turns into its `complete` verdict. An absent file is readable, parsed, and
+/// all-default — exactly the interactive fallback.
+const Sidecar = struct {
+    rules: Rules = .{},
+    parsed: bool = true,
+    readable: bool = true,
+};
+
+/// Process-wide memo of the parsed sidecar, keyed by path and validated
+/// against the file's mtime+size on EVERY call.
+///
+/// The sidecar was re-read and re-parsed inside every `checkFiltered*` — dozens
+/// of times per page render, all for a ~30-byte file that almost never exists.
+/// `Rules` is a fixed-size table of optional enums that borrows nothing from
+/// the read buffer, so an entry is a plain value copy; only the key path is
+/// owned (page allocator, like `placement/fill_cache.zig` — every caller's
+/// allocator is a per-request arena that outlives nothing).
+///
+/// A stat is still paid per call, which is what makes an edited or deleted
+/// sidecar visible immediately: a changed mtime or size misses, and a stat
+/// failure of any kind falls through to the original uncached read so the
+/// unusual paths keep their exact historical behaviour.
+const RulesCache = struct {
+    const Entry = struct {
+        path: []const u8,
+        mtime: i128,
+        size: u64,
+        sidecar: Sidecar,
+    };
+    /// Distinct designs whose policy is retained at once. A sidecar is tiny and
+    /// the key is one path, so this is bounded for tidiness, not for memory.
+    const max_entries: usize = 64;
+
+    mutex: infra_fs.Mutex = .{},
+    backing: std.mem.Allocator = std.heap.page_allocator,
+    entries: std.ArrayList(Entry) = .empty,
+
+    fn get(self: *RulesCache, path: []const u8, mtime: i128, size: u64) ?Sidecar {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.entries.items) |e| {
+            if (e.mtime != mtime or e.size != size or !std.mem.eql(u8, e.path, path)) continue;
+            return e.sidecar;
+        }
+        return null;
+    }
+
+    fn put(self: *RulesCache, path: []const u8, mtime: i128, size: u64, sidecar: Sidecar) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.entries.items) |*e| {
+            if (!std.mem.eql(u8, e.path, path)) continue;
+            e.mtime = mtime;
+            e.size = size;
+            e.sidecar = sidecar;
+            return;
+        }
+        // A memo failure is never a policy failure: the caller already holds
+        // the freshly parsed rules it is about to return.
+        const owned = self.backing.dupe(u8, path) catch return;
+        self.entries.append(self.backing, .{ .path = owned, .mtime = mtime, .size = size, .sidecar = sidecar }) catch {
+            self.backing.free(owned);
+            return;
+        };
+        if (self.entries.items.len > max_entries) {
+            const evicted = self.entries.orderedRemove(0);
+            self.backing.free(evicted.path);
+        }
+    }
+};
+
+var rules_cache: RulesCache = .{};
+
+/// The uncached read+parse. Kept whole so the cached path and the fall-through
+/// path can never disagree about what a malformed or unreadable file means.
+fn readSidecar(alloc: std.mem.Allocator, path: []const u8) Sidecar {
+    const data = infra_fs.cwd().readFileAlloc(alloc, path, 1 << 16) catch |err| {
+        return .{ .readable = err == error.FileNotFound };
+    };
+    var out = Sidecar{};
+    out.parsed = parseInto(&out.rules, alloc, data);
+    return out;
+}
+
+/// The design's sidecar, from the memo when its mtime+size still match.
+fn sidecarOf(alloc: std.mem.Allocator, path: []const u8) Sidecar {
+    const st = infra_fs.cwd().statFile(path) catch return readSidecar(alloc, path);
+    const mtime = st.mtime.nanoseconds;
+    if (rules_cache.get(path, mtime, st.size)) |hit| return hit;
+    const fresh = readSidecar(alloc, path);
+    rules_cache.put(path, mtime, st.size, fresh);
+    return fresh;
+}
+
 /// Load the design's override sidecar (default rules when absent/malformed).
 pub fn load(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) Rules {
-    var rules = Rules{};
-    const path = paths.designSiblingPath(alloc, project_dir, name, rules_ext) catch return rules;
+    const path = paths.designSiblingPath(alloc, project_dir, name, rules_ext) catch return .{};
     defer alloc.free(path);
-    const data = infra_fs.cwd().readFileAlloc(alloc, path, 1 << 16) catch return rules;
-    _ = parseInto(&rules, alloc, data);
-    return rules;
+    return sidecarOf(alloc, path).rules;
 }
 
 const ReleaseRules = struct { rules: Rules = .{}, complete: bool = true };
@@ -103,12 +210,11 @@ const ReleaseRules = struct { rules: Rules = .{}, complete: bool = true };
 fn loadRelease(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ReleaseRules {
     const path = paths.designSiblingPath(alloc, project_dir, name, rules_ext) catch return .{ .complete = false };
     defer alloc.free(path);
-    const data = infra_fs.cwd().readFileAlloc(alloc, path, 1 << 16) catch |err| {
-        return .{ .complete = err == error.FileNotFound };
-    };
-    var rules = Rules{};
-    if (!parseInto(&rules, alloc, data)) return .{ .complete = false };
-    return .{ .rules = rules };
+    const s = sidecarOf(alloc, path);
+    // A partial parse is discarded here (unlike `load`): manufacturing must not
+    // run on half a policy file.
+    if (!s.readable or !s.parsed) return .{ .complete = false };
+    return .{ .rules = s.rules };
 }
 
 /// Run DRC and apply the design's overrides in one step — the wrapper every
@@ -205,17 +311,96 @@ pub fn checkFilteredZonesTally(
     in: CopperCheck,
 ) ApiReport {
     const report = checkFilteredZonesReport(alloc, project_dir, name, in);
-    const tally = if (report.net_report.connectivity.len == in.placement.nets.len)
-        fab_readiness.summarizeConnectivity(alloc, report.net_report.connectivity) catch null
-    else
-        fab_readiness.routableTally(alloc, in.placement, .{
-            .tracks = in.routed.tracks,
-            .arcs = in.routed.arcs,
-            .rf_paths = in.routed.rf_port_outcomes,
-            .vias = in.routed.vias,
-            .zones = in.zones,
-        }) catch null;
-    return .{ .violations = report.violations, .tally = tally };
+    return .{ .violations = report.violations, .tally = tallyOf(alloc, in, report.net_report) };
+}
+
+/// The scoped-recheck seam, re-exported for the serve layer.
+///
+/// `Prior` is what an accepted board state leaves behind, `Delta` is the copper
+/// edit two states differ by, and `checkScopedZonesTally` is the pair of them
+/// turned into the same answer `/api/pcb-drc` has always returned. Every one of
+/// them is DECLARED in `placement/drc_compose.zig` — the scoping reads placement
+/// types only — and named here so the serve layer keeps one door into the DRC
+/// engine (`guardian.toml`'s `serve-placement-internals`).
+pub const Prior = drc_compose.Prior;
+pub const Delta = drc_compose.Delta;
+pub const FillHold = drc_compose.FillHold;
+pub const FillKey = drc_compose.FillKey;
+pub const diffCopper = drc_compose.diffCopper;
+pub const EdgeField = drc_compose.EdgeField;
+pub const sharedEdgeField = drc_compose.sharedEdgeField;
+pub const isDeferredKind = drc_compose.isDeferredKind;
+pub const PourAudit = drc_compose.PourAudit;
+pub const PourOwner = drc_compose.PourOwner;
+
+/// `ApiReport` plus what the next scoped recheck of this design needs: the
+/// snapshot to measure against, the borrow its rasters live in, and whether the
+/// scoped path was actually taken (a refusal is answered by a full check, never
+/// by a partial one).
+pub const ScopedApiReport = struct {
+    violations: []const drc.Violation = &.{},
+    tally: ?fab_readiness.Tally = null,
+    prior: Prior = .{},
+    held: FillHold = .{},
+    scoped: bool = false,
+    /// How many of the board's fills this pass had to pour, of how many.
+    reuse: drc_compose.FillReuse = .{},
+};
+
+/// Re-check a board that differs from `prior`'s by `delta` alone, applying the
+/// design's severity overrides exactly as the full seam does.
+pub fn checkScopedZonesTally(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    in: CopperCheck,
+    prior: Prior,
+    delta: Delta,
+) ScopedApiReport {
+    return applyScoped(alloc, project_dir, name, in, drc_compose.checkScopedReport(alloc, in, prior, delta));
+}
+
+/// A FULL check that also records what a following scoped recheck needs. Its
+/// findings are `checkFilteredZonesTally`'s findings; it keeps the evidence.
+pub fn checkPrimingZonesTally(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    in: CopperCheck,
+) ScopedApiReport {
+    return applyScoped(alloc, project_dir, name, in, drc_compose.checkPrimingReport(alloc, in));
+}
+
+fn applyScoped(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    in: CopperCheck,
+    raw: drc_compose.ScopedReport,
+) ScopedApiReport {
+    if (!raw.scoped) return .{};
+    return .{
+        .violations = apply(alloc, load(alloc, project_dir, name), raw.violations),
+        .tally = tallyOf(alloc, in, raw.net_report),
+        .prior = raw.prior,
+        .held = raw.held,
+        .scoped = true,
+        .reuse = raw.reuse,
+    };
+}
+
+/// The response tally, from the connectivity this pass already built when it is
+/// complete and from a standalone routable count when it is not.
+fn tallyOf(alloc: std.mem.Allocator, in: CopperCheck, report: net_open.Report) ?fab_readiness.Tally {
+    if (report.connectivity.len == in.placement.nets.len)
+        return fab_readiness.summarizeConnectivity(alloc, report.connectivity) catch null;
+    return fab_readiness.routableTally(alloc, in.placement, .{
+        .tracks = in.routed.tracks,
+        .arcs = in.routed.arcs,
+        .rf_paths = in.routed.rf_port_outcomes,
+        .vias = in.routed.vias,
+        .zones = in.zones,
+    }) catch null;
 }
 
 /// The copper context one connectivity/geometry DRC pass measures, and the
@@ -431,6 +616,39 @@ test "rules apply: ignore drops, warn retags, unset kinds keep built-in severity
     try std.testing.expect(parseInto(&rules, alloc, "{\"not_a_kind\":\"err\"}"));
 }
 
+// spec: Web Server - The per-design DRC rule sidecar is parsed once per file state, and an edited or deleted sidecar is honoured on the very next check
+test "rules sidecar memo re-reads an edited or deleted policy file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "src", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/demo.sexp", .data = "(design demo)" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/demo.drc-rules.json", .data = "{\"silk_over_pad\":\"ignore\"}" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const alloc = arena_inst.allocator();
+
+    // First read parses; the second is the memo, and must answer the same.
+    try std.testing.expectEqual(Action.ignore, load(alloc, root, "demo").ov[@backingInt(drc.Kind.silk_over_pad)].?);
+    try std.testing.expectEqual(Action.ignore, load(alloc, root, "demo").ov[@backingInt(drc.Kind.silk_over_pad)].?);
+
+    // An edit is visible on the very next call — the entry is validated against
+    // the file, not trusted because it exists.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/demo.drc-rules.json", .data = "{\"hole_hole\":\"warn\",\"track_pad\":\"warn\"}" });
+    const edited = load(alloc, root, "demo");
+    try std.testing.expectEqual(Action.warn, edited.ov[@backingInt(drc.Kind.hole_hole)].?);
+    try std.testing.expectEqual(@as(?Action, null), edited.ov[@backingInt(drc.Kind.silk_over_pad)]);
+
+    // Deleting the sidecar returns the board to the built-in severities, and
+    // the release loader still calls an absent optional file complete.
+    try tmp.dir.deleteFile(std.testing.io, "src/demo.drc-rules.json");
+    try std.testing.expect(load(alloc, root, "demo").isDefault());
+    const release = loadRelease(alloc, root, "demo");
+    try std.testing.expect(release.complete and release.rules.isDefault());
+}
+
 test "rules sidecar JSON round-trips and the kinds table carries defaults + overrides" {
     var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_inst.deinit();
@@ -526,10 +744,15 @@ test "viewer JS wires the WASM DRC worker, server reconciliation, and the overri
     try std.testing.expect(std.mem.indexOf(u8, worker, "drc_check") != null);
     try std.testing.expect(std.mem.indexOf(u8, worker, "drc_output_ptr") != null);
     // The server fallback derives its response tally from the same net-open
-    // graph and retains the standalone fail-open path.
+    // graph and retains the standalone fail-open path. The editor's reconcile
+    // reaches that tally through the retained session (`drc_reconcile`), which
+    // takes the scoped seam or the full one and answers the same shape either
+    // way — so the endpoint asserts the SEAM, not one of its two spellings.
     const page = @embedFile("pcb_layout_page.zig");
     const rules = @embedFile("drc_rules.zig");
-    try std.testing.expect(std.mem.indexOf(u8, page, "checkFilteredZonesTally") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page, "lease.reconcile(ctx.allocator, .{") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rules, "fn checkFilteredZonesTally") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rules, "fn checkScopedZonesTally") != null);
     try std.testing.expect(std.mem.indexOf(u8, rules, "summarizeConnectivity(alloc, report.net_report.connectivity)") != null);
     try std.testing.expect(std.mem.indexOf(u8, rules, "fab_readiness.routableTally(alloc, in.placement") != null);
 }
@@ -781,7 +1004,7 @@ test "pour refill takes the fills-only API path and shares its edge raster" {
     try std.testing.expect(std.mem.indexOf(u8, js, "if(!opts.deferred)scheduleServerReconcile();done(fresh);") != null);
 
     const fast = std.mem.indexOf(u8, page, "if (queryFlag(req, \"pours_only\")) {") orelse return error.TestExpectedEqual;
-    const full_drc = std.mem.indexOf(u8, page[fast..], "const report = drc_rules.checkFilteredZonesTally") orelse return error.TestExpectedEqual;
+    const full_drc = std.mem.indexOf(u8, page[fast..], "const outcome = resolved.lease.reconcile(") orelse return error.TestExpectedEqual;
     const branch = page[fast .. fast + full_drc];
     try std.testing.expect(std.mem.indexOf(u8, branch, "pour.sharedEdgeField(req.arena, placement)") != null);
     try std.testing.expect(std.mem.count(u8, branch, "base_edge);") == 3);

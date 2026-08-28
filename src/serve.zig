@@ -62,6 +62,8 @@ const pcb_subseeds = @import("serve/pcb_subseeds.zig");
 const matlab_rf_export = @import("serve/matlab_rf_export.zig");
 const pcb_page_cache = @import("serve/pcb_page_cache.zig");
 const pcb_derived = @import("serve/pcb_derived.zig");
+const drc_reconcile = @import("drc_reconcile.zig");
+const drc_sweep = @import("drc_sweep.zig");
 const thermal_cache = @import("serve/thermal_cache.zig");
 const progress_cache = @import("serve/progress_cache.zig");
 const describe_cache = @import("serve/describe_cache.zig");
@@ -379,6 +381,11 @@ pub const ServerState = struct {
     /// `serve/pcb_derived.zig`). Held here rather than at module scope so two
     /// server instances stay independent.
     derived_warms: pcb_derived.WarmLimit = .{},
+    /// Retained DRC reconcile sessions for the PCB editor, keyed by design (see
+    /// `drc_reconcile.Store`). A default-constructed store has no allocator and
+    /// retains nothing, so a handler test's bare `ServerState` takes the full
+    /// check on every request.
+    drc_sessions: drc_reconcile.Store = .{},
 };
 
 // ── Server ─────────────────────────────────────────────────────────────
@@ -788,8 +795,19 @@ pub fn serve(
     // the ban-env policy holds (only config.zig touches the environment).
     const dev_mode = @import("config.zig").devMode(allocator);
     if (dev_mode) std.debug.print("netlisp: NETLISP_DEV set — loopback requests bypass auth as dev@localhost\n", .{});
-    var state: ServerState = .{ .caches = .init(allocator) }; // owned here; shared by pointer
+    var state: ServerState = .{
+        .caches = .init(allocator),
+        // The reconcile store retains an evaluated design, its placement and a
+        // board's worth of pour borrows per session, so it takes the server's
+        // long-lived allocator for the same reason the page caches do.
+        .drc_sessions = .{ .allocator = allocator },
+    }; // owned here; shared by pointer
     defer state.caches.deinit();
+    // A real server may run background full-board DRC sweeps behind the
+    // editor's reconciles; nothing else does, which is what keeps every test's
+    // sweep a synchronous call it can assert on (see `drc_sweep.zig`).
+    drc_sweep.install(&state.drc_sessions);
+    defer state.drc_sessions.deinit();
     // Published AFTER the deinit defer so the retraction below runs FIRST
     // (defers unwind last-in-first-out): no surface can reach a torn-down store.
     thermal_cache.publish(&state.caches.thermal_solves);

@@ -45,6 +45,8 @@ const perimeter_fence = @import("../placement/perimeter_fence.zig");
 const pcb_keepout_json = @import("pcb_keepout_json.zig");
 const pour = @import("../placement/pour.zig");
 const pour_json = @import("pour_json.zig");
+const drc_reconcile = @import("../drc_reconcile.zig");
+const page_cache = @import("page_cache.zig");
 const pcb_rules_json = @import("pcb_rules_json.zig");
 const pcb_query = @import("pcb_query.zig");
 const pcb_derived = @import("pcb_derived.zig");
@@ -163,13 +165,13 @@ const texts_open = ",\"texts\":";
 const outline_open = ",\"outline\":";
 const fabrication_layers_open = ",\"fabrication_layers\":";
 /// Error bodies shared across the layout handlers.
-const no_block_msg = "No design or module by that name";
+pub const no_block_msg = "No design or module by that name";
 /// Response header name the fab-output endpoints set their MIME type on.
 const ct_hdr = "content-type";
 /// Returned when `?sub=<slug>` names a sub-block that doesn't exist in the design.
-const no_sub_msg = "No sub-block by that name";
+pub const no_sub_msg = "No sub-block by that name";
 const bad_json_msg = "bad json";
-const placement_err_msg = "Placement error";
+pub const placement_err_msg = "Placement error";
 /// Returned by the fab endpoints when a design has no saved layout at all —
 /// fab outputs are only meaningful for a deliberately placed board.
 const no_saved_layout_msg = "no saved layout — place the board (and save/star a layout) first";
@@ -1266,7 +1268,7 @@ fn showEmbedLegend(embed: bool, edit_embed: bool, physical_review: bool) bool {
 /// matches `sub_slug` (the same `review.slugify` the schematic page uses for its
 /// `data-sub` attributes, so the keys line up). Null when none match. Only the
 /// sub-block's parts are then placed/routed — the whole design never is.
-fn descendToSub(
+pub fn descendToSub(
     allocator: std.mem.Allocator,
     block: *env_mod.DesignBlock,
     sub_slug: []const u8,
@@ -4434,39 +4436,13 @@ pub fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
     // `drc.check` from `placement.rules.net`.
     const body_clearance = jsonNum(root.object.get(clearance_key));
 
-    var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
-    defer eval.deinit();
-    var module_res: ?modules_mod.ResolvedBlock = null;
-    defer if (module_res) |mr| {
-        mr.eval.deinit();
-        ctx.allocator.destroy(mr.eval);
-    };
-    const block: *env_mod.DesignBlock = resolveBlock(ctx.allocator, ctx.project_dir, name, &eval, &module_res) orelse {
-        res.status = 500;
-        res.body = no_block_msg;
-        return;
-    };
-    const eff_block = if (subSlug(req)) |s|
-        (descendToSub(ctx.allocator, block, s) orelse {
-            res.status = 404;
-            res.body = no_sub_msg;
-            return;
-        }).block
-    else
-        block;
-
-    // A submitted outline becomes the board edge so the board-edge DRC check
-    // sees it (a drawn polygon carries its exact points, so the polygon check
-    // measures the real shape, not just its bbox). Absent one, fall back to
-    // the design's blessed drawn outline — a bare-API caller that omits the
-    // body outline must not silently get an edge-blind DRC (parity with
-    // pcbRouteApi, which routes against this same resolution).
-    const oseed = outlineForBody(ctx.allocator, ctx.project_dir, name, subSlug(req), parseSavedOutline(ctx.allocator, root.object.get("outline")));
-    const placement = optimizer.placeFromPoses(ctx.allocator, eff_block, ctx.project_dir, .{ .poses = poses.items, .outline = oseed }, optimizer.Params{}) catch {
-        res.status = 500;
-        res.body = placement_err_msg;
-        return;
-    };
+    // Lease this design's reconcile session and take its placement, or build one
+    // into it. Evaluating and placing the design is seven to nine seconds of a
+    // barracuda-class request and depends on nothing the editor's copper edits
+    // touch, so a session already holding one for these poses answers with it.
+    var resolved = drc_reconcile.resolvePlacement(ctx, req, res, root, poses.items, name) orelse return;
+    defer resolved.lease.release();
+    const placement = resolved.placement;
 
     // Restore the client's copper into the current netlist (net NAME → index),
     // exactly as a saved layout's persisted copper is restored on page open.
@@ -4500,9 +4476,28 @@ pub fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
         res.body = aw.written();
         return;
     }
-    const report = drc_rules.checkFilteredZonesTally(ctx.allocator, ctx.project_dir, name, .{ .placement = placement, .routed = rr, .clearance = clearance, .zones = user_zones });
-    const violations = report.violations;
-    const tally = report.tally;
+    // Re-check what the edit can reach, against the board this session last
+    // accepted. `?full=1` forces the whole-board path and re-primes — the escape
+    // hatch a caller (or a test) uses to compare the two answers.
+    const outcome = resolved.lease.reconcile(ctx.allocator, .{
+        .project_dir = ctx.project_dir,
+        .name = name,
+        .board = .{
+            .zones = drc_reconcile.zonesKey(user_zones),
+            .aux = drc_reconcile.auxKey(rr),
+            .clearance = clearance,
+        },
+        .copper = .{
+            .placement = placement,
+            .routed = rr,
+            .clearance = clearance,
+            .zones = user_zones,
+            .base_edge = resolved.lease.edgeField(),
+        },
+        .full = queryFlag(req, "full"),
+    });
+    const violations = outcome.report.violations;
+    const tally = outcome.report.tally;
 
     try w.writeAll("{\"drc\":[");
     for (violations, 0..) |vio, i| {
@@ -4511,6 +4506,16 @@ pub fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
     }
     try w.print("],\"n\":{d}", .{violations.len});
     if (tally) |t| try w.print(",\"routed\":{d},\"total\":{d},\"unique_routed\":{d},\"unique_total\":{d}", .{ t.routed, t.total, t.unique_routed, t.unique_total });
+    // Additive only: how the answer was reached. No viewer reads these — they
+    // exist so a test (and a human with curl) can tell a scoped recheck from a
+    // full one without inferring it from a stopwatch.
+    // …and, on the same terms, what the background full-board sweep has
+    // established about this session (`drc_sweep.zig`): how many have landed,
+    // which accepted generation the last one agreed about, how long ago, and
+    // the disagreements it has found — a figure meant to stay 0.
+    try w.print(",\"scoped\":{},\"fills\":{d},\"repoured\":{d},\"delta\":{d},\"sweep\":{{\"runs\":{d},\"rev\":{d},\"age_ms\":{d},\"discrepancies_total\":{d}}}", .{
+        outcome.scoped, outcome.fills, outcome.fills_repoured, outcome.delta, outcome.sweep.runs, outcome.sweep.rev, outcome.sweep.age_ms, outcome.sweep.discrepancies_total,
+    });
     if (queryFlag(req, "pours")) {
         const live_copper: pour.Copper = .{ .tracks = rr.tracks, .arcs = rr.arcs, .vias = rr.vias, .rf_paths = rr.rf_port_outcomes };
         const base_edge = pour.sharedEdgeField(req.arena, placement) catch null;
@@ -6766,7 +6771,7 @@ fn drawnSource(o: SavedOutline) optimizer.OutlineSource {
 /// else authored-only. The ONE resolution such endpoints share, so the Route
 /// button, the debounced DRC, and the GET ?route=1 pipeline can never
 /// disagree about the board edge again.
-fn outlineForBody(
+pub fn outlineForBody(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
@@ -12094,7 +12099,7 @@ fn mcpCopperViolations(
     const bare = drc_rules.apply(
         alloc,
         drc_rules.load(alloc, project_dir, name),
-        drc.check(alloc, solved.placement, routed, clearance) catch &.{},
+        drc_rules.checkGeometry(alloc, solved.placement, routed, clearance) catch &.{},
     );
     var combined: std.ArrayList(drc.Violation) = .empty;
     combined.appendSlice(alloc, filled) catch return filled;

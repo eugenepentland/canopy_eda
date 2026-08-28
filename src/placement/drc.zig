@@ -410,7 +410,32 @@ pub fn check(
     routed: router.RouteResult,
     clearance: f64,
 ) std.mem.Allocator.Error![]Violation {
-    return checkImpl(arena, placement, routed, clearance, &.{}, null);
+    return checkImpl(arena, placement, routed, clearance, &.{}, .{});
+}
+
+/// `check` with a per-fill memo for the ONE rule in it that pours copper.
+///
+/// Geometry DRC looks like a pure clearance sweep and mostly is, but the
+/// power-width rule needs to know whether a declared rail's local branch is fed
+/// by a plane, and `routedTrackRequiredWidths` answers that by rastering every
+/// declared plane and pour of the board from scratch — 7.5 s of barracuda-base's
+/// 8.2 s geometry pass, paid by every caller that never passes prepared copper.
+/// A server-side caller measuring a SAVED board passes a memo here and pays it
+/// once; the findings are identical either way, because a memoised fill is a
+/// memoised fill.
+///
+/// Deliberately a separate entry point rather than a default: `drc.zig` is
+/// compiled into the client's wasm DRC engine, which has no store to consult,
+/// and the router's candidate loop mutates the copper the surfaces depend on
+/// between every call and would only ever miss.
+pub fn checkMemoised(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    clearance: f64,
+    memo: ?pour.FillMemo,
+) std.mem.Allocator.Error![]Violation {
+    return checkImpl(arena, placement, routed, clearance, &.{}, .{ .fills = memo });
 }
 
 /// `check` with hand-authored copper zones credited as real same-net copper
@@ -422,7 +447,7 @@ pub fn checkWithZones(
     clearance: f64,
     zones: []const TopologyZone,
 ) std.mem.Allocator.Error![]Violation {
-    return checkImpl(arena, placement, routed, clearance, zones, null);
+    return checkImpl(arena, placement, routed, clearance, zones, .{});
 }
 
 /// `checkWithZones` plus the exact prepared fills already owned by the
@@ -435,7 +460,7 @@ pub fn checkWithPreparedCopper(
     clearance: f64,
     prepared: PreparedCopper,
 ) std.mem.Allocator.Error![]Violation {
-    return checkImpl(arena, placement, routed, clearance, prepared.topology_zones, prepared);
+    return checkImpl(arena, placement, routed, clearance, prepared.topology_zones, .{ .copper = prepared });
 }
 
 /// Exact fabricated copper rasters shared by reporting DRC's topology,
@@ -643,13 +668,23 @@ fn trackClearsBoardEdge(placement: optimizer.Placement, track: router.Track) boo
     return worst - half >= placement.rules.design.edgeClearance() - eps;
 }
 
+/// How the power-width rule inside `checkImpl` gets at the board's poured
+/// copper: either the caller already holds the exact fills (the reporting seam,
+/// which poured them for topology and connectivity), or it holds a memo the
+/// rule can pour THROUGH, or neither and it pours from scratch. Exactly one of
+/// the two is ever set; both null is the historical behaviour.
+const PowerCopper = struct {
+    copper: ?PreparedCopper = null,
+    fills: ?pour.FillMemo = null,
+};
+
 fn checkImpl(
     arena: std.mem.Allocator,
     placement: optimizer.Placement,
     routed: router.RouteResult,
     clearance: f64,
     topology_zones: []const TopologyZone,
-    prepared_power: ?PreparedCopper,
+    power: PowerCopper,
 ) std.mem.Allocator.Error![]Violation {
     var out: std.ArrayList(Violation) = .empty;
     const pads = try padBoxes(arena, placement);
@@ -697,7 +732,7 @@ fn checkImpl(
     try checkSilkOverPad(arena, &out, placement, pads, &pad_grid, rules.mask.margin);
     var current_routed = routed;
     current_routed.tracks = tracks;
-    const local_power_widths = if (prepared_power) |prepared|
+    const local_power_widths = if (power.copper) |prepared|
         try power_integrity.routedTrackRequiredWidthsPrepared(
             arena,
             placement,
@@ -707,7 +742,7 @@ fn checkImpl(
             prepared.zone_fills,
         )
     else
-        try power_integrity.routedTrackRequiredWidths(arena, placement, current_routed);
+        try power_integrity.routedTrackRequiredWidthsMemo(arena, placement, current_routed, power.fills);
     try checkTrackWidth(arena, &out, .{
         .placement = placement,
         .routed = routed,
@@ -726,7 +761,7 @@ fn checkImpl(
     // swept path and land, instead of presenting tessellation density as
     // warning severity or hiding distinct editable sections.
     try checkLandTransit(c, placement, routed, tracks, pads, &pad_grid);
-    try checkGroundPadVias(arena, &out, placement, pads, vias, rules.pour.ground_via_max);
+    try checkGroundPadVias(c, placement, pads, vias, &via_grid, rules.pour.ground_via_max);
     try checkPadPad(c, pads, &pad_grid);
     try drc_diffpair.check(arena, &out, placement, .{ .tracks = tracks, .vias = vias }, clearance);
     // `(match-group …)` length matching — the same shape of tolerance judgement
@@ -925,6 +960,9 @@ fn checkCopperTopology(
         },
     );
     const redundancy = try copper_topology.analyzeRedundancy(arena, terminals, topology_tracks, support.branch);
+    // One batch call so the endpoint sweep buckets the board's copper once
+    // instead of re-walking every land, trace, and barrel per section.
+    const loose_ends = try copper_topology.looseEnds(arena, terminals, topology_tracks, topology_vias, endpoint_pours);
     const redundant = redundancy.individual;
     const removal = redundancy.removal;
     for (tracks, 0..) |track, track_i| {
@@ -933,10 +971,7 @@ fn checkCopperTopology(
         // adjoining pads, tracks, vias, and pours, but none is independently
         // reportable or removable merely because neighbouring samples overlap.
         const stored_i = track_identities[track_i] orelse continue;
-        const loose = copper_topology.looseEnd(terminals, topology_tracks, topology_vias, track_i, .{
-            endpoint_pours[track_i][0],
-            endpoint_pours[track_i][1],
-        });
+        const loose = loose_ends[track_i];
         // The user's unit is the stored route section: one warning for every
         // section whose deletion preserves all support connectivity.
         if (redundant[track_i]) {
@@ -1278,12 +1313,20 @@ fn checkLandTransit(
 /// must share the exact flattened net index: an AGND via cannot satisfy a GND
 /// pad merely because both names are ground-like. Through-hole pads already
 /// reach every copper layer and therefore need no separate barrel.
+///
+/// Two passes, and the split is what keeps this exact while it stops scanning
+/// every via for every ground pad. The grid answers the only question the
+/// VERDICT needs — "is any same-net via inside the rule?" — because a via at or
+/// under `max_distance` from the pad centre necessarily sits in a queried cell.
+/// The reported `gap` is the true nearest distance, so a pad that fails the
+/// first pass (rare: it is a violation) still gets the exhaustive scan, which
+/// also means a grid that somehow missed a close via is caught here anyway.
 fn checkGroundPadVias(
-    arena: std.mem.Allocator,
-    out: *Viol,
+    c: Ctx,
     placement: optimizer.Placement,
     pads: []const PadBox,
     vias: []const router.Via,
+    via_grid: *Grid,
     max_distance: f64,
 ) Err {
     if (!(max_distance > 0)) return;
@@ -1297,13 +1340,23 @@ fn checkGroundPadVias(
         if (net_i >= placement.nets.len) continue;
         const name = placement.nets[net_i].name;
         if (!optimizer.isGroundName(router.shortName(name)) or !router.netHasPlane(placement, name)) continue;
+        var served = false;
+        for (try via_grid.near(c.arena, pointBox(pad.hx, pad.hy), max_distance + eps)) |j| {
+            const via = vias[j];
+            if (via.net != pad.net) continue;
+            if (std.math.hypot(via.x - pad.hx, via.y - pad.hy) <= max_distance + eps) {
+                served = true;
+                break;
+            }
+        }
+        if (served) continue;
         var nearest = std.math.inf(f64);
         for (vias) |via| {
             if (via.net != pad.net) continue;
             nearest = @min(nearest, std.math.hypot(via.x - pad.hx, via.y - pad.hy));
         }
         if (nearest <= max_distance + eps) continue;
-        try out.append(arena, .{
+        try c.out.append(c.arena, .{
             .x = pad.hx,
             .y = pad.hy,
             .gap = if (std.math.isFinite(nearest)) nearest else max_distance + 1,
@@ -1465,12 +1518,17 @@ fn checkDrillRules(
             try out.append(arena, .{ .x = p.hx, .y = p.hy, .gap = p.drill, .clearance = rules.min_drill, .kind = .min_drill, .who = onePadParties(p) });
         }
     }
-    // hole ↔ hole: walls closer than the rule risk breakout. O(holes²), brute
-    // (holes are few).
+    // hole ↔ hole: walls closer than the rule risk breakout. Grid-culled — a
+    // via-fenced board carries hundreds of barrels, and all-pairs over them was
+    // the drill station's whole cost. `holeBox` already contains the barrel and
+    // any slot sweep, so a violating pair's boxes are within `hole_to_hole` of
+    // each other and therefore always share a queried cell.
     const holes = try allHoles(arena, pads, vias);
+    var hole_grid = try Grid.build(arena, Hole, holes, holeBox, rules.hole_to_hole);
     for (holes, 0..) |a, i| {
-        for (holes[i + 1 ..]) |b| {
-            if (holePairViolation(rules, a, b)) |v| try out.append(arena, v);
+        for (try hole_grid.near(arena, holeBox(a), rules.hole_to_hole)) |ju| {
+            if (ju <= i) continue; // emit each unordered pair once, at the lower index
+            if (holePairViolation(rules, a, holes[ju])) |v| try out.append(arena, v);
         }
     }
 }
@@ -1669,7 +1727,8 @@ fn checkComponentEdge(
 /// courtyard ↔ courtyard: two same-side parts whose keep-out courtyards
 /// interpenetrate can't both be assembled (opposite sides never clash). Strict
 /// overlap is the violation (negative gap = depth); touching exactly is legal.
-/// O(parts²) — parts are few (hundreds), so this stays brute (not grid-culled).
+/// Grid-culled on the courtyard boxes: an overlapping pair's boxes overlap, so
+/// the two always share a queried cell and no clash can be missed.
 ///
 /// The boxes cull; the parts' REAL rotated rectangles decide. A courtyard off a
 /// quarter turn boxes up to √2 wider per axis, so two parts that clear each
@@ -1678,10 +1737,14 @@ fn checkComponentEdge(
 /// than it is (rf-switch-eval's SMPM pairs: 1.037 mm boxed against 0.733 mm of
 /// real interpenetration).
 fn checkCourtyards(arena: std.mem.Allocator, out: *Viol, placement: optimizer.Placement) std.mem.Allocator.Error!void {
+    var grid = try Grid.build(arena, optimizer.Part, placement.parts, courtyardBox, 0);
     for (placement.parts, 0..) |a, i| {
         const ca = optimizer.worldCourtyard(&a);
         if (ca.w <= 0 or ca.h <= 0) continue;
-        for (placement.parts[i + 1 ..], i + 1..) |b, bi| {
+        for (try grid.near(arena, courtyardBox(a), 0)) |bu| {
+            const bi: usize = bu;
+            if (bi <= i) continue; // emit each unordered pair once, at the lower index
+            const b = placement.parts[bi];
             if (a.side != b.side) continue;
             const cb = optimizer.worldCourtyard(&b);
             if (cb.w <= 0 or cb.h <= 0) continue;
@@ -1717,13 +1780,16 @@ fn checkSilkOverPad(
         if (part.features.silk_lines.len == 0 and part.features.silk_circles.len == 0) continue;
         const box = silkWorldBox(part) orelse continue;
         const s_layer: u8 = if (part.side == .bottom) 1 else 0;
-        // Openings the silk could cross sit within `margin` of its bbox — the grid
-        // delta. Candidates stay in pad order, so the first hit is stable.
+        // Openings the silk could cross sit within `margin` of its bbox — the
+        // grid delta. The grid answers in cell-scan order, so the kept openings
+        // are put back into pad order: this check reports at most one finding
+        // per part, and WHICH pad it names must not depend on cell geometry.
         var openings: std.ArrayList(Opening) = .empty;
         for (try pad_grid.near(arena, box, mask_margin)) |j| {
             if (pads[j].part == pi) continue; // own footprint's silk-vs-pad = geometry
             if (padOpening(pads[j], s_layer, mask_margin)) |ob| try openings.append(arena, .{ .box = ob, .pad = j });
         }
+        std.mem.sort(Opening, openings.items, {}, openingBefore);
         if (silkOverPadHit(part, openings.items)) |hit| {
             // Parties: A = the part whose silk offends, B = the pad it covers.
             const victim = pads[hit.pad];
@@ -1782,6 +1848,11 @@ fn silkOverPadHit(part: optimizer.Part, openings: []const Opening) ?SilkHit {
 /// A candidate mask opening for the silk check: its world box + the `pads`
 /// index it came from (so a hit can name the pad the silk covers).
 const Opening = struct { box: [4]f64, pad: usize };
+
+/// Pad order over mask openings — the stable identity of a one-per-part finding.
+fn openingBefore(_: void, a: Opening, b: Opening) bool {
+    return a.pad < b.pad;
+}
 
 /// Where silk crosses an opening, and which `pads` entry it was.
 const SilkHit = struct { x: f64, y: f64, pad: usize };
@@ -2044,6 +2115,10 @@ const Grid = struct {
     inv: f64 = 1,
     map: std.AutoHashMapUnmanaged(u64, std.ArrayList(u32)) = .empty,
     cand: std.ArrayList(u32) = .empty,
+    /// Per-feature "already collected by this query" stamp. One epoch bump per
+    /// query makes the dedupe a compare-and-store instead of a sort.
+    seen: []u32 = &.{},
+    epoch: u32 = 0,
 
     /// Cell size ~ the typical span raised to `delta`, floored at 0.5 mm, never
     /// letting the largest box span over 64² cells (bounds degenerate input).
@@ -2057,7 +2132,8 @@ const Grid = struct {
         }
         var cell = @max(@max(@max(sum / @max(1.0, @as(f64, @floatFromInt(xs.len))), 2 * delta), 0.5), maxext / 64.0);
         if (!(std.math.isFinite(cell) and cell > 0)) cell = 1;
-        var g = Grid{ .inv = 1.0 / cell };
+        var g = Grid{ .inv = 1.0 / cell, .seen = try a.alloc(u32, xs.len) };
+        @memset(g.seen, 0);
         for (xs, 0..) |it, i| {
             const b = bf(it);
             var cx = floorCell(b[0] * g.inv);
@@ -2075,28 +2151,40 @@ const Grid = struct {
         return g;
     }
 
-    /// Deduped, ascending candidate indices whose cells meet `box`±`delta`.
+    /// Deduped candidate indices whose cells meet `box`±`delta`, in cell-scan
+    /// order (deterministic: the bbox loop is fixed and each cell's list is in
+    /// build order — no hash map is ever iterated).
+    ///
+    /// Dedupe is the part callers DEPEND on: a box spanning several cells lists
+    /// its neighbour once per shared cell, and a duplicate candidate would emit
+    /// a duplicate violation. Order is not depended on for a verdict — every
+    /// caller either judges each candidate independently or takes an unordered
+    /// pair at the lower index — except `checkSilkOverPad`, which sorts the
+    /// openings it keeps so its one-per-part pick stays the lowest pad index.
     fn near(self: *Grid, arena: std.mem.Allocator, box: [4]f64, delta: f64) std.mem.Allocator.Error![]const u32 {
         self.cand.clearRetainingCapacity();
+        // Wrap would make a stale stamp read as "already seen" and silently
+        // drop a candidate, so retire the stamps rather than reusing an epoch.
+        if (self.epoch == std.math.maxInt(u32)) {
+            @memset(self.seen, 0);
+            self.epoch = 0;
+        }
+        self.epoch += 1;
         var cx = floorCell((box[0] - delta) * self.inv);
         const cx1 = floorCell((box[2] + delta) * self.inv);
         const cy1 = floorCell((box[3] + delta) * self.inv);
         while (cx <= cx1) : (cx += 1) {
             var cy = floorCell((box[1] - delta) * self.inv);
             while (cy <= cy1) : (cy += 1) {
-                if (self.map.get(cellKey(cx, cy))) |b| try self.cand.appendSlice(arena, b.items);
+                const b = self.map.get(cellKey(cx, cy)) orelse continue;
+                for (b.items) |v| {
+                    if (self.seen[v] == self.epoch) continue;
+                    self.seen[v] = self.epoch;
+                    try self.cand.append(arena, v);
+                }
             }
         }
-        const s = self.cand.items;
-        std.mem.sort(u32, s, {}, std.sort.asc(u32));
-        var w: usize = 0;
-        for (s) |v| {
-            if (w == 0 or s[w - 1] != v) {
-                s[w] = v;
-                w += 1;
-            }
-        }
-        return s[0..w];
+        return self.cand.items;
     }
 };
 
@@ -2111,6 +2199,22 @@ fn trackBox(t: router.Track) [4]f64 {
 }
 fn padBox(p: PadBox) [4]f64 {
     return .{ p.x0, p.y0, p.x1, p.y1 };
+}
+/// A drilled hole's barrel box, widened by the slot sweep so an oval reaches
+/// both arc centres.
+fn holeBox(h: Hole) [4]f64 {
+    const r = h.drill / 2 + @max(@abs(h.shx), @abs(h.shy));
+    return .{ h.x - r, h.y - r, h.x + r, h.y + r };
+}
+/// A part's world courtyard as a grid box (degenerate when it has none — such a
+/// part is skipped by the check that queries this).
+fn courtyardBox(p: optimizer.Part) [4]f64 {
+    const c = optimizer.worldCourtyard(&p);
+    return .{ c.minx, c.miny, c.minx + c.w, c.miny + c.h };
+}
+/// A bare point as a grid probe box.
+fn pointBox(x: f64, y: f64) [4]f64 {
+    return .{ x, y, x, y };
 }
 
 /// One (pin-name → net-index) entry in a ref-des's pin list.
@@ -3121,6 +3225,98 @@ fn cornerGap(part: optimizer.Part, x: f64, y: f64) f64 {
         nearest = @min(nearest, std.math.hypot(x - corner[0], y - corner[1]));
     }
     return nearest;
+}
+
+/// A deterministic scatter generator for the scale tests — a plain LCG, so the
+/// same board is judged on every machine and every run.
+fn scatter(state: *u64, span: u64) f64 {
+    state.* = state.* *% 6364136223846793005 +% 1442695040888963407;
+    return @as(f64, @floatFromInt((state.* >> 33) % span)) / 100.0;
+}
+
+/// Barrels dense enough that one box spans several grid cells and many pairs
+/// share more than one — the case a sort-free dedupe would double-report and a
+/// badly sized grid would drop.
+fn scatterVias(vias: []router.Via, state: *u64) void {
+    for (vias, 0..) |*v, i| {
+        v.* = .{ .x = scatter(state, 1200), .y = scatter(state, 1200), .dia = 0.6, .drill = 0.3, .net = @intCast(i % 4) };
+    }
+}
+
+/// The all-pairs hole↔hole answer the grid-culled sweep must reproduce exactly.
+fn bruteHolePairs(vias: []const router.Via, rules: optimizer.DesignRules) usize {
+    var n: usize = 0;
+    for (vias, 0..) |a, i| {
+        for (vias[i + 1 ..]) |b| {
+            const ha = Hole{ .x = a.x, .y = a.y, .drill = a.drill, .net = a.net };
+            const hb = Hole{ .x = b.x, .y = b.y, .drill = b.drill, .net = b.net };
+            if (holePairViolation(rules, ha, hb) != null) n += 1;
+        }
+    }
+    return n;
+}
+
+/// Overlapping courtyards on both faces, scattered the same deterministic way.
+fn scatterParts(parts: []optimizer.Part, state: *u64) void {
+    for (parts, 0..) |*p, i| {
+        p.* = .{
+            .ref_des = "U1",
+            .kind = .hub,
+            .hw = 0.6,
+            .hh = 0.6,
+            .pads = &.{},
+            .fallback = false,
+            .x = scatter(state, 800),
+            .y = scatter(state, 800),
+            .side = if (i % 3 == 0) .bottom else .top,
+        };
+    }
+}
+
+/// The all-pairs courtyard answer the grid-culled sweep must reproduce exactly.
+fn bruteCourtyardPairs(parts: []const optimizer.Part) usize {
+    var n: usize = 0;
+    for (parts, 0..) |a, i| {
+        const ca = optimizer.worldCourtyard(&a);
+        if (ca.w <= 0 or ca.h <= 0) continue;
+        for (parts[i + 1 ..]) |b| {
+            if (a.side != b.side) continue;
+            const cb = optimizer.worldCourtyard(&b);
+            if (cb.w <= 0 or cb.h <= 0) continue;
+            if (rectOverlap(ca, cb).depth <= eps) continue;
+            const ov = pose_math.obbPenetration(
+                pad_shape.worldCourtyardCorners(a),
+                pad_shape.worldCourtyardCorners(b),
+            ) orelse continue;
+            if (ov.depth > eps) n += 1;
+        }
+    }
+    return n;
+}
+
+// spec: placement/drc - the grid-culled hole-to-hole and courtyard sweeps report exactly the brute all-pairs findings
+test "grid-culled drill and courtyard sweeps agree with brute force at scale" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    var seed: u64 = 0x9E3779B97F4A7C15;
+
+    var vias: [240]router.Via = undefined;
+    scatterVias(&vias, &seed);
+    const brute = bruteHolePairs(&vias, .{});
+    try testing.expect(brute > 0);
+    var no_parts = [_]optimizer.Part{};
+    const drilled = try check(arena, partsOnly(&no_parts), .{ .tracks = &.{}, .vias = &vias, .routed = 0, .total = 0 }, 0.127);
+    try testing.expectEqual(brute, countKind(drilled, .hole_hole));
+
+    // The same question for courtyards: boxes that overlap always share a cell,
+    // and the rotated-rectangle verdict is unchanged by the culling.
+    var parts: [80]optimizer.Part = undefined;
+    scatterParts(&parts, &seed);
+    const court_brute = bruteCourtyardPairs(&parts);
+    try testing.expect(court_brute > 0);
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
+    try testing.expectEqual(court_brute, countKind(try check(arena, partsOnly(&parts), routed, 0.127), .courtyard));
 }
 
 // spec: placement/drc - flags two drilled holes whose walls sit closer than the hole-to-hole rule

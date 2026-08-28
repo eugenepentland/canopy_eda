@@ -24,6 +24,7 @@ const std = @import("std");
 const optimizer = @import("placement/optimizer.zig");
 const router = @import("placement/router.zig");
 const drc = @import("placement/drc.zig");
+const drc_compose = @import("placement/drc_compose.zig");
 const drc_rules = @import("serve/drc_rules.zig");
 const pour = @import("placement/pour.zig");
 const implicit_plane = @import("placement/implicit_plane.zig");
@@ -212,7 +213,7 @@ pub fn check(
             .message = "the full fabricated-fill DRC did not complete — export is blocked rather than trusting a partial report",
         });
         break :blk composed;
-    } else drc_rules.apply(arena, ctx.drc_rules, drc.check(arena, placement, routed, clearance) catch &.{});
+    } else drc_rules.apply(arena, ctx.drc_rules, drc_compose.checkGeometry(arena, placement, routed, clearance) catch &.{});
     stats.connectivity.drc_violations = violations.len;
     // Partition by severity: error-severity violations block the gate; warnings
     // (courtyard overlap, silkscreen over a pad) flow through as
@@ -1695,6 +1696,19 @@ pub fn userZoneFills(
     copper: export_gerber.Copper,
     base: ?pour.EdgeField,
 ) std.mem.Allocator.Error![]const pour.Fill {
+    return userZoneFillsMemo(arena, placement, copper, base, null);
+}
+
+/// `userZoneFills` through a caller's per-fill memo (`pour.FillMemo`). Null is
+/// exactly `userZoneFills`; a memo makes each zone's raster reusable across the
+/// board edits that did not reach it.
+pub fn userZoneFillsMemo(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    copper: export_gerber.Copper,
+    base: ?pour.EdgeField,
+    memo: ?pour.FillMemo,
+) std.mem.Allocator.Error![]const pour.Fill {
     const fills = try arena.alloc(pour.Fill, copper.zones.len);
     // One board, one lattice: seed the edge-margin field once for all zones.
     // `base` is the caller's shared field when the whole render pours the same
@@ -1703,12 +1717,12 @@ pub fn userZoneFills(
     for (copper.zones, 0..) |z, zi| {
         var spec = pour.zoneLayerSpec(z.net, pour.sideOfSignal(z.layer), z.layer, z.poly);
         spec.higher = try pour.higherPolys(arena, copper.zones, zi);
-        fills[zi] = try pour.computeShared(arena, placement, .{
+        fills[zi] = try pour.computeMemo(arena, placement, .{
             .tracks = copper.tracks,
             .vias = copper.vias,
             .arcs = copper.arcs,
             .rf_paths = copper.rf_paths,
-        }, spec, base_eff);
+        }, spec, base_eff, memo);
     }
     return fills;
 }

@@ -140,3 +140,89 @@ log is not a substitute for reporting an active blocker to the user.
 - **friction:** The exact-candidate `prepare-release.sh` run passed Guardian, all 1,247 tests, and the ReleaseSafe build, then rejected an editor-only change on one noisy Canvas zoom sample (33.6 ms median versus 30 ms). An immediate isolated rerun against the same stripped binary passed at 25 ms median and 34 ms worst, costing one failed release attempt and about three minutes.
 - **idea:** Let the release script retry only the deterministic editor benchmark once against the preserved exact candidate before discarding it, while still requiring both the retry and the other release evidence to be green. This would absorb transient host contention without rerunning compilation and the full suite.
 - **status:** open
+
+## 2026-08-28 · claude · DRC hot-path speedups (W0)
+- **friction:** Proving that a pure-speedup DRC change emits an identical violation multiset needed a temporary `drc-dump` subcommand plus two extra full binary builds: nothing shipped dumps the violation set. `netlisp check` is schematic ERC, `bench-page` reports only three aggregate DRC counts (total/errors/net_open), and `describe_pcb_layout` summarises rather than enumerating. Aggregate counts cannot distinguish "same number of findings" from "same findings".
+- **idea:** Add a read-only `netlisp drc-dump [--project-dir <d>] <design>…` (or a `--dump-drc` flag on `bench-page`) that prints every violation's kind, coordinates, gap, clearance, severity, layer and parties, sorted deterministically. That single command turns any DRC refactor's correctness claim into one diff, and would have saved two builds and roughly six calls here.
+- **workaround:** Added the subcommand as an uncommitted patch, built base and patched binaries with it, diffed the sorted dumps over eight corpus boards, then removed it before committing.
+- **status:** open
+
+## 2026-08-28 · claude · DRC de-quadratic (copper topology + net-open)
+- **friction:** Proving "the emitted violation multiset is unchanged" over the board corpus needed a FULL violation dump, and no surface produces one: `describe_pcb_layout`'s `drc_list` omits `who.track_a` (which decides whether a `dangling_copper` finding is offered to automatic cleanup), and `bench-page` reports only counts. Attributing the cost also needed a phase profile, and `perf` is unusable on this machine (`perf_event_paranoid=4`), so a throwaway `drc-dump` command plus temporary `profNow/profMark` instrumentation in `drc.zig`/`drc_compose.zig` had to be written, built twice (Debug + ReleaseSafe), and stripped again — roughly eight extra build/patch cycles.
+- **idea:** Add a small read-only `netlisp drc-dump <design>` that prints every field of every violation from both seams (`drc.check` and `drc_rules.checkFilteredZones`) in a deterministically sorted text form, plus each seam's wall time. It is the natural differential harness for any DRC refactor and would have removed every diagnostic patch here.
+- **finding:** The audit premise that `copper_topology` dominates `drc.check` on barracuda-base is no longer true on `48c5573`: geometry DRC there is ~8.2 s ReleaseSafe of which `power_integrity.routedTrackRequiredWidths` (the un-prepared plane raster inside `checkImpl`) is ~7.5 s, while copper topology was ~310 ms. `drc.check` has no `prepared_power` seam, so every geometry-only caller — including the router's candidate loop and the client WASM twin — pays that raster.
+- **status:** open
+
+## 2026-08-28 · claude · per-fill copper memo + prepared power surfaces (W2)
+- **friction:** The same missing tool was rebuilt for the third consecutive DRC change. Proving that a memo hands back a bit-identical fill needs the whole violation multiset from BOTH seams, plus a way to run one board through an edit twice (warm and cold) in separate processes; nothing shipped could do either, so a throwaway `drc-dump` had to be written, ported onto the base revision by hand, and built into two ReleaseSafe binaries before a single comparison could be made.
+- **idea:** `netlisp drc-dump` is now committed, with `--mutate <k>` (a deterministic in-memory copper edit) and `--prime` (a discarded pass over the unmutated board). `drc-dump --mutate k --prime B` vs `drc-dump --mutate k B` in a fresh process is a one-line proof that a memo is sound, and `#`-prefixed timing/reuse lines mean `diff -I '^#'` compares only the findings. The next cache change should not need a patch at all.
+- **finding:** Wall-clock on this machine is noisy enough to mislead: repeated identical barracuda reporting-DRC runs spanned 3.4–6.3 s (±30%). Every number in this change is a median of three alternating runs, and single-sample comparisons between two binaries were actively wrong twice before that discipline was adopted.
+- **finding:** Two independent whole-board rasters of the SAME user-zone spec were being computed per reporting pass — `drc_compose.filledTopology`'s zone loop and `net_open.zoneFills` build identical `LayerSpec`s over identical copper. Content-keying the fill collapsed them, which is most of why COLD reporting DRC also got faster (barracuda 5951 ms → 3588 ms) rather than only the warm path.
+- **status:** resolved in this change
+
+## 2026-08-28 — the reconcile endpoint's cost was never where the DRC work was
+
+Workstream W3 was briefed as "the editor's server reconcile runs a full DRC on
+every POST /api/pcb-drc, ~300 ms after edit idle; get it well under 300 ms".
+Measured on this tree before touching anything (ReleaseSafe, barracuda): the
+endpoint took 7.0-11.4 s, of which 3.5 s was resolving the design and 4.3-5.3 s
+was `placeFromPoses` — neither of them DRC at all. The DRC seam itself was
+1.8-3.5 s. The 300 ms figure appears to have been carried forward from a
+different measurement and set the whole plan's target an order of magnitude off.
+
+Two things would have caught it in one command instead of an afternoon:
+
+1. There is no way to time an ENDPOINT's stages. `bench-page` measures page
+   renders; `drc-dump` measures the two DRC seams. Neither sees the handler, so
+   "which part of this request is slow" needed a throwaway instrumentation
+   patch, three rebuilds, and a scratch file to print into because
+   `std.debug.print` from a serve thread does not reach the server log. A
+   `netlisp bench-api <endpoint> <design> --body <file>` that posts a recorded
+   body and prints per-stage wall time would be the drc-dump of the HTTP layer.
+
+2. Nothing in the repo records what an endpoint currently costs, so a brief can
+   quote a stale number and nobody notices. `scripts/perf_gate.sh` gates four
+   PAGE latencies; the editor's reconcile — the request a user makes most — is
+   not among them.
+
+Also worth writing down, because it cost real time: `fill_cache`'s per-fill memo
+hands back a BORROW, and a caller that retains the `pour.Fill` value across
+requests keeps a pointer nothing is holding. The fix is to retain the memo KEY
+and ask again (`pour.computeMemoKeyed`), which takes a proper reference or
+misses and pours. The module header states the borrow rule for the whole-board
+entry; it now also matters for anything that keeps a fill between passes, and
+that is not obvious from the type — a `Fill` looks like a value.
+
+## 2026-08-28 — no fixture exercised the deferred DRC kinds, and the forms that create one are top-level
+
+W4 (the background full-board DRC sweep) exists mainly to refresh the three
+kinds a scoped recheck defers — `reference_plane_gap`, `reference_transition`,
+`loop_area` — so its first test had to be a board that actually emits one. No
+committed fixture did. Every server-side reconcile fixture and every
+`drc_return_path` test builds its placement in Zig, so the only worked examples
+of the DSL that produces those findings are in `docs/language-forms.md`, in a
+single table row several thousand characters long.
+
+Two concrete costs, both avoidable:
+
+1. `(stackup …)` and `(net-class …)` are TOP-LEVEL `design-block` forms, not
+   `(design-rules …)` children. The existing reconcile fixture nested
+   `(stackup 4) (plane 2 "GND")` inside `(design-rules …)`, where it is ignored
+   — the board had no declared stackup at all, and `drc_return_path.check`
+   returns immediately without one. The evaluator does warn, but the endpoint
+   test harness discards evaluator warnings, so the fixture read as fine for as
+   long as nothing depended on the stackup. A fixture that silently loses half
+   its declarations is worse than one that fails.
+
+2. Finding this took a placement dump printed from inside a test. There is no
+   cheap way to ask "what did the evaluator actually make of this design's
+   rules" — `netlisp check` is schematic ERC and `describe_pcb_layout`
+   summarises geometry. A `netlisp describe-rules <design>` printing the
+   resolved stackup, planes and per-net class rules would have answered it in
+   one command.
+
+Worth keeping in mind for the next task in this area: the reconcile fixture in
+`src/drc_reconcile.zig` now declares a real 4-layer stackup and a
+`(return-path (max-loop-area …))` net class, so it emits three
+`reference_plane_gap` findings and one `loop_area`. It is the cheapest worked
+example of those forms in the tree.

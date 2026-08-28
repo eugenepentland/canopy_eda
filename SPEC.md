@@ -739,6 +739,56 @@ one-board anecdote.
 - completeness-waiver: integer overflow (counts come from routed slices; the score arithmetic widens to f64 before any accumulation)
 - completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
 
+## drc-dump
+
+Public functions: cmdDrcDump, mutate
+
+The board's WHOLE violation multiset, printed. `netlisp drc-dump
+[--project-dir <dir>] [--mutate <k>] [--prime] <design> …` evaluates a design,
+restores its saved layout exactly as the PCB page does, and writes every field
+of every violation from both DRC seams — the geometry-only pass
+(`drc_rules.checkGeometry`) and the full composed report
+(`drc_rules.checkFilteredZones`, fill-aware topology plus `net_open`
+connectivity plus the design's severity sidecar) — sorted, one per line, with
+each seam's wall time and the copper-fill memo's reuse tally on `#` comment
+lines that `diff -I '^#'` ignores.
+
+It exists because nothing else produces one: `netlisp check` is schematic ERC,
+`bench-page` reports three aggregate DRC counts, and `describe_pcb_layout`
+summarises. Aggregate counts cannot tell "the same NUMBER of findings" from
+"the same findings", which is the only claim a pure DRC speedup makes — three
+consecutive DRC refactors each had to add a throwaway dump command, build two
+binaries with it, diff the corpus, and strip the patch again.
+
+`--mutate <k>` applies one deterministic copper edit IN MEMORY (move / delete /
+add a track, move a distant track, delete / move a via) and `--prime` runs a
+discarded DRC pass over the unmutated board first, so `--mutate k --prime`
+versus `--mutate k` in a fresh process is a direct test that a memo's borrowed
+fills are bit-identical to poured ones. The command is read-only: it writes no
+file and starts no server.
+
+`--scoped` is the same idea one level up. It primes a full check, walks a
+SEQUENCE of edits through the incremental seam the editor's server reconcile
+uses, and after every step also runs a cold full check of the identical state in
+the same process, labelling the two `scoped` and `full` so one `diff` is the
+whole claim. The three kinds a scoped pass defers
+(`reference_plane_gap`, `reference_transition`, `loop_area`) are excluded from
+that diff and checked separately against the priming pass's answer for them,
+because carrying them forward is the decision under test rather than a
+discrepancy.
+
+- the CLI parses the project dir, the mutation selector and the priming flag with positionals as design names
+- every violation renders one line carrying every field, including the track identity automatic cleanup reads, and the lines sort deterministically
+- each mutation edits copper in memory only, leaving the board it was given untouched
+- completeness-waiver: empty inputs (a dump with no design named is a usage error rather than an empty dump that would trivially match any comparison; a board that does not resolve prints one marked comment line and the run continues)
+- completeness-waiver: large inputs (each board runs in its own arena, freed before the next, so a corpus dump peaks at one board's DRC)
+- completeness-waiver: unauthorized access (a local read-only CLI over the caller's own project directory; no network, no auth surface, and no file is written)
+- completeness-waiver: concurrent access (single-threaded, and the process-wide fill memo it reads through is itself mutex-guarded and refcounted)
+- completeness-waiver: i/o failure (a design that cannot be evaluated or whose layout cannot be restored prints an UNRESOLVED comment for that board and the remaining boards still dump)
+- completeness-waiver: malformed encoding (the design and its saved layout are parsed by the same seam the PCB page uses, which rejects malformed input long before a violation exists to print)
+- completeness-waiver: integer overflow (no arithmetic on the dump path beyond formatting already-computed violation fields)
+- completeness-waiver: panic-free (every failing stage degrades to a comment line and the next board; a DRC seam that errors contributes an empty list rather than aborting the dump)
+
 ## bench-page
 
 Public functions: benchOne, corpus, writeTable, writeResultsJson, cmdBenchPage
@@ -2922,7 +2972,7 @@ are out of scope.
 
 ## placement/copper-topology
 
-Public functions: BranchSupport, ViaSupport, RedundancyAnalysis, ImplicitJoin, looseEnd, viaUseCount, redundantSections, analyzeRedundancy, analyzeViaRedundancy, implicitJoins, repairableJoins
+Public functions: BranchSupport, ViaSupport, RedundancyAnalysis, ImplicitJoin, looseEnd, looseEnds, viaUseCount, viaUseCounts, redundantSections, analyzeRedundancy, analyzeViaRedundancy, implicitJoins, repairableJoins
 
 - a trace end must land on a same-net pad, via, pour, or trace; a free leaf remains loose
 - a stored trace section is redundant when deleting it preserves the connectivity of every pad, live via, and poured region
@@ -2937,6 +2987,7 @@ Public functions: BranchSupport, ViaSupport, RedundancyAnalysis, ImplicitJoin, l
 - redundant-via pruning preserves every persistent copper component and chooses a jointly safe subset of parallel layer jumps
 - a via that is the only robust bridge between persistent copper features is never deletion-invariant
 - a via that is the sole support for a trace endpoint remains even when deleting its graph leaf would not split a component
+- one shared copper index answers every section's endpoints and every barrel's layer count exactly as the per-feature sweep does
 - completeness-waiver: empty inputs (an empty copper list has no endpoint or via to classify)
 - completeness-waiver: large inputs (bounded section-deletion walks over the already-bounded routed copper and support lists)
 - completeness-waiver: unauthorized access (pure in-memory geometry with no request or persistence surface)
@@ -2970,6 +3021,7 @@ question each caller answers honestly through `Zone.component`.
 
 ## placement/drc
 
+- the net-open island chain's bounding-box estimate never exceeds the exact nearest approach, so a skipped pair could not have beaten the frontier
 - an authored ground-via maximum warns on an SMD ground pad until a same-net plane via falls within the budget
 - an optional NC or input-strap land assigned to ground is excluded from the ground-via maximum because its same-package real ground return owns the required plane connection
 
@@ -3022,6 +3074,7 @@ Public functions: check, checkTopology, checkWithZones, checkWithPreparedCopper,
 - the component-edge check measures the courtyard's own corners, so a chamfer clears a rotated part its bounding box would flag
 - a component's perimeter-band inset is measured at its rotated courtyard corners
 - flags two drilled holes whose walls sit closer than the hole-to-hole rule
+- the grid-culled hole-to-hole and courtyard sweeps report exactly the brute all-pairs findings
 - flags two vias of the SAME net crowded closer than the via-to-via rule, which the foreign-net clearance rule exempts
 - the same-net via spacing rule defaults to the pair's resolved clearance, and an authored (design-rules (via-to-via ...)) overrides it
 - flags a drilled hole below the minimum drill diameter (pads and vias); SMD pads exempt
@@ -3077,6 +3130,12 @@ Public functions: check, checkTopology, checkWithZones, checkWithPreparedCopper,
 - the net-open sweep rasters the board's user pours once for all nets and each net still reads only its own pour
 - a pad no copper ever reached is a net-open island, not silently excused as unrouted
 - a routable net with no drawn copper at all is flagged, matching the fab gate's airwire verdict
+- a scoped recheck returns the findings a full check of the same board returns, for every kind it does not defer
+- a scoped recheck retires the findings its edit changed and carries the ones it did not
+- the three reference-plane kinds are carried across scoped rechecks rather than recomputed
+- the copper diff reports only the features that changed, whichever position they hold in the posted arrays
+- two identical copper features are two features, so deleting one of them is an edit
+- a via edit is reported with its own geometry so a scoped recheck can grow the region a drill rule reaches
 - completeness-waiver: empty inputs (each rule iterates the geometry present, so a design with no copper or parts yields no violations by construction)
 - completeness-waiver: large inputs (a bounded pairwise geometry scan; working memory stays proportional to the parsed design, with no unbounded buffering)
 - completeness-waiver: unauthorized access (a pure in-memory computation with no auth surface here; access control lives in serve/users)
@@ -3155,7 +3214,7 @@ connectivity model.
 
 ## placement/fill-cache
 
-Public functions: acquire, key, put
+Public functions: acquire, beginSession, key, put
 
 - one board fingerprints identically from two independently built copies and differently after any change to its copper
 - the fingerprint ignores the objective score and whether the optimizer ran, so one saved board shares an entry across the surfaces that resolve it
@@ -3165,6 +3224,13 @@ Public functions: acquire, key, put
 - a board with no planes, pours or zones retains its empty fill so the surfaces after it skip the pour attempt too
 - a board whose fill alone exceeds the whole store's byte ceiling is declined rather than retained, and every later pass simply pours it again
 - a second reporting DRC over an unchanged board reuses the retained fill instead of re-pouring it and returns the identical verdict
+- the content fingerprint separates two values that differ in any fold-in and matches two independently built copies of one value
+- a fingerprint tag separates two runs of otherwise identical scalars so adjacent feature kinds cannot alias
+- one fill retained under its own content key is borrowed by the next pass over a DIFFERENT board, so an edit re-pours only what it changed
+- a board entry built from a session references the retained fills instead of copying them, and they stay alive as long as the entry does
+- a pass holding a fill the store could not retain publishes its board by COPYING the fill, never by referencing memory the pass owns
+- retained fills nothing references are given up before a whole board state is, and a fill a live board entry still needs is never freed under it
+- a board rebuilt after a copper edit borrows the fills the edit did not reach, and every borrowed raster is bit-identical to the one a cold pour produces
 
 The reporting DRC seam pours every declared plane, every pour and every drawn
 zone of a board before it can judge copper topology or connectivity, and that
@@ -3172,6 +3238,16 @@ raster is the whole cost of the seam. It is a pure function of the board, so it
 is retained under a 128-bit content fingerprint of the placement, the routed
 copper and the user zones, and borrowed rather than re-poured by every later
 pass over the same board.
+
+That board fingerprint is all-or-nothing, and a board under edit changes on
+every keystroke, so each FILL is also retained under its own content key
+(`placement/pour`'s `fillKey`, computed by the same traversal that stamps the
+raster). A board rebuilt after an edit borrows every fill whose own inputs did
+not move — every inner plane across any track edit, every other layer's fills
+across a same-layer edit, and every drawn zone the edit did not reach — and
+pours only the rest. Fills are refcounted independently of the board entries
+that reference them, so consecutive board states share one copy of everything
+between them rather than each holding a whole board's rasters.
 
 - completeness-waiver: large inputs (a single board's fill is refused outright when it exceeds the store's whole byte ceiling, and the retained set is bounded by both a board count and that ceiling; the fill itself is already cell-capped by placement/pour)
 - completeness-waiver: unauthorized access (an in-process memo over boards a caller already holds; entries are reachable only through a fingerprint of the exact board's own bytes, so nothing can read copper it did not already have, and there is no file, request, or auth surface)
@@ -6076,6 +6152,19 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 
 ## Web Server
 
+- The DRC reconcile session answers only for a board whose non-copper inputs are unchanged
+- A DRC reconcile store with no allocator retains nothing and every request takes the full check
+- The DRC reconcile store keeps two designs and evicts the least recently leased
+- A reconcile session is claimed by one design name and one sub-circuit slug
+- A reconcile snapshot that carries the previous one's deferred findings forward is retained without aliasing the memory it copies from
+- A background full-board DRC sweep refreshes the kinds a scoped recheck defers, and the next reconcile answer carries them
+- A background full-board DRC sweep corrects a ledger that lost a finding or invented one, and counts the disagreement
+- A background DRC sweep answer for a state the session has left is dropped without touching its ledger
+- Background DRC sweeps are one thread per design, capped across designs, and a re-arm during one coalesces into it
+- A background DRC sweep refreshes the deferred kinds and treats a difference in them as the refresh, never as a discrepancy
+- A background DRC sweep reports every non-deferred finding the scoped answer and a full pass disagree about, in both directions
+- A background DRC sweep of a design with nothing accepted does nothing
+- The DRC endpoint re-checks a copper edit against the board state it last accepted and returns the answer a full check returns
 - the schematic page exposes the current board role as a Design type selector on designs but not reusable module pages
 - the schematic Design type control replaces only the design root's board-role form, preserving comments and nested module text
 - the schematic Design type control adds an explicit role when a string-named block currently relies on the subcircuit default
@@ -6529,6 +6618,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Loading a new board replaces the WASM DRC session so probes answer against the current state
 - A WASM DRC probe with no loaded session returns the no-session sentinel
 - Per-design DRC rule overrides retag or drop violations before every reporting surface
+- The per-design DRC rule sidecar is parsed once per file state, and an edited or deleted sidecar is honoured on the very next check
 - The DRC policy table advertises the same built-in severity the checker emits, differential-pair rules included
 - A DRC check for copper outside any project design still layers the net-open connectivity rule onto the built-in severities
 - The /pcb-layout Properties dock hosts the inspector with segment editing and DRC rule settings

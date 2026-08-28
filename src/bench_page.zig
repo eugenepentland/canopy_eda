@@ -82,6 +82,7 @@ const paths = @import("paths.zig");
 const json_writer = @import("json_writer.zig");
 const optimizer = @import("placement/optimizer.zig");
 const drc = @import("placement/drc.zig");
+const drc_compose = @import("placement/drc_compose.zig");
 const drc_rules = @import("serve/drc_rules.zig");
 const assembly_debug = @import("serve/assembly_debug.zig");
 const pcb_layout_page = @import("serve/pcb_layout_page.zig");
@@ -307,12 +308,14 @@ fn benchRep(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8)
         out.drc = .{ .total = v.len, .errors = drc.errorCount(v), .net_open = drc.countKind(v, .net_open) };
     }
 
-    // Phase: drc_geom — the geometry-only pass, the native twin of the
-    // client's interactive WASM engine (same source, same inputs). Only the
-    // wall time is wanted; a failed check still spent the time it spent.
+    // Phase: drc_geom — the geometry-only pass as the SERVER runs it: the same
+    // rules the client's interactive WASM engine runs, through the server-side
+    // seam that memoises the plane surfaces the power-width rule pours
+    // (`drc_compose.checkGeometry`). Only the wall time is wanted; a failed
+    // check still spent the time it spent.
     {
         const t0 = clock.nanoTimestamp();
-        if (drc.check(alloc, solved.placement, routed, clearance)) |_| {} else |err| {
+        if (drc_compose.checkGeometry(alloc, solved.placement, routed, clearance)) |_| {} else |err| {
             log.warn("bench-page: {s} geometry DRC failed mid-measure: {s}", .{ name, @errorName(err) });
         }
         out.phases.drc_geom_ms = nsToMs(clock.nanoTimestamp() - t0);
