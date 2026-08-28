@@ -320,6 +320,52 @@ pub const fillMemoStats = fill_cache.stats;
 /// business and not the server's.
 pub const FillHold = fill_cache.Held;
 
+/// One board's poured fill, handed to a caller whose OWN whole-board sweeps
+/// must read the same rasters.
+///
+/// The reporting seam already pours every plane and zone of a board and
+/// publishes them (`boardFills`). What it did NOT do is let anyone else see
+/// them, so `/api/pcb-describe` ran its connectivity tally, its open-net report
+/// and its completion ladder over three private re-pours of the identical
+/// board — 55-60 s apiece on barracuda-base. This is the same acquire the
+/// reporting pass makes, with the borrow handed out instead of dropped.
+///
+/// The borrow's rule is unchanged and load-bearing: nothing derived from these
+/// rasters may point into them (see `fill_cache`'s header). Release it when the
+/// sweeps that read it are done.
+pub const SharedFills = struct {
+    plane_fills: []const pour.NetFills = &.{},
+    zone_fills: []const pour.Fill = &.{},
+    /// The fill could not be built at all. Distinguished from an empty fill,
+    /// which is a legitimate answer for a board with no planes, pours or
+    /// zones — a caller must raster for itself rather than sweep a board whose
+    /// every pour appears to have vanished.
+    failed: bool = false,
+    held: fill_cache.Held = .{},
+
+    /// End the borrow.
+    pub fn release(self: *SharedFills) void {
+        self.held.release();
+    }
+};
+
+/// This board's fill, from the process memo when some surface has already
+/// poured it and freshly poured (and published) when none has. A miss costs the
+/// pour the caller would otherwise have paid per sweep, so this is never slower
+/// than not asking.
+pub fn sharedFills(alloc: std.mem.Allocator, in: CopperCheck) SharedFills {
+    var board = boardFills(alloc, in);
+    if (board.failed) {
+        board.release();
+        return .{ .failed = true };
+    }
+    return .{
+        .plane_fills = board.fills.plane_fills,
+        .zone_fills = board.fills.zone_fills,
+        .held = board.held,
+    };
+}
+
 /// The board-edge margin field every fill of one board starts from, and the
 /// walk that seeds it. A reconcile session that holds a placement across edits
 /// seeds it ONCE: it is a function of the outline and the lattice alone, so
@@ -812,6 +858,55 @@ fn exactFillKeepsCopperLoweringRemoves(exact: pour.Fill, lowered: pour.Fill) boo
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
+
+// spec: placement/fill-cache - a reporting pass hands its poured board fill to the caller's own whole-board sweeps instead of making each of them pour the board again
+test "sharedFills borrows the same board fill the reporting pass used" {
+    const testing = std.testing;
+    const geometry = @import("geometry.zig");
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const alloc = arena_inst.allocator();
+    const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 1, .y = 1 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 4, .y = 1 },
+    };
+    const pins = [_]@import("../flat_netlist.zig").FlatPin{ .{ .ref_des = "R1", .pin = "1" }, .{ .ref_des = "R2", .pin = "1" } };
+    const nets = [_]optimizer.FlatNet{.{ .name = "GND", .pins = &pins }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 5,
+        .maxy = 2,
+        .generated = true,
+        .board_rect = .{ .minx = 0, .miny = 0, .w = 5, .h = 2 },
+    };
+    const drawn = [_][2]f64{ .{ 0.2, 0.2 }, .{ 4.6, 0.2 }, .{ 4.6, 1.7 }, .{ 0.2, 1.7 } };
+    const zones = [_]pour.UserZone{.{ .net = "GND", .layer = 0, .poly = &drawn }};
+    const empty = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 1 };
+    const in: CopperCheck = .{ .placement = placement, .routed = empty, .clearance = 0.127, .zones = &zones };
+
+    const verdict = checkDefaultRules(alloc, in);
+
+    // What the pass poured, borrowed rather than poured again: one raster per
+    // hand-drawn zone, and the verdict is unmoved by the borrow existing.
+    var shared = sharedFills(alloc, in);
+    defer shared.release();
+    try testing.expect(!shared.failed);
+    try testing.expectEqual(zones.len, shared.zone_fills.len);
+    try testing.expect(shared.zone_fills[0].labels.len > 0);
+
+    const after = checkDefaultRules(alloc, in);
+    try testing.expectEqual(verdict.len, after.len);
+    try testing.expectEqual(drc.countKind(verdict, .net_open), drc.countKind(after, .net_open));
+}
 
 // spec: placement/fill-cache - a second reporting DRC over an unchanged board reuses the retained fill instead of re-pouring it and returns the identical verdict
 test "a memoised board fill returns the verdict the pour that built it returned" {

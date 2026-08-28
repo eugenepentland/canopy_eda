@@ -1150,6 +1150,45 @@ pub const NetStatus = struct {
     hairline_gaps: usize = 0,
 };
 
+/// The board-level rasters a caller may ALREADY hold for this exact
+/// `(placement, copper)`, offered to a whole-board sweep so it reads them
+/// instead of pouring the board over again.
+///
+/// The reporting DRC pours every one of them on its way to a verdict and keeps
+/// them in the process fill memo (`drc_compose.sharedFills`). A sweep that does
+/// not take them poured each plane-carried net for itself AND seeded its own
+/// board-edge field per net — on barracuda-base that is 55-60 s per sweep, and
+/// `/api/pcb-describe` runs three of them. Every field is optional: what is
+/// missing is built here exactly as before, so a caller with nothing to offer
+/// gets the old behaviour at the old cost.
+pub const BoardPrep = struct {
+    /// Per-net carrying-layer rasters (the reporting DRC's topology pass).
+    /// Empty means "raster each plane-carried net here".
+    plane_fills: []const pour.NetFills = &.{},
+    /// The user-zone rasters. Null means "raster them here".
+    zone_fills: ?[]const pour.Fill = null,
+    /// The caller's shared board-edge margin field (`pour.sharedEdgeField`).
+    /// Null seeds one per fill — a ~150 ms outline walk PER NET on a
+    /// barracuda-class board.
+    base: ?pour.EdgeField = null,
+};
+
+/// Complete `prep` into the per-net sweep state: what the caller supplied is
+/// taken as it is, and only what is missing is built.
+fn sharedFillsOf(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    copper: export_gerber.Copper,
+    prep: BoardPrep,
+) std.mem.Allocator.Error!SharedFills {
+    return .{
+        .zone_fills = prep.zone_fills orelse try userZoneFills(arena, placement, copper, prep.base),
+        .base = prep.base,
+        .plane_fills = prep.plane_fills,
+        .identity = try net_identity.Identity.init(arena, placement),
+    };
+}
+
 /// Compute per-net connectivity over the persisted copper — one `NetStatus` per
 /// design net, in `placement.nets` order. This is the loop `check` used to
 /// inline; factoring it out lets serve code build a progress ladder from the
@@ -1159,12 +1198,23 @@ pub fn netConnectivity(
     placement: optimizer.Placement,
     copper: export_gerber.Copper,
 ) std.mem.Allocator.Error![]const NetStatus {
-    const zone_fills = try userZoneFills(arena, placement, copper, null);
+    return netConnectivityPrepared(arena, placement, copper, .{});
+}
+
+/// `netConnectivity` over board rasters the caller already holds (`BoardPrep`).
+/// The same statuses in the same order: a borrowed fill is bit-identical to a
+/// poured one, so this changes latency and nothing else.
+pub fn netConnectivityPrepared(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    copper: export_gerber.Copper,
+    prep: BoardPrep,
+) std.mem.Allocator.Error![]const NetStatus {
+    const fills = try sharedFillsOf(arena, placement, copper, prep);
     const physical = try export_gerber.physicalCopper(arena, copper);
     var out: std.ArrayList(NetStatus) = .empty;
-    const identity = try net_identity.Identity.init(arena, placement);
     for (placement.nets, 0..) |net, net_i| {
-        const graph = try buildNetGraphPrepared(arena, placement, physical, net, @intCast(net_i), .{ .zone_fills = zone_fills, .identity = identity });
+        const graph = try buildNetGraphPrepared(arena, placement, physical, net, @intCast(net_i), fills);
         try out.append(arena, try netStatusFromGraph(arena, net.name, graph, true));
     }
     return out.toOwnedSlice(arena);
@@ -1294,7 +1344,19 @@ pub fn openNets(
     placement: optimizer.Placement,
     copper: export_gerber.Copper,
 ) std.mem.Allocator.Error![]const OpenNet {
-    return openNetsAmong(arena, placement, copper, null);
+    return openNetsWith(arena, placement, copper, null, .{});
+}
+
+/// `openNets` over board rasters the caller already holds (`BoardPrep`) — the
+/// open-net twin of `netConnectivityPrepared`, and the same guarantee: the
+/// report is unchanged, only the pouring is not repeated.
+pub fn openNetsPrepared(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    copper: export_gerber.Copper,
+    prep: BoardPrep,
+) std.mem.Allocator.Error![]const OpenNet {
+    return openNetsWith(arena, placement, copper, null, prep);
 }
 
 /// The `openNets` report restricted to exact net names. `names == null` means
@@ -1308,11 +1370,22 @@ pub fn openNetsAmong(
     copper: export_gerber.Copper,
     names: ?[]const []const u8,
 ) std.mem.Allocator.Error![]const OpenNet {
+    return openNetsWith(arena, placement, copper, names, .{});
+}
+
+/// The one open-net sweep the three public spellings share: an optional name
+/// filter, and the optional board rasters the caller already holds.
+fn openNetsWith(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    copper: export_gerber.Copper,
+    names: ?[]const []const u8,
+    prep: BoardPrep,
+) std.mem.Allocator.Error![]const OpenNet {
     if (names) |wanted| if (wanted.len == 0) return &.{};
-    const zone_fills = try userZoneFills(arena, placement, copper, null);
+    const fills = try sharedFillsOf(arena, placement, copper, prep);
     const physical = try export_gerber.physicalCopper(arena, copper);
     var out: std.ArrayList(OpenNet) = .empty;
-    const identity = try net_identity.Identity.init(arena, placement);
     for (placement.nets, 0..) |net, ni| {
         if (names) |wanted| {
             var selected = false;
@@ -1324,7 +1397,7 @@ pub fn openNetsAmong(
             }
             if (!selected) continue;
         }
-        const detail = try openNetDetail(arena, placement, physical, net, @intCast(ni), .{ .zone_fills = zone_fills, .identity = identity });
+        const detail = try openNetDetail(arena, placement, physical, net, @intCast(ni), fills);
         if (detail) |d| try out.append(arena, d);
     }
     return out.toOwnedSlice(arena);
@@ -3569,6 +3642,84 @@ test "openNets marks the pour-joined island and leaves the stranded one unmarked
     }};
     const closed = try openNets(arena, placement, .{ .tracks = &track, .zones = &zones });
     try testing.expectEqual(@as(usize, 0), closed.len);
+}
+
+// spec: fab_readiness - a whole-board sweep handed the board's rasters reports exactly what pouring them per sweep reported
+test "prepared board rasters give the same connectivity and open-net report" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    const pads1 = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 1, .hh = 1, .pads = &pads1, .fallback = false, .x = 1, .y = 1 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 1, .hh = 1, .pads = &pads1, .fallback = false, .x = 3, .y = 1 },
+        .{ .ref_des = "R3", .kind = .passive, .hw = 1, .hh = 1, .pads = &pads1, .fallback = false, .x = 10, .y = 1 },
+    };
+    const pins = [_]export_kicad.FlatPin{
+        .{ .ref_des = "R1", .pin = "1" },
+        .{ .ref_des = "R2", .pin = "1" },
+        .{ .ref_des = "R3", .pin = "1" },
+    };
+    const nets = [_]export_kicad.FlatNet{.{ .name = "PWR", .pins = &pins }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -2,
+        .miny = -2,
+        .maxx = 12,
+        .maxy = 4,
+        .generated = false,
+        .board_rect = .{ .minx = -2, .miny = -2, .w = 16, .h = 8 },
+        .rules = .{ .plane_nets = &.{}, .copper_layers = 2 },
+    };
+    const poly = [_][2]f64{ .{ 0, 0 }, .{ 5, 0 }, .{ 5, 2 }, .{ 0, 2 } };
+    const zones = [_]pour.UserZone{.{ .net = "PWR", .layer = 0, .poly = &poly }};
+    const copper: export_gerber.Copper = .{ .zones = &zones };
+
+    // The rasters a reporting DRC pass would already be holding.
+    const base = try pour.sharedEdgeField(arena, placement);
+    const zone_fills = try userZoneFills(arena, placement, copper, base);
+    const prep: BoardPrep = .{ .zone_fills = zone_fills, .base = base };
+
+    try expectSameConnectivity(
+        try netConnectivity(arena, placement, copper),
+        try netConnectivityPrepared(arena, placement, copper, prep),
+    );
+    const cold_open = try openNets(arena, placement, copper);
+    try testing.expect(cold_open.len > 0);
+    try expectSameOpenNets(cold_open, try openNetsPrepared(arena, placement, copper, prep));
+}
+
+/// Every field of every per-net status, in order.
+fn expectSameConnectivity(cold: []const NetStatus, warm: []const NetStatus) !void {
+    try testing.expectEqual(cold.len, warm.len);
+    for (cold, warm) |a, b| {
+        try testing.expectEqualStrings(a.name, b.name);
+        try testing.expectEqual(a.routable, b.routable);
+        try testing.expectEqual(a.connected, b.connected);
+        try testing.expectEqual(a.islands, b.islands);
+        try testing.expectEqual(a.coarsened, b.coarsened);
+        try testing.expectEqual(a.hairline_gaps, b.hairline_gaps);
+    }
+}
+
+/// Every open net, its island count, and each pad's island assignment.
+fn expectSameOpenNets(cold: []const OpenNet, warm: []const OpenNet) !void {
+    try testing.expectEqual(cold.len, warm.len);
+    for (cold, warm) |a, b| {
+        try testing.expectEqualStrings(a.net, b.net);
+        try testing.expectEqual(a.islands, b.islands);
+        try testing.expectEqual(a.pads.len, b.pads.len);
+        for (a.pads, b.pads) |pa, pb| try testing.expectEqual(pa.island, pb.island);
+        try testing.expectEqual(a.plane_joined.len, b.plane_joined.len);
+        for (a.plane_joined, b.plane_joined) |ja, jb| try testing.expectEqual(ja, jb);
+    }
 }
 
 // spec: fab_readiness - two same-net vias that abut with no track between them are one copper island

@@ -1331,7 +1331,7 @@ fn roughPlacementView(
         .maxx = maxx,
         .maxy = maxy,
         .generated = true,
-        .rules = try boardRulesOf(arena, prep.block, nets),
+        .rules = try boardRulesWith(arena, prep.block, nets, try prep.rulesFor(arena, prep.block, nets)),
     };
 }
 
@@ -6491,6 +6491,18 @@ fn planeNetsOf(arena: std.mem.Allocator, block: *const DesignBlock) std.mem.Allo
 /// the copper stack (layer count and where each declared plane sits). The one
 /// construction path for `Placement.rules`.
 fn boardRulesOf(arena: std.mem.Allocator, block: *const DesignBlock, nets: []const FlatNet) std.mem.Allocator.Error!BoardRules {
+    return boardRulesWith(arena, block, nets, try net_rules.resolvedNetRules(arena, block, nets));
+}
+
+/// `boardRulesOf` with the per-net rules already resolved — the spelling every
+/// placement path takes, because `prepare` resolved them for this exact
+/// `(block, nets)` before the parts were even positioned.
+fn boardRulesWith(
+    arena: std.mem.Allocator,
+    block: *const DesignBlock,
+    nets: []const FlatNet,
+    rules: []const NetRule,
+) std.mem.Allocator.Error!BoardRules {
     var planes: []const PlaneAt = &.{};
     if (block.stackup.present and block.stackup.planes.len > 0) {
         const out = try arena.alloc(PlaneAt, block.stackup.planes.len);
@@ -6500,7 +6512,7 @@ fn boardRulesOf(arena: std.mem.Allocator, block: *const DesignBlock, nets: []con
     return .{
         .perimeter_fence = block.board.perimeter_fence,
         .plane_nets = try planeNetsOf(arena, block),
-        .net = try net_rules.resolvedNetRules(arena, block, nets),
+        .net = rules,
         .copper_layers = if (block.stackup.present) block.stackup.layers else 0,
         .planes = .{
             .declared = planes,
@@ -6694,7 +6706,7 @@ pub fn solve(
     emitBest(parts, bd.objective, .refine);
     var pl = try finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, generated);
     pl.pin_roles = prep.roles;
-    pl.rules = try boardRulesOf(arena, block, nets);
+    pl.rules = try boardRulesWith(arena, block, nets, try prep.rulesFor(arena, block, nets));
     pl.fabrication_layers = block.fabrication_layers;
     pl.diff_pairs = try diff_pairs.resolve(arena, nets, pl.rules.net);
     pl.match_groups = try match_group.resolve(arena, nets, pl.rules.net);
@@ -6899,7 +6911,7 @@ pub fn placeFromPoses(
     const bd = breakdownWith(parts, &prep.idx_of, nets, params, score, lsum);
     var pl = try finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, false);
     pl.pin_roles = prep.roles;
-    pl.rules = try boardRulesOf(arena, block, nets);
+    pl.rules = try boardRulesWith(arena, block, nets, try prep.rulesFor(arena, block, nets));
     pl.fabrication_layers = block.fabrication_layers;
     pl.diff_pairs = try diff_pairs.resolve(arena, nets, pl.rules.net);
     pl.match_groups = try match_group.resolve(arena, nets, pl.rules.net);
@@ -6966,7 +6978,7 @@ pub fn gridPlace(
     const bd = breakdownWith(parts, &prep.idx_of, nets, params, score, lsum);
     var pl = try finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, false);
     pl.pin_roles = prep.roles;
-    pl.rules = try boardRulesOf(arena, block, nets);
+    pl.rules = try boardRulesWith(arena, block, nets, try prep.rulesFor(arena, block, nets));
     pl.fabrication_layers = block.fabrication_layers;
     pl.diff_pairs = try diff_pairs.resolve(arena, nets, pl.rules.net);
     pl.match_groups = try match_group.resolve(arena, nets, pl.rules.net);
@@ -7025,6 +7037,29 @@ const Prepared = struct {
     /// nested-solve each one as its own board.
     block: *const DesignBlock,
     project_dir: []const u8,
+    /// The design's resolved per-net rules over `nets`, resolved ONCE.
+    ///
+    /// Three consumers of one placement each asked for them independently and
+    /// each paid the full resolution — the RF pad adaptation here, the critical
+    /// -path extraction, and the `BoardRules` the placement carries. That is a
+    /// pure function of `(block, nets)`, so on barracuda-base it was the same
+    /// 3.3 s answer computed three times: ten of a cold PCB page's ten seconds.
+    net_rules: []const NetRule = &.{},
+
+    /// The resolved rules for `(block, nets)` — this preparation's own when it
+    /// was prepared from exactly that pair, and a fresh resolution otherwise.
+    /// Identity, not equality: two different slices may hold equal nets, and
+    /// resolving is the only honest answer for a pair this did not prepare.
+    fn rulesFor(
+        self: *const Prepared,
+        arena: std.mem.Allocator,
+        block: *const DesignBlock,
+        nets: []const FlatNet,
+    ) std.mem.Allocator.Error![]const NetRule {
+        if (block == self.block and nets.ptr == self.nets.ptr and nets.len == self.nets.len)
+            return self.net_rules;
+        return net_rules.resolvedNetRules(arena, block, nets);
+    }
 };
 
 /// Resolve a design-local net name (what a constraint author writes — "VIN",
@@ -7455,7 +7490,7 @@ fn prepare(
     // three can never describe different boards.
     const near = try near_bind.resolve(arena, instances, nets);
     const built = try buildSprings(arena, nets, parts, &idx_of, roles, .{ .caps = binds, .near = near.pairs });
-    const critical = try critical_rough.extract(arena, block, parts, nets);
+    const critical = try critical_rough.extract(arena, parts, nets, effective_net_rules);
     classify(parts, built.loops, nets, params.cap_w_max, params.input_loop_boost, priority);
     // Declared rail currents (ports' `(current …)`, pins' `(i-typ …)`) → the
     // per-net congestion corridor widths `congestPitch` reads.
@@ -7501,6 +7536,7 @@ fn prepare(
         .guidance = guidance,
         .block = block,
         .project_dir = project_dir,
+        .net_rules = effective_net_rules,
     };
 }
 
@@ -10750,6 +10786,45 @@ test "a rated module output widens its rail once a bare stackup exists" {
     const outer = power_capacity.requiredTraceWidthMm(0.5, impedance.default_foil_mm, true).?;
     try testing.expectApproxEqAbs(outer, two.powerWidthForNet("VOUT").?, 1e-12);
     try testing.expect(outer < want);
+}
+
+// spec: placement/optimizer - a placement carries the per-net rules its preparation already resolved rather than resolving a second identical copy
+test "board rules built from prepared net rules match a fresh resolution" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "J1", .pin = "1" } };
+    const design_nets = [_]env.Net{.{ .name = "RFIN", .pins = &.{
+        .{ .ref_des = "U1", .pin = "1" },
+        .{ .ref_des = "J1", .pin = "1" },
+    } }};
+    const classes = [_]env.NetClassSpec{.{ .name = "rf-50", .width = 0.31, .clearance = 0.2, .nets = &.{"RFIN"} }};
+    const block = DesignBlock{
+        .name = "rf",
+        .instances = &.{},
+        .nets = &design_nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .net_classes = &classes,
+    };
+    const nets = [_]FlatNet{.{ .name = "RFIN", .pins = &pins }};
+
+    // The class is load-bearing: without it the comparison below could pass on
+    // two empty rule sets.
+    const resolved = try net_rules.resolvedNetRules(arena, &block, &nets);
+    try testing.expectEqual(nets.len, resolved.len);
+    try testing.expectApproxEqAbs(@as(f64, 0.31), resolved[0].width, 1e-12);
+
+    const fresh = try boardRulesOf(arena, &block, &nets);
+    const prepared = try boardRulesWith(arena, &block, &nets, resolved);
+    try testing.expectEqual(fresh.net.len, prepared.net.len);
+    for (fresh.net, prepared.net) |a, b| {
+        try testing.expectApproxEqAbs(a.width, b.width, 1e-12);
+        try testing.expectApproxEqAbs(a.clearance, b.clearance, 1e-12);
+        try testing.expectEqualStrings(a.class.name, b.class.name);
+    }
 }
 
 // spec: placement/implicit-plane - a disabled subcircuit power plane leaves the dominant supply rail unplaned without authoring a stackup

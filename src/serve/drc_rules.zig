@@ -333,6 +333,12 @@ pub const isDeferredKind = drc_compose.isDeferredKind;
 pub const PourAudit = drc_compose.PourAudit;
 pub const PourOwner = drc_compose.PourOwner;
 
+/// The board's poured fill, borrowed for a caller's own whole-board sweeps
+/// (connectivity tallies, open-net reports, the completion ladder). Named here
+/// so the serve layer keeps ONE door into the DRC engine.
+pub const SharedFills = drc_compose.SharedFills;
+pub const sharedFills = drc_compose.sharedFills;
+
 /// `ApiReport` plus what the next scoped recheck of this design needs: the
 /// snapshot to measure against, the borrow its rasters live in, and whether the
 /// scoped path was actually taken (a refusal is answered by a full check, never

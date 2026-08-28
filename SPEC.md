@@ -280,6 +280,7 @@ Public functions: rotate, aabbHalf, obbPenetration
 
 Public functions: solve
 
+- a placement carries the per-net rules its preparation already resolved rather than resolving a second identical copy
 - a pose seed that misses parts stages them in a band below the covered bbox, never stacked at the origin, and reports their refs
 - the authored board rectangle centres on seed-covered parts only, so an uncovered part cannot drag the outline
 - classifies hub vs passive ref-des, handling hierarchical paths
@@ -3231,6 +3232,7 @@ Public functions: acquire, beginSession, key, put
 - a pass holding a fill the store could not retain publishes its board by COPYING the fill, never by referencing memory the pass owns
 - retained fills nothing references are given up before a whole board state is, and a fill a live board entry still needs is never freed under it
 - a board rebuilt after a copper edit borrows the fills the edit did not reach, and every borrowed raster is bit-identical to the one a cold pour produces
+- a reporting pass hands its poured board fill to the caller's own whole-board sweeps instead of making each of them pour the board again
 
 The reporting DRC seam pours every declared plane, every pour and every drawn
 zone of a board before it can judge copper topology or connectivity, and that
@@ -6820,6 +6822,7 @@ Public functions: check, writeJson
 - connectivity propagates across an inner-signal-layer chain through its vias
 - a ground plane connects its pads without routed copper
 - a surface pad isolated from the plane is flagged until a plane via bridges it
+- a whole-board sweep handed the board's rasters reports exactly what pouring them per sweep reported
 - an open net's island report marks the island already joined to the net's plane or pour copper
 - a same-net trace that enters a user pour joins it without a sacrificial via
 - two same-net vias that abut with no track between them are one copper island
@@ -7282,11 +7285,12 @@ export never invents them.
 - phase detector polarity changes the feedback sign by 180 degrees
 - dynamically formatted validation messages are released with their evaluator
 - E24 synthesis jointly satisfies an authored divider/Kvco curve, tolerance corners, and ramp limit
+- the synthesis search is memoised on its complete input, so a design evaluated again runs it no second time and a changed value never reads the old answer
 - completeness-waiver: empty inputs (the parser rejects a declaration without a name, complete component-role bindings, topology, PFD, charge pump, feedback divider, Kvco range, and op-amp GBW before evaluation)
 - completeness-waiver: large inputs (one declaration resolves exactly seven named parts; validation sweeps a fixed 256 R/C corners, while optional synthesis admits at most 16 operating-curve points and uses a fixed 6,000-member deterministic E24 search plus bounded coordinate refinement followed by exact tolerance verification)
 - completeness-waiver: unauthorized access (an in-process calculation over an already-authorized evaluated DesignBlock with no request, file, socket, user, or write surface)
 - completeness-waiver: i/o failure (the validator performs no I/O and appends allocator-owned assertion messages; OutOfMemory is propagated)
-- completeness-waiver: concurrent access (all solver state is stack-local or owned by the calling evaluator and there are no globals or shared mutable objects)
+- completeness-waiver: concurrent access (all solver state is stack-local or owned by the calling evaluator; the one shared object is the process-lifetime synthesis memo, whose fixed entry table is read and written only under its own mutex and whose values are plain scalars)
 - completeness-waiver: malformed encoding (the existing s-expression parser supplies typed nodes; malformed forms and non-finite or out-of-range numeric fields are rejected before evaluation)
 - completeness-waiver: integer overflow (loop bounds are fixed constants except the seven-element tolerance mask, whose shift count is compile-time bounded)
 - completeness-waiver: panic-free (component lookup, value parsing, and crossover failure use optional/error returns; panic-freedom is also enforced repo-wide by Guardian's panic-budget snapshot)

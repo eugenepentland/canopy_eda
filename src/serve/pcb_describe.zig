@@ -194,6 +194,14 @@ pub fn describeDesign(
     // solveForRequest.restored) and DRC-checked the same way, so a
     // no-route describe reports the saved routing.
     const route_params = solved.placement.rules.design.routeParams();
+    // One board, one pour. The reporting DRC below rasters every plane and
+    // hand-drawn zone of this board; the connectivity tally and the open-net
+    // report that follow ask the SAME questions of the SAME copper, and each
+    // used to raster all of it privately — 55-60 s apiece on barracuda-base,
+    // three times in one request. They now read what the DRC pass built
+    // (`drc_rules.sharedFills`), and the board-edge margin field every one of
+    // them starts from is seeded ONCE here instead of once per fill per net.
+    const base_edge = drc_rules.sharedEdgeField(alloc, solved.placement) catch null;
     var stuck: []const route_diagnose.Diagnosis = &.{};
     var claimed: usize = 0;
     var raw_routed: ?router.RouteResult = if (opts.route) blk: {
@@ -216,7 +224,25 @@ pub fn describeDesign(
     } else solved.restored.routes;
     if (opts.route) raw_routed = perimeter_fence.append(alloc, solved.placement, raw_routed) catch raw_routed;
     const routed: ?RoutedSummary = if (raw_routed) |r| blk: {
-        const v = drc_rules.checkFilteredZones(alloc, project_dir, name, .{ .placement = solved.placement, .routed = r, .clearance = route_params.clearance, .zones = solved.shown_zones.user, .texts = solved.texts });
+        const check: drc_rules.CopperCheck = .{
+            .placement = solved.placement,
+            .routed = r,
+            .clearance = route_params.clearance,
+            .zones = solved.shown_zones.user,
+            .texts = solved.texts,
+            .base_edge = base_edge,
+        };
+        const v = drc_rules.checkFilteredZones(alloc, project_dir, name, check);
+        // The rasters that pass just poured, borrowed for the two sweeps below.
+        // Nothing they produce points into a fill (`fill_cache`'s borrow rule),
+        // so the borrow ends with this block.
+        var board = drc_rules.sharedFills(alloc, check);
+        defer board.release();
+        const prep: fab_readiness.BoardPrep = .{
+            .plane_fills = board.plane_fills,
+            .zone_fills = if (board.failed) null else board.zone_fills,
+            .base = base_edge,
+        };
         var trace: f64 = 0;
         for (r.tracks) |t| trace += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
         // Connectivity comes from the ORACLE, fresh route or restored copper
@@ -226,7 +252,7 @@ pub fn describeDesign(
         // is the oracle: barracuda reported `routed:85, unrouted:[5 names]`
         // beside thirteen open nets. Two tallies in one object, and the
         // optimistic one is the one a reader sees first.
-        const conn: fab_readiness.Tally = try connectivityTally(alloc, solved.placement, r, solved.shown_zones.user);
+        const conn: fab_readiness.Tally = try connectivityTally(alloc, solved.placement, r, solved.shown_zones.user, prep);
         break :blk .{
             .trace_mm = trace,
             .tracks = r.tracks.len,
@@ -251,10 +277,11 @@ pub fn describeDesign(
             .stuck = stuck,
             // Pours count as connecting copper either way — a fresh route and a
             // restored board both sit on the shown layout's zones.
-            .open_nets = fab_readiness.openNets(
+            .open_nets = fab_readiness.openNetsPrepared(
                 alloc,
                 solved.placement,
                 routeCopper(r, solved.shown_zones.user),
+                prep,
             ) catch &.{},
         };
     } else null;
@@ -435,8 +462,10 @@ fn connectivityTally(
     placement: optimizer.Placement,
     r: router.RouteResult,
     zones: []const pour.UserZone,
+    prep: fab_readiness.BoardPrep,
 ) std.mem.Allocator.Error!fab_readiness.Tally {
-    return fab_readiness.routableTally(alloc, placement, routeCopper(r, zones));
+    const conn = try fab_readiness.netConnectivityPrepared(alloc, placement, routeCopper(r, zones), prep);
+    return fab_readiness.summarizeConnectivity(alloc, conn);
 }
 
 fn routeCopper(r: router.RouteResult, zones: []const pour.UserZone) export_gerber.Copper {
@@ -2304,7 +2333,7 @@ test "the connectivity tally overrides both the zeroed restored counters and an 
     try std.testing.expectEqual(@as(usize, 0), restored.routed);
 
     // No pour zones in this scenario — the two nets are joined by tracks alone.
-    const conn = try connectivityTally(alloc, placement, restored, &.{});
+    const conn = try connectivityTally(alloc, placement, restored, &.{}, .{});
     try std.testing.expectEqual(@as(usize, 2), conn.total);
     try std.testing.expectEqual(@as(usize, 1), conn.routed);
     try std.testing.expectEqual(@as(usize, 1), conn.open.len);
@@ -2314,7 +2343,7 @@ test "the connectivity tally overrides both the zeroed restored counters and an 
     // both nets (its search for BARE succeeded; the copper never landed). The
     // oracle has to win, or the payload reports 2/2 beside an open BARE.
     const fresh = router.RouteResult{ .tracks = &tracks, .vias = &.{}, .routed = 2, .total = 2 };
-    const fresh_conn = try connectivityTally(alloc, placement, fresh, &.{});
+    const fresh_conn = try connectivityTally(alloc, placement, fresh, &.{}, .{});
     try std.testing.expectEqual(@as(usize, 1), fresh_conn.routed);
     try std.testing.expectEqualStrings("BARE", fresh_conn.open[0]);
 
@@ -2344,7 +2373,7 @@ test "the connectivity tally overrides both the zeroed restored counters and an 
         .routed = 0,
         .total = 0,
     };
-    const sampled_conn = try connectivityTally(alloc, placement, sampled, &.{});
+    const sampled_conn = try connectivityTally(alloc, placement, sampled, &.{}, .{});
     try std.testing.expectEqual(@as(usize, 1), sampled_conn.routed);
     try std.testing.expectEqualStrings("BARE", sampled_conn.open[0]);
 }

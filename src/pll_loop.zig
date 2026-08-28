@@ -16,6 +16,8 @@ const ast = @import("sexpr/ast.zig");
 const env = @import("eval/env.zig");
 const passive = @import("req_checks.zig");
 const decouple_key = @import("decouple_key.zig");
+const content_key = @import("placement/content_key.zig");
+const infra_fs = @import("infra/fs.zig");
 
 const Node = ast.Node;
 const DesignBlock = env.DesignBlock;
@@ -425,8 +427,116 @@ const e24 = [_]f64{ 1.0, 1.1, 1.2, 1.3, 1.5, 1.6, 1.8, 2.0, 2.2, 2.4, 2.7, 3.0, 
 const synthesis_primes = [_]usize{ 2, 3, 5, 7, 11, 13, 17 };
 
 fn synthesize(context: *Context, spec: Spec, circuit: Circuit) std.mem.Allocator.Error!void {
-    const result = findSynthesis(spec, circuit);
+    const result = memoisedSynthesis(spec, circuit);
     try appendSynthesisResult(context, spec, circuit, result);
+}
+
+// ── Synthesis memo ────────────────────────────────────────────────────────
+//
+// `(synthesize …)` runs a 6,000-candidate deterministic inverse search plus six
+// refinement rounds, and it runs inside DESIGN EVALUATION — so every page
+// render, every `netlisp build`, every ERC run and every module resolution of a
+// design carrying one paid for it again. Measured on barracuda (ReleaseSafe,
+// 2026-08-28): 3.7 s of a 3.8 s `Evaluator.evalFile`, and a single cold PCB
+// page evaluates the module TWICE (the design, then the Stamp palette's module
+// resolution), a deferred-payload cycle four times.
+//
+// The search reads nothing but the declaration and the resolved R/C values, so
+// its answer is kept for the life of the process and the repeats are free. A
+// miss recomputes: cache loss changes latency, never an assertion.
+
+/// Bumped whenever a change to the search makes an OLD key describe a result
+/// this build would no longer produce.
+const synth_key_version: u8 = 1;
+
+/// Distinct synthesis declarations held at once. A design carries one or two;
+/// the corpus a single server evaluates carries a handful.
+const synth_memo_max: usize = 8;
+
+const SynthEntry = struct { key: content_key.Key, result: SynthResult };
+
+/// The memo itself. Small, fixed and oldest-first: this is a working set over
+/// the declarations a process actually evaluates, not a cache to grow.
+const SynthMemo = struct {
+    mutex: infra_fs.Mutex = .{},
+    entries: [synth_memo_max]?SynthEntry = @splat(null),
+    next: usize = 0,
+
+    fn get(self: *SynthMemo, key: content_key.Key) ?SynthResult {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.entries) |slot| {
+            const entry = slot orelse continue;
+            if (entry.key.eql(key)) return entry.result;
+        }
+        return null;
+    }
+
+    fn put(self: *SynthMemo, key: content_key.Key, result: SynthResult) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.entries) |slot| {
+            const entry = slot orelse continue;
+            if (entry.key.eql(key)) return;
+        }
+        self.entries[self.next] = .{ .key = key, .result = result };
+        self.next = (self.next + 1) % synth_memo_max;
+    }
+};
+
+var synth_memo: SynthMemo = .{};
+
+/// `findSynthesis` through the process memo. Identical answer either way.
+fn memoisedSynthesis(spec: Spec, circuit: Circuit) SynthResult {
+    const key = synthKey(spec, circuit);
+    if (synth_memo.get(key)) |hit| return hit;
+    const result = findSynthesis(spec, circuit);
+    synth_memo.put(key, result);
+    return result;
+}
+
+/// The content key of one synthesis search: everything `findSynthesis` reads.
+///
+/// The walk over `Spec` is reflective on purpose — a field added to the
+/// declaration is covered the day it is declared, and a type the fingerprint
+/// cannot reduce fails the BUILD rather than going quietly unkeyed. `design` is
+/// the one field taken apart by hand, because its operating curve holds raw
+/// AST nodes; the SEARCH reads them only through `profileSample`, so the parsed
+/// points are what is folded in, and the compile-time length check below fails
+/// the build if `DesignMode` ever grows a third field nobody keyed.
+fn synthKey(spec: Spec, circuit: Circuit) content_key.Key {
+    comptime std.debug.assert(@typeInfo(DesignMode).@"struct".field_names.len == 2);
+    var fp: content_key.Fingerprint = .{};
+    fp.tag(synth_key_version);
+    const info = @typeInfo(Spec).@"struct";
+    inline for (info.field_names, info.field_types) |name, Field| {
+        if (comptime !std.mem.eql(u8, name, "design")) fp.put(Field, @field(spec, name));
+    }
+    fp.put(Synthesis, spec.design.synthesis);
+    fp.put(usize, profileSampleCount(spec));
+    for (0..profileSampleCount(spec)) |index| {
+        const point = profileSample(spec, index) orelse continue;
+        fp.put(usize, index);
+        fp.put(f64, point.pll_n);
+        fp.put(f64, point.kvco_hz_per_v);
+    }
+    fp.put(usize, @typeInfo(Circuit).@"struct".field_names.len);
+    inline for (@typeInfo(Circuit).@"struct".field_names) |name| putValue(&fp, @field(circuit, name));
+    return fp.final();
+}
+
+/// Fold one resolved passive in by the numbers the search reads, and NOT by its
+/// `ref`. The reference designator is what the assertion TEXT prints, and it
+/// differs between a module evaluated standalone and the same module evaluated
+/// inside a design that renumbers it — while the search's answer does not.
+/// Keying on it would miss on exactly the pair this memo exists to join.
+/// The field count is asserted so a new `Value` field is a decision somebody
+/// makes here rather than one that goes quietly unkeyed.
+fn putValue(fp: *content_key.Fingerprint, value: Value) void {
+    comptime std.debug.assert(@typeInfo(Value).@"struct".field_names.len == 4);
+    fp.put(f64, value.nominal);
+    fp.put(f64, value.tolerance_pct);
+    fp.put(f64, value.tolerance_abs);
 }
 
 fn findSynthesis(spec: Spec, circuit: Circuit) SynthResult {
@@ -988,6 +1098,95 @@ test "active inverting filter requires negative polarity" {
     const wrong = analyze(spec, c, spec.circuit.charge_pump.value, 200e6).?;
     try std.testing.expect(stable.phase_margin_deg > 40);
     try std.testing.expect(wrong.phase_margin_deg < -100);
+}
+
+/// The declaration + resolved values the memo tests key on. Deliberately not
+/// any real design's numbers: the memo is process-wide, so a fixture that
+/// collided with an authored `(pll-loop …)` would seed that design's answer.
+const memo_point_a = [_]Node{ Node.atom(ast.Span.zero, "point"), Node.float(ast.Span.zero, 26), Node.float(ast.Span.zero, 410e6) };
+const memo_point_b = [_]Node{ Node.atom(ast.Span.zero, "point"), Node.float(ast.Span.zero, 31), Node.float(ast.Span.zero, 690e6) };
+const memo_point_b_moved = [_]Node{ Node.atom(ast.Span.zero, "point"), Node.float(ast.Span.zero, 31), Node.float(ast.Span.zero, 700e6) };
+
+fn memoFixture() struct { spec: Spec, circuit: Circuit, points: [2]Node } {
+    return .{
+        .points = .{ Node.list(ast.Span.zero, &memo_point_a), Node.list(ast.Span.zero, &memo_point_b) },
+        .spec = .{
+            .name = "pll-loop memo fixture",
+            .topology_active_inverting = true,
+            .circuit = .{
+                .pfd_hz = 100e6,
+                .charge_pump = .{ .value = 2.5e-3, .tolerance_pct = 2.5 },
+                .feedback = .{ .prescaler = 4, .pll_n = 26 },
+                .kvco_hz_per_v = .{ .min = 410e6, .max = 690e6 },
+                .op_amp = .{ .gbw_hz = 145e6, .dc_gain = 500_000 },
+                .polarity = .negative,
+            },
+            .requirements = .{
+                .phase = .{ .target_deg = .{ .min = 45, .max = 55 }, .hard_min_deg = 40 },
+                .ramp = .{ .span_hz = 1.5e9, .time_s = 35e-6, .max_phase_error_rad = 1 },
+            },
+            .design = .{ .synthesis = .{ .enabled = true } },
+        },
+        .circuit = .{
+            .c_cp = .{ .nominal = 12e-12, .tolerance_pct = 2, .ref = "C_CP" },
+            .r_in = .{ .nominal = 220, .tolerance_pct = 1, .ref = "R_IN" },
+            .r_feedback = .{ .nominal = 3000, .tolerance_pct = 1, .ref = "R_FB" },
+            .c_feedback = .{ .nominal = 82e-12, .tolerance_pct = 2, .ref = "C_FB" },
+            .c_feedback_hf = .{ .nominal = 2.7e-12, .tolerance_pct = 3.7, .ref = "C_FB_HF" },
+            .r_isolation = .{ .nominal = 120, .tolerance_pct = 1, .ref = "R_ISO" },
+            .c_tune = .{ .nominal = 180e-12, .tolerance_pct = 5, .ref = "C_VTUNE" },
+            .extra_tune_cap = .{ .nominal = 20e-12, .tolerance_pct = 2, .ref = "extra" },
+        },
+    };
+}
+
+// spec: pll-loop - the synthesis search is memoised on its complete input, so a design evaluated again runs it no second time and a changed value never reads the old answer
+test "the synthesis memo answers only the identical declaration and circuit" {
+    var fixture = memoFixture();
+    fixture.spec.design.operating_curve = .{ .point_nodes = &fixture.points };
+    const key = synthKey(fixture.spec, fixture.circuit);
+    try std.testing.expect(key.eql(synthKey(fixture.spec, fixture.circuit)));
+
+    // The memo is consulted, not merely written: a seeded answer comes back
+    // without the 6,000-candidate search ever running.
+    const seeded = SynthResult{
+        .corner = .{ .c_cp = 1, .r_in = 2, .r_feedback = 3, .c_feedback = 4, .c_feedback_hf = 5, .r_isolation = 6, .c_tune = 7 },
+        .anchor_step = 9,
+        .nominal = .{},
+        .tolerance = .{},
+    };
+    synth_memo.put(key, seeded);
+    const hit = memoisedSynthesis(fixture.spec, fixture.circuit);
+    try std.testing.expectEqual(@as(usize, 9), hit.anchor_step);
+    try std.testing.expectEqual(@as(f64, 3), hit.corner.r_feedback);
+
+    // Every input the search reads re-keys: a component value, an operating
+    // point, a synthesis range, and a scalar of the declaration itself.
+    var other_circuit = fixture.circuit;
+    other_circuit.r_feedback.nominal = 3300;
+    try std.testing.expect(!key.eql(synthKey(fixture.spec, other_circuit)));
+
+    // …and the ref-des does NOT: the same module renumbers between a standalone
+    // evaluation and its instantiation inside a design, and the search's answer
+    // does not depend on what the assertion text will call the part.
+    var renumbered = fixture.circuit;
+    renumbered.r_feedback.ref = "R47";
+    renumbered.c_tune.ref = "C93";
+    try std.testing.expect(key.eql(synthKey(fixture.spec, renumbered)));
+
+    var moved = fixture.points;
+    moved[1] = Node.list(ast.Span.zero, &memo_point_b_moved);
+    var moved_spec = fixture.spec;
+    moved_spec.design.operating_curve = .{ .point_nodes = &moved };
+    try std.testing.expect(!key.eql(synthKey(moved_spec, fixture.circuit)));
+
+    var narrowed = fixture.spec;
+    narrowed.design.synthesis.resistor_range = .{ .min = 100, .max = 10_000 };
+    try std.testing.expect(!key.eql(synthKey(narrowed, fixture.circuit)));
+
+    var faster = fixture.spec;
+    faster.circuit.pfd_hz = 120e6;
+    try std.testing.expect(!key.eql(synthKey(faster, fixture.circuit)));
 }
 
 // spec: pll-loop - E24 synthesis jointly satisfies an authored divider/Kvco curve, tolerance corners, and ramp limit

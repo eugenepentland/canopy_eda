@@ -55,7 +55,33 @@ pub fn assemble(
     // rastering a poured board's zones for it is the dominant cost of this
     // whole request — computing it twice made `/api/layout-progress` take 100 s
     // on barracuda-base (15 zones) instead of 50 s.
-    const conn = try fab_readiness.netConnectivity(arena, placement, copper);
+    // That pass rasters every plane and pour of the board, and it is the same
+    // raster the reporting DRC of `/api/pcb-describe` (and the editor page it
+    // trails by an edit) has almost always already poured. Ask the process fill
+    // memo for this exact copper first: a hit makes the sweep a graph walk, and
+    // a miss pours the board ONCE here for the sweep and the fab gate together
+    // rather than once per plane-carried net.
+    const base = drc_rules.sharedEdgeField(arena, placement) catch null;
+    var board = drc_rules.sharedFills(arena, .{
+        .placement = placement,
+        .routed = .{
+            .tracks = shown.tracks,
+            .arcs = shown.arcs,
+            .vias = shown.vias,
+            .rf_port_outcomes = shown.rf_paths,
+            .routed = 0,
+            .total = 0,
+        },
+        .clearance = placement.rules.design.clearance,
+        .zones = shown.zones,
+        .base_edge = base,
+    });
+    defer board.release();
+    const conn = try fab_readiness.netConnectivityPrepared(arena, placement, copper, .{
+        .plane_fills = board.plane_fills,
+        .zone_fills = if (board.failed) null else board.zone_fills,
+        .base = base,
+    });
     const fab = try fab_readiness.check(arena, placement, copper, .{
         .from_saved_layout = shown.from_saved,
         .drc_rules = drc_rules.load(arena, project_dir, name),

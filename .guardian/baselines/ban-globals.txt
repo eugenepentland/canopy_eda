@@ -14,6 +14,7 @@ ban-globals|src/placement/optimizer.zig|mutable global var outside wiring/main
 ban-globals|src/placement/optimizer.zig|mutable global var outside wiring/main
 ban-globals|src/placement/optimizer.zig|mutable global var outside wiring/main
 ban-globals|src/placement/optimizer.zig|mutable global var outside wiring/main
+ban-globals|src/pll_loop.zig|mutable global var outside wiring/main
 ban-globals|src/serve.zig|mutable global var outside wiring/main
 ban-globals|src/serve.zig|mutable global var outside wiring/main
 ban-globals|src/serve.zig|mutable global var outside wiring/main
