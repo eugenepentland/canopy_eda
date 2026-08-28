@@ -7267,10 +7267,10 @@ window.PCBTraceFilletRfPaths=traceFilletRfPaths;
 // lowering seam:
 //  · an authored pad neck stays at pad_neck_width for max_length, then grows
 //    over taper_length (the ordinary autorouter pad_neck pass);
-//  · every single-ended controlled-impedance route starts at the ACTUAL SMD
-//    land width, whether narrower or wider, holds through the pad edge, then
-//    reaches nominal over 1.2 trace widths. This is local launch geometry:
-//    vias, opposite-side terminals, and branches elsewhere do not suppress it.
+//  · every single-ended controlled-impedance route starts at the ACTUAL land
+//    width, whether an SMD pad or a through-via, holds through the copper edge,
+//    then reaches nominal over 1.2 trace widths. This is local launch geometry:
+//    opposite-side terminals and branches elsewhere do not suppress it.
 // The completed route keeps its compact centreline as edit handles and stores
 // one swept custom-copper polygon as the physical width authority. DRC lowers
 // that path privately when it needs capsule probes; the object list never
@@ -7279,6 +7279,10 @@ function drawEndpointPad(net,l,x,y){var hit=null,key=net||"";
  P.some(function(p,i){return (p.pads||[]).some(function(pd){if(pd.thru||!pd.net||pd.net!==key)return false;
    var pl=p.side==="bottom"?1:0,c=wpt(i,pd.x,pd.y);if(pl!==l||Math.hypot(c.x-x,c.y-y)>1e-7)return false;
    hit={i:i,pd:pd,l:pl};return true;});});return hit;}
+function drawEndpointVia(net,x,y){var hit=null,key=net||"";
+ (PCB.vias||[]).some(function(v){if((v.net||"")!==key||!drawSamePointXY(v.x,v.y,x,y))return false;
+  hit={via:v,pd:{w:+v.d||.4,h:+v.d||.4,shape:"circle",thru:true},l:null};return true;});return hit;}
+function drawEndpointLand(net,l,x,y){return drawEndpointPad(net,l,x,y)||drawEndpointVia(net,x,y);}
 function drawPadFrame(pad){if(!pad||!pad.pd)return null;
  var pd=pad.pd,a=(+pd.rot||0)*Math.PI/180,c=wpt(pad.i,pd.x,pd.y),
   q=wpt(pad.i,pd.x+Math.cos(a),pd.y+Math.sin(a)),ux=q.x-c.x,uy=q.y-c.y,ul=Math.hypot(ux,uy)||1;
@@ -7313,7 +7317,8 @@ window.PCBDrawPadLaunch=drawPadLaunch;
 // one endpoint tangent through the pad forever. The first box-boundary
 // crossing supplies both the real path length held at land width and the
 // angle-aware span where copper actually exits.
-function drawPathPadLaunch(tracks,pad,start){var f=drawPadFrame(pad);if(!f||!tracks||!tracks.length)return null;
+function drawPathPadLaunch(tracks,pad,start){if(pad&&pad.via){var d=+pad.via.d||.4;return {land:d/2,span:d,portal:null};}
+ var f=drawPadFrame(pad);if(!f||!tracks||!tracks.length)return null;
  var total=0,n=tracks.length;
  for(var ti=0;ti<n;ti++){var t=start?tracks[ti]:drawReverseTrack(tracks[n-1-ti]),ch=trackChords(t),piece=trackLength(t)/ch.length;
   for(var j=0;j<ch.length;j++){var a={x:ch[j].x1,y:ch[j].y1},b={x:ch[j].x2,y:ch[j].y2},la=f.local(a),lb=f.local(b),
@@ -7332,7 +7337,7 @@ function drawTaperProfile(net,pad,nominal,dir){if(!pad||!pad.pd)return null;
  var classW=+c.width||+((PCB.rules||{}).track_width)||baseTrackW(),power=+c.adaptive_power_width||0,
   classMatch=classW>0&&Math.abs(nominal-classW)<=1e-7,powerMatch=power>0&&Math.abs(nominal-power)<=1e-7;
  if(!classMatch&&!powerMatch)return null;
- var launch=dir&&dir.land!=null&&dir.span!=null?dir:drawPadLaunch(pad,dir),span=launch?launch.span:Math.min(+pad.pd.w||0,+pad.pd.h||0);
+ var launch=dir&&dir.land!=null&&dir.span!=null?dir:(pad.via?drawPathPadLaunch(null,pad,true):drawPadLaunch(pad,dir)),span=launch?launch.span:Math.min(+pad.pd.w||0,+pad.pd.h||0);
  // A power land launches at its smaller physical dimension regardless of the
  // approach angle. Hold that width through the ACTUAL pad boundary, then use
  // the shortest 45-degree-sided transition. This physical land rule supersedes
@@ -7344,7 +7349,7 @@ function drawTaperProfile(net,pad,nominal,dir){if(!pad||!pad.pd)return null;
   return {kind:"power",width:powerPadWidth,land:launch?launch.land:Math.max(+pad.pd.w||0,+pad.pd.h||0)/2,
    taper:powerTaper,step:Math.max(.005,powerTaper/4)};}
  var neck=+c.pad_neck_width||0;
- if(neck>0){neck=Math.max(neck,+((PCB.rules||{}).min_width)||0);
+ if(!pad.via&&neck>0){neck=Math.max(neck,+((PCB.rules||{}).min_width)||0);
   if(neck<nominal-1e-9&&span<nominal-1e-9)
    return {kind:"neck",width:neck,land:(+c.pad_neck_max_length||.75),taper:(+c.pad_neck_taper_length||.35),step:.025};}
  if(!(+c.impedance_ohms>0)||(+c.diff_impedance_ohms>0))return null;
@@ -7480,18 +7485,16 @@ function drawTaperPathSet(tracks,start,end,nominal){var main=drawTaperPath(track
  if(head)out.push(head);if(tail&&!out.some(function(path){return drawSamePortalPath(tail,path);}))out.push(tail);return out;}
 function drawTaperPortalProbes(paths){var out=[];(paths||[]).forEach(function(p){if(!p.portal||!p.samples||p.samples.length!==2)return;
   var a=p.samples[0],b=p.samples[1];out.push({x1:a[0],y1:a[1],x2:b[0],y2:b[1],l:p.l||0,w:Math.max(+a[2],+b[2]),net:p.net||""});});return out;}
-// Keep a via-fed gesture's two launch profiles on their own contiguous layer
-// runs. The middle (including every via transition) remains nominal centreline
-// copper and no custom path claims tracks from another layer.
-function drawRfTaperPlan(tracks,start,end,nominal){var n=tracks.length,head=0,tail=n,paths=[],shaped=[];
- if(start){var hl=tracks[0].l||0;while(head<n&&(tracks[head].l||0)===hl)head++;}
- if(end){var el=tracks[n-1].l||0;while(tail>0&&(tracks[tail-1].l||0)===el)tail--;}
- if(start&&end&&head>tail)return {tracks:drawTaperTracks(tracks,start,end,nominal),paths:drawTaperPathSet(tracks,start,end,nominal)};
- if(start){var first=tracks.slice(0,head);
-  shaped=shaped.concat(drawTaperTracks(first,start,null,nominal));paths=paths.concat(drawTaperPathSet(first,start,null,nominal));}
- shaped=shaped.concat(tracks.slice(start?head:0,end?tail:n));
- if(end){var last=tracks.slice(tail);
-  shaped=shaped.concat(drawTaperTracks(last,null,end,nominal));paths=paths.concat(drawTaperPathSet(last,null,end,nominal));}
+// Keep a via-fed gesture's launch profiles on their own contiguous layer runs.
+// Each through-via contributes its real annulus width independently on both
+// connected faces, and no custom path claims tracks from another layer.
+function drawRfTaperPlan(tracks,start,end,nominal){var n=tracks.length,paths=[],shaped=[],i=0;
+ while(i<n){var layer=tracks[i].l||0,j=i+1;while(j<n&&(tracks[j].l||0)===layer)j++;
+  var run=tracks.slice(i,j),first=run[0],last=run[run.length-1],sp=i===0?start:null,ep=j===n?end:null;
+  if(i>0){var sv=drawEndpointVia(first.net,first.x1,first.y1);sp=drawTaperProfile(first.net,sv,nominal,drawPathPadLaunch(run,sv,true));}
+  if(j<n){var ev=drawEndpointVia(last.net,last.x2,last.y2);ep=drawTaperProfile(last.net,ev,nominal,drawPathPadLaunch(run,ev,false));}
+  if(sp||ep){shaped=shaped.concat(drawTaperTracks(run,sp,ep,nominal));paths=paths.concat(drawTaperPathSet(run,sp,ep,nominal));}
+  else shaped=shaped.concat(run);i=j;}
  return {tracks:shaped,paths:paths};}
 window.PCBDrawRfTaperPlan=drawRfTaperPlan;
 // Pure physical-copper plan for one ordered hand-route run. The live clearance
@@ -7520,7 +7523,7 @@ function drawAutomaticTaperPlan(tracks,startPad,endPad,nominal,taperScale){var o
  return {tracks:shaped,paths:paths,compactable:compactable,scale:scale};}
 window.PCBDrawAutomaticTaperPlan=drawAutomaticTaperPlan;
 function drawProspectiveTaperPlan(plan){if(!dtrace||dtrace.pair||!plan||!plan.tracks||!plan.tracks.length)return {tracks:(plan&&plan.tracks)||[],paths:[]};
- var tracks=plan.tracks,last=tracks[tracks.length-1],ep=drawEndpointPad(last.net,last.l||0,last.x2,last.y2);
+ var tracks=plan.tracks,last=tracks[tracks.length-1],ep=drawEndpointLand(last.net,last.l||0,last.x2,last.y2);
  return drawAutomaticTaperPlan(tracks,dtrace.n===0?dtrace.startPad:null,ep,dtrace.w);}
 function drawTaperPathOwnsProbe(paths,t){return (paths||[]).some(function(p){if(p.portal||+(p.l||0)!==+(t.l||0)||(p.net||"")!==(t.net||""))return false;
  var ss=p.samples||[];return ss.length>1&&(rfPathCoversTrack(ss,t,[t.x1,t.y1],[t.x2,t.y2])||rfPathCoversTrack(ss,t,[t.x2,t.y2],[t.x1,t.y1]));});}
@@ -7546,7 +7549,7 @@ function drawTaperPathsPadViolation(paths,layer,net){var clr=netClrFor(net),regi
  return false;}
 function drawApplyAutomaticTapers(){if(!dtrace||dtrace.pair||!dtrace.laid||!dtrace.laid.length)return {ok:true,changed:false,paths:[]};
  var old=dtrace.laid.slice(),nominal=dtrace.w,powerTarget=+dtrace.powerTarget||0,power=powerTarget>nominal+1e-9;
- var ep=drawEndpointPad(dtrace.net,dtrace.l,dtrace.lx,dtrace.ly),board=PCB.tracks||[],base=dtrace.undo||{},
+ var ep=drawEndpointLand(dtrace.net,dtrace.l,dtrace.lx,dtrace.ly),board=PCB.tracks||[],base=dtrace.undo||{},
   scales=[1,.75,.5,.25,.125,.0625],physical=null,initial=power?drawAdaptivePowerPlan(old,dtrace.startPad,ep,nominal,powerTarget):drawAutomaticTaperPlan(old,dtrace.startPad,ep,nominal,1);
  if(!initial.paths.length)return {ok:true,changed:false,paths:[],omitted:power,power:power,maxWidth:nominal};
  // Never materialise automatic copper that the exact gate did not inspect. A
@@ -7586,7 +7589,7 @@ function drawRfRetrofitRun(seed,reverse,nominal,pad,start,claimed){var first=rev
  run=[first],used={};used[trackIdEnsure(seed)]=1;var total=trackLength(first),endPad=null,
  walk=start.land+start.taper+Math.hypot(+pad.pd.w||0,+pad.pd.h||0);
  for(var guard=0;guard<256;guard++){
-  var last=run[run.length-1],x=last.x2,y=last.y2,finishPad=drawEndpointPad(last.net,last.l||0,x,y);
+  var last=run[run.length-1],x=last.x2,y=last.y2,finishPad=drawEndpointLand(last.net,last.l||0,x,y);
   if(finishPad){endPad=finishPad;break;}
   if(total>=walk-1e-9||drawViaAt(last.net,x,y))break;
   var next=[];(PCB.tracks||[]).forEach(function(t){var id=trackIdEnsure(t);if(used[id]||claimed[id]||rfOwnsTrack(t))return;
@@ -7602,7 +7605,7 @@ function drawRfRetrofitGroups(){var claimed={},groups=[];
  (PCB.tracks||[]).forEach(function(t){var id=trackIdEnsure(t);if(claimed[id]||rfOwnsTrack(t))return;
   var c=netClassInfo(t.net||"");if(!c||!(+c.impedance_ohms>0)||(+c.diff_impedance_ohms>0))return;
   var nominal=+c.width||+((PCB.rules||{}).track_width)||baseTrackW();if(!(nominal>0)||Math.abs((+t.w||0)-nominal)>1e-7)return;
-  for(var end=0;end<2&&!claimed[id];end++){var x=end?t.x2:t.x1,y=end?t.y2:t.y1,pad=drawEndpointPad(t.net,t.l||0,x,y);
+  for(var end=0;end<2&&!claimed[id];end++){var x=end?t.x2:t.x1,y=end?t.y2:t.y1,pad=drawEndpointLand(t.net,t.l||0,x,y);
    if(!pad)continue;var oriented=end?drawReverseTrack(t):t,profile=drawTaperProfile(t.net,pad,nominal,drawTrackEndDirection(oriented,true));
    if(!profile)continue;var group=drawRfRetrofitRun(t,!!end,nominal,pad,profile,claimed);if(group)groups.push(group);}});
  return groups;}
@@ -8447,7 +8450,7 @@ function drawStart(net,layer,x,y,pi,pd){
   dests.map(function(d){return refLabel(P[d.i].ref);}).join(", "));
  var geo=drawNetGeometry(net),tr={net:net,l:layer,w:geo.width,powerTarget:geo.target,lx:x,ly:y,n:0,undo:snapAll(),laid:[],dest:dests,pdir:null,steps:[],
   startRoot:drawStartRoot(pi,pd,net,layer,x,y),ratTargets:[],
-  startPad:(pi!=null&&pd&&!pd.thru)?{i:pi,pd:pd,l:layer}:null};
+  startPad:(pi!=null&&pd&&!pd.thru)?{i:pi,pd:pd,l:layer}:drawEndpointVia(net,x,y)};
  tr.ratTargets=drawRatTargets(tr);
  // Auto-couple a declared pair from either its launch pads or already-routed
  // copper. The latter is what preserves pair mode after ending at a via and

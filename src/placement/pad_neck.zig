@@ -2,13 +2,13 @@
 //!
 //! A net class may keep a wide nominal trunk while authorizing a short narrow
 //! escape at SMD lands. A single-ended controlled-impedance class instead
-//! transitions from every actual SMD launch span, whether wider or narrower,
-//! to its nominal line. Controlled-width signals search with their nominal
-//! class geometry. Current-rated power nets instead search a fabrication-legal
-//! centreline, then this pass grows them toward their electrical target under
-//! exact clearance and adds pad/congestion tapers. At the final output boundary
-//! the pass subdivides only width-changing spans into fabrication-real
-//! constant-width slices.
+//! transitions from every actual SMD launch span or through-via annulus,
+//! whether wider or narrower, to its nominal line. Controlled-width signals
+//! search with their nominal class geometry. Current-rated power nets instead
+//! search a fabrication-legal centreline, then this pass grows them toward
+//! their electrical target under exact clearance and adds pad/congestion
+//! tapers. At the final output boundary the pass subdivides only width-changing
+//! spans into fabrication-real constant-width slices.
 //!
 //! Constant-width slices are intentional. They are understood identically by
 //! the route viewer, DRC, Gerber writer, KiCad writer, and saved-layout schema;
@@ -292,8 +292,14 @@ fn shapeTrack(arena: std.mem.Allocator, out: *std.ArrayList(router.Track), shape
     }
 }
 
-fn rfEndpointProfile(
+const EndpointCopper = struct {
     pads: []const Pad,
+    vias: []const router.Via,
+    net: i32,
+};
+
+fn rfEndpointProfile(
+    copper: EndpointCopper,
     point: [2]f64,
     layer: u8,
     nominal: f64,
@@ -302,13 +308,20 @@ fn rfEndpointProfile(
     var found = false;
     var width: f64 = 0;
     var land: f64 = 0;
-    for (pads) |pad| {
+    for (copper.pads) |pad| {
         if (pad.layer != layer or !samePoint(pad.at, point)) continue;
         const span = launchSpan(pad, direction);
         if (!(span > 0)) continue;
         found = true;
         width = @max(width, span);
         land = @max(land, boxRayHalfExtent(pad, direction));
+    }
+    for (copper.vias) |via| {
+        if (via.net != copper.net or !samePoint(.{ via.x, via.y }, point)) continue;
+        if (!(via.dia > 0)) continue;
+        found = true;
+        width = @max(width, via.dia);
+        land = @max(land, via.dia / 2);
     }
     if (!found or @abs(width - nominal) <= eps) return null;
     return .{ .width = width, .land = land, .taper = nominal * rf_taper_widths };
@@ -524,8 +537,8 @@ fn adaptPowerTracks(board: router.CleanupBoard) std.mem.Allocator.Error!bool {
 
 /// Shape every selected generated net that declares a pad-local neck or a
 /// single-ended controlled-impedance target. Controlled-impedance shaping is
-/// local to each SMD endpoint, so vias and branches elsewhere on the net do
-/// not suppress an otherwise valid launch transition.
+/// local to each SMD or through-via endpoint, so branches elsewhere on the net
+/// do not suppress an otherwise valid launch transition.
 ///
 /// This is the copper-only seam used by scoped route replay before its output
 /// is offered to the assembled-board gate. Normal complete-board routing uses
@@ -534,6 +547,7 @@ pub fn shapeGeneratedTracks(
     arena: std.mem.Allocator,
     placement: optimizer.Placement,
     selected_nets: []const bool,
+    vias: []const router.Via,
     tracks: *std.ArrayList(router.Track),
 ) std.mem.Allocator.Error!bool {
     var out: std.ArrayList(router.Track) = .empty;
@@ -584,7 +598,7 @@ pub fn shapeGeneratedTracks(
         ))
             .{ .width = neck, .land = neck_len, .taper = taper_len }
         else if (controlled_impedance)
-            rfEndpointProfile(pads, .{ track.x1, track.y1 }, track.layer, nominal, direction)
+            rfEndpointProfile(.{ .pads = pads, .vias = vias, .net = track.net }, .{ track.x1, track.y1 }, track.layer, nominal, direction)
         else
             null;
         const end: ?Profile = if (authored and endpointNeedsNeck(
@@ -597,7 +611,7 @@ pub fn shapeGeneratedTracks(
         ))
             .{ .width = neck, .land = neck_len, .taper = taper_len }
         else if (controlled_impedance)
-            rfEndpointProfile(pads, .{ track.x2, track.y2 }, track.layer, nominal, direction)
+            rfEndpointProfile(.{ .pads = pads, .vias = vias, .net = track.net }, .{ track.x2, track.y2 }, track.layer, nominal, direction)
         else
             null;
         if (start == null and end == null) {
@@ -622,7 +636,7 @@ pub fn shapeGeneratedTracks(
 /// list changes.
 pub fn passBoard(board: router.CleanupBoard) std.mem.Allocator.Error!void {
     const adaptive = try adaptPowerTracks(board);
-    const authored = try shapeGeneratedTracks(board.ctx.arena, board.placement, board.ctx.selected_nets, board.tracks);
+    const authored = try shapeGeneratedTracks(board.ctx.arena, board.placement, board.ctx.selected_nets, board.vias.items, board.tracks);
     if (adaptive or authored) router.copperCompacted(board.ctx);
 }
 
@@ -851,12 +865,60 @@ test "generated controlled-impedance launch tapers both wider and narrower lands
     };
     var tracks: std.ArrayList(router.Track) = .empty;
     try tracks.append(arena, .{ .x1 = 0, .y1 = 0, .x2 = 3, .y2 = 0, .layer = 0, .width = 0.4, .net = 0 });
-    try testing.expect(try shapeGeneratedTracks(arena, placement, &.{true}, &tracks));
+    try testing.expect(try shapeGeneratedTracks(arena, placement, &.{true}, &.{}, &tracks));
     try testing.expectApproxEqAbs(@as(f64, 0.6), tracks.items[0].width, eps);
     try testing.expectApproxEqAbs(@as(f64, 0.2), tracks.items[tracks.items.len - 1].width, eps);
     var saw_nominal = false;
     for (tracks.items) |track| saw_nominal = saw_nominal or @abs(track.width - 0.4) <= eps;
     try testing.expect(saw_nominal);
+}
+
+// spec: placement/rf-port-frame-routing - every single-ended controlled-impedance through-via launch tapers between the via's actual annulus diameter and nominal width independently on every connected signal layer
+test "generated controlled-impedance trace tapers into both faces of a through-via" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const nets = [_]flat_netlist.FlatNet{.{ .name = "RF", .pins = &.{} }};
+    const rules = [_]optimizer.NetRule{.{
+        .width = 0.2,
+        .rf = .{ .impedance = .{ .ohms = 50 } },
+    }};
+    const placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .rules = .{ .net = &rules, .design = .{ .track_width = 0.127, .min_width = 0.127 } },
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -2,
+        .miny = -1,
+        .maxx = 2,
+        .maxy = 1,
+        .generated = true,
+    };
+    const vias = [_]router.Via{.{ .x = 0, .y = 0, .dia = 0.6, .drill = 0.3, .net = 0 }};
+    var tracks: std.ArrayList(router.Track) = .empty;
+    try tracks.appendSlice(arena, &.{
+        .{ .x1 = -2, .y1 = 0, .x2 = 0, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 1, .width = 0.2, .net = 0 },
+    });
+
+    try testing.expect(try shapeGeneratedTracks(arena, placement, &.{true}, &vias, &tracks));
+    var top_via_width: ?f64 = null;
+    var bottom_via_width: ?f64 = null;
+    var saw_top_nominal = false;
+    var saw_bottom_nominal = false;
+    for (tracks.items) |track| {
+        if (samePoint(.{ track.x2, track.y2 }, .{ 0, 0 }) and track.layer == 0) top_via_width = track.width;
+        if (samePoint(.{ track.x1, track.y1 }, .{ 0, 0 }) and track.layer == 1) bottom_via_width = track.width;
+        saw_top_nominal = saw_top_nominal or (track.layer == 0 and @abs(track.width - 0.2) <= eps);
+        saw_bottom_nominal = saw_bottom_nominal or (track.layer == 1 and @abs(track.width - 0.2) <= eps);
+    }
+    try testing.expectApproxEqAbs(@as(f64, 0.6), top_via_width.?, eps);
+    try testing.expectApproxEqAbs(@as(f64, 0.6), bottom_via_width.?, eps);
+    try testing.expect(saw_top_nominal and saw_bottom_nominal);
 }
 
 test "generated track keeps nominal width at a land that can carry its launch" {
@@ -893,7 +955,7 @@ test "generated track keeps nominal width at a land that can carry its launch" {
     };
     var tracks: std.ArrayList(router.Track) = .empty;
     try tracks.append(arena, .{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.35, .net = 0 });
-    try testing.expect(try shapeGeneratedTracks(arena, placement, &.{true}, &tracks));
+    try testing.expect(try shapeGeneratedTracks(arena, placement, &.{true}, &.{}, &tracks));
     try testing.expectEqual(@as(f64, 0.20), tracks.items[0].width);
     try testing.expectEqual(@as(f64, 0.35), tracks.items[tracks.items.len - 1].width);
     try testing.expect(!try allowsTrack(arena, placement, .{

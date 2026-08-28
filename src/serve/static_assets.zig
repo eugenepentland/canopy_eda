@@ -1112,7 +1112,7 @@ test "PCB editor automatically lowers every local controlled-impedance pad taper
         "function drawTaperProfile",                                 "Math.abs(span-nominal)<=1e-9",           "pad_neck_width",                                       "kind:\"rf\"",
         "nominal*1.2",                                               "function drawTaperTracks",               "function drawApplyAutomaticTapers",                    "automatic pad tapers added",
         "window.PCBDrawTaperTracks",                                 "function drawTaperPath",                 "track_ids:tracks.map(trackIdEnsure)",                  "window.PCBDrawPadLaunch",
-        "function drawRfTaperPlan",                                  "window.PCBDrawRfTaperPlan",              "vias, opposite-side terminals",                        "function drawTrackEndDirection",
+        "function drawRfTaperPlan",                                  "window.PCBDrawRfTaperPlan",              "through-via contributes its real annulus width",       "function drawTrackEndDirection",
         "function rfFallbackRegions",                                "function rfRingFolded",                  "overlapping simple segment",                           "polys=rfFallbackRegions(pts,ws,poly)",
         "function rfCleanSamples",                                   "function rfCompactRing",                 "ws[last]=Math.max(ws[last],w)",                        "clean.pts.length<2",
         "function drawPathPadLaunch",                                "window.PCBDrawPathPadLaunch",            "first box-boundary",                                   "span:f.spanAt(ex,ey,-wy,wx)",

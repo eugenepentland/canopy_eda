@@ -125,6 +125,83 @@ function load(names, globals = {}) {
 }
 
 {
+  const PCB = { vias: [{ x: 0, y: 0, d: 0.6, net: "RF" }], rules: { min_width: 0.1, track_width: 0.2 } };
+  const globals = {
+    PCB,
+    netClassInfo() { return { width: 0.2, impedance_ohms: 50, diff_impedance_ohms: 0 }; },
+    baseTrackW() { return 0.2; },
+  };
+  const g = load(["drawSamePointXY", "drawEndpointVia", "drawPathPadLaunch", "drawTaperProfile"], globals);
+  const via = g.drawEndpointVia("RF", 0, 0);
+  assert(via?.via, "a through-via must resolve as an RF taper endpoint");
+  assert.equal(g.drawEndpointVia("OTHER", 0, 0), null, "a foreign via must not become this net's endpoint");
+  const launch = g.drawPathPadLaunch(null, via, true);
+  assert.equal(launch.span, 0.6);
+  assert.equal(launch.land, 0.3);
+  const profile = g.drawTaperProfile("RF", via, 0.2, launch);
+  assert.equal(profile.width, 0.6, "the flare must meet the through-via's actual copper diameter");
+  assert.equal(profile.land, 0.3, "the via diameter must be held through the annulus edge");
+  assert.equal(profile.taper, 0.24);
+  assert.equal(profile.portal, null, "a circular via needs no rectangular pad collar");
+}
+
+{
+  const PCB = { vias: [{ x: 0, y: 0, d: 0.6, net: "RF" }], rules: { min_width: 0.1, track_width: 0.2 } };
+  let nextId = 0;
+  const globals = {
+    PCB,
+    netClassInfo() { return { width: 0.2, impedance_ohms: 50, diff_impedance_ohms: 0 }; },
+    baseTrackW() { return 0.2; },
+    trackArcGeom() { return null; },
+    trackLength(t) { return Math.hypot(t.x2 - t.x1, t.y2 - t.y1); },
+    trackChords(t) { return [t]; },
+    trackIdEnsure(t) { return t.id || (t.id = `t${++nextId}`); },
+    trackIdNew() { return `s${++nextId}`; },
+  };
+  const g = load([
+    "drawSamePointXY", "drawEndpointVia", "drawPathPadLaunch", "drawTaperProfile",
+    "drawProfileWidth", "drawTrackPoint", "drawTrackPiece", "drawTaperTracks", "drawTaperPath",
+    "drawTaperPortalPath", "drawSamePortalPath", "drawTaperPathSet", "drawRfTaperPlan",
+  ], globals);
+  const plan = g.drawRfTaperPlan([
+    { x1: -2, y1: 0, x2: 0, y2: 0, l: 0, w: 0.2, net: "RF" },
+    { x1: 0, y1: 0, x2: 2, y2: 0, l: 1, w: 0.2, net: "RF" },
+  ], null, null, 0.2);
+  assert.equal(plan.paths.length, 2, "a layer transition must get one taper path on each connected face");
+  assert.equal(plan.paths[0].samples.at(-1)[2], 0.6, "the incoming face must widen into the via");
+  assert.equal(plan.paths[1].samples[0][2], 0.6, "the outgoing face must leave at the via diameter");
+  assert(plan.paths.every((path) => new Set(path.samples.map((s) => s[2])).size > 1),
+    "both via faces must carry a real variable-width transition");
+}
+
+{
+  const track = { id: "via-run", x1: 0, y1: 0, x2: 2, y2: 0, l: 0, w: 0.2, net: "RF" };
+  const PCB = { tracks: [track], vias: [{ x: 0, y: 0, d: 0.6, net: "RF" }] };
+  let seededVia = null;
+  const globals = {
+    PCB,
+    P: [],
+    drawEndpointPad() { return null; },
+    netClassInfo() { return { width: 0.2, impedance_ohms: 50, diff_impedance_ohms: 0 }; },
+    baseTrackW() { return 0.2; },
+    trackIdEnsure(t) { return t.id; },
+    rfOwnsTrack() { return false; },
+    drawTrackEndDirection() { return { x: 1, y: 0 }; },
+    drawTaperProfile(_net, land) { return land?.via ? { width: land.via.d } : null; },
+    drawRfRetrofitRun(_track, _reverse, _nominal, land) {
+      seededVia = land;
+      return [{ net: "RF", l: 0, samples: [[0, 0, 0.6], [1, 0, 0.2]] }];
+    },
+  };
+  const g = load([
+    "drawSamePointXY", "drawEndpointVia", "drawEndpointLand", "drawReverseTrack", "drawRfRetrofitGroups",
+  ], globals);
+  const groups = g.drawRfRetrofitGroups();
+  assert.equal(groups.length, 1, "saved nominal-width copper must seed a retrofit from its through-via endpoint");
+  assert.equal(seededVia?.via, PCB.vias[0]);
+}
+
+{
   const g = load(["segsCross", "polySelfIntersects", "polyContains", "rfRingFolded", "rfFallbackRegions"]);
   const points = [
     [143.96, 105.45],
