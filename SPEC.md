@@ -3112,6 +3112,7 @@ Public functions: compute, computeMaskShared, computeMasks, initMargin, planeCon
 - the shared fill lattice is pitched for the tighter of the two pour-clearance defaults
 - a foreign net-class clearance widens the ground-pour gap around its track
 - a grounded-coplanar ground gap overrides the generic ground-pour clearance without changing non-ground pours
+- the finished Gerber contour, rather than the raster's conservative guard offset, realizes the controlled-impedance ground gap
 - an opt-in CPWG gap profile follows taper width and stops at its authored maximum
 - restored variable-width RF paths carve their exact swept taper polygon instead of the compact constant-width editor handle
 - native routed arcs carve their exact directed envelope and suppress only stored implementation chords with matching layer, net, and width

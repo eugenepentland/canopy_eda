@@ -1181,7 +1181,7 @@ fn stampForeign(
             if (rfPathOwnsTrack(copper.rf_paths, t)) continue;
             if (nativeArcOwnsTrack(physical_arcs, t)) continue;
             if (planeCarries(spec.net, netName(placement, t.net))) continue;
-            const reach = trackPourClearance(placement, t, spec.net, base);
+            const reach = trackPourStampClearance(placement, t, spec.net, base, g.iso);
             stampSegWithin(g, active, .{ t.x1, t.y1 }, .{ t.x2, t.y2 }, t.width / 2 + reach);
         }
         for (physical_arcs) |arc| {
@@ -1196,7 +1196,7 @@ fn stampForeign(
                 .width = arc.width,
                 .net = arc.net,
             };
-            const reach = trackPourClearance(placement, probe, spec.net, base);
+            const reach = trackPourStampClearance(placement, probe, spec.net, base, g.iso);
             stampArcWithin(g, active, arc, arc.width / 2 + reach);
         }
         for (copper.rf_paths) |path| {
@@ -1213,7 +1213,7 @@ fn stampForeign(
                     .width = piece.width_mm,
                     .net = path.net,
                 };
-                const reach = trackPourClearance(placement, probe, spec.net, base);
+                const reach = trackPourStampClearance(placement, probe, spec.net, base, g.iso);
                 stampPolygonWithin(g, active, piece.poly, reach);
             }
         }
@@ -1476,6 +1476,34 @@ fn trackPourClearance(placement: optimizer.Placement, track: router.Track, plane
         @max(fixed, cap),
     ) catch return fixed;
     return solved.gap_mm;
+}
+
+/// Clearance stamped into the signed field for a same-layer controlled GND
+/// opening. Ordinary clearances are minimum legal spacings, so the tracer's
+/// conservative guard belongs on top of them. A `(ground-gap ...)`, however,
+/// is the FINISHED edge-to-edge CPWG geometry used by the impedance model. The
+/// contour tracer subsequently offsets every stamped obstacle by `guard`; take
+/// that known offset out here so the emitted Gerber lands on the authored /
+/// solved gap instead of silently widening every RF slot by 0.03 mm.
+///
+/// This is only a representation correction: the resolved ground gap was
+/// already raised to the applicable copper clearance by `deriveWidths`, and
+/// final-polygon DRC still checks the manufactured pour against foreign copper.
+/// If a coarsened raster needs a guard at least as large as the requested gap,
+/// retain a zero stamp clearance rather than going negative; that fill remains
+/// visibly coarsened and cannot masquerade as a tighter result.
+fn trackPourStampClearance(
+    placement: optimizer.Placement,
+    track: router.Track,
+    plane_net: PlaneNet,
+    base: f64,
+    guard: f64,
+) f64 {
+    const finished = trackPourClearance(placement, track, plane_net, base);
+    if (!planeIsGround(plane_net) or track.net < 0) return finished;
+    const i: usize = @intCast(track.net);
+    if (i >= placement.rules.net.len or !(placement.rules.net[i].rf.impedance.ground_gap_mm > 0)) return finished;
+    return @max(0, finished - guard);
 }
 
 /// Clearance from an RF signal via's copper land to every foreign plane/pour.
@@ -3994,6 +4022,89 @@ test "grounded-coplanar gap controls only a ground pour opening" {
         .{ .net = .{ .named = "VCC" }, .side = .bottom, .track_layer = 1, .keep_unseeded = true },
     );
     try testing.expect(rail_fill.componentAt(10, 10.45) < 0);
+}
+
+// spec: placement/pour - the finished Gerber contour, rather than the raster's conservative guard offset, realizes the controlled-impedance ground gap
+test "grounded-coplanar straight wall finishes at the authored ground gap" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    const pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{.{
+        .ref_des = "C1",
+        .kind = .passive,
+        .hw = 0.5,
+        .hh = 0.5,
+        .pads = &pad,
+        .fallback = false,
+        .x = 3,
+        .y = 3,
+        .side = .bottom,
+    }};
+    const gnd_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "C1", .pin = "1" }};
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "GND", .pins = &gnd_pins },
+        .{ .name = "RF", .pins = &.{} },
+    };
+    const gap: f64 = 0.1524;
+    const rules = [_]optimizer.NetRule{
+        .{},
+        .{ .class = .{ .name = "rf-cpwg-50" }, .clearance = gap, .rf = .{
+            .impedance = .{ .ohms = 50, .ground_gap_mm = gap },
+        } },
+    };
+    const placement = testPlacement(&parts, &nets, .{
+        .design = .{ .pour = .{ .clearance_outer = 0.3 } },
+        .copper_layers = 2,
+        .net = &rules,
+    });
+    const trace_width: f64 = 0.1899;
+    const rf = [_]router.Track{.{
+        .x1 = -1,
+        .y1 = 10,
+        .x2 = 21,
+        .y2 = 10,
+        .layer = 1,
+        .width = trace_width,
+        .net = 1,
+    }};
+    const samples = [_]@import("rf_path_solver.zig").Sample{
+        .{ .at = .{ -1, 10 }, .s_mm = 0, .curvature = 0, .width_mm = trace_width },
+        .{ .at = .{ 21, 10 }, .s_mm = 22, .curvature = 0, .width_mm = trace_width },
+    };
+    const paths = [_]rf_port_report.Outcome{.{
+        .net = 1,
+        .chosen = 0,
+        .feasible = true,
+        .success = true,
+        .metrics = .{},
+        .trials = &.{},
+        .physical = .{ .sample_count = samples.len, .samples = &samples, .layer = 1 },
+    }};
+    const fill = try compute(arena, placement, .{ .tracks = &rf, .rf_paths = &paths }, .{
+        .net = .{ .named = "GND" },
+        .side = .bottom,
+        .track_layer = 1,
+    });
+
+    // C1 seeds the lower half. Find the long horizontal clearance wall in the
+    // final contour and measure copper edge to poured-ground edge, exactly as
+    // a CAM audit measures the resulting G36 region.
+    var measured: ?f64 = null;
+    for (fill.contours) |poly| {
+        for (poly, 0..) |a, k| {
+            const b = poly[(k + 1) % poly.len];
+            const length = std.math.hypot(b[0] - a[0], b[1] - a[1]);
+            const mx = (a[0] + b[0]) / 2;
+            const my = (a[1] + b[1]) / 2;
+            if (length < 5 or mx < 2 or mx > 18 or @abs(my - 10) > 0.5) continue;
+            measured = @abs(my - 10) - trace_width / 2;
+            break;
+        }
+    }
+    try testing.expect(measured != null);
+    try testing.expectApproxEqAbs(gap, measured.?, 1e-6);
 }
 
 // spec: placement/pour - an opt-in CPWG gap profile follows taper width and stops at its authored maximum
