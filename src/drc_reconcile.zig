@@ -296,6 +296,10 @@ const Session = struct {
     placement: ?optimizer.Placement = null,
     /// The board-edge margin field every fill of this placement starts from.
     edge: ?pour.EdgeField = null,
+    /// Every pad's world collision ring. Like `edge` it is a function of the
+    /// PLACEMENT alone, so it is built when the placement is adopted and read
+    /// by every pass until the placement is replaced.
+    pads: ?drc_rules.PadShapes = null,
     /// The copper the retained answer was computed over, in the form a full
     /// re-check consumes it: everything `Board.aux` and `Board.zones` digest,
     /// so a sweep re-checks the same board and not a narrowed one.
@@ -374,6 +378,7 @@ const Session = struct {
         self.files = null;
         self.placement = null;
         self.edge = null;
+        self.pads = null;
         self.design = .{};
         const stale = self.design_arena;
         if (Arena.fresh(self.backing)) |next| {
@@ -652,6 +657,7 @@ pub const Lease = struct {
         // design arena: a three-million-cell outline walk has no business
         // running under the store lock.
         const edge = drc_rules.sharedEdgeField(pending.allocator(), board) catch null;
+        const pads = drc_rules.padShapes(pending.allocator(), board) catch null;
         const promoted = Arena.wrap(session.backing, pending) orelse {
             session.pending = null;
             return;
@@ -670,6 +676,7 @@ pub const Lease = struct {
         session.placement = board;
         session.design = self.design;
         session.edge = edge;
+        session.pads = pads;
     }
 
     /// The board-edge margin field this placement's fills all start from.
@@ -681,14 +688,20 @@ pub const Lease = struct {
     /// Run the check, scoped when this session can answer for the board the
     /// last one left and the request did not ask for a full pass.
     pub fn reconcile(self: *Lease, alloc: std.mem.Allocator, in: Check) Report {
-        var out = self.answer(alloc, in);
+        // The placement-derived caches ride in on the session rather than
+        // being asked for at the call site: a handler that hands over poses and
+        // copper should not also have to know which per-placement tables the
+        // rule layers happen to want.
+        var check = in;
+        if (self.session) |session| check.copper.pads = session.pads;
+        var out = self.answer(alloc, check);
         out.sweep = self.sweepStatus();
         // Arm the full-board sweep BEHIND this answer, never in front of it:
         // a few seconds after the edits stop it re-checks the accepted state in
         // full, refreshes the kinds a scoped pass defers, and reconciles the
         // rest against what was just returned (`drc_sweep.zig`). Debounced and
         // coalesced, so a drag arms one sweep rather than one per frame.
-        self.armSweep(in.project_dir);
+        self.armSweep(check.project_dir);
         return out;
     }
 
@@ -887,7 +900,30 @@ fn retainPrior(alloc: std.mem.Allocator, prior: drc_rules.Prior) ?drc_rules.Prio
     const spec_keys = alloc.dupe(u64, prior.spec_keys) catch return null;
     const deferred = alloc.dupe(drc.Violation, prior.deferred) catch return null;
     const audit = retainAudit(alloc, prior.pour_audit) orelse return null;
-    return .{ .fill_keys = fill_keys, .spec_keys = spec_keys, .pour_audit = audit, .deferred = deferred };
+    const answers = retainNetAnswers(alloc, prior.net_answers) orelse return null;
+    return .{
+        .fill_keys = fill_keys,
+        .spec_keys = spec_keys,
+        .pour_audit = audit,
+        .deferred = deferred,
+        .net_answers = answers,
+    };
+}
+
+/// Copy the connectivity layer's per-net record. Each net's findings get their
+/// own array: the pass's own list is one contiguous buffer the answers window
+/// into, and a session must not keep a window onto memory the response arena is
+/// about to reclaim. The strings inside — net names and pad numbers — belong to
+/// the placement the session already holds, exactly as the ledger's do.
+fn retainNetAnswers(alloc: std.mem.Allocator, answers: []const drc_rules.NetAnswer) ?[]const drc_rules.NetAnswer {
+    const out = alloc.alloc(drc_rules.NetAnswer, answers.len) catch return null;
+    for (answers, out) |src, *dst| {
+        dst.* = .{
+            .status = src.status,
+            .violations = alloc.dupe(drc.Violation, src.violations) catch return null,
+        };
+    }
+    return out;
 }
 
 fn retainAudit(alloc: std.mem.Allocator, audit: drc_rules.PourAudit) ?drc_rules.PourAudit {
@@ -1202,6 +1238,7 @@ pub fn snapshotFor(store: *Store, name: []const u8, sub: ?[]const u8, live_versi
             .clearance = session.copper.clearance,
             .zones = session.copper.zones,
             .base_edge = session.edge,
+            .pads = session.pads,
         },
         .ledger = session.ledger,
     };

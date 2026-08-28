@@ -9,7 +9,8 @@
 //! had to add a throwaway dump command, build two binaries with it, diff the
 //! corpus and then strip the patch again. This is that command, kept.
 //!
-//!   netlisp drc-dump [--project-dir <dir>] [--mutate <k>] [--prime] [--scoped] <design>…
+//!   netlisp drc-dump [--project-dir <dir>] [--mutate <k>] [--prime] [--scoped]
+//!                    [--bench <reps>] <design>…
 //!
 //! It is READ-ONLY: it evaluates the design, restores the saved layout exactly
 //! as the PCB page does, runs the two DRC seams, and writes to stdout. It
@@ -73,6 +74,20 @@
 //! The sweep's deferred-kind refresh is applied between steps too, so the
 //! sequence exercises a session that is being swept rather than one that never
 //! is.
+//!
+//! ## Timing a reconcile
+//!
+//! `--bench <reps>` primes a session and then times the SCOPED seam ALONE over
+//! three editing gestures — a track drag, the identical repost the client sends
+//! when nothing moved, and a via drag — printing each one's median:
+//!
+//!   netlisp drc-dump --bench 5 barracuda barracuda-base | grep BENCH
+//!
+//! No cold full pass runs beside the measured one, which is the difference from
+//! `--scoped`: the numbers are the reconcile's own wall time, and a profiler
+//! pointed at this mode sees the scoped path and nothing else. The `none` row
+//! is the one to read first — an edit that changes no copper still runs every
+//! whole-board rule, so its median IS the reconcile's fixed cost.
 
 const std = @import("std");
 const clock = @import("infra/clock.zig");
@@ -132,6 +147,11 @@ const Args = struct {
     /// scoped after each edit and dump a cold full check of the same state
     /// beside it. `--mutate` and `--prime` are ignored in this mode.
     scoped: bool = false,
+    /// Time the SCOPED seam alone over this many repetitions of each editing
+    /// gesture, and print the medians. Zero disables it. No cold full pass runs
+    /// beside the measured one, so the number is the reconcile's own cost and a
+    /// sampling profiler pointed at this mode sees only the scoped path.
+    bench: usize = 0,
 };
 
 fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) DumpError!Args {
@@ -151,6 +171,9 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) DumpError!Args 
             out.prime = true;
         } else if (std.mem.eql(u8, a, "--scoped")) {
             out.scoped = true;
+        } else if (std.mem.eql(u8, a, "--bench") and i + 1 < args.len) {
+            i += 1;
+            out.bench = std.fmt.parseInt(usize, args[i], 10) catch return error.DrcDumpUsage;
         } else if (std.mem.startsWith(u8, a, "--")) {
             return error.DrcDumpUsage;
         } else try names.append(arena, a);
@@ -278,7 +301,10 @@ fn dumpScoped(
     // reconcile session holds one: it depends on the placement alone, and the
     // scoped path runs only over an unchanged placement.
     const edge = drc_rules.sharedEdgeField(alloc, solved.placement) catch null;
-    const base: drc_rules.CopperCheck = .{ .placement = solved.placement, .routed = saved, .clearance = clearance, .zones = zones, .base_edge = edge };
+    // Built once for the whole session, exactly as the server's reconcile
+    // session builds it once for a retained placement.
+    const pads = drc_rules.padShapes(alloc, solved.placement) catch null;
+    const base: drc_rules.CopperCheck = .{ .placement = solved.placement, .routed = saved, .clearance = clearance, .zones = zones, .base_edge = edge, .pads = pads };
 
     const t_prime = clock.nanoTimestamp();
     var session = drc_rules.checkPrimingZonesTally(alloc, args.project_dir, name, base);
@@ -293,7 +319,7 @@ fn dumpScoped(
     for (scoped_sequence, 0..) |m, step| {
         const next = try mutate(alloc, state, m);
         const delta = drc_rules.diffCopper(alloc, state, next, solved.placement.nets.len) catch break;
-        const in: drc_rules.CopperCheck = .{ .placement = solved.placement, .routed = next, .clearance = clearance, .zones = zones, .base_edge = edge };
+        const in: drc_rules.CopperCheck = .{ .placement = solved.placement, .routed = next, .clearance = clearance, .zones = zones, .base_edge = edge, .pads = pads };
 
         const t_scoped = clock.nanoTimestamp();
         const scoped = drc_rules.checkScopedZonesTally(alloc, args.project_dir, name, in, session.prior, delta);
@@ -336,6 +362,73 @@ fn dumpScoped(
     }
     session.held.release();
     return discrepancies;
+}
+
+/// The three editing gestures `--bench` times, in the order a session meets
+/// them: a drag (one track nudged again and again), the identical repost the
+/// client sends when nothing moved, and a via drag — the scoped path's worst
+/// case, since a barrel unsettles every unclipped fill on the board.
+const bench_gestures = [_]Mutation{ .move_track, .none, .move_via };
+
+/// Time the scoped seam alone.
+///
+/// Nothing cold runs beside the measured pass: the point is the reconcile's own
+/// wall time and a profile of it that is not half full check. Each repetition
+/// advances the session exactly as the editor's server does — the answer is
+/// retained and the next edit is diffed against it — so a drag is a drag and
+/// not the same edit re-measured against a warm memo.
+fn benchScoped(
+    alloc: std.mem.Allocator,
+    w: *std.Io.Writer,
+    args: Args,
+    name: []const u8,
+    solved: pcb_layout_page.SolvedRequest,
+) DumpError!void {
+    const saved = solved.restored.routes orelse router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
+    const clearance = solved.placement.rules.design.routeParams().clearance;
+    const zones = solved.shown_zones.user;
+    const edge = drc_rules.sharedEdgeField(alloc, solved.placement) catch null;
+    // Built once for the whole session, exactly as the server's reconcile
+    // session builds it once for a retained placement.
+    const pads = drc_rules.padShapes(alloc, solved.placement) catch null;
+    const base: drc_rules.CopperCheck = .{ .placement = solved.placement, .routed = saved, .clearance = clearance, .zones = zones, .base_edge = edge, .pads = pads };
+
+    const t_prime = clock.nanoTimestamp();
+    var session = drc_rules.checkPrimingZonesTally(alloc, args.project_dir, name, base);
+    defer session.held.release();
+    try w.print("# {s} BENCH prime ms={d:.1} ok={} fills={d}\n", .{
+        name, @as(f64, @floatFromInt(clock.nanoTimestamp() - t_prime)) / ns_per_ms, session.scoped, session.reuse.fills,
+    });
+    if (!session.scoped) return;
+
+    var state = saved;
+    const samples = try alloc.alloc(f64, args.bench);
+    for (bench_gestures) |m| {
+        var repoured: usize = 0;
+        var fills: usize = 0;
+        for (samples) |*sample| {
+            const next = try mutate(alloc, state, m);
+            const delta = drc_rules.diffCopper(alloc, state, next, solved.placement.nets.len) catch break;
+            const in: drc_rules.CopperCheck = .{ .placement = solved.placement, .routed = next, .clearance = clearance, .zones = zones, .base_edge = edge, .pads = pads };
+            const t = clock.nanoTimestamp();
+            const scoped = drc_rules.checkScopedZonesTally(alloc, args.project_dir, name, in, session.prior, delta);
+            sample.* = @as(f64, @floatFromInt(clock.nanoTimestamp() - t)) / ns_per_ms;
+            if (!scoped.scoped) {
+                try w.print("# {s} BENCH {s} REFUSED\n", .{ name, @tagName(m) });
+                return;
+            }
+            repoured = scoped.reuse.repoured;
+            fills = scoped.reuse.fills;
+            session.held.release();
+            session = scoped;
+            state = next;
+        }
+        std.mem.sort(f64, samples, {}, std.sort.asc(f64));
+        try w.print("# {s} BENCH {s} reps={d} p50={d:.1} min={d:.1} max={d:.1} repoured={d}/{d}\n", .{
+            name, @tagName(m), samples.len, samples[samples.len / 2], samples[0], samples[samples.len - 1], repoured, fills,
+        });
+        try w.flush();
+    }
 }
 
 /// One step's sweep verdict: the deferred kinds it refreshed, and every
@@ -423,6 +516,10 @@ fn dumpOne(
         try w.print("# {s} UNRESOLVED\n", .{name});
         return 0;
     };
+    if (args.bench > 0) {
+        try benchScoped(alloc, w, args, name, solved);
+        return 0;
+    }
     if (args.scoped) return dumpScoped(alloc, w, args, name, solved);
     const saved = solved.restored.routes orelse router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
     const clearance = solved.placement.rules.design.routeParams().clearance;
@@ -507,21 +604,24 @@ pub fn cmdDrcDump(allocator: std.mem.Allocator, args: []const []const u8) DumpEr
 
 const testing = std.testing;
 
-// spec: drc-dump - the CLI parses the project dir, the mutation selector and the priming flag with positionals as design names
+// spec: drc-dump - the CLI parses the project dir, the mutation selector, the priming flag and the scoped-seam benchmark repetition count with positionals as design names
 test "drc-dump CLI parses flags and positionals" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const parsed = try parseArgs(arena, &.{ "--project-dir", "p", "--mutate", "3", "--prime", "barracuda", "cyclops" });
+    const parsed = try parseArgs(arena, &.{ "--project-dir", "p", "--mutate", "3", "--prime", "--bench", "4", "barracuda", "cyclops" });
     try testing.expectEqualStrings("p", parsed.project_dir);
     try testing.expectEqual(Mutation.add_track, parsed.mutate);
     try testing.expect(parsed.prime);
+    try testing.expectEqual(@as(usize, 4), parsed.bench);
     try testing.expectEqual(@as(usize, 2), parsed.names.len);
     // A dump with no board named, or an unknown mutation, is a usage error
     // rather than a silent empty dump that would "pass" any diff.
     try testing.expectError(error.DrcDumpUsage, parseArgs(arena, &.{"--prime"}));
     try testing.expectError(error.DrcDumpUsage, parseArgs(arena, &.{ "--mutate", "9", "b" }));
     try testing.expect((try parseArgs(arena, &.{ "--scoped", "b" })).scoped);
+    try testing.expectEqual(@as(usize, 0), (try parseArgs(arena, &.{"b"})).bench);
+    try testing.expectError(error.DrcDumpUsage, parseArgs(arena, &.{ "--bench", "x", "b" }));
 }
 
 // spec: drc-dump - every violation renders one line carrying every field, including the track identity automatic cleanup reads, and the lines sort deterministically

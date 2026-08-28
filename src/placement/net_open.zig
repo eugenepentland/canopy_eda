@@ -111,6 +111,47 @@ pub const Report = struct {
     connectivity: []const fab.NetStatus,
 };
 
+/// One net's whole answer: the connectivity status it reported and the opens it
+/// named. Kept per net rather than merged, because that is the granularity a
+/// scoped re-check carries at — a net whose copper and pours did not move
+/// reports the same status and the same findings, and this is the record of
+/// what those were.
+pub const NetAnswer = struct {
+    status: fab.NetStatus,
+    violations: []const drc.Violation = &.{},
+};
+
+/// What a scoped connectivity pass may carry instead of recomputing.
+///
+/// A net's graph is built from ITS OWN copper (`identity.same`), its own
+/// carrying-layer fills and its own user zones — nothing else on the board
+/// enters it. So a net whose copper the edit did not touch and whose fills the
+/// memo handed back unchanged has, by construction, the graph it had, and
+/// therefore the same status and the same opens.
+///
+/// Nothing here needs an index remap the way a topology finding would: a
+/// `net_open` / `hairline_gap` finding names a NET and two PADS, never a stored
+/// track index, so a carried finding is byte-identical to the one a cold pass
+/// would emit even after the client renumbered every array.
+pub const Scope = struct {
+    /// One flag per `placement.nets` index: recompute this net.
+    dirty: []const bool = &.{},
+    /// The previous pass's answers, in `placement.nets` order.
+    prior: []const NetAnswer = &.{},
+
+    /// Only a scope that covers every net can answer for any of them; a short
+    /// or mismatched pair recomputes the board, which is the same answer.
+    fn covers(self: Scope, nets: usize) bool {
+        return self.dirty.len == nets and self.prior.len == nets;
+    }
+};
+
+/// The connectivity report plus the per-net record the next scoped pass reads.
+pub const ScopedReport = struct {
+    report: Report,
+    answers: []const NetAnswer = &.{},
+};
+
 /// Run the open-net sweep and retain each graph's connectivity status so a
 /// reporting caller can summarize it without a duplicate whole-board pass.
 pub fn checkWithConnectivity(
@@ -119,8 +160,27 @@ pub fn checkWithConnectivity(
     copper: routed_copper.Copper,
     prepared: Prepared,
 ) std.mem.Allocator.Error!Report {
+    return (try checkWithConnectivityScoped(arena, placement, copper, prepared, null)).report;
+}
+
+/// `checkWithConnectivity`, optionally carrying the nets one copper edit could
+/// not have reached.
+///
+/// With `scope` null every net is rebuilt — the full pass, unchanged. With one,
+/// a clean net's status and findings ride through from `scope.prior` and the
+/// nets are still emitted in `placement.nets` order, so the violation multiset
+/// and the status array are the ones the full pass would have produced.
+pub fn checkWithConnectivityScoped(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    copper: routed_copper.Copper,
+    prepared: Prepared,
+    scope: ?Scope,
+) std.mem.Allocator.Error!ScopedReport {
     var out: std.ArrayList(drc.Violation) = .empty;
     var connectivity: std.ArrayList(fab.NetStatus) = .empty;
+    var answers: std.ArrayList(NetAnswer) = .empty;
+    const carrying: ?Scope = if (scope) |s| (if (s.covers(placement.nets.len)) s else null) else null;
     // Raster the user zones ONCE for the whole run — or not at all, when the
     // caller already holds this board's rasters (`Prepared.zone_fills`, which
     // the reporting DRC seam memoises). A zone's fill is a property of the
@@ -132,7 +192,14 @@ pub fn checkWithConnectivity(
     // zone rasters here and the per-net plane connect — reads it, so the
     // outline walk happens once for the whole render instead of once per
     // caller and once per net.
-    const board: Board = .{
+    var any_dirty = true;
+    if (carrying) |s| {
+        any_dirty = false;
+        for (s.dirty) |flag| any_dirty = any_dirty or flag;
+    }
+    // The whole-board setup — the user-zone raster in particular — is skipped
+    // outright when every net is carried, which is the identical-repost case.
+    const board: ?Board = if (!any_dirty) null else .{
         .placement = placement,
         .copper = copper,
         .zone_fills = prepared.zone_fills orelse try zoneFills(arena, placement, copper, prepared.base),
@@ -141,11 +208,35 @@ pub fn checkWithConnectivity(
         .identity = try net_identity.Identity.init(arena, placement),
     };
     for (placement.nets, 0..) |net, ni| {
-        try connectivity.append(arena, try checkNet(arena, &out, board, net, @intCast(ni)));
+        if (carrying) |s| {
+            if (!s.dirty[ni]) {
+                const kept = s.prior[ni];
+                try out.appendSlice(arena, kept.violations);
+                try connectivity.append(arena, kept.status);
+                try answers.append(arena, kept);
+                continue;
+            }
+        }
+        const first = out.items.len;
+        const status = try checkNet(arena, &out, board.?, net, @intCast(ni));
+        try connectivity.append(arena, status);
+        try answers.append(arena, .{ .status = status, .violations = out.items[first..] });
+    }
+    const violations = try out.toOwnedSlice(arena);
+    // `toOwnedSlice` may move the buffer, so each answer's window is re-taken
+    // over the slice that survived rather than the one it was appended into.
+    var at: usize = 0;
+    for (answers.items) |*answer| {
+        const len = answer.violations.len;
+        answer.violations = violations[at..][0..len];
+        at += len;
     }
     return .{
-        .violations = try out.toOwnedSlice(arena),
-        .connectivity = try connectivity.toOwnedSlice(arena),
+        .report = .{
+            .violations = violations,
+            .connectivity = try connectivity.toOwnedSlice(arena),
+        },
+        .answers = try answers.toOwnedSlice(arena),
     };
 }
 
@@ -1197,4 +1288,101 @@ test "a net with two pads and no copper flags one net_open" {
     const solo = [_]flat_netlist.FlatNet{.{ .name = "NC1", .pins = &solo_pins }};
     const solo_pl = twoPadPlacement(&parts, &solo);
     try testing.expectEqual(@as(usize, 0), count(try check(arena, solo_pl, .{}, null)));
+}
+
+/// Every field of two connectivity reports that a scoped pass claims to
+/// reproduce: the opens with their markers and named pads, and the per-net
+/// statuses. Named rather than inline so the assertion is one statement in the
+/// test that makes the claim.
+fn expectSameReport(cold: Report, warm: Report) !void {
+    try testing.expectEqual(cold.violations.len, warm.violations.len);
+    for (cold.violations, warm.violations) |c, w| {
+        try testing.expectEqual(c.kind, w.kind);
+        try testing.expectEqual(c.severity, w.severity);
+        try testing.expectEqual(c.x, w.x);
+        try testing.expectEqual(c.y, w.y);
+        try testing.expectEqual(c.gap, w.gap);
+        try testing.expectEqual(c.who.net_a, w.who.net_a);
+        try testing.expectEqual(c.who.part_a, w.who.part_a);
+        try testing.expectEqual(c.who.part_b, w.who.part_b);
+        try testing.expectEqualStrings(c.who.pad_a, w.who.pad_a);
+        try testing.expectEqualStrings(c.who.pad_b, w.who.pad_b);
+        try testing.expectEqual(c.who.bridge, w.who.bridge);
+    }
+    try testing.expectEqual(cold.connectivity.len, warm.connectivity.len);
+    for (cold.connectivity, warm.connectivity) |c, w| {
+        try testing.expectEqualStrings(c.name, w.name);
+        try testing.expectEqual(c.routable, w.routable);
+        try testing.expectEqual(c.connected, w.connected);
+        try testing.expectEqual(c.islands, w.islands);
+    }
+}
+
+// spec: placement/drc - a scoped connectivity pass carries the nets one copper edit could not reach and reports exactly what a cold pass over the same board reports
+test "a scoped connectivity pass equals the cold pass it carried nets past" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // Two independent two-pad nets on one board. `SIG` is left alone by the
+    // edit; `AUX` is the net the edit breaks — so a carried `SIG` and a
+    // rebuilt `AUX` between them have to reproduce the whole board's answer.
+    const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &pads, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 1, .pads = &pads, .fallback = false, .x = 10, .y = 0 },
+        .{ .ref_des = "U2", .kind = .hub, .hw = 1, .hh = 1, .pads = &pads, .fallback = false, .x = 0, .y = -1.5 },
+        .{ .ref_des = "C2", .kind = .passive, .hw = 1, .hh = 1, .pads = &pads, .fallback = false, .x = 10, .y = -1.5 },
+    };
+    const sig_pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } };
+    const aux_pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "U2", .pin = "1" }, .{ .ref_des = "C2", .pin = "1" } };
+    const nets = [_]flat_netlist.FlatNet{ .{ .name = "SIG", .pins = &sig_pins }, .{ .name = "AUX", .pins = &aux_pins } };
+    const placement = twoPadPlacement(&parts, &nets);
+
+    // `SIG` is broken from the start, `AUX` is whole.
+    const before = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 4.7, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 5.3, .y1 = 0, .x2 = 10, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 0, .y1 = -1.5, .x2 = 10, .y2 = -1.5, .layer = 0, .width = 0.2, .net = 1 },
+    };
+    const first = try checkWithConnectivityScoped(arena, placement, .{ .tracks = &before }, .{}, null);
+    try testing.expectEqual(@as(usize, 1), count(first.report.violations));
+    try testing.expectEqual(@as(usize, 2), first.answers.len);
+
+    // The edit cuts `AUX` in two and leaves `SIG` exactly as it was.
+    const after = [_]router.Track{
+        before[0],
+        before[1],
+        .{ .x1 = 0, .y1 = -1.5, .x2 = 4.7, .y2 = -1.5, .layer = 0, .width = 0.2, .net = 1 },
+        .{ .x1 = 5.3, .y1 = -1.5, .x2 = 10, .y2 = -1.5, .layer = 0, .width = 0.2, .net = 1 },
+    };
+    const cold = try checkWithConnectivityScoped(arena, placement, .{ .tracks = &after }, .{}, null);
+    const dirty = [_]bool{ false, true };
+    const warm = try checkWithConnectivityScoped(arena, placement, .{ .tracks = &after }, .{}, .{
+        .dirty = &dirty,
+        .prior = first.answers,
+    });
+
+    // The board now has two opens, one of them carried — so the fixture cannot
+    // pass by finding nothing on either side.
+    try testing.expectEqual(@as(usize, 2), count(cold.report.violations));
+    try expectSameReport(cold.report, warm.report);
+
+    // A scope that does not cover the board is refused rather than trusted: a
+    // short prior would otherwise carry one net's answer onto another's index.
+    const short = [_]bool{true};
+    const refused = try checkWithConnectivityScoped(arena, placement, .{ .tracks = &after }, .{}, .{
+        .dirty = &short,
+        .prior = first.answers,
+    });
+    try testing.expectEqual(cold.report.violations.len, refused.report.violations.len);
+
+    // …and a WRONG dirty mask is a wrong answer, which is what makes the
+    // agreement above evidence rather than coincidence.
+    const lying = [_]bool{ false, false };
+    const stale = try checkWithConnectivityScoped(arena, placement, .{ .tracks = &after }, .{}, .{
+        .dirty = &lying,
+        .prior = first.answers,
+    });
+    try testing.expect(stale.report.violations.len != cold.report.violations.len);
 }

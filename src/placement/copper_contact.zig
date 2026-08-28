@@ -326,6 +326,42 @@ fn directedTrackContact(narrow: Trace, wide: Trace) bool {
         .wide1 = wide.b,
     };
 
+    // The verdict below is a MINIMUM over three probes — the two ends and the
+    // converged interior point — so an end that already fits settles it: no
+    // search can pull a minimum that is already under the limit any lower.
+    // This is the ordinary shape of routed copper (a chain of sections meeting
+    // end to end), and it costs two distances instead of a hundred and twelve.
+    const at_start = search.coverage(0);
+    const at_end = search.coverage(1);
+    if (@min(at_start, at_end) <= limit) return true;
+
+    // The other side of the same argument. `coverage` is the LARGER of the two
+    // offset rails' distances to the wide centreline, so no probe anywhere on
+    // [0,1] can come in under the closest approach of EITHER rail. Both are
+    // closed-form segment distances, and together they settle every pair whose
+    // rails stay clear — which, once the end-to-end joins above are taken out,
+    // is nearly every same-net neighbour on the board.
+    //
+    // The guard is a rounding allowance, not a tolerance: a bound that comes
+    // back a fraction of a picometre high must send the pair to the search
+    // rather than reject it. Being generous here costs a search; being tight
+    // would cost a finding.
+    const bound_guard_mm: f64 = 1e-9;
+    const offset = [2]f64{ normal[0] * radius, normal[1] * radius };
+    const rail_low = [2][2]f64{
+        .{ narrow.a[0] - offset[0], narrow.a[1] - offset[1] },
+        .{ narrow.b[0] - offset[0], narrow.b[1] - offset[1] },
+    };
+    const rail_high = [2][2]f64{
+        .{ narrow.a[0] + offset[0], narrow.a[1] + offset[1] },
+        .{ narrow.b[0] + offset[0], narrow.b[1] + offset[1] },
+    };
+    const floor = @max(
+        pad_shape.segSegDist(rail_low[0], rail_low[1], wide.a, wide.b),
+        pad_shape.segSegDist(rail_high[0], rail_high[1], wide.a, wide.b),
+    );
+    if (floor > limit + bound_guard_mm) return false;
+
     var lo: f64 = 0;
     var hi: f64 = 1;
     // 56 iterations resolve far below a nanometre even on metre-long board
@@ -341,10 +377,7 @@ fn directedTrackContact(narrow: Trace, wide: Trace) bool {
             lo = left;
     }
     const middle = (lo + hi) / 2;
-    const need = @min(
-        @min(search.coverage(0), search.coverage(1)),
-        search.coverage(middle),
-    );
+    const need = @min(@min(at_start, at_end), search.coverage(middle));
     return need <= limit;
 }
 
@@ -484,4 +517,40 @@ test "via contact requires a complete bottleneck cross-section" {
         .{ .a = .{ 0, 0 }, .b = .{ 1, 0 }, .width = 0.5 },
         .{ .at = .{ 1, 0.1 }, .dia = 0.4 },
     ));
+}
+
+// spec: placement/drc - a bottleneck cross-section is judged by the same verdict whether it is found at a trace end, in mid-span, or refused as a flank graze
+test "the cross-section bounds settle end joins and flank grazes without changing a mid-span contact" {
+    const testing = @import("std").testing;
+    const wide = Trace{ .a = .{ 0, 0 }, .b = .{ 10, 0 }, .width = 1.0 };
+
+    // An END that already fits settles it: the verdict is a minimum over the
+    // two ends and the interior, so no search can lower it further.
+    const chained = Trace{ .a = .{ 10, 0 }, .b = .{ 15, 0 }, .width = 0.2 };
+    try testing.expect(trackTrackConnects(wide, chained));
+
+    // MID-SPAN: a perpendicular crossing whose own ends are 3 mm clear of the
+    // wide copper. Neither end fits and the pair is far from tangential, so
+    // this is the case a bound that rejected too eagerly would silently open —
+    // the crossing conducts and must still be found.
+    const crossing = Trace{ .a = .{ 5, -3 }, .b = .{ 5, 3 }, .width = 0.2 };
+    try testing.expect(trackTrackConnects(wide, crossing));
+
+    // FLANK GRAZE: capsules touch exactly, but the narrow trace's far rail
+    // stands 0.7 mm off the wide centreline — 0.2 mm outside its copper — so no
+    // complete cross-section is carried and the pair stays open.
+    const graze = Trace{ .a = .{ 0, 0.6 }, .b = .{ 10, 0.6 }, .width = 0.2 };
+    try testing.expect(trackTrackCapsulesOverlap(wide, graze));
+    try testing.expect(!trackTrackConnects(wide, graze));
+
+    // An end that stands clear of the wide copper is refused by the end probe
+    // rather than accepted by it: 0.55 mm off the centreline is 0.05 mm beyond
+    // the wide trace's own half width.
+    const past_the_edge = Trace{ .a = .{ 5, 0.55 }, .b = .{ 5, 4 }, .width = 0.2 };
+    try testing.expect(!trackTrackConnects(wide, past_the_edge));
+
+    // Order must not decide the answer for equal widths.
+    const equal_a = Trace{ .a = .{ 0, 0 }, .b = .{ 5, 0 }, .width = 0.3 };
+    const equal_b = Trace{ .a = .{ 5, 0 }, .b = .{ 5, 5 }, .width = 0.3 };
+    try testing.expectEqual(trackTrackConnects(equal_a, equal_b), trackTrackConnects(equal_b, equal_a));
 }

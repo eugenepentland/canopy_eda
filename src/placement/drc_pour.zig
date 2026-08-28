@@ -134,10 +134,23 @@ fn validArcCircle(circle: outline.ArcCircle) bool {
     return std.math.isFinite(circle.radius) and std.math.isFinite(circle.sweep);
 }
 
+/// Every pad's collision ring in board coordinates, indexed
+/// `[part][pad]` — the one thing this module reads that depends on the
+/// PLACEMENT alone.
+///
+/// A reconcile session pins a placement across an editing session, so the
+/// transform that produces these runs when the session is built and never
+/// again; a caller with no session (the router's finish, a CLI check, a test)
+/// passes null and each pass builds its own, exactly as before. Short or
+/// ragged tables fall through per pad rather than being rejected wholesale, so
+/// a caller cannot half-supply this into a wrong shape.
+pub const PadShapes = []const []const pad_shape.Shape;
+
 const Audit = struct {
     arena: std.mem.Allocator,
     placement: optimizer.Placement,
     identity: net_identity.Identity,
+    pads: ?PadShapes = null,
     violations: *std.ArrayList(drc.Violation),
     surfaces: *std.ArrayList(Surface),
     /// Parallel to `violations`: what each finding was derived from. Written
@@ -147,6 +160,14 @@ const Audit = struct {
 
     fn record(self: Audit) std.mem.Allocator.Error!void {
         try self.owners.append(self.arena, self.cur.*);
+    }
+
+    /// This pad's world collision ring — the session's, when it holds one.
+    fn padShape(self: Audit, part_i: usize, pad_i: usize, part: optimizer.Part, pad: @TypeOf(part.pads[0])) std.mem.Allocator.Error!pad_shape.Shape {
+        if (self.pads) |table| {
+            if (part_i < table.len and pad_i < table[part_i].len) return table[part_i][pad_i];
+        }
+        return pad_shape.worldShape(self.arena, part, pad);
     }
 
     fn appendInvalid(self: Audit, net: []const u8, layer: ?board_layers.SignalIndex, at: Point) std.mem.Allocator.Error!void {
@@ -322,7 +343,19 @@ pub fn check(
     routed: router.RouteResult,
     prepared: drc.PreparedCopper,
 ) std.mem.Allocator.Error![]const drc.Violation {
-    return (try checkAudited(arena, placement, routed, prepared, null)).violations;
+    return (try checkAudited(arena, placement, routed, prepared, null, null)).violations;
+}
+
+/// Build the placement's pad collision rings once, for a caller that will audit
+/// the same placement repeatedly (`PadShapes`).
+pub fn padShapes(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error!PadShapes {
+    const out = try arena.alloc([]const pad_shape.Shape, placement.parts.len);
+    for (placement.parts, out) |part, *shapes| {
+        const row = try arena.alloc(pad_shape.Shape, part.pads.len);
+        for (part.pads, row) |pad, *shape| shape.* = try pad_shape.worldShape(arena, part, pad);
+        shapes.* = row;
+    }
+    return out;
 }
 
 /// `check` with its evidence, and optionally scoped by a copper edit.
@@ -339,6 +372,7 @@ pub fn checkAudited(
     routed: router.RouteResult,
     prepared: drc.PreparedCopper,
     scope: ?Scope,
+    pads: ?PadShapes,
 ) std.mem.Allocator.Error!Audited {
     var violations: std.ArrayList(drc.Violation) = .empty;
     var surfaces: std.ArrayList(Surface) = .empty;
@@ -350,6 +384,7 @@ pub fn checkAudited(
         .arena = arena,
         .placement = placement,
         .identity = identity,
+        .pads = pads,
         .violations = &violations,
         .surfaces = &surfaces,
         .owners = &owners,
@@ -520,8 +555,12 @@ fn checkForeignTracks(
         const radius = @max(0, track.width / 2);
         const key = drc_scope.trackKey(track);
         for (audit.surfaces.items) |surface| {
-            if (surface.stack != stack or carrierOwnsNet(audit, surface, track.net)) continue;
+            // The SCOPE test comes first because it is a pointer comparison
+            // and `carrierOwnsNet` is a net-name resolution over the whole
+            // netlist; the two are independent predicates, so asking the cheap
+            // one first drops the same pairs for a fraction of the work.
             if (!live(scope, key, surface)) continue;
+            if (surface.stack != stack or carrierOwnsNet(audit, surface, track.net)) continue;
             const at = solidCapsuleContact(surface, .{ track.x1, track.y1 }, .{ track.x2, track.y2 }, radius) orelse continue;
             audit.cur.* = .{ .fill_a = drc.partyIndex(surface.fill), .feature = key };
             try audit.appendOverlap(surface, .{ .net = track.net }, at);
@@ -541,8 +580,8 @@ fn checkForeignRfPaths(audit: Audit, paths: []const rf_port_report.Outcome, scop
         const regions = try path_copper.regions(audit.arena, path.physical.samples);
         const stack = audit.placement.rules.signalStackIndex(path.physical.layer);
         for (audit.surfaces.items) |surface| {
-            if (surface.stack != stack or carrierOwnsNet(audit, surface, path.net)) continue;
             if (!live(scope, 0, surface)) continue;
+            if (surface.stack != stack or carrierOwnsNet(audit, surface, path.net)) continue;
             for (regions) |region| {
                 if (region.len < 3) continue;
                 const at = solidRingContact(surface, region) orelse continue;
@@ -561,8 +600,8 @@ fn checkForeignArcs(audit: Audit, arcs: []const router.Arc, scope: ?Scope) std.m
         const stack = audit.placement.rules.signalStackIndex(arc.layer);
         const probe = ArcProbe.init(arc);
         for (audit.surfaces.items) |surface| {
-            if (surface.stack != stack or carrierOwnsNet(audit, surface, arc.net)) continue;
             if (!live(scope, 0, surface)) continue;
+            if (surface.stack != stack or carrierOwnsNet(audit, surface, arc.net)) continue;
             const at = solidArcContact(surface, probe) orelse continue;
             audit.cur.* = .{ .fill_a = drc.partyIndex(surface.fill) };
             try audit.appendOverlap(surface, .{ .net = arc.net }, at);
@@ -613,8 +652,8 @@ fn checkForeignVias(audit: Audit, vias: []const router.Via, scope: ?Scope) std.m
         const radius = @max(0, via.dia / 2);
         const key = drc_scope.viaKey(via);
         for (audit.surfaces.items) |surface| {
-            if (carrierOwnsNet(audit, surface, via.net)) continue;
             if (!live(scope, key, surface)) continue;
+            if (carrierOwnsNet(audit, surface, via.net)) continue;
             const at = solidCapsuleContact(surface, center, center, radius) orelse continue;
             audit.cur.* = .{ .fill_a = drc.partyIndex(surface.fill), .feature = key };
             try audit.appendOverlap(surface, .{ .net = via.net }, at);
@@ -623,23 +662,38 @@ fn checkForeignVias(audit: Audit, vias: []const router.Via, scope: ?Scope) std.m
 }
 
 fn checkForeignPads(audit: Audit, scope: ?Scope) std.mem.Allocator.Error!void {
+    // A pad has no feature key: the scoped path runs only over an unchanged
+    // placement, so a pad moves exactly never. Every pair a pad could form is
+    // therefore dead unless the SURFACE moved — and when no surface did, the
+    // whole sweep is dead before a single land is transformed into world
+    // coordinates. That is the identical-repost case, and it used to rebuild
+    // every pad shape on the board to ask a question with no live pairs in it.
+    if (!anyLiveSurface(audit, scope)) return;
     for (audit.placement.parts, 0..) |part, part_i| {
-        for (part.pads) |pad| {
+        for (part.pads, 0..) |pad, pad_i| {
             if (pad.npth) continue;
             const pad_net = padNetIndex(audit.placement, part.ref_des, pad.number);
-            const shape = try pad_shape.worldShape(audit.arena, part, pad);
+            const shape = try audit.padShape(part_i, pad_i, part, pad);
             for (audit.surfaces.items) |surface| {
+                if (!live(scope, 0, surface)) continue;
                 if (!padOnSurface(audit.placement.rules, part, pad.thru, surface) or
                     carrierOwnsNet(audit, surface, pad_net)) continue;
-                // A pad has no feature key: the scoped path runs only over an
-                // unchanged placement, so a pad moves exactly never.
-                if (!live(scope, 0, surface)) continue;
                 const at = solidPadContact(surface, shape) orelse continue;
                 audit.cur.* = .{ .fill_a = drc.partyIndex(surface.fill) };
                 try audit.appendOverlap(surface, .{ .net = pad_net, .part = drc.partyIndex(part_i), .pad = pad.number }, at);
             }
         }
     }
+}
+
+/// Is any surface on the board one this pass still has to judge pads against?
+/// Always, with no scope; with one, only while some fill actually moved.
+fn anyLiveSurface(audit: Audit, scope: ?Scope) bool {
+    const s = scope orelse return true;
+    for (audit.surfaces.items) |surface| {
+        if (s.fillChanged(drc.partyIndex(surface.fill))) return true;
+    }
+    return false;
 }
 
 fn padOnSurface(rules: optimizer.BoardRules, part: optimizer.Part, thru: bool, surface: Surface) bool {
@@ -1363,4 +1417,81 @@ test "pour audit coalesces implicit ground carriers and preserves invalid empty 
     const invalid_planes = [_]pour.NetFills{.{ .net_name = "GND", .layers = &ground_layer, .fills = &invalid_fills }};
     const rejected = try check(arena, placement, testRoute(&.{}, &.{}), .{ .topology_zones = &.{}, .plane_fills = &invalid_planes, .zones = &.{}, .zone_fills = &.{} });
     try std.testing.expectEqual(@as(usize, 1), drc.countKind(rejected, .pour_invalid));
+}
+
+/// Two audits' findings, field for field — the whole of what a retained pad
+/// table or a skipped pad sweep is allowed to leave unchanged.
+fn expectSameFindings(a: []const drc.Violation, b: []const drc.Violation) !void {
+    const testing = std.testing;
+    try testing.expectEqual(a.len, b.len);
+    for (a, b) |first, second| {
+        try testing.expectEqual(first.kind, second.kind);
+        try testing.expectEqual(first.x, second.x);
+        try testing.expectEqual(first.y, second.y);
+        try testing.expectEqual(first.who.net_a, second.who.net_a);
+        try testing.expectEqual(first.who.net_b, second.who.net_b);
+        try testing.expectEqual(first.who.part_b, second.who.part_b);
+        try testing.expectEqualStrings(first.who.pad_b, second.who.pad_b);
+    }
+}
+
+// spec: placement/drc - a pour audit given the placement's retained pad shapes reports exactly what one that builds them per pass reports, and a scoped audit whose fills all held builds none at all
+test "retained pad shapes and the scoped pad sweep leave the pour audit's findings unchanged" {
+    const testing = std.testing;
+    const geometry = @import("geometry.zig");
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // One GND pour with a V_5V land sitting in it — a real `pour_overlap`, so
+    // the comparison below cannot pass by both sides finding nothing.
+    const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.8, .h = 0.8 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &pads, .fallback = false, .x = 5, .y = 5 },
+    };
+    const pins = [_]@import("../flat_netlist.zig").FlatPin{.{ .ref_des = "U1", .pin = "1" }};
+    const nets = [_]optimizer.FlatNet{
+        .{ .name = "GND", .pins = &.{} },
+        .{ .name = "V_5V", .pins = &pins },
+    };
+    var placement = testPlacement(&nets, .{ .copper_layers = 2 });
+    placement.parts = &parts;
+
+    const square = [_]Point{ .{ 2, 2 }, .{ 8, 2 }, .{ 8, 8 }, .{ 2, 8 } };
+    const contours = [_][]const Point{&square};
+    const no_holes = [_][]const Point{};
+    const holes = [_][]const []const Point{&no_holes};
+    const fills = [_]pour.Fill{testFill(&contours, &holes)};
+    const layers = [_]pour.LayerSpec{.{ .net = .{ .named = "GND" }, .stack = 1, .side = .top, .track_layer = 0 }};
+    const planes = [_]pour.NetFills{.{ .net_name = "GND", .layers = &layers, .fills = &fills }};
+    const prepared = drc.PreparedCopper{ .topology_zones = &.{}, .plane_fills = &planes, .zones = &.{}, .zone_fills = &.{} };
+    const routed = testRoute(&.{}, &.{});
+
+    const built = try checkAudited(arena, placement, routed, prepared, null, null);
+    const retained = try checkAudited(arena, placement, routed, prepared, null, try padShapes(arena, placement));
+    try testing.expectEqual(@as(usize, 1), drc.countKind(built.violations, .pour_overlap));
+    try expectSameFindings(built.violations, retained.violations);
+
+    // A scoped re-audit over an unchanged fill judges no pad pair at all — and
+    // must still return the finding, carried from the previous audit.
+    const unchanged = [_]bool{false};
+    const scoped = try checkAudited(arena, placement, routed, prepared, .{
+        .changed_fill = &unchanged,
+        .changed_feature = &.{},
+        .prior = built,
+    }, null);
+    try testing.expectEqual(built.violations.len, scoped.violations.len);
+    try testing.expectEqual(@as(usize, 1), drc.countKind(scoped.violations, .pour_overlap));
+    try testing.expectEqual(built.violations[0].x, scoped.violations[0].x);
+    try testing.expectEqual(built.violations[0].y, scoped.violations[0].y);
+
+    // …and when the fill DID move, the pad sweep runs again and re-derives it.
+    const moved = [_]bool{true};
+    const rejudged = try checkAudited(arena, placement, routed, prepared, .{
+        .changed_fill = &moved,
+        .changed_feature = &.{},
+        .prior = built,
+    }, try padShapes(arena, placement));
+    try testing.expectEqual(built.violations.len, rejudged.violations.len);
+    try testing.expectEqual(built.violations[0].x, rejudged.violations[0].x);
 }

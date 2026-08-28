@@ -24,6 +24,7 @@ const drc_scope = @import("drc_scope.zig");
 const fill_cache = @import("fill_cache.zig");
 const bypass_open = @import("bypass_open.zig");
 const net_open = @import("net_open.zig");
+const net_identity = @import("net_identity.zig");
 const optimizer = @import("optimizer.zig");
 const router = @import("router.zig");
 const pour = @import("pour.zig");
@@ -48,6 +49,10 @@ pub const CopperCheck = struct {
     /// Saved board-level silkscreen labels shown with this copper. Empty for
     /// route-only/internal checks that have no layout text context.
     texts: []const font.BoardText = &.{},
+    /// The caller's world-space pad collision rings, when it holds a placement
+    /// across passes and built them once (`drc_pour.padShapes`). Null builds
+    /// them per pass, exactly as before.
+    pads: ?drc_pour.PadShapes = null,
 };
 
 /// `checkFilteredZones` for copper that belongs to NO project design: an
@@ -91,7 +96,7 @@ pub fn checkDefaultRulesReport(alloc: std.mem.Allocator, in: CopperCheck) CheckR
     const geom = filledViolationsReport(alloc, in, board);
     const silk = withBoardTextReport(alloc, in.placement, geom, in.texts);
     const bypass = withBypassOpenReport(alloc, in.placement, in.routed, silk);
-    return withNetOpenReport(alloc, in, bypass, board);
+    return withNetOpenReport(alloc, in, bypass, board, null).report();
 }
 
 /// Everything one accepted board state leaves behind so the NEXT recheck can be
@@ -116,6 +121,10 @@ pub const Prior = struct {
     /// The last FULL pass's `reference_plane_gap` / `reference_transition` /
     /// `loop_area` findings, carried through every scoped pass in between.
     deferred: []const drc.Violation = &.{},
+    /// What the connectivity layer answered for each net, in `placement.nets`
+    /// order. A net whose own copper and own fills the edit did not move keeps
+    /// this answer instead of rebuilding its graph (`net_open.Scope`).
+    net_answers: []const net_open.NetAnswer = &.{},
 };
 
 /// One scoped recheck's answer, plus the state the next one measures against.
@@ -206,7 +215,9 @@ pub fn checkScopedReport(
     });
     const silk = withBoardTextReport(alloc, in.placement, filled.stage, in.texts);
     const bypass = withBypassOpenReport(alloc, in.placement, in.routed, silk);
-    const report = withNetOpenReport(alloc, in, bypass, board);
+    const net_scope = netOpenScope(alloc, in.placement, delta, board, prior) catch null;
+    const staged = withNetOpenReport(alloc, in, bypass, board, net_scope);
+    const report = staged.report();
     var all: std.ArrayList(drc.Violation) = .empty;
     all.appendSlice(alloc, report.violations) catch {
         board.release();
@@ -227,10 +238,68 @@ pub fn checkScopedReport(
             .spec_keys = board.spec_keys,
             .pour_audit = filled.audited,
             .deferred = prior.deferred,
+            .net_answers = staged.answers,
         },
         .held = board.held,
         .reuse = .{ .fills = board.changed.len, .repoured = countChanged(board.changed) },
     };
+}
+
+/// Which nets a scoped connectivity pass has to rebuild.
+///
+/// A net's graph reads its OWN copper and its OWN fills and nothing else, so a
+/// net is dirty exactly when the edit touched a feature of its net, or when one
+/// of the fills it is credited by was re-poured. Both are widened through
+/// `net_identity`: `net_open` credits a net with every copper feature its
+/// canonical group owns, so one member moving dirties the whole group.
+///
+/// Null — recompute everything — whenever the prior record does not cover the
+/// board, or a changed fill belongs to a net that cannot be named. Being wrong
+/// here is a wrong DRC answer, so every uncertainty resolves that way.
+fn netOpenScope(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    delta: drc_scope.Delta,
+    board: BoardFills,
+    prior: Prior,
+) std.mem.Allocator.Error!?net_open.Scope {
+    const count = placement.nets.len;
+    if (prior.net_answers.len != count) return null;
+    if (board.fill_nets.len != board.changed.len) return null;
+    const identity = try net_identity.Identity.init(alloc, placement);
+    const group = try alloc.alloc(bool, count);
+    @memset(group, false);
+    var mark = struct {
+        group: []bool,
+        identity: net_identity.Identity,
+        all: bool = false,
+
+        fn net(self: *@This(), index: i32) void {
+            const canonical = self.identity.canonical(index);
+            if (canonical < 0 or @as(usize, @intCast(canonical)) >= self.group.len) {
+                self.all = true;
+                return;
+            }
+            self.group[@intCast(canonical)] = true;
+        }
+    }{ .group = group, .identity = identity };
+
+    for (delta.tracks) |t| mark.net(t.net);
+    for (delta.vias) |v| mark.net(v.net);
+    for (board.changed, board.fill_nets) |changed, net| {
+        if (!changed) continue;
+        mark.net(net);
+    }
+    const dirty = try alloc.alloc(bool, count);
+    for (dirty, 0..) |*flag, i| {
+        if (mark.all) {
+            flag.* = true;
+            continue;
+        }
+        const canonical = identity.canonical(drc.partyIndex(i));
+        flag.* = canonical >= 0 and @as(usize, @intCast(canonical)) < count and group[@intCast(canonical)];
+    }
+    return .{ .dirty = dirty, .prior = prior.net_answers };
 }
 
 fn countChanged(flags: []const bool) usize {
@@ -260,7 +329,8 @@ pub fn checkPrimingReport(alloc: std.mem.Allocator, in: CopperCheck) ScopedRepor
     const filled = filledViolationsScoped(alloc, in, board, null);
     const silk = withBoardTextReport(alloc, in.placement, filled.stage, in.texts);
     const bypass = withBypassOpenReport(alloc, in.placement, in.routed, silk);
-    const report = withNetOpenReport(alloc, in, bypass, board);
+    const staged = withNetOpenReport(alloc, in, bypass, board, null);
+    const report = staged.report();
     return .{
         .violations = report.violations,
         .net_report = report.net_report,
@@ -270,6 +340,7 @@ pub fn checkPrimingReport(alloc: std.mem.Allocator, in: CopperCheck) ScopedRepor
             .spec_keys = board.spec_keys,
             .pour_audit = filled.audited,
             .deferred = deferredOf(alloc, report.violations),
+            .net_answers = staged.answers,
         },
         .held = board.held,
         .reuse = .{ .fills = board.changed.len, .repoured = countChanged(board.changed) },
@@ -335,6 +406,14 @@ pub const sharedEdgeField = pour.sharedEdgeField;
 /// the findings its edit could not have moved.
 pub const PourAudit = drc_pour.Audited;
 pub const PourOwner = drc_pour.Owner;
+
+/// Every pad's world collision ring, built once for a retained placement — see
+/// `drc_pour.PadShapes`.
+pub const PadShapes = drc_pour.PadShapes;
+pub const padShapes = drc_pour.padShapes;
+
+/// One net's retained connectivity answer — see `net_open.NetAnswer`.
+pub const NetAnswer = net_open.NetAnswer;
 
 pub const Delta = drc_scope.Delta;
 pub const diffCopper = drc_scope.diffCopper;
@@ -477,7 +556,7 @@ fn filledViolationsScoped(
     ) catch return .{ .stage = .{ .violations = &.{}, .complete = false } };
     var out: std.ArrayList(drc.Violation) = .empty;
     out.appendSlice(alloc, base) catch return .{ .stage = .{ .violations = base, .complete = false } };
-    const audited = drc_pour.checkAudited(alloc, in.placement, in.routed, prepared, scope) catch
+    const audited = drc_pour.checkAudited(alloc, in.placement, in.routed, prepared, scope, in.pads) catch
         return .{ .stage = .{ .violations = base, .complete = false } };
     out.appendSlice(alloc, audited.violations) catch return .{ .stage = .{ .violations = base, .complete = false } };
     if (scope == null)
@@ -507,6 +586,9 @@ const BoardFills = struct {
     fill_keys: []const FillKey = &.{},
     spec_keys: []const u64 = &.{},
     changed: []const bool = &.{},
+    /// The `placement.nets` index each fill belongs to, or -1 when its net
+    /// could not be named. -1 makes every net dirty rather than guessing.
+    fill_nets: []const i32 = &.{},
 
     fn release(self: *BoardFills) void {
         self.held.release();
@@ -549,7 +631,7 @@ fn boardFills(alloc: std.mem.Allocator, in: CopperCheck) BoardFills {
 fn boardFillsScoped(alloc: std.mem.Allocator, in: CopperCheck, reuse: Reuse) BoardFills {
     const session = fill_cache.beginSession() orelse {
         const alone = filledTopology(alloc, in, null, reuse) catch return .{ .failed = true };
-        return .{ .fills = alone.fills, .fill_keys = alone.fill_keys, .spec_keys = alone.spec_keys, .changed = alone.changed };
+        return .{ .fills = alone.fills, .fill_keys = alone.fill_keys, .spec_keys = alone.spec_keys, .changed = alone.changed, .fill_nets = alone.fill_nets };
     };
     const fresh = filledTopology(alloc, in, session.memo(), reuse) catch {
         session.release();
@@ -564,6 +646,7 @@ fn boardFillsScoped(alloc: std.mem.Allocator, in: CopperCheck, reuse: Reuse) Boa
         .fill_keys = fresh.fill_keys,
         .spec_keys = fresh.spec_keys,
         .changed = fresh.changed,
+        .fill_nets = fresh.fill_nets,
     };
 }
 
@@ -596,7 +679,8 @@ fn filledTopology(alloc: std.mem.Allocator, in: CopperCheck, memo: ?pour.FillMem
     // when the caller seeded it; otherwise we seed our own.
     const base = if (in.base_edge) |b| b else try pour.sharedEdgeField(alloc, in.placement);
     var builder = Builder{ .alloc = alloc, .placement = in.placement, .copper = copper, .base = base, .memo = memo, .reuse = reuse };
-    for (in.placement.nets) |net| {
+    var fill_nets: std.ArrayList(i32) = .empty;
+    for (in.placement.nets, 0..) |net, net_i| {
         const layers = try pour.carryingLayers(alloc, in.placement.rules, net.name);
         if (layers.len == 0) continue;
         const prepared_layers = try alloc.alloc(pour.LayerSpec, layers.len);
@@ -606,6 +690,7 @@ fn filledTopology(alloc: std.mem.Allocator, in: CopperCheck, memo: ?pour.FillMem
             if (spec.track_layer) |track_layer|
                 spec.higher = try pour.higherThanDeclared(alloc, in.zones, track_layer, spec.net);
             const fill = try builder.take(spec);
+            try fill_nets.append(alloc, drc.partyIndex(net_i));
             prepared_layers[fill_i] = spec;
             fills[fill_i] = fill;
             for (fill.contours, 0..) |contour, contour_i| {
@@ -634,6 +719,7 @@ fn filledTopology(alloc: std.mem.Allocator, in: CopperCheck, memo: ?pour.FillMem
         var spec = pour.zoneLayerSpec(zone.net, pour.sideOfSignal(zone.layer), zone.layer, zone.poly);
         spec.higher = try pour.higherPolys(alloc, in.zones, zone_i);
         const fill = try builder.take(spec);
+        try fill_nets.append(alloc, netIndexOfName(in.placement, zone.net));
         zone_fills[zone_i] = fill;
         for (fill.contours, 0..) |contour, contour_i| {
             try out.append(alloc, .{
@@ -655,7 +741,18 @@ fn filledTopology(alloc: std.mem.Allocator, in: CopperCheck, memo: ?pour.FillMem
         .fill_keys = builder.fill_keys.items,
         .spec_keys = builder.spec_keys.items,
         .changed = builder.changed.items,
+        .fill_nets = fill_nets.items,
     };
+}
+
+/// The `placement.nets` index a user zone's net name refers to, or -1 when no
+/// net carries that spelling. -1 is deliberately pessimistic: a fill nobody can
+/// attribute makes every net dirty rather than silently belonging to none.
+fn netIndexOfName(placement: optimizer.Placement, name: []const u8) i32 {
+    for (placement.nets, 0..) |net, i| {
+        if (std.ascii.eqlIgnoreCase(net.name, name)) return drc.partyIndex(i);
+    }
+    return -1;
 }
 
 /// One board's fills plus the per-fill bookkeeping a scoped recheck needs.
@@ -664,6 +761,7 @@ const Topology = struct {
     fill_keys: []const FillKey,
     spec_keys: []const u64,
     changed: []const bool,
+    fill_nets: []const i32,
 };
 
 /// The previous board state's fills, offered to this pass so the ones the edit
@@ -768,7 +866,8 @@ fn withNetOpenReport(
     in: CopperCheck,
     geom: ViolationStage,
     board: BoardFills,
-) CheckReport {
+    scope: ?net_open.Scope,
+) NetOpenStage {
     const empty: net_open.Report = .{ .violations = &.{}, .connectivity = &.{} };
     const tracks = connectivityTracks(alloc, in.routed) catch return .{ .violations = geom.violations, .net_report = empty, .complete = false };
     const arcs = path_copper.filterArcs(alloc, in.routed.rf_port_outcomes, in.routed.arcs) catch
@@ -781,15 +880,29 @@ fn withNetOpenReport(
         // failed pass asks for its own rather than claiming there are no zones.
         .zone_fills = if (board.failed) null else board.fills.zone_fills,
     };
-    const report = net_open.checkWithConnectivity(alloc, in.placement, .{ .tracks = tracks, .vias = in.routed.vias, .arcs = arcs, .zones = in.zones }, prepared) catch
+    const scoped = net_open.checkWithConnectivityScoped(alloc, in.placement, .{ .tracks = tracks, .vias = in.routed.vias, .arcs = arcs, .zones = in.zones }, prepared, scope) catch
         return .{ .violations = geom.violations, .net_report = empty, .complete = false };
+    const report = scoped.report;
     const connectivity_complete = !board.failed and report.connectivity.len == in.placement.nets.len;
-    if (report.violations.len == 0) return .{ .violations = geom.violations, .net_report = report, .complete = geom.complete and connectivity_complete };
+    if (report.violations.len == 0) return .{ .violations = geom.violations, .net_report = report, .complete = geom.complete and connectivity_complete, .answers = scoped.answers };
     var all: std.ArrayList(drc.Violation) = .empty;
-    all.appendSlice(alloc, geom.violations) catch return .{ .violations = geom.violations, .net_report = report, .complete = false };
-    all.appendSlice(alloc, report.violations) catch return .{ .violations = geom.violations, .net_report = report, .complete = false };
-    return .{ .violations = all.items, .net_report = report, .complete = geom.complete and connectivity_complete };
+    all.appendSlice(alloc, geom.violations) catch return .{ .violations = geom.violations, .net_report = report, .complete = false, .answers = scoped.answers };
+    all.appendSlice(alloc, report.violations) catch return .{ .violations = geom.violations, .net_report = report, .complete = false, .answers = scoped.answers };
+    return .{ .violations = all.items, .net_report = report, .complete = geom.complete and connectivity_complete, .answers = scoped.answers };
 }
+
+/// `CheckReport` plus the per-net record `Prior` keeps. It exists only so the
+/// connectivity stage can hand both back through one return.
+const NetOpenStage = struct {
+    violations: []const drc.Violation,
+    net_report: net_open.Report,
+    complete: bool = true,
+    answers: []const net_open.NetAnswer = &.{},
+
+    fn report(self: NetOpenStage) CheckReport {
+        return .{ .violations = self.violations, .net_report = self.net_report, .complete = self.complete };
+    }
+};
 
 /// A persisted RF path intentionally omits its solver chords: the compact
 /// sample chain is the copper authority rendered and fabricated as one swept

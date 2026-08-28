@@ -332,6 +332,9 @@ pub const sharedEdgeField = drc_compose.sharedEdgeField;
 pub const isDeferredKind = drc_compose.isDeferredKind;
 pub const PourAudit = drc_compose.PourAudit;
 pub const PourOwner = drc_compose.PourOwner;
+pub const NetAnswer = drc_compose.NetAnswer;
+pub const PadShapes = drc_compose.PadShapes;
+pub const padShapes = drc_compose.padShapes;
 
 /// `ApiReport` plus what the next scoped recheck of this design needs: the
 /// snapshot to measure against, the borrow its rasters live in, and whether the
