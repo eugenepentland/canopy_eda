@@ -63,6 +63,7 @@ const matlab_rf_export = @import("serve/matlab_rf_export.zig");
 const pcb_page_cache = @import("serve/pcb_page_cache.zig");
 const pcb_derived = @import("serve/pcb_derived.zig");
 const drc_reconcile = @import("drc_reconcile.zig");
+const drc_sweep = @import("drc_sweep.zig");
 const thermal_cache = @import("serve/thermal_cache.zig");
 const progress_cache = @import("serve/progress_cache.zig");
 const describe_cache = @import("serve/describe_cache.zig");
@@ -802,6 +803,10 @@ pub fn serve(
         .drc_sessions = .{ .allocator = allocator },
     }; // owned here; shared by pointer
     defer state.caches.deinit();
+    // A real server may run background full-board DRC sweeps behind the
+    // editor's reconciles; nothing else does, which is what keeps every test's
+    // sweep a synchronous call it can assert on (see `drc_sweep.zig`).
+    drc_sweep.install(&state.drc_sessions);
     defer state.drc_sessions.deinit();
     // Published AFTER the deinit defer so the retraction below runs FIRST
     // (defers unwind last-in-first-out): no surface can reach a torn-down store.

@@ -40,12 +40,31 @@
 //! copied there too — never the pass's own arena memory — with one deliberate
 //! exception: the pour rasters, which are owned by the process fill memo and
 //! held by a refcounted borrow the session releases when it drops them.
+//!
+//! ## The background sweep's foothold
+//!
+//! A scoped answer is trusted because a FULL reporting pass over the same
+//! accepted state agrees with it, and that pass runs behind the editor rather
+//! than in front of it (`drc_sweep.zig`). It needs to read a session's
+//! placement and board snapshot for seconds while the editor keeps replacing
+//! both, so both arenas are REFERENCE-COUNTED (`Arena`) and a sweep holds a
+//! reference for exactly as long as it reads them. Nothing else would do: W3
+//! found two use-after-frees from handing session memory out by value, and the
+//! session already solves this shape of problem for its pour rasters with a
+//! refcounted borrow. The sweep gets the same mechanism, never a raw pointer.
+//!
+//! Because a sweep reads those fields off the reconcile path, every mutation of
+//! a live session's fields is made under `Store.mutex` — the `*Locked` methods
+//! below assume it is held, and the entry points take it around the swap alone,
+//! never around the copying that precedes it.
 
 const std = @import("std");
 const drc = @import("placement/drc.zig");
 const optimizer = @import("placement/optimizer.zig");
 const pour = @import("placement/pour.zig");
 const router = @import("placement/router.zig");
+const rf_port_report = @import("placement/rf_port_report.zig");
+const clock = @import("infra/clock.zig");
 const drc_rules = @import("serve/drc_rules.zig");
 const page_cache = @import("serve/page_cache.zig");
 const fab_readiness = @import("fab_readiness.zig");
@@ -64,6 +83,13 @@ const Evaluator = @import("eval/evaluator.zig").Evaluator;
 /// Each entry pins an evaluated design, a placement and a board's worth of
 /// pour borrows, so this is a working set, not a cache to grow.
 const max_sessions: usize = 2;
+
+/// How long after the last accepted answer the background sweep starts.
+///
+/// Long enough that a continuous drag or a burst of keystrokes arms exactly one
+/// sweep behind it, short enough that the deferred kinds refresh while the edit
+/// is still the thing on screen.
+pub const sweep_debounce_ns: i128 = 3 * std.time.ns_per_s;
 
 /// What decides whether a retained PLACEMENT still describes this request: the
 /// design as it is on disk, and the poses and outline it would be built at.
@@ -174,26 +200,82 @@ pub fn auxKey(routed: router.RouteResult) u64 {
     return h.final();
 }
 
+/// An arena with more than one owner.
+///
+/// A session's two arenas are replaced while a background sweep is still
+/// reading out of them — the design arena when the design is rebuilt, the board
+/// arena on every accepted answer — and the sweep's read runs for seconds off
+/// the store lock. Handing it the arena's contents by value is exactly the
+/// use-after-free W3 found twice, so it is handed a REFERENCE instead: the same
+/// mechanism the session already uses for its pour rasters. Every `refs`
+/// mutation happens under `Store.mutex`.
+const Arena = struct {
+    arena: std.heap.ArenaAllocator,
+    refs: usize = 1,
+
+    /// Box an arena the caller already owns. Null on OOM, which every caller
+    /// treats as "retain nothing" rather than as an error.
+    fn wrap(backing: std.mem.Allocator, taken: std.heap.ArenaAllocator) ?*Arena {
+        const box = backing.create(Arena) catch {
+            var owned = taken;
+            owned.deinit();
+            return null;
+        };
+        box.* = .{ .arena = taken };
+        return box;
+    }
+
+    fn fresh(backing: std.mem.Allocator) ?*Arena {
+        return wrap(backing, std.heap.ArenaAllocator.init(backing));
+    }
+
+    fn allocator(self: *Arena) std.mem.Allocator {
+        return self.arena.allocator();
+    }
+
+    /// Take a second reference. Caller holds `Store.mutex`.
+    fn pin(self: *Arena) *Arena {
+        self.refs += 1;
+        return self;
+    }
+
+    /// Hand one reference back, freeing the arena with the last. Caller holds
+    /// `Store.mutex`.
+    fn release(self: *Arena) void {
+        if (self.refs > 1) {
+            self.refs -= 1;
+            return;
+        }
+        const backing = self.arena.child_allocator;
+        self.arena.deinit();
+        backing.destroy(self);
+    }
+};
+
 /// One design's retained reconcile state.
 ///
 /// TWO arenas, because the two things retained have different lifetimes. The
 /// DESIGN arena holds the evaluated block, the placement and the board-edge
 /// field, and is replaced wholesale when the design or the poses move. The
-/// BOARD arena holds one edit's worth of snapshot — the accepted copper and the
-/// evidence a scoped recheck measures against — and is reset on every accepted
-/// answer. One arena for both would grow by a placement per design reload and
-/// by a snapshot per keystroke, which is a leak with a slow fuse rather than a
-/// bounded working set.
+/// BOARD arena holds one edit's worth of snapshot — the accepted copper, the
+/// answer it produced, and the evidence a scoped recheck measures against — and
+/// is replaced on every accepted answer. One arena for both would grow by a
+/// placement per design reload and by a snapshot per keystroke, which is a leak
+/// with a slow fuse rather than a bounded working set.
 const Session = struct {
+    /// The store's long-lived allocator, kept here so a method that has to make
+    /// a fresh arena does not have to reach back through one.
+    backing: std.mem.Allocator,
     /// The evaluated design and the placement built from it.
-    design_arena: std.heap.ArenaAllocator,
-    /// The board state and scoping evidence of the last accepted answer.
-    board_arena: std.heap.ArenaAllocator,
+    design_arena: *Arena,
+    /// The board state, the answer, and the scoping evidence of the last
+    /// accepted answer.
+    board_arena: *Arena,
     /// A design being rebuilt this request, not yet adopted. Freed by `adopt`
     /// (which promotes it) or by `Lease.release` (which discards it).
     pending: ?std.heap.ArenaAllocator = null,
     /// Design name and sub-circuit slug, owned by the store's allocator so that
-    /// resetting either arena cannot pull them out from under the store.
+    /// replacing either arena cannot pull them out from under the store.
     name: []const u8,
     sub: ?[]const u8,
     design: Design = .{},
@@ -204,12 +286,21 @@ const Session = struct {
     placement: ?optimizer.Placement = null,
     /// The board-edge margin field every fill of this placement starts from.
     edge: ?pour.EdgeField = null,
-    /// The copper the retained answer was computed over.
-    tracks: []const router.Track = &.{},
-    vias: []const router.Via = &.{},
+    /// The copper the retained answer was computed over, in the form a full
+    /// re-check consumes it: everything `Board.aux` and `Board.zones` digest,
+    /// so a sweep re-checks the same board and not a narrowed one.
+    copper: Copper = .{},
+    /// The FINDINGS of the last accepted answer — the ledger a background sweep
+    /// reconciles its full pass against. Board arena; the strings inside point
+    /// into the placement, never into this arena (see `retainPrior`).
+    ledger: []const drc.Violation = &.{},
     prior: drc_rules.Prior = .{},
     /// The borrow the retained rasters live in.
     held: drc_rules.FillHold = .{},
+    /// Which accepted answer the board arena currently holds. Bumped by every
+    /// `retain`, and the whole of a sweep's staleness test: a sweep publishes
+    /// only into the generation it snapshotted.
+    gen: u64 = 0,
     /// True once a DRC answer has been retained; before that only the placement
     /// is usable and the next check must be a full priming pass.
     primed: bool = false,
@@ -218,6 +309,26 @@ const Session = struct {
     refs: usize = 0,
     dropped: bool = false,
     use: u64 = 0,
+    /// Background sweep bookkeeping — see `drc_sweep.zig`. `sweep_live` is
+    /// true while a sweep thread exists for this design (armed or running), so
+    /// a burst of edits arms one thread rather than one per keystroke.
+    sweep_live: bool = false,
+    /// When the armed sweep may start. Pushed forward by every accepted answer,
+    /// which is what makes the arming debounced rather than per-edit.
+    sweep_due_ns: i128 = 0,
+    /// Arm counter and the arm a run has already claimed. A thread that finds
+    /// them equal has nothing new to sweep and exits; a re-arm during a run
+    /// makes them differ, and the run repeats instead of a second thread
+    /// starting.
+    sweep_arm: u64 = 0,
+    sweep_served: u64 = 0,
+    /// The generation the last published sweep agreed about, and when it
+    /// finished. Both are reported additively on `/api/pcb-drc`.
+    swept_gen: u64 = 0,
+    swept_at_ns: i128 = 0,
+    /// Sweeps published into this session, and the disagreements they found.
+    sweeps: u64 = 0,
+    discrepancies: u64 = 0,
 
     fn owns(self: *const Session, name: []const u8, sub: ?[]const u8) bool {
         if (!std.mem.eql(u8, self.name, name)) return false;
@@ -225,30 +336,43 @@ const Session = struct {
         return sub == null;
     }
 
-    /// Drop the retained ANSWER — its fill borrow, its copper and its evidence —
-    /// and reclaim the arena that held them. The design and its placement stay.
-    fn dropBoard(self: *Session) void {
+    /// Drop the retained ANSWER — its fill borrow, its copper, its findings and
+    /// its evidence — and hand back the arena that held them. The design and its
+    /// placement stay. Caller holds `Store.mutex`.
+    fn dropBoardLocked(self: *Session) void {
         self.held.release();
+        self.held = .{};
         self.prior = .{};
-        self.tracks = &.{};
-        self.vias = &.{};
+        self.copper = .{};
+        self.ledger = &.{};
         self.primed = false;
-        _ = self.board_arena.reset(.retain_capacity);
+        // A reference-counted arena cannot be RESET: a sweep may still be
+        // reading the snapshot in it. Hand this one back and take a new one.
+        const stale = self.board_arena;
+        if (Arena.fresh(self.backing)) |next| {
+            self.board_arena = next;
+            stale.release();
+        }
+        self.gen +%= 1;
     }
 
     /// Drop the retained DESIGN as well: the placement, its read-set, and the
-    /// arena all three lived in.
-    fn dropDesign(self: *Session) void {
-        self.dropBoard();
+    /// arena all three lived in. Caller holds `Store.mutex`.
+    fn dropDesignLocked(self: *Session) void {
+        self.dropBoardLocked();
         if (self.files) |files| files.deinit();
         self.files = null;
         self.placement = null;
         self.edge = null;
         self.design = .{};
-        _ = self.design_arena.reset(.free_all);
+        const stale = self.design_arena;
+        if (Arena.fresh(self.backing)) |next| {
+            self.design_arena = next;
+            stale.release();
+        }
     }
 
-    /// Discard a rebuild that was never adopted.
+    /// Discard a rebuild that was never adopted. Never shared, so no lock.
     fn dropPending(self: *Session) void {
         if (self.pending) |*pending| pending.deinit();
         self.pending = null;
@@ -258,13 +382,69 @@ const Session = struct {
         self.held.release();
         if (self.files) |files| files.deinit();
         self.dropPending();
-        self.board_arena.deinit();
-        self.design_arena.deinit();
+        self.board_arena.release();
+        self.design_arena.release();
         backing.free(self.name);
         if (self.sub) |sub| backing.free(sub);
         backing.destroy(self);
     }
 };
+
+/// The copper one accepted answer was computed over, retained so a background
+/// sweep re-checks the SAME board.
+///
+/// It is the whole of `CopperCheck` that does not already live in the design
+/// arena: the routed copper, the posted user zones and the clearance. The
+/// placement and the board-edge field are the design's, and a sweep reads those
+/// through its design-arena reference.
+const Copper = struct {
+    routed: router.RouteResult = .{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 },
+    zones: []const pour.UserZone = &.{},
+    clearance: f64 = 0,
+};
+
+/// Copy one request's copper into the arena that will outlive it.
+///
+/// Everything a fill or a rule reads is copied. `RouteResult`'s diagnostic
+/// fields are NOT: `trials`, `failed`, `search_limited` and friends are
+/// router-run commentary, no DRC layer reads them, and `trials` in particular
+/// is a tree of solver state that would have to be walked to be copied safely.
+/// The narrowing is exactly the field set `auxKey` digests plus the plain
+/// geometry, so a board that would re-check differently invalidates the session
+/// instead of reaching a sweep half-copied.
+fn retainCopper(alloc: std.mem.Allocator, in: drc_rules.CopperCheck) ?Copper {
+    const routed = in.routed;
+    const tracks = alloc.dupe(router.Track, routed.tracks) catch return null;
+    const vias = alloc.dupe(router.Via, routed.vias) catch return null;
+    const arcs = alloc.dupe(router.Arc, routed.arcs) catch return null;
+    const bends = alloc.dupe(router.SharpBend, routed.sharp_bends) catch return null;
+    const outcomes = alloc.alloc(rf_port_report.Outcome, routed.rf_port_outcomes.len) catch return null;
+    for (routed.rf_port_outcomes, outcomes) |src, *dst| {
+        dst.* = src;
+        dst.trials = &.{};
+        dst.physical.gate_first_error = "";
+        dst.physical.samples = alloc.dupe(@TypeOf(src.physical.samples[0]), src.physical.samples) catch return null;
+    }
+    const zones = alloc.alloc(pour.UserZone, in.zones.len) catch return null;
+    for (in.zones, zones) |src, *dst| {
+        dst.* = src;
+        dst.net = alloc.dupe(u8, src.net) catch return null;
+        dst.poly = alloc.dupe([2]f64, src.poly) catch return null;
+    }
+    return .{
+        .routed = .{
+            .tracks = tracks,
+            .vias = vias,
+            .arcs = arcs,
+            .sharp_bends = bends,
+            .rf_port_outcomes = outcomes,
+            .routed = routed.routed,
+            .total = routed.total,
+        },
+        .zones = zones,
+        .clearance = in.clearance,
+    };
+}
 
 /// One server's retained reconcile sessions.
 ///
@@ -282,14 +462,33 @@ pub const Store = struct {
     /// arriving mid-reconcile is never turned away for want of a slot.
     busy: [max_sessions * 2]?[]const u8 = @splat(null),
     clock: u64 = 0,
+    /// Everything the background sweep keeps per server (see `drc_sweep.zig`).
+    sweep: Sweeps = .{},
 
     pub fn deinit(self: *Store) void {
         const backing = self.allocator orelse return;
+        self.mutex.lock();
+        // A detached sweep thread reads sessions through this store, so tearing
+        // it down means asking those threads to leave and waiting for them.
+        // They check `stopping` at every wake, so this is bounded by one sweep.
+        self.sweep.stopping = true;
+        self.changed.broadcast();
+        while (self.sweep.threads > 0) self.changed.wait(&self.mutex);
         for (&self.sessions) |*slot| {
             if (slot.*) |session| session.destroy(backing);
             slot.* = null;
         }
-        self.* = .{};
+        // Cleared field by field rather than `self.* = .{}`: a sweep thread that
+        // has just handed its registration back is still inside `unlock`, and
+        // overwriting the mutex out from under it is the one race waiting for
+        // the threads cannot close. `stopping` stays set — a deinitialised store
+        // is finished, not reusable.
+        self.allocator = null;
+        self.busy = @splat(null);
+        self.clock = 0;
+        self.sweep.starter = null;
+        self.sweep.discrepancies = 0;
+        self.mutex.unlock();
     }
 
     fn nextUse(self: *Store) u64 {
@@ -346,9 +545,21 @@ pub const Store = struct {
             backing.free(owned);
             return null;
         };
+        const design_arena = Arena.fresh(backing) orelse {
+            backing.free(owned);
+            backing.destroy(session);
+            return null;
+        };
+        const board_arena = Arena.fresh(backing) orelse {
+            design_arena.release();
+            backing.free(owned);
+            backing.destroy(session);
+            return null;
+        };
         session.* = .{
-            .design_arena = std.heap.ArenaAllocator.init(backing),
-            .board_arena = std.heap.ArenaAllocator.init(backing),
+            .backing = backing,
+            .design_arena = design_arena,
+            .board_arena = board_arena,
             .name = owned,
             .sub = if (sub) |slug| (backing.dupe(u8, slug) catch null) else null,
         };
@@ -404,7 +615,7 @@ pub const Lease = struct {
     /// session's arena when there is one, the request arena otherwise.
     pub fn arena(self: Lease) std.mem.Allocator {
         const session = self.session orelse return self.request;
-        if (session.pending == null) session.pending = std.heap.ArenaAllocator.init(session.design_arena.child_allocator);
+        if (session.pending == null) session.pending = std.heap.ArenaAllocator.init(session.backing);
         return (&session.pending.?).allocator();
     }
 
@@ -424,19 +635,31 @@ pub const Lease = struct {
     /// request and dropped.
     pub fn adopt(self: *Lease, board: optimizer.Placement, files: ?page_cache.FileSet) void {
         const session = self.session orelse return;
+        const store = self.store orelse return;
         const set = files orelse return;
-        const pending = session.pending orelse return;
+        var pending = session.pending orelse return;
+        // Seeded BEFORE the swap, out of the arena that is about to become the
+        // design arena: a three-million-cell outline walk has no business
+        // running under the store lock.
+        const edge = drc_rules.sharedEdgeField(pending.allocator(), board) catch null;
+        const promoted = Arena.wrap(session.backing, pending) orelse {
+            session.pending = null;
+            return;
+        };
+        session.pending = null;
+        store.mutex.lock();
+        defer store.mutex.unlock();
         // A rebuilt design invalidates every board answer taken against the old
         // one, its read-set, and the arena all of it lived in.
-        session.dropBoard();
+        session.dropBoardLocked();
         if (session.files) |old| old.deinit();
-        session.design_arena.deinit();
-        session.design_arena = pending;
-        session.pending = null;
+        const stale = session.design_arena;
+        session.design_arena = promoted;
+        stale.release();
         session.files = set;
         session.placement = board;
         session.design = self.design;
-        session.edge = drc_rules.sharedEdgeField(session.design_arena.allocator(), board) catch null;
+        session.edge = edge;
     }
 
     /// The board-edge margin field this placement's fills all start from.
@@ -448,14 +671,83 @@ pub const Lease = struct {
     /// Run the check, scoped when this session can answer for the board the
     /// last one left and the request did not ask for a full pass.
     pub fn reconcile(self: *Lease, alloc: std.mem.Allocator, in: Check) Report {
+        var out = self.answer(alloc, in);
+        out.sweep = self.sweepStatus();
+        // Arm the full-board sweep BEHIND this answer, never in front of it:
+        // a few seconds after the edits stop it re-checks the accepted state in
+        // full, refreshes the kinds a scoped pass defers, and reconciles the
+        // rest against what was just returned (`drc_sweep.zig`). Debounced and
+        // coalesced, so a drag arms one sweep rather than one per frame.
+        self.armSweep(in.project_dir);
+        return out;
+    }
+
+    /// Arm (or re-arm) this design's background sweep after an accepted answer,
+    /// starting a thread for it when none is alive.
+    ///
+    /// Best-effort in every direction: an unprimed session, a full cap, or no
+    /// installed starter all mean the design goes un-swept for now, which costs
+    /// correctness nothing — the deferred kinds still refresh whenever
+    /// something invalidates the session, exactly as they did before. The
+    /// common case is two field writes under a lock nobody is contending.
+    fn armSweep(self: *Lease, project_dir: []const u8) void {
+        const store = self.store orelse return;
+        const session = self.session orelse return;
+        const start = blk: {
+            store.mutex.lock();
+            defer store.mutex.unlock();
+            if (store.sweep.stopping or !session.primed) break :blk false;
+            session.sweep_arm +%= 1;
+            session.sweep_due_ns = clock.nanoTimestamp() + sweep_debounce_ns;
+            // One thread per design, one arm counter it serves: a re-arm while
+            // one is asleep or running moves the deadline and is picked up by
+            // the thread already there.
+            if (session.sweep_live) break :blk false;
+            if (store.sweep.threads >= Sweeps.max_concurrent) break :blk false;
+            if (store.sweep.starter == null) break :blk false;
+            session.sweep_live = true;
+            store.sweep.threads += 1;
+            break :blk true;
+        };
+        if (!start) return;
+        // From here the store believes a thread exists for this design, so a
+        // starter that could not make one has to hand the registration back.
+        const starter = store.sweep.starter.?;
+        if (!starter(store, project_dir, session.name, session.sub)) endSweep(store, session.name, session.sub);
+    }
+
+    /// What the last background sweep of this design established, read after the
+    /// answer has been retained so the figures describe the state being
+    /// returned. Off a session-less lease it is all zeroes, which is the honest
+    /// answer: nothing sweeps a board nothing retains.
+    fn sweepStatus(self: Lease) SweepStatus {
+        const store = self.store orelse return .{};
+        const session = self.session orelse return .{};
+        store.mutex.lock();
+        defer store.mutex.unlock();
+        return .{
+            .runs = session.sweeps,
+            .rev = session.swept_gen,
+            .age_ms = if (session.sweeps == 0) -1 else @intCast(@divFloor(clock.nanoTimestamp() - session.swept_at_ns, clock.ns_per_ms)),
+            .discrepancies_total = store.sweep.discrepancies,
+        };
+    }
+
+    fn answer(self: *Lease, alloc: std.mem.Allocator, in: Check) Report {
         const session = self.session orelse return .{ .report = fullCheck(alloc, in), .scoped = false };
-        if (!self.scopable(session, in)) return self.prime(alloc, in);
-        const prior = router.RouteResult{ .tracks = session.tracks, .vias = session.vias, .routed = 0, .total = 0 };
-        const delta = drc_rules.diffCopper(alloc, prior, in.copper.routed, in.copper.placement.nets.len) catch
+        // Read the retained snapshot ONCE, under the lock: a background sweep
+        // replaces `prior.deferred` and can retire `primed` while this runs, and
+        // the scoped pass must not be handed a slice mid-swap. What is read
+        // stays valid afterwards — only a reconcile replaces the board arena,
+        // and this request holds that design's single-flight reservation.
+        const held = self.snapshotLocked(session);
+        if (in.full or !held.primed) return self.prime(alloc, in);
+        if (!held.design.eql(self.design) or !held.board.eql(in.board)) return self.prime(alloc, in);
+        const delta = drc_rules.diffCopper(alloc, held.copper.routed, in.copper.routed, in.copper.placement.nets.len) catch
             return self.prime(alloc, in);
-        const scoped = drc_rules.checkScopedZonesTally(alloc, in.project_dir, in.name, in.copper, session.prior, delta);
+        const scoped = drc_rules.checkScopedZonesTally(alloc, in.project_dir, in.name, in.copper, held.prior, delta);
         if (!scoped.scoped) return self.prime(alloc, in);
-        self.retain(scoped, in.copper.routed);
+        self.retain(scoped, in);
         return .{
             .report = .{ .violations = scoped.violations, .tally = scoped.tally },
             .scoped = true,
@@ -465,23 +757,35 @@ pub const Lease = struct {
         };
     }
 
-    /// Can this session answer incrementally? Only when it already holds an
-    /// answer for the same design and the same board, and the caller did not
-    /// ask for the full path.
-    fn scopable(self: Lease, session: *const Session, in: Check) bool {
-        if (in.full or !session.primed) return false;
-        if (!session.design.eql(self.design)) return false;
-        return session.board.eql(in.board);
+    /// The retained answer this request may scope against, taken as one
+    /// consistent reading rather than field by field.
+    const Retained = struct {
+        primed: bool = false,
+        design: Design = .{},
+        board: Board = .{},
+        copper: Copper = .{},
+        prior: drc_rules.Prior = .{},
+    };
+
+    fn snapshotLocked(self: Lease, session: *Session) Retained {
+        const store = self.store orelse return .{};
+        store.mutex.lock();
+        defer store.mutex.unlock();
+        return .{
+            .primed = session.primed,
+            .design = session.design,
+            .board = session.board,
+            .copper = session.copper,
+            .prior = session.prior,
+        };
     }
 
     /// A full check that also leaves the session able to scope the next one.
     fn prime(self: *Lease, alloc: std.mem.Allocator, in: Check) Report {
-        const session = self.session orelse return .{ .report = fullCheck(alloc, in), .scoped = false };
+        if (self.session == null) return .{ .report = fullCheck(alloc, in), .scoped = false };
         const primed = drc_rules.checkPrimingZonesTally(alloc, in.project_dir, in.name, in.copper);
         if (!primed.scoped) return .{ .report = fullCheck(alloc, in), .scoped = false };
-        session.design = self.design;
-        session.board = in.board;
-        self.retain(primed, in.copper.routed);
+        self.retain(primed, in);
         return .{
             .report = .{ .violations = primed.violations, .tally = primed.tally },
             .scoped = false,
@@ -493,41 +797,58 @@ pub const Lease = struct {
     /// Keep what the next recheck measures against. Every slice is copied into
     /// the session arena — the pass that produced them is about to end — except
     /// the rasters, which the borrow keeps alive.
-    fn retain(self: *Lease, result: drc_rules.ScopedApiReport, routed: router.RouteResult) void {
+    fn retain(self: *Lease, result: drc_rules.ScopedApiReport, in: Check) void {
         const session = self.session orelse return;
+        const store = self.store orelse return;
         // Build the new snapshot in a FRESH arena and swap it in, rather than
         // resetting the old one and copying into the space it just gave back.
         // A scoped pass carries the previous snapshot's deferred findings
         // forward BY REFERENCE, so the memory being copied from is the memory a
         // reset would have handed straight back to the copy — an alias, and a
-        // panic on the first edit after the first one.
-        var fresh = std.heap.ArenaAllocator.init(session.design_arena.child_allocator);
-        const alloc = fresh.allocator();
+        // panic on the first edit after the first one. (A reference-counted
+        // arena could not be reset in any case: a sweep may be reading it.)
         var next = result;
+        const fresh = Arena.fresh(session.backing) orelse {
+            next.held.release();
+            store.mutex.lock();
+            defer store.mutex.unlock();
+            session.dropBoardLocked();
+            return;
+        };
+        const alloc = fresh.allocator();
         const kept = retainPrior(alloc, result.prior);
-        const tracks = alloc.dupe(router.Track, routed.tracks) catch null;
-        const vias = alloc.dupe(router.Via, routed.vias) catch null;
-        if (kept == null or tracks == null or vias == null) {
+        const copper = retainCopper(alloc, in.copper);
+        // The answer itself, so a background sweep has something to reconcile
+        // its own full pass against.
+        const ledger = alloc.dupe(drc.Violation, result.violations) catch null;
+        if (kept == null or copper == null or ledger == null) {
             // Nothing can be retained, so nothing may claim to be: release this
             // pass's borrow and let the next request prime again.
-            fresh.deinit();
+            store.mutex.lock();
+            defer store.mutex.unlock();
+            fresh.release();
             next.held.release();
-            session.dropBoard();
+            session.dropBoardLocked();
             return;
         }
-        var old = session.board_arena;
+        store.mutex.lock();
+        defer store.mutex.unlock();
+        const old = session.board_arena;
         var prior_held = session.held;
         session.board_arena = fresh;
         session.prior = kept.?;
         session.held = next.held;
-        session.tracks = tracks.?;
-        session.vias = vias.?;
+        session.copper = copper.?;
+        session.ledger = ledger.?;
+        session.design = self.design;
+        session.board = in.board;
         session.primed = true;
+        session.gen +%= 1;
         // The previous generation's borrow goes back only now: every raster
         // this snapshot reuses was re-borrowed through the memo by the pass
         // above, so it holds its own reference and outlives this release.
         prior_held.release();
-        old.deinit();
+        old.release();
     }
 
     /// End the lease: hand back the single-flight reservation and drop this
@@ -587,6 +908,24 @@ pub const Report = struct {
     fills: usize = 0,
     fills_repoured: usize = 0,
     delta: usize = 0,
+    /// What the background full-board sweep has to say about this session — see
+    /// `drc_sweep.zig`. Additive on the response; nothing reads it but a test
+    /// and a human with curl.
+    sweep: SweepStatus = .{},
+};
+
+/// The last background sweep's standing, as of the answer being written.
+pub const SweepStatus = struct {
+    /// How many sweeps have been published into this session.
+    runs: u64 = 0,
+    /// The accepted generation the last published sweep agreed about. Zero
+    /// means none has landed yet — a cold session, or one still inside its
+    /// first debounce.
+    rev: u64 = 0,
+    /// Milliseconds since that sweep finished, or -1 when there has been none.
+    age_ms: i64 = -1,
+    /// Disagreements found over this server's life, across every design.
+    discrepancies_total: u64 = 0,
 };
 
 fn fullCheck(alloc: std.mem.Allocator, in: Check) drc_rules.ApiReport {
@@ -686,10 +1025,238 @@ pub fn resolvePlacement(
     return .{ .lease = lease, .placement = built };
 }
 
+// ── The background sweep's view of a session ────────────────────────────────
+//
+// `drc_sweep.zig` decides WHEN a full reporting pass runs and WHAT its
+// disagreement with the ledger means. This half decides what it is allowed to
+// touch: it hands out a reference-counted snapshot, and it is the only code
+// that writes a sweep's answer back into a live session. Keeping the two apart
+// is what makes the lifetime argument reviewable — every pointer the sweep
+// holds is pinned right here, and handed back right here.
+
+/// How a sweep thread is started, installed by `drc_sweep.install` when the
+/// server builds its state.
+///
+/// A function pointer rather than a direct call because the dependency only
+/// runs one way: the sweep knows about sessions, sessions know nothing about
+/// threads. It also makes the default — no starter — the right one for a test:
+/// a bare `Store` arms sweeps and starts none, so every committed test runs the
+/// sweep body in line and asserts what it did instead of racing it.
+pub const Starter = *const fn (store: *Store, project_dir: []const u8, name: []const u8, sub: ?[]const u8) bool;
+
+/// The background sweep's per-server state. One struct rather than five fields
+/// on `Store`, so the store stays a table of sessions with one guest.
+pub const Sweeps = struct {
+    /// Installed by `drc_sweep.install`; null means sweeps are armed and never
+    /// started, which is exactly what a test wants.
+    starter: ?Starter = null,
+    /// Threads alive on this store, armed or running. A store cannot be torn
+    /// down under one, so `deinit` waits them out.
+    threads: usize = 0,
+    /// Set by `deinit`: every thread exits at its next wake rather than
+    /// touching a store that is going away.
+    stopping: bool = false,
+    /// Every disagreement a sweep has found between a scoped answer and a full
+    /// pass, over this server's life. Zero is the claim the scoped path makes;
+    /// a non-zero number here is a bug in it, which is why the figure rides out
+    /// on every `/api/pcb-drc` answer rather than being logged and forgotten.
+    /// Per store rather than per process, so two server instances stay
+    /// independent as every other counter here is.
+    discrepancies: u64 = 0,
+
+    /// Sweeps allowed to exist at once, across every design.
+    ///
+    /// Two, mirroring `serve/pcb_derived.zig`'s `WarmLimit` and for the same
+    /// reason: a sweep is a complete reporting DRC over board-sized rasters, and
+    /// a burst of edits across designs must not put one on every core. It is
+    /// also exactly `max_sessions`, so the working set can always be covered.
+    const max_concurrent: usize = 2;
+};
+
+/// One design's accepted state, pinned for a background sweep.
+///
+/// `check` points into the session's two arenas; `design` and `board` are the
+/// references that keep them alive. Nothing here may outlive `publish`, and it
+/// may not be published twice.
+pub const Snapshot = struct {
+    session: *Session,
+    design: *Arena,
+    board: *Arena,
+    /// The generation of the accepted answer this covers. A sweep publishes
+    /// into this generation or into nothing.
+    gen: u64,
+    /// The design's live edit counter when the snapshot was taken.
+    live_version: u32,
+    /// The board a full reporting pass must re-check.
+    check: drc_rules.CopperCheck,
+    /// The findings the scoped path produced for this exact board.
+    ledger: []const drc.Violation,
+};
+
+/// What one published sweep says about the session it swept.
+pub const Sweep = struct {
+    /// The full pass's `reference_plane_gap` / `reference_transition` /
+    /// `loop_area` findings. They REPLACE the ones the session has been
+    /// carrying — that is what the sweep is for — and are never a discrepancy.
+    deferred: []const drc.Violation = &.{},
+    /// Every finding the full pass produced, adopted as the new ledger when the
+    /// two disagreed.
+    violations: []const drc.Violation = &.{},
+    /// Non-deferred findings the sweep and the ledger disagreed about.
+    discrepancies: usize = 0,
+};
+
+/// Whether a sweep's answer reached the session it was taken from.
+pub const Publish = enum {
+    /// Applied: deferred findings refreshed, and the ledger corrected if the
+    /// two disagreed.
+    published,
+    /// The session moved (a newer accepted answer, a live edit, an eviction, a
+    /// shutdown) while the sweep ran. Dropped in silence — the state it
+    /// measured is not the state anyone is looking at.
+    stale,
+};
+
+/// What an armed sweep thread should do next.
+pub const Turn = union(enum) {
+    /// Nothing left to serve, or the session/store is going away.
+    exit,
+    /// The debounce has not elapsed; wait this many nanoseconds (at most).
+    wait: u64,
+    /// Take a snapshot and run.
+    go,
+};
+
+/// Find a linked session without creating one or disturbing the LRU order.
+/// Caller holds `mutex`.
+fn peek(store: *Store, name: []const u8, sub: ?[]const u8) ?*Session {
+    for (store.sessions) |slot| {
+        if (slot) |session| {
+            if (session.owns(name, sub)) return session;
+        }
+    }
+    return null;
+}
+
+/// Hand back the registration an arm took out. Idempotent enough to sit in a
+/// `defer` beside a thread body.
+pub fn endSweep(store: *Store, name: []const u8, sub: ?[]const u8) void {
+    store.mutex.lock();
+    defer store.mutex.unlock();
+    if (peek(store, name, sub)) |session| session.sweep_live = false;
+    if (store.sweep.threads > 0) store.sweep.threads -= 1;
+    store.changed.broadcast();
+}
+
+/// What the armed thread should do at this moment. `.go` claims the current
+/// arm, so a run that nothing re-armed is followed by `.exit` rather than by
+/// another run.
+pub fn sweepTurn(store: *Store, name: []const u8, sub: ?[]const u8, now_ns: i128) Turn {
+    store.mutex.lock();
+    defer store.mutex.unlock();
+    if (store.sweep.stopping) return .exit;
+    const session = peek(store, name, sub) orelse return .exit;
+    if (session.dropped) return .exit;
+    if (session.sweep_arm == session.sweep_served) return .exit;
+    if (now_ns < session.sweep_due_ns) {
+        const remaining = session.sweep_due_ns - now_ns;
+        return .{ .wait = std.math.cast(u64, remaining) orelse std.math.maxInt(u64) };
+    }
+    session.sweep_served = session.sweep_arm;
+    return .go;
+}
+
+/// Pin this design's accepted state for a full re-check.
+///
+/// Null when there is nothing to sweep: no store, no session, or a session that
+/// has not accepted an answer yet. The two arena references and the session
+/// claim are handed back by `publish`, which the caller must reach.
+pub fn snapshotFor(store: *Store, name: []const u8, sub: ?[]const u8, live_version: u32) ?Snapshot {
+    if (store.allocator == null) return null;
+    store.mutex.lock();
+    defer store.mutex.unlock();
+    if (store.sweep.stopping) return null;
+    const session = peek(store, name, sub) orelse return null;
+    if (session.dropped or !session.primed) return null;
+    const placement = session.placement orelse return null;
+    session.refs += 1;
+    return .{
+        .session = session,
+        .design = session.design_arena.pin(),
+        .board = session.board_arena.pin(),
+        .gen = session.gen,
+        .live_version = live_version,
+        .check = .{
+            .placement = placement,
+            .routed = session.copper.routed,
+            .clearance = session.copper.clearance,
+            .zones = session.copper.zones,
+            .base_edge = session.edge,
+        },
+        .ledger = session.ledger,
+    };
+}
+
+/// Write one sweep's answer back into the session it was taken from, and hand
+/// back everything the snapshot pinned.
+///
+/// The staleness test is pointer- and generation-exact rather than a heuristic:
+/// the session must still hold the very arenas that were pinned, at the very
+/// generation that was snapshotted, at the live version it was taken at. Any
+/// drift and the answer describes a board nobody is looking at, so it is
+/// dropped in silence and the sweep re-arms if the session is still live.
+pub fn publish(store: *Store, snap: Snapshot, sweep: Sweep, now_ns: i128, live_version: u32) Publish {
+    store.mutex.lock();
+    defer store.mutex.unlock();
+    defer releaseLocked(store, snap);
+    const session = snap.session;
+    if (store.sweep.stopping or session.dropped) return .stale;
+    if (session.gen != snap.gen) return .stale;
+    if (session.design_arena != snap.design or session.board_arena != snap.board) return .stale;
+    if (live_version != snap.live_version) return .stale;
+
+    const alloc = session.board_arena.allocator();
+    // Copied into the session's own arena before it can be replaced — the
+    // sweep's arena dies with the sweep. The pad/net strings inside are the
+    // PLACEMENT's, which this session still holds, so only the array moves
+    // (the same contract `retainPrior` documents).
+    const refreshed = alloc.dupe(drc.Violation, sweep.deferred) catch return .stale;
+    session.prior.deferred = refreshed;
+    if (sweep.discrepancies > 0) {
+        // The scoped path and a full pass disagreed about a kind the scoped
+        // path claims to compute exactly. The sweep is the truth: adopt its
+        // findings as the ledger, and retire the incremental state so the very
+        // next request re-primes from a full pass rather than continuing to
+        // scope against evidence that has been shown wrong.
+        if (alloc.dupe(drc.Violation, sweep.violations)) |truth| {
+            session.ledger = truth;
+        } else |_| {}
+        session.primed = false;
+        session.discrepancies +|= sweep.discrepancies;
+        store.sweep.discrepancies +|= sweep.discrepancies;
+    }
+    session.sweeps +%= 1;
+    session.swept_gen = session.gen;
+    session.swept_at_ns = now_ns;
+    return .published;
+}
+
+/// Caller holds `mutex`.
+fn releaseLocked(store: *Store, snap: Snapshot) void {
+    snap.board.release();
+    snap.design.release();
+    if (store.allocator) |backing| store.drop(backing, snap.session);
+    store.changed.broadcast();
+}
+
 /// Answer this request with a status and end the lease. Always null, so a
 /// caller writes `orelse return fail(...)`.
 fn fail(lease: *Lease, res: *httpz.Response, status: u16, message: []const u8) ?Resolved {
-    if (lease.session) |session| session.dropDesign();
+    if (lease.session) |session| if (lease.store) |store| {
+        store.mutex.lock();
+        session.dropDesignLocked();
+        store.mutex.unlock();
+    };
     lease.release();
     res.status = status;
     res.body = message;
@@ -699,6 +1266,40 @@ fn fail(lease: *Lease, res: *httpz.Response, status: u16, message: []const u8) ?
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
+const drc_sweep = @import("drc_sweep.zig");
+
+/// A placement with no parts and no nets. Real enough to be retained and
+/// pinned; the retention tests are about arena lifetimes, not about copper.
+fn emptyPlacement() optimizer.Placement {
+    return .{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 0,
+        .maxy = 0,
+        .generated = false,
+    };
+}
+
+/// A `Check` over that empty board.
+fn emptyCheck() Check {
+    return .{
+        .project_dir = "",
+        .name = "alpha",
+        .board = .{},
+        .copper = .{
+            .placement = emptyPlacement(),
+            .routed = .{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 },
+            .clearance = 0,
+        },
+    };
+}
 
 // spec: Web Server - The DRC reconcile session answers only for a board whose non-copper inputs are unchanged
 test "a reconcile identity separates copper edits from every other change" {
@@ -837,7 +1438,9 @@ fn writeReconcileFixture(dir: std.Io.Dir) !void {
         \\(design-block "Reconcile Fixture"
         \\  (import cap)
         \\  (board (size 20 10))
-        \\  (design-rules (stackup 4) (plane 2 "GND") (pour top "GND") (ground-via-max 1.0))
+        \\  (stackup 4 (plane 2 "GND"))
+        \\  (net-class "sig" (return-path (max-loop-area 0.001)) (nets "SIG"))
+        \\  (design-rules (pour top "GND") (ground-via-max 1.0))
         \\  (instance "C1" (cap "10nF") (pin 1 "SIG") (pin 2 "GND"))
         \\  (instance "C2" (cap "10nF") (pin 1 "SIG") (pin 2 "GND")))
     });
@@ -886,6 +1489,60 @@ fn drcApiFindings(body: []const u8) []const u8 {
     return body[start .. start + end];
 }
 
+/// The three kinds a scoped recheck DEFERS, as the words they appear under in
+/// the response (`serve/drc_json.zig`'s `kindStr`).
+const deferred_labels = [_][]const u8{ "reference plane gap", "reference transition", "return loop area" };
+
+/// One response's findings with the deferred kinds removed, and the deferred
+/// kinds alone — the two halves a scoped answer makes different promises about.
+///
+/// A scoped pass computes the first half exactly and CARRIES the second from the
+/// last full pass, so "scoped equals full" is a claim about `plain` only. This
+/// is the same split `drc-dump --scoped` makes over the corpus, spelled against
+/// the JSON because that is the surface the endpoint test measures.
+fn drcApiSplit(alloc: std.mem.Allocator, body: []const u8, want_deferred: bool) []const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    const findings = drcApiFindings(body);
+    // Brace depth, not the next `}`: a finding carries nested `a`/`b` party
+    // objects, and a splitter that stopped at the first close would cut two-
+    // party findings (every `net_open`) in half and compare the halves.
+    var depth: usize = 0;
+    var start: usize = 0;
+    var quoted = false;
+    for (findings, 0..) |ch, i| {
+        if (quoted) {
+            if (ch == '"') quoted = false;
+            continue;
+        }
+        switch (ch) {
+            '"' => quoted = true,
+            '{' => {
+                if (depth == 0) start = i;
+                depth += 1;
+            },
+            '}' => {
+                depth -= 1;
+                if (depth != 0) continue;
+                const item = findings[start .. i + 1];
+                var is_deferred = false;
+                for (deferred_labels) |label| {
+                    if (std.mem.indexOf(u8, item, label) != null) is_deferred = true;
+                }
+                if (is_deferred != want_deferred) continue;
+                out.append(alloc, ';') catch return out.items;
+                out.appendSlice(alloc, item) catch return out.items;
+            },
+            else => {},
+        }
+    }
+    return out.items;
+}
+
+/// How many findings one split holds.
+fn drcApiCount(split: []const u8) usize {
+    return std.mem.count(u8, split, ";");
+}
+
 /// The `routed`/`total`/`unique_*` run of one response — the completion pair the
 /// editor header reads, isolated from the additive scoping counters after it.
 fn drcApiTally(body: []const u8) []const u8 {
@@ -923,10 +1580,25 @@ test "the DRC endpoint scopes a copper edit, matches ?full=1, and re-primes when
     // …and it really did diff rather than re-do: three segments moved.
     try testing.expect(std.mem.indexOf(u8, scoped, "\"delta\":6") != null);
 
-    // The same state through the forced-full escape hatch is the same answer.
+    // The same state through the forced-full escape hatch is the same answer —
+    // for every kind the scoped path claims to compute. The three it DEFERS are
+    // excluded here and asserted below: comparing them would be comparing the
+    // scoped path against the thing it deliberately does not do.
     const forced = try drcApiBody(alloc, &state, project, edited, true);
     try testing.expect(std.mem.indexOf(u8, forced, "\"scoped\":false") != null);
-    try testing.expectEqualStrings(drcApiFindings(forced), drcApiFindings(scoped));
+    const plain_forced = drcApiSplit(alloc, forced, false);
+    try testing.expectEqualStrings(plain_forced, drcApiSplit(alloc, scoped, false));
+    // The split is load-bearing, so assert it actually splits: this board has
+    // two ground-via warnings and one open net on the plain side, and three
+    // reference-plane gaps plus one loop area on the deferred side.
+    try testing.expectEqual(@as(usize, 3), drcApiCount(plain_forced));
+    try testing.expectEqual(@as(usize, 4), drcApiCount(drcApiSplit(alloc, forced, true)));
+    // The deferred half of the scoped answer is the PRIMED board's, carried
+    // verbatim — and the full pass's is the edited board's, which is different.
+    // That difference is the staleness the background sweep exists to end
+    // (`drc_sweep.zig`), and it is real on this fixture rather than assumed.
+    try testing.expectEqualStrings(drcApiSplit(alloc, primed, true), drcApiSplit(alloc, scoped, true));
+    try testing.expect(!std.mem.eql(u8, drcApiSplit(alloc, forced, true), drcApiSplit(alloc, scoped, true)));
     // The routed tally the editor header reads is the same number too.
     try testing.expectEqualStrings(drcApiTally(forced), drcApiTally(scoped));
     try testing.expect(std.mem.indexOf(u8, drcApiTally(scoped), "\"unique_total\":") != null);
@@ -946,13 +1618,15 @@ test "the DRC endpoint scopes a copper edit, matches ?full=1, and re-primes when
     _ = serve_root.bumpLiveVersion("fabsel");
     const after_edit = try drcApiBody(alloc, &state, project, first, false);
     try testing.expect(std.mem.indexOf(u8, after_edit, "\"scoped\":false") != null);
-    try testing.expectEqualStrings(drcApiFindings(back_to_scoped), drcApiFindings(after_edit));
+    try testing.expectEqualStrings(drcApiSplit(alloc, back_to_scoped, false), drcApiSplit(alloc, after_edit, false));
 
     // With no store at all every request is a full check — and the same one.
     var bare = serve_root.ServerState{};
     const unretained = try drcApiBody(alloc, &bare, project, edited, false);
     try testing.expect(std.mem.indexOf(u8, unretained, "\"scoped\":false") != null);
     try testing.expectEqualStrings(drcApiFindings(forced), drcApiFindings(unretained));
+    // A store that retains nothing sweeps nothing, and says so.
+    try testing.expect(std.mem.indexOf(u8, unretained, "\"runs\":0,\"rev\":0,\"age_ms\":-1") != null);
 }
 
 // spec: Web Server - A reconcile snapshot that carries the previous one's deferred findings forward is retained without aliasing the memory it copies from
@@ -962,7 +1636,7 @@ test "a retained snapshot survives being replaced by one that carries it forward
     var lease = acquire(&store, testing.allocator, "alpha", null, .{});
     defer lease.release();
     const session = lease.session.?;
-    const empty = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
+    const empty = emptyCheck();
 
     // A first accepted answer carrying one deferred finding.
     const first = [_]drc.Violation{.{ .x = 1, .y = 2, .gap = 0, .clearance = 0, .kind = .loop_area, .severity = .warn }};
@@ -981,4 +1655,315 @@ test "a retained snapshot survives being replaced by one that carries it forward
         try testing.expectEqual(drc.Kind.loop_area, session.prior.deferred[0].kind);
         try testing.expectEqual(@as(f64, 1), session.prior.deferred[0].x);
     }
+}
+
+/// The `loop_area` finding of one response, as its whole JSON object.
+///
+/// It is the deferred kind this fixture produces (`(return-path (max-loop-area
+/// …))` on the SIG net), and its `y` is the midpoint of the segment the test
+/// moves — so "did the carried deferred finding refresh?" is a string compare.
+fn drcApiLoopArea(body: []const u8) []const u8 {
+    const key = "\"k\":\"return loop area\"";
+    const at = std.mem.indexOf(u8, body, key) orelse return "";
+    const start = std.mem.lastIndexOfScalar(u8, body[0..at], '{') orelse return "";
+    const end = std.mem.indexOfScalarPos(u8, body, at, '}') orelse return "";
+    return body[start .. end + 1];
+}
+
+/// One sweep of `fabsel`, run on this thread. The store under test has no
+/// starter installed, so nothing races this and nothing has to be slept on.
+fn sweepFixture(state: *serve_root.ServerState, project: []const u8) drc_sweep.Outcome {
+    return drc_sweep.sweepOnce(&state.drc_sessions, project, "fabsel", null);
+}
+
+// spec: Web Server - A background full-board DRC sweep refreshes the kinds a scoped recheck defers, and the next reconcile answer carries them
+test "a background sweep refreshes the deferred findings a scoped answer carried" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+    try writeReconcileFixture(tmp.dir);
+
+    var state = serve_root.ServerState{ .drc_sessions = .{ .allocator = testing.allocator } };
+    defer state.drc_sessions.deinit();
+
+    // Prime, then move the middle segment. `loop_area` is reported at the
+    // longest segment's midpoint, so the truth for the edited board is a
+    // finding 0.4 mm away from the primed one.
+    const primed = try drcApiBody(alloc, &state, project, try drcApiRequestBody(alloc, 0), false);
+    const at_prime = try alloc.dupe(u8, drcApiLoopArea(primed));
+    try testing.expect(at_prime.len > 0);
+    // Nothing has swept yet, and the response says so.
+    try testing.expect(std.mem.indexOf(u8, primed, "\"sweep\":{\"runs\":0,\"rev\":0,\"age_ms\":-1,\"discrepancies_total\":0}") != null);
+
+    const edited = try drcApiRequestBody(alloc, 0.4);
+    const scoped = try drcApiBody(alloc, &state, project, edited, false);
+    try testing.expect(std.mem.indexOf(u8, scoped, "\"scoped\":true") != null);
+    // The scoped answer CARRIED the primed board's deferred finding: it is
+    // stale by design, and this is the staleness the sweep exists to end.
+    try testing.expectEqualStrings(at_prime, drcApiLoopArea(scoped));
+    const forced = try drcApiBody(alloc, &state, project, edited, true);
+    const truth = try alloc.dupe(u8, drcApiLoopArea(forced));
+    try testing.expect(!std.mem.eql(u8, at_prime, truth));
+    // …and re-prime the session back into the carrying state that a real
+    // editing session is in, so the sweep is the only thing that can fix it.
+    const back = try drcApiBody(alloc, &state, project, edited, false);
+    _ = back;
+
+    // The sweep: one full pass over the accepted state, published into it.
+    const out = sweepFixture(&state, project);
+    try testing.expect(out.ran and out.published);
+    try testing.expect(out.deferred > 0);
+    // Refreshing a deferred kind is NOT a disagreement.
+    try testing.expectEqual(@as(usize, 0), out.discrepancies);
+
+    // The next answer carries the correction out with no protocol change: the
+    // client asked for nothing, changed nothing, and gets the fresh finding.
+    const after = try drcApiBody(alloc, &state, project, edited, false);
+    try testing.expect(std.mem.indexOf(u8, after, "\"scoped\":true") != null);
+    try testing.expectEqualStrings(truth, drcApiLoopArea(after));
+    try testing.expect(std.mem.indexOf(u8, after, "\"runs\":1") != null);
+    try testing.expect(std.mem.indexOf(u8, after, "\"discrepancies_total\":0") != null);
+}
+
+// spec: Web Server - A background full-board DRC sweep corrects a ledger that lost a finding or invented one, and counts the disagreement
+test "a background sweep restores a lost finding and retires an invented one" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+    try writeReconcileFixture(tmp.dir);
+
+    var state = serve_root.ServerState{ .drc_sessions = .{ .allocator = testing.allocator } };
+    defer state.drc_sessions.deinit();
+    const board = try drcApiRequestBody(alloc, 0);
+    _ = try drcApiBody(alloc, &state, project, board, false);
+    const store = &state.drc_sessions;
+
+    // A clean session sweeps clean: this is the claim the whole scoped path
+    // rests on, asserted before anything is broken on purpose.
+    const clean = sweepFixture(&state, project);
+    try testing.expect(clean.published);
+    try testing.expectEqual(@as(usize, 0), clean.discrepancies);
+    try testing.expectEqual(@as(u64, 0), store.sweep.discrepancies);
+
+    // A ledger with a finding the board does not have. Only a bug in the
+    // scoped path could produce one, so a test has to plant it.
+    const session = peekTest(store).?;
+    const invented = drc.Violation{ .x = 7, .y = 7, .gap = 0.01, .clearance = 0.2, .kind = .track_track };
+    const grown = try session.board_arena.allocator().alloc(drc.Violation, session.ledger.len + 1);
+    @memcpy(grown[0..session.ledger.len], session.ledger);
+    grown[session.ledger.len] = invented;
+    session.ledger = grown;
+
+    const caught = sweepFixture(&state, project);
+    try testing.expect(caught.published);
+    try testing.expectEqual(@as(usize, 1), caught.discrepancies);
+    try testing.expectEqual(@as(u64, 1), store.sweep.discrepancies);
+    // The sweep wins: its findings are the ledger now, and the invented one is
+    // gone from it.
+    for (session.ledger) |v| try testing.expect(v.kind != .track_track or v.x != 7);
+    // …and the session is retired, so the very next answer is a full pass
+    // rather than more scoping against evidence shown to be wrong.
+    try testing.expect(!session.primed);
+
+    // The inverse: a ledger MISSING a finding the board really has. The next
+    // request re-primes (the session was retired above), so drop one entry from
+    // the ledger it leaves behind.
+    _ = try drcApiBody(alloc, &state, project, board, false);
+    const after = peekTest(store).?;
+    try testing.expect(after.ledger.len > 0);
+    after.ledger = after.ledger[0 .. after.ledger.len - 1];
+    const restored = sweepFixture(&state, project);
+    try testing.expect(restored.published);
+    try testing.expectEqual(@as(usize, 1), restored.discrepancies);
+    try testing.expectEqual(@as(u64, 2), store.sweep.discrepancies);
+    try testing.expect(!after.primed);
+
+    // The count is visible on the wire, additively.
+    const answer = try drcApiBody(alloc, &state, project, board, false);
+    try testing.expect(std.mem.indexOf(u8, answer, "\"discrepancies_total\":2") != null);
+}
+
+/// The store's single session, for a test that has to reach past the sweep API
+/// to break a ledger on purpose.
+fn peekTest(store: *Store) ?*Session {
+    store.mutex.lock();
+    defer store.mutex.unlock();
+    for (store.sessions) |slot| {
+        if (slot) |session| return session;
+    }
+    return null;
+}
+
+// spec: Web Server - A background DRC sweep answer for a state the session has left is dropped without touching its ledger
+test "a sweep answer is dropped when the session moved under it" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+    try writeReconcileFixture(tmp.dir);
+
+    var state = serve_root.ServerState{ .drc_sessions = .{ .allocator = testing.allocator } };
+    defer state.drc_sessions.deinit();
+    const store = &state.drc_sessions;
+    _ = try drcApiBody(alloc, &state, project, try drcApiRequestBody(alloc, 0), false);
+
+    const session = peekTest(store).?;
+    const before_deferred = session.prior.deferred;
+    const before_ledger = session.ledger;
+    const before_gen = session.gen;
+
+    // A LIVE EDIT between snapshot and publish. Everything else about the
+    // session is untouched, so only the version check can catch this.
+    const snap = snapshotFor(store, "fabsel", null, serve_root.getLiveVersion("fabsel")).?;
+    const bumped = serve_root.bumpLiveVersion("fabsel");
+    const planted = [_]drc.Violation{.{ .x = 3, .y = 3, .gap = 0, .clearance = 0, .kind = .loop_area, .severity = .warn }};
+    try testing.expectEqual(Publish.stale, publish(store, snap, .{
+        .deferred = &planted,
+        .violations = &planted,
+        .discrepancies = 3,
+    }, clock.nanoTimestamp(), bumped));
+    try testing.expectEqual(before_deferred.ptr, session.prior.deferred.ptr);
+    try testing.expectEqual(before_ledger.ptr, session.ledger.ptr);
+    try testing.expectEqual(before_gen, session.gen);
+    try testing.expectEqual(@as(u64, 0), store.sweep.discrepancies);
+    try testing.expectEqual(@as(u64, 0), session.sweeps);
+    try testing.expect(session.primed);
+
+    // A NEWER ACCEPTED ANSWER between snapshot and publish is the other half:
+    // the generation moves, and the answer describes a board nobody is on.
+    const moved = snapshotFor(store, "fabsel", null, bumped).?;
+    _ = try drcApiBody(alloc, &state, project, try drcApiRequestBody(alloc, 0.4), false);
+    try testing.expect(session.gen != moved.gen);
+    try testing.expectEqual(Publish.stale, publish(store, moved, .{
+        .deferred = &planted,
+        .violations = &planted,
+        .discrepancies = 3,
+    }, clock.nanoTimestamp(), bumped));
+    try testing.expectEqual(@as(u64, 0), store.sweep.discrepancies);
+    try testing.expectEqual(@as(u64, 0), session.sweeps);
+
+    // The snapshot's own arena references went back on both drops: the store
+    // tears down clean under the leak-checking allocator, which is the whole
+    // proof that a dropped sweep does not strand a session.
+}
+
+/// The nanoseconds a turn asks a thread to wait, or 0 for any other verdict.
+fn waitOf(turn: Turn) u64 {
+    return switch (turn) {
+        .wait => |ns| ns,
+        else => 0,
+    };
+}
+
+/// A `Starter` that records rather than spawns, so the scheduling can be tested
+/// without a thread to synchronise with.
+const StartLog = struct {
+    var calls: usize = 0;
+    var refuse: bool = false;
+
+    fn start(_: *Store, _: []const u8, _: []const u8, _: ?[]const u8) bool {
+        calls += 1;
+        return !refuse;
+    }
+};
+
+// spec: Web Server - Background DRC sweeps are one thread per design, capped across designs, and a re-arm during one coalesces into it
+test "arming a sweep starts one thread per design, capped, and coalesces re-arms" {
+    var store = Store{ .allocator = testing.allocator };
+    defer store.deinit();
+    StartLog.calls = 0;
+    StartLog.refuse = false;
+    store.sweep.starter = StartLog.start;
+
+    var alpha = acquire(&store, testing.allocator, "alpha", null, .{});
+    const a = alpha.session.?;
+    // Nothing is armed before an answer is accepted: an unprimed session has no
+    // state a sweep could measure.
+    alpha.armSweep("p");
+    try testing.expectEqual(@as(usize, 0), StartLog.calls);
+    try testing.expectEqual(@as(u64, 0), a.sweep_arm);
+
+    alpha.retain(.{ .scoped = true }, emptyCheck());
+    alpha.armSweep("p");
+    try testing.expectEqual(@as(usize, 1), StartLog.calls);
+    try testing.expectEqual(@as(usize, 1), store.sweep.threads);
+    try testing.expect(a.sweep_live);
+
+    // A second answer while one is armed COALESCES: the deadline moves and the
+    // arm counter rises, but no second thread is asked for.
+    const first_due = a.sweep_due_ns;
+    alpha.armSweep("p");
+    alpha.armSweep("p");
+    try testing.expectEqual(@as(usize, 1), StartLog.calls);
+    try testing.expectEqual(@as(u64, 3), a.sweep_arm);
+    try testing.expect(a.sweep_due_ns >= first_due);
+    alpha.release();
+
+    // A second DESIGN gets its own thread — that is what the cap of two is for.
+    var beta = acquire(&store, testing.allocator, "beta", null, .{});
+    beta.retain(.{ .scoped = true }, emptyCheck());
+    beta.armSweep("p");
+    try testing.expectEqual(@as(usize, 2), StartLog.calls);
+    try testing.expectEqual(@as(usize, 2), store.sweep.threads);
+    beta.release();
+
+    // The armed thread serves the arms it was given and then leaves: `.go`
+    // claims the current arm, and a turn with nothing new is `.exit`.
+    try testing.expectEqual(Turn.go, sweepTurn(&store, "alpha", null, a.sweep_due_ns));
+    try testing.expectEqual(Turn.exit, sweepTurn(&store, "alpha", null, a.sweep_due_ns));
+    // A re-arm DURING the run makes the same thread go round again rather than
+    // a second one starting.
+    var again = acquire(&store, testing.allocator, "alpha", null, .{});
+    again.retain(.{ .scoped = true }, emptyCheck());
+    again.armSweep("p");
+    again.release();
+    try testing.expectEqual(@as(usize, 2), StartLog.calls);
+    try testing.expectEqual(Turn.go, sweepTurn(&store, "alpha", null, a.sweep_due_ns + std.time.ns_per_s));
+
+    // Before the deadline a thread waits rather than sweeping.
+    var third = acquire(&store, testing.allocator, "alpha", null, .{});
+    third.retain(.{ .scoped = true }, emptyCheck());
+    third.armSweep("p");
+    third.release();
+    try testing.expect(waitOf(sweepTurn(&store, "alpha", null, a.sweep_due_ns - std.time.ns_per_s)) > 0);
+
+    // Hand both registrations back, as the threads' own `defer` would.
+    endSweep(&store, "alpha", null);
+    endSweep(&store, "beta", null);
+    try testing.expectEqual(@as(usize, 0), store.sweep.threads);
+
+    // With both slots taken, a third design is refused rather than queued: the
+    // cap is a cap, and an unswept design is only unswept, never wrong.
+    store.sweep.threads = Sweeps.max_concurrent;
+    var gamma = acquire(&store, testing.allocator, "gamma", null, .{});
+    gamma.retain(.{ .scoped = true }, emptyCheck());
+    gamma.armSweep("p");
+    try testing.expectEqual(@as(usize, 2), StartLog.calls);
+    try testing.expect(!gamma.session.?.sweep_live);
+    gamma.release();
+    store.sweep.threads = 0;
+
+    // A starter that cannot make a thread hands the registration straight back,
+    // so a failed spawn does not leave the design permanently "swept by
+    // someone else".
+    StartLog.refuse = true;
+    var delta = acquire(&store, testing.allocator, "delta", null, .{});
+    delta.retain(.{ .scoped = true }, emptyCheck());
+    delta.armSweep("p");
+    try testing.expectEqual(@as(usize, 3), StartLog.calls);
+    try testing.expectEqual(@as(usize, 0), store.sweep.threads);
+    try testing.expect(!delta.session.?.sweep_live);
+    delta.release();
+    StartLog.refuse = false;
 }

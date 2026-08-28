@@ -57,6 +57,22 @@
 //! The three deferred kinds (`reference_plane_gap`, `reference_transition`,
 //! `loop_area`) are excluded from both sides: a scoped pass carries them rather
 //! than recomputing them, which is a decision, not a discrepancy.
+//!
+//! ## Proving the background sweep
+//!
+//! `--scoped` also runs the sweep the editor's server runs behind every edit
+//! (`drc_sweep.zig`), over the two lists each step already has: the scoped
+//! answer is the session's ledger, the cold full check is the sweep's truth, and
+//! the production comparison decides whether they agree. Each step's verdict is
+//! a `SWEEP` line, each disagreement a `SWEEP!` line naming the finding and the
+//! direction it moved, and the run ends with the one line a soak reads:
+//!
+//!   netlisp drc-dump --scoped barracuda barracuda-base barracuda-via-fence Cyclops-Flex \
+//!     | grep '^# SWEEP RESULT'          # must say discrepancies=0
+//!
+//! The sweep's deferred-kind refresh is applied between steps too, so the
+//! sequence exercises a session that is being swept rather than one that never
+//! is.
 
 const std = @import("std");
 const clock = @import("infra/clock.zig");
@@ -66,6 +82,7 @@ const drc_rules = @import("serve/drc_rules.zig");
 const fab_readiness = @import("fab_readiness.zig");
 const pcb_layout_page = @import("serve/pcb_layout_page.zig");
 const router = @import("placement/router.zig");
+const drc_sweep = @import("drc_sweep.zig");
 const modules_mod = @import("serve/modules.zig");
 const Evaluator = @import("eval/evaluator.zig").Evaluator;
 
@@ -252,7 +269,8 @@ fn dumpScoped(
     args: Args,
     name: []const u8,
     solved: pcb_layout_page.SolvedRequest,
-) DumpError!void {
+) DumpError!usize {
+    var discrepancies: usize = 0;
     const saved = solved.restored.routes orelse router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
     const clearance = solved.placement.rules.design.routeParams().clearance;
     const zones = solved.shown_zones.user;
@@ -296,11 +314,40 @@ fn dumpScoped(
         try writeTally(w, tag, "full", full.tally);
         try writeDeferred(alloc, w, tag, deferred_at_prime, scoped.violations);
 
+        // THE SWEEP, interleaved. The background sweep the editor's server runs
+        // a few seconds after the edits stop reconciles the scoped answer it
+        // last gave against a full pass over the same state — which is the two
+        // lists this step already has in hand. Running the production
+        // comparison over them turns this dump from something a human diffs
+        // into something that states its own verdict, and makes the corpus run
+        // a soak proof of the sweep as well as of the scoped path.
+        const swept = drc_sweep.compare(alloc, scoped.violations, full.violations);
+        discrepancies += swept.discrepancies.len;
+        try writeSweep(w, tag, swept);
+
         session.held.release();
         session = scoped;
+        // …and publishing it refreshes the deferred kinds, exactly as
+        // `drc_reconcile.publish` does, so the NEXT step carries the sweep's
+        // findings rather than the prime's. Without this the sequence would
+        // test a server that never sweeps.
+        session.prior.deferred = swept.deferred;
         state = next;
     }
     session.held.release();
+    return discrepancies;
+}
+
+/// One step's sweep verdict: the deferred kinds it refreshed, and every
+/// non-deferred finding the two passes disagreed about. A `!` line is a
+/// scoped-path bug, and the only interesting output this command has.
+fn writeSweep(w: *std.Io.Writer, name: []const u8, verdict: drc_sweep.Verdict) DumpError!void {
+    try w.print("{s} SWEEP refreshed={d} discrepancies={d}\n", .{ name, verdict.deferred.len, verdict.discrepancies.len });
+    for (verdict.discrepancies) |d| {
+        try w.print("{s} SWEEP! {s} {s} x={d:.6} y={d:.6} gap={d:.6} clr={d:.6}\n", .{
+            name, @tagName(d.direction), @tagName(d.violation.kind), d.violation.x, d.violation.y, d.violation.gap, d.violation.clearance,
+        });
+    }
 }
 
 /// The three kinds a scoped recheck defers are excluded from the differential:
@@ -364,7 +411,7 @@ fn dumpOne(
     w: *std.Io.Writer,
     args: Args,
     name: []const u8,
-) DumpError!void {
+) DumpError!usize {
     var eval = Evaluator.init(alloc, args.project_dir);
     defer eval.deinit();
     var module_res: ?modules_mod.ResolvedBlock = null;
@@ -374,7 +421,7 @@ fn dumpOne(
     };
     const solved = pcb_layout_page.solveForRequest(alloc, args.project_dir, name, .{}, &eval, &module_res) catch {
         try w.print("# {s} UNRESOLVED\n", .{name});
-        return;
+        return 0;
     };
     if (args.scoped) return dumpScoped(alloc, w, args, name, solved);
     const saved = solved.restored.routes orelse router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
@@ -425,6 +472,7 @@ fn dumpOne(
         memo.fills,
         memo.bytes,
     });
+    return 0;
 }
 
 /// CLI entry: `netlisp drc-dump [--project-dir <dir>] [--mutate <k>] [--prime]
@@ -437,14 +485,21 @@ pub fn cmdDrcDump(allocator: std.mem.Allocator, args: []const []const u8) DumpEr
 
     var buf: [64 * 1024]u8 = undefined;
     var fw = std.Io.File.stdout().writer(infra_fs.currentIo(), &buf);
+    var discrepancies: usize = 0;
     for (parsed.names) |name| {
         // A per-board arena: a barracuda-class board's DRC holds hundreds of
         // megabytes, and a corpus dump must peak at one board's worth.
         var board_state = std.heap.ArenaAllocator.init(allocator);
         defer board_state.deinit();
-        try dumpOne(board_state.allocator(), &fw.interface, parsed, name);
+        discrepancies += try dumpOne(board_state.allocator(), &fw.interface, parsed, name);
         try fw.interface.flush();
     }
+    // The one line a soak run has to read. `--scoped` over the routed corpus is
+    // the standing claim that the incremental path and the background sweep
+    // agree about every board and every edit; anything but 0 here is a bug in
+    // the scoped path, with the offending findings named on the `SWEEP!` lines
+    // above.
+    if (parsed.scoped) try fw.interface.print("# SWEEP RESULT boards={d} discrepancies={d}\n", .{ parsed.names.len, discrepancies });
     try fw.interface.flush();
 }
 

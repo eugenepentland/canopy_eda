@@ -60,6 +60,7 @@ pub const shards: []const []const []const u8 = &.{
         "placement.content_key.test.",
         "drc_dump.test.",
         "drc_reconcile.test.",
+        "drc_sweep.test.",
         "placement.drc_compose.test.",
         "placement.drc_scope.test.",
         "placement.drc_pour.test.",
