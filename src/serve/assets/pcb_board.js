@@ -2722,7 +2722,7 @@ function cuBatchGet(){
  // backstop under the explicit cuGeomDrop() calls.
  if(cuBatch&&cuBatch.ts===ts&&cuBatch.tn===ts.length&&cuBatch.vs===vs&&cuBatch.vn===vs.length
   &&cuBatch.nc===netColOn&&cuBatch.ncm===PCB.netcolor&&cuBatch.vgd===vgd)return cuBatch;
- var byL={},barrel=[],holes=new Path2D(),nb=0;
+ var byL={},barrel=[],fence=[],holes=new Path2D(),nb=0;
  ts.forEach(function(t){if(rfOwnsTrack(t))return;var L=t.l||0;
   var c=(netColOn&&netColorOf(netCollapse(t.net)))||layerColor(L);
   var w=Math.max(t.w*S,1.2),m=byL[L]||(byL[L]=[]);
@@ -2733,11 +2733,27 @@ function cuBatchGet(){
   var rh=viaRenderRadius(dr);
   var c=(netColOn&&netColorOf(netCollapse(v.net)))||TH.via,x=X(v.x),y=Y(v.y);
   holes.moveTo(x+rh,y);holes.arc(x,y,rh,0,6.2832);nb++;
+  if(routeFenceVia(v)){var fw=rr-rh,fr=(rr+rh)/2;
+   if(fw>0){var fb=cuBucket(fence,c+"|"+fw,function(){return {c:c,w:fw,p:new Path2D()};});
+    for(var fa=0;fa<3;fa++){var a0=fa*2*Math.PI/3,a1=a0+Math.PI/3;
+     fb.p.moveTo(x+fr*Math.cos(a0),y+fr*Math.sin(a0));fb.p.arc(x,y,fr,a0,a1);}}return;}
   var bb=cuBucket(barrel,c,function(){return {c:c,p:new Path2D()};});
   bb.p.moveTo(x+rr,y);bb.p.arc(x,y,rr,0,6.2832);});
  cuBatch={ts:ts,tn:ts.length,vs:vs,vn:vs.length,nc:netColOn,ncm:PCB.netcolor,vgd:vgd,
-  t:byL,v:barrel,h:holes,nb:nb};
+  t:byL,v:barrel,f:fence,h:holes,nb:nb};
  return cuBatch;}
+// Generated RF-fence vias are intentionally temporary routing furniture. Draw
+// their copper annulus as three brown/net-colour dashes so it remains obvious
+// which posts the hand router may consume; ordinary and perimeter vias stay
+// solid. The stroke is centred between the exact drill and copper radii, so its
+// inner/outer edges preserve the manufactured geometry.
+function paintFenceVia(ctx,x,y,rr,rh,col){var w=rr-rh;if(!(w>0))return;
+ var r=(rr+rh)/2;ctx.save();ctx.strokeStyle=col;ctx.lineWidth=w;ctx.lineCap="butt";ctx.beginPath();
+ for(var i=0;i<3;i++){var a0=i*2*Math.PI/3,a1=a0+Math.PI/3;
+  ctx.moveTo(x+r*Math.cos(a0),y+r*Math.sin(a0));ctx.arc(x,y,r,a0,a1);}ctx.stroke();ctx.restore();}
+function paintFenceVias(ctx,groups){if(!groups.length)return;ctx.save();ctx.lineCap="butt";
+ for(var i=0;i<groups.length;i++){var g=groups[i];ctx.strokeStyle=g.c;ctx.lineWidth=g.w;
+  ctx.stroke(g.p);}ctx.restore();}
 // Marquee-selected copper gets a purple fringe — the same hue selected parts
 // use, so one selection colour reads across parts and copper. Split by the drag
 // cache exactly like the copper itself, so each paints once. Lifted out of
@@ -2809,6 +2825,7 @@ function paintTracks(ctx,cop,only){
  if(CB){ctx.globalAlpha=1;
   for(var vi=0;vi<CB.v.length;vi++){ctx.fillStyle=CB.v[vi].c;ctx.fill(CB.v[vi].p);}
   if(CB.nb){ctx.fillStyle=TH.viaHole;ctx.fill(CB.h);}
+  paintFenceVias(ctx,CB.f);
   if(PHYSICAL_REVIEW)paintMaskRelief(ctx);
   ctx.globalAlpha=1;return;}
  (PCB.vias||[]).forEach(function(v){
@@ -2818,7 +2835,8 @@ function paintTracks(ctx,cop,only){
   var rr=viaRenderRadius(v.d),dr=(v.drill>0)?v.drill:viaGeo().drill;
   var rh=viaRenderRadius(dr);
   var col=hit?"#8be9ff":(PHYSICAL_REVIEW?PH.viaMask:(netColOn&&netColorOf(netCollapse(v.net))||TH.via));
-  ctx.fillStyle=col;ctx.beginPath();ctx.arc(X(v.x),Y(v.y),rr,0,6.2832);ctx.fill();
+  if(routeFenceVia(v))paintFenceVia(ctx,X(v.x),Y(v.y),rr,rh,col);
+  else{ctx.fillStyle=col;ctx.beginPath();ctx.arc(X(v.x),Y(v.y),rr,0,6.2832);ctx.fill();}
   ctx.globalAlpha=1;
   ctx.fillStyle=PHYSICAL_REVIEW?PH.hole:TH.viaHole;ctx.beginPath();ctx.arc(X(v.x),Y(v.y),rh,0,6.2832);ctx.fill();});
  if(PHYSICAL_REVIEW)paintMaskRelief(ctx);
@@ -11549,7 +11567,7 @@ if(GPU_REQ&&window.PCBGpu&&navigator.gpu&&CV.parentNode){
    layerColor:layerColor,ref:CV,host:CV.parentNode,
    // Colour + pour GEOMETRY hooks: the rules stay in this file (one expression,
    // shared with the 2D painters), the renderer only bakes what they return.
-   trackColor:gpuTrackColor,trackChords:trackChords,viaColor:gpuViaColor,padColor:gpuPadColor,
+   trackColor:gpuTrackColor,trackChords:trackChords,viaColor:gpuViaColor,viaFence:routeFenceVia,padColor:gpuPadColor,
    rfPaths:rfPathGeom,rfOwnsTrack:rfOwnsTrack,pours:gpuPourGeom,
    onLost:function(){if(gpuInitTimer)clearTimeout(gpuInitTimer);gpuInitTimer=null;gpuStarting=false;gpuOn=false;gpuStatusSync();
     assemblyGpuFail((PCBGpu&&PCBGpu.error)||"The WebGPU device was lost. Reload the Assembly page to restart it.");dragCacheDrop();paintSoon();}})

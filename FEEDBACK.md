@@ -130,3 +130,8 @@ log is not a substitute for reporting an active blocker to the user.
 - **friction:** The all-pages browser gate sent ordinary wheel events that Chromium coalesced before paint, ran the editor at DPR 1, and did not assert the selected renderer. It reported a misleading 16.8 ms frame while Barracuda's swept RF paths silently disabled WebGPU and deterministic DPR-2 paints took 23–42 ms; the pre-push-only gate also was not on the local post-merge deployment path.
 - **idea:** Keep one-paint-per-camera-step editor benchmarks and exact-candidate performance certification as reusable release-gate primitives, so high-density fallback latency, renderer activation, workload size, and local deployment eligibility cannot drift apart again.
 - **status:** resolved in this change
+
+## 2026-08-28 · codex · dashed generated RF-fence vias
+- **friction:** The standing `scripts/pcb_gpu_check/run.js` renderer harness aborted before reaching its WGSL or via-buffer assertions because its fake device has no `createSampler`, now required during renderer initialization. This cost one attempted run plus two diagnostic calls and left the focused static renderer contract as the available inner-loop coverage.
+- **idea:** Keep the fake WebGPU surface API-complete for renderer initialization (starting with `createSampler`) or split shader/buffer checks from CAM resource setup, so a semantic-copper change can exercise its actual buffer and WGSL assertions without booting unrelated CAM machinery.
+- **status:** open

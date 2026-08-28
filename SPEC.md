@@ -6607,7 +6607,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Re-running the fence on a layout replaces the previous fence rather than stacking a second row beside the same trace
 - The fence endpoint 404s an unknown layout naming the rows that exist, and refuses a board that declares no fence
 - The generate_fence CLI tool and the fence HTTP endpoint share one implementation, so they report the same board
-- Generated RF fence sites render, select, and edit as ordinary vias; provenance remains internal for safe regeneration
+- Generated RF fence sites render with a dashed annular ring in both Canvas and WebGPU views, while ordinary and perimeter vias stay solid; all remain selectable and editable, and provenance remains internal for safe regeneration
 - Generated RF fence vias are disposable while hand-routing: previews, exact DRC gates, and scoped autocomplete ignore them, committed copper removes only intersecting posts, and perimeter/ordinary vias remain obstacles
 - The PCB editor always shows the RF via-fence action, regardless of whether the board declares perimeter fencing or currently resolves a fenceable RF class
 - The PCB page blob carries both the authored keepout halo and the full RF fence corridor through the far edge of its vias

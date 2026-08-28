@@ -271,7 +271,8 @@ var WGSL = [
 "}",
 "",
 // ── circles: annulus SDF. r.y == 0 ⇒ a filled disc (via barrel, hole
-// punch, drill bore); r.y > 0 remains available to the generic pipeline. ──
+// punch, drill bore); r.y > 0 is an ordinary annulus; r.y < 0 is the same
+// annulus split into three angular dashes (generated RF-fence barrels). ──
 "struct CirV {",
 "  @builtin(position) pos: vec4<f32>,",
 "  @location(0) w: vec2<f32>,",
@@ -293,7 +294,11 @@ var WGSL = [
 "  var al = 1.0 - smoothstep(v.r.x - f, v.r.x + f, d);",
 // A disc must NOT run the inner term: smoothstep straddling 0 would halve the
 // alpha at the centre and leave a dim dot in every via.
-"  if (v.r.y > 0.0) { al = al * smoothstep(v.r.y - f, v.r.y + f, d); }",
+"  if (v.r.y != 0.0) {",
+"    let inner = abs(v.r.y);",
+"    al = al * smoothstep(inner - f, inner + f, d);",
+"    if (v.r.y < 0.0 && sin(3.0 * atan2(v.w.y - v.c.y, v.w.x - v.c.x)) < 0.0) { discard; }",
+"  }",
 "  al = al * v.col.a * du.p.x;",
 "  if (al <= 0.0) { discard; }",
 "  return premul(v.col.rgb, al);",
@@ -860,8 +865,8 @@ function camBuild() {
 
 // Copper. Tracks are ordered by layer so each layer is one contiguous instance
 // range drawn with its own alpha; vias split into barrels / hole punches in that
-// draw order. Generated fence sites carry provenance in the model for safe
-// regeneration, but render through this same ordinary-via path.
+// draw order. Generated RF-fence barrels use a negative inner radius to select
+// the dashed-annulus shader branch; ordinary and perimeter vias remain discs.
 // Colours come from pcb_board.js's own
 // expressions (net-colours mode included), so the two renderers agree
 // pixel-for-intent.
@@ -949,7 +954,7 @@ function buildCopper(viaDrill) {
     var rr = v.d / 2 * S;
     var dr = (v.drill > 0) ? v.drill : viaDrill;
     var rh = dr / 2 * S;
-    barrel.push([ux(v.x), uy(v.y), rr, 0, vc]);
+    barrel.push([ux(v.x), uy(v.y), rr, (O.viaFence && O.viaFence(v)) ? -rh : 0, vc]);
     hole.push([ux(v.x), uy(v.y), rh, 0, ch]);
   }
   var n = barrel.length + hole.length;

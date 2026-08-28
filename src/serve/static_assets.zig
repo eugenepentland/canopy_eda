@@ -670,16 +670,23 @@ test "PCB editor rigidly mirrors the complete selected part target without delet
     try std.testing.expect(std.mem.indexOf(u8, flip_body, "scheduleDrc()") != null);
 }
 
-// spec: Web Server - Generated RF fence sites render, select, and edit as ordinary vias; provenance remains internal for safe regeneration
+// spec: Web Server - Generated RF fence sites render with a dashed annular ring in both Canvas and WebGPU views, while ordinary and perimeter vias stay solid; all remain selectable and editable, and provenance remains internal for safe regeneration
 // spec: Web Server - The PCB viewer offers one Tapers + fence action that preserves RF route centerlines while refreshing controlled-impedance widths and ground-pour gaps, replaces stale taper paths from current pad and route geometry, DRC-gates and saves the result, then regenerates the RF ground via fence around that exact copper
 // spec: Web Server - The PCB editor always shows the RF via-fence action, regardless of whether the board declares perimeter fencing or currently resolves a fenceable RF class
-test "PCB editor carries the RF via-fence action as ordinary vias" {
+test "PCB editor renders generated RF fence vias as dashed editable annuli" {
     const Check = struct { haystack: []const u8 = pcb_board_js, marker: []const u8, present: bool = true };
     const checks = [_]Check{
-        // One normal via row, barrel path and visibility state cover hand-drawn
-        // and generated vias alike.
+        // One normal via row and visibility state cover every via. Generated
+        // RF-fence barrels alone branch to the dashed annulus in both renderers.
         .{ .marker = "[\"via\",\"Vias\"" },
-        .{ .marker = "var byL={},barrel=[],holes=new Path2D(),nb=0;" },
+        .{ .marker = "var byL={},barrel=[],fence=[],holes=new Path2D(),nb=0;" },
+        .{ .marker = "function paintFenceVia" },
+        .{ .marker = "function paintFenceVias" },
+        .{ .marker = "paintFenceVias(ctx,CB.f)" },
+        .{ .marker = "if(routeFenceVia(v))paintFenceVia" },
+        .{ .marker = "viaFence:routeFenceVia" },
+        .{ .haystack = pcb_gpu_js, .marker = "(O.viaFence && O.viaFence(v)) ? -rh : 0" },
+        .{ .haystack = pcb_gpu_js, .marker = "sin(3.0 * atan2" },
         .{ .marker = "via:anyCopperVisible()?1:0" },
         // The provenance tag survives undo/redo so fence regeneration can
         // still distinguish generated sites from ordinary ground vias.
@@ -701,7 +708,8 @@ test "PCB editor carries the RF via-fence action as ordinary vias" {
         .{ .marker = "function fenceBtnSync", .present = false },
         .{ .marker = "function fenceDeclared", .present = false },
         .{ .marker = "style.display=fence", .present = false },
-        // The old visual class and its dedicated WebGPU slot are both gone.
+        // The old filter/visibility class and dedicated WebGPU slot remain gone:
+        // dashed provenance is a barrel style, not another selectable object row.
         .{ .marker = "function isFenceVia", .present = false },
         .{ .marker = "function fenceVisible", .present = false },
         .{ .marker = "filt.fence", .present = false },
@@ -768,7 +776,7 @@ test "PCB editor keeps every drilled bore visible through pours and board flips"
     const batch_barrel = std.mem.indexOf(u8, pcb_board_js, "for(var vi=0;vi<CB.v.length;vi++)").?;
     const batch_hole = std.mem.indexOfPos(u8, pcb_board_js, batch_barrel, "ctx.fill(CB.h)").?;
     try std.testing.expect(batch_barrel < batch_hole);
-    const gpu_barrel = std.mem.indexOf(u8, pcb_gpu_js, "barrel.push([ux(v.x), uy(v.y), rr, 0, vc]);").?;
+    const gpu_barrel = std.mem.indexOf(u8, pcb_gpu_js, "barrel.push([ux(v.x), uy(v.y), rr, (O.viaFence && O.viaFence(v)) ? -rh : 0, vc]);").?;
     const gpu_hole = std.mem.indexOfPos(u8, pcb_gpu_js, gpu_barrel, "hole.push([ux(v.x), uy(v.y), rh, 0, ch]);").?;
     try std.testing.expect(gpu_barrel < gpu_hole);
 }
