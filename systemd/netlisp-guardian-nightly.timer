@@ -8,7 +8,7 @@
 # The mutation-score ratchet the service maintains lives in .guardian/mutation.txt.
 
 [Unit]
-Description=Nightly Guardian gate for netlisp/eda (around 03:00)
+Description=Nightly Guardian gate for netlisp (around 03:00)
 
 [Timer]
 OnCalendar=*-*-* 03:00:00

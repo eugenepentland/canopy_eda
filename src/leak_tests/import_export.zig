@@ -134,7 +134,7 @@ test "leak: convertFootprint error path frees parse nodes" {
 test "leak: convertSymbol owned buffer + temp list freed" {
     const alloc = std.testing.allocator;
     const input =
-        \\(kicad_symbol_lib (version 20211014) (generator canopy)
+        \\(kicad_symbol_lib (version 20211014) (generator netlisp)
         \\  (symbol "R" (pin_numbers hide) (pin_names (offset 0))
         \\    (property "Reference" "R")
         \\    (symbol "R_1_1"
@@ -151,7 +151,7 @@ test "leak: convertSymbol owned buffer + temp list freed" {
 test "leak: generatePinout owned buffer frees pin lists" {
     const alloc = std.testing.allocator;
     const input =
-        \\(kicad_symbol_lib (version 20211014) (generator canopy)
+        \\(kicad_symbol_lib (version 20211014) (generator netlisp)
         \\  (symbol "U1"
         \\    (symbol "U1_1_1"
         \\      (pin power_in line (at 0 0 0) (length 1) (name "VDD") (number "1"))

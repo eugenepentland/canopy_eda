@@ -3,7 +3,7 @@
 
 For every module that has a starred (default) `.layouts.json`, solve the rough
 seed (`?rough=1`) and the starred layout (`?layout=<name>`) via a running
-`eda serve`, then compare per interchangeable class (kind|nets|footprint), per
+`netlisp serve`, then compare per interchangeable class (kind|nets|footprint), per
 anchor-IC edge. The goal of the rough seed is hand-LIKENESS (put each part in the
 same general area so the board is easy to finish by dragging), not the score — so
 the columns are:
@@ -23,7 +23,7 @@ yardstick (they feed the means). Fixing that bug (key poses by origin_key) is wh
 makes the `broken` rows measurable.
 
 Usage:
-    # start a server first:  eda serve --project-dir projects/designs --port 7050
+    # start a server first:  netlisp serve --project-dir projects/designs --port 7050
     python3 scripts/rough_corpus_bench.py
     python3 scripts/rough_corpus_bench.py --base http://localhost:7099
     python3 scripts/rough_corpus_bench.py --project-dir projects/designs --json out.json
@@ -117,7 +117,7 @@ def analyze(base, name, sidecar, regen):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--base", default="http://localhost:7050", help="running eda serve base URL")
+    ap.add_argument("--base", default="http://localhost:7050", help="running netlisp serve base URL")
     ap.add_argument("--project-dir", default="projects/designs", help="where the .layouts.json sidecars live")
     ap.add_argument("--regen", action="store_true", help="force a fresh rough solve (avoids cache)")
     ap.add_argument("--json", help="also write the rows as JSON to this path")

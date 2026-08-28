@@ -6,7 +6,7 @@ Dependencies: `httpz` (HTTP server), `guardian` (code-quality gate).
 
 ### Build modes and codegen backends
 
-The repository has one bright-line policy: **every internal EDA build is the
+The repository has one bright-line policy: **every internal netlisp build is the
 self-hosted Debug build**. That includes the application, focused/full tests,
 dev servers, renderers/exporters, mutation runs, solver experiments, profiling,
 and benchmarks. **Self-hosted ReleaseSafe is built only at the deployment boundary**
@@ -114,11 +114,11 @@ unchanged tool. `GUARDIAN_PREBUILT=off` forces the from-source compile back on;
   and neither spec nor scenario-category debt may grow. `zig build spec-init`
   regenerates a starter SPEC.md.
 
-`guardian-check` is the deliberate exception to the EDA-artifact policy: it is
-an already-built gate tool that must run on every Debug build, not an EDA
+`guardian-check` is the deliberate exception to the netlisp-artifact policy: it is
+an already-built gate tool that must run on every Debug build, not a netlisp
 application/test/dev-server artifact. Keeping that checker ReleaseSafe avoids
 roughly 40x gate execution overhead; it does not create or exercise a
-ReleaseSafe EDA build.
+ReleaseSafe netlisp build.
 
 Commands (`guardian-check` is the guardian dep's binary at
 `../guardian-zig/zig-out/bin/`, built by `zig build` there — that build now

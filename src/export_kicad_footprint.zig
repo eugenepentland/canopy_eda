@@ -237,7 +237,7 @@ pub fn exportFootprintMod(
     try w.writeAll(name);
     try w.writeAll("\"\n");
     try w.writeAll("  (version 20240108)\n");
-    try w.writeAll("  (generator \"canopy-eda\")\n");
+    try w.writeAll("  (generator \"netlisp\")\n");
     try w.writeAll(footprint_layer_line);
 
     // Description

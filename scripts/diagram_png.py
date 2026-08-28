@@ -2,13 +2,13 @@
 """Rasterize a design's block-diagram view to PNG for visual review.
 
 The schematic page renders the diagram as inline SVG styled by the page's
-CSS classes. This pulls one tab's panel out of a running `eda serve`, inlines a
+CSS classes. This pulls one tab's panel out of a running `netlisp serve`, inlines a
 self-contained copy of the `.dg-*` rules (so colors/fonts resolve without the
 page), draws the class legend natively (the page legend is HTML), and renders
 with cairosvg.
 
 Usage:
-    # start a server first:  eda serve --project-dir projects/designs --port 7060
+    # start a server first:  netlisp serve --project-dir projects/designs --port 7060
     python3 scripts/diagram_png.py labstation                 # System view -> /tmp/labstation_system.png
     python3 scripts/diagram_png.py labstation out.png 2.0     # out path + scale
     python3 scripts/diagram_png.py stm32n6 --view power       # a specific tab

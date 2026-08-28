@@ -51,7 +51,7 @@
 #   acquiring the lock and no-ops if its head already shipped — so N merges
 #   during one build cost at most ONE follow-up deploy). Each further merge
 #   REWRITES the marker. What the queue collapses is prepare-release.sh — the
-#   machine-wide /tmp/eda-gate.lock for ~7 min — plus the prod restart itself.
+#   machine-wide /tmp/netlisp-gate.lock for ~7 min — plus the prod restart itself.
 #   The `Deploy: skip` trailer is RETIRED: it is logged as a note and the
 #   merge deploys like any other. DEPLOY_SETTLE_SECONDS>0 restores a settle
 #   delay (timer-deployed) if batching ever matters more than immediacy again.
@@ -432,7 +432,7 @@ if await_health; then
   # lockstep with prod. `projects/designs/netlisp` is now a TRACKED launcher
   # (not a binary) that materializes this same verified build into
   # `projects/designs/.netlisp-bin/` on first use; pre-warming it here — plus
-  # writing the paired EDA commit to the designs repo's git dir so
+  # writing the paired netlisp commit to the designs repo's git dir so
   # `netlisp version` and exported review metadata report the real build —
   # means the design folder is immediately self-contained and current after
   # any deploy. This is deliberately best-effort: a design agent that only

@@ -188,7 +188,7 @@
   <circle cx="1490" cy="25" r="280" fill="#2f8ebd" opacity="0.08"/>
   <circle cx="80" cy="1770" r="300" fill="#65d6ad" opacity="0.055"/>
 
-  <text x="60" y="55" class="eyebrow">CANOPY EDA · SCHEMATICS AS S-EXPRESSIONS</text>
+  <text x="60" y="55" class="eyebrow">NETLISP EDA · SCHEMATICS AS S-EXPRESSIONS</text>
   <text x="60" y="112" class="title">AI-assisted schematic design</text>
   <text x="60" y="148" class="subtitle">
     From a written build intent to a reviewed, canonical <tspan class="mono">.sexp</tspan> schematic

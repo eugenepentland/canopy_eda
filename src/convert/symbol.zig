@@ -271,7 +271,7 @@ pub const ConvertError = error{
 test "convert simple symbol" {
     const alloc = std.testing.allocator;
     const input =
-        \\(kicad_symbol_lib (version 20211014) (generator canopy)
+        \\(kicad_symbol_lib (version 20211014) (generator netlisp)
         \\  (symbol "R" (pin_numbers hide) (pin_names (offset 0))
         \\    (property "Reference" "R")
         \\    (property "Description" "Resistor")

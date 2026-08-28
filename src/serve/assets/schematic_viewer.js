@@ -2538,13 +2538,13 @@
       });
     });
     function failureSuggestion(err) {
-      if (err.errorCode === 'AccessDenied' || err.errorCode === 'PermissionDenied') return 'Make the design notes file and its directory writable by the EDA server, then retry.';
+      if (err.errorCode === 'AccessDenied' || err.errorCode === 'PermissionDenied') return 'Make the design notes file and its directory writable by the netlisp server, then retry.';
       if (err.errorCode === 'NoSpaceLeft' || err.errorCode === 'DiskQuota') return 'Free disk space (or quota) on the server, then retry.';
       if (err.httpStatus === 404) return 'Reload the page. This task may have been changed or removed by another editor.';
       if (err.httpStatus === 400) return 'Reload the page and retry. If it still fails, copy these details when reporting the problem.';
       if (err.httpStatus === 413) return 'Shorten the notes file so it is below the 1 MB limit, then retry.';
       if (err.httpStatus >= 500) return 'Check that the design notes file is writable and inspect the server log, then retry.';
-      if (!err.httpStatus) return 'Check the connection to the EDA server, then retry.';
+      if (!err.httpStatus) return 'Check the connection to the netlisp server, then retry.';
       return 'Retry the update. If it fails again, copy these details when reporting the problem.';
     }
     function showFailure(summary, action, path, err, context) {
@@ -2771,14 +2771,14 @@
     var cm = CodeMirror(overlay.querySelector('.src-edit-cm'), {
       value: 'Loading…',
       mode: 'scheme',
-      theme: 'eda-dark',
+      theme: 'netlisp-dark',
       lineNumbers: true,
       matchBrackets: true,
       autoCloseBrackets: true,
       lineWrapping: false,
       indentUnit: 2,
       tabSize: 2,
-      gutters: ['CodeMirror-linenumbers', 'eda-diag-gutter']
+      gutters: ['CodeMirror-linenumbers', 'netlisp-diag-gutter']
     });
 
     var state = {
@@ -2960,7 +2960,7 @@
         cm.removeLineClass(ln, 'wrap', 'cm-diag-warn-line');
       });
       state.diagLineClasses = [];
-      cm.clearGutter('eda-diag-gutter');
+      cm.clearGutter('netlisp-diag-gutter');
     }
     function applyDiagnostics(diags) {
       clearDiagnostics();
@@ -2992,7 +2992,7 @@
         dot.textContent = isErr ? '●' : '▲';
         dot.title = ds.map(function (d) { return d.message; }).join('\n');
         dot.addEventListener('click', function () { cm.setCursor({ line: ln, ch: 0 }); cm.focus(); });
-        cm.setGutterMarker(ln, 'eda-diag-gutter', dot);
+        cm.setGutterMarker(ln, 'netlisp-diag-gutter', dot);
       });
       var s = state.statusEl;
       s.className = 'src-edit-status';

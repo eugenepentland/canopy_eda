@@ -1,4 +1,4 @@
-//! Complete command-line entry point for the structured EDA tool surface.
+//! Complete command-line entry point for the structured netlisp tool surface.
 //!
 //! `netlisp tool list` prints the machine-readable catalog. A tool is invoked
 //! with `netlisp tool <name> --args '<json object>'`; `--args-file` avoids shell

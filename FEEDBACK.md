@@ -1,10 +1,10 @@
-# EDA Agent Feedback Log
+# Netlisp Agent Feedback Log
 
 This append-only log captures concrete blockers and development-process ideas
 noticed by AI agents while working in this repository. Its purpose is to make
 future tasks take fewer turns, tool calls, rebuilds, and retries.
 
-This file is for the EDA repository itself. Guardian-specific feedback belongs
+This file is for the netlisp repository itself. Guardian-specific feedback belongs
 in `../guardian-zig/FEEDBACK.md` under that repository's own rules.
 
 ## What to log

@@ -3,16 +3,16 @@
 # Usage: bash test/test_id_stability.sh
 set -e
 
-EDA="./zig-out/bin/eda"
+NETLISP="./zig-out/bin/netlisp"
 DESIGN="projects/designs/src/stm32n6.sexp"
 BOM="projects/designs/src/stm32n6.bom"
 PROJ="projects/designs"
 PASS=0
 FAIL=0
 
-# Build EDA if needed
-if [ ! -f "$EDA" ]; then
-    echo "Building EDA..."
+# Build netlisp if needed
+if [ ! -f "$NETLISP" ]; then
+    echo "Building netlisp..."
     zig build 2>/dev/null
 fi
 
@@ -22,7 +22,7 @@ cp "$BOM" /tmp/stm32n6_orig.bom 2>/dev/null || true
 
 # Helper: build and extract sorted IDs from BOM
 extract_ids() {
-    $EDA build --project-dir "$PROJ" stm32n6 >/dev/null 2>&1 || true
+    $NETLISP build --project-dir "$PROJ" stm32n6 >/dev/null 2>&1 || true
     grep '(id "' "$BOM" | sed 's/.*id "\([^"]*\)".*/\1/' | sort
 }
 
@@ -129,7 +129,7 @@ cp /tmp/stm32n6_orig.sexp "$DESIGN"
 cp /tmp/stm32n6_orig.sexp "$DESIGN"
 cp /tmp/stm32n6_orig.bom "$BOM" 2>/dev/null || true
 # Rebuild to ensure clean state
-$EDA build --project-dir "$PROJ" stm32n6 >/dev/null 2>&1 || true
+$NETLISP build --project-dir "$PROJ" stm32n6 >/dev/null 2>&1 || true
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

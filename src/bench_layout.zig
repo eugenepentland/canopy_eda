@@ -13,7 +13,7 @@
 //! Built as its own executable (`zig build bench-layout -Doptimize=fast`)
 //! whose module pulls in only the optimizer + evaluator — not the HTTP server
 //! or the render/diagram stack — so editing the optimizer rebuilds in a
-//! fraction of the full `eda` build, and the step skips Guardian so a throwaway
+//! fraction of the full `netlisp` build, and the step skips Guardian so a throwaway
 //! perf variant compiles without baseline churn. Read-only: it never inserts
 //! IDs or writes layout sidecars, so it is safe to point at a shared project
 //! dir from many concurrent processes.

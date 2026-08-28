@@ -148,7 +148,7 @@ function camVisible(k){return camVisibility[k]!==false;}
 // is fetched only after the Assembly shell explicitly enters CAM Review, so
 // ordinary assembly work never pays its generation, transfer or parse cost.
 function camReviewPost(state,detail){if(window.parent===window)return;
- try{window.parent.postMessage({type:"eda-pcb-cam-state",design:PCB.name,state:state,
+ try{window.parent.postMessage({type:"netlisp-pcb-cam-state",design:PCB.name,state:state,
   enabled:CAM_REVIEW,ready:camPayloadReady(),detail:detail||""},MESSAGE_TARGET_ORIGIN);}catch(e){}}
 function camReviewUse(){
  if(!camReviewRequested||!camPayloadReady())return false;
@@ -4810,7 +4810,7 @@ function stickyNetSet(net){selNetCur=net;
 function reviewPickedNet(net){var stats=net?reviewSet({nets:[net],fit:false}):reviewClear();
  if(window.parent===window)return;
  var matched=(stats.matchedNets||stats.matched_nets||[])[0]||net||"";
- try{window.parent.postMessage({type:"eda-pcb-net-picked",design:PCB.name,
+ try{window.parent.postMessage({type:"netlisp-pcb-net-picked",design:PCB.name,
   net:matched,clear:!net,stats:stats},MESSAGE_TARGET_ORIGIN);}catch(e){}}
 function reviewClearOutside(m){var pts=reviewBoardPoints();
  if(!PHYSICAL_REVIEW||pts.length<3||polyContains(pts,m.x,m.y))return false;
@@ -4821,7 +4821,7 @@ function reviewPickedRef(i,pd){var p=P[i],side=reviewPartSide(p);
  if(reviewPickedRefCur===reviewText(p.ref)&&pd&&pd.net&&reviewPickedRefSide===side){reviewPickedRefSide=null;reviewPickedRefCur=null;selNet(pd.net);return;}
  var stats=reviewSet({refs:[p.ref],side:side,fit:false});
  if(window.parent===window)return;
- try{window.parent.postMessage({type:"eda-pcb-ref-picked",design:PCB.name,
+ try{window.parent.postMessage({type:"netlisp-pcb-ref-picked",design:PCB.name,
   ref:p.ref,side:side,pad:(pd&&pd.num)||"",net:(pd&&pd.net)||"",stats:stats},MESSAGE_TARGET_ORIGIN);}catch(e){}}
 function reviewInnerLayers(){return STACK.filter(function(r){return r.i>1&&r.i<STACK.length;}).map(function(r){
  return {id:"copper-inner-"+r.i,name:r.name};});}
@@ -4830,7 +4830,7 @@ function reviewInnerLayers(){return STACK.filter(function(r){return r.i>1&&r.i<S
 // load race; the message response below remains useful for part-side data.
 window.PCBReviewInnerLayers=reviewInnerLayers;
 function reviewPostParts(target,origin){if(!PHYSICAL_REVIEW||!target||!target.postMessage)return;
- try{target.postMessage({type:"eda-pcb-parts",design:PCB.name,parts:P.map(function(p){
+ try{target.postMessage({type:"netlisp-pcb-parts",design:PCB.name,parts:P.map(function(p){
   return {ref:p.ref,side:p.side==="bottom"?"bottom":"top"};}),
   innerLayers:reviewInnerLayers()},origin);}catch(e){}}
 function reviewCamVisibility(next){if(!next||typeof next!=="object")return;
@@ -5109,13 +5109,13 @@ function reviewOrient(side,rotation){var nextSide=side==="bottom"?"bottom":"top"
 window.PCBReviewFocus={set:reviewSet,clear:reviewClear};
 window.addEventListener("message",function(ev){var msg=ev.data;
  if(!msg||(!STANDALONE&&ev.origin!==window.location.origin))return;
- if(msg.type==="eda-pcb-parts-request"){reviewPostParts(ev.source,STANDALONE?"*":ev.origin);return;}
- if(msg.type==="eda-pcb-orientation"){if(RO)reviewOrient(msg.side,msg.rotation);return;}
- if(msg.type==="eda-pcb-cam-mode"){if(RO)camReviewSet(!!msg.enabled);return;}
- if(msg.type==="eda-pcb-cam-visibility"){reviewCamVisibility(msg.layers);return;}
- if(msg.type!=="eda-pcb-focus")return;
+ if(msg.type==="netlisp-pcb-parts-request"){reviewPostParts(ev.source,STANDALONE?"*":ev.origin);return;}
+ if(msg.type==="netlisp-pcb-orientation"){if(RO)reviewOrient(msg.side,msg.rotation);return;}
+ if(msg.type==="netlisp-pcb-cam-mode"){if(RO)camReviewSet(!!msg.enabled);return;}
+ if(msg.type==="netlisp-pcb-cam-visibility"){reviewCamVisibility(msg.layers);return;}
+ if(msg.type!=="netlisp-pcb-focus")return;
  if(msg.design!=null&&String(msg.design)!==String(PCB.name))return;
- var stats=msg.clear?reviewClear():reviewSet(msg),reply={type:"eda-pcb-focus-result",design:PCB.name};
+ var stats=msg.clear?reviewClear():reviewSet(msg),reply={type:"netlisp-pcb-focus-result",design:PCB.name};
  Object.keys(stats).forEach(function(k){reply[k]=stats[k];});
  if(msg.requestId!=null)reply.requestId=msg.requestId;
  try{if(ev.source&&ev.source.postMessage)ev.source.postMessage(reply,STANDALONE?"*":ev.origin);}catch(e){};});

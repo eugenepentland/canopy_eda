@@ -89,7 +89,7 @@ Run this from a clean, committed feature worktree before merging:
 
 It generates and checks the committed templates, runs the whole-tree Guardian
 gate once, then starts the self-hosted Debug unit suite and the repository's
-sole EDA self-hosted ReleaseSafe build together with separate local Zig caches.
+sole netlisp self-hosted ReleaseSafe build together with separate local Zig caches.
 The official pinned compiler contains LLVM, but `build.zig` forces this one
 executable through the self-hosted backend. All development builds, tests,
 tools, dev servers, and benchmarks stay Debug;
@@ -111,7 +111,7 @@ of waiting for the build to finish an artifact that cannot be published. It
 gives
 the group two seconds to handle `TERM`, then enforces cancellation with `KILL`;
 both job logs and the failed staging directory are retained as usual. Exercise
-this path without compiling EDA using `scripts/test_prepare_release_fail_fast.sh`.
+this path without compiling netlisp using `scripts/test_prepare_release_fail_fast.sh`.
 
 A candidate also records the source **tree** it was verified for, and that key
 is checked before any work starts: a commit whose tree already has a verified,
@@ -148,7 +148,7 @@ After installing the verified candidate it restarts the unit and probes the live
 - **Healthy** → the binary is copied to `.git/deploy-lastgood-netlisp`, its ID
   to `.git/deploy-lastgood-id`, and the deployed commit to
   `.git/deploy-last-hash`. The same verified binary is also pre-warmed into
-  `projects/designs/.netlisp-bin/netlisp` with the paired EDA commit written to
+  `projects/designs/.netlisp-bin/netlisp` with the paired netlisp commit written to
   `projects/designs/.git/netlisp-deploy-id`, so the schematic-design-agent
   folder (whose tracked `netlisp` is a launcher, not a binary) stays
   self-contained and on the current build — best-effort, never able to fail the
@@ -185,7 +185,7 @@ legacy markers.
 **Every further merge rewrites the marker**, and the queue is what collapses
 cost: N merges landing while one deploy builds cost at most ONE follow-up
 deploy of the accumulated head, never N — the expensive parts being
-`prepare-release.sh` (the machine-wide `/tmp/eda-gate.lock` for ~7 minutes,
+`prepare-release.sh` (the machine-wide `/tmp/netlisp-gate.lock` for ~7 minutes,
 which every other session queues behind) and the prod restart. The marker
 records the head that armed it only for the log: the deploy always targets
 whatever main's HEAD is when it runs, one build covering everything that

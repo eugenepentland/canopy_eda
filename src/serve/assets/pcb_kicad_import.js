@@ -31,7 +31,7 @@
   var pushTrigger = document.getElementById("pcb-kicad-push");
   var pushCreated = !pushTrigger;
   if (!pushTrigger) pushTrigger = make("button", "pcb-kicad-push", "btn", "⇡ Push to KiCad");
-  pushTrigger.title = "Preview and push this saved EDA layout's placement, routed copper, vias, and " +
+  pushTrigger.title = "Preview and push this saved netlisp layout's placement, routed copper, vias, and " +
     LN.edge_cuts + " into KiCad";
   if (pushCreated) trigger.insertAdjacentElement("afterend", pushTrigger);
 
@@ -44,7 +44,7 @@
   close.title = "Close";
   var body = make("div", "kicad-import-body", "fab-body");
   var actions = make("div", null, "court-actions");
-  var go = make("button", "kicad-import-go", "btn", "Import into EDA");
+  var go = make("button", "kicad-import-go", "btn", "Import into netlisp");
   var cancel = make("button", "kicad-import-cancel", "btn", "Cancel");
   head.appendChild(title);
   head.appendChild(close);
@@ -86,7 +86,7 @@
       if (result === "failed" || result === "conflict" || result === "invalid" || result === "skipped") {
         // "skipped" = dirty edits held back by the unplaced-parts autosave
         // gate — an explicit Save (which accepts the staging) clears it.
-        throw new Error("Save the current EDA layout before syncing from KiCad.");
+        throw new Error("Save the current netlisp layout before syncing from KiCad.");
       }
       return result;
     });
@@ -121,12 +121,12 @@
     var stats = data.stats || {};
     var matched = (match.by_uuid || 0) + (match.by_ref || 0);
 
-    addText("fab-sec ok", "Ready to inspect in the EDA PCB editor");
+    addText("fab-sec ok", "Ready to inspect in the netlisp PCB editor");
     addText("fab-stats", (stats.parts || 0) + " parts · " +
       (stats.tracks || 0) + " tracks · " + (stats.vias || 0) + " vias · " +
       (stats.outline_points || 0) + " outline points");
     addText("court-note", "Source: " + (data.board_path || "declared KiCad PCB") +
-      ". The KiCad file stays read-only. Import replaces the EDA tool's starred layout; the previous EDA layout is kept in layout history.");
+      ". The KiCad file stays read-only. Import replaces the netlisp tool's starred layout; the previous netlisp layout is kept in layout history.");
     addText("fab-sec", "Identity and net mapping");
     addText("fab-stats", matched + " footprints matched (" + (match.by_uuid || 0) +
       " by stable ID, " + (match.by_ref || 0) + " by reference) · " +
@@ -197,7 +197,7 @@
     }).catch(function (error) {
       showError(error);
       if (error && error.status === 409) addText("court-note", "Reload the PCB editor, then preview the KiCad board again.");
-      go.textContent = "Import into EDA";
+      go.textContent = "Import into netlisp";
       setBusy(false);
     });
   });
@@ -206,7 +206,7 @@
   cancel.addEventListener("click", dismiss);
   modal.addEventListener("click", function (event) { if (event.target === modal) dismiss(); });
 
-  // ---- Authoritative EDA layout → KiCad handoff ----
+  // ---- Authoritative netlisp layout → KiCad handoff ----
   // This is intentionally separate from the schematic page's conservative
   // netlist sync: the latter never moves a placed part; this explicit action
   // replaces layout geometry after a dry-run preview.
@@ -268,8 +268,8 @@
       "Current design footprints are moved/refreshed and stale board footprints are removed. " +
       "Zones, setup/rules, and unrelated drawings are preserved. A timestamped board backup is created first.");
     if (summary.layout_zones) pushText("court-note", summary.layout_zones +
-      " EDA copper pour zone(s), and any EDA board text, are not exported yet. Existing KiCad zones/text are preserved; refill zones before DRC/Gerber generation.");
-    else pushText("court-note", "EDA board text is not exported yet. Existing KiCad zones/text are preserved; refill zones before DRC/Gerber generation.");
+      " netlisp copper pour zone(s), and any netlisp board text, are not exported yet. Existing KiCad zones/text are preserved; refill zones before DRC/Gerber generation.");
+    else pushText("court-note", "netlisp board text is not exported yet. Existing KiCad zones/text are preserved; refill zones before DRC/Gerber generation.");
   }
 
   function dismissPush() {
@@ -282,7 +282,7 @@
     pushTrigger.disabled = true; pushTrigger.textContent = "Saving layout…";
     flushEditor().then(function () {
       pushLayoutName = activeLayoutName();
-      if (!pushLayoutName) throw new Error("Save or load a named EDA layout before pushing it to KiCad.");
+      if (!pushLayoutName) throw new Error("Save or load a named netlisp layout before pushing it to KiCad.");
       pushTrigger.textContent = "Previewing…";
       return pushRequest(true, pushLayoutName);
     }).then(function (data) {

@@ -9,7 +9,7 @@ unchanged objective/routed scores. The sum of the four medians fell from
 ## Method
 
 - Host: Intel Core i5-10400, Linux 5.15.0-187, Zig 0.15.1.
-- Baseline: EDA commit `b7fa30120535b8483c767cb1e3d75c59481055e3`.
+- Baseline: netlisp commit `b7fa30120535b8483c767cb1e3d75c59481055e3`.
 - Final: the commit containing this report.
 - Input repo: `projects/designs` at
   `b2789cc5defb531175fa51da33819e9eb40e62f6`, with its pre-existing dirty

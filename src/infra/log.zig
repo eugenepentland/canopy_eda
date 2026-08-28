@@ -3,7 +3,7 @@
 //! instead of `std.debug.print` / `std.log`, which Guardian's
 //! `debug-print-ban` check forbids.
 //!
-//! CLI command output (the visible result of running `eda <cmd>`)
+//! CLI command output (the visible result of running `netlisp <cmd>`)
 //! stays on `std.Io.File.stdout()` directly inside `src/commands.zig`
 //! and `src/main.zig` — those prints are the program's purpose, not
 //! diagnostics about it.

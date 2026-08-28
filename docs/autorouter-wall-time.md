@@ -3,7 +3,7 @@
 > **Current build policy (2026-08-12):** all new routing development,
 > profiling, corpus runs, and acceptance tests use pinned-master self-hosted
 > Debug. ReleaseSafe numbers below are a historical measurement record, not a
-> command template; the only new EDA ReleaseSafe build is made during deploy.
+> command template; the only new netlisp ReleaseSafe build is made during deploy.
 
 **Date:** 2026-08-02. **Instrumentation:** `bench-route --breakdown` (per-phase
 wall-clock timing + maze-expansion/leg counters + per-net slowest list) added in

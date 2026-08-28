@@ -1,4 +1,4 @@
-# EDA Architecture
+# Netlisp Architecture
 
 A high-level map of what this tool does today. Capability-focused, language-agnostic — the implementation lives in `src/`, but this document deliberately stays out of it.
 
@@ -6,7 +6,7 @@ A high-level map of what this tool does today. Capability-focused, language-agno
 
 ## 1. What the tool is
 
-**A CLI-driven schematic-capture EDA tool where designs are S-expression source files.** A single binary (`eda`) parses, evaluates, validates, renders, and serves designs. Source files in `projects/designs/` are evaluated into an in-memory design graph that fans out to four terminal forms:
+**A CLI-driven schematic-capture tool where designs are S-expression source files.** A single binary (`netlisp`) parses, evaluates, validates, renders, and serves designs. Source files in `projects/designs/` are evaluated into an in-memory design graph that fans out to four terminal forms:
 
 - **Browser-rendered HTML schematic** with inline SVG (hub-and-spoke layout, live-updating).
 - **Design-review report** — a structured HTML/JSON document with power-budget, BOM, ERC, and assertion roll-ups.
@@ -172,7 +172,7 @@ served. Report sections include:
 
 ### Web server (`netlisp serve`)
 
-Default port 7050. Dev URL: `http://localhost:7050`. Production URL: `https://co-circuit.eugenepentland.dev`.
+Default port 7050. Dev URL: `http://localhost:7050`. Production URL: `https://netlisp.eugenepentland.dev`.
 
 **Pages.** `/` (design list), `/schematics/:name` and `/modules/:name` (board and module schematics), `/pcb-layout/:name` (2D and `?view=3d`), `/assembly-debug/:name`, `/thermal/:name`, `/library`, `/library/footprint/:name`, `/library/3d/:footprint`, `/route-review`, and `/pdf-view/:filename`. `/modules` and the retired `/pcb-route-lab/:name` redirect into those current surfaces. The datasheet viewer loads its pinned PDF.js runtime and worker from the embedded same-origin static registry, so it has no CDN dependency. Sign-in and account management are not netlisp pages — the navbar Account link points at ward's admin portal (`https://ward.eugenepentland.dev/admin`).
 
@@ -195,13 +195,13 @@ netlisp is a **pure resource server** — it runs no auth of its own. Everything
 - **Browser sessions.** The `ward_session` cookie (domain `.eugenepentland.dev`) is verified against wardd `GET /verify`. No cookie → `302` to `https://ward.eugenepentland.dev/login?rd=<url>`; wardd unreachable → `503` (fail-closed).
 - **Sync API bearers.** The KiCad sync endpoint accepts its dedicated plugin
   token first, then a ward token verified through `POST /oauth/introspect`; the
-  ward token must carry the `eda` service scope and a writer-capable role.
+  ward token must carry the `netlisp` service scope and a writer-capable role.
 - **Roles.** ward member → `writer`, ward admin → `admin`, unknown → `reader`
   for browser/API writes. Local CLI tools run with the invoking user's
   filesystem authority. Registration and account management live in ward's
   admin portal (`/admin`).
 - **Plugin tokens (bearer).** For KiCad sync API clients — minted via `netlisp mint-plugin-token`, stored in `plugin_tokens.json` under the auth dir, checked *before* the ward bearer on `/api/sync-kicad-pcb/*`.
-- **Config (env / `.env`).** `WARD_VERIFY_URL`, `WARD_LOGIN_URL`, `WARD_INTROSPECT_URL`, `WARD_SERVICE_NAME` (default `eda`), `WARD_CACHE_TTL_SECS` (default `30`, the revocation-lag bound). Unset → fail closed (`503`) outside the dev bypass.
+- **Config (env / `.env`).** `WARD_VERIFY_URL`, `WARD_LOGIN_URL`, `WARD_INTROSPECT_URL`, `WARD_SERVICE_NAME` (default `netlisp`), `WARD_CACHE_TTL_SECS` (default `30`, the revocation-lag bound). Unset → fail closed (`503`) outside the dev bypass.
 - **Dev bypass.** `NETLISP_DEV` grants a local admin identity to a loopback, unproxied request (env opt-in) — no wardd needed for local development.
 
 ### Structured CLI tools
@@ -278,12 +278,12 @@ projects/designs/
 │   ├── pinouts/                  # extracted pinouts (pin → function lookups)
 │   └── datasheets/               # uploaded PDFs
 └── auth/
-    └── plugin_tokens.json        # KiCad-sync bearer tokens (eda_p_*)
+    └── plugin_tokens.json        # KiCad-sync bearer tokens (netlisp_p_*)
 ```
 
 (Post ward-migration this is the only auth sidecar: passkeys, sessions, invites, and OAuth clients/tokens now live in wardd, not on disk here. The old `users.json` / `oauth_clients.json` / `oauth_tokens.json` stores are gone.)
 
-KiCad sync writes the declared `.kicad_pcb` directly and does not maintain EDA
+KiCad sync writes the declared `.kicad_pcb` directly and does not maintain netlisp
 sidecars beside it. KiCad may create transient project lock files while pcbnew
 has the board open:
 

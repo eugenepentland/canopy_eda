@@ -63,7 +63,7 @@ git -C "$REPO" commit -qm fixture
 
 started="$(date +%s)"
 set +e
-EDA_GATE_SERIALIZE=0 \
+NETLISP_GATE_SERIALIZE=0 \
   ZIG="$REPO/bin/zig" \
   FAKE_TEST_FAIL=1 \
   FAIL_FAST_STARTED="$TMP/build-started" \
@@ -111,7 +111,7 @@ fi
 
 # The same grouped-job launcher must leave the green path unchanged: both jobs
 # finish and the gate publishes the exact-commit executable.
-EDA_GATE_SERIALIZE=0 ZIG="$REPO/bin/zig" \
+NETLISP_GATE_SERIALIZE=0 ZIG="$REPO/bin/zig" \
   STRIP=/bin/true READELF=/bin/true \
   "$REPO/.githooks/prepare-release.sh" >"$TMP/success-output" 2>&1
 head_hash="$(git -C "$REPO" rev-parse HEAD)"

@@ -25,7 +25,7 @@ const tmp_dir_name = "tmp";
 // from the client-supplied `X-Filename` header — templating an attacker string
 // into a `/tmp/...` path was an arbitrary-file-write (path traversal via
 // `../../..`) → RCE vector. Both `{d}` fields are our own counters.
-const tmp_zip_template = "/" ++ var_dir_name ++ "/" ++ tmp_dir_name ++ "/eda-upload-{d}-{d}";
+const tmp_zip_template = "/" ++ var_dir_name ++ "/" ++ tmp_dir_name ++ "/netlisp-upload-{d}-{d}";
 
 /// Monotonic counter appended to temp-file names so two uploads landing in the
 /// same millisecond can't collide (and so no request input reaches the path).

@@ -212,7 +212,7 @@
   function focusMessage(refs, nets, fit, kind, pins, context) {
     if (!frame || !frame.contentWindow) return;
     frame.contentWindow.postMessage({
-      type: 'eda-pcb-focus',
+      type: 'netlisp-pcb-focus',
       refs: unique(refs),
       nets: unique(nets),
       pins: pins || [],
@@ -249,7 +249,7 @@
       const innerLayers = frame.contentWindow.PCBReviewInnerLayers;
       if (typeof innerLayers === 'function') populateInnerCopperLayers(innerLayers());
     } catch (_) {}
-    frame.contentWindow.postMessage({ type: 'eda-pcb-parts-request' }, messageTargetOrigin);
+    frame.contentWindow.postMessage({ type: 'netlisp-pcb-parts-request' }, messageTargetOrigin);
   }
 
   function showWorkspacePanel(name) {
@@ -588,7 +588,7 @@
     if (!frame) return;
     if (frame.contentWindow) {
       frame.contentWindow.postMessage({
-        type: 'eda-pcb-orientation',
+        type: 'netlisp-pcb-orientation',
         side: boardSide,
         rotation: boardRotation
       }, messageTargetOrigin);
@@ -683,7 +683,7 @@
       }
     } catch (_) {}
     frame.contentWindow.postMessage({
-      type: 'eda-pcb-cam-mode',
+      type: 'netlisp-pcb-cam-mode',
       enabled: camReviewRequested
     }, messageTargetOrigin);
   }
@@ -749,7 +749,7 @@
   function applyCamLayers(persist) {
     if (frame && frame.contentWindow) {
       frame.contentWindow.postMessage({
-        type: 'eda-pcb-cam-visibility',
+        type: 'netlisp-pcb-cam-visibility',
         layers: camLayerState()
       }, messageTargetOrigin);
     }
@@ -1287,7 +1287,7 @@
   window.addEventListener('message', (event) => {
     if ((!standalone && event.origin !== window.location.origin) || event.source !== frame.contentWindow) return;
     const payload = event.data || {};
-    if (payload.type === 'eda-pcb-cam-state') {
+    if (payload.type === 'netlisp-pcb-cam-state') {
       if (payload.state === 'loading') {
         camReviewError = '';
         camReviewLoading = true;
@@ -1312,7 +1312,7 @@
       syncCamReviewControl();
       return;
     }
-    if (payload.type === 'eda-pcb-parts') {
+    if (payload.type === 'netlisp-pcb-parts') {
       populateInnerCopperLayers(payload.innerLayers);
       partSides.clear();
       (payload.parts || []).forEach((part) => {
@@ -1323,7 +1323,7 @@
       renderLists();
       return;
     }
-    if (payload.type === 'eda-pcb-ref-picked') {
+    if (payload.type === 'netlisp-pcb-ref-picked') {
       const pickedSide = payload.side === 'bottom' || payload.side === 'top'
         ? payload.side
         : partSides.get(String(payload.ref || '').toLowerCase());
@@ -1337,7 +1337,7 @@
       }
       return;
     }
-    if (payload.type === 'eda-pcb-net-picked') {
+    if (payload.type === 'netlisp-pcb-net-picked') {
       if (payload.clear) {
         clearSelection(true);
         return;

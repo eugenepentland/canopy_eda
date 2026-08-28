@@ -348,7 +348,7 @@ pub const Requirement = struct {
     /// parse time so every requirement is addressable from a `(verifies ...)`
     /// form without a prior freeze. Editing the requirement text without
     /// freezing first will break links, so we recommend running
-    /// `eda freeze-requirement-ids` once a design starts using verifies.
+    /// `netlisp freeze-requirement-ids` once a design starts using verifies.
     id: []const u8 = "",
 };
 

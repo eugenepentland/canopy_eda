@@ -10,7 +10,7 @@ pub const required_zig_version = "0.17.0-dev.1683+5ceec001b";
 pub fn build(b: *std.Build) void {
     if (!std.mem.eql(u8, builtin.zig_version_string, required_zig_version)) {
         std.debug.panic(
-            "EDA requires Zig {s}; found {s}. See README.md for the pinned toolchain and archive checksum.",
+            "netlisp requires Zig {s}; found {s}. See README.md for the pinned toolchain and archive checksum.",
             .{ required_zig_version, builtin.zig_version_string },
         );
     }
@@ -34,7 +34,7 @@ pub fn build(b: *std.Build) void {
     // tradeoff which required ReleaseSafe just to keep solver tests usable.
     // The option remains available as a low-level diagnostic escape hatch, but
     // repository policy is self-hosted Debug for every internal test; only the
-    // deployment pipeline builds the EDA application with self-hosted ReleaseSafe.
+    // deployment pipeline builds the netlisp application with self-hosted ReleaseSafe.
     // This affects ONLY the `test` binary below; the main artifact, bench,
     // wasm, and `test-fast` keep honoring `-Doptimize`.
     const test_opt = b.option(
@@ -205,7 +205,7 @@ pub fn build(b: *std.Build) void {
 
     // Slim PCB-layout optimizer benchmark. Its module pulls in only the
     // optimizer + evaluator (no httpz/zt, no serve/render/diagram stack), so an
-    // edit to placement/optimizer.zig rebuilds a fraction of the full `eda`
+    // edit to placement/optimizer.zig rebuilds a fraction of the full `netlisp`
     // exe — the fast inner loop for perf experiments. The `bench-layout` step
     // deliberately does NOT depend on Guardian, fmt-check, or the templates, so
     // a throwaway SoA/SIMD variant builds cleanly without baseline churn.
@@ -432,7 +432,7 @@ fn addTestShard(
     // integrity block in src/test_root.zig can hold the compiler to that row.
     // Absent for `-Dtest-filter`, whose selection no manifest row describes.
     if (shard_index) |index| {
-        run_tests.setEnvironmentVariable("EDA_TEST_SHARD", b.fmt("{d}", .{index}));
+        run_tests.setEnvironmentVariable("NETLISP_TEST_SHARD", b.fmt("{d}", .{index}));
     }
     // Tell the runner what the filter texts were — Zig never passes them to a
     // test runner, so without this it can only detect a completely empty binary

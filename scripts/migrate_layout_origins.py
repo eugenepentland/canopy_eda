@@ -9,13 +9,13 @@ collapses to (0,0) and reads as `center` (a spurious 0% in layout-match).
 
 The optimizer/serve code already writes + consumes `origin` correctly; this only
 back-fills it on existing data. For each starred module it pulls the standalone
-solve's ordered (ref, origin) list from a running `eda serve` and zips it onto each
+solve's ordered (ref, origin) list from a running `netlisp serve` and zips it onto each
 saved layout BY INDEX — but only after verifying the ref-des-prefix sequence
 (U/C/R/L/…) matches position-for-position, so a layout whose part order diverges is
 reported and skipped rather than corrupted.
 
 Usage:
-    # start a server first:  eda serve --project-dir projects/designs --port 7050
+    # start a server first:  netlisp serve --project-dir projects/designs --port 7050
     python3 scripts/migrate_layout_origins.py                 # dry-run (report only)
     python3 scripts/migrate_layout_origins.py --apply         # write + .bak backups
     python3 scripts/migrate_layout_origins.py --base http://localhost:7099 --apply

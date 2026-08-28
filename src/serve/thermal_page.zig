@@ -337,7 +337,7 @@ fn writeDocHead(w: *std.Io.Writer, v: View, title: []const u8) std.Io.Writer.Err
     try escape.writeXml(w, v.name);
     try w.writeAll(" — Thermal</title>");
     try w.writeAll("<link rel=\"stylesheet\" href=\"/static/thermal_page.css\"></head>");
-    try w.writeAll("<body><header class=\"topbar\"><a class=\"brand\" href=\"/\">EDA</a><strong>");
+    try w.writeAll("<body><header class=\"topbar\"><a class=\"brand\" href=\"/\">netlisp</a><strong>");
     try escape.writeXml(w, if (title.len > 0) title else v.name);
     try w.writeAll("</strong>");
     try writeNav(w, v);
@@ -1503,7 +1503,7 @@ test "the thermal board switches between physical top and bottom faces" {
     const client = @embedFile("assets/thermal_page.js");
     try testing.expect(containsAll(client, &.{
         "function boardSideSet(",
-        "type: \"eda-pcb-orientation\"",
+        "type: \"netlisp-pcb-orientation\"",
         "side: boardSide",
         "board_side",
         "tell({ side: boardSide })",
@@ -1565,7 +1565,7 @@ test "thermal labels reveal only the clicked IC by default" {
     }));
     const client = @embedFile("assets/thermal_page.js");
     try testing.expect(containsAll(client, &.{
-        "d.type === \"eda-pcb-ref-picked\"",
+        "d.type === \"netlisp-pcb-ref-picked\"",
         "tell({ selectedRef: d.ref || \"\" })",
     }));
 }

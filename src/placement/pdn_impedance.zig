@@ -1218,7 +1218,7 @@ fn writeSpiceIdent(w: *std.Io.Writer, raw: []const u8) std.Io.Writer.Error!void 
 /// subcircuit. PORT is the observation/load node; an AC-grounded source RL and
 /// every mounted capacitor RLC branch shunt it to GND.
 pub fn writeSpice(w: *std.Io.Writer, rail: Rail) std.Io.Writer.Error!void {
-    try w.writeAll("* Canopy routed-board PDN screen; values are SI\n.subckt PDN_");
+    try w.writeAll("* Netlisp routed-board PDN screen; values are SI\n.subckt PDN_");
     try writeSpiceIdent(w, rail.net);
     try w.writeAll(" PORT GND\n");
     try w.print("R_SRC PORT N_SRC {e}\nL_SRC N_SRC GND {e}\n", .{ rail.source_resistance_ohm, rail.source_inductance_h });

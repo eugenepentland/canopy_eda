@@ -1,4 +1,4 @@
-// implement-design — turn a (stub …)-based EDA design into a reusable-module-
+// implement-design — turn a (stub …)-based netlisp design into a reusable-module-
 // aware, datasheet-reviewed implementation that passes strict preflight.
 //
 // Invoke:  Workflow({ name: "implement-design", args: { design: "barracuda" } })
@@ -19,7 +19,7 @@
 //
 // SAFETY: this workflow never commits, pushes, exports to the KiCad board, or
 // writes the NAS — it stops at build+preflight and hands back a report for a
-// human to inspect and approve. Requires the eda MCP server connected (its
+// human to inspect and approve. Requires the netlisp MCP server connected (its
 // tools — read/edit, library search, datasheet/requirement tools, build, and
 // run_checks — are reached by sub-agents via ToolSearch).
 
@@ -226,13 +226,13 @@ const design = (_a && typeof _a === 'object' && _a.design) || (typeof _a === 'st
 if (!design) throw new Error('implement-design: pass the design name, e.g. { args: { design: "barracuda" } }')
 
 const tool_note =
-  'Find and use the eda MCP tools via ToolSearch (they are prefixed by the eda server id). '
-  + 'If the eda MCP server is not connected, stop and report that — do not guess.'
+  'Find and use the netlisp MCP tools via ToolSearch (they are prefixed by the netlisp server id). '
+  + 'If the netlisp MCP server is not connected, stop and report that — do not guess.'
 
 // ── Phase 0: introspect ───────────────────────────────────────────
 phase('Introspect')
 const inv = await agent(
-  `${tool_note}\n\nRead the source of EDA design "${design}" (use read_file / glob / list_designs to locate its .sexp under projects/designs). `
+  `${tool_note}\n\nRead the source of netlisp design "${design}" (use read_file / glob / list_designs to locate its .sexp under projects/designs). `
   + `Extract EVERY (stub …) form: its name (the quoted key), ref_des if explicit, the (mpn "…") string verbatim as mpn_raw, (category …), and each (signal "NAME" class "NET") as {name, class, net}. Return the full stub inventory.`,
   { schema: STUB_SCHEMA, phase: 'Introspect' },
 )

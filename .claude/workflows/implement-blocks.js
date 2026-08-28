@@ -219,7 +219,7 @@ const REPAIR_SCHEMA = {
   required: ['build_ok'],
 }
 
-const TOOL = 'Use the eda MCP tools via ToolSearch: read_file, edit_file, list_library, describe_component, preview_module, download_datasheet, read_datasheet, add_component_requirement, build, and run_checks.'
+const TOOL = 'Use the netlisp MCP tools via ToolSearch: read_file, edit_file, list_library, describe_component, preview_module, download_datasheet, read_datasheet, add_component_requirement, build, and run_checks.'
 
 // ── Phase 0: reusable implementation discovery ────────────────────
 phase('Prepare')
@@ -322,7 +322,7 @@ for (let attempt = 1; attempt <= 2 && !(lastVerify.build_ok && lastVerify.eval_o
   log(`build/eval not green (attempt ${attempt}) — running repair`)
   repair = await agent(
     `${TOOL}\n\nThe "${design}" build did NOT evaluate cleanly. Build error / status: ${JSON.stringify(lastVerify.build_error || lastVerify.preflight_summary || 'unknown')}.\n\n`
-    + `The eda build reports UnboundVariable / ArityError WITHOUT a symbol name. The known causes (check ${SEXP} for each) are:\n`
+    + `The netlisp build reports UnboundVariable / ArityError WITHOUT a symbol name. The known causes (check ${SEXP} for each) are:\n`
     + `  1. A component is referenced but not in the top-level (import …) form → UnboundVariable. Add the missing import.\n`
     + `  2. A net token is unquoted, e.g. (pin 1 GND) → UnboundVariable. Quote it: (pin 1 "GND").\n`
     + `  3. A nested (design-block …) inside the top design-block → remove the wrapper, keep the bare (instance …) forms.\n`

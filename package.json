@@ -1,5 +1,5 @@
 {
-  "name": "canopy-eda-browser-gates",
+  "name": "netlisp-browser-gates",
   "private": true,
   "scripts": {
     "perf:assembly": "node scripts/pcb_browser_perf/run.js",

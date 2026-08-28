@@ -2,7 +2,7 @@
 
 ## Mandatory worktree workflow
 
-**Scope: changes to the EDA tool itself.** This workflow governs edits to this
+**Scope: changes to the netlisp tool itself.** This workflow governs edits to this
 repo's source (the `netlisp` binary, schematic engine, renderers, server,
 build scripts, and this documentation). Work on the design library under
 `projects/designs/` is exempt: that folder is its own git repo and the live
@@ -46,7 +46,7 @@ the same time, records an exact-commit candidate under the shared git directory,
 and lets the post-merge deploy reuse that binary. If a merge creates a different
 commit, the deploy hook safely performs the same preparation on `main`.
 
-**This release gate applies only to changes to the EDA tool itself** (the
+**This release gate applies only to changes to the netlisp tool itself** (the
 `netlisp` binary, schematic engine, renderers, UI, parsers). Changes to the
 design library under `projects/designs/` — schematics, modules, parts, and
 their docs — never build or rebuild anything: the `netlisp` launcher resolves
@@ -69,7 +69,7 @@ performed, and whether the branch remains unmerged.
 
 ## Repository workflow feedback
 
-After an EDA-tool task, append a concise entry to `FEEDBACK.md` when you
+After a netlisp-tool task, append a concise entry to `FEEDBACK.md` when you
 encounter a genuine blocker or identify a concrete way to reduce future turns,
 tool calls, rebuilds, or retries. Follow that file's append-only format and do
 not add routine success notes. This repository log is separate from the
@@ -77,13 +77,13 @@ mandatory Guardian feedback log described by the global instructions.
 
 ## Build and test modes
 
-**Scope: the EDA tool source only.** These modes drive the toolchain build
+**Scope: the netlisp tool source only.** These modes drive the toolchain build
 (`zig build …`, `scripts/zig-prod`, `prepare-release.sh`). They exist because
 the tool itself is a compiled Zig program. Design-library changes under
 `projects/designs/` never touch it — `netlisp` is a launcher over the already
 verified binary, so design work never builds, never runs `zig`, and never runs
 `prepare-release.sh`. Continue to the modes only when you are modifying the
-EDA tool; otherwise work in `projects/designs/` per its own `AGENTS.md`.
+netlisp tool; otherwise work in `projects/designs/` per its own `AGENTS.md`.
 
 Use self-hosted Debug for code iteration and tests, and the pinned production
 compiler's ReleaseSafe output for anything a human actually exercises (dev
@@ -122,7 +122,7 @@ builds. `scripts/zig-prod` resolves the production compiler from
 
 Backend flags are compiler flags, not Zig build-runner flags:
 `zig build ... -fno-llvm` and `zig build ... -fllvm` are invalid. They may be
-used with direct commands such as `zig build-exe`, but internal EDA work should
+used with direct commands such as `zig build-exe`, but internal netlisp work should
 not override the default self-hosted Debug backend. See `CLAUDE.md` under
 "Build modes and codegen backends" for commands and measurements. Zig 0.17
 build options use lowercase enum values (`debug`, `safe`, `fast`, `small`);

@@ -2025,7 +2025,7 @@ test "decoupling cap on a multi-supply-pad rail requires a pin binding" {
 
     const block = try makeDecoupleTestBlock(alloc);
     var violations: std.ArrayList(Violation) = .empty;
-    try checkDecouplingBinding(alloc, &block, "/nonexistent-eda-test-dir", &violations);
+    try checkDecouplingBinding(alloc, &block, "/nonexistent-netlisp-test-dir", &violations);
 
     try std.testing.expectEqual(@as(usize, 1), countKind(violations.items, .decoupling_unbound));
     for (violations.items) |v| {
@@ -4490,7 +4490,7 @@ test "decoupling-binding exempts a micro-sign bulk reservoir" {
         .net_ties = &.{},
     };
     var violations: std.ArrayList(Violation) = .empty;
-    try checkDecouplingBinding(alloc, &block, "/nonexistent-eda-test-dir", &violations);
+    try checkDecouplingBinding(alloc, &block, "/nonexistent-netlisp-test-dir", &violations);
     try std.testing.expectEqual(@as(usize, 0), countKind(violations.items, .decoupling_unbound));
 }
 

@@ -754,7 +754,7 @@
       },
       "pdf_viewer": {
         "label": "PDF datasheet viewer",
-        "path": "/pdf-view/browser-perf.pdf?highlight=Canopy",
+        "path": "/pdf-view/browser-perf.pdf?highlight=Netlisp",
         "repetitions": 3,
         "navigation": {
           "response_p50_ms": 3.4,

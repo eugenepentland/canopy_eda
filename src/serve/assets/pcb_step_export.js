@@ -256,8 +256,8 @@
     if (!bodies.length) throw new Error("no closed 3D geometry");
     var lines = [
       "ISO-10303-21;", "HEADER;",
-      "FILE_DESCRIPTION(('Canopy PCB 3D conformant faceted B-rep export'),'2;1');",
-      "FILE_NAME(" + stepText(fileName(name)) + "," + stepText(timestamp || new Date().toISOString().slice(0, 19)) + ",('Canopy'),('Canopy'),'Canopy EDA','','');",
+      "FILE_DESCRIPTION(('Netlisp PCB 3D conformant faceted B-rep export'),'2;1');",
+      "FILE_NAME(" + stepText(fileName(name)) + "," + stepText(timestamp || new Date().toISOString().slice(0, 19)) + ",('Netlisp'),('Netlisp'),'Netlisp','','');",
       "FILE_SCHEMA(('AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF { 1 0 10303 442 1 1 4 }'));",
       "ENDSEC;", "DATA;",
       "#1=APPLICATION_CONTEXT('managed model based 3d engineering');",

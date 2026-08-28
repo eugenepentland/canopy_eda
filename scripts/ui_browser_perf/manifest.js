@@ -220,7 +220,7 @@ const surfaces = [
   {
     id: "pdf_viewer",
     label: "PDF datasheet viewer",
-    path: "/pdf-view/browser-perf.pdf?highlight=Canopy",
+    path: "/pdf-view/browser-perf.pdf?highlight=Netlisp",
     ready: "#viewer canvas",
     scenarios: [
       { id: "lazy_scroll", kind: "async", budgets: { p95_ms: 500, max_ms: 750 } },

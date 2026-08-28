@@ -64,7 +64,7 @@ pub fn writeNetlist(
     // The design name is a CLI/HTTP-supplied string, not a tokenizer slice, so
     // it is the one field here that can carry a genuinely raw `"`.
     try w.print("    (source \"{s}\")\n", .{try kicad_format.sexprEscape(tmp, design_name)});
-    try w.writeAll("    (tool \"canopy-eda\"))\n");
+    try w.writeAll("    (tool \"netlisp\"))\n");
 
     // Components
     try w.writeAll("  (components\n");

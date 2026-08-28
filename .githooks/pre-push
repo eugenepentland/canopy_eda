@@ -8,7 +8,7 @@
 # never gated — the cost lands exactly once, on the push that matters.
 #
 # Escapes, loud on purpose:
-#   EDA_PERF_SKIP=1 git push      # skip this one push, and say so
+#   NETLISP_PERF_SKIP=1 git push      # skip this one push, and say so
 #   git push --no-verify          # git's own whole-hook bypass
 #
 # A machine without the designs repo (fresh clone, CI) warns and allows: the
@@ -17,8 +17,8 @@
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-BASELINE="${EDA_PERF_BASELINE:-docs/benchmarks/pcb-page/baseline.json}"
-PROJECT_DIR="${EDA_PERF_PROJECT_DIR:-projects/designs}"
+BASELINE="${NETLISP_PERF_BASELINE:-docs/benchmarks/pcb-page/baseline.json}"
+PROJECT_DIR="${NETLISP_PERF_PROJECT_DIR:-projects/designs}"
 
 # stdin: "<local ref> <local sha> <remote ref> <remote sha>" per ref being
 # pushed. Gate only when some ref lands on the remote's main (deletes exempt).
@@ -33,8 +33,8 @@ while read -r _local_ref local_sha remote_ref _remote_sha; do
 done
 [ "$gate_main" = 1 ] || exit 0
 
-if [ "${EDA_PERF_SKIP:-0}" = "1" ]; then
-  echo "pre-push: EDA_PERF_SKIP=1 — page-load latency gate SKIPPED for this push" >&2
+if [ "${NETLISP_PERF_SKIP:-0}" = "1" ]; then
+  echo "pre-push: NETLISP_PERF_SKIP=1 — page-load latency gate SKIPPED for this push" >&2
   exit 0
 fi
 head_sha="$(git rev-parse HEAD)"
@@ -43,7 +43,7 @@ if [ "$head_sha" != "$pushed_main_sha" ]; then
   exit 1
 fi
 if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
-  echo "pre-push: REFUSED — the EDA checkout is dirty; commit or isolate changes before measuring the pushed main commit" >&2
+  echo "pre-push: REFUSED — the netlisp checkout is dirty; commit or isolate changes before measuring the pushed main commit" >&2
   exit 1
 fi
 if [ ! -d "$PROJECT_DIR/src" ]; then
@@ -60,12 +60,12 @@ fi
 if [ ! -f "$BASELINE" ]; then
   echo "pre-push: REFUSED — no committed page-latency baseline at $BASELINE." >&2
   echo "pre-push: record one and commit it:  scripts/perf_gate.sh --record" >&2
-  echo "pre-push: (bypass once with EDA_PERF_SKIP=1 if you must)" >&2
+  echo "pre-push: (bypass once with NETLISP_PERF_SKIP=1 if you must)" >&2
   exit 1
 fi
 
 echo "pre-push: server-page and browser interaction performance gates for main — queueing behind the machine gate lock…"
-EDA_PERF_PROJECT_DIR="$PROJECT_DIR" bash scripts/perf_gate.sh
+NETLISP_PERF_PROJECT_DIR="$PROJECT_DIR" bash scripts/perf_gate.sh
 status=$?
 if [ "$status" -ne 0 ]; then
   echo "pre-push: REFUSED — page latency regressed vs $BASELINE (see the gate report above)." >&2

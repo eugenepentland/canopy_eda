@@ -918,7 +918,7 @@ test "PCB editor carries the guarded inbound KiCad sync workflow" {
         "?dry_run=1",
         "KiCad footprints with no design instance",
         "zones/keepouts are reported but not rendered",
-        "Import into EDA",
+        "Import into netlisp",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_kicad_import_js, marker) != null);
 }
@@ -1161,7 +1161,7 @@ test "Assembly review resolves ordered CAM policy with independent layer visibil
         .{ .bytes = pcb_gpu_js, .marker = "function camOpDark" },
         .{ .bytes = pcb_gpu_js, .marker = "if (L.negative) dark = !dark" },
         .{ .bytes = pcb_board_js, .marker = "if(camVisible(\"components\")){paintParts" },
-        .{ .bytes = pcb_board_js, .marker = "eda-pcb-cam-visibility" },
+        .{ .bytes = pcb_board_js, .marker = "netlisp-pcb-cam-visibility" },
         .{ .bytes = pcb_board_js, .marker = "PCB.cam.profile" },
         .{ .bytes = pcb_board_js, .marker = "function physicalReviewOutlinePoints()" },
         .{ .bytes = pcb_board_js, .marker = "this read-only page omits the sketch compiler" },
@@ -1613,7 +1613,7 @@ test "Assembly board loads exact CAM only on explicit review request" {
         "var CAM_REVIEW=false,camReviewRequested=false,camLoadStarted=false",
         "function camReviewSet(enabled)",
         "window.PCBReviewCamMode=camReviewSet",
-        "if(msg.type===\"eda-pcb-cam-mode\")",
+        "if(msg.type===\"netlisp-pcb-cam-mode\")",
         "function loadCamReview()",
         "if(!PHYSICAL_REVIEW||CAM_REVIEW||!camReviewRequested)return",
         "if(!camReviewRequested)return",

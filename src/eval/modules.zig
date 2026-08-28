@@ -770,7 +770,7 @@ test "loadComponent parses datasheet-review evidence" {
         \\    (datasheet "reviewed.pdf")
         \\    (sha256 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         \\    (status complete)
-        \\    (reviewed-by "eda-agent")
+        \\    (reviewed-by "netlisp-agent")
         \\    (date "2026-07-16")
         \\    (category supply)
         \\    (category-na thermal "junction stays below rating")))
@@ -782,7 +782,7 @@ test "loadComponent parses datasheet-review evidence" {
     const review = eval.component_cache.get("reviewed-part").?.docs.review.?;
     try testing.expectEqual(env_mod.DatasheetReviewStatus.complete, review.status);
     try testing.expectEqualStrings("reviewed.pdf", review.datasheet);
-    try testing.expectEqualStrings("eda-agent", review.reviewed_by);
+    try testing.expectEqualStrings("netlisp-agent", review.reviewed_by);
     try testing.expectEqualStrings("supply", review.categories[0]);
     try testing.expectEqualStrings("thermal", review.not_applicable[0].category);
     try testing.expectEqualStrings("junction stays below rating", review.not_applicable[0].rationale);

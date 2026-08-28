@@ -265,7 +265,7 @@ assert.strictEqual(require("crypto").createHash("sha256").update(pdfBytes).diges
   "PDF fixture workload digest changed; review the generated rendering work before accepting it");
 assert((gate.match(/node scripts\/ui_browser_perf\/run\.js/g) || []).length >= 2,
   "perf_gate.sh must run the all-pages matrix in both record and enforce modes");
-assert(gate.includes("archive --format=tar") && gate.includes("EDA_PERF_DESIGNS_COMMIT"),
+assert(gate.includes("archive --format=tar") && gate.includes("NETLISP_PERF_DESIGNS_COMMIT"),
   "perf_gate.sh must measure a clean, identified designs HEAD snapshot");
 assert(gate.includes("*.layouts.json") && gate.includes("layouts_fingerprint") && gate.includes("--reflink=auto") &&
   gate.includes("*.bom") && gate.includes("boms_fingerprint"),

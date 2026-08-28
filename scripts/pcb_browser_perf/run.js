@@ -381,7 +381,7 @@ function stopServer(server) {
 }
 
 function projectOverlay(projectDir) {
-  const overlay = fs.mkdtempSync(path.join(os.tmpdir(), "eda-assembly-perf-"));
+  const overlay = fs.mkdtempSync(path.join(os.tmpdir(), "netlisp-assembly-perf-"));
   try {
     for (const entry of fs.readdirSync(projectDir)) {
       if (entry === "lib") continue;
@@ -654,10 +654,10 @@ function valueAt(object, dotted) {
 }
 
 function projectFacts(projectDir) {
-  if (process.env.EDA_PERF_DESIGNS_COMMIT) {
+  if (process.env.NETLISP_PERF_DESIGNS_COMMIT) {
     return {
-      commit: process.env.EDA_PERF_DESIGNS_COMMIT,
-      fingerprint: process.env.EDA_PERF_DESIGNS_FINGERPRINT || process.env.EDA_PERF_DESIGNS_COMMIT,
+      commit: process.env.NETLISP_PERF_DESIGNS_COMMIT,
+      fingerprint: process.env.NETLISP_PERF_DESIGNS_FINGERPRINT || process.env.NETLISP_PERF_DESIGNS_COMMIT,
       dirty: false,
       source: "git-archive+workload-bundles",
     };

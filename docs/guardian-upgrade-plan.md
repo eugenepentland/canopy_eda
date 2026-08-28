@@ -228,7 +228,7 @@ regressions on any grandfathered item go red naming the exact key.
 
    ```ini
    # netlisp-guardian-nightly.timer → .service ExecStart:
-   #   guardian-check nightly /path/to/eda
+   #   guardian-check nightly /path/to/netlisp
    OnCalendar=*-*-* 03:00
    ```
 

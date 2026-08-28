@@ -246,7 +246,7 @@
     function next() {
       if (!queue.length) {
         if (renderStack) renderStack.then(function (stack) { stack.renderer.dispose(); }, function () {});
-        try { window.parent.postMessage({ type: "eda-pcb-sprite-progress", done: done, total: total }, window.location.origin); } catch (_) {}
+        try { window.parent.postMessage({ type: "netlisp-pcb-sprite-progress", done: done, total: total }, window.location.origin); } catch (_) {}
         return;
       }
       var footprint = queue.shift();
@@ -275,7 +275,7 @@
         done++;
         try {
           window.parent.postMessage({
-            type: "eda-pcb-sprite-progress", done: done,
+            type: "netlisp-pcb-sprite-progress", done: done,
             total: total, footprint: footprint
           }, window.location.origin);
         } catch (_) {}

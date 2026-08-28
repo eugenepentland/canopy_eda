@@ -219,9 +219,9 @@ router and zone refill read net classes from `.kicad_pro`, which this repository
 does not edit today.
 
 Treat native KiCad class sync as a separate opt-in phase: update only
-Canopy-owned definitions/assignments, preserve unrelated rules, preview the
+Netlisp-owned definitions/assignments, preserve unrelated rules, preview the
 project-settings diff, and require explicit permission before writing the
-project file. Core inheritance and Canopy Gerbers must not depend on this.
+project file. Core inheritance and Netlisp Gerbers must not depend on this.
 
 ## Trial design
 

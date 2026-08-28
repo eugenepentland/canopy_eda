@@ -42,7 +42,7 @@ deny_growth = ["spec", "completeness", "concept", "divergent-const", "twin-refer
     "canonical-idiom", "shadowed-const", "import-layering", "twin-parity"]
 
 # Commit-tier test suite. Current policy keeps this and every other internal
-# EDA test self-hosted Debug; ReleaseSafe is built only by deployment.
+# Netlisp test self-hosted Debug; ReleaseSafe is built only by deployment.
 # This gated on `test-fast` from the 2026-07-23 audit
 # until 2026-07-25, when the 1923s figure that justified it was found to be
 # STALE: it measured the Debug test binary before the old configuration began

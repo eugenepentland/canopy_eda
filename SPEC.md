@@ -95,7 +95,7 @@ Public functions: applyOpsToSource, applyOpsToSourceWithStats
 - add places the new footprint at the premade layout's (x, y, rotation)
 - add bakes design properties (MPN, Manufacturer, …) on the first sync
 - add_via inserts a (via …) form stitching the GND net
-- add_zone inserts an EDA-owned refillable copper zone
+- add_zone inserts a netlisp-owned refillable copper zone
 - add_via at an existing via position is a no-op
 - add_track inserts a (segment …) form on the op's layer
 - seeded sub-circuit groups include their routed tracks and vias
@@ -165,7 +165,7 @@ Public functions: build, writeReport, run, writeImportedStarredLayout
 
 The `import-kicad-layout` command: port a routed KiCad board's placement,
 outline, and copper INTO a design's `<design>.layouts.json` sidecar as its
-starred layout, making the EDA tool the system of record. The board
+starred layout, making the netlisp tool the system of record. The board
 file is opened read-only and never written. The core (`build`) is a pure,
 arena-based function over the parsed snapshot plus the flattened design view;
 the CLI seam owns evaluation, file reads, the JSON result, and the sidecar
@@ -206,7 +206,7 @@ write.
 The build graph and tracked hooks keep a fresh worktree deterministic while
 shortening the commit-to-deploy critical path. Generated zt output is committed
 and still regenerated from source; every reader waits on the same generate and
-format predecessor. Every internal EDA artifact and workflow uses self-hosted
+format predecessor. Every internal netlisp artifact and workflow uses self-hosted
 Debug. Release preparation is the sole ReleaseSafe boundary: it gates one clean
 commit, then overlaps the Debug full suite with the independent self-hosted
 ReleaseSafe production build and publishes an immutable, checksum-addressed
@@ -5286,7 +5286,7 @@ Public functions: notFound, serve
 - A sync bearer scoped for another service is not admitted and falls through to the session gate
 - Ward state initialization builds distinct http clients for the session and bearer verify paths
 - The sync bearer grant requires both a service scope and a writer-capable role
-- A ward reader's eda-scoped bearer does not admit the destructive sync write while a member's and an admin's do
+- A ward reader's netlisp-scoped bearer does not admit the destructive sync write while a member's and an admin's do
 - Every read-only post prefix exempts only its own route family while safe methods are never write-gated
 - Every public route entry is served without a session while a sibling sharing its leading text is not
 
@@ -5306,8 +5306,8 @@ Public functions: runSyncPlan, syncKicadPcbApi
 - pickByKicadUuid adopts an orphan whose KiCad uuid equals the instance's canopy_uuid
 - pickByKicadUuid refuses an fp another instance already claimed in this walk
 - isPassiveRef classifies R/C/L/F/D ref-des prefixes as passive spokes and everything else as a hub
-- buildCanopyNetValue renders each passive pad as destRef.destPin.net for a single hub pin, else the bare net name
-- buildCanopyNetValue lists a passive's pads in numeric order joined by ' / ' and returns null when the passive has no connected pads
+- buildNetlispNetValue renders each passive pad as destRef.destPin.net for a single hub pin, else the bare net name
+- buildNetlispNetValue lists a passive's pads in numeric order joined by ' / ' and returns null when the passive has no connected pads
 - sectionForRef attributes a sub-block part to its sub-block name and a top-level part to its declared section, else ""
 - stripSubPrefix removes a leading "<sub>/" so a flattened sub-block ref maps to its module layout's ref
 - boxCols returns a roughly-square (ceil-sqrt) column count for a staging box of N parts
@@ -5340,8 +5340,8 @@ Public functions: runSyncPlan, syncKicadPcbApi
 - a staged part keeps the rotation and side the design layout gives it
 - an authoritative layout emits one full replacement batch using only live design nets
 - an authoritative layout without declared stackup planes retains its saved zone count in the sync summary
-- authoritative placement converts EDA rotation/side into a targeted KiCad pose op
-- authoritative stale pruning also removes pre-canopy manual KiCad footprints
+- authoritative placement converts netlisp rotation/side into a targeted KiCad pose op
+- authoritative stale pruning also removes pre-netlisp manual KiCad footprints
 
 ## serve/route-plan
 

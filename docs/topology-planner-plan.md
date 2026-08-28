@@ -11,7 +11,7 @@ the router already honours.
 > **Current execution policy (2026-08-12):** use pinned-master self-hosted
 > Debug for the planner harness, corpus benchmarks, tests, and review server.
 > Any ReleaseSafe baseline text below is historical; deployment is the only
-> workflow that builds a new ReleaseSafe EDA application.
+> workflow that builds a new ReleaseSafe netlisp application.
 
 ## Scope decisions (locked with Eugene)
 

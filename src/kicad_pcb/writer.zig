@@ -153,7 +153,7 @@ fn applyOps(arena: std.mem.Allocator, root_children: []const Node, ops: []const 
 
 /// First pass over the board's top-level forms: record the max net-id, the
 /// (kicad_uuid → footprint index) lookup, the set of canopy_uuids already
-/// present (so a re-emitted `add` for an existing canopy is a no-op), and the
+/// present (so a re-emitted `add` for an existing netlisp footprint is a no-op), and the
 /// centres of every existing via (so an `add_via` at one is a no-op).
 /// Existing-group bookkeeping for the `group` op: the uuids of groups already on
 /// the board (so a `group` op never duplicates one) and every footprint uuid
@@ -183,7 +183,7 @@ fn indexBoardChildren(
             if (cl[2].asString()) |name| try net_id_by_name.put(arena, name, id_i64);
         } else if (child.isForm(form_footprint)) {
             if (footprintKicadUuid(child)) |u| try fp_by_uuid.put(arena, u, i);
-            if (footprintCanopyUuid(child)) |c| try existing_canopy_uuids.put(arena, c, {});
+            if (footprintNetlispUuid(child)) |c| try existing_canopy_uuids.put(arena, c, {});
         } else if (child.isForm(form_via)) {
             if (viaCenterMm(child)) |c| try existing_vias.append(arena, c);
         } else if (child.isForm(form_group)) {
@@ -552,7 +552,7 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
         if (std.mem.eql(u8, op_name, "add")) {
             // Idempotency: if the board already carries a footprint with
             // this canopy_uuid, drop the add. The diff brain's by_uuid
-            // map only registers one fp per canopy when duplicates
+            // map only registers one fp per netlisp footprint when duplicates
             // exist, so it re-emits the same add forever; without this
             // check every click adds another duplicate fp.
             //
@@ -767,27 +767,31 @@ fn isEdgeCutsGraphic(node: Node) bool {
     return std.mem.eql(u8, layer, board_layers.edge_cuts);
 }
 
-/// Top-level KiCad forms replaced by the EDA layout. Unrelated zones and
+/// Top-level KiCad forms replaced by the netlisp layout. Unrelated zones and
 /// drawings remain KiCad-owned during the transition.
 fn layoutOwnedChild(arena: std.mem.Allocator, node: Node) bool {
     return node.isForm(form_segment) or node.isForm("arc") or
         node.isForm(form_via) or node.isForm(form_group) or isEdgeCutsGraphic(node) or
-        isCanopyZone(node) or isCanopyText(arena, node);
+        isNetlispZone(node) or isNetlispText(arena, node);
 }
 
-fn isCanopyZone(node: Node) bool {
+fn isNetlispZone(node: Node) bool {
     if (!node.isForm(form_zone)) return false;
     const cl = node.asList() orelse return false;
     for (cl[1..]) |sub| {
         const sl = sub.asList() orelse continue;
         if (sl.len < 2) continue;
         if (!std.mem.eql(u8, sl[0].asAtom() orelse "", "name")) continue;
-        return std.mem.startsWith(u8, sl[1].asString() orelse "", "Canopy EDA ");
+        const name = sl[1].asString() orelse "";
+        // Keep recognizing zones emitted before the product rename so an
+        // authoritative push cannot strand legacy netlisp-owned copper.
+        return std.mem.startsWith(u8, name, "Netlisp ") or
+            std.mem.startsWith(u8, name, "Canopy EDA ");
     }
     return false;
 }
 
-fn isCanopyText(arena: std.mem.Allocator, node: Node) bool {
+fn isNetlispText(arena: std.mem.Allocator, node: Node) bool {
     if (!node.isForm("gr_text")) return false;
     const cl = node.asList() orelse return false;
     if (cl.len < 2) return false;
@@ -897,7 +901,7 @@ fn buildGrRect(arena: std.mem.Allocator, shape: std.json.ObjectMap, layer: []con
     return if (nodes.len == 0) null else nodes[0];
 }
 
-/// A straight Edge.Cuts segment from the saved EDA outline. The UUID is
+/// A straight Edge.Cuts segment from the saved netlisp outline. The UUID is
 /// geometry-derived, keeping repeated authoritative pushes byte-stable.
 fn buildOutlineSegment(arena: std.mem.Allocator, op_obj: std.json.ObjectMap) WriteError!?Node {
     const x1 = jsonNumNm(op_obj.get("x1")) / nm_per_mm;
@@ -916,7 +920,7 @@ fn buildOutlineSegment(arena: std.mem.Allocator, op_obj: std.json.ObjectMap) Wri
     return if (nodes.len == 0) null else nodes[0];
 }
 
-/// A native three-point Edge.Cuts arc from the saved EDA outline.
+/// A native three-point Edge.Cuts arc from the saved netlisp outline.
 fn buildOutlineArc(arena: std.mem.Allocator, op_obj: std.json.ObjectMap) WriteError!?Node {
     const x1 = jsonNumNm(op_obj.get("x1")) / nm_per_mm;
     const y1 = jsonNumNm(op_obj.get("y1")) / nm_per_mm;
@@ -998,7 +1002,7 @@ fn buildZone(arena: std.mem.Allocator, op_obj: std.json.ObjectMap) WriteError!?N
     var text = std.Io.Writer.Allocating.init(arena);
     const w = &text.writer;
     const seed = try std.fmt.allocPrint(arena, "zone:{s}:{s}:{d}", .{ net, layer, priority });
-    try w.print("(zone (net \"{s}\") (net_name \"{s}\") (layer \"{s}\") (uuid \"{s}\") (name \"Canopy EDA {s}\") (hatch edge 0.5) (connect_pads (clearance {d})) (min_thickness 0.25) (fill (thermal_gap 0.3) (thermal_bridge_width 0.3)) (polygon (pts", .{
+    try w.print("(zone (net \"{s}\") (net_name \"{s}\") (layer \"{s}\") (uuid \"{s}\") (name \"Netlisp {s}\") (hatch edge 0.5) (connect_pads (clearance {d})) (min_thickness 0.25) (fill (thermal_gap 0.3) (thermal_bridge_width 0.3)) (polygon (pts", .{
         try fmt_const.sexprEscape(arena, net), try fmt_const.sexprEscape(arena, net), layer,
         try boardItemUuid(arena, seed),        layer,                                 clearance,
     });
@@ -1051,8 +1055,8 @@ fn nodeUuid(item: Node) ?[]const u8 {
 /// Returns the value of the footprint's `(property "canopy_uuid" "…")`
 /// — the cross-sync identity tag the diff brain matches design
 /// instances against. Null when the fp hasn't been synced yet (manually
-/// placed in pcbnew or pre-Canopy).
-fn footprintCanopyUuid(fp: Node) ?[]const u8 {
+/// placed in pcbnew or before netlisp).
+fn footprintNetlispUuid(fp: Node) ?[]const u8 {
     const cl = fp.asList() orelse return null;
     for (cl[1..]) |sub| {
         if (!sub.isForm(form_property)) continue;
@@ -2419,8 +2423,8 @@ test "applyOpsToSource add_via inserts a free via" {
     try std.testing.expectEqual(@as(usize, 1), via_count);
 }
 
-// spec: kicad_pcb/writer - add_zone inserts an EDA-owned refillable copper zone
-test "applyOpsToSource add_zone inserts a canopy zone" {
+// spec: kicad_pcb/writer - add_zone inserts a netlisp-owned refillable copper zone
+test "applyOpsToSource add_zone inserts a netlisp zone" {
     const a = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
@@ -2436,7 +2440,7 @@ test "applyOpsToSource add_zone inserts a canopy zone" {
     ;
     const out = try applyOpsToSource(arena.allocator(), src, ops);
     try std.testing.expect(std.mem.indexOf(u8, out, "(zone") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Canopy EDA F.Cu") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Netlisp F.Cu") != null);
     _ = try parser.parse(arena.allocator(), out);
 }
 
@@ -3030,7 +3034,7 @@ test "applyOpsToSource escapes a set_field value containing a quote and backslas
 }
 
 // spec: kicad_pcb/writer - an authoritative layout push moves footprints and replaces tracks vias groups and Edge.Cuts while preserving zones and unrelated drawings
-test "authoritative layout ops replace only EDA-owned board geometry" {
+test "authoritative layout ops replace only netlisp-owned board geometry" {
     const a = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();

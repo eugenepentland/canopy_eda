@@ -78,9 +78,9 @@ fi
 # each other's wall time (see scripts/gate.sh). Re-exec rather than wrap the
 # body so the internal test/build concurrency below stays exactly as it is —
 # that parallelism is deliberate (same commit, separate Zig caches) and only
-# CROSS-session overlap is being removed. EDA_GATE_HELD is set by gate.sh once
+# CROSS-session overlap is being removed. NETLISP_GATE_HELD is set by gate.sh once
 # the lock is ours, so this cannot re-enter itself.
-if [ "${EDA_GATE_SERIALIZE:-1}" != "0" ] && [ -z "${EDA_GATE_HELD:-}" ] && [ -x "$TOP/scripts/gate.sh" ]; then
+if [ "${NETLISP_GATE_SERIALIZE:-1}" != "0" ] && [ -z "${NETLISP_GATE_HELD:-}" ] && [ -x "$TOP/scripts/gate.sh" ]; then
   exec "$TOP/scripts/gate.sh" "$TOP/.githooks/prepare-release.sh" "$@"
 fi
 

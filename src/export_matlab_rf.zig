@@ -768,7 +768,7 @@ fn writeManifest(
     const stop_hz = if (rule.rf.max_freq_hz > 0) rule.rf.max_freq_hz else 6.0e9;
     var out: std.Io.Writer.Allocating = .init(alloc);
     const w = &out.writer;
-    try w.writeAll("{\n  \"schema\":\"custom-eda-matlab-rf-export\",\n  \"schemaVersion\":\"1.0\",\n  \"generator\":{");
+    try w.writeAll("{\n  \"schema\":\"custom-netlisp-matlab-rf-export\",\n  \"schemaVersion\":\"1.0\",\n  \"generator\":{");
     try json_writer.writeField(w, "application", "netlisp");
     try w.writeByte(',');
     try json_writer.writeField(w, "applicationVersion", input.generator.application_version);

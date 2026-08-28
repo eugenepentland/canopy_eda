@@ -32,7 +32,7 @@ const auth = @import("auth.zig");
 pub const AuthError = std.mem.Allocator.Error;
 
 // ── Constants ──────────────────────────────────────────────────────────
-const default_service_name = "eda";
+const default_service_name = "netlisp";
 const default_cache_ttl_secs: i64 = 30;
 
 const http_unauthorized: u16 = 401;
@@ -349,7 +349,7 @@ fn syncBearerOk(ctx: *Server, req: *httpz.Request) bool {
 ///     in place. It is the most destructive write the server offers, and the
 ///     bearer leg of `authMiddleware` returns `true` straight past the session
 ///     gate's `requiresWrite` check — so without this, a ward READER holding an
-///     eda-scoped token could drive it. The role mapping is
+///     netlisp-scoped token could drive it. The role mapping is
 ///     `mapWardRole`: member→writer, admin→admin, unknown→reader.
 fn wardSyncGrantOk(scope: []const u8, role: ward.verdict.Role, service: []const u8) bool {
     return serviceScopeOk(scope, service) and mapWardRole(role).canWrite();
@@ -617,10 +617,10 @@ test "serviceUrlOrNull reports a configured url and omits an unset one" {
         .auth_server_url = "",
         .introspect_url = "",
         .service_name = default_service_name,
-        .service_url = "https://co-circuit.example",
+        .service_url = "https://netlisp.example",
         .cache_ttl_secs = default_cache_ttl_secs,
     };
-    try std.testing.expectEqualStrings("https://co-circuit.example", serviceUrlOrNull(configured).?);
+    try std.testing.expectEqualStrings("https://netlisp.example", serviceUrlOrNull(configured).?);
     // The field defaults to unset, so an untouched config reports no url at all
     // rather than an empty one wardd would reject.
     const unset = WardConfig{
@@ -687,30 +687,30 @@ test "session and bearer config predicates require their urls" {
 
 // spec: serve - The service scope check accepts a scope containing the service name and rejects one without it
 test "serviceScopeOk requires a whole-entry service scope" {
-    try std.testing.expect(serviceScopeOk("eda", "eda"));
-    try std.testing.expect(serviceScopeOk("files eda", "eda"));
-    try std.testing.expect(serviceScopeOk("eda files", "eda"));
-    try std.testing.expect(!serviceScopeOk("files", "eda"));
-    try std.testing.expect(!serviceScopeOk("", "eda"));
-    // A prefix lookalike is not a whole-entry match — "edax" must not authorize "eda".
-    try std.testing.expect(!serviceScopeOk("edax", "eda"));
-    try std.testing.expect(!serviceScopeOk("files edax", "eda"));
+    try std.testing.expect(serviceScopeOk("netlisp", "netlisp"));
+    try std.testing.expect(serviceScopeOk("files netlisp", "netlisp"));
+    try std.testing.expect(serviceScopeOk("netlisp files", "netlisp"));
+    try std.testing.expect(!serviceScopeOk("files", "netlisp"));
+    try std.testing.expect(!serviceScopeOk("", "netlisp"));
+    // A prefix lookalike is not a whole-entry match — "netlispx" must not authorize "netlisp".
+    try std.testing.expect(!serviceScopeOk("netlispx", "netlisp"));
+    try std.testing.expect(!serviceScopeOk("files netlispx", "netlisp"));
 }
 
 // spec: serve - The sync bearer grant requires both a service scope and a writer-capable role
-test "wardSyncGrantOk requires the eda scope and a writer-capable role together" {
+test "wardSyncGrantOk requires the netlisp scope and a writer-capable role together" {
     // Both halves present — the fallback the KiCad sync agent relies on.
-    try std.testing.expect(wardSyncGrantOk("eda", .member, "eda"));
-    try std.testing.expect(wardSyncGrantOk("files eda", .admin, "eda"));
+    try std.testing.expect(wardSyncGrantOk("netlisp", .member, "netlisp"));
+    try std.testing.expect(wardSyncGrantOk("files netlisp", .admin, "netlisp"));
     // Role without scope: a token minted for another service on this shared
     // wardd must not reach the board write however privileged its holder.
-    try std.testing.expect(!wardSyncGrantOk("files", .admin, "eda"));
-    try std.testing.expect(!wardSyncGrantOk("", .member, "eda"));
+    try std.testing.expect(!wardSyncGrantOk("files", .admin, "netlisp"));
+    try std.testing.expect(!wardSyncGrantOk("", .member, "netlisp"));
     // Scope without role: `.unknown` maps to reader, and a reader may not
     // rewrite the board — the leg that used to be missing entirely, since the
     // bearer path returns before the session gate's write check.
-    try std.testing.expect(!wardSyncGrantOk("eda", .unknown, "eda"));
-    try std.testing.expect(!wardSyncGrantOk("files eda", .unknown, "eda"));
+    try std.testing.expect(!wardSyncGrantOk("netlisp", .unknown, "netlisp"));
+    try std.testing.expect(!wardSyncGrantOk("files netlisp", .unknown, "netlisp"));
 }
 
 // spec: serve - Every read-only post prefix exempts only its own route family while safe methods are never write-gated

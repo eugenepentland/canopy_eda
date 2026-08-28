@@ -1,6 +1,6 @@
 # Designing Auto-Generated Block Diagrams for an S-Expression EDA Tool
 
-This report is the working brief for evolving co-circuit's diagram generator from a fixed compass layout into a domain-aware, multi-page block-diagram pipeline that can serve MCU boards, analog/RF daughterboards, RF frontends, and RF basebands. It is structured in two halves: **Part A — visual / diagrammatic conventions** (what diagrams should *look* like) and **Part B — algorithmic / layout** (how to *compute* them), followed by an opinionated **DSL extension proposal**.
+This report is the working brief for evolving netlisp's diagram generator from a fixed compass layout into a domain-aware, multi-page block-diagram pipeline that can serve MCU boards, analog/RF daughterboards, RF frontends, and RF basebands. It is structured in two halves: **Part A — visual / diagrammatic conventions** (what diagrams should *look* like) and **Part B — algorithmic / layout** (how to *compute* them), followed by an opinionated **DSL extension proposal**.
 
 ---
 
@@ -32,7 +32,7 @@ Survey the front-page block diagrams of TI (TPS6594, TPS628x family), ADI (AD738
 - Good: ≤ ~20 top-level blocks per page; consistent left-to-right or top-to-bottom signal flow; one clear "subject" block (e.g. the core matrix); ports labelled at the edge; buses collapsed; one decoration meaning per visual property (don't reuse colour for both rail and domain).
 - Bad: > 30 blocks; mixed flow directions; passives (R/C) drawn at this level; inconsistent shapes; long unbroken edges crossing many blocks; pin numbers shown at this level.
 
-**Power vs. signal in vendor diagrams.** Vendors that ship a PMIC (TI TPS6594, NXP PF5020) almost always present *two* diagrams: a functional block diagram (the I²C/SPI map, regulator tree as black boxes) and a separate **power-rail / sequencing diagram** showing rails as horizontal busses with each load tapping off, and an associated **timing strip** (a row of t‑aligned step waveforms) labelling enable-to-PG delays. This separation is exactly the pattern co-circuit should adopt.
+**Power vs. signal in vendor diagrams.** Vendors that ship a PMIC (TI TPS6594, NXP PF5020) almost always present *two* diagrams: a functional block diagram (the I²C/SPI map, regulator tree as black boxes) and a separate **power-rail / sequencing diagram** showing rails as horizontal busses with each load tapping off, and an associated **timing strip** (a row of t‑aligned step waveforms) labelling enable-to-PG delays. This separation is exactly the pattern netlisp should adopt.
 
 ### A2. RF system block-diagram conventions
 
@@ -55,12 +55,12 @@ RF block diagrams are the most stylised in electronics and have hard, well-under
 - RF chains read **left → right** (transmit) or **right → left** (receive). Many ADI diagrams put TX and RX on the same page with the antenna on the right, splitting into `RX↓` (top) and `↑TX` (bottom) at a T/R switch or circulator.
 - LOs are drawn **from above** (above the mixer with the LO arrow coming down) — this is a near-universal convention, and you should enforce it. Synthesisers/PLL blocks live on their own row above the signal-flow row, with thin LO-distribution lines snaking down to each mixer they drive.
 - IF stages are conventionally drawn with the IF frequency labelled in-line (`IF = 70 MHz`) and any IF gain/filter blocks placed in the same row.
-- **Heterodyne / superhet receiver** (the textbook block-diagram shape): Antenna → preselect BPF → LNA → image-reject filter → mixer (with LO above) → IF BPF → IF amplifier → demodulator/ADC. Co-circuit should recognise this canonical sequence and lay out detected matches in this exact order even if the source data is unordered.
+- **Heterodyne / superhet receiver** (the textbook block-diagram shape): Antenna → preselect BPF → LNA → image-reject filter → mixer (with LO above) → IF BPF → IF amplifier → demodulator/ADC. Netlisp should recognise this canonical sequence and lay out detected matches in this exact order even if the source data is unordered.
 - **I/Q (zero-IF / direct conversion)**: one mixer becomes two stacked, with a 90° block in the LO branch; the two outputs run parallel through identical LPF + VGA + ADC paths labelled `I` and `Q`.
 - **Phased arrays** (e.g. ADAR1000/ADAR2001 reference): each element column has its own LNA → phase shifter → VGA → combiner; columns are stacked vertically and merge into a single sum line at the right. Beamformer ICs are typically drawn as a tall rectangle containing the per-element internal chain.
 - **Differential / balanced lines**: drawn as two parallel lines kept close together, often shaded as a single thick "ribbon" or wrapped in a tinted bracket; label `LO+/LO-` at the ends. The Pozar/Razavi convention treats baluns as a labelled rectangle (or transformer symbol) that splits a single-ended port into a differential pair.
 
-**Frequency annotation** is part of the diagram itself: every signal segment between symbols in an RF chain should be labelled with its centre frequency, and gain/NF/IP3 cascade tables are often placed in a strip below the diagram (this is the standard "Friis-cascade" presentation in ADI app notes — co-circuit should support a table-strip overlay if RF metadata is present).
+**Frequency annotation** is part of the diagram itself: every signal segment between symbols in an RF chain should be labelled with its centre frequency, and gain/NF/IP3 cascade tables are often placed in a strip below the diagram (this is the standard "Friis-cascade" presentation in ADI app notes — netlisp should support a table-strip overlay if RF metadata is present).
 
 ### A3. Software-architecture diagram conventions as inspiration
 
@@ -118,7 +118,7 @@ The current compass layout is a special case of the MCU-with-peripherals view. K
 
 ### B1. Graph drawing algorithms — what fits a block diagram
 
-| Algorithm family | Strength | Weakness | Verdict for co-circuit |
+| Algorithm family | Strength | Weakness | Verdict for netlisp |
 |---|---|---|---|
 | **Sugiyama layered** (Graphviz `dot`, ELK Layered, Dagre, rust-sugiyama) | Excellent for DAGs and signal flow; produces canonical LTR/TTB layouts; handles ports cleanly when extended | Assumes a flow direction; suffers when the graph has many cycles or is highly hub-centric | **Primary choice** for functional diagrams and power trees |
 | **Force-directed** (Fruchterman–Reingold, Kamada–Kawai, FM³) | Good for organic / undirected exploration; few inputs needed | Non-deterministic; can twist; produces "blob" layouts that engineers find unreadable; ignores ports | Avoid for the final diagram; usable as an *initial* layout for clustering visualisation only |
@@ -144,7 +144,7 @@ After these four phases, you do **edge routing** (often counted as a 5th phase) 
 
 Standard Sugiyama places nodes as points; real block diagrams have edges entering at *specific positions on the perimeter*. This matters because (a) flow looks wrong if a "data out" port at the bottom of an IC ends up routed from its top, and (b) ports impose ordering constraints within a layer.
 
-**ELK's approach** (the reference): nodes have a port-side constraint (`FIXED_SIDE`, `FIXED_ORDER`, or `FIXED_POS`) and the barycentre heuristic operates on port positions. Northern/southern ports are handled by a pre-/post-processor that may insert dummy intermediate layers so that an edge entering a north port crosses cleanly through a "turn" dummy. For co-circuit, the practical guidance is:
+**ELK's approach** (the reference): nodes have a port-side constraint (`FIXED_SIDE`, `FIXED_ORDER`, or `FIXED_POS`) and the barycentre heuristic operates on port positions. Northern/southern ports are handled by a pre-/post-processor that may insert dummy intermediate layers so that an edge entering a north port crosses cleanly through a "turn" dummy. For netlisp, the practical guidance is:
 
 - Every block-instance should declare its ports with a *side hint* (`west` for inputs, `east` for outputs is the LTR default; `north` for clocks/LO, `south` for power).
 - Inside vertex-ordering, sort the ports on each side by their average neighbour barycentre, so the connections fan out smoothly.
@@ -257,7 +257,7 @@ For boards with **multiple power domains** (e.g., a daughterboard with always-on
 
 For RF specifically: **always left-to-right**; **LOs always from above**; **differential pairs always rendered as parallel pairs**, never collapsed to a single line (because the engineer needs to see the balance). For phased arrays, stack element chains vertically and combine on the right.
 
-### B11. DSL extensions for co-circuit — opinionated proposal
+### B11. DSL extensions for netlisp — opinionated proposal
 
 Rules of thumb for what's worth adding:
 - *Auto-infer if you can*; only ask the user to annotate when inference would be brittle or wrong.

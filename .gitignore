@@ -19,7 +19,7 @@ zig-out-browser-perf/
 __pycache__/
 *.pyc
 
-# Board-specific design data — the user's projects, not the eda tool itself.
+# Board-specific design data — the user's projects, not the netlisp tool itself.
 # Everything under projects/ (designs, libraries, history, reviews, OAuth
 # state, edit history) lives on disk but is not tracked. The tracked tool is
 # src/, build.zig, SPEC.md, docs/, etc.

@@ -18,34 +18,34 @@
 # pinned ReleaseSafe build; both are same-machine numbers, so a baseline
 # recorded elsewhere or in another build mode compares nothing.
 #
-# Env: EDA_PERF_BASELINE, EDA_BROWSER_PERF_BASELINE, EDA_UI_PERF_BASELINE,
-# EDA_PERF_PROJECT_DIR (default projects/designs), EDA_PERF_REPS (default 3),
-# EDA_BROWSER_PERF_REPS (default 3), EDA_UI_PERF_REPS (default 3),
-# EDA_BROWSER_PERF_BINARY.
+# Env: NETLISP_PERF_BASELINE, NETLISP_BROWSER_PERF_BASELINE, NETLISP_UI_PERF_BASELINE,
+# NETLISP_PERF_PROJECT_DIR (default projects/designs), NETLISP_PERF_REPS (default 3),
+# NETLISP_BROWSER_PERF_REPS (default 3), NETLISP_UI_PERF_REPS (default 3),
+# NETLISP_BROWSER_PERF_BINARY.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-BASELINE="${EDA_PERF_BASELINE:-docs/benchmarks/pcb-page/baseline.json}"
-BROWSER_BASELINE="${EDA_BROWSER_PERF_BASELINE:-docs/benchmarks/pcb-browser/baseline.json}"
-UI_BASELINE="${EDA_UI_PERF_BASELINE:-docs/benchmarks/ui-browser/baseline.json}"
-PROJECT_DIR="${EDA_PERF_PROJECT_DIR:-projects/designs}"
-REPS="${EDA_PERF_REPS:-3}"
-BROWSER_REPS="${EDA_BROWSER_PERF_REPS:-3}"
-UI_REPS="${EDA_UI_PERF_REPS:-3}"
-BROWSER_BINARY="${EDA_BROWSER_PERF_BINARY:-zig-out-browser-perf/bin/netlisp}"
+BASELINE="${NETLISP_PERF_BASELINE:-docs/benchmarks/pcb-page/baseline.json}"
+BROWSER_BASELINE="${NETLISP_BROWSER_PERF_BASELINE:-docs/benchmarks/pcb-browser/baseline.json}"
+UI_BASELINE="${NETLISP_UI_PERF_BASELINE:-docs/benchmarks/ui-browser/baseline.json}"
+PROJECT_DIR="${NETLISP_PERF_PROJECT_DIR:-projects/designs}"
+REPS="${NETLISP_PERF_REPS:-3}"
+BROWSER_REPS="${NETLISP_BROWSER_PERF_REPS:-3}"
+UI_REPS="${NETLISP_UI_PERF_REPS:-3}"
+BROWSER_BINARY="${NETLISP_BROWSER_PERF_BINARY:-zig-out-browser-perf/bin/netlisp}"
 PERF_PROJECT_SNAPSHOT=""
 
 cleanup_perf_snapshot() {
   case "$PERF_PROJECT_SNAPSHOT" in
-    /tmp/eda-perf-designs.*) [ ! -d "$PERF_PROJECT_SNAPSHOT" ] || rm -rf -- "$PERF_PROJECT_SNAPSHOT" ;;
+    /tmp/netlisp-perf-designs.*) [ ! -d "$PERF_PROJECT_SNAPSHOT" ] || rm -rf -- "$PERF_PROJECT_SNAPSHOT" ;;
   esac
 }
 trap cleanup_perf_snapshot EXIT
 
-# Take the machine-wide gate lock, once. gate.sh sets EDA_GATE_HELD and execs,
+# Take the machine-wide gate lock, once. gate.sh sets NETLISP_GATE_HELD and execs,
 # so the re-entered script falls through to the body as the lock holder.
-lock="${EDA_GATE_LOCK:-/tmp/eda-gate.lock}"
-if [ "${EDA_GATE_HELD:-}" != "$lock" ] && [ "${EDA_GATE_SERIALIZE:-1}" != "0" ]; then
+lock="${NETLISP_GATE_LOCK:-/tmp/netlisp-gate.lock}"
+if [ "${NETLISP_GATE_HELD:-}" != "$lock" ] && [ "${NETLISP_GATE_SERIALIZE:-1}" != "0" ]; then
   exec scripts/gate.sh bash "$0" "$@"
 fi
 
@@ -83,7 +83,7 @@ if git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo "perf_gate: no BOM sidecars in $source_project_dir/src — refusing an incomplete assembly workload" >&2
     exit 1
   fi
-  PERF_PROJECT_SNAPSHOT="$(mktemp -d /tmp/eda-perf-designs.XXXXXX)"
+  PERF_PROJECT_SNAPSHOT="$(mktemp -d /tmp/netlisp-perf-designs.XXXXXX)"
   mkdir -p "$PERF_PROJECT_SNAPSHOT/lib/models"
   # The vendor models are ignored binary inputs. Reflink/copy only their
   # top-level files; generated .sprites starts empty and any benchmark write
@@ -106,8 +106,8 @@ if git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   layouts_fingerprint="$(cd "$PERF_PROJECT_SNAPSHOT" && find src -type f \( -name '*.layouts.json' -o -name '*.autolayout.json' \) -print0 | sort -z | xargs -0 -r sha256sum | sha256sum | cut -d' ' -f1)"
   boms_fingerprint="$(cd "$PERF_PROJECT_SNAPSHOT" && find src -type f -name '*.bom' -print0 | sort -z | xargs -0 -r sha256sum | sha256sum | cut -d' ' -f1)"
   PROJECT_DIR="$PERF_PROJECT_SNAPSHOT"
-  export EDA_PERF_DESIGNS_COMMIT="$designs_commit"
-  export EDA_PERF_DESIGNS_FINGERPRINT="$designs_commit:$models_fingerprint:$layouts_fingerprint:$boms_fingerprint"
+  export NETLISP_PERF_DESIGNS_COMMIT="$designs_commit"
+  export NETLISP_PERF_DESIGNS_FINGERPRINT="$designs_commit:$models_fingerprint:$layouts_fingerprint:$boms_fingerprint"
   echo "perf_gate: measuring committed designs $designs_commit with model $models_fingerprint, layout $layouts_fingerprint, and BOM $boms_fingerprint bundles"
 fi
 

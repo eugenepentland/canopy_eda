@@ -621,7 +621,7 @@ test {
     const shard_env = std.process.Environ.getAlloc(
         std.testing.environ,
         std.testing.allocator,
-        "EDA_TEST_SHARD",
+        "NETLISP_TEST_SHARD",
     ) catch null;
     // Unset: an unsharded binary (`-Dtest-filter=...`, `test-compile`, or a
     // direct `zig test`). Its selection is the caller's business, not ours.
@@ -1019,7 +1019,7 @@ test "deploy refreshes the design-agent folder binary on a healthy install" {
     const source = try readRepoFile(std.testing.allocator, ".githooks/deploy-prod.sh");
     defer std.testing.allocator.free(source);
     // The tracked design-folder launcher materializes this binary; the deploy
-    // pre-warms it and writes the paired EDA commit into the designs repo's git dir.
+    // pre-warms it and writes the paired netlisp commit into the designs repo's git dir.
     try std.testing.expect(std.mem.indexOf(u8, source, "projects/designs/.netlisp-bin/netlisp") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "projects/designs/.git/netlisp-deploy-id") != null);
     // Refreshing must happen only on the HEALTHY path (before the rollback branch),
@@ -1037,15 +1037,15 @@ test "gate wrapper waits on one lock and honours the bypass before locking" {
     const source = try readRepoFile(std.testing.allocator, "scripts/gate.sh");
     defer std.testing.allocator.free(source);
     // The bypass has to be decided before the lock file is ever opened.
-    const bypass = std.mem.indexOf(u8, source, "\"${EDA_GATE_SERIALIZE:-1}\" = \"0\"").?;
+    const bypass = std.mem.indexOf(u8, source, "\"${NETLISP_GATE_SERIALIZE:-1}\" = \"0\"").?;
     const open_lock = std.mem.indexOf(u8, source, "exec 9>\"$lock\"").?;
     const acquire = std.mem.indexOf(u8, source, "flock -w \"$wait_secs\" 9").?;
     try std.testing.expect(bypass < open_lock);
     try std.testing.expect(open_lock < acquire);
     // Defaults, and the exec that hands the held lock to the gated command.
-    try std.testing.expect(std.mem.indexOf(u8, source, "EDA_GATE_LOCK:-/tmp/eda-gate.lock") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source, "EDA_GATE_WAIT:-5400") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source, "export EDA_GATE_HELD=\"$lock\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "NETLISP_GATE_LOCK:-/tmp/netlisp-gate.lock") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "NETLISP_GATE_WAIT:-5400") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "export NETLISP_GATE_HELD=\"$lock\"") != null);
     try std.testing.expect(std.mem.lastIndexOf(u8, source, "exec \"$@\"").? > acquire);
 }
 
@@ -1057,9 +1057,9 @@ test "release preparation re-execs under the gate lock exactly once" {
     const reexec = std.mem.indexOf(u8, source, "exec \"$TOP/scripts/gate.sh\"").?;
     // Guarded on both the bypass and the marker gate.sh exports, so a script
     // already holding the lock runs its body instead of queueing behind itself.
-    const guard = std.mem.indexOf(u8, source, "[ -z \"${EDA_GATE_HELD:-}\" ]").?;
+    const guard = std.mem.indexOf(u8, source, "[ -z \"${NETLISP_GATE_HELD:-}\" ]").?;
     try std.testing.expect(guard < reexec);
-    try std.testing.expect(std.mem.indexOf(u8, source, "\"${EDA_GATE_SERIALIZE:-1}\" != \"0\"").? < reexec);
+    try std.testing.expect(std.mem.indexOf(u8, source, "\"${NETLISP_GATE_SERIALIZE:-1}\" != \"0\"").? < reexec);
     // The re-exec precedes the body, so the whole verification runs under the
     // lock; the internal test/build concurrency below it is untouched.
     try std.testing.expect(reexec < std.mem.indexOf(u8, source, "start_release_job \"$staging/test.status\"").?);

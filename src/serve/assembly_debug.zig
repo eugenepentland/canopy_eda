@@ -3,7 +3,7 @@
 //! The handler evaluates a design, builds one compact JSON index, and leaves
 //! all interaction to `assembly_debug.js`. The PCB itself stays in the normal
 //! read-only PCB embed; selections cross the iframe boundary through the
-//! `eda-pcb-focus` postMessage protocol.
+//! `netlisp-pcb-focus` postMessage protocol.
 
 const std = @import("std");
 const datasheet_ref = @import("datasheet_ref.zig");
@@ -832,7 +832,7 @@ fn renderPageWithOptions(allocator: std.mem.Allocator, name: []const u8, index: 
     if (opts.meta.standalone)
         try w.writeAll("<span class=\"brand\">Released assembly</span>")
     else
-        try w.writeAll("<a class=\"brand\" href=\"/\">EDA</a>");
+        try w.writeAll("<a class=\"brand\" href=\"/\">netlisp</a>");
     try w.writeAll("<strong>");
     try writeHtmlText(w, name);
     try w.writeAll("</strong>");
@@ -1311,9 +1311,9 @@ test "page HTML is read-only and carries embed, data, and focus assets" {
     try std.testing.expect(std.mem.indexOf(u8, js, "rotation: boardRotation") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "url.searchParams.set('model_sprites', '1')") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "url.searchParams.delete('model_sprites')") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "eda-pcb-cam-visibility") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "eda-pcb-cam-mode") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "eda-pcb-cam-state") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "netlisp-pcb-cam-visibility") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "netlisp-pcb-cam-mode") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "netlisp-pcb-cam-state") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "camReviewRequested = new URLSearchParams(window.location.search).get('cam') === '1'") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "assembly-cam-layers:") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "populateInnerCopperLayers(payload.innerLayers)") != null);
@@ -1505,7 +1505,7 @@ test "assembly BOM orders quantity first and labels placement sides" {
     const js = @embedFile("assets/assembly_debug.js");
     try std.testing.expect(std.mem.indexOf(u8, js, "visibleQty(b) - visibleQty(a)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "side-badge side-${side}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "payload.type === 'eda-pcb-parts'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "payload.type === 'netlisp-pcb-parts'") != null);
     const css = @embedFile("assets/assembly_debug.css");
     try std.testing.expect(std.mem.indexOf(u8, css, ".side-top") != null);
     try std.testing.expect(std.mem.indexOf(u8, css, ".side-bottom") != null);
@@ -1541,15 +1541,15 @@ test "assembly and board labels omit internal refdes paths" {
 test "PCB review asset exposes complete ref and net focus coverage" {
     const js = @embedFile("assets/pcb_board.js");
     try std.testing.expect(std.mem.indexOf(u8, js, "window.PCBReviewFocus") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "eda-pcb-focus-result") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "netlisp-pcb-focus-result") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "PCB.tracks") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "PCB.vias") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "reviewCopperAreas") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "reviewPlaneLayers") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "a.q.keepout") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "eda-pcb-net-picked") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "eda-pcb-ref-picked") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "eda-pcb-orientation") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "netlisp-pcb-net-picked") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "netlisp-pcb-ref-picked") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "netlisp-pcb-orientation") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "sceneShell.contains(ev.target)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "if(PHYSICAL_REVIEW)return;") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "PHYSICAL_REVIEW&&!reviewFocusHasNets()") != null);
@@ -1561,7 +1561,7 @@ test "PCB review asset exposes complete ref and net focus coverage" {
 // spec: Web Server - assembly component and pad picks reveal and highlight the owning component in the active sidebar, while placement selection preserves the board viewport
 test "assembly client reveals the BOM row for a board-picked component" {
     const js = @embedFile("assets/assembly_debug.js");
-    try std.testing.expect(std.mem.indexOf(u8, js, "payload.type === 'eda-pcb-ref-picked'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "payload.type === 'netlisp-pcb-ref-picked'") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "bomGroupForRef(payload.ref)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "function revealRow(row)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "revealRow(sourceNode);") != null);

@@ -1,6 +1,6 @@
 # KiCad-Reference Routing Port — Audit & Plan
 
-**Goal.** Make the EDA tool the system of record for full PCB routing, using the
+**Goal.** Make the netlisp tool the system of record for full PCB routing, using the
 routed KiCad board only as a *reference*: import the barracuda RF frontend's
 exact placement, outline, and copper into the netlisp design, then progressively
 erase traces and prove the native router — steered by constraints authored in
@@ -135,7 +135,7 @@ most of the *experiment* machinery — but all of it is anchored to the
    (baseline mode) for the reference DRC/return-path counts we'll score
    against.
 
-### Phase 1 — Port the reference into the EDA tool (the big one)
+### Phase 1 — Port the reference into the netlisp tool (the big one)
 
 New command `netlisp import-kicad-layout <design> [--board <path>]` + MCP twin.
 Reads the board via `snapshot.parse`; **writes only netlisp state** (the
@@ -225,7 +225,7 @@ planes → DC rails → SPI/control → REF_LMX LVDS pair (diff-pair class) → 
 chain → LO chain → X-band RF chain last. Iterate the DSL (and router backlog)
 until full-board routing from DSL constraints passes the Phase-4 gate and
 `run_fab_readiness` is green. Deliverable: barracuda routes entirely inside
-the EDA tool; the KiCad file remains untouched reference ground truth.
+the netlisp tool; the KiCad file remains untouched reference ground truth.
 
 ---
 

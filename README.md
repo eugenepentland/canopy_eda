@@ -62,7 +62,7 @@ tools, mutation testing, solver work, and benchmarks. A plain `zig build` is
 Debug; write `-Doptimize=debug` only when an explicit spelling helps. Do not
 manually build ReleaseSafe for development or internal benchmarking.
 
-The sole EDA ReleaseSafe build belongs to the deployment boundary.
+The sole netlisp ReleaseSafe build belongs to the deployment boundary.
 `.githooks/prepare-release.sh` creates it with the pinned official compiler and
 forces its self-hosted x86-64 backend while the Debug test suite runs. The
 deploy hook validates the exact compiler and candidate SHA-256 before atomically
@@ -101,8 +101,8 @@ For the reverse review workflow, declare the same `(kicad-pcb "<path>")`, open
 the design's **PCB Layout** page, and choose **Sync from KiCad**. The editor
 first previews footprint/net mismatches, dropped copper, unusual vias, zones,
 and outline fallbacks. Confirming imports the board's placement, routed tracks,
-vias, and Edge.Cuts into the EDA tool as its starred layout, then reloads the
-PCB review. The KiCad board is opened read-only; the previous EDA layout is
+vias, and Edge.Cuts into the netlisp tool as its starred layout, then reloads the
+PCB review. The KiCad board is opened read-only; the previous netlisp layout is
 saved in layout history. KiCad zones and keepouts are reported but are not
 currently imported as rendered copper.
 

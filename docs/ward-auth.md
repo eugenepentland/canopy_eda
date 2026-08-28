@@ -16,21 +16,21 @@ navbar Account link points at that admin portal.
   `https://ward.eugenepentland.dev/login?rd=<url>`; wardd unreachable → `503`
   (fail-closed, never fail-open).
 - **MCP / API bearers.** Verified via wardd's LAN-only `POST /oauth/introspect`;
-  the token scope must contain the service name (`eda`). On failure a `401`
+  the token scope must contain the service name (`netlisp`). On failure a `401`
   carries an RFC 9728 `WWW-Authenticate` pointing at
   `GET /.well-known/oauth-protected-resource` (the one well-known endpoint
   netlisp still serves), which names `ward.eugenepentland.dev` as the
   authorization server. Role mapping: ward **member → writer**, ward
   **admin → admin**, unknown → **reader** (write access gates the MCP mutation
   tools).
-- **Plugin tokens (kept).** `eda_p_*` tokens — minted by the
+- **Plugin tokens (kept).** `netlisp_p_*` tokens — minted by the
   `mint-plugin-token` CLI, stored in `plugin_tokens.json` under the auth dir —
   still guard the KiCad plugin sync endpoint, checked **before** the ward
   bearer on `/api/sync-kicad-pcb/*`.
 - **Dev bypass.** `NETLISP_DEV` grants a local admin identity to a loopback,
   unproxied request (env opt-in) — no wardd needed for local development.
 - **Config (env / `.env`).** `WARD_VERIFY_URL`, `WARD_LOGIN_URL`,
-  `WARD_INTROSPECT_URL`, `WARD_SERVICE_NAME` (default `eda`),
+  `WARD_INTROSPECT_URL`, `WARD_SERVICE_NAME` (default `netlisp`),
   `WARD_CACHE_TTL_SECS` (default `30`, the revocation-lag bound). Unset → fail
   closed (`503`) outside the dev bypass. Adapter: `src/serve/ward_auth.zig`
   (HTTP seam in `src/infra/net.zig`).

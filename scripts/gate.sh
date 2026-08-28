@@ -12,9 +12,9 @@
 # read a serial log than three interleaved ones. This wrapper is that queue.
 #
 # Usage: scripts/gate.sh <command...>
-#   EDA_GATE_LOCK=<path>    lock file            (default /tmp/eda-gate.lock)
-#   EDA_GATE_WAIT=<seconds> how long to queue     (default 5400)
-#   EDA_GATE_SERIALIZE=0    bypass the lock entirely (exec the command directly)
+#   NETLISP_GATE_LOCK=<path>    lock file            (default /tmp/netlisp-gate.lock)
+#   NETLISP_GATE_WAIT=<seconds> how long to queue     (default 5400)
+#   NETLISP_GATE_SERIALIZE=0    bypass the lock entirely (exec the command directly)
 #
 # Cheap work does not belong here — `zig build test -Dtest-filter=…` and
 # `zig build test-compile` are seconds-to-10s jobs and should not wait behind
@@ -26,11 +26,11 @@ if [ "$#" -eq 0 ]; then
   exit 2
 fi
 
-lock="${EDA_GATE_LOCK:-/tmp/eda-gate.lock}"
-wait_secs="${EDA_GATE_WAIT:-5400}"
+lock="${NETLISP_GATE_LOCK:-/tmp/netlisp-gate.lock}"
+wait_secs="${NETLISP_GATE_WAIT:-5400}"
 
 # Explicit opt-out, for a machine that is genuinely alone.
-if [ "${EDA_GATE_SERIALIZE:-1}" = "0" ]; then
+if [ "${NETLISP_GATE_SERIALIZE:-1}" = "0" ]; then
   exec "$@"
 fi
 
@@ -38,7 +38,7 @@ fi
 # nested gate.sh (or a script that re-execs itself under the gate) would open a
 # SECOND description of the same file and deadlock against its own parent for
 # the whole timeout. Anything already inside this lock just runs.
-if [ "${EDA_GATE_HELD:-}" = "$lock" ]; then
+if [ "${NETLISP_GATE_HELD:-}" = "$lock" ]; then
   exec "$@"
 fi
 
@@ -66,7 +66,7 @@ if ! flock -w "$wait_secs" 9; then
     else
       echo "gate.sh: could not identify the holder (fuser/lsof found nothing)"
     fi
-    echo "gate.sh: raise EDA_GATE_WAIT, or set EDA_GATE_SERIALIZE=0 to bypass the queue"
+    echo "gate.sh: raise NETLISP_GATE_WAIT, or set NETLISP_GATE_SERIALIZE=0 to bypass the queue"
   } >&2
   exit 75 # EX_TEMPFAIL — distinct from the gated command's own failure codes
 fi
@@ -74,5 +74,5 @@ fi
 # The lock lives on fd 9, which survives exec, so the gated command *becomes*
 # the holder: no wrapper process lingers, and the kernel releases the lock when
 # that process dies however it dies.
-export EDA_GATE_HELD="$lock"
+export NETLISP_GATE_HELD="$lock"
 exec "$@"

@@ -120,7 +120,7 @@ function stopServer(server) {
 }
 
 function projectOverlay(projectDir, pdfFixture) {
-  const overlay = fs.mkdtempSync(path.join(os.tmpdir(), "eda-ui-perf-"));
+  const overlay = fs.mkdtempSync(path.join(os.tmpdir(), "netlisp-ui-perf-"));
   try {
     for (const entry of fs.readdirSync(projectDir)) {
       if (entry === "lib") continue;
@@ -184,7 +184,7 @@ function projectOverlay(projectDir, pdfFixture) {
 
 function assertPrivateOverlay(projectDir) {
   const resolved = fs.realpathSync(projectDir);
-  if (path.dirname(resolved) !== os.tmpdir() || !path.basename(resolved).startsWith("eda-ui-perf-")) {
+  if (path.dirname(resolved) !== os.tmpdir() || !path.basename(resolved).startsWith("netlisp-ui-perf-")) {
     throw new Error(`refusing private mutation checkpoint outside an owned overlay: ${resolved}`);
   }
   return resolved;
@@ -1593,10 +1593,10 @@ async function runResponses(baseUrl) {
 }
 
 function projectFacts(projectDir) {
-  if (process.env.EDA_PERF_DESIGNS_COMMIT) {
+  if (process.env.NETLISP_PERF_DESIGNS_COMMIT) {
     return {
-      commit: process.env.EDA_PERF_DESIGNS_COMMIT,
-      fingerprint: process.env.EDA_PERF_DESIGNS_FINGERPRINT || process.env.EDA_PERF_DESIGNS_COMMIT,
+      commit: process.env.NETLISP_PERF_DESIGNS_COMMIT,
+      fingerprint: process.env.NETLISP_PERF_DESIGNS_FINGERPRINT || process.env.NETLISP_PERF_DESIGNS_COMMIT,
       dirty: false,
       source: "git-archive+workload-bundles",
     };

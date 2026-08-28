@@ -1,4 +1,4 @@
-# Guardian nightly gate for the netlisp/eda repo.
+# Guardian nightly gate for the netlisp repo.
 #
 # What it does: runs Guardian's full nightly tier against this checkout —
 #   1. `zig build`        — the whole 59-check `all` suite in baseline mode.
@@ -24,7 +24,7 @@
 # (committed); commit any bump it produces.
 
 [Unit]
-Description=Guardian nightly gate (all suite + whole-tree mutation ratchet) for netlisp/eda
+Description=Guardian nightly gate (all suite + whole-tree mutation ratchet) for netlisp
 After=network.target
 
 [Service]

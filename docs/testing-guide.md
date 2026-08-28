@@ -160,9 +160,9 @@ concurrent builds, and the release ledger shows the same test job at 527 s
 against 320 s solo — so queueing is strictly faster than overlapping. When
 another session may be building, put the expensive tier behind the wrapper:
 `scripts/gate.sh zig build test` and `scripts/gate.sh guardian-check commit
---intent "..." .` take one machine-wide flock (`/tmp/eda-gate.lock`, override
-with `EDA_GATE_LOCK`) and wait up to `EDA_GATE_WAIT` seconds (default 5400)
-before failing with the holder's pid. `EDA_GATE_SERIALIZE=0` bypasses the lock
+--intent "..." .` take one machine-wide flock (`/tmp/netlisp-gate.lock`, override
+with `NETLISP_GATE_LOCK`) and wait up to `NETLISP_GATE_WAIT` seconds (default 5400)
+before failing with the holder's pid. `NETLISP_GATE_SERIALIZE=0` bypasses the lock
 entirely for a machine you know is idle. `.githooks/prepare-release.sh` takes
 the same lock itself, so release preparations queue without being asked — its
 *internal* test/build parallelism is deliberate and unaffected. Quick tiers do

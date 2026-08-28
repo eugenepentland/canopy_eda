@@ -2,7 +2,7 @@
 
 > Moved verbatim from CLAUDE.md (2026-08-19); linked from its Reference Docs section.
 
-The production EDA server runs at **https://co-circuit.eugenepentland.dev** —
+The production netlisp server runs at **https://netlisp.eugenepentland.dev** —
 that's the canonical URL for the KiCad-sync agent and browser clients. The
 structured tool surface is local-only through `netlisp tool`.
 Local dev still uses `http://localhost:7050`.
@@ -299,12 +299,12 @@ Local dev still uses `http://localhost:7050`.
   flushes the editor save queue, requires an exact named saved layout, and
   previews `POST /api/sync-kicad-pcb/:name?push_layout=1&layout=<name>` before
   applying it with the current layout-sidecar `rev`. This explicit mode makes
-  EDA authoritative: it moves/flips and refreshes current design footprints,
+  netlisp authoritative: it moves/flips and refreshes current design footprints,
   prunes stale KiCad footprints, and replaces all top-level tracks, copper
   arcs, vias, groups, and Edge.Cuts with the saved layout's routes and outline.
   The named layout must cover every current design footprint and have an
   outline. KiCad zones, board setup/rules, and unrelated drawings are preserved;
-  EDA-authored zones and board text are not exported yet, so refill the retained
+  netlisp-authored zones and board text are not exported yet, so refill the retained
   KiCad zones before using KiCad DRC or generating Gerbers. The ordinary sync's
   no-movement guard remains unchanged; only this named, revision-checked action
   may change existing placement. Writes retain the same atomic backup and

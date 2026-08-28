@@ -396,7 +396,7 @@ pub const Server = struct {
     /// `plugin_tokens.json` (the KiCad-sync bearer store) — passkeys, sessions,
     /// users, and OAuth grants moved to wardd. Defaults to `<project_dir>/auth`
     /// when no explicit override is supplied — the historic location. Override
-    /// via `netlisp serve --auth-dir <path>` or the `EDA_AUTH_DIR` env var so
+    /// via `netlisp serve --auth-dir <path>` or the `NETLISP_AUTH_DIR` env var so
     /// multiple worktrees / project checkouts share one plugin-token store.
     auth_dir: []const u8,
 
@@ -679,7 +679,7 @@ test "httpz close handover cannot leave a stale read event" {
     try verifyHttpzCloseHandover(std.testing.allocator);
 }
 
-/// Bring up the EDA web server on `port`: registers every page, JSON API,
+/// Bring up the netlisp web server on `port`: registers every page, JSON API,
 /// auth, and OAuth-support route against an httpz instance, then blocks on
 /// `server.listen()`. Project files are served out of `project_dir`; auth
 /// state lives in `auth_dir` (or `<project_dir>/auth` when null).

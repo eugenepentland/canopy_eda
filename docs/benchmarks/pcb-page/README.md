@@ -78,7 +78,7 @@ scripts/perf_gate.sh --record
 zig-out/bin/netlisp bench-page --project-dir projects/designs --reps 5 barracuda
 
 # Escapes (loud): skip one push
-EDA_PERF_SKIP=1 git push
+NETLISP_PERF_SKIP=1 git push
 ```
 
 `perf_gate.sh` queues behind `scripts/gate.sh`'s machine-wide lock — a

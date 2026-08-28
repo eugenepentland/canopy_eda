@@ -18,7 +18,7 @@ const serve = @import("../serve.zig");
 const ward_auth = @import("../serve/ward_auth.zig");
 const auth_store = @import("../serve/auth_store.zig");
 
-const service = "eda";
+const service = "netlisp";
 const login_url = "https" ++ "://ward.example/login";
 // A well-formed access token: exactly 32 lowercase-hex chars (ward's
 // `extractBearer` rejects anything else before a lookup). Assembled from short
@@ -313,7 +313,7 @@ test "auth-request: a plugin token wins the sync path and a bogus one falls thro
 
     // Seed a plugin_tokens.json holding the sha256 of a known raw token so
     // `validate` accepts it (mirrors the store's on-disk format).
-    const raw_token = "eda_p_" ++ "deadbeefdeadbeefdeadbeefdeadbeef";
+    const raw_token = "netlisp_p_" ++ "deadbeefdeadbeefdeadbeefdeadbeef";
     const hash = try auth_store.sha256Hex(std.testing.allocator, raw_token);
     defer std.testing.allocator.free(hash);
     const json = try std.fmt.allocPrint(
@@ -364,7 +364,7 @@ test "auth-request: a cache-seeded ward bearer admits the sync path as the fallb
     // Seed the bearer cache so the verifier (network) is never consulted. The
     // grant must be scoped for this service (wardd is shared) — a foreign scope
     // no longer admits the board write (see the scope-rejection test below).
-    try env.state.ward.bearer.?.cache.put(bearer_token, "ada", .member, "eda", clock.timestamp());
+    try env.state.ward.bearer.?.cache.put(bearer_token, "ada", .member, "netlisp", clock.timestamp());
     var ht = httpz.testing.init(.{});
     defer ht.deinit();
     ht.url("/api/sync-kicad-pcb/x");
@@ -374,14 +374,14 @@ test "auth-request: a cache-seeded ward bearer admits the sync path as the fallb
     try std.testing.expect(try ward_auth.authMiddleware(&srv, ht.req, ht.res));
 }
 
-// spec: serve - A ward reader's eda-scoped bearer does not admit the destructive sync write while a member's and an admin's do
+// spec: serve - A ward reader's netlisp-scoped bearer does not admit the destructive sync write while a member's and an admin's do
 test "auth-request: the sync bearer fallback is role-gated, not scope-only" {
     // `POST /api/sync-kicad-pcb/:name` rewrites the KiCad board in place, and the
     // bearer leg returns straight past the session gate's write check — so the
     // role has to be checked HERE. Each row seeds a live, correctly-scoped grant
     // and differs only in the ward role behind it.
     const rows = [_]struct { role: ward.verdict.Role, admitted: bool }{
-        // Reader: a valid eda-scoped token whose holder may not write. Falls
+        // Reader: a valid netlisp-scoped token whose holder may not write. Falls
         // through to the session gate, which (no cookie, /api/ path) answers 401.
         .{ .role = .unknown, .admitted = false },
         .{ .role = .member, .admitted = true }, // → writer
@@ -409,8 +409,8 @@ test "auth-request: a foreign-scoped ward bearer does not admit the sync path" {
     var env = TestEnv{ .a = std.testing.allocator };
     defer env.deinit();
     env.initWard("http" ++ "://v", login_url, "http" ++ "://i");
-    // A live grant scoped for a DIFFERENT service ("files", not "eda"). wardd is
-    // a shared auth server, so this token must not drive the eda board write: the
+    // A live grant scoped for a DIFFERENT service ("files", not "netlisp"). wardd is
+    // a shared auth server, so this token must not drive the netlisp board write: the
     // bearer path returns false, and the request falls through to the session
     // gate, which (no ward_session cookie, an /api/ path) answers 401 — never a
     // sync execution.
@@ -500,10 +500,10 @@ test "auth-request: protected-resource metadata derives host and names the ward 
         var ht = httpz.testing.init(.{});
         defer ht.deinit();
         ht.url("/.well-known/oauth-protected-resource");
-        ht.header("host", "eda.example:7050");
+        ht.header("host", "netlisp.example:7050");
         var srv = env.server(false);
         try ward_auth.metadataProtectedResource(&srv, ht.req, ht.res);
-        try expectContains(ht.res.body, "\"resource\":\"http" ++ "://eda.example:7050\"");
+        try expectContains(ht.res.body, "\"resource\":\"http" ++ "://netlisp.example:7050\"");
         try expectContains(ht.res.body, "\"authorization_servers\":[\"" ++ "https" ++ "://ward.example\"]");
     }
     // No Host header → the resource url derives to localhost.
@@ -520,10 +520,10 @@ test "auth-request: protected-resource metadata derives host and names the ward 
         var ht = httpz.testing.init(.{});
         defer ht.deinit();
         ht.url("/.well-known/oauth-protected-resource");
-        ht.header("host", "eda.example");
+        ht.header("host", "netlisp.example");
         ht.header("x-forwarded-proto", "https");
         var srv = env.server(false);
         try ward_auth.metadataProtectedResource(&srv, ht.req, ht.res);
-        try expectContains(ht.res.body, "\"resource\":\"" ++ "https" ++ "://eda.example\"");
+        try expectContains(ht.res.body, "\"resource\":\"" ++ "https" ++ "://netlisp.example\"");
     }
 }

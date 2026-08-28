@@ -20,7 +20,7 @@
 # the running deploy finishes; and N merges landing during one build still
 # cost ONE follow-up deploy of the accumulated head, because each just
 # rewrites the one marker. What that collapses is prepare-release.sh — the
-# machine-wide /tmp/eda-gate.lock for ~7 minutes, which every other agent
+# machine-wide /tmp/netlisp-gate.lock for ~7 minutes, which every other agent
 # session on this box would spend queued behind — plus the prod restart.
 #
 # A merge landing while a deploy is RUNNING re-arms the marker; deploy-prod.sh's

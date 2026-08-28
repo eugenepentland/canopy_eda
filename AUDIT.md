@@ -1,4 +1,4 @@
-# netlisp / co-circuit — Full Codebase Audit
+# Netlisp — Full Codebase Audit
 
 _Generated 2026-07-01. Scope: the entire `netlisp` Zig codebase (~100 kLOC across 156 files under `src/`), plus build/docs/project hygiene. Read-only static audit — no code was changed, no builds run, no board files touched._
 
@@ -10,7 +10,7 @@ The codebase is **fundamentally well-built** — arena discipline is real, the D
 
 **148 findings: 3 Critical · 31 High · 55 Medium · 59 Low.**
 
-The three Criticals plus the High-severity auth/XSS findings mean the public server (`co-circuit.eugenepentland.dev`) should be treated as **currently exploitable by any authenticated user, and — via one header — by an unauthenticated remote attacker.** Everything else can be scheduled; these should not.
+The three Criticals plus the High-severity auth/XSS findings mean the public server (`netlisp.eugenepentland.dev`) should be treated as **currently exploitable by any authenticated user, and — via one header — by an unauthenticated remote attacker.** Everything else can be scheduled; these should not.
 
 ---
 
@@ -21,7 +21,7 @@ The three Criticals plus the High-severity auth/XSS findings mean the public ser
 | # | Issue | Location | Detail §  |
 |---|-------|----------|-----------|
 | C1 | **`Host: localhost` header = full unauthenticated admin.** "Am I local?" is decided from the client-controlled `Host` header while the server binds `0.0.0.0`; the middleware short-circuits *all* auth and promotes to admin. One header → VFS write/delete, every MCP mutation, user/invite management. | `serve/auth.zig:581-593,723-725`; `serve.zig:322` | 8 |
-| C2 | **Arbitrary file write → RCE via `X-Filename` header.** The zip/model upload path templates the unsanitized header into `/tmp/eda-upload-{s}` and writes the request body; `../../../` escapes `/tmp`. Service runs as a systemd `--user` unit → write `~/.ssh/authorized_keys`. | `serve/upload.zig:92,259`; `serve/library.zig:332` | 10 |
+| C2 | **Arbitrary file write → RCE via `X-Filename` header.** The zip/model upload path templates the unsanitized header into `/tmp/netlisp-upload-{s}` and writes the request body; `../../../` escapes `/tmp`. Service runs as a systemd `--user` unit → write `~/.ssh/authorized_keys`. | `serve/upload.zig:92,259`; `serve/library.zig:332` | 10 |
 | C3 | **Session-token theft via `/api/module-source?src=auth/sessions.json`.** The "copy source" reader blocks only `..`/leading-`/` and serves any project-relative file; `sessions.json` holds raw live tokens → any `reader` impersonates admin. | `serve/modules.zig:93,105,138` | 10 |
 
 ### P1 — High, security (authenticated-user escalation / stored & reflected XSS)
@@ -663,7 +663,7 @@ The soft spots are (1) **injection**: every string in the big `<script>const PCB
 
 - **[High] `writeJsonStr` doesn't escape `</script>` — stored/self XSS in the PCB data blob** — `src/serve/pcb_layout_page.zig:3828` (`writeJsonStr`), used at `:3478` (`const PCB=`), `:3721` (`writeLayoutsJson`).
   - `writeJsonStr` escapes `"`, `\`, control chars, but not `<`, `/`, U+2028/2029. Its output is emitted verbatim *inside* a `<script>` element, so any design/net/ref/value/footprint or saved-layout **name** containing `</script>` closes the script tag and injects markup. Layout names are the most exposed vector: `saveNamedLayoutApi` (`:1404`) accepts any `nm` with `0 < len ≤ 80` and no content check, persists it to `.layouts.json`, and it is later echoed into the `<script>` blob via `writeLayoutsJson`. Net/ref/value text from the design flows the same way.
-  - Why it matters: the server is internet-facing (`co-circuit.eugenepentland.dev`). Even auth-gated, a persisted `</script><script>…` layout name executes on every subsequent `/pcb-layout` load for the account owner. The visible panel path (`writeLayoutsPanel`) *does* use `writeEscaped`/`writeAttr`, so the gap is specifically the script-context serializer.
+  - Why it matters: the server is internet-facing (`netlisp.eugenepentland.dev`). Even auth-gated, a persisted `</script><script>…` layout name executes on every subsequent `/pcb-layout` load for the account owner. The visible panel path (`writeLayoutsPanel`) *does* use `writeEscaped`/`writeAttr`, so the gap is specifically the script-context serializer.
   - Fix: in `writeJsonStr` emit `<` as `<` (or replace `</` → `<\/`), and add U+2028/U+2029 escaping; that single change closes every `<script>`-context site since they all route through it.
 
 - **[Medium] `.layouts.json` writes are non-atomic and occur on GET without locking — corruption / silent data loss** — `src/serve/pcb_layout_page.zig:1701` (`writeFileAll` = `createFile(truncate) + writeAll`, no tmp/rename), invoked from `writeLayouts`/`writeLayoutsSub`/`writeAutoCache`/`recordAutoLayout`, and notably from `displayLayouts` (`:2262`) which rewrites the sidecar during `pcbLayoutPage` rendering.
@@ -742,8 +742,8 @@ off the open internet.
 ### Findings
 
 - **[CRITICAL] Arbitrary file write via `X-Filename` header (path traversal in temp-file name)** — `upload.zig:92` (+ `upload.zig:213`, callers `upload.zig:259`, `library.zig:332`)
-  - `importZipBytes`/`extractStepBytes` build the temp path as `TMP_ZIP_TEMPLATE = "/" ++ "tmp" ++ "/eda-upload-{s}"` filled with `filename`, then `createFile(tmp_zip).writeAll(zip_bytes)`. `uploadZipApi` passes `req.header("x-filename")` straight in (`upload.zig:259`); `uploadModelApi` likewise passes the raw `x-filename` to `extractStepBytes` (`library.zig:332`, 339). The header is never sanitized — the doc comment at `upload.zig:83-85` *asserts* "filename … must be path-safe" but nothing enforces it.
-  - `X-Filename: ../../../etc/cron.d/evil` resolves `"/tmp/eda-upload-" ++ "../../../etc/cron.d/evil"` to `/etc/cron.d/evil` (first `..` cancels the glued `eda-upload-..` component, the next two climb out of `/tmp`), and the file content is the fully attacker-controlled request body. The service runs as a systemd `--user` unit, so an attacker can write `~/.ssh/authorized_keys`, `~/.bashrc`, `~/.config/systemd/user/*.service`, etc. → remote code execution. Reachable by any authenticated user (incl. `reader` role).
+  - `importZipBytes`/`extractStepBytes` build the temp path as `TMP_ZIP_TEMPLATE = "/" ++ "tmp" ++ "/netlisp-upload-{s}"` filled with `filename`, then `createFile(tmp_zip).writeAll(zip_bytes)`. `uploadZipApi` passes `req.header("x-filename")` straight in (`upload.zig:259`); `uploadModelApi` likewise passes the raw `x-filename` to `extractStepBytes` (`library.zig:332`, 339). The header is never sanitized — the doc comment at `upload.zig:83-85` *asserts* "filename … must be path-safe" but nothing enforces it.
+  - `X-Filename: ../../../etc/cron.d/evil` resolves `"/tmp/netlisp-upload-" ++ "../../../etc/cron.d/evil"` to `/etc/cron.d/evil` (first `..` cancels the glued `netlisp-upload-..` component, the next two climb out of `/tmp`), and the file content is the fully attacker-controlled request body. The service runs as a systemd `--user` unit, so an attacker can write `~/.ssh/authorized_keys`, `~/.bashrc`, `~/.config/systemd/user/*.service`, etc. → remote code execution. Reachable by any authenticated user (incl. `reader` role).
   - Fix: sanitize `filename` to a single path-safe basename before templating (reuse `library.isSafeLibName` / `sanitizeFilename`), or ignore the header entirely and mint the temp name from a random/timestamp token (as `TMP_EXTRACT_TEMPLATE` already does).
 
 - **[CRITICAL] `/api/module-source` reads arbitrary project files → session-token theft** — `modules.zig:105` (`resolveSourcePath`), handler `modules.zig:138`

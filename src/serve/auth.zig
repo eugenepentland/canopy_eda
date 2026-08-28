@@ -79,7 +79,7 @@ fn getBearerToken(req: *httpz.Request) ?[]const u8 {
 /// the KiCad board file in place, and a match admits it outright — ahead of the
 /// ward bearer and without any role check. That is the token's whole purpose
 /// (the KiCad sync helper is a machine with no ward session), so treat an
-/// `eda_p_*` token as board-write capability that never expires; revocation
+/// `netlisp_p_*` token as board-write capability that never expires; revocation
 /// means removing its hash from `plugin_tokens.json`.
 pub fn validatePluginBearerToken(ctx: *Server, req: *httpz.Request) bool {
     const raw = getBearerToken(req) orelse return false;

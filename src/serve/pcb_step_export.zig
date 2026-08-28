@@ -1333,8 +1333,8 @@ fn build(allocator: std.mem.Allocator, project_dir: []const u8, design_name: []c
     var out: std.Io.Writer.Allocating = .init(allocator);
     const w = &out.writer;
     try w.writeAll("ISO-10303-21;\nHEADER;\n" ++
-        "FILE_DESCRIPTION(('Canopy exact PCB assembly'),'2;1');\n" ++
-        "FILE_NAME('canopy-pcb.step','',('Canopy'),('Canopy'),'Canopy EDA','','');\n" ++
+        "FILE_DESCRIPTION(('Netlisp exact PCB assembly'),'2;1');\n" ++
+        "FILE_NAME('netlisp-pcb.step','',('Netlisp'),('Netlisp'),'Netlisp','','');\n" ++
         "FILE_SCHEMA(('AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF { 1 0 10303 442 1 1 4 }'));\n" ++
         "ENDSEC;\nDATA;\n" ++
         "#1=APPLICATION_CONTEXT('managed model based 3d engineering');\n" ++

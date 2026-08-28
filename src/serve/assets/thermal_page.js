@@ -127,7 +127,7 @@
     if (!frame || !frame.contentWindow) return;
     try {
       frame.contentWindow.postMessage({
-        type: "eda-pcb-orientation", side: boardSide, rotation: 0
+        type: "netlisp-pcb-orientation", side: boardSide, rotation: 0
       }, window.location.origin);
     } catch (e) { /* frame not ready yet */ }
   }
@@ -154,7 +154,7 @@
   window.addEventListener("message", function (ev) {
     var d = ev.data;
     if (frame && ev.source !== frame.contentWindow) return;
-    if (d && d.type === "eda-pcb-ref-picked") {
+    if (d && d.type === "netlisp-pcb-ref-picked") {
       tell({ selectedRef: d.ref || "" });
       return;
     }

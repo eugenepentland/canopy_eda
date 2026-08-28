@@ -161,7 +161,7 @@ fn readPad(
         // Standard KiCad format: `(net <id> "<name>")` — slot 1 is the
         // integer net-ID into the top-level table.
         // Legacy name-only format: `(net "<name>")` — slot 1 is the name
-        // directly, no top-level table. Older Canopy boards were
+        // directly, no top-level table. Older Netlisp boards were
         // written this way; the file-based sync must read both so an
         // existing board isn't flagged "all pads disconnected" on the
         // first push. The writer always emits the canonical form.

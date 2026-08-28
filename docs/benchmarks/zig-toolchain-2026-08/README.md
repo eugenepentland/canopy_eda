@@ -16,13 +16,13 @@
 > **Current workflow:** use pinned-master self-hosted Debug for every internal
 > application build, test, dev server, tool, solver run, and benchmark. The
 > ReleaseSafe/LLVM rows below are retained only as toolchain decision evidence;
-> deployment is the sole workflow that now builds a ReleaseSafe EDA artifact.
+> deployment is the sole workflow that now builds a ReleaseSafe netlisp artifact.
 > That deployment executable is stripped: a 2026-08-12 clean A/B reduced the
 > full application build from 293.66 s / 4.24 GB RSS / 61.1 MB to 223.11 s /
 > 2.26 GB RSS / 20.5 MB without changing ReleaseSafe runtime checks. See
 > `../release-build-2026-08/README.md` for the release-build analysis.
 
-Decision data for "should eda upgrade past Zig 0.15.1, and can Debug builds
+Decision data for "should netlisp upgrade past Zig 0.15.1, and can Debug builds
 replace ReleaseSafe for prototyping?" Measured on the production server
 (i5-10400, 12 threads, Linux). The raw `.tsv`/`.txt` files and the
 `summarize*.py` scripts that regenerate every table live beside this file;

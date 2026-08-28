@@ -1,7 +1,7 @@
 //! CLI entry point: parses the subcommand from argv and dispatches to the
 //! `commands.zig` handlers (build/check/export/import) or the local
 //! convert/parse/token helpers, printing usage on an unknown command. Also
-//! resolves the auth directory (CLI flag -> `EDA_AUTH_DIR` -> `<project>/auth`)
+//! resolves the auth directory (CLI flag -> `NETLISP_AUTH_DIR` -> `<project>/auth`)
 //! shared with the long-running `serve` flow.
 
 const std = @import("std");
@@ -55,12 +55,12 @@ fn hasFlag(args: []const []const u8, flag: []const u8) bool {
     return false;
 }
 
-/// Read `EDA_AUTH_DIR` from the environment so multiple worktrees / project
+/// Read `NETLISP_AUTH_DIR` from the environment so multiple worktrees / project
 /// checkouts can share one plugin-token store. Returns `null` when the
 /// env var is unset; the caller falls back to the `<project_dir>/auth`
 /// default. Caller owns any returned slice (allocator-owned dupe).
 fn readAuthDirEnv(allocator: std.mem.Allocator, environ: *const std.process.Environ.Map) ?[]const u8 {
-    const value = environ.get("EDA_AUTH_DIR") orelse return null;
+    const value = environ.get("NETLISP_AUTH_DIR") orelse return null;
     return allocator.dupe(u8, value) catch null;
 }
 
@@ -342,7 +342,7 @@ fn dispatchServe(io: std.Io, allocator: std.mem.Allocator, scratch_allocator: st
     });
 }
 
-/// Print the runtime build id (the deployment-provided EDA commit from
+/// Print the runtime build id (the deployment-provided netlisp commit from
 /// `.git/netlisp-deploy-id`, or the current checkout's git HEAD short hash).
 fn cmdVersion() !void {
     try writeStdout(process_build_id);
@@ -518,7 +518,7 @@ fn printUsage() !void {
         \\  netlisp convert-pinout <file> [--filter <name>]  Generate pinout from KiCad .kicad_sym
         \\  netlisp merge-alt-functions <pinout.sexp> <alts.csv|alts.xml> [--write]  Merge alt functions (CSV or ST open-pin-data XML)
         \\  netlisp gen-language-docs [--output <path>] [--check]  Regenerate (or verify with --check) docs/language-forms.md from the dispatch tables
-        \\  netlisp version                          Print the runtime build id (the EDA commit, or the current checkout's HEAD)
+        \\  netlisp version                          Print the runtime build id (the netlisp commit, or the current checkout's HEAD)
         \\  netlisp help                            Show this help
         \\
     );

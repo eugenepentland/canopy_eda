@@ -80,7 +80,7 @@ pub const PluginTokenStore = struct {
         auth_store.writeFileAtomicWithBackup(allocator, path, bw.written());
     }
 
-    /// Mint a new plugin token. Returns the raw token string (prefix `eda_p_`) —
+    /// Mint a new plugin token. Returns the raw token string (prefix `netlisp_p_`) —
     /// shown once to the user and never stored. Caller owns the returned memory.
     pub fn mint(
         self: *PluginTokenStore,
@@ -94,7 +94,7 @@ pub const PluginTokenStore = struct {
 
         const suffix = try randomHex(allocator, 32);
         defer allocator.free(suffix);
-        const raw = try std.fmt.allocPrint(allocator, "eda_p_{s}", .{suffix});
+        const raw = try std.fmt.allocPrint(allocator, "netlisp_p_{s}", .{suffix});
         const hash = try sha256Hex(store_alloc, raw);
         try self.tokens_list.append(store_alloc, .{
             .hash = hash,

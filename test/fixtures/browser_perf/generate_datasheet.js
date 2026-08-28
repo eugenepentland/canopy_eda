@@ -14,7 +14,7 @@ const DENSE_LINES = 14;
 const VECTOR_SEGMENTS = 64;
 const IMAGE_WIDTH = 160;
 const IMAGE_HEIGHT = 120;
-const WORKLOAD_MARKER = `%CANOPY_BROWSER_PERF_WORKLOAD_V2 pages=${PAGE_COUNT} table_rows=${TABLE_ROWS} table_columns=${TABLE_COLUMNS} dense_lines=${DENSE_LINES} vector_segments=${VECTOR_SEGMENTS} images=${PAGE_COUNT} image_pixels=${IMAGE_WIDTH}x${IMAGE_HEIGHT}`;
+const WORKLOAD_MARKER = `%NETLISP_BROWSER_PERF_WORKLOAD_V2 pages=${PAGE_COUNT} table_rows=${TABLE_ROWS} table_columns=${TABLE_COLUMNS} dense_lines=${DENSE_LINES} vector_segments=${VECTOR_SEGMENTS} images=${PAGE_COUNT} image_pixels=${IMAGE_WIDTH}x${IMAGE_HEIGHT}`;
 
 function pdfText(value) {
   return String(value).replaceAll("\\", "\\\\").replaceAll("(", "\\(").replaceAll(")", "\\)");
@@ -55,7 +55,7 @@ function pageContent(pageNumber, imageName) {
     "q 0.965 0.975 0.985 rg 0 0 612 792 re f Q",
     "0.10 0.16 0.24 rg 36 738 540 34 re f",
     "1 1 1 rg",
-    textRun("F1", 18, 48, 749, `Canopy component datasheet benchmark - page ${pageNumber}`),
+    textRun("F1", 18, 48, 749, `Netlisp component datasheet benchmark - page ${pageNumber}`),
     "0.10 0.16 0.24 rg",
     textRun("F1", 9, 48, 720, "Synthetic engineering content for deterministic browser rendering and text-layer timing"),
   ];
