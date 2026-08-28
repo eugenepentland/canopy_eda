@@ -13,7 +13,7 @@ Local dev still uses `http://localhost:7050`.
 - **Schematic viewer**: `GET /schematics/:name` — server-rendered HTML schematic with embedded SVG. The page also embeds the design-review panels inline (power-budget table, power-sequence, test-points, per-section coverage). There is no standalone review-report endpoint.
 - **Thermal review**: `GET /thermal/:name[?ambient=NN][?scenario=natural|airflow_1ms|airflow_2ms|heatsink][?layout=<saved>][?fragment=1][?row=<saved>]` — the **Thermal** tab (last in the shared design-view bar, right after Assembly, on the schematic / PCB / 3D / assembly pages; modules get it too, without Assembly). Server-rendered dark page: the board-coupled verdict pill + sentence with the package-level screen demoted under it, the ambient window, a cooling-scenario picker, the `?thermal=1` heat-zone image of the selected scenario, the four-rung cooling ladder, a per-part junction table for that scenario sorted hottest first (each row cross-probing to `/pcb-layout/<name>?focus=<ref>` + `/schematics/<name>#comp-<ref>` and announcing itself on the shared `netlisp-xprobe` channel), and a coverage footer with the unplaced refs and the screening-grade caveat. Every sentence and cell comes from `review_thermal.zig`, so the page and the review panel/PDF can never disagree. `?ambient` is clamped to −55…125 rather than refused and `?fragment=1` answers the two ambient-dependent regions alone (what the page's own client swaps in); switching scenario is client-side. A design with no cooling ladder shows the reason instead of the picker, the image and the ladder — never a broken image. Toolbar: `⤓ PDF` → `/api/schematic-pdf/:name`, `{ } JSON` → `/api/thermal/:name`. `?layout=<saved>` screens one named saved layout instead of the design's default board — a layout picker beside the ambient window switches it, and the choice rides into the board frame, the tab bar, the cross-probe links and the JSON link, so nothing on the page describes a board other than the one it names; a `?layout` nobody saved falls back to the default board and says so rather than screening a board under the wrong name. Below the tables a **Compare layouts** panel lists every saved layout of the design (parts, saved copper, hottest part, Tj, and Δ against the board on screen). Only the shown board's row is filled on load — every other row is a whole second solve, so rows fill one at a time on click or via a "Solve all" sweep the reader can stop; `?row=<saved>` answers one row's cells alone. A design with one board renders no panel. `:name` resolves as a design or a bare `lib/modules` module (percent-decoded first); unknown name → 404 plain text. Read-only (`src/serve/thermal_page.zig`).
 - **Scene graph**: `GET /api/scene-graph/:name` — JSON scene graph for schematic (used by the live-push pipeline)
-- **Schematic PDF**: `GET /api/schematic-pdf/:name[?theme=light]` — the design-review document as an `application/pdf` attachment (default = the viewer's dark screen theme, page background included; `?theme=light` = print palette) (`<name>.pdf`): cover, one A4-landscape sheet per `(section …)` (the section's hub blocks **plus the single-instance `(sub-block …)` modules that section owns** shelf-packed into a 2D grid at one uniform scale, each cell captioned with its pin-group label or `<sub-block> - <module title>`, the section's notes and its modules' notes under the grid; a section with no drawing at all packs as a compact entry, and the `(sub-block)` appendix keeps only what no section drew — unattached and multi-instance `x N` modules), validation appendix, power/test-point tables. The HTTP twin of `netlisp export-pdf` (`src/serve/schematic_pdf.zig` → `src/export_pdf.zig`), so the download and the CLI's output are the same document, with a real `/CreationDate` added. `:name` resolves as a design or a bare `lib/modules` module (percent-decoded first); unknown name → 404 plain text. Read-only, composed on demand, self-checked by `pdf.validate` before it is served. The schematic page's `⤓ PDF` toolbar button points here (module pages too).
+- **Schematic PDF**: `GET /api/schematic-pdf/:name[?theme=light]` — the design-review document as an `application/pdf` attachment (default = the viewer's dark screen theme, page background included; `?theme=light` = print palette) (`<name>.pdf`): cover, one A4-landscape sheet per `(section …)` (the section's hub blocks **plus the single-instance `(sub-block …)` modules that section owns** shelf-packed into a 2D grid at one uniform scale, each cell captioned with its pin-group label or `<sub-block> - <module title>`, the section's notes and its modules' notes under the grid; a section with no drawing at all packs as a compact entry, and the `(sub-block)` appendix keeps only what no section drew — unattached and multi-instance `x N` modules), validation appendix, power/test-point tables. The HTTP twin of `netlisp export-pdf` (`src/serve/schematic_pdf.zig` → `src/export_pdf.zig`), so the download and the CLI's output are the same document, with a real `/CreationDate` added. `:name` resolves as a design or a bare `lib/modules` module (percent-decoded first); unknown name → 404 plain text. Read-only, composed on demand, self-checked by `pdf.validate` before it is served, and then retained (`src/serve/read_cache.zig`) keyed by design and `?theme=`, against the evaluator read-set plus the placement sidecars its cooling ladder is solved from. A cached document is served without re-running `pdf.validate` — those exact bytes already passed it — and keeps the `/CreationDate` (and matching cover date) of the compose that produced it, so two downloads of an unchanged design are byte-identical. `X-Netlisp-Pdf-Cache: hit|miss|bypass` reports which happened. The schematic page's `⤓ PDF` toolbar button points here (module pages too).
 - **KiCad schematic**: `GET /api/kicad-sch/:name[?vendor=0][?flat=1]` — the
   exported `.kicad_sch` hierarchy plus its project sidecars (`sym-lib-table`,
   `fp-lib-table`, `<name>.kicad_pro`, `netlisp.kicad_sym`) as one store-only
@@ -26,11 +26,16 @@ Local dev still uses `http://localhost:7050`.
   `--no-vendor-symbols` / `--flat`. `:name` resolves as a design or a bare
   `lib/modules` module (percent-decoded first); unknown name → 404 plain text.
   Read-only, composed on demand, and every sheet is re-parsed + structurally
-  checked before it is served. No cache: the vendor `.kicad_sym` index it
-  rebuilds per call is ~0.36 s of a 0.95 s *Debug* export of the largest board
-  here, and caching it would need an invalidation signal `lib/` does not have
-  (`lib/sources/` is writable through the CLI VFS and the library page). The
-  schematic page's `⤓ KiCad` toolbar button points here (module pages too).
+  checked before it is served. The finished archive is then retained
+  (`src/serve/read_cache.zig`), keyed by design and the `?vendor=` / `?flat=`
+  pair; a cached body is served without re-running the structural self-check
+  those exact bytes already passed. The invalidation signal this entry once
+  said `lib/` did not have is the `lib/sources/` `.kicad_sym` listing plus each
+  file's mtime, stamped alongside the evaluator read-set — so a vendor symbol
+  written through the CLI VFS or the library page retires the archive on the
+  next lookup. `X-Netlisp-Kicad-Sch-Cache: hit|miss|bypass` reports which
+  happened. The schematic page's `⤓ KiCad` toolbar button points here (module
+  pages too).
   Footprint links resolve only when `footprints.pretty/` sits beside the sheets
   — `GET /api/export-kicad/:name` carries both and opens with 0 ERC warnings.
 - **KiCad schematic push**: `POST /api/sync-kicad-sch/:name[?dry_run=1][?force=1]`
@@ -277,7 +282,14 @@ Local dev still uses `http://localhost:7050`.
   or no `events` array → 400. Same auth as every other `/api` route
   (`src/serve/request_log.zig`).
 - **Value editing**: `POST /api/edit-value/:name` — edit component value in .sexp file
-- **ERC**: `GET /api/erc/:name` — electrical-rule violations
+- **ERC**: `GET /api/erc/:name` — electrical-rule violations. Repeat requests
+  are answered from a dependency-validated in-memory cache
+  (`src/serve/read_cache.zig`): the evaluator read-set (design, checks, every
+  transitively imported `lib/` file, the `.bom` / `.refdes.json` / `.notes.md`
+  siblings) plus the design's live-edit version, captured AFTER the identity
+  resolve that may rewrite the `.bom`. The endpoint takes no query parameters,
+  so any query bypasses. `X-Netlisp-Erc-Cache: hit|miss|bypass` reports which
+  happened.
 - **Thermal facts**: `GET /api/thermal/:name[?ambient=NN][?layout=<saved>]` — the lumped
   steady-state thermal screening (`src/eval/thermal.zig`) as read-only JSON:
   `ambient_c`, the board `verdict`
@@ -300,6 +312,17 @@ Local dev still uses `http://localhost:7050`.
   cached solve. `GET /api/thermal-field/:name` (the board overlay's heat field)
   takes the same argument. CLI twin: `describe_thermal`, sharing this
   endpoint's whole body (`src/serve/thermal_api.zig`).
+
+  The retained solve (`src/serve/thermal_cache.zig`) skips the relaxation, not
+  the design evaluation each request opens with — so the finished RESPONSE is
+  retained too (`src/serve/read_cache.zig`), for both this endpoint (keyed by
+  `?ambient=` / `?layout=`, header `X-Netlisp-Thermal-Cache`) and the
+  `/thermal/:name` page (keyed by `?ambient=` / `?scenario=` / `?layout=` /
+  `?compare=` / `?fragment=`, header `X-Netlisp-Thermal-Page-Cache`; `?row=`
+  bypasses, because it answers a board this dependency set does not describe).
+  Both stamp the evaluator read-set plus the `.layouts.json` / `.autolayout.json`
+  sidecars — deliberately the same pair the solved field is validated against,
+  so a retained page can never outlive the field it reports.
 - **KiCad sync**: `POST /api/sync-kicad-pcb/:name` — file-based sync. Reads the `.kicad_pcb` declared by the design's `(kicad-pcb "<path>")` form, diffs it against the flattened netlist, and writes the updated board in place so footprint placements and routing are preserved. Driven by the schematic viewer's "Push to KiCad PCB" button, which dry-runs first and shows a categorized preview modal (board changes up top, metadata collapsed) before the real write, with a result toast. The heuristic relink (parent-path + value + net signature) is ON by default, so a refdes drift (e.g. FB→L) renames the placed part instead of staging a duplicate; a placement guard aborts the write with HTTP 409 if it would move, rotate, or side-flip any existing footprint; every write rolls a timestamped backup into a `backups/` subdirectory beside the board (`backups/<name>.bak-<stamp>`, newest 10 kept — the KiCad project dir stays free of `.bak-*` siblings). (`?dry_run=1` / `?prune=1` / `?no_migrate=1` / `?no_swap=1` modifiers — `no_swap` suppresses all `swap_footprint` geometry re-bakes so hand-tuned board lands survive; the withheld count is reported as `swaps_suppressed`.)
 
   The PCB editor also exposes the inverse **“⇡ Push to KiCad”** handoff. It
@@ -376,11 +399,13 @@ browser's 2 s version poll does not bury the file.
 Two handlers report their own phase breakdown, because whole-request timing
 could not say which part of an autosave was slow:
 
-- `POST /api/pcb-layouts/:name` → `parse`, `score_resolve`, `score_poses`,
-  `snapshot`, `write`. `score_resolve` is the whole-design re-evaluation inside
-  `layout_score.scoreSavedLayout`, which every save pays; `score_poses` is
-  `optimizer.scorePoses`. They are split precisely so a slow evaluator and a
-  slow solver are distinguishable.
+- `POST /api/pcb-layouts/:name` → `parse`, `resolve`, `snapshot`, `write`.
+  `resolve` is the whole-design re-evaluation inside
+  `layout_save_layers.savedLayoutLayers`, which every save pays for the layer
+  rules it validates a pour against; it is named apart from the rest of the
+  write so a slow evaluator and a slow handler are distinguishable. (A save no
+  longer scores the arrangement, so the old `score_poses` phase is gone — it was
+  27.2 s of a 27.7 s Debug autosave on barracuda.)
 - `POST /api/pcb-drc/:name` → `parse`, `resolve`, `restore`, `drc`, `pours`,
   `respond`. `resolve` is the reconcile session's design evaluation +
   `placeFromPoses` — near zero when the session answered from a retained
@@ -392,6 +417,60 @@ whole-handler figure, so a browser can subtract server work from its own
 `/pcb-layout` page's embedded `PCB` blob carries **`PCB.build_id`** — the build
 that RENDERED the page — which the client echoes as `page_build`, so a tab held
 open across a deploy files its events under the code that drew it.
+### Startup: what is in front of the socket, and what is behind it
+
+A merge deploys, and a deploy restarts this process, so "cold" is a state
+production is in several times a day. The ordering that keeps that from being a
+visible outage:
+
+**Nothing expensive runs before `listen()`.** `serve()` configures rate limits,
+builds `ServerState`, initialises the ward adapter from `WARD_*`, registers the
+routes, and binds. Measured on this corpus (ReleaseSafe, 2026-08-28): **5 ms
+from exec to the first accepted connection**, of which netlisp's own startup —
+`main` entry to bound socket — is **0.54 ms**; the rest is exec and dynamic
+loading. The startup banner is followed by `[I] startup: listening after N.NN ms
+…`, which is the number to read when a restart looks slow: if it is small, the
+delay is a *request*, not the boot. (Sub-millisecond is why that line carries
+two decimals — an integer `0 ms` reads like a broken clock.)
+
+**The deploy health check never touches a design.** `.githooks/deploy-prod.sh`
+polls `HEALTH_URLS` — `/.well-known/oauth-protected-resource` expecting **200**
+and `/` expecting **302** — for up to `HEALTH_TIMEOUT` (90 s). Both are answered
+ahead of every handler: the metadata route is on the session allowlist and
+returns a static RFC 9728 document, and `/` is answered by
+`ward_auth.authMiddleware`, which redirects an unauthenticated request to the
+ward login *before* `pages.indexPage` is ever called. Neither can be delayed by
+a cold cache, a warm-up sweep, or a design scan. Verified against a
+freshly-started cold server with `WARD_*` pointing at a port nothing listens
+on: metadata `200` and `/` `302`, both answered within 120 ms of exec — the
+redirect is decided from the absent cookie alone, so it needs no round trip to
+wardd.
+
+Two things to know when reproducing this locally:
+
+- **`NETLISP_DEV=1` changes what `/` means.** Dev mode bypasses auth for
+  loopback, so `/` renders the actual home page — which on a cold process gathers
+  every design and is the slowest read on the server. The deploy health check
+  never sees that page, because prod does not set `NETLISP_DEV`.
+- **Ward-less local runs answer 503, not 302**, by design (`sessionConfigured` is
+  false → fail closed). That is not a health-check regression; it means the probe
+  cannot be reproduced without `WARD_VERIFY_URL` / `WARD_LOGIN_URL` set. Check
+  the *metadata* URL locally, and check the pair against a ward-configured
+  server.
+
+**Everything else warms behind the socket.** `serve/warmup.zig` runs on its own
+thread: the design-summary gather first (`[I] warmup: N design summary(s) ready
+in M ms`), then PCB editor pages, then their deferred `?derived=1` payloads, then
+the progress ladders. A request that arrives mid-warm is never refused — it joins
+the warm work per design (`serve/warm_sched.zig`'s `Flight`, and the PCB page
+cache's own `reserveWarm`) rather than starting a duplicate render.
+
+**The design scan is the one thing a request blocks on.** `GET /api/designs` and
+`GET /` both evaluate every design under `src/` on a cold process. That scan is
+now parallel across a bounded worker set (half the host's cores, capped at four)
+and single-flighted per design, so a poller retrying during a restart joins the
+scan in progress instead of starting a second one. Its floor is the single
+slowest design in the corpus, since the response needs all of them.
 
 ### Live update workflow
 

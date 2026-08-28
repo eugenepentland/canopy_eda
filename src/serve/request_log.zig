@@ -568,11 +568,11 @@ test "an interaction-log line carries the common fields and escapes its values" 
     // only appears when a handler named a phase.
     var sw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer sw.deinit();
-    const stages = [_]Stage{ .{ .name = "score_resolve", .ms = 3512.04 }, .{ .name = "write", .ms = 9 } };
+    const stages = [_]Stage{ .{ .name = "resolve", .ms = 3512.04 }, .{ .name = "write", .ms = 9 } };
     try writeLine(&sw.writer, at, .client, "stages", &.{}, &stages);
     try testing.expectEqualStrings(
         "{\"ts\":\"2026-08-28T17:04:05.123Z\",\"build\":\"test\",\"src\":\"client\",\"evt\":\"stages\"," ++
-            "\"stages\":{\"score_resolve\":3512.0,\"write\":9.0}}\n",
+            "\"stages\":{\"resolve\":3512.0,\"write\":9.0}}\n",
         sw.written(),
     );
 }
@@ -633,10 +633,10 @@ test "a stage timer names each phase and totals the whole handler" {
     var timer = StageTimer.start();
     try testing.expectEqual(@as(usize, 0), timer.stages().len);
     timer.lap("parse");
-    timer.lap("score_resolve");
+    timer.lap("resolve");
     try testing.expectEqual(@as(usize, 2), timer.stages().len);
     try testing.expectEqualStrings("parse", timer.stages()[0].name);
-    try testing.expectEqualStrings("score_resolve", timer.stages()[1].name);
+    try testing.expectEqualStrings("resolve", timer.stages()[1].name);
     // Monotonic, so no phase and no total can come out negative…
     try testing.expect(shortestStage(&timer) >= 0);
     try testing.expect(timer.totalMs() >= 0);

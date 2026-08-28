@@ -26,7 +26,10 @@ const reader = @import("reader.zig");
 /// Where a project keeps the original vendor files it imported parts from.
 pub const sources_subdir = "lib/sources";
 
-const suffix = ".kicad_sym";
+/// Extension `load` indexes out of `sources_subdir`. Public because a cache of
+/// an export built from this index has to stamp exactly the files that index
+/// read — one spelling, so a scan and its dependency set can never disagree.
+pub const suffix = ".kicad_sym";
 /// Cap on a vendor `lib/sources/<file>.kicad_sym` read. A vendor symbol
 /// library dwarfs a netlisp `lib/` source - the largest in this project is
 /// ~248 KB, already 94% of a 256 KiB cap - so the class carries its own

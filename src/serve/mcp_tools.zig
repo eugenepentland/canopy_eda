@@ -28,6 +28,7 @@ const review_json_mod = @import("../review_json.zig");
 const req_checks = @import("../req_checks.zig");
 const component_info = @import("component_info.zig");
 const notes = @import("notes.zig");
+const warm_sched = @import("warm_sched.zig");
 const symbol_conv = @import("../convert/symbol.zig");
 const mcp_parts_tools = @import("mcp_parts_tools.zig");
 const mcp_notes_tools = @import("mcp_notes_tools.zig");
@@ -1819,6 +1820,17 @@ fn summaryCacheGet(arena: std.mem.Allocator, name: []const u8, live_version: u32
     return dupeSummary(arena, e.summary) catch null;
 }
 
+/// Whether a valid cached summary already exists for `name` — the same test
+/// `summaryCacheGet` applies, without the copy. The parallel fill asks this
+/// before claiming a design so a warm scan costs the read-set `stat`s and
+/// nothing else.
+fn summaryIsFresh(name: []const u8, live_version: u32) bool {
+    summary_cache_mutex.lock();
+    defer summary_cache_mutex.unlock();
+    const e = summary_cache.getPtr(name) orelse return false;
+    return e.live_version == live_version and e.files.isValid();
+}
+
 /// Cache `summary` for `name`, duping it + the read-set into page_allocator and
 /// freeing any prior entry. `scratch` is the request arena.
 /// The library files that could satisfy an `(import …)` this evaluation read
@@ -1912,6 +1924,199 @@ fn summaryCachePut(
     gop.value_ptr.* = .{ .summary = stored, .files = files, .live_version = live_version };
 }
 
+// ── The design scan ────────────────────────────────────────────────────
+//
+// `GET /api/designs`, `GET /` and the `list_designs` tool all come through
+// here, and on a cold process every one of them evaluates every design under
+// `src/`. That is the whole of a restart's visible cost: the socket is bound in
+// milliseconds (see `serve/warm_sched.zig`), and then the first caller pays
+// nine seconds of serial evaluation because one board in this corpus takes four
+// on its own while nineteen cores sit idle. A poller retrying meanwhile started
+// a second full scan, and a third.
+//
+// The scan below fills the per-design summary cache on a bounded worker set
+// first, then reads the answer back out of that cache exactly as it always did.
+// Nothing about validity moves: an entry is still keyed on its evaluation's
+// file read-set and the design's live version, still recomputed when either
+// moved, and the serial read-back still computes anything the workers could not
+// cache. The parallel pass is a WARM, not a second source of truth.
+
+/// One `src/**.sexp` the scan may summarise. `live_version` is read during the
+/// walk — before any evaluation — so an edit landing mid-scan is a miss next
+/// time rather than something baked into a cache entry.
+const Candidate = struct {
+    /// Design name (basename without `.sexp`), owned by the scan's allocator.
+    base: []const u8,
+    /// Full path to the source file, owned by the scan's allocator.
+    full_path: []const u8,
+    mtime_sec: i64,
+    live_version: u32,
+    /// Source size in bytes — the scan's only cost estimate (see `fillOrder`).
+    size: u64,
+};
+
+/// Designs currently being summarised, so two scans racing the same cold cache
+/// evaluate each design once between them instead of once each. Namespaced
+/// like `VerdictMemo` below: process-wide by nature, with one named home.
+const ScanFlight = struct {
+    var latch: warm_sched.Flight = .{};
+};
+
+/// Workers the parallel fill may use, before the host's core count clamps it.
+/// The corpus's critical path is its single slowest design; the rest fit under
+/// that design's own wall well below this, so a higher cap would buy nothing
+/// and cost the request path cores.
+const scan_worker_cap: usize = 4;
+
+/// The shared state of one parallel fill: which candidates, in which order.
+const ScanFill = struct {
+    project_dir: []const u8,
+    cands: []const Candidate,
+    order: []const usize,
+
+    fn one(self: *ScanFill, i: usize) void {
+        ensureSummaryCached(self.project_dir, self.cands[self.order[i]]);
+    }
+};
+
+/// Indices into `cands`, largest source first.
+///
+/// Work is claimed dynamically, so ordering only matters for the LAST item to
+/// start: a four-second board picked up by the final free worker adds its whole
+/// wall to the scan, while the same board started first hides every cheap
+/// design behind it. Source size is a coarse proxy for evaluation cost — good
+/// enough to keep the expensive boards off the tail, and free, since the walk
+/// already stats each file.
+fn fillOrder(allocator: std.mem.Allocator, cands: []const Candidate) std.mem.Allocator.Error![]usize {
+    const order = try allocator.alloc(usize, cands.len);
+    for (order, 0..) |*o, i| o.* = i;
+    std.mem.sort(usize, order, cands, struct {
+        fn lessThan(all: []const Candidate, a: usize, b: usize) bool {
+            return all[a].size > all[b].size;
+        }
+    }.lessThan);
+    return order;
+}
+
+/// Bring one candidate's summary-cache entry up to date, off the caller's
+/// allocator. Returns without touching anything when the entry is already
+/// valid, which is what makes a warm scan a handful of `stat` calls.
+///
+/// Single-flighted per design: the second thread to want a design waits for the
+/// first and then finds the entry, rather than evaluating it again. A latch
+/// failure or a leader that could not cache what it built simply means this
+/// caller evaluates too — slower, never wrong.
+fn ensureSummaryCached(project_dir: []const u8, cand: Candidate) void {
+    if (summaryIsFresh(cand.base, cand.live_version)) return;
+    const leading = ScanFlight.latch.claim(cand.base);
+    defer if (leading) ScanFlight.latch.release(cand.base);
+    if (summaryIsFresh(cand.base, cand.live_version)) return;
+
+    // Each worker owns its scratch and releases it before taking the next
+    // design, so a whole-corpus fill peaks at one evaluated design per worker
+    // rather than all of them at once.
+    // allocator-ok: scan-worker scratch, released at the end of this call.
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    // Same order as the read-back below: a file with no top-level design-block
+    // is not a design and must not be evaluated (the verdict is memoised, so
+    // the read-back's own call is a hit).
+    if (!hasTopLevelDesignBlock(scratch, cand.full_path)) return;
+    _ = summarizeDesign(scratch, project_dir, cand) catch return;
+}
+
+/// Evaluate one design and build its summary, caching it on the way out. The
+/// returned summary is owned by `allocator`; the cached copy is its own.
+fn summarizeDesign(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    cand: Candidate,
+) ToolError!DesignSummary {
+    var summary = DesignSummary{
+        .name = cand.base,
+        .title = "",
+        .sections = &.{},
+        .instance_count = 0,
+        .net_count = 0,
+        .mtime_sec = cand.mtime_sec,
+        .build_ok = false,
+    };
+
+    var eval = Evaluator.init(allocator, project_dir);
+    defer eval.deinit();
+    if (eval.evalFile(cand.full_path)) |result| {
+        const block_opt: ?*const env_mod.DesignBlock = switch (result) {
+            .design_block => |b| b,
+            else => null,
+        };
+        if (block_opt) |block| {
+            summary.title = try allocator.dupe(u8, block.name);
+            var names: std.ArrayList([]const u8) = .empty;
+            for (block.sections) |s| {
+                try names.append(allocator, try allocator.dupe(u8, s.name));
+            }
+            // Sub-blocks appear as sections on the block diagram too —
+            // include their names so designs that are pure-composition
+            // (e.g. a single sub-block wrapper) still show structure.
+            if (names.items.len == 0) {
+                for (block.sub_blocks) |sb| {
+                    try names.append(allocator, try allocator.dupe(u8, sb.name));
+                }
+            }
+            summary.sections = try names.toOwnedSlice(allocator);
+            summary.instance_count = countInstances(block);
+            summary.net_count = countNets(block);
+            summary.build_ok = true;
+            summary.has_groups = block.groups.len > 0;
+            // Explicit board/subcircuit role: driven solely by the top-level
+            // (board-role board|subcircuit) form. No content auto-detection —
+            // a design with no (board-role …) defaults to subcircuit, so a
+            // fabricable board must declare (board-role board). (board …) and
+            // (kicad-pcb …) keep their own jobs and no longer set the role.
+            summary.is_board = block.board.role == .board;
+
+            // Status-chip roll-up for the home dashboard: ERC severities
+            // (same .bom-resolved path the review endpoint uses), failed
+            // non-warning assertions, and open .notes.md tasks. Each
+            // degrades to 0 on failure rather than dropping the summary.
+            const bom_path = paths.designSiblingPath(allocator, project_dir, cand.base, ".bom") catch null;
+            if (bom_path) |bp| {
+                defer allocator.free(bp);
+                bom.resolveIdentities(allocator, @constCast(block), bp, project_dir) catch |e| warnResolveIdentities(cand.base, e);
+            }
+            const violations = erc_mod.runErc(allocator, @constCast(block), project_dir) catch &[_]erc_mod.Violation{};
+            for (violations) |v| {
+                if (v.severity == .@"error") {
+                    summary.erc_errors += 1;
+                } else if (v.severity == .warning) {
+                    summary.erc_warnings += 1;
+                }
+            }
+            for (eval.assertions.items) |a| {
+                if (!a.passed and !a.is_warning) summary.assert_fails += 1;
+            }
+
+            var used: std.ArrayList([]const u8) = .empty;
+            try collectModuleUses(allocator, block, &used);
+            summary.modules_used = try used.toOwnedSlice(allocator);
+        }
+    } else |_| {}
+    summary.open_notes = countOpenNotes(allocator, project_dir, cand.base);
+
+    // Failed builds are cached too. The read-set of a failed eval IS
+    // partial — it stops at the first error, so imports past that point are
+    // unstamped — but nothing beyond the failure can fix it: an eval that
+    // dies on import A is repaired by editing the design, by editing A, or
+    // by CREATING a file A was searched for and missing, and all three are
+    // stamped (the last via `eval.missing_files`, recorded absent). Not
+    // caching them cost far more than the staleness it avoided: four copies
+    // of one 92 KiB broken board re-evaluated on every `GET /`, which was
+    // ~70% of a warm home page.
+    summaryCachePut(allocator, &eval, project_dir, cand.base, summary, cand.live_version);
+    return summary;
+}
+
 /// Scan `{project_dir}/src/` for design files and return a summary for each.
 /// Designs that fail to evaluate are still included with build_ok=false so
 /// the UI can surface them instead of silently dropping them.
@@ -1925,118 +2130,60 @@ pub fn listDesignSummaries(
     var dir = infra_fs.cwd().openDir(src_path, .{ .iterate = true }) catch return &[_]DesignSummary{};
     defer dir.close();
 
-    var summaries: std.ArrayList(DesignSummary) = .empty;
+    var cands: std.ArrayList(Candidate) = .empty;
     var walker = try dir.walk(allocator);
     defer walker.deinit();
     while (try walker.next()) |entry| {
         if (entry.kind != .file and entry.kind != .sym_link) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".sexp")) continue;
         if (std.mem.endsWith(u8, entry.basename, ".checks.sexp")) continue;
-        const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ src_path, entry.path });
-        defer allocator.free(full_path);
         const base = try allocator.dupe(u8, entry.basename[0 .. entry.basename.len - ".sexp".len]);
+        var mtime_sec: i64 = 0;
+        var size: u64 = 0;
+        if (dir.statFile(entry.path)) |st| {
+            mtime_sec = @intCast(@divTrunc(st.mtime.nanoseconds, std.time.ns_per_s));
+            size = st.size;
+        } else |_| {}
+        try cands.append(allocator, .{
+            .base = base,
+            .full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ src_path, entry.path }),
+            .mtime_sec = mtime_sec,
+            // Read BEFORE the evaluation, exactly as the serial scan did.
+            .live_version = serve_root.getLiveVersion(base),
+            .size = size,
+        });
+    }
+    // `base` is deliberately NOT freed: it becomes `summary.name` for every
+    // design the read-back evaluates, exactly as it did before. The paths and
+    // the candidate array itself are ours alone (defers unwind last-first, so
+    // the paths go before the array holding them).
+    defer cands.deinit(allocator);
+    defer for (cands.items) |c| allocator.free(c.full_path);
 
+    // Fill the cross-request cache in parallel, THEN read the answer out of it
+    // serially below. A warm process finds every entry valid and this pass is
+    // the `stat` set the read-back would have done anyway.
+    if (cands.items.len > 1) {
+        const order = try fillOrder(allocator, cands.items);
+        defer allocator.free(order);
+        var fill = ScanFill{ .project_dir = project_dir, .cands = cands.items, .order = order };
+        warm_sched.runIndexed(ScanFill, &fill, order.len, ScanFill.one, warm_sched.workerCount(scan_worker_cap));
+    }
+
+    var summaries: std.ArrayList(DesignSummary) = .empty;
+    for (cands.items) |cand| {
         // Serve the cached summary when this design's source files are
         // unchanged. Checked BEFORE hasTopLevelDesignBlock (a full re-parse of
         // the file) so a hit skips that parse too — a cached entry is proof the
-        // file is a design. live_version is read before the eval so a bump
-        // mid-build is treated as a miss next time rather than baked in.
-        const live_version = serve_root.getLiveVersion(base);
-        if (summaryCacheGet(allocator, base, live_version)) |cached| {
+        // file is a design.
+        if (summaryCacheGet(allocator, cand.base, cand.live_version)) |cached| {
             try summaries.append(allocator, cached);
             continue;
         }
-
-        if (!hasTopLevelDesignBlock(allocator, full_path)) continue;
-
-        var mtime_sec: i64 = 0;
-        if (dir.statFile(entry.path)) |st| {
-            mtime_sec = @intCast(@divTrunc(st.mtime.nanoseconds, std.time.ns_per_s));
-        } else |_| {}
-
-        var summary = DesignSummary{
-            .name = base,
-            .title = "",
-            .sections = &.{},
-            .instance_count = 0,
-            .net_count = 0,
-            .mtime_sec = mtime_sec,
-            .build_ok = false,
-        };
-
-        var eval = Evaluator.init(allocator, project_dir);
-        defer eval.deinit();
-        if (eval.evalFile(full_path)) |result| {
-            const block_opt: ?*const env_mod.DesignBlock = switch (result) {
-                .design_block => |b| b,
-                else => null,
-            };
-            if (block_opt) |block| {
-                summary.title = try allocator.dupe(u8, block.name);
-                var names: std.ArrayList([]const u8) = .empty;
-                for (block.sections) |s| {
-                    try names.append(allocator, try allocator.dupe(u8, s.name));
-                }
-                // Sub-blocks appear as sections on the block diagram too —
-                // include their names so designs that are pure-composition
-                // (e.g. a single sub-block wrapper) still show structure.
-                if (names.items.len == 0) {
-                    for (block.sub_blocks) |sb| {
-                        try names.append(allocator, try allocator.dupe(u8, sb.name));
-                    }
-                }
-                summary.sections = try names.toOwnedSlice(allocator);
-                summary.instance_count = countInstances(block);
-                summary.net_count = countNets(block);
-                summary.build_ok = true;
-                summary.has_groups = block.groups.len > 0;
-                // Explicit board/subcircuit role: driven solely by the top-level
-                // (board-role board|subcircuit) form. No content auto-detection —
-                // a design with no (board-role …) defaults to subcircuit, so a
-                // fabricable board must declare (board-role board). (board …) and
-                // (kicad-pcb …) keep their own jobs and no longer set the role.
-                summary.is_board = block.board.role == .board;
-
-                // Status-chip roll-up for the home dashboard: ERC severities
-                // (same .bom-resolved path the review endpoint uses), failed
-                // non-warning assertions, and open .notes.md tasks. Each
-                // degrades to 0 on failure rather than dropping the summary.
-                const bom_path = paths.designSiblingPath(allocator, project_dir, base, ".bom") catch null;
-                if (bom_path) |bp| {
-                    defer allocator.free(bp);
-                    bom.resolveIdentities(allocator, @constCast(block), bp, project_dir) catch |e| warnResolveIdentities(base, e);
-                }
-                const violations = erc_mod.runErc(allocator, @constCast(block), project_dir) catch &[_]erc_mod.Violation{};
-                for (violations) |v| {
-                    if (v.severity == .@"error") {
-                        summary.erc_errors += 1;
-                    } else if (v.severity == .warning) {
-                        summary.erc_warnings += 1;
-                    }
-                }
-                for (eval.assertions.items) |a| {
-                    if (!a.passed and !a.is_warning) summary.assert_fails += 1;
-                }
-
-                var used: std.ArrayList([]const u8) = .empty;
-                try collectModuleUses(allocator, block, &used);
-                summary.modules_used = try used.toOwnedSlice(allocator);
-            }
-        } else |_| {}
-        summary.open_notes = countOpenNotes(allocator, project_dir, base);
-
-        // Failed builds are cached too. The read-set of a failed eval IS
-        // partial — it stops at the first error, so imports past that point are
-        // unstamped — but nothing beyond the failure can fix it: an eval that
-        // dies on import A is repaired by editing the design, by editing A, or
-        // by CREATING a file A was searched for and missing, and all three are
-        // stamped (the last via `eval.missing_files`, recorded absent). Not
-        // caching them cost far more than the staleness it avoided: four copies
-        // of one 92 KiB broken board re-evaluated on every `GET /`, which was
-        // ~70% of a warm home page.
-        summaryCachePut(allocator, &eval, project_dir, base, summary, live_version);
-
-        try summaries.append(allocator, summary);
+        if (!hasTopLevelDesignBlock(allocator, cand.full_path)) continue;
+        // Only reached when the fill above could not cache this design (an
+        // allocation failure, or an edit that landed between the two passes).
+        try summaries.append(allocator, try summarizeDesign(allocator, project_dir, cand));
     }
     const slice = try summaries.toOwnedSlice(allocator);
     std.mem.sort(DesignSummary, slice, {}, struct {
@@ -2500,6 +2647,98 @@ fn forgetDesignBlockVerdicts() void {
     }
     VerdictMemo.entries.deinit(page);
     VerdictMemo.entries = .empty;
+}
+
+/// The three designs the scan fixture declares, present exactly once each, in
+/// mtime-descending order, with the `defmodule` file filtered out — whatever
+/// order the size-ordered parallel fill dispatched them in.
+fn expectScanCorpus(found: []const DesignSummary) !void {
+    const testing = std.testing;
+    try testing.expectEqual(@as(usize, 3), found.len);
+    var titles: [3]bool = @splat(false);
+    var prev_mtime: i64 = std.math.maxInt(i64);
+    for (found) |s| {
+        try testing.expect(s.build_ok);
+        // The `defmodule` file declares no TOP-LEVEL design-block, so it is not
+        // a design however the fill reached it.
+        try testing.expect(!std.mem.eql(u8, s.name, "scanpar-frag"));
+        try testing.expect(s.mtime_sec <= prev_mtime);
+        prev_mtime = s.mtime_sec;
+        for ([_][]const u8{ "A", "B", "C" }, &titles) |want, *seen| {
+            if (std.mem.eql(u8, s.title, want)) seen.* = true;
+        }
+    }
+    try testing.expect(titles[0] and titles[1] and titles[2]);
+}
+
+/// Two scans of one unchanged corpus describe it identically.
+fn expectSameSummaries(a: []const DesignSummary, b: []const DesignSummary) !void {
+    const testing = std.testing;
+    try testing.expectEqual(a.len, b.len);
+    for (a, b) |x, y| {
+        try testing.expectEqualStrings(x.name, y.name);
+        try testing.expectEqualStrings(x.title, y.title);
+        try testing.expectEqual(x.instance_count, y.instance_count);
+        try testing.expectEqual(x.net_count, y.net_count);
+        try testing.expectEqual(x.build_ok, y.build_ok);
+        try testing.expectEqual(x.mtime_sec, y.mtime_sec);
+    }
+}
+
+/// Every racing scan counted the same corpus.
+fn expectEveryCount(counts: []const usize, want: usize) !void {
+    for (counts) |n| try std.testing.expectEqual(want, n);
+}
+
+/// One thread's `listDesignSummaries` over a shared root, for the race below.
+const ScanRacer = struct {
+    root: []const u8,
+    counts: [4]usize = @splat(0),
+
+    fn scan(self: *ScanRacer, i: usize) void {
+        // allocator-ok: per-thread test scratch, released at the end of this call.
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+        const found = listDesignSummaries(arena.allocator(), self.root) catch return;
+        self.counts[i] = found.len;
+    }
+};
+
+// spec: Web Server - The design scan lists every design under src whatever order its parallel fill ran in, and concurrent scans agree
+test "the parallel design scan lists every design, and racing scans agree" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "src", .default_dir);
+    try tmp.dir.createDir(std.testing.io, "src/nested", .default_dir);
+    // Deliberately uneven: the fill orders by source size, so the biggest file
+    // is dispatched first while the answer below must still carry all four.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/scanpar-a.sexp", .data = "(design-block \"A\" (section \"s1\"))" });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/scanpar-b.sexp",
+        .data = "(design-block \"B\" (section \"s1\") (section \"s2\") (section \"s3\") (section \"s4\"))",
+    });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/nested/scanpar-c.sexp", .data = "(design-block \"C\")" });
+    // A `.sexp` that is not a design must still be filtered out by the parallel
+    // pass exactly as the serial read-back filters it.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/scanpar-frag.sexp", .data = "(defmodule scanparfrag () (design-block \"F\"))" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    const cold = try listDesignSummaries(alloc, root);
+    try expectScanCorpus(cold);
+    // Warm: the same answer, now entirely out of the summary cache.
+    try expectSameSummaries(cold, try listDesignSummaries(alloc, root));
+    // Four scans at once — the shape a restart's health poller produces — all
+    // see the same corpus. Each design is single-flighted, so they share the
+    // evaluations rather than repeating them.
+    var racer = ScanRacer{ .root = root };
+    warm_sched.runIndexed(ScanRacer, &racer, 4, ScanRacer.scan, 4);
+    try expectEveryCount(&racer.counts, 3);
 }
 
 // spec: Web Server - A design whose evaluation fails is cached against the library files its imports could resolve to, so creating the missing one re-evaluates it

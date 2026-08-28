@@ -27,6 +27,7 @@ const review_md_mod = @import("../review_md.zig");
 const req_checks = @import("../req_checks.zig");
 const edit_mod = @import("edit.zig");
 const diag_format = @import("diag_format.zig");
+const page_cache = @import("page_cache.zig");
 const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
 
@@ -392,6 +393,87 @@ test "component library info marks HTTP datasheets as remote" {
     ) != null);
 }
 
+/// A design with one unconnected pin, so its ERC answer is a real violations
+/// document rather than an empty list.
+fn writeErcFixture(dir: std.Io.Dir) !void {
+    try dir.createDirPath(std.testing.io, "lib/components");
+    try dir.createDirPath(std.testing.io, "src");
+    try dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/erc-ic.sexp", .data =
+        \\(component "erc-ic"
+        \\  (description "minimal test regulator"))
+    });
+    try dir.writeFile(std.testing.io, .{ .sub_path = "src/ercdemo.sexp", .data =
+        \\(import erc-ic)
+        \\
+        \\(design-block "ERC Demo Board"
+        \\  (instance "U1" erc-ic
+        \\    (id "aa000001")
+        \\    (pin 1 "VIN")
+        \\    (pin 2 "GND")))
+    });
+}
+
+/// Drive the real ERC handler against a SHARED server state, so successive
+/// calls see the same response cache, and report the body alongside the
+/// cache's own verdict header.
+fn serveErc(
+    state: *serve_root.ServerState,
+    alloc: std.mem.Allocator,
+    project: []const u8,
+    name: []const u8,
+) !struct { body: []const u8, cache: []const u8 } {
+    var srv = Server{ .allocator = alloc, .project_dir = project, .auth_dir = project, .state = state };
+    var ht = httpz.testing.init(.{});
+    defer ht.deinit();
+    ht.param("name", name);
+    try ercApi(&srv, ht.req, ht.res);
+    return .{
+        .body = try alloc.dupe(u8, ht.res.body),
+        .cache = try alloc.dupe(u8, ht.res.headers.get("X-Netlisp-Erc-Cache") orelse ""),
+    };
+}
+
+// spec: Web Server - A cached ERC answer is byte-identical to the freshly computed one it was retained from, and an edit to the design retires it
+test "the ERC endpoint answers a repeat request with the identical bytes it retained" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeErcFixture(tmp.dir);
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+
+    var state = serve_root.ServerState{ .caches = .init(std.testing.allocator) };
+    defer state.caches.deinit();
+
+    const fresh = try serveErc(&state, alloc, project, "ercdemo");
+    try std.testing.expectEqualStrings("miss", fresh.cache);
+    const cached = try serveErc(&state, alloc, project, "ercdemo");
+    try std.testing.expectEqualStrings("hit", cached.cache);
+    // The whole contract: a cache loss changes latency and nothing else.
+    try std.testing.expectEqualStrings(fresh.body, cached.body);
+
+    // Adding a second part changes the violations, so the entry must not
+    // survive the edit that changed them.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/ercdemo.sexp", .data =
+        \\(import erc-ic)
+        \\
+        \\(design-block "ERC Demo Board"
+        \\  (instance "U1" erc-ic
+        \\    (id "aa000001")
+        \\    (pin 1 "VIN")
+        \\    (pin 2 "GND"))
+        \\  (instance "U2" erc-ic
+        \\    (id "aa000002")
+        \\    (pin 1 "VIN")
+        \\    (pin 2 "GND")))
+    });
+    const edited = try serveErc(&state, alloc, project, "ercdemo");
+    try std.testing.expectEqualStrings("miss", edited.cache);
+    try std.testing.expect(!std.mem.eql(u8, fresh.body, edited.body));
+}
+
 /// GET /api/export-kicad/:name — build the design, resolve BOM identities,
 /// and stream back a `<name>-kicad.zip` containing the KiCad schematic,
 /// netlist, and per-instance footprint files.
@@ -718,11 +800,32 @@ fn zipNameForSource(project_dir: []const u8, path: []const u8) []const u8 {
 /// GET /api/erc/:name — run electrical-rule checks (duplicate ref-des,
 /// floating nets, unconnected pins, voltage mismatches, missing decoupling)
 /// and return the violations as JSON for the schematic viewer's panel.
+///
+/// The violations are a pure function of the design's sources and its `.bom`
+/// identities, so a repeat request for an unchanged design is answered from
+/// `serve/read_cache.zig` instead of paying the fresh evaluation again — which
+/// on the largest board here is essentially the whole 4 s cost of the endpoint.
+/// The endpoint takes no query parameters, so any query bypasses the cache.
 pub fn ercApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = http_not_found;
         return;
     };
+    // Read the live version BEFORE computing, so a design edit that lands
+    // mid-request is treated as a miss next time instead of being baked in.
+    const live_version = serve_root.getLiveVersion(name);
+    var miss_version: ?u32 = null;
+    if (ctx.state.caches.reads.erc.serve(.{
+        .scratch = ctx.allocator,
+        .req = req,
+        .res = res,
+        .name = name,
+        .live_version = live_version,
+    }, &miss_version)) {
+        res.content_type = .JSON;
+        res.header(header_cors_allow_origin, "*");
+        return;
+    }
 
     const board_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
     defer ctx.allocator.free(board_path);
@@ -763,6 +866,19 @@ pub fn ercApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerEr
     res.content_type = .JSON;
     res.header(header_cors_allow_origin, "*");
     res.body = json;
+    // Captured AFTER `resolveIdentities`, which rewrites the `.bom` when an
+    // identity actually moved: stamping it beforehand would record the mtime
+    // this very request was about to invalidate.
+    ctx.state.caches.reads.erc.store(.{
+        .scratch = ctx.allocator,
+        .req = req,
+        .res = res,
+        .name = name,
+        .body = json,
+        .files = page_cache.capture(ctx.allocator, &eval, ctx.project_dir, name) catch null,
+        .live_version = miss_version,
+        .current_version = serve_root.getLiveVersion(name),
+    });
 }
 
 /// Return all designs in the project as a JSON array. Same shape as the

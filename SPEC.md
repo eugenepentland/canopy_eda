@@ -6199,7 +6199,8 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The interaction log appends one line per event to a dated file under the project's logs directory, creating it on demand, and writes nothing at all when no project directory is set
 - A handler's stage timer reports every phase it names and a total that covers the work after the last one
 - An instrumented handler files its own phase breakdown in the interaction log, naming every stage it ran and the total that covers them
-- The layout-save endpoint reports its design-resolve and objective phases separately, so an autosave's cost is attributable
+- The layout-save endpoint reports its design-resolve phase separately from the rest of the write, so an autosave's cost is attributable
+- A saved layout is persisted without an objective score, and an identically placed auto run is left alone rather than promoted into it
 - The client-log endpoint appends one line per posted browser event, passing its scalar fields through, and refuses an oversized body or event burst without writing anything
 - the schematic page exposes the current board role as a Design type selector on designs but not reusable module pages
 - the schematic Design type control replaces only the design root's board-role form, preserving comments and nested module text
@@ -6235,6 +6236,15 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - One warm-up render answers both the PCB page and its deferred payload, each reserved and retained under its own cache identity
 - A deferred-payload warm reserves the SAME cache entry the editor's `?derived=1` fetch looks up, so the browser joins that render instead of starting a second one
 - Background PCB deferred-payload warms are capped, so a burst of saves cannot put the heaviest read-only render on every core
+- Background warm concurrency is bounded at half the host's cores so a startup sweep cannot occupy the machine it is warming
+- A parallel warm sweep processes every design exactly once regardless of how many workers it runs
+- Concurrent design scans coalesce onto one evaluation per design instead of each starting its own
+- Two different designs never block each other in the scan's single-flight latch
+- A background warm sweep pauses for in-flight requests and still proceeds when the server stays busy
+- A process that never marked a start reports no boot elapsed, so CLI commands carry no server timing
+- A process-start mark taken before the I/O capability is installed is refused rather than recorded, so the startup line reports real elapsed milliseconds or none at all
+- The design scan lists every design under src whatever order its parallel fill ran in, and concurrent scans agree
+- The startup board sweep skips designs with no saved layout and dispatches the heaviest remaining board first, so the last one to start does not set the wall
 - A warm-up reservation drops a retained PCB entry an edit has already invalidated, so the warm that edit triggered actually runs instead of deferring to the dead entry
 - The PDN impedance sweep rides its own response behind the after-paint payload, marked by a null `ac`, so the board's own diagnostics never wait on the editor's most expensive analysis
 - The PDN sweep is keyed apart from the after-paint payload, so the viewer's two fetches never collide on one cache entry
@@ -6257,6 +6267,13 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The PCB-describe endpoint reuses a dependency-validated facts document and invalidates it when the design or its sidecars change
 - The PCB-describe endpoint caches only its allow-listed query modes and bypasses fresh-solve and sub-scoped requests
 - The PCB-describe cache refuses a body whose dependency set stamps nothing
+- The read-only response caches reuse a dependency-validated body and invalidate it when the design changes
+- The read-only response caches key their allow-listed query parameters and bypass every other one
+- The read-only response caches refuse a body that stamps no file, that is over budget, or that a live edit raced
+- The read-only response caches are bounded by entry count and by retained bytes, evicting a keyed variant before the plain answer
+- A read-only response cache with no allocator retains nothing, so a handler test computes every answer fresh
+- A cached ERC answer is byte-identical to the freshly computed one it was retained from, and an edit to the design retires it
+- A cached thermal answer is byte-identical to the freshly computed one it was retained from, and an edit to the design retires it
 - The layout-status reader reuses a parsed layouts sidecar until that file's mtime or size changes
 - The fab-readiness gate reuses caller-supplied net connectivity instead of recomputing it
 - The navigation bar routes home through the Netlisp brand and carries no separate Designs tab

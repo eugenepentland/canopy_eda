@@ -144,7 +144,7 @@ pub const shards: []const []const []const u8 = &.{
         "serve.mcp_schematic_view.test.",
         "serve.pour_json.test.",
         "serve.request_log.test.",
-        "layout_score.test.",
+        "layout_save_layers.test.",
     },
     // shard 2
     &.{
@@ -278,6 +278,7 @@ pub const shards: []const []const []const u8 = &.{
         "serve.pcb_derived.test.",
         "serve.progress_cache.test.",
         "serve.describe_cache.test.",
+        "serve.read_cache.test.",
         "serve.route_plan.test.",
         "serve.route_session_api.test.",
         "serve.route_vision.test.",
@@ -364,6 +365,7 @@ pub const shards: []const []const []const u8 = &.{
         "serve.sync.test.",
         "serve.ward_auth.test.",
         "serve.warmup.test.",
+        "serve.warm_sched.test.",
     },
     // shard 5
     &.{

@@ -68,6 +68,7 @@ const drc_sweep = @import("drc_sweep.zig");
 const thermal_cache = @import("serve/thermal_cache.zig");
 const progress_cache = @import("serve/progress_cache.zig");
 const describe_cache = @import("serve/describe_cache.zig");
+const read_cache = @import("serve/read_cache.zig");
 const warmup = @import("serve/warmup.zig");
 const pcb_fence = @import("serve/pcb_fence.zig");
 const pcb_step_export = @import("serve/pcb_step_export.zig");
@@ -93,6 +94,7 @@ const design_diff = @import("serve/design_diff.zig");
 const datasheet_attach = @import("serve/datasheet_attach.zig");
 const rate_limiter = @import("serve/rate_limiter.zig");
 const request_log = @import("serve/request_log.zig");
+const warm_sched = @import("serve/warm_sched.zig");
 
 // ── Global live state ──────────────────────────────────────────────────
 
@@ -307,6 +309,47 @@ pub fn pcbJobSnapshot(alloc: std.mem.Allocator, name: []const u8) ?PcbJobView {
 // every route handler through `Server.state`. Persisted stores keep their
 // exact on-disk formats and paths; only the in-memory containers moved.
 
+/// The finished responses of the read-only design surfaces, each retained
+/// against the read-set that produced it (see `serve/read_cache.zig`). They are
+/// grouped because they share one implementation and one reason to exist: every
+/// one of these handlers opens with a FRESH `Evaluator.evalFile`, which on this
+/// project's largest board is about four seconds and is charged upstream of
+/// every per-analysis cache underneath them — so nothing but retaining the
+/// finished response can skip it.
+pub const ReadCaches = struct {
+    /// `GET /api/erc/:name` — the electrical-rule violations document.
+    erc: read_cache.Store(read_cache.erc) = .{},
+    /// `GET /api/thermal/:name` — the thermal facts JSON.
+    thermal_facts: read_cache.Store(read_cache.thermal_facts) = .{},
+    /// `GET /thermal/:name` — the rendered thermal review page.
+    thermal_page: read_cache.Store(read_cache.thermal_page) = .{},
+    /// `GET /api/schematic-pdf/:name` — the composed review document.
+    schematic_pdf: read_cache.Store(read_cache.schematic_pdf) = .{},
+    /// `GET /api/kicad-sch/:name` — the exported schematic archive.
+    kicad_sch: read_cache.Store(read_cache.kicad_sch) = .{},
+
+    /// Give every store the server's long-lived allocator, which is the switch
+    /// that turns retention on.
+    pub fn init(allocator: std.mem.Allocator) ReadCaches {
+        return .{
+            .erc = .{ .allocator = allocator },
+            .thermal_facts = .{ .allocator = allocator },
+            .thermal_page = .{ .allocator = allocator },
+            .schematic_pdf = .{ .allocator = allocator },
+            .kicad_sch = .{ .allocator = allocator },
+        };
+    }
+
+    /// Release every retained body. Safe on a default-constructed value.
+    pub fn deinit(self: *ReadCaches) void {
+        self.erc.deinit();
+        self.thermal_facts.deinit();
+        self.thermal_page.deinit();
+        self.schematic_pdf.deinit();
+        self.kicad_sch.deinit();
+    }
+};
+
 /// Everything the server keeps only because recomputing it would be wasted
 /// work. Every entry here is DERIVED — validated against the design files it
 /// came from and safe to drop at any moment — which is what separates it from
@@ -327,6 +370,9 @@ pub const Caches = struct {
     /// endpoint agent loops and review tooling re-request most — and the one
     /// that used to pay its full 6.5 s solve + reporting DRC every single call.
     describe_json: describe_cache.Store = .{},
+    /// The read-only design surfaces whose whole cost is the FRESH design
+    /// evaluation each of their handlers starts with.
+    reads: ReadCaches = .{},
     /// Memoised gzip streams, keyed on the response body itself (see
     /// `gzip_cache`). Held here rather than module-scope so two server
     /// instances stay independent.
@@ -342,6 +388,7 @@ pub const Caches = struct {
             .thermal_solves = .{ .allocator = allocator },
             .progress_json = .{ .allocator = allocator },
             .describe_json = .{ .allocator = allocator },
+            .reads = .init(allocator),
             .gzip = .{ .allocator = allocator },
         };
     }
@@ -353,6 +400,7 @@ pub const Caches = struct {
         self.thermal_solves.deinit();
         self.progress_json.deinit();
         self.describe_json.deinit();
+        self.reads.deinit();
         self.gzip.deinit();
     }
 };
@@ -436,6 +484,13 @@ pub const Server = struct {
         req: *httpz.Request,
         res: *httpz.Response,
     ) !void {
+        // Count the request for as long as it is being served. Background
+        // sweeps (`serve/warmup.zig`) read this and pause briefly before
+        // claiming their next board, so a reader who arrives during a
+        // post-deploy warm competes with fewer of its workers. Cheap enough to
+        // sit on every request: one relaxed atomic each way.
+        warm_sched.enterInteractive();
+        defer warm_sched.leaveInteractive();
         // A request is a snapshot: revalidate the `src/` basename index once
         // here so the handlers below resolve however many design siblings they
         // need without re-walking the tree per lookup (`paths.beginRequest`).
@@ -986,6 +1041,13 @@ pub fn serve(
         defer allocator.free(log_path);
         log.progress("interaction log: {s}", .{log_path});
     }
+    // The one number that says whether a deploy's restart was a gap: everything
+    // above this line runs BEFORE the socket answers — the interaction log's
+    // own open included — and everything below it runs behind an
+    // already-listening server. Kept as its own line (rather than folded into
+    // the banner above) because the banner's exact text is what deploy logs and
+    // humans grep for.
+    log.progress("startup: listening after {d:.2} ms — design scan and page warm run behind the socket", .{warm_sched.sinceStartMs()});
     // Fill the read-path caches in the background so the first visitor after a
     // deploy is not the one who pays for them. Overlaps with listen(). A
     // private performance harness needs an idle machine more than corpus-wide

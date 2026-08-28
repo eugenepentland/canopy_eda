@@ -111,6 +111,22 @@ pub fn thermalPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
     const name_raw = req.param("name") orelse return plainError(res, http_not_found, err_not_found);
     const name = try urlcodec.decodeAlloc(alloc, name_raw);
 
+    // Read the live version BEFORE computing, so a design edit that lands
+    // mid-request is treated as a miss next time instead of being baked in.
+    const live_version = serve_root.getLiveVersion(name);
+    var miss_version: ?u32 = null;
+    if (ctx.state.caches.reads.thermal_page.serve(.{
+        .scratch = alloc,
+        .req = req,
+        .res = res,
+        .name = name,
+        .live_version = live_version,
+    }, &miss_version)) {
+        res.content_type = .HTML;
+        res.header("Cache-Control", "no-store");
+        return;
+    }
+
     var eval = Evaluator.init(alloc, ctx.project_dir);
     defer eval.deinit();
     const nb = mcp_tools.evalNamedBlock(alloc, ctx.project_dir, name, &eval) catch |e| switch (e) {
@@ -172,6 +188,19 @@ pub fn thermalPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
     res.content_type = .HTML;
     res.header("Cache-Control", "no-store");
     res.body = body;
+    // Captured here rather than in a `defer`: `eval` is still alive (its own
+    // `defer deinit` runs after this statement), and the retention has to see
+    // the read-set, not the other way round.
+    ctx.state.caches.reads.thermal_page.store(.{
+        .scratch = alloc,
+        .req = req,
+        .res = res,
+        .name = name,
+        .body = body,
+        .files = thermal_api.captureDeps(alloc, &eval, ctx.project_dir, name),
+        .live_version = miss_version,
+        .current_version = serve_root.getLiveVersion(name),
+    });
 }
 
 /// Render the default thermal review without a published server cache. The

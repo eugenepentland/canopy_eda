@@ -378,7 +378,7 @@ test {
     _ = @import("serve/layout_match.zig");
     _ = @import("serve/layout_merge_command.zig");
     _ = @import("serve/layout_sidecar_json.zig");
-    _ = @import("layout_score.zig");
+    _ = @import("layout_save_layers.zig");
     _ = @import("layout_sidecar_store.zig");
     _ = @import("serve/library.zig");
     _ = @import("serve/library_3d.zig");
@@ -414,6 +414,7 @@ test {
     _ = @import("serve/pcb_page_cache.zig");
     _ = @import("serve/progress_cache.zig");
     _ = @import("serve/describe_cache.zig");
+    _ = @import("serve/read_cache.zig");
     _ = @import("serve/pcb_part_json.zig");
     _ = @import("serve/pcb_progress.zig");
     _ = @import("serve/pcb_rules_json.zig");
@@ -450,6 +451,7 @@ test {
     _ = @import("serve/upload_datasheet.zig");
     _ = @import("serve/vfs.zig");
     _ = @import("serve/warmup.zig");
+    _ = @import("serve/warm_sched.zig");
     _ = @import("serve/ward_auth.zig");
     _ = @import("sexpr/ast.zig");
     _ = @import("sexpr/parser.zig");
