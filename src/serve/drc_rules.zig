@@ -311,17 +311,96 @@ pub fn checkFilteredZonesTally(
     in: CopperCheck,
 ) ApiReport {
     const report = checkFilteredZonesReport(alloc, project_dir, name, in);
-    const tally = if (report.net_report.connectivity.len == in.placement.nets.len)
-        fab_readiness.summarizeConnectivity(alloc, report.net_report.connectivity) catch null
-    else
-        fab_readiness.routableTally(alloc, in.placement, .{
-            .tracks = in.routed.tracks,
-            .arcs = in.routed.arcs,
-            .rf_paths = in.routed.rf_port_outcomes,
-            .vias = in.routed.vias,
-            .zones = in.zones,
-        }) catch null;
-    return .{ .violations = report.violations, .tally = tally };
+    return .{ .violations = report.violations, .tally = tallyOf(alloc, in, report.net_report) };
+}
+
+/// The scoped-recheck seam, re-exported for the serve layer.
+///
+/// `Prior` is what an accepted board state leaves behind, `Delta` is the copper
+/// edit two states differ by, and `checkScopedZonesTally` is the pair of them
+/// turned into the same answer `/api/pcb-drc` has always returned. Every one of
+/// them is DECLARED in `placement/drc_compose.zig` — the scoping reads placement
+/// types only — and named here so the serve layer keeps one door into the DRC
+/// engine (`guardian.toml`'s `serve-placement-internals`).
+pub const Prior = drc_compose.Prior;
+pub const Delta = drc_compose.Delta;
+pub const FillHold = drc_compose.FillHold;
+pub const FillKey = drc_compose.FillKey;
+pub const diffCopper = drc_compose.diffCopper;
+pub const EdgeField = drc_compose.EdgeField;
+pub const sharedEdgeField = drc_compose.sharedEdgeField;
+pub const isDeferredKind = drc_compose.isDeferredKind;
+pub const PourAudit = drc_compose.PourAudit;
+pub const PourOwner = drc_compose.PourOwner;
+
+/// `ApiReport` plus what the next scoped recheck of this design needs: the
+/// snapshot to measure against, the borrow its rasters live in, and whether the
+/// scoped path was actually taken (a refusal is answered by a full check, never
+/// by a partial one).
+pub const ScopedApiReport = struct {
+    violations: []const drc.Violation = &.{},
+    tally: ?fab_readiness.Tally = null,
+    prior: Prior = .{},
+    held: FillHold = .{},
+    scoped: bool = false,
+    /// How many of the board's fills this pass had to pour, of how many.
+    reuse: drc_compose.FillReuse = .{},
+};
+
+/// Re-check a board that differs from `prior`'s by `delta` alone, applying the
+/// design's severity overrides exactly as the full seam does.
+pub fn checkScopedZonesTally(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    in: CopperCheck,
+    prior: Prior,
+    delta: Delta,
+) ScopedApiReport {
+    return applyScoped(alloc, project_dir, name, in, drc_compose.checkScopedReport(alloc, in, prior, delta));
+}
+
+/// A FULL check that also records what a following scoped recheck needs. Its
+/// findings are `checkFilteredZonesTally`'s findings; it keeps the evidence.
+pub fn checkPrimingZonesTally(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    in: CopperCheck,
+) ScopedApiReport {
+    return applyScoped(alloc, project_dir, name, in, drc_compose.checkPrimingReport(alloc, in));
+}
+
+fn applyScoped(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    in: CopperCheck,
+    raw: drc_compose.ScopedReport,
+) ScopedApiReport {
+    if (!raw.scoped) return .{};
+    return .{
+        .violations = apply(alloc, load(alloc, project_dir, name), raw.violations),
+        .tally = tallyOf(alloc, in, raw.net_report),
+        .prior = raw.prior,
+        .held = raw.held,
+        .scoped = true,
+        .reuse = raw.reuse,
+    };
+}
+
+/// The response tally, from the connectivity this pass already built when it is
+/// complete and from a standalone routable count when it is not.
+fn tallyOf(alloc: std.mem.Allocator, in: CopperCheck, report: net_open.Report) ?fab_readiness.Tally {
+    if (report.connectivity.len == in.placement.nets.len)
+        return fab_readiness.summarizeConnectivity(alloc, report.connectivity) catch null;
+    return fab_readiness.routableTally(alloc, in.placement, .{
+        .tracks = in.routed.tracks,
+        .arcs = in.routed.arcs,
+        .rf_paths = in.routed.rf_port_outcomes,
+        .vias = in.routed.vias,
+        .zones = in.zones,
+    }) catch null;
 }
 
 /// The copper context one connectivity/geometry DRC pass measures, and the
@@ -665,10 +744,15 @@ test "viewer JS wires the WASM DRC worker, server reconciliation, and the overri
     try std.testing.expect(std.mem.indexOf(u8, worker, "drc_check") != null);
     try std.testing.expect(std.mem.indexOf(u8, worker, "drc_output_ptr") != null);
     // The server fallback derives its response tally from the same net-open
-    // graph and retains the standalone fail-open path.
+    // graph and retains the standalone fail-open path. The editor's reconcile
+    // reaches that tally through the retained session (`drc_reconcile`), which
+    // takes the scoped seam or the full one and answers the same shape either
+    // way — so the endpoint asserts the SEAM, not one of its two spellings.
     const page = @embedFile("pcb_layout_page.zig");
     const rules = @embedFile("drc_rules.zig");
-    try std.testing.expect(std.mem.indexOf(u8, page, "checkFilteredZonesTally") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page, "lease.reconcile(ctx.allocator, .{") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rules, "fn checkFilteredZonesTally") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rules, "fn checkScopedZonesTally") != null);
     try std.testing.expect(std.mem.indexOf(u8, rules, "summarizeConnectivity(alloc, report.net_report.connectivity)") != null);
     try std.testing.expect(std.mem.indexOf(u8, rules, "fab_readiness.routableTally(alloc, in.placement") != null);
 }
@@ -920,7 +1004,7 @@ test "pour refill takes the fills-only API path and shares its edge raster" {
     try std.testing.expect(std.mem.indexOf(u8, js, "if(!opts.deferred)scheduleServerReconcile();done(fresh);") != null);
 
     const fast = std.mem.indexOf(u8, page, "if (queryFlag(req, \"pours_only\")) {") orelse return error.TestExpectedEqual;
-    const full_drc = std.mem.indexOf(u8, page[fast..], "const report = drc_rules.checkFilteredZonesTally") orelse return error.TestExpectedEqual;
+    const full_drc = std.mem.indexOf(u8, page[fast..], "const outcome = resolved.lease.reconcile(") orelse return error.TestExpectedEqual;
     const branch = page[fast .. fast + full_drc];
     try std.testing.expect(std.mem.indexOf(u8, branch, "pour.sharedEdgeField(req.arena, placement)") != null);
     try std.testing.expect(std.mem.count(u8, branch, "base_edge);") == 3);

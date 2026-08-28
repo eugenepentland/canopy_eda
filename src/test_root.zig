@@ -58,6 +58,7 @@ test {
     _ = @import("diagram/render.zig");
     _ = @import("docgen.zig");
     _ = @import("drc_dump.zig");
+    _ = @import("drc_reconcile.zig");
     _ = @import("drc_session.zig");
     _ = @import("emit.zig");
     _ = @import("erc.zig");
@@ -207,6 +208,7 @@ test {
     _ = @import("placement/drc_match.zig");
     _ = @import("placement/drc_perimeter_keepout.zig");
     _ = @import("placement/drc_pour.zig");
+    _ = @import("placement/drc_scope.zig");
     _ = @import("placement/edge_rotation.zig");
     _ = @import("placement/escalate_retry.zig");
     _ = @import("placement/escape_assign.zig");
