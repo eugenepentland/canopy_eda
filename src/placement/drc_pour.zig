@@ -71,11 +71,28 @@ const Surface = struct {
     outer: []const Point,
     holes: []const []const Point,
     box: Box,
+    /// One box per hole, measured with `box` when the surface was built.
+    ///
+    /// Every question asked of a surface is asked once per copper feature on
+    /// the board — a barracuda-class pour is judged against fifteen hundred
+    /// lands and nine hundred traces — and each of those used to re-measure the
+    /// ring it was rejecting. The boxes only PRUNE: a probe outside a ring's
+    /// bounds cannot meet the ring, so the pair it drops is one the exact test
+    /// below would have dropped anyway. Empty means "not measured", which is
+    /// what a hand-built fixture surface gets, and every reader falls back to
+    /// measuring on the spot.
+    hole_boxes: []const Box = &.{},
     /// Flat index of the fill this component was traced from — planes first (net
     /// major, carrying layer minor), then the user zones in posted order. It is
     /// what lets a scoped recheck say "this finding came from a fill the edit
     /// could not have moved".
     fill: usize = 0,
+
+    /// This hole's bounds, measured now when the surface did not bring them.
+    fn holeBox(self: Surface, index: usize) ?Box {
+        if (index < self.hole_boxes.len) return self.hole_boxes[index];
+        return Box.of(self.holes[index]);
+    }
 };
 
 const FillTarget = struct {
@@ -233,6 +250,8 @@ const Audit = struct {
                 if (cached == null) try self.appendInvalid(target.net, target.layer, .{ 0, 0 });
                 continue;
             };
+            const hole_boxes = try self.arena.alloc(Box, holes.len);
+            for (holes, hole_boxes) |hole, *hole_box| hole_box.* = Box.of(hole) orelse box;
             const candidate = Surface{
                 .net = target.net,
                 .net_index = namedNetIndex(self.placement, self.identity, target.net),
@@ -242,6 +261,7 @@ const Audit = struct {
                 .outer = outer,
                 .holes = holes,
                 .box = box,
+                .hole_boxes = hole_boxes,
                 .fill = index,
             };
             verdict.* = if (cached) |prior|
@@ -501,10 +521,16 @@ fn surfaceIssue(surface: Surface) ?Point {
 /// the only remaining overlap case. `pointInSolid` subtracts holes.
 fn solidContact(a: Surface, b: Surface) ?Point {
     if (!a.box.touches(b.box)) return null;
-    if (ringsContact(a.outer, b.outer)) |at| return at;
-    for (a.holes) |hole| if (ringsContact(hole, b.outer)) |at| return at;
-    for (b.holes) |hole| if (ringsContact(a.outer, hole)) |at| return at;
-    for (a.holes) |ah| for (b.holes) |bh| if (ringsContact(ah, bh)) |at| return at;
+    if (ringsContactBoxed(a.outer, a.box, b.outer, b.box)) |at| return at;
+    for (a.holes, 0..) |hole, i| if (ringsContactBoxed(hole, a.holeBox(i) orelse continue, b.outer, b.box)) |at| return at;
+    for (b.holes, 0..) |hole, i| if (ringsContactBoxed(a.outer, a.box, hole, b.holeBox(i) orelse continue)) |at| return at;
+    for (a.holes, 0..) |ah, i| {
+        const ab = a.holeBox(i) orelse continue;
+        for (b.holes, 0..) |bh, j| {
+            const bb = b.holeBox(j) orelse continue;
+            if (ringsContactBoxed(ah, ab, bh, bb)) |at| return at;
+        }
+    }
     if (pointInSolid(a, b.outer[0])) return b.outer[0];
     if (pointInSolid(b, a.outer[0])) return a.outer[0];
     return null;
@@ -512,8 +538,19 @@ fn solidContact(a: Surface, b: Surface) ?Point {
 
 fn pointInSolid(surface: Surface, point: Point) bool {
     if (!pointInRing(surface.outer, point)) return false;
-    for (surface.holes) |hole| if (pointInRing(hole, point)) return false;
+    for (surface.holes, 0..) |hole, i| {
+        const hole_box = surface.holeBox(i) orelse continue;
+        if (!boxHolds(hole_box, point)) continue;
+        if (pointInRing(hole, point)) return false;
+    }
     return true;
+}
+
+/// Could this point lie in that box? Generous by `ring_eps` on every side, so
+/// the reject can only ever be pessimistic.
+fn boxHolds(box: Box, point: Point) bool {
+    return point[0] >= box.minx - ring_eps and point[0] <= box.maxx + ring_eps and
+        point[1] >= box.miny - ring_eps and point[1] <= box.maxy + ring_eps;
 }
 
 /// Audit final pour solids against every independently emitted copper feature.
@@ -708,11 +745,15 @@ fn padOnSurface(rules: optimizer.BoardRules, part: optimizer.Part, thru: bool, s
 }
 
 fn solidCapsuleContact(surface: Surface, a: Point, b: Point, radius: f64) ?Point {
-    if (!surface.box.touches(segmentBox(a, b).grown(radius))) return null;
+    const capsule = segmentBox(a, b).grown(radius);
+    if (!surface.box.touches(capsule)) return null;
     if (pointInSolid(surface, a)) return a;
     if (pointInSolid(surface, b)) return b;
     if (ringCapsuleContact(surface.outer, a, b, radius)) |at| return at;
-    for (surface.holes) |hole| if (ringCapsuleContact(hole, a, b, radius)) |at| return at;
+    for (surface.holes, 0..) |hole, i| {
+        if (!capsule.touches(surface.holeBox(i) orelse continue)) continue;
+        if (ringCapsuleContact(hole, a, b, radius)) |at| return at;
+    }
     return null;
 }
 
@@ -752,8 +793,10 @@ fn solidPadContact(surface: Surface, shape: pad_shape.Shape) ?Point {
 fn solidRingContact(surface: Surface, ring: []const Point) ?Point {
     const box = Box.of(ring) orelse return null;
     if (!surface.box.touches(box)) return null;
-    if (ringsContact(surface.outer, ring)) |at| return at;
-    for (surface.holes) |hole| if (ringsContact(hole, ring)) |at| return at;
+    if (ringsContactBoxed(surface.outer, surface.box, ring, box)) |at| return at;
+    for (surface.holes, 0..) |hole, i| {
+        if (ringsContactBoxed(hole, surface.holeBox(i) orelse continue, ring, box)) |at| return at;
+    }
     if (pointInSolid(surface, ring[0])) return ring[0];
     if (pointInRing(ring, surface.outer[0])) return surface.outer[0];
     return null;
@@ -869,6 +912,12 @@ fn ringIssue(poly: []const Point) ?Point {
 fn ringsContact(a: []const Point, b: []const Point) ?Point {
     const a_box = Box.of(a) orelse return null;
     const b_box = Box.of(b) orelse return null;
+    return ringsContactBoxed(a, a_box, b, b_box);
+}
+
+/// `ringsContact` for a caller that already holds both rings' bounds. Same
+/// answer; it simply does not re-measure a ring to reject it.
+fn ringsContactBoxed(a: []const Point, a_box: Box, b: []const Point, b_box: Box) ?Point {
     if (!a_box.touches(b_box)) return null;
     for (a, 0..) |p, i| {
         const q = a[(i + 1) % a.len];
@@ -1494,4 +1543,65 @@ test "retained pad shapes and the scoped pad sweep leave the pour audit's findin
     }, try padShapes(arena, placement));
     try testing.expectEqual(built.violations.len, rejudged.violations.len);
     try testing.expectEqual(built.violations[0].x, rejudged.violations[0].x);
+}
+
+/// The same rings, once with their bounds measured and once without — the two
+/// readings every contact test below has to agree about.
+fn boxedAndBare(arena: std.mem.Allocator, net: []const u8, outer: []const Point, holes: []const []const Point) !struct { Surface, Surface } {
+    const bare = testSurface(net, outer, holes);
+    var boxed = bare;
+    const boxes = try arena.alloc(Box, holes.len);
+    for (holes, boxes) |hole, *box| box.* = Box.of(hole).?;
+    boxed.hole_boxes = boxes;
+    return .{ bare, boxed };
+}
+
+// spec: placement/drc - a surface's measured ring bounds only skip contact tests that could not have found anything, so a boxed surface answers every contact question exactly as an unmeasured one
+test "measured surface bounds answer every contact question the unmeasured rings do" {
+    const testing = std.testing;
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    const outer = [_]Point{ .{ 0, 0 }, .{ 10, 0 }, .{ 10, 10 }, .{ 0, 10 } };
+    const near_hole = [_]Point{ .{ 2, 2 }, .{ 4, 2 }, .{ 4, 4 }, .{ 2, 4 } };
+    const far_hole = [_]Point{ .{ 6, 6 }, .{ 8, 6 }, .{ 8, 8 }, .{ 6, 8 } };
+    const holes = [_][]const Point{ &near_hole, &far_hole };
+    const pair = try boxedAndBare(arena, "GND", &outer, &holes);
+    const bare = pair[0];
+    const boxed = pair[1];
+
+    // Probes chosen so each hole is the deciding one for some of them: inside
+    // the near hole, inside the far hole, in the copper between them, and
+    // outside the solid entirely.
+    const probes = [_]Point{ .{ 3, 3 }, .{ 7, 7 }, .{ 5, 5 }, .{ -1, 5 }, .{ 2, 2 }, .{ 8, 8 } };
+    for (probes) |p| {
+        try testing.expectEqual(pointInSolid(bare, p), pointInSolid(boxed, p));
+        try testing.expectEqual(
+            solidCapsuleContact(bare, p, .{ p[0] + 0.5, p[1] }, 0.1) != null,
+            solidCapsuleContact(boxed, p, .{ p[0] + 0.5, p[1] }, 0.1) != null,
+        );
+    }
+    // The fixture is only evidence if the holes actually decide something.
+    try testing.expect(!pointInSolid(boxed, .{ 3, 3 }));
+    try testing.expect(!pointInSolid(boxed, .{ 7, 7 }));
+    try testing.expect(pointInSolid(boxed, .{ 5, 5 }));
+
+    // A land straddling a hole's rim, and one wholly inside it: the first is
+    // contact, the second is not, and a bounds reject that got either wrong
+    // would show here.
+    const on_rim = [_]Point{ .{ 3.5, 3.5 }, .{ 4.5, 3.5 }, .{ 4.5, 4.5 }, .{ 3.5, 4.5 } };
+    const in_hole = [_]Point{ .{ 6.5, 6.5 }, .{ 7.5, 6.5 }, .{ 7.5, 7.5 }, .{ 6.5, 7.5 } };
+    try testing.expectEqual(solidRingContact(bare, &on_rim) != null, solidRingContact(boxed, &on_rim) != null);
+    try testing.expectEqual(solidRingContact(bare, &in_hole) != null, solidRingContact(boxed, &in_hole) != null);
+    try testing.expect(solidRingContact(boxed, &on_rim) != null);
+    try testing.expect(solidRingContact(boxed, &in_hole) == null);
+
+    // …and two solids, each with holes, judged against one another.
+    const other_outer = [_]Point{ .{ 3, 3 }, .{ 13, 3 }, .{ 13, 13 }, .{ 3, 13 } };
+    const other_hole = [_]Point{ .{ 5, 5 }, .{ 9, 5 }, .{ 9, 9 }, .{ 5, 9 } };
+    const other_holes = [_][]const Point{&other_hole};
+    const other = try boxedAndBare(arena, "V_5V", &other_outer, &other_holes);
+    try testing.expectEqual(solidContact(bare, other[0]) != null, solidContact(boxed, other[1]) != null);
+    try testing.expect(solidContact(boxed, other[1]) != null);
 }

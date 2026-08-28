@@ -3024,6 +3024,7 @@ question each caller answers honestly through `Zone.component`.
 - a bottleneck cross-section is judged by the same verdict whether it is found at a trace end, in mid-span, or refused as a flank graze
 - a scoped connectivity pass carries the nets one copper edit could not reach and reports exactly what a cold pass over the same board reports
 - a pour audit given the placement's retained pad shapes reports exactly what one that builds them per pass reports, and a scoped audit whose fills all held builds none at all
+- a surface's measured ring bounds only skip contact tests that could not have found anything, so a boxed surface answers every contact question exactly as an unmeasured one
 - the net-open island chain's bounding-box estimate never exceeds the exact nearest approach, so a skipped pair could not have beaten the frontier
 - an authored ground-via maximum warns on an SMD ground pad until a same-net plane via falls within the budget
 - an optional NC or input-strap land assigned to ground is excluded from the ground-via maximum because its same-package real ground return owns the required plane connection
