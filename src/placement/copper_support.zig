@@ -188,20 +188,17 @@ pub fn assemble(
     vias: []const copper_topology.Via,
     zones: []const Zone,
 ) std.mem.Allocator.Error!Support {
-    const via_uses = try arena.alloc(usize, vias.len);
     const via_poured = try arena.alloc(u64, vias.len);
     const via_planes = try arena.alloc(u8, vias.len);
-    var live: std.ArrayList(copper_topology.Via) = .empty;
     for (vias, 0..) |via, via_i| {
         via_poured[via_i] = pourLayers(placement, via.net, zones, via.at[0], via.at[1]);
         via_planes[via_i] = planeContacts(placement, via.net, zones, via.at[0], via.at[1]);
-        via_uses[via_i] = copper_topology.viaUseCount(
-            terminals,
-            tracks,
-            via,
-            via_poured[via_i],
-            via_planes[via_i],
-        );
+    }
+    // One shared copper-locality index over the traces and lands, rather than
+    // one whole-board sweep per barrel; the per-barrel count is unchanged.
+    const via_uses = try copper_topology.viaUseCounts(arena, terminals, tracks, vias, via_poured, via_planes);
+    var live: std.ArrayList(copper_topology.Via) = .empty;
+    for (vias, 0..) |via, via_i| {
         if (via_uses[via_i] >= 2) try live.append(arena, via);
     }
     const endpoint_pours = try arena.alloc([2]u64, tracks.len);
@@ -258,13 +255,22 @@ test "assemble credits a pour under a barrel and the endpoints standing in it" {
     const placement = onePlacement(&nets);
     const tracks = [_]copper_topology.Track{
         .{ .a = .{ 0, 0 }, .b = .{ 1, 0 }, .layer = 0, .width = 0.2, .net = 0 },
+        // A second run and barrel well away from the first: the shared copper
+        // index has to keep each barrel's layer count to its OWN copper.
+        .{ .a = .{ 6, 0 }, .b = .{ 7, 0 }, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .a = .{ 7, 0 }, .b = .{ 7, 1 }, .layer = 1, .width = 0.2, .net = 0 },
     };
-    const vias = [_]copper_topology.Via{.{ .at = .{ 1, 0 }, .dia = 0.4, .net = 0 }};
+    const vias = [_]copper_topology.Via{
+        .{ .at = .{ 1, 0 }, .dia = 0.4, .net = 0 },
+        .{ .at = .{ 7, 0 }, .dia = 0.4, .net = 0 },
+    };
 
-    // With no zone the barrel reaches one layer and supports nothing.
+    // With no zone the first barrel reaches one layer and supports nothing,
+    // while the distant one is a real layer jump.
     const bare = try assemble(arena, placement, &.{}, &tracks, &vias, &.{});
     try testing.expectEqual(@as(usize, 1), bare.via_uses[0]);
-    try testing.expectEqual(@as(usize, 0), bare.branch.live_vias.len);
+    try testing.expectEqual(@as(usize, 2), bare.via_uses[1]);
+    try testing.expectEqual(@as(usize, 1), bare.branch.live_vias.len);
     try testing.expectEqual(@as(u64, 0), bare.branch.pour_layers[0][1]);
 
     // An inner filled region of the same net makes it a real destination, and
@@ -278,7 +284,7 @@ test "assemble credits a pour under a barrel and the endpoints standing in it" {
     // Two DISTINCT copper layers: the routed face (which the layer-0 pour
     // shares with the track) and the inner fill the barrel drops into.
     try testing.expectEqual(@as(usize, 2), filled.via_uses[0]);
-    try testing.expectEqual(@as(usize, 1), filled.branch.live_vias.len);
+    try testing.expectEqual(@as(usize, 2), filled.branch.live_vias.len);
     try testing.expectEqual(@as(u64, 88), filled.branch.pour_components[0][0]);
     // The leaf spelling of a hierarchical net name resolves to the same fill.
     const hierarchical = [_]optimizer.FlatNet{.{ .name = "amp1/V_3V3A", .pins = &.{} }};

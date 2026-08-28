@@ -1594,9 +1594,11 @@ src/placement/copper_topology.zig::analyzeRedundancy | fn analyzeRedundancy( are
 src/placement/copper_topology.zig::analyzeViaRedundancy | fn analyzeViaRedundancy( arena: std.mem.Allocator, terminals: []const Terminal, tracks: []const Track, vias: []const Via, support: ViaSupport, ) std.mem.Allocator.Error!RedundancyAnalysis
 src/placement/copper_topology.zig::implicitJoins | fn implicitJoins( arena: std.mem.Allocator, tracks: []const Track, ) std.mem.Allocator.Error![]const ImplicitJoin
 src/placement/copper_topology.zig::looseEnd | fn looseEnd( terminals: []const Terminal, tracks: []const Track, vias: []const Via, track_i: usize, pour_layers: [2]u64, ) ?[2]f64
+src/placement/copper_topology.zig::looseEnds | fn looseEnds( arena: std.mem.Allocator, terminals: []const Terminal, tracks: []const Track, vias: []const Via, pour_layers: []const [2]u64, ) std.mem.Allocator.Error![]const ?[2]f64
 src/placement/copper_topology.zig::redundantSections | fn redundantSections( arena: std.mem.Allocator, terminals: []const Terminal, tracks: []const Track, support: BranchSupport, ) std.mem.Allocator.Error![]const bool
 src/placement/copper_topology.zig::repairableJoins | fn repairableJoins( arena: std.mem.Allocator, tracks: []const Track, ) std.mem.Allocator.Error![]const ImplicitJoin
 src/placement/copper_topology.zig::viaUseCount | fn viaUseCount( terminals: []const Terminal, tracks: []const Track, via: Via, pour_layers: u64, plane_contacts: u8, ) usize
+src/placement/copper_topology.zig::viaUseCounts | fn viaUseCounts( arena: std.mem.Allocator, terminals: []const Terminal, tracks: []const Track, vias: []const Via, pour_layers: []const u64, plane_contacts: []const u8, ) std.mem.Allocator.Error![]const usize
 src/placement/courtyard_close.zig::Rect struct_
 src/placement/courtyard_close.zig::Settings struct_
 src/placement/courtyard_close.zig::close | fn close( comptime Part: type, parts: []Part, settings: Settings, comptime courtyardFn: *const fn (*const Part) Rect, comptime overlapsFn: *const fn ([]const Part, *const Part) bool, ) void
