@@ -4819,8 +4819,10 @@ function persistLayoutNow(nm,verb,automatic){var msg=document.getElementById("pc
     var pmap={};parts.forEach(function(p){pmap[p.ref]={x:p.x,y:p.y,rot:p.rot,origin:p.origin||"",side:p.side,locked:p.locked};});
     var Ls=PCB.layouts||(PCB.layouts=[]),found=null,foundAt=-1;
     for(var i=0;i<Ls.length;i++)if(Ls[i].name===nm){found=Ls[i];foundAt=i;break;}
-    var sb=currentScore;
-    var savedScore=sb?{hpwl:sb.hpwl||0,loop:sb.loop_raw||sb.loop||0,caps:sb.caps||0,objective:sb.objective||0}:null;
+    // The server stores a save unscored, so the row is score-less here too —
+    // stamping the live board's score in would show a number that vanishes on
+    // the next reload. `updateLayoutRowScore` renders null as "—".
+    var savedScore=null;
     if(found){found.parts=pmap;found.kind="manual";found.score=savedScore;found.routes=routes;found.outline=PCB.outline||null;found.fabrication_layers=cloneFabricationLayers();found.heatsink=cloneHeatsink();found.texts=texts;found.dimensions=cloneDimensions();found.ts=Math.floor(Date.now()/1000);
      if(foundAt>0){Ls.splice(foundAt,1);Ls.unshift(found);}}
     else Ls.unshift({name:nm,kind:"manual",parts:pmap,score:savedScore,routes:routes,outline:PCB.outline||null,fabrication_layers:cloneFabricationLayers(),heatsink:cloneHeatsink(),texts:texts,dimensions:cloneDimensions(),ts:Math.floor(Date.now()/1000)});

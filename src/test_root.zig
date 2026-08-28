@@ -377,7 +377,7 @@ test {
     _ = @import("serve/layout_match.zig");
     _ = @import("serve/layout_merge_command.zig");
     _ = @import("serve/layout_sidecar_json.zig");
-    _ = @import("layout_score.zig");
+    _ = @import("layout_save_layers.zig");
     _ = @import("layout_sidecar_store.zig");
     _ = @import("serve/library.zig");
     _ = @import("serve/library_3d.zig");

@@ -1360,7 +1360,7 @@ src/kicad_sym/reader.zig::Unit struct_
 src/kicad_sym/reader.zig::max_coord value
 src/kicad_sym/reader.zig::parseLibrary | fn parseLibrary(arena: std.mem.Allocator, source: []const u8) ReadError![]const Symbol
 src/kicad_sym/reader.zig::per_mm value
-src/layout_score.zig::scoreSavedLayout | fn scoreSavedLayout( ctx: *Server, req: *httpz.Request, name: []const u8, sub: ?[]const u8, parts: []const page.PartPose, stages: ?*request_log.StageTimer, ) page.HandlerError!sidecar_json.SavedLayoutCheck
+src/layout_save_layers.zig::savedLayoutLayers | fn savedLayoutLayers( ctx: *Server, arena: std.mem.Allocator, name: []const u8, sub: ?[]const u8, stages: ?*request_log.StageTimer, ) ?optimizer.BoardRules
 src/layout_sidecar_store.zig::CacheSlot struct_
 src/layout_sidecar_store.zig::SidecarDoc struct_
 src/layout_sidecar_store.zig::SnapshotChoice struct_
@@ -3676,7 +3676,6 @@ src/serve/layout_match.zig::layoutMatchApi | fn layoutMatchApi(ctx: *Server, req
 src/serve/layout_match.zig::layoutMatchJson | fn layoutMatchJson(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) pcb_layout_page.PngError![]u8
 src/serve/layout_match.zig::matchInfos | fn matchInfos(alloc: std.mem.Allocator, rough: []const PInfo, starred: []const PInfo) std.mem.Allocator.Error!MatchResult
 src/serve/layout_merge_command.zig::run | fn run(allocator: std.mem.Allocator, argv: []const []const u8) RunError!void
-src/serve/layout_sidecar_json.zig::SavedLayoutCheck struct_
 src/serve/layout_sidecar_json.zig::jsonFlag | fn jsonFlag(v: ?std.json.Value) bool
 src/serve/layout_sidecar_json.zig::jsonInt | fn jsonInt(v: ?std.json.Value) i64
 src/serve/layout_sidecar_json.zig::jsonNum | fn jsonNum(v: ?std.json.Value) f64

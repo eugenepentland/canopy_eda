@@ -144,7 +144,7 @@ pub const shards: []const []const []const u8 = &.{
         "serve.mcp_schematic_view.test.",
         "serve.pour_json.test.",
         "serve.request_log.test.",
-        "layout_score.test.",
+        "layout_save_layers.test.",
     },
     // shard 2
     &.{

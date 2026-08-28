@@ -20,7 +20,7 @@ const clock = @import("../infra/clock.zig");
 const serve_root = @import("../serve.zig");
 const modules = @import("modules.zig");
 const pcb = @import("pcb_layout_page.zig");
-const layout_score = @import("../layout_score.zig");
+const layout_save_layers = @import("../layout_save_layers.zig");
 const sidecar_json = @import("layout_sidecar_json.zig");
 const saved_zone = @import("saved_zone.zig");
 
@@ -375,19 +375,23 @@ pub fn saveSubcircuitLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Re
     };
     const net_map = try captureNetMap(req.arena, sub.name, parent_placement, target_placement);
     const routes = try captureRoutes(req.arena, sub.name, pcb.parseSavedRoutes(req.arena, root.object.get("routes")), captured.transform, &net_map);
+    // Layer rules only — like the editor's save this stores the capture without
+    // scoring it. Nothing downstream reads a module layout's score: the stamp
+    // picks its snapshot by origin-key coverage and the ★ (`chooseModuleSnapshot`),
+    // and `/api/pcb-rescore` declines sub circuits outright.
     // No stage sink: this path is the module-layout capture, not the editor's
     // autosave, so it has no `evt:"stages"` line to contribute phases to.
-    const checked = try layout_score.scoreSavedLayout(ctx, req, target_name, target_slug, captured.parts, null);
+    const layers = layout_save_layers.savedLayoutLayers(ctx, req.arena, target_name, target_slug, null);
     const entry = pcb.SavedLayout{
         .name = layout_name,
         .kind = pcb.kind_manual,
         .ts = clock.timestamp(),
-        .score = checked.score,
+        .score = null,
         .parts = captured.parts,
         .routes = routes,
         .default = existing.len == 0,
     };
-    if (sidecar_json.saveRejection(req.arena, checked.layers, entry)) |message| {
+    if (sidecar_json.saveRejection(req.arena, layers, entry)) |message| {
         res.status = 400;
         res.body = message;
         return;
