@@ -8,10 +8,23 @@
 //! own ISO stamp so the visible cover date and the metadata date can never
 //! disagree.
 //!
-//! Read-only: nothing here writes to the project dir. No cache either — a
-//! compose is well under a second on the boards in this repo, and caching would
-//! have to be invalidated on the same read-set the schematic page tracks for a
-//! result the browser hands straight to a download.
+//! Read-only: nothing here writes to the project dir.
+//!
+//! Composed bytes ARE retained (`serve/read_cache.zig`), keyed by design and
+//! `?theme=`. The old rationale here — "a compose is well under a second" —
+//! was measured before the largest board in this project existed: `barracuda`
+//! costs 4.2 s cold and 4.4 s on the identical repeat, essentially all of it
+//! the fresh design evaluation this handler opens with. The invalidation
+//! signal it claimed not to have is the ordinary one every other read surface
+//! uses: the evaluator read-set the compose itself walked, plus the placement
+//! sidecars the cooling ladder on the power page is solved from, plus the
+//! design's live-edit version.
+//!
+//! A served cached document keeps the `/CreationDate` (and the matching visible
+//! cover date) of the compose that produced it, so a re-download of an
+//! unchanged design is stamped when its content was actually generated rather
+//! than when it was fetched. That is the honest reading of the field, and it is
+//! what makes two downloads of one unchanged design byte-identical.
 
 const std = @import("std");
 const build_id = @import("../build_id.zig");
@@ -28,6 +41,7 @@ const pdf_mod = @import("../pdf.zig");
 const svg2pdf = @import("../svg2pdf.zig");
 const mcp_tools = @import("mcp_tools.zig");
 const notes = @import("notes.zig");
+const page_cache = @import("page_cache.zig");
 const thermal_api = @import("thermal_api.zig");
 const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
@@ -97,16 +111,25 @@ fn openNoteCount(allocator: std.mem.Allocator, project_dir: []const u8, name: []
 /// read-only CLI tools and the export-review package use. The caller owns the
 /// returned slice; on any failure the error is returned for the handler to map
 /// onto a status.
+/// `deps`, when non-null, receives the file dependency set of this compose —
+/// the evaluator read-set plus the placement sidecars the embedded cooling
+/// ladder is solved from — so the caller can retain the document against it.
+/// Captured before the deferred `deinit` below and before any early error
+/// return, so a cache never keys on a half-built read-set.
 fn composeFor(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
     theme: svg2pdf.Theme,
+    deps: ?*?page_cache.FileSet,
 ) ![]u8 {
     // `eval` must outlive the block it returns (the block borrows its arena),
     // so it lives for the whole compose.
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
+    defer if (deps) |out| {
+        out.* = thermal_api.captureDeps(allocator, &eval, project_dir, name);
+    };
     const nb = try mcp_tools.evalNamedBlock(allocator, project_dir, name, &eval);
 
     // Merge the persisted BOM identities so the PDF's parts agree with the
@@ -177,7 +200,28 @@ pub fn schematicPdfApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
     };
     const name = try urlDecodeAlloc(ctx.allocator, name_raw);
 
-    const bytes = composeFor(ctx.allocator, ctx.project_dir, name, themeFromQuery(req)) catch |e| {
+    // Read the live version BEFORE composing, so a design edit that lands
+    // mid-request is treated as a miss next time instead of being baked in.
+    const live_version = serve_root.getLiveVersion(name);
+    var miss_version: ?u32 = null;
+    if (ctx.state.caches.reads.schematic_pdf.serve(.{
+        .scratch = ctx.allocator,
+        .req = req,
+        .res = res,
+        .name = name,
+        .live_version = live_version,
+    }, &miss_version)) {
+        // The structural self-check (`pdf.validate`) is NOT re-run: these exact
+        // bytes passed it at compose time and nothing has touched them since.
+        res.content_type = .PDF;
+        res.header(header_content_disposition, try dispositionFor(ctx.allocator, name));
+        res.header(header_cors_allow_origin, "*");
+        return;
+    }
+
+    var deps: ?page_cache.FileSet = null;
+    const bytes = composeFor(ctx.allocator, ctx.project_dir, name, themeFromQuery(req), &deps) catch |e| {
+        if (deps) |d| d.deinit();
         switch (e) {
             error.FileNotFound, error.NotADesign, error.InvalidName => {
                 res.status = http_not_found;
@@ -206,15 +250,27 @@ pub fn schematicPdfApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
         return;
     };
 
-    const disposition = try std.fmt.allocPrint(
-        ctx.allocator,
-        "attachment; filename=\"{s}.pdf\"",
-        .{name},
-    );
     res.content_type = .PDF;
-    res.header(header_content_disposition, disposition);
+    res.header(header_content_disposition, try dispositionFor(ctx.allocator, name));
     res.header(header_cors_allow_origin, "*");
     res.body = bytes;
+    ctx.state.caches.reads.schematic_pdf.store(.{
+        .scratch = ctx.allocator,
+        .req = req,
+        .res = res,
+        .name = name,
+        .body = bytes,
+        .files = deps,
+        .live_version = miss_version,
+        .current_version = serve_root.getLiveVersion(name),
+    });
+}
+
+/// `Content-Disposition` naming the download `<name>.pdf`. Built per request
+/// (it embeds the design name) whether the document was composed or recalled,
+/// so a cached answer is framed exactly as a fresh one.
+fn dispositionFor(allocator: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error![]const u8 {
+    return std.fmt.allocPrint(allocator, "attachment; filename=\"{s}.pdf\"", .{name});
 }
 
 /// Percent-decode a path param onto `allocator`. httpz passes `:params`

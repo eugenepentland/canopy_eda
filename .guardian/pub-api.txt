@@ -1348,6 +1348,7 @@ src/kicad_sym/library.zig::Library struct_
 src/kicad_sym/library.zig::find | fn find(self: Library, name: []const u8) ?reader.Symbol
 src/kicad_sym/library.zig::load | fn load(arena: std.mem.Allocator, project_dir: []const u8) std.mem.Allocator.Error!Library
 src/kicad_sym/library.zig::sources_subdir value
+src/kicad_sym/library.zig::suffix value
 src/kicad_sym/reader.zig::Fill enum_
 src/kicad_sym/reader.zig::Graphic struct_
 src/kicad_sym/reader.zig::Kind enum_
@@ -3395,15 +3396,18 @@ src/serve.zig::JobOutcome enum_
 src/serve.zig::PcbJob struct_
 src/serve.zig::PcbJobBegin struct_
 src/serve.zig::PcbJobView struct_
+src/serve.zig::ReadCaches struct_
 src/serve.zig::ServeError value
 src/serve.zig::ServeOptions struct_
 src/serve.zig::Server struct_
 src/serve.zig::ServerState struct_
 src/serve.zig::bumpLiveVersion | fn bumpLiveVersion(name: []const u8) u32
 src/serve.zig::deinit | fn deinit(self: *Caches) void
+src/serve.zig::deinit | fn deinit(self: *ReadCaches) void
 src/serve.zig::dispatch | fn dispatch( self: *Server, action: *const fn (*Server, *httpz.Request, *httpz.Response) anyerror!void, req: *httpz.Request, res: *httpz.Response, ) !void
 src/serve.zig::getLiveVersion | fn getLiveVersion(name: []const u8) u32
 src/serve.zig::init | fn init(allocator: std.mem.Allocator) Caches
+src/serve.zig::init | fn init(allocator: std.mem.Allocator) ReadCaches
 src/serve.zig::liveLayoutFor | fn liveLayoutFor(alloc: std.mem.Allocator, name: []const u8) ?[]const u8
 src/serve.zig::live_version_mutex value
 src/serve.zig::live_versions value
@@ -3648,9 +3652,9 @@ src/serve/history.zig::snapshot | fn snapshot( allocator: std.mem.Allocator, pro
 src/serve/history.zig::snapshotLayouts | fn snapshotLayouts( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, sidecar_path: []const u8, ) HistoryError!?[]const u8
 src/serve/kicad_sch_export.zig::ExportZipError value
 src/serve/kicad_sch_export.zig::HandlerError value
-src/serve/kicad_sch_export.zig::exportFor | fn exportFor( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: export_kicad_sch.Options, ) ExportZipError!export_kicad_sch.Output
+src/serve/kicad_sch_export.zig::exportFor | fn exportFor( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: export_kicad_sch.Options, deps: ?*?page_cache.FileSet, ) ExportZipError!export_kicad_sch.Output
 src/serve/kicad_sch_export.zig::kicadSchApi | fn kicadSchApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/kicad_sch_export.zig::zipFor | fn zipFor( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: export_kicad_sch.Options, ) ExportZipError![]const u8
+src/serve/kicad_sch_export.zig::zipFor | fn zipFor( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: export_kicad_sch.Options, deps: ?*?page_cache.FileSet, ) ExportZipError![]const u8
 src/serve/layer_table_json.zig::write | fn write(w: *std.Io.Writer, rules: optimizer.BoardRules) std.Io.Writer.Error!void
 src/serve/layout_backfill.zig::Options struct_
 src/serve/layout_backfill.zig::Report struct_
@@ -4080,6 +4084,13 @@ src/serve/rate_limiter.zig::cse value
 src/serve/rate_limiter.zig::digikey value
 src/serve/rate_limiter.zig::init | fn init(min_interval_ms: u64, max_in_flight: u32) RateLimiter
 src/serve/rate_limiter.zig::release | fn release(self: *RateLimiter) void
+src/serve/read_cache.zig::Config struct_
+src/serve/read_cache.zig::Store | fn Store(comptime cfg: Config) type
+src/serve/read_cache.zig::erc value
+src/serve/read_cache.zig::kicad_sch value
+src/serve/read_cache.zig::schematic_pdf value
+src/serve/read_cache.zig::thermal_facts value
+src/serve/read_cache.zig::thermal_page value
 src/serve/rebuild_design.zig::AssertionFailure struct_
 src/serve/rebuild_design.zig::BuildReport struct_
 src/serve/rebuild_design.zig::BuildWarning struct_
@@ -4290,13 +4301,14 @@ src/serve/thermal_api.zig::HandlerError value
 src/serve/thermal_api.zig::Solved struct_
 src/serve/thermal_api.zig::ThermalError value
 src/serve/thermal_api.zig::boardOf | fn boardOf(solved: pcb_layout_page.SolvedRequest, layout: ?[]const u8, bt: thermal.BoardThermal) Board
+src/serve/thermal_api.zig::captureDeps | fn captureDeps( scratch: std.mem.Allocator, eval: *const Evaluator, project_dir: []const u8, name: []const u8, ) ?page_cache.FileSet
 src/serve/thermal_api.zig::mcpDescribeThermal | fn mcpDescribeThermal( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) std.mem.Allocator.Error!bool
 src/serve/thermal_api.zig::scenariosFor | fn scenariosFor( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, bt: thermal.BoardThermal, ambient_c: f64, layout: ?[]const u8, ) std.mem.Allocator.Error!thermal_scenarios.Answer
 src/serve/thermal_api.zig::solveFor | fn solveFor( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, bt: thermal.BoardThermal, layout: ?[]const u8, ) std.mem.Allocator.Error!Solved
 src/serve/thermal_api.zig::solveOver | fn solveOver( alloc: std.mem.Allocator, eval: *const Evaluator, project_dir: []const u8, name: []const u8, bt: thermal.BoardThermal, board: Board, ) std.mem.Allocator.Error![]const thermal_scenarios.ScenarioResult
 src/serve/thermal_api.zig::thermalApi | fn thermalApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/thermal_api.zig::thermalFieldApi | fn thermalFieldApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/thermal_api.zig::thermalJson | fn thermalJson( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, ambient_c: ?f64, layout: ?[]const u8, ) ThermalError![]const u8
+src/serve/thermal_api.zig::thermalJson | fn thermalJson( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, ambient_c: ?f64, layout: ?[]const u8, deps: ?*?page_cache.FileSet, ) ThermalError![]const u8
 src/serve/thermal_cache.zig::Key struct_
 src/serve/thermal_cache.zig::Store struct_
 src/serve/thermal_cache.zig::active | fn active() ?*Store
