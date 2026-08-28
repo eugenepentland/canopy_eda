@@ -3018,6 +3018,7 @@ Public functions: check, checkTopology, checkWithZones, checkWithPreparedCopper,
 - the component-edge check measures the courtyard's own corners, so a chamfer clears a rotated part its bounding box would flag
 - a component's perimeter-band inset is measured at its rotated courtyard corners
 - flags two drilled holes whose walls sit closer than the hole-to-hole rule
+- the grid-culled hole-to-hole and courtyard sweeps report exactly the brute all-pairs findings
 - flags two vias of the SAME net crowded closer than the via-to-via rule, which the foreign-net clearance rule exempts
 - the same-net via spacing rule defaults to the pair's resolved clearance, and an authored (design-rules (via-to-via ...)) overrides it
 - flags a drilled hole below the minimum drill diameter (pads and vias); SMD pads exempt
@@ -6509,6 +6510,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Loading a new board replaces the WASM DRC session so probes answer against the current state
 - A WASM DRC probe with no loaded session returns the no-session sentinel
 - Per-design DRC rule overrides retag or drop violations before every reporting surface
+- The per-design DRC rule sidecar is parsed once per file state, and an edited or deleted sidecar is honoured on the very next check
 - The DRC policy table advertises the same built-in severity the checker emits, differential-pair rules included
 - A DRC check for copper outside any project design still layers the net-open connectivity rule onto the built-in severities
 - The /pcb-layout Properties dock hosts the inspector with segment editing and DRC rule settings
