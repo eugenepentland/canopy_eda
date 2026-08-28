@@ -64,6 +64,7 @@ const lane_reserve = @import("lane_reserve.zig");
 const rf_shadow = @import("rf_shadow.zig");
 const pad_exit = @import("pad_exit.zig");
 const route_cleanup = @import("route_cleanup.zig");
+const power_route_width = @import("power_route_width.zig");
 const gap_policy = @import("gap_policy.zig");
 const route_timeline = @import("route_timeline.zig");
 const return_path = @import("return_path.zig");
@@ -2279,6 +2280,16 @@ pub const CleanupBoard = struct {
     /// Width currently resolved for `beginNet`'s net.
     pub fn trackWidth(self: CleanupBoard) f64 {
         return self.ctx.params.track_width;
+    }
+
+    /// Electrical width the adaptive power finisher should approach for this
+    /// net. Null means the net keeps exact routed geometry (ordinary signal,
+    /// controlled impedance/differential pair, or a plane/pour fanout).
+    pub fn adaptivePowerWidth(self: CleanupBoard, net_i: usize) ?f64 {
+        var authored = self.ctx.base.track_width;
+        if (net_i < self.placement.rules.net.len and self.placement.rules.net[net_i].width > 0)
+            authored = self.placement.rules.net[net_i].width;
+        return power_route_width.adaptiveTargetWidth(self.ctx.zones, self.placement, net_i, authored);
     }
 
     /// Clearance-probe handle for the current net and live copper.
@@ -4875,13 +4886,18 @@ pub fn setNetParams(ctx: *Ctx, placement: optimizer.Placement, net_i: usize) voi
     }
     if (net_i < placement.nets.len) {
         const name = placement.nets[net_i].name;
-        // A carried rail's routed copper is only a local pad-to-sheet fanout;
-        // its actual branch current is proven after routing. Applying the full
-        // rail envelope there made every short QFN supply stub as wide as the
-        // common trunk and can make a physically sound pour impossible to
-        // escape. An unpoured rail has no sheet to share current, so every
-        // generated route reserves the conservative whole-rail width.
-        p.track_width = effectivePowerTrackWidth(ctx.zones, placement, net_i, p.track_width);
+        // Current capacity is an electrical target, not a routing primitive.
+        // Search an ordinary fabrication-legal centreline for an unpoured
+        // rail, then let the final adaptive-width pass grow it as far as exact
+        // clearance permits. This keeps a wide trunk routable through QFN
+        // lands and other unavoidable necks without weakening copper DRC.
+        // Plane/pour fanouts retain their authored branch geometry because
+        // their local-current proof is tied to the carrying sheet.
+        const authored_width = p.track_width;
+        if (power_route_width.adaptiveTargetWidth(ctx.zones, placement, net_i, authored_width) != null)
+            p.track_width = @max(placement.rules.design.min_width, @min(authored_width, ctx.base.track_width))
+        else
+            p.track_width = power_route_width.exactWidth(ctx.zones, placement, net_i, authored_width);
         if (placement.rules.powerViaDrillForNet(name)) |required_drill| {
             p.via_drill = @max(p.via_drill, required_drill);
             p.via_dia = @max(p.via_dia, p.via_drill + 2.0 * placement.rules.design.min_annular);
@@ -4907,24 +4923,6 @@ pub fn setNetParams(ctx: *Ctx, placement: optimizer.Placement, net_i: usize) voi
     // single choke point every net change already goes through — is what makes
     // arming it on the primary route safe (`armStaticBlock`); the bump is O(1).
     ctx.static_block.reset();
-}
-
-fn powerPourCarried(zones: []const route_policy.ExistingZone, placement: optimizer.Placement, net_i: usize) bool {
-    if (net_i >= placement.nets.len) return false;
-    if (netHasPlane(placement, placement.nets[net_i].name)) return true;
-    const net: i32 = @intCast(net_i);
-    for (zones) |zone| if (zone.copper and zone.net == net) return true;
-    return false;
-}
-
-fn effectivePowerTrackWidth(
-    zones: []const route_policy.ExistingZone,
-    placement: optimizer.Placement,
-    net_i: usize,
-    authored: f64,
-) f64 {
-    if (powerPourCarried(zones, placement, net_i) or net_i >= placement.nets.len) return if (net_i < placement.nets.len and net_i < placement.rules.net.len and placement.rules.net[net_i].pad_neck.power_branch_width > 0) @max(placement.rules.net[net_i].pad_neck.power_branch_width, placement.rules.design.min_width) else authored;
-    return @max(authored, placement.rules.powerWidthForNet(placement.nets[net_i].name) orelse 0);
 }
 
 /// True when `layer` belongs to `mask`; an empty mask means unrestricted.
@@ -14041,8 +14039,8 @@ test "net-class rules drive per-net track width" {
     try testing.expect(saw_wide and saw_default);
 }
 
-// spec: placement/power-routing - an unpoured rail reserves its whole maximum-current width while a pour-backed rail leaves short fanouts to the post-route branch-current proof
-test "power routing widens trunks without widening pour fanouts" {
+// spec: placement/power-routing - adaptive routing retains the full maximum-current target while a pour-backed rail keeps its short authored fanout width
+test "power routing keeps the electrical target without widening pour fanouts" {
     const foils = [_]@import("impedance.zig").Foil{
         .{ .index = 1, .thickness_mm = 0.035 },
         .{ .index = 2, .thickness_mm = 0.0152 },
@@ -14071,11 +14069,11 @@ test "power routing widens trunks without widening pour fanouts" {
         .generated = true,
         .rules = .{ .physical = .{ .stack = .{ .layers = 4, .foils = &foils }, .rails = &rails } },
     };
-    const trunk = effectivePowerTrackWidth(&.{}, placement, 0, 0.2532);
+    const trunk = power_route_width.exactWidth(&.{}, placement, 0, 0.2532);
     try testing.expect(trunk > 0.40 and trunk < 0.42);
     const poly = [_][2]f64{ .{ 0, 0 }, .{ 10, 0 }, .{ 10, 10 }, .{ 0, 10 } };
     const zones = [_]route_policy.ExistingZone{.{ .polygon = &poly, .layer = 2, .net = 0 }};
-    try testing.expectEqual(@as(f64, 0.2532), effectivePowerTrackWidth(&zones, placement, 0, 0.2532));
+    try testing.expectEqual(@as(f64, 0.2532), power_route_width.exactWidth(&zones, placement, 0, 0.2532));
 }
 
 // spec: placement/router - LoopRouter measures a real per-leg trace length that detours foreign pads

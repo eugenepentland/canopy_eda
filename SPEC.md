@@ -906,6 +906,7 @@ area).
 
 - a board whose nets all resolve to one pitch rasters identically under either lattice mode
 - the narrowest mode rasters a mixed-class board at the finest class's own pitch, not the widest
+- a wide current-rated power class keeps the ordinary centreline lattice because its electrical width is added after routing
 - the narrowest lattice is never coarser than the widest-class lattice it replaces
 - a finer class pitch that would overflow the node budget falls back to the finest lattice that fits, never to an overflow
 - a board that cannot afford even its widest-class lattice keeps that lattice rather than being refined into a deeper overflow
@@ -3188,12 +3189,17 @@ Public functions: analyze, classifyNetName, isInductor
 
 Public functions: capacityForArea, traceCapacityA, requiredTraceWidthMm,
 viaCapacityA, requiredViaDrillMm, routingCurrentA, powerWidthForNet,
-powerViaDrillForNet, routedTrackRequiredWidths, routedTrackRequiredWidthsPrepared
+powerViaDrillForNet, routedTrackRequiredWidths, routedTrackRequiredWidthsPrepared,
+adaptiveTargetWidth, exactWidth
 
 Power routing derives conservative pre-route copper geometry from the rail's
 declared load envelope, the actual stack foil, the 10 °C IPC-2221 screening
 target, and the board's via-plating rule. Shared traces without plane or pour
-support reserve the full rail load. For a rail carried by an explicitly
+support first route a fabrication-legal centreline, then grow toward the full
+rail width wherever exact copper clearance permits; pad-sized and constrained
+necks receive automatic tapers, and one worst-neck warning reports any
+remaining electrical shortfall without turning connectivity into a DRC error.
+For a rail carried by an explicitly
 declared plane or copper zone, the fill reserves the full-current neck while
 short pad fanouts may opt into `(power-branch-width MM)` and are judged after
 routing at the local branch current solved by the power-integrity analysis.
@@ -3206,7 +3212,9 @@ is enlarged only as far as the derived drill and annular-ring rules require.
 - a maximum load is the pre-route envelope, with typical used only when no maximum was authored
 - a power pour's effective minimum neck is raised above the board fabrication floor by the rail maximum and actual stack foil
 - board rules derive the worst-layer trace width and one-barrel drill from maximum rail load
-- an unpoured rail reserves its whole maximum-current width while a pour-backed rail leaves short fanouts to the post-route branch-current proof
+- an unpoured current-rated rail routes through a QFN-sized land at fabrication width, then grows to its electrical target with an automatic pad taper
+- adaptive routing retains the full maximum-current target while a pour-backed rail keeps its short authored fanout width
+- an adaptive rail reports one warning at its worst electrical shortfall while the fabrication minimum remains a hard error
 - a solved plane-aware rail exposes an index-aligned required width for each local-current branch, while an incomplete opted-in rail screens every segment at the whole-rail current
 - a rail with no annotated load routes for its declared source capacity, so a standalone regulator page sizes copper from its own output rating
 - declared loads outrank source capacity, so a rail routes for what the board draws rather than what its supply could deliver
@@ -3521,8 +3529,8 @@ completely with every surface calling the board clean. It is measured by
 - an escape fan the corridor seats in full is not flagged
 - an escape fan every net of which an authored assignment already covers is not flagged
 - a port net with no corridor out of the block and no room for a via is flagged, and only when the caller supplies the port mask
-- a corridor is measured at the router's effective width, so an unpoured rail's IPC-2221 envelope widens the demand and a plane-carried rail keeps its authored width
-- a net class wider than the rail envelope keeps its authored width, so the two rules compose as a maximum rather than one overriding the other
+- a corridor is measured at the adaptive router's narrow search width, while a plane-carried rail keeps its authored fanout width
+- an adaptive rail's authored wide class remains an electrical target and does not widen the static route corridor
 - completeness-waiver: empty inputs (a placement with no parts is unit-tested to return an empty finding slice)
 - completeness-waiver: large inputs (the pad table is built once and every scan is bounded by the pad count; findings are bucketed and ref lists capped, so a dense board yields a bounded report)
 - completeness-waiver: unauthorized access (a pure in-memory analysis of an already-resolved placement; access control lives at the serve boundary)
@@ -3622,7 +3630,7 @@ this block has nothing to prove.
 - the port mask names exactly the block's declared port nets, matching a flattened net on its leaf
 - detecting on the same placement twice reports the same findings
 - an empty port mask leaves every net unexamined
-- a port net's corridor is probed at the router's effective width, so an unpoured rail is measured at its IPC-2221 envelope and a plane-carried one is not
+- a port corridor uses the adaptive power router's narrow search width while a plane-carried fanout keeps its authored width
 - completeness-waiver: empty inputs (an empty port mask and a placement with no parts both return an empty finding slice before any lattice is built)
 - completeness-waiver: large inputs (the lattice is refused above a cell cap and the flood stops at the first escape; the pad index bounds every cell test to its own bucket)
 - completeness-waiver: unauthorized access (a pure in-memory analysis of an already-resolved placement; access control lives at the serve boundary)

@@ -2467,6 +2467,8 @@ src/placement/power_integrity.zig::routedTrackRequiredWidths | fn routedTrackReq
 src/placement/power_integrity.zig::routedTrackRequiredWidthsPrepared | fn routedTrackRequiredWidthsPrepared( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, plane_fills: []const pour.NetFills, zones: []const pour.UserZone, zone_fills: []const pour.Fill, ) std.mem.Allocator.Error![]const ?f64
 src/placement/power_integrity.zig::temperature_rise_c value
 src/placement/power_integrity.zig::via_plating_mm value
+src/placement/power_route_width.zig::adaptiveTargetWidth | fn adaptiveTargetWidth( zones: []const route_policy.ExistingZone, placement: optimizer.Placement, net_i: usize, authored: f64, ) ?f64
+src/placement/power_route_width.zig::exactWidth | fn exactWidth( zones: []const route_policy.ExistingZone, placement: optimizer.Placement, net_i: usize, authored: f64, ) f64
 src/placement/progress.zig::Inputs struct_
 src/placement/progress.zig::Item struct_
 src/placement/progress.zig::NetConn struct_
@@ -2769,6 +2771,7 @@ src/placement/router.zig::Track value
 src/placement/router.zig::Via value
 src/placement/router.zig::VisionInput struct_
 src/placement/router.zig::VisionMask struct_
+src/placement/router.zig::adaptivePowerWidth | fn adaptivePowerWidth(self: CleanupBoard, net_i: usize) ?f64
 src/placement/router.zig::addGroundPadStitches | fn addGroundPadStitches( arena: std.mem.Allocator, placement: optimizer.Placement, routed: RouteResult, ) std.mem.Allocator.Error!RouteResult
 src/placement/router.zig::arena | fn arena(self: CleanupBoard) std.mem.Allocator
 src/placement/router.zig::beginNet | fn beginNet(self: CleanupBoard, net_i: usize) void
