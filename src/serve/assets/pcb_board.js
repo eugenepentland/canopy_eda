@@ -7402,11 +7402,45 @@ function drawAdaptiveClearWidth(a,b,layer,net,floor,cap,skip){cap=Math.max(floor
  if(segViolation(a.x,a.y,b.x,b.y,layer,net,floor/2,skip))return floor;
  var lo=floor,hi=cap;for(var i=0;i<11;i++){var mid=(lo+hi)/2;
   if(segViolation(a.x,a.y,b.x,b.y,layer,net,mid/2,skip))hi=mid;else lo=mid;}return lo;}
-function drawAdaptivePowerRun(tracks,start,end,floor,target){var sampled=drawAdaptiveStations(tracks,start,end),ss=sampled.stations,total=sampled.total,
+// The fast editor probe intentionally stays cheap, but on a dense board it can
+// both overestimate a pad box and miss a filled custom zone. Ask the exact WASM
+// gate about ONE local interval at a time: a clean interval keeps growing even
+// when a different interval on the same gesture is constrained.
+function drawAdaptiveProbePath(a,b,layer,net,width){return {net:net,l:layer,track_ids:[],samples:[[a.x,a.y,width],[b.x,b.y,width]]};}
+function drawAdaptiveExactClearWidth(a,b,layer,net,floor,cap,skip,blocker){cap=Math.max(floor,cap);
+ if(!drcGate.ready||drcGate.failed)return drawAdaptiveClearWidth(a,b,layer,net,floor,cap,skip);
+ function blocked(w){var path=drawAdaptiveProbePath(a,b,layer,net,w);return blocker?blocker(path):drcGateBlocks([],[],[path]);}
+ if(cap<=floor+1e-9||!blocked(cap))return cap;if(drcGate.failed||blocked(floor))return floor;
+ var lo=floor,hi=cap;for(var i=0;i<7;i++){var mid=(lo+hi)/2;
+  if(blocked(mid))hi=mid;else lo=mid;if(drcGate.failed)return floor;}return lo;}
+function drawAdaptiveRefinedClearWidth(a,b,layer,net,floor,cap,skip){var quick=drawAdaptiveClearWidth(a,b,layer,net,floor,cap,skip);
+ return quick>=cap-1e-7?cap:drawAdaptiveExactClearWidth(a,b,layer,net,floor,cap,skip);}
+// Scope exact probes to one interval. Nearby intervals commonly select the
+// same unchanged copper/parts, so cache that baseline while still keeping the
+// candidate side small; the expensive whole-board model is never rebuilt.
+function drawAdaptiveIntervalBlocker(a,b,layer,net,cap,baseCache){if(!drcGate.ready||drcGate.failed)return null;
+ var probe=drawAdaptiveProbePath(a,b,layer,net,cap),bt=PCB.tracks||[],bv=PCB.vias||[],brf=PCB.rf_paths||[],
+  scope=drcGateScope(bt,bv,bt,bv,brf,brf.concat([probe]));if(!scope)return null;
+ var key=scope.bt.map(function(o){return bt.indexOf(o);}).join(",")+"|"+
+  scope.bv.map(function(o){return bv.indexOf(o);}).join(",")+"|"+
+  scope.parts.map(function(o){return P.indexOf(o);}).join(",")+"|"+
+  scope.brf.map(function(o){return brf.indexOf(o);}).join(","),baseCounts=baseCache[key];
+ if(!baseCounts)try{baseCounts=drcBlockCounts(drcGateRun(scope.bt,scope.bv,scope.parts,scope.brf));baseCache[key]=baseCounts;}
+ catch(e){drcGate.failed=true;return null;}
+ return function(path){var after;try{after=drcBlockCounts(drcGateRun(scope.at,scope.av,scope.parts,scope.brf.concat([path])));}
+  catch(e){drcGate.failed=true;return true;}for(var id in after)if(after[id]>(baseCounts[id]||0))return true;return false;};}
+function drawAdaptiveRunClearer(tracks,target,refine){var baseCache={};
+ return function(a,b,layer,net,floor,cap,skip){if(refine){var quick=drawAdaptiveClearWidth(a,b,layer,net,floor,cap,skip);if(quick>=cap-1e-7)return cap;}
+  var blocker=drawAdaptiveIntervalBlocker(a,b,layer,net,cap,baseCache);
+  return drawAdaptiveExactClearWidth(a,b,layer,net,floor,cap,skip,blocker);};}
+function drawAdaptivePowerRun(tracks,start,end,floor,target,clearWidth){var sampled=drawAdaptiveStations(tracks,start,end),ss=sampled.stations,total=sampled.total,
  layer=tracks[0].l||0,net=tracks[0].net||"",cells=[],i;
  if(ss.length<2||!(total>1e-10))return {tracks:tracks.slice(),paths:[],maxWidth:floor};
+ clearWidth=clearWidth||drawAdaptiveClearWidth;
+ if(clearWidth===drawAdaptiveExactClearWidth)clearWidth=drawAdaptiveRunClearer(tracks,target,false);
+ else if(clearWidth===drawAdaptiveRefinedClearWidth)clearWidth=drawAdaptiveRunClearer(tracks,target,true);
  for(i=1;i<ss.length;i++){var a=ss[i-1],b=ss[i],profileCap=Math.max(drawProfileWidth(a.s,total,start,end,target),drawProfileWidth(b.s,total,start,end,target));
-  cells.push(drawAdaptiveClearWidth(a,b,layer,net,floor,profileCap,tracks));}
+  cells.push(clearWidth(a,b,layer,net,floor,profileCap,tracks));}
  for(i=0;i<ss.length;i++){var cellCap=i===0?cells[0]:(i===ss.length-1?cells[cells.length-1]:Math.min(cells[i-1],cells[i])),
   profile=drawProfileWidth(ss[i].s,total,start,end,target);ss[i].w=Math.max(floor,Math.min(profile,cellCap));}
  // |Δ full width| <= 2·centreline distance gives 45-degree copper flanks.
@@ -7417,17 +7451,22 @@ function drawAdaptivePowerRun(tracks,start,end,floor,target){var sampled=drawAda
  if(!widened)return {tracks:tracks.slice(),paths:[],maxWidth:floor};
  var path={net:net,l:layer,track_ids:tracks.map(trackIdEnsure),samples:ss.map(function(s){return [s.x,s.y,s.w];})};
  return {tracks:shaped,paths:[path],maxWidth:maxWidth};}
-function drawAdaptivePowerPlan(tracks,startPad,endPad,floor,target){var old=(tracks||[]).slice();
+function drawAdaptivePowerPlan(tracks,startPad,endPad,floor,target,clearWidth){var old=(tracks||[]).slice();
  if(!old.length||!(target>floor+1e-9))return {tracks:old,paths:[],maxWidth:floor,power:true};
  var runs=[],at=0;while(at<old.length){var stop=at+1,l=old[at].l||0;while(stop<old.length&&(old[stop].l||0)===l)stop++;
   runs.push(old.slice(at,stop));at=stop;}
  var shaped=[],paths=[],maxWidth=floor;runs.forEach(function(run,ri){var first=run[0],last=run[run.length-1],sr=null,er=null;
   if(ri===0&&startPad)sr=drawTaperProfile(first.net,startPad,target,drawPathPadLaunch(run,startPad,true)||drawTrackEndDirection(first,true));
   if(ri===runs.length-1&&endPad)er=drawTaperProfile(last.net,endPad,target,drawPathPadLaunch(run,endPad,false)||drawTrackEndDirection(last,false));
-  var planned=drawAdaptivePowerRun(run,sr,er,floor,target);Array.prototype.push.apply(shaped,planned.tracks);
+  var planned=drawAdaptivePowerRun(run,sr,er,floor,target,clearWidth);Array.prototype.push.apply(shaped,planned.tracks);
   Array.prototype.push.apply(paths,planned.paths);maxWidth=Math.max(maxWidth,planned.maxWidth);});
  return {tracks:shaped,paths:paths,maxWidth:maxWidth,power:true};}
 window.PCBDrawAdaptivePowerPlan=drawAdaptivePowerPlan;
+// Read-only browser-test seam: exercise the same exact per-interval fitter used
+// at draw completion without committing copper to the open layout.
+window.PCBDrawAdaptivePowerPlanExact=function(tracks,startPad,endPad,floor,target){
+ return drawAdaptivePowerPlan(tracks,startPad,endPad,floor,target,drawAdaptiveRefinedClearWidth);};
+window.PCBDrawAdaptivePowerGateReady=function(){return !!drcGate.ready&&!drcGate.failed;};
 // Pure centreline lowering: split at every profile sample and use the wider
 // endpoint for each constant-width piece (a conservative outer approximation
 // of the linear taper). `tracks` must be in gesture order.
@@ -7550,7 +7589,7 @@ function drawTaperPathsPadViolation(paths,layer,net){var clr=netClrFor(net),regi
 function drawApplyAutomaticTapers(){if(!dtrace||dtrace.pair||!dtrace.laid||!dtrace.laid.length)return {ok:true,changed:false,paths:[]};
  var old=dtrace.laid.slice(),nominal=dtrace.w,powerTarget=+dtrace.powerTarget||0,power=powerTarget>nominal+1e-9;
  var ep=drawEndpointLand(dtrace.net,dtrace.l,dtrace.lx,dtrace.ly),board=PCB.tracks||[],base=dtrace.undo||{},
-  scales=[1,.75,.5,.25,.125,.0625],physical=null,initial=power?drawAdaptivePowerPlan(old,dtrace.startPad,ep,nominal,powerTarget):drawAutomaticTaperPlan(old,dtrace.startPad,ep,nominal,1);
+  scales=[1,.75,.5,.25,.125,.0625],physical=null,initial=power?drawAdaptivePowerPlan(old,dtrace.startPad,ep,nominal,powerTarget,drawAdaptiveRefinedClearWidth):drawAutomaticTaperPlan(old,dtrace.startPad,ep,nominal,1);
  if(!initial.paths.length)return {ok:true,changed:false,paths:[],omitted:power,power:power,maxWidth:nominal};
  // Never materialise automatic copper that the exact gate did not inspect. A
  // still-loading/failed WASM engine leaves the already preview-cleared uniform
@@ -7560,7 +7599,14 @@ function drawApplyAutomaticTapers(){if(!dtrace||dtrace.pair||!dtrace.laid||!dtra
   var trial=si===0?initial:drawAutomaticTaperPlan(old,dtrace.startPad,ep,nominal,scales[si]);
   var trialAfter=board.filter(function(t){return old.indexOf(t)<0;}).concat(old),trialPaths=(PCB.rf_paths||[]).concat(trial.paths);
   if(!drcGateDiffBlocks(base.tracks||[],base.vias||[],trialAfter,PCB.vias||[],base.rf_paths||[],trialPaths)){physical=trial;break;}
-  if(drcGate.failed||power||!trial.compactable)break;}
+  if(drcGate.failed)break;
+  // A fast full-path miss must not throw away every clean wide interval. Refit
+  // each interval against the exact gate, then validate their combined path.
+  if(power){var exact=drawAdaptivePowerPlan(old,dtrace.startPad,ep,nominal,powerTarget,drawAdaptiveRefinedClearWidth);
+   if(exact.paths.length){var exactPaths=(PCB.rf_paths||[]).concat(exact.paths);
+    if(!drcGateDiffBlocks(base.tracks||[],base.vias||[],trialAfter,PCB.vias||[],base.rf_paths||[],exactPaths)){physical=exact;break;}}
+   break;}
+  if(!trial.compactable)break;}
  if(!physical){
   // The pen's uniform-width copper was independently gated on every commit,
   // but confirm the complete gesture once more before using it as the fallback.

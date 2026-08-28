@@ -74,7 +74,14 @@ function load(names, globals = {}) {
 {
   const floor = 0.127;
   const target = 0.4;
-  const g = load(["drawProfileWidth", "drawAdaptiveStations", "drawAdaptiveClearWidth", "drawAdaptivePowerRun"], {
+  const g = load([
+    "drawProfileWidth",
+    "drawAdaptiveStations",
+    "drawAdaptiveClearWidth",
+    "drawAdaptiveExactClearWidth",
+    "drawAdaptiveRefinedClearWidth",
+    "drawAdaptivePowerRun",
+  ], {
     DRAW_ADAPTIVE_STEP: 0.05,
     trackLength(t) { return Math.hypot(t.x2 - t.x1, t.y2 - t.y1); },
     drawTrackPoint(t, f) { return { x: t.x1 + (t.x2 - t.x1) * f, y: t.y1 + (t.y2 - t.y1) * f }; },
@@ -109,6 +116,68 @@ function load(names, globals = {}) {
     assert(Math.abs(s[2] - prior[2]) <= 2 * distance + 1e-8,
       "adjacent adaptive widths must retain 45-degree-or-shallower flanks");
   });
+}
+
+{
+  const floor = 0.127;
+  const target = 0.4;
+  const exactLimit = 0.31;
+  const attempted = [];
+  const g = load([
+    "drawAdaptiveClearWidth",
+    "drawAdaptiveProbePath",
+    "drawAdaptiveExactClearWidth",
+    "drawAdaptiveRefinedClearWidth",
+  ], {
+    drcGate: { ready: true, failed: false },
+    segViolation(_x1, _y1, _x2, _y2, _layer, _net, hw) {
+      return 2 * hw > 0.18 ? { k: "conservative pad box" } : null;
+    },
+    drcGateBlocks(_tracks, _vias, paths) {
+      const width = paths[0].samples[0][2];
+      attempted.push(width);
+      return width > exactLimit + 1e-9;
+    },
+  });
+  const a = { x: 0, y: 0 };
+  const b = { x: 0.05, y: 0 };
+  const fast = g.drawAdaptiveClearWidth(a, b, 1, "V_12V", floor, target, []);
+  const fitted = g.drawAdaptiveRefinedClearWidth(a, b, 1, "V_12V", floor, target, []);
+  assert(fast < 0.181, "the fixture must reproduce the conservative fast-probe cap");
+  assert(fitted > exactLimit - 0.0022 && fitted <= exactLimit + 1e-9,
+    "each interval must grow past a conservative preview cap to its exact DRC-clean maximum");
+  assert(attempted.includes(target), "the exact fitter must try the desired width first");
+  assert(attempted.length <= 9, "a blocked interval must converge to about 0.002 mm with a bounded binary search");
+}
+
+{
+  const existingTrack = { id: "existing" };
+  const existingPart = { ref: "U1" };
+  let baselineRuns = 0;
+  let candidateRuns = 0;
+  const g = load(["drawAdaptiveProbePath", "drawAdaptiveIntervalBlocker"], {
+    drcGate: { ready: true, failed: false },
+    PCB: { tracks: [existingTrack], vias: [], rf_paths: [] },
+    P: [existingPart],
+    drcGateScope(bt, bv) {
+      return { bt, bv, at: bt, av: bv, parts: [existingPart], brf: [] };
+    },
+    drcGateRun(_tracks, _vias, _parts, paths) {
+      if (paths.length) candidateRuns++;
+      else baselineRuns++;
+      return [];
+    },
+    drcBlockCounts() { return {}; },
+  });
+  const cache = {};
+  const a = { x: 0, y: 0 };
+  const b = { x: 0.05, y: 0 };
+  const first = g.drawAdaptiveIntervalBlocker(a, b, 1, "V_12V", 0.4, cache);
+  const second = g.drawAdaptiveIntervalBlocker(a, b, 1, "V_12V", 0.4, cache);
+  assert.equal(first(g.drawAdaptiveProbePath(a, b, 1, "V_12V", 0.4)), false);
+  assert.equal(second(g.drawAdaptiveProbePath(a, b, 1, "V_12V", 0.3)), false);
+  assert.equal(baselineRuns, 1, "identical local scopes must reuse their unchanged DRC baseline");
+  assert.equal(candidateRuns, 2, "each proposed interval width must still receive its own exact DRC run");
 }
 
 {

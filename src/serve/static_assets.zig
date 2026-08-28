@@ -1148,7 +1148,7 @@ test "PCB hand router gates pad entry and exit at the prospective tapered width"
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
-// spec: placement/power-routing - the hand router steers an unpoured current-rated rail at ordinary fabrication width, then grows each local interval to its largest DRC-clear width with 45-degree tapers from the pad's smaller dimension
+// spec: placement/power-routing - the hand router steers an unpoured current-rated rail at ordinary fabrication width, then independently exact-DRC-fits each local interval up to its electrical target with 45-degree tapers from the pad's smaller dimension
 test "PCB hand router adaptively widens power copper after steering" {
     const markers = [_][]const u8{
         "adaptive_power_width",
@@ -1156,11 +1156,22 @@ test "PCB hand router adaptively widens power copper after steering" {
         "powerTarget:geo.target",
         "function drawAdaptiveClearWidth",
         "for(var i=0;i<11;i++)",
+        "function drawAdaptiveExactClearWidth",
+        "drawAdaptiveProbePath(a,b,layer,net,w)",
+        "for(var i=0;i<7;i++)",
+        "function drawAdaptiveRefinedClearWidth",
+        "function drawAdaptiveIntervalBlocker",
+        "baseCache[key]=baseCounts",
+        "baseCounts=drcBlockCounts(drcGateRun",
+        "function drawAdaptiveRunClearer",
         "function drawAdaptivePowerRun",
         "ss[i-1].w+2*(ss[i].s-ss[i-1].s)",
         "function drawAdaptivePowerPlan",
         "window.PCBDrawAdaptivePowerPlan",
+        "window.PCBDrawAdaptivePowerPlanExact",
+        "window.PCBDrawAdaptivePowerGateReady",
         "initial=power?drawAdaptivePowerPlan",
+        "drawAdaptivePowerPlan(old,dtrace.startPad,ep,nominal,powerTarget,drawAdaptiveRefinedClearWidth)",
         "power route widened locally up to ",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
