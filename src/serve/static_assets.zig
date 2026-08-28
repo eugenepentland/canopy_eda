@@ -1157,6 +1157,16 @@ test "PCB hand router fits automatic tapers to DRC" {
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "automatic pad taper would violate DRC") == null);
 }
 
+// spec: Web Server - A controlled-impedance launch approaching a pad corner never pinches below the smaller of its nominal trace width and the pad's narrow dimension, while a genuinely narrow land still receives its physical-width taper
+test "PCB RF taper rejects degenerate corner chords" {
+    const markers = [_][]const u8{
+        "var padFloor=Math.min(nominal,Math.min(+pad.pd.w||0,+pad.pd.h||0))",
+        "if(padFloor>0)span=Math.max(span,padFloor)",
+        "a 0.190 mm line pinched to 0.028 mm",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+}
+
 // spec: Web Server - Generated RF fence vias are disposable while hand-routing: previews, exact DRC gates, and scoped autocomplete ignore them, committed copper removes only intersecting posts, and perimeter/ordinary vias remain obstacles
 test "PCB hand router routes through generated RF fence vias and culls the crossed posts" {
     const markers = [_][]const u8{

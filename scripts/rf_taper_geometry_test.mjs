@@ -107,8 +107,14 @@ function load(names, globals = {}) {
     trackLength(t) {
       return Math.hypot(t.x2 - t.x1, t.y2 - t.y1);
     },
+    netClassInfo() {
+      return { width: 0.18993671363271875, impedance_ohms: 50 };
+    },
+    baseTrackW() {
+      return 0.18993671363271875;
+    },
   };
-  const g = load(["drawPadFrame", "drawPadPortal", "drawPathPadLaunch", "drawTaperPortalPath", "drawSamePortalPath"], globals);
+  const g = load(["drawPadFrame", "drawPadPortal", "drawPathPadLaunch", "drawTaperProfile", "drawTaperPortalPath", "drawSamePortalPath"], globals);
   const points = [
     [149.70000000000002, 104.98],
     [149.70000000000002, 105],
@@ -162,6 +168,17 @@ function load(names, globals = {}) {
   assert.equal(diagonal.span, 0, "a 45-degree square-pad exit must not acquire the sqrt(2) centre-chord flare");
   const horizontal = g.drawPathPadLaunch([{ x1: 0, y1: 0, x2: 1, y2: 0 }], square, true);
   assert(Math.abs(horizontal.span - 0.5) < 1e-9, "an orthogonal square-pad exit must retain its full face width");
+
+  const nominal = 0.18993671363271875;
+  const c127 = { i: 0, pd: { w: 0.5, h: 0.3, shape: "roundrect" } };
+  assert.equal(g.drawTaperProfile("RF", c127, nominal,
+    { land: 0.212, span: 0.02828427124745862, portal: null }), null,
+  "C127's near-corner chord must not pinch a nominal-width trace into a needle");
+  const narrow = { i: 0, pd: { w: 0.1, h: 0.3, shape: "roundrect" } };
+  const narrowProfile = g.drawTaperProfile("RF", narrow, nominal,
+    { land: 0.15, span: 0.028, portal: null });
+  assert(Math.abs(narrowProfile.width - 0.1) < 1e-9,
+    "a genuinely narrow land must taper to its physical minimum dimension, not its corner chord");
 }
 
 {

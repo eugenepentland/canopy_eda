@@ -7265,6 +7265,14 @@ function drawTaperProfile(net,pad,nominal,dir){if(!pad||!pad.pd)return null;
   if(neck<nominal-1e-9&&span<nominal-1e-9)
    return {kind:"neck",width:neck,land:(+c.pad_neck_max_length||.75),taper:(+c.pad_neck_taper_length||.35),step:.025};}
  if(!(+c.impedance_ohms>0)||(+c.diff_impedance_ohms>0))return null;
+ // A near-corner crossing can have an arbitrarily tiny local chord even when
+ // the LAND itself is wider than the controlled trace. C127 exposed the bad
+ // limit: a 0.190 mm line pinched to 0.028 mm because its 45-degree approach
+ // met the rounded pad near one corner. A real narrow land may still request a
+ // taper, but an angled crossing may never claim less than the smaller of the
+ // nominal trace and the pad's own narrow dimension.
+ var padFloor=Math.min(nominal,Math.min(+pad.pd.w||0,+pad.pd.h||0));
+ if(padFloor>0)span=Math.max(span,padFloor);
  if(!(span>0)||Math.abs(span-nominal)<=1e-9)return null;
  return {kind:"rf",width:span,land:launch?launch.land:Math.max(+pad.pd.w||0,+pad.pd.h||0)/2,
   taper:nominal*1.2,step:nominal*1.2/6,portal:launch&&launch.portal||null};}
