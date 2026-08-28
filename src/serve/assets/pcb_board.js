@@ -3327,7 +3327,8 @@ function wirePropInputs(ref){
  if(ri)ri.addEventListener("change",function(){var i=idxOf();if(i<0||P[i].locked)return;
   recordUndo();P[i].rot=(((parseInt(ri.value,10)||0)%360)+360)%360;commitMove([i]);});
  if(si)si.addEventListener("change",function(){var i=idxOf();if(i<0||P[i].locked)return;
-  recordUndo();P[i].side=(si.value==="bottom")?"bottom":"top";commitMove([i]);});}
+  var want=si.value==="bottom"?"bottom":"top";if((P[i].side||"top")===want)return;
+  flipParts([i],i);});}
 function markSelPart(){paintSoon();}
 // ── Left dock tabs (Properties / Autorouter / Sub-circuits) ─────────────
 // One pane visible at a time. Selecting anything on the board raises the
@@ -3923,6 +3924,16 @@ function rotatePart(i,sign,live){if(i<0||P[i].locked||!partOnVisibleFace(P[i]))r
 function flipAnchor(mv,want){if(want!=null&&mv.indexOf(want)>=0)return want;
  var best=mv[0];mv.forEach(function(i){var p=P[i],b=P[best],ph=p.kind==="hub"?1:0,bh=b.kind==="hub"?1:0;
   if(ph>bh||(ph===bh&&p.hw*p.hh>b.hw*b.hh))best=i;});return best;}
+// Return the ownership slug only when this flip contains the complete rigid
+// sub-circuit. A partial/mixed marquee must not steal all of a group's stamped
+// copper merely because its anchor happens to be a member of that group.
+function flipTargetGroup(mv){if(!mv.length)return null;var g=grpOf(P[mv[0]].ref),all=g&&(GRPS[g]||[]);
+ if(!all||all.length!==mv.length)return null;
+ for(var i=0;i<all.length;i++)if(mv.indexOf(all[i])<0)return null;return g;}
+function flipAreaFace(q){if(!q)return;
+ if(q.layer!=null)q.layer=stampZoneLayer(q.layer,true);
+ if(Array.isArray(q.layers))q.layers=q.layers.map(function(l){return stampZoneLayer(l,true);});
+ if(q.side==="top")q.side="bottom";else if(q.side==="bottom")q.side="top";}
 // Flip one resolved transform target to the opposite board face. One shared
 // pose transform mirrors every member around a stable anchor; independently
 // toggling each footprint would mirror each around its OWN origin, leaving the
@@ -3934,14 +3945,26 @@ function flipParts(idxs,wantAnchor){var mv=idxs.filter(function(i){return !P[i].
  var before=stampPoseOf(P[anchor]);
  var after={x:before.x,y:before.y,rot:before.rot,back:!before.back};
  var xf=stampPoseCompose(after,stampPoseInverse(before));
+ var g=flipTargetGroup(mv),cop=carriedCopper(mv,g,!g),fills=zoneFillsFor(cop.z);
  mv.forEach(function(i){var np=stampPoseCompose(xf,stampPoseOf(P[i]));
   P[i].x=np.x;P[i].y=np.y;P[i].rot=np.rot;P[i].side=np.back?"bottom":"top";setT(i);});
- // Keep routed copper in place, just like an ordinary move or rotation. A
- // side change can disconnect SMD pads or leave a trace on the wrong layer;
- // ratsnest and DRC expose those exact repairs without destroying unrelated
- // branches elsewhere on the same net.
- markPoursStale();ratsUpdate(mv);drawClr();fetchScore();refreshUnplaced();
+ // Apply the identical rigid transform to copper with unambiguous ownership:
+ // stamped group copper, explicitly selected copper, and private-net copper.
+ // Shared rails leaving the target stay board-owned and DRC/ratsnest expose
+ // any endpoint that now needs reconnecting. Through vias mirror in position;
+ // surface tracks and pour faces additionally swap F.Cu <-> B.Cu.
+ rfDropForTracks(cop.t);
+ cop.t.forEach(function(t){var a=stampPoseApply(xf,t.x1,t.y1),b=stampPoseApply(xf,t.x2,t.y2),m=t.xm!=null?stampPoseApply(xf,t.xm,t.ym):null;
+  t.x1=a.x;t.y1=a.y;if(m){t.xm=m.x;t.ym=m.y;}t.x2=b.x;t.y2=b.y;t.l=stampLayer(t.l||0,xf.back);});
+ cop.v.forEach(function(v){var a=stampPoseApply(xf,v.x,v.y);v.x=a.x;v.y=a.y;});
+ cop.z.forEach(function(z){z.poly=(z.poly||[]).map(function(p){var a=stampPoseApply(xf,+p[0],+p[1]);return [a.x,a.y];});flipAreaFace(z);});
+ fills.forEach(function(f){f.poly=(f.poly||[]).map(function(p){var a=stampPoseApply(xf,+p[0],+p[1]);return [a.x,a.y];});
+  f.holes=(f.holes||[]).map(function(h){return h.map(function(p){var a=stampPoseApply(xf,+p[0],+p[1]);return [a.x,a.y];});});flipAreaFace(f);});
+ if(cop.t.length||cop.v.length)drawRoute();
+ if(cop.z.length){pourGeomDrop();dragCacheDrop();markPoursStale();}
+ ratsUpdate(mv);drawClr();fetchScore();refreshUnplaced();
  scheduleDrc();updatePropLive();
+ if(cop.z.length)refillPours();
  if(window.PCB3D&&window.PCB3D.sync)window.PCB3D.sync();return true;}
 // The pose algebra used when a module snapshot is re-anchored on the board.
 // It matches worldPt: mirror local X first, then rotate in the y-down board
@@ -4289,6 +4312,7 @@ function cloneHeatsink(){return PCB.heatsink?JSON.parse(JSON.stringify(PCB.heats
 function cloneDimensions(){return JSON.parse(JSON.stringify(PCB.dimensions||[]));}
 function cloneZones(){return (PCB.zones||[]).map(function(z){return {net:z.net||"",layer:z.layer||"",layers:Array.isArray(z.layers)?z.layers.slice():undefined,poly:(z.poly||[]).map(function(p){return [+p[0],+p[1]];}),filled:!!z.filled,keepout:!!z.keepout,priority:+z.priority||0,g:z.g,
  sketch:z.sketch?(OS?OS.clone(z.sketch):JSON.parse(JSON.stringify(z.sketch))):null};});}
+function cloneZoneFills(){return JSON.parse(JSON.stringify(PCB.zone_fills||[]));}
 // Deep-copy the drawn board outline ({x,y,w,h,pts?}) so a snapshot holds its
 // own vertex array — an in-place vertex drag must not mutate a stored undo step.
 function cloneOutline(){var o=PCB.outline;if(!o)return null;
@@ -4296,7 +4320,7 @@ function cloneOutline(){var o=PCB.outline;if(!o)return null;
   radii:o.radii?o.radii.slice():null,sketch:o.sketch?(OS?OS.clone(o.sketch):JSON.parse(JSON.stringify(o.sketch))):null};}
 // Build a full snapshot. `poses` optionally overrides the current poses (a
 // drag's captured pre-move state); copper + texts + outline are always current.
-function snapAll(poses){var c=cloneCopper();return {poses:poses||snapPoses(),tracks:c.tracks,vias:c.vias,rf_paths:c.rf_paths,zones:cloneZones(),texts:cloneTexts(),outline:cloneOutline(),fabrication_layers:cloneFabricationLayers(),heatsink:cloneHeatsink(),dimensions:cloneDimensions()};}
+function snapAll(poses){var c=cloneCopper();return {poses:poses||snapPoses(),tracks:c.tracks,vias:c.vias,rf_paths:c.rf_paths,zones:cloneZones(),zone_fills:cloneZoneFills(),texts:cloneTexts(),outline:cloneOutline(),fabrication_layers:cloneFabricationLayers(),heatsink:cloneHeatsink(),dimensions:cloneDimensions()};}
 function undoBtns(){var u=document.getElementById("pcb-undo"),r=document.getElementById("pcb-redo");
  if(u)u.disabled=!undoStack.length;if(r)r.disabled=!redoStack.length;}
 // recordUndo accepts a full snapshot {poses,tracks,vias}, a bare pose array
@@ -4318,6 +4342,7 @@ function restoreSnap(s){s.poses.forEach(function(q,i){if(P[i]){P[i].x=q.x;P[i].y
  var editZoneIndex=typeof pourEdit!=="undefined"&&pourEdit?(PCB.zones||[]).indexOf(pourEdit):-1;
  PCB.zones=(s.zones||[]).map(function(z){return {net:z.net||"",layer:z.layer||"",layers:Array.isArray(z.layers)?z.layers.slice():undefined,poly:(z.poly||[]).map(function(p){return [+p[0],+p[1]];}),filled:!!z.filled,keepout:!!z.keepout,priority:+z.priority||0,g:z.g,
   sketch:z.sketch?(OS?OS.clone(z.sketch):JSON.parse(JSON.stringify(z.sketch))):null};});
+ PCB.zone_fills=JSON.parse(JSON.stringify(s.zone_fills||[]));
  if(typeof pourEdit!=="undefined")pourEdit=editZoneIndex>=0&&editZoneIndex<PCB.zones.length?PCB.zones[editZoneIndex]:null;
  pourGeomDrop();markPoursStale();
  // Board texts rewind with the same snapshot; drop any selection/popover

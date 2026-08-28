@@ -636,8 +636,8 @@ test "PCB pad alignment resolves same-subcircuit targets to footprint ownership"
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "moving.idxs.indexOf(hit.i)>=0") != null);
 }
 
-// spec: Web Server - F rigidly mirrors a selected sub-circuit or marquee group to the opposite board side around one stable anchor, preserving relative positions, orientations, and routed copper in one undo
-test "PCB editor rigidly mirrors the complete selected part target without deleting copper" {
+// spec: Web Server - F rigidly mirrors a selected sub-circuit or marquee group to the opposite board side around one stable anchor, preserving relative positions, orientations, traces, vias, and copper pours in one undo
+test "PCB editor rigidly mirrors the complete selected target and its owned copper" {
     const markers = [_][]const u8{
         "function flipAnchor(mv,want)",
         "function flipParts(idxs,wantAnchor)",
@@ -645,6 +645,7 @@ test "PCB editor rigidly mirrors the complete selected part target without delet
         "var before=stampPoseOf(P[anchor]);",
         "var after={x:before.x,y:before.y,rot:before.rot,back:!before.back};",
         "var xf=stampPoseCompose(after,stampPoseInverse(before));",
+        "var g=flipTargetGroup(mv),cop=carriedCopper(mv,g,!g),fills=zoneFillsFor(cop.z);",
         "var np=stampPoseCompose(xf,stampPoseOf(P[i]));",
         "P[i].x=np.x;P[i].y=np.y;P[i].rot=np.rot;P[i].side=np.back?\"bottom\":\"top\"",
         "cur>=0&&sel.length>1&&sel.indexOf(cur)>=0",
@@ -663,11 +664,23 @@ test "PCB editor rigidly mirrors the complete selected part target without delet
         return error.FlipPartsEndMissing;
     const flip_body = flip_tail[0..flip_end];
     try std.testing.expect(std.mem.indexOf(u8, flip_body, "clearRouteFor") == null);
-    try std.testing.expect(std.mem.indexOf(u8, flip_body, "PCB.tracks") == null);
-    try std.testing.expect(std.mem.indexOf(u8, flip_body, "PCB.vias") == null);
-    try std.testing.expect(std.mem.indexOf(u8, flip_body, "PCB.rf_paths") == null);
+    // Copper moves in place rather than deleting/replacing a whole board array.
+    try std.testing.expect(std.mem.indexOf(u8, flip_body, "PCB.tracks=") == null);
+    try std.testing.expect(std.mem.indexOf(u8, flip_body, "PCB.vias=") == null);
+    try std.testing.expect(std.mem.indexOf(u8, flip_body, "rfDropForTracks(cop.t)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, flip_body, "stampPoseApply(xf,t.x1,t.y1)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, flip_body, "stampLayer(t.l||0,xf.back)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, flip_body, "stampPoseApply(xf,v.x,v.y)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, flip_body, "stampPoseApply(xf,+p[0],+p[1])") != null);
+    try std.testing.expect(std.mem.indexOf(u8, flip_body, "flipAreaFace(z)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, flip_body, "flipAreaFace(f)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, flip_body, "if(cop.z.length)refillPours()") != null);
     try std.testing.expect(std.mem.indexOf(u8, flip_body, "ratsUpdate(mv)") != null);
     try std.testing.expect(std.mem.indexOf(u8, flip_body, "scheduleDrc()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "zone_fills:cloneZoneFills()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "PCB.zone_fills=JSON.parse(JSON.stringify(s.zone_fills||[]));") != null);
+    // The properties dropdown is the same operation, not a pose-only shortcut.
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "flipParts([i],i);") != null);
 }
 
 // spec: Web Server - Generated RF fence sites render with a dashed annular ring in both Canvas and WebGPU views, while ordinary and perimeter vias stay solid; all remain selectable and editable, and provenance remains internal for safe regeneration
