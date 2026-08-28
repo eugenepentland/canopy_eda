@@ -63,7 +63,7 @@ const CORR_TABLE = CORRECTNESS.map((c) => `      ${c.name} = ${c.checksum}`).joi
 
 // ── shared preamble embedded in EVERY agent ──────────────────────────
 const PREAMBLE = `
-You are optimizing a single Zig file. The project is an S-expression EDA tool; the
+You are optimizing a single Zig file. The project is an S-expression netlisp tool; the
 file under test is the PCB auto-placement optimizer.
 
 GOAL: make \`pub fn solve\` in src/placement/optimizer.zig run FASTER, single-threaded,
