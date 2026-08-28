@@ -4368,7 +4368,8 @@ src/serve/warm_sched.zig::leaveInteractive | fn leaveInteractive() void
 src/serve/warm_sched.zig::markProcessStart | fn markProcessStart() void
 src/serve/warm_sched.zig::release | fn release(self: *Flight, key: []const u8) void
 src/serve/warm_sched.zig::runIndexed | fn runIndexed( comptime Ctx: type, ctx: *Ctx, count: usize, comptime body: fn (*Ctx, usize) void, workers: usize, ) void
-src/serve/warm_sched.zig::sinceStartMs | fn sinceStartMs() i64
+src/serve/warm_sched.zig::sinceStartMs | fn sinceStartMs() f64
+src/serve/warm_sched.zig::sinceStartUs | fn sinceStartUs() i64
 src/serve/warm_sched.zig::workerCount | fn workerCount(cap: usize) usize
 src/serve/warm_sched.zig::yieldToInteractive | fn yieldToInteractive() void
 src/serve/warmup.zig::spawn | fn spawn(ctx: *Server) void

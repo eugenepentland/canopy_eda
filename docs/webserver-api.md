@@ -402,11 +402,13 @@ visible outage:
 
 **Nothing expensive runs before `listen()`.** `serve()` configures rate limits,
 builds `ServerState`, initialises the ward adapter from `WARD_*`, registers the
-routes, and binds. Measured on the four-board corpus (ReleaseSafe, 2026-08-28):
-**8 ms from exec to the first accepted connection.** The startup banner is
-followed by `[I] startup: listening after N ms …`, which is the number to read
-when a restart looks slow — if it is small, the delay is a *request*, not the
-boot.
+routes, and binds. Measured on this corpus (ReleaseSafe, 2026-08-28): **5 ms
+from exec to the first accepted connection**, of which netlisp's own startup —
+`main` entry to bound socket — is **0.54 ms**; the rest is exec and dynamic
+loading. The startup banner is followed by `[I] startup: listening after N.NN ms
+…`, which is the number to read when a restart looks slow: if it is small, the
+delay is a *request*, not the boot. (Sub-millisecond is why that line carries
+two decimals — an integer `0 ms` reads like a broken clock.)
 
 **The deploy health check never touches a design.** `.githooks/deploy-prod.sh`
 polls `HEALTH_URLS` — `/.well-known/oauth-protected-resource` expecting **200**
@@ -415,8 +417,11 @@ ahead of every handler: the metadata route is on the session allowlist and
 returns a static RFC 9728 document, and `/` is answered by
 `ward_auth.authMiddleware`, which redirects an unauthenticated request to the
 ward login *before* `pages.indexPage` is ever called. Neither can be delayed by
-a cold cache, a warm-up sweep, or a design scan. Measured cold, at boot, the
-metadata route answers in 4 ms.
+a cold cache, a warm-up sweep, or a design scan. Verified against a
+freshly-started cold server with `WARD_*` pointing at a port nothing listens
+on: metadata `200` and `/` `302`, both answered within 120 ms of exec — the
+redirect is decided from the absent cookie alone, so it needs no round trip to
+wardd.
 
 Two things to know when reproducing this locally:
 

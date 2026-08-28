@@ -89,11 +89,15 @@ fn oneShotAllocator(process_arena: *std.heap.ArenaAllocator) std.mem.Allocator {
 /// `convert-*` / `parse` / `mint-plugin-token` helpers). Prints the usage
 /// banner and exits 1 on unknown commands.
 pub fn main(init: std.process.Init) !void {
-    // First statement in the process, so `netlisp serve` can report how long
-    // its socket took to come up against a real zero (see serve/warm_sched.zig).
-    warm_sched.markProcessStart();
     process_io = init.io;
     process_environ_map = init.environ_map;
+    // As early as a clock read can possibly work, so `netlisp serve` can report
+    // how long its socket took to come up against a real zero (see
+    // serve/warm_sched.zig). It has to follow the line above, not lead it:
+    // `infra/clock.zig` reads the time through `process_io`, which is `.failing`
+    // until then — a mark taken before it silently records nothing and every
+    // startup line reports 0 ms.
+    warm_sched.markProcessStart();
     const arena = oneShotAllocator(init.arena);
     // Evaluated designs deliberately retain their parsed source and AST for
     // the lifetime of the command. Put every one-shot CLI command on the

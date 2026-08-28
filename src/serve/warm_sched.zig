@@ -220,15 +220,39 @@ const Boot = struct {
     var start_ns: i128 = 0;
 };
 
-/// Record process entry. Called once, first thing in `main`.
+/// Record process entry. Called once by `main`, immediately after it installs
+/// the process I/O capability — never before it (see `recordProcessStart`).
 pub fn markProcessStart() void {
-    Boot.start_ns = clock.nanoTimestamp();
+    recordProcessStart(clock.nanoTimestamp());
 }
 
-/// Milliseconds since `markProcessStart`, or 0 when it was never called.
-pub fn sinceStartMs() i64 {
+/// Take `now_ns` as the process start, unless the clock could not answer.
+///
+/// Split out from the read above so the refusal is testable. `infra/clock.zig`
+/// reads the time through `root.process_io`, which is `.failing` until `main`
+/// installs the real capability — and a failing read yields 0, not an error. A
+/// mark taken one line too early therefore records a start of zero, which
+/// `sinceStartMs` cannot distinguish from a CLI process that never marked one,
+/// and every startup line then reports `0 ms` while looking perfectly healthy.
+/// Refusing it keeps that failure honest: the line reports the truth or nothing.
+fn recordProcessStart(now_ns: i128) void {
+    if (now_ns == 0) return;
+    Boot.start_ns = now_ns;
+}
+
+/// Microseconds since `markProcessStart`, or 0 when it was never called.
+///
+/// Microseconds rather than milliseconds because the number this exists to
+/// report — exec to bound socket — is SUB-MILLISECOND once the boot does no
+/// work, and a startup line that says `0 ms` reads exactly like a broken clock.
+pub fn sinceStartUs() i64 {
     if (Boot.start_ns == 0) return 0;
-    return @intCast(@divTrunc(clock.nanoTimestamp() - Boot.start_ns, clock.ns_per_ms));
+    return @intCast(@divTrunc(clock.nanoTimestamp() - Boot.start_ns, std.time.ns_per_us));
+}
+
+/// `sinceStartUs` as fractional milliseconds, for a log line a human reads.
+pub fn sinceStartMs() f64 {
+    return @as(f64, @floatFromInt(sinceStartUs())) / @as(f64, @floatFromInt(std.time.us_per_ms));
 }
 
 // spec: Web Server - Background warm concurrency is bounded at half the host's cores so a startup sweep cannot occupy the machine it is warming
@@ -332,12 +356,21 @@ test "the interactive brake is bounded, not a gate" {
 }
 
 // spec: Web Server - A process that never marked a start reports no boot elapsed, so CLI commands carry no server timing
-test "boot elapsed is zero until the process start is marked" {
+// spec: Web Server - A process-start mark taken before the I/O capability is installed is refused rather than recorded, so the startup line reports real elapsed milliseconds or none at all
+test "boot elapsed is zero until a usable process start is marked" {
     const saved = Boot.start_ns;
     defer Boot.start_ns = saved;
     Boot.start_ns = 0;
-    try std.testing.expectEqual(@as(i64, 0), sinceStartMs());
+    try std.testing.expectEqual(@as(i64, 0), sinceStartUs());
+
+    // What `clock.nanoTimestamp()` yields on the `.failing` capability every
+    // process carries until `main` installs the real one. Recording it would
+    // make every startup line say `0 ms` while looking healthy.
+    recordProcessStart(0);
+    try std.testing.expectEqual(@as(i128, 0), Boot.start_ns);
+    try std.testing.expectEqual(@as(i64, 0), sinceStartUs());
+
     markProcessStart();
     try std.testing.expect(Boot.start_ns != 0);
-    try std.testing.expect(sinceStartMs() >= 0);
+    try std.testing.expect(sinceStartUs() >= 0);
 }

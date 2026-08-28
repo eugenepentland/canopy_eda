@@ -6212,6 +6212,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Two different designs never block each other in the scan's single-flight latch
 - A background warm sweep pauses for in-flight requests and still proceeds when the server stays busy
 - A process that never marked a start reports no boot elapsed, so CLI commands carry no server timing
+- A process-start mark taken before the I/O capability is installed is refused rather than recorded, so the startup line reports real elapsed milliseconds or none at all
 - The design scan lists every design under src whatever order its parallel fill ran in, and concurrent scans agree
 - The startup board sweep skips designs with no saved layout and dispatches the heaviest remaining board first, so the last one to start does not set the wall
 - A warm-up reservation drops a retained PCB entry an edit has already invalidated, so the warm that edit triggered actually runs instead of deferring to the dead entry

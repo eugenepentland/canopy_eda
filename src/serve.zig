@@ -1000,7 +1000,7 @@ pub fn serve(
     // already-listening server. Kept as its own line (rather than folded into
     // the banner above) because the banner's exact text is what deploy logs and
     // humans grep for.
-    log.progress("startup: listening after {d} ms — design scan and page warm run behind the socket", .{warm_sched.sinceStartMs()});
+    log.progress("startup: listening after {d:.2} ms — design scan and page warm run behind the socket", .{warm_sched.sinceStartMs()});
     // Fill the read-path caches in the background so the first visitor after a
     // deploy is not the one who pays for them. Overlaps with listen(). A
     // private performance harness needs an idle machine more than corpus-wide
