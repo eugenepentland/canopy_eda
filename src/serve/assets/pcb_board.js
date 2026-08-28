@@ -850,7 +850,7 @@ var dragCache=null,gpuDragCache=null,keepoutGeomRev=0;
 // Keepout halos are geometry-derived, so unlike visual-only selection state
 // their retained paths/bitmap must be dropped whenever copper or a pad pose
 // changes. All mutation funnels converge here; rebuilding stays lazy.
-function keepoutGeomDrop(){keepoutGeomRev++;keepoutBatch=null;keepoutMaskKey="";keepoutOverlayCache=null;}
+function keepoutGeomDrop(){keepoutGeomRev++;keepoutBatch=null;keepoutMaskKey="";}
 // Also the ONE funnel the overscan pan buffer keys its staleness on: every
 // call site here is exactly "a static part restyled", which is what both
 // caches mean by stale. vbBusy() is the deliberate exception — see ovsRev.
@@ -2158,14 +2158,24 @@ function isGroundNetName(leaf){var t=(PCB&&PCB.ground_names)||[];
 // made a keepouts-on frame issue hundreds of separate raster calls. Paths are
 // now grouped by stroke width exactly like the normal copper batch, and the
 // composed transparent bitmap is retained until geometry/view state changes.
+// Fixed regions paint directly into the scene before that bitmap: routing the
+// mask through a second viewport-sized overlay would clear and copy another
+// DPR-scaled canvas on every zoom step without changing source-over results.
 var keepoutBatch=null,keepoutBatchSeq=0,keepoutMaskCv=null,keepoutMaskKey="";
-var keepoutOverlayCv=null,keepoutOverlayCache=null;
 function keepoutStrokeBucket(list,w){for(var i=0;i<list.length;i++)if(list[i].w===w)return list[i];
  var b={w:w,p:new Path2D()};list.push(b);return b;}
 function keepoutCircle(path,x,y,r){path.moveTo(x+r,y);path.arc(x,y,r,0,6.2832);}
+function keepoutBoundsAdd(b,x,y,r){b.x0=Math.min(b.x0,x-r);b.y0=Math.min(b.y0,y-r);
+ b.x1=Math.max(b.x1,x+r);b.y1=Math.max(b.y1,y+r);}
+function keepoutTrackBounds(b,t,r){trackChords(t).forEach(function(s){keepoutBoundsAdd(b,X(s.x1),Y(s.y1),r);
+ keepoutBoundsAdd(b,X(s.x2),Y(s.y2),r);});}
 function keepoutPartPoint(p,lx,ly){var a=(p.rot||0)*Math.PI/180,c=Math.cos(a),s=Math.sin(a);
  if(p.side==="bottom")lx=-lx;
  return {x:X(p.x+lx*c-ly*s),y:Y(p.y+lx*s+ly*c)};}
+function keepoutPadBounds(b,p,pd,grow){if(pd.poly&&pd.poly.length){pd.poly.forEach(function(v){
+  var q=keepoutPartPoint(p,v[0],v[1]);keepoutBoundsAdd(b,q.x,q.y,grow);});return;}
+ var pc=keepoutPartPoint(p,pd.x,pd.y),r=Math.hypot(pd.w||0,pd.h||0)*S/2+grow;
+ keepoutBoundsAdd(b,pc.x,pc.y,r);}
 // Build one pad outline directly in world SVG units. Part rotation/mirroring
 // wraps the pad's own translation/rotation; custom polygons already carry
 // footprint-local points. Shared by every exact pad-outline halo painter.
@@ -2182,33 +2192,44 @@ function worldPadPath(p,pd){var path=new Path2D(),q;
 function keepoutBatchGet(){var ts=PCB.tracks||[],vs=PCB.vias||[],nc=ncIndex(),focus=focusedSignal();
  if(keepoutBatch&&keepoutBatch.rev===keepoutGeomRev&&keepoutBatch.ts===ts&&keepoutBatch.tn===ts.length
   &&keepoutBatch.vs===vs&&keepoutBatch.vn===vs.length&&keepoutBatch.nc===nc&&keepoutBatch.l===focus)return keepoutBatch;
- var ot=[],it=[],op=[],of=new Path2D(),inf=new Path2D(),any=false;
+ var ot=[],it=[],op=[],of=new Path2D(),inf=new Path2D(),any=false,bb={x0:Infinity,y0:Infinity,x1:-Infinity,y1:-Infinity};
  if(focus==null){keepoutBatch={id:++keepoutBatchSeq,rev:keepoutGeomRev,ts:ts,tn:ts.length,vs:vs,vn:vs.length,nc:nc,l:focus,
   any:false,ot:ot,it:it,op:op,of:of,inf:inf};return keepoutBatch;}
  ts.forEach(function(t){if((t.l||0)!==focus)return;if(keepoutExemptNet(t.net)){
    var xe=keepoutStrokeBucket(it,(t.w||0.25)*S).p;trackPath(xe,t);return;}
   var c=rfKeepoutRule(t.net);if(!c)return;any=true;
-  var po=keepoutStrokeBucket(ot,((t.w||0.25)+2*rfKeepoutWidth(c))*S).p;
+  var ow=((t.w||0.25)+2*rfKeepoutWidth(c))*S,po=keepoutStrokeBucket(ot,ow).p;
   trackPath(po,t);
+  keepoutTrackBounds(bb,t,ow/2+.02*S);
   var pi=keepoutStrokeBucket(it,(t.w||0.25)*S).p;trackPath(pi,t);});
  vs.forEach(function(v){if(keepoutExemptNet(v.net)){keepoutCircle(inf,X(v.x),Y(v.y),(v.d||0.4)*S/2);return;}
   var c=rfKeepoutRule(v.net);if(!c)return;any=true;
-  keepoutCircle(of,X(v.x),Y(v.y),((v.d||0.4)/2+rfKeepoutWidth(c))*S);
+  var vr=((v.d||0.4)/2+rfKeepoutWidth(c))*S;keepoutCircle(of,X(v.x),Y(v.y),vr);
+  keepoutBoundsAdd(bb,X(v.x),Y(v.y),vr);
   keepoutCircle(inf,X(v.x),Y(v.y),(v.d||0.4)*S/2);});
  P.forEach(function(p){(p.pads||[]).forEach(function(pd){if(!rfKeepoutPadActive(p,pd))return;
   if(keepoutExemptNet(pd.net)){inf.addPath(worldPadPath(p,pd));return;}var c=rfKeepoutRule(pd.net);
   if(!c||pd.npth)return;any=true;
   var shape=worldPadPath(p,pd);of.addPath(shape);inf.addPath(shape);
+  keepoutPadBounds(bb,p,pd,rfKeepoutWidth(c)*S);
   keepoutStrokeBucket(op,2*rfKeepoutWidth(c)*S).p.addPath(shape);});});
  keepoutBatch={id:++keepoutBatchSeq,rev:keepoutGeomRev,ts:ts,tn:ts.length,vs:vs,vn:vs.length,nc:nc,l:focus,
-  any:any,ot:ot,it:it,op:op,of:of,inf:inf};return keepoutBatch;}
+  any:any,ot:ot,it:it,op:op,of:of,inf:inf,x0:bb.x0,y0:bb.y0,x1:bb.x1,y1:bb.y1};return keepoutBatch;}
 function keepoutTransformKey(tr){return [tr.a,tr.b,tr.c,tr.d,tr.e,tr.f].join(",");}
+function keepoutPixelBounds(b,tr,w,h){var xs=[tr.a*b.x0+tr.c*b.y0+tr.e,tr.a*b.x1+tr.c*b.y0+tr.e,
+ tr.a*b.x0+tr.c*b.y1+tr.e,tr.a*b.x1+tr.c*b.y1+tr.e],
+ ys=[tr.b*b.x0+tr.d*b.y0+tr.f,tr.b*b.x1+tr.d*b.y0+tr.f,
+ tr.b*b.x0+tr.d*b.y1+tr.f,tr.b*b.x1+tr.d*b.y1+tr.f],pad=2,
+ x0=Math.max(0,Math.floor(Math.min.apply(null,xs)-pad)),y0=Math.max(0,Math.floor(Math.min.apply(null,ys)-pad)),
+ x1=Math.min(w,Math.ceil(Math.max.apply(null,xs)+pad)),y1=Math.min(h,Math.ceil(Math.max.apply(null,ys)+pad));
+ return {x:x0,y:y0,w:Math.max(0,x1-x0),h:Math.max(0,y1-y0)};}
 function paintNetKeepouts(ctx,b){if(!b||!b.any)return;
  var target=ctx.canvas,cv=keepoutMaskCv;if(!cv)cv=keepoutMaskCv=document.createElement("canvas");
  if(cv.width!==target.width){cv.width=target.width;keepoutMaskKey="";}
  if(cv.height!==target.height){cv.height=target.height;keepoutMaskKey="";}
- var tr=ctx.getTransform(),key=cv.width+"|"+cv.height+"|"+b.id+"|"+keepoutTransformKey(tr);
- if(keepoutMaskKey!==key){var mc=cv.getContext("2d");mc.setTransform(1,0,0,1,0,0);mc.clearRect(0,0,cv.width,cv.height);
+ var tr=ctx.getTransform(),crop=keepoutPixelBounds(b,tr,cv.width,cv.height);if(!crop.w||!crop.h)return;
+ var key=cv.width+"|"+cv.height+"|"+b.id+"|"+keepoutTransformKey(tr);
+ if(keepoutMaskKey!==key){var mc=cv.getContext("2d");mc.setTransform(1,0,0,1,0,0);mc.clearRect(crop.x,crop.y,crop.w,crop.h);
   mc.setTransform(tr);mc.lineCap="round";mc.lineJoin="round";
   mc.strokeStyle="#f59e0b";mc.fillStyle="#f59e0b";mc.globalCompositeOperation="source-over";
   for(var oi=0;oi<b.ot.length;oi++){mc.lineWidth=b.ot[oi].w;mc.stroke(b.ot[oi].p);}
@@ -2217,7 +2238,8 @@ function paintNetKeepouts(ctx,b){if(!b||!b.any)return;
   mc.globalCompositeOperation="destination-out";mc.strokeStyle="#000";mc.fillStyle="#000";
   for(var ii=0;ii<b.it.length;ii++){mc.lineWidth=b.it[ii].w;mc.stroke(b.it[ii].p);}mc.fill(b.inf);
   mc.globalCompositeOperation="source-over";keepoutMaskKey=key;}
- ctx.save();ctx.setTransform(1,0,0,1,0,0);ctx.globalAlpha=0.19;ctx.drawImage(cv,0,0);ctx.restore();}
+ ctx.save();ctx.setTransform(1,0,0,1,0,0);ctx.globalAlpha=0.19;
+ ctx.drawImage(cv,crop.x,crop.y,crop.w,crop.h,crop.x,crop.y,crop.w,crop.h);ctx.restore();}
 // ── Solder-mask relief (assembly view) ──────────────────────────────────
 // PCB.mask_relief carries only the SERVED opening geometry of the shown
 // copper — exposure runs merged across joints and widened over fence rows.
@@ -2342,16 +2364,7 @@ function paintFixedKeepouts(ctx,k){(PCB.keepouts||[]).forEach(function(q){if(!q.
   var step=8/Math.max(k||1,0.01);ctx.strokeStyle="rgba(196,143,255,0.38)";ctx.lineWidth=Math.max(0.8/Math.max(k||1,0.01),0.03*S);
   ctx.beginPath();for(var d=x0-y1;d<x1-y0;d+=step){ctx.moveTo(d+y0,y0);ctx.lineTo(d+y1,y1);}ctx.stroke();ctx.restore();});}
 function paintKeepouts(ctx,k){if(PHYSICAL_REVIEW||!viewSt.vis.keepouts)return;
- var target=ctx.canvas,b=keepoutBatchGet(),tr=ctx.getTransform(),fixed=PCB.keepouts||[],c=keepoutOverlayCache;
- var hit=c&&c.w===target.width&&c.h===target.height&&c.k===k&&c.bid===b.id&&c.fixed===fixed&&c.fn===fixed.length
-  &&c.tr===keepoutTransformKey(tr);
- if(!hit){var cv=keepoutOverlayCv;if(!cv)cv=keepoutOverlayCv=document.createElement("canvas");
-  if(cv.width!==target.width)cv.width=target.width;if(cv.height!==target.height)cv.height=target.height;
-  var oc=cv.getContext("2d",{alpha:true});oc.setTransform(1,0,0,1,0,0);oc.clearRect(0,0,cv.width,cv.height);
-  oc.setTransform(tr);paintFixedKeepouts(oc,k);paintNetKeepouts(oc,b);
-  keepoutOverlayCache={w:target.width,h:target.height,k:k,bid:b.id,fixed:fixed,fn:fixed.length,tr:keepoutTransformKey(tr)};}
- ctx.save();ctx.setTransform(1,0,0,1,0,0);ctx.globalAlpha=1;ctx.globalCompositeOperation="source-over";
- ctx.drawImage(keepoutOverlayCv,0,0);ctx.restore();}
+ paintFixedKeepouts(ctx,k);paintNetKeepouts(ctx,keepoutBatchGet());}
 // movG/only: drag-cache split — a group box is dynamic when any member moves
 // (its bounding box follows the drag).
 function partOnVisibleFace(p){return layerAlpha(p&&p.side==="bottom"?1:0)>0;}

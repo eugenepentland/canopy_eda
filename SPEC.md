@@ -6115,7 +6115,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - PCB drag/drop keeps full-board work and retained-overlay rebuilds off the interactive path
 - visible board silkscreen text can be selected and grid-dragged directly in Select mode, with one undo step and refreshed DRC
 - R and Shift-R rotate a held board-silkscreen label live and commit the whole drag as one undo step
-- PCB keepout overlays retain width-batched net-class geometry and a transform-keyed raster so enabling them does not rebuild hundreds of paths on unchanged frames
+- PCB keepout overlays retain width-batched net-class geometry and one transform-keyed raster cropped to the visible halo bounds, painting fixed regions directly so a zoom never clears or copies a redundant viewport-sized overlay
 - Stable PCB layout pages reuse dependency-validated rendered HTML and invalidate it when the design or layout sidecar changes
 - Repeat assembly workspace loads reuse dependency-validated HTML and invalidate when rework-guide availability changes
 - A captured page-cache read-set stamps the evaluated design's own source file, so editing it invalidates the cached result

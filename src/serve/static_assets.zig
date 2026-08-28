@@ -893,15 +893,18 @@ test "PCB editor carries the generic keepout overlay" {
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "keepout_escape_mm") == null);
 }
 
-// spec: Web Server - PCB keepout overlays retain width-batched net-class geometry and a transform-keyed raster so enabling them does not rebuild hundreds of paths on unchanged frames
+// spec: Web Server - PCB keepout overlays retain width-batched net-class geometry and one transform-keyed raster cropped to the visible halo bounds, painting fixed regions directly so a zoom never clears or copies a redundant viewport-sized overlay
 test "PCB keepout rendering retains its batched geometry and raster" {
     const markers = [_][]const u8{
-        "function keepoutBatchGet", "function keepoutStrokeBucket",
-        "keepoutOverlayCache",      "function keepoutTransformKey",
-        "keepoutMaskKey!==key",     "keepoutGeomDrop();if(gpuOn)",
-        "mc.stroke(b.ot[oi].p)",    "ctx.drawImage(keepoutOverlayCv,0,0)",
+        "function keepoutBatchGet",                                          "function keepoutStrokeBucket",
+        "paintFixedKeepouts(ctx,k);paintNetKeepouts(ctx,keepoutBatchGet())", "function keepoutTransformKey",
+        "function keepoutPixelBounds",                                       "mc.clearRect(crop.x,crop.y,crop.w,crop.h)",
+        "keepoutMaskKey!==key",                                              "keepoutGeomDrop();if(gpuOn)",
+        "mc.stroke(b.ot[oi].p)",                                             "ctx.drawImage(cv,crop.x,crop.y,crop.w,crop.h",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "keepoutOverlayCv") == null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "keepoutOverlayCache") == null);
 }
 
 test "PCB clearance halos follow exact rotated pad outlines" {
