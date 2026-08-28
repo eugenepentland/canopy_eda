@@ -760,6 +760,11 @@ summarises. Aggregate counts cannot tell "the same NUMBER of findings" from
 consecutive DRC refactors each had to add a throwaway dump command, build two
 binaries with it, diff the corpus, and strip the patch again.
 
+A board that fails to solve marks the run UNRESOLVED and the command FAILS
+(`error.UnresolvedBoard`), and `# SWEEP RESULT boards=` counts only boards that
+actually ran — a soak can never read a vacuous "0 discrepancies over 0 boards"
+as green (that exact vacuous pass happened once, from a wrong `--project-dir`).
+
 `--mutate <k>` applies one deterministic copper edit IN MEMORY (move / delete /
 add a track, move a distant track, delete / move a via) and `--prime` runs a
 discarded DRC pass over the unmutated board first, so `--mutate k --prime`
@@ -780,11 +785,12 @@ discrepancy.
 - the CLI parses the project dir, the mutation selector, the priming flag and the scoped-seam benchmark repetition count with positionals as design names
 - every violation renders one line carrying every field, including the track identity automatic cleanup reads, and the lines sort deterministically
 - each mutation edits copper in memory only, leaving the board it was given untouched
-- completeness-waiver: empty inputs (a dump with no design named is a usage error rather than an empty dump that would trivially match any comparison; a board that does not resolve prints one marked comment line and the run continues)
+- a board that fails to solve marks the run UNRESOLVED and the command fails, so a soak can never read a vacuous pass as green
+- completeness-waiver: empty inputs (a dump with no design named is a usage error rather than an empty dump that would trivially match any comparison; a board that does not resolve prints one marked comment line, and the run fails after every board has had its chance)
 - completeness-waiver: large inputs (each board runs in its own arena, freed before the next, so a corpus dump peaks at one board's DRC)
 - completeness-waiver: unauthorized access (a local read-only CLI over the caller's own project directory; no network, no auth surface, and no file is written)
 - completeness-waiver: concurrent access (single-threaded, and the process-wide fill memo it reads through is itself mutex-guarded and refcounted)
-- completeness-waiver: i/o failure (a design that cannot be evaluated or whose layout cannot be restored prints an UNRESOLVED comment for that board and the remaining boards still dump)
+- completeness-waiver: i/o failure (a design that cannot be evaluated or whose layout cannot be restored prints an UNRESOLVED comment for that board; the remaining boards still dump, then the command fails with error.UnresolvedBoard)
 - completeness-waiver: malformed encoding (the design and its saved layout are parsed by the same seam the PCB page uses, which rejects malformed input long before a violation exists to print)
 - completeness-waiver: integer overflow (no arithmetic on the dump path beyond formatting already-computed violation fields)
 - completeness-waiver: panic-free (every failing stage degrades to a comment line and the next board; a DRC seam that errors contributes an empty list rather than aborting the dump)

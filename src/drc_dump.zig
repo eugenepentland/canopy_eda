@@ -103,7 +103,12 @@ const Evaluator = @import("eval/evaluator.zig").Evaluator;
 
 const ns_per_ms: f64 = 1_000_000.0;
 
-pub const DumpError = std.mem.Allocator.Error || std.Io.Writer.Error || error{DrcDumpUsage};
+pub const DumpError = std.mem.Allocator.Error || std.Io.Writer.Error || error{ DrcDumpUsage, UnresolvedBoard };
+
+/// One board's dump outcome. `resolved = false` means the board could not even
+/// be solved — its findings were never checked, so a run containing one must
+/// FAIL rather than let "0 discrepancies over 0 boards" read as a green soak.
+const Outcome = struct { discrepancies: usize = 0, resolved: bool = true };
 
 /// One deterministic in-memory copper edit, named by `--mutate`. Each is chosen
 /// to invalidate a DIFFERENT slice of a per-fill memo: a track edit reaches only
@@ -504,7 +509,7 @@ fn dumpOne(
     w: *std.Io.Writer,
     args: Args,
     name: []const u8,
-) DumpError!usize {
+) DumpError!Outcome {
     var eval = Evaluator.init(alloc, args.project_dir);
     defer eval.deinit();
     var module_res: ?modules_mod.ResolvedBlock = null;
@@ -514,13 +519,13 @@ fn dumpOne(
     };
     const solved = pcb_layout_page.solveForRequest(alloc, args.project_dir, name, .{}, &eval, &module_res) catch {
         try w.print("# {s} UNRESOLVED\n", .{name});
-        return 0;
+        return .{ .resolved = false };
     };
     if (args.bench > 0) {
         try benchScoped(alloc, w, args, name, solved);
-        return 0;
+        return .{};
     }
-    if (args.scoped) return dumpScoped(alloc, w, args, name, solved);
+    if (args.scoped) return .{ .discrepancies = try dumpScoped(alloc, w, args, name, solved) };
     const saved = solved.restored.routes orelse router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
     const clearance = solved.placement.rules.design.routeParams().clearance;
     const zones = solved.shown_zones.user;
@@ -580,7 +585,7 @@ fn dumpOne(
         @as(f64, @floatFromInt(memo.tally.build.pour_ns)) / ns_per_ms,
         memo.bases,
     });
-    return 0;
+    return .{};
 }
 
 /// CLI entry: `netlisp drc-dump [--project-dir <dir>] [--mutate <k>] [--prime]
@@ -593,22 +598,40 @@ pub fn cmdDrcDump(allocator: std.mem.Allocator, args: []const []const u8) DumpEr
 
     var buf: [64 * 1024]u8 = undefined;
     var fw = std.Io.File.stdout().writer(infra_fs.currentIo(), &buf);
+    try runParsed(allocator, &fw.interface, parsed);
+}
+
+fn runParsed(allocator: std.mem.Allocator, w: *std.Io.Writer, parsed: Args) DumpError!void {
     var discrepancies: usize = 0;
+    var resolved: usize = 0;
+    var unresolved: usize = 0;
     for (parsed.names) |name| {
         // A per-board arena: a barracuda-class board's DRC holds hundreds of
         // megabytes, and a corpus dump must peak at one board's worth.
         var board_state = std.heap.ArenaAllocator.init(allocator);
         defer board_state.deinit();
-        discrepancies += try dumpOne(board_state.allocator(), &fw.interface, parsed, name);
-        try fw.interface.flush();
+        const outcome = try dumpOne(board_state.allocator(), w, parsed, name);
+        discrepancies += outcome.discrepancies;
+        if (outcome.resolved) resolved += 1 else unresolved += 1;
+        try w.flush();
     }
     // The one line a soak run has to read. `--scoped` over the routed corpus is
     // the standing claim that the incremental path and the background sweep
     // agree about every board and every edit; anything but 0 here is a bug in
     // the scoped path, with the offending findings named on the `SWEEP!` lines
-    // above.
-    if (parsed.scoped) try fw.interface.print("# SWEEP RESULT boards={d} discrepancies={d}\n", .{ parsed.names.len, discrepancies });
-    try fw.interface.flush();
+    // above. `boards=` counts only boards that actually ran: a board that
+    // failed to solve verified nothing, and the run FAILS so a soak can never
+    // read "0 discrepancies over 0 boards" as green (that exact vacuous pass
+    // happened on 2026-08-28, from a wrong --project-dir).
+    if (parsed.scoped) {
+        if (unresolved > 0) {
+            try w.print("# SWEEP RESULT boards={d} discrepancies={d} unresolved={d}\n", .{ resolved, discrepancies, unresolved });
+        } else {
+            try w.print("# SWEEP RESULT boards={d} discrepancies={d}\n", .{ resolved, discrepancies });
+        }
+    }
+    try w.flush();
+    if (unresolved > 0) return error.UnresolvedBoard;
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -633,6 +656,21 @@ test "drc-dump CLI parses flags and positionals" {
     try testing.expect((try parseArgs(arena, &.{ "--scoped", "b" })).scoped);
     try testing.expectEqual(@as(usize, 0), (try parseArgs(arena, &.{"b"})).bench);
     try testing.expectError(error.DrcDumpUsage, parseArgs(arena, &.{ "--bench", "x", "b" }));
+}
+
+// spec: drc-dump - a board that fails to solve marks the run UNRESOLVED and the command fails, so a soak can never read a vacuous pass as green
+test "an unresolvable board fails the dump instead of passing vacuously" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // A project dir that exists but contains no such design: solveForRequest
+    // fails, which must surface as a hard error, not an empty green dump.
+    const parsed = try parseArgs(arena, &.{ "--scoped", "--project-dir", "/nonexistent-netlisp-project", "no-such-board" });
+    var out = std.Io.Writer.Allocating.init(testing.allocator);
+    defer out.deinit();
+    try testing.expectError(error.UnresolvedBoard, runParsed(testing.allocator, &out.writer, parsed));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "# no-such-board UNRESOLVED") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "boards=0 discrepancies=0 unresolved=1") != null);
 }
 
 // spec: drc-dump - every violation renders one line carrying every field, including the track identity automatic cleanup reads, and the lines sort deterministically
