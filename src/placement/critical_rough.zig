@@ -9,7 +9,6 @@
 //! keeping the already-large optimizer implementation below its size gate.
 
 const std = @import("std");
-const env = @import("../eval/env.zig");
 const net_analysis = @import("../eval/net_analysis.zig");
 const numeric = @import("../numeric.zig");
 const geometry = @import("geometry.zig");
@@ -65,15 +64,16 @@ const SupportTarget = struct {
     net_pin_count: usize,
 };
 
-/// Resolve authored RF rules and recover exact ordered paths from optimizer
-/// parts without importing optimizer.zig.
+/// Recover exact ordered RF paths from optimizer parts without importing
+/// optimizer.zig. `rules` are the design's already-resolved per-net rules —
+/// `prepare` resolves them for this exact `(block, nets)` before this runs, and
+/// resolving a second identical copy here cost as much as the whole extraction.
 pub fn extract(
     arena: std.mem.Allocator,
-    block: *const env.DesignBlock,
     parts: anytype,
     nets: []const critical_paths.FlatNet,
+    rules: []const net_rules.NetRule,
 ) std.mem.Allocator.Error!Result {
-    const rules = try net_rules.resolvedNetRules(arena, block, nets);
     const projected = try arena.alloc(critical_paths.Part, parts.len);
     for (parts, 0..) |part, i| projected[i] = .{
         .ref_des = part.ref_des,
