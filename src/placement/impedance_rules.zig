@@ -15,6 +15,7 @@ const std = @import("std");
 const env = @import("../eval/env.zig");
 const power_budget = @import("../eval/power_budget.zig");
 const impedance = @import("impedance.zig");
+const impedance_cache = @import("impedance_cache.zig");
 const optimizer = @import("optimizer.zig");
 
 const DesignBlock = env.DesignBlock;
@@ -132,9 +133,14 @@ pub fn deriveWidths(
             continue;
         }
         const coated = impedance.traceIsCoated(r.rf.mask_relief_mm, r.rf.max_freq_hz);
+        // Through the process-wide memo rather than straight into the model:
+        // `prepare` re-resolves these rules on every solve, and each class's
+        // iterative field synthesis is seconds on a coated process. The memo is
+        // keyed on exactly the arguments below plus the stack's content, so a
+        // hit returns the bits the model would have returned.
         const w = if (r.rf.impedance.diff_ohms > 0) blk: {
             if (r.diff_gap < 0) continue;
-            break :blk impedance.resolvedDiffWidthMmOnLayerWithProcess(
+            break :blk impedance_cache.resolvedDiffWidthMm(
                 arena,
                 stack,
                 r.rf.impedance.layer,
@@ -142,7 +148,7 @@ pub fn deriveWidths(
                 resolvedPairGap(r.*, board_clearance),
                 coated,
             ) orelse continue;
-        } else impedance.resolvedWidthMmOnLayerWithProcess(
+        } else impedance_cache.resolvedWidthMm(
             arena,
             stack,
             r.rf.impedance.layer,
@@ -453,6 +459,43 @@ test "an unreachable target leaves the width at the router default" {
     const rules2 = try rulesFor(arena, &plane_less);
     try testing.expectEqual(@as(f64, 0), rules2[0].width);
     try testing.expect(!rules2[0].rf.impedance.width_derived);
+}
+
+// spec: placement/impedance_rules - re-resolving an unchanged board replays its derived widths instead of re-running the field synthesis
+test "a second resolution of the same board derives no width twice" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const classes = [_]env.NetClassSpec{.{
+        .name = "rf",
+        .rf = .{ .impedance = .{ .ohms = 50 } },
+        .nets = &.{"RF_IN"},
+    }};
+    const block = fixture(&classes, true);
+
+    // Deltas rather than absolutes: the memo is process-wide, so what this owns
+    // is the SECOND resolution's behaviour, not whatever ran before it.
+    const first = try rulesFor(arena, &block);
+    const after_first = impedance_cache.stats();
+    const second = try rulesFor(arena, &block);
+    const after_second = impedance_cache.stats();
+
+    // Not one further synthesis, and the same width bit for bit — which is the
+    // memo's entire contract: it may skip work, never change the answer.
+    try testing.expectEqual(after_first.misses, after_second.misses);
+    try testing.expect(after_second.hits > after_first.hits);
+    try testing.expect(first[0].rf.impedance.width_derived);
+    try testing.expect(second[0].rf.impedance.width_derived);
+    try testing.expectEqual(first[0].width, second[0].width);
+    try testing.expectEqual(impedance.resolvedWidthMm(try stackOf(arena, &block), 50).?, second[0].width);
+
+    // A board that declares no impedance at all never reaches the memo, so it
+    // pays nothing for its existence.
+    const plain = [_]env.NetClassSpec{.{ .name = "sig", .width = 0.2, .nets = &.{"RF_IN"} }};
+    const bare = fixture(&plain, true);
+    _ = try rulesFor(arena, &bare);
+    try testing.expectEqual(after_second, impedance_cache.stats());
 }
 
 // spec: placement/impedance_rules - a dielectric with no authored (er …) takes the generic FR-4 default

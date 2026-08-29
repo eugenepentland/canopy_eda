@@ -3577,6 +3577,41 @@ for a coupled 3D EM model; differential transitions are therefore excluded.
 - completeness-waiver: integer overflow (no integer arithmetic beyond bounded stack-layer iteration)
 - completeness-waiver: panic-free (domain guards precede every logarithm, square root, and division)
 
+## placement/impedance-cache
+
+Public functions: resolvedWidthMm, resolvedDiffWidthMm, keyOf, stats
+
+- an identical synthesis query is answered from the memo, with the same bits the model would have returned
+- changing any keyed input mints a new key and re-solves rather than replaying a stale width
+- an unreachable target is memoised as the null the model returned, not re-attempted
+- an empty stackup is answered null without a field solve, and a board that declares no impedance never reaches the memo at all
+- the store is bounded and drops its least recently answered query first
+
+Solving `(impedance …)` for a track width is an iterative inverse: a closed-form
+seed, then up to five secant steps, each running two electrostatic field solves
+over the trapezoidal, mask-coated cross-section. On a coated process that is
+seconds per net class, and `placement/optimizer`'s `prepare` re-resolves the net
+rules on every solve — so the page render, the PNG, `describe`, the thermal page
+and every autosave's DRC re-synthesised widths nobody had changed.
+
+The synthesised width is a pure function of the buildup, the layer, the target,
+the resolved gap and whether the class's mask artwork coats the trace, so it is
+retained under a 128-bit content fingerprint of exactly those. The fingerprint
+uses `placement/fill-cache`'s reflective walk, which fails the BUILD on a field
+it cannot reduce to bytes: a property added to the stackup later joins the key
+automatically rather than being silently left out of it. Board clearance is not
+keyed directly and does not need to be — it reaches the synthesis only through
+the gap `placement/impedance_rules` resolves before calling in, so a clearance
+that does not move the gap cannot change the width either.
+
+- completeness-waiver: large inputs (the key is a fingerprint of a stackup the evaluator already bounds to 32 layers, and the retained set is bounded by an entry count with least-recently-answered eviction)
+- completeness-waiver: unauthorized access (an in-process memo over a buildup the caller already holds; an entry is reachable only through a fingerprint of that exact buildup's own bytes, and there is no file, request or auth surface)
+- completeness-waiver: concurrent access (the store is mutex-guarded, and the synthesis itself runs outside the lock so one board's multi-second solve cannot serialize another's; two threads racing one key both solve it and agree, because the synthesis is pure, and the first published entry stands)
+- completeness-waiver: i/o failure (no I/O — the memo holds plain f64 values and reads no path; an allocation failure declines the entry and leaves the caller with the width it just solved)
+- completeness-waiver: malformed encoding (typed stackup and query values only; a nonsensical number is caught by the parser's range checks and by the model's own domain checks, which answer null)
+- completeness-waiver: integer overflow (the fingerprint widens every scalar to its own storage width before hashing and does no arithmetic on it; the only counters are hit/miss tallies)
+- completeness-waiver: panic-free (every failure path degrades to a miss: a failed allocation and a key another thread published first both return without retaining, and the caller keeps the answer the model gave it)
+
 ## placement/impedance_rules
 
 Public functions: stackOf, deriveWidths, resolvedPairGap
@@ -3594,10 +3629,11 @@ declared `(impedance OHMS)` but no `(width MM)`.
 - the stack bridge carries every authored foil, interval and plane through unchanged
 - a dielectric with no authored (er …) takes the generic FR-4 default
 - an empty rule list derives nothing and never builds a stack
+- re-resolving an unchanged board replays its derived widths instead of re-running the field synthesis
 - completeness-waiver: large inputs (a stackup is at most 32 layers and the rule list is the design's net count — both already bounded by the evaluator upstream)
 - completeness-waiver: unauthorized access (a pure translation between two in-memory representations; it reads no file, no network and no user identity)
 - completeness-waiver: i/o failure (performs no I/O — the design block arrives already evaluated)
-- completeness-waiver: concurrent access (a single pass over a caller-owned slice with a caller-supplied arena; nothing is shared or global, so there is nothing to race on)
+- completeness-waiver: concurrent access (a single pass over a caller-owned slice with a caller-supplied arena; the only shared state it touches is `placement/impedance-cache`'s mutex-guarded memo, which answers identically whether or not it hits)
 - completeness-waiver: malformed encoding (inputs are typed evaluator structs, never bytes or text; a nonsensical number is caught by the parser's range checks and by the model's domain checks)
 - completeness-waiver: integer overflow (the only integers are 1-based layer indices the evaluator already bounded to 1-32; all arithmetic here is f64 geometry)
 - an unreachable or uncomputable target leaves the width alone; the bridge never panics
