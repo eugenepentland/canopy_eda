@@ -373,7 +373,29 @@ const SyncSummary = struct {
     /// reported so the preview can say they are not yet exported; existing
     /// KiCad zones are preserved in this transitional bridge.
     layout_zones: u32 = 0,
+    /// Saved copper an AUTHORITATIVE push could not emit — its net no longer
+    /// resolves through `net_display`, or its geometry is degenerate.
+    ///
+    /// `emitAuthoritativeLayout` used to `continue` past these with no counter
+    /// and no warning, and the response reported only what was EMITTED, so a
+    /// push that shipped an incomplete board to fabrication looked identical to
+    /// a clean one — while the editor happily went on DRAWING the dropped
+    /// track. The `push_layout` rev gate cannot catch it either: it checks the
+    /// LAYOUT SIDECAR's rev, and renaming or deleting a net in the design
+    /// `.sexp` leaves that rev untouched. So the drop is counted and named
+    /// instead: `emitted + dropped == input` for every saved track and via.
+    dropped_tracks: u32 = 0,
+    dropped_vias: u32 = 0,
+    /// The distinct net names behind those drops, first-seen order, capped at
+    /// `max_dropped_net_names` so one broken net cannot inflate the response.
+    dropped_nets: std.ArrayList([]const u8) = .empty,
 };
+
+/// How many distinct dropped-copper net names a response will name.
+const max_dropped_net_names: usize = 24;
+
+/// Placeholder for copper whose saved net name is itself empty.
+const unnamed_net_label = "(unnamed)";
 
 /// Internal result of running the diff against a parsed plan. `body` is the
 /// dry-run response envelope; `ops_json` is the same operation array exposed
@@ -747,7 +769,7 @@ fn writeSummaryEnvelope(w: anytype, version: u64, summary: SyncSummary) !void {
             "\"updated\":{d},\"relabeled\":{d},\"added\":{d},\"removed\":{d}," ++
             "\"swapped\":{d},\"flagged_stale\":{d}," ++
             "\"swaps_suppressed\":{d},\"vias\":{d},\"tracks\":{d}," ++
-            "\"layout_parts\":{d},\"outline_edges\":{d},\"layout_zones\":{d}}},\"sub_circuits\":",
+            "\"layout_parts\":{d},\"outline_edges\":{d},\"layout_zones\":{d}",
         .{
             version,               summary.updated,          summary.relabeled,
             summary.added,         summary.removed,          summary.swapped,
@@ -756,6 +778,55 @@ fn writeSummaryEnvelope(w: anytype, version: u64, summary: SyncSummary) !void {
             summary.layout_zones,
         },
     );
+    // Appended, never substituted: every field above keeps its name and meaning
+    // so an existing client reading `summary.tracks` is unaffected. These say
+    // what the emitted counts alone cannot — that copper was left behind.
+    try writeDroppedCopperFields(w, summary);
+    try w.writeAll("},\"sub_circuits\":");
+}
+
+/// Write the `dropped_*` accounting fields into an open JSON object.
+///
+/// `tracks + dropped_tracks` and `vias + dropped_vias` account for every saved
+/// track and via an authoritative push was handed, so a caller can tell an
+/// incomplete fabrication handoff from a clean one without diffing the board.
+fn writeDroppedCopperFields(w: anytype, summary: SyncSummary) !void {
+    try w.print(",\"dropped_tracks\":{d},\"dropped_vias\":{d},\"dropped_nets\":[", .{
+        summary.dropped_tracks, summary.dropped_vias,
+    });
+    for (summary.dropped_nets.items, 0..) |net, i| {
+        if (i > 0) try w.writeAll(",");
+        try json_writer.writeString(w, net);
+    }
+    try w.writeAll("]");
+}
+
+/// Human-readable "copper was left behind" line, or null when nothing dropped.
+///
+/// Rendered into the push response's `warning` (which the KiCad-push modal
+/// already displays) so an incomplete handoff is visible without a client
+/// change, on top of the machine-readable `dropped` object.
+fn droppedCopperWarning(alloc: std.mem.Allocator, summary: SyncSummary) !?[]const u8 {
+    if (summary.dropped_tracks == 0 and summary.dropped_vias == 0) return null;
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    const w = &aw.writer;
+    try w.print(
+        "{d} saved track(s) and {d} via(s) were NOT written to KiCad: their nets no longer exist in the design",
+        .{ summary.dropped_tracks, summary.dropped_vias },
+    );
+    if (summary.dropped_nets.items.len > 0) {
+        try w.writeAll(" (");
+        for (summary.dropped_nets.items, 0..) |net, i| {
+            if (i > 0) try w.writeAll(", ");
+            try w.writeAll(net);
+        }
+        if (summary.dropped_nets.items.len >= max_dropped_net_names) try w.writeAll(", …");
+        try w.writeAll(")");
+    }
+    try w.writeAll(
+        ". The board on disk is missing that copper — re-route those nets in the layout editor and push again before fabricating.",
+    );
+    return aw.written();
 }
 
 const kicad_pcb_reader = @import("../kicad_pcb/reader.zig");
@@ -1040,11 +1111,34 @@ fn runKicadPcbSync(
     );
     try rw.print(",\"source_copied\":{d}", .{source_copied});
     try rw.print(",\"models_copied\":{d},\"swaps_suppressed\":{d}", .{ models_copied, run.summary.swaps_suppressed });
-    if (lock_warning) |msg| {
-        if (wrote_file) {
-            try rw.writeAll(",\"warning\":");
-            try json_writer.writeString(rw, msg);
-        }
+    // `applied` above counts only what LANDED. Saved copper the push could not
+    // resolve a net for was dropped by `emitAuthoritativeLayout`, and without
+    // this an incomplete fabrication handoff is indistinguishable from a clean
+    // one. Reported as its own object so every existing `applied.*` field keeps
+    // its name and meaning.
+    try rw.print(",\"dropped\":{{\"tracks\":{d},\"vias\":{d},\"nets\":[", .{
+        run.summary.dropped_tracks, run.summary.dropped_vias,
+    });
+    for (run.summary.dropped_nets.items, 0..) |net, i| {
+        if (i > 0) try rw.writeAll(",");
+        try json_writer.writeString(rw, net);
+    }
+    try rw.writeAll("]}");
+    // The push modal already renders `warning`, so folding the dropped-copper
+    // line into it makes the loss visible with no client change. Shown even
+    // when nothing was written: "KiCad already matches" is exactly the reading
+    // a silent drop would produce, and it would be wrong. When a pcbnew lock
+    // warning is also pending the two are joined — JSON has one `warning` key.
+    const dropped_warning = try droppedCopperWarning(req.arena, run.summary);
+    const shown_lock_warning: ?[]const u8 = if (wrote_file) lock_warning else null;
+    const warning: ?[]const u8 = blk: {
+        const dw = dropped_warning orelse break :blk shown_lock_warning;
+        const lw = shown_lock_warning orelse break :blk dw;
+        break :blk try std.fmt.allocPrint(req.arena, "{s} {s}", .{ dw, lw });
+    };
+    if (warning) |msg| {
+        try rw.writeAll(",\"warning\":");
+        try json_writer.writeString(rw, msg);
     }
     try rw.writeAll("}");
     res.content_type = .JSON;
@@ -3876,12 +3970,45 @@ fn emitLayoutCopper(
     }
 }
 
+/// Record one saved net name behind a dropped piece of copper.
+///
+/// First-seen order, distinct, and capped at `max_dropped_net_names` — the
+/// COUNTERS stay exact past the cap, only the name list stops growing. Failing
+/// to record a name never fails the push; the count still reports the drop.
+fn noteDroppedNet(d: *DiffContext, net: []const u8) void {
+    const label = if (net.len > 0) net else unnamed_net_label;
+    for (d.summary.dropped_nets.items) |seen| {
+        if (std.mem.eql(u8, seen, label)) return;
+    }
+    if (d.summary.dropped_nets.items.len >= max_dropped_net_names) return;
+    // An exhausted arena costs this push one dropped-net NAME, never a count:
+    // the tallies above already incremented, so `emitted + dropped == input`
+    // still holds and the warning still fires — it just lists one fewer net.
+    d.summary.dropped_nets.append(d.spc.arena, label) catch return;
+}
+
+/// Tally one saved track the authoritative push could not write to the board.
+fn noteDroppedTrack(d: *DiffContext, net: []const u8) void {
+    d.summary.dropped_tracks += 1;
+    noteDroppedNet(d, net);
+}
+
+/// Tally one saved via the authoritative push could not write to the board.
+fn noteDroppedVia(d: *DiffContext, net: []const u8) void {
+    d.summary.dropped_vias += 1;
+    noteDroppedNet(d, net);
+}
+
 /// Emit the destructive half of an explicit PCB-editor → KiCad handoff. The
 /// writer removes existing tracks, vias, Edge.Cuts, and stale groups, then
 /// appends this named layout's saved copper and finished outline. Footprints,
 /// zones, board setup/rules, and unrelated graphics remain in the KiCad file.
 /// Placement ops were emitted per matched footprint in `handleMatched`, before
 /// each forced geometry refresh, so pad orientation follows the new pose.
+///
+/// Saved copper this cannot resolve a live net for is NOT emitted, but it is
+/// counted and its net named in `SyncSummary.dropped_*`, so the response can
+/// say the fabrication handoff is incomplete instead of looking clean.
 fn emitAuthoritativeLayout(
     d: *DiffContext,
     w: anytype,
@@ -3894,8 +4021,20 @@ fn emitAuthoritativeLayout(
 
     if (layout.routes) |routes| {
         for (routes.tracks) |t| {
-            const net = d.net_display.get(t.net) orelse continue;
-            if (net.len == 0 or t.w <= 0) continue;
+            // A saved track whose net no longer resolves (renamed or deleted in
+            // the design `.sexp` since the layout was saved — which does NOT
+            // move the sidecar rev this push gates on) or whose width is
+            // degenerate cannot be written to the board. It is COUNTED and its
+            // net NAMED rather than skipped in silence: this is the fabrication
+            // handoff, and the editor is still drawing the track.
+            const net = d.net_display.get(t.net) orelse {
+                noteDroppedTrack(d, t.net);
+                continue;
+            };
+            if (net.len == 0 or t.w <= 0) {
+                noteDroppedTrack(d, t.net);
+                continue;
+            }
             if (!first.*) try w.writeAll(",");
             first.* = false;
             const mid: ?[2]f64 = if (t.xm) |xm| if (t.ym) |ym| .{ xm, ym } else null else null;
@@ -3916,8 +4055,15 @@ fn emitAuthoritativeLayout(
             d.summary.tracks += 1;
         }
         for (routes.vias) |v| {
-            const net = d.net_display.get(v.net) orelse continue;
-            if (net.len == 0 or v.d <= 0 or v.drill <= 0) continue;
+            // Same accounting as the tracks above.
+            const net = d.net_display.get(v.net) orelse {
+                noteDroppedVia(d, v.net);
+                continue;
+            };
+            if (net.len == 0 or v.d <= 0 or v.drill <= 0) {
+                noteDroppedVia(d, v.net);
+                continue;
+            }
             if (!first.*) try w.writeAll(",");
             first.* = false;
             try w.writeAll(add_via_op_open);
@@ -5716,6 +5862,71 @@ test "emitAuthoritativeLayout replaces copper and outline from the exact saved r
     try std.testing.expectEqual(@as(u32, 1), d.summary.vias);
     try std.testing.expectEqual(@as(u32, 4), d.summary.outline_edges);
     try std.testing.expectEqual(@as(u32, 2), d.summary.layout_zones);
+}
+
+// A push whose saved copper references a net the design no longer has used to
+// `continue` past it with no counter and no warning, while the response reported
+// only the EMITTED counts — so an incomplete fabrication handoff read exactly
+// like a clean one, and the editor went on drawing the track that never reached
+// the board. The layout-sidecar rev gate cannot catch this: renaming or deleting
+// a net lives in the design `.sexp`, which leaves the sidecar rev untouched.
+// spec: serve/sync - an authoritative push counts and names the saved copper it could not emit, so emitted plus dropped accounts for every saved track and via
+test "emitAuthoritativeLayout accounts for the copper it drops on a since-removed net" {
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+    var model_cfg: export_kicad.ModelConfigMap = .empty;
+    var spc = SyncPlanContext{ .arena = arena, .project_dir = ".", .model_cfg = &model_cfg };
+    var state = TestDiffState{};
+    var d = try seededCopperCtx(arena, &state, &spc);
+    // Two tracks and two vias in, one of each on `gone/OLD` — a net the design
+    // no longer flattens, so `net_display` cannot resolve it.
+    const routes_value = try std.json.parseFromSliceLeaky(std.json.Value, arena,
+        \\{"tracks":[
+        \\ {"x1":1,"y1":2,"x2":3,"y2":4,"l":0,"w":0.2,"net":"dsa/VDD_F"},
+        \\ {"x1":5,"y1":6,"x2":7,"y2":8,"l":1,"w":0.25,"net":"gone/OLD"}],
+        \\ "vias":[
+        \\ {"x":9,"y":10,"d":0.6,"drill":0.3,"net":"GND"},
+        \\ {"x":11,"y":12,"d":0.6,"drill":0.3,"net":"gone/OLD"}]}
+    , .{});
+    const routes = pcb_layout.parseSavedRoutes(arena, routes_value).?;
+    const poses = std.StringHashMapUnmanaged(pcb_layout.SyncPose).empty;
+    d.authoritative_layout = .{ .poses = poses, .routes = routes, .outline = &.{} };
+
+    var buf: std.Io.Writer.Allocating = .init(arena);
+    var first = true;
+    try emitAuthoritativeLayout(&d, &buf.writer, &first);
+
+    // The accounting invariant: emitted + dropped == input, for both kinds.
+    try std.testing.expectEqual(@as(u32, 1), d.summary.tracks);
+    try std.testing.expectEqual(@as(u32, 1), d.summary.dropped_tracks);
+    try std.testing.expectEqual(@as(u32, 1), d.summary.vias);
+    try std.testing.expectEqual(@as(u32, 1), d.summary.dropped_vias);
+    try std.testing.expectEqual(routes.tracks.len, @as(usize, d.summary.tracks + d.summary.dropped_tracks));
+    try std.testing.expectEqual(routes.vias.len, @as(usize, d.summary.vias + d.summary.dropped_vias));
+    // The dropped copper is still absent from the ops — this reports the loss,
+    // it does not start writing unresolvable nets to the board.
+    try std.testing.expect(std.mem.indexOf(u8, buf.written(), "OLD") == null);
+
+    // The response NAMES the net behind the drop, once, however many pieces of
+    // copper it cost. Existing summary fields keep their names and meaning.
+    var env: std.Io.Writer.Allocating = .init(arena);
+    try writeSummaryEnvelope(&env.writer, 7, state.summary);
+    const envelope = env.written();
+    try std.testing.expect(std.mem.indexOf(u8, envelope, "\"tracks\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, envelope, "\"dropped_tracks\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, envelope, "\"dropped_vias\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, envelope, "\"dropped_nets\":[\"gone/OLD\"]") != null);
+
+    // …and the human-readable line the push modal's existing `warning` renders.
+    const warning = (try droppedCopperWarning(arena, state.summary)) orelse
+        return error.TestExpectedDroppedWarning;
+    try std.testing.expect(std.mem.indexOf(u8, warning, "gone/OLD") != null);
+    try std.testing.expect(std.mem.indexOf(u8, warning, "NOT written to KiCad") != null);
+
+    // A push that dropped nothing stays quiet — no warning on a clean handoff.
+    const clean: SyncSummary = .{};
+    try std.testing.expect((try droppedCopperWarning(arena, clean)) == null);
 }
 
 // spec: serve/sync - authoritative placement converts netlisp rotation/side into a targeted KiCad pose op

@@ -244,7 +244,22 @@ fn parseBusPortHeader(self: *Evaluator, bp_children: []const Node, env: *Env) Ev
     // Reject NaN/±inf/out-of-range before narrowing (UB in ReleaseSmall).
     const start_i = numeric.checkedInt(i64, start_f) orelse return null;
     const end_i = numeric.checkedInt(i64, end_f) orelse return null;
-    if (end_i - start_i >= max_bus_port_expansion) {
+    // Bus lanes are non-negative signal indices — the sibling `(bus-net …)`
+    // path narrows both endpoints through `numberAsUsize`, which rejects a
+    // negative outright, and the documented ranges (`0 7`, `1 10`) mirror
+    // hardware bit numbering. Enforcing the same rule here is also what keeps
+    // the span below from wrapping: an i64 `end - start` with a large-negative
+    // start and a large-positive end overflows, and with runtime safety off it
+    // wraps *negative*, slipping past the lane cap and turning the expansion
+    // loops into ~2^64 port-allocating iterations on any push/validate/build.
+    if (start_i < 0) {
+        self.warnFmt(bp_children[0].span, "(bus-port …) index range {d}..{d} has a negative start index — ignored", .{ start_i, end_i });
+        return null;
+    }
+    // Widen to i128 so the span is exact for every i64 endpoint pair, even if
+    // the non-negative rule above is ever relaxed.
+    const span: i128 = @as(i128, end_i) - @as(i128, start_i);
+    if (span >= @as(i128, max_bus_port_expansion)) {
         self.warnFmt(bp_children[0].span, "(bus-port …) index range {d}..{d} exceeds the {d}-lane cap — ignored", .{ start_i, end_i, max_bus_port_expansion });
         return null;
     }
@@ -1711,4 +1726,81 @@ test "decouple per-pin auto with zero matches errors" {
     const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
     try testing.expect(std.mem.indexOf(u8, diag.message, "no pins of \"U1\" on net \"VDDA\"") != null);
     try testing.expect(std.mem.indexOf(u8, diag.message, "(pins …) declarations must appear before (decouple …)") != null);
+}
+
+// spec: eval/design_block - a bus-port index range whose lane span would overflow the i64 subtraction is diagnosed and expands nothing
+test "bus-port rejects an index range whose span overflows i64" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+
+    // The endpoints are individually in i64 range, but they are ~1.8e19 apart:
+    // an i64 `end - start` wraps *negative*, which used to slip past the
+    // `>= max_bus_port_expansion` cap and run the expansion loop ~2^64 times,
+    // allocating a port per iteration. Reachable over HTTP via push/validate.
+    const src = "(bus-port \"X\" -9000000000000000000 9000000000000000000 (suffixes A))";
+    const children = (try parser_mod.parse(alloc, src))[0].asList().?;
+
+    var section_ports: std.ArrayList(env_mod.SectionPort) = .empty;
+    try expandSectionBusPort(&eval, children, &env, &section_ports);
+    try testing.expectEqual(@as(usize, 0), section_ports.items.len);
+
+    var top_ports: std.ArrayList(Port) = .empty;
+    try expandTopLevelBusPort(&eval, children, &env, &top_ports);
+    try testing.expectEqual(@as(usize, 0), top_ports.items.len);
+
+    // Both attempts diagnose rather than dropping the form silently.
+    try testing.expectEqual(@as(usize, 2), eval.warnings.items.len);
+    try testing.expect(std.mem.indexOf(u8, eval.warnings.items[0].message, "negative start index") != null);
+    try testing.expect(std.mem.indexOf(u8, eval.warnings.items[1].message, "negative start index") != null);
+
+    // A non-negative range far past the cap still trips the lane cap itself.
+    const wide = (try parser_mod.parse(alloc, "(bus-port \"Y\" 0 9000000000000000000 in)"))[0].asList().?;
+    var wide_ports: std.ArrayList(Port) = .empty;
+    try expandTopLevelBusPort(&eval, wide, &env, &wide_ports);
+    try testing.expectEqual(@as(usize, 0), wide_ports.items.len);
+    try testing.expectEqual(@as(usize, 3), eval.warnings.items.len);
+    try testing.expect(std.mem.indexOf(u8, eval.warnings.items[2].message, "exceeds the 4096-lane cap") != null);
+}
+
+// spec: eval/design_block - a zero-based bus-port range still expands and the lane cap admits a span of exactly 4095
+test "bus-port still expands an ordinary index range" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+
+    // Zero-based range: the guard rejects negatives, never a legitimate 0 start.
+    const children = (try parser_mod.parse(alloc, "(bus-port \"D\" 0 3 (suffixes P N) in)"))[0].asList().?;
+
+    var section_ports: std.ArrayList(env_mod.SectionPort) = .empty;
+    try expandSectionBusPort(&eval, children, &env, &section_ports);
+    try testing.expectEqual(@as(usize, 8), section_ports.items.len);
+    try testing.expectEqualStrings("D0P", section_ports.items[0].name);
+    try testing.expectEqualStrings("D3N", section_ports.items[7].name);
+
+    var top_ports: std.ArrayList(Port) = .empty;
+    try expandTopLevelBusPort(&eval, children, &env, &top_ports);
+    try testing.expectEqual(@as(usize, 8), top_ports.items.len);
+    try testing.expectEqualStrings("D0P", top_ports.items[0].name);
+    try testing.expectEqualStrings("D3N", top_ports.items[7].name);
+
+    // Nothing above warned.
+    try testing.expectEqual(@as(usize, 0), eval.warnings.items.len);
+
+    // Cap boundary, asserted on the header alone so the test doesn't allocate
+    // thousands of ports: a 4095 span is admitted, a 4096 span is not.
+    const at_cap = (try parser_mod.parse(alloc, "(bus-port \"E\" 0 4095 in)"))[0].asList().?;
+    const admitted = (try parseBusPortHeader(&eval, at_cap, &env)).?;
+    try testing.expectEqual(@as(i64, 0), admitted.start);
+    try testing.expectEqual(@as(i64, 4095), admitted.end);
+    try testing.expectEqual(@as(usize, 0), eval.warnings.items.len);
+
+    const over_cap = (try parser_mod.parse(alloc, "(bus-port \"E\" 0 4096 in)"))[0].asList().?;
+    try testing.expect((try parseBusPortHeader(&eval, over_cap, &env)) == null);
+    try testing.expectEqual(@as(usize, 1), eval.warnings.items.len);
+    try testing.expect(std.mem.indexOf(u8, eval.warnings.items[0].message, "exceeds the 4096-lane cap") != null);
 }

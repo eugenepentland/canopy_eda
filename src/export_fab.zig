@@ -200,6 +200,31 @@ pub const DrillFile = struct {
     copper_layers: u8,
 };
 
+/// Half-width of an Excellon tool bucket: two diameters closer than this
+/// share one tool (0.01 mm resolution).
+const tool_bucket_mm: f64 = 0.005;
+
+/// Index of the tool `d` belongs to — the NEAREST diameter inside the bucket
+/// — or null when `d` needs a tool of its own. Both the tool-table build and
+/// the hole emission go through this one answer, so a hole can never be
+/// claimed by two tools (drilled twice) or by none.
+///
+/// Strict `<` on the running best means an exact tie goes to the lower index,
+/// i.e. the smaller diameter once `dias` is sorted: deterministic, and
+/// never dependent on the order holes were collected in.
+fn toolFor(dias: []const f64, d: f64) ?usize {
+    var best: ?usize = null;
+    var best_err: f64 = tool_bucket_mm;
+    for (dias, 0..) |t, i| {
+        const err = @abs(t - d);
+        if (err < best_err) {
+            best = i;
+            best_err = err;
+        }
+    }
+    return best;
+}
+
 /// Write an Excellon (METRIC, decimal, trailing-zero) drill file.
 /// `.plated` emits the PTH file: every plated through-hole pad of every
 /// placed part plus every routed via. `.non_plated` emits the NPTH file
@@ -248,16 +273,20 @@ pub fn excellonDrill(
     // Distinct diameters (0.01 mm buckets), ascending — one Excellon tool each.
     var dias: std.ArrayList(f64) = .empty;
     for (holes.items) |h| {
-        var known = false;
-        for (dias.items) |d| {
-            if (@abs(d - h.d) < 0.005) {
-                known = true;
-                break;
-            }
-        }
-        if (!known) try dias.append(alloc, h.d);
+        if (toolFor(dias.items, h.d) == null) try dias.append(alloc, h.d);
     }
     std.sort.pdq(f64, dias.items, {}, std.sort.asc(f64));
+
+    // Bind every hole to EXACTLY ONE tool up front. The bucket test is a
+    // radius, not a partition: with diameters 0.400, 0.405, 0.402 the first
+    // two are ≥0.005 apart so both become tools, and 0.402 is within 0.005 of
+    // BOTH. Re-running the test once per tool at emit time therefore drilled
+    // that hole twice at the same XY — a broken bit or, at best, a
+    // duplicate-hit warning from the fab's CAM. `toolFor` picks the nearest
+    // tool (ties to the smaller diameter), so the mapping is a function of
+    // the diameter alone and independent of hole order.
+    const owners = try alloc.alloc(usize, holes.items.len);
+    for (holes.items, owners) |h, *o| o.* = toolFor(dias.items, h.d) orelse 0;
 
     try w.writeAll("M48\n");
     // The X2 file function, in the `; #@!` comment form Excellon carries it
@@ -276,10 +305,10 @@ pub fn excellonDrill(
     try w.writeAll("METRIC,TZ\n");
     for (dias.items, 1..) |d, ti| try w.print("T{d}C{d:.3}\n", .{ ti, d });
     try w.writeAll("%\n");
-    for (dias.items, 1..) |d, ti| {
-        try w.print("T{d}\n", .{ti});
-        for (holes.items) |h| {
-            if (@abs(h.d - d) >= 0.005) continue;
+    for (dias.items, 0..) |_, ti| {
+        try w.print("T{d}\n", .{ti + 1});
+        for (holes.items, owners) |h, owner| {
+            if (owner != ti) continue;
             if (h.slot) {
                 // Excellon canned slot: route from one arc centre to the other.
                 try w.print("X{d:.3}Y{d:.3}G85X{d:.3}Y{d:.3}\n", .{ h.x, h.y, h.x2, h.y2 });
@@ -510,4 +539,43 @@ test "a fab package prefixes ordinary members and preserves vendor names" {
     // job file's `Path` field spells for it — never a second transformation.
     try testing.expectEqualStrings("board-PTH.drl", pkg.entries.items[1].name);
     try testing.expectEqualStrings("psb_tesa8854.gbr", pkg.entries.items[2].name);
+}
+
+// spec: export_fab - every hole is drilled by exactly one Excellon tool, even when its diameter sits inside two tool buckets
+test "excellonDrill drills each clustered-diameter hole exactly once" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const alloc = arena_inst.allocator();
+
+    // 0.400 and 0.405 are 0.005 apart — just far enough that each claims its
+    // own tool — and 0.402 falls inside BOTH buckets. Re-testing the bucket
+    // once per tool at emit time drilled it twice at the same XY.
+    const vias = [_]router.Via{
+        .{ .x = 0, .y = 1, .dia = 0.6, .drill = 0.400, .net = 0 },
+        .{ .x = 1, .y = 2, .dia = 0.6, .drill = 0.405, .net = 0 },
+        .{ .x = 2, .y = 3, .dia = 0.6, .drill = 0.402, .net = 0 },
+    };
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    try excellonDrill(&aw.writer, alloc, &.{}, &vias, .{ .class = .plated, .copper_layers = 2 }, .{ .ox = 0, .oy = 10 });
+    const out = aw.written();
+
+    // Two tools, ascending …
+    try testing.expect(std.mem.indexOf(u8, out, "T1C0.400") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "T2C0.405") != null);
+    // … and exactly one drill record per hole — the ambiguous one included.
+    try testing.expectEqual(@as(usize, vias.len), std.mem.count(u8, out, "\nX"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "X2.000Y7.000"));
+}
+
+// spec: export_fab - the Excellon tool lookup partitions diameters, giving each hole exactly one owning tool
+test "toolFor partitions overlapping diameter buckets" {
+    const dias = [_]f64{ 0.400, 0.405 };
+    // The ambiguous diameter belongs to the NEARER tool, not to both.
+    try testing.expectEqual(@as(?usize, 0), toolFor(&dias, 0.402));
+    try testing.expectEqual(@as(?usize, 1), toolFor(&dias, 0.404));
+    try testing.expectEqual(@as(?usize, 0), toolFor(&dias, 0.400));
+    try testing.expectEqual(@as(?usize, 1), toolFor(&dias, 0.405));
+    // Outside every bucket → the caller mints a new tool.
+    try testing.expectEqual(@as(?usize, null), toolFor(&dias, 0.500));
+    try testing.expectEqual(@as(?usize, null), toolFor(&.{}, 0.400));
 }

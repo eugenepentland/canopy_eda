@@ -5,7 +5,18 @@
 const std = @import("std");
 const env_mod = @import("../eval/env.zig");
 const export_kicad = @import("../export_kicad.zig");
+const json_writer = @import("../json_writer.zig");
 const optimizer = @import("../placement/optimizer.zig");
+
+// Every design-derived string below — ref-des, footprint, value, component,
+// MPN, pad shape/number, pad net, edit-source names — is serialized with
+// `json_writer.writeScriptString`, NOT the plain JSON writer. Both of this
+// module's consumers are page paths: `writePartJson` feeds the PCB page's
+// `<script>const PCB=…` blob (and the `/api/…` package-refresh response),
+// while `buildEditSources` is spliced into that same blob as `part_edits`.
+// The script-safe form encodes every `<` as a unicode JSON escape, so no value
+// can close the script element; that escape is ordinary JSON, so the API
+// consumers parse the original string back unchanged.
 
 /// Append the non-default pose fields used by sidecars, caches, and PCB blobs.
 pub fn writePoseSideLocked(w: *std.Io.Writer, side: optimizer.Side, locked: bool) std.Io.Writer.Error!void {
@@ -32,7 +43,7 @@ pub fn writePadRectList(w: *std.Io.Writer, list: []const optimizer.PadRect) std.
 /// and instances index-aligned; an empty value makes a malformed fixture safe.
 pub fn writeComponentField(w: *std.Io.Writer, instances: []const export_kicad.FlatInstance, index: usize) std.Io.Writer.Error!void {
     try w.writeAll(",\"component\":");
-    try writeJsonString(w, if (index < instances.len) instances[index].component else "");
+    try json_writer.writeScriptString(w, if (index < instances.len) instances[index].component else "");
 }
 
 /// Add the resolved manufacturer part number used by the Properties inspector.
@@ -49,7 +60,7 @@ fn writeMpnField(w: *std.Io.Writer, inst: ?export_kicad.FlatInstance) std.Io.Wri
         }
     }
     try w.writeAll(",\"mpn\":");
-    try writeJsonString(w, mpn);
+    try json_writer.writeScriptString(w, mpn);
 }
 
 /// Emit one part's browser pad array, including exact shape/drill metadata and
@@ -64,9 +75,9 @@ pub fn writePadsJson(
     for (part.pads, 0..) |pad, j| {
         if (j > 0) try w.writeByte(',');
         try w.print("{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d},\"shape\":", .{ pad.x, pad.y, pad.w, pad.h });
-        try writeJsonString(w, pad.shape);
+        try json_writer.writeScriptString(w, pad.shape);
         try w.writeAll(",\"num\":");
-        try writeJsonString(w, pad.number);
+        try json_writer.writeScriptString(w, pad.number);
         if (pad.rot != 0) try w.print(",\"rot\":{d}", .{pad.rot});
         if (pad.rratio() != 0) try w.print(",\"rratio\":{d}", .{pad.rratio()});
         if (pad.isSlot()) try w.print(",\"slot_half\":[{d},{d}]", .{ pad.slot_half[0], pad.slot_half[1] });
@@ -86,7 +97,7 @@ pub fn writePadsJson(
         const key = try std.fmt.allocPrint(alloc, "{s}|{s}", .{ part.ref_des, pad.number });
         if (pin_net.get(key)) |net| {
             try w.writeAll(",\"net\":");
-            try writeJsonString(w, net);
+            try json_writer.writeScriptString(w, net);
         }
         try w.writeByte('}');
     }
@@ -106,9 +117,9 @@ pub fn writePartJson(
     const part = placement.parts[index];
     const inst: ?export_kicad.FlatInstance = if (index < placement.instances.len) placement.instances[index] else null;
     try w.writeAll("{\"ref\":");
-    try writeJsonString(w, part.ref_des);
+    try json_writer.writeScriptString(w, part.ref_des);
     try w.writeAll(",\"origin\":");
-    try writeJsonString(w, if (inst) |item| item.origin_key else "");
+    try json_writer.writeScriptString(w, if (inst) |item| item.origin_key else "");
     try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d},\"hw\":{d},\"hh\":{d},\"kind\":\"{s}\",\"fb\":{s}", .{
         part.x,                                      part.y,                                 part.rot, part.hw, part.hh,
         if (part.kind == .hub) "hub" else "passive", if (part.fallback) "true" else "false",
@@ -116,9 +127,9 @@ pub fn writePartJson(
     if (part.ccx != 0 or part.ccy != 0) try w.print(",\"ccx\":{d},\"ccy\":{d}", .{ part.ccx, part.ccy });
     try writePoseSideLocked(w, part.side, part.locked);
     try w.print(",\"blame\":{d:.4},\"fp\":", .{blame});
-    try writeJsonString(w, if (inst) |item| item.footprint else "");
+    try json_writer.writeScriptString(w, if (inst) |item| item.footprint else "");
     try w.writeAll(",\"val\":");
-    try writeJsonString(w, if (inst) |item| instanceLabel(item) else "");
+    try json_writer.writeScriptString(w, if (inst) |item| instanceLabel(item) else "");
     try writeComponentField(w, placement.instances, index);
     try writeMpnField(w, inst);
     try writePadsJson(w, alloc, part, pin_net);
@@ -174,11 +185,11 @@ fn emitBlock(
         const ref = try joinedRef(allocator, prefix, inst.ref_des);
         if (!first.*) try w.writeByte(',');
         first.* = false;
-        try writeJsonString(w, ref);
+        try json_writer.writeScriptString(w, ref);
         try w.print(":{{\"src\":{d},\"srcName\":", .{inst.source_offset});
-        try writeJsonString(w, source_name);
+        try json_writer.writeScriptString(w, source_name);
         try w.writeAll(",\"srcRef\":");
-        try writeJsonString(w, if (inst.label.len > 0) inst.label else inst.ref_des);
+        try json_writer.writeScriptString(w, if (inst.label.len > 0) inst.label else inst.ref_des);
         try w.writeByte('}');
     }
     for (block.sub_blocks) |sub| {
@@ -200,19 +211,6 @@ fn editableSourceName(name: []const u8) []const u8 {
     if (std.mem.indexOfScalar(u8, name, '/') != null or std.mem.indexOfScalar(u8, name, '\\') != null) return "";
     if (std.mem.indexOf(u8, name, "..") != null or std.mem.endsWith(u8, name, ".sexp")) return "";
     return name;
-}
-
-fn writeJsonString(w: *std.Io.Writer, value: []const u8) std.Io.Writer.Error!void {
-    try w.writeByte('"');
-    for (value) |c| switch (c) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
-        else => if (c < 0x20) try w.print("\\u{x:0>4}", .{c}) else try w.writeByte(c),
-    };
-    try w.writeByte('"');
 }
 
 // spec: Web Server - PCB passive footprint edits update the exact owning schematic source
@@ -310,4 +308,115 @@ test "live PCB part JSON carries replacement footprint geometry" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"pads\":[{\"x\":-0.5") != null);
     var parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
     defer parsed.deinit();
+}
+
+// spec: Web Server - Part fields in the PCB blob are escaped for the script element they sit in, so no ref-des, value, MPN, footprint, pad or pad-net name can close the tag
+test "part JSON escapes a closing script tag in every design-derived string" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    // The tag break is planted in every string this writer takes from a design:
+    // ref-des, origin key, footprint, value, component, MPN, pad shape, pad
+    // number, and the pad's net. The blob it lands in is written straight into
+    // `<script>const PCB=…`, and MPN is editable over HTTP, so reaching this
+    // needs no saved design at all.
+    const evil = "</script><script>alert(1)</script>";
+    var parts = [_]optimizer.Part{.{
+        .ref_des = evil,
+        .kind = .passive,
+        .hw = 0.8,
+        .hh = 0.5,
+        .pads = &.{.{ .number = evil, .x = -0.5, .y = 0, .w = 0.6, .h = 0.7, .shape = evil }},
+        .fallback = false,
+    }};
+    const properties = [_]env_mod.Property{.{ .key = "MPN", .value = evil }};
+    const instances = [_]export_kicad.FlatInstance{.{
+        .ref_des = evil,
+        .component = evil,
+        .origin_key = evil,
+        .value = evil,
+        .footprint = evil,
+        .properties = &properties,
+        .uuid = "",
+    }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &instances,
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 2,
+        .maxy = 1,
+        .generated = false,
+    };
+    var pin_net = std.StringHashMapUnmanaged([]const u8).empty;
+    try pin_net.put(alloc, try std.fmt.allocPrint(alloc, "{s}|{s}", .{ evil, evil }), evil);
+
+    var writer: std.Io.Writer.Allocating = .init(alloc);
+    try writePartJson(&writer.writer, alloc, placement, 0, 0, pin_net);
+    const json = writer.written();
+
+    // Nothing an HTML parser reads as a tag survives anywhere in the part…
+    try std.testing.expect(std.mem.indexOf(u8, json, "</script>") == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, json, '<') == null);
+    // …and every one of the nine fields is escaped, not merely dropped.
+    try std.testing.expectEqual(
+        @as(usize, 9),
+        std.mem.count(u8, json, "\\u003c/script>\\u003cscript>alert(1)\\u003c/script>"),
+    );
+
+    // The escape is ordinary JSON, so the plain-JSON consumer of this same
+    // writer — the package-refresh response — still reads the exact strings.
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, alloc, json, .{});
+    try std.testing.expectEqualStrings(evil, parsed.object.get("ref").?.string);
+    try std.testing.expectEqualStrings(evil, parsed.object.get("val").?.string);
+    try std.testing.expectEqualStrings(evil, parsed.object.get("mpn").?.string);
+    try std.testing.expectEqualStrings(evil, parsed.object.get("fp").?.string);
+    try std.testing.expectEqualStrings(evil, parsed.object.get("component").?.string);
+    const pad = parsed.object.get("pads").?.array.items[0].object;
+    try std.testing.expectEqualStrings(evil, pad.get("net").?.string);
+    try std.testing.expectEqualStrings(evil, pad.get("shape").?.string);
+}
+
+// spec: Web Server - Edit-source provenance in the PCB blob is escaped for the script element, so neither a ref-des key nor an instance label can close the tag
+test "PCB edit-source provenance escapes a closing script tag in ref-des and label" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // `buildEditSources` output is spliced verbatim into the same blob as the
+    // `part_edits` member, so its keys and labels need the same escaping.
+    const evil = "</script><script>alert(1)</script>";
+    const root_instances = [_]env_mod.Instance{.{
+        .ref_des = evil,
+        .label = evil,
+        .component = "res-0402",
+        .value = "10k",
+        .footprint = "r-0402",
+        .symbol = "generic-res",
+        .source_offset = 19,
+    }};
+    const root = env_mod.DesignBlock{
+        .name = "Board",
+        .instances = &root_instances,
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    const json = buildEditSources(a, &root, "black-canyon");
+    try std.testing.expect(std.mem.indexOf(u8, json, "</script>") == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, json, '<') == null);
+
+    // Key and `srcRef` both round-trip through JSON unchanged.
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, a, json, .{});
+    const entry = parsed.object.get(evil).?.object;
+    try std.testing.expectEqualStrings(evil, entry.get("srcRef").?.string);
+    try std.testing.expectEqualStrings("black-canyon", entry.get("srcName").?.string);
 }

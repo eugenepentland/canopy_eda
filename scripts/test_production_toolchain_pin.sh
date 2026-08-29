@@ -29,4 +29,19 @@ fi
 grep -q '^Restart=always$' "$UNIT"
 grep -q '^Environment=NETLISP_GIT_AUTOCOMMIT=0$' "$UNIT"
 
+# The unit must run the DEPLOYED artifact, never the dev build output. Checking
+# only for ExecStartPre missed the 2026-08-19 incident, where this tracked unit
+# pointed at zig-out/bin — the path any `zig build` overwrites — and prod served
+# a Debug binary for five hours. The rendered template is the source of truth
+# (.githooks/netlisp.service.in), so the two must name the same binary.
+if ! grep -q '^ExecStart=.*/\.deploy/bin/netlisp ' "$UNIT"; then
+  echo 'FAIL: unit ExecStart does not run the deployed .deploy/bin/netlisp artifact' >&2
+  exit 1
+fi
+if grep -q '^ExecStart=.*/zig-out/' "$UNIT"; then
+  echo 'FAIL: unit ExecStart runs the overwritable zig-out build output' >&2
+  exit 1
+fi
+grep -Fq 'ExecStart=@TOP@/.deploy/bin/netlisp' "$ROOT/.githooks/netlisp.service.in"
+
 echo 'production toolchain path, compiler SHA, candidate provenance, and service boundary OK'

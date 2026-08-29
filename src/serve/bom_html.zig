@@ -12,6 +12,7 @@ const json_writer = @import("../json_writer.zig");
 const escape = @import("../escape.zig");
 const numeric = @import("../numeric.zig");
 const lib_limits = @import("../lib_limits.zig");
+const log = @import("../infra/log.zig");
 
 /// A datasheet href is safe to emit as a link only if it is a same-origin
 /// path or an http(s) URL. Anything else (`javascript:`, `data:`, …) is
@@ -499,7 +500,16 @@ pub fn buildSymbolPinCache(allocator: std.mem.Allocator, project_dir: []const u8
         var iter = dir.iterate();
         while (try iter.next()) |entry| {
             if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".sexp")) {
-                const content = dir.readFileAlloc(allocator, entry.name, 1024 * 256) catch continue;
+                const content = dir.readFileAlloc(allocator, entry.name, lib_limits.max_lib_file_bytes) catch |err| {
+                    // Unlike the by-name pinout readers, `entry` came from this
+                    // directory's own iterator: there is no ordinary "absent"
+                    // case to stay quiet about. Every failure here drops a real
+                    // pinout out of the pin cache, so the BOM and the schematic
+                    // show that part with fewer pads than it has. Warn on all
+                    // of them and keep building the rest of the cache.
+                    log.warn("bom: pinout '{s}/{s}' not loaded ({s}) — its pins are missing from the BOM and pin cache", .{ d.path, entry.name, @errorName(err) });
+                    continue;
+                };
                 const nodes = parser_mod.parse(allocator, content) catch continue;
                 if (nodes.len == 0) continue;
                 const top = nodes[0].asList() orelse continue;
@@ -839,4 +849,30 @@ test "footprintHasPads reports false when the path allocation fails" {
     // failure; a `false`->`true` flip would claim pads exist on OOM.
     var fa = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     try std.testing.expect(!footprintHasPads(fa.allocator(), "/proj", "some_fp"));
+}
+
+// spec: Web Server - The BOM symbol-pin cache reads library pinouts at the class-owned lib_limits cap, so a pinout past the retired 256 KiB figure still contributes its pads
+test "buildSymbolPinCache loads a pinout past the retired 256 KiB cap" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // The cap is `lib_limits`', not a literal here: a pinout in the
+    // 256 KiB..1 MiB band used to be skipped by `catch continue`, so the BOM
+    // and the schematic showed that part with fewer pads than it has.
+    const data = try lib_limits.synthPinoutSource(alloc, "big", lib_limits.retired_lib_file_cap_bytes + 4096);
+    try std.testing.expect(data.len > lib_limits.retired_lib_file_cap_bytes);
+    try std.testing.expect(data.len < lib_limits.max_lib_file_bytes);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "lib/pinouts");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/pinouts/big.sexp", .data = data });
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+
+    const cache = try buildSymbolPinCache(alloc, project_dir);
+    const pins = cache.get("big") orelse return error.TestUnexpectedResult;
+    // Last row in the file: present only if the whole file was read.
+    try std.testing.expectEqualStrings("LAST", pins[pins.len - 1].num);
+    try std.testing.expectEqualStrings("LASTFN", pins[pins.len - 1].name);
 }

@@ -28,7 +28,56 @@ pub const max_footprint_bytes: usize = 1024 * 1024;
 /// inside this; the old 256 KiB was only ~7x that worst case.
 pub const max_lib_file_bytes: usize = 1024 * 1024;
 
+/// The 256 KiB figure five of the `lib/pinouts` readers carried before the cap
+/// above owned the class — `render_json.loadPinoutAlts` / `loadPinoutNames`,
+/// `serve/api.pinoutApi`, `eval/ids.loadPinoutFile`, and
+/// `serve/bom_html.buildSymbolPinCache`. It is named rather than deleted so
+/// "raise these, never lower them" is testable instead of only asserted: each
+/// of those readers now has a regression test that loads a pinout LARGER than
+/// this and expects its pins back, and `max_lib_file_bytes` dropping to or
+/// below this figure fails all of them at once. Nothing reads a file at it.
+pub const retired_lib_file_cap_bytes: usize = 1024 * 256;
+
 const std = @import("std");
+
+/// Build a synthetic `(pinout "<name>" …)` source strictly larger than
+/// `min_bytes`, ending in a `(pin LAST "LASTFN" (alt "SENTINEL" io))` the
+/// caller can look for to prove the tail of the file — not just its head —
+/// survived the read.
+///
+/// The sentinel pad is a BARE ATOM, not a quoted string: `bom_html`'s pad
+/// reader takes `asAtom()` only, so a quoted sentinel is silently skipped
+/// there and the fixture would stop testing the one reader whose failure is a
+/// `catch continue`. An atom is the one spelling all five readers accept.
+///
+/// It lives with the caps rather than in each reader's module because it is a
+/// fixture ABOUT the caps: every reader's regression test sizes off
+/// `retired_lib_file_cap_bytes` through this one function, so no test can drift
+/// to a fixture that no longer straddles the retired figure. Generated at test
+/// time rather than committed — a ~260 KB fixture has no business in the tree
+/// when the only property under test is its size.
+pub fn synthPinoutSource(
+    gpa: std.mem.Allocator,
+    name: []const u8,
+    min_bytes: usize,
+) std.mem.Allocator.Error![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+
+    const head = try std.fmt.allocPrint(gpa, "(pinout \"{s}\"\n", .{name});
+    defer gpa.free(head);
+    try out.appendSlice(gpa, head);
+
+    var i: usize = 1;
+    while (out.items.len < min_bytes) : (i += 1) {
+        const line = try std.fmt.allocPrint(gpa, "  (pin {d} \"PIN{d}\" (alt \"ALT{d}\" io))\n", .{ i, i, i });
+        defer gpa.free(line);
+        try out.appendSlice(gpa, line);
+    }
+
+    try out.appendSlice(gpa, "  (pin LAST \"LASTFN\" (alt \"SENTINEL\" io))\n)\n");
+    return out.toOwnedSlice(gpa);
+}
 
 // spec: lib_limits - Both lib/ read caps clear the largest part this tree targets, so neither may be lowered back under its worst case
 test "lib read caps clear their worst-case part" {
@@ -43,6 +92,24 @@ test "lib read caps clear their worst-case part" {
 
     // A 1000-pin BGA pinout at the measured ~162 B/pin. This is the figure that
     // made the raise necessary rather than cosmetic: it lands near 160 KB, 62%
-    // of the 256 KiB four of these readers used to carry.
+    // of the 256 KiB the five stale read sites used to carry.
     try std.testing.expect(max_lib_file_bytes > 1000 * 162);
+    try std.testing.expect(max_lib_file_bytes > retired_lib_file_cap_bytes);
+}
+
+// spec: lib_limits - The shared over-cap pinout fixture is larger than the retired 256 KiB cap and still inside the live class cap
+test "the synthetic over-cap pinout straddles the retired cap" {
+    const src = try synthPinoutSource(std.testing.allocator, "big", retired_lib_file_cap_bytes + 4096);
+    defer std.testing.allocator.free(src);
+
+    // The two bounds every reader's regression test relies on: past the figure
+    // the five stale sites carried, still comfortably inside the class cap.
+    try std.testing.expect(src.len > retired_lib_file_cap_bytes);
+    try std.testing.expect(src.len < max_lib_file_bytes);
+
+    // The sentinel pin is the LAST content in the file, so a reader that finds
+    // it read the whole thing rather than stopping short. Its pad is a bare
+    // atom because `bom_html` accepts only `asAtom()` pads.
+    try std.testing.expect(std.mem.startsWith(u8, src, "(pinout \"big\"\n"));
+    try std.testing.expect(std.mem.endsWith(u8, src, "  (pin LAST \"LASTFN\" (alt \"SENTINEL\" io))\n)\n"));
 }

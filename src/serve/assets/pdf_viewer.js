@@ -33,6 +33,7 @@ let pageRecords = [];
 const currentQuery = initialHighlight;
 let matches = [];
 let currentMatchIdx = -1;
+let renderErrors = 0;
 
 function setStatus(text, hide) {
   status.textContent = text;
@@ -94,7 +95,10 @@ async function loadPdf() {
     }
   }
   document.body.dataset.pdfReady = 'true';
-  setStatus('', true);
+  // A page that failed to raster must not be hidden behind a cleared status bar
+  // — the document is usable, but it is not all here.
+  if (renderErrors) setStatus(renderErrors + ' page(s) could not be rendered — use the retry button on the page, or open the raw PDF.');
+  else setStatus('', true);
 }
 
 async function renderPage(rec) {
@@ -140,6 +144,34 @@ async function renderPage(rec) {
     // canvas insertion as a finished page. Publish completion only after the
     // raster, extracted text layer, and optional highlights are all installed.
     rec.container.dataset.renderComplete = 'true';
+  } catch (err) {
+    // The IntersectionObserver calls this without awaiting it, so a throw here
+    // used to become an unhandled rejection and nothing else: the page kept its
+    // placeholder box and simply never filled in, with no way to tell a failed
+    // raster from one still scrolling into range. Report it on the page itself
+    // and leave the record un-rendered so the retry re-enters from a clean state.
+    console.error('pdf page ' + rec.pageNum + ' failed to render', err);
+    renderErrors++;
+    rec.rendered = false;
+    rec.container.classList.add('page-placeholder');
+    rec.container.dataset.renderError = 'true';
+    delete rec.container.dataset.renderComplete;
+    rec.container.querySelectorAll('canvas, .textLayer').forEach(n => n.remove());
+    if (!rec.container.querySelector('.page-retry')) {
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.className = 'page-retry';
+      retry.textContent = 'p.' + rec.pageNum + ' could not be rendered — retry';
+      retry.style.cssText = 'display:block;margin:12px auto;padding:6px 14px;border:0;border-radius:4px;'
+        + 'background:#d29922;color:#0d1117;font:inherit;font-weight:600;cursor:pointer';
+      retry.addEventListener('click', () => {
+        retry.remove();
+        delete rec.container.dataset.renderError;
+        renderPage(rec);
+      });
+      rec.container.appendChild(retry);
+    }
+    setStatus('Page ' + rec.pageNum + ' could not be rendered.');
   } finally {
     rec.rendering = false;
   }

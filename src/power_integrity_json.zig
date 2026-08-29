@@ -1,4 +1,13 @@
 //! JSON surface for the PCB viewer's click-to-inspect power-copper screen.
+//!
+//! Every design-derived string here — net names, source terminals, capacitor
+//! ref-des/value, the emitted SPICE deck — goes out through
+//! `json_writer.writeScriptString`, never the plain `writeString`. `write` is
+//! called on two paths: inline into the PCB page's `<script>const PCB=…` blob,
+//! and into the `application/json` deferred/`?pdn=1` responses. The script-safe
+//! form is what the first path needs, and it is ordinary JSON — a net named
+//! like a closing script tag decodes back byte-for-byte for the second — so one
+//! writer serves both rather than two rules that can drift apart.
 
 const std = @import("std");
 const optimizer = @import("placement/optimizer.zig");
@@ -65,19 +74,19 @@ pub fn write(w: *std.Io.Writer, allocators: Allocators, in: Inputs) std.Io.Write
     for (analysis.nets, 0..) |net, ni| {
         if (ni > 0) try w.writeByte(',');
         try w.writeAll("{\"net\":");
-        try writeString(w, net.name);
+        try json_writer.writeScriptString(w, net.name);
         try w.print(",\"net_index\":{d},\"source\":", .{net.index});
-        try writeString(w, net.demand.source);
+        try json_writer.writeScriptString(w, net.demand.source);
         try w.writeAll(",\"source_terminals\":[");
         for (net.demand.source_terminals, 0..) |terminal, terminal_index| {
             if (terminal_index > 0) try w.writeByte(',');
-            try writeString(w, terminal);
+            try json_writer.writeScriptString(w, terminal);
         }
         try w.writeByte(']');
         try w.writeAll(",\"flow_typical_status\":");
-        try writeString(w, net.typical_status.name());
+        try json_writer.writeScriptString(w, net.typical_status.name());
         try w.writeAll(",\"flow_maximum_status\":");
-        try writeString(w, net.maximum_status.name());
+        try json_writer.writeScriptString(w, net.maximum_status.name());
         try w.writeAll(",\"demand_typical_a\":");
         try writeOptionalNumber(w, net.demand.typical_a);
         try w.writeAll(",\"demand_maximum_a\":");
@@ -135,7 +144,7 @@ pub fn write(w: *std.Io.Writer, allocators: Allocators, in: Inputs) std.Io.Write
         for (net.planes, 0..) |plane, pi| {
             if (pi > 0) try w.writeByte(',');
             try w.writeAll("{\"kind\":");
-            try writeString(w, plane.kind.name());
+            try json_writer.writeScriptString(w, plane.kind.name());
             try w.print(
                 ",\"physical_layer\":{d},\"foil_mm\":{d},\"component_count\":{d},\"fill_coarsened\":{s}," ++
                     "\"design_min_width_mm\":{d},\"capacity_a_per_mm\":{d},\"capacity_at_design_min_a\":{d},\"required_neck_typical_mm\":",
@@ -145,9 +154,9 @@ pub fn write(w: *std.Io.Writer, allocators: Allocators, in: Inputs) std.Io.Write
             try w.writeAll(",\"required_neck_maximum_mm\":");
             try writeOptionalNumber(w, plane.required_neck_maximum_mm);
             try w.writeAll(",\"typical_status\":");
-            try writeString(w, plane.typical_status.name());
+            try json_writer.writeScriptString(w, plane.typical_status.name());
             try w.writeAll(",\"maximum_status\":");
-            try writeString(w, plane.maximum_status.name());
+            try json_writer.writeScriptString(w, plane.maximum_status.name());
             try w.writeByte('}');
         }
         try w.writeAll("]}");
@@ -202,7 +211,7 @@ fn writeAc(
 
 fn writeAcRail(w: *std.Io.Writer, alloc: std.mem.Allocator, rail: pdn_impedance.Rail) std.Io.Writer.Error!void {
     try w.writeAll("{\"net\":");
-    try writeString(w, rail.net);
+    try json_writer.writeScriptString(w, rail.net);
     try w.print(",\"ripple_v\":{d},\"step_current_a\":", .{rail.ripple_v});
     try writeOptionalNumber(w, rail.step_current_a);
     try w.print(",\"step_assumed\":{s},\"target_ohm\":", .{if (rail.step_assumed) "true" else "false"});
@@ -229,9 +238,9 @@ fn writeAcRail(w: *std.Io.Writer, alloc: std.mem.Allocator, rail: pdn_impedance.
     if (coverage_complete)
         try w.writeAll("null")
     else if (rail.capacitors.len == 0)
-        try writeString(w, "no bound decoupling capacitors were extracted")
+        try json_writer.writeScriptString(w, "no bound decoupling capacitors were extracted")
     else
-        try writeString(w, "one or more capacitor legs use fallback or estimated geometry");
+        try json_writer.writeScriptString(w, "one or more capacitor legs use fallback or estimated geometry");
     try w.writeAll(",\"points\":[");
     for (rail.points, 0..) |point, i| {
         if (i > 0) try w.writeByte(',');
@@ -251,25 +260,25 @@ fn writeAcRail(w: *std.Io.Writer, alloc: std.mem.Allocator, rail: pdn_impedance.
     var spice_buf: std.Io.Writer.Allocating = .init(alloc);
     defer spice_buf.deinit();
     pdn_impedance.writeSpice(&spice_buf.writer, rail) catch return error.WriteFailed;
-    try writeString(w, spice_buf.written());
+    try json_writer.writeScriptString(w, spice_buf.written());
     try w.writeByte('}');
 }
 
 fn writeAcCap(w: *std.Io.Writer, cap: pdn_impedance.Capacitor) std.Io.Writer.Error!void {
     try w.writeAll("{\"ref\":");
-    try writeString(w, cap.ref_des);
+    try json_writer.writeScriptString(w, cap.ref_des);
     try w.writeAll(",\"target_ref\":");
-    try writeString(w, cap.target_ref_des);
+    try json_writer.writeScriptString(w, cap.target_ref_des);
     try w.writeAll(",\"target_pin\":");
-    try writeString(w, cap.target_pin);
+    try json_writer.writeScriptString(w, cap.target_pin);
     try w.writeAll(",\"value\":");
-    try writeString(w, cap.value);
+    try json_writer.writeScriptString(w, cap.value);
     try w.writeAll(",\"model_source\":");
-    try writeString(w, cap.model_source);
+    try json_writer.writeScriptString(w, cap.model_source);
     try w.writeAll(",\"power_path_kind\":");
-    try writeString(w, cap.path_kind.power);
+    try json_writer.writeScriptString(w, cap.path_kind.power);
     try w.writeAll(",\"ground_path_kind\":");
-    try writeString(w, cap.path_kind.ground);
+    try json_writer.writeScriptString(w, cap.path_kind.ground);
     try w.print(",\"capacitance_f\":{d},\"effective_factor\":{d},\"esr_ohm\":{d},\"intrinsic_esl_h\":{d},\"mounting_inductance_h\":{d},\"power_path_mm\":{d},\"ground_path_mm\":{d},\"model_estimated\":{s},\"mounted_srf_hz\":{d},\"removal_impact_db\":{d},\"ideal_mount_improvement_db\":{d},\"ineffective\":{s}}}", .{
         cap.capacitance_f,
         cap.effective_factor,
@@ -296,16 +305,6 @@ fn writeOptionalInteger(w: *std.Io.Writer, value: ?usize) std.Io.Writer.Error!vo
     return w.writeAll("null");
 }
 
-fn writeString(w: *std.Io.Writer, value: []const u8) std.Io.Writer.Error!void {
-    json_writer.writeString(w, value) catch |err| switch (err) {
-        error.WriteFailed => return error.WriteFailed,
-        // `std.Io.Writer` does not allocate, but json_writer's generic error
-        // surface also serves allocating writers. Collapse that impossible
-        // member here instead of adding a panic to the page path.
-        error.OutOfMemory => return error.WriteFailed,
-    };
-}
-
 test "PDN capacitor JSON serializes finite computed-pour provenance for both legs" {
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
@@ -330,4 +329,57 @@ test "PDN capacitor JSON serializes finite computed-pour provenance for both leg
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"ground_path_kind\":\"computed-pour\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"mounting_inductance_h\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"mounting_inductance_h\":0,") == null);
+}
+
+// spec: Web Server - Power-integrity net and terminal names in the PCB blob are escaped for the script element, so neither can close the tag
+test "power-integrity JSON escapes a closing script tag in every design-derived string" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    // `write` embeds this payload inline in the PCB page's `<script>const PCB=`
+    // blob, so a capacitor ref-des or value spelling a tag break would close it
+    // for every viewer of the board.
+    const evil = "</script><script>alert(1)</script>";
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    try writeAcCap(&out.writer, .{
+        .ref_des = evil,
+        .target_ref_des = evil,
+        .target_pin = evil,
+        .value = evil,
+        .model_source = evil,
+        .capacitance_f = 100e-9,
+        .effective_factor = 1,
+        .esr_ohm = 0.02,
+        .intrinsic_esl_h = 0.4e-9,
+        .mounting_inductance_h = 0.8e-9,
+        .power_path_mm = 1.2,
+        .ground_path_mm = 1.4,
+        .path_kind = .{ .power = "computed-pour", .ground = "computed-pour" },
+        .model_estimated = false,
+        .mounted_srf_hz = 10e6,
+    });
+    const json = out.written();
+
+    // Nothing an HTML parser reads as a tag survives…
+    try std.testing.expect(std.mem.indexOf(u8, json, "</script>") == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, json, '<') == null);
+    try std.testing.expectEqual(
+        @as(usize, 5),
+        std.mem.count(u8, json, "\\u003c/script>\\u003cscript>alert(1)\\u003c/script>"),
+    );
+
+    // …and the escape is ordinary JSON, so this module's OTHER consumer — the
+    // `application/json` deferred and `?pdn=1` responses — reads the exact
+    // strings back. That is why one writer serves both paths.
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, alloc, json, .{});
+    try std.testing.expectEqualStrings(evil, parsed.object.get("ref").?.string);
+    try std.testing.expectEqualStrings(evil, parsed.object.get("value").?.string);
+    try std.testing.expectEqualStrings(evil, parsed.object.get("target_pin").?.string);
+
+    // Every string in this module goes out through the script-safe writer. The
+    // needle is split so this assertion is not its own counterexample.
+    const source = @embedFile("power_integrity_json.zig");
+    const unsafe_sink = "json_writer." ++ "writeString(";
+    try std.testing.expect(std.mem.indexOf(u8, source, unsafe_sink) == null);
 }

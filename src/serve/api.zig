@@ -9,6 +9,7 @@ const build_id = @import("../build_id.zig");
 const json_writer = @import("../json_writer.zig");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
+const lib_limits = @import("../lib_limits.zig");
 const log = @import("../infra/log.zig");
 const paths = @import("../paths.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
@@ -203,7 +204,14 @@ pub fn pinoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
     const path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/pinouts/{s}.sexp", .{ ctx.project_dir, name });
     defer ctx.allocator.free(path);
 
-    const content = infra_fs.cwd().readFileAlloc(ctx.allocator, path, 1024 * 256) catch {
+    const content = infra_fs.cwd().readFileAlloc(ctx.allocator, path, lib_limits.max_lib_file_bytes) catch |err| {
+        // The status stays 404 on every failure: the viewer treats "no pinout"
+        // as a soft absence and must not begin 5xx-ing over a library file it
+        // could not read. But a pinout that EXISTS and merely failed to load is
+        // not "not found", and answering 404 makes it indistinguishable from a
+        // part that never had one — so name it on stderr.
+        if (err != error.FileNotFound)
+            log.warn("pinout api: '{s}' not readable ({s}) — answering 404", .{ path, @errorName(err) });
         res.status = http_not_found;
         res.content_type = .JSON;
         res.body = "{\"error\":\"pinout not found\"}";
@@ -472,6 +480,40 @@ test "the ERC endpoint answers a repeat request with the identical bytes it reta
     const edited = try serveErc(&state, alloc, project, "ercdemo");
     try std.testing.expectEqualStrings("miss", edited.cache);
     try std.testing.expect(!std.mem.eql(u8, fresh.body, edited.body));
+}
+
+// spec: Web Server - The pinout endpoint reads its library file at the class-owned lib_limits cap, so a pinout past the retired 256 KiB figure is served rather than answered 404
+test "the pinout endpoint serves a pinout past the retired 256 KiB cap" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // The cap is `lib_limits`', not a literal here. In the 256 KiB..1 MiB band
+    // this endpoint used to answer 404 "pinout not found" for a file that was
+    // on disk all along — indistinguishable from a part with no pinout.
+    const data = try lib_limits.synthPinoutSource(alloc, "big", lib_limits.retired_lib_file_cap_bytes + 4096);
+    try std.testing.expect(data.len > lib_limits.retired_lib_file_cap_bytes);
+    try std.testing.expect(data.len < lib_limits.max_lib_file_bytes);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "lib/pinouts");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/pinouts/big.sexp", .data = data });
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+
+    var state = serve_root.ServerState{ .caches = .init(std.testing.allocator) };
+    defer state.caches.deinit();
+    var srv = Server{ .allocator = alloc, .project_dir = project, .auth_dir = project, .state = &state };
+
+    var ht = httpz.testing.init(.{});
+    defer ht.deinit();
+    ht.param("name", "big");
+    try pinoutApi(&srv, ht.req, ht.res);
+
+    try std.testing.expect(ht.res.status != http_not_found);
+    // The sentinel pin is the file's last row, so it is in the body only if the
+    // read covered the whole file.
+    try std.testing.expect(std.mem.indexOf(u8, ht.res.body, "\"LASTFN\"") != null);
 }
 
 /// GET /api/export-kicad/:name — build the design, resolve BOM identities,

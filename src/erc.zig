@@ -41,6 +41,11 @@ const group_coverage_min_blocks: u32 = 5;
 /// How many ungrouped block names to spell out in the violation before
 /// summarising the rest as "+N more".
 const group_coverage_name_limit: usize = 6;
+/// Slack allowed before a declared absolute-maximum pin rating counts as
+/// exceeded. Pure float-noise headroom: a 3.60 V rated rail landing on a 3.60 V
+/// rated pin must not fire, while a real overvoltage (5 V onto a 1.8 V-max
+/// input) clears this by volts.
+const overvoltage_tolerance_v: f64 = 0.01;
 
 /// Tag identifying which electrical-rule check produced a `Violation`. The
 /// review UI groups findings by this kind so users can scan all
@@ -70,6 +75,7 @@ pub const ViolationKind = enum {
     rail_voltage_unresolved,
     sequence_cycle,
     voltage_domain_incompatible,
+    voltage_overstress,
     missing_requirements,
     direct_component_implementation,
     module_metadata_incomplete,
@@ -291,11 +297,19 @@ fn checkComponentGrouping(
 /// when `target_id` is set, else by ref-des; then the `req_id` must match a
 /// requirement on that instance), recursing sub-blocks the same way, so a
 /// verification counts as matched iff `applyVerifications` would have applied it.
+///
+/// Runs **per block** over each block's OWN `verifications` and then recurses,
+/// because `req_checks.applyVerifications` does exactly that: a module's
+/// `(verifies …)` forms are applied against that module and its descendants,
+/// never against the parent. Iterating only the top block would leave a reused
+/// module's dangling sign-off invisible unless the module were checked
+/// standalone — and renumber drift is MORE likely inside a reused module, which
+/// is the scenario this check exists for.
 fn checkOrphanedVerifications(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
     violations: *std.ArrayList(Violation),
-) !void {
+) std.mem.Allocator.Error!void {
     for (block.verifications) |v| {
         if (verificationResolves(block, v)) continue;
         const target = if (v.target_id.len > 0) v.target_id else v.ref_des;
@@ -313,6 +327,10 @@ fn checkOrphanedVerifications(
             .ref_des = v.ref_des,
         });
     }
+    // A sub-block's own `(verifies …)` forms are resolved against that
+    // sub-block (see doc comment), so recurse with `sb.block` as the resolution
+    // root rather than flattening every instance into the top-level scope.
+    for (block.sub_blocks) |sb| try checkOrphanedVerifications(allocator, sb.block, violations);
 }
 
 /// True iff verification `v` resolves to a live `(ref_des_or_id, req_id)` pair
@@ -338,11 +356,25 @@ fn verificationResolves(block: *const DesignBlock, v: env_mod.Verification) bool
 }
 
 /// For each net, gather pins whose component library declared electrical
-/// levels and compare driver outputs against receiver thresholds. Flags
-/// nets where the worst driver high (lowest v_oh_typ across drivers)
-/// can't meet the worst receiver high threshold (highest v_ih_min across
-/// receivers). Pins without electrical metadata are silently skipped so
-/// the check starts low-noise and grows useful as the library is
+/// levels and compare them in BOTH directions:
+///
+///   * UNDER-drive — the worst driver high (lowest `v_oh_typ` across drivers)
+///     can't meet the worst receiver high threshold (highest `v_ih_min` across
+///     receivers), so the receiver never reads a logic 1. Emits
+///     `voltage_domain_incompatible`.
+///   * OVER-voltage — the strongest thing on the net (highest `v_oh_typ` across
+///     drivers, or the net's own DECLARED rail voltage) exceeds the lowest
+///     `(max-voltage …)` declared by a pin on it, so a part is destroyed. Emits
+///     `voltage_overstress`.
+///
+/// The second direction is why `max_voltage` exists: it is surfaced in the
+/// review's boundary-contract table, so leaving it unread made the UI advertise
+/// an enforced contract that nothing enforced — a 5 V CMOS output sharing a net
+/// with a 1.8 V-max input passed ERC clean.
+///
+/// Pins without electrical metadata are silently skipped, and the over-voltage
+/// direction additionally needs an explicit `(max-voltage …)` on the victim
+/// pin, so the check stays low-noise and grows useful as the library is
 /// annotated.
 fn checkVoltageDomainCompat(
     allocator: std.mem.Allocator,
@@ -383,7 +415,7 @@ fn checkBlockVoltageDomainCompat(
 
     for (block.ports) |p| {
         const e = p.electrical orelse continue;
-        if (e.electrical_type == null) continue;
+        if (e.electrical_type == null and e.max_voltage == null) continue;
         const base = na.baseNetName(p.net);
         const gop = try net_to_port_elec.getOrPut(allocator, base);
         if (!gop.found_existing) gop.value_ptr.* = .empty;
@@ -392,7 +424,7 @@ fn checkBlockVoltageDomainCompat(
     for (block.sections) |sec| {
         for (sec.ports) |sp| {
             const e = sp.electrical orelse continue;
-            if (e.electrical_type == null) continue;
+            if (e.electrical_type == null and e.max_voltage == null) continue;
             const base = na.baseNetName(sp.name);
             const gop = try net_to_port_elec.getOrPut(allocator, base);
             if (!gop.found_existing) gop.value_ptr.* = .empty;
@@ -408,64 +440,217 @@ fn checkBlockVoltageDomainCompat(
         const base = na.baseNetName(net.name);
         if (std.mem.eql(u8, base, "GND")) continue;
 
-        var worst_driver_high: ?f64 = null;
-        var worst_receiver_high_threshold: ?f64 = null;
+        var levels: NetLevels = .{};
 
         for (net.pins) |pin| {
             const elec = ref_to_elec.get(pin.ref_des) orelse continue;
             const decl = findPinDecl(elec, pin.pin) orelse continue;
-            applyDecl(decl, &worst_driver_high, &worst_receiver_high_threshold);
+            applyDecl(decl, .{ .instance = pin.ref_des }, &levels);
         }
 
         if (net_to_port_elec.get(base)) |port_decls| {
-            for (port_decls.items) |decl| {
-                applyDecl(decl, &worst_driver_high, &worst_receiver_high_threshold);
-            }
+            // `buildPort`/`parseSectionPort` set `decl.pin` to the port's own
+            // name, so it doubles as the owner label for a boundary contract.
+            for (port_decls.items) |decl| applyDecl(decl, .{ .port = decl.pin }, &levels);
         }
 
-        if (worst_driver_high) |drv| {
-            if (worst_receiver_high_threshold) |rcv| {
-                if (drv < rcv) {
-                    const msg = std.fmt.allocPrint(
-                        allocator,
-                        "Net \"{s}\": driver high level {d:.2}V is below receiver high threshold {d:.2}V — a level shifter is required",
-                        .{ base, drv, rcv },
-                    ) catch continue;
-                    try violations.append(allocator, .{
-                        .kind = .voltage_domain_incompatible,
-                        .severity = .@"error",
-                        .message = msg,
-                        .net = base,
-                    });
-                }
-            }
-        }
+        // A rail puts its declared voltage on EVERY pin sitting on it, whether
+        // or not anything on the net declares `v-oh-typ`. Fold it in so a 5 V
+        // rail landing on a 3.3 V-max pad is caught by the same compare.
+        if (declaredRailVolts(block, base)) |rail_v| applyDrive(&levels, rail_v, base);
+
+        try appendUnderDrive(allocator, base, levels, violations);
+        try appendOverstress(allocator, base, levels, violations);
     }
 }
 
-/// Fold one electrical declaration into the running worst-driver / worst-
-/// receiver tallies for a net. Pins and ports share this logic so port-level
-/// boundary contracts (e.g. "this mezz pin is 3.3 V CMOS") participate in the
-/// same driver-meets-threshold compare as component pins.
-fn applyDecl(decl: env_mod.ElectricalDecl, worst_driver_high: *?f64, worst_receiver_high_threshold: *?f64) void {
+/// Who declared one electrical contract on a net: a component pin (which
+/// carries a real ref-des the schematic viewer can jump to) or a boundary port
+/// (which carries only a name). Kept distinct so a port-sourced finding never
+/// fills `Violation.ref_des` with something that is not a ref-des.
+const DeclOwner = union(enum) {
+    instance: []const u8,
+    port: []const u8,
+
+    /// Human-readable name for the violation message.
+    fn label(self: DeclOwner) []const u8 {
+        return switch (self) {
+            .instance => |ref_des| ref_des,
+            .port => |name| name,
+        };
+    }
+
+    /// Value for `Violation.ref_des` — empty for a boundary port.
+    fn refDes(self: DeclOwner) []const u8 {
+        return switch (self) {
+            .instance => |ref_des| ref_des,
+            .port => "",
+        };
+    }
+};
+
+/// Running per-net electrical tallies, folded from every component pin and
+/// boundary-port declaration landing on that net. Two independent compares read
+/// from it (see `checkVoltageDomainCompat`): the under-drive pair
+/// (`worst_driver_high` vs `worst_receiver_high_threshold`) and the
+/// over-voltage pair (`peak_drive` vs `lowest_max_voltage`).
+const NetLevels = struct {
+    /// Lowest `v_oh_typ` across drivers — the driver least able to meet a
+    /// receiver threshold.
+    worst_driver_high: ?f64 = null,
+    /// Highest `v_ih_min` across receivers — the hardest threshold to meet.
+    worst_receiver_high_threshold: ?f64 = null,
+    /// Highest voltage anything puts on the net: the strongest driver's
+    /// `v_oh_typ`, or the net's declared rail voltage.
+    peak_drive: ?f64 = null,
+    /// Label of whatever sources `peak_drive` (a ref-des, a port name, or the
+    /// rail's net name).
+    peak_source: []const u8 = "",
+    /// Lowest declared `(max-voltage …)` across every declaration on the net —
+    /// the first part the net destroys.
+    lowest_max_voltage: ?f64 = null,
+    /// Who owns `lowest_max_voltage`, and which of its pins.
+    max_owner: ?DeclOwner = null,
+    max_owner_pin: []const u8 = "",
+};
+
+/// Fold one electrical declaration into the running tallies for a net. Pins and
+/// ports share this logic so port-level boundary contracts (e.g. "this mezz pin
+/// is 3.3 V CMOS") participate in the same compares as component pins.
+///
+/// The absolute-max rating is folded FIRST and without consulting
+/// `electrical_type`: `(max-voltage …)` is a package rating that holds whatever
+/// signal role the pin plays, and a declaration carrying a rating but no
+/// `(type …)` must still be protected — an omitted type is not consent to be
+/// overdriven.
+fn applyDecl(decl: env_mod.ElectricalDecl, owner: DeclOwner, levels: *NetLevels) void {
+    if (decl.max_voltage) |limit| {
+        if (levels.lowest_max_voltage == null or limit < levels.lowest_max_voltage.?) {
+            levels.lowest_max_voltage = limit;
+            levels.max_owner = owner;
+            levels.max_owner_pin = decl.pin;
+        }
+    }
+
     const t = decl.electrical_type orelse return;
     const is_driver = t == .output or t == .io or t == .power_out;
     const is_receiver = t == .input or t == .io or t == .power_in;
 
     if (is_driver) {
         if (decl.v_oh_typ) |v| {
-            if (worst_driver_high.* == null or v < worst_driver_high.*.?) {
-                worst_driver_high.* = v;
+            if (levels.worst_driver_high == null or v < levels.worst_driver_high.?) {
+                levels.worst_driver_high = v;
             }
+            applyDrive(levels, v, owner.label());
         }
     }
     if (is_receiver) {
         if (decl.v_ih_min) |v| {
-            if (worst_receiver_high_threshold.* == null or v > worst_receiver_high_threshold.*.?) {
-                worst_receiver_high_threshold.* = v;
+            if (levels.worst_receiver_high_threshold == null or v > levels.worst_receiver_high_threshold.?) {
+                levels.worst_receiver_high_threshold = v;
             }
         }
     }
+}
+
+/// Raise the net's peak drive if `volts` — a driver's output-high level or a
+/// declared rail voltage — is the highest seen so far, recording its source for
+/// the violation message.
+fn applyDrive(levels: *NetLevels, volts: f64, source: []const u8) void {
+    if (levels.peak_drive != null and volts <= levels.peak_drive.?) return;
+    levels.peak_drive = volts;
+    levels.peak_source = source;
+}
+
+/// Voltage net `base` carries according to the design's OWN declared numbers: a
+/// derived rail's rating/nominal, a top-level port's `(rated …)`/nominal, or a
+/// section power port's voltage. Name-encoded spellings ("V3P3", "+5V") are
+/// deliberately NOT decoded here — a guessed rail voltage must never be the
+/// thing that fails an error-severity absolute-max check. The rated MAXIMUM
+/// wins over the nominal, because an abs-max rating is judged against the worst
+/// case the rail reaches, not its typical value.
+fn declaredRailVolts(block: *const DesignBlock, base: []const u8) ?f64 {
+    for (block.rails) |rail| {
+        if (!railNameMatches(rail, base)) continue;
+        if (rail.rated_voltage.max) |v| return v;
+        if (rail.nominal) |v| return v;
+    }
+    for (block.ports) |p| {
+        if (!std.mem.eql(u8, na.baseNetName(p.net), base) and !std.mem.eql(u8, p.name, base)) continue;
+        if (p.rated_max) |v| return v;
+        if (p.nominal) |v| return v;
+    }
+    for (block.sections) |sec| {
+        if (sectionPortVolts(sec, base)) |v| return v;
+    }
+    return null;
+}
+
+/// Declared `(port "NAME" power <volts>)` voltage for `base` inside `sec` or any
+/// nested sub-section, or null when no section port names it.
+fn sectionPortVolts(sec: env_mod.Section, base: []const u8) ?f64 {
+    for (sec.ports) |p| {
+        if (!std.mem.eql(u8, p.name, base)) continue;
+        if (p.voltage) |v| return v;
+    }
+    for (sec.sub_sections) |sub| {
+        if (sectionPortVolts(sub, base)) |v| return v;
+    }
+    return null;
+}
+
+/// Emit the under-drive finding for `base` when the net's weakest driver cannot
+/// reach its hardest receiver threshold.
+fn appendUnderDrive(
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    levels: NetLevels,
+    violations: *std.ArrayList(Violation),
+) std.mem.Allocator.Error!void {
+    const drv = levels.worst_driver_high orelse return;
+    const rcv = levels.worst_receiver_high_threshold orelse return;
+    if (drv >= rcv) return;
+    const msg = std.fmt.allocPrint(
+        allocator,
+        "Net \"{s}\": driver high level {d:.2}V is below receiver high threshold {d:.2}V — a level shifter is required",
+        .{ base, drv, rcv },
+    ) catch return;
+    try violations.append(allocator, .{
+        .kind = .voltage_domain_incompatible,
+        .severity = .@"error",
+        .message = msg,
+        .net = base,
+    });
+}
+
+/// Emit the over-voltage finding for `base` when the strongest driver (or the
+/// net's declared rail voltage) exceeds the lowest absolute-max rating declared
+/// by anything on it. This is the direction that destroys parts and cannot be
+/// reworked once fabbed, so it is an `error`, and it is attributed to the RATED
+/// part — the one that dies — not to the aggressor.
+fn appendOverstress(
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    levels: NetLevels,
+    violations: *std.ArrayList(Violation),
+) std.mem.Allocator.Error!void {
+    const drive = levels.peak_drive orelse return;
+    const limit = levels.lowest_max_voltage orelse return;
+    const owner = levels.max_owner orelse return;
+    if (drive <= limit + overvoltage_tolerance_v) return;
+    const msg = std.fmt.allocPrint(
+        allocator,
+        "Net \"{s}\": {s} drives it to {d:.2}V but {s} pin \"{s}\" is rated {d:.2}V absolute max — " ++
+            "that overvoltage destroys the part; add a level shifter, divider or series clamp",
+        .{ base, levels.peak_source, drive, owner.label(), levels.max_owner_pin, limit },
+    ) catch return;
+    try violations.append(allocator, .{
+        .kind = .voltage_overstress,
+        .severity = .@"error",
+        .message = msg,
+        .ref_des = owner.refDes(),
+        .net = base,
+    });
 }
 
 /// Linear scan to find an `ElectricalDecl` whose `pin` field matches the
@@ -1564,13 +1749,63 @@ fn checkBlockStrapTies(
     }
 }
 
+/// True when net base name `base` reads as a POWER-SUPPLY rail (ground
+/// deliberately excluded — callers that also want ground compose this with
+/// `pin_roles.isGroundFn`).
+///
+/// This is THE supply-name vocabulary for ERC. Both the strap direct-tie check
+/// (`isRailNet`) and the IC-power-presence check (`checkBlockPowerPins`) read
+/// it, so a spelling one recognises is a spelling the other recognises. They
+/// used to keep two hand-maintained lists and had drifted apart in both
+/// directions:
+///   * the strap check was missing `V3P3` (point rails), `V_3V3D`/`V_RF_3P3`
+///     (underscore rails) and `+5_0V` (the dot-free signed form
+///     `import_kicad.sanitizeNetName` manufactures from `+5.0V`), so on a flat
+///     or imported design whose rail never lands in `block.rails` an ADDR/MODE
+///     strap tied straight to the rail produced NO error — a false negative on
+///     an error-class check guarding an irreversible fab mistake;
+///   * the power-pin check was missing the bare voltage literal (`3V3`, `1V8`),
+///     so an IC powered only from such a rail was wrongly told it had no power.
+///
+/// Every term here is a supply spelling this tree actually uses; nothing that
+/// only *looks* voltage-ish was added, because widening this predicate widens
+/// an error-severity check.
+fn isSupplyRailName(base: []const u8) bool {
+    if (std.mem.startsWith(u8, base, "VDD") or std.mem.startsWith(u8, base, "VCC")) return true;
+    if (std.mem.startsWith(u8, base, "VBAT") or std.mem.startsWith(u8, base, "VBUS")) return true;
+    if (std.mem.startsWith(u8, base, "VIN") or std.mem.startsWith(u8, base, "VOUT")) return true;
+    // Local post-filter supply nodes that *end* in a supply token — a chip's
+    // VDD/VCC pin fed from a board rail through a ferrite/LC filter sits on a
+    // renamed node like `SW_VDD` (PE42553 cal switch: V_3V3D → FB_VDD →
+    // SW_VDD) or `ANA_VCC`. Mirrors the `endsWith GND/VSS` ground rule.
+    if (std.mem.endsWith(u8, base, "VDD") or std.mem.endsWith(u8, base, "VCC")) return true;
+    // The analog/digital supply domains, spelled from the shared rail
+    // vocabulary. Kept as their own term rather than folded into `isSupplyFn`:
+    // that predicate rejects a supply-NAMED strap (`AVDD_EN`), and these checks
+    // want the rail itself recognised even so.
+    if (std.mem.startsWith(u8, base, rails_mod.analog_supply)) return true;
+    if (std.mem.startsWith(u8, base, rails_mod.digital_supply)) return true;
+    // VREF: auto-direction level translators (LSF0108, TXS0108, …) have no
+    // VDD/VCC pin — they are supplied through their VREF_A / VREF_B rails.
+    if (std.mem.startsWith(u8, base, "VREF") or std.mem.startsWith(u8, base, "V+")) return true;
+    // The system rail (+ derivatives) is a real supply — kept explicitly
+    // because `isSupplyFn` doesn't list it.
+    if (std.mem.startsWith(u8, base, rails_mod.system_rail)) return true;
+    // Real supply names (VS, VBUS, VIN, …) by `pin_roles.isSupplyFn`, which
+    // rejects ground first so VSS/VSSA never read as a supply.
+    if (pin_roles.isSupplyFn(base)) return true;
+    // The board-rail spellings the name prefixes above cannot express.
+    if (isVoltagePointRail(base) or isUnderscoreRail(base)) return true;
+    return isSignedVoltRail(base) or looksLikeRailLiteral(base);
+}
+
 /// True when net base name `base` denotes a power or ground rail — a strap on it
-/// is a direct tie. Combines the supply/ground name heuristics with this block's
-/// declared rail names and a voltage-literal fallback ("3V3", "1V8", "+5V").
+/// is a direct tie. Combines the shared supply vocabulary (`isSupplyRailName`)
+/// and the ground heuristic with this block's declared rail names.
 fn isRailNet(base: []const u8, rail_set: *const std.StringHashMapUnmanaged(void)) bool {
-    if (pin_roles.isGroundFn(base) or pin_roles.isSupplyFn(base)) return true;
+    if (pin_roles.isGroundFn(base)) return true;
     if (rail_set.contains(base)) return true;
-    return looksLikeRailLiteral(base);
+    return isSupplyRailName(base);
 }
 
 /// True when `base` looks like a voltage-literal rail name: an optional +/- sign,
@@ -2488,52 +2723,11 @@ fn checkBlockPowerPins(
             pin_roles.isGroundFn(base);
         // A net classified as ground is never also a supply — reject it first so
         // "VSS"/"VSSA" don't read as power (the old inline `startsWith("VS")`
-        // heuristic marked VSS/VSYNC/VSW/VSENSE as power; delegate to
-        // `pin_roles.isSupplyFn` for the exact `VS`/`VSYS` form instead).
-        const is_vdd = !is_gnd and (std.mem.startsWith(u8, base, "VDD") or std.mem.startsWith(u8, base, "VCC") or
-            std.mem.startsWith(u8, base, "VBAT") or
-            // Local post-filter supply nodes that *end* in a supply token — a
-            // chip's VDD/VCC pin fed from a board rail through a ferrite/LC
-            // filter sits on a renamed node like `SW_VDD` (PE42553 cal switch:
-            // V_3V3D → FB_VDD → SW_VDD) or `ANA_VCC`. Mirrors the `endsWith
-            // GND/VSS` rule the ground classifier already applies.
-            std.mem.endsWith(u8, base, "VDD") or std.mem.endsWith(u8, base, "VCC") or
-            // `V<int>P<frac>` board-rail convention (V1P8, V3P3, V5P0, V0P9,
-            // V12P0 …) — `P` is the decimal point. Generalises the old
-            // V1P/V2P/V3P3 special-cases, which missed higher rails like the
-            // 5V `V5P0` feeding the NeoPixel level shifter.
-            isVoltagePointRail(base) or
-            std.mem.startsWith(u8, base, "VBUS") or std.mem.startsWith(u8, base, "VIN") or
-            std.mem.startsWith(u8, base, "VOUT") or
-            // The analog/digital supply domains, spelled from the shared
-            // rail vocabulary. Kept as their own term rather than folded
-            // into `isSupplyFn` below: that predicate rejects a
-            // supply-NAMED strap (`AVDD_EN`), and this check wants the
-            // rail recognised even so.
-            std.mem.startsWith(u8, base, rails_mod.analog_supply) or
-            std.mem.startsWith(u8, base, rails_mod.digital_supply) or
-            std.mem.startsWith(u8, base, "V+") or
-            // VREF: auto-direction level translators (LSF0108, TXS0108, …) have no
-            // VDD/VCC pin — they are supplied through their VREF_A / VREF_B rails.
-            std.mem.startsWith(u8, base, "VREF") or
-            // The system rail (+ derivatives) is a real supply — kept
-            // explicitly because `isSupplyFn` doesn't list it.
-            std.mem.startsWith(u8, base, rails_mod.system_rail) or
-            // Real supply names (VS, VBUS, VIN, …) by `pin_roles.isSupplyFn`,
-            // which rejects ground first so VSS/VSSA never read as a supply —
-            // replacing the old `startsWith("VS")` that swallowed
-            // VSS/VSYNC/VSW/VSENSE as power.
-            pin_roles.isSupplyFn(base) or
-            // `V_…` underscore board rails — both the digit-first form
-            // (V_3V3D, V_12V, V_5V0) and the domain-tagged form
-            // (V_RF_3P3, V_RX_2P5, V_NEG_3P3) RF/analog boards use. Without
-            // this an IC powered only from such a rail is falsely flagged
-            // "no power connection".
-            isUnderscoreRail(base) or
-            // KiCad-convention signed rails (+5V, +3V3, -5.0V, +12V — and
-            // the dot-free +5_0V form imported modules use). Boards migrated
-            // via import-kicad keep these names verbatim.
-            isSignedVoltRail(base));
+        // heuristic marked VSS/VSYNC/VSW/VSENSE as power; `isSupplyRailName`
+        // delegates to `pin_roles.isSupplyFn` for the exact `VS`/`VSYS` form).
+        // The supply vocabulary itself lives in `isSupplyRailName`, shared with
+        // the strap direct-tie check so the two can no longer drift apart.
+        const is_vdd = !is_gnd and isSupplyRailName(base);
 
         for (net.pins) |pin| {
             if (pin.ref_des.len == 0) continue;
@@ -4002,6 +4196,134 @@ test "top-level port electrical decl flags incompatible receiver" {
     try std.testing.expect(hit);
 }
 
+// Build a single-net DesignBlock with a driver declaring `driver_oh_typ` and a
+// receiver declaring `receiver_max_v` as its absolute-maximum rating, for
+// over-voltage tests. The receiver's v_ih_min is deliberately low so the
+// under-drive compare stays silent and only the over-voltage direction can fire.
+fn makeOverstressBlock(
+    alloc: std.mem.Allocator,
+    driver_oh_typ: f64,
+    receiver_max_v: f64,
+) !DesignBlock {
+    const drv_elec = try alloc.alloc(env_mod.ElectricalDecl, 1);
+    drv_elec[0] = .{ .pin = "1", .electrical_type = .output, .v_oh_typ = driver_oh_typ };
+    const rcv_elec = try alloc.alloc(env_mod.ElectricalDecl, 1);
+    rcv_elec[0] = .{
+        .pin = "1",
+        .electrical_type = .input,
+        .v_ih_min = 1.17,
+        .max_voltage = receiver_max_v,
+    };
+    const insts = try alloc.alloc(env_mod.Instance, 2);
+    insts[0] = .{
+        .ref_des = "U1",
+        .component = "drv",
+        .value = "",
+        .footprint = "",
+        .symbol = "",
+        .electrical = drv_elec,
+    };
+    insts[1] = .{
+        .ref_des = "U2",
+        .component = "rcv",
+        .value = "",
+        .footprint = "",
+        .symbol = "",
+        .electrical = rcv_elec,
+    };
+    const pins = try alloc.alloc(env_mod.PinRef, 2);
+    pins[0] = .{ .ref_des = "U1", .pin = "1" };
+    pins[1] = .{ .ref_des = "U2", .pin = "1" };
+    const nets = try alloc.alloc(env_mod.Net, 1);
+    nets[0] = .{ .name = "SIG", .pins = pins };
+    return .{
+        .name = "overstress-fixture",
+        .instances = insts,
+        .nets = nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+}
+
+// spec: erc - Flags a driver whose output high exceeds a receiver's declared absolute-maximum voltage
+test "overvoltage above a declared max-voltage is an error" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // 5 V CMOS driver (v_oh_typ 4.9 V) sharing a net with a 1.8 V part rated
+    // 1.98 V absolute max. `max_voltage` was read by ZERO checkers, so this
+    // exact net — the one that destroys the part — passed ERC clean while the
+    // review's boundary-contract table printed the rating as if enforced.
+    const block = try makeOverstressBlock(alloc, 4.9, 1.98);
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkVoltageDomainCompat(alloc, &block, &violations);
+    try std.testing.expectEqual(@as(usize, 1), countKind(violations.items, .voltage_overstress));
+    for (violations.items) |v| {
+        if (v.kind != .voltage_overstress) continue;
+        try std.testing.expectEqual(Severity.@"error", v.severity);
+        try std.testing.expectEqualStrings("SIG", v.net);
+        // Attributed to the RATED part — the one that dies, not the aggressor.
+        try std.testing.expectEqualStrings("U2", v.ref_des);
+    }
+}
+
+// spec: erc - Emits no overvoltage violation when every driver stays inside the declared ratings
+test "driver inside the declared rating emits no overvoltage" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // 3.3 V CMOS driver into a part rated 3.6 V — the ordinary, correct case.
+    const block = try makeOverstressBlock(alloc, 3.1, 3.6);
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkVoltageDomainCompat(alloc, &block, &violations);
+    try std.testing.expectEqual(@as(usize, 0), countKind(violations.items, .voltage_overstress));
+}
+
+// spec: erc - A declared rail voltage over-stresses a rated pin sitting on the same net
+test "declared rail voltage over-stresses a rated pin" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Nothing on this net declares v-oh-typ: the aggressor is the rail's own
+    // declared 5 V, which reaches every pin sitting on it.
+    const rcv_elec = try alloc.alloc(env_mod.ElectricalDecl, 1);
+    rcv_elec[0] = .{ .pin = "VDD", .electrical_type = .power_in, .max_voltage = 3.6 };
+    const insts = try alloc.alloc(env_mod.Instance, 1);
+    insts[0] = .{
+        .ref_des = "U1",
+        .component = "rcv",
+        .value = "",
+        .footprint = "",
+        .symbol = "",
+        .electrical = rcv_elec,
+    };
+    const pins = try alloc.alloc(env_mod.PinRef, 1);
+    pins[0] = .{ .ref_des = "U1", .pin = "VDD" };
+    const nets = try alloc.alloc(env_mod.Net, 1);
+    nets[0] = .{ .name = "VBUS", .pins = pins };
+    const rails = try alloc.alloc(env_mod.PowerRail, 1);
+    rails[0] = .{ .name = "VBUS", .nominal = 5.0 };
+
+    const block: DesignBlock = .{
+        .name = "rail-overstress",
+        .instances = insts,
+        .nets = nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .rails = rails,
+    };
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkVoltageDomainCompat(alloc, &block, &violations);
+    try std.testing.expectEqual(@as(usize, 1), countKind(violations.items, .voltage_overstress));
+}
+
 // spec: erc - Flags a sequencing cycle by emitting sequence_cycle per affected rail
 test "sequencing cycle detected" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -4152,6 +4474,27 @@ test "underscore voltage rails count as power" {
     try std.testing.expect(!isUnderscoreRail("V_SENSE")); // no digit ⇒ not a rail
     try std.testing.expect(!isUnderscoreRail("X_3V3")); // wrong first char
     try std.testing.expect(!isUnderscoreRail("VX3V3")); // no underscore
+}
+
+// spec: erc - The strap direct-tie check shares the power-pin check's supply-rail vocabulary
+test "strap rail predicate recognises point underscore and signed rails" {
+    // Empty rail set = the flat / import-kicad case, where nothing was derived
+    // into `block.rails`. These three spellings are exactly what
+    // `checkBlockPowerPins` has always called power and `isRailNet` did not, so
+    // a MODE/ADDR strap tied straight to such a rail produced NO error at all.
+    const derived: std.StringHashMapUnmanaged(void) = .empty;
+    try std.testing.expect(isRailNet("V3P3", &derived)); // point rail
+    try std.testing.expect(isRailNet("V_3V3D", &derived)); // underscore rail
+    try std.testing.expect(isRailNet("+5_0V", &derived)); // import-kicad's +5.0V
+    // The routes that already worked must keep working.
+    try std.testing.expect(isRailNet("VDD", &derived));
+    try std.testing.expect(isRailNet("GND", &derived));
+    try std.testing.expect(isRailNet("3V3", &derived));
+    // …and a signal name must still not read as a rail: widening this predicate
+    // widens an error-severity check.
+    try std.testing.expect(!isRailNet("MOSI", &derived));
+    try std.testing.expect(!isRailNet("ADDR0", &derived));
+    try std.testing.expect(!isRailNet("V_SENSE", &derived));
 }
 
 // spec: erc - Accepts an MPN-identified fixed component as a valued passive (no missing_value)
@@ -4597,4 +4940,58 @@ test "orphaned verification flags a stale req id on a live instance" {
         violations.deinit(std.testing.allocator);
     }
     try std.testing.expectEqual(@as(usize, 1), countKind(violations.items, .verification_orphaned));
+}
+
+// spec: erc - a dangling (verifies …) sign-off declared inside a reused module is flagged too
+test "orphaned verification inside a sub-block is flagged" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const reqs = [_]env_mod.Requirement{.{ .text = "rule", .id = "r1" }};
+    const sub_insts = [_]Instance{.{
+        .ref_des = "U1",
+        .component = "x",
+        .value = "",
+        .footprint = "",
+        .symbol = "",
+        .id = "aa11bb22",
+        .requirements = &reqs,
+    }};
+    // The module signs off "U1/r1" (resolves) and "U7/r1" (orphaned by a
+    // renumber). `req_checks.applyVerifications` applies module-internal
+    // verifications recursively, so this check has to walk sub-blocks too —
+    // iterating only the top block made a reused module's drift invisible.
+    const sub_verifs = [_]env_mod.Verification{
+        .{ .ref_des = "U1", .req_id = "r1", .rationale = "ok" },
+        .{ .ref_des = "U7", .req_id = "r1", .rationale = "drifted" },
+    };
+    const sub_block = try alloc.create(DesignBlock);
+    sub_block.* = .{
+        .name = "buck",
+        .instances = &sub_insts,
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .verifications = &sub_verifs,
+    };
+    const subs = [_]env_mod.SubBlock{.{ .name = "buck", .block = sub_block }};
+    const block: DesignBlock = .{
+        .name = "demo",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &subs,
+    };
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkOrphanedVerifications(alloc, &block, &violations);
+    try std.testing.expectEqual(@as(usize, 1), countKind(violations.items, .verification_orphaned));
+    for (violations.items) |v| {
+        if (v.kind != .verification_orphaned) continue;
+        try std.testing.expectEqualStrings("U7", v.ref_des);
+    }
 }

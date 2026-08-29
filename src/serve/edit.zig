@@ -6,6 +6,7 @@
 const std = @import("std");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
+const atomic_write = @import("../infra/atomic_write.zig");
 const log = @import("../infra/log.zig");
 const paths = @import("../paths.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
@@ -425,14 +426,9 @@ pub fn editFootprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
         }
     }
 
-    const file = infra_fs.cwd().createFile(file_path, .{}) catch {
+    atomic_write.writeFile(file_path, final_source) catch {
         res.status = 500;
         res.body = err_cannot_write_file;
-        return;
-    };
-    defer file.close();
-    file.writeAll(final_source) catch {
-        res.status = 500;
         return;
     };
 
@@ -671,14 +667,9 @@ pub fn addInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
     }
 
     // Write file
-    const file = infra_fs.cwd().createFile(file_path, .{}) catch {
+    atomic_write.writeFile(file_path, new_source.written()) catch {
         res.status = 500;
         res.body = err_cannot_write_file;
-        return;
-    };
-    defer file.close();
-    file.writeAll(new_source.written()) catch {
-        res.status = 500;
         return;
     };
 
@@ -1453,14 +1444,9 @@ pub fn removeInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response
     try nw.writeAll(source[0..inst_start]);
     try nw.writeAll(source[inst_end..]);
 
-    const file = infra_fs.cwd().createFile(file_path, .{}) catch {
+    atomic_write.writeFile(file_path, new_source.written()) catch {
         res.status = 500;
         res.body = err_cannot_write_file;
-        return;
-    };
-    defer file.close();
-    file.writeAll(new_source.written()) catch {
-        res.status = 500;
         return;
     };
 
@@ -2324,11 +2310,10 @@ pub fn writeAndRebuild(
         break :blk null;
     };
 
-    {
-        const file = infra_fs.cwd().createFile(path, .{}) catch return error.CannotWriteDesign;
-        defer file.close();
-        file.writeAll(new_source) catch return error.CannotWriteDesign;
-    }
+    // tmp → fsync → rename: the snapshot above is best-effort, so a truncating
+    // write is the one step that could leave the design with neither its old
+    // nor its new contents.
+    atomic_write.writeFile(path, new_source) catch return error.CannotWriteDesign;
 
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
@@ -2799,9 +2784,9 @@ fn libComponentPath(allocator: std.mem.Allocator, project_dir: []const u8, compo
 }
 
 fn writeLibComponent(path: []const u8, new_source: []const u8) EditError!void {
-    const file = infra_fs.cwd().createFile(path, .{}) catch return error.CannotWriteDesign;
-    defer file.close();
-    file.writeAll(new_source) catch return error.CannotWriteDesign;
+    // A library component has no history snapshot at all, so the atomic write is
+    // the only thing standing between an interrupted save and a lost part.
+    atomic_write.writeFile(path, new_source) catch return error.CannotWriteDesign;
 }
 
 fn safeLibName(name: []const u8) bool {

@@ -25,6 +25,7 @@ const fill_cache = @import("fill_cache.zig");
 const bypass_open = @import("bypass_open.zig");
 const net_open = @import("net_open.zig");
 const net_identity = @import("net_identity.zig");
+const net_name = @import("../net_name.zig");
 const optimizer = @import("optimizer.zig");
 const router = @import("router.zig");
 const pour = @import("pour.zig");
@@ -830,11 +831,36 @@ fn filledTopology(alloc: std.mem.Allocator, in: CopperCheck, memo: ?pour.FillMem
 }
 
 /// The `placement.nets` index a user zone's net name refers to, or -1 when no
-/// net carries that spelling. -1 is deliberately pessimistic: a fill nobody can
-/// attribute makes every net dirty rather than silently belonging to none.
+/// net carries that spelling at all. -1 is deliberately pessimistic: a fill
+/// nobody can attribute makes every net dirty rather than silently belonging to
+/// none.
+///
+/// Two spellings, because the two sides of a user zone read its name
+/// differently and this index has to be sound for the stricter one:
+///
+///   * `fab_readiness.uniteUserZones` credits a zone's fill to a net exactly
+///     when the zone spells that net's CANONICAL name byte for byte. So an
+///     exact hit is authoritative — it names the one canonical group whose
+///     graphs read this fill, and marking that group is necessary and
+///     sufficient. It is tried first for that reason: a case-insensitive scan
+///     that happened to land on a differently-cased twin would mark a group
+///     that does not read the fill and leave the one that does carried, which
+///     is a stale answer rather than a slow one.
+///
+///   * the RASTER side is looser — `pour.planeCarries`, which decides what the
+///     zone's own fill contains, treats `GND` and `pwr/GND` as one rail — so a
+///     zone named by the `/`-leaf of a flattened rail is an ordinary board, not
+///     a malformed one. Nothing credits such a fill to a net, so any answer is
+///     sound; naming the leaf's net marks one group where falling to -1 rebuilt
+///     every net's connectivity graph on every edit that re-poured the zone.
 fn netIndexOfName(placement: optimizer.Placement, name: []const u8) i32 {
     for (placement.nets, 0..) |net, i| {
-        if (std.ascii.eqlIgnoreCase(net.name, name)) return drc.partyIndex(i);
+        if (std.mem.eql(u8, net.name, name)) return drc.partyIndex(i);
+    }
+    for (placement.nets, 0..) |net, i| {
+        if (std.ascii.eqlIgnoreCase(net.name, name) or
+            std.ascii.eqlIgnoreCase(net_name.leaf(net.name), net_name.leaf(name)))
+            return drc.partyIndex(i);
     }
     return -1;
 }
@@ -1593,6 +1619,45 @@ test "a scoped recheck carries the deferred kinds forward untouched" {
     try testing.expectEqual(@as(usize, 1), drc.countKind(scoped.violations, .loop_area));
     try testing.expectEqual(@as(usize, 1), drc.countKind(scoped.violations, .reference_plane_gap));
     try testing.expect(scoped.prior.deferred.len == mixed.len);
+}
+
+test "a user zone's net resolves by exact spelling first and by hierarchy leaf after" {
+    const testing = std.testing;
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false, .x = 1.5, .y = 1.5 },
+    };
+
+    // `pwr/GND` shares its leaf with `GND` and is scanned FIRST. The exact
+    // spelling still has to win: `fab_readiness.uniteUserZones` credits a
+    // zone's fill on that byte-exact name, so answering with the leaf twin
+    // would mark a group that never reads the fill and carry the one that does
+    // — a stale connectivity answer rather than a slow one.
+    const twins = [_]optimizer.FlatNet{
+        .{ .name = "pwr/GND", .pins = &.{} },
+        .{ .name = "SIG", .pins = &.{} },
+        .{ .name = "GND", .pins = &.{} },
+    };
+    const shared = twoFaceBoard(&parts, &twins);
+    try testing.expectEqual(@as(i32, 2), netIndexOfName(shared, "GND"));
+    try testing.expectEqual(@as(i32, 0), netIndexOfName(shared, "pwr/GND"));
+    try testing.expectEqual(@as(i32, 1), netIndexOfName(shared, "SIG"));
+
+    // A zone that names a flattened rail by its LEAF is what the raster side
+    // already reads as that rail (`pour.planeCarries`), so it resolves to one
+    // net instead of falling to -1 — which made `netOpenScope` mark every net
+    // dirty and rebuild the whole board's connectivity on any edit that
+    // re-poured the zone.
+    const flattened = [_]optimizer.FlatNet{
+        .{ .name = "pwr/VOUT", .pins = &.{} },
+        .{ .name = "SIG", .pins = &.{} },
+    };
+    const board = twoFaceBoard(&parts, &flattened);
+    try testing.expectEqual(@as(i32, 0), netIndexOfName(board, "VOUT"));
+    try testing.expectEqual(@as(i32, 0), netIndexOfName(board, "vout"));
+
+    // A spelling no net carries at all stays pessimistic: nothing can be
+    // attributed, so every net is rebuilt rather than guessed at.
+    try testing.expectEqual(@as(i32, -1), netIndexOfName(board, "V_5VA"));
 }
 
 // spec: placement/fill-cache - only the editor's scoped recheck asks to retain patch bases; the priming pass an editor page runs on load does not, so the first edit after a page load pours once and the second updates

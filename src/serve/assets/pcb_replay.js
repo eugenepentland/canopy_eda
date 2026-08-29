@@ -169,7 +169,7 @@
   // job here (window.PCBLiveRoute.begin); we poll its growing event stream into
   // the SAME `data.timeline` the replay player reads, following the head until
   // the user scrubs back.
-  var live = { on: false, gen: 0, attempt: 0, since: 0, misses: 0,
+  var live = { on: false, gen: 0, attempt: 0, since: 0, misses: 0, reattached: false,
                follow: true, onFinal: null, logSeq: 0, seq: 0,
                stopping: false, elapsedMs: 0, stopElapsedMs: 0,
                sawSubcircuit: false, localElapsedMs: null };
@@ -747,6 +747,10 @@
     live.misses = 0; live.follow = true; live.stopping = false;
     live.elapsedMs = 0; live.stopElapsedMs = 0;
     live.sawSubcircuit = false; live.localElapsedMs = null;
+    // A reattach has no local Route click behind it, so the board never took an
+    // undo snapshot for this job. The applier needs to know that before it
+    // replaces this tab's copper with the finished result.
+    live.reattached = !!(opts && opts.reattached);
     live.onFinal = (opts && opts.onFinal) || null;
     liveResetTimeline(nets);
     // Reset the Route button's remembered disabled state to enabled so exitMode
@@ -890,7 +894,8 @@
       exitMode();
       if (live.onFinal) live.onFinal(j.final || {}, {
         elapsedMs: live.elapsedMs,
-        localElapsedMs: live.localElapsedMs
+        localElapsedMs: live.localElapsedMs,
+        reattached: live.reattached
       });
       // Timeline stays loaded: scrubbing re-enters exclusive view (the board copper
       // IS the final anyway), and Adopt/Clear return to the live board.
@@ -898,6 +903,11 @@
       if (j.final && j.final.stage === "subcircuits") {
         var ss = j.final.subcircuit_seeds || {};
         status("subcircuit stage complete · " + (ss.completed_subcircuits || 0) + "/" + (ss.attempted_subcircuits || 0) + " modules — scrub to review", "ok");
+      } else if (live.reattached) {
+        // This tab only watched the run; the copper it was holding has just been
+        // replaced by a result solved for the poses the ROUTE started from, so
+        // say where the undo step is.
+        status("live route complete · " + routed + "/" + total + " nets — it replaced this tab's copper; Ctrl+Z restores what was here", "warn");
       } else status("live route complete · " + routed + "/" + total + " nets — scrub to review", "ok");
     }
   }
@@ -908,7 +918,7 @@
   function liveReattach() {
     fetch("/api/route-live/" + encodeURIComponent(PCB.name) + "?since=0&attempt=0")
       .then(function (r) { if (r.status === 404) return null; return r.json(); })
-      .then(function (j) { if (j && j.running) liveBegin(j.gen, null, { onFinal: window.PCBApplyRouteResult }); })
+      .then(function (j) { if (j && j.running) liveBegin(j.gen, null, { onFinal: window.PCBApplyRouteResult, reattached: true }); })
       .catch(function () { });
   }
 

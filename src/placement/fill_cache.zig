@@ -580,18 +580,18 @@ pub const Store = struct {
         };
         const alloc = entry.arena.allocator();
         entry.fills = (if (session != null) lightFills(alloc, fills) else dupeFills(alloc, fills)) catch {
-            destroyEntry(entry);
+            discardUnclaimed(entry);
             return null;
         };
         if (session) |s| {
             entry.nodes = distinctNodes(alloc, s.nodes.items) catch {
-                destroyEntry(entry);
+                discardUnclaimed(entry);
                 return null;
             };
         }
         entry.held.bytes = entry.arena.queryCapacity();
         if (entry.held.bytes > self.limits.bytes) {
-            destroyEntry(entry);
+            discardUnclaimed(entry);
             return null;
         }
         // The entry's own claim on every raster it points at, taken LAST and
@@ -797,6 +797,20 @@ var process_bases: BaseStore = .{};
 fn unlink(entry: *Entry) void {
     if (entry.held.refs == 0) return destroyEntry(entry);
     entry.held.dropped = true;
+}
+
+/// Abandon a half-built entry that never reached the claim `Store.build` takes
+/// at its end.
+///
+/// `destroyEntry` gives back one ref per node the entry NAMES, which is exactly
+/// right for an entry that took them and exactly wrong for one that failed
+/// first: the rasters it names are the session's, borrowed on the session's own
+/// count, and releasing them here would drive that count under and hand the
+/// pass's own `release` an underflow. Dropping the names is what makes the
+/// free give back only what was taken — nothing.
+fn discardUnclaimed(entry: *Entry) void {
+    entry.nodes = &.{};
+    destroyEntry(entry);
 }
 
 /// Free an entry and give back its claim on every raster it referenced. Called
@@ -1282,6 +1296,43 @@ test "a session-backed board entry shares its rasters with the fills it borrowed
     try testing.expect(held.entry != null);
     try testing.expectEqualSlices(i32, &[_]i32{5}, held.fills().zone_fills[0].labels);
     try testing.expectEqual(@as(usize, 1), held.entry.?.nodes.len);
+}
+
+// spec: placement/fill-cache - a board entry the byte ceiling declines gives back exactly the raster claims it took, so the pass that lent them can still release its own
+test "a declined oversized board entry gives back only the raster claims it took" {
+    var store: Store = .{ .backing = testing.allocator };
+    defer store.deinit();
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+
+    // A session that really holds a retained raster, so the entry below NAMES
+    // one. That is the only shape of this branch that can get the count wrong:
+    // an unsessioned board names nothing and has nothing to give back.
+    var session = store.beginSession(.keep).?;
+    const memo = session.memo();
+    _ = memo.put(memo.ctx, .{ .lo = 61, .hi = 61 }, try fakeFill(scratch.allocator(), 9));
+    try testing.expect(session.all_backed);
+    try testing.expectEqual(@as(usize, 1), store.fills.items.len);
+    const node = store.fills.items[0];
+    try testing.expectEqual(@as(usize, 1), node.held.refs); // the session's borrow
+
+    // Now nothing fits: the entry's own metadata arena alone is over the
+    // ceiling, so `build` must decline it BEFORE it claims that raster.
+    store.limits.bytes = 1;
+    const board: Key = .{ .lo = 62, .hi = 62 };
+    const zones = try scratch.allocator().dupe(drc.TopologyZone, &[_]drc.TopologyZone{
+        .{ .net = "GND", .layer = 0, .poly = &.{}, .component = 1 },
+    });
+    store.put(board, .{ .zones = zones }, session);
+    try testing.expect(!store.acquire(board).active());
+
+    // The declined entry never took a claim, so it must not have given one
+    // back: the session's borrow is still the only one on the raster, and
+    // releasing it is what brings the count to zero. Releasing a count the
+    // decline had already spent would underflow it instead.
+    try testing.expectEqual(@as(usize, 1), node.held.refs);
+    session.release();
+    try testing.expectEqual(@as(usize, 0), node.held.refs);
 }
 
 // spec: placement/fill-cache - a pass holding a fill the store could not retain publishes its board by COPYING the fill, never by referencing memory the pass owns
