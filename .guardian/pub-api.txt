@@ -172,6 +172,7 @@ src/bom.zig::FlatInfo struct_
 src/bom.zig::applyBomUuids | fn applyBomUuids( allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, ) BomError!void
 src/bom.zig::applyExisting value
 src/bom.zig::collectFlatInstances | fn collectFlatInstances( allocator: std.mem.Allocator, block: *const DesignBlock, prefix: []const u8, list: *std.ArrayList(FlatInfo), ) std.mem.Allocator.Error!void
+src/bom.zig::entryMatchesSource value
 src/bom.zig::existingSidecarMatches value
 src/bom.zig::generateUuid | fn generateUuid(allocator: std.mem.Allocator) (std.mem.Allocator.Error || std.Io.RandomSecureError)![]const u8
 src/bom.zig::loadBom | fn loadBom(allocator: std.mem.Allocator, bom_path: []const u8) BomError![]const BomEntry
@@ -180,6 +181,7 @@ src/bom.zig::resolveIdentities value
 src/bom_resolve.zig::ResolveError value
 src/bom_resolve.zig::SetPropertyError value
 src/bom_resolve.zig::applyExisting | fn applyExisting( allocator: std.mem.Allocator, block: *const DesignBlock, bom_path: []const u8, project_dir: []const u8, ) ResolveError!void
+src/bom_resolve.zig::entryMatchesSource | fn entryMatchesSource(entry: bom_mod.BomEntry, current: FlatInfo) bool
 src/bom_resolve.zig::existingSidecarMatches | fn existingSidecarMatches( allocator: std.mem.Allocator, block: *const DesignBlock, bom_path: []const u8, project_dir: []const u8, ) ResolveError!bool
 src/bom_resolve.zig::resolveIdentities | fn resolveIdentities( allocator: std.mem.Allocator, block: *const DesignBlock, bom_path: []const u8, project_dir: []const u8, ) ResolveError!void
 src/bom_resolve.zig::setBomProperty | fn setBomProperty( allocator: std.mem.Allocator, bom_path: []const u8, ref_des: []const u8, key: []const u8, value: []const u8, ) SetPropertyError!void
