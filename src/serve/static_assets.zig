@@ -1165,13 +1165,13 @@ test "PCB hand router adaptively widens power copper after steering" {
         "baseCounts=drcBlockCounts(drcGateRun",
         "function drawAdaptiveRunClearer",
         "function drawAdaptivePowerRun",
-        "ss[i-1].w+2*(ss[i].s-ss[i-1].s)",
+        "ss[i-1].w+(ss[i].bend&&ss[i-1].bend?0:2*(ss[i].s-ss[i-1].s))",
         "function drawAdaptivePowerPlan",
         "window.PCBDrawAdaptivePowerPlan",
         "window.PCBDrawAdaptivePowerPlanExact",
         "window.PCBDrawAdaptivePowerGateReady",
         "initial=power?drawAdaptivePowerPlan",
-        "drawAdaptivePowerPlan(old,dtrace.startPad,ep,nominal,powerTarget,drawAdaptiveRefinedClearWidth)",
+        "drawAdaptivePowerPlan(old,sp,tp,nominal,powerTarget,drawAdaptiveRefinedClearWidth)",
         "power route widened locally up to ",
         // Equal-width collinear stations collapse, and the shaped copper itself
         // is what the gate judges and what the board keeps — no second
@@ -1239,14 +1239,15 @@ test "PCB editor re-widens adaptive power runs after an edit moves them" {
         "t.xm==null&&!rfOwnsTrack(t)",
         "function rewidenGrow",
         "pad=drawEndpointLand(last.net,last.l||0,x,y);if(pad)break;",
-        "if(next.length!==1||claimed[trackIdEnsure(next[0].t)])break;",
+        "if(touch.length!==1)break;",
+        "if(next.length!==1||claimed[trackIdEnsure(next[0].t)]){joint=+touch[0].w||0;break;}",
         "function rewidenRun(",
         "function rewidenRuns",
         // Recut with the pen's own planner, all-or-nothing behind the exact
         // gate, committed as ordinary copper.
         "function rewidenDeclined",
         "function rewidenPlan",
-        "drawAdaptivePowerPlan(r.run,r.startPad,r.endPad,r.floor,r.target,drawAdaptiveRefinedClearWidth)",
+        "drawAdaptivePowerPlan(r.run,r.startPad||drawJointProfile(r.startJoint,r.target),r.endPad||drawJointProfile(r.endJoint,r.target),r.floor,r.target,drawAdaptiveRefinedClearWidth)",
         "shaped=r.run.map(function(q){return rewidenAtFloor(q,r.floor);});",
         "function rewidenStatus",
         "function rewidenApply",
@@ -1267,6 +1268,50 @@ test "PCB editor re-widens adaptive power runs after an edit moves them" {
     // so it must stay unreachable from a pointermove: one definition, three
     // gesture releases, and nothing else.
     try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, pcb_board_js, "rewidenHeal("));
+}
+
+// spec: placement/power-routing - two adaptive slices meeting at a bend or at a plain two-way splice with existing copper are emitted at one width, with the 45-degree transition moved onto the adjoining straight, while pad lands, via corners and T-junctions keep their free trunk/branch step
+test "PCB adaptive power copper never steps its width on a joint" {
+    const markers = [_][]const u8{
+        // A direction-changing track boundary is a bend station, and a run
+        // terminal spliced onto copper is pinned the same way.
+        "function drawAdaptiveBendJoint",
+        "return Math.abs(ax*by-ay*bx)>1e-9||ax*bx+ay*by<=0;",
+        "if(i&&drawAdaptiveBendJoint(tracks[i-1],t))bends.push(base);",
+        "bend:bends.some(function(q){return Math.abs(q-s)<=1e-8;})",
+        "if(start&&start.joint)ss[0].bend=true;",
+        "if(end&&end.joint)ss[ss.length-1].bend=true;",
+        // Two pinned stations sharing one interval level to the narrower of the
+        // pair — a zero-distance flank limit run in both directions.
+        "ss[i-1].w+(ss[i].bend&&ss[i-1].bend?0:2*(ss[i].s-ss[i-1].s))",
+        "ss[i+1].w+(ss[i].bend&&ss[i+1].bend?0:2*(ss[i+1].s-ss[i].s))",
+        // An interval touching a pinned station is emitted AT that width; the
+        // far-side interval still takes the max and its round cap covers the
+        // shared station.
+        "w=a.bend&&b.bend?Math.min(a.w,b.w):(a.bend?a.w:(b.bend?b.w:Math.max(a.w,b.w)));",
+        // The neighbour's width becomes an ordinary launch profile: held at the
+        // joint, then the standard 45-degree flank to or down from target.
+        "function drawJointProfile",
+        "return {kind:\"joint\",joint:true,width:width,land:0,taper:flank,step:Math.max(.005,flank/4)};",
+        "sr=startPad.joint?startPad:drawTaperProfile(",
+        "er=endPad.joint?endPad:drawTaperProfile(",
+        // Run boundaries on both surfaces: the recut walk's non-land stops, and
+        // a fresh gesture that starts or finishes on existing copper.
+        "if(next.length!==1||claimed[trackIdEnsure(next[0].t)]){joint=+touch[0].w||0;break;}",
+        "startJoint:behind.joint,endJoint:ahead.joint",
+        "r.startPad||drawJointProfile(r.startJoint,r.target)",
+        "r.endPad||drawJointProfile(r.endJoint,r.target)",
+        "function drawJointNeighbourWidth",
+        "if(hits.length!==1)return 0;",
+        "if(power&&!sp)sp=drawJointProfile(drawJointNeighbourWidth(first.net,first.l||0,first.x1,first.y1,old),powerTarget);",
+        "if(power&&!tp)tp=drawJointProfile(drawJointNeighbourWidth(dtrace.net,dtrace.l,dtrace.lx,dtrace.ly,old),powerTarget);",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+    // A T-junction and a via-covered corner stay free: the via test is what
+    // separates a splice from a barrel, and a land never becomes a joint.
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "if((PCB.vias||[]).some(function(v){return (v.net||\"\")===key&&Math.hypot(v.x-x,v.y-y)<=DRAW_JOINT_SNAP;}))return 0;") != null);
+    // The un-pinned emission must not survive anywhere in the adaptive planner.
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "var a=ss[i-1],b=ss[i],w=Math.max(a.w,b.w);") == null);
 }
 
 // spec: Web Server - A hand-routed RF launch keeps its generated portal collar inside the source pad, retries a DRC-blocked wide-land taper with progressively shorter flares, and finishes with the independently DRC-confirmed uniform trace when no automatic taper fits

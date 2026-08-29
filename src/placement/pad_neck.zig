@@ -365,6 +365,30 @@ const AdaptiveCell = struct {
     width: f64,
 };
 
+/// One track this pass has smoothed but not yet emitted. The whole net is
+/// shaped before any of it is written out, because a bend is only visible from
+/// both of the tracks that form it.
+const ShapedRun = struct {
+    track: router.Track,
+    len: f64,
+    cells: []AdaptiveCell,
+    /// An end cell was pulled down since this run last saw the flank passes.
+    reflank: bool = false,
+};
+
+/// One end of one of this net's tracks, as a joint candidate. A shaped run can
+/// still give width up; a track this pass left alone — already wider than the
+/// routing floor, or degenerate — contributes its fixed width and nothing else.
+const TrackEnd = struct {
+    at: [2]f64,
+    layer: u8,
+    /// Index into the pass's shaped runs, or null for a fixed-width neighbour.
+    run: ?usize,
+    /// 0 selects the run's first cell, 1 its last.
+    tail: u1,
+    width: f64,
+};
+
 const AdaptiveShape = struct {
     probe: router.TautProbe,
     track: router.Track,
@@ -407,19 +431,36 @@ fn widestClear(
     return low;
 }
 
-fn adaptiveShapeTrack(
+/// Clearance may jump at an obstacle edge. Pull each side down to a
+/// 45-degree-flank envelope so the emitted 50 um slices form a taper rather
+/// than a width step. Two directional passes compute the greatest profile
+/// beneath those local maxima. Re-running them after a joint has pulled an end
+/// cell down walks that neck back into the run at the same flank.
+fn flankCells(cells: []AdaptiveCell) void {
+    for (cells[1..], 1..) |*cell, i| {
+        const prior = cells[i - 1];
+        const centre_gap = ((prior.s1 - prior.s0) + (cell.s1 - cell.s0)) / 2;
+        cell.width = @min(cell.width, prior.width + adaptive_width_per_length * centre_gap);
+    }
+    var i = cells.len;
+    while (i > 1) {
+        i -= 1;
+        const next = cells[i];
+        const cell = &cells[i - 1];
+        const centre_gap = ((next.s1 - next.s0) + (cell.s1 - cell.s0)) / 2;
+        cell.width = @min(cell.width, next.width + adaptive_width_per_length * centre_gap);
+    }
+}
+
+fn shapeRun(
     arena: std.mem.Allocator,
-    out: *std.ArrayList(router.Track),
     adaptive: AdaptiveShape,
-) std.mem.Allocator.Error!bool {
+) std.mem.Allocator.Error!?ShapedRun {
     const track = adaptive.track;
     const floor = adaptive.floor;
     const target = adaptive.target;
     const len = std.math.hypot(track.x2 - track.x1, track.y2 - track.y1);
-    if (len <= eps or target <= floor + eps) {
-        try out.append(arena, track);
-        return false;
-    }
+    if (len <= eps or target <= floor + eps) return null;
     const shape = Shape{ .track = track, .nominal = target, .start = adaptive.start, .end = adaptive.end };
     var cells: std.ArrayList(AdaptiveCell) = .empty;
     var s0: f64 = 0;
@@ -443,27 +484,20 @@ fn adaptiveShapeTrack(
         });
         s0 = s1;
     }
+    flankCells(cells.items);
+    return .{ .track = track, .len = len, .cells = cells.items };
+}
 
-    // Clearance may jump at an obstacle edge. Pull each side down to a
-    // 45-degree-flank envelope so the emitted 50 um slices form a taper rather
-    // than a width step. Two directional passes compute the greatest profile
-    // beneath those local maxima.
-    for (cells.items[1..], 1..) |*cell, i| {
-        const prior = cells.items[i - 1];
-        const centre_gap = ((prior.s1 - prior.s0) + (cell.s1 - cell.s0)) / 2;
-        cell.width = @min(cell.width, prior.width + adaptive_width_per_length * centre_gap);
-    }
-    var i = cells.items.len;
-    while (i > 1) {
-        i -= 1;
-        const next = cells.items[i];
-        const cell = &cells.items[i - 1];
-        const centre_gap = ((next.s1 - next.s0) + (cell.s1 - cell.s0)) / 2;
-        cell.width = @min(cell.width, next.width + adaptive_width_per_length * centre_gap);
-    }
-
+fn emitShapedRun(
+    arena: std.mem.Allocator,
+    out: *std.ArrayList(router.Track),
+    run: ShapedRun,
+) std.mem.Allocator.Error!bool {
+    const track = run.track;
+    const len = run.len;
+    const cells = run.cells;
     var changed = false;
-    for (cells.items) |cell| changed = changed or cell.width > track.width + eps;
+    for (cells) |cell| changed = changed or cell.width > track.width + eps;
     if (!changed) {
         try out.append(arena, track);
         return false;
@@ -473,9 +507,9 @@ fn adaptiveShapeTrack(
     // taper and genuinely clearance-varying neck retain 50 um slices, so a
     // 100 mm rail does not become 2,000 persisted segments merely because it
     // had room to reach the same target everywhere.
-    var run_s0 = cells.items[0].s0;
-    var run_width = cells.items[0].width;
-    for (cells.items[1..]) |cell| {
+    var run_s0 = cells[0].s0;
+    var run_width = cells[0].width;
+    for (cells[1..]) |cell| {
         if (@abs(cell.width - run_width) <= eps) continue;
         const a = pointOnTrack(track, run_s0, len);
         const b = pointOnTrack(track, cell.s0, len);
@@ -489,10 +523,148 @@ fn adaptiveShapeTrack(
     return true;
 }
 
+const JointPass = struct {
+    runs: []ShapedRun,
+    /// Same-net tracks this pass left alone. They cannot move, but a shaped run
+    /// that ends on one still has to meet it.
+    fixed: []const router.Track,
+    vias: []const router.Via,
+    pads: []const Pad,
+    net: i32,
+};
+
+/// Sweeps of clamp-then-reflank. Clamping only ever lowers a width, so the
+/// sweep is monotone and settles; the cap bounds a chain of sub-taper-length
+/// segments, which would otherwise carry a neck one hop per sweep.
+const joint_equalize_sweeps: usize = 3;
+
+fn endCellIndex(run: ShapedRun, tail: u1) usize {
+    return if (tail == 0) 0 else run.cells.len - 1;
+}
+
+fn endWidth(runs: []const ShapedRun, end: TrackEnd) f64 {
+    const run = end.run orelse return end.width;
+    return runs[run].cells[endCellIndex(runs[run], end.tail)].width;
+}
+
+fn clampEnd(runs: []ShapedRun, end: TrackEnd, width: f64) bool {
+    const index = end.run orelse return false;
+    const run = &runs[index];
+    const cell = &run.cells[endCellIndex(run.*, end.tail)];
+    if (cell.width <= width + eps) return false;
+    cell.width = width;
+    run.reflank = true;
+    return true;
+}
+
+fn trackEnds(track: router.Track, run: ?usize) [2]TrackEnd {
+    return .{
+        .{ .at = .{ track.x1, track.y1 }, .layer = track.layer, .run = run, .tail = 0, .width = track.width },
+        .{ .at = .{ track.x2, track.y2 }, .layer = track.layer, .run = run, .tail = 1, .width = track.width },
+    };
+}
+
+/// Bring one joint's two ends to the narrower of their widths. True when that
+/// moved copper, which is also what asks the run for another flank pass.
+fn settleJoint(runs: []ShapedRun, ends: []const TrackEnd, joint: [2]usize) bool {
+    const width = @min(endWidth(runs, ends[joint[0]]), endWidth(runs, ends[joint[1]]));
+    const first = clampEnd(runs, ends[joint[0]], width);
+    return clampEnd(runs, ends[joint[1]], width) or first;
+}
+
+fn endOrderLess(ends: []const TrackEnd, a: usize, b: usize) bool {
+    if (ends[a].layer != ends[b].layer) return ends[a].layer < ends[b].layer;
+    if (ends[a].at[0] != ends[b].at[0]) return ends[a].at[0] < ends[b].at[0];
+    if (ends[a].at[1] != ends[b].at[1]) return ends[a].at[1] < ends[b].at[1];
+    return a < b;
+}
+
+/// A same-net barrel or land at the meeting point already governs the corner:
+/// the barrel covers the elbow, and the pad launch profiles own the land.
+fn jointCovered(pass: JointPass, at: [2]f64, layer: u8) bool {
+    for (pass.vias) |via| {
+        if (via.net == pass.net and samePoint(.{ via.x, via.y }, at)) return true;
+    }
+    for (pass.pads) |pad| {
+        if (pad.layer == layer and samePoint(pad.at, at)) return true;
+    }
+    return false;
+}
+
+/// Make connected copper meet at ONE width.
+///
+/// Each track is fitted against its own clearance, so two that meet at a bend
+/// can arrive there at unrelated widths — a full-height ledge exactly on the
+/// elbow, which is where a round capsule cap cannot hide it. Where exactly two
+/// of this net's tracks meet on one layer, both ends take the narrower of the
+/// two, and the wider side walks back up its own straight on the standard
+/// 45-degree flank.
+///
+/// Only a bare two-track meeting is equalized. A T-junction is a real trunk to
+/// branch step and ordinary fab practice, and a barrel or land at the point
+/// already governs the geometry there.
+fn equalizeJointWidths(arena: std.mem.Allocator, pass: JointPass) std.mem.Allocator.Error!void {
+    var ends: std.ArrayList(TrackEnd) = .empty;
+    for (pass.runs, 0..) |run, index| try ends.appendSlice(arena, &trackEnds(run.track, index));
+    for (pass.fixed) |track| try ends.appendSlice(arena, &trackEnds(track, null));
+    if (ends.items.len < 2) return;
+
+    // Sorted by layer then x, so every end within joint tolerance of an anchor
+    // sits in the short window that opens at it.
+    const order = try arena.alloc(usize, ends.items.len);
+    for (order, 0..) |*slot, index| slot.* = index;
+    std.mem.sort(usize, order, @as([]const TrackEnd, ends.items), endOrderLess);
+    const claimed = try arena.alloc(bool, ends.items.len);
+    @memset(claimed, false);
+    var joints: std.ArrayList([2]usize) = .empty;
+    for (order, 0..) |anchor, position| {
+        if (claimed[anchor]) continue;
+        claimed[anchor] = true;
+        const at = ends.items[anchor].at;
+        const layer = ends.items[anchor].layer;
+        var partner = anchor;
+        var degree: usize = 1;
+        var scan = position + 1;
+        while (scan < order.len) : (scan += 1) {
+            const other = ends.items[order[scan]];
+            if (other.layer != layer or other.at[0] - at[0] > router.clearance_eps) break;
+            if (!samePoint(other.at, at)) continue;
+            claimed[order[scan]] = true;
+            partner = order[scan];
+            degree += 1;
+        }
+        if (degree != 2 or jointCovered(pass, at, layer)) continue;
+        try joints.append(arena, .{ anchor, partner });
+    }
+    if (joints.items.len == 0) return;
+
+    for (0..joint_equalize_sweeps) |_| {
+        var moved = false;
+        for (joints.items) |joint| {
+            if (settleJoint(pass.runs, ends.items, joint)) moved = true;
+        }
+        if (!moved) return;
+        for (pass.runs) |*run| {
+            if (!run.reflank) continue;
+            run.reflank = false;
+            flankCells(run.cells);
+        }
+    }
+    // A re-flank can pull an end cell back below what its joint had agreed, and
+    // a chain of very short segments can outlast the sweeps. Close on the
+    // joints rather than on the flanks: any residue then lands mid-straight,
+    // under a capsule cap, instead of on the elbow this pass exists to fix.
+    for (joints.items) |joint| _ = settleJoint(pass.runs, ends.items, joint);
+}
+
 /// Route power nets at an ordinary legal centreline, then grow each segment
 /// toward its electrical target under the router's exact width-aware clearance
 /// oracle. Nets are committed one at a time so later rails see earlier widened
 /// copper as a foreign obstacle rather than both claiming the same free space.
+///
+/// A net is shaped in full before any of it is emitted: width continuity across
+/// a bend is a property of two tracks at once, and `equalizeJointWidths` needs
+/// both sides in hand.
 fn adaptPowerTracks(board: router.CleanupBoard) std.mem.Allocator.Error!bool {
     const arena = board.arena();
     var any_changed = false;
@@ -502,29 +674,56 @@ fn adaptPowerTracks(board: router.CleanupBoard) std.mem.Allocator.Error!bool {
         board.beginNet(net_i);
         const floor = board.trackWidth();
         if (target <= floor + eps) continue;
-        const pads = try netPads(arena, board.placement, @intCast(net_i));
-        const probe = board.tautProbe(@intCast(net_i));
-        var out: std.ArrayList(router.Track) = .empty;
-        var changed = false;
-        for (board.tracks.items) |track| {
-            if (track.net != @as(i32, @intCast(net_i)) or track.width > floor + router.clearance_eps) {
-                try out.append(arena, track);
+        const net: i32 = @intCast(net_i);
+        const pads = try netPads(arena, board.placement, net);
+        const probe = board.tautProbe(net);
+        // Which shaped run each board track became, so emission keeps the
+        // board's own track order.
+        const plan = try arena.alloc(?usize, board.tracks.items.len);
+        var runs: std.ArrayList(ShapedRun) = .empty;
+        var fixed: std.ArrayList(router.Track) = .empty;
+        for (board.tracks.items, 0..) |track, index| {
+            plan[index] = null;
+            if (track.net != net) continue;
+            if (track.width > floor + router.clearance_eps) {
+                try fixed.append(arena, track);
                 continue;
             }
             const direction = unit(.{ track.x2 - track.x1, track.y2 - track.y1 }) orelse {
-                try out.append(arena, track);
+                try fixed.append(arena, track);
                 continue;
             };
             const start = powerEndpointProfile(pads, .{ track.x1, track.y1 }, track.layer, target, direction);
             const end = powerEndpointProfile(pads, .{ track.x2, track.y2 }, track.layer, target, direction);
-            changed = (try adaptiveShapeTrack(arena, &out, .{
+            const run = try shapeRun(arena, .{
                 .probe = probe,
                 .track = track,
                 .floor = floor,
                 .target = target,
                 .start = start,
                 .end = end,
-            })) or changed;
+            }) orelse {
+                try fixed.append(arena, track);
+                continue;
+            };
+            plan[index] = runs.items.len;
+            try runs.append(arena, run);
+        }
+        try equalizeJointWidths(arena, .{
+            .runs = runs.items,
+            .fixed = fixed.items,
+            .vias = board.vias.items,
+            .pads = pads,
+            .net = net,
+        });
+        var out: std.ArrayList(router.Track) = .empty;
+        var changed = false;
+        for (board.tracks.items, 0..) |track, index| {
+            const run = plan[index] orelse {
+                try out.append(arena, track);
+                continue;
+            };
+            if (try emitShapedRun(arena, &out, runs.items[run])) changed = true;
         }
         if (!changed) continue;
         board.tracks.clearRetainingCapacity();
@@ -743,6 +942,215 @@ test "adaptive power launch uses minimum pad dimension and a compact taper" {
     try testing.expectApproxEqAbs(@as(f64, 0.3), profile.width, eps);
     try testing.expectApproxEqAbs(@as(f64, 0.05), profile.taper, eps);
     try testing.expectApproxEqAbs(@as(f64, 0.15 * @sqrt(2.0)), profile.land, eps);
+}
+
+// spec: placement/power-routing - two adaptive power tracks that meet at a bend take the narrower of their two widths at that joint, including where one side is copper this pass left alone, and the wider side tapers back to its electrical target along its own straight
+test "adaptive power widths meet at one width where two tracks bend" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const G = @import("geometry.zig");
+    const trunk_pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.8, .h = 0.8 }};
+    const fine_pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.2, .h = 0.2 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 0.4, .hh = 0.4, .pads = &trunk_pad, .fallback = false, .x = 5, .y = 2 },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.1, .hh = 0.1, .pads = &fine_pad, .fallback = false, .x = 1.85, .y = 1.85 },
+    };
+    const pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } };
+    const nets = [_]flat_netlist.FlatNet{.{ .name = "VDD", .pins = &pins }};
+    const foils = [_]@import("impedance.zig").Foil{
+        .{ .index = 1, .thickness_mm = 0.035 },
+        .{ .index = 2, .thickness_mm = 0.035 },
+    };
+    const rails = [_]@import("../eval/power_budget.zig").Rail{.{
+        .net = "VDD",
+        .load_max_a = 0.2,
+        .any_max_load = true,
+        .status = .no_source,
+    }};
+    const rules = [_]optimizer.NetRule{.{ .width = 0.8 }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .rules = .{
+            .net = &rules,
+            .plane_nets = &.{},
+            .copper_layers = 2,
+            .design = .{ .track_width = 0.127, .min_width = 0.127, .clearance = 0.127 },
+            .physical = .{ .stack = .{ .layers = 2, .foils = &foils }, .rails = &rails },
+        },
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -1,
+        .miny = -1,
+        .maxx = 7,
+        .maxy = 5,
+        .generated = true,
+    };
+    // A long open trunk into a 45-degree elbow whose far end is a fine land:
+    // the elbow cannot leave that land wide, and before this pass agreed the
+    // corner the trunk arrived at full target beside it.
+    const corner = [2]f64{ 2, 2 };
+    var tracks: std.ArrayList(router.Track) = .empty;
+    try tracks.appendSlice(arena, &.{
+        .{ .x1 = 5, .y1 = 2, .x2 = corner[0], .y2 = corner[1], .layer = 0, .width = 0.127, .net = 0 },
+        .{ .x1 = corner[0], .y1 = corner[1], .x2 = 1.85, .y2 = 1.85, .layer = 0, .width = 0.127, .net = 0 },
+    });
+    var vias: std.ArrayList(router.Via) = .empty;
+    const board = (try router.cleanupBoard(arena, placement, .{ .track_width = 0.127, .clearance = 0.127 }, .{}, .{
+        .tracks = &tracks,
+        .vias = &vias,
+    })).?;
+    try testing.expect(try adaptPowerTracks(board));
+
+    var at_corner: ?f64 = null;
+    var widest: f64 = 0;
+    var trunk_widths: usize = 0;
+    var prior: f64 = -1;
+    for (tracks.items) |slice| {
+        widest = @max(widest, slice.width);
+        if (@abs(slice.y1 - 2) <= eps and @abs(slice.y2 - 2) <= eps and @abs(slice.width - prior) > eps) {
+            trunk_widths += 1;
+            prior = slice.width;
+        }
+        if (!samePoint(.{ slice.x1, slice.y1 }, corner) and !samePoint(.{ slice.x2, slice.y2 }, corner)) continue;
+        if (at_corner) |width| try testing.expectEqual(width, slice.width) else at_corner = slice.width;
+    }
+    try testing.expectApproxEqAbs(@as(f64, 0.8), widest, 1e-4);
+    // The corner carries what the elbow can carry there: above the routing
+    // floor, below the trunk's target, and identical on both sides.
+    try testing.expect(at_corner.? > 0.127 + eps);
+    try testing.expect(at_corner.? < widest - eps);
+    try testing.expect(trunk_widths > 4);
+}
+
+/// A shaped run whose clearance fit came out uniform: what this pass produces
+/// for a leg held at one width along its whole length.
+fn uniformRun(arena: std.mem.Allocator, track: router.Track, width: f64) std.mem.Allocator.Error!ShapedRun {
+    const len = std.math.hypot(track.x2 - track.x1, track.y2 - track.y1);
+    var cells: std.ArrayList(AdaptiveCell) = .empty;
+    var s0: f64 = 0;
+    while (s0 < len - eps) {
+        const s1 = @min(len, s0 + adaptive_step_mm);
+        try cells.append(arena, .{ .s0 = s0, .s1 = s1, .width = width });
+        s0 = s1;
+    }
+    return .{ .track = track, .len = len, .cells = cells.items };
+}
+
+/// How a run reads walking from one end back into the track: the steepest width
+/// step between neighbouring cells, the widest cell reached, and whether the
+/// walk only ever widens. A legal flank keeps every step inside
+/// `adaptive_width_per_length` times the cell pitch.
+fn flankProfile(run: ShapedRun, tail: u1) struct { step: f64, widest: f64, monotonic: bool } {
+    var prior = run.cells[endCellIndex(run, tail)].width;
+    var step: f64 = 0;
+    var widest = prior;
+    var monotonic = true;
+    for (1..run.cells.len) |offset| {
+        const width = run.cells[if (tail == 0) offset else run.cells.len - 1 - offset].width;
+        step = @max(step, @abs(width - prior));
+        widest = @max(widest, width);
+        monotonic = monotonic and width >= prior - eps;
+        prior = width;
+    }
+    return .{ .step = step, .widest = widest, .monotonic = monotonic };
+}
+
+/// The V_5VA elbow this pass was reported on: a widened straight butt-joining a
+/// leg a foreign obstacle held at the routing floor, meeting at 45 degrees.
+const bend_corner = [2]f64{ 180.39, 91.99 };
+const bend_trunk = router.Track{ .x1 = 181.39, .y1 = 91.99, .x2 = 180.39, .y2 = 91.99, .layer = 0, .width = 0.127, .net = 0 };
+const bend_elbow = router.Track{ .x1 = 180.39, .y1 = 91.99, .x2 = 179.9, .y2 = 91.5, .layer = 0, .width = 0.127, .net = 0 };
+
+test "a clearance-necked power leg pulls its bend partner down to a taper" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var runs = [_]ShapedRun{
+        try uniformRun(arena, bend_trunk, 0.2532),
+        try uniformRun(arena, bend_elbow, 0.127),
+    };
+    try equalizeJointWidths(arena, .{
+        .runs = &runs,
+        .fixed = &.{},
+        .vias = &.{},
+        .pads = &.{},
+        .net = 0,
+    });
+    const taper = runs[0].cells;
+    try testing.expectEqual(@as(f64, 0.127), taper[taper.len - 1].width);
+    try testing.expectEqual(@as(f64, 0.127), runs[1].cells[0].width);
+
+    // The wide side gives its width up on its own straight, at the 45-degree
+    // flank and nowhere steeper, and still reaches target.
+    const flank = flankProfile(runs[0], 1);
+    try testing.expect(flank.monotonic);
+    try testing.expect(flank.step <= adaptive_width_per_length * adaptive_step_mm + eps);
+    try testing.expectApproxEqAbs(@as(f64, 0.2532), flank.widest, eps);
+
+    // No emitted pair differs in width at the shared point.
+    var out: std.ArrayList(router.Track) = .empty;
+    _ = try emitShapedRun(arena, &out, runs[0]);
+    _ = try emitShapedRun(arena, &out, runs[1]);
+    var at_corner: ?f64 = null;
+    for (out.items) |slice| {
+        if (!samePoint(.{ slice.x1, slice.y1 }, bend_corner) and !samePoint(.{ slice.x2, slice.y2 }, bend_corner)) continue;
+        if (at_corner) |width| try testing.expectEqual(width, slice.width) else at_corner = slice.width;
+    }
+    try testing.expectEqual(@as(f64, 0.127), at_corner.?);
+}
+
+// spec: placement/power-routing - a three-track junction, a same-net barrel, or a pad land at the meeting point leaves every leg its own width, so only a bare two-track joint is equalized
+test "a branched, barrelled or landed power corner keeps each leg's own width" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const branch = router.Track{ .x1 = 180.39, .y1 = 91.99, .x2 = 180.39, .y2 = 92.99, .layer = 0, .width = 0.127, .net = 0 };
+    const barrels = [_]router.Via{.{ .x = bend_corner[0], .y = bend_corner[1], .dia = 0.6, .drill = 0.3, .net = 0 }};
+    const lands = [_]Pad{.{ .at = bend_corner, .layer = 0, .half_w = 0.3, .half_h = 0.3, .axis_x = .{ 1, 0 } }};
+    for (0..3) |scenario| {
+        var runs = [_]ShapedRun{
+            try uniformRun(arena, bend_trunk, 0.2532),
+            try uniformRun(arena, bend_elbow, 0.127),
+            try uniformRun(arena, branch, 0.2532),
+        };
+        const before = try arena.dupe(AdaptiveCell, runs[0].cells);
+        try equalizeJointWidths(arena, .{
+            .runs = runs[0..if (scenario == 0) 3 else 2],
+            .fixed = &.{},
+            .vias = if (scenario == 1) &barrels else &.{},
+            .pads = if (scenario == 2) &lands else &.{},
+            .net = 0,
+        });
+        for (runs[0].cells, before) |cell, unchanged| try testing.expectEqual(unchanged.width, cell.width);
+        try testing.expectEqual(@as(f64, 0.2532), runs[0].cells[runs[0].cells.len - 1].width);
+        try testing.expectEqual(@as(f64, 0.127), runs[1].cells[0].width);
+    }
+}
+
+test "a shaped power leg meets copper this pass left alone at that copper's width" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var runs = [_]ShapedRun{try uniformRun(arena, bend_trunk, 0.2532)};
+    // Already wider than the routing floor, so the shaping gates skipped it.
+    var skipped = bend_elbow;
+    skipped.width = 0.15;
+    try equalizeJointWidths(arena, .{
+        .runs = &runs,
+        .fixed = &.{skipped},
+        .vias = &.{},
+        .pads = &.{},
+        .net = 0,
+    });
+    const cells = runs[0].cells;
+    try testing.expectEqual(@as(f64, 0.15), cells[cells.len - 1].width);
+    try testing.expectApproxEqAbs(@as(f64, 0.25), cells[cells.len - 2].width, eps);
+    try testing.expectEqual(@as(f64, 0.2532), cells[0].width);
 }
 
 test "overlapping endpoint profiles keep a short pad to pad hop narrow" {
