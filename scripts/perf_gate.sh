@@ -6,7 +6,10 @@
 #   scripts/perf_gate.sh --record   # re-record the baseline in place; review
 #                                   # and commit the diff deliberately
 #
-# The first gate compares `netlisp bench-page` phase medians against
+# The first gate verifies the baseline was recorded against the designs
+# workload now measured (scripts/perf_gate_designs_identity.js — a moved
+# workload is named as drift, never misreported as a latency regression), then
+# compares `netlisp bench-page` phase medians against
 # docs/benchmarks/pcb-page/baseline.json. The second starts a private loopback
 # server and drives the real Barracuda Base assembly iframe in headless Chromium
 # against docs/benchmarks/pcb-browser/baseline.json. The third gates the PCB
@@ -116,6 +119,15 @@ if git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "perf_gate: measuring committed designs $designs_commit with model $models_fingerprint, layout $layouts_fingerprint, and BOM $boms_fingerprint bundles"
 fi
 
+# Refuse to compare latencies across different workloads before spending
+# minutes measuring them: a designs-repo move otherwise surfaces as a page
+# "latency regression" (FEEDBACK.md 2026-08-29). A non-zero check aborts here
+# via set -e with the script's own named reason. The browser runners enforce
+# the same identity from their baselines' reference.designs.
+if [ "${1:-}" != "--record" ]; then
+  node scripts/perf_gate_designs_identity.js check "$BASELINE"
+fi
+
 zig build --seed=1 -Doptimize=debug
 # Page rendering and CAM generation are user-facing/benchmark work, so the
 # browser half runs the pinned self-hosted ReleaseSafe artifact. A Debug server
@@ -125,16 +137,10 @@ scripts/zig-prod build --seed=1 -Doptimize=safe -p zig-out-browser-perf
 if [ "${1:-}" = "--record" ]; then
   mkdir -p "$(dirname "$BASELINE")"
   zig-out/bin/netlisp bench-page --project-dir "$PROJECT_DIR" --reps "$REPS" --json >"$BASELINE.tmp"
-  node - "$BASELINE" "$BASELINE.tmp" <<'NODE'
-const fs = require("fs");
-const [previousPath, recordedPath] = process.argv.slice(2);
-const recorded = JSON.parse(fs.readFileSync(recordedPath, "utf8"));
-if (fs.existsSync(previousPath)) {
-  const previous = JSON.parse(fs.readFileSync(previousPath, "utf8"));
-  if (previous.budgets) recorded.budgets = previous.budgets;
-}
-fs.writeFileSync(recordedPath, `${JSON.stringify(recorded, null, 2)}\n`);
-NODE
+  # Carry the hand-set budgets forward and stamp the measured designs identity
+  # (commit + model/layout/BOM bundle hashes) so the next enforce can tell
+  # workload drift from regression.
+  node scripts/perf_gate_designs_identity.js stamp "$BASELINE.tmp" "$BASELINE"
   mv -f "$BASELINE.tmp" "$BASELINE"
   echo "perf_gate: recorded $BASELINE — review the diff and commit it deliberately"
   node scripts/pcb_browser_perf/run.js --project-dir "$PROJECT_DIR" --binary "$BROWSER_BINARY" --reps "$BROWSER_REPS" \

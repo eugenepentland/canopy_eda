@@ -8,13 +8,20 @@
 //   - Canvas2D at DPR 2: the supported fallback on a high-density display.
 //   - WebGPU at DPR 1 through pinned SwiftShader: asserts RF copper remains on
 //     the retained GPU path and bounds command/raster cost deterministically.
+//
+// The baseline also carries the designs-workload identity it was recorded
+// against (reference.designs). Under scripts/perf_gate.sh's snapshot env that
+// identity is enforced like the sibling runners'; standalone (prepare-release
+// certifying the release binary against the live checkout) drift is labelled,
+// not failed — the zoom budgets here are absolute, so certification does not
+// depend on a matching baseline workload.
 "use strict";
 
 const fs = require("fs");
 const net = require("net");
 const os = require("os");
 const path = require("path");
-const { spawn } = require("child_process");
+const { execFileSync, spawn } = require("child_process");
 
 const localLib = path.join(os.homedir(), ".local", "lib", "playwright-chromium", "usr", "lib", "x86_64-linux-gnu");
 if (fs.existsSync(localLib)) process.env.LD_LIBRARY_PATH = [localLib, process.env.LD_LIBRARY_PATH].filter(Boolean).join(":");
@@ -150,9 +157,57 @@ function limits() {
 }
 
 function valueAt(o, dotted) { return dotted.split(".").reduce((v, k) => v == null ? undefined : v[k], o); }
+
+function projectFacts(projectDir) {
+  if (process.env.NETLISP_PERF_DESIGNS_COMMIT) {
+    return {
+      commit: process.env.NETLISP_PERF_DESIGNS_COMMIT,
+      fingerprint: process.env.NETLISP_PERF_DESIGNS_FINGERPRINT || process.env.NETLISP_PERF_DESIGNS_COMMIT,
+      dirty: false,
+      source: "git-archive+workload-bundles",
+    };
+  }
+  try {
+    const commit = execFileSync("git", ["-C", projectDir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const modelDir = path.join(projectDir, "lib", "models");
+    const modelHash = fs.existsSync(modelDir) ? execFileSync("bash", ["-c",
+      "find . -maxdepth 1 -type f -print0 | sort -z | xargs -0 -r sha256sum | sha256sum | cut -d' ' -f1"
+    ], { cwd: modelDir, encoding: "utf8" }).trim() : null;
+    const layoutHash = execFileSync("bash", ["-c",
+      "find src -type f \\( -name '*.layouts.json' -o -name '*.autolayout.json' \\) -print0 | sort -z | xargs -0 -r sha256sum | sha256sum | cut -d' ' -f1"
+    ], { cwd: projectDir, encoding: "utf8" }).trim();
+    const bomHash = execFileSync("bash", ["-c",
+      "find src -type f -name '*.bom' -print0 | sort -z | xargs -0 -r sha256sum | sha256sum | cut -d' ' -f1"
+    ], { cwd: projectDir, encoding: "utf8" }).trim();
+    return {
+      commit,
+      fingerprint: [commit, modelHash, layoutHash, bomHash].filter(Boolean).join(":"),
+      dirty: execFileSync("git", ["-C", projectDir, "status", "--porcelain"], { encoding: "utf8" }).trim().length > 0,
+      source: "checkout+model-bundle",
+    };
+  } catch (_) { return { commit: null, fingerprint: null, dirty: null }; }
+}
+
 function enforce(summary, baseline) {
   if (!fs.existsSync(baseline)) throw new Error(`missing ${baseline}; record it deliberately`);
   const doc = JSON.parse(fs.readFileSync(baseline, "utf8")), budgets = doc.budgets || {}, failures = [];
+  // Workload identity: strict under scripts/perf_gate.sh's snapshot env (the
+  // sibling runners' contract); a printed label standalone, where
+  // prepare-release measures the live checkout and must not be blocked by
+  // designs work-in-progress.
+  const strict = Boolean(process.env.NETLISP_PERF_DESIGNS_COMMIT);
+  const recorded = doc.reference?.designs, note = (line) => console.error(`pcb_editor_perf: NOTE ${line}`);
+  if (!recorded?.commit || !recorded?.fingerprint) {
+    if (strict) failures.push("designs.fingerprint: baseline has no workload identity; re-record deliberately");
+    else note(`${baseline} records no designs workload identity; the next scripts/perf_gate.sh --record stamps it`);
+  } else if (summary.designs.fingerprint && summary.designs.fingerprint !== recorded.fingerprint) {
+    if (strict) failures.push(`designs.fingerprint: workload bundle changed (recorded designs ${recorded.commit.slice(0, 12)}, measuring ${summary.designs.commit.slice(0, 12)}); re-record deliberately`);
+    else note(`measuring designs ${String(summary.designs.commit).slice(0, 12)} against a baseline recorded at designs ${recorded.commit.slice(0, 12)} — workload drift; the absolute zoom budgets still apply`);
+  }
+  if (summary.designs.dirty) {
+    if (strict) failures.push("designs.dirty: performance workload contains uncommitted changes");
+    else note("measuring a dirty designs checkout; the identity above reflects committed state only");
+  }
   for (const metric of Object.keys(limits())) {
     const actual = valueAt(summary, metric), limit = budgets[metric];
     if (!Number.isFinite(limit)) failures.push(`${metric}: missing finite budget`);
@@ -187,6 +242,9 @@ async function main() {
         "--disable-vulkan-surface", "--enable-dawn-features=allow_unsafe_apis",
       ] } },
     ], summary = { schema: 1, design: options.design, viewport: { width: 1600, height: 900 }, repetitions: options.reps };
+    summary.designs = projectFacts(options.projectDir);
+    if (options.record && summary.designs.dirty)
+      throw new Error("refusing to record a baseline from a dirty designs checkout; use scripts/perf_gate.sh --record for a clean HEAD snapshot");
     for (const profile of profiles) {
       // Launch profiles serially so the software WebGPU process cannot steal
       // CPU from the high-DPI Canvas measurement (or vice versa).

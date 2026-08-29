@@ -308,3 +308,28 @@ choice obvious instead of learned.
   itself from. Every handler that can exceed a second is worth one `defer
   emitStages` — it is ~8 lines and removes a build-instrument-rebuild cycle per
   investigation.
+
+## 2026-08-29 · claude · designs identity stamped into the perf baselines
+
+- **workaround:** implemented the entry above's idea. `scripts/perf_gate.sh
+  --record` now stamps `NETLISP_PERF_DESIGNS_COMMIT`/`_FINGERPRINT` into
+  `docs/benchmarks/pcb-page/baseline.json` (via
+  `scripts/perf_gate_designs_identity.js`, contract-tested under Guardian),
+  and enforce refuses a moved workload with "recorded against designs X,
+  comparing against designs Y" BEFORE spending minutes measuring. The
+  pcb-editor runner gained the `reference.designs` capture its two sibling
+  runners already had; its enforcement is strict only under the perf_gate
+  snapshot env and prints a label standalone, so `prepare-release` (which
+  measures the live checkout) can never be blocked by designs
+  work-in-progress. Until the next deliberate `--record`, the gate fails with
+  the honest "no workload identity / workload changed" reason instead of fake
+  latency regressions.
+- **friction:** the four boards missing from the bench corpus (`black-canyon`,
+  `cyclops-interposer`, `rf-switch-eval`, `straps`) never stopped evaluating —
+  they were never tried. Their sources moved into `src/boards/<name>/` during
+  the designs refactor while their gitignored `.layouts.json` sidecars stayed
+  at the old flat `src/` paths, and `bench_page.corpus` (like the boot
+  warm-up) only selects designs whose sidecar sits NEXT to the source file.
+  Moving the orphaned sidecars — and deduplicating the `.bom` copies now
+  present at three path depths (`src/`, `src/boards/`, `src/boards/<name>/`)
+  — restores the corpus; no tool change is needed.

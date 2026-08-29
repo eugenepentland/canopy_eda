@@ -41,15 +41,28 @@ A gated run fails (non-zero exit, refusing the push) when any of:
    per-board rule alone would wave through.
 3. **Hand-set budgets** — the optional top-level `"budgets"` object in
    `baseline.json` caps every board absolutely. The committed page ceilings are
-   1000 ms for PCB, 150 ms for assembly, 2250 ms for thermal, and 500 ms for
-   schematics. The recorder never writes this object — only a human adds or
-   changes a budget, so re-recording cannot silently raise one.
+   11 000 ms for PCB, 850 ms for assembly, 13 500 ms for thermal, and 1000 ms
+   for schematics — owner-decided 2026-08-29, sized to the measured worst board
+   (the routed barracuda family) plus ~25% headroom, so they are catastrophe
+   backstops while rules 1–2 police regressions. (The original 1000/150/2250/500
+   ceilings predate the barracuda RF boards' routed copper.) The recorder never
+   writes this object — only a human adds or changes a budget, so re-recording
+   cannot silently raise one.
 4. **Unlike work** — a board's DRC counts moved vs the baseline. Wall times
    over different work prove nothing; the fix is to re-record (below) if the
    *designs* changed, or to find what your *code* change did to DRC if they
    didn't.
 5. **Retention lost** — a board whose page the baseline run cached is no
    longer admitted.
+6. **Workload moved** — before any timing comparison, `perf_gate.sh` checks
+   the baseline's stamped `designs` identity (designs commit plus
+   model/layout/BOM bundle hashes, written by `--record` via
+   `scripts/perf_gate_designs_identity.js`) against the snapshot it is about
+   to measure. A mismatch fails immediately as "recorded against designs X,
+   comparing against designs Y" — the honest reason — instead of surfacing
+   minutes later as rules 1–4 violations. An unstamped baseline fails the same
+   way; re-record to stamp it. (Running `bench-page --baseline` by hand skips
+   this shell-level check; its own missing/unlined notes still apply.)
 
 A board **without a blessed (starred/named-restorable) layout** has its PCB,
 thermal, solve, and DRC phases reported but not gated: those paths re-solve the
@@ -71,7 +84,8 @@ scripts/perf_gate.sh
 
 # Re-record after an intentional change (a real speedup, a designs-repo
 # update) — then review and COMMIT the diff deliberately. The wrapper preserves
-# the existing hand-set "budgets" object while replacing measurements:
+# the existing hand-set "budgets" object while replacing measurements, and
+# stamps the measured designs identity into the top-level "designs" object:
 scripts/perf_gate.sh --record
 
 # One board, more reps, by hand:
