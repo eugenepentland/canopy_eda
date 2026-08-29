@@ -41,12 +41,22 @@
 #   file      list of paths the finding lived in; each must still exist.
 #   fixed_in  commit — required when status = "fixed".
 #   test      zig test name(s) proving it; each must exist as `test "<name>"`
-#             under src/**/*.zig. Required when status = "fixed".
+#             under src/**/*.zig. Required when status = "fixed", unless
+#             `harness` or `untested` stands in for it.
+#   harness   a non-zig regression harness, for a fix no zig test can reach:
+#             browser JavaScript, or a property of a directory. `path` must
+#             exist; `path#anchor` additionally requires `anchor` to still
+#             appear as a quoted identifier inside it, so a probe that dropped
+#             the named invariant fails instead of passing on file existence.
+#             Listed on every run — these are guarded by something the unit
+#             suite does not run.
 #   untested  true — the escape hatch for a `fixed` finding with NO regression
 #             test. Requires `note`. These are counted and listed on every run
 #             so the gap stays visible instead of being forgotten.
 #   guard     optional non-zig guard (a script path, a Guardian rule name).
-#             Path-shaped values are checked for existence.
+#             Path-shaped values are checked for existence. Weaker than
+#             `harness`: it does not satisfy the requirement for a `fixed`
+#             entry, because existence is all it proves.
 #   note      required for `open` and for `untested`.
 #   reason    required for `waived`.
 #   reopens   optional id of the earlier finding whose class this one reopened.
@@ -350,33 +360,30 @@ id = "DRIFT-JS-001"
 summary = "in the browser editor, saved-layout rows aliased the live copper arrays, so Load could not revert an edit"
 severity = "high"
 status = "fixed"
-untested = true
 file = ["src/serve/assets/pcb_board.js"]
 fixed_in = "e2a5f7e"
-guard = "guardian.toml [[external]] pcb-board-js-syntax (syntax only)"
-note = "NO REGRESSION TEST. Fixed by splitting cloneZoneList/cloneOutlineOf out of the live-board reader so both ownership boundaries deep-copy, but nothing asserts it: no zig source-scanning test embeds pcb_board.js for this, and the only JS gates are `node --check` syntax gates. A future edit that re-aliases the arrays passes every tier. This is the highest-value missing test in the ledger."
+harness = "scripts/pcb_editor_invariants/run.js#row-aliasing"
+note = "Fixed by splitting cloneZoneList/cloneOutlineOf out of the live-board reader so both ownership boundaries deep-copy. Guarded since 7160bba by the headless editor probe, which drives a real browser: edit copper, save, edit again, Load, and require the first state back. The probe scores 1/6 against a pre-fix binary, so this invariant is measured failing when the bug is present. It runs in .githooks/prepare-release.sh against the stripped candidate, not in the unit suite — see the harness list on every ledger run."
 
 [[finding]]
 id = "DRIFT-JS-002"
 summary = "a queued autosave captured its payload at dequeue but its NAME at enqueue, so it could write layout B's board into row A"
 severity = "high"
 status = "fixed"
-untested = true
 file = ["src/serve/assets/pcb_board.js"]
 fixed_in = "e2a5f7e"
-guard = "guardian.toml [[external]] pcb-board-js-syntax (syntax only)"
-note = "NO REGRESSION TEST — same gap as DRIFT-JS-001. A cross-layout write is silent data loss into the wrong row, and nothing in the tree would fail if the name capture moved back to enqueue."
+harness = "scripts/pcb_editor_invariants/run.js#save-name-race"
+note = "A cross-layout write is silent data loss into the wrong row. The probe queues a save, switches layout, and requires the board to land in the row it was captured from — the capture moving back to enqueue fails it."
 
 [[finding]]
 id = "DRIFT-JS-003"
 summary = "undo left the identity-keyed copper selection dangling, making a stale Delete a no-op that still recorded an undo entry — which wiped redoStack and made the just-undone edit unredoable"
 severity = "medium"
 status = "fixed"
-untested = true
 file = ["src/serve/assets/pcb_board.js"]
 fixed_in = "e2a5f7e"
-guard = "guardian.toml [[external]] pcb-board-js-syntax (syntax only)"
-note = "NO REGRESSION TEST — same gap as DRIFT-JS-001. Fixed by clearing both selCu and the inspector on every restore, the way the drag-rollback callers already did by hand."
+harness = "scripts/pcb_editor_invariants/run.js#undo-selection"
+note = "Fixed by clearing both selCu and the inspector on every restore, the way the drag-rollback callers already did by hand. KNOWN GAP, recorded in the probe's own header: reverting ONLY the `selCuClear();inspClear();` pair is not caught, because applyAll->clearRoute->copperTouched already clears both on that path; the deep revert IS caught."
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -451,22 +458,41 @@ id = "DRIFT-INFRA-002"
 summary = "systemd/netlisp.service still ran zig-out/bin — the path any `zig build` overwrites, and the one behind the 2026-08-19 Debug-in-prod incident — while the live unit and the rendered template both used .deploy/bin"
 severity = "high"
 status = "fixed"
-untested = true
-file = ["systemd/netlisp.service"]
+file = ["systemd/netlisp.service", ".githooks/netlisp.service.in", "src/deploy_unit.zig"]
 fixed_in = "e2a5f7e"
-guard = "scripts/test_production_toolchain_pin.sh"
-note = "NO ZIG TEST — deliberately. The guard is a shell assertion in scripts/test_production_toolchain_pin.sh that the unit's ExecStart names .deploy/bin/netlisp, never zig-out, and matches .githooks/netlisp.service.in. That script's existence is checked by this ledger; its contents are not."
+test = [
+  "the systemd unit runs the deployed binary, never zig-out",
+  "the checked-in unit matches the template it is rendered from",
+  "the production unit keeps its restart and autocommit settings",
+]
+note = "The original guard was scripts/test_production_toolchain_pin.sh — and closing this entry turned up that NOTHING RUNS IT. It is referenced by no gate, no hook and no build step; the only reference in the tree was this ledger row, which checked that the file exists. A whole family of scripts/test_*.sh is manual-only. The guard is now src/deploy_unit.zig, which embeds both unit files (via addDeployUnitImports in build.zig, since @embedFile cannot escape src/) and runs in the ordinary suite. Verified by mutation: restoring ExecStart to zig-out/bin fails two of the three tests."
 
 [[finding]]
 id = "DRIFT-INFRA-003"
 summary = "12 first-party JS assets had no syntax gate at all and shape_sketch.test.js was wired to no runner"
 severity = "medium"
 status = "fixed"
-untested = true
-file = ["guardian.toml"]
+file = ["guardian.toml", "src/serve/assets"]
 fixed_in = "e2a5f7e"
-guard = "guardian.toml [[external]] — 14 node gates"
-note = "NO ZIG TEST, and none is appropriate: the fix IS the gate. Recorded so a later guardian.toml edit that drops the externals is a visible regression rather than a silent one. Verifying the 14 external blocks still exist is out of this checker's scope."
+harness = "scripts/check_js_asset_gates.py"
+note = "SEE DRIFT-INFRA-004 FIRST: the [[external]] blocks this was fixed with never ran. The e2a5f7e fix added them BY HAND, which closes the finding only for the files someone remembered — and closing this entry showed it had already drifted open again by SEVEN files: drc_marshal.js, drc_worker.js, footprint_svg.js, pcb_region.js, pcb_replay.js (997 lines the PCB page loads every visit), pcb_settings.js and thermal_page.js all had no gate naming them. The guard is now the standing rule instead of the list: check_js_asset_gates.py enumerates src/serve/assets/ and requires each first-party .js/.mjs to be named by some external's COMMAND (naming it in `inputs` is deliberately not enough — inputs decide when a gate re-runs, not whether anything parses the file). Vendored drops are exempt by explicit path plus reason, and a stale exemption fails too. Its --syntax mode then PARSES all 30 first-party assets plus the 9 further scripts an external names, because the declared node --check gates do not run; build.zig's addTreePolicyChecks hangs that, its self-test, and the three JavaScript unit-test runners off the `test` step, which is what makes any of it gate. Verified: a syntax error in pcb_replay.js now fails `zig build test` and rode a green build before."
+
+[[finding]]
+id = "DRIFT-INFRA-004"
+summary = "every [[external]] gate is advisory — a command that exits nonzero still leaves the gate reporting 0 blocking, so all 27 node/python gates were decorative, including the 21 that were DRIFT-INFRA-003's whole fix"
+severity = "high"
+status = "open"
+file = ["guardian.toml", "build.zig"]
+reopens = "DRIFT-INFRA-003"
+note = """Found 2026-08-29 while closing DRIFT-INFRA-003, and it is why that finding could not honestly be closed by declaring more externals.
+
+MEASURED, three ways, all on an uncommitted tree so no green-run digest could be hiding it:
+ 1. Replaced pcb-replay-js-syntax's command with `python3 -c \"import sys; sys.exit(1)\"` — `guardian-check all .` reported 70 checks, 0 blocking.
+ 2. Broke AUDIT-LEDGER.toml so the ledger checker exits 1 when run by hand (verified) — that file is a declared `input` of the audit-ledger external, so caching cannot apply; `guardian-check all .` still reported 0 blocking, and `zig build --seed=1 test` exited 0.
+ 3. Appended a syntax error to src/serve/assets/pcb_replay.js — `node --check` fails on it directly; the gate did not.
+`guardian-check external-gates .` answers only from its baseline without running anything; `--dry-run` DOES execute the commands (their failure output is visible) but still reports `0 finding(s)`. Config errors DO surface — an `inputs` path that does not exist is reported — so findings flow; command exit status is what is dropped.
+
+PARTIALLY MITIGATED here, not fixed: build.zig's addTreePolicyChecks now hangs the two policy checkers, their two self-tests, and the three JavaScript unit-test runners off the `test` step, and check_js_asset_gates.py --syntax parses all 30 first-party assets plus the 9 further scripts an external names. Verified both ways: a syntax error in pcb_replay.js and a renamed ledger test each fail `zig build test` now, and both rode a green build before. Still advisory and NOT covered by that step: the pdf.js vendor gates, drc-wasm-parity syntax, and the perf-harness syntax gates. The real fix is guardian-side — an external's nonzero exit must be a blocking finding — and belongs in guardian-zig, not here."""
 
 [[finding]]
 id = "DRIFT-SIZE-001"
@@ -504,11 +530,14 @@ id = "JUL-C2"
 summary = "arbitrary file write to RCE via the X-Filename header — the zip/model upload path templated the unsanitized header into /tmp/netlisp-upload-{s}, and `../../../` escaped /tmp under a systemd --user unit"
 severity = "critical"
 status = "fixed"
-untested = true
 file = ["src/serve/upload.zig", "src/serve/library.zig"]
 fixed_in = "pre-2026-08-29"
 guard = "src/serve/library.zig isSafeLibName (tested separately)"
-note = "NO REGRESSION TEST for the fixed path. The fix is real and well-commented (upload.zig:20-33: the temp name is minted from a process-unique atomic counter and both template fields are our own, so no request input reaches the path) but no test asserts it. The sibling traversal guard IS tested — `isSafeLibName allows part-number commas and + series suffixes but still rejects traversal + separators` — and upload_datasheet.zig has four sanitizeFilename tests, but neither covers this file's temp-path minting. A future edit that reintroduces the header into the template would pass the suite."
+test = [
+  "the staged-upload path is minted from counters, never from request input",
+  "a hostile X-Filename cannot steer a library import",
+]
+note = "The temp name is minted from a timestamp plus a process-unique atomic counter; both template fields are `{d}`, so no request input can reach the path. The first test pins that structurally (no `{s}` in the template) and behaviourally (the staged path stays one component under /var/tmp). Its real strength is the call itself: `stageArchive` takes the bytes and nothing else, so reintroducing the header means adding a parameter — verified by mutation, that BREAKS THE BUILD at the test's call site rather than failing at runtime. The second test imports one archive twice, under a benign name and a traversal payload, and requires identical results plus an untouched project tree."
 
 [[finding]]
 id = "JUL-C3"
@@ -562,22 +591,25 @@ id = "JUL-S5"
 summary = "stored XSS in the schematic BOM card — component, value, MPN, manufacturer and datasheet href rendered with raw {s}, and MPN/manufacturer are attacker-writable via editMpnApi"
 severity = "high"
 status = "fixed"
-untested = true
 file = ["src/serve/bom_html.zig"]
 fixed_in = "pre-2026-08-29"
 guard = "src/escape.zig writeXml (tested separately)"
-note = "NO CARD-LEVEL REGRESSION TEST. The fix is in place — every field now goes out through escape.writeXml (bom_html.zig:218-287) — and the canonical escaper has its own test (`writeXml neutralizes a script/attribute breakout`), but nothing asserts that THIS module still calls it. The only bom_html test in the tree, `correctness: bom_html.writeComponentsJson escapes double-quotes in string fields`, covers the JSON writer, not the HTML card. This is precisely the shape JUL-S4 reopened in: a correct central escaper and an unchecked call site."
+test = [
+  "the schematic BOM card escapes every field a user can write into it",
+  "the BOM card links an http datasheet and leaves a data: URL inert",
+]
+note = "This was the sharpest gap in the ledger: the fix routes every field through escape.writeXml, the escaper has its own test, and nothing asserted that THIS module still called it — precisely the shape JUL-S4 reopened in. The first test renders a card from a design carrying breakout payloads in component, value, footprint, attrs, property key/value, ref-des, MPN and manufacturer, and asserts on the RENDERED OUTPUT (so it cannot self-blind on its own source text the way a lexical check would): no live markup, and each field present in escaped form so a dropped field cannot pass. MPN and manufacturer are the attribute-context sinks and the two an attacker writes directly via editMpnApi. Verified by mutation: printing MPN with a raw {s} fails it. The second test covers safeHref in both directions so \"no href\" cannot pass by the card having stopped linking datasheets."
 
 [[finding]]
 id = "JUL-S6"
 summary = "reflected XSS plus arbitrary .sexp/model read in the 3D viewer — the :footprint param was embedded raw in HTML and interpolated into read paths with no name validation"
 severity = "high"
 status = "fixed"
-untested = true
 file = ["src/serve/library_3d.zig"]
 fixed_in = "pre-2026-08-29"
 guard = "isSafeFootprint at library_3d.zig:41"
-note = "NO REGRESSION TEST for either half. The fix is real — isSafeFootprint gates all five entry points (:89, :259, :288, :329, :610) and the param is written through escape.writeXml (:345, :353) — but no test exercises isSafeFootprint, so a weakened predicate reopens both the traversal and the reflected-XSS halves silently. The module's one test covers writeJsonString's control-char handling only."
+test = "isSafeFootprint rejects traversal and markup while accepting real footprint names"
+note = "Two vulnerabilities sharing one missing check, and one predicate now closes both: isSafeFootprint gates all five entry points, so a weakened predicate reopens the arbitrary .sexp/model read AND the reflected XSS together. The test drives the decoded forms an attacker actually lands (urlDecode runs first at every call site) across both halves, and pins the accept side too — a comma part number and the `#` KiCad generates — so tightening it into uselessness fails as loudly as loosening it. Verified by mutation: allowing `/`, `<`, `>`, `\"` and dropping the `..` check fails it."
 
 [[finding]]
 id = "JUL-S7"
@@ -586,8 +618,11 @@ severity = "high"
 status = "fixed"
 file = ["src/render_html.zig", "src/render_json.zig"]
 fixed_in = "pre-2026-08-29"
-test = "serializeScene escapes a quote/backslash in the design name"
-note = "PARTIAL COVERAGE. The render_json half is tested. The render_html half is fixed (writeHtmlEscaped at render_html.zig:149, :414, :886) but has no test of its own — no test in render_html.zig covers title or data-ref escaping. Treat this entry as guarding one of two sites."
+test = [
+  "serializeScene escapes a quote/backslash in the design name",
+  "the schematic page escapes the design name and every hub ref-des it renders",
+]
+note = "Both halves are covered now. The render_json half has been tested since the July fix; the render_html half was fixed at the same time and went untested for two months, leaving this entry guarding one of two sites. The second test covers all three render_html sinks — the document title and H1 (RCDATA), the subtitle filename, and each hub card's data-ref (an attribute, where a bare quote is a breakout with no angle bracket needed) — plus the URL-encoded sink beside them, where percent-encoding and not escaping is the right answer. Verified by mutation: printing block.name into <title> with a raw {s} fails it."
 
 
 # ────────────────────────────────────────────────────────────────────────────

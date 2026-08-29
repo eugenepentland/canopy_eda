@@ -56,6 +56,7 @@ test {
     _ = @import("diagram/lod.zig");
     _ = @import("diagram/membership.zig");
     _ = @import("diagram/render.zig");
+    _ = @import("deploy_unit.zig");
     _ = @import("docgen.zig");
     _ = @import("drc_dump.zig");
     _ = @import("gerber_dump.zig");

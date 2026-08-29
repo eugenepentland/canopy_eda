@@ -2885,3 +2885,58 @@ test "a bridged sub-block port net is not a boundary port" {
     try std.testing.expect(std.mem.indexOf(u8, tag, "#e8c547") != null);
     try std.testing.expect(std.mem.indexOf(u8, tag, "#4a9eff") == null);
 }
+
+// spec: render_html - The schematic page escapes the design name everywhere it appears — document title, heading, subtitle filename — and escapes each hub card's ref-des into its data-ref attribute
+test "the schematic page escapes the design name and every hub ref-des it renders" {
+    // JUL-S7's render_html half. The render_json half has had a test since the
+    // July fix (`serializeScene escapes a quote/backslash in the design name`);
+    // this side was fixed at the same time and never covered, which left the
+    // ledger recording the finding as only half guarded. Design names come
+    // from .sexp files that arrive by import, upload and MCP write_file, and
+    // ref-des values ride along with them.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const hostile = "</title><svg onload=alert(1)>\"'&";
+    var block = emptyAttachBlock(hostile);
+    var checks: CheckResultMap = .empty;
+    const html = try renderToHtml(alloc, &block, "", "demo", "", .pass, null, &checks, .{ .path = "/schematics/" });
+
+    // RCDATA breakout: `</title>` closing the element early is the whole
+    // attack, and it must not survive anywhere on the page.
+    try std.testing.expect(std.mem.indexOf(u8, html, "</title><svg") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "<svg onload") == null);
+    // Present in escaped form, so the absence above is escaping, not dropping.
+    try std.testing.expect(std.mem.indexOf(u8, html, "&lt;/title&gt;&lt;svg onload=alert(1)&gt;&quot;&#39;&amp;") != null);
+    // The name reaches the document title and the H1 by two different paths.
+    try std.testing.expect(std.mem.indexOf(u8, html, "<title>&lt;/title&gt;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "<h1>&lt;/title&gt;") != null);
+
+    // The header's own two sinks, driven directly: the title in RCDATA and the
+    // design name in the `<code>…​.sexp</code>` subtitle.
+    var head: std.Io.Writer.Allocating = .init(alloc);
+    try writeHeader(&head.writer, hostile, "de\"mo<x>", .pass, .{ .path = "/schematics/" }, .{}, false);
+    try std.testing.expect(std.mem.indexOf(u8, head.written(), "<svg onload") == null);
+    try std.testing.expect(std.mem.indexOf(u8, head.written(), "de&quot;mo&lt;x&gt;.sexp") != null);
+    // …and the URL-encoded sink beside it, where escaping is not the right
+    // answer and percent-encoding is.
+    try std.testing.expect(std.mem.indexOf(u8, head.written(), "de%22mo%3Cx%3E") != null);
+
+    // data-ref: an attribute context, so a bare `"` is a breakout with no
+    // angle bracket needed. Hub cards key their editor hooks off this.
+    const hub_instances = [_]env_mod.Instance{.{
+        .ref_des = "U\" onmouseover=alert(1) x=\"",
+        .component = "mcu",
+        .value = "",
+        .footprint = "qfn-32",
+        .symbol = "generic",
+    }};
+    var hub_block = emptyAttachBlock("Board");
+    hub_block.instances = &hub_instances;
+    const hub_html = try renderToHtml(alloc, &hub_block, "", "demo", "", .pass, null, &checks, .{ .path = "/schematics/" });
+    // The payload TEXT survives escaping — only the quote that would close the
+    // attribute is neutralized, so that is what the assertion has to be about.
+    try std.testing.expect(std.mem.indexOf(u8, hub_html, "U\" onmouseover") == null);
+    try std.testing.expect(std.mem.indexOf(u8, hub_html, "data-ref=\"U&quot; onmouseover=alert(1) x=&quot;\"") != null);
+}

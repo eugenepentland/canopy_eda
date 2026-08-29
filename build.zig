@@ -232,8 +232,10 @@ pub fn build(b: *std.Build) void {
     test_mod.addImport("zt", zt_dep.module("zt"));
     test_mod.addImport("ward", ward_dep.module("ward"));
     test_mod.addAnonymousImport("drc.wasm", .{ .root_source_file = wasm_bin });
+    addDeployUnitImports(b, test_mod);
 
     const test_step = b.step("test", "Run unit tests");
+    addTreePolicyChecks(b, test_step);
     // SHARDED. `test` compiles one test binary per shard in src/test_shards.zig
     // and runs them concurrently — the build system executes independent steps
     // in parallel (default `-j` = core count), so the suite's 78s serial test
@@ -298,6 +300,7 @@ pub fn build(b: *std.Build) void {
     fast_test_mod.addImport("zt", zt_dep.module("zt"));
     fast_test_mod.addImport("ward", ward_dep.module("ward"));
     fast_test_mod.addAnonymousImport("drc.wasm", .{ .root_source_file = wasm_bin });
+    addDeployUnitImports(b, fast_test_mod);
 
     //
     // Hoisted to a named const because the runner is told the same list twice:
@@ -410,6 +413,22 @@ pub fn build(b: *std.Build) void {
 /// Every shard shares `test_mod`, so a shard cannot drift from the suite's
 /// module graph, optimize mode, or root file: the only per-shard input is the
 /// filter list, and `src/test_shards.zig` is proven to partition the tree.
+/// Make the shipped systemd unit and its deploy-hook template readable from a
+/// test. `@embedFile` cannot escape the module root (`src/`), so the two files
+/// come in as anonymous imports instead. Tests only — `src/deploy_unit.zig`
+/// asserts the two agree and that neither ExecStart points at `zig-out/bin`,
+/// the path any local `zig build` overwrites and the cause of the 2026-08-19
+/// Debug-in-prod incident. Adding them here also makes an edit to either file
+/// re-run the suite.
+fn addDeployUnitImports(b: *std.Build, mod: *std.Build.Module) void {
+    mod.addAnonymousImport("netlisp.service", .{
+        .root_source_file = b.path("systemd/netlisp.service"),
+    });
+    mod.addAnonymousImport("netlisp.service.in", .{
+        .root_source_file = b.path(".githooks/netlisp.service.in"),
+    });
+}
+
 fn addTestShard(
     b: *std.Build,
     test_step: *std.Build.Step,
@@ -441,6 +460,48 @@ fn addTestShard(
     // green run into a failure.
     guardian.announceFilters(run_tests, filters);
     test_step.dependOn(&run_tests.step);
+}
+
+/// The checks that guard what no Zig test can see: which browser assets have a
+/// gate and whether they parse, whether the JavaScript unit tests still pass,
+/// and whether every closed audit finding still names a live regression test.
+///
+/// All of these are ALSO declared as `[[external]]` gates in guardian.toml, and
+/// that declaration is not what runs them. Measured 2026-08-29: an external
+/// whose command exits nonzero does not block — `guardian-check all` reports
+/// "0 blocking" with the audit-ledger checker failing under it, and so does
+/// `zig build test`. Every `[[external]]` in this tree is advisory today,
+/// including the twenty-one `node --check` asset gates, which is how a
+/// syntax error in any browser asset rode a green build. Hanging them off the
+/// `test` step is what makes them real, following `test-affected`'s precedent;
+/// the guardian.toml entries stay, because they still declare these files to
+/// the green-run digest and because they are the right home once that path is
+/// fixed. See AUDIT-LEDGER.toml DRIFT-INFRA-004.
+fn addTreePolicyChecks(b: *std.Build, test_step: *std.Build.Step) void {
+    const checks = [_][]const []const u8{
+        // `--syntax` parses every first-party asset with Node here, because
+        // the `node --check` externals that were supposed to do it do not run.
+        &.{ "python3", "scripts/check_js_asset_gates.py", "--syntax" },
+        &.{ "python3", "scripts/check_js_asset_gates_test.py" },
+        &.{ "python3", "scripts/check_audit_ledger.py" },
+        &.{ "python3", "scripts/check_audit_ledger_test.py" },
+        // The three JavaScript unit-test runners. Each was declared as an
+        // external and therefore ran nowhere — which put shape_sketch.test.js
+        // back in exactly the state DRIFT-INFRA-003 described, "a unit test
+        // wired to NOTHING". All three exit 0 with a pass line today.
+        &.{ "node", "src/serve/assets/shape_sketch.test.js" },
+        &.{ "node", "src/serve/assets/pcb_3d_surface.test.js" },
+        &.{ "node", "scripts/test_pcb_region.js" },
+    };
+    for (checks) |argv| {
+        const run = b.addSystemCommand(argv);
+        run.setCwd(b.path("."));
+        // Each reads the tree it is judging, so nothing about it is cacheable
+        // by output hash — and a skipped policy check is the failure mode
+        // these exist to prevent.
+        run.has_side_effects = true;
+        test_step.dependOn(&run.step);
+    }
 }
 
 /// Developer-only changed-file selector. The script starts a nested filtered
