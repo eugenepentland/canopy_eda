@@ -1350,7 +1350,7 @@ test "a matching pin bypasses the search and the memo" {
         .key_hi = key.hi,
         .values = .{ snapE24(22e-12), snapE24(75), snapE24(4300), snapE24(30e-12), snapE24(1.8e-12), snapE24(36), snapE24(75e-12) },
     };
-    var assertions: std.ArrayList(env.AssertionResult) = .{};
+    var assertions: std.ArrayList(env.AssertionResult) = .empty;
     defer freeAssertions(std.testing.allocator, &assertions);
     var context = Context{ .allocator = std.testing.allocator, .assertions = &assertions };
     try synthesize(&context, fixture.spec, fixture.circuit);
@@ -1377,7 +1377,7 @@ test "a stale pin warns, searches, and offers a fresh pin line" {
     });
 
     fixture.spec.design.pinned = .{ .key_lo = key.lo +% 1, .key_hi = key.hi, .values = @splat(1) };
-    var assertions: std.ArrayList(env.AssertionResult) = .{};
+    var assertions: std.ArrayList(env.AssertionResult) = .empty;
     defer freeAssertions(std.testing.allocator, &assertions);
     var context = Context{ .allocator = std.testing.allocator, .assertions = &assertions };
     try synthesize(&context, fixture.spec, fixture.circuit);
