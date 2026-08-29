@@ -2049,6 +2049,18 @@ src/placement/impedance.zig::signalLayers | fn signalLayers(stack: Stack, out: [
 src/placement/impedance.zig::striplineZ0 | fn striplineZ0(w_mm: f64, h1_mm: f64, h2_mm: f64, t_mm: f64, er: f64) Error!f64
 src/placement/impedance.zig::targetLayer | fn targetLayer(stack: Stack, authored: u8) ?u8
 src/placement/impedance.zig::traceIsCoated | fn traceIsCoated(mask_relief_mm: f64, max_freq_hz: f64) bool
+src/placement/impedance_cache.zig::Key value
+src/placement/impedance_cache.zig::Mode enum_
+src/placement/impedance_cache.zig::Query struct_
+src/placement/impedance_cache.zig::Store struct_
+src/placement/impedance_cache.zig::Tally struct_
+src/placement/impedance_cache.zig::deinit | fn deinit(self: *Store) void
+src/placement/impedance_cache.zig::keyOf | fn keyOf(stack: impedance.Stack, q: Query) Key
+src/placement/impedance_cache.zig::resolvedDiffWidthMm | fn resolvedDiffWidthMm( scratch: std.mem.Allocator, stack: impedance.Stack, layer: u8, target_ohms: f64, pair_gap_mm: f64, coated: bool, ) ?f64
+src/placement/impedance_cache.zig::resolvedWidthMm | fn resolvedWidthMm( scratch: std.mem.Allocator, stack: impedance.Stack, layer: u8, target_ohms: f64, ground_gap_mm: f64, coated: bool, ) ?f64
+src/placement/impedance_cache.zig::stats | fn stats() Tally
+src/placement/impedance_cache.zig::stats | fn stats(self: *Store) Tally
+src/placement/impedance_cache.zig::widthMm | fn widthMm( self: *Store, scratch: std.mem.Allocator, stack: impedance.Stack, q: Query, ) ?f64
 src/placement/impedance_coupled_microstrip.zig::Modes struct_
 src/placement/impedance_coupled_microstrip.zig::analyze | fn analyze(w: f64, h: f64, t: f64, er: f64, gap: f64) Error!Modes
 src/placement/impedance_coupled_microstrip.zig::z0 | fn z0(w: f64, h: f64, t: f64, er: f64, gap: f64) Error!f64

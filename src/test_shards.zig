@@ -401,6 +401,7 @@ pub const shards: []const []const []const u8 = &.{
         "placement.escalate_retry.test.",
         "placement.gap_close_route.test.",
         "placement.gap_policy.test.",
+        "placement.impedance_cache.test.",
         "placement.impedance_rules.test.",
         "placement.keepout.test.",
         "placement.keepout_route.test.",

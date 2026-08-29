@@ -228,6 +228,7 @@ test {
     _ = @import("placement/impedance_microstrip.zig");
     _ = @import("placement/impedance_coupled_microstrip.zig");
     _ = @import("placement/impedance_coupled_stripline.zig");
+    _ = @import("placement/impedance_cache.zig");
     _ = @import("placement/impedance_rules.zig");
     _ = @import("placement/implicit_plane.zig");
     _ = @import("placement/island_accept.zig");
