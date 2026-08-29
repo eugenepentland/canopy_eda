@@ -888,7 +888,10 @@ fn toolGetPcbImage(allocator: std.mem.Allocator, project_dir: []const u8, args_v
     if (optionalU64(args_val, "r")) |r| opts.crop_r = @floatFromInt(r);
     if (optionalString(args_val, "names")) |s| opts.names = std.meta.stringToEnum(render_pcb_png.NameMode, s);
 
-    const png_bytes = pcb_layout_page.renderDesignPng(allocator, project_dir, name, opts) catch |e| {
+    // No dependency set is asked for: the CLI tool runs one render per process
+    // and has no store to retain it against (see `serve/png_cache.zig`, which is
+    // the server's own answer to the same cost).
+    const png_bytes = pcb_layout_page.renderDesignPng(allocator, project_dir, name, opts, null) catch |e| {
         try out.appendSlice(allocator, try std.fmt.allocPrint(allocator, "error rendering pcb layout: {s}", .{@errorName(e)}));
         return false;
     };

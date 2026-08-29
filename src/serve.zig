@@ -69,6 +69,7 @@ const thermal_cache = @import("serve/thermal_cache.zig");
 const progress_cache = @import("serve/progress_cache.zig");
 const describe_cache = @import("serve/describe_cache.zig");
 const read_cache = @import("serve/read_cache.zig");
+const png_cache = @import("serve/png_cache.zig");
 const warmup = @import("serve/warmup.zig");
 const pcb_fence = @import("serve/pcb_fence.zig");
 const pcb_step_export = @import("serve/pcb_step_export.zig");
@@ -327,6 +328,12 @@ pub const ReadCaches = struct {
     schematic_pdf: read_cache.Store(read_cache.schematic_pdf) = .{},
     /// `GET /api/kicad-sch/:name` — the exported schematic archive.
     kicad_sch: read_cache.Store(read_cache.kicad_sch) = .{},
+    /// `GET /api/pcb-png/:name` — the rendered board image. Grouped here by
+    /// ROLE rather than by mechanism: it is the same read-only design surface
+    /// whose whole cost is a fresh evaluation, but its body is an image with a
+    /// framing allow-list of its own, so it keeps its own store type
+    /// (`serve/png_cache.zig`).
+    png_images: png_cache.Store = .{},
 
     /// Give every store the server's long-lived allocator, which is the switch
     /// that turns retention on.
@@ -337,6 +344,7 @@ pub const ReadCaches = struct {
             .thermal_page = .{ .allocator = allocator },
             .schematic_pdf = .{ .allocator = allocator },
             .kicad_sch = .{ .allocator = allocator },
+            .png_images = .{ .allocator = allocator },
         };
     }
 
@@ -347,6 +355,7 @@ pub const ReadCaches = struct {
         self.thermal_page.deinit();
         self.schematic_pdf.deinit();
         self.kicad_sch.deinit();
+        self.png_images.deinit();
     }
 };
 

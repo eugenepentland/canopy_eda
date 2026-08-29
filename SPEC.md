@@ -6244,6 +6244,10 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - A read-only response cache with no allocator retains nothing, so a handler test computes every answer fresh
 - A cached ERC answer is byte-identical to the freshly computed one it was retained from, and an edit to the design retires it
 - A cached thermal answer is byte-identical to the freshly computed one it was retained from, and an edit to the design retires it
+- The PCB image endpoint reuses a dependency-validated image and invalidates it when the design or its sidecars change
+- The PCB image endpoint caches only its allow-listed framing modes and bypasses fresh-route, fresh-solve and sub-scoped requests
+- The PCB image cache refuses a body whose dependency set stamps nothing
+- The PCB image cache retains nothing when its server gave it no allocator
 - The layout-status reader reuses a parsed layouts sidecar until that file's mtime or size changes
 - The fab-readiness gate reuses caller-supplied net connectivity instead of recomputing it
 - The navigation bar routes home through the Netlisp brand and carries no separate Designs tab

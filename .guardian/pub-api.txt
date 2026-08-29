@@ -3228,6 +3228,7 @@ src/render_order.zig::stages value
 src/render_order.zig::word | fn word(self: Gpu) []const u8
 src/render_pcb_png.zig::NameMode enum_
 src/render_pcb_png.zig::Options struct_
+src/render_pcb_png.zig::PourInputs struct_
 src/render_pcb_png.zig::SpecStatus struct_
 src/render_pcb_png.zig::cropNetBbox | fn cropNetBbox( alloc: std.mem.Allocator, p: optimizer.Placement, routed: ?router.RouteResult, nets: []const []const u8, margin: f64, ) std.mem.Allocator.Error!?[4]f64
 src/render_pcb_png.zig::cropnet_margin_mm value
@@ -3993,7 +3994,7 @@ src/serve/pcb_layout_page.zig::readiness value
 src/serve/pcb_layout_page.zig::readiness_response value
 src/serve/pcb_layout_page.zig::refPosesFromPartPoses | fn refPosesFromPartPoses(alloc: std.mem.Allocator, parts: []const PartPose) std.mem.Allocator.Error![]optimizer.RefPose
 src/serve/pcb_layout_page.zig::renameNamedLayoutApi | fn renameNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/pcb_layout_page.zig::renderDesignPng | fn renderDesignPng( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: PngRequest, ) PngError![]u8
+src/serve/pcb_layout_page.zig::renderDesignPng | fn renderDesignPng( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: PngRequest, deps: ?*?page_cache.FileSet, ) PngError![]u8
 src/serve/pcb_layout_page.zig::renderLayoutPage | fn renderLayoutPage( ctx: *Server, req: ?*httpz.Request, res: ?*httpz.Response, job: RenderJob, ) HandlerError!?[]const u8
 src/serve/pcb_layout_page.zig::rescoreLayoutsApi | fn rescoreLayoutsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::resolveBlock | fn resolveBlock( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, eval: *Evaluator, module_res: *?modules_mod.ResolvedBlock, ) ?*env_mod.DesignBlock
@@ -4067,6 +4068,12 @@ src/serve/plugin_tokens.zig::PluginTokenStore struct_
 src/serve/plugin_tokens.zig::Token struct_
 src/serve/plugin_tokens.zig::mint | fn mint( self: *PluginTokenStore, allocator: std.mem.Allocator, auth_dir: []const u8, label: []const u8, ) (std.mem.Allocator.Error || std.Io.RandomSecureError)![]const u8
 src/serve/plugin_tokens.zig::validate | fn validate(self: *PluginTokenStore, allocator: std.mem.Allocator, auth_dir: []const u8, raw: []const u8) bool
+src/serve/png_cache.zig::Store struct_
+src/serve/png_cache.zig::captureRenderDeps | fn captureRenderDeps( alloc: std.mem.Allocator, eval: *const Evaluator, module_res: ?modules_mod.ResolvedBlock, project_dir: []const u8, name: []const u8, ) ?page_cache.FileSet
+src/serve/png_cache.zig::deinit | fn deinit(self: *Store) void
+src/serve/png_cache.zig::serve | fn serve(self: *Store, in: anytype, miss_version: *?u32) bool
+src/serve/png_cache.zig::serveImage | fn serveImage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void
+src/serve/png_cache.zig::store | fn store(self: *Store, in: anytype) void
 src/serve/pour_json.zig::ZoneFillReq struct_
 src/serve/pour_json.zig::writePlaneFillsField | fn writePlaneFillsField( w: *std.Io.Writer, alloc: std.mem.Allocator, placement: optimizer.Placement, copper: pour.Copper, omit: bool, base: ?pour.EdgeField, ) std.Io.Writer.Error!void
 src/serve/pour_json.zig::writePours | fn writePours( w: *std.Io.Writer, alloc: std.mem.Allocator, placement: optimizer.Placement, copper: pour.Copper, zones: []const pour.UserZone, base: ?pour.EdgeField, ) std.Io.Writer.Error!void
