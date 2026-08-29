@@ -3446,6 +3446,12 @@ src/review_thermal.zig::summaryLines | fn summaryLines( allocator: std.mem.Alloc
 src/review_thermal.zig::testHotLadder | fn testHotLadder() thermal_scenarios.Ladder
 src/review_thermal.zig::testLadder | fn testLadder(sink: []const u8) thermal_scenarios.Ladder
 src/review_thermal.zig::writeFactsJson | fn writeFactsJson( w: anytype, bt: thermal.BoardThermal, scenarios: thermal_scenarios.Answer, ) json_writer.WriteError!void
+src/route_cleanup_gate.zig::Apply struct_
+src/route_cleanup_gate.zig::applyTrackPlan | fn applyTrackPlan( alloc: std.mem.Allocator, routed: router.RouteResult, findings: []const drc.Violation, selected: []const bool, ) std.mem.Allocator.Error!Apply
+src/route_cleanup_gate.zig::applyViaPlan | fn applyViaPlan( alloc: std.mem.Allocator, nets: []const optimizer.FlatNet, routed: router.RouteResult, findings: []const drc.Violation, selected: []const bool, ) std.mem.Allocator.Error!router.RouteResult
+src/route_cleanup_gate.zig::bypassRegressedNets | fn bypassRegressedNets( alloc: std.mem.Allocator, net_count: usize, before_violations: []const drc.Violation, after_violations: []const drc.Violation, ) std.mem.Allocator.Error![]const usize
+src/route_cleanup_gate.zig::gateSafe | fn gateSafe( before_violations: []const drc.Violation, before_tally: fab_readiness.Tally, after_violations: []const drc.Violation, after_tally: fab_readiness.Tally, ) bool
+src/route_cleanup_gate.zig::newlyOpenNets | fn newlyOpenNets( alloc: std.mem.Allocator, nets: []const optimizer.FlatNet, before_open: []const []const u8, after_open: []const []const u8, ) std.mem.Allocator.Error![]const usize
 src/route_repair.zig::Baseline struct_
 src/route_repair.zig::Input struct_
 src/route_repair.zig::Outcome struct_

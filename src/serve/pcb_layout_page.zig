@@ -37,6 +37,7 @@ const route_score = @import("../placement/route_score.zig");
 const drc = @import("../placement/drc.zig");
 const drc_json = @import("drc_json.zig");
 const drc_rules = @import("drc_rules.zig");
+const route_cleanup_gate = @import("../route_cleanup_gate.zig");
 const outline_mod = @import("../placement/outline.zig");
 const shape_sketch = @import("../shape_sketch.zig");
 const shape_sketch_json = @import("shape_sketch_json.zig");
@@ -12409,84 +12410,99 @@ fn repairLandTransitNet(
     return result;
 }
 
-/// Remove deletion-invariant trace sections and non-ground vias from persisted
-/// copper without rerouting it. The shared topology gate supplies a jointly
-/// safe deletion plan; the edit is persisted only when error DRC and routed-net
-/// connectivity do not regress.
-fn cleanupNetSelected(selected: []const bool, net: i32) bool {
-    if (net < 0) return false;
-    if (selected.len == 0) return true;
-    const net_i: usize = @intCast(net);
-    return net_i < selected.len and selected[net_i];
-}
-
-const CleanupApply = struct {
-    routed: router.RouteResult,
-    stub_tracks_removed: usize = 0,
+/// The outcome of the trace-deletion phase of `clean_route_topology`: the
+/// last candidate attempted, its full-board evidence, and the nets the retry
+/// had to withhold from the plan.
+const TracePhase = struct {
+    candidate: router.RouteResult,
+    violations: []const drc.Violation,
+    tally: fab_readiness.Tally,
+    safe: bool,
+    rounds: usize,
+    stub_tracks_removed: usize,
+    nets_excluded: []const []const u8,
 };
 
-fn mcpApplyTrackCleanupPlan(
-    alloc: std.mem.Allocator,
-    routed: router.RouteResult,
-    findings: []const drc.Violation,
-    selected: []const bool,
-) std.mem.Allocator.Error!CleanupApply {
-    const drop = try alloc.alloc(bool, routed.tracks.len);
-    @memset(drop, false);
-    var stub_tracks_removed: usize = 0;
-    for (findings) |finding| {
-        const removable = finding.kind == .dangling_copper or finding.kind == .copper_stub;
-        if (!removable or finding.who.track_a < 0) continue;
-        const track_i: usize = @intCast(finding.who.track_a);
-        if (track_i >= routed.tracks.len) continue;
-        const net = routed.tracks[track_i].net;
-        if (!cleanupNetSelected(selected, net)) continue;
-        if (!drop[track_i] and finding.kind == .copper_stub) stub_tracks_removed += 1;
-        drop[track_i] = true;
-    }
-    var tracks: std.ArrayList(router.Track) = .empty;
-    for (routed.tracks, drop) |track, remove| if (!remove) try tracks.append(alloc, track);
-    var out = routed;
-    out.tracks = try tracks.toOwnedSlice(alloc);
-    return .{ .routed = out, .stub_tracks_removed = stub_tracks_removed };
-}
-
-fn mcpApplyViaCleanupPlan(
-    alloc: std.mem.Allocator,
-    nets: []const optimizer.FlatNet,
-    routed: router.RouteResult,
-    findings: []const drc.Violation,
-    selected: []const bool,
-) std.mem.Allocator.Error!router.RouteResult {
-    const drop_vias = try alloc.alloc(bool, routed.vias.len);
-    @memset(drop_vias, false);
-    for (findings) |finding| {
-        const removable = finding.kind == .single_layer_via or finding.kind == .redundant_via;
-        if (!removable or finding.who.track_a < 0) continue;
-        const via_i: usize = @intCast(finding.who.track_a);
-        if (via_i >= routed.vias.len) continue;
-        const via = routed.vias[via_i];
-        if (!cleanupNetSelected(selected, via.net) or via.net < 0) continue;
-        const net_i: usize = @intCast(via.net);
-        if (net_i >= nets.len or optimizer.isGroundName(router.shortName(nets[net_i].name))) continue;
-        drop_vias[via_i] = true;
-    }
-    var vias: std.ArrayList(router.Via) = .empty;
-    for (routed.vias, drop_vias) |via, remove| if (!remove) try vias.append(alloc, via);
-    var out = routed;
-    out.vias = try vias.toOwnedSlice(alloc);
-    return out;
-}
-
-fn cleanupGateSafe(
+/// Run the trace-deletion phase, retried PER NET. The redundancy plan is
+/// advisory and the gate is the authority, and on real hand-edited boards
+/// they disagree: the topology graph credits a connection net_open's
+/// fabricated-copper raster does not, so deleting that net's
+/// "deletion-invariant" sections opens it (barracuda, 2026-08: three such
+/// nets vetoed a 152-section cleanup outright), and a section can carry a
+/// decoupling cap's same-face bypass leg the net graph never modelled. One
+/// unsound net must not hold every other net's junk hostage: each refused
+/// attempt excludes exactly the nets the gate's own evidence names — newly
+/// open in the tally, or with a grown bypass_open count — and tries again
+/// without them; their sections stay on the board and stay reported. Any
+/// other regression (a new error-severity finding, a changed net total)
+/// still refuses the whole phase, as before.
+/// Everything the trace phase judges against: the board as restored, the
+/// full-board evidence taken before any deletion, and the caller's net scope.
+const TraceIn = struct {
+    project_dir: []const u8,
+    name: []const u8,
+    solved: SolvedRequest,
+    restored: router.RouteResult,
     before_violations: []const drc.Violation,
     before_tally: fab_readiness.Tally,
-    after_violations: []const drc.Violation,
-    after_tally: fab_readiness.Tally,
-) bool {
-    if (drc.errorCount(after_violations) > drc.errorCount(before_violations)) return false;
-    if (after_tally.total != before_tally.total) return false;
-    return after_tally.routed >= before_tally.routed;
+    selected: []const bool,
+    clearance: f64,
+};
+
+fn cleanupTracePhase(alloc: std.mem.Allocator, in: TraceIn) HandlerError!TracePhase {
+    var out = TracePhase{
+        .candidate = in.restored,
+        .violations = in.before_violations,
+        .tally = in.before_tally,
+        .safe = false,
+        .rounds = 0,
+        .stub_tracks_removed = 0,
+        .nets_excluded = &.{},
+    };
+    var excluded: std.ArrayList([]const u8) = .empty;
+    var scope: []const bool = in.selected;
+    const round_limit = in.restored.tracks.len + 1;
+    const retry_limit = 8;
+    var retries: usize = 0;
+    while (retries < retry_limit) : (retries += 1) {
+        out.candidate = in.restored;
+        out.violations = in.before_violations;
+        out.rounds = 0;
+        out.stub_tracks_removed = 0;
+        while (out.rounds < round_limit) : (out.rounds += 1) {
+            const applied = try route_cleanup_gate.applyTrackPlan(alloc, out.candidate, out.violations, scope);
+            out.stub_tracks_removed += applied.stub_tracks_removed;
+            if (applied.routed.tracks.len == out.candidate.tracks.len) break;
+            out.candidate = applied.routed;
+            out.violations = mcpCopperViolations(alloc, in.project_dir, in.name, in.solved, out.candidate, in.clearance);
+        }
+        out.tally = try fab_readiness.routableTally(alloc, in.solved.placement, .{
+            .tracks = out.candidate.tracks,
+            .vias = out.candidate.vias,
+            .zones = in.solved.shown_zones.user,
+        });
+        out.safe = route_cleanup_gate.gateSafe(in.before_violations, in.before_tally, out.violations, out.tally);
+        if (out.safe) break;
+        const opened = try route_cleanup_gate.newlyOpenNets(alloc, in.solved.placement.nets, in.before_tally.open, out.tally.open);
+        const bypass_hit = try route_cleanup_gate.bypassRegressedNets(alloc, in.solved.placement.nets.len, in.before_violations, out.violations);
+        if (opened.len == 0 and bypass_hit.len == 0) break;
+        var narrowed = try alloc.alloc(bool, in.solved.placement.nets.len);
+        if (scope.len == 0) {
+            @memset(narrowed, true);
+        } else {
+            @memcpy(narrowed, scope);
+        }
+        for ([2][]const usize{ opened, bypass_hit }) |offenders| {
+            for (offenders) |net_i| {
+                if (!narrowed[net_i]) continue;
+                narrowed[net_i] = false;
+                try excluded.append(alloc, in.solved.placement.nets[net_i].name);
+            }
+        }
+        scope = narrowed;
+    }
+    out.nets_excluded = try excluded.toOwnedSlice(alloc);
+    return out;
 }
 
 /// Apply or preview the exact jointly-safe redundant-section plan emitted by
@@ -12548,29 +12564,23 @@ pub fn mcpCleanRouteTopology(
     // redundancy verdict must not prevent independently safe via pruning (and
     // vice versa): reject only the phase that regressed full-board DRC or fab
     // connectivity, then continue the next phase from the last accepted board.
-    var trace_candidate = restored;
-    var trace_violations = before_violations;
-    var cleanup_rounds: usize = 0;
-    var candidate_stub_tracks_removed: usize = 0;
-    const cleanup_limit = restored.tracks.len + 1;
-    while (cleanup_rounds < cleanup_limit) : (cleanup_rounds += 1) {
-        const applied = try mcpApplyTrackCleanupPlan(alloc, trace_candidate, trace_violations, selected);
-        candidate_stub_tracks_removed += applied.stub_tracks_removed;
-        if (applied.routed.tracks.len == trace_candidate.tracks.len) break;
-        trace_candidate = applied.routed;
-        trace_violations = mcpCopperViolations(alloc, project_dir, name, solved, trace_candidate, rp.clearance);
-    }
-    const trace_tally = try fab_readiness.routableTally(alloc, solved.placement, .{
-        .tracks = trace_candidate.tracks,
-        .vias = trace_candidate.vias,
-        .zones = solved.shown_zones.user,
+    const trace = try cleanupTracePhase(alloc, .{
+        .project_dir = project_dir,
+        .name = name,
+        .solved = solved,
+        .restored = restored,
+        .before_violations = before_violations,
+        .before_tally = before_tally,
+        .selected = selected,
+        .clearance = rp.clearance,
     });
+    const trace_candidate = trace.candidate;
+    const trace_safe = trace.safe;
     const trace_attempted = trace_candidate.tracks.len < restored.tracks.len;
-    const trace_safe = cleanupGateSafe(before_violations, before_tally, trace_violations, trace_tally);
     var cleaned = if (trace_safe) trace_candidate else restored;
-    const via_before_violations = if (trace_safe) trace_violations else before_violations;
-    const via_before_tally = if (trace_safe) trace_tally else before_tally;
-    const via_candidate = try mcpApplyViaCleanupPlan(
+    const via_before_violations = if (trace_safe) trace.violations else before_violations;
+    const via_before_tally = if (trace_safe) trace.tally else before_tally;
+    const via_candidate = try route_cleanup_gate.applyViaPlan(
         alloc,
         solved.placement.nets,
         cleaned,
@@ -12590,13 +12600,13 @@ pub fn mcpCleanRouteTopology(
         })
     else
         via_before_tally;
-    const via_safe = cleanupGateSafe(via_before_violations, via_before_tally, via_violations, via_tally);
+    const via_safe = route_cleanup_gate.gateSafe(via_before_violations, via_before_tally, via_violations, via_tally);
     if (via_safe) cleaned = via_candidate;
     const after_violations = if (via_safe) via_violations else via_before_violations;
     const after_tally = if (via_safe) via_tally else via_before_tally;
     const tracks_rolled_back = trace_attempted and !trace_safe;
     const vias_rolled_back = via_attempted and !via_safe;
-    const stub_tracks_removed = if (trace_safe) candidate_stub_tracks_removed else 0;
+    const stub_tracks_removed = if (trace_safe) trace.stub_tracks_removed else 0;
     var candidate_error_kinds: std.ArrayList([]const u8) = .empty;
     var candidate_error_details: std.ArrayList([]const u8) = .empty;
     for (after_violations) |violation| {
@@ -12653,7 +12663,7 @@ pub fn mcpCleanRouteTopology(
             before_tally.total,
             after_tally.total,
             drc.countKind(after_violations, .dangling_copper),
-            cleanup_rounds,
+            trace.rounds,
             stub_tracks_removed,
             dry_run,
             would_change,
@@ -12667,6 +12677,8 @@ pub fn mcpCleanRouteTopology(
         },
     );
     try mcpWriteStrArray(w, after_tally.open);
+    try w.writeAll(",\"trace_nets_excluded\":");
+    try mcpWriteStrArray(w, trace.nets_excluded);
     try w.writeAll(",\"candidate_error_kinds\":");
     try mcpWriteStrArray(w, candidate_error_kinds.items);
     try w.writeAll(",\"candidate_error_details\":");
@@ -14423,7 +14435,7 @@ test "route topology cleanup includes newly exposed stubs and honors net scope" 
         .{ .x = 2.5, .y = 0, .gap = 0, .clearance = 0, .kind = .copper_stub, .who = .{ .track_a = 1 } },
         .{ .x = 4.5, .y = 0, .gap = 0, .clearance = 0, .kind = .copper_stub, .who = .{ .track_a = 2 } },
     };
-    const applied = try mcpApplyTrackCleanupPlan(
+    const applied = try route_cleanup_gate.applyTrackPlan(
         alloc,
         .{ .tracks = &tracks, .vias = &.{}, .routed = 2, .total = 2 },
         &findings,

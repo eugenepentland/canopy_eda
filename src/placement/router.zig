@@ -13617,18 +13617,16 @@ test "quarter-pitch pass rescues a base-grid quantization failure beyond the loc
     try testing.expectEqual(@as(usize, 2), drc_mod.countKind(viol, .component_edge));
     // The rescue draws raw lattice copper: it runs BELOW the finish, so no pad
     // escape has disciplined it yet and its legs still leave their own lands
-    // off centre — nine same-net `land_transit` warnings that belong to the
-    // fixture's geometry, not to a clearance failure.
-    //
-    // Nine rather than the seven this fixture used to draw: priced pad gateways
-    // (`GateAnchors`) stopped the legs buying a free outer fan ring, so each one
-    // now enters its land nearer the centre and passes closer to the siblings of
-    // a seven-pad chain packed on 1 mm pitch. The finish's own pad-escape pass —
-    // which this rescue runs below, and which every board sees — is what centres
-    // those entries; the trade on the whole board is measured the other way
-    // round (`bcuda-lt3045-ldo`: 18.47 mm of trace to 16.87 mm, 24 quality
-    // warnings to 9).
-    try testing.expectEqual(@as(usize, 9), drc_mod.countKind(viol, .land_transit));
+    // off centre — one same-net `land_transit` warning per dirtied land of the
+    // seven-pad chain packed on 1 mm pitch, belonging to the fixture's
+    // geometry, not to a clearance failure. (The checker reports per PAD with
+    // the worst offence; before that grouping this same lattice read as nine
+    // findings, two lands double-billed for two legs each.) The finish's own
+    // pad-escape pass — which this rescue runs below, and which every board
+    // sees — is what centres those entries; the trade on the whole board is
+    // measured the other way round (`bcuda-lt3045-ldo`: 18.47 mm of trace to
+    // 16.87 mm, 24 quality warnings to 9).
+    try testing.expectEqual(@as(usize, 7), drc_mod.countKind(viol, .land_transit));
     // Under the full-cross-section contact graph, only three stored sections
     // can be deleted without changing pad/live-via/pour connectivity. Eight
     // sections the capsule-only graph called redundant are now correctly kept:
@@ -13638,7 +13636,7 @@ test "quarter-pitch pass rescues a base-grid quantization failure beyond the loc
     // gate. Its former width-only contact is a weak graze, not a fabricated
     // junction, so it must not be reported as an implicit electrical join.
     try testing.expectEqual(@as(usize, 0), drc_mod.countKind(viol, .implicit_junction));
-    try testing.expectEqual(@as(usize, 16), viol.len);
+    try testing.expectEqual(@as(usize, 14), viol.len);
 
     // The public batch seam runs the same sequence before diagnostics capture,
     // so the rescued net disappears from `failed` in the finished result.

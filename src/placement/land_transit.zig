@@ -323,15 +323,50 @@ fn runMiss(land: Land, pts: []const [2]f64, r: Run) ?f64 {
 /// beside the land is off the line by the width of the corridor it is sitting
 /// in, so it fails. What it cannot see — a corner that happens to fall exactly
 /// on the ray — is a shape no emitter here draws.
+///
+/// One family of off-ray copper is exempt: an axis-aligned run whose swept
+/// metal stays inside the land's own extent on the axis PERPENDICULAR to its
+/// travel — `columnContained` — provided the run also reaches one of its
+/// segment's ends inside the grown land (it terminates or turns here rather
+/// than flying straight through). Such copper never puts metal beside the
+/// land: everything it adds sits over the pad or inside the pad's own column,
+/// so the corridor to the neighbouring pin holds nothing the pad itself did
+/// not already put there. This is what a hand-drawn entry that misses the
+/// centre by a few hundredths looks like, and what a connection to a long
+/// connector finger (too narrow to be a `paddle`, far too long for its centre
+/// to be the anchor) looks like. The 2026-08 barracuda/barracuda-base audit
+/// measured hand-routed entries missing the ray by 0.03–0.4 mm while staying
+/// wholly inside their land's column — half the boards' own-land findings —
+/// with zero of them putting copper in a corridor. A fly-through that crosses
+/// the land without an end inside stays a finding even when contained: copper
+/// that BRIDGES across a land's column is exactly the shape the rule exists
+/// for.
 pub fn segmentOffence(land: Land, a: [2]f64, b: [2]f64, half: f64) ?Finding {
     if (land.paddle()) return null;
     const cl = clip(land, half, a, b) orelse return null;
     const c = land.centre();
     const off = lineOffset(a, b, c);
     if (off <= anchor_tol_mm) return null;
+    if (columnContained(land, a, b, half) and (cl[0] <= eps or cl[1] >= 1 - eps)) return null;
     const p = [2]f64{ a[0] + cl[0] * (b[0] - a[0]), a[1] + cl[0] * (b[1] - a[1]) };
     const q = [2]f64{ a[0] + cl[1] * (b[0] - a[0]), a[1] + cl[1] * (b[1] - a[1]) };
     return .{ .at = nearestOn(p, q, c), .overlap_mm = dist(p, q), .miss_mm = off };
+}
+
+/// Does this axis-aligned segment's swept copper stay inside the land's extent
+/// on the axis perpendicular to its run? A diagonal segment is never contained:
+/// projection containment is not geometric containment once the run is off
+/// axis, so the strict ray rule keeps judging it.
+fn columnContained(land: Land, a: [2]f64, b: [2]f64, half: f64) bool {
+    if (@abs(b[0] - a[0]) <= eps) {
+        return @min(a[0], b[0]) - half >= land.x0 - eps and
+            @max(a[0], b[0]) + half <= land.x1 + eps;
+    }
+    if (@abs(b[1] - a[1]) <= eps) {
+        return @min(a[1], b[1]) - half >= land.y0 - eps and
+            @max(a[1], b[1]) + half <= land.y1 + eps;
+    }
+    return false;
 }
 
 /// Re-anchor one offending flat segment through `land.centre()`.
@@ -485,6 +520,32 @@ test "a lap along a flank and a transit across a land are both findings" {
     const t = (try offence(arena, qfn_land, &transit, track_half)) orelse
         return testing.expect(false);
     try testing.expectApproxEqAbs(0.3, t.miss_mm, 1e-6);
+}
+
+// spec: placement/land-transit - An axis-aligned run whose swept copper stays inside the land's own column and reaches a segment end there is the pad's connection, not an offence; a column-contained fly-through, a flank lap, and every diagonal stay judged by the strict ray rule.
+
+test "column-contained copper that ends on the land is legal; fly-throughs and laps are not" {
+    // A hand-drawn entry aimed 0.05 mm off the centre ray: swept copper
+    // (x in 0.05 +/- 0.0635) stays inside the land's own +/-0.15 column and the
+    // segment ends on the land, so nothing reaches the corridor.
+    try testing.expect(segmentOffence(qfn_land, .{ 0.05, 0.1 }, .{ 0.05, 0.9 }, track_half) == null);
+    // A connector finger 4.19 x 1.27 mm: one axis is under `paddle_min_half_mm`
+    // so the ray rule is in scope, but a bar of copper lying wholly on the land
+    // 2 mm from its centre puts no metal beside it.
+    const finger = Land{ .x0 = -2.095, .y0 = -0.635, .x1 = 2.095, .y1 = 0.635 };
+    try testing.expect(segmentOffence(finger, .{ -2.031, -0.572 }, .{ -2.031, 0.571 }, track_half) == null);
+    // The same off-ray column with BOTH ends outside the land is a bridge
+    // straight across it, not a connection: still a finding.
+    const through = segmentOffence(qfn_land, .{ 0.05, -1 }, .{ 0.05, 1 }, track_half) orelse
+        return testing.expect(false);
+    try testing.expectApproxEqAbs(0.05, through.miss_mm, 1e-6);
+    // A lap along the flank leaves the column sideways: still a finding.
+    try testing.expect(segmentOffence(qfn_land, .{ 0.19, -1 }, .{ 0.19, 1 }, track_half) != null);
+    // A transit across the short axis exits through the flank corridors even
+    // though its own lateral band fits the land's long axis: still a finding.
+    try testing.expect(segmentOffence(qfn_land, .{ -1, 0.3 }, .{ 1, 0.3 }, track_half) != null);
+    // A diagonal is never column-contained; the strict ray rule keeps judging it.
+    try testing.expect(segmentOffence(qfn_land, .{ 0.05, 0.1 }, .{ 0.08, 0.9 }, track_half) != null);
 }
 
 // spec: placement/land-transit - an exposed thermal paddle is out of scope, since nothing anchors on its centre and it has no flank corridor
