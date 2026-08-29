@@ -738,6 +738,20 @@ pub const FillMemo = struct {
     /// freshly poured fill lives in a per-request arena, so a memo that handed
     /// back the caller's own copy could not be referenced after the request.
     put: *const fn (ctx: *anyopaque, k: content_key.Key, fill: Fill) ?Fill,
+    /// Borrow the LAST generation of the fill `id` names (`fillIdentity`): its
+    /// margin field, and the obstacle set that produced it. A memo that offers
+    /// this lets a fill whose content key MOVED be updated instead of poured
+    /// again — the field is copied and only the changed obstacles' windows are
+    /// rebuilt. BORROWS, on the same terms as `get`.
+    ///
+    /// Null (the wasm engine, every router-internal caller) pours cold, and so
+    /// does a miss: the patch is an optimisation and never a correctness input,
+    /// which is why the fallback is a routine path rather than an error.
+    base: ?*const fn (ctx: *anyopaque, id: content_key.Key) ?Snapshot = null,
+    /// Retain this generation's field and obstacle set as the base the NEXT
+    /// generation of `id` patches from. COPIES: the snapshot handed in lives in
+    /// the pass's arena and dies with the request.
+    put_base: ?*const fn (ctx: *anyopaque, id: content_key.Key, snap: Snapshot) void = null,
 };
 
 /// Bumped whenever a change to `computeFill` makes an OLD key describe a fill
@@ -747,7 +761,7 @@ pub const FillMemo = struct {
 /// poured differently must not be answered. (The store is process-lifetime, so
 /// this guards against a stale key surviving inside one running server across a
 /// hot-reloaded design, not across binaries; it costs one byte to be right.)
-const fill_key_version: u8 = 1;
+const fill_key_version: u8 = 2;
 
 /// The content key of ONE fill: everything `computeFill` reads to produce it,
 /// and nothing else.
@@ -773,19 +787,57 @@ const fill_key_version: u8 = 1;
 /// Everything the walk does not see is folded in explicitly below: the lattice,
 /// the guard/inset/clearance scalars, the minimum-width opening, the corner
 /// radius, whether contours are traced, the clip, and the seed-fallback flag.
-pub fn fillKey(
+/// `rec`, when given, also collects each resolved obstacle's own digest and
+/// stamp window on the way past. ONE traversal answers both questions, because
+/// they are the same traversal: the key says whether this fill moved, and the
+/// record says which of its obstacles did.
+fn fillKey(
     arena: std.mem.Allocator,
     placement: optimizer.Placement,
     copper: Copper,
     spec: LayerSpec,
     contours: bool,
+    rec: ?*Recorder,
 ) std.mem.Allocator.Error!content_key.Key {
     const lat = lattice(placement);
+    var fp: content_key.Fingerprint = .{};
+    foldFillShape(&fp, placement, spec, contours, lat);
+    if (lat.nx < 1 or lat.ny < 1) return fp.final();
     const rules = placement.rules;
     const inset = rules.design.pourEdge();
-    const pc = baseGapFor(rules.design, spec);
     const r_min = @max(0.1, @min(smallestPourGap(placement), inset));
-    var fp: content_key.Fingerprint = .{};
+    const grid = Grid{
+        .minx = lat.r.minx,
+        .miny = lat.r.miny,
+        .pitch = lat.pitch,
+        .nx = lat.nx,
+        .ny = lat.ny,
+        .labels = &.{},
+        .margin = &.{},
+        .iso = isoGuardFor(lat.pitch, r_min),
+    };
+    const sink = Sink{ .g = grid, .fp = &fp, .rec = rec };
+    const nets = try padNets(arena, placement);
+    try walkObstacles(arena, sink, placement, copper, spec, nets);
+    markSeeds(sink, placement, copper, spec, nets, &.{});
+    return fp.final();
+}
+
+/// Everything about a fill that is NOT a stamped obstacle: the lattice, the
+/// scalars derived from it, the outline, the clip and the post-raster
+/// parameters. Folded by `fillKey` before its walk, and BY ITSELF the fill's
+/// IDENTITY (`fillIdentity`) — the thing that stays the same across an edit
+/// while the content key moves.
+fn foldFillShape(
+    fp: *content_key.Fingerprint,
+    placement: optimizer.Placement,
+    spec: LayerSpec,
+    contours: bool,
+    lat: Lattice,
+) void {
+    const rules = placement.rules;
+    const inset = rules.design.pourEdge();
+    const r_min = @max(0.1, @min(smallestPourGap(placement), inset));
     fp.tag(fill_key_version);
     // The lattice and the scalars derived from it — the shape of the raster,
     // before a single obstacle is stamped.
@@ -797,10 +849,9 @@ pub fn fillKey(
     fp.put(usize, lat.nx);
     fp.put(usize, lat.ny);
     fp.put(bool, lat.coarsened);
-    const guard = isoGuardFor(lat.pitch, r_min);
-    fp.put(f64, guard);
+    fp.put(f64, isoGuardFor(lat.pitch, r_min));
     fp.put(f64, inset);
-    fp.put(f64, pc);
+    fp.put(f64, baseGapFor(rules.design, spec));
     fp.put(f64, effectiveMinimumWidth(placement, spec));
     fp.put(f64, @max(0, rules.design.pour.corner_radius));
     fp.put(bool, contours);
@@ -812,21 +863,35 @@ pub fn fillKey(
     // must share one entry.
     fp.put([]const [2]f64, spec.clip);
     fp.put(bool, spec.keep_unseeded);
-    if (lat.nx < 1 or lat.ny < 1) return fp.final();
-    const grid = Grid{
-        .minx = lat.r.minx,
-        .miny = lat.r.miny,
-        .pitch = lat.pitch,
-        .nx = lat.nx,
-        .ny = lat.ny,
-        .labels = &.{},
-        .margin = &.{},
-        .iso = guard,
-    };
-    const sink = Sink{ .g = grid, .fp = &fp };
-    const nets = try padNets(arena, placement);
-    try walkObstacles(arena, sink, placement, copper, spec, nets);
-    markSeeds(sink, placement, copper, spec, nets, &.{});
+}
+
+/// WHICH fill this is, as opposed to what is currently in it.
+///
+/// The content key moves with every edit that reaches the fill; this does not.
+/// It is what lets the next generation of one fill find the previous one's
+/// margin field and update it, and it covers exactly the inputs that field is
+/// meaningful under: the lattice (so the two fields are co-sized and their cells
+/// are the same cells), the edge/clip base the update reseeds from, and the
+/// post-raster parameters. The plane net, side and layer go in as well — they
+/// decide which obstacles the walk resolves at all, so two fills that differ
+/// there would diff as a near-total change and never patch usefully.
+///
+/// `spec.higher` is deliberately absent: those rings are stamped THROUGH the
+/// sink like any other obstacle, so a change to them is one the feature diff
+/// handles rather than one that has to invalidate the base.
+fn fillIdentity(placement: optimizer.Placement, spec: LayerSpec, contours: bool) content_key.Key {
+    var fp: content_key.Fingerprint = .{};
+    foldFillShape(&fp, placement, spec, contours, lattice(placement));
+    fp.tag(9);
+    switch (spec.net) {
+        .ground => fp.tag(0),
+        .named => |name| {
+            fp.tag(1);
+            fp.put([]const u8, name);
+        },
+    }
+    fp.put(?optimizer.Side, spec.side);
+    fp.put(?u8, spec.track_layer);
     return fp.final();
 }
 
@@ -853,10 +918,14 @@ pub fn fillKey(
 ///     complete stamp window reaches its active box (`stampWindowActive`), so an
 ///     edit elsewhere leaves it borrowable even on its own layer.
 ///
-/// A VIA is deliberately far less forgiving: `markSeeds` seeds from every
-/// same-net via and is NOT clip-culled, and `stampForeign` stamps every foreign
-/// via on every layer. So a via edit unsettles every unclipped fill on the
-/// board, which is the honest worst case rather than a bug.
+/// A VIA is layer-blind — a `router.Via` names no span, so its barrel really is
+/// on every layer and `stampForeign` really does stamp it into every fill. What
+/// a via edit CANNOT reach is a hand-drawn zone it is nowhere near, on both
+/// counts: its clearance stamp is culled by `stampWindowActive` exactly as a
+/// track's is, and its SEED sample is culled by `seedHalo` — the same box
+/// `markSeeds` culls against, for the reason stated there. An UNCLIPPED fill has
+/// no such box and is genuinely unsettled by any via edit, which is the honest
+/// worst case rather than a bug.
 ///
 /// Arcs and RF paths are NOT considered: a caller that can change them must
 /// treat every fill as unstable (the server's reconcile refuses the scoped path
@@ -893,9 +962,15 @@ pub fn fillKeyStable(
         )) continue;
         return false;
     };
+    const seed_active = seedHalo(lat.pitch, spec.clip);
     for (vias) |v| {
-        // A same-net via is a SEED, and seeding is not clip-culled.
-        if (planeCarries(spec.net, netName(placement, v.net))) return false;
+        // A same-net via is a SEED rather than an obstacle, and a seed's reach is
+        // the one cell it samples — culled by the clip halo, never by a
+        // clearance window.
+        if (planeCarries(spec.net, netName(placement, v.net))) {
+            if (!stampWindowActive(seed_active, v.x, v.y, v.x, v.y)) continue;
+            return false;
+        }
         const win = v.dia / 2 + viaPlaneClearance(placement, v, spec.net, base) + window_cells * lat.pitch;
         if (!stampWindowActive(active, v.x - win, v.y - win, v.x + win, v.y + win)) continue;
         return false;
@@ -929,6 +1004,12 @@ pub fn computeMemo(
 pub const KeyedFill = struct {
     fill: Fill,
     key: content_key.Key,
+    /// Was this raster UPDATED from the previous generation of the same fill
+    /// rather than poured from nothing? Reported because the update is
+    /// invisible in the answer — it is bit-identical to a cold pour by
+    /// construction — and a path that quietly stops taking it looks exactly
+    /// like one that works.
+    patched: bool = false,
 };
 
 /// `computeMemo`, reporting the key as well. Unmemoised callers get the key the
@@ -954,10 +1035,61 @@ fn computeFillMemo(
     memo: ?FillMemo,
 ) std.mem.Allocator.Error!KeyedFill {
     const m = memo orelse return .{ .fill = try computeFill(arena, placement, copper, spec, opts), .key = .{ .lo = 0, .hi = 0 } };
-    const k = try fillKey(arena, placement, copper, spec, opts.contours);
+    // Recording the walk's obstacles costs one small struct per obstacle and is
+    // only useful to a memo that can hold them, so it is asked for only then.
+    var rec: Recorder = .{ .arena = arena };
+    const patches = m.base != null or m.put_base != null;
+    const k = try fillKey(arena, placement, copper, spec, opts.contours, if (patches) &rec else null);
     if (m.get(m.ctx, k)) |hit| return .{ .fill = hit, .key = k };
-    const fresh = try computeFill(arena, placement, copper, spec, opts);
-    return .{ .fill = m.put(m.ctx, k, fresh) orelse fresh, .key = k };
+    const usable = patches and !rec.failed;
+    const id = if (usable) fillIdentity(placement, spec, opts.contours) else content_key.Key{ .lo = 0, .hi = 0 };
+    const built = try patchOrPour(arena, placement, copper, spec, opts, .{
+        .memo = m,
+        .features = if (usable) rec.items.items else null,
+        .id = id,
+    });
+    const kept = m.put(m.ctx, k, built.fill) orelse built.fill;
+    // Publish this generation as the base the NEXT edit patches from, whether it
+    // was itself patched or poured — a cold pour is where the chain starts.
+    if (usable and built.margin.len > 0) {
+        if (m.put_base) |put_base| put_base(m.ctx, id, .{ .margin = built.margin, .features = rec.items.items });
+    }
+    return .{ .fill = kept, .key = k, .patched = built.patched };
+}
+
+/// Where a patched build comes FROM: the memo holding the previous generation,
+/// this generation's obstacle set (null when it was not recorded), and the
+/// identity the two are matched on.
+const PatchSource = struct {
+    memo: FillMemo,
+    features: ?[]const FeatureRecord,
+    id: content_key.Key,
+};
+
+/// This fill updated from the previous generation of the same fill, or poured
+/// cold. Every step down to the cold pour is a routine outcome, not a failure:
+/// no memo, no prior generation, a lattice that moved under it, or a diff too
+/// large to be worth patching.
+fn patchOrPour(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    copper: Copper,
+    spec: LayerSpec,
+    opts: FillOpts,
+    from: PatchSource,
+) std.mem.Allocator.Error!Built {
+    const features = from.features orelse return buildFill(arena, placement, copper, spec, opts, null);
+    const get_base = from.memo.base orelse return buildFill(arena, placement, copper, spec, opts, null);
+    const prior = get_base(from.memo.ctx, from.id) orelse return buildFill(arena, placement, copper, spec, opts, null);
+    const lat = lattice(placement);
+    // The identity folds the lattice in, so a mismatch means a stale or foreign
+    // snapshot rather than a moved board — refuse it rather than read it.
+    if (prior.margin.len != lat.nx * lat.ny) return buildFill(arena, placement, copper, spec, opts, null);
+    const boxes = (try changedWindows(arena, prior.features, features, lat)) orelse
+        return buildFill(arena, placement, copper, spec, opts, null);
+    var built = try buildFill(arena, placement, copper, spec, opts, .{ .prior = prior.margin, .boxes = boxes });
+    built.patched = true;
+    return built;
 }
 
 /// Every obstacle the fill's margin field is lowered by, in ONE traversal —
@@ -989,6 +1121,73 @@ fn computeFill(
     spec: LayerSpec,
     opts: FillOpts,
 ) std.mem.Allocator.Error!Fill {
+    return (try buildFill(arena, placement, copper, spec, opts, null)).fill;
+}
+
+/// The previous generation of this fill's margin field, plus the world boxes
+/// inside which it must be discarded and rastered again — everything outside
+/// them is carried over untouched.
+const Patch = struct {
+    prior: []const f32,
+    boxes: []const [4]f64,
+};
+
+/// A world box reduced to the INCLUSIVE cell index range a stamp windowed by it
+/// touches — `[i0, j0, i1, j1]`.
+const CellBox = [4]usize;
+
+/// The cull and the reseed have to agree about CELLS, not about rectangles.
+/// Every stamp derives its loop bounds from its window with `cellRange`, and so
+/// does the reseed; two rectangles can be disjoint on the real line and still
+/// clip into the same cell, and culling such a stamp would leave that cell
+/// reseeded to the base with the stamp's contribution missing. So both sides
+/// convert first, with the same rounding, and compare index ranges.
+fn cellBox(g: Grid, box: [4]f64) CellBox {
+    const lo = cellRange(g, box[0], box[1]);
+    const hi = cellRange(g, box[2], box[3]);
+    return .{ lo[0], lo[1], hi[0], hi[1] };
+}
+
+fn cellBoxesMeet(a: CellBox, b: CellBox) bool {
+    return a[2] >= b[0] and b[2] >= a[0] and a[3] >= b[1] and b[3] >= a[1];
+}
+
+/// One built fill and the margin field it came out of. The field is what the
+/// NEXT generation of this fill patches from; nothing else reads it, and it is
+/// empty for the two answers that have no field (a degenerate lattice and a
+/// failed-integrity collapse), both of which are cheap to reproduce cold.
+const Built = struct {
+    fill: Fill,
+    margin: []const f32 = &.{},
+    patched: bool = false,
+};
+
+/// The one fill builder. `patch` null pours cold — seed the base field, stamp
+/// every obstacle. `patch` set updates instead: copy the previous generation's
+/// field, reseed its base ONLY inside the changed windows, and stamp only the
+/// obstacles that reach them.
+///
+/// The update is bit-identical to the cold pour, and that rests on two facts,
+/// neither of which is an approximation:
+///
+///   * `lowerMargin` compares and stores in f32, so the field is the pure
+///     `min` of the base and each obstacle's contribution — a SET, with no
+///     order and no accumulation. Applying an obstacle a second time is a
+///     no-op, and applying obstacles in a different order is the same field.
+///   * every changed obstacle's whole stamp window lies inside `boxes`. So a
+///     cell outside them sees exactly the obstacles it already saw (its stored
+///     value is already their min), and a cell inside them is rebuilt from the
+///     base with every obstacle that can write there — the same set, hence the
+///     same min. Obstacles whose windows straddle a box write outside it too;
+///     those writes are the second application of a value already present.
+fn buildFill(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    copper: Copper,
+    spec: LayerSpec,
+    opts: FillOpts,
+    patch: ?Patch,
+) std.mem.Allocator.Error!Built {
     const lat = lattice(placement);
     const r = lat.r;
     const rules = placement.rules;
@@ -997,7 +1196,7 @@ fn computeFill(
     const coarsened = lat.coarsened;
     const nx = lat.nx;
     const ny = lat.ny;
-    if (nx < 1 or ny < 1) return emptyFill(r, pitch, coarsened);
+    if (nx < 1 or ny < 1) return .{ .fill = emptyFill(r, pitch, coarsened) };
 
     const labels = try arena.alloc(i32, nx * ny);
     const margin = try arena.alloc(f32, nx * ny);
@@ -1013,23 +1212,35 @@ fn computeFill(
         .margin = margin,
         .iso = guard,
     };
-    if (opts.base) |b| {
-        if (b.fits(lat)) @memcpy(margin, b.margin) else initMargin(grid, placement, r, inset);
-    } else initMargin(grid, placement, r, inset);
-    // A user pour's drawn boundary further confines the fillable field: min the
-    // board-edge margin with the signed inset into the clip polygon, so the
-    // traced contour hugs the drawn outline (blocked cells being those the guard
-    // band inside it) and copper never escapes past the user's line.
-    if (spec.clip.len >= 3) clipMargin(grid, spec.clip);
-
     const nets = try padNets(arena, placement);
-    try walkObstacles(arena, .{ .g = grid }, placement, copper, spec, nets);
+    if (patch) |p| {
+        @memcpy(margin, p.prior);
+        // Every box first, THEN the walk: an obstacle reaching box A may also
+        // write into box B, and reseeding B afterwards would erase it.
+        const cells = try arena.alloc(CellBox, p.boxes.len);
+        for (p.boxes, cells) |b, *out| {
+            reseedBase(grid, placement, r, inset, spec.clip, b);
+            out.* = cellBox(grid, b);
+        }
+        try walkObstacles(arena, .{ .g = grid, .only = cells }, placement, copper, spec, nets);
+    } else {
+        if (opts.base) |b| {
+            if (b.fits(lat)) @memcpy(margin, b.margin) else initMargin(grid, placement, r, inset);
+        } else initMargin(grid, placement, r, inset);
+        // A user pour's drawn boundary further confines the fillable field: min
+        // the board-edge margin with the signed inset into the clip polygon, so
+        // the traced contour hugs the drawn outline (blocked cells being those
+        // the guard band inside it) and copper never escapes past the user's
+        // line.
+        if (spec.clip.len >= 3) clipMargin(grid, spec.clip);
+        try walkObstacles(arena, .{ .g = grid }, placement, copper, spec, nets);
+    }
     const min_width = effectiveMinimumWidth(placement, spec);
     const k = if (min_width > 0)
-        openMinimumWidth(arena, grid, min_width / 2.0) catch return emptyFill(r, pitch, coarsened)
+        openMinimumWidth(arena, grid, min_width / 2.0) catch return .{ .fill = emptyFill(r, pitch, coarsened) }
     else blk: {
         thresholdLabels(grid);
-        break :blk labelComponents(arena, grid) catch return emptyFill(r, pitch, coarsened);
+        break :blk labelComponents(arena, grid) catch return .{ .fill = emptyFill(r, pitch, coarsened) };
     };
     const kept = try arena.alloc(bool, k);
     @memset(kept, false);
@@ -1046,17 +1257,154 @@ fn computeFill(
         // A broken boundary must never reach a G36 Gerber region. Collapse
         // the whole fill, including its membership labels, so electrical
         // checks cannot credit copper that fabrication will not receive.
-        error.InvalidBoundary => return invalidFill(r, pitch, coarsened),
+        error.InvalidBoundary => return .{ .fill = invalidFill(r, pitch, coarsened) },
         error.OutOfMemory => return error.OutOfMemory,
     };
     return .{
-        .frame = .{ .minx = r.minx, .miny = r.miny, .pitch = pitch, .nx = nx, .ny = ny },
-        .labels = labels,
-        .n_comp = traced.n_comp,
-        .contours = if (opts.contours) traced.contours else &.{},
-        .holes = if (opts.contours) traced.holes else &.{},
-        .coarsened = coarsened,
+        .fill = .{
+            .frame = .{ .minx = r.minx, .miny = r.miny, .pitch = pitch, .nx = nx, .ny = ny },
+            .labels = labels,
+            .n_comp = traced.n_comp,
+            .contours = if (opts.contours) traced.contours else &.{},
+            .holes = if (opts.contours) traced.holes else &.{},
+            .coarsened = coarsened,
+        },
+        .margin = margin,
     };
+}
+
+/// Throw one world box's cells back to the fill's BASE field — the board-edge
+/// margin, then the drawn clip — so a patched re-raster starts them exactly
+/// where a cold pour starts them.
+///
+/// It runs the SAME row routines the full seeding runs, over a column range,
+/// rather than a scalar re-derivation of them. That is not tidiness: the row
+/// kernels group columns into vector lanes, and for the clip the grouping
+/// changes the VALUE a blocked cell holds (a group straddling the clip's halo
+/// box is evaluated exactly, a group wholly outside it takes a distance
+/// shortcut). One routine, one grouping, one answer.
+fn reseedBase(
+    g: Grid,
+    placement: optimizer.Placement,
+    r: optimizer.BoardRect,
+    inset: f64,
+    clip: []const [2]f64,
+    box: [4]f64,
+) void {
+    const lo = cellRange(g, box[0], box[1]);
+    const hi = cellRange(g, box[2], box[3]);
+    const i_hi = @min(hi[0] + 1, g.nx);
+    if (lo[0] >= i_hi) return;
+    const halo = clipHalo(g.pitch, clip);
+    const seed: EdgeSeed = .{ .placement = placement, .rect = r, .inset = inset };
+    var j = lo[1];
+    while (j <= hi[1] and j < g.ny) : (j += 1) {
+        initMarginRow(g, seed, j, lo[0], i_hi);
+        if (halo) |h| clipMarginRow(g, clip, h, j, lo[0], i_hi);
+    }
+}
+
+/// How many world boxes one patched re-raster carries. More boxes cull more
+/// tightly and cost a linear test per obstacle; a dozen is far more than a
+/// copper edit produces and still trivial to test against.
+const max_patch_boxes: usize = 12;
+
+/// Beyond this many CHANGED obstacles a patch has stopped being an update. One
+/// copper edit moves a handful; a board that reloaded, or a rule that moved
+/// every clearance, moves thousands, and pouring that cold is both simpler and
+/// faster than merging thousands of windows.
+const max_patch_features: usize = 128;
+
+/// A patch whose windows cover more than this fraction of the lattice is
+/// declined too: past it the re-raster is a cold pour with extra bookkeeping.
+const max_patch_coverage: f64 = 0.5;
+
+/// The world windows a patched re-raster must rebuild: the stamp window of every
+/// obstacle the two generations disagree about, merged down to `max_patch_boxes`.
+/// Null declines the patch, which is always safe — the caller pours cold.
+///
+/// The comparison is a MULTISET difference over per-obstacle content digests,
+/// not a positional one: the walk visits copper in array order, and an edit
+/// renumbers those arrays freely. Two obstacles with the same digest resolved to
+/// the same world geometry and the same reach, so they have the same window and
+/// are interchangeable here.
+fn changedWindows(
+    arena: std.mem.Allocator,
+    prior: []const FeatureRecord,
+    now: []const FeatureRecord,
+    lat: Lattice,
+) std.mem.Allocator.Error!?[]const [4]f64 {
+    const Tally = struct { delta: i64, box: [4]f64 };
+    var seen: std.AutoHashMapUnmanaged([2]u64, Tally) = .empty;
+    defer seen.deinit(arena);
+    for (prior) |f| {
+        const gop = try seen.getOrPut(arena, .{ f.lo, f.hi });
+        if (!gop.found_existing) gop.value_ptr.* = .{ .delta = 0, .box = f.box };
+        gop.value_ptr.delta -= 1;
+    }
+    for (now) |f| {
+        const gop = try seen.getOrPut(arena, .{ f.lo, f.hi });
+        if (!gop.found_existing) gop.value_ptr.* = .{ .delta = 0, .box = f.box };
+        gop.value_ptr.delta += 1;
+    }
+    var boxes: std.ArrayList([4]f64) = .empty;
+    var it = seen.iterator();
+    while (it.next()) |e| {
+        if (e.value_ptr.delta == 0) continue;
+        if (boxes.items.len == max_patch_features) return null;
+        try boxes.append(arena, clampToLattice(e.value_ptr.box, lat));
+    }
+    mergeWindows(&boxes, max_patch_boxes);
+    var covered: f64 = 0;
+    for (boxes.items) |b| covered += @max(0, b[2] - b[0]) * @max(0, b[3] - b[1]);
+    const lattice_area = @as(f64, @floatFromInt(lat.nx)) * @as(f64, @floatFromInt(lat.ny)) * lat.pitch * lat.pitch;
+    if (lattice_area > 0 and covered > max_patch_coverage * lattice_area) return null;
+    return boxes.items;
+}
+
+/// A window clipped to the lattice: a stamp cannot write outside the raster, so
+/// the part of its window that hangs off the board is not area worth merging or
+/// counting.
+fn clampToLattice(box: [4]f64, lat: Lattice) [4]f64 {
+    const maxx = lat.r.minx + @as(f64, @floatFromInt(lat.nx)) * lat.pitch;
+    const maxy = lat.r.miny + @as(f64, @floatFromInt(lat.ny)) * lat.pitch;
+    return .{
+        @max(box[0], lat.r.minx),
+        @max(box[1], lat.r.miny),
+        @min(box[2], maxx),
+        @min(box[3], maxy),
+    };
+}
+
+/// Merge windows, cheapest union first, until at most `limit` remain. Any
+/// covering set is CORRECT — a larger box only re-rasters cells that were going
+/// to come out the same — so this is purely about how much of the field the
+/// patch rebuilds.
+fn mergeWindows(boxes: *std.ArrayList([4]f64), limit: usize) void {
+    while (boxes.items.len > limit) {
+        var take_a: usize = 0;
+        var take_b: usize = 1;
+        var best = std.math.inf(f64);
+        for (boxes.items, 0..) |a, i| {
+            for (boxes.items[i + 1 ..], i + 1..) |b, j| {
+                const cost = boxArea(unionBox(a, b)) - boxArea(a) - boxArea(b);
+                if (cost >= best) continue;
+                best = cost;
+                take_a = i;
+                take_b = j;
+            }
+        }
+        boxes.items[take_a] = unionBox(boxes.items[take_a], boxes.items[take_b]);
+        _ = boxes.orderedRemove(take_b);
+    }
+}
+
+fn unionBox(a: [4]f64, b: [4]f64) [4]f64 {
+    return .{ @min(a[0], b[0]), @min(a[1], b[1]), @max(a[2], b[2]), @max(a[3], b[3]) };
+}
+
+fn boxArea(b: [4]f64) f64 {
+    return @max(0, b[2] - b[0]) * @max(0, b[3] - b[1]);
 }
 
 /// Manufacturing floor raised by a named power rail's conservative
@@ -1139,34 +1487,62 @@ fn invalidFill(r: optimizer.BoardRect, pitch: f64, coarsened: bool) Fill {
 /// rectangle. NO cell-diagonal inflation — this is the true geometric margin the
 /// foreign stamps then `min()` against.
 pub fn initMargin(g: Grid, placement: optimizer.Placement, r: optimizer.BoardRect, inset: f64) void {
+    const seed: EdgeSeed = .{ .placement = placement, .rect = r, .inset = inset };
     var j: usize = 0;
-    while (j < g.ny) : (j += 1) {
-        // Cell-centre y is constant across the row (hoisted out of the i-loop);
-        // the expression matches `cellCenter`, so the field is bit-identical.
-        const cy = g.miny + (@as(f64, @floatFromInt(j)) + 0.5) * g.pitch;
-        const row = j * g.nx;
-        var i: usize = 0;
-        // A polygon outline walks every edge per cell, which is the whole cost
-        // of seeding a poly-outline board's field (8 ms of a barracuda DRC on a
-        // 20-point rounded rectangle). Whole lanes of the row take that walk
-        // together; the ragged tail falls back to the scalar form.
-        if (placement.board_poly) |poly| {
-            if (poly.len >= 3) {
-                var lane: [lanes]f64 = undefined;
-                while (i + lanes <= g.nx) : (i += lanes) {
-                    polyInsetLanes(poly, cellXs(g, i), cy, &lane);
-                    for (lane, 0..) |m, k| g.margin[row + i + k] = @floatCast(m - inset);
+    while (j < g.ny) : (j += 1) initMarginRow(g, seed, j, 0, g.nx);
+}
+
+/// What the board-edge margin is a function of: the outline (or the plain
+/// rectangle when there is none) and the fabrication edge inset.
+const EdgeSeed = struct {
+    placement: optimizer.Placement,
+    rect: optimizer.BoardRect,
+    inset: f64,
+};
+
+/// One row's board-edge margin, for the cells `[i_lo, i_hi)`.
+///
+/// The range exists so a patched fill can reseed a WINDOW of the field. It is
+/// applied inside the lane grouping rather than around it, and the grouping
+/// starts from column 0 whatever the range is, because the grouping is part of
+/// the VALUE and not only of the speed: the vector kernel and the scalar tail
+/// are separate arithmetic, and a partial row that regrouped them differently
+/// could write a cell a bit away from what the full pass wrote there. Every
+/// caller therefore takes the same groups from the same origin.
+fn initMarginRow(g: Grid, seed: EdgeSeed, j: usize, i_lo: usize, i_hi: usize) void {
+    if (i_lo >= i_hi) return;
+    // Cell-centre y is constant across the row (hoisted out of the i-loop);
+    // the expression matches `cellCenter`, so the field is bit-identical.
+    const cy = g.miny + (@as(f64, @floatFromInt(j)) + 0.5) * g.pitch;
+    const row = j * g.nx;
+    var i: usize = 0;
+    // A polygon outline walks every edge per cell, which is the whole cost
+    // of seeding a poly-outline board's field (8 ms of a barracuda DRC on a
+    // 20-point rounded rectangle). Whole lanes of the row take that walk
+    // together; the ragged tail falls back to the scalar form.
+    if (seed.placement.board_poly) |poly| {
+        if (poly.len >= 3) {
+            var lane: [lanes]f64 = undefined;
+            i = (i_lo / lanes) * lanes;
+            while (i + lanes <= g.nx and i < i_hi) : (i += lanes) {
+                polyInsetLanes(poly, cellXs(g, i), cy, &lane);
+                for (lane, 0..) |m, k| {
+                    if (i + k < i_lo or i + k >= i_hi) continue;
+                    g.margin[row + i + k] = @floatCast(m - seed.inset);
                 }
             }
+            // Resume exactly where the full pass's vector loop stopped.
+            i = (g.nx / lanes) * lanes;
         }
-        while (i < g.nx) : (i += 1) {
-            const cx = g.minx + (@as(f64, @floatFromInt(i)) + 0.5) * g.pitch;
-            const m = if (placement.board_poly) |poly|
-                polySignedInset(poly, cx, cy) - inset
-            else
-                rectInset(r, inset, cx, cy);
-            g.margin[row + i] = @floatCast(m);
-        }
+    }
+    i = @max(i, i_lo);
+    while (i < g.nx and i < i_hi) : (i += 1) {
+        const cx = g.minx + (@as(f64, @floatFromInt(i)) + 0.5) * g.pitch;
+        const m = if (seed.placement.board_poly) |poly|
+            polySignedInset(poly, cx, cy) - seed.inset
+        else
+            rectInset(seed.rect, seed.inset, cx, cy);
+        g.margin[row + i] = @floatCast(m);
     }
 }
 
@@ -1292,46 +1668,64 @@ fn polySignedInset(poly: []const [2]f64, x: f64, y: f64) f64 {
 /// edge clearance is subtracted here — the guard band alone insets the traced
 /// contour a hair inside the polygon.
 fn clipMargin(g: Grid, clip: []const [2]f64) void {
-    if (clip.len < 3) return;
-    // The drawn zone is usually a fraction of the board, and outside its
-    // bounding box the walk can only ever answer "outside" — so bound the
-    // polygon once and spend the per-edge walk on the cells that can still
-    // change the answer. Cells beyond the box get their Chebyshev distance to
-    // it, which stays at least `pad` below zero and so is blocked exactly as
-    // the walk would have blocked it; the band of `pad` cells around the box is
-    // walked exactly, so every contour the fill later interpolates sits on real
-    // values.
-    const box = polyBounds(clip);
-    const pad = 4 * g.pitch;
-    const x0 = box[0] - pad;
-    const y0 = box[1] - pad;
-    const x1 = box[2] + pad;
-    const y1 = box[3] + pad;
+    const halo = clipHalo(g.pitch, clip) orelse return;
     var j: usize = 0;
-    while (j < g.ny) : (j += 1) {
-        const cy = g.miny + (@as(f64, @floatFromInt(j)) + 0.5) * g.pitch;
-        const row = j * g.nx;
-        const dy = @max(@max(y0 - cy, cy - y1), 0);
-        var i: usize = 0;
-        if (dy == 0) {
-            var lane: [lanes]f64 = undefined;
-            while (i + lanes <= g.nx) : (i += lanes) {
-                const xs = cellXs(g, i);
-                const cxs: [lanes]f64 = xs;
-                if (cxs[lanes - 1] < x0 or cxs[0] > x1) {
-                    for (cxs, 0..) |cx, k| lowerMargin(g, row + i + k, -@max(x0 - cx, cx - x1));
-                    continue;
+    while (j < g.ny) : (j += 1) clipMarginRow(g, clip, halo, j, 0, g.nx);
+}
+
+/// One row of the drawn clip's confinement, for the cells `[i_lo, i_hi)`.
+///
+/// The lane grouping is load-bearing here in a way it is not for the board
+/// edge: a group whose cells all sit outside the halo box takes the cheap
+/// Chebyshev-distance shortcut, while a group that STRADDLES the box is walked
+/// exactly for every one of its lanes — so a cell just outside the box holds a
+/// different (still blocked) value depending on which group it fell in. A
+/// partial row must therefore take the same groups from the same origin, or a
+/// patched fill would not be bit-identical to a cold one.
+fn clipMarginRow(
+    g: Grid,
+    clip: []const [2]f64,
+    halo: [4]f64,
+    j: usize,
+    i_lo: usize,
+    i_hi: usize,
+) void {
+    if (i_lo >= i_hi) return;
+    const x0 = halo[0];
+    const y0 = halo[1];
+    const x1 = halo[2];
+    const y1 = halo[3];
+    const cy = g.miny + (@as(f64, @floatFromInt(j)) + 0.5) * g.pitch;
+    const row = j * g.nx;
+    const dy = @max(@max(y0 - cy, cy - y1), 0);
+    var i: usize = 0;
+    if (dy == 0) {
+        var lane: [lanes]f64 = undefined;
+        i = (i_lo / lanes) * lanes;
+        while (i + lanes <= g.nx and i < i_hi) : (i += lanes) {
+            const xs = cellXs(g, i);
+            const cxs: [lanes]f64 = xs;
+            if (cxs[lanes - 1] < x0 or cxs[0] > x1) {
+                for (cxs, 0..) |cx, k| {
+                    if (i + k < i_lo or i + k >= i_hi) continue;
+                    lowerMargin(g, row + i + k, -@max(x0 - cx, cx - x1));
                 }
-                polyInsetLanes(clip, xs, cy, &lane);
-                for (lane, 0..) |m, k| lowerMargin(g, row + i + k, m);
+                continue;
+            }
+            polyInsetLanes(clip, xs, cy, &lane);
+            for (lane, 0..) |m, k| {
+                if (i + k < i_lo or i + k >= i_hi) continue;
+                lowerMargin(g, row + i + k, m);
             }
         }
-        while (i < g.nx) : (i += 1) {
-            const cx = g.minx + (@as(f64, @floatFromInt(i)) + 0.5) * g.pitch;
-            const dx = @max(@max(x0 - cx, cx - x1), 0);
-            const m = if (dx == 0 and dy == 0) polySignedInset(clip, cx, cy) else -@max(dx, dy);
-            lowerMargin(g, row + i, m);
-        }
+        i = (g.nx / lanes) * lanes;
+    }
+    i = @max(i, i_lo);
+    while (i < g.nx and i < i_hi) : (i += 1) {
+        const cx = g.minx + (@as(f64, @floatFromInt(i)) + 0.5) * g.pitch;
+        const dx = @max(@max(x0 - cx, cx - x1), 0);
+        const m = if (dx == 0 and dy == 0) polySignedInset(clip, cx, cy) else -@max(dx, dy);
+        lowerMargin(g, row + i, m);
     }
 }
 
@@ -1623,15 +2017,17 @@ fn stampWindowActive(active: ?[4]f64, x0: f64, y0: f64, x1: f64, y1: f64) bool {
 
 fn stampDiscWithin(sink: Sink, active: ?[4]f64, cx: f64, cy: f64, rad: f64) void {
     const win = rad + window_cells * sink.g.pitch;
-    if (!stampWindowActive(active, cx - win, cy - win, cx + win, cy + win)) return;
-    if (sink.fp) |fp| return sink.scalars(fp, 1, &.{ cx, cy, rad });
+    const box = [4]f64{ cx - win, cy - win, cx + win, cy + win };
+    if (!stampWindowActive(active, box[0], box[1], box[2], box[3])) return;
+    if (!sink.emit(.{ .scalars = .{ .marker = 1, .values = &.{ cx, cy, rad } } }, box)) return;
     stampDisc(sink.g, cx, cy, rad);
 }
 
 fn stampSegWithin(sink: Sink, active: ?[4]f64, a: [2]f64, b: [2]f64, rad: f64) void {
     const win = rad + window_cells * sink.g.pitch;
-    if (!stampWindowActive(active, @min(a[0], b[0]) - win, @min(a[1], b[1]) - win, @max(a[0], b[0]) + win, @max(a[1], b[1]) + win)) return;
-    if (sink.fp) |fp| return sink.scalars(fp, 2, &.{ a[0], a[1], b[0], b[1], rad });
+    const box = [4]f64{ @min(a[0], b[0]) - win, @min(a[1], b[1]) - win, @max(a[0], b[0]) + win, @max(a[1], b[1]) + win };
+    if (!stampWindowActive(active, box[0], box[1], box[2], box[3])) return;
+    if (!sink.emit(.{ .scalars = .{ .marker = 2, .values = &.{ a[0], a[1], b[0], b[1], rad } } }, box)) return;
     stampSeg(sink.g, a[0], a[1], b[0], b[1], rad);
 }
 
@@ -1688,8 +2084,9 @@ fn stampArcWithin(sink: Sink, active: ?[4]f64, arc: router.Arc, rad: f64) void {
     };
     const bounds = arcBounds(arc, circle);
     const win = rad + window_cells * g.pitch;
-    if (!stampWindowActive(active, bounds[0] - win, bounds[1] - win, bounds[2] + win, bounds[3] + win)) return;
-    if (sink.fp) |fp| return sink.scalars(fp, 3, &.{ arc.p1[0], arc.p1[1], arc.pm[0], arc.pm[1], arc.p2[0], arc.p2[1], rad });
+    const box = [4]f64{ bounds[0] - win, bounds[1] - win, bounds[2] + win, bounds[3] + win };
+    if (!stampWindowActive(active, box[0], box[1], box[2], box[3])) return;
+    if (!sink.emit(.{ .scalars = .{ .marker = 3, .values = &.{ arc.p1[0], arc.p1[1], arc.pm[0], arc.pm[1], arc.p2[0], arc.p2[1], rad } } }, box)) return;
     const lo = cellRange(g, bounds[0] - win, bounds[1] - win);
     const hi = cellRange(g, bounds[2] + win, bounds[3] + win);
     var j = lo[1];
@@ -1900,34 +2297,55 @@ pub fn viaPlaneClearance(placement: optimizer.Placement, via: router.Via, plane_
 /// Mark the component under each same-net SEED (a carried pad/via present on
 /// the layer) KEPT. A component with no seed is an orphan island — dropped.
 fn markSeeds(sink: Sink, placement: optimizer.Placement, copper: Copper, spec: LayerSpec, nets: std.StringHashMapUnmanaged([]const u8), kept: []bool) void {
+    const active = seedHalo(sink.g.pitch, spec.clip);
     for (placement.parts) |p| {
         for (p.pads) |pad| {
             if (!padOnLayer(p, pad, spec)) continue;
             if (!planeCarries(spec.net, netOfPad(nets, p.ref_des, pad.number))) continue;
-            seedPad(sink, p, pad, kept);
+            seedPad(sink, active, p, pad, kept);
         }
     }
     for (copper.vias) |v| {
         if (!planeCarries(spec.net, netName(placement, v.net))) continue;
-        seedAt(sink, v.x, v.y, kept);
+        seedAt(sink, active, v.x, v.y, kept);
     }
+}
+
+/// The only points a CLIPPED fill's seed sample can land on and find anything
+/// but blocked copper, and therefore the cull that keeps a hand-drawn zone's
+/// content key independent of same-net copper elsewhere on the board.
+///
+/// It is the walk's own arithmetic, not an estimate. `clipMargin` gives every
+/// cell whose CENTRE lies outside the clip halo a margin of minus its distance
+/// out of that box, which is strictly negative; the fill's guard threshold
+/// (`isoGuardFor`) is at least `iso_guard` > 0, and a cell blocks at
+/// `margin <= iso`. So such a cell is blocked, `labelAtWorld` answers with a
+/// negative label, and the seed marks nothing. A point beyond the halo by more
+/// than one pitch has its containing cell's centre outside the halo (a centre
+/// sits within half a pitch of any point in its cell), so it is exactly that
+/// case. Null (an unclipped fill) culls nothing: a declared plane really does
+/// seed from every same-net via on the board.
+fn seedHalo(pitch: f64, clip: []const [2]f64) ?[4]f64 {
+    const box = clipHalo(pitch, clip) orelse return null;
+    return .{ box[0] - pitch, box[1] - pitch, box[2] + pitch, box[3] + pitch };
 }
 
 /// Seed the pour from a same-net pad by sampling its centre and four rotated
 /// edge-midpoints (so a pad whose centre grazes an obstacle/edge cell still
 /// keeps the component its copper actually reaches).
-fn seedPad(sink: Sink, p: optimizer.Part, pad: geometry.Pad, kept: []bool) void {
+fn seedPad(sink: Sink, active: ?[4]f64, p: optimizer.Part, pad: geometry.Pad, kept: []bool) void {
     const hw = pad.w * 0.4;
     const hh = pad.h * 0.4;
     const local = [_][2]f64{ .{ pad.x, pad.y }, .{ pad.x + hw, pad.y }, .{ pad.x - hw, pad.y }, .{ pad.x, pad.y + hh }, .{ pad.x, pad.y - hh } };
     for (local) |lp| {
         const c = optimizer.worldPadCenter(&p, lp[0], lp[1]);
-        seedAt(sink, c[0], c[1], kept);
+        seedAt(sink, active, c[0], c[1], kept);
     }
 }
 
-fn seedAt(sink: Sink, x: f64, y: f64, kept: []bool) void {
-    if (sink.fp) |fp| return sink.scalars(fp, 8, &.{ x, y });
+fn seedAt(sink: Sink, active: ?[4]f64, x: f64, y: f64, kept: []bool) void {
+    if (!stampWindowActive(active, x, y, x, y)) return;
+    if (!sink.seedPoint(x, y)) return;
     const lbl = labelAtWorld(sink.g, x, y);
     if (lbl >= 0) kept[@intCast(lbl)] = true;
 }
@@ -2037,15 +2455,12 @@ fn stampPadWithin(sink: Sink, active: ?[4]f64, p: optimizer.Part, pad: geometry.
     var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
     const sh = pad_shape.worldShape(fba.allocator(), p, pad) catch return;
     const win = reach + window_cells * sink.g.pitch;
-    if (!stampWindowActive(active, sh.x0 - win, sh.y0 - win, sh.x1 + win, sh.y1 + win)) return;
-    if (sink.fp) |fp| {
-        // The world SHAPE, not the part/pad pair: it is the only thing
-        // `stampPadShape` reads, so two boards whose pads differ only in a field
-        // the shape does not express carve identically and must key identically.
-        sink.scalars(fp, 4, &.{ sh.x0, sh.y0, sh.x1, sh.y1, reach });
-        for (sh.poly) |pt| sink.scalars(fp, 5, &pt);
-        return;
-    }
+    const box = [4]f64{ sh.x0 - win, sh.y0 - win, sh.x1 + win, sh.y1 + win };
+    if (!stampWindowActive(active, box[0], box[1], box[2], box[3])) return;
+    // The world SHAPE, not the part/pad pair: it is the only thing
+    // `stampPadShape` reads, so two boards whose pads differ only in a field
+    // the shape does not express carve identically and must key identically.
+    if (!sink.emit(.{ .pad = .{ .shape = sh, .reach = reach } }, box)) return;
     stampPadShape(sink.g, sh, reach);
 }
 
@@ -2090,44 +2505,150 @@ fn stampPolygonWithin(sink: Sink, active: ?[4]f64, poly: []const [2]f64, clearan
     if (poly.len < 3) return;
     const bounds = polyBounds(poly);
     const win = clearance + window_cells * sink.g.pitch;
-    if (!stampWindowActive(active, bounds[0] - win, bounds[1] - win, bounds[2] + win, bounds[3] + win)) return;
-    if (sink.fp) |fp| return sink.polygon(fp, 6, poly, clearance);
+    const box = [4]f64{ bounds[0] - win, bounds[1] - win, bounds[2] + win, bounds[3] + win };
+    if (!stampWindowActive(active, box[0], box[1], box[2], box[3])) return;
+    if (!sink.emit(.{ .ring = .{ .marker = 6, .poly = poly, .clearance = clearance } }, box)) return;
     stampPolygon(sink.g, poly, clearance);
 }
 
 /// `stampHigher` through a sink: the higher-priority pour boundaries and the
-/// footprint keepouts take the same path in both modes.
+/// footprint keepouts take the same path in both modes. Each ring is offered
+/// SEPARATELY — one ring is one obstacle, with its own stamp window, which is
+/// what lets a later pass diff the set of them and re-raster only the windows
+/// that moved.
 fn stampHigherSink(sink: Sink, polys: []const []const [2]f64, clearance: f64) void {
-    if (sink.fp) |fp| {
-        for (polys) |poly| sink.polygon(fp, 7, poly, clearance);
-        return;
+    for (polys) |poly| {
+        // `stampHigher` itself ignores a degenerate ring, and `polyBounds` has
+        // no answer for an empty one.
+        if (poly.len < 3) continue;
+        const bounds = polyBounds(poly);
+        const win = clearance + window_cells * sink.g.pitch;
+        const box = [4]f64{ bounds[0] - win, bounds[1] - win, bounds[2] + win, bounds[3] + win };
+        if (!sink.emit(.{ .ring = .{ .marker = 7, .poly = poly, .clearance = clearance } }, box)) continue;
+        const one = [_][]const [2]f64{poly};
+        stampHigher(sink.g, &one, clearance);
     }
-    stampHigher(sink.g, polys, clearance);
 }
+
+/// One RESOLVED obstacle stamp: the world geometry and the reach the walk
+/// settled on, and the only currency the sink's modes share. The stamp, the
+/// content-key fold and the per-feature digest are all derived from this one
+/// value, so a feature cannot be rastered under one description and keyed or
+/// diffed under another.
+const Effect = union(enum) {
+    /// A fixed-arity feature (disc, segment, arc, seed point) as its scalars.
+    scalars: struct { marker: u8, values: []const f64 },
+    /// A polygon obstacle and the clearance it is grown by.
+    ring: struct { marker: u8, poly: []const [2]f64, clearance: f64 },
+    /// A pad, by the world shape `stampPadShape` reads and nothing else.
+    pad: struct { shape: pad_shape.Shape, reach: f64 },
+};
+
+/// Fold one resolved effect into a fingerprint. The ONE encoding — the fill's
+/// content key and a feature's own digest both come through here, so a key that
+/// says two boards differ and a diff that says which feature moved can never be
+/// describing different things.
+fn foldEffect(fp: *content_key.Fingerprint, e: Effect) void {
+    switch (e) {
+        .scalars => |s| {
+            fp.tag(s.marker);
+            fp.add(std.mem.sliceAsBytes(s.values));
+        },
+        .ring => |r| {
+            fp.tag(r.marker);
+            fp.add(std.mem.asBytes(&r.clearance));
+            fp.put(usize, r.poly.len);
+            fp.add(std.mem.sliceAsBytes(r.poly));
+        },
+        .pad => |p| {
+            fp.tag(4);
+            fp.add(std.mem.sliceAsBytes(&[_]f64{ p.shape.x0, p.shape.y0, p.shape.x1, p.shape.y1, p.reach }));
+            for (p.shape.poly) |pt| {
+                fp.tag(5);
+                fp.add(std.mem.sliceAsBytes(&pt));
+            }
+        },
+    }
+}
+
+/// One resolved stamp reduced to what a LATER pass needs in order to diff it
+/// against this one: a content digest of the effect, and the world window the
+/// stamp can write inside. No payload — the re-raster re-runs the walk rather
+/// than replaying a record, so a record can never describe a stamp the walk
+/// would not make.
+pub const FeatureRecord = struct {
+    lo: u64,
+    hi: u64,
+    box: [4]f64,
+};
+
+/// The obstacle set one fill's raster consumed, and the margin field it
+/// produced — everything the next generation of the same fill needs to update
+/// the field instead of pouring it again.
+pub const Snapshot = struct {
+    margin: []const f32,
+    features: []const FeatureRecord,
+};
+
+/// Collects the walk's resolved effects as `FeatureRecord`s. An allocation
+/// failure sets `failed` rather than aborting the walk: the record is an
+/// optimisation, and a pass that could not take one simply pours cold.
+const Recorder = struct {
+    arena: std.mem.Allocator,
+    items: std.ArrayList(FeatureRecord) = .empty,
+    failed: bool = false,
+
+    fn push(self: *Recorder, e: Effect, box: [4]f64) void {
+        var one: content_key.Fingerprint = .{};
+        foldEffect(&one, e);
+        const digest = one.final();
+        self.items.append(self.arena, .{ .lo = digest.lo, .hi = digest.hi, .box = box }) catch {
+            self.failed = true;
+        };
+    }
+};
 
 /// Where `computeFill`'s obstacle walk writes. In the ordinary mode it lowers
 /// the margin field of `g`; with `fp` set it folds the EXACT same feature —
 /// after the EXACT same window culls, with the EXACT same resolved clearance —
 /// into a content fingerprint instead, and `g` carries only the lattice the
-/// culls read (its `labels`/`margin` are empty and never touched).
+/// culls read (its `labels`/`margin` are empty and never touched). With `rec`
+/// set it also writes that feature's own digest and window down. With `only`
+/// set it stamps, but ONLY the features whose window meets one of those boxes —
+/// the sub-window re-raster.
 ///
-/// One walk, two modes, deliberately: a fill memo whose key is computed by a
+/// One walk, four modes, deliberately: a fill memo whose key is computed by a
 /// SECOND traversal is a memo that goes stale the day someone stamps a new kind
 /// of feature and forgets the copy. Here a new stamp that is not routed through
 /// this sink cannot reach the raster at all.
 const Sink = struct {
     g: Grid,
     fp: ?*content_key.Fingerprint = null,
+    rec: ?*Recorder = null,
+    /// Restrict STAMPING to the features that write into one of these CELL
+    /// ranges. Null stamps everything, which is the ordinary cold pour.
+    only: ?[]const CellBox = null,
 
-    fn scalars(_: Sink, fp: *content_key.Fingerprint, marker: u8, values: []const f64) void {
-        fp.tag(marker);
-        fp.add(std.mem.sliceAsBytes(values));
+    /// Fold/record this resolved effect, and answer whether the caller should go
+    /// on to write it into the margin field.
+    fn emit(self: Sink, e: Effect, box: [4]f64) bool {
+        if (self.fp) |fp| foldEffect(fp, e);
+        if (self.rec) |r| r.push(e, box);
+        // A digesting walk carries no field to write into.
+        if (self.fp != null) return false;
+        const boxes = self.only orelse return true;
+        const cells = cellBox(self.g, box);
+        for (boxes) |b| if (cellBoxesMeet(b, cells)) return true;
+        return false;
     }
 
-    fn polygon(self: Sink, fp: *content_key.Fingerprint, marker: u8, poly: []const [2]f64, clearance: f64) void {
-        self.scalars(fp, marker, &.{clearance});
-        fp.put(usize, poly.len);
-        fp.add(std.mem.sliceAsBytes(poly));
+    /// The same for a SEED sample, which lowers no margin and so has no window:
+    /// it is folded into the key (a seed decides which components survive) and
+    /// left out of the record, because a seed set that moved never asks for a
+    /// re-raster — `markSeeds` is re-run in full on every path.
+    fn seedPoint(self: Sink, x: f64, y: f64) bool {
+        if (self.fp) |fp| foldEffect(fp, .{ .scalars = .{ .marker = 8, .values = &.{ x, y } } });
+        return self.fp == null;
     }
 };
 
@@ -2242,9 +2763,10 @@ fn traceComponents(arena: std.mem.Allocator, g: Grid, n_comp: usize, corner_radi
     var contours: std.ArrayList(Contour) = .empty;
     var holes: std.ArrayList([]const Contour) = .empty;
     var repair_clears: std.ArrayList(RepairClear) = .empty;
+    const boundary = try collectBoundaryEdges(arena, g, n_comp);
     var c: usize = 0;
     while (c < n_comp) : (c += 1) {
-        for (try traceOuters(arena, g, @intCast(c), corner_radius, &repair_clears)) |tc| {
+        for (try traceOuters(arena, g, corner_radius, &repair_clears, boundary[c].items)) |tc| {
             try contours.append(arena, tc.outer);
             try holes.append(arena, tc.holes);
         }
@@ -2270,32 +2792,51 @@ fn traceComponents(arena: std.mem.Allocator, g: Grid, n_comp: usize, corner_radi
 fn traceOuters(
     arena: std.mem.Allocator,
     g: Grid,
-    comp: i32,
     corner_radius: f64,
     repair_clears: *std.ArrayList(RepairClear),
+    collected: []const Edge,
 ) TraceError![]const TracedComponent {
-    var edges: std.ArrayList(Edge) = .empty;
-    try collectBoundaryEdges(arena, &edges, g, comp);
-    if (edges.items.len == 0) return &.{};
+    if (collected.len == 0) return &.{};
+    // The stitcher marks edges used as it consumes them, so it needs its own
+    // mutable run of this component's boundary rather than the shared scan.
+    const edges = try arena.dupe(Edge, collected);
 
     var by_tail: TailMap = .empty;
-    try indexTails(arena, &by_tail, edges.items);
-    const loops = try realiseLoops(arena, g, edges.items, &by_tail, repair_clears);
+    try indexTails(arena, &by_tail, edges);
+    const loops = try realiseLoops(arena, g, edges, &by_tail, repair_clears);
     return classifyLoops(arena, loops, g.pitch, corner_radius, repair_clears);
 }
 
-/// Emit every boundary edge of component `comp` (a `comp` cell adjacent to a
-/// non-`comp` neighbour), oriented copper-on-the-left in the y-down grid.
-fn collectBoundaryEdges(arena: std.mem.Allocator, edges: *std.ArrayList(Edge), g: Grid, comp: i32) std.mem.Allocator.Error!void {
+/// Every kept component's boundary edges (a `comp` cell adjacent to a
+/// non-`comp` neighbour), oriented copper-on-the-left in the y-down grid,
+/// bucketed by component.
+///
+/// ONE pass over the label grid for the whole fill, deliberately. Collecting a
+/// single component's edges is a whole-grid scan whichever way it is written, so
+/// doing it per component made tracing O(components x cells): a barracuda-class
+/// zone with a few hundred kept islands spent ~200 ms of its ~230 ms pour in
+/// this scan alone, which is most of what a re-poured fill costs after an edit.
+/// Bucketing costs one `ArrayList` header per component and leaves each
+/// component's edges in exactly the (row, column) order the per-component scan
+/// produced — the stitcher's loop order, and therefore the emitted contour
+/// order, is a function of that order and must not move.
+fn collectBoundaryEdges(arena: std.mem.Allocator, g: Grid, n_comp: usize) std.mem.Allocator.Error![]std.ArrayList(Edge) {
+    const out = try arena.alloc(std.ArrayList(Edge), n_comp);
+    for (out) |*bucket| bucket.* = .empty;
+    if (n_comp == 0) return out;
     const w: u32 = @intCast(g.nx + 1);
     var j: usize = 0;
     while (j < g.ny) : (j += 1) {
         var i: usize = 0;
         while (i < g.nx) : (i += 1) {
-            if (g.labels[j * g.nx + i] != comp) continue;
-            try emitCellEdges(arena, edges, g, comp, i, j, w);
+            const label = g.labels[j * g.nx + i];
+            if (label < 0) continue;
+            const c: usize = @intCast(label);
+            if (c >= n_comp) continue;
+            try emitCellEdges(arena, &out[c], g, label, i, j, w);
         }
     }
+    return out;
 }
 
 /// Index boundary edges by their tail corner code, so the stitcher can find the
@@ -2948,15 +3489,166 @@ fn tracedComponentValid(arena: std.mem.Allocator, component: TracedComponent) st
         }
     }
 
+    // Nesting is checked pairwise, and a dense pour's holes are its via and pad
+    // antipads — hundreds of small rings, nearly all of them far apart. A point
+    // STRICTLY inside a ring is strictly inside that ring's bounding box, so two
+    // rings whose boxes do not meet cannot nest, and the box test settles almost
+    // every pair before either point walk runs. Without it the scan is
+    // O(holes^2 x points^2) and dominates the whole pour: 4.5 s of a 5 s
+    // barracuda fill pass, which is most of what re-pouring one edited fill cost.
+    const boxes = try arena.alloc([4]f64, component.holes.len);
+    for (component.holes, boxes) |hole, *box| box.* = polyBounds(hole);
+    // One query per hole against the OUTER ring, which on a dense pour is a
+    // boundary of thousands of points — 320 ms of a barracuda fill pass went
+    // into this one line before the ring was indexed.
+    const outer_index = try RingIndex.of(arena, component.outer);
     for (component.holes, 0..) |hole, i| {
-        if (!(polySignedInset(component.outer, hole[0][0], hole[0][1]) > 0)) return false;
-        for (component.holes[0..i]) |prior| {
-            for (hole) |point| if (pointStrictlyInContour(prior, point)) return false;
-            for (prior) |point| if (pointStrictlyInContour(hole, point)) return false;
+        if (!outer_index.strictlyInside(hole[0][0], hole[0][1])) return false;
+        for (component.holes[0..i], boxes[0..i]) |prior, prior_box| {
+            if (!boundsMeet(boxes[i], prior_box)) continue;
+            // Two rings whose boxes merely graze each other still reach here,
+            // and each point walk is a whole ring — so the same containment
+            // argument is applied per POINT: a point strictly inside a ring is
+            // strictly inside that ring's box, and one that is not cannot
+            // nest. Without it two adjacent antipads cost O(points^2).
+            for (hole) |point| {
+                if (!pointInBounds(prior_box, point)) continue;
+                if (pointStrictlyInContour(prior, point)) return false;
+            }
+            for (prior) |point| {
+                if (!pointInBounds(boxes[i], point)) continue;
+                if (pointStrictlyInContour(hole, point)) return false;
+            }
         }
     }
     return true;
 }
+
+/// Is a point inside a `[minx, miny, maxx, maxy]` box? Edges count as inside,
+/// so a `false` is a conservative claim that the point is outside.
+fn pointInBounds(box: [4]f64, p: [2]f64) bool {
+    return p[0] >= box[0] and p[0] <= box[2] and p[1] >= box[1] and p[1] <= box[3];
+}
+
+/// Do two `[minx, miny, maxx, maxy]` boxes meet? Edges count as meeting, so a
+/// `false` is a conservative separation claim.
+fn boundsMeet(a: [4]f64, b: [4]f64) bool {
+    return a[2] >= b[0] and b[2] >= a[0] and a[3] >= b[1] and b[3] >= a[1];
+}
+
+/// A ring prepared for MANY strict-containment queries: its edges bucketed by
+/// the horizontal bands they span.
+///
+/// `polySignedInset(poly, x, y) > 0` is two claims — the even-odd ray cast says
+/// inside, and the point is not ON the ring (the inset is +d inside and -d
+/// outside, and d is zero only on the boundary). Both only ever depend on edges
+/// whose y-range contains the query y: an edge that does not span y neither
+/// crosses the horizontal ray nor can pass through the point. So a band index
+/// answers the ray cast EXACTLY, at a fraction of the ring's length.
+///
+/// The second claim is settled without approximating anything: an "outside"
+/// answer is already final, and an "inside" answer is final too unless the point
+/// falls inside some edge's bounding box — the only way it can be on the ring —
+/// in which case the exact `polySignedInset` is asked, on the rare point that
+/// needs it. So this is a pure acceleration of that predicate, never a
+/// re-statement of it.
+const RingIndex = struct {
+    poly: Contour,
+    miny: f64,
+    band: f64,
+    /// CSR: `edges[starts[b]..starts[b + 1]]` are the edges spanning band `b`.
+    starts: []const u32,
+    edges: []const u32,
+
+    /// Edge `k` runs from `poly[k - 1]` to `poly[k]`, exactly the (j, i) pairing
+    /// `polySignedInset` walks.
+    fn of(arena: std.mem.Allocator, poly: Contour) std.mem.Allocator.Error!RingIndex {
+        if (poly.len < 3) return .{ .poly = poly, .miny = 0, .band = 1, .starts = &.{}, .edges = &.{} };
+        var lo = poly[0][1];
+        var hi = lo;
+        for (poly) |pt| {
+            lo = @min(lo, pt[1]);
+            hi = @max(hi, pt[1]);
+        }
+        const bands = @min(@max(poly.len / 8, 1), 8192);
+        const span = hi - lo;
+        // A degenerate or non-finite span collapses to one band, which is the
+        // unindexed walk and still exactly right.
+        const band = if (span > 0 and std.math.isFinite(span)) span / @as(f64, @floatFromInt(bands)) else 0;
+        var self: RingIndex = .{
+            .poly = poly,
+            .miny = lo,
+            .band = band,
+            .starts = &.{},
+            .edges = &.{},
+        };
+        const starts = try arena.alloc(u32, bands + 1);
+        @memset(starts, 0);
+        var k: usize = 0;
+        while (k < poly.len) : (k += 1) {
+            const range = self.bandRange(poly[k], poly[(k + poly.len - 1) % poly.len], bands);
+            var b = range[0];
+            while (b <= range[1]) : (b += 1) starts[b] += 1;
+        }
+        var total: u32 = 0;
+        for (starts[0..bands]) |*c| {
+            const here = c.*;
+            c.* = total;
+            total += here;
+        }
+        starts[bands] = total;
+        const cursor = try arena.alloc(u32, bands);
+        @memcpy(cursor, starts[0..bands]);
+        const edges = try arena.alloc(u32, total);
+        k = 0;
+        while (k < poly.len) : (k += 1) {
+            const range = self.bandRange(poly[k], poly[(k + poly.len - 1) % poly.len], bands);
+            var b = range[0];
+            while (b <= range[1]) : (b += 1) {
+                edges[cursor[b]] = @intCast(k);
+                cursor[b] += 1;
+            }
+        }
+        self.starts = starts;
+        self.edges = edges;
+        return self;
+    }
+
+    fn bandOf(self: RingIndex, y: f64, bands: usize) usize {
+        if (!(self.band > 0) or !(y > self.miny)) return 0;
+        const at = @floor((y - self.miny) / self.band);
+        const i = numeric.checkedInt(usize, at) orelse return bands - 1;
+        return @min(i, bands - 1);
+    }
+
+    fn bandRange(self: RingIndex, p: [2]f64, q: [2]f64, bands: usize) [2]usize {
+        const a = self.bandOf(@min(p[1], q[1]), bands);
+        const b = self.bandOf(@max(p[1], q[1]), bands);
+        return .{ @min(a, b), @max(a, b) };
+    }
+
+    /// `polySignedInset(self.poly, x, y) > 0`, exactly.
+    fn strictlyInside(self: RingIndex, x: f64, y: f64) bool {
+        if (self.starts.len < 2) return polySignedInset(self.poly, x, y) > 0;
+        const b = self.bandOf(y, self.starts.len - 1);
+        var inside = false;
+        var on_boundary = false;
+        for (self.edges[self.starts[b]..self.starts[b + 1]]) |k| {
+            const p = self.poly[k];
+            const q = self.poly[(k + self.poly.len - 1) % self.poly.len];
+            if ((p[1] > y) != (q[1] > y)) {
+                const t = (y - p[1]) / (q[1] - p[1]);
+                if (x < p[0] + t * (q[0] - p[0])) inside = !inside;
+            }
+            // The point can only lie ON this edge if it lies in its box.
+            if (x >= @min(p[0], q[0]) and x <= @max(p[0], q[0]) and
+                y >= @min(p[1], q[1]) and y <= @max(p[1], q[1])) on_boundary = true;
+        }
+        if (!inside) return false;
+        if (!on_boundary) return true;
+        return polySignedInset(self.poly, x, y) > 0;
+    }
+};
 
 fn pointStrictlyInContour(poly: Contour, point: [2]f64) bool {
     for (poly, 0..) |a, i| {
@@ -3523,8 +4215,7 @@ test "contour topology leaves a diagonal saddle as one simple open notch" {
         1,  1,  1,  -1,
     };
     const g = Grid{ .minx = 0, .miny = 0, .pitch = 1, .nx = 4, .ny = 4, .labels = &labels, .margin = &margin, .iso = 0 };
-    var edges: std.ArrayList(Edge) = .empty;
-    try collectBoundaryEdges(arena, &edges, g, 0);
+    const edges = (try collectBoundaryEdges(arena, g, 1))[0];
     var by_tail: TailMap = .empty;
     try indexTails(arena, &by_tail, edges.items);
     var repair_clears: std.ArrayList(RepairClear) = .empty;
@@ -5394,4 +6085,144 @@ test "carryingLayers picks the poured layers for a net" {
     try testing.expectEqual(@as(usize, 1), layers.len);
     try testing.expect(layers[0].side.? == .bottom);
     try testing.expectEqual(@as(u8, 1), layers[0].track_layer.?);
+}
+
+// spec: placement/pour - the sub-window base reseed writes exactly the values the full board-edge and clip seeding writes, cell for cell
+test "the patch's base reseed reproduces the full base field exactly" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // The whole update rests on a cell inside a rebuilt window starting from the
+    // SAME value a cold pour starts it from. The full seeding runs a vector
+    // kernel over whole lanes of each row and the reseed runs the scalar form,
+    // so this pins the two together over a polygon outline AND a drawn clip —
+    // the two shapes that have a vector path at all.
+    const l_poly = [_][2]f64{ .{ 0, 0 }, .{ 20, 0 }, .{ 20, 6 }, .{ 12, 6 }, .{ 12, 20 }, .{ 0, 20 } };
+    const clip = [_][2]f64{ .{ 2, 2 }, .{ 11, 2 }, .{ 11, 17 }, .{ 2, 17 } };
+    var placement = testPlacement(&.{}, &.{}, .{});
+    placement.board_poly = &l_poly;
+    const lat = lattice(placement);
+    const inset = placement.rules.design.pourEdge();
+
+    const full = try arena.alloc(f32, lat.nx * lat.ny);
+    const patched = try arena.alloc(f32, lat.nx * lat.ny);
+    const whole: [4]f64 = .{ lat.r.minx, lat.r.miny, lat.r.minx + lat.r.w, lat.r.miny + lat.r.h };
+    for ([_][]const [2]f64{ &.{}, &clip }) |drawn| {
+        const a = Grid{ .minx = lat.r.minx, .miny = lat.r.miny, .pitch = lat.pitch, .nx = lat.nx, .ny = lat.ny, .labels = &.{}, .margin = full, .iso = 0 };
+        initMargin(a, placement, lat.r, inset);
+        if (drawn.len >= 3) clipMargin(a, drawn);
+        const b = Grid{ .minx = lat.r.minx, .miny = lat.r.miny, .pitch = lat.pitch, .nx = lat.nx, .ny = lat.ny, .labels = &.{}, .margin = patched, .iso = 0 };
+        // Deliberately seeded with garbage first: the reseed must WRITE the base
+        // value, not lower whatever was there.
+        @memset(patched, 42);
+        reseedBase(b, placement, lat.r, inset, drawn, whole);
+        try testing.expectEqualSlices(f32, full, patched);
+    }
+}
+
+// spec: placement/pour - the indexed ring containment test answers exactly what the signed-inset predicate answers, inside, outside and on the boundary
+test "the ring index answers strict containment exactly" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // A reflex ring, so the band index has edges that span several bands and a
+    // row where the ray cast flips more than once.
+    const ring = try starRing(arena, 160);
+    const index = try RingIndex.of(arena, ring);
+
+    var state: u64 = 0xC0FFEE;
+    for (0..4000) |probe| {
+        // A mix of free points and exact ring vertices, so the "on the boundary"
+        // branch — the one that falls back to the exact predicate — is reached.
+        const p = probePoint(ring, probe, &state);
+        try testing.expectEqual(polySignedInset(ring, p[0], p[1]) > 0, index.strictlyInside(p[0], p[1]));
+    }
+}
+
+/// A closed star ring of `n` points around (10, 10), reflex enough that a
+/// horizontal ray crosses it more than twice on some rows.
+fn starRing(arena: std.mem.Allocator, n: usize) std.mem.Allocator.Error!Contour {
+    const out = try arena.alloc([2]f64, n);
+    for (out, 0..) |*pt, k| {
+        const t = @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(n)) * std.math.tau;
+        const radius = 6 + 2 * @sin(5 * t);
+        pt.* = .{ 10 + radius * @cos(t), 10 + radius * @sin(t) };
+    }
+    return out;
+}
+
+/// Every eighth probe is an exact ring vertex; the rest are scattered over the
+/// ring's box by a small deterministic generator.
+fn probePoint(ring: Contour, probe: usize, state: *u64) [2]f64 {
+    state.* = state.* *% 6364136223846793005 +% 1442695040888963407;
+    const a = state.* >> 11;
+    state.* = state.* *% 6364136223846793005 +% 1442695040888963407;
+    const b = state.* >> 11;
+    if (probe % 8 == 0) return ring[a % ring.len];
+    const scale = @as(f64, @floatFromInt(@as(u64, 1) << 53));
+    return .{
+        @as(f64, @floatFromInt(a % (1 << 53))) / scale * 20,
+        @as(f64, @floatFromInt(b % (1 << 53))) / scale * 20,
+    };
+}
+
+// spec: placement/pour - a drawn zone's content key and its stability predicate both ignore a same-net via too far outside the clip to seed it, and both still see one that can
+test "a clipped fill ignores a same-net via it cannot be seeded by" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // `markSeeds` samples one cell per via and every cell outside the clip halo
+    // is already blocked, so a distant same-net via cannot mark anything. The
+    // key must agree, or a zone would be re-poured for an edit that provably
+    // cannot move it.
+    const zone = [_][2]f64{ .{ 1, 1 }, .{ 6, 1 }, .{ 6, 6 }, .{ 1, 6 } };
+    const nets = [_]flat_netlist.FlatNet{.{ .name = "GND", .pins = &.{} }};
+    const placement = testPlacement(&.{}, &nets, .{});
+    const spec = zoneLayerSpec("GND", .bottom, 1, &zone);
+
+    const far = [_]router.Via{.{ .x = 17, .y = 17, .dia = 0.6, .drill = 0.3, .net = 0 }};
+    const near = [_]router.Via{.{ .x = 3, .y = 3, .dia = 0.6, .drill = 0.3, .net = 0 }};
+    const bare = try fillKey(arena, placement, .{}, spec, true, null);
+    try testing.expectEqual(bare, try fillKey(arena, placement, .{ .vias = &far }, spec, true, null));
+    try testing.expect(!content_key.Key.eql(bare, try fillKey(arena, placement, .{ .vias = &near }, spec, true, null)));
+
+    // …and the cheap predicate the scoped recheck asks first says the same.
+    try testing.expect(fillKeyStable(placement, spec, &.{}, &far));
+    try testing.expect(!fillKeyStable(placement, spec, &.{}, &near));
+    // An unclipped plane has no halo to cull against and is unsettled by both.
+    const plane: LayerSpec = .{ .net = .{ .named = "GND" } };
+    try testing.expect(!fillKeyStable(placement, plane, &.{}, &far));
+}
+
+// spec: placement/pour - the changed-obstacle diff is a multiset difference over content digests, so a reordered obstacle list asks for no re-raster and a moved obstacle asks for both of its windows
+test "the changed-window diff follows content, not position" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+    const lat = lattice(testPlacement(&.{}, &.{}, .{}));
+
+    const a: FeatureRecord = .{ .lo = 1, .hi = 1, .box = .{ 0, 0, 2, 2 } };
+    const b: FeatureRecord = .{ .lo = 2, .hi = 2, .box = .{ 5, 5, 6, 6 } };
+    const c: FeatureRecord = .{ .lo = 3, .hi = 3, .box = .{ 9, 9, 10, 10 } };
+
+    // The same obstacles in a different order are not a change.
+    const reordered = (try changedWindows(arena, &.{ a, b }, &.{ b, a }, lat)).?;
+    try testing.expectEqual(@as(usize, 0), reordered.len);
+
+    // A moved obstacle is a removal AND an addition: both windows are rebuilt.
+    const moved = (try changedWindows(arena, &.{ a, b }, &.{ a, c }, lat)).?;
+    try testing.expectEqual(@as(usize, 2), moved.len);
+    var covers_b = false;
+    var covers_c = false;
+    for (moved) |box| {
+        if (boundsMeet(box, b.box)) covers_b = true;
+        if (boundsMeet(box, c.box)) covers_c = true;
+    }
+    try testing.expect(covers_b and covers_c);
+
+    // A duplicate obstacle is one more of it, not a different one.
+    try testing.expectEqual(@as(usize, 1), (try changedWindows(arena, &.{a}, &.{ a, a }, lat)).?.len);
 }

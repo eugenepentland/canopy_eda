@@ -227,6 +227,118 @@ Worth keeping in mind for the next task in this area: the reconcile fixture in
 `reference_plane_gap` findings and one `loop_area`. It is the cheapest worked
 example of those forms in the tree.
 
+## Profiling a hot path with no profiler
+
+`perf_event_paranoid` is 4 on this machine and the agent account cannot lower
+it, so `perf record` fails outright ("Failure to open any events"). Every
+attribution in the incremental-DRC headroom work therefore had to come from
+hand-placed timers, and the cost of that showed up twice.
+
+First, it made the WRONG suspects expensive to rule out. The W3 report
+attributed the residual scoped-reconcile time to `drc_pour`'s per-pass rebuild
+(~300–400 ms) and to the Tarjan pass inside `copper_topology`. Both were wrong,
+and each took a build-measure-rebuild cycle of its own to disprove: on an
+identical repost `drc_pour` costs 44 ms of a 518 ms pass, and the two redundancy
+analyses spend 0.2 ms in Tarjan and 40 ms each in the graph BUILD. The actual
+hot spot was one predicate three call sites below any of that
+(`copper_contact.directedTrackContact`, 56 ternary iterations = 224 segment
+distances per same-net track pair, ~9 µs a call, several thousand calls a pass).
+A five-minute sampling profile would have named it immediately.
+
+Second, the scaffolding is not reusable. The timers went into `drc_scope.zig`,
+`drc.zig`, `drc_pour.zig`, `drc_compose.zig` and `copper_topology.zig`, had to
+be guarded for the freestanding `drc.wasm` build (no `std.time.nanoTimestamp`),
+and were then stripped again — the same throwaway-patch cycle `drc-dump`'s own
+header records for three previous DRC refactors.
+
+Two things that would have paid for themselves:
+
+1. A standing `NETLISP_PROFILE=1` stage-timer seam on the reporting DRC
+   composition (`drc_compose`'s five stages plus `checkImpl`'s dozen), printed
+   on exit. The stages are stable and already named in the code; the whole
+   patch was about 60 lines and is worth keeping rather than re-deriving.
+2. `netlisp drc-dump --bench <reps>` is now committed and is the cheap half of
+   this: it primes a session and times the SCOPED seam alone over a drag, an
+   identical repost and a via drag, with no cold full pass beside it. Reach for
+   it before adding timers — an identical repost is the whole fixed cost of a
+   reconcile, isolated, and it is one command.
+
+Also worth knowing: this box runs several agents at once and wall times swing
+2-3x between rounds. Any before/after claim needs alternating old/new runs and a
+median of several, never one run of each.
+
+## 2026-08-28 — the pour's cost was two quadratics, not the raster
+
+Task: make a fill an edit changed cheap to UPDATE instead of re-pouring
+(sub-window re-raster from the previous generation's margin field).
+
+The premise held — the update works and is bit-identical — but the premise
+about WHERE the time went did not, and finding that out cost most of the task.
+A changed barracuda fill cost ~230 ms, and the obstacle walk the whole
+sub-window design targets was 17 ms of it. Contour tracing was ~200 ms, in two
+places that had nothing to do with the raster:
+
+  * `collectBoundaryEdges` scanned the whole label grid once PER COMPONENT
+    (O(components x cells));
+  * `tracedComponentValid` compared every pair of a component's holes point by
+    point with no bounding-box filter (O(holes^2 x points^2)) — 4.5 s of a 5 s
+    pass on a pour with a few hundred via antipads.
+
+Both are three-line fixes and both are pure speedups. The sub-window update is
+worth ~27 ms of the remaining ~67 ms; the two quadratics were worth ~165 ms.
+
+What would have saved the detour: **`netlisp drc-dump` reports per-seam wall
+time but nothing below it.** Every phase number in this task came from hand-
+patching `clock.nanoTimestamp()` counters into `pour.computeFill`, building,
+reading, and stripping them again — four rebuild cycles, and the counters could
+not live in `pour.zig` permanently because that file is compiled into the
+wasm32 DRC engine, which has no clock (importing `infra/clock.zig` there fails
+the build outright). A `--phases` flag on `drc-dump`, or a per-phase tally on
+the `fill_cache` side of the seam where a clock is already available, would
+have made "which part of a pour is expensive" a one-command question. This
+change adds the coarse half of that (`# <board> build patched=N ms=… poured=N
+ms=…`); the phase split inside a single build is still hand-instrumented.
+
+Second, smaller: the machine ran at load average ~10 throughout (parallel
+agents), and the same binary on the same board measured 3.3 s and 6.7 s for the
+same phase within minutes. Any timing claim from a session like this needs
+alternating medians against a baseline binary built from the same tree, not
+absolute numbers — worth stating in the task brief rather than discovering.
+
+## 2026-08-28 · claude · two open wasm/server DRC width divergences on power boards
+
+Investigating whether the client wasm DRC pays the plane raster (it does not —
+`wasm_drc.zig` marshals no rail current, so `needs_surfaces` is false there;
+now pinned by a test) surfaced two pre-existing items worth recording. Neither
+is fixed here.
+
+1. `scripts/drc_wasm_parity.mjs` reports a phantom divergence on any board with
+   a current-aware power net. It compares the wasm result against the server
+   after applying only `PCB.drc_kinds` overrides (`applyOverrides`), but the
+   viewer additionally filters the wasm list through
+   `pcb_board.js drcGateDefersPowerWidth` before showing or gating anything.
+   Run against `barracuda-base` the harness would flag ~103 findings of
+   "drift" that no user ever sees: 99 `track width` on `V_3V3D` at its
+   `power-branch-width`, 2 on `V_12V`, and 2 server-only `power width` warns.
+   The script is wired into no gate today; it must learn that filter before it
+   becomes one, or it will fail on its first real power board.
+
+2. A rail with a declared current but NO `power-branch-width` produces
+   transient false errors in the fast tier. On `barracuda-base`, `V_12V` (class
+   `base-input-power`, width 0.400 mm) has two 0.127 mm segments. The server
+   aggregates them into one advisory `power width` WARNING; the wasm, having no
+   rail model, reports them as `track width` ERRORS against the 0.400 mm class
+   width, and `drcGateDefersPowerWidth` does not suppress them because the
+   class declares no branch floor to compare against. The user sees two errors
+   for ~300 ms after every edit until the reconcile replaces them. Related:
+   `applyWasmDrc` carries only `net open` rows across a wasm refresh, so every
+   other server-only kind (`power width`, `reference_plane_gap`, `loop_area`,
+   `bypass_open`) is torn down and recreated on each edit too.
+
+Reproduction for both, no server needed: `netlisp drc-dump <board>` prints the
+server's geometry seam; the wasm's answer is the same seam over a placement
+with `rules.physical.rails` emptied.
+
 ## 2026-08-28 · claude · "the server takes ten seconds to come up" was never about the boot
 
 A restart on this corpus looked like a nine-second outage, and there was
@@ -333,3 +445,97 @@ choice obvious instead of learned.
   Moving the orphaned sidecars — and deduplicating the `.bom` copies now
   present at three path depths (`src/`, `src/boards/`, `src/boards/<name>/`)
   — restores the corpus; no tool change is needed.
+## 2026-08-29 — a memo that copies memory is invisible to every DRC metric we have
+
+The per-fill patch base (H-B) deep-copies a margin field per fill when it
+publishes one. On barracuda-base that is ~80 MB of allocation and memcpy in one
+burst. Every number the DRC seam reports stayed green — findings identical on
+twelve boards, scoped == full, sweep discrepancies zero, reconcile timings
+better — because none of them measures *memory traffic on a background path*.
+What caught it was `scripts/pcb_editor_perf/run.js`: the burst landed inside a
+cold page load's derived warm, and the CPU-rendered zoom probes janked by
+200-400 ms, reproducible to 0.6 ms.
+
+Two things that would have caught it earlier, in order of cheapness:
+
+1. **`drc-dump` already prints `retained=…+… bytes=…`, and nobody diffs it.**
+   The regression is one number: 68.7 MB → 124.8 MB on the read-only path. It
+   was in my own report as a fact about memory and never as a *comparison* —
+   the corpus differential script compares findings and times, not the memo
+   line. Adding the memo/bytes line to the same `diff -I '^#'` corpus loop
+   (or a ceiling on it) makes "this change retains more" a gate rather than a
+   footnote.
+
+2. **A retention change wants the editor gate, not only the DRC gate.** The
+   task brief for H-B named `drc-dump`, `scripts/perf_gate.sh` and the four
+   primary-page latencies as the verification surface. None of them renders a
+   frame. Anything that changes what a background pass *allocates* — not what
+   it computes — should list `pcb_editor_perf/run.js` as a required probe,
+   because the only place that cost is observable is a paint.
+
+The fix itself is one line of policy: publishing a base is opt-in per
+fill-build session, and only the editor's reconcile asks. The seam was already
+exactly where the split needed to be (`boardFills` vs `boardFillsScoped` in
+`drc_compose.zig`), so no plumbing was needed through `drc_reconcile.zig` at
+all — worth remembering that the scoped/full fork lives in `drc_compose`, not
+in the server.
+
+## 2026-08-29 — the editor zoom gate measures a race, and a DRC speedup wins it
+
+Follow-up to the entry above. A regression was attributed to H-B's patch-base
+copy landing inside a cold page load's derived warm. It is not that, and the
+three experiments that ruled it out are worth writing down because each looked
+conclusive on its own:
+
+1. RSS after a cold page load was within 2 MB of main's candidate, and
+   `drc-dump` showed `bases=0` on every read-only seam. **But a `curl` of the
+   page runs no JavaScript**, so it never issues the round-trips the real page
+   makes. A memory probe that does not execute the page is not a probe of the
+   page.
+2. Excluding the priming reconcile too (so no base can be published during a
+   page load at all) left the gate failing 3 of 3.
+3. Stripping the candidate — main's is 61 MB stripped, a `zig-prod` build is
+   143 MB with symbols — changed nothing. Worth knowing anyway: an A/B against
+   a release candidate is not like-for-like until both are stripped.
+
+The actual mechanism, found by logging request timing beside the frame data:
+the editable page posts three server round-trips as it opens (the authoritative
+DRC, the RF retrofit check, and `refillPours`), and each REPAINTS the board when
+it answers. The gate starts measuring at `load`, without waiting. On main the
+pour refill answers *after* the benchmark has finished, so its repaint is never
+recorded. H-B makes that pour fast enough to answer *during* — and the repaint
+lands in whichever zoom phase it falls in, as a single ~200 ms outlier with
+every median unchanged. Blocking `/api/pcb-drc/**` in the harness makes the
+numbers identical to main's, 4 runs of 4; allowing it reproduces the spike
+exactly in the runs where the response beats `__fbench`.
+
+So the gate is not measuring a rendering regression. It is measuring who won a
+race, and **any** pour or DRC speedup flips it — this will happen again.
+
+RESOLVED — the gate owner chose **measure the finished page**, and it landed:
+`fbRunWhenReady` now waits for the page's deferred chain before the zoom program
+runs, and `docs/benchmarks/pcb-editor/baseline.json` was re-recorded under those
+semantics.
+
+Two things the prototype got wrong, both worth knowing before touching this
+again:
+
+* The deferred work is a **chain**, not a set: `refillPours` hands off to the
+  `?derived=1` payload, which schedules the RF retrofit check. Waiting for "one
+  finished and none in flight" passes in the gaps BETWEEN links, and a run that
+  starts in a gap still catches the next link's repaint — that is what left one
+  196 ms `gpu.zoom_in` outlier after the first fix. The condition has to be a
+  quiet INTERVAL (800 ms), which lets the next link start and take the flag back
+  down.
+* `?derived=1` is itself one of the repainting round-trips and is not a
+  `/api/pcb-drc/` call, so a filter written around that path misses the largest
+  one.
+
+The re-recorded numbers went DOWN, not up, which was not the prediction: the old
+baseline had been recorded against a lighter board (the live corpus has since
+grown from 62 to 120 RF paths) and, from its GPU figures, a busier machine.
+Canvas p50 23.0/23.1 -> 21.1/20.6, GPU p50 95.2/89.6 -> 63.4/55.0, and the p95s
+collapse toward the medians (41.3 -> 29.9 on canvas zoom-out) because the
+outlier the race produced is gone. The enforced budgets were left exactly as
+they were, so the gate is no looser than before — which is the property that
+matters when the person re-recording is the author of the change.

@@ -9,7 +9,8 @@
 //! had to add a throwaway dump command, build two binaries with it, diff the
 //! corpus and then strip the patch again. This is that command, kept.
 //!
-//!   netlisp drc-dump [--project-dir <dir>] [--mutate <k>] [--prime] [--scoped] <design>…
+//!   netlisp drc-dump [--project-dir <dir>] [--mutate <k>] [--prime] [--scoped]
+//!                    [--bench <reps>] <design>…
 //!
 //! It is READ-ONLY: it evaluates the design, restores the saved layout exactly
 //! as the PCB page does, runs the two DRC seams, and writes to stdout. It
@@ -73,6 +74,20 @@
 //! The sweep's deferred-kind refresh is applied between steps too, so the
 //! sequence exercises a session that is being swept rather than one that never
 //! is.
+//!
+//! ## Timing a reconcile
+//!
+//! `--bench <reps>` primes a session and then times the SCOPED seam ALONE over
+//! three editing gestures — a track drag, the identical repost the client sends
+//! when nothing moved, and a via drag — printing each one's median:
+//!
+//!   netlisp drc-dump --bench 5 barracuda barracuda-base | grep BENCH
+//!
+//! No cold full pass runs beside the measured one, which is the difference from
+//! `--scoped`: the numbers are the reconcile's own wall time, and a profiler
+//! pointed at this mode sees the scoped path and nothing else. The `none` row
+//! is the one to read first — an edit that changes no copper still runs every
+//! whole-board rule, so its median IS the reconcile's fixed cost.
 
 const std = @import("std");
 const clock = @import("infra/clock.zig");
@@ -88,7 +103,12 @@ const Evaluator = @import("eval/evaluator.zig").Evaluator;
 
 const ns_per_ms: f64 = 1_000_000.0;
 
-pub const DumpError = std.mem.Allocator.Error || std.Io.Writer.Error || error{DrcDumpUsage};
+pub const DumpError = std.mem.Allocator.Error || std.Io.Writer.Error || error{ DrcDumpUsage, UnresolvedBoard };
+
+/// One board's dump outcome. `resolved = false` means the board could not even
+/// be solved — its findings were never checked, so a run containing one must
+/// FAIL rather than let "0 discrepancies over 0 boards" read as a green soak.
+const Outcome = struct { discrepancies: usize = 0, resolved: bool = true };
 
 /// One deterministic in-memory copper edit, named by `--mutate`. Each is chosen
 /// to invalidate a DIFFERENT slice of a per-fill memo: a track edit reaches only
@@ -132,6 +152,11 @@ const Args = struct {
     /// scoped after each edit and dump a cold full check of the same state
     /// beside it. `--mutate` and `--prime` are ignored in this mode.
     scoped: bool = false,
+    /// Time the SCOPED seam alone over this many repetitions of each editing
+    /// gesture, and print the medians. Zero disables it. No cold full pass runs
+    /// beside the measured one, so the number is the reconcile's own cost and a
+    /// sampling profiler pointed at this mode sees only the scoped path.
+    bench: usize = 0,
 };
 
 fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) DumpError!Args {
@@ -151,6 +176,9 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) DumpError!Args 
             out.prime = true;
         } else if (std.mem.eql(u8, a, "--scoped")) {
             out.scoped = true;
+        } else if (std.mem.eql(u8, a, "--bench") and i + 1 < args.len) {
+            i += 1;
+            out.bench = std.fmt.parseInt(usize, args[i], 10) catch return error.DrcDumpUsage;
         } else if (std.mem.startsWith(u8, a, "--")) {
             return error.DrcDumpUsage;
         } else try names.append(arena, a);
@@ -278,7 +306,10 @@ fn dumpScoped(
     // reconcile session holds one: it depends on the placement alone, and the
     // scoped path runs only over an unchanged placement.
     const edge = drc_rules.sharedEdgeField(alloc, solved.placement) catch null;
-    const base: drc_rules.CopperCheck = .{ .placement = solved.placement, .routed = saved, .clearance = clearance, .zones = zones, .base_edge = edge };
+    // Built once for the whole session, exactly as the server's reconcile
+    // session builds it once for a retained placement.
+    const pads = drc_rules.padShapes(alloc, solved.placement) catch null;
+    const base: drc_rules.CopperCheck = .{ .placement = solved.placement, .routed = saved, .clearance = clearance, .zones = zones, .base_edge = edge, .pads = pads };
 
     const t_prime = clock.nanoTimestamp();
     var session = drc_rules.checkPrimingZonesTally(alloc, args.project_dir, name, base);
@@ -293,7 +324,7 @@ fn dumpScoped(
     for (scoped_sequence, 0..) |m, step| {
         const next = try mutate(alloc, state, m);
         const delta = drc_rules.diffCopper(alloc, state, next, solved.placement.nets.len) catch break;
-        const in: drc_rules.CopperCheck = .{ .placement = solved.placement, .routed = next, .clearance = clearance, .zones = zones, .base_edge = edge };
+        const in: drc_rules.CopperCheck = .{ .placement = solved.placement, .routed = next, .clearance = clearance, .zones = zones, .base_edge = edge, .pads = pads };
 
         const t_scoped = clock.nanoTimestamp();
         const scoped = drc_rules.checkScopedZonesTally(alloc, args.project_dir, name, in, session.prior, delta);
@@ -335,7 +366,86 @@ fn dumpScoped(
         state = next;
     }
     session.held.release();
+    // How the fills this sequence had to BUILD were built. The scoped path is
+    // the one caller that retains a patch base, so `patched` staying above zero
+    // here is what says the update is still reached after an edit — a number no
+    // findings diff would ever show.
+    const built = drc_rules.fillMemoStats().tally.build;
+    try w.print("# {s} build patched={d} ms={d:.1} poured={d} ms={d:.1}\n", .{
+        name,
+        built.patched,
+        @as(f64, @floatFromInt(built.patch_ns)) / ns_per_ms,
+        built.poured,
+        @as(f64, @floatFromInt(built.pour_ns)) / ns_per_ms,
+    });
     return discrepancies;
+}
+
+/// The three editing gestures `--bench` times, in the order a session meets
+/// them: a drag (one track nudged again and again), the identical repost the
+/// client sends when nothing moved, and a via drag — the scoped path's worst
+/// case, since a barrel unsettles every unclipped fill on the board.
+const bench_gestures = [_]Mutation{ .move_track, .none, .move_via };
+
+/// Time the scoped seam alone.
+///
+/// Nothing cold runs beside the measured pass: the point is the reconcile's own
+/// wall time and a profile of it that is not half full check. Each repetition
+/// advances the session exactly as the editor's server does — the answer is
+/// retained and the next edit is diffed against it — so a drag is a drag and
+/// not the same edit re-measured against a warm memo.
+fn benchScoped(
+    alloc: std.mem.Allocator,
+    w: *std.Io.Writer,
+    args: Args,
+    name: []const u8,
+    solved: pcb_layout_page.SolvedRequest,
+) DumpError!void {
+    const saved = solved.restored.routes orelse router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
+    const clearance = solved.placement.rules.design.routeParams().clearance;
+    const zones = solved.shown_zones.user;
+    const edge = drc_rules.sharedEdgeField(alloc, solved.placement) catch null;
+    // Built once for the whole session, exactly as the server's reconcile
+    // session builds it once for a retained placement.
+    const pads = drc_rules.padShapes(alloc, solved.placement) catch null;
+    const base: drc_rules.CopperCheck = .{ .placement = solved.placement, .routed = saved, .clearance = clearance, .zones = zones, .base_edge = edge, .pads = pads };
+
+    const t_prime = clock.nanoTimestamp();
+    var session = drc_rules.checkPrimingZonesTally(alloc, args.project_dir, name, base);
+    defer session.held.release();
+    try w.print("# {s} BENCH prime ms={d:.1} ok={} fills={d}\n", .{
+        name, @as(f64, @floatFromInt(clock.nanoTimestamp() - t_prime)) / ns_per_ms, session.scoped, session.reuse.fills,
+    });
+    if (!session.scoped) return;
+
+    var state = saved;
+    const samples = try alloc.alloc(f64, args.bench);
+    for (bench_gestures) |m| {
+        var repoured: usize = 0;
+        var fills: usize = 0;
+        for (samples) |*sample| {
+            const next = try mutate(alloc, state, m);
+            const delta = drc_rules.diffCopper(alloc, state, next, solved.placement.nets.len) catch break;
+            const in: drc_rules.CopperCheck = .{ .placement = solved.placement, .routed = next, .clearance = clearance, .zones = zones, .base_edge = edge, .pads = pads };
+            const t = clock.nanoTimestamp();
+            const scoped = drc_rules.checkScopedZonesTally(alloc, args.project_dir, name, in, session.prior, delta);
+            sample.* = @as(f64, @floatFromInt(clock.nanoTimestamp() - t)) / ns_per_ms;
+            if (!scoped.scoped) {
+                try w.print("# {s} BENCH {s} REFUSED\n", .{ name, @tagName(m) });
+                return;
+            }
+            repoured = scoped.reuse.repoured;
+            fills = scoped.reuse.fills;
+            session.held.release();
+            session = scoped;
+            state = next;
+        }
+        std.mem.sort(f64, samples, {}, std.sort.asc(f64));
+        try w.print("# {s} BENCH {s} reps={d} p50={d:.1} min={d:.1} max={d:.1} repoured={d}/{d}\n", .{
+            name, @tagName(m), samples.len, samples[samples.len / 2], samples[0], samples[samples.len - 1], repoured, fills,
+        });
+        try w.flush();
+    }
 }
 
 /// One step's sweep verdict: the deferred kinds it refreshed, and every
@@ -411,7 +521,7 @@ fn dumpOne(
     w: *std.Io.Writer,
     args: Args,
     name: []const u8,
-) DumpError!usize {
+) DumpError!Outcome {
     var eval = Evaluator.init(alloc, args.project_dir);
     defer eval.deinit();
     var module_res: ?modules_mod.ResolvedBlock = null;
@@ -421,9 +531,13 @@ fn dumpOne(
     };
     const solved = pcb_layout_page.solveForRequest(alloc, args.project_dir, name, .{}, &eval, &module_res) catch {
         try w.print("# {s} UNRESOLVED\n", .{name});
-        return 0;
+        return .{ .resolved = false };
     };
-    if (args.scoped) return dumpScoped(alloc, w, args, name, solved);
+    if (args.bench > 0) {
+        try benchScoped(alloc, w, args, name, solved);
+        return .{};
+    }
+    if (args.scoped) return .{ .discrepancies = try dumpScoped(alloc, w, args, name, solved) };
     const saved = solved.restored.routes orelse router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
     const clearance = solved.placement.rules.design.routeParams().clearance;
     const zones = solved.shown_zones.user;
@@ -472,7 +586,18 @@ fn dumpOne(
         memo.fills,
         memo.bytes,
     });
-    return 0;
+    // How the fills this process had to BUILD were built: updated from the
+    // previous generation's raster, or poured from nothing — and what each cost.
+    // A patch path that quietly stops matching is invisible in the timings alone.
+    try w.print("# {s} build patched={d} ms={d:.1} poured={d} ms={d:.1} bases={d}\n", .{
+        name,
+        memo.tally.build.patched,
+        @as(f64, @floatFromInt(memo.tally.build.patch_ns)) / ns_per_ms,
+        memo.tally.build.poured,
+        @as(f64, @floatFromInt(memo.tally.build.pour_ns)) / ns_per_ms,
+        memo.bases,
+    });
+    return .{};
 }
 
 /// CLI entry: `netlisp drc-dump [--project-dir <dir>] [--mutate <k>] [--prime]
@@ -485,43 +610,79 @@ pub fn cmdDrcDump(allocator: std.mem.Allocator, args: []const []const u8) DumpEr
 
     var buf: [64 * 1024]u8 = undefined;
     var fw = std.Io.File.stdout().writer(infra_fs.currentIo(), &buf);
+    try runParsed(allocator, &fw.interface, parsed);
+}
+
+fn runParsed(allocator: std.mem.Allocator, w: *std.Io.Writer, parsed: Args) DumpError!void {
     var discrepancies: usize = 0;
+    var resolved: usize = 0;
+    var unresolved: usize = 0;
     for (parsed.names) |name| {
         // A per-board arena: a barracuda-class board's DRC holds hundreds of
         // megabytes, and a corpus dump must peak at one board's worth.
         var board_state = std.heap.ArenaAllocator.init(allocator);
         defer board_state.deinit();
-        discrepancies += try dumpOne(board_state.allocator(), &fw.interface, parsed, name);
-        try fw.interface.flush();
+        const outcome = try dumpOne(board_state.allocator(), w, parsed, name);
+        discrepancies += outcome.discrepancies;
+        if (outcome.resolved) resolved += 1 else unresolved += 1;
+        try w.flush();
     }
     // The one line a soak run has to read. `--scoped` over the routed corpus is
     // the standing claim that the incremental path and the background sweep
     // agree about every board and every edit; anything but 0 here is a bug in
     // the scoped path, with the offending findings named on the `SWEEP!` lines
-    // above.
-    if (parsed.scoped) try fw.interface.print("# SWEEP RESULT boards={d} discrepancies={d}\n", .{ parsed.names.len, discrepancies });
-    try fw.interface.flush();
+    // above. `boards=` counts only boards that actually ran: a board that
+    // failed to solve verified nothing, and the run FAILS so a soak can never
+    // read "0 discrepancies over 0 boards" as green (that exact vacuous pass
+    // happened on 2026-08-28, from a wrong --project-dir).
+    if (parsed.scoped) {
+        if (unresolved > 0) {
+            try w.print("# SWEEP RESULT boards={d} discrepancies={d} unresolved={d}\n", .{ resolved, discrepancies, unresolved });
+        } else {
+            try w.print("# SWEEP RESULT boards={d} discrepancies={d}\n", .{ resolved, discrepancies });
+        }
+    }
+    try w.flush();
+    if (unresolved > 0) return error.UnresolvedBoard;
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
 
-// spec: drc-dump - the CLI parses the project dir, the mutation selector and the priming flag with positionals as design names
+// spec: drc-dump - the CLI parses the project dir, the mutation selector, the priming flag and the scoped-seam benchmark repetition count with positionals as design names
 test "drc-dump CLI parses flags and positionals" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const parsed = try parseArgs(arena, &.{ "--project-dir", "p", "--mutate", "3", "--prime", "barracuda", "cyclops" });
+    const parsed = try parseArgs(arena, &.{ "--project-dir", "p", "--mutate", "3", "--prime", "--bench", "4", "barracuda", "cyclops" });
     try testing.expectEqualStrings("p", parsed.project_dir);
     try testing.expectEqual(Mutation.add_track, parsed.mutate);
     try testing.expect(parsed.prime);
+    try testing.expectEqual(@as(usize, 4), parsed.bench);
     try testing.expectEqual(@as(usize, 2), parsed.names.len);
     // A dump with no board named, or an unknown mutation, is a usage error
     // rather than a silent empty dump that would "pass" any diff.
     try testing.expectError(error.DrcDumpUsage, parseArgs(arena, &.{"--prime"}));
     try testing.expectError(error.DrcDumpUsage, parseArgs(arena, &.{ "--mutate", "9", "b" }));
     try testing.expect((try parseArgs(arena, &.{ "--scoped", "b" })).scoped);
+    try testing.expectEqual(@as(usize, 0), (try parseArgs(arena, &.{"b"})).bench);
+    try testing.expectError(error.DrcDumpUsage, parseArgs(arena, &.{ "--bench", "x", "b" }));
+}
+
+// spec: drc-dump - a board that fails to solve marks the run UNRESOLVED and the command fails, so a soak can never read a vacuous pass as green
+test "an unresolvable board fails the dump instead of passing vacuously" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // A project dir that exists but contains no such design: solveForRequest
+    // fails, which must surface as a hard error, not an empty green dump.
+    const parsed = try parseArgs(arena, &.{ "--scoped", "--project-dir", "/nonexistent-netlisp-project", "no-such-board" });
+    var out = std.Io.Writer.Allocating.init(testing.allocator);
+    defer out.deinit();
+    try testing.expectError(error.UnresolvedBoard, runParsed(testing.allocator, &out.writer, parsed));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "# no-such-board UNRESOLVED") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "boards=0 discrepancies=0 unresolved=1") != null);
 }
 
 // spec: drc-dump - every violation renders one line carrying every field, including the track identity automatic cleanup reads, and the lines sort deterministically

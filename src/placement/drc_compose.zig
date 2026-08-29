@@ -24,6 +24,7 @@ const drc_scope = @import("drc_scope.zig");
 const fill_cache = @import("fill_cache.zig");
 const bypass_open = @import("bypass_open.zig");
 const net_open = @import("net_open.zig");
+const net_identity = @import("net_identity.zig");
 const optimizer = @import("optimizer.zig");
 const router = @import("router.zig");
 const pour = @import("pour.zig");
@@ -48,6 +49,10 @@ pub const CopperCheck = struct {
     /// Saved board-level silkscreen labels shown with this copper. Empty for
     /// route-only/internal checks that have no layout text context.
     texts: []const font.BoardText = &.{},
+    /// The caller's world-space pad collision rings, when it holds a placement
+    /// across passes and built them once (`drc_pour.padShapes`). Null builds
+    /// them per pass, exactly as before.
+    pads: ?drc_pour.PadShapes = null,
 };
 
 /// `checkFilteredZones` for copper that belongs to NO project design: an
@@ -91,7 +96,7 @@ pub fn checkDefaultRulesReport(alloc: std.mem.Allocator, in: CopperCheck) CheckR
     const geom = filledViolationsReport(alloc, in, board);
     const silk = withBoardTextReport(alloc, in.placement, geom, in.texts);
     const bypass = withBypassOpenReport(alloc, in.placement, in.routed, silk);
-    return withNetOpenReport(alloc, in, bypass, board);
+    return withNetOpenReport(alloc, in, bypass, board, null).report();
 }
 
 /// Everything one accepted board state leaves behind so the NEXT recheck can be
@@ -116,6 +121,10 @@ pub const Prior = struct {
     /// The last FULL pass's `reference_plane_gap` / `reference_transition` /
     /// `loop_area` findings, carried through every scoped pass in between.
     deferred: []const drc.Violation = &.{},
+    /// What the connectivity layer answered for each net, in `placement.nets`
+    /// order. A net whose own copper and own fills the edit did not move keeps
+    /// this answer instead of rebuilding its graph (`net_open.Scope`).
+    net_answers: []const net_open.NetAnswer = &.{},
 };
 
 /// One scoped recheck's answer, plus the state the next one measures against.
@@ -185,12 +194,15 @@ pub fn checkScopedReport(
     prior: Prior,
     delta: drc_scope.Delta,
 ) ScopedReport {
+    // `.keep`: a scoped pass is by definition mid-edit, so the fills it
+    // rebuilds are the ones the NEXT keystroke will rebuild again — the one
+    // place retaining each raster to update from pays for itself.
     var board = boardFillsScoped(alloc, in, .{
         .keys = prior.fill_keys,
         .spec_keys = prior.spec_keys,
         .tracks = delta.tracks,
         .vias = delta.vias,
-    });
+    }, .keep);
     if (board.failed) {
         board.release();
         return .{ .scoped = false };
@@ -206,7 +218,9 @@ pub fn checkScopedReport(
     });
     const silk = withBoardTextReport(alloc, in.placement, filled.stage, in.texts);
     const bypass = withBypassOpenReport(alloc, in.placement, in.routed, silk);
-    const report = withNetOpenReport(alloc, in, bypass, board);
+    const net_scope = netOpenScope(alloc, in.placement, delta, board, prior) catch null;
+    const staged = withNetOpenReport(alloc, in, bypass, board, net_scope);
+    const report = staged.report();
     var all: std.ArrayList(drc.Violation) = .empty;
     all.appendSlice(alloc, report.violations) catch {
         board.release();
@@ -227,10 +241,68 @@ pub fn checkScopedReport(
             .spec_keys = board.spec_keys,
             .pour_audit = filled.audited,
             .deferred = prior.deferred,
+            .net_answers = staged.answers,
         },
         .held = board.held,
         .reuse = .{ .fills = board.changed.len, .repoured = countChanged(board.changed) },
     };
+}
+
+/// Which nets a scoped connectivity pass has to rebuild.
+///
+/// A net's graph reads its OWN copper and its OWN fills and nothing else, so a
+/// net is dirty exactly when the edit touched a feature of its net, or when one
+/// of the fills it is credited by was re-poured. Both are widened through
+/// `net_identity`: `net_open` credits a net with every copper feature its
+/// canonical group owns, so one member moving dirties the whole group.
+///
+/// Null — recompute everything — whenever the prior record does not cover the
+/// board, or a changed fill belongs to a net that cannot be named. Being wrong
+/// here is a wrong DRC answer, so every uncertainty resolves that way.
+fn netOpenScope(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    delta: drc_scope.Delta,
+    board: BoardFills,
+    prior: Prior,
+) std.mem.Allocator.Error!?net_open.Scope {
+    const count = placement.nets.len;
+    if (prior.net_answers.len != count) return null;
+    if (board.fill_nets.len != board.changed.len) return null;
+    const identity = try net_identity.Identity.init(alloc, placement);
+    const group = try alloc.alloc(bool, count);
+    @memset(group, false);
+    var mark = struct {
+        group: []bool,
+        identity: net_identity.Identity,
+        all: bool = false,
+
+        fn net(self: *@This(), index: i32) void {
+            const canonical = self.identity.canonical(index);
+            if (canonical < 0 or @as(usize, @intCast(canonical)) >= self.group.len) {
+                self.all = true;
+                return;
+            }
+            self.group[@intCast(canonical)] = true;
+        }
+    }{ .group = group, .identity = identity };
+
+    for (delta.tracks) |t| mark.net(t.net);
+    for (delta.vias) |v| mark.net(v.net);
+    for (board.changed, board.fill_nets) |changed, net| {
+        if (!changed) continue;
+        mark.net(net);
+    }
+    const dirty = try alloc.alloc(bool, count);
+    for (dirty, 0..) |*flag, i| {
+        if (mark.all) {
+            flag.* = true;
+            continue;
+        }
+        const canonical = identity.canonical(drc.partyIndex(i));
+        flag.* = canonical >= 0 and @as(usize, @intCast(canonical)) < count and group[@intCast(canonical)];
+    }
+    return .{ .dirty = dirty, .prior = prior.net_answers };
 }
 
 fn countChanged(flags: []const bool) usize {
@@ -252,7 +324,14 @@ fn featureKeys(alloc: std.mem.Allocator, delta: drc_scope.Delta) std.mem.Allocat
 /// findings to `checkDefaultRulesReport`; it simply keeps the evidence instead
 /// of dropping it on the way out.
 pub fn checkPrimingReport(alloc: std.mem.Allocator, in: CopperCheck) ScopedReport {
-    var board = boardFillsScoped(alloc, in, .{});
+    // `.skip`, unlike the scoped pass this prepares for. Priming is what an
+    // editor page does on LOAD — the client posts one DRC as it opens — and a
+    // page load is not an edit: nothing follows it until a human moves
+    // something, which may be seconds away or never. Publishing every fill's
+    // raster there puts a ~80 MB copy inside the page's own load, paid for a
+    // second edit that may not come. The first real edit pours cold and
+    // publishes; the second updates.
+    var board = boardFillsScoped(alloc, in, .{}, .skip);
     if (board.failed) {
         board.release();
         return .{ .scoped = false };
@@ -260,7 +339,8 @@ pub fn checkPrimingReport(alloc: std.mem.Allocator, in: CopperCheck) ScopedRepor
     const filled = filledViolationsScoped(alloc, in, board, null);
     const silk = withBoardTextReport(alloc, in.placement, filled.stage, in.texts);
     const bypass = withBypassOpenReport(alloc, in.placement, in.routed, silk);
-    const report = withNetOpenReport(alloc, in, bypass, board);
+    const staged = withNetOpenReport(alloc, in, bypass, board, null);
+    const report = staged.report();
     return .{
         .violations = report.violations,
         .net_report = report.net_report,
@@ -270,6 +350,7 @@ pub fn checkPrimingReport(alloc: std.mem.Allocator, in: CopperCheck) ScopedRepor
             .spec_keys = board.spec_keys,
             .pour_audit = filled.audited,
             .deferred = deferredOf(alloc, report.violations),
+            .net_answers = staged.answers,
         },
         .held = board.held,
         .reuse = .{ .fills = board.changed.len, .repoured = countChanged(board.changed) },
@@ -281,7 +362,8 @@ pub fn checkPrimingReport(alloc: std.mem.Allocator, in: CopperCheck) ScopedRepor
 /// `drc.check` is a clearance sweep with one exception: the power-width rule
 /// asks whether a declared rail's branch is fed by a plane, and answers by
 /// rastering every declared plane and pour of the board. `drc.check` passes no
-/// prepared copper, so it paid that raster in full on every call — 7.5 s of
+/// prepared copper, so a caller whose placement carries the design's `(i-typ …)`
+/// rail demands paid that raster in full on every call — 7.5 s of
 /// barracuda-base's 8.2 s geometry pass — and the boards a SERVER checks are
 /// saved boards it re-checks over and over.
 ///
@@ -289,7 +371,9 @@ pub fn checkPrimingReport(alloc: std.mem.Allocator, in: CopperCheck) ScopedRepor
 /// identical: a memoised fill is bit-identical to a poured one, and every other
 /// rule is untouched. It lives here, not in `drc.zig`, because `drc.zig` is
 /// compiled into the client's wasm engine, which has no store — nothing in the
-/// wasm target reaches `fill_cache` through this seam.
+/// wasm target reaches `fill_cache` through this seam. Nor does it need to:
+/// `wasm_drc.zig` marshals no rail demand, so the raster this memo exists to
+/// amortise is unreachable there (that file's own test pins it).
 ///
 /// The router's candidate loop deliberately keeps calling `drc.check`: it
 /// mutates the copper those surfaces depend on between calls, so it would only
@@ -300,7 +384,7 @@ pub fn checkGeometry(
     routed: router.RouteResult,
     clearance: f64,
 ) std.mem.Allocator.Error![]drc.Violation {
-    const session = fill_cache.beginSession() orelse
+    const session = fill_cache.beginSession(.skip) orelse
         return drc.check(alloc, placement, routed, clearance);
     // Released on the way out: the widths this produces are plain numbers and
     // no violation points into a fill (`fill_cache`'s borrow rule).
@@ -381,6 +465,14 @@ pub const sharedEdgeField = pour.sharedEdgeField;
 /// the findings its edit could not have moved.
 pub const PourAudit = drc_pour.Audited;
 pub const PourOwner = drc_pour.Owner;
+
+/// Every pad's world collision ring, built once for a retained placement — see
+/// `drc_pour.PadShapes`.
+pub const PadShapes = drc_pour.PadShapes;
+pub const padShapes = drc_pour.padShapes;
+
+/// One net's retained connectivity answer — see `net_open.NetAnswer`.
+pub const NetAnswer = net_open.NetAnswer;
 
 pub const Delta = drc_scope.Delta;
 pub const diffCopper = drc_scope.diffCopper;
@@ -523,7 +615,7 @@ fn filledViolationsScoped(
     ) catch return .{ .stage = .{ .violations = &.{}, .complete = false } };
     var out: std.ArrayList(drc.Violation) = .empty;
     out.appendSlice(alloc, base) catch return .{ .stage = .{ .violations = base, .complete = false } };
-    const audited = drc_pour.checkAudited(alloc, in.placement, in.routed, prepared, scope) catch
+    const audited = drc_pour.checkAudited(alloc, in.placement, in.routed, prepared, scope, in.pads) catch
         return .{ .stage = .{ .violations = base, .complete = false } };
     out.appendSlice(alloc, audited.violations) catch return .{ .stage = .{ .violations = base, .complete = false } };
     if (scope == null)
@@ -553,6 +645,9 @@ const BoardFills = struct {
     fill_keys: []const FillKey = &.{},
     spec_keys: []const u64 = &.{},
     changed: []const bool = &.{},
+    /// The `placement.nets` index each fill belongs to, or -1 when its net
+    /// could not be named. -1 makes every net dirty rather than guessing.
+    fill_nets: []const i32 = &.{},
 
     fn release(self: *BoardFills) void {
         self.held.release();
@@ -568,7 +663,12 @@ fn boardFills(alloc: std.mem.Allocator, in: CopperCheck) BoardFills {
     const key = fill_cache.key(in.placement, in.routed, in.zones);
     var held = fill_cache.acquire(key);
     if (held.entry != null) return .{ .fills = held.fills(), .held = held };
-    const session = fill_cache.beginSession() orelse {
+    // `.skip`: every caller that reaches here is a read-only surface — a page
+    // render, the derived warm, the background sweep, `describe`, the fab gate.
+    // None of them is followed by "the same board with one track moved", so
+    // paying to publish a patch base is a burst of memory traffic for nothing
+    // (see `fill_cache.Bases`).
+    const session = fill_cache.beginSession(.skip) orelse {
         // No memo at all this pass: pour it exactly as an unmemoised caller
         // would. A memo failure is never a DRC failure.
         const alone = filledTopology(alloc, in, null, null) catch return .{ .failed = true };
@@ -592,10 +692,10 @@ fn boardFills(alloc: std.mem.Allocator, in: CopperCheck) BoardFills {
 /// a hash of every track and via to be told so. The per-fill answer is the one
 /// that matters, and `Reuse` gets it without keying the fills the edit could not
 /// reach at all.
-fn boardFillsScoped(alloc: std.mem.Allocator, in: CopperCheck, reuse: Reuse) BoardFills {
-    const session = fill_cache.beginSession() orelse {
+fn boardFillsScoped(alloc: std.mem.Allocator, in: CopperCheck, reuse: Reuse, bases: fill_cache.Bases) BoardFills {
+    const session = fill_cache.beginSession(bases) orelse {
         const alone = filledTopology(alloc, in, null, reuse) catch return .{ .failed = true };
-        return .{ .fills = alone.fills, .fill_keys = alone.fill_keys, .spec_keys = alone.spec_keys, .changed = alone.changed };
+        return .{ .fills = alone.fills, .fill_keys = alone.fill_keys, .spec_keys = alone.spec_keys, .changed = alone.changed, .fill_nets = alone.fill_nets };
     };
     const fresh = filledTopology(alloc, in, session.memo(), reuse) catch {
         session.release();
@@ -610,6 +710,7 @@ fn boardFillsScoped(alloc: std.mem.Allocator, in: CopperCheck, reuse: Reuse) Boa
         .fill_keys = fresh.fill_keys,
         .spec_keys = fresh.spec_keys,
         .changed = fresh.changed,
+        .fill_nets = fresh.fill_nets,
     };
 }
 
@@ -642,7 +743,8 @@ fn filledTopology(alloc: std.mem.Allocator, in: CopperCheck, memo: ?pour.FillMem
     // when the caller seeded it; otherwise we seed our own.
     const base = if (in.base_edge) |b| b else try pour.sharedEdgeField(alloc, in.placement);
     var builder = Builder{ .alloc = alloc, .placement = in.placement, .copper = copper, .base = base, .memo = memo, .reuse = reuse };
-    for (in.placement.nets) |net| {
+    var fill_nets: std.ArrayList(i32) = .empty;
+    for (in.placement.nets, 0..) |net, net_i| {
         const layers = try pour.carryingLayers(alloc, in.placement.rules, net.name);
         if (layers.len == 0) continue;
         const prepared_layers = try alloc.alloc(pour.LayerSpec, layers.len);
@@ -652,6 +754,7 @@ fn filledTopology(alloc: std.mem.Allocator, in: CopperCheck, memo: ?pour.FillMem
             if (spec.track_layer) |track_layer|
                 spec.higher = try pour.higherThanDeclared(alloc, in.zones, track_layer, spec.net);
             const fill = try builder.take(spec);
+            try fill_nets.append(alloc, drc.partyIndex(net_i));
             prepared_layers[fill_i] = spec;
             fills[fill_i] = fill;
             for (fill.contours, 0..) |contour, contour_i| {
@@ -680,6 +783,7 @@ fn filledTopology(alloc: std.mem.Allocator, in: CopperCheck, memo: ?pour.FillMem
         var spec = pour.zoneLayerSpec(zone.net, pour.sideOfSignal(zone.layer), zone.layer, zone.poly);
         spec.higher = try pour.higherPolys(alloc, in.zones, zone_i);
         const fill = try builder.take(spec);
+        try fill_nets.append(alloc, netIndexOfName(in.placement, zone.net));
         zone_fills[zone_i] = fill;
         for (fill.contours, 0..) |contour, contour_i| {
             try out.append(alloc, .{
@@ -701,7 +805,18 @@ fn filledTopology(alloc: std.mem.Allocator, in: CopperCheck, memo: ?pour.FillMem
         .fill_keys = builder.fill_keys.items,
         .spec_keys = builder.spec_keys.items,
         .changed = builder.changed.items,
+        .fill_nets = fill_nets.items,
     };
+}
+
+/// The `placement.nets` index a user zone's net name refers to, or -1 when no
+/// net carries that spelling. -1 is deliberately pessimistic: a fill nobody can
+/// attribute makes every net dirty rather than silently belonging to none.
+fn netIndexOfName(placement: optimizer.Placement, name: []const u8) i32 {
+    for (placement.nets, 0..) |net, i| {
+        if (std.ascii.eqlIgnoreCase(net.name, name)) return drc.partyIndex(i);
+    }
+    return -1;
 }
 
 /// One board's fills plus the per-fill bookkeeping a scoped recheck needs.
@@ -710,6 +825,7 @@ const Topology = struct {
     fill_keys: []const FillKey,
     spec_keys: []const u64,
     changed: []const bool,
+    fill_nets: []const i32,
 };
 
 /// The previous board state's fills, offered to this pass so the ones the edit
@@ -814,7 +930,8 @@ fn withNetOpenReport(
     in: CopperCheck,
     geom: ViolationStage,
     board: BoardFills,
-) CheckReport {
+    scope: ?net_open.Scope,
+) NetOpenStage {
     const empty: net_open.Report = .{ .violations = &.{}, .connectivity = &.{} };
     const tracks = connectivityTracks(alloc, in.routed) catch return .{ .violations = geom.violations, .net_report = empty, .complete = false };
     const arcs = path_copper.filterArcs(alloc, in.routed.rf_port_outcomes, in.routed.arcs) catch
@@ -827,15 +944,29 @@ fn withNetOpenReport(
         // failed pass asks for its own rather than claiming there are no zones.
         .zone_fills = if (board.failed) null else board.fills.zone_fills,
     };
-    const report = net_open.checkWithConnectivity(alloc, in.placement, .{ .tracks = tracks, .vias = in.routed.vias, .arcs = arcs, .zones = in.zones }, prepared) catch
+    const scoped = net_open.checkWithConnectivityScoped(alloc, in.placement, .{ .tracks = tracks, .vias = in.routed.vias, .arcs = arcs, .zones = in.zones }, prepared, scope) catch
         return .{ .violations = geom.violations, .net_report = empty, .complete = false };
+    const report = scoped.report;
     const connectivity_complete = !board.failed and report.connectivity.len == in.placement.nets.len;
-    if (report.violations.len == 0) return .{ .violations = geom.violations, .net_report = report, .complete = geom.complete and connectivity_complete };
+    if (report.violations.len == 0) return .{ .violations = geom.violations, .net_report = report, .complete = geom.complete and connectivity_complete, .answers = scoped.answers };
     var all: std.ArrayList(drc.Violation) = .empty;
-    all.appendSlice(alloc, geom.violations) catch return .{ .violations = geom.violations, .net_report = report, .complete = false };
-    all.appendSlice(alloc, report.violations) catch return .{ .violations = geom.violations, .net_report = report, .complete = false };
-    return .{ .violations = all.items, .net_report = report, .complete = geom.complete and connectivity_complete };
+    all.appendSlice(alloc, geom.violations) catch return .{ .violations = geom.violations, .net_report = report, .complete = false, .answers = scoped.answers };
+    all.appendSlice(alloc, report.violations) catch return .{ .violations = geom.violations, .net_report = report, .complete = false, .answers = scoped.answers };
+    return .{ .violations = all.items, .net_report = report, .complete = geom.complete and connectivity_complete, .answers = scoped.answers };
 }
+
+/// `CheckReport` plus the per-net record `Prior` keeps. It exists only so the
+/// connectivity stage can hand both back through one return.
+const NetOpenStage = struct {
+    violations: []const drc.Violation,
+    net_report: net_open.Report,
+    complete: bool = true,
+    answers: []const net_open.NetAnswer = &.{},
+
+    fn report(self: NetOpenStage) CheckReport {
+        return .{ .violations = self.violations, .net_report = self.net_report, .complete = self.complete };
+    }
+};
 
 /// A persisted RF path intentionally omits its solver chords: the compact
 /// sample chain is the copper authority rendered and fabricated as one swept
@@ -1170,7 +1301,7 @@ test "fills borrowed across an edit are bit-identical to a cold pour" {
 
     // The board as saved, poured once through the memo and KEPT borrowed, so
     // its fills are still retained when the edited state asks for them.
-    var first = fill_cache.beginSession() orelse return error.TestExpectedSession;
+    var first = fill_cache.beginSession(.skip) orelse return error.TestExpectedSession;
     defer first.release();
     _ = try filledTopology(alloc, before, first.memo(), null);
 
@@ -1186,7 +1317,7 @@ test "fills borrowed across an edit are bit-identical to a cold pour" {
     };
 
     const hits_before = fill_cache.stats().tally.fill_hits;
-    var second = fill_cache.beginSession() orelse return error.TestExpectedSession;
+    var second = fill_cache.beginSession(.skip) orelse return error.TestExpectedSession;
     defer second.release();
     const warm = (try filledTopology(alloc, after, second.memo(), null)).fills;
     // Something WAS borrowed — otherwise the comparison below would be two
@@ -1434,4 +1565,77 @@ test "a scoped recheck carries the deferred kinds forward untouched" {
     try testing.expectEqual(@as(usize, 1), drc.countKind(scoped.violations, .loop_area));
     try testing.expectEqual(@as(usize, 1), drc.countKind(scoped.violations, .reference_plane_gap));
     try testing.expect(scoped.prior.deferred.len == mixed.len);
+}
+
+// spec: placement/fill-cache - only the editor's scoped recheck asks to retain patch bases; the priming pass an editor page runs on load does not, so the first edit after a page load pours once and the second updates
+test "the priming pass retains no patch base, and the scoped pass does" {
+    const testing = std.testing;
+    const geometry = @import("geometry.zig");
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const alloc = arena_inst.allocator();
+
+    const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 1.5, .y = 1.5 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 8, .y = 1.5 },
+    };
+    const flat = @import("../flat_netlist.zig");
+    const gnd_pins = [_]flat.FlatPin{.{ .ref_des = "R1", .pin = "1" }};
+    const sig_pins = [_]flat.FlatPin{.{ .ref_des = "R2", .pin = "1" }};
+    const nets = [_]optimizer.FlatNet{ .{ .name = "GND", .pins = &gnd_pins }, .{ .name = "SIG", .pins = &sig_pins } };
+    const placement = twoFaceBoard(&parts, &nets);
+    // Deliberately not the other tests' fixture: they share one process-wide
+    // memo, and a board some earlier test already retained would answer every
+    // fill from the content key and BUILD nothing, which is what these deltas
+    // are counting.
+    const poly = [_][2]f64{ .{ 0.37, 0.41 }, .{ 9.61, 0.41 }, .{ 9.61, 2.77 }, .{ 0.37, 2.77 } };
+    const zones = [_]pour.UserZone{.{ .net = "GND", .layer = 0, .poly = &poly }};
+    const tracks = [_]router.Track{.{ .x1 = 2.53, .y1 = 1.47, .x2 = 7.51, .y2 = 1.47, .layer = 0, .width = 0.23, .net = 1 }};
+    const in: CopperCheck = .{
+        .placement = placement,
+        .routed = .{ .tracks = &tracks, .vias = &.{}, .routed = 1, .total = 1 },
+        .clearance = 0.15,
+        .zones = &zones,
+    };
+
+    // A page load pours every fill and keeps the evidence a later scoped pass
+    // measures against — but not the rasters, which only an edit can spend. The
+    // counters are process-wide and monotonic, so each claim is a delta taken
+    // around its own call rather than a reading of the store's total.
+    const before_prime = fill_cache.stats().tally.build;
+    var primed = checkPrimingReport(alloc, in);
+    const after_prime = fill_cache.stats().tally.build;
+    primed.held.release();
+    try testing.expect(after_prime.poured > before_prime.poured);
+    try testing.expectEqual(before_prime.patched, after_prime.patched);
+
+    // The first edit. It has no base to update from — priming published none —
+    // so it pours too, and publishes what the next edit will update from.
+    var once = tracks;
+    once[0].y1 += 0.3;
+    once[0].y2 += 0.3;
+    var first = checkScopedReport(alloc, edited(placement, &once, &zones), primed.prior, .{ .tracks = &.{ tracks[0], once[0] }, .vias = &.{} });
+    const after_first = fill_cache.stats().tally.build;
+    try testing.expect(after_first.poured > after_prime.poured);
+    try testing.expectEqual(after_prime.patched, after_first.patched);
+
+    // The second edit updates from it.
+    var twice = once;
+    twice[0].y1 += 0.3;
+    twice[0].y2 += 0.3;
+    var second = checkScopedReport(alloc, edited(placement, &twice, &zones), first.prior, .{ .tracks = &.{ once[0], twice[0] }, .vias = &.{} });
+    try testing.expect(fill_cache.stats().tally.build.patched > after_first.patched);
+    second.held.release();
+    first.held.release();
+}
+
+/// The same board with one edited copper list, for the sequence above.
+fn edited(placement: optimizer.Placement, tracks: []const router.Track, zones: []const pour.UserZone) CopperCheck {
+    return .{
+        .placement = placement,
+        .routed = .{ .tracks = tracks, .vias = &.{}, .routed = 1, .total = 1 },
+        .clearance = 0.15,
+        .zones = zones,
+    };
 }

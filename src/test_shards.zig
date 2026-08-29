@@ -181,6 +181,7 @@ pub const shards: []const []const []const u8 = &.{
         "placement.lane_reserve.test.",
         "placement.net_rules.test.",
         "placement.pour.test.",
+        "placement.pour_patch_regression.test.",
         "placement.power_capacity.test.",
         "placement.power_integrity.test.",
         "placement.pdn_impedance.test.",

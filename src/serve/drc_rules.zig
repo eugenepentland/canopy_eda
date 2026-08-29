@@ -332,6 +332,9 @@ pub const sharedEdgeField = drc_compose.sharedEdgeField;
 pub const isDeferredKind = drc_compose.isDeferredKind;
 pub const PourAudit = drc_compose.PourAudit;
 pub const PourOwner = drc_compose.PourOwner;
+pub const NetAnswer = drc_compose.NetAnswer;
+pub const PadShapes = drc_compose.PadShapes;
+pub const padShapes = drc_compose.padShapes;
 
 /// The board's poured fill, borrowed for a caller's own whole-board sweeps
 /// (connectivity tallies, open-net reports, the completion ladder). Named here

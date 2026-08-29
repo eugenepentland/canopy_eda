@@ -45,6 +45,23 @@
 //! of everything the pour reads. That claim is what
 //! `drc_compose`'s edit-sequence tests exist to hold.
 //!
+//! ## …and a third table, for the fills an edit DID reach
+//!
+//! A fill whose key moved was still poured from nothing, which on a
+//! barracuda-class board is most of a via edit's cost (a via is layer-blind, so
+//! it lands in every unclipped fill). So a PATCH BASE is retained per fill
+//! IDENTITY (`pour.fillIdentity`) alongside the content-keyed fills: the margin
+//! field that fill's last generation produced, and the obstacle set that
+//! produced it. The next generation diffs the two obstacle sets, copies the
+//! field, and re-rasters only the windows the changed obstacles can write in.
+//!
+//! Bases live in their own store (`BaseStore`) with their own budget, because
+//! they are a different kind of thing from a memo entry: one per identity rather
+//! than one per content, superseded rather than accumulated, and the cheapest
+//! thing here to give up — losing one costs the next edit a cold pour and
+//! nothing else. `pour` owns the update and its bit-identity argument; this
+//! module only holds the fields and the refcounts.
+//!
 //! ## Ownership
 //!
 //! Entries are pinned to the page allocator because every caller's allocator is
@@ -71,6 +88,7 @@
 //! copy it into the caller's arena, not hand out the borrowed one.
 
 const std = @import("std");
+const clock = @import("../infra/clock.zig");
 const infra_fs = @import("../infra/fs.zig");
 const content_key = @import("content_key.zig");
 const drc = @import("drc.zig");
@@ -108,6 +126,12 @@ const max_boards: usize = 4;
 /// megabytes — which is exactly why generations SHARE their unchanged fills
 /// rather than each holding a copy.
 const max_fill_bytes: usize = 384 * 1024 * 1024;
+/// Byte ceiling over the retained PATCH BASES — the margin fields a changed
+/// fill is updated from. Unlike the fills, these do not accumulate per board
+/// generation: one base per fill IDENTITY, replaced when that fill is next
+/// built. A barracuda-class board's twenty-odd fills are ~2 MB of margin field
+/// each, so this holds several boards' worth of bases at once.
+const max_base_bytes: usize = 128 * 1024 * 1024;
 
 /// What a retained thing — a board entry or one fill — needs to be freed at the
 /// right moment: its size against the ceiling, who is still reading it, and
@@ -133,6 +157,46 @@ pub const FillNode = struct {
     held: Retention,
 };
 
+/// One fill IDENTITY's most recent raster snapshot: the margin field the last
+/// generation of that fill produced, and the obstacle set that produced it.
+///
+/// A `FillNode` is keyed on CONTENT and is therefore useless the moment a fill
+/// changes; this is keyed on the fill itself and is what the changed generation
+/// is built FROM. Exactly one is retained per identity — the newest — because
+/// only the newest is what the next edit differs from.
+const BaseNode = struct {
+    id: Key,
+    arena: std.heap.ArenaAllocator,
+    snapshot: pour.Snapshot,
+    held: Retention,
+};
+
+/// Does this pass take part in the PATCH-BASE chain — borrowing the previous
+/// generation of each fill it rebuilds, and publishing its own?
+///
+/// Opt-in, and deliberately not the default, because publishing a base is not
+/// free: it deep-copies a margin field and an obstacle record per fill, which on
+/// a barracuda-class board is ~80 MB of allocation and memcpy in one burst. That
+/// burst is invisible in a DRC number and very visible in a frame: the editor
+/// zoom gate measured 200-400 ms of jank on the CPU-rendered canvas when the
+/// background derived warm did it behind a cold page load.
+///
+/// So only the EDITOR's reconcile takes part — the pass that is going to be
+/// asked the same question again a moment later, with one track moved. Every
+/// read-only surface (page render, derived warm, background sweep, `describe`,
+/// the fab gate, bench, the geometry seam) skips it and behaves exactly as it
+/// did before the update existed.
+///
+/// The cost of skipping is one cold pour: the first edit after a cold page has
+/// no base to update from and pours, which is the fallback the update already
+/// treats as routine — and it publishes the base the second edit patches from.
+pub const Bases = enum {
+    /// Retain nothing, borrow nothing.
+    skip,
+    /// Borrow the previous generation of each fill, and publish this one.
+    keep,
+};
+
 /// What the store may retain. Bundled so a test can bound one store without
 /// touching the process-wide one, and so both bounds are stated together: the
 /// board count is a window over recent board STATES, the byte ceiling is the
@@ -142,13 +206,29 @@ pub const Limits = struct {
     bytes: usize = max_fill_bytes,
 };
 
-/// What the store did since the process started: boards answered whole, and
-/// fills borrowed versus poured.
+/// What the store did since the process started: boards answered whole, fills
+/// borrowed versus built, and — of the fills it had to build — how many were
+/// UPDATED from the previous generation's raster rather than poured from
+/// nothing, with the wall time each of those two answers cost.
+///
+/// Counted rather than inferred, for the same reason the hit counts are: a
+/// patch path that silently stops matching looks exactly like one that works.
 pub const Tally = struct {
     board_hits: usize = 0,
     board_misses: usize = 0,
     fill_hits: usize = 0,
     fill_misses: usize = 0,
+    build: Build = .{},
+};
+
+/// How the fills a pass had to BUILD were built, and what each answer cost.
+const Build = struct {
+    /// Updated from the previous generation of the same fill.
+    patched: usize = 0,
+    /// Poured from nothing.
+    poured: usize = 0,
+    patch_ns: i128 = 0,
+    pour_ns: i128 = 0,
 };
 
 /// One memoised board, its light metadata, the fills it is made of, and the
@@ -207,23 +287,52 @@ pub const Held = struct {
 /// is refcounted here and released together when the pass ends.
 pub const Session = struct {
     store: *Store,
+    /// Whether this pass takes part in the patch-base chain at all.
+    bases_wanted: Bases = .skip,
     nodes: std.ArrayList(*FillNode) = .empty,
+    /// The patch bases this pass borrowed, released together with the fills.
+    bases: std.ArrayList(*BaseNode) = .empty,
     /// False once any fill in this pass could NOT be retained (an allocation
     /// failure, or a board over the byte ceiling). Such a fill lives in the
     /// caller's arena, so the board entry built from it must not be retained —
     /// it would outlive the memory it points at.
     all_backed: bool = true,
+    /// When the pass last MISSED on a fill, and whether it went on to take a
+    /// patch base for it. `pour` asks in a fixed order — `get`, then `base`,
+    /// then `put` — so the span between the miss and the store is exactly what
+    /// building that one fill cost, and the flag says which of the two answers
+    /// it was. A base taken and then DECLINED by `pour` (a diff too large to be
+    /// worth patching) is counted as patched though it was poured: the flag is
+    /// what this side of the seam can see, and the mis-attribution is a slower
+    /// number in the "patched" column rather than a wrong verdict anywhere.
+    building_since: ?i128 = null,
+    building_patched: bool = false,
 
     /// The `pour` seam this session answers. Borrow it for one pass only.
+    ///
+    /// A `.skip` pass leaves both base hooks null, which `pour` reads as "this
+    /// caller does not patch" — no obstacle record is collected and no margin
+    /// field is copied. That is not merely an optimisation for the read-only
+    /// surfaces: it is what keeps them behaving exactly as they did before the
+    /// update existed (see `Bases`).
     pub fn memo(self: *Session) pour.FillMemo {
-        return .{ .ctx = @ptrCast(self), .get = sessionGet, .put = sessionPut };
+        const wants = self.bases_wanted == .keep;
+        return .{
+            .ctx = @ptrCast(self),
+            .get = sessionGet,
+            .put = sessionPut,
+            .base = if (wants) sessionBase else null,
+            .put_base = if (wants) sessionPutBase else null,
+        };
     }
 
     /// Drop every borrow and free the session.
     pub fn release(self: *Session) void {
         const store = self.store;
         for (self.nodes.items) |node| store.releaseFill(node);
+        for (self.bases.items) |node| process_bases.release(node);
         self.nodes.deinit(store.backing);
+        self.bases.deinit(store.backing);
         store.backing.destroy(self);
     }
 
@@ -235,17 +344,62 @@ pub const Session = struct {
             self.all_backed = false;
         };
     }
+
+    /// Close the timing of the fill this pass was building, into whichever of
+    /// the two answers it turned out to be.
+    fn settle(self: *Session) void {
+        const started = self.building_since orelse return;
+        self.building_since = null;
+        const spent = clock.nanoTimestamp() - started;
+        self.store.mutex.lock();
+        defer self.store.mutex.unlock();
+        if (self.building_patched) {
+            self.store.tally.build.patched += 1;
+            self.store.tally.build.patch_ns += spent;
+        } else {
+            self.store.tally.build.poured += 1;
+            self.store.tally.build.pour_ns += spent;
+        }
+    }
 };
 
 fn sessionGet(ctx: *anyopaque, k: Key) ?pour.Fill {
     const self: *Session = @ptrCast(@alignCast(ctx));
-    const node = self.store.acquireFill(k) orelse return null;
+    const node = self.store.acquireFill(k) orelse {
+        self.building_since = clock.nanoTimestamp();
+        self.building_patched = false;
+        return null;
+    };
     const before = self.nodes.items.len;
     self.hold(node);
     // `hold` failing gave the borrow straight back, so the fill is no longer
     // ours to hand out.
-    if (self.nodes.items.len == before) return null;
+    if (self.nodes.items.len == before) {
+        self.building_since = clock.nanoTimestamp();
+        self.building_patched = false;
+        return null;
+    }
     return node.fill;
+}
+
+/// Borrow the last generation of this fill, so `pour` can update it instead of
+/// pouring it. A miss is ordinary — the first pass over a board has no previous
+/// generation of anything.
+fn sessionBase(ctx: *anyopaque, id: Key) ?pour.Snapshot {
+    const self: *Session = @ptrCast(@alignCast(ctx));
+    const node = process_bases.acquire(id) orelse return null;
+    self.bases.append(self.store.backing, node) catch {
+        process_bases.release(node);
+        return null;
+    };
+    self.building_patched = true;
+    return node.snapshot;
+}
+
+/// Retain this generation as the base the next edit patches from. A failure to
+/// retain costs the NEXT pass a cold pour and nothing else.
+fn sessionPutBase(_: *anyopaque, id: Key, snap: pour.Snapshot) void {
+    process_bases.put(id, snap);
 }
 
 /// Retain `fill` and hand back THE RETAINED COPY. Returning the store's copy
@@ -254,6 +408,7 @@ fn sessionGet(ctx: *anyopaque, k: Key) ?pour.Fill {
 /// built from it would point at freed memory the moment the request ended.
 fn sessionPut(ctx: *anyopaque, k: Key, fill: pour.Fill) ?pour.Fill {
     const self: *Session = @ptrCast(@alignCast(ctx));
+    self.settle();
     const node = self.store.putFill(k, fill) orelse {
         self.all_backed = false;
         return null;
@@ -307,9 +462,9 @@ pub const Store = struct {
     /// Open a per-fill borrow session for one DRC pass. Null when the session
     /// itself cannot be allocated, which the caller answers by pouring
     /// unmemoised — a memo failure is never a DRC failure.
-    pub fn beginSession(self: *Store) ?*Session {
+    pub fn beginSession(self: *Store, bases: Bases) ?*Session {
         const session = self.backing.create(Session) catch return null;
-        session.* = .{ .store = self };
+        session.* = .{ .store = self, .bases_wanted = bases };
         return session;
     }
 
@@ -505,6 +660,137 @@ pub const Store = struct {
     }
 };
 
+/// The retained PATCH BASES: one per fill identity, holding the margin field
+/// that fill's last generation produced and the obstacle set that produced it.
+///
+/// Deliberately its own store rather than another table inside `Store`. A base
+/// is not a memo entry: it is keyed on the fill rather than on its content, it
+/// is SUPERSEDED rather than accumulated (one per identity, always the newest),
+/// it has its own budget, and losing one costs the next edit a cold pour and
+/// nothing else — so it is the first thing worth giving up under pressure and
+/// the last thing that should compete with the fills for their ceiling.
+const BaseStore = struct {
+    mutex: infra_fs.Mutex = .{},
+    backing: std.mem.Allocator = std.heap.page_allocator,
+    /// Oldest borrow first: the recency order eviction reads.
+    nodes: std.ArrayList(*BaseNode) = .empty,
+    bytes: usize = 0,
+    limit: usize = max_base_bytes,
+
+    /// Borrow one fill identity's retained base, or null on a miss. A miss is
+    /// ordinary — the first pass over a board has no previous generation.
+    fn acquire(self: *BaseStore, id: Key) ?*BaseNode {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.nodes.items, 0..) |node, i| {
+            if (!Key.eql(node.id, id)) continue;
+            node.held.refs += 1;
+            self.nodes.appendAssumeCapacity(self.nodes.orderedRemove(i));
+            return node;
+        }
+        return null;
+    }
+
+    /// Retain this generation of `id` as its base, replacing whatever generation
+    /// was there. The old node is UNLINKED rather than freed: the pass that just
+    /// patched from it is usually still reading it, and the last release frees it.
+    fn put(self: *BaseStore, id: Key, snap: pour.Snapshot) void {
+        // Built OUTSIDE the lock: the copy walks a whole margin field.
+        const node = self.build(id, snap) orelse return;
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.nodes.items, 0..) |existing, i| {
+            if (!Key.eql(existing.id, id)) continue;
+            _ = self.nodes.orderedRemove(i);
+            self.bytes -= existing.held.bytes;
+            unlinkBase(existing);
+            break;
+        }
+        self.nodes.append(self.backing, node) catch {
+            destroyBase(node);
+            return;
+        };
+        self.bytes += node.held.bytes;
+        self.trim();
+    }
+
+    fn release(self: *BaseStore, node: *BaseNode) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        node.held.refs -= 1;
+        if (node.held.dropped and node.held.refs == 0) destroyBase(node);
+    }
+
+    fn count(self: *BaseStore) usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.nodes.items.len;
+    }
+
+    fn size(self: *BaseStore) usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.bytes;
+    }
+
+    fn build(self: *BaseStore, id: Key, snap: pour.Snapshot) ?*BaseNode {
+        const node = self.backing.create(BaseNode) catch return null;
+        node.* = .{
+            .id = id,
+            .arena = std.heap.ArenaAllocator.init(self.backing),
+            .snapshot = .{ .margin = &.{}, .features = &.{} },
+            .held = .{},
+        };
+        const alloc = node.arena.allocator();
+        const margin = alloc.dupe(f32, snap.margin) catch {
+            destroyBase(node);
+            return null;
+        };
+        const features = alloc.dupe(pour.FeatureRecord, snap.features) catch {
+            destroyBase(node);
+            return null;
+        };
+        node.snapshot = .{ .margin = margin, .features = features };
+        node.held.bytes = node.arena.queryCapacity();
+        if (node.held.bytes > self.limit) {
+            destroyBase(node);
+            return null;
+        }
+        return node;
+    }
+
+    /// Give up the least recently borrowed unreferenced bases until the budget
+    /// is met. Called with the mutex held. A base a pass is still reading stays;
+    /// it is unlinked by the next `put` for its identity instead.
+    fn trim(self: *BaseStore) void {
+        var i: usize = 0;
+        while (self.bytes > self.limit and i < self.nodes.items.len) {
+            const node = self.nodes.items[i];
+            if (node.held.refs > 0) {
+                i += 1;
+                continue;
+            }
+            _ = self.nodes.orderedRemove(i);
+            self.bytes -= node.held.bytes;
+            unlinkBase(node);
+        }
+    }
+
+    fn deinit(self: *BaseStore) void {
+        self.mutex.lock();
+        for (self.nodes.items) |node| unlinkBase(node);
+        self.nodes.deinit(self.backing);
+        self.nodes = .empty;
+        self.bytes = 0;
+        self.mutex.unlock();
+    }
+};
+
+/// The one base store. Process-wide for the same reason the fill store is: the
+/// surfaces that pour a board between edits are several different callers, and
+/// an identity makes sharing between them exact.
+var process_bases: BaseStore = .{};
+
 /// Drop the store's own claim on an unlinked entry: free it now when nothing
 /// reads it, otherwise leave it to the last reader's `release`. Called with the
 /// mutex held.
@@ -531,6 +817,17 @@ fn unlinkFill(node: *FillNode) void {
 }
 
 fn destroyFill(node: *FillNode) void {
+    const backing = node.arena.child_allocator;
+    node.arena.deinit();
+    backing.destroy(node);
+}
+
+fn unlinkBase(node: *BaseNode) void {
+    if (node.held.refs == 0) return destroyBase(node);
+    node.held.dropped = true;
+}
+
+fn destroyBase(node: *BaseNode) void {
     const backing = node.arena.child_allocator;
     node.arena.deinit();
     backing.destroy(node);
@@ -572,20 +869,21 @@ pub fn put(k: Key, fills: Fills, session: ?*Session) void {
 }
 
 /// Open a per-fill borrow session against the process-wide store.
-pub fn beginSession() ?*Session {
-    return process_store.beginSession();
+pub fn beginSession(bases: Bases) ?*Session {
+    return process_store.beginSession(bases);
 }
 
 /// What the process-wide memo has done so far, and what it is holding. Read by
 /// `drc-dump` so a change in REUSE is reportable, not just a change in time.
-pub fn stats() struct { tally: Tally, boards: usize, fills: usize, bytes: usize } {
+pub fn stats() struct { tally: Tally, boards: usize, fills: usize, bases: usize, bytes: usize } {
     process_store.mutex.lock();
     defer process_store.mutex.unlock();
     return .{
         .tally = process_store.tally,
         .boards = process_store.entries.items.len,
         .fills = process_store.fills.items.len,
-        .bytes = process_store.bytes,
+        .bases = process_bases.count(),
+        .bytes = process_store.bytes + process_bases.size(),
     };
 }
 
@@ -944,7 +1242,7 @@ test "a fill is borrowed across two different board states" {
 
     const unchanged: Key = .{ .lo = 11, .hi = 11 };
     const edited: Key = .{ .lo = 22, .hi = 22 };
-    var first = store.beginSession().?;
+    var first = store.beginSession(.keep).?;
     const memo = first.memo();
     try testing.expect(memo.get(memo.ctx, unchanged) == null);
     _ = memo.put(memo.ctx, unchanged, try fakeFill(scratch.allocator(), 7));
@@ -952,7 +1250,7 @@ test "a fill is borrowed across two different board states" {
     first.release();
 
     // The next board state asks for the same unchanged fill and one new one.
-    var second = store.beginSession().?;
+    var second = store.beginSession(.keep).?;
     defer second.release();
     const next = second.memo();
     const borrowed = next.get(next.ctx, unchanged) orelse return error.TestExpectedBorrow;
@@ -967,7 +1265,7 @@ test "a session-backed board entry shares its rasters with the fills it borrowed
     var scratch = std.heap.ArenaAllocator.init(testing.allocator);
 
     const fill_key: Key = .{ .lo = 41, .hi = 41 };
-    var session = store.beginSession().?;
+    var session = store.beginSession(.keep).?;
     const memo = session.memo();
     _ = memo.put(memo.ctx, fill_key, try fakeFill(scratch.allocator(), 5));
     const shared = memo.get(memo.ctx, fill_key).?;
@@ -991,7 +1289,7 @@ test "an unretainable fill makes the board entry copy rather than reference" {
     var tight: Store = .{ .backing = testing.allocator, .limits = .{ .bytes = 1 } };
     defer tight.deinit();
     var scratch = std.heap.ArenaAllocator.init(testing.allocator);
-    var declined = tight.beginSession().?;
+    var declined = tight.beginSession(.keep).?;
     const memo = declined.memo();
     // A fill the ceiling refuses: the pass keeps its own copy and says so.
     try testing.expect(memo.put(memo.ctx, .{ .lo = 51, .hi = 51 }, try fakeFill(scratch.allocator(), 3)) == null);
@@ -1002,7 +1300,7 @@ test "an unretainable fill makes the board entry copy rather than reference" {
     // board must still be retained — by value, so it survives the pass's arena.
     var store: Store = .{ .backing = testing.allocator };
     defer store.deinit();
-    var session = store.beginSession().?;
+    var session = store.beginSession(.keep).?;
     session.all_backed = false;
     const board: Key = .{ .lo = 52, .hi = 52 };
     store.put(board, try fakeFills(scratch.allocator(), "GND"), session);
@@ -1025,7 +1323,7 @@ test "the byte ceiling evicts unreferenced fills before referenced ones" {
     defer scratch.deinit();
 
     // One fill kept alive by a board entry, one nothing references.
-    var session = store.beginSession().?;
+    var session = store.beginSession(.keep).?;
     const memo = session.memo();
     const kept: Key = .{ .lo = 61, .hi = 61 };
     _ = memo.put(memo.ctx, kept, try fakeFill(scratch.allocator(), 1));
@@ -1033,7 +1331,7 @@ test "the byte ceiling evicts unreferenced fills before referenced ones" {
     store.put(.{ .lo = 62, .hi = 62 }, .{ .zone_fills = try scratch.allocator().dupe(pour.Fill, &[_]pour.Fill{shared}) }, session);
     session.release();
 
-    var loose = store.beginSession().?;
+    var loose = store.beginSession(.keep).?;
     const loose_memo = loose.memo();
     _ = loose_memo.put(loose_memo.ctx, .{ .lo = 63, .hi = 63 }, try fakeFill(scratch.allocator(), 2));
     loose.release();
@@ -1050,4 +1348,62 @@ test "the byte ceiling evicts unreferenced fills before referenced ones" {
     defer held.release();
     try testing.expect(held.entry != null);
     try testing.expectEqualSlices(i32, &[_]i32{1}, held.fills().zone_fills[0].labels);
+}
+
+/// A one-cell margin field and a one-obstacle record, distinct per call so a
+/// retained base can be told apart from the one it replaced.
+fn fakeSnapshot(alloc: std.mem.Allocator, mark: f32) std.mem.Allocator.Error!pour.Snapshot {
+    return .{
+        .margin = try alloc.dupe(f32, &[_]f32{mark}),
+        .features = try alloc.dupe(pour.FeatureRecord, &[_]pour.FeatureRecord{.{ .lo = 1, .hi = 1, .box = .{ 0, 0, 1, 1 } }}),
+    };
+}
+
+// spec: placement/fill-cache - one patch base is retained per fill identity, copied out of the pass's arena, and replaced rather than accumulated when that fill is built again
+test "a patch base is retained per identity and superseded by the next generation" {
+    var bases: BaseStore = .{ .backing = testing.allocator };
+    defer bases.deinit();
+
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    const id: Key = .{ .lo = 71, .hi = 71 };
+    bases.put(id, try fakeSnapshot(scratch.allocator(), 1));
+    bases.put(id, try fakeSnapshot(scratch.allocator(), 2));
+    // Exactly what the server does to the request arena after it answers.
+    scratch.deinit();
+
+    try testing.expectEqual(@as(usize, 1), bases.count());
+    const node = bases.acquire(id) orelse return error.TestExpectedBase;
+    defer bases.release(node);
+    try testing.expectEqualSlices(f32, &[_]f32{2}, node.snapshot.margin);
+    try testing.expectEqual(@as(usize, 1), node.snapshot.features.len);
+    try testing.expect(bases.acquire(.{ .lo = 9, .hi = 9 }) == null);
+}
+
+// spec: placement/fill-cache - a patch base superseded or evicted while a pass is reading it is unlinked rather than freed, and a base over the whole budget is declined outright
+test "a patch base under a live borrow outlives the store's claim on it" {
+    var bases: BaseStore = .{ .backing = testing.allocator };
+    defer bases.deinit();
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+
+    const id: Key = .{ .lo = 81, .hi = 81 };
+    bases.put(id, try fakeSnapshot(scratch.allocator(), 5));
+    const reading = bases.acquire(id) orelse return error.TestExpectedBase;
+    // A newer generation arrives mid-pass: the reader still sees its own field.
+    bases.put(id, try fakeSnapshot(scratch.allocator(), 6));
+    try testing.expectEqualSlices(f32, &[_]f32{5}, reading.snapshot.margin);
+    bases.release(reading);
+    const newer = bases.acquire(id) orelse return error.TestExpectedBase;
+    try testing.expectEqualSlices(f32, &[_]f32{6}, newer.snapshot.margin);
+    bases.release(newer);
+
+    // The budget gives up unreferenced bases; one that alone exceeds the whole
+    // budget is never retained at all, which simply costs the next edit a pour.
+    bases.mutex.lock();
+    bases.limit = 0;
+    bases.trim();
+    bases.mutex.unlock();
+    try testing.expectEqual(@as(usize, 0), bases.count());
+    bases.put(.{ .lo = 82, .hi = 82 }, try fakeSnapshot(scratch.allocator(), 7));
+    try testing.expectEqual(@as(usize, 0), bases.count());
 }

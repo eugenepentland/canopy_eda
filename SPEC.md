@@ -761,6 +761,11 @@ summarises. Aggregate counts cannot tell "the same NUMBER of findings" from
 consecutive DRC refactors each had to add a throwaway dump command, build two
 binaries with it, diff the corpus, and strip the patch again.
 
+A board that fails to solve marks the run UNRESOLVED and the command FAILS
+(`error.UnresolvedBoard`), and `# SWEEP RESULT boards=` counts only boards that
+actually ran — a soak can never read a vacuous "0 discrepancies over 0 boards"
+as green (that exact vacuous pass happened once, from a wrong `--project-dir`).
+
 `--mutate <k>` applies one deterministic copper edit IN MEMORY (move / delete /
 add a track, move a distant track, delete / move a via) and `--prime` runs a
 discarded DRC pass over the unmutated board first, so `--mutate k --prime`
@@ -778,14 +783,15 @@ that diff and checked separately against the priming pass's answer for them,
 because carrying them forward is the decision under test rather than a
 discrepancy.
 
-- the CLI parses the project dir, the mutation selector and the priming flag with positionals as design names
+- the CLI parses the project dir, the mutation selector, the priming flag and the scoped-seam benchmark repetition count with positionals as design names
 - every violation renders one line carrying every field, including the track identity automatic cleanup reads, and the lines sort deterministically
 - each mutation edits copper in memory only, leaving the board it was given untouched
-- completeness-waiver: empty inputs (a dump with no design named is a usage error rather than an empty dump that would trivially match any comparison; a board that does not resolve prints one marked comment line and the run continues)
+- a board that fails to solve marks the run UNRESOLVED and the command fails, so a soak can never read a vacuous pass as green
+- completeness-waiver: empty inputs (a dump with no design named is a usage error rather than an empty dump that would trivially match any comparison; a board that does not resolve prints one marked comment line, and the run fails after every board has had its chance)
 - completeness-waiver: large inputs (each board runs in its own arena, freed before the next, so a corpus dump peaks at one board's DRC)
 - completeness-waiver: unauthorized access (a local read-only CLI over the caller's own project directory; no network, no auth surface, and no file is written)
 - completeness-waiver: concurrent access (single-threaded, and the process-wide fill memo it reads through is itself mutex-guarded and refcounted)
-- completeness-waiver: i/o failure (a design that cannot be evaluated or whose layout cannot be restored prints an UNRESOLVED comment for that board and the remaining boards still dump)
+- completeness-waiver: i/o failure (a design that cannot be evaluated or whose layout cannot be restored prints an UNRESOLVED comment for that board; the remaining boards still dump, then the command fails with error.UnresolvedBoard)
 - completeness-waiver: malformed encoding (the design and its saved layout are parsed by the same seam the PCB page uses, which rejects malformed input long before a violation exists to print)
 - completeness-waiver: integer overflow (no arithmetic on the dump path beyond formatting already-computed violation fields)
 - completeness-waiver: panic-free (every failing stage degrades to a comment line and the next board; a DRC seam that errors contributes an empty list rather than aborting the dump)
@@ -3022,6 +3028,10 @@ question each caller answers honestly through `Zone.component`.
 
 ## placement/drc
 
+- a bottleneck cross-section is judged by the same verdict whether it is found at a trace end, in mid-span, or refused as a flank graze
+- a scoped connectivity pass carries the nets one copper edit could not reach and reports exactly what a cold pass over the same board reports
+- a pour audit given the placement's retained pad shapes reports exactly what one that builds them per pass reports, and a scoped audit whose fills all held builds none at all
+- a surface's measured ring bounds only skip contact tests that could not have found anything, so a boxed surface answers every contact question exactly as an unmeasured one
 - the net-open island chain's bounding-box estimate never exceeds the exact nearest approach, so a skipped pair could not have beaten the frontier
 - an authored ground-via maximum warns on an SMD ground pad until a same-net plane via falls within the budget
 - an optional NC or input-strap land assigned to ground is excluded from the ground-via maximum because its same-package real ground return owns the required plane connection
@@ -3203,6 +3213,14 @@ Public functions: compute, computeMaskShared, computeMasks, initMargin, planeCon
 - a board's fills seed from one shared edge-margin field and each still traces exactly the contours an unshared fill traces
 - carryingLayers resolves declared planes and the implicit ground model
 - gridCount collapses a non-finite extent to zero cells instead of an unchecked narrowing
+- a fill updated from the previous generation's raster is bit-identical to the same fill poured cold, across a seeded script of track and via additions, moves and deletions on every carrying layer
+- a fill whose seed set alone moved is still updated from the previous raster, because a seed lowers no margin, and still matches the cold pour exactly
+- a fill update is declined and the fill poured cold when the lattice or a pour rule moved under it, because the retained raster no longer describes the same fill
+- a memo that offers no patch base pours every fill cold and still answers with the same raster, so the update is an optional seam rather than a required one
+- the sub-window base reseed writes exactly the values the full board-edge and clip seeding writes, cell for cell
+- the changed-obstacle diff is a multiset difference over content digests, so a reordered obstacle list asks for no re-raster and a moved obstacle asks for both of its windows
+- a drawn zone's content key and its stability predicate both ignore a same-net via too far outside the clip to seed it, and both still see one that can
+- the indexed ring containment test answers exactly what the signed-inset predicate answers, inside, outside and on the boundary
 
 The low-level signed-margin grid, obstacle stamps, and component labeller give
 pours a consistent board-edge, pad-shape, track, via, and deterministic
@@ -3233,6 +3251,10 @@ Public functions: acquire, beginSession, key, put
 - retained fills nothing references are given up before a whole board state is, and a fill a live board entry still needs is never freed under it
 - a board rebuilt after a copper edit borrows the fills the edit did not reach, and every borrowed raster is bit-identical to the one a cold pour produces
 - a reporting pass hands its poured board fill to the caller's own whole-board sweeps instead of making each of them pour the board again
+- one patch base is retained per fill identity, copied out of the pass's arena, and replaced rather than accumulated when that fill is built again
+- a patch base superseded or evicted while a pass is reading it is unlinked rather than freed, and a base over the whole budget is declined outright
+- a fill-build session takes part in the patch-base chain only when it asks to, so a read-only surface neither copies a margin field nor updates from one
+- only the editor's scoped recheck asks to retain patch bases; the priming pass an editor page runs on load does not, so the first edit after a page load pours once and the second updates
 
 The reporting DRC seam pours every declared plane, every pour and every drawn
 zone of a board before it can judge copper topology or connectivity, and that
@@ -3250,6 +3272,22 @@ across a same-layer edit, and every drawn zone the edit did not reach — and
 pours only the rest. Fills are refcounted independently of the board entries
 that reference them, so consecutive board states share one copy of everything
 between them rather than each holding a whole board's rasters.
+
+A fill the edit DID reach is updated rather than re-poured, for the one caller
+that will be asked the same question again with one track moved: the editor's
+reconcile. One margin field per fill IDENTITY is retained beside the fills,
+together with the obstacle set that produced it; the next generation of that fill diffs the two obstacle sets, copies
+the field, throws away only the windows the changed obstacles can write in, and
+rasters those again. The update is bit-identical to a cold pour by construction —
+the field is a pure per-cell `min`, so a cell outside every changed window has
+already seen exactly the obstacles it would see again — and any case that cannot
+be shown to be (a moved lattice, a moved rule, a diff too large to be worth it,
+no previous generation) falls back to the cold pour. Retaining a base is opt-in
+per pass, because it deep-copies a margin field per fill: every read-only
+surface — page render, derived warm, background sweep, describe, fab gate —
+skips it and behaves exactly as it did before the update existed, and the first
+edit after a cold page pours once to establish the base the next one updates
+from.
 
 - completeness-waiver: large inputs (a single board's fill is refused outright when it exceeds the store's whole byte ceiling, and the retained set is bounded by both a board count and that ceiling; the fill itself is already cell-capped by placement/pour)
 - completeness-waiver: unauthorized access (an in-process memo over boards a caller already holds; entries are reachable only through a fingerprint of the exact board's own bytes, so nothing can read copper it did not already have, and there is no file, request, or auth surface)
@@ -6513,6 +6551,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The clearance-halo toggle persists with the rest of the PCB view state and both of its surfaces read that one value
 - A layout save refuses a copper pour on a layer this board has not got while keeping the spellings a KiCad import carries
 - The opt-in PCB frame benchmark briefly dwells at fit, maximum zoom, seek, and pan turnarounds without mixing those pauses into movement percentiles
+- The opt-in PCB frame benchmark waits for the page's deferred DRC, RF retrofit and pour round-trips before measuring, so the repaint each answer triggers is never recorded as a camera frame
 - The /pcb-layout left dock tabs Properties, Autorouter, DRC, and Sub-circuits, showing one pane at a time
 - The /pcb-layout DRC pane docks the violations list under a previous/next step-through
 - Net-open DRC reporting groups every island gap by full net name and counts each open net once while retaining expandable per-gap details
@@ -6639,6 +6678,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The WASM DRC bridge applies the same net-gated keepout escape as the server, excusing only a net with its own pad in the zone
 - The WASM DRC bridge carries each net's class identity, so the client waives the keepout halo between one class's own members exactly as the server does
 - The WASM DRC bridge carries typed generic perimeter keepouts and their allowed nets
+- The WASM DRC bridge marshals no rail current, so the client engine never rasters the board's planes for a power-branch width verdict
 - The /pcb-layout viewer runs the WASM DRC in a worker with a server fallback
 - The WASM DRC session load returns the board's net table for probe indexing
 - The WASM DRC session segment probe matches a full drc.check for new routing-class violations

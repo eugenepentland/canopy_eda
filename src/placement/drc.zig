@@ -418,16 +418,16 @@ pub fn check(
 /// Geometry DRC looks like a pure clearance sweep and mostly is, but the
 /// power-width rule needs to know whether a declared rail's local branch is fed
 /// by a plane, and `routedTrackRequiredWidths` answers that by rastering every
-/// declared plane and pour of the board from scratch — 7.5 s of barracuda-base's
-/// 8.2 s geometry pass, paid by every caller that never passes prepared copper.
-/// A server-side caller measuring a SAVED board passes a memo here and pays it
-/// once; the findings are identical either way, because a memoised fill is a
-/// memoised fill.
-///
-/// Deliberately a separate entry point rather than a default: `drc.zig` is
-/// compiled into the client's wasm DRC engine, which has no store to consult,
-/// and the router's candidate loop mutates the copper the surfaces depend on
-/// between every call and would only ever miss.
+/// declared plane and pour of the board — 7.5 s of barracuda-base's 8.2 s
+/// geometry pass. Only a placement CARRYING rail demands
+/// (`rules.physical.rails`) reaches it; `needs_surfaces` is false without them,
+/// which is why `wasm_drc.zig` — marshalling none — never pours at all.
+/// A server-side caller measuring a SAVED board passes a memo here and pays the
+/// raster once; the findings are identical either way, because a memoised fill
+/// is a memoised fill. Deliberately a separate entry point rather than a
+/// default: the wasm engine has no store to consult, and the router's candidate
+/// loop mutates the copper the surfaces depend on between every call and would
+/// only ever miss.
 pub fn checkMemoised(
     arena: std.mem.Allocator,
     placement: optimizer.Placement,
