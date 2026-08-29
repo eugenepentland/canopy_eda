@@ -31,6 +31,23 @@ function load(names, globals = {}) {
   return context;
 }
 
+// A capsule's round cap hides a width step along a straight and nothing at all
+// across an angle, so every emitted pair that meets at a bend has to meet at ONE
+// width. Every suite that emits shaped copper runs this.
+function assertBendContinuity(shaped, label) {
+  for (let i = 1; i < shaped.length; i++) {
+    const p = shaped[i - 1];
+    const q = shaped[i];
+    if (Math.hypot(q.x1 - p.x2, q.y1 - p.y2) > 1e-9) continue;
+    const ax = p.x2 - p.x1, ay = p.y2 - p.y1, bx = q.x2 - q.x1, by = q.y2 - q.y1;
+    const al = Math.hypot(ax, ay), bl = Math.hypot(bx, by);
+    if (!(al > 1e-12) || !(bl > 1e-12)) continue;
+    if (Math.abs((ax * by - ay * bx) / (al * bl)) <= 1e-9 && ax * bx + ay * by > 0) continue;
+    assert(Math.abs(p.w - q.w) < 1e-9,
+      `${label}: slices meeting at (${q.x1}, ${q.y1}) step from ${p.w} to ${q.w} across the bend`);
+  }
+}
+
 {
   const document = { getElementById() { return { value: "net" }; } };
   const PCB = { rules: { track_width: 0.127, min_width: 0.1 }, zones: [] };
@@ -76,6 +93,8 @@ function load(names, globals = {}) {
   const target = 0.4;
   const g = load([
     "drawProfileWidth",
+    "drawTrackEndDirection",
+    "drawAdaptiveBendJoint",
     "drawAdaptiveStations",
     "drawAdaptiveClearWidth",
     "drawAdaptiveExactClearWidth",
@@ -135,6 +154,161 @@ function load(names, globals = {}) {
   });
   assert(Math.abs(shaped[0].x1) < 1e-12 && Math.abs(shaped.at(-1).x2 - 3) < 1e-12,
     "the collapsed run must still span the whole centreline");
+  assertBendContinuity(shaped, "straight pad-launched power run");
+}
+
+{
+  // The reported ledge: a width transition that crosses a BEND station puts the
+  // step exactly on the elbow, where no round cap can hide it. Both slices at
+  // the corner must carry the corner's own width and the taper must move onto
+  // the straight.
+  const floor = 0.127;
+  const target = 0.4;
+  const g = load([
+    "drawProfileWidth", "drawTrackEndDirection", "drawAdaptiveBendJoint", "drawAdaptiveStations",
+    "drawAdaptiveClearWidth", "drawAdaptiveExactClearWidth", "drawAdaptiveRefinedClearWidth",
+    "drawSamePointXY", "drawShapedPush", "drawAdaptivePowerRun",
+  ], {
+    DRAW_ADAPTIVE_STEP: 0.05,
+    trackLength(t) { return Math.hypot(t.x2 - t.x1, t.y2 - t.y1); },
+    drawTrackPoint(t, f) { return { x: t.x1 + (t.x2 - t.x1) * f, y: t.y1 + (t.y2 - t.y1) * f }; },
+    trackIdEnsure(t) { return t.id; },
+    // A neighbour crowds only the incoming leg, from x = 1 up to the corner.
+    segViolation(x1, y1, x2, y2, _layer, _net, hw) {
+      const necked = Math.abs(y1) < 1e-9 && Math.abs(y2) < 1e-9 && (x1 + x2) / 2 > 1;
+      return 2 * hw > (necked ? 0.2 : target) + 1e-9 ? { k: "clearance" } : null;
+    },
+  });
+  const legs = [
+    { id: "in", net: "V_12V", l: 0, x1: 0, y1: 0, x2: 2, y2: 0 },
+    { id: "out", net: "V_12V", l: 0, x1: 2, y1: 0, x2: 2, y2: 2 },
+  ];
+  const plan = g.drawAdaptivePowerRun(legs, null, null, floor, target);
+  const shaped = plan.tracks;
+  assertBendContinuity(shaped, "necked two-leg bend");
+  const into = shaped.filter((t) => Math.hypot(t.x2 - 2, t.y2) < 1e-9);
+  const outOf = shaped.filter((t) => Math.hypot(t.x1 - 2, t.y1) < 1e-9);
+  assert.equal(into.length, 1, "exactly one slice may arrive at the corner");
+  assert.equal(outOf.length, 1, "exactly one slice may leave the corner");
+  assert(Math.abs(into[0].w - outOf[0].w) < 1e-12,
+    `the two slices at the bend must share one width (${into[0].w} vs ${outOf[0].w})`);
+  assert(into[0].w > 0.19 && into[0].w <= 0.2 + 1e-9,
+    `the corner must carry the narrower leg's clearance-fitted width, not the wide leg's (${into[0].w})`);
+  const flank = shaped.filter((t) => Math.abs(t.x1 - 2) < 1e-9 && t.y1 > 1e-9);
+  assert(flank.length >= 1 && flank.every((t) => t.w > 0.2 + 1e-9),
+    "the recovered width must live on the straight beyond the corner");
+  assert(shaped.some((t) => Math.abs(t.w - target) < 1e-9), "the open leg still reaches the electrical target");
+  const samples = plan.paths[0].samples;
+  const corner = samples.find((s) => Math.hypot(s[0] - 2, s[1]) < 1e-9);
+  assert(corner && corner[2] > 0.19 && corner[2] <= 0.2 + 1e-9,
+    "the sampled corner station carries the joint width");
+  assert(Math.abs(corner[2] - into[0].w) < 1e-12, "the emitted corner slices carry exactly the corner station's width");
+  samples.forEach((s, i) => {
+    if (!i) return;
+    const prior = samples[i - 1];
+    assert(Math.abs(s[2] - prior[2]) <= 2 * Math.hypot(s[0] - prior[0], s[1] - prior[1]) + 1e-8,
+      "a bent run keeps 45-degree-or-shallower flanks through the corner");
+  });
+}
+
+{
+  // Run-boundary caps. A terminal that butts onto existing same-net copper is
+  // not free: it leaves at THAT neighbour's width, narrower or wider, and the
+  // 45-degree flank carries it to the target inboard.
+  const floor = 0.127;
+  const target = 0.4;
+  const g = load([
+    "drawProfileWidth", "drawTrackEndDirection", "drawAdaptiveBendJoint", "drawAdaptiveStations",
+    "drawAdaptiveClearWidth", "drawAdaptiveExactClearWidth", "drawAdaptiveRefinedClearWidth",
+    "drawSamePointXY", "drawShapedPush", "drawAdaptivePowerRun", "drawJointProfile",
+  ], {
+    DRAW_ADAPTIVE_STEP: 0.05,
+    trackLength(t) { return Math.hypot(t.x2 - t.x1, t.y2 - t.y1); },
+    drawTrackPoint(t, f) { return { x: t.x1 + (t.x2 - t.x1) * f, y: t.y1 + (t.y2 - t.y1) * f }; },
+    trackIdEnsure(t) { return t.id; },
+    segViolation(_x1, _y1, _x2, _y2, _layer, _net, hw) { return 2 * hw > 0.9 ? { k: "clearance" } : null; },
+  });
+
+  assert.equal(g.drawJointProfile(0, target), null, "no neighbour is no joint");
+  assert.equal(g.drawJointProfile(target, target), null, "a neighbour already at target needs no profile");
+  const narrow = g.drawJointProfile(0.127, target);
+  assert.equal(narrow.land, 0, "the joint width is held AT the joint, not past it");
+  assert(Math.abs(narrow.taper - (target - 0.127) / 2) < 1e-12,
+    "a narrower neighbour flares up over half the width difference — a 45-degree flank");
+
+  const track = { id: "spliced", net: "V_12V", l: 0, x1: 0, y1: 0, x2: 3, y2: 0 };
+  const capped = g.drawAdaptivePowerRun([track], narrow, null, floor, target);
+  assertBendContinuity(capped.tracks, "narrow-neighbour terminal");
+  assert(Math.abs(capped.tracks[0].w - 0.127) < 1e-9,
+    `the terminal slice must meet the 0.127 mm neighbour (${capped.tracks[0].w})`);
+  assert(Math.abs(capped.paths[0].samples[0][2] - 0.127) < 1e-9, "the sampled terminal station carries the joint width");
+  assert(capped.tracks[0].x2 <= 0.05 + 1e-9, "only the slice touching the joint is capped");
+  assert(capped.tracks.some((t) => Math.abs(t.w - target) < 1e-9), "the run still reaches its target inboard");
+  capped.paths[0].samples.forEach((s, i) => {
+    if (!i) return;
+    const prior = capped.paths[0].samples[i - 1];
+    assert(Math.abs(s[2] - prior[2]) <= 2 * (s[0] - prior[0]) + 1e-8, "the inboard flank stays at 45 degrees");
+    assert(s[2] >= floor - 1e-9, "a joint cap never drops the run below the routing floor");
+  });
+
+  const trunk = g.drawJointProfile(0.8, target);
+  assert(Math.abs(trunk.taper - (0.8 - target) / 2) < 1e-12,
+    "a wider neighbour comes DOWN over half the difference at the same 45 degrees");
+  const flared = g.drawAdaptivePowerRun([track], trunk, null, floor, target);
+  assertBendContinuity(flared.tracks, "wide-trunk terminal");
+  assert(Math.abs(flared.tracks[0].w - 0.8) < 1e-9,
+    `joining an already-wide trunk must flare UP to meet it (${flared.tracks[0].w})`);
+  assert(flared.maxWidth >= 0.8 - 1e-9, "the flare is reported as the run's widest copper");
+  assert(flared.tracks.some((t) => Math.abs(t.w - target) < 1e-9), "the flare comes back to target on the straight");
+
+  // Clearance still outranks cosmetics: a flare no cell can fit is clamped.
+  const tight = load([
+    "drawProfileWidth", "drawTrackEndDirection", "drawAdaptiveBendJoint", "drawAdaptiveStations",
+    "drawAdaptiveClearWidth", "drawAdaptiveExactClearWidth", "drawAdaptiveRefinedClearWidth",
+    "drawSamePointXY", "drawShapedPush", "drawAdaptivePowerRun",
+  ], {
+    DRAW_ADAPTIVE_STEP: 0.05,
+    trackLength(t) { return Math.hypot(t.x2 - t.x1, t.y2 - t.y1); },
+    drawTrackPoint(t, f) { return { x: t.x1 + (t.x2 - t.x1) * f, y: t.y1 + (t.y2 - t.y1) * f }; },
+    trackIdEnsure(t) { return t.id; },
+    segViolation(_x1, _y1, _x2, _y2, _layer, _net, hw) { return 2 * hw > 0.45 ? { k: "clearance" } : null; },
+  });
+  const clamped = tight.drawAdaptivePowerRun([track], trunk, null, floor, target);
+  assert(clamped.tracks[0].w <= 0.45 + 1e-9,
+    "a joint flare stays inside the clearance-fitted cell cap like every other station");
+}
+
+{
+  // Which terminals are joints at all. A fresh gesture that stops on existing
+  // copper splices only where EXACTLY one same-net, same-layer track ends and no
+  // via barrel covers the point.
+  const trunk = { id: "trunk", net: "V_12V", l: 0, x1: 3, y1: 0, x2: 6, y2: 0, w: 0.8 };
+  const branch = { id: "branch", net: "V_12V", l: 0, x1: 3, y1: 0, x2: 3, y2: 3, w: 0.3 };
+  const foreign = { id: "gnd", net: "GND", l: 0, x1: 3, y1: 0, x2: 3, y2: -3, w: 0.5 };
+  const upper = { id: "lay", net: "V_12V", l: 1, x1: 3, y1: 0, x2: 3, y2: -3, w: 0.5 };
+  const mine = { id: "mine", net: "V_12V", l: 0, x1: 0, y1: 0, x2: 3, y2: 0, w: 0.127 };
+  const PCB = { tracks: [trunk, branch, foreign, upper, mine], vias: [] };
+  const g = load(["drawJointNeighbourWidth"], { PCB, DRAW_JOINT_SNAP: 2e-3 });
+
+  assert.equal(g.drawJointNeighbourWidth("V_12V", 0, 3, 0, [mine]), 0,
+    "a T-junction is an ordinary trunk/branch step and must stay free");
+  PCB.tracks = [trunk, foreign, upper, mine];
+  assert(Math.abs(g.drawJointNeighbourWidth("V_12V", 0, 3, 0, [mine]) - 0.8) < 1e-12,
+    "one same-net same-layer neighbour is a two-way splice and supplies its width");
+  assert(Math.abs(g.drawJointNeighbourWidth("V_12V", 0, 3.0015, 0, [mine]) - 0.8) < 1e-12,
+    "a gesture that lands within the snap tolerance still splices");
+  assert.equal(g.drawJointNeighbourWidth("V_12V", 0, 3.05, 0, [mine]), 0, "copper further off is not a joint");
+  assert(Math.abs(g.drawJointNeighbourWidth("V_12V", 1, 3, 0, []) - 0.5) < 1e-12,
+    "each layer counts only its own copper — the layer-0 trunk is invisible from layer 1");
+  assert.equal(g.drawJointNeighbourWidth("V_5VA", 0, 3, 0, [mine]), 0, "another net never pins this terminal");
+  assert.equal(g.drawJointNeighbourWidth("V_12V", 0, 3, 0, []), 0,
+    "the gesture's own laid copper must be excluded before the neighbours are counted");
+  PCB.vias = [{ net: "V_12V", x: 3, y: 0, d: 0.6 }];
+  assert.equal(g.drawJointNeighbourWidth("V_12V", 0, 3, 0, [mine]), 0,
+    "a same-net via barrel covers the elbow — that corner stays free");
+  PCB.vias = [{ net: "GND", x: 3, y: 0, d: 0.6 }];
+  assert(Math.abs(g.drawJointNeighbourWidth("V_12V", 0, 3, 0, [mine]) - 0.8) < 1e-12,
+    "a foreign via covers nothing on this net");
 }
 
 {
@@ -739,14 +913,22 @@ function loadRfLifecycle(PCB, impedance) {
   const dtrace = { pair: null, laid: laid.slice(), w: 0.127, powerTarget: 0.4, net: "V_12V", l: 0,
     lx: 2, ly: 0, startPad: null, undo: { tracks: [other], vias: [], rf_paths: [] } };
   const seen = [];
+  const planned = [];
   let minted = 0;
-  const g = load(["drawSamePointXY", "drawCommitShaped", "drawApplyAutomaticTapers"], {
+  const g = load([
+    "drawSamePointXY", "drawCommitShaped", "drawJointProfile", "drawJointNeighbourWidth",
+    "drawApplyAutomaticTapers",
+  ], {
     PCB,
     dtrace,
+    DRAW_JOINT_SNAP: 2e-3,
     drcGate: { ready: true, failed: false },
     drawAdaptiveRefinedClearWidth() {},
     drawEndpointLand() { return null; },
-    drawAdaptivePowerPlan() { return { tracks: shaped, paths: [overlay], maxWidth: 0.4, power: true }; },
+    drawAdaptivePowerPlan(_tracks, startPad, endPad) {
+      planned.push({ startPad, endPad });
+      return { tracks: shaped, paths: [overlay], maxWidth: 0.4, power: true };
+    },
     drawAutomaticTaperPlan() { throw new Error("a power run must not fall back to the impedance planner"); },
     drcGateDiffBlocks(_bt, _bv, after, _av, _brf, arf) { seen.push({ after, arf }); return false; },
     trackIdEnsure(t) { return t.id; },
@@ -768,13 +950,29 @@ function loadRfLifecycle(PCB, impedance) {
   assert.deepEqual(Array.from(seen[0].after, (t) => t.w), [0.2, 0.4, 0.32], "the gate must judge the shaped copper");
   assert.equal(seen[0].arf.length, 0, "the gate must not be shown a power overlay it will never commit");
   assert.deepEqual(Array.from(dtrace.laid, (t) => t.w), [0.4, 0.32], "the gesture's laid set follows the copper it committed");
+  assert.equal(planned[0].startPad, null, "open copper on its own hands the planner no terminal profile");
+  assert.equal(planned[0].endPad, null);
+
+  // The same gesture, finished ON an existing wide rail. No land, one same-net
+  // same-layer neighbour: the run has to leave at that trunk's width.
+  const rail = { id: "rail", x1: 2, y1: 0, x2: 5, y2: 0, l: 0, w: 0.8, net: "V_12V" };
+  PCB.tracks = [other, rail, ...laid];
+  PCB.rf_paths = [];
+  dtrace.laid = laid.slice();
+  planned.length = 0;
+  g.drawApplyAutomaticTapers();
+  assert.equal(planned[0].startPad, null, "the free start is still free");
+  assert(planned[0].endPad?.joint, "the spliced finish must reach the planner as a joint profile");
+  assert(Math.abs(planned[0].endPad.width - 0.8) < 1e-12, "that profile carries the trunk's real width");
+  assert.equal(planned[0].endPad.land, 0, "the trunk width is met AT the joint");
+  assert(Math.abs(planned[0].endPad.taper - 0.2) < 1e-12, "and comes down to target over a 45-degree flank");
 }
 
 // Scoped re-widen. An edited adaptive rail heals to the clearance it has NOW,
 // so the first thing that has to be right is which copper the recut covers: one
 // unambiguous same-net, same-layer chain, ordered head-to-tail however its
 // segments were authored.
-function loadRewidenWalk(PCB, lands = []) {
+function loadRewidenWalk(PCB, lands = [], owned = []) {
   return load([
     "drawSamePointXY", "drawReverseTrack", "drawTrackFromPoint",
     "rewidenTarget", "rewidenTrack", "rewidenGrow", "rewidenRun", "rewidenRuns",
@@ -783,7 +981,7 @@ function loadRewidenWalk(PCB, lands = []) {
     RO: false,
     baseTrackW() { return 0.127; },
     netClassInfo(net) { return net.slice(0, 2) === "V_" ? { adaptive_power_width: 0.4 } : null; },
-    rfOwnsTrack() { return false; },
+    rfOwnsTrack(t) { return owned.indexOf(t.id) >= 0; },
     trackIdEnsure(t) { return t.id; },
     trackLength(t) { return Math.hypot(t.x2 - t.x1, t.y2 - t.y1); },
     drawEndpointLand(net, layer, x, y) {
@@ -812,6 +1010,9 @@ function loadRewidenWalk(PCB, lands = []) {
     "reverse-authored copper is re-oriented so the planner reads one ordered centreline");
   assert.equal(runs[0].startPad, land, "the land a run starts on supplies its launch profile");
   assert.equal(runs[0].endPad, null, "a branch ends a run without a land");
+  assert.equal(runs[0].startJoint, 0, "a land end is governed by its launch profile, never by a joint cap");
+  assert.equal(runs[0].endJoint, 0,
+    "a T-junction is a normal trunk/branch width step — that terminal stays free");
   assert.equal(runs[0].target, 0.4);
   assert.equal(runs[0].floor, 0.127, "the run recuts against the pen's routing floor");
 
@@ -831,6 +1032,7 @@ function loadRewidenWalk(PCB, lands = []) {
   const runs = g.rewidenRuns([up]);
   assert.deepEqual(Array.from(runs[0].tracks, (t) => t.id), ["u"], "a via ends the run it feeds");
   assert.equal(runs[0].endPad, viaLand, "the via's annulus becomes that end's launch profile");
+  assert.equal(runs[0].endJoint, 0, "a via barrel covers that corner — no joint cap is synthesized there");
   const both = g.rewidenRuns(null);
   assert.equal(both.length, 2, "a rail crossing layers through a via recuts as one run per face");
   assert(both.every((r) => new Set(r.run.map((t) => t.l)).size === 1), "no run may span two layers");
@@ -841,9 +1043,22 @@ function loadRewidenWalk(PCB, lands = []) {
   const arc = { id: "arc", net: "V_12V", l: 0, x1: 1, y1: 0, xm: 1.5, ym: 0.2, x2: 2, y2: 0, w: 0.127 };
   const PCB = { rules: { track_width: 0.127, min_width: 0.1 }, tracks: [straight, arc] };
   const g = loadRewidenWalk(PCB, []);
-  assert.deepEqual(Array.from(g.rewidenRuns([straight])[0].tracks, (t) => t.id), ["s"],
+  const run = g.rewidenRuns([straight])[0];
+  assert.deepEqual(Array.from(run.tracks, (t) => t.id), ["s"],
     "an authored fillet ends a run — the station sampler would leave chords in its place");
   assert.equal(g.rewidenRuns([arc]).length, 0, "an arc never seeds a recut");
+  // The recut cannot touch that fillet, so its width is a hard boundary
+  // condition for this run rather than a free edge.
+  assert(Math.abs(run.endJoint - 0.127) < 1e-12,
+    "a run butted against copper the recut may not reshape must meet that copper's width");
+  assert.equal(run.startJoint, 0, "the open end has no neighbour and stays free");
+
+  const owner = { id: "owned", net: "V_12V", l: 0, x1: 1, y1: 0, x2: 2, y2: 0, w: 0.2 };
+  PCB.tracks = [straight, owner];
+  const excluded = loadRewidenWalk(PCB, [], ["owned"]).rewidenRuns([straight])[0];
+  assert.deepEqual(Array.from(excluded.tracks, (t) => t.id), ["s"], "an overlay-owned handle also ends the run");
+  assert(Math.abs(excluded.endJoint - 0.2) < 1e-12,
+    "every stop that is neither a land nor a branch reports its neighbour's width");
 }
 
 {
@@ -859,9 +1074,10 @@ function loadRewidenWalk(PCB, lands = []) {
   const gated = [];
   const PCB = { rules: { track_width: floor, min_width: 0.1 }, tracks: [], vias: [], rf_paths: [] };
   const g = load([
-    "drawProfileWidth", "drawAdaptiveStations", "drawAdaptiveClearWidth",
+    "drawProfileWidth", "drawTrackEndDirection", "drawAdaptiveBendJoint", "drawAdaptiveStations",
+    "drawAdaptiveClearWidth",
     "drawAdaptiveExactClearWidth", "drawAdaptiveRefinedClearWidth",
-    "drawSamePointXY", "drawShapedPush", "drawAdaptivePowerRun", "drawAdaptivePowerPlan",
+    "drawSamePointXY", "drawShapedPush", "drawAdaptivePowerRun", "drawJointProfile", "drawAdaptivePowerPlan",
     "drawReverseTrack", "drawTrackFromPoint", "drawCommitShaped",
     "rewidenTarget", "rewidenTrack", "rewidenGrow", "rewidenRun", "rewidenRuns", "rewidenSame",
     "rewidenDeclined", "rewidenAtFloor", "rewidenPlan", "rewidenStatus", "rewidenApply", "rewidenHeal",
@@ -967,6 +1183,33 @@ function loadRewidenWalk(PCB, lands = []) {
   assert.equal(two.w, floor);
   assert(g.rewidenApply(null) >= 1, "the whole-board action covers every adaptive run");
   assert(Math.abs(PCB.tracks[1].w - target) < 1e-9);
+
+  // A recut whose walk stops against copper it may not reshape has to LAND on
+  // that copper's width, then flare back to target on its own straight.
+  const butt = { id: "butt", net: "V_12V", l: 0, x1: 0, y1: 0, x2: 3, y2: 0, w: floor, source: "human" };
+  const fillet = { id: "fillet", net: "V_12V", l: 0, x1: 3, y1: 0, xm: 3.5, ym: 0.2, x2: 4, y2: 0, w: 0.127 };
+  PCB.tracks = [butt, fillet];
+  assert(g.rewidenHeal([butt]) >= 1, "the butted run still recuts");
+  const cut = PCB.tracks.filter((t) => t.xm == null);
+  assertBendContinuity(cut, "recut butted against a fillet");
+  assert.equal(PCB.tracks.filter((t) => t.xm != null).length, 1, "the fillet itself is never reshaped");
+  const meets = cut.filter((t) => Math.abs(t.x2 - 3) < 1e-9);
+  assert.equal(meets.length, 1);
+  assert(Math.abs(meets[0].w - 0.127) < 1e-9,
+    `the terminal slice must meet the fillet's 0.127 mm copper (${meets[0].w})`);
+  assert(meets[0].x1 >= 3 - 0.05 - 1e-9, "only the slice touching the joint is capped — the flank is inboard");
+  assert(cut.some((t) => Math.abs(t.w - target) < 1e-9), "the rest of the run still carries the electrical target");
+  assert(cut.every((t) => t.w >= floor - 1e-9), "a joint cap never goes below the routing floor");
+
+  // Three ways in is a trunk/branch step, not a splice: that terminal is free.
+  const trunk = { id: "trunk", net: "V_12V", l: 0, x1: 0, y1: 0, x2: 3, y2: 0, w: floor, source: "human" };
+  const legA = { id: "legA", net: "V_12V", l: 0, x1: 3, y1: 0, x2: 4, y2: 0, w: 0.127, source: "human" };
+  const legB = { id: "legB", net: "V_12V", l: 0, x1: 3, y1: 0, x2: 3, y2: 1, w: 0.127, source: "human" };
+  PCB.tracks = [trunk, legA, legB];
+  assert(g.rewidenHeal([trunk]) >= 1);
+  const teed = PCB.tracks.filter((t) => t.id !== "legA" && t.id !== "legB" && t.x1 < 3);
+  assert(teed.every((t) => Math.abs(t.w - target) < 1e-9),
+    "a T-junction terminal keeps today's free full-width answer");
 }
 
 console.log("RF and power taper geometry probes PASS");

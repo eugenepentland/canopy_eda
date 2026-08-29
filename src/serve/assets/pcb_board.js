@@ -7567,17 +7567,29 @@ function drawProfileWidth(s,total,start,end,nominal){
 // physical path per contiguous copper layer. Forward/backward limiting keeps
 // every shoulder at 45 degrees or shallower.
 var DRAW_ADAPTIVE_STEP=.05;
-function drawAdaptiveStations(tracks,start,end){var lens=tracks.map(trackLength),total=lens.reduce(function(a,b){return a+b;},0),targets=[0,total],base=0;
+// A capsule's round cap hides a width step along a straight, never across an
+// angle: a step that lands exactly ON a bend is a ledge at the elbow. Two
+// consecutive legs bend when the direction leaving the first is not the
+// direction entering the second — a 180-degree retrace counts, a collinear
+// splice does not.
+function drawAdaptiveBendJoint(prev,next){var a=drawTrackEndDirection(prev,false),b=drawTrackEndDirection(next,true),
+ al=Math.hypot(a.x,a.y),bl=Math.hypot(b.x,b.y);
+ if(!(al>1e-12)||!(bl>1e-12))return false;
+ var ax=-a.x/al,ay=-a.y/al,bx=b.x/bl,by=b.y/bl;
+ return Math.abs(ax*by-ay*bx)>1e-9||ax*bx+ay*by<=0;}
+function drawAdaptiveStations(tracks,start,end){var lens=tracks.map(trackLength),total=lens.reduce(function(a,b){return a+b;},0),targets=[0,total],base=0,bends=[];
  function cuts(p,rev){if(!p)return;targets.push(rev?total-p.land:p.land,rev?total-p.land-p.taper:p.land+p.taper);}
  cuts(start,false);cuts(end,true);
  tracks.forEach(function(t,i){var len=lens[i],n=Math.max(1,Math.ceil(len/DRAW_ADAPTIVE_STEP));
+  if(i&&drawAdaptiveBendJoint(tracks[i-1],t))bends.push(base);
   for(var j=0;j<=n;j++)targets.push(base+len*j/n);base+=len;});
  targets=targets.filter(function(s){return s>=-1e-9&&s<=total+1e-9;}).map(function(s){return Math.max(0,Math.min(total,s));});
  targets.sort(function(a,b){return a-b;});var unique=[];
  targets.forEach(function(s){if(!unique.length||Math.abs(s-unique[unique.length-1])>1e-8)unique.push(s);});
  var stations=[],ti=0,begin=0;unique.forEach(function(s){while(ti+1<tracks.length&&s>begin+lens[ti]-1e-8){begin+=lens[ti];ti++;}
   var len=lens[ti],f=len>1e-12?(s-begin)/len:0,p=drawTrackPoint(tracks[ti],Math.max(0,Math.min(1,f)));
-  stations.push({s:s,x:p.x,y:p.y});});return {stations:stations,total:total};}
+  stations.push({s:s,x:p.x,y:p.y,bend:bends.some(function(q){return Math.abs(q-s)<=1e-8;})});});
+ return {stations:stations,total:total};}
 function drawAdaptiveClearWidth(a,b,layer,net,floor,cap,skip){cap=Math.max(floor,cap);
  if(cap<=floor+1e-9||!segViolation(a.x,a.y,b.x,b.y,layer,net,cap/2,skip))return cap;
  if(segViolation(a.x,a.y,b.x,b.y,layer,net,floor/2,skip))return floor;
@@ -7630,25 +7642,63 @@ function drawAdaptivePowerRun(tracks,start,end,floor,target,clearWidth){var samp
  clearWidth=clearWidth||drawAdaptiveClearWidth;
  if(clearWidth===drawAdaptiveExactClearWidth)clearWidth=drawAdaptiveRunClearer(tracks,target,false);
  else if(clearWidth===drawAdaptiveRefinedClearWidth)clearWidth=drawAdaptiveRunClearer(tracks,target,true);
+ // A terminal spliced onto existing copper is pinned exactly like a bend: the
+ // joint itself carries the neighbour's width and the flank lives inboard on
+ // this run's own straight. A pad land is NOT pinned — its launch profile
+ // already governs that end.
+ if(start&&start.joint)ss[0].bend=true;
+ if(end&&end.joint)ss[ss.length-1].bend=true;
  for(i=1;i<ss.length;i++){var a=ss[i-1],b=ss[i],profileCap=Math.max(drawProfileWidth(a.s,total,start,end,target),drawProfileWidth(b.s,total,start,end,target));
   cells.push(clearWidth(a,b,layer,net,floor,profileCap,tracks));}
  for(i=0;i<ss.length;i++){var cellCap=i===0?cells[0]:(i===ss.length-1?cells[cells.length-1]:Math.min(cells[i-1],cells[i])),
   profile=drawProfileWidth(ss[i].s,total,start,end,target);ss[i].w=Math.max(floor,Math.min(profile,cellCap));}
- // |Δ full width| <= 2·centreline distance gives 45-degree copper flanks.
- for(i=1;i<ss.length;i++)ss[i].w=Math.min(ss[i].w,ss[i-1].w+2*(ss[i].s-ss[i-1].s));
- for(i=ss.length-2;i>=0;i--)ss[i].w=Math.min(ss[i].w,ss[i+1].w+2*(ss[i+1].s-ss[i].s));
- var shaped=[],maxWidth=floor,widened=false;for(i=1;i<ss.length;i++){var a=ss[i-1],b=ss[i],w=Math.max(a.w,b.w);
+ // |Δ full width| <= 2·centreline distance gives 45-degree copper flanks. Two
+ // pinned stations sharing one interval have no straight to taper on at all, so
+ // they level to the narrower of the pair instead — running that as a zero-
+ // distance limit in BOTH directions leaves them exactly equal.
+ for(i=1;i<ss.length;i++)ss[i].w=Math.min(ss[i].w,ss[i-1].w+(ss[i].bend&&ss[i-1].bend?0:2*(ss[i].s-ss[i-1].s)));
+ for(i=ss.length-2;i>=0;i--)ss[i].w=Math.min(ss[i].w,ss[i+1].w+(ss[i].bend&&ss[i+1].bend?0:2*(ss[i+1].s-ss[i].s)));
+ // An interval touching a pinned station is emitted AT that station's width, so
+ // the two slices meeting at the elbow are equal and the transition moves onto
+ // the straight. The interval on the far side still takes the max, and its round
+ // cap covers the shared station.
+ var shaped=[],maxWidth=floor,widened=false;for(i=1;i<ss.length;i++){var a=ss[i-1],b=ss[i],
+  w=a.bend&&b.bend?Math.min(a.w,b.w):(a.bend?a.w:(b.bend?b.w:Math.max(a.w,b.w)));
   drawShapedPush(shaped,{x1:a.x,y1:a.y,x2:b.x,y2:b.y,l:layer,w:w,net:net,source:"human"});maxWidth=Math.max(maxWidth,a.w,b.w);if(w>floor+1e-7)widened=true;}
  if(!widened)return {tracks:tracks.slice(),paths:[],maxWidth:floor};
  var path={net:net,l:layer,track_ids:tracks.map(trackIdEnsure),samples:ss.map(function(s){return [s.x,s.y,s.w];})};
  return {tracks:shaped,paths:[path],maxWidth:maxWidth};}
+// A run terminal that is neither a land nor a branch still has a rule. Where it
+// splices onto existing same-net copper at a plain two-way joint, both ends must
+// LEAVE at one width, so hand the planner the launch profile it already
+// understands: the neighbour's width held exactly at the joint (land 0), then
+// the standard 45-degree flank to — or, joining an already-wide trunk, down
+// from — the electrical target. Clearance keeps the last word either way: every
+// station is still capped by its own fitted cell.
+function drawJointProfile(width,target){width=+width||0;
+ if(!(width>0)||Math.abs(width-target)<=1e-9)return null;
+ var flank=Math.abs(target-width)/2;
+ return {kind:"joint",joint:true,width:width,land:0,taper:flank,step:Math.max(.005,flank/4)};}
+// A fresh gesture can start or finish ON existing copper instead of a land. That
+// is a plain two-way splice only when EXACTLY one existing same-net, same-layer
+// track ends at the point and no same-net via barrel covers it: a T-junction is
+// a normal trunk/branch step and a via corner is hidden by the barrel, so both
+// stay free.
+var DRAW_JOINT_SNAP=2e-3;
+function drawJointNeighbourWidth(net,layer,x,y,skip){var hits=[],key=net||"",l=+layer||0;
+ (PCB.tracks||[]).forEach(function(t){if(skip&&skip.indexOf(t)>=0)return;
+  if((t.net||"")!==key||(t.l||0)!==l)return;
+  if(Math.hypot(t.x1-x,t.y1-y)<=DRAW_JOINT_SNAP||Math.hypot(t.x2-x,t.y2-y)<=DRAW_JOINT_SNAP)hits.push(t);});
+ if(hits.length!==1)return 0;
+ if((PCB.vias||[]).some(function(v){return (v.net||"")===key&&Math.hypot(v.x-x,v.y-y)<=DRAW_JOINT_SNAP;}))return 0;
+ return +hits[0].w||0;}
 function drawAdaptivePowerPlan(tracks,startPad,endPad,floor,target,clearWidth){var old=(tracks||[]).slice();
  if(!old.length||!(target>floor+1e-9))return {tracks:old,paths:[],maxWidth:floor,power:true};
  var runs=[],at=0;while(at<old.length){var stop=at+1,l=old[at].l||0;while(stop<old.length&&(old[stop].l||0)===l)stop++;
   runs.push(old.slice(at,stop));at=stop;}
  var shaped=[],paths=[],maxWidth=floor;runs.forEach(function(run,ri){var first=run[0],last=run[run.length-1],sr=null,er=null;
-  if(ri===0&&startPad)sr=drawTaperProfile(first.net,startPad,target,drawPathPadLaunch(run,startPad,true)||drawTrackEndDirection(first,true));
-  if(ri===runs.length-1&&endPad)er=drawTaperProfile(last.net,endPad,target,drawPathPadLaunch(run,endPad,false)||drawTrackEndDirection(last,false));
+  if(ri===0&&startPad)sr=startPad.joint?startPad:drawTaperProfile(first.net,startPad,target,drawPathPadLaunch(run,startPad,true)||drawTrackEndDirection(first,true));
+  if(ri===runs.length-1&&endPad)er=endPad.joint?endPad:drawTaperProfile(last.net,endPad,target,drawPathPadLaunch(run,endPad,false)||drawTrackEndDirection(last,false));
   var planned=drawAdaptivePowerRun(run,sr,er,floor,target,clearWidth);Array.prototype.push.apply(shaped,planned.tracks);
   Array.prototype.push.apply(paths,planned.paths);maxWidth=Math.max(maxWidth,planned.maxWidth);});
  return {tracks:shaped,paths:paths,maxWidth:maxWidth,power:true};}
@@ -7794,7 +7844,12 @@ function drawCommitShaped(old,shaped){var used={};
 function drawApplyAutomaticTapers(){if(!dtrace||dtrace.pair||!dtrace.laid||!dtrace.laid.length)return {ok:true,changed:false,paths:[]};
  var old=dtrace.laid.slice(),nominal=dtrace.w,powerTarget=+dtrace.powerTarget||0,power=powerTarget>nominal+1e-9;
  var ep=drawEndpointLand(dtrace.net,dtrace.l,dtrace.lx,dtrace.ly),board=PCB.tracks||[],base=dtrace.undo||{},
-  scales=[1,.75,.5,.25,.125,.0625],physical=null,initial=power?drawAdaptivePowerPlan(old,dtrace.startPad,ep,nominal,powerTarget,drawAdaptiveRefinedClearWidth):drawAutomaticTaperPlan(old,dtrace.startPad,ep,nominal,1);
+  first=old[0],sp=dtrace.startPad,tp=ep;
+ // Neither end had to be a land: a gesture that starts or finishes on existing
+ // adaptive copper meets that neighbour's width at the joint instead.
+ if(power&&!sp)sp=drawJointProfile(drawJointNeighbourWidth(first.net,first.l||0,first.x1,first.y1,old),powerTarget);
+ if(power&&!tp)tp=drawJointProfile(drawJointNeighbourWidth(dtrace.net,dtrace.l,dtrace.lx,dtrace.ly,old),powerTarget);
+ var scales=[1,.75,.5,.25,.125,.0625],physical=null,initial=power?drawAdaptivePowerPlan(old,sp,tp,nominal,powerTarget,drawAdaptiveRefinedClearWidth):drawAutomaticTaperPlan(old,sp,tp,nominal,1);
  if(!initial.paths.length)return {ok:true,changed:false,paths:[],omitted:power,power:power,maxWidth:nominal};
  // Never materialise automatic copper that the exact gate did not inspect. A
  // still-loading/failed WASM engine leaves the already preview-cleared uniform
@@ -7805,13 +7860,13 @@ function drawApplyAutomaticTapers(){if(!dtrace||dtrace.pair||!dtrace.laid||!dtra
  // path list rides through unchanged.
  var rest=board.filter(function(t){return old.indexOf(t)<0;});
  for(var si=0;si<(power?1:scales.length);si++){
-  var trial=si===0?initial:drawAutomaticTaperPlan(old,dtrace.startPad,ep,nominal,scales[si]);
+  var trial=si===0?initial:drawAutomaticTaperPlan(old,sp,tp,nominal,scales[si]);
   var trialAfter=rest.concat(power?trial.tracks:old),trialPaths=power?(PCB.rf_paths||[]):(PCB.rf_paths||[]).concat(trial.paths);
   if(!drcGateDiffBlocks(base.tracks||[],base.vias||[],trialAfter,PCB.vias||[],base.rf_paths||[],trialPaths)){physical=trial;break;}
   if(drcGate.failed)break;
   // A fast full-path miss must not throw away every clean wide interval. Refit
   // each interval against the exact gate, then validate their combined path.
-  if(power){var exact=drawAdaptivePowerPlan(old,dtrace.startPad,ep,nominal,powerTarget,drawAdaptiveRefinedClearWidth);
+  if(power){var exact=drawAdaptivePowerPlan(old,sp,tp,nominal,powerTarget,drawAdaptiveRefinedClearWidth);
    if(exact.paths.length){
     if(!drcGateDiffBlocks(base.tracks||[],base.vias||[],rest.concat(exact.tracks),PCB.vias||[],base.rf_paths||[],trialPaths)){physical=exact;break;}}
    break;}
@@ -9619,26 +9674,32 @@ function rewidenTrack(t,net,layer){return !!t&&(t.net||"")===net&&(t.l||0)===lay
 // layer only through a via, which has already stopped it. The branch count is
 // pure topology; a lone continuation another run already claimed stops this one
 // so the same copper is never planned twice.
-function rewidenGrow(chain,used,claimed){var pad=null;
+// A stop that is neither a land nor a branch leaves this run BUTTED against
+// same-net copper the recut will not touch — an arc, an overlay-owned handle,
+// another run's claim. Report that neighbour's width so the terminal can meet
+// it; topology (touch count) decides, eligibility only decides whether to walk.
+function rewidenGrow(chain,used,claimed){var pad=null,joint=0;
  for(var guard=0;guard<512;guard++){var last=chain[chain.length-1].q,x=last.x2,y=last.y2;
   pad=drawEndpointLand(last.net,last.l||0,x,y);if(pad)break;
-  var next=[];(PCB.tracks||[]).forEach(function(t){var id=trackIdEnsure(t);
-   if(used[id]||!rewidenTrack(t,last.net||"",last.l||0))return;
-   var q=drawTrackFromPoint(t,x,y);if(q&&trackLength(q)>1e-9)next.push({t:t,q:q});});
-  if(next.length!==1||claimed[trackIdEnsure(next[0].t)])break;
+  var next=[],touch=[];(PCB.tracks||[]).forEach(function(t){var id=trackIdEnsure(t);
+   if(used[id]||(t.net||"")!==(last.net||"")||(t.l||0)!==(last.l||0))return;
+   var q=drawTrackFromPoint(t,x,y);if(!q||!(trackLength(q)>1e-9))return;
+   touch.push(t);if(rewidenTrack(t,last.net||"",last.l||0))next.push({t:t,q:q});});
+  if(touch.length!==1)break;
+  if(next.length!==1||claimed[trackIdEnsure(next[0].t)]){joint=+touch[0].w||0;break;}
   used[trackIdEnsure(next[0].t)]=1;chain.push(next[0]);}
- return pad;}
+ return {pad:pad,joint:joint};}
 // The maximal run through `seed`, grown both ways and handed back head-to-tail:
 // `run` is the oriented geometry the planner reads, `tracks` the board objects
 // the commit replaces.
 function rewidenRun(seed,claimed){var used={};used[trackIdEnsure(seed)]=1;
- var fwd=[{t:seed,q:seed}],endPad=rewidenGrow(fwd,used,claimed),
-  back=[{t:seed,q:drawReverseTrack(seed)}],startPad=rewidenGrow(back,used,claimed),chain=[];
+ var fwd=[{t:seed,q:seed}],ahead=rewidenGrow(fwd,used,claimed),
+  back=[{t:seed,q:drawReverseTrack(seed)}],behind=rewidenGrow(back,used,claimed),chain=[];
  for(var i=back.length-1;i>0;i--)chain.push({t:back[i].t,q:drawReverseTrack(back[i].q)});
  Array.prototype.push.apply(chain,fwd);
  chain.forEach(function(w){claimed[trackIdEnsure(w.t)]=1;});
  return {tracks:chain.map(function(w){return w.t;}),run:chain.map(function(w){return w.q;}),
-  startPad:startPad,endPad:endPad};}
+  startPad:behind.pad,endPad:ahead.pad,startJoint:behind.joint,endJoint:ahead.joint};}
 function rewidenRuns(seeds){var ts=PCB.tracks||[],claimed={},out=[];
  (seeds||ts).forEach(function(t){if(!t||ts.indexOf(t)<0||claimed[trackIdEnsure(t)])return;
   var geo=rewidenTarget(t.net||"");if(!geo||!rewidenTrack(t,t.net||"",t.l||0))return;
@@ -9657,7 +9718,7 @@ function rewidenDeclined(run,shaped){if(shaped.length!==run.length)return false;
 function rewidenAtFloor(q,floor){var c={};for(var k in q)c[k]=q[k];c.w=floor;return c;}
 function rewidenPlan(seeds){var runs=[],tracks=0,nets=Object.create(null),maxWidth=0;
  rewidenRuns(seeds).forEach(function(r){
-  var plan=drawAdaptivePowerPlan(r.run,r.startPad,r.endPad,r.floor,r.target,drawAdaptiveRefinedClearWidth),
+  var plan=drawAdaptivePowerPlan(r.run,r.startPad||drawJointProfile(r.startJoint,r.target),r.endPad||drawJointProfile(r.endJoint,r.target),r.floor,r.target,drawAdaptiveRefinedClearWidth),
    shaped=plan.tracks||[];
   if(!shaped.length)return;
   // Nowhere to widen IS the answer for this run: recut it to the floor rather
