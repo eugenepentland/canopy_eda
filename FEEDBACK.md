@@ -259,3 +259,52 @@ Batching every measurement that needs the lock into ONE script (parity check,
 health probe, boot probes, and both benchmark reps) turned four queue waits into
 one. `gate.sh` reporting the current queue depth when it blocks would make that
 choice obvious instead of learned.
+
+## 2026-08-29 · claude · fab-package fail-fast + a perf baseline that cannot be re-recorded
+
+- **blocker:** `scripts/perf_gate.sh --record` cannot currently restore a
+  passing gate, so the re-record it exists for is not a mechanical operation.
+  `--record` deliberately carries the previous file's `budgets` object forward
+  (`if (previous.budgets) recorded.budgets = previous.budgets`), and those
+  hand-set absolute budgets — `page_ms` 1000, `assembly_page_ms` 150,
+  `thermal_page_ms` 2250, `schematic_page_ms` 500 — are now blown 5-10x by the
+  barracuda family: measured on a quiet machine, `barracuda` page 5.67 s /
+  thermal 6.41 s and `barracuda-base` page 8.85 s / thermal 10.96 s. Recording
+  medians cannot clear a budget violation, so the recorded baseline is followed
+  immediately by `result: FAIL — page latency regression`. Someone has to
+  decide whether the budget or the page is wrong; a re-recording agent cannot.
+- **blocker:** the same re-record would silently absorb a corpus change, which
+  is precisely what the DRC-count rule exists to stop. Against the committed
+  baseline, `barracuda-base` moved `parts` 203 -> 231, `drc_total` 582 -> 727,
+  `drc_errors` 33 -> 61; `barracuda` moved `drc_total` 441 -> 450, `net_open`
+  11 -> 2 and its sidecar 650 KB -> 1.04 MB; and four boards in the baseline
+  (`black-canyon`, `cyclops-interposer`, `rf-switch-eval`, `straps`) are no
+  longer measured at all. Those come from `projects/designs` moving (the base
+  IF-LNA work through d9484d1), not from any tool change. **The baseline file
+  records no designs commit.** `perf_gate.sh` already computes
+  `NETLISP_PERF_DESIGNS_FINGERPRINT` (designs commit + model/layout/BOM bundle
+  hashes) and exports it — writing it INTO `baseline.json` and printing
+  "recorded against designs X, comparing against designs Y" would turn a
+  half-hour forensic diff into one line, and would let the gate say "the
+  workload changed" instead of "latency regressed".
+- **friction:** timing runs taken under `scripts/gate.sh` are still corrupted by
+  sibling sessions that benchmark outside it. Three separate gate-locked
+  measurements here overlapped a concurrent `scripts/pcb_editor_perf/hb_when.js`
+  and a 100%-CPU test shard from other worktrees. Cost: one full
+  `perf_gate.sh --record` (~20 min) aborted in `pcb_browser_perf` run 2/3 on a
+  `page.waitForLoadState("networkidle")` 30 s timeout, leaving the pcb-browser /
+  pcb-editor / ui-browser baselines unwritten; and one bench-page pass came out
+  17-72% slower than its neighbours on the big boards (barracuda `solve_ms`
+  4.72 s / 4.84 s / 8.10 s across three runs of one binary, while `labstation`
+  held 86.0 / 85.4 / 87.1 ms). Two fixes worth having: put the browser runners
+  behind the same lock the page half already takes (`hb_when.js` and
+  `pcb_editor_perf/run.js` take none), and have `bench-page` refuse or flag a
+  run whose 1-minute load average moved by more than a set fraction, so a
+  contended measurement is labelled rather than recorded.
+- **idea:** `serve/request_log.zig`'s `StageTimer` paid for itself immediately.
+  The question "which second of this 15-second request is which" had no answer
+  without it; three laps in `pcbGerbersApiHooked` located 4.5 s in
+  `fab_identity.build` and 1.1 s in a lock the request had already disqualified
+  itself from. Every handler that can exceed a second is worth one `defer
+  emitStages` — it is ~8 lines and removes a build-instrument-rebuild cycle per
+  investigation.
