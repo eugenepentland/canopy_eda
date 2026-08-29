@@ -406,3 +406,45 @@ exactly where the split needed to be (`boardFills` vs `boardFillsScoped` in
 `drc_compose.zig`), so no plumbing was needed through `drc_reconcile.zig` at
 all — worth remembering that the scoped/full fork lives in `drc_compose`, not
 in the server.
+
+## 2026-08-29 — the editor zoom gate measures a race, and a DRC speedup wins it
+
+Follow-up to the entry above. A regression was attributed to H-B's patch-base
+copy landing inside a cold page load's derived warm. It is not that, and the
+three experiments that ruled it out are worth writing down because each looked
+conclusive on its own:
+
+1. RSS after a cold page load was within 2 MB of main's candidate, and
+   `drc-dump` showed `bases=0` on every read-only seam. **But a `curl` of the
+   page runs no JavaScript**, so it never issues the round-trips the real page
+   makes. A memory probe that does not execute the page is not a probe of the
+   page.
+2. Excluding the priming reconcile too (so no base can be published during a
+   page load at all) left the gate failing 3 of 3.
+3. Stripping the candidate — main's is 61 MB stripped, a `zig-prod` build is
+   143 MB with symbols — changed nothing. Worth knowing anyway: an A/B against
+   a release candidate is not like-for-like until both are stripped.
+
+The actual mechanism, found by logging request timing beside the frame data:
+the editable page posts three server round-trips as it opens (the authoritative
+DRC, the RF retrofit check, and `refillPours`), and each REPAINTS the board when
+it answers. The gate starts measuring at `load`, without waiting. On main the
+pour refill answers *after* the benchmark has finished, so its repaint is never
+recorded. H-B makes that pour fast enough to answer *during* — and the repaint
+lands in whichever zoom phase it falls in, as a single ~200 ms outlier with
+every median unchanged. Blocking `/api/pcb-drc/**` in the harness makes the
+numbers identical to main's, 4 runs of 4; allowing it reproduces the spike
+exactly in the runs where the response beats `__fbench`.
+
+So the gate is not measuring a rendering regression. It is measuring who won a
+race, and **any** pour or DRC speedup flips it — this will happen again.
+
+A prototype of the fix (wait for those round-trips before measuring, on the same
+terms `fbRunWhenReady` already waits for the physical-review CAM payload) removes
+the outlier completely: max 35-39 ms across 3 runs versus 192-455 ms. It is NOT
+in this branch, because it also changes what the benchmark measures — the scene
+now has its pours drawn, which raises canvas p50 from ~18.8 to ~23 ms and
+breaches budgets recorded against the pre-pour scene. Choosing between "measure
+the finished page and re-record" and "suppress the deferred work and keep the
+current baseline" is the gate owner's call, and re-recording a baseline to make
+one's own change pass is not a call the author of the change should make.

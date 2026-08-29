@@ -3252,6 +3252,7 @@ Public functions: acquire, beginSession, key, put
 - one patch base is retained per fill identity, copied out of the pass's arena, and replaced rather than accumulated when that fill is built again
 - a patch base superseded or evicted while a pass is reading it is unlinked rather than freed, and a base over the whole budget is declined outright
 - a fill-build session takes part in the patch-base chain only when it asks to, so a read-only surface neither copies a margin field nor updates from one
+- only the editor's scoped recheck asks to retain patch bases; the priming pass an editor page runs on load does not, so the first edit after a page load pours once and the second updates
 
 The reporting DRC seam pours every declared plane, every pour and every drawn
 zone of a board before it can judge copper topology or connectivity, and that

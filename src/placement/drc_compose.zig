@@ -194,12 +194,15 @@ pub fn checkScopedReport(
     prior: Prior,
     delta: drc_scope.Delta,
 ) ScopedReport {
+    // `.keep`: a scoped pass is by definition mid-edit, so the fills it
+    // rebuilds are the ones the NEXT keystroke will rebuild again — the one
+    // place retaining each raster to update from pays for itself.
     var board = boardFillsScoped(alloc, in, .{
         .keys = prior.fill_keys,
         .spec_keys = prior.spec_keys,
         .tracks = delta.tracks,
         .vias = delta.vias,
-    });
+    }, .keep);
     if (board.failed) {
         board.release();
         return .{ .scoped = false };
@@ -321,7 +324,14 @@ fn featureKeys(alloc: std.mem.Allocator, delta: drc_scope.Delta) std.mem.Allocat
 /// findings to `checkDefaultRulesReport`; it simply keeps the evidence instead
 /// of dropping it on the way out.
 pub fn checkPrimingReport(alloc: std.mem.Allocator, in: CopperCheck) ScopedReport {
-    var board = boardFillsScoped(alloc, in, .{});
+    // `.skip`, unlike the scoped pass this prepares for. Priming is what an
+    // editor page does on LOAD — the client posts one DRC as it opens — and a
+    // page load is not an edit: nothing follows it until a human moves
+    // something, which may be seconds away or never. Publishing every fill's
+    // raster there puts a ~80 MB copy inside the page's own load, paid for a
+    // second edit that may not come. The first real edit pours cold and
+    // publishes; the second updates.
+    var board = boardFillsScoped(alloc, in, .{}, .skip);
     if (board.failed) {
         board.release();
         return .{ .scoped = false };
@@ -636,12 +646,8 @@ fn boardFills(alloc: std.mem.Allocator, in: CopperCheck) BoardFills {
 /// a hash of every track and via to be told so. The per-fill answer is the one
 /// that matters, and `Reuse` gets it without keying the fills the edit could not
 /// reach at all.
-fn boardFillsScoped(alloc: std.mem.Allocator, in: CopperCheck, reuse: Reuse) BoardFills {
-    // `.keep`: this is the editor's reconcile — the priming pass and every
-    // scoped recheck after it. It is the one caller that will be asked the same
-    // question again with one track moved, so it is the one caller for which
-    // retaining each fill's raster to update from pays for itself.
-    const session = fill_cache.beginSession(.keep) orelse {
+fn boardFillsScoped(alloc: std.mem.Allocator, in: CopperCheck, reuse: Reuse, bases: fill_cache.Bases) BoardFills {
+    const session = fill_cache.beginSession(bases) orelse {
         const alone = filledTopology(alloc, in, null, reuse) catch return .{ .failed = true };
         return .{ .fills = alone.fills, .fill_keys = alone.fill_keys, .spec_keys = alone.spec_keys, .changed = alone.changed, .fill_nets = alone.fill_nets };
     };
@@ -1464,4 +1470,77 @@ test "a scoped recheck carries the deferred kinds forward untouched" {
     try testing.expectEqual(@as(usize, 1), drc.countKind(scoped.violations, .loop_area));
     try testing.expectEqual(@as(usize, 1), drc.countKind(scoped.violations, .reference_plane_gap));
     try testing.expect(scoped.prior.deferred.len == mixed.len);
+}
+
+// spec: placement/fill-cache - only the editor's scoped recheck asks to retain patch bases; the priming pass an editor page runs on load does not, so the first edit after a page load pours once and the second updates
+test "the priming pass retains no patch base, and the scoped pass does" {
+    const testing = std.testing;
+    const geometry = @import("geometry.zig");
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const alloc = arena_inst.allocator();
+
+    const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 1.5, .y = 1.5 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 8, .y = 1.5 },
+    };
+    const flat = @import("../flat_netlist.zig");
+    const gnd_pins = [_]flat.FlatPin{.{ .ref_des = "R1", .pin = "1" }};
+    const sig_pins = [_]flat.FlatPin{.{ .ref_des = "R2", .pin = "1" }};
+    const nets = [_]optimizer.FlatNet{ .{ .name = "GND", .pins = &gnd_pins }, .{ .name = "SIG", .pins = &sig_pins } };
+    const placement = twoFaceBoard(&parts, &nets);
+    // Deliberately not the other tests' fixture: they share one process-wide
+    // memo, and a board some earlier test already retained would answer every
+    // fill from the content key and BUILD nothing, which is what these deltas
+    // are counting.
+    const poly = [_][2]f64{ .{ 0.37, 0.41 }, .{ 9.61, 0.41 }, .{ 9.61, 2.77 }, .{ 0.37, 2.77 } };
+    const zones = [_]pour.UserZone{.{ .net = "GND", .layer = 0, .poly = &poly }};
+    const tracks = [_]router.Track{.{ .x1 = 2.53, .y1 = 1.47, .x2 = 7.51, .y2 = 1.47, .layer = 0, .width = 0.23, .net = 1 }};
+    const in: CopperCheck = .{
+        .placement = placement,
+        .routed = .{ .tracks = &tracks, .vias = &.{}, .routed = 1, .total = 1 },
+        .clearance = 0.15,
+        .zones = &zones,
+    };
+
+    // A page load pours every fill and keeps the evidence a later scoped pass
+    // measures against — but not the rasters, which only an edit can spend. The
+    // counters are process-wide and monotonic, so each claim is a delta taken
+    // around its own call rather than a reading of the store's total.
+    const before_prime = fill_cache.stats().tally.build;
+    var primed = checkPrimingReport(alloc, in);
+    const after_prime = fill_cache.stats().tally.build;
+    primed.held.release();
+    try testing.expect(after_prime.poured > before_prime.poured);
+    try testing.expectEqual(before_prime.patched, after_prime.patched);
+
+    // The first edit. It has no base to update from — priming published none —
+    // so it pours too, and publishes what the next edit will update from.
+    var once = tracks;
+    once[0].y1 += 0.3;
+    once[0].y2 += 0.3;
+    var first = checkScopedReport(alloc, edited(placement, &once, &zones), primed.prior, .{ .tracks = &.{ tracks[0], once[0] }, .vias = &.{} });
+    const after_first = fill_cache.stats().tally.build;
+    try testing.expect(after_first.poured > after_prime.poured);
+    try testing.expectEqual(after_prime.patched, after_first.patched);
+
+    // The second edit updates from it.
+    var twice = once;
+    twice[0].y1 += 0.3;
+    twice[0].y2 += 0.3;
+    var second = checkScopedReport(alloc, edited(placement, &twice, &zones), first.prior, .{ .tracks = &.{ once[0], twice[0] }, .vias = &.{} });
+    try testing.expect(fill_cache.stats().tally.build.patched > after_first.patched);
+    second.held.release();
+    first.held.release();
+}
+
+/// The same board with one edited copper list, for the sequence above.
+fn edited(placement: optimizer.Placement, tracks: []const router.Track, zones: []const pour.UserZone) CopperCheck {
+    return .{
+        .placement = placement,
+        .routed = .{ .tracks = tracks, .vias = &.{}, .routed = 1, .total = 1 },
+        .clearance = 0.15,
+        .zones = zones,
+    };
 }
