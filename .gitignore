@@ -12,7 +12,11 @@ zig-out-browser-perf/
 *.o
 *.swp
 *~
-/node_modules/
+# No trailing slash: a worktree points this at the shared checkout's install
+# via a symlink (perf_gate.sh checks node_modules/playwright literally), and
+# the directory-only pattern left that symlink untracked-dirty, which
+# prepare-release refuses.
+/node_modules
 /test-results/
 
 # Python bytecode
