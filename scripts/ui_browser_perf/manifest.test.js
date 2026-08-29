@@ -274,6 +274,8 @@ assert(gate.includes("archive --format=tar") && gate.includes("NETLISP_PERF_DESI
 assert(gate.includes("*.layouts.json") && gate.includes("layouts_fingerprint") && gate.includes("--reflink=auto") &&
   gate.includes("*.bom") && gate.includes("boms_fingerprint"),
   "perf_gate.sh must copy and identify ignored layout/model/BOM workload inputs");
+assert((gate.match(/node scripts\/perf_gate_designs_identity\.js/g) || []).length >= 2,
+  "perf_gate.sh must stamp the recorded page baseline's workload identity and verify it before enforcing");
 assert(!gate.includes('ln -s "$source_project_dir/lib/models"'),
   "perf_gate.sh must never expose the live model bundle to benchmark writes");
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));

@@ -50,6 +50,15 @@ A gated run fails (non-zero exit, refusing the push) when any of:
    didn't.
 5. **Retention lost** — a board whose page the baseline run cached is no
    longer admitted.
+6. **Workload moved** — before any timing comparison, `perf_gate.sh` checks
+   the baseline's stamped `designs` identity (designs commit plus
+   model/layout/BOM bundle hashes, written by `--record` via
+   `scripts/perf_gate_designs_identity.js`) against the snapshot it is about
+   to measure. A mismatch fails immediately as "recorded against designs X,
+   comparing against designs Y" — the honest reason — instead of surfacing
+   minutes later as rules 1–4 violations. An unstamped baseline fails the same
+   way; re-record to stamp it. (Running `bench-page --baseline` by hand skips
+   this shell-level check; its own missing/unlined notes still apply.)
 
 A board **without a blessed (starred/named-restorable) layout** has its PCB,
 thermal, solve, and DRC phases reported but not gated: those paths re-solve the
@@ -71,7 +80,8 @@ scripts/perf_gate.sh
 
 # Re-record after an intentional change (a real speedup, a designs-repo
 # update) — then review and COMMIT the diff deliberately. The wrapper preserves
-# the existing hand-set "budgets" object while replacing measurements:
+# the existing hand-set "budgets" object while replacing measurements, and
+# stamps the measured designs identity into the top-level "designs" object:
 scripts/perf_gate.sh --record
 
 # One board, more reps, by hand:

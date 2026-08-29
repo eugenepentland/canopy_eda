@@ -180,7 +180,11 @@ assembly timing covers its parent page while the independently measured PCB
 timing covers its board iframe. `--baseline` compares medians against the
 committed recording in `docs/benchmarks/pcb-page/baseline.json`, failing on
 per-board allowances, corpus-wide drift, hand-set absolute budgets, moved DRC
-counts (unlike work), or lost PCB page-cache retention. The tracked
+counts (unlike work), or lost PCB page-cache retention. Before comparing, the
+gate checks the baseline's stamped designs identity (commit plus
+model/layout/BOM bundle hashes) against the snapshot being measured and
+refuses a moved workload by name — designs drift is never misreported as a
+latency regression. The tracked
 `.githooks/pre-push` hook runs it (via `scripts/perf_gate.sh`, behind the
 machine gate lock) whenever main is pushed; feature-branch pushes are never
 gated. Re-record deliberately with `scripts/perf_gate.sh --record` and commit

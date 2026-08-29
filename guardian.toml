@@ -225,6 +225,16 @@ command = ["node", "--check", "scripts/ui_browser_perf/run.js"]
 inputs = ["scripts/ui_browser_perf/run.js"]
 
 [[external]]
+name = "perf-gate-designs-identity-js-syntax"
+command = ["node", "--check", "scripts/perf_gate_designs_identity.js"]
+inputs = ["scripts/perf_gate_designs_identity.js"]
+
+[[external]]
+name = "perf-gate-designs-identity-contract"
+command = ["node", "scripts/perf_gate_designs_identity.test.js"]
+inputs = ["scripts/perf_gate_designs_identity.js", "scripts/perf_gate_designs_identity.test.js"]
+
+[[external]]
 name = "ui-browser-perf-route-contract"
 command = ["node", "scripts/ui_browser_perf/manifest.test.js"]
 inputs = ["scripts/ui_browser_perf/run.js", "scripts/ui_browser_perf/manifest.js",
