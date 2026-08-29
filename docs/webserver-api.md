@@ -236,7 +236,24 @@ Local dev still uses `http://localhost:7050`.
   drills, centroid/BOM CSVs, release reports, checksums, and a standalone
   `<name>-assembly.html`. That HTML embeds the exact released CAM, operator
   search/BOM data, and rework guides, so it opens directly from disk without
-  the server. An authored `(board (part-number "…") …)` is printed beside the
+  the server. **A board that cannot be released is refused before it is
+  built.** The gate itself is seconds of work on a large board — evaluating,
+  restoring and pouring the copper, composed DRC, strict preflight, then
+  digesting the Gerber geometry into a fabrication mark — and running all of it
+  to discover an answer the project's own source revision had already settled
+  is the difference between a 15-second "no" and a fast one. When
+  `captureProjectState` reports a dirty or unrevisioned worktree before the
+  first evaluator read, `src/fab_package.zig` refuses there: same 500, the same
+  `source-worktree-dirty` / `source-revision-unavailable` finding the full
+  report carries, plus `"report_complete":false` and a `report_url` naming
+  `/api/fab-readiness/<design>`. Measured on the shared designs snapshot,
+  `barracuda` goes 14.2 s → 0.9 s and `barracuda-base` 19.4 s → 0.14 s. The
+  refusal is deliberately narrow: it fires only for a status that provably
+  forces the block (`fab_release.bindBaseline` folds a dirty/unavailable
+  pre-read state into every later verdict), it never pre-empts a `?layout=`
+  404 or a "nothing saved" 404, and it never touches `/api/fab-readiness`,
+  which still runs the complete gate and remains the surface that enumerates
+  every independent finding. An authored `(board (part-number "…") …)` is printed beside the
   eight-hex fabrication ID on silkscreen and is recorded in every release
   report; the part number also participates in the fabrication digest. KiCad
   file naming + Protel extensions let fab CAM auto-detect layers. Writer in

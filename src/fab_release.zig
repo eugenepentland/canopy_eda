@@ -234,7 +234,11 @@ fn hashFloat(hash: *Sha256, value: f64) void {
     hash.update(&bytes);
 }
 
-fn projectStatusFinding(status: ProjectStatus) ?fab_readiness.Item {
+/// The readiness finding one source-revision status contributes to a release
+/// report. Public because the fast refusal in `fab_package.zig` must cite the
+/// SAME id and message the full report would have cited, rather than a
+/// second, drifting copy of these sentences.
+pub fn projectStatusFinding(status: ProjectStatus) ?fab_readiness.Item {
     return switch (status) {
         .clean => null,
         .dirty => .{
