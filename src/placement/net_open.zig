@@ -446,6 +446,11 @@ fn emitOpens(
 /// connection is a false positive; what is actually wrong is the QUALITY of the
 /// junction, which is a warning to go widen or restructure the joint.
 ///
+/// Because the SIGN of that gap is what decides this, the gap it reads has to
+/// be measured against each land's real copper and not its bounding box — see
+/// `padDist`. A box's dead corners would otherwise manufacture the overlap and
+/// demote an open the union-find, reading the same outline, had refused to join.
+///
 /// Everything else is unchanged: an island pair that genuinely never touches is
 /// the fab-fatal error it has always been, and the 1–20 µm hairline band keeps
 /// its own kind at its own default severity. Only the severity moves — the kind,
@@ -551,38 +556,94 @@ fn nearestApproach(a: *const Comp, b: *const Comp) Approach {
 /// half-width.
 fn padTrack(best: *Approach, p: pad_shape.Shape, t: router.Track) void {
     const c = padCenter(p);
-    fold(best, segRectDist(t, p) - t.width / 2, c, segClosestPoint(t, c));
+    const radius = t.width / 2;
+    fold(best, segPadDist(t, p, classReach(radius)) - radius, c, segClosestPoint(t, c));
 }
 
 /// pad ↔ via: the pad's land against the via centre, less the via radius.
 fn padVia(best: *Approach, p: pad_shape.Shape, v: router.Via) void {
-    fold(best, boxDist(p, v.x, v.y) - v.dia / 2, padCenter(p), .{ v.x, v.y });
+    const radius = v.dia / 2;
+    fold(best, padDist(p, v.x, v.y, classReach(radius)) - radius, padCenter(p), .{ v.x, v.y });
 }
 
 /// pad ↔ pad: land-to-land gap between two bare pads.
 fn padPad(best: *Approach, a: pad_shape.Shape, b: pad_shape.Shape) void {
-    fold(best, pad_shape.shapeGap(a, b, 0), padCenter(a), padCenter(b));
+    fold(best, pad_shape.shapeGap(a, b, classReach(0)), padCenter(a), padCenter(b));
 }
 
-/// Distance from `(px,py)` to a pad's land box. Measured on the bounding box
-/// (`slack = 0` short-circuits the outline walk): a concave custom pad then
-/// reads slightly WIDER than its copper, which can only shrink a reported
-/// airgap — never hide one, since an island's existence is decided by the
-/// union-find, not by this number.
+/// How far a pad's bounding BOX may stand from the feature being measured and
+/// still have the pad's real OUTLINE change the pair's gap CLASS
+/// (`copper_contact.classifyGap`) rather than merely the magnitude reported
+/// beside it: the radius the kernel is about to subtract, plus the hairline
+/// band, plus one rounding step.
+///
+/// A box CONTAINS the copper it bounds, so a box distance already past this
+/// puts the exact distance past it too and the pair reads `.open` either way.
+/// This is the single threshold both stages of `padDist`/`segPadDist` filter
+/// on, so no second epsilon enters the comparison.
+fn classReach(radius: f64) f64 {
+    return radius + copper_contact.hairline_slack_mm + eps;
+}
+
+/// Distance from `(px,py)` to a pad's land: the bounding box as the broad
+/// phase, the real outline once the box comes within `reach` (an infinite
+/// `reach` is how a caller that has already decided the pair is close asks for
+/// the exact number outright; `reach = 0` asks for the box alone).
+///
+/// The box is the cheap answer and, for the ordinary rectangular land whose box
+/// IS its copper, the exact one — so that path is untouched. A land that
+/// carries an outline is different: a rotated rectangle, a circle or a concave
+/// custom pad leaves board area inside its box that its copper never reaches,
+/// and there the box distance UNDER-states the gap.
+///
+/// That under-statement was harmless while this number only set the magnitude a
+/// finding reported. It is not harmless now the gap's SIGN feeds `severityFor`:
+/// a foreign island's track endpoint or via centre can sit in a 45° land's dead
+/// corner, read as overlapping metal (`.connected` ⇒ warn) and so demote an
+/// open that the union-find — which walks the very same outline through
+/// `copper_contact.padTrackConnects` — has already refused to join. Reporting
+/// a fab-fatal open as a warning is the one direction this pass must never
+/// move in, so both now measure the same copper.
+fn padDist(p: pad_shape.Shape, px: f64, py: f64, reach: f64) f64 {
+    return pad_shape.pointDist(p.x0, p.y0, p.x1, p.y1, p.poly, px, py, reach);
+}
+
+/// The pad's bounding-box distance alone — the broad phase `segPadDist` filters
+/// on before it is worth walking any outline.
 fn boxDist(p: pad_shape.Shape, px: f64, py: f64) f64 {
-    return pad_shape.pointDist(p.x0, p.y0, p.x1, p.y1, p.poly, px, py, 0);
+    return padDist(p, px, py, 0);
 }
 
-/// Exact segment↔box distance for two DISJOINT shapes: the closest pair of two
-/// convex sets is attained at a vertex of one, so probing the box's four corners
-/// against the segment plus the segment's two ends against the box covers every
-/// case. Islands are disjoint by construction (an overlap would have united
-/// them), so the disjoint assumption always holds here.
-fn segRectDist(t: router.Track, p: pad_shape.Shape) f64 {
+/// Nearest approach between a track's centreline and a pad's land.
+///
+/// BOX phase: the closest pair of two convex sets is attained at a vertex of
+/// one, so the box's four corners against the segment plus the segment's two
+/// ends against the box is the exact segment↔box distance — and since the box
+/// contains the copper, a lower bound on the segment↔land distance.
+///
+/// OUTLINE phase: entered only for a land that carries an outline whose box
+/// already came within `reach`, i.e. only where the difference can move the gap
+/// class. It is the minimum over the land's own edges (`segSegDist`, which is
+/// zero wherever the centreline crosses the copper) together with the segment's
+/// two ends measured against the outline — exact for a disjoint pair, and zero
+/// for one that overlaps.
+fn segPadDist(t: router.Track, p: pad_shape.Shape, reach: f64) f64 {
     var d = @min(boxDist(p, t.x1, t.y1), boxDist(p, t.x2, t.y2));
     const corners = [4][2]f64{ .{ p.x0, p.y0 }, .{ p.x1, p.y0 }, .{ p.x1, p.y1 }, .{ p.x0, p.y1 } };
     for (corners) |c| d = @min(d, segClosest(t.x1, t.y1, t.x2, t.y2, c[0], c[1]).dist);
-    return d;
+    if (p.poly.len < 3 or d >= reach) return d;
+    // The pair is already inside the class band, so the endpoint probes below
+    // ask for the outline unconditionally rather than filtering a second time.
+    const always = std.math.inf(f64);
+    const a = [2]f64{ t.x1, t.y1 };
+    const b = [2]f64{ t.x2, t.y2 };
+    var out = @min(padDist(p, a[0], a[1], always), padDist(p, b[0], b[1], always));
+    var j: usize = p.poly.len - 1;
+    for (p.poly, 0..) |v, i| {
+        out = @min(out, pad_shape.segSegDist(a, b, p.poly[j], v));
+        j = i;
+    }
+    return out;
 }
 
 fn padCenter(p: pad_shape.Shape) [2]f64 {
@@ -885,6 +946,57 @@ test "overlapping same-net islands warn instead of erroring as a hard net open" 
         try testing.expect(vs[0].who.part_a == 2 or vs[0].who.part_b == 2); // C2
         try testing.expectApproxEqAbs(@as(f64, 5), vs[0].x, 1e-9);
     }
+}
+
+// spec: placement/drc - a pad's gap CLASS is measured against its real outline, so a rotated or concave land's empty bounding-box corner cannot demote a genuine net_open to a graze warning
+test "a rotated land's empty box corner does not demote its open to a graze warning" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // U1 carries a 1 mm square land on a part rotated 45°, the pose the
+    // rf-switch-eval SMPM launches stand at. Its copper is the diamond
+    // |x| + |y| ≤ 0.7071; its bounding box is the [−0.7071, 0.7071] square, so
+    // each box corner is 0.5 mm of bare board the box calls copper.
+    const u_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 1, .h = 1 }};
+    const c_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &u_pads, .fallback = false, .x = 0, .y = 0, .rot = 45 },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 1, .pads = &c_pads, .fallback = false, .x = 3, .y = 3 },
+    };
+    const pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } };
+    const nets = [_]flat_netlist.FlatNet{.{ .name = "SIG", .pins = &pins }};
+    var placement = twoPadPlacement(&parts, &nets);
+    placement.maxy = 4;
+
+    // C1's run dies at (0.65, 0.65): INSIDE U1's bounding box, and 0.4192 mm
+    // clear of U1's real copper. `copper_contact.padTrackConnects` walks that
+    // outline and correctly refuses the join, so this net genuinely stands in
+    // two pieces. The bounding box, measuring the same pair, put the track's
+    // endpoint ON the land and reported a NEGATIVE gap — which `severityFor`
+    // reads as metal laid on metal and demotes to a warning.
+    const tracks = [_]router.Track{
+        .{ .x1 = 3, .y1 = 3, .x2 = 0.65, .y2 = 0.65, .layer = 0, .width = 0.2, .net = 0 },
+    };
+    const vs = try check(arena, placement, .{ .tracks = &tracks }, null);
+    try testing.expectEqual(@as(usize, 1), count(vs));
+    try testing.expectEqual(drc.Kind.net_open, vs[0].kind);
+    try testing.expectEqual(drc.Severity.err, vs[0].severity);
+    // 0.4192 mm from the endpoint to the diamond's edge, less the track's
+    // 0.1 mm half-width: a real airgap, far past the hairline band, where the
+    // box reported −0.1 mm of overlap.
+    try testing.expect(vs[0].gap > copper_contact.hairline_slack_mm);
+    try testing.expectApproxEqAbs(@as(f64, 0.3192), vs[0].gap, 1e-3);
+
+    // The control: the same land and the same run, carried on until its end
+    // sits on the diamond's REAL copper. A full transverse chord fits there,
+    // the union-find joins the two, and no marker is emitted — so the error
+    // above is the land's outline talking, not a rotated pad being refused
+    // everything.
+    const landed = [_]router.Track{
+        .{ .x1 = 3, .y1 = 3, .x2 = 0.25, .y2 = 0.25, .layer = 0, .width = 0.2, .net = 0 },
+    };
+    try testing.expectEqual(@as(usize, 0), count(try check(arena, placement, .{ .tracks = &landed }, null)));
 }
 
 // spec: placement/drc - A net-open DRC violation names its net and a pad from each copper island it failed to join

@@ -3150,6 +3150,7 @@ Public functions: check, checkTopology, checkWithZones, checkWithPreparedCopper,
 - two identical copper features are two features, so deleting one of them is an edit
 - a via edit is reported with its own geometry so a scoped recheck can grow the region a drill rule reaches
 - same-net copper that physically overlaps without forming a certifiable junction is reported as a warning-severity net_open, while islands that genuinely never touch stay error-severity
+- a pad's gap CLASS is measured against its real outline, so a rotated or concave land's empty bounding-box corner cannot demote a genuine net_open to a graze warning
 - completeness-waiver: empty inputs (each rule iterates the geometry present, so a design with no copper or parts yields no violations by construction)
 - completeness-waiver: large inputs (a bounded pairwise geometry scan; working memory stays proportional to the parsed design, with no unbounded buffering)
 - completeness-waiver: unauthorized access (a pure in-memory computation with no auth surface here; access control lives in serve/users)
@@ -3245,6 +3246,7 @@ Public functions: acquire, beginSession, key, put
 - a board already retained is never duplicated, and the least recently borrowed board is the one eviction takes
 - a board with no planes, pours or zones retains its empty fill so the surfaces after it skip the pour attempt too
 - a board whose fill alone exceeds the whole store's byte ceiling is declined rather than retained, and every later pass simply pours it again
+- a board entry the byte ceiling declines gives back exactly the raster claims it took, so the pass that lent them can still release its own
 - a second reporting DRC over an unchanged board reuses the retained fill instead of re-pouring it and returns the identical verdict
 - the content fingerprint separates two values that differ in any fold-in and matches two independently built copies of one value
 - a fingerprint tag separates two runs of otherwise identical scalars so adjacent feature kinds cannot alias
@@ -4391,6 +4393,7 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - last_error records the source span of an unknown form so callers can report file:line:col
 - last_error records the source span of an arity mismatch in a special form
 - a pinout-less instance wiring three or more pads warns that the pad numbers are unchecked
+- loadPinoutFile reads a library pinout at the class-owned lib_limits cap, so a pinout past the retired 256 KiB figure still yields its pin names
 
 ## id_insert
 
@@ -4410,6 +4413,7 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - Bakes a custom pad's at-angle into the emitted polygon in KiCad's counter-clockwise display sense
 - Flattens a plain pad's exact quarter-turn at-angle into a width/height swap with no rotation token
 - Preserves a plain pad's non-quarter-turn at-angle as a netlisp-frame pos rotation token
+- Emits the pad number as a quoted token so an SI-shaped or spaced pad name reads back unchanged
 
 ## convert/symbol
 
@@ -4428,6 +4432,8 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - Sanitizes library names to lowercase slugs
 - Writes a board's description, value, MPN and pin name back verbatim, so an escaped quote survives the import instead of being substituted
 - Escapes the caller-supplied design title, the one import string that does not come through the tokenizer
+- Keeps a pin id bare only when the tokenizer reads it back as the same text
+- Quotes a pad number or pin id whose bare spelling the tokenizer would re-read as an SI value
 
 ## import_fold
 
@@ -4625,6 +4631,8 @@ Public functions: Package.add, Package.addNamed, centroidCsv, excellonDrill, fra
 - fab writers share one y-up frame derived from the board outline
 - an oval drill exports as a G85 slot at its minor-axis tool between the two arc centres, in both drill files
 - each Excellon file declares its X2 file function, naming its plating and the copper span it drills through
+- every hole is drilled by exactly one Excellon tool, even when its diameter sits inside two tool buckets
+- the Excellon tool lookup partitions diameters, giving each hole exactly one owning tool
 
 ## export_gerber
 
@@ -4723,6 +4731,8 @@ Public functions: planLayers, writeLayer
 - Declares the routed-copper bundle in a neutral module beneath both the placement and export layers
 - both silk faces and the fabrication-ID search share one silkscreen solve, and a prepared plan writes byte-identical silk
 - silk label placement clears pads through a spatial index that answers every clearance probe exactly as a full pad scan
+- an arc whose bow falls below the output lattice is emitted as its straight chord instead of a G75 arc
+- a native arc's G02/G03 sweep direction is carried from the model, not re-derived from the rounded output coordinates
 
 ## pdf
 
@@ -4940,6 +4950,7 @@ Public functions: renderSchematic
 - Functional pin rows put the pin's own net before a ground shunt so the shunt draws below the pin; Original remains alphabetical
 - Passive accounting in the SVG equals the physical source count even when identical spokes fold into one visual symbol
 - Net names are XML-escaped in the emitted SVG markup
+- Both scene-graph pinout readers take the class-owned lib_limits cap, so a pinout past the retired 256 KiB figure still carries its pin names and alternates
 
 ## decouple_key
 
@@ -5008,6 +5019,11 @@ Public functions: renderSchematic
 - Recurses sub-blocks and flags once per undocumented component
 - an unbound HF decoupling cap on a multi-supply-pad rail is an error, with bound/bulk/rail-optout/per-pin/EMI-coupling caps exempt
 - config straps tied to the rail are excluded from the supply-pad count, like the placer's hubTargets
+- a dangling (verifies …) sign-off declared inside a reused module is flagged too
+- A declared rail voltage over-stresses a rated pin sitting on the same net
+- Emits no overvoltage violation when every driver stays inside the declared ratings
+- Flags a driver whose output high exceeds a receiver's declared absolute-maximum voltage
+- The strap direct-tie check shares the power-pin check's supply-rail vocabulary
 
 ## eval/power_budget
 
@@ -5148,6 +5164,8 @@ Public functions: analyze
 - repeat derives distinct stable child ids from its anchor origin key and lexical index
 - repeat ids sidecars override indexed child derivation for UUID-preserving migrations
 - repeat composes with sub-block calls and gives each repeated module a distinct stable hierarchy
+- a bus-port index range whose lane span would overflow the i64 subtraction is diagnosed and expands nothing
+- a zero-based bus-port range still expands and the lane cap admits a span of exactly 4095
 
 ## eval/test_point
 
@@ -5382,6 +5400,9 @@ Public functions: runChecks, deinit, parseMicroFarads, parseOhms, parseMicroHenr
 
 - feedback-divider and SET-current checks reject the mismatched values used by straps
 - rail-name fallback decodes common voltage conventions used by flat designs
+- a second resistor on one feedback leg is reported instead of silently replacing it
+- rail-name fallback decodes the imported underscore decimal and signed negative spellings
+- resistor values are read through the canonical req_checks parser including the milliohm suffix
 - completeness-waiver: empty inputs (missing pins, nets, or programming resistors produce a failed check result rather than indexing absent data)
 - completeness-waiver: large inputs (the checks scan the already-allocated instance and net slices linearly and allocate only their diagnostic message)
 - completeness-waiver: unauthorized access (a pure design-analysis layer with no access surface; authorization is enforced before CLI dispatch)
@@ -5521,6 +5542,7 @@ Public functions: runSyncPlan, syncKicadPcbApi
 - an authoritative layout without declared stackup planes retains its saved zone count in the sync summary
 - authoritative placement converts netlisp rotation/side into a targeted KiCad pose op
 - authoritative stale pruning also removes pre-netlisp manual KiCad footprints
+- an authoritative push counts and names the saved copper it could not emit, so emitted plus dropped accounts for every saved track and via
 
 ## serve/route-plan
 
@@ -6223,20 +6245,85 @@ it. Two classes: `lib/footprints/<name>.sexp` and the
 `lib/<components|pinouts|modules>/<name>.sexp` family. Spelling a cap per-reader
 produced a real defect twice — a footprint that loaded in the editor was refused
 by the preview, and two pinout readers stayed at 256 KiB while the rest read
-1 MiB. Every reader swallows an over-cap read (`catch continue` /
-`catch return null` / `catch return false`), so the failure mode is a part going
-quietly missing from a page, a BOM row or a pin-name map, never an error.
+1 MiB. Every reader still swallows an over-cap read (`catch continue` /
+`catch return null` / `catch return false`) rather than failing a request, so a
+part goes missing from a page, a BOM row or a pin-name map instead of erroring —
+but the swallow is no longer silent: each reader now logs the file and the
+fallback it took, skipping only the ordinary `FileNotFound` case, so the
+degradation is visible without changing any caller's control flow or status code.
+`retired_lib_file_cap_bytes` records the superseded 256 KiB figure so the
+"raise never lower" rule is testable rather than only asserted here: every
+reader's regression test sizes its fixture off it.
 
 - Both lib/ read caps clear the largest part this tree targets, so neither may be lowered back under its worst case
+- The shared over-cap pinout fixture is larger than the retired 256 KiB cap and still inside the live class cap
 
-- completeness-waiver: empty inputs (a zero-byte lib file is under every cap; emptiness is the parser's contract, not this module's — it declares two comptime integers and reads nothing)
+- completeness-waiver: empty inputs (a zero-byte lib file is under every cap; emptiness is the parser's contract, not this module's. `synthPinoutSource` with `min_bytes = 0` or an empty name still emits a well-formed head and sentinel row, so it has no degenerate output)
 - completeness-waiver: large inputs (this module IS the large-input policy; the over-cap case is the caller's swallowed read, specified and tested in each reader's own section)
 - completeness-waiver: unauthorized access (both classes live under the trusted local project dir and neither is an upload seam; the traversal contract on the names spliced into these paths belongs to `paths` and each handler's own name validation)
-- completeness-waiver: I/O failure (no I/O here; the module declares constants and opens nothing)
-- completeness-waiver: concurrent access (two comptime constants, no mutable state to share)
+- completeness-waiver: I/O failure (no I/O here; the module declares caps and builds a fixture string in memory — it opens nothing)
+- completeness-waiver: concurrent access (the caps are comptime constants and `synthPinoutSource` touches only its own locals and the caller's allocator, so there is no shared mutable state)
 - completeness-waiver: malformed encoding (no parsing here; a lib file's syntax is the sexpr parser's contract)
-- completeness-waiver: integer overflow (both values are comptime `usize` literals ~1e6, six orders of magnitude inside the type)
-- completeness-waiver: panic-free (a comptime constant declaration has no runtime path that can panic)
+- completeness-waiver: integer overflow (the three cap values are comptime `usize` literals ~1e6, six orders of magnitude inside the type; `synthPinoutSource`'s row counter is bounded by `min_bytes`, which the allocator would refuse long before the counter could wrap)
+- completeness-waiver: panic-free (the caps are comptime declarations, and the one runtime path — `synthPinoutSource` — returns `Allocator.Error` rather than panicking, so an exhausted allocator surfaces as an error to the caller)
+
+## infra/atomic-write
+
+The one place a file is replaced rather than rewritten in place. A truncating
+`createFile` + `writeAll` pair leaves the target empty or half-filled if the
+process dies between the two syscalls, and the files this guards — a design's
+`.sexp` source, a library component, a notes document — are the user's authored
+work with no other copy. Every write stages into a sibling temporary, flushes,
+fsyncs, and renames, so a reader sees either the whole previous file or the
+whole new one and never a torn middle. It wraps `infra/fs.zig`'s `AtomicFile`
+rather than hand-rolling create+rename: that keeps the tree's one I/O-capability
+boundary intact and inherits a randomly named temporary that is retried on
+collision, which is what a fixed `<path>.tmp` gets wrong when two writers race.
+The fsync is the one thing added on top, and it is best-effort and logged — a
+filesystem that does not implement it must not fail a user's save for a reason
+the user cannot act on.
+
+Atomicity is not serialization: this module stops a torn file, not a lost
+update. Two callers that each read, modify and write the same path still race,
+and that ordering belongs to the caller.
+
+- writeFile replaces the target with exactly the new bytes, an empty body included
+- an oversized body larger than the staging buffer lands whole
+- a staged write abandoned before commit, or stopped by a write error, leaves the previous file contents intact
+- neither a committed nor an abandoned write leaves a temporary file behind
+- write and commit on a Staged whose begin never succeeded return NotStaged with no panic
+- two concurrent writers staging one target use distinct temporaries and the later commit wins whole
+
+- completeness-waiver: unauthorized access (it opens exactly the path it is handed and grants no capability of its own; name validation and traversal defence belong to the callers — `paths.designSourcePath`, `library.isSafeLibName`, and each route's own `:name` check)
+- completeness-waiver: malformed encoding (the payload is an opaque byte slice that is never parsed here; a design source's or a notes document's syntax is the sexpr and notes parsers' contract)
+- completeness-waiver: integer overflow (no arithmetic beyond one comptime buffer length and the slice lengths the writer already bounds)
+
+## numeric
+
+The sanctioned narrowing guard. `[int_from_float]` in `guardian.toml` names
+`checkedInt` as the one wrapper a raw `@intFromFloat` may hide inside, so every
+float that becomes an integer anywhere in the evaluator, the placer, the KiCad
+importer and the board readers passes through here. That makes its bound a
+safety property of the whole tree rather than a local detail: a value it wrongly
+admits is undefined behaviour in the safety-off production build, at whichever
+call site happens to receive it.
+
+The upper bound is therefore exclusive — `maxInt(T) + 1` — because for any T
+whose value bits exceed the f64 mantissa, `@floatFromInt(maxInt(T))` cannot
+represent the maximum and rounds *up* to exactly `maxInt(T) + 1`. An inclusive
+`r > hi` test compares equal there and waves the out-of-range value through.
+`maxInt(T) + 1` is a power of two and so is exact in f64 at every width, which
+is what makes the predicate exact rather than approximately right.
+
+- checkedInt admits exactly the values representable in T, rejecting the maxInt+1 overflow bound at every width
+
+- completeness-waiver: empty inputs (the input is a single f64; there is no collection to be empty, and the non-finite cases are part of the specified behaviour rather than an edge)
+- completeness-waiver: unauthorized access (pure arithmetic on a value the caller already holds; it reads no ambient state and grants no capability)
+- completeness-waiver: I/O failure (no I/O — the module opens nothing and reads nothing)
+- completeness-waiver: concurrent access (pure functions over their arguments with no shared mutable state, so every call is independent)
+- completeness-waiver: malformed encoding (an f64 is not parsed here; NaN and the infinities are specified inputs, not encoding errors)
+- completeness-waiver: large inputs (a magnitude past the target type's range is the case this module exists to reject, and it is specified above rather than waived away)
+- completeness-waiver: panic-free (every path returns `null` or a value; the `@intFromFloat` is reached only after the range test that makes it defined)
 
 ## Web Server
 
@@ -6898,6 +6985,16 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - A server whose gzip memo has no allocator still compresses its responses
 - The one-parse layout read still falls back to the legacy .autolayout.json cache when the sidecar carries no cache slot
 - Silk texts resolve against an already-parsed layout list, naming the requested row or falling back to the starred default
+- A named layout save holds one sidecar lock across its whole revision check-then-write, so two saves that observed the same revision cannot both be accepted
+- Edit-source provenance in the PCB blob is escaped for the script element, so neither a ref-des key nor an instance label can close the tag
+- One sidecar always hashes to one lock slot and its guard releases it, so a collision only over-serializes and can never deadlock
+- Part fields in the PCB blob are escaped for the script element they sit in, so no ref-des, value, MPN, footprint, pad or pad-net name can close the tag
+- Plane net names in the PCB blob's layer table are escaped for the script element, so a plane net cannot close the tag
+- Power-integrity net and terminal names in the PCB blob are escaped for the script element, so neither can close the tag
+- The BOM symbol-pin cache reads library pinouts at the class-owned lib_limits cap, so a pinout past the retired 256 KiB figure still contributes its pads
+- The pinout endpoint reads its library file at the class-owned lib_limits cap, so a pinout past the retired 256 KiB figure is served rather than answered 404
+- The revision-free sidecar writers, the render dedup and the regenerate record, re-read under the sidecar lock rather than trusting a value read before it
+- Two saved vias that differ only in their layer span are different copper and both survive a sidecar save round-trip
 - completeness-waiver: concurrent access (httpz owns request threading and each handler answers from its own response arena; the two pieces of state that really are shared — the live scene graph and a design's layout sidecar — are specified where they live, under the push and layout-backfill sections, rather than restated per endpoint)
 
 ## fab_readiness
@@ -6959,6 +7056,7 @@ Public functions: check, writeJson
 - the fast fabrication refusal cites the same source-revision finding as the full report and states that the rest of the report was not computed
 - the fast fabrication refusal declines every request the saved-layout selection still owes a 404
 - a collapsed sub-micron track crumb the parser culls is not dropped manufacturing copper, while any other missing track still fails release evidence
+- every non-waivable release-blocking id is still spelled at the site that emits it
 - completeness-waiver: empty inputs (an empty/missing selection has no exact manufacturing row and is a non-waivable evidence failure)
 - completeness-waiver: large inputs (the sidecar read is capped at 16 MiB before the strict JSON tree and entity validation run)
 - completeness-waiver: unauthorized access (the validator is read-only; HTTP authorization remains at the manufacturing endpoint boundary)

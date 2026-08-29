@@ -25,6 +25,7 @@ const history = @import("history.zig");
 const subprocess = @import("subprocess.zig");
 const page = @import("pcb_layout_page.zig");
 const saved_zone = @import("saved_zone.zig");
+const sidecar_store = @import("../layout_sidecar_store.zig");
 
 const SavedLayout = page.SavedLayout;
 
@@ -146,6 +147,13 @@ fn write(
     layouts: []const SavedLayout,
 ) bool {
     const path = paths.designSiblingPath(alloc, project_dir, name, page.layouts_ext) catch return false;
+    // The rev read, the snapshot and the write are one transaction: without the
+    // hold a concurrent save can land between the read and the rename, and this
+    // pass then republishes `rev + 1` over it — the lost update the sidecar lock
+    // exists to stop. The three readers below take no lock of their own, so
+    // calling them inside the hold cannot re-enter it.
+    const guard = sidecar_store.lockSidecar(name, null);
+    defer guard.unlock();
     _ = history.snapshotLayouts(alloc, project_dir, name, path) catch null;
     const rev = page.readLayoutRev(alloc, project_dir, name, null);
     const cache = page.readCacheSlot(alloc, project_dir, name);

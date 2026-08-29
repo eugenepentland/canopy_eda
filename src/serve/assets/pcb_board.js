@@ -194,9 +194,23 @@ function loadCamReview(){
 // board diagnostics start. If the user edits meanwhile, the saved-state result
 // is stale and is discarded.
 var deferredAnalysisSeq=0;
+// A save in ANOTHER window (or a KiCad sync) can bump the sidecar rev between
+// this page's render and its deferred fetch, so the payload answers a rev this
+// page never loaded. `rebase` re-aims the NEXT attempt at the rev the server
+// just reported — most such bumps (a rename, a delete, a sibling layout's save)
+// leave the copper on screen untouched, so the retry matches and the page
+// completes normally. It is deliberately NOT PCB.rev: that is the
+// optimistic-concurrency token, and adopting a rev this window never saw would
+// turn the next save into a silent clobber of the other window's work. Retries
+// are counted and small: after the budget the flag is cleared honestly rather
+// than leaving the DRC chip stuck on "checking…" forever.
+var DEFERRED_ANALYSIS_RETRIES=2;
+var deferredAnalysisRebase=null,deferredAnalysisTries=0;
 function loadDeferredAnalysis(){
  if(RO||!PCB.analysis_deferred)return;
- var run=++deferredAnalysisSeq,generation=dirtyGeneration,rev=PCB.rev;
+ var run=++deferredAnalysisSeq,generation=dirtyGeneration,rev=PCB.rev,
+     expect=(deferredAnalysisRebase&&deferredAnalysisRebase.from===rev)?deferredAnalysisRebase.rev:rev,
+     rebased=expect!==rev;
  function current(){return run===deferredAnalysisSeq&&generation===dirtyGeneration&&rev===PCB.rev;}
  // A normal Save can bump PCB.rev while the opening deferred request is in
  // flight. The stale owner must hand work to one fresh generation; otherwise
@@ -207,7 +221,13 @@ function loadDeferredAnalysis(){
   var u=new URL(window.location.href);u.hash="";u.searchParams.set("derived","1");
   drcFlightBegin();
   fetch(u.pathname+u.search).then(function(r){if(!r.ok)throw 0;return r.json();})
-   .then(function(j){if(stale()||!j||j.rev!==rev)return;
+   .then(function(j){if(stale()||!j)return;
+    // The payload describes a DIFFERENT revision of the board than the one on
+    // screen, so it must not be painted here. Nothing local changed (stale()
+    // covers that), so the bump came from outside this window: re-aim one
+    // bounded retry at the reported rev, or give up in the open.
+    if(j.rev!==expect){deferredAnalysisRebump(j.rev);return;}
+    deferredAnalysisRebase=null;deferredAnalysisTries=0;
     PCB.pours=j.pours||[];PCB.plane_fills=j.plane_fills||[];PCB.zone_fills=j.zone_fills||[];pourCacheStore(j);
     PCB.drc=drawRfRetrofitDrcMerge(j.drc||[]);
     PCB.mask_relief=j.mask_relief||{openings:[],strokes:[],joints:[]};PCB.mask_merges=j.mask_merges||[];
@@ -215,13 +235,33 @@ function loadDeferredAnalysis(){
     PCB.power_integrity=j.power_integrity||{nets:[]};PCB.fab_text=j.fab_text||null;
     if(PCB.power_integrity.ac===null)loadPdnSweep();
     PCB.analysis_deferred=false;traceEmIdx=null;powerIntegrityIdx=null;traceEmDirty=false;powerIntegrityDirty=false;
-    routeSummaryFrom(j);pourGeomDrop();dragCacheDrop();paintSoon();drawDrc();drcChip(PCB.drc.length);poursFresh();drawRfRetrofitSchedule();})
+    routeSummaryFrom(j);pourGeomDrop();dragCacheDrop();paintSoon();drawDrc();drcChip(PCB.drc.length);poursFresh();drawRfRetrofitSchedule();
+    // Accepted on the re-aimed attempt: this analysis answers a save made in
+    // another window. Usually that save left THIS board alone (a rename, a
+    // delete, a sibling layout) and the fills/DRC are exactly right — but this
+    // page cannot prove it, so say where the numbers came from rather than
+    // presenting them as its own.
+    if(rebased)routeStatMsg("fills and DRC are from a newer save made in another window \u{2014} reload to be sure they match this board");})
    .catch(function(){if(stale())return;PCB.analysis_deferred=false;runDrcNow();drawRfRetrofitSchedule();})
    .then(drcFlightEnd,drcFlightEnd);}
  var start=function(){pourCacheRead(function(j){if(stale())return;
    if(j){pourFillApply(j);poursFresh();analysis();return;}
    if(poursDeclared())refillPours({deferred:true,done:analysis});else analysis();});};
  requestAnimationFrame(function(){requestAnimationFrame(start);});}
+// One bounded re-aim of the deferred analysis at the rev the server reported.
+// Anything else — a non-numeric rev, or a budget already spent — CLEARS the
+// deferred flag instead of dropping the payload and waiting forever: the DRC
+// chip re-runs locally (exactly what the fetch-failure path does) and the RF
+// taper rebuild stops answering "save a routed layout before rebuilding its
+// tapers" for a board that is saved. A wrong diagnosis needing a full reload is
+// worse than an honest one that says so.
+function deferredAnalysisRebump(serverRev){
+ if(typeof serverRev==="number"&&deferredAnalysisTries<DEFERRED_ANALYSIS_RETRIES){
+  deferredAnalysisTries++;deferredAnalysisRebase={from:PCB.rev,rev:serverRev};
+  loadDeferredAnalysis();return;}
+ deferredAnalysisRebase=null;PCB.analysis_deferred=false;
+ routeStatMsg("board analysis came back for a newer save in another window \u{2014} reload to refresh it",true);
+ runDrcNow();drawRfRetrofitSchedule();}
 var pdnPending=false;
 // The PDN impedance sweep is the heaviest analysis this board runs — on
 // barracuda it was 6.3 s of a 13.5 s deferred payload, because it rasters every
@@ -4372,14 +4412,18 @@ function cloneTexts(){return (PCB.texts||[]).map(cloneText);}
 function cloneFabricationLayers(){return JSON.parse(JSON.stringify(PCB.fabrication_layers||[]));}
 function cloneHeatsink(){return PCB.heatsink?JSON.parse(JSON.stringify(PCB.heatsink)):null;}
 function cloneDimensions(){return JSON.parse(JSON.stringify(PCB.dimensions||[]));}
-function cloneZones(){return (PCB.zones||[]).map(function(z){return {net:z.net||"",layer:z.layer||"",layers:Array.isArray(z.layers)?z.layers.slice():undefined,poly:(z.poly||[]).map(function(p){return [+p[0],+p[1]];}),filled:!!z.filled,keepout:!!z.keepout,priority:+z.priority||0,g:z.g,
+// Zone deep-copy split from the live-board reader so BOTH ownership boundaries
+// (snapshot ↔ board, saved-layout row ↔ board) can use the same clone.
+function cloneZoneList(zs){return (zs||[]).map(function(z){return {net:z.net||"",layer:z.layer||"",layers:Array.isArray(z.layers)?z.layers.slice():undefined,poly:(z.poly||[]).map(function(p){return [+p[0],+p[1]];}),filled:!!z.filled,keepout:!!z.keepout,priority:+z.priority||0,g:z.g,
  sketch:z.sketch?(OS?OS.clone(z.sketch):JSON.parse(JSON.stringify(z.sketch))):null};});}
+function cloneZones(){return cloneZoneList(PCB.zones);}
 function cloneZoneFills(){return JSON.parse(JSON.stringify(PCB.zone_fills||[]));}
 // Deep-copy the drawn board outline ({x,y,w,h,pts?}) so a snapshot holds its
 // own vertex array — an in-place vertex drag must not mutate a stored undo step.
-function cloneOutline(){var o=PCB.outline;if(!o)return null;
+function cloneOutlineOf(o){if(!o)return null;
  return {x:o.x,y:o.y,w:o.w,h:o.h,pts:o.pts?o.pts.map(function(p){return [p[0],p[1]];}):null,
   radii:o.radii?o.radii.slice():null,sketch:o.sketch?(OS?OS.clone(o.sketch):JSON.parse(JSON.stringify(o.sketch))):null};}
+function cloneOutline(){return cloneOutlineOf(PCB.outline);}
 // Build a full snapshot. `poses` optionally overrides the current poses (a
 // drag's captured pre-move state); copper + texts + outline are always current.
 function snapAll(poses){var c=cloneCopper();return {poses:poses||snapPoses(),tracks:c.tracks,vias:c.vias,rf_paths:c.rf_paths,zones:cloneZones(),zone_fills:cloneZoneFills(),texts:cloneTexts(),outline:cloneOutline(),fabrication_layers:cloneFabricationLayers(),heatsink:cloneHeatsink(),dimensions:cloneDimensions()};}
@@ -4401,9 +4445,16 @@ function restoreSnap(s){s.poses.forEach(function(q,i){if(P[i]){P[i].x=q.x;P[i].y
  // snapshot's copper AFTER it, then repaint + re-DRC.
  applyAll();
  restoreCopperSnap(s);
+ // The copper the marquee selection and the inspector pointed at was just
+ // REPLACED by fresh clones, and both hold their targets by object IDENTITY.
+ // A carried-over selCu paints fringes over geometry that no longer exists,
+ // and a following Delete filters by identity, removes nothing, yet still
+ // records an undo entry — which wipes redoStack and makes the edit that was
+ // just undone unredoable. The drag-rollback callers clear the inspector by
+ // hand for exactly this reason; every restore needs both.
+ selCuClear();inspClear();
  var editZoneIndex=typeof pourEdit!=="undefined"&&pourEdit?(PCB.zones||[]).indexOf(pourEdit):-1;
- PCB.zones=(s.zones||[]).map(function(z){return {net:z.net||"",layer:z.layer||"",layers:Array.isArray(z.layers)?z.layers.slice():undefined,poly:(z.poly||[]).map(function(p){return [+p[0],+p[1]];}),filled:!!z.filled,keepout:!!z.keepout,priority:+z.priority||0,g:z.g,
-  sketch:z.sketch?(OS?OS.clone(z.sketch):JSON.parse(JSON.stringify(z.sketch))):null};});
+ PCB.zones=cloneZoneList(s.zones);
  PCB.zone_fills=JSON.parse(JSON.stringify(s.zone_fills||[]));
  if(typeof pourEdit!=="undefined")pourEdit=editZoneIndex>=0&&editZoneIndex<PCB.zones.length?PCB.zones[editZoneIndex]:null;
  pourGeomDrop();markPoursStale();
@@ -4413,10 +4464,7 @@ function restoreSnap(s){s.poses.forEach(function(q,i){if(P[i]){P[i].x=q.x;P[i].y
  if(typeof txSel!=="undefined"&&txSel>=0){txSel=-1;txPopClose();}
  // The board outline rewinds too (undo/redo of an outline draw/poly/vertex
  // edit / clear); repaint it and mark the board dirty like any restored edit.
- PCB.outline=s.outline?{x:s.outline.x,y:s.outline.y,w:s.outline.w,h:s.outline.h,
-  pts:s.outline.pts?s.outline.pts.map(function(p){return [p[0],p[1]];}):null,
-  radii:s.outline.radii?s.outline.radii.slice():null,
-  sketch:s.outline.sketch?(OS?OS.clone(s.outline.sketch):JSON.parse(JSON.stringify(s.outline.sketch))):null}:null;
+ PCB.outline=cloneOutlineOf(s.outline);
  var backingLayerIndex=typeof backingEdit!=="undefined"&&backingEdit?(PCB.fabrication_layers||[]).indexOf(backingEdit.layer):-1,backingRegionIndex=typeof backingEdit!=="undefined"&&backingEdit?backingEdit.index:-1;
  PCB.fabrication_layers=JSON.parse(JSON.stringify(s.fabrication_layers||fabricationDefaults));
  if(typeof backingEdit!=="undefined"){var restoredBacking=backingLayerIndex>=0&&PCB.fabrication_layers[backingLayerIndex];backingEdit=restoredBacking&&backingRegionIndex>=0?{layer:restoredBacking,index:backingRegionIndex,poly:restoredBacking.regions[backingRegionIndex],sketch:(restoredBacking.sketches||[])[backingRegionIndex]||null}:null;}
@@ -4527,6 +4575,13 @@ var DRAFT_KEY="pcb-draft:"+PCB.name+(PCB.sub?(":"+PCB.sub):"");
 var pcbDirty=false,draftTimer=null,draftIdle=null,autosaveTimer=null,dirtyGeneration=0;
 var autosaveQueued=false,saveQueue=Promise.resolve();
 var autosaveRetryMs=2000;
+// A 409 is TERMINAL for this page: the server bumped the sidecar rev, this
+// window deliberately does not adopt it (adopting would let the next save
+// clobber the other window's work), so every later save is guaranteed to 409
+// too. Latch it, stop re-arming saves that cannot succeed, and say so where the
+// user cannot miss it — a one-line amber status is overwritten by the next
+// copper edit's own message.
+var saveConflicted=false;
 function autosaveName(){return curLayout;}
 // One `dirty` line per dirty BURST (the first edit after a clean/save), never
 // one per pointer move: the burst is what a later save has to carry.
@@ -4552,7 +4607,10 @@ function scheduleDraft(ms){if(RO)return;if(draftTimer)clearTimeout(draftTimer);
  draftTimer=setTimeout(function(){draftTimer=null;
   if(draftGestureLive()){scheduleDraft(500);return;}
   saveDraft();},ms||1000);}
-function scheduleAutosave(ms){if(RO)return;if(!autosaveName()){ilogGate("no-name");return;}
+function scheduleAutosave(ms){if(RO)return;
+ // Never re-arm a save that is guaranteed to conflict; the banner owns recovery.
+ if(saveConflicted){ilogGate("conflict");return;}
+ if(!autosaveName()){ilogGate("no-name");return;}
  // Unplaced parts = poses the SERVER staged, not ones the user authored. The
  // idle autosave must never write them into the saved row; place them (any
  // move counts) or Save/Update explicitly to accept the staging.
@@ -4574,6 +4632,10 @@ function runAutosave(){autosaveTimer=null;
   // edit while its older payload was in flight. Coalesce that edit into one
   // follow-up save; failures/conflicts keep the draft without request-spamming.
   if(result==="saved"&&pcbDirty)scheduleAutosave();
+  // "skipped" here means the queued save was abandoned because the loaded
+  // layout changed under it. The edits are still unsaved — re-arm so they land
+  // in the layout that is actually being edited now.
+  else if(result==="skipped"&&pcbDirty)scheduleAutosave();
   else if(result==="retry"&&pcbDirty){var ms=autosaveRetryMs;autosaveRetryMs=Math.min(30000,autosaveRetryMs*2);scheduleAutosave(ms);ilog("save.retry",{backoff_ms:ms});}
   // A newer edit may have repaired a hard validation failure while the large
   // board's previous request was still being checked. Give that generation
@@ -4629,6 +4691,19 @@ function showDraftBanner(d,stale){if(document.getElementById("pcb-draft-banner")
  rb.addEventListener("click",function(){applyDraft(d);close();});
  db.addEventListener("click",function(){clearDraft();close();});
  bar.appendChild(lbl);bar.appendChild(rb);bar.appendChild(db);document.body.appendChild(bar);}
+// Fixed bar announcing a terminal save conflict. The draft is written first, so
+// Reload lands on the other window's version with this window's work offered
+// back by the draft banner — the only path that keeps both.
+function showConflictBanner(){if(document.getElementById("pcb-conflict-banner"))return;
+ var bar=mkEl("div");bar.id="pcb-conflict-banner";
+ bar.style.cssText="position:fixed;top:0;left:0;right:0;z-index:10001;background:#9e6a03;color:#fff;"+
+  "padding:8px 14px;display:flex;gap:12px;align-items:center;font:13px/1.4 system-ui,sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.35)";
+ var lbl=mkEl("span",null,"This layout was saved in another window. Saving is stopped so your edits cannot overwrite it — they are kept as a draft. Reload to pick up that version, then Restore.");
+ lbl.style.flex="1";
+ var rb=mkEl("button",null,"Reload");
+ rb.style.cssText="border:0;border-radius:4px;padding:5px 12px;cursor:pointer;font:inherit;font-weight:600;background:#fff;color:#0d1117";
+ rb.addEventListener("click",function(){window.location.reload();});
+ bar.appendChild(lbl);bar.appendChild(rb);document.body.appendChild(bar);}
 var outBtn=document.getElementById("pcb-outline");
 if(outBtn)outBtn.addEventListener("click",function(){outlineArm(!outlineMode);});
 var polyBtn=document.getElementById("pcb-outline-poly");
@@ -4660,12 +4735,17 @@ function loadLayoutName(nm){
  // sub-block's IC) and last-wins, which collapsed whole sub-circuits onto one
  // pose on Load — the black-canyon layout corruption.
  P.forEach(function(p){var s=L.parts[p.ref];if(s){p.x=s.x;p.y=s.y;p.rot=s.rot||0;p.side=s.side||"top";if(s.locked!==undefined)p.locked=!!s.locked;}});applyAll();
+ // CLONE out of the saved row, never alias it: almost every copper edit mutates
+ // PCB.tracks/vias/zones (and the outline's vertex arrays) IN PLACE, so a row
+ // handed out by reference would be edited along with the board — and clicking
+ // Load again would "revert" to the same mutated arrays. The row must stay the
+ // board as it was saved.
  if(L.routes&&((L.routes.tracks||[]).length||(L.routes.vias||[]).length||(L.routes.rf_paths||[]).length)){
-  PCB.tracks=L.routes.tracks||[];PCB.vias=L.routes.vias||[];PCB.rf_paths=L.routes.rf_paths||[];PCB.drc=[];rfLoadBake();drawRoute();drawDrc();}
+  restoreCopperSnap(L.routes);PCB.drc=[];rfLoadBake();drawRoute();drawDrc();}
  // Restore this layout's custom copper pours; the carved fills recompute below.
- PCB.zones=(L.routes&&L.routes.zones)?L.routes.zones:[];PCB.zone_fills=[];pourGeomDrop();
+ PCB.zones=(L.routes&&L.routes.zones)?cloneZoneList(L.routes.zones):[];PCB.zone_fills=[];pourGeomDrop();
  PCB.dimensions=JSON.parse(JSON.stringify(L.dimensions||[]));
- PCB.outline=L.outline||null;PCB.fabrication_layers=JSON.parse(JSON.stringify((L.fabrication_layers&&L.fabrication_layers.length)?L.fabrication_layers:fabricationDefaults));outlineGeomDrop();
+ PCB.outline=cloneOutlineOf(L.outline);PCB.fabrication_layers=JSON.parse(JSON.stringify((L.fabrication_layers&&L.fabrication_layers.length)?L.fabrication_layers:fabricationDefaults));outlineGeomDrop();
  PCB.heatsink=L.heatsink?JSON.parse(JSON.stringify(L.heatsink)):null;drawBoardRect();
  PCB.texts=(L.texts||[]).map(cloneText);
  txSel=-1;txPopClose();copperTouched();paintSoon();
@@ -4707,9 +4787,13 @@ function bindLayRename(b){b.addEventListener("click",function(){var old=b.getAtt
 // vias from the default on the next sync.
 function bindLayDefault(b){b.addEventListener("click",function(){var nm=b.getAttribute("data-lay-default");
  var send=b.classList.contains("on")?"":nm;
+ // Carry the rev like the sibling delete/rename mutations do, and never swallow
+ // the outcome: this used to reload on success and do NOTHING visible on
+ // failure, so a rejected toggle looked exactly like a star that would not move.
  fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name)+"/default"+subq(),{method:"POST",
-   headers:{"Content-Type":"application/json"},body:JSON.stringify({name:send})})
-  .then(function(r){if(!r.ok)throw 0;window.location.reload();}).catch(function(){});});}
+   headers:{"Content-Type":"application/json"},body:JSON.stringify({name:send,rev:PCB.rev||0})})
+  .then(function(r){if(!r.ok)throw r;window.location.reload();})
+  .catch(function(r){window.alert(r&&r.status===409?"Layouts changed in another window. Reload before changing the default.":"Could not change the default layout.");});});}
 function bindRescore(btn){btn.addEventListener("click",function(){
  btn.disabled=true;btn.textContent="Rescoring…";
  fetch("/api/pcb-rescore/"+encodeURIComponent(PCB.name)+subq(),{method:"POST"})
@@ -4807,8 +4891,27 @@ function updateLayoutRowScore(nm,s){var rows=document.querySelectorAll(".lay-row
 // with the same optimistic-concurrency rev. Payload capture happens when the
 // queued save starts, so a manual Save behind an autosave still gets the newest
 // board state.
-function persistLayout(nm,verb,automatic){ilogSaveEnq();var task=saveQueue.then(function(){
- return persistLayoutNow(nm,verb,!!automatic);});
+function persistLayout(nm,verb,automatic){ilogSaveEnq();
+ // Which layout the board on screen BELONGED to when this save was queued.
+ // Deferring payload capture to dequeue time is deliberate — a manual Save
+ // behind an autosave should write the newest board state — but "the newest
+ // board state" belongs to whatever layout is loaded NOW. If a Load switched
+ // the edit target while this save waited its turn, the board in memory is a
+ // different layout's, and writing it under the queued name would replace that
+ // row with a copy of the other one (and drag the user's edit target back with
+ // it, since a successful save re-activates the name it wrote). Abandon
+ // instead; the board stays dirty, so the next autosave saves it under the
+ // layout it actually belongs to.
+ var queuedFor=curLayout;
+ var task=saveQueue.then(function(){
+  if(curLayout!==queuedFor){
+   ilogSaveWait();/* consume this save's queue-wait stamp; nothing will report it */
+   ilog("save.abandon",{name:nm,queued_for:queuedFor||"",active:curLayout||"",automatic:!!automatic});
+   if(!automatic){var msg=document.getElementById("pcb-savemsg");
+    if(msg){msg.style.color="#d29922";
+     msg.textContent="not saved \u{2014} a different layout was loaded while this save was queued";}}
+   return "skipped";}
+  return persistLayoutNow(nm,verb,!!automatic);});
  saveQueue=task.then(function(result){return result;},function(){return "failed";});
  return saveQueue;}
 function saveResponse(r){ilogSaveRes(r);return r.text().then(function(t){
@@ -4846,14 +4949,25 @@ function persistLayoutNow(nm,verb,automatic){var msg=document.getElementById("pc
  // Persist the on-screen copper (tracks/vias + user copper-pour zones) + drawn
  // outline with the poses so all survive reloads. Zones alone make `routes`
  // non-null so a board with only pours still round-trips them.
- var routes=((PCB.tracks||[]).length||(PCB.vias||[]).length||(PCB.zones||[]).length||(PCB.rf_paths||[]).length)?{tracks:PCB.tracks||[],vias:PCB.vias||[],zones:PCB.zones||[],rf_paths:PCB.rf_paths||[]}:null;
- var texts=(PCB.texts||[]).filter(function(t){return t&&t.text;});
+ // Everything below is a DEEP COPY of the board, captured once and used for
+ // both the request body and the panel row this save caches. The row must own
+ // its data: the live arrays are mutated in place by nearly every copper edit
+ // (a draw pushes into PCB.tracks, a segment/via drag writes coordinates back),
+ // so a row holding them by reference would silently drift into whatever the
+ // board became — and Load would then "revert" to the drifted arrays instead of
+ // the board as saved. The sibling fields were already cloned; copper, texts
+ // and the outline's vertex arrays were the gap.
+ var cu=cloneCopper(),savedZones=cloneZones();
+ var routes=(cu.tracks.length||cu.vias.length||savedZones.length||cu.rf_paths.length)?{tracks:cu.tracks,vias:cu.vias,zones:savedZones,rf_paths:cu.rf_paths}:null;
+ var texts=(PCB.texts||[]).filter(function(t){return t&&t.text;}).map(cloneText);
+ var savedOutline=cloneOutline(),savedFabLayers=cloneFabricationLayers(),
+     savedHeatsink=cloneHeatsink(),savedDimensions=cloneDimensions();
  if(msg){msg.style.color="#8b949e";msg.textContent=verb+"\u{2026}";}
  // Echo the sidecar rev the page loaded so the server can 409 a stale write
  // (another window saved since) instead of silently clobbering it.
  // The body is serialized into a local so the save log can report its exact
  // size without stringifying the whole board a second time.
- var ilogBody=JSON.stringify({name:nm,parts:parts,routes:routes,outline:PCB.outline||null,fabrication_layers:PCB.fabrication_layers||[],heatsink:PCB.heatsink||null,texts:texts,dimensions:PCB.dimensions||[],rev:PCB.rev||0});
+ var ilogBody=JSON.stringify({name:nm,parts:parts,routes:routes,outline:savedOutline,fabrication_layers:savedFabLayers,heatsink:savedHeatsink,texts:texts,dimensions:savedDimensions,rev:PCB.rev||0});
  ilog("save.start",{verb:verb,automatic:!!automatic,queue_wait_ms:ilogWait,bytes:ilogBody.length,
   parts:parts.length,tracks:(PCB.tracks||[]).length,vias:(PCB.vias||[]).length,zones:(PCB.zones||[]).length,
   rev:PCB.rev||0,gen:saveGeneration});
@@ -4872,9 +4986,9 @@ function persistLayoutNow(nm,verb,automatic){var msg=document.getElementById("pc
     // stamping the live board's score in would show a number that vanishes on
     // the next reload. `updateLayoutRowScore` renders null as "—".
     var savedScore=null;
-    if(found){found.parts=pmap;found.kind="manual";found.score=savedScore;found.routes=routes;found.outline=PCB.outline||null;found.fabrication_layers=cloneFabricationLayers();found.heatsink=cloneHeatsink();found.texts=texts;found.dimensions=cloneDimensions();found.ts=Math.floor(Date.now()/1000);
+    if(found){found.parts=pmap;found.kind="manual";found.score=savedScore;found.routes=routes;found.outline=savedOutline;found.fabrication_layers=savedFabLayers;found.heatsink=savedHeatsink;found.texts=texts;found.dimensions=savedDimensions;found.ts=Math.floor(Date.now()/1000);
      if(foundAt>0){Ls.splice(foundAt,1);Ls.unshift(found);}}
-    else Ls.unshift({name:nm,kind:"manual",parts:pmap,score:savedScore,routes:routes,outline:PCB.outline||null,fabrication_layers:cloneFabricationLayers(),heatsink:cloneHeatsink(),texts:texts,dimensions:cloneDimensions(),ts:Math.floor(Date.now()/1000)});
+    else Ls.unshift({name:nm,kind:"manual",parts:pmap,score:savedScore,routes:routes,outline:savedOutline,fabrication_layers:savedFabLayers,heatsink:savedHeatsink,texts:texts,dimensions:savedDimensions,ts:Math.floor(Date.now()/1000)});
     upsertLayoutPanel(nm);updateLayoutRowScore(nm,savedScore);setActiveLayout(nm);layoutNavSync(true);
     // An EXPLICIT save accepts the board as shown — staged parts included
     // (they are covered by the row now), so the autosave gate lifts.
@@ -4905,7 +5019,14 @@ function persistLayoutNow(nm,verb,automatic){var msg=document.getElementById("pc
      // The board changed under us — keep the dirty state + draft so nothing is
      // lost, and do NOT adopt the server rev; the user reloads to pick up the
      // other window's version, then re-saves.
+     // Latch it: PCB.rev is now permanently behind the server, so every later
+     // save would 409 too. Stop arming them, hold the work in the crash draft,
+     // and escalate from a status line to a banner that survives the next edit.
+     saveConflicted=true;
+     if(autosaveTimer){clearTimeout(autosaveTimer);autosaveTimer=null;}
+     saveDraft();
      if(msg){msg.style.color="#d29922";msg.textContent="layout changed in another window \u{2014} reload to continue";}
+     showConflictBanner();
      ilogSaveEnd("conflict");return "conflict";}
     var retryable=!e||e.retryable||typeof e.status!=="number";
     if(automatic&&retryable){if(msg){msg.style.color="#8b949e";msg.textContent="autosave interrupted \u{2014} retrying\u{2026}";}ilogSaveEnd("retry");return "retry";}
@@ -10956,14 +11077,22 @@ window.PCBAdoptCopper=function(tracks,vias,drc,rfPaths){
 // Shared route-result application — today's blocking-route response handling,
 // factored so BOTH the live-route done path (pcb_replay.js's driver hands the
 // finished job's `final` here) and the blocking fallback below run it identically.
-// NO recordUndo — the Route click already recorded one undo step. Exposed on
-// window so the live-route driver and the page-init reattach can land a finished
-// job's copper exactly like a Route. opts: {scope, clr}. Hands the stuck-net
-// diagnostics (route_diagnose.capture rode along on the route) to the Stuck-nets
-// panel, and re-enables the Route button.
+// NO recordUndo on the CLICK path — runRoute already recorded one undo step
+// before it sent the job. `opts.reattached` marks the other caller: a tab that
+// reloaded into a route already running (pcb_replay.js's liveReattach), where
+// nobody clicked Route here and no snapshot was ever taken. The stream runs for
+// minutes with the part/copper tools live, so that tab can hold real edits when
+// the result lands — and this replaces its copper wholesale with copper solved
+// for the CLICK-time poses. Record the undo step the missing click owed, so the
+// user can put their board back. Exposed on window so the live-route driver and
+// the page-init reattach can land a finished job's copper exactly like a Route.
+// opts: {scope, clr, reattached}. Hands the stuck-net diagnostics
+// (route_diagnose.capture rode along on the route) to the Stuck-nets panel, and
+// re-enables the Route button.
 window.PCBApplyRouteResult=function(j,opts){
  opts=opts||{};var scope=opts.scope||"";
  var elapsed=(typeof opts.elapsedMs==="number")?(" · "+(opts.elapsedMs/1000).toFixed(1)+"s"):"";
+ if(opts.reattached)recordUndo();
  if(opts.clr>0)PCB.clr=opts.clr;
  applyRoutedCopper(j.tracks||[],j.vias||[],j.drc||[],j.rf_paths||[]); // shared with PCBAdoptCopper
  var counts=uniqueRouteCounts(j),ok=(counts.routed===counts.total);

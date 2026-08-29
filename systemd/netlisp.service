@@ -14,7 +14,7 @@ WorkingDirectory=/home/epentland/ai/canopy/eda
 # installed atomically by deploy-prod.sh. The service only runs that artifact;
 # it must never rebuild an unchecked binary during restart or host boot.
 Environment=NETLISP_GIT_AUTOCOMMIT=0
-ExecStart=/home/epentland/ai/canopy/eda/zig-out/bin/netlisp serve --project-dir /home/epentland/ai/canopy/eda/projects/designs --port 7050
+ExecStart=/home/epentland/ai/canopy/eda/.deploy/bin/netlisp serve --project-dir /home/epentland/ai/canopy/eda/projects/designs --port 7050
 # `always` also recovers from signals systemd classifies as clean exits, while
 # still honoring an explicit `systemctl --user stop`.
 Restart=always

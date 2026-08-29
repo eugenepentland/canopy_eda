@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const board_layers = @import("../board_layers.zig");
+const json_writer = @import("../json_writer.zig");
 const optimizer = @import("../placement/optimizer.zig");
 
 /// What the blob prints for a stack row's `"net"`: the net a declared plane
@@ -44,7 +45,11 @@ pub fn write(w: *std.Io.Writer, rules: optimizer.BoardRules) std.Io.Writer.Error
         try w.print("{{\"i\":{d},\"l\":", .{index});
         if (row.signal) |layer| try w.print("{d}", .{layer.int()}) else try w.writeAll("null");
         try w.print(",\"name\":\"{s}\",\"kind\":\"{s}\",\"net\":", .{ row.kicadName(), @tagName(row.kind) });
-        if (planeLabel(row)) |net| try writeJsonStr(w, net) else try w.writeAll("null");
+        // The plane net is the one DESIGN-derived string in a stack row (every
+        // other field is a fixed `board_layers` spelling), and this blob is
+        // embedded in the PCB page's `<script>` tag — so it goes out through
+        // the script-safe writer, which escapes `<` as well as the JSON set.
+        if (planeLabel(row)) |net| try json_writer.writeScriptString(w, net) else try w.writeAll("null");
         try w.print(",\"c\":\"{s}\"", .{row.color()});
         if (!table.stack.declared and index > 1 and index < table.stackCount()) try w.writeAll(",\"implicit\":true");
         try w.writeByte('}');
@@ -72,16 +77,6 @@ fn writeNames(w: *std.Io.Writer) std.Io.Writer.Error!void {
             board_layers.b_crtyd,
         },
     );
-}
-
-/// Minimal JSON string escaping for a net name (quotes and backslashes).
-fn writeJsonStr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
-    try w.writeByte('"');
-    for (s) |c| {
-        if (c == '"' or c == '\\') try w.writeByte('\\');
-        try w.writeByte(c);
-    }
-    try w.writeByte('"');
 }
 
 // spec: Web Server - PCB blob layer rows take their names, colours and plane nets from the shared layer table
@@ -182,4 +177,47 @@ test "PCB blob ships a single layer table the viewer derives both registries fro
     const js = @embedFile("assets/pcb_board.js");
     try std.testing.expect(std.mem.indexOf(u8, js, "PCB.layer_table") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "typeof r.l===\"number\"") != null);
+}
+
+// spec: Web Server - Plane net names in the PCB blob's layer table are escaped for the script element, so a plane net cannot close the tag
+test "a plane net named like a closing script tag cannot terminate the blob's script element" {
+    // The board declares a plane whose net name IS a script-tag break. It is
+    // reachable from a design's `(stackup …)`, and the blob it lands in is
+    // written straight into `<script>const PCB=…` on every PCB page load.
+    const evil = "</script><script>alert(1)</script>";
+    const planes = [_]optimizer.PlaneAt{.{ .index = 2, .net = evil }};
+    const rules = optimizer.BoardRules{ .plane_nets = &.{evil}, .copper_layers = 4, .planes = .{ .declared = &planes } };
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // `write` emits members of the blob object, trailing comma included — the
+    // `"_"` filler closes it into standalone JSON.
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    try aw.writer.writeByte('{');
+    try write(&aw.writer, rules);
+    try aw.writer.writeAll("\"_\":0}");
+    const json = aw.written();
+
+    // Nothing an HTML parser reads as a tag survives into the blob…
+    try std.testing.expect(std.mem.indexOf(u8, json, "</script>") == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, json, '<') == null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\\u003c/script>") != null);
+
+    // …and the escape is transparent to JSON: the viewer still reads the exact
+    // net name the design declared.
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, arena, json, .{});
+    const row = root.object.get("layer_table").?.array.items[1].object;
+    try std.testing.expectEqualStrings(evil, row.get("net").?.string);
+
+    // A lexical gate cannot protect this file any more: the `\\u003c` in the
+    // assertion above makes the whole FILE read as script-safe, so
+    // `script-string-safety` is pinned green here and a SECOND, private escaper
+    // added later would slip past it. This is that guard. Both needles are
+    // split so this assertion is never its own counterexample.
+    const source = @embedFile("layer_table_json.zig");
+    const private_quote_arm = "'\"'" ++ " =>";
+    try std.testing.expect(std.mem.indexOf(u8, source, private_quote_arm) == null);
+    const unsafe_sink = "json_writer." ++ "writeString(";
+    try std.testing.expect(std.mem.indexOf(u8, source, unsafe_sink) == null);
 }

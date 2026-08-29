@@ -88,18 +88,22 @@ deny_growth = ["spec", "completeness", "concept", "divergent-const", "twin-refer
 # loaded worst case while catching a single-shard runaway an order of magnitude
 # sooner than 180 s did.
 #
-# CAVEAT, measured the same day and NOT fixed here: this cap is currently inert
-# in practice. Guardian's runner reads the variable through an 8 KiB
-# FixedBufferAllocator it shares with argv parsing, and
-# `std.process.Environ.getAlloc` allocates against the whole environment block,
-# so any environment over ~2 KB makes the read fail — and `readEnv` maps that
-# failure to `null`, which is indistinguishable from "unset". Bisected on this
-# tree: with `env -i` a 5 s cap correctly fails an 11.05 s shard; add ~2 KB of
-# environment and the identical run passes. Every real shell and CI environment
-# is well past that, so BOTH 180 and 60 have been dead letters. The number here
-# is still the right one for when guardian-zig fixes the read (reported to
-# guardian-zig FEEDBACK.md 2026-08-17) — it is just not load-bearing today, and
-# nobody should read a green gate as evidence that shard cost is bounded.
+# HISTORY, and the reason to re-read a green gate here with fresh eyes: from
+# 2026-08-17 to 2026-08-24 this cap was INERT. Guardian's runner read the
+# variable through an 8 KiB FixedBufferAllocator it shared with argv parsing,
+# and `std.process.Environ.getAlloc` allocates against the whole environment
+# block, so any environment over ~2 KB made the read fail — and `readEnv` mapped
+# that failure to `null`, indistinguishable from "unset". Bisected on this tree
+# at the time: with `env -i` a 5 s cap correctly failed an 11.05 s shard; add
+# ~2 KB of environment and the identical run passed. Every real shell and CI
+# environment is well past that, so BOTH 180 and 60 were dead letters.
+#
+# FIXED UPSTREAM in guardian-zig 3fbcac2 (2026-08-24): `readEnv` now allocates
+# from the runner backing allocator and maps only `EnvironmentVariableMissing`
+# to null, fataling on OOM/InvalidWtf8 instead of silently disarming. The 60 s
+# cap below is therefore LIVE as of the 2026-08-29 audit — it is a real
+# per-shard ceiling again, not documentation. Note it remains PER SHARD (the
+# runner is one process per shard), so the suite-wide ceiling is 8x this number.
 # The `env` prefix is REQUIRED: guardian tokenizes test_command into argv with
 # no shell, so a bare NAME=VALUE would be exec'd as the program name.
 [gate]
@@ -152,6 +156,20 @@ forbidden = ["export_kicad.zig", "export_gerber.zig", "fab_readiness.zig"]
 # The local Zig cache is intentionally large for this dependency-heavy design;
 # keep doctor advisory below 8 GiB while retaining the tighter Guardian-owned
 # cache threshold. Set either value to zero to disable that warning class.
+#
+# UNCLOSED GAP (measured 2026-08-29): doctor's disk audit inspects only
+# `.guardian/cache`, `.zig-cache` and `zig-cache` (guardian-zig
+# cli/doctor.zig:inspectCache), and the [doctor] config surface accepts EXACTLY
+# these two keys (config_parser.zig whitelists `zig_cache_warn_mib`,
+# `guardian_cache_warn_mib` — any third key is a hard parse error). Meanwhile the
+# release pipeline leaves ~27 GB of residue in the shared gitdir that no worktree
+# or cache threshold sees: `.git/release-candidates` = 18 GB and
+# `.git/release-failures` = 9.1 GB here (this worktree shares the main checkout's
+# .git). There is no config key to threshold `.git/release-*` growth, so it
+# CANNOT be expressed here today — it needs a new doctor key + a gitdir-size
+# inspection in guardian-zig (e.g. `release_residue_warn_mib`, scanning
+# `git rev-parse --git-common-dir`/release-{candidates,failures}). Filed as a
+# guardian-zig gap; not addable from this file.
 [doctor]
 zig_cache_warn_mib = 8192
 guardian_cache_warn_mib = 1024
@@ -263,6 +281,92 @@ name = "pdfjs-worker-syntax"
 command = ["node", "--check", "src/serve/assets/vendor/pdfjs-4.10.38/pdf.worker.min.mjs"]
 inputs = ["src/serve/assets/vendor/pdfjs-4.10.38/pdf.worker.min.mjs"]
 
+# ── First-party JS assets that had NO gate (COVERAGE, audit 2026-08-29) ────
+# Guardian scans only Zig/spec/config, so a broken edit to any browser asset not
+# named here rode green on an unchanged Zig tree. These twelve first-party
+# `src/serve/assets/*.js` files were the ones still un-gated after the entries
+# above; each `node --check` is measured passing today, so this is coverage of a
+# gate that did not exist, not a new failure. (drc_wasm_parity is added below;
+# the parser-run harness needs a live server and is skipped, syntax-only.)
+[[external]]
+name = "assembly-debug-js-syntax"
+command = ["node", "--check", "src/serve/assets/assembly_debug.js"]
+inputs = ["src/serve/assets/assembly_debug.js"]
+
+[[external]]
+name = "footprint-editor-js-syntax"
+command = ["node", "--check", "src/serve/assets/footprint_editor.js"]
+inputs = ["src/serve/assets/footprint_editor.js"]
+
+[[external]]
+name = "library-js-syntax"
+command = ["node", "--check", "src/serve/assets/library.js"]
+inputs = ["src/serve/assets/library.js"]
+
+[[external]]
+name = "pcb-dxf-js-syntax"
+command = ["node", "--check", "src/serve/assets/pcb_dxf.js"]
+inputs = ["src/serve/assets/pcb_dxf.js"]
+
+[[external]]
+name = "pcb-gpu-js-syntax"
+command = ["node", "--check", "src/serve/assets/pcb_gpu.js"]
+inputs = ["src/serve/assets/pcb_gpu.js"]
+
+[[external]]
+name = "pcb-kicad-import-js-syntax"
+command = ["node", "--check", "src/serve/assets/pcb_kicad_import.js"]
+inputs = ["src/serve/assets/pcb_kicad_import.js"]
+
+[[external]]
+name = "pcb-route-session-js-syntax"
+command = ["node", "--check", "src/serve/assets/pcb_route_session.js"]
+inputs = ["src/serve/assets/pcb_route_session.js"]
+
+[[external]]
+name = "pcb-step-export-js-syntax"
+command = ["node", "--check", "src/serve/assets/pcb_step_export.js"]
+inputs = ["src/serve/assets/pcb_step_export.js"]
+
+[[external]]
+name = "pcb-stuck-js-syntax"
+command = ["node", "--check", "src/serve/assets/pcb_stuck.js"]
+inputs = ["src/serve/assets/pcb_stuck.js"]
+
+[[external]]
+name = "pcb-thermal-js-syntax"
+command = ["node", "--check", "src/serve/assets/pcb_thermal.js"]
+inputs = ["src/serve/assets/pcb_thermal.js"]
+
+[[external]]
+name = "review-notes-js-syntax"
+command = ["node", "--check", "src/serve/assets/review_notes.js"]
+inputs = ["src/serve/assets/review_notes.js"]
+
+[[external]]
+name = "shape-sketch-js-syntax"
+command = ["node", "--check", "src/serve/assets/shape_sketch.js"]
+inputs = ["src/serve/assets/shape_sketch.js"]
+
+# The shape-sketch constraint solver had a unit test wired to NOTHING — no gate
+# ran it. It requires ./shape_sketch.js and exits 0 with a pass line today, so it
+# is coverage of an orphaned test, not a new failure.
+[[external]]
+name = "shape-sketch-solver"
+command = ["node", "src/serve/assets/shape_sketch.test.js"]
+inputs = ["src/serve/assets/shape_sketch.js", "src/serve/assets/shape_sketch.test.js"]
+
+# The WASM/server DRC parity harness. Measured 2026-08-29: run standalone it
+# exits 2 with a usage banner — it needs a live server URL, design names and a
+# built zig-out/bin/drc.wasm, so it CANNOT be a run-gate here (documented,
+# skipped). What is gateable is its own syntax: `node --check` passes today, so
+# an edit that breaks the ESM harness itself now fails instead of surfacing only
+# when someone next runs the manual parity check.
+[[external]]
+name = "drc-wasm-parity-js-syntax"
+command = ["node", "--check", "scripts/drc_wasm_parity.mjs"]
+inputs = ["scripts/drc_wasm_parity.mjs"]
+
 # Completeness checklist (opt-in). Every SPEC.md `## ` feature section must
 # ADDRESS or explicitly WAIVE all 8 scenario categories (empty inputs, large
 # inputs, unauthorized access, I/O failure, concurrent access, malformed
@@ -364,6 +468,66 @@ modules = [
   "src/pdf.zig",
   "src/svg2pdf.zig",
 ]
+
+# ── Script-context escaping (`[script_string_safety]`) ────────────────────
+# The PCB page ships its whole board as `<script>const PCB=…</script>`, so every
+# serializer feeding that blob writes into an HTML script element, not into a
+# JSON response. A JSON escaper is not a script escaper: it passes `<` through,
+# and a design-authored `</script>` then closes the tag and executes.
+#
+# This is the SECOND time that bug shipped. The 2026-07 audit found it, the fix
+# hardened the central writer (`json_writer.writeScriptString`, which escapes
+# `<` plus U+2028/9) — and three sibling serializers into the same blob kept
+# their own private escaper: pcb_part_json escaped quotes and control chars but
+# not `<`, layer_table_json escaped only `"` and `\`, and power_integrity_json
+# routed through the plain `writeString`. Nothing in the type system says a
+# writer is script-safe, so a fourth private escaper could reopen it again.
+#
+# `blob_files` names both sides on purpose: the three that were unsafe AND the
+# two that were already right (`pcb_rules_json`, `trace_em_json`) plus the owner
+# `json_writer`, so the rule is measured against its own negative controls. The
+# check is deliberately opt-in and consumer-named rather than keyed on "any
+# writer lacking `<`": over a broad `src/**/*_json.zig` glob it scores ten
+# findings, most of them legitimate `application/json` responders where `<` is
+# fine.
+[script_string_safety]
+blob_files = [
+  "src/serve/pcb_part_json.zig",
+  "src/serve/layer_table_json.zig",
+  "src/power_integrity_json.zig",
+  "src/serve/pcb_rules_json.zig",
+  "src/serve/trace_em_json.zig",
+  "src/json_writer.zig",
+]
+
+# ── Surfaced-but-unenforced model fields (`[[dead_model_field]]`) ─────────
+# `ElectricalDecl.max_voltage` was parsed from `(max-voltage …)`, rendered into
+# the review's "boundary contracts" table and into review JSON — and read by no
+# checker at all. The voltage-domain ERC consumed only the UNDERvoltage
+# direction, so a 5 V driver on a 1.8 V-max receiver passed clean while the UI
+# displayed the rating as though something enforced it. That is worse than an
+# unchecked field: the contract was on screen.
+#
+# The rule counts FIELD ACCESSES (an identifier preceded by `.`), so the JSON
+# key string `"max_voltage"` never counts — only `e.max_voltage` does. A field
+# read under `output` and never under `logic` fires. `fields` is named
+# explicitly rather than discovered from the struct: discovery over the whole
+# `ElectricalDecl` yields a defensible five-field set, but generic names like
+# `.domain` and `.drive` conflate with same-named fields on other structs, and
+# this is a gate, not a survey.
+[[dead_model_field]]
+struct = "ElectricalDecl"
+owner = "src/eval/env.zig"
+fields = ["max_voltage"]
+output = ["src/review_json.zig", "src/render_html.zig"]
+logic = [
+  "src/erc.zig",
+  "src/checks.zig",
+  "src/req_checks.zig",
+  "src/req_derived_checks.zig",
+  "src/eval/validate.zig",
+]
+reason = "a declared absolute-maximum rating that is shown to the user must be enforced by a checker, or the review table promises a guard nothing performs"
 # ── [[ban]]: the raw `.layouts.json` writers ──────────────────────────────
 # Rule of thumb first (evaluated 2026-08-04, still true): reach for [[ban]] only
 # when the callee's signature is NOT ours to change. The case this check was
@@ -433,6 +597,33 @@ reason = "rev-reading wrapper over the raw sidecar write — persist layouts thr
 chain = ["active_read_trace"]
 allow = ["src/infra/fs.zig"]
 reason = "the release read capability is one synchronous thread-local scope owned by the filesystem adapter; begin/end reject nesting and cross-thread lifetime, and no parser may introduce another ambient trace"
+
+# ── [[ban]]: non-atomic design-source writes (DETECTOR, FIRING) ────────────
+# The design .sexp and the review-notes sidecar are the two files an interactive
+# edit rewrites in place, and both are written the unsafe way: `createFile`
+# TRUNCATES the target to zero length, then a separate `writeAll` refills it. A
+# crash, a full disk or a killed process between those two syscalls leaves the
+# user's design truncated or empty on disk — the classic "atomic write" hazard
+# the tmp+rename idiom (see the `tmp-rename-write` [[idiom]] below) exists to
+# avoid. Measured 2026-08-29: SEVEN such sites, all in these two files —
+# edit.zig:428/674/1456/2328/2802 (design + lib-component writers) and
+# notes.zig:241/330 (the notes sidecar). Every one is a plain
+# `infra_fs.cwd().createFile(...)` + `file.writeAll(...)`.
+#
+# Chain is the single bare token `createFile` so it matches under any alias and
+# as a bare same-file call (the matcher does no alias resolution). `paths` scopes
+# the ban to exactly the two non-atomic writers so it CANNOT fire on the ~40
+# other legitimate createFile calls elsewhere in the tree (tmp files inside the
+# atomic writer, caches, exports). `allow = []` today: the eventual fix routes
+# both files through a to-be-created `src/infra/atomic_write.zig` (tmp write +
+# fsync + rename), and when that lands its path JOINS this allow list while the
+# two source files stop calling createFile directly. Left FIRING on purpose — a
+# baseline here would hide the very truncation bug this names.
+[[ban]]
+chain = ["createFile"]
+paths = ["src/serve/edit.zig", "src/serve/notes.zig"]
+allow = []
+reason = "design .sexp and the notes sidecar are rewritten with createFile (truncate) + writeAll, which leaves the file truncated or empty if the process dies between the two syscalls — persist them atomically through src/infra/atomic_write.zig (tmp write + rename)"
 
 # ── Owned concepts ────────────────────────────────────────────────────────
 # A [[concept]] names a set of magic spellings that model ONE domain fact, the
@@ -671,6 +862,23 @@ reason = "the DRC finding vocabulary is drc.Kind, marshalled once by drc_json �
 # API route strings ("/api/pcb-describe/") — every consumer must spell the route
 # it calls; there is no owner module a fetch() could import from. A route table
 # is a different mechanism (a generated client), not an ownership rule.
+#
+# gerber arc sweep direction from QUANTIZED coordinates (export_gerber.zig `arc`
+# ~1817 and `regionArcTo` ~1890) — DROPPED after measuring (audit 2026-08-29).
+# Both decide the G02/G03 sweep from a cross product of `g.xy()`-quantized 4.6
+# integers (`a`, `m`, `b`), so rounding can flip the sign of a nearly-collinear
+# arc and emit the wrong direction. A fragment conjunction `["cross < 0", "G02"]`
+# WOULD fire precisely on exactly those two lines and nowhere else (verified: the
+# only other `cross < 0` is outline.zig:257 with no G02; the only other `"G02"`
+# are gerber_verify.zig and two test asserts). But an [[idiom]] asserts "drift
+# with a canonical home you should call instead", and this is neither: the shape
+# is not hand-copied vocabulary, there is no helper to point at, and — decisively
+# — a lexical rule cannot tell a cross product taken over ROUNDED ints (the bug)
+# from one taken over the raw floats (the fix). It would mark a location while
+# claiming to detect drift it cannot see. The real detector is a differential
+# dump: compute the direction at full float precision vs. the 4.6-quantized
+# integers and fail when they disagree. Shipping the idiom would be a noisy lint;
+# the harness is the honest tool, so the rule is dropped, not added.
 
 # src/exit.zig is netlisp's designated fatal helper (like guardian's own
 # src/reporter.zig): the one place a raw std.process.exit(nonzero) is allowed,
@@ -731,6 +939,64 @@ name = "tmp-rename-write"
 fragments = [".rename("]
 allow = ["src/infra/atomic_write.zig", "src/serve/vfs.zig"]
 reason = "private atomic-write (tmp+rename) - 8 implementations while the design .sexp itself is written non-atomically; one shared writer (vfs move_file is a legitimate rename)"
+
+# ── [[idiom]]: lib-file read caps that diverge from the class limit (DETECTOR)
+# `src/lib_limits.zig` OWNS the read cap for netlisp's own `lib/` source files:
+# `max_lib_file_bytes = 1 MiB`, one figure across every reader of that class. Its
+# own doc comment records the defect a per-reader cap has already caused twice —
+# "the same split left two of the pinout readers at 256 KiB while the rest read
+# 1 MiB" — and the failure is SILENT: every one of these reads is behind `catch
+# return` / `catch return null` / `catch continue`, so an over-cap part goes
+# quietly missing from a page/BOM/pin-map instead of erroring.
+#
+# Two spellings of the stale 256 KiB cap survive, so it takes two rules (an idiom
+# is a single-line fragment conjunction and cannot OR two literals). Measured
+# 2026-08-29, both FIRING:
+#   `1024 * 256` — render_json.zig:146, serve/api.zig:206, eval/ids.zig:685,
+#                  serve/bom_html.zig:502 (4 files; all read lib/pinouts or
+#                  lib/*.sexp, the exact class lib_limits owns)
+#   `1 << 18`    — render_json.zig:191 (1 file; the pinout-name reader)
+# Both render_json sites the audit named are covered (146 by the first, 191 by
+# the second). The fix is to pass `lib_limits.max_lib_file_bytes` at each site;
+# `allow` names lib_limits.zig where the figure legitimately lives. Left FIRING —
+# a baseline would hide the divergence.
+[[idiom]]
+name = "lib-read-cap-256k-mul"
+fragments = ["readFileAlloc", "1024 * 256"]
+allow = ["src/lib_limits.zig"]
+files = ["src/*.zig"]
+reason = "lib/ file read capped at a bare 256 KiB instead of lib_limits.max_lib_file_bytes (1 MiB) — an over-cap part is silently swallowed by the catch; pass the class-owned limit"
+
+[[idiom]]
+name = "lib-read-cap-256k-shift"
+fragments = ["readFileAlloc", "1 << 18"]
+allow = ["src/lib_limits.zig"]
+files = ["src/*.zig"]
+reason = "lib/ file read capped at a bare 1<<18 (256 KiB) instead of lib_limits.max_lib_file_bytes (1 MiB) — an over-cap part is silently swallowed by the catch; pass the class-owned limit"
+
+# ── [[idiom]]: a second private parseOhms implementation (DETECTOR) ────────
+# The resistor-value parser `parseOhms` (number + SI/`R`-notation suffix → Ω) is
+# `pub` in `src/req_checks.zig`, and `src/req_derived_checks.zig:322` carries a
+# byte-for-byte private RE-IMPLEMENTATION of it (same R-notation fold, same
+# suffix switch). Two parsers for one value grammar is how a suffix the canonical
+# one learns silently goes unrecognised in the derived-checks pass. `allow` names
+# the owner; the rule fires on the duplicate definition and NOT on the many legit
+# `req_checks.parseOhms(...)` CALL sites (they never spell `fn parseOhms`).
+#
+# NOTE — why this is an [[idiom]] and NOT a [[concept]] family, per the audit's
+# "value/unit parser ownership" item: a concept freezes a LITERAL SPELLING, but
+# the parser NAMES are legitimately referenced by every caller (`capFarads` is
+# already correctly centralised in decouple_key.zig — every user aliases
+# `decouple_key.capFarads`, zero drift — and freezing the name would flag all of
+# them). The only real divergence is a duplicate DEFINITION, which the
+# definition-spelling fragment `fn parseOhms` catches exactly. Measured
+# 2026-08-29: 1 offender (req_derived_checks.zig). Left FIRING.
+[[idiom]]
+name = "parse-ohms-duplicate"
+fragments = ["fn parseOhms"]
+allow = ["src/req_checks.zig"]
+files = ["src/*.zig"]
+reason = "a second private parseOhms re-implements req_checks.parseOhms verbatim — one value grammar, two parsers that can drift; call req_checks.parseOhms instead of forking the suffix logic"
 
 [[shadow]]
 const = "src/placement/drc.zig.eps"

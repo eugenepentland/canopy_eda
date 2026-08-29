@@ -1788,8 +1788,7 @@ const Gx = struct {
 
     /// Placement-space mm → framed 4.6 integer coordinates.
     fn xy(g: *Gx, x: f64, y: f64) [2]i64 {
-        const p = g.frame.pt(x, y);
-        return .{ mmToUm(p[0]), mmToUm(p[1]) };
+        return frameXy(g.frame, x, y);
     }
 
     fn flash(g: *Gx, x: f64, y: f64) Error!void {
@@ -1805,23 +1804,85 @@ const Gx = struct {
 
     /// Native circular interpolation (single-quadrant/multi-quadrant G75) from
     /// the same exact three points persisted by the editor and KiCad writer.
+    /// Degrades to the straight chord when the quantized arc would not be
+    /// trustworthy — see `arcDirection`.
     fn arc(g: *Gx, p1: [2]f64, pm: [2]f64, p2: [2]f64) Error!void {
-        const circle = outline.arcCircle(.{ .p1 = p1, .pm = pm, .p2 = p2 }) orelse {
+        const dir = arcDirection(g.frame, .{ .p1 = p1, .pm = pm, .p2 = p2 }) orelse {
             try g.line(p1[0], p1[1], p2[0], p2[1]);
             return;
         };
         const a = g.xy(p1[0], p1[1]);
-        const m = g.xy(pm[0], pm[1]);
         const b = g.xy(p2[0], p2[1]);
-        const c = g.xy(circle.cx, circle.cy);
-        const cross = @as(i128, m[0] - a[0]) * @as(i128, b[1] - m[1]) -
-            @as(i128, m[1] - a[1]) * @as(i128, b[0] - m[0]);
         try g.w.writeAll("G75*\n");
         try g.w.print("X{d}Y{d}D02*\n{s}X{d}Y{d}I{d}J{d}D01*\nG01*\n", .{
-            a[0], a[1], if (cross < 0) "G02" else "G03", b[0], b[1], c[0] - a[0], c[1] - a[1],
+            a[0], a[1], dir.code, b[0], b[1], dir.i, dir.j,
         });
     }
 };
+
+/// Placement-space mm → framed 4.6 integer coordinates. Free-standing so the
+/// arc solver below can quantize without a live `Gx`.
+fn frameXy(frame: export_fab.Frame, x: f64, y: f64) [2]i64 {
+    const p = frame.pt(x, y);
+    return .{ mmToUm(p[0]), mmToUm(p[1]) };
+}
+
+/// Largest magnitude the 4.6 coordinate format this file declares
+/// (`%FSLAX46Y46*%`) can spell: 4 integer digits + 6 decimals.
+const coord_max_46 = 9_999_999_999;
+
+/// True when `mm` fits the declared 4.6 coordinate format.
+fn within46(mm: f64) bool {
+    return @abs(mm) * 1e6 <= @as(f64, coord_max_46);
+}
+
+/// The G02/G03 direction word and the I/J centre offsets for one native
+/// circular interpolation, or null when the arc must degrade to its straight
+/// chord.
+///
+/// The sweep DIRECTION is carried from the model: `outline.arcCircle` already
+/// solves the signed start→end sweep the midpoint selects, and that sign is
+/// authoritative. It used to be re-derived from a cross product of the
+/// ROUNDED output coordinates, which is exactly where quantization can lie —
+/// move the rounded midpoint onto (or across) the rounded chord and the cross
+/// product's sign flips or vanishes. Under the multi-quadrant G75 rule the
+/// wrong word does not mean a slightly-off curve, it means the COMPLEMENT
+/// sweep: a 2° CCW sliver emits as a 358° CW arc, hundreds of millimetres of
+/// spurious copper. Nothing downstream catches it — DRC measures the
+/// model-space chord and `gerber_verify` only validates G36 regions, not
+/// stroked arcs.
+///
+/// The frame's y-flip (`export_fab.Frame.pt`) reverses handedness, so a model
+/// sweep that is counter-clockwise over the raw board numbers is CLOCKWISE in
+/// the emitted y-up coordinate system: positive sweep → G02.
+///
+/// Two quantization guards return null instead of an arc:
+///   • a sagitta below half a 4.6 unit — the arc and its chord are the same
+///     picture at output resolution, but not the same file: the rounded
+///     centre lands arbitrarily far away, and rounded-equal endpoints are
+///     read under G75 as a full 360° circle. (`arcCircle` accepts any arc
+///     whose determinant is ≥1e-12 mm², and `serve/layout_sidecar_json`
+///     validates saves on that same threshold, so such arcs do reach here.)
+///   • a centre or offset the 4.6 format cannot spell — `mmToUm` clamps an
+///     unrepresentable coordinate to 0, which would silently name a
+///     completely different circle.
+fn arcDirection(
+    frame: export_fab.Frame,
+    arc: optimizer.BoardArc,
+) ?struct { code: []const u8, i: i64, j: i64 } {
+    const circle = outline.arcCircle(arc) orelse return null;
+    // Written as `!(x >= y)` so a NaN sweep/radius degrades to the chord.
+    const sagitta_mm = circle.radius * (1 - @cos(@abs(circle.sweep) / 2));
+    if (!(sagitta_mm * 1e6 >= 0.5)) return null;
+    const cf = frame.pt(circle.cx, circle.cy);
+    if (!within46(cf[0]) or !within46(cf[1])) return null;
+    const a = frameXy(frame, arc.p1[0], arc.p1[1]);
+    const c = frameXy(frame, circle.cx, circle.cy);
+    const i = c[0] - a[0];
+    const j = c[1] - a[1];
+    if (@abs(i) > coord_max_46 or @abs(j) > coord_max_46) return null;
+    return .{ .code = if (circle.sweep > 0) "G02" else "G03", .i = i, .j = j };
+}
 
 /// Fill a closed polygon (placement-space points) as a G36/G37 region.
 fn regionPoly(g: *Gx, pts: []const [2]f64) Error!void {
@@ -1879,21 +1940,15 @@ fn sameOutlinePoint(a: [2]f64, b: [2]f64) bool {
 }
 
 fn regionArcTo(g: *Gx, arc: optimizer.BoardArc) Error!void {
-    const circle = outline.arcCircle(arc) orelse {
-        const end = g.xy(arc.p2[0], arc.p2[1]);
-        try g.w.print("X{d}Y{d}D01*\n", .{ end[0], end[1] });
+    const b = g.xy(arc.p2[0], arc.p2[1]);
+    // Same model-carried direction + quantization guards as `Gx.arc`; a
+    // rejected arc closes the region edge with its straight chord.
+    const dir = arcDirection(g.frame, arc) orelse {
+        try g.w.print("X{d}Y{d}D01*\n", .{ b[0], b[1] });
         return;
     };
-    const a = g.xy(arc.p1[0], arc.p1[1]);
-    const m = g.xy(arc.pm[0], arc.pm[1]);
-    const b = g.xy(arc.p2[0], arc.p2[1]);
-    const c = g.xy(circle.cx, circle.cy);
-    const cross = @as(i128, m[0] - a[0]) * @as(i128, b[1] - m[1]) -
-        @as(i128, m[1] - a[1]) * @as(i128, b[0] - m[0]);
     try g.w.writeAll("G75*\n");
-    try g.w.print("{s}X{d}Y{d}I{d}J{d}D01*\nG01*\n", .{
-        if (cross < 0) "G02" else "G03", b[0], b[1], c[0] - a[0], c[1] - a[1],
-    });
+    try g.w.print("{s}X{d}Y{d}I{d}J{d}D01*\nG01*\n", .{ dir.code, b[0], b[1], dir.i, dir.j });
 }
 
 /// mm → integer 4.6-format units (1e-6 mm).
@@ -3982,4 +4037,76 @@ fn packageOf(arena: std.mem.Allocator, files: []const LayerFile, prefix: []const
     var pkg = export_fab.Package{ .arena = arena, .prefix = prefix };
     for (files) |f| if (f.exact_name) try pkg.addNamed(f.suffix, "") else try pkg.add(f.suffix, "");
     return pkg;
+}
+
+// spec: export_gerber - a native arc's G02/G03 sweep direction is carried from the model, not re-derived from the rounded output coordinates
+test "arc direction survives coordinate quantization" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // A shallow counter-clockwise sliver: a 1 µm chord bowing 0.8 nm off it.
+    // In the model the p1→pm→p2 turn is unambiguously left, but at the 4.6
+    // output resolution all three points round onto the SAME y lattice line,
+    // so a cross product of the rounded ints is exactly 0 — which the old
+    // emitter read as the opposite direction. Under the multi-quadrant G75
+    // rule the wrong word is not a slightly-off curve, it is the COMPLEMENT
+    // sweep: ~359.7° of copper instead of ~0.3°.
+    const p1 = [2]f64{ 0, 0.0000004 };
+    const pm = [2]f64{ 0.0005, -0.0000004 };
+    const p2 = [2]f64{ 0.001, 0.0000004 };
+
+    const frame = export_fab.Frame{};
+    const a = frameXy(frame, p1[0], p1[1]);
+    const m = frameXy(frame, pm[0], pm[1]);
+    const b = frameXy(frame, p2[0], p2[1]);
+    // The premise: quantized, the three points are collinear.
+    try testing.expectEqual(@as(i128, 0), @as(i128, m[0] - a[0]) * @as(i128, b[1] - m[1]) -
+        @as(i128, m[1] - a[1]) * @as(i128, b[0] - m[0]));
+    // The model is not ambiguous at all: the sweep is counter-clockwise over
+    // the raw board numbers, which the y-flipped output frame spells G02.
+    try testing.expect(outline.arcCircle(.{ .p1 = p1, .pm = pm, .p2 = p2 }).?.sweep > 0);
+
+    var aps = Apertures{};
+    var gw: std.Io.Writer.Allocating = .init(arena);
+    var g = Gx{ .w = &gw.writer, .aps = &aps, .arena = arena, .frame = frame };
+    try g.arc(p1, pm, p2);
+    const out = gw.written();
+    try testing.expect(std.mem.indexOf(u8, out, "G75*") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "G02") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "G03") == null);
+}
+
+// spec: export_gerber - an arc whose bow falls below the output lattice is emitted as its straight chord instead of a G75 arc
+test "sub-lattice arcs degrade to a straight chord" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // 0.2 nm of bow on a 1 µm chord. `arcCircle` still solves it — the save
+    // validator accepts any arc whose determinant is ≥1e-12 mm², so shapes
+    // like this do reach the writer — but at 4.6 resolution both endpoints
+    // land on ONE lattice point, and under G75 an arc whose start equals its
+    // end is a full 360° circle.
+    const p1 = [2]f64{ 0, 0 };
+    const pm = [2]f64{ 0.0005, -0.0000002 };
+    const p2 = [2]f64{ 0.001, 0 };
+    try testing.expect(outline.arcCircle(.{ .p1 = p1, .pm = pm, .p2 = p2 }) != null);
+    try testing.expect(arcDirection(.{}, .{ .p1 = p1, .pm = pm, .p2 = p2 }) == null);
+
+    var aps = Apertures{};
+    var gw: std.Io.Writer.Allocating = .init(arena);
+    var g = Gx{ .w = &gw.writer, .aps = &aps, .arena = arena, .frame = .{} };
+    try g.arc(p1, pm, p2);
+    const out = gw.written();
+    try testing.expect(std.mem.indexOf(u8, out, "G75*") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "G02") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "G03") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "X1000Y0D01*") != null);
+
+    // The same guard protects a region edge: it closes with its chord.
+    var rw: std.Io.Writer.Allocating = .init(arena);
+    var rg = Gx{ .w = &rw.writer, .aps = &aps, .arena = arena, .frame = .{} };
+    try regionArcTo(&rg, .{ .p1 = p1, .pm = pm, .p2 = p2 });
+    try testing.expectEqualStrings("X1000Y0D01*\n", rw.written());
 }

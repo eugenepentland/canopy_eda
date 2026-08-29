@@ -17,6 +17,7 @@ const std = @import("std");
 const logError = std.log.err;
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
+const atomic_write = @import("../infra/atomic_write.zig");
 const infra_random = @import("../infra/random.zig");
 const clock = @import("../infra/clock.zig");
 const paths = @import("../paths.zig");
@@ -226,8 +227,13 @@ pub fn loadNotes(
     return parseNotes(allocator, data);
 }
 
-/// Serialize and write `notes` to the file. Overwrites whatever was
-/// there. Creates the file if missing.
+/// Serialize and write `notes` to the file. Replaces whatever was
+/// there, atomically. Creates the file if missing.
+///
+/// Atomic because this is a whole-file rewrite of a document the user also
+/// hand-edits: every task mutation re-renders the entire notes file from the
+/// parse, so an interrupted truncating write would take the scratchpad and every
+/// other task with it, and there is no snapshot of this sidecar anywhere.
 fn writeNotesFile(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
@@ -238,9 +244,7 @@ fn writeNotesFile(
     defer allocator.free(path);
     const body = try renderNotes(allocator, notes);
     defer allocator.free(body);
-    const file = try infra_fs.cwd().createFile(path, .{});
-    defer file.close();
-    try file.writeAll(body);
+    try atomic_write.writeFile(path, body);
 }
 
 // ── HTTP handlers ────────────────────────────────────────────────────
@@ -327,9 +331,11 @@ pub fn saveNotesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
 
     const path = notesPath(ctx.allocator, ctx.project_dir, name) catch return jsonError(res, http_internal_error, err_resolve_path);
     defer ctx.allocator.free(path);
-    const file = infra_fs.cwd().createFile(path, .{}) catch return jsonError(res, http_internal_error, err_write_notes);
-    defer file.close();
-    file.writeAll(text_val.string) catch return jsonError(res, http_internal_error, "{\"error\":\"write failed\"}");
+    // One failure body now: with a staged write there is no longer an "opened
+    // but could not fill it" state to report separately — either the whole
+    // document replaces the old one or the old one is still there.
+    atomic_write.writeFile(path, text_val.string) catch
+        return jsonError(res, http_internal_error, err_write_notes);
 
     res.body = ok_json;
 }

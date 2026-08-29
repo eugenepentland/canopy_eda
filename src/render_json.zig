@@ -7,6 +7,8 @@
 
 const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
+const lib_limits = @import("lib_limits.zig");
+const log = @import("infra/log.zig");
 const env_mod = @import("eval/env.zig");
 const json_writer = @import("json_writer.zig");
 const asserted_fns_mod = @import("asserted_fns.zig");
@@ -143,7 +145,17 @@ fn loadPinoutAlts(allocator: Allocator, map: *PinoutAltMap, project_dir: []const
     if (project_dir.len == 0 or symbol.len == 0) return;
     if (map.contains(symbol)) return;
     const path = std.fmt.allocPrint(allocator, "{s}/lib/pinouts/{s}.sexp", .{ project_dir, symbol }) catch return;
-    const content = infra_fs.cwd().readFileAlloc(allocator, path, 1024 * 256) catch return;
+    const content = infra_fs.cwd().readFileAlloc(allocator, path, lib_limits.max_lib_file_bytes) catch |err| {
+        // A component with no pinout file is ordinary (every passive), so
+        // `FileNotFound` stays silent. Every other failure means a pinout that
+        // EXISTS is being dropped from the scene graph while `render_html.zig`
+        // and `erc.zig` — reading the same file at the same class cap — still
+        // see it, which is the divergence this cap already caused once. Report
+        // it; the degrade itself is unchanged.
+        if (err != error.FileNotFound)
+            log.warn("scene graph: pinout '{s}' not loaded ({s}) — pin alternates fall back to net names", .{ path, @errorName(err) });
+        return;
+    };
     const parser_m = @import("sexpr/parser.zig");
     const nodes = parser_m.parse(allocator, content) catch return;
     if (nodes.len == 0) return;
@@ -188,7 +200,15 @@ fn loadPinoutAlts(allocator: Allocator, map: *PinoutAltMap, project_dir: []const
 /// pinout file — the same source the HTML schematic uses (which is why it
 /// already read "GP11" where the scene graph read the net "LED2_DRV").
 fn loadPinoutNames(allocator: Allocator, path: []const u8) ?std.StringHashMapUnmanaged([]const u8) {
-    const content = infra_fs.cwd().readFileAlloc(allocator, path, 1 << 18) catch return null;
+    const content = infra_fs.cwd().readFileAlloc(allocator, path, lib_limits.max_lib_file_bytes) catch |err| {
+        // `hubPinNameMap` probes three candidate names per hub, so most calls
+        // here legitimately miss — `FileNotFound` must stay quiet or every hub
+        // would log twice. A pinout that exists and still fails to load is the
+        // silent case worth naming: the hub falls back to labelling pins by net.
+        if (err != error.FileNotFound)
+            log.warn("scene graph: pinout '{s}' not loaded ({s}) — hub pins fall back to net names", .{ path, @errorName(err) });
+        return null;
+    };
     const parser_m = @import("sexpr/parser.zig");
     const nodes = parser_m.parse(allocator, content) catch return null;
     if (nodes.len == 0) return null;
@@ -2610,4 +2630,41 @@ test "loadPinoutAlts reads bare-integer pad ids" {
     try std.testing.expectEqualStrings("TIM1_CH1", alts[1]);
     // A quoted pad in the same file still loads beside it.
     try std.testing.expect(by_pin.get("B1") != null);
+}
+
+// spec: render_svg - Both scene-graph pinout readers take the class-owned lib_limits cap, so a pinout past the retired 256 KiB figure still carries its pin names and alternates
+test "the scene-graph pinout readers load a pinout past the retired 256 KiB cap" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // 256 KiB..1 MiB is the exact band this used to break in: the HTML page
+    // (`render_html.zig`) and ERC both already read at the class cap and showed
+    // the part's pin names, while these two readers — capped at 256 KiB behind
+    // `catch return` / `catch return null` — dropped it to bare net names with
+    // no diagnostic anywhere. The cap comes from `lib_limits`, so this file
+    // never restates a figure of its own.
+    const data = try lib_limits.synthPinoutSource(alloc, "big", lib_limits.retired_lib_file_cap_bytes + 4096);
+    try std.testing.expect(data.len > lib_limits.retired_lib_file_cap_bytes);
+    try std.testing.expect(data.len < lib_limits.max_lib_file_bytes);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "lib/pinouts");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/pinouts/big.sexp", .data = data });
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+
+    // Reader 1 — alternates. Over the old cap the read failed outright, so the
+    // symbol never entered the map at all.
+    var map: PinoutAltMap = .empty;
+    try loadPinoutAlts(alloc, &map, project_dir, "big");
+    const by_pin = map.get("big") orelse return error.TestUnexpectedResult;
+    const alts = by_pin.get("LAST") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("SENTINEL", alts[0]);
+
+    // Reader 2 — the hub pin-name supplement, which spelled the same cap as
+    // `1 << 18` and so diverged even from its own file's other reader.
+    const path = try std.fmt.allocPrint(alloc, "{s}/lib/pinouts/big.sexp", .{project_dir});
+    const names = loadPinoutNames(alloc, path) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("LASTFN", names.get("LAST") orelse return error.TestUnexpectedResult);
 }

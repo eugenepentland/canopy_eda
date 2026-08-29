@@ -41,6 +41,7 @@
 const std = @import("std");
 const ast = @import("sexpr/ast.zig");
 const parser_mod = @import("sexpr/parser.zig");
+const tokenizer_mod = @import("sexpr/tokenizer.zig");
 const footprint_conv = @import("convert/footprint.zig");
 const kicad_fmt = @import("kicad_pcb/format.zig");
 const infra_fs = @import("infra/fs.zig");
@@ -525,7 +526,9 @@ fn renderPinout(arena: std.mem.Allocator, name: []const u8, pads: []const Pad) I
     try w.print("(pinout \"{s}\"\n", .{name});
     for (uniq.items) |p| {
         const func = if (p.func.len > 0) p.func else "~";
-        try w.print("  (pin {s} \"{s}\")\n", .{ p.number, func });
+        try w.writeAll("  (pin ");
+        try writePinId(w, p.number);
+        try w.print(" \"{s}\")\n", .{func});
     }
     try w.writeAll(")\n");
     return buf.toOwnedSlice();
@@ -657,8 +660,9 @@ fn emitBoardPad(
     // {d:.4} matches KiCad's own metric precision (0402 pads at ±0.485, fine-
     // pitch BGAs at 0.1625 steps) — quantising to 0.01 mm shifts coordinates by
     // up to 5 µm and compounds across an import→export round-trip.
-    try w.print("  (pad {s} {s} {s} (pos {d:.4} {d:.4}", .{
-        num,
+    try w.writeAll("  (pad ");
+    try writeQuotedId(w, num);
+    try w.print(" {s} {s} (pos {d:.4} {d:.4}", .{
         footprint_conv.mapPadType(pad_type),
         footprint_conv.mapPadShape(shape),
         x,
@@ -690,14 +694,69 @@ fn padHalfExtents(out_sx: f64, out_sy: f64, angle_deg: f64) struct { x: f64, y: 
 }
 
 /// Pad-number text without an allocator (stack buffer for numeric pads).
+/// A non-finite / out-of-range numeric pad number yields null so the caller
+/// SKIPS the pad. That is deliberately the same answer `convert/footprint`'s
+/// `emitPad` gives — the two emitters must never disagree — and the same one
+/// the reader side gives (`render_html.pinIdStr`). The old `orelse 0` fallback
+/// invented pad "0", which shadows a real `(pad 0 …)` and binds the wrong
+/// copper in the netlist and the Gerbers.
 fn padNumText(node: Node, buf: *[32]u8) ?[]const u8 {
     if (node.asString()) |s| return s;
     if (node.asAtom()) |a| return a;
     if (node.asNumber()) |n| {
-        const i: i64 = numeric.checkedInt(i64, n) orelse 0;
+        const i: i64 = numeric.checkedInt(i64, n) orelse return null;
         return std.fmt.bufPrint(buf, "{d}", .{i}) catch null;
     }
     return null;
+}
+
+/// Write a pad number / pin id as a QUOTED token — the shape
+/// `kicad_pcb/format.padNumberText` documents as the modern generated form,
+/// and the only one that re-parses to the original name. Bare, this project's
+/// own tokenizer applies its SI rules (`si_unit_letters = "VAFHR"`) to a
+/// digit-run followed by one of those letters: a castellated `5V` pad comes
+/// back as the number 5 and a dual-row `1A` as 1, and `padNumberText` rejects
+/// a float outright, so the pad drops out of the net diff entirely.
+///
+/// The payload is written verbatim and must NOT be re-escaped: it is either a
+/// `.string` slice this project's tokenizer produced (already in the grammar's
+/// escaped form, per this module's header note), a `.atom` slice (the atom
+/// charset admits neither `"` nor `\`), or the decimal text of a bare int.
+/// Passing such a slice through `kicad_fmt.sexprEscape` would double-escape it.
+fn writeQuotedId(w: anytype, s: []const u8) !void {
+    try w.print("\"{s}\"", .{s});
+}
+
+/// True when `s` may be written BARE in a `(pin …)` slot and still be read
+/// back as exactly these bytes. The check runs the real tokenizer, so it can
+/// never drift from the language: a single `.atom` spanning all of `s`
+/// re-reads verbatim, and a single `.int` re-reads through `{d}` (so a leading
+/// zero — `01` → `1` — disqualifies it). Everything else — `5V`/`1A`
+/// (SI values), `1.5` (float, which the readers reject outright), anything
+/// with a space or a quote — must be quoted instead.
+fn bareIdRoundTrips(s: []const u8) bool {
+    if (s.len == 0) return false;
+    var tz = tokenizer_mod.Tokenizer.init(s);
+    const t = tz.next() catch return false;
+    if (t.text.len != s.len) return false; // the token must cover all of `s`
+    const rest = tz.next() catch return false;
+    if (rest.tag != .eof) return false;
+    return switch (t.tag) {
+        .atom => true,
+        .int => s.len == 1 or s[0] != '0',
+        else => false,
+    };
+}
+
+/// Write a pin id into a `(pin …)` slot, keeping the language's idiomatic
+/// bare form wherever it round-trips and quoting only the names that would
+/// otherwise be silently renamed by the tokenizer.
+fn writePinId(w: anytype, s: []const u8) !void {
+    if (bareIdRoundTrips(s)) {
+        try w.writeAll(s);
+        return;
+    }
+    try writeQuotedId(w, s);
 }
 
 // ── Design emission ───────────────────────────────────────────────────
@@ -837,7 +896,10 @@ fn emitInstance(arena: std.mem.Allocator, w: anytype, part: Part, nets: *NetName
 
     for (groups.items) |group| {
         try w.writeAll("\n    (pin");
-        for (group.pins.items) |pin| try w.print(" {s}", .{pin});
+        for (group.pins.items) |pin| {
+            try w.writeByte(' ');
+            try writePinId(w, pin);
+        }
         try w.print(" \"{s}\")", .{group.net});
     }
     // First-class DNP so the BOM/CSV, populated-qty merges, and KiCad netlist
@@ -1158,10 +1220,10 @@ test "footprint geometry preserves diagonal pad angles" {
     const text = try renderFootprint(arena, parts[0]);
     // The token is netlisp's frame — mod(360 − local, 360) — and the size
     // stays the pad's own unrotated W×H, never swapped.
-    try testing.expect(std.mem.indexOf(u8, text, "(pad 1 smd rect (pos 0.0000 0.0000 315.0000) (size 0.5800 0.5800))") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "(pad \"1\" smd rect (pos 0.0000 0.0000 315.0000) (size 0.5800 0.5800))") != null);
     // An exact quarter-turn keeps the historical flatten: swap, no token.
-    try testing.expect(std.mem.indexOf(u8, text, "(pad 2 smd rect (pos 3.0000 0.0000) (size 1.0000 0.5000))") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "(pad 3 smd rect (pos -3.0000 0.0000 260.0000) (size 0.9000 1.8000))") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "(pad \"2\" smd rect (pos 3.0000 0.0000) (size 1.0000 0.5000))") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "(pad \"3\" smd rect (pos -3.0000 0.0000 260.0000) (size 0.9000 1.8000))") != null);
 }
 
 // spec: import_kicad - Grows a preserved-angle pad's courtyard envelope to its rotated extents
@@ -1324,4 +1386,93 @@ test "buildDesignText escapes a raw design title" {
     const out_nodes = try parser_mod.parse(arena, text);
     try testing.expectEqual(@as(usize, 1), out_nodes.len);
     try testing.expectEqualStrings("Board \\\"A\\\" \\\\ rev", out_nodes[0].asList().?[1].asString().?);
+}
+
+// spec: import_kicad - Quotes a pad number or pin id whose bare spelling the tokenizer would re-read as an SI value
+test "import quotes SI-shaped pad numbers and pin ids" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // A castellated module: function-named pads. Written bare, `5V` and `1A`
+    // lex as SI values (`si_unit_letters = "VAFHR"`) and come back as the
+    // numbers 5 and 1 — and `padNumberText` rejects a float outright, so the
+    // pad vanished from the KiCad writer's net diff. `3V3` and `2` already
+    // round-trip bare and must stay that way (no churn in generated files).
+    const board =
+        \\(kicad_pcb (version 20260206)
+        \\  (footprint "MOD:CASTELLATED"
+        \\    (at 0 0)
+        \\    (property "Reference" "U1" (at 0 0 0))
+        \\    (property "Value" "MOD" (at 0 0 0))
+        \\    (pad "5V" smd rect (at 0 0) (size 1 1) (net "VBUS") (pinfunction "VBUS"))
+        \\    (pad "1A" smd rect (at 1 0) (size 1 1) (net "SDA") (pinfunction "SDA"))
+        \\    (pad "3V3" smd rect (at 2 0) (size 1 1) (net "V3P3") (pinfunction "V3P3"))
+        \\    (pad "2" smd rect (at 3 0) (size 1 1) (net "GND") (pinfunction "GND"))))
+    ;
+    const nodes = try parser_mod.parse(arena, board);
+    const parts = try parseParts(arena, nodes[0]);
+    try testing.expectEqual(@as(usize, 1), parts.len);
+
+    // 1. Footprint pads read back through the SAME reader the KiCad writer
+    //    and the netlist use, byte-identical to the board's own names.
+    const fp = try renderFootprint(arena, parts[0]);
+    const fp_nodes = try parser_mod.parse(arena, fp);
+    const want = [_][]const u8{ "5V", "1A", "3V3", "2" };
+    var seen: usize = 0;
+    for (fp_nodes[0].asList().?[2..]) |child| {
+        if (!child.isForm("pad")) continue;
+        try testing.expect(seen < want.len);
+        try testing.expectEqualStrings(want[seen], kicad_fmt.padNumberText(arena, child.asList().?[1]).?);
+        seen += 1;
+    }
+    try testing.expectEqual(@as(usize, want.len), seen);
+
+    // 2. Pinout pin ids: quoted only where bare would not round-trip.
+    const pinout = try renderPinout(arena, "castellated", parts[0].pads);
+    try testing.expect(std.mem.indexOf(u8, pinout, "(pin \"5V\" \"VBUS\")") != null);
+    try testing.expect(std.mem.indexOf(u8, pinout, "(pin \"1A\" \"SDA\")") != null);
+    try testing.expect(std.mem.indexOf(u8, pinout, "(pin 3V3 \"V3P3\")") != null);
+    try testing.expect(std.mem.indexOf(u8, pinout, "(pin 2 \"GND\")") != null);
+
+    // 3. The design-block pin lists follow the same rule, so the emitted net
+    //    binding names the pad the board actually carries.
+    parts[0].comp_name = "castellated";
+    var nets = NetNames.init(arena);
+    var summary = ImportSummary{};
+    var buf: std.Io.Writer.Allocating = .init(arena);
+    try emitInstance(arena, &buf.writer, parts[0], &nets, &summary);
+    const inst = buf.written();
+    try testing.expect(std.mem.indexOf(u8, inst, "(pin \"5V\" \"VBUS\")") != null);
+    try testing.expect(std.mem.indexOf(u8, inst, "(pin \"1A\" \"SDA\")") != null);
+    try testing.expect(std.mem.indexOf(u8, inst, "(pin 2 \"GND\")") != null);
+}
+
+// spec: import_kicad - Keeps a pin id bare only when the tokenizer reads it back as the same text
+test "bareIdRoundTrips accepts only self-identical bare tokens" {
+    // Atoms and plain integers survive bare; SI-shaped names, floats, leading
+    // zeros, spaces and quotes do not — the tokenizer reads those back as a
+    // different token, which is exactly when the emitter has to quote.
+    const cases = [_]struct { id: []const u8, bare: bool }{
+        .{ .id = "1", .bare = true },
+        .{ .id = "0", .bare = true },
+        .{ .id = "42", .bare = true },
+        .{ .id = "-3", .bare = true },
+        .{ .id = "A1", .bare = true },
+        .{ .id = "3V3", .bare = true },
+        .{ .id = "P$1", .bare = true },
+        .{ .id = "EP", .bare = true },
+        .{ .id = "1-2", .bare = true },
+        .{ .id = "5V", .bare = false },
+        .{ .id = "1A", .bare = false },
+        .{ .id = "10mA", .bare = false },
+        .{ .id = "1.5", .bare = false },
+        .{ .id = "01", .bare = false },
+        .{ .id = "007", .bare = false },
+        .{ .id = "P 1", .bare = false },
+        .{ .id = "A\"B", .bare = false },
+        .{ .id = "", .bare = false },
+        .{ .id = "1mm", .bare = false },
+    };
+    for (cases) |c| try testing.expectEqual(c.bare, bareIdRoundTrips(c.id));
 }

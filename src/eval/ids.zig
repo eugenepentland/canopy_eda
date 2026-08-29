@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const infra_fs = @import("../infra/fs.zig");
+const lib_limits = @import("../lib_limits.zig");
 const log = @import("../infra/log.zig");
 const ast = @import("../sexpr/ast.zig");
 const numeric = @import("../numeric.zig");
@@ -682,7 +683,16 @@ pub const LoadedPinout = struct {
 
 /// Load pin names + alternate functions from a pinout file. Missing file returns null.
 pub fn loadPinoutFile(self: *Evaluator, path: []const u8) ?LoadedPinout {
-    const content = infra_fs.cwd().readFileAlloc(self.allocator, path, 1024 * 256) catch return null;
+    const content = infra_fs.cwd().readFileAlloc(self.allocator, path, lib_limits.max_lib_file_bytes) catch |err| {
+        // `getSymbolPins` probes this for every component, and most components
+        // (all passives) simply have no pinout — `FileNotFound` is the normal
+        // answer and stays silent. Any other failure silently strips a real
+        // part's pin names from the whole eval, so it goes to stderr rather
+        // than nowhere. `warnFmt` is not usable here: the caller has no span.
+        if (err != error.FileNotFound)
+            log.warn("pinout '{s}' not loaded ({s}) — this part's pins fall back to pad numbers", .{ path, @errorName(err) });
+        return null;
+    };
     const nodes = parser_mod.parse(self.allocator, content) catch return null;
     if (nodes.len == 0) return null;
     const top = nodes[0].asList() orelse return null;
@@ -968,4 +978,34 @@ test "reassignSubBlockIdsV4 composes nested sub-block paths" {
     // nested child id == hash(hash(parent_uuid, nested_name), origin_key)
     const nested = try deriveChildId(&eval, "ebcb7396", "lo", 0);
     try std.testing.expectEqualStrings(try deriveChildId(&eval, nested, "100nF@B4#0", 0), inner_insts[0].id);
+}
+
+// spec: eval/evaluator - loadPinoutFile reads a library pinout at the class-owned lib_limits cap, so a pinout past the retired 256 KiB figure still yields its pin names
+test "loadPinoutFile loads a pinout past the retired 256 KiB cap" {
+    // Arena rather than page_allocator: `loadPinoutFile` never frees the file
+    // bytes or the maps, and this fixture is ~260 KB.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // The cap figure is `lib_limits`', not this file's — a pinout in the
+    // 256 KiB..1 MiB band used to resolve its pins in ERC and the HTML page
+    // while eval silently fell back to pad numbers.
+    const data = try lib_limits.synthPinoutSource(alloc, "big", lib_limits.retired_lib_file_cap_bytes + 4096);
+    try std.testing.expect(data.len > lib_limits.retired_lib_file_cap_bytes);
+    try std.testing.expect(data.len < lib_limits.max_lib_file_bytes);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "lib/pinouts");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/pinouts/big.sexp", .data = data });
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+
+    var eval = Evaluator.init(alloc, project_dir);
+    defer eval.deinit();
+
+    const pins = getSymbolPins(&eval, "big") orelse return error.TestUnexpectedResult;
+    // The sentinel is the last pin in the file, so finding it proves the read
+    // covered the whole thing rather than stopping at the retired cap.
+    try std.testing.expectEqualStrings("LASTFN", pins.get("LAST") orelse return error.TestUnexpectedResult);
 }

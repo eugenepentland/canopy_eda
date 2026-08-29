@@ -8,6 +8,7 @@ const parser_mod = @import("../sexpr/parser.zig");
 const printer_mod = @import("../sexpr/printer.zig");
 const numeric = @import("../numeric.zig");
 const board_layers = @import("../board_layers.zig");
+const kicad_fmt = @import("../kicad_pcb/format.zig");
 const Node = ast.Node;
 const Span = ast.Span;
 // ── Constants ─────────────────────────────────────────────────────
@@ -82,6 +83,30 @@ pub fn convertFootprint(allocator: std.mem.Allocator, source: []const u8) Conver
     return buf.toOwnedSlice();
 }
 
+/// Write a pad's number/name into slot 1 of a `(pad …)` form as a QUOTED
+/// token — the form `kicad_pcb/format.padNumberText` documents as the modern
+/// generated shape, and the only one that survives a re-parse intact.
+/// A bare token is read back by this project's own tokenizer, whose SI rules
+/// (`si_unit_letters = "VAFHR"`) turn a digit-run followed by one of those
+/// letters into a NUMBER: a castellated `5V` pad re-read as the float 5, a
+/// dual-row `1A` as 1. `padNumberText` returns null for a float node, so such
+/// a pad silently vanished from the KiCad writer's net diff and from the
+/// netlist — the copper stayed, the binding did not. Pad names with a space
+/// or an embedded quote were equally unrepresentable bare.
+///
+/// `num` is NOT re-escaped, and must not be: every value reaching here is
+/// either a `.string` payload this project's own tokenizer produced (already
+/// in the grammar's escaped form — a raw `"` would have ended the token, and
+/// every `\` is followed by another byte of the same token), a `.atom` slice
+/// (the atom charset admits neither `"` nor `\`), or the decimal rendering of
+/// a bare int. Running `kicad_fmt.sexprEscape` over an already-escaped string
+/// payload would DOUBLE-escape it — the same corruption the module header of
+/// `import_kicad.zig` documents. Writing the slice straight back between
+/// quotes re-parses to exactly the bytes the source carried.
+fn writePadNum(w: anytype, num: []const u8) !void {
+    try w.print("\"{s}\"", .{num});
+}
+
 fn emitPad(w: anytype, node: Node) !void {
     const children = node.asList() orelse return;
     if (children.len < 4) return;
@@ -95,7 +120,11 @@ fn emitPad(w: anytype, node: Node) !void {
     const num_str = children[1].asAtom() orelse children[1].asString() orelse blk: {
         if (children[1].asNumber()) |n| {
             // Reject a non-finite / out-of-range pad number before the
-            // `@intFromFloat` (UB in the safety-off prod build).
+            // `@intFromFloat` (UB in the safety-off prod build). SKIPPING the
+            // pad is the shared contract: `import_kicad.padNumText` does the
+            // same, and so does the reader side (`render_html.pinIdStr`) —
+            // falling back to "0" would invent a pad that shadows a real
+            // `(pad 0 …)` and bind the wrong copper.
             const i = numeric.checkedInt(i64, n) orelse return;
             break :blk std.fmt.bufPrint(&num_buf, "{d}", .{i}) catch return;
         }
@@ -180,7 +209,9 @@ fn emitPad(w: anytype, node: Node) !void {
     // at ±0.485, 0.4 mm-pitch BGAs step by 0.1625 — quantising to 0.01 mm
     // shifts every coordinate by up to 5 µm and the error compounds across
     // an import→export round-trip.
-    try w.print("  (pad {s} {s} {s} (pos {d:.4} {d:.4}", .{ num_str, out_type, out_shape, x, y });
+    try w.writeAll("  (pad ");
+    try writePadNum(w, num_str);
+    try w.print(" {s} {s} (pos {d:.4} {d:.4}", .{ out_type, out_shape, x, y });
     if (rot_out.angle != 0) try w.print(" {d:.4}", .{rot_out.angle});
     try w.print(") (size {d:.4} {d:.4})", .{ out_sx, out_sy });
     if (has_drill) {
@@ -287,8 +318,10 @@ fn emitCustomPolyPad(
 
     const cx = (min_x + max_x) / 2.0;
     const cy = (min_y + max_y) / 2.0;
-    try w.print("  (pad {s} {s} custom (pos {d:.3} {d:.3}) (size {d:.3} {d:.3})", .{
-        num_str, out_type, cx, cy, max_x - min_x, max_y - min_y,
+    try w.writeAll("  (pad ");
+    try writePadNum(w, num_str);
+    try w.print(" {s} custom (pos {d:.3} {d:.3}) (size {d:.3} {d:.3})", .{
+        out_type, cx, cy, max_x - min_x, max_y - min_y,
     });
     if (has_drill) try w.print(" (drill {d:.2})", .{drill});
     try w.writeAll("\n    (poly");
@@ -555,7 +588,7 @@ test "convert simple footprint" {
     defer alloc.free(output);
 
     try std.testing.expect(std.mem.indexOf(u8, output, "\"R_0402_1005Metric\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad 1 smd roundrect") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"1\" smd roundrect") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "(courtyard") != null);
 }
 
@@ -575,11 +608,11 @@ test "convert bare-int pad numbers do not dangle" {
     ;
     const output = try convertFootprint(alloc, input);
     defer alloc.free(output);
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad 1 smd rect") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad 22 smd rect") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad 333 thru circle") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"1\" smd rect") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"22\" smd rect") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"333\" thru circle") != null);
     // No garbage/empty pad number leaked in (would look like "(pad  smd").
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad  ") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"\"") == null);
 }
 
 // spec: convert/footprint - Captures F.Fab body outline and silkscreen polygons into the footprint
@@ -623,7 +656,7 @@ test "convert custom pad expands gr_poly into polygon + bbox" {
     defer alloc.free(output);
     // The tiny 0.25×0.25 anchor is replaced by the polygon's bbox: 2×2 centred
     // on the pad origin (1,1) — local pts (±1,±1) + at(1,1) → abs (0..2, 0..2).
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad 1 smd custom (pos 1.000 1.000) (size 2.000 2.000)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"1\" smd custom (pos 1.000 1.000) (size 2.000 2.000)") != null);
     // Outline is preserved in footprint-absolute coordinates.
     try std.testing.expect(std.mem.indexOf(u8, output, "(poly (0.000 0.000) (2.000 0.000) (2.000 2.000) (0.000 2.000))") != null);
 }
@@ -640,8 +673,8 @@ test "convert footprint accepts dollar-sign pad identifiers" {
     const output = try convertFootprint(alloc, input);
     defer alloc.free(output);
 
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad P$1 smd custom") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad P$2 smd rect") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"P$1\" smd custom") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"P$2\" smd rect") != null);
 }
 
 // spec: convert/footprint - Bakes a custom pad's at-angle into the emitted polygon in KiCad's counter-clockwise display sense
@@ -693,12 +726,12 @@ test "convert flattens exact quarter-turn pad at-angle to size swap" {
     // 90° and −90° (= 270°) swap W×H; the two-number (pos …) shows no angle
     // token — identical copper, and identical output to every conversion the
     // committed library was generated under.
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad 1 smd rect (pos -1.0000 0.0000) (size 1.0000 0.5000))") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad 2 smd rect (pos 1.0000 0.0000) (size 1.2000 0.6000))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"1\" smd rect (pos -1.0000 0.0000) (size 1.0000 0.5000))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"2\" smd rect (pos 1.0000 0.0000) (size 1.2000 0.6000))") != null);
     // 180° is the identity for the 2-fold-symmetric shapes emitted here.
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad 3 smd rect (pos 0.0000 1.0000) (size 0.7000 1.4000))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"3\" smd rect (pos 0.0000 1.0000) (size 0.7000 1.4000))") != null);
     // Angles reduce mod 360: 450° is the 90° swap.
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad 4 smd rect (pos 0.0000 -1.0000) (size 1.6000 0.8000))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"4\" smd rect (pos 0.0000 -1.0000) (size 1.6000 0.8000))") != null);
 }
 
 // spec: convert/footprint - Preserves a plain pad's non-quarter-turn at-angle as a netlisp-frame pos rotation token
@@ -719,9 +752,50 @@ test "convert preserves non-quarter pad at-angle in netlisp frame" {
     // The token is netlisp's frame — mod(360 − kicad, 360), the same bridge as
     // serve/sync.zig's netlispRotToKicad — and the size stays the pad's own
     // unrotated W×H, never swapped.
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad 1 smd rect (pos 0.0000 0.0000 45.0000) (size 0.5800 0.5800))") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad 2 smd rect (pos 2.0000 1.0000 330.0000) (size 1.2000 0.6000))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"1\" smd rect (pos 0.0000 0.0000 45.0000) (size 0.5800 0.5800))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"2\" smd rect (pos 2.0000 1.0000 330.0000) (size 1.2000 0.6000))") != null);
     // 100° used to fall in the old near-90° window and flatten to a 90° swap,
     // 10° wrong; it now keeps its real angle.
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad 3 smd rect (pos -2.0000 1.0000 260.0000) (size 0.9000 1.8000))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"3\" smd rect (pos -2.0000 1.0000 260.0000) (size 0.9000 1.8000))") != null);
+}
+
+// spec: convert/footprint - Emits the pad number as a quoted token so an SI-shaped or spaced pad name reads back unchanged
+test "convert quotes pad numbers so SI-shaped names survive a re-parse" {
+    const alloc = std.testing.allocator;
+    // `5V` (castellated module) and `1A` (dual-row connector) are real pad
+    // names. Written bare, this project's own tokenizer reads them as SI
+    // values — `si_unit_letters = "VAFHR"` — so `5V` came back as the number
+    // 5 and `1A` as 1; `padNumberText` rejects a float outright, so the pad
+    // vanished from the net diff entirely. `3V3` already lexed as an atom and
+    // must keep working; `P 1` can only be spelled quoted at all.
+    const input =
+        \\(footprint "CASTELLATED"
+        \\  (pad "5V" smd rect (at 0 0) (size 1 1) (layers "F.Cu"))
+        \\  (pad "1A" smd rect (at 1 0) (size 1 1) (layers "F.Cu"))
+        \\  (pad "P 1" smd rect (at 2 0) (size 1 1) (layers "F.Cu"))
+        \\  (pad "3V3" smd rect (at 3 0) (size 1 1) (layers "F.Cu"))
+        \\  (pad "A\"B" smd rect (at 4 0) (size 1 1) (layers "F.Cu"))
+        \\)
+    ;
+    const output = try convertFootprint(alloc, input);
+    defer alloc.free(output);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"5V\" smd rect") != null);
+
+    // Re-read the emitted text through the SAME reader the KiCad writer and
+    // the netlist use: every pad name must come back byte-identical.
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const nodes = try parser_mod.parse(a, output);
+    const children = nodes[0].asList().?;
+    const want = [_][]const u8{ "5V", "1A", "P 1", "3V3", "A\\\"B" };
+    var seen: usize = 0;
+    for (children[2..]) |child| {
+        if (!child.isForm("pad")) continue;
+        const cl = child.asList().?;
+        try std.testing.expect(seen < want.len);
+        try std.testing.expectEqualStrings(want[seen], kicad_fmt.padNumberText(a, cl[1]).?);
+        seen += 1;
+    }
+    try std.testing.expectEqual(@as(usize, want.len), seen);
 }

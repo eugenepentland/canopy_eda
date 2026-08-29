@@ -29,6 +29,81 @@ pub const kind_auto = "auto";
 const max_auto_layouts: usize = 12;
 const auto_ext = ".autolayout.json";
 
+// ── Sidecar write serialization ──────────────────────────────────────────────
+//
+// Every sidecar mutation is a read-modify-write: read `rev` (and usually the
+// whole layout list), decide, write `rev + 1`. Nothing about that is atomic on
+// its own, and the server runs handlers on a thread pool with a detached regen
+// thread beside them. Two saves that both observed `rev = 5` both passed the
+// optimistic-concurrency guard, both wrote `rev = 6`, and both clients were told
+// `6` — the first save's row simply vanished. The GET-side dedup rewrite and the
+// regen thread's auto-record are worse still: they read-then-write the CURRENT
+// rev, so they clobber a concurrent save without ever tripping the guard.
+//
+// The fix is a lock held across the whole check-then-write span, taken by the
+// CALLER (the site that owns the read-modify-write), never inside the writers —
+// `std.Io.Mutex` is not reentrant, and the writers are reached from inside
+// already-locked spans. Long work (design resolve, solving, scoring, pouring)
+// stays outside: those spans compute first and lock only around the
+// read-modify-write, so the lock never serializes the editor.
+//
+// Slots, not a keyed registry: a fixed table hashed by (design, sub) needs no
+// allocation, no map, and no entry lifetime, and a hash collision only
+// over-serializes two unrelated designs — it can never under-serialize one,
+// because the same sidecar always hashes to the same slot.
+const sidecar_lock_slots = 16;
+var sidecar_locks: [sidecar_lock_slots]infra_fs.Mutex = @splat(.{});
+
+/// Held ownership of one sidecar's write lock. `defer guard.unlock()`.
+pub const SidecarGuard = struct {
+    mu: *infra_fs.Mutex,
+
+    /// Release the sidecar lock.
+    pub fn unlock(self: SidecarGuard) void {
+        self.mu.unlock();
+    }
+};
+
+/// The lock slot serializing `<design>[.<sub>].layouts.json`.
+fn sidecarMutex(name: []const u8, sub: ?[]const u8) *infra_fs.Mutex {
+    var hash = std.hash.Wyhash.init(0x5f_53_49_44_45_43_41_52);
+    hash.update(name);
+    hash.update("\x00");
+    if (sub) |slug| hash.update(slug);
+    return &sidecar_locks[@intCast(hash.final() % sidecar_lock_slots)];
+}
+
+/// The revision a client claims it last saw, read out of a request body's
+/// `"rev"` field, or null when it sent none.
+///
+/// A JSON number reaches us as either an integer or a float depending on how
+/// the client serialized it, and a float is narrowed through `checkedInt` so a
+/// NaN or an out-of-range value is "no revision" rather than an out-of-range
+/// cast. Absent, wrong-typed and unrepresentable all collapse to null, which
+/// every caller treats as "the client is not asserting a revision" — the
+/// optimistic guard then admits the write, exactly as it did before revisions
+/// existed.
+pub fn clientRev(value: ?std.json.Value) ?i64 {
+    const v = value orelse return null;
+    return switch (v) {
+        .integer => |i| i,
+        .float => |f| numeric.checkedInt(i64, f),
+        else => null,
+    };
+}
+
+/// Enter the read-compare-write critical section for one design's sidecar.
+///
+/// Take this around the WHOLE span — the `rev` read, the conflict comparison,
+/// the history snapshot, the list read and the write — not just the write, or
+/// the guard stays a lockless check-then-write. Never take it around solving,
+/// scoring, or design resolution.
+pub fn lockSidecar(name: []const u8, sub: ?[]const u8) SidecarGuard {
+    const mu = sidecarMutex(name, sub);
+    mu.lock();
+    return .{ .mu = mu };
+}
+
 /// Optimizer parameters and poses persisted in the sidecar's cache slot.
 pub const CacheSlot = struct {
     params: optimizer.Params,
@@ -393,6 +468,16 @@ pub fn dedupedLayouts(alloc: std.mem.Allocator, layouts: []const SavedLayout) []
 }
 
 /// Remove byte-identical track geometry while preserving first-row order.
+///
+/// The key names every field that makes a segment a different piece of copper —
+/// both endpoints, the arc midpoint (present/absent as well as its value), the
+/// layer, the width and the net. `g`/`source`/`id` are provenance and row
+/// identity, deliberately left out for the same reason `dedupedVias` leaves out
+/// `f`/`g`: two segments on the same layer between the same points at the same
+/// width on the same net are ONE trace however they got there, and keying on
+/// provenance would let a re-Stamp or an autoroute re-run persist a second copy
+/// on top of the first. Unlike a via's `s`, a track carries no
+/// electrically-distinguishing field outside this key.
 pub fn dedupedTracks(alloc: std.mem.Allocator, tracks: []const SavedTrack) []const SavedTrack {
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     var out: std.ArrayList(SavedTrack) = .empty;
@@ -409,12 +494,25 @@ pub fn dedupedTracks(alloc: std.mem.Allocator, tracks: []const SavedTrack) []con
     return out.items;
 }
 
-/// Remove same-hole, same-net vias while preserving first-row provenance.
+/// Remove same-hole, same-net, same-SPAN vias while preserving first-row provenance.
+///
+/// The span (`SavedVia.s` — the `[from, to]` routable layer pair) is part of the
+/// key because it is ELECTRICAL, not provenance: a through via `0..N` and a
+/// blind/buried via `0..1` in the same hole on the same net connect different
+/// layers, and the standalone via tool and the KiCad import can both produce
+/// that pair. Keying without it collapsed them onto whichever came first and
+/// silently rewrote the board's layer connectivity — invisible until fab,
+/// because `s` round-trips correctly through parse and emit everywhere else.
+/// A span-less via (`null`) keys distinctly from any explicit span.
 pub fn dedupedVias(alloc: std.mem.Allocator, vias: []const SavedVia) []const SavedVia {
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     var out: std.ArrayList(SavedVia) = .empty;
     for (vias) |via| {
-        const key = std.fmt.allocPrint(alloc, "{d},{d},{d},{d},{s}", .{ via.x, via.y, via.d, via.drill, via.net }) catch return vias;
+        // −1,−1 is the "no explicit span" sentinel; real span indices are u8.
+        const span: [2]i16 = if (via.s) |s| .{ s[0], s[1] } else .{ -1, -1 };
+        const key = std.fmt.allocPrint(alloc, "{d},{d},{d},{d},{s},{d},{d}", .{
+            via.x, via.y, via.d, via.drill, via.net, span[0], span[1],
+        }) catch return vias;
         const found = seen.getOrPut(alloc, key) catch return vias;
         if (found.found_existing) continue;
         out.append(alloc, via) catch return vias;
@@ -568,7 +666,20 @@ pub fn displayLayouts(
     raw: []const SavedLayout,
 ) []const SavedLayout {
     const deduped = dedupLayouts(alloc, raw);
-    if (deduped.len != raw.len) writeLayoutsSub(alloc, project_dir, name, sub, deduped);
+    // This is a WRITE on a plain GET render, and `raw` was read before any lock
+    // existed. Writing `deduped` straight back would erase a save that landed in
+    // between — and it would do so without ever consulting `rev`, so the save's
+    // own optimistic-concurrency guard could not catch it. Re-read and re-dedup
+    // under the lock instead: only rows still on disk can be collapsed, and if
+    // the fresh copy has no duplicates the render writes nothing at all.
+    if (deduped.len != raw.len) {
+        const guard = lockSidecar(name, sub);
+        defer guard.unlock();
+        const fresh = readLayoutsSub(alloc, project_dir, name, sub);
+        const fresh_deduped = dedupLayouts(alloc, fresh);
+        if (fresh_deduped.len != fresh.len)
+            writeLayoutsSub(alloc, project_dir, name, sub, fresh_deduped);
+    }
     const sorted = alloc.dupe(SavedLayout, deduped) catch return deduped;
     std.sort.insertion(SavedLayout, sorted, {}, layoutMoreRecentlyEdited);
     return sorted;
@@ -596,7 +707,6 @@ pub fn recordAutoLayout(
     placement: optimizer.Placement,
     params: optimizer.Params,
 ) void {
-    const existing = readLayouts(alloc, project_dir, name);
     const score = LayoutScore{
         .hpwl = placement.score.hpwl_mm,
         .loop = placement.score.loop_mm,
@@ -604,6 +714,13 @@ pub fn recordAutoLayout(
         .objective = placement.breakdown.objective,
     };
     const parts = posesFromPlacement(alloc, placement) orelse return;
+    // Read-modify-write on the same file a save writes, reached from the
+    // detached regen thread as well as the render path — and it stamps the
+    // CURRENT rev, so without this it clobbers a concurrent save silently.
+    // Solving already finished in the caller; only the file work is inside.
+    const guard = lockSidecar(name, null);
+    defer guard.unlock();
+    const existing = readLayouts(alloc, project_dir, name);
     for (existing, 0..) |layout, i| {
         if (!sameLayoutScore(layout.score, score)) continue;
         if (params.rough and !layout.rough) {
@@ -762,4 +879,180 @@ test "sidecar store removes identical copper while preserving order" {
     const duplicate = SavedTrack{ .x1 = 1, .y1 = 2, .x2 = 3, .y2 = 4, .w = 0.2, .net = "GND" };
     const tracks = [_]SavedTrack{ duplicate, duplicate, .{ .x1 = 1, .y1 = 2, .x2 = 3, .y2 = 4, .l = 1, .w = 0.2, .net = "GND" } };
     try std.testing.expectEqual(@as(usize, 2), dedupedTracks(alloc, &tracks).len);
+}
+
+// A via's `s` layer span is ELECTRICAL: `[0,1]` is a blind via joining the top
+// two layers and `[0,3]` a through via joining top to bottom. They can share a
+// hole position, diameter, drill and net — the standalone via tool and the KiCad
+// import both produce that pair — and the dedup key omitted `s`, so the second
+// row was silently discarded on every save and the board's layer connectivity
+// quietly changed. `s` round-trips correctly through emit and parse, so nothing
+// downstream could reveal the loss before fabrication.
+// spec: Web Server - Two saved vias that differ only in their layer span are different copper and both survive a sidecar save round-trip
+test "the sidecar keeps two same-hole vias whose layer spans differ" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    const blind = SavedVia{ .x = 5, .y = 6, .d = 0.4, .drill = 0.2, .net = "GND", .s = .{ 0, 1 } };
+    var through = blind;
+    through.s = .{ 0, 3 };
+    var spanless = blind;
+    spanless.s = null;
+
+    // Genuine duplicates (including two identical spans) still collapse; the
+    // three distinct spans — blind, through, and "no explicit span" — do not.
+    const vias = [_]SavedVia{ blind, blind, through, spanless };
+    const kept = dedupedVias(alloc, &vias);
+    try std.testing.expectEqual(@as(usize, 3), kept.len);
+
+    // Survives the actual save round-trip: serialize the sidecar, parse it back,
+    // and both barrels are still there with their spans intact.
+    const layouts = [_]SavedLayout{.{
+        .name = "release",
+        .kind = kind_manual,
+        .ts = 0,
+        .score = null,
+        .parts = &.{},
+        .routes = .{ .tracks = &.{}, .vias = &vias },
+    }};
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    try writeLayoutsFileJsonRev(&out.writer, dedupedLayouts(alloc, &layouts), null, 7);
+    const parsed = parseLayouts(alloc, out.written()) orelse return error.TestExpectedParsedSidecar;
+    try std.testing.expectEqual(@as(usize, 1), parsed.len);
+    const round_tripped = (parsed[0].routes orelse return error.TestExpectedRoutes).vias;
+    try std.testing.expectEqual(@as(usize, 3), round_tripped.len);
+    try std.testing.expectEqual(@as(?[2]u8, .{ 0, 1 }), round_tripped[0].s);
+    try std.testing.expectEqual(@as(?[2]u8, .{ 0, 3 }), round_tripped[1].s);
+    try std.testing.expectEqual(@as(?[2]u8, null), round_tripped[2].s);
+}
+
+/// Source text of one function, from its signature to the next declaration.
+fn storeFunctionBody(source: []const u8, signature: []const u8, next: []const u8) ![]const u8 {
+    const start = std.mem.indexOf(u8, source, signature) orelse return error.TestExpectedFunction;
+    const tail = source[start..];
+    const end = std.mem.indexOf(u8, tail, next) orelse return error.TestExpectedFunctionEnd;
+    return tail[0..end];
+}
+
+// The two writers that reach the sidecar WITHOUT a rev check: `displayLayouts`
+// rewrites a de-duplicated list during a plain GET render, and `recordAutoLayout`
+// appends an auto row from the detached regen thread. Both read-then-write the
+// CURRENT rev, so an unheld one overwrites a save that landed in between and the
+// save's own optimistic-concurrency guard never fires — the clobbered client is
+// told its write succeeded. They must therefore hold the same lock the save
+// path holds, and `displayLayouts` must re-read inside it, because the list it
+// was handed was read before the hold began.
+//
+// Threads are deliberately absent: a real stress test needs two OS threads
+// driving `saveNamedLayoutApi` against one design through a live `httpz`
+// server, a barrier releasing both inside the critical section, and N rounds
+// asserting the final rev equals the number of 200s. That needs a server
+// harness, so what is pinned here is the structure the lock depends on.
+// spec: Web Server - The revision-free sidecar writers, the render dedup and the regenerate record, re-read under the sidecar lock rather than trusting a value read before it
+test "the render and regenerate sidecar writers hold the sidecar lock" {
+    const source = @embedFile("layout_sidecar_store.zig");
+
+    const display = try storeFunctionBody(source, "pub fn displayLayouts(", "fn posesFromPlacement(");
+    const display_lock = std.mem.indexOf(u8, display, "lockSidecar(name, sub)") orelse
+        return error.TestExpectedDisplayLock;
+    const display_reread = std.mem.indexOf(u8, display, "readLayoutsSub(alloc, project_dir, name, sub)") orelse
+        return error.TestExpectedDisplayReread;
+    const display_write = std.mem.indexOf(u8, display, "writeLayoutsSub(") orelse
+        return error.TestExpectedDisplayWrite;
+    try std.testing.expect(display_lock < display_reread);
+    try std.testing.expect(display_reread < display_write);
+
+    const record = try storeFunctionBody(source, "pub fn recordAutoLayout(", "fn tagRough(");
+    const record_lock = std.mem.indexOf(u8, record, "lockSidecar(name, null)") orelse
+        return error.TestExpectedRecordLock;
+    const record_read = std.mem.indexOf(u8, record, "readLayouts(alloc, project_dir, name)") orelse
+        return error.TestExpectedRecordRead;
+    const record_write = std.mem.indexOf(u8, record, "writeLayouts(alloc, project_dir, name") orelse
+        return error.TestExpectedRecordWrite;
+    try std.testing.expect(record_lock < record_read);
+    try std.testing.expect(record_read < record_write);
+}
+
+// spec: Web Server - One sidecar always hashes to one lock slot and its guard releases it, so a collision only over-serializes and can never deadlock
+test "one sidecar always maps to one lock slot and the guard releases it" {
+    // Correctness rests on STABILITY, not on distinctness: the same sidecar must
+    // always resolve to the same slot, or two writers get into one file at once.
+    // Two different sidecars landing on one slot is merely extra serialization,
+    // so nothing here asserts they differ — that would only test the hash.
+    try std.testing.expect(sidecarMutex("board", null) == sidecarMutex("board", null));
+    try std.testing.expect(sidecarMutex("board", "buck") == sidecarMutex("board", "buck"));
+    // The design and its sub circuits are separately keyed, so they can (and
+    // usually do) proceed independently.
+    const keys = [_]?[]const u8{ null, "buck", "ldo", "rf" };
+    for (keys) |key| {
+        try std.testing.expect(sidecarMutex("board", key) == sidecarMutex("board", key));
+    }
+
+    // Taking the same slot twice in sequence must not deadlock — the guard
+    // really does release, which is what every `defer guard.unlock()` relies on.
+    {
+        const guard = lockSidecar("board", null);
+        guard.unlock();
+    }
+    const second = lockSidecar("board", null);
+    second.unlock();
+}
+
+// Moved here from `serve/pcb_layout_page.zig` so all three sidecar-lock
+// structure assertions sit together, and so the page file — already at 96%
+// of its hard size cap — stops growing for test text.
+// The rev guard is worth nothing if the check and the write are separate
+// critical sections: two saves that both read `rev = 5` both pass the
+// comparison, both write `rev = 6`, and the first one's row is gone while both
+// clients are told `6`. So the authoritative rev read, the comparison it feeds,
+// the history snapshot and the write must all sit inside ONE hold — while the
+// design resolve, which dominates this handler's cost, must stay outside it or
+// every concurrent editor queues behind a block evaluation.
+//
+// A true concurrency test needs two OS threads driving this handler against one
+// design through a live `httpz` server, a barrier releasing both inside the
+// hold, and N rounds asserting the final rev equals the number of 200s. That
+// wants a server harness; this pins the structure the guarantee rests on, the
+// way "layout save validates before snapshotting recovery history" does.
+// spec: Web Server - A named layout save holds one sidecar lock across its whole revision check-then-write, so two saves that observed the same revision cannot both be accepted
+test "the layout save holds one sidecar lock across its whole revision check-then-write" {
+    const source = @embedFile("serve/pcb_layout_page.zig");
+    const handler_start = std.mem.indexOf(u8, source, "pub fn saveNamedLayoutApi") orelse
+        return error.TestExpectedSaveHandler;
+    const handler_tail = source[handler_start..];
+    const handler_end = std.mem.indexOf(u8, handler_tail, "pub fn pcbLayoutHistoryApi") orelse
+        return error.TestExpectedHistoryHandler;
+    const handler = handler_tail[0..handler_end];
+
+    const lock = std.mem.indexOf(u8, handler, "const guard = lockSidecar(name, sub);") orelse
+        return error.TestExpectedSidecarLock;
+    const rev_read = std.mem.indexOf(u8, handler, "const disk_rev = readLayoutRev(") orelse
+        return error.TestExpectedRevRead;
+    const bump = std.mem.indexOf(u8, handler, "const new_rev = disk_rev + 1;") orelse
+        return error.TestExpectedRevBump;
+    const snapshot = std.mem.indexOf(u8, handler, "history.snapshotLayouts") orelse
+        return error.TestExpectedHistorySnapshot;
+    const write = std.mem.indexOf(u8, handler, "writeLayoutsSubRev(") orelse
+        return error.TestExpectedLayoutWrite;
+
+    // Read → compare → snapshot → write, all after the lock is taken.
+    try std.testing.expect(lock < rev_read);
+    try std.testing.expect(rev_read < bump);
+    try std.testing.expect(bump < snapshot);
+    try std.testing.expect(snapshot < write);
+    // One writer only: a second one would be a second, unguarded critical section.
+    try std.testing.expect(std.mem.indexOf(u8, handler[write + 1 ..], "writeLayoutsSubRev(") == null);
+    // The lock is released by scope exit, so every early return under it (the
+    // 409, the allocator errors on the merge) still unlocks.
+    try std.testing.expect(std.mem.indexOf(u8, handler[lock..], "defer guard.unlock();") != null);
+
+    // The block resolve — the expensive part — happens BEFORE the hold, along
+    // with the cheap pre-check that fails an already-doomed save fast.
+    const layers = std.mem.indexOf(u8, handler, "layout_save_layers.savedLayoutLayers(") orelse
+        return error.TestExpectedLayerResolve;
+    const precheck = std.mem.indexOf(u8, handler, "const seen_rev = readLayoutRev(") orelse
+        return error.TestExpectedRevPrecheck;
+    try std.testing.expect(layers < lock);
+    try std.testing.expect(precheck < layers);
 }

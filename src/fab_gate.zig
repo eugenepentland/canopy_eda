@@ -4,6 +4,7 @@ const std = @import("std");
 const bom = @import("bom.zig");
 const drc = @import("placement/drc.zig");
 const env = @import("eval/env.zig");
+const erc = @import("erc.zig");
 const Evaluator = @import("eval/evaluator.zig").Evaluator;
 const export_gerber = @import("export_gerber.zig");
 const export_fab = @import("export_fab.zig");
@@ -62,19 +63,108 @@ pub const Result = struct {
     internal_complete: bool,
 };
 
+// ── Non-waivable release blocks ────────────────────────────────────────────
+//
+// `hard_ids` below is what stands between `?waive=1` and a shipped package
+// with, say, a duplicate source identity — and it is coupled to the code that
+// PRODUCES those ids by nothing but the spelling of a string. Renaming an
+// emit site leaves the error perfectly visible in the report while silently
+// demoting it to waivable. Each entry therefore carries where its spelling
+// comes from, and each origin has a defence:
+//   • `.local`          — emitted by `check` below through the SAME constant,
+//                         so the emit site cannot drift from the list.
+//   • `.enum_tag`       — spelled through `@tagName`, so renaming the ERC
+//                         field is a compile error here, not a silent demotion.
+//   • `.upstream_literal` — a literal in a module this one only reads. The
+//                         test below scans those sources for the spelling.
+
+/// Emitted by `check` when the chosen saved layout is structurally incomplete.
+const id_layout_evidence = "layout-evidence-incomplete";
+/// Emitted by `check` when the persisted BOM is missing/stale.
+const id_bom_evidence = "bom-evidence-incomplete";
+/// Emitted by `check` when the read-set / `.checks.sexp` closure is unprovable.
+const id_verification_evidence = "verification-evidence-incomplete";
+/// The one non-waivable id that is an ERC finding KIND rather than a literal:
+/// `fab_schematic_gate` turns each finding into an item id with `@tagName`, so
+/// naming the enum field here makes a rename break the build instead of
+/// quietly turning this release block into a waivable one.
+const id_module_metadata: []const u8 = @tagName(erc.ViolationKind.module_metadata_incomplete);
+
+/// Where a non-waivable id's spelling actually originates — what has to be
+/// proven still true for the entry to keep working.
+const HardOrigin = enum { local, enum_tag, upstream_literal };
+
+const HardId = struct { id: []const u8, origin: HardOrigin };
+
 /// Identity findings that mean there is no trustworthy revision/BOM lock and
 /// therefore cannot be waived as an ordinary design-rule exception.
+const hard_ids = [_]HardId{
+    .{ .id = "revision-missing", .origin = .upstream_literal },
+    .{ .id = "centroid-parity", .origin = .upstream_literal },
+    .{ .id = "missing-identity", .origin = .upstream_literal },
+    .{ .id = "duplicate-identity", .origin = .upstream_literal },
+    .{ .id = "duplicate-source-identity", .origin = .upstream_literal },
+    .{ .id = "footprint-geometry-unresolved", .origin = .upstream_literal },
+    .{ .id = "bom-identity", .origin = .upstream_literal },
+    .{ .id = id_bom_evidence, .origin = .local },
+    .{ .id = id_verification_evidence, .origin = .local },
+    .{ .id = id_layout_evidence, .origin = .local },
+    .{ .id = id_module_metadata, .origin = .enum_tag },
+};
+
 fn identityComplete(report: fab_readiness.Report) bool {
-    const hard_ids = [_][]const u8{
-        "revision-missing",                 "centroid-parity",               "missing-identity",
-        "duplicate-identity",               "duplicate-source-identity",     "bom-evidence-incomplete",
-        "verification-evidence-incomplete", "footprint-geometry-unresolved", "module_metadata_incomplete",
-        "layout-evidence-incomplete",       "bom-identity",
-    };
-    for (report.errors) |item| for (hard_ids) |id| {
-        if (std.mem.eql(u8, item.id, id)) return false;
+    for (report.errors) |item| for (hard_ids) |hard| {
+        if (std.mem.eql(u8, item.id, hard.id)) return false;
     };
     return true;
+}
+
+// spec: fabrication-release - every non-waivable release-blocking id is still spelled at the site that emits it
+test "non-waivable release ids still exist at their emit sites" {
+    // The `.upstream_literal` entries name spellings owned by two modules this
+    // one only reads. Nothing but these bytes ties them together, and the
+    // synthetic reports in the test below are built from the same literals, so
+    // that test cannot notice emit-site drift. Scan the real sources instead.
+    // (`fab_gate.zig` itself is deliberately NOT scanned: the list would match
+    // itself and prove nothing.)
+    const upstream = [_][]const u8{
+        @embedFile("fab_readiness.zig"),
+        @embedFile("fab_schematic_gate.zig"),
+    };
+    var upstream_checked: usize = 0;
+    var local_seen: usize = 0;
+    var tag_seen: usize = 0;
+    for (hard_ids) |hard| {
+        try std.testing.expect(hard.id.len > 0);
+        switch (hard.origin) {
+            .local => local_seen += 1,
+            .enum_tag => tag_seen += 1,
+            .upstream_literal => {
+                upstream_checked += 1;
+                var buf: [128]u8 = undefined;
+                const quoted = try std.fmt.bufPrint(&buf, "\"{s}\"", .{hard.id});
+                var found = false;
+                for (upstream) |source| {
+                    if (std.mem.indexOf(u8, source, quoted) != null) found = true;
+                }
+                if (!found) {
+                    std.debug.print(
+                        "non-waivable release id {s} is no longer emitted by fab_readiness.zig or fab_schematic_gate.zig — " ++
+                            "the block is still reported but has silently become WAIVABLE\n",
+                        .{quoted},
+                    );
+                    return error.NonWaivableIdNotEmitted;
+                }
+            },
+        }
+    }
+    // The set is non-empty and every origin is still represented — a future
+    // edit that empties the list, or converts every entry to the unchecked
+    // kinds, fails here rather than quietly opening the gate.
+    try std.testing.expectEqual(@as(usize, 7), upstream_checked);
+    try std.testing.expectEqual(@as(usize, 3), local_seen);
+    try std.testing.expectEqual(@as(usize, 1), tag_seen);
+    try std.testing.expectEqual(@as(usize, hard_ids.len), upstream_checked + local_seen + tag_seen);
 }
 
 // spec: fabrication-release - revision, source-ID, BOM/centroid, and fallback-geometry identity failures can never be waived
@@ -84,13 +174,21 @@ test "release identity hard failures are nonwaivable" {
     const missing_revision = fab_readiness.Report{ .errors = &.{.{ .id = "revision-missing", .message = "revision" }}, .warnings = &.{}, .stats = .{} };
     const fallback = fab_readiness.Report{ .errors = &.{.{ .id = "footprint-geometry-unresolved", .message = "footprint" }}, .warnings = &.{}, .stats = .{} };
     const missing_mpn = fab_readiness.Report{ .errors = &.{.{ .id = "bom-identity", .message = "MPN" }}, .warnings = &.{}, .stats = .{} };
-    const malformed_layout = fab_readiness.Report{ .errors = &.{.{ .id = "layout-evidence-incomplete", .message = "layout" }}, .warnings = &.{}, .stats = .{} };
+    const malformed_layout = fab_readiness.Report{ .errors = &.{.{ .id = id_layout_evidence, .message = "layout" }}, .warnings = &.{}, .stats = .{} };
+    // Spelled through the ERC enum, exactly as `fab_schematic_gate` renders a
+    // finding kind — so this case tracks a rename instead of a copied literal.
+    const uncited_module = fab_readiness.Report{
+        .errors = &.{.{ .id = @tagName(erc.ViolationKind.module_metadata_incomplete), .message = "module" }},
+        .warnings = &.{},
+        .stats = .{},
+    };
     try std.testing.expect(identityComplete(ordinary));
     try std.testing.expect(!identityComplete(duplicate_source));
     try std.testing.expect(!identityComplete(missing_revision));
     try std.testing.expect(!identityComplete(fallback));
     try std.testing.expect(!identityComplete(missing_mpn));
     try std.testing.expect(!identityComplete(malformed_layout));
+    try std.testing.expect(!identityComplete(uncited_module));
 }
 
 /// Build the fabrication identity mark while preserving the complete gate
@@ -251,7 +349,7 @@ pub fn check(arena: std.mem.Allocator, input: Input) std.mem.Allocator.Error!Res
         var errors: std.ArrayList(fab_readiness.Item) = .empty;
         try errors.appendSlice(arena, release_report.errors);
         try errors.append(arena, .{
-            .id = "layout-evidence-incomplete",
+            .id = id_layout_evidence,
             .message = "the selected saved layout contains malformed/defaulted manufacturing records, or only an optimizer cache was available; save a structurally complete layout before release",
         });
         release_report.errors = errors.items;
@@ -260,7 +358,7 @@ pub fn check(arena: std.mem.Allocator, input: Input) std.mem.Allocator.Error!Res
         var errors: std.ArrayList(fab_readiness.Item) = .empty;
         try errors.appendSlice(arena, release_report.errors);
         try errors.append(arena, .{
-            .id = "bom-evidence-incomplete",
+            .id = id_bom_evidence,
             .message = "the persisted BOM is missing, malformed, or stale against component/value/net identity; rebuild before release",
         });
         release_report.errors = errors.items;
@@ -270,7 +368,7 @@ pub fn check(arena: std.mem.Allocator, input: Input) std.mem.Allocator.Error!Res
         var errors: std.ArrayList(fab_readiness.Item) = .empty;
         try errors.appendSlice(arena, release_report.errors);
         try errors.append(arena, .{
-            .id = "verification-evidence-incomplete",
+            .id = id_verification_evidence,
             .message = "the exact evaluator read-set or an existing .checks.sexp sidecar could not be loaded; release is blocked",
         });
         release_report.errors = errors.items;

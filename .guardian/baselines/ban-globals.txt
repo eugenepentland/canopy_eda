@@ -1,6 +1,7 @@
 # guardian-snapshot v3
 ban-globals|src/bench_layout.zig|mutable global var outside wiring/main
 ban-globals|src/infra/fs.zig|mutable global var outside wiring/main
+ban-globals|src/layout_sidecar_store.zig|mutable global var outside wiring/main
 ban-globals|src/placement/fill_cache.zig|mutable global var outside wiring/main
 ban-globals|src/placement/fill_cache.zig|mutable global var outside wiring/main
 ban-globals|src/placement/impedance_cache.zig|mutable global var outside wiring/main

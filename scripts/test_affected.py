@@ -36,6 +36,12 @@ ALWAYS_FILTERS = (
     "mcpSetPartPoses rejects an empty poses array",
     "release preparation",
     "template predecessor",
+    # The two shard-integrity boundaries: they prove src/test_shards.zig's
+    # manifest still runs every named test exactly once and imports every module
+    # whose tests run. A shard that silently drops a test (or a module that no
+    # shard imports) ships green everywhere else, so these run on every subset.
+    "shard manifest runs every named test exactly once",
+    "the shard import bridge lists every module whose tests run",
 )
 
 # These inputs define how the suite is compiled or selected. Guessing a subset
@@ -45,6 +51,7 @@ FULL_RUN_FILES = {
     "build.zig.zon",
     "guardian.toml",
     "src/test_root.zig",
+    "src/test_shards.zig",
     "scripts/test_affected.py",
 }
 FULL_RUN_PREFIXES = (".guardian/",)

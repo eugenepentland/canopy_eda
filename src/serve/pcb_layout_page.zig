@@ -5262,22 +5262,28 @@ pub fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
     // write with 409 + the current rev so the client can warn "reload to
     // continue" instead of silently clobbering the other window's edits. A body
     // with no `rev` (a legacy cached page) skips the check and just stamps —
-    // "accept then stamp". The successful write bumps the rev to `new_rev`.
-    const disk_rev = readLayoutRev(req.arena, ctx.project_dir, name, sub);
-    if (root.object.get("rev")) |rv| {
-        const client_rev: ?i64 = switch (rv) {
-            .integer => |i| i,
-            .float => |f| numeric.checkedInt(i64, f),
-            else => null,
-        };
-        if (client_rev) |cr| if (cr != disk_rev) {
+    // "accept then stamp". The successful write bumps the rev to `disk_rev + 1`.
+    //
+    // The check and the write must happen under ONE hold of the sidecar lock or
+    // this is a check-then-write race: two saves that both read `rev = 5` both
+    // pass, both write `rev = 6`, and the first one's row is gone while both
+    // clients are told `6`. So `client_rev` is only PARSED here; the authoritative
+    // read-compare-write runs inside `lockSidecar` at the bottom of the handler,
+    // after the expensive design resolve — which must stay outside the lock, or
+    // every concurrent editor queues behind it.
+    const client_rev = sidecar_store.clientRev(root.object.get("rev"));
+    // Cheap pre-check on the same value, purely so an already-doomed save fails
+    // fast instead of paying for a block resolve first. It decides nothing: the
+    // hold below re-reads and re-compares before it writes.
+    if (client_rev) |cr| {
+        const seen_rev = readLayoutRev(req.arena, ctx.project_dir, name, sub);
+        if (cr != seen_rev) {
             res.status = 409;
             res.content_type = .JSON;
-            res.body = try std.fmt.allocPrint(req.arena, "{{\"error\":\"conflict\",\"rev\":{d}}}", .{disk_rev});
+            res.body = try std.fmt.allocPrint(req.arena, "{{\"error\":\"conflict\",\"rev\":{d}}}", .{seen_rev});
             return;
-        };
+        }
     }
-    const new_rev = disk_rev + 1;
     timer.lap("parse");
     // Resolve the block for its layer rules alone — a pour naming a layer this
     // board has not got is refused below. Nothing here judges the placement.
@@ -5313,6 +5319,27 @@ pub fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
         res.body = msg;
         return;
     }
+    // ── The guarded read-compare-write ───────────────────────────────
+    // ONE hold of the sidecar lock now covers the entire span the rev guard was
+    // always meant to protect: re-read the on-disk rev, re-compare it against
+    // the client's, snapshot, read the current list, merge, write `rev + 1`.
+    // Splitting the check from the write is what let two saves both observe
+    // `rev = 5`, both pass, and both write `rev = 6` with the first one's row
+    // dropped. Everything costly (the block resolve, every body parse, every
+    // rejection) is already done above and stays OUTSIDE this hold, so it is
+    // three file operations long and cannot serialize the editor.
+    const guard = lockSidecar(name, sub);
+    defer guard.unlock();
+
+    const disk_rev = readLayoutRev(req.arena, ctx.project_dir, name, sub);
+    if (client_rev) |cr| if (cr != disk_rev) {
+        res.status = 409;
+        res.content_type = .JSON;
+        res.body = try std.fmt.allocPrint(req.arena, "{{\"error\":\"conflict\",\"rev\":{d}}}", .{disk_rev});
+        return;
+    };
+    const new_rev = disk_rev + 1;
+
     // Snapshot only a request that has passed every rejection above and will
     // actually overwrite the sidecar. Rejected idle-autosaves used to consume
     // all 20 history slots with identical copies of the last good board.
@@ -5419,6 +5446,11 @@ pub fn restoreLayoutHistoryApi(ctx: *Server, req: *httpz.Request, res: *httpz.Re
     };
     // Snapshot the current sidecar so the restore itself is undoable, then write
     // the restored layouts with a bumped rev, preserving the current cache slot.
+    // Rev read → snapshot → cache read → write is one read-modify-write and is
+    // held as one, so a concurrent save cannot land between the snapshot and
+    // the overwrite (its row would be neither restored nor recoverable).
+    const guard = lockSidecar(name, null);
+    defer guard.unlock();
     const disk_rev = readLayoutRev(req.arena, ctx.project_dir, name, null);
     if (layoutsSidecar(req.arena, ctx.project_dir, name, null, layouts_ext)) |scp| {
         _ = history.snapshotLayouts(req.arena, ctx.project_dir, name, scp) catch null;
@@ -5445,11 +5477,17 @@ pub fn mcpRestoreLayoutSnapshot(
         return mcpFail(out, alloc, "layout snapshot read failed");
     const restored = parseLayouts(alloc, snap_data) orelse
         return mcpFail(out, alloc, "layout snapshot is corrupt");
-    const disk_rev = readLayoutRev(alloc, project_dir, name, null);
-    if (layoutsSidecar(alloc, project_dir, name, null, layouts_ext)) |sidecar_path| {
-        _ = history.snapshotLayouts(alloc, project_dir, name, sidecar_path) catch null;
-    }
-    writeLayoutsFile(alloc, project_dir, name, restored, readCacheSlot(alloc, project_dir, name), disk_rev + 1);
+    // Same read-modify-write as the HTTP twin, held the same way.
+    const disk_rev = blk: {
+        const guard = lockSidecar(name, null);
+        defer guard.unlock();
+        const rev = readLayoutRev(alloc, project_dir, name, null);
+        if (layoutsSidecar(alloc, project_dir, name, null, layouts_ext)) |sidecar_path| {
+            _ = history.snapshotLayouts(alloc, project_dir, name, sidecar_path) catch null;
+        }
+        writeLayoutsFile(alloc, project_dir, name, restored, readCacheSlot(alloc, project_dir, name), rev + 1);
+        break :blk rev;
+    };
     out.clearRetainingCapacity();
     var aw: std.Io.Writer.Allocating = .fromArrayList(alloc, out);
     defer out.* = aw.toArrayList();
@@ -5490,6 +5528,12 @@ fn namedLayoutMutationRev(
 
 /// Persist a revised named-layout list, snapshotting top-level stores first,
 /// and return the optimistic-concurrency revision written to the sidecar.
+///
+/// Takes no lock and is only half a critical section: `disk_rev` was read (and
+/// usually compared, via `namedLayoutMutationRev`) by the caller. The CALLER
+/// must hold `lockSidecar(design, sub)` across both halves — see
+/// `deleteNamedLayoutApi` — or the rev guard degrades to a check-then-write and
+/// two mutations that read the same rev both write `rev + 1`.
 pub fn commitNamedLayoutMutation(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
@@ -5560,6 +5604,10 @@ pub fn deleteNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respo
         return;
     }
     const sub = subSlug(req);
+    // `namedLayoutMutationRev` reads and compares the rev; `commitNamedLayoutMutation`
+    // snapshots and writes `rev + 1`. That is a check-then-write and is held as one.
+    const guard = lockSidecar(name, sub);
+    defer guard.unlock();
     const disk_rev = namedLayoutMutationRev(req, res, ctx.project_dir, name, sub, root) orelse return;
     const existing = readLayoutsSub(req.arena, ctx.project_dir, name, sub);
     const remaining = deletedLayoutList(req.arena, existing, nm_v.string) catch |err| switch (err) {
@@ -5601,6 +5649,11 @@ pub fn renameNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respo
         return;
     }
     const sub = subSlug(req);
+    // Rev check → name-collision scan → write is one read-modify-write: without
+    // the hold, two renames to the same new name can both pass the collision
+    // scan. See `deleteNamedLayoutApi`.
+    const guard = lockSidecar(design, sub);
+    defer guard.unlock();
     const disk_rev = namedLayoutMutationRev(req, res, ctx.project_dir, design, sub, root) orelse return;
     const existing = readLayoutsSub(req.arena, ctx.project_dir, design, sub);
     if (std.mem.eql(u8, old_v.string, new_name)) {
@@ -5650,6 +5703,12 @@ pub fn setDefaultLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respon
     }
     const want = std.mem.trim(u8, nm_v.string, " \t\n\r");
     const sub = subSlug(req);
+    // Read the list, re-stamp one row's `default`, write the whole list back:
+    // a read-modify-write that carries the current rev, so a save landing in the
+    // middle would be written straight back out of existence. Nothing costly
+    // happens between the read and the write, so the whole span is held.
+    const guard = lockSidecar(name, sub);
+    defer guard.unlock();
     const existing = readLayoutsSub(req.arena, ctx.project_dir, name, sub);
     var out: std.ArrayList(SavedLayout) = .empty;
     for (existing) |L| {
@@ -5725,7 +5784,29 @@ pub fn rescoreLayoutsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response
         }
         try out.append(req.arena, updated);
     }
-    writeLayouts(req.arena, ctx.project_dir, name, out.items);
+
+    // Scoring resolved the design block and ran the objective once per saved
+    // row — far too long to hold the sidecar lock across, and holding it there
+    // would serialize every editor save behind a rescore. So only the
+    // read-modify-write is held: re-read the list under the lock and copy each
+    // freshly computed score onto the row that still carries the same NAME.
+    // A layout saved, renamed or deleted while the scoring ran therefore
+    // survives untouched, instead of being written back out of existence by
+    // the stale list this handler started from. `sub` is null here (scoped
+    // requests returned above), so this is the design-level sidecar.
+    const guard = lockSidecar(name, null);
+    defer guard.unlock();
+    var merged: std.ArrayList(SavedLayout) = .empty;
+    for (readLayoutsSub(req.arena, ctx.project_dir, name, null)) |L| {
+        var row = L;
+        for (out.items) |scored| {
+            if (!std.mem.eql(u8, scored.name, L.name)) continue;
+            row.score = scored.score;
+            break;
+        }
+        try merged.append(req.arena, row);
+    }
+    writeLayouts(req.arena, ctx.project_dir, name, merged.items);
 
     res.content_type = .JSON;
     res.body = try std.fmt.allocPrint(req.arena, "{{\"ok\":true,\"rescored\":{d}}}", .{n});
@@ -6878,6 +6959,17 @@ const writeLayoutsSubRev = sidecar_store.writeLayoutsSubRev;
 /// Persist layouts + cache slot + `rev` to `.layouts.json` (the whole sidecar).
 const writeLayoutsFile = sidecar_store.writeLayoutsFile;
 
+/// Enter the read-compare-write critical section for one design's sidecar.
+///
+/// Every sidecar mutation on this page is a read-modify-write, and the `rev`
+/// guard alone is a lockless check-then-write: two saves that both read `rev=5`
+/// both passed it, both wrote `rev=6`, and the first one's row was gone. Take
+/// this around the WHOLE span (rev read → conflict check → history snapshot →
+/// list read → write) and `defer guard.unlock()`. Expensive work — resolving
+/// the design, solving, scoring, pouring — is computed BEFORE the lock so the
+/// editor is never serialized behind it. See `layout_sidecar_store.lockSidecar`.
+const lockSidecar = sidecar_store.lockSidecar;
+
 /// Drop exactly-duplicated copper from every layout on its way to disk.
 ///
 /// Copper reaches the sidecar from several appenders — a fresh route, the gap
@@ -6896,13 +6988,18 @@ const dedupedTracks = sidecar_store.dedupedTracks;
 
 /// `vias` with byte-identical duplicates removed, order preserved.
 ///
-/// The key is geometry + net and deliberately ignores BOTH provenance tags (`g`
+/// The key is geometry — hole position, diameter, drill AND the `s` layer
+/// SPAN — plus the net, and it deliberately ignores BOTH provenance tags (`g`
 /// stamp group, `f` fence): two vias at the same place on the same net are one
 /// piece of copper however they got there, and keying on provenance would let a
 /// re-Stamp or a fence re-run persist a second barrel in the same hole. Order
 /// preservation then decides which row survives — the FIRST one, so
 /// pre-existing (typically untagged, hand-drawn or autorouted) copper keeps its
 /// identity and a later tagged twin is the one dropped.
+///
+/// The span is on the OTHER side of that line: a blind/buried `0..1` and a
+/// through `0..N` in one hole are two different pieces of copper joining
+/// different layers, so they are not twins and both persist.
 const dedupedVias = sidecar_store.dedupedVias;
 
 // spec: Web Server - Copper is de-duplicated on its way to the layout sidecar, so an appender that re-lays a segment cannot persist it twice
@@ -7378,9 +7475,19 @@ pub fn loadSyncRoutes(alloc: std.mem.Allocator, project_dir: []const u8, name: [
 /// Best-effort: a write failure just means a regenerate.
 fn writeAutoCache(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, p: optimizer.Placement, params: optimizer.Params) void {
     const parts = posesFromPlacement(alloc, p) orelse return;
-    const doc = readSidecarDoc(alloc, project_dir, name, null);
-    // Refreshing the auto cache is a render-path write — preserve the rev.
-    writeLayoutsFile(alloc, project_dir, name, doc.layouts, .{ .params = params, .parts = parts }, doc.rev);
+    // Read the whole document, swap the cache slot, write it back. That is a
+    // read-modify-write on the file saves also write, reached from the detached
+    // regen thread as well as the render path, and it re-stamps the CURRENT rev
+    // — so unheld it clobbers a concurrent save without ever tripping the rev
+    // guard. Solving already finished in the caller; only the file work is
+    // inside the hold. Released before the legacy-file cleanup below.
+    {
+        const guard = lockSidecar(name, null);
+        defer guard.unlock();
+        const doc = readSidecarDoc(alloc, project_dir, name, null);
+        // Refreshing the auto cache is a render-path write — preserve the rev.
+        writeLayoutsFile(alloc, project_dir, name, doc.layouts, .{ .params = params, .parts = parts }, doc.rev);
+    }
     if (paths.designSiblingPath(alloc, project_dir, name, auto_ext)) |legacy| {
         defer alloc.free(legacy);
         infra_fs.cwd().deleteFile(legacy) catch |e| switch (e) {
@@ -10483,6 +10590,11 @@ pub fn mcpPersistWorking(
     // existing named layout. Refresh the timestamp so the editor's default
     // newest-edited-first ordering reflects the actual working layout.
     entry.ts = clock.timestamp();
+    // Read the list, upsert one row, write it back with `rev + 1`: the same
+    // read-modify-write `saveNamedLayoutApi` performs, so it takes the same
+    // hold — an agent's CLI write and an open tab's save target one file.
+    const guard = lockSidecar(name, null);
+    defer guard.unlock();
     const existing = readLayouts(alloc, project_dir, name);
     var out: std.ArrayList(SavedLayout) = .empty;
     var replaced = false;
@@ -10510,6 +10622,10 @@ pub fn mcpPersistWorking(
 /// visible to an open editor tab's optimistic-concurrency guard (the tab's now
 /// stale rev 409s on its next save instead of silently clobbering). CLI tools
 /// are design-level only, so there is no `sub` variant.
+///
+/// Takes no sidecar lock of its own: its only caller (`mcpPersistWorking`)
+/// already holds one across the read this write is modifying, and
+/// `infra_fs.Mutex` is not reentrant.
 fn mcpProtectedWrite(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layouts: []const SavedLayout) void {
     if (layoutsSidecar(alloc, project_dir, name, null, layouts_ext)) |scp| {
         _ = history.snapshotLayouts(alloc, project_dir, name, scp) catch null;

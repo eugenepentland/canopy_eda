@@ -1017,6 +1017,17 @@ src/import_kicad.zig::parseNetlist | fn parseNetlist(arena: std.mem.Allocator, p
 src/import_kicad.zig::sanitizeName | fn sanitizeName(arena: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error![]const u8
 src/import_kicad.zig::sanitizeNetName | fn sanitizeNetName(arena: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error![]const u8
 src/import_kicad.zig::unconnected_prefix value
+src/infra/atomic_write.zig::CommitError value
+src/infra/atomic_write.zig::Error value
+src/infra/atomic_write.zig::InitError value
+src/infra/atomic_write.zig::StageError value
+src/infra/atomic_write.zig::Staged struct_
+src/infra/atomic_write.zig::WriteError value
+src/infra/atomic_write.zig::abandon | fn abandon(self: *Staged) void
+src/infra/atomic_write.zig::begin | fn begin(self: *Staged, path: []const u8) InitError!void
+src/infra/atomic_write.zig::commit | fn commit(self: *Staged) CommitError!void
+src/infra/atomic_write.zig::write | fn write(self: *Staged, bytes: []const u8) WriteError!void
+src/infra/atomic_write.zig::writeFile | fn writeFile(path: []const u8, bytes: []const u8) Error!void
 src/infra/clock.zig::epoch value
 src/infra/clock.zig::milliTimestamp | fn milliTimestamp() i64
 src/infra/clock.zig::monotonicNanos | fn monotonicNanos() i128
@@ -1381,11 +1392,13 @@ src/kicad_sym/reader.zig::per_mm value
 src/layout_save_layers.zig::savedLayoutLayers | fn savedLayoutLayers( ctx: *Server, arena: std.mem.Allocator, name: []const u8, sub: ?[]const u8, stages: ?*request_log.StageTimer, ) ?optimizer.BoardRules
 src/layout_sidecar_store.zig::CacheSlot struct_
 src/layout_sidecar_store.zig::SidecarDoc struct_
+src/layout_sidecar_store.zig::SidecarGuard struct_
 src/layout_sidecar_store.zig::SnapshotChoice struct_
 src/layout_sidecar_store.zig::SyncPose struct_
 src/layout_sidecar_store.zig::cachePoses | fn cachePoses(alloc: std.mem.Allocator, cache: ?CacheSlot) ?[]const optimizer.RefPose
 src/layout_sidecar_store.zig::chooseModuleSnapshot | fn chooseModuleSnapshot( layouts: []const SavedLayout, origin_of: *const std.StringHashMapUnmanaged([]const u8), ) ?SnapshotChoice
 src/layout_sidecar_store.zig::chooseSyncPoses | fn chooseSyncPoses(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?[]const optimizer.RefPose
+src/layout_sidecar_store.zig::clientRev | fn clientRev(value: ?std.json.Value) ?i64
 src/layout_sidecar_store.zig::dedupLayouts | fn dedupLayouts(alloc: std.mem.Allocator, layouts: []const SavedLayout) []const SavedLayout
 src/layout_sidecar_store.zig::dedupedLayouts | fn dedupedLayouts(alloc: std.mem.Allocator, layouts: []const SavedLayout) []const SavedLayout
 src/layout_sidecar_store.zig::dedupedTracks | fn dedupedTracks(alloc: std.mem.Allocator, tracks: []const SavedTrack) []const SavedTrack
@@ -1396,6 +1409,7 @@ src/layout_sidecar_store.zig::kind_auto value
 src/layout_sidecar_store.zig::kind_manual value
 src/layout_sidecar_store.zig::layoutsSidecar | fn layoutsSidecar( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8, ext: []const u8, ) ?[]u8
 src/layout_sidecar_store.zig::layouts_ext value
+src/layout_sidecar_store.zig::lockSidecar | fn lockSidecar(name: []const u8, sub: ?[]const u8) SidecarGuard
 src/layout_sidecar_store.zig::parseCacheSlot | fn parseCacheSlot(alloc: std.mem.Allocator, value: std.json.Value) ?CacheSlot
 src/layout_sidecar_store.zig::parseLayouts | fn parseLayouts(alloc: std.mem.Allocator, data: []const u8) ?[]const SavedLayout
 src/layout_sidecar_store.zig::readAutoPoses | fn readAutoPoses(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?[]const optimizer.RefPose
@@ -1409,6 +1423,7 @@ src/layout_sidecar_store.zig::recordAutoLayout | fn recordAutoLayout( alloc: std
 src/layout_sidecar_store.zig::refPosesFromParts | fn refPosesFromParts(alloc: std.mem.Allocator, parts: []const PartPose) ?[]const optimizer.RefPose
 src/layout_sidecar_store.zig::sameLayoutScore | fn sameLayoutScore(a: ?LayoutScore, b: ?LayoutScore) bool
 src/layout_sidecar_store.zig::sidecar_max_bytes value
+src/layout_sidecar_store.zig::unlock | fn unlock(self: SidecarGuard) void
 src/layout_sidecar_store.zig::writeLayouts | fn writeLayouts(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layouts: []const SavedLayout) void
 src/layout_sidecar_store.zig::writeLayoutsFile | fn writeLayoutsFile( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layouts: []const SavedLayout, cache: ?CacheSlot, rev: i64, ) void
 src/layout_sidecar_store.zig::writeLayoutsFileJson | fn writeLayoutsFileJson(w: *std.Io.Writer, layouts: []const SavedLayout, cache: ?CacheSlot) std.Io.Writer.Error!void
@@ -1435,6 +1450,8 @@ src/layout_status.zig::ModuleLayoutStatus struct_
 src/layout_status.zig::read | fn read(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ModuleLayoutStatus
 src/lib_limits.zig::max_footprint_bytes value
 src/lib_limits.zig::max_lib_file_bytes value
+src/lib_limits.zig::retired_lib_file_cap_bytes value
+src/lib_limits.zig::synthPinoutSource | fn synthPinoutSource( gpa: std.mem.Allocator, name: []const u8, min_bytes: usize, ) std.mem.Allocator.Error![]u8
 src/main.zig::main | fn main(init: std.process.Init) !void
 src/main.zig::process_build_id value
 src/main.zig::process_environ_map value

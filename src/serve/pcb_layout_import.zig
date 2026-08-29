@@ -12,6 +12,7 @@ const paths = @import("../paths.zig");
 const outline_mod = @import("../placement/outline.zig");
 const import_layout = @import("../kicad_pcb/import_layout.zig");
 const page = @import("pcb_layout_page.zig");
+const sidecar_store = @import("../layout_sidecar_store.zig");
 
 /// The sidecar track element type, derived through the pub `SavedRoutes`
 /// field so the 8-field struct itself can stay private to the page module
@@ -40,6 +41,13 @@ pub fn writeImportedStarredLayout(
     imported: import_layout.Imported,
 ) bool {
     const layout = importedSavedLayout(alloc, imported) catch return false;
+    // Read-modify-write: the rev, the cache slot and the existing rows are all
+    // read, merged, and republished as `rev + 1`. The conversion above is pure,
+    // so the hold starts here and covers only the transaction — a concurrent
+    // save landing mid-merge would otherwise be overwritten whole. None of the
+    // readers below takes this lock, so the hold cannot re-enter itself.
+    const guard = sidecar_store.lockSidecar(name, null);
+    defer guard.unlock();
     const rev = page.readLayoutRev(alloc, project_dir, name, null);
     const cache = page.readCacheSlot(alloc, project_dir, name);
     const merged = mergeStarred(alloc, page.readLayouts(alloc, project_dir, name), layout) catch return false;

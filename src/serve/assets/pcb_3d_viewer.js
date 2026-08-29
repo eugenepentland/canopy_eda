@@ -557,8 +557,18 @@
     (DATA.parts || []).forEach(function (part, i) {
       if (part.fp !== fp || !partGroups[i]) return;
       var mount = partGroups[i].userData.mount;
+      // The template cache entry for this footprint was just dropped, so the
+      // instances detached here hold the LAST references to its geometry and
+      // materials — remove them without disposing and the GPU buffers survive
+      // every upload for the life of the page. Instances are `.clone()`s that
+      // SHARE the template's buffers, which is why this is only safe where the
+      // template is being retired and every instance of it goes in this same
+      // synchronous pass (the filter keeps other footprints untouched).
       mount.children.slice().forEach(function (child) {
-        if (child.userData.pcb3dKind === "models" && child.userData.pcb3dFootprint === fp) mount.remove(child);
+        if (child.userData.pcb3dKind === "models" && child.userData.pcb3dFootprint === fp) {
+          mount.remove(child);
+          disposeGroup(child);
+        }
       });
       placeModel(mount, part);
     });
@@ -757,14 +767,24 @@
       var pose = partGroups[i], mount = pose.userData.mount;
       if (pose.userData.footprint !== p.fp) {
         var previous = pose.userData.footprint;
+        var detached = [];
         mount.children.slice().forEach(function (child) {
-          if (child.userData.pcb3dKind === "models") mount.remove(child);
+          if (child.userData.pcb3dKind === "models") { mount.remove(child); detached.push(child); }
         });
         pose.userData.footprint = p.fp;
         // Invalidate an old async STEP parse before it can land back on this
         // mount. Refresh any other instances that still use that package, then
         // load the replacement body when its refreshed model map has one.
-        if (previous && (DATA.models || {})[previous]) refreshModel(previous, DATA.models[previous]);
+        if (previous && (DATA.models || {})[previous]) {
+          refreshModel(previous, DATA.models[previous]);
+          // refreshModel retires that footprint's template and rebuilds every
+          // remaining instance from a fresh parse, so the bodies detached above
+          // are the last holders of the OLD shared buffers and are safe to free.
+          // Without that guarantee they are left alone: a `.clone()` shares its
+          // template's geometry with every other instance of the same package,
+          // and disposing here would blank the parts still showing it.
+          detached.forEach(disposeGroup);
+        }
         if (p.fp && (DATA.models || {})[p.fp]) placeModel(mount, p);
       }
       pose.position.set(p.x, -p.y, 0);
