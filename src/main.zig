@@ -22,6 +22,8 @@ const tool_cli = @import("tool_cli.zig");
 const bench_route = @import("bench_route.zig");
 const bench_page = @import("bench_page.zig");
 const drc_dump = @import("drc_dump.zig");
+const gerber_dump = @import("gerber_dump.zig");
+const netlist_dump = @import("netlist_dump.zig");
 const plugin_tokens = @import("serve/plugin_tokens.zig");
 const build_id = @import("build_id.zig");
 
@@ -298,8 +300,30 @@ fn dispatchQueryCommand(
         try bench_page.cmdBenchPage(allocator, args);
         return true;
     }
+    return dispatchDumpCommand(allocator, command, args);
+}
+
+/// The differential dump family: read-only, deterministic dumps of one saved
+/// board's DRC findings, its fabrication artwork, and its flattened netlist.
+/// Each writes its per-run numbers on `#`-prefixed lines so two binaries'
+/// output compares with `diff -I '^#'` — `scripts/corpus_diff.sh` runs all
+/// three over the board corpus. Grouped here so the query dispatcher keeps one
+/// branch for the whole family rather than one per member.
+fn dispatchDumpCommand(
+    allocator: std.mem.Allocator,
+    command: []const u8,
+    args: []const []const u8,
+) !bool {
     if (std.mem.eql(u8, command, "drc-dump")) {
         try drc_dump.cmdDrcDump(allocator, args);
+        return true;
+    }
+    if (std.mem.eql(u8, command, "gerber-dump")) {
+        try gerber_dump.cmdGerberDump(allocator, args);
+        return true;
+    }
+    if (std.mem.eql(u8, command, "netlist-dump")) {
+        try netlist_dump.cmdNetlistDump(allocator, args);
         return true;
     }
     return false;
@@ -525,6 +549,8 @@ fn printUsage() !void {
         \\  netlisp compare-elmer-thermal [--project-dir <d>] [--output-dir <out>] [--layout <name>] [--ambient <C>] [--scenario <natural|airflow_1ms|airflow_2ms>] [--solver <path>] <name>  Run Elmer and write a side-by-side thermal comparison
         \\  netlisp bench-thermal [--project-dir <d>] [--layout <name>] [--reps <n>] <name>  Benchmark only the built-in four-scenario thermal field solve
         \\  netlisp bench-page [--project-dir <d>] [--reps <n>] [--json] [--baseline <file>] [<name>…]  Benchmark PCB-page load + DRC latency per board (--baseline gates against a committed recording)
+        \\  netlisp gerber-dump [--project-dir <d>] [--layout <name>] [--digest] <name>…  Dump the unstamped fabrication artwork of a saved layout — every Gerber layer, the job file and both drills (read-only; `#` lines carry the timings, so `diff -I '^#'` compares artwork alone)
+        \\  netlisp netlist-dump [--project-dir <d>] <name>…  Dump the flattened netlist — one sorted line per net carrying its sorted refdes.pad members (read-only; `#` lines carry the timings)
         \\  netlisp export-schematic-png [--project-dir <d>] <name> [--sub <slug>|--ref <hub>] [--view sequential|functional] [--theme light|dark] [--width <px>] [--output <file>]  Export a schematic block PNG without a browser
         \\  netlisp convert-footprint <file>        Convert KiCad .kicad_mod to .sexp
         \\  netlisp convert-symbol <file> [--filter <name>]  Convert KiCad .kicad_sym to .sexp
@@ -712,6 +738,8 @@ test {
     _ = @import("placement/fill_cache.zig");
     _ = @import("placement/content_key.zig");
     _ = @import("drc_dump.zig");
+    _ = @import("gerber_dump.zig");
+    _ = @import("netlist_dump.zig");
     _ = @import("placement/bypass_intent.zig");
     _ = @import("placement/bypass_open.zig");
     _ = @import("placement/routed_copper.zig");

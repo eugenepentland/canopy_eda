@@ -237,6 +237,17 @@ name = "pcb-editor-perf-js-syntax"
 command = ["node", "--check", "scripts/pcb_editor_perf/run.js"]
 inputs = ["scripts/pcb_editor_perf/run.js"]
 
+# The editor invariant probe itself is NOT a guardian gate: it needs a netlisp
+# binary and a Chromium launch, and the tempting compromise — exit 0 with a note
+# when no binary is present — is precisely the failure this audit was about, a
+# check that passes because it did not run. It lives in prepare-release.sh
+# against the exact stripped candidate. Its syntax is gated here like its perf
+# siblings.
+[[external]]
+name = "pcb-editor-invariants-js-syntax"
+command = ["node", "--check", "scripts/pcb_editor_invariants/run.js"]
+inputs = ["scripts/pcb_editor_invariants/run.js"]
+
 [[external]]
 name = "ui-browser-perf-js-syntax"
 command = ["node", "--check", "scripts/ui_browser_perf/run.js"]
@@ -280,6 +291,37 @@ inputs = ["src/serve/assets/vendor/pdfjs-4.10.38/pdf.min.mjs"]
 name = "pdfjs-worker-syntax"
 command = ["node", "--check", "src/serve/assets/vendor/pdfjs-4.10.38/pdf.worker.min.mjs"]
 inputs = ["src/serve/assets/vendor/pdfjs-4.10.38/pdf.worker.min.mjs"]
+
+# ── The audit ledger ──────────────────────────────────────────────────────
+# Two audits have now run over this tree, and the second had to re-derive the
+# status of every finding in the first by hand. Worse, the July stored-XSS
+# finding (S4) was fixed in the central writer and came BACK through three
+# sibling serializers the fix missed — with nothing recording that the class had
+# been closed, nothing noticed it had reopened.
+#
+# `AUDIT-LEDGER.toml` is that record, and this gate is what keeps it honest:
+# every entry marked `fixed` names the regression test that proves it, and the
+# checker fails if that test no longer exists under src/. A fix whose guard was
+# deleted or renamed is not a fix any more. It also prints, on every GREEN run,
+# the fixed findings that have no regression test at all — currently 8, three of
+# them the browser-editor state bugs — so the gap stays visible instead of
+# being rediscovered by the next audit.
+#
+# `inputs` is the whole Zig tree ON PURPOSE. `inputs` feeds the green-run
+# digest, so listing only the ledger would let a .zig-only change reuse a green
+# digest and skip this check at exactly the moment it matters: when a test is
+# renamed. `src/*.zig` is subtree-matching here (the same spelling the
+# [[concept]] rules rely on), so it cannot go stale the way an explicit file
+# list would.
+[[external]]
+name = "audit-ledger"
+command = ["python3", "scripts/check_audit_ledger.py"]
+inputs = ["AUDIT-LEDGER.toml", "scripts/check_audit_ledger.py", "src/*.zig"]
+
+[[external]]
+name = "audit-ledger-selftest"
+command = ["python3", "scripts/check_audit_ledger_test.py"]
+inputs = ["scripts/check_audit_ledger.py", "scripts/check_audit_ledger_test.py", "AUDIT-LEDGER.toml"]
 
 # ── First-party JS assets that had NO gate (COVERAGE, audit 2026-08-29) ────
 # Guardian scans only Zig/spec/config, so a broken edit to any browser asset not
@@ -468,6 +510,34 @@ modules = [
   "src/pdf.zig",
   "src/svg2pdf.zig",
 ]
+
+# ── Concurrency evidence (`[concurrency_presence]`) ───────────────────────
+# The sibling of `[fuzz_presence]`, for shared mutable state instead of
+# untrusted input: a listed module must carry a test that starts a SECOND unit
+# of execution over the state it guards.
+#
+# The layout sidecar earns the first entry. Its optimistic `rev` guard was a
+# lockless check-then-write for its entire life — two saves that both read
+# `rev = 5` both passed it, both wrote `rev = 6`, one row vanished, and both
+# clients were told `6`. The lock that fixes that landed on 2026-08-29, and the
+# lesson is that a lock's PRESENCE proves nothing: the guard had looked
+# deliberate for months. The check deliberately does not credit a mutex, a
+# `lock()` call, or `io.async` (which in this toolchain may run inline and so
+# can pass having never interleaved) — only a real spawn a test reaches.
+#
+# `layout_sidecar_store.zig` satisfies it with a genuine 4-thread × 30-round
+# stress test asserting that every accepted write advances the revision by
+# exactly one and no writer's row is overwritten. That test was verified to FAIL
+# (120 expected, 116 found) with the lock neutered, so it is evidence rather
+# than decoration.
+#
+# NOT LISTED, and worth saying why rather than leaving it silent: `serve/warmup.zig`
+# and `drc_sweep.zig` also spawn production threads and carry no concurrency
+# test. Listing them today would only paint the gate red for work this change
+# does not do; they are recorded in the audit ledger as open instead, and belong
+# here the moment either gains one.
+[concurrency_presence]
+modules = ["src/layout_sidecar_store.zig"]
 
 # ── Script-context escaping (`[script_string_safety]`) ────────────────────
 # The PCB page ships its whole board as `<script>const PCB=…</script>`, so every

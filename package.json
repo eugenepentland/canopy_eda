@@ -5,7 +5,9 @@
     "perf:assembly": "node scripts/pcb_browser_perf/run.js",
     "perf:pcb-editor": "node scripts/pcb_editor_perf/run.js",
     "perf:ui": "node scripts/ui_browser_perf/run.js",
-    "test:perf-manifest": "node scripts/ui_browser_perf/manifest.test.js"
+    "test:perf-manifest": "node scripts/ui_browser_perf/manifest.test.js",
+    "test:pcb-invariants": "node scripts/pcb_editor_invariants/run.js",
+    "test:pcb-invariants-selftest": "node scripts/pcb_editor_invariants/run.js --self-test"
   },
   "devDependencies": {
     "playwright": "1.62.1"
