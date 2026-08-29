@@ -2706,10 +2706,14 @@ function rfPathGeom(data){var src=data&&data.rf_paths||PCB.rf_paths||[];
 window.PCBRfSurfacePolys=function(data){return rfPathGeom(data).map(function(r){
  return {l:r.l,net:r.net,polys:r.polys};});};
 function rfSamePoint(a,b){return Math.abs(a[0]-b[0])<=1e-7&&Math.abs(a[1]-b[1])<=1e-7;}
-function rfPathCoversTrack(ss,t,a,b){for(var i=0;i<ss.length;i++){if(!rfSamePoint(ss[i],a))continue;
-  for(var j=i+1;j<ss.length;j++){if(!rfSamePoint(ss[j],b))continue;var on=true;
-   for(var k=i+1;k<j;k++)if(segDist(ss[k][0],ss[k][1],t)>.011){on=false;break;}
-   if(on)return true;}}return false;}
+// Widest sample across the span that covers this track, or -1 when the path
+// does not cover it. Ownership and the width baked back onto the copper read
+// the SAME span, so a dropped overlay can never widen unrelated tracks.
+function rfPathSpanWidth(ss,t,a,b){for(var i=0;i<ss.length;i++){if(!rfSamePoint(ss[i],a))continue;
+  for(var j=i+1;j<ss.length;j++){if(!rfSamePoint(ss[j],b))continue;var on=true,w=Math.max(+ss[i][2]||0,+ss[j][2]||0);
+   for(var k=i+1;k<j;k++){if(segDist(ss[k][0],ss[k][1],t)>.011){on=false;break;}w=Math.max(w,+ss[k][2]||0);}
+   if(on)return w;}}return -1;}
+function rfPathCoversTrack(ss,t,a,b){return rfPathSpanWidth(ss,t,a,b)>=0;}
 function rfPathOwnsTrack(p,t){if(!p||p.portal||!t||+(p.l||0)!==+(t.l||0)||(p.net||"")!==(t.net||""))return false;
  var ids=p.track_ids||[];if(ids.length)return !!t.id&&ids.indexOf(t.id)>=0;
  var ss=p.samples||[];if(ss.length<2)return false;
@@ -2718,12 +2722,55 @@ function rfOwnsTrack(t){return (PCB.rf_paths||[]).some(function(p){return rfPath
 window.PCBRfOwnsTrack=rfOwnsTrack;
 function rfPathBelongsToTrack(p,t){if(!p||!t||+(p.l||0)!==+(t.l||0)||(p.net||"")!==(t.net||""))return false;
  var ids=p.track_ids||[];return (!!t.id&&ids.indexOf(t.id)>=0)||rfPathOwnsTrack(p,t);}
+// An adaptive power overlay is derived width, not a controlled-impedance proof:
+// its net carries no impedance class, so nothing ever regenerates it. Dropping
+// one has to leave its copper behind at the width it actually had.
+function rfPathPower(p){if(!p||p.portal)return false;
+ var c=netClassInfo(p.net||"");return !(c&&+c.impedance_ohms>0);}
+function rfPathBakeWidth(p,t){var ss=p.samples||[];if(ss.length<2)return 0;
+ var w=Math.max(rfPathSpanWidth(ss,t,[t.x1,t.y1],[t.x2,t.y2]),rfPathSpanWidth(ss,t,[t.x2,t.y2],[t.x1,t.y1]));
+ if(w>=0)return w;
+ // Owned by id but no longer station-aligned (a re-cut or edited handle): use
+ // only the samples that still lie on this track.
+ for(var i=0;i<ss.length;i++)if(segDist(ss[i][0],ss[i][1],t)<=.011)w=Math.max(w,+ss[i][2]||0);
+ return Math.max(w,0);}
+// Write an overlay's sample widths onto the copper it owns before the record
+// goes away. `was` indexes pre-gesture geometry by track id for a drag that has
+// already moved its copper. Returns how many tracks the overlay owned.
+function rfBakePath(p,was){var ts=PCB.tracks||[];
+ function pass(path){var hit=0;
+  for(var i=0;i<ts.length;i++){var t=ts[i],q=(was&&t.id&&was[t.id])||t;
+   if(!rfPathOwnsTrack(path,q))continue;hit++;
+   var w=rfPathBakeWidth(path,q);if(w>(+t.w||0)+1e-9)t.w=w;}
+  return hit;}
+ var n=pass(p);
+ // Saved copper whose ids did not survive still matches on geometry alone.
+ if(!n&&(p.track_ids||[]).length)n=pass({net:p.net,l:p.l,samples:p.samples});
+ return n;}
+function rfPathOwnsAny(p){var ts=PCB.tracks||[];
+ for(var i=0;i<ts.length;i++)if(rfPathOwnsTrack(p,ts[i]))return true;
+ return false;}
+function rfWasIndex(was){if(!was||!was.length)return null;var m={};
+ was.forEach(function(t){if(t&&t.id)m[t.id]=t;});return m;}
 // A generated RF polygon is exact only while its hidden centreline chords are
 // untouched. Editing one drops its polygon proof; ordinary tracks become
 // visible/editable and DRC judges them until Route creates a fresh RF path.
-function rfDropForTracks(ts){if(!(PCB.rf_paths||[]).length||!ts||!ts.length)return;
- var before=PCB.rf_paths;PCB.rf_paths=before.filter(function(p){return !ts.some(function(t){return rfPathBelongsToTrack(p,t);});});
- if(PCB.rf_paths.length!==before.length)cuGeomDrop();}
+// A power overlay has no such regeneration, so bake first: the drag keeps the
+// rail at its real width instead of silently reverting it to the floor.
+function rfDropForTracks(ts,was){if(!(PCB.rf_paths||[]).length||!ts||!ts.length)return;
+ var before=PCB.rf_paths,ix=rfWasIndex(was),kept=before.filter(function(p){
+  if(!ts.some(function(t){return rfPathBelongsToTrack(p,t);}))return true;
+  if(rfPathPower(p))rfBakePath(p,ix);
+  return false;});
+ PCB.rf_paths=kept;if(kept.length!==before.length)cuGeomDrop();}
+// One open of a pre-adaptive board heals it: every power overlay's widths move
+// onto its copper and the record goes, and exact-probe debris (a 2-sample path
+// that owns nothing) goes with it. In memory only — no dirty mark; the next
+// real edit's save persists the healed board.
+function rfLoadBake(){var src=PCB.rf_paths||[],keep=src.filter(function(p){
+  if(rfPathPower(p)){rfBakePath(p);return false;}
+  return !!p.portal||(p.samples||[]).length>=3||rfPathOwnsAny(p);});
+ if(keep.length!==src.length){PCB.rf_paths=keep;cuGeomDrop();}}
 function rfDropNet(net){if(!net)return;var before=PCB.rf_paths;
  PCB.rf_paths=before.filter(function(p){return p.net!==net;});if(PCB.rf_paths.length!==before.length)cuGeomDrop();}
 function cuBatchOn(cop){
@@ -4614,7 +4661,7 @@ function loadLayoutName(nm){
  // pose on Load — the black-canyon layout corruption.
  P.forEach(function(p){var s=L.parts[p.ref];if(s){p.x=s.x;p.y=s.y;p.rot=s.rot||0;p.side=s.side||"top";if(s.locked!==undefined)p.locked=!!s.locked;}});applyAll();
  if(L.routes&&((L.routes.tracks||[]).length||(L.routes.vias||[]).length||(L.routes.rf_paths||[]).length)){
-  PCB.tracks=L.routes.tracks||[];PCB.vias=L.routes.vias||[];PCB.rf_paths=L.routes.rf_paths||[];PCB.drc=[];drawRoute();drawDrc();}
+  PCB.tracks=L.routes.tracks||[];PCB.vias=L.routes.vias||[];PCB.rf_paths=L.routes.rf_paths||[];PCB.drc=[];rfLoadBake();drawRoute();drawDrc();}
  // Restore this layout's custom copper pours; the carved fills recompute below.
  PCB.zones=(L.routes&&L.routes.zones)?L.routes.zones:[];PCB.zone_fills=[];pourGeomDrop();
  PCB.dimensions=JSON.parse(JSON.stringify(L.dimensions||[]));
@@ -6012,6 +6059,12 @@ function segFollow(list,nx,ny){list.forEach(function(w){
  else if(w.e===1){w.q.x1=nx;w.q.y1=ny;}
  else{w.q.x2=nx;w.q.y2=ny;}});}
 function segJogDrop(pl){if(pl.jog){PCB.tracks=PCB.tracks.filter(function(q){return q!==pl.jog;});pl.jog=null;}}
+// segFollow stretches every attached neighbour, so the WHOLE moved set releases
+// the overlays it belongs to — dropping only the grabbed segment's left the
+// neighbours' swept copper stale over copper that had already moved.
+function segDragTracks(sd){var out=[sd.t];
+ [sd.a,sd.b].forEach(function(pl){(pl&&pl.at||[]).forEach(function(w){if(w.q&&out.indexOf(w.q)<0)out.push(w.q);});});
+ return out;}
 // New position for one endpoint whose original was `o`, slid by (mx,my).
 function segEnd(sd,pl,o,mx,my,free){var ax=o.x+mx,ay=o.y+my;
  // Every pointermove is absolute from the drag snapshot. This also makes a
@@ -6061,7 +6114,9 @@ function segMove(m,free){var sd=segdrag,g=snapG();
   sd.t.x1=h.x1;sd.t.y1=h.y1;sd.t.xm=h.xm;sd.t.ym=h.ym;sd.t.x2=h.x2;sd.t.y2=h.y2;
   gpuCuEdit();paintSoon();return;}
  if(e1.x===sd.t.x1&&e1.y===sd.t.y1&&e2.x===sd.t.x2&&e2.y===sd.t.y2)return;
- if(!sd.moved){sd.moved=true;rfDropForTracks([sd.t]);svg.style.cursor="grabbing";}
+ // segEnd already slid the neighbours, so bake/drop against the drag snapshot's
+ // pre-gesture geometry rather than the copper as it stands right now.
+ if(!sd.moved){sd.moved=true;rfDropForTracks(segDragTracks(sd),sd.snap.tracks);svg.style.cursor="grabbing";}
  sd.t.x1=e1.x;sd.t.y1=e1.y;sd.t.x2=e2.x;sd.t.y2=e2.y;
  if(arcMid){sd.t.xm=arcMid.x;sd.t.ym=arcMid.y;
   sd.arcLast={x1:e1.x,y1:e1.y,xm:arcMid.x,ym:arcMid.y,x2:e2.x,y2:e2.y};}
@@ -6070,9 +6125,22 @@ function segMove(m,free){var sd=segdrag,g=snapG();
  if(insp&&insp.o===sd.t)renderProps();
  gpuCuEdit(); // segEnd/segFollow just moved copper (and may have laid a jog) in place
  paintSoon();}
-// Drop jogs that ended zero-length (slid back home / never left).
-function segJogClean(sd){[sd.a,sd.b].forEach(function(pl){var j=pl&&pl.jog;
- if(j&&Math.hypot(j.x2-j.x1,j.y2-j.y1)<1e-6){PCB.tracks=PCB.tracks.filter(function(q){return q!==j;});pl.jog=null;gpuCuEdit();}});}
+// Drop every crumb the gesture collapsed: jogs that slid back home / never
+// left, plus a grabbed or stretched segment whose two corners met. Zero-length
+// copper joins nothing (every contact predicate refuses degenerate geometry),
+// so a surviving crumb reads as a phantom island in the server's net_open.
+// Jogs clean up even on a stationary press — anchor mode lays one on the first
+// pointermove — while the moved set is swept only for a real drag, which the
+// pointerup below records as one undoable step.
+function segCrumbClean(sd){var dead=[];
+ [sd.a,sd.b].forEach(function(pl){if(pl&&pl.jog)dead.push(pl.jog);});
+ if(sd.moved){dead.push(sd.t);
+  [sd.a,sd.b].forEach(function(pl){(pl&&pl.at||[]).forEach(function(w){if(w.q&&dead.indexOf(w.q)<0)dead.push(w.q);});});}
+ var gone=dead.filter(function(t){return trackLength(t)<1e-6;});
+ if(!gone.length)return;
+ PCB.tracks=(PCB.tracks||[]).filter(function(q){return gone.indexOf(q)<0;});
+ [sd.a,sd.b].forEach(function(pl){if(pl&&pl.jog&&gone.indexOf(pl.jog)>=0)pl.jog=null;});
+ gpuCuEdit();}
 // ── Via dragging (Select mode) ──────────────────────────────────────────
 // A grabbed via translates as a rigid node: every track endpoint sitting on
 // its center rides along — on EVERY layer, since the barrel joins them all —
@@ -6385,34 +6453,43 @@ svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.p
   else outlineSelect("curve",od.i,od.id,ev);
   return;}
  if(segdrag){var sgd=segdrag;segdrag=null;svg.style.cursor="";
-  segJogClean(sgd);
+  segCrumbClean(sgd);
   if(sgd.moved){
    // The drag already mutated PCB.tracks in place; gate PRE-drag vs. now, and
    // if the engine flags a new routing-class violation, revert the whole move
-   // (a segment drag must not be a back door to violating copper).
-   if(drcGateDiffBlocks(sgd.snap.tracks||[],sgd.snap.vias||[],PCB.tracks||[],PCB.vias||[])){
+   // (a segment drag must not be a back door to violating copper). The paths
+   // ride along explicitly: the drag dropped the live ones, so defaulting both
+   // sides to PCB.rf_paths judged the "before" board without its wide copper.
+   if(drcGateDiffBlocks(sgd.snap.tracks||[],sgd.snap.vias||[],PCB.tracks||[],PCB.vias||[],sgd.snap.rf_paths||[],PCB.rf_paths||[])){
     restoreSnap(sgd.snap);inspClear();
     routeStatMsg("move reverted — it would create a DRC error",true);return;}
-   recordUndo(sgd.snap);routeStatMsg();scheduleDrc();}
+   // The move stands: heal the adaptive runs it touched back to their real
+   // clearance-limited width. A recut replaces that copper, so the grabbed
+   // segment can leave the board here exactly as a collapsed one does.
+   recordUndo(sgd.snap);rewidenHeal(segDragTracks(sgd));routeStatMsg();scheduleDrc();}
+  if((PCB.tracks||[]).indexOf(sgd.t)<0){inspClear();return;} // the gesture collapsed it away
   inspSet({t:"track",o:sgd.t});if(!sgd.moved)pickCycleRemember(mm(ev),ev,{t:"track",o:sgd.t});return;}
  if(viadrag){var vgd=viadrag;viadrag=null;svg.style.cursor="";
   if(vgd.moved){
-   // Same contract as a segment drag: gate PRE-drag vs. now; a move that
-   // introduces a new routing-class violation reverts atomically.
-   if(drcGateDiffBlocks(vgd.snap.tracks||[],vgd.snap.vias||[],PCB.tracks||[],PCB.vias||[])){
+   // Same contract as a segment drag: gate PRE-drag vs. now (paths explicit —
+   // viaMove dropped the live ones); a move that introduces a new
+   // routing-class violation reverts atomically.
+   if(drcGateDiffBlocks(vgd.snap.tracks||[],vgd.snap.vias||[],PCB.tracks||[],PCB.vias||[],vgd.snap.rf_paths||[],PCB.rf_paths||[])){
     restoreSnap(vgd.snap);inspClear();
     routeStatMsg("move reverted — it would create a DRC error",true);return;}
-   recordUndo(vgd.snap);routeStatMsg();scheduleDrc();
+   recordUndo(vgd.snap);rewidenHeal(vgd.at.map(function(w){return w.q;}));routeStatMsg();scheduleDrc();
    inspSet({t:"via",o:vgd.v});return;}
   // No movement — the press was a plain click: today's click-to-inspect.
   inspShow({t:"via",o:vgd.v},ev);pickCycleRemember(mm(ev),ev,{t:"via",o:vgd.v});return;}
  if(txDrag){var moved=txDrag.moved,adopted=txDrag.adopted,ti=txDrag.i,tsnap=txDrag.snap;txDrag=null;svg.style.cursor="";
   if(moved||adopted){recordUndo(tsnap);txDirty();txPopReposition(ti);scheduleDrc();}return;}
- if(typeof gdrag!=="undefined"&&gdrag){var gmv=gdrag.moved,gsnap=gdrag.snap,gdn=gdrag.down,gbg=gdrag.boxGroup,gcu=gdrag.cuDown,gzones=gdrag.cz.length;gdrag=null;svg.style.cursor="";
+ if(typeof gdrag!=="undefined"&&gdrag){var gmv=gdrag.moved,gsnap=gdrag.snap,gdn=gdrag.down,gbg=gdrag.boxGroup,gcu=gdrag.cuDown,gzones=gdrag.cz.length,gct=gdrag.ct;gdrag=null;svg.style.cursor="";
   // No movement = a plain click on a rigid-group / multi-selected part (or on
   // selected copper) — select or inspect it like any other click instead of
   // swallowing it. Post-drag repaint drops the drag cache and restores pad labels.
-  if(gmv){recordUndo(gsnap);fetchScore();dragCacheDrop();paintSoon();if(gzones)refillPours();if(anyCopper())scheduleDrc();}
+  // Carried copper translated rigidly, so the clearance around it changed too:
+  // heal its adaptive runs before the post-drag repaint and re-DRC.
+  if(gmv){recordUndo(gsnap);rewidenHeal(gct.map(function(o){return o.t;}));fetchScore();dragCacheDrop();paintSoon();if(gzones)refillPours();if(anyCopper())scheduleDrc();}
   else if(gcu){inspShow(gcu,ev);pickCycleRemember(mm(ev),ev,gcu);}
   else if(gbg){selectGroup(gbg);pickCycleRemember(mm(ev),ev,{t:"sub",g:gbg});}
   else if(gdn!=null&&gdn>=0)clickPart(ev,gdn);return;}
@@ -7537,6 +7614,16 @@ function drawAdaptiveRunClearer(tracks,target,refine){var baseCache={};
  return function(a,b,layer,net,floor,cap,skip){if(refine){var quick=drawAdaptiveClearWidth(a,b,layer,net,floor,cap,skip);if(quick>=cap-1e-7)return cap;}
   var blocker=drawAdaptiveIntervalBlocker(a,b,layer,net,cap,baseCache);
   return drawAdaptiveExactClearWidth(a,b,layer,net,floor,cap,skip,blocker);};}
+// Shaped copper is committed as real tracks, so a constant-width straight
+// stretch must be ONE segment and not one 50 um slice per station (the server's
+// adaptPowerTracks collapses its equal-width runs the same way). Merge only a
+// shared endpoint continuing in the same direction at the same width: a bend, a
+// width step, and a 180-degree retrace all stay separate copper.
+function drawShapedPush(out,q){var p=out.length?out[out.length-1]:null;
+ if(p&&Math.abs(p.w-q.w)<=1e-7&&drawSamePointXY(p.x2,p.y2,q.x1,q.y1)){
+  var ax=p.x2-p.x1,ay=p.y2-p.y1,bx=q.x2-q.x1,by=q.y2-q.y1,al=Math.hypot(ax,ay),bl=Math.hypot(bx,by);
+  if(al>1e-12&&bl>1e-12&&Math.abs((ax*by-ay*bx)/(al*bl))<=1e-9&&ax*bx+ay*by>0){p.x2=q.x2;p.y2=q.y2;return;}}
+ out.push(q);}
 function drawAdaptivePowerRun(tracks,start,end,floor,target,clearWidth){var sampled=drawAdaptiveStations(tracks,start,end),ss=sampled.stations,total=sampled.total,
  layer=tracks[0].l||0,net=tracks[0].net||"",cells=[],i;
  if(ss.length<2||!(total>1e-10))return {tracks:tracks.slice(),paths:[],maxWidth:floor};
@@ -7551,7 +7638,7 @@ function drawAdaptivePowerRun(tracks,start,end,floor,target,clearWidth){var samp
  for(i=1;i<ss.length;i++)ss[i].w=Math.min(ss[i].w,ss[i-1].w+2*(ss[i].s-ss[i-1].s));
  for(i=ss.length-2;i>=0;i--)ss[i].w=Math.min(ss[i].w,ss[i+1].w+2*(ss[i+1].s-ss[i].s));
  var shaped=[],maxWidth=floor,widened=false;for(i=1;i<ss.length;i++){var a=ss[i-1],b=ss[i],w=Math.max(a.w,b.w);
-  shaped.push({x1:a.x,y1:a.y,x2:b.x,y2:b.y,l:layer,w:w,net:net,source:"human"});maxWidth=Math.max(maxWidth,a.w,b.w);if(w>floor+1e-7)widened=true;}
+  drawShapedPush(shaped,{x1:a.x,y1:a.y,x2:b.x,y2:b.y,l:layer,w:w,net:net,source:"human"});maxWidth=Math.max(maxWidth,a.w,b.w);if(w>floor+1e-7)widened=true;}
  if(!widened)return {tracks:tracks.slice(),paths:[],maxWidth:floor};
  var path={net:net,l:layer,track_ids:tracks.map(trackIdEnsure),samples:ss.map(function(s){return [s.x,s.y,s.w];})};
  return {tracks:shaped,paths:[path],maxWidth:maxWidth};}
@@ -7690,6 +7777,20 @@ function drawTaperPathsPadViolation(paths,layer,net){var clr=netClrFor(net),regi
   for(var j=0;j<pads.length;j++){var pd=pads[j];if(!pd.thru&&bot!==layer||sameNet(pd.net||"",net))continue;var b=wrect(i,pd);
    for(var k=0;k<regions.length;k++)if(drawPolyRectGap(regions[k],b)<clr-1e-6)return true;}}
  return false;}
+// Swap a gesture's laid centreline handles for the shaped copper replacing
+// them, in place, so the run keeps its slot in the board array. A shaped span
+// identical to a handle inherits that handle's id; the rest are new copper.
+function drawCommitShaped(old,shaped){var used={};
+ shaped.forEach(function(t){if(t.id)return;
+  for(var i=0;i<old.length;i++){var o=old[i],id=trackIdEnsure(o);
+   if(used[id]||!drawSamePointXY(o.x1,o.y1,t.x1,t.y1)||!drawSamePointXY(o.x2,o.y2,t.x2,t.y2))continue;
+   used[id]=1;t.id=id;return;}
+  t.id=trackIdNew();});
+ var out=[],placed=false;
+ (PCB.tracks||[]).forEach(function(t){if(old.indexOf(t)<0){out.push(t);return;}
+  if(placed)return;placed=true;Array.prototype.push.apply(out,shaped);});
+ if(!placed)Array.prototype.push.apply(out,shaped);
+ PCB.tracks=out;}
 function drawApplyAutomaticTapers(){if(!dtrace||dtrace.pair||!dtrace.laid||!dtrace.laid.length)return {ok:true,changed:false,paths:[]};
  var old=dtrace.laid.slice(),nominal=dtrace.w,powerTarget=+dtrace.powerTarget||0,power=powerTarget>nominal+1e-9;
  var ep=drawEndpointLand(dtrace.net,dtrace.l,dtrace.lx,dtrace.ly),board=PCB.tracks||[],base=dtrace.undo||{},
@@ -7699,16 +7800,20 @@ function drawApplyAutomaticTapers(){if(!dtrace||dtrace.pair||!dtrace.laid||!dtra
  // still-loading/failed WASM engine leaves the already preview-cleared uniform
  // route intact; a later explicit taper rebuild can retry it.
  if(!drcGate.ready||drcGate.failed)return {ok:true,changed:false,paths:[],omitted:true,power:power,maxWidth:nominal};
+ // A power run commits its shaped copper as ordinary tracks, so the gate judges
+ // THOSE, not an overlay: trial copper replaces the laid handles and the live
+ // path list rides through unchanged.
+ var rest=board.filter(function(t){return old.indexOf(t)<0;});
  for(var si=0;si<(power?1:scales.length);si++){
   var trial=si===0?initial:drawAutomaticTaperPlan(old,dtrace.startPad,ep,nominal,scales[si]);
-  var trialAfter=board.filter(function(t){return old.indexOf(t)<0;}).concat(old),trialPaths=(PCB.rf_paths||[]).concat(trial.paths);
+  var trialAfter=rest.concat(power?trial.tracks:old),trialPaths=power?(PCB.rf_paths||[]):(PCB.rf_paths||[]).concat(trial.paths);
   if(!drcGateDiffBlocks(base.tracks||[],base.vias||[],trialAfter,PCB.vias||[],base.rf_paths||[],trialPaths)){physical=trial;break;}
   if(drcGate.failed)break;
   // A fast full-path miss must not throw away every clean wide interval. Refit
   // each interval against the exact gate, then validate their combined path.
   if(power){var exact=drawAdaptivePowerPlan(old,dtrace.startPad,ep,nominal,powerTarget,drawAdaptiveRefinedClearWidth);
-   if(exact.paths.length){var exactPaths=(PCB.rf_paths||[]).concat(exact.paths);
-    if(!drcGateDiffBlocks(base.tracks||[],base.vias||[],trialAfter,PCB.vias||[],base.rf_paths||[],exactPaths)){physical=exact;break;}}
+   if(exact.paths.length){
+    if(!drcGateDiffBlocks(base.tracks||[],base.vias||[],rest.concat(exact.tracks),PCB.vias||[],base.rf_paths||[],trialPaths)){physical=exact;break;}}
    break;}
   if(!trial.compactable)break;}
  if(!physical){
@@ -7719,6 +7824,13 @@ function drawApplyAutomaticTapers(){if(!dtrace||dtrace.pair||!dtrace.laid||!dtra
   if(drcGate.failed||drcGateDiffBlocks(base.tracks||[],base.vias||[],board,PCB.vias||[])){
    routeStatMsg("the completed route would violate DRC — adjust the launch before finishing",true);return {ok:false,changed:false,paths:[]};}
   return {ok:true,changed:false,paths:[],omitted:true,power:power,maxWidth:nominal};}
+ // Adaptive power copper lands as ordinary tracks at their real widths — one
+ // representation, editable, and no overlay to go stale under the next drag.
+ // A controlled-impedance launch keeps its swept-polygon proof.
+ if(power){var shaped=physical.tracks||[];
+  if(!shaped.length)return {ok:true,changed:false,paths:[]};
+  drawCommitShaped(old,shaped);dtrace.laid=shaped.slice();cuGeomDrop();gpuCuEdit();
+  return {ok:true,changed:true,paths:[],power:true,maxWidth:physical.maxWidth||nominal};}
  var paths=physical.paths;
  if(!paths.length)return {ok:true,changed:false,paths:[]};PCB.rf_paths=PCB.rf_paths||[];
  Array.prototype.push.apply(PCB.rf_paths,paths);cuGeomDrop();gpuCuEdit();return {ok:true,changed:true,paths:paths,adjusted:physical.scale<1,power:power,maxWidth:physical.maxWidth||nominal};}
@@ -9482,6 +9594,119 @@ function applyPowerWidths(){if(RO)return powerWidthStatus();var p=powerWidthPlan
 window.PCBPowerWidthPlan=powerWidthPlan;
 window.PCBPowerWidthStatus=powerWidthStatus;
 window.PCBApplyPowerWidths=applyPowerWidths;
+
+// Width on an adaptive rail is derived data, not an authored value: the moment
+// its copper moves, the clearance-limited answer moves with it. Recut each
+// affected run with the planner the pen itself uses — wider where the edit
+// opened room, narrower where it closed some, never below the routing floor —
+// and commit the shaped copper only when the exact gate sees no new violation.
+// The widen action above cannot cover these: an unclassed IPC rail carries an
+// adaptive_power_width but no power_branch_width and no `track width` finding.
+function rewidenTarget(net){var c=netClassInfo(net||""),target=c?+c.adaptive_power_width||0:0;
+ if(!(target>0))return null;
+ // drawNetGeometry's floor, read from the class instead of the pen's width
+ // selector: this heals saved copper whatever the pen is set to right now.
+ var rules=PCB.rules||{},ordinary=+rules.track_width||baseTrackW(),
+  floor=Math.max(+rules.min_width||0,Math.min(target,ordinary));
+ return target>floor+1e-9?{floor:floor,target:target}:null;}
+// Copper a run may contain. An arc keeps its authored sweep (the station sampler
+// would leave chords in its place), and an overlay-owned handle belongs to a
+// controlled-impedance proof that Route regenerates instead.
+function rewidenTrack(t,net,layer){return !!t&&(t.net||"")===net&&(t.l||0)===layer&&t.xm==null&&!rfOwnsTrack(t);}
+// Extend one oriented chain past its tail. Stopping rules are the RF retrofit
+// walk's: a pad or via land ends the run and supplies its launch profile, and so
+// does a branch — a run has to be one unambiguous chain. A power run changes
+// layer only through a via, which has already stopped it. The branch count is
+// pure topology; a lone continuation another run already claimed stops this one
+// so the same copper is never planned twice.
+function rewidenGrow(chain,used,claimed){var pad=null;
+ for(var guard=0;guard<512;guard++){var last=chain[chain.length-1].q,x=last.x2,y=last.y2;
+  pad=drawEndpointLand(last.net,last.l||0,x,y);if(pad)break;
+  var next=[];(PCB.tracks||[]).forEach(function(t){var id=trackIdEnsure(t);
+   if(used[id]||!rewidenTrack(t,last.net||"",last.l||0))return;
+   var q=drawTrackFromPoint(t,x,y);if(q&&trackLength(q)>1e-9)next.push({t:t,q:q});});
+  if(next.length!==1||claimed[trackIdEnsure(next[0].t)])break;
+  used[trackIdEnsure(next[0].t)]=1;chain.push(next[0]);}
+ return pad;}
+// The maximal run through `seed`, grown both ways and handed back head-to-tail:
+// `run` is the oriented geometry the planner reads, `tracks` the board objects
+// the commit replaces.
+function rewidenRun(seed,claimed){var used={};used[trackIdEnsure(seed)]=1;
+ var fwd=[{t:seed,q:seed}],endPad=rewidenGrow(fwd,used,claimed),
+  back=[{t:seed,q:drawReverseTrack(seed)}],startPad=rewidenGrow(back,used,claimed),chain=[];
+ for(var i=back.length-1;i>0;i--)chain.push({t:back[i].t,q:drawReverseTrack(back[i].q)});
+ Array.prototype.push.apply(chain,fwd);
+ chain.forEach(function(w){claimed[trackIdEnsure(w.t)]=1;});
+ return {tracks:chain.map(function(w){return w.t;}),run:chain.map(function(w){return w.q;}),
+  startPad:startPad,endPad:endPad};}
+function rewidenRuns(seeds){var ts=PCB.tracks||[],claimed={},out=[];
+ (seeds||ts).forEach(function(t){if(!t||ts.indexOf(t)<0||claimed[trackIdEnsure(t)])return;
+  var geo=rewidenTarget(t.net||"");if(!geo||!rewidenTrack(t,t.net||"",t.l||0))return;
+  var run=rewidenRun(t,claimed);run.floor=geo.floor;run.target=geo.target;out.push(run);});
+ return out;}
+function rewidenSame(a,b){if(a.length!==b.length)return false;
+ for(var i=0;i<a.length;i++){var p=a[i],q=b[i];
+  if(Math.abs((+p.w||0)-(+q.w||0))>1e-9||!drawSamePointXY(p.x1,p.y1,q.x1,q.y1)||!drawSamePointXY(p.x2,p.y2,q.x2,q.y2))return false;}
+ return true;}
+// The planner hands its input array straight back — same objects — when no
+// interval of the run could exceed the floor. Equal WIDTHS on fresh objects mean
+// something else entirely: the fitted answer is already on the copper.
+function rewidenDeclined(run,shaped){if(shaped.length!==run.length)return false;
+ for(var i=0;i<run.length;i++)if(shaped[i]!==run[i])return false;
+ return true;}
+function rewidenAtFloor(q,floor){var c={};for(var k in q)c[k]=q[k];c.w=floor;return c;}
+function rewidenPlan(seeds){var runs=[],tracks=0,nets=Object.create(null),maxWidth=0;
+ rewidenRuns(seeds).forEach(function(r){
+  var plan=drawAdaptivePowerPlan(r.run,r.startPad,r.endPad,r.floor,r.target,drawAdaptiveRefinedClearWidth),
+   shaped=plan.tracks||[];
+  if(!shaped.length)return;
+  // Nowhere to widen IS the answer for this run: recut it to the floor rather
+  // than leave the clearance it had before the edit sitting on the copper.
+  if(rewidenDeclined(r.run,shaped)){
+   if(!r.run.some(function(q){return (+q.w||0)>r.floor+1e-9;}))return;
+   shaped=r.run.map(function(q){return rewidenAtFloor(q,r.floor);});}
+  else if(rewidenSame(r.run,shaped))return;
+  runs.push({tracks:r.tracks,shaped:shaped});tracks+=shaped.length;
+  nets[r.run[0].net||""]=1;maxWidth=Math.max(maxWidth,plan.maxWidth||0);});
+ return {runs:runs,tracks:tracks,nets:Object.keys(nets).length,maxWidth:maxWidth};}
+// Cheap eligibility only: adaptive copper standing below its class target. What
+// the recut actually produces needs the exact gate, so it belongs to the plan.
+function rewidenStatus(){var tracks=0,nets=Object.create(null);
+ (PCB.tracks||[]).forEach(function(t){var geo=rewidenTarget(t.net||"");
+  if(!geo||!rewidenTrack(t,t.net||"",t.l||0)||(+t.w||0)>=geo.target-1e-9)return;
+  tracks++;nets[t.net||""]=1;});
+ return {tracks:tracks,nets:Object.keys(nets).length,changed:tracks,editable:!RO};}
+function rewidenApply(seeds){if(RO||!drcGate.ready||drcGate.failed)return 0;
+ var p=rewidenPlan(seeds);if(!p.runs.length)return 0;
+ var old=[],shaped=[];
+ p.runs.forEach(function(r){Array.prototype.push.apply(old,r.tracks);Array.prototype.push.apply(shaped,r.shaped);});
+ var rest=(PCB.tracks||[]).filter(function(t){return old.indexOf(t)<0;});
+ // Derived width is never worth a new violation: one all-or-nothing exact check
+ // of the whole recut against the board exactly as it stands.
+ if(drcGate.failed||drcGateDiffBlocks(PCB.tracks||[],PCB.vias||[],rest.concat(shaped),PCB.vias||[],PCB.rf_paths||[],PCB.rf_paths||[]))return 0;
+ p.runs.forEach(function(r){drawCommitShaped(r.tracks,r.shaped);});
+ cuGeomDrop();gpuCuEdit();ovPaintSoon();return p.tracks;}
+function applyAdaptiveRewiden(){if(RO)return rewidenStatus();
+ if(!drcGate.ready||drcGate.failed){
+  routeStatMsg("adaptive power widths need the geometry engine's exact check — it is still loading",true);return rewidenStatus();}
+ var before=snapAll(),n=rewidenApply(null);
+ if(!n){routeStatMsg("adaptive power copper already fits the clearance it has");return rewidenStatus();}
+ recordUndo(before);PCB.drc=[];drawRoute();drawClr();drawDrc();scheduleDrc();
+ if(poursDeclared())refillPours();
+ routeStatMsg("recut "+n+" adaptive power segment"+(n===1?"":"s")+" to the clearance it has now — DRC and pours are refreshing; Save/Update to keep");
+ return rewidenStatus();}
+window.PCBRewidenRuns=rewidenRuns;
+window.PCBRewidenPlan=rewidenPlan;
+window.PCBRewidenStatus=rewidenStatus;
+window.PCBApplyAdaptiveRewiden=applyAdaptiveRewiden;
+// Release-only healing for a gesture that moved adaptive copper: the runs it
+// touched are recut to the clearance they now have. It runs inside the gesture,
+// after the crumb cull and the move's own gate, so the healed copper lands in
+// the undo step the drag already recorded. A rejected or unavailable gate leaves
+// the rail exactly where the gesture put it — the aggregated power_width warning
+// still reports it as under target. Never on pointermove: every interval of a
+// recut bisects against the exact engine.
+function rewidenHeal(ts){return ts&&ts.length?rewidenApply(ts):0;}
 var traceEmIdx=null,traceEmDirty=false,powerIntegrityIdx=null,powerIntegrityDirty=false;
 function traceEmInfo(net){if(!traceEmIdx){traceEmIdx={exact:{},coll:{}};
  ((PCB.trace_em&&PCB.trace_em.analyses)||[]).forEach(function(a){traceEmIdx.exact[a.net]=a;var k=netCollapse(a.net);if(traceEmIdx.coll[k]===undefined)traceEmIdx.coll[k]=a;});}
@@ -11361,6 +11586,7 @@ var netColOn=true;
 // open-net DRC finding owns the only focused connection line.
 var ratsOn=false;
 function netColorOf(nk){if(!nk||!PCB.netcolor)return null;return PCB.netcolor[nk]||null;}
+rfLoadBake(); // saved adaptive overlays become plain wide copper before the first paint
 drcSync();showScore(PCB.auto);drawRoute();drawClr();drawDrc();
 markUnplaced(PCB.placement&&PCB.placement.unplaced);
 // A named saved layout may predate automatic impedance tapers. Reconcile it

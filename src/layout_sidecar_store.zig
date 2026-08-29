@@ -215,6 +215,24 @@ test "selected sidecar typed parsing is proven one-to-one with raw manufacturing
     try std.testing.expect(coverage.zone_sketch);
 }
 
+// spec: Web Server - Reading a saved layout back out of its sidecar drops the collapsed sub-micron crumbs its copper carries, so an old board opens healed without its file being edited
+test "reading a sidecar heals a board whose copper carries drag crumbs" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    // The barracuda crumb: a segment dragged onto its own end, sitting on a
+    // through via. Reading it back must not put that island on the board.
+    const source =
+        "{\"default\":\"release\",\"layouts\":[{\"name\":\"release\",\"kind\":\"manual\"," ++
+        "\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":2,\"rot\":0}],\"routes\":{\"tracks\":[" ++
+        "{\"x1\":180,\"y1\":93.1,\"x2\":182.21,\"y2\":93.1,\"l\":1,\"w\":0.127,\"net\":\"V_5VA\",\"id\":\"seg-run\"}," ++
+        "{\"x1\":182.21,\"y1\":93.1,\"x2\":182.21,\"y2\":93.1,\"l\":1,\"w\":0.127,\"net\":\"V_5VA\",\"id\":\"seg-crumb\"}]}}]}";
+    const layouts = parseLayouts(arena_state.allocator(), source).?;
+    try std.testing.expectEqual(@as(usize, 1), layouts.len);
+    const tracks = layouts[0].routes.?.tracks;
+    try std.testing.expectEqual(@as(usize, 1), tracks.len);
+    try std.testing.expectEqualStrings("seg-run", tracks[0].id);
+}
+
 /// Parse the sidecar cache object and its placement parameters.
 pub fn parseCacheSlot(alloc: std.mem.Allocator, value: std.json.Value) ?CacheSlot {
     if (value != .object) return null;

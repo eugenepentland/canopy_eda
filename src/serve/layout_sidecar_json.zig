@@ -352,6 +352,50 @@ fn strictTrack(value: std.json.Value) bool {
     return true;
 }
 
+/// The ball inside which a persisted track's own ends are the same point.
+/// Numerically this is `copper_contact.join_slack_mm` — the tolerance every
+/// contact predicate already treats as "one place" — and physically it is a
+/// hundredth of the finest drawable feature, so nothing a fabricator could
+/// make falls inside it.
+const collapsed_track_mm: f64 = 1e-3;
+
+/// True when a stored track record has collapsed into one `collapsed_track_mm`
+/// ball: a corner-drag residue rather than copper. `strictTrack` above still
+/// ACCEPTS such a row — a board that already carries crumbs must keep
+/// autosaving — and `parseSavedRoutes` culls it instead, so the crumb never
+/// reaches the connectivity model that would report it as a broken net.
+///
+/// An arc is judged on all three of its points. A mid-point outside the ball
+/// still describes real copper (a near-full circle whose chord is short), and
+/// it is kept whenever the three points define a circle at all. Coincident
+/// ends define none — `arcCircle` is exactly the degenerate case there — so
+/// that row is a shape no surface can draw and is culled with the rest.
+fn collapsedTrack(p1: [2]f64, p2: [2]f64, pm: ?[2]f64) bool {
+    if (std.math.hypot(p2[0] - p1[0], p2[1] - p1[1]) >= collapsed_track_mm) return false;
+    const mid = pm orelse return true;
+    if (std.math.hypot(mid[0] - p1[0], mid[1] - p1[1]) < collapsed_track_mm) return true;
+    return outline_mod.arcCircle(.{ .p1 = p1, .pm = mid, .p2 = p2 }) == null;
+}
+
+/// The arc mid-point of a track record: only a complete `xm`+`ym` pair bends
+/// copper, matching what the writer emits and what `strictTrack` demands.
+fn arcMidpoint(xm: ?f64, ym: ?f64) ?[2]f64 {
+    const x = xm orelse return null;
+    const y = ym orelse return null;
+    return .{ x, y };
+}
+
+/// `collapsedTrack` for one raw JSON track row, read exactly the way
+/// `parseSavedRoutes` reads it so evidence and parse cull the same rows.
+fn rawTrackCollapsed(value: std.json.Value) bool {
+    if (value != .object) return false;
+    return collapsedTrack(
+        .{ jsonNum(value.object.get("x1")), jsonNum(value.object.get("y1")) },
+        .{ jsonNum(value.object.get("x2")), jsonNum(value.object.get("y2")) },
+        arcMidpoint(jsonOptNum(value.object.get("xm")), jsonOptNum(value.object.get("ym"))),
+    );
+}
+
 fn strictVia(value: std.json.Value) bool {
     if (value != .object) return false;
     if (!objectHasOnlyKeys(value, .{ "x", "y", "d", "drill", "net", "g", "f", "s", "source", "id" })) return false;
@@ -694,10 +738,23 @@ fn rfPathMatches(raw: std.json.Value, parsed: SavedRfPath) bool {
     return true;
 }
 
+/// How many raw track rows survive the collapsed-crumb cull — the count the
+/// typed model must carry, since a crumb is deliberately not copper.
+fn keptTrackCount(raw: std.json.Value) usize {
+    const tracks = raw.object.get("tracks") orelse return 0;
+    if (tracks != .array) return 0;
+    var kept: usize = 0;
+    for (tracks.array.items) |row_track| {
+        if (row_track != .object or rawTrackCollapsed(row_track)) continue;
+        kept += 1;
+    }
+    return kept;
+}
+
 fn routesMatchParsed(row: std.json.Value, parsed: ?page.SavedRoutes) bool {
     const raw = row.object.get("routes") orelse return parsed == null;
     if (raw != .object) return false;
-    const track_count = rawArrayLength(raw, "tracks");
+    const track_count = keptTrackCount(raw);
     const via_count = rawArrayLength(raw, "vias");
     const zone_count = rawArrayLength(raw, "zones");
     const rf_count = rawArrayLength(raw, "rf_paths");
@@ -705,8 +762,14 @@ fn routesMatchParsed(row: std.json.Value, parsed: ?page.SavedRoutes) bool {
     const routes = parsed orelse return false;
     if (routes.tracks.len != track_count or routes.vias.len != via_count or
         routes.zones.len != zone_count or routes.rf_paths.len != rf_count) return false;
-    if (raw.object.get("tracks")) |tracks| for (tracks.array.items, routes.tracks) |row_track, track| {
-        if (!trackMatches(row_track, track)) return false;
+    if (raw.object.get("tracks")) |tracks| if (tracks == .array) {
+        var kept: usize = 0;
+        for (tracks.array.items) |row_track| {
+            if (row_track != .object or rawTrackCollapsed(row_track)) continue;
+            if (kept >= routes.tracks.len or !trackMatches(row_track, routes.tracks[kept])) return false;
+            kept += 1;
+        }
+        if (kept != routes.tracks.len) return false;
     };
     if (raw.object.get("vias")) |vias| for (vias.array.items, routes.vias) |raw_via, via| {
         if (!viaMatches(raw_via, via)) return false;
@@ -963,6 +1026,15 @@ pub fn parseSavedRoutes(alloc: std.mem.Allocator, v: ?std.json.Value) ?page.Save
     if (obj.object.get("tracks")) |tv| if (tv == .array) {
         for (tv.array.items) |it| {
             if (it != .object) continue;
+            // A corner drag can leave a neighbour segment collapsed onto its
+            // own end. That crumb is copper no contact predicate can join, so
+            // on its layer it is an island the connectivity model reports as a
+            // broken net. Cull it here — silently, in BOTH directions, because
+            // this parser is the one seam the editor's save and the sidecar
+            // load share: rejecting the row would 400 every autosave of a
+            // board that already carries one, and keeping it would keep the
+            // phantom island. The next save writes the healed copper back.
+            if (rawTrackCollapsed(it)) continue;
             tracks.append(alloc, .{
                 .x1 = jsonNum(it.object.get("x1")),
                 .y1 = jsonNum(it.object.get("y1")),
@@ -1042,6 +1114,126 @@ pub fn parseSavedRoutes(alloc: std.mem.Allocator, v: ?std.json.Value) ?page.Save
         .zones = zones.toOwnedSlice(alloc) catch return null,
         .rf_paths = rf_paths.toOwnedSlice(alloc) catch return null,
     };
+}
+
+/// The saved-routes rows a collapse test needs: one ordinary segment, three
+/// shapes that have collapsed into a sub-micron ball, and two that only look
+/// like they have. Every row here is one `strictTrack` accepts, so each is a
+/// row a save must keep accepting. Shared by the parse, round-trip and
+/// evidence tests below.
+const crumb_track_rows =
+    "{\"x1\":0,\"y1\":0,\"x2\":4,\"y2\":0,\"w\":0.2,\"net\":\"N\",\"id\":\"seg-line\"}," ++
+    // Exactly the barracuda crumb: a segment dragged onto its own end.
+    "{\"x1\":182.21,\"y1\":93.1,\"x2\":182.21,\"y2\":93.1,\"l\":1,\"w\":0.127,\"net\":\"N\",\"id\":\"seg-zero\"}," ++
+    // Sub-micron but not exactly zero — still nothing a fabricator can make.
+    "{\"x1\":1,\"y1\":1,\"x2\":1.0004,\"y2\":1.0003,\"w\":0.2,\"net\":\"N\",\"id\":\"seg-sub\"}," ++
+    // An arc whose three points have all collapsed into the same ball. They
+    // still describe a circle, so only the ball rule culls this one.
+    "{\"x1\":2,\"y1\":2,\"x2\":2.0001,\"y2\":2,\"xm\":2.00005,\"ym\":2.00001,\"w\":0.2,\"net\":\"N\",\"id\":\"seg-arc-ball\"}," ++
+    // A near-full circle: the chord is sub-micron but the bulge is 1 mm of
+    // real copper, and the three points still describe a circle.
+    "{\"x1\":10,\"y1\":10,\"x2\":10.0005,\"y2\":10,\"xm\":10.00025,\"ym\":11,\"w\":0.2,\"net\":\"N\",\"id\":\"seg-bulge\"}," ++
+    // Exactly one micron long: the shortest copper that is still copper.
+    "{\"x1\":20,\"y1\":20,\"x2\":20.001,\"y2\":20,\"w\":0.2,\"net\":\"N\",\"id\":\"seg-micron\"}";
+
+/// Coincident ends with a distant mid-point: three points that define no
+/// circle at all, so the record describes a shape no surface can draw.
+const no_circle_track_row =
+    "{\"x1\":5,\"y1\":5,\"x2\":5,\"y2\":5,\"xm\":6,\"ym\":6,\"w\":0.2,\"net\":\"N\",\"id\":\"seg-no-circle\"}";
+
+fn crumbTestRoutes(alloc: std.mem.Allocator, rows: []const u8) !?page.SavedRoutes {
+    const source = try std.fmt.allocPrint(alloc, "{{\"tracks\":[{s}]}}", .{rows});
+    const value = try std.json.parseFromSliceLeaky(std.json.Value, alloc, source, .{});
+    return parseSavedRoutes(alloc, value);
+}
+
+/// The persisted identity of every track a parse kept, in order.
+fn crumbTestKeptIds(alloc: std.mem.Allocator, tracks: []const page.SavedTrack) ![]const []const u8 {
+    var ids: std.ArrayList([]const u8) = .empty;
+    for (tracks) |track| try ids.append(alloc, track.id);
+    return ids.items;
+}
+
+/// How many leading rows of a raw track array the strict validator accepts.
+fn crumbTestStrictPrefix(rows: []const std.json.Value) usize {
+    var accepted: usize = 0;
+    for (rows) |row| {
+        if (!strictTrack(row)) break;
+        accepted += 1;
+    }
+    return accepted;
+}
+
+/// True when the serialized copper still names any of these track ids.
+fn crumbTestMentionsAny(written: []const u8, ids: []const []const u8) bool {
+    for (ids) |id| {
+        if (std.mem.indexOf(u8, written, id) != null) return true;
+    }
+    return false;
+}
+
+// spec: Web Server - The saved-routes parser silently culls a track that has collapsed into a sub-micron ball, on the save and the sidecar load alike, judging an arc on all three of its points and keeping one whose points still describe a circle
+test "collapsed sub-micron track crumbs are culled from parsed copper, arcs judged on all three points" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    const routes = (try crumbTestRoutes(alloc, crumb_track_rows ++ "," ++ no_circle_track_row)).?;
+    try std.testing.expectEqualDeep(
+        @as([]const []const u8, &.{ "seg-line", "seg-bulge", "seg-micron" }),
+        try crumbTestKeptIds(alloc, routes.tracks),
+    );
+
+    // Every crumb the parser culls is a row the strict validator ACCEPTS —
+    // rejecting instead of culling would 400 every autosave of a board that
+    // already carries one. Only the trailing record, the one that describes no
+    // circle, is refused there, and for its geometry rather than its length.
+    const raw = try std.json.parseFromSliceLeaky(
+        std.json.Value,
+        alloc,
+        try std.fmt.allocPrint(alloc, "[{s},{s}]", .{ crumb_track_rows, no_circle_track_row }),
+        .{},
+    );
+    try std.testing.expectEqual(raw.array.items.len - 1, crumbTestStrictPrefix(raw.array.items));
+
+    // The save path persists what it parsed, so the crumbs leave the board on
+    // the next write instead of being copied forward.
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    try writeSavedRoutesJson(&aw.writer, routes);
+    try std.testing.expect(!crumbTestMentionsAny(
+        aw.written(),
+        &.{ "seg-zero", "seg-sub", "seg-arc-ball", "seg-no-circle" },
+    ));
+    try std.testing.expect(crumbTestMentionsAny(aw.written(), &.{"seg-bulge"}));
+
+    // Copper that is nothing but crumbs parses as no copper at all rather than
+    // an empty routes record.
+    try std.testing.expect((try crumbTestRoutes(
+        alloc,
+        "{\"x1\":3,\"y1\":3,\"x2\":3,\"y2\":3,\"w\":0.2,\"net\":\"N\",\"id\":\"seg-only\"}",
+    )) == null);
+}
+
+// spec: fabrication-release - a collapsed sub-micron track crumb the parser culls is not dropped manufacturing copper, while any other missing track still fails release evidence
+test "release evidence accepts culled crumbs but still counts real dropped copper" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    const source = "{\"default\":\"release\",\"layouts\":[{\"name\":\"release\",\"kind\":\"manual\"," ++
+        "\"parts\":[{\"ref\":\"U1\",\"x\":1,\"y\":2,\"rot\":0}],\"routes\":{\"tracks\":[" ++ crumb_track_rows ++ "]}}]}";
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, source, .{});
+    const row = root.object.get("layouts").?.array.items[0];
+    try std.testing.expect(selectedLayoutEvidence(alloc, root, "release"));
+    try std.testing.expect(selectedLayoutParsedEvidence(alloc, root, parsedEvidenceTestLayout(alloc, row)));
+
+    // The cull is the only copper the model may be missing: dropping a track
+    // that is real is still incomplete evidence.
+    var thinned = parsedEvidenceTestLayout(alloc, row);
+    thinned.routes = .{
+        .tracks = thinned.routes.?.tracks[0 .. thinned.routes.?.tracks.len - 1],
+        .vias = &.{},
+    };
+    try std.testing.expect(!selectedLayoutParsedEvidence(alloc, root, thinned));
 }
 
 fn parseSavedZone(alloc: std.mem.Allocator, value: std.json.Value) ?page.SavedZone {

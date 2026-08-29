@@ -1173,8 +1173,100 @@ test "PCB hand router adaptively widens power copper after steering" {
         "initial=power?drawAdaptivePowerPlan",
         "drawAdaptivePowerPlan(old,dtrace.startPad,ep,nominal,powerTarget,drawAdaptiveRefinedClearWidth)",
         "power route widened locally up to ",
+        // Equal-width collinear stations collapse, and the shaped copper itself
+        // is what the gate judges and what the board keeps — no second
+        // representation to go stale under the next drag.
+        "function drawShapedPush",
+        "drawShapedPush(shaped,{x1:a.x,y1:a.y,x2:b.x,y2:b.y,l:layer,w:w,net:net,source:\"human\"})",
+        "function drawCommitShaped",
+        "trialAfter=rest.concat(power?trial.tracks:old)",
+        "trialPaths=power?(PCB.rf_paths||[]):(PCB.rf_paths||[]).concat(trial.paths)",
+        "drcGateDiffBlocks(base.tracks||[],base.vias||[],rest.concat(exact.tracks),PCB.vias||[],base.rf_paths||[],trialPaths)",
+        "drawCommitShaped(old,shaped);dtrace.laid=shaped.slice()",
+        "return {ok:true,changed:true,paths:[],power:true,maxWidth:physical.maxWidth||nominal}",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+    // Only the controlled-impedance branch publishes a swept overlay.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, pcb_board_js, "Array.prototype.push.apply(PCB.rf_paths,paths)"));
+}
+
+// spec: placement/power-routing - an adaptive rail carries its width as ordinary copper: a drawn run commits its shaped tracks with equal-width collinear stations collapsed, an inherited overlay bakes its sample widths onto the tracks it owns before any edit releases it, and a gesture that collapses copper to zero length takes the crumb with it
+test "PCB editor keeps adaptive power width on the copper across edits" {
+    const markers = [_][]const u8{
+        // Bake, don't drop: an overlay whose net has no impedance class is the
+        // only record of that rail's width, and nothing regenerates it.
+        "function rfPathSpanWidth",
+        "function rfPathPower",
+        "function rfPathBakeWidth",
+        "function rfBakePath",
+        "function rfWasIndex",
+        "function rfDropForTracks(ts,was)",
+        "if(rfPathPower(p))rfBakePath(p,ix)",
+        "function rfLoadBake",
+        "rfLoadBake(); // saved adaptive overlays",
+        "PCB.drc=[];rfLoadBake();drawRoute();drawDrc();",
+        // The whole moved set releases its overlays, judged against the drag
+        // snapshot's pre-gesture geometry and its pre-gesture path list.
+        "function segDragTracks",
+        "rfDropForTracks(segDragTracks(sd),sd.snap.tracks)",
+        "rfDropForTracks(vd.at.map(function(w){return w.q;}))",
+        "drcGateDiffBlocks(sgd.snap.tracks||[],sgd.snap.vias||[],PCB.tracks||[],PCB.vias||[],sgd.snap.rf_paths||[],PCB.rf_paths||[])",
+        "drcGateDiffBlocks(vgd.snap.tracks||[],vgd.snap.vias||[],PCB.tracks||[],PCB.vias||[],vgd.snap.rf_paths||[],PCB.rf_paths||[])",
+        // Zero-length copper joins nothing, so the gesture that collapsed one
+        // takes it away with it.
+        "function segCrumbClean",
+        "segCrumbClean(sgd);",
+        "return trackLength(t)<1e-6;",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+    // The released blind spots must not come back: a segment drag that dropped
+    // only the grabbed track's overlay, and a cleanup that saw only its jogs.
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "rfDropForTracks([sd.t])") == null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "function segJogClean") == null);
+}
+
+// spec: placement/power-routing - moving adaptive power copper recuts the maximal same-net runs the gesture touched to the clearance they have after the move, growing or shrinking under the exact DRC gate and never below the routing floor
+test "PCB editor re-widens adaptive power runs after an edit moves them" {
+    const markers = [_][]const u8{
+        // The class target and the pen's own routing floor, read without the
+        // width selector so saved copper heals whatever the pen is set to.
+        "function rewidenTarget",
+        "target=c?+c.adaptive_power_width||0:0",
+        "floor=Math.max(+rules.min_width||0,Math.min(target,ordinary))",
+        // One unambiguous same-net, same-layer chain: a land, a branch, an arc
+        // or another run's copper ends it.
+        "function rewidenTrack",
+        "t.xm==null&&!rfOwnsTrack(t)",
+        "function rewidenGrow",
+        "pad=drawEndpointLand(last.net,last.l||0,x,y);if(pad)break;",
+        "if(next.length!==1||claimed[trackIdEnsure(next[0].t)])break;",
+        "function rewidenRun(",
+        "function rewidenRuns",
+        // Recut with the pen's own planner, all-or-nothing behind the exact
+        // gate, committed as ordinary copper.
+        "function rewidenDeclined",
+        "function rewidenPlan",
+        "drawAdaptivePowerPlan(r.run,r.startPad,r.endPad,r.floor,r.target,drawAdaptiveRefinedClearWidth)",
+        "shaped=r.run.map(function(q){return rewidenAtFloor(q,r.floor);});",
+        "function rewidenStatus",
+        "function rewidenApply",
+        "if(RO||!drcGate.ready||drcGate.failed)return 0;",
+        "drcGateDiffBlocks(PCB.tracks||[],PCB.vias||[],rest.concat(shaped),PCB.vias||[],PCB.rf_paths||[],PCB.rf_paths||[])",
+        "drawCommitShaped(r.tracks,r.shaped)",
+        "window.PCBRewidenPlan",
+        "window.PCBRewidenStatus",
+        "window.PCBApplyAdaptiveRewiden",
+        // Healing rides the gesture's own undo step, scoped to the copper it moved.
+        "function rewidenHeal",
+        "recordUndo(sgd.snap);rewidenHeal(segDragTracks(sgd));",
+        "recordUndo(vgd.snap);rewidenHeal(vgd.at.map(function(w){return w.q;}));",
+        "recordUndo(gsnap);rewidenHeal(gct.map(function(o){return o.t;}));",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+    // Release only — every interval of a recut bisects against the exact engine,
+    // so it must stay unreachable from a pointermove: one definition, three
+    // gesture releases, and nothing else.
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, pcb_board_js, "rewidenHeal("));
 }
 
 // spec: Web Server - A hand-routed RF launch keeps its generated portal collar inside the source pad, retries a DRC-blocked wide-land taper with progressively shorter flares, and finishes with the independently DRC-confirmed uniform trace when no automatic taper fits

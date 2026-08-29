@@ -260,7 +260,7 @@ var DRC_HELP={
  reference_transition:"A signal layer change switches physical reference planes without a nearby same-net stitching via, or a capacitor bridging two different reference nets.",
  loop_area:"Estimated trace length times physical trace-to-reference separation exceeds the net class's authored (return-path (max-loop-area MM2)) budget.",
  bypass_open:"A bypass capacitor's rail pad has no continuous same-face copper path to the exact IC supply pad it is authored to decouple. A remote pour or separate plane drops do not replace this local high-frequency connection.",
- net_open:"A net's copper splits into islands that never join — the connection is missing on the fabbed board."
+ net_open:"A net's copper splits into islands the contact rules cannot join. As an error the islands never touch and the connection is missing on the fabbed board; as a warning they already overlap but form no full-width junction — the metal is continuous, the joint is not, so widen or restructure where the two runs meet."
 };
 // The Properties inspector consumes the same prose and the same ruleGraphic
 // renderer as Design Settings.  Violation JSON carries the human label (`k`),

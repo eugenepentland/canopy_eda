@@ -80,6 +80,8 @@ function load(names, globals = {}) {
     "drawAdaptiveClearWidth",
     "drawAdaptiveExactClearWidth",
     "drawAdaptiveRefinedClearWidth",
+    "drawSamePointXY",
+    "drawShapedPush",
     "drawAdaptivePowerRun",
   ], {
     DRAW_ADAPTIVE_STEP: 0.05,
@@ -116,6 +118,54 @@ function load(names, globals = {}) {
     assert(Math.abs(s[2] - prior[2]) <= 2 * distance + 1e-8,
       "adjacent adaptive widths must retain 45-degree-or-shallower flanks");
   });
+
+  // Shaped copper is committed as real tracks now, so equal-width collinear
+  // stations have to leave as ONE segment instead of a 50 um slice per station.
+  const shaped = plan.tracks;
+  assert(shaped.length < samples.length / 4,
+    `equal-width stations must collapse into runs (${shaped.length} of ${samples.length - 1} slices)`);
+  const trunk = shaped.filter((t) => t.x1 > 1.9 && Math.abs(t.w - target) < 1e-9);
+  assert.equal(trunk.length, 1, "the recovered full-width trunk must be one track, not one per station");
+  assert(trunk[0].x2 > 2.99, "the collapsed trunk must reach the end of the run");
+  assert.equal(shaped.filter((t) => t.w < 0.23).length, 1, "the necked stretch must also be a single segment");
+  shaped.forEach((t, i) => {
+    assert(Math.hypot(t.x2 - t.x1, t.y2 - t.y1) > 1e-9, "shaped copper must never emit a zero-length slice");
+    if (i) assert(Math.abs(t.x1 - shaped[i - 1].x2) < 1e-9 && Math.abs(t.y1 - shaped[i - 1].y2) < 1e-9,
+      "collapsing must keep the shaped run continuous");
+  });
+  assert(Math.abs(shaped[0].x1) < 1e-12 && Math.abs(shaped.at(-1).x2 - 3) < 1e-12,
+    "the collapsed run must still span the whole centreline");
+}
+
+{
+  const g = load(["drawSamePointXY", "drawShapedPush"]);
+  function push(...slices) {
+    const out = [];
+    slices.forEach((s) => g.drawShapedPush(out, s));
+    return out;
+  }
+  const straight = push(
+    { x1: 0, y1: 0, x2: 1, y2: 0, w: 0.4 },
+    { x1: 1, y1: 0, x2: 2, y2: 0, w: 0.4 },
+  );
+  assert.equal(straight.length, 1, "collinear equal-width slices must merge");
+  assert.equal(straight[0].x2, 2);
+  assert.equal(push(
+    { x1: 0, y1: 0, x2: 1, y2: 0, w: 0.4 },
+    { x1: 1, y1: 0, x2: 2, y2: 0, w: 0.5 },
+  ).length, 2, "a width step must stay its own segment");
+  assert.equal(push(
+    { x1: 0, y1: 0, x2: 1, y2: 0, w: 0.4 },
+    { x1: 1, y1: 0, x2: 1, y2: 1, w: 0.4 },
+  ).length, 2, "a bend must never be merged away");
+  assert.equal(push(
+    { x1: 0, y1: 0, x2: 1, y2: 0, w: 0.4 },
+    { x1: 1, y1: 0, x2: 0, y2: 0, w: 0.4 },
+  ).length, 2, "a 180-degree retrace is not one segment");
+  assert.equal(push(
+    { x1: 0, y1: 0, x2: 1, y2: 0, w: 0.4 },
+    { x1: 1.001, y1: 0, x2: 2, y2: 0, w: 0.4 },
+  ).length, 2, "a gap in the run must not be bridged");
 }
 
 {
@@ -454,9 +504,13 @@ function load(names, globals = {}) {
     { net: "RF", l: 0, portal: true, track_ids: ["seg-owner"], samples: [[0.5, -0.2, 0.1], [0.5, 0.2, 0.1]] },
     { net: "RF", l: 0, track_ids: ["seg-other"], samples: [[2, 0, 0.2], [3, 0, 0.2]] },
   ] };
-  const g = load(["rfPathOwnsTrack", "rfOwnsTrack", "rfPathBelongsToTrack", "rfDropForTracks", "cloneCopper"], {
+  const g = load([
+    "rfPathOwnsTrack", "rfOwnsTrack", "rfPathBelongsToTrack", "rfPathPower", "rfPathBakeWidth",
+    "rfBakePath", "rfWasIndex", "rfDropForTracks", "cloneCopper",
+  ], {
     PCB,
     cuGeomDrop() {},
+    netClassInfo() { return { impedance_ohms: 50 }; },
     trackIdEnsure(t) { return t.id; },
     viaIdEnsure(v) { return v.id; },
   });
@@ -553,6 +607,366 @@ function load(names, globals = {}) {
   assert.equal(g.drawRfMissingPortalGroups().length, 0);
   assert.equal(ownedLegacy.track_ids.length, 1, "a geometrically owned legacy main path should acquire stable track ids");
   assert.equal(ownedLegacy.track_ids[0], "legacy-owner");
+}
+
+// An adaptive power overlay is the ONLY record of a rail's real width, and
+// nothing regenerates it: dropping one has to leave that width on the copper.
+function loadRfLifecycle(PCB, impedance) {
+  return load([
+    "rfSamePoint", "rfPathSpanWidth", "rfPathCoversTrack", "rfPathOwnsTrack", "rfOwnsTrack",
+    "rfPathBelongsToTrack", "rfPathPower", "rfPathBakeWidth", "rfBakePath", "rfPathOwnsAny",
+    "rfWasIndex", "rfDropForTracks", "rfLoadBake",
+  ], {
+    PCB,
+    cuGeomDrop() {},
+    netClassInfo(net) { return impedance.includes(net) ? { impedance_ohms: 50 } : null; },
+    segDist(px, py, t) {
+      const dx = t.x2 - t.x1, dy = t.y2 - t.y1, l2 = dx * dx + dy * dy;
+      const f = l2 > 0 ? Math.max(0, Math.min(1, ((px - t.x1) * dx + (py - t.y1) * dy) / l2)) : 0;
+      return Math.hypot(px - (t.x1 + dx * f), py - (t.y1 + dy * f));
+    },
+  });
+}
+
+{
+  const a = { id: "a", net: "V_5VA", l: 0, x1: 0, y1: 0, x2: 1, y2: 0, w: 0.127 };
+  const b = { id: "b", net: "V_5VA", l: 0, x1: 1, y1: 0, x2: 2, y2: 0, w: 0.127 };
+  const rf = { id: "r", net: "LO1", l: 0, x1: 5, y1: 0, x2: 6, y2: 0, w: 0.19 };
+  const PCB = {
+    tracks: [a, b, rf],
+    rf_paths: [
+      { net: "V_5VA", l: 0, track_ids: ["a", "b"],
+        samples: [[0, 0, 0.2], [0.5, 0, 0.6], [1, 0, 0.3], [2, 0, 0.25]] },
+      { net: "LO1", l: 0, track_ids: ["r"], samples: [[5, 0, 0.4], [6, 0, 0.19]] },
+    ],
+  };
+  const g = loadRfLifecycle(PCB, ["LO1"]);
+  g.rfDropForTracks([a]);
+  assert.equal(PCB.rf_paths.length, 1, "editing one segment must retire its whole power overlay");
+  assert(Math.abs(a.w - 0.6) < 1e-12, "the dragged segment must keep the widest copper it actually had");
+  assert(Math.abs(b.w - 0.3) < 1e-12, "every other segment of the run must keep ITS width, not the run maximum");
+  g.rfDropForTracks([rf]);
+  assert.equal(PCB.rf_paths.length, 0);
+  assert(Math.abs(rf.w - 0.19) < 1e-12,
+    "a controlled-impedance handle must stay at its class width — Route regenerates that taper");
+}
+
+{
+  // A segment drag moves its attached neighbours BEFORE the overlay is
+  // released, so the bake reads the drag snapshot's pre-gesture geometry.
+  const a = { id: "a", net: "V_5VA", l: 0, x1: 0, y1: 0, x2: 1, y2: 0, w: 0.127 };
+  const b = { id: "b", net: "V_5VA", l: 0, x1: 1, y1: 0.4, x2: 2, y2: 0.4, w: 0.127 };
+  const PCB = { tracks: [a, b], rf_paths: [
+    { net: "V_5VA", l: 0, track_ids: ["a", "b"], samples: [[0, 0, 0.5], [1, 0, 0.5], [2, 0, 0.32]] },
+  ] };
+  const g = loadRfLifecycle(PCB, []);
+  const was = [
+    { id: "a", net: "V_5VA", l: 0, x1: 0, y1: 0, x2: 1, y2: 0 },
+    { id: "b", net: "V_5VA", l: 0, x1: 1, y1: 0, x2: 2, y2: 0 },
+  ];
+  g.rfDropForTracks([a, b], was);
+  assert(Math.abs(a.w - 0.5) < 1e-12, "the grabbed segment bakes from its pre-drag span");
+  assert(Math.abs(b.w - 0.5) < 1e-12, "an already-stretched neighbour must still bake, not silently revert");
+}
+
+{
+  // One open of a pre-adaptive board heals it: widths onto the copper, overlay
+  // and exact-probe debris gone, controlled-impedance proofs untouched.
+  const power = { id: "p", net: "V_12V", l: 0, x1: 0, y1: 0, x2: 2, y2: 0, w: 0.127 };
+  const rf = { id: "r", net: "LO1", l: 0, x1: 5, y1: 0, x2: 6, y2: 0, w: 0.19 };
+  const keep = { net: "LO1", l: 0, track_ids: ["r"], samples: [[5, 0, 0.4], [5.2, 0, 0.19], [6, 0, 0.19]] };
+  const collar = { net: "LO1", l: 0, portal: true, track_ids: ["r"], samples: [[5, -0.2, 0.1], [5, 0.2, 0.1]] };
+  const PCB = {
+    tracks: [power, rf],
+    rf_paths: [
+      { net: "V_12V", l: 0, track_ids: ["p"], samples: [[0, 0, 0.45], [1, 0, 0.45], [2, 0, 0.45]] },
+      { net: "LO1", l: 0, track_ids: [], samples: [[9, 0, 0.3], [9.5, 0, 0.3]] },
+      keep, collar,
+    ],
+  };
+  const g = loadRfLifecycle(PCB, ["LO1"]);
+  g.rfLoadBake();
+  assert.equal(PCB.rf_paths.length, 2, "power overlays and orphan probe debris must not survive the load");
+  assert.equal(PCB.rf_paths[0], keep, "a controlled-impedance taper must be kept verbatim");
+  assert.equal(PCB.rf_paths[1], collar, "a two-sample pad collar owns no handle and must still be kept");
+  assert(Math.abs(power.w - 0.45) < 1e-12, "the healed rail keeps its physical width as ordinary copper");
+  assert(Math.abs(rf.w - 0.19) < 1e-12, "healing must not touch controlled-impedance handles");
+  g.rfLoadBake();
+  assert.equal(PCB.rf_paths.length, 2, "a healed board must reload idempotently");
+}
+
+{
+  // Zero-length crumbs are copper no contact predicate can join, so the server
+  // reports them as phantom islands. The gesture that made one culls it.
+  const main = { id: "m", x1: 0, y1: 0, x2: 1, y2: 0 };
+  const crumb = { id: "c", x1: 2, y1: 2, x2: 2, y2: 2 };
+  const live = { id: "n", x1: 1, y1: 0, x2: 1, y2: 1 };
+  const jog = { id: "j", x1: 3, y1: 3, x2: 3, y2: 3 };
+  const PCB = { tracks: [main, crumb, live, jog] };
+  const g = load(["segCrumbClean"], {
+    PCB,
+    gpuCuEdit() {},
+    trackLength(t) { return Math.hypot(t.x2 - t.x1, t.y2 - t.y1); },
+  });
+  g.segCrumbClean({ t: main, moved: false, a: { jog, at: [{ q: crumb, e: 1 }] }, b: { jog: null, at: [] } });
+  assert.deepEqual(Array.from(PCB.tracks, (t) => t.id), ["m", "c", "n"],
+    "a stationary press cleans only the jog it laid — it must not silently delete existing copper");
+  PCB.tracks = [main, crumb, live, jog];
+  g.segCrumbClean({ t: main, moved: true, a: { jog, at: [{ q: crumb, e: 1 }] }, b: { jog: null, at: [{ q: live, e: 2 }] } });
+  assert.deepEqual(Array.from(PCB.tracks, (t) => t.id), ["m", "n"],
+    "a real drag culls every zero-length track it touched, followed neighbours included");
+  const gone = { id: "g", x1: 4, y1: 4, x2: 4, y2: 4 };
+  PCB.tracks = [gone];
+  const sd = { t: gone, moved: true, a: { jog: null, at: [] }, b: { jog: null, at: [] } };
+  g.segCrumbClean(sd);
+  assert.equal(PCB.tracks.length, 0, "a grabbed segment whose own corners met is a crumb too");
+}
+
+{
+  // A drawn power run commits SHAPED COPPER, not a second representation: the
+  // gate judges the real tracks and no overlay is left to go stale.
+  const laid = [
+    { id: "l1", x1: 0, y1: 0, x2: 1, y2: 0, l: 0, w: 0.127, net: "V_12V" },
+    { id: "l2", x1: 1, y1: 0, x2: 2, y2: 0, l: 0, w: 0.127, net: "V_12V" },
+  ];
+  const other = { id: "o", x1: 9, y1: 9, x2: 9.5, y2: 9, l: 0, w: 0.2, net: "GND" };
+  const shaped = [
+    { x1: 0, y1: 0, x2: 1, y2: 0, l: 0, w: 0.4, net: "V_12V", source: "human" },
+    { x1: 1, y1: 0, x2: 2, y2: 0, l: 0, w: 0.32, net: "V_12V", source: "human" },
+  ];
+  const overlay = { net: "V_12V", l: 0, track_ids: ["l1", "l2"], samples: [[0, 0, 0.4], [2, 0, 0.32]] };
+  const PCB = { tracks: [other, ...laid], vias: [], rf_paths: [] };
+  const dtrace = { pair: null, laid: laid.slice(), w: 0.127, powerTarget: 0.4, net: "V_12V", l: 0,
+    lx: 2, ly: 0, startPad: null, undo: { tracks: [other], vias: [], rf_paths: [] } };
+  const seen = [];
+  let minted = 0;
+  const g = load(["drawSamePointXY", "drawCommitShaped", "drawApplyAutomaticTapers"], {
+    PCB,
+    dtrace,
+    drcGate: { ready: true, failed: false },
+    drawAdaptiveRefinedClearWidth() {},
+    drawEndpointLand() { return null; },
+    drawAdaptivePowerPlan() { return { tracks: shaped, paths: [overlay], maxWidth: 0.4, power: true }; },
+    drawAutomaticTaperPlan() { throw new Error("a power run must not fall back to the impedance planner"); },
+    drcGateDiffBlocks(_bt, _bv, after, _av, _brf, arf) { seen.push({ after, arf }); return false; },
+    trackIdEnsure(t) { return t.id; },
+    trackIdNew() { return `s${++minted}`; },
+    cuGeomDrop() {},
+    gpuCuEdit() {},
+    routeStatMsg() {},
+  });
+  const out = g.drawApplyAutomaticTapers();
+  assert.equal(out.changed, true);
+  assert.equal(out.power, true);
+  assert.equal(out.paths.length, 0, "a power run must publish no swept overlay at all");
+  assert.equal(PCB.rf_paths.length, 0, "the board must carry one representation of that copper");
+  assert.deepEqual(Array.from(PCB.tracks, (t) => t.id), ["o", "l1", "l2"],
+    "shaped copper replaces the laid handles in place and inherits identical spans' ids");
+  assert.deepEqual(Array.from(PCB.tracks, (t) => t.w), [0.2, 0.4, 0.32], "the committed tracks carry the shaped widths");
+  assert.equal(minted, 0, "an unchanged span must not churn its track id");
+  assert.equal(seen.length, 1);
+  assert.deepEqual(Array.from(seen[0].after, (t) => t.w), [0.2, 0.4, 0.32], "the gate must judge the shaped copper");
+  assert.equal(seen[0].arf.length, 0, "the gate must not be shown a power overlay it will never commit");
+  assert.deepEqual(Array.from(dtrace.laid, (t) => t.w), [0.4, 0.32], "the gesture's laid set follows the copper it committed");
+}
+
+// Scoped re-widen. An edited adaptive rail heals to the clearance it has NOW,
+// so the first thing that has to be right is which copper the recut covers: one
+// unambiguous same-net, same-layer chain, ordered head-to-tail however its
+// segments were authored.
+function loadRewidenWalk(PCB, lands = []) {
+  return load([
+    "drawSamePointXY", "drawReverseTrack", "drawTrackFromPoint",
+    "rewidenTarget", "rewidenTrack", "rewidenGrow", "rewidenRun", "rewidenRuns",
+  ], {
+    PCB,
+    RO: false,
+    baseTrackW() { return 0.127; },
+    netClassInfo(net) { return net.slice(0, 2) === "V_" ? { adaptive_power_width: 0.4 } : null; },
+    rfOwnsTrack() { return false; },
+    trackIdEnsure(t) { return t.id; },
+    trackLength(t) { return Math.hypot(t.x2 - t.x1, t.y2 - t.y1); },
+    drawEndpointLand(net, layer, x, y) {
+      return lands.find((l) => l.net === net && Math.hypot(l.x - x, l.y - y) < 1e-9) || null;
+    },
+  });
+}
+
+{
+  const a = { id: "a", net: "V_5VA", l: 0, x1: 1, y1: 0, x2: 2, y2: 0, w: 0.127 };
+  const b = { id: "b", net: "V_5VA", l: 0, x1: 0, y1: 0, x2: 1, y2: 0, w: 0.127 };
+  const c = { id: "c", net: "V_5VA", l: 0, x1: 2, y1: 0, x2: 3, y2: 0, w: 0.127 };
+  const d1 = { id: "d1", net: "V_5VA", l: 0, x1: 3, y1: 0, x2: 4, y2: 0, w: 0.127 };
+  const d2 = { id: "d2", net: "V_5VA", l: 0, x1: 3, y1: 0, x2: 3, y2: 1, w: 0.127 };
+  const foreign = { id: "x", net: "GND", l: 0, x1: 2, y1: 0, x2: 2, y2: 1, w: 0.2 };
+  const otherLayer = { id: "lay", net: "V_5VA", l: 1, x1: 1, y1: 0, x2: 1, y2: -1, w: 0.127 };
+  const land = { net: "V_5VA", x: 0, y: 0, pd: { w: 0.3, h: 0.3 } };
+  const PCB = { rules: { track_width: 0.127, min_width: 0.1 }, tracks: [a, b, c, d1, d2, foreign, otherLayer] };
+  const g = loadRewidenWalk(PCB, [land]);
+
+  const runs = g.rewidenRuns([a]);
+  assert.equal(runs.length, 1, "one seed identifies one run");
+  assert.deepEqual(Array.from(runs[0].tracks, (t) => t.id), ["b", "a", "c"],
+    "the run grows both ways from the seed and stops at the branch");
+  assert.deepEqual(Array.from(runs[0].run, (t) => [t.x1, t.x2]), [[0, 1], [1, 2], [2, 3]],
+    "reverse-authored copper is re-oriented so the planner reads one ordered centreline");
+  assert.equal(runs[0].startPad, land, "the land a run starts on supplies its launch profile");
+  assert.equal(runs[0].endPad, null, "a branch ends a run without a land");
+  assert.equal(runs[0].target, 0.4);
+  assert.equal(runs[0].floor, 0.127, "the run recuts against the pen's routing floor");
+
+  const all = g.rewidenRuns(null);
+  assert.deepEqual(Array.from(all, (r) => Array.from(r.tracks, (t) => t.id)), [["b", "a", "c"], ["d1"], ["d2"], ["lay"]],
+    "a whole-board pass partitions the net's copper by topology alone — the other layer is its own run");
+  assert(!all.some((r) => r.tracks.some((t) => t.id === "x")),
+    "foreign copper never joins a run through a shared node");
+}
+
+{
+  const up = { id: "u", net: "V_12V", l: 0, x1: 0, y1: 0, x2: 1, y2: 0, w: 0.127 };
+  const dn = { id: "d", net: "V_12V", l: 1, x1: 1, y1: 0, x2: 2, y2: 0, w: 0.127 };
+  const viaLand = { net: "V_12V", x: 1, y: 0, via: { d: 0.4 }, pd: { w: 0.4, h: 0.4 } };
+  const PCB = { rules: { track_width: 0.127, min_width: 0.1 }, tracks: [up, dn] };
+  const g = loadRewidenWalk(PCB, [viaLand]);
+  const runs = g.rewidenRuns([up]);
+  assert.deepEqual(Array.from(runs[0].tracks, (t) => t.id), ["u"], "a via ends the run it feeds");
+  assert.equal(runs[0].endPad, viaLand, "the via's annulus becomes that end's launch profile");
+  const both = g.rewidenRuns(null);
+  assert.equal(both.length, 2, "a rail crossing layers through a via recuts as one run per face");
+  assert(both.every((r) => new Set(r.run.map((t) => t.l)).size === 1), "no run may span two layers");
+}
+
+{
+  const straight = { id: "s", net: "V_12V", l: 0, x1: 0, y1: 0, x2: 1, y2: 0, w: 0.127 };
+  const arc = { id: "arc", net: "V_12V", l: 0, x1: 1, y1: 0, xm: 1.5, ym: 0.2, x2: 2, y2: 0, w: 0.127 };
+  const PCB = { rules: { track_width: 0.127, min_width: 0.1 }, tracks: [straight, arc] };
+  const g = loadRewidenWalk(PCB, []);
+  assert.deepEqual(Array.from(g.rewidenRuns([straight])[0].tracks, (t) => t.id), ["s"],
+    "an authored fillet ends a run — the station sampler would leave chords in its place");
+  assert.equal(g.rewidenRuns([arc]).length, 0, "an arc never seeds a recut");
+}
+
+{
+  // The recut itself, through the planner the pen uses. Growing and shrinking
+  // are equally correct: width on an adaptive rail is derived from the clearance
+  // it has right now, and the exact gate has the final say either way.
+  const floor = 0.127;
+  const target = 0.4;
+  let limit = () => Infinity;
+  let blocked = false;
+  let minted = 0;
+  const gate = { ready: true, failed: false };
+  const gated = [];
+  const PCB = { rules: { track_width: floor, min_width: 0.1 }, tracks: [], vias: [], rf_paths: [] };
+  const g = load([
+    "drawProfileWidth", "drawAdaptiveStations", "drawAdaptiveClearWidth",
+    "drawAdaptiveExactClearWidth", "drawAdaptiveRefinedClearWidth",
+    "drawSamePointXY", "drawShapedPush", "drawAdaptivePowerRun", "drawAdaptivePowerPlan",
+    "drawReverseTrack", "drawTrackFromPoint", "drawCommitShaped",
+    "rewidenTarget", "rewidenTrack", "rewidenGrow", "rewidenRun", "rewidenRuns", "rewidenSame",
+    "rewidenDeclined", "rewidenAtFloor", "rewidenPlan", "rewidenStatus", "rewidenApply", "rewidenHeal",
+  ], {
+    PCB,
+    RO: false,
+    DRAW_ADAPTIVE_STEP: 0.05,
+    drcGate: gate,
+    baseTrackW() { return floor; },
+    netClassInfo(net) { return net === "V_12V" ? { adaptive_power_width: target } : null; },
+    rfOwnsTrack() { return false; },
+    drawEndpointLand() { return null; },
+    trackIdEnsure(t) { return t.id; },
+    trackIdNew() { return `s${++minted}`; },
+    trackLength(t) { return Math.hypot(t.x2 - t.x1, t.y2 - t.y1); },
+    drawTrackPoint(t, f) { return { x: t.x1 + (t.x2 - t.x1) * f, y: t.y1 + (t.y2 - t.y1) * f }; },
+    // The fitter's per-interval probe, reduced to this fixture's obstacle map.
+    drawAdaptiveRunClearer() {
+      return (p, q, _layer, _net, lo, cap) => Math.max(lo, Math.min(cap, limit((p.x + q.x) / 2)));
+    },
+    drcGateDiffBlocks(_bt, _bv, after) { gated.push(after); return blocked; },
+    cuGeomDrop() {}, gpuCuEdit() {}, ovPaintSoon() {},
+  });
+
+  const rail = { id: "rail", net: "V_12V", l: 0, x1: 0, y1: 0, x2: 3, y2: 0, w: floor, source: "human" };
+  PCB.tracks = [rail];
+  assert.deepEqual({ ...g.rewidenStatus() }, { tracks: 1, nets: 1, changed: 1, editable: true },
+    "copper under its class target is eligible for a recut");
+  assert(g.rewidenHeal([rail]) >= 1, "a released gesture heals the run it moved");
+  assert.equal(PCB.tracks.length, 1, "an unobstructed run recuts to one full-width segment");
+  assert(Math.abs(PCB.tracks[0].w - target) < 1e-9,
+    "a rail left at the routing floor grows back to its electrical target");
+  assert.equal(PCB.tracks[0].id, "rail", "an unchanged span keeps its track id");
+  assert.equal(g.rewidenStatus().tracks, 0, "the healed rail is no longer under target");
+  assert.deepEqual(Array.from(gated.at(-1), (t) => t.w), [target],
+    "the gate judges the shaped copper, not an overlay");
+
+  limit = (x) => (x > 1 && x < 2 ? 0.2 : Infinity);
+  const wide = { id: "wide", net: "V_12V", l: 0, x1: 0, y1: 0, x2: 3, y2: 0, w: target, source: "human" };
+  PCB.tracks = [wide];
+  assert.equal(g.rewidenStatus().tracks, 0, "copper already at target reads as nothing to grow");
+  assert(g.rewidenHeal([wide]) > 1, "an obstacle splits the recut into shaped segments");
+  const widths = Array.from(PCB.tracks, (t) => t.w);
+  assert(widths.some((w) => w <= 0.2 + 1e-9), "the recut necks down where an obstacle now sits");
+  assert(widths.some((w) => Math.abs(w - target) < 1e-9), "clear stretches still carry the full target");
+  assert(widths.every((w) => w >= floor - 1e-9), "a recut never goes below the routing floor");
+  assert(Math.abs(PCB.tracks[0].x1) < 1e-12 && Math.abs(PCB.tracks.at(-1).x2 - 3) < 1e-12,
+    "the recut copper still spans the whole run");
+
+  limit = () => Infinity;
+  const fitted = { id: "fit", net: "V_12V", l: 0, x1: 0, y1: 0, x2: 3, y2: 0, w: target, source: "human" };
+  PCB.tracks = [fitted];
+  assert.equal(g.rewidenHeal([fitted]), 0, "a run already at its fitted width is left untouched");
+  assert.equal(PCB.tracks[0], fitted, "an unchanged answer must not churn the board's copper");
+  assert.equal(fitted.w, target);
+
+  // Nowhere left to widen is an answer too, and it is the floor.
+  limit = () => 0.05;
+  const crowded = { id: "crowd", net: "V_12V", l: 0, x1: 0, y1: 0, x2: 3, y2: 0, w: target, source: "human" };
+  PCB.tracks = [crowded];
+  assert(g.rewidenHeal([crowded]) >= 1);
+  assert(Math.abs(PCB.tracks[0].w - floor) < 1e-9, "a run with no room anywhere recuts down to the routing floor");
+  assert.equal(PCB.tracks[0].id, "crowd", "the floor recut keeps the copper's identity");
+  const pinned = { id: "pin", net: "V_12V", l: 0, x1: 0, y1: 0, x2: 3, y2: 0, w: floor, source: "human" };
+  PCB.tracks = [pinned];
+  assert.equal(g.rewidenHeal([pinned]), 0, "a run already at the floor with no room does no work");
+  assert.equal(PCB.tracks[0], pinned);
+
+  limit = () => Infinity;
+  blocked = true;
+  const narrow = { id: "narrow", net: "V_12V", l: 0, x1: 0, y1: 0, x2: 3, y2: 0, w: floor, source: "human" };
+  PCB.tracks = [narrow];
+  assert.equal(g.rewidenHeal([narrow]), 0, "a recut the exact gate rejects is not committed");
+  assert.equal(PCB.tracks[0], narrow, "gate-rejected copper is left exactly where the gesture put it");
+  assert.equal(narrow.w, floor);
+  blocked = false;
+
+  const signal = { id: "sig", net: "SDA", l: 0, x1: 5, y1: 0, x2: 6, y2: 0, w: 0.2, source: "human" };
+  PCB.tracks = [signal];
+  assert.equal(g.rewidenPlan([signal]).runs.length, 0, "a net with no adaptive target is never recut");
+  assert.equal(g.rewidenHeal([signal]), 0);
+  assert.equal(signal.w, 0.2, "ordinary hand-authored width stays authored");
+
+  PCB.tracks = [narrow];
+  gate.ready = false;
+  assert.equal(g.rewidenHeal([narrow]), 0, "healing is skipped while the exact gate is unavailable");
+  gate.ready = true;
+  gate.failed = true;
+  assert.equal(g.rewidenHeal([narrow]), 0, "a failed gate degrades to the width the gesture left");
+  gate.failed = false;
+  g.RO = true;
+  assert.equal(g.rewidenHeal([narrow]), 0, "a read-only board is never healed");
+  g.RO = false;
+  assert.equal(g.rewidenHeal([]), 0, "a gesture that moved no copper does no work");
+
+  const one = { id: "one", net: "V_12V", l: 0, x1: 0, y1: 0, x2: 3, y2: 0, w: floor, source: "human" };
+  const two = { id: "two", net: "V_12V", l: 0, x1: 0, y1: 5, x2: 3, y2: 5, w: floor, source: "human" };
+  PCB.tracks = [one, two];
+  g.rewidenHeal([one]);
+  assert.equal(PCB.tracks.length, 2);
+  assert(Math.abs(PCB.tracks[0].w - target) < 1e-9, "the run the gesture touched heals");
+  assert.equal(PCB.tracks[1], two, "a separate run on the same net is not the gesture's business");
+  assert.equal(two.w, floor);
+  assert(g.rewidenApply(null) >= 1, "the whole-board action covers every adaptive run");
+  assert(Math.abs(PCB.tracks[1].w - target) < 1e-9);
 }
 
 console.log("RF and power taper geometry probes PASS");

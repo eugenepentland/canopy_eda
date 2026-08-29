@@ -321,6 +321,20 @@ pub fn filterArcs(arena: std.mem.Allocator, paths: []const rf_port_report.Outcom
 
 /// Whether `track` is an editor handle or implementation chord belonging to a
 /// swept path, without hiding unrelated branches on the same net and layer.
+///
+/// Net, layer, and coordinates are necessary but not sufficient: a stale or
+/// orphaned path still holds the coordinates of the run it used to describe, so
+/// `variable_width_copper.ownsTrack` also requires the path's own copper over
+/// the covered span to be at least as wide as the track. A wider rail lying
+/// along a narrow probe path therefore survives at full width instead of being
+/// deleted and re-emitted as that probe's chords.
+///
+/// The converse — a track NARROWER than the samples it lies on — is not
+/// separable here: a compact constant-width handle under a taper has exactly
+/// that shape, and only the stored `SavedRfPath.track_ids` could tell it from a
+/// neighbour a drag moved onto the same coordinates. Those ids are dropped when
+/// a saved layout is rebuilt into a `router.RouteResult`, which carries no
+/// per-track identity at all.
 pub fn ownsTrack(paths: []const rf_port_report.Outcome, track: anytype) bool {
     for (paths) |path| {
         if (!path.success or path.physical.gate_removed) continue;
@@ -390,6 +404,44 @@ test "path copper replaces only its compact centreline handle with private profi
     try std.testing.expectApproxEqAbs(@as(f64, 0.2), got[1].width, 1e-12);
     try std.testing.expectApproxEqAbs(@as(f64, 0.3), got[2].width, 1e-12);
     try std.testing.expectEqual(@as(f64, 1), got[0].y2); // unrelated branch survives
+}
+
+// spec: placement/rf-port-frame-routing - an orphaned or stale swept path never narrows a wider stored trace that shares its coordinates, and still deduplicates the chords it does describe
+test "a narrow orphaned path cannot swallow the wider rail lying along it" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // The two-sample debris an exact-gate width probe leaves behind on a power
+    // net: real coordinates, but the probe's own narrow width.
+    const samples = [_]Sample{
+        .{ .at = .{ 0, 0 }, .s_mm = 0, .curvature = 0, .width_mm = 0.1524 },
+        .{ .at = .{ 1, 0 }, .s_mm = 1, .curvature = 0, .width_mm = 0.1524 },
+    };
+    const paths = [_]rf_port_report.Outcome{.{
+        .net = 3,
+        .chosen = 0,
+        .feasible = true,
+        .success = true,
+        .metrics = .{},
+        .trials = &.{},
+        .physical = .{ .sample_count = samples.len, .samples = &samples, .layer = 0 },
+    }};
+    // Same net, same layer, same endpoints — only the width says this rail is
+    // not the probe's copper, and swallowing it would narrow it by 40%.
+    const rail = router.Track{ .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.2532, .net = 3 };
+    try std.testing.expect(!ownsTrack(&paths, rail));
+    const kept = try tracks(arena, .{ .tracks = &.{rail}, .vias = &.{}, .rf_port_outcomes = &paths, .routed = 1, .total = 1 });
+    try std.testing.expectEqual(@as(usize, 2), kept.len);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.2532), kept[0].width, 1e-12); // the rail survives at full width
+    try std.testing.expectApproxEqAbs(@as(f64, 0.1524), kept[1].width, 1e-12); // the path still lowers its own chord
+
+    // A handle the path does cover is still deduped, so a live path never
+    // doubles its own copper.
+    const handle = router.Track{ .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.1524, .net = 3 };
+    try std.testing.expect(ownsTrack(&paths, handle));
+    const deduped = try tracks(arena, .{ .tracks = &.{handle}, .vias = &.{}, .rf_port_outcomes = &paths, .routed = 1, .total = 1 });
+    try std.testing.expectEqual(@as(usize, 1), deduped.len);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.1524), deduped[0].width, 1e-12);
 }
 
 test "variable width outline bevels a sharp angled taper without an inward gap" {
