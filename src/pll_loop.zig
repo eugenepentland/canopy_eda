@@ -49,7 +49,23 @@ const Synthesis = struct {
 };
 const OperatingCurve = struct { point_nodes: []const Node = &.{} };
 const OperatingPoint = struct { pll_n: f64, kvco_hz_per_v: f64 };
-const DesignMode = struct { operating_curve: OperatingCurve = .{}, synthesis: Synthesis = .{} };
+
+/// A `(pinned "KEY" (c-cp F) …)` clause inside `(synthesize …)`: the winning
+/// corner of a search a previous build already ran, stamped with that search's
+/// own content key. A matching key answers without the 6,000-candidate search;
+/// a stale key is ignored (with a warning) and the search runs as if the pin
+/// were absent — so a pin can only ever skip recomputing an answer, never
+/// change one. Values hold component nominals in component order (`c-tune`
+/// WITHOUT the extra tune cap, exactly as authored), snapped onto the E24 grid
+/// at parse so the printed text round-trips to the search's bit-exact f64s.
+const PinnedSynthesis = struct {
+    key_lo: u64 = 0,
+    key_hi: u64 = 0,
+    values: [7]f64 = @splat(0),
+};
+const pinned_component_names = [_][]const u8{ "c-cp", "r-in", "r-feedback", "c-feedback", "c-feedback-hf", "r-isolation", "c-tune" };
+
+const DesignMode = struct { operating_curve: OperatingCurve = .{}, synthesis: Synthesis = .{}, pinned: ?PinnedSynthesis = null };
 const OpAmp = struct {
     gbw_hz: f64 = 0,
     dc_gain: f64 = 500_000,
@@ -126,7 +142,7 @@ fn parseChild(node: Node, out: *Spec) ParseError!void {
     } else if (eq(head, "operating-curve")) {
         try parseOperatingCurve(c, &out.design.operating_curve);
     } else if (eq(head, "synthesize")) {
-        try parseSynthesis(c, &out.design.synthesis);
+        try parseSynthesis(c, &out.design);
     } else if (eq(head, "phase-margin")) {
         try parsePhaseMargin(c, &out.requirements.phase);
     } else if (eq(head, "polarity")) {
@@ -152,21 +168,49 @@ fn parseOperatingPoint(node: Node) ParseError!OperatingPoint {
     return .{ .pll_n = try positiveAt(p, 1), .kvco_hz_per_v = try positiveAt(p, 2) };
 }
 
-fn parseSynthesis(c: []const Node, out: *Synthesis) ParseError!void {
-    out.enabled = true;
+fn parseSynthesis(c: []const Node, out: *DesignMode) ParseError!void {
+    out.synthesis.enabled = true;
     for (c[1..]) |node| {
         const p = node.asList() orelse return error.InvalidForm;
         const head = try atomAt(p, 0);
         if (eq(head, "series")) {
             if (!eq(try atomAt(p, 1), "e24")) return error.InvalidForm;
         } else if (eq(head, "resistance-range")) {
-            out.resistor_range = .{ .min = try positiveAt(p, 1), .max = try positiveAt(p, 2) };
+            out.synthesis.resistor_range = .{ .min = try positiveAt(p, 1), .max = try positiveAt(p, 2) };
         } else if (eq(head, "capacitance-range")) {
-            out.capacitor_range = .{ .min = try positiveAt(p, 1), .max = try positiveAt(p, 2) };
+            out.synthesis.capacitor_range = .{ .min = try positiveAt(p, 1), .max = try positiveAt(p, 2) };
+        } else if (eq(head, "pinned")) {
+            out.pinned = try parsePinned(p);
         } else return error.InvalidForm;
     }
-    if (out.resistor_range.max < out.resistor_range.min) return error.InvalidForm;
-    if (out.capacitor_range.max < out.capacitor_range.min) return error.InvalidForm;
+    if (out.synthesis.resistor_range.max < out.synthesis.resistor_range.min) return error.InvalidForm;
+    if (out.synthesis.capacitor_range.max < out.synthesis.capacitor_range.min) return error.InvalidForm;
+}
+
+/// `(pinned "KEY32HEX" (c-cp F) (r-in R) (r-feedback R) (c-feedback F)
+/// (c-feedback-hf F) (r-isolation R) (c-tune F))` — the key string every
+/// unpinned build prints, plus all seven components, each exactly once in any
+/// order. Values snap onto the E24 grid (see `snapE24`).
+fn parsePinned(p: []const Node) ParseError!PinnedSynthesis {
+    if (p.len != 2 + pinned_component_names.len) return error.InvalidForm;
+    const key_text = p[1].asString() orelse return error.InvalidForm;
+    if (key_text.len != 32) return error.InvalidForm;
+    var pin = PinnedSynthesis{};
+    pin.key_hi = std.fmt.parseInt(u64, key_text[0..16], 16) catch return error.InvalidForm;
+    pin.key_lo = std.fmt.parseInt(u64, key_text[16..32], 16) catch return error.InvalidForm;
+    var seen: [pinned_component_names.len]bool = @splat(false);
+    for (p[2..]) |node| {
+        const entry = node.asList() orelse return error.InvalidForm;
+        const head = try atomAt(entry, 0);
+        const index = for (pinned_component_names, 0..) |name, i| {
+            if (eq(head, name)) break i;
+        } else return error.InvalidForm;
+        if (seen[index]) return error.InvalidForm;
+        seen[index] = true;
+        pin.values[index] = snapE24(try positiveAt(entry, 1));
+    }
+    for (seen) |s| if (!s) return error.InvalidForm;
+    return pin;
 }
 
 fn parseLimits(c: []const Node, head: []const u8, out: *Spec) ParseError!bool {
@@ -427,8 +471,42 @@ const e24 = [_]f64{ 1.0, 1.1, 1.2, 1.3, 1.5, 1.6, 1.8, 2.0, 2.2, 2.4, 2.7, 3.0, 
 const synthesis_primes = [_]usize{ 2, 3, 5, 7, 11, 13, 17 };
 
 fn synthesize(context: *Context, spec: Spec, circuit: Circuit) std.mem.Allocator.Error!void {
+    const key = synthKey(spec, circuit);
+    if (spec.design.pinned) |pin| {
+        if (pin.key_lo == key.lo and pin.key_hi == key.hi) {
+            try appendSynthesisResult(context, spec, circuit, pinnedResult(spec, circuit, pin));
+            return;
+        }
+        try warning(context, "{s}: pinned synthesis is stale — the declaration or resolved values no longer match its key, so the full search ran; replace the pin from the line below", .{spec.name});
+    }
     const result = memoisedSynthesis(spec, circuit);
     try appendSynthesisResult(context, spec, circuit, result);
+    try appendPinOffer(context, spec, circuit, key, result);
+}
+
+/// The `SynthResult` a current pin stands for: the pinned corner pushed
+/// through the same helpers `findSynthesis` returns through, so a pinned
+/// evaluation and the search it replaces are the same answer to the digit.
+fn pinnedResult(spec: Spec, circuit: Circuit, pin: PinnedSynthesis) SynthResult {
+    const first = parseOperatingPoint(spec.design.operating_curve.point_nodes[0]) catch OperatingPoint{ .pll_n = spec.circuit.feedback.pll_n, .kvco_hz_per_v = spec.circuit.kvco_hz_per_v.min };
+    const anchor_step = synthesisAnchorStep(spec, first);
+    const corner = Corner{ .c_cp = pin.values[0], .r_in = pin.values[1], .r_feedback = pin.values[2], .c_feedback = pin.values[3], .c_feedback_hf = pin.values[4], .r_isolation = pin.values[5], .c_tune = pin.values[6] + circuit.extra_tune_cap.nominal };
+    return .{
+        .corner = corner,
+        .anchor_step = anchor_step,
+        .nominal = profileSweep(spec, corner, anchor_step, false),
+        .tolerance = synthesisToleranceSweep(spec, circuit, corner, anchor_step),
+    };
+}
+
+/// The copy-paste line that makes the NEXT evaluation skip the search: the
+/// search's winning component values plus the content key of everything the
+/// search read. Printed values are snapped onto the E24 grid so they read as
+/// the catalogue numbers they are; parsing snaps again, so the round trip
+/// lands on the identical f64s either way.
+fn appendPinOffer(context: *Context, spec: Spec, circuit: Circuit, key: content_key.Key, result: SynthResult) std.mem.Allocator.Error!void {
+    const c = result.corner;
+    try append(context, spec, true, "{s}: pin this search — (pinned \"{x:0>16}{x:0>16}\" (c-cp {d}pF) (r-in {d}R) (r-feedback {d}R) (c-feedback {d}pF) (c-feedback-hf {d}pF) (r-isolation {d}R) (c-tune {d}pF))", .{ spec.name, key.hi, key.lo, snapE24(c.c_cp * 1e12), snapE24(c.r_in), snapE24(c.r_feedback), snapE24(c.c_feedback * 1e12), snapE24(c.c_feedback_hf * 1e12), snapE24(c.r_isolation), snapE24((c.c_tune - circuit.extra_tune_cap.nominal) * 1e12) });
 }
 
 // ── Synthesis memo ────────────────────────────────────────────────────────
@@ -505,7 +583,12 @@ fn memoisedSynthesis(spec: Spec, circuit: Circuit) SynthResult {
 /// points are what is folded in, and the compile-time length check below fails
 /// the build if `DesignMode` ever grows a third field nobody keyed.
 fn synthKey(spec: Spec, circuit: Circuit) content_key.Key {
-    comptime std.debug.assert(@typeInfo(DesignMode).@"struct".field_names.len == 2);
+    // Three DesignMode fields, of which `pinned` is DELIBERATELY not keyed: a
+    // pin is a memo OF this key's answer, so folding it in would be circular —
+    // authoring the pin the offer line prints would change the key and
+    // instantly un-pin it. The search never reads the pin, so the key is
+    // complete without it.
+    comptime std.debug.assert(@typeInfo(DesignMode).@"struct".field_names.len == 3);
     var fp: content_key.Fingerprint = .{};
     fp.tag(synth_key_version);
     const info = @typeInfo(Spec).@"struct";
@@ -625,6 +708,29 @@ fn halton(input_index: usize, base: usize) f64 {
         result += factor * @as(f64, @floatFromInt(index % base));
     }
     return result;
+}
+
+/// The nearest E24 grid point, computed with the same `mantissa * scale`
+/// arithmetic the search's candidates use — so a value that came off that grid
+/// and went through decimal text re-parses to the bit-identical f64. A value
+/// more than ~0.1% off every grid point (a hand-authored non-E24 pin) is kept
+/// verbatim rather than silently moved onto the grid.
+fn snapE24(value: f64) f64 {
+    var best = value;
+    var best_error = std.math.inf(f64);
+    const decade = @floor(@log10(value));
+    for ([_]f64{ decade - 1, decade, decade + 1 }) |exponent| {
+        const scale = std.math.pow(f64, 10, exponent);
+        for (e24) |mantissa| {
+            const candidate = mantissa * scale;
+            const err = @abs(@log(candidate / value));
+            if (err < best_error) {
+                best = candidate;
+                best_error = err;
+            }
+        }
+    }
+    return if (best_error <= 1e-3) best else value;
 }
 
 fn nearestE24InRange(value: f64, limits: Range) f64 {
@@ -1187,6 +1293,99 @@ test "the synthesis memo answers only the identical declaration and circuit" {
     var faster = fixture.spec;
     faster.circuit.pfd_hz = 120e6;
     try std.testing.expect(!key.eql(synthKey(faster, fixture.circuit)));
+}
+
+// spec: pll-loop - pinned values snap onto the E24 grid at parse, so the printed decimal text round-trips to the search's bit-identical f64s, and a non-E24 value is kept verbatim rather than moved
+test "snapE24 reproduces the candidate grid's exact doubles" {
+    // The same `mantissa * scale` arithmetic `nearestE24InRange` uses.
+    try std.testing.expectEqual(2.2 * std.math.pow(f64, 10, -11), snapE24(22e-12));
+    try std.testing.expectEqual(7.5 * std.math.pow(f64, 10, 1), snapE24(75));
+    try std.testing.expectEqual(4.3 * std.math.pow(f64, 10, 3), snapE24(4300));
+    try std.testing.expectEqual(1.8 * std.math.pow(f64, 10, -12), snapE24(1.8e-12));
+    // A value the offer line printed with float dust still lands on the grid…
+    try std.testing.expectEqual(3.0 * std.math.pow(f64, 10, 1), snapE24(30.000000000000004));
+    // …while a deliberate off-grid value (>0.1% from every E24 point) is kept.
+    try std.testing.expectEqual(@as(f64, 3.14e3), snapE24(3.14e3));
+}
+
+/// The pin tests' own fixture: the memo fixture with its second operating
+/// point moved, so its key collides with nothing another test seeds into the
+/// process-wide memo.
+fn pinFixture() struct { spec: Spec, circuit: Circuit, points: [2]Node } {
+    var fixture = memoFixture();
+    fixture.spec.name = "pll-loop pin fixture";
+    fixture.points[1] = Node.list(ast.Span.zero, &memo_point_b_moved);
+    return .{ .spec = fixture.spec, .circuit = fixture.circuit, .points = fixture.points };
+}
+
+fn freeAssertions(allocator: std.mem.Allocator, list: *std.ArrayList(env.AssertionResult)) void {
+    for (list.items) |assertion| allocator.free(assertion.message);
+    list.deinit(allocator);
+}
+
+fn messagesContain(list: *const std.ArrayList(env.AssertionResult), needle: []const u8) bool {
+    for (list.items) |assertion| {
+        if (std.mem.indexOf(u8, assertion.message, needle) != null) return true;
+    }
+    return false;
+}
+
+// spec: pll-loop - a pin whose key matches answers from its own values without consulting the search or its memo, and prints no re-pin offer
+test "a matching pin bypasses the search and the memo" {
+    var fixture = pinFixture();
+    fixture.spec.design.operating_curve = .{ .point_nodes = &fixture.points };
+    const key = synthKey(fixture.spec, fixture.circuit);
+
+    // Poison the memo under this key: if the pinned path consulted the memo
+    // (or ran the search and wrote it), these impossible values would show.
+    synth_memo.put(key, .{
+        .corner = .{ .c_cp = 1, .r_in = 1, .r_feedback = 1, .c_feedback = 1, .c_feedback_hf = 1, .r_isolation = 1, .c_tune = 1 },
+        .anchor_step = 1,
+        .nominal = .{},
+        .tolerance = .{},
+    });
+
+    fixture.spec.design.pinned = .{
+        .key_lo = key.lo,
+        .key_hi = key.hi,
+        .values = .{ snapE24(22e-12), snapE24(75), snapE24(4300), snapE24(30e-12), snapE24(1.8e-12), snapE24(36), snapE24(75e-12) },
+    };
+    var assertions: std.ArrayList(env.AssertionResult) = .{};
+    defer freeAssertions(std.testing.allocator, &assertions);
+    var context = Context{ .allocator = std.testing.allocator, .assertions = &assertions };
+    try synthesize(&context, fixture.spec, fixture.circuit);
+
+    // The E24 line prints the PIN's r_feedback (4300 Ω), not the poison's 1 Ω.
+    try std.testing.expect(messagesContain(&assertions, "R_FB 3000→4300"));
+    try std.testing.expect(!messagesContain(&assertions, "pin this search"));
+    try std.testing.expect(!messagesContain(&assertions, "stale"));
+}
+
+// spec: pll-loop - a pin whose key no longer matches is ignored with a warning and the full search runs, so a pin can only skip recomputation and never change an answer
+test "a stale pin warns, searches, and offers a fresh pin line" {
+    var fixture = pinFixture();
+    fixture.spec.design.operating_curve = .{ .point_nodes = &fixture.points };
+    const key = synthKey(fixture.spec, fixture.circuit);
+
+    // Seed the memo so "the search ran" is observable as this seeded answer
+    // (and the test never pays the real 6,000-candidate walk).
+    synth_memo.put(key, .{
+        .corner = .{ .c_cp = 1, .r_in = 1, .r_feedback = 1, .c_feedback = 1, .c_feedback_hf = 1, .r_isolation = 1, .c_tune = 1 },
+        .anchor_step = 1,
+        .nominal = .{},
+        .tolerance = .{},
+    });
+
+    fixture.spec.design.pinned = .{ .key_lo = key.lo +% 1, .key_hi = key.hi, .values = @splat(1) };
+    var assertions: std.ArrayList(env.AssertionResult) = .{};
+    defer freeAssertions(std.testing.allocator, &assertions);
+    var context = Context{ .allocator = std.testing.allocator, .assertions = &assertions };
+    try synthesize(&context, fixture.spec, fixture.circuit);
+
+    try std.testing.expect(messagesContain(&assertions, "pinned synthesis is stale"));
+    // The memoised (seeded) search answered — its 1 Ω corner, not the pin's.
+    try std.testing.expect(messagesContain(&assertions, "R_FB 3000→1"));
+    try std.testing.expect(messagesContain(&assertions, "pin this search"));
 }
 
 // spec: pll-loop - E24 synthesis jointly satisfies an authored divider/Kvco curve, tolerance corners, and ramp limit

@@ -7293,6 +7293,9 @@ export never invents them.
 - dynamically formatted validation messages are released with their evaluator
 - E24 synthesis jointly satisfies an authored divider/Kvco curve, tolerance corners, and ramp limit
 - the synthesis search is memoised on its complete input, so a design evaluated again runs it no second time and a changed value never reads the old answer
+- pinned values snap onto the E24 grid at parse, so the printed decimal text round-trips to the search's bit-identical f64s, and a non-E24 value is kept verbatim rather than moved
+- a pin whose key matches answers from its own values without consulting the search or its memo, and prints no re-pin offer
+- a pin whose key no longer matches is ignored with a warning and the full search runs, so a pin can only skip recomputation and never change an answer
 - completeness-waiver: empty inputs (the parser rejects a declaration without a name, complete component-role bindings, topology, PFD, charge pump, feedback divider, Kvco range, and op-amp GBW before evaluation)
 - completeness-waiver: large inputs (one declaration resolves exactly seven named parts; validation sweeps a fixed 256 R/C corners, while optional synthesis admits at most 16 operating-curve points and uses a fixed 6,000-member deterministic E24 search plus bounded coordinate refinement followed by exact tolerance verification)
 - completeness-waiver: unauthorized access (an in-process calculation over an already-authorized evaluated DesignBlock with no request, file, socket, user, or write surface)
