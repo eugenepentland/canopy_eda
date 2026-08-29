@@ -824,7 +824,8 @@ pub const scope_form_docs = blk: {
             "[(extra-tune-cap F [TOL_PCT])] (pfd HZ) (charge-pump A [TOL_PCT]) " ++
             "(feedback-divider PRESCALER PLL_N) (kvco MIN_HZ_PER_V MAX_HZ_PER_V) " ++
             "[(operating-curve (point PLL_N KVCO_HZ_PER_V)…)] " ++
-            "[(synthesize [(series e24)] [(resistance-range MIN MAX)] [(capacitance-range MIN MAX)])] " ++
+            "[(synthesize [(series e24)] [(resistance-range MIN MAX)] [(capacitance-range MIN MAX)] " ++
+            "[(pinned \"KEY\" (c-cp F) (r-in R) (r-feedback R) (c-feedback F) (c-feedback-hf F) (r-isolation R) (c-tune F))])] " ++
             "(op-amp (gbw HZ) [(dc-gain RATIO)]) [(phase-margin (target MIN MAX) (hard-min DEG))] " ++
             "(polarity positive|negative) [(supply MIN_V MAX_V)] [(op-amp-max-supply V)] " ++
             "[(vtune MIN_V MAX_V)] [(output-headroom LOW_V HIGH_V)] " ++
@@ -835,6 +836,11 @@ pub const scope_form_docs = blk: {
             "margin, PFD/GBW ratios, polarity, output swing, and an approximate FMCW ramp phase-error/slew screen. " ++
             "An operating curve plus synthesize form searches E24 passive values and an ADF4159 charge-pump schedule, " ++
             "then verifies the proposal over interpolated operating points and exact component/current corners. " ++
+            "The search costs seconds and runs inside design evaluation, so every unpinned build prints a ready-to-paste " ++
+            "(pinned \"KEY\" …) line carrying its winning values and the content key of everything it read; authoring that " ++
+            "line inside synthesize makes later evaluations replay the result without searching, for identical assertions. " ++
+            "A pin whose key no longer matches — any change to the declaration or the resolved values — is ignored with a " ++
+            "warning and the full search runs, so pinning can only skip recomputation, never change an answer. " ++
             "Use advisory mode while Kvco or firmware Icp is provisional; gate mode makes failed limits build-blocking. " ++
             "This is not a sampled-PFD, phase-noise, nonlinear acquisition, SPICE, or capacitive-load-stability sign-off.",
     } };
