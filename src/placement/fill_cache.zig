@@ -171,6 +171,32 @@ const BaseNode = struct {
     held: Retention,
 };
 
+/// Does this pass take part in the PATCH-BASE chain — borrowing the previous
+/// generation of each fill it rebuilds, and publishing its own?
+///
+/// Opt-in, and deliberately not the default, because publishing a base is not
+/// free: it deep-copies a margin field and an obstacle record per fill, which on
+/// a barracuda-class board is ~80 MB of allocation and memcpy in one burst. That
+/// burst is invisible in a DRC number and very visible in a frame: the editor
+/// zoom gate measured 200-400 ms of jank on the CPU-rendered canvas when the
+/// background derived warm did it behind a cold page load.
+///
+/// So only the EDITOR's reconcile takes part — the pass that is going to be
+/// asked the same question again a moment later, with one track moved. Every
+/// read-only surface (page render, derived warm, background sweep, `describe`,
+/// the fab gate, bench, the geometry seam) skips it and behaves exactly as it
+/// did before the update existed.
+///
+/// The cost of skipping is one cold pour: the first edit after a cold page has
+/// no base to update from and pours, which is the fallback the update already
+/// treats as routine — and it publishes the base the second edit patches from.
+pub const Bases = enum {
+    /// Retain nothing, borrow nothing.
+    skip,
+    /// Borrow the previous generation of each fill, and publish this one.
+    keep,
+};
+
 /// What the store may retain. Bundled so a test can bound one store without
 /// touching the process-wide one, and so both bounds are stated together: the
 /// board count is a window over recent board STATES, the byte ceiling is the
@@ -261,6 +287,8 @@ pub const Held = struct {
 /// is refcounted here and released together when the pass ends.
 pub const Session = struct {
     store: *Store,
+    /// Whether this pass takes part in the patch-base chain at all.
+    bases_wanted: Bases = .skip,
     nodes: std.ArrayList(*FillNode) = .empty,
     /// The patch bases this pass borrowed, released together with the fills.
     bases: std.ArrayList(*BaseNode) = .empty,
@@ -281,13 +309,20 @@ pub const Session = struct {
     building_patched: bool = false,
 
     /// The `pour` seam this session answers. Borrow it for one pass only.
+    ///
+    /// A `.skip` pass leaves both base hooks null, which `pour` reads as "this
+    /// caller does not patch" — no obstacle record is collected and no margin
+    /// field is copied. That is not merely an optimisation for the read-only
+    /// surfaces: it is what keeps them behaving exactly as they did before the
+    /// update existed (see `Bases`).
     pub fn memo(self: *Session) pour.FillMemo {
+        const wants = self.bases_wanted == .keep;
         return .{
             .ctx = @ptrCast(self),
             .get = sessionGet,
             .put = sessionPut,
-            .base = sessionBase,
-            .put_base = sessionPutBase,
+            .base = if (wants) sessionBase else null,
+            .put_base = if (wants) sessionPutBase else null,
         };
     }
 
@@ -427,9 +462,9 @@ pub const Store = struct {
     /// Open a per-fill borrow session for one DRC pass. Null when the session
     /// itself cannot be allocated, which the caller answers by pouring
     /// unmemoised — a memo failure is never a DRC failure.
-    pub fn beginSession(self: *Store) ?*Session {
+    pub fn beginSession(self: *Store, bases: Bases) ?*Session {
         const session = self.backing.create(Session) catch return null;
-        session.* = .{ .store = self };
+        session.* = .{ .store = self, .bases_wanted = bases };
         return session;
     }
 
@@ -834,8 +869,8 @@ pub fn put(k: Key, fills: Fills, session: ?*Session) void {
 }
 
 /// Open a per-fill borrow session against the process-wide store.
-pub fn beginSession() ?*Session {
-    return process_store.beginSession();
+pub fn beginSession(bases: Bases) ?*Session {
+    return process_store.beginSession(bases);
 }
 
 /// What the process-wide memo has done so far, and what it is holding. Read by
@@ -1207,7 +1242,7 @@ test "a fill is borrowed across two different board states" {
 
     const unchanged: Key = .{ .lo = 11, .hi = 11 };
     const edited: Key = .{ .lo = 22, .hi = 22 };
-    var first = store.beginSession().?;
+    var first = store.beginSession(.keep).?;
     const memo = first.memo();
     try testing.expect(memo.get(memo.ctx, unchanged) == null);
     _ = memo.put(memo.ctx, unchanged, try fakeFill(scratch.allocator(), 7));
@@ -1215,7 +1250,7 @@ test "a fill is borrowed across two different board states" {
     first.release();
 
     // The next board state asks for the same unchanged fill and one new one.
-    var second = store.beginSession().?;
+    var second = store.beginSession(.keep).?;
     defer second.release();
     const next = second.memo();
     const borrowed = next.get(next.ctx, unchanged) orelse return error.TestExpectedBorrow;
@@ -1230,7 +1265,7 @@ test "a session-backed board entry shares its rasters with the fills it borrowed
     var scratch = std.heap.ArenaAllocator.init(testing.allocator);
 
     const fill_key: Key = .{ .lo = 41, .hi = 41 };
-    var session = store.beginSession().?;
+    var session = store.beginSession(.keep).?;
     const memo = session.memo();
     _ = memo.put(memo.ctx, fill_key, try fakeFill(scratch.allocator(), 5));
     const shared = memo.get(memo.ctx, fill_key).?;
@@ -1254,7 +1289,7 @@ test "an unretainable fill makes the board entry copy rather than reference" {
     var tight: Store = .{ .backing = testing.allocator, .limits = .{ .bytes = 1 } };
     defer tight.deinit();
     var scratch = std.heap.ArenaAllocator.init(testing.allocator);
-    var declined = tight.beginSession().?;
+    var declined = tight.beginSession(.keep).?;
     const memo = declined.memo();
     // A fill the ceiling refuses: the pass keeps its own copy and says so.
     try testing.expect(memo.put(memo.ctx, .{ .lo = 51, .hi = 51 }, try fakeFill(scratch.allocator(), 3)) == null);
@@ -1265,7 +1300,7 @@ test "an unretainable fill makes the board entry copy rather than reference" {
     // board must still be retained — by value, so it survives the pass's arena.
     var store: Store = .{ .backing = testing.allocator };
     defer store.deinit();
-    var session = store.beginSession().?;
+    var session = store.beginSession(.keep).?;
     session.all_backed = false;
     const board: Key = .{ .lo = 52, .hi = 52 };
     store.put(board, try fakeFills(scratch.allocator(), "GND"), session);
@@ -1288,7 +1323,7 @@ test "the byte ceiling evicts unreferenced fills before referenced ones" {
     defer scratch.deinit();
 
     // One fill kept alive by a board entry, one nothing references.
-    var session = store.beginSession().?;
+    var session = store.beginSession(.keep).?;
     const memo = session.memo();
     const kept: Key = .{ .lo = 61, .hi = 61 };
     _ = memo.put(memo.ctx, kept, try fakeFill(scratch.allocator(), 1));
@@ -1296,7 +1331,7 @@ test "the byte ceiling evicts unreferenced fills before referenced ones" {
     store.put(.{ .lo = 62, .hi = 62 }, .{ .zone_fills = try scratch.allocator().dupe(pour.Fill, &[_]pour.Fill{shared}) }, session);
     session.release();
 
-    var loose = store.beginSession().?;
+    var loose = store.beginSession(.keep).?;
     const loose_memo = loose.memo();
     _ = loose_memo.put(loose_memo.ctx, .{ .lo = 63, .hi = 63 }, try fakeFill(scratch.allocator(), 2));
     loose.release();

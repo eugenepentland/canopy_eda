@@ -371,3 +371,38 @@ Batching every measurement that needs the lock into ONE script (parity check,
 health probe, boot probes, and both benchmark reps) turned four queue waits into
 one. `gate.sh` reporting the current queue depth when it blocks would make that
 choice obvious instead of learned.
+
+## 2026-08-29 — a memo that copies memory is invisible to every DRC metric we have
+
+The per-fill patch base (H-B) deep-copies a margin field per fill when it
+publishes one. On barracuda-base that is ~80 MB of allocation and memcpy in one
+burst. Every number the DRC seam reports stayed green — findings identical on
+twelve boards, scoped == full, sweep discrepancies zero, reconcile timings
+better — because none of them measures *memory traffic on a background path*.
+What caught it was `scripts/pcb_editor_perf/run.js`: the burst landed inside a
+cold page load's derived warm, and the CPU-rendered zoom probes janked by
+200-400 ms, reproducible to 0.6 ms.
+
+Two things that would have caught it earlier, in order of cheapness:
+
+1. **`drc-dump` already prints `retained=…+… bytes=…`, and nobody diffs it.**
+   The regression is one number: 68.7 MB → 124.8 MB on the read-only path. It
+   was in my own report as a fact about memory and never as a *comparison* —
+   the corpus differential script compares findings and times, not the memo
+   line. Adding the memo/bytes line to the same `diff -I '^#'` corpus loop
+   (or a ceiling on it) makes "this change retains more" a gate rather than a
+   footnote.
+
+2. **A retention change wants the editor gate, not only the DRC gate.** The
+   task brief for H-B named `drc-dump`, `scripts/perf_gate.sh` and the four
+   primary-page latencies as the verification surface. None of them renders a
+   frame. Anything that changes what a background pass *allocates* — not what
+   it computes — should list `pcb_editor_perf/run.js` as a required probe,
+   because the only place that cost is observable is a paint.
+
+The fix itself is one line of policy: publishing a base is opt-in per
+fill-build session, and only the editor's reconcile asks. The seam was already
+exactly where the split needed to be (`boardFills` vs `boardFillsScoped` in
+`drc_compose.zig`), so no plumbing was needed through `drc_reconcile.zig` at
+all — worth remembering that the scoped/full fork lives in `drc_compose`, not
+in the server.

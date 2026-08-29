@@ -1877,6 +1877,7 @@ src/placement/escape_assign.zig::plan | fn plan(arena: Allocator, placement: opt
 src/placement/escape_assign.zig::refused | fn refused(self: Contention) usize
 src/placement/escape_assign.zig::reservedLanes | fn reservedLanes( arena: Allocator, p: Plan, run_mm: f64, ) Allocator.Error![]const route_policy.ReservedLane
 src/placement/escape_assign.zig::suggestDsl | fn suggestDsl( arena: Allocator, placement: optimizer.Placement, c: Contention, ) Allocator.Error![]const u8
+src/placement/fill_cache.zig::Bases enum_
 src/placement/fill_cache.zig::Entry struct_
 src/placement/fill_cache.zig::FillNode struct_
 src/placement/fill_cache.zig::Fills struct_
@@ -1890,8 +1891,8 @@ src/placement/fill_cache.zig::acquire | fn acquire(k: Key) Held
 src/placement/fill_cache.zig::acquire | fn acquire(self: *Store, k: Key) Held
 src/placement/fill_cache.zig::acquireFill | fn acquireFill(self: *Store, k: Key) ?*FillNode
 src/placement/fill_cache.zig::active | fn active(self: Held) bool
-src/placement/fill_cache.zig::beginSession | fn beginSession() ?*Session
-src/placement/fill_cache.zig::beginSession | fn beginSession(self: *Store) ?*Session
+src/placement/fill_cache.zig::beginSession | fn beginSession(bases: Bases) ?*Session
+src/placement/fill_cache.zig::beginSession | fn beginSession(self: *Store, bases: Bases) ?*Session
 src/placement/fill_cache.zig::deinit | fn deinit(self: *Store) void
 src/placement/fill_cache.zig::fills | fn fills(self: Held) Fills
 src/placement/fill_cache.zig::key | fn key( placement: optimizer.Placement, routed: router.RouteResult, zones: []const pour.UserZone, ) Key

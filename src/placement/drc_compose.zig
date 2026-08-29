@@ -374,7 +374,7 @@ pub fn checkGeometry(
     routed: router.RouteResult,
     clearance: f64,
 ) std.mem.Allocator.Error![]drc.Violation {
-    const session = fill_cache.beginSession() orelse
+    const session = fill_cache.beginSession(.skip) orelse
         return drc.check(alloc, placement, routed, clearance);
     // Released on the way out: the widths this produces are plain numbers and
     // no violation points into a fill (`fill_cache`'s borrow rule).
@@ -607,7 +607,12 @@ fn boardFills(alloc: std.mem.Allocator, in: CopperCheck) BoardFills {
     const key = fill_cache.key(in.placement, in.routed, in.zones);
     var held = fill_cache.acquire(key);
     if (held.entry != null) return .{ .fills = held.fills(), .held = held };
-    const session = fill_cache.beginSession() orelse {
+    // `.skip`: every caller that reaches here is a read-only surface — a page
+    // render, the derived warm, the background sweep, `describe`, the fab gate.
+    // None of them is followed by "the same board with one track moved", so
+    // paying to publish a patch base is a burst of memory traffic for nothing
+    // (see `fill_cache.Bases`).
+    const session = fill_cache.beginSession(.skip) orelse {
         // No memo at all this pass: pour it exactly as an unmemoised caller
         // would. A memo failure is never a DRC failure.
         const alone = filledTopology(alloc, in, null, null) catch return .{ .failed = true };
@@ -632,7 +637,11 @@ fn boardFills(alloc: std.mem.Allocator, in: CopperCheck) BoardFills {
 /// that matters, and `Reuse` gets it without keying the fills the edit could not
 /// reach at all.
 fn boardFillsScoped(alloc: std.mem.Allocator, in: CopperCheck, reuse: Reuse) BoardFills {
-    const session = fill_cache.beginSession() orelse {
+    // `.keep`: this is the editor's reconcile — the priming pass and every
+    // scoped recheck after it. It is the one caller that will be asked the same
+    // question again with one track moved, so it is the one caller for which
+    // retaining each fill's raster to update from pays for itself.
+    const session = fill_cache.beginSession(.keep) orelse {
         const alone = filledTopology(alloc, in, null, reuse) catch return .{ .failed = true };
         return .{ .fills = alone.fills, .fill_keys = alone.fill_keys, .spec_keys = alone.spec_keys, .changed = alone.changed, .fill_nets = alone.fill_nets };
     };
@@ -1191,7 +1200,7 @@ test "fills borrowed across an edit are bit-identical to a cold pour" {
 
     // The board as saved, poured once through the memo and KEPT borrowed, so
     // its fills are still retained when the edited state asks for them.
-    var first = fill_cache.beginSession() orelse return error.TestExpectedSession;
+    var first = fill_cache.beginSession(.skip) orelse return error.TestExpectedSession;
     defer first.release();
     _ = try filledTopology(alloc, before, first.memo(), null);
 
@@ -1207,7 +1216,7 @@ test "fills borrowed across an edit are bit-identical to a cold pour" {
     };
 
     const hits_before = fill_cache.stats().tally.fill_hits;
-    var second = fill_cache.beginSession() orelse return error.TestExpectedSession;
+    var second = fill_cache.beginSession(.skip) orelse return error.TestExpectedSession;
     defer second.release();
     const warm = (try filledTopology(alloc, after, second.memo(), null)).fills;
     // Something WAS borrowed — otherwise the comparison below would be two

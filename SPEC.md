@@ -3251,6 +3251,7 @@ Public functions: acquire, beginSession, key, put
 - a board rebuilt after a copper edit borrows the fills the edit did not reach, and every borrowed raster is bit-identical to the one a cold pour produces
 - one patch base is retained per fill identity, copied out of the pass's arena, and replaced rather than accumulated when that fill is built again
 - a patch base superseded or evicted while a pass is reading it is unlinked rather than freed, and a base over the whole budget is declined outright
+- a fill-build session takes part in the patch-base chain only when it asks to, so a read-only surface neither copies a margin field nor updates from one
 
 The reporting DRC seam pours every declared plane, every pour and every drawn
 zone of a board before it can judge copper topology or connectivity, and that
@@ -3269,15 +3270,21 @@ pours only the rest. Fills are refcounted independently of the board entries
 that reference them, so consecutive board states share one copy of everything
 between them rather than each holding a whole board's rasters.
 
-A fill the edit DID reach is updated rather than re-poured. One margin field per
-fill IDENTITY is retained beside the fills, together with the obstacle set that
-produced it; the next generation of that fill diffs the two obstacle sets, copies
+A fill the edit DID reach is updated rather than re-poured, for the one caller
+that will be asked the same question again with one track moved: the editor's
+reconcile. One margin field per fill IDENTITY is retained beside the fills,
+together with the obstacle set that produced it; the next generation of that fill diffs the two obstacle sets, copies
 the field, throws away only the windows the changed obstacles can write in, and
 rasters those again. The update is bit-identical to a cold pour by construction —
 the field is a pure per-cell `min`, so a cell outside every changed window has
 already seen exactly the obstacles it would see again — and any case that cannot
 be shown to be (a moved lattice, a moved rule, a diff too large to be worth it,
-no previous generation) falls back to the cold pour.
+no previous generation) falls back to the cold pour. Retaining a base is opt-in
+per pass, because it deep-copies a margin field per fill: every read-only
+surface — page render, derived warm, background sweep, describe, fab gate —
+skips it and behaves exactly as it did before the update existed, and the first
+edit after a cold page pours once to establish the base the next one updates
+from.
 
 - completeness-waiver: large inputs (a single board's fill is refused outright when it exceeds the store's whole byte ceiling, and the retained set is bounded by both a board count and that ceiling; the fill itself is already cell-capped by placement/pour)
 - completeness-waiver: unauthorized access (an in-process memo over boards a caller already holds; entries are reachable only through a fingerprint of the exact board's own bytes, so nothing can read copper it did not already have, and there is no file, request, or auth surface)

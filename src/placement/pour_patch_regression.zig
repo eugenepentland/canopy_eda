@@ -23,6 +23,7 @@
 
 const std = @import("std");
 const content_key = @import("content_key.zig");
+const fill_cache = @import("fill_cache.zig");
 const flat_netlist = @import("../flat_netlist.zig");
 const geometry = @import("geometry.zig");
 const optimizer = @import("optimizer.zig");
@@ -391,4 +392,55 @@ test "a memo without a patch base still answers exactly" {
         try testing.expect(!unmemoised.patched);
         try expectSameFill(try pour.compute(arena, placement, copper, spec), unmemoised.fill);
     }
+}
+
+/// Two copper states that differ by one track, offset so each caller in the
+/// test below works on a board state no other caller has already retained.
+fn twoStates(arena: std.mem.Allocator, at: f64) std.mem.Allocator.Error![2]pour.Copper {
+    const one = try arena.alloc(router.Track, 1);
+    one[0] = .{ .x1 = 3, .y1 = at, .x2 = 12, .y2 = at, .layer = 0, .width = 0.3, .net = 1 };
+    const two = try arena.alloc(router.Track, 2);
+    two[0] = one[0];
+    two[1] = .{ .x1 = 3, .y1 = at + 1.5, .x2 = 12, .y2 = at + 1.5, .layer = 0, .width = 0.3, .net = 1 };
+    return .{ .{ .tracks = one }, .{ .tracks = two } };
+}
+
+// spec: placement/fill-cache - a fill-build session takes part in the patch-base chain only when it asks to, so a read-only surface neither copies a margin field nor updates from one
+test "only a base-keeping session takes part in the patch chain" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    var parts = scriptParts();
+    const gnd_names = [_][]const u8{"GND"};
+    var placement = scriptPlacement(&parts, &script_nets, .{ .plane_nets = &gnd_names, .copper_layers = 4 });
+    placement.board_poly = &board_outline;
+    const spec: pour.LayerSpec = .{ .net = .{ .named = "GND" }, .side = .top, .track_layer = 0 };
+
+    // A skipping session offers `pour` no base hooks at all, so it records no
+    // obstacles, publishes no margin field, and never updates: rebuilding after
+    // an edit pours, exactly as it did before the update existed.
+    const plain = try twoStates(arena, 11);
+    var skip = fill_cache.beginSession(.skip) orelse return error.TestExpectedSession;
+    const skipping = skip.memo();
+    try testing.expect(skipping.base == null);
+    try testing.expect(skipping.put_base == null);
+    _ = try pour.computeMemoKeyed(arena, placement, plain[0], spec, null, skipping);
+    const cold = try pour.computeMemoKeyed(arena, placement, plain[1], spec, null, skipping);
+    try testing.expect(!cold.patched);
+    try expectSameFill(try pour.compute(arena, placement, plain[1], spec), cold.fill);
+    skip.release();
+
+    // A keeping session publishes each generation, so the next one updates from
+    // it — and the raster it produces is the same raster either way.
+    const chained = try twoStates(arena, 15);
+    var keep = fill_cache.beginSession(.keep) orelse return error.TestExpectedSession;
+    const keeping = keep.memo();
+    try testing.expect(keeping.base != null);
+    try testing.expect(keeping.put_base != null);
+    _ = try pour.computeMemoKeyed(arena, placement, chained[0], spec, null, keeping);
+    const warm = try pour.computeMemoKeyed(arena, placement, chained[1], spec, null, keeping);
+    try testing.expect(warm.patched);
+    try expectSameFill(try pour.compute(arena, placement, chained[1], spec), warm.fill);
+    keep.release();
 }

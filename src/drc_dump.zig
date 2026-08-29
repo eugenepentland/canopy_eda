@@ -366,6 +366,18 @@ fn dumpScoped(
         state = next;
     }
     session.held.release();
+    // How the fills this sequence had to BUILD were built. The scoped path is
+    // the one caller that retains a patch base, so `patched` staying above zero
+    // here is what says the update is still reached after an edit — a number no
+    // findings diff would ever show.
+    const built = drc_rules.fillMemoStats().tally.build;
+    try w.print("# {s} build patched={d} ms={d:.1} poured={d} ms={d:.1}\n", .{
+        name,
+        built.patched,
+        @as(f64, @floatFromInt(built.patch_ns)) / ns_per_ms,
+        built.poured,
+        @as(f64, @floatFromInt(built.pour_ns)) / ns_per_ms,
+    });
     return discrepancies;
 }
 
