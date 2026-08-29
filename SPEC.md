@@ -827,6 +827,16 @@ hand-set absolute budget in the baseline's `budgets` object, moved DRC counts
 (unlike work is not comparable), or lost page-cache retention. Full workflow:
 `docs/benchmarks/pcb-page/README.md`.
 
+The gate lock serializes only jobs that take it, so the bench also reads
+`/proc/loadavg`'s 1-minute average around every board and labels the run —
+and each board measured beside the excess — as CONTENDED in the table and the
+JSON when a sample exceeds the quiet-machine model (`1 + (start − 1)·e^(−t/60)`
+— the bench's own busy core plus the decay of whatever ran before it) by more
+than 2 runnable tasks. The label never flips the gate verdict; it exists so
+`scripts/perf_gate.sh --record` can refuse to install a contended recording
+and so a contended FAIL reads as "re-run quiet first". Where `/proc/loadavg`
+does not exist, no load facts are reported and no label is invented.
+
 - the CLI parses project dir, reps, output and baseline flags with positionals as design names
 - phase medians are the outlier-tolerant middle of the rep samples
 - the JSON recording round-trips through the baseline loader with every phase and invariant intact
@@ -843,6 +853,10 @@ hand-set absolute budget in the baseline's `budgets` object, moved DRC counts
 - a failed board renders as FAILED in the table and carries ok=false in JSON
 - a page render the cache refused is flagged in the table so a silent every-load-cold regression is visible
 - the page-cache retention probe asks under the same entry and live version the page warm admitted, so a cached page is never reported as NOT retained
+- the load tripwire parses the leading 1-minute loadavg figure and refuses malformed content
+- the load model forgives a high start decaying after a gated build and the bench's own busy core
+- load that persists or arrives mid-run exceeds the decay model and labels the run contended
+- a contended run is labelled in the table and JSON so it cannot be recorded as a clean baseline silently
 - completeness-waiver: empty inputs (an empty corpus prints an empty table; a zero-baseline phase is ratio-floored so it cannot divide by zero)
 - completeness-waiver: large inputs (each rep runs in its own arena, freed before the next; the corpus peaks at one rep's render)
 - completeness-waiver: unauthorized access (a local CLI over a project directory the invoking user already owns; no network or auth surface)

@@ -480,6 +480,18 @@ pub const File = struct {
         return self.f.writePositionalAll(currentIo(), bytes, offset);
     }
 
+    /// Read up to `buffer.len` bytes from the handle's current position,
+    /// returning how many arrived — 0 at end of stream, the POSIX contract.
+    /// This is the read that reaches content `readFileAlloc` cannot: virtual
+    /// files (`/proc/*`) stat as size 0, so a stat-sized buffer reads them
+    /// as empty while streaming from the open handle returns their content.
+    pub fn readStreaming(self: File, buffer: []u8) std.Io.File.ReadStreamingError!usize {
+        return self.f.readStreaming(currentIo(), &.{buffer}) catch |err| switch (err) {
+            error.EndOfStream => 0,
+            else => err,
+        };
+    }
+
     /// Read metadata for this open file.
     pub fn stat(self: File) std.Io.File.StatError!std.Io.File.Stat {
         return self.f.stat(currentIo());

@@ -97,7 +97,17 @@ NETLISP_PERF_SKIP=1 git push
 
 `perf_gate.sh` queues behind `scripts/gate.sh`'s machine-wide lock — a
 concurrent `zig build test` roughly doubles wall times (measured, see
-docs/testing-guide.md), which would fail honest commits.
+docs/testing-guide.md), which would fail honest commits. The lock only
+serializes jobs that take it (the browser runners now queue themselves too,
+via `scripts/perf_gate_lock.js`), so `bench-page` additionally watches
+`/proc/loadavg` around every board: when a 1-minute sample exceeds the
+quiet-machine model — the bench's own busy core plus the decay of whatever
+ran just before it, `1 + (start − 1)·e^(−t/60)` — by more than 2 runnable
+tasks, the run and the boards measured beside the excess are labelled
+CONTENDED in the table and in the JSON's top-level `load` object.
+`--record` refuses to install a recording carrying that label; on an enforce
+run the label never flips the verdict, it marks a FAIL as "re-run quiet
+before believing it".
 
 ## Validity rules for the numbers
 
@@ -106,7 +116,10 @@ docs/testing-guide.md), which would fail honest commits.
   recorded the baseline — the repo's standing rule that Debug is the internal
   measurement target (docs/benchmarks/zig-toolchain-2026-08/). A baseline from
   another machine or a ReleaseSafe binary compares nothing.
-- **Idle machine or gated.** Never read numbers taken beside a compile.
+- **Idle machine or gated.** Never read numbers taken beside a compile. The
+  loadavg tripwire above labels the egregious violations, but it deliberately
+  tolerates ~2 runnable tasks of drift — a lone extra single-threaded process
+  can still skew big-board numbers without tripping it.
 - **Medians of ≥ 3.** One rep proves nothing; the harness defaults to 3.
 - **`drc_report_ms` is a warm number** (see the table). A change that only
   makes the FIRST pour of a board cheaper will barely move it; a change that

@@ -137,6 +137,15 @@ scripts/zig-prod build --seed=1 -Doptimize=safe -p zig-out-browser-perf
 if [ "${1:-}" = "--record" ]; then
   mkdir -p "$(dirname "$BASELINE")"
   zig-out/bin/netlisp bench-page --project-dir "$PROJECT_DIR" --reps "$REPS" --json >"$BASELINE.tmp"
+  # bench-page watches /proc/loadavg around every board and labels the run's
+  # JSON when the 1-minute load exceeded its contention model — a workload the
+  # gate lock cannot serialize ran beside the measurement. A contended
+  # recording is poison as a baseline, so it is refused here, not committed.
+  if ! node -e 'process.exit(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).load?.contended ? 3 : 0)' "$BASELINE.tmp"; then
+    rm -f "$BASELINE.tmp"
+    echo "perf_gate: REFUSED --record — bench-page measured beside another workload (its machine-load line names the excess); re-run when the machine is quiet" >&2
+    exit 1
+  fi
   # Carry the hand-set budgets forward and stamp the measured designs identity
   # (commit + model/layout/BOM bundle hashes) so the next enforce can tell
   # workload drift from regression.

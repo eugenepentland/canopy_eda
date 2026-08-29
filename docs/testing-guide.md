@@ -163,9 +163,23 @@ another session may be building, put the expensive tier behind the wrapper:
 --intent "..." .` take one machine-wide flock (`/tmp/netlisp-gate.lock`, override
 with `NETLISP_GATE_LOCK`) and wait up to `NETLISP_GATE_WAIT` seconds (default 5400)
 before failing with the holder's pid. `NETLISP_GATE_SERIALIZE=0` bypasses the lock
-entirely for a machine you know is idle. `.githooks/prepare-release.sh` takes
+entirely for a machine you know is idle. When the lock is busy, gate.sh reports
+the queue depth and the pids ahead (with their commands) before it starts
+waiting, and prints how long it queued once it acquires — a blocked gate is
+never silent about what it is behind. `.githooks/prepare-release.sh` takes
 the same lock itself, so release preparations queue without being asked — its
-*internal* test/build parallelism is deliberate and unaffected. Quick tiers do
+*internal* test/build parallelism is deliberate and unaffected. The browser
+benchmark runners (`scripts/pcb_browser_perf/run.js`,
+`scripts/pcb_editor_perf/run.js`, `scripts/ui_browser_perf/run.js`) also
+re-exec themselves under the lock when invoked standalone
+(`scripts/perf_gate_lock.js`): a timing run outside the queue corrupts the
+gated one it overlaps — one such overlap aborted a 20-minute `--record` and
+skewed a bench-page pass 17-72% (FEEDBACK.md 2026-08-29). As the backstop for
+workloads that never take the lock at all, `netlisp bench-page` watches
+`/proc/loadavg` around every board and labels the run CONTENDED when the
+1-minute load exceeds what the bench itself plus the decay of a just-finished
+gated job explains; `scripts/perf_gate.sh --record` refuses to install a
+recording carrying that label. Quick tiers do
 **not** belong in the queue: use `zig build --seed=1 test` with a focused
 `-Dtest-filter=…`, or use `zig build test-compile`; these short jobs
 should never wait behind someone's full suite.

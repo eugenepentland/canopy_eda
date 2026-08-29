@@ -44,31 +44,69 @@ fi
 
 exec 9>"$lock" || { echo "gate.sh: cannot open lock file $lock" >&2; exit 1; }
 
-if ! flock -w "$wait_secs" 9; then
-  # Name the holder if the system can tell us; both tools are best-effort.
-  # `exec 9>&-` closes our inherited lock fd inside the probe subshell, so the
-  # probe does not report itself as a holder of the file it is asking about.
+# Pids holding or awaiting the lock, left in $probed; both tools are
+# best-effort. Waiters keep the file open on their own fd 9 while they queue,
+# so the pids reported are the holder plus everyone queued ahead — the queue
+# depth. `exec 9>&-` closes our inherited lock fd inside the probe subshell,
+# so the probe does not report this process as a holder of the file it is
+# asking about; our own pid still shows up through fd 9 and is dropped
+# explicitly. The result travels by variable, not command substitution: a
+# $(probe) subshell would itself hold fd 9 open and be counted as a phantom
+# queue entry.
+probe_lock_pids() {
   found="$(exec 9>&-; fuser "$lock" 2>/dev/null || true)"
   if [ -z "${found// /}" ]; then
     found="$(exec 9>&-; lsof -t -- "$lock" 2>/dev/null | tr '\n' ' ' || true)"
   fi
-  # We hold the file open on fd 9 ourselves while waiting, so drop our own pid.
-  holders=""
+  probed=""
   for pid in $found; do
-    [ "$pid" = "$$" ] || holders="$holders $pid"
+    [ "$pid" = "$$" ] && continue
+    # A queued waiter shows up as TWO pids on the fd: its gate.sh shell and
+    # the flock(1) child doing the waiting. Count the shell, not the tool, so
+    # depth means jobs ahead rather than open descriptors; a pid that exited
+    # between the probes is dropped rather than listed nameless.
+    comm="$(ps -o comm= -p "$pid" 2>/dev/null || true)"
+    [ -z "$comm" ] && continue
+    [ "$comm" = "flock" ] && continue
+    probed="$probed $pid"
   done
+}
+
+# Try without waiting first, so a blocked entry reports what it is queued
+# behind — and how deep the queue already is — instead of going silent for up
+# to NETLISP_GATE_WAIT seconds.
+if ! flock -n 9; then
+  probe_lock_pids
+  queued="$probed"
+  depth=0
+  for pid in $queued; do depth=$((depth + 1)); done
   {
-    echo "gate.sh: timed out after ${wait_secs}s waiting for $lock"
-    if [ -n "${holders// /}" ]; then
-      echo "gate.sh: lock held by pid(s): $holders"
+    if [ "$depth" -gt 0 ]; then
+      echo "gate.sh: blocked on $lock — queue depth $depth (holder + waiters ahead); waiting up to ${wait_secs}s"
       # shellcheck disable=SC2086
-      ps -o pid=,etime=,args= -p $holders 2>/dev/null | sed 's/^/  /' || true
+      ps -o pid=,etime=,args= -p $queued 2>/dev/null | sed 's/^/  /' || true
     else
-      echo "gate.sh: could not identify the holder (fuser/lsof found nothing)"
+      echo "gate.sh: blocked on $lock (holder not identifiable); waiting up to ${wait_secs}s"
     fi
-    echo "gate.sh: raise NETLISP_GATE_WAIT, or set NETLISP_GATE_SERIALIZE=0 to bypass the queue"
   } >&2
-  exit 75 # EX_TEMPFAIL — distinct from the gated command's own failure codes
+  waited_from=$SECONDS
+  if ! flock -w "$wait_secs" 9; then
+    probe_lock_pids
+    holders="$probed"
+    {
+      echo "gate.sh: timed out after ${wait_secs}s waiting for $lock"
+      if [ -n "${holders// /}" ]; then
+        echo "gate.sh: lock held by pid(s): $holders"
+        # shellcheck disable=SC2086
+        ps -o pid=,etime=,args= -p $holders 2>/dev/null | sed 's/^/  /' || true
+      else
+        echo "gate.sh: could not identify the holder (fuser/lsof found nothing)"
+      fi
+      echo "gate.sh: raise NETLISP_GATE_WAIT, or set NETLISP_GATE_SERIALIZE=0 to bypass the queue"
+    } >&2
+    exit 75 # EX_TEMPFAIL — distinct from the gated command's own failure codes
+  fi
+  echo "gate.sh: acquired $lock after $((SECONDS - waited_from))s in the queue" >&2
 fi
 
 # The lock lives on fd 9, which survives exec, so the gated command *becomes*
