@@ -61,6 +61,7 @@ const fab_preview = @import("../fab_preview.zig");
 const subcircuit_silkscreen = @import("../subcircuit_silkscreen.zig");
 const fab_readiness = @import("../fab_readiness.zig");
 const fab_gate = @import("../fab_gate.zig");
+const fab_package = @import("../fab_package.zig");
 const fab_release = @import("../fab_release.zig");
 const fab_filename = @import("fab_filename.zig");
 const standalone_assembly = @import("standalone_assembly.zig");
@@ -4621,22 +4622,7 @@ pub const FabView = struct {
     } = .{},
 };
 
-/// The saved snapshot the blessed poses come from — the same precedence
-/// `chooseSyncPoses` walks (★ default → newest manual → any named), so the
-/// fab package's outline + routes are restored from the SAME layout its poses
-/// were. Null when only the optimizer cache exists.
-fn blessedLayout(layouts: []const SavedLayout) ?*const SavedLayout {
-    for (layouts) |*L| {
-        if (L.default and L.parts.len > 0) return L;
-    }
-    for (layouts) |*L| {
-        if (std.mem.eql(u8, L.kind, kind_manual) and L.parts.len > 0) return L;
-    }
-    for (layouts) |*L| {
-        if (L.parts.len > 0) return L;
-    }
-    return null;
-}
+const blessedLayout = fab_package.blessedLayout;
 
 fn exactPoseCoverage(poses: []const optimizer.RefPose, parts: []const optimizer.Part) bool {
     if (poses.len != parts.len) return false;
@@ -5049,7 +5035,12 @@ fn pcbGerbersApiHooked(
     res: *httpz.Response,
     snapshot_hook: ?*ReleaseSnapshotHook,
 ) HandlerError!void {
+    // Phase timings for the one handler whose cost is worth attributing in
+    // production: the release gate is seconds of work, and which second is
+    // which was previously only visible from a throwaway patch.
+    var timer = request_log.StageTimer.start();
     const name = nameParam(req, res) orelse return;
+    defer request_log.emitStages(&ctx.state.request_log, req.arena, req.url.path, name, &timer);
     if (subSlug(req) != null) {
         res.status = 400;
         res.content_type = .JSON;
@@ -5060,6 +5051,7 @@ fn pcbGerbersApiHooked(
     defer req.arena.free(project_before.commit);
     const layout_before = try fab_release.savedLayoutDigest(req.arena, ctx.project_dir, name);
     const bom_before = try fab_release.savedBomDigest(req.arena, ctx.project_dir, name);
+    timer.lap("project_state");
     var read_trace = infra_fs.ReadTrace.init(req.arena);
     defer read_trace.deinit();
     defer writeReleaseSnapshot(snapshot_hook, false);
@@ -5078,12 +5070,29 @@ fn pcbGerbersApiHooked(
         res.body = no_block_msg;
         return;
     };
+    timer.lap("resolve_block");
+    // The whole gate below exists to decide whether this board may be
+    // fabricated. When the project's own source revision has ALREADY decided
+    // it cannot, deciding it again costs seconds and changes nothing: refuse
+    // here, with the finding the full report would have carried, before the
+    // board is restored, poured, checked and digested (`fab_package`).
+    if (fab_package.refuseEarly(req.arena, ctx.project_dir, name, queryOpt(req, "layout"), project_before)) |refusal| {
+        res.status = 500;
+        var refused: std.Io.Writer.Allocating = .init(req.arena);
+        try fab_package.writeRefusalJson(&refused.writer, name, refusal);
+        res.content_type = .JSON;
+        res.body = refused.written();
+        timer.lap("refused");
+        return;
+    }
     const gate_evaluator = if (module_res) |resolved| resolved.eval else &evaluator;
     const fv = resolvedReleaseView(ctx, req, res, name, block) orelse return;
+    timer.lap("release_view");
 
     const copper = export_gerber.Copper{ .tracks = fv.routed.tracks, .arcs = fv.routed.arcs, .rf_paths = fv.routed.rf_port_outcomes, .vias = fv.routed.vias, .zones = fv.zones, .silk_keepouts = fv.silk_keepouts };
     const frame = export_fab.frameFor(fv.placement);
     var gate = try fabGateFor(ctx, req, fv, gate_evaluator, block);
+    timer.lap("fab_gate");
     read_trace.end();
     writeReleaseSnapshot(snapshot_hook, false);
     const consumed_inputs_sha256 = read_trace.digest();
@@ -5091,7 +5100,9 @@ fn pcbGerbersApiHooked(
     const source_input_sha256 = traced_inputs.source;
     const layout_input_sha256 = traced_inputs.layout;
     const bom_input_sha256 = traced_inputs.bom;
+    timer.lap("traced_inputs");
     const mark = try releaseIdentityMark(req.arena, fv, copper, &gate);
+    timer.lap("identity_mark");
     const evidence = fab_release.Evidence{
         .report = gate.report,
         .design = .{
@@ -5117,12 +5128,14 @@ fn pcbGerbersApiHooked(
     var lock = (try releaseLock(ctx, req, res, name, evidence)) orelse return;
     fab_release.bindBaseline(&lock, project_before, layout_before, bom_before);
     fab_release.bindTracedInputs(&lock, traced_inputs, read_trace.verify());
+    timer.lap("release_lock");
     if (releaseEvidenceBlocked(gate, lock)) {
         res.status = 500;
         var failed_json: std.Io.Writer.Allocating = .init(req.arena);
         try fab_release.writeReadinessJson(req.arena, &failed_json.writer, evidence, lock);
         res.content_type = .JSON;
         res.body = failed_json.written();
+        timer.lap("blocked_body");
         return;
     }
     const confirmed = if (queryOpt(req, "confirm")) |token| std.mem.eql(u8, token, &lock.token) else false;
@@ -5137,75 +5150,28 @@ fn pcbGerbersApiHooked(
         res.body = jw.written();
         return;
     }
-    const fab_texts = try fab_identity.replaceAdoptedText(req.arena, fv.texts, mark);
-
-    // The package basename is sanitized ONCE, here, and every member — the
-    // layer files, the job file's own `Path` fields, the drills, the centroid
-    // and the download's filename — is named from it. JLCPCB rejects an
-    // archive whose entry names carry certain words, so a rejected design slug
-    // falls back to a neutral one (`fab_filename.prefix`); doing that per call
-    // site is how a job file ends up pointing at members the archive does not
-    // contain under that name.
-    var pkg = export_fab.Package{ .arena = req.arena, .prefix = fab_filename.prefix(name) };
-    const layers = try export_gerber.planLayers(req.arena, fv.placement);
-    // ONE clock read for the whole package, so every layer in this ZIP carries
-    // the same `%TF.CreationDate`. The writer itself stays deterministic (its
-    // CLI/test path passes no stamp at all) — the same split the review PDF
-    // uses for `/CreationDate`.
-    const stamped = try export_gerber.creationDate(req.arena, clock.timestamp());
-    for (layers) |f| {
-        var aw: std.Io.Writer.Allocating = .init(req.arena);
-        try export_gerber.writeLayer(&aw.writer, req.arena, fv.placement, copper, fab_texts, frame, f.layer, .{ .function = f.function, .created = stamped });
-        if (f.exact_name) try pkg.addNamed(f.suffix, aw.written()) else try pkg.add(f.suffix, aw.written());
-    }
-    // The Gerber Job File ties the package together (board size, layer count,
-    // per-file FileFunction). Its Path fields match the entry names above.
-    var jbw: std.Io.Writer.Allocating = .init(req.arena);
-    try export_gerber.writeJobFile(&jbw.writer, fv.placement, layers, pkg.prefix);
-    try pkg.add(export_gerber.job_file_suffix, jbw.written());
-    // The drill headers declare the span they drill through, which is the
-    // same copper count the job file reports and the layer table generated.
-    const copper_layers = fv.placement.rules.layerStack().stackCount();
-    var pth: std.Io.Writer.Allocating = .init(req.arena);
-    try export_fab.excellonDrill(&pth.writer, req.arena, fv.placement.parts, fv.routed.vias, .{ .class = .plated, .copper_layers = copper_layers }, frame);
-    try pkg.add(export_gerber.plated_drill_suffix, pth.written());
-    var npth: std.Io.Writer.Allocating = .init(req.arena);
-    try export_fab.excellonDrill(&npth.writer, req.arena, fv.placement.parts, fv.routed.vias, .{ .class = .non_plated, .copper_layers = copper_layers }, frame);
-    try pkg.add(export_gerber.non_plated_drill_suffix, npth.written());
-    var cw: std.Io.Writer.Allocating = .init(req.arena);
-    try export_fab.centroidCsv(&cw.writer, fv.placement.parts, fv.placement.instances, frame, dnpMode(req));
-    try pkg.add("centroid.csv", cw.written());
-    var bw: std.Io.Writer.Allocating = .init(req.arena);
-    try export_fab.assemblyBomCsv(&bw.writer, fv.placement.instances, dnpMode(req));
-    try pkg.add("bom.csv", bw.written());
     var displayed_id = mark.short_hex;
     _ = std.ascii.upperString(&displayed_id, &mark.short_hex);
-    try pkg.add("assembly.html", try standaloneReleaseAssemblyHtml(ctx, req, name, block, fv, .{
-        .part_number = mark.part_number,
-        .revision = fv.authored.revision.id,
-        .fab_id = &displayed_id,
-        .release_token = &lock.token,
-    }));
-    const manifest = try std.fmt.allocPrint(req.arena,
-        \\Board part number: {s}
-        \\PCB fabrication ID: {s}
-        \\Full SHA-256: {s}
-        \\Scope: deterministic Gerber and Excellon geometry plus board part number before the generated mark
-        \\
-    , .{ mark.part_number, &displayed_id, &mark.digest_hex });
-    try pkg.add("fab-id.txt", manifest);
-    var rrj: std.Io.Writer.Allocating = .init(req.arena);
-    try fab_release.writeMachineReport(&rrj.writer, evidence, lock, needs_waiver);
-    try pkg.add("release-report.json", rrj.written());
-    var rrm: std.Io.Writer.Allocating = .init(req.arena);
-    try fab_release.writeHumanReport(&rrm.writer, evidence, lock, needs_waiver);
-    try pkg.add("release-report.md", rrm.written());
-    var rules: std.Io.Writer.Allocating = .init(req.arena);
-    try fab_release.writeRulesJson(&rules.writer, evidence);
-    try pkg.add("design-rules.json", rules.written());
-    var checksums: std.Io.Writer.Allocating = .init(req.arena);
-    try fab_release.writeChecksums(&checksums.writer, pkg.entries.items);
-    try pkg.add("checksums.sha256", checksums.written());
+    const pkg = try fab_package.compose(req.arena, name, .{
+        .placement = fv.placement,
+        .routed = fv.routed,
+        .texts = fv.texts,
+        .copper = copper,
+        .frame = frame,
+    }, .{
+        .mark = mark,
+        .evidence = evidence,
+        .lock = lock,
+        .needs_waiver = needs_waiver,
+        .dnp = dnpMode(req),
+        .assembly_html = try standaloneReleaseAssemblyHtml(ctx, req, name, block, fv, .{
+            .part_number = mark.part_number,
+            .revision = fv.authored.revision.id,
+            .fab_id = &displayed_id,
+            .release_token = &lock.token,
+        }),
+    });
+    timer.lap("compose");
 
     // Close the generation-time TOCTOU window: `makeLock` rereads every disk
     // input. If source/layout/library state moved after the reviewed lock was
@@ -5231,6 +5197,7 @@ fn pcbGerbersApiHooked(
     const revision = try fab_release.safeRevision(req.arena, fv.authored.revision.id);
     res.header("content-disposition", try std.fmt.allocPrint(req.arena, "attachment; filename=\"{s}-rev-{s}-{s}-release.zip\"", .{ pkg.prefix, revision, &mark.short_hex }));
     res.body = zw.written();
+    timer.lap("zip");
 }
 
 // POST /api/pcb-layouts/:name — save a named layout snapshot (kind "manual").
@@ -13175,20 +13142,21 @@ pub fn fabViewForResolved(
     block: *env_mod.DesignBlock,
 ) FabViewError!FabView {
     const sidecar = readDesignDoc(alloc, project_dir, name);
-    const layouts = sidecar.layouts;
-    const chosen: ?SavedLayout = if (layout_arg) |la| blk: {
-        for (layouts) |L| {
-            if (std.mem.eql(u8, L.name, la) and L.parts.len > 0) break :blk L;
-        }
-        return error.UnknownLayout;
-    } else if (blessedLayout(layouts)) |L| L.* else null;
+    // One selection predicate, shared with the fast refusal in `fab_package`:
+    // a release that is going to be refused must be able to reach these same
+    // two 404s without first paying for the placement below.
+    const cache_poses = cachePoses(alloc, sidecar.cache);
+    const chosen: ?SavedLayout = switch (fab_package.select(sidecar.layouts, cache_poses != null, layout_arg)) {
+        .row => |L| L.*,
+        .cache => null,
+        .unknown_layout => return error.UnknownLayout,
+        .none_saved => return error.NoSavedLayout,
+    };
 
     const poses: []const optimizer.RefPose = if (chosen) |layout|
         (rekeyPosesByOrigin(alloc, block, layout.parts) orelse (refPosesFromParts(alloc, layout.parts) orelse return error.PlacementFailed))
-    else if (layout_arg != null)
-        return error.UnknownLayout
     else
-        (cachePoses(alloc, sidecar.cache) orelse return error.NoSavedLayout);
+        (cache_poses orelse return error.NoSavedLayout);
 
     // The chosen layout's own drawn outline is the fab board edge.
     const oseed: optimizer.OutlineSource = if (chosen) |L|

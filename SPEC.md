@@ -6863,6 +6863,9 @@ Public functions: check, writeJson
 - MCP preserves the full release report and null authorization token for an ambiguous source bundle
 - an in-request A/B/A sidecar mutation invalidates HTTP readiness and export without granting an authorization token
 - release tokens bind finding counts, report statistics, and complete DRC bridge evidence
+- a fabrication package request whose project source revision already blocks the release is refused before the board is placed, checked or digested
+- the fast fabrication refusal cites the same source-revision finding as the full report and states that the rest of the report was not computed
+- the fast fabrication refusal declines every request the saved-layout selection still owes a 404
 - completeness-waiver: empty inputs (an empty/missing selection has no exact manufacturing row and is a non-waivable evidence failure)
 - completeness-waiver: large inputs (the sidecar read is capped at 16 MiB before the strict JSON tree and entity validation run)
 - completeness-waiver: unauthorized access (the validator is read-only; HTTP authorization remains at the manufacturing endpoint boundary)

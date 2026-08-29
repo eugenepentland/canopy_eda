@@ -866,6 +866,17 @@ src/fab_identity.zig::Error value
 src/fab_identity.zig::Mark struct_
 src/fab_identity.zig::build | fn build( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, user_texts: []const font.BoardText, frame: export_fab.Frame, base_edge: ?pour.EdgeField, ) Error!Mark
 src/fab_identity.zig::replaceAdoptedText | fn replaceAdoptedText( arena: std.mem.Allocator, user_texts: []const font.BoardText, mark: Mark, ) std.mem.Allocator.Error![]const font.BoardText
+src/fab_package.zig::Board struct_
+src/fab_package.zig::ComposeError value
+src/fab_package.zig::Evidence struct_
+src/fab_package.zig::Refusal struct_
+src/fab_package.zig::Selection union_
+src/fab_package.zig::blessedLayout | fn blessedLayout(layouts: []const SavedLayout) ?*const SavedLayout
+src/fab_package.zig::compose | fn compose( arena: std.mem.Allocator, name: []const u8, board: Board, parts: Evidence, ) ComposeError!export_fab.Package
+src/fab_package.zig::refuseEarly | fn refuseEarly( arena: std.mem.Allocator, project_dir: []const u8, name: []const u8, layout_arg: ?[]const u8, before: fab_release.ProjectState, ) ?Refusal
+src/fab_package.zig::select | fn select( layouts: []const SavedLayout, has_cache_poses: bool, layout_arg: ?[]const u8, ) Selection
+src/fab_package.zig::sourceRevisionRefusal | fn sourceRevisionRefusal(before: fab_release.ProjectState) ?Refusal
+src/fab_package.zig::writeRefusalJson | fn writeRefusalJson( writer: *std.Io.Writer, name: []const u8, refusal: Refusal, ) json_writer.WriteError!void
 src/fab_preview.zig::Error value
 src/fab_preview.zig::Request struct_
 src/fab_preview.zig::writeJson | fn writeJson( w: *std.Io.Writer, arena: std.mem.Allocator, request: Request, ) Error!void
@@ -920,6 +931,7 @@ src/fab_release.zig::deinit | fn deinit(self: InputPaths, allocator: std.mem.All
 src/fab_release.zig::inputPaths | fn inputPaths(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) InputPathError!?InputPaths
 src/fab_release.zig::invalidate | fn invalidate(lock: *Lock, reason: []const u8) void
 src/fab_release.zig::makeLock | fn makeLock( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, evidence: Evidence, ) LockError!Lock
+src/fab_release.zig::projectStatusFinding | fn projectStatusFinding(status: ProjectStatus) ?fab_readiness.Item
 src/fab_release.zig::reviewedInputDigest | fn reviewedInputDigest( allocator: std.mem.Allocator, project_dir: []const u8, block: *const env.DesignBlock, ) std.mem.Allocator.Error!ReviewedInputDigest
 src/fab_release.zig::safeRevision | fn safeRevision(allocator: std.mem.Allocator, revision: []const u8) std.mem.Allocator.Error![]const u8
 src/fab_release.zig::savedBomDigest | fn savedBomDigest( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) std.mem.Allocator.Error![64]u8

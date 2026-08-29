@@ -101,6 +101,7 @@ test {
     _ = @import("export_matlab_rf.zig");
     _ = @import("export_pdf.zig");
     _ = @import("fab_identity.zig");
+    _ = @import("fab_package.zig");
     _ = @import("fab_gate.zig");
     _ = @import("fab_preview.zig");
     _ = @import("fab_readiness.zig");
