@@ -205,6 +205,7 @@ function loadDeferredAnalysis(){
   if(run===deferredAnalysisSeq&&PCB.analysis_deferred)loadDeferredAnalysis();return true;}
  function analysis(){if(stale())return;
   var u=new URL(window.location.href);u.hash="";u.searchParams.set("derived","1");
+  drcFlightBegin();
   fetch(u.pathname+u.search).then(function(r){if(!r.ok)throw 0;return r.json();})
    .then(function(j){if(stale()||!j||j.rev!==rev)return;
     PCB.pours=j.pours||[];PCB.plane_fills=j.plane_fills||[];PCB.zone_fills=j.zone_fills||[];pourCacheStore(j);
@@ -215,7 +216,8 @@ function loadDeferredAnalysis(){
     if(PCB.power_integrity.ac===null)loadPdnSweep();
     PCB.analysis_deferred=false;traceEmIdx=null;powerIntegrityIdx=null;traceEmDirty=false;powerIntegrityDirty=false;
     routeSummaryFrom(j);pourGeomDrop();dragCacheDrop();paintSoon();drawDrc();drcChip(PCB.drc.length);poursFresh();drawRfRetrofitSchedule();})
-   .catch(function(){if(stale())return;PCB.analysis_deferred=false;runDrcNow();drawRfRetrofitSchedule();});}
+   .catch(function(){if(stale())return;PCB.analysis_deferred=false;runDrcNow();drawRfRetrofitSchedule();})
+   .then(drcFlightEnd,drcFlightEnd);}
  var start=function(){pourCacheRead(function(j){if(stale())return;
    if(j){pourFillApply(j);poursFresh();analysis();return;}
    if(poursDeclared())refillPours({deferred:true,done:analysis});else analysis();});};
@@ -7804,8 +7806,9 @@ function drawRfRetrofitBlockGroups(pending,blocks){var grouped=pending.map(funct
   var best=0,bestDist=1/0;pending.forEach(function(paths,index){(paths||[]).forEach(function(path){(path.samples||[]).forEach(function(s){
     var dist=Math.hypot(d.x-s[0],d.y-s[1]);if(dist<bestDist){bestDist=dist;best=index;}});});});grouped[best].push(d);});return grouped;}
 function drawRfRetrofitCheck(paths){var payload=boardStatePayload();payload.rf_paths=paths;
+ drcFlightBegin();
  return fetch("/api/pcb-drc/"+encodeURIComponent(PCB.name)+subq(),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
-  .then(function(r){if(!r.ok)throw 0;return r.json();});}
+  .then(function(r){drcFlightEnd();if(!r.ok)throw 0;return r.json();},function(e){drcFlightEnd();throw e;});}
 var drawRfRetrofitScheduledFor="";
 function drawRfRetrofitSchedule(){if(RO||!curLayout)return;var key=curLayout+":"+PCB.rev+":"+dirtyGeneration;
  if(drawRfRetrofitScheduledFor===key)return;drawRfRetrofitScheduledFor=key;setTimeout(drawRfRetrofitSaved,0);}
@@ -9758,6 +9761,17 @@ function paintPickPreview(ctx){var d=pickPreview;if(!d)return;
 // The live client-side check blocks obvious shorts during drawing; this is the
 // authoritative re-check (all 8 checks, incl. annular + board-edge).
 var drcTimer=null,drcSeq=0,powerWidthDrcFresh=true;
+// Every server round-trip this page has in flight whose ANSWER REPAINTS the
+// board — the deferred `?derived=1` payload, the pour refill, the authoritative
+// DRC, and the RF retrofit check — and how many have finished. Only the frame
+// benchmark reads them (see `fbRunWhenReady`): a run that starts while one is
+// outstanding records the repaint its answer triggers as if it were a camera
+// frame. They form a CHAIN on load — the pour refill hands off to the derived
+// payload, which schedules the retrofit check — so the benchmark waits for a
+// quiet interval rather than for a single one of them to finish.
+var drcFlight=0,drcDone=0;
+function drcFlightBegin(){drcFlight++;}
+function drcFlightEnd(){if(drcFlight>0)drcFlight--;drcDone++;}
 // Chip splits the count by severity while rolling a net's many open gaps into
 // one actionable open-net count. The underlying raw violations still gate fab.
 function drcChip(n){var e=document.getElementById("r-drc");if(!e)return;
@@ -9768,7 +9782,7 @@ function drcChip(n){var e=document.getElementById("r-drc");if(!e)return;
  if(sum.otherErr)bits.push(sum.otherErr+(sum.open?" other err":" err"));
  if(sum.otherWarn)bits.push(sum.otherWarn+" warn");
  e.textContent=bits.length?bits.join(" · "):"DRC clean ✓";}
-function runDrcNow(){if(RO)return;var seq=++drcSeq;drcChip(-1);
+function runDrcNow(){if(RO)return;var seq=++drcSeq;drcChip(-1);drcFlightBegin();
  var payload=boardStatePayload();
  var idrc=ilogDrcBegin();/* names this call's trigger and starts its clock */
  fetch("/api/pcb-drc/"+encodeURIComponent(PCB.name)+subq(),{method:"POST",
@@ -9784,7 +9798,8 @@ function runDrcNow(){if(RO)return;var seq=++drcSeq;drcChip(-1);
     powerWidthDrcFresh=true;
     var shown=drawRfRetrofitDrcMerge(srv),oldIds=drcIdSet(PCB.drc||[]),changed=shown.length!==(PCB.drc||[]).length||!idSetEq(drcIdSet(shown),oldIds);
     PCB.drc=shown;if(changed)drawDrc();else renderDrcList();drcChip(shown.length);routeSummaryFrom(j);}) // server wins
-  .catch(function(){ilogDrcEnd(idrc,null,seq);if(seq===drcSeq)drcChip(0);});}
+  .catch(function(){ilogDrcEnd(idrc,null,seq);if(seq===drcSeq)drcChip(0);})
+  .then(drcFlightEnd,drcFlightEnd);}
 function boardStatePayload(){var vg=viaGeo();return {
  parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,side:p.side||"top"};}),
  tracks:PCB.tracks||[],vias:PCB.vias||[],zones:PCB.zones||[],rf_paths:PCB.rf_paths||[],clearance:clrVal(),
@@ -9912,7 +9927,7 @@ function groundViasRun(){if(groundViasInFlight||RO)return;var b=document.getElem
   .catch(function(){groundViasInFlight=false;b.disabled=false;routeStatMsg("GND via seed failed",true);});}
 function refillPours(opts){opts=opts&&opts.deferred?opts:{};var done=typeof opts.done==="function"?opts.done:function(){};
  if(poursInFlight){done(false);return;}var bs=pourBtns();if(!bs.length){done(false);return;}
- poursInFlight=true;bs.forEach(function(b){b.disabled=true;});
+ poursInFlight=true;drcFlightBegin();bs.forEach(function(b){b.disabled=true;});
  setStat("r-pour-stat","","refilling…");var q=subq(),payload=JSON.stringify(boardStatePayload()),sig=pourStateSignature(payload);
  fetch("/api/pcb-drc/"+encodeURIComponent(PCB.name)+q+(q?"&":"?")+"pours=1&pours_only=1",{method:"POST",
   headers:{"Content-Type":"application/json"},body:payload})
@@ -9921,12 +9936,12 @@ function refillPours(opts){opts=opts&&opts.deferred?opts:{};var done=typeof opts
    if(!opts.deferred||fresh){pourFillApply(j);routeSummaryFrom(j);}if(fresh){poursFresh();pourCacheStore(j,sig);}
    var nfill=PCB.pours.length+(PCB.plane_fills||[]).length+(PCB.zone_fills||[]).length;
    setStat("r-pour-stat",nfill?"ok":"warn",nfill?"pours refilled ✓":"no pours to fill");
-   poursInFlight=false;bs.forEach(function(b){b.disabled=false;});
+   poursInFlight=false;drcFlightEnd();bs.forEach(function(b){b.disabled=false;});
    // The fast response intentionally omits DRC/connectivity. Reconcile those
    // after the new fill is already visible instead of holding up this button.
    if(!opts.deferred)scheduleServerReconcile();done(fresh);})
   .catch(function(){setStat("r-pour-stat","err","refill failed");
-   poursInFlight=false;bs.forEach(function(b){b.disabled=false;});done(false);});}
+   poursInFlight=false;drcFlightEnd();bs.forEach(function(b){b.disabled=false;});done(false);});}
 pourBtns().forEach(function(b){b.addEventListener("click",refillPours);});
 (function(){groundViasBtnInstall();var b=document.getElementById("pcb-ground-vias");if(b&&!RO)b.addEventListener("click",groundViasRun);})();
 (function(){var b=fenceBtn();if(b&&!RO)b.addEventListener("click",fenceRun);})();
@@ -11918,16 +11933,43 @@ function fbRun(){
 // has replaced the semantic preview. A bounded wait publishes a diagnostic
 // error instead of measuring the fallback semantic scene; the headless gate
 // rejects that result.
+// How long the page must stay quiet before the benchmark believes it is
+// finished. Long enough to cover the gap between two links of the load chain,
+// short enough that it costs a benchmark run nothing that matters.
+var fb_quiet_ms=800;
 function fbRunWhenReady(){
  var deadline=((window.performance&&performance.now)?performance.now():Date.now())+240000;
+ var quietSince=0;
  var ready=function(){
   var t=(window.performance&&performance.now)?performance.now():Date.now();
+  // The editable page issues a CHAIN of server round-trips as it opens — the
+  // pour refill, the deferred `?derived=1` payload, the authoritative DRC and
+  // the RF retrofit check — and each REPAINTS the board when it answers.
+  // Measure the finished page: wait for them, on the same terms a
+  // physical-review run waits for its deferred CAM payload.
+  //
+  // The wait is load-bearing rather than tidy. Without it the run records
+  // whichever repaint lands mid-program as if it were a camera frame — one
+  // ~200 ms outlier in whichever phase it falls in, with every median
+  // unchanged — and WHICH runs see it depends on how fast the server answered.
+  // A gate that is stable only while the server loses that race reports every
+  // future pour or DRC speedup as a rendering regression. A read-only page
+  // issues none of them, so it has nothing to wait for.
+  var quiet=RO||(drcDone>0&&drcFlight===0);
+  // A QUIET INTERVAL, not a single completion: the load chain hands off between
+  // its links (pour refill -> derived payload -> retrofit check), so there are
+  // instants where nothing is in flight and the page is not finished. Requiring
+  // the quiet to hold lets the next link start and take the flag back down.
+  if(!quiet)quietSince=0;else if(!quietSince)quietSince=t;
+  var deferredSettled=quiet&&(t-quietSince>=fb_quiet_ms);
   if(!PHYSICAL_REVIEW){
-   if(!GPU_REQ||gpuOn){fbRun();return;}
-   if(!gpuStarting){window.__fbench={error:(window.PCBGpu&&PCBGpu.error)||"WebGPU did not become active",design:PCB.name};return;}}
+   if(deferredSettled){
+    if(!GPU_REQ||gpuOn){fbRun();return;}
+    if(!gpuStarting){window.__fbench={error:(window.PCBGpu&&PCBGpu.error)||"WebGPU did not become active",design:PCB.name};return;}}}
   else if(CAM_REVIEW&&window.__fbenchCamReadyMs>0){fbRun();return;}
-  if(t>=deadline){window.__fbench={error:"CAM payload did not load within 240 seconds",
-   design:PCB.name,physical_review:PHYSICAL_REVIEW,cam_review:false};return;}
+  if(t>=deadline){window.__fbench={error:PHYSICAL_REVIEW?"CAM payload did not load within 240 seconds"
+    :"the page's deferred server work did not settle within 240 seconds",
+   design:PCB.name,physical_review:PHYSICAL_REVIEW,cam_review:false,deferred_settled:deferredSettled};return;}
   setTimeout(ready,100);};
  ready();}
 // ── WebGPU renderer boot (required by Assembly; optional in the editor) ──

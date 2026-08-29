@@ -2151,6 +2151,7 @@ test "PCB clearance halos persist in the view state instead of only the checkbox
 }
 
 // spec: Web Server - The opt-in PCB frame benchmark briefly dwells at fit, maximum zoom, seek, and pan turnarounds without mixing those pauses into movement percentiles
+// spec: Web Server - The opt-in PCB frame benchmark waits for the page's deferred DRC, RF retrofit and pour round-trips before measuring, so the repaint each answer triggers is never recorded as a camera frame
 test "PCB frame benchmark carries human-readable dwell points outside movement phases" {
     const markers = [_][]const u8{
         "dwell(\"fit\",300)",
@@ -2165,11 +2166,33 @@ test "PCB frame benchmark carries human-readable dwell points outside movement p
         "if(!GPU_REQ||gpuOn){fbRun();return;}",
         "else if(CAM_REVIEW&&window.__fbenchCamReadyMs>0){fbRun();return;}",
         "window.__fbenchCamReadyMs=+performance.now().toFixed(2)",
-        "error:\"CAM payload did not load within 240 seconds\"",
+        "\"CAM payload did not load within 240 seconds\"",
         "setTimeout(fbRunWhenReady,1000)",
+        // The editable page's deferred round-trips — the pour refill, the
+        // `?derived=1` payload, the authoritative DRC and the RF retrofit
+        // check — each repaint the board when they answer, and they CHAIN, so
+        // the benchmark waits for a quiet interval rather than for one of them.
+        // Without the wait it recorded whichever repaint landed mid-program as
+        // a camera frame, and which runs saw that depended on how fast the
+        // server answered.
+        "var drcFlight=0,drcDone=0;",
+        "function drcFlightBegin(){drcFlight++;}",
+        "function drcFlightEnd(){if(drcFlight>0)drcFlight--;drcDone++;}",
+        "var quiet=RO||(drcDone>0&&drcFlight===0)",
+        "var deferredSettled=quiet&&(t-quietSince>=fb_quiet_ms)",
+        "the page's deferred server work did not settle within 240 seconds",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, pcb_board_js, "window.__fbenchCamReadyMs=+performance.now().toFixed(2)"));
+    // One begin per repainting round-trip (DRC, RF retrofit, pour refill), and
+    // an end on EVERY terminal branch of each — a begin whose end one path
+    // misses hangs every benchmark run on this page for the full 240 s
+    // deadline, so the pairing is pinned per call site rather than by a count.
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, pcb_board_js, "drcFlightBegin();"));
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, ".then(drcFlightEnd,drcFlightEnd);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "function(r){drcFlightEnd();if(!r.ok)throw 0;return r.json();},function(e){drcFlightEnd();throw e;}") != null);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, pcb_board_js, "poursInFlight=false;drcFlightEnd();"));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, pcb_board_js, ".then(drcFlightEnd,drcFlightEnd);"));
     const scene_paint = std.mem.indexOf(u8, pcb_board_js, "function scenePaint()") orelse return error.ScenePaintMissing;
     const cam_painted = std.mem.indexOf(u8, pcb_board_js, "window.__fbenchCamReadyMs=+performance.now().toFixed(2)") orelse return error.CamPaintReadinessMissing;
     try std.testing.expect(scene_paint < cam_painted);

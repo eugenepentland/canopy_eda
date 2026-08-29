@@ -439,12 +439,30 @@ exactly in the runs where the response beats `__fbench`.
 So the gate is not measuring a rendering regression. It is measuring who won a
 race, and **any** pour or DRC speedup flips it — this will happen again.
 
-A prototype of the fix (wait for those round-trips before measuring, on the same
-terms `fbRunWhenReady` already waits for the physical-review CAM payload) removes
-the outlier completely: max 35-39 ms across 3 runs versus 192-455 ms. It is NOT
-in this branch, because it also changes what the benchmark measures — the scene
-now has its pours drawn, which raises canvas p50 from ~18.8 to ~23 ms and
-breaches budgets recorded against the pre-pour scene. Choosing between "measure
-the finished page and re-record" and "suppress the deferred work and keep the
-current baseline" is the gate owner's call, and re-recording a baseline to make
-one's own change pass is not a call the author of the change should make.
+RESOLVED — the gate owner chose **measure the finished page**, and it landed:
+`fbRunWhenReady` now waits for the page's deferred chain before the zoom program
+runs, and `docs/benchmarks/pcb-editor/baseline.json` was re-recorded under those
+semantics.
+
+Two things the prototype got wrong, both worth knowing before touching this
+again:
+
+* The deferred work is a **chain**, not a set: `refillPours` hands off to the
+  `?derived=1` payload, which schedules the RF retrofit check. Waiting for "one
+  finished and none in flight" passes in the gaps BETWEEN links, and a run that
+  starts in a gap still catches the next link's repaint — that is what left one
+  196 ms `gpu.zoom_in` outlier after the first fix. The condition has to be a
+  quiet INTERVAL (800 ms), which lets the next link start and take the flag back
+  down.
+* `?derived=1` is itself one of the repainting round-trips and is not a
+  `/api/pcb-drc/` call, so a filter written around that path misses the largest
+  one.
+
+The re-recorded numbers went DOWN, not up, which was not the prediction: the old
+baseline had been recorded against a lighter board (the live corpus has since
+grown from 62 to 120 RF paths) and, from its GPU figures, a busier machine.
+Canvas p50 23.0/23.1 -> 21.1/20.6, GPU p50 95.2/89.6 -> 63.4/55.0, and the p95s
+collapse toward the medians (41.3 -> 29.9 on canvas zoom-out) because the
+outlier the race produced is gone. The enforced budgets were left exactly as
+they were, so the gate is no looser than before — which is the property that
+matters when the person re-recording is the author of the change.

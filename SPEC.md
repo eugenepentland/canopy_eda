@@ -6545,6 +6545,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The clearance-halo toggle persists with the rest of the PCB view state and both of its surfaces read that one value
 - A layout save refuses a copper pour on a layer this board has not got while keeping the spellings a KiCad import carries
 - The opt-in PCB frame benchmark briefly dwells at fit, maximum zoom, seek, and pan turnarounds without mixing those pauses into movement percentiles
+- The opt-in PCB frame benchmark waits for the page's deferred DRC, RF retrofit and pour round-trips before measuring, so the repaint each answer triggers is never recorded as a camera frame
 - The /pcb-layout left dock tabs Properties, Autorouter, DRC, and Sub-circuits, showing one pane at a time
 - The /pcb-layout DRC pane docks the violations list under a previous/next step-through
 - Net-open DRC reporting groups every island gap by full net name and counts each open net once while retaining expandable per-gap details
