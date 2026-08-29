@@ -28,7 +28,13 @@ test = "the guard holds"
 """
 
 
-class LedgerCheckerTests(unittest.TestCase):
+class LedgerFixture(unittest.TestCase):
+    """A throwaway tree with two known zig tests, plus the run helpers.
+
+    Declares no tests of its own so the suites below do not re-run each
+    other's cases.
+    """
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -55,6 +61,8 @@ class LedgerCheckerTests(unittest.TestCase):
             code = check_audit_ledger.main(["--root", str(self.root), "--ledger", str(ledger)])
         return code, out.getvalue(), err.getvalue()
 
+
+class LedgerCheckerTests(LedgerFixture):
     # ── the two that matter ──────────────────────────────────────────────
 
     def test_fails_when_a_fixed_findings_test_does_not_exist(self) -> None:
@@ -311,6 +319,192 @@ tests = "the guard holds"
         self.assertIn("not valid TOML", err_text)
 
 
+class HarnessTests(LedgerFixture):
+    """`harness` is how a fix no zig test can reach still names a live guard.
+
+    It has to be checked as strictly as `test`, or it becomes the soft option
+    that quietly absorbs every entry someone did not want to write a test for.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        (self.root / "scripts").mkdir()
+        # A stand-in for the editor probe: a harness file declaring named
+        # invariants, the way run.js declares `id: "row-aliasing"`.
+        # Mirrors the real probe's shape, including the trap: each invariant's
+        # name also appears as a fixture key and a revert target, so a check
+        # that merely looked for the quoted string would stay green after the
+        # invariant itself was renamed away.
+        (self.root / "scripts/probe.js").write_text(
+            "const FIXTURES = {\n"
+            '  "first-invariant": [],\n'
+            '  "second-invariant": [],\n'
+            "};\n"
+            "const CHECKS = [\n"
+            '  { id: "first-invariant", revert: "first-invariant" },\n'
+            '  { id: "second-invariant", revert: "second-invariant" },\n'
+            "];\n",
+            encoding="utf-8",
+        )
+
+    def harness_entry(self, harness: str) -> str:
+        return f"""
+[[finding]]
+id = "H-001"
+summary = "a fix that lives in JavaScript"
+severity = "high"
+status = "fixed"
+file = ["src/thing.zig"]
+fixed_in = "abc1234"
+harness = "{harness}"
+"""
+
+    # ── the ones that matter ─────────────────────────────────────────────
+
+    def test_fails_when_the_named_invariant_is_gone_from_the_harness(self) -> None:
+        """The whole reason for the `#anchor` form.
+
+        A probe that still exists but no longer runs the invariant would pass a
+        file-existence check while guarding nothing — which is the exact
+        failure this ledger was built to catch, one level up.
+        """
+        code, _, err = self.run_main(self.harness_entry("scripts/probe.js#third-invariant"))
+        self.assertEqual(1, code)
+        self.assertIn("third-invariant", err)
+        self.assertIn("no longer declared as an id", err)
+
+    def test_fails_when_the_harness_file_is_gone(self) -> None:
+        code, _, err = self.run_main(self.harness_entry("scripts/deleted_probe.js#first-invariant"))
+        self.assertEqual(1, code)
+        self.assertIn("deleted_probe.js", err)
+        self.assertIn("deleted or renamed", err)
+
+    def test_a_verified_harness_satisfies_a_fixed_finding(self) -> None:
+        code, out, err = self.run_main(self.harness_entry("scripts/probe.js#first-invariant"))
+        self.assertEqual(0, code, err)
+        self.assertIn("1 fixed finding(s) guarded by a harness", out)
+        self.assertIn("H-001", out)
+
+    def test_a_failed_harness_does_not_stand_in_for_a_missing_test(self) -> None:
+        """Two problems, not one: the broken anchor AND the unguarded finding.
+
+        Reporting only the anchor would leave the entry looking like it still
+        had a guard once someone 'fixed' the anchor by deleting it.
+        """
+        code, _, err = self.run_main(self.harness_entry("scripts/probe.js#gone"))
+        self.assertEqual(1, code)
+        self.assertIn("no longer declared as an id", err)
+        self.assertIn("requires `test`", err)
+
+    # ── the rest of the surface ──────────────────────────────────────────
+
+    def test_a_bare_harness_path_needs_no_anchor(self) -> None:
+        code, out, err = self.run_main(self.harness_entry("scripts/probe.js"))
+        self.assertEqual(0, code, err)
+        self.assertIn("H-001", out)
+
+    def test_a_renamed_invariant_is_caught_even_though_the_name_lingers(self) -> None:
+        """The measured near-miss: a bare quoted-string match was not enough.
+
+        Renaming the real probe's `id: "row-aliasing"` left three other quoted
+        occurrences of that name in the file, and a substring check stayed
+        green. Only an id DECLARATION counts.
+        """
+        (self.root / "scripts/probe.js").write_text(
+            "const FIXTURES = {\n"
+            '  "first-invariant": [],\n'
+            "};\n"
+            "const CHECKS = [\n"
+            '  { id: "first-invariant-v2", revert: "first-invariant" },\n'
+            "];\n",
+            encoding="utf-8",
+        )
+        code, _, err = self.run_main(self.harness_entry("scripts/probe.js#first-invariant"))
+        self.assertEqual(1, code)
+        self.assertIn("no longer declared as an id", err)
+
+    def test_a_single_quoted_anchor_counts(self) -> None:
+        (self.root / "scripts/probe.js").write_text(
+            "const CHECKS = [{ id: 'single-quoted' }];\n", encoding="utf-8"
+        )
+        code, _, err = self.run_main(self.harness_entry("scripts/probe.js#single-quoted"))
+        self.assertEqual(0, code, err)
+
+    def test_a_json_style_id_key_counts(self) -> None:
+        (self.root / "scripts/probe.json").write_text(
+            '{"checks": [{"id": "json-invariant"}]}\n', encoding="utf-8"
+        )
+        code, _, err = self.run_main(self.harness_entry("scripts/probe.json#json-invariant"))
+        self.assertEqual(0, code, err)
+
+    def test_an_unquoted_substring_is_not_an_anchor(self) -> None:
+        """`first` appears inside `first-invariant`; only a whole quoted id counts."""
+        code, _, err = self.run_main(self.harness_entry("scripts/probe.js#first"))
+        self.assertEqual(1, code)
+        self.assertIn("no longer declared as an id", err)
+
+    def test_harness_must_look_like_a_path(self) -> None:
+        code, _, err = self.run_main(self.harness_entry("some prose about a probe"))
+        self.assertEqual(1, code)
+        self.assertIn("must name a path", err)
+
+    def test_a_directory_is_not_a_harness(self) -> None:
+        code, _, err = self.run_main(self.harness_entry("scripts/"))
+        self.assertEqual(1, code)
+
+    def test_harness_and_untested_are_mutually_exclusive(self) -> None:
+        code, _, err = self.run_main(
+            """
+[[finding]]
+id = "H-002"
+summary = "cannot be both guarded and unguarded"
+severity = "low"
+status = "fixed"
+file = ["src/thing.zig"]
+fixed_in = "abc1234"
+harness = "scripts/probe.js"
+untested = true
+note = "a note"
+"""
+        )
+        self.assertEqual(1, code)
+        self.assertIn("mutually exclusive", err)
+
+    def test_a_zig_test_and_a_harness_can_coexist(self) -> None:
+        """A fix with both is listed as tested, not as harness-only."""
+        code, out, err = self.run_main(
+            """
+[[finding]]
+id = "H-003"
+summary = "guarded twice over"
+severity = "low"
+status = "fixed"
+file = ["src/thing.zig"]
+fixed_in = "abc1234"
+test = "the guard holds"
+harness = "scripts/probe.js#first-invariant"
+"""
+        )
+        self.assertEqual(0, code, err)
+        self.assertNotIn("guarded by a harness", out)
+
+    def test_harness_is_not_a_field_on_an_open_finding(self) -> None:
+        code, _, err = self.run_main(
+            """
+[[finding]]
+id = "H-004"
+summary = "still open"
+severity = "low"
+status = "open"
+file = ["src/thing.zig"]
+harness = "scripts/probe.js"
+note = "why"
+"""
+        )
+        self.assertEqual(1, code)
+        self.assertIn("unknown field", err)
+
+
 class RealLedgerTests(unittest.TestCase):
     def test_this_repositorys_ledger_is_green(self) -> None:
         """The shipped ledger must pass its own gate."""
@@ -318,6 +512,21 @@ class RealLedgerTests(unittest.TestCase):
         problems, entries = check_audit_ledger.check(root / "AUDIT-LEDGER.toml", root)
         self.assertEqual([], [str(p) for p in problems])
         self.assertGreater(len(entries), 0)
+
+    def test_no_fixed_finding_is_left_unguarded(self) -> None:
+        """The standing claim: every fixed finding names a test or a harness.
+
+        This started at eight untested entries. Should one ever be added back,
+        it is a deliberate act that has to change this assertion too.
+        """
+        root = Path(check_audit_ledger.__file__).resolve().parent.parent
+        _, entries = check_audit_ledger.check(root / "AUDIT-LEDGER.toml", root)
+        unguarded = [
+            e.get("id")
+            for e in entries
+            if isinstance(e, dict) and e.get("status") == "fixed" and e.get("untested")
+        ]
+        self.assertEqual([], unguarded)
 
 
 if __name__ == "__main__":

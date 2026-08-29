@@ -876,3 +876,130 @@ test "buildSymbolPinCache loads a pinout past the retired 256 KiB cap" {
     try std.testing.expectEqualStrings("LAST", pins[pins.len - 1].num);
     try std.testing.expectEqualStrings("LASTFN", pins[pins.len - 1].name);
 }
+
+// spec: Web Server - The schematic BOM card escapes every attacker-writable field it renders — component, value, footprint, attrs, MPN, manufacturer and property keys — and refuses to make a link out of a non-http datasheet URL
+test "the schematic BOM card escapes every field a user can write into it" {
+    // JUL-S5. The fix routes all of these through escape.writeXml, and the
+    // escaper has its own test — but nothing asserted that THIS module still
+    // calls it, which is exactly the shape JUL-S4 reopened in: a correct
+    // central escaper and an unchecked call site. MPN and manufacturer are
+    // directly attacker-writable through editMpnApi, and they land in an
+    // ATTRIBUTE (`value="…"`), where an unescaped quote is a breakout with no
+    // angle bracket required.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const props = [_]env_mod.Property{
+        .{ .key = "mpn", .value = "\"><script>alert('mpn')</script>" },
+        .{ .key = "manufacturer", .value = "\"><img src=x onerror=alert('mfr')>" },
+        // A non-http scheme must render inert rather than becoming an href.
+        .{ .key = "datasheet", .value = "javascript:alert('ds')" },
+        // Both halves of an arbitrary property are written; both are escaped.
+        .{ .key = "<key>", .value = "<val>" },
+    };
+    const attrs = [_][]const u8{"<attr>"};
+    const instances = [_]env_mod.Instance{.{
+        .ref_des = "U<1>",
+        .component = "<script>alert('comp')</script>",
+        .value = "\"><b>v</b>",
+        .footprint = "<fp>",
+        .symbol = "generic",
+        .properties = &props,
+        .attrs = &attrs,
+    }};
+    const block = env_mod.DesignBlock{
+        .name = "Board",
+        .instances = &instances,
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    try writeSchematicBomHtml(alloc, &aw.writer, &block);
+    const html = aw.written();
+
+    // Nothing the design supplied may reach the page as live markup. `<` is
+    // the only character that can open a tag, and the card writes no `<` of
+    // its own that is followed by one of these payloads.
+    try std.testing.expect(std.mem.indexOf(u8, html, "<script>") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "<img src=x") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "<b>") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "<fp>") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "<attr>") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "<key>") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "<val>") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "U<1>") == null);
+
+    // And each one is present in escaped form, so the assertions above are
+    // passing because the field was escaped, not because it was dropped.
+    try std.testing.expect(std.mem.indexOf(u8, html, "&lt;script&gt;alert(&#39;comp&#39;)&lt;/script&gt;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "&quot;&gt;&lt;b&gt;v&lt;/b&gt;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "&lt;fp&gt;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "&lt;attr&gt;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "&lt;key&gt;: &lt;val&gt;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "U&lt;1&gt;") != null);
+
+    // The editable MPN/manufacturer inputs are the attribute-context sinks: an
+    // unescaped `"` here closes `value="` and the rest is markup.
+    try std.testing.expect(std.mem.indexOf(u8, html, "&quot;&gt;&lt;script&gt;alert(&#39;mpn&#39;)&lt;/script&gt;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "&quot;&gt;&lt;img src=x onerror=alert(&#39;mfr&#39;)&gt;") != null);
+
+    // The datasheet is a scheme decision, not an escaping one: a javascript:
+    // URL is rendered as inert text, never as an href.
+    try std.testing.expect(std.mem.indexOf(u8, html, "href=\"javascript:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "datasheet: javascript:alert(&#39;ds&#39;)") != null);
+}
+
+// spec: Web Server - The BOM card links a datasheet only for an http(s) or site-absolute URL, and that link is emitted with rel="noopener noreferrer"
+test "the BOM card links an http datasheet and leaves a data: URL inert" {
+    // The companion to the test above: prove the safe path still produces a
+    // real link, so "no href" is not passing for the trivial reason that the
+    // card stopped linking datasheets at all.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const cases = [_]struct { url: []const u8, linked: bool }{
+        .{ .url = "https://example.com/ds.pdf", .linked = true },
+        .{ .url = "http://example.com/ds.pdf", .linked = true },
+        .{ .url = "/lib/datasheets/ds.pdf", .linked = true },
+        .{ .url = "data:text/html,<script>alert(1)</script>", .linked = false },
+        .{ .url = "javascript:alert(1)", .linked = false },
+        .{ .url = "vbscript:msgbox(1)", .linked = false },
+        .{ .url = "ds.pdf", .linked = false },
+    };
+    for (cases) |case| {
+        const props = [_]env_mod.Property{.{ .key = "datasheet", .value = case.url }};
+        const instances = [_]env_mod.Instance{.{
+            .ref_des = "U1",
+            .component = "part",
+            .value = "",
+            .footprint = "fp",
+            .symbol = "generic",
+            .properties = &props,
+        }};
+        const block = env_mod.DesignBlock{
+            .name = "Board",
+            .instances = &instances,
+            .nets = &.{},
+            .ports = &.{},
+            .notes = &.{},
+            .groups = &.{},
+            .sub_blocks = &.{},
+        };
+        var aw: std.Io.Writer.Allocating = .init(alloc);
+        try writeSchematicBomHtml(alloc, &aw.writer, &block);
+        const html = aw.written();
+        const has_link = std.mem.indexOf(u8, html, "sch-bom-tag-link") != null;
+        try std.testing.expectEqual(case.linked, has_link);
+        if (case.linked) {
+            try std.testing.expect(std.mem.indexOf(u8, html, "rel=\"noopener noreferrer\"") != null);
+        } else {
+            try std.testing.expect(std.mem.indexOf(u8, html, "href=\"") == null);
+        }
+    }
+}

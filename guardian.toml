@@ -398,6 +398,69 @@ name = "shape-sketch-solver"
 command = ["node", "src/serve/assets/shape_sketch.test.js"]
 inputs = ["src/serve/assets/shape_sketch.js", "src/serve/assets/shape_sketch.test.js"]
 
+# ── The seven the hand-written list above still missed ────────────────────
+# The block above closed DRIFT-INFRA-003 for the twelve assets someone
+# remembered. `scripts/check_js_asset_gates.py` (gated below) enumerates the
+# directory instead of trusting a list, and found seven more first-party assets
+# that no gate named — including pcb_replay.js, 997 lines the PCB page loads on
+# every visit, and drc_marshal.js/drc_worker.js, which are the client half of
+# the DRC. Each `node --check` is measured passing today: coverage of a gate
+# that did not exist, not a new failure.
+[[external]]
+name = "drc-marshal-js-syntax"
+command = ["node", "--check", "src/serve/assets/drc_marshal.js"]
+inputs = ["src/serve/assets/drc_marshal.js"]
+
+[[external]]
+name = "drc-worker-js-syntax"
+command = ["node", "--check", "src/serve/assets/drc_worker.js"]
+inputs = ["src/serve/assets/drc_worker.js"]
+
+[[external]]
+name = "footprint-svg-js-syntax"
+command = ["node", "--check", "src/serve/assets/footprint_svg.js"]
+inputs = ["src/serve/assets/footprint_svg.js"]
+
+# pcb_region.js is loaded by `region-triangulation` above, so its syntax was
+# already exercised there — but only as a side effect of that harness still
+# requiring it. Named directly so the gate survives a change to the harness.
+[[external]]
+name = "pcb-region-js-syntax"
+command = ["node", "--check", "src/serve/assets/pcb_region.js"]
+inputs = ["src/serve/assets/pcb_region.js"]
+
+[[external]]
+name = "pcb-replay-js-syntax"
+command = ["node", "--check", "src/serve/assets/pcb_replay.js"]
+inputs = ["src/serve/assets/pcb_replay.js"]
+
+[[external]]
+name = "pcb-settings-js-syntax"
+command = ["node", "--check", "src/serve/assets/pcb_settings.js"]
+inputs = ["src/serve/assets/pcb_settings.js"]
+
+[[external]]
+name = "thermal-page-js-syntax"
+command = ["node", "--check", "src/serve/assets/thermal_page.js"]
+inputs = ["src/serve/assets/thermal_page.js"]
+
+# The rule that makes the eighteen blocks above self-maintaining: every
+# first-party .js/.mjs under src/serve/assets/ must be named by some external's
+# COMMAND (naming it in `inputs` is not enough — inputs decide when a gate
+# re-runs, not whether anything parses the file). Vendored drops are exempt by
+# explicit path + reason inside the script, and an exemption for a file that no
+# longer exists fails too. This is the standing form of DRIFT-INFRA-003, which
+# was closed once by hand and had drifted open again by seven files.
+[[external]]
+name = "js-asset-gates"
+command = ["python3", "scripts/check_js_asset_gates.py"]
+inputs = ["scripts/check_js_asset_gates.py", "guardian.toml", "src/serve/assets/*.js"]
+
+[[external]]
+name = "js-asset-gates-selftest"
+command = ["python3", "scripts/check_js_asset_gates_test.py"]
+inputs = ["scripts/check_js_asset_gates.py", "scripts/check_js_asset_gates_test.py"]
+
 # The WASM/server DRC parity harness. Measured 2026-08-29: run standalone it
 # exits 2 with a usage banner — it needs a live server URL, design names and a
 # built zig-out/bin/drc.wasm, so it CANNOT be a run-gate here (documented,

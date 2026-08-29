@@ -242,6 +242,9 @@ candidate for deployment.
 - A healthy deploy refreshes the design-agent folder's binary and runtime build id
 - Serializes heavy gates behind one machine-wide lock with an environment bypass
 - Prepares a release under that gate lock without re-entering it
+- The production systemd unit executes the deploy-installed binary and never the build-output path that a local build overwrites
+- The checked-in systemd unit is the rendered form of the deploy-hook template, so the two cannot drift apart in the directives that matter
+- The production unit keeps the restart and autocommit settings that recovered the 2026-07-25 outage and that keep design persistence on the checkpoint timer
 - completeness-waiver: empty inputs (the pipeline has no user collection input; an empty source tree cannot configure the declared Zig artifacts and therefore fails before candidate publication)
 - completeness-waiver: large inputs (logs stream to files rather than memory and the candidate contains one production binary plus bounded metadata; source and test scale remain the Zig build system's domain)
 - completeness-waiver: unauthorized access (the scripts mutate only the current repository's shared git directory and production service, and production activation remains an explicit machine-local hook opt-in)
@@ -4883,6 +4886,7 @@ Public functions: parseSchematicView, renderToHtml, setupRenderCtx, renderHubSvg
 - The schematic page renders no thermal panel, linking out to /thermal/:name instead, so the page reads nothing but the design's own .sexp
 - Each sub circuit card links out to its PCB layout in a new tab rather than embedding one, so no sub circuit opens a layout from the schematic page
 - A sub circuit backed by a reusable module links to that module's own layout editor, and a path- or inline-sourced one to the design-scoped view of its slice
+- The schematic page escapes the design name everywhere it appears — document title, heading, subtitle filename — and escapes each hub card's ref-des into its data-ref attribute
 
 ## diagram/types
 
@@ -7074,6 +7078,11 @@ is what makes the predicate exact rather than approximately right.
 - The pinout endpoint reads its library file at the class-owned lib_limits cap, so a pinout past the retired 256 KiB figure is served rather than answered 404
 - The revision-free sidecar writers, the render dedup and the regenerate record, re-read under the sidecar lock rather than trusting a value read before it
 - Two saved vias that differ only in their layer span are different copper and both survive a sidecar save round-trip
+- The schematic BOM card escapes every attacker-writable field it renders — component, value, footprint, attrs, MPN, manufacturer and property keys — and refuses to make a link out of a non-http datasheet URL
+- The BOM card links a datasheet only for an http(s) or site-absolute URL, and that link is emitted with rel="noopener noreferrer"
+- The 3D viewer validates its `:footprint` route param after percent-decoding, so a decoded name carrying traversal or markup reaches neither a read path nor the page
+- The staged-upload temp path is minted from a timestamp and a process-unique counter with no request input in it, so an uploaded archive cannot steer where it is written
+- A library import ignores the client's X-Filename header entirely, so two uploads of one archive under different filenames produce identical results
 - completeness-waiver: concurrent access (httpz owns request threading and each handler answers from its own response arena; the two pieces of state that really are shared — the live scene graph and a design's layout sidecar — are specified where they live, under the push and layout-backfill sections, rather than restated per endpoint)
 
 ## fab_readiness

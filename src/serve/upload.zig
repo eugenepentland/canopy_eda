@@ -603,3 +603,142 @@ test "zip import succeeds without system unzip or RAM-backed temp space" {
     try tmp.dir.access(std.testing.io, "lib/footprints/scrp2682w.sexp", .{});
     try tmp.dir.access(std.testing.io, "lib/models/scrp2682w.step", .{});
 }
+
+/// Every byte a staged-upload path may contain after the fixed prefix: the two
+/// counter fields and the separator between them. Anything else means
+/// something other than our own counters reached the path.
+fn tmpPathTailIsCounters(tail: []const u8) bool {
+    if (tail.len == 0) return false;
+    for (tail) |c| {
+        if (!((c >= '0' and c <= '9') or c == '-')) return false;
+    }
+    return true;
+}
+
+// spec: Web Server - The staged-upload temp path is minted from a timestamp and a process-unique counter with no request input in it, so an uploaded archive cannot steer where it is written
+test "the staged-upload path is minted from counters, never from request input" {
+    // JUL-C2 was arbitrary file write to RCE: the client's `X-Filename` header
+    // was templated into `/tmp/netlisp-upload-{s}`, and `../../../` escaped the
+    // directory. Two things close it, and this test pins both.
+    //
+    // First, structurally: `{s}` is the only format field that can carry text,
+    // so a template with no `{s}` cannot carry a header no matter what the
+    // call site passes.
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, tmp_zip_template, "{d}"));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, tmp_zip_template, "{s}"));
+
+    // Second, behaviourally: `stageArchive` takes the bytes and NOTHING else —
+    // reintroducing the header means adding a parameter, which breaks this
+    // call and fails the build. The path it hands back stays one component
+    // under /var/tmp, whatever the counters read.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var staged = try stageArchive(alloc, "not really a zip");
+    defer staged.deinit();
+
+    const prefix = "/" ++ var_dir_name ++ "/" ++ tmp_dir_name ++ "/netlisp-upload-";
+    try std.testing.expect(std.mem.startsWith(u8, staged.path, prefix));
+    const tail = staged.path[prefix.len..];
+    try std.testing.expect(tmpPathTailIsCounters(tail));
+    // The three ways a path escapes its directory, all excluded by the above
+    // but asserted by name so a widened tail predicate is not enough.
+    try std.testing.expect(std.mem.indexOfScalar(u8, tail, '/') == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, tail, '\\') == null);
+    try std.testing.expect(std.mem.indexOf(u8, tail, "..") == null);
+
+    // And the counter half is what makes the name unique without needing any
+    // client-supplied token: two stages in the same millisecond still differ.
+    try std.testing.expect(nextTmpSeq() != nextTmpSeq());
+    var second = try stageArchive(alloc, "not really a zip either");
+    defer second.deinit();
+    try std.testing.expect(!std.mem.eql(u8, staged.path, second.path));
+}
+
+/// One import of a fixture archive, plus the throwaway project tree it landed
+/// in. Kept together so the caller can compare results and inspect the trees.
+const NamedImport = struct { dir: std.testing.TmpDir, result: ImportResult };
+
+/// Import the same archive once per `names` entry, each into its own clean
+/// project tree. `names` are X-Filename header values.
+fn importUnderNames(
+    arena: std.mem.Allocator,
+    zip_bytes: []const u8,
+    names: []const []const u8,
+    out: []NamedImport,
+) !void {
+    std.debug.assert(names.len == out.len);
+    for (names, out) |name, *slot| {
+        slot.dir = std.testing.tmpDir(.{ .iterate = true });
+        const project_dir = try slot.dir.dir.realPathFileAlloc(std.testing.io, ".", arena);
+        slot.result = try importZipBytes(arena, project_dir, zip_bytes, name);
+    }
+}
+
+fn cleanupImports(imports: []NamedImport) void {
+    for (imports) |*one| one.dir.cleanup();
+}
+
+/// A successful import creates `lib/` and nothing else at the project root.
+fn expectOnlyLibTree(tmp: *std.testing.TmpDir) !void {
+    var it = tmp.dir.iterate();
+    while (try it.next(std.testing.io)) |entry| {
+        try std.testing.expectEqualStrings("lib", entry.name);
+    }
+}
+
+// spec: Web Server - A library import ignores the client's X-Filename header entirely, so two uploads of one archive under different filenames produce identical results
+test "a hostile X-Filename cannot steer a library import" {
+    // The header is the JUL-C2 vector, and `importZipBytes` discards it. Prove
+    // it by importing the SAME archive twice under a benign name and a
+    // traversal payload, into two clean trees, and comparing everything the
+    // import produced. Any use of the header at all would show up here.
+    const zipfile = @import("../zipfile.zig");
+    const symbol =
+        \\(kicad_symbol_lib (version 20211014) (generator test)
+        \\  (symbol "PART-1"
+        \\    (property "Reference" "U")
+        \\    (property "Manufacturer_Part_Number" "PART-1")
+        \\    (pin passive line (at 0 0 0) (length 1.27)
+        \\      (name "PORT_1") (number "1"))
+        \\  )
+        \\)
+    ;
+    const footprint =
+        \\(module "PART1" (layer F.Cu)
+        \\  (descr "test footprint")
+        \\  (pad 1 smd rect (at 0 0) (size 1 1) (layers F.Cu F.Mask F.Paste))
+        \\)
+    ;
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var zip_out: std.Io.Writer.Allocating = .init(arena);
+    try zipfile.write(&zip_out.writer, &.{
+        .{ .name = "PART-1/KiCad/PART-1.kicad_sym", .data = symbol },
+        .{ .name = "PART-1/KiCad/PART1.kicad_mod", .data = footprint },
+    });
+    const zip_bytes = zip_out.written();
+
+    var imports: [2]NamedImport = undefined;
+    try importUnderNames(arena, zip_bytes, &.{
+        "LIB_PART-1.zip",
+        "../../../../../../home/user/.bashrc",
+    }, &imports);
+    defer cleanupImports(&imports);
+
+    const benign = imports[0].result;
+    const hostile = imports[1].result;
+    try std.testing.expectEqualStrings(benign.package_name, hostile.package_name);
+    try std.testing.expectEqualStrings(benign.component_name, hostile.component_name);
+    try std.testing.expectEqualStrings(benign.footprint_name, hostile.footprint_name);
+    try std.testing.expectEqualStrings(benign.pinout_name, hostile.pinout_name);
+    try std.testing.expectEqual(benign.has_3d, hostile.has_3d);
+    try std.testing.expectEqual(benign.component, hostile.component);
+
+    // The traversal payload wrote nothing outside its own project dir.
+    try expectOnlyLibTree(&imports[1].dir);
+}

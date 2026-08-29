@@ -30,13 +30,26 @@ ID_RE = re.compile(r"\A[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*\Z")
 # declaration — the whole point is to find the real thing.
 TEST_DECL_RE = re.compile(rb'^[ \t]*test "([^"\n]*)"', re.MULTILINE)
 
+
+def _ID_DECL_RE(anchor: str) -> re.Pattern[bytes]:
+    """`id: "anchor"` / `id = "anchor"` / `"id": "anchor"`, in either quote.
+
+    A harness anchor has to name a DECLARED check, not merely a string that
+    occurs somewhere in the file — the probe mentions each invariant's name in
+    its fixture keys and revert targets too, so a bare substring match would
+    survive the invariant itself being renamed away.
+    """
+    return re.compile(
+        rb'["\']?\bid["\']?\s*[:=]\s*["\']' + re.escape(anchor.encode()) + rb'["\']'
+    )
+
 # Fields every entry may carry, by status. Anything else is a typo, and a typo
 # in a field name silently drops the constraint it was meant to express.
 COMMON_FIELDS = frozenset(
     {"id", "summary", "severity", "status", "file", "note", "guard", "reopens"}
 )
 STATUS_FIELDS = {
-    "fixed": COMMON_FIELDS | {"fixed_in", "test", "untested"},
+    "fixed": COMMON_FIELDS | {"fixed_in", "test", "untested", "harness"},
     "open": COMMON_FIELDS,
     "waived": COMMON_FIELDS | {"reason"},
 }
@@ -92,6 +105,63 @@ def _looks_like_path(value: str) -> bool:
     return "/" in value and not any(c.isspace() for c in value)
 
 
+def _check_harness(raw: object, root: Path, add) -> bool:
+    """Verify a non-Zig regression harness, and report whether it holds.
+
+    Some fixes are not provable by a Zig test: the browser-editor findings live
+    in JavaScript that Guardian cannot parse, and the JS-asset-gate rule is a
+    property of a directory. Those are guarded by a real harness — a headless
+    browser probe, a directory-walking checker — and `harness` names it so the
+    ledger can check the same thing it checks for `test`: that the guard still
+    exists, by name.
+
+    A `path#anchor` value asserts more than the file's existence: the anchor
+    must still be DECLARED as an id inside it — `id: "anchor"`, `id = "anchor"`
+    or `"id": "anchor"`. That is what makes `run.js#row-aliasing` mean "the
+    probe still declares that invariant" rather than merely "the probe file is
+    still there" — a probe that dropped the invariant would otherwise pass.
+
+    Matching a bare quoted occurrence is not enough, and this was measured:
+    renaming the probe's `id: "row-aliasing"` to `row-aliasing-v2` left three
+    other quoted `"row-aliasing"` strings in the file (a fixture key, a revert
+    target, a design name) and a substring check stayed green.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        add("`harness`, when present, must be a non-empty string")
+        return False
+
+    path_part, _, anchor = raw.partition("#")
+    if not _looks_like_path(path_part):
+        add(f"`harness` must name a path (optionally `path#anchor`), got {raw!r}")
+        return False
+
+    target = root / path_part
+    if not target.is_file():
+        add(
+            f"`harness` names a file that does not exist: {path_part!r} — the "
+            "harness that guarded this fix was deleted or renamed"
+        )
+        return False
+
+    if not anchor:
+        return True
+
+    try:
+        body = target.read_bytes()
+    except OSError as exc:
+        add(f"`harness` file {path_part!r} could not be read: {exc}")
+        return False
+
+    if not _ID_DECL_RE(anchor).search(body):
+        add(
+            f"`harness` anchor {anchor!r} is no longer declared as an id in "
+            f"{path_part!r} — the specific check that guarded this fix is gone, "
+            "even though the harness file remains"
+        )
+        return False
+    return True
+
+
 def _check_entry(
     entry: dict,
     where: str,
@@ -138,7 +208,7 @@ def _check_entry(
             add(f"`guard` names a path that does not exist: {guard!r}")
 
     if status == "fixed":
-        _check_fixed(entry, tests, add)
+        _check_fixed(entry, root, tests, add)
     elif status == "open":
         if not str(entry.get("note", "")).strip():
             add("status `open` requires a `note` explaining why it is still open")
@@ -147,7 +217,7 @@ def _check_entry(
             add("status `waived` requires a `reason`")
 
 
-def _check_fixed(entry: dict, tests: dict[str, str], add) -> None:
+def _check_fixed(entry: dict, root: Path, tests: dict[str, str], add) -> None:
     if not str(entry.get("fixed_in", "")).strip():
         add("status `fixed` requires `fixed_in` naming the commit that closed it")
 
@@ -157,6 +227,8 @@ def _check_fixed(entry: dict, tests: dict[str, str], add) -> None:
         untested = bool(untested)
 
     raw_tests = entry.get("test")
+    raw_harness = entry.get("harness")
+    has_harness = raw_harness is not None and _check_harness(raw_harness, root, add)
 
     if untested:
         # The deliberate escape hatch for a fix with no regression test. It must
@@ -164,15 +236,22 @@ def _check_fixed(entry: dict, tests: dict[str, str], add) -> None:
         # why — these are the entries the summary lists on every run.
         if raw_tests is not None:
             add("`untested = true` and `test` are mutually exclusive — drop one")
+        if raw_harness is not None:
+            add("`untested = true` and `harness` are mutually exclusive — drop one")
         if not str(entry.get("note", "")).strip():
             add("`untested = true` requires a `note` recording why there is no test")
         return
 
     if raw_tests is None:
-        add(
-            "status `fixed` requires `test` naming the regression test that proves it "
-            "(or `untested = true` with a `note`, if there genuinely is none)"
-        )
+        # A harness alone is enough for a fix no Zig test can reach, but only a
+        # VERIFIED one: `_check_harness` has already reported why if it failed,
+        # and a failed harness must not silently stand in for a missing test.
+        if not has_harness:
+            add(
+                "status `fixed` requires `test` naming the regression test that proves it, "
+                "or `harness` naming a non-Zig one (or `untested = true` with a `note`, "
+                "if there genuinely is none)"
+            )
         return
 
     names = _as_names(raw_tests)
@@ -264,18 +343,34 @@ def check(ledger_path: Path, root: Path) -> tuple[list[Problem], list[dict]]:
 def summarize(entries: list[dict], out) -> None:
     counts = {status: 0 for status in STATUSES}
     untested: list[dict] = []
+    harnessed: list[dict] = []
     for entry in entries:
         if not isinstance(entry, dict):
             continue
         status = entry.get("status")
         if status in counts:
             counts[status] += 1
-        if status == "fixed" and entry.get("untested"):
+        if status != "fixed":
+            continue
+        if entry.get("untested"):
             untested.append(entry)
+        elif entry.get("test") is None and entry.get("harness") is not None:
+            harnessed.append(entry)
 
     total = sum(counts.values())
     parts = ", ".join(f"{counts[s]} {s}" for s in STATUSES)
     print(f"audit ledger OK — {total} findings: {parts}", file=out)
+
+    if harnessed:
+        # Not a defect — but these are guarded by something the unit suite does
+        # not run, so say which harness has to keep working for the claim to
+        # hold. A harness nobody runs is the failure mode here.
+        print(
+            f"\n{len(harnessed)} fixed finding(s) guarded by a harness, not a zig test:",
+            file=out,
+        )
+        for entry in harnessed:
+            print(f"  {entry.get('id')}  {entry.get('harness')}", file=out)
 
     if untested:
         # Never let these go quiet. A fix with no regression test is the exact

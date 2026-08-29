@@ -862,3 +862,51 @@ test "writeJsonString emits a literal space, escaping only sub-0x20 controls" {
     try writeJsonString(&aw.writer, "a b");
     try std.testing.expectEqualStrings("\"a b\"", aw.written());
 }
+
+// spec: Web Server - The 3D viewer validates its `:footprint` route param after percent-decoding, so a decoded name carrying traversal or markup reaches neither a read path nor the page
+test "isSafeFootprint rejects traversal and markup while accepting real footprint names" {
+    // JUL-S6 was two vulnerabilities sharing one missing check: the raw param
+    // was interpolated into `lib/models/{s}` (arbitrary .sexp/model read) AND
+    // written into the viewer page (reflected XSS). Both halves are now closed
+    // by this ONE predicate, gating all five entry points — so a weakened
+    // predicate reopens both at once, and this test is the only thing that
+    // would notice. `urlDecode` runs BEFORE it at every call site, so the
+    // inputs below are the decoded forms an attacker actually lands.
+
+    // Traversal — the read half.
+    try std.testing.expect(!isSafeFootprint("../../../etc/passwd"));
+    try std.testing.expect(!isSafeFootprint(".."));
+    try std.testing.expect(!isSafeFootprint("ok/../../secret"));
+    try std.testing.expect(!isSafeFootprint("auth/sessions.json"));
+    try std.testing.expect(!isSafeFootprint("/etc/passwd"));
+    try std.testing.expect(!isSafeFootprint("c..b"));
+    // A backslash is a separator on the platforms KiCad libraries travel from.
+    try std.testing.expect(!isSafeFootprint("lib\\models\\x"));
+    // A NUL would truncate the name at the syscall boundary but not here.
+    try std.testing.expect(!isSafeFootprint("safe\x00../../etc/passwd"));
+
+    // Markup — the reflected-XSS half. `<`, `>`, `"`, `'` and `&` are all
+    // rejected outright rather than relying on the escaper downstream.
+    try std.testing.expect(!isSafeFootprint("<script>alert(1)</script>"));
+    try std.testing.expect(!isSafeFootprint("x\" onload=\"alert(1)"));
+    try std.testing.expect(!isSafeFootprint("x' onload='alert(1)"));
+    try std.testing.expect(!isSafeFootprint("a&b"));
+    try std.testing.expect(!isSafeFootprint("</title><svg onload=alert(1)>"));
+
+    // Degenerate and oversized names.
+    try std.testing.expect(!isSafeFootprint(""));
+    try std.testing.expect(!isSafeFootprint(" "));
+    var long: [129]u8 = undefined;
+    @memset(&long, 'a');
+    try std.testing.expect(!isSafeFootprint(long[0..129]));
+    try std.testing.expect(isSafeFootprint(long[0..128]));
+
+    // Real library names must still resolve, including the two reserved chars
+    // that only arrive here because urlDecode ran first: a part number with a
+    // comma (`74ahct1g125gm,132`) and the `#` KiCad uses in generated names.
+    try std.testing.expect(isSafeFootprint("74ahct1g125gm,132"));
+    try std.testing.expect(isSafeFootprint("R_0402_1005Metric"));
+    try std.testing.expect(isSafeFootprint("SOT-23-5"));
+    try std.testing.expect(isSafeFootprint("c-0402.step"));
+    try std.testing.expect(isSafeFootprint("QFN-32#1"));
+}
