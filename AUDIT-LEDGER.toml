@@ -1,0 +1,641 @@
+# Audit finding ledger
+#
+# WHY THIS FILE EXISTS
+#
+# This tree has been audited twice: 2026-07-01 (AUDIT.md, ~148 findings) and
+# 2026-08-29 (a read-only drift audit whose findings are enumerated in commits
+# e2a5f7e and 7007d88, merged as 79f63e6). Both remediations were real and both
+# were INVISIBLE: nothing in the tree recorded which finding was closed, by
+# what, or whether it was still closed.
+#
+# That cost twice, concretely:
+#   1. July's `</script>` breakout (JUL-S4) was fixed in the central writer and
+#      CAME BACK through three sibling serializers the fix missed. Nothing
+#      noticed the class had reopened until a second full audit found it.
+#   2. The second audit had to re-derive the status of every prior finding by
+#      hand, at real cost.
+#
+# `scripts/check_audit_ledger.py` turns "that finding is closed" into something
+# a gate can check: every entry marked `fixed` must name a regression test that
+# STILL EXISTS in the tree. A fixed finding whose test was deleted or renamed
+# has silently lost its guard, and the gate says so by name.
+#
+# SCOPE (deliberate — this is not a transcription of AUDIT.md)
+#
+#   IN   every finding from the 2026-08-29 drift audit, fixed and open alike.
+#   IN   the July findings whose CLASS is still live or has already reopened —
+#        the escaping class (S3-S7), the narrowing class (K1), the pad-number
+#        class (K6), the ERC-recursion class (K9) — plus the three Criticals
+#        (C1-C3), whose guards are the ones that must never quietly disappear.
+#   OUT  the remaining ~120 July findings. The 2026-08-29 audit re-checked the
+#        Critical/High set and found them genuinely fixed; the Medium/Low tail
+#        is closed, low-value, and transcribing it would bury the live entries
+#        under noise. Add an entry here when a class reopens, not before.
+#
+# SCHEMA (enforced by scripts/check_audit_ledger.py --help)
+#
+#   id        unique, stable. Never renumber: `reopens` points at these.
+#   summary   one line, what actually went wrong.
+#   severity  critical | high | medium | low
+#   status    fixed | open | waived
+#   file      list of paths the finding lived in; each must still exist.
+#   fixed_in  commit — required when status = "fixed".
+#   test      zig test name(s) proving it; each must exist as `test "<name>"`
+#             under src/**/*.zig. Required when status = "fixed".
+#   untested  true — the escape hatch for a `fixed` finding with NO regression
+#             test. Requires `note`. These are counted and listed on every run
+#             so the gap stays visible instead of being forgotten.
+#   guard     optional non-zig guard (a script path, a Guardian rule name).
+#             Path-shaped values are checked for existence.
+#   note      required for `open` and for `untested`.
+#   reason    required for `waived`.
+#   reopens   optional id of the earlier finding whose class this one reopened.
+
+[meta]
+audits = ["2026-07-01", "2026-08-29"]
+fix_wave = ["e2a5f7e", "7007d88", "79f63e6"]
+sources = ["AUDIT.md", "FEEDBACK.md", "git log"]
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 2026-08-29 drift audit — security
+#
+# All four are one bug: a `<script>const PCB=…</script>` blob whose strings come
+# from a design. Every PCB page load serialized ref-des, value, MPN, footprint,
+# pad and net names through them, so a design-authored `</script>` executed for
+# every viewer with no save required. The July fix (JUL-S4) hardened
+# json_writer and these three siblings never adopted it.
+# ────────────────────────────────────────────────────────────────────────────
+
+[[finding]]
+id = "DRIFT-SEC-001"
+summary = "pcb_part_json's private escaper covered quotes and control chars but not `<`, so a design string could close the PCB page's script element"
+severity = "critical"
+status = "fixed"
+file = ["src/serve/pcb_part_json.zig"]
+fixed_in = "e2a5f7e"
+test = "part JSON escapes a closing script tag in every design-derived string"
+guard = "guardian-zig script-string-safety"
+reopens = "JUL-S4"
+note = "The private escaper was deleted rather than patched — the bug class is 'one rule, several spellings'. MPN is editable over HTTP, so this needed no saved design at all."
+
+[[finding]]
+id = "DRIFT-SEC-002"
+summary = "layer_table_json escaped only `\"` and `\\`, so a plane net name could terminate the blob's script element"
+severity = "critical"
+status = "fixed"
+file = ["src/serve/layer_table_json.zig"]
+fixed_in = "e2a5f7e"
+test = "a plane net named like a closing script tag cannot terminate the blob's script element"
+guard = "guardian-zig script-string-safety"
+reopens = "JUL-S4"
+
+[[finding]]
+id = "DRIFT-SEC-003"
+summary = "power_integrity_json routed design-derived net and terminal names through the plain JSON writer instead of the script-safe one"
+severity = "critical"
+status = "fixed"
+file = ["src/power_integrity_json.zig"]
+fixed_in = "e2a5f7e"
+test = "power-integrity JSON escapes a closing script tag in every design-derived string"
+guard = "guardian-zig script-string-safety"
+reopens = "JUL-S4"
+
+[[finding]]
+id = "DRIFT-SEC-004"
+summary = "buildEditSources spliced ref-des keys and instance labels into the same script blob unescaped — a fourth vector found while fixing the other three"
+severity = "high"
+status = "fixed"
+file = ["src/serve/pcb_part_json.zig"]
+fixed_in = "e2a5f7e"
+test = "PCB edit-source provenance escapes a closing script tag in ref-des and label"
+reopens = "JUL-S4"
+
+[[finding]]
+id = "DRIFT-SEC-005"
+summary = "the script-string-safety lexical check is pinned green by its own regression tests, so a SECOND private escaper added beside the correct one would pass"
+severity = "medium"
+status = "waived"
+file = [
+  "src/serve/pcb_part_json.zig",
+  "src/serve/layer_table_json.zig",
+  "src/power_integrity_json.zig",
+]
+reason = "Structural, not fixable in the lexical rule: the check asks per file whether a blob serializer escapes `<` anywhere in its own code, and each fix's regression test asserts on the escaped form — so every one of these files now reads as script-safe no matter what it later gains. Verified by reintroducing exactly that (a hand-rolled escaper with `\"` and `\\` arms and no `<`), which the check passed. Mitigated instead by a guard that READS the file: all three modules carry a self-@embedFile tripwire that fails if the module regains a private quote-escaping switch arm or reaches the plain non-script sink, proven both ways in 7007d88. The check still earns its place — it fires on a blob serializer with no `<` escaping at all, and on a new file added to blob_files. A FOURTH blob serializer must add its own tripwire; that is the residual this waiver records."
+guard = "self-@embedFile tripwires in the three modules' script-tag tests"
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 2026-08-29 drift audit — crash / DoS / UB
+# ────────────────────────────────────────────────────────────────────────────
+
+[[finding]]
+id = "DRIFT-DOS-001"
+summary = "(bus-port …) checked its 4096-lane cap with an i64 subtraction, so a large-negative start and large-positive end wrapped the span negative, skipped the cap, and ran the expansion loop ~1.8e19 times — reachable over HTTP"
+severity = "critical"
+status = "fixed"
+file = ["src/eval/builders.zig"]
+fixed_in = "e2a5f7e"
+test = [
+  "bus-port rejects an index range whose span overflows i64",
+  "bus-port still expands an ordinary index range",
+]
+note = "Negative indices are now rejected (bus-net always did; this restores the parity an earlier cast fix left half-applied) and the span is computed in i128."
+
+[[finding]]
+id = "DRIFT-UB-001"
+summary = "numeric.checkedInt's INCLUSIVE upper bound compared equal at maxInt for u64/i64/usize and handed an out-of-range value to @intFromFloat — UB in the safety-off production build"
+severity = "high"
+status = "fixed"
+file = ["src/numeric.zig"]
+fixed_in = "e2a5f7e"
+test = "checkedInt is exact at each type's maximum"
+reopens = "JUL-K1"
+note = "checkedInt is the one wrapper guardian.toml's [int_from_float] lets a raw @intFromFloat hide inside, so its bound is a safety property of the whole tree. The bound is now the exclusive maxInt(T)+1, which is a power of two and therefore exact in f64 at every width."
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 2026-08-29 drift audit — silent wrong output
+# ────────────────────────────────────────────────────────────────────────────
+
+[[finding]]
+id = "DRIFT-OUT-001"
+summary = "the footprint converter wrote pad numbers as bare tokens, so netlisp's own SI-aware tokenizer re-read `5V` as 5 — and padNumberText returns null for a float, so the pad drops out of the netlist entirely while its copper stays"
+severity = "high"
+status = "fixed"
+file = ["src/convert/footprint.zig"]
+fixed_in = "e2a5f7e"
+test = "convert quotes pad numbers so SI-shaped names survive a re-parse"
+reopens = "JUL-K6"
+
+[[finding]]
+id = "DRIFT-OUT-002"
+summary = "the KiCad importer's board emitter had the same bare-token pad number and pin id defect as the footprint converter"
+severity = "high"
+status = "fixed"
+file = ["src/import_kicad.zig"]
+fixed_in = "e2a5f7e"
+test = [
+  "import quotes SI-shaped pad numbers and pin ids",
+  "bareIdRoundTrips accepts only self-identical bare tokens",
+]
+reopens = "JUL-K6"
+note = "Quoted only when the bare form would not round-trip, so ordinary numeric pads are untouched."
+
+[[finding]]
+id = "DRIFT-OUT-003"
+summary = "native Gerber arcs picked G02/G03 from a cross product of 4.6-quantized coordinates, discarding the signed sweep the model already had, so a sub-lattice sliver could emit as a near-full turn of spurious copper"
+severity = "high"
+status = "fixed"
+file = ["src/export_gerber.zig"]
+fixed_in = "e2a5f7e"
+test = [
+  "arc direction survives coordinate quantization",
+  "sub-lattice arcs degrade to a straight chord",
+]
+
+[[finding]]
+id = "DRIFT-OUT-004"
+summary = "Excellon tool bucketing could match one hole to two adjacent tools and drill it twice"
+severity = "high"
+status = "fixed"
+file = ["src/export_fab.zig"]
+fixed_in = "e2a5f7e"
+test = [
+  "excellonDrill drills each clustered-diameter hole exactly once",
+  "toolFor partitions overlapping diameter buckets",
+]
+
+[[finding]]
+id = "DRIFT-OUT-005"
+summary = "net_open classified a pad gap from the pad's BOUNDING BOX, so after the adaptive-width merge made the gap's sign a severity input, a rotated or concave land's empty box corner demoted a genuine union-find-confirmed open to a warning"
+severity = "high"
+status = "fixed"
+file = ["src/placement/net_open.zig"]
+fixed_in = "e2a5f7e"
+test = "a rotated land's empty box corner does not demote its open to a graze warning"
+note = "The class-deciding gap is now measured against the real outline, with the box kept as a pre-filter so axis-aligned lands take the identical fast path."
+
+[[finding]]
+id = "DRIFT-ERC-001"
+summary = "ERC's max_voltage was parsed and shown in the review's contract table and read by NO checker, so a 5V driver on a 1.8V-max receiver passed clean"
+severity = "high"
+status = "fixed"
+file = ["src/erc.zig"]
+fixed_in = "e2a5f7e"
+test = [
+  "overvoltage above a declared max-voltage is an error",
+  "declared rail voltage over-stresses a rated pin",
+  "driver inside the declared rating emits no overvoltage",
+]
+guard = "guardian-zig dead-model-field"
+note = "Overvoltage is error-severity and sourced ONLY from declared voltages — a guessed voltage must not fail an error check. The new dead-model-field Guardian rule finds the next field written and surfaced but read by no enforcement path."
+
+[[finding]]
+id = "DRIFT-ERC-002"
+summary = "the orphaned-verification check, added in the same wave that made six ERC checks recurse, was itself still top-level only — a dangling (verifies …) sign-off inside a reused module went unflagged"
+severity = "medium"
+status = "fixed"
+file = ["src/erc.zig"]
+fixed_in = "e2a5f7e"
+test = "orphaned verification inside a sub-block is flagged"
+reopens = "JUL-K9"
+
+[[finding]]
+id = "DRIFT-ERC-003"
+summary = "the strap direct-tie check did not share the power-pin check's supply-rail vocabulary, so point, underscore and signed rail spellings were invisible to it"
+severity = "medium"
+status = "fixed"
+file = ["src/erc.zig"]
+fixed_in = "e2a5f7e"
+test = "strap rail predicate recognises point underscore and signed rails"
+
+[[finding]]
+id = "DRIFT-ERC-004"
+summary = "req_derived_checks carried a private parseOhms that had fallen behind the canonical one — no milliohm `m`, giga `G` or spelled-out `ohm` suffix — so a 10m current-sense shunt was null-skipped by the derived checks while req_checks read it as 0.01 ohm"
+severity = "medium"
+status = "fixed"
+file = ["src/req_derived_checks.zig"]
+fixed_in = "e2a5f7e"
+test = "derived checks read resistor values through the canonical ohms parser"
+guard = "guardian.toml [[idiom]] parse-ohms-duplicate"
+note = "One value grammar must have exactly one parser; the Guardian idiom rule fails the next copy."
+
+[[finding]]
+id = "DRIFT-ERC-005"
+summary = "the feedback-divider collector overwrote top/bottom on every match, so which resistor won depended on instance order — and a wrongly-picked leg computes a VOUT that can make a mis-set rail false-PASS"
+severity = "medium"
+status = "fixed"
+file = ["src/req_derived_checks.zig"]
+fixed_in = "e2a5f7e"
+test = "ambiguous feedback leg is reported rather than resolved by instance order"
+
+[[finding]]
+id = "DRIFT-ERC-006"
+summary = "the rail-name voltage fallback did not decode the imported underscore-decimal or signed negative rail spellings"
+severity = "medium"
+status = "fixed"
+file = ["src/req_derived_checks.zig"]
+fixed_in = "e2a5f7e"
+test = "voltageFromRailName decodes imported and negative rail spellings"
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 2026-08-29 drift audit — data loss
+# ────────────────────────────────────────────────────────────────────────────
+
+[[finding]]
+id = "DRIFT-DATA-001"
+summary = "seven sites rewrote a user's design source, library part or notes with a truncating createFile + writeAll, so a crash between the two syscalls left the file empty"
+severity = "critical"
+status = "fixed"
+file = [
+  "src/infra/atomic_write.zig",
+  "src/serve/edit.zig",
+  "src/serve/notes.zig",
+]
+fixed_in = "e2a5f7e"
+test = [
+  "writeFile replaces the target with exactly the new bytes",
+  "a staged write abandoned before commit leaves the previous contents intact",
+  "neither a committed nor an abandoned write leaves a temporary file behind",
+  "two concurrent writers staging one target use distinct temporaries and the later commit wins whole",
+  "an oversized body larger than the staging buffer lands whole",
+  "write and commit on a Staged whose begin never succeeded return NotStaged",
+]
+guard = "guardian.toml [[ban]] on the non-atomic writers"
+reopens = "JUL-THEME-5"
+note = "infra/atomic_write.zig — the canonical home guardian.toml's tmp-rename-write idiom had always NAMED and which never existed — is now real, wrapping infra/fs.zig's AtomicFile and adding the fsync it lacked. Atomicity is not serialization: this stops a torn file, not a lost update."
+
+[[finding]]
+id = "DRIFT-DATA-002"
+summary = "the layout sidecar had NO locking at all — its optimistic rev guard was a check-then-write, and the GET-side dedup and the regen thread rewrote the current rev without consulting it"
+severity = "critical"
+status = "fixed"
+file = [
+  "src/layout_sidecar_store.zig",
+  "src/serve/layout_backfill.zig",
+  "src/serve/pcb_layout_import.zig",
+]
+fixed_in = "e2a5f7e"
+test = [
+  "the layout save holds one sidecar lock across its whole revision check-then-write",
+  "one sidecar always maps to one lock slot and the guard releases it",
+  "the render and regenerate sidecar writers hold the sidecar lock",
+]
+reopens = "JUL-THEME-5"
+note = "Every read-modify-write now runs under a per-sidecar lock, with the expensive work (design resolve, solving, scoring) deliberately outside it. layout_backfill and pcb_layout_import were two writers the first pass could not reach."
+
+[[finding]]
+id = "DRIFT-DATA-003"
+summary = "the via dedup key omitted the layer span, collapsing a blind and a through via that share one hole into a single via"
+severity = "high"
+status = "fixed"
+file = ["src/layout_sidecar_store.zig"]
+fixed_in = "e2a5f7e"
+test = "the sidecar keeps two same-hole vias whose layer spans differ"
+
+[[finding]]
+id = "DRIFT-DATA-004"
+summary = "the authoritative KiCad push silently skipped copper whose net no longer resolved, with no counter — so a push that DROPPED copper looked clean"
+severity = "high"
+status = "fixed"
+file = ["src/serve/sync.zig"]
+fixed_in = "e2a5f7e"
+test = "emitAuthoritativeLayout accounts for the copper it drops on a since-removed net"
+note = "Emitted plus dropped now accounts for every saved track and via."
+
+[[finding]]
+id = "DRIFT-JS-001"
+summary = "in the browser editor, saved-layout rows aliased the live copper arrays, so Load could not revert an edit"
+severity = "high"
+status = "fixed"
+untested = true
+file = ["src/serve/assets/pcb_board.js"]
+fixed_in = "e2a5f7e"
+guard = "guardian.toml [[external]] pcb-board-js-syntax (syntax only)"
+note = "NO REGRESSION TEST. Fixed by splitting cloneZoneList/cloneOutlineOf out of the live-board reader so both ownership boundaries deep-copy, but nothing asserts it: no zig source-scanning test embeds pcb_board.js for this, and the only JS gates are `node --check` syntax gates. A future edit that re-aliases the arrays passes every tier. This is the highest-value missing test in the ledger."
+
+[[finding]]
+id = "DRIFT-JS-002"
+summary = "a queued autosave captured its payload at dequeue but its NAME at enqueue, so it could write layout B's board into row A"
+severity = "high"
+status = "fixed"
+untested = true
+file = ["src/serve/assets/pcb_board.js"]
+fixed_in = "e2a5f7e"
+guard = "guardian.toml [[external]] pcb-board-js-syntax (syntax only)"
+note = "NO REGRESSION TEST — same gap as DRIFT-JS-001. A cross-layout write is silent data loss into the wrong row, and nothing in the tree would fail if the name capture moved back to enqueue."
+
+[[finding]]
+id = "DRIFT-JS-003"
+summary = "undo left the identity-keyed copper selection dangling, making a stale Delete a no-op that still recorded an undo entry — which wiped redoStack and made the just-undone edit unredoable"
+severity = "medium"
+status = "fixed"
+untested = true
+file = ["src/serve/assets/pcb_board.js"]
+fixed_in = "e2a5f7e"
+guard = "guardian.toml [[external]] pcb-board-js-syntax (syntax only)"
+note = "NO REGRESSION TEST — same gap as DRIFT-JS-001. Fixed by clearing both selCu and the inspector on every restore, the way the drag-rollback callers already did by hand."
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 2026-08-29 drift audit — duplicated rules, gates and infrastructure
+# ────────────────────────────────────────────────────────────────────────────
+
+[[finding]]
+id = "DRIFT-LIB-001"
+summary = "a 256 KiB library-file read cap was duplicated across five readers, below the class-owned lib_limits cap, and every reader SWALLOWED the over-cap read — so a large pinout went missing from a page, a BOM row or a pin-name map instead of erroring"
+severity = "medium"
+status = "fixed"
+file = [
+  "src/lib_limits.zig",
+  "src/eval/ids.zig",
+  "src/serve/bom_html.zig",
+  "src/serve/api.zig",
+  "src/render_json.zig",
+]
+fixed_in = "e2a5f7e"
+test = [
+  "loadPinoutFile loads a pinout past the retired 256 KiB cap",
+  "buildSymbolPinCache loads a pinout past the retired 256 KiB cap",
+  "the pinout endpoint serves a pinout past the retired 256 KiB cap",
+  "the scene-graph pinout readers load a pinout past the retired 256 KiB cap",
+  "the synthetic over-cap pinout straddles the retired cap",
+]
+guard = "guardian.toml [[idiom]] lib-read-cap-256k-mul, lib-read-cap-256k-shift"
+note = "lib_limits.retired_lib_file_cap_bytes records the superseded 256 KiB figure so the 'raise never lower' rule is testable rather than only asserted: every reader's regression test sizes its fixture off it. The swallow remains, but is now logged."
+
+[[finding]]
+id = "DRIFT-FAB-001"
+summary = "the non-waivable release-block ids were coupled to the code that EMITS them by nothing but the spelling of a string, so renaming an emit site left the error visible in the report while silently demoting it to waivable past `?waive=1`"
+severity = "medium"
+status = "fixed"
+file = ["src/fab_gate.zig"]
+fixed_in = "e2a5f7e"
+test = "non-waivable release ids still exist at their emit sites"
+
+[[finding]]
+id = "DRIFT-FILL-001"
+summary = "a fill-cache board entry declined by the byte ceiling released one raster ref per node it NAMED — refs it had never taken — driving the session's borrow count under and handing the lending pass an underflow"
+severity = "medium"
+status = "fixed"
+file = ["src/placement/fill_cache.zig"]
+fixed_in = "e2a5f7e"
+test = "a declined oversized board entry gives back only the raster claims it took"
+
+[[finding]]
+id = "DRIFT-DRC-001"
+summary = "user-zone net attribution scanned case-insensitively before trying the exact canonical spelling, so a differently-cased twin could be marked while the group that actually reads the fill stayed carried — a stale answer rather than a slow one"
+severity = "medium"
+status = "fixed"
+file = ["src/placement/drc_compose.zig"]
+fixed_in = "e2a5f7e"
+test = "a user zone's net resolves by exact spelling first and by hierarchy leaf after"
+
+[[finding]]
+id = "DRIFT-INFRA-001"
+summary = "test_affected.py could not see the two shard-manifest integrity tests, so a missing shard claim passed every cheap tier and failed only at prepare-release — twice in one day"
+severity = "medium"
+status = "fixed"
+file = ["scripts/test_affected.py", "src/test_shards.zig"]
+fixed_in = "e2a5f7e"
+test = [
+  "shard manifest runs every named test exactly once",
+  "the shard import bridge lists every module whose tests run",
+]
+note = "The fix is two names added to test_affected.py's ALWAYS_FILTERS plus src/test_shards.zig added to FULL_RUN_FILES. Those two names are STRINGS in a Python list — nothing else in the tree checks they still resolve, so renaming either test silently reverts the fix. Naming them here is what makes this ledger's test-existence check the guard for it."
+
+[[finding]]
+id = "DRIFT-INFRA-002"
+summary = "systemd/netlisp.service still ran zig-out/bin — the path any `zig build` overwrites, and the one behind the 2026-08-19 Debug-in-prod incident — while the live unit and the rendered template both used .deploy/bin"
+severity = "high"
+status = "fixed"
+untested = true
+file = ["systemd/netlisp.service"]
+fixed_in = "e2a5f7e"
+guard = "scripts/test_production_toolchain_pin.sh"
+note = "NO ZIG TEST — deliberately. The guard is a shell assertion in scripts/test_production_toolchain_pin.sh that the unit's ExecStart names .deploy/bin/netlisp, never zig-out, and matches .githooks/netlisp.service.in. That script's existence is checked by this ledger; its contents are not."
+
+[[finding]]
+id = "DRIFT-INFRA-003"
+summary = "12 first-party JS assets had no syntax gate at all and shape_sketch.test.js was wired to no runner"
+severity = "medium"
+status = "fixed"
+untested = true
+file = ["guardian.toml"]
+fixed_in = "e2a5f7e"
+guard = "guardian.toml [[external]] — 14 node gates"
+note = "NO ZIG TEST, and none is appropriate: the fix IS the gate. Recorded so a later guardian.toml edit that drops the externals is a visible regression rather than a silent one. Verifying the 14 external blocks still exist is out of this checker's scope."
+
+[[finding]]
+id = "DRIFT-SIZE-001"
+summary = "src/serve/pcb_layout_page.zig sits at 96% of its hard size ratchet (18,030 lines) and Guardian is asking for a split"
+severity = "low"
+status = "open"
+file = ["src/serve/pcb_layout_page.zig"]
+note = "Left as its own change by the fix wave, deliberately. e2a5f7e kept it under the ratchet only by moving a source-scanning test to the sidecar store and extracting the client-revision parse — headroom that is now spent. The next feature-sized edit to this file will fail the ratchet, so the split is due before the next change here, not after."
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 2026-07-01 audit — the three Criticals
+#
+# Closed, and re-checked clean by the 2026-08-29 audit. They are tracked here
+# because they are the highest-severity findings this tree has ever had and
+# their guards are exactly the ones that must never quietly disappear.
+# ────────────────────────────────────────────────────────────────────────────
+
+[[finding]]
+id = "JUL-C1"
+summary = "`Host: localhost` header = full unauthenticated admin — 'am I local?' was decided from the client-controlled Host header while the server binds 0.0.0.0, short-circuiting all auth and promoting to admin"
+severity = "critical"
+status = "fixed"
+file = ["src/serve/auth.zig", "src/serve.zig"]
+fixed_in = "pre-2026-08-29"
+test = [
+  "auth-request: a non-loopback peer does not receive the dev bypass",
+  "auth-request: dev mode disabled forbids the loopback bypass",
+  "auth-request: ipv6 loopback bypasses and a non-loopback ipv6 peer does not",
+]
+note = "Locality is now derived from the TCP peer address and gated on an explicit dev mode. The three tests cover both halves: peer-derived, and disable-able."
+
+[[finding]]
+id = "JUL-C2"
+summary = "arbitrary file write to RCE via the X-Filename header — the zip/model upload path templated the unsanitized header into /tmp/netlisp-upload-{s}, and `../../../` escaped /tmp under a systemd --user unit"
+severity = "critical"
+status = "fixed"
+untested = true
+file = ["src/serve/upload.zig", "src/serve/library.zig"]
+fixed_in = "pre-2026-08-29"
+guard = "src/serve/library.zig isSafeLibName (tested separately)"
+note = "NO REGRESSION TEST for the fixed path. The fix is real and well-commented (upload.zig:20-33: the temp name is minted from a process-unique atomic counter and both template fields are our own, so no request input reaches the path) but no test asserts it. The sibling traversal guard IS tested — `isSafeLibName allows part-number commas and + series suffixes but still rejects traversal + separators` — and upload_datasheet.zig has four sanitizeFilename tests, but neither covers this file's temp-path minting. A future edit that reintroduces the header into the template would pass the suite."
+
+[[finding]]
+id = "JUL-C3"
+summary = "session-token theft via /api/module-source?src=auth/sessions.json — the 'copy source' reader blocked only `..` and a leading `/`, so any reader could read the raw live token store and impersonate admin"
+severity = "critical"
+status = "fixed"
+file = ["src/serve/modules.zig"]
+fixed_in = "pre-2026-08-29"
+test = "sourceIsSafe rejects markup metacharacters and traversal"
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 2026-07-01 audit — the escaping class
+#
+# This is the class that has already reopened once (JUL-S4 → DRIFT-SEC-001..004)
+# and the reason this ledger exists. Escaping in this tree is applied by
+# convention, not by construction: correct escapers exist and are used ALMOST
+# everywhere. Every entry below is a site that bypassed one.
+# ────────────────────────────────────────────────────────────────────────────
+
+[[finding]]
+id = "JUL-S3"
+summary = "the entire SVG emit path wrote net names, ref-des, values and pin labels into markup unescaped — XSS reachable via import-kicad net names, uploaded symbols and MCP write_file"
+severity = "high"
+status = "fixed"
+file = [
+  "src/render_svg/draw.zig",
+  "src/render_svg/branch.zig",
+  "src/render_svg/section_inset.zig",
+  "src/render_svg/connection.zig",
+]
+fixed_in = "pre-2026-08-29"
+test = [
+  "drawNetWire escapes a quote/angle-bracket in the net name",
+  "writeXml neutralizes a script/attribute breakout",
+]
+note = "The second test guards the canonical escaper the whole class now routes through; the first proves the render_svg sink actually calls it."
+
+[[finding]]
+id = "JUL-S4"
+summary = "`</script>` breakout in the `<script>const PCB=…</script>` blob — writeJsonStr was a JSON escaper, not a script-context escaper, so a saved-layout, net or ref name containing `</script>` was stored XSS"
+severity = "high"
+status = "fixed"
+file = ["src/json_writer.zig", "src/serve/pcb_layout_page.zig"]
+fixed_in = "pre-2026-08-29"
+test = "script strings escape closing tags and JavaScript line separators"
+note = "REOPENED, and this is the ledger's motivating case. The July fix hardened the central writer; three sibling serializers into the same blob never adopted it and one more vector was never covered at all — see DRIFT-SEC-001 through DRIFT-SEC-004. The central fix was correct and tested the whole time. Nothing checked that its SIBLINGS used it, so the class stayed open for two months with a green suite."
+
+[[finding]]
+id = "JUL-S5"
+summary = "stored XSS in the schematic BOM card — component, value, MPN, manufacturer and datasheet href rendered with raw {s}, and MPN/manufacturer are attacker-writable via editMpnApi"
+severity = "high"
+status = "fixed"
+untested = true
+file = ["src/serve/bom_html.zig"]
+fixed_in = "pre-2026-08-29"
+guard = "src/escape.zig writeXml (tested separately)"
+note = "NO CARD-LEVEL REGRESSION TEST. The fix is in place — every field now goes out through escape.writeXml (bom_html.zig:218-287) — and the canonical escaper has its own test (`writeXml neutralizes a script/attribute breakout`), but nothing asserts that THIS module still calls it. The only bom_html test in the tree, `correctness: bom_html.writeComponentsJson escapes double-quotes in string fields`, covers the JSON writer, not the HTML card. This is precisely the shape JUL-S4 reopened in: a correct central escaper and an unchecked call site."
+
+[[finding]]
+id = "JUL-S6"
+summary = "reflected XSS plus arbitrary .sexp/model read in the 3D viewer — the :footprint param was embedded raw in HTML and interpolated into read paths with no name validation"
+severity = "high"
+status = "fixed"
+untested = true
+file = ["src/serve/library_3d.zig"]
+fixed_in = "pre-2026-08-29"
+guard = "isSafeFootprint at library_3d.zig:41"
+note = "NO REGRESSION TEST for either half. The fix is real — isSafeFootprint gates all five entry points (:89, :259, :288, :329, :610) and the param is written through escape.writeXml (:345, :353) — but no test exercises isSafeFootprint, so a weakened predicate reopens both the traversal and the reflected-XSS halves silently. The module's one test covers writeJsonString's control-char handling only."
+
+[[finding]]
+id = "JUL-S7"
+summary = "render_html's title and data-ref, and the scene-graph JSON `name`, were unescaped — an RCDATA/attribute/JSON breakout sitting right next to correctly-escaped siblings"
+severity = "high"
+status = "fixed"
+file = ["src/render_html.zig", "src/render_json.zig"]
+fixed_in = "pre-2026-08-29"
+test = "serializeScene escapes a quote/backslash in the design name"
+note = "PARTIAL COVERAGE. The render_json half is tested. The render_html half is fixed (writeHtmlEscaped at render_html.zig:149, :414, :886) but has no test of its own — no test in render_html.zig covers title or data-ref escaping. Treat this entry as guarding one of two sites."
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 2026-07-01 audit — the three classes that reopened on 2026-08-29
+#
+# Each was genuinely fixed in July. Each came back somewhere the July fix did
+# not reach. They are tracked so the NEXT reopening is visible immediately.
+# ────────────────────────────────────────────────────────────────────────────
+
+[[finding]]
+id = "JUL-K1"
+summary = "unchecked @intFromFloat on design/layout numbers was UB in the shipping safety-off build — a NaN or huge value from a .sexp or a corrupt layouts.json became memory-unsafe UB, not a clean error, across ~8 sites in 5 subsystems"
+severity = "high"
+status = "fixed"
+file = ["src/numeric.zig", "src/eval/design_block.zig", "src/eval/builders.zig", "src/raster.zig"]
+fixed_in = "pre-2026-08-29"
+test = [
+  "checkedInt rejects NaN and infinities",
+  "checkedInt rejects out-of-range and rounds in-range",
+]
+note = "CLASS REOPENED at the boundary: the shared checkedInt guard was correct for NaN, infinity and ordinary out-of-range values, and wrong at exactly maxInt for u64/i64/usize — see DRIFT-UB-001. A guard used tree-wide is worth testing at its edges, not just its middle."
+
+[[finding]]
+id = "JUL-K6"
+summary = "use-after-scope: bare-integer pad numbers returned a dangling stack slice in the footprint converter, giving garbage pad names in generated library footprints and a broken pad-to-net mapping"
+severity = "high"
+status = "fixed"
+file = ["src/convert/footprint.zig"]
+fixed_in = "pre-2026-08-29"
+test = "convert bare-int pad numbers do not dangle"
+note = "CLASS REOPENED in a different shape: July fixed the LIFETIME of a bare pad token, and left the bare token itself. netlisp's own SI-aware tokenizer then re-read `5V` as 5 on the way back in, dropping the pad from the netlist — see DRIFT-OUT-001 and DRIFT-OUT-002. Same field, same file, adjacent bug."
+
+[[finding]]
+id = "JUL-K9"
+summary = "half the ERC rules never recursed into sub-blocks (dup-refdes, missing value/footprint, pin-functions, pin-multi-net, voltage-domain), so module internals silently passed checks the top level would fail"
+severity = "high"
+status = "fixed"
+file = ["src/erc.zig"]
+fixed_in = "pre-2026-08-29"
+test = "duplicate ref-des across a sub-block boundary is flagged"
+note = "CLASS REOPENED: the wave that made six ERC checks recurse ADDED the orphaned-verification check in the same change and left it top-level only — see DRIFT-ERC-002. A fix wave is itself a place new instances of the class get introduced."
+
+[[finding]]
+id = "JUL-THEME-5"
+summary = "cross-cutting: non-atomic writes on state that matters — .layouts.json written on GET with no lock, the auth stores truncate-then-write, insertPendingIds rewriting hand-authored .sexp non-atomically"
+severity = "high"
+status = "fixed"
+file = ["src/infra/fs.zig", "src/infra/atomic_write.zig"]
+fixed_in = "pre-2026-08-29"
+test = "writeFile replaces the target with exactly the new bytes"
+note = "CLASS REOPENED twice. July's recommendation was 'route every state write through the existing atomic-write-with-backup helper' — and guardian.toml went on NAMING an infra/atomic_write.zig that did not exist, while seven design-source, library and notes writes stayed non-atomic (DRIFT-DATA-001) and the layout sidecar had no locking at all (DRIFT-DATA-002). A recommendation is not a fix, and a Guardian idiom that names a nonexistent module guards nothing."

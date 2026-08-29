@@ -796,6 +796,70 @@ discrepancy.
 - completeness-waiver: integer overflow (no arithmetic on the dump path beyond formatting already-computed violation fields)
 - completeness-waiver: panic-free (every failing stage degrades to a comment line and the next board; a DRC seam that errors contributes an empty list rather than aborting the dump)
 
+## gerber-dump
+
+Public functions: cmdGerberDump
+
+The Gerber half of the differential tier, and the answer to a class of bug no
+other gate here can see. Three defects found by the 2026-08-29 audit changed
+EMITTED BYTES while every count stayed identical: an arc's sweep direction taken
+from quantized coordinates rather than the model (a sliver emitting as a
+near-full turn of spurious copper), a bare pad token the SI tokenizer re-read as
+a number, and a hole matched to two adjacent drill tools. Unit tests did not
+cover them, and the DRC gate counts findings rather than reading artwork.
+
+It drives the real writers — the same `fabViewFor` selector the fabrication
+endpoints use, then `planLayers`/`writeLayer`/`writeJobFile`/`excellonDrill` in
+the package's own order and under its own entry names — so the bytes compared
+are the bytes that ship. It is NOT a release path: no archive, no revision lock,
+no readiness evidence, nothing a fab could be handed; it answers only "what does
+the writer produce". Determinism comes from passing no clock stamp, so the
+`%TF.CreationDate` a released package carries is simply absent.
+
+Read a diff with one thing in mind: the fabrication identity is stamped into the
+silk, so ANY artwork change also moves the `fab-id` line and both silk layers.
+That coupling is the canary that the board changed at all — but it means the
+layer worth reading first is the one that is not silk.
+
+- the CLI parses the project dir, the saved-layout selector and the digest-only flag with positionals as design names
+- two dumps of one board are byte-identical, and the creation-date stamp a released package carries is absent from the compared output
+- every line of the dumped artwork is compared while the command's per-run numbers stay on #-prefixed lines, and --digest keeps every member banner while dropping the bodies
+- a board that fails to resolve marks the run UNRESOLVED and the command fails, so a corpus differential can never read a vacuous pass as green
+
+- completeness-waiver: empty inputs (a dump naming no design is a usage error rather than an empty dump that would trivially match any comparison; a board that does not resolve prints one marked comment line and fails the run)
+- completeness-waiver: large inputs (each board runs in its own arena, freed before the next, so a corpus dump peaks at one board's artwork; `--digest` drops the bodies when the bytes themselves are not wanted)
+- completeness-waiver: unauthorized access (a local read-only CLI over the caller's own project directory; no network, no auth surface, and no file is written)
+- completeness-waiver: concurrent access (single-threaded, and the process-wide fill memo it reads through is itself mutex-guarded and refcounted)
+- completeness-waiver: i/o failure (a design that cannot be evaluated or whose layout cannot be restored prints an UNRESOLVED comment for that board; the remaining boards still dump, then the command fails)
+- completeness-waiver: malformed encoding (the design and its saved layout are parsed by the same seam the PCB page uses, which rejects malformed input long before any artwork exists to write)
+- completeness-waiver: integer overflow (no arithmetic on the dump path beyond the writers' own already-audited coordinate quantization)
+- completeness-waiver: panic-free (every failing stage degrades to a comment line and the next board rather than aborting the dump)
+
+## netlist-dump
+
+Public functions: cmdNetlistDump
+
+The connectivity half of the differential tier. A pad that silently leaves a net
+is invisible to every count-based gate — the audit's pad-quoting bug did exactly
+that, because a pad whose bare token re-read as a float returned null from the
+reader and dropped out of the netlist while its copper stayed on the board. One
+sorted line per net, each carrying its sorted `refdes.pad` members, turns that
+into a one-line diff. It reuses `flat_netlist.flattenAndMergeNets` over a block
+from the read-only resolve path rather than walking the hierarchy again.
+
+- the CLI parses the project dir with positionals as design names and refuses a run that names no design
+- every net renders one compared line carrying its sorted refdes.pad members, nets sort by name, the same netlist dumps byte-identically twice, and a reordering of either is not a difference
+- a design that fails to resolve marks the run UNRESOLVED and the command fails, producing no compared line at all rather than a vacuous match
+
+- completeness-waiver: empty inputs (a run naming no design is a usage error; a design with no nets renders no compared line and is reported rather than passing as a trivial match)
+- completeness-waiver: large inputs (one arena per design, freed before the next, so a corpus dump peaks at one design's flattened netlist)
+- completeness-waiver: unauthorized access (a local read-only CLI over the caller's own project directory; no network, no auth surface, and no file is written)
+- completeness-waiver: concurrent access (single-threaded, sharing no state between designs)
+- completeness-waiver: i/o failure (a design that cannot be resolved prints an UNRESOLVED comment and the command fails after every design has had its chance)
+- completeness-waiver: malformed encoding (the design is parsed by the same evaluator seam the PCB page uses, which rejects malformed input before a net exists to print)
+- completeness-waiver: integer overflow (no arithmetic beyond formatting already-computed net and pad counts)
+- completeness-waiver: panic-free (a design that fails to resolve degrades to a comment line and the next design)
+
 ## bench-page
 
 Public functions: benchOne, corpus, writeTable, writeResultsJson, cmdBenchPage
@@ -7000,6 +7064,7 @@ is what makes the predicate exact rather than approximately right.
 - The one-parse layout read still falls back to the legacy .autolayout.json cache when the sidecar carries no cache slot
 - Silk texts resolve against an already-parsed layout list, naming the requested row or falling back to the starred default
 - A named layout save holds one sidecar lock across its whole revision check-then-write, so two saves that observed the same revision cannot both be accepted
+- Concurrent writers of one design's layout sidecar are serialized so that every accepted write advances the revision by exactly one and no write's saved row is overwritten by a peer that read the same revision
 - Edit-source provenance in the PCB blob is escaped for the script element, so neither a ref-des key nor an instance label can close the tag
 - One sidecar always hashes to one lock slot and its guard releases it, so a collision only over-serializes and can never deadlock
 - Part fields in the PCB blob are escaped for the script element they sit in, so no ref-des, value, MPN, footprint, pad or pad-net name can close the tag

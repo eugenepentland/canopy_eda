@@ -944,11 +944,11 @@ fn storeFunctionBody(source: []const u8, signature: []const u8, next: []const u8
 // path holds, and `displayLayouts` must re-read inside it, because the list it
 // was handed was read before the hold began.
 //
-// Threads are deliberately absent: a real stress test needs two OS threads
-// driving `saveNamedLayoutApi` against one design through a live `httpz`
-// server, a barrier releasing both inside the critical section, and N rounds
-// asserting the final rev equals the number of 200s. That needs a server
-// harness, so what is pinned here is the structure the lock depends on.
+// Threads are absent from THIS assertion by design. That the lock orders real
+// concurrent writers is proven at the end of this file, on real OS threads;
+// what cannot be reached without a live `httpz` harness is these two specific
+// call sites, so what is pinned here is the structure the runtime guarantee
+// then rests on.
 // spec: Web Server - The revision-free sidecar writers, the render dedup and the regenerate record, re-read under the sidecar lock rather than trusting a value read before it
 test "the render and regenerate sidecar writers hold the sidecar lock" {
     const source = @embedFile("layout_sidecar_store.zig");
@@ -1010,10 +1010,10 @@ test "one sidecar always maps to one lock slot and the guard releases it" {
 // design resolve, which dominates this handler's cost, must stay outside it or
 // every concurrent editor queues behind a block evaluation.
 //
-// A true concurrency test needs two OS threads driving this handler against one
-// design through a live `httpz` server, a barrier releasing both inside the
-// hold, and N rounds asserting the final rev equals the number of 200s. That
-// wants a server harness; this pins the structure the guarantee rests on, the
+// That the lock actually serializes concurrent writers is proven on real OS
+// threads at the end of this file. Driving THIS handler that way additionally
+// needs a live `httpz` server, so what is pinned here is the wiring that puts
+// the handler's own check-then-write inside that proven critical section, the
 // way "layout save validates before snapshotting recovery history" does.
 // spec: Web Server - A named layout save holds one sidecar lock across its whole revision check-then-write, so two saves that observed the same revision cannot both be accepted
 test "the layout save holds one sidecar lock across its whole revision check-then-write" {
@@ -1055,4 +1055,191 @@ test "the layout save holds one sidecar lock across its whole revision check-the
         return error.TestExpectedRevPrecheck;
     try std.testing.expect(layers < lock);
     try std.testing.expect(precheck < layers);
+}
+
+// ── The lock at runtime ──────────────────────────────────────────────────────
+//
+// Every assertion above pins STRUCTURE: that the source text takes the lock
+// before it reads. Structure cannot show the lock actually ORDERS anything, so
+// what follows drives the genuine read-modify-write from real OS threads against
+// a real file and asserts the invariant the lock exists for.
+//
+// Real threads work here, and the reason is worth recording because the `std.Io`
+// rewrite makes it non-obvious. `infra_fs.Mutex` wraps `std.Io.Mutex`, whose
+// `lockUncancelable` is a compare-and-swap on an atomic state word that
+// futex-waits when it loses the race; under test `infra_fs.currentIo()` returns
+// `std.testing.io`, an `Io.Threaded` whose `futexWaitUncancelable` discards its
+// userdata entirely and calls the plain OS futex. No thread-pool membership,
+// fiber, or event loop is involved, so a bare `std.Thread` blocks and wakes
+// correctly — the same basis on which `serve/thermal_cache.zig` already hammers
+// an `infra_fs.Mutex` from four spawned threads.
+//
+// Scope: this proves the store-level critical section serializes concurrent
+// writers. It does NOT drive `saveNamedLayoutApi` itself — that handler still
+// wants a live server harness, which is why the structure assertions above stay.
+
+/// One writer in the lost-update stress test.
+const SidecarStressWriter = struct {
+    project_dir: []const u8,
+    design: []const u8,
+    id: usize,
+    rounds: usize,
+    go: *std.atomic.Value(bool),
+    accepted: *std.atomic.Value(u64),
+    /// Backing allocator for this writer's private arena, injected by the test
+    /// rather than reached for here: the writers must share no allocator state,
+    /// or a failure could come from allocator contention instead of the lock.
+    gpa: std.mem.Allocator,
+
+    fn run(self: SidecarStressWriter) void {
+        // Per-thread arena: the writers then share no allocator state at all, so
+        // nothing here can pass or fail for a reason other than the sidecar lock.
+        var arena_state = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena_state.deinit();
+        // Released together, so every writer's first round reaches the revision
+        // read at the same instant — precisely the overlap the lock must absorb.
+        while (!self.go.load(.acquire)) std.atomic.spinLoopHint();
+        for (0..self.rounds) |round| {
+            _ = arena_state.reset(.retain_capacity);
+            if (self.writeRound(arena_state.allocator(), round)) _ = self.accepted.fetchAdd(1, .acq_rel);
+        }
+    }
+
+    /// The real save shape: lock, read the revision, read the list, append this
+    /// writer's own row, write back at `rev + 1`, confirm, unlock.
+    fn writeRound(self: SidecarStressWriter, alloc: std.mem.Allocator, round: usize) bool {
+        const row = std.fmt.allocPrint(alloc, "w{d}-{d}", .{ self.id, round }) catch return false;
+
+        const guard = lockSidecar(self.design, null);
+        defer guard.unlock();
+
+        const disk_rev = readLayoutRev(alloc, self.project_dir, self.design, null);
+        var out: std.ArrayList(SavedLayout) = .empty;
+        out.appendSlice(alloc, readLayoutsSub(alloc, self.project_dir, self.design, null)) catch return false;
+        out.append(alloc, .{
+            .name = row,
+            .kind = kind_manual,
+            .ts = @intCast(round),
+            .score = null,
+            .parts = &.{},
+        }) catch return false;
+
+        const next = disk_rev + 1;
+        writeLayoutsSubRev(alloc, self.project_dir, self.design, null, out.items, next);
+        // `writeLayoutsSubRev` is best-effort and returns void, so the write is
+        // confirmed from disk while the lock is still held. Counting only
+        // confirmed writes is what keeps "the final revision equals the number of
+        // accepted writes" an invariant rather than a tautology: a write that
+        // never landed cannot quietly excuse a missing revision.
+        return readLayoutRev(alloc, self.project_dir, self.design, null) == next;
+    }
+};
+
+// Four writers released together, thirty rounds each: 120 read-modify-writes
+// whose read-to-write window spans two whole-file reads, a JSON parse and an
+// atomic rewrite. Against the pre-lock code the FIRST round alone loses three of
+// the four writes — all four read revision 0, all four write revision 1, three
+// rows vanish — and the remaining 119 rounds each re-run that race with the
+// writers already in lockstep. So both assertions below fail immediately without
+// the lock, and with it all 120 writes have to survive.
+// spec: Web Server - Concurrent writers of one design's layout sidecar are serialized so that every accepted write advances the revision by exactly one and no write's saved row is overwritten by a peer that read the same revision
+test "concurrent sidecar writers lose no accepted write" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "src", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/lockrace.sexp", .data = "(design-block \"D\")" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/lockrace.layouts.json", .data = "{\"layouts\":[]}" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+
+    const writers = 4;
+    const rounds = 30;
+    var go: std.atomic.Value(bool) = .init(false);
+    var accepted: std.atomic.Value(u64) = .init(0);
+
+    var threads: [writers]std.Thread = undefined;
+    // The page allocator is named HERE, in the test body, so each writer gets an
+    // independent arena without this module reaching for a global allocator of
+    // its own.
+    const spawned = spawnStressWriters(&threads, root, rounds, &go, &accepted, std.heap.page_allocator);
+    // Set unconditionally, so a writer that spawned before a failing peer is
+    // released rather than spinning on a barrier that will never fill.
+    go.store(true, .release);
+    joinStressWriters(threads[0..spawned]);
+    try testing.expectEqual(@as(usize, writers), spawned);
+
+    const total = writers * rounds;
+    try testing.expectEqual(@as(u64, total), accepted.load(.acquire));
+
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    // Every accepted write advanced the revision by exactly one, so no writer
+    // stamped a revision a peer had already claimed.
+    try testing.expectEqual(@as(i64, total), readLayoutRev(alloc, root, "lockrace", null));
+
+    // ...and no accepted write's row was dropped. A lost update loses a ROW, and
+    // a revision that merely counts correctly could still be hiding one, so the
+    // rows themselves are checked against the full expected set.
+    const final = readLayoutsSub(alloc, root, "lockrace", null);
+    try testing.expectEqual(@as(usize, total), final.len);
+    try expectEveryStressRowPresent(alloc, final, writers, rounds);
+}
+
+/// Start one stress writer per slot, returning how many actually started. A
+/// spawn failure stops the loop rather than propagating, so the caller can
+/// release the barrier and join the writers that DID start — a test that leaves
+/// threads spinning on a barrier nobody sets hangs the shard instead of failing.
+/// Hoisted out of the test body: the spawn and join loops are two of the four
+/// loops this one assertion needs, and `test-no-conditional` allows one.
+fn spawnStressWriters(
+    threads: []std.Thread,
+    project_dir: []const u8,
+    rounds: usize,
+    go: *std.atomic.Value(bool),
+    accepted: *std.atomic.Value(u64),
+    gpa: std.mem.Allocator,
+) usize {
+    var spawned: usize = 0;
+    while (spawned < threads.len) : (spawned += 1) {
+        threads[spawned] = std.Thread.spawn(.{}, SidecarStressWriter.run, .{SidecarStressWriter{
+            .project_dir = project_dir,
+            .design = "lockrace",
+            .id = spawned,
+            .rounds = rounds,
+            .go = go,
+            .accepted = accepted,
+            .gpa = gpa,
+        }}) catch break;
+    }
+    return spawned;
+}
+
+/// Join every writer that started.
+fn joinStressWriters(threads: []std.Thread) void {
+    for (threads) |t| t.join();
+}
+
+/// Assert every writer's every round left its own row behind. A lost update
+/// loses a ROW, and a revision that merely counts correctly could still be
+/// hiding one, so the full expected set is checked rather than the count alone.
+fn expectEveryStressRowPresent(
+    alloc: std.mem.Allocator,
+    final: []const SavedLayout,
+    writers: usize,
+    rounds: usize,
+) !void {
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    for (final) |layout| try seen.put(alloc, layout.name, {});
+    var buf: [32]u8 = undefined;
+    var w: usize = 0;
+    while (w < writers) : (w += 1) {
+        var n: usize = 0;
+        while (n < rounds) : (n += 1) {
+            const want = try std.fmt.bufPrint(&buf, "w{d}-{d}", .{ w, n });
+            if (!seen.contains(want)) return error.TestLostLayoutRow;
+        }
+    }
 }

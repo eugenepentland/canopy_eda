@@ -106,6 +106,7 @@ candidate_valid() {
   [ "$(cat "$CANDIDATE/tree")" = "$HEAD_TREE" ] || return 1
   [ -f "$CANDIDATE/verified" ] || return 1
   grep -qx 'pcb_editor_perf=passed' "$CANDIDATE/verified" || return 1
+  grep -qx 'pcb_editor_invariants=passed' "$CANDIDATE/verified" || return 1
   [ -f "$CANDIDATE/zig-version" ] || return 1
   [ "$(cat "$CANDIDATE/zig-version")" = "$REQUIRED_ZIG" ] || return 1
   [ -f "$CANDIDATE/compiler-sha256" ] || return 1
@@ -127,6 +128,7 @@ candidate_tree_verified() {
   [ "$(cat "$dir/tree")" = "$HEAD_TREE" ] || return 1
   [ -f "$dir/verified" ] || return 1
   grep -qx 'pcb_editor_perf=passed' "$dir/verified" || return 1
+  grep -qx 'pcb_editor_invariants=passed' "$dir/verified" || return 1
   [ -f "$dir/zig-version" ] || return 1
   [ "$(cat "$dir/zig-version")" = "$REQUIRED_ZIG" ] || return 1
   [ -f "$dir/compiler-sha256" ] || return 1
@@ -151,6 +153,7 @@ publish_staging() {
   [ "$(cat "$staging/tree")" = "$HEAD_TREE" ] || return 1
   [ -f "$staging/verified" ] || return 1
   grep -qx 'pcb_editor_perf=passed' "$staging/verified" || return 1
+  grep -qx 'pcb_editor_invariants=passed' "$staging/verified" || return 1
   [ -f "$staging/compiler-sha256" ] || return 1
   [ "$(cat "$staging/compiler-sha256")" = "$ZIG_SHA256" ] || return 1
   [ -f "$staging/build-id" ] || return 1
@@ -406,6 +409,30 @@ if ! node scripts/pcb_editor_perf/run.js --project-dir "$PERF_PROJECT_DIR" \
 fi
 editor_perf_elapsed=$(( $(date +%s) - editor_perf_started ))
 
+# The editor's six state-ownership invariants: a saved-layout row owning its
+# copper, a queued autosave abandoning a changed target, undo dropping the
+# copper selection, a rev-bumped analysis answer being re-aimed, a reattached
+# route recording its undo step, and a 409 raising a visible conflict. Each one
+# is a bug that shipped, and `pcb_board.js` has no other behavioural gate —
+# `node --check` and static_assets' substring markers both pass a board that
+# silently loses an edit. `--no-substitute` is required: the candidate EMBEDS
+# its assets at build time, so the probe must exercise the binary's own copy
+# rather than a working tree that may have moved on.
+echo "[$(ts)] prepare-release: running PCB editor state-ownership invariants"
+editor_inv_started="$(date +%s)"
+if ! node scripts/pcb_editor_invariants/run.js \
+  --binary "$staging/install/bin/netlisp" --no-substitute \
+  >"$staging/pcb-editor-invariants.log" 2>&1; then
+  echo "prepare-release: PCB editor invariant probe failed:" >&2
+  tail -n 120 "$staging/pcb-editor-invariants.log" >&2
+  failed="$FAILURE_ROOT/$HEAD_HASH-$(date +%Y%m%d-%H%M%S)-$$"
+  mv "$staging" "$failed"
+  staging=""
+  echo "prepare-release: full logs kept at $failed" >&2
+  exit 1
+fi
+editor_inv_elapsed=$(( $(date +%s) - editor_inv_started ))
+
 # Fail closed: a green test job must have EXECUTED the suite. Guardian's
 # counting test runner prints this line before the first test; a log without
 # it means the run step was replayed from a cache and nothing actually ran —
@@ -427,9 +454,9 @@ printf '%s\n' "$REQUIRED_ZIG" >"$staging/zig-version"
 printf '%s\n' "$ZIG_SHA256" >"$staging/compiler-sha256"
 printf '%s\n' "$SHORT_HASH" >"$staging/build-id"
 printf '%s\n' "$ARTIFACT_POLICY" >"$staging/artifact-policy"
-printf 'guardian=passed\ntest=passed\nbuild=passed\npcb_editor_perf=passed\n' >"$staging/verified"
-printf 'test_seconds=%s\nbuild_seconds=%s\npcb_editor_perf_seconds=%s\nwall_seconds=%s\n' \
-  "$test_elapsed" "$build_elapsed" "$editor_perf_elapsed" "$(( $(date +%s) - started ))" >"$staging/timing"
+printf 'guardian=passed\ntest=passed\nbuild=passed\npcb_editor_perf=passed\npcb_editor_invariants=passed\n' >"$staging/verified"
+printf 'test_seconds=%s\nbuild_seconds=%s\npcb_editor_perf_seconds=%s\npcb_editor_invariants_seconds=%s\nwall_seconds=%s\n' \
+  "$test_elapsed" "$build_elapsed" "$editor_perf_elapsed" "$editor_inv_elapsed" "$(( $(date +%s) - started ))" >"$staging/timing"
 
 if ! publish_staging; then
   echo "prepare-release: could not publish the candidate for $SHORT_HASH" >&2

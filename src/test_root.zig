@@ -58,6 +58,8 @@ test {
     _ = @import("diagram/render.zig");
     _ = @import("docgen.zig");
     _ = @import("drc_dump.zig");
+    _ = @import("gerber_dump.zig");
+    _ = @import("netlist_dump.zig");
     _ = @import("drc_reconcile.zig");
     _ = @import("drc_sweep.zig");
     _ = @import("drc_session.zig");

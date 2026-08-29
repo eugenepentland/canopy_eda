@@ -965,6 +965,8 @@ src/font5x7.zig::default_size_mm value
 src/font5x7.zig::gh value
 src/font5x7.zig::glyphRuns | fn glyphRuns(ch: u8, comptime E: type, ctx: anytype, emit: fn (@TypeOf(ctx), Run) E!void) E!void
 src/font5x7.zig::gw value
+src/gerber_dump.zig::DumpError value
+src/gerber_dump.zig::cmdGerberDump | fn cmdGerberDump(allocator: std.mem.Allocator, args: []const []const u8) DumpError!void
 src/gerber_verify.zig::ApKind enum_
 src/gerber_verify.zig::Aperture struct_
 src/gerber_verify.zig::Arc struct_
@@ -1474,6 +1476,8 @@ src/module_metadata.zig::searchDescription | fn searchDescription(allocator: std
 src/module_metadata.zig::strength | fn strength(self: ImplementationPolicy) u8
 src/net_name.zig::leaf | fn leaf(name: []const u8) []const u8
 src/net_name.zig::parent | fn parent(name: []const u8) ?[]const u8
+src/netlist_dump.zig::DumpError value
+src/netlist_dump.zig::cmdNetlistDump | fn cmdNetlistDump(allocator: std.mem.Allocator, args: []const []const u8) DumpError!void
 src/numeric.zig::checkedInt | fn checkedInt(comptime T: type, f: f64) ?T
 src/numeric.zig::toCount | fn toCount(f: f64) usize
 src/pad_neck_profile.zig::Profile struct_
