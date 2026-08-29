@@ -109,6 +109,19 @@ fn sourceFingerprint(info: FlatInfo) [64]u8 {
     return std.fmt.bytesToHex(digest, .lower);
 }
 
+/// Whether one persisted BOM row still describes the exact source-authored
+/// instance. This deliberately checks source identity rather than the selected
+/// parts-table row: assembly review presents the last explicit build, while
+/// release validation separately decides whether that selection is strict.
+pub fn entryMatchesSource(entry: bom_mod.BomEntry, current: FlatInfo) bool {
+    if (entry.id.len == 0 or current.id.len == 0 or !std.mem.eql(u8, entry.id, current.id)) return false;
+    if (entry.component.len == 0 or !std.mem.eql(u8, entry.component, current.component)) return false;
+    if (!std.mem.eql(u8, entry.value, current.value)) return false;
+    const fingerprint = sourceFingerprint(current);
+    return std.mem.eql(u8, entry.source_fingerprint, &fingerprint) and
+        sameStringSet(entry.nets, current.nets);
+}
+
 fn stabilizeRefdes(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
@@ -494,12 +507,7 @@ pub fn applyExisting(
         // A sidecar row belongs to the source identity, not merely to the
         // ref-des currently occupying that label.  Ref-des reuse after a
         // component swap must never attach the old MPN/rating to the new part.
-        if (entry.component.len == 0 or !std.mem.eql(u8, entry.component, current.component)) continue;
-        if (entry.id.len == 0 or current.id.len == 0 or !std.mem.eql(u8, entry.id, current.id)) continue;
-        if (!std.mem.eql(u8, entry.value, current.value)) continue;
-        const fingerprint = sourceFingerprint(current);
-        if (!std.mem.eql(u8, entry.source_fingerprint, &fingerprint)) continue;
-        if (!sameStringSet(entry.nets, current.nets)) continue;
+        if (!entryMatchesSource(entry, current)) continue;
         if (entry.uuid.len > 0) try uuids.put(allocator, entry.ref_des, entry.uuid);
         const has_family = parts_db.hasFamily(current.component);
         const selected = parts_db.lookupStrict(current.component, current.value, current.attrs);
@@ -536,13 +544,7 @@ pub fn existingSidecarMatches(
         var matches: usize = 0;
         for (entries) |entry| {
             if (!std.mem.eql(u8, entry.ref_des, current.ref_des)) continue;
-            if (entry.id.len == 0 or current.id.len == 0) continue;
-            if (!std.mem.eql(u8, entry.id, current.id)) continue;
-            if (!std.mem.eql(u8, entry.component, current.component)) continue;
-            if (!std.mem.eql(u8, entry.value, current.value)) continue;
-            const fingerprint = sourceFingerprint(current);
-            if (!std.mem.eql(u8, entry.source_fingerprint, &fingerprint)) continue;
-            if (!sameStringSet(entry.nets, current.nets)) continue;
+            if (!entryMatchesSource(entry, current)) continue;
             if (entry.uuid.len == 0) continue;
             if (!propertyKeysUnique(entry.properties)) continue;
             const has_family = parts_db.hasFamily(current.component);

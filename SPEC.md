@@ -4735,6 +4735,8 @@ Public functions: write
 
 ## bom-resolve
 
+Public functions: entryMatchesSource
+
 - identity resolution is a fixed point: two consecutive resolveIdentities calls produce a byte-identical BOM
 - identity is deterministic: each part takes uuidFromId(its stable id), independent of any prior .bom contents
 - automatically assigned refdes reuse the prior BOM label by stable ID while newly inserted parts take numbers above the prior range
@@ -6623,6 +6625,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - the live scene graph is answered only for the design it was pushed for
 - a live scene-graph read copies the bytes so a later push cannot free the response body
 - assembly review groups sourceable parts by normalized MPN and records DNP placements
+- assembly applies the persisted BOM through stable source identity before grouping, so inserting a newly auto-numbered part cannot shift MPNs onto unrelated refdes
 - assembly BOM rows sort by visible quantity and show top, bottom, or both placement badges
 - assembly BOM rows expose stable kit indices, allow their text to be copied, and mark the exact refdes picked on the board
 - assembly and board labels show globally unique leaf refdes without internal sub-block path prefixes

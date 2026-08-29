@@ -9,6 +9,7 @@ const std = @import("std");
 const datasheet_ref = @import("datasheet_ref.zig");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
+const log = @import("../infra/log.zig");
 const paths = @import("../paths.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const env_mod = @import("../eval/env.zig");
@@ -127,6 +128,13 @@ fn isSafeName(name: []const u8) bool {
     return true;
 }
 
+fn testDesignBlock(value: env_mod.Value) error{TestExpectedDesignBlock}!*env_mod.DesignBlock {
+    return switch (value) {
+        .design_block => |block| block,
+        else => error.TestExpectedDesignBlock,
+    };
+}
+
 fn property(properties: []const env_mod.Property, wanted: []const u8) []const u8 {
     for (properties) |p| {
         if (std.ascii.eqlIgnoreCase(p.key, wanted)) return std.mem.trim(u8, p.value, " \t\r\n");
@@ -136,12 +144,11 @@ fn property(properties: []const env_mod.Property, wanted: []const u8) []const u8
 
 fn overlayProperty(
     entries: []const bom.BomEntry,
-    ref: []const u8,
-    evaluated: []const env_mod.Property,
+    info: bom.FlatInfo,
     wanted: []const u8,
 ) []const u8 {
     for (entries) |entry| {
-        if (!std.mem.eql(u8, entry.ref_des, ref)) continue;
+        if (!bom.entryMatchesSource(entry, info)) continue;
         for (entry.properties) |entry_property| {
             if (std.ascii.eqlIgnoreCase(entry_property.key, wanted)) {
                 return std.mem.trim(u8, entry_property.value, " \t\r\n");
@@ -149,7 +156,7 @@ fn overlayProperty(
         }
         break;
     }
-    return property(evaluated, wanted);
+    return property(info.properties, wanted);
 }
 
 fn uuidForPart(
@@ -158,7 +165,7 @@ fn uuidForPart(
     info: bom.FlatInfo,
 ) ![]const u8 {
     for (entries) |entry| {
-        if (std.mem.eql(u8, entry.ref_des, info.ref_des) and entry.uuid.len > 0) return entry.uuid;
+        if (entry.uuid.len > 0 and bom.entryMatchesSource(entry, info)) return entry.uuid;
     }
     if (info.id.len > 0) return export_kicad.uuidFromId(allocator, info.id);
     return "";
@@ -553,13 +560,8 @@ fn partsFromFlat(
             .component = info.component,
             .value = info.value,
             .footprint = info.footprint,
-            .mpn = overlayProperty(entries, info.ref_des, info.properties, "mpn"),
-            .manufacturer = overlayProperty(
-                entries,
-                info.ref_des,
-                info.properties,
-                "manufacturer",
-            ),
+            .mpn = overlayProperty(entries, info, "mpn"),
+            .manufacturer = overlayProperty(entries, info, "manufacturer"),
             .dnp = info.dnp,
             .testpoint = env_mod.isTestPoint(info.component),
             .datasheets = datasheets.get(info.component) orelse &.{},
@@ -1002,11 +1004,21 @@ fn buildPageIndex(
     block: *const env_mod.DesignBlock,
 ) !Index {
     const bom_path = paths.designSiblingPath(allocator, project_dir, name, ".bom") catch null;
-    const entries: []const bom.BomEntry = if (bom_path) |path|
-        bom.loadBom(allocator, path) catch &.{}
-    else
-        &.{};
-    var index = try buildIndex(allocator, project_dir, block, entries);
+    if (bom_path) |path| {
+        defer allocator.free(path);
+        // The BOM is the annotation ledger for allocator-owned refdes. Apply
+        // it through the identity-validating read-only path before flattening;
+        // joining raw rows to a fresh source-order evaluation by refdes alone
+        // can attach nearly every MPN to the wrong part after an insertion.
+        bom.applyExisting(allocator, block, path, project_dir) catch |err| {
+            log.warn("assembly: could not apply existing BOM for {s}: {s}", .{ name, @errorName(err) });
+        };
+        const entries = bom.loadBom(allocator, path) catch &.{};
+        var index = try buildIndex(allocator, project_dir, block, entries);
+        index.guides = rework_guide.loadAll(allocator, project_dir, name);
+        return index;
+    }
+    var index = try buildIndex(allocator, project_dir, block, &.{});
     index.guides = rework_guide.loadAll(allocator, project_dir, name);
     return index;
 }
@@ -1153,9 +1165,16 @@ test "BOM fallback does not collapse unrelated missing MPN parts and excludes te
     try std.testing.expect(!std.mem.eql(u8, groups[1].refs[0], "TP1"));
 }
 
-test "existing BOM properties group exact hierarchical refs without identity resolution" {
+test "evaluated BOM properties group exact hierarchical refs" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
+    const first_props = [_]env_mod.Property{
+        .{ .key = "mpn", .value = "RC-SHARED" },
+        .{ .key = "manufacturer", .value = "Yageo" },
+    };
+    const second_props = [_]env_mod.Property{
+        .{ .key = "mpn", .value = "rc-shared" },
+    };
     const flat = [_]bom.FlatInfo{
         .{
             .ref_des = "reg/R1",
@@ -1164,7 +1183,7 @@ test "existing BOM properties group exact hierarchical refs without identity res
             .value = "10k",
             .attrs = &.{},
             .nets = &.{},
-            .properties = &.{},
+            .properties = &first_props,
         },
         .{
             .ref_des = "sense/R1",
@@ -1173,35 +1192,104 @@ test "existing BOM properties group exact hierarchical refs without identity res
             .value = "12k",
             .attrs = &.{},
             .nets = &.{},
-            .properties = &.{},
-        },
-    };
-    const first_props = [_]env_mod.Property{
-        .{ .key = "mpn", .value = "RC-SHARED" },
-        .{ .key = "manufacturer", .value = "Yageo" },
-    };
-    const second_props = [_]env_mod.Property{
-        .{ .key = "mpn", .value = "rc-shared" },
-    };
-    const entries = [_]bom.BomEntry{
-        .{
-            .ref_des = "reg/R1",
-            .uuid = "",
-            .component = "res",
-            .properties = &first_props,
-        },
-        .{
-            .ref_des = "sense/R1",
-            .uuid = "",
-            .component = "res",
             .properties = &second_props,
         },
     };
-    const parts = try partsFromFlat(arena.allocator(), &flat, &entries, .empty);
+    const parts = try partsFromFlat(arena.allocator(), &flat, &.{}, .empty);
     const groups = try buildBomGroups(arena.allocator(), parts);
     try std.testing.expectEqual(@as(usize, 1), groups.len);
     try std.testing.expectEqual(@as(usize, 2), groups[0].refs.len);
     try std.testing.expectEqualStrings("Yageo", groups[0].manufacturer);
+}
+
+// spec: Web Server - assembly applies the persisted BOM through stable source identity before grouping, so inserting a newly auto-numbered part cannot shift MPNs onto unrelated refdes
+test "assembly BOM keeps MPNs on stable identities after refdes insertion" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.createDirPath(std.testing.io, "src/demo");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/indicator.sexp",
+        .data =
+        \\(component indicator
+        \\  (footprint "indicator-fp")
+        \\  (manufacturer "Acme")
+        \\  (mpn "LED-1"))
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/pushbutton.sexp",
+        .data =
+        \\(component pushbutton
+        \\  (footprint "button-fp")
+        \\  (manufacturer "Acme")
+        \\  (mpn "SW-1"))
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/connector.sexp",
+        .data =
+        \\(component connector
+        \\  (footprint "connector-fp")
+        \\  (manufacturer "Acme")
+        \\  (mpn "CONN-1"))
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/demo/demo.sexp",
+        .data =
+        \\(import indicator pushbutton)
+        \\(design-block "Demo"
+        \\  (instance "status" indicator (id a1000001) (pin 1 "A"))
+        \\  (instance "reset" pushbutton (id a1000002) (pin 1 "B")))
+        ,
+    });
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    const design_path = try std.fmt.allocPrint(alloc, "{s}/src/demo/demo.sexp", .{project_dir});
+    const bom_path = try std.fmt.allocPrint(alloc, "{s}/src/demo/demo.bom", .{project_dir});
+    {
+        var evaluator = Evaluator.init(alloc, project_dir);
+        defer evaluator.deinit();
+        const evaluated = try evaluator.evalFile(design_path);
+        const block = try testDesignBlock(evaluated);
+        try bom.resolveIdentities(alloc, block, bom_path, project_dir);
+    }
+
+    // A fresh evaluation initially calls the inserted connector U1 and shifts
+    // both existing parts. The persisted IDs must restore LED-1 to U1 and SW-1
+    // to U2 before the assembly page reads their properties.
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/demo/demo.sexp",
+        .data =
+        \\(import connector indicator pushbutton)
+        \\(design-block "Demo"
+        \\  (instance "io" connector (id a1000003) (pin 1 "C"))
+        \\  (instance "status" indicator (id a1000001) (pin 1 "A"))
+        \\  (instance "reset" pushbutton (id a1000002) (pin 1 "B")))
+        ,
+    });
+    var evaluator = Evaluator.init(alloc, project_dir);
+    defer evaluator.deinit();
+    const evaluated = try evaluator.evalFile(design_path);
+    const block = try testDesignBlock(evaluated);
+    const index = try buildPageIndex(alloc, project_dir, "demo", block);
+    try std.testing.expectEqual(@as(usize, 3), index.bom_groups.len);
+    for (index.bom_groups) |group| {
+        try std.testing.expect(group.mpn.len > 0);
+        try std.testing.expect(!group.conflict);
+        try std.testing.expectEqual(@as(usize, 1), group.refs.len);
+        if (std.mem.eql(u8, group.mpn, "LED-1"))
+            try std.testing.expectEqualStrings("U1", group.refs[0])
+        else if (std.mem.eql(u8, group.mpn, "SW-1"))
+            try std.testing.expectEqualStrings("U2", group.refs[0])
+        else if (std.mem.eql(u8, group.mpn, "CONN-1"))
+            try std.testing.expectEqualStrings("J1", group.refs[0])
+        else
+            return error.TestUnexpectedResult;
+    }
 }
 
 test "recursive sections include nested refs and explicitly hosted subcircuits" {

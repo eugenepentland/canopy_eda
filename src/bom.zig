@@ -20,6 +20,7 @@ const bom_resolve = @import("bom_resolve.zig");
 pub const resolveIdentities = bom_resolve.resolveIdentities;
 pub const applyExisting = bom_resolve.applyExisting;
 pub const existingSidecarMatches = bom_resolve.existingSidecarMatches;
+pub const entryMatchesSource = bom_resolve.entryMatchesSource;
 
 // ── Constants ─────────────────────────────────────────────────────
 // UUID v4 byte indices (RFC 4122)
