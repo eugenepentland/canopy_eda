@@ -390,6 +390,7 @@ test {
     _ = @import("serve/library_3d.zig");
     _ = @import("serve/mcp_checks.zig");
     _ = @import("serve/mcp_close_gaps.zig");
+    _ = @import("route_cleanup_gate.zig");
     _ = @import("serve/mcp_connector_pinout.zig");
     _ = @import("serve/mcp_escape_assign.zig");
     _ = @import("serve/mcp_flatten.zig");

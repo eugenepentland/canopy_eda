@@ -863,6 +863,7 @@ test {
     _ = @import("route_repair.zig");
     _ = @import("serve/mcp_route_order.zig");
     _ = @import("serve/mcp_close_gaps.zig");
+    _ = @import("route_cleanup_gate.zig");
     _ = @import("serve/mcp_routability.zig");
     _ = @import("serve/mcp_kicad_sch.zig");
     _ = @import("serve/mcp_placement_sensitivity.zig");

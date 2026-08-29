@@ -2965,6 +2965,7 @@ inherited a lap can still be improved.
 - A hierarchical route seed carrying a same-net land transit is rejected before the assembled-board router can reuse it.
 - A hierarchical route seed is centre-anchored through same-net lands before board acceptance and remains rejected when the normalized copper is not DRC-clean.
 - Authored exact bypass paths are immutable at the aggregate seed gate, so nearby same-rail lands cannot retarget their endpoints.
+- An axis-aligned run whose swept copper stays inside the land's own column and reaches a segment end there is the pad's connection, not an offence; a column-contained fly-through, a flank lap, and every diagonal stay judged by the strict ray rule.
 
 Public functions: offence, segmentOffence, worsens, onLand
 
@@ -3138,7 +3139,8 @@ Public functions: check, checkTopology, checkWithZones, checkWithPreparedCopper,
 - a leaf-only net alias is accepted only when unique; sibling flattened nets with the same leaf remain distinct copper
 - reporting DRC retains the same exact variable-width RF carve that Gerber computes from the raw route proof
 - warns when a signal net's own copper laps one of its pads instead of being aimed at the pad centre, while ground nets are exempt
-- reports one own-land warning per swept RF path and physical land rather than one per tessellation chord
+- reports one own-land warning per physical land — carrying the worst offence measured on it — rather than one per tessellation chord or stored segment
+- a hand-drawn chain that laps one land in several stored segments is a single finding carrying the worst miss
 - a match group spreading wider than its tolerance warns once, naming the longest and shortest nets
 - a match group with fewer than two routed members is reported as unfinished, never as mismatched
 - a design declaring no match group produces no measurement and no violation
@@ -3153,7 +3155,7 @@ Public functions: check, checkTopology, checkWithZones, checkWithPreparedCopper,
 - checks the board edge against a non-rectangular outline polygon, catching copper in a notch
 - the polygon board-edge inset is measured against the copper-edge design rule
 - flags a component land crowding the board edge, exempts a staged off-board part, and reports nothing without an outline
-- component courtyards default to a 0.2 mm edge margin, honor an authored override, and exempt NPTH-only/staged parts
+- component courtyards default to a 0.2 mm edge margin, honor an authored override, and exempt NPTH-only/staged/edge-overhanging parts
 - component-edge clearance follows the exact rounded outline rather than its rectangular bounding box
 - a pad inside the board rectangle but in a concave notch is measured against the outline polygon
 - a typed perimeter keepout flags only its blocked feature families, admits named nets, and exempts generated fence vias
@@ -5625,6 +5627,19 @@ Public functions: runSyncPlan, syncKicadPcbApi
 - authoritative placement converts netlisp rotation/side into a targeted KiCad pose op
 - authoritative stale pruning also removes pre-netlisp manual KiCad footprints
 - an authoritative push counts and names the saved copper it could not emit, so emitted plus dropped accounts for every saved track and via
+
+## route-cleanup-gate
+
+- a cleanup candidate is refused when it grows the error count, opens a routed net, or grows the bypass_open count, and accepted when nothing regresses
+- a refused candidate is attributed to exact nets, by the tally names that are newly open and the nets whose bypass_open count grew
+- completeness-waiver: concurrent access (pure functions over caller-owned slices; no shared state and no I/O — the serve layer owns sessions and persistence)
+- completeness-waiver: empty inputs (an empty violation list and unchanged tallies gate green, attribute nothing, and delete nothing; the paired tests exercise the empty lists directly)
+- completeness-waiver: i/o failure (the module performs no I/O; candidates and verdicts are in-memory slices handed in by the caller)
+- completeness-waiver: integer overflow (counts are usize tallies over allocator-bounded slices; net indices are bounds-checked before every cast)
+- completeness-waiver: large inputs (linear scans over the board's own violation and net lists; nothing is quadratic beyond open-net name matching, which is bounded by the board's net count)
+- completeness-waiver: malformed encoding (no bytes are decoded; inputs are already-typed violations, tallies, and net tables)
+- completeness-waiver: panic-free (every `net_a`/index cast is guarded by a sign and bounds check first; out-of-range parties are skipped, not indexed)
+- completeness-waiver: unauthorized access (authorization is the MCP layer's concern; this module never touches files, sessions, or the network)
 
 ## serve/route-plan
 
