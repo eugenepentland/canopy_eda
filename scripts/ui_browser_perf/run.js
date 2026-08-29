@@ -8,6 +8,7 @@ const path = require("path");
 const { execFileSync, spawn } = require("child_process");
 const { performance } = require("perf_hooks");
 const { surfaces, responseScenarios } = require("./manifest");
+const { ensureGateLock } = require("../perf_gate_lock");
 
 const scenarioSpecs = new Map(surfaces.flatMap((surface) =>
   surface.scenarios.map((scenario) => [`${surface.id}.${scenario.id}`, scenario])));
@@ -1738,6 +1739,11 @@ async function main() {
   let selected = options.surfaceIds ? surfaces.filter((surface) => options.surfaceIds.includes(surface.id)) : surfaces;
   if (options.scenario) selected = selected.filter((surface) => options.scenario.startsWith(`${surface.id}.`));
   if (!selected.length) failUsage("filters selected no surfaces");
+  // Past the free checks (--list and argument validation exit above), this is
+  // a timing measurement: queue it under the machine-wide gate so it cannot
+  // skew (or be skewed by) a gated run in a sibling session. No-op when
+  // perf_gate.sh already holds the lock.
+  ensureGateLock("ui_browser_perf");
   if (!fs.existsSync(options.fixture)) throw new Error(`missing route-review fixture ${options.fixture}`);
   if (!fs.existsSync(options.pdfFixture)) throw new Error(`missing PDF fixture ${options.pdfFixture}`);
 

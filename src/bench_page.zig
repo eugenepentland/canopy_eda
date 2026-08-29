@@ -60,7 +60,12 @@
 //!
 //! Wall-clock discipline: numbers are only comparable when the machine isn't
 //! also compiling something. Run gated: `scripts/gate.sh zig-out/bin/netlisp
-//! bench-page …` (see docs/benchmarks/pcb-page/README.md).
+//! bench-page …` (see docs/benchmarks/pcb-page/README.md). The lock can only
+//! serialize jobs that take it, so the bench also watches /proc/loadavg's
+//! 1-minute average around every board and labels the run — in the table and
+//! the JSON — as CONTENDED when the load cannot be explained by this process
+//! plus the decay of whatever ran before it; `scripts/perf_gate.sh --record`
+//! refuses to install a baseline carrying that label.
 //!
 //! Usage:
 //!   netlisp bench-page [--project-dir <dir>] [--reps <n>] [--json]
@@ -218,6 +223,10 @@ pub const BoardResult = struct {
     phases: Phases = .{},
     drc: DrcCounts = .{},
     facts: Facts = .{},
+    /// The 1-minute load sampled right after this board exceeded the
+    /// contention model (see the machine-load tripwire below): something else
+    /// ran beside the measurement, so this row's wall times are suspect.
+    load_contended: bool = false,
 };
 
 /// Median of the samples, in place. Even counts average the middle pair —
@@ -441,9 +450,120 @@ pub fn corpus(arena: std.mem.Allocator, project_dir: []const u8) std.mem.Allocat
     return names.toOwnedSlice(arena);
 }
 
+// ── Machine-load tripwire ───────────────────────────────────────────────────
+//
+// scripts/gate.sh serializes only the jobs that take its lock: a sibling
+// session benchmarking outside it skewed one gated bench-page pass 17-72% on
+// the big boards while the small ones held steady (FEEDBACK.md 2026-08-29).
+// Nothing in the timing columns distinguishes that run from an honest
+// regression, so the bench reads /proc/loadavg's 1-minute average around
+// every board and labels the run — and each board measured beside the excess
+// — as CONTENDED, in both the table and the JSON. A contended measurement is
+// thereby labelled rather than silently recorded: perf_gate.sh --record
+// refuses the labelled JSON, and a labelled FAIL reads as "re-run quiet
+// first", not "chase a phantom regression". Where /proc/loadavg does not
+// exist, no load facts are reported and no label is ever invented.
+
+/// A sample is contended when it exceeds `expectedLoad` by more than this
+/// many runnable tasks. The bench's own busy core is already in the model, so
+/// the margin only absorbs sampler noise, kernel housekeeping, and a burst of
+/// interactive use. Any sustained sibling workload lands beyond it: a
+/// server-plus-headless-browser bench keeps 2-3 tasks runnable for minutes
+/// and a parallel build far more, while a lone extra single-threaded process
+/// stays under — a miss accepted to keep false alarms out of 20-minute
+/// recordings.
+const load_excess_limit = 2.0;
+
+/// The kernel's 1-minute load average is an exponential moving average with a
+/// 60 s time constant; this is that constant, for the model below.
+const loadavg_tau_s = 60.0;
+
+/// The 1-minute load this run should see `elapsed_s` seconds after sampling
+/// `start_1m`, on a machine where nothing else is running: the starting load
+/// decays with the kernel's time constant while the bench's own single busy
+/// core ramps in with the same constant — `1 + (start − 1)·e^(−t/τ)`. A high
+/// START is thereby forgiven when it fades on schedule (perf_gate.sh runs two
+/// parallel `zig build`s seconds before the bench starts); load that persists
+/// or arrives mid-run is exactly what exceeds the curve.
+fn expectedLoad(start_1m: f64, elapsed_s: f64) f64 {
+    return 1.0 + (start_1m - 1.0) * @exp(-elapsed_s / loadavg_tau_s);
+}
+
+/// The leading 1-minute figure of a /proc/loadavg line, or null for content
+/// that isn't one — a refused parse must never fabricate a load of 0.
+fn parseLoad1m(data: []const u8) ?f64 {
+    var it = std.mem.tokenizeAny(u8, data, " \t\r\n");
+    const tok = it.next() orelse return null;
+    return std.fmt.parseFloat(f64, tok) catch null;
+}
+
+fn readLoad1m() ?f64 {
+    // Streamed from an open handle, not readFileAlloc: /proc files stat as
+    // size 0, so a stat-sized buffer reads them as empty.
+    const file = infra_fs.cwd().openFile("/proc/loadavg", .{}) catch return null;
+    defer file.close();
+    var buf: [256]u8 = undefined;
+    var len: usize = 0;
+    while (len < buf.len) {
+        const n = file.readStreaming(buf[len..]) catch return null;
+        if (n == 0) break;
+        len += n;
+    }
+    return parseLoad1m(buf[0..len]);
+}
+
+/// The run-level load facts the table and JSON report.
+const LoadReport = struct {
+    start_1m: f64,
+    end_1m: f64,
+    /// Largest sampled excess over the model, clamped at 0 — how far past
+    /// "this bench plus decay" the machine ever got.
+    max_excess_1m: f64,
+    contended: bool,
+};
+
+/// Samples the 1-minute load around every board and accumulates the verdict.
+const LoadWatch = struct {
+    start_1m: ?f64 = null,
+    started_ns: i128 = 0,
+    last_1m: f64 = 0,
+    max_excess: f64 = 0,
+    contended: bool = false,
+
+    fn begin() LoadWatch {
+        const first = readLoad1m() orelse return .{};
+        return .{ .start_1m = first, .last_1m = first, .started_ns = clock.monotonicNanos() };
+    }
+
+    /// Read the load after one board; true when this sample exceeds the model
+    /// past `load_excess_limit`, meaning that board's numbers are suspect.
+    fn sample(self: *LoadWatch) bool {
+        const start = self.start_1m orelse return false;
+        const now = readLoad1m() orelse return false;
+        self.last_1m = now;
+        const elapsed_s = @as(f64, @floatFromInt(clock.monotonicNanos() - self.started_ns)) /
+            @as(f64, @floatFromInt(clock.ns_per_s));
+        const excess = now - expectedLoad(start, elapsed_s);
+        if (excess > self.max_excess) self.max_excess = excess;
+        if (excess <= load_excess_limit) return false;
+        self.contended = true;
+        return true;
+    }
+
+    fn report(self: LoadWatch) ?LoadReport {
+        const start = self.start_1m orelse return null;
+        return .{
+            .start_1m = start,
+            .end_1m = self.last_1m,
+            .max_excess_1m = self.max_excess,
+            .contended = self.contended,
+        };
+    }
+};
+
 /// Render the corpus table a reviewer reads. Columns are the phase medians in
 /// milliseconds; the trailing flags call out the states a number can't show.
-pub fn writeTable(w: *std.Io.Writer, results: []const BoardResult, reps: usize) std.Io.Writer.Error!void {
+pub fn writeTable(w: *std.Io.Writer, results: []const BoardResult, reps: usize, load: ?LoadReport) std.Io.Writer.Error!void {
     try w.print("phase medians over {d} rep(s), ms — eval ⊂ solve ⊂ pcbPage; other pages are independent cold renders\n", .{reps});
     try w.print("{s:<24} {s:>5} {s:>9} {s:>8} {s:>8} {s:>8} {s:>8} {s:>8} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>13}\n", .{
         "board", "parts", "sidecar", "eval", "sidecar", "solve", "drcRep", "drcGeom", "pcbPage", "assembly", "thermal", "schematic", "pcb_kb", "drc e/t/open",
@@ -455,7 +575,7 @@ pub fn writeTable(w: *std.Io.Writer, results: []const BoardResult, reps: usize) 
         }
         var drc_buf: [48]u8 = undefined;
         const drc_col = std.fmt.bufPrint(&drc_buf, "{d}/{d}/{d}", .{ r.drc.errors, r.drc.total, r.drc.net_open }) catch "?";
-        try w.print("{s:<24} {d:>5} {d:>8.1}k {d:>8.1} {d:>8.1} {d:>8.1} {d:>8.1} {d:>8.1} {d:>9.1} {d:>9.1} {d:>9.1} {d:>9.1} {d:>9.1} {s:>13}{s}{s}{s}\n", .{
+        try w.print("{s:<24} {d:>5} {d:>8.1}k {d:>8.1} {d:>8.1} {d:>8.1} {d:>8.1} {d:>8.1} {d:>9.1} {d:>9.1} {d:>9.1} {d:>9.1} {d:>9.1} {s:>13}{s}{s}{s}{s}\n", .{
             r.name,
             r.facts.parts,
             @as(f64, @floatFromInt(r.facts.sidecar_bytes)) / 1024.0,
@@ -473,14 +593,27 @@ pub fn writeTable(w: *std.Io.Writer, results: []const BoardResult, reps: usize) 
             if (r.facts.cached) "" else "   (NOT retained by page cache)",
             if (r.facts.unstable) "   (UNSTABLE drc counts across reps)" else "",
             if (r.facts.placed) "" else "   (no blessed layout — PCB/thermal not gated)",
+            if (r.load_contended) "   (CONTENDED — 1-min load above the quiet-machine model while measured)" else "",
+        });
+    }
+    if (load) |l| {
+        try w.print("machine load (1-min avg): start {d:.2} → end {d:.2}, max excess over quiet-machine model {d:.2} (limit {d:.1}) — {s}\n", .{
+            l.start_1m,
+            l.end_1m,
+            l.max_excess_1m,
+            load_excess_limit,
+            if (l.contended) "CONTENDED: another workload ran beside this bench; treat these numbers as noise" else "clean",
         });
     }
 }
 
 /// Render the same results as JSON — the recording `--baseline` reads back.
 /// The top-level `budgets` object is absent here on purpose: budgets are
-/// hand-set absolute caps a human adds to the committed file.
-pub fn writeResultsJson(w: *std.Io.Writer, results: []const BoardResult) json_writer.WriteError!void {
+/// hand-set absolute caps a human adds to the committed file. The top-level
+/// `load` object (and a flagged board's `load_contended`) is what lets
+/// perf_gate.sh --record refuse a contended run instead of enshrining it;
+/// the baseline loader ignores both.
+pub fn writeResultsJson(w: *std.Io.Writer, results: []const BoardResult, load: ?LoadReport) json_writer.WriteError!void {
     try w.writeAll("{\"boards\":[");
     for (results, 0..) |r, i| {
         if (i > 0) try w.writeAll(",");
@@ -492,7 +625,7 @@ pub fn writeResultsJson(w: *std.Io.Writer, results: []const BoardResult) json_wr
         inline for (Phases.names) |fname| {
             try w.print(",\"{s}\":{d:.3}", .{ fname, r.phases.get(fname) });
         }
-        try w.print(",\"drc_total\":{d},\"drc_errors\":{d},\"{s}\":{d},\"cached\":{s},\"html_bytes\":{d},\"unstable\":{s}}}", .{
+        try w.print(",\"drc_total\":{d},\"drc_errors\":{d},\"{s}\":{d},\"cached\":{s},\"html_bytes\":{d},\"unstable\":{s}", .{
             r.drc.total,
             r.drc.errors,
             net_open_key,
@@ -501,8 +634,22 @@ pub fn writeResultsJson(w: *std.Io.Writer, results: []const BoardResult) json_wr
             r.facts.html_bytes,
             if (r.facts.unstable) "true" else "false",
         });
+        // Written only when it fired, so clean recordings stay byte-stable
+        // across this label's introduction.
+        if (r.load_contended) try w.writeAll(",\"load_contended\":true");
+        try w.writeAll("}");
     }
-    try w.writeAll("]}\n");
+    try w.writeAll("]");
+    if (load) |l| {
+        try w.print(",\"load\":{{\"start_1m\":{d:.2},\"end_1m\":{d:.2},\"max_excess_1m\":{d:.2},\"excess_limit_1m\":{d:.2},\"contended\":{s}}}", .{
+            l.start_1m,
+            l.end_1m,
+            l.max_excess_1m,
+            load_excess_limit,
+            if (l.contended) "true" else "false",
+        });
+    }
+    try w.writeAll("}\n");
 }
 
 // ── Baseline gate ───────────────────────────────────────────────────────────
@@ -839,14 +986,18 @@ pub fn cmdBenchPage(allocator: std.mem.Allocator, args: []const []const u8) Benc
     else
         try corpus(arena, parsed.project_dir);
 
+    var watch = LoadWatch.begin();
     var results: std.ArrayList(BoardResult) = .empty;
     for (names) |n| {
-        try results.append(arena, try benchOne(allocator, arena, parsed.project_dir, n, parsed.reps));
+        var row = try benchOne(allocator, arena, parsed.project_dir, n, parsed.reps);
+        row.load_contended = watch.sample();
+        try results.append(arena, row);
     }
+    const load = watch.report();
 
     var buf: [4096]u8 = undefined;
     var fw = std.Io.File.stdout().writer(infra_fs.currentIo(), &buf);
-    if (parsed.json) try writeResultsJson(&fw.interface, results.items) else try writeTable(&fw.interface, results.items, parsed.reps);
+    if (parsed.json) try writeResultsJson(&fw.interface, results.items, load) else try writeTable(&fw.interface, results.items, parsed.reps, load);
 
     // The durable regression gate: record with `--json > baseline.json`,
     // commit it, and every later gated run compares against it. A missing or
@@ -855,6 +1006,12 @@ pub fn cmdBenchPage(allocator: std.mem.Allocator, args: []const []const u8) Benc
         const baseline = loadBaseline(arena, path) catch return error.PageBaselineRegression;
         const report = checkBaseline(arena, results.items, &baseline) catch return error.PageBaselineRegression;
         try writeBaselineReport(&fw.interface, report, path);
+        // Contention never flips the verdict — numbers under their limits
+        // despite noise passed honestly, and a labelled FAIL tells the reader
+        // to re-run quiet before believing the regression.
+        if (load) |l| if (l.contended) {
+            try fw.interface.print("  note: this run was CONTENDED (1-min load {d:.2} past the quiet-machine model) — a FAIL above may be machine noise; re-run gated on a quiet machine before believing it\n", .{l.max_excess_1m});
+        };
         try fw.interface.flush();
         if (!report.pass) return error.PageBaselineRegression;
     }
@@ -885,7 +1042,7 @@ fn sampleResult(name: []const u8) BoardResult {
 fn sampleBaselineJson(arena: std.mem.Allocator) ![]const u8 {
     var aw: std.Io.Writer.Allocating = .init(arena);
     const results = [_]BoardResult{sampleResult("barracuda")};
-    try writeResultsJson(&aw.writer, &results);
+    try writeResultsJson(&aw.writer, &results, null);
     return aw.written();
 }
 
@@ -981,7 +1138,7 @@ test "baseline gate fails on corpus drift below the per-board allowance" {
     const arena = arena_state.allocator();
     var aw: std.Io.Writer.Allocating = .init(arena);
     const recorded = [_]BoardResult{ sampleResult("a"), sampleResult("b"), sampleResult("c") };
-    try writeResultsJson(&aw.writer, &recorded);
+    try writeResultsJson(&aw.writer, &recorded, null);
     const base = try parseBaseline(arena, aw.written());
     var now: [3]BoardResult = .{ sampleResult("a"), sampleResult("b"), sampleResult("c") };
     // Every page median 20% up: inside the 1.30 per-board ratio, over the
@@ -1000,7 +1157,7 @@ test "baseline gate enforces hand-set absolute budgets" {
     const arena = arena_state.allocator();
     var aw: std.Io.Writer.Allocating = .init(arena);
     const recorded = [_]BoardResult{sampleResult("barracuda")};
-    try writeResultsJson(&aw.writer, &recorded);
+    try writeResultsJson(&aw.writer, &recorded, null);
     // Splice a budgets object in, as a human editing the committed file would.
     const with_budget = try std.mem.concat(arena, u8, &.{
         aw.written()[0 .. aw.written().len - 2], // drop "}\n"
@@ -1023,7 +1180,7 @@ test "baseline gate skips an unblessed board with a note" {
     var loose = sampleResult("free-solver");
     loose.facts.placed = false;
     const recorded = [_]BoardResult{ sampleResult("blessed"), loose };
-    try writeResultsJson(&aw.writer, &recorded);
+    try writeResultsJson(&aw.writer, &recorded, null);
     const base = try parseBaseline(arena, aw.written());
     // The unblessed board comes back wildly different — different counts,
     // triple the wall — and the gate still passes, with it named in the note.
@@ -1046,7 +1203,7 @@ test "baseline gate still checks stable pages on an unblessed board" {
     var base_row = sampleResult("free-solver");
     base_row.facts.placed = false;
     var aw: std.Io.Writer.Allocating = .init(arena);
-    try writeResultsJson(&aw.writer, &.{base_row});
+    try writeResultsJson(&aw.writer, &.{base_row}, null);
     const base = try parseBaseline(arena, aw.written());
 
     var slower = base_row;
@@ -1092,7 +1249,7 @@ test "baseline gate notes unlined and missing boards" {
     const arena = arena_state.allocator();
     var aw: std.Io.Writer.Allocating = .init(arena);
     const recorded = [_]BoardResult{ sampleResult("kept"), sampleResult("vanished") };
-    try writeResultsJson(&aw.writer, &recorded);
+    try writeResultsJson(&aw.writer, &recorded, null);
     const base = try parseBaseline(arena, aw.written());
     const results = [_]BoardResult{ sampleResult("kept"), sampleResult("brand-new") };
     const report = try checkBaseline(arena, &results, &base);
@@ -1118,12 +1275,12 @@ test "table and JSON report a failed board without medians" {
     var buf: [2048]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
     const rows = [_]BoardResult{ sampleResult("good"), .{ .name = "broken" } };
-    try writeTable(&w, &rows, 3);
+    try writeTable(&w, &rows, 3, null);
     try testing.expect(std.mem.indexOf(u8, w.buffered(), "FAILED") != null);
     try testing.expect(std.mem.indexOf(u8, w.buffered(), "good") != null);
     var jbuf: [2048]u8 = undefined;
     var jw = std.Io.Writer.fixed(&jbuf);
-    try writeResultsJson(&jw, &rows);
+    try writeResultsJson(&jw, &rows, null);
     try testing.expect(std.mem.indexOf(u8, jw.buffered(), "\"name\":\"broken\",\"ok\":false") != null);
 }
 
@@ -1133,8 +1290,70 @@ test "table flags a render the page cache did not retain" {
     var w = std.Io.Writer.fixed(&buf);
     var uncached = sampleResult("big-board");
     uncached.facts.cached = false;
-    try writeTable(&w, &.{uncached}, 3);
+    try writeTable(&w, &.{uncached}, 3, null);
     try testing.expect(std.mem.indexOf(u8, w.buffered(), "NOT retained") != null);
+}
+
+// spec: bench-page - the load tripwire parses the leading 1-minute loadavg figure and refuses malformed content
+test "loadavg parse takes the 1-minute figure and refuses garbage" {
+    try testing.expectEqual(@as(f64, 0.42), parseLoad1m("0.42 0.36 0.30 2/1250 12345\n").?);
+    try testing.expect(parseLoad1m("") == null);
+    try testing.expect(parseLoad1m("   \n") == null);
+    try testing.expect(parseLoad1m("not-a-load 1 2") == null);
+}
+
+// spec: bench-page - the load model forgives a high start decaying after a gated build and the bench's own busy core
+test "load model forgives post-build decay and its own core" {
+    // Quiet machine: five minutes in, the only load is the bench's own core.
+    try testing.expect(1.1 - expectedLoad(0.1, 300.0) < load_excess_limit);
+    // perf_gate.sh runs two parallel `zig build`s seconds before the bench
+    // starts (1-min load 8 at start); three minutes later the observed ~1.4
+    // is the modelled decay plus this process, nowhere near the limit.
+    try testing.expect(1.4 - expectedLoad(8.0, 180.0) < 1.0);
+}
+
+// spec: bench-page - load that persists or arrives mid-run exceeds the decay model and labels the run contended
+test "load model flags persisting and arriving workloads" {
+    // A sibling already running at start (1-min load 4) does not fade the way
+    // a finished build would: five minutes in, the model expects ~1 and the
+    // machine still shows ~4.8 — the FEEDBACK.md 2026-08-29 case.
+    try testing.expect(4.8 - expectedLoad(4.0, 300.0) > load_excess_limit);
+    // A parallel test shard arriving mid-run on a machine that started quiet.
+    try testing.expect(9.0 - expectedLoad(0.2, 240.0) > load_excess_limit);
+}
+
+// spec: bench-page - a contended run is labelled in the table and JSON so it cannot be recorded as a clean baseline silently
+test "contended runs are labelled in table and JSON" {
+    var flagged = sampleResult("barracuda");
+    flagged.load_contended = true;
+    const noisy = LoadReport{ .start_1m = 0.2, .end_1m = 4.6, .max_excess_1m = 3.6, .contended = true };
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try writeTable(&w, &.{flagged}, 3, noisy);
+    try testing.expect(std.mem.indexOf(u8, w.buffered(), "CONTENDED") != null);
+    var jbuf: [4096]u8 = undefined;
+    var jw = std.Io.Writer.fixed(&jbuf);
+    try writeResultsJson(&jw, &.{flagged}, noisy);
+    try testing.expect(std.mem.indexOf(u8, jw.buffered(), "\"load_contended\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, jw.buffered(), "\"load\":{") != null);
+    try testing.expect(std.mem.indexOf(u8, jw.buffered(), "\"contended\":true") != null);
+
+    // The labels ride beside the boards without disturbing the baseline
+    // loader — a labelled recording still round-trips its rows.
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const base = try parseBaseline(arena, jw.buffered());
+    try testing.expect(base.board("barracuda") != null);
+
+    // A clean run carries no per-board label and says contended:false, the
+    // fact perf_gate.sh --record checks before installing a recording.
+    const clean = LoadReport{ .start_1m = 0.2, .end_1m = 1.1, .max_excess_1m = 0.1, .contended = false };
+    var cbuf: [4096]u8 = undefined;
+    var cw = std.Io.Writer.fixed(&cbuf);
+    try writeResultsJson(&cw, &.{sampleResult("barracuda")}, clean);
+    try testing.expect(std.mem.indexOf(u8, cw.buffered(), "load_contended") == null);
+    try testing.expect(std.mem.indexOf(u8, cw.buffered(), "\"contended\":false") != null);
 }
 
 // spec: bench-page - the page-cache retention probe asks under the same entry and live version the page warm admitted, so a cached page is never reported as NOT retained

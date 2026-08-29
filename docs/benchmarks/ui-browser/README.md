@@ -99,6 +99,14 @@ npm run perf:ui -- --surface pcb_2d --reps 5
 npm run perf:ui -- --scenario pcb_2d.find --reps 10
 ```
 
+Every measuring invocation (focused ones included) queues itself under
+`scripts/gate.sh`'s machine-wide lock via `scripts/perf_gate_lock.js`, the
+same lock `scripts/perf_gate.sh` holds for the full matrix — timing runs
+outside the queue corrupt whatever gated run they overlap (FEEDBACK.md
+2026-08-29). `--list` and argument validation stay lock-free. gate.sh reports
+the queue depth when it has to wait; `NETLISP_GATE_SERIALIZE=0` bypasses the
+queue on a machine known idle.
+
 `--url http://127.0.0.1:PORT` uses an already-running private loopback server
 for focused surface/action runs and therefore requires `--surface` or
 `--scenario`. It cannot be combined with `--record`; raw-response checks and

@@ -32,3 +32,10 @@ npm run perf:pcb-editor -- --binary zig-out-browser-perf/bin/netlisp \
 Use `--url http://127.0.0.1:PORT` for a read-only diagnostic run against an
 existing loopback dev server. Use `--record` only when deliberately replacing
 the reference measurements; it preserves existing reviewed budgets.
+
+Standalone runs (the `npm run` form above included) queue themselves under
+`scripts/gate.sh`'s machine-wide lock via `scripts/perf_gate_lock.js`: an
+unlocked zoom run beside a gated measurement skewed the gated numbers 17-72%
+on the big boards (FEEDBACK.md 2026-08-29). gate.sh reports the queue depth
+when it has to wait; `NETLISP_GATE_SERIALIZE=0` bypasses the queue on a
+machine known idle.

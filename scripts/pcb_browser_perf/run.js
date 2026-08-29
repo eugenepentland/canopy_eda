@@ -9,6 +9,7 @@ const net = require("net");
 const os = require("os");
 const path = require("path");
 const { execFileSync, spawn } = require("child_process");
+const { ensureGateLock } = require("../perf_gate_lock");
 
 const root = path.resolve(__dirname, "..", "..");
 const localLib = path.join(os.homedir(), ".local", "lib", "playwright-chromium", "usr", "lib", "x86_64-linux-gnu");
@@ -764,6 +765,10 @@ function printSummary(summary) {
 
 async function main() {
   const options = argsRead(process.argv.slice(2));
+  // A standalone assembly bench is a timing measurement like any other: queue
+  // it under the machine-wide gate so it cannot skew (or be skewed by) a gated
+  // run in a sibling session. No-op when perf_gate.sh already holds the lock.
+  ensureGateLock("assembly_browser_perf");
   let server = null;
   let overlay = null;
   let serverText = "";

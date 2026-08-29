@@ -15,8 +15,8 @@ src/bench_page.zig::benchOne | fn benchOne( allocator: std.mem.Allocator, arena:
 src/bench_page.zig::cmdBenchPage | fn cmdBenchPage(allocator: std.mem.Allocator, args: []const []const u8) BenchError!void
 src/bench_page.zig::corpus | fn corpus(arena: std.mem.Allocator, project_dir: []const u8) std.mem.Allocator.Error![]const []const u8
 src/bench_page.zig::names value
-src/bench_page.zig::writeResultsJson | fn writeResultsJson(w: *std.Io.Writer, results: []const BoardResult) json_writer.WriteError!void
-src/bench_page.zig::writeTable | fn writeTable(w: *std.Io.Writer, results: []const BoardResult, reps: usize) std.Io.Writer.Error!void
+src/bench_page.zig::writeResultsJson | fn writeResultsJson(w: *std.Io.Writer, results: []const BoardResult, load: ?LoadReport) json_writer.WriteError!void
+src/bench_page.zig::writeTable | fn writeTable(w: *std.Io.Writer, results: []const BoardResult, reps: usize, load: ?LoadReport) std.Io.Writer.Error!void
 src/bench_route.zig::BenchError value
 src/bench_route.zig::BoardResult struct_
 src/bench_route.zig::Copper struct_
@@ -1090,6 +1090,7 @@ src/infra/fs.zig::next | fn next(self: *Walker) Error!?std.Io.Dir.Walker.Entry
 src/infra/fs.zig::openDir | fn openDir(self: Dir, sub_path: []const u8, options: std.Io.Dir.OpenOptions) OpenError!Dir
 src/infra/fs.zig::openFile | fn openFile(self: Dir, sub_path: []const u8, options: std.Io.Dir.OpenFileOptions) File.OpenError!File
 src/infra/fs.zig::readFileAlloc | fn readFileAlloc(self: Dir, allocator: std.mem.Allocator, sub_path: []const u8, max: usize) std.Io.Dir.ReadFileAllocError![]u8
+src/infra/fs.zig::readStreaming | fn readStreaming(self: File, buffer: []u8) std.Io.File.ReadStreamingError!usize
 src/infra/fs.zig::rename | fn rename(self: Dir, old_sub_path: []const u8, new_sub_path: []const u8) RenameError!void
 src/infra/fs.zig::signal | fn signal(self: *Condition) void
 src/infra/fs.zig::stat | fn stat(self: File) std.Io.File.StatError!std.Io.File.Stat

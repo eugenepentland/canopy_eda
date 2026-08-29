@@ -22,6 +22,7 @@ const net = require("net");
 const os = require("os");
 const path = require("path");
 const { execFileSync, spawn } = require("child_process");
+const { ensureGateLock } = require("../perf_gate_lock");
 
 const localLib = path.join(os.homedir(), ".local", "lib", "playwright-chromium", "usr", "lib", "x86_64-linux-gnu");
 if (fs.existsSync(localLib)) process.env.LD_LIBRARY_PATH = [localLib, process.env.LD_LIBRARY_PATH].filter(Boolean).join(":");
@@ -219,6 +220,10 @@ function enforce(summary, baseline) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
+  // A standalone zoom run is a timing measurement like any other: queue it
+  // under the machine-wide gate so it cannot skew (or be skewed by) a gated
+  // run in a sibling session. No-op when perf_gate.sh already holds the lock.
+  ensureGateLock("pcb_editor_perf");
   let server = null, serverText = "", baseUrl = options.url;
   try {
     if (!baseUrl) {

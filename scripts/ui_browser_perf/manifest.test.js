@@ -278,6 +278,20 @@ assert((gate.match(/node scripts\/perf_gate_designs_identity\.js/g) || []).lengt
   "perf_gate.sh must stamp the recorded page baseline's workload identity and verify it before enforcing");
 assert(!gate.includes('ln -s "$source_project_dir/lib/models"'),
   "perf_gate.sh must never expose the live model bundle to benchmark writes");
+// Standalone timing runs corrupted gated ones until the runners queued
+// themselves (FEEDBACK.md 2026-08-29): every browser runner must re-exec
+// under scripts/gate.sh's machine-wide lock when it does not already hold it,
+// and a bench-page recording labelled contended must never become a baseline.
+for (const perfRunner of ["scripts/pcb_browser_perf/run.js", "scripts/pcb_editor_perf/run.js", "scripts/ui_browser_perf/run.js"]) {
+  const runnerSource = fs.readFileSync(path.join(root, perfRunner), "utf8");
+  assert(runnerSource.includes('require("../perf_gate_lock")') && runnerSource.includes("ensureGateLock("),
+    `${perfRunner} must queue standalone timing runs under scripts/gate.sh's machine-wide lock`);
+}
+const gateLock = fs.readFileSync(path.join(root, "scripts", "perf_gate_lock.js"), "utf8");
+assert(gateLock.includes("NETLISP_GATE_HELD") && gateLock.includes("NETLISP_GATE_SERIALIZE"),
+  "perf_gate_lock.js must honor gate.sh's recursion guard and its explicit bypass");
+assert(gate.includes(".load?.contended"),
+  "perf_gate.sh --record must refuse to install a bench-page recording labelled contended");
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 assert.strictEqual(packageJson.scripts["perf:ui"], "node scripts/ui_browser_perf/run.js");
 assert.strictEqual(packageJson.scripts["perf:pcb-editor"], "node scripts/pcb_editor_perf/run.js");

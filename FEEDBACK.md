@@ -539,3 +539,28 @@ collapse toward the medians (41.3 -> 29.9 on canvas zoom-out) because the
 outlier the race produced is gone. The enforced budgets were left exactly as
 they were, so the gate is no looser than before — which is the property that
 matters when the person re-recording is the author of the change.
+
+## 2026-08-29 · claude · benchmark runs can no longer dodge the gate silently
+
+- **workaround:** implemented the "friction" fixes from the fail-fast entry
+  above. All three tracked browser runners (`scripts/pcb_browser_perf/run.js`,
+  `scripts/pcb_editor_perf/run.js`, `scripts/ui_browser_perf/run.js`) now
+  re-exec themselves under `scripts/gate.sh` when invoked standalone
+  (`scripts/perf_gate_lock.js`, tripwired by `manifest.test.js`); `--list`,
+  `--help`, and argument errors stay lock-free, `NETLISP_GATE_SERIALIZE=0`
+  still bypasses, and under `perf_gate.sh` the inherited `NETLISP_GATE_HELD`
+  makes it a no-op. As the backstop for workloads that never take the lock at
+  all, `netlisp bench-page` samples /proc/loadavg around every board and
+  labels the run — and each board measured beside the excess — CONTENDED when
+  a 1-minute sample exceeds `1 + (start − 1)·e^(−t/60)` (its own busy core
+  plus the decay of the just-finished gated builds) by more than 2 runnable
+  tasks; `perf_gate.sh --record` refuses to install a recording carrying the
+  label, and an enforce run prints it beside a FAIL instead of flipping the
+  verdict. `gate.sh` now reports the queue depth and the pids ahead (commands
+  included) the moment it blocks, and how long it queued once it acquires.
+- **note:** the tripwire deliberately tolerates ~2 runnable tasks of drift —
+  one extra single-threaded process can still skew a big board without
+  tripping it (stated in docs/benchmarks/pcb-page/README.md's validity
+  rules). The `hb_when.js` named above was an untracked scratch script and is
+  gone from every checkout; the durable protection is that the tracked
+  runners queue and bench-page labels what queuing cannot prevent.

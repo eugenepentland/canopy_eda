@@ -58,6 +58,12 @@ Use `npm run perf:assembly -- --record` only when deliberately replacing the
 reference measurements. Existing reviewed budgets are preserved. The normal
 pre-push performance gate runs this benchmark after the server-side page gate.
 
+Standalone runs queue themselves under `scripts/gate.sh`'s machine-wide lock
+(via `scripts/perf_gate_lock.js`) exactly as `scripts/perf_gate.sh` does — a
+timing run outside the queue corrupts any gated measurement it overlaps
+(FEEDBACK.md 2026-08-29). gate.sh reports the queue depth when it has to
+wait; `NETLISP_GATE_SERIALIZE=0` bypasses the queue on a machine known idle.
+
 `--url http://127.0.0.1:PORT` can target an already-running private loopback
 server for diagnosis; non-loopback URLs are refused and existing-server runs
 cannot record a baseline. In either mode the browser
