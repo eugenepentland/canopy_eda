@@ -209,4 +209,15 @@ test "a plane net named like a closing script tag cannot terminate the blob's sc
     const root = try std.json.parseFromSliceLeaky(std.json.Value, arena, json, .{});
     const row = root.object.get("layer_table").?.array.items[1].object;
     try std.testing.expectEqualStrings(evil, row.get("net").?.string);
+
+    // A lexical gate cannot protect this file any more: the `\\u003c` in the
+    // assertion above makes the whole FILE read as script-safe, so
+    // `script-string-safety` is pinned green here and a SECOND, private escaper
+    // added later would slip past it. This is that guard. Both needles are
+    // split so this assertion is never its own counterexample.
+    const source = @embedFile("layer_table_json.zig");
+    const private_quote_arm = "'\"'" ++ " =>";
+    try std.testing.expect(std.mem.indexOf(u8, source, private_quote_arm) == null);
+    const unsafe_sink = "json_writer." ++ "writeString(";
+    try std.testing.expect(std.mem.indexOf(u8, source, unsafe_sink) == null);
 }

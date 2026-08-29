@@ -468,6 +468,66 @@ modules = [
   "src/pdf.zig",
   "src/svg2pdf.zig",
 ]
+
+# ── Script-context escaping (`[script_string_safety]`) ────────────────────
+# The PCB page ships its whole board as `<script>const PCB=…</script>`, so every
+# serializer feeding that blob writes into an HTML script element, not into a
+# JSON response. A JSON escaper is not a script escaper: it passes `<` through,
+# and a design-authored `</script>` then closes the tag and executes.
+#
+# This is the SECOND time that bug shipped. The 2026-07 audit found it, the fix
+# hardened the central writer (`json_writer.writeScriptString`, which escapes
+# `<` plus U+2028/9) — and three sibling serializers into the same blob kept
+# their own private escaper: pcb_part_json escaped quotes and control chars but
+# not `<`, layer_table_json escaped only `"` and `\`, and power_integrity_json
+# routed through the plain `writeString`. Nothing in the type system says a
+# writer is script-safe, so a fourth private escaper could reopen it again.
+#
+# `blob_files` names both sides on purpose: the three that were unsafe AND the
+# two that were already right (`pcb_rules_json`, `trace_em_json`) plus the owner
+# `json_writer`, so the rule is measured against its own negative controls. The
+# check is deliberately opt-in and consumer-named rather than keyed on "any
+# writer lacking `<`": over a broad `src/**/*_json.zig` glob it scores ten
+# findings, most of them legitimate `application/json` responders where `<` is
+# fine.
+[script_string_safety]
+blob_files = [
+  "src/serve/pcb_part_json.zig",
+  "src/serve/layer_table_json.zig",
+  "src/power_integrity_json.zig",
+  "src/serve/pcb_rules_json.zig",
+  "src/serve/trace_em_json.zig",
+  "src/json_writer.zig",
+]
+
+# ── Surfaced-but-unenforced model fields (`[[dead_model_field]]`) ─────────
+# `ElectricalDecl.max_voltage` was parsed from `(max-voltage …)`, rendered into
+# the review's "boundary contracts" table and into review JSON — and read by no
+# checker at all. The voltage-domain ERC consumed only the UNDERvoltage
+# direction, so a 5 V driver on a 1.8 V-max receiver passed clean while the UI
+# displayed the rating as though something enforced it. That is worse than an
+# unchecked field: the contract was on screen.
+#
+# The rule counts FIELD ACCESSES (an identifier preceded by `.`), so the JSON
+# key string `"max_voltage"` never counts — only `e.max_voltage` does. A field
+# read under `output` and never under `logic` fires. `fields` is named
+# explicitly rather than discovered from the struct: discovery over the whole
+# `ElectricalDecl` yields a defensible five-field set, but generic names like
+# `.domain` and `.drive` conflate with same-named fields on other structs, and
+# this is a gate, not a survey.
+[[dead_model_field]]
+struct = "ElectricalDecl"
+owner = "src/eval/env.zig"
+fields = ["max_voltage"]
+output = ["src/review_json.zig", "src/render_html.zig"]
+logic = [
+  "src/erc.zig",
+  "src/checks.zig",
+  "src/req_checks.zig",
+  "src/req_derived_checks.zig",
+  "src/eval/validate.zig",
+]
+reason = "a declared absolute-maximum rating that is shown to the user must be enforced by a checker, or the review table promises a guard nothing performs"
 # ── [[ban]]: the raw `.layouts.json` writers ──────────────────────────────
 # Rule of thumb first (evaluated 2026-08-04, still true): reach for [[ban]] only
 # when the callee's signature is NOT ours to change. The case this check was

@@ -381,6 +381,19 @@ test "part JSON escapes a closing script tag in every design-derived string" {
     const pad = parsed.object.get("pads").?.array.items[0].object;
     try std.testing.expectEqualStrings(evil, pad.get("net").?.string);
     try std.testing.expectEqualStrings(evil, pad.get("shape").?.string);
+
+    // A lexical gate cannot protect this file any more: the `<` in the
+    // assertion above makes the whole FILE read as script-safe, so
+    // `script-string-safety` is pinned green here and a SECOND, private escaper
+    // added later would slip past it. This is that guard — it fails on the
+    // quote-escaping switch arm every hand-rolled JSON escaper starts from, and
+    // on the plain sink. Both needles are split so neither is its own
+    // counterexample.
+    const source = @embedFile("pcb_part_json.zig");
+    const private_quote_arm = "'\"'" ++ " =>";
+    try std.testing.expect(std.mem.indexOf(u8, source, private_quote_arm) == null);
+    const unsafe_sink = "json_writer." ++ "writeString(";
+    try std.testing.expect(std.mem.indexOf(u8, source, unsafe_sink) == null);
 }
 
 // spec: Web Server - Edit-source provenance in the PCB blob is escaped for the script element, so neither a ref-des key nor an instance label can close the tag
