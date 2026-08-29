@@ -469,6 +469,14 @@ pub fn applyExisting(
         }
         allocator.free(entries);
     }
+
+    // The BOM is also the annotation ledger for allocator-owned ref-des.
+    // Reconcile those names before matching UUID/property rows: a fresh
+    // evaluation numbers by source order, so an inserted instance can
+    // otherwise make every read-only surface (queries, PCB, fab) disagree
+    // with `build` about which stable ID owns U/C/R<n>.
+    try stabilizeRefdes(allocator, block, entries);
+
     var uuids = std.StringHashMapUnmanaged([]const u8).empty;
     defer uuids.deinit(allocator);
     var props = std.StringHashMapUnmanaged([]const Property).empty;
@@ -517,6 +525,7 @@ pub fn existingSidecarMatches(
 ) ResolveError!bool {
     const entries = try bom_mod.loadBom(allocator, bom_path);
     defer freeEntries(allocator, entries);
+    try stabilizeRefdes(allocator, block, entries);
     var flat: std.ArrayList(FlatInfo) = .empty;
     defer flat.deinit(allocator);
     try bom_mod.collectFlatInstances(allocator, block, "", &flat);

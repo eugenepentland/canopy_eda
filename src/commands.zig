@@ -267,6 +267,15 @@ pub fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandE
     defer eval.deinit();
     const block = evalCheckBlock(&eval, board_path, parsed.design);
 
+    // ERC/preflight diagnostics must name the same parts as `build`, the
+    // introspection commands, and the PCB. Loading the prior BOM is read-only;
+    // it restores allocator-owned ref-des by stable ID before checks run.
+    const bom_path = try paths.designSiblingPath(allocator, parsed.project_dir, parsed.design, ".bom");
+    defer allocator.free(bom_path);
+    bom.applyExisting(allocator, block, bom_path, parsed.project_dir) catch |err| {
+        std.debug.print("warning: existing BOM identity merge skipped: {s}\n", .{@errorName(err)});
+    };
+
     const violations = try erc_mod.runErc(allocator, block, parsed.project_dir);
     var w_buf: std.Io.Writer.Allocating = .init(allocator);
     defer w_buf.deinit();

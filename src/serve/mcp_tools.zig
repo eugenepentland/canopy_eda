@@ -2337,7 +2337,17 @@ pub fn evalNamedBlock(
     if (have_design) {
         const result = try eval.evalFile(path);
         switch (result) {
-            .design_block => |b| return .{ .block = b, .is_module = false },
+            .design_block => |b| {
+                // Read tools must consume the same ID-backed ref-des ledger as
+                // `build`. Without this pass list_instances/get_net used the
+                // evaluator's provisional source-order numbering while the
+                // emitted design and PCB used the persisted BOM assignments.
+                const bom_path = try paths.designSiblingPath(allocator, project_dir, name, ".bom");
+                defer allocator.free(bom_path);
+                bom.applyExisting(allocator, b, bom_path, project_dir) catch |err|
+                    warnResolveIdentities(name, err);
+                return .{ .block = b, .is_module = false };
+            },
             // A defmodule file (returns .nil) means `name` resolved via the
             // lib/modules fallback in designSourcePath — not a real src/ design.
             // Fall through to instantiate it as a module below.
@@ -2392,6 +2402,79 @@ pub fn renderSceneGraph(
 }
 
 // ── Tests ─────────────────────────────────────────────────────────
+
+test "read tools reuse build's stable refdes assignments after insertion" {
+    // spec: serve/mcp_tools - build, list_instances, and get_net resolve allocator-owned refdes from the same stable-ID BOM ledger
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/refchip.sexp", .data =
+        \\(component refchip
+        \\  (refdes "U")
+        \\  (ignore-requirements)
+        \\  (pins (1 "IO")))
+    });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/board.sexp", .data =
+        \\(import refchip)
+        \\(design-block "Stable refs"
+        \\  (instance "OLD_A" refchip (id aaa00001) (pin 1 "OLD_A_NET"))
+        \\  (instance "OLD_B" refchip (id bbb00002) (pin 1 "OLD_B_NET")))
+    });
+
+    const source_path = try paths.designSourcePath(alloc, project, "board");
+    const bom_path = try paths.designSiblingPath(alloc, project, "board", ".bom");
+    {
+        var evaluator = Evaluator.init(alloc, project);
+        defer evaluator.deinit();
+        const value = try evaluator.evalFile(source_path);
+        const block = switch (value) {
+            .design_block => |candidate| candidate,
+            else => return error.TestExpectedDesignBlock,
+        };
+        try bom.resolveIdentities(alloc, block, bom_path, project);
+        try std.testing.expectEqualStrings("U1", block.instances[0].ref_des);
+        try std.testing.expectEqualStrings("U2", block.instances[1].ref_des);
+    }
+
+    // A new source-order predecessor provisionally takes U1. The build path
+    // moves it above the old range and restores U1/U2 by stable ID.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/board.sexp", .data =
+        \\(import refchip)
+        \\(design-block "Stable refs"
+        \\  (instance "NEW" refchip (id ccc00003) (pin 1 "NEW_NET"))
+        \\  (instance "OLD_A" refchip (id aaa00001) (pin 1 "OLD_A_NET"))
+        \\  (instance "OLD_B" refchip (id bbb00002) (pin 1 "OLD_B_NET")))
+    });
+    {
+        var evaluator = Evaluator.init(alloc, project);
+        defer evaluator.deinit();
+        const value = try evaluator.evalFile(source_path);
+        const block = switch (value) {
+            .design_block => |candidate| candidate,
+            else => return error.TestExpectedDesignBlock,
+        };
+        try bom.resolveIdentities(alloc, block, bom_path, project);
+        try std.testing.expectEqualStrings("U3", block.instances[0].ref_des);
+        try std.testing.expectEqualStrings("U1", block.instances[1].ref_des);
+        try std.testing.expectEqualStrings("U2", block.instances[2].ref_des);
+    }
+
+    var instances_out: std.Io.Writer.Allocating = .init(alloc);
+    try std.testing.expect(try listInstances(alloc, project, "board", .flat, &instances_out.writer));
+    try std.testing.expect(std.mem.indexOf(u8, instances_out.written(), "\"ref_des\":\"U3\",\"origin\":\"NEW\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, instances_out.written(), "\"ref_des\":\"U1\",\"origin\":\"OLD_A\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, instances_out.written(), "\"ref_des\":\"U2\",\"origin\":\"OLD_B\"") != null);
+
+    var net_out: std.Io.Writer.Allocating = .init(alloc);
+    try std.testing.expect(try getNet(alloc, project, "board", "OLD_A_NET", .flat, &net_out.writer));
+    try std.testing.expect(std.mem.indexOf(u8, net_out.written(), "\"ref_des\":\"U1\"") != null);
+}
 
 test "fuzzyScore returns 0 for a non-match" {
     // spec: serve/mcp_tools - fuzzyScore returns 0 when the needle does not match the haystack as a substring or subsequence

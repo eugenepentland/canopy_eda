@@ -6137,6 +6137,7 @@ Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesig
 - build response carries eval warnings in a warnings[] array separate from erc[]
 - The tools registration table and the embedded tools_list_result.json declare exactly the same tool names
 - get_schematic defaults to a compact summary far smaller than the full scene graph
+- build, list_instances, and get_net resolve allocator-owned refdes from the same stable-ID BOM ledger
 - flatten makes list_instances include sub-block children with prefixed refs and origins
 - list_instances counts pins from the component pinout when the part declares no symbol
 - flatten makes get_net return the merged rail and resolve a sub-scoped net spelling
