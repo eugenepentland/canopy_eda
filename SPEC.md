@@ -2138,6 +2138,8 @@ the owning switch pad axis.
 - frame fit rejects cramped tangent intersection and accepts a straight spoke
 - a terminal-to-terminal RF calibration net becomes its own physical island
 - every attempted RF net exposes its chosen trial, all trial scores, feasibility, entry error, curvature energy, and worst return loss in pcb-describe
+- a sampled path claims a stored track only where its own copper is at least that wide, so an orphaned or stale run can never delete a wider trace and re-emit it thinner
+- an orphaned or stale swept path never narrows a wider stored trace that shares its coordinates, and still deduplicates the chords it does describe
 - completeness-waiver: empty inputs (no eligible two-pin controlled-impedance net is a no-op; an empty/degenerate guide records an infeasible trial rather than indexing it)
 - completeness-waiver: large inputs (one net explores a bounded 96-profile table across direct, dogleg, and mirrored lateral-detour families and bounds every Euler chord by the authored chord length; whole-board work is linear in eligible nets)
 - completeness-waiver: unauthorized access (pure geometry plus an in-process final router pass; endpoint authorization remains at the existing serve boundary)
@@ -3147,6 +3149,7 @@ Public functions: check, checkTopology, checkWithZones, checkWithPreparedCopper,
 - the copper diff reports only the features that changed, whichever position they hold in the posted arrays
 - two identical copper features are two features, so deleting one of them is an edit
 - a via edit is reported with its own geometry so a scoped recheck can grow the region a drill rule reaches
+- same-net copper that physically overlaps without forming a certifiable junction is reported as a warning-severity net_open, while islands that genuinely never touch stay error-severity
 - completeness-waiver: empty inputs (each rule iterates the geometry present, so a design with no copper or parts yields no violations by construction)
 - completeness-waiver: large inputs (a bounded pairwise geometry scan; working memory stays proportional to the parsed design, with no unbounded buffering)
 - completeness-waiver: unauthorized access (a pure in-memory computation with no auth surface here; access control lives in serve/users)
@@ -3344,6 +3347,8 @@ is enlarged only as far as the derived drill and annular-ring rules require.
 - declared loads outrank source capacity, so a rail routes for what the board draws rather than what its supply could deliver
 - a standalone module that rates its own output port and declares a bare layer count gets an IPC-2221 width for that rail; without the stackup no width is invented
 - power-routing named tests remain assigned to exactly one test shard
+- an adaptive rail carries its width as ordinary copper: a drawn run commits its shaped tracks with equal-width collinear stations collapsed, an inherited overlay bakes its sample widths onto the tracks it owns before any edit releases it, and a gesture that collapses copper to zero length takes the crumb with it
+- moving adaptive power copper recuts the maximal same-net runs the gesture touched to the clearance they have after the move, growing or shrinking under the exact DRC gate and never below the routing floor
 - completeness-waiver: concurrent access (capacity functions are pure and routing reads one immutable placement snapshot while mutating only its caller-owned route)
 - completeness-waiver: empty inputs (a missing or empty stack and a rail without an unambiguous declared load produce no derived geometry)
 - completeness-waiver: i/o failure (the model performs no I/O; board rules and load annotations arrive as in-memory values)
@@ -3982,6 +3987,7 @@ short surface-current path to the supply land it is meant to serve.
 - Vias and remote pours do not substitute for a bypass capacitor's local surface leg
 - rail-level reservoir capacitors explicitly marked `(decouples rail)` are outside the exact-pad rule
 - optimizer-inferred proximity loops are outside the authored exact-pad rule
+- The bypass connectivity check judges the lowered swept-path copper every sibling rule measures, not the compact editor handle's floor width
 - completeness-waiver: empty inputs (a placement with no decoupling loops produces no findings)
 - completeness-waiver: large inputs (the pass is final-state reporting only and filters copper by each loop's one rail and outer face)
 - completeness-waiver: unauthorized access (pure in-process geometry over an already-authorized layout)
@@ -6259,6 +6265,8 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The PDN impedance sweep rides its own response behind the after-paint payload, marked by a null `ac`, so the board's own diagnostics never wait on the editor's most expensive analysis
 - The PDN sweep is keyed apart from the after-paint payload, so the viewer's two fetches never collide on one cache entry
 - The progress store accepts a ladder computed off-request under the same size and read-set rules as a served one
+- The saved-routes parser silently culls a track that has collapsed into a sub-micron ball, on the save and the sidecar load alike, judging an arc on all three of its points and keeping one whose points still describe a circle
+- Reading a saved layout back out of its sidecar drops the collapsed sub-micron crumbs its copper carries, so an old board opens healed without its file being edited
 
 - completeness-waiver: concurrent access (the umbrella section owns no single mutable store; endpoint-specific locking, revision conflicts, atomic sidecar writes, and request-local state are specified and tested in their dedicated serve sections)
 
@@ -6879,6 +6887,7 @@ Public functions: check, writeJson
 - a custom outline polygon with fewer than 3 points warns that the profile fell back to a rect
 - a part in a concave notch is flagged off-board by the polygon inset, not just the bbox rect
 - release confirmation tokens bind report findings, CAM identity, source and evaluated BOM
+- a zero-length track is a point feature that joins the same-net copper covering its centre, and its own half-width disc grants it nothing more
 
 ## fabrication-release
 
@@ -6906,6 +6915,7 @@ Public functions: check, writeJson
 - a fabrication package request whose project source revision already blocks the release is refused before the board is placed, checked or digested
 - the fast fabrication refusal cites the same source-revision finding as the full report and states that the rest of the report was not computed
 - the fast fabrication refusal declines every request the saved-layout selection still owes a 404
+- a collapsed sub-micron track crumb the parser culls is not dropped manufacturing copper, while any other missing track still fails release evidence
 - completeness-waiver: empty inputs (an empty/missing selection has no exact manufacturing row and is a non-waivable evidence failure)
 - completeness-waiver: large inputs (the sidecar read is capped at 16 MiB before the strict JSON tree and entity validation run)
 - completeness-waiver: unauthorized access (the validator is read-only; HTTP authorization remains at the manufacturing endpoint boundary)

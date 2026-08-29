@@ -17,11 +17,14 @@
 //! Per net: build the net's connectivity graph, split it into connected
 //! components (plane-fed islands fuse through the pour, so a real ground plane
 //! is exempt), and if more than one survives, chain them by nearest approach —
-//! one `net_open` error per (components − 1) edge, its marker sitting in the
-//! closest gap with `gap` = that airgap in mm. A copper island touching NO pad
-//! is orphan copper, flagged the same way (on a plane-carried net, orphan-only
-//! islands are skipped — they are almost always pour-connected, which this pass
-//! cannot cheaply prove, so flagging them would be noise).
+//! one `net_open` finding per (components − 1) edge, its marker sitting in the
+//! closest gap with `gap` = that airgap in mm. It is an ERROR when the two
+//! islands genuinely stand apart and a WARNING when their copper already
+//! overlaps without forming a certifiable junction (see `severityFor`). A
+//! copper island touching NO pad is orphan copper, flagged the same way (on a
+//! plane-carried net, orphan-only islands are skipped — they are almost always
+//! pour-connected, which this pass cannot cheaply prove, so flagging them would
+//! be noise).
 //!
 //! An island may be a BARE PAD — one the router never reached, so its only
 //! copper is the pad itself. Those count exactly like a copper island: a pad
@@ -347,8 +350,9 @@ fn compFor(
 }
 
 /// Chain the copper islands into one tree by nearest approach (Prim's MST) and
-/// emit a `net_open` error per tree edge — `islands − 1` violations, each marked
-/// in the closest gap between the two islands it joins. Capping at the MST edges
+/// emit one finding per tree edge — `islands − 1` violations, each marked in
+/// the closest gap between the two islands it joins, at the kind and severity
+/// that gap earns (`severityFor`). Capping at the MST edges
 /// (not every pair) keeps a many-island net from producing quadratic spam while
 /// still surfacing every disconnected island once.
 ///
@@ -405,14 +409,15 @@ fn emitOpens(
                 link[j] = pick;
             }
         }
-        const kind: drc.Kind = if (copper_contact.classifyGap(best.dist) == .hairline) .hairline_gap else .net_open;
+        const class = copper_contact.classifyGap(best.dist);
+        const kind: drc.Kind = if (class == .hairline) .hairline_gap else .net_open;
         try out.append(arena, .{
             .x = best.x,
             .y = best.y,
             .gap = best.dist,
             .clearance = 0, // an open must close to 0 mm; no spacing rule applies
             .kind = kind,
-            .severity = drc.defaultSeverity(kind),
+            .severity = severityFor(class, kind),
             // ONE net (`net_b` unset), with the two islands it failed to join
             // named by a pad each — the endpoints copper still has to reach.
             .who = .{
@@ -425,6 +430,30 @@ fn emitOpens(
             },
         });
     }
+}
+
+/// How loudly one island-pair edge is reported, given how close the two islands
+/// came.
+///
+/// A `.connected` approach is the odd one: it means the pair's nearest gap is
+/// within the 1 µm join tolerance — usually NEGATIVE, i.e. the two islands'
+/// copper physically OVERLAPS — and yet the contact policy still refused to
+/// unite them. That happens when the overlap carries no complete bottleneck
+/// cross-section: a narrow stub dying on the flank of a wide trunk, or a
+/// degenerate crumb sitting inside a via's land, lays metal on metal without
+/// ever landing a full transverse chord (`copper_contact.trackTrackConnects`).
+/// On the fabbed board that metal is continuous, so calling it a missing
+/// connection is a false positive; what is actually wrong is the QUALITY of the
+/// junction, which is a warning to go widen or restructure the joint.
+///
+/// Everything else is unchanged: an island pair that genuinely never touches is
+/// the fab-fatal error it has always been, and the 1–20 µm hairline band keeps
+/// its own kind at its own default severity. Only the severity moves — the kind,
+/// the island graph, the marker and the emitted count are identical either way,
+/// so the fab gate's airwire verdict and every `net_open` count still agree with
+/// this pass exactly as before.
+fn severityFor(class: copper_contact.GapClass, kind: drc.Kind) drc.Severity {
+    return if (class == .connected) .warn else drc.defaultSeverity(kind);
 }
 
 /// The nearest-approach point + edge-to-edge gap between two islands' copper.
@@ -769,6 +798,93 @@ test "a five micron same-net gap is a hairline error and not a connection" {
     try testing.expectEqual(drc.Kind.hairline_gap, found[0].kind);
     try testing.expectEqual(drc.Severity.err, found[0].severity);
     try testing.expectApproxEqAbs(@as(f64, 0.005), found[0].gap, 1e-6);
+}
+
+/// A wide trunk joining U1 and C1, plus a narrow stub hanging off C2 that ends
+/// `stub_end_y` above the trunk's centreline. The trunk's copper reaches
+/// 0.5 mm out and the stub's 0.1 mm, so the pair's edge-to-edge gap is
+/// `stub_end_y − 0.6`: one number picks the overlapping, hairline and open
+/// cases out of the SAME geometry.
+///
+/// The stub never unites with the trunk at any of them. Its transverse chord
+/// sits 0.1 mm either side of its tip, which is where a perpendicular stub's
+/// bottleneck cross-section has to fit inside the trunk's 0.5 mm half-width —
+/// and at `stub_end_y ≥ 0.55` it never does. That is exactly the flank landing
+/// this severity split is about: metal on metal, no certified junction.
+fn stubOnTrunkTracks(stub_end_y: f64) [2]router.Track {
+    return .{
+        .{ .x1 = 0, .y1 = 0, .x2 = 10, .y2 = 0, .layer = 0, .width = 1.0, .net = 0 },
+        .{ .x1 = 5, .y1 = 3, .x2 = 5, .y2 = stub_end_y, .layer = 0, .width = 0.2, .net = 0 },
+    };
+}
+
+/// One 0.6 mm land at the part origin — the footprint every fixture part below
+/// carries. File-scope so the `Part.pads` slices that name it outlive the
+/// helper that builds them.
+const one_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+
+/// U1 and C1 at the trunk's ends and C2 above it, the three parts
+/// `stubOnTrunkTracks` lays copper between.
+fn stubOnTrunkParts() [3]optimizer.Part {
+    return .{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &one_pad, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 1, .pads = &one_pad, .fallback = false, .x = 10, .y = 0 },
+        .{ .ref_des = "C2", .kind = .passive, .hw = 1, .hh = 1, .pads = &one_pad, .fallback = false, .x = 5, .y = 3 },
+    };
+}
+
+// spec: placement/drc - same-net copper that physically overlaps without forming a certifiable junction is reported as a warning-severity net_open, while islands that genuinely never touch stay error-severity
+test "overlapping same-net islands warn instead of erroring as a hard net open" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    var parts = stubOnTrunkParts();
+    const pins = [_]flat_netlist.FlatPin{
+        .{ .ref_des = "U1", .pin = "1" },
+        .{ .ref_des = "C1", .pin = "1" },
+        .{ .ref_des = "C2", .pin = "1" },
+    };
+    const nets = [_]flat_netlist.FlatNet{.{ .name = "SIG", .pins = &pins }};
+    const placement = twoPadPlacement(&parts, &nets);
+
+    // Stub tip 0.55 mm off the trunk centreline: its copper laps 0.05 mm ONTO
+    // the trunk's. The fabbed board carries current here — what it does not
+    // carry is a full-width joint — so the marker is a warning to go widen the
+    // landing, not the fab-fatal "this net is in two pieces".
+    const grazing = stubOnTrunkTracks(0.55);
+    const warned = try check(arena, placement, .{ .tracks = &grazing }, null);
+    try testing.expectEqual(@as(usize, 1), count(warned));
+    try testing.expectEqual(drc.Kind.net_open, warned[0].kind);
+    try testing.expectEqual(drc.Severity.warn, warned[0].severity);
+    try testing.expect(warned[0].gap < 0); // overlapping copper, not an airgap
+    try testing.expectApproxEqAbs(@as(f64, -0.05), warned[0].gap, 1e-9);
+
+    // Pull the same stub back to a 5 µm airgap and it is the hairline defect
+    // band, unchanged: its own kind, at error severity.
+    const hairline = stubOnTrunkTracks(0.605);
+    const thin = try check(arena, placement, .{ .tracks = &hairline }, null);
+    try testing.expectEqual(@as(usize, 1), thin.len);
+    try testing.expectEqual(drc.Kind.hairline_gap, thin[0].kind);
+    try testing.expectEqual(drc.Severity.err, thin[0].severity);
+    try testing.expectApproxEqAbs(@as(f64, 0.005), thin[0].gap, 1e-9);
+
+    // Pull it back to 0.3 mm and the two islands genuinely stand apart: the
+    // error this rule has always reported. One fixture, three verdicts — so
+    // the warning above is the gap class talking, not the fixture.
+    const apart = stubOnTrunkTracks(0.9);
+    const opened = try check(arena, placement, .{ .tracks = &apart }, null);
+    try testing.expectEqual(@as(usize, 1), count(opened));
+    try testing.expectEqual(drc.Kind.net_open, opened[0].kind);
+    try testing.expectEqual(drc.Severity.err, opened[0].severity);
+    try testing.expectApproxEqAbs(@as(f64, 0.3), opened[0].gap, 1e-9);
+
+    // The island graph is untouched by any of this: all three states are still
+    // ONE finding naming C2's island against the trunk's, marked in the gap.
+    for ([_][]const drc.Violation{ warned, thin, opened }) |vs| {
+        try testing.expect(vs[0].who.part_a == 2 or vs[0].who.part_b == 2); // C2
+        try testing.expectApproxEqAbs(@as(f64, 5), vs[0].x, 1e-9);
+    }
 }
 
 // spec: placement/drc - A net-open DRC violation names its net and a pad from each copper island it failed to join

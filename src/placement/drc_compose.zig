@@ -95,8 +95,9 @@ pub fn checkDefaultRulesReport(alloc: std.mem.Allocator, in: CopperCheck) CheckR
     defer board.release();
     const geom = filledViolationsReport(alloc, in, board);
     const silk = withBoardTextReport(alloc, in.placement, geom, in.texts);
-    const bypass = withBypassOpenReport(alloc, in.placement, in.routed, silk);
-    return withNetOpenReport(alloc, in, bypass, board, null).report();
+    const lowered = connectivityTracks(alloc, in.routed);
+    const bypass = withBypassOpenReport(alloc, in.placement, in.routed, lowered, silk);
+    return withNetOpenReport(alloc, in, bypass, board, null, lowered).report();
 }
 
 /// Everything one accepted board state leaves behind so the NEXT recheck can be
@@ -217,9 +218,10 @@ pub fn checkScopedReport(
         .prior = prior.pour_audit,
     });
     const silk = withBoardTextReport(alloc, in.placement, filled.stage, in.texts);
-    const bypass = withBypassOpenReport(alloc, in.placement, in.routed, silk);
+    const lowered = connectivityTracks(alloc, in.routed);
+    const bypass = withBypassOpenReport(alloc, in.placement, in.routed, lowered, silk);
     const net_scope = netOpenScope(alloc, in.placement, delta, board, prior) catch null;
-    const staged = withNetOpenReport(alloc, in, bypass, board, net_scope);
+    const staged = withNetOpenReport(alloc, in, bypass, board, net_scope, lowered);
     const report = staged.report();
     var all: std.ArrayList(drc.Violation) = .empty;
     all.appendSlice(alloc, report.violations) catch {
@@ -338,8 +340,9 @@ pub fn checkPrimingReport(alloc: std.mem.Allocator, in: CopperCheck) ScopedRepor
     }
     const filled = filledViolationsScoped(alloc, in, board, null);
     const silk = withBoardTextReport(alloc, in.placement, filled.stage, in.texts);
-    const bypass = withBypassOpenReport(alloc, in.placement, in.routed, silk);
-    const staged = withNetOpenReport(alloc, in, bypass, board, null);
+    const lowered = connectivityTracks(alloc, in.routed);
+    const bypass = withBypassOpenReport(alloc, in.placement, in.routed, lowered, silk);
+    const staged = withNetOpenReport(alloc, in, bypass, board, null, lowered);
     const report = staged.report();
     return .{
         .violations = report.violations,
@@ -490,13 +493,30 @@ pub fn checkTopologyFilled(alloc: std.mem.Allocator, in: CopperCheck) []const dr
 /// Append exact-target bypass connectivity warnings. This stays beside the
 /// net-open layer, outside `drc.check`, so router candidates and client WASM do
 /// not rebuild a surface graph for every tentative edit.
+///
+/// It judges the LOWERED copper (`connectivityTracks`), not the persisted
+/// handles. A swept path's saved track is a compact centreline at the editor's
+/// handle width; the copper that will be fabricated is the private width-profile
+/// chord chain lowered from its samples, which is what `drc.checkImpl` measures
+/// geometry against and what `net_open` builds its graph from. Passing the raw
+/// handles here made this the one connectivity rule reading a different board
+/// than its siblings: a widened rail whose chords bridge the cap land to the IC
+/// land read as an open bypass because the handle beneath them was too narrow to
+/// land a full transverse chord. Lowered copper is only ever MORE and WIDER, so
+/// this direction can only clear false warnings, never hide a missing leg.
+///
+/// `lowered` null means the lowering could not be allocated; the raw handles are
+/// the honest fallback (today's behaviour) and the connectivity stage that
+/// shares this list reports the pass incomplete for the same failure.
 fn withBypassOpenReport(
     alloc: std.mem.Allocator,
     placement: optimizer.Placement,
     r: router.RouteResult,
+    lowered: ?[]const router.Track,
     base: ViolationStage,
 ) ViolationStage {
-    const warnings = bypass_open.check(alloc, placement, r.tracks) catch return .{ .violations = base.violations, .complete = false };
+    const tracks = lowered orelse r.tracks;
+    const warnings = bypass_open.check(alloc, placement, tracks) catch return .{ .violations = base.violations, .complete = false };
     if (warnings.len == 0) return base;
     var all: std.ArrayList(drc.Violation) = .empty;
     all.appendSlice(alloc, base.violations) catch return .{ .violations = base.violations, .complete = false };
@@ -931,9 +951,10 @@ fn withNetOpenReport(
     geom: ViolationStage,
     board: BoardFills,
     scope: ?net_open.Scope,
+    lowered: ?[]const router.Track,
 ) NetOpenStage {
     const empty: net_open.Report = .{ .violations = &.{}, .connectivity = &.{} };
-    const tracks = connectivityTracks(alloc, in.routed) catch return .{ .violations = geom.violations, .net_report = empty, .complete = false };
+    const tracks = lowered orelse return .{ .violations = geom.violations, .net_report = empty, .complete = false };
     const arcs = path_copper.filterArcs(alloc, in.routed.rf_port_outcomes, in.routed.arcs) catch
         return .{ .violations = geom.violations, .net_report = empty, .complete = false };
     const prepared: net_open.Prepared = .{
@@ -973,8 +994,15 @@ const NetOpenStage = struct {
 /// polygon. Reconstruct those chords only for connectivity when no ordinary
 /// track remains on that net. Geometry DRC keeps the polygon proof instead of
 /// reclassifying its implementation samples as editable track segments.
-fn connectivityTracks(alloc: std.mem.Allocator, r: router.RouteResult) std.mem.Allocator.Error![]const router.Track {
-    return path_copper.tracks(alloc, r);
+///
+/// Built ONCE per pass and shared by BOTH connectivity stages. `bypass_open`
+/// and `net_open` ask the same question — does this copper join these two
+/// lands — so they have to ask it of the same copper, and a pass that lowered
+/// separately for each paid a second walk of every path's samples to arrive at
+/// the identical list. Null is an allocation failure, which every caller
+/// reports as an incomplete pass rather than inventing copper.
+fn connectivityTracks(alloc: std.mem.Allocator, r: router.RouteResult) ?[]const router.Track {
+    return path_copper.tracks(alloc, r) catch null;
 }
 
 fn exactFillKeepsCopperLoweringRemoves(exact: pour.Fill, lowered: pour.Fill) bool {
@@ -1638,4 +1666,105 @@ fn edited(placement: optimizer.Placement, tracks: []const router.Track, zones: [
         .clearance = 0.15,
         .zones = zones,
     };
+}
+
+// spec: placement/bypass-open - The bypass connectivity check judges the lowered swept-path copper every sibling rule measures, not the compact editor handle's floor width
+test "bypass_open reads the widened path chords, not the handle beneath them" {
+    const testing = std.testing;
+    const geometry = @import("geometry.zig");
+    const solver = @import("rf_path_solver.zig");
+    const rf_report = @import("rf_port_report.zig");
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const alloc = arena_inst.allocator();
+
+    // A hub `U1` at the origin, a decoupling cap `C1` 4 mm away on `VDD`, and
+    // the authored loop that says `C1` pad 1 decouples `U1` pad 1 exactly.
+    const hub_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.8, .h = 0.8 }};
+    const cap_pads = [_]geometry.Pad{
+        .{ .number = "1", .x = 0, .y = 0, .w = 0.5, .h = 0.5 },
+        .{ .number = "2", .x = 0, .y = 1, .w = 0.5, .h = 0.5 },
+    };
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &hub_pads, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &cap_pads, .fallback = false, .x = 4, .y = 0 },
+    };
+    const pins = [_]@import("../flat_netlist.zig").FlatPin{
+        .{ .ref_des = "U1", .pin = "1" },
+        .{ .ref_des = "C1", .pin = "1" },
+    };
+    const nets = [_]optimizer.FlatNet{.{ .name = "VDD", .pins = &pins }};
+    const loops = [_]optimizer.Loop{.{
+        .cap = 1,
+        .hub = 0,
+        .cap_pwr = .{ .x = 0, .y = 0, .w = 0.5, .h = 0.5 },
+        .cap_gnd = .{ .x = 0, .y = 1, .w = 0.5, .h = 0.5 },
+        .hub_pwr = &.{},
+        .hub_pwr_pin = .{ .x = 0, .y = 0, .w = 0.8, .h = 0.8 },
+        .hub_gnd = &.{},
+        .pwr_net = 0,
+        .explicit_pin = "1",
+    }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &loops,
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -1,
+        .miny = -1,
+        .maxx = 6,
+        .maxy = 3,
+        .generated = false,
+        .board_rect = .{ .minx = -1, .miny = -1, .w = 8, .h = 5 },
+        .rules = .{ .plane_nets = &.{}, .copper_layers = 2 },
+    };
+
+    // The rail: an adaptive run from `U1`'s land out to x = 3, saved the way
+    // the editor saves one — ONE compact 0.127 mm handle — while its samples
+    // carry the 0.6 mm copper the board actually fabricates in the middle.
+    const samples = [_]solver.Sample{
+        .{ .at = .{ 0, 0 }, .s_mm = 0, .curvature = 0, .width_mm = 0.127 },
+        .{ .at = .{ 1.5, 0 }, .s_mm = 1.5, .curvature = 0, .width_mm = 0.6 },
+        .{ .at = .{ 3, 0 }, .s_mm = 3, .curvature = 0, .width_mm = 0.127 },
+    };
+    const outcomes = [_]rf_report.Outcome{.{
+        .net = 0,
+        .chosen = 0,
+        .feasible = true,
+        .success = true,
+        .metrics = .{},
+        .trials = &.{},
+        .physical = .{ .sample_count = samples.len, .samples = &samples, .layer = 0 },
+    }};
+    // `C1`'s local leg dies on the rail's FLANK, 0.2 mm off its centreline. At
+    // the handle's 0.127 mm the two capsules do not even meet; at the lowered
+    // 0.6 mm the leg lands a complete cross-section on the rail.
+    const tracks = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 3, .y2 = 0, .layer = 0, .width = 0.127, .net = 0 },
+        .{ .x1 = 4, .y1 = 0, .x2 = 3, .y2 = 0.2, .layer = 0, .width = 0.1, .net = 0 },
+    };
+    const routed = router.RouteResult{
+        .tracks = &tracks,
+        .vias = &.{},
+        .rf_port_outcomes = &outcomes,
+        .routed = 1,
+        .total = 1,
+    };
+
+    // The bug this pins: judged on the raw handles the bypass leg reads OPEN.
+    // The fixture is therefore doing the work — a composed report that finds
+    // nothing cannot be passing because there was nothing to find.
+    const on_handles = try bypass_open.check(alloc, placement, routed.tracks);
+    try testing.expectEqual(@as(usize, 1), on_handles.len);
+    try testing.expectEqual(drc.Kind.bypass_open, on_handles[0].kind);
+
+    // The same copper, lowered the way `drc.checkImpl` and `net_open` see it:
+    // the leg is connected, so the composed report says nothing about it.
+    const lowered = connectivityTracks(alloc, routed) orelse return error.TestExpectedEqual;
+    try testing.expectEqual(@as(usize, 0), (try bypass_open.check(alloc, placement, lowered)).len);
+    const composed = checkDefaultRules(alloc, .{ .placement = placement, .routed = routed, .clearance = 0.127 });
+    try testing.expectEqual(@as(usize, 0), drc.countKind(composed, .bypass_open));
 }

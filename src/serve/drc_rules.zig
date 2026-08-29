@@ -1205,7 +1205,9 @@ test "viewer JS slides segments KiCad-style without repositioning neighbouring t
     try std.testing.expect(std.mem.indexOf(u8, js, "return {mode:\"free\",at:at};") == null);
     // Free node movement remains available only as the explicit Shift path.
     try std.testing.expect(std.mem.indexOf(u8, js, "if(free){if(pl.jog)segJogDrop(pl);segFollow(pl.at,ax,ay);") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "segJogClean") != null);
+    // Zero-length bridges (and any copper the gesture collapsed) are culled at
+    // release — the jog sweep lives inside the broader crumb cleanup now.
+    try std.testing.expect(std.mem.indexOf(u8, js, "segCrumbClean") != null);
 }
 
 // spec: Web Server - Dragging a native trace fillet re-solves its circle against both neighbouring support lines so both joins remain tangent

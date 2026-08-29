@@ -11,6 +11,54 @@ const pad_shape = @import("pad_shape.zig");
 pub const join_slack_mm: f64 = 1e-3;
 pub const hairline_slack_mm: f64 = 0.02;
 
+/// A track whose two stored endpoints are this close carries no direction, so
+/// it has no transverse cross-section for the bottleneck rule below to judge.
+/// It is a POINT feature: drag residue, a jog collapsed onto its own corner, a
+/// zero-run section posted through the tracks API. That copper is still on the
+/// board, so it has to be able to join the same-net copper it sits on — left
+/// unjoinable it becomes a phantom island and `net_open` reports a hard error
+/// on copper that physically overlaps.
+///
+/// A point track contributes ONLY its centre. It conducts exactly where that
+/// centre lies inside the other feature's copper plus `join_slack_mm`; its own
+/// half-width disc is deliberately not counted. That keeps this file's policy
+/// intact — a crumb whose disc merely grazes an edge stays as open as any
+/// other graze — and it is the limit of the full-chord rule as a trace's
+/// length goes to zero. The rule is symmetric: a real trace, land or via joins
+/// a point track by covering that same centre, so storage order and which side
+/// happens to be wider cannot change the verdict. Zero WIDTH is not copper at
+/// all and stays unconnectable, as before.
+const point_track_len_mm: f64 = 1e-9;
+
+/// The single point a degenerate track occupies. Both stored endpoints lie
+/// within `point_track_len_mm` of it, so the midpoint is the order-independent
+/// choice.
+fn pointTrackCentre(a: [2]f64, b: [2]f64) [2]f64 {
+    return .{ (a[0] + b[0]) / 2, (a[1] + b[1]) / 2 };
+}
+
+/// Does `p` lie on this land's copper (within the join slack)? A custom land
+/// is judged against its real outline; a simple land's bounding box is its
+/// copper. Mirrors the witness tolerance of the full-chord land test below.
+fn padCoversPoint(shape: pad_shape.Shape, p: [2]f64) bool {
+    const reach = join_slack_mm + 1e-9;
+    return pad_shape.pointDist(shape.x0, shape.y0, shape.x1, shape.y1, shape.poly, p[0], p[1], reach) <= reach;
+}
+
+/// Is this trace a point feature rather than a segment? Squared, because every
+/// same-net pair the connectivity sweeps consider asks this first.
+fn isPointTrack(t: Trace) bool {
+    const dx = t.b[0] - t.a[0];
+    const dy = t.b[1] - t.a[1];
+    return dx * dx + dy * dy <= point_track_len_mm * point_track_len_mm;
+}
+
+/// Does `p` lie on this trace's round-capped copper (within the join slack)?
+fn traceCoversPoint(t: Trace, p: [2]f64) bool {
+    return pad_shape.segPointDist(t.a[0], t.a[1], t.b[0], t.b[1], p[0], p[1]) <=
+        t.width / 2 + join_slack_mm;
+}
+
 /// Electrical classification of the edge-to-edge gap between same-net copper.
 pub const GapClass = enum { connected, hairline, open };
 
@@ -117,13 +165,15 @@ fn padBottleneckConnects(shape: pad_shape.Shape, a: [2]f64, b: [2]f64, normal: [
 /// Does the trace and land share a fabrication-robust neck? The narrower
 /// feature is the bottleneck: either one complete transverse trace chord fits
 /// on the land, or the land's complete anchor chord fits in the trace capsule.
-/// Mere edge/corner overlap satisfies neither direction and stays open.
+/// Mere edge/corner overlap satisfies neither direction and stays open. A
+/// point track (`point_track_len_mm`) has no chord to fit, so it joins the land
+/// exactly when its centre sits on that land's copper.
 pub fn padTrackConnects(shape: pad_shape.Shape, a: [2]f64, b: [2]f64, width: f64) bool {
     if (!(width > 0)) return false;
     const dx = b[0] - a[0];
     const dy = b[1] - a[1];
     const length = std.math.hypot(dx, dy);
-    if (length <= 1e-12) return false;
+    if (length <= point_track_len_mm) return padCoversPoint(shape, pointTrackCentre(a, b));
     const nx = -dy / length;
     const ny = dx / length;
     const radius = width / 2;
@@ -221,13 +271,19 @@ pub fn trackViaCopperOverlaps(track: Trace, via: Via) bool {
 ///
 /// Both shapes are convex, so checking both endpoints proves the whole chord.
 /// A trace/via edge graze therefore remains open while ordinary centred and
-/// offset landings continue to conduct.
+/// offset landings continue to conduct. A point track (`point_track_len_mm`)
+/// has neither chord nor direction, so it joins the barrel exactly when its
+/// centre sits on the via's land.
 pub fn trackViaConnects(track: Trace, via: Via) bool {
     if (!trackViaCopperOverlaps(track, via)) return false;
     const dx = track.b[0] - track.a[0];
     const dy = track.b[1] - track.a[1];
     const length = std.math.hypot(dx, dy);
-    if (length <= 1e-12) return false;
+    if (length <= point_track_len_mm) {
+        const centre = pointTrackCentre(track.a, track.b);
+        return std.math.hypot(centre[0] - via.at[0], centre[1] - via.at[1]) <=
+            via.dia / 2 + join_slack_mm;
+    }
     const closest = pad_shape.closestOnSeg(
         track.a[0],
         track.a[1],
@@ -313,7 +369,10 @@ const CrossSectionSearch = struct {
 fn directedTrackContact(narrow: Trace, wide: Trace) bool {
     const delta = [2]f64{ narrow.b[0] - narrow.a[0], narrow.b[1] - narrow.a[1] };
     const length = std.math.hypot(delta[0], delta[1]);
-    if (length <= 1e-12) return false;
+    // Point tracks never reach here: `trackTrackConnects` settles them with the
+    // centre rule before choosing a bottleneck direction. The guard stands so
+    // the normal below is never a division by zero.
+    if (length <= point_track_len_mm) return false;
     const normal = [2]f64{ -delta[1] / length, delta[0] / length };
     const radius = narrow.width / 2;
     const limit = wide.width / 2 + join_slack_mm;
@@ -391,8 +450,26 @@ fn directedTrackContact(narrow: Trace, wide: Trace) bool {
 /// centreline; ternary minimization finds its global minimum. The ordinary
 /// capsule test first rejects the overwhelmingly common far pairs. Equal-width
 /// traces test both directions so the result cannot depend on storage order.
+///
+/// A point track (`point_track_len_mm`) is settled before any of that: it has
+/// no cross-section to fit and no direction to fit it along, so neither side
+/// can be a meaningful bottleneck. It joins the other trace exactly when its
+/// centre lies inside that trace's copper — which is also why the test runs
+/// ahead of the width comparison: a wide crumb must not be handed to the
+/// chord rule as if it were a trunk.
 pub fn trackTrackConnects(a: Trace, b: Trace) bool {
     if (!trackTrackCapsulesOverlap(a, b)) return false;
+    const a_is_point = isPointTrack(a);
+    const b_is_point = isPointTrack(b);
+    if (a_is_point or b_is_point) {
+        const a_centre = pointTrackCentre(a.a, a.b);
+        const b_centre = pointTrackCentre(b.a, b.b);
+        if (a_is_point and b_is_point)
+            // Neither side contributes copper beyond its centre, so two crumbs
+            // are one piece of metal only where they coincide.
+            return std.math.hypot(b_centre[0] - a_centre[0], b_centre[1] - a_centre[1]) <= join_slack_mm;
+        return if (a_is_point) traceCoversPoint(b, a_centre) else traceCoversPoint(a, b_centre);
+    }
     if (a.width < b.width) return directedTrackContact(a, b);
     if (b.width < a.width) return directedTrackContact(b, a);
     return directedTrackContact(a, b) or directedTrackContact(b, a);
@@ -553,4 +630,95 @@ test "the cross-section bounds settle end joins and flank grazes without changin
     const equal_a = Trace{ .a = .{ 0, 0 }, .b = .{ 5, 0 }, .width = 0.3 };
     const equal_b = Trace{ .a = .{ 5, 0 }, .b = .{ 5, 5 }, .width = 0.3 };
     try testing.expectEqual(trackTrackConnects(equal_a, equal_b), trackTrackConnects(equal_b, equal_a));
+}
+
+// spec: fab_readiness - a zero-length track is a point feature that joins the same-net copper covering its centre, and its own half-width disc grants it nothing more
+test "a point track connects through its centre and grazes nothing with its disc" {
+    const testing = @import("std").testing;
+    const crumb_width = 0.127; // barracuda's floor trace width: a 0.0635 mm disc
+
+    // Barracuda: a corner drag collapsed seg-a489d105ac9c428f onto the centre
+    // of a through via. That crumb was the net's only copper at the spot on
+    // layer 1, so refusing degenerate geometry made overlapping copper report a
+    // net_open — at a NEGATIVE gap of -(0.2 + 0.0635) mm.
+    const barrel = Via{ .at = .{ 182.21, 93.10 }, .dia = 0.4 };
+    const centred = Trace{ .a = .{ 182.21, 93.10 }, .b = .{ 182.21, 93.10 }, .width = crumb_width };
+    try testing.expect(trackViaConnects(centred, barrel));
+
+    // Anywhere on the barrel's land conducts. 0.1 mm past its edge does not,
+    // and neither does an offset only the crumb's own disc could reach.
+    try testing.expect(trackViaConnects(
+        .{ .a = .{ 182.36, 93.10 }, .b = .{ 182.36, 93.10 }, .width = crumb_width },
+        barrel,
+    ));
+    try testing.expect(!trackViaConnects(
+        .{ .a = .{ 182.51, 93.10 }, .b = .{ 182.51, 93.10 }, .width = crumb_width },
+        barrel,
+    ));
+    const via_graze = Trace{ .a = .{ 182.45, 93.10 }, .b = .{ 182.45, 93.10 }, .width = crumb_width };
+    try testing.expect(trackViaCopperOverlaps(via_graze, barrel));
+    try testing.expect(!trackViaConnects(via_graze, barrel));
+
+    // Track ↔ point: the crumb joins wherever its centre is inside the trunk's
+    // copper, in either storage order. 0.16 mm off a 0.3 mm trunk's centreline
+    // is 0.01 mm outside that copper — the crumb's disc reaches it, the centre
+    // rule does not — and 0.25 mm off stands 0.1 mm clear of everything.
+    const trunk = Trace{ .a = .{ 0, 0 }, .b = .{ 10, 0 }, .width = 0.3 };
+    const on_trunk = Trace{ .a = .{ 5, 0.14 }, .b = .{ 5, 0.14 }, .width = crumb_width };
+    try testing.expect(trackTrackConnects(on_trunk, trunk));
+    try testing.expectEqual(trackTrackConnects(on_trunk, trunk), trackTrackConnects(trunk, on_trunk));
+    const track_graze = Trace{ .a = .{ 5, 0.16 }, .b = .{ 5, 0.16 }, .width = crumb_width };
+    try testing.expect(trackTrackCapsulesOverlap(track_graze, trunk));
+    try testing.expect(!trackTrackConnects(track_graze, trunk));
+    try testing.expect(!trackTrackConnects(trunk, track_graze));
+    try testing.expect(!trackTrackConnects(
+        .{ .a = .{ 5, 0.25 }, .b = .{ 5, 0.25 }, .width = crumb_width },
+        trunk,
+    ));
+
+    // A crumb WIDER than the trace it sits on is still only a point. Handing
+    // it to the chord rule as the wider feature would ask the trunk's full
+    // 0.3 mm chord to fit in a 0.16 mm disc and call solid copper open.
+    const fat = Trace{ .a = .{ 5, 0.10 }, .b = .{ 5, 0.10 }, .width = 0.32 };
+    try testing.expect(trackTrackConnects(fat, trunk));
+    try testing.expect(trackTrackConnects(trunk, fat));
+
+    // Two crumbs carry no copper beyond their centres, so they are one piece of
+    // metal only where those coincide.
+    try testing.expect(trackTrackConnects(on_trunk, .{ .a = .{ 5, 0.14 }, .b = .{ 5, 0.14 }, .width = 0.2 }));
+    try testing.expect(!trackTrackConnects(on_trunk, .{ .a = .{ 5, 0.16 }, .b = .{ 5, 0.16 }, .width = 0.2 }));
+
+    // Pad ↔ point: the land's own copper decides. The slack band still joins,
+    // 0.03 mm out is a disc-only graze, 0.1 mm out is clear, and a custom land
+    // lends no copper to the notch in its bounding box.
+    const land = pad_shape.Shape{ .x0 = 0, .y0 = -0.5, .x1 = 1, .y1 = 0.5 };
+    try testing.expect(padTrackConnects(land, .{ 0.5, 0 }, .{ 0.5, 0 }, crumb_width));
+    try testing.expect(padTrackConnects(land, .{ 1.0005, 0 }, .{ 1.0005, 0 }, crumb_width));
+    try testing.expect(!padTrackConnects(land, .{ 1.03, 0 }, .{ 1.03, 0 }, crumb_width));
+    try testing.expect(!padTrackConnects(land, .{ 1.1, 0 }, .{ 1.1, 0 }, crumb_width));
+    const concave = [_][2]f64{
+        .{ 0, -0.5 }, .{ 0.4, -0.5 }, .{ 0.4, -0.1 }, .{ 1, -0.1 },
+        .{ 1, 0.5 },  .{ 0.4, 0.5 },  .{ 0.4, 0.1 },  .{ 0, 0.1 },
+    };
+    const custom = pad_shape.Shape{ .x0 = 0, .y0 = -0.5, .x1 = 1, .y1 = 0.5, .poly = &concave };
+    try testing.expect(padTrackConnects(custom, .{ 0.2, 0 }, .{ 0.2, 0 }, crumb_width));
+    try testing.expect(!padTrackConnects(custom, .{ 0.2, 0.3 }, .{ 0.2, 0.3 }, crumb_width));
+
+    // Zero WIDTH is not copper at all and still joins nothing, degenerate or not.
+    try testing.expect(!trackViaConnects(.{ .a = .{ 182.21, 93.10 }, .b = .{ 182.21, 93.10 }, .width = 0 }, barrel));
+    try testing.expect(!trackTrackConnects(.{ .a = .{ 5, 0 }, .b = .{ 5, 0 }, .width = 0 }, trunk));
+    try testing.expect(!padTrackConnects(land, .{ 0.5, 0 }, .{ 0.5, 0 }, 0));
+
+    // The controls: this is a degeneracy limit, not a new tolerance. A real
+    // 0.05 mm section in the crumb's place is still judged by the chord rule,
+    // and a real trace 0.16 mm off the trunk is still the flank graze that
+    // rule refuses — neither reaches the centre test above.
+    try testing.expect(trackViaConnects(
+        .{ .a = .{ 182.185, 93.10 }, .b = .{ 182.235, 93.10 }, .width = crumb_width },
+        barrel,
+    ));
+    try testing.expect(!trackTrackConnects(
+        .{ .a = .{ 0, 0.16 }, .b = .{ 10, 0.16 }, .width = crumb_width },
+        trunk,
+    ));
 }
