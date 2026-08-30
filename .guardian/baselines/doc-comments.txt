@@ -54,7 +54,6 @@ doc-comments|src/serve/templates/pages.zig|pub const DesignCard (struct_): has n
 doc-comments|src/serve/templates/pages.zig|pub const Home (struct_): has no /// doc comment
 doc-comments|src/serve/templates/pages.zig|pub const ModuleCard (struct_): has no /// doc comment
 doc-comments|src/serve/templates/pages.zig|pub const Navbar (struct_): has no /// doc comment
-doc-comments|src/serve/templates/pages.zig|pub const SystemCard (struct_): has no /// doc comment
 doc-comments|src/serve/templates/pages.zig|pub fn bind: has no /// doc comment
 doc-comments|src/serve/templates/pages.zig|pub fn bind: has no /// doc comment
 doc-comments|src/serve/templates/pages.zig|pub fn bind: has no /// doc comment

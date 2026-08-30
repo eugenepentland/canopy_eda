@@ -528,66 +528,68 @@ pub const DesignCard = struct {
     }
 };
 
+/// One system-review workspace as a home card: identity, board and document
+/// counts, and the link into `/systems/<name>`.
 pub const SystemCard = struct {
     fn _render(sys: SystemHomeEntry, search: []const u8, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         _ = &sys;
         _ = &search;
-        // pages.zt:391
+        // pages.zt:393
         try writer.writeAll("<div");
         try writer.writeAll(" class=\"design-card\"");
         try writer.writeAll(" data-kind=\"system\"");
         try zt.writeAttr(writer, "data-search", search);
         try writer.writeAll(">");
-        // pages.zt:392
+        // pages.zt:394
         try writer.writeAll("<div class=\"type-row\">");
-        // pages.zt:393
+        // pages.zt:395
         try writer.writeAll("<span class=\"type-tag system\">");
         try writer.writeAll("System");
         try writer.writeAll("</span>");
-        // pages.zt:394
+        // pages.zt:396
         if (sys.attested) {
-            // pages.zt:395
+            // pages.zt:397
             try writer.writeAll("<span class=\"tag-chip starred\" title=\"Review inputs have been approved and the attestation is current\">");
             try writer.writeAll("attested");
             try writer.writeAll("</span>");
         }
-        // pages.zt:398
-        try writer.writeAll("</div>");
-        // pages.zt:399
-        try writer.writeAll("<div class=\"design-card-header\">");
         // pages.zt:400
+        try writer.writeAll("</div>");
+        // pages.zt:401
+        try writer.writeAll("<div class=\"design-card-header\">");
+        // pages.zt:402
         try writer.writeAll("<div class=\"design-card-title\">");
         try zt.writeEscaped(writer, sys.title);
         try writer.writeAll("</div>");
-        // pages.zt:401
+        // pages.zt:403
         try writer.writeAll("<div class=\"design-card-name\">");
         try zt.writeEscaped(writer, sys.part_number);
         try writer.writeAll(" rev ");
         try zt.writeEscaped(writer, sys.revision);
         try writer.writeAll("</div>");
-        // pages.zt:402
-        try writer.writeAll("</div>");
-        // pages.zt:403
-        try writer.writeAll("<div class=\"design-card-stats\">");
         // pages.zt:404
+        try writer.writeAll("</div>");
+        // pages.zt:405
+        try writer.writeAll("<div class=\"design-card-stats\">");
+        // pages.zt:406
         try writer.writeAll("<span>");
         try zt.writeEscaped(writer, sys.boards);
         try writer.writeAll(" boards");
         try writer.writeAll("</span>");
-        // pages.zt:405
+        // pages.zt:407
         try writer.writeAll("<span class=\"sep\">");
         try writer.writeAll("·");
         try writer.writeAll("</span>");
-        // pages.zt:406
+        // pages.zt:408
         try writer.writeAll("<span>");
         try zt.writeEscaped(writer, sys.documents);
         try writer.writeAll(" documents");
         try writer.writeAll("</span>");
-        // pages.zt:407
-        try writer.writeAll("</div>");
-        // pages.zt:408
-        try writer.writeAll("<div class=\"design-card-links\">");
         // pages.zt:409
+        try writer.writeAll("</div>");
+        // pages.zt:410
+        try writer.writeAll("<div class=\"design-card-links\">");
+        // pages.zt:411
         try writer.writeAll("<a");
         try writer.writeAll(" class=\"design-card-link\"");
         try writer.writeAll(" href=\"");
@@ -597,9 +599,9 @@ pub const SystemCard = struct {
         try writer.writeAll(">");
         try writer.writeAll("Review workspace");
         try writer.writeAll("</a>");
-        // pages.zt:410
+        // pages.zt:412
         try writer.writeAll("</div>");
-        // pages.zt:411
+        // pages.zt:413
         try writer.writeAll("</div>");
     }
 
@@ -627,65 +629,65 @@ pub const ModuleCard = struct {
     fn _render(m: ModuleHomeEntry, search: []const u8, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         _ = &m;
         _ = &search;
-        // pages.zt:415
+        // pages.zt:417
         try writer.writeAll("<div");
         try writer.writeAll(" class=\"design-card\"");
         try writer.writeAll(" data-kind=\"subcircuit\"");
         try zt.writeAttr(writer, "data-search", search);
         try writer.writeAll(">");
-        // pages.zt:416
+        // pages.zt:418
         try writer.writeAll("<div class=\"type-row\">");
-        // pages.zt:417
+        // pages.zt:419
         try writer.writeAll("<span class=\"type-tag subcircuit\">");
         try writer.writeAll("Subcircuit");
         try writer.writeAll("</span>");
-        // pages.zt:418
+        // pages.zt:420
         if (m.has_groups) {
-            // pages.zt:419
+            // pages.zt:421
             try writer.writeAll("<span class=\"tag-chip grouping\" title=\"Declares placement (group …) DSL — ready for a rough placement\">");
             try writer.writeAll("grouping");
             try writer.writeAll("</span>");
         }
-        // pages.zt:422
+        // pages.zt:424
         if (m.has_starred) {
-            // pages.zt:423
+            // pages.zt:425
             try writer.writeAll("<span class=\"tag-chip starred\" title=\"A layout has been starred — approved by a person\">");
             try writer.writeAll("★ starred");
             try writer.writeAll("</span>");
         }
-        // pages.zt:426
-        try writer.writeAll("</div>");
-        // pages.zt:427
-        try writer.writeAll("<div class=\"design-card-header\">");
         // pages.zt:428
+        try writer.writeAll("</div>");
+        // pages.zt:429
+        try writer.writeAll("<div class=\"design-card-header\">");
+        // pages.zt:430
         try writer.writeAll("<div class=\"design-card-title\">");
         try zt.writeEscaped(writer, m.name);
         try writer.writeAll("<span class=\"mod-params\">");
         try zt.writeEscaped(writer, m.params);
         try writer.writeAll("</span>");
         try writer.writeAll("</div>");
-        // pages.zt:429
+        // pages.zt:431
         try writer.writeAll("</div>");
-        // pages.zt:430
+        // pages.zt:432
         if (m.doc.len > 0) {
-            // pages.zt:431
+            // pages.zt:433
             try writer.writeAll("<div class=\"design-card-stats\">");
             try writer.writeAll("<span>");
             try zt.writeEscaped(writer, m.doc);
             try writer.writeAll("</span>");
             try writer.writeAll("</div>");
         }
-        // pages.zt:434
+        // pages.zt:436
         try writer.writeAll("<div class=\"design-card-sections\">");
-        // pages.zt:435
+        // pages.zt:437
         if (m.used_by.len > 0) {
-            // pages.zt:436
+            // pages.zt:438
             try writer.writeAll("<span class=\"section-chip-more\">");
             try writer.writeAll("used by");
             try writer.writeAll("</span>");
-            // pages.zt:437
+            // pages.zt:439
             for (m.used_by) |d| {
-                // pages.zt:438
+                // pages.zt:440
                 try writer.writeAll("<a");
                 try writer.writeAll(" class=\"section-chip\"");
                 try writer.writeAll(" href=\"");
@@ -697,16 +699,16 @@ pub const ModuleCard = struct {
                 try writer.writeAll("</a>");
             }
         } else {
-            // pages.zt:441
+            // pages.zt:443
             try writer.writeAll("<span class=\"section-chip-more\">");
             try writer.writeAll("not used by any design yet");
             try writer.writeAll("</span>");
         }
-        // pages.zt:443
-        try writer.writeAll("</div>");
-        // pages.zt:444
-        try writer.writeAll("<div class=\"design-card-links\">");
         // pages.zt:445
+        try writer.writeAll("</div>");
+        // pages.zt:446
+        try writer.writeAll("<div class=\"design-card-links\">");
+        // pages.zt:447
         try writer.writeAll("<a");
         try writer.writeAll(" class=\"design-card-link\"");
         try writer.writeAll(" href=\"");
@@ -716,7 +718,7 @@ pub const ModuleCard = struct {
         try writer.writeAll(">");
         try writer.writeAll("Schematic");
         try writer.writeAll("</a>");
-        // pages.zt:446
+        // pages.zt:448
         try writer.writeAll("<a");
         try writer.writeAll(" class=\"design-card-link\"");
         try writer.writeAll(" href=\"");
@@ -726,9 +728,9 @@ pub const ModuleCard = struct {
         try writer.writeAll(">");
         try writer.writeAll("PCB layout");
         try writer.writeAll("</a>");
-        // pages.zt:447
+        // pages.zt:449
         try writer.writeAll("</div>");
-        // pages.zt:448
+        // pages.zt:450
         try writer.writeAll("</div>");
     }
 
@@ -759,31 +761,31 @@ pub const Home = struct {
         _ = &module_cards;
         _ = &now_sec;
         try writer.writeAll("<!DOCTYPE html>");
-        // pages.zt:453
-        try writer.writeAll("<html>");
-        // pages.zt:454
-        try writer.writeAll("<head>");
         // pages.zt:455
-        try writer.writeAll("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\">");
+        try writer.writeAll("<html>");
         // pages.zt:456
+        try writer.writeAll("<head>");
+        // pages.zt:457
+        try writer.writeAll("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\">");
+        // pages.zt:458
         try writer.writeAll("<title>");
         try writer.writeAll("Netlisp — Systems, Designs &amp; Modules");
         try writer.writeAll("</title>");
-        // pages.zt:457
-        try zt.writeRaw(writer, home_style_block);
-        // pages.zt:458
-        try writer.writeAll("</head>");
         // pages.zt:459
-        try writer.writeAll("<body>");
+        try zt.writeRaw(writer, home_style_block);
         // pages.zt:460
-        try zt.renderComponent(Navbar, .{"designs"}, writer);
+        try writer.writeAll("</head>");
         // pages.zt:461
-        try writer.writeAll("<div class=\"home-shell\" style=\"max-width:960px;margin:0 auto\">");
+        try writer.writeAll("<body>");
         // pages.zt:462
+        try zt.renderComponent(Navbar, .{"designs"}, writer);
+        // pages.zt:463
+        try writer.writeAll("<div class=\"home-shell\" style=\"max-width:960px;margin:0 auto\">");
+        // pages.zt:464
         try writer.writeAll("<h1 class=\"home-title\" style=\"padding:16px 16px 0;color:#f0f6fc\">");
         try writer.writeAll("Systems, Designs &amp; Modules");
         try writer.writeAll("</h1>");
-        // pages.zt:463
+        // pages.zt:465
         try writer.writeAll("<p class=\"mod-sub-note\">");
         try writer.writeAll("Every system-review workspace, ");
         try writer.writeAll("<code>");
@@ -795,21 +797,21 @@ pub const Home = struct {
         try writer.writeAll("</code>");
         try writer.writeAll(" block — tagged and searchable.");
         try writer.writeAll("</p>");
-        // pages.zt:464
+        // pages.zt:466
         try writer.writeAll("<div class=\"home-newrow\">");
-        // pages.zt:465
+        // pages.zt:467
         try writer.writeAll("<input type=\"text\" id=\"home-search\" class=\"home-search\" placeholder=\"Search systems, designs and modules…\">");
-        // pages.zt:468
+        // pages.zt:470
         try writer.writeAll("<button type=\"button\" id=\"home-new\" class=\"home-new\">");
         try writer.writeAll("+ New design");
         try writer.writeAll("</button>");
-        // pages.zt:469
-        try writer.writeAll("</div>");
-        // pages.zt:470
-        try writer.writeAll("<div class=\"home-filters\" id=\"home-filters\">");
         // pages.zt:471
+        try writer.writeAll("</div>");
+        // pages.zt:472
+        try writer.writeAll("<div class=\"home-filters\" id=\"home-filters\">");
+        // pages.zt:473
         for (home_filters) |f| {
-            // pages.zt:472
+            // pages.zt:474
             try writer.writeAll("<button");
             try writer.writeAll(" type=\"button\"");
             try zt.writeAttr(writer, "class", filterClass(f.id));
@@ -820,52 +822,52 @@ pub const Home = struct {
             try zt.writeEscaped(writer, f.label);
             try writer.writeAll("</button>");
         }
-        // pages.zt:474
+        // pages.zt:476
         try writer.writeAll("</div>");
-        // pages.zt:475
+        // pages.zt:477
         try writer.writeAll("<div class=\"home-count\" id=\"home-count\">");
         try writer.writeAll("</div>");
-        // pages.zt:476
+        // pages.zt:478
         try writer.writeAll("<div class=\"designs-grid\" id=\"home-grid\">");
-        // pages.zt:477
+        // pages.zt:479
         for (system_cards) |c| {
-            // pages.zt:478
+            // pages.zt:480
             try zt.renderComponent(SystemCard, .{ c.sys, c.search }, writer);
         }
-        // pages.zt:480
+        // pages.zt:482
         for (design_cards) |c| {
-            // pages.zt:481
+            // pages.zt:483
             try zt.renderComponent(DesignCard, .{ c.s, c.search, c.has_starred, now_sec }, writer);
         }
-        // pages.zt:483
+        // pages.zt:485
         for (module_cards) |c| {
-            // pages.zt:484
+            // pages.zt:486
             try zt.renderComponent(ModuleCard, .{ c.m, c.search }, writer);
         }
-        // pages.zt:486
+        // pages.zt:488
         if (system_cards.len == 0 and design_cards.len == 0 and module_cards.len == 0) {
-            // pages.zt:487
+            // pages.zt:489
             try writer.writeAll("<div class=\"empty-hint\">");
             try writer.writeAll("Nothing found.");
             try writer.writeAll("</div>");
         }
-        // pages.zt:490
-        try writer.writeAll("</div>");
-        // pages.zt:491
-        try writer.writeAll("<div class=\"empty-hint\" id=\"home-empty\" style=\"display:none\">");
-        try writer.writeAll("Nothing matches your search.");
-        try writer.writeAll("</div>");
         // pages.zt:492
         try writer.writeAll("</div>");
         // pages.zt:493
-        try zt.writeRaw(writer, home_search_script);
+        try writer.writeAll("<div class=\"empty-hint\" id=\"home-empty\" style=\"display:none\">");
+        try writer.writeAll("Nothing matches your search.");
+        try writer.writeAll("</div>");
         // pages.zt:494
-        try zt.writeRaw(writer, home_progress_script);
+        try writer.writeAll("</div>");
         // pages.zt:495
-        try zt.writeRaw(writer, home_new_script);
+        try zt.writeRaw(writer, home_search_script);
         // pages.zt:496
-        try writer.writeAll("</body>");
+        try zt.writeRaw(writer, home_progress_script);
         // pages.zt:497
+        try zt.writeRaw(writer, home_new_script);
+        // pages.zt:498
+        try writer.writeAll("</body>");
+        // pages.zt:499
         try writer.writeAll("</html>");
     }
 

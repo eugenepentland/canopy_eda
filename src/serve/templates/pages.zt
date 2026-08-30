@@ -384,6 +384,8 @@ pub templ DesignCard(s: DesignSummary, search: []const u8, has_starred: bool, no
     </div>
 }
 
+/// One system-review workspace as a home card: identity, board and document
+/// counts, and the link into `/systems/<name>`.
 pub templ SystemCard(sys: SystemHomeEntry, search: []const u8) {
     <div class="design-card" data-kind="system" data-search={search}>
         <div class="type-row">
