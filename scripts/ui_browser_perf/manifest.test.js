@@ -116,7 +116,13 @@ function routeMatches(template, actual) {
   return expected.length === got.length && expected.every((segment, i) => segment.startsWith(":") ? got[i].length > 0 : segment === got[i]);
 }
 
-const coverageKinds = new Set(["surface", "surfaces", "delegated", "redirect", "response", "asset", "metadata"]);
+// `uncovered` is deliberately last and deliberately loud: it is the only kind
+// that admits a route has NO browser-perf coverage. It exists because the
+// alternative on the day a route lands uncovered is worse — either a false
+// classification ("asset" for an interactive page) or invented scenarios that
+// put meaningless numbers in the gate. Every uncovered route is printed on a
+// PASSING run, so it cannot go quiet the way an unclassified route did.
+const coverageKinds = new Set(["surface", "surfaces", "delegated", "redirect", "response", "asset", "metadata", "uncovered"]);
 const gate = fs.readFileSync(path.join(root, "scripts", "perf_gate.sh"), "utf8");
 for (const [route, record] of Object.entries(routes)) {
   assert(coverageKinds.has(record.coverage), `${route} has unknown coverage ${record.coverage}`);
@@ -178,6 +184,18 @@ for (const [route, record] of Object.entries(routes)) {
       `${record.runner} must remove a partially constructed project overlay`);
   }
   if (["asset", "metadata"].includes(record.coverage)) assert(record.reason, `${route} needs an explicit non-page reason`);
+  if (record.coverage === "uncovered") {
+    assert(record.reason, `${route} needs an explicit reason for having no coverage`);
+    // Long enough to be an account rather than a shrug: who owns it and why it
+    // is not covered yet, so the entry can be acted on rather than inherited.
+    assert(record.reason.length >= 80, `${route} needs a real account of the gap, not a placeholder`);
+  }
+}
+
+const uncovered = Object.entries(routes).filter(([, record]) => record.coverage === "uncovered");
+if (uncovered.length > 0) {
+  console.log(`ui-browser-perf: ${uncovered.length} route(s) have NO browser-perf coverage:`);
+  for (const [route, record] of uncovered) console.log(`  ${route} — ${record.reason}`);
 }
 
 const runner = fs.readFileSync(path.join(__dirname, "run.js"), "utf8");
