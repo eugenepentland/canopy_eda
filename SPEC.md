@@ -5516,6 +5516,13 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - the aggregated open-items register lists every failing package gate, board review note, ERC error and failing loop screen, and says so plainly when there are none
 - the system block diagram is archived as review/system-diagram.svg, referenced by the generated system-diagram section, and admitted as the one system-level SVG
 - system Markdown becomes a structurally valid searchable PDF with draft marking
+- the offline HTML dossier is one self-contained file with no external request and no script
+- the offline HTML dossier ships beside the combined Markdown and PDF in draft and release, carrying the draft marker only in draft
+- the HTML dossier carries the draft marker only in draft mode and numbers one section per manifest document
+- the HTML dossier inlines each board's block diagram and omits the figure when the design has none
+- the HTML dossier is a pure function of its inputs and renders byte-identically on repeat
+- every identity string interpolated into the HTML dossier is escaped rather than emitted as markup
+- identity text reaching the HTML dossier is escaped, so no manifest string can become page markup
 - long UTF-8 review lines wrap only between complete codepoints in the generated PDF
 - board archive roles are unique and authored review documents are Markdown; binary evidence uses the bounded assets area
 - a board release reports CAM blocking and waiver conditions independently

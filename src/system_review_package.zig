@@ -19,6 +19,7 @@ const pll_loop = @import("pll_loop.zig");
 const review = @import("review.zig");
 const system_review = @import("system_review.zig");
 const review_assets = @import("system_review_assets.zig");
+const review_html = @import("system_review_html.zig");
 const review_md = @import("system_review_md.zig");
 const review_pdf = @import("system_review_pdf.zig");
 const zipfile = @import("zipfile.zig");
@@ -31,6 +32,7 @@ const max_document_total_bytes: usize = 32 * 1024 * 1024;
 const max_rendered_document_bytes: usize = 2 * 1024 * 1024;
 const max_combined_markdown_bytes: usize = 64 * 1024 * 1024;
 const max_system_pdf_bytes: usize = 64 * 1024 * 1024;
+const max_system_html_bytes: usize = review_html.max_html_bytes;
 const max_nested_board_release_bytes: usize = 64 * 1024 * 1024;
 const max_analysis_evidence_bytes: usize = 256 * 1024 * 1024;
 const max_archive_entries: usize = 4096;
@@ -561,9 +563,19 @@ fn analyze(
     };
     // Preflight the exact safe Markdown composition used by draft/final export
     // before readiness or attestation can call these inputs current.
-    const preflight_markdown = try renderSystemMarkdown(allocator, result, true);
+    // Compose the document faces once, in draft form, purely to prove the
+    // package fits its ceilings before any of it is written anywhere.
+    const preflight_bodies = try renderDocumentBodies(allocator, result);
+    const preflight_markdown = try renderSystemMarkdown(allocator, result, preflight_bodies, true);
+    const preflight_html = try renderSystemHtml(allocator, result, preflight_bodies, true);
     const archive_names = try preflightArchiveNames(allocator, result, preflight_mode);
-    try preflightArchivePayload(allocator, result, archive_names, preflight_markdown.len);
+    try preflightArchivePayload(
+        allocator,
+        result,
+        archive_names,
+        preflight_markdown.len,
+        preflight_html.len,
+    );
     return result;
 }
 
@@ -1119,6 +1131,7 @@ fn preflightArchiveNames(
     try appendEmptyEntry(allocator, &entries, "readiness.json");
     try appendEmptyEntry(allocator, &entries, try std.fmt.allocPrint(allocator, "review/{s}.md", .{base}));
     try appendEmptyEntry(allocator, &entries, try std.fmt.allocPrint(allocator, "review/{s}.pdf", .{base}));
+    try appendEmptyEntry(allocator, &entries, try std.fmt.allocPrint(allocator, "review/{s}.html", .{base}));
     try appendEmptyEntry(allocator, &entries, "review/source/system.json");
     if (spec.boards.len > 0) try appendEmptyEntry(allocator, &entries, system_diagram_member);
     for (analysis.documents) |document| if (document.spec.include_in_fab)
@@ -1161,10 +1174,12 @@ fn preflightArchivePayload(
     analysis: Analysis,
     archive_names: []const zipfile.Entry,
     markdown_bytes: usize,
+    html_bytes: usize,
 ) !void {
     var payload: usize = 0;
     try addBoundedBytes(&payload, analysis.manifest_source.len, max_archive_payload_bytes);
     try addBoundedBytes(&payload, markdown_bytes, max_archive_payload_bytes);
+    try addBoundedBytes(&payload, html_bytes, max_archive_payload_bytes);
     try addBoundedBytes(&payload, max_system_pdf_bytes, max_archive_payload_bytes);
     try addArchiveMetadataReserve(&payload, archive_names);
     for (analysis.documents) |document| if (document.spec.include_in_fab)
@@ -1228,7 +1243,8 @@ fn composeArchive(
     const spec = analysis.parsed.value;
     const safe_part = try fab_release.safeRevision(allocator, spec.part_number);
     const safe_revision = try fab_release.safeRevision(allocator, spec.revision);
-    const markdown = try renderSystemMarkdown(allocator, analysis, !is_release);
+    const bodies = try renderDocumentBodies(allocator, analysis);
+    const markdown = try renderSystemMarkdown(allocator, analysis, bodies, !is_release);
     const identity = try std.fmt.allocPrint(allocator, "{s} / Rev {s}", .{ spec.part_number, spec.revision });
     const pdf = try review_pdf.compose(allocator, markdown, .{
         .title = spec.title,
@@ -1238,6 +1254,8 @@ fn composeArchive(
         .draft = !is_release,
     });
     if (pdf.len > max_system_pdf_bytes) return error.ArchiveTooLarge;
+    const html = try renderSystemHtml(allocator, analysis, bodies, !is_release);
+    if (html.len > max_system_html_bytes) return error.ArchiveTooLarge;
 
     var entries: std.ArrayList(zipfile.Entry) = .empty;
     const readme = try renderReadme(allocator, analysis, is_release);
@@ -1247,6 +1265,10 @@ fn composeArchive(
     const base = try std.fmt.allocPrint(allocator, "{s}-rev-{s}-system-review", .{ safe_part, safe_revision });
     try entries.append(allocator, .{ .name = try std.fmt.allocPrint(allocator, "review/{s}.md", .{base}), .data = markdown });
     try entries.append(allocator, .{ .name = try std.fmt.allocPrint(allocator, "review/{s}.pdf", .{base}), .data = pdf });
+    // Review evidence, not CAM, exactly like the .md and .pdf beside it, and
+    // offline like the per-board fabrication `assembly.html`: a draft carries
+    // it too.
+    try entries.append(allocator, .{ .name = try std.fmt.allocPrint(allocator, "review/{s}.html", .{base}), .data = html });
     try entries.append(allocator, .{ .name = "review/source/system.json", .data = analysis.manifest_source });
     // Review evidence, not CAM: the system figure the combined Markdown points
     // at travels beside it. A board-free manifest draws nothing and the member
@@ -1529,37 +1551,139 @@ fn renderReadme(allocator: std.mem.Allocator, analysis: Analysis, is_release: bo
     return canonicalMarkdown(allocator, out.written(), 1024 * 1024);
 }
 
-fn renderSystemMarkdown(allocator: std.mem.Allocator, analysis: Analysis, draft_mode: bool) ![]const u8 {
+/// One inlined manifest document, with its generated regions already expanded
+/// and the result canonicalised. Produced exactly once per composition so the
+/// combined Markdown, the PDF, and the HTML dossier can never show a reader
+/// three different systems.
+const RenderedDocument = struct {
+    spec: system_review.DocumentSpec,
+    markdown: []const u8,
+};
+
+/// One active document archived beside the combined members instead of inlined.
+const SupportingDocument = struct {
+    title: []const u8,
+    path: []const u8,
+};
+
+/// Every document face of one analysis: the inlined bodies in manifest order,
+/// and the archived-only references listed after them.
+const DocumentBodies = struct {
+    inlined: []const RenderedDocument,
+    supporting: []const SupportingDocument,
+};
+
+fn renderDocumentBodies(allocator: std.mem.Allocator, analysis: Analysis) !DocumentBodies {
+    const spec = analysis.parsed.value;
+    const workspace_prefix = try std.fmt.allocPrint(allocator, "src/systems/{s}/", .{spec.name});
+    var inlined: std.ArrayList(RenderedDocument) = .empty;
+    var supporting: std.ArrayList(SupportingDocument) = .empty;
+    for (analysis.documents) |document| {
+        if (!document.spec.include_in_fab) continue;
+        if (!std.mem.startsWith(u8, document.spec.path, workspace_prefix)) {
+            try supporting.append(allocator, .{
+                .title = document.spec.title,
+                .path = try archivedDocumentName(allocator, spec.name, document.spec.path),
+            });
+            continue;
+        }
+        const expanded = try expandGeneratedRegions(allocator, analysis, document);
+        var parsed = try review_md.parse(allocator, expanded, .{});
+        defer parsed.deinit();
+        try inlined.append(allocator, .{
+            .spec = document.spec,
+            .markdown = try review_md.renderMarkdownAlloc(allocator, &parsed),
+        });
+    }
+    return .{ .inlined = inlined.items, .supporting = supporting.items };
+}
+
+fn renderSystemMarkdown(
+    allocator: std.mem.Allocator,
+    analysis: Analysis,
+    bodies: DocumentBodies,
+    draft_mode: bool,
+) ![]const u8 {
     var combined: std.Io.Writer.Allocating = .init(allocator);
     const spec = analysis.parsed.value;
     try combined.writer.print("# {s} — System Review Package\n\n", .{spec.title});
-    if (draft_mode) try combined.writer.writeAll("DRAFT — NOT FOR FABRICATION\n\n");
+    if (draft_mode) try combined.writer.writeAll(review_html.draft_marker ++ "\n\n");
     try combined.writer.print("Part number: `{s}`  \nRevision: `{s}`  \nSystem release token: `{s}`\n\n", .{
         spec.part_number,
         spec.revision,
         &analysis.release_token,
     });
     try ensureMarkdownSize(&combined, max_combined_markdown_bytes);
-    const workspace_prefix = try std.fmt.allocPrint(allocator, "src/systems/{s}/", .{spec.name});
-    for (analysis.documents) |document| {
-        if (!document.spec.include_in_fab or !std.mem.startsWith(u8, document.spec.path, workspace_prefix)) continue;
-        const expanded = try expandGeneratedRegions(allocator, analysis, document);
-        var parsed = try review_md.parse(allocator, expanded, .{});
-        defer parsed.deinit();
-        const canonical = try review_md.renderMarkdownAlloc(allocator, &parsed);
+    for (bodies.inlined) |document| {
         try writeMarkdownBounded(&combined, "\n---\n\n", max_combined_markdown_bytes);
-        try writeMarkdownBounded(&combined, canonical, max_combined_markdown_bytes);
-        if (!std.mem.endsWith(u8, canonical, "\n"))
+        try writeMarkdownBounded(&combined, document.markdown, max_combined_markdown_bytes);
+        if (!std.mem.endsWith(u8, document.markdown, "\n"))
             try writeMarkdownBounded(&combined, "\n", max_combined_markdown_bytes);
     }
     try writeMarkdownBounded(&combined, "\n---\n\n## Active supporting documents\n\n", max_combined_markdown_bytes);
-    for (analysis.documents) |document| {
-        if (!document.spec.include_in_fab or std.mem.startsWith(u8, document.spec.path, workspace_prefix)) continue;
-        const archived_path = try archivedDocumentName(allocator, spec.name, document.spec.path);
-        try combined.writer.print("- {s}: `{s}`\n", .{ document.spec.title, archived_path });
+    for (bodies.supporting) |document| {
+        try combined.writer.print("- {s}: `{s}`\n", .{ document.title, document.path });
         try ensureMarkdownSize(&combined, max_combined_markdown_bytes);
     }
     return canonicalMarkdown(allocator, combined.written(), max_combined_markdown_bytes);
+}
+
+/// Render the same expanded documents as the offline HTML dossier: one numbered
+/// section per inlined manifest document, the tool-drawn system-of-boards
+/// figure, and one per-board evidence section linking the sibling members.
+fn renderSystemHtml(
+    allocator: std.mem.Allocator,
+    analysis: Analysis,
+    bodies: DocumentBodies,
+    draft_mode: bool,
+) ![]const u8 {
+    const sections = try allocator.alloc(review_html.Section, bodies.inlined.len);
+    for (bodies.inlined, sections) |document, *section| section.* = .{
+        .title = document.spec.title,
+        .classification = @tagName(document.spec.classification),
+        .markdown = document.markdown,
+    };
+    const supporting = try allocator.alloc(review_html.Supporting, bodies.supporting.len);
+    for (bodies.supporting, supporting) |document, *entry| entry.* = .{
+        .title = document.title,
+        .path = document.path,
+    };
+    const boards = try allocator.alloc(review_html.Board, analysis.boards.len);
+    for (analysis.boards, boards) |board, *entry| entry.* = .{
+        .identity = .{
+            .role = board.member.role,
+            .design = board.member.name,
+            .title = board.snapshot.identity.title,
+            .part_number = board.member.part_number,
+            .revision = board.member.revision,
+            .layout = board.snapshot.identity.layout,
+            .generated_at = board.snapshot.identity.generated_at,
+        },
+        .review = .{
+            .status = @tagName(board.snapshot.review.status),
+            .open_notes = board.snapshot.review.open_notes,
+            .diagram_svg = board.snapshot.review.diagram_svg,
+            .has_notes = board.snapshot.review.notes_source != null,
+        },
+        .fab_blocked = board.fab.readiness.blocked,
+    };
+    return review_html.compose(allocator, sections, .{
+        .spec = &analysis.parsed.value,
+        .draft = draft_mode,
+        .provenance = .{
+            .generated_at = analysis.generated_at,
+            .build_id = build_id.current(),
+            .content_lock = &analysis.content_lock,
+            .release_token = &analysis.release_token,
+        },
+        .state = .{
+            .blocked = analysis.blocked(),
+            .needs_waiver = analysis.needs_waiver,
+            .attested = analysis.state.attested,
+        },
+        .boards = boards,
+        .supporting = supporting,
+    });
 }
 
 fn writeMarkdownBounded(
@@ -2718,6 +2842,205 @@ test "final archive nests unchanged board release and emits approval inventory a
         }
     }
     try std.testing.expect(saw_nested and saw_approval and saw_manifest and saw_checksums);
+}
+
+/// One archive composed from a fixed Analysis carrying two inlined manifest
+/// documents, one archived-only supporting document, and one board — enough
+/// shape for the HTML dossier to exercise every section kind it renders.
+/// `title` is caller-chosen so a test can prove hostile identity text is
+/// escaped rather than emitted as markup.
+fn composeHtmlFixture(
+    allocator: std.mem.Allocator,
+    title: []const u8,
+    mode: PreflightMode,
+) !BuiltArchive {
+    // Titles chosen by callers here never contain a quote or a backslash, so
+    // direct interpolation stays valid JSON.
+    const manifest = try std.fmt.allocPrint(
+        allocator,
+        "{{\"schema\":\"netlisp-system-review-v1\",\"name\":\"demo\",\"title\":\"{s}\",\"part_number\":\"SYS-1\",\"revision\":\"A\",\"boards\":[{{\"name\":\"one\",\"role\":\"main\",\"source\":\"src/one.sexp\",\"part_number\":\"ONE\",\"revision\":\"A\"}}]}}",
+        .{title},
+    );
+    const parsed = try std.json.parseFromSlice(system_review.SystemSpec, allocator, manifest, .{});
+    const inspected: system_review.DocumentContent = .{
+        .sha256 = @splat('0'),
+        .checklist = .{},
+        .generated_regions = 0,
+    };
+    const documents = [_]DocumentEvidence{
+        .{
+            .spec = .{
+                .id = "overview",
+                .title = "System overview",
+                .path = "src/systems/demo/system-overview.md",
+                .classification = .design,
+            },
+            .source = "# Architecture\n\n<!-- netlisp:generated board-summary -->\n<!-- /netlisp:generated -->\n",
+            .inspected = inspected,
+        },
+        .{
+            .spec = .{
+                .id = "bringup",
+                .title = "Bring-up & acceptance",
+                .path = "src/systems/demo/bring-up.md",
+                .classification = .bringup,
+            },
+            .source = "# Bring-up\n\nPower the base board first.\n",
+            .inspected = inspected,
+        },
+        .{
+            .spec = .{
+                .id = "icd",
+                .title = "Interface control",
+                .path = "docs/demo-icd.md",
+                .classification = .reference,
+            },
+            .source = "# ICD\n",
+            .inspected = inspected,
+        },
+    };
+    const source_entries = [_]zipfile.Entry{
+        .{ .name = "src/one.sexp", .data = "(design-block one)" },
+    };
+    const snapshot: board_review.Snapshot = .{
+        .identity = .{
+            .name = "one",
+            .source = "src/one.sexp",
+            .title = "One",
+            .part_number = "ONE",
+            .revision = "A",
+            .layout = "layout-a",
+            .generated_at = "2026-08-29T00:00:00Z",
+        },
+        .review = .{
+            .status = .pass,
+            .open_notes = 0,
+            .notes_path = "src/one.notes.md",
+            .notes_source = null,
+            .markdown = "# One review\n",
+            .pdf = "%PDF-board",
+            .json = "{}",
+            .bom_csv = "Ref,Part\n",
+            .diagram_svg = "<svg viewBox=\"0 0 10 10\" class=\"dg-svg\" xmlns=\"http://www.w3.org/2000/svg\"></svg>",
+        },
+        .physical = .{
+            .pcb_png = "\x89PNG\r\n\x1a\n",
+            .consumed_sha256 = @splat('c'),
+            .consumed_trace = infra_fs.ReadTrace.init(allocator),
+            .fab_inputs = .{
+                .source = @splat('3'),
+                .layout = @splat('4'),
+                .bom = @splat('5'),
+                .complete = true,
+            },
+            .sources = &source_entries,
+            .connections = &.{},
+        },
+    };
+    const released: fab_service.Result = .{
+        .identity = .{ .name = "one", .part_number = "ONE", .revision = "A", .layout = "layout-a" },
+        .lock = .{
+            .project_commit = "commit",
+            .release_token = @splat('r'),
+            .fab_id = "1234abcd".*,
+            .project_status = .clean,
+        },
+        .readiness = .{ .needs_waiver = false, .blocked = false, .json = "{\"blocked\":false}" },
+        .digests = .{
+            .reviewed = @splat('1'),
+            .consumed = @splat('2'),
+            .source = @splat('3'),
+            .layout = @splat('4'),
+            .bom_evidence = @splat('5'),
+            .dependency = @splat('6'),
+            .bom = @splat('7'),
+            .centroid = @splat('8'),
+            .rules = @splat('9'),
+        },
+        .zip = if (mode == .release) "PK\x03\x04board" else null,
+    };
+    const boards = try allocator.dupe(BoardEvidence, &[_]BoardEvidence{.{
+        .member = parsed.value.boards[0],
+        .snapshot = snapshot,
+        .fab = released,
+        .identity_ok = true,
+    }});
+    const analysis = Analysis{
+        .parsed = parsed,
+        .manifest_source = manifest,
+        .documents = try allocator.dupe(DocumentEvidence, &documents),
+        .assets = &.{},
+        .boards = boards,
+        .inputs = &.{},
+        .document_attestations = &.{},
+        .generated_at = "2026-08-29T00:00:00Z",
+        .content_lock = @splat('l'),
+        .release_token = @splat('t'),
+        .needs_waiver = false,
+        .state = .{ .attested = mode == .release },
+        .interface_diagnostic = .{},
+    };
+    if (mode == .draft) return composeArchive(allocator, allocator, analysis, null);
+    const released_boards = try allocator.dupe(fab_service.Result, &[_]fab_service.Result{released});
+    return composeArchive(allocator, allocator, analysis, .{
+        .boards = released_boards,
+        .actor = "reviewer@example.com",
+        .role = "writer",
+        .at = "2026-08-29T00:00:00Z",
+        .waivers_accepted = false,
+    });
+}
+
+const html_member = "review/SYS-1-rev-A-system-review.html";
+
+// spec: system-review - the offline HTML dossier ships beside the combined Markdown and PDF in draft and release, carrying the draft marker only in draft
+test "system review HTML dossier is a draft and release member" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+
+    const draft_archive = try composeHtmlFixture(allocator, "Demo System", .draft);
+    const draft_html = (try draftMemberBytes(allocator, draft_archive.zip, html_member)) orelse
+        return error.MissingHtmlMember;
+    try std.testing.expect(std.mem.startsWith(u8, draft_html, "<!DOCTYPE html>"));
+    try std.testing.expect(std.mem.endsWith(u8, std.mem.trimEnd(u8, draft_html, "\n"), "</html>"));
+    try std.testing.expect(std.mem.indexOf(u8, draft_html, "Demo System") != null);
+    try std.testing.expect(std.mem.indexOf(u8, draft_html, review_html.draft_marker) != null);
+    // One numbered section per inlined manifest document, by manifest title.
+    try std.testing.expect(std.mem.indexOf(u8, draft_html, "System overview") != null);
+    try std.testing.expect(std.mem.indexOf(u8, draft_html, "Bring-up &amp; acceptance") != null);
+    // The archived-only document is referenced, not inlined.
+    try std.testing.expect(std.mem.indexOf(u8, draft_html, "../review/source/docs/demo-icd.md.txt") != null);
+    // The generated region expanded into the HTML exactly as it does into the
+    // Markdown: one expansion, rendered by both faces.
+    try std.testing.expect(std.mem.indexOf(u8, draft_html, "<th>Role</th>") != null);
+    // Sibling evidence is reachable from review/.
+    try std.testing.expect(std.mem.indexOf(u8, draft_html, "\"../boards/main/bom.csv\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, draft_html, "\"../boards/main/diagram.svg\"") != null);
+    // Same inputs ⇒ same bytes.
+    const repeat = try composeHtmlFixture(allocator, "Demo System", .draft);
+    try std.testing.expectEqualSlices(u8, draft_archive.zip, repeat.zip);
+
+    const release_archive = try composeHtmlFixture(allocator, "Demo System", .release);
+    const release_html = (try draftMemberBytes(allocator, release_archive.zip, html_member)) orelse
+        return error.MissingHtmlMember;
+    try std.testing.expect(std.mem.indexOf(u8, release_html, review_html.draft_marker) == null);
+    try std.testing.expect(std.mem.indexOf(u8, release_html, "Demo System") != null);
+}
+
+// spec: system-review - identity text reaching the HTML dossier is escaped, so no manifest string can become page markup
+test "system review HTML dossier escapes hostile manifest identity" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    // A raw `<` cannot reach this far: the strict Markdown profile refuses the
+    // combined member first, which is exactly the layering we want. `&` does
+    // reach the page, and must arrive as text rather than an entity opener.
+    const archive = try composeHtmlFixture(allocator, "R&D Demo", .draft);
+    const html = (try draftMemberBytes(allocator, archive.zip, html_member)) orelse
+        return error.MissingHtmlMember;
+    try std.testing.expect(std.mem.indexOf(u8, html, "R&amp;D Demo") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "R&D Demo") == null);
 }
 
 /// One board's draft archive, composed twice from a fixed Analysis so a test
