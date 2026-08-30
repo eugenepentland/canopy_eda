@@ -4995,6 +4995,27 @@ Public functions: renderTabs
 - Wraps a block's description onto multiple lines instead of truncating at one
 - Truncation backs up to a UTF-8 boundary so multi-byte characters never split
 
+## diagram/system_of_boards
+
+Public functions: renderSystemSvg, classifySignal, laneColor, laneLabel
+
+- Classifies an interface contact into a power, clock, comms, control, RF or ground lane by its canonical net name
+- An unrecognised canonical net name falls back to the control lane
+- Renders one board node per member carrying its role, design name, part number and revision
+- Groups an interface's contacts into per-class lanes labeled with the class, its contact count and representative net names
+- The ground lane collapses to a contact count instead of listing return nets
+- The same system spec renders byte-identical SVG on every run
+- A board-free system renders nothing while one-board and three-board systems still render
+- A system with no interface contracts renders its boards with an empty spine
+- completeness-waiver: empty inputs (a board-free spec writes nothing and an interface with no signals contributes no lane row, both covered by the board-count behavior above)
+- completeness-waiver: large inputs (each lane names at most three representative nets and folds the rest into a count, so a wide contract cannot grow the fragment per contact)
+- completeness-waiver: unauthorized access (the renderer reads an in-memory manifest snapshot and has no authorization or external access surface)
+- completeness-waiver: i/o failure (no file or network access; the only failure modes are the caller's writer and allocator errors, both propagated)
+- completeness-waiver: concurrent access (rendering is pure over an immutable spec with no globals and a request-local arena)
+- completeness-waiver: malformed encoding (names are opaque byte slices escaped for XML on output; manifest decoding rejects malformed UTF-8 before this renderer sees it)
+- completeness-waiver: integer overflow (contact tallies are bounded by the signal slice length and all geometry is f64 derived from those counts)
+- completeness-waiver: panic-free (the lane fallback makes classification total, unresolved endpoint board names are skipped rather than unwrapped, and allocation failure is returned)
+
 ## diagram/diagram
 
 Public functions: renderBlockDiagramTabs, renderSystemSvg

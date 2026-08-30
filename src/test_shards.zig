@@ -450,6 +450,7 @@ pub const shards: []const []const []const u8 = &.{
         "deflate.test.",
         "diagram.membership.test.",
         "diagram.render.test.",
+        "diagram.system_of_boards.test.",
         "escape.test.",
         "eval.builtins.test.",
         "eval.fmt.test.",
