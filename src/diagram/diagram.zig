@@ -93,6 +93,42 @@ fn hasTopLevelHub(block: *const DesignBlock) bool {
     return false;
 }
 
+/// Render the design's block diagram as a **standalone SVG document** — one
+/// self-contained `<svg>` element with the diagram stylesheet embedded, for
+/// archiving as its own `.svg` file (the system review package's per-board
+/// diagram evidence).
+///
+/// This is the System view, not the grouped-cards **Block overview**: the
+/// overview is an HTML card grid, which cannot be an SVG file, so it stays
+/// where it already lives — inline in the Markdown review. Like
+/// `renderSystemSvg` this falls back to a single synthetic box for a flat
+/// design with no sections or sub-blocks. Returns false, writing nothing, when
+/// there is no diagram at all, so the caller can omit the file rather than
+/// archive an empty member.
+pub fn renderStandaloneSvg(
+    allocator: Allocator,
+    block: *const DesignBlock,
+    sub_attachments: []const ?usize,
+    project_dir: []const u8,
+    w: *Writer,
+) (Allocator.Error || Writer.Error)!bool {
+    var graph = try collect.collectGraph(allocator, block, sub_attachments, project_dir);
+    defer graph.deinit(allocator);
+    if (try render.renderSystemDocument(allocator, &graph, w)) return true;
+
+    if (!hasTopLevelHub(block)) return false;
+    var syn = [_]types.Node{.{
+        .label = block.name,
+        .subtitle = "",
+        .category = rb.classifyByName(block.name, block.instances),
+        .slug = "design",
+        .inputs = &.{},
+        .outputs = &.{},
+    }};
+    var syn_graph = types.Graph{ .nodes = &syn, .edges = &.{} };
+    return render.renderSystemDocument(allocator, &syn_graph, w);
+}
+
 /// CSS fragment for the diagram, embedded into the schematic page stylesheet
 /// and the markdown export's `<style>` block (the System view reuses the
 /// signal-view node/edge/legend CSS).

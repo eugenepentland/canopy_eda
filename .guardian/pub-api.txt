@@ -284,6 +284,7 @@ src/diagram/collect.zig::collectGraph | fn collectGraph( allocator: Allocator, b
 src/diagram/diagram.zig::diagram_css value
 src/diagram/diagram.zig::renderBlockDiagramTabs | fn renderBlockDiagramTabs( allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize, /// Project root, for deriving each chip's `layout` maturity stage from the /// sub-modules' `.layouts.json` sidecars (empty ⇒ chips cap at `schematic`). project_dir: []const u8, w: *Writer, ) (Allocator.Error || Writer.Error)!void
 src/diagram/diagram.zig::renderBlockOverview | fn renderBlockOverview( allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize, project_dir: []const u8, w: *Writer, ) (Allocator.Error || Writer.Error)!bool
+src/diagram/diagram.zig::renderStandaloneSvg | fn renderStandaloneSvg( allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize, project_dir: []const u8, w: *Writer, ) (Allocator.Error || Writer.Error)!bool
 src/diagram/diagram.zig::renderSystemSvg | fn renderSystemSvg( allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize, project_dir: []const u8, w: *Writer, ) (Allocator.Error || Writer.Error)!void
 src/diagram/layout.zig::GroupBox struct_
 src/diagram/layout.zig::LNode struct_
@@ -325,6 +326,7 @@ src/diagram/membership.zig::deinit | fn deinit(self: *Membership, allocator: All
 src/diagram/membership.zig::resolve | fn resolve(self: *const Membership, flat_ref: []const u8) ?u32
 src/diagram/render.zig::css value
 src/diagram/render.zig::renderBlocksStandalone | fn renderBlocksStandalone(allocator: Allocator, graph: *const Graph, w: *Writer) (Allocator.Error || Writer.Error)!bool
+src/diagram/render.zig::renderSystemDocument | fn renderSystemDocument(allocator: Allocator, graph: *const Graph, w: *Writer) (Allocator.Error || Writer.Error)!bool
 src/diagram/render.zig::renderSystemStandalone | fn renderSystemStandalone(allocator: Allocator, graph: *const Graph, w: *Writer) (Allocator.Error || Writer.Error)!bool
 src/diagram/render.zig::renderTabs | fn renderTabs(allocator: Allocator, graph: *const Graph, w: *Writer) (Allocator.Error || Writer.Error)!void
 src/diagram/render.zig::system_color value

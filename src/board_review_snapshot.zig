@@ -24,6 +24,8 @@ const review_json = @import("review_json.zig");
 const review_md = @import("review_md.zig");
 const review_assets = @import("system_review_assets.zig");
 const zipfile = @import("zipfile.zig");
+const block_diagram = @import("diagram/diagram.zig");
+const membership = @import("diagram/membership.zig");
 const bom_html = @import("serve/bom_html.zig");
 const mcp_tools = @import("serve/mcp_tools.zig");
 const notes = @import("serve/notes.zig");
@@ -79,6 +81,12 @@ pub const Snapshot = struct {
         pdf: []const u8,
         json: []const u8,
         bom_csv: []const u8,
+        /// Standalone SVG document of the board's block diagram, rendered from
+        /// the same evaluated design as the Markdown above. Empty when the
+        /// design has no diagram to draw, in which case the archive omits the
+        /// member. Held here so a document composer can inline the diagram
+        /// without re-evaluating the design.
+        diagram_svg: []const u8,
     },
     physical: struct {
         pcb_png: []const u8,
@@ -176,6 +184,7 @@ fn buildImpl(
 
     var bom_out: std.Io.Writer.Allocating = .init(allocator);
     try bom_html.writeBomCsv(allocator, &bom_out.writer, named.block);
+    const diagram_svg = try renderDiagram(allocator, named.block);
 
     const fv = try pcb.fabViewForResolved(allocator, project_dir, name, options.layout, named.block);
     const pcb_png = try render_pcb_png.render(allocator, fv.placement, .{
@@ -213,6 +222,7 @@ fn buildImpl(
             .pdf = pdf_bytes,
             .json = json,
             .bom_csv = bom_out.written(),
+            .diagram_svg = diagram_svg,
         },
         .physical = .{
             .pcb_png = pcb_png,
@@ -262,6 +272,35 @@ pub fn verifySnapshot(
     ) catch |err| return err == error.FileNotFound;
     allocator.free(unexpected);
     return false;
+}
+
+/// Render the board's block diagram as a standalone SVG document from the one
+/// evaluated design this snapshot already holds, so the diagram never costs a
+/// second evaluation and can never disagree with the rest of the evidence.
+///
+/// The diagram engine is deliberately given an empty project root — the same
+/// choice `review_md` makes for the export form. A project root would make the
+/// renderer read each sub-module's `.layouts.json` sidecar for its maturity
+/// star; those reads sit outside this module's `ReadTrace`, so admitting them
+/// would leave the snapshot's `consumed_sha256` claiming a read set it does not
+/// actually cover. Chips therefore cap at the `schematic` stage, exactly as
+/// they do in the archived Markdown.
+///
+/// Returns empty bytes when the design has no diagram to draw, which the
+/// archive reads as "omit the member".
+fn renderDiagram(
+    allocator: std.mem.Allocator,
+    block: *const @import("eval/env.zig").DesignBlock,
+) ![]const u8 {
+    const sub_attachments = try membership.computeSubBlockAttachments(allocator, block);
+    defer allocator.free(sub_attachments);
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    if (!try block_diagram.renderStandaloneSvg(allocator, block, sub_attachments, "", &out.writer)) {
+        out.deinit();
+        return "";
+    }
+    return out.written();
 }
 
 fn collectConnections(
@@ -487,6 +526,53 @@ test "connector observations retain hierarchy handles and canonical tied nets" {
     try std.testing.expectEqual(@as(usize, 2), connections.len);
     try std.testing.expectEqualStrings("link/J1", connections[0].connector);
     try std.testing.expectEqualStrings("CANONICAL", connections[0].net);
+}
+
+// spec: system-review - per-board block diagram evidence is one standalone SVG document rendered from the same evaluated design, omitted when there is nothing to draw
+test "board diagram evidence renders standalone or is cleanly absent" {
+    const env = @import("eval/env.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // A flat design with no groups, sections or sub-blocks: the grouped-cards
+    // overview has nothing to show, so the synthetic single-box fallback still
+    // produces a valid standalone document.
+    const instances = [_]env.Instance{.{
+        .ref_des = "U1",
+        .label = "U1",
+        .origin_key = "U1",
+        .component = "mcu",
+        .value = "mcu",
+        .footprint = "qfn",
+        .symbol = "ic",
+    }};
+    const flat = env.DesignBlock{
+        .name = "flat",
+        .instances = &instances,
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    const svg = try renderDiagram(allocator, &flat);
+    try std.testing.expect(std.mem.startsWith(u8, svg, "<svg "));
+    try std.testing.expect(std.mem.endsWith(u8, svg, "</svg>"));
+    // Same evaluated design ⇒ same bytes, so the archive stays reproducible.
+    try std.testing.expectEqualStrings(svg, try renderDiagram(allocator, &flat));
+
+    // Nothing placeable at all: no diagram, no member, no empty file.
+    const bare = env.DesignBlock{
+        .name = "bare",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    try std.testing.expectEqual(@as(usize, 0), (try renderDiagram(allocator, &bare)).len);
 }
 
 // spec: system-review - evaluated source paths retain the buildable src/lib shape in a review package
