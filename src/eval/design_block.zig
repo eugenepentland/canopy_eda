@@ -31,6 +31,7 @@ const board_role_mod = @import("board_role.zig");
 const net_analysis = @import("net_analysis.zig");
 const section_maturity = @import("section_maturity.zig");
 const stackup_presets = @import("stackup_presets.zig");
+const outline_mod = @import("../placement/outline.zig");
 const pll_loop = @import("../pll_loop.zig");
 const frequency_plan = @import("../frequency_plan.zig");
 const ScopeForm = forms_mod.ScopeForm;
@@ -2220,6 +2221,7 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
     var w: f64 = 0;
     var h: f64 = 0;
     var corner_radius: f64 = 0;
+    var outline_approved: []const u8 = "";
     var perimeter_fence: env_mod.PerimeterFenceSpec = .{};
     var corners: std.ArrayList(env_mod.PlacementItem) = .empty;
     for (form_children[1..]) |child| {
@@ -2243,6 +2245,10 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
             if (c.len >= 2) corner_radius = @max(c[1].asNumber() orelse 0, 0);
             continue;
         }
+        if (std.mem.eql(u8, head, "outline-approved")) {
+            if (c.len >= 2) outline_approved = parseOutlineApproval(self, c[1]);
+            continue;
+        }
         if (std.mem.eql(u8, head, "perimeter-fence")) {
             perimeter_fence = try parsePerimeterFence(self, c[1..]);
             continue;
@@ -2259,11 +2265,35 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
         .w = w,
         .h = h,
         .corner_radius = corner_radius,
+        .outline_approved = outline_approved,
         .sides = board_sides,
         .corners = corners.toOwnedSlice(self.allocator) catch &.{},
         .perimeter_fence = perimeter_fence,
         .present = true,
     };
+}
+
+/// Parse `(outline-approved "DIGEST")` — the author's content-bound
+/// acceptance of a saved outline profile the `(board …)` rectangle cannot
+/// describe. Only the exact hex digest shape the `outline-drift` finding
+/// prints is accepted; anything else warns and is dropped, so a typo can
+/// never read as an approval of geometry nobody looked at.
+fn parseOutlineApproval(self: *Evaluator, node: Node) []const u8 {
+    const text = node.asString() orelse node.asAtom() orelse "";
+    if (text.len == outline_mod.digest_len and hexOnly(text)) return text;
+    self.warnFmt(
+        node.span,
+        "(outline-approved …) needs the {d}-character hex outline digest the fab-readiness outline-drift finding prints",
+        .{outline_mod.digest_len},
+    );
+    return "";
+}
+
+fn hexOnly(text: []const u8) bool {
+    for (text) |c| {
+        if (!std.ascii.isHex(c)) return false;
+    }
+    return true;
 }
 
 fn fabricationBasenameSafe(name: []const u8) bool {
@@ -5020,6 +5050,40 @@ test "design-block parses a (board ...) form" {
     try testing.expectEqual(@as(f64, 90), block.board.sides[1].items[0].rot.?);
     try testing.expectEqual(@as(usize, 4), block.board.corners.len);
     try testing.expectEqualStrings("MK3", block.board.corners[2].ref);
+}
+
+// spec: eval/design_block - board form accepts an outline-approved digest only in the exact hex shape the drift finding prints, warning and dropping anything else
+test "design-block parses (outline-approved ...) and refuses a malformed digest" {
+    const a = std.heap.page_allocator;
+    const good =
+        \\(design-block "test"
+        \\  (board (size 40 20) (outline-approved "8eb1d63442ff9e8f")))
+    ;
+    const nodes = try sexpr_parser.parse(a, good);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqualStrings("8eb1d63442ff9e8f", block.board.outline_approved);
+    try testing.expectEqual(@as(usize, 0), eval.warnings.items.len);
+
+    // A truncated / non-hex pin is a typo, not an approval: it warns and is
+    // dropped, so the outline-drift finding keeps firing with the real digest.
+    const bad =
+        \\(design-block "test"
+        \\  (board (size 40 20) (outline-approved "not-a-digest")))
+    ;
+    const bad_nodes = try sexpr_parser.parse(a, bad);
+    const bad_children = bad_nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var bad_eval = Evaluator.init(a, "");
+    defer bad_eval.deinit();
+    var bad_env = env_mod.Env.init(a, null);
+    defer bad_env.deinit();
+    const bad_block = (try evalDesignBlock(&bad_eval, bad_children[1..], &bad_env)).design_block;
+    try testing.expectEqualStrings("", bad_block.board.outline_approved);
+    try testing.expectEqual(@as(usize, 1), bad_eval.warnings.items.len);
 }
 
 // spec: eval/design_block - revision form captures id, date, and newest-first changelog

@@ -565,7 +565,7 @@ pub const scope_form_docs = blk: {
             "the force / rough solver on /pcb-layout.",
     } };
     t[@backingInt(ScopeForm.board)] = .{ .scope = tl, .doc = .{
-        .syntax = "(board [(part-number \"PN\")] (size W H) [(corner-radius R)] " ++
+        .syntax = "(board [(part-number \"PN\")] (size W H) [(corner-radius R)] [(outline-approved \"DIGEST\")] " ++
             "[(perimeter-fence (via DIA DRILL) (spacing PITCH) (edge-offset OFFSET) (mask-width WIDTH) [(net \"GND\")] " ++
             "[(keepout CLEARANCE [(blocks components tracks vias)] [(allow-nets \"NET\"…)])])] " ++
             "(left|right|top|bottom \"REF\"… | (rot N \"REF\")…)… [(corners \"REF\"…)])",
@@ -573,7 +573,12 @@ pub const scope_form_docs = blk: {
             "(required — without it the form is inert). (corner-radius R) rounds the outline's " ++
             "corners with radius R mm — the shape flows to " ++ board_layers.edge_cuts ++
             ", the board-edge DRC, and " ++
-            "every renderer as a fine polyline. (perimeter-fence …) generates plated vias " ++
+            "every renderer as a fine polyline. (outline-approved \"DIGEST\") accepts a saved outline " ++
+            "profile this form cannot describe — a notch, a recess, mixed corner radii — by pinning that " ++
+            "exact profile's digest, which the fabrication-readiness outline-drift finding prints for " ++
+            "copy-paste. It approves the PROFILE only: (size W H) is still compared, and redrawing the " ++
+            "outline makes the pin stale rather than silently blessing the new shape. " ++
+            "(perimeter-fence …) generates plated vias " ++
             "around that exact outline; DIA and DRILL set their finished diameter and hole, " ++
             "PITCH is their nominal centre spacing, OFFSET is the via-centre distance from the " ++
             "finished edge, and WIDTH removes solder mask inward from the edge only on a face carrying a matching GND pour (" ++ board_layers.f_mask ++

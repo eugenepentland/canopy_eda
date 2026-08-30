@@ -1243,6 +1243,14 @@ pub const BoardSpec = struct {
     /// (emitted as fine polyline arcs on every exact-shape consumer:
     /// Edge.Cuts, board-edge DRC, the renderers). 0 = square corners.
     corner_radius: f64 = 0,
+    /// `(outline-approved "DIGEST")` — the author's explicit acceptance of a
+    /// saved outline whose profile `(size W H)` + `(corner-radius R)` cannot
+    /// describe (a notch, a recess, mixed corner radii). Content-bound: it
+    /// pins that exact profile's `placement/outline` digest, so redrawing the
+    /// outline makes the approval stale rather than silently blessing the new
+    /// shape. Empty ⇒ unapproved. The approval covers the PROFILE only — the
+    /// declared size is still compared, and still drives the docs.
+    outline_approved: []const u8 = "",
     /// Edge-docked parts per board edge (NOT sides of an anchor — the words
     /// name the physical board edge the connector mounts on).
     sides: []const PlacementSideSpec = &.{},

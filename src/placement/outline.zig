@@ -365,6 +365,389 @@ fn segIntersect(a: [2]f64, b: [2]f64, c: [2]f64, d: [2]f64) ?[2]f64 {
     return .{ a[0] + t * r0, a[1] + t * r1 };
 }
 
+// ── Declared-vs-saved drift ─────────────────────────────────────────────────
+//
+// ONE predicate answers "did this board's outline drift from its source?", and
+// every surface that reports drift calls it: `fab_readiness`'s `outline-drift`
+// release finding and the board-review mechanical summary. They were once two
+// hand-written comparisons — one dimensions-only, one dimensions-and-shape —
+// which is how the barracuda base board came to read `matches` on the review
+// document and `outline-drift` on the release report at the same moment.
+
+/// Fabrication tolerance (mm) for every declared-vs-saved outline comparison.
+pub const drift_tolerance_mm: f64 = 0.01;
+
+/// Hex characters in the outline digest an `(outline-approved "…")` clause
+/// pins: enough that no two board profiles collide, few enough to read off a
+/// finding message and paste into a design source by hand.
+pub const digest_len: usize = 16;
+
+/// The lowercase hex digest identifying one saved outline profile.
+pub const Digest = [digest_len]u8;
+
+/// Domain separator, so an outline digest can never equal some other
+/// truncated SHA-256 this toolchain prints.
+const digest_domain = "netlisp-board-outline-v1\n";
+
+/// What the design source declares about its board outline: the `(board …)`
+/// form's geometry plus the author's explicit acceptance of a saved profile.
+pub const Declared = struct {
+    /// `(size W H)` in mm. Zero ⇒ nothing declared, nothing to compare.
+    w: f64 = 0,
+    h: f64 = 0,
+    /// `(corner-radius R)` in mm; 0 = square corners.
+    corner_radius: f64 = 0,
+    /// The digest pinned by `(outline-approved "…")`; empty ⇒ unapproved.
+    /// An approval covers the PROFILE only — `(size W H)` is still compared,
+    /// so the declared size stays meaningful for docs and mechanical tables.
+    approved: []const u8 = "",
+
+    /// True when the source declares an outline worth comparing against.
+    pub fn present(self: Declared) bool {
+        return self.w > 0 and self.h > 0;
+    }
+};
+
+/// The outline a selected layout actually saved: the bbox rectangle every
+/// consumer derives, plus the exact profile when it is not a plain rectangle.
+pub const Saved = struct {
+    rect: optimizer.BoardRect,
+    poly: ?[]const [2]f64 = null,
+    arcs: []const optimizer.BoardArc = &.{},
+};
+
+/// How the saved outline stands against the declaration.
+pub const Verdict = enum {
+    /// No declared outline, or no saved outline — nothing was compared.
+    not_compared,
+    /// Dimensions and profile both match the declaration.
+    matches,
+    /// The profile is not the declared rectangle, but the source pinned this
+    /// exact profile with `(outline-approved …)`, and the size still matches.
+    approved,
+    /// The saved bbox differs from the declared `(size W H)`.
+    dimensions,
+    /// The size matches but the profile is neither the declared rectangle nor
+    /// an approved one.
+    shape,
+    /// Both the size and the profile disagree.
+    dimensions_and_shape,
+    /// An `(outline-approved …)` clause pins a digest this outline no longer
+    /// has: the approval is stale and says nothing about what was saved.
+    stale_approval,
+
+    /// True for every verdict a fabrication release must block on.
+    pub fn drifted(self: Verdict) bool {
+        return switch (self) {
+            .not_compared, .matches, .approved => false,
+            .dimensions, .shape, .dimensions_and_shape, .stale_approval => true,
+        };
+    }
+
+    /// Summary-table wording: what drifted, not merely that something did.
+    pub fn label(self: Verdict) []const u8 {
+        return switch (self) {
+            .not_compared => "not compared",
+            .matches => "matches",
+            .approved => "approved shape",
+            .dimensions => "DRIFT (size)",
+            .shape => "DRIFT (shape)",
+            .dimensions_and_shape => "DRIFT (size + shape)",
+            .stale_approval => "DRIFT (stale approval)",
+        };
+    }
+};
+
+/// One outline comparison: the verdict plus the saved profile's digest — the
+/// exact string an `(outline-approved …)` clause has to pin, so the author
+/// never has to go looking for it.
+pub const Drift = struct {
+    verdict: Verdict = .not_compared,
+    /// All-zero when nothing was compared.
+    digest: Digest = @splat('0'),
+};
+
+/// Whether an approval clause applies to the outline in hand.
+const Approval = enum { none, honored, stale };
+
+/// THE declared-vs-saved outline predicate. Dimensions are always compared
+/// against `(size W H)`; the profile matches when it is the declared
+/// rectangle (optionally filleted by `(corner-radius R)`) or when the source
+/// pinned this exact profile's digest.
+pub fn compare(
+    alloc: std.mem.Allocator,
+    declared: Declared,
+    saved: ?Saved,
+) std.mem.Allocator.Error!Drift {
+    const s = saved orelse return .{};
+    if (!declared.present()) return .{};
+    const d = try digest(alloc, s);
+    const approval = approvalOf(declared.approved, d);
+    if (approval == .stale) return .{ .verdict = .stale_approval, .digest = d };
+    const sized = @abs(s.rect.w - declared.w) <= drift_tolerance_mm and
+        @abs(s.rect.h - declared.h) <= drift_tolerance_mm;
+    const shaped = approval == .honored or try declaredShape(alloc, declared, s);
+    return .{ .digest = d, .verdict = if (!sized and !shaped)
+        .dimensions_and_shape
+    else if (!sized)
+        .dimensions
+    else if (!shaped)
+        .shape
+    else if (approval == .honored)
+        .approved
+    else
+        .matches };
+}
+
+fn approvalOf(pinned: []const u8, actual: Digest) Approval {
+    if (pinned.len == 0) return .none;
+    return if (std.ascii.eqlIgnoreCase(pinned, &actual)) .honored else .stale;
+}
+
+/// True when the saved profile is exactly the shape `(board …)` describes.
+fn declaredShape(
+    alloc: std.mem.Allocator,
+    declared: Declared,
+    saved: Saved,
+) std.mem.Allocator.Error!bool {
+    const corners = rectCorners(saved.rect);
+    if (!(declared.corner_radius > 0)) {
+        return saved.arcs.len == 0 and
+            (saved.poly == null or polygonEquivalent(saved.poly.?, &corners, drift_tolerance_mm));
+    }
+    const radii: [4]f64 = @splat(declared.corner_radius);
+    const expected = try filletPath(alloc, &corners, &radii, drift_tolerance_mm);
+    const poly = saved.poly orelse return false;
+    return polygonEquivalent(poly, expected.poly, drift_tolerance_mm) and
+        arcsEquivalent(saved.arcs, expected.arcs, drift_tolerance_mm);
+}
+
+/// The `outline-drift` finding text for a drifted comparison. Every variant
+/// names the way out: an unapproved profile carries the digest to paste, a
+/// wrong size says that approving cannot fix a size, and a stale pin names
+/// both the pinned and the current digest.
+pub fn driftMessage(
+    alloc: std.mem.Allocator,
+    declared: Declared,
+    saved: Saved,
+    drift: Drift,
+) std.mem.Allocator.Error![]const u8 {
+    const pinned = declared.approved[0..@min(declared.approved.len, 64)];
+    if (drift.verdict == .stale_approval) return std.fmt.allocPrint(
+        alloc,
+        "saved fabrication outline no longer matches its (outline-approved \"{s}\") pin: this outline is " ++
+            "{d:.3} x {d:.3} mm with {d} native arcs and digests to \"{s}\" — re-approve with that digest " ++
+            "if the change is intended",
+        .{ pinned, saved.rect.w, saved.rect.h, saved.arcs.len, &drift.digest },
+    );
+    const tail: []const u8 = switch (drift.verdict) {
+        .shape => try std.fmt.allocPrint(
+            alloc,
+            "; if that profile is the approved one, pin it with (outline-approved \"{s}\") under (board …)",
+            .{&drift.digest},
+        ),
+        .dimensions, .dimensions_and_shape => "; (outline-approved …) approves a profile, never a size, " ++
+            "so correct (size W H) first",
+        else => "",
+    };
+    return std.fmt.allocPrint(
+        alloc,
+        "saved fabrication outline is {d:.3} x {d:.3} mm with {d} native arcs, but source declares " ++
+            "{d:.3} x {d:.3} mm and {d:.3} mm corner radius{s}",
+        .{ saved.rect.w, saved.rect.h, saved.arcs.len, declared.w, declared.h, declared.corner_radius, tail },
+    );
+}
+
+/// Canonical digest of a saved outline's PROFILE.
+///
+/// Three deliberate normalizations make the value a property of the shape
+/// rather than of the file it came out of: coordinates are taken relative to
+/// the outline's own bounding box (a layout that shifts inside the board
+/// frame keeps its digest, and the declared size is compared separately);
+/// they are quantized to whole micrometres (re-serializing 2.18 as
+/// 2.1799999999999997 digests identically); and the profile is the NOMINAL
+/// contour — native arcs plus the straight edges between them — so changing
+/// the fillet sagitta cannot invalidate every pinned approval in the corpus.
+/// A real geometry change (a moved notch, a different corner radius) does
+/// change it, which is the whole point of pinning one.
+pub fn digest(alloc: std.mem.Allocator, saved: Saved) std.mem.Allocator.Error!Digest {
+    const corners = rectCorners(saved.rect);
+    const poly: []const [2]f64 = saved.poly orelse &corners;
+    const bb = bboxRect(poly);
+    const items = try profileItems(alloc, poly, saved.arcs);
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hash.update(digest_domain);
+    if (items.len > 0) {
+        const tokens = try alloc.alloc([]const u8, items.len);
+        for (items, tokens) |item, *token| token.* = try itemToken(alloc, item, bb.minx, bb.miny);
+        const start = smallestToken(tokens);
+        for (0..tokens.len) |k| {
+            hash.update(tokens[(start + k) % tokens.len]);
+            hash.update("\n");
+        }
+    }
+    var full: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    hash.final(&full);
+    const hex = std.fmt.bytesToHex(full, .lower);
+    var short: Digest = undefined;
+    @memcpy(&short, hex[0..digest_len]);
+    return short;
+}
+
+fn rectCorners(r: optimizer.BoardRect) [4][2]f64 {
+    return .{
+        .{ r.minx, r.miny },
+        .{ r.minx + r.w, r.miny },
+        .{ r.minx + r.w, r.miny + r.h },
+        .{ r.minx, r.miny + r.h },
+    };
+}
+
+/// One piece of the nominal contour: a straight edge or a native arc.
+const ProfileItem = union(enum) {
+    line: [2][2]f64,
+    arc: optimizer.BoardArc,
+};
+
+/// Tolerance (mm) for deciding a tessellated polygon edge belongs to a native
+/// arc: far below the coarsest chord a 0.01 mm sagitta produces, far above
+/// any sidecar coordinate rounding.
+const arc_owner_tolerance_mm: f64 = 1e-3;
+
+/// A chord endpoint belongs to an arc when it lies on the arc's span OR is
+/// one of its two ends. The explicit endpoint case matters: at exactly the
+/// start angle `arcOwnsSegment`'s modular sweep test sits on a knife edge, so
+/// a coordinate rounded a nanometre the wrong way would otherwise split the
+/// first chord of a fillet off into a phantom straight — and change a digest
+/// that nothing about the board had changed.
+fn arcHasPoint(arc: optimizer.BoardArc, p: [2]f64) bool {
+    return pointNear(p, arc.p1, arc_owner_tolerance_mm) or
+        pointNear(p, arc.p2, arc_owner_tolerance_mm) or
+        arcOwnsSegment(arc, p, p, arc_owner_tolerance_mm);
+}
+
+fn arcOwnerOf(arcs: []const optimizer.BoardArc, a: [2]f64, b: [2]f64) ?usize {
+    for (arcs, 0..) |arc, i| {
+        if (arcHasPoint(arc, a) and arcHasPoint(arc, b)) return i;
+    }
+    return null;
+}
+
+/// The nominal contour in traversal order: every run of tessellated chords is
+/// folded back into the single arc that owns it, and every remaining edge is
+/// its own straight item.
+fn profileItems(
+    alloc: std.mem.Allocator,
+    poly: []const [2]f64,
+    arcs: []const optimizer.BoardArc,
+) std.mem.Allocator.Error![]const ProfileItem {
+    const n = poly.len;
+    if (n < 3) return &.{};
+    const owners = try alloc.alloc(?usize, n);
+    for (owners, 0..) |*owner, i| owner.* = arcOwnerOf(arcs, poly[i], poly[(i + 1) % n]);
+    var items: std.ArrayList(ProfileItem) = .empty;
+    var previous: ?usize = null;
+    const start = profileStart(owners);
+    for (0..n) |k| {
+        const i = (start + k) % n;
+        if (owners[i]) |owner| {
+            const continues = previous != null and previous.? == owner;
+            if (!continues) try items.append(alloc, .{ .arc = arcs[owner] });
+        } else {
+            try items.append(alloc, .{ .line = .{ poly[i], poly[(i + 1) % n] } });
+        }
+        previous = owners[i];
+    }
+    return items.toOwnedSlice(alloc);
+}
+
+/// An edge index where one contour item ends and the next begins, so the
+/// traversal never splits one arc's chord run across the wrap.
+fn profileStart(owners: []const ?usize) usize {
+    for (owners, 0..) |owner, i| if (owner == null) return i;
+    for (owners, 0..) |owner, i| {
+        const previous = owners[(i + owners.len - 1) % owners.len];
+        if (previous == null or owner.? != previous.?) return i;
+    }
+    return 0;
+}
+
+/// Quantize a millimetre coordinate to whole micrometres.
+fn micron(v: f64) i64 {
+    return numeric.checkedInt(i64, v * 1000) orelse 0;
+}
+
+fn itemToken(
+    alloc: std.mem.Allocator,
+    item: ProfileItem,
+    ox: f64,
+    oy: f64,
+) std.mem.Allocator.Error![]const u8 {
+    return switch (item) {
+        .line => |seg| std.fmt.allocPrint(alloc, "L {d} {d} {d} {d}", .{
+            micron(seg[0][0] - ox), micron(seg[0][1] - oy),
+            micron(seg[1][0] - ox), micron(seg[1][1] - oy),
+        }),
+        .arc => |arc| std.fmt.allocPrint(alloc, "A {d} {d} {d} {d} {d} {d}", .{
+            micron(arc.p1[0] - ox), micron(arc.p1[1] - oy),
+            micron(arc.pm[0] - ox), micron(arc.pm[1] - oy),
+            micron(arc.p2[0] - ox), micron(arc.p2[1] - oy),
+        }),
+    };
+}
+
+/// Rotate the contour to start at its smallest token, so which vertex a
+/// writer happened to start the polygon at is not part of the identity.
+fn smallestToken(tokens: []const []const u8) usize {
+    var best: usize = 0;
+    for (tokens, 0..) |token, i| {
+        if (std.mem.order(u8, token, tokens[best]) == .lt) best = i;
+    }
+    return best;
+}
+
+fn pointNear(a: [2]f64, b: [2]f64, tolerance: f64) bool {
+    return @abs(a[0] - b[0]) <= tolerance and @abs(a[1] - b[1]) <= tolerance;
+}
+
+/// Same closed vertex ring up to start offset and winding direction.
+fn polygonEquivalent(a: []const [2]f64, b: []const [2]f64, tolerance: f64) bool {
+    if (a.len != b.len or a.len == 0) return false;
+    for (b, 0..) |candidate, offset| {
+        if (!pointNear(a[0], candidate, tolerance)) continue;
+        var forward = true;
+        var reverse = true;
+        for (a, 0..) |point, index| {
+            if (!pointNear(point, b[(offset + index) % b.len], tolerance)) forward = false;
+            if (!pointNear(point, b[(offset + b.len - index) % b.len], tolerance)) reverse = false;
+        }
+        if (forward or reverse) return true;
+    }
+    return false;
+}
+
+fn arcNear(a: optimizer.BoardArc, b: optimizer.BoardArc, tolerance: f64) bool {
+    const forward = pointNear(a.p1, b.p1, tolerance) and pointNear(a.pm, b.pm, tolerance) and pointNear(a.p2, b.p2, tolerance);
+    const reverse = pointNear(a.p1, b.p2, tolerance) and pointNear(a.pm, b.pm, tolerance) and pointNear(a.p2, b.p1, tolerance);
+    return forward or reverse;
+}
+
+/// Same arc ring up to start offset and winding direction.
+fn arcsEquivalent(a: []const optimizer.BoardArc, b: []const optimizer.BoardArc, tolerance: f64) bool {
+    if (a.len != b.len or a.len == 0) return false;
+    for (b, 0..) |candidate, offset| {
+        if (!arcNear(a[0], candidate, tolerance)) continue;
+        var forward = true;
+        var reverse = true;
+        for (a, 0..) |arc, index| {
+            if (!arcNear(arc, b[(offset + index) % b.len], tolerance)) forward = false;
+            if (!arcNear(arc, b[(offset + b.len - index) % b.len], tolerance)) reverse = false;
+        }
+        if (forward or reverse) return true;
+    }
+    return false;
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -471,4 +854,143 @@ test "filletPath preserves native rounded corners" {
     const circle = arcCircle(result.arcs[0]) orelse return error.TestExpectedArc;
     try testing.expectApproxEqAbs(@as(f64, 2), circle.radius, 1e-9);
     try testing.expect(arcOwnsSegment(result.arcs[0], result.poly[0], result.poly[1], 0.0001));
+}
+
+/// Barracuda-class notched outline: a rectangle whose bottom edge carries a
+/// rectangular recess, big fillets on the board corners and small ones in the
+/// recess — the profile `(size W H)` plus one `(corner-radius R)` cannot
+/// express, and therefore the one an approval clause exists for.
+const notch_pts = [_][2]f64{
+    .{ 0, 0 },   .{ 40, 0 },  .{ 40, 20 }, .{ 25, 20 },
+    .{ 25, 14 }, .{ 15, 14 }, .{ 15, 20 }, .{ 0, 20 },
+};
+const notch_radii = [_]f64{ 2, 2, 2, 0.9, 0.9, 0.9, 0.9, 2 };
+
+/// Re-serialize the tessellated polygon with sub-micrometre coordinate noise
+/// while the native arcs stay exact — the shape a sidecar round-trip leaves.
+fn jitteredPoly(alloc: std.mem.Allocator, saved: Saved, noise: f64) !Saved {
+    const poly = try alloc.dupe([2]f64, saved.poly.?);
+    for (poly) |*p| {
+        p[0] += noise;
+        p[1] -= noise;
+    }
+    return .{ .rect = bboxRect(poly), .poly = poly, .arcs = saved.arcs };
+}
+
+/// The same closed contour written starting at a different vertex.
+fn rotatedOutline(alloc: std.mem.Allocator, saved: Saved, by: usize) !Saved {
+    const poly = try alloc.alloc([2]f64, saved.poly.?.len);
+    for (poly, 0..) |*p, i| p.* = saved.poly.?[(i + by) % poly.len];
+    const arcs = try alloc.alloc(optimizer.BoardArc, saved.arcs.len);
+    for (arcs, 0..) |*arc, i| arc.* = saved.arcs[(i + by) % arcs.len];
+    return .{ .rect = saved.rect, .poly = poly, .arcs = arcs };
+}
+
+/// The recess cut `deeper` mm further into the board — a real geometry change.
+fn deeperNotch(alloc: std.mem.Allocator, deeper: f64) !Saved {
+    const pts = try alloc.dupe([2]f64, &notch_pts);
+    pts[4][1] -= deeper;
+    pts[5][1] -= deeper;
+    const filleted = try filletPath(alloc, pts, &notch_radii, 0.01);
+    return .{ .rect = bboxRect(filleted.poly), .poly = filleted.poly, .arcs = filleted.arcs };
+}
+
+fn notchedOutline(alloc: std.mem.Allocator, dx: f64, dy: f64, sagitta: f64) !Saved {
+    const pts = try alloc.dupe([2]f64, &notch_pts);
+    for (pts) |*p| {
+        p[0] += dx;
+        p[1] += dy;
+    }
+    const filleted = try filletPath(alloc, pts, &notch_radii, sagitta);
+    return .{ .rect = bboxRect(filleted.poly), .poly = filleted.poly, .arcs = filleted.arcs };
+}
+
+// spec: placement/outline - the saved-outline digest identifies the nominal profile, surviving float jitter, arc tessellation, start vertex and board position while a moved notch changes it
+test "the outline digest is canonical over the profile, not its serialization" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const alloc = arena_inst.allocator();
+
+    const saved = try notchedOutline(alloc, 0, 0, 0.01);
+    try testing.expectEqual(@as(usize, notch_pts.len), saved.arcs.len);
+    const base = try digest(alloc, saved);
+    try testing.expectEqual(digest_len, base.len);
+
+    // Sub-micrometre float jitter — a re-serialized 2.18 coming back as
+    // 2.1799999999999997 — is formatting, not geometry.
+    const jittered = try jitteredPoly(alloc, saved, 1e-10);
+    try testing.expectEqualSlices(u8, &base, &(try digest(alloc, jittered)));
+
+    // A finer fillet tessellation is the same board: the digest is taken over
+    // native arcs plus the straights between them, never over the chords.
+    const finer = try notchedOutline(alloc, 0, 0, 0.002);
+    try testing.expect(finer.poly.?.len > saved.poly.?.len);
+    try testing.expectEqualSlices(u8, &base, &(try digest(alloc, finer)));
+
+    // Nor is the vertex a writer happened to start at part of the identity.
+    const rotated = try rotatedOutline(alloc, saved, 7);
+    try testing.expectEqualSlices(u8, &base, &(try digest(alloc, rotated)));
+
+    // Nor where the board sits in the layout frame — the declared size is
+    // compared on its own, so the digest is the shape alone.
+    const moved = try notchedOutline(alloc, 7.5, -3.25, 0.01);
+    try testing.expectEqualSlices(u8, &base, &(try digest(alloc, moved)));
+
+    // Real geometry, however, does change it: a recess 0.5 mm deeper.
+    const changed = try digest(alloc, try deeperNotch(alloc, 0.5));
+    try testing.expect(!std.mem.eql(u8, &base, &changed));
+}
+
+// spec: placement/outline - the shared drift predicate always compares the declared dimensions, accepts a profile the source pinned by digest, and reports an outdated pin as a stale approval
+test "compare approves a pinned profile, keeps the size check, and flags a stale pin" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const alloc = arena_inst.allocator();
+    const saved = try notchedOutline(alloc, 0, 0, 0.01);
+    const declared: Declared = .{ .w = 40, .h = 20 };
+
+    // Unapproved, the notch is shape drift — and the message carries the exact
+    // digest to paste back into the source, so closing the loop is copy-paste.
+    const unapproved = try compare(alloc, declared, saved);
+    try testing.expectEqual(Verdict.shape, unapproved.verdict);
+    try testing.expect(unapproved.verdict.drifted());
+    const open_msg = try driftMessage(alloc, declared, saved, unapproved);
+    try testing.expect(std.mem.indexOf(u8, open_msg, &unapproved.digest) != null);
+    try testing.expect(std.mem.indexOf(u8, open_msg, "(outline-approved") != null);
+
+    // Pinned, that same profile is clean.
+    const pinned: Declared = .{ .w = 40, .h = 20, .approved = &unapproved.digest };
+    const honored = try compare(alloc, pinned, saved);
+    try testing.expectEqual(Verdict.approved, honored.verdict);
+    try testing.expect(!honored.verdict.drifted());
+
+    // The approval covers the profile and never the size: a board that is not
+    // the declared 40 mm wide still drifts with the pin in place.
+    const resized: Declared = .{ .w = 41, .h = 20, .approved = &unapproved.digest };
+    try testing.expectEqual(Verdict.dimensions, (try compare(alloc, resized, saved)).verdict);
+
+    // A pin that no longer matches is its own, distinctly-worded finding
+    // naming both digests — never a silent approval of unseen geometry.
+    const stale_pin = "0123456789abcdef";
+    const stale_decl: Declared = .{ .w = 40, .h = 20, .approved = stale_pin };
+    const stale = try compare(alloc, stale_decl, saved);
+    try testing.expectEqual(Verdict.stale_approval, stale.verdict);
+    const stale_msg = try driftMessage(alloc, stale_decl, saved, stale);
+    try testing.expect(std.mem.indexOf(u8, stale_msg, stale_pin) != null);
+    try testing.expect(std.mem.indexOf(u8, stale_msg, &stale.digest) != null);
+    try testing.expect(std.mem.indexOf(u8, stale_msg, "no longer matches") != null);
+
+    // Plain rectangles and RF-style rounded rectangles are untouched.
+    const rect: Saved = .{ .rect = .{ .minx = 0, .miny = 0, .w = 81, .h = 24.8 } };
+    try testing.expectEqual(Verdict.matches, (try compare(alloc, .{ .w = 81, .h = 24.8 }, rect)).verdict);
+    const rf_corners = [_][2]f64{ .{ 0, 0 }, .{ 81, 0 }, .{ 81, 24.8 }, .{ 0, 24.8 } };
+    const rf_radii: [4]f64 = @splat(2);
+    const rf = try filletPath(alloc, &rf_corners, &rf_radii, 0.01);
+    const rf_saved: Saved = .{ .rect = rect.rect, .poly = rf.poly, .arcs = rf.arcs };
+    const rf_declared: Declared = .{ .w = 81, .h = 24.8, .corner_radius = 2 };
+    try testing.expectEqual(Verdict.matches, (try compare(alloc, rf_declared, rf_saved)).verdict);
+
+    // Nothing declared, or nothing saved, is compared rather than guessed at.
+    try testing.expectEqual(Verdict.not_compared, (try compare(alloc, .{}, saved)).verdict);
+    try testing.expectEqual(Verdict.not_compared, (try compare(alloc, declared, null)).verdict);
 }

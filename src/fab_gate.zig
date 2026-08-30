@@ -298,9 +298,7 @@ pub fn check(arena: std.mem.Allocator, input: Input) std.mem.Allocator.Error!Res
         .release = .{
             .composed_drc = composed.effective,
             .composed_drc_complete = composed.complete,
-            .authored_board_w = input.release.board.w,
-            .authored_board_h = input.release.board.h,
-            .authored_corner_radius = input.release.board.corner_radius,
+            .authored_outline = fab_readiness.declaredOutline(input.release.board),
         },
     });
     const block = input.block orelse {

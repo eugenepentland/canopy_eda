@@ -13,12 +13,15 @@ const env_mod = @import("eval/env.zig");
 const erc = @import("erc.zig");
 const frequency_plan = @import("frequency_plan.zig");
 const pll_loop = @import("pll_loop.zig");
-/// The fab view's outline rectangle type, aliased through the module that
-/// declares it so this file does not depend on the placement optimizer.
-const BoardRect = @import("placement/courtyard_close.zig").Rect;
+/// The shared declared-vs-saved outline predicate — the SAME comparison the
+/// readiness `outline-drift` finding makes, called rather than restated. It
+/// also carries the fab view's outline rectangle and arc types, so this file
+/// still names no placement-optimizer symbol of its own.
+const outline_mod = @import("placement/outline.zig");
 const power_budget = @import("eval/power_budget.zig");
 const thermal = @import("eval/thermal.zig");
 const export_pdf = @import("export_pdf.zig");
+const fab_readiness = @import("fab_readiness.zig");
 const fab_release = @import("fab_release.zig");
 const flat_netlist = @import("flat_netlist.zig");
 const infra_fs = @import("infra/fs.zig");
@@ -212,11 +215,13 @@ pub const Outline = struct {
 pub const Mechanical = struct {
     declared: Outline = .{},
     measured: Outline = .{},
-    /// True when both outlines are present and their sizes disagree by more
-    /// than the fabrication tolerance the readiness `outline-drift` finding
-    /// uses. Surfaced at document level so a drifted board is visible without
+    /// The shared drift predicate's verdict for this board — the same call
+    /// `fab_readiness` makes for its `outline-drift` finding, so the two
+    /// surfaces cannot disagree, and it names WHAT drifted (size, profile, or
+    /// a stale `(outline-approved …)` pin) rather than only that something
+    /// did. Surfaced at document level so a drifted board is visible without
     /// opening `fab-readiness.json`.
-    drift: bool = false,
+    outline: outline_mod.Verdict = .not_compared,
     stackup_preset: []const u8 = "",
     stackup_layers: u8 = 0,
 };
@@ -524,7 +529,7 @@ fn buildImpl(
             .pll = evaluator.pll_reports.items,
             .frequency = evaluator.frequency_plan_reports.items,
         },
-        fv.placement.board_rect,
+        fab_readiness.savedOutline(fv.placement),
     );
     read_trace.end();
     if (!read_trace.verify()) return error.InputsChanged;
@@ -575,22 +580,23 @@ const EvaluatedReports = struct {
 /// each string into the snapshot's allocator: the evaluator that owns the PLL
 /// verdict messages is destroyed when `buildImpl` returns.
 ///
-/// `board_rect` is the fab view's resolved outline — the selected saved
-/// layout's drawn edge when it has one, else the authored rectangle — so the
-/// measurement is already covered by this module's read trace.
+/// `saved` is the fab view's resolved outline — the selected saved layout's
+/// drawn edge (bbox rectangle plus the exact profile when it has one), else
+/// the authored rectangle — so the measurement is already covered by this
+/// module's read trace.
 fn collectEngineering(
     allocator: std.mem.Allocator,
     block: *const env_mod.DesignBlock,
     doc: review.ReviewDoc,
     violations: []const erc.Violation,
     reports: EvaluatedReports,
-    board_rect: ?BoardRect,
+    saved: ?outline_mod.Saved,
 ) !Engineering {
     return .{
         .power = try collectPowerRails(allocator, block, doc.power.budget),
         .thermal = try collectThermal(allocator, doc.power.thermal, doc.power.scenarios),
         .checks = try collectChecks(allocator, violations, doc.assertions),
-        .mechanical = collectMechanical(block, board_rect),
+        .mechanical = try collectMechanical(allocator, block, saved),
         .pll = try collectPllReports(allocator, reports.pll),
         .frequency = try collectFrequencyPlans(allocator, reports.frequency),
         .bom = try bom_html.rollupBom(allocator, block),
@@ -713,34 +719,40 @@ fn collectChecks(
     return out;
 }
 
-/// Fabrication tolerance for the declared-vs-measured outline comparison —
-/// the same 0.01 mm `fab_readiness`'s `outline-drift` finding uses, so the two
-/// surfaces can never disagree about whether a board drifted.
-const outline_tolerance_mm: f64 = 0.01;
-
+/// The declared-vs-measured outline comparison is not restated here: it is
+/// `placement/outline.compare`, the one predicate `fab_readiness`'s
+/// `outline-drift` finding also calls, so the two surfaces can never disagree
+/// about whether a board drifted — nor about why. The scratch arena exists
+/// only because the predicate fillets the declared rectangle and digests the
+/// saved profile to answer; nothing it allocates escapes.
 fn collectMechanical(
+    allocator: std.mem.Allocator,
     block: *const env_mod.DesignBlock,
-    board_rect: ?BoardRect,
-) Mechanical {
+    saved: ?outline_mod.Saved,
+) std.mem.Allocator.Error!Mechanical {
     const declared: Outline = .{
         .w = block.board.w,
         .h = block.board.h,
         .corner_radius = block.board.corner_radius,
         .present = block.board.present and block.board.w > 0 and block.board.h > 0,
     };
-    const measured: Outline = if (board_rect) |rect| .{
-        .w = rect.w,
-        .h = rect.h,
+    const measured: Outline = if (saved) |outline| .{
+        .w = outline.rect.w,
+        .h = outline.rect.h,
         .corner_radius = declared.corner_radius,
         .present = true,
     } else .{};
-    const drift = declared.present and measured.present and
-        (@abs(measured.w - declared.w) > outline_tolerance_mm or
-            @abs(measured.h - declared.h) > outline_tolerance_mm);
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const drift = try outline_mod.compare(
+        scratch.allocator(),
+        fab_readiness.declaredOutline(block.board),
+        if (declared.present) saved else null,
+    );
     return .{
         .declared = declared,
         .measured = measured,
-        .drift = drift,
+        .outline = drift.verdict,
         .stackup_preset = block.stackup.preset,
         .stackup_layers = block.stackup.layers,
     };
@@ -1494,19 +1506,96 @@ test "mechanical evidence flags a measured outline that drifted from the declara
     defer arena.deinit();
     const block = try engineeringFixture(arena.allocator());
 
-    const agreeing = collectMechanical(&block, .{ .minx = 0, .miny = 0, .w = 60, .h = 40 });
+    const alloc = arena.allocator();
+    // The fixture declares `(corner-radius 2)`, so the outline that agrees
+    // with it is the filleted one — the same geometry the release check
+    // compares against, because it is the same predicate.
+    const corners = [_][2]f64{ .{ 0, 0 }, .{ 60, 0 }, .{ 60, 40 }, .{ 0, 40 } };
+    const radii: [4]f64 = @splat(2);
+    const rounded = try outline_mod.filletPath(alloc, &corners, &radii, 0.01);
+    const agreeing = try collectMechanical(alloc, &block, .{
+        .rect = .{ .minx = 0, .miny = 0, .w = 60, .h = 40 },
+        .poly = rounded.poly,
+        .arcs = rounded.arcs,
+    });
     try std.testing.expect(agreeing.declared.present and agreeing.measured.present);
-    try std.testing.expect(!agreeing.drift);
+    try std.testing.expectEqual(outline_mod.Verdict.matches, agreeing.outline);
     try std.testing.expectEqualStrings("JLC06161H-3313", agreeing.stackup_preset);
     try std.testing.expectEqual(@as(u8, 6), agreeing.stackup_layers);
 
-    const drifted = collectMechanical(&block, .{ .minx = 0, .miny = 0, .w = 60.5, .h = 40 });
-    try std.testing.expect(drifted.drift);
+    // The verdict names WHAT drifted, not merely that something did: a board
+    // cut 0.5 mm wide, correctly filleted, is a SIZE drift and nothing else.
+    const wide_corners = [_][2]f64{ .{ 0, 0 }, .{ 60.5, 0 }, .{ 60.5, 40 }, .{ 0, 40 } };
+    const wide = try outline_mod.filletPath(alloc, &wide_corners, &radii, 0.01);
+    const drifted = try collectMechanical(alloc, &block, .{
+        .rect = .{ .minx = 0, .miny = 0, .w = 60.5, .h = 40 },
+        .poly = wide.poly,
+        .arcs = wide.arcs,
+    });
+    try std.testing.expectEqual(outline_mod.Verdict.dimensions, drifted.outline);
+    try std.testing.expectEqualStrings("DRIFT (size)", drifted.outline.label());
+
+    // A square saved profile under a rounded declaration is SHAPE drift — the
+    // half the mechanical summary used to be blind to.
+    const squared = try collectMechanical(alloc, &block, .{ .rect = .{ .minx = 0, .miny = 0, .w = 60, .h = 40 } });
+    try std.testing.expectEqual(outline_mod.Verdict.shape, squared.outline);
 
     // No resolved outline at all ⇒ nothing to compare, so nothing is claimed.
-    const unmeasured = collectMechanical(&block, null);
+    const unmeasured = try collectMechanical(alloc, &block, null);
     try std.testing.expect(!unmeasured.measured.present);
-    try std.testing.expect(!unmeasured.drift);
+    try std.testing.expectEqual(outline_mod.Verdict.not_compared, unmeasured.outline);
+}
+
+/// The recess-in-one-edge board the `(board …)` rectangle cannot describe:
+/// big corner fillets, small recess fillets, a bbox of exactly 40 x 20 mm.
+fn notchedOutline(alloc: std.mem.Allocator) !outline_mod.Saved {
+    const pts = [_][2]f64{
+        .{ 0, 0 },   .{ 40, 0 },  .{ 40, 20 }, .{ 25, 20 },
+        .{ 25, 14 }, .{ 15, 14 }, .{ 15, 20 }, .{ 0, 20 },
+    };
+    const radii = [_]f64{ 2, 2, 2, 0.9, 0.9, 0.9, 0.9, 2 };
+    const cut = try outline_mod.filletPath(alloc, &pts, &radii, 0.01);
+    return .{
+        .rect = .{ .minx = 0, .miny = 0, .w = 40, .h = 20 },
+        .poly = cut.poly,
+        .arcs = cut.arcs,
+    };
+}
+
+// spec: system-review - the mechanical summary and the fabrication-readiness outline finding are the same predicate, agreeing on an unapproved, an approved, and a stale-pinned non-rectangular outline alike
+test "the mechanical summary and the readiness outline finding cannot disagree" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var block = try engineeringFixture(alloc);
+    block.board = .{ .w = 40, .h = 20, .present = true };
+    const saved = try notchedOutline(alloc);
+
+    // Unapproved: the readiness surface reports it, and the document surface
+    // says the same thing in the same words rather than claiming a match.
+    const open_mech = try collectMechanical(alloc, &block, saved);
+    const open_finding = try fab_readiness.outlineDrift(alloc, fab_readiness.declaredOutline(block.board), saved);
+    try std.testing.expectEqual(outline_mod.Verdict.shape, open_mech.outline);
+    try std.testing.expect(open_finding != null);
+    try std.testing.expectEqualStrings("outline-drift", open_finding.?.id);
+
+    // Approved: both surfaces clear on the pin, and neither on the other's say-so.
+    const pin = try outline_mod.digest(alloc, saved);
+    block.board.outline_approved = &pin;
+    const clean_mech = try collectMechanical(alloc, &block, saved);
+    const clean_finding = try fab_readiness.outlineDrift(alloc, fab_readiness.declaredOutline(block.board), saved);
+    try std.testing.expectEqual(outline_mod.Verdict.approved, clean_mech.outline);
+    try std.testing.expect(clean_finding == null);
+    try std.testing.expectEqualStrings("approved shape", clean_mech.outline.label());
+
+    // Stale: both surfaces fire again, and the document says WHICH kind.
+    block.board.outline_approved = "0123456789abcdef";
+    const stale_mech = try collectMechanical(alloc, &block, saved);
+    const stale_finding = try fab_readiness.outlineDrift(alloc, fab_readiness.declaredOutline(block.board), saved);
+    try std.testing.expectEqual(outline_mod.Verdict.stale_approval, stale_mech.outline);
+    try std.testing.expectEqualStrings("DRIFT (stale approval)", stale_mech.outline.label());
+    try std.testing.expect(stale_finding != null);
+    try std.testing.expect(std.mem.indexOf(u8, stale_finding.?.message, "0123456789abcdef") != null);
 }
 
 // spec: system-review - generated loop-filter evidence copies each PLL report's screens out of the evaluator, keeping only the non-passing ones beside the population verdict counts
