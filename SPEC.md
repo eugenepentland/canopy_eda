@@ -5479,9 +5479,12 @@ Public functions: renderToMarkdown
 
 ## system_review_md
 
-Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, renderHtmlAlloc, deinit, uncheckedChecklistCount
+Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, renderHtmlAlloc, stripEmphasis, deinit, uncheckedChecklistCount
 
 - parses the complete bounded authoring profile into a public AST and renders stable Markdown and inert HTML
+- renders paired asterisk emphasis as strong and em in both the Markdown and the HTML face, and canonicalizes back to the same source on re-parse
+- keeps unpaired, empty, space-padded and nested asterisk runs as literal text instead of failing the document
+- folds a wrapped list item's continuation lines into that item, ending the item at any new block and the list at a blank line
 - rejects active markup, external targets, traversal, encoded paths, and unsafe image types before rendering
 - accepts only approved, syntactically valid netlisp directives occupying their whole source line
 - treats fenced code as literal text while escaping it in HTML and refuses unterminated fences and code spans
@@ -5504,7 +5507,8 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - per-board block diagram evidence is archived as boards/<role>/diagram.svg in draft and release, reproducibly, and omitted when the design has no diagram
 - the only archived SVG is the tool-rendered per-board block diagram; SVG is refused at every other archive path in draft and release alike
 - generated power evidence carries each rail's budget row beside the voltage its design declares, including through a ferrite-bridged alias
-- generated thermal evidence is the screening rollup — dissipation, powered part count, the hottest part and the ambient window
+- generated thermal evidence is the heat rollup — dissipation, the hottest part, the ambient window and the population the screen actually saw
+- generated thermal evidence headlines the board-coupled verdict and the window that goes with it, keeping the datasheet package screen only as a labelled estimate
 - generated rule-check evidence counts every ERC severity and assertion outcome, and retains a capped list of the error-severity findings
 - generated mechanical evidence pairs the declared outline and stackup with the selected layout's measured edge and flags a drift between them
 - generated loop-filter evidence copies each PLL report's screens out of the evaluator, keeping only the non-passing ones beside the population verdict counts
@@ -5513,10 +5517,22 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - the generated loop-filter section renders each population's bandwidth and phase-margin ranges, its failing screens and the charge-pump schedule
 - the generated ERC section reports counts by severity and lists the error-severity findings, stating the cap when it truncates
 - every generated section renders bounded, safe Markdown that is deterministic and states its own no-data line when the design declares nothing
+- the generated thermal section states each board's board-coupled verdict and quotes the datasheet package screen only as a labelled estimate
+- the generated thermal section discloses how much of the screened population carries no power data whenever any part does not
 - the aggregated open-items register lists every failing package gate, board review note, ERC error and failing loop screen, and says so plainly when there are none
+- no open-items row carries a summary that only restates the severity column beside it
 - the system block diagram is archived as review/system-diagram.svg, referenced by the generated system-diagram section, and admitted as the one system-level SVG
 - system Markdown becomes a structurally valid searchable PDF with draft marking
+- the offline HTML dossier is one self-contained file with no external request and no script
+- the offline HTML dossier ships beside the combined Markdown and PDF in draft and release, carrying the draft marker only in draft
+- the HTML dossier carries the draft marker only in draft mode and numbers one section per manifest document
+- the HTML dossier inlines each board's block diagram and omits the figure when the design has none
+- the HTML dossier is a pure function of its inputs and renders byte-identically on repeat
+- a generated engineering section's no-data line reaches the HTML dossier through the same single expansion the Markdown face renders
+- every identity string interpolated into the HTML dossier is escaped rather than emitted as markup
+- identity text reaching the HTML dossier is escaped, so no manifest string can become page markup
 - long UTF-8 review lines wrap only between complete codepoints in the generated PDF
+- the review PDF lays emphasised Markdown out as plain words, printing no emphasis markers outside fenced code
 - board archive roles are unique and authored review documents are Markdown; binary evidence uses the bounded assets area
 - a board release reports CAM blocking and waiver conditions independently
 - independently allocated fabrication snapshots compare their identity strings by value

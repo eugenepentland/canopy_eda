@@ -346,6 +346,7 @@ test {
     _ = @import("review_md.zig");
     _ = @import("system_review.zig");
     _ = @import("system_review_assets.zig");
+    _ = @import("system_review_html.zig");
     _ = @import("system_review_md.zig");
     _ = @import("system_review_pdf.zig");
     _ = @import("system_review_package.zig");

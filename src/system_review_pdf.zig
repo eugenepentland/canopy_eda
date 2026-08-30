@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const pdf = @import("pdf.zig");
+const review_md = @import("system_review_md.zig");
 
 const page_w = pdf.a4_landscape_w;
 const page_h = pdf.a4_landscape_h;
@@ -142,9 +143,24 @@ pub fn compose(allocator: std.mem.Allocator, markdown: []const u8, opts: Options
     });
     c.y = 235;
 
+    // This composer lays out Markdown text, not the inline AST, and its text
+    // runs carry a single font each — so emphasis is flattened to plain words
+    // rather than switched mid-line. What it must never do is print the
+    // markers themselves. Fenced code keeps its bytes verbatim.
+    var plain: std.ArrayList(u8) = .empty;
+    defer plain.deinit(allocator);
+    var in_fence = false;
+
     var lines = std.mem.splitScalar(u8, markdown, '\n');
     while (lines.next()) |raw| {
-        const line = std.mem.trimEnd(u8, raw, "\r");
+        const source_line = std.mem.trimEnd(u8, raw, "\r");
+        if (std.mem.startsWith(u8, std.mem.trim(u8, source_line, " \t"), "```")) in_fence = !in_fence;
+        var line = source_line;
+        if (!in_fence) {
+            plain.clearRetainingCapacity();
+            try review_md.stripEmphasis(allocator, &plain, source_line);
+            line = plain.items;
+        }
         if (std.mem.startsWith(u8, line, "<!--")) continue;
         if (std.mem.startsWith(u8, line, "### ")) {
             c.y += 5;
@@ -186,6 +202,28 @@ test "system review PDF renders draft status and authored text" {
     try pdf.validate(bytes);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "DRAFT - NOT FOR FABRICATION") != null);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "Architecture") != null);
+}
+
+// spec: system-review - the review PDF lays emphasised Markdown out as plain words, printing no emphasis markers outside fenced code
+test "system review PDF flattens emphasis and keeps fenced code verbatim" {
+    const markdown =
+        "# Release **blocked**\n\n" ++
+        "- **Item** one and *item* two\n\n" ++
+        "```text\n**verbatim**\n```\n";
+    const bytes = try compose(std.testing.allocator, markdown, .{
+        .title = "Emphasis flattening",
+        .identity = "SYS / A",
+        .generated_at = "2026-08-29T00:00:00Z",
+        .build_id = "test-build",
+        .draft = true,
+    });
+    defer std.testing.allocator.free(bytes);
+    try pdf.validate(bytes);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "Release blocked") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "Item one and item two") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "**Release") == null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "**Item") == null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "**verbatim**") != null);
 }
 
 // spec: system-review - long UTF-8 review lines wrap only between complete codepoints in the generated PDF

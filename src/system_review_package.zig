@@ -19,6 +19,7 @@ const pll_loop = @import("pll_loop.zig");
 const review = @import("review.zig");
 const system_review = @import("system_review.zig");
 const review_assets = @import("system_review_assets.zig");
+const review_html = @import("system_review_html.zig");
 const review_md = @import("system_review_md.zig");
 const review_pdf = @import("system_review_pdf.zig");
 const zipfile = @import("zipfile.zig");
@@ -31,6 +32,7 @@ const max_document_total_bytes: usize = 32 * 1024 * 1024;
 const max_rendered_document_bytes: usize = 2 * 1024 * 1024;
 const max_combined_markdown_bytes: usize = 64 * 1024 * 1024;
 const max_system_pdf_bytes: usize = 64 * 1024 * 1024;
+const max_system_html_bytes: usize = review_html.max_html_bytes;
 const max_nested_board_release_bytes: usize = 64 * 1024 * 1024;
 const max_analysis_evidence_bytes: usize = 256 * 1024 * 1024;
 const max_archive_entries: usize = 4096;
@@ -561,9 +563,19 @@ fn analyze(
     };
     // Preflight the exact safe Markdown composition used by draft/final export
     // before readiness or attestation can call these inputs current.
-    const preflight_markdown = try renderSystemMarkdown(allocator, result, true);
+    // Compose the document faces once, in draft form, purely to prove the
+    // package fits its ceilings before any of it is written anywhere.
+    const preflight_bodies = try renderDocumentBodies(allocator, result);
+    const preflight_markdown = try renderSystemMarkdown(allocator, result, preflight_bodies, true);
+    const preflight_html = try renderSystemHtml(allocator, result, preflight_bodies, true);
     const archive_names = try preflightArchiveNames(allocator, result, preflight_mode);
-    try preflightArchivePayload(allocator, result, archive_names, preflight_markdown.len);
+    try preflightArchivePayload(
+        allocator,
+        result,
+        archive_names,
+        preflight_markdown.len,
+        preflight_html.len,
+    );
     return result;
 }
 
@@ -1119,6 +1131,7 @@ fn preflightArchiveNames(
     try appendEmptyEntry(allocator, &entries, "readiness.json");
     try appendEmptyEntry(allocator, &entries, try std.fmt.allocPrint(allocator, "review/{s}.md", .{base}));
     try appendEmptyEntry(allocator, &entries, try std.fmt.allocPrint(allocator, "review/{s}.pdf", .{base}));
+    try appendEmptyEntry(allocator, &entries, try std.fmt.allocPrint(allocator, "review/{s}.html", .{base}));
     try appendEmptyEntry(allocator, &entries, "review/source/system.json");
     if (spec.boards.len > 0) try appendEmptyEntry(allocator, &entries, system_diagram_member);
     for (analysis.documents) |document| if (document.spec.include_in_fab)
@@ -1161,10 +1174,12 @@ fn preflightArchivePayload(
     analysis: Analysis,
     archive_names: []const zipfile.Entry,
     markdown_bytes: usize,
+    html_bytes: usize,
 ) !void {
     var payload: usize = 0;
     try addBoundedBytes(&payload, analysis.manifest_source.len, max_archive_payload_bytes);
     try addBoundedBytes(&payload, markdown_bytes, max_archive_payload_bytes);
+    try addBoundedBytes(&payload, html_bytes, max_archive_payload_bytes);
     try addBoundedBytes(&payload, max_system_pdf_bytes, max_archive_payload_bytes);
     try addArchiveMetadataReserve(&payload, archive_names);
     for (analysis.documents) |document| if (document.spec.include_in_fab)
@@ -1228,7 +1243,8 @@ fn composeArchive(
     const spec = analysis.parsed.value;
     const safe_part = try fab_release.safeRevision(allocator, spec.part_number);
     const safe_revision = try fab_release.safeRevision(allocator, spec.revision);
-    const markdown = try renderSystemMarkdown(allocator, analysis, !is_release);
+    const bodies = try renderDocumentBodies(allocator, analysis);
+    const markdown = try renderSystemMarkdown(allocator, analysis, bodies, !is_release);
     const identity = try std.fmt.allocPrint(allocator, "{s} / Rev {s}", .{ spec.part_number, spec.revision });
     const pdf = try review_pdf.compose(allocator, markdown, .{
         .title = spec.title,
@@ -1238,6 +1254,8 @@ fn composeArchive(
         .draft = !is_release,
     });
     if (pdf.len > max_system_pdf_bytes) return error.ArchiveTooLarge;
+    const html = try renderSystemHtml(allocator, analysis, bodies, !is_release);
+    if (html.len > max_system_html_bytes) return error.ArchiveTooLarge;
 
     var entries: std.ArrayList(zipfile.Entry) = .empty;
     const readme = try renderReadme(allocator, analysis, is_release);
@@ -1247,6 +1265,10 @@ fn composeArchive(
     const base = try std.fmt.allocPrint(allocator, "{s}-rev-{s}-system-review", .{ safe_part, safe_revision });
     try entries.append(allocator, .{ .name = try std.fmt.allocPrint(allocator, "review/{s}.md", .{base}), .data = markdown });
     try entries.append(allocator, .{ .name = try std.fmt.allocPrint(allocator, "review/{s}.pdf", .{base}), .data = pdf });
+    // Review evidence, not CAM, exactly like the .md and .pdf beside it, and
+    // offline like the per-board fabrication `assembly.html`: a draft carries
+    // it too.
+    try entries.append(allocator, .{ .name = try std.fmt.allocPrint(allocator, "review/{s}.html", .{base}), .data = html });
     try entries.append(allocator, .{ .name = "review/source/system.json", .data = analysis.manifest_source });
     // Review evidence, not CAM: the system figure the combined Markdown points
     // at travels beside it. A board-free manifest draws nothing and the member
@@ -1529,37 +1551,139 @@ fn renderReadme(allocator: std.mem.Allocator, analysis: Analysis, is_release: bo
     return canonicalMarkdown(allocator, out.written(), 1024 * 1024);
 }
 
-fn renderSystemMarkdown(allocator: std.mem.Allocator, analysis: Analysis, draft_mode: bool) ![]const u8 {
+/// One inlined manifest document, with its generated regions already expanded
+/// and the result canonicalised. Produced exactly once per composition so the
+/// combined Markdown, the PDF, and the HTML dossier can never show a reader
+/// three different systems.
+const RenderedDocument = struct {
+    spec: system_review.DocumentSpec,
+    markdown: []const u8,
+};
+
+/// One active document archived beside the combined members instead of inlined.
+const SupportingDocument = struct {
+    title: []const u8,
+    path: []const u8,
+};
+
+/// Every document face of one analysis: the inlined bodies in manifest order,
+/// and the archived-only references listed after them.
+const DocumentBodies = struct {
+    inlined: []const RenderedDocument,
+    supporting: []const SupportingDocument,
+};
+
+fn renderDocumentBodies(allocator: std.mem.Allocator, analysis: Analysis) !DocumentBodies {
+    const spec = analysis.parsed.value;
+    const workspace_prefix = try std.fmt.allocPrint(allocator, "src/systems/{s}/", .{spec.name});
+    var inlined: std.ArrayList(RenderedDocument) = .empty;
+    var supporting: std.ArrayList(SupportingDocument) = .empty;
+    for (analysis.documents) |document| {
+        if (!document.spec.include_in_fab) continue;
+        if (!std.mem.startsWith(u8, document.spec.path, workspace_prefix)) {
+            try supporting.append(allocator, .{
+                .title = document.spec.title,
+                .path = try archivedDocumentName(allocator, spec.name, document.spec.path),
+            });
+            continue;
+        }
+        const expanded = try expandGeneratedRegions(allocator, analysis, document);
+        var parsed = try review_md.parse(allocator, expanded, .{});
+        defer parsed.deinit();
+        try inlined.append(allocator, .{
+            .spec = document.spec,
+            .markdown = try review_md.renderMarkdownAlloc(allocator, &parsed),
+        });
+    }
+    return .{ .inlined = inlined.items, .supporting = supporting.items };
+}
+
+fn renderSystemMarkdown(
+    allocator: std.mem.Allocator,
+    analysis: Analysis,
+    bodies: DocumentBodies,
+    draft_mode: bool,
+) ![]const u8 {
     var combined: std.Io.Writer.Allocating = .init(allocator);
     const spec = analysis.parsed.value;
     try combined.writer.print("# {s} — System Review Package\n\n", .{spec.title});
-    if (draft_mode) try combined.writer.writeAll("DRAFT — NOT FOR FABRICATION\n\n");
+    if (draft_mode) try combined.writer.writeAll(review_html.draft_marker ++ "\n\n");
     try combined.writer.print("Part number: `{s}`  \nRevision: `{s}`  \nSystem release token: `{s}`\n\n", .{
         spec.part_number,
         spec.revision,
         &analysis.release_token,
     });
     try ensureMarkdownSize(&combined, max_combined_markdown_bytes);
-    const workspace_prefix = try std.fmt.allocPrint(allocator, "src/systems/{s}/", .{spec.name});
-    for (analysis.documents) |document| {
-        if (!document.spec.include_in_fab or !std.mem.startsWith(u8, document.spec.path, workspace_prefix)) continue;
-        const expanded = try expandGeneratedRegions(allocator, analysis, document);
-        var parsed = try review_md.parse(allocator, expanded, .{});
-        defer parsed.deinit();
-        const canonical = try review_md.renderMarkdownAlloc(allocator, &parsed);
+    for (bodies.inlined) |document| {
         try writeMarkdownBounded(&combined, "\n---\n\n", max_combined_markdown_bytes);
-        try writeMarkdownBounded(&combined, canonical, max_combined_markdown_bytes);
-        if (!std.mem.endsWith(u8, canonical, "\n"))
+        try writeMarkdownBounded(&combined, document.markdown, max_combined_markdown_bytes);
+        if (!std.mem.endsWith(u8, document.markdown, "\n"))
             try writeMarkdownBounded(&combined, "\n", max_combined_markdown_bytes);
     }
     try writeMarkdownBounded(&combined, "\n---\n\n## Active supporting documents\n\n", max_combined_markdown_bytes);
-    for (analysis.documents) |document| {
-        if (!document.spec.include_in_fab or std.mem.startsWith(u8, document.spec.path, workspace_prefix)) continue;
-        const archived_path = try archivedDocumentName(allocator, spec.name, document.spec.path);
-        try combined.writer.print("- {s}: `{s}`\n", .{ document.spec.title, archived_path });
+    for (bodies.supporting) |document| {
+        try combined.writer.print("- {s}: `{s}`\n", .{ document.title, document.path });
         try ensureMarkdownSize(&combined, max_combined_markdown_bytes);
     }
     return canonicalMarkdown(allocator, combined.written(), max_combined_markdown_bytes);
+}
+
+/// Render the same expanded documents as the offline HTML dossier: one numbered
+/// section per inlined manifest document, the tool-drawn system-of-boards
+/// figure, and one per-board evidence section linking the sibling members.
+fn renderSystemHtml(
+    allocator: std.mem.Allocator,
+    analysis: Analysis,
+    bodies: DocumentBodies,
+    draft_mode: bool,
+) ![]const u8 {
+    const sections = try allocator.alloc(review_html.Section, bodies.inlined.len);
+    for (bodies.inlined, sections) |document, *section| section.* = .{
+        .title = document.spec.title,
+        .classification = @tagName(document.spec.classification),
+        .markdown = document.markdown,
+    };
+    const supporting = try allocator.alloc(review_html.Supporting, bodies.supporting.len);
+    for (bodies.supporting, supporting) |document, *entry| entry.* = .{
+        .title = document.title,
+        .path = document.path,
+    };
+    const boards = try allocator.alloc(review_html.Board, analysis.boards.len);
+    for (analysis.boards, boards) |board, *entry| entry.* = .{
+        .identity = .{
+            .role = board.member.role,
+            .design = board.member.name,
+            .title = board.snapshot.identity.title,
+            .part_number = board.member.part_number,
+            .revision = board.member.revision,
+            .layout = board.snapshot.identity.layout,
+            .generated_at = board.snapshot.identity.generated_at,
+        },
+        .review = .{
+            .status = @tagName(board.snapshot.review.status),
+            .open_notes = board.snapshot.review.open_notes,
+            .diagram_svg = board.snapshot.review.diagram_svg,
+            .has_notes = board.snapshot.review.notes_source != null,
+        },
+        .fab_blocked = board.fab.readiness.blocked,
+    };
+    return review_html.compose(allocator, sections, .{
+        .spec = &analysis.parsed.value,
+        .draft = draft_mode,
+        .provenance = .{
+            .generated_at = analysis.generated_at,
+            .build_id = build_id.current(),
+            .content_lock = &analysis.content_lock,
+            .release_token = &analysis.release_token,
+        },
+        .state = .{
+            .blocked = analysis.blocked(),
+            .needs_waiver = analysis.needs_waiver,
+            .attested = analysis.state.attested,
+        },
+        .boards = boards,
+        .supporting = supporting,
+    });
 }
 
 fn writeMarkdownBounded(
@@ -1896,10 +2020,21 @@ fn writePowerSummary(out: *std.Io.Writer.Allocating, analysis: Analysis, limit: 
     try w.writeAll("\nPer-device consumer breakdowns for each rail are in `boards/ROLE/review.json`.\n\n");
 }
 
+/// The heat rollup, headlined by each board's own board-coupled verdict.
+///
+/// The Verdict and ambient columns come from `Thermal.verdict` / `.window`,
+/// which the snapshot fills from the board review's headline — the cooling
+/// ladder over the real outline where a layout resolved one. The datasheet
+/// package screen is the more optimistic model (a JEDEC 2s2p theta-JA on a
+/// board a fifth its area), so it is never the headline while a board answer
+/// exists: it is quoted underneath, labelled as an estimate, and only where it
+/// actually disagrees. Under that go the coverage disclosures — a board whose
+/// parts mostly declare no power reads cool for want of input, and a release
+/// document must never let that pass for a characterised result.
 fn writeThermalSummary(out: *std.Io.Writer.Allocating, analysis: Analysis, limit: usize) !void {
     const w = &out.writer;
     var powered: usize = 0;
-    for (analysis.boards) |board| powered += board.snapshot.analysis.thermal.powered_parts;
+    for (analysis.boards) |board| powered += board.snapshot.analysis.thermal.coverage.with_power;
     if (powered == 0) {
         try w.writeAll("No board in this system declares part dissipation, so thermal screening has no input.\n\n");
         return;
@@ -1908,7 +2043,7 @@ fn writeThermalSummary(out: *std.Io.Writer.Allocating, analysis: Analysis, limit
         "| --- | --- | ---: | --- | --- | --- | --- | --- |\n");
     for (analysis.boards) |board| {
         const heat = board.snapshot.analysis.thermal;
-        try w.print("| {s} | {d:.3} W | {d} | ", .{ board.member.role, heat.total_w, heat.powered_parts });
+        try w.print("| {s} | {d:.3} W | {d} | ", .{ board.member.role, heat.total_w, heat.coverage.with_power });
         if (heat.hottest.ref_des.len > 0)
             try w.print("`{s}` at {d:.3} W", .{ heat.hottest.ref_des, heat.hottest.watts })
         else
@@ -1920,7 +2055,56 @@ fn writeThermalSummary(out: *std.Io.Writer.Allocating, analysis: Analysis, limit
         try w.writeAll(" |\n");
         try ensureMarkdownSize(out, limit);
     }
-    try w.writeAll("\nScreening-level steady state only: this is a lumped junction-temperature read of the design, not the layout-aware cooling ladder in each board's review.\n\n");
+    try w.writeByte('\n');
+    try writeThermalDisclosures(out, analysis, limit);
+    try w.writeAll("Verdict and ambient window are each board's board-coupled answer where its review resolved a layout, and the package-level screen where it did not; dissipation and the hottest part are the lumped screen's own figures.\n\n");
+}
+
+/// Everything the table alone would let a reader believe wrongly, per board and
+/// in board order so the section stays a pure function of its inputs.
+fn writeThermalDisclosures(out: *std.Io.Writer.Allocating, analysis: Analysis, limit: usize) !void {
+    const w = &out.writer;
+    var disclosed = false;
+    for (analysis.boards) |board| {
+        const heat = board.snapshot.analysis.thermal;
+        if (thermalEstimateDiffers(heat)) {
+            try w.print(
+                "- `{s}`: the datasheet package estimate reads `{s}` — theta-JA on the JEDEC 2s2p board (76 x 114 mm), optimistic for anything smaller — while the board-coupled verdict above is `{s}`. The board verdict governs.\n",
+                .{ board.member.role, @tagName(heat.model.estimate), @tagName(heat.verdict) },
+            );
+            disclosed = true;
+            try ensureMarkdownSize(out, limit);
+        }
+        if (!heat.model.board_coupled and heat.verdict != .insufficient_data) {
+            try w.print(
+                "- `{s}`: no layout resolved for this board, so its verdict is the datasheet package estimate (theta-JA on the JEDEC 2s2p board) rather than a board-coupled result.\n",
+                .{board.member.role},
+            );
+            disclosed = true;
+            try ensureMarkdownSize(out, limit);
+        }
+        if (heat.coverage.unknown_power > 0) {
+            try w.print(
+                "- `{s}`: {d} of {d} screened parts carry power data; the remaining {d} are unmodelled, so these figures are a partial screen rather than a characterised result.\n",
+                .{
+                    board.member.role,
+                    heat.coverage.with_power,
+                    heat.coverage.screened(),
+                    heat.coverage.unknown_power,
+                },
+            );
+            disclosed = true;
+            try ensureMarkdownSize(out, limit);
+        }
+    }
+    if (disclosed) try w.writeByte('\n');
+}
+
+/// Does the demoted datasheet estimate actually disagree with the headline?
+/// Quoted only then: a second verdict that says the same thing is noise, and a
+/// board with no ladder has no second opinion to disagree with.
+fn thermalEstimateDiffers(heat: board_review.Thermal) bool {
+    return heat.model.board_coupled and heat.model.estimate != heat.verdict;
 }
 
 fn writeErcSummary(out: *std.Io.Writer.Allocating, analysis: Analysis, limit: usize) !void {
@@ -2231,9 +2415,28 @@ fn boardPllFailures(board: BoardEvidence) usize {
 fn writeOpenItemRow(out: *std.Io.Writer.Allocating, item: OpenItem, limit: usize) !void {
     const w = &out.writer;
     try w.print("| `{s}` | {s} | {s} | ", .{ item.id, item.source, item.severity });
-    try writeCell(w, item.summary);
+    if (restatesSeverity(item.summary, item.severity)) {
+        // The row still appears — dropping an open item would falsify the
+        // register — but its Summary cell points at the evidence instead of
+        // echoing the column beside it.
+        try w.print("no detail beyond the severity; see this item's {s} evidence", .{item.source});
+    } else try writeCell(w, item.summary);
     try w.writeAll(" |\n");
     try ensureMarkdownSize(out, limit);
+}
+
+/// Does this Summary cell say anything the Severity column did not?
+///
+/// An empty summary, or one that is the severity word under another spelling
+/// ("warn" against "warning"), costs the reader a cell and tells them nothing.
+/// Case-insensitive and prefix-wise in both directions, so neither the enum
+/// tags nor the severity words can drift into agreement unnoticed.
+fn restatesSeverity(summary: []const u8, severity: []const u8) bool {
+    const text = std.mem.trim(u8, summary, " \t");
+    if (text.len == 0) return true;
+    const shorter = @min(text.len, severity.len);
+    if (shorter == 0) return false;
+    return std.ascii.eqlIgnoreCase(text[0..shorter], severity[0..shorter]);
 }
 
 fn writeGateOpenItems(out: *std.Io.Writer.Allocating, analysis: Analysis, limit: usize) !void {
@@ -2253,6 +2456,18 @@ fn writeGateOpenItems(out: *std.Io.Writer.Allocating, analysis: Analysis, limit:
     }, limit);
 }
 
+/// What a non-passing board review actually found, in words. The status tag on
+/// its own ("warn", "fail") only respells the Severity column beside it, which
+/// is how this row used to read; the archived per-board review is where the
+/// finding itself lives, so the summary sends the reader there.
+fn reviewStatusSummary(status: review.Status) []const u8 {
+    return switch (status) {
+        .pass => "",
+        .warn => "engineering review passed with unresolved warnings; the findings are in this board's `review.md`",
+        .fail => "engineering review failed; the findings are in this board's `review.md`",
+    };
+}
+
 fn writeBoardOpenItems(out: *std.Io.Writer.Allocating, board: BoardEvidence, limit: usize) !void {
     const w = &out.writer;
     const snapshot = board.snapshot;
@@ -2260,7 +2475,7 @@ fn writeBoardOpenItems(out: *std.Io.Writer.Allocating, board: BoardEvidence, lim
         .id = board.member.role,
         .source = "board review",
         .severity = if (snapshot.review.status == .fail) "blocker" else "warning",
-        .summary = @tagName(snapshot.review.status),
+        .summary = reviewStatusSummary(snapshot.review.status),
     }, limit);
     if (snapshot.review.open_notes > 0) {
         try w.print("| `{s}` | design notes | warning | {d} open note(s) in `boards/{s}/design-notes.md` |\n", .{
@@ -2720,6 +2935,223 @@ test "final archive nests unchanged board release and emits approval inventory a
     try std.testing.expect(saw_nested and saw_approval and saw_manifest and saw_checksums);
 }
 
+/// One archive composed from a fixed Analysis carrying two inlined manifest
+/// documents, one archived-only supporting document, and one board — enough
+/// shape for the HTML dossier to exercise every section kind it renders.
+/// `title` is caller-chosen so a test can prove hostile identity text is
+/// escaped rather than emitted as markup.
+fn composeHtmlFixture(
+    allocator: std.mem.Allocator,
+    title: []const u8,
+    mode: PreflightMode,
+) !BuiltArchive {
+    // Titles chosen by callers here never contain a quote or a backslash, so
+    // direct interpolation stays valid JSON.
+    const manifest = try std.fmt.allocPrint(
+        allocator,
+        "{{\"schema\":\"netlisp-system-review-v1\",\"name\":\"demo\",\"title\":\"{s}\",\"part_number\":\"SYS-1\",\"revision\":\"A\",\"boards\":[{{\"name\":\"one\",\"role\":\"main\",\"source\":\"src/one.sexp\",\"part_number\":\"ONE\",\"revision\":\"A\"}}]}}",
+        .{title},
+    );
+    const parsed = try std.json.parseFromSlice(system_review.SystemSpec, allocator, manifest, .{});
+    const inspected: system_review.DocumentContent = .{
+        .sha256 = @splat('0'),
+        .checklist = .{},
+        .generated_regions = 0,
+    };
+    const documents = [_]DocumentEvidence{
+        .{
+            .spec = .{
+                .id = "overview",
+                .title = "System overview",
+                .path = "src/systems/demo/system-overview.md",
+                .classification = .design,
+            },
+            .source = "# Architecture\n\n<!-- netlisp:generated board-summary -->\n<!-- /netlisp:generated -->\n\n<!-- netlisp:generated power-summary -->\n<!-- /netlisp:generated -->\n",
+            .inspected = inspected,
+        },
+        .{
+            .spec = .{
+                .id = "bringup",
+                .title = "Bring-up & acceptance",
+                .path = "src/systems/demo/bring-up.md",
+                .classification = .bringup,
+            },
+            .source = "# Bring-up\n\nPower the base board first.\n",
+            .inspected = inspected,
+        },
+        .{
+            .spec = .{
+                .id = "icd",
+                .title = "Interface control",
+                .path = "docs/demo-icd.md",
+                .classification = .reference,
+            },
+            .source = "# ICD\n",
+            .inspected = inspected,
+        },
+    };
+    const source_entries = [_]zipfile.Entry{
+        .{ .name = "src/one.sexp", .data = "(design-block one)" },
+    };
+    const snapshot: board_review.Snapshot = .{
+        .identity = .{
+            .name = "one",
+            .source = "src/one.sexp",
+            .title = "One",
+            .part_number = "ONE",
+            .revision = "A",
+            .layout = "layout-a",
+            .generated_at = "2026-08-29T00:00:00Z",
+        },
+        .review = .{
+            .status = .pass,
+            .open_notes = 0,
+            .notes_path = "src/one.notes.md",
+            .notes_source = null,
+            .markdown = "# One review\n",
+            .pdf = "%PDF-board",
+            .json = "{}",
+            .bom_csv = "Ref,Part\n",
+            .diagram_svg = "<svg viewBox=\"0 0 10 10\" class=\"dg-svg\" xmlns=\"http://www.w3.org/2000/svg\"></svg>",
+        },
+        .analysis = .{},
+        .physical = .{
+            .pcb_png = "\x89PNG\r\n\x1a\n",
+            .consumed_sha256 = @splat('c'),
+            .consumed_trace = infra_fs.ReadTrace.init(allocator),
+            .fab_inputs = .{
+                .source = @splat('3'),
+                .layout = @splat('4'),
+                .bom = @splat('5'),
+                .complete = true,
+            },
+            .sources = &source_entries,
+            .connections = &.{},
+        },
+    };
+    const released: fab_service.Result = .{
+        .identity = .{ .name = "one", .part_number = "ONE", .revision = "A", .layout = "layout-a" },
+        .lock = .{
+            .project_commit = "commit",
+            .release_token = @splat('r'),
+            .fab_id = "1234abcd".*,
+            .project_status = .clean,
+        },
+        .readiness = .{ .needs_waiver = false, .blocked = false, .json = "{\"blocked\":false}" },
+        .digests = .{
+            .reviewed = @splat('1'),
+            .consumed = @splat('2'),
+            .source = @splat('3'),
+            .layout = @splat('4'),
+            .bom_evidence = @splat('5'),
+            .dependency = @splat('6'),
+            .bom = @splat('7'),
+            .centroid = @splat('8'),
+            .rules = @splat('9'),
+        },
+        .zip = if (mode == .release) "PK\x03\x04board" else null,
+    };
+    const boards = try allocator.dupe(BoardEvidence, &[_]BoardEvidence{.{
+        .member = parsed.value.boards[0],
+        .snapshot = snapshot,
+        .fab = released,
+        .identity_ok = true,
+    }});
+    const analysis = Analysis{
+        .parsed = parsed,
+        .manifest_source = manifest,
+        .documents = try allocator.dupe(DocumentEvidence, &documents),
+        .assets = &.{},
+        .boards = boards,
+        .inputs = &.{},
+        .document_attestations = &.{},
+        .generated_at = "2026-08-29T00:00:00Z",
+        .content_lock = @splat('l'),
+        .release_token = @splat('t'),
+        .needs_waiver = false,
+        .state = .{ .attested = mode == .release },
+        .interface_diagnostic = .{},
+    };
+    if (mode == .draft) return composeArchive(allocator, allocator, analysis, null);
+    const released_boards = try allocator.dupe(fab_service.Result, &[_]fab_service.Result{released});
+    return composeArchive(allocator, allocator, analysis, .{
+        .boards = released_boards,
+        .actor = "reviewer@example.com",
+        .role = "writer",
+        .at = "2026-08-29T00:00:00Z",
+        .waivers_accepted = false,
+    });
+}
+
+const html_member = "review/SYS-1-rev-A-system-review.html";
+
+// spec: system-review - the offline HTML dossier ships beside the combined Markdown and PDF in draft and release, carrying the draft marker only in draft
+test "system review HTML dossier is a draft and release member" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+
+    const draft_archive = try composeHtmlFixture(allocator, "Demo System", .draft);
+    const draft_html = (try draftMemberBytes(allocator, draft_archive.zip, html_member)) orelse
+        return error.MissingHtmlMember;
+    try std.testing.expect(std.mem.startsWith(u8, draft_html, "<!DOCTYPE html>"));
+    try std.testing.expect(std.mem.endsWith(u8, std.mem.trimEnd(u8, draft_html, "\n"), "</html>"));
+    try std.testing.expect(std.mem.indexOf(u8, draft_html, "Demo System") != null);
+    try std.testing.expect(std.mem.indexOf(u8, draft_html, review_html.draft_marker) != null);
+    // One numbered section per inlined manifest document, by manifest title.
+    try std.testing.expect(std.mem.indexOf(u8, draft_html, "System overview") != null);
+    try std.testing.expect(std.mem.indexOf(u8, draft_html, "Bring-up &amp; acceptance") != null);
+    // The archived-only document is referenced, not inlined.
+    try std.testing.expect(std.mem.indexOf(u8, draft_html, "../review/source/docs/demo-icd.md.txt") != null);
+    // The generated region expanded into the HTML exactly as it does into the
+    // Markdown: one expansion, rendered by both faces.
+    try std.testing.expect(std.mem.indexOf(u8, draft_html, "<th>Role</th>") != null);
+    // Sibling evidence is reachable from review/.
+    try std.testing.expect(std.mem.indexOf(u8, draft_html, "\"../boards/main/bom.csv\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, draft_html, "\"../boards/main/diagram.svg\"") != null);
+    // Same inputs ⇒ same bytes.
+    const repeat = try composeHtmlFixture(allocator, "Demo System", .draft);
+    try std.testing.expectEqualSlices(u8, draft_archive.zip, repeat.zip);
+
+    const release_archive = try composeHtmlFixture(allocator, "Demo System", .release);
+    const release_html = (try draftMemberBytes(allocator, release_archive.zip, html_member)) orelse
+        return error.MissingHtmlMember;
+    try std.testing.expect(std.mem.indexOf(u8, release_html, review_html.draft_marker) == null);
+    try std.testing.expect(std.mem.indexOf(u8, release_html, "Demo System") != null);
+}
+
+// spec: system-review - identity text reaching the HTML dossier is escaped, so no manifest string can become page markup
+test "system review HTML dossier escapes hostile manifest identity" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    // A raw `<` cannot reach this far: the strict Markdown profile refuses the
+    // combined member first, which is exactly the layering we want. `&` does
+    // reach the page, and must arrive as text rather than an entity opener.
+    const archive = try composeHtmlFixture(allocator, "R&D Demo", .draft);
+    const html = (try draftMemberBytes(allocator, archive.zip, html_member)) orelse
+        return error.MissingHtmlMember;
+    try std.testing.expect(std.mem.indexOf(u8, html, "R&amp;D Demo") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "R&D Demo") == null);
+}
+
+// spec: system-review - a generated engineering section's no-data line reaches the HTML dossier through the same single expansion the Markdown face renders
+test "system review HTML dossier carries a generated section's no-data line for empty board analysis" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    // The fixture board's engineering analysis is default-empty, so the
+    // power-summary region must reach the HTML as its no-data sentence.
+    const archive = try composeHtmlFixture(allocator, "Demo System", .draft);
+    const html = (try draftMemberBytes(allocator, archive.zip, html_member)) orelse
+        return error.MissingHtmlMember;
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        html,
+        "No board in this system declares a power-rail budget",
+    ) != null);
+}
+
 /// One board's draft archive, composed twice from a fixed Analysis so a test
 /// can assert both its inventory and its reproducibility. `diagram_svg` is the
 /// only thing that varies: empty stands for a design the diagram engine
@@ -3038,13 +3470,21 @@ fn fixtureEngineering(allocator: std.mem.Allocator) !board_review.Engineering {
     }});
     return .{
         .power = rails,
+        // The barracuda shape: the board-coupled ladder wants airflow where the
+        // datasheet screen called the same board passively fine, and most of
+        // the population declares no power at all.
         .thermal = .{
             .ambient_c = 25,
             .verdict = .needs_airflow,
             .total_w = 2.0,
-            .powered_parts = 2,
             .hottest = .{ .ref_des = "U2", .watts = 1.75 },
             .window = .{ .max_c = 61.5, .min_c = -40 },
+            .model = .{
+                .board_coupled = true,
+                .estimate = .passive_ok,
+                .estimate_window = .{ .max_c = 85, .min_c = -40 },
+            },
+            .coverage = .{ .with_power = 2, .unknown_power = 5 },
         },
         .checks = .{
             .errors = 3,
@@ -3205,6 +3645,104 @@ test "power, thermal, mechanical and BOM sections carry the design's own numbers
     try std.testing.expect(std.mem.indexOf(u8, bom, "| `one` | 4 | 3 | 1 | 1 | `boards/main/bom.csv` |") != null);
     // The CSV pointers the section always carried are still there.
     try std.testing.expect(std.mem.indexOf(u8, bom, "`boards/rf/bom.csv`") != null);
+}
+
+// spec: system-review - the generated thermal section states each board's board-coupled verdict and quotes the datasheet package screen only as a labelled estimate
+test "the thermal section headlines the board verdict and demotes the datasheet screen" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    const analysis = try fixtureAnalysis(allocator, try fixtureEngineering(allocator), true);
+
+    const heat = try renderSection(allocator, analysis, "thermal-summary");
+    // The board being built needs airflow; the optimistic datasheet verdict
+    // reaches the reader only under the table, named as an estimate.
+    try std.testing.expect(std.mem.indexOf(u8, heat, "| needs_airflow | 25.0 C | 61.5 C |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, heat, "| passive_ok |") == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        heat,
+        "- `main`: the datasheet package estimate reads `passive_ok`",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, heat, "JEDEC 2s2p board (76 x 114 mm), optimistic") != null);
+    try std.testing.expect(std.mem.indexOf(u8, heat, "The board verdict governs.") != null);
+
+    // A board whose review resolved no layout has no board answer to state, so
+    // the section says the verdict it prints is the datasheet estimate.
+    var unplaced = try fixtureEngineering(allocator);
+    unplaced.thermal.verdict = .passive_ok;
+    unplaced.thermal.model = .{ .board_coupled = false, .estimate = .passive_ok, .estimate_window = .{ .max_c = 85 } };
+    const flat = try renderSection(allocator, try fixtureAnalysis(allocator, unplaced, true), "thermal-summary");
+    try std.testing.expect(std.mem.indexOf(u8, flat, "- `main`: no layout resolved for this board") != null);
+    // With one verdict and one model there is nothing to contradict.
+    try std.testing.expect(std.mem.indexOf(u8, flat, "datasheet package estimate reads") == null);
+}
+
+// spec: system-review - the generated thermal section discloses how much of the screened population carries no power data whenever any part does not
+test "the thermal section discloses unmodelled parts behind its numbers" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    const analysis = try fixtureAnalysis(allocator, try fixtureEngineering(allocator), true);
+
+    const heat = try renderSection(allocator, analysis, "thermal-summary");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        heat,
+        "- `main`: 2 of 7 screened parts carry power data; the remaining 5 are unmodelled",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, heat, "partial screen rather than a characterised result") != null);
+
+    // A fully modelled population has nothing to disclose and says nothing.
+    var complete = try fixtureEngineering(allocator);
+    complete.thermal.coverage = .{ .with_power = 7, .unknown_power = 0 };
+    const full = try renderSection(allocator, try fixtureAnalysis(allocator, complete, true), "thermal-summary");
+    try std.testing.expect(std.mem.indexOf(u8, full, "carry power data") == null);
+    try std.testing.expect(std.mem.indexOf(u8, full, "unmodelled") == null);
+}
+
+// spec: system-review - no open-items row carries a summary that only restates the severity column beside it
+test "open-items summaries say more than the severity column" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    var analysis = try fixtureAnalysis(allocator, try fixtureEngineering(allocator), false);
+    // A non-passing board review is the row that used to read "warning | warn".
+    const boards = try allocator.dupe(BoardEvidence, analysis.boards);
+    boards[0].snapshot.review.status = .warn;
+    boards[1].snapshot.review.status = .fail;
+    analysis.boards = boards;
+
+    const items = try renderSection(allocator, analysis, "open-items");
+    try std.testing.expect(std.mem.indexOf(u8, items, "| `main` | board review | warning | engineering review passed with unresolved warnings;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, items, "| `rf` | board review | blocker | engineering review failed;") != null);
+    try expectSummariesAddDetail(items);
+
+    // The guard behind that invariant, at the two spellings that used to slip
+    // through: the status tag against its severity word, and an empty cell.
+    try std.testing.expect(restatesSeverity("warn", "warning"));
+    try std.testing.expect(restatesSeverity("   ", "blocker"));
+    try std.testing.expect(!restatesSeverity("engineering review failed", "blocker"));
+}
+
+/// No rendered open-items row may leave its Summary cell echoing the Severity
+/// cell beside it — checked over the table itself rather than over the strings
+/// the writers happen to pass, so a future row cannot reintroduce the defect.
+fn expectSummariesAddDetail(rendered: []const u8) !void {
+    var lines = std.mem.splitScalar(u8, rendered, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "| `")) continue;
+        var cells = std.mem.splitSequence(u8, std.mem.trim(u8, line, "| "), " | ");
+        var seen: usize = 0;
+        var severity: []const u8 = "";
+        var summary: []const u8 = "";
+        while (cells.next()) |cell| : (seen += 1) {
+            severity = summary;
+            summary = cell;
+        }
+        if (seen < 4) continue;
+        try std.testing.expect(!restatesSeverity(summary, severity));
+    }
 }
 
 // spec: system-review - the generated loop-filter section renders each population's bandwidth and phase-margin ranges, its failing screens and the charge-pump schedule
