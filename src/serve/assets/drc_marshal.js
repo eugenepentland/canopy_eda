@@ -25,8 +25,10 @@ function collapseNet(s) {
 // Assemble the wasm DRC input object from the page blob + live state.
 //   PCB  — the /pcb-layout page blob (source of geometry, rules, net-classes).
 //   live — optional overrides captured from the live editor:
-//            {parts, tracks, vias, outline, clearance, ignore_rf_fence_vias}.
+//            {parts, tracks, vias, zones, outline, clearance, ignore_rf_fence_vias}.
 //            Any geometry field left out falls back to the blob's own value.
+//            Fresh computed fills cross as topology zones; a geometry override
+//            or stale fill falls back to the authored zone boundaries.
 //            `ignore_rf_fence_vias` is reserved for the hand-router's preview
 //            and commit gates: generated RF fence posts are disposable routing
 //            obstacles, while ordinary vias and the perimeter fence remain.
@@ -88,6 +90,44 @@ function buildDrcInput(PCB, live) {
     board = PCB.board || null;
     boardPoly = (PCB.board_poly && PCB.board_poly.length) ? PCB.board_poly : null;
   }
+  function signalLayer(name) {
+    var rows = PCB.layer_table || [];
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].name === name && typeof rows[i].l === "number") return rows[i].l;
+    }
+    return null;
+  }
+  function topologyRow(src, plane) {
+    var l = signalLayer(src.layer);
+    if (!plane && l == null) return null;
+    return {
+      net: collapseNet(src.net), l: l == null ? 0 : l,
+      stack: plane ? (+src.stack || 0) : 0, plane: !!plane,
+      poly: src.poly || [], holes: src.holes || []
+    };
+  }
+  var topologyZones = [];
+  // Exact fills are authoritative only for the exact board state they were
+  // poured from. A live trial or stale board falls back to authored zone
+  // boundaries; the server reconcile shortly replaces that optimistic result
+  // with the freshly rastered one.
+  var liveCopper = live.parts !== undefined || live.tracks !== undefined || live.vias !== undefined ||
+    live.rf_paths !== undefined || live.zones !== undefined || !!live.ignore_rf_fence_vias;
+  var exactFills = !liveCopper && !PCB.analysis_deferred && !PCB.poursStale;
+  if (exactFills) {
+    (PCB.pours || []).forEach(function (z) { var q = topologyRow(z, false); if (q) topologyZones.push(q); });
+    (PCB.zone_fills || []).forEach(function (z) { var q = topologyRow(z, false); if (q) topologyZones.push(q); });
+    (PCB.plane_fills || []).forEach(function (z) { var q = topologyRow(z, true); if (q) topologyZones.push(q); });
+  } else {
+    (live.zones || PCB.zones || []).forEach(function (z) {
+      if (z.keepout || z.filled === false || !z.net || !(z.poly || []).length) return;
+      var layers = (z.layers && z.layers.length) ? z.layers : [z.layer];
+      layers.forEach(function (name) {
+        var l = signalLayer(name); if (l == null) return;
+        topologyZones.push({net:collapseNet(z.net),l:l,poly:z.poly,holes:[],priority:+z.priority||0,plane:false,stack:0});
+      });
+    });
+  }
   var out = {
     clearance: clearance,
     rules: PCB.rules || {},
@@ -104,6 +144,7 @@ function buildDrcInput(PCB, live) {
     vias: vias.map(function (v) {
       return { x: v.x, y: v.y, d: v.d, drill: v.drill, net: collapseNet(v.net) };
     }),
+    zones: topologyZones,
     rf_paths: rfPaths.map(function (p) {
       return { net: collapseNet(p.net), l: p.l || 0, samples: p.samples || [] };
     }),
