@@ -107,9 +107,9 @@ pub const ReleaseContext = struct {
     /// check failure, never permission to fall back to geometry-only DRC.
     composed_drc: ?[]const drc.Violation = null,
     composed_drc_complete: bool = false,
-    authored_board_w: f64 = 0,
-    authored_board_h: f64 = 0,
-    authored_corner_radius: f64 = 0,
+    /// The design's `(board …)` outline declaration, including any
+    /// `(outline-approved "…")` pin — the input to the shared drift predicate.
+    authored_outline: outline_mod.Declared = .{},
 };
 
 /// Saved-layout and DNP policy supplied by fabrication-export callers.
@@ -168,7 +168,7 @@ pub fn check(
     }
     if (ctx.release) |release| {
         try appendReleaseIdentityChecks(arena, &errors, placement, ctx.keep_dnp);
-        try appendOutlineDrift(arena, &errors, placement, release.authored_board_w, release.authored_board_h, release.authored_corner_radius);
+        try appendOutlineDrift(arena, &errors, placement, release.authored_outline);
         try appendRailRatingChecks(arena, &errors, &warnings, placement, ctx.keep_dnp);
     }
 
@@ -774,39 +774,53 @@ fn appendRailRatingChecks(
     }
 }
 
+/// Lift a placement's folded board outline into the shared drift predicate's
+/// input, so this surface and the board-review mechanical summary compare the
+/// same geometry by the same rule.
+pub fn savedOutline(placement: optimizer.Placement) ?outline_mod.Saved {
+    return .{
+        .rect = placement.board_rect orelse return null,
+        .poly = placement.board_poly,
+        .arcs = placement.board_arcs,
+    };
+}
+
+/// The `(board …)` outline declaration in the shared predicate's terms. The
+/// ONE mapping from evaluator spec to drift input, so no surface can end up
+/// comparing a different subset of what the source declared.
+pub fn declaredOutline(board: env_mod.BoardSpec) outline_mod.Declared {
+    return .{
+        .w = board.w,
+        .h = board.h,
+        .corner_radius = board.corner_radius,
+        .approved = board.outline_approved,
+    };
+}
+
+/// The `outline-drift` finding for one declared-vs-saved pair, or null when
+/// the board did not drift. Public so the board-review mechanical summary can
+/// be tested against this surface through both rather than by hand.
+pub fn outlineDrift(
+    arena: std.mem.Allocator,
+    declared: outline_mod.Declared,
+    saved: ?outline_mod.Saved,
+) std.mem.Allocator.Error!?Item {
+    const outline = saved orelse return null;
+    const drift = try outline_mod.compare(arena, declared, outline);
+    if (!drift.verdict.drifted()) return null;
+    return .{
+        .id = "outline-drift",
+        .message = try outline_mod.driftMessage(arena, declared, outline, drift),
+    };
+}
+
 fn appendOutlineDrift(
     arena: std.mem.Allocator,
     errors: *std.ArrayList(Item),
     placement: optimizer.Placement,
-    authored_w: f64,
-    authored_h: f64,
-    authored_radius: f64,
+    declared: outline_mod.Declared,
 ) std.mem.Allocator.Error!void {
-    if (!(authored_w > 0 and authored_h > 0)) return;
-    const saved = placement.board_rect orelse return;
-    const dimensions_match = @abs(saved.w - authored_w) <= 0.01 and @abs(saved.h - authored_h) <= 0.01;
-    const corners = [_][2]f64{
-        .{ saved.minx, saved.miny },
-        .{ saved.minx + saved.w, saved.miny },
-        .{ saved.minx + saved.w, saved.miny + saved.h },
-        .{ saved.minx, saved.miny + saved.h },
-    };
-    var shape_matches: bool = false;
-    if (!(authored_radius > 0)) {
-        shape_matches = placement.board_arcs.len == 0 and
-            (placement.board_poly == null or polygonEquivalent(placement.board_poly.?, &corners, 0.01));
-    } else {
-        const radii = [_]f64{ authored_radius, authored_radius, authored_radius, authored_radius };
-        const expected = try outline_mod.filletPath(arena, &corners, &radii, 0.01);
-        shape_matches = placement.board_poly != null and
-            polygonEquivalent(placement.board_poly.?, expected.poly, 0.01) and
-            arcsEquivalent(placement.board_arcs, expected.arcs, 0.01);
-    }
-    if (dimensions_match and shape_matches) return;
-    try errors.append(arena, .{
-        .id = "outline-drift",
-        .message = try std.fmt.allocPrint(arena, "saved fabrication outline is {d:.3} x {d:.3} mm with {d} native arcs, but source declares {d:.3} x {d:.3} mm and {d:.3} mm corner radius", .{ saved.w, saved.h, placement.board_arcs.len, authored_w, authored_h, authored_radius }),
-    });
+    if (try outlineDrift(arena, declared, savedOutline(placement))) |item| try errors.append(arena, item);
 }
 
 fn hasItemRef(items: []const Item, id: []const u8, ref: []const u8) bool {
@@ -918,19 +932,80 @@ test "release outline drift compares exact rounded geometry" {
         .board_arcs = expected.arcs,
     };
     var errors: std.ArrayList(Item) = .empty;
-    try appendOutlineDrift(arena, &errors, placement, 40, 20, 2);
+    try appendOutlineDrift(arena, &errors, placement, .{ .w = 40, .h = 20, .corner_radius = 2 });
     try std.testing.expectEqual(@as(usize, 0), errors.items.len);
-    try appendOutlineDrift(arena, &errors, placement, 41, 20, 2);
+    try appendOutlineDrift(arena, &errors, placement, .{ .w = 41, .h = 20, .corner_radius = 2 });
     try std.testing.expectEqual(@as(usize, 1), errors.items.len);
     errors.clearRetainingCapacity();
-    try appendOutlineDrift(arena, &errors, placement, 40, 20, 3);
+    try appendOutlineDrift(arena, &errors, placement, .{ .w = 40, .h = 20, .corner_radius = 3 });
     try std.testing.expectEqual(@as(usize, 1), errors.items.len);
     const deformed = try arena.dupe([2]f64, expected.poly);
     deformed[0][0] += 0.5;
     placement.board_poly = deformed;
     errors.clearRetainingCapacity();
-    try appendOutlineDrift(arena, &errors, placement, 40, 20, 2);
+    try appendOutlineDrift(arena, &errors, placement, .{ .w = 40, .h = 20, .corner_radius = 2 });
     try std.testing.expectEqual(@as(usize, 1), errors.items.len);
+}
+
+// spec: fab_readiness - a notched saved outline reports outline-drift carrying the digest to pin, clears once the source pins that digest, and reports an outdated pin as a distinct stale approval
+test "an authored outline approval clears a notched outline and goes stale when it changes" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // A real non-rectangular board: a recess in one edge, big corner fillets,
+    // small recess fillets. `(size W H)` cannot describe it at any radius.
+    const pts = [_][2]f64{
+        .{ 0, 0 },   .{ 40, 0 },  .{ 40, 20 }, .{ 25, 20 },
+        .{ 25, 14 }, .{ 15, 14 }, .{ 15, 20 }, .{ 0, 20 },
+    };
+    const radii = [_]f64{ 2, 2, 2, 0.9, 0.9, 0.9, 0.9, 2 };
+    const cut = try outline_mod.filletPath(arena, &pts, &radii, 0.01);
+    const placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 40,
+        .maxy = 20,
+        .generated = false,
+        .board_rect = .{ .minx = 0, .miny = 0, .w = 40, .h = 20 },
+        .board_poly = cut.poly,
+        .board_arcs = cut.arcs,
+    };
+    const saved = savedOutline(placement) orelse return error.TestExpectedOutline;
+
+    // Unapproved it is a finding, and the finding hands the author the digest.
+    var errors: std.ArrayList(Item) = .empty;
+    try appendOutlineDrift(arena, &errors, placement, .{ .w = 40, .h = 20 });
+    try std.testing.expectEqual(@as(usize, 1), errors.items.len);
+    try std.testing.expectEqualStrings("outline-drift", errors.items[0].id);
+    const pin = try outline_mod.digest(arena, saved);
+    try std.testing.expect(std.mem.indexOf(u8, errors.items[0].message, &pin) != null);
+
+    // Pinned, the very same board is clean.
+    errors.clearRetainingCapacity();
+    try appendOutlineDrift(arena, &errors, placement, .{ .w = 40, .h = 20, .approved = &pin });
+    try std.testing.expectEqual(@as(usize, 0), errors.items.len);
+
+    // The pin approves the profile, not the size.
+    try appendOutlineDrift(arena, &errors, placement, .{ .w = 41, .h = 20, .approved = &pin });
+    try std.testing.expectEqual(@as(usize, 1), errors.items.len);
+
+    // An outdated pin is its own message, naming what was pinned and what the
+    // board now is — never a silent approval of geometry nobody looked at.
+    errors.clearRetainingCapacity();
+    const stale_pin = "0123456789abcdef";
+    try appendOutlineDrift(arena, &errors, placement, .{ .w = 40, .h = 20, .approved = stale_pin });
+    try std.testing.expectEqual(@as(usize, 1), errors.items.len);
+    const stale_message = errors.items[0].message;
+    try std.testing.expect(std.mem.indexOf(u8, stale_message, stale_pin) != null);
+    try std.testing.expect(std.mem.indexOf(u8, stale_message, &pin) != null);
+    try std.testing.expect(std.mem.indexOf(u8, stale_message, "no longer matches") != null);
 }
 
 // spec: fabrication-release - synthesized footprint fallback geometry is a non-waivable release identity failure
@@ -959,46 +1034,6 @@ test "release identity rejects fallback footprint geometry" {
     var errors: std.ArrayList(Item) = .empty;
     try appendReleaseIdentityChecks(arena, &errors, placement, false);
     try std.testing.expect(hasItemRef(errors.items, "footprint-geometry-unresolved", "U1"));
-}
-
-fn pointNear(a: [2]f64, b: [2]f64, tolerance: f64) bool {
-    return @abs(a[0] - b[0]) <= tolerance and @abs(a[1] - b[1]) <= tolerance;
-}
-
-fn polygonEquivalent(a: []const [2]f64, b: []const [2]f64, tolerance: f64) bool {
-    if (a.len != b.len or a.len == 0) return false;
-    for (b, 0..) |candidate, offset| {
-        if (!pointNear(a[0], candidate, tolerance)) continue;
-        var forward = true;
-        var reverse = true;
-        for (a, 0..) |point, index| {
-            if (!pointNear(point, b[(offset + index) % b.len], tolerance)) forward = false;
-            if (!pointNear(point, b[(offset + b.len - index) % b.len], tolerance)) reverse = false;
-        }
-        if (forward or reverse) return true;
-    }
-    return false;
-}
-
-fn arcNear(a: optimizer.BoardArc, b: optimizer.BoardArc, tolerance: f64) bool {
-    const forward = pointNear(a.p1, b.p1, tolerance) and pointNear(a.pm, b.pm, tolerance) and pointNear(a.p2, b.p2, tolerance);
-    const reverse = pointNear(a.p1, b.p2, tolerance) and pointNear(a.pm, b.pm, tolerance) and pointNear(a.p2, b.p1, tolerance);
-    return forward or reverse;
-}
-
-fn arcsEquivalent(a: []const optimizer.BoardArc, b: []const optimizer.BoardArc, tolerance: f64) bool {
-    if (a.len != b.len or a.len == 0) return false;
-    for (b, 0..) |candidate, offset| {
-        if (!arcNear(a[0], candidate, tolerance)) continue;
-        var forward = true;
-        var reverse = true;
-        for (a, 0..) |arc, index| {
-            if (!arcNear(arc, b[(offset + index) % b.len], tolerance)) forward = false;
-            if (!arcNear(arc, b[(offset + b.len - index) % b.len], tolerance)) reverse = false;
-        }
-        if (forward or reverse) return true;
-    }
-    return false;
 }
 
 /// Serialize a report to the JSON the endpoint returns / the modal reads:

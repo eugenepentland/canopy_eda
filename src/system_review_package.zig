@@ -2256,10 +2256,15 @@ fn writeMechanicalSummary(out: *std.Io.Writer.Allocating, analysis: Analysis, li
         if (mech.stackup_preset.len > 0) try w.print("`{s}`", .{mech.stackup_preset}) else try w.writeAll("custom");
         try w.print(" | {d} | ", .{mech.stackup_layers});
         try writeOutline(w, mech.measured);
-        try w.print(" | {s} |\n", .{if (mech.drift) "DRIFT" else "matches"});
+        try w.print(" | {s} |\n", .{mech.outline.label()});
         try ensureMarkdownSize(out, limit);
     }
-    try w.writeAll("\nThe measured outline is the fabrication edge of the exact saved layout this package selected. `DRIFT` means it disagrees with the declared size by more than the fabrication tolerance, which the board's `fab-readiness.json` reports as `outline-drift`.\n\n");
+    try w.writeAll("\nThe measured outline is the fabrication edge of the exact saved layout this package selected. " ++
+        "The Outline column is the same declared-vs-saved verdict the board's `fab-readiness.json` reports as `outline-drift`, " ++
+        "computed by the same predicate, and it names what disagrees: `DRIFT (size)` for a bbox outside the fabrication tolerance, " ++
+        "`DRIFT (shape)` for a profile the declared rectangle and corner radius do not describe, and " ++
+        "`DRIFT (stale approval)` when the source's `(outline-approved …)` pin no longer matches the saved profile. " ++
+        "`approved shape` is a non-rectangular profile the source pinned deliberately.\n\n");
 }
 
 fn writeBomSummary(out: *std.Io.Writer.Allocating, analysis: Analysis, limit: usize) !void {
@@ -3890,7 +3895,7 @@ fn fixtureEngineering(allocator: std.mem.Allocator) !board_review.Engineering {
         .mechanical = .{
             .declared = .{ .w = 60, .h = 40, .corner_radius = 2, .present = true },
             .measured = .{ .w = 60.5, .h = 40, .corner_radius = 2, .present = true },
-            .drift = true,
+            .outline = .dimensions,
             .stackup_preset = "JLC06161H-3313",
             .stackup_layers = 6,
         },
@@ -4126,7 +4131,7 @@ test "power, thermal, mechanical and BOM sections carry the design's own numbers
     const mech = try renderSection(allocator, analysis, "mechanical-summary");
     try std.testing.expect(std.mem.indexOf(u8, mech, "60.000 x 40.000 mm") != null);
     try std.testing.expect(std.mem.indexOf(u8, mech, "`JLC06161H-3313`") != null);
-    try std.testing.expect(std.mem.indexOf(u8, mech, "| 60.500 x 40.000 mm | DRIFT |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mech, "| 60.500 x 40.000 mm | DRIFT (size) |") != null);
     // A board with no outline at all says so rather than claiming a match.
     try std.testing.expect(std.mem.indexOf(u8, mech, "| rf | undeclared") != null);
 

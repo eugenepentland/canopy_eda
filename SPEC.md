@@ -3245,13 +3245,15 @@ Public functions: check, checkTopology, checkWithZones, checkWithPreparedCopper,
 
 ## placement/outline
 
-Public functions: contains, distToEdge, signedInset, bboxRect, segCrossesEdge, roundedRectPoly, arcCircle, arcOwnsSegment, filletPath, selfIntersects, valid
+Public functions: contains, distToEdge, signedInset, bboxRect, segCrossesEdge, roundedRectPoly, arcCircle, arcOwnsSegment, filletPath, selfIntersects, valid, compare, digest, driftMessage
 
 - point-in-polygon and signed inset classify an L-shaped outline's interior, notch, and edges
 - a segment crossing a concave notch edge reports the crossing point
 - rounded-rect generation clamps the radius and keeps corner points inside the rect
 - selfIntersects flags a bow-tie but not a concave outline; valid rejects degenerate polys
 - polygon fillets retain exact three-point arcs while producing a bounded-sagitta DRC polygon
+- the saved-outline digest identifies the nominal profile, surviving float jitter, arc tessellation, start vertex and board position while a moved notch changes it
+- the shared drift predicate always compares the declared dimensions, accepts a profile the source pinned by digest, and reports an outdated pin as a stale approval
 
 ## placement/pour
 
@@ -5255,6 +5257,7 @@ Public functions: analyze
 - compact decouple infers one host from pin functions and mixes per-pin with bulk capacitors
 - bare top-level pins forms attach electrical pins instead of silently no-oping
 - board form parses outline size, corner radius, edge lists, corners, and typed perimeter keepouts
+- board form accepts an outline-approved digest only in the exact hex shape the drift finding prints, warning and dropping anything else
 - board-role form sets the explicit board/subcircuit role
 - board-role defaults to subcircuit when the form is absent
 - board-role remains authoritative whether it appears before or after the board geometry form
@@ -5512,6 +5515,7 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - generated thermal evidence headlines the board-coupled verdict and the window that goes with it, keeping the datasheet package screen only as a labelled estimate
 - generated rule-check evidence counts every ERC severity and assertion outcome, and retains a capped list of the error-severity findings
 - generated mechanical evidence pairs the declared outline and stackup with the selected layout's measured edge and flags a drift between them
+- the mechanical summary and the fabrication-readiness outline finding are the same predicate, agreeing on an unapproved, an approved, and a stale-pinned non-rectangular outline alike
 - generated loop-filter evidence copies each PLL report's screens out of the evaluator, keeping only the non-passing ones beside the population verdict counts
 - generated frequency-plan evidence copies each declaration's screens out of the evaluator, keeps only the non-passing ones, and retains each product's band hull rather than its branches
 - the generated BOM rollup counts the exact placements, lines and do-not-populate parts the archived bom.csv carries
@@ -7218,7 +7222,7 @@ is what makes the predicate exact rather than approximately right.
 
 ## fab_readiness
 
-Public functions: check, writeJson
+Public functions: check, writeJson, savedOutline, declaredOutline, outlineDrift
 
 - a routed net is connected; an unrouted multi-pad net is flagged
 - Copper connectivity uses a 1 µm numeric contact tolerance; a same-net 1–20 µm gap stays electrically open and is an error-severity hairline_gap
@@ -7247,6 +7251,7 @@ Public functions: check, writeJson
 - a part in a concave notch is flagged off-board by the polygon inset, not just the bbox rect
 - release confirmation tokens bind report findings, CAM identity, source and evaluated BOM
 - a zero-length track is a point feature that joins the same-net copper covering its centre, and its own half-width disc grants it nothing more
+- a notched saved outline reports outline-drift carrying the digest to pin, clears once the source pins that digest, and reports an outdated pin as a distinct stale approval
 
 ## fabrication-release
 

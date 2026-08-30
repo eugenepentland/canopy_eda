@@ -941,6 +941,7 @@ src/fab_readiness.zig::Tally struct_
 src/fab_readiness.zig::buildNetGraph | fn buildNetGraph( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, net: export_kicad.FlatNet, net_i: i32, ) std.mem.Allocator.Error!NetGraph
 src/fab_readiness.zig::buildNetGraphPrepared | fn buildNetGraphPrepared( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, net: export_kicad.FlatNet, net_i: i32, fills: SharedFills, ) std.mem.Allocator.Error!NetGraph
 src/fab_readiness.zig::check | fn check( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, ctx: Context, ) std.mem.Allocator.Error!Report
+src/fab_readiness.zig::declaredOutline | fn declaredOutline(board: env_mod.BoardSpec) outline_mod.Declared
 src/fab_readiness.zig::netConnectivity | fn netConnectivity( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, ) std.mem.Allocator.Error![]const NetStatus
 src/fab_readiness.zig::netConnectivityPrepared | fn netConnectivityPrepared( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, prep: BoardPrep, ) std.mem.Allocator.Error![]const NetStatus
 src/fab_readiness.zig::netHasPlane value
@@ -949,8 +950,10 @@ src/fab_readiness.zig::ok | fn ok(self: Report) bool
 src/fab_readiness.zig::openNets | fn openNets( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, ) std.mem.Allocator.Error![]const OpenNet
 src/fab_readiness.zig::openNetsAmong | fn openNetsAmong( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, names: ?[]const []const u8, ) std.mem.Allocator.Error![]const OpenNet
 src/fab_readiness.zig::openNetsPrepared | fn openNetsPrepared( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, prep: BoardPrep, ) std.mem.Allocator.Error![]const OpenNet
+src/fab_readiness.zig::outlineDrift | fn outlineDrift( arena: std.mem.Allocator, declared: outline_mod.Declared, saved: ?outline_mod.Saved, ) std.mem.Allocator.Error!?Item
 src/fab_readiness.zig::root | fn root(self: NetGraph, node: usize) usize
 src/fab_readiness.zig::routableTally | fn routableTally( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, ) std.mem.Allocator.Error!Tally
+src/fab_readiness.zig::savedOutline | fn savedOutline(placement: optimizer.Placement) ?outline_mod.Saved
 src/fab_readiness.zig::staging_band_mm value
 src/fab_readiness.zig::summarizeConnectivity | fn summarizeConnectivity(arena: std.mem.Allocator, conn: []const NetStatus) std.mem.Allocator.Error!Tally
 src/fab_readiness.zig::userZoneFills | fn userZoneFills( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, base: ?pour.EdgeField, ) std.mem.Allocator.Error![]const pour.Fill
@@ -2484,14 +2487,27 @@ src/placement/optimizer.zig::surrogateObjective | fn surrogateObjective(parts: [
 src/placement/optimizer.zig::worldCourtyard | fn worldCourtyard(p: *const Part) BoardRect
 src/placement/optimizer.zig::worldPadCenter | fn worldPadCenter(p: *const Part, lx: f64, ly: f64) [2]f64
 src/placement/outline.zig::ArcCircle struct_
+src/placement/outline.zig::Declared struct_
+src/placement/outline.zig::Digest value
+src/placement/outline.zig::Drift struct_
 src/placement/outline.zig::FilletResult struct_
+src/placement/outline.zig::Saved struct_
+src/placement/outline.zig::Verdict enum_
 src/placement/outline.zig::arcCircle | fn arcCircle(arc: optimizer.BoardArc) ?ArcCircle
 src/placement/outline.zig::arcOwnsSegment | fn arcOwnsSegment(arc: optimizer.BoardArc, a: [2]f64, b: [2]f64, tolerance: f64) bool
 src/placement/outline.zig::bboxRect | fn bboxRect(poly: []const [2]f64) optimizer.BoardRect
+src/placement/outline.zig::compare | fn compare( alloc: std.mem.Allocator, declared: Declared, saved: ?Saved, ) std.mem.Allocator.Error!Drift
 src/placement/outline.zig::contains | fn contains(poly: []const [2]f64, x: f64, y: f64) bool
 src/placement/outline.zig::corner_segs value
+src/placement/outline.zig::digest | fn digest(alloc: std.mem.Allocator, saved: Saved) std.mem.Allocator.Error!Digest
+src/placement/outline.zig::digest_len value
 src/placement/outline.zig::distToEdge | fn distToEdge(poly: []const [2]f64, x: f64, y: f64) f64
+src/placement/outline.zig::driftMessage | fn driftMessage( alloc: std.mem.Allocator, declared: Declared, saved: Saved, drift: Drift, ) std.mem.Allocator.Error![]const u8
+src/placement/outline.zig::drift_tolerance_mm value
+src/placement/outline.zig::drifted | fn drifted(self: Verdict) bool
 src/placement/outline.zig::filletPath | fn filletPath( alloc: std.mem.Allocator, pts: []const [2]f64, radii: []const f64, max_sagitta: f64, ) std.mem.Allocator.Error!FilletResult
+src/placement/outline.zig::label | fn label(self: Verdict) []const u8
+src/placement/outline.zig::present | fn present(self: Declared) bool
 src/placement/outline.zig::roundedRectPoly | fn roundedRectPoly(alloc: std.mem.Allocator, r: optimizer.BoardRect, radius: f64) std.mem.Allocator.Error![]const [2]f64
 src/placement/outline.zig::segCrossesEdge | fn segCrossesEdge(poly: []const [2]f64, x1: f64, y1: f64, x2: f64, y2: f64) ?[2]f64
 src/placement/outline.zig::selfIntersects | fn selfIntersects(poly: []const [2]f64) bool
