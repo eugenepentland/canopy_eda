@@ -5521,6 +5521,7 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - the HTML dossier carries the draft marker only in draft mode and numbers one section per manifest document
 - the HTML dossier inlines each board's block diagram and omits the figure when the design has none
 - the HTML dossier is a pure function of its inputs and renders byte-identically on repeat
+- a generated engineering section's no-data line reaches the HTML dossier through the same single expansion the Markdown face renders
 - every identity string interpolated into the HTML dossier is escaped rather than emitted as markup
 - identity text reaching the HTML dossier is escaped, so no manifest string can become page markup
 - long UTF-8 review lines wrap only between complete codepoints in the generated PDF

@@ -2875,7 +2875,7 @@ fn composeHtmlFixture(
                 .path = "src/systems/demo/system-overview.md",
                 .classification = .design,
             },
-            .source = "# Architecture\n\n<!-- netlisp:generated board-summary -->\n<!-- /netlisp:generated -->\n",
+            .source = "# Architecture\n\n<!-- netlisp:generated board-summary -->\n<!-- /netlisp:generated -->\n\n<!-- netlisp:generated power-summary -->\n<!-- /netlisp:generated -->\n",
             .inspected = inspected,
         },
         .{
@@ -2923,6 +2923,7 @@ fn composeHtmlFixture(
             .bom_csv = "Ref,Part\n",
             .diagram_svg = "<svg viewBox=\"0 0 10 10\" class=\"dg-svg\" xmlns=\"http://www.w3.org/2000/svg\"></svg>",
         },
+        .analysis = .{},
         .physical = .{
             .pcb_png = "\x89PNG\r\n\x1a\n",
             .consumed_sha256 = @splat('c'),
@@ -3041,6 +3042,23 @@ test "system review HTML dossier escapes hostile manifest identity" {
         return error.MissingHtmlMember;
     try std.testing.expect(std.mem.indexOf(u8, html, "R&amp;D Demo") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "R&D Demo") == null);
+}
+
+// spec: system-review - a generated engineering section's no-data line reaches the HTML dossier through the same single expansion the Markdown face renders
+test "system review HTML dossier carries a generated section's no-data line for empty board analysis" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    // The fixture board's engineering analysis is default-empty, so the
+    // power-summary region must reach the HTML as its no-data sentence.
+    const archive = try composeHtmlFixture(allocator, "Demo System", .draft);
+    const html = (try draftMemberBytes(allocator, archive.zip, html_member)) orelse
+        return error.MissingHtmlMember;
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        html,
+        "No board in this system declares a power-rail budget",
+    ) != null);
 }
 
 /// One board's draft archive, composed twice from a fixed Analysis so a test
