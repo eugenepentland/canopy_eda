@@ -534,6 +534,28 @@ CONTAINMENT vs SYMLINKED LIBRARIES. Against the benchmark overlay the same reque
 Consequence for the gate: scripts/ui_browser_perf/run.js aborts this request for the system_review surface. Waiting for a guaranteed 27 s error would be a third of the surface's wall clock, and letting it run in the background would leave both boards' fab analyses competing with every interaction being timed. The page renders the failure into #readiness and stays fully usable, which is what the scenarios measure. Covering readiness for real needs the overlay to copy lib/components and lib/modules — cheap, they are text — but that changes the workload every other surface is measured against, so it belongs to a deliberate re-record and not to the change that found it."""
 
 [[finding]]
+id = "DRIFT-BENCH-001"
+summary = "browser-perf servers could auto-commit to the real designs repository: the overlay symlinked .git and no runner disabled NETLISP_GIT_AUTOCOMMIT"
+severity = "high"
+status = "fixed"
+file = ["scripts/ui_browser_perf/run.js", "scripts/pcb_browser_perf/run.js", "scripts/pcb_editor_perf/run.js"]
+fixed_in = "5c0d48e1"
+harness = "scripts/ui_browser_perf/manifest.test.js#bench-autocommit-disabled"
+note = """Found 2026-08-30 by the same investigation as DRIFT-SYSREV-001, one layer below it.
+
+TWO INDEPENDENT HOLES, both required for the hazard and both present. (1) projectOverlay() symlinked every top-level entry of projects/designs it did not special-case, `.git` included. Git resolves the symlink, so the overlay was a work tree of the REAL designs repository that reported the overlay as its toplevel — measured, not inferred: `rev-parse --git-dir` returned `.git` and `--show-toplevel` returned the overlay. (2) All three runners spawned the server with `NETLISP_DEV=1` and left `NETLISP_GIT_AUTOCOMMIT` unset, and config.zig gitAutocommitEnabled() defaults to ENABLED when unset. Production is protected only by its systemd unit (scripts/test_production_toolchain_pin.sh:30), so every benchmark server ran with auto-commit ON. src/serve/system_review_api.zig calls autocommit.begin() at the document-save, attest and asset-upload endpoints, whose `git add -A -- <paths>` + commit would therefore have landed a commit in the user's designs repository, authored from a temporary copy of the tree.
+
+pcb_editor_perf is the sharpest case and was not in the original report: it builds NO overlay at all and serves the real projects/designs directly, so hole (2) was the only thing between a benchmark write and the user's history.
+
+LATENT, NOT FIRED. All 93 `netlisp <netlisp@server>` commits in designs are `mcp:`/`cli:` tool subjects (edit_file, set_part_poses, save_pcb_layout, …), newest 2026-08-22, none reachable from HEAD and none from a review write path. The system_review browser surface (82b97e5d, 2026-08-30) deliberately covers no writes, which is the only reason this never fired — adding the obvious next scenario would have tripped it.
+
+FIX is defence in depth, either half sufficient: every runner now spawns with NETLISP_GIT_AUTOCOMMIT=0, and projectOverlay() skips `.git` the way it skips `lib`, in both runners that build an overlay. Verified by building real overlays from the shipped projectOverlay source: pre-fix the overlay is a git work tree of designs, post-fix `git -C <overlay> rev-parse --git-dir` fails with "not a git repository" for both the ui and the pcb overlay.
+
+GUARDED by two named invariants in scripts/ui_browser_perf/manifest.test.js: `bench-autocommit-disabled` (this entry's anchor — reads EVERY `env: { ...process.env` literal in all three runners, so a newly added spawn that forgets the variable trips it too) and `bench-overlay-not-a-git-repo` (projectOverlay must skip .git and must never symlink it). Six mutants — the env removed from each of the three runners, the .git skip deleted from each of the two overlays, and the symlink resurrected — each fail, and each is caught by the expected guard id. Both siblings were already in the `ui-browser-perf-route-contract` gate's inputs, so a regression in any of the three re-runs the gate.
+
+ONE BEHAVIOUR CHANGE, deliberate: fab_release.captureProjectState() is the only server path that reads `project_dir/.git`, and under an overlay it now degrades to `commit = "unavailable"` instead of reporting the real repository's HEAD and dirty state. That is the more honest answer — the overlay's tree is a copy, and pairing the real repo's commit label with it was itself misleading — and the benchmark aborts that request anyway (DRIFT-SYSREV-001)."""
+
+[[finding]]
 id = "DRIFT-SIZE-001"
 summary = "src/serve/pcb_layout_page.zig sits at 96% of its hard size ratchet (18,030 lines) and Guardian is asking for a split"
 severity = "low"
