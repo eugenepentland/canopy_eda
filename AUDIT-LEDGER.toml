@@ -499,6 +499,19 @@ PARTIALLY MITIGATED here, not fixed: build.zig's addTreePolicyChecks now hangs t
 The guard here is scripts/check_external_gates_armed.sh (61ms, wired into build.zig's test step): it builds a throwaway project with a recorded baseline and one gate that exits 1, and requires guardian to exit nonzero AND name the gate. Verified both ways — it fails against the pre-fix guardian binary and passes against the fixed one. The build.zig mitigation above stays as defence in depth, since it does not depend on the toolchain being correct."""
 
 [[finding]]
+id = "DRIFT-PERF-001"
+summary = "the /systems/:name page shipped with no browser-perf coverage, and its own contract test had been failing unnoticed because Guardian's external gates were inert"
+severity = "medium"
+status = "open"
+file = ["scripts/ui_browser_perf/manifest.js", "src/serve/system_review_api.zig"]
+reopens = "DRIFT-INFRA-004"
+note = """Found 2026-08-30 by the DRIFT-INFRA-004 fix, on the very first deploy after it: `ui-browser-perf-route-contract` had been RED and passing. scripts/ui_browser_perf/manifest.test.js requires every non-API GET route in serve.zig to be classified, and /systems/:name — added in 1f33d92, the commit live in production — never was. The contract worked; the gate that ran it did not. This is the first concrete cost of that class, and it is exactly the shape the class predicts: a check that was correct the whole time, attached to a runner that had stopped running.
+
+NOT resolved here, deliberately. The page is a real interactive surface (document list, editor textarea, rendered preview, toolbar), so classifying it as an asset or a redirect would be false, and inventing benchmark scenarios for a page without studying it would put meaningless numbers in the perf gate. It is recorded as `coverage: "uncovered"` with an account of why — a new kind that requires a >=80-char reason and is PRINTED on every passing run, so it cannot go quiet the way an unclassified route did. Verified that the escape hatch is bounded: removing the route from the manifest still fails the original "must classify every route" assertion, and a placeholder reason fails too.
+
+The fix is a real surface entry from whoever owns the system-review page."""
+
+[[finding]]
 id = "DRIFT-SIZE-001"
 summary = "src/serve/pcb_layout_page.zig sits at 96% of its hard size ratchet (18,030 lines) and Guardian is asking for a split"
 severity = "low"

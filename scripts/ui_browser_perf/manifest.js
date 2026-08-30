@@ -30,6 +30,19 @@ const routes = {
   "/style.css": { coverage: "asset", reason: "shared stylesheet, not an interactive page" },
   "/static/:name": { coverage: "asset", reason: "static asset dispatcher, not an interactive page" },
   "/.well-known/oauth-protected-resource": { coverage: "metadata", reason: "OAuth discovery document, not an interactive page" },
+  // RECORDED GAP, not a classification. The system-review page is a real
+  // interactive surface — document list, editor textarea, rendered preview,
+  // toolbar buttons — so calling it an asset or a redirect would be false, and
+  // inventing benchmark scenarios for a page without studying it would put
+  // meaningless numbers in the gate. It is listed as uncovered so the gap is
+  // stated rather than hidden; `uncovered` is the only kind manifest.test.js
+  // prints on a passing run.
+  "/systems/:name": {
+    coverage: "uncovered",
+    reason: "landed in 1f33d92 without browser-perf coverage, and rode a green gate because "
+      + "Guardian's [[external]] gates were inert at the time (AUDIT-LEDGER DRIFT-INFRA-004). "
+      + "Needs a real surface entry from whoever owns the system-review page.",
+  },
 };
 
 const surfaces = [
