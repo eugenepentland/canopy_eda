@@ -5275,6 +5275,7 @@ Public functions: analyze
 - repeat composes with sub-block calls and gives each repeated module a distinct stable hierarchy
 - a bus-port index range whose lane span would overflow the i64 subtraction is diagnosed and expands nothing
 - a zero-based bus-port range still expands and the lane cap admits a span of exactly 4095
+- a frequency-plan declaration is collected during the block body and evaluated after it, publishing its typed report on the evaluator beside the loop-filter ones
 
 ## eval/test_point
 
@@ -7684,6 +7685,34 @@ export never invents them.
 - completeness-waiver: malformed encoding (names go through the shared strict JSON string writer and archive tokens admit only ASCII letters, digits, dash, and underscore; generated JSON is parsed again before packaging)
 - completeness-waiver: integer overflow (Gerber coordinates are bounded by finite PCB millimetre geometry before their fixed 1e6 conversion, entry counts come from bounded in-memory slices, and the shared ZIP writer validates its own fixed-width casts)
 - completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
+
+## frequency-plan
+
+- the absolute value of a product range that crosses DC inside the RF sweep folds into two branches reaching down to zero, never the naive endpoint-magnitude interval
+- the diagonal product count at an IF matches the closed form and names the IF above which the commanded band carries none
+- the required RF window, its image and the output sub-band an RF gap costs are exact inverses of one another on both sidebands
+- an RF window that leaves a declared passband reports the uncovered sub-interval on the side it leaves from, and reports nothing when it is contained
+- a declared cutoff rejects a product only when every folded branch lies wholly beyond it
+- the required RF window is checked against the delivered passband, so a fixed LO that closes the commanded band passes and one 950 MHz lower fails naming the uncovered sub-interval and the output frequencies it costs
+- a failed plan limit is a warning in advisory mode and a failure in gate mode, with the same message and the same typed row either way
+- each enumerated product is classified against the output band and the declared cutoffs, with the leakage rows present and the wanted product distinguished from the co-channel ones
+- a product whose signed frequency changes sign inside the required RF sweep is split into both folded branches, so it is seen to reach DC and lands in band where a single-interval fold would miss it
+- a declared suppression entry is checked against the in-band limit at the co-channel product it names, and no level is claimed for any product the table omits
+- the reported diagonal family matches the closed-form count at the band's low edge at several band positions and names the IF above which the band carries none
+- the image sideband is placed and is called rejected only when a declared cutoff or the delivered passband actually excludes it
+- each declaration publishes a typed report whose plans concatenate back into assertion order, one verdict per screen matching that assertion's pass/warn/fail, and (sideband either) publishes both sidebands high side first
+- evaluating one declaration twice produces byte-identical assertions and structurally identical reports, so the analysis is a pure function of what was declared
+- the parser requires a title, mode, output band, LO and mixer sense, bounds the enumeration order at nine, and refuses sum mixing rather than approximating it
+- the authored Barracuda declaration round-trips through the parser into the same plan the fixture screens, with SI-suffixed frequencies and signed dBm resolved
+- a low-side plan under an LO below the commanded band is refused as unrealizable rather than screened against a negative RF window
+- completeness-waiver: empty inputs (the parser rejects a declaration without a title, a mode, an output band, an LO frequency, and a mixer sense before evaluation; a source range that does not contain its own delivered passband is refused with them)
+- completeness-waiver: large inputs (one declaration enumerates at most the ninth-order square plus two leakage rows — 83 products — over a single required RF interval, admits at most 64 spur-table rows, and plans at most two sidebands)
+- completeness-waiver: unauthorized access (an in-process calculation over an already-authorized parsed declaration with no request, file, socket, user, or write surface)
+- completeness-waiver: i/o failure (the analysis performs no I/O and appends allocator-owned assertion messages; OutOfMemory is propagated)
+- completeness-waiver: concurrent access (all state is stack-local or owned by the calling evaluator; the module holds no shared mutable object of any kind)
+- completeness-waiver: malformed encoding (the existing s-expression parser supplies typed nodes; malformed forms, non-finite numbers, inverted intervals, non-integer or out-of-range orders, and sum mixing are rejected before evaluation)
+- completeness-waiver: integer overflow (order loops are bounded by the parse-time nine-order cap, the product buffer is a fixed array sized from that cap, and the one float-to-integer conversion is guarded by its own floor comparison)
+- completeness-waiver: panic-free (interval arithmetic is total over finite inputs, table lookup and level claims use optional/enum returns, and panic-freedom is also enforced repo-wide by Guardian's panic-budget snapshot)
 
 ## pll-loop
 

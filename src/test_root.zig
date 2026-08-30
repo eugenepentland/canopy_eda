@@ -115,6 +115,7 @@ test {
     _ = @import("route_resume.zig");
     _ = @import("flat_netlist.zig");
     _ = @import("font5x7.zig");
+    _ = @import("frequency_plan.zig");
     _ = @import("gerber_verify.zig");
     _ = @import("githash.zig");
     _ = @import("id_insert.zig");
@@ -181,6 +182,7 @@ test {
     _ = @import("pdf_afm.zig");
     _ = @import("pdf_verify.zig");
     _ = @import("pll_loop.zig");
+    _ = @import("spurious.zig");
     _ = @import("power_integrity_json.zig");
     _ = @import("placement/airwire_geometry.zig");
     _ = @import("placement/bend_smooth.zig");

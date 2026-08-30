@@ -16,6 +16,7 @@ const modules = @import("modules.zig");
 const suggest = @import("suggest.zig");
 const design_block = @import("design_block.zig");
 const pll_loop = @import("../pll_loop.zig");
+const frequency_plan = @import("../frequency_plan.zig");
 const instance_mod = @import("instance.zig");
 const builders = @import("builders.zig");
 const forms = @import("forms.zig");
@@ -143,6 +144,13 @@ pub const Evaluator = struct {
     /// (`eval.pll_reports.items`), so a document renderer builds loop-filter
     /// tables and plots from numbers instead of re-parsing prose.
     pll_reports: std.ArrayList(pll_loop.Report),
+    /// The numeric twin of the `(frequency-plan …)` assertion strings: one
+    /// `Report` per declaration evaluated anywhere in the design tree, in the
+    /// order the evaluator reached them. Parallel to `assertions` and read the
+    /// same way (`eval.frequency_plan_reports.items`), so a document renderer
+    /// builds spur tables and band-closure rows from numbers instead of
+    /// re-parsing prose.
+    frequency_plan_reports: std.ArrayList(frequency_plan.Report),
     /// Cache of loaded file contents (path -> parsed nodes)
     loaded_files: std.StringHashMapUnmanaged([]const Node),
     /// Cache of loaded component/symbol/footprint data
@@ -293,6 +301,7 @@ pub const Evaluator = struct {
             .lib_dir = lib_dir,
             .assertions = .empty,
             .pll_reports = .empty,
+            .frequency_plan_reports = .empty,
             .loaded_files = .empty,
             .component_cache = .empty,
             .symbol_pin_cache = .empty,
@@ -312,6 +321,8 @@ pub const Evaluator = struct {
         self.assertions.deinit(self.allocator);
         for (self.pll_reports.items) |report| report.deinit(self.allocator);
         self.pll_reports.deinit(self.allocator);
+        for (self.frequency_plan_reports.items) |report| report.deinit(self.allocator);
+        self.frequency_plan_reports.deinit(self.allocator);
         self.warnings.deinit(self.allocator);
         self.module_stack.deinit(self.allocator);
         self.imports_in_progress.deinit(self.allocator);

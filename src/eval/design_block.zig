@@ -32,6 +32,7 @@ const net_analysis = @import("net_analysis.zig");
 const section_maturity = @import("section_maturity.zig");
 const stackup_presets = @import("stackup_presets.zig");
 const pll_loop = @import("../pll_loop.zig");
+const frequency_plan = @import("../frequency_plan.zig");
 const ScopeForm = forms_mod.ScopeForm;
 
 const Node = ast.Node;
@@ -139,6 +140,8 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     var net_class_specs: std.ArrayList(env_mod.NetClassSpec) = .empty;
     var pll_loop_specs: std.ArrayList(pll_loop.Spec) = .empty;
     defer pll_loop_specs.deinit(self.allocator);
+    var frequency_plan_specs: std.ArrayList(frequency_plan.Spec) = .empty;
+    defer frequency_plan_specs.deinit(self.allocator);
     var design_rules_spec: env_mod.DesignRulesSpec = .{};
     var pcb_plan_spec: ?env_mod.PcbPlanSpec = null;
     var kicad_pcb_path: ?[]const u8 = null;
@@ -190,6 +193,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
         .fabrication_layers = &fabrication_layers,
         .net_class_specs = &net_class_specs,
         .pll_loop_specs = &pll_loop_specs,
+        .frequency_plan_specs = &frequency_plan_specs,
         .design_rules_spec = &design_rules_spec,
         .pcb_plan_spec = &pcb_plan_spec,
         .kicad_pcb_path = &kicad_pcb_path,
@@ -258,6 +262,10 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     // block exists, so their component roles resolve against actual instance
     // values/tolerances regardless of source order.
     for (pll_loop_specs.items) |spec| pll_loop.evaluate(self.allocator, &self.assertions, &self.pll_reports, block, spec) catch return EvalError.OutOfMemory;
+    // The frequency plan is a pure function of its own declaration — it names
+    // no instances — so it needs the block only for ordering: its assertions
+    // land after the loop-filter screens, in declaration order.
+    for (frequency_plan_specs.items) |spec| frequency_plan.evaluate(self.allocator, &self.assertions, &self.frequency_plan_reports, spec) catch return EvalError.OutOfMemory;
 
     // Derive first-class power-rail entries from sub-block output ports +
     // ferrite-bead union-find. Downstream analyses (power_budget,
@@ -295,6 +303,7 @@ const BlockBuildState = struct {
     fabrication_layers: *std.ArrayList(env_mod.FabricationLayerSpec),
     net_class_specs: *std.ArrayList(env_mod.NetClassSpec),
     pll_loop_specs: *std.ArrayList(pll_loop.Spec),
+    frequency_plan_specs: *std.ArrayList(frequency_plan.Spec),
     design_rules_spec: *env_mod.DesignRulesSpec,
     pcb_plan_spec: *?env_mod.PcbPlanSpec,
     kicad_pcb_path: *?[]const u8,
@@ -518,6 +527,17 @@ fn evalBlockBodyForm(
                 return EvalError.InvalidForm;
             };
             build.pll_loop_specs.append(self.allocator, spec) catch return EvalError.OutOfMemory;
+        },
+        .frequency_plan => {
+            const spec = frequency_plan.parse(form_children) catch |err| {
+                self.setError(form.span, switch (err) {
+                    error.SumMixingUnsupported => "(frequency-plan …) models difference mixing only; (mixer sum) has no analysis here and is refused rather than approximated",
+                    error.SpurOrderTooHigh => "(frequency-plan …) (spurs (max-order M)) admits 1 through 9; a higher order enumerates arithmetic rather than mixer behaviour",
+                    error.InvalidForm => "malformed (frequency-plan …); see `netlisp reference frequency-plan`",
+                });
+                return EvalError.InvalidForm;
+            };
+            build.frequency_plan_specs.append(self.allocator, spec) catch return EvalError.OutOfMemory;
         },
         .design_rules => build.design_rules_spec.* = parseDesignRules(self, form_children),
         .pcb_plan => build.pcb_plan_spec.* = try takeFirstPcbPlan(self, form_children, form.span, build.pcb_plan_spec.*),
@@ -1210,6 +1230,7 @@ fn evalSection(
             .fabrication_layer,
             .net_class,
             .pll_loop,
+            .frequency_plan,
             .design_rules,
             .pcb_plan,
             => self.warnFmt(sf.span, "({s} …) is top-level-only — ignored inside (section …)", .{sf_name}),
@@ -3836,6 +3857,44 @@ test "design-block captures (kicad-pcb path)" {
     };
     try testing.expect(block.kicad_pcb_path != null);
     try testing.expectEqualStrings("/mnt/nas/test.kicad_pcb", block.kicad_pcb_path.?);
+}
+
+// spec: eval/design_block - a frequency-plan declaration is collected during the block body and evaluated after it, publishing its typed report on the evaluator beside the loop-filter ones
+test "design-block collects and evaluates (frequency-plan …)" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (frequency-plan "Band 1"
+        \\    (mode advisory)
+        \\    (output-band 50M 1500M)
+        \\    (source (range 10G 20G) (delivered 10.5G 12.9G))
+        \\    (lo 10.95G (drive 21) (drive-window 17 23))
+        \\    (mixer difference (sideband high))
+        \\    (if-filter (low-pass 6G))))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    _ = try evalDesignBlock(&eval, form_children[1..], &env);
+
+    try testing.expectEqual(@as(usize, 1), eval.frequency_plan_reports.items.len);
+    const report = eval.frequency_plan_reports.items[0];
+    try testing.expectEqualStrings("Band 1", report.name);
+    try testing.expectEqual(frequency_plan.Mode.advisory, report.mode);
+    try testing.expectEqual(@as(usize, 1), report.plans.len);
+    // Every verdict message is one of the assertions the same evaluation
+    // appended — the parity a document renderer relies on.
+    try testing.expect(eval.assertions.items.len >= report.plans[0].verdicts.len);
+    for (report.plans[0].verdicts) |verdict| {
+        var found = false;
+        for (eval.assertions.items) |assertion| {
+            if (assertion.message.ptr == verdict.message.ptr) found = true;
+        }
+        try testing.expect(found);
+    }
 }
 
 // spec: eval/design_block - stackup form captures layer count and plane assignments on the design block
