@@ -29,6 +29,8 @@ const req_checks = @import("req_checks.zig");
 const review = @import("review.zig");
 const review_json = @import("review_json.zig");
 const review_md = @import("review_md.zig");
+const review_thermal = @import("review_thermal.zig");
+const thermal_scenarios = @import("thermal_scenarios.zig");
 const review_assets = @import("system_review_assets.zig");
 const zipfile = @import("zipfile.zig");
 const block_diagram = @import("diagram/diagram.zig");
@@ -109,16 +111,61 @@ pub const AmbientWindow = struct {
     min_c: ?f64 = null,
 };
 
-/// Screening-level heat evidence for the whole board.
+/// Which thermal model answered, and what the other one said.
+///
+/// Two models screen the same board. `eval/thermal.zig` scales one datasheet
+/// theta-JA per part, and a datasheet theta-JA is measured on the JEDEC 2s2p
+/// board (76 x 114 mm), so it is systematically OPTIMISTIC for anything
+/// smaller. The cooling ladder in `thermal_scenarios.zig` reads the junctions a
+/// spreader computed over the board's actual outline, stackup and part
+/// positions. Where they disagree the ladder is the board being built, so the
+/// snapshot's headline `Thermal.verdict` is the ladder's whenever there is one
+/// and the datasheet answer is retained here, demoted and labelled.
+pub const ThermalModel = struct {
+    /// True when the review resolved a placement and the layout-aware ladder
+    /// governed `Thermal.verdict` and `Thermal.window`. False ⇒ no layout, so
+    /// the headline IS `estimate` and a reader must be told so.
+    board_coupled: bool = false,
+    /// The package-level datasheet screen's own verdict — an estimate, never
+    /// the headline where a ladder exists.
+    estimate: thermal.Verdict = .insufficient_data,
+    /// The ambient window that estimate is good for, on the same JEDEC-board
+    /// assumption.
+    estimate_window: AmbientWindow = .{},
+};
+
+/// How much of the board the heat screen actually saw. A board where most
+/// parts declare no power reads cool for want of input rather than by
+/// engineering, so every surface that quotes the numbers states this beside
+/// them.
+pub const ThermalCoverage = struct {
+    /// Parts that dissipate something the screen could compute a rise from.
+    with_power: usize = 0,
+    /// Screened parts whose dissipation nothing declared or derived.
+    unknown_power: usize = 0,
+
+    /// Every part the screen looked at, modelled or not.
+    pub fn screened(self: ThermalCoverage) usize {
+        return self.with_power + self.unknown_power;
+    }
+};
+
+/// Heat evidence for the whole board, headlined by the board-coupled answer.
 pub const Thermal = struct {
     ambient_c: f64 = 0,
+    /// The verdict a document states: the board-coupled ladder's where the
+    /// review resolved one (`model.board_coupled`), else the package screen's.
+    /// Never the optimistic datasheet answer while a board answer exists.
     verdict: thermal.Verdict = .insufficient_data,
     /// Sum of every screened part's declared/derived dissipation (W).
     total_w: f64 = 0,
-    /// Parts that dissipate something the screen could compute a rise from.
-    powered_parts: usize = 0,
     hottest: HottestPart = .{},
+    /// The window that goes with `verdict`: hot end from the governing cooling
+    /// scenario when a ladder governs (null when no scenario clears every
+    /// junction), cold end always the parts' ratings floor.
     window: AmbientWindow = .{},
+    model: ThermalModel = .{},
+    coverage: ThermalCoverage = .{},
 };
 
 /// One retained error-severity ERC violation.
@@ -436,7 +483,7 @@ fn collectEngineering(
 ) !Engineering {
     return .{
         .power = try collectPowerRails(allocator, block, doc.power.budget),
-        .thermal = try collectThermal(allocator, doc.power.thermal),
+        .thermal = try collectThermal(allocator, doc.power.thermal, doc.power.scenarios),
         .checks = try collectChecks(allocator, violations, doc.assertions),
         .mechanical = collectMechanical(block, board_rect),
         .pll = try collectPllReports(allocator, pll_reports),
@@ -480,7 +527,20 @@ fn declaredRailVoltage(block: *const env_mod.DesignBlock, net: []const u8) ?f64 
     return null;
 }
 
-fn collectThermal(allocator: std.mem.Allocator, heat: thermal.BoardThermal) !Thermal {
+/// Retain the board's heat answer, headlined the way the board's own review
+/// headlines it.
+///
+/// `scenarios` is the ladder the caller already resolved onto `doc.power`
+/// before this ran — no new read, so the read trace is untouched — and the
+/// headline goes through `review_thermal.headlineVerdict`, the same function
+/// the review page's pill and the review Markdown use. A system document can
+/// therefore never state a cooler verdict than the board review it was built
+/// from.
+fn collectThermal(
+    allocator: std.mem.Allocator,
+    heat: thermal.BoardThermal,
+    scenarios: thermal_scenarios.Answer,
+) !Thermal {
     var total_w: f64 = 0;
     var hottest: ?thermal.PartThermal = null;
     for (heat.parts) |part| {
@@ -488,16 +548,31 @@ fn collectThermal(allocator: std.mem.Allocator, heat: thermal.BoardThermal) !The
         total_w += watts;
         if (hottest == null or watts > hottest.?.power.watts.?) hottest = part;
     }
+    const estimate_window: AmbientWindow = .{ .max_c = heat.max_ambient.c, .min_c = heat.min_ambient.c };
     return .{
         .ambient_c = heat.ambient_c,
-        .verdict = heat.verdict,
+        .verdict = review_thermal.headlineVerdict(heat, scenarios),
         .total_w = total_w,
-        .powered_parts = heat.counts.with_power,
         .hottest = .{
             .ref_des = if (hottest) |part| try allocator.dupe(u8, part.ref_des) else "",
             .watts = if (hottest) |part| part.power.watts.? else 0,
         },
-        .window = .{ .max_c = heat.max_ambient.c, .min_c = heat.min_ambient.c },
+        .window = if (scenarios.ladder) |ladder| .{
+            // The governing scenario sets the hot end (it is the cooling the
+            // board actually needs); the cold end is a ratings floor that no
+            // amount of airflow moves, so it stays the screen's own.
+            .max_c = if (thermal_scenarios.governingRow(ladder)) |gov| gov.max_ambient.c else null,
+            .min_c = heat.min_ambient.c,
+        } else estimate_window,
+        .model = .{
+            .board_coupled = scenarios.ladder != null,
+            .estimate = heat.verdict,
+            .estimate_window = estimate_window,
+        },
+        .coverage = .{
+            .with_power = heat.counts.with_power,
+            .unknown_power = heat.counts.unknown_power,
+        },
     };
 }
 
@@ -1093,7 +1168,7 @@ test "power rail evidence joins the budget to the declared rail voltage" {
     try std.testing.expectEqual(@as(?f64, null), declaredRailVoltage(&block, "V1P8"));
 }
 
-// spec: system-review - generated thermal evidence is the screening rollup — dissipation, powered part count, the hottest part and the ambient window
+// spec: system-review - generated thermal evidence is the heat rollup — dissipation, the hottest part, the ambient window and the population the screen actually saw
 test "thermal evidence rolls up dissipation and names the hottest part" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1109,19 +1184,71 @@ test "thermal evidence rolls up dissipation and names the hottest part" {
         .verdict = .needs_airflow,
         .max_ambient = .{ .c = 61.5, .ref_des = "U2" },
         .min_ambient = .{ .c = -40, .ref_des = "U1" },
-        .counts = .{ .with_power = 2 },
-    });
+        .counts = .{ .with_power = 2, .unknown_power = 1 },
+    }, .{});
     try std.testing.expectApproxEqAbs(@as(f64, 2.0), heat.total_w, 1e-9);
-    try std.testing.expectEqual(@as(usize, 2), heat.powered_parts);
+    try std.testing.expectEqual(@as(usize, 2), heat.coverage.with_power);
+    try std.testing.expectEqual(@as(usize, 1), heat.coverage.unknown_power);
+    try std.testing.expectEqual(@as(usize, 3), heat.coverage.screened());
     try std.testing.expectEqualStrings("U2", heat.hottest.ref_des);
     try std.testing.expectApproxEqAbs(@as(f64, 1.75), heat.hottest.watts, 1e-9);
     try std.testing.expectEqual(@as(?f64, 61.5), heat.window.max_c);
 
     // A board where nothing dissipates keeps an empty hottest slot rather than
     // naming an arbitrary part.
-    const quiet = try collectThermal(allocator, .{ .ambient_c = 25 });
+    const quiet = try collectThermal(allocator, .{ .ambient_c = 25 }, .{});
     try std.testing.expectEqualStrings("", quiet.hottest.ref_des);
-    try std.testing.expectEqual(@as(usize, 0), quiet.powered_parts);
+    try std.testing.expectEqual(@as(usize, 0), quiet.coverage.with_power);
+}
+
+/// A two-rung ladder at 25 °C whose still-air rung cooks the part and whose
+/// 1 m/s rung saves it: the barracuda shape, where the datasheet screen says
+/// passive is fine and the board being built needs a fan.
+fn airflowLadderFixture() thermal_scenarios.Answer {
+    const still = &[_]thermal_scenarios.PartRow{
+        .{ .ref = "U2", .tj_c = 141, .board_c = 96, .max_ambient_c = -9.1 },
+    };
+    const moving = &[_]thermal_scenarios.PartRow{
+        .{ .ref = "U2", .tj_c = 96, .board_c = 70, .max_ambient_c = 61.5 },
+    };
+    const rows = &[_]thermal_scenarios.Row{
+        .{ .scenario = .natural, .board_max_c = 96, .max_ambient = .{ .c = -9.1, .ref = "U2" }, .parts = still },
+        .{ .scenario = .airflow_1ms, .board_max_c = 70, .max_ambient = .{ .c = 61.5, .ref = "U2" }, .parts = moving },
+    };
+    return .{ .ladder = .{ .ambient_c = 25, .rows = rows } };
+}
+
+// spec: system-review - generated thermal evidence headlines the board-coupled verdict and the window that goes with it, keeping the datasheet package screen only as a labelled estimate
+test "thermal evidence headlines the board verdict over the datasheet estimate" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    // The datasheet screen's own answer, on a board whose ladder disagrees.
+    const screen: thermal.BoardThermal = .{
+        .ambient_c = 25,
+        .verdict = .passive_ok,
+        .max_ambient = .{ .c = 85, .ref_des = "U2" },
+        .min_ambient = .{ .c = -40, .ref_des = "U1" },
+        .counts = .{ .with_power = 4, .unknown_power = 5 },
+    };
+
+    const coupled = try collectThermal(allocator, screen, airflowLadderFixture());
+    try std.testing.expectEqual(thermal.Verdict.needs_airflow, coupled.verdict);
+    try std.testing.expect(coupled.model.board_coupled);
+    try std.testing.expectEqual(thermal.Verdict.passive_ok, coupled.model.estimate);
+    // The window follows the verdict: the governing rung's ceiling, not the
+    // datasheet's optimistic one. The cold end is a ratings floor either way.
+    try std.testing.expectEqual(@as(?f64, 61.5), coupled.window.max_c);
+    try std.testing.expectEqual(@as(?f64, -40), coupled.window.min_c);
+    try std.testing.expectEqual(@as(?f64, 85), coupled.model.estimate_window.max_c);
+
+    // With no ladder there is no board answer to prefer, so the estimate is
+    // the headline — and `board_coupled` says so rather than leaving a reader
+    // to assume the layout was consulted.
+    const uncoupled = try collectThermal(allocator, screen, .{});
+    try std.testing.expectEqual(thermal.Verdict.passive_ok, uncoupled.verdict);
+    try std.testing.expect(!uncoupled.model.board_coupled);
+    try std.testing.expectEqual(@as(?f64, 85), uncoupled.window.max_c);
 }
 
 /// `count` identical error-severity violations, so a test can drive the

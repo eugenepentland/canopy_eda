@@ -5507,7 +5507,8 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - per-board block diagram evidence is archived as boards/<role>/diagram.svg in draft and release, reproducibly, and omitted when the design has no diagram
 - the only archived SVG is the tool-rendered per-board block diagram; SVG is refused at every other archive path in draft and release alike
 - generated power evidence carries each rail's budget row beside the voltage its design declares, including through a ferrite-bridged alias
-- generated thermal evidence is the screening rollup — dissipation, powered part count, the hottest part and the ambient window
+- generated thermal evidence is the heat rollup — dissipation, the hottest part, the ambient window and the population the screen actually saw
+- generated thermal evidence headlines the board-coupled verdict and the window that goes with it, keeping the datasheet package screen only as a labelled estimate
 - generated rule-check evidence counts every ERC severity and assertion outcome, and retains a capped list of the error-severity findings
 - generated mechanical evidence pairs the declared outline and stackup with the selected layout's measured edge and flags a drift between them
 - generated loop-filter evidence copies each PLL report's screens out of the evaluator, keeping only the non-passing ones beside the population verdict counts
@@ -5516,7 +5517,10 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - the generated loop-filter section renders each population's bandwidth and phase-margin ranges, its failing screens and the charge-pump schedule
 - the generated ERC section reports counts by severity and lists the error-severity findings, stating the cap when it truncates
 - every generated section renders bounded, safe Markdown that is deterministic and states its own no-data line when the design declares nothing
+- the generated thermal section states each board's board-coupled verdict and quotes the datasheet package screen only as a labelled estimate
+- the generated thermal section discloses how much of the screened population carries no power data whenever any part does not
 - the aggregated open-items register lists every failing package gate, board review note, ERC error and failing loop screen, and says so plainly when there are none
+- no open-items row carries a summary that only restates the severity column beside it
 - the system block diagram is archived as review/system-diagram.svg, referenced by the generated system-diagram section, and admitted as the one system-level SVG
 - system Markdown becomes a structurally valid searchable PDF with draft marking
 - the offline HTML dossier is one self-contained file with no external request and no script

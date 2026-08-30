@@ -2020,10 +2020,21 @@ fn writePowerSummary(out: *std.Io.Writer.Allocating, analysis: Analysis, limit: 
     try w.writeAll("\nPer-device consumer breakdowns for each rail are in `boards/ROLE/review.json`.\n\n");
 }
 
+/// The heat rollup, headlined by each board's own board-coupled verdict.
+///
+/// The Verdict and ambient columns come from `Thermal.verdict` / `.window`,
+/// which the snapshot fills from the board review's headline — the cooling
+/// ladder over the real outline where a layout resolved one. The datasheet
+/// package screen is the more optimistic model (a JEDEC 2s2p theta-JA on a
+/// board a fifth its area), so it is never the headline while a board answer
+/// exists: it is quoted underneath, labelled as an estimate, and only where it
+/// actually disagrees. Under that go the coverage disclosures — a board whose
+/// parts mostly declare no power reads cool for want of input, and a release
+/// document must never let that pass for a characterised result.
 fn writeThermalSummary(out: *std.Io.Writer.Allocating, analysis: Analysis, limit: usize) !void {
     const w = &out.writer;
     var powered: usize = 0;
-    for (analysis.boards) |board| powered += board.snapshot.analysis.thermal.powered_parts;
+    for (analysis.boards) |board| powered += board.snapshot.analysis.thermal.coverage.with_power;
     if (powered == 0) {
         try w.writeAll("No board in this system declares part dissipation, so thermal screening has no input.\n\n");
         return;
@@ -2032,7 +2043,7 @@ fn writeThermalSummary(out: *std.Io.Writer.Allocating, analysis: Analysis, limit
         "| --- | --- | ---: | --- | --- | --- | --- | --- |\n");
     for (analysis.boards) |board| {
         const heat = board.snapshot.analysis.thermal;
-        try w.print("| {s} | {d:.3} W | {d} | ", .{ board.member.role, heat.total_w, heat.powered_parts });
+        try w.print("| {s} | {d:.3} W | {d} | ", .{ board.member.role, heat.total_w, heat.coverage.with_power });
         if (heat.hottest.ref_des.len > 0)
             try w.print("`{s}` at {d:.3} W", .{ heat.hottest.ref_des, heat.hottest.watts })
         else
@@ -2044,7 +2055,56 @@ fn writeThermalSummary(out: *std.Io.Writer.Allocating, analysis: Analysis, limit
         try w.writeAll(" |\n");
         try ensureMarkdownSize(out, limit);
     }
-    try w.writeAll("\nScreening-level steady state only: this is a lumped junction-temperature read of the design, not the layout-aware cooling ladder in each board's review.\n\n");
+    try w.writeByte('\n');
+    try writeThermalDisclosures(out, analysis, limit);
+    try w.writeAll("Verdict and ambient window are each board's board-coupled answer where its review resolved a layout, and the package-level screen where it did not; dissipation and the hottest part are the lumped screen's own figures.\n\n");
+}
+
+/// Everything the table alone would let a reader believe wrongly, per board and
+/// in board order so the section stays a pure function of its inputs.
+fn writeThermalDisclosures(out: *std.Io.Writer.Allocating, analysis: Analysis, limit: usize) !void {
+    const w = &out.writer;
+    var disclosed = false;
+    for (analysis.boards) |board| {
+        const heat = board.snapshot.analysis.thermal;
+        if (thermalEstimateDiffers(heat)) {
+            try w.print(
+                "- `{s}`: the datasheet package estimate reads `{s}` — theta-JA on the JEDEC 2s2p board (76 x 114 mm), optimistic for anything smaller — while the board-coupled verdict above is `{s}`. The board verdict governs.\n",
+                .{ board.member.role, @tagName(heat.model.estimate), @tagName(heat.verdict) },
+            );
+            disclosed = true;
+            try ensureMarkdownSize(out, limit);
+        }
+        if (!heat.model.board_coupled and heat.verdict != .insufficient_data) {
+            try w.print(
+                "- `{s}`: no layout resolved for this board, so its verdict is the datasheet package estimate (theta-JA on the JEDEC 2s2p board) rather than a board-coupled result.\n",
+                .{board.member.role},
+            );
+            disclosed = true;
+            try ensureMarkdownSize(out, limit);
+        }
+        if (heat.coverage.unknown_power > 0) {
+            try w.print(
+                "- `{s}`: {d} of {d} screened parts carry power data; the remaining {d} are unmodelled, so these figures are a partial screen rather than a characterised result.\n",
+                .{
+                    board.member.role,
+                    heat.coverage.with_power,
+                    heat.coverage.screened(),
+                    heat.coverage.unknown_power,
+                },
+            );
+            disclosed = true;
+            try ensureMarkdownSize(out, limit);
+        }
+    }
+    if (disclosed) try w.writeByte('\n');
+}
+
+/// Does the demoted datasheet estimate actually disagree with the headline?
+/// Quoted only then: a second verdict that says the same thing is noise, and a
+/// board with no ladder has no second opinion to disagree with.
+fn thermalEstimateDiffers(heat: board_review.Thermal) bool {
+    return heat.model.board_coupled and heat.model.estimate != heat.verdict;
 }
 
 fn writeErcSummary(out: *std.Io.Writer.Allocating, analysis: Analysis, limit: usize) !void {
@@ -2355,9 +2415,28 @@ fn boardPllFailures(board: BoardEvidence) usize {
 fn writeOpenItemRow(out: *std.Io.Writer.Allocating, item: OpenItem, limit: usize) !void {
     const w = &out.writer;
     try w.print("| `{s}` | {s} | {s} | ", .{ item.id, item.source, item.severity });
-    try writeCell(w, item.summary);
+    if (restatesSeverity(item.summary, item.severity)) {
+        // The row still appears — dropping an open item would falsify the
+        // register — but its Summary cell points at the evidence instead of
+        // echoing the column beside it.
+        try w.print("no detail beyond the severity; see this item's {s} evidence", .{item.source});
+    } else try writeCell(w, item.summary);
     try w.writeAll(" |\n");
     try ensureMarkdownSize(out, limit);
+}
+
+/// Does this Summary cell say anything the Severity column did not?
+///
+/// An empty summary, or one that is the severity word under another spelling
+/// ("warn" against "warning"), costs the reader a cell and tells them nothing.
+/// Case-insensitive and prefix-wise in both directions, so neither the enum
+/// tags nor the severity words can drift into agreement unnoticed.
+fn restatesSeverity(summary: []const u8, severity: []const u8) bool {
+    const text = std.mem.trim(u8, summary, " \t");
+    if (text.len == 0) return true;
+    const shorter = @min(text.len, severity.len);
+    if (shorter == 0) return false;
+    return std.ascii.eqlIgnoreCase(text[0..shorter], severity[0..shorter]);
 }
 
 fn writeGateOpenItems(out: *std.Io.Writer.Allocating, analysis: Analysis, limit: usize) !void {
@@ -2377,6 +2456,18 @@ fn writeGateOpenItems(out: *std.Io.Writer.Allocating, analysis: Analysis, limit:
     }, limit);
 }
 
+/// What a non-passing board review actually found, in words. The status tag on
+/// its own ("warn", "fail") only respells the Severity column beside it, which
+/// is how this row used to read; the archived per-board review is where the
+/// finding itself lives, so the summary sends the reader there.
+fn reviewStatusSummary(status: review.Status) []const u8 {
+    return switch (status) {
+        .pass => "",
+        .warn => "engineering review passed with unresolved warnings; the findings are in this board's `review.md`",
+        .fail => "engineering review failed; the findings are in this board's `review.md`",
+    };
+}
+
 fn writeBoardOpenItems(out: *std.Io.Writer.Allocating, board: BoardEvidence, limit: usize) !void {
     const w = &out.writer;
     const snapshot = board.snapshot;
@@ -2384,7 +2475,7 @@ fn writeBoardOpenItems(out: *std.Io.Writer.Allocating, board: BoardEvidence, lim
         .id = board.member.role,
         .source = "board review",
         .severity = if (snapshot.review.status == .fail) "blocker" else "warning",
-        .summary = @tagName(snapshot.review.status),
+        .summary = reviewStatusSummary(snapshot.review.status),
     }, limit);
     if (snapshot.review.open_notes > 0) {
         try w.print("| `{s}` | design notes | warning | {d} open note(s) in `boards/{s}/design-notes.md` |\n", .{
@@ -3379,13 +3470,21 @@ fn fixtureEngineering(allocator: std.mem.Allocator) !board_review.Engineering {
     }});
     return .{
         .power = rails,
+        // The barracuda shape: the board-coupled ladder wants airflow where the
+        // datasheet screen called the same board passively fine, and most of
+        // the population declares no power at all.
         .thermal = .{
             .ambient_c = 25,
             .verdict = .needs_airflow,
             .total_w = 2.0,
-            .powered_parts = 2,
             .hottest = .{ .ref_des = "U2", .watts = 1.75 },
             .window = .{ .max_c = 61.5, .min_c = -40 },
+            .model = .{
+                .board_coupled = true,
+                .estimate = .passive_ok,
+                .estimate_window = .{ .max_c = 85, .min_c = -40 },
+            },
+            .coverage = .{ .with_power = 2, .unknown_power = 5 },
         },
         .checks = .{
             .errors = 3,
@@ -3546,6 +3645,104 @@ test "power, thermal, mechanical and BOM sections carry the design's own numbers
     try std.testing.expect(std.mem.indexOf(u8, bom, "| `one` | 4 | 3 | 1 | 1 | `boards/main/bom.csv` |") != null);
     // The CSV pointers the section always carried are still there.
     try std.testing.expect(std.mem.indexOf(u8, bom, "`boards/rf/bom.csv`") != null);
+}
+
+// spec: system-review - the generated thermal section states each board's board-coupled verdict and quotes the datasheet package screen only as a labelled estimate
+test "the thermal section headlines the board verdict and demotes the datasheet screen" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    const analysis = try fixtureAnalysis(allocator, try fixtureEngineering(allocator), true);
+
+    const heat = try renderSection(allocator, analysis, "thermal-summary");
+    // The board being built needs airflow; the optimistic datasheet verdict
+    // reaches the reader only under the table, named as an estimate.
+    try std.testing.expect(std.mem.indexOf(u8, heat, "| needs_airflow | 25.0 C | 61.5 C |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, heat, "| passive_ok |") == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        heat,
+        "- `main`: the datasheet package estimate reads `passive_ok`",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, heat, "JEDEC 2s2p board (76 x 114 mm), optimistic") != null);
+    try std.testing.expect(std.mem.indexOf(u8, heat, "The board verdict governs.") != null);
+
+    // A board whose review resolved no layout has no board answer to state, so
+    // the section says the verdict it prints is the datasheet estimate.
+    var unplaced = try fixtureEngineering(allocator);
+    unplaced.thermal.verdict = .passive_ok;
+    unplaced.thermal.model = .{ .board_coupled = false, .estimate = .passive_ok, .estimate_window = .{ .max_c = 85 } };
+    const flat = try renderSection(allocator, try fixtureAnalysis(allocator, unplaced, true), "thermal-summary");
+    try std.testing.expect(std.mem.indexOf(u8, flat, "- `main`: no layout resolved for this board") != null);
+    // With one verdict and one model there is nothing to contradict.
+    try std.testing.expect(std.mem.indexOf(u8, flat, "datasheet package estimate reads") == null);
+}
+
+// spec: system-review - the generated thermal section discloses how much of the screened population carries no power data whenever any part does not
+test "the thermal section discloses unmodelled parts behind its numbers" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    const analysis = try fixtureAnalysis(allocator, try fixtureEngineering(allocator), true);
+
+    const heat = try renderSection(allocator, analysis, "thermal-summary");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        heat,
+        "- `main`: 2 of 7 screened parts carry power data; the remaining 5 are unmodelled",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, heat, "partial screen rather than a characterised result") != null);
+
+    // A fully modelled population has nothing to disclose and says nothing.
+    var complete = try fixtureEngineering(allocator);
+    complete.thermal.coverage = .{ .with_power = 7, .unknown_power = 0 };
+    const full = try renderSection(allocator, try fixtureAnalysis(allocator, complete, true), "thermal-summary");
+    try std.testing.expect(std.mem.indexOf(u8, full, "carry power data") == null);
+    try std.testing.expect(std.mem.indexOf(u8, full, "unmodelled") == null);
+}
+
+// spec: system-review - no open-items row carries a summary that only restates the severity column beside it
+test "open-items summaries say more than the severity column" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    var analysis = try fixtureAnalysis(allocator, try fixtureEngineering(allocator), false);
+    // A non-passing board review is the row that used to read "warning | warn".
+    const boards = try allocator.dupe(BoardEvidence, analysis.boards);
+    boards[0].snapshot.review.status = .warn;
+    boards[1].snapshot.review.status = .fail;
+    analysis.boards = boards;
+
+    const items = try renderSection(allocator, analysis, "open-items");
+    try std.testing.expect(std.mem.indexOf(u8, items, "| `main` | board review | warning | engineering review passed with unresolved warnings;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, items, "| `rf` | board review | blocker | engineering review failed;") != null);
+    try expectSummariesAddDetail(items);
+
+    // The guard behind that invariant, at the two spellings that used to slip
+    // through: the status tag against its severity word, and an empty cell.
+    try std.testing.expect(restatesSeverity("warn", "warning"));
+    try std.testing.expect(restatesSeverity("   ", "blocker"));
+    try std.testing.expect(!restatesSeverity("engineering review failed", "blocker"));
+}
+
+/// No rendered open-items row may leave its Summary cell echoing the Severity
+/// cell beside it — checked over the table itself rather than over the strings
+/// the writers happen to pass, so a future row cannot reintroduce the defect.
+fn expectSummariesAddDetail(rendered: []const u8) !void {
+    var lines = std.mem.splitScalar(u8, rendered, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "| `")) continue;
+        var cells = std.mem.splitSequence(u8, std.mem.trim(u8, line, "| "), " | ");
+        var seen: usize = 0;
+        var severity: []const u8 = "";
+        var summary: []const u8 = "";
+        while (cells.next()) |cell| : (seen += 1) {
+            severity = summary;
+            summary = cell;
+        }
+        if (seen < 4) continue;
+        try std.testing.expect(!restatesSeverity(summary, severity));
+    }
 }
 
 // spec: system-review - the generated loop-filter section renders each population's bandwidth and phase-margin ranges, its failing screens and the charge-pump schedule
