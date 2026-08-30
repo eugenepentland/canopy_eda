@@ -56,7 +56,14 @@ pub const Generator = struct {
             try self.generateInnerStructs(template.name, template.params, template.body);
         }
 
-        // Phase 2: Generate the main struct
+        // Phase 2: Generate the main struct. The author's leading comment goes
+        // here rather than with the header, so it documents this templ's own
+        // struct — and after the inner structs above, which are private
+        // implementation detail the comment is not about.
+        if (template.leading_comment) |comment| {
+            try self.output.writeAll(comment);
+            try self.output.writeAll("\n");
+        }
         if (template.is_public) {
             try self.output.writeAll("pub ");
         }
@@ -1159,4 +1166,98 @@ test "generate void elements without closing slash" {
     try std.testing.expect(std.mem.indexOf(u8, result, "</br>") == null);
     // But regular elements should still have closing tags
     try std.testing.expect(std.mem.indexOf(u8, result, "</head>") != null);
+}
+
+test "generate emits a templ's leading comment on its own struct" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const parser = @import("parser.zig");
+
+    const source =
+        \\const std = @import("std");
+        \\
+        \\/// Doc for Second.
+        \\pub templ Second() {
+        \\    <div>second</div>
+        \\}
+    ;
+
+    var p = parser.Parser.init(arena.allocator(), source);
+    const file = try p.parseFile();
+
+    var output: std.Io.Writer.Allocating = .init(arena.allocator());
+    var gen = Generator.init(&output.writer);
+    try gen.generateFile(file);
+
+    const result = output.writer.buffer[0..output.writer.end];
+    try std.testing.expect(std.mem.indexOf(u8, result, "/// Doc for Second.\npub const Second = struct {") != null);
+    // The header must not carry a copy of it.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, result, "Doc for Second"));
+}
+
+test "leading comment lands on the main struct, after any children structs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const parser = @import("parser.zig");
+
+    const source =
+        \\pub templ Inner() {
+        \\    <p>inner</p>
+        \\}
+        \\
+        \\/// Doc for Outer.
+        \\pub templ Outer() {
+        \\    @Inner() {
+        \\        <span>kid</span>
+        \\    }
+        \\}
+    ;
+
+    var p = parser.Parser.init(arena.allocator(), source);
+    const file = try p.parseFile();
+
+    var output: std.Io.Writer.Allocating = .init(arena.allocator());
+    var gen = Generator.init(&output.writer);
+    try gen.generateFile(file);
+
+    const result = output.writer.buffer[0..output.writer.end];
+    const comment = std.mem.indexOf(u8, result, "/// Doc for Outer.").?;
+    const children_struct = std.mem.indexOf(u8, result, "const Outer__children_0 = struct {").?;
+    const main_struct = std.mem.indexOf(u8, result, "pub const Outer = struct {").?;
+    // The private children struct is not what the comment describes.
+    try std.testing.expect(children_struct < comment);
+    try std.testing.expect(comment < main_struct);
+}
+
+test "an undocumented templ emitted first stays undocumented" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const parser = @import("parser.zig");
+
+    const source =
+        \\pub templ First() {
+        \\    <div>first</div>
+        \\}
+        \\
+        \\/// Doc for Second.
+        \\pub templ Second() {
+        \\    <div>second</div>
+        \\}
+    ;
+
+    var p = parser.Parser.init(arena.allocator(), source);
+    const file = try p.parseFile();
+
+    var output: std.Io.Writer.Allocating = .init(arena.allocator());
+    var gen = Generator.init(&output.writer);
+    try gen.generateFile(file);
+
+    const result = output.writer.buffer[0..output.writer.end];
+    const first = std.mem.indexOf(u8, result, "pub const First = struct {").?;
+    const comment = std.mem.indexOf(u8, result, "/// Doc for Second.").?;
+    // The regression: this comment used to be emitted above `First`.
+    try std.testing.expect(first < comment);
 }

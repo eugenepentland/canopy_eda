@@ -6,7 +6,6 @@ const zt = @import("zt");
 // and worker all live in the embedded same-origin `/static` registry, so this
 // template only carries the bare HTML skeleton and a `data-pdf="…"` hook the
 // script reads on load.
-
 pub const Page = struct {
     fn _render(filename: []const u8, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         _ = &filename;
