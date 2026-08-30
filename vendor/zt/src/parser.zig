@@ -125,6 +125,9 @@ pub const Parser = struct {
     pub fn parseFile(self: *Parser) Error!ast.TemplateFile {
         var zig_code_parts: std.ArrayList([]const u8) = .empty;
         var templates: std.ArrayList(ast.Template) = .empty;
+        // Comment block peeled off the end of the preceding Zig chunk, held
+        // until the template it was written above has been parsed.
+        var pending_comment: ?[]const u8 = null;
 
         while (self.peek() != null) {
             self.skipWhitespace();
@@ -132,7 +135,9 @@ pub const Parser = struct {
 
             // Check if we're at a template start
             if (self.isAtTemplate()) {
-                const template = try self.parseTemplate();
+                var template = try self.parseTemplate();
+                template.leading_comment = pending_comment;
+                pending_comment = null;
                 try templates.append(self.allocator, template);
             } else {
                 // Parse Zig code until next template or EOF
@@ -142,7 +147,15 @@ pub const Parser = struct {
                     self.skipWhitespace();
                     if (self.isAtTemplate()) break;
                 }
-                const zig_code = std.mem.trim(u8, self.source[zig_start..self.pos], " \t\n\r");
+                var chunk = self.source[zig_start..self.pos];
+                // Only split at a header->templ boundary. At EOF there is no
+                // template to hand the comment to, so it stays header code.
+                if (self.isAtTemplate()) {
+                    const split = splitTrailingComments(chunk);
+                    chunk = split.code;
+                    pending_comment = split.comment;
+                }
+                const zig_code = std.mem.trim(u8, chunk, " \t\n\r");
                 if (zig_code.len > 0) {
                     try zig_code_parts.append(self.allocator, zig_code);
                 }
@@ -183,6 +196,47 @@ pub const Parser = struct {
             _ = self.advance();
             if (c == '\n') break;
         }
+    }
+
+    const TrailingComments = struct {
+        /// The chunk with the trailing comment run removed.
+        code: []const u8,
+        /// The peeled run, or null when the chunk does not end in comments.
+        comment: ?[]const u8,
+    };
+
+    /// Split a chunk of header Zig code into the code proper and the run of
+    /// whole-line comments trailing it.
+    ///
+    /// The run may contain blank lines but must begin at a comment line, so a
+    /// chunk ending in blank lines alone yields nothing. `//!` module docs are
+    /// never peeled: they are only legal at the top of a file, so moving one
+    /// down onto a struct would turn a misplaced comment into a compile error.
+    ///
+    /// Called at the header->`templ` boundary so a comment stays with the
+    /// template it was written above rather than being hoisted into the header
+    /// and emitted over whichever struct comes first.
+    fn splitTrailingComments(chunk: []const u8) TrailingComments {
+        const none: TrailingComments = .{ .code = chunk, .comment = null };
+        // Byte offset where the trailing comment run starts, if any.
+        var comment_start: ?usize = null;
+        var line_end = chunk.len;
+        while (true) {
+            const prev_nl = std.mem.lastIndexOfScalar(u8, chunk[0..line_end], '\n');
+            const line_start = if (prev_nl) |nl| nl + 1 else 0;
+            const line = std.mem.trim(u8, chunk[line_start..line_end], " \t\r");
+            if (std.mem.startsWith(u8, line, "//!")) break;
+            if (std.mem.startsWith(u8, line, "//")) {
+                comment_start = line_start;
+            } else if (line.len != 0) {
+                break;
+            }
+            if (prev_nl) |nl| line_end = nl else break;
+        }
+        const start = comment_start orelse return none;
+        const comment = std.mem.trim(u8, chunk[start..], " \t\n\r");
+        if (comment.len == 0) return none;
+        return .{ .code = chunk[0..start], .comment = comment };
     }
 
     pub fn parseTemplate(self: *Parser) Error!ast.Template {
@@ -1966,4 +2020,141 @@ test "parse multiline html attributes - issue #14" {
     try std.testing.expectEqualStrings("type", element.attributes[0].name);
     try std.testing.expectEqualStrings("data-action", element.attributes[1].name);
     try std.testing.expectEqualStrings("class", element.attributes[2].name);
+}
+
+test "leading comment attaches to its own templ, not the header" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const source =
+        \\const std = @import("std");
+        \\
+        \\/// Doc on a header struct, which keeps it.
+        \\pub const Thing = struct { a: u8 };
+        \\
+        \\/// Doc for First.
+        \\pub templ First() {
+        \\    <div>first</div>
+        \\}
+        \\
+        \\// Plain comment for Second.
+        \\pub templ Second() {
+        \\    <div>second</div>
+        \\}
+    ;
+
+    var parser = Parser.init(arena.allocator(), source);
+    const file = try parser.parseFile();
+
+    try std.testing.expectEqual(@as(usize, 2), file.templates.len);
+    try std.testing.expectEqualStrings("/// Doc for First.", file.templates[0].leading_comment.?);
+    try std.testing.expectEqualStrings("// Plain comment for Second.", file.templates[1].leading_comment.?);
+
+    // The header keeps the comment on its own declaration and loses the two
+    // that belong to templates.
+    try std.testing.expect(std.mem.indexOf(u8, file.header, "/// Doc on a header struct") != null);
+    try std.testing.expect(std.mem.indexOf(u8, file.header, "Doc for First") == null);
+    try std.testing.expect(std.mem.indexOf(u8, file.header, "Plain comment for Second") == null);
+}
+
+test "leading comment spans multiple lines and blank separators" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const source =
+        \\const x = 1;
+        \\
+        \\/// First line.
+        \\/// Second line.
+        \\pub templ A() {
+        \\    <p>a</p>
+        \\}
+        \\
+        \\// Separated from its templ by a blank line.
+        \\
+        \\pub templ B() {
+        \\    <p>b</p>
+        \\}
+    ;
+
+    var parser = Parser.init(arena.allocator(), source);
+    const file = try parser.parseFile();
+
+    try std.testing.expectEqualStrings("/// First line.\n/// Second line.", file.templates[0].leading_comment.?);
+    try std.testing.expectEqualStrings("// Separated from its templ by a blank line.", file.templates[1].leading_comment.?);
+    try std.testing.expectEqualStrings("const x = 1;", file.header);
+}
+
+test "templ without a leading comment gets none" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const source =
+        \\const x = 1;
+        \\
+        \\pub templ A() {
+        \\    <p>a</p>
+        \\}
+    ;
+
+    var parser = Parser.init(arena.allocator(), source);
+    const file = try parser.parseFile();
+
+    try std.testing.expect(file.templates[0].leading_comment == null);
+    try std.testing.expectEqualStrings("const x = 1;", file.header);
+}
+
+test "trailing header comment at EOF stays in the header" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const source =
+        \\pub templ A() {
+        \\    <p>a</p>
+        \\}
+        \\
+        \\// Nothing follows, so there is no templ to attach this to.
+    ;
+
+    var parser = Parser.init(arena.allocator(), source);
+    const file = try parser.parseFile();
+
+    try std.testing.expect(file.templates[0].leading_comment == null);
+    try std.testing.expect(std.mem.indexOf(u8, file.header, "Nothing follows") != null);
+}
+
+test "module doc comment is never peeled off the header" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const source =
+        \\//! Module docs, legal only at the top of a file.
+        \\pub templ A() {
+        \\    <p>a</p>
+        \\}
+    ;
+
+    var parser = Parser.init(arena.allocator(), source);
+    const file = try parser.parseFile();
+
+    try std.testing.expect(file.templates[0].leading_comment == null);
+    try std.testing.expect(std.mem.indexOf(u8, file.header, "//! Module docs") != null);
+}
+
+test "a same-line trailing comment is not mistaken for a leading one" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const source =
+        \\const x = 1; // explains x, not the templ
+        \\pub templ A() {
+        \\    <p>a</p>
+        \\}
+    ;
+
+    var parser = Parser.init(arena.allocator(), source);
+    const file = try parser.parseFile();
+
+    try std.testing.expect(file.templates[0].leading_comment == null);
+    try std.testing.expectEqualStrings("const x = 1; // explains x, not the templ", file.header);
 }

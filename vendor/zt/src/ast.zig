@@ -17,6 +17,11 @@ pub const Template = struct {
     params: []const Parameter,
     is_public: bool,
     body: []const Node,
+    /// Whole-line comment block written directly above `templ` in the source.
+    /// Re-emitted on this template's own generated struct; without it the block
+    /// would be swallowed into the file header and land on whichever struct is
+    /// emitted first, silently documenting an unrelated template.
+    leading_comment: ?[]const u8 = null,
 };
 
 pub const Node = union(enum) {
