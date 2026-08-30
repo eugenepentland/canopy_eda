@@ -4846,7 +4846,10 @@ fn releaseNeedsWaiver(gate: fab_gate.Result) bool {
     return gate.drc.raw.len > gate.drc.effective.len;
 }
 
-fn standaloneReleaseAssemblyHtml(
+/// Render the offline Assembly member for callers that compose a release from
+/// the same resolved `FabView` outside the per-board HTTP endpoint (notably a
+/// multi-board system package).
+pub fn standaloneReleaseAssemblyHtml(
     ctx: *Server,
     req: *httpz.Request,
     name: []const u8,

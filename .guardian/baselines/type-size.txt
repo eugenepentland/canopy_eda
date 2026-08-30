@@ -95,4 +95,6 @@
 9 src/serve/pcb_layout_page.zig|SolvedRequest
 8 src/serve/saved_zone.zig|SavedZone
 8 src/subcircuit_silkscreen.zig|Annotation
+9 src/system_review.zig|DocumentSpec
+9 src/system_review.zig|SystemSpec
 8 src/thermal_scenarios.zig|Row

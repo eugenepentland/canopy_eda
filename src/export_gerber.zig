@@ -107,6 +107,24 @@ pub const plated_drill_suffix = "PTH.drl";
 /// …and the non-plated mounting holes, which the fab drills without copper.
 pub const non_plated_drill_suffix = "NPTH.drl";
 
+/// Recognize filename extensions owned by the Gerber/Excellon fabrication
+/// contract, including vendor-generic and arbitrary inner-copper spellings.
+pub fn isCamOutputFilename(filename: []const u8) bool {
+    const extensions = [_][]const u8{
+        ".gbr", ".ger", ".gerber", ".gbrjob", ".drl", ".xln", ".exc",
+        ".gtl", ".gbl", ".gts",    ".gbs",    ".gtp", ".gbp", ".gto",
+        ".gbo", ".gko", ".gm1",    ".gml",    ".art",
+    };
+    for (extensions) |extension| {
+        if (std.ascii.endsWithIgnoreCase(filename, extension)) return true;
+    }
+    const dot = std.mem.lastIndexOfScalar(u8, filename, '.') orelse return false;
+    const extension = filename[dot + 1 ..];
+    if (extension.len < 2 or std.ascii.toLower(extension[0]) != 'g') return false;
+    for (extension[1..]) |byte| if (!std.ascii.isDigit(byte)) return false;
+    return true;
+}
+
 /// Contract-owned archive paths for the MATLAB R2022b four-layer simulation
 /// handoff. They live beside the ordinary fab suffixes so CAM extensions have
 /// one owner even though this package uses MATLAB's required layer basenames.
@@ -3411,6 +3429,15 @@ test "the package's non-layer member names resolve to the writer's constants" {
     // Drill members are distinguished by plating class, never by extension.
     try testing.expect(std.mem.endsWith(u8, plated_drill_suffix, ".drl"));
     try testing.expect(std.mem.endsWith(u8, non_plated_drill_suffix, ".drl"));
+}
+
+// spec: export_gerber - CAM output filename detection recognizes layer, job, drill, and arbitrary inner-copper extensions from the Gerber owner
+test "CAM filename detection covers package output extensions" {
+    try testing.expect(isCamOutputFilename("board-F_Cu.gtl"));
+    try testing.expect(isCamOutputFilename("board-job.GBRJOB"));
+    try testing.expect(isCamOutputFilename("board-PTH.drl"));
+    try testing.expect(isCamOutputFilename("board-In7_Cu.g8"));
+    try testing.expect(!isCamOutputFilename("review/board.pdf"));
 }
 
 // spec: export_gerber - the .gbrjob job file lists board size, layer count, and each file's function

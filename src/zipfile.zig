@@ -14,9 +14,30 @@ pub const Entry = struct { name: []const u8, data: []const u8 };
 /// are byte-reproducible for identical inputs.
 const dos_date: u16 = 0x0021;
 
+/// Exact byte count of the deterministic store-method archive, rejecting any
+/// input that cannot be represented by this writer's ZIP32 fields.
+pub fn encodedSize(entries: []const Entry) error{Zip32LimitExceeded}!u64 {
+    if (entries.len > std.math.maxInt(u16)) return error.Zip32LimitExceeded;
+    var local_size: u64 = 0;
+    var central_size: u64 = 0;
+    for (entries) |entry| {
+        if (entry.name.len > std.math.maxInt(u16) or entry.data.len > std.math.maxInt(u32))
+            return error.Zip32LimitExceeded;
+        local_size = std.math.add(u64, local_size, 30 + @as(u64, @intCast(entry.name.len)) + @as(u64, @intCast(entry.data.len))) catch
+            return error.Zip32LimitExceeded;
+        central_size = std.math.add(u64, central_size, 46 + @as(u64, @intCast(entry.name.len))) catch
+            return error.Zip32LimitExceeded;
+        if (local_size > std.math.maxInt(u32) or central_size > std.math.maxInt(u32))
+            return error.Zip32LimitExceeded;
+    }
+    const body_size = std.math.add(u64, local_size, central_size) catch return error.Zip32LimitExceeded;
+    return std.math.add(u64, body_size, 22) catch return error.Zip32LimitExceeded;
+}
+
 /// Write `entries` as a complete ZIP archive: local headers + data, central
 /// directory, end record.
 pub fn write(w: *std.Io.Writer, entries: []const Entry) std.Io.Writer.Error!void {
+    _ = encodedSize(entries) catch return error.WriteFailed;
     var offset: u64 = 0;
     // Local file headers + stored data.
     for (entries) |e| {
@@ -133,6 +154,36 @@ test "write produces an archive std.zip can extract" {
         seen += 1;
     }
     try testing.expectEqual(entries.len, seen);
+}
+
+test "write rejects ZIP32 field overflow before producing bytes" {
+    const too_many = try testing.allocator.alloc(Entry, std.math.maxInt(u16) + 1);
+    defer testing.allocator.free(too_many);
+    @memset(too_many, .{ .name = "a", .data = "" });
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try testing.expectError(error.WriteFailed, write(&out.writer, too_many));
+    try testing.expectEqual(@as(usize, 0), out.written().len);
+
+    const long_name = try testing.allocator.alloc(u8, std.math.maxInt(u16) + 1);
+    defer testing.allocator.free(long_name);
+    @memset(long_name, 'n');
+    try testing.expectError(
+        error.WriteFailed,
+        write(&out.writer, &.{.{ .name = long_name, .data = "" }}),
+    );
+    try testing.expectEqual(@as(usize, 0), out.written().len);
+}
+
+test "encoded size predicts the complete archive before allocation" {
+    const entries = [_]Entry{
+        .{ .name = "a.txt", .data = "abc" },
+        .{ .name = "nested/b.bin", .data = "12345" },
+    };
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try write(&out.writer, &entries);
+    try testing.expectEqual(try encodedSize(&entries), out.written().len);
 }
 
 // Seeds: empty, a bare word, a path-shaped name carrying an embedded newline,

@@ -101,7 +101,14 @@ test "auth-request: dev bypass admits a loopback request with ward unconfigured"
 
 // spec: serve - A loopback request carrying any proxy header does not receive the dev bypass
 test "auth-request: a proxy header defeats the dev bypass for every proxy header" {
-    const proxy_headers = [_][]const u8{ "x-forwarded-for", "x-forwarded-host", "x-real-ip", "forwarded" };
+    const proxy_headers = [_][]const u8{
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-forwarded-proto",
+        "x-forwarded-port",
+        "x-real-ip",
+        "forwarded",
+    };
     for (proxy_headers) |h| {
         var env = TestEnv{ .a = std.testing.allocator };
         defer env.deinit(); // unconfigured ward → fail-closed 503 proves no bypass fired

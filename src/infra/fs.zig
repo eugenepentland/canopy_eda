@@ -65,6 +65,21 @@ pub const ReadTrace = struct {
         self.directories.deinit(self.allocator);
     }
 
+    /// Conservative byte count for retained trace arrays, paths, and member
+    /// names. Release preflight uses this to bound evidence memory, not just
+    /// the archived source payloads that caused the reads.
+    pub fn retainedBytes(self: *const ReadTrace) usize {
+        var total = saturatedProduct(self.entries.capacity, @sizeOf(ReadTraceEntry));
+        total = saturatedSum(total, saturatedProduct(self.directories.capacity, @sizeOf(DirectoryTrace)));
+        for (self.entries.items) |entry| total = saturatedSum(total, entry.path.len);
+        for (self.directories.items) |directory| {
+            total = saturatedSum(total, directory.path.len);
+            total = saturatedSum(total, saturatedProduct(directory.members.capacity, @sizeOf(DirectoryMember)));
+            for (directory.members.items) |member| total = saturatedSum(total, member.name.len);
+        }
+        return total;
+    }
+
     /// Begin tracing reads on this request thread.
     pub fn begin(self: *ReadTrace) void {
         if (self.started or active_read_trace != null) {
@@ -353,6 +368,14 @@ pub const ReadTrace = struct {
     }
 };
 
+fn saturatedSum(left: usize, right: usize) usize {
+    return std.math.add(usize, left, right) catch std.math.maxInt(usize);
+}
+
+fn saturatedProduct(left: usize, right: usize) usize {
+    return std.math.mul(usize, left, right) catch std.math.maxInt(usize);
+}
+
 // Release evaluation is synchronous inside one server/MCP handler. The
 // filesystem adapter is intentionally the sole owner of this thread-local
 // capability because threading it through every parser would let untraced
@@ -360,6 +383,12 @@ pub const ReadTrace = struct {
 // single-scope, owner-thread, and bounded-lifetime invariants; Guardian pins the
 // identifier to this file so container nesting cannot hide another instance.
 threadlocal var active_read_trace: ?*ReadTrace = null;
+
+/// True while this request thread is collecting an exact filesystem read-set.
+/// Derived-result caches use this to force their source reads through tracing.
+pub fn hasActiveReadTrace() bool {
+    return active_read_trace != null;
+}
 
 /// Return the active I/O capability. Tests use the runner-owned capability;
 /// executable roots expose the one supplied by `std.process.Init`.
@@ -381,6 +410,17 @@ test "read trace digest sorts canonical paths" {
     try second.record("/project/src/design.sexp", "source");
 
     try std.testing.expectEqual(first.digest(), second.digest());
+}
+
+test "read trace reports retained evidence memory" {
+    var trace = ReadTrace.init(std.testing.allocator);
+    defer trace.deinit();
+    try trace.record("/project/src/design.sexp", "source");
+    try trace.record("/project/src/design.bom", "bom");
+
+    const entry_storage = trace.entries.capacity * @sizeOf(ReadTraceEntry);
+    try std.testing.expect(trace.retainedBytes() >= entry_storage +
+        "/project/src/design.sexp".len + "/project/src/design.bom".len);
 }
 
 test "nested read traces invalidate both scopes without stealing reads" {
@@ -553,9 +593,108 @@ pub const Walker = struct {
     }
 };
 
+/// Recursive walker that opens every directory component without following
+/// symlinks. Child handles are pinned before their entry is returned, closing
+/// the readdir/open race that would otherwise traverse a swapped symlink.
+pub const SecureWalker = struct {
+    const Frame = struct {
+        dir: std.Io.Dir,
+        iterator: std.Io.Dir.Iterator,
+        prefix_len: usize,
+        owned: bool,
+    };
+
+    /// One pinned nonsymlink entry yielded by a secure recursive walk.
+    pub const Entry = struct {
+        dir: Dir,
+        basename: []const u8,
+        path: []const u8,
+        kind: std.Io.File.Kind,
+    };
+
+    allocator: std.mem.Allocator,
+    frames: std.ArrayList(Frame) = .empty,
+    path: std.ArrayList(u8) = .empty,
+
+    pub const Error = std.mem.Allocator.Error || std.Io.Dir.Iterator.Error || std.Io.Dir.OpenError;
+
+    fn init(allocator: std.mem.Allocator, root: std.Io.Dir) std.mem.Allocator.Error!SecureWalker {
+        var walker = SecureWalker{ .allocator = allocator };
+        try walker.frames.append(allocator, .{
+            .dir = root,
+            .iterator = root.iterate(),
+            .prefix_len = 0,
+            .owned = false,
+        });
+        return walker;
+    }
+
+    pub fn next(self: *SecureWalker) Error!?Entry {
+        while (self.frames.items.len > 0) {
+            const frame = &self.frames.items[self.frames.items.len - 1];
+            const item = frame.iterator.next(currentIo()) catch |err| {
+                const failed = self.frames.pop().?;
+                if (failed.owned) failed.dir.close(currentIo());
+                return err;
+            } orelse {
+                const finished = self.frames.pop().?;
+                if (finished.owned) finished.dir.close(currentIo());
+                continue;
+            };
+
+            self.path.shrinkRetainingCapacity(frame.prefix_len);
+            if (self.path.items.len > 0) try self.path.append(self.allocator, '/');
+            const basename_start = self.path.items.len;
+            try self.path.appendSlice(self.allocator, item.name);
+            const parent = frame.dir;
+            var kind = item.kind;
+            if (item.kind == .directory) {
+                const child = parent.openDir(currentIo(), item.name, .{
+                    .iterate = true,
+                    .follow_symlinks = false,
+                }) catch |err| switch (err) {
+                    error.NotDir, error.SymLinkLoop => {
+                        kind = .sym_link;
+                        return .{
+                            .dir = .{ .d = parent },
+                            .basename = self.path.items[basename_start..],
+                            .path = self.path.items,
+                            .kind = kind,
+                        };
+                    },
+                    else => return err,
+                };
+                self.frames.append(self.allocator, .{
+                    .dir = child,
+                    .iterator = child.iterate(),
+                    .prefix_len = self.path.items.len,
+                    .owned = true,
+                }) catch |err| {
+                    child.close(currentIo());
+                    return err;
+                };
+            }
+            return .{
+                .dir = .{ .d = parent },
+                .basename = self.path.items[basename_start..],
+                .path = self.path.items,
+                .kind = kind,
+            };
+        }
+        return null;
+    }
+
+    pub fn deinit(self: *SecureWalker) void {
+        for (self.frames.items) |frame| if (frame.owned) frame.dir.close(currentIo());
+        self.frames.deinit(self.allocator);
+        self.path.deinit(self.allocator);
+    }
+};
+
 /// Buffer supplied for the writer owned by an atomic-file transaction.
 pub const AtomicFileOptions = struct {
     write_buffer: []u8,
+    replace: bool = true,
 };
 
 /// Compatibility wrapper for the former `std.fs.AtomicFile`: callers keep a
@@ -567,6 +706,7 @@ pub const AtomicFile = struct {
 
     pub const InitError = std.Io.Dir.CreateFileAtomicError;
     pub const FinishError = File.WriteError || std.Io.File.Atomic.ReplaceError;
+    pub const PreserveFinishError = File.WriteError || std.Io.File.Atomic.LinkError;
 
     /// Abandon this atomic write and release its temporary resources.
     pub fn deinit(self: *AtomicFile) void {
@@ -580,6 +720,15 @@ pub const AtomicFile = struct {
         };
         try self.inner.replace(currentIo());
     }
+
+    /// Flush buffered data and atomically publish the destination only when no
+    /// directory entry with that name exists.
+    pub fn finishPreserve(self: *AtomicFile) PreserveFinishError!void {
+        self.file_writer.interface.flush() catch |err| switch (err) {
+            error.WriteFailed => return self.file_writer.err.?,
+        };
+        try self.inner.link(currentIo());
+    }
 };
 
 /// Directory handle bound to the active root I/O capability.
@@ -590,6 +739,7 @@ pub const Dir = struct {
     pub const AccessError = std.Io.Dir.AccessError;
     pub const CopyFileError = std.Io.Dir.CopyFileError;
     pub const DeleteFileError = std.Io.Dir.DeleteFileError;
+    pub const MakeDirError = std.Io.Dir.CreateDirError;
     pub const MakeError = std.Io.Dir.CreateDirPathError;
     pub const OpenError = std.Io.Dir.OpenError;
     pub const RenameError = std.Io.Dir.RenameError;
@@ -620,6 +770,93 @@ pub const Dir = struct {
             // compatible, but makes the manufacturing trace fail closed.
             var absolute_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const path_len = self.d.realPathFile(currentIo(), sub_path, &absolute_path) catch {
+                trace.consistent = false;
+                return bytes;
+            };
+            trace.recordResolution(self.d, sub_path, absolute_path[0..path_len]);
+            try trace.record(absolute_path[0..path_len], bytes);
+        }
+        return bytes;
+    }
+
+    const SecureReadError = @typeInfo(@typeInfo(@TypeOf(readFileAllocSecureImpl)).@"fn".return_type.?).error_union.error_set;
+
+    /// Read a bounded regular file while refusing every symlink component.
+    /// Each parent is opened relative to the preceding directory handle, so a
+    /// rename after a component is opened cannot redirect the remaining walk.
+    pub fn readFileAllocSecure(
+        self: Dir,
+        allocator: std.mem.Allocator,
+        sub_path: []const u8,
+        max: usize,
+    ) SecureReadError![]u8 {
+        return self.readFileAllocSecureImpl(allocator, sub_path, max);
+    }
+
+    fn readFileAllocSecureImpl(
+        self: Dir,
+        allocator: std.mem.Allocator,
+        sub_path: []const u8,
+        max: usize,
+    ) ![]u8 {
+        if (sub_path.len == 0 or sub_path[0] == '/' or std.mem.indexOfScalar(u8, sub_path, '\\') != null)
+            return error.UnsafePath;
+        if (sub_path[sub_path.len - 1] == '/') return error.UnsafePath;
+
+        const basename = std.fs.path.basename(sub_path);
+        if (!safePathComponent(basename)) return error.UnsafePath;
+
+        var current = self.d;
+        var owned: ?std.Io.Dir = null;
+        defer if (owned) |dir| dir.close(currentIo());
+        if (std.fs.path.dirname(sub_path)) |parent| {
+            var components = std.mem.splitScalar(u8, parent, '/');
+            while (components.next()) |component| {
+                if (!safePathComponent(component)) return error.UnsafePath;
+                const next = current.openDir(currentIo(), component, .{
+                    .follow_symlinks = false,
+                }) catch |err| {
+                    traceSecureReadError(self.d, sub_path, err);
+                    return err;
+                };
+                if (owned) |dir| dir.close(currentIo());
+                owned = next;
+                current = next;
+            }
+        }
+
+        var opened = current.openFile(currentIo(), basename, .{
+            .allow_directory = false,
+            .follow_symlinks = false,
+            .resolve_beneath = true,
+        }) catch |err| {
+            traceSecureReadError(self.d, sub_path, err);
+            return err;
+        };
+        defer opened.close(currentIo());
+
+        var read_buffer: [4096]u8 = undefined;
+        var reader = opened.reader(currentIo(), &read_buffer);
+        const bytes = reader.interface.allocRemaining(allocator, .limited64(max)) catch |err| switch (err) {
+            error.ReadFailed => {
+                if (active_read_trace) |trace| trace.consistent = false;
+                return reader.err.?;
+            },
+            error.StreamTooLong => {
+                if (active_read_trace) |trace| trace.consistent = false;
+                return error.FileTooBig;
+            },
+            else => {
+                if (active_read_trace) |trace| trace.consistent = false;
+                return err;
+            },
+        };
+        errdefer allocator.free(bytes);
+
+        if (active_read_trace) |trace| {
+            trace.recordCandidate(self.d, sub_path, .exists);
+            var absolute_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const path_len = opened.realPath(currentIo(), &absolute_path) catch {
                 trace.consistent = false;
                 return bytes;
             };
@@ -707,9 +944,25 @@ pub const Dir = struct {
         return .{ .walker = try self.d.walk(allocator) };
     }
 
+    /// Start a recursive no-symlink traversal.
+    pub fn walkSecure(self: Dir, allocator: std.mem.Allocator) std.mem.Allocator.Error!SecureWalker {
+        return SecureWalker.init(allocator, self.d);
+    }
+
     /// Read metadata for a child path.
     pub fn statFile(self: Dir, sub_path: []const u8) StatFileError!std.Io.Dir.Stat {
         return self.d.statFile(currentIo(), sub_path, .{});
+    }
+
+    /// Read metadata for the named directory entry without following a final
+    /// symlink.
+    pub fn statFileNoFollow(self: Dir, sub_path: []const u8) StatFileError!std.Io.Dir.Stat {
+        return self.d.statFile(currentIo(), sub_path, .{ .follow_symlinks = false });
+    }
+
+    /// Create exactly one child directory.
+    pub fn makeDir(self: Dir, sub_path: []const u8) MakeDirError!void {
+        return self.d.createDir(currentIo(), sub_path, .default_dir);
     }
 
     /// Create a directory path and any missing parents.
@@ -732,6 +985,11 @@ pub const Dir = struct {
         return self.d.rename(old_sub_path, self.d, new_sub_path, currentIo());
     }
 
+    /// Rename one child into another already-open directory.
+    pub fn renameTo(self: Dir, old_sub_path: []const u8, destination: Dir, new_sub_path: []const u8) RenameError!void {
+        return self.d.rename(old_sub_path, destination.d, new_sub_path, currentIo());
+    }
+
     /// Copy one child file into another directory.
     pub fn copyFile(
         self: Dir,
@@ -745,13 +1003,26 @@ pub const Dir = struct {
 
     /// Begin an atomic replacement transaction for a child file.
     pub fn atomicFile(self: Dir, sub_path: []const u8, options: AtomicFileOptions) AtomicFile.InitError!AtomicFile {
-        const inner = try self.d.createFileAtomic(currentIo(), sub_path, .{ .replace = true });
+        const inner = try self.d.createFileAtomic(currentIo(), sub_path, .{ .replace = options.replace });
         return .{
             .file_writer = inner.file.writer(currentIo(), options.write_buffer),
             .inner = inner,
         };
     }
 };
+
+fn safePathComponent(component: []const u8) bool {
+    if (component.len == 0) return false;
+    if (std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..")) return false;
+    return std.mem.indexOfScalar(u8, component, 0) == null;
+}
+
+fn traceSecureReadError(dir: std.Io.Dir, sub_path: []const u8, err: anyerror) void {
+    if (active_read_trace) |trace| switch (err) {
+        error.FileNotFound => trace.recordCandidate(dir, sub_path, .absent),
+        else => trace.consistent = false,
+    };
+}
 
 /// Return the process working-directory handle.
 pub fn cwd() Dir {
