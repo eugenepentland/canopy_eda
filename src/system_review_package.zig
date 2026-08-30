@@ -13,6 +13,7 @@ const build_id = @import("build_id.zig");
 const export_fab = @import("export_fab.zig");
 const export_gerber = @import("export_gerber.zig");
 const fab_release = @import("fab_release.zig");
+const frequency_plan = @import("frequency_plan.zig");
 const infra_fs = @import("infra/fs.zig");
 const json_writer = @import("json_writer.zig");
 const pll_loop = @import("pll_loop.zig");
@@ -651,6 +652,25 @@ fn addEngineeringEvidenceBytes(total: *usize, analysis: board_review.Engineering
         try addBoundedBytes(total, finding.message.len, max_analysis_evidence_bytes);
     }
     for (analysis.pll) |report| try addPllEvidenceBytes(total, report);
+    for (analysis.frequency) |report| try addFrequencyPlanEvidenceBytes(total, report);
+}
+
+fn addFrequencyPlanEvidenceBytes(total: *usize, report: board_review.FrequencyPlanReport) !void {
+    try addBoundedBytes(total, @sizeOf(board_review.FrequencyPlanReport), max_analysis_evidence_bytes);
+    try addBoundedBytes(total, report.name.len, max_analysis_evidence_bytes);
+    for (report.plans) |plan| {
+        try addBoundedBytes(total, @sizeOf(board_review.FrequencyPlanSideband), max_analysis_evidence_bytes);
+        const product_storage = std.math.mul(
+            usize,
+            plan.spurs.rows.len,
+            @sizeOf(board_review.SpurProduct),
+        ) catch return error.ArchiveTooLarge;
+        try addBoundedBytes(total, product_storage, max_analysis_evidence_bytes);
+        for (plan.screens.failing) |screen| {
+            try addBoundedBytes(total, @sizeOf(board_review.FrequencyScreen), max_analysis_evidence_bytes);
+            try addBoundedBytes(total, screen.message.len, max_analysis_evidence_bytes);
+        }
+    }
 }
 
 fn addPllEvidenceBytes(total: *usize, report: board_review.PllReport) !void {
@@ -1816,6 +1836,7 @@ fn writeGeneratedSection(
         .@"power-summary" => try writePowerSummary(out, analysis, limit),
         .@"thermal-summary" => try writeThermalSummary(out, analysis, limit),
         .@"pll-summary" => try writePllSummary(out, analysis, limit),
+        .@"frequency-plan-summary" => try writeFrequencyPlanSummary(out, analysis, limit),
         .@"erc-summary" => try writeErcSummary(out, analysis, limit),
         .@"mechanical-summary" => try writeMechanicalSummary(out, analysis, limit),
         .@"open-items" => try writeOpenItems(out, analysis, limit),
@@ -2371,6 +2392,256 @@ fn writePllSchedule(
     try w.writeByte('\n');
 }
 
+/// Megahertz to three decimals — the scale and precision the frequency-plan
+/// engine writes its own assertions in, so a generated row and the build
+/// assertion behind it show a reader the same digits.
+fn writeMhz(w: *std.Io.Writer, hz: f64) !void {
+    try w.print("{d:.3} MHz", .{hz / 1e6});
+}
+
+fn writeMhzBand(w: *std.Io.Writer, band: frequency_plan.Band) !void {
+    try w.print("{d:.3}-{d:.3} MHz", .{ band.lo_hz / 1e6, band.hi_hz / 1e6 });
+}
+
+fn sidebandWord(side: frequency_plan.Sideband) []const u8 {
+    return switch (side) {
+        .high => "high",
+        .low => "low",
+        .either => "either",
+    };
+}
+
+fn placementWord(placement: frequency_plan.Placement) []const u8 {
+    return switch (placement) {
+        .wanted => "wanted",
+        .co_channel => "co-channel",
+        .filter_rejected => "filter-rejected",
+        .out_of_band => "out-of-band",
+    };
+}
+
+/// What removes a band, in the words the engine's own image assertion uses.
+/// `.none` is never rendered as "unfiltered": it means nothing declared
+/// removes this band, and an image nothing removes reaches the mixer at full
+/// amplitude, which is the fact a reader needs.
+fn rejectionWords(rejection: frequency_plan.Rejection) []const u8 {
+    return switch (rejection) {
+        .none => "removed by nothing declared — it reaches the mixer at full amplitude",
+        .if_low_pass => "wholly above the declared IF low-pass cutoff",
+        .rf_low_pass => "wholly above the declared RF low-pass cutoff",
+        .rf_high_pass => "wholly below the declared RF high-pass cutoff",
+        .outside_delivered => "wholly outside the delivered source passband",
+    };
+}
+
+/// The product table's governing-mechanism cell. A co-channel product is one
+/// no filter can reach, which is a different statement from an out-of-band
+/// product that merely has no declared filter aimed at it.
+fn writeGovernedBy(w: *std.Io.Writer, product: board_review.SpurProduct) !void {
+    if (product.placement == .wanted) return w.writeAll("the wanted product");
+    if (product.rejection != .none) return w.writeAll(rejectionWords(product.rejection));
+    return w.writeAll(switch (product.placement) {
+        .co_channel => "no declared filter removes it",
+        else => "misses the output band; nothing declared removes it",
+    });
+}
+
+/// The level cell. A product with no `(spur-table …)` entry states WHERE it
+/// lands and nothing about how big it is — this engine never invents a level,
+/// so such a row prints no dBc at all. A declared entry that no in-band limit
+/// judged prints the authored number and says plainly that nothing claimed it.
+fn writeSpurLevel(w: *std.Io.Writer, level: frequency_plan.Level) !void {
+    if (!level.declared) return w.writeAll("placement only");
+    switch (level.verdict) {
+        .unclaimed => try w.print("{d:.1} dBc declared, no in-band claim", .{level.dbc}),
+        .within_limit => try w.print("{d:.1} dBc, within limit", .{level.dbc}),
+        .over_limit => try w.print("{d:.1} dBc, over limit", .{level.dbc}),
+    }
+}
+
+fn writeFrequencyPlanSummary(out: *std.Io.Writer.Allocating, analysis: Analysis, limit: usize) !void {
+    const w = &out.writer;
+    var reports: usize = 0;
+    for (analysis.boards) |board| reports += board.snapshot.analysis.frequency.len;
+    if (reports == 0) {
+        try w.writeAll("No board in this system declares a frequency plan, so there is no generated mixer spur table.\n\n");
+        return;
+    }
+    for (analysis.boards) |board| for (board.snapshot.analysis.frequency) |report| {
+        try writeFrequencyPlanReport(out, board.member.role, report, limit);
+    };
+}
+
+fn writeFrequencyPlanReport(
+    out: *std.Io.Writer.Allocating,
+    role: []const u8,
+    report: board_review.FrequencyPlanReport,
+    limit: usize,
+) !void {
+    const w = &out.writer;
+    try w.print("### {s} frequency plan ", .{role});
+    try writeCell(w, report.name);
+    try w.writeByte('\n');
+    try w.writeByte('\n');
+    try writeFrequencyProfileLine(out, report);
+    for (report.plans) |plan|
+        try writeFrequencySidebandPlan(out, plan, report.profile.plan.source.range, limit);
+}
+
+/// One sentence-per-fact profile line: the mode the declaration screens under,
+/// the LO it mixes against, the band it commands and the enumeration it was
+/// screened to. Drive, drive window and in-band limit appear only where the
+/// declaration actually authored them.
+fn writeFrequencyProfileLine(
+    out: *std.Io.Writer.Allocating,
+    report: board_review.FrequencyPlanReport,
+) !void {
+    const w = &out.writer;
+    const profile = report.profile;
+    const lo = profile.mixer.lo;
+    try w.print("Mode: {s}. Screening reached: {s}. LO ", .{ @tagName(report.mode), @tagName(report.outcome) });
+    try writeMhz(w, lo.frequency_hz);
+    if (lo.drive_declared) {
+        try w.print(" at {d:.2} dBm", .{lo.drive_dbm});
+        if (lo.window.declared)
+            try w.print(" into a {d:.2} to {d:.2} dBm drive window", .{ lo.window.min_dbm, lo.window.max_dbm });
+    }
+    try w.print(", {s} mixing, sideband {s}. Output band ", .{
+        @tagName(profile.mixer.sense),
+        sidebandWord(profile.mixer.sideband),
+    });
+    try writeMhzBand(w, profile.plan.output_band);
+    if (profile.plan.source.delivered.declared()) {
+        try w.writeAll(" from a source delivering ");
+        try writeMhzBand(w, profile.plan.source.delivered);
+    } else try w.writeAll(" from a source with no declared delivered passband");
+    try w.print(". Products enumerated to order {d}", .{profile.spurs.max_order});
+    if (profile.spurs.limit_declared)
+        try w.print(" against a {d:.1} dBc in-band limit", .{profile.spurs.in_band_limit_dbc});
+    try w.writeAll(".\n\n");
+}
+
+fn writeFrequencySidebandPlan(
+    out: *std.Io.Writer.Allocating,
+    plan: board_review.FrequencyPlanSideband,
+    range: frequency_plan.Band,
+    limit: usize,
+) !void {
+    const w = &out.writer;
+    try w.print("#### {s}-side plan\n\n", .{sidebandWord(plan.sideband)});
+    // An unrealizable sideband carries only its rf_window verdict and no
+    // products at all, so it is stated as the refusal it is rather than
+    // rendered as a table with no rows under it.
+    if (plan.spurs.enumerated == 0) {
+        try w.writeAll("This sideband is not a realizable plan against the declared LO: no RF window closed, so no products were enumerated.\n\n");
+        return writeFrequencyScreenTable(out, plan, limit);
+    }
+    try writeFrequencyWindowFacts(out, plan, range, limit);
+    try w.writeAll("| Product | Band | Placement | Governed by | Level |\n| --- | --- | --- | --- | --- |\n");
+    for (plan.spurs.rows) |product| try writeSpurRow(out, product, limit);
+    if (plan.spurs.rows.len < plan.spurs.enumerated)
+        try w.print("\nTable capped at {d} of {d} enumerated products.\n", .{
+            plan.spurs.rows.len,
+            plan.spurs.enumerated,
+        });
+    try w.writeByte('\n');
+    try writeFrequencyScreenTable(out, plan, limit);
+}
+
+/// The band facts behind the table: what RF the sideband demands, how the
+/// declared source covers it, where the image lands, and the `(m,m)` diagonal
+/// family's two counts — the unbounded closed form and what this enumeration
+/// actually reached, which are different numbers and are never merged.
+fn writeFrequencyWindowFacts(
+    out: *std.Io.Writer.Allocating,
+    plan: board_review.FrequencyPlanSideband,
+    range: frequency_plan.Band,
+    limit: usize,
+) !void {
+    const w = &out.writer;
+    try w.writeAll("- Required RF window: ");
+    try writeMhzBand(w, plan.rf.required);
+    if (range.declared()) {
+        try w.writeAll(if (plan.rf.in_range)
+            "; the declared source range contains it"
+        else
+            "; the declared source range does NOT contain it");
+    }
+    try w.writeAll(".\n- Source coverage: ");
+    try writeCoverage(w, plan.rf);
+    try w.writeAll("\n- Image: the image band lands at ");
+    try writeMhzBand(w, plan.image.band);
+    try w.print(" and is {s}.\n- Diagonal (m,m) family: ", .{rejectionWords(plan.image.rejection)});
+    try w.print("{d} land in band at the ", .{plan.diagonal.worst_case_count});
+    try writeMhz(w, plan.diagonal.worst_case_if_hz);
+    try w.print(" low edge, of which this enumeration reached {d}; the band is diagonal-clean above ", .{
+        plan.diagonal.enumerated_count,
+    });
+    try writeMhz(w, plan.diagonal.clean_above_hz);
+    try w.writeAll(".\n\n");
+    try ensureMarkdownSize(out, limit);
+}
+
+fn writeCoverage(w: *std.Io.Writer, window: frequency_plan.RfWindow) !void {
+    if (!window.covered_checked)
+        return w.writeAll("no delivered passband is declared, so band closure was not screened.");
+    if (window.covered)
+        return w.writeAll("the delivered passband contains the whole required window.");
+    var wrote = false;
+    if (!window.uncovered_low.isEmpty()) {
+        try writeMhzBand(w, window.uncovered_low);
+        try w.writeAll(" of the required window falls below the delivered passband");
+        wrote = true;
+    }
+    if (!window.uncovered_high.isEmpty()) {
+        try w.writeAll(if (wrote) " and " else "");
+        try writeMhzBand(w, window.uncovered_high);
+        try w.writeAll(" falls above it");
+    }
+    try w.writeAll(" — the plan does not close.");
+}
+
+fn writeSpurRow(
+    out: *std.Io.Writer.Allocating,
+    product: board_review.SpurProduct,
+    limit: usize,
+) !void {
+    const w = &out.writer;
+    try w.print("| ({d},{d}) | ", .{ product.order.m, product.order.n });
+    try writeMhzBand(w, product.band);
+    try w.print(" | {s} | ", .{placementWord(product.placement)});
+    try writeGovernedBy(w, product);
+    try w.writeAll(" | ");
+    try writeSpurLevel(w, product.level);
+    try w.writeAll(" |\n");
+    try ensureMarkdownSize(out, limit);
+}
+
+fn writeFrequencyScreenTable(
+    out: *std.Io.Writer.Allocating,
+    plan: board_review.FrequencyPlanSideband,
+    limit: usize,
+) !void {
+    const w = &out.writer;
+    if (plan.screens.failing.len == 0) {
+        try w.writeAll("Every screen on this plan passes.\n\n");
+        return;
+    }
+    try w.writeAll("| Screen | Status | Detail |\n| --- | --- | --- |\n");
+    for (plan.screens.failing) |screen| {
+        try w.print("| `{s}` | {s} | ", .{ screen.screen, @tagName(screen.status) });
+        try writeCell(w, screen.message);
+        try w.writeAll(" |\n");
+        try ensureMarkdownSize(out, limit);
+    }
+    if (plan.screens.failing.len < plan.screens.warn + plan.screens.fail)
+        try w.print("\nList capped at {d} of {d} non-passing screens.\n", .{
+            plan.screens.failing.len,
+            plan.screens.warn + plan.screens.fail,
+        });
+    try w.writeByte('\n');
+}
+
 /// One row of the release-blocker register: a stable id, where it came from,
 /// how badly it blocks, and a one-line summary.
 const OpenItem = struct {
@@ -2383,7 +2654,7 @@ const OpenItem = struct {
 fn writeOpenItems(out: *std.Io.Writer.Allocating, analysis: Analysis, limit: usize) !void {
     const w = &out.writer;
     if (!openItemsPresent(analysis)) {
-        try w.writeAll("No open items: every package gate, board review, rule check and loop screen in this system is clear.\n\n");
+        try w.writeAll("No open items: every package gate, board review, rule check, loop screen and frequency-plan screen in this system is clear.\n\n");
         return;
     }
     try w.writeAll("| Item | Source | Severity | Summary |\n| --- | --- | --- | --- |\n");
@@ -2400,6 +2671,7 @@ fn openItemsPresent(analysis: Analysis) bool {
         if (snapshot.analysis.checks.errors > 0) return true;
         if (board.fab.readiness.blocked or board.fab.readiness.needs_waiver) return true;
         if (boardPllFailures(board) > 0) return true;
+        if (boardFrequencyPlanFailures(board) > 0) return true;
     }
     return false;
 }
@@ -2408,6 +2680,14 @@ fn boardPllFailures(board: BoardEvidence) usize {
     var failing: usize = 0;
     for (board.snapshot.analysis.pll) |report| {
         for (report.populations) |population| failing += population.failing.len;
+    }
+    return failing;
+}
+
+fn boardFrequencyPlanFailures(board: BoardEvidence) usize {
+    var failing: usize = 0;
+    for (board.snapshot.analysis.frequency) |report| {
+        for (report.plans) |plan| failing += plan.screens.failing.len;
     }
     return failing;
 }
@@ -2502,6 +2782,35 @@ fn writeBoardOpenItems(out: *std.Io.Writer.Allocating, board: BoardEvidence, lim
             "board release requires an explicit waiver",
     }, limit);
     for (snapshot.analysis.pll) |report| try writePllOpenItems(out, board.member.role, report, limit);
+    for (snapshot.analysis.frequency) |report|
+        try writeFrequencyPlanOpenItems(out, board.member.role, report, limit);
+}
+
+/// Where a failing frequency-plan screen names itself in the register. Static
+/// per sideband so the row costs no allocation, and worded so two sidebands of
+/// one declaration never collapse into the same-looking row.
+fn frequencyPlanSource(side: frequency_plan.Sideband) []const u8 {
+    return switch (side) {
+        .high => "frequency plan (high side)",
+        .low => "frequency plan (low side)",
+        .either => "frequency plan",
+    };
+}
+
+fn writeFrequencyPlanOpenItems(
+    out: *std.Io.Writer.Allocating,
+    role: []const u8,
+    report: board_review.FrequencyPlanReport,
+    limit: usize,
+) !void {
+    for (report.plans) |plan| for (plan.screens.failing) |screen| {
+        try writeOpenItemRow(out, .{
+            .id = role,
+            .source = frequencyPlanSource(plan.sideband),
+            .severity = @tagName(screen.status),
+            .summary = screen.message,
+        }, limit);
+    };
 }
 
 fn writePllOpenItems(
@@ -3470,6 +3779,7 @@ fn fixtureEngineering(allocator: std.mem.Allocator) !board_review.Engineering {
     }});
     return .{
         .power = rails,
+        .frequency = try fixtureFrequencyPlans(allocator),
         // The barracuda shape: the board-coupled ladder wants airflow where the
         // datasheet screen called the same board passively fine, and most of
         // the population declares no power at all.
@@ -3505,6 +3815,103 @@ fn fixtureEngineering(allocator: std.mem.Allocator) !board_review.Engineering {
         .pll = pll,
         .bom = .{ .placements = 4, .lines = 3, .dnp_placements = 1, .dnp_lines = 1 },
     };
+}
+
+/// The Barracuda shape: a swept X-band source behind a filter pair that does
+/// NOT reach the bottom of the window the plan demands, a fixed LO whose image
+/// nothing declared removes, and a spur table that claims one co-channel
+/// product and leaves the rest stating placement only.
+fn fixtureFrequencyPlans(allocator: std.mem.Allocator) ![]const board_review.FrequencyPlanReport {
+    const products = try allocator.dupe(board_review.SpurProduct, &.{
+        .{
+            .order = .{ .m = 0, .n = 1 },
+            .band = .{ .lo_hz = 10.95e9, .hi_hz = 10.95e9 },
+            .placement = .out_of_band,
+            .rejection = .none,
+            .level = .{},
+        },
+        .{
+            .order = .{ .m = 1, .n = 1 },
+            .band = .{ .lo_hz = 50e6, .hi_hz = 1.5e9 },
+            .placement = .wanted,
+            .rejection = .none,
+            .level = .{},
+        },
+        .{
+            .order = .{ .m = 2, .n = 2 },
+            // Hull across a DC crossing: both monotone branches reach down to 0.
+            .band = .{ .lo_hz = 0, .hi_hz = 3e9 },
+            .placement = .co_channel,
+            .rejection = .none,
+            .level = .{ .dbc = -62, .declared = true, .verdict = .within_limit },
+        },
+        .{
+            .order = .{ .m = 3, .n = 1 },
+            .band = .{ .lo_hz = 22.05e9, .hi_hz = 26.4e9 },
+            .placement = .filter_rejected,
+            .rejection = .if_low_pass,
+            .level = .{},
+        },
+    });
+    const failing = try allocator.dupe(board_review.FrequencyScreen, &.{
+        .{
+            .screen = "band_closure",
+            .status = .fail,
+            .message = "Barracuda Band 1: the high-side RF window 11000.000-12450.000 MHz for output band 50.000-1500.000 MHz leaves the delivered passband 11100.000-12900.000 MHz",
+        },
+        .{
+            .screen = "spur_coverage",
+            .status = .warn,
+            .message = "Barracuda Band 1: 1 of the high-side co-channel products carry no declared suppression",
+        },
+    });
+    const plans = try allocator.dupe(board_review.FrequencyPlanSideband, &.{.{
+        .sideband = .high,
+        .rf = .{
+            .required = .{ .lo_hz = 11e9, .hi_hz = 12.45e9 },
+            .uncovered_low = .{ .lo_hz = 11e9, .hi_hz = 11.1e9 },
+            .covered = false,
+            .covered_checked = true,
+            .in_range = true,
+        },
+        .image = .{ .band = .{ .lo_hz = 9.45e9, .hi_hz = 10.9e9 }, .rejection = .none },
+        .diagonal = .{
+            .worst_case_if_hz = 50e6,
+            .worst_case_count = 29,
+            .enumerated_count = 4,
+            .clean_above_hz = 750e6,
+        },
+        .spurs = .{ .rows = products, .enumerated = products.len },
+        .screens = .{ .pass = 4, .warn = 1, .fail = 1, .failing = failing },
+    }});
+    return allocator.dupe(board_review.FrequencyPlanReport, &.{.{
+        .name = "Barracuda Band 1",
+        .mode = .gate,
+        .outcome = .screened,
+        .profile = .{
+            .plan = .{
+                .output_band = .{ .lo_hz = 50e6, .hi_hz = 1.5e9 },
+                .source = .{
+                    .range = .{ .lo_hz = 10e9, .hi_hz = 13e9 },
+                    .delivered = .{ .lo_hz = 11.1e9, .hi_hz = 12.9e9 },
+                },
+                .filters = .{ .if_low_pass_hz = 6e9 },
+            },
+            .mixer = .{
+                .sense = .difference,
+                .sideband = .high,
+                .lo = .{
+                    .frequency_hz = 10.95e9,
+                    .drive_dbm = 15,
+                    .drive_declared = true,
+                    .window = .{ .min_dbm = 13, .max_dbm = 17, .declared = true },
+                },
+                .declared = true,
+            },
+            .spurs = .{ .max_order = 5, .in_band_limit_dbc = -60, .limit_declared = true },
+        },
+        .plans = plans,
+    }});
 }
 
 fn fixtureBoardEvidence(
@@ -3766,6 +4173,138 @@ test "the loop-filter section renders ranges, failing screens and the pump sched
     try std.testing.expect(std.mem.indexOf(u8, pll, "| 4 | 200 | 60.000 MHz/V | 2.500 mA |") != null);
 }
 
+// spec: system-review - the generated frequency-plan section renders each sideband's band closure, image rejection wording, both diagonal counts and every enumerated product's placement, claiming a level only where one was declared
+test "the frequency-plan section renders the closure gap, the image and every product row" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    const analysis = try fixtureAnalysis(allocator, try fixtureEngineering(allocator), true);
+
+    const plan = try renderSection(allocator, analysis, "frequency-plan-summary");
+    try std.testing.expect(std.mem.indexOf(u8, plan, "### main frequency plan Barracuda Band 1") != null);
+    // The profile line states the LO, its drive against the mixer's window,
+    // the commanded band, the delivered source and the enumeration bound.
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        plan,
+        "Mode: gate. Screening reached: screened. LO 10950.000 MHz at 15.00 dBm into a 13.00 to 17.00 dBm drive window, difference mixing, sideband high. Output band 50.000-1500.000 MHz from a source delivering 11100.000-12900.000 MHz. Products enumerated to order 5 against a -60.0 dBc in-band limit.",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan, "#### high-side plan") != null);
+    // Band closure names the interval the delivered passband does not reach.
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        plan,
+        "- Source coverage: 11000.000-11100.000 MHz of the required window falls below the delivered passband — the plan does not close.",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan, "- Required RF window: 11000.000-12450.000 MHz; the declared source range contains it.") != null);
+    // An image nothing removes is stated as reaching the mixer, not as "none".
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        plan,
+        "- Image: the image band lands at 9450.000-10900.000 MHz and is removed by nothing declared — it reaches the mixer at full amplitude.",
+    ) != null);
+    // Both diagonal counts, never merged into one number.
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        plan,
+        "- Diagonal (m,m) family: 29 land in band at the 50.000 MHz low edge, of which this enumeration reached 4; the band is diagonal-clean above 750.000 MHz.",
+    ) != null);
+    // The wanted product stays in the table, labelled rather than counted as a spur.
+    try std.testing.expect(std.mem.indexOf(u8, plan, "| (1,1) | 50.000-1500.000 MHz | wanted | the wanted product | placement only |") != null);
+    // A co-channel product with a declared level prints it with its verdict;
+    // the hull of a DC-crossing product is rendered whole.
+    try std.testing.expect(std.mem.indexOf(u8, plan, "| (2,2) | 0.000-3000.000 MHz | co-channel | no declared filter removes it | -62.0 dBc, within limit |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan, "| (3,1) | 22050.000-26400.000 MHz | filter-rejected | wholly above the declared IF low-pass cutoff | placement only |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan, "| (0,1) | 10950.000-10950.000 MHz | out-of-band | misses the output band; nothing declared removes it | placement only |") != null);
+    // No dBc is claimed anywhere for a product that declared none: the only
+    // dBc figures in the whole section are the one declared level and the
+    // declared in-band limit.
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, plan, " dBc"));
+    // Non-passing screens are listed with their messages, as the loop section does.
+    try std.testing.expect(std.mem.indexOf(u8, plan, "| `band_closure` | fail | Barracuda Band 1: the high-side RF window 11000.000-12450.000 MHz") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan, "| `spur_coverage` | warn |") != null);
+}
+
+// spec: system-review - the generated frequency-plan section renders an unrealizable sideband as a stated refusal and names its own retention caps whenever a product or screen list truncates
+test "the frequency-plan section states an unrealizable sideband and its own caps" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+
+    // An unrealizable low-side plan carries only its rf_window verdict and no
+    // products, which must read as the refusal it is.
+    const refused = try allocator.dupe(board_review.FrequencyScreen, &.{.{
+        .screen = "rf_window",
+        .status = .fail,
+        .message = "Barracuda Band 1: the low-side RF window 9450.000-10900.000 MHz is not a realizable sweep",
+    }});
+    // A truncated plan: fewer retained rows and screens than the engine produced.
+    const rows = try allocator.dupe(board_review.SpurProduct, &.{.{
+        .order = .{ .m = 1, .n = 1 },
+        .band = .{ .lo_hz = 50e6, .hi_hz = 1.5e9 },
+        .placement = .wanted,
+        .rejection = .none,
+        .level = .{},
+    }});
+    const plans = try allocator.dupe(board_review.FrequencyPlanSideband, &.{
+        .{ .sideband = .low, .screens = .{ .fail = 1, .failing = refused } },
+        .{
+            .sideband = .high,
+            .rf = .{ .required = .{ .lo_hz = 11e9, .hi_hz = 12.45e9 } },
+            .spurs = .{ .rows = rows, .enumerated = 83 },
+            .screens = .{ .pass = 1, .warn = 3, .failing = refused },
+        },
+    });
+    var engineering: board_review.Engineering = .{};
+    engineering.frequency = try allocator.dupe(board_review.FrequencyPlanReport, &.{.{
+        .name = "Barracuda Band 1",
+        .mode = .advisory,
+        .outcome = .unrealizable,
+        .profile = .{},
+        .plans = plans,
+    }});
+
+    const rendered = try renderSection(allocator, try fixtureAnalysis(allocator, engineering, true), "frequency-plan-summary");
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "#### low-side plan") != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        rendered,
+        "This sideband is not a realizable plan against the declared LO: no RF window closed, so no products were enumerated.",
+    ) != null);
+    // The refusal still carries its verdict; it does not become an empty table.
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "| `rf_window` | fail | Barracuda Band 1: the low-side RF window") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "| Product | Band |") != null);
+    // Both caps are stated in the rendered text where they bite.
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Table capped at 1 of 83 enumerated products.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "List capped at 1 of 3 non-passing screens.") != null);
+}
+
+// spec: system-review - failing and warning frequency-plan screens join the aggregated open-items register beside the loop screens, one row per screen
+test "failing frequency-plan screens reach the open-items register" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    const analysis = try fixtureAnalysis(allocator, try fixtureEngineering(allocator), false);
+
+    const items = try renderSection(allocator, analysis, "open-items");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        items,
+        "| `main` | frequency plan (high side) | fail | Barracuda Band 1: the high-side RF window",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, items, "| `main` | frequency plan (high side) | warn | Barracuda Band 1: 1 of the high-side") != null);
+    // The same register still carries the loop screens beside them.
+    try std.testing.expect(std.mem.indexOf(u8, items, "| `main` | PLL fitted | fail |") != null);
+    try expectSummariesAddDetail(items);
+
+    // A system whose frequency plans all pass contributes no such row, and the
+    // clear-register sentence names the frequency screens it checked.
+    const clear = try fixtureAnalysis(allocator, .{}, true);
+    const none = try renderSection(allocator, clear, "open-items");
+    try std.testing.expect(std.mem.indexOf(u8, none, "frequency plan (") == null);
+    try std.testing.expect(std.mem.indexOf(u8, none, "frequency-plan screen in this system is clear") != null);
+}
+
 // spec: system-review - the generated ERC section reports counts by severity and lists the error-severity findings, stating the cap when it truncates
 test "the ERC section rolls up severities and states its own listing cap" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -3823,13 +4362,14 @@ test "every generated section is deterministic, safe Markdown with a no-data lin
     try expectNoDataLines(allocator, empty);
 }
 
-/// The four data-driven sections name their own missing input rather than
+/// The data-driven sections name their own missing input rather than
 /// emitting a table header with no rows under it.
 fn expectNoDataLines(allocator: std.mem.Allocator, empty: Analysis) !void {
     const absent = [_]struct { id: []const u8, phrase: []const u8 }{
         .{ .id = "power-summary", .phrase = "declares a power-rail budget" },
         .{ .id = "thermal-summary", .phrase = "declares part dissipation" },
         .{ .id = "pll-summary", .phrase = "declares a phase-locked-loop filter" },
+        .{ .id = "frequency-plan-summary", .phrase = "declares a frequency plan" },
         .{ .id = "mechanical-summary", .phrase = "declares a board outline or stackup" },
     };
     for (absent) |expected| {

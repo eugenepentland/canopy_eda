@@ -5513,9 +5513,13 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - generated rule-check evidence counts every ERC severity and assertion outcome, and retains a capped list of the error-severity findings
 - generated mechanical evidence pairs the declared outline and stackup with the selected layout's measured edge and flags a drift between them
 - generated loop-filter evidence copies each PLL report's screens out of the evaluator, keeping only the non-passing ones beside the population verdict counts
+- generated frequency-plan evidence copies each declaration's screens out of the evaluator, keeps only the non-passing ones, and retains each product's band hull rather than its branches
 - the generated BOM rollup counts the exact placements, lines and do-not-populate parts the archived bom.csv carries
 - the generated power, thermal, mechanical and BOM sections render each board's own computed rows
 - the generated loop-filter section renders each population's bandwidth and phase-margin ranges, its failing screens and the charge-pump schedule
+- the generated frequency-plan section renders each sideband's band closure, image rejection wording, both diagonal counts and every enumerated product's placement, claiming a level only where one was declared
+- the generated frequency-plan section renders an unrealizable sideband as a stated refusal and names its own retention caps whenever a product or screen list truncates
+- failing and warning frequency-plan screens join the aggregated open-items register beside the loop screens, one row per screen
 - the generated ERC section reports counts by severity and lists the error-severity findings, stating the cap when it truncates
 - every generated section renders bounded, safe Markdown that is deterministic and states its own no-data line when the design declares nothing
 - the generated thermal section states each board's board-coupled verdict and quotes the datasheet package screen only as a labelled estimate
