@@ -5503,6 +5503,13 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - per-board block diagram evidence is archived as boards/<role>/diagram.svg in draft and release, reproducibly, and omitted when the design has no diagram
 - the only archived SVG is the tool-rendered per-board block diagram; SVG is refused at every other archive path in draft and release alike
 - system Markdown becomes a structurally valid searchable PDF with draft marking
+- the offline HTML dossier is one self-contained file with no external request and no script
+- the offline HTML dossier ships beside the combined Markdown and PDF in draft and release, carrying the draft marker only in draft
+- the HTML dossier carries the draft marker only in draft mode and numbers one section per manifest document
+- the HTML dossier inlines each board's block diagram and omits the figure when the design has none
+- the HTML dossier is a pure function of its inputs and renders byte-identically on repeat
+- every identity string interpolated into the HTML dossier is escaped rather than emitted as markup
+- identity text reaching the HTML dossier is escaped, so no manifest string can become page markup
 - long UTF-8 review lines wrap only between complete codepoints in the generated PDF
 - board archive roles are unique and authored review documents are Markdown; binary evidence uses the bounded assets area
 - a board release reports CAM blocking and waiver conditions independently

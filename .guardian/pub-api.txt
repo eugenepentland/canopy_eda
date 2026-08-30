@@ -4712,6 +4712,18 @@ src/system_review_assets.zig::resolveContainedPathAlloc | fn resolveContainedPat
 src/system_review_assets.zig::validContent | fn validContent(asset_kind: Kind, body: []const u8) bool
 src/system_review_assets.zig::validFilename | fn validFilename(filename: []const u8) bool
 src/system_review_assets.zig::validateAddition | fn validateAddition(existing: []const Asset, added_bytes: usize) error{ TooManyAssets, AssetsTooLarge }!void
+src/system_review_html.zig::Board struct_
+src/system_review_html.zig::Error value
+src/system_review_html.zig::Identity struct_
+src/system_review_html.zig::Options struct_
+src/system_review_html.zig::Provenance struct_
+src/system_review_html.zig::Review struct_
+src/system_review_html.zig::Section struct_
+src/system_review_html.zig::State struct_
+src/system_review_html.zig::Supporting struct_
+src/system_review_html.zig::compose | fn compose(allocator: std.mem.Allocator, sections: []const Section, opts: Options) Error![]u8
+src/system_review_html.zig::draft_marker value
+src/system_review_html.zig::max_html_bytes value
 src/system_review_md.zig::Alignment enum_
 src/system_review_md.zig::Block union_
 src/system_review_md.zig::Cell struct_

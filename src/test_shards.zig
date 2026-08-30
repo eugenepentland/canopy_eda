@@ -562,6 +562,7 @@ pub const shards: []const []const []const u8 = &.{
         "req_derived_checks.test.",
         "review_md.test.",
         "system_review_assets.test.",
+        "system_review_html.test.",
         "system_review_md.test.",
         "system_review_package.test.",
         "board_review_snapshot.test.",
