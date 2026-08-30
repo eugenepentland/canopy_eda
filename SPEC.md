@@ -5479,9 +5479,12 @@ Public functions: renderToMarkdown
 
 ## system_review_md
 
-Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, renderHtmlAlloc, deinit, uncheckedChecklistCount
+Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, renderHtmlAlloc, stripEmphasis, deinit, uncheckedChecklistCount
 
 - parses the complete bounded authoring profile into a public AST and renders stable Markdown and inert HTML
+- renders paired asterisk emphasis as strong and em in both the Markdown and the HTML face, and canonicalizes back to the same source on re-parse
+- keeps unpaired, empty, space-padded and nested asterisk runs as literal text instead of failing the document
+- folds a wrapped list item's continuation lines into that item, ending the item at any new block and the list at a blank line
 - rejects active markup, external targets, traversal, encoded paths, and unsafe image types before rendering
 - accepts only approved, syntactically valid netlisp directives occupying their whole source line
 - treats fenced code as literal text while escaping it in HTML and refuses unterminated fences and code spans
@@ -5525,6 +5528,7 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - every identity string interpolated into the HTML dossier is escaped rather than emitted as markup
 - identity text reaching the HTML dossier is escaped, so no manifest string can become page markup
 - long UTF-8 review lines wrap only between complete codepoints in the generated PDF
+- the review PDF lays emphasised Markdown out as plain words, printing no emphasis markers outside fenced code
 - board archive roles are unique and authored review documents are Markdown; binary evidence uses the bounded assets area
 - a board release reports CAM blocking and waiver conditions independently
 - independently allocated fabrication snapshots compare their identity strings by value

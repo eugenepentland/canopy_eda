@@ -4766,6 +4766,7 @@ src/system_review_md.zig::renderHtml | fn renderHtml(writer: *std.Io.Writer, doc
 src/system_review_md.zig::renderHtmlAlloc | fn renderHtmlAlloc(allocator: Allocator, document: *const Document) RenderError![]const u8
 src/system_review_md.zig::renderMarkdown | fn renderMarkdown(writer: *std.Io.Writer, document: *const Document) std.Io.Writer.Error!void
 src/system_review_md.zig::renderMarkdownAlloc | fn renderMarkdownAlloc(allocator: Allocator, document: *const Document) RenderError![]const u8
+src/system_review_md.zig::stripEmphasis | fn stripEmphasis( allocator: Allocator, out: *std.ArrayList(u8), line: []const u8, ) Allocator.Error!void
 src/system_review_md.zig::uncheckedChecklistCount | fn uncheckedChecklistCount(self: *const Document) usize
 src/system_review_package.zig::AttestationResult struct_
 src/system_review_package.zig::PackageResult struct_

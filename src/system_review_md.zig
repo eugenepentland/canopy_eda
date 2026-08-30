@@ -76,11 +76,16 @@ pub const Image = struct {
     target: []const u8,
 };
 
-/// Inline content is deliberately flat. Link labels and image alt text are
-/// plain strings; nested markup is outside the review-document profile.
+/// Inline content is deliberately flat. Link labels, image alt text, and
+/// emphasis bodies are plain strings; nested markup is outside the
+/// review-document profile.
 pub const Inline = union(enum) {
     text: []const u8,
     code: []const u8,
+    /// `**strong**` body, already unescaped and free of further markup.
+    strong: []const u8,
+    /// `*em*` body, already unescaped and free of further markup.
+    em: []const u8,
     link: Link,
     image: Image,
 };
@@ -272,6 +277,20 @@ const Parser = struct {
                 continue;
             }
 
+            if (c == '*') {
+                if (emphasisSpan(source, i)) |span| {
+                    try self.appendText(&nodes, &text);
+                    try self.takeInline();
+                    const body = try self.plainLabel(span.body);
+                    try nodes.append(self.allocator, switch (span.kind) {
+                        .strong => Inline{ .strong = body },
+                        .em => Inline{ .em = body },
+                    });
+                    i = span.next;
+                    continue;
+                }
+            }
+
             if (try self.parseLink(source, i, &next_label_end)) |located| {
                 try self.appendText(&nodes, &text);
                 try self.takeInline();
@@ -418,6 +437,85 @@ fn normalizeNewlines(allocator: Allocator, source: []const u8) Allocator.Error![
     return out.toOwnedSlice(allocator);
 }
 
+const EmphasisKind = enum { strong, em };
+
+const EmphasisSpan = struct {
+    kind: EmphasisKind,
+    /// Still-escaped source body; `plainLabel` owns unescaping and safety.
+    body: []const u8,
+    next: usize,
+};
+
+/// Recognise one balanced `**strong**` or `*em*` run beginning at `at`.
+///
+/// The grammar is deliberately flat and single-pass, matching the rest of this
+/// profile: the body must be non-empty, must not begin or end with a space or
+/// tab, and must contain no further unescaped `*`. Anything else — an unclosed
+/// marker, an empty or space-padded run, or nested emphasis — is not a span,
+/// so the caller keeps the asterisks as ordinary literal text instead of
+/// failing the document. `_`/`__` are deliberately NOT emphasis markers:
+/// review prose is full of net and identifier names such as `VCC_3V3_SENSE`,
+/// and silently emphasising them would change how existing authored documents
+/// canonicalize.
+fn emphasisSpan(source: []const u8, at: usize) ?EmphasisSpan {
+    if (source[at] != '*') return null;
+    const strong = at + 1 < source.len and source[at + 1] == '*';
+    const marker: usize = if (strong) 2 else 1;
+    var i = at + marker;
+    const start = i;
+    const close = while (i < source.len) : (i += 1) {
+        if (source[i] == '\\') {
+            i += @intFromBool(i + 1 < source.len);
+            continue;
+        }
+        if (source[i] != '*') continue;
+        if (!strong) break i;
+        // A lone `*` inside a `**` run is nested emphasis, which this profile
+        // does not model; the whole run degrades to literal text.
+        if (i + 1 >= source.len or source[i + 1] != '*') return null;
+        break i;
+    } else return null;
+
+    const body = source[start..close];
+    if (body.len == 0) return null;
+    if (body[0] == ' ' or body[0] == '\t') return null;
+    if (body[body.len - 1] == ' ' or body[body.len - 1] == '\t') return null;
+    return .{
+        .kind = if (strong) .strong else .em,
+        .body = body,
+        .next = close + marker,
+    };
+}
+
+/// Rewrite one already-rendered canonical Markdown line with its balanced
+/// emphasis markers removed, appending to `out`. Unpaired markers and
+/// backslash-escaped asterisks are preserved exactly. Consumers that lay out
+/// Markdown text rather than the AST — the PDF composer — use this so a
+/// `**strong**` run reads as words instead of literal asterisks.
+pub fn stripEmphasis(
+    allocator: Allocator,
+    out: *std.ArrayList(u8),
+    line: []const u8,
+) Allocator.Error!void {
+    var i: usize = 0;
+    while (i < line.len) {
+        if (line[i] == '\\' and i + 1 < line.len) {
+            try out.appendSlice(allocator, line[i .. i + 2]);
+            i += 2;
+            continue;
+        }
+        if (line[i] == '*') {
+            if (emphasisSpan(line, i)) |span| {
+                try out.appendSlice(allocator, span.body);
+                i = span.next;
+                continue;
+            }
+        }
+        try out.append(allocator, line[i]);
+        i += 1;
+    }
+}
+
 fn beginsRawHtml(source: []const u8, at: usize) bool {
     if (at + 1 >= source.len or source[at] != '<') return false;
     const next = source[at + 1];
@@ -562,7 +660,7 @@ fn parseList(parser: *Parser, lines: []const []const u8, index: *usize) ParseErr
     const first = listLead(lines[index.*]) orelse return error.InvalidList;
     var items: std.ArrayList(ListItem) = .empty;
     var at = index.*;
-    while (at < lines.len) : (at += 1) {
+    while (at < lines.len) {
         if (nestedListMarker(lines[at])) return error.InvalidList;
         const lead = listLead(lines[at]) orelse break;
         if (lead.kind != first.kind) break;
@@ -573,9 +671,25 @@ fn parseList(parser: *Parser, lines: []const []const u8, index: *usize) ParseErr
             body = std.mem.trim(u8, task.body, " \t");
         }
         if (body.len == 0) return error.InvalidList;
+        at += 1;
+
+        // A wrapped item keeps its continuation lines. Anything that opens a
+        // block of its own — a blank line, a new marker, a heading, fence,
+        // table, or directive — ends the item, and a blank line ends the list.
+        var joined: std.ArrayList(u8) = .empty;
+        try joined.appendSlice(parser.allocator, body);
+        while (at < lines.len and !startsBlock(lines, at)) : (at += 1) {
+            const piece = std.mem.trim(u8, lines[at], " \t");
+            try joined.append(parser.allocator, ' ');
+            try joined.appendSlice(parser.allocator, piece);
+        }
+
         parser.list_item_count += 1;
         if (parser.list_item_count > parser.options.limits.list_items) return error.LimitExceeded;
-        try items.append(parser.allocator, .{ .checked = checked, .content = try parser.parseInlines(body) });
+        try items.append(parser.allocator, .{
+            .checked = checked,
+            .content = try parser.parseInlines(joined.items),
+        });
     }
     index.* = at;
     if (first.kind == .ordered and items.items.len > 0 and
@@ -869,6 +983,16 @@ fn writeMarkdownInlines(
             try writer.print("`{s}`", .{code});
             prefix = .other;
         },
+        .strong, .em => |body, tag| {
+            const marker = if (tag == .strong) "**" else "*";
+            try writer.writeAll(marker);
+            // The body escaper turns every `*` back into `\*`, so the closing
+            // marker below is always the first unescaped one on re-parse.
+            var body_prefix: MarkdownPrefix = .other;
+            try writeMarkdownText(writer, body, table_cell, &body_prefix);
+            try writer.writeAll(marker);
+            prefix = .other;
+        },
         .link => |link| {
             try writer.writeByte('[');
             var label_prefix: MarkdownPrefix = .other;
@@ -981,6 +1105,16 @@ fn writeHtmlInlines(writer: *std.Io.Writer, nodes: []const Inline) std.Io.Writer
             try writeHtmlEscaped(writer, code);
             try writer.writeAll("</code>");
         },
+        .strong => |body| {
+            try writer.writeAll("<strong>");
+            try writeHtmlEscaped(writer, body);
+            try writer.writeAll("</strong>");
+        },
+        .em => |body| {
+            try writer.writeAll("<em>");
+            try writeHtmlEscaped(writer, body);
+            try writer.writeAll("</em>");
+        },
         .link => |link| {
             try writer.writeAll("<a href=\"");
             try writeHtmlEscaped(writer, link.target);
@@ -1072,6 +1206,140 @@ test "bounded profile parses and renders deterministically" {
     const markdown_again = try renderMarkdownAlloc(testing.allocator, &reparsed);
     defer testing.allocator.free(markdown_again);
     try testing.expectEqualStrings(markdown, markdown_again);
+}
+
+// spec: system_review_md - renders paired asterisk emphasis as strong and em in both the Markdown and the HTML face, and canonicalizes back to the same source on re-parse
+test "paired asterisk emphasis renders in every face" {
+    const source =
+        \\# Release **status**
+        \\
+        \\Release is **BLOCKED** and the *loop filter* is marginal. Bodies keep
+        \\their own escaping, as in **A & B** and *R\*SET*.
+        \\
+        \\- [ ] Confirm the **stackup**
+        \\
+        \\| Board | Verdict |
+        \\| --- | --- |
+        \\| RF | **fail** |
+    ;
+    var document = try parse(testing.allocator, source, .{});
+    defer document.deinit();
+
+    const markdown = try renderMarkdownAlloc(testing.allocator, &document);
+    defer testing.allocator.free(markdown);
+    const html = try renderHtmlAlloc(testing.allocator, &document);
+    defer testing.allocator.free(html);
+
+    const expected_markdown =
+        "# Release **status**\n" ++
+        "\nRelease is **BLOCKED** and the *loop filter* is marginal. Bodies keep " ++
+        "their own escaping, as in **A \\& B** and *R\\*SET*.\n" ++
+        "\n- [ ] Confirm the **stackup**\n" ++
+        "\n| Board | Verdict |\n| --- | --- |\n| RF | **fail** |\n";
+    try testing.expectEqualStrings(expected_markdown, markdown);
+
+    try testing.expect(std.mem.indexOf(u8, html, "<h1>Release <strong>status</strong></h1>") != null);
+    try testing.expect(std.mem.indexOf(u8, html, "is <strong>BLOCKED</strong> and the <em>loop filter</em>") != null);
+    try testing.expect(std.mem.indexOf(u8, html, "<strong>A &amp; B</strong>") != null);
+    try testing.expect(std.mem.indexOf(u8, html, "<em>R*SET</em>") != null);
+    try testing.expect(std.mem.indexOf(u8, html, "Confirm the <strong>stackup</strong>") != null);
+    try testing.expect(std.mem.indexOf(u8, html, "<td><strong>fail</strong></td>") != null);
+    try testing.expect(std.mem.indexOf(u8, html, "**") == null);
+
+    // Canonical Markdown is a fixed point: re-parsing and re-rendering it, and
+    // rendering the same document twice, both reproduce these exact bytes.
+    var reparsed = try parse(testing.allocator, markdown, .{});
+    defer reparsed.deinit();
+    const markdown_again = try renderMarkdownAlloc(testing.allocator, &reparsed);
+    defer testing.allocator.free(markdown_again);
+    try testing.expectEqualStrings(markdown, markdown_again);
+
+    const html_again = try renderHtmlAlloc(testing.allocator, &reparsed);
+    defer testing.allocator.free(html_again);
+    try testing.expectEqualStrings(html, html_again);
+}
+
+// spec: system_review_md - keeps unpaired, empty, space-padded and nested asterisk runs as literal text instead of failing the document
+test "degenerate asterisk runs stay literal text" {
+    // Nested emphasis is deliberately not modelled: the outer `**` of
+    // `**outer *inner* run**` degrades to literal asterisks while the inner
+    // single-marker run still emphasises, and neither outcome is an error.
+    const source =
+        \\Multiply 3 * 4 * 5 and leave **unclosed strong and *unclosed em alone.
+        \\
+        \\Empty **** and padded ** ** runs, plus **outer *inner* run**.
+    ;
+    var document = try parse(testing.allocator, source, .{});
+    defer document.deinit();
+    try testing.expectEqual(@as(usize, 2), document.blocks.len);
+
+    const html = try renderHtmlAlloc(testing.allocator, &document);
+    defer testing.allocator.free(html);
+    try testing.expect(std.mem.indexOf(u8, html, "Multiply 3 * 4 * 5 and leave **unclosed strong and *unclosed em alone.") != null);
+    try testing.expect(std.mem.indexOf(u8, html, "Empty **** and padded ** ** runs, plus **outer <em>inner</em> run**.") != null);
+    try testing.expect(std.mem.indexOf(u8, html, "<strong>") == null);
+
+    const markdown = try renderMarkdownAlloc(testing.allocator, &document);
+    defer testing.allocator.free(markdown);
+    var reparsed = try parse(testing.allocator, markdown, .{});
+    defer reparsed.deinit();
+    const markdown_again = try renderMarkdownAlloc(testing.allocator, &reparsed);
+    defer testing.allocator.free(markdown_again);
+    try testing.expectEqualStrings(markdown, markdown_again);
+}
+
+// spec: system_review_md - folds a wrapped list item's continuation lines into that item, ending the item at any new block and the list at a blank line
+test "wrapped list items fold their continuation lines" {
+    const source =
+        \\- [ ] Confirm the stackup matches
+        \\  the fabricator's stated capability
+        \\- [x] Second task wraps
+        \\unindented as well
+        \\  and once more
+        \\- Third item stands alone
+        \\
+        \\Trailing paragraph.
+    ;
+    var document = try parse(testing.allocator, source, .{});
+    defer document.deinit();
+
+    try testing.expectEqual(@as(usize, 2), document.blocks.len);
+    try testing.expect(document.blocks[1] == .paragraph);
+    const list = document.blocks[0].list;
+    try testing.expectEqual(@as(usize, 3), list.items.len);
+    try testing.expectEqual(@as(usize, 1), document.uncheckedChecklistCount());
+    try testing.expectEqualStrings(
+        "Confirm the stackup matches the fabricator's stated capability",
+        list.items[0].content[0].text,
+    );
+    try testing.expectEqualStrings(
+        "Second task wraps unindented as well and once more",
+        list.items[1].content[0].text,
+    );
+
+    const markdown = try renderMarkdownAlloc(testing.allocator, &document);
+    defer testing.allocator.free(markdown);
+    try testing.expectEqualStrings(
+        "- [ ] Confirm the stackup matches the fabricator's stated capability\n" ++
+            "- [x] Second task wraps unindented as well and once more\n" ++
+            "- Third item stands alone\n" ++
+            "\nTrailing paragraph.\n",
+        markdown,
+    );
+
+    var reparsed = try parse(testing.allocator, markdown, .{});
+    defer reparsed.deinit();
+    const markdown_again = try renderMarkdownAlloc(testing.allocator, &reparsed);
+    defer testing.allocator.free(markdown_again);
+    try testing.expectEqualStrings(markdown, markdown_again);
+
+    // A heading, table, fence or directive still ends the item it follows, and
+    // an indented marker remains the nested-list error it always was.
+    var interrupted = try parse(testing.allocator, "- item\n# Heading\n", .{});
+    defer interrupted.deinit();
+    try testing.expectEqual(@as(usize, 2), interrupted.blocks.len);
+    try testing.expect(interrupted.blocks[1] == .heading);
+    try expectParseError(error.InvalidList, "- item\n  - nested\n", .{});
 }
 
 fn expectParseError(expected: ParseError, source: []const u8, options: Options) !void {
