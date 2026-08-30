@@ -1246,4 +1246,42 @@ function loadRewidenWalk(PCB, lands = [], owned = []) {
     "a T-junction terminal keeps today's free full-width answer");
 }
 
+{
+  // The DRC panel can be the first exact-geometry consumer on the page. Its
+  // first click starts the shared load, coalesces repeated clicks, and resumes
+  // the original action when the gate is ready.
+  const gate = { ready: false, failed: false };
+  const status = { tracks: 2, nets: 1, changed: 2, editable: true };
+  const messages = [];
+  let finishLoad, initCalls = 0, applyCalls = 0, undoCalls = 0;
+  const loading = new Promise((resolve) => { finishLoad = resolve; });
+  const g = load(["applyAdaptiveRewiden"], {
+    RO: false,
+    adaptiveRewidenPending: false,
+    drcGate: gate,
+    PCB: { drc: [] },
+    rewidenStatus() { return status; },
+    drcGateInit() { initCalls++; return loading; },
+    routeStatMsg(message, error) { messages.push({ message, error: !!error }); },
+    snapAll() { return { before: true }; },
+    rewidenApply() { applyCalls++; return 2; },
+    recordUndo() { undoCalls++; },
+    drawRoute() {}, drawClr() {}, drawDrc() {}, scheduleDrc() {},
+    poursDeclared() { return false; }, refillPours() {},
+  });
+
+  assert.equal(g.applyAdaptiveRewiden(), status);
+  assert.equal(g.applyAdaptiveRewiden(), status);
+  assert.equal(initCalls, 1, "repeated clicks must share the in-flight geometry-engine load");
+  assert.equal(applyCalls, 0, "no copper changes before the exact gate is ready");
+  assert.match(messages[0].message, /will recheck automatically/);
+
+  gate.ready = true;
+  finishLoad(true);
+  await loading;
+  assert.equal(applyCalls, 1, "the original click resumes automatically after the gate loads");
+  assert.equal(undoCalls, 1, "the resumed whole-board recheck remains one undo step");
+  assert.match(messages.at(-1).message, /recut 2 adaptive power segments/);
+}
+
 console.log("RF and power taper geometry probes PASS");
