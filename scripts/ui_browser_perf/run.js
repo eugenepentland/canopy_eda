@@ -125,6 +125,12 @@ function projectOverlay(projectDir, pdfFixture) {
   try {
     for (const entry of fs.readdirSync(projectDir)) {
       if (entry === "lib") continue;
+      // Never link .git. Git resolves the symlink, so an overlay carrying one
+      // is a work tree of the REAL designs repository whose toplevel is the
+      // overlay itself: `git add -A -- <overlay path>` + commit would write a
+      // commit into the user's repo from a temporary copy of the tree. The
+      // overlay needs no git for anything, so it simply is not a repo.
+      if (entry === ".git") continue;
       if (entry === "src" || entry === "history") {
         // Some read-only page GETs may refresh generated placement sidecars.
         // Successful private layout saves also append history. Give both
@@ -1828,7 +1834,14 @@ async function main() {
       baseUrl = `http://127.0.0.1:${port}`;
       server = spawn(options.binary, ["serve", "--project-dir", overlay, "--port", String(port), "--skip-warmup"], {
         cwd: root,
-        env: { ...process.env, NETLISP_DEV: "1" },
+        // NETLISP_GIT_AUTOCOMMIT=0 is not optional: config.zig defaults
+        // auto-commit to ENABLED when the variable is unset, and the mutating
+        // endpoints (system_review_api.zig document save / attest / asset
+        // upload) call autocommit.begin() unconditionally. Only production is
+        // otherwise protected, by its systemd unit. Together with
+        // projectOverlay's refusal to link .git this is defence in depth: a
+        // benchmark server must not be able to commit anywhere.
+        env: { ...process.env, NETLISP_DEV: "1", NETLISP_GIT_AUTOCOMMIT: "0" },
         stdio: ["ignore", "pipe", "pipe"],
       });
       const append = (chunk) => { serverText = (serverText + chunk.toString()).slice(-24000); };

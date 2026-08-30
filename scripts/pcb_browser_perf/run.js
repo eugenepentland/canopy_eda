@@ -386,6 +386,9 @@ function projectOverlay(projectDir) {
   try {
     for (const entry of fs.readdirSync(projectDir)) {
       if (entry === "lib") continue;
+      // Never link .git — see ui_browser_perf/run.js. A linked .git makes the
+      // overlay a work tree of the real designs repository.
+      if (entry === ".git") continue;
       if (entry === "src") {
         fs.cpSync(path.join(projectDir, entry), path.join(overlay, entry), {
           recursive: true,
@@ -783,7 +786,9 @@ async function main() {
       baseUrl = `http://127.0.0.1:${port}`;
       server = spawn(options.binary, ["serve", "--project-dir", overlay, "--port", String(port), "--skip-warmup"], {
         cwd: root,
-        env: { ...process.env, NETLISP_DEV: "1" },
+        // See ui_browser_perf/run.js: auto-commit defaults to ENABLED when
+        // unset, so a benchmark server must disable it explicitly.
+        env: { ...process.env, NETLISP_DEV: "1", NETLISP_GIT_AUTOCOMMIT: "0" },
         stdio: ["ignore", "pipe", "pipe"],
       });
       const append = (chunk) => { serverText = (serverText + chunk.toString()).slice(-16000); };

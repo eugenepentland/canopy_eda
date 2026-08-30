@@ -231,7 +231,11 @@ async function main() {
       if (!fs.existsSync(path.join(options.projectDir, "src"))) throw new Error(`no designs repo at ${options.projectDir}`);
       const port = await freePort(); baseUrl = `http://127.0.0.1:${port}`;
       server = spawn(options.binary, ["serve", "--project-dir", options.projectDir, "--port", String(port), "--skip-warmup"], {
-        cwd: root, env: { ...process.env, NETLISP_DEV: "1" }, stdio: ["ignore", "pipe", "pipe"],
+        // This runner has no overlay — it serves the REAL designs checkout, so
+        // it is the one place where an auto-commit would land in the user's
+        // repository directly rather than through a symlinked .git. config.zig
+        // defaults auto-commit to ENABLED when unset; disable it explicitly.
+        cwd: root, env: { ...process.env, NETLISP_DEV: "1", NETLISP_GIT_AUTOCOMMIT: "0" }, stdio: ["ignore", "pipe", "pipe"],
       });
       const append = (c) => { serverText = (serverText + c.toString()).slice(-16000); };
       server.stdout.on("data", append); server.stderr.on("data", append);
