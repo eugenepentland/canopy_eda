@@ -203,6 +203,46 @@ fn buildPoly(arena: std.mem.Allocator, v: ?std.json.Value) ![]const [2]f64 {
     return list.toOwnedSlice(arena);
 }
 
+/// A `[[[x,y],...],...]` JSON array to owned hole contours. Degenerate holes
+/// are harmless here: `copper_support.zoneContains` applies the same polygon
+/// predicate as it does to an outer contour, and an empty/short one contains
+/// no point.
+fn buildHoles(arena: std.mem.Allocator, v: ?std.json.Value) ![]const []const [2]f64 {
+    const arr = arrOf(v) orelse return &.{};
+    var list: std.ArrayList([]const [2]f64) = .empty;
+    for (arr.items) |it| try list.append(arena, try buildPoly(arena, it));
+    return list.toOwnedSlice(arena);
+}
+
+/// Fabricated/user copper regions marshalled by `drc_marshal.js`. Each contour
+/// carries a non-zero component id so the topology graph keeps disconnected
+/// islands distinct. Dedicated plane contours additionally carry `plane=true`:
+/// a barrel reaches them, while a same-layer signal trace does not.
+fn buildTopologyZones(arena: std.mem.Allocator, v: ?std.json.Value, nettab: *NetTable) ![]const drc.TopologyZone {
+    const arr = arrOf(v) orelse return &.{};
+    var list: std.ArrayList(drc.TopologyZone) = .empty;
+    for (arr.items, 0..) |it, i| {
+        const o = objOf(it) orelse continue;
+        const net = jStr(o.get("net"));
+        const poly = try buildPoly(arena, o.get("poly"));
+        if (net.len == 0 or poly.len < 3) continue;
+        _ = try nettab.intern(arena, net);
+        try list.append(arena, .{
+            .net = net,
+            .layer = layerOf(o.get("l")),
+            .stack = numeric.checkedInt(u8, @floor(jNum(o.get("stack")))) orelse 0,
+            .poly = poly,
+            .holes = try buildHoles(arena, o.get("holes")),
+            .priority = numeric.checkedInt(i64, @floor(jNum(o.get("priority")))) orelse 0,
+            // JSON rows are zero-based, while zero means "unknown component"
+            // to the topology engine.
+            .component = @as(u64, @intCast(i)) + 1,
+            .plane = jFlag(o.get("plane")),
+        });
+    }
+    return list.toOwnedSlice(arena);
+}
+
 /// A pad's oval-slot half-vector: a `[a,b]` array → `{a,b}`, a bare number →
 /// `{n,0}`, absent → `{0,0}` (round bore). Tolerant of the exact spelling the
 /// blob writer settles on.
@@ -515,10 +555,10 @@ fn buildPerimeterFence(arena: std.mem.Allocator, v: ?std.json.Value) !env.Perime
 
 // ── Bridge core ──────────────────────────────────────────────────────────────
 
-/// Parse the board-state JSON, build a minimal `Placement` + `RouteResult`, run
-/// `drc.check`, and serialize the violations. Any malformed / non-object input
-/// or marshal failure surfaces as `{"error":"…"}`; only OOM propagates. The
-/// returned bytes are owned by `arena`.
+/// Parse the board-state JSON, build a minimal placement, route and poured
+/// topology, run `drc.checkWithZones`, and serialize the violations. Any
+/// malformed/non-object input or marshal failure surfaces as `{"error":"…"}`;
+/// only OOM propagates. The returned bytes are owned by `arena`.
 fn runDrcJson(arena: std.mem.Allocator, input: []const u8) []const u8 {
     return buildAndSerialize(arena, input) catch |e| errorJson(arena, @errorName(e));
 }
@@ -532,6 +572,7 @@ fn errorJson(arena: std.mem.Allocator, msg: []const u8) []const u8 {
 const Board = struct {
     placement: optimizer.Placement,
     routed: router.RouteResult,
+    zones: []const drc.TopologyZone,
     clearance: f64,
 };
 
@@ -546,6 +587,7 @@ fn buildBoard(arena: std.mem.Allocator, input: []const u8) !Board {
     const parts = try buildParts(arena, obj.get("parts"), &nettab);
     const tracks = try buildTracks(arena, obj.get("tracks"), &nettab);
     const vias = try buildVias(arena, obj.get("vias"), &nettab);
+    const zones = try buildTopologyZones(arena, obj.get("zones"), &nettab);
     const rf_paths = try buildRfPaths(arena, obj.get("rf_paths"), &nettab);
     const overrides = try buildNetClassOverrides(arena, obj.get("netclasses"), &nettab);
     const dpairs = try buildDiffPairs(arena, obj.get("diffpairs"), &nettab);
@@ -612,12 +654,12 @@ fn buildBoard(arena: std.mem.Allocator, input: []const u8) !Board {
     const body_clearance = jNum(clearanceVal(obj));
     const clearance = if (body_clearance > 0) body_clearance else design.clearance;
 
-    return .{ .placement = placement, .routed = routed, .clearance = clearance };
+    return .{ .placement = placement, .routed = routed, .zones = zones, .clearance = clearance };
 }
 
 fn buildAndSerialize(arena: std.mem.Allocator, input: []const u8) ![]const u8 {
     const board = try buildBoard(arena, input);
-    const violations = try drc.check(arena, board.placement, board.routed, board.clearance);
+    const violations = try drc.checkWithZones(arena, board.placement, board.routed, board.clearance, board.zones);
     return serialize(arena, violations, .{ .nets = board.placement.nets, .parts = board.placement.parts });
 }
 
@@ -938,6 +980,50 @@ test "the bridge adopts the marshalled copper stack" {
     // The marshal is what puts the table on the wire.
     const marshal = @embedFile("serve/assets/drc_marshal.js");
     try testing.expect(std.mem.indexOf(u8, marshal, "out.layer_table = PCB.layer_table.map(") != null);
+}
+
+/// Barracuda's 3.3 V rails are not dedicated stackup planes: they are poured
+/// on routable In3.Cu. The fast client check therefore needs the fabricated
+/// fill contours as well as the physical layer table.
+const power_zone_via_board_json =
+    \\{"clearance":0.2,
+    \\ "planes":["GND"],
+    \\ "layer_table":[{"i":1,"l":0,"kind":"signal","net":null},
+    \\                {"i":2,"l":null,"kind":"plane","net":"GND"},
+    \\                {"i":3,"l":2,"kind":"signal","net":null},
+    \\                {"i":4,"l":3,"kind":"signal","net":null},
+    \\                {"i":5,"l":null,"kind":"plane","net":"GND"},
+    \\                {"i":6,"l":1,"kind":"signal","net":null}],
+    \\ "tracks":[{"x1":0,"y1":0,"x2":3,"y2":0,"l":0,"w":0.2,"net":"V_3V3A"}],
+    \\ "vias":[{"x":3,"y":0,"d":0.6,"drill":0.3,"net":"V_3V3A"}],
+    \\ "zones":[{"net":"V_3V3A","l":3,"poly":[[2,-1],[4,-1],[4,1],[2,1]]}]}
+;
+
+const power_zone_via_hole_board_json =
+    \\{"clearance":0.2,
+    \\ "tracks":[{"x1":0,"y1":0,"x2":3,"y2":0,"l":0,"w":0.2,"net":"V_3V3A"}],
+    \\ "vias":[{"x":3,"y":0,"d":0.6,"drill":0.3,"net":"V_3V3A"}],
+    \\ "zones":[{"net":"V_3V3A","l":3,"poly":[[2,-1],[4,-1],[4,1],[2,1]],
+    \\            "holes":[[[2.5,-0.5],[3.5,-0.5],[3.5,0.5],[2.5,0.5]]]}]}
+;
+
+// spec: Web Server - The WASM DRC credits an exact same-net fill on a routable internal power layer as a via contact, while an antipad hole remains disconnected
+test "the bridge credits an internal power fill at a via" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const board = try buildBoard(arena, power_zone_via_board_json);
+    try testing.expectEqual(@as(usize, 1), board.zones.len);
+    try testing.expectEqual(@as(u8, 3), board.zones[0].layer);
+    try testing.expectEqual(@as(u64, 1), board.zones[0].component);
+    try testing.expect(std.mem.indexOf(u8, runDrcJson(arena, power_zone_via_board_json), "single-layer via") == null);
+    try testing.expect(std.mem.indexOf(u8, runDrcJson(arena, power_zone_via_hole_board_json), "single-layer via") != null);
+
+    const marshal = @embedFile("serve/assets/drc_marshal.js");
+    try testing.expect(std.mem.indexOf(u8, marshal, "PCB.zone_fills") != null);
+    try testing.expect(std.mem.indexOf(u8, marshal, "PCB.plane_fills") != null);
+    try testing.expect(std.mem.indexOf(u8, marshal, "PCB.poursStale") != null);
 }
 
 /// How a keepout finding spells its kind on the wire (`drc_json.kindStr`); the

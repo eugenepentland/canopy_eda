@@ -6867,6 +6867,7 @@ is what makes the predicate exact rather than approximately right.
 - a saved via may declare its layer span, which round-trips through the sidecar and add_tracks while routing still treats every via as through
 - A per-layer DRC violation carries its copper layer on the wire and in its id, so two defects at one point on different layers stay distinct
 - The WASM DRC bridge is given the board's copper stack, so the client engine's layer arithmetic matches the server's on a declared stackup
+- The WASM DRC credits an exact same-net fill on a routable internal power layer as a via contact, while an antipad hole remains disconnected
 - PCB blob layer rows take their names, colours and plane nets from the shared layer table
 - The PCB blob names the fixed copper, silkscreen, outline and courtyard layers beside its layer table, so the browser spells no KiCad layer of its own
 - Inner-layer copper paints one colour across the PCB blob, the page legend and the PNG

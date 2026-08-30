@@ -582,6 +582,40 @@ function assertBendContinuity(shaped, label) {
 }
 
 {
+  const { buildDrcInput } = require("../src/serve/assets/drc_marshal.js");
+  const layer_table = [
+    { i: 1, l: 0, name: "F.Cu", kind: "signal" },
+    { i: 2, l: null, name: "In1.Cu", kind: "plane", net: "GND" },
+    { i: 3, l: 2, name: "In2.Cu", kind: "signal" },
+    { i: 4, l: 3, name: "In3.Cu", kind: "signal" },
+    { i: 5, l: null, name: "In4.Cu", kind: "plane", net: "GND" },
+    { i: 6, l: 1, name: "B.Cu", kind: "signal" },
+  ];
+  const poly = [[2, -1], [4, -1], [4, 1], [2, 1]];
+  const holes = [[[2.5, -0.5], [3.5, -0.5], [3.5, 0.5], [2.5, 0.5]]];
+  const PCB = {
+    layer_table,
+    analysis_deferred: false,
+    poursStale: false,
+    zone_fills: [{ zone: 0, layer: "In3.Cu", net: "V_3V3A", poly, holes }],
+    plane_fills: [{ stack: 2, layer: "In1.Cu", net: "GND", poly }],
+    zones: [{ net: "V_3V3A", layer: "In3.Cu", filled: true, priority: 6, poly }],
+  };
+  const exact = buildDrcInput(PCB, {});
+  assert.equal(exact.zones.length, 2, "fresh client DRC must receive exact user and dedicated plane fills");
+  assert.equal(exact.zones[0].l, 3, "an In3.Cu power fill must retain its routable layer index");
+  assert.deepEqual(exact.zones[0].holes, holes, "fabricated antipad holes must cross the bridge");
+  assert.equal(exact.zones[1].plane, true);
+  assert.equal(exact.zones[1].stack, 2);
+
+  PCB.poursStale = true;
+  const stale = buildDrcInput(PCB, {});
+  assert.equal(stale.zones.length, 1, "stale rasters must fall back to authored zones");
+  assert.equal(stale.zones[0].l, 3);
+  assert.equal(stale.zones[0].priority, 6);
+}
+
+{
   const globals = {
     PCB: { rules: { min_width: 0.1 } },
     wpt(_i, x, y) {

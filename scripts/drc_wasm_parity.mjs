@@ -142,6 +142,8 @@ function serverBody(PCB) {
     parts: (PCB.parts || []).map((p) => ({ ref: p.ref, x: p.x, y: p.y, rot: p.rot || 0, side: p.side || "top" })),
     tracks: PCB.tracks || [],
     vias: PCB.vias || [],
+    zones: PCB.zones || [],
+    rf_paths: PCB.rf_paths || [],
     clearance: PCB.clr,
     outline: PCB.outline || null,
   };
