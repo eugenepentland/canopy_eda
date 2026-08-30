@@ -127,6 +127,24 @@ pub fn commit(session: ?Session, username: ?[]const u8, tool_name: []const u8) v
     commitLocked(s, username, tool_name);
 }
 
+/// Commit only the exact project-relative paths declared by a structured
+/// mutation. Paths that were already dirty before `begin` are omitted. This is
+/// the audit-safe seam for handlers whose output set is known in advance: a
+/// concurrent unrelated mutation can never be swept into their commit.
+pub fn commitPaths(
+    session: ?Session,
+    username: ?[]const u8,
+    tool_name: []const u8,
+    paths: []const []const u8,
+) void {
+    const s = session orelse return;
+    GitLock.mu.lock();
+    defer GitLock.mu.unlock();
+    const selected = explicitPaths(s.allocator, s.before, paths) catch return;
+    if (selected.len == 0) return;
+    stageAndCommit(s.allocator, s.project_dir, selected, username, tool_name);
+}
+
 // ── Internals ─────────────────────────────────────────────────────
 
 fn commitLocked(s: Session, username: ?[]const u8, tool_name: []const u8) void {
@@ -158,6 +176,44 @@ fn touchedPaths(
     // An exact-length owned slice so a non-arena caller (the unit test) can free
     // it without a capacity mismatch.
     return list.toOwnedSlice(allocator);
+}
+
+fn explicitPaths(
+    allocator: std.mem.Allocator,
+    before: PathSet,
+    requested: []const []const u8,
+) std.mem.Allocator.Error![]const []const u8 {
+    var selected: std.ArrayList([]const u8) = .empty;
+    for (requested) |path| {
+        if (!safeCommitPath(path) or isExcluded(path) or dirtyBeforeCovers(before, path)) continue;
+        var duplicate = false;
+        for (selected.items) |existing| if (std.mem.eql(u8, existing, path)) {
+            duplicate = true;
+            break;
+        };
+        if (!duplicate) try selected.append(allocator, path);
+    }
+    return selected.toOwnedSlice(allocator);
+}
+
+fn safeCommitPath(path: []const u8) bool {
+    if (path.len == 0 or path[0] == '/' or std.mem.indexOfScalar(u8, path, 0) != null) return false;
+    var components = std.mem.splitScalar(u8, path, '/');
+    while (components.next()) |component| {
+        if (component.len == 0 or std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, ".."))
+            return false;
+    }
+    return true;
+}
+
+fn dirtyBeforeCovers(before: PathSet, path: []const u8) bool {
+    if (before.contains(path)) return true;
+    var iterator = before.keyIterator();
+    while (iterator.next()) |dirty| {
+        if (!std.mem.endsWith(u8, dirty.*, "/")) continue;
+        if (std.mem.startsWith(u8, path, dirty.*)) return true;
+    }
+    return false;
 }
 
 /// Paths that must never enter an auto-commit even if git reports them dirty:
@@ -365,6 +421,24 @@ test "touchedPaths keeps only newly-dirty, non-excluded paths" {
     // Only the mutation's own new file — loose work and history are excluded.
     try testing.expectEqual(@as(usize, 1), touched.len);
     try testing.expectEqualStrings("src/mutated.sexp", touched[0]);
+}
+
+test "explicit paths exclude unrelated unsafe duplicate and pre-dirty paths" {
+    var before: PathSet = .empty;
+    defer before.deinit(testing.allocator);
+    try before.put(testing.allocator, "src/loose.md", {});
+    try before.put(testing.allocator, "src/untracked/", {});
+    const selected = try explicitPaths(testing.allocator, before, &.{
+        "src/loose.md",
+        "src/review.md",
+        "src/review.md",
+        "src/untracked/new.md",
+        "../escape",
+        "history/old.md",
+    });
+    defer testing.allocator.free(selected);
+    try testing.expectEqual(@as(usize, 1), selected.len);
+    try testing.expectEqualStrings("src/review.md", selected[0]);
 }
 
 test "commitMessage is a one-line greppable subject with a path cap" {

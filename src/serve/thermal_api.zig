@@ -20,6 +20,7 @@
 
 const std = @import("std");
 const httpz = @import("httpz");
+const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
 const json_writer = @import("../json_writer.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
@@ -129,6 +130,10 @@ const no_parts =
 const no_layout =
     "This design has no saved layout by that name, so there is no board to spread the heat over.";
 
+fn derivedCacheAllowed() bool {
+    return !infra_fs.hasActiveReadTrace();
+}
+
 /// The layout-aware cooling-scenario ladder for `name` at `ambient_c`, or the
 /// reason there is none.
 ///
@@ -219,10 +224,12 @@ pub fn solveFor(
         .live_version = version,
         .layout = layout orelse "",
     };
-    if (cache) |store| {
-        // Checked HERE and not just in `solveOver`, because a hit has to skip
-        // the placement resolve too — that sidecar parse is half the cost.
-        if (store.get(alloc, key)) |hit| return .{ .results = hit };
+    if (derivedCacheAllowed()) {
+        if (cache) |store| {
+            // Checked HERE and not just in `solveOver`, because a hit has to skip
+            // the placement resolve too — that sidecar parse is half the cost.
+            if (store.get(alloc, key)) |hit| return .{ .results = hit };
+        }
     }
     // A misspelled layout would otherwise fall through to a FRESH optimizer
     // solve — the most expensive thing this process does — and answer for a
@@ -298,17 +305,30 @@ pub fn solveOver(
         .live_version = version,
         .layout = board.layout orelse "",
     };
-    if (thermal_cache.active()) |store| {
-        if (store.get(alloc, key)) |hit| return hit;
+    if (derivedCacheAllowed()) {
+        if (thermal_cache.active()) |store| {
+            if (store.get(alloc, key)) |hit| return hit;
+        }
     }
     const results = try thermal_scenarios.solveFieldsWithHeatsink(alloc, bt, board.placement, board.copper, board.heatsink);
-    if (thermal_cache.active()) |store| {
-        // Re-read: a design edited WHILE the fields relaxed would otherwise be
-        // cached under the version it started at, and stay wrong until the next
-        // edit bumped it again.
-        if (serve_root.getLiveVersion(name) == version) store.put(alloc, eval, key, results);
+    if (derivedCacheAllowed()) {
+        if (thermal_cache.active()) |store| {
+            // Re-read: a design edited WHILE the fields relaxed would otherwise be
+            // cached under the version it started at, and stay wrong until the next
+            // edit bumped it again.
+            if (serve_root.getLiveVersion(name) == version) store.put(alloc, eval, key, results);
+        }
     }
     return results;
+}
+
+test "thermal derived caches are disabled while exact read tracing is active" {
+    try std.testing.expect(derivedCacheAllowed());
+    var trace = infra_fs.ReadTrace.init(std.testing.allocator);
+    defer trace.deinit();
+    trace.begin();
+    defer trace.end();
+    try std.testing.expect(!derivedCacheAllowed());
 }
 
 /// GET /api/thermal/:name[?ambient=NN][&layout=NAME] — the thermal facts for a

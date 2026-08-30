@@ -117,6 +117,11 @@ src/board_layers.zig::techRows | fn techRows(self: *const LayerTable) []const Ro
 src/board_layers.zig::tech_row_count value
 src/board_layers.zig::unrestricted value
 src/board_layers.zig::with | fn with(self: LayerSet, sig: SignalIndex) LayerSet
+src/board_review_snapshot.zig::Connection struct_
+src/board_review_snapshot.zig::Options struct_
+src/board_review_snapshot.zig::Snapshot struct_
+src/board_review_snapshot.zig::build | fn build( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, options: Options, ) BuildError!Snapshot
+src/board_review_snapshot.zig::verifySnapshot | fn verifySnapshot( allocator: std.mem.Allocator, project_dir: []const u8, snapshot: Snapshot, ) bool
 src/board_theme.zig::Channels struct_
 src/board_theme.zig::Entry struct_
 src/board_theme.zig::airwire_ground value
@@ -198,12 +203,14 @@ src/commands.zig::cmdExportKicad | fn cmdExportKicad(allocator: std.mem.Allocato
 src/commands.zig::cmdExportKicadSch | fn cmdExportKicadSch(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/commands.zig::cmdExportPdf | fn cmdExportPdf(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/commands.zig::cmdExportSchematicPng | fn cmdExportSchematicPng(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
+src/commands.zig::cmdExportSystemReview | fn cmdExportSystemReview(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/commands.zig::cmdImportKicad | fn cmdImportKicad(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/commands.zig::cmdImportKicadLayout | fn cmdImportKicadLayout( allocator: std.mem.Allocator, args: []const []const u8, ) InspectCommandError!void
 src/commands.zig::cmdInspectKicad | fn cmdInspectKicad( allocator: std.mem.Allocator, args: []const []const u8, ) InspectCommandError!void
 src/commands.zig::cmdMergeLayout | fn cmdMergeLayout( allocator: std.mem.Allocator, args: []const []const u8, ) InspectCommandError!void
 src/commands.zig::cmdRouteKicadReference | fn cmdRouteKicadReference( allocator: std.mem.Allocator, args: []const []const u8, ) InspectCommandError!void
 src/commands.zig::cmdSyncKicadSch | fn cmdSyncKicadSch(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
+src/commands.zig::cmdSystemCheck | fn cmdSystemCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/component_classification.zig::isActiveSemiconductor | fn isActiveSemiconductor(inst: env.Instance) bool
 src/config.zig::cseEmail | fn cseEmail(allocator: std.mem.Allocator) ?[]u8
 src/config.zig::cseMaxInFlight | fn cseMaxInFlight(allocator: std.mem.Allocator) u32
@@ -783,6 +790,7 @@ src/export_gerber.zig::PlaneNet union_
 src/export_gerber.zig::SilkPlan struct_
 src/export_gerber.zig::arcOwnsTrack | fn arcOwnsTrack(arcs: []const router.Arc, track: router.Track) bool
 src/export_gerber.zig::creationDate | fn creationDate(allocator: std.mem.Allocator, unix_s: i64) std.mem.Allocator.Error![]const u8
+src/export_gerber.zig::isCamOutputFilename | fn isCamOutputFilename(filename: []const u8) bool
 src/export_gerber.zig::job_file_ext value
 src/export_gerber.zig::job_file_suffix value
 src/export_gerber.zig::l1 value
@@ -1045,19 +1053,24 @@ src/infra/fs.zig::Condition struct_
 src/infra/fs.zig::CopyFileError value
 src/infra/fs.zig::DeleteFileError value
 src/infra/fs.zig::Dir struct_
+src/infra/fs.zig::Entry struct_
+src/infra/fs.zig::Error value
 src/infra/fs.zig::Error value
 src/infra/fs.zig::Error value
 src/infra/fs.zig::File struct_
 src/infra/fs.zig::FinishError value
 src/infra/fs.zig::InitError value
 src/infra/fs.zig::Iterator struct_
+src/infra/fs.zig::MakeDirError value
 src/infra/fs.zig::MakeError value
 src/infra/fs.zig::Mutex struct_
 src/infra/fs.zig::OpenError value
 src/infra/fs.zig::OpenError value
+src/infra/fs.zig::PreserveFinishError value
 src/infra/fs.zig::ReadError value
 src/infra/fs.zig::ReadTrace struct_
 src/infra/fs.zig::RenameError value
+src/infra/fs.zig::SecureWalker struct_
 src/infra/fs.zig::StatFileError value
 src/infra/fs.zig::Walker struct_
 src/infra/fs.zig::WriteError value
@@ -1076,6 +1089,7 @@ src/infra/fs.zig::currentIo | fn currentIo() std.Io
 src/infra/fs.zig::cwd | fn cwd() Dir
 src/infra/fs.zig::deinit | fn deinit(self: *AtomicFile) void
 src/infra/fs.zig::deinit | fn deinit(self: *ReadTrace) void
+src/infra/fs.zig::deinit | fn deinit(self: *SecureWalker) void
 src/infra/fs.zig::deinit | fn deinit(self: *Walker) void
 src/infra/fs.zig::deleteFile | fn deleteFile(self: Dir, sub_path: []const u8) DeleteFileError!void
 src/infra/fs.zig::deleteTree | fn deleteTree(self: Dir, sub_path: []const u8) std.Io.Dir.DeleteTreeError!void
@@ -1083,25 +1097,34 @@ src/infra/fs.zig::digest | fn digest(self: *const ReadTrace) [64]u8
 src/infra/fs.zig::digestForPath | fn digestForPath(self: *const ReadTrace, path: []const u8) ?[64]u8
 src/infra/fs.zig::end | fn end(self: *ReadTrace) void
 src/infra/fs.zig::finish | fn finish(self: *AtomicFile) FinishError!void
+src/infra/fs.zig::finishPreserve | fn finishPreserve(self: *AtomicFile) PreserveFinishError!void
+src/infra/fs.zig::hasActiveReadTrace | fn hasActiveReadTrace() bool
 src/infra/fs.zig::init | fn init(allocator: std.mem.Allocator) ReadTrace
 src/infra/fs.zig::iterate | fn iterate(self: Dir) Iterator
 src/infra/fs.zig::lock | fn lock(self: *Mutex) void
+src/infra/fs.zig::makeDir | fn makeDir(self: Dir, sub_path: []const u8) MakeDirError!void
 src/infra/fs.zig::makePath | fn makePath(self: Dir, sub_path: []const u8) MakeError!void
 src/infra/fs.zig::next | fn next(self: *Iterator) Error!?std.Io.Dir.Entry
+src/infra/fs.zig::next | fn next(self: *SecureWalker) Error!?Entry
 src/infra/fs.zig::next | fn next(self: *Walker) Error!?std.Io.Dir.Walker.Entry
 src/infra/fs.zig::openDir | fn openDir(self: Dir, sub_path: []const u8, options: std.Io.Dir.OpenOptions) OpenError!Dir
 src/infra/fs.zig::openFile | fn openFile(self: Dir, sub_path: []const u8, options: std.Io.Dir.OpenFileOptions) File.OpenError!File
 src/infra/fs.zig::readFileAlloc | fn readFileAlloc(self: Dir, allocator: std.mem.Allocator, sub_path: []const u8, max: usize) std.Io.Dir.ReadFileAllocError![]u8
+src/infra/fs.zig::readFileAllocSecure | fn readFileAllocSecure( self: Dir, allocator: std.mem.Allocator, sub_path: []const u8, max: usize, ) SecureReadError![]u8
 src/infra/fs.zig::readStreaming | fn readStreaming(self: File, buffer: []u8) std.Io.File.ReadStreamingError!usize
 src/infra/fs.zig::rename | fn rename(self: Dir, old_sub_path: []const u8, new_sub_path: []const u8) RenameError!void
+src/infra/fs.zig::renameTo | fn renameTo(self: Dir, old_sub_path: []const u8, destination: Dir, new_sub_path: []const u8) RenameError!void
+src/infra/fs.zig::retainedBytes | fn retainedBytes(self: *const ReadTrace) usize
 src/infra/fs.zig::signal | fn signal(self: *Condition) void
 src/infra/fs.zig::stat | fn stat(self: File) std.Io.File.StatError!std.Io.File.Stat
 src/infra/fs.zig::statFile | fn statFile(self: Dir, sub_path: []const u8) StatFileError!std.Io.Dir.Stat
+src/infra/fs.zig::statFileNoFollow | fn statFileNoFollow(self: Dir, sub_path: []const u8) StatFileError!std.Io.Dir.Stat
 src/infra/fs.zig::sync | fn sync(self: File) std.Io.File.SyncError!void
 src/infra/fs.zig::unlock | fn unlock(self: *Mutex) void
 src/infra/fs.zig::verify | fn verify(self: *const ReadTrace) bool
 src/infra/fs.zig::wait | fn wait(self: *Condition, mutex: *Mutex) void
 src/infra/fs.zig::walk | fn walk(self: Dir, allocator: std.mem.Allocator) std.mem.Allocator.Error!Walker
+src/infra/fs.zig::walkSecure | fn walkSecure(self: Dir, allocator: std.mem.Allocator) std.mem.Allocator.Error!SecureWalker
 src/infra/fs.zig::writeAll | fn writeAll(self: File, bytes: []const u8) WriteError!void
 src/infra/fs.zig::writeAllAt | fn writeAllAt(self: File, bytes: []const u8, offset: u64) std.Io.File.WritePositionalError!void
 src/infra/fs.zig::writeFile | fn writeFile(self: Dir, options: std.Io.Dir.WriteFileOptions) std.Io.Dir.WriteFileError!void
@@ -3446,6 +3469,12 @@ src/review_thermal.zig::summaryLines | fn summaryLines( allocator: std.mem.Alloc
 src/review_thermal.zig::testHotLadder | fn testHotLadder() thermal_scenarios.Ladder
 src/review_thermal.zig::testLadder | fn testLadder(sink: []const u8) thermal_scenarios.Ladder
 src/review_thermal.zig::writeFactsJson | fn writeFactsJson( w: anytype, bt: thermal.BoardThermal, scenarios: thermal_scenarios.Answer, ) json_writer.WriteError!void
+src/route_cleanup_gate.zig::Apply struct_
+src/route_cleanup_gate.zig::applyTrackPlan | fn applyTrackPlan( alloc: std.mem.Allocator, routed: router.RouteResult, findings: []const drc.Violation, selected: []const bool, ) std.mem.Allocator.Error!Apply
+src/route_cleanup_gate.zig::applyViaPlan | fn applyViaPlan( alloc: std.mem.Allocator, nets: []const optimizer.FlatNet, routed: router.RouteResult, findings: []const drc.Violation, selected: []const bool, ) std.mem.Allocator.Error!router.RouteResult
+src/route_cleanup_gate.zig::bypassRegressedNets | fn bypassRegressedNets( alloc: std.mem.Allocator, net_count: usize, before_violations: []const drc.Violation, after_violations: []const drc.Violation, ) std.mem.Allocator.Error![]const usize
+src/route_cleanup_gate.zig::gateSafe | fn gateSafe( before_violations: []const drc.Violation, before_tally: fab_readiness.Tally, after_violations: []const drc.Violation, after_tally: fab_readiness.Tally, ) bool
+src/route_cleanup_gate.zig::newlyOpenNets | fn newlyOpenNets( alloc: std.mem.Allocator, nets: []const optimizer.FlatNet, before_open: []const []const u8, after_open: []const []const u8, ) std.mem.Allocator.Error![]const usize
 src/route_repair.zig::Baseline struct_
 src/route_repair.zig::Input struct_
 src/route_repair.zig::Outcome struct_
@@ -3521,6 +3550,7 @@ src/serve/auth_store.zig::writeFileAtomicWithBackup | fn writeFileAtomicWithBack
 src/serve/autocommit.zig::Session struct_
 src/serve/autocommit.zig::begin | fn begin(allocator: std.mem.Allocator, project_dir: []const u8) ?Session
 src/serve/autocommit.zig::commit | fn commit(session: ?Session, username: ?[]const u8, tool_name: []const u8) void
+src/serve/autocommit.zig::commitPaths | fn commitPaths( session: ?Session, username: ?[]const u8, tool_name: []const u8, paths: []const []const u8, ) void
 src/serve/autocommit.zig::deinit | fn deinit(self: *Session) void
 src/serve/board_backup.zig::RollBackupError value
 src/serve/board_backup.zig::WriteFileAtomicError value
@@ -3703,6 +3733,14 @@ src/serve/edit_assist.zig::libIndexApi | fn libIndexApi(ctx: *Server, _: *httpz.
 src/serve/edit_assist.zig::saveDiagramLayoutApi | fn saveDiagramLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit_assist.zig::validateSourceApi | fn validateSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/fab_filename.zig::prefix | fn prefix(name: []const u8) []const u8
+src/serve/fab_release_service.zig::AssemblyInput struct_
+src/serve/fab_release_service.zig::AssemblyRenderer struct_
+src/serve/fab_release_service.zig::Options struct_
+src/serve/fab_release_service.zig::ReleaseError value
+src/serve/fab_release_service.zig::Result struct_
+src/serve/fab_release_service.zig::readiness | fn readiness( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, options: Options, ) ReleaseError!Result
+src/serve/fab_release_service.zig::release | fn release( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, options: Options, renderer: AssemblyRenderer, ) ReleaseError!Result
+src/serve/fab_release_service.zig::releaseBounded | fn releaseBounded( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, options: Options, renderer: AssemblyRenderer, max_zip_bytes: usize, ) ReleaseError!Result
 src/serve/footprint_editor.zig::HandlerError value
 src/serve/footprint_editor.zig::editorPage | fn editorPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/footprint_editor.zig::saveApi | fn saveApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
@@ -4084,6 +4122,7 @@ src/serve/pcb_layout_page.zig::setup value
 src/serve/pcb_layout_page.zig::shownLayoutCopper | fn shownLayoutCopper( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: PngRequest, placement: optimizer.Placement, ) ShownCopper
 src/serve/pcb_layout_page.zig::sidecar_max_bytes value
 src/serve/pcb_layout_page.zig::solveForRequest | fn solveForRequest( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: PngRequest, eval: *Evaluator, module_res: *?modules_mod.ResolvedBlock, ) PngError!SolvedRequest
+src/serve/pcb_layout_page.zig::standaloneReleaseAssemblyHtml | fn standaloneReleaseAssemblyHtml( ctx: *Server, req: *httpz.Request, name: []const u8, block: *const env_mod.DesignBlock, fv: FabView, identity: standalone_assembly.ReleaseIdentity, ) HandlerError![]const u8
 src/serve/pcb_layout_page.zig::subBlockPoseByOriginKey | fn subBlockPoseByOriginKey( alloc: std.mem.Allocator, project_dir: []const u8, sub_block: env_mod.SubBlock, ) ?SubBlockSeeds
 src/serve/pcb_layout_page.zig::subSlug value
 src/serve/pcb_layout_page.zig::thermalCopper | fn thermalCopper(solved: SolvedRequest) thermal_scenarios.Copper
@@ -4337,6 +4376,18 @@ src/serve/sync_kicad_sch.zig::mcpSyncKicadSch | fn mcpSyncKicadSch( alloc: std.m
 src/serve/sync_kicad_sch.zig::runPush | fn runPush( allocator: std.mem.Allocator, arena: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: push.Options, ) PushApiError!push.Result
 src/serve/sync_kicad_sch.zig::syncKicadSchApi | fn syncKicadSchApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/sync_kicad_sch.zig::writeResultJson | fn writeResultJson( w: *std.Io.Writer, name: []const u8, result: push.Result, dry_run: bool, ) std.Io.Writer.Error!void
+src/serve/system_review_api.zig::HandlerError value
+src/serve/system_review_api.zig::attestSystemApi | fn attestSystemApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/system_review_api.zig::draftPackageApi | fn draftPackageApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/system_review_api.zig::getAssetApi | fn getAssetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/system_review_api.zig::getDocumentApi | fn getDocumentApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/system_review_api.zig::getSystemApi | fn getSystemApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/system_review_api.zig::listSystemsApi | fn listSystemsApi(ctx: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/system_review_api.zig::putDocumentApi | fn putDocumentApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/system_review_api.zig::readinessApi | fn readinessApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/system_review_api.zig::releaseApi | fn releaseApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/system_review_api.zig::systemPage | fn systemPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/system_review_api.zig::uploadAssetApi | fn uploadAssetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/templates/library.zig::Args value
 src/serve/templates/library.zig::Args value
 src/serve/templates/library.zig::Args value
@@ -4425,10 +4476,13 @@ src/serve/upload_package.zig::HandlerError value
 src/serve/upload_package.zig::uploadPackageApi | fn uploadPackageApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/urlcodec.zig::decodeAlloc | fn decodeAlloc(allocator: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error![]u8
 src/serve/vfs.zig::ListMode enum_
+src/serve/vfs.zig::MutationScope struct_
 src/serve/vfs.zig::ReplaceMode enum_
 src/serve/vfs.zig::VfsError value
 src/serve/vfs.zig::WriteMode enum_
 src/serve/vfs.zig::WriteOpts struct_
+src/serve/vfs.zig::beginMutation | fn beginMutation() MutationScope
+src/serve/vfs.zig::deinit | fn deinit(self: *MutationScope) void
 src/serve/vfs.zig::deleteFile | fn deleteFile( allocator: std.mem.Allocator, project_dir: []const u8, rel_path: []const u8, out: *std.ArrayList(u8), ) VfsError!bool
 src/serve/vfs.zig::dirtyDesignsForPath | fn dirtyDesignsForPath( allocator: std.mem.Allocator, project_dir: []const u8, rel_path: []const u8, ) (std.mem.Allocator.Error || infra_fs.Dir.OpenError || infra_fs.Iterator.Error)![][]const u8
 src/serve/vfs.zig::editFile | fn editFile( allocator: std.mem.Allocator, project_dir: []const u8, rel_path: []const u8, old_string: []const u8, new_string: []const u8, expected_sha256: ?[]const u8, replace_mode: ReplaceMode, out: *std.ArrayList(u8), ) VfsError!bool
@@ -4563,6 +4617,108 @@ src/svg2pdf.zig::Text struct_
 src/svg2pdf.zig::Theme enum_
 src/svg2pdf.zig::translate | fn translate(gpa: Allocator, svg: []const u8, opts: Options, diag: ?*Diagnostic) Error!Document
 src/svg2pdf.zig::translateAll | fn translateAll(gpa: Allocator, markup: []const u8, opts: Options, diag: ?*Diagnostic) Error![]Document
+src/system_review.zig::AttestInputError value
+src/system_review.zig::Attestation struct_
+src/system_review.zig::AttestationWriteError value
+src/system_review.zig::BoardMember struct_
+src/system_review.zig::ChecklistSummary struct_
+src/system_review.zig::ContactObservation struct_
+src/system_review.zig::Diagnostic struct_
+src/system_review.zig::DiagnosticCode enum_
+src/system_review.zig::DnpPolicy enum_
+src/system_review.zig::DocumentAttestation struct_
+src/system_review.zig::DocumentClassification enum_
+src/system_review.zig::DocumentContent struct_
+src/system_review.zig::DocumentError value
+src/system_review.zig::DocumentSpec struct_
+src/system_review.zig::DocumentStatus enum_
+src/system_review.zig::GeneratedSection enum_
+src/system_review.zig::InputAttestation struct_
+src/system_review.zig::InterfaceAlias struct_
+src/system_review.zig::InterfaceContract struct_
+src/system_review.zig::InterfaceEndpoint struct_
+src/system_review.zig::InterfaceObservation struct_
+src/system_review.zig::InterfaceSignal struct_
+src/system_review.zig::ParseError value
+src/system_review.zig::ParsedSystemSpec value
+src/system_review.zig::SystemSpec struct_
+src/system_review.zig::SystemSpecWriteError value
+src/system_review.zig::ValidationError value
+src/system_review.zig::allComplete | fn allComplete(self: ChecklistSummary) bool
+src/system_review.zig::attestDocument | fn attestDocument( allocator: std.mem.Allocator, spec: DocumentSpec, content: []const u8, diagnostic: *Diagnostic, ) DocumentError!DocumentAttestation
+src/system_review.zig::attestInput | fn attestInput( allocator: std.mem.Allocator, path: []const u8, content: []const u8, diagnostic: *Diagnostic, ) AttestInputError!InputAttestation
+src/system_review.zig::canonicalSpecDigest | fn canonicalSpecDigest( allocator: std.mem.Allocator, spec: SystemSpec, ) std.mem.Allocator.Error![64]u8
+src/system_review.zig::clear | fn clear(self: *Diagnostic) void
+src/system_review.zig::generatedSection | fn generatedSection(id: []const u8) ?GeneratedSection
+src/system_review.zig::generated_region_close value
+src/system_review.zig::generated_region_open value
+src/system_review.zig::inspectDocumentContent | fn inspectDocumentContent( spec: DocumentSpec, content: []const u8, diagnostic: *Diagnostic, ) DocumentError!DocumentContent
+src/system_review.zig::isSafeRelativePath | fn isSafeRelativePath(path: []const u8) bool
+src/system_review.zig::makeAttestation | fn makeAttestation( allocator: std.mem.Allocator, spec: SystemSpec, inputs: []const InputAttestation, documents: []const DocumentAttestation, ) std.mem.Allocator.Error!Attestation
+src/system_review.zig::max_manifest_bytes value
+src/system_review.zig::max_relative_path_bytes value
+src/system_review.zig::parseSystemSpec | fn parseSystemSpec( allocator: std.mem.Allocator, source: []const u8, diagnostic: *Diagnostic, ) ParseError!ParsedSystemSpec
+src/system_review.zig::schema_v1 value
+src/system_review.zig::sha256Hex | fn sha256Hex(content: []const u8) [64]u8
+src/system_review.zig::systemLockDigest | fn systemLockDigest( allocator: std.mem.Allocator, spec: SystemSpec, inputs: []const InputAttestation, documents: []const DocumentAttestation, ) std.mem.Allocator.Error![64]u8
+src/system_review.zig::validateAttestation | fn validateAttestation( allocator: std.mem.Allocator, spec: SystemSpec, attestation: Attestation, diagnostic: *Diagnostic, ) ValidationError!void
+src/system_review.zig::validateInterfaceCompleteness | fn validateInterfaceCompleteness( spec: SystemSpec, observations: []const InterfaceObservation, diagnostic: *Diagnostic, ) error{InvalidManifest}!void
+src/system_review.zig::validateReleaseAttestation | fn validateReleaseAttestation( allocator: std.mem.Allocator, spec: SystemSpec, attestation: Attestation, diagnostic: *Diagnostic, ) ValidationError!void
+src/system_review.zig::validateSystemSpec | fn validateSystemSpec( allocator: std.mem.Allocator, spec: SystemSpec, diagnostic: *Diagnostic, ) ValidationError!void
+src/system_review.zig::writeAttestationJson | fn writeAttestationJson( allocator: std.mem.Allocator, writer: *std.Io.Writer, attestation: Attestation, ) AttestationWriteError!void
+src/system_review.zig::writeSystemSpecJson | fn writeSystemSpecJson( allocator: std.mem.Allocator, writer: *std.Io.Writer, spec: SystemSpec, ) SystemSpecWriteError!void
+src/system_review_assets.zig::Asset struct_
+src/system_review_assets.zig::Kind enum_
+src/system_review_assets.zig::enumerate | fn enumerate( allocator: std.mem.Allocator, project_dir: []const u8, system_name: []const u8, ) EnumerateError![]const Asset
+src/system_review_assets.zig::kind | fn kind(filename: []const u8) ?Kind
+src/system_review_assets.zig::max_asset_bytes value
+src/system_review_assets.zig::max_asset_count value
+src/system_review_assets.zig::max_filename_bytes value
+src/system_review_assets.zig::max_total_bytes value
+src/system_review_assets.zig::readAsset | fn readAsset( allocator: std.mem.Allocator, project_dir: []const u8, system_name: []const u8, filename: []const u8, ) ReadAssetError!Asset
+src/system_review_assets.zig::readContainedFile | fn readContainedFile( allocator: std.mem.Allocator, project_dir: []const u8, relative: []const u8, max_bytes: usize, ) ReadContainedError![]const u8
+src/system_review_assets.zig::relativePath | fn relativePath( allocator: std.mem.Allocator, system_name: []const u8, filename: []const u8, ) std.mem.Allocator.Error![]const u8
+src/system_review_assets.zig::resolveContainedPathAlloc | fn resolveContainedPathAlloc( allocator: std.mem.Allocator, project_dir: []const u8, relative: []const u8, ) ResolveError![]const u8
+src/system_review_assets.zig::validContent | fn validContent(asset_kind: Kind, body: []const u8) bool
+src/system_review_assets.zig::validFilename | fn validFilename(filename: []const u8) bool
+src/system_review_assets.zig::validateAddition | fn validateAddition(existing: []const Asset, added_bytes: usize) error{ TooManyAssets, AssetsTooLarge }!void
+src/system_review_md.zig::Alignment enum_
+src/system_review_md.zig::Block union_
+src/system_review_md.zig::Cell struct_
+src/system_review_md.zig::CodeBlock struct_
+src/system_review_md.zig::Directive struct_
+src/system_review_md.zig::Document struct_
+src/system_review_md.zig::Heading struct_
+src/system_review_md.zig::Image struct_
+src/system_review_md.zig::Inline union_
+src/system_review_md.zig::Limits struct_
+src/system_review_md.zig::Link struct_
+src/system_review_md.zig::List struct_
+src/system_review_md.zig::ListItem struct_
+src/system_review_md.zig::ListKind enum_
+src/system_review_md.zig::Options struct_
+src/system_review_md.zig::Paragraph struct_
+src/system_review_md.zig::ParseError value
+src/system_review_md.zig::RenderError value
+src/system_review_md.zig::Table struct_
+src/system_review_md.zig::deinit | fn deinit(self: *Document) void
+src/system_review_md.zig::parse | fn parse(parent: Allocator, source: []const u8, options: Options) ParseError!Document
+src/system_review_md.zig::renderHtml | fn renderHtml(writer: *std.Io.Writer, document: *const Document) std.Io.Writer.Error!void
+src/system_review_md.zig::renderHtmlAlloc | fn renderHtmlAlloc(allocator: Allocator, document: *const Document) RenderError![]const u8
+src/system_review_md.zig::renderMarkdown | fn renderMarkdown(writer: *std.Io.Writer, document: *const Document) std.Io.Writer.Error!void
+src/system_review_md.zig::renderMarkdownAlloc | fn renderMarkdownAlloc(allocator: Allocator, document: *const Document) RenderError![]const u8
+src/system_review_md.zig::uncheckedChecklistCount | fn uncheckedChecklistCount(self: *const Document) usize
+src/system_review_package.zig::AttestationResult struct_
+src/system_review_package.zig::PackageResult struct_
+src/system_review_package.zig::Readiness struct_
+src/system_review_package.zig::ReleaseOptions struct_
+src/system_review_package.zig::attest | fn attest( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, expected_content_lock: []const u8, actor: []const u8, attested_at: []const u8, ) AttestError!AttestationResult
+src/system_review_package.zig::draft | fn draft( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) DraftError!PackageResult
+src/system_review_package.zig::readiness | fn readiness( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) ReadinessError!Readiness
+src/system_review_package.zig::release | fn release( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, options: ReleaseOptions, renderer: fab_service.AssemblyRenderer, ) ReleaseError!PackageResult
+src/system_review_pdf.zig::Error value
+src/system_review_pdf.zig::Options struct_
+src/system_review_pdf.zig::compose | fn compose(allocator: std.mem.Allocator, markdown: []const u8, opts: Options) Error![]u8
 src/target_unblock.zig::Board struct_
 src/target_unblock.zig::Corridor struct_
 src/target_unblock.zig::Gate struct_
@@ -4646,4 +4802,5 @@ src/thermal_scenarios.zig::solveFieldsWithHeatsink | fn solveFieldsWithHeatsink(
 src/thermal_scenarios.zig::spreaderLayersOf | fn spreaderLayersOf(rules: optimizer.BoardRules) u8
 src/tool_cli.zig::run | fn run(allocator: std.mem.Allocator, args: []const []const u8) RunError!void
 src/zipfile.zig::Entry struct_
+src/zipfile.zig::encodedSize | fn encodedSize(entries: []const Entry) error{Zip32LimitExceeded}!u64
 src/zipfile.zig::write | fn write(w: *std.Io.Writer, entries: []const Entry) std.Io.Writer.Error!void

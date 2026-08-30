@@ -95,6 +95,7 @@ const design_diff = @import("serve/design_diff.zig");
 const datasheet_attach = @import("serve/datasheet_attach.zig");
 const rate_limiter = @import("serve/rate_limiter.zig");
 const request_log = @import("serve/request_log.zig");
+const system_review_api = @import("serve/system_review_api.zig");
 const warm_sched = @import("serve/warm_sched.zig");
 
 // ── Global live state ──────────────────────────────────────────────────
@@ -481,6 +482,16 @@ pub const Server = struct {
     /// a `Host: localhost` header used to grant unauthenticated admin remotely.
     dev_mode: bool = false,
 
+    /// Authenticated identity for the current request. The long-lived server
+    /// leaves these at their defaults; `dispatch` creates a request-local copy
+    /// and `ward_auth.authMiddleware` fills them only after verification.
+    /// Handlers that create audit records must use these fields rather than
+    /// trusting a username supplied by the request body.
+    request_auth: struct {
+        username: ?[]const u8 = null,
+        role: ward_auth.Role = .reader,
+    } = .{},
+
     /// Per-server mutable state (session/challenge stores today; OAuth/user/
     /// plugin-token stores, caches, live versions, PCB jobs, and rate limiters
     /// as the migration lands). Borrowed — the single instance is owned by
@@ -519,6 +530,7 @@ pub const Server = struct {
             .project_dir = self.project_dir,
             .auth_dir = self.auth_dir,
             .dev_mode = self.dev_mode,
+            .request_auth = .{},
             // The per-request copy borrows the same long-lived state instance,
             // so every route handler reaches the same stores/caches/limiters.
             .state = self.state,
@@ -924,9 +936,20 @@ pub fn serve(
     router.get("/static/:name", static_assets.staticAsset, .{});
     router.get("/schematics/:name", schematic_page.schematicPage, .{});
     registerPcbRoutes(router);
+    router.get("/systems/:name", system_review_api.systemPage, .{});
     router.get("/modules", modules_page.modulesListPage, .{});
     router.get("/modules/:name", modules_page.moduleViewPage, .{});
     // API
+    router.get("/api/systems", system_review_api.listSystemsApi, .{});
+    router.get("/api/systems/:name", system_review_api.getSystemApi, .{});
+    router.get("/api/systems/:name/docs/:doc", system_review_api.getDocumentApi, .{});
+    router.put("/api/systems/:name/docs/:doc", system_review_api.putDocumentApi, .{});
+    router.post("/api/systems/:name/attest", system_review_api.attestSystemApi, .{});
+    router.post("/api/systems/:name/assets", system_review_api.uploadAssetApi, .{});
+    router.get("/api/systems/:name/assets/:asset", system_review_api.getAssetApi, .{});
+    router.get("/api/systems/:name/readiness", system_review_api.readinessApi, .{});
+    router.get("/api/systems/:name/draft.zip", system_review_api.draftPackageApi, .{});
+    router.post("/api/systems/:name/release", system_review_api.releaseApi, .{});
     router.post("/api/push/:name", api.pushApi, .{});
     router.get("/api/module-source", modules_page.moduleSourceApi, .{});
     router.get("/api/version/:name", api.versionApi, .{});

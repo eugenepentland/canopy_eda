@@ -35,6 +35,7 @@ const review_mod = @import("review.zig");
 const req_checks = @import("req_checks.zig");
 const notes = @import("serve/notes.zig");
 const thermal_api = @import("serve/thermal_api.zig");
+const system_review_package = @import("system_review_package.zig");
 
 const InspectCommandError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
@@ -78,6 +79,47 @@ const export_kicad_usage =
     "Usage: netlisp export-kicad --project-dir <d> --output-dir <out> [--with-schematic] <design-name>\n" ++
     "--with-schematic also writes the .kicad_sch hierarchy + project sidecars, so\n" ++
     "the output directory opens in KiCad as a complete project.\n";
+const system_check_usage =
+    "Usage: netlisp system-check [--project-dir <d>] <system-name>\n";
+const export_system_review_usage =
+    "Usage: netlisp export-system-review [--project-dir <d>] <system-name> [--output <file.zip>]\n";
+
+const SystemReviewArgs = struct {
+    project_dir: []const u8 = ".",
+    name: []const u8 = "",
+    output: ?[]const u8 = null,
+};
+
+fn parseSystemReviewArgs(args: []const []const u8, allow_output: bool) !SystemReviewArgs {
+    var parsed: SystemReviewArgs = .{};
+    var saw_project_dir = false;
+    var saw_output = false;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], project_dir_flag)) {
+            if (saw_project_dir) return error.DuplicateOption;
+            if (i + 1 >= args.len or std.mem.startsWith(u8, args[i + 1], "--"))
+                return error.MissingOptionValue;
+            saw_project_dir = true;
+            parsed.project_dir = args[i + 1];
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--output")) {
+            if (!allow_output) return error.OutputNotAllowed;
+            if (saw_output) return error.DuplicateOption;
+            if (i + 1 >= args.len or std.mem.startsWith(u8, args[i + 1], "--"))
+                return error.MissingOptionValue;
+            saw_output = true;
+            parsed.output = args[i + 1];
+            i += 1;
+        } else if (std.mem.startsWith(u8, args[i], "--")) {
+            return error.UnknownOption;
+        } else {
+            if (parsed.name.len != 0) return error.TooManyPositionals;
+            parsed.name = args[i];
+        }
+    }
+    return parsed;
+}
 
 /// Error set for the CLI command handlers in this file. Wide on purpose:
 /// each `cmd*` orchestrates the evaluator (`EvalError`), file IO, network
@@ -289,6 +331,35 @@ pub fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandE
     try std.Io.File.stdout().writeStreamingAll(infra_fs.currentIo(), w_buf.written());
 
     if (counts.errors > 0) exit.failure();
+}
+
+/// `netlisp system-check <name>` — print the exact system-release readiness
+/// document and fail the process when any engineering/fabrication gate blocks.
+pub fn cmdSystemCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void {
+    const parsed = parseSystemReviewArgs(args, false) catch exit.fatal(system_check_usage, .{});
+    if (parsed.name.len == 0) exit.fatal(system_check_usage, .{});
+    const result = system_review_package.readiness(allocator, parsed.project_dir, parsed.name) catch |err| {
+        exit.fatal("System review failed: {s}\n", .{@errorName(err)});
+    };
+    try std.Io.File.stdout().writeStreamingAll(infra_fs.currentIo(), result.json);
+    try std.Io.File.stdout().writeStreamingAll(infra_fs.currentIo(), "\n");
+    if (result.blocked) exit.failure();
+}
+
+/// `netlisp export-system-review <name>` — write a watermarked review archive.
+/// This command is intentionally draft-only: final CAM release remains behind
+/// authenticated browser approval and an echoed readiness token.
+pub fn cmdExportSystemReview(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void {
+    const parsed = parseSystemReviewArgs(args, true) catch exit.fatal(export_system_review_usage, .{});
+    if (parsed.name.len == 0) exit.fatal(export_system_review_usage, .{});
+    const result = system_review_package.draft(allocator, parsed.project_dir, parsed.name) catch |err| {
+        exit.fatal("System review export failed: {s}\n", .{@errorName(err)});
+    };
+    const output = parsed.output orelse result.filename;
+    infra_fs.cwd().writeFile(.{ .sub_path = output, .data = result.zip }) catch |err| {
+        exit.fatal(cannot_write_fmt, .{ output, err });
+    };
+    std.debug.print("Wrote {s} ({d} bytes, draft; no fabrication CAM)\n", .{ output, result.zip.len });
 }
 
 /// Parsed argument vector for `netlisp build`. Kept as a pure struct so the
@@ -1249,6 +1320,24 @@ fn pushToServer(allocator: std.mem.Allocator, url: []const u8, body: []const u8)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────
+
+// spec: system-review - CLI system review commands share project, system, and output argument parsing
+test "system review CLI accepts project and output flags around the system name" {
+    const args = [_][]const u8{ "barracuda", "--output", "review.zip", project_dir_flag, "projects/designs" };
+    const parsed = try parseSystemReviewArgs(&args, true);
+    try std.testing.expectEqualStrings("projects/designs", parsed.project_dir);
+    try std.testing.expectEqualStrings("barracuda", parsed.name);
+    try std.testing.expectEqualStrings("review.zip", parsed.output.?);
+}
+
+// spec: system-review - CLI system review commands reject unknown flags, missing option values, duplicate positionals, and draft output flags on readiness checks
+test "system review CLI rejects ambiguous and command-specific arguments" {
+    try std.testing.expectError(error.UnknownOption, parseSystemReviewArgs(&.{ "barracuda", "--wat" }, true));
+    try std.testing.expectError(error.MissingOptionValue, parseSystemReviewArgs(&.{ "barracuda", "--output" }, true));
+    try std.testing.expectError(error.TooManyPositionals, parseSystemReviewArgs(&.{ "barracuda", "another" }, true));
+    try std.testing.expectError(error.OutputNotAllowed, parseSystemReviewArgs(&.{ "barracuda", "--output", "review.zip" }, false));
+    try std.testing.expectError(error.DuplicateOption, parseSystemReviewArgs(&.{ project_dir_flag, "one", project_dir_flag, "two", "barracuda" }, true));
+}
 
 test "parseSyncSchArgs: flags in any order, lone positional is the design" {
     // spec: kicad_sch_push - The sync-kicad-sch CLI reads --project-dir, --dry-run and --force in any order and takes the lone positional as the design

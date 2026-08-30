@@ -21,6 +21,33 @@ const max_path_bytes: usize = 1024;
 const max_glob_results: usize = 4096;
 const default_list_entries: usize = 1024;
 
+const MutationState = struct {
+    var mutex: infra_fs.Mutex = .{};
+    threadlocal var depth: usize = 0;
+};
+
+/// Reentrant process-local mutation transaction shared by the generic VFS and
+/// multi-file system-review operations. Nested scopes on the same request
+/// thread retain the outer lock until its full transaction is complete.
+pub const MutationScope = struct {
+    active: bool = true,
+
+    pub fn deinit(self: *MutationScope) void {
+        if (!self.active) return;
+        std.debug.assert(MutationState.depth > 0);
+        MutationState.depth -= 1;
+        if (MutationState.depth == 0) MutationState.mutex.unlock();
+        self.active = false;
+    }
+};
+
+/// Enter the shared reentrant filesystem-mutation transaction.
+pub fn beginMutation() MutationScope {
+    if (MutationState.depth == 0) MutationState.mutex.lock();
+    MutationState.depth += 1;
+    return .{};
+}
+
 // Repeated JSON / error fragments — extracted so the same literal isn't
 // duplicated across handlers.
 const json_path_open = "{\"path\":";
@@ -72,12 +99,13 @@ const SandboxError = error{
 /// found) get JSON-encoded into `out` and the function returns `false`.
 pub const VfsError = std.mem.Allocator.Error || std.Io.Writer.Error ||
     infra_fs.File.OpenError || infra_fs.File.ReadError || infra_fs.File.WriteError ||
-    infra_fs.Dir.MakeError || infra_fs.Dir.StatFileError ||
+    infra_fs.Dir.MakeError || infra_fs.Dir.MakeDirError || infra_fs.Dir.StatFileError ||
     infra_fs.Dir.OpenError || infra_fs.Iterator.Error ||
     infra_fs.Dir.RenameError || infra_fs.Dir.DeleteFileError ||
     infra_fs.Dir.AccessError || infra_fs.AtomicFile.InitError ||
-    infra_fs.AtomicFile.FinishError ||
-    error{ FileTooBig, StreamTooLong, BrokenPipe, NotOpenForWriting };
+    infra_fs.AtomicFile.FinishError || infra_fs.AtomicFile.PreserveFinishError ||
+    std.Io.Dir.RealPathFileAllocError ||
+    error{ FileTooBig, StreamTooLong, BrokenPipe, NotOpenForWriting, ReadFailed, UnsafePath };
 
 /// Top-level prefixes that may be read. A path is OK if it starts with one
 /// of these followed by '/'. The empty prefix `""` matches the project root
@@ -423,16 +451,20 @@ pub fn readFile(
         return writeSandboxError(out, allocator, e, rel_path, .read);
     };
     defer allocator.free(resolved.abs);
+    var target = openSecureExistingTarget(allocator, project_dir, resolved.rel) catch |err| switch (err) {
+        error.FileNotFound => return writeError(out, allocator, err_not_found),
+        error.SymLinkLoop, error.NotDir => return writeError(out, allocator, "refusing symlinked path"),
+        else => return err,
+    };
+    defer target.deinit();
+    const stat = target.parent.statFileNoFollow(target.basename) catch |err| switch (err) {
+        error.FileNotFound => return writeError(out, allocator, err_not_found),
+        else => return err,
+    };
+    if (stat.kind == .sym_link) return writeError(out, allocator, "refusing to read symlink");
+    if (stat.kind == .directory) return writeError(out, allocator, "is a directory");
 
-    // The ACL is lexical (checks the rel path), so a pre-existing symlink whose
-    // lexical prefix is allowlisted (e.g. `src/x -> ../auth/oauth_tokens.json`)
-    // would otherwise be followed and leak a file outside the sandbox. Reject
-    // symlinks on read, mirroring the write/delete paths.
-    if (infra_fs.cwd().statFile(resolved.abs)) |stat| {
-        if (stat.kind == .sym_link) return writeError(out, allocator, "refusing to read symlink");
-    } else |_| {}
-
-    const content = infra_fs.cwd().readFileAlloc(allocator, resolved.abs, max_file_bytes) catch |e| switch (e) {
+    const content = target.parent.readFileAllocSecure(allocator, target.basename, max_file_bytes) catch |e| switch (e) {
         error.FileNotFound => return writeError(out, allocator, err_not_found),
         error.IsDir => return writeError(out, allocator, "is a directory"),
         error.AccessDenied => return writeError(out, allocator, err_access_denied),
@@ -510,7 +542,95 @@ pub const WriteMode = enum { replace, append };
 pub const WriteOpts = struct {
     expected_sha256: ?[]const u8 = null,
     mode: WriteMode = .replace,
+    /// Atomically reserve a new path and fail if any entry already exists.
+    /// Used for upload/create operations that must never replace raced data.
+    require_absent: bool = false,
 };
+
+const SecureWriteTarget = struct {
+    parent: infra_fs.Dir,
+    basename: []const u8,
+
+    fn deinit(self: *SecureWriteTarget) void {
+        self.parent.close();
+    }
+};
+
+const ParentMode = enum { existing, create };
+
+fn openSecureWriteTarget(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    relative: []const u8,
+) !SecureWriteTarget {
+    return openSecureTarget(allocator, project_dir, relative, .create);
+}
+
+fn openSecureExistingTarget(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    relative: []const u8,
+) !SecureWriteTarget {
+    return openSecureTarget(allocator, project_dir, relative, .existing);
+}
+
+fn openSecureDirectory(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    relative: []const u8,
+) !infra_fs.Dir {
+    if (relative.len == 0) {
+        const root_path = try infra_fs.canonicalPathAlloc(allocator, project_dir);
+        defer allocator.free(root_path);
+        return infra_fs.cwd().openDir(root_path, .{
+            .iterate = true,
+            .follow_symlinks = false,
+        });
+    }
+    var target = try openSecureExistingTarget(allocator, project_dir, relative);
+    defer target.deinit();
+    return target.parent.openDir(target.basename, .{
+        .iterate = true,
+        .follow_symlinks = false,
+    });
+}
+
+fn openSecureTarget(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    relative: []const u8,
+    mode: ParentMode,
+) !SecureWriteTarget {
+    const root_path = try infra_fs.canonicalPathAlloc(allocator, project_dir);
+    defer allocator.free(root_path);
+    var current = try infra_fs.cwd().openDir(root_path, .{ .follow_symlinks = false });
+    errdefer current.close();
+
+    const basename = std.fs.path.basename(relative);
+    if (std.fs.path.dirname(relative)) |parent| {
+        var components = std.mem.splitScalar(u8, parent, '/');
+        while (components.next()) |component| {
+            const next = try openTargetDirectory(current, component, mode);
+            current.close();
+            current = next;
+        }
+    }
+    return .{ .parent = current, .basename = basename };
+}
+
+fn openTargetDirectory(parent: infra_fs.Dir, component: []const u8, mode: ParentMode) !infra_fs.Dir {
+    return parent.openDir(component, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => blk: {
+            if (mode == .existing) return error.FileNotFound;
+            parent.makeDir(component) catch |make_err| switch (make_err) {
+                error.PathAlreadyExists => {},
+                else => return make_err,
+            };
+            break :blk try parent.openDir(component, .{ .follow_symlinks = false });
+        },
+        else => return err,
+    };
+}
 
 /// Atomically write `content` to a sandboxed path. `opts.mode == .append`
 /// concatenates `content` onto the existing file (empty if it doesn't exist
@@ -527,6 +647,8 @@ pub fn writeFile(
     opts: WriteOpts,
     out: *std.ArrayList(u8),
 ) VfsError!bool {
+    var mutation = beginMutation();
+    defer mutation.deinit();
     if (content.len > max_file_bytes) {
         return writeError(out, allocator, "content too large");
     }
@@ -534,13 +656,19 @@ pub fn writeFile(
         return writeSandboxError(out, allocator, e, rel_path, .write);
     };
     defer allocator.free(resolved.abs);
+    var target = openSecureWriteTarget(allocator, project_dir, resolved.rel) catch |err| switch (err) {
+        error.SymLinkLoop, error.NotDir => return writeError(out, allocator, "refusing symlinked path"),
+        else => return err,
+    };
+    defer target.deinit();
 
-    if (infra_fs.cwd().statFile(resolved.abs)) |stat| {
+    if (target.parent.statFileNoFollow(target.basename)) |stat| {
+        if (opts.require_absent) return writeStaleSha(out, allocator, "");
         if (stat.kind == .sym_link) {
             return writeError(out, allocator, err_refuse_symlink);
         }
         if (opts.expected_sha256) |expected| {
-            const existing = infra_fs.cwd().readFileAlloc(allocator, resolved.abs, max_file_bytes) catch |e| switch (e) {
+            const existing = target.parent.readFileAllocSecure(allocator, target.basename, max_file_bytes) catch |e| switch (e) {
                 error.FileNotFound => return writeStaleSha(out, allocator, ""),
                 else => return e,
             };
@@ -553,19 +681,12 @@ pub fn writeFile(
         }
     } else |_| {}
 
-    if (std.fs.path.dirname(resolved.abs)) |parent| {
-        infra_fs.cwd().makePath(parent) catch |e| switch (e) {
-            error.PathAlreadyExists => {},
-            else => return e,
-        };
-    }
-
     // In append mode, prepend the existing file's bytes (empty if absent) so
     // the atomic rewrite lands existing++content. A plain write writes `content`.
     var appended: ?[]u8 = null;
     defer if (appended) |a| allocator.free(a);
     const to_write: []const u8 = if (opts.mode == .replace) content else blk: {
-        const prior: []u8 = infra_fs.cwd().readFileAlloc(allocator, resolved.abs, max_file_bytes) catch |e| switch (e) {
+        const prior: []u8 = target.parent.readFileAllocSecure(allocator, target.basename, max_file_bytes) catch |e| switch (e) {
             error.FileNotFound => try allocator.alloc(u8, 0),
             error.FileTooBig => return writeError(out, allocator, err_file_too_large),
             else => return e,
@@ -581,9 +702,12 @@ pub fn writeFile(
         return writeError(out, allocator, err_file_too_large);
     }
 
-    {
+    if (opts.require_absent) {
         var write_buf: [4096]u8 = undefined;
-        var atomic = infra_fs.cwd().atomicFile(resolved.abs, .{ .write_buffer = &write_buf }) catch |e| switch (e) {
+        var atomic = target.parent.atomicFile(target.basename, .{
+            .write_buffer = &write_buf,
+            .replace = false,
+        }) catch |e| switch (e) {
             error.AccessDenied => return writeError(out, allocator, err_access_denied),
             else => return e,
         };
@@ -591,6 +715,25 @@ pub fn writeFile(
         atomic.file_writer.interface.writeAll(to_write) catch |e| switch (e) {
             error.WriteFailed => return atomic.file_writer.err.?,
         };
+        atomic.finishPreserve() catch |e| switch (e) {
+            error.PathAlreadyExists => return writeStaleSha(out, allocator, ""),
+            error.AccessDenied => return writeError(out, allocator, err_access_denied),
+            else => return e,
+        };
+    } else {
+        var write_buf: [4096]u8 = undefined;
+        var atomic = target.parent.atomicFile(target.basename, .{ .write_buffer = &write_buf }) catch |e| switch (e) {
+            error.AccessDenied => return writeError(out, allocator, err_access_denied),
+            else => return e,
+        };
+        defer atomic.deinit();
+        atomic.file_writer.interface.writeAll(to_write) catch |e| switch (e) {
+            error.WriteFailed => return atomic.file_writer.err.?,
+        };
+        if (opts.expected_sha256) |expected| {
+            if (!try currentShaMatches(allocator, target.parent, target.basename, expected))
+                return writeStaleSha(out, allocator, "");
+        }
         try atomic.finish();
     }
 
@@ -610,25 +753,17 @@ pub fn writeFile(
     return true;
 }
 
-const ReadForEditError = infra_fs.File.OpenError || infra_fs.File.ReadError ||
-    infra_fs.Dir.StatFileError || std.mem.Allocator.Error ||
-    error{ NotFound, IsSymlink, TooLarge, StreamTooLong };
-
-/// Stat-then-read helper for the edit path. Maps file-not-found and
-/// existing-symlink into named errors so the caller can branch once
-/// instead of nesting two stat/read pairs (which pushed `editFile` over
-/// the returns-per-function cap).
-fn readForEdit(allocator: std.mem.Allocator, abs: []const u8) ReadForEditError![]u8 {
-    const stat = infra_fs.cwd().statFile(abs) catch |e| switch (e) {
-        error.FileNotFound => return error.NotFound,
-        else => return e,
-    };
-    if (stat.kind == .sym_link) return error.IsSymlink;
-    return infra_fs.cwd().readFileAlloc(allocator, abs, max_file_bytes) catch |e| switch (e) {
-        error.FileNotFound => return error.NotFound,
-        error.FileTooBig => return error.TooLarge,
-        else => return e,
-    };
+fn currentShaMatches(
+    allocator: std.mem.Allocator,
+    parent: infra_fs.Dir,
+    basename: []const u8,
+    expected: []const u8,
+) !bool {
+    const current = parent.readFileAllocSecure(allocator, basename, max_file_bytes) catch return false;
+    defer allocator.free(current);
+    var hash_hex: [64]u8 = undefined;
+    sha256Hex(current, &hash_hex);
+    return std.mem.eql(u8, expected, &hash_hex);
 }
 
 fn writeStaleSha(out: *std.ArrayList(u8), allocator: std.mem.Allocator, current: []const u8) VfsError!bool {
@@ -654,6 +789,8 @@ pub fn editFile(
     replace_mode: ReplaceMode,
     out: *std.ArrayList(u8),
 ) VfsError!bool {
+    var mutation = beginMutation();
+    defer mutation.deinit();
     if (old_string.len == 0) {
         return writeError(out, allocator, "old_string must be non-empty");
     }
@@ -662,20 +799,30 @@ pub fn editFile(
         return writeSandboxError(out, allocator, e, rel_path, .write);
     };
     defer allocator.free(resolved.abs);
-
-    const existing = readForEdit(allocator, resolved.abs) catch |e| switch (e) {
-        error.NotFound => return writeError(out, allocator, err_not_found),
-        error.IsSymlink => return writeError(out, allocator, err_refuse_symlink),
-        error.TooLarge => return writeError(out, allocator, err_file_too_large),
-        else => |real| return real,
+    var target = openSecureExistingTarget(allocator, project_dir, resolved.rel) catch |err| switch (err) {
+        error.FileNotFound => return writeError(out, allocator, err_not_found),
+        error.SymLinkLoop, error.NotDir => return writeError(out, allocator, "refusing symlinked path"),
+        else => return err,
+    };
+    defer target.deinit();
+    const stat = target.parent.statFileNoFollow(target.basename) catch |err| switch (err) {
+        error.FileNotFound => return writeError(out, allocator, err_not_found),
+        else => return err,
+    };
+    if (stat.kind == .sym_link) return writeError(out, allocator, err_refuse_symlink);
+    if (stat.kind == .directory) return writeError(out, allocator, "is a directory");
+    const existing = target.parent.readFileAllocSecure(allocator, target.basename, max_file_bytes) catch |e| switch (e) {
+        error.FileNotFound => return writeError(out, allocator, err_not_found),
+        error.FileTooBig => return writeError(out, allocator, err_file_too_large),
+        else => return e,
     };
     defer allocator.free(existing);
+    var original_sha256: [64]u8 = undefined;
+    sha256Hex(existing, &original_sha256);
 
     if (expected_sha256) |expected| {
-        var hash_hex: [64]u8 = undefined;
-        sha256Hex(existing, &hash_hex);
-        if (!std.mem.eql(u8, expected, hash_hex[0..])) {
-            return writeStaleSha(out, allocator, hash_hex[0..]);
+        if (!std.mem.eql(u8, expected, &original_sha256)) {
+            return writeStaleSha(out, allocator, &original_sha256);
         }
     }
 
@@ -709,11 +856,13 @@ pub fn editFile(
 
     {
         var write_buf: [4096]u8 = undefined;
-        var atomic = infra_fs.cwd().atomicFile(resolved.abs, .{ .write_buffer = &write_buf }) catch |e| return e;
+        var atomic = target.parent.atomicFile(target.basename, .{ .write_buffer = &write_buf }) catch |e| return e;
         defer atomic.deinit();
         atomic.file_writer.interface.writeAll(new_content.written()) catch |e| switch (e) {
             error.WriteFailed => return atomic.file_writer.err.?,
         };
+        if (!try currentShaMatches(allocator, target.parent, target.basename, &original_sha256))
+            return writeStaleSha(out, allocator, "");
         try atomic.finish();
     }
 
@@ -779,9 +928,9 @@ pub fn listDir(
     }
     defer if (owned_abs) allocator.free(abs);
 
-    var dir = infra_fs.cwd().openDir(abs, .{ .iterate = true }) catch |e| switch (e) {
+    var dir = openSecureDirectory(allocator, project_dir, canonical) catch |e| switch (e) {
         error.FileNotFound => return writeError(out, allocator, err_not_found),
-        error.NotDir => return writeError(out, allocator, "not a directory"),
+        error.NotDir, error.SymLinkLoop => return writeError(out, allocator, "not a safe directory"),
         error.AccessDenied => return writeError(out, allocator, err_access_denied),
         else => return e,
     };
@@ -798,7 +947,7 @@ pub fn listDir(
     var truncated = false;
 
     if (list_mode == .recursive) {
-        var walker = try dir.walk(allocator);
+        var walker = try dir.walkSecure(allocator);
         defer walker.deinit();
         while (try walker.next()) |entry| {
             if (emitted >= cap) {
@@ -813,7 +962,7 @@ pub fn listDir(
             // Skip denied entries silently — keep the listing useful but
             // never leak a denied path.
             checkAcl(child_rel, .read) catch continue;
-            const stat = entry.dir.statFile(infra_fs.currentIo(), entry.basename, .{}) catch continue;
+            const stat = entry.dir.statFileNoFollow(entry.basename) catch continue;
             if (emitted > 0) try w.writeAll(",");
             emitted += 1;
             try emitListEntry(w, child_rel, switch (entry.kind) {
@@ -836,7 +985,7 @@ pub fn listDir(
                 try std.fmt.allocPrint(allocator, "{s}/{s}", .{ canonical, entry.name });
             defer allocator.free(child_rel);
             checkAcl(child_rel, .read) catch continue;
-            const stat = dir.statFile(entry.name) catch continue;
+            const stat = dir.statFileNoFollow(entry.name) catch continue;
             if (emitted > 0) try w.writeAll(",");
             emitted += 1;
             try emitListEntry(w, child_rel, dirEntryKind(entry), stat.size, @as(i64, @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s))));
@@ -879,9 +1028,9 @@ pub fn glob(
     }
     defer allocator.free(base_abs);
 
-    var dir = infra_fs.cwd().openDir(base_abs, .{ .iterate = true }) catch |e| switch (e) {
+    var dir = openSecureDirectory(allocator, project_dir, base_canonical) catch |e| switch (e) {
         error.FileNotFound => return writeError(out, allocator, "base not found"),
-        error.NotDir => return writeError(out, allocator, "base not a directory"),
+        error.NotDir, error.SymLinkLoop => return writeError(out, allocator, "base not a safe directory"),
         else => return e,
     };
     defer dir.close();
@@ -892,7 +1041,7 @@ pub fn glob(
         matches.deinit(allocator);
     }
 
-    var walker = try dir.walk(allocator);
+    var walker = try dir.walkSecure(allocator);
     defer walker.deinit();
     while (try walker.next()) |entry| {
         if (entry.kind == .directory) continue;
@@ -979,19 +1128,26 @@ pub fn deleteFile(
     rel_path: []const u8,
     out: *std.ArrayList(u8),
 ) VfsError!bool {
+    var mutation = beginMutation();
+    defer mutation.deinit();
     const resolved = resolveSandboxedWithRel(allocator, project_dir, rel_path, .write) catch |e| {
         return writeSandboxError(out, allocator, e, rel_path, .write);
     };
     defer allocator.free(resolved.abs);
-
-    const stat = infra_fs.cwd().statFile(resolved.abs) catch |e| switch (e) {
+    var target = openSecureExistingTarget(allocator, project_dir, resolved.rel) catch |err| switch (err) {
+        error.FileNotFound => return writeError(out, allocator, err_not_found),
+        error.SymLinkLoop, error.NotDir => return writeError(out, allocator, "refusing symlinked path"),
+        else => return err,
+    };
+    defer target.deinit();
+    const stat = target.parent.statFileNoFollow(target.basename) catch |e| switch (e) {
         error.FileNotFound => return writeError(out, allocator, err_not_found),
         else => return e,
     };
     if (stat.kind == .directory) return writeError(out, allocator, "is a directory");
     if (stat.kind == .sym_link) return writeError(out, allocator, "refusing to delete symlink");
 
-    infra_fs.cwd().deleteFile(resolved.abs) catch |e| switch (e) {
+    target.parent.deleteFile(target.basename) catch |e| switch (e) {
         error.AccessDenied => return writeError(out, allocator, err_access_denied),
         else => return e,
     };
@@ -1018,6 +1174,8 @@ pub fn moveFile(
     to_rel: []const u8,
     out: *std.ArrayList(u8),
 ) VfsError!bool {
+    var mutation = beginMutation();
+    defer mutation.deinit();
     const from = resolveSandboxedWithRel(allocator, project_dir, from_rel, .write) catch |e| {
         return writeSandboxError(out, allocator, e, from_rel, .write);
     };
@@ -1026,15 +1184,32 @@ pub fn moveFile(
         return writeSandboxError(out, allocator, e, to_rel, .write);
     };
     defer allocator.free(to.abs);
-
-    if (std.fs.path.dirname(to.abs)) |parent| {
-        infra_fs.cwd().makePath(parent) catch |e| switch (e) {
-            error.PathAlreadyExists => {},
-            else => return e,
-        };
+    var source = openSecureExistingTarget(allocator, project_dir, from.rel) catch |err| switch (err) {
+        error.FileNotFound => return writeError(out, allocator, "source not found"),
+        error.SymLinkLoop, error.NotDir => return writeError(out, allocator, "refusing symlinked source path"),
+        else => return err,
+    };
+    defer source.deinit();
+    const source_stat = source.parent.statFileNoFollow(source.basename) catch |err| switch (err) {
+        error.FileNotFound => return writeError(out, allocator, "source not found"),
+        else => return err,
+    };
+    if (source_stat.kind == .sym_link) return writeError(out, allocator, "refusing to move symlink");
+    if (source_stat.kind == .directory) return writeError(out, allocator, "source is a directory");
+    var destination = openSecureWriteTarget(allocator, project_dir, to.rel) catch |err| switch (err) {
+        error.SymLinkLoop, error.NotDir => return writeError(out, allocator, "refusing symlinked destination path"),
+        else => return err,
+    };
+    defer destination.deinit();
+    if (destination.parent.statFileNoFollow(destination.basename)) |stat| {
+        if (stat.kind == .sym_link) return writeError(out, allocator, "refusing to replace symlink");
+        if (stat.kind == .directory) return writeError(out, allocator, "destination is a directory");
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
     }
 
-    infra_fs.cwd().rename(from.abs, to.abs) catch |e| switch (e) {
+    source.parent.renameTo(source.basename, destination.parent, destination.basename) catch |e| switch (e) {
         error.FileNotFound => return writeError(out, allocator, "source not found"),
         error.AccessDenied => return writeError(out, allocator, err_access_denied),
         else => return e,
@@ -1376,6 +1551,38 @@ test "readFile errors when the offset is at or past EOF" {
     out.clearRetainingCapacity();
     try std.testing.expect(try readFile(alloc, proj, "src/f.sexp", 2, null, &out));
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"content\":\"cde\"") != null);
+}
+
+test "VFS reads listings and mutations do not traverse allowed parent symlinks" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "project/src");
+    try tmp.dir.createDirPath(std.testing.io, "outside");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "outside/secret.sexp", .data = "secret" });
+    try tmp.dir.symLink(std.testing.io, "../../outside", "project/src/link", .{ .is_directory = true });
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, "project", allocator);
+    defer allocator.free(project);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    try std.testing.expect(!try readFile(allocator, project, "src/link/secret.sexp", null, null, &out));
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "secret") == null);
+
+    out.clearRetainingCapacity();
+    try std.testing.expect(!try writeFile(allocator, project, "src/link/new.sexp", "escaped", .{}, &out));
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.access(std.testing.io, "outside/new.sexp", .{}),
+    );
+
+    out.clearRetainingCapacity();
+    try std.testing.expect(try listDir(allocator, project, "src", .recursive, null, &out));
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "secret.sexp") == null);
+
+    out.clearRetainingCapacity();
+    try std.testing.expect(try glob(allocator, project, "**/*.sexp", "src", &out));
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "secret.sexp") == null);
 }
 
 test "writeFile append concatenates onto the existing file atomically" {

@@ -204,6 +204,14 @@ fn dispatchEarlyCommand(
         try tool_cli.run(arena, args);
         return true;
     }
+    if (std.mem.eql(u8, command, "system-check")) {
+        try commands.cmdSystemCheck(allocator, args);
+        return true;
+    }
+    if (std.mem.eql(u8, command, "export-system-review")) {
+        try commands.cmdExportSystemReview(allocator, args);
+        return true;
+    }
     if (try dispatchKicadCommand(allocator, command, args)) return true;
     return dispatchQueryCommand(allocator, command, args);
 }
@@ -523,6 +531,7 @@ fn printUsage() !void {
         \\  netlisp parse <file>                   Parse and pretty-print an S-expression file
         \\  netlisp build [--project-dir <d>]       Evaluate and emit resolved design
         \\  netlisp check [--project-dir <d>] [--severity <s>] [--profile authoring|preflight] <name>  Run ERC + requirements
+        \\  netlisp system-check [--project-dir <d>] <system>  Print system review/fabrication readiness as JSON; fail while blocked
         \\  netlisp designs [--project-dir <d>]     List designs (name + title) as JSON
         \\  netlisp instances [--project-dir <d>] <name>  List a design's parts as JSON
         \\  netlisp net [--project-dir <d>] <name> <net>  Pins + passives on a net as JSON
@@ -545,6 +554,7 @@ fn printUsage() !void {
         \\  netlisp export-kicad-sch --project-dir <d> [--output <root>] [--output-dir <dir>] [--flat] [--no-vendor-symbols] <name>  Export a hierarchical KiCad schematic (root + one .kicad_sch per section/module, plus sym-lib-table / fp-lib-table / <name>.kicad_pro / netlisp.kicad_sym; parts with a lib/sources/*.kicad_sym are drawn from it)
         \\  netlisp sync-kicad-sch --project-dir <d> [--dry-run] [--force] <name>  Push that schematic INTO the KiCad project directory the design's (kicad-pcb "<path>") names — guarded (refuses a hand-drawn sheet or a locked project; replaced files roll into backups/)
         \\  netlisp export-pdf [--project-dir <d>] <name> [--output <file>] [--theme light|dark]  Export the design-review PDF (cover, per-section schematics, validation + power tables)
+        \\  netlisp export-system-review [--project-dir <d>] <system> [--output <file.zip>]  Export a watermarked Markdown/PDF review ZIP with no fabrication CAM
         \\  netlisp export-elmer-thermal [--project-dir <d>] [--output-dir <out>] [--layout <name>] [--ambient <C>] [--scenario <natural|airflow_1ms|airflow_2ms>] <name>  Export an Elmer FEM thermal case
         \\  netlisp compare-elmer-thermal [--project-dir <d>] [--output-dir <out>] [--layout <name>] [--ambient <C>] [--scenario <natural|airflow_1ms|airflow_2ms>] [--solver <path>] <name>  Run Elmer and write a side-by-side thermal comparison
         \\  netlisp bench-thermal [--project-dir <d>] [--layout <name>] [--reps <n>] <name>  Benchmark only the built-in four-scenario thermal field solve
@@ -863,6 +873,7 @@ test {
     _ = @import("route_repair.zig");
     _ = @import("serve/mcp_route_order.zig");
     _ = @import("serve/mcp_close_gaps.zig");
+    _ = @import("route_cleanup_gate.zig");
     _ = @import("serve/mcp_routability.zig");
     _ = @import("serve/mcp_kicad_sch.zig");
     _ = @import("serve/mcp_placement_sensitivity.zig");

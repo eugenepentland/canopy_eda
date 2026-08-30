@@ -326,7 +326,11 @@ fn requiresWriteFor(method: httpz.Method, path: []const u8) bool {
 /// bypass and the plugin-token sync path are preserved; ward owns the session
 /// and bearer verdicts.
 pub fn authMiddleware(ctx: *Server, req: *httpz.Request, res: *httpz.Response) AuthError!bool {
-    if (auth.isLocalhostRequest(ctx, req)) return true;
+    if (auth.isLocalhostRequest(ctx, req)) {
+        ctx.request_auth.username = "dev@localhost";
+        ctx.request_auth.role = .admin;
+        return true;
+    }
     const path = req.url.path;
     if (std.mem.startsWith(u8, path, sync_path_prefix) and syncBearerOk(ctx, req)) return true;
     return sessionGateMiddleware(ctx, req, res);
@@ -410,9 +414,11 @@ fn sessionGateMiddleware(ctx: *Server, req: *httpz.Request, res: *httpz.Response
         // of this function and returns early, so a public path never reaches
         // `requireUser` to come back as a `.public` action.
         .public => unreachable,
-        .allow => {
+        .allow => |username| {
             if (requiresWrite(req) and !mapWardRole(decision.role).canWrite())
                 return forbidden(res, body_forbidden_write);
+            ctx.request_auth.username = username;
+            ctx.request_auth.role = mapWardRole(decision.role);
             return true;
         },
         // An unauthenticated XHR/fetch to an /api/ route wants a 401 it can

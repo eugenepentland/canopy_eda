@@ -343,6 +343,14 @@ test {
     _ = @import("req_derived_checks.zig");
     _ = @import("review.zig");
     _ = @import("review_md.zig");
+    _ = @import("system_review.zig");
+    _ = @import("system_review_assets.zig");
+    _ = @import("system_review_md.zig");
+    _ = @import("system_review_pdf.zig");
+    _ = @import("system_review_package.zig");
+    _ = @import("board_review_snapshot.zig");
+    _ = @import("serve/fab_release_service.zig");
+    _ = @import("serve/system_review_api.zig");
     _ = @import("review_html.zig");
     _ = @import("review_thermal.zig");
     _ = @import("thermal_scenarios.zig");
@@ -390,6 +398,7 @@ test {
     _ = @import("serve/library_3d.zig");
     _ = @import("serve/mcp_checks.zig");
     _ = @import("serve/mcp_close_gaps.zig");
+    _ = @import("route_cleanup_gate.zig");
     _ = @import("serve/mcp_connector_pinout.zig");
     _ = @import("serve/mcp_escape_assign.zig");
     _ = @import("serve/mcp_flatten.zig");

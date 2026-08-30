@@ -2965,6 +2965,7 @@ inherited a lap can still be improved.
 - A hierarchical route seed carrying a same-net land transit is rejected before the assembled-board router can reuse it.
 - A hierarchical route seed is centre-anchored through same-net lands before board acceptance and remains rejected when the normalized copper is not DRC-clean.
 - Authored exact bypass paths are immutable at the aggregate seed gate, so nearby same-rail lands cannot retarget their endpoints.
+- An axis-aligned run whose swept copper stays inside the land's own column and reaches a segment end there is the pad's connection, not an offence; a column-contained fly-through, a flank lap, and every diagonal stay judged by the strict ray rule.
 
 Public functions: offence, segmentOffence, worsens, onLand
 
@@ -3138,7 +3139,8 @@ Public functions: check, checkTopology, checkWithZones, checkWithPreparedCopper,
 - a leaf-only net alias is accepted only when unique; sibling flattened nets with the same leaf remain distinct copper
 - reporting DRC retains the same exact variable-width RF carve that Gerber computes from the raw route proof
 - warns when a signal net's own copper laps one of its pads instead of being aimed at the pad centre, while ground nets are exempt
-- reports one own-land warning per swept RF path and physical land rather than one per tessellation chord
+- reports one own-land warning per physical land — carrying the worst offence measured on it — rather than one per tessellation chord or stored segment
+- a hand-drawn chain that laps one land in several stored segments is a single finding carrying the worst miss
 - a match group spreading wider than its tolerance warns once, naming the longest and shortest nets
 - a match group with fewer than two routed members is reported as unfinished, never as mismatched
 - a design declaring no match group produces no measurement and no violation
@@ -3153,7 +3155,7 @@ Public functions: check, checkTopology, checkWithZones, checkWithPreparedCopper,
 - checks the board edge against a non-rectangular outline polygon, catching copper in a notch
 - the polygon board-edge inset is measured against the copper-edge design rule
 - flags a component land crowding the board edge, exempts a staged off-board part, and reports nothing without an outline
-- component courtyards default to a 0.2 mm edge margin, honor an authored override, and exempt NPTH-only/staged parts
+- component courtyards default to a 0.2 mm edge margin, honor an authored override, and exempt NPTH-only/staged/edge-overhanging parts
 - component-edge clearance follows the exact rounded outline rather than its rectangular bounding box
 - a pad inside the board rectangle but in a concave notch is measured against the outline polygon
 - a typed perimeter keepout flags only its blocked feature families, admits named nets, and exempts generated fence vias
@@ -4723,6 +4725,7 @@ Public functions: planLayers, writeLayer
 - every copper Gerber file takes its name and X2 file function from the shared layer table row
 - the mask, paste, silkscreen and profile files take their names and X2 file functions from the shared layer table's technical rows
 - the fab package's job-file and Excellon drill members are named by the Gerber writer rather than by whatever assembles the archive
+- CAM output filename detection recognizes layer, job, drill, and arbitrary inner-copper extensions from the Gerber owner
 - the job file's LayerNumber counts the copper files the package actually ships, and every entry's polarity is the one its own Gerber carries
 - every job-file Path is the exact archive entry name the package builds for that same file
 - a vendor-named backing Gerber follows the board face and clears only matching-side footprint courtyards
@@ -5450,6 +5453,54 @@ Public functions: renderToMarkdown
 - the markdown Thermal section carries the verdict sentence, the ambient range, one row per screened part, and the coverage line
 - the markdown Thermal section carries the cooling-scenario table with one row per scenario, and prints the missing-layout reason when there is no ladder
 
+## system_review_md
+
+Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, renderHtmlAlloc, deinit, uncheckedChecklistCount
+
+- parses the complete bounded authoring profile into a public AST and renders stable Markdown and inert HTML
+- rejects active markup, external targets, traversal, encoded paths, and unsafe image types before rendering
+- accepts only approved, syntactically valid netlisp directives occupying their whole source line
+- treats fenced code as literal text while escaping it in HTML and refuses unterminated fences and code spans
+- enforces source, line, structural, table, and list bounds without partial output
+- normalizes line endings and escapes authored text and attributes in deterministic output
+- completeness-waiver: empty inputs (an empty or whitespace-only source parses to an empty document and both renderers emit an empty fragment)
+- completeness-waiver: large inputs (caller-configurable byte, line, block, inline, list-item, table-row, and table-column ceilings fail before unbounded output is produced)
+- completeness-waiver: unauthorized access (the module performs pure in-memory parsing and rendering; package authorization and file loading remain at the caller boundary)
+- completeness-waiver: i/o failure (the parser performs no I/O and writer failures are returned by the streaming renderers)
+- completeness-waiver: concurrent access (each document owns a private arena and the module has no mutable globals, filesystem state, or shared cache)
+- completeness-waiver: malformed encoding (invalid UTF-8 and forbidden control bytes are rejected before normalization or AST construction)
+- completeness-waiver: integer overflow (all input-driven counts are bounded by slice lengths and explicit usize ceilings before renderer arithmetic)
+- completeness-waiver: panic-free (syntax and safety violations use explicit errors, allocations propagate OutOfMemory, and every optional delimiter lookup is checked)
+
+## system-review
+
+- evaluated source paths retain the buildable src/lib shape in a review package
+- interface evidence resolves stable sub-block connector handles through the canonical flattened netlist
+- system Markdown becomes a structurally valid searchable PDF with draft marking
+- long UTF-8 review lines wrap only between complete codepoints in the generated PDF
+- board archive roles are unique and authored review documents are Markdown; binary evidence uses the bounded assets area
+- a board release reports CAM blocking and waiver conditions independently
+- independently allocated fabrication snapshots compare their identity strings by value
+- draft archives are visibly non-fabrication packages and contain no nested board release ZIPs
+- archive members are safe, unique project-relative paths, and draft validation rejects CAM and nested ZIP payloads
+- optional active documents may be absent without blocking release, while every required active document and required checklist must pass
+- duplicate attestation or source paths are accepted only when their bytes agree
+- the release manifest states which self-referential inventory and checksum members it excludes
+- the system release token binds the stable content lock to every ordinary board release token
+- CLI system review commands share project, system, and output argument parsing
+- CLI system review commands reject unknown flags, missing option values, duplicate positionals, and draft output flags on readiness checks
+- flat safe workspace assets are content-validated, deterministically hashed, and archived beside combined Markdown under review/assets
+- system-review file reads resolve canonically below the project root and reject parent-symlink escapes
+- system-review mutations require the custom review header, document replacement requires If-Match, and release JSON is size-bounded
+- completeness-waiver: empty inputs (a system must name at least one board and every required active document must exist, so an empty workspace is rejected with a diagnostic)
+- completeness-waiver: large inputs (manifest, Markdown, image, collection, and ZIP-member limits reject oversized review inputs before unbounded work)
+- completeness-waiver: unauthorized access (draft/readiness are read-only; attestation, document writes, uploads, and final release require the authenticated writer role)
+- completeness-waiver: i/o failure (contained project reads, atomic VFS writes, PDF composition, and archive writers propagate failure and never publish a partial final package)
+- completeness-waiver: concurrent access (document and attestation mutations share one lock; release locks and final revalidation reject inputs that move during composition)
+- completeness-waiver: malformed encoding (strict typed JSON and UTF-8 Markdown parsing reject malformed manifests, controls, active markup, and unsafe paths)
+- completeness-waiver: integer overflow (explicit byte/count ceilings and checked allocator/writer arithmetic bound all input-derived sizes)
+- completeness-waiver: panic-free (invalid manifests, stale approvals, missing confirmation, unsafe paths, and release races return explicit errors without forced unwraps)
+
 ## req_checks
 
 Public functions: runChecks, deinit, parseMicroFarads, parseOhms, parseMicroHenries
@@ -5625,6 +5676,19 @@ Public functions: runSyncPlan, syncKicadPcbApi
 - authoritative placement converts netlisp rotation/side into a targeted KiCad pose op
 - authoritative stale pruning also removes pre-netlisp manual KiCad footprints
 - an authoritative push counts and names the saved copper it could not emit, so emitted plus dropped accounts for every saved track and via
+
+## route-cleanup-gate
+
+- a cleanup candidate is refused when it grows the error count, opens a routed net, or grows the bypass_open count, and accepted when nothing regresses
+- a refused candidate is attributed to exact nets, by the tally names that are newly open and the nets whose bypass_open count grew
+- completeness-waiver: concurrent access (pure functions over caller-owned slices; no shared state and no I/O — the serve layer owns sessions and persistence)
+- completeness-waiver: empty inputs (an empty violation list and unchanged tallies gate green, attribute nothing, and delete nothing; the paired tests exercise the empty lists directly)
+- completeness-waiver: i/o failure (the module performs no I/O; candidates and verdicts are in-memory slices handed in by the caller)
+- completeness-waiver: integer overflow (counts are usize tallies over allocator-bounded slices; net indices are bounds-checked before every cast)
+- completeness-waiver: large inputs (linear scans over the board's own violation and net lists; nothing is quadratic beyond open-net name matching, which is bounded by the board's net count)
+- completeness-waiver: malformed encoding (no bytes are decoded; inputs are already-typed violations, tallies, and net tables)
+- completeness-waiver: panic-free (every `net_a`/index cast is guarded by a sign and bounds check first; out-of-range parties are skipped, not indexed)
+- completeness-waiver: unauthorized access (authorization is the MCP layer's concern; this module never touches files, sessions, or the network)
 
 ## serve/route-plan
 

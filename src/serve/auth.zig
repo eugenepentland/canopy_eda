@@ -48,6 +48,8 @@ fn peerIsLoopback(req: *httpz.Request) bool {
 fn viaProxy(req: *httpz.Request) bool {
     return req.header("x-forwarded-for") != null or
         req.header("x-forwarded-host") != null or
+        req.header("x-forwarded-proto") != null or
+        req.header("x-forwarded-port") != null or
         req.header("x-real-ip") != null or
         req.header("forwarded") != null;
 }

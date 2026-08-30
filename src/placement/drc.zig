@@ -760,7 +760,7 @@ fn checkImpl(
     // profile.  Its checker coalesces chords only when they belong to the same
     // swept path and land, instead of presenting tessellation density as
     // warning severity or hiding distinct editable sections.
-    try checkLandTransit(c, placement, routed, tracks, pads, &pad_grid);
+    try checkLandTransit(c, placement, tracks, pads, &pad_grid);
     try checkGroundPadVias(c, placement, pads, vias, &via_grid, rules.pour.ground_via_max);
     try checkPadPad(c, pads, &pad_grid);
     try drc_diffpair.check(arena, &out, placement, .{ .tracks = tracks, .vias = vias }, clearance);
@@ -1247,17 +1247,24 @@ fn checkTrackTrack(c: Ctx, tracks: []const router.Track, track_grid: *Grid) Err 
 fn checkLandTransit(
     c: Ctx,
     placement: optimizer.Placement,
-    routed: router.RouteResult,
     tracks: []const router.Track,
     pads: []const PadBox,
     pad_grid: *Grid,
 ) Err {
-    const PathLandFinding = struct {
-        path: usize,
+    // ONE finding per offending pad, carrying the worst offence measured on
+    // it. The reader's unit is the pad ("this land has off-centre copper"),
+    // not the segment: an RF path's tessellation chords used to be the only
+    // copper grouped this way, while a hand-drawn chain crossing a land in
+    // four pieces was reported four times over — the 2026-08 barracuda audit
+    // found single pads carrying up to seven findings for one shape. The
+    // repair (`repair_land_transit`) walks every same-net segment on the land
+    // regardless of how many findings named it, so collapsing to the worst
+    // loses nothing a fix could use.
+    const PadLandFinding = struct {
         pad: usize,
         violation: Violation,
     };
-    var path_findings: std.ArrayList(PathLandFinding) = .empty;
+    var pad_findings: std.ArrayList(PadLandFinding) = .empty;
     for (tracks) |t| {
         // Ground lands intentionally collect broad surface bonds, stitching
         // fans, and pour tie-ins. Treating those shapes like a signal escape
@@ -1266,12 +1273,6 @@ fn checkLandTransit(
         // receive the same exemption as a literal GND net.
         if (t.net >= 0 and @as(usize, @intCast(t.net)) < placement.nets.len and
             optimizer.isGroundName(router.shortName(placement.nets[@intCast(t.net)].name))) continue;
-        var path_owner: ?usize = null;
-        for (routed.rf_port_outcomes, 0..) |_, path_i| {
-            if (!path_copper.ownsTrack(routed.rf_port_outcomes[path_i .. path_i + 1], t)) continue;
-            path_owner = path_i;
-            break;
-        }
         const half = t.width / 2;
         for (try pad_grid.near(c.arena, trackBox(t), c.clr_max)) |j| {
             const p = pads[j];
@@ -1288,13 +1289,9 @@ fn checkLandTransit(
                 .who = padParties(t.net, p),
                 .layer = layerOf(t.layer),
             };
-            const path_i = path_owner orelse {
-                try c.out.append(c.arena, finding);
-                continue;
-            };
             var grouped = false;
-            for (path_findings.items) |*prior| {
-                if (prior.path != path_i or prior.pad != j) continue;
+            for (pad_findings.items) |*prior| {
+                if (prior.pad != j) continue;
                 if (finding.clearance > prior.violation.clearance + eps or
                     (@abs(finding.clearance - prior.violation.clearance) <= eps and finding.gap > prior.violation.gap))
                 {
@@ -1303,10 +1300,10 @@ fn checkLandTransit(
                 grouped = true;
                 break;
             }
-            if (!grouped) try path_findings.append(c.arena, .{ .path = path_i, .pad = j, .violation = finding });
+            if (!grouped) try pad_findings.append(c.arena, .{ .pad = j, .violation = finding });
         }
     }
-    for (path_findings.items) |finding| try c.out.append(c.arena, finding.violation);
+    for (pad_findings.items) |finding| try c.out.append(c.arena, finding.violation);
 }
 
 /// Enforce the optional maximum ground-return drop distance. The pad and via
@@ -1671,6 +1668,18 @@ fn checkPadEdge(
 /// process requirement. A wholly off-board courtyard is staged work, already
 /// handled by fab-readiness, and NPTH-only mounting hardware has no assembled
 /// component body to police.
+///
+/// A courtyard that CROSSES the outline is exempt too: a body hanging past the
+/// board edge is how an edge-launch connector, a card-edge module, or a
+/// mezzanine interface mounts — the overhang is the part's construction, not a
+/// crowding accident, and warning that its corner is "less than 0.2 mm from
+/// the edge" reads as noise to the person who put it there (every one of
+/// barracuda-base's 14 component-edge findings in the 2026-08 audit was such a
+/// deliberate overhang, at up to 14.6 mm past the edge). The margin therefore
+/// polices only parts wholly on the board but crowding its rim. A part nudged
+/// over the edge by MISTAKE is not silently lost: its lands follow the body,
+/// and copper crossing or crowding the outline is `board_edge`'s territory, at
+/// error severity.
 fn checkComponentEdge(
     arena: std.mem.Allocator,
     out: *Viol,
@@ -1710,7 +1719,7 @@ fn checkComponentEdge(
                 at = corner;
             }
         }
-        if (worst < edge - eps) {
+        if (worst >= -eps and worst < edge - eps) {
             try out.append(arena, .{
                 .x = at[0],
                 .y = at[1],
@@ -4158,7 +4167,7 @@ test "check flags a pad at the board edge and skips a staged part's pads" {
     try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, routed, 0.127), .board_edge));
 }
 
-// spec: placement/drc - component courtyards default to a 0.2 mm edge margin, honor an authored override, and exempt NPTH-only/staged parts
+// spec: placement/drc - component courtyards default to a 0.2 mm edge margin, honor an authored override, and exempt NPTH-only/staged/edge-overhanging parts
 test "check enforces component-to-edge clearance" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
@@ -4176,6 +4185,11 @@ test "check enforces component-to-edge clearance" {
         // Wholly off-board solver staging is reported by fab-readiness, not
         // repeated as a component-edge finding.
         .{ .ref_des = "U3", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false, .x = 20, .y = 20 },
+        // An edge-launch connector overhanging the cut by construction: its
+        // courtyard CROSSES the outline, which is a mounting style, not a
+        // crowding accident — exempt. (Copper dragged over the edge with it
+        // would still be a board_edge error.)
+        .{ .ref_des = "J9", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false, .x = 10.2, .y = 5 },
     };
     var placement = partsOnly(&parts);
     placement.board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 10 };
@@ -4403,7 +4417,7 @@ test "check keeps an essential loose section as a copper-stub error" {
 }
 
 // spec: placement/drc - warns when a signal net's own copper laps one of its pads instead of being aimed at the pad centre, while ground nets are exempt
-// spec: placement/drc - reports one own-land warning per swept RF path and physical land rather than one per tessellation chord
+// spec: placement/drc - reports one own-land warning per physical land — carrying the worst offence measured on it — rather than one per tessellation chord or stored segment
 test "check warns on signal copper riding a land's flank, not a clean escape or ground bond" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
@@ -4482,6 +4496,33 @@ test "check warns on signal copper riding a land's flank, not a clean escape or 
         @as(usize, 0),
         countKind(try check(arena, placement, .{ .tracks = &riding, .vias = &.{}, .routed = 1, .total = 1 }, 0.127), .land_transit),
     );
+}
+
+// spec: placement/drc - a hand-drawn chain that laps one land in several stored segments is a single finding carrying the worst miss
+test "check reports one own-land warning per pad with the worst offence, not one per stored segment" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const G = @import("geometry.zig");
+    const pad = [_]G.Pad{.{ .number = "18", .x = 0, .y = 0, .w = 0.3, .h = 0.9 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pad, .fallback = false, .x = 0, .y = 0 },
+    };
+    const pins = [_]flat_netlist.FlatPin{.{ .ref_des = "U1", .pin = "18" }};
+    const nets = [_]FlatNet{.{ .name = "SIG", .pins = &pins }};
+    var placement = partsOnly(&parts);
+    placement.nets = &nets;
+    // Two stored sections lapping the same land — a chain a hand edit left in
+    // two pieces, one riding the flank a little farther out than the other.
+    const laps = [_]router.Track{
+        .{ .x1 = 0.15, .y1 = -1, .x2 = 0.15, .y2 = 0.2, .layer = 0, .width = 0.127, .net = 0 },
+        .{ .x1 = 0.18, .y1 = 0.2, .x2 = 0.18, .y2 = 1.14, .layer = 0, .width = 0.127, .net = 0 },
+    };
+    const found = try check(arena, placement, .{ .tracks = &laps, .vias = &.{}, .routed = 1, .total = 1 }, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(found, .land_transit));
+    // The one finding carries the WORST miss of the pieces, so the marker
+    // points at the copper a repair reaches for first.
+    try testing.expectApproxEqAbs(@as(f64, 0.18), firstOfKind(found, .land_transit).?.clearance, 1e-9);
 }
 
 // spec: placement/drc - an authored ground-via maximum warns on an SMD ground pad until a same-net plane via falls within the budget
