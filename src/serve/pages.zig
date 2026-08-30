@@ -13,6 +13,7 @@ const assets_css = @import("assets_css.zig");
 const library = @import("library.zig");
 const mcp_tools = @import("mcp_tools.zig");
 const modules_page = @import("modules.zig");
+const system_review_api = @import("system_review_api.zig");
 const home_template = @import("templates/pages.zig");
 const layout_status = @import("../layout_status.zig");
 
@@ -31,7 +32,7 @@ pub fn indexPage(ctx: *Server, _: *httpz.Request, res: *httpz.Response) HandlerE
     const now_sec: i64 = @intCast(@divTrunc(clock.nanoTimestamp(), clock.ns_per_s));
 
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
-    try home_template.Home.render(.{ home.design_cards, home.module_cards, now_sec }, &aw.writer);
+    try home_template.Home.render(.{ home.system_cards, home.design_cards, home.module_cards, now_sec }, &aw.writer);
     res.body = aw.written();
     res.content_type = .HTML;
 }
@@ -40,6 +41,7 @@ pub fn indexPage(ctx: *Server, _: *httpz.Request, res: *httpz.Response) HandlerE
 /// the module entries, and each card's search haystack + ★ flag.
 pub const HomeData = struct {
     summaries: []const mcp_tools.DesignSummary,
+    system_cards: []const home_template.SystemCardVM,
     design_cards: []const home_template.DesignCardVM,
     module_cards: []const home_template.ModuleCardVM,
 };
@@ -54,6 +56,7 @@ pub fn gatherHome(allocator: std.mem.Allocator, project_dir: []const u8) HomeDat
     const modules = collectHomeModules(allocator, project_dir, summaries) catch &[_]home_template.ModuleHomeEntry{};
     return .{
         .summaries = summaries,
+        .system_cards = buildSystemCards(allocator, project_dir) catch &[_]home_template.SystemCardVM{},
         .design_cards = buildDesignCards(allocator, project_dir, summaries) catch &[_]home_template.DesignCardVM{},
         .module_cards = buildModuleCards(allocator, modules) catch &[_]home_template.ModuleCardVM{},
     };
@@ -79,6 +82,54 @@ fn buildDesignCards(
         };
     }
     return out;
+}
+
+/// Enumerate the project's system-review workspaces as home cards. Reuses the
+/// same enumeration `/api/systems` serves, so the page and the endpoint can
+/// never disagree about which systems exist. A project with no `src/systems`
+/// yields none and the section simply does not appear.
+fn buildSystemCards(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+) ![]home_template.SystemCardVM {
+    const summaries = try system_review_api.collectSystemSummaries(allocator, project_dir);
+    const out = try allocator.alloc(home_template.SystemCardVM, summaries.len);
+    for (summaries, out) |summary, *card| {
+        const entry: home_template.SystemHomeEntry = .{
+            .name = summary.name,
+            .title = summary.title,
+            .part_number = summary.part_number,
+            .revision = summary.revision,
+            .boards = summary.boards,
+            .documents = summary.documents,
+            .attested = summary.attested,
+        };
+        card.* = .{ .sys = entry, .search = try systemSearchText(allocator, entry) };
+    }
+    return out;
+}
+
+/// "system <name> <title> <part-number> <revision>" — the searchable text for
+/// a system card. The leading tag word mirrors the visible type tag the way
+/// the design and module haystacks do, so "system" surfaces exactly these.
+fn systemSearchText(
+    allocator: std.mem.Allocator,
+    entry: home_template.SystemHomeEntry,
+) std.mem.Allocator.Error![]const u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    try buf.appendSlice(allocator, "system ");
+    try buf.appendSlice(allocator, entry.name);
+    for ([_][]const u8{ entry.title, entry.part_number, entry.revision }) |part| {
+        if (part.len == 0) continue;
+        try buf.append(allocator, ' ');
+        try buf.appendSlice(allocator, part);
+    }
+    if (entry.attested) try buf.appendSlice(allocator, " attested");
+    // `toOwnedSlice`, not `buf.items`: the list's capacity can exceed its
+    // length, so `items` is not a freeable allocation. The sibling design and
+    // module haystacks get away with returning `items` only because the page
+    // allocator never frees them — this one is exercised by a test that does.
+    return buf.toOwnedSlice(allocator);
 }
 
 /// Pair every module entry with its search haystack.
@@ -251,6 +302,76 @@ test "home design cards keep issue counts inside schematic progress" {
     try std.testing.expect(std.mem.indexOf(u8, html, "data-open-notes=\"4\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "status-chips") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "design-card-sections") == null);
+}
+
+// spec: Web Server - The home page lists every `src/systems/` review workspace as its own card kind, from the same enumeration `/api/systems` serves, so a system is reachable without knowing its URL
+test "home system cards carry the workspace link, identity and filter kind" {
+    const entry: home_template.SystemHomeEntry = .{
+        .name = "barracuda",
+        .title = "Barracuda OC-303-1-01",
+        .part_number = "OC-303-1-01",
+        .revision = "B3",
+        .boards = 2,
+        .documents = 19,
+        .attested = true,
+    };
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    try home_template.SystemCard.render(.{ entry, "system barracuda" }, &aw.writer);
+    const html = aw.written();
+
+    // The whole point of the card: a route into the workspace. Before this,
+    // /systems/:name was reachable only by typing the URL — nothing in the UI
+    // linked it and /systems itself 404s.
+    try std.testing.expect(std.mem.indexOf(u8, html, "href=\"/systems/barracuda\"") != null);
+    // Its own kind, so the Systems filter button selects exactly these.
+    try std.testing.expect(std.mem.indexOf(u8, html, "data-kind=\"system\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "Barracuda OC-303-1-01") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "OC-303-1-01 rev B3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "2 boards") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "19 documents") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "attested") != null);
+    // It rides the shared card class, so the existing search/filter script
+    // (which selects `#home-grid .design-card`) picks it up with no JS change.
+    try std.testing.expect(std.mem.indexOf(u8, html, "class=\"design-card\"") != null);
+}
+
+// spec: Web Server - A system card's search text leads with its kind word and carries its identity, so the home page's existing search box and its Systems filter both surface it with no extra client script
+test "home system search text and filter tab make a system findable by name and kind" {
+    const entry: home_template.SystemHomeEntry = .{
+        .name = "barracuda",
+        .title = "Barracuda OC-303-1-01",
+        .part_number = "OC-303-1-01",
+        .revision = "B3",
+        .boards = 2,
+        .documents = 19,
+        .attested = true,
+    };
+    const search = try systemSearchText(std.testing.allocator, entry);
+    defer std.testing.allocator.free(search);
+    // The leading tag word mirrors the visible tag the way design/module
+    // haystacks do, so a query of "system" surfaces exactly these cards.
+    try std.testing.expect(std.mem.startsWith(u8, search, "system barracuda"));
+    try std.testing.expect(std.mem.indexOf(u8, search, "OC-303-1-01") != null);
+    try std.testing.expect(std.mem.indexOf(u8, search, "B3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, search, "attested") != null);
+
+    // An empty identity field must not leave a double space that a two-term
+    // query would then fail to match across.
+    const bare = try systemSearchText(std.testing.allocator, .{
+        .name = "spare",
+        .title = "",
+        .part_number = "",
+        .revision = "",
+        .boards = 0,
+        .documents = 0,
+    });
+    defer std.testing.allocator.free(bare);
+    try std.testing.expectEqualStrings("system spare", bare);
+
+    // The card kind is worthless without the tab that selects it.
+    const template = @embedFile("templates/pages.zt");
+    try std.testing.expect(std.mem.indexOf(u8, template, ".{ .id = \"system\", .label = \"Systems\" }") != null);
 }
 
 // spec: Web Server - Phone-width Design, Library, Schematic, and Assembly pages use touch-sized navigation, single-column content, and board-first inspection without horizontal page overflow

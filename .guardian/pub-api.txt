@@ -4472,7 +4472,10 @@ src/serve/sync_kicad_sch.zig::runPush | fn runPush( allocator: std.mem.Allocator
 src/serve/sync_kicad_sch.zig::syncKicadSchApi | fn syncKicadSchApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/sync_kicad_sch.zig::writeResultJson | fn writeResultJson( w: *std.Io.Writer, name: []const u8, result: push.Result, dry_run: bool, ) std.Io.Writer.Error!void
 src/serve/system_review_api.zig::HandlerError value
+src/serve/system_review_api.zig::ListSystemsError value
+src/serve/system_review_api.zig::SystemSummary struct_
 src/serve/system_review_api.zig::attestSystemApi | fn attestSystemApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/system_review_api.zig::collectSystemSummaries | fn collectSystemSummaries( allocator: std.mem.Allocator, project_dir: []const u8, ) ListSystemsError![]const SystemSummary
 src/serve/system_review_api.zig::draftPackageApi | fn draftPackageApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::getAssetApi | fn getAssetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::getDocumentApi | fn getDocumentApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
@@ -4499,6 +4502,7 @@ src/serve/templates/pages.zig::Args value
 src/serve/templates/pages.zig::Args value
 src/serve/templates/pages.zig::Args value
 src/serve/templates/pages.zig::Args value
+src/serve/templates/pages.zig::Args value
 src/serve/templates/pages.zig::DesignCard struct_
 src/serve/templates/pages.zig::DesignCardVM struct_
 src/serve/templates/pages.zig::Home struct_
@@ -4506,11 +4510,16 @@ src/serve/templates/pages.zig::ModuleCard struct_
 src/serve/templates/pages.zig::ModuleCardVM struct_
 src/serve/templates/pages.zig::ModuleHomeEntry struct_
 src/serve/templates/pages.zig::Navbar struct_
+src/serve/templates/pages.zig::SystemCard struct_
+src/serve/templates/pages.zig::SystemCardVM struct_
+src/serve/templates/pages.zig::SystemHomeEntry struct_
+src/serve/templates/pages.zig::bind | fn bind(args: *const Args) zt.Component
 src/serve/templates/pages.zig::bind | fn bind(args: *const Args) zt.Component
 src/serve/templates/pages.zig::bind | fn bind(args: *const Args) zt.Component
 src/serve/templates/pages.zig::bind | fn bind(args: *const Args) zt.Component
 src/serve/templates/pages.zig::bind | fn bind(args: *const Args) zt.Component
 src/serve/templates/pages.zig::formatHtml | fn formatHtml(self: RelTime, w: *std.Io.Writer) std.Io.Writer.Error!void
+src/serve/templates/pages.zig::render | fn render(args: Args, writer: *std.Io.Writer) std.Io.Writer.Error!void
 src/serve/templates/pages.zig::render | fn render(args: Args, writer: *std.Io.Writer) std.Io.Writer.Error!void
 src/serve/templates/pages.zig::render | fn render(args: Args, writer: *std.Io.Writer) std.Io.Writer.Error!void
 src/serve/templates/pages.zig::render | fn render(args: Args, writer: *std.Io.Writer) std.Io.Writer.Error!void

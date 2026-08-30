@@ -31,6 +31,26 @@ pub const ModuleCardVM = struct {
     search: []const u8,
 };
 
+/// One system-review workspace on the home page: `src/systems/<name>/`
+/// manifest identity plus its board and document counts.
+pub const SystemHomeEntry = struct {
+    name: []const u8,
+    title: []const u8,
+    part_number: []const u8,
+    revision: []const u8,
+    boards: usize,
+    documents: usize,
+    /// The manifest carries a current attestation over these exact inputs.
+    attested: bool = false,
+};
+
+/// A system entry paired with its search haystack (the "system" tag word +
+/// name + title + part number + revision).
+pub const SystemCardVM = struct {
+    sys: SystemHomeEntry,
+    search: []const u8,
+};
+
 // zt treats `<style>` as a raw-text element — expressions inside are NOT
 // interpolated, so the entire `<style>…</style>` block ships as a single raw
 // chunk emitted via `{!HOME_STYLE_BLOCK}` in the head.
@@ -76,6 +96,7 @@ const home_style_block: []const u8 = "<style>" ++ @embedFile("../assets/navbar.c
     \\padding:1px 8px;border-radius:10px;border:1px solid #30363d;color:#8b949e}
     \\.type-tag.board{color:#58a6ff;border-color:#1f6feb}
     \\.type-tag.subcircuit{color:#bc8cff;border-color:#8957e5}
+    \\.type-tag.system{color:#f0883e;border-color:#bd561d}
     \\.tag-chip{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;
     \\padding:1px 8px;border-radius:10px;border:1px solid #30363d;color:#8b949e}
     \\.tag-chip.grouping{color:#3fb950;border-color:#238636}
@@ -260,6 +281,7 @@ const home_filters = [_]HomeFilter{
     .{ .id = "all", .label = "All" },
     .{ .id = "board", .label = "Boards" },
     .{ .id = "subcircuit", .label = "Subcircuits" },
+    .{ .id = "system", .label = "Systems" },
 };
 
 fn filterClass(id: []const u8) []const u8 {
@@ -362,6 +384,29 @@ pub templ DesignCard(s: DesignSummary, search: []const u8, has_starred: bool, no
     </div>
 }
 
+pub templ SystemCard(sys: SystemHomeEntry, search: []const u8) {
+    <div class="design-card" data-kind="system" data-search={search}>
+        <div class="type-row">
+            <span class="type-tag system">System</span>
+            if (sys.attested) {
+                <span class="tag-chip starred" title="Review inputs have been approved and the attestation is current">attested</span>
+            }
+        </div>
+        <div class="design-card-header">
+            <div class="design-card-title">{sys.title}</div>
+            <div class="design-card-name">{sys.part_number} rev {sys.revision}</div>
+        </div>
+        <div class="design-card-stats">
+            <span>{sys.boards} boards</span>
+            <span class="sep">·</span>
+            <span>{sys.documents} documents</span>
+        </div>
+        <div class="design-card-links">
+            <a class="design-card-link" href="/systems/{sys.name}">Review workspace</a>
+        </div>
+    </div>
+}
+
 pub templ ModuleCard(m: ModuleHomeEntry, search: []const u8) {
     <div class="design-card" data-kind="subcircuit" data-search={search}>
         <div class="type-row">
@@ -396,23 +441,23 @@ pub templ ModuleCard(m: ModuleHomeEntry, search: []const u8) {
     </div>
 }
 
-pub templ Home(design_cards: []const DesignCardVM, module_cards: []const ModuleCardVM, now_sec: i64) {
+pub templ Home(system_cards: []const SystemCardVM, design_cards: []const DesignCardVM, module_cards: []const ModuleCardVM, now_sec: i64) {
     <!DOCTYPE html>
     <html>
         <head>
             <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-            <title>Netlisp — Designs &amp; Modules</title>
+            <title>Netlisp — Systems, Designs &amp; Modules</title>
             {!home_style_block}
         </head>
         <body>
             @Navbar("designs")
             <div class="home-shell" style="max-width:960px;margin:0 auto">
-                <h1 class="home-title" style="padding:16px 16px 0;color:#f0f6fc">Designs &amp; Modules</h1>
-                <p class="mod-sub-note">Every <code>.sexp</code> design and reusable <code>lib/modules/</code> block — tagged and searchable.</p>
+                <h1 class="home-title" style="padding:16px 16px 0;color:#f0f6fc">Systems, Designs &amp; Modules</h1>
+                <p class="mod-sub-note">Every system-review workspace, <code>.sexp</code> design, and reusable <code>lib/modules/</code> block — tagged and searchable.</p>
                 <div class="home-newrow">
                     <input
                         type="text" id="home-search" class="home-search"
-                        placeholder="Search designs and modules…" />
+                        placeholder="Search systems, designs and modules…" />
                     <button type="button" id="home-new" class="home-new">+ New design</button>
                 </div>
                 <div class="home-filters" id="home-filters">
@@ -422,17 +467,20 @@ pub templ Home(design_cards: []const DesignCardVM, module_cards: []const ModuleC
                 </div>
                 <div class="home-count" id="home-count"></div>
                 <div class="designs-grid" id="home-grid">
+                    for (system_cards) |c| {
+                        @SystemCard(c.sys, c.search)
+                    }
                     for (design_cards) |c| {
                         @DesignCard(c.s, c.search, c.has_starred, now_sec)
                     }
                     for (module_cards) |c| {
                         @ModuleCard(c.m, c.search)
                     }
-                    if (design_cards.len == 0 and module_cards.len == 0) {
-                        <div class="empty-hint">No designs or modules found.</div>
+                    if (system_cards.len == 0 and design_cards.len == 0 and module_cards.len == 0) {
+                        <div class="empty-hint">Nothing found.</div>
                     }
                 </div>
-                <div class="empty-hint" id="home-empty" style="display:none">No designs or modules match your search.</div>
+                <div class="empty-hint" id="home-empty" style="display:none">Nothing matches your search.</div>
             </div>
             {!home_search_script}
             {!home_progress_script}
