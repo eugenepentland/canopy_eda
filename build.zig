@@ -485,6 +485,11 @@ fn addTreePolicyChecks(b: *std.Build, test_step: *std.Build.Step) void {
         &.{ "python3", "scripts/check_js_asset_gates_test.py" },
         &.{ "python3", "scripts/check_audit_ledger.py" },
         &.{ "python3", "scripts/check_audit_ledger_test.py" },
+        // Guardian blocks on a failing [[external]] again as of guardian-zig
+        // 0453ca0; for an unknown stretch before that it did not, and all 45
+        // gates here were decorative. Nothing in this tree could have noticed,
+        // because a gate that never fires looks exactly like one that cannot.
+        &.{"scripts/check_external_gates_armed.sh"},
         // The three JavaScript unit-test runners. Each was declared as an
         // external and therefore ran nowhere — which put shape_sketch.test.js
         // back in exactly the state DRIFT-INFRA-003 described, "a unit test
