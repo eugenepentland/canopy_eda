@@ -117,9 +117,23 @@ src/board_layers.zig::techRows | fn techRows(self: *const LayerTable) []const Ro
 src/board_layers.zig::tech_row_count value
 src/board_layers.zig::unrestricted value
 src/board_layers.zig::with | fn with(self: LayerSet, sig: SignalIndex) LayerSet
+src/board_review_snapshot.zig::AmbientWindow struct_
+src/board_review_snapshot.zig::Checks struct_
 src/board_review_snapshot.zig::Connection struct_
+src/board_review_snapshot.zig::Engineering struct_
+src/board_review_snapshot.zig::Finding struct_
+src/board_review_snapshot.zig::HottestPart struct_
+src/board_review_snapshot.zig::Mechanical struct_
 src/board_review_snapshot.zig::Options struct_
+src/board_review_snapshot.zig::Outline struct_
+src/board_review_snapshot.zig::PllPopulation struct_
+src/board_review_snapshot.zig::PllProfile struct_
+src/board_review_snapshot.zig::PllReport struct_
+src/board_review_snapshot.zig::PllScreen struct_
+src/board_review_snapshot.zig::PowerRail struct_
+src/board_review_snapshot.zig::RailSource struct_
 src/board_review_snapshot.zig::Snapshot struct_
+src/board_review_snapshot.zig::Thermal struct_
 src/board_review_snapshot.zig::build | fn build( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, options: Options, ) BuildError!Snapshot
 src/board_review_snapshot.zig::verifySnapshot | fn verifySnapshot( allocator: std.mem.Allocator, project_dir: []const u8, snapshot: Snapshot, ) bool
 src/board_theme.zig::Channels struct_
@@ -284,6 +298,7 @@ src/diagram/collect.zig::collectGraph | fn collectGraph( allocator: Allocator, b
 src/diagram/diagram.zig::diagram_css value
 src/diagram/diagram.zig::renderBlockDiagramTabs | fn renderBlockDiagramTabs( allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize, /// Project root, for deriving each chip's `layout` maturity stage from the /// sub-modules' `.layouts.json` sidecars (empty ⇒ chips cap at `schematic`). project_dir: []const u8, w: *Writer, ) (Allocator.Error || Writer.Error)!void
 src/diagram/diagram.zig::renderBlockOverview | fn renderBlockOverview( allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize, project_dir: []const u8, w: *Writer, ) (Allocator.Error || Writer.Error)!bool
+src/diagram/diagram.zig::renderStandaloneSvg | fn renderStandaloneSvg( allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize, project_dir: []const u8, w: *Writer, ) (Allocator.Error || Writer.Error)!bool
 src/diagram/diagram.zig::renderSystemSvg | fn renderSystemSvg( allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize, project_dir: []const u8, w: *Writer, ) (Allocator.Error || Writer.Error)!void
 src/diagram/layout.zig::GroupBox struct_
 src/diagram/layout.zig::LNode struct_
@@ -325,11 +340,19 @@ src/diagram/membership.zig::deinit | fn deinit(self: *Membership, allocator: All
 src/diagram/membership.zig::resolve | fn resolve(self: *const Membership, flat_ref: []const u8) ?u32
 src/diagram/render.zig::css value
 src/diagram/render.zig::renderBlocksStandalone | fn renderBlocksStandalone(allocator: Allocator, graph: *const Graph, w: *Writer) (Allocator.Error || Writer.Error)!bool
+src/diagram/render.zig::renderSystemDocument | fn renderSystemDocument(allocator: Allocator, graph: *const Graph, w: *Writer) (Allocator.Error || Writer.Error)!bool
 src/diagram/render.zig::renderSystemStandalone | fn renderSystemStandalone(allocator: Allocator, graph: *const Graph, w: *Writer) (Allocator.Error || Writer.Error)!bool
 src/diagram/render.zig::renderTabs | fn renderTabs(allocator: Allocator, graph: *const Graph, w: *Writer) (Allocator.Error || Writer.Error)!void
 src/diagram/render.zig::system_color value
 src/diagram/render.zig::system_key value
 src/diagram/render.zig::system_label value
+src/diagram/system_of_boards.zig::Lane enum_
+src/diagram/system_of_boards.zig::Options struct_
+src/diagram/system_of_boards.zig::classifySignal | fn classifySignal(canonical: []const u8) Lane
+src/diagram/system_of_boards.zig::laneColor | fn laneColor(lane: Lane) []const u8
+src/diagram/system_of_boards.zig::laneLabel | fn laneLabel(lane: Lane) []const u8
+src/diagram/system_of_boards.zig::renderSystemDocumentSvg | fn renderSystemDocumentSvg( allocator: Allocator, spec: *const SystemSpec, opts: Options, w: *Writer, ) (Allocator.Error || Writer.Error)!bool
+src/diagram/system_of_boards.zig::renderSystemSvg | fn renderSystemSvg( allocator: Allocator, spec: *const SystemSpec, opts: Options, w: *Writer, ) (Allocator.Error || Writer.Error)!void
 src/diagram/types.zig::ClassDef struct_
 src/diagram/types.zig::ClassId value
 src/diagram/types.zig::Edge struct_
@@ -3229,12 +3252,34 @@ src/placement/via_guide.zig::trace | fn trace(arena: std.mem.Allocator, u: Union
 src/placement/via_merge.zig::Merge struct_
 src/placement/via_merge.zig::ViaPt struct_
 src/placement/via_merge.zig::plan | fn plan(arena: std.mem.Allocator, vias: []const ViaPt) std.mem.Allocator.Error![]const Merge
+src/pll_loop.zig::ComponentValue struct_
 src/pll_loop.zig::Components struct_
+src/pll_loop.zig::CurvePoint struct_
 src/pll_loop.zig::Mode enum_
+src/pll_loop.zig::Outcome enum_
 src/pll_loop.zig::Polarity enum_
+src/pll_loop.zig::Population struct_
+src/pll_loop.zig::PopulationKind enum_
+src/pll_loop.zig::Profile struct_
+src/pll_loop.zig::Range struct_
+src/pll_loop.zig::Report struct_
+src/pll_loop.zig::Response struct_
+src/pll_loop.zig::ResponsePoint struct_
+src/pll_loop.zig::Results struct_
+src/pll_loop.zig::Role enum_
+src/pll_loop.zig::ScheduleEntry struct_
+src/pll_loop.zig::Screen enum_
 src/pll_loop.zig::Spec struct_
-src/pll_loop.zig::evaluate | fn evaluate(allocator: std.mem.Allocator, assertions: *std.ArrayList(env.AssertionResult), block: *const DesignBlock, spec: Spec) std.mem.Allocator.Error!void
+src/pll_loop.zig::Status enum_
+src/pll_loop.zig::Suggestion struct_
+src/pll_loop.zig::SweepSummary struct_
+src/pll_loop.zig::Topology enum_
+src/pll_loop.zig::Verdict struct_
+src/pll_loop.zig::deinit | fn deinit(self: Report, allocator: std.mem.Allocator) void
+src/pll_loop.zig::evaluate | fn evaluate(allocator: std.mem.Allocator, assertions: *std.ArrayList(env.AssertionResult), reports: *std.ArrayList(Report), block: *const DesignBlock, spec: Spec) std.mem.Allocator.Error!void
 src/pll_loop.zig::parse | fn parse(form: []const Node) ParseError!Spec
+src/pll_loop.zig::response_samples value
+src/pll_loop.zig::roles value
 src/png.zig::Error value
 src/png.zig::encodeRgb | fn encodeRgb(alloc: std.mem.Allocator, width: u32, height: u32, rgb: []const u8) Error![]u8
 src/power_integrity_json.zig::AcMode enum_
@@ -3558,6 +3603,7 @@ src/serve/board_backup.zig::rollBackup | fn rollBackup(arena: std.mem.Allocator,
 src/serve/board_backup.zig::writeFileAtomic | fn writeFileAtomic(arena: std.mem.Allocator, path: []const u8, contents: []const u8) WriteFileAtomicError!void
 src/serve/bom_html.zig::BomCounts struct_
 src/serve/bom_html.zig::BomError value
+src/serve/bom_html.zig::BomRollup struct_
 src/serve/bom_html.zig::SymbolPin struct_
 src/serve/bom_html.zig::SymbolPinCache value
 src/serve/bom_html.zig::augmentUnconnectedPins | fn augmentUnconnectedPins(allocator: std.mem.Allocator, block: *env_mod.DesignBlock, sym_cache: *const SymbolPinCache) std.mem.Allocator.Error!void
@@ -3565,6 +3611,7 @@ src/serve/bom_html.zig::buildSymbolPinCache | fn buildSymbolPinCache(allocator: 
 src/serve/bom_html.zig::collectMissing | fn collectMissing( allocator: std.mem.Allocator, block: *const env_mod.DesignBlock, project_dir: []const u8, missing_fp: *std.ArrayList([]const u8), missing_model: *std.ArrayList([]const u8), checked_fp: *std.StringHashMapUnmanaged(void), checked_model: *std.StringHashMapUnmanaged(void), ) BomError!void
 src/serve/bom_html.zig::countBom | fn countBom(allocator: std.mem.Allocator, block: *const env_mod.DesignBlock) BomError!BomCounts
 src/serve/bom_html.zig::footprintHasPads | fn footprintHasPads(allocator: std.mem.Allocator, project_dir: []const u8, footprint: []const u8) bool
+src/serve/bom_html.zig::rollupBom | fn rollupBom(allocator: std.mem.Allocator, block: *const env_mod.DesignBlock) BomError!BomRollup
 src/serve/bom_html.zig::writeBomCsv | fn writeBomCsv(allocator: std.mem.Allocator, w: anytype, block: *const env_mod.DesignBlock) BomError!void
 src/serve/bom_html.zig::writeComponentsJson | fn writeComponentsJson( w: anytype, block: *const env_mod.DesignBlock, prefix: []const u8, sym_cache: *const SymbolPinCache, allocator: std.mem.Allocator, project_dir: []const u8, ) BomError!bool
 src/serve/bom_html.zig::writeJsonEscaped value

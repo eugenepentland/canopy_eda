@@ -257,7 +257,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     // Domain-specific engineering declarations run after the complete local
     // block exists, so their component roles resolve against actual instance
     // values/tolerances regardless of source order.
-    for (pll_loop_specs.items) |spec| pll_loop.evaluate(self.allocator, &self.assertions, block, spec) catch return EvalError.OutOfMemory;
+    for (pll_loop_specs.items) |spec| pll_loop.evaluate(self.allocator, &self.assertions, &self.pll_reports, block, spec) catch return EvalError.OutOfMemory;
 
     // Derive first-class power-rail entries from sub-block output ports +
     // ferrite-bead union-find. Downstream analyses (power_budget,

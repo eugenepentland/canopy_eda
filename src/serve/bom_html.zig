@@ -802,6 +802,63 @@ pub const writeJsonEscaped = json_writer.writeEscaped;
 /// `writeSchematicBomHtml`.
 pub const BomCounts = struct { unique: u32 = 0, total: u32 = 0 };
 
+/// Headline numbers for the exact parts list `writeBomCsv` emits: how many
+/// parts get placed, how many distinct purchasing lines they group into, and
+/// how much of each is do-not-populate.
+pub const BomRollup = struct {
+    placements: usize = 0,
+    lines: usize = 0,
+    dnp_placements: usize = 0,
+    dnp_lines: usize = 0,
+};
+
+/// Roll up the BOM without rendering it. This deliberately mirrors
+/// `writeBomCsv`'s collection walk and grouping key — including its
+/// do-not-populate split and its test-point exclusion — so a document that
+/// quotes these numbers can never disagree with the archived `bom.csv` beside
+/// it. `countBom` answers a different question (the schematic card's
+/// hierarchical, DNP-blind card count) and is not interchangeable.
+pub fn rollupBom(allocator: std.mem.Allocator, block: *const env_mod.DesignBlock) BomError!BomRollup {
+    var all: std.ArrayList(env_mod.Instance) = .empty;
+    try bomCollectInstances(allocator, block, &all);
+
+    const Key = struct {
+        component: []const u8,
+        value: []const u8,
+        footprint: []const u8,
+        attrs: []const []const u8,
+        dnp: bool,
+    };
+    var keys: std.ArrayList(Key) = .empty;
+    var rollup: BomRollup = .{};
+    for (all.items) |inst| {
+        if (env_mod.isTestPoint(inst.component)) continue;
+        rollup.placements += 1;
+        if (inst.dnp) rollup.dnp_placements += 1;
+        var found = false;
+        for (keys.items) |k| {
+            if (k.dnp != inst.dnp) continue;
+            if (!std.mem.eql(u8, k.component, inst.component)) continue;
+            if (!std.mem.eql(u8, k.value, inst.value)) continue;
+            if (!std.mem.eql(u8, k.footprint, inst.footprint)) continue;
+            if (!attrsEqual(k.attrs, inst.attrs)) continue;
+            found = true;
+            break;
+        }
+        if (found) continue;
+        try keys.append(allocator, .{
+            .component = inst.component,
+            .value = inst.value,
+            .footprint = inst.footprint,
+            .attrs = inst.attrs,
+            .dnp = inst.dnp,
+        });
+        rollup.lines += 1;
+        if (inst.dnp) rollup.dnp_lines += 1;
+    }
+    return rollup;
+}
+
 /// Count BOM lines + total parts without rendering the table — used for the
 /// collapsed BOM card's `<summary>` count. Mirrors `writeSchematicBomHtml`'s
 /// dedup keys exactly so the headline numbers match the expanded table.

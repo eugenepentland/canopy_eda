@@ -347,6 +347,35 @@ pub fn renderSystemStandalone(allocator: Allocator, graph: *const Graph, w: *Wri
     return true;
 }
 
+/// Background behind a standalone SVG *document*. The page fragment inherits
+/// `.dg-wrap`'s canvas; a file opened on its own has no wrapper, so it paints
+/// the same colour itself rather than landing on the viewer's white.
+const document_background = "#0d1117";
+
+/// The System view as a self-contained SVG **document** — no wrapper `div`, no
+/// HTML legend, and the diagram stylesheet embedded inside the root `<svg>` so
+/// the bytes render identically outside the schematic page. This is the form a
+/// standalone `.svg` archive member needs; `renderSystemStandalone` above emits
+/// an HTML fragment that only works inside a page carrying `css`.
+/// Returns false, writing nothing, when the graph has nothing to lay out.
+pub fn renderSystemDocument(allocator: Allocator, graph: *const Graph, w: *Writer) (Allocator.Error || Writer.Error)!bool {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const lay = (try layout.computeSystemLayout(arena, graph)) orelse return false;
+    try writeSvgOpen(w, lay.width, lay.height, false);
+    // `css` is plain declarations with no `<` or `&` (asserted by test below),
+    // so it needs no CDATA section to stay well-formed when the file is parsed
+    // as XML. Selectors that only match page chrome are simply inert here.
+    try w.writeAll("<style>");
+    try w.writeAll(css);
+    try w.writeAll("</style>");
+    try w.print("<rect width=\"100%\" height=\"100%\" fill=\"{s}\"/>", .{document_background});
+    try renderSystemView(arena, w, graph, lay, false, false);
+    try w.writeAll("</svg>");
+    return true;
+}
+
 /// The class legend + one inline SVG, shared by the tab panel and the export's
 /// standalone block.
 fn renderSystemBody(arena: Allocator, w: *Writer, graph: *const Graph, lay: layout.Layout, rail_mode: bool) (Allocator.Error || Writer.Error)!void {
@@ -1291,6 +1320,41 @@ pub const css =
 // ── tests ──────────────────────────────────────────────────────────────
 
 const testing = std.testing;
+
+// spec: diagram/render - The standalone SVG document carries its own root, stylesheet and canvas so an archived .svg file stands alone
+test "renderSystemDocument emits one self-contained SVG root" {
+    var nodes = [_]types.Node{ mkNode("MCU"), mkNode("Sensor") };
+    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.class_control, .label = "I2C_SDA" }};
+    var graph = Graph{ .nodes = &nodes, .edges = &edges };
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try testing.expect(try renderSystemDocument(testing.allocator, &graph, &aw.writer));
+    const out = aw.written();
+    // A file, not a page fragment: no wrapper div, no HTML legend, its own
+    // namespace, its own stylesheet, and its own painted background.
+    try testing.expect(std.mem.startsWith(u8, out, "<svg "));
+    try testing.expect(std.mem.endsWith(u8, out, "</svg>"));
+    try testing.expect(std.mem.indexOf(u8, out, "xmlns=\"http://www.w3.org/2000/svg\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "<style>") != null);
+    try testing.expect(std.mem.indexOf(u8, out, document_background) != null);
+    // No HTML at all: the page fragment's wrapper div and class legend would
+    // both be foreign elements in an SVG file. (The embedded stylesheet still
+    // mentions their selectors, which is inert.)
+    try testing.expect(std.mem.indexOf(u8, out, "<div") == null);
+
+    // The embedded stylesheet is written as plain element text, so it must
+    // never contain markup-significant bytes or the file stops being
+    // well-formed XML when a viewer parses it as image/svg+xml.
+    try testing.expect(std.mem.indexOfScalar(u8, css, '<') == null);
+    try testing.expect(std.mem.indexOfScalar(u8, css, '&') == null);
+
+    // Nothing to lay out ⇒ nothing written, so a caller can omit the file.
+    var empty = Graph{ .nodes = &.{}, .edges = &.{} };
+    var aw2: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw2.deinit();
+    try testing.expect(!try renderSystemDocument(testing.allocator, &empty, &aw2.writer));
+    try testing.expectEqual(@as(usize, 0), aw2.written().len);
+}
 
 test "semantic zoom CSS keeps vector detail out of active wheel frames" {
     try testing.expect(std.mem.indexOf(u8, css, ".dg-svg.dg-zooming .dg-deep{display:none;}") != null);

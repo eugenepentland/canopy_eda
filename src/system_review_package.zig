@@ -15,12 +15,14 @@ const export_gerber = @import("export_gerber.zig");
 const fab_release = @import("fab_release.zig");
 const infra_fs = @import("infra/fs.zig");
 const json_writer = @import("json_writer.zig");
+const pll_loop = @import("pll_loop.zig");
 const review = @import("review.zig");
 const system_review = @import("system_review.zig");
 const review_assets = @import("system_review_assets.zig");
 const review_md = @import("system_review_md.zig");
 const review_pdf = @import("system_review_pdf.zig");
 const zipfile = @import("zipfile.zig");
+const system_of_boards = @import("diagram/system_of_boards.zig");
 const fab_service = @import("serve/fab_release_service.zig");
 const fab_filename = @import("serve/fab_filename.zig");
 
@@ -585,6 +587,7 @@ fn addBoardEvidenceBytes(
         snapshot.review.pdf,
         snapshot.review.json,
         snapshot.review.bom_csv,
+        snapshot.review.diagram_svg,
         snapshot.physical.pcb_png,
     };
     for (slices) |bytes| try addBoundedBytes(total, bytes.len, max_analysis_evidence_bytes);
@@ -614,7 +617,46 @@ fn addBoardEvidenceBytes(
         try addBoundedBytes(total, connection.pin.len, max_analysis_evidence_bytes);
         try addBoundedBytes(total, connection.net.len, max_analysis_evidence_bytes);
     }
+    try addEngineeringEvidenceBytes(total, snapshot.analysis);
     try addFabEvidenceBytes(total, fab);
+}
+
+/// Charge the retained engineering evidence against the same ceiling as the
+/// rendered evidence beside it. The snapshot layer already caps every list, so
+/// this is a bound being proved rather than one being imposed.
+fn addEngineeringEvidenceBytes(total: *usize, analysis: board_review.Engineering) !void {
+    try addBoundedBytes(total, @sizeOf(board_review.Engineering), max_analysis_evidence_bytes);
+    for (analysis.power) |rail| {
+        try addBoundedBytes(total, @sizeOf(board_review.PowerRail), max_analysis_evidence_bytes);
+        try addBoundedBytes(total, rail.net.len, max_analysis_evidence_bytes);
+        try addBoundedBytes(total, rail.source.label.len, max_analysis_evidence_bytes);
+    }
+    try addBoundedBytes(total, analysis.thermal.hottest.ref_des.len, max_analysis_evidence_bytes);
+    for (analysis.checks.findings) |finding| {
+        try addBoundedBytes(total, @sizeOf(board_review.Finding), max_analysis_evidence_bytes);
+        try addBoundedBytes(total, finding.ref_des.len, max_analysis_evidence_bytes);
+        try addBoundedBytes(total, finding.net.len, max_analysis_evidence_bytes);
+        try addBoundedBytes(total, finding.message.len, max_analysis_evidence_bytes);
+    }
+    for (analysis.pll) |report| try addPllEvidenceBytes(total, report);
+}
+
+fn addPllEvidenceBytes(total: *usize, report: board_review.PllReport) !void {
+    try addBoundedBytes(total, @sizeOf(board_review.PllReport), max_analysis_evidence_bytes);
+    try addBoundedBytes(total, report.name.len, max_analysis_evidence_bytes);
+    const schedule_storage = std.math.mul(
+        usize,
+        report.schedule.len,
+        @sizeOf(pll_loop.ScheduleEntry),
+    ) catch return error.ArchiveTooLarge;
+    try addBoundedBytes(total, schedule_storage, max_analysis_evidence_bytes);
+    for (report.populations) |population| {
+        try addBoundedBytes(total, @sizeOf(board_review.PllPopulation), max_analysis_evidence_bytes);
+        for (population.failing) |screen| {
+            try addBoundedBytes(total, @sizeOf(board_review.PllScreen), max_analysis_evidence_bytes);
+            try addBoundedBytes(total, screen.message.len, max_analysis_evidence_bytes);
+        }
+    }
 }
 
 fn addFabEvidenceBytes(total: *usize, fab: fab_service.Result) !void {
@@ -1078,6 +1120,7 @@ fn preflightArchiveNames(
     try appendEmptyEntry(allocator, &entries, try std.fmt.allocPrint(allocator, "review/{s}.md", .{base}));
     try appendEmptyEntry(allocator, &entries, try std.fmt.allocPrint(allocator, "review/{s}.pdf", .{base}));
     try appendEmptyEntry(allocator, &entries, "review/source/system.json");
+    if (spec.boards.len > 0) try appendEmptyEntry(allocator, &entries, system_diagram_member);
     for (analysis.documents) |document| if (document.spec.include_in_fab)
         try appendEmptyEntry(
             allocator,
@@ -1134,6 +1177,7 @@ fn preflightArchivePayload(
             board.snapshot.review.pdf,
             board.snapshot.review.json,
             board.snapshot.review.bom_csv,
+            board.snapshot.review.diagram_svg,
             board.snapshot.physical.pcb_png,
             board.fab.readiness.json,
         };
@@ -1204,6 +1248,12 @@ fn composeArchive(
     try entries.append(allocator, .{ .name = try std.fmt.allocPrint(allocator, "review/{s}.md", .{base}), .data = markdown });
     try entries.append(allocator, .{ .name = try std.fmt.allocPrint(allocator, "review/{s}.pdf", .{base}), .data = pdf });
     try entries.append(allocator, .{ .name = "review/source/system.json", .data = analysis.manifest_source });
+    // Review evidence, not CAM: the system figure the combined Markdown points
+    // at travels beside it. A board-free manifest draws nothing and the member
+    // is omitted rather than archived empty.
+    const system_diagram = try renderSystemDiagram(allocator, spec);
+    if (system_diagram.len > 0)
+        try entries.append(allocator, .{ .name = system_diagram_member, .data = system_diagram });
     for (analysis.documents) |document| if (document.spec.include_in_fab) {
         try entries.append(allocator, .{
             .name = try archivedDocumentName(allocator, spec.name, document.spec.path),
@@ -1247,6 +1297,23 @@ fn composeArchive(
     };
 }
 
+/// Draw the system-of-boards figure as a standalone SVG document, from the
+/// already-validated manifest alone — no filesystem, no evaluator, no clock —
+/// so the member is a pure function of the manifest bytes. Returns empty for a
+/// manifest with no boards.
+fn renderSystemDiagram(
+    allocator: std.mem.Allocator,
+    spec: system_review.SystemSpec,
+) ![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    if (!try system_of_boards.renderSystemDocumentSvg(allocator, &spec, .{}, &out.writer)) {
+        out.deinit();
+        return "";
+    }
+    return out.written();
+}
+
 fn validateArchiveEntries(
     allocator: std.mem.Allocator,
     entries: []const zipfile.Entry,
@@ -1267,6 +1334,7 @@ fn validateArchiveEntries(
     for (entries) |entry| {
         if (!portableArchivePath(entry.name) or entry.name.len > std.math.maxInt(u16))
             return error.UnsafeArchivePath;
+        if (!allowedSvgMember(entry.name)) return error.UnexpectedSvgMember;
         if (entry.data.len > std.math.maxInt(u32) or
             entry.data.len > max_archive_payload_bytes - payload_bytes)
             return error.ArchiveTooLarge;
@@ -1337,6 +1405,35 @@ fn reservedStem(segment: []const u8, reserved: []const u8) bool {
     return segment.len == reserved.len or segment[reserved.len] == '.';
 }
 
+/// The one archive filename allowed to be an SVG, under each board's evidence
+/// directory.
+const board_diagram_member = "diagram.svg";
+/// The one system-level SVG: the boards-and-interfaces figure the combined
+/// review Markdown points at.
+const system_diagram_member = "review/system-diagram.svg";
+
+/// SVG is admitted at exactly two shapes of path — `boards/<role>/diagram.svg`
+/// and `review/system-diagram.svg` — and refused everywhere else, in draft and
+/// release alike.
+///
+/// The distinction is provenance, not the format: both files are written by the
+/// diagram renderers inside this process, one from an evaluated design and one
+/// from the validated manifest, so their markup is ours. An SVG a person
+/// uploaded is not, and can carry script, so `system_review_assets.Kind` still
+/// refuses SVG at the upload boundary — this check keeps that refusal true of
+/// the archive as well, so a future asset kind cannot quietly smuggle a
+/// hand-authored SVG in beside the review Markdown.
+fn allowedSvgMember(name: []const u8) bool {
+    if (!std.ascii.endsWithIgnoreCase(name, ".svg")) return true;
+    if (std.mem.eql(u8, name, system_diagram_member)) return true;
+    const boards_prefix = "boards/";
+    if (!std.mem.startsWith(u8, name, boards_prefix)) return false;
+    const tail = name[boards_prefix.len..];
+    const separator = std.mem.indexOfScalar(u8, tail, '/') orelse return false;
+    if (separator == 0) return false;
+    return std.mem.eql(u8, tail[separator + 1 ..], board_diagram_member);
+}
+
 fn draftForbiddenMember(name: []const u8) bool {
     if (std.mem.startsWith(u8, name, "fab/")) return true;
     if (export_gerber.isCamOutputFilename(name)) return true;
@@ -1375,6 +1472,13 @@ fn appendBoardEntries(
     for (files) |file| try entries.append(allocator, .{
         .name = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, file.suffix }),
         .data = file.data,
+    });
+    // Review evidence, not CAM: the block diagram belongs in the draft as much
+    // as review.md does. A design the diagram engine declines to draw yields no
+    // bytes, and the member is omitted rather than archived empty.
+    if (board.snapshot.review.diagram_svg.len > 0) try entries.append(allocator, .{
+        .name = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, board_diagram_member }),
+        .data = board.snapshot.review.diagram_svg,
     });
     if (board.snapshot.review.notes_source) |notes_source| try entries.append(allocator, .{
         .name = try std.fmt.allocPrint(allocator, "{s}/design-notes.md", .{prefix}),
@@ -1563,101 +1667,641 @@ fn generatedMarkerId(line: []const u8) ?[]const u8 {
     return line[system_review.generated_region_open.len .. line.len - suffix.len];
 }
 
+/// Expand one `<!-- netlisp:generated <id> -->` region.
+///
+/// Dispatch is over the typed id rather than raw strings: `inspectDocumentContent`
+/// already refused any marker whose id is not a `GeneratedSection`, and a
+/// document that failed inspection never became evidence, so an unresolvable id
+/// here cannot come from a real package.
 fn writeGeneratedSection(
     out: *std.Io.Writer.Allocating,
     analysis: Analysis,
     id: []const u8,
     limit: usize,
 ) !void {
-    const w = &out.writer;
-    const spec = analysis.parsed.value;
-    if (std.mem.eql(u8, id, "system-summary")) {
-        try w.print("| Field | Value |\n| --- | --- |\n| System | {s} |\n| Part number | `{s}` |\n| Revision | `{s}` |\n| Content lock | `{s}` |\n| Release token | `{s}` |\n\n", .{
-            spec.name, spec.part_number, spec.revision, &analysis.content_lock, &analysis.release_token,
-        });
-    } else if (std.mem.eql(u8, id, "board-summary")) {
-        try w.writeAll("| Role | Design | Part number | Revision | Layout | Review | Fab gate |\n| --- | --- | --- | --- | --- | --- | --- |\n");
-        for (analysis.boards) |board| {
-            try w.print("| {s} | `{s}` | `{s}` | `{s}` | `{s}` | {s} | {s} |\n", .{
-                board.member.role,
-                board.member.name,
-                board.member.part_number,
-                board.member.revision,
-                board.snapshot.identity.layout,
-                @tagName(board.snapshot.review.status),
-                if (board.fab.readiness.blocked) "BLOCKED" else "ready",
-            });
-            try ensureMarkdownSize(out, limit);
-        }
-        try w.writeByte('\n');
-    } else if (std.mem.eql(u8, id, "interface-matrix")) {
-        for (spec.interfaces) |interface| {
-            try w.print("### {s}\n\n| Canonical | {s} pin/net | {s} pin/net | Required |\n| --- | --- | --- | --- |\n", .{
-                interface.id, interface.left.board, interface.right.board,
-            });
-            for (interface.signals) |signal| {
-                try w.print("| `{s}` | {s} / `{s}` | {s} / `{s}` | {s} |\n", .{
-                    signal.canonical,
-                    signal.left_pin,
-                    signal.left_net,
-                    signal.right_pin,
-                    signal.right_net,
-                    if (signal.required) "yes" else "no",
-                });
-                try ensureMarkdownSize(out, limit);
-            }
-            try w.writeByte('\n');
-        }
-    } else if (std.mem.eql(u8, id, "validation-summary")) {
-        try w.writeAll("| Gate | Result |\n| --- | --- |\n");
-        try writeGateRow(w, "Board identity and layouts", analysis.state.identity_ok);
-        try writeGateRow(w, "Evaluated interface contract", analysis.state.interface_ok);
-        try writeGateRow(w, "Board engineering reviews", analysis.state.board_review_ok);
-        try writeGateRow(w, "Fabrication readiness", analysis.state.fab_ok);
-        try writeGateRow(w, "Release checklists", analysis.state.checklists_ok);
-        try writeGateRow(w, "Content attestation", analysis.state.attested);
-        try w.writeByte('\n');
-    } else if (std.mem.eql(u8, id, "release-status")) {
-        try w.print("System release is **{s}**. Confirmation token: `{s}`. Waiver acceptance is {s}.\n\n", .{
-            if (analysis.blocked()) "BLOCKED" else "READY",
-            &analysis.release_token,
-            if (analysis.needs_waiver) "required" else "not required",
-        });
-    } else if (std.mem.eql(u8, id, "bom-summary")) {
-        try w.writeAll("Generated BOM CSVs are bound to the selected board release inputs and included at:\n\n");
-        for (analysis.boards) |board| {
-            try w.print("- `{s}`: `boards/{s}/bom.csv`\n", .{ board.member.name, board.member.role });
-            try ensureMarkdownSize(out, limit);
-        }
-        try w.writeByte('\n');
-    } else if (std.mem.eql(u8, id, "drc-summary")) {
-        try w.writeAll("| Board | Complete gate | Waiver required | Evidence |\n| --- | --- | --- | --- |\n");
-        for (analysis.boards) |board| {
-            try w.print("| `{s}` | {s} | {s} | `boards/{s}/fab-readiness.json` |\n", .{
-                board.member.name,
-                if (board.fab.readiness.blocked) "no" else "yes",
-                if (board.fab.readiness.needs_waiver) "yes" else "no",
-                board.member.role,
-            });
-            try ensureMarkdownSize(out, limit);
-        }
-        try w.writeByte('\n');
-    } else if (std.mem.eql(u8, id, "checklist-summary")) {
-        var total: usize = 0;
-        var complete: usize = 0;
-        var open: usize = 0;
-        for (analysis.documents) |candidate| if (candidate.spec.classification == .checklist) {
-            total += candidate.inspected.checklist.total;
-            complete += candidate.inspected.checklist.complete;
-            open += candidate.inspected.checklist.open;
-        };
-        try w.print("| Total | Complete | Open |\n| ---: | ---: | ---: |\n| {d} | {d} | {d} |\n\n", .{ total, complete, open });
+    const section = system_review.generatedSection(id) orelse return;
+    switch (section) {
+        .@"system-summary" => try writeSystemSummary(out, analysis),
+        .@"board-summary" => try writeBoardSummary(out, analysis, limit),
+        .@"interface-matrix" => try writeInterfaceMatrix(out, analysis, limit),
+        .@"validation-summary" => try writeValidationSummary(out, analysis),
+        .@"release-status" => try writeReleaseStatus(out, analysis),
+        .@"bom-summary" => try writeBomSummary(out, analysis, limit),
+        .@"drc-summary" => try writeDrcSummary(out, analysis, limit),
+        .@"checklist-summary" => try writeChecklistSummary(out, analysis),
+        .@"power-summary" => try writePowerSummary(out, analysis, limit),
+        .@"thermal-summary" => try writeThermalSummary(out, analysis, limit),
+        .@"pll-summary" => try writePllSummary(out, analysis, limit),
+        .@"erc-summary" => try writeErcSummary(out, analysis, limit),
+        .@"mechanical-summary" => try writeMechanicalSummary(out, analysis, limit),
+        .@"open-items" => try writeOpenItems(out, analysis, limit),
+        .@"system-diagram" => try writeSystemDiagram(out, analysis, limit),
     }
     try ensureMarkdownSize(out, limit);
 }
 
+fn writeSystemSummary(out: *std.Io.Writer.Allocating, analysis: Analysis) !void {
+    const spec = analysis.parsed.value;
+    try out.writer.print("| Field | Value |\n| --- | --- |\n| System | {s} |\n| Part number | `{s}` |\n| Revision | `{s}` |\n| Content lock | `{s}` |\n| Release token | `{s}` |\n\n", .{
+        spec.name, spec.part_number, spec.revision, &analysis.content_lock, &analysis.release_token,
+    });
+}
+
+fn writeBoardSummary(out: *std.Io.Writer.Allocating, analysis: Analysis, limit: usize) !void {
+    const w = &out.writer;
+    try w.writeAll("| Role | Design | Part number | Revision | Layout | Review | Fab gate |\n| --- | --- | --- | --- | --- | --- | --- |\n");
+    for (analysis.boards) |board| {
+        try w.print("| {s} | `{s}` | `{s}` | `{s}` | `{s}` | {s} | {s} |\n", .{
+            board.member.role,
+            board.member.name,
+            board.member.part_number,
+            board.member.revision,
+            board.snapshot.identity.layout,
+            @tagName(board.snapshot.review.status),
+            if (board.fab.readiness.blocked) "BLOCKED" else "ready",
+        });
+        try ensureMarkdownSize(out, limit);
+    }
+    try w.writeByte('\n');
+}
+
+fn writeInterfaceMatrix(out: *std.Io.Writer.Allocating, analysis: Analysis, limit: usize) !void {
+    const w = &out.writer;
+    for (analysis.parsed.value.interfaces) |interface| {
+        try w.print("### {s}\n\n| Canonical | {s} pin/net | {s} pin/net | Required |\n| --- | --- | --- | --- |\n", .{
+            interface.id, interface.left.board, interface.right.board,
+        });
+        for (interface.signals) |signal| {
+            try w.print("| `{s}` | {s} / `{s}` | {s} / `{s}` | {s} |\n", .{
+                signal.canonical,
+                signal.left_pin,
+                signal.left_net,
+                signal.right_pin,
+                signal.right_net,
+                if (signal.required) "yes" else "no",
+            });
+            try ensureMarkdownSize(out, limit);
+        }
+        try w.writeByte('\n');
+    }
+}
+
+fn writeValidationSummary(out: *std.Io.Writer.Allocating, analysis: Analysis) !void {
+    const w = &out.writer;
+    try w.writeAll("| Gate | Result |\n| --- | --- |\n");
+    try writeGateRow(w, "Board identity and layouts", analysis.state.identity_ok);
+    try writeGateRow(w, "Evaluated interface contract", analysis.state.interface_ok);
+    try writeGateRow(w, "Board engineering reviews", analysis.state.board_review_ok);
+    try writeGateRow(w, "Fabrication readiness", analysis.state.fab_ok);
+    try writeGateRow(w, "Release checklists", analysis.state.checklists_ok);
+    try writeGateRow(w, "Content attestation", analysis.state.attested);
+    try w.writeByte('\n');
+}
+
+fn writeReleaseStatus(out: *std.Io.Writer.Allocating, analysis: Analysis) !void {
+    try out.writer.print("System release is **{s}**. Confirmation token: `{s}`. Waiver acceptance is {s}.\n\n", .{
+        if (analysis.blocked()) "BLOCKED" else "READY",
+        &analysis.release_token,
+        if (analysis.needs_waiver) "required" else "not required",
+    });
+}
+
+fn writeDrcSummary(out: *std.Io.Writer.Allocating, analysis: Analysis, limit: usize) !void {
+    const w = &out.writer;
+    try w.writeAll("| Board | Complete gate | Waiver required | Evidence |\n| --- | --- | --- | --- |\n");
+    for (analysis.boards) |board| {
+        try w.print("| `{s}` | {s} | {s} | `boards/{s}/fab-readiness.json` |\n", .{
+            board.member.name,
+            if (board.fab.readiness.blocked) "no" else "yes",
+            if (board.fab.readiness.needs_waiver) "yes" else "no",
+            board.member.role,
+        });
+        try ensureMarkdownSize(out, limit);
+    }
+    try w.writeByte('\n');
+}
+
+fn writeChecklistSummary(out: *std.Io.Writer.Allocating, analysis: Analysis) !void {
+    var total: usize = 0;
+    var complete: usize = 0;
+    var open: usize = 0;
+    for (analysis.documents) |candidate| if (candidate.spec.classification == .checklist) {
+        total += candidate.inspected.checklist.total;
+        complete += candidate.inspected.checklist.complete;
+        open += candidate.inspected.checklist.open;
+    };
+    try out.writer.print("| Total | Complete | Open |\n| ---: | ---: | ---: |\n| {d} | {d} | {d} |\n\n", .{ total, complete, open });
+}
+
 fn writeGateRow(w: *std.Io.Writer, label: []const u8, ok: bool) !void {
     try w.print("| {s} | {s} |\n", .{ label, if (ok) "PASS" else "BLOCKED" });
+}
+
+// ── generated engineering sections ─────────────────────────────────────
+//
+// Every writer below renders from `Analysis` alone — no filesystem, no clock,
+// no evaluator — so the same inputs always produce the same bytes. Each one
+// states its own "nothing declared" line rather than emitting a headerless
+// table, and each row is bounded by the retention caps the board snapshot
+// already applied, re-checked against `limit` as it goes.
+
+/// Longest engine-authored prose a generated table cell carries. Messages are
+/// one line by construction; this is a ceiling on a pathological one.
+const max_generated_cell_bytes: usize = 200;
+
+/// Write engine prose into one Markdown table cell. A pipe would end the cell
+/// and a newline would end the row, so both are neutralized, and the text is
+/// clipped on a complete codepoint so the document stays valid UTF-8.
+fn writeCell(w: *std.Io.Writer, text: []const u8) !void {
+    const clipped = clipUtf8(text, max_generated_cell_bytes);
+    for (clipped) |byte| switch (byte) {
+        '|' => try w.writeByte('/'),
+        0...0x1f, 0x7f => try w.writeByte(' '),
+        else => try w.writeByte(byte),
+    };
+    if (clipped.len < text.len) try w.writeAll("...");
+}
+
+fn clipUtf8(text: []const u8, limit: usize) []const u8 {
+    if (text.len <= limit) return text;
+    var end = limit;
+    while (end > 0 and text[end] & 0xc0 == 0x80) end -= 1;
+    return text[0..end];
+}
+
+fn writeVolts(w: *std.Io.Writer, value: ?f64) !void {
+    if (value) |volts| try w.print("{d:.3} V", .{volts}) else try w.writeAll("n/a");
+}
+
+fn writeAmps(w: *std.Io.Writer, value: ?f64) !void {
+    if (value) |amps| try w.print("{d:.3} A", .{amps}) else try w.writeAll("n/a");
+}
+
+fn writePercent(w: *std.Io.Writer, value: ?f64) !void {
+    if (value) |pct| try w.print("{d:.1}%", .{pct}) else try w.writeAll("n/a");
+}
+
+fn writeCelsius(w: *std.Io.Writer, value: ?f64) !void {
+    if (value) |degrees| try w.print("{d:.1} C", .{degrees}) else try w.writeAll("n/a");
+}
+
+/// SI-scaled frequency, so a loop table reads `1.000 MHz` rather than a raw
+/// seven-digit hertz count.
+fn writeHertz(w: *std.Io.Writer, hz: f64) !void {
+    if (!(hz > 0)) return w.writeAll("n/a");
+    if (hz >= 1e9) return w.print("{d:.3} GHz", .{hz / 1e9});
+    if (hz >= 1e6) return w.print("{d:.3} MHz", .{hz / 1e6});
+    if (hz >= 1e3) return w.print("{d:.3} kHz", .{hz / 1e3});
+    return w.print("{d:.1} Hz", .{hz});
+}
+
+/// SI-scaled current, for charge-pump figures that live in the milliamp and
+/// microamp decades.
+fn writeScaledAmps(w: *std.Io.Writer, amps: f64) !void {
+    if (!(amps > 0)) return w.writeAll("n/a");
+    if (amps >= 1e-3) return w.print("{d:.3} mA", .{amps * 1e3});
+    return w.print("{d:.1} uA", .{amps * 1e6});
+}
+
+fn writeOutline(w: *std.Io.Writer, outline: board_review.Outline) !void {
+    if (!outline.present) return w.writeAll("undeclared");
+    try w.print("{d:.3} x {d:.3} mm", .{ outline.w, outline.h });
+}
+
+fn writePowerSummary(out: *std.Io.Writer.Allocating, analysis: Analysis, limit: usize) !void {
+    const w = &out.writer;
+    var rails: usize = 0;
+    for (analysis.boards) |board| rails += board.snapshot.analysis.power.len;
+    if (rails == 0) {
+        try w.writeAll("No board in this system declares a power-rail budget, so there is no generated rail table.\n\n");
+        return;
+    }
+    try w.writeAll("| Board | Rail | Nominal | Source | Source max | Load max | Margin | Consumers | Status |\n" ++
+        "| --- | --- | --- | --- | --- | --- | --- | ---: | --- |\n");
+    for (analysis.boards) |board| for (board.snapshot.analysis.power) |rail| {
+        try w.print("| {s} | `{s}` | ", .{ board.member.role, rail.net });
+        try writeVolts(w, rail.nominal_v);
+        try w.writeAll(" | ");
+        if (rail.source.label.len > 0)
+            try w.print("`{s}`", .{rail.source.label})
+        else
+            try w.writeAll("undeclared");
+        try w.writeAll(" | ");
+        try writeAmps(w, rail.source.max_a);
+        try w.print(" | {d:.3} A | ", .{rail.load_max_a});
+        try writePercent(w, rail.margin_pct);
+        try w.print(" | {d} | {s} |\n", .{ rail.consumers, @tagName(rail.status) });
+        try ensureMarkdownSize(out, limit);
+    };
+    try w.writeAll("\nPer-device consumer breakdowns for each rail are in `boards/ROLE/review.json`.\n\n");
+}
+
+fn writeThermalSummary(out: *std.Io.Writer.Allocating, analysis: Analysis, limit: usize) !void {
+    const w = &out.writer;
+    var powered: usize = 0;
+    for (analysis.boards) |board| powered += board.snapshot.analysis.thermal.powered_parts;
+    if (powered == 0) {
+        try w.writeAll("No board in this system declares part dissipation, so thermal screening has no input.\n\n");
+        return;
+    }
+    try w.writeAll("| Board | Dissipation | Powered parts | Hottest part | Verdict | Ambient | Max ambient | Min ambient |\n" ++
+        "| --- | --- | ---: | --- | --- | --- | --- | --- |\n");
+    for (analysis.boards) |board| {
+        const heat = board.snapshot.analysis.thermal;
+        try w.print("| {s} | {d:.3} W | {d} | ", .{ board.member.role, heat.total_w, heat.powered_parts });
+        if (heat.hottest.ref_des.len > 0)
+            try w.print("`{s}` at {d:.3} W", .{ heat.hottest.ref_des, heat.hottest.watts })
+        else
+            try w.writeAll("n/a");
+        try w.print(" | {s} | {d:.1} C | ", .{ @tagName(heat.verdict), heat.ambient_c });
+        try writeCelsius(w, heat.window.max_c);
+        try w.writeAll(" | ");
+        try writeCelsius(w, heat.window.min_c);
+        try w.writeAll(" |\n");
+        try ensureMarkdownSize(out, limit);
+    }
+    try w.writeAll("\nScreening-level steady state only: this is a lumped junction-temperature read of the design, not the layout-aware cooling ladder in each board's review.\n\n");
+}
+
+fn writeErcSummary(out: *std.Io.Writer.Allocating, analysis: Analysis, limit: usize) !void {
+    const w = &out.writer;
+    if (analysis.boards.len == 0) {
+        try w.writeAll("This system declares no boards, so there are no rule-check results to roll up.\n\n");
+        return;
+    }
+    try w.writeAll("| Board | ERC errors | ERC warnings | Assertions pass | warn | fail |\n" ++
+        "| --- | ---: | ---: | ---: | ---: | ---: |\n");
+    var errors: usize = 0;
+    for (analysis.boards) |board| {
+        const checks = board.snapshot.analysis.checks;
+        errors += checks.errors;
+        try w.print("| {s} | {d} | {d} | {d} | {d} | {d} |\n", .{
+            board.member.role,
+            checks.errors,
+            checks.warnings,
+            checks.assertions_pass,
+            checks.assertions_warn,
+            checks.assertions_fail,
+        });
+        try ensureMarkdownSize(out, limit);
+    }
+    try w.writeByte('\n');
+    if (errors == 0) {
+        try w.writeAll("No error-severity ERC violation is outstanding on any board.\n\n");
+        return;
+    }
+    try w.writeAll("| Board | Kind | Ref | Net | Detail |\n| --- | --- | --- | --- | --- |\n");
+    for (analysis.boards) |board| try writeErcFindings(out, board, limit);
+    try w.writeByte('\n');
+    for (analysis.boards) |board| if (board.snapshot.analysis.checks.truncated) {
+        try w.print(
+            "Listing for `{s}` is capped at {d} of {d} error-severity findings; the complete list is in `boards/{s}/review.json`.\n\n",
+            .{
+                board.member.name,
+                board.snapshot.analysis.checks.findings.len,
+                board.snapshot.analysis.checks.errors,
+                board.member.role,
+            },
+        );
+        try ensureMarkdownSize(out, limit);
+    };
+}
+
+fn writeErcFindings(out: *std.Io.Writer.Allocating, board: BoardEvidence, limit: usize) !void {
+    const w = &out.writer;
+    for (board.snapshot.analysis.checks.findings) |finding| {
+        try w.print("| {s} | `{s}` | ", .{ board.member.role, finding.kind });
+        if (finding.ref_des.len > 0) try w.print("`{s}`", .{finding.ref_des}) else try w.writeAll("-");
+        try w.writeAll(" | ");
+        if (finding.net.len > 0) try w.print("`{s}`", .{finding.net}) else try w.writeAll("-");
+        try w.writeAll(" | ");
+        try writeCell(w, finding.message);
+        try w.writeAll(" |\n");
+        try ensureMarkdownSize(out, limit);
+    }
+}
+
+fn writeMechanicalSummary(out: *std.Io.Writer.Allocating, analysis: Analysis, limit: usize) !void {
+    const w = &out.writer;
+    var described: usize = 0;
+    for (analysis.boards) |board| {
+        const mech = board.snapshot.analysis.mechanical;
+        if (mech.declared.present or mech.measured.present or mech.stackup_layers > 0) described += 1;
+    }
+    if (described == 0) {
+        try w.writeAll("No board in this system declares a board outline or stackup, so there is no generated mechanical table.\n\n");
+        return;
+    }
+    try w.writeAll("| Board | Declared outline | Corner radius | Stackup preset | Layers | Measured outline | Outline |\n" ++
+        "| --- | --- | --- | --- | ---: | --- | --- |\n");
+    for (analysis.boards) |board| {
+        const mech = board.snapshot.analysis.mechanical;
+        try w.print("| {s} | ", .{board.member.role});
+        try writeOutline(w, mech.declared);
+        try w.print(" | {d:.3} mm | ", .{mech.declared.corner_radius});
+        if (mech.stackup_preset.len > 0) try w.print("`{s}`", .{mech.stackup_preset}) else try w.writeAll("custom");
+        try w.print(" | {d} | ", .{mech.stackup_layers});
+        try writeOutline(w, mech.measured);
+        try w.print(" | {s} |\n", .{if (mech.drift) "DRIFT" else "matches"});
+        try ensureMarkdownSize(out, limit);
+    }
+    try w.writeAll("\nThe measured outline is the fabrication edge of the exact saved layout this package selected. `DRIFT` means it disagrees with the declared size by more than the fabrication tolerance, which the board's `fab-readiness.json` reports as `outline-drift`.\n\n");
+}
+
+fn writeBomSummary(out: *std.Io.Writer.Allocating, analysis: Analysis, limit: usize) !void {
+    const w = &out.writer;
+    if (analysis.boards.len == 0) {
+        try w.writeAll("This system declares no boards, so no bill of materials is generated.\n\n");
+        return;
+    }
+    try w.writeAll("Generated BOM CSVs are bound to the selected board release inputs.\n\n" ++
+        "| Board | Placements | Distinct lines | DNP placements | DNP lines | CSV |\n" ++
+        "| --- | ---: | ---: | ---: | ---: | --- |\n");
+    for (analysis.boards) |board| {
+        const bom = board.snapshot.analysis.bom;
+        try w.print("| `{s}` | {d} | {d} | {d} | {d} | `boards/{s}/bom.csv` |\n", .{
+            board.member.name,
+            bom.placements,
+            bom.lines,
+            bom.dnp_placements,
+            bom.dnp_lines,
+            board.member.role,
+        });
+        try ensureMarkdownSize(out, limit);
+    }
+    try w.writeAll("\nPlacements exclude test points, which are probe pads rather than sourced parts, and count each populated instance once. Distinct lines are the CSV's own grouping, so a do-not-populate variant of a part is its own line.\n\n");
+}
+
+fn writeSystemDiagram(out: *std.Io.Writer.Allocating, analysis: Analysis, limit: usize) !void {
+    const w = &out.writer;
+    const spec = analysis.parsed.value;
+    if (spec.boards.len == 0) {
+        try w.writeAll("This system declares no boards, so no system block diagram is generated.\n\n");
+        return;
+    }
+    try w.print("System block diagram: `{s}` — one node per board, each board-to-board contract drawn as a labeled spine of signal lanes.\n\n", .{system_diagram_member});
+    try w.writeAll("| Board | Role | Part number | Revision |\n| --- | --- | --- | --- |\n");
+    for (spec.boards) |board| {
+        try w.print("| `{s}` | {s} | `{s}` | `{s}` |\n", .{ board.name, board.role, board.part_number, board.revision });
+        try ensureMarkdownSize(out, limit);
+    }
+    try w.writeByte('\n');
+    if (spec.interfaces.len == 0) {
+        try w.writeAll("No board-to-board interface is declared, so the diagram draws the boards alone.\n\n");
+        return;
+    }
+    try w.writeAll("| Interface | Left | Right | Contacts |\n| --- | --- | --- | ---: |\n");
+    for (spec.interfaces) |interface| {
+        try w.print("| `{s}` | {s} / `{s}` | {s} / `{s}` | {d} |\n", .{
+            interface.id,
+            interface.left.board,
+            interface.left.connector,
+            interface.right.board,
+            interface.right.connector,
+            interface.contact_count,
+        });
+        try ensureMarkdownSize(out, limit);
+    }
+    try w.writeByte('\n');
+}
+
+fn writePllSummary(out: *std.Io.Writer.Allocating, analysis: Analysis, limit: usize) !void {
+    const w = &out.writer;
+    var reports: usize = 0;
+    for (analysis.boards) |board| reports += board.snapshot.analysis.pll.len;
+    if (reports == 0) {
+        try w.writeAll("No board in this system declares a phase-locked-loop filter, so there is no generated loop table.\n\n");
+        return;
+    }
+    for (analysis.boards) |board| for (board.snapshot.analysis.pll) |report| {
+        try writePllReport(out, board.member.role, report, limit);
+    };
+}
+
+fn writePllReport(
+    out: *std.Io.Writer.Allocating,
+    role: []const u8,
+    report: board_review.PllReport,
+    limit: usize,
+) !void {
+    const w = &out.writer;
+    try w.print("### {s} loop ", .{role});
+    try writeCell(w, report.name);
+    try w.print("\n\nMode: {s}. Screening reached: {s}.\n\n", .{ @tagName(report.mode), @tagName(report.outcome) });
+    try w.writeAll("| Parameter | Value |\n| --- | --- |\n| Phase detector | ");
+    try writeHertz(w, report.profile.pfd_hz);
+    try w.print(" |\n| Divider N | {d:.0} |\n| Prescaler | {d:.0} |\n| Charge pump | ", .{
+        report.profile.pll_n,
+        report.profile.prescaler,
+    });
+    try writeScaledAmps(w, report.profile.charge_pump_a);
+    try w.writeAll(" |\n| Op-amp GBW | ");
+    try writeHertz(w, report.profile.op_amp_gbw_hz);
+    try w.print(" |\n| Phase-margin target | {d:.1} to {d:.1} deg |\n| Ramp phase-error limit | {d:.4} rad |\n\n", .{
+        report.profile.phase_margin_target_deg.min,
+        report.profile.phase_margin_target_deg.max,
+        report.profile.max_ramp_phase_error_rad,
+    });
+    try ensureMarkdownSize(out, limit);
+    try w.writeAll("| Population | Nominal LBW | Nominal PM | Corner LBW | Corner PM | Ramp phase error | Pass | Warn | Fail |\n" ++
+        "| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: |\n");
+    for (report.populations) |population| try writePllPopulationRow(out, population, limit);
+    try w.writeByte('\n');
+    try writePllFailures(out, report, limit);
+    try writePllSchedule(out, report, limit);
+}
+
+fn writePllPopulationRow(
+    out: *std.Io.Writer.Allocating,
+    population: board_review.PllPopulation,
+    limit: usize,
+) !void {
+    const w = &out.writer;
+    try w.print("| {s} | ", .{@tagName(population.kind)});
+    try writeSweepBandwidth(w, population.results.nominal);
+    try w.writeAll(" | ");
+    try writeSweepPhase(w, population.results.nominal);
+    try w.writeAll(" | ");
+    try writeSweepBandwidth(w, population.results.tolerance);
+    try w.writeAll(" | ");
+    try writeSweepPhase(w, population.results.tolerance);
+    try w.print(" | {d:.4} rad | {d} | {d} | {d} |\n", .{
+        population.results.ramp_phase_error_rad,
+        population.pass,
+        population.warn,
+        population.fail,
+    });
+    try ensureMarkdownSize(out, limit);
+}
+
+fn writeSweepBandwidth(w: *std.Io.Writer, sweep: pll_loop.SweepSummary) !void {
+    if (sweep.corners == 0) return w.writeAll("n/a");
+    try writeHertz(w, sweep.min_bandwidth_hz);
+    try w.writeAll(" to ");
+    try writeHertz(w, sweep.max_bandwidth_hz);
+}
+
+fn writeSweepPhase(w: *std.Io.Writer, sweep: pll_loop.SweepSummary) !void {
+    if (sweep.corners == 0) return w.writeAll("n/a");
+    try w.print("{d:.1} to {d:.1} deg", .{ sweep.min_phase_margin_deg, sweep.max_phase_margin_deg });
+}
+
+fn writePllFailures(
+    out: *std.Io.Writer.Allocating,
+    report: board_review.PllReport,
+    limit: usize,
+) !void {
+    const w = &out.writer;
+    var failing: usize = 0;
+    for (report.populations) |population| failing += population.failing.len;
+    if (failing == 0) {
+        try w.writeAll("Every screen on this loop passes.\n\n");
+        return;
+    }
+    try w.writeAll("| Population | Screen | Status | Detail |\n| --- | --- | --- | --- |\n");
+    for (report.populations) |population| for (population.failing) |screen| {
+        try w.print("| {s} | `{s}` | {s} | ", .{ @tagName(population.kind), screen.screen, @tagName(screen.status) });
+        try writeCell(w, screen.message);
+        try w.writeAll(" |\n");
+        try ensureMarkdownSize(out, limit);
+    };
+    try w.writeByte('\n');
+}
+
+fn writePllSchedule(
+    out: *std.Io.Writer.Allocating,
+    report: board_review.PllReport,
+    limit: usize,
+) !void {
+    if (report.schedule.len == 0) return;
+    const w = &out.writer;
+    try w.writeAll("Charge-pump schedule:\n\n| Step | Divider N | Kvco | I_CP |\n| ---: | ---: | --- | --- |\n");
+    for (report.schedule) |entry| {
+        try w.print("| {d} | {d:.0} | ", .{ entry.step, entry.pll_n });
+        try writeHertz(w, entry.kvco_hz_per_v);
+        try w.writeAll("/V | ");
+        try writeScaledAmps(w, entry.current_a);
+        try w.writeAll(" |\n");
+        try ensureMarkdownSize(out, limit);
+    }
+    try w.writeByte('\n');
+}
+
+/// One row of the release-blocker register: a stable id, where it came from,
+/// how badly it blocks, and a one-line summary.
+const OpenItem = struct {
+    id: []const u8,
+    source: []const u8,
+    severity: []const u8,
+    summary: []const u8,
+};
+
+fn writeOpenItems(out: *std.Io.Writer.Allocating, analysis: Analysis, limit: usize) !void {
+    const w = &out.writer;
+    if (!openItemsPresent(analysis)) {
+        try w.writeAll("No open items: every package gate, board review, rule check and loop screen in this system is clear.\n\n");
+        return;
+    }
+    try w.writeAll("| Item | Source | Severity | Summary |\n| --- | --- | --- | --- |\n");
+    try writeGateOpenItems(out, analysis, limit);
+    for (analysis.boards) |board| try writeBoardOpenItems(out, board, limit);
+    try w.writeByte('\n');
+}
+
+fn openItemsPresent(analysis: Analysis) bool {
+    if (analysis.blocked()) return true;
+    for (analysis.boards) |board| {
+        const snapshot = board.snapshot;
+        if (snapshot.review.open_notes > 0 or snapshot.review.status != .pass) return true;
+        if (snapshot.analysis.checks.errors > 0) return true;
+        if (board.fab.readiness.blocked or board.fab.readiness.needs_waiver) return true;
+        if (boardPllFailures(board) > 0) return true;
+    }
+    return false;
+}
+
+fn boardPllFailures(board: BoardEvidence) usize {
+    var failing: usize = 0;
+    for (board.snapshot.analysis.pll) |report| {
+        for (report.populations) |population| failing += population.failing.len;
+    }
+    return failing;
+}
+
+fn writeOpenItemRow(out: *std.Io.Writer.Allocating, item: OpenItem, limit: usize) !void {
+    const w = &out.writer;
+    try w.print("| `{s}` | {s} | {s} | ", .{ item.id, item.source, item.severity });
+    try writeCell(w, item.summary);
+    try w.writeAll(" |\n");
+    try ensureMarkdownSize(out, limit);
+}
+
+fn writeGateOpenItems(out: *std.Io.Writer.Allocating, analysis: Analysis, limit: usize) !void {
+    const gates = [_]struct { id: []const u8, ok: bool, summary: []const u8 }{
+        .{ .id = "gate-identity", .ok = analysis.state.identity_ok, .summary = "a board's evaluated identity or layout does not match the manifest" },
+        .{ .id = "gate-interface", .ok = analysis.state.interface_ok, .summary = "the evaluated connector observations do not satisfy the declared contract" },
+        .{ .id = "gate-board-review", .ok = analysis.state.board_review_ok, .summary = "a board engineering review is failing or carries open design notes" },
+        .{ .id = "gate-fabrication", .ok = analysis.state.fab_ok, .summary = "a board's fabrication readiness gate is blocked" },
+        .{ .id = "gate-checklists", .ok = analysis.state.checklists_ok, .summary = "a required release checklist still has open tasks" },
+        .{ .id = "gate-attestation", .ok = analysis.state.attested, .summary = "no current content attestation covers these exact inputs" },
+    };
+    for (gates) |gate| if (!gate.ok) try writeOpenItemRow(out, .{
+        .id = gate.id,
+        .source = "package gate",
+        .severity = "blocker",
+        .summary = gate.summary,
+    }, limit);
+}
+
+fn writeBoardOpenItems(out: *std.Io.Writer.Allocating, board: BoardEvidence, limit: usize) !void {
+    const w = &out.writer;
+    const snapshot = board.snapshot;
+    if (snapshot.review.status != .pass) try writeOpenItemRow(out, .{
+        .id = board.member.role,
+        .source = "board review",
+        .severity = if (snapshot.review.status == .fail) "blocker" else "warning",
+        .summary = @tagName(snapshot.review.status),
+    }, limit);
+    if (snapshot.review.open_notes > 0) {
+        try w.print("| `{s}` | design notes | warning | {d} open note(s) in `boards/{s}/design-notes.md` |\n", .{
+            board.member.role,
+            snapshot.review.open_notes,
+            board.member.role,
+        });
+        try ensureMarkdownSize(out, limit);
+    }
+    if (snapshot.analysis.checks.errors > 0) {
+        try w.print("| `{s}` | ERC | blocker | {d} error-severity violation(s) |\n", .{
+            board.member.role,
+            snapshot.analysis.checks.errors,
+        });
+        try ensureMarkdownSize(out, limit);
+    }
+    if (board.fab.readiness.blocked or board.fab.readiness.needs_waiver) try writeOpenItemRow(out, .{
+        .id = board.member.role,
+        .source = "fabrication",
+        .severity = if (board.fab.readiness.blocked) "blocker" else "waiver",
+        .summary = if (board.fab.readiness.blocked)
+            "board release gate is blocked"
+        else
+            "board release requires an explicit waiver",
+    }, limit);
+    for (snapshot.analysis.pll) |report| try writePllOpenItems(out, board.member.role, report, limit);
+}
+
+fn writePllOpenItems(
+    out: *std.Io.Writer.Allocating,
+    role: []const u8,
+    report: board_review.PllReport,
+    limit: usize,
+) !void {
+    const w = &out.writer;
+    for (report.populations) |population| for (population.failing) |screen| {
+        try w.print("| `{s}` | PLL {s} | {s} | ", .{ role, @tagName(population.kind), @tagName(screen.status) });
+        try writeCell(w, screen.message);
+        try w.writeAll(" |\n");
+        try ensureMarkdownSize(out, limit);
+    };
 }
 
 fn renderApproval(allocator: std.mem.Allocator, analysis: Analysis, bundle: ReleaseBundle) ![]const u8 {
@@ -1808,6 +2452,35 @@ test "draft archive validation rejects CAM traversal and duplicate members" {
     try std.testing.expectError(error.DraftContainsCam, validateArchiveEntries(std.testing.allocator, &gerber, false));
 }
 
+// spec: system-review - the only archived SVG is the tool-rendered per-board block diagram; SVG is refused at every other archive path in draft and release alike
+test "SVG is admitted only as tool-rendered per-board diagram evidence" {
+    try std.testing.expect(allowedSvgMember("boards/rf/diagram.svg"));
+    // Not SVG at all ⇒ this rule has no opinion.
+    try std.testing.expect(allowedSvgMember("boards/rf/review.md"));
+    // The permitted name is exact, so no case variant widens the opening.
+    try std.testing.expect(!allowedSvgMember("boards/rf/DIAGRAM.SVG"));
+    // A user-uploaded asset stays refused here even if the assets allowlist
+    // ever grew an SVG kind.
+    try std.testing.expect(!allowedSvgMember("review/assets/scope.svg"));
+    try std.testing.expect(!allowedSvgMember("boards/rf/extra.svg"));
+    try std.testing.expect(!allowedSvgMember("boards/rf/nested/diagram.svg"));
+    try std.testing.expect(!allowedSvgMember("boards/diagram.svg"));
+    try std.testing.expect(!allowedSvgMember("diagram.svg"));
+
+    const diagram = [_]zipfile.Entry{.{ .name = "boards/rf/diagram.svg", .data = "<svg/>" }};
+    try validateArchiveEntries(std.testing.allocator, &diagram, false);
+    try validateArchiveEntries(std.testing.allocator, &diagram, true);
+    const smuggled = [_]zipfile.Entry{.{ .name = "review/assets/scope.svg", .data = "<svg onload=\"x\"/>" }};
+    try std.testing.expectError(
+        error.UnexpectedSvgMember,
+        validateArchiveEntries(std.testing.allocator, &smuggled, false),
+    );
+    try std.testing.expectError(
+        error.UnexpectedSvgMember,
+        validateArchiveEntries(std.testing.allocator, &smuggled, true),
+    );
+}
+
 // spec: system-review - optional active documents may be absent without blocking release, while every required active document and required checklist must pass
 test "optional document lifecycle does not weaken required checklists" {
     var document = system_review.DocumentSpec{
@@ -1936,6 +2609,7 @@ test "final archive nests unchanged board release and emits approval inventory a
             .pdf = "%PDF-board",
             .json = "{}",
             .bom_csv = "Ref,Part\n",
+            .diagram_svg = "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
         },
         .physical = .{
             .pcb_png = "\x89PNG\r\n\x1a\n",
@@ -1950,6 +2624,7 @@ test "final archive nests unchanged board release and emits approval inventory a
             .sources = &source_entries,
             .connections = &.{},
         },
+        .analysis = .{},
     };
     const nested_board_zip = "PK\x03\x04unchanged-board-release";
     const released: fab_service.Result = .{
@@ -2043,6 +2718,157 @@ test "final archive nests unchanged board release and emits approval inventory a
         }
     }
     try std.testing.expect(saw_nested and saw_approval and saw_manifest and saw_checksums);
+}
+
+/// One board's draft archive, composed twice from a fixed Analysis so a test
+/// can assert both its inventory and its reproducibility. `diagram_svg` is the
+/// only thing that varies: empty stands for a design the diagram engine
+/// declined to draw.
+fn composeDraftForDiagramTest(
+    allocator: std.mem.Allocator,
+    diagram_svg: []const u8,
+) !struct { first: BuiltArchive, second: BuiltArchive } {
+    const parsed = try std.json.parseFromSlice(
+        system_review.SystemSpec,
+        allocator,
+        "{\"schema\":\"netlisp-system-review-v1\",\"name\":\"demo\",\"title\":\"Demo\",\"part_number\":\"SYS-1\",\"revision\":\"A\",\"boards\":[{\"name\":\"one\",\"role\":\"main\",\"source\":\"src/one.sexp\",\"part_number\":\"ONE\",\"revision\":\"A\"}]}",
+        .{},
+    );
+    const source_entries = [_]zipfile.Entry{
+        .{ .name = "src/one.sexp", .data = "(design-block one)" },
+    };
+    const snapshot: board_review.Snapshot = .{
+        .identity = .{
+            .name = "one",
+            .source = "src/one.sexp",
+            .title = "One",
+            .part_number = "ONE",
+            .revision = "A",
+            .layout = "layout-a",
+            .generated_at = "2026-08-29T00:00:00Z",
+        },
+        .review = .{
+            .status = .pass,
+            .open_notes = 0,
+            .notes_path = "src/one.notes.md",
+            .notes_source = null,
+            .markdown = "# One review\n",
+            .pdf = "%PDF-board",
+            .json = "{}",
+            .bom_csv = "Ref,Part\n",
+            .diagram_svg = diagram_svg,
+        },
+        .physical = .{
+            .pcb_png = "\x89PNG\r\n\x1a\n",
+            .consumed_sha256 = @splat('c'),
+            .consumed_trace = infra_fs.ReadTrace.init(allocator),
+            .fab_inputs = .{
+                .source = @splat('3'),
+                .layout = @splat('4'),
+                .bom = @splat('5'),
+                .complete = true,
+            },
+            .sources = &source_entries,
+            .connections = &.{},
+        },
+        .analysis = .{},
+    };
+    const boards = try allocator.dupe(BoardEvidence, &[_]BoardEvidence{.{
+        .member = parsed.value.boards[0],
+        .snapshot = snapshot,
+        .fab = .{
+            .identity = .{ .name = "one", .part_number = "ONE", .revision = "A", .layout = "layout-a" },
+            .lock = .{
+                .project_commit = "commit",
+                .release_token = @splat('r'),
+                .fab_id = "1234abcd".*,
+                .project_status = .clean,
+            },
+            .readiness = .{ .needs_waiver = false, .blocked = false, .json = "{\"blocked\":false}" },
+            .digests = .{
+                .reviewed = @splat('1'),
+                .consumed = @splat('2'),
+                .source = @splat('3'),
+                .layout = @splat('4'),
+                .bom_evidence = @splat('5'),
+                .dependency = @splat('6'),
+                .bom = @splat('7'),
+                .centroid = @splat('8'),
+                .rules = @splat('9'),
+            },
+        },
+        .identity_ok = true,
+    }});
+    const analysis = Analysis{
+        .parsed = parsed,
+        .manifest_source = "{}",
+        .documents = &.{},
+        .assets = &.{},
+        .boards = boards,
+        .inputs = &.{},
+        .document_attestations = &.{},
+        .generated_at = "2026-08-29T00:00:00Z",
+        .content_lock = @splat('l'),
+        .release_token = @splat('t'),
+        .needs_waiver = false,
+        .state = .{},
+        .interface_diagnostic = .{},
+    };
+    return .{
+        .first = try composeArchive(allocator, allocator, analysis, null),
+        .second = try composeArchive(allocator, allocator, analysis, null),
+    };
+}
+
+fn draftMemberBytes(
+    allocator: std.mem.Allocator,
+    archive: []const u8,
+    wanted: []const u8,
+) !?[]const u8 {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "system.zip", .data = archive });
+    var file = try tmp.dir.openFile(std.testing.io, "system.zip", .{});
+    defer file.close(std.testing.io);
+    var read_buffer: [4096]u8 = undefined;
+    var reader = file.reader(std.testing.io, &read_buffer);
+    var iterator = try std.zip.Iterator.init(&reader);
+    while (try iterator.next()) |entry| {
+        var name_buffer: [1024]u8 = undefined;
+        const filename = try entry.getFilename(&reader, &name_buffer, .{});
+        if (!std.mem.eql(u8, filename, wanted)) continue;
+        var extracted: std.Io.Writer.Allocating = .init(allocator);
+        try entry.extractTo(&reader, &extracted.writer);
+        return extracted.written();
+    }
+    return null;
+}
+
+// spec: system-review - per-board block diagram evidence is archived as boards/<role>/diagram.svg in draft and release, reproducibly, and omitted when the design has no diagram
+test "board diagram is a deterministic draft member and absent when undrawn" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+
+    const rendered = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 10 10\"></svg>";
+    const drawn = try composeDraftForDiagramTest(allocator, rendered);
+    const member = (try draftMemberBytes(allocator, drawn.first.zip, "boards/main/diagram.svg")) orelse
+        return error.MissingDiagramMember;
+    try std.testing.expectEqualStrings(rendered, member);
+    // The diagram is review evidence, so a draft carries it: composition would
+    // have failed with DraftContainsCam otherwise.
+    try std.testing.expect(std.mem.indexOf(u8, drawn.first.filename, "draft") != null);
+    // Its digest is inventoried alongside every other member.
+    const manifest = (try draftMemberBytes(allocator, drawn.first.zip, "release-manifest.json")) orelse
+        return error.MissingDiagramMember;
+    try std.testing.expect(std.mem.indexOf(u8, manifest, "boards/main/diagram.svg") != null);
+    // Same inputs ⇒ same bytes.
+    try std.testing.expectEqualSlices(u8, drawn.first.zip, drawn.second.zip);
+
+    const undrawn = try composeDraftForDiagramTest(allocator, "");
+    try std.testing.expect((try draftMemberBytes(allocator, undrawn.first.zip, "boards/main/diagram.svg")) == null);
+    // Every other board member is still there, so the omission is targeted.
+    try std.testing.expect((try draftMemberBytes(allocator, undrawn.first.zip, "boards/main/review.md")) != null);
 }
 
 // spec: system-review - flat safe workspace assets are content-validated, deterministically hashed, and archived beside combined Markdown under review/assets
@@ -2139,4 +2965,386 @@ test "blessed layout sentinel selects and records the concrete starred row" {
     try std.testing.expectEqualStrings("production-v4", requestedLayout("production-v4").?);
     try std.testing.expect(selectedLayoutMatches("production-v4", "production-v4"));
     try std.testing.expect(!selectedLayoutMatches("production-v4", "prototype"));
+}
+
+// ── generated engineering sections ─────────────────────────────────────
+
+/// Two boards joined by one interface: enough for every generated section to
+/// have a shape to render, and enough for a mixed system where one board
+/// carries engineering evidence and the other declares nothing.
+const engineering_manifest =
+    \\{"schema":"netlisp-system-review-v1","name":"demo","title":"Demo","part_number":"SYS-1","revision":"A",
+    \\"boards":[{"name":"one","role":"main","source":"src/one.sexp","part_number":"ONE","revision":"A"},
+    \\{"name":"two","role":"rf","source":"src/two.sexp","part_number":"TWO","revision":"A"}],
+    \\"interfaces":[{"id":"j1","left":{"board":"one","connector":"J1"},"right":{"board":"two","connector":"J1"},
+    \\"contact_count":2,"signals":[
+    \\{"canonical":"V_3V3","left_pin":"1","left_net":"V3P3","right_pin":"1","right_net":"V3P3"},
+    \\{"canonical":"GND","left_pin":"2","left_net":"GND","right_pin":"2","right_net":"GND"}]}]}
+;
+
+/// Populated evidence for the `main` board: one rail, one hot part, one ERC
+/// error, a drifted outline, a failing loop screen and a real BOM rollup.
+fn fixtureEngineering(allocator: std.mem.Allocator) !board_review.Engineering {
+    const rails = try allocator.dupe(board_review.PowerRail, &.{.{
+        .net = "V3P3",
+        .nominal_v = 3.3,
+        .source = .{ .label = "buck/VOUT", .max_a = 2.0 },
+        .load_max_a = 1.25,
+        .margin_pct = 37.5,
+        .status = .ok,
+        .consumers = 4,
+    }});
+    const findings = try allocator.dupe(board_review.Finding, &.{.{
+        .kind = "floating_net",
+        .ref_des = "U7",
+        .net = "LNA_BYPASS",
+        .message = "net has a single connection",
+    }});
+    const failing = try allocator.dupe(board_review.PllScreen, &.{.{
+        .screen = "nominal_phase_target",
+        .status = .fail,
+        .message = "phase margin 31.2 deg below the 45.0 deg target",
+    }});
+    const populations = try allocator.dupe(board_review.PllPopulation, &.{.{
+        .kind = .fitted,
+        .results = .{
+            .nominal = .{ .corners = 3, .min_bandwidth_hz = 1200, .max_bandwidth_hz = 3400, .min_phase_margin_deg = 31.2, .max_phase_margin_deg = 48.0 },
+            .tolerance = .{ .corners = 27, .min_bandwidth_hz = 900, .max_bandwidth_hz = 4100, .min_phase_margin_deg = 24.5, .max_phase_margin_deg = 55.0 },
+            .ramp_phase_error_rad = 0.0123,
+        },
+        .pass = 18,
+        .warn = 1,
+        .fail = 1,
+        .failing = failing,
+    }});
+    const schedule = try allocator.dupe(pll_loop.ScheduleEntry, &.{
+        .{ .pll_n = 200, .kvco_hz_per_v = 6e7, .step = 4, .current_a = 2.5e-3 },
+    });
+    const pll = try allocator.dupe(board_review.PllReport, &.{.{
+        .name = "chirp-loop",
+        .mode = .gate,
+        .outcome = .screened,
+        .profile = .{
+            .pfd_hz = 1e6,
+            .charge_pump_a = 2.5e-3,
+            .prescaler = 4,
+            .pll_n = 200,
+            .op_amp_gbw_hz = 1e7,
+            .phase_margin_target_deg = .{ .min = 45, .max = 60 },
+            .max_ramp_phase_error_rad = 0.05,
+        },
+        .populations = populations,
+        .schedule = schedule,
+    }});
+    return .{
+        .power = rails,
+        .thermal = .{
+            .ambient_c = 25,
+            .verdict = .needs_airflow,
+            .total_w = 2.0,
+            .powered_parts = 2,
+            .hottest = .{ .ref_des = "U2", .watts = 1.75 },
+            .window = .{ .max_c = 61.5, .min_c = -40 },
+        },
+        .checks = .{
+            .errors = 3,
+            .warnings = 5,
+            .findings = findings,
+            .truncated = true,
+            .assertions_pass = 12,
+            .assertions_warn = 1,
+            .assertions_fail = 2,
+        },
+        .mechanical = .{
+            .declared = .{ .w = 60, .h = 40, .corner_radius = 2, .present = true },
+            .measured = .{ .w = 60.5, .h = 40, .corner_radius = 2, .present = true },
+            .drift = true,
+            .stackup_preset = "JLC06161H-3313",
+            .stackup_layers = 6,
+        },
+        .pll = pll,
+        .bom = .{ .placements = 4, .lines = 3, .dnp_placements = 1, .dnp_lines = 1 },
+    };
+}
+
+fn fixtureBoardEvidence(
+    allocator: std.mem.Allocator,
+    member: system_review.BoardMember,
+    engineering: board_review.Engineering,
+    open_notes: usize,
+) BoardEvidence {
+    return .{
+        .member = member,
+        .snapshot = .{
+            .identity = .{
+                .name = member.name,
+                .source = member.source,
+                .title = member.name,
+                .part_number = member.part_number,
+                .revision = member.revision,
+                .layout = "layout-a",
+                .generated_at = "2026-08-29T00:00:00Z",
+            },
+            .review = .{
+                .status = .pass,
+                .open_notes = open_notes,
+                .notes_path = "src/one.notes.md",
+                .notes_source = null,
+                .markdown = "# review\n",
+                .pdf = "%PDF-board",
+                .json = "{}",
+                .bom_csv = "Ref,Part\n",
+                .diagram_svg = "",
+            },
+            .physical = .{
+                .pcb_png = "\x89PNG\r\n\x1a\n",
+                .consumed_sha256 = @splat('c'),
+                .consumed_trace = infra_fs.ReadTrace.init(allocator),
+                .fab_inputs = .{ .source = @splat('3'), .layout = @splat('4'), .bom = @splat('5'), .complete = true },
+                .sources = &.{},
+                .connections = &.{},
+            },
+            .analysis = engineering,
+        },
+        .fab = .{
+            .identity = .{ .name = member.name, .part_number = member.part_number, .revision = member.revision, .layout = "layout-a" },
+            .lock = .{
+                .project_commit = "commit",
+                .release_token = @splat('r'),
+                .fab_id = "1234abcd".*,
+                .project_status = .clean,
+            },
+            .readiness = .{ .needs_waiver = false, .blocked = false, .json = "{\"blocked\":false}" },
+            .digests = .{
+                .reviewed = @splat('1'),
+                .consumed = @splat('2'),
+                .source = @splat('3'),
+                .layout = @splat('4'),
+                .bom_evidence = @splat('5'),
+                .dependency = @splat('6'),
+                .bom = @splat('7'),
+                .centroid = @splat('8'),
+                .rules = @splat('9'),
+            },
+        },
+        .identity_ok = true,
+    };
+}
+
+/// An `Analysis` over `engineering_manifest` whose `main` board carries
+/// `engineering` and whose `aux` board declares nothing.
+fn fixtureAnalysis(
+    allocator: std.mem.Allocator,
+    engineering: board_review.Engineering,
+    clean: bool,
+) !Analysis {
+    const parsed = try std.json.parseFromSlice(
+        system_review.SystemSpec,
+        allocator,
+        engineering_manifest,
+        .{},
+    );
+    const boards = try allocator.dupe(BoardEvidence, &.{
+        fixtureBoardEvidence(allocator, parsed.value.boards[0], engineering, if (clean) 0 else 2),
+        fixtureBoardEvidence(allocator, parsed.value.boards[1], .{}, 0),
+    });
+    return .{
+        .parsed = parsed,
+        .manifest_source = engineering_manifest,
+        .documents = &.{},
+        .assets = &.{},
+        .boards = boards,
+        .inputs = &.{},
+        .document_attestations = &.{},
+        .generated_at = "2026-08-29T00:00:00Z",
+        .content_lock = @splat('l'),
+        .release_token = @splat('t'),
+        .needs_waiver = false,
+        .state = .{
+            .identity_ok = true,
+            .interface_ok = true,
+            .board_review_ok = clean,
+            .fab_ok = true,
+            .checklists_ok = true,
+            .attested = clean,
+        },
+        .interface_diagnostic = .{},
+    };
+}
+
+fn renderSection(allocator: std.mem.Allocator, analysis: Analysis, id: []const u8) ![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    try writeGeneratedSection(&out, analysis, id, max_rendered_document_bytes);
+    return out.written();
+}
+
+// spec: system-review - the generated power, thermal, mechanical and BOM sections render each board's own computed rows
+test "power, thermal, mechanical and BOM sections carry the design's own numbers" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    const analysis = try fixtureAnalysis(allocator, try fixtureEngineering(allocator), true);
+
+    const power = try renderSection(allocator, analysis, "power-summary");
+    try std.testing.expect(std.mem.indexOf(u8, power, "| main | `V3P3` | 3.300 V | `buck/VOUT` | 2.000 A | 1.250 A | 37.5% | 4 | ok |") != null);
+
+    const heat = try renderSection(allocator, analysis, "thermal-summary");
+    try std.testing.expect(std.mem.indexOf(u8, heat, "| main | 2.000 W | 2 | `U2` at 1.750 W | needs_airflow | 25.0 C | 61.5 C | -40.0 C |") != null);
+    // The board that declares nothing still gets a row, reading as zeroes.
+    try std.testing.expect(std.mem.indexOf(u8, heat, "| rf | 0.000 W | 0 | n/a |") != null);
+
+    const mech = try renderSection(allocator, analysis, "mechanical-summary");
+    try std.testing.expect(std.mem.indexOf(u8, mech, "60.000 x 40.000 mm") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mech, "`JLC06161H-3313`") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mech, "| 60.500 x 40.000 mm | DRIFT |") != null);
+    // A board with no outline at all says so rather than claiming a match.
+    try std.testing.expect(std.mem.indexOf(u8, mech, "| rf | undeclared") != null);
+
+    const bom = try renderSection(allocator, analysis, "bom-summary");
+    try std.testing.expect(std.mem.indexOf(u8, bom, "| `one` | 4 | 3 | 1 | 1 | `boards/main/bom.csv` |") != null);
+    // The CSV pointers the section always carried are still there.
+    try std.testing.expect(std.mem.indexOf(u8, bom, "`boards/rf/bom.csv`") != null);
+}
+
+// spec: system-review - the generated loop-filter section renders each population's bandwidth and phase-margin ranges, its failing screens and the charge-pump schedule
+test "the loop-filter section renders ranges, failing screens and the pump schedule" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    const analysis = try fixtureAnalysis(allocator, try fixtureEngineering(allocator), true);
+
+    const pll = try renderSection(allocator, analysis, "pll-summary");
+    try std.testing.expect(std.mem.indexOf(u8, pll, "### main loop chirp-loop") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pll, "| Phase detector | 1.000 MHz |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pll, "| Charge pump | 2.500 mA |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pll, "| Phase-margin target | 45.0 to 60.0 deg |") != null);
+    // Nominal and corner sweeps both appear on the population row, with counts.
+    try std.testing.expect(std.mem.indexOf(u8, pll, "| fitted | 1.200 kHz to 3.400 kHz | 31.2 to 48.0 deg | 900.0 Hz to 4.100 kHz | 24.5 to 55.0 deg | 0.0123 rad | 18 | 1 | 1 |") != null);
+    // The failing screen is named with its message, not merely counted.
+    try std.testing.expect(std.mem.indexOf(u8, pll, "`nominal_phase_target`") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pll, "phase margin 31.2 deg below the 45.0 deg target") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pll, "Charge-pump schedule:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pll, "| 4 | 200 | 60.000 MHz/V | 2.500 mA |") != null);
+}
+
+// spec: system-review - the generated ERC section reports counts by severity and lists the error-severity findings, stating the cap when it truncates
+test "the ERC section rolls up severities and states its own listing cap" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    const analysis = try fixtureAnalysis(allocator, try fixtureEngineering(allocator), true);
+
+    const rendered = try renderSection(allocator, analysis, "erc-summary");
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "| main | 3 | 5 | 12 | 1 | 2 |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "| rf | 0 | 0 | 0 | 0 | 0 |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "| main | `floating_net` | `U7` | `LNA_BYPASS` | net has a single connection |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "capped at 1 of 3 error-severity findings") != null);
+
+    // A clean system says so instead of printing an empty findings table.
+    const clean = try fixtureAnalysis(allocator, .{}, true);
+    const quiet = try renderSection(allocator, clean, "erc-summary");
+    try std.testing.expect(std.mem.indexOf(u8, quiet, "No error-severity ERC violation is outstanding") != null);
+    try std.testing.expect(std.mem.indexOf(u8, quiet, "floating_net") == null);
+}
+
+// spec: system-review - the aggregated open-items register lists every failing package gate, board review note, ERC error and failing loop screen, and says so plainly when there are none
+test "the open-items register aggregates every blocker the package knows about" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    const analysis = try fixtureAnalysis(allocator, try fixtureEngineering(allocator), false);
+
+    const items = try renderSection(allocator, analysis, "open-items");
+    try std.testing.expect(std.mem.indexOf(u8, items, "`gate-board-review`") != null);
+    try std.testing.expect(std.mem.indexOf(u8, items, "`gate-attestation`") != null);
+    try std.testing.expect(std.mem.indexOf(u8, items, "2 open note(s) in `boards/main/design-notes.md`") != null);
+    try std.testing.expect(std.mem.indexOf(u8, items, "| `main` | ERC | blocker | 3 error-severity violation(s) |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, items, "| `main` | PLL fitted | fail |") != null);
+    // A gate that passes contributes no row.
+    try std.testing.expect(std.mem.indexOf(u8, items, "`gate-interface`") == null);
+
+    const clear = try fixtureAnalysis(allocator, .{}, true);
+    const none = try renderSection(allocator, clear, "open-items");
+    try std.testing.expect(std.mem.indexOf(u8, none, "No open items") != null);
+    try std.testing.expect(std.mem.indexOf(u8, none, "| Item |") == null);
+}
+
+// spec: system-review - every generated section renders bounded, safe Markdown that is deterministic and states its own no-data line when the design declares nothing
+test "every generated section is deterministic, safe Markdown with a no-data line" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    const empty = try fixtureAnalysis(allocator, .{}, true);
+    const full = try fixtureAnalysis(allocator, try fixtureEngineering(allocator), false);
+
+    for (@typeInfo(system_review.GeneratedSection).@"enum".field_names) |id| {
+        try expectSectionRendersSafely(allocator, empty, full, id);
+    }
+
+    try expectNoDataLines(allocator, empty);
+}
+
+/// The four data-driven sections name their own missing input rather than
+/// emitting a table header with no rows under it.
+fn expectNoDataLines(allocator: std.mem.Allocator, empty: Analysis) !void {
+    const absent = [_]struct { id: []const u8, phrase: []const u8 }{
+        .{ .id = "power-summary", .phrase = "declares a power-rail budget" },
+        .{ .id = "thermal-summary", .phrase = "declares part dissipation" },
+        .{ .id = "pll-summary", .phrase = "declares a phase-locked-loop filter" },
+        .{ .id = "mechanical-summary", .phrase = "declares a board outline or stackup" },
+    };
+    for (absent) |expected| {
+        const rendered = try renderSection(allocator, empty, expected.id);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, expected.phrase) != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "| --- |") == null);
+    }
+}
+
+/// One generated id renders the same bytes twice, stays inside the rendered-
+/// document ceiling, and survives the strict Markdown profile the combined
+/// document is composed under — with and without engineering evidence.
+fn expectSectionRendersSafely(
+    allocator: std.mem.Allocator,
+    empty: Analysis,
+    full: Analysis,
+    id: []const u8,
+) !void {
+    for ([_]Analysis{ empty, full }) |analysis| {
+        const rendered = try renderSection(allocator, analysis, id);
+        try std.testing.expect(rendered.len <= max_rendered_document_bytes);
+        try std.testing.expectEqualStrings(rendered, try renderSection(allocator, analysis, id));
+        try std.testing.expect(std.unicode.utf8ValidateSlice(rendered));
+        // The strict profile refuses raw HTML and malformed tables, so a
+        // section that parses here can never poison the combined document.
+        _ = try canonicalMarkdown(allocator, rendered, max_rendered_document_bytes);
+    }
+}
+
+// spec: system-review - the system block diagram is archived as review/system-diagram.svg, referenced by the generated system-diagram section, and admitted as the one system-level SVG
+test "the system diagram is an archived SVG document the generated section points at" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    const analysis = try fixtureAnalysis(allocator, try fixtureEngineering(allocator), true);
+
+    const section = try renderSection(allocator, analysis, "system-diagram");
+    try std.testing.expect(std.mem.indexOf(u8, section, "`review/system-diagram.svg`") != null);
+    try std.testing.expect(std.mem.indexOf(u8, section, "| `one` | main | `ONE` | `A` |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, section, "| `j1` | one / `J1` | two / `J1` | 2 |") != null);
+
+    const built = try composeArchive(allocator, allocator, analysis, null);
+    const member = (try draftMemberBytes(allocator, built.zip, system_diagram_member)) orelse
+        return error.MissingSystemDiagram;
+    try std.testing.expect(std.mem.startsWith(u8, member, "<svg xmlns=\"http://www.w3.org/2000/svg\""));
+    try std.testing.expect(std.mem.endsWith(u8, member, "</svg>"));
+    try std.testing.expect(std.mem.indexOf(u8, member, "<div") == null);
+    // Same inputs, same archive: the figure does not disturb reproducibility.
+    const again = try composeArchive(allocator, allocator, analysis, null);
+    try std.testing.expectEqualSlices(u8, built.zip, again.zip);
+
+    // The one system-level SVG path is exact; nothing else beside it is admitted.
+    try std.testing.expect(allowedSvgMember(system_diagram_member));
+    try std.testing.expect(!allowedSvgMember("review/system-diagram-copy.svg"));
+    try std.testing.expect(!allowedSvgMember("review/SYSTEM-DIAGRAM.SVG"));
 }
