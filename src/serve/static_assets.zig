@@ -1270,7 +1270,7 @@ test "PCB editor re-widens adaptive power runs after an edit moves them" {
     try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, pcb_board_js, "rewidenHeal("));
 }
 
-// spec: placement/power-routing - the PCB DRC panel offers an undoable whole-board recheck that recuts every adaptive run against its current exact clearance without moving its centre line, while fixed-width copper remains untouched
+// spec: placement/power-routing - the PCB DRC panel offers an undoable whole-board recheck that loads the exact geometry gate on demand, then recuts every adaptive run against its current clearance without moving its centre line, while fixed-width copper remains untouched
 test "PCB editor offers a whole-board adaptive width recheck" {
     const markers = [_][]const u8{
         // The manual action deliberately stays available for every board with
@@ -1278,6 +1278,12 @@ test "PCB editor offers a whole-board adaptive width recheck" {
         "adaptiveClasses=classes.some(function(c){return +c.adaptive_power_width>0;})",
         "id=\"drc-adaptive-width\"",
         "if(adaptive)adaptive.addEventListener(\"click\",function(){applyAdaptiveRewiden();});",
+        // The DRC panel is a valid first entry point: initialize once, share an
+        // in-flight load, then resume this same action without another click.
+        "var adaptiveRewidenPending=false;",
+        "drcGateInit().then(function(ok){adaptiveRewidenPending=false;",
+        "if(ok){applyAdaptiveRewiden();return;}",
+        "if(drcGate.load)return drcGate.load;",
         // Null seeds select every eligible run; eligibility is limited to an
         // adaptive target, leaving fixed-width tracks outside the plan.
         "var before=snapAll(),n=rewidenApply(null);",

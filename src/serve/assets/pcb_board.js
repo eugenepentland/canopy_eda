@@ -9874,9 +9874,17 @@ function rewidenApply(seeds){if(RO||!drcGate.ready||drcGate.failed)return 0;
  if(drcGate.failed||drcGateDiffBlocks(PCB.tracks||[],PCB.vias||[],rest.concat(shaped),PCB.vias||[],PCB.rf_paths||[],PCB.rf_paths||[]))return 0;
  p.runs.forEach(function(r){drawCommitShaped(r.tracks,r.shaped);});
  cuGeomDrop();gpuCuEdit();ovPaintSoon();return p.tracks;}
+var adaptiveRewidenPending=false;
 function applyAdaptiveRewiden(){if(RO)return rewidenStatus();
- if(!drcGate.ready||drcGate.failed){
-  routeStatMsg("adaptive power widths need the geometry engine's exact check — it is still loading",true);return rewidenStatus();}
+ if(drcGate.failed){
+  routeStatMsg("adaptive power widths are unavailable because the exact geometry engine could not load — reload the page to retry",true);return rewidenStatus();}
+ if(!drcGate.ready){
+  if(!adaptiveRewidenPending){adaptiveRewidenPending=true;
+   routeStatMsg("loading the exact geometry engine — adaptive widths will recheck automatically");
+   drcGateInit().then(function(ok){adaptiveRewidenPending=false;
+    if(ok){applyAdaptiveRewiden();return;}
+    routeStatMsg("adaptive power widths are unavailable because the exact geometry engine could not load — reload the page to retry",true);});}
+  return rewidenStatus();}
  var before=snapAll(),n=rewidenApply(null);
  if(!n){routeStatMsg("adaptive power copper already fits the clearance it has");return rewidenStatus();}
  recordUndo(before);PCB.drc=[];drawRoute();drawClr();drawDrc();scheduleDrc();
@@ -10477,7 +10485,7 @@ function drcRefreshNow(){if(!wasmDrc.failed&&wasmDrc.worker){runWasmDrc();schedu
 // drawing never blocks on wasm availability.
 // sLoaded/netIdx/sSeq back the persistent MID-DRAG session (drc_session.zig's
 // drc_load + drc_probe_*), separate from the commit-gate scoped check below.
-var drcGate={inst:null,mem:null,ready:false,failed:false,sLoaded:false,netIdx:null,sSeq:0};
+var drcGate={inst:null,mem:null,ready:false,failed:false,load:null,sLoaded:false,netIdx:null,sSeq:0};
 // Only clearance/edge/hole-class violations block a commit: they are the ones a
 // user fixes by rerouting. track-width / min-drill / annular are geometry the
 // route can't dodge (blocking them would trap the pen), and silk/courtyard
@@ -10488,12 +10496,15 @@ var drcGate={inst:null,mem:null,ready:false,failed:false,sLoaded:false,netIdx:nu
 // putting the via somewhere else — so it blocks like every other via clearance.
 var DRC_BLOCK={"via↔pad":1,"via↔via":1,"via spacing":1,"via↔track":1,"track↔track":1,"track↔pad":1,"pad↔pad":1,"board edge":1,"hole↔hole":1};
 function drcGateInit(){
- if(RO||drcGate.inst||drcGate.failed)return;
- if(typeof WebAssembly==="undefined"||typeof buildDrcInput!=="function"){drcGate.failed=true;return;}
- fetch("/static/drc.wasm").then(function(r){if(!r.ok)throw 0;return r.arrayBuffer();})
+ if(drcGate.ready)return Promise.resolve(true);
+ if(RO||drcGate.failed)return Promise.resolve(false);
+ if(drcGate.load)return drcGate.load;
+ if(typeof WebAssembly==="undefined"||typeof buildDrcInput!=="function"){drcGate.failed=true;return Promise.resolve(false);}
+ drcGate.load=fetch("/static/drc.wasm").then(function(r){if(!r.ok)throw 0;return r.arrayBuffer();})
   .then(function(buf){return WebAssembly.instantiate(buf,{});})
-  .then(function(res){drcGate.inst=res.instance;drcGate.mem=res.instance.exports.memory;drcGate.ready=true;drcGateSessionDefer();})
-  .catch(function(){drcGate.failed=true;});}
+  .then(function(res){drcGate.inst=res.instance;drcGate.mem=res.instance.exports.memory;drcGate.ready=true;drcGateSessionDefer();return true;})
+  .catch(function(){drcGate.failed=true;return false;});
+ return drcGate.load;}
 // ── Persistent mid-drag session ─────────────────────────────────────────────
 // Load the CURRENT board once into the wasm session so each pointermove probe is
 // microseconds (vs. the whole-board drc_check). A stale session refills only in
