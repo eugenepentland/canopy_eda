@@ -481,8 +481,10 @@ note = "SEE DRIFT-INFRA-004 FIRST: the [[external]] blocks this was fixed with n
 id = "DRIFT-INFRA-004"
 summary = "every [[external]] gate is advisory — a command that exits nonzero still leaves the gate reporting 0 blocking, so all 27 node/python gates were decorative, including the 21 that were DRIFT-INFRA-003's whole fix"
 severity = "high"
-status = "open"
-file = ["guardian.toml", "build.zig"]
+status = "fixed"
+file = ["guardian.toml", "build.zig", "scripts/check_external_gates_armed.sh"]
+fixed_in = "guardian-zig 0453ca0"
+harness = "scripts/check_external_gates_armed.sh"
 reopens = "DRIFT-INFRA-003"
 note = """Found 2026-08-29 while closing DRIFT-INFRA-003, and it is why that finding could not honestly be closed by declaring more externals.
 
@@ -492,7 +494,9 @@ MEASURED, three ways, all on an uncommitted tree so no green-run digest could be
  3. Appended a syntax error to src/serve/assets/pcb_replay.js — `node --check` fails on it directly; the gate did not.
 `guardian-check external-gates .` answers only from its baseline without running anything; `--dry-run` DOES execute the commands (their failure output is visible) but still reports `0 finding(s)`. Config errors DO surface — an `inputs` path that does not exist is reported — so findings flow; command exit status is what is dropped.
 
-PARTIALLY MITIGATED here, not fixed: build.zig's addTreePolicyChecks now hangs the two policy checkers, their two self-tests, and the three JavaScript unit-test runners off the `test` step, and check_js_asset_gates.py --syntax parses all 30 first-party assets plus the 9 further scripts an external names. Verified both ways: a syntax error in pcb_replay.js and a renamed ledger test each fail `zig build test` now, and both rode a green build before. Still advisory and NOT covered by that step: the pdf.js vendor gates, drc-wasm-parity syntax, and the perf-harness syntax gates. The real fix is guardian-side — an external's nonzero exit must be a blocking finding — and belongs in guardian-zig, not here."""
+PARTIALLY MITIGATED here, not fixed: build.zig's addTreePolicyChecks now hangs the two policy checkers, their two self-tests, and the three JavaScript unit-test runners off the `test` step, and check_js_asset_gates.py --syntax parses all 30 first-party assets plus the 9 further scripts an external names. Verified both ways: a syntax error in pcb_replay.js and a renamed ledger test each fail `zig build test` now, and both rode a green build before. FIXED UPSTREAM 2026-08-30 in guardian-zig 0453ca0, and the root cause was one layer deeper than the symptom. external-gates named each failure as its own UNINDENTED reporter.fail header; baseline.extract collects only INDENTED lines beneath a header and stops at the first hint label, and this check's only indented lines were `stderr:`/`stdout:` — which ARE hint labels. So it reconstructed to zero findings, which against an empty baseline is "matches", which is green. Behind that, runWithBaseline was discarding a check's own CheckFailed verdict in favour of that reconstruction, so ANY check reporting in an unextractable shape would have been disarmed just as silently; baseline.requireNamedFindings now propagates a failure that names nothing. A scan of the other 69 checks found no second instance.
+
+The guard here is scripts/check_external_gates_armed.sh (61ms, wired into build.zig's test step): it builds a throwaway project with a recorded baseline and one gate that exits 1, and requires guardian to exit nonzero AND name the gate. Verified both ways — it fails against the pre-fix guardian binary and passes against the fixed one. The build.zig mitigation above stays as defence in depth, since it does not depend on the toolchain being correct."""
 
 [[finding]]
 id = "DRIFT-SIZE-001"
