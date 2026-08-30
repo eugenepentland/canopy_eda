@@ -3434,6 +3434,7 @@ is enlarged only as far as the derived drill and annular-ring rules require.
 - power-routing named tests remain assigned to exactly one test shard
 - an adaptive rail carries its width as ordinary copper: a drawn run commits its shaped tracks with equal-width collinear stations collapsed, an inherited overlay bakes its sample widths onto the tracks it owns before any edit releases it, and a gesture that collapses copper to zero length takes the crumb with it
 - moving adaptive power copper recuts the maximal same-net runs the gesture touched to the clearance they have after the move, growing or shrinking under the exact DRC gate and never below the routing floor
+- the PCB DRC panel offers an undoable whole-board recheck that recuts every adaptive run against its current exact clearance without moving its centre line, while fixed-width copper remains untouched
 - Two adaptive slices meeting at a bend or at a plain two-way splice with existing copper are emitted at one width, with the 45-degree transition moved onto the adjoining straight, while pad lands, via corners and T-junctions keep their free trunk/branch step
 - two adaptive power tracks that meet at a bend take the narrower of their two widths at that joint, including where one side is copper this pass left alone, and the wider side tapers back to its electrical target along its own straight
 - a three-track junction, a same-net barrel, or a pad land at the meeting point leaves every leg its own width, so only a bare two-track joint is equalized

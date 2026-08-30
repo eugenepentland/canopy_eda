@@ -9323,12 +9323,16 @@ function renderDrcList(){drcTabBadge();var lst=ensureDrcList();if(!lst)return;
  var v=PCB.drc||[];
  var g=drcGroups(),groups=g.groups,order=g.order;
  var nt=order.length,sum=drcSummary(),issues=sum.err+sum.warn,other=sum.otherErr+sum.otherWarn;
- var power=powerWidthStatus(),powerClasses=(PCB.netclasses||[]).some(function(c){return +c.power_branch_width>0;});
+ var power=powerWidthStatus(),classes=PCB.netclasses||[],
+  powerClasses=classes.some(function(c){return +c.power_branch_width>0;}),
+  adaptiveClasses=classes.some(function(c){return +c.adaptive_power_width>0;}),
+  actions=(powerClasses?'<button id="drc-power-width" class="btn"'+(power.changed?'':' disabled')+' title="Widen only current-aware power segments that the latest post-route current check found undersized. Unsolved branches use the conservative full-rail width. Undoable.">'+(power.changed?('Widen power ('+power.tracks+')'):'Power widths ✓')+'</button>':'')+
+   (adaptiveClasses?'<button id="drc-adaptive-width" class="btn" title="Re-evaluate every adaptive-width power trace against the clearance it has now, widening newly open stretches and narrowing newly constrained ones without moving centre lines. Undoable.">↻ Recheck adaptive</button>':'');
  var h='<div class="drc-row" style="cursor:default;font-weight:600"><span class="drc-k">'+
   (v.length?((sum.open?(sum.open+" open net"+(sum.open>1?"s":"")+(other?(" · "+other+" other issue"+(other>1?"s":"")):"")):
    (issues+" issue"+(issues>1?"s":"")))+(nt>1?" · "+nt+" types":"")):"No DRC violations")+'</span>'+
-  (powerClasses?'<button id="drc-power-width" class="btn" style="font-size:11px"'+(power.changed?'':' disabled')+' title="Widen only current-aware power segments that the latest post-route current check found undersized. Unsolved branches use the conservative full-rail width. Undoable.">'+(power.changed?('Widen power ('+power.tracks+')'):'Power widths ✓')+'</button>':'')+
-  '<button id="drc-cog" class="btn" style="font-size:11px" title="Choose which checks count as errors or warnings, or are ignored — saved with the design, honoured by the APIs and the fab gate too">\u2699 Rules</button></div>';
+  '<button id="drc-cog" class="btn" style="font-size:11px" title="Choose which checks count as errors or warnings, or are ignored — saved with the design, honoured by the APIs and the fab gate too">\u2699 Rules</button></div>'+
+  (actions?'<div class="drc-actions">'+actions+'</div>':'');
  if(drcRulesOpen)h+=drcRulesHtml();
  order.forEach(function(k){var idxs=groups[k],err=grpSev(idxs)===0,coll=!!drcCollapsed[k];
   var openNets=k==="net open"?drcOpenNetGroups(idxs):null;
@@ -9355,6 +9359,8 @@ function renderDrcList(){drcTabBadge();var lst=ensureDrcList();if(!lst)return;
  if(cog)cog.addEventListener("click",function(){drcRulesOpen=!drcRulesOpen;renderDrcList();});
  var widen=document.getElementById("drc-power-width");
  if(widen)widen.addEventListener("click",function(){applyPowerWidths();});
+ var adaptive=document.getElementById("drc-adaptive-width");
+ if(adaptive)adaptive.addEventListener("click",function(){applyAdaptiveRewiden();});
  lst.querySelectorAll("[data-drck]").forEach(function(sl){
   sl.addEventListener("change",function(){var kk=(PCB.drc_kinds||[])[+sl.getAttribute("data-drck")];
    if(!kk)return;kk.ov=(sl.value===kk.def)?null:sl.value;drcRulesPost();});});

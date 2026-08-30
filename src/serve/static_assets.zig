@@ -1270,6 +1270,23 @@ test "PCB editor re-widens adaptive power runs after an edit moves them" {
     try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, pcb_board_js, "rewidenHeal("));
 }
 
+// spec: placement/power-routing - the PCB DRC panel offers an undoable whole-board recheck that recuts every adaptive run against its current exact clearance without moving its centre line, while fixed-width copper remains untouched
+test "PCB editor offers a whole-board adaptive width recheck" {
+    const markers = [_][]const u8{
+        // The manual action deliberately stays available for every board with
+        // an adaptive class: stored width alone cannot prove a fit is fresh.
+        "adaptiveClasses=classes.some(function(c){return +c.adaptive_power_width>0;})",
+        "id=\"drc-adaptive-width\"",
+        "if(adaptive)adaptive.addEventListener(\"click\",function(){applyAdaptiveRewiden();});",
+        // Null seeds select every eligible run; eligibility is limited to an
+        // adaptive target, leaving fixed-width tracks outside the plan.
+        "var before=snapAll(),n=rewidenApply(null);",
+        "var geo=rewidenTarget(t.net||\"\");",
+        "recordUndo(before);PCB.drc=[];",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+}
+
 // spec: placement/power-routing - two adaptive slices meeting at a bend or at a plain two-way splice with existing copper are emitted at one width, with the 45-degree transition moved onto the adjoining straight, while pad lands, via corners and T-junctions keep their free trunk/branch step
 test "PCB adaptive power copper never steps its width on a joint" {
     const markers = [_][]const u8{
