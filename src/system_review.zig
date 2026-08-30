@@ -54,6 +54,13 @@ pub const GeneratedSection = enum {
     @"bom-summary",
     @"drc-summary",
     @"checklist-summary",
+    @"power-summary",
+    @"thermal-summary",
+    @"pll-summary",
+    @"erc-summary",
+    @"mechanical-summary",
+    @"open-items",
+    @"system-diagram",
 };
 
 /// One board participating in a system review.

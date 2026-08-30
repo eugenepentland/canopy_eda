@@ -4998,7 +4998,7 @@ Public functions: renderTabs
 
 ## diagram/system_of_boards
 
-Public functions: renderSystemSvg, classifySignal, laneColor, laneLabel
+Public functions: renderSystemSvg, renderSystemDocumentSvg, classifySignal, laneColor, laneLabel
 
 - Classifies an interface contact into a power, clock, comms, control, RF or ground lane by its canonical net name
 - An unrecognised canonical net name falls back to the control lane
@@ -5008,6 +5008,7 @@ Public functions: renderSystemSvg, classifySignal, laneColor, laneLabel
 - The same system spec renders byte-identical SVG on every run
 - A board-free system renders nothing while one-board and three-board systems still render
 - A system with no interface contracts renders its boards with an empty spine
+- The document form is a standalone SVG root with its own namespace, intrinsic size and painted background, and draws the same body as the page fragment
 - completeness-waiver: empty inputs (a board-free spec writes nothing and an interface with no signals contributes no lane row, both covered by the board-count behavior above)
 - completeness-waiver: large inputs (each lane names at most three representative nets and folds the rest into a count, so a wide contract cannot grow the fragment per contact)
 - completeness-waiver: unauthorized access (the renderer reads an in-memory manifest snapshot and has no authorization or external access surface)
@@ -5502,6 +5503,18 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - per-board block diagram evidence is one standalone SVG document rendered from the same evaluated design, omitted when there is nothing to draw
 - per-board block diagram evidence is archived as boards/<role>/diagram.svg in draft and release, reproducibly, and omitted when the design has no diagram
 - the only archived SVG is the tool-rendered per-board block diagram; SVG is refused at every other archive path in draft and release alike
+- generated power evidence carries each rail's budget row beside the voltage its design declares, including through a ferrite-bridged alias
+- generated thermal evidence is the screening rollup — dissipation, powered part count, the hottest part and the ambient window
+- generated rule-check evidence counts every ERC severity and assertion outcome, and retains a capped list of the error-severity findings
+- generated mechanical evidence pairs the declared outline and stackup with the selected layout's measured edge and flags a drift between them
+- generated loop-filter evidence copies each PLL report's screens out of the evaluator, keeping only the non-passing ones beside the population verdict counts
+- the generated BOM rollup counts the exact placements, lines and do-not-populate parts the archived bom.csv carries
+- the generated power, thermal, mechanical and BOM sections render each board's own computed rows
+- the generated loop-filter section renders each population's bandwidth and phase-margin ranges, its failing screens and the charge-pump schedule
+- the generated ERC section reports counts by severity and lists the error-severity findings, stating the cap when it truncates
+- every generated section renders bounded, safe Markdown that is deterministic and states its own no-data line when the design declares nothing
+- the aggregated open-items register lists every failing package gate, board review note, ERC error and failing loop screen, and says so plainly when there are none
+- the system block diagram is archived as review/system-diagram.svg, referenced by the generated system-diagram section, and admitted as the one system-level SVG
 - system Markdown becomes a structurally valid searchable PDF with draft marking
 - long UTF-8 review lines wrap only between complete codepoints in the generated PDF
 - board archive roles are unique and authored review documents are Markdown; binary evidence uses the bounded assets area

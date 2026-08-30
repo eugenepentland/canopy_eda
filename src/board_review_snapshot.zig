@@ -9,7 +9,14 @@
 const std = @import("std");
 const build_id = @import("build_id.zig");
 const Evaluator = @import("eval/evaluator.zig").Evaluator;
+const env_mod = @import("eval/env.zig");
 const erc = @import("erc.zig");
+const pll_loop = @import("pll_loop.zig");
+/// The fab view's outline rectangle type, aliased through the module that
+/// declares it so this file does not depend on the placement optimizer.
+const BoardRect = @import("placement/courtyard_close.zig").Rect;
+const power_budget = @import("eval/power_budget.zig");
+const thermal = @import("eval/thermal.zig");
 const export_pdf = @import("export_pdf.zig");
 const fab_release = @import("fab_release.zig");
 const flat_netlist = @import("flat_netlist.zig");
@@ -54,6 +61,170 @@ pub const Connection = struct {
     connector: []const u8,
     pin: []const u8,
     net: []const u8,
+};
+
+/// Retention ceilings for the engineering evidence below. A system document
+/// quotes headline numbers and a bounded list of the worst offenders; the
+/// complete lists already travel as `review.json` beside it, so nothing is
+/// lost by capping here — and the caps keep one pathological board from
+/// growing the analysis, the Markdown and the PDF without limit.
+const max_retained_rails: usize = 64;
+const max_retained_erc_findings: usize = 32;
+const max_retained_pll_reports: usize = 16;
+const max_retained_pll_screens: usize = 32;
+const max_retained_schedule_entries: usize = 32;
+
+/// What declared the rail and how much it can deliver. Grouped because a
+/// source without its capacity says nothing a budget table can use.
+pub const RailSource = struct {
+    /// Sub-block output port path that sources the rail, or "" when undeclared.
+    label: []const u8 = "",
+    max_a: ?f64 = null,
+};
+
+/// One rail's budget row, retained independently of the evaluated design.
+pub const PowerRail = struct {
+    net: []const u8,
+    /// Declared nominal rail voltage (V), or null when nothing declared one.
+    nominal_v: ?f64 = null,
+    source: RailSource = .{},
+    load_max_a: f64 = 0,
+    margin_pct: ?f64 = null,
+    status: power_budget.RailStatus = .no_source,
+    /// Per-device consumer rows behind `load_max_a`, counted rather than
+    /// retained: the full breakdown is already in the board's `review.json`.
+    consumers: usize = 0,
+};
+
+/// The part the board's heat hangs on.
+pub const HottestPart = struct {
+    ref_des: []const u8 = "",
+    watts: f64 = 0,
+};
+
+/// Ambient window (°C) the whole board is good for. Either edge stays null
+/// when nothing on the board constrains it.
+pub const AmbientWindow = struct {
+    max_c: ?f64 = null,
+    min_c: ?f64 = null,
+};
+
+/// Screening-level heat evidence for the whole board.
+pub const Thermal = struct {
+    ambient_c: f64 = 0,
+    verdict: thermal.Verdict = .insufficient_data,
+    /// Sum of every screened part's declared/derived dissipation (W).
+    total_w: f64 = 0,
+    /// Parts that dissipate something the screen could compute a rise from.
+    powered_parts: usize = 0,
+    hottest: HottestPart = .{},
+    window: AmbientWindow = .{},
+};
+
+/// One retained error-severity ERC violation.
+pub const Finding = struct {
+    kind: []const u8,
+    ref_des: []const u8,
+    net: []const u8,
+    message: []const u8,
+};
+
+/// The board's rule-check rollup: violation counts by severity, the worst
+/// findings themselves, and the evaluator's assertion outcomes.
+pub const Checks = struct {
+    errors: usize = 0,
+    warnings: usize = 0,
+    /// Error-severity findings, capped at `max_retained_erc_findings`.
+    findings: []const Finding = &.{},
+    /// True when `errors` exceeds the retained `findings`.
+    truncated: bool = false,
+    assertions_pass: usize = 0,
+    assertions_warn: usize = 0,
+    assertions_fail: usize = 0,
+};
+
+/// One outline rectangle, either as declared in source or as measured on the
+/// selected saved layout. `present` false ⇒ nothing declared/resolved.
+pub const Outline = struct {
+    w: f64 = 0,
+    h: f64 = 0,
+    corner_radius: f64 = 0,
+    present: bool = false,
+};
+
+/// Board mechanical evidence. `measured` comes from the same resolved fab view
+/// the PCB preview is rendered from, so it is inside this module's read trace.
+pub const Mechanical = struct {
+    declared: Outline = .{},
+    measured: Outline = .{},
+    /// True when both outlines are present and their sizes disagree by more
+    /// than the fabrication tolerance the readiness `outline-drift` finding
+    /// uses. Surfaced at document level so a drifted board is visible without
+    /// opening `fab-readiness.json`.
+    drift: bool = false,
+    stackup_preset: []const u8 = "",
+    stackup_layers: u8 = 0,
+};
+
+/// One PLL loop screen's outcome, retained independently of the evaluator's
+/// assertion list.
+pub const PllScreen = struct {
+    screen: []const u8,
+    status: pll_loop.Status,
+    message: []const u8,
+};
+
+/// One screened component population of one `(pll-loop …)` declaration.
+pub const PllPopulation = struct {
+    kind: pll_loop.PopulationKind,
+    /// Plain numbers only — safe to copy by value out of the evaluator.
+    results: pll_loop.Results,
+    pass: usize = 0,
+    warn: usize = 0,
+    fail: usize = 0,
+    /// Non-passing screens, capped at `max_retained_pll_screens`.
+    failing: []const PllScreen = &.{},
+};
+
+/// The declaration figures a loop-filter table prints beside its results.
+pub const PllProfile = struct {
+    pfd_hz: f64 = 0,
+    charge_pump_a: f64 = 0,
+    prescaler: f64 = 0,
+    pll_n: f64 = 0,
+    op_amp_gbw_hz: f64 = 0,
+    phase_margin_target_deg: pll_loop.Range = .{},
+    max_ramp_phase_error_rad: f64 = 0,
+};
+
+/// One `(pll-loop …)` declaration's result, in snapshot-owned memory. The
+/// evaluator's own `pll_loop.Report` borrows its names and verdict messages
+/// from the assertion list and is freed with the evaluator, so every string
+/// here is a copy.
+pub const PllReport = struct {
+    name: []const u8,
+    mode: pll_loop.Mode,
+    outcome: pll_loop.Outcome,
+    profile: PllProfile,
+    populations: []const PllPopulation,
+    /// Quantized charge-pump schedule knots, empty unless a synthesis ran.
+    schedule: []const pll_loop.ScheduleEntry,
+};
+
+/// Everything the system document computes from the design rather than reads
+/// from authored prose, gathered from the one evaluation this snapshot already
+/// pays for. Grouped so a surface that carries board evidence carries all of
+/// it, and so `Snapshot` itself stays four fields wide.
+pub const Engineering = struct {
+    /// Rail budget rows, tightest-first, capped at `max_retained_rails`.
+    power: []const PowerRail = &.{},
+    thermal: Thermal = .{},
+    checks: Checks = .{},
+    mechanical: Mechanical = .{},
+    /// One entry per `(pll-loop …)` declaration, capped at
+    /// `max_retained_pll_reports`.
+    pll: []const PllReport = &.{},
+    bom: bom_html.BomRollup = .{},
 };
 
 /// Fully rendered, immutable evidence for one board member. Every byte slice
@@ -103,6 +274,10 @@ pub const Snapshot = struct {
         sources: []const zipfile.Entry,
         connections: []const Connection,
     },
+    /// Design-derived engineering evidence — power, heat, rule checks,
+    /// mechanical outline, loop filters, BOM rollup — computed from the same
+    /// single evaluation as the Markdown above and owned by this allocator.
+    analysis: Engineering,
 };
 
 const BuildError = @typeInfo(@typeInfo(@TypeOf(buildImpl)).@"fn".return_type.?).error_union.error_set;
@@ -199,6 +374,14 @@ fn buildImpl(
 
     const source_entries = try collectSources(allocator, project_dir, root_source_path, &evaluator);
     const connections = try collectConnections(allocator, named.block, options.connectors);
+    const engineering = try collectEngineering(
+        allocator,
+        named.block,
+        doc,
+        violations,
+        evaluator.pll_reports.items,
+        fv.placement.board_rect,
+    );
     read_trace.end();
     if (!read_trace.verify()) return error.InputsChanged;
     const consumed_sha256 = read_trace.digest();
@@ -232,7 +415,214 @@ fn buildImpl(
             .sources = source_entries,
             .connections = connections,
         },
+        .analysis = engineering,
     };
+}
+
+/// Retain everything the system document computes from this design, copying
+/// each string into the snapshot's allocator: the evaluator that owns the PLL
+/// verdict messages is destroyed when `buildImpl` returns.
+///
+/// `board_rect` is the fab view's resolved outline — the selected saved
+/// layout's drawn edge when it has one, else the authored rectangle — so the
+/// measurement is already covered by this module's read trace.
+fn collectEngineering(
+    allocator: std.mem.Allocator,
+    block: *const env_mod.DesignBlock,
+    doc: review.ReviewDoc,
+    violations: []const erc.Violation,
+    pll_reports: []const pll_loop.Report,
+    board_rect: ?BoardRect,
+) !Engineering {
+    return .{
+        .power = try collectPowerRails(allocator, block, doc.power.budget),
+        .thermal = try collectThermal(allocator, doc.power.thermal),
+        .checks = try collectChecks(allocator, violations, doc.assertions),
+        .mechanical = collectMechanical(block, board_rect),
+        .pll = try collectPllReports(allocator, pll_reports),
+        .bom = try bom_html.rollupBom(allocator, block),
+    };
+}
+
+fn collectPowerRails(
+    allocator: std.mem.Allocator,
+    block: *const env_mod.DesignBlock,
+    budget: []const power_budget.Rail,
+) ![]const PowerRail {
+    const retained = @min(budget.len, max_retained_rails);
+    const rails = try allocator.alloc(PowerRail, retained);
+    for (budget[0..retained], rails) |rail, *out| out.* = .{
+        .net = try allocator.dupe(u8, rail.net),
+        .nominal_v = declaredRailVoltage(block, rail.net),
+        .source = .{
+            .label = try allocator.dupe(u8, rail.source_label),
+            .max_a = rail.source_max_a,
+        },
+        .load_max_a = rail.load_max_a,
+        .margin_pct = rail.margin_pct,
+        .status = rail.status,
+        .consumers = rail.consumers.len,
+    };
+    return rails;
+}
+
+/// The rail's declared nominal voltage. `power_budget` collapses ferrite-
+/// bridged nets onto the source-side name, which is the same name
+/// `eval/rails` keys a `PowerRail` on, so the primary name matches first and
+/// the alias list covers a budget row named after a downstream leg.
+fn declaredRailVoltage(block: *const env_mod.DesignBlock, net: []const u8) ?f64 {
+    for (block.rails) |rail| {
+        if (std.mem.eql(u8, rail.name, net)) return rail.nominal;
+        for (rail.aliases) |alias| {
+            if (std.mem.eql(u8, alias, net)) return rail.nominal;
+        }
+    }
+    return null;
+}
+
+fn collectThermal(allocator: std.mem.Allocator, heat: thermal.BoardThermal) !Thermal {
+    var total_w: f64 = 0;
+    var hottest: ?thermal.PartThermal = null;
+    for (heat.parts) |part| {
+        const watts = part.power.watts orelse continue;
+        total_w += watts;
+        if (hottest == null or watts > hottest.?.power.watts.?) hottest = part;
+    }
+    return .{
+        .ambient_c = heat.ambient_c,
+        .verdict = heat.verdict,
+        .total_w = total_w,
+        .powered_parts = heat.counts.with_power,
+        .hottest = .{
+            .ref_des = if (hottest) |part| try allocator.dupe(u8, part.ref_des) else "",
+            .watts = if (hottest) |part| part.power.watts.? else 0,
+        },
+        .window = .{ .max_c = heat.max_ambient.c, .min_c = heat.min_ambient.c },
+    };
+}
+
+fn collectChecks(
+    allocator: std.mem.Allocator,
+    violations: []const erc.Violation,
+    assertions: []const review.AssertionReport,
+) !Checks {
+    var out: Checks = .{};
+    var findings: std.ArrayList(Finding) = .empty;
+    for (violations) |violation| switch (violation.severity) {
+        .@"error" => {
+            out.errors += 1;
+            if (findings.items.len >= max_retained_erc_findings) continue;
+            try findings.append(allocator, .{
+                .kind = @tagName(violation.kind),
+                .ref_des = try allocator.dupe(u8, violation.ref_des),
+                .net = try allocator.dupe(u8, violation.net),
+                .message = try allocator.dupe(u8, violation.message),
+            });
+        },
+        .warning => out.warnings += 1,
+        .info => {},
+    };
+    for (assertions) |assertion| switch (assertion.status) {
+        .pass => out.assertions_pass += 1,
+        .warn => out.assertions_warn += 1,
+        .fail => out.assertions_fail += 1,
+    };
+    out.findings = findings.items;
+    out.truncated = out.errors > findings.items.len;
+    return out;
+}
+
+/// Fabrication tolerance for the declared-vs-measured outline comparison —
+/// the same 0.01 mm `fab_readiness`'s `outline-drift` finding uses, so the two
+/// surfaces can never disagree about whether a board drifted.
+const outline_tolerance_mm: f64 = 0.01;
+
+fn collectMechanical(
+    block: *const env_mod.DesignBlock,
+    board_rect: ?BoardRect,
+) Mechanical {
+    const declared: Outline = .{
+        .w = block.board.w,
+        .h = block.board.h,
+        .corner_radius = block.board.corner_radius,
+        .present = block.board.present and block.board.w > 0 and block.board.h > 0,
+    };
+    const measured: Outline = if (board_rect) |rect| .{
+        .w = rect.w,
+        .h = rect.h,
+        .corner_radius = declared.corner_radius,
+        .present = true,
+    } else .{};
+    const drift = declared.present and measured.present and
+        (@abs(measured.w - declared.w) > outline_tolerance_mm or
+            @abs(measured.h - declared.h) > outline_tolerance_mm);
+    return .{
+        .declared = declared,
+        .measured = measured,
+        .drift = drift,
+        .stackup_preset = block.stackup.preset,
+        .stackup_layers = block.stackup.layers,
+    };
+}
+
+fn collectPllReports(
+    allocator: std.mem.Allocator,
+    reports: []const pll_loop.Report,
+) ![]const PllReport {
+    const retained = @min(reports.len, max_retained_pll_reports);
+    const out = try allocator.alloc(PllReport, retained);
+    for (reports[0..retained], out) |report, *copy| copy.* = .{
+        .name = try allocator.dupe(u8, report.name),
+        .mode = report.mode,
+        .outcome = report.outcome,
+        .profile = .{
+            .pfd_hz = report.profile.pfd_hz,
+            .charge_pump_a = report.profile.charge_pump_a,
+            .prescaler = report.profile.prescaler,
+            .pll_n = report.profile.pll_n,
+            .op_amp_gbw_hz = report.profile.op_amp_gbw_hz,
+            .phase_margin_target_deg = report.profile.phase_margin_target_deg,
+            .max_ramp_phase_error_rad = report.profile.max_ramp_phase_error_rad,
+        },
+        .populations = try collectPllPopulations(allocator, report.populations),
+        .schedule = try allocator.dupe(
+            pll_loop.ScheduleEntry,
+            report.schedule[0..@min(report.schedule.len, max_retained_schedule_entries)],
+        ),
+    };
+    return out;
+}
+
+fn collectPllPopulations(
+    allocator: std.mem.Allocator,
+    populations: []const pll_loop.Population,
+) ![]const PllPopulation {
+    const out = try allocator.alloc(PllPopulation, populations.len);
+    for (populations, out) |population, *copy| copy.* = try collectPllPopulation(allocator, population);
+    return out;
+}
+
+fn collectPllPopulation(
+    allocator: std.mem.Allocator,
+    population: pll_loop.Population,
+) !PllPopulation {
+    var copy: PllPopulation = .{ .kind = population.kind, .results = population.results };
+    var failing: std.ArrayList(PllScreen) = .empty;
+    for (population.verdicts) |verdict| {
+        switch (verdict.status) {
+            .pass => copy.pass += 1,
+            .warn => copy.warn += 1,
+            .fail => copy.fail += 1,
+        }
+        if (verdict.status == .pass or failing.items.len >= max_retained_pll_screens) continue;
+        try failing.append(allocator, .{
+            .screen = @tagName(verdict.screen),
+            .status = verdict.status,
+            .message = try allocator.dupe(u8, verdict.message),
+        });
+    }
+    copy.failing = failing.items;
+    return copy;
 }
 
 /// Re-read every archived source and the optional notes sidecar after the
@@ -642,4 +1032,227 @@ test "root source identity is resolved project relative" {
         error.SourceOutsideProject,
         projectRelativeSource(std.testing.allocator, ".", "/etc/passwd"),
     );
+}
+
+// ── engineering evidence ───────────────────────────────────────────────
+
+/// A one-rail board: a rated 3.3 V output port, a declared rail carrying a
+/// downstream alias, a declared outline and stackup, and a populated BOM with
+/// one do-not-populate variant and one test point.
+fn engineeringFixture(allocator: std.mem.Allocator) !env_mod.DesignBlock {
+    const aliases = try allocator.dupe([]const u8, &.{"VDDA33"});
+    return .{
+        .name = "engineering-fixture",
+        .instances = try allocator.dupe(env_mod.Instance, &.{
+            .{ .ref_des = "U1", .label = "U1", .component = "mcu", .value = "mcu", .footprint = "qfn", .symbol = "ic" },
+            .{ .ref_des = "C1", .label = "C1", .component = "cap-0402", .value = "100nF", .footprint = "0402", .symbol = "cap" },
+            .{ .ref_des = "C2", .label = "C2", .component = "cap-0402", .value = "100nF", .footprint = "0402", .symbol = "cap" },
+            .{ .ref_des = "C3", .label = "C3", .component = "cap-0402", .value = "100nF", .footprint = "0402", .symbol = "cap", .dnp = true },
+            .{ .ref_des = "TP1", .label = "TP1", .component = "testpoint", .value = "testpoint", .footprint = "tp", .symbol = "tp" },
+        }),
+        .nets = try allocator.dupe(env_mod.Net, &.{.{ .name = "V3P3", .pins = &.{} }}),
+        .ports = try allocator.dupe(env_mod.Port, &.{.{
+            .name = "V3P3",
+            .net = "V3P3",
+            .direction = "out",
+            .kind = "power",
+            .nominal = 3.3,
+            .current_typ = 0.5,
+            .current_max = 0.8,
+        }}),
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .rails = try allocator.dupe(env_mod.PowerRail, &.{
+            .{ .name = "V3P3", .nominal = 3.3, .aliases = aliases },
+        }),
+        .board = .{ .w = 60, .h = 40, .corner_radius = 2, .present = true },
+        .stackup = .{ .layers = 6, .preset = "JLC06161H-3313", .present = true },
+    };
+}
+
+// spec: system-review - generated power evidence carries each rail's budget row beside the voltage its design declares, including through a ferrite-bridged alias
+test "power rail evidence joins the budget to the declared rail voltage" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const block = try engineeringFixture(allocator);
+
+    const budget = try power_budget.analyze(allocator, &block);
+    const rails = try collectPowerRails(allocator, &block, budget);
+    try std.testing.expect(rails.len > 0);
+    const rail = for (rails) |candidate| {
+        if (std.mem.eql(u8, candidate.net, "V3P3")) break candidate;
+    } else return error.MissingRail;
+    try std.testing.expectEqual(@as(?f64, 3.3), rail.nominal_v);
+    try std.testing.expectEqual(@as(?f64, 0.8), rail.source.max_a);
+
+    // A budget row named after a ferrite-bridged downstream leg still resolves
+    // the rail voltage its source-side declaration carries.
+    try std.testing.expectEqual(@as(?f64, 3.3), declaredRailVoltage(&block, "VDDA33"));
+    try std.testing.expectEqual(@as(?f64, null), declaredRailVoltage(&block, "V1P8"));
+}
+
+// spec: system-review - generated thermal evidence is the screening rollup — dissipation, powered part count, the hottest part and the ambient window
+test "thermal evidence rolls up dissipation and names the hottest part" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const parts = [_]thermal.PartThermal{
+        .{ .ref_des = "U1", .component = "mcu", .power = .{ .watts = 0.25 } },
+        .{ .ref_des = "U2", .component = "pa", .power = .{ .watts = 1.75 } },
+        .{ .ref_des = "R1", .component = "res-0402", .power = .{} },
+    };
+    const heat = try collectThermal(allocator, .{
+        .ambient_c = 25,
+        .parts = &parts,
+        .verdict = .needs_airflow,
+        .max_ambient = .{ .c = 61.5, .ref_des = "U2" },
+        .min_ambient = .{ .c = -40, .ref_des = "U1" },
+        .counts = .{ .with_power = 2 },
+    });
+    try std.testing.expectApproxEqAbs(@as(f64, 2.0), heat.total_w, 1e-9);
+    try std.testing.expectEqual(@as(usize, 2), heat.powered_parts);
+    try std.testing.expectEqualStrings("U2", heat.hottest.ref_des);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.75), heat.hottest.watts, 1e-9);
+    try std.testing.expectEqual(@as(?f64, 61.5), heat.window.max_c);
+
+    // A board where nothing dissipates keeps an empty hottest slot rather than
+    // naming an arbitrary part.
+    const quiet = try collectThermal(allocator, .{ .ambient_c = 25 });
+    try std.testing.expectEqualStrings("", quiet.hottest.ref_des);
+    try std.testing.expectEqual(@as(usize, 0), quiet.powered_parts);
+}
+
+/// `count` identical error-severity violations, so a test can drive the
+/// retention cap without carrying a loop of its own.
+fn appendRepeatedErrors(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(erc.Violation),
+    count: usize,
+) !void {
+    var index: usize = 0;
+    while (index < count) : (index += 1) try out.append(allocator, .{
+        .kind = .floating_net,
+        .severity = .@"error",
+        .message = "net has a single connection",
+        .ref_des = "U1",
+        .net = "SPARE",
+    });
+}
+
+// spec: system-review - generated rule-check evidence counts every ERC severity and assertion outcome, and retains a capped list of the error-severity findings
+test "rule-check evidence counts every severity and caps the retained findings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var violations: std.ArrayList(erc.Violation) = .empty;
+    try appendRepeatedErrors(allocator, &violations, max_retained_erc_findings + 3);
+    try violations.append(allocator, .{ .kind = .missing_decoupling, .severity = .warning, .message = "no bypass cap" });
+    try violations.append(allocator, .{ .kind = .missing_decoupling, .severity = .info, .message = "informational" });
+    const assertions = [_]review.AssertionReport{
+        .{ .message = "ok", .status = .pass },
+        .{ .message = "close", .status = .warn },
+        .{ .message = "bad", .status = .fail },
+    };
+
+    const checks = try collectChecks(allocator, violations.items, &assertions);
+    try std.testing.expectEqual(max_retained_erc_findings + 3, checks.errors);
+    try std.testing.expectEqual(@as(usize, 1), checks.warnings);
+    try std.testing.expectEqual(max_retained_erc_findings, checks.findings.len);
+    try std.testing.expect(checks.truncated);
+    try std.testing.expectEqualStrings("floating_net", checks.findings[0].kind);
+    try std.testing.expectEqual(@as(usize, 1), checks.assertions_pass);
+    try std.testing.expectEqual(@as(usize, 1), checks.assertions_warn);
+    try std.testing.expectEqual(@as(usize, 1), checks.assertions_fail);
+
+    const clean = try collectChecks(allocator, &.{}, &.{});
+    try std.testing.expect(!clean.truncated);
+    try std.testing.expectEqual(@as(usize, 0), clean.findings.len);
+}
+
+// spec: system-review - generated mechanical evidence pairs the declared outline and stackup with the selected layout's measured edge and flags a drift between them
+test "mechanical evidence flags a measured outline that drifted from the declaration" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const block = try engineeringFixture(arena.allocator());
+
+    const agreeing = collectMechanical(&block, .{ .minx = 0, .miny = 0, .w = 60, .h = 40 });
+    try std.testing.expect(agreeing.declared.present and agreeing.measured.present);
+    try std.testing.expect(!agreeing.drift);
+    try std.testing.expectEqualStrings("JLC06161H-3313", agreeing.stackup_preset);
+    try std.testing.expectEqual(@as(u8, 6), agreeing.stackup_layers);
+
+    const drifted = collectMechanical(&block, .{ .minx = 0, .miny = 0, .w = 60.5, .h = 40 });
+    try std.testing.expect(drifted.drift);
+
+    // No resolved outline at all ⇒ nothing to compare, so nothing is claimed.
+    const unmeasured = collectMechanical(&block, null);
+    try std.testing.expect(!unmeasured.measured.present);
+    try std.testing.expect(!unmeasured.drift);
+}
+
+// spec: system-review - generated loop-filter evidence copies each PLL report's screens out of the evaluator, keeping only the non-passing ones beside the population verdict counts
+test "loop-filter evidence copies screens and retains only the failures" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var name_buffer = "chirp-loop".*;
+    var message_buffer = "phase margin 31.2 deg below 45.0 deg target".*;
+    const verdicts = [_]pll_loop.Verdict{
+        .{ .screen = .nominal_sweep, .status = .pass, .message = "ok" },
+        .{ .screen = .nominal_phase_target, .status = .fail, .message = &message_buffer },
+        .{ .screen = .pfd_ratio, .status = .warn, .message = "advisory" },
+    };
+    const populations = [_]pll_loop.Population{.{
+        .kind = .fitted,
+        .verdicts = &verdicts,
+        .results = .{ .nominal = .{ .corners = 3, .min_bandwidth_hz = 1200, .max_bandwidth_hz = 3400 } },
+    }};
+    const schedule = [_]pll_loop.ScheduleEntry{.{ .pll_n = 200, .kvco_hz_per_v = 6e7, .step = 4, .current_a = 2.5e-3 }};
+    const reports = [_]pll_loop.Report{.{
+        .name = &name_buffer,
+        .mode = .gate,
+        .outcome = .screened,
+        .profile = .{ .pfd_hz = 1e6, .pll_n = 200, .charge_pump_a = 2.5e-3 },
+        .populations = &populations,
+        .schedule = &schedule,
+    }};
+
+    const copied = try collectPllReports(allocator, &reports);
+    try std.testing.expectEqual(@as(usize, 1), copied.len);
+    try std.testing.expectEqualStrings("chirp-loop", copied[0].name);
+    try std.testing.expectEqual(@as(usize, 1), copied[0].schedule.len);
+    const population = copied[0].populations[0];
+    try std.testing.expectEqual(@as(usize, 1), population.pass);
+    try std.testing.expectEqual(@as(usize, 1), population.warn);
+    try std.testing.expectEqual(@as(usize, 1), population.fail);
+    try std.testing.expectEqual(@as(usize, 2), population.failing.len);
+    try std.testing.expectEqualStrings("nominal_phase_target", population.failing[0].screen);
+
+    // The evaluator's buffers are its own: overwriting them must not disturb
+    // anything the snapshot retained.
+    @memset(&name_buffer, 'x');
+    @memset(&message_buffer, 'x');
+    try std.testing.expectEqualStrings("chirp-loop", copied[0].name);
+    try std.testing.expectEqualStrings("phase margin 31.2 deg below 45.0 deg target", population.failing[0].message);
+}
+
+// spec: system-review - the generated BOM rollup counts the exact placements, lines and do-not-populate parts the archived bom.csv carries
+test "BOM rollup matches the archived CSV grouping" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const block = try engineeringFixture(allocator);
+
+    const rollup = try bom_html.rollupBom(allocator, &block);
+    // Four sourced parts: the test point is a probe pad, not a purchased line.
+    try std.testing.expectEqual(@as(usize, 4), rollup.placements);
+    // The MCU, the populated 100nF pair, and the do-not-populate variant of the
+    // same part, which the CSV keeps as its own line.
+    try std.testing.expectEqual(@as(usize, 3), rollup.lines);
+    try std.testing.expectEqual(@as(usize, 1), rollup.dnp_placements);
+    try std.testing.expectEqual(@as(usize, 1), rollup.dnp_lines);
 }

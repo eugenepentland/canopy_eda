@@ -117,9 +117,23 @@ src/board_layers.zig::techRows | fn techRows(self: *const LayerTable) []const Ro
 src/board_layers.zig::tech_row_count value
 src/board_layers.zig::unrestricted value
 src/board_layers.zig::with | fn with(self: LayerSet, sig: SignalIndex) LayerSet
+src/board_review_snapshot.zig::AmbientWindow struct_
+src/board_review_snapshot.zig::Checks struct_
 src/board_review_snapshot.zig::Connection struct_
+src/board_review_snapshot.zig::Engineering struct_
+src/board_review_snapshot.zig::Finding struct_
+src/board_review_snapshot.zig::HottestPart struct_
+src/board_review_snapshot.zig::Mechanical struct_
 src/board_review_snapshot.zig::Options struct_
+src/board_review_snapshot.zig::Outline struct_
+src/board_review_snapshot.zig::PllPopulation struct_
+src/board_review_snapshot.zig::PllProfile struct_
+src/board_review_snapshot.zig::PllReport struct_
+src/board_review_snapshot.zig::PllScreen struct_
+src/board_review_snapshot.zig::PowerRail struct_
+src/board_review_snapshot.zig::RailSource struct_
 src/board_review_snapshot.zig::Snapshot struct_
+src/board_review_snapshot.zig::Thermal struct_
 src/board_review_snapshot.zig::build | fn build( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, options: Options, ) BuildError!Snapshot
 src/board_review_snapshot.zig::verifySnapshot | fn verifySnapshot( allocator: std.mem.Allocator, project_dir: []const u8, snapshot: Snapshot, ) bool
 src/board_theme.zig::Channels struct_
@@ -337,6 +351,7 @@ src/diagram/system_of_boards.zig::Options struct_
 src/diagram/system_of_boards.zig::classifySignal | fn classifySignal(canonical: []const u8) Lane
 src/diagram/system_of_boards.zig::laneColor | fn laneColor(lane: Lane) []const u8
 src/diagram/system_of_boards.zig::laneLabel | fn laneLabel(lane: Lane) []const u8
+src/diagram/system_of_boards.zig::renderSystemDocumentSvg | fn renderSystemDocumentSvg( allocator: Allocator, spec: *const SystemSpec, opts: Options, w: *Writer, ) (Allocator.Error || Writer.Error)!bool
 src/diagram/system_of_boards.zig::renderSystemSvg | fn renderSystemSvg( allocator: Allocator, spec: *const SystemSpec, opts: Options, w: *Writer, ) (Allocator.Error || Writer.Error)!void
 src/diagram/types.zig::ClassDef struct_
 src/diagram/types.zig::ClassId value
@@ -3588,6 +3603,7 @@ src/serve/board_backup.zig::rollBackup | fn rollBackup(arena: std.mem.Allocator,
 src/serve/board_backup.zig::writeFileAtomic | fn writeFileAtomic(arena: std.mem.Allocator, path: []const u8, contents: []const u8) WriteFileAtomicError!void
 src/serve/bom_html.zig::BomCounts struct_
 src/serve/bom_html.zig::BomError value
+src/serve/bom_html.zig::BomRollup struct_
 src/serve/bom_html.zig::SymbolPin struct_
 src/serve/bom_html.zig::SymbolPinCache value
 src/serve/bom_html.zig::augmentUnconnectedPins | fn augmentUnconnectedPins(allocator: std.mem.Allocator, block: *env_mod.DesignBlock, sym_cache: *const SymbolPinCache) std.mem.Allocator.Error!void
@@ -3595,6 +3611,7 @@ src/serve/bom_html.zig::buildSymbolPinCache | fn buildSymbolPinCache(allocator: 
 src/serve/bom_html.zig::collectMissing | fn collectMissing( allocator: std.mem.Allocator, block: *const env_mod.DesignBlock, project_dir: []const u8, missing_fp: *std.ArrayList([]const u8), missing_model: *std.ArrayList([]const u8), checked_fp: *std.StringHashMapUnmanaged(void), checked_model: *std.StringHashMapUnmanaged(void), ) BomError!void
 src/serve/bom_html.zig::countBom | fn countBom(allocator: std.mem.Allocator, block: *const env_mod.DesignBlock) BomError!BomCounts
 src/serve/bom_html.zig::footprintHasPads | fn footprintHasPads(allocator: std.mem.Allocator, project_dir: []const u8, footprint: []const u8) bool
+src/serve/bom_html.zig::rollupBom | fn rollupBom(allocator: std.mem.Allocator, block: *const env_mod.DesignBlock) BomError!BomRollup
 src/serve/bom_html.zig::writeBomCsv | fn writeBomCsv(allocator: std.mem.Allocator, w: anytype, block: *const env_mod.DesignBlock) BomError!void
 src/serve/bom_html.zig::writeComponentsJson | fn writeComponentsJson( w: anytype, block: *const env_mod.DesignBlock, prefix: []const u8, sym_cache: *const SymbolPinCache, allocator: std.mem.Allocator, project_dir: []const u8, ) BomError!bool
 src/serve/bom_html.zig::writeJsonEscaped value

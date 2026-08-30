@@ -88,7 +88,36 @@ pub fn renderSystemSvg(
     opts: Options,
     w: *Writer,
 ) (Allocator.Error || Writer.Error)!void {
-    if (spec.boards.len == 0) return;
+    _ = try renderForm(allocator, spec, opts, w, .fragment);
+}
+
+/// Render the same drawing as a standalone SVG document — an `<svg>` root with
+/// its own `xmlns`, intrinsic `width`/`height`, and a painted background — the
+/// form an archive member has to take, since a bare fragment is not a file a
+/// viewer can open. Returns false and writes nothing when the spec declares no
+/// boards, which the archive reads as "omit the member", matching how the
+/// per-board diagram evidence behaves.
+pub fn renderSystemDocumentSvg(
+    allocator: Allocator,
+    spec: *const SystemSpec,
+    opts: Options,
+    w: *Writer,
+) (Allocator.Error || Writer.Error)!bool {
+    return renderForm(allocator, spec, opts, w, .document);
+}
+
+/// Which wrapper the same drawing gets: an HTML fragment for a review page, or
+/// a self-standing SVG document for a file.
+const Form = enum { fragment, document };
+
+fn renderForm(
+    allocator: Allocator,
+    spec: *const SystemSpec,
+    opts: Options,
+    w: *Writer,
+    form: Form,
+) (Allocator.Error || Writer.Error)!bool {
+    if (spec.boards.len == 0) return false;
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -102,10 +131,16 @@ pub fn renderSystemSvg(
     const canvas_h = opts.pad * 2 + @max(content_h, columnHeight(opts, sides, false));
     const canvas_w = opts.pad * 2 + opts.board_w * 2 + opts.gutter * 2 + opts.spine_w;
 
-    try writeOpen(w, spec, canvas_w, canvas_h);
+    try writeOpen(w, spec, canvas_w, canvas_h, form);
+    // A document has no host page behind it, so it paints its own ground; the
+    // fragment's wrapper `<div>` already carries that colour.
+    if (form == .document)
+        try w.print("<rect width=\"100%\" height=\"100%\" fill=\"{s}\"/>", .{sheet_deep});
     try writeBoardColumns(w, spec, opts, sides, canvas_h);
     try writeSpine(w, spec, opts, tallies, canvas_h - opts.pad * 2 - spine_h);
-    try w.writeAll("</svg></div>");
+    try w.writeAll("</svg>");
+    if (form == .fragment) try w.writeAll("</div>");
+    return true;
 }
 
 /// Classify one contact's canonical net name into a signal lane.
@@ -315,15 +350,23 @@ fn spineHeight(opts: Options, tallies: []const InterfaceTally) f64 {
 
 // ── rendering ──────────────────────────────────────────────────────────
 
-fn writeOpen(w: *Writer, spec: *const SystemSpec, canvas_w: f64, canvas_h: f64) Writer.Error!void {
-    try w.print(
-        "<div class=\"sob-wrap\" style=\"margin:12px 0 4px;padding:10px;background:{s};" ++
-            "border:1px solid #21262d;border-radius:8px;\">" ++
-            "<svg viewBox=\"0 0 {d:.0} {d:.0}\" role=\"img\" " ++
-            "style=\"display:block;width:100%;max-width:{d:.0}px;height:auto;\" " ++
-            "xmlns=\"http://www.w3.org/2000/svg\" aria-label=\"",
-        .{ sheet_deep, canvas_w, canvas_h, canvas_w },
-    );
+fn writeOpen(w: *Writer, spec: *const SystemSpec, canvas_w: f64, canvas_h: f64, form: Form) Writer.Error!void {
+    if (form == .fragment) {
+        try w.print(
+            "<div class=\"sob-wrap\" style=\"margin:12px 0 4px;padding:10px;background:{s};" ++
+                "border:1px solid #21262d;border-radius:8px;\">" ++
+                "<svg viewBox=\"0 0 {d:.0} {d:.0}\" role=\"img\" " ++
+                "style=\"display:block;width:100%;max-width:{d:.0}px;height:auto;\" " ++
+                "xmlns=\"http://www.w3.org/2000/svg\" aria-label=\"",
+            .{ sheet_deep, canvas_w, canvas_h, canvas_w },
+        );
+    } else {
+        try w.print(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {d:.0} {d:.0}\" " ++
+                "width=\"{d:.0}\" height=\"{d:.0}\" role=\"img\" aria-label=\"",
+            .{ canvas_w, canvas_h, canvas_w, canvas_h },
+        );
+    }
     try escape.writeXml(w, spec.title);
     try w.writeAll(" system block diagram\"><title>");
     try escape.writeXml(w, spec.title);
@@ -752,4 +795,43 @@ test "renderSystemSvg renders boards for a system with no interfaces" {
     defer testing.allocator.free(out);
     try testing.expect(std.mem.indexOf(u8, out, "barracuda-base") != null);
     try testing.expect(std.mem.indexOf(u8, out, "j1-board-to-board") == null);
+}
+
+/// The same drawing as `render`, in the standalone-document form an archive
+/// member takes.
+fn renderDocument(allocator: Allocator, spec: *const SystemSpec) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    _ = try renderSystemDocumentSvg(allocator, spec, .{}, &aw.writer);
+    return aw.toOwnedSlice();
+}
+
+// spec: diagram/system_of_boards - The document form is a standalone SVG root with its own namespace, intrinsic size and painted background, and draws the same body as the page fragment
+test "renderSystemDocumentSvg emits a self-standing SVG document" {
+    const spec = fixture();
+    const document = try renderDocument(testing.allocator, &spec);
+    defer testing.allocator.free(document);
+
+    // A file, not a fragment: an `<svg>` root, no wrapper element, its own
+    // namespace and intrinsic size, and a ground of its own to draw on.
+    try testing.expect(std.mem.startsWith(u8, document, "<svg xmlns=\"http://www.w3.org/2000/svg\""));
+    try testing.expect(std.mem.endsWith(u8, document, "</svg>"));
+    try testing.expect(std.mem.indexOf(u8, document, "<div") == null);
+    try testing.expect(std.mem.indexOf(u8, document, " width=\"") != null);
+    try testing.expect(std.mem.indexOf(u8, document, "<rect width=\"100%\" height=\"100%\"") != null);
+    // Same body as the page fragment: every board node still reads the same.
+    try testing.expect(std.mem.indexOf(u8, document, "barracuda-base") != null);
+    try testing.expect(std.mem.indexOf(u8, document, "j1-board-to-board") != null);
+
+    const again = try renderDocument(testing.allocator, &spec);
+    defer testing.allocator.free(again);
+    try testing.expectEqualStrings(document, again);
+
+    // A board-free system writes nothing at all, so the archive omits the
+    // member rather than storing an empty file.
+    var empty = fixture();
+    empty.boards = &.{};
+    const nothing = try renderDocument(testing.allocator, &empty);
+    defer testing.allocator.free(nothing);
+    try testing.expectEqual(@as(usize, 0), nothing.len);
 }
