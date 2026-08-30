@@ -330,6 +330,12 @@ src/diagram/render.zig::renderTabs | fn renderTabs(allocator: Allocator, graph: 
 src/diagram/render.zig::system_color value
 src/diagram/render.zig::system_key value
 src/diagram/render.zig::system_label value
+src/diagram/system_of_boards.zig::Lane enum_
+src/diagram/system_of_boards.zig::Options struct_
+src/diagram/system_of_boards.zig::classifySignal | fn classifySignal(canonical: []const u8) Lane
+src/diagram/system_of_boards.zig::laneColor | fn laneColor(lane: Lane) []const u8
+src/diagram/system_of_boards.zig::laneLabel | fn laneLabel(lane: Lane) []const u8
+src/diagram/system_of_boards.zig::renderSystemSvg | fn renderSystemSvg( allocator: Allocator, spec: *const SystemSpec, opts: Options, w: *Writer, ) (Allocator.Error || Writer.Error)!void
 src/diagram/types.zig::ClassDef struct_
 src/diagram/types.zig::ClassId value
 src/diagram/types.zig::Edge struct_
