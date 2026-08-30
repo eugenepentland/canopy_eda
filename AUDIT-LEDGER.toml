@@ -502,14 +502,36 @@ The guard here is scripts/check_external_gates_armed.sh (61ms, wired into build.
 id = "DRIFT-PERF-001"
 summary = "the /systems/:name page shipped with no browser-perf coverage, and its own contract test had been failing unnoticed because Guardian's external gates were inert"
 severity = "medium"
-status = "open"
-file = ["scripts/ui_browser_perf/manifest.js", "src/serve/system_review_api.zig"]
+status = "fixed"
+fixed_in = "82b97e5d"
+harness = "scripts/ui_browser_perf/manifest.test.js"
+file = ["scripts/ui_browser_perf/manifest.js", "scripts/ui_browser_perf/run.js", "src/serve/system_review_api.zig"]
 reopens = "DRIFT-INFRA-004"
 note = """Found 2026-08-30 by the DRIFT-INFRA-004 fix, on the very first deploy after it: `ui-browser-perf-route-contract` had been RED and passing. scripts/ui_browser_perf/manifest.test.js requires every non-API GET route in serve.zig to be classified, and /systems/:name — added in 1f33d92, the commit live in production — never was. The contract worked; the gate that ran it did not. This is the first concrete cost of that class, and it is exactly the shape the class predicts: a check that was correct the whole time, attached to a runner that had stopped running.
 
-NOT resolved here, deliberately. The page is a real interactive surface (document list, editor textarea, rendered preview, toolbar), so classifying it as an asset or a redirect would be false, and inventing benchmark scenarios for a page without studying it would put meaningless numbers in the perf gate. It is recorded as `coverage: "uncovered"` with an account of why — a new kind that requires a >=80-char reason and is PRINTED on every passing run, so it cannot go quiet the way an unclassified route did. Verified that the escape hatch is bounded: removing the route from the manifest still fails the original "must classify every route" assertion, and a placeholder reason fails too.
+The interim record was `coverage: "uncovered"` with an account of why — a kind that requires a >=80-char reason and is PRINTED on every passing run, so the gap could not go quiet the way an unclassified route did.
 
-The fix is a real surface entry from whoever owns the system-review page."""
+CLOSED by the real surface it asked for. `system_review` exercises /systems/barracuda in the browser matrix: opening an authored document from the list (p95 93 ms), typing into the editor textarea (p95 58 ms), and switching to the largest manifest document, whose ~58 KB of generated HTML replaces the preview and re-walks every [src]/[href] for asset rewriting (p95 146 ms). Measured stable across three independent 3-rep runs; budgets committed at roughly 3-4x headroom.
+
+Release readiness is deliberately outside that surface and is BLOCKED at the harness's request interposer rather than left running in the background. It cannot succeed under the benchmark overlay at all, and the reason is its own finding: DRIFT-SYSREV-001.
+
+The extraction that missed the route in the first place was sound — the bug really was only the inert runner — but it was tightened anyway, because a route this contract cannot READ is indistinguishable from one that does not exist. It now proves the absence of unreadable shapes before reading the readable ones: every `router.get()` path in serve.zig must be a plain string literal, no `all`/`head`/`method`/`group` registration verb may appear, and no other file under src/ may register a route. Verified all three fail against a tree that violates them and pass against one that does not."""
+
+[[finding]]
+id = "DRIFT-SYSREV-001"
+summary = "system release readiness takes 21-67 s, disagrees with itself across identical requests, and cannot run at all against a project whose lib/ is symlinked"
+severity = "medium"
+status = "open"
+file = ["src/system_review_package.zig", "src/board_review_snapshot.zig", "src/serve/system_review_api.zig"]
+note = """Found 2026-08-30 while building the browser-perf surface DRIFT-PERF-001 asked for. Three separate facts, all measured against projects/designs at 23c92b66, none of them previously recorded:
+
+COST. `GET /api/systems/barracuda/readiness` took 21-67 s per call on an idle machine. analyze(.release) computes each board's fab readiness TWICE — once into a throwaway arena as `fab_before`, once for real — plus a board-review snapshot and a verifySnapshot pass, for both boards. The two fab computations alone measured 6.7 s and 13.3 s per board via /api/fab-readiness. The page fires this on boot, so every visit to /systems/:name pays it.
+
+NONDETERMINISM. Roughly half of otherwise identical sequential requests returned 409 `release inputs changed during composition` after ~21 s: the second fab computation disagreed with the first for inputs nobody touched between them. Observed 200/409/409, then 200/200/409/409, on a quiet server with no other client. `netlisp system-check` on the same project succeeded, so this is reachable through the server path specifically — the likeliest cause is a read-only GET refreshing a generated sidecar underneath the composition. The double-compute check is doing its job; what it is catching is our own writes.
+
+CONTAINMENT vs SYMLINKED LIBRARIES. Against the benchmark overlay the same request fails with 422 after ~27 s, `SourceOutsideProject`. board_review_snapshot.zig walks the board's whole .sexp import closure and requires each file to canonicalize INSIDE --project-dir (projectRelativeSource, line 374). The overlay symlinks lib/ to keep the model bundle out of a writable copy, so every imported component and module canonicalizes to the source checkout and is rejected. Reproduced deterministically with `netlisp system-check --project-dir <overlay> barracuda`.
+
+Consequence for the gate: scripts/ui_browser_perf/run.js aborts this request for the system_review surface. Waiting for a guaranteed 27 s error would be a third of the surface's wall clock, and letting it run in the background would leave both boards' fab analyses competing with every interaction being timed. The page renders the failure into #readiness and stays fully usable, which is what the scenarios measure. Covering readiness for real needs the overlay to copy lib/components and lib/modules — cheap, they are text — but that changes the workload every other surface is measured against, so it belongs to a deliberate re-record and not to the change that found it."""
 
 [[finding]]
 id = "DRIFT-SIZE-001"

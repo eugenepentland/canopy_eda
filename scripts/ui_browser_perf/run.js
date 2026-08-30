@@ -620,6 +620,20 @@ async function footprintPadDragUndo(page) {
   return result;
 }
 
+async function openSystemDocument(page, title) {
+  const button = page.locator("#docs button", { hasText: title });
+  if (await button.count() !== 1) throw new Error(`system review document ${title} is not uniquely listed`);
+  return measured(page, async () => button.click(), async () => {
+    await page.waitForFunction((expected) => {
+      const active = document.querySelector("#docs button.active");
+      const heading = document.querySelector("#doc-title")?.textContent || "";
+      return Boolean(active) && active.textContent.includes(expected) && heading.startsWith(`${expected} \u00b7 `) &&
+        (document.querySelector("#source")?.value.length || 0) > 0 &&
+        (document.querySelector("#rendered")?.childElementCount || 0) > 0;
+    }, title, { timeout: PAGE_TIMEOUT_MS });
+  });
+}
+
 const ACTIONS = {
   "home.search": async (page) => {
     const before = await page.locator("#home-grid .design-card:visible").count();
@@ -1021,6 +1035,30 @@ const ACTIONS = {
   "thermal.pan": async (page) => { const frame = await thermalFrame(page); return dragGesture(page, frame, frame.locator(".pcb-scene"), { button: "middle" }); },
   "thermal.zoom": async (page) => { const frame = await thermalFrame(page); return wheelGesture(page, frame, frame.locator(".pcb-scene")); },
 
+  // The system-review workspace opens a document by clicking its list button.
+  // Wait for the whole applied state — active button, title, loaded source,
+  // rendered preview — because openDoc() sets them from one awaited fetch and
+  // a partial check would time the fetch instead of the usable document.
+  "system_review.document_open": async (page) => openSystemDocument(page, "Barracuda B3 Manufacturing Review"),
+  // No listener is bound to the textarea today, so this measures the editor's
+  // raw input latency on a real authored document. It is the tripwire for the
+  // live-preview/validation work this pane invites: anything that starts
+  // reacting to keystrokes shows up here rather than in a user's hands.
+  "system_review.source_edit": async (page) => {
+    const source = page.locator("#source");
+    if (await source.isDisabled()) throw new Error("system review source edit needs an editable document open");
+    const before = await source.inputValue();
+    const result = await measured(page, async () => source.pressSequentially(" review note", { delay: 0 }),
+      async () => page.waitForFunction((old) => document.querySelector("#source")?.value === `${old} review note`, before));
+    // Never saved, but leave the pane on the authored text so a later
+    // repetition cannot measure a document that drifted inside the browser.
+    await source.fill(before);
+    await page.waitForFunction((old) => document.querySelector("#source")?.value === old, before);
+    await afterFrames(page, 2);
+    return result;
+  },
+  "system_review.large_document": async (page) => openSystemDocument(page, "Historical Complete BOM Snapshot"),
+
   "library.search": async (page) => {
     const before = {
       page: (await page.locator("#page-info").textContent())?.trim() || "",
@@ -1287,6 +1325,18 @@ async function waitSurfaceReady(page, surface) {
       return view && view.width > 0 && status && getComputedStyle(status).display === "none";
     }, null, { timeout: PAGE_TIMEOUT_MS });
   }
+  if (surface.id === "system_review") {
+    // boot() opens the first document and then fires refreshReady(). Wait for
+    // BOTH to settle — the editor holding real source, and the readiness panel
+    // off its "Computing readiness…" placeholder — so no scenario below is
+    // timed while boot() is still assigning page state.
+    await page.waitForFunction(() => {
+      const panel = document.querySelector("#readiness");
+      return (document.querySelector("#source")?.value.length || 0) > 0 &&
+        (document.querySelector("#rendered")?.childElementCount || 0) > 0 &&
+        Boolean(panel) && (panel.classList.contains("ok") || panel.classList.contains("blocked"));
+    }, null, { timeout: PAGE_TIMEOUT_MS });
+  }
   if (surface.id === "pdf_viewer") {
     await page.locator('body[data-pdf-ready="true"] #status.hidden').waitFor({ state: "attached", timeout: PAGE_TIMEOUT_MS });
   }
@@ -1371,6 +1421,22 @@ async function runSurfaceInContext(context, baseUrl, surface, env) {
     }
     if (request.method() === "GET" && url.pathname === "/datasheets/browser-perf.pdf") {
       return route.fulfill({ path: env.pdfFixture, contentType: "application/pdf" });
+    }
+    // System-review release readiness is deliberately OUT of browser-perf
+    // scope, and blocked rather than merely unmeasured. It cannot succeed
+    // here: the overlay symlinks lib/, and the board-review source closure
+    // requires every imported .sexp to canonicalize INSIDE --project-dir, so
+    // the composition always ends in SourceOutsideProject (HTTP 422) after
+    // ~27 s of real work. Waiting for that would spend a third of this
+    // surface's wall clock on a guaranteed error, and letting it run in the
+    // background would leave both boards' fab analyses competing with every
+    // interaction timed below. The page renders the failure into #readiness
+    // and stays fully usable, which is the state the scenarios measure.
+    // Covering it for real needs the overlay to copy lib/components and
+    // lib/modules; see AUDIT-LEDGER DRIFT-SYSREV-001.
+    if (request.method() === "GET" && /^\/api\/systems\/[^/]+\/readiness$/.test(url.pathname)) {
+      network.blocked_expected.push(`${request.method()} ${url.pathname}`);
+      return route.abort("blockedbyclient");
     }
     const method = request.method().toUpperCase();
     if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
@@ -1636,6 +1702,7 @@ function defaultBudgets(summary) {
     pcb_2d: 2000,
     pcb_3d: 2000,
     thermal: 3000,
+    system_review: 750,
     library: 750,
     footprint_editor: 750,
     model_alignment_3d: 1500,

@@ -30,19 +30,7 @@ const routes = {
   "/style.css": { coverage: "asset", reason: "shared stylesheet, not an interactive page" },
   "/static/:name": { coverage: "asset", reason: "static asset dispatcher, not an interactive page" },
   "/.well-known/oauth-protected-resource": { coverage: "metadata", reason: "OAuth discovery document, not an interactive page" },
-  // RECORDED GAP, not a classification. The system-review page is a real
-  // interactive surface — document list, editor textarea, rendered preview,
-  // toolbar buttons — so calling it an asset or a redirect would be false, and
-  // inventing benchmark scenarios for a page without studying it would put
-  // meaningless numbers in the gate. It is listed as uncovered so the gap is
-  // stated rather than hidden; `uncovered` is the only kind manifest.test.js
-  // prints on a passing run.
-  "/systems/:name": {
-    coverage: "uncovered",
-    reason: "landed in 1f33d92 without browser-perf coverage, and rode a green gate because "
-      + "Guardian's [[external]] gates were inert at the time (AUDIT-LEDGER DRIFT-INFRA-004). "
-      + "Needs a real surface entry from whoever owns the system-review page.",
-  },
+  "/systems/:name": { coverage: "surface", surface: "system_review" },
 };
 
 const surfaces = [
@@ -157,6 +145,27 @@ const surfaces = [
       { id: "opacity", kind: "local" },
       { id: "pan", kind: "frame" },
       { id: "zoom", kind: "frame" },
+    ],
+  },
+  {
+    id: "system_review",
+    label: "System review workspace",
+    path: "/systems/barracuda",
+    // The document workspace: boot() renders the document list and opens the
+    // first active document. waitSurfaceReady() additionally requires the
+    // loaded source, the rendered preview, and a settled readiness panel, so
+    // nothing below is timed while boot() is still assigning page state.
+    // Release readiness itself is out of scope and blocked by run.js — it
+    // cannot succeed against the benchmark overlay at all; see AUDIT-LEDGER
+    // DRIFT-SYSREV-001 for the measurement and what covering it would cost.
+    ready: "#docs button.active",
+    scenarios: [
+      { id: "document_open", kind: "async", budgets: { p95_ms: 300, max_ms: 500 } },
+      { id: "source_edit", kind: "local", setup: ["document_open"] },
+      // Last: the largest authored document in the manifest. It replaces the
+      // preview with ~58 KB of generated HTML and re-walks every [src]/[href]
+      // for asset rewriting, and it leaves a read-only document selected.
+      { id: "large_document", kind: "async", budgets: { p95_ms: 500, max_ms: 750 } },
     ],
   },
   {

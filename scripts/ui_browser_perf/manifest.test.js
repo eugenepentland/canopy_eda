@@ -10,10 +10,50 @@ const {
 
 const root = path.resolve(__dirname, "..", "..");
 const serveSource = fs.readFileSync(path.join(root, "src", "serve.zig"), "utf8");
+
+// Extraction IS the contract. `/systems/:name` shipped uncovered while this
+// file already required every route to be classified, so the lesson is not
+// "match more shapes" — it is that a registration this file cannot see is
+// indistinguishable from one that does not exist. Everything below therefore
+// proves the absence of unreadable shapes before reading the readable ones.
+
+// 1. Every router.get() in serve.zig must pass a plain string literal. A path
+//    built from a constant or a concatenation would parse to nothing here and
+//    land outside the gate in silence.
+const getCalls = Array.from(serveSource.matchAll(/router\.get\(([\s\S]{0,200}?),/g), (match) => match[1].trim());
+assert.deepStrictEqual(getCalls.filter((argument) => !/^"[^"\\]*"$/.test(argument)), [],
+  "every router.get() path in src/serve.zig must be a plain string literal this contract can read");
+
+// 2. httpz can register a GET page through verbs this file does not read —
+//    `all`, `head`, `method`, or a `group(...)` whose own `.get` calls are
+//    invisible to the scan above. None exist today; if one lands, extend the
+//    extraction deliberately rather than let it register an unclassified page.
+const unreadVerbs = [...new Set(Array.from(serveSource.matchAll(/\brouter\.(all|head|method|group)\(/g), (match) => match[1]))].sort();
+assert.deepStrictEqual(unreadVerbs, [],
+  "src/serve.zig registers routes through a verb this contract cannot read; teach the extraction about it");
+
+// 3. serve.zig is the only router. A `router.get(` anywhere else registers
+//    pages this file never reads.
+const strayRouters = [];
+(function scan(dir) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const target = path.join(dir, entry.name);
+    if (entry.isDirectory()) scan(target);
+    else if (entry.name.endsWith(".zig") && target !== path.join(root, "src", "serve.zig")) {
+      // Requiring an unescaped quote is what keeps src/serve/pages.zig out:
+      // its `router.get(\\"…` is a Zig string literal in a test asserting on
+      // serve.zig's own source, and the backslash makes it not match.
+      if (/router\.get\(\s*"/.test(fs.readFileSync(target, "utf8"))) strayRouters.push(path.relative(root, target));
+    }
+  }
+})(path.join(root, "src"));
+assert.deepStrictEqual(strayRouters.sort(), [],
+  "routes must be registered in src/serve.zig, which is the only file this contract reads");
+
 // A server lifecycle test owns a private `GET /` router too. Route coverage is
 // about the unique production surface, not how often a literal occurs in this
 // source file.
-const registered = [...new Set(Array.from(serveSource.matchAll(/router\.get\("([^"]+)"/g), (match) => match[1])
+const registered = [...new Set(getCalls.map((argument) => argument.slice(1, -1))
   .filter((route) => !route.startsWith("/api/")))].sort();
 assert.deepStrictEqual(Object.keys(routes).sort(), registered,
   "manifest.js must classify every non-API GET route in src/serve.zig");
