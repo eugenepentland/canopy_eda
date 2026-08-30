@@ -5552,6 +5552,9 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - flat safe workspace assets are content-validated, deterministically hashed, and archived beside combined Markdown under review/assets
 - system-review file reads resolve canonically below the project root and reject parent-symlink escapes
 - system-review mutations require the custom review header, document replacement requires If-Match, and release JSON is size-bounded
+- the standalone draft dossier is the archive's own HTML member composed without the archive around it
+- a dossier request over a workspace that cannot compose answers the composer's diagnostic rather than a crash or a partial page
+- the system review page offers the dossier as a page action beside the draft download, pointing at the system's own dossier path
 - completeness-waiver: empty inputs (a system must name at least one board and every required active document must exist, so an empty workspace is rejected with a diagnostic)
 - completeness-waiver: large inputs (manifest, Markdown, image, collection, and ZIP-member limits reject oversized review inputs before unbounded work)
 - completeness-waiver: unauthorized access (draft/readiness are read-only; attestation, document writes, uploads, and final release require the authenticated writer role)
@@ -5682,6 +5685,7 @@ Public functions: notFound, serve
 - A ward reader's netlisp-scoped bearer does not admit the destructive sync write while a member's and an admin's do
 - Every read-only post prefix exempts only its own route family while safe methods are never write-gated
 - Every public route entry is served without a session while a sibling sharing its leading text is not
+- The system dossier page is session-gated and refuses like its sibling system page rather than as a JSON api
 
 ## serve/sync
 

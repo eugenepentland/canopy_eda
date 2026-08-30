@@ -786,6 +786,20 @@ test "the session allowlist admits exactly its public routes" {
     try std.testing.expectEqual(@as(usize, 2), public_routes.len);
 }
 
+// spec: serve - The system dossier page is session-gated and refuses like its sibling system page rather than as a JSON api
+test "the system review dossier page is gated exactly like its sibling page" {
+    // Not allowlisted, so an unauthenticated request never reaches the composer.
+    try std.testing.expect(!sessionAllowlist().isPublic("/systems/demo/dossier"));
+    // A page, not an api route: the refusal is the login redirect its sibling
+    // page gets, not the 401 the /api/systems/... data endpoints answer with.
+    try std.testing.expect(!isApiPath("/systems/demo/dossier"));
+    try std.testing.expect(!isApiPath("/systems/demo"));
+    try std.testing.expect(isApiPath("/api/systems/demo/draft.zip"));
+    // Reading a dossier is a safe method, so an authenticated reader may view it
+    // without the writer role the mutating review routes demand.
+    try std.testing.expect(!requiresWriteFor(.GET, "/systems/demo/dossier"));
+}
+
 // spec: serve - The ward auth-server url is derived by stripping the login path from the configured login url
 test "deriveAuthServer strips the trailing login path" {
     const login = "https" ++ "://ward.example/login";

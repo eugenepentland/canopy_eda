@@ -4473,6 +4473,7 @@ src/serve/sync_kicad_sch.zig::syncKicadSchApi | fn syncKicadSchApi(ctx: *Server,
 src/serve/sync_kicad_sch.zig::writeResultJson | fn writeResultJson( w: *std.Io.Writer, name: []const u8, result: push.Result, dry_run: bool, ) std.Io.Writer.Error!void
 src/serve/system_review_api.zig::HandlerError value
 src/serve/system_review_api.zig::attestSystemApi | fn attestSystemApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/system_review_api.zig::dossierPage | fn dossierPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::draftPackageApi | fn draftPackageApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::getAssetApi | fn getAssetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::getDocumentApi | fn getDocumentApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
@@ -4844,6 +4845,7 @@ src/system_review_package.zig::Readiness struct_
 src/system_review_package.zig::ReleaseOptions struct_
 src/system_review_package.zig::attest | fn attest( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, expected_content_lock: []const u8, actor: []const u8, attested_at: []const u8, ) AttestError!AttestationResult
 src/system_review_package.zig::draft | fn draft( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) DraftError!PackageResult
+src/system_review_package.zig::draftDossierHtml | fn draftDossierHtml( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) DossierHtmlError![]const u8
 src/system_review_package.zig::readiness | fn readiness( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) ReadinessError!Readiness
 src/system_review_package.zig::release | fn release( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, options: ReleaseOptions, renderer: fab_service.AssemblyRenderer, ) ReleaseError!PackageResult
 src/system_review_pdf.zig::Error value
