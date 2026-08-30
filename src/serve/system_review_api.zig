@@ -507,7 +507,10 @@ fn sendVfsFailure(res: *httpz.Response, body: []const u8) HandlerError!void {
     res.body = try res.arena.dupe(u8, body);
 }
 
-const SystemSummary = struct {
+/// One system workspace as the listing surfaces summarise it. Shared with the
+/// home page, which renders the same set as cards — the JSON endpoint must
+/// never be the only way to discover that a system exists.
+pub const SystemSummary = struct {
     name: []const u8,
     title: []const u8,
     part_number: []const u8,
@@ -521,7 +524,24 @@ fn lessSystemSummary(_: void, a: SystemSummary, b: SystemSummary) bool {
     return std.mem.lessThan(u8, a.name, b.name);
 }
 
-fn collectSystemSummaries(
+/// Everything enumeration can fail with, derived from the implementation the
+/// way system_review_package.zig derives its own — a hand-written set would
+/// drift the moment the path or directory helpers widen theirs. A malformed
+/// individual manifest is NOT in here: that system is skipped, so one bad
+/// workspace cannot blank the home page or the listing endpoint.
+pub const ListSystemsError = @typeInfo(@typeInfo(@TypeOf(collectSystemSummariesImpl)).@"fn".return_type.?).error_union.error_set;
+
+/// Enumerate `src/systems/*/system.json`, sorted by name. Empty (not an
+/// error) when the project has no `src/systems` at all, so a project that
+/// never adopted system review renders a home page with no systems section.
+pub fn collectSystemSummaries(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+) ListSystemsError![]const SystemSummary {
+    return collectSystemSummariesImpl(allocator, project_dir);
+}
+
+fn collectSystemSummariesImpl(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
 ) ![]const SystemSummary {

@@ -6585,6 +6585,8 @@ is what makes the predicate exact rather than approximately right.
 - A sexp under src that declares no top-level design-block is judged once and the verdict reused until that file changes
 - A design whose evaluation fails is cached against the library files its imports could resolve to, so creating the missing one re-evaluates it
 - The home page's data gather runs without a request, so the startup warm-up fills exactly the caches a render reads
+- The home page lists every `src/systems/` review workspace as its own card kind, from the same enumeration `/api/systems` serves, so a system is reachable without knowing its URL
+- A system card's search text leads with its kind word and carries its identity, so the home page's existing search box and its Systems filter both surface it with no extra client script
 - The PCB layout page renders without a request, reading a missing request as the plain no-query page, so the startup warm-up can retain it under the same cache entry a bare URL looks up
 - Startup warms PCB editor pages before the slower progress ladders, so an unrelated lazy diagnostic cannot leave every editor cache cold after a deploy
 - Startup warms every PCB page before any deferred payload, so a deploy has the pages a reader blocks on cached in about a second rather than behind twelve boards of analyses
