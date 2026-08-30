@@ -24,7 +24,7 @@
 8 src/eval/env.zig|StackupSpec
 8 src/eval/env.zig|Value
 14 src/eval/evaluator.zig|ComponentData
-20 src/eval/evaluator.zig|Evaluator
+21 src/eval/evaluator.zig|Evaluator
 12 src/eval/instance.zig|ResolvedComponent
 12 src/eval/power_budget.zig|Rail
 8 src/export_gerber.zig|Layer
@@ -80,6 +80,8 @@
 8 src/placement/thermal_field.zig|PartField
 8 src/placement/thermal_field.zig|PartInput
 10 src/placement/thermal_field.zig|ScenarioResult
+24 src/pll_loop.zig|Profile
+9 src/pll_loop.zig|Results
 24 src/render_pcb_png.zig|Options
 14 src/render_svg/context.zig|FlatInst
 18 src/render_svg/context.zig|RenderCtx

@@ -27,6 +27,9 @@ const Instance = env.Instance;
 pub const Mode = enum { advisory, gate };
 /// ADF4159 phase-detector polarity programmed by firmware.
 pub const Polarity = enum { positive, negative };
+/// Filter topology. `parse` accepts exactly one today; the enum exists so a
+/// report reads as a topology rather than as a boolean nobody can widen.
+pub const Topology = enum { active_inverting };
 
 /// Instance labels assigned to each element of the supported active filter.
 pub const Components = struct {
@@ -39,7 +42,8 @@ pub const Components = struct {
     c_tune: []const u8 = "",
 };
 
-const Range = struct { min: f64 = 0, max: f64 = 0 };
+/// A closed numeric interval. Both edges stay 0 when a clause is not authored.
+pub const Range = struct { min: f64 = 0, max: f64 = 0 };
 const ValueTolerance = struct { value: f64 = 0, tolerance_pct: f64 = 0 };
 const Feedback = struct { prescaler: f64 = 0, pll_n: f64 = 0 };
 const Synthesis = struct {
@@ -346,6 +350,10 @@ const Corner = struct {
     c_tune: f64,
 };
 
+/// ADF4159 charge-pump full scale, set by RSET. The 16-step I_CP schedule and
+/// the step suggestion both quantize against it.
+const adf4159_full_scale_a: f64 = 5e-3;
+
 const Metrics = struct { crossover_hz: f64, phase_margin_deg: f64 };
 const Sweep = struct {
     min_bandwidth_hz: f64 = std.math.inf(f64),
@@ -363,18 +371,265 @@ const Sweep = struct {
     }
 };
 
-/// Evaluate one declaration and append normal design assertions. In advisory
-/// mode a failed engineering limit is a warning, suitable while graph-derived
-/// Kvco or firmware charge-pump settings are still provisional.
-pub fn evaluate(allocator: std.mem.Allocator, assertions: *std.ArrayList(env.AssertionResult), block: *const DesignBlock, spec: Spec) std.mem.Allocator.Error!void {
+// ── Typed results ─────────────────────────────────────────────────────────
+//
+// A second VIEW of one evaluation, never a second evaluation: every number a
+// `Report` carries is the same f64 the matching assertion string formats, taken
+// from the same local. A document renderer builds tables and plots from these
+// instead of re-parsing prose.
+
+/// Which element of the active filter a reported value belongs to. The order
+/// matches `pinned_component_names` and the search's component indices.
+pub const Role = enum { c_cp, r_in, r_feedback, c_feedback, c_feedback_hf, r_isolation, c_tune };
+
+/// Every role, in the order a `Population.components` slice carries them.
+pub const roles = [_]Role{ .c_cp, .r_in, .r_feedback, .c_feedback, .c_feedback_hf, .r_isolation, .c_tune };
+
+/// One component of one population. `value` is farads for the four capacitors
+/// and ohms for the three resistors; `c_tune` carries the PART's own value,
+/// with any `(extra-tune-cap …)` reported once on `Profile`.
+pub const ComponentValue = struct {
+    role: Role,
+    value: f64 = 0,
+    /// Effective tolerance in percent — an absolute capacitor tolerance is
+    /// already divided by the nominal, exactly as the assertions print it.
+    tolerance_pct: f64 = 0,
+    /// Ref-des (or local instance label) the role bound to. Empty when the
+    /// binding failed.
+    ref: []const u8 = "",
+};
+
+/// Loop bandwidth and phase margin across one family of corners.
+pub const SweepSummary = struct {
+    /// Corners that solved for a unique 0 dB crossover. 0 ⇒ nothing else is set.
+    corners: usize = 0,
+    min_bandwidth_hz: f64 = 0,
+    max_bandwidth_hz: f64 = 0,
+    min_phase_margin_deg: f64 = 0,
+    max_phase_margin_deg: f64 = 0,
+};
+
+/// Every screen `evaluate` can append, named in the order it appends them.
+pub const Screen = enum {
+    binding,
+    bom_values,
+    capacitor_dielectric,
+    crossover_solve,
+    nominal_sweep,
+    nominal_phase_target,
+    tolerance_corners,
+    pfd_ratio,
+    gbw_ratio,
+    gbw_preferred,
+    polarity,
+    operating_curve,
+    output_swing,
+    op_amp_supply,
+    ramp_phase_error,
+    vtune_slew,
+    charge_pump_suggestion,
+    synthesis_stale_pin,
+    synthesis_replacement,
+    synthesis_profile,
+    synthesis_ramp_phase_error,
+    synthesis_schedule,
+    synthesis_pin_offer,
+};
+
+/// `pass` mirrors a passing assertion, `warn` an advisory-mode failure or a
+/// standalone warning, `fail` a gating failure.
+pub const Status = enum { pass, warn, fail };
+
+/// One screen's outcome plus the exact assertion text it appended. `message`
+/// is BORROWED from the assertion list, so it lives as long as the evaluator
+/// that owns those messages, not longer.
+pub const Verdict = struct {
+    screen: Screen,
+    status: Status,
+    message: []const u8,
+};
+
+/// One sample of the open-loop response.
+pub const ResponsePoint = struct { frequency_hz: f64, magnitude_db: f64, phase_deg: f64 };
+
+/// Samples per open-loop trace, log-spaced over the same 100 Hz … max(PFD,
+/// 2·GBW) span the crossover solver walks.
+pub const response_samples: usize = 161;
+
+/// A deterministic open-loop trace plus the operating point it was taken at.
+/// Phase is normalized the way the crossover solver normalizes it (wrapped
+/// into (-360, 0]), so phase margin reads as 180 + phase.
+pub const Response = struct {
+    points: []const ResponsePoint = &.{},
+    icp_a: f64 = 0,
+    kvco_hz_per_v: f64 = 0,
+    prescaler: f64 = 0,
+    pll_n: f64 = 0,
+};
+
+/// The screened numbers for one population.
+pub const Results = struct {
+    /// Fitted population: the three-point nominal Kvco sweep at the declared
+    /// I_CP. Synthesized population: the whole operating curve at its
+    /// quantized I_CP schedule.
+    nominal: SweepSummary = .{},
+    /// Every deterministic R/C/I_CP tolerance corner of that same sweep.
+    tolerance: SweepSummary = .{},
+    /// Fixed-I_CP operating-curve sweeps — fitted population only, and only
+    /// when `(operating-curve …)` is authored.
+    curve_nominal: SweepSummary = .{},
+    curve_tolerance: SweepSummary = .{},
+    /// FMCW ramp phase error at this population's narrowest tracking loop,
+    /// rad. 0 when no `(ramp …)` is declared.
+    ramp_phase_error_rad: f64 = 0,
+    /// VTUNE slew the ramp demands vs what the op amp declares, V/s. Both stay
+    /// 0 without a `(slew-rate …)`; the pair is a property of the ramp and the
+    /// op amp, so both populations report the same one.
+    vtune_slew_required_v_per_s: f64 = 0,
+    vtune_slew_available_v_per_s: f64 = 0,
+    /// PFD ÷ widest nominal loop bandwidth; ≥10 is the screen. The fitted
+    /// population's is the ratio its assertion prints; the synthesized
+    /// population's is the same ratio against its own nominal maximum, which
+    /// its acceptance expresses instead as min(PFD, GBW)/10.
+    pfd_lbw_ratio: f64 = 0,
+    /// Op-amp GBW ÷ widest nominal loop bandwidth; ≥10 required, ≥20 preferred.
+    gbw_lbw_ratio: f64 = 0,
+};
+
+/// `fitted` is the population the BOM actually carries; `synthesized` is what
+/// `(synthesize …)` proposes in its place.
+pub const PopulationKind = enum { fitted, synthesized };
+
+/// One component set and everything screened about it.
+pub const Population = struct {
+    kind: PopulationKind,
+    /// One entry per `Role`, in `Role` order.
+    components: []const ComponentValue = &.{},
+    results: Results = .{},
+    /// The screens charged to this population, in assertion order.
+    /// Concatenating the populations' lists reproduces the order `evaluate`
+    /// appended its assertions in.
+    verdicts: []const Verdict = &.{},
+    response: Response = .{},
+};
+
+/// One entry of the quantized ADF4159 I_CP schedule.
+pub const ScheduleEntry = struct { pll_n: f64, kvco_hz_per_v: f64, step: usize, current_a: f64 };
+
+/// The charge-pump step the advisory suggestion names when the fitted
+/// population's nominal phase margin falls short of target.
+pub const Suggestion = struct {
+    full_scale_a: f64 = 0,
+    current_a: f64 = 0,
+    min_phase_margin_deg: f64 = 0,
+    min_bandwidth_hz: f64 = 0,
+    max_bandwidth_hz: f64 = 0,
+};
+
+/// One authored `(operating-curve (point N Kvco))` knot.
+pub const CurvePoint = struct { pll_n: f64, kvco_hz_per_v: f64 };
+
+/// What the declaration states, normalized to SI. Absent clauses stay 0.
+pub const Profile = struct {
+    topology: Topology = .active_inverting,
+    pfd_hz: f64 = 0,
+    charge_pump_a: f64 = 0,
+    charge_pump_tolerance_pct: f64 = 0,
+    /// The ADF4159 I_CP full scale its 16-step schedule quantizes against.
+    charge_pump_full_scale_a: f64 = 0,
+    prescaler: f64 = 0,
+    pll_n: f64 = 0,
+    kvco_hz_per_v: Range = .{},
+    /// Authored `(operating-curve …)` knots, in authored order. Empty if none.
+    operating_points: []const CurvePoint = &.{},
+    op_amp_gbw_hz: f64 = 0,
+    op_amp_dc_gain: f64 = 0,
+    op_amp_slew_rate_v_per_s: f64 = 0,
+    op_amp_max_supply_v: f64 = 0,
+    output_headroom_v: Range = .{},
+    phase_margin_target_deg: Range = .{},
+    phase_margin_hard_min_deg: f64 = 0,
+    polarity: Polarity = .positive,
+    supply_v: Range = .{},
+    vtune_v: Range = .{},
+    ramp_span_hz: f64 = 0,
+    ramp_time_s: f64 = 0,
+    max_ramp_phase_error_rad: f64 = 0,
+    /// `(extra-tune-cap …)` — added to the bound `c-tune` part in every model
+    /// corner and reported here rather than folded into the part's value.
+    extra_tune_cap_f: f64 = 0,
+    extra_tune_cap_tolerance_pct: f64 = 0,
+};
+
+/// How far the screens got. `unbound` ⇒ a named R/C is missing or carries an
+/// unparseable value, so only the binding verdict exists; `no_crossover` ⇒ the
+/// nominal Kvco sweep found no unique 0 dB crossover and the results stay at
+/// their defaults; `screened` ⇒ the whole screen ran.
+pub const Outcome = enum { unbound, no_crossover, screened };
+
+/// One `(pll-loop …)` declaration's complete typed result. Slices are owned by
+/// the allocator `evaluate` was handed; `Verdict.message` and every `[]const
+/// u8` name are borrowed from the assertion list and the design block.
+pub const Report = struct {
+    name: []const u8 = "",
+    mode: Mode = .gate,
+    profile: Profile = .{},
+    outcome: Outcome = .unbound,
+    /// `fitted` always (even unbound); `synthesized` too when `(synthesize …)`
+    /// produced a population.
+    populations: []const Population = &.{},
+    /// First/middle/last knots of the quantized I_CP schedule, matching the
+    /// schedule assertion. Empty unless a synthesis ran.
+    schedule: []const ScheduleEntry = &.{},
+    suggestion: ?Suggestion = null,
+
+    /// Release the slices `evaluate` allocated. Borrowed strings — verdict
+    /// messages, names, ref-deses — belong to the assertion list and the
+    /// design block and are left alone.
+    pub fn deinit(self: Report, allocator: std.mem.Allocator) void {
+        for (self.populations) |population| {
+            allocator.free(population.components);
+            allocator.free(population.verdicts);
+            allocator.free(population.response.points);
+        }
+        allocator.free(self.populations);
+        allocator.free(self.profile.operating_points);
+        allocator.free(self.schedule);
+    }
+};
+
+fn summarize(sweep: Sweep) SweepSummary {
+    if (sweep.solved == 0) return .{};
+    return .{
+        .corners = sweep.solved,
+        .min_bandwidth_hz = sweep.min_bandwidth_hz,
+        .max_bandwidth_hz = sweep.max_bandwidth_hz,
+        .min_phase_margin_deg = sweep.min_phase_margin_deg,
+        .max_phase_margin_deg = sweep.max_phase_margin_deg,
+    };
+}
+
+/// Evaluate one declaration, append normal design assertions, and publish the
+/// typed record of the same numbers. In advisory mode a failed engineering
+/// limit is a warning, suitable while graph-derived Kvco or firmware
+/// charge-pump settings are still provisional.
+pub fn evaluate(allocator: std.mem.Allocator, assertions: *std.ArrayList(env.AssertionResult), reports: *std.ArrayList(Report), block: *const DesignBlock, spec: Spec) std.mem.Allocator.Error!void {
     var context = Context{ .allocator = allocator, .assertions = assertions };
+    defer context.verdicts.deinit(allocator);
+    try screen(&context, block, spec);
+    try reports.append(allocator, try finish(&context, spec));
+}
+
+fn screen(context: *Context, block: *const DesignBlock, spec: Spec) std.mem.Allocator.Error!void {
     const circuit = resolveCircuit(block, spec) orelse {
-        try append(&context, spec, false, "{s}: loop-filter component binding failed; every named R/C must exist and have a parseable value", .{spec.name});
+        try append(context, spec, .binding, false, "{s}: loop-filter component binding failed; every named R/C must exist and have a parseable value", .{spec.name});
         return;
     };
-    try append(&context, spec, true, "{s}: BOM values loaded — {s} {d:.0} pF ±{d:.2}%, {s} {d:.0} Ω ±{d:.2}%, {s} {d:.0} Ω ±{d:.2}% / {s} {d:.1} pF ±{d:.2}%, {s} {d:.1} pF ±{d:.2}%, {s} {d:.0} Ω ±{d:.2}% / {s} {d:.0} pF ±{d:.2}%", .{ spec.name, circuit.c_cp.ref, circuit.c_cp.nominal * 1e12, circuit.c_cp.tolerancePctAt(circuit.c_cp.nominal), circuit.r_in.ref, circuit.r_in.nominal, circuit.r_in.tolerancePctAt(circuit.r_in.nominal), circuit.r_feedback.ref, circuit.r_feedback.nominal, circuit.r_feedback.tolerancePctAt(circuit.r_feedback.nominal), circuit.c_feedback.ref, circuit.c_feedback.nominal * 1e12, circuit.c_feedback.tolerancePctAt(circuit.c_feedback.nominal), circuit.c_feedback_hf.ref, circuit.c_feedback_hf.nominal * 1e12, circuit.c_feedback_hf.tolerancePctAt(circuit.c_feedback_hf.nominal), circuit.r_isolation.ref, circuit.r_isolation.nominal, circuit.r_isolation.tolerancePctAt(circuit.r_isolation.nominal), circuit.c_tune.ref, (circuit.c_tune.nominal + circuit.extra_tune_cap.nominal) * 1e12, @max(circuit.c_tune.tolerancePctAt(circuit.c_tune.nominal), circuit.extra_tune_cap.tolerancePctAt(circuit.extra_tune_cap.nominal)) });
+    context.circuit = circuit;
+    context.outcome = .no_crossover;
+    try append(context, spec, .bom_values, true, "{s}: BOM values loaded — {s} {d:.0} pF ±{d:.2}%, {s} {d:.0} Ω ±{d:.2}%, {s} {d:.0} Ω ±{d:.2}% / {s} {d:.1} pF ±{d:.2}%, {s} {d:.1} pF ±{d:.2}%, {s} {d:.0} Ω ±{d:.2}% / {s} {d:.0} pF ±{d:.2}%", .{ spec.name, circuit.c_cp.ref, circuit.c_cp.nominal * 1e12, circuit.c_cp.tolerancePctAt(circuit.c_cp.nominal), circuit.r_in.ref, circuit.r_in.nominal, circuit.r_in.tolerancePctAt(circuit.r_in.nominal), circuit.r_feedback.ref, circuit.r_feedback.nominal, circuit.r_feedback.tolerancePctAt(circuit.r_feedback.nominal), circuit.c_feedback.ref, circuit.c_feedback.nominal * 1e12, circuit.c_feedback.tolerancePctAt(circuit.c_feedback.nominal), circuit.c_feedback_hf.ref, circuit.c_feedback_hf.nominal * 1e12, circuit.c_feedback_hf.tolerancePctAt(circuit.c_feedback_hf.nominal), circuit.r_isolation.ref, circuit.r_isolation.nominal, circuit.r_isolation.tolerancePctAt(circuit.r_isolation.nominal), circuit.c_tune.ref, (circuit.c_tune.nominal + circuit.extra_tune_cap.nominal) * 1e12, @max(circuit.c_tune.tolerancePctAt(circuit.c_tune.nominal), circuit.extra_tune_cap.tolerancePctAt(circuit.extra_tune_cap.nominal)) });
 
-    try append(&context, spec, loopCapsAreStable(block, spec.components), "{s}: every frequency-shaping capacitor is C0G/NP0", .{spec.name});
+    try append(context, spec, .capacitor_dielectric, loopCapsAreStable(block, spec.components), "{s}: every frequency-shaping capacitor is C0G/NP0", .{spec.name});
 
     const nominal = nominalCorner(circuit);
     var sweep = Sweep{};
@@ -383,46 +638,70 @@ pub fn evaluate(allocator: std.mem.Allocator, assertions: *std.ArrayList(env.Ass
         if (analyze(spec, nominal, spec.circuit.charge_pump.value, kvco)) |m| sweep.add(m);
     }
     if (sweep.solved != 3) {
-        try append(&context, spec, false, "{s}: no unique 0 dB crossover was found across the Kvco sweep", .{spec.name});
+        try append(context, spec, .crossover_solve, false, "{s}: no unique 0 dB crossover was found across the Kvco sweep", .{spec.name});
         return;
     }
-    try append(&context, spec, sweep.min_phase_margin_deg >= spec.requirements.phase.hard_min_deg, "{s}: nominal Kvco sweep {d:.0}-{d:.0} MHz/V gives LBW {d:.3}-{d:.3} MHz and phase margin {d:.1}-{d:.1}° (hard minimum {d:.1}°)", .{ spec.name, spec.circuit.kvco_hz_per_v.min / 1e6, spec.circuit.kvco_hz_per_v.max / 1e6, sweep.min_bandwidth_hz / 1e6, sweep.max_bandwidth_hz / 1e6, sweep.min_phase_margin_deg, sweep.max_phase_margin_deg, spec.requirements.phase.hard_min_deg });
-    try append(&context, spec, sweep.min_phase_margin_deg >= spec.requirements.phase.target_deg.min and sweep.max_phase_margin_deg <= spec.requirements.phase.target_deg.max, "{s}: nominal phase margin stays inside target {d:.1}-{d:.1}°", .{ spec.name, spec.requirements.phase.target_deg.min, spec.requirements.phase.target_deg.max });
+    context.outcome = .screened;
+    context.fitted.nominal = summarize(sweep);
+    context.fitted_response = .{ .icp_a = spec.circuit.charge_pump.value, .kvco_hz_per_v = kvco_mid, .prescaler = spec.circuit.feedback.prescaler, .pll_n = spec.circuit.feedback.pll_n };
+    try append(context, spec, .nominal_sweep, sweep.min_phase_margin_deg >= spec.requirements.phase.hard_min_deg, "{s}: nominal Kvco sweep {d:.0}-{d:.0} MHz/V gives LBW {d:.3}-{d:.3} MHz and phase margin {d:.1}-{d:.1}° (hard minimum {d:.1}°)", .{ spec.name, spec.circuit.kvco_hz_per_v.min / 1e6, spec.circuit.kvco_hz_per_v.max / 1e6, sweep.min_bandwidth_hz / 1e6, sweep.max_bandwidth_hz / 1e6, sweep.min_phase_margin_deg, sweep.max_phase_margin_deg, spec.requirements.phase.hard_min_deg });
+    try append(context, spec, .nominal_phase_target, sweep.min_phase_margin_deg >= spec.requirements.phase.target_deg.min and sweep.max_phase_margin_deg <= spec.requirements.phase.target_deg.max, "{s}: nominal phase margin stays inside target {d:.1}-{d:.1}°", .{ spec.name, spec.requirements.phase.target_deg.min, spec.requirements.phase.target_deg.max });
 
     const worst = toleranceSweep(spec, circuit);
-    try append(&context, spec, worst.solved > 0 and worst.min_phase_margin_deg >= spec.requirements.phase.hard_min_deg, "{s}: deterministic R/C/Icp tolerance corners give LBW {d:.3}-{d:.3} MHz and minimum phase margin {d:.1}°", .{ spec.name, worst.min_bandwidth_hz / 1e6, worst.max_bandwidth_hz / 1e6, worst.min_phase_margin_deg });
+    context.fitted.tolerance = summarize(worst);
+    try append(context, spec, .tolerance_corners, worst.solved > 0 and worst.min_phase_margin_deg >= spec.requirements.phase.hard_min_deg, "{s}: deterministic R/C/Icp tolerance corners give LBW {d:.3}-{d:.3} MHz and minimum phase margin {d:.1}°", .{ spec.name, worst.min_bandwidth_hz / 1e6, worst.max_bandwidth_hz / 1e6, worst.min_phase_margin_deg });
 
     const pfd_ratio = spec.circuit.pfd_hz / sweep.max_bandwidth_hz;
-    try append(&context, spec, pfd_ratio >= 10, "{s}: PFD/LBW ratio is {d:.1} at the widest nominal corner (must be ≥10)", .{ spec.name, pfd_ratio });
+    context.fitted.pfd_lbw_ratio = pfd_ratio;
+    try append(context, spec, .pfd_ratio, pfd_ratio >= 10, "{s}: PFD/LBW ratio is {d:.1} at the widest nominal corner (must be ≥10)", .{ spec.name, pfd_ratio });
     const gbw_ratio = spec.circuit.op_amp.gbw_hz / sweep.max_bandwidth_hz;
-    try append(&context, spec, gbw_ratio >= 10, "{s}: op-amp GBW/LBW ratio is {d:.1} at the widest nominal corner (must be ≥10; ≥20 preferred)", .{ spec.name, gbw_ratio });
-    if (gbw_ratio >= 10 and gbw_ratio < 20) try warning(&context, "{s}: op-amp GBW/LBW ratio {d:.1} passes the hard floor but is below the preferred 20", .{ spec.name, gbw_ratio });
+    context.fitted.gbw_lbw_ratio = gbw_ratio;
+    try append(context, spec, .gbw_ratio, gbw_ratio >= 10, "{s}: op-amp GBW/LBW ratio is {d:.1} at the widest nominal corner (must be ≥10; ≥20 preferred)", .{ spec.name, gbw_ratio });
+    if (gbw_ratio >= 10 and gbw_ratio < 20) try warning(context, .gbw_preferred, "{s}: op-amp GBW/LBW ratio {d:.1} passes the hard floor but is below the preferred 20", .{ spec.name, gbw_ratio });
 
-    try append(&context, spec, spec.circuit.polarity == .negative, "{s}: inverting active filter requires negative ADF4159 phase-detector polarity", .{spec.name});
+    try append(context, spec, .polarity, spec.circuit.polarity == .negative, "{s}: inverting active filter requires negative ADF4159 phase-detector polarity", .{spec.name});
     var tracking_bandwidth_hz = sweep.min_bandwidth_hz;
     if (spec.design.operating_curve.point_nodes.len >= 2) {
         const profile = fixedProfileSweep(spec, nominal, false);
         const profile_tolerance = fixedProfileToleranceSweep(spec, circuit);
         tracking_bandwidth_hz = profile.min_bandwidth_hz;
-        try append(&context, spec, profile.min_phase_margin_deg >= spec.requirements.phase.hard_min_deg and profile_tolerance.min_phase_margin_deg >= spec.requirements.phase.hard_min_deg, "{s}: populated fixed-I_CP operating curve gives nominal LBW {d:.3}-{d:.3} MHz / PM {d:.1}-{d:.1}° and tolerance-corner LBW {d:.3}-{d:.3} MHz / PM {d:.1}-{d:.1}°", .{ spec.name, profile.min_bandwidth_hz / 1e6, profile.max_bandwidth_hz / 1e6, profile.min_phase_margin_deg, profile.max_phase_margin_deg, profile_tolerance.min_bandwidth_hz / 1e6, profile_tolerance.max_bandwidth_hz / 1e6, profile_tolerance.min_phase_margin_deg, profile_tolerance.max_phase_margin_deg });
+        context.fitted.curve_nominal = summarize(profile);
+        context.fitted.curve_tolerance = summarize(profile_tolerance);
+        try append(context, spec, .operating_curve, profile.min_phase_margin_deg >= spec.requirements.phase.hard_min_deg and profile_tolerance.min_phase_margin_deg >= spec.requirements.phase.hard_min_deg, "{s}: populated fixed-I_CP operating curve gives nominal LBW {d:.3}-{d:.3} MHz / PM {d:.1}-{d:.1}° and tolerance-corner LBW {d:.3}-{d:.3} MHz / PM {d:.1}-{d:.1}°", .{ spec.name, profile.min_bandwidth_hz / 1e6, profile.max_bandwidth_hz / 1e6, profile.min_phase_margin_deg, profile.max_phase_margin_deg, profile_tolerance.min_bandwidth_hz / 1e6, profile_tolerance.max_bandwidth_hz / 1e6, profile_tolerance.min_phase_margin_deg, profile_tolerance.max_phase_margin_deg });
     }
-    try outputChecks(&context, spec);
-    try rampChecks(&context, spec, tracking_bandwidth_hz);
-    try chargePumpSuggestion(&context, spec, nominal, sweep.min_phase_margin_deg);
-    if (spec.design.synthesis.enabled) try synthesize(&context, spec, circuit);
+    try outputChecks(context, spec);
+    try rampChecks(context, spec, tracking_bandwidth_hz);
+    try chargePumpSuggestion(context, spec, nominal, sweep.min_phase_margin_deg);
+    if (spec.design.synthesis.enabled) try synthesize(context, spec, circuit);
 }
 
+/// Accumulator for one declaration: the assertion list every screen appends to,
+/// plus the same screens' numbers on their way into a `Report`.
 const Context = struct {
     allocator: std.mem.Allocator,
     assertions: *std.ArrayList(env.AssertionResult),
+    /// Every verdict in assertion order. `synthesis_first_verdict` splits the
+    /// fitted population's screens from the synthesized population's.
+    verdicts: std.ArrayList(Verdict) = .empty,
+    synthesis_first_verdict: usize = 0,
+    circuit: ?Circuit = null,
+    outcome: Outcome = .unbound,
+    fitted: Results = .{},
+    fitted_response: Response = .{},
+    synthesis: ?SynthResult = null,
+    synthesis_results: Results = .{},
+    synthesis_response: Response = .{},
+    schedule: [3]ScheduleEntry = @splat(.{ .pll_n = 0, .kvco_hz_per_v = 0, .step = 0, .current_a = 0 }),
+    schedule_len: usize = 0,
+    suggestion: ?Suggestion = null,
 };
 
 fn outputChecks(context: *Context, spec: Spec) std.mem.Allocator.Error!void {
     if (spec.circuit.op_amp.supply_v.min <= 0 or spec.circuit.op_amp.supply_v.max <= 0) return;
     const swing_min = spec.circuit.op_amp.output_headroom_v.min;
     const swing_max = spec.circuit.op_amp.supply_v.min - spec.circuit.op_amp.output_headroom_v.max;
-    try append(context, spec, spec.requirements.vtune_v.min >= swing_min and spec.requirements.vtune_v.max <= swing_max, "{s}: worst-case op-amp output range is {d:.2}-{d:.2} V; required VTUNE is {d:.2}-{d:.2} V", .{ spec.name, swing_min, swing_max, spec.requirements.vtune_v.min, spec.requirements.vtune_v.max });
-    if (spec.circuit.op_amp.max_supply_v > 0) try append(context, spec, spec.circuit.op_amp.supply_v.max <= spec.circuit.op_amp.max_supply_v, "{s}: loop rail maximum {d:.2} V is within op-amp {d:.2} V operating maximum ({d:.2} V margin)", .{ spec.name, spec.circuit.op_amp.supply_v.max, spec.circuit.op_amp.max_supply_v, spec.circuit.op_amp.max_supply_v - spec.circuit.op_amp.supply_v.max });
+    try append(context, spec, .output_swing, spec.requirements.vtune_v.min >= swing_min and spec.requirements.vtune_v.max <= swing_max, "{s}: worst-case op-amp output range is {d:.2}-{d:.2} V; required VTUNE is {d:.2}-{d:.2} V", .{ spec.name, swing_min, swing_max, spec.requirements.vtune_v.min, spec.requirements.vtune_v.max });
+    if (spec.circuit.op_amp.max_supply_v > 0) try append(context, spec, .op_amp_supply, spec.circuit.op_amp.supply_v.max <= spec.circuit.op_amp.max_supply_v, "{s}: loop rail maximum {d:.2} V is within op-amp {d:.2} V operating maximum ({d:.2} V margin)", .{ spec.name, spec.circuit.op_amp.supply_v.max, spec.circuit.op_amp.max_supply_v, spec.circuit.op_amp.max_supply_v - spec.circuit.op_amp.supply_v.max });
 }
 
 fn rampChecks(context: *Context, spec: Spec, min_bandwidth_hz: f64) std.mem.Allocator.Error!void {
@@ -431,10 +710,13 @@ fn rampChecks(context: *Context, spec: Spec, min_bandwidth_hz: f64) std.mem.Allo
     // Standard type-II envelope estimate near 50° PM: fc ≈ 1.4 fn.
     const natural_hz = min_bandwidth_hz / 1.4;
     const phase_error = slope / (2.0 * std.math.pi * natural_hz * natural_hz);
-    if (spec.requirements.ramp.max_phase_error_rad > 0) try append(context, spec, phase_error <= spec.requirements.ramp.max_phase_error_rad, "{s}: linear-ramp phase-error estimate is {d:.2} rad at the narrowest loop (limit {d:.2} rad; fc/1.4 envelope model)", .{ spec.name, phase_error, spec.requirements.ramp.max_phase_error_rad });
+    context.fitted.ramp_phase_error_rad = phase_error;
+    if (spec.requirements.ramp.max_phase_error_rad > 0) try append(context, spec, .ramp_phase_error, phase_error <= spec.requirements.ramp.max_phase_error_rad, "{s}: linear-ramp phase-error estimate is {d:.2} rad at the narrowest loop (limit {d:.2} rad; fc/1.4 envelope model)", .{ spec.name, phase_error, spec.requirements.ramp.max_phase_error_rad });
     if (spec.circuit.op_amp.slew_rate_v_per_s > 0) {
         const required = slope / spec.circuit.kvco_hz_per_v.min;
-        try append(context, spec, required <= spec.circuit.op_amp.slew_rate_v_per_s, "{s}: VTUNE slew requires {d:.3} V/µs; op amp provides {d:.1} V/µs", .{ spec.name, required / 1e6, spec.circuit.op_amp.slew_rate_v_per_s / 1e6 });
+        context.fitted.vtune_slew_required_v_per_s = required;
+        context.fitted.vtune_slew_available_v_per_s = spec.circuit.op_amp.slew_rate_v_per_s;
+        try append(context, spec, .vtune_slew, required <= spec.circuit.op_amp.slew_rate_v_per_s, "{s}: VTUNE slew requires {d:.3} V/µs; op amp provides {d:.1} V/µs", .{ spec.name, required / 1e6, spec.circuit.op_amp.slew_rate_v_per_s / 1e6 });
     }
 }
 
@@ -445,7 +727,7 @@ fn chargePumpSuggestion(context: *Context, spec: Spec, corner: Corner, current_m
     var best_min_bw: f64 = 0;
     var best_max_bw: f64 = 0;
     for (1..17) |step| {
-        const icp = 5e-3 * @as(f64, @floatFromInt(step)) / 16.0;
+        const icp = adf4159_full_scale_a * @as(f64, @floatFromInt(step)) / 16.0;
         var candidate = Sweep{};
         const kvco_mid = @sqrt(spec.circuit.kvco_hz_per_v.min * spec.circuit.kvco_hz_per_v.max);
         for ([_]f64{ spec.circuit.kvco_hz_per_v.min, kvco_mid, spec.circuit.kvco_hz_per_v.max }) |kvco|
@@ -457,7 +739,8 @@ fn chargePumpSuggestion(context: *Context, spec: Spec, corner: Corner, current_m
             best_max_bw = candidate.max_bandwidth_hz;
         }
     }
-    try warning(context, "{s}: no claim is made that the current population is optimal; best ADF4159 5 mA/16 step is {d:.4} mA with nominal min PM {d:.1}° and LBW {d:.3}-{d:.3} MHz", .{ spec.name, best_current * 1e3, best_min_pm, best_min_bw / 1e6, best_max_bw / 1e6 });
+    context.suggestion = .{ .full_scale_a = adf4159_full_scale_a, .current_a = best_current, .min_phase_margin_deg = best_min_pm, .min_bandwidth_hz = best_min_bw, .max_bandwidth_hz = best_max_bw };
+    try warning(context, .charge_pump_suggestion, "{s}: no claim is made that the current population is optimal; best ADF4159 5 mA/16 step is {d:.4} mA with nominal min PM {d:.1}° and LBW {d:.3}-{d:.3} MHz", .{ spec.name, best_current * 1e3, best_min_pm, best_min_bw / 1e6, best_max_bw / 1e6 });
 }
 
 const SynthResult = struct {
@@ -471,13 +754,14 @@ const e24 = [_]f64{ 1.0, 1.1, 1.2, 1.3, 1.5, 1.6, 1.8, 2.0, 2.2, 2.4, 2.7, 3.0, 
 const synthesis_primes = [_]usize{ 2, 3, 5, 7, 11, 13, 17 };
 
 fn synthesize(context: *Context, spec: Spec, circuit: Circuit) std.mem.Allocator.Error!void {
+    context.synthesis_first_verdict = context.verdicts.items.len;
     const key = synthKey(spec, circuit);
     if (spec.design.pinned) |pin| {
         if (pin.key_lo == key.lo and pin.key_hi == key.hi) {
             try appendSynthesisResult(context, spec, circuit, pinnedResult(spec, circuit, pin));
             return;
         }
-        try warning(context, "{s}: pinned synthesis is stale — the declaration or resolved values no longer match its key, so the full search ran; replace the pin from the line below", .{spec.name});
+        try warning(context, .synthesis_stale_pin, "{s}: pinned synthesis is stale — the declaration or resolved values no longer match its key, so the full search ran; replace the pin from the line below", .{spec.name});
     }
     const result = memoisedSynthesis(spec, circuit);
     try appendSynthesisResult(context, spec, circuit, result);
@@ -506,7 +790,7 @@ fn pinnedResult(spec: Spec, circuit: Circuit, pin: PinnedSynthesis) SynthResult 
 /// lands on the identical f64s either way.
 fn appendPinOffer(context: *Context, spec: Spec, circuit: Circuit, key: content_key.Key, result: SynthResult) std.mem.Allocator.Error!void {
     const c = result.corner;
-    try append(context, spec, true, "{s}: pin this search — (pinned \"{x:0>16}{x:0>16}\" (c-cp {d}pF) (r-in {d}R) (r-feedback {d}R) (c-feedback {d}pF) (c-feedback-hf {d}pF) (r-isolation {d}R) (c-tune {d}pF))", .{ spec.name, key.hi, key.lo, snapE24(c.c_cp * 1e12), snapE24(c.r_in), snapE24(c.r_feedback), snapE24(c.c_feedback * 1e12), snapE24(c.c_feedback_hf * 1e12), snapE24(c.r_isolation), snapE24((c.c_tune - circuit.extra_tune_cap.nominal) * 1e12) });
+    try append(context, spec, .synthesis_pin_offer, true, "{s}: pin this search — (pinned \"{x:0>16}{x:0>16}\" (c-cp {d}pF) (r-in {d}R) (r-feedback {d}R) (c-feedback {d}pF) (c-feedback-hf {d}pF) (r-isolation {d}R) (c-tune {d}pF))", .{ spec.name, key.hi, key.lo, snapE24(c.c_cp * 1e12), snapE24(c.r_in), snapE24(c.r_feedback), snapE24(c.c_feedback * 1e12), snapE24(c.c_feedback_hf * 1e12), snapE24(c.r_isolation), snapE24((c.c_tune - circuit.extra_tune_cap.nominal) * 1e12) });
 }
 
 // ── Synthesis memo ────────────────────────────────────────────────────────
@@ -828,7 +1112,7 @@ fn profileSample(spec: Spec, sample_index: usize) ?OperatingPoint {
 
 fn scheduledCurrent(spec: Spec, point: OperatingPoint, anchor_step: usize) f64 {
     const first = parseOperatingPoint(spec.design.operating_curve.point_nodes[0]) catch return spec.circuit.charge_pump.value;
-    const step_a = 5e-3 / 16.0;
+    const step_a = adf4159_full_scale_a / 16.0;
     const target_gain = @as(f64, @floatFromInt(anchor_step)) * step_a * first.kvco_hz_per_v / first.pll_n;
     const ideal_step = target_gain * point.pll_n / point.kvco_hz_per_v / step_a;
     return @as(f64, @floatFromInt(@max(1, @min(16, @as(usize, @intFromFloat(@round(ideal_step))))))) * step_a;
@@ -904,25 +1188,52 @@ fn mergeSweep(target: *Sweep, source: Sweep) void {
 
 fn appendSynthesisResult(context: *Context, spec: Spec, circuit: Circuit, result: SynthResult) std.mem.Allocator.Error!void {
     const c = result.corner;
-    try append(context, spec, true, "{s}: E24 synthesis replaces C_CP {d:.1}→{d:.1} pF, R_IN {d:.0}→{d:.0} Ω, R_FB {d:.0}→{d:.0} Ω, C_FB {d:.1}→{d:.1} pF, C_FB_HF {d:.1}→{d:.1} pF, R_ISO {d:.0}→{d:.0} Ω, and C_VTUNE {d:.1}→{d:.1} pF", .{ spec.name, circuit.c_cp.nominal * 1e12, c.c_cp * 1e12, circuit.r_in.nominal, c.r_in, circuit.r_feedback.nominal, c.r_feedback, circuit.c_feedback.nominal * 1e12, c.c_feedback * 1e12, circuit.c_feedback_hf.nominal * 1e12, c.c_feedback_hf * 1e12, circuit.r_isolation.nominal, c.r_isolation, circuit.c_tune.nominal * 1e12, (c.c_tune - circuit.extra_tune_cap.nominal) * 1e12 });
+    context.synthesis = result;
+    context.synthesis_results = synthesisResults(spec, result);
+    context.synthesis_results.vtune_slew_required_v_per_s = context.fitted.vtune_slew_required_v_per_s;
+    context.synthesis_results.vtune_slew_available_v_per_s = context.fitted.vtune_slew_available_v_per_s;
+    try append(context, spec, .synthesis_replacement, true, "{s}: E24 synthesis replaces C_CP {d:.1}→{d:.1} pF, R_IN {d:.0}→{d:.0} Ω, R_FB {d:.0}→{d:.0} Ω, C_FB {d:.1}→{d:.1} pF, C_FB_HF {d:.1}→{d:.1} pF, R_ISO {d:.0}→{d:.0} Ω, and C_VTUNE {d:.1}→{d:.1} pF", .{ spec.name, circuit.c_cp.nominal * 1e12, c.c_cp * 1e12, circuit.r_in.nominal, c.r_in, circuit.r_feedback.nominal, c.r_feedback, circuit.c_feedback.nominal * 1e12, c.c_feedback * 1e12, circuit.c_feedback_hf.nominal * 1e12, c.c_feedback_hf * 1e12, circuit.r_isolation.nominal, c.r_isolation, circuit.c_tune.nominal * 1e12, (c.c_tune - circuit.extra_tune_cap.nominal) * 1e12 });
     const synthesis_passes = result.tolerance.min_phase_margin_deg >= spec.requirements.phase.target_deg.min and
         result.tolerance.max_phase_margin_deg <= spec.requirements.phase.target_deg.max and
         result.tolerance.max_bandwidth_hz <= synthesisBandwidthMax(spec);
-    try append(context, spec, synthesis_passes, "{s}: synthesized profile gives nominal LBW {d:.3}-{d:.3} MHz / PM {d:.1}-{d:.1}° and tolerance-corner LBW {d:.3}-{d:.3} MHz / PM {d:.1}-{d:.1}°", .{ spec.name, result.nominal.min_bandwidth_hz / 1e6, result.nominal.max_bandwidth_hz / 1e6, result.nominal.min_phase_margin_deg, result.nominal.max_phase_margin_deg, result.tolerance.min_bandwidth_hz / 1e6, result.tolerance.max_bandwidth_hz / 1e6, result.tolerance.min_phase_margin_deg, result.tolerance.max_phase_margin_deg });
+    try append(context, spec, .synthesis_profile, synthesis_passes, "{s}: synthesized profile gives nominal LBW {d:.3}-{d:.3} MHz / PM {d:.1}-{d:.1}° and tolerance-corner LBW {d:.3}-{d:.3} MHz / PM {d:.1}-{d:.1}°", .{ spec.name, result.nominal.min_bandwidth_hz / 1e6, result.nominal.max_bandwidth_hz / 1e6, result.nominal.min_phase_margin_deg, result.nominal.max_phase_margin_deg, result.tolerance.min_bandwidth_hz / 1e6, result.tolerance.max_bandwidth_hz / 1e6, result.tolerance.min_phase_margin_deg, result.tolerance.max_phase_margin_deg });
     const phase_error = rampPhaseError(spec, result.tolerance.min_bandwidth_hz);
-    if (phase_error > 0) try append(context, spec, phase_error <= spec.requirements.ramp.max_phase_error_rad, "{s}: synthesized worst-corner FMCW ramp phase error is {d:.3} rad (limit {d:.3} rad)", .{ spec.name, phase_error, spec.requirements.ramp.max_phase_error_rad });
+    if (phase_error > 0) try append(context, spec, .synthesis_ramp_phase_error, phase_error <= spec.requirements.ramp.max_phase_error_rad, "{s}: synthesized worst-corner FMCW ramp phase error is {d:.3} rad (limit {d:.3} rad)", .{ spec.name, phase_error, spec.requirements.ramp.max_phase_error_rad });
     try appendSchedule(context, spec, result.anchor_step);
+}
+
+/// The synthesized population's numbers, read off the same `SynthResult` the
+/// synthesis assertions format. The slew pair is a property of the ramp and the
+/// op amp rather than of a population, so it is carried over from the fitted
+/// screens unchanged.
+fn synthesisResults(spec: Spec, result: SynthResult) Results {
+    const nominal = summarize(result.nominal);
+    const widest = nominal.max_bandwidth_hz;
+    return .{
+        .nominal = nominal,
+        .tolerance = summarize(result.tolerance),
+        .ramp_phase_error_rad = rampPhaseError(spec, result.tolerance.min_bandwidth_hz),
+        .pfd_lbw_ratio = if (widest > 0) spec.circuit.pfd_hz / widest else 0,
+        .gbw_lbw_ratio = if (widest > 0) spec.circuit.op_amp.gbw_hz / widest else 0,
+    };
 }
 
 fn appendSchedule(context: *Context, spec: Spec, anchor_step: usize) std.mem.Allocator.Error!void {
     const first = parseOperatingPoint(spec.design.operating_curve.point_nodes[0]) catch return;
     const middle = parseOperatingPoint(spec.design.operating_curve.point_nodes[spec.design.operating_curve.point_nodes.len / 2]) catch return;
     const last = parseOperatingPoint(spec.design.operating_curve.point_nodes[spec.design.operating_curve.point_nodes.len - 1]) catch return;
-    try append(context, spec, true, "{s}: ADF4159 I_CP schedule — N={d:.2}/Kvco={d:.0} MHz/V: step {d} ({d:.4} mA); N={d:.2}/{d:.0}: step {d} ({d:.4} mA); N={d:.2}/{d:.0}: step {d} ({d:.4} mA)", .{ spec.name, first.pll_n, first.kvco_hz_per_v / 1e6, currentStep(spec, first, anchor_step), scheduledCurrent(spec, first, anchor_step) * 1e3, middle.pll_n, middle.kvco_hz_per_v / 1e6, currentStep(spec, middle, anchor_step), scheduledCurrent(spec, middle, anchor_step) * 1e3, last.pll_n, last.kvco_hz_per_v / 1e6, currentStep(spec, last, anchor_step), scheduledCurrent(spec, last, anchor_step) * 1e3 });
+    for ([_]OperatingPoint{ first, middle, last }, 0..) |point, index| context.schedule[index] = .{
+        .pll_n = point.pll_n,
+        .kvco_hz_per_v = point.kvco_hz_per_v,
+        .step = currentStep(spec, point, anchor_step),
+        .current_a = scheduledCurrent(spec, point, anchor_step),
+    };
+    context.schedule_len = 3;
+    try append(context, spec, .synthesis_schedule, true, "{s}: ADF4159 I_CP schedule — N={d:.2}/Kvco={d:.0} MHz/V: step {d} ({d:.4} mA); N={d:.2}/{d:.0}: step {d} ({d:.4} mA); N={d:.2}/{d:.0}: step {d} ({d:.4} mA)", .{ spec.name, first.pll_n, first.kvco_hz_per_v / 1e6, currentStep(spec, first, anchor_step), scheduledCurrent(spec, first, anchor_step) * 1e3, middle.pll_n, middle.kvco_hz_per_v / 1e6, currentStep(spec, middle, anchor_step), scheduledCurrent(spec, middle, anchor_step) * 1e3, last.pll_n, last.kvco_hz_per_v / 1e6, currentStep(spec, last, anchor_step), scheduledCurrent(spec, last, anchor_step) * 1e3 });
 }
 
 fn currentStep(spec: Spec, point: OperatingPoint, anchor_step: usize) usize {
-    return @intFromFloat(@round(scheduledCurrent(spec, point, anchor_step) / (5e-3 / 16.0)));
+    return @intFromFloat(@round(scheduledCurrent(spec, point, anchor_step) / (adf4159_full_scale_a / 16.0)));
 }
 
 fn rampPhaseError(spec: Spec, bandwidth_hz: f64) f64 {
@@ -1143,18 +1454,162 @@ fn transimpedance(spec: Spec, c: Corner, s: Complex) Complex {
     return out_per_current.div(one.add(s.scale(c.r_isolation * c.c_tune)));
 }
 
-fn append(context: *Context, spec: Spec, passed: bool, comptime fmt: []const u8, args: anytype) std.mem.Allocator.Error!void {
+/// Publish everything the screens computed. The fitted population always
+/// exists — an unbound declaration reports it with empty refs and the single
+/// binding verdict — and the synthesized one joins it when a search or a pin
+/// produced values.
+fn finish(context: *Context, spec: Spec) std.mem.Allocator.Error!Report {
+    const allocator = context.allocator;
+    const split = if (context.synthesis == null) context.verdicts.items.len else context.synthesis_first_verdict;
+    var populations: std.ArrayList(Population) = .empty;
+    try populations.append(allocator, .{
+        .kind = .fitted,
+        .components = try fittedComponents(allocator, context.circuit),
+        .results = context.fitted,
+        .verdicts = try allocator.dupe(Verdict, context.verdicts.items[0..split]),
+        .response = try fittedResponse(allocator, context, spec),
+    });
+    if (context.synthesis) |result| try populations.append(allocator, .{
+        .kind = .synthesized,
+        .components = try synthesizedComponents(allocator, context.circuit, result.corner),
+        .results = context.synthesis_results,
+        .verdicts = try allocator.dupe(Verdict, context.verdicts.items[split..]),
+        .response = try synthesizedResponse(allocator, spec, result),
+    });
+    return .{
+        .name = spec.name,
+        .mode = spec.mode,
+        .profile = try profileOf(allocator, spec),
+        .outcome = context.outcome,
+        .populations = try populations.toOwnedSlice(allocator),
+        .schedule = try allocator.dupe(ScheduleEntry, context.schedule[0..context.schedule_len]),
+        .suggestion = context.suggestion,
+    };
+}
+
+fn profileOf(allocator: std.mem.Allocator, spec: Spec) std.mem.Allocator.Error!Profile {
+    var points: std.ArrayList(CurvePoint) = .empty;
+    for (spec.design.operating_curve.point_nodes) |node| {
+        const point = parseOperatingPoint(node) catch continue;
+        try points.append(allocator, .{ .pll_n = point.pll_n, .kvco_hz_per_v = point.kvco_hz_per_v });
+    }
+    return .{
+        .topology = .active_inverting,
+        .pfd_hz = spec.circuit.pfd_hz,
+        .charge_pump_a = spec.circuit.charge_pump.value,
+        .charge_pump_tolerance_pct = spec.circuit.charge_pump.tolerance_pct,
+        .charge_pump_full_scale_a = adf4159_full_scale_a,
+        .prescaler = spec.circuit.feedback.prescaler,
+        .pll_n = spec.circuit.feedback.pll_n,
+        .kvco_hz_per_v = spec.circuit.kvco_hz_per_v,
+        .operating_points = try points.toOwnedSlice(allocator),
+        .op_amp_gbw_hz = spec.circuit.op_amp.gbw_hz,
+        .op_amp_dc_gain = spec.circuit.op_amp.dc_gain,
+        .op_amp_slew_rate_v_per_s = spec.circuit.op_amp.slew_rate_v_per_s,
+        .op_amp_max_supply_v = spec.circuit.op_amp.max_supply_v,
+        .output_headroom_v = spec.circuit.op_amp.output_headroom_v,
+        .phase_margin_target_deg = spec.requirements.phase.target_deg,
+        .phase_margin_hard_min_deg = spec.requirements.phase.hard_min_deg,
+        .polarity = spec.circuit.polarity,
+        .supply_v = spec.circuit.op_amp.supply_v,
+        .vtune_v = spec.requirements.vtune_v,
+        .ramp_span_hz = spec.requirements.ramp.span_hz,
+        .ramp_time_s = spec.requirements.ramp.time_s,
+        .max_ramp_phase_error_rad = spec.requirements.ramp.max_phase_error_rad,
+        .extra_tune_cap_f = spec.circuit.extra_tune_cap.value,
+        .extra_tune_cap_tolerance_pct = spec.circuit.extra_tune_cap.tolerance_pct,
+    };
+}
+
+fn fittedComponents(allocator: std.mem.Allocator, circuit: ?Circuit) std.mem.Allocator.Error![]const ComponentValue {
+    var out: [roles.len]ComponentValue = undefined;
+    for (roles, 0..) |role, index| out[index] = .{ .role = role };
+    if (circuit) |c| {
+        const parts = [_]Value{ c.c_cp, c.r_in, c.r_feedback, c.c_feedback, c.c_feedback_hf, c.r_isolation, c.c_tune };
+        for (roles, parts, 0..) |role, part, index|
+            out[index] = .{ .role = role, .value = part.nominal, .tolerance_pct = part.tolerancePctAt(part.nominal), .ref = part.ref };
+    }
+    return allocator.dupe(ComponentValue, &out);
+}
+
+/// The search's winning values on the SAME roles and refs the fitted population
+/// bound — a synthesized value is what an existing part would become, so that
+/// part's designator is what names it. `c_tune` drops the `(extra-tune-cap …)`
+/// the corner folds in, exactly as the pin-offer line prints it.
+fn synthesizedComponents(allocator: std.mem.Allocator, circuit: ?Circuit, corner: Corner) std.mem.Allocator.Error![]const ComponentValue {
+    const c = circuit orelse return &.{};
+    var out: [roles.len]ComponentValue = undefined;
+    const values = [_]f64{ corner.c_cp, corner.r_in, corner.r_feedback, corner.c_feedback, corner.c_feedback_hf, corner.r_isolation, corner.c_tune - c.extra_tune_cap.nominal };
+    const parts = [_]Value{ c.c_cp, c.r_in, c.r_feedback, c.c_feedback, c.c_feedback_hf, c.r_isolation, c.c_tune };
+    for (roles, values, parts, 0..) |role, value, part, index|
+        out[index] = .{ .role = role, .value = value, .tolerance_pct = part.tolerancePctAt(value), .ref = part.ref };
+    return allocator.dupe(ComponentValue, &out);
+}
+
+fn fittedResponse(allocator: std.mem.Allocator, context: *Context, spec: Spec) std.mem.Allocator.Error!Response {
+    const circuit = context.circuit orelse return .{};
+    if (context.outcome != .screened) return .{};
+    var out = context.fitted_response;
+    out.points = try sampleResponse(allocator, spec, nominalCorner(circuit), out.icp_a, out.kvco_hz_per_v);
+    return out;
+}
+
+/// The synthesized trace is taken at the FIRST operating-curve knot with the
+/// current its own schedule assigns there — the point the anchor step is set
+/// from, and so the point the search's acceptance is anchored on.
+fn synthesizedResponse(allocator: std.mem.Allocator, spec: Spec, result: SynthResult) std.mem.Allocator.Error!Response {
+    if (spec.design.operating_curve.point_nodes.len == 0) return .{};
+    const first = parseOperatingPoint(spec.design.operating_curve.point_nodes[0]) catch return .{};
+    var point_spec = spec;
+    point_spec.circuit.feedback.pll_n = first.pll_n;
+    const icp_a = scheduledCurrent(spec, first, result.anchor_step);
+    return .{
+        .points = try sampleResponse(allocator, point_spec, result.corner, icp_a, first.kvco_hz_per_v),
+        .icp_a = icp_a,
+        .kvco_hz_per_v = first.kvco_hz_per_v,
+        .prescaler = spec.circuit.feedback.prescaler,
+        .pll_n = first.pll_n,
+    };
+}
+
+/// A log-spaced open-loop trace over the same 100 Hz … max(PFD, 2·GBW) span the
+/// crossover solver walks, phase-wrapped the same way, so a plotted margin
+/// reads as the screened one.
+fn sampleResponse(allocator: std.mem.Allocator, spec: Spec, corner: Corner, icp_a: f64, kvco_hz_per_v: f64) std.mem.Allocator.Error![]const ResponsePoint {
+    const f_min: f64 = 100;
+    const f_max = @max(spec.circuit.pfd_hz, spec.circuit.op_amp.gbw_hz * 2.0);
+    const log_min = @log10(f_min);
+    const log_span = @log10(f_max) - log_min;
+    const points = try allocator.alloc(ResponsePoint, response_samples);
+    for (points, 0..) |*point, index| {
+        const fraction = @as(f64, @floatFromInt(index)) / @as(f64, @floatFromInt(response_samples - 1));
+        const frequency_hz = std.math.pow(f64, 10.0, log_min + log_span * fraction);
+        const loop = openLoop(spec, corner, icp_a, kvco_hz_per_v, frequency_hz);
+        var phase_deg = std.math.atan2(loop.im, loop.re) * 180.0 / std.math.pi;
+        if (phase_deg > 0) phase_deg -= 360;
+        point.* = .{ .frequency_hz = frequency_hz, .magnitude_db = 20.0 * @log10(@max(1e-300, loop.abs())), .phase_deg = phase_deg };
+    }
+    return points;
+}
+
+fn append(context: *Context, spec: Spec, screen_id: Screen, passed: bool, comptime fmt: []const u8, args: anytype) std.mem.Allocator.Error!void {
+    const is_warning = !passed and spec.mode == .advisory;
     const message = try std.fmt.allocPrint(context.allocator, fmt, args);
     errdefer context.allocator.free(message);
     try context.assertions.append(context.allocator, .{
         .passed = passed,
         .message = message,
-        .is_warning = !passed and spec.mode == .advisory,
+        .is_warning = is_warning,
         .message_owned = true,
+    });
+    try context.verdicts.append(context.allocator, .{
+        .screen = screen_id,
+        .status = if (passed) .pass else if (is_warning) .warn else .fail,
+        .message = message,
     });
 }
 
-fn warning(context: *Context, comptime fmt: []const u8, args: anytype) std.mem.Allocator.Error!void {
+fn warning(context: *Context, screen_id: Screen, comptime fmt: []const u8, args: anytype) std.mem.Allocator.Error!void {
     const message = try std.fmt.allocPrint(context.allocator, fmt, args);
     errdefer context.allocator.free(message);
     try context.assertions.append(context.allocator, .{
@@ -1163,6 +1618,7 @@ fn warning(context: *Context, comptime fmt: []const u8, args: anytype) std.mem.A
         .is_warning = true,
         .message_owned = true,
     });
+    try context.verdicts.append(context.allocator, .{ .screen = screen_id, .status = .warn, .message = message });
 }
 
 fn eq(a: []const u8, b: []const u8) bool {
@@ -1353,6 +1809,7 @@ test "a matching pin bypasses the search and the memo" {
     var assertions: std.ArrayList(env.AssertionResult) = .empty;
     defer freeAssertions(std.testing.allocator, &assertions);
     var context = Context{ .allocator = std.testing.allocator, .assertions = &assertions };
+    defer context.verdicts.deinit(std.testing.allocator);
     try synthesize(&context, fixture.spec, fixture.circuit);
 
     // The E24 line prints the PIN's r_feedback (4300 Ω), not the poison's 1 Ω.
@@ -1380,6 +1837,7 @@ test "a stale pin warns, searches, and offers a fresh pin line" {
     var assertions: std.ArrayList(env.AssertionResult) = .empty;
     defer freeAssertions(std.testing.allocator, &assertions);
     var context = Context{ .allocator = std.testing.allocator, .assertions = &assertions };
+    defer context.verdicts.deinit(std.testing.allocator);
     try synthesize(&context, fixture.spec, fixture.circuit);
 
     try std.testing.expect(messagesContain(&assertions, "pinned synthesis is stale"));
@@ -1427,4 +1885,262 @@ test "synthesize active loop filter over operating curve" {
     try std.testing.expect(result.tolerance.max_phase_margin_deg <= 55);
     try std.testing.expect(result.tolerance.max_bandwidth_hz <= synthesisBandwidthMax(spec));
     try std.testing.expect(rampPhaseError(spec, result.tolerance.min_bandwidth_hz) <= 1);
+}
+
+/// The seven parts one declaration binds, carrying the BOM text and the
+/// dielectric/tolerance attributes `resolveCircuit` and the C0G screen read.
+/// Deliberately not any real design's numbers, for the reason `memo_point_a`
+/// gives: the synthesis memo is process-wide.
+const report_cap_attrs = [_][]const u8{ "np0", "2%" };
+const report_res_attrs = [_][]const u8{"1%"};
+const report_instances = [_]Instance{
+    .{ .ref_des = "C31", .label = "c_cp", .component = "cap", .value = "12pF", .footprint = "", .symbol = "", .attrs = &report_cap_attrs },
+    .{ .ref_des = "R14", .label = "r_in", .component = "res", .value = "220", .footprint = "", .symbol = "", .attrs = &report_res_attrs },
+    .{ .ref_des = "R15", .label = "r_fb", .component = "res", .value = "3000", .footprint = "", .symbol = "", .attrs = &report_res_attrs },
+    .{ .ref_des = "C32", .label = "c_fb", .component = "cap", .value = "82pF", .footprint = "", .symbol = "", .attrs = &report_cap_attrs },
+    .{ .ref_des = "C33", .label = "c_fb_hf", .component = "cap", .value = "2.7pF", .footprint = "", .symbol = "", .attrs = &report_cap_attrs },
+    .{ .ref_des = "R16", .label = "r_iso", .component = "res", .value = "120", .footprint = "", .symbol = "", .attrs = &report_res_attrs },
+    .{ .ref_des = "C34", .label = "c_vtune", .component = "cap", .value = "180pF", .footprint = "", .symbol = "", .attrs = &report_cap_attrs },
+};
+
+const report_point_a = [_]Node{ Node.atom(ast.Span.zero, "point"), Node.float(ast.Span.zero, 26), Node.float(ast.Span.zero, 410e6) };
+const report_point_b = [_]Node{ Node.atom(ast.Span.zero, "point"), Node.float(ast.Span.zero, 33), Node.float(ast.Span.zero, 690e6) };
+const report_points = [_]Node{ Node.list(ast.Span.zero, &report_point_a), Node.list(ast.Span.zero, &report_point_b) };
+
+fn reportBlock() DesignBlock {
+    return .{ .name = "report fixture", .instances = &report_instances, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &.{} };
+}
+
+fn reportSpec() Spec {
+    return .{
+        .name = "pll-loop report fixture",
+        .topology_active_inverting = true,
+        .components = .{ .c_cp = "c_cp", .r_in = "r_in", .r_feedback = "r_fb", .c_feedback = "c_fb", .c_feedback_hf = "c_fb_hf", .r_isolation = "r_iso", .c_tune = "c_vtune" },
+        .circuit = .{
+            .extra_tune_cap = .{ .value = 20e-12, .tolerance_pct = 2 },
+            .pfd_hz = 100e6,
+            .charge_pump = .{ .value = 2.5e-3, .tolerance_pct = 2.5 },
+            .feedback = .{ .prescaler = 4, .pll_n = 26 },
+            .kvco_hz_per_v = .{ .min = 410e6, .max = 690e6 },
+            .op_amp = .{
+                .gbw_hz = 145e6,
+                .dc_gain = 500_000,
+                .supply_v = .{ .min = 5, .max = 5.25 },
+                .max_supply_v = 12,
+                .output_headroom_v = .{ .min = 0.2, .max = 0.3 },
+                .slew_rate_v_per_s = 20e6,
+            },
+            .polarity = .negative,
+        },
+        .requirements = .{
+            .phase = .{ .target_deg = .{ .min = 45, .max = 55 }, .hard_min_deg = 40 },
+            .vtune_v = .{ .min = 0.5, .max = 4.5 },
+            .ramp = .{ .span_hz = 1.5e9, .time_s = 35e-6, .max_phase_error_rad = 1 },
+        },
+    };
+}
+
+fn freeReports(allocator: std.mem.Allocator, list: *std.ArrayList(Report)) void {
+    for (list.items) |report| report.deinit(allocator);
+    list.deinit(allocator);
+}
+
+fn verdictOf(report: Report, screen_id: Screen) ?Verdict {
+    for (report.populations) |population| {
+        for (population.verdicts) |verdict| if (verdict.screen == screen_id) return verdict;
+    }
+    return null;
+}
+
+/// `printed` is a typed number formatted the way its screen's assertion
+/// formats it; it must appear verbatim in that assertion's own text.
+fn expectPrinted(report: Report, screen_id: Screen, printed: []const u8) !void {
+    const verdict = verdictOf(report, screen_id) orelse return error.ScreenMissing;
+    try std.testing.expect(std.mem.indexOf(u8, verdict.message, printed) != null);
+}
+
+fn componentOf(population: Population, role: Role) ComponentValue {
+    for (population.components) |component| if (component.role == role) return component;
+    return .{ .role = role };
+}
+
+/// Concatenating the populations' verdict lists must reproduce the assertion
+/// list: same count, same message bytes, same outcome.
+fn expectVerdictsTrackAssertions(assertions: []const env.AssertionResult, populations: []const Population) !void {
+    var index: usize = 0;
+    for (populations) |population| for (population.verdicts) |verdict| {
+        try std.testing.expect(index < assertions.len);
+        const assertion = assertions[index];
+        try std.testing.expectEqual(assertion.message.ptr, verdict.message.ptr);
+        const expected: Status = if (assertion.passed) .pass else if (assertion.is_warning) .warn else .fail;
+        try std.testing.expectEqual(expected, verdict.status);
+        index += 1;
+    };
+    try std.testing.expectEqual(assertions.len, index);
+}
+
+/// Relative, because a BOM string ("2.7pF") reaches the report through the
+/// same `mantissa * scale` arithmetic every other consumer parses it with,
+/// which is not bit-identical to the literal a test writes.
+fn expectComponentValues(population: Population, values: [roles.len]f64) !void {
+    for (roles, values) |role, value| try std.testing.expectApproxEqRel(value, componentOf(population, role).value, 1e-12);
+}
+
+/// Every schedule entry is a legal ADF4159 step and appears in the schedule
+/// assertion with the same step index and current.
+fn expectScheduleMatchesText(report: Report) !void {
+    var buffer: [128]u8 = undefined;
+    for (report.schedule) |entry| {
+        try std.testing.expect(entry.step >= 1 and entry.step <= 16);
+        try expectPrinted(report, .synthesis_schedule, try std.fmt.bufPrint(&buffer, "step {d} ({d:.4} mA)", .{ entry.step, entry.current_a * 1e3 }));
+    }
+}
+
+/// Frequency strictly increases and phase stays inside the solver's own
+/// (-360°, 0] wrap.
+fn expectTraceWellFormed(response: Response) !void {
+    var previous = response.points[0].frequency_hz;
+    for (response.points[1..]) |point| {
+        try std.testing.expect(point.frequency_hz > previous);
+        try std.testing.expect(point.phase_deg <= 0 and point.phase_deg > -360);
+        previous = point.frequency_hz;
+    }
+}
+
+/// The phase margin a renderer reads off the trace at its first 0 dB crossing.
+fn traceMarginDeg(response: Response) ?f64 {
+    for (response.points[1..], 0..) |point, index| {
+        if (response.points[index].magnitude_db < 0 or point.magnitude_db > 0) continue;
+        return 180.0 + point.phase_deg;
+    }
+    return null;
+}
+
+// spec: pll-loop - each declaration publishes a typed report carrying the numbers its assertion strings print, one verdict per screen matching that assertion's pass/warn/fail
+test "the typed report agrees with the assertion text it accompanies" {
+    const allocator = std.testing.allocator;
+    const block = reportBlock();
+    const spec = reportSpec();
+    var assertions: std.ArrayList(env.AssertionResult) = .empty;
+    defer freeAssertions(allocator, &assertions);
+    var reports: std.ArrayList(Report) = .empty;
+    defer freeReports(allocator, &reports);
+    try evaluate(allocator, &assertions, &reports, &block, spec);
+
+    try std.testing.expectEqual(@as(usize, 1), reports.items.len);
+    const report = reports.items[0];
+    try std.testing.expectEqualStrings(spec.name, report.name);
+    try std.testing.expectEqual(Mode.gate, report.mode);
+    try std.testing.expectEqual(Topology.active_inverting, report.profile.topology);
+    try std.testing.expectEqual(Outcome.screened, report.outcome);
+    try std.testing.expectEqual(@as(f64, 100e6), report.profile.pfd_hz);
+    try std.testing.expectEqual(@as(f64, 20e-12), report.profile.extra_tune_cap_f);
+    try std.testing.expectEqual(Polarity.negative, report.profile.polarity);
+
+    // One population, holding the BOM the block actually carries — the part's
+    // own c-tune value, with the extra tune cap reported separately above.
+    try std.testing.expectEqual(@as(usize, 1), report.populations.len);
+    const fitted = report.populations[0];
+    try std.testing.expectEqual(PopulationKind.fitted, fitted.kind);
+    try std.testing.expectEqual(@as(usize, roles.len), fitted.components.len);
+    try std.testing.expectEqualStrings("R15", componentOf(fitted, .r_feedback).ref);
+    try std.testing.expectEqual(@as(f64, 1), componentOf(fitted, .r_feedback).tolerance_pct);
+    try expectComponentValues(fitted, .{ 12e-12, 220, 3000, 82e-12, 2.7e-12, 120, 180e-12 });
+
+    // Every verdict is the assertion beside it: same order, same bytes, same
+    // outcome.
+    try expectVerdictsTrackAssertions(assertions.items, report.populations);
+
+    // …and every screened number is the one that assertion prints.
+    const results = fitted.results;
+    var buffer: [256]u8 = undefined;
+    try expectPrinted(report, .nominal_sweep, try std.fmt.bufPrint(&buffer, "gives LBW {d:.3}-{d:.3} MHz and phase margin {d:.1}-{d:.1}°", .{ results.nominal.min_bandwidth_hz / 1e6, results.nominal.max_bandwidth_hz / 1e6, results.nominal.min_phase_margin_deg, results.nominal.max_phase_margin_deg }));
+    try expectPrinted(report, .tolerance_corners, try std.fmt.bufPrint(&buffer, "give LBW {d:.3}-{d:.3} MHz and minimum phase margin {d:.1}°", .{ results.tolerance.min_bandwidth_hz / 1e6, results.tolerance.max_bandwidth_hz / 1e6, results.tolerance.min_phase_margin_deg }));
+    try expectPrinted(report, .pfd_ratio, try std.fmt.bufPrint(&buffer, "PFD/LBW ratio is {d:.1} at the widest nominal corner", .{results.pfd_lbw_ratio}));
+    try expectPrinted(report, .gbw_ratio, try std.fmt.bufPrint(&buffer, "op-amp GBW/LBW ratio is {d:.1} at the widest nominal corner", .{results.gbw_lbw_ratio}));
+    try expectPrinted(report, .ramp_phase_error, try std.fmt.bufPrint(&buffer, "phase-error estimate is {d:.2} rad", .{results.ramp_phase_error_rad}));
+    try expectPrinted(report, .vtune_slew, try std.fmt.bufPrint(&buffer, "VTUNE slew requires {d:.3} V/µs; op amp provides {d:.1} V/µs", .{ results.vtune_slew_required_v_per_s / 1e6, results.vtune_slew_available_v_per_s / 1e6 }));
+    try std.testing.expect(results.tolerance.corners > results.nominal.corners);
+    // No operating curve is authored, so its sweeps stay unset.
+    try std.testing.expectEqual(@as(usize, 0), results.curve_nominal.corners);
+}
+
+// spec: pll-loop - a pinned synthesis publishes a second population beside the fitted one, whose components, results and schedule are the pinned answer, and whose verdicts concatenate back into assertion order
+test "both populations round-trip through the typed report" {
+    const allocator = std.testing.allocator;
+    const block = reportBlock();
+    var spec = reportSpec();
+    spec.name = "pll-loop two-population fixture";
+    spec.design.operating_curve = .{ .point_nodes = &report_points };
+    spec.design.synthesis.enabled = true;
+    const circuit = resolveCircuit(&block, spec).?;
+    const key = synthKey(spec, circuit);
+    const pinned = [_]f64{ snapE24(22e-12), snapE24(75), snapE24(4300), snapE24(30e-12), snapE24(1.8e-12), snapE24(36), snapE24(75e-12) };
+    spec.design.pinned = .{ .key_lo = key.lo, .key_hi = key.hi, .values = pinned };
+
+    var assertions: std.ArrayList(env.AssertionResult) = .empty;
+    defer freeAssertions(allocator, &assertions);
+    var reports: std.ArrayList(Report) = .empty;
+    defer freeReports(allocator, &reports);
+    try evaluate(allocator, &assertions, &reports, &block, spec);
+
+    const report = reports.items[0];
+    try std.testing.expectEqual(@as(usize, 2), report.populations.len);
+    const fitted = report.populations[0];
+    const synthesized = report.populations[1];
+    try std.testing.expectEqual(PopulationKind.synthesized, synthesized.kind);
+    try std.testing.expectEqual(@as(usize, 2), report.profile.operating_points.len);
+
+    // The synthesized values are the pin's, carried on the fitted population's
+    // parts; c-tune drops the extra tune cap the corner folds in.
+    try expectComponentValues(synthesized, pinned);
+    try std.testing.expectEqualStrings("C34", componentOf(synthesized, .c_tune).ref);
+    try std.testing.expectEqualStrings(componentOf(fitted, .r_in).ref, componentOf(synthesized, .r_in).ref);
+    try std.testing.expect(componentOf(fitted, .r_feedback).value != componentOf(synthesized, .r_feedback).value);
+
+    // The fitted population keeps its own operating-curve sweeps; the
+    // synthesized one's nominal IS that curve at its scheduled I_CP.
+    try std.testing.expect(fitted.results.curve_nominal.corners > 0);
+    try std.testing.expect(synthesized.results.nominal.corners > 0);
+    var buffer: [256]u8 = undefined;
+    try expectPrinted(report, .synthesis_profile, try std.fmt.bufPrint(&buffer, "nominal LBW {d:.3}-{d:.3} MHz / PM {d:.1}-{d:.1}°", .{ synthesized.results.nominal.min_bandwidth_hz / 1e6, synthesized.results.nominal.max_bandwidth_hz / 1e6, synthesized.results.nominal.min_phase_margin_deg, synthesized.results.nominal.max_phase_margin_deg }));
+    try expectPrinted(report, .synthesis_replacement, try std.fmt.bufPrint(&buffer, "R_FB {d:.0}→{d:.0} Ω", .{ componentOf(fitted, .r_feedback).value, componentOf(synthesized, .r_feedback).value }));
+
+    // Three schedule entries, matching the three knots the schedule line names.
+    try std.testing.expectEqual(@as(usize, 3), report.schedule.len);
+    try std.testing.expectEqual(@as(f64, 26), report.schedule[0].pll_n);
+    try std.testing.expectEqual(@as(f64, 33), report.schedule[2].pll_n);
+    try expectScheduleMatchesText(report);
+
+    try expectVerdictsTrackAssertions(assertions.items, report.populations);
+    // A matching pin answers without offering a fresh one.
+    try std.testing.expectEqual(@as(?Verdict, null), verdictOf(report, .synthesis_pin_offer));
+}
+
+// spec: pll-loop - the open-loop trace is deterministically log-spaced over the solver's own span and reads back a phase margin inside the nominal sweep it accompanies
+test "the reported open-loop trace agrees with the screened phase margin" {
+    const allocator = std.testing.allocator;
+    const block = reportBlock();
+    const spec = reportSpec();
+    var assertions: std.ArrayList(env.AssertionResult) = .empty;
+    defer freeAssertions(allocator, &assertions);
+    var reports: std.ArrayList(Report) = .empty;
+    defer freeReports(allocator, &reports);
+    try evaluate(allocator, &assertions, &reports, &block, spec);
+
+    const response = reports.items[0].populations[0].response;
+    try std.testing.expectEqual(response_samples, response.points.len);
+    try std.testing.expectEqual(spec.circuit.charge_pump.value, response.icp_a);
+    try std.testing.expectEqual(spec.circuit.feedback.pll_n, response.pll_n);
+    try std.testing.expectApproxEqAbs(@as(f64, 100), response.points[0].frequency_hz, 1e-9);
+    try std.testing.expectApproxEqAbs(@sqrt(spec.circuit.kvco_hz_per_v.min * spec.circuit.kvco_hz_per_v.max), response.kvco_hz_per_v, 1);
+    try expectTraceWellFormed(response);
+
+    // The margin a renderer reads at the trace's 0 dB crossing lies inside the
+    // nominal sweep the same evaluation screened. The sampling is coarser than
+    // the solver's bisection, so the reading is bracketed, not exact.
+    const nominal = reports.items[0].populations[0].results.nominal;
+    const margin_deg = traceMarginDeg(response) orelse return error.NoCrossover;
+    try std.testing.expect(margin_deg >= nominal.min_phase_margin_deg - 2);
+    try std.testing.expect(margin_deg <= nominal.max_phase_margin_deg + 2);
 }
