@@ -157,6 +157,7 @@ pub const ScopeForm = enum {
     fabrication_layer,
     net_class,
     pll_loop,
+    frequency_plan,
     design_rules,
     pcb_plan,
 
@@ -209,6 +210,7 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "fabrication-layer", .fabrication_layer },
     .{ "net-class", .net_class },
     .{ "pll-loop", .pll_loop },
+    .{ "frequency-plan", .frequency_plan },
     .{ "design-rules", .design_rules },
     .{ "pcb-plan", .pcb_plan },
 });
@@ -843,6 +845,36 @@ pub const scope_form_docs = blk: {
             "warning and the full search runs, so pinning can only skip recomputation, never change an answer. " ++
             "Use advisory mode while Kvco or firmware Icp is provisional; gate mode makes failed limits build-blocking. " ++
             "This is not a sampled-PFD, phase-noise, nonlinear acquisition, SPICE, or capacitive-load-stability sign-off.",
+    } };
+    t[@backingInt(ScopeForm.frequency_plan)] = .{ .scope = tl, .doc = .{
+        .syntax = "(frequency-plan \"name\" (mode advisory|gate) (output-band LO_HZ HI_HZ) " ++
+            "[(source [(range LO_HZ HI_HZ)] [(delivered LO_HZ HI_HZ)])] " ++
+            "(lo HZ [(drive DBM)] [(drive-window MIN_DBM MAX_DBM)]) " ++
+            "(mixer difference [(sideband high|low|either)]) " ++
+            "[(if-filter (low-pass HZ))] [(rf-filter [(low-pass HZ)] [(high-pass HZ)])] " ++
+            "[(spurs [(max-order M)] [(in-band-limit DBC)])] " ++
+            "[(spur-table (product M N DBC)…)])",
+        .summary = "Screen a fixed-LO downconversion frequency plan and enumerate its spurious products. " ++
+            "(output-band) is what the instrument is commanded to deliver, (lo) the fixed local oscillator, and " ++
+            "(mixer difference (sideband …)) selects RF = LO + IF (high), LO − IF (low), or plans BOTH (either). " ++
+            "From those the swept RF window is exact, so band closure against the source's (delivered) passband and " ++
+            "(range) is a containment test that names the uncovered sub-interval and the output frequencies it costs — " ++
+            "the check that decides an LO choice instead of arguing about it. The image sideband is placed and " ++
+            "reported as rejected only when a declared (rf-filter) cutoff or the delivered passband actually excludes it. " ++
+            "Every (m,n) product is enumerated by INTERVAL arithmetic over the whole RF sweep rather than by sampling: " ++
+            "|m·RF − n·LO| is folded onto the positive axis (into two branches when it crosses DC inside the sweep, so a " ++
+            "straddling product is correctly seen to reach down to DC) and classified co-channel with the output band, " ++
+            "rejected by a declared (if-filter) cutoff, or out of band. The (m,m) diagonal family, which lands on exact " ++
+            "multiples of the commanded IF and so cannot be moved by retuning the LO, is counted at the band's low edge " ++
+            "with the IF above which the band carries none. Filters are modelled at CUTOFF level only — a product is " ++
+            "rejected when its whole interval lies beyond a declared cutoff; there is no rolloff, insertion loss, or " ++
+            "group delay. Levels are claimed ONLY where (spur-table (product M N DBC)) supplies measured or datasheet " ++
+            "suppression, checked against (spurs (in-band-limit DBC)); every other row is a placement with no level " ++
+            "attached, and an unlevelled co-channel product is reported as such rather than assumed small. " ++
+            "(spurs (max-order M)) bounds enumeration at 9. Sum mixing is refused rather than approximated. " ++
+            "Use advisory mode while an LO frequency or a drive measurement is provisional; gate mode makes a failed " ++
+            "plan limit build-blocking. This is not a phase-noise, reciprocal-mixing, compression, or two-tone " ++
+            "intermodulation analysis.",
     } };
     t[@backingInt(ScopeForm.design_rules)] = .{ .scope = tl, .doc = .{
         .syntax = "(design-rules [(clearance MM)] [(min-drill MM)] [(mask-margin MM)] [(mask-relief-corner-radius MM)] [(copper-edge MM)] [(component-edge MM)] " ++

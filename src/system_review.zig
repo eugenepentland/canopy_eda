@@ -57,6 +57,7 @@ pub const GeneratedSection = enum {
     @"power-summary",
     @"thermal-summary",
     @"pll-summary",
+    @"frequency-plan-summary",
     @"erc-summary",
     @"mechanical-summary",
     @"open-items",

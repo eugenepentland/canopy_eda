@@ -11,6 +11,7 @@ const build_id = @import("build_id.zig");
 const Evaluator = @import("eval/evaluator.zig").Evaluator;
 const env_mod = @import("eval/env.zig");
 const erc = @import("erc.zig");
+const frequency_plan = @import("frequency_plan.zig");
 const pll_loop = @import("pll_loop.zig");
 /// The fab view's outline rectangle type, aliased through the module that
 /// declares it so this file does not depend on the placement optimizer.
@@ -75,6 +76,13 @@ const max_retained_erc_findings: usize = 32;
 const max_retained_pll_reports: usize = 16;
 const max_retained_pll_screens: usize = 32;
 const max_retained_schedule_entries: usize = 32;
+const max_retained_frequency_reports: usize = 8;
+const max_retained_frequency_screens: usize = 32;
+/// One sideband plan enumerates at most `frequency_plan.max_products` (83)
+/// rows today, so this ceiling does not bite on any authorable declaration —
+/// it is the bound that keeps a future order limit from growing the document
+/// without one. A section that truncates says so in its own rendered text.
+const max_retained_spur_products: usize = 96;
 
 /// What declared the rail and how much it can deliver. Grouped because a
 /// source without its capacity says nothing a budget table can use.
@@ -258,6 +266,89 @@ pub const PllReport = struct {
     schedule: []const pll_loop.ScheduleEntry,
 };
 
+/// One frequency-plan screen's outcome, retained independently of the
+/// evaluator's assertion list — the same copy discipline `PllScreen` uses.
+pub const FrequencyScreen = struct {
+    screen: []const u8,
+    status: frequency_plan.Status,
+    message: []const u8,
+};
+
+/// The screens charged to one sideband plan: how many of each outcome, and the
+/// non-passing ones themselves capped at `max_retained_frequency_screens`.
+pub const FrequencyScreens = struct {
+    pass: usize = 0,
+    warn: usize = 0,
+    fail: usize = 0,
+    failing: []const FrequencyScreen = &.{},
+};
+
+/// One enumerated mixer product, reduced to what a document renders.
+///
+/// The engine's `Product` also carries the monotone `branches` of
+/// `|m·RF − n·LO|`; they are deliberately NOT retained. `band` is already the
+/// hull of those branches, and a renderer that reached for the endpoints would
+/// be recomputing an overlap the engine has settled — so the type it renders
+/// from does not offer them.
+pub const SpurProduct = struct {
+    order: frequency_plan.Order,
+    /// Hull of every branch: the interval a table row states.
+    band: frequency_plan.Band,
+    placement: frequency_plan.Placement,
+    /// `.none` unless `placement == .filter_rejected`.
+    rejection: frequency_plan.Rejection,
+    level: frequency_plan.Level,
+};
+
+/// One sideband plan's enumerated products. `enumerated` is how many the
+/// engine produced, so `rows.len < enumerated` is exactly the truncation a
+/// document must state rather than hide.
+pub const SpurTable = struct {
+    /// Retained rows, capped at `max_retained_spur_products`.
+    rows: []const SpurProduct = &.{},
+    enumerated: usize = 0,
+};
+
+/// One analysed sideband of one `(frequency-plan …)` declaration.
+pub const FrequencyPlanSideband = struct {
+    sideband: frequency_plan.Sideband,
+    rf: frequency_plan.RfWindow = .{},
+    image: frequency_plan.Image = .{},
+    diagonal: frequency_plan.Diagonal = .{},
+    spurs: SpurTable = .{},
+    screens: FrequencyScreens = .{},
+};
+
+/// The declaration figures a spur table prints beside its results. The
+/// authored `(spur-table …)` rows are not retained separately: every entry
+/// that matched a product already travels on that product's `level`.
+pub const FrequencyProfileLimits = struct {
+    max_order: u8 = 0,
+    in_band_limit_dbc: f64 = 0,
+    limit_declared: bool = false,
+};
+
+/// What one `(frequency-plan …)` declaration states, normalized to SI.
+pub const FrequencyProfile = struct {
+    plan: frequency_plan.PlanConfig = .{},
+    mixer: frequency_plan.MixerConfig = .{},
+    spurs: FrequencyProfileLimits = .{},
+};
+
+/// One `(frequency-plan …)` declaration's result, in snapshot-owned memory.
+/// The evaluator's own `frequency_plan.Report` borrows its name and every
+/// verdict message from the assertion list and is freed with the evaluator, so
+/// every string here is a copy.
+pub const FrequencyPlanReport = struct {
+    name: []const u8,
+    mode: frequency_plan.Mode,
+    outcome: frequency_plan.Outcome,
+    profile: FrequencyProfile,
+    /// One entry per analysed sideband, in evaluation order — `(sideband
+    /// either)` publishes two, high side first.
+    plans: []const FrequencyPlanSideband,
+};
+
 /// Everything the system document computes from the design rather than reads
 /// from authored prose, gathered from the one evaluation this snapshot already
 /// pays for. Grouped so a surface that carries board evidence carries all of
@@ -271,6 +362,9 @@ pub const Engineering = struct {
     /// One entry per `(pll-loop …)` declaration, capped at
     /// `max_retained_pll_reports`.
     pll: []const PllReport = &.{},
+    /// One entry per `(frequency-plan …)` declaration, capped at
+    /// `max_retained_frequency_reports`.
+    frequency: []const FrequencyPlanReport = &.{},
     bom: bom_html.BomRollup = .{},
 };
 
@@ -426,7 +520,10 @@ fn buildImpl(
         named.block,
         doc,
         violations,
-        evaluator.pll_reports.items,
+        .{
+            .pll = evaluator.pll_reports.items,
+            .frequency = evaluator.frequency_plan_reports.items,
+        },
         fv.placement.board_rect,
     );
     read_trace.end();
@@ -466,6 +563,14 @@ fn buildImpl(
     };
 }
 
+/// The typed analysis records the evaluator publishes beside its assertion
+/// list. Grouped so one evaluation hands the collector every declared-analysis
+/// result in a single argument instead of a growing parameter list.
+const EvaluatedReports = struct {
+    pll: []const pll_loop.Report = &.{},
+    frequency: []const frequency_plan.Report = &.{},
+};
+
 /// Retain everything the system document computes from this design, copying
 /// each string into the snapshot's allocator: the evaluator that owns the PLL
 /// verdict messages is destroyed when `buildImpl` returns.
@@ -478,7 +583,7 @@ fn collectEngineering(
     block: *const env_mod.DesignBlock,
     doc: review.ReviewDoc,
     violations: []const erc.Violation,
-    pll_reports: []const pll_loop.Report,
+    reports: EvaluatedReports,
     board_rect: ?BoardRect,
 ) !Engineering {
     return .{
@@ -486,7 +591,8 @@ fn collectEngineering(
         .thermal = try collectThermal(allocator, doc.power.thermal, doc.power.scenarios),
         .checks = try collectChecks(allocator, violations, doc.assertions),
         .mechanical = collectMechanical(block, board_rect),
-        .pll = try collectPllReports(allocator, pll_reports),
+        .pll = try collectPllReports(allocator, reports.pll),
+        .frequency = try collectFrequencyPlans(allocator, reports.frequency),
         .bom = try bom_html.rollupBom(allocator, block),
     };
 }
@@ -698,6 +804,89 @@ fn collectPllPopulation(
     }
     copy.failing = failing.items;
     return copy;
+}
+
+/// Retain every `(frequency-plan …)` result, copying the declaration name and
+/// each verdict message out of the assertion list the evaluator owns. The
+/// engine's `Report.deinit` stays the evaluator's business; nothing here
+/// aliases it.
+fn collectFrequencyPlans(
+    allocator: std.mem.Allocator,
+    reports: []const frequency_plan.Report,
+) ![]const FrequencyPlanReport {
+    const retained = @min(reports.len, max_retained_frequency_reports);
+    const out = try allocator.alloc(FrequencyPlanReport, retained);
+    for (reports[0..retained], out) |report, *copy| copy.* = .{
+        .name = try allocator.dupe(u8, report.name),
+        .mode = report.mode,
+        .outcome = report.outcome,
+        .profile = .{
+            .plan = report.profile.plan,
+            .mixer = report.profile.mixer,
+            .spurs = .{
+                .max_order = report.profile.spurs.max_order,
+                .in_band_limit_dbc = report.profile.spurs.in_band_limit_dbc,
+                .limit_declared = report.profile.spurs.limit_declared,
+            },
+        },
+        .plans = try collectFrequencySidebands(allocator, report.plans),
+    };
+    return out;
+}
+
+fn collectFrequencySidebands(
+    allocator: std.mem.Allocator,
+    plans: []const frequency_plan.SidebandPlan,
+) ![]const FrequencyPlanSideband {
+    const out = try allocator.alloc(FrequencyPlanSideband, plans.len);
+    for (plans, out) |plan, *copy| copy.* = .{
+        .sideband = plan.sideband,
+        .rf = plan.rf,
+        .image = plan.image,
+        .diagonal = plan.diagonal,
+        .spurs = try collectSpurTable(allocator, plan.products),
+        .screens = try collectFrequencyScreens(allocator, plan.verdicts),
+    };
+    return out;
+}
+
+fn collectSpurTable(
+    allocator: std.mem.Allocator,
+    products: []const frequency_plan.Product,
+) !SpurTable {
+    const retained = @min(products.len, max_retained_spur_products);
+    const rows = try allocator.alloc(SpurProduct, retained);
+    for (products[0..retained], rows) |product, *copy| copy.* = .{
+        .order = product.order,
+        .band = product.band,
+        .placement = product.placement,
+        .rejection = product.rejection,
+        .level = product.level,
+    };
+    return .{ .rows = rows, .enumerated = products.len };
+}
+
+fn collectFrequencyScreens(
+    allocator: std.mem.Allocator,
+    verdicts: []const frequency_plan.Verdict,
+) !FrequencyScreens {
+    var out: FrequencyScreens = .{};
+    var failing: std.ArrayList(FrequencyScreen) = .empty;
+    for (verdicts) |verdict| {
+        switch (verdict.status) {
+            .pass => out.pass += 1,
+            .warn => out.warn += 1,
+            .fail => out.fail += 1,
+        }
+        if (verdict.status == .pass or failing.items.len >= max_retained_frequency_screens) continue;
+        try failing.append(allocator, .{
+            .screen = @tagName(verdict.screen),
+            .status = verdict.status,
+            .message = try allocator.dupe(u8, verdict.message),
+        });
+    }
+    out.failing = failing.items;
+    return out;
 }
 
 /// Re-read every archived source and the optional notes sidecar after the
@@ -1365,6 +1554,69 @@ test "loop-filter evidence copies screens and retains only the failures" {
     @memset(&message_buffer, 'x');
     try std.testing.expectEqualStrings("chirp-loop", copied[0].name);
     try std.testing.expectEqualStrings("phase margin 31.2 deg below 45.0 deg target", population.failing[0].message);
+}
+
+// spec: system-review - generated frequency-plan evidence copies each declaration's screens out of the evaluator, keeps only the non-passing ones, and retains each product's band hull rather than its branches
+test "frequency-plan evidence copies screens and retains the product hulls" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var name_buffer = "Barracuda Band 1".*;
+    var message_buffer = "leaves the delivered passband".*;
+    const verdicts = [_]frequency_plan.Verdict{
+        .{ .screen = .lo_drive, .status = .pass, .message = "ok" },
+        .{ .screen = .band_closure, .status = .fail, .message = &message_buffer },
+        .{ .screen = .spur_coverage, .status = .warn, .message = "no declared suppression" },
+    };
+    const products = [_]frequency_plan.Product{.{
+        .order = .{ .m = 2, .n = 2 },
+        // Two monotone branches whose hull is what a table must render.
+        .branches = .{ .parts = .{ .{ .lo_hz = 0, .hi_hz = 3e8 }, .{ .lo_hz = 0, .hi_hz = 3e9 } }, .len = 2 },
+        .band = .{ .lo_hz = 0, .hi_hz = 3e9 },
+        .placement = .co_channel,
+        .level = .{ .dbc = -62, .declared = true, .verdict = .within_limit },
+    }};
+    const plans = [_]frequency_plan.SidebandPlan{.{
+        .sideband = .high,
+        .rf = .{ .required = .{ .lo_hz = 11e9, .hi_hz = 12.45e9 }, .covered_checked = true },
+        .diagonal = .{ .worst_case_count = 29, .enumerated_count = 4 },
+        .products = &products,
+        .verdicts = &verdicts,
+    }};
+    const reports = [_]frequency_plan.Report{.{
+        .name = &name_buffer,
+        .mode = .gate,
+        .outcome = .screened,
+        .profile = .{ .spurs = .{ .max_order = 5, .in_band_limit_dbc = -60, .limit_declared = true } },
+        .plans = &plans,
+    }};
+
+    const copied = try collectFrequencyPlans(allocator, &reports);
+    try std.testing.expectEqual(@as(usize, 1), copied.len);
+    try std.testing.expectEqualStrings("Barracuda Band 1", copied[0].name);
+    try std.testing.expectEqual(@as(u8, 5), copied[0].profile.spurs.max_order);
+    const plan = copied[0].plans[0];
+    try std.testing.expectEqual(@as(usize, 1), plan.screens.pass);
+    try std.testing.expectEqual(@as(usize, 1), plan.screens.warn);
+    try std.testing.expectEqual(@as(usize, 1), plan.screens.fail);
+    try std.testing.expectEqual(@as(usize, 2), plan.screens.failing.len);
+    try std.testing.expectEqualStrings("band_closure", plan.screens.failing[0].screen);
+    // Both diagonal counts survive the copy, unconflated.
+    try std.testing.expectEqual(@as(usize, 29), plan.diagonal.worst_case_count);
+    try std.testing.expectEqual(@as(usize, 4), plan.diagonal.enumerated_count);
+    // The retained row is the hull; the branches are deliberately not carried.
+    try std.testing.expectEqual(@as(usize, 1), plan.spurs.rows.len);
+    try std.testing.expectEqual(@as(usize, 1), plan.spurs.enumerated);
+    try std.testing.expectEqual(@as(f64, 3e9), plan.spurs.rows[0].band.hi_hz);
+    try std.testing.expect(!@hasField(SpurProduct, "branches"));
+
+    // The evaluator's buffers are its own: overwriting them must not disturb
+    // anything the snapshot retained.
+    @memset(&name_buffer, 'x');
+    @memset(&message_buffer, 'x');
+    try std.testing.expectEqualStrings("Barracuda Band 1", copied[0].name);
+    try std.testing.expectEqualStrings("leaves the delivered passband", plan.screens.failing[0].message);
 }
 
 // spec: system-review - the generated BOM rollup counts the exact placements, lines and do-not-populate parts the archived bom.csv carries
