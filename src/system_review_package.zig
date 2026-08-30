@@ -585,6 +585,7 @@ fn addBoardEvidenceBytes(
         snapshot.review.pdf,
         snapshot.review.json,
         snapshot.review.bom_csv,
+        snapshot.review.diagram_svg,
         snapshot.physical.pcb_png,
     };
     for (slices) |bytes| try addBoundedBytes(total, bytes.len, max_analysis_evidence_bytes);
@@ -1134,6 +1135,7 @@ fn preflightArchivePayload(
             board.snapshot.review.pdf,
             board.snapshot.review.json,
             board.snapshot.review.bom_csv,
+            board.snapshot.review.diagram_svg,
             board.snapshot.physical.pcb_png,
             board.fab.readiness.json,
         };
@@ -1267,6 +1269,7 @@ fn validateArchiveEntries(
     for (entries) |entry| {
         if (!portableArchivePath(entry.name) or entry.name.len > std.math.maxInt(u16))
             return error.UnsafeArchivePath;
+        if (!allowedSvgMember(entry.name)) return error.UnexpectedSvgMember;
         if (entry.data.len > std.math.maxInt(u32) or
             entry.data.len > max_archive_payload_bytes - payload_bytes)
             return error.ArchiveTooLarge;
@@ -1337,6 +1340,29 @@ fn reservedStem(segment: []const u8, reserved: []const u8) bool {
     return segment.len == reserved.len or segment[reserved.len] == '.';
 }
 
+/// The one archive filename allowed to be an SVG, under each board's evidence
+/// directory.
+const board_diagram_member = "diagram.svg";
+
+/// SVG is admitted at exactly one shape of path — `boards/<role>/diagram.svg` —
+/// and refused everywhere else, in draft and release alike.
+///
+/// The distinction is provenance, not the format: this file is written by the
+/// diagram renderer inside this process from an evaluated design, so its markup
+/// is ours. An SVG a person uploaded is not, and can carry script, so
+/// `system_review_assets.Kind` still refuses SVG at the upload boundary — this
+/// check keeps that refusal true of the archive as well, so a future asset kind
+/// cannot quietly smuggle a hand-authored SVG in beside the review Markdown.
+fn allowedSvgMember(name: []const u8) bool {
+    if (!std.ascii.endsWithIgnoreCase(name, ".svg")) return true;
+    const boards_prefix = "boards/";
+    if (!std.mem.startsWith(u8, name, boards_prefix)) return false;
+    const tail = name[boards_prefix.len..];
+    const separator = std.mem.indexOfScalar(u8, tail, '/') orelse return false;
+    if (separator == 0) return false;
+    return std.mem.eql(u8, tail[separator + 1 ..], board_diagram_member);
+}
+
 fn draftForbiddenMember(name: []const u8) bool {
     if (std.mem.startsWith(u8, name, "fab/")) return true;
     if (export_gerber.isCamOutputFilename(name)) return true;
@@ -1375,6 +1401,13 @@ fn appendBoardEntries(
     for (files) |file| try entries.append(allocator, .{
         .name = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, file.suffix }),
         .data = file.data,
+    });
+    // Review evidence, not CAM: the block diagram belongs in the draft as much
+    // as review.md does. A design the diagram engine declines to draw yields no
+    // bytes, and the member is omitted rather than archived empty.
+    if (board.snapshot.review.diagram_svg.len > 0) try entries.append(allocator, .{
+        .name = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, board_diagram_member }),
+        .data = board.snapshot.review.diagram_svg,
     });
     if (board.snapshot.review.notes_source) |notes_source| try entries.append(allocator, .{
         .name = try std.fmt.allocPrint(allocator, "{s}/design-notes.md", .{prefix}),
@@ -1808,6 +1841,35 @@ test "draft archive validation rejects CAM traversal and duplicate members" {
     try std.testing.expectError(error.DraftContainsCam, validateArchiveEntries(std.testing.allocator, &gerber, false));
 }
 
+// spec: system-review - the only archived SVG is the tool-rendered per-board block diagram; SVG is refused at every other archive path in draft and release alike
+test "SVG is admitted only as tool-rendered per-board diagram evidence" {
+    try std.testing.expect(allowedSvgMember("boards/rf/diagram.svg"));
+    // Not SVG at all ⇒ this rule has no opinion.
+    try std.testing.expect(allowedSvgMember("boards/rf/review.md"));
+    // The permitted name is exact, so no case variant widens the opening.
+    try std.testing.expect(!allowedSvgMember("boards/rf/DIAGRAM.SVG"));
+    // A user-uploaded asset stays refused here even if the assets allowlist
+    // ever grew an SVG kind.
+    try std.testing.expect(!allowedSvgMember("review/assets/scope.svg"));
+    try std.testing.expect(!allowedSvgMember("boards/rf/extra.svg"));
+    try std.testing.expect(!allowedSvgMember("boards/rf/nested/diagram.svg"));
+    try std.testing.expect(!allowedSvgMember("boards/diagram.svg"));
+    try std.testing.expect(!allowedSvgMember("diagram.svg"));
+
+    const diagram = [_]zipfile.Entry{.{ .name = "boards/rf/diagram.svg", .data = "<svg/>" }};
+    try validateArchiveEntries(std.testing.allocator, &diagram, false);
+    try validateArchiveEntries(std.testing.allocator, &diagram, true);
+    const smuggled = [_]zipfile.Entry{.{ .name = "review/assets/scope.svg", .data = "<svg onload=\"x\"/>" }};
+    try std.testing.expectError(
+        error.UnexpectedSvgMember,
+        validateArchiveEntries(std.testing.allocator, &smuggled, false),
+    );
+    try std.testing.expectError(
+        error.UnexpectedSvgMember,
+        validateArchiveEntries(std.testing.allocator, &smuggled, true),
+    );
+}
+
 // spec: system-review - optional active documents may be absent without blocking release, while every required active document and required checklist must pass
 test "optional document lifecycle does not weaken required checklists" {
     var document = system_review.DocumentSpec{
@@ -1936,6 +1998,7 @@ test "final archive nests unchanged board release and emits approval inventory a
             .pdf = "%PDF-board",
             .json = "{}",
             .bom_csv = "Ref,Part\n",
+            .diagram_svg = "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
         },
         .physical = .{
             .pcb_png = "\x89PNG\r\n\x1a\n",
@@ -2043,6 +2106,156 @@ test "final archive nests unchanged board release and emits approval inventory a
         }
     }
     try std.testing.expect(saw_nested and saw_approval and saw_manifest and saw_checksums);
+}
+
+/// One board's draft archive, composed twice from a fixed Analysis so a test
+/// can assert both its inventory and its reproducibility. `diagram_svg` is the
+/// only thing that varies: empty stands for a design the diagram engine
+/// declined to draw.
+fn composeDraftForDiagramTest(
+    allocator: std.mem.Allocator,
+    diagram_svg: []const u8,
+) !struct { first: BuiltArchive, second: BuiltArchive } {
+    const parsed = try std.json.parseFromSlice(
+        system_review.SystemSpec,
+        allocator,
+        "{\"schema\":\"netlisp-system-review-v1\",\"name\":\"demo\",\"title\":\"Demo\",\"part_number\":\"SYS-1\",\"revision\":\"A\",\"boards\":[{\"name\":\"one\",\"role\":\"main\",\"source\":\"src/one.sexp\",\"part_number\":\"ONE\",\"revision\":\"A\"}]}",
+        .{},
+    );
+    const source_entries = [_]zipfile.Entry{
+        .{ .name = "src/one.sexp", .data = "(design-block one)" },
+    };
+    const snapshot: board_review.Snapshot = .{
+        .identity = .{
+            .name = "one",
+            .source = "src/one.sexp",
+            .title = "One",
+            .part_number = "ONE",
+            .revision = "A",
+            .layout = "layout-a",
+            .generated_at = "2026-08-29T00:00:00Z",
+        },
+        .review = .{
+            .status = .pass,
+            .open_notes = 0,
+            .notes_path = "src/one.notes.md",
+            .notes_source = null,
+            .markdown = "# One review\n",
+            .pdf = "%PDF-board",
+            .json = "{}",
+            .bom_csv = "Ref,Part\n",
+            .diagram_svg = diagram_svg,
+        },
+        .physical = .{
+            .pcb_png = "\x89PNG\r\n\x1a\n",
+            .consumed_sha256 = @splat('c'),
+            .consumed_trace = infra_fs.ReadTrace.init(allocator),
+            .fab_inputs = .{
+                .source = @splat('3'),
+                .layout = @splat('4'),
+                .bom = @splat('5'),
+                .complete = true,
+            },
+            .sources = &source_entries,
+            .connections = &.{},
+        },
+    };
+    const boards = try allocator.dupe(BoardEvidence, &[_]BoardEvidence{.{
+        .member = parsed.value.boards[0],
+        .snapshot = snapshot,
+        .fab = .{
+            .identity = .{ .name = "one", .part_number = "ONE", .revision = "A", .layout = "layout-a" },
+            .lock = .{
+                .project_commit = "commit",
+                .release_token = @splat('r'),
+                .fab_id = "1234abcd".*,
+                .project_status = .clean,
+            },
+            .readiness = .{ .needs_waiver = false, .blocked = false, .json = "{\"blocked\":false}" },
+            .digests = .{
+                .reviewed = @splat('1'),
+                .consumed = @splat('2'),
+                .source = @splat('3'),
+                .layout = @splat('4'),
+                .bom_evidence = @splat('5'),
+                .dependency = @splat('6'),
+                .bom = @splat('7'),
+                .centroid = @splat('8'),
+                .rules = @splat('9'),
+            },
+        },
+        .identity_ok = true,
+    }});
+    const analysis = Analysis{
+        .parsed = parsed,
+        .manifest_source = "{}",
+        .documents = &.{},
+        .assets = &.{},
+        .boards = boards,
+        .inputs = &.{},
+        .document_attestations = &.{},
+        .generated_at = "2026-08-29T00:00:00Z",
+        .content_lock = @splat('l'),
+        .release_token = @splat('t'),
+        .needs_waiver = false,
+        .state = .{},
+        .interface_diagnostic = .{},
+    };
+    return .{
+        .first = try composeArchive(allocator, allocator, analysis, null),
+        .second = try composeArchive(allocator, allocator, analysis, null),
+    };
+}
+
+fn draftMemberBytes(
+    allocator: std.mem.Allocator,
+    archive: []const u8,
+    wanted: []const u8,
+) !?[]const u8 {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "system.zip", .data = archive });
+    var file = try tmp.dir.openFile(std.testing.io, "system.zip", .{});
+    defer file.close(std.testing.io);
+    var read_buffer: [4096]u8 = undefined;
+    var reader = file.reader(std.testing.io, &read_buffer);
+    var iterator = try std.zip.Iterator.init(&reader);
+    while (try iterator.next()) |entry| {
+        var name_buffer: [1024]u8 = undefined;
+        const filename = try entry.getFilename(&reader, &name_buffer, .{});
+        if (!std.mem.eql(u8, filename, wanted)) continue;
+        var extracted: std.Io.Writer.Allocating = .init(allocator);
+        try entry.extractTo(&reader, &extracted.writer);
+        return extracted.written();
+    }
+    return null;
+}
+
+// spec: system-review - per-board block diagram evidence is archived as boards/<role>/diagram.svg in draft and release, reproducibly, and omitted when the design has no diagram
+test "board diagram is a deterministic draft member and absent when undrawn" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+
+    const rendered = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 10 10\"></svg>";
+    const drawn = try composeDraftForDiagramTest(allocator, rendered);
+    const member = (try draftMemberBytes(allocator, drawn.first.zip, "boards/main/diagram.svg")) orelse
+        return error.MissingDiagramMember;
+    try std.testing.expectEqualStrings(rendered, member);
+    // The diagram is review evidence, so a draft carries it: composition would
+    // have failed with DraftContainsCam otherwise.
+    try std.testing.expect(std.mem.indexOf(u8, drawn.first.filename, "draft") != null);
+    // Its digest is inventoried alongside every other member.
+    const manifest = (try draftMemberBytes(allocator, drawn.first.zip, "release-manifest.json")) orelse
+        return error.MissingDiagramMember;
+    try std.testing.expect(std.mem.indexOf(u8, manifest, "boards/main/diagram.svg") != null);
+    // Same inputs ⇒ same bytes.
+    try std.testing.expectEqualSlices(u8, drawn.first.zip, drawn.second.zip);
+
+    const undrawn = try composeDraftForDiagramTest(allocator, "");
+    try std.testing.expect((try draftMemberBytes(allocator, undrawn.first.zip, "boards/main/diagram.svg")) == null);
+    // Every other board member is still there, so the omission is targeted.
+    try std.testing.expect((try draftMemberBytes(allocator, undrawn.first.zip, "boards/main/review.md")) != null);
 }
 
 // spec: system-review - flat safe workspace assets are content-validated, deterministically hashed, and archived beside combined Markdown under review/assets

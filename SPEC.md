@@ -4980,6 +4980,7 @@ Public functions: buildGlanceEntities, writeGlanceLayer, nodeByKey, groupCoverag
 Public functions: renderTabs
 
 - Renders a tab per non-empty view and nothing when no view has edges
+- The standalone SVG document carries its own root, stylesheet and canvas so an archived .svg file stands alone
 - Leads with a Block overview tab of grouped cards when the design declares groups
 - A designer-declared class renders its own view
 - Draws all edge labels after all wires so net pills stay legible
@@ -5476,6 +5477,9 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 
 - evaluated source paths retain the buildable src/lib shape in a review package
 - interface evidence resolves stable sub-block connector handles through the canonical flattened netlist
+- per-board block diagram evidence is one standalone SVG document rendered from the same evaluated design, omitted when there is nothing to draw
+- per-board block diagram evidence is archived as boards/<role>/diagram.svg in draft and release, reproducibly, and omitted when the design has no diagram
+- the only archived SVG is the tool-rendered per-board block diagram; SVG is refused at every other archive path in draft and release alike
 - system Markdown becomes a structurally valid searchable PDF with draft marking
 - long UTF-8 review lines wrap only between complete codepoints in the generated PDF
 - board archive roles are unique and authored review documents are Markdown; binary evidence uses the bounded assets area
