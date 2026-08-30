@@ -190,6 +190,56 @@ fn draftImpl(
     };
 }
 
+const DossierHtmlError = @typeInfo(@typeInfo(@TypeOf(draftDossierHtmlImpl)).@"fn".return_type.?).error_union.error_set;
+
+/// Compose the draft dossier's HTML face on its own — byte-identical to the
+/// `review/<base>.html` member `draft` archives, watermark included, without
+/// building the ZIP around it. Read-only over current workspace state, so a
+/// browser surface can serve the review document directly.
+pub fn draftDossierHtml(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+) DossierHtmlError![]const u8 {
+    return draftDossierHtmlImpl(allocator, project_dir, name);
+}
+
+fn draftDossierHtmlImpl(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+) ![]const u8 {
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    var analysis = try analyze(scratch.allocator(), allocator, project_dir, name, .draft);
+    defer analysis.parsed.deinit();
+    return allocator.dupe(u8, try composeDossierHtml(scratch.allocator(), analysis, true));
+}
+
+/// The archive's HTML member composition, shared by `composeArchive` and the
+/// standalone dossier surface so neither can drift from the other.
+fn composeDossierHtml(
+    allocator: std.mem.Allocator,
+    analysis: Analysis,
+    draft_mode: bool,
+) ![]const u8 {
+    const bodies = try renderDocumentBodies(allocator, analysis);
+    return dossierHtmlFromBodies(allocator, analysis, bodies, draft_mode);
+}
+
+/// The HTML member over already-rendered document bodies — `composeArchive`
+/// renders those once for the Markdown face and reuses them here.
+fn dossierHtmlFromBodies(
+    allocator: std.mem.Allocator,
+    analysis: Analysis,
+    bodies: DocumentBodies,
+    draft_mode: bool,
+) ![]const u8 {
+    const html = try renderSystemHtml(allocator, analysis, bodies, draft_mode);
+    if (html.len > max_system_html_bytes) return error.ArchiveTooLarge;
+    return html;
+}
+
 const AttestError = @typeInfo(@typeInfo(@TypeOf(attestImpl)).@"fn".return_type.?).error_union.error_set;
 
 /// Compute and serialize a current attestation. Persistence remains at the
@@ -1274,8 +1324,7 @@ fn composeArchive(
         .draft = !is_release,
     });
     if (pdf.len > max_system_pdf_bytes) return error.ArchiveTooLarge;
-    const html = try renderSystemHtml(allocator, analysis, bodies, !is_release);
-    if (html.len > max_system_html_bytes) return error.ArchiveTooLarge;
+    const html = try dossierHtmlFromBodies(allocator, analysis, bodies, !is_release);
 
     var entries: std.ArrayList(zipfile.Entry) = .empty;
     const readme = try renderReadme(allocator, analysis, is_release);
@@ -3254,6 +3303,26 @@ fn composeHtmlFixture(
     title: []const u8,
     mode: PreflightMode,
 ) !BuiltArchive {
+    const analysis = try htmlFixtureAnalysis(allocator, title, mode);
+    if (mode == .draft) return composeArchive(allocator, allocator, analysis, null);
+    const released_boards = try allocator.dupe(
+        fab_service.Result,
+        &[_]fab_service.Result{analysis.boards[0].fab},
+    );
+    return composeArchive(allocator, allocator, analysis, .{
+        .boards = released_boards,
+        .actor = "reviewer@example.com",
+        .role = "writer",
+        .at = "2026-08-29T00:00:00Z",
+        .waivers_accepted = false,
+    });
+}
+
+fn htmlFixtureAnalysis(
+    allocator: std.mem.Allocator,
+    title: []const u8,
+    mode: PreflightMode,
+) !Analysis {
     // Titles chosen by callers here never contain a quote or a backslash, so
     // direct interpolation stays valid JSON.
     const manifest = try std.fmt.allocPrint(
@@ -3366,7 +3435,7 @@ fn composeHtmlFixture(
         .fab = released,
         .identity_ok = true,
     }});
-    const analysis = Analysis{
+    return .{
         .parsed = parsed,
         .manifest_source = manifest,
         .documents = try allocator.dupe(DocumentEvidence, &documents),
@@ -3381,15 +3450,6 @@ fn composeHtmlFixture(
         .state = .{ .attested = mode == .release },
         .interface_diagnostic = .{},
     };
-    if (mode == .draft) return composeArchive(allocator, allocator, analysis, null);
-    const released_boards = try allocator.dupe(fab_service.Result, &[_]fab_service.Result{released});
-    return composeArchive(allocator, allocator, analysis, .{
-        .boards = released_boards,
-        .actor = "reviewer@example.com",
-        .role = "writer",
-        .at = "2026-08-29T00:00:00Z",
-        .waivers_accepted = false,
-    });
 }
 
 const html_member = "review/SYS-1-rev-A-system-review.html";
@@ -3427,6 +3487,28 @@ test "system review HTML dossier is a draft and release member" {
         return error.MissingHtmlMember;
     try std.testing.expect(std.mem.indexOf(u8, release_html, review_html.draft_marker) == null);
     try std.testing.expect(std.mem.indexOf(u8, release_html, "Demo System") != null);
+}
+
+// spec: system-review - the standalone draft dossier is the archive's own HTML member composed without the archive around it
+test "the standalone draft dossier HTML is the archived member byte for byte" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+
+    const analysis = try htmlFixtureAnalysis(allocator, "Demo System", .draft);
+    const standalone = try composeDossierHtml(allocator, analysis, true);
+    // A whole review document, not a fragment: the browser gets the same
+    // watermarked page the ZIP member carries.
+    try std.testing.expect(std.mem.startsWith(u8, standalone, "<!DOCTYPE html>"));
+    try std.testing.expect(std.mem.indexOf(u8, standalone, "Demo System") != null);
+    try std.testing.expect(std.mem.indexOf(u8, standalone, review_html.draft_marker) != null);
+    // Manifest documents are inlined as numbered sections, not merely linked.
+    try std.testing.expect(std.mem.indexOf(u8, standalone, "System overview") != null);
+
+    const archive = try composeHtmlFixture(allocator, "Demo System", .draft);
+    const member = (try draftMemberBytes(allocator, archive.zip, html_member)) orelse
+        return error.MissingHtmlMember;
+    try std.testing.expectEqualSlices(u8, member, standalone);
 }
 
 // spec: system-review - identity text reaching the HTML dossier is escaped, so no manifest string can become page markup

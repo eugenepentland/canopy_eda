@@ -31,6 +31,10 @@ const routes = {
   "/static/:name": { coverage: "asset", reason: "static asset dispatcher, not an interactive page" },
   "/.well-known/oauth-protected-resource": { coverage: "metadata", reason: "OAuth discovery document, not an interactive page" },
   "/systems/:name": { coverage: "surface", surface: "system_review" },
+  "/systems/:name/dossier": {
+    coverage: "uncovered",
+    reason: "The draft dossier is a script-free, server-composed document with no interactions to time: its whole cost is the system package composer's per-request analysis (every board's review snapshot and fabrication readiness), so measuring it here would time the composer through a browser rather than the UI, and doing so needs a release-ready system fixture this gate does not carry.",
+  },
 };
 
 const surfaces = [

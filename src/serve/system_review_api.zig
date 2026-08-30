@@ -1168,6 +1168,22 @@ pub fn draftPackageApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
     res.body = result.zip;
 }
 
+/// GET /systems/:name/dossier — the draft package's HTML dossier served for
+/// reading in the browser instead of downloaded inside `draft.zip`. Same inputs,
+/// same composer, same watermark; composed per request from current workspace
+/// state (no cache), so a reload picks up saved document edits. Failures answer
+/// with the composer's own diagnostic exactly as `draftPackageApi` does.
+pub fn dossierPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse return sendJsonError(res, 404, "missing system name");
+    const html = system_review_package.draftDossierHtml(ctx.allocator, ctx.project_dir, name) catch |err|
+        return sendPackageFailure(res, err, .draft);
+    res.content_type = .HTML;
+    res.header("cache-control", "no-store");
+    res.header("content-security-policy", "frame-ancestors 'none'");
+    res.header("x-frame-options", "DENY");
+    res.body = html;
+}
+
 /// POST /api/systems/:name/release — authenticated-writer final package after a fresh lock.
 pub fn releaseApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     if (!try requireMutationHeader(req, res)) return;
@@ -1229,7 +1245,8 @@ pub fn systemPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
             ".ok{color:#65d38e}.blocked{color:#ffb85c}#message{position:fixed;right:18px;bottom:18px;max-width:520px;background:#172139;border:1px solid #53617d;border-radius:8px;padding:10px;display:none}" ++
             "@media(max-width:1000px){main{grid-template-columns:220px 1fr}.preview{display:none}}" ++
             "</style></head><body><header><div><h1 id=\"title\">System review</h1><p id=\"identity\">Loading manifest…</p></div>" ++
-            "<div class=\"grow\"></div><a class=\"button\" id=\"draft\">Download draft</a>" ++
+            "<div class=\"grow\"></div><a class=\"button\" id=\"dossier\" target=\"_blank\" rel=\"noopener\">View dossier</a>" ++
+            "<a class=\"button\" id=\"draft\">Download draft</a>" ++
             "<label><input id=\"waive\" type=\"checkbox\"> accept waivers</label><button id=\"release\">Final release</button></header>" ++
             "<main><aside><strong>Documents</strong><div id=\"docs\"></div><div class=\"status\" id=\"readiness\">Computing readiness…</div>" ++
             "<hr><label class=\"button\">Upload asset<input id=\"asset\" type=\"file\" accept=\".png,.jpg,.jpeg,.txt\" hidden></label></aside>" ++
@@ -1257,7 +1274,7 @@ pub fn systemPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
             "$('#release').disabled=!state.permissions.release||value.blocked}catch(error){$('#readiness').textContent=error.message;$('#readiness').className='status blocked'}}" ++
             "async function boot(){try{const {value}=await request(endpoint(''));state.manifest=value.manifest;state.permissions=value.permissions;$('#attest').disabled=!value.permissions.write;" ++
             "$('#title').textContent=value.manifest.title;$('#identity').textContent=value.manifest.part_number+' · revision '+value.manifest.revision+' · '+value.permissions.role;" ++
-            "$('#draft').href=endpoint('/draft.zip');const host=$('#docs');let first=null;for(const doc of value.manifest.documents){const button=document.createElement('button');" ++
+            "$('#draft').href=endpoint('/draft.zip');$('#dossier').href='/systems/'+encodeURIComponent(SYSTEM)+'/dossier';const host=$('#docs');let first=null;for(const doc of value.manifest.documents){const button=document.createElement('button');" ++
             "button.type='button';button.append(document.createTextNode(doc.title));const tag=document.createElement('span');tag.className='tag';tag.textContent=doc.classification+' · '+(doc.status||'active');button.append(tag);" ++
             "button.onclick=()=>openDoc(doc,button).catch(e=>note(e.message,true));host.append(button);if(!first&&doc.status!=='historical')first=[doc,button]}if(!first&&value.manifest.documents.length)first=[value.manifest.documents[0],host.firstElementChild];" ++
             "if(first)await openDoc(first[0],first[1]);await refreshReady()}catch(error){note(error.message,true)}}" ++
@@ -1364,6 +1381,100 @@ test "system review API denies document mutation without authenticated write rol
     try putDocumentApi(&server, request.req, request.res);
     try std.testing.expectEqual(@as(u16, 403), request.res.status);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "writer role required") != null);
+}
+
+// spec: system-review - a dossier request over a workspace that cannot compose answers the composer's diagnostic rather than a crash or a partial page
+test "the dossier page answers a non-composable workspace with the composer diagnostic" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "project/src/systems/demo");
+    // A manifest declaring no required release checklist — a workspace the
+    // composer refuses before any evidence is gathered.
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "project/src/systems/demo/system.json",
+        .data =
+        \\{"schema":"netlisp-system-review-v1","name":"other","title":"Other","part_number":"SYS-1","revision":"A","boards":[{"name":"board","role":"main","source":"src/board.sexp","part_number":"PCB-1","revision":"A"}],"documents":[]}
+        ,
+    });
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, "project", allocator);
+    defer allocator.free(project);
+
+    var state: serve_root.ServerState = .{};
+    var server = Server{
+        .allocator = allocator,
+        .project_dir = project,
+        .auth_dir = project,
+        .state = &state,
+    };
+
+    // A traversal-shaped name never reaches the filesystem.
+    var unsafe = httpz.testing.init(.{});
+    defer unsafe.deinit();
+    server.allocator = unsafe.res.arena;
+    unsafe.param("name", "../demo");
+    try dossierPage(&server, unsafe.req, unsafe.res);
+    try std.testing.expectEqual(@as(u16, 400), unsafe.res.status);
+    try std.testing.expect(std.mem.indexOf(u8, unsafe.res.body, "invalid system name") != null);
+
+    // A workspace with no manifest at all is a 404 diagnostic, not a 500.
+    var absent = httpz.testing.init(.{});
+    defer absent.deinit();
+    server.allocator = absent.res.arena;
+    absent.param("name", "missing");
+    try dossierPage(&server, absent.req, absent.res);
+    try std.testing.expectEqual(@as(u16, 404), absent.res.status);
+    try std.testing.expect(std.mem.indexOf(u8, absent.res.body, "not found") != null);
+
+    // A manifest the composer refuses answers 422 with its own wording; no
+    // partial page and no HTML content type on any of these paths.
+    var mismatch = httpz.testing.init(.{});
+    defer mismatch.deinit();
+    server.allocator = mismatch.res.arena;
+    mismatch.param("name", "demo");
+    try dossierPage(&server, mismatch.req, mismatch.res);
+    try std.testing.expectEqual(@as(u16, 422), mismatch.res.status);
+    try std.testing.expect(std.mem.indexOf(u8, mismatch.res.body, "not package-valid") != null);
+    try std.testing.expectEqual(httpz.ContentType.JSON, mismatch.res.content_type.?);
+}
+
+// spec: system-review - the system review page offers the dossier as a page action beside the draft download, pointing at the system's own dossier path
+test "the system review page carries the view-dossier action" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "project/src/systems/demo");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "project/src/systems/demo/system.json",
+        .data =
+        \\{"schema":"netlisp-system-review-v1","name":"demo","title":"Demo","part_number":"SYS-1","revision":"A","boards":[{"name":"board","role":"main","source":"src/board.sexp","part_number":"PCB-1","revision":"A"}],"documents":[{"id":"release-checklist","title":"Release checklist","path":"src/systems/demo/release.md","classification":"checklist","required":true}]}
+        ,
+    });
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, "project", allocator);
+    defer allocator.free(project);
+
+    var state: serve_root.ServerState = .{};
+    var server = Server{
+        .allocator = allocator,
+        .project_dir = project,
+        .auth_dir = project,
+        .state = &state,
+    };
+    var request = httpz.testing.init(.{});
+    defer request.deinit();
+    server.allocator = request.res.arena;
+    request.param("name", "demo");
+    try systemPage(&server, request.req, request.res);
+    const body = request.res.body;
+    // A labelled action beside the existing draft download…
+    try std.testing.expect(std.mem.indexOf(u8, body, ">View dossier</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, ">Download draft</a>") != null);
+    // …pointing at this system's own page-side dossier path, not the API family.
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        body,
+        "$('#dossier').href='/systems/'+encodeURIComponent(SYSTEM)+'/dossier'",
+    ) != null);
 }
 
 test "system review API creates a declared missing document with an absent-only precondition" {

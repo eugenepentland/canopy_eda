@@ -937,6 +937,9 @@ pub fn serve(
     router.get("/schematics/:name", schematic_page.schematicPage, .{});
     registerPcbRoutes(router);
     router.get("/systems/:name", system_review_api.systemPage, .{});
+    // The draft package's HTML dossier as a readable page — same composition as
+    // the `draft.zip` member, without the download-and-unzip round trip.
+    router.get("/systems/:name/dossier", system_review_api.dossierPage, .{});
     router.get("/modules", modules_page.modulesListPage, .{});
     router.get("/modules/:name", modules_page.moduleViewPage, .{});
     // API
