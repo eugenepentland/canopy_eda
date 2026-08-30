@@ -345,6 +345,61 @@ for (const perfRunner of ["scripts/pcb_browser_perf/run.js", "scripts/pcb_editor
   assert(runnerSource.includes('require("../perf_gate_lock")') && runnerSource.includes("ensureGateLock("),
     `${perfRunner} must queue standalone timing runs under scripts/gate.sh's machine-wide lock`);
 }
+// A benchmark server must be incapable of committing to the designs repository.
+// config.zig's gitAutocommitEnabled() defaults to ENABLED when the variable is
+// unset — only production is protected, by its systemd unit — and the
+// system-review document save / attest / asset-upload endpoints call
+// autocommit.begin() unconditionally. Two independent guards, either of which
+// alone is sufficient:
+//
+//   1. Every spawned server gets NETLISP_GIT_AUTOCOMMIT=0. Checked against
+//      EVERY `env: { ...process.env` literal, so a newly added spawn that
+//      forgets the variable trips this too.
+//   2. projectOverlay() never links .git. Git resolves the symlink, so an
+//      overlay carrying one is a work tree of the real designs repo reporting
+//      the overlay as its toplevel — `git add -A` + commit would land a commit
+//      in the user's repository from a temporary copy of the tree.
+//
+// pcb_editor_perf has no overlay at all: it serves the real designs checkout,
+// so for that runner guard 1 is the only thing standing between a benchmark
+// write and the user's history.
+const benchGitGuards = [
+  {
+    id: "bench-autocommit-disabled",
+    // Applies to every runner, including pcb_editor_perf, which has no overlay
+    // and serves the real checkout directly.
+    check(runnerSource, perfRunner, fail) {
+      const envLiterals = Array.from(runnerSource.matchAll(/env:\s*\{[^}]*\.\.\.process\.env[^}]*\}/g), (match) => match[0]);
+      if (!envLiterals.length) fail(`${perfRunner} must spawn its server with an explicit env`);
+      for (const literal of envLiterals) {
+        if (!/NETLISP_GIT_AUTOCOMMIT:\s*"0"/.test(literal)) {
+          fail(`${perfRunner} must spawn its server with NETLISP_GIT_AUTOCOMMIT="0" — auto-commit defaults to ENABLED when unset, so a benchmark write would commit to the designs repository`);
+        }
+      }
+    },
+  },
+  {
+    id: "bench-overlay-not-a-git-repo",
+    // Only the two runners that build an overlay.
+    check(runnerSource, perfRunner, fail) {
+      const start = runnerSource.indexOf("function projectOverlay(");
+      if (start === -1) return;
+      const body = runnerSource.slice(start, runnerSource.indexOf("\n}", start));
+      if (!/entry === "\.git"\) continue;/.test(body)) {
+        fail(`${perfRunner} projectOverlay() must skip .git — a linked .git makes the overlay a work tree of the real designs repository`);
+      }
+      if (/symlinkSync\([^\n]*"\.git"/.test(body)) {
+        fail(`${perfRunner} projectOverlay() must never symlink .git into the overlay`);
+      }
+    },
+  },
+];
+for (const perfRunner of ["scripts/pcb_browser_perf/run.js", "scripts/pcb_editor_perf/run.js", "scripts/ui_browser_perf/run.js"]) {
+  const runnerSource = fs.readFileSync(path.join(root, perfRunner), "utf8");
+  for (const guard of benchGitGuards) {
+    guard.check(runnerSource, perfRunner, (message) => assert.fail(`[${guard.id}] ${message}`));
+  }
+}
 const gateLock = fs.readFileSync(path.join(root, "scripts", "perf_gate_lock.js"), "utf8");
 assert(gateLock.includes("NETLISP_GATE_HELD") && gateLock.includes("NETLISP_GATE_SERIALIZE"),
   "perf_gate_lock.js must honor gate.sh's recursion guard and its explicit bypass");
