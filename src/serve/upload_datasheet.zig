@@ -5,6 +5,7 @@
 const std = @import("std");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
+const datasheet_ref = @import("datasheet_ref.zig");
 const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
 
@@ -42,9 +43,29 @@ fn stripDuplicateMarker(stem: []const u8) []const u8 {
     return std.mem.trimEnd(u8, stem[0..open], " _");
 }
 
+/// The one whitelist of bytes a stored datasheet filename may contain.
+///
+/// `+` is DATA, not an option or a separator. Mini-Circuits part numbers end in
+/// one (`YAT-0A+`, `TSY-83LNW+`), and folding it to `_` on the way in made the
+/// file unreadable on the way out: `read_datasheet "TSY-83LNW+.pdf"` sanitized
+/// its own argument to `TSY-83LNW_.pdf` and reported "datasheet not found" for
+/// a file sitting on disk. It is safe in every consumer: the name only ever
+/// becomes a `lib/datasheets/<name>` path (no separator, no `..`, and never
+/// leading — the stem always carries a real character before it), and the
+/// ps2ascii extraction passes that path as an argv element, never through a
+/// shell. Everything outside this set still collapses to `_`.
+///
+/// Kept in step with `datasheet_ref.isLocal`, which validates the same names
+/// coming from a `(datasheet "…")` declaration — a name this function can WRITE
+/// but that one rejects is the same round-trip bug in a different surface.
+fn nameByte(c: u8) bool {
+    if (std.ascii.isAlphanumeric(c)) return true;
+    return c == '_' or c == '-' or c == '.' or c == '+';
+}
+
 /// Conservative filename whitelist for `lib/datasheets/`. Drops any path
 /// component the client tried to smuggle in, strips a duplicate-download
-/// marker (`foo (1).pdf` → `foo.pdf`), replaces non-`[a-zA-Z0-9_.-]` bytes
+/// marker (`foo (1).pdf` → `foo.pdf`), replaces every byte `nameByte` rejects
 /// with `_`, and forces a trailing `.pdf`. Caller owns the returned slice.
 /// Used by both transports — kept here so the policy is one-place.
 pub fn sanitizeFilename(allocator: std.mem.Allocator, raw: []const u8) SanitizeError![]u8 {
@@ -65,8 +86,7 @@ pub fn sanitizeFilename(allocator: std.mem.Allocator, raw: []const u8) SanitizeE
 
     var out: std.ArrayList(u8) = .empty;
     for (cleaned) |c| {
-        const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_' or c == '-' or c == '.';
-        try out.append(allocator, if (ok) c else '_');
+        try out.append(allocator, if (nameByte(c)) c else '_');
     }
     if (out.items.len == 0) return error.InvalidName;
 
@@ -268,6 +288,26 @@ test "sanitizeFilename keeps a part number that merely ends in digits" {
     const out = try sanitizeFilename(alloc, "lm2596.pdf");
     defer alloc.free(out);
     try std.testing.expectEqualStrings("lm2596.pdf", out);
+}
+
+test "sanitizeFilename keeps the plus of a Mini-Circuits part number" {
+    // spec: serve/upload_datasheet - sanitize keeps `+` so a Mini-Circuits filename survives its own round trip
+    const alloc = std.testing.allocator;
+    // The name a store writes must be the name a read of that same string
+    // resolves — sanitizing is idempotent, which folding `+` to `_` was not.
+    const out = try sanitizeFilename(alloc, "TSY-83LNW+.pdf");
+    defer alloc.free(out);
+    try std.testing.expectEqualStrings("TSY-83LNW+.pdf", out);
+    const again = try sanitizeFilename(alloc, out);
+    defer alloc.free(again);
+    try std.testing.expectEqualStrings("TSY-83LNW+.pdf", again);
+    // `+` is data; everything that could steer a path or a shell still is not.
+    const hostile = try sanitizeFilename(alloc, "../lib/YAT-0A+;rm -rf $HOME.pdf");
+    defer alloc.free(hostile);
+    try std.testing.expectEqualStrings("YAT-0A+_rm_-rf__HOME.pdf", hostile);
+    try std.testing.expect(datasheet_ref.isLocal(hostile));
+    try std.testing.expect(datasheet_ref.isLocal("TSY-83LNW+.pdf"));
+    try std.testing.expect(!datasheet_ref.isLocal("../TSY-83LNW+.pdf"));
 }
 
 test "isPdfMagic rejects non-PDF bytes" {

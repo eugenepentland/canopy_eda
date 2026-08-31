@@ -731,6 +731,7 @@ src/eval/net_envelopes.zig::Contradiction struct_
 src/eval/net_envelopes.zig::Declaration struct_
 src/eval/net_envelopes.zig::Result struct_
 src/eval/net_envelopes.zig::build | fn build( allocator: std.mem.Allocator, block: *const DesignBlock, declarations: []const Declaration, ) std.mem.Allocator.Error!Result
+src/eval/net_envelopes.zig::ferriteBridges | fn ferriteBridges( allocator: std.mem.Allocator, instances: []const flat_netlist.FlatInstance, nets: []const flat_netlist.FlatNet, ) std.mem.Allocator.Error!std.StringHashMapUnmanaged([]const u8)
 src/eval/pin_enrichment.zig::enrichPinFunctions | fn enrichPinFunctions( allocator: Allocator, block: *DesignBlock, project_dir: []const u8, ) Allocator.Error!void
 src/eval/power_budget.zig::BranchLoad struct_
 src/eval/power_budget.zig::Rail struct_

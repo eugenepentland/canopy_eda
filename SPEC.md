@@ -6362,6 +6362,7 @@ Public functions: uploadDatasheetApi, listDatasheetsApi, serveDatasheetApi, isPd
 - sanitize replaces unsafe chars
 - sanitize strips duplicate-download marker
 - sanitize preserves trailing-digit names
+- sanitize keeps `+` so a Mini-Circuits filename survives its own round trip
 - isPdfMagic gates non-PDF input
 
 ## serve/edit
@@ -6438,6 +6439,7 @@ Public functions: read, fetch
 - fetch_datasheet refuses to replace a stored datasheet whose bytes differ unless overwrite is requested
 - fetch_datasheet content-sniffs the %PDF magic and rejects a non-PDF body and any non-http(s) URL without writing
 - fetch_datasheet derives its target name from the URL path segment, dropping query and fragment
+- a fetched Mini-Circuits filename keeps its trailing `+` and read_datasheet resolves that exact stored name
 
 ## serve/mcp_checks
 
@@ -7326,6 +7328,9 @@ Public functions: check, writeJson, savedOutline, declaredOutline, outlineDrift
 - rail checks use worst-case voltage, reject underrating, preserve unknown endpoints, and size zero-ohm jumpers by rail current
 - a series element is charged the branch its own rail data declares, and the whole rail's worst case only when the design declared no branch
 - a rail with no per-branch declaration still charges every series element its whole worst-case load
+- a zero-ohm configuration strap to ground carries no rail current, while a jumper any rail reaches or a ground-to-ground link stays unproven
+- a series magnetic sealed inside a module inherits that module's declared input current, and keeps none of it on a leg the declaration never covered
+- a net a ferrite bead ties to a rail is that rail's node for current as well as voltage, so a module-internal series element behind the bead is charged the rail
 - saved rounded outlines must exactly match authored dimensions, radius, polygon, and native arcs
 - synthesized footprint fallback geometry is a non-waivable release identity failure
 - 0R0 is a zero-ohm jumper that requires authored current and maximum-resistance evidence, never tolerance

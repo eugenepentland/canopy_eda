@@ -477,7 +477,7 @@ test "fetch stores a PDF under a sanitized name" {
     // The URL's last segment carries a query and unsafe bytes; the stored name
     // is whitelisted and forced to .pdf, and nothing escapes lib/datasheets/.
     const body = try fetchInto(std.testing.allocator, root, .{
-        .url = "https" ++ "://example.invalid/lit/ds/lm+66100(1).pdf?ts=17",
+        .url = "https" ++ "://example.invalid/lit/ds/lm;66100(1).pdf?ts=17",
         .transport = stubPdf,
     });
     defer std.testing.allocator.free(body);
@@ -490,6 +490,40 @@ test "fetch stores a PDF under a sanitized name" {
     const stored = try tmp.dir.readFileAlloc(std.testing.io, "lib/datasheets/lm_66100.pdf", std.testing.allocator, .limited64(1024));
     defer std.testing.allocator.free(stored);
     try std.testing.expectEqualStrings("%PDF-1.7\nstub datasheet\n", stored);
+}
+
+// spec: serve/datasheet - a fetched Mini-Circuits filename keeps its trailing `+` and read_datasheet resolves that exact stored name
+test "fetch then read round-trips a name containing a plus" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+
+    const body = try fetchInto(std.testing.allocator, root, .{
+        .url = "https" ++ "://example.invalid/pdfs/YAT-0A+.pdf",
+        .transport = stubPdf,
+    });
+    defer std.testing.allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"name\":\"YAT-0A+.pdf\"") != null);
+    // The bytes really landed under the `+` name, not a folded one.
+    const stored = try tmp.dir.readFileAlloc(std.testing.io, "lib/datasheets/YAT-0A+.pdf", std.testing.allocator, .limited64(1024));
+    defer std.testing.allocator.free(stored);
+    try std.testing.expectEqualStrings("%PDF-1.7\nstub datasheet\n", stored);
+
+    // `read` sanitizes its own argument, so the round trip is what proves the
+    // two halves agree. Extraction needs ps2ascii, which a test host may not
+    // have: assert that resolution got PAST the name — a found file reports its
+    // digest or an extraction failure, never "datasheet not found".
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(std.testing.allocator);
+    _ = try read(std.testing.allocator, root, "YAT-0A+.pdf", null, null, &out);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "datasheet not found") == null);
+
+    // A name that never was stored still resolves to the honest miss.
+    var missing: std.ArrayList(u8) = .empty;
+    defer missing.deinit(std.testing.allocator);
+    try std.testing.expect(!try read(std.testing.allocator, root, "YAT-0B+.pdf", null, null, &missing));
+    try std.testing.expect(std.mem.indexOf(u8, missing.items, "datasheet not found") != null);
 }
 
 // spec: serve/datasheet - fetch_datasheet re-fetching identical bytes is idempotent and reports the unchanged digest

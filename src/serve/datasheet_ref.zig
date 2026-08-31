@@ -23,12 +23,20 @@ pub fn isRemote(value: []const u8) bool {
 }
 
 /// True when `value` is a traversal-safe basename for `lib/datasheets/`.
+///
+/// The accepted byte set is the one `upload_datasheet.sanitizeFilename` WRITES,
+/// `+` included: a Mini-Circuits part number carries one (`TSY-83LNW+.pdf`), and
+/// a name the store can produce but this predicate rejects is a file that can be
+/// written and never cited. `+` is inert here — it is neither a path separator
+/// nor a shell metacharacter, and these names only ever become a
+/// `lib/datasheets/<name>` path or a `/datasheets/<name>` URL path segment
+/// (where `+` is literal; only query strings decode it as a space).
 pub fn isLocal(value: []const u8) bool {
     if (value.len == 0 or value.len > 255) return false;
     if (std.mem.indexOf(u8, value, "..") != null) return false;
     if (std.mem.indexOfAny(u8, value, "/\\\"") != null) return false;
     for (value) |c| {
-        const ok = std.ascii.isAlphanumeric(c) or c == '_' or c == '-' or c == '.';
+        const ok = std.ascii.isAlphanumeric(c) or c == '_' or c == '-' or c == '.' or c == '+';
         if (!ok) return false;
     }
     return true;
