@@ -3336,6 +3336,7 @@ src/placement/via_merge.zig::ViaPt struct_
 src/placement/via_merge.zig::plan | fn plan(arena: std.mem.Allocator, vias: []const ViaPt) std.mem.Allocator.Error![]const Merge
 src/pll_loop.zig::ComponentValue struct_
 src/pll_loop.zig::Components struct_
+src/pll_loop.zig::CurveFaces struct_
 src/pll_loop.zig::CurvePoint struct_
 src/pll_loop.zig::Mode enum_
 src/pll_loop.zig::Outcome enum_
