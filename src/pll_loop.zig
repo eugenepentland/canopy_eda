@@ -82,6 +82,10 @@ const CircuitConfig = struct {
     extra_tune_cap: ValueTolerance = .{},
     pfd_hz: f64 = 0,
     charge_pump: ValueTolerance = .{},
+    /// The I_CP full scale the 16-step schedule quantizes against, set on the
+    /// board by RSET (ADF4159 datasheet: 4.8 mA typ at 5.1 kΩ). Unauthored, it
+    /// stays at the part's nominal.
+    charge_pump_full_scale: f64 = adf4159_full_scale_a,
     feedback: Feedback = .{},
     kvco_hz_per_v: Range = .{},
     op_amp: OpAmp = .{},
@@ -135,6 +139,8 @@ fn parseChild(node: Node, out: *Spec) ParseError!void {
     } else if (eq(head, "charge-pump")) {
         out.circuit.charge_pump.value = try positiveAt(c, 1);
         if (c.len > 2) out.circuit.charge_pump.tolerance_pct = try nonNegativeAt(c, 2);
+    } else if (eq(head, "charge-pump-full-scale")) {
+        out.circuit.charge_pump_full_scale = try positiveAt(c, 1);
     } else if (eq(head, "feedback-divider")) {
         out.circuit.feedback.prescaler = try positiveAt(c, 1);
         out.circuit.feedback.pll_n = try positiveAt(c, 2);
@@ -713,7 +719,14 @@ fn rampChecks(context: *Context, spec: Spec, min_bandwidth_hz: f64) std.mem.Allo
     context.fitted.ramp_phase_error_rad = phase_error;
     if (spec.requirements.ramp.max_phase_error_rad > 0) try append(context, spec, .ramp_phase_error, phase_error <= spec.requirements.ramp.max_phase_error_rad, "{s}: linear-ramp phase-error estimate is {d:.2} rad at the narrowest loop (limit {d:.2} rad; fc/1.4 envelope model)", .{ spec.name, phase_error, spec.requirements.ramp.max_phase_error_rad });
     if (spec.circuit.op_amp.slew_rate_v_per_s > 0) {
-        const required = slope / spec.circuit.kvco_hz_per_v.min;
+        // The slowest tune slope is set by the smallest Kvco anywhere on the
+        // authored operating curve, not just the base kvco range.
+        var kvco_min = spec.circuit.kvco_hz_per_v.min;
+        for (spec.design.operating_curve.point_nodes) |node| {
+            const point = parseOperatingPoint(node) catch continue;
+            kvco_min = @min(kvco_min, point.kvco_hz_per_v);
+        }
+        const required = slope / kvco_min;
         context.fitted.vtune_slew_required_v_per_s = required;
         context.fitted.vtune_slew_available_v_per_s = spec.circuit.op_amp.slew_rate_v_per_s;
         try append(context, spec, .vtune_slew, required <= spec.circuit.op_amp.slew_rate_v_per_s, "{s}: VTUNE slew requires {d:.3} V/µs; op amp provides {d:.1} V/µs", .{ spec.name, required / 1e6, spec.circuit.op_amp.slew_rate_v_per_s / 1e6 });
@@ -727,7 +740,7 @@ fn chargePumpSuggestion(context: *Context, spec: Spec, corner: Corner, current_m
     var best_min_bw: f64 = 0;
     var best_max_bw: f64 = 0;
     for (1..17) |step| {
-        const icp = adf4159_full_scale_a * @as(f64, @floatFromInt(step)) / 16.0;
+        const icp = spec.circuit.charge_pump_full_scale * @as(f64, @floatFromInt(step)) / 16.0;
         var candidate = Sweep{};
         const kvco_mid = @sqrt(spec.circuit.kvco_hz_per_v.min * spec.circuit.kvco_hz_per_v.max);
         for ([_]f64{ spec.circuit.kvco_hz_per_v.min, kvco_mid, spec.circuit.kvco_hz_per_v.max }) |kvco|
@@ -739,8 +752,8 @@ fn chargePumpSuggestion(context: *Context, spec: Spec, corner: Corner, current_m
             best_max_bw = candidate.max_bandwidth_hz;
         }
     }
-    context.suggestion = .{ .full_scale_a = adf4159_full_scale_a, .current_a = best_current, .min_phase_margin_deg = best_min_pm, .min_bandwidth_hz = best_min_bw, .max_bandwidth_hz = best_max_bw };
-    try warning(context, .charge_pump_suggestion, "{s}: no claim is made that the current population is optimal; best ADF4159 5 mA/16 step is {d:.4} mA with nominal min PM {d:.1}° and LBW {d:.3}-{d:.3} MHz", .{ spec.name, best_current * 1e3, best_min_pm, best_min_bw / 1e6, best_max_bw / 1e6 });
+    context.suggestion = .{ .full_scale_a = spec.circuit.charge_pump_full_scale, .current_a = best_current, .min_phase_margin_deg = best_min_pm, .min_bandwidth_hz = best_min_bw, .max_bandwidth_hz = best_max_bw };
+    try warning(context, .charge_pump_suggestion, "{s}: no claim is made that the current population is optimal; best ADF4159 {d:.1} mA/16 step is {d:.4} mA with nominal min PM {d:.1}° and LBW {d:.3}-{d:.3} MHz", .{ spec.name, spec.circuit.charge_pump_full_scale * 1e3, best_current * 1e3, best_min_pm, best_min_bw / 1e6, best_max_bw / 1e6 });
 }
 
 const SynthResult = struct {
@@ -1112,7 +1125,7 @@ fn profileSample(spec: Spec, sample_index: usize) ?OperatingPoint {
 
 fn scheduledCurrent(spec: Spec, point: OperatingPoint, anchor_step: usize) f64 {
     const first = parseOperatingPoint(spec.design.operating_curve.point_nodes[0]) catch return spec.circuit.charge_pump.value;
-    const step_a = adf4159_full_scale_a / 16.0;
+    const step_a = spec.circuit.charge_pump_full_scale / 16.0;
     const target_gain = @as(f64, @floatFromInt(anchor_step)) * step_a * first.kvco_hz_per_v / first.pll_n;
     const ideal_step = target_gain * point.pll_n / point.kvco_hz_per_v / step_a;
     return @as(f64, @floatFromInt(@max(1, @min(16, @as(usize, @intFromFloat(@round(ideal_step))))))) * step_a;
@@ -1233,7 +1246,7 @@ fn appendSchedule(context: *Context, spec: Spec, anchor_step: usize) std.mem.All
 }
 
 fn currentStep(spec: Spec, point: OperatingPoint, anchor_step: usize) usize {
-    return @intFromFloat(@round(scheduledCurrent(spec, point, anchor_step) / (adf4159_full_scale_a / 16.0)));
+    return @intFromFloat(@round(scheduledCurrent(spec, point, anchor_step) / (spec.circuit.charge_pump_full_scale / 16.0)));
 }
 
 fn rampPhaseError(spec: Spec, bandwidth_hz: f64) f64 {
@@ -1498,7 +1511,7 @@ fn profileOf(allocator: std.mem.Allocator, spec: Spec) std.mem.Allocator.Error!P
         .pfd_hz = spec.circuit.pfd_hz,
         .charge_pump_a = spec.circuit.charge_pump.value,
         .charge_pump_tolerance_pct = spec.circuit.charge_pump.tolerance_pct,
-        .charge_pump_full_scale_a = adf4159_full_scale_a,
+        .charge_pump_full_scale_a = spec.circuit.charge_pump_full_scale,
         .prescaler = spec.circuit.feedback.prescaler,
         .pll_n = spec.circuit.feedback.pll_n,
         .kvco_hz_per_v = spec.circuit.kvco_hz_per_v,
@@ -2143,4 +2156,44 @@ test "the reported open-loop trace agrees with the screened phase margin" {
     const margin_deg = traceMarginDeg(response) orelse return error.NoCrossover;
     try std.testing.expect(margin_deg >= nominal.min_phase_margin_deg - 2);
     try std.testing.expect(margin_deg <= nominal.max_phase_margin_deg + 2);
+}
+
+// spec: pll-loop - charge-pump-full-scale is parsed as a positive authored current
+test "parse charge-pump full scale" {
+    const child = [_]Node{ Node.atom(ast.Span.zero, "charge-pump-full-scale"), Node.float(ast.Span.zero, 4.8e-3) };
+    var out = Spec{ .name = "t" };
+    try parseChild(Node.list(ast.Span.zero, &child), &out);
+    try std.testing.expectApproxEqAbs(@as(f64, 4.8e-3), out.circuit.charge_pump_full_scale, 1e-15);
+    const bad = [_]Node{ Node.atom(ast.Span.zero, "charge-pump-full-scale"), Node.float(ast.Span.zero, 0) };
+    try std.testing.expectError(error.InvalidForm, parseChild(Node.list(ast.Span.zero, &bad), &out));
+}
+
+// spec: pll-loop - an authored charge-pump full scale rescales schedule currents without changing step choices
+test "charge-pump full scale rescales the schedule" {
+    const p1 = [_]Node{ Node.atom(ast.Span.zero, "point"), Node.float(ast.Span.zero, 25), Node.float(ast.Span.zero, 420e6) };
+    const p2 = [_]Node{ Node.atom(ast.Span.zero, "point"), Node.float(ast.Span.zero, 29.25), Node.float(ast.Span.zero, 730e6) };
+    const p3 = [_]Node{ Node.atom(ast.Span.zero, "point"), Node.float(ast.Span.zero, 50), Node.float(ast.Span.zero, 340e6) };
+    const points = [_]Node{ Node.list(ast.Span.zero, &p1), Node.list(ast.Span.zero, &p2), Node.list(ast.Span.zero, &p3) };
+    var spec = Spec{
+        .name = "t",
+        .topology_active_inverting = true,
+        .circuit = .{
+            .pfd_hz = 100e6,
+            .charge_pump = .{ .value = 2.5e-3 },
+            .feedback = .{ .prescaler = 4, .pll_n = 25 },
+            .kvco_hz_per_v = .{ .min = 340e6, .max = 730e6 },
+            .op_amp = .{ .gbw_hz = 145e6 },
+        },
+        .design = .{ .operating_curve = .{ .point_nodes = &points } },
+    };
+    const first = try parseOperatingPoint(points[0]);
+    const last = try parseOperatingPoint(points[2]);
+    const anchor = synthesisAnchorStep(spec, first);
+    try std.testing.expectEqual(@as(usize, 5), anchor);
+    try std.testing.expectApproxEqAbs(@as(f64, 5.0 * 5e-3 / 16.0), scheduledCurrent(spec, first, anchor), 1e-12);
+    spec.circuit.charge_pump_full_scale = 4.8e-3;
+    try std.testing.expectEqual(@as(usize, 5), currentStep(spec, first, anchor));
+    try std.testing.expectEqual(@as(usize, 12), currentStep(spec, last, anchor));
+    try std.testing.expectApproxEqAbs(@as(f64, 5.0 * 4.8e-3 / 16.0), scheduledCurrent(spec, first, anchor), 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 12.0 * 4.8e-3 / 16.0), scheduledCurrent(spec, last, anchor), 1e-12);
 }
