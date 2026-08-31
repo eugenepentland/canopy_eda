@@ -184,6 +184,7 @@ fn run(input: RunInput) ReleaseError!Result {
     const block = pcb.resolveBlock(allocator, project_dir, name, &evaluator, &module_result) orelse
         return error.BoardNotFound;
     const gate_evaluator = if (module_result) |resolved| resolved.eval else &evaluator;
+    const bom_evidence_complete = try fab_gate.prepareBomEvidence(allocator, project_dir, name, block);
     const view = pcb.fabViewForResolved(allocator, project_dir, name, options.layout, block) catch |err| return switch (err) {
         error.BlockNotFound => error.BoardNotFound,
         error.UnknownLayout => error.LayoutNotFound,
@@ -213,6 +214,7 @@ fn run(input: RunInput) ReleaseError!Result {
         .release = .{
             .from_saved = view.selection.from_saved,
             .layout_evidence_complete = view.selection.evidence_complete,
+            .bom_evidence_complete = bom_evidence_complete,
             .keep_dnp = options.dnp == .keep,
             .board = view.authored.board,
         },

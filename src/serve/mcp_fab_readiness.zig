@@ -53,6 +53,7 @@ pub fn run(
     const block = pcb.resolveBlock(allocator, project_dir, name, &evaluator, &module_result) orelse
         return fail(out, allocator, "the design could not be resolved");
     const gate_evaluator = if (module_result) |resolved| resolved.eval else &evaluator;
+    const bom_evidence_complete = try fab_gate.prepareBomEvidence(allocator, project_dir, name, block);
     const view = pcb.fabViewForResolved(allocator, project_dir, name, layout, block) catch |err| return switch (err) {
         error.UnknownLayout => fail(out, allocator, "the requested saved layout does not exist"),
         else => fail(out, allocator, "no saved layout is available; save one before release"),
@@ -67,6 +68,7 @@ pub fn run(
         .release = .{
             .from_saved = view.selection.from_saved,
             .layout_evidence_complete = view.selection.evidence_complete,
+            .bom_evidence_complete = bom_evidence_complete,
             .keep_dnp = false,
             .board = view.authored.board,
         },
@@ -216,4 +218,117 @@ test "MCP and HTTP preserve full findings for an ambiguous release source" {
         http_json.object.get("errors").?.array.items.len,
         mcp_json.object.get("errors").?.array.items.len,
     );
+}
+
+const test_bom = @import("../bom.zig");
+
+fn errorIdCounts(
+    allocator: std.mem.Allocator,
+    body: []const u8,
+) !std.StringArrayHashMapUnmanaged(usize) {
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, allocator, body, .{});
+    var counts = std.StringArrayHashMapUnmanaged(usize).empty;
+    for (parsed.object.get("errors").?.array.items) |item| {
+        const id = try allocator.dupe(u8, item.object.get("id").?.string);
+        const slot = try counts.getOrPutValue(allocator, id, 0);
+        slot.value_ptr.* += 1;
+    }
+    return counts;
+}
+
+fn rebuildSidecar(allocator: std.mem.Allocator, project: []const u8) !void {
+    const design_path = try std.fmt.allocPrint(allocator, "{s}/src/fabvar.sexp", .{project});
+    const bom_path = try std.fmt.allocPrint(allocator, "{s}/src/fabvar.bom", .{project});
+    var evaluator = Evaluator.init(allocator, project);
+    defer evaluator.deinit();
+    const evaluated = try evaluator.evalFile(design_path);
+    const block = switch (evaluated) {
+        .design_block => |value| value,
+        else => return error.TestExpectedDesignBlock,
+    };
+    try test_bom.resolveIdentities(allocator, block, bom_path, project);
+}
+
+// spec: fabrication-release - a first readiness run against a stale BOM sidecar reports the steady-state findings plus only the non-waivable staleness block, without rewriting the sidecar
+test "readiness against a stale sidecar matches the rebuilt steady state" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.createDirPath(std.testing.io, "lib/footprints");
+    try tmp.dir.createDirPath(std.testing.io, "lib/parts");
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/cap-0402.sexp", .data =
+        \\(component-family cap-0402
+        \\  (param-type capacitance)
+        \\  (footprint "0402"))
+    });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/footprints/0402.sexp", .data =
+        \\(footprint "0402"
+        \\  (pad 1 smd roundrect (pos -0.5 0) (size 0.5 0.6))
+        \\  (pad 2 smd roundrect (pos 0.5 0) (size 0.5 0.6))
+        \\  (courtyard (rect -1 -0.6 1 0.6)))
+    });
+    const first_row =
+        \\(parts "cap-0402"
+        \\  (part "100nF" (manufacturer "Murata") (mpn "FIRST-100N") (voltage "50V") (dielectric "x7r") (tolerance "10%") preferred))
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/parts/cap-0402.sexp", .data = first_row });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/fabvar.sexp", .data =
+        \\(import cap-0402)
+        \\(design-block "Readiness Variance Fixture"
+        \\  (revision "A" (date "2026-08-31"))
+        \\  (board (part-number "FABVAR-1") (size 20 10))
+        \\  (instance "C1" (cap-0402 "100nF" "50V" "x7r" "10%")
+        \\    (id fabc0001)
+        \\    (pin 1 "VDD")
+        \\    (pin 2 "GND")))
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/fabvar.layouts.json",
+        .data =
+        \\{"default":"release","layouts":[{"name":"release","kind":"manual","ts":1,"default":true,
+        \\ "parts":[{"ref":"C1","x":5,"y":5,"rot":0}]}]}
+        ,
+    });
+    try rebuildSidecar(allocator, project);
+    // A rating/MPN correction in the parts table invalidates the persisted
+    // selected-row fingerprint: the sidecar is now stale first-run evidence.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/parts/cap-0402.sexp", .data =
+        \\(parts "cap-0402"
+        \\  (part "100nF" (manufacturer "Murata") (mpn "SECOND-100N") (voltage "50V") (dielectric "x7r") (tolerance "10%") preferred))
+    });
+    const bom_path = try std.fmt.allocPrint(allocator, "{s}/src/fabvar.bom", .{project});
+    const stale_bytes = try infra_fs.cwd().readFileAlloc(allocator, bom_path, 1024 * 1024);
+
+    const args = try std.json.parseFromSliceLeaky(std.json.Value, allocator, "{\"name\":\"fabvar\",\"layout\":\"release\"}", .{});
+    var stale_out: std.ArrayList(u8) = .empty;
+    try std.testing.expect(try run(allocator, project, args, &stale_out));
+    const after_bytes = try infra_fs.cwd().readFileAlloc(allocator, bom_path, 1024 * 1024);
+    try std.testing.expectEqualStrings(stale_bytes, after_bytes);
+    var stale_ids = try errorIdCounts(allocator, stale_out.items);
+
+    try rebuildSidecar(allocator, project);
+    var steady_out: std.ArrayList(u8) = .empty;
+    try std.testing.expect(try run(allocator, project, args, &steady_out));
+    var steady_ids = try errorIdCounts(allocator, steady_out.items);
+
+    // The staleness block is the ONLY divergence: the stale first run must not
+    // manufacture bom-identity/bom-selection-drift/rating findings that the
+    // rebuilt steady state does not have, and the steady state itself must not
+    // report stale evidence (guards the prove-then-present ordering).
+    try std.testing.expectEqual(@as(usize, 1), stale_ids.get("bom-evidence-incomplete") orelse 0);
+    try std.testing.expectEqual(@as(usize, 0), steady_ids.get("bom-evidence-incomplete") orelse 0);
+    try std.testing.expectEqual(@as(usize, 0), stale_ids.get("bom-identity") orelse 0);
+    try std.testing.expectEqual(@as(usize, 0), stale_ids.get("bom-selection-drift") orelse 0);
+    const removed = stale_ids.orderedRemove("bom-evidence-incomplete");
+    try std.testing.expect(removed);
+    try std.testing.expectEqual(steady_ids.count(), stale_ids.count());
+    var iterator = steady_ids.iterator();
+    while (iterator.next()) |entry| {
+        try std.testing.expectEqual(entry.value_ptr.*, stale_ids.get(entry.key_ptr.*) orelse 0);
+    }
 }

@@ -4764,6 +4764,7 @@ fn fabGateFor(
     fv: FabView,
     evaluator: *Evaluator,
     block: ?*const env_mod.DesignBlock,
+    bom_evidence_complete: bool,
 ) HandlerError!fab_gate.Result {
     const copper = export_gerber.Copper{ .tracks = fv.routed.tracks, .arcs = fv.routed.arcs, .rf_paths = fv.routed.rf_port_outcomes, .vias = fv.routed.vias, .zones = fv.zones, .silk_keepouts = fv.silk_keepouts };
     const name = req.param("name") orelse "";
@@ -4776,6 +4777,7 @@ fn fabGateFor(
         .release = .{
             .from_saved = fv.selection.from_saved,
             .layout_evidence_complete = fv.selection.evidence_complete,
+            .bom_evidence_complete = bom_evidence_complete,
             .keep_dnp = queryKeepDnp(req),
             .board = fv.authored.board,
         },
@@ -4966,15 +4968,13 @@ fn pcbFabReadinessApiHooked(
         return;
     };
     const gate_evaluator = if (module_res) |resolved| resolved.eval else &evaluator;
+    const bom_evidence_complete = try fab_gate.prepareBomEvidence(req.arena, ctx.project_dir, name, block);
     const fv = resolvedReleaseView(ctx, req, res, name, block) orelse return;
-    var gate = try fabGateFor(ctx, req, fv, gate_evaluator, block);
+    var gate = try fabGateFor(ctx, req, fv, gate_evaluator, block, bom_evidence_complete);
     read_trace.end();
     writeReleaseSnapshot(snapshot_hook, false);
     const consumed_inputs_sha256 = read_trace.digest();
     const traced_inputs = try fab_release.tracedInputs(req.arena, &read_trace, ctx.project_dir, name);
-    const source_input_sha256 = traced_inputs.source;
-    const layout_input_sha256 = traced_inputs.layout;
-    const bom_input_sha256 = traced_inputs.bom;
     const copper = export_gerber.Copper{ .tracks = fv.routed.tracks, .arcs = fv.routed.arcs, .rf_paths = fv.routed.rf_port_outcomes, .vias = fv.routed.vias, .zones = fv.zones, .silk_keepouts = fv.silk_keepouts };
     const mark = try releaseIdentityMark(req.arena, fv, copper, &gate);
     const evidence = fab_release.Evidence{
@@ -4994,9 +4994,9 @@ fn pcbFabReadinessApiHooked(
             .evaluation_sha256 = gate.evaluation.sha256,
             .reviewed_sha256 = gate.evaluation.reviewed_inputs_sha256,
             .consumed_sha256 = consumed_inputs_sha256,
-            .source_sha256 = source_input_sha256,
-            .layout_sha256 = layout_input_sha256,
-            .bom_sha256 = bom_input_sha256,
+            .source_sha256 = traced_inputs.source,
+            .layout_sha256 = traced_inputs.layout,
+            .bom_sha256 = traced_inputs.bom,
         },
     };
     var lock = (try releaseLock(ctx, req, res, name, evidence)) orelse return;
@@ -5090,20 +5090,18 @@ fn pcbGerbersApiHooked(
         return;
     }
     const gate_evaluator = if (module_res) |resolved| resolved.eval else &evaluator;
+    const bom_evidence_complete = try fab_gate.prepareBomEvidence(req.arena, ctx.project_dir, name, block);
     const fv = resolvedReleaseView(ctx, req, res, name, block) orelse return;
     timer.lap("release_view");
 
     const copper = export_gerber.Copper{ .tracks = fv.routed.tracks, .arcs = fv.routed.arcs, .rf_paths = fv.routed.rf_port_outcomes, .vias = fv.routed.vias, .zones = fv.zones, .silk_keepouts = fv.silk_keepouts };
     const frame = export_fab.frameFor(fv.placement);
-    var gate = try fabGateFor(ctx, req, fv, gate_evaluator, block);
+    var gate = try fabGateFor(ctx, req, fv, gate_evaluator, block, bom_evidence_complete);
     timer.lap("fab_gate");
     read_trace.end();
     writeReleaseSnapshot(snapshot_hook, false);
     const consumed_inputs_sha256 = read_trace.digest();
     const traced_inputs = try fab_release.tracedInputs(req.arena, &read_trace, ctx.project_dir, name);
-    const source_input_sha256 = traced_inputs.source;
-    const layout_input_sha256 = traced_inputs.layout;
-    const bom_input_sha256 = traced_inputs.bom;
     timer.lap("traced_inputs");
     const mark = try releaseIdentityMark(req.arena, fv, copper, &gate);
     timer.lap("identity_mark");
@@ -5124,9 +5122,9 @@ fn pcbGerbersApiHooked(
             .evaluation_sha256 = gate.evaluation.sha256,
             .reviewed_sha256 = gate.evaluation.reviewed_inputs_sha256,
             .consumed_sha256 = consumed_inputs_sha256,
-            .source_sha256 = source_input_sha256,
-            .layout_sha256 = layout_input_sha256,
-            .bom_sha256 = bom_input_sha256,
+            .source_sha256 = traced_inputs.source,
+            .layout_sha256 = traced_inputs.layout,
+            .bom_sha256 = traced_inputs.bom,
         },
     };
     var lock = (try releaseLock(ctx, req, res, name, evidence)) orelse return;

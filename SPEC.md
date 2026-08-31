@@ -4881,6 +4881,7 @@ Public functions: entryMatchesSource
 - a non-passive component with a parts table round-trips its exact selected row instead of being mistaken for inline-only fixed identity
 - a non-passive component with a parts table cannot fall back to inline fixed identity when its authored selection has no exact row
 - manufacturing lookup refuses a value-only fallback when an authored passive specification has no exact row
+- the read-only release presentation donates the current parts-table selection over a stale sidecar without rewriting it
 
 ## render_html
 
@@ -7361,6 +7362,7 @@ Public functions: check, writeJson, savedOutline, declaredOutline, outlineDrift
 - the fast fabrication refusal cites the same source-revision finding as the full report and states that the rest of the report was not computed
 - the fast fabrication refusal declines every request the saved-layout selection still owes a 404
 - a collapsed sub-micron track crumb the parser culls is not dropped manufacturing copper, while any other missing track still fails release evidence
+- a first readiness run against a stale BOM sidecar reports the steady-state findings plus only the non-waivable staleness block, without rewriting the sidecar
 - every non-waivable release-blocking id is still spelled at the site that emits it
 - completeness-waiver: empty inputs (an empty/missing selection has no exact manufacturing row and is a non-waivable evidence failure)
 - completeness-waiver: large inputs (the sidecar read is capped at 16 MiB before the strict JSON tree and entity validation run)
