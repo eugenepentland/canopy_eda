@@ -154,6 +154,52 @@ fn hasPassiveDescription(inst: env.Instance) bool {
     return false;
 }
 
+/// True when `inst` is a pass-through connector: a part whose contacts carry
+/// current ACROSS the board boundary rather than into a die. The distinction
+/// matters to the thermal screen — a current annotated on a connector pin is
+/// power delivered through it (heating the load on the far side), not power
+/// dissipated in it. What a real connector burns is I²R across milliohm
+/// contacts, orders of magnitude below the throughput figure.
+///
+/// Evidence, strongest first: an authored `J`/`P` ref-des class is a connector
+/// by declaration. Otherwise the same structural corroboration
+/// `libraryIdentifiesInertPart` demands — a known pinout with no supply pad —
+/// backs either a purely positional pinout of more than two pads (the importer's
+/// signature for a connector or mechanical part; a bare `1`/`2` pinout is the
+/// generic two-terminal shape and proves nothing) or a library description
+/// naming a connector class. The vocabulary here is DELIBERATELY narrower than
+/// `inert_words`: an LED or a crystal is inert for datasheet-review policy but
+/// genuinely dissipates its pin current, so only the connector nouns qualify.
+pub fn isPassThroughConnector(inst: env.Instance) bool {
+    const prefix = refDesClass(inst.ref_des);
+    if (std.mem.eql(u8, prefix, "J") or std.mem.eql(u8, prefix, "P")) return true;
+    const facts = inst.pinout_facts;
+    if (!facts.known or facts.has_supply) return false;
+    if (facts.positional and facts.pin_count != 2) return true;
+    return describesConnector(inst);
+}
+
+/// Head nouns that name a connector and nothing else. A subset of
+/// `inert_words` on purpose — see `isPassThroughConnector`.
+const connector_words = [_][]const u8{
+    "connector", "connectors", "receptacle", "receptacles", "jack", "jacks",
+    "socket",    "sockets",    "header",     "headers",     "plug", "plugs",
+};
+
+fn describesConnector(inst: env.Instance) bool {
+    for (inst.properties) |property| {
+        if (!std.mem.eql(u8, property.key, "description")) continue;
+        if (std.ascii.findIgnoreCase(property.value, "terminal block") != null) return true;
+        var words = std.mem.tokenizeAny(u8, property.value, " \t\r\n,.;:/\\()[]{}<>\"'|+*&_-");
+        while (words.next()) |word| {
+            for (connector_words) |term| {
+                if (std.ascii.eqlIgnoreCase(word, term)) return true;
+            }
+        }
+    }
+    return false;
+}
+
 fn refDesClass(ref_des: []const u8) []const u8 {
     var end: usize = 0;
     while (end < ref_des.len and std.ascii.isAlphabetic(ref_des[end])) : (end += 1) {}
@@ -312,6 +358,71 @@ test "an unreadable pinout is not read as absence of a supply pin" {
         .pin_count = 11,
     });
     try std.testing.expect(isActiveSemiconductor(ldo));
+}
+
+// spec: component_classification - isPassThroughConnector identifies a connector by its authored J/P class or by a supply-free positional pinout
+test "pass-through connectors are identified by authored class or positional pinout" {
+    // Authored J class: a connector by declaration, pinout or no pinout.
+    const erm = fixtureInstance("J1", "erm6-20-01-5-l-dv-a-k-tr", &.{}, positionalPinout(40));
+    try std.testing.expect(isPassThroughConnector(erm));
+    var bare_j = erm;
+    bare_j.pinout_facts = .{};
+    try std.testing.expect(isPassThroughConnector(bare_j));
+
+    // Importer-default U with the structural connector signature.
+    var sma = erm;
+    sma.ref_des = "U12";
+    sma.component = "sma-j-p-h-st-em1";
+    sma.pinout_facts = positionalPinout(3);
+    try std.testing.expect(isPassThroughConnector(sma));
+
+    // A two-pad positional pinout is the generic two-terminal shape a TVS
+    // diode also wears — not evidence.
+    var tvs = erm;
+    tvs.ref_des = "U33";
+    tvs.component = "smbj15ca";
+    tvs.pinout_facts = positionalPinout(2);
+    try std.testing.expect(!isPassThroughConnector(tvs));
+
+    // A supply-pinned part is never a pass-through connector, whatever its
+    // description says (a "USB socket controller" IC keeps its VDD).
+    const usb_desc = [_]env.Property{.{ .key = "description", .value = "USB Type-C receptacle" }};
+    var powered = fixtureInstance("U5", "usb-ctl", &usb_desc, .{
+        .known = true,
+        .has_supply = true,
+        .pin_count = 24,
+    });
+    try std.testing.expect(!isPassThroughConnector(powered));
+    // The same description with a supply-free pinout is a connector.
+    powered.pinout_facts = .{ .known = true, .has_ground = true, .pin_count = 24 };
+    try std.testing.expect(isPassThroughConnector(powered));
+}
+
+// spec: component_classification - isPassThroughConnector keeps dissipating inert parts (LED, crystal) out of the connector class
+test "LEDs and crystals are inert for policy but are not pass-through connectors" {
+    const led_desc = [_]env.Property{.{
+        .key = "description",
+        .value = "Lite-On LTST-S270KGKT, 571 nm Green LED, 1608 (0603) Side View SMD package",
+    }};
+    const led = fixtureInstance("U9", "ltst-s270kgkt", &led_desc, .{ .known = true, .pin_count = 2 });
+    try std.testing.expect(!isPassThroughConnector(led));
+
+    const xtal_desc = [_]env.Property{.{
+        .key = "description",
+        .value = "12MHz +/-30ppm Crystal 20pF 80 Ohms 4-SMD, No Lead",
+    }};
+    const xtal = fixtureInstance("U24", "ecs-120-20-30b-tr", &xtal_desc, .{
+        .known = true,
+        .has_ground = true,
+        .pin_count = 4,
+    });
+    try std.testing.expect(!isPassThroughConnector(xtal));
+
+    // No pinout to read means no evidence: the description alone reclassifies
+    // nothing, exactly as with isActiveSemiconductor.
+    const desc = [_]env.Property{.{ .key = "description", .value = "board-edge socket" }};
+    const unknown = fixtureInstance("U40", "mystery-part", &desc, .{});
+    try std.testing.expect(!isPassThroughConnector(unknown));
 }
 
 test "active classification recognizes multi-letter IC and power refs" {
