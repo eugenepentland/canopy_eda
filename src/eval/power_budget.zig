@@ -602,6 +602,84 @@ fn creditNet(
     try tally.loads.put(allocator, root, load);
 }
 
+/// One module's declared draw on one rail: the `(current typ max)` a
+/// `(sub-block …)` states on an INPUT power port, resolved to the top-level
+/// rail that port ties to.
+///
+/// Deliberately NOT a `RailConsumer` and deliberately not summed into
+/// `load_typ_a` / `load_max_a`. A `RailConsumer` is an annotated PIN — a
+/// measured contribution the budget table adds up — while this is a boundary
+/// declaration made by the module about itself, which the budget has never
+/// counted. Folding it in would silently restate every board's rail totals.
+///
+/// What it IS good for is branch sizing: everything inside the module reaches
+/// the rail through that port, so no series element in there can carry more
+/// than the port declares. `fab_readiness` uses it to size a module's own
+/// ferrite/jumper against the branch it actually feeds instead of against the
+/// whole rail's worst case.
+pub const BranchLoad = struct {
+    /// Sub-block instance name (e.g. "lna"). Every flattened ref-des inside
+    /// that module carries it as a `path ++ "/"` prefix.
+    path: []const u8,
+    /// Top-level rail net name the branch taps (e.g. "V_5VA").
+    rail: []const u8,
+    /// Summed `(current typ …)` across this module's input ports on the rail.
+    i_typ: ?f64,
+    /// Summed `(current … max)` across this module's input ports on the rail.
+    i_max: ?f64,
+};
+
+/// Every `(path, rail)` pair for which a sub-block's input power ports declare
+/// a current. A module tapping one rail through several ports contributes the
+/// SUM of those ports, because one series element inside it may feed them all.
+///
+/// Top-level sub-blocks only: a port nested two modules deep ties to a net in
+/// its parent's private scope, not to a board rail, and inventing a mapping for
+/// it would be guessing. A branch with no entry simply has no declared data,
+/// and every caller must keep its conservative whole-rail answer there.
+pub fn branchLoads(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+) std.mem.Allocator.Error![]const BranchLoad {
+    var out: std.ArrayList(BranchLoad) = .empty;
+    for (block.sub_blocks) |sb| {
+        for (sb.block.ports) |port| {
+            if (!std.mem.eql(u8, port.direction, "in")) continue;
+            if (port.isDeclaredNonPower() or !port.isPowerSource()) continue;
+            if (port.current_typ == null and port.current_max == null) continue;
+            const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ sb.name, port.name });
+            defer allocator.free(path);
+            const rail = railNameForSubPath(block, path) orelse continue;
+            try accumulateBranch(allocator, &out, sb.name, rail, port);
+        }
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// Add one input port's declared current to its module's `(path, rail)` entry,
+/// creating the entry on first sight.
+fn accumulateBranch(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(BranchLoad),
+    path: []const u8,
+    rail: []const u8,
+    port: env_mod.Port,
+) std.mem.Allocator.Error!void {
+    for (out.items) |*existing| {
+        if (!std.mem.eql(u8, existing.path, path)) continue;
+        if (!std.ascii.eqlIgnoreCase(existing.rail, rail)) continue;
+        if (port.current_typ) |v| existing.i_typ = (existing.i_typ orelse 0) + v;
+        if (port.current_max) |v| existing.i_max = (existing.i_max orelse 0) + v;
+        return;
+    }
+    try out.append(allocator, .{
+        .path = path,
+        .rail = rail,
+        .i_typ = port.current_typ,
+        .i_max = port.current_max,
+    });
+}
+
 fn buildConsumers(
     allocator: std.mem.Allocator,
     group_keys: []const []const u8,
@@ -1110,6 +1188,46 @@ test "a top-level output port without a declared current rates nothing" {
     signal[1].kind = "signal";
     block.ports = signal;
     try testing.expect(railNamed(try analyze(alloc, &block), "VOUT") == null);
+}
+
+// spec: eval/power_budget - a sub-block input power port's declared current is reported as a branch load for series sizing and never enters the rail's summed budget
+test "a module's declared input current is a branch load, not a budget entry" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var block = try siblingChainBlock(alloc);
+    const before = railNamed(try analyze(alloc, &block), "V3P3").?;
+    try testing.expectEqual(@as(usize, 0), (try branchLoads(alloc, &block)).len);
+
+    // The load module now states what it draws at its own boundary. Its inner
+    // module declares one too, and must be ignored: a nested port ties to its
+    // parent's private scope, not to a board rail.
+    const load_mod = block.sub_blocks[1].block;
+    const load_ports = try alloc.dupe(env_mod.Port, load_mod.ports);
+    load_ports[0].kind = "power";
+    load_ports[0].current_typ = 0.128;
+    load_ports[0].current_max = 0.144;
+    load_mod.ports = load_ports;
+    const inner = load_mod.sub_blocks[0].block;
+    const inner_ports = try alloc.dupe(env_mod.Port, inner.ports);
+    inner_ports[0].kind = "power";
+    inner_ports[0].current_max = 9.0;
+    inner.ports = inner_ports;
+
+    const branches = try branchLoads(alloc, &block);
+    try testing.expectEqual(@as(usize, 1), branches.len);
+    try testing.expectEqualStrings("loadmod", branches[0].path);
+    try testing.expectEqualStrings("V3P3", branches[0].rail);
+    try testing.expectEqual(@as(?f64, 0.128), branches[0].i_typ);
+    try testing.expectEqual(@as(?f64, 0.144), branches[0].i_max);
+
+    // The rail's summed budget is byte-for-byte what it was: a boundary
+    // declaration is evidence about a branch, not a second copy of the load.
+    const after = railNamed(try analyze(alloc, &block), "V3P3").?;
+    try testing.expectEqual(before.load_typ_a, after.load_typ_a);
+    try testing.expectEqual(before.load_max_a, after.load_max_a);
+    try testing.expectEqual(before.consumers.len, after.consumers.len);
 }
 
 // spec: eval/power_budget - a parent board reads a module's rating through its sub-block port, and the highest declared capacity wins a rail whichever way it was declared

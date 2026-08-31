@@ -723,10 +723,12 @@ src/eval/net_analysis.zig::refDesLocalPrefix | fn refDesLocalPrefix(ref_des: []c
 src/eval/net_analysis.zig::schematic_ground_names value
 src/eval/net_analysis.zig::subBlockNetHasCap | fn subBlockNetHasCap(block: *const DesignBlock, net_path: []const u8) bool
 src/eval/pin_enrichment.zig::enrichPinFunctions | fn enrichPinFunctions( allocator: Allocator, block: *DesignBlock, project_dir: []const u8, ) Allocator.Error!void
+src/eval/power_budget.zig::BranchLoad struct_
 src/eval/power_budget.zig::Rail struct_
 src/eval/power_budget.zig::RailConsumer struct_
 src/eval/power_budget.zig::RailStatus enum_
 src/eval/power_budget.zig::analyze | fn analyze( allocator: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error![]const Rail
+src/eval/power_budget.zig::branchLoads | fn branchLoads( allocator: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error![]const BranchLoad
 src/eval/power_budget.zig::railNameForSubPath | fn railNameForSubPath(block: *const DesignBlock, path: []const u8) ?[]const u8
 src/eval/power_budget.zig::resolveRailVoltage | fn resolveRailVoltage(allocator: std.mem.Allocator, block: *const DesignBlock, rail_name: []const u8) ?f64
 src/eval/power_sequencing.zig::SequenceRow struct_
@@ -2201,6 +2203,7 @@ src/placement/impedance_field.zig::analyzeOdd | fn analyzeOdd(allocator: std.mem
 src/placement/impedance_microstrip.zig::Analysis struct_
 src/placement/impedance_microstrip.zig::analyze | fn analyze(w: f64, h: f64, t: f64, er: f64) Error!Analysis
 src/placement/impedance_rules.zig::Physical struct_
+src/placement/impedance_rules.zig::RailModel struct_
 src/placement/impedance_rules.zig::deriveWidths | fn deriveWidths( arena: std.mem.Allocator, block: *const DesignBlock, rules: []NetRule, ) std.mem.Allocator.Error!void
 src/placement/impedance_rules.zig::resolvedPairGap | fn resolvedPairGap(r: NetRule, board_clearance: f64) f64
 src/placement/impedance_rules.zig::stackOf | fn stackOf( arena: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error!impedance.Stack
