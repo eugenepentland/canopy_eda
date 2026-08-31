@@ -569,6 +569,7 @@ pub const shards: []const []const []const u8 = &.{
         "system_review_package.test.",
         "board_review_snapshot.test.",
         "serve.fab_release_service.test.",
+        "serve.dossier_jobs.test.",
         "serve.system_review_api.test.",
         "review_thermal.test.",
         "thermal_scenarios.test.",

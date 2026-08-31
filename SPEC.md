@@ -5559,6 +5559,16 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - the standalone draft dossier is the archive's own HTML member composed without the archive around it
 - a dossier request over a workspace that cannot compose answers the composer's diagnostic rather than a crash or a partial page
 - the system review page offers the dossier as a page action beside the draft download, pointing at the system's own dossier path
+- a dossier request answers from the composed copy or a loader without ever composing inside the request
+- one dossier composition per system is ever in flight, and a reload during one joins it rather than starting a second
+- a system-review mutation drops the composed dossier and retires the compose in flight, so no reader is served the document they just edited away
+- a failed dossier composition is recorded against its system and reported rather than retried on every reload
+- a dossier composition that failed in the background reaches the next page request as the composer's diagnostic
+- a saved review document retires the system's composed dossier so the next request composes from post-save inputs
+- the dossier's board-free refusals are decided without starting a composition, so a broken workspace is refused on the first request
+- the dossier status endpoint reports composition state and freshness without starting or serving a composition
+- the dossier loader waits and reloads rather than polling, so a composition in flight is not destabilised by its own progress page
+- a dossier composition that lost its input closure to concurrent server work is composed again within a bounded number of attempts
 - completeness-waiver: empty inputs (a system must name at least one board and every required active document must exist, so an empty workspace is rejected with a diagnostic)
 - completeness-waiver: large inputs (manifest, Markdown, image, collection, and ZIP-member limits reject oversized review inputs before unbounded work)
 - completeness-waiver: unauthorized access (draft/readiness are read-only; attestation, document writes, uploads, and final release require the authenticated writer role)

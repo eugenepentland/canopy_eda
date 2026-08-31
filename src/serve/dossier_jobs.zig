@@ -1,0 +1,447 @@
+//! Background composition of the system-review HTML dossier.
+//!
+//! `GET /systems/:name/dossier` used to compose its document inside the
+//! request. Composition is `system_review_package.draftDossierHtml`, whose cost
+//! is a complete per-board review snapshot plus a complete fabrication
+//! readiness pass (DRC included) for every board the system names — measured at
+//! 50-57 s for the two-board Barracuda system, warm or cold, on the deployed
+//! ReleaseSafe binary. A browser asked to wait that long simply looks broken.
+//!
+//! So the page no longer composes: it reads this store. One composed document
+//! per system is retained here, composed on a detached thread and replaced
+//! whole when a newer one finishes. The contract the page implements over it:
+//!
+//!   * a composed copy is served immediately, byte-identical to the
+//!     `review/<base>.html` member of the same system's `draft.zip` — the store
+//!     retains the composer's output and never edits it;
+//!   * a copy older than `revalidate_after_ms` starts a background recompose
+//!     while it is being served, so the next reload carries current evidence;
+//!   * a system-review mutation (document save, asset upload, attestation)
+//!     `invalidate`s the copy outright, because a reader who just saved must
+//!     never be handed the pre-save document;
+//!   * exactly ONE compose per system is ever in flight. A reload during a
+//!     compose joins it rather than starting a second minute of board analysis.
+//!
+//! A composed document, a failure, and an in-flight compose are all per-system
+//! state, so a broken or slow system never blocks another one.
+//!
+//! `background` is the switch that turns thread spawning on, mirroring the
+//! `allocator`-is-the-switch convention of the serve-layer caches: a
+//! default-constructed store (every handler test's `ServerState`) composes
+//! nothing and starts no thread, so a test drives `begin`/`finish` explicitly
+//! instead of racing a detached minute of analysis against its own fixture
+//! directory.
+
+const std = @import("std");
+const clock = @import("../infra/clock.zig");
+const infra_fs = @import("../infra/fs.zig");
+const log = @import("../infra/log.zig");
+const paths = @import("../paths.zig");
+const warm_sched = @import("warm_sched.zig");
+const system_review_package = @import("../system_review_package.zig");
+
+/// The allocator every retained document and map key uses. A composed dossier
+/// must outlive both the request that asked for it and the thread that produced
+/// it, so neither a request arena nor the compose thread's own arena will do.
+// allocator-ok: process-lifetime by necessity — see the paragraph above.
+const durable = std.heap.page_allocator;
+
+/// How long a composed dossier is served without starting a background
+/// recompose behind it. Composition is a minute of board analysis, so this is
+/// the knob that keeps a reader hammering reload from queueing a minute of CPU
+/// per keystroke while still making an ordinary revisit pick up current
+/// evidence.
+pub const revalidate_after_ms: i64 = 60 * 1000;
+
+/// How many times one compose may be attempted before its failure is reported.
+/// Only `error.InputsChanged` is retried — the composer's own guard against a
+/// board's inputs moving mid-analysis, which is a transient property of a busy
+/// server rather than a statement about the workspace. Everything else is
+/// reported on the first attempt.
+const max_compose_attempts: u8 = 3;
+
+/// Whether a failed attempt should be composed again. Only the composer's
+/// mid-analysis consistency guard qualifies: `error.InputsChanged` says a
+/// board's consumed-input closure moved between `analyze`'s two fabrication
+/// passes, which is a property of what else the server was doing rather than a
+/// verdict about the workspace. Every other failure — an invalid manifest, a
+/// missing board, a package over its ceiling — would fail identically on the
+/// next attempt, so it is reported at once.
+fn retryable(err: anyerror, attempt: u8) bool {
+    return err == error.InputsChanged and attempt < max_compose_attempts;
+}
+
+/// One system's slot: the last composed document, or the last compose failure,
+/// plus whether a compose is in flight right now. `gen` versions the slot so an
+/// `invalidate` landing mid-compose retires that compose's result instead of
+/// publishing a document composed from pre-mutation inputs.
+const Entry = struct {
+    gen: u32 = 0,
+    composing: bool = false,
+    html: ?[]const u8 = null,
+    composed_ms: i64 = 0,
+    err: ?anyerror = null,
+};
+
+/// A consistent read of one system's slot. `html` is copied into the caller's
+/// allocator under the lock, because a finishing compose frees the bytes the
+/// slot previously held — so a caller that only wants the STATE asks for no
+/// copy and reads `has_document` instead of paying a megabyte-scale memcpy.
+pub const View = struct {
+    gen: u32,
+    composing: bool,
+    has_document: bool,
+    html: ?[]const u8,
+    composed_ms: i64,
+    err: ?anyerror,
+
+    /// Whether what this view holds is old enough to be worth recomposing. A
+    /// slot that has never composed anything (`composed_ms == 0`) is always
+    /// stale, which is what makes the first request start the first compose.
+    pub fn stale(self: View, now_ms: i64) bool {
+        if (self.composed_ms == 0) return true;
+        return now_ms -| self.composed_ms >= revalidate_after_ms;
+    }
+
+    /// Whole seconds since this document (or failure) was composed, for the
+    /// status endpoint's freshness reporting. Null when nothing is recorded.
+    pub fn ageSeconds(self: View, now_ms: i64) ?i64 {
+        if (self.composed_ms == 0) return null;
+        return @divFloor(@max(now_ms - self.composed_ms, 0), 1000);
+    }
+};
+
+/// The per-system dossier slots, held in `ServerState` so they live for the
+/// server's lifetime without a module-level global (`route_live`'s convention).
+/// All access is serialized by `mutex`.
+pub const Store = struct {
+    mutex: infra_fs.Mutex = .{},
+    map: std.StringHashMapUnmanaged(Entry) = .empty,
+    /// Whether `spawn` may start a detached compose thread. Off by default so a
+    /// bare `ServerState` is inert; `serve()` turns it on.
+    background: bool = false,
+
+    /// Claim the single compose slot for `name`, returning the generation the
+    /// caller must quote back to `finish`. Null when a compose is already in
+    /// flight (the join case — the caller starts nothing) or when the slot
+    /// could not be allocated.
+    pub fn begin(self: *Store, name: []const u8) ?u32 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const gop = self.map.getOrPut(durable, name) catch return null;
+        if (!gop.found_existing) {
+            // Borrow the caller's name until the durable dupe lands, so a
+            // failed dupe can still remove the entry through a valid key.
+            gop.key_ptr.* = name;
+            gop.value_ptr.* = .{};
+            gop.key_ptr.* = durable.dupe(u8, name) catch {
+                _ = self.map.remove(name);
+                return null;
+            };
+        }
+        if (gop.value_ptr.composing) return null;
+        gop.value_ptr.composing = true;
+        gop.value_ptr.gen +%= 1;
+        return gop.value_ptr.gen;
+    }
+
+    /// Publish generation `gen`'s outcome: `html` (durable-owned, ownership
+    /// taken) on success, or `err` on failure. The compose slot is released
+    /// either way, because the one worker holding it has exited. A result whose
+    /// generation was superseded by `invalidate` is discarded rather than
+    /// published — its inputs are known to be out of date.
+    pub fn finish(self: *Store, name: []const u8, gen: u32, html: ?[]const u8, err: ?anyerror) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const entry = self.map.getPtr(name) orelse {
+            if (html) |bytes| durable.free(bytes);
+            return;
+        };
+        entry.composing = false;
+        if (entry.gen != gen) {
+            if (html) |bytes| durable.free(bytes);
+            return;
+        }
+        if (entry.html) |old| durable.free(old);
+        entry.html = html;
+        entry.err = err;
+        entry.composed_ms = clock.milliTimestamp();
+    }
+
+    /// A consistent snapshot of `name`'s slot. A composed document is copied
+    /// into `allocator` (the request arena) when one is supplied; pass null to
+    /// read the state alone, which is what the polled status endpoint wants —
+    /// it never serves the document, and copying a megabyte every two seconds
+    /// to answer "is it there yet" would be the wrong kind of cheap. An unknown
+    /// system reads as an empty slot rather than an error, because the first
+    /// request for a system is exactly that.
+    pub fn snapshot(self: *Store, allocator: ?std.mem.Allocator, name: []const u8) View {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const entry = self.map.get(name) orelse return .{
+            .gen = 0,
+            .composing = false,
+            .has_document = false,
+            .html = null,
+            .composed_ms = 0,
+            .err = null,
+        };
+        const copied: ?[]const u8 = if (allocator) |a|
+            (if (entry.html) |bytes| (a.dupe(u8, bytes) catch null) else null)
+        else
+            null;
+        // A copy that was ASKED for and failed to allocate must not read as
+        // "nothing composed": report the allocation failure so the page answers
+        // a diagnostic rather than silently starting another composition.
+        const copy_failed = allocator != null and entry.html != null and copied == null;
+        return .{
+            .gen = entry.gen,
+            .composing = entry.composing,
+            .has_document = entry.html != null,
+            .html = copied,
+            .composed_ms = entry.composed_ms,
+            .err = if (copy_failed) error.OutOfMemory else entry.err,
+        };
+    }
+
+    /// Drop `name`'s composed document and recorded failure, and retire any
+    /// compose already in flight for it. Called by every system-review mutation
+    /// so the next dossier request composes from post-mutation inputs instead of
+    /// serving the document the reader just edited away.
+    pub fn invalidate(self: *Store, name: []const u8) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const entry = self.map.getPtr(name) orelse return;
+        if (entry.html) |old| durable.free(old);
+        entry.html = null;
+        entry.err = null;
+        entry.composed_ms = 0;
+        entry.gen +%= 1;
+    }
+
+    /// Release every retained document and key. Safe on a default-constructed
+    /// store. Not safe while a compose thread is still running, which is why
+    /// only `serve()`'s owned instance is ever torn down.
+    pub fn deinit(self: *Store) void {
+        var it = self.map.iterator();
+        while (it.next()) |kv| {
+            if (kv.value_ptr.html) |bytes| durable.free(bytes);
+            durable.free(kv.key_ptr.*);
+        }
+        self.map.deinit(durable);
+        self.map = .empty;
+    }
+};
+
+/// What the detached compose thread owns. `project_dir` and `name` are durable
+/// copies because both point into per-request storage at the call site, and the
+/// thread outlives the response by about a minute.
+const Task = struct {
+    store: *Store,
+    project_dir: []const u8,
+    name: []const u8,
+    gen: u32,
+
+    fn run(self: Task) void {
+        defer {
+            // allocator-ok: releasing the process-lifetime copies `spawn` made.
+            durable.free(self.project_dir);
+            durable.free(self.name);
+        }
+        // A compose is a unit of work over the project tree, exactly like a
+        // request, so it opens with what `Server.dispatch` opens every request
+        // with: the src/ basename index revalidated once for this unit of work,
+        // and the work counted as interactive so the startup and derived warm
+        // sweeps yield to it the way they yield to a reader.
+        warm_sched.enterInteractive();
+        defer warm_sched.leaveInteractive();
+        paths.beginRequest();
+        // The compose owns its scratch and releases it before returning, so a
+        // system's worth of board evidence is not retained past the one
+        // document it produced.
+        // allocator-ok: detached compose-thread scratch, released below.
+        var arena = std.heap.ArenaAllocator.init(durable);
+        defer arena.deinit();
+        var attempt: u8 = 0;
+        while (true) {
+            attempt += 1;
+            const composed = system_review_package.draftDossierHtml(
+                arena.allocator(),
+                self.project_dir,
+                self.name,
+            ) catch |err| {
+                // `InputsChanged` is `analyze`'s mid-analysis consistency
+                // guard, not a verdict about the workspace: something the
+                // server did moved a board's consumed-input closure between the
+                // two fabrication passes that sandwich the review snapshot.
+                // Measured on the real Barracuda system, a minute-long analysis
+                // survives an occasional concurrent request but not a steady
+                // stream of them, so composing again is the sanctioned
+                // response — bounded, so a genuinely unstable tree reports
+                // instead of looping.
+                if (retryable(err, attempt)) {
+                    log.warn(
+                        "dossier compose: {s} lost its input closure, composing again ({d}/{d})",
+                        .{ self.name, attempt + 1, max_compose_attempts },
+                    );
+                    _ = arena.reset(.retain_capacity);
+                    continue;
+                }
+                self.store.finish(self.name, self.gen, null, err);
+                return;
+            };
+            // allocator-ok: process-lifetime by necessity — the retained
+            // document outlives this thread's arena and every request that
+            // reads it.
+            const owned = durable.dupe(u8, composed) catch {
+                self.store.finish(self.name, self.gen, null, error.OutOfMemory);
+                return;
+            };
+            self.store.finish(self.name, self.gen, owned, null);
+            return;
+        }
+    }
+};
+
+/// Start composing `name`'s dossier on a detached thread, unless one is already
+/// in flight for that system. Best-effort in every direction: a store with
+/// background composition off, a busy slot, a failed name copy, or a refused
+/// thread all mean no compose starts — the page then serves whatever the slot
+/// already holds and says so.
+pub fn spawn(store: *Store, project_dir: []const u8, name: []const u8) void {
+    if (!store.background) return;
+    const gen = store.begin(name) orelse return;
+    // allocator-ok: process-lifetime by necessity — these outlive the request.
+    const owned_dir = durable.dupe(u8, project_dir) catch {
+        store.finish(name, gen, null, error.OutOfMemory);
+        return;
+    };
+    const owned_name = durable.dupe(u8, name) catch {
+        durable.free(owned_dir);
+        store.finish(name, gen, null, error.OutOfMemory);
+        return;
+    };
+    const task = Task{ .store = store, .project_dir = owned_dir, .name = owned_name, .gen = gen };
+    const thread = std.Thread.spawn(.{}, Task.run, .{task}) catch |err| {
+        log.warn("dossier compose: not started for {s} ({s})", .{ name, @errorName(err) });
+        durable.free(owned_dir);
+        durable.free(owned_name);
+        store.finish(name, gen, null, err);
+        return;
+    };
+    thread.detach();
+}
+
+// spec: system-review - one dossier composition per system is ever in flight, and a reload during one joins it rather than starting a second
+test "the dossier store admits one compose per system and serves the finished document" {
+    var store = Store{};
+    defer store.deinit();
+
+    // Nothing composed yet: an empty slot that reads as stale, so the first
+    // request is what starts the first compose.
+    const empty = store.snapshot(null, "demo");
+    try std.testing.expect(!empty.has_document);
+    try std.testing.expect(!empty.composing);
+    try std.testing.expect(empty.stale(clock.milliTimestamp()));
+    try std.testing.expect(empty.ageSeconds(clock.milliTimestamp()) == null);
+
+    // One compose claims the slot; a second caller joins rather than starting
+    // a second minute of board analysis.
+    const gen = store.begin("demo").?;
+    try std.testing.expect(store.begin("demo") == null);
+    // A different system is unaffected by the busy one.
+    const other = store.begin("otherdemo").?;
+    try std.testing.expectEqual(gen, other);
+
+    const in_flight = store.snapshot(null, "demo");
+    try std.testing.expect(in_flight.composing);
+    try std.testing.expect(!in_flight.has_document);
+
+    // allocator-ok: the store takes ownership of durable-allocated documents.
+    store.finish("demo", gen, try durable.dupe(u8, "<html>v1</html>"), null);
+    const composed = store.snapshot(std.testing.allocator, "demo");
+    const composed_html = composed.html orelse return error.NothingComposed;
+    defer std.testing.allocator.free(composed_html);
+    try std.testing.expect(!composed.composing);
+    try std.testing.expectEqualStrings("<html>v1</html>", composed_html);
+    try std.testing.expect(composed.err == null);
+    // A fresh document is not recomposed behind the reader.
+    try std.testing.expect(!composed.stale(clock.milliTimestamp()));
+    try std.testing.expect(composed.stale(clock.milliTimestamp() + revalidate_after_ms));
+    // The slot is free again, so a later revalidation may claim it.
+    try std.testing.expect(store.begin("demo") != null);
+}
+
+// spec: system-review - a system-review mutation drops the composed dossier and retires the compose in flight, so no reader is served the document they just edited away
+test "invalidating a dossier slot retires the compose already running for it" {
+    var store = Store{};
+    defer store.deinit();
+
+    const first = store.begin("demo").?;
+    // allocator-ok: the store takes ownership of durable-allocated documents.
+    store.finish("demo", first, try durable.dupe(u8, "<html>v1</html>"), null);
+
+    // A recompose is under way when the reader saves a document.
+    const second = store.begin("demo").?;
+    store.invalidate("demo");
+    const dropped = store.snapshot(null, "demo");
+    try std.testing.expect(!dropped.has_document);
+    try std.testing.expect(dropped.composed_ms == 0);
+
+    // The in-flight compose read pre-save inputs, so its result is discarded
+    // rather than published over the invalidation.
+    // allocator-ok: the store takes ownership of durable-allocated documents.
+    store.finish("demo", second, try durable.dupe(u8, "<html>stale</html>"), null);
+    const after_stale = store.snapshot(null, "demo");
+    try std.testing.expect(!after_stale.has_document);
+    try std.testing.expect(!after_stale.composing);
+
+    // The recompose that starts after the save is the one that publishes, and
+    // what it publishes is what the reader now gets.
+    const third = store.begin("demo").?;
+    // allocator-ok: the store takes ownership of durable-allocated documents.
+    store.finish("demo", third, try durable.dupe(u8, "<html>v2</html>"), null);
+    const fresh = store.snapshot(std.testing.allocator, "demo");
+    const fresh_html = fresh.html orelse return error.NothingComposed;
+    defer std.testing.allocator.free(fresh_html);
+    try std.testing.expectEqualStrings("<html>v2</html>", fresh_html);
+}
+
+// spec: system-review - a dossier composition that lost its input closure to concurrent server work is composed again within a bounded number of attempts
+test "only the composer's mid-analysis guard earns another compose attempt" {
+    // The guard says "something moved under me", so the same inputs may well
+    // compose cleanly on the next pass…
+    try std.testing.expect(retryable(error.InputsChanged, 1));
+    try std.testing.expect(retryable(error.InputsChanged, max_compose_attempts - 1));
+    // …but not forever: a genuinely unstable tree reports instead of looping.
+    try std.testing.expect(!retryable(error.InputsChanged, max_compose_attempts));
+    // Everything else is a verdict about the workspace and would fail the same
+    // way on every attempt, so it is reported on the first one.
+    try std.testing.expect(!retryable(error.BoardNotFound, 1));
+    try std.testing.expect(!retryable(error.InvalidManifest, 1));
+    try std.testing.expect(!retryable(error.ArchiveTooLarge, 1));
+    try std.testing.expect(!retryable(error.OutOfMemory, 1));
+}
+
+// spec: system-review - a failed dossier composition is recorded against its system and reported rather than retried on every reload
+test "a failed dossier compose is retained as the slot's reported outcome" {
+    var store = Store{};
+    defer store.deinit();
+
+    const gen = store.begin("demo").?;
+    store.finish("demo", gen, null, error.InputsChanged);
+    const failed = store.snapshot(null, "demo");
+    try std.testing.expect(!failed.has_document);
+    try std.testing.expect(!failed.composing);
+    try std.testing.expectEqual(@as(anyerror, error.InputsChanged), failed.err.?);
+    // Recorded, so it is not stale — a broken workspace is not recomposed on
+    // every reload, only once the revalidation window has passed.
+    try std.testing.expect(!failed.stale(clock.milliTimestamp()));
+    try std.testing.expect(failed.ageSeconds(clock.milliTimestamp()).? >= 0);
+
+    // A store with background composition off starts nothing, which is what
+    // keeps a handler test from racing a detached compose against its fixture.
+    store.invalidate("demo");
+    spawn(&store, ".", "demo");
+    try std.testing.expect(!store.snapshot(null, "demo").composing);
+}

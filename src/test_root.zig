@@ -374,6 +374,7 @@ test {
     _ = @import("serve/datasheet.zig");
     _ = @import("serve/datasheet_attach.zig");
     _ = @import("serve/datasheet_ref.zig");
+    _ = @import("serve/dossier_jobs.zig");
     _ = @import("serve/design_diff.zig");
     _ = @import("serve/design_rules_edit.zig");
     _ = @import("serve/diag_format.zig");
@@ -600,6 +601,7 @@ test "shard manifest runs every named test exactly once" {
     // behind the broad integrity loop when their test-root import first lands.
     try std.testing.expectEqual(@as(usize, 1), claimingShards("serve.warmup.test.startup prioritizes PCB pages over deferred payloads over progress ladders"));
     try std.testing.expectEqual(@as(usize, 1), claimingShards("serve.pcb_derived.test.deferred warm slots are capped and released"));
+    try std.testing.expectEqual(@as(usize, 1), claimingShards("serve.dossier_jobs.test.the dossier store admits one compose per system and serves the finished document"));
     try std.testing.expectEqual(@as(usize, 1), claimingShards("shape_sketch.test.outline sketch compiles an ordered line profile"));
     try std.testing.expectEqual(@as(usize, 1), claimingShards("serve.shape_sketch_json.test.outline sketch JSON round trips stable entities and dimensions"));
     try std.testing.expectEqual(@as(usize, 1), claimingShards("main.test.one-shot CLI allocator releases process-lifetime storage in bulk"));

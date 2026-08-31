@@ -883,6 +883,7 @@ test {
     _ = @import("serve/mcp_flatten.zig");
     _ = @import("serve/datasheet_attach.zig");
     _ = @import("serve/datasheet_ref.zig");
+    _ = @import("serve/dossier_jobs.zig");
     _ = @import("serve/page_cache.zig");
     _ = @import("serve/gzip_cache.zig");
     _ = @import("serve/pcb_page_cache.zig");

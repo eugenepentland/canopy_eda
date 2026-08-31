@@ -460,13 +460,23 @@ fn copyFabResult(
     };
 }
 
-fn analyze(
+/// A system's manifest as `analyze` needs it: the exact bytes read from the
+/// workspace plus the validated spec they parse to.
+const LoadedManifest = struct {
+    source: []const u8,
+    parsed: system_review.ParsedSystemSpec,
+};
+
+/// The board-free front of `analyze`: reject an unusable `name`, read the
+/// manifest, validate it, and confirm it claims the name that was asked for.
+/// Factored out so `dossierPreflight` can answer the identical refusals without
+/// starting the per-board evidence pass — one implementation, so the fast
+/// pre-check and the composer can never disagree about what they reject.
+fn loadManifest(
     allocator: std.mem.Allocator,
-    transient_allocator: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
-    preflight_mode: PreflightMode,
-) !Analysis {
+) !LoadedManifest {
     if (!simpleName(name)) return error.InvalidSystemName;
     const manifest_rel = try std.fmt.allocPrint(allocator, "src/systems/{s}/system.json", .{name});
     const manifest_source = try review_assets.readContainedFile(
@@ -478,6 +488,47 @@ fn analyze(
     var parsed = try parseManifestForRefresh(allocator, manifest_source);
     errdefer parsed.deinit();
     if (!std.mem.eql(u8, name, parsed.value.name)) return error.SystemNameMismatch;
+    return .{ .source = manifest_source, .parsed = parsed };
+}
+
+const PreflightError = @typeInfo(@typeInfo(@TypeOf(dossierPreflightImpl)).@"fn".return_type.?).error_union.error_set;
+
+/// Decide, without touching a board, whether composing this system's dossier is
+/// worth starting at all. Returns exactly the refusals `analyze` would reach
+/// before its first board — an unusable name, an absent or oversized manifest,
+/// a manifest that does not validate, and a manifest naming a different system.
+/// Anything this accepts may still fail later inside `analyze`; the point is
+/// only that these four never need a minute of board analysis to be reported.
+pub fn dossierPreflight(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+) PreflightError!void {
+    return dossierPreflightImpl(allocator, project_dir, name);
+}
+
+fn dossierPreflightImpl(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+) !void {
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    var loaded = try loadManifest(scratch.allocator(), project_dir, name);
+    loaded.parsed.deinit();
+}
+
+fn analyze(
+    allocator: std.mem.Allocator,
+    transient_allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    preflight_mode: PreflightMode,
+) !Analysis {
+    const loaded = try loadManifest(allocator, project_dir, name);
+    const manifest_source = loaded.source;
+    var parsed = loaded.parsed;
+    errdefer parsed.deinit();
 
     var documents: std.ArrayList(DocumentEvidence) = .empty;
     var document_attestations: std.ArrayList(system_review.DocumentAttestation) = .empty;
