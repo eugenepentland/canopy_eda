@@ -35,7 +35,9 @@ const pad_shape = @import("placement/pad_shape.zig");
 const copper_contact = @import("placement/copper_contact.zig");
 const outline_mod = @import("placement/outline.zig");
 const board_layers = @import("board_layers.zig");
+const impedance_rules = @import("placement/impedance_rules.zig");
 const net_analysis = @import("eval/net_analysis.zig");
+const net_envelopes = @import("eval/net_envelopes.zig");
 const env_mod = @import("eval/env.zig");
 const power_budget = @import("eval/power_budget.zig");
 const flat_netlist = @import("flat_netlist.zig");
@@ -657,6 +659,27 @@ fn branchCurrentForRef(
     return best;
 }
 
+/// True when a part sitting on `name` is REACHED by the rail `rail_name` —
+/// the same node by name, or the same node through a ferrite bead.
+///
+/// Reachability only. A bead is a DC conductor, so `boost22/BOOST25_VIN` behind
+/// the boost module's input bead draws out of `V_12V` no matter what the
+/// flattened name spells; without this hop such a net was voltage-known (the
+/// envelopes cross the bead) and current-unknown (the rails never did), which
+/// is not a physical distinction. It is deliberately NOT used to decide which
+/// consumers a leg owns: a bead makes two nets one POTENTIAL, not one current,
+/// and the leg past it still carries only its own load. `netMatchesRailName`
+/// stays the test wherever the question is "is this net that rail's trunk".
+///
+/// Widening reachability can only ADD rails to `railCurrentForRef`'s `@max`,
+/// never remove one, so this never talks an already-proven current down.
+fn netMatchesRail(ctx: RatingContext, name: []const u8, rail_name: []const u8) bool {
+    if (netMatchesRailName(name, rail_name)) return true;
+    const a = net_analysis.findRoot(ctx.bridges, name);
+    const b = net_analysis.findRoot(ctx.bridges, rail_name);
+    return std.mem.eql(u8, a, b);
+}
+
 /// The declared bound on what `ref` carries out of `rail`, or null when the
 /// design declared nothing more specific than the rail total.
 ///
@@ -665,18 +688,20 @@ fn branchCurrentForRef(
 /// where two disagree the design has not proved the smaller of them. Sharpening
 /// attribution must not become a way to talk a rating down.
 fn attributedRailCurrent(
-    placement: optimizer.Placement,
+    ctx: RatingContext,
     rail: power_budget.Rail,
     ref: []const u8,
 ) ?f64 {
     var best: ?f64 = declaredCurrentOfRef(rail, ref);
-    for (placement.nets) |net| {
+    for (ctx.placement.nets) |net| {
+        // Trunk by NAME: the far side of a bead is a distinct leg with its own
+        // declared consumers, and charging it the trunk would erase them.
         if (netMatchesRailName(net.name, rail.net)) continue;
         if (!ownsNet(net, ref)) continue;
         const branch = declaredCurrentOnNet(rail, net.name) orelse continue;
         best = @max(best orelse branch, branch);
     }
-    if (branchCurrentForRef(placement, rail, ref)) |declared| {
+    if (branchCurrentForRef(ctx.placement, rail, ref)) |declared| {
         best = @max(best orelse declared, declared);
     }
     return best;
@@ -697,30 +722,142 @@ fn attributedRailCurrent(
 /// alongside the rail total. A design that declares nothing branch-specific
 /// keeps exactly the whole-rail answer it had before: this narrows attribution
 /// where the design earned it, and never where it did not.
-fn railCurrentForRef(placement: optimizer.Placement, ref: []const u8) ?f64 {
+fn railCurrentForRef(ctx: RatingContext, ref: []const u8) ?f64 {
     var result: ?f64 = null;
-    for (placement.rules.physical.rails) |rail| {
+    for (ctx.placement.rules.physical.rails) |rail| {
         if (!rail.any_max_load) continue;
         if (!(rail.load_max_a > 0)) continue;
-        if (!railTouchesRef(placement, rail, ref)) continue;
+        if (!railTouchesRef(ctx, rail, ref)) continue;
         var amps = rail.load_max_a;
-        if (attributedRailCurrent(placement, rail, ref)) |declared| amps = @min(amps, declared);
+        if (attributedRailCurrent(ctx, rail, ref)) |declared| amps = @min(amps, declared);
         result = @max(result orelse amps, amps);
     }
-    return result;
+    // Only where NO rail model reaches the part at all does the module's own
+    // boundary declaration become the answer; it can never narrow one above.
+    return result orelse moduleInflowCurrent(ctx, ref);
 }
 
 /// True when `ref` has a pin on `rail`'s trunk net or on any net one of its
 /// consumers names — the same reach test the whole-rail attribution used.
-fn railTouchesRef(placement: optimizer.Placement, rail: power_budget.Rail, ref: []const u8) bool {
-    for (placement.nets) |net| {
+fn railTouchesRef(ctx: RatingContext, rail: power_budget.Rail, ref: []const u8) bool {
+    for (ctx.placement.nets) |net| {
         if (!ownsNet(net, ref)) continue;
-        if (netMatchesRailName(net.name, rail.net)) return true;
+        if (netMatchesRail(ctx, net.name, rail.net)) return true;
         for (rail.consumers) |consumer| {
-            if (netMatchesRailName(net.name, consumer.net)) return true;
+            if (netMatchesRail(ctx, net.name, consumer.net)) return true;
         }
     }
     return false;
+}
+
+/// Worst-case current a series element sealed inside a sub-block can carry, in
+/// amps, taken from what that MODULE declares it draws — or null when the
+/// design declared nothing that bounds it.
+///
+/// The physical argument is a cut, not a path: every DC amp inside a sub-block
+/// crossed one of its boundary ports to get there, so the sum of the declared
+/// maxima on those ports bounds any single element inside. That is why the
+/// `lna` module's `(port "VDD" in power … (current 0.128 0.144))` sizes its
+/// `L1` current-mirror choke as well as its supply bead — `L1` hangs off a bias
+/// node fed from the die, and the die is fed from `VDD`.
+///
+/// Two guards keep this from becoming a way to under-size a part:
+///
+///   * `inflowBounded` refuses any element that touches a top-level net which
+///     is NOT one of this module's declared input rails (ground excepted). That
+///     is what excludes the dangerous shape — a step-down module whose OUTPUT
+///     leg carries many times its input current — while still admitting the
+///     bead sitting on the declared input rail itself.
+///   * A branch that declares only a typical current (`i_max == null`) proves
+///     nothing about the worst case and yields null rather than a guess.
+///
+/// It is reached only when no rail model touches the part, so it can never
+/// replace a larger rail-derived answer; and an undeclared boundary port
+/// contributes no current here for the same reason it contributes none to any
+/// rail total in `eval/power_budget` — this inherits that modelling boundary
+/// rather than widening it.
+fn moduleInflowCurrent(ctx: RatingContext, ref: []const u8) ?f64 {
+    var total: f64 = 0;
+    var path: []const u8 = "";
+    for (ctx.placement.rules.physical.rail_model.branch_loads) |branch| {
+        if (!refInsideSubBlock(ref, branch.path)) continue;
+        total += branch.i_max orelse return null;
+        path = branch.path;
+    }
+    if (path.len == 0) return null;
+    if (!inflowBounded(ctx, ref, path)) return null;
+    return total;
+}
+
+/// True when every net `ref` sits on is covered by the sub-block `path`'s
+/// declared inflow: a module-internal net (`path/…`), a 0 V return, or one of
+/// the very rails that module declared it draws from. Anything else means the
+/// part straddles the boundary on a leg the declaration never described.
+fn inflowBounded(ctx: RatingContext, ref: []const u8, path: []const u8) bool {
+    for (ctx.placement.nets) |net| {
+        if (!ownsNet(net, ref)) continue;
+        if (refInsideSubBlock(net.name, path)) continue;
+        if (net_analysis.isRatingZeroVolts(net.name)) continue;
+        if (declaredBranchRail(ctx, path, net.name)) continue;
+        return false;
+    }
+    return true;
+}
+
+/// True when `net` is a rail the sub-block `path` declared a maximum draw on.
+fn declaredBranchRail(ctx: RatingContext, path: []const u8, net: []const u8) bool {
+    for (ctx.placement.rules.physical.rail_model.branch_loads) |branch| {
+        if (!std.mem.eql(u8, branch.path, path)) continue;
+        if (branch.i_max == null) continue;
+        // By NAME: the declaration is about the port's own rail, and a chain of
+        // beads must not let some further net inherit the module's inflow.
+        if (netMatchesRailName(net, branch.rail)) return true;
+    }
+    return false;
+}
+
+/// 0 A for a two-terminal zero-ohm part that is a CONFIGURATION STRAP — a
+/// MODE/RT-style pin tie to ground — or null for anything else.
+///
+/// A strap is not in a power path, so there is no rail current to prove and
+/// `railCurrentForRef` correctly returns null forever; what it carries is the
+/// bias current of the one config pin it holds, which is negligible against
+/// the 1 A rating a 0402 jumper part carries. Reporting it "unproven" for all
+/// time was a finding no authoring could ever close.
+///
+/// The recognition is deliberately narrow, and every clause is load-bearing:
+///
+///   * EXACTLY two nets, EXACTLY one of them proven at 0 V, and the other
+///     proven not to be. A series element in a power path has both terminals
+///     at the rail's potential — a jumper with one leg on ground would be
+///     shorting that rail. The "other is not 0 V" half is what excludes the
+///     genuine hazard in this shape: a ground-link/star-ground jumper, which
+///     carries the whole return current with 0 V on both sides.
+///   * NO rail in the model touches the part — checked against every rail,
+///     including the ones with no declared load at all. A jumper in a modelled
+///     power path whose rail merely lacks a load figure must stay unproven
+///     rather than be excused by the gap in the model.
+///   * No consumer row anywhere is keyed on this part, and (implied by the
+///     rail check, which also matches consumer nets) none names either of its
+///     nets. Nothing the design declared attributes any current here.
+///
+/// Returning 0 rather than skipping the check keeps the dissipation arithmetic
+/// downstream on the same footing: I²R at 0 A is 0 W.
+fn configStrapCurrent(ctx: RatingContext, ref: []const u8) ?f64 {
+    var owned: usize = 0;
+    var grounded: usize = 0;
+    for (ctx.placement.nets) |net| {
+        if (!ownsNet(net, ref)) continue;
+        owned += 1;
+        const volts = railVoltage(ctx.placement, net.name) orelse continue;
+        if (volts.min == 0 and volts.max == 0) grounded += 1;
+    }
+    if (owned != 2 or grounded != 1) return null;
+    for (ctx.placement.rules.physical.rails) |rail| {
+        if (railTouchesRef(ctx, rail, ref)) return null;
+        if (declaredCurrentOfRef(rail, ref) != null) return null;
+    }
+    return 0;
 }
 
 fn appendUnproven(
@@ -741,6 +878,10 @@ const RatingContext = struct {
     errors: *std.ArrayList(Item),
     warnings: *std.ArrayList(Item),
     placement: optimizer.Placement,
+    /// Flat-net union-find over ferrite beads at any hierarchy depth — the
+    /// SAME graph `eval/net_envelopes` derives this board's voltages over,
+    /// read here so current attribution sees the identical set of DC nodes.
+    bridges: *std.StringHashMapUnmanaged([]const u8),
 };
 
 fn checkCapacitorRating(ctx: RatingContext, inst: flat_netlist.FlatInstance) std.mem.Allocator.Error!void {
@@ -778,10 +919,12 @@ fn checkJumperRating(ctx: RatingContext, inst: flat_netlist.FlatInstance, has_po
     // selection evidence is still validated above, but absence of a power-rail
     // model is not itself a release error.
     if (endpointEvidence(ctx.placement, inst.ref_des).known == 0) return;
-    const actual_current = railCurrentForRef(ctx.placement, inst.ref_des) orelse {
-        try appendUnproven(ctx.arena, ctx.errors, inst, "zero-ohm jumper current");
-        return;
-    };
+    const actual_current = railCurrentForRef(ctx, inst.ref_des) orelse
+        configStrapCurrent(ctx, inst.ref_des) orelse
+        {
+            try appendUnproven(ctx.arena, ctx.errors, inst, "zero-ohm jumper current");
+            return;
+        };
     if (has_current) {
         const rated_current = parseRating(propertyAny(inst, &.{ "rated-current", "current-rating", "current" }));
         if (rated_current.present and actual_current > rated_current.value + 1e-9) try ctx.errors.append(ctx.arena, .{
@@ -856,7 +999,7 @@ fn checkMagneticRating(ctx: RatingContext, inst: flat_netlist.FlatInstance) std.
     const has_current = try requirePositiveRating(ctx.arena, ctx.errors, inst, &.{ "rated-current", "current-rating", "current" }, "rated current");
     const has_dcr = try requirePositiveRating(ctx.arena, ctx.errors, inst, &.{ "dcr-max", "dcr" }, "maximum DCR");
     if (std.mem.startsWith(u8, inst.component, "ind-")) _ = try requireProperty(ctx.arena, ctx.errors, inst, &.{"tolerance"}, "tolerance");
-    const current = railCurrentForRef(ctx.placement, inst.ref_des) orelse {
+    const current = railCurrentForRef(ctx, inst.ref_des) orelse {
         if (endpointEvidence(ctx.placement, inst.ref_des).known > 0) try appendUnproven(ctx.arena, ctx.errors, inst, "inductor/ferrite current rating");
         return;
     };
@@ -887,7 +1030,15 @@ fn appendRailRatingChecks(
     placement: optimizer.Placement,
     keep_dnp: bool,
 ) std.mem.Allocator.Error!void {
-    const ctx: RatingContext = .{ .arena = arena, .errors = errors, .warnings = warnings, .placement = placement };
+    var bridges = try net_envelopes.ferriteBridges(arena, placement.instances, placement.nets);
+    defer bridges.deinit(arena);
+    const ctx: RatingContext = .{
+        .arena = arena,
+        .errors = errors,
+        .warnings = warnings,
+        .placement = placement,
+        .bridges = &bridges,
+    };
     for (placement.instances) |inst| {
         if (!export_fab.assemblyPopulated(inst, if (keep_dnp) .keep else .drop)) continue;
         if (std.mem.startsWith(u8, inst.component, "cap-")) {
@@ -1185,6 +1336,176 @@ test "a rail that declares no branch data still charges the whole rail" {
     try appendRailRatingChecks(arena, &errors, &warnings, placement, false);
     try std.testing.expect(hasItemRefMessage(errors.items, "component-underrated", "mod/FB", "carries up to 0.500 A"));
     try std.testing.expect(hasItemRefMessage(errors.items, "component-underrated", "mod/R0", "carries up to 0.500 A"));
+}
+
+/// Placement skeleton for the rating tests: only the electrical inputs vary,
+/// so the geometric fields are stated once instead of five times over.
+fn ratingPlacement(
+    instances: []const flat_netlist.FlatInstance,
+    nets: []const flat_netlist.FlatNet,
+    rails: []const power_budget.Rail,
+    model: impedance_rules.RailModel,
+) optimizer.Placement {
+    return .{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = instances,
+        .nets = nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 1,
+        .maxy = 1,
+        .generated = false,
+        .rules = .{ .physical = .{ .rails = rails, .rail_model = model } },
+    };
+}
+
+/// A zero-ohm link whose selected part is fully evidenced, so the only thing
+/// the jumper check can still fault is the current attributed to it.
+fn ratedJumper(ref: []const u8, uuid: []const u8, properties: []const env_mod.Property) flat_netlist.FlatInstance {
+    return .{
+        .ref_des = ref,
+        .component = "res-0402",
+        .value = "0R0",
+        .footprint = "r0402",
+        .uuid = uuid,
+        .properties = properties,
+    };
+}
+
+// spec: fabrication-release - a zero-ohm configuration strap to ground carries no rail current, while a jumper any rail reaches or a ground-to-ground link stays unproven
+test "a config strap to ground is proved at zero amps and nothing else is" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const link_props = [_]env_mod.Property{
+        .{ .key = "power", .value = "63mW" },       .{ .key = "voltage", .value = "25V" },
+        .{ .key = "rated-current", .value = "1A" }, .{ .key = "max-resistance", .value = "50mOhm" },
+    };
+    const instances = [_]flat_netlist.FlatInstance{
+        // A MODE/RT-style strap: one leg on a config pin nothing declares, the
+        // other on ground. This is the shape that could never be closed.
+        ratedJumper("buck/R_MODE", "strap", &link_props),
+        // Same shape, but a modelled rail reaches it — the rail simply carries
+        // no load figure. The gap in the model must not excuse the part.
+        ratedJumper("R_DEAD", "dead", &link_props),
+        // Both legs at 0 V: a star-ground link carries the whole return, so it
+        // is exactly the hazard the one-grounded-endpoint rule excludes.
+        ratedJumper("R_GNDLINK", "gndlink", &link_props),
+    };
+    const mode_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "buck/R_MODE", .pin = "1" }};
+    const ground_pins = [_]flat_netlist.FlatPin{
+        .{ .ref_des = "buck/R_MODE", .pin = "2" }, .{ .ref_des = "R_DEAD", .pin = "2" }, .{ .ref_des = "R_GNDLINK", .pin = "1" },
+    };
+    const agnd_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "R_GNDLINK", .pin = "2" }};
+    const v3_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "R_DEAD", .pin = "1" }};
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "buck/MODE", .pins = &mode_pins }, .{ .name = "GND", .pins = &ground_pins },
+        .{ .name = "AGND", .pins = &agnd_pins },      .{ .name = "V3", .pins = &v3_pins },
+    };
+    const rails = [_]power_budget.Rail{
+        .{ .net = "V3", .load_max_a = 0, .any_max_load = false, .status = .no_consumers },
+    };
+    const rail_specs = [_]env_mod.PowerRail{
+        .{ .name = "V3", .nominal = 3.3, .rated_voltage = .{ .min = 3.1, .max = 3.5 } },
+    };
+    var errors: std.ArrayList(Item) = .empty;
+    var warnings: std.ArrayList(Item) = .empty;
+    try appendRailRatingChecks(arena, &errors, &warnings, ratingPlacement(&instances, &nets, &rails, .{ .specs = &rail_specs }), false);
+    try std.testing.expect(!hasItemRef(errors.items, "component-rating-unproven", "buck/R_MODE"));
+    try std.testing.expect(!hasItemRef(errors.items, "component-underrated", "buck/R_MODE"));
+    try std.testing.expect(hasItemRefMessage(errors.items, "component-rating-unproven", "R_DEAD", "zero-ohm jumper current"));
+    try std.testing.expect(hasItemRefMessage(errors.items, "component-rating-unproven", "R_GNDLINK", "zero-ohm jumper current"));
+}
+
+// spec: fabrication-release - a series magnetic sealed inside a module inherits that module's declared input current, and keeps none of it on a leg the declaration never covered
+test "module-internal magnetics inherit the sub-block's declared inflow" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // Every bead is rated 50 mA, well under the declared branch, so the message
+    // states the exact current attribution reached.
+    const props = [_]env_mod.Property{
+        .{ .key = "rated-current", .value = "50mA" }, .{ .key = "dcr-max", .value = "0.5Ohm" },
+    };
+    const instances = [_]flat_netlist.FlatInstance{
+        // On the declared input rail itself, and on a purely internal node.
+        ratedFerrite("lna/FB_IN", "feed", &props),
+        ratedFerrite("lna/L_BIAS", "bias", &props),
+        // On a leg leaving the module toward a net the declaration never named
+        // — the step-down shape, where the output leg can carry many times the
+        // declared input current.
+        ratedFerrite("lna/FB_OUT", "out", &props),
+        // A module that declared only a typical current bounds no worst case.
+        ratedFerrite("typonly/FB", "typonly", &props),
+    };
+    const v5_pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "lna/FB_IN", .pin = "1" }, .{ .ref_des = "typonly/FB", .pin = "1" } };
+    const filt_pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "lna/FB_IN", .pin = "2" }, .{ .ref_des = "lna/L_BIAS", .pin = "1" } };
+    const bias_pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "lna/L_BIAS", .pin = "2" }, .{ .ref_des = "lna/FB_OUT", .pin = "1" } };
+    const load_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "lna/FB_OUT", .pin = "2" }};
+    const typ_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "typonly/FB", .pin = "2" }};
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "V5", .pins = &v5_pins },         .{ .name = "lna/VDD_FILT", .pins = &filt_pins },
+        .{ .name = "lna/CM", .pins = &bias_pins },   .{ .name = "V_LOAD", .pins = &load_pins },
+        .{ .name = "typonly/A", .pins = &typ_pins },
+    };
+    // No rail budget at all: this is the imported-supply case, where the only
+    // current statement on the board is the module's own boundary declaration.
+    const branch_loads = [_]power_budget.BranchLoad{
+        .{ .path = "lna", .rail = "V5", .i_typ = 0.128, .i_max = 0.144 },
+        .{ .path = "typonly", .rail = "V5", .i_typ = 0.1, .i_max = null },
+    };
+    const rail_specs = [_]env_mod.PowerRail{
+        .{ .name = "V5", .nominal = 5, .rated_voltage = .{ .min = 4.75, .max = 5.25 } },
+        .{ .name = "V_LOAD", .nominal = 3.3, .rated_voltage = .{ .min = 3.1, .max = 3.5 } },
+    };
+    const model: impedance_rules.RailModel = .{ .specs = &rail_specs, .branch_loads = &branch_loads };
+    var errors: std.ArrayList(Item) = .empty;
+    var warnings: std.ArrayList(Item) = .empty;
+    try appendRailRatingChecks(arena, &errors, &warnings, ratingPlacement(&instances, &nets, &.{}, model), false);
+    try std.testing.expect(hasItemRefMessage(errors.items, "component-underrated", "lna/FB_IN", "carries up to 0.144 A"));
+    try std.testing.expect(hasItemRefMessage(errors.items, "component-underrated", "lna/L_BIAS", "carries up to 0.144 A"));
+    try std.testing.expect(!hasItemRef(errors.items, "component-rating-unproven", "lna/L_BIAS"));
+    try std.testing.expect(hasItemRefMessage(errors.items, "component-rating-unproven", "lna/FB_OUT", "inductor/ferrite current rating"));
+    try std.testing.expect(hasItemRefMessage(errors.items, "component-rating-unproven", "typonly/FB", "inductor/ferrite current rating"));
+}
+
+// spec: fabrication-release - a net a ferrite bead ties to a rail is that rail's node for current as well as voltage, so a module-internal series element behind the bead is charged the rail
+test "a bead-bridged module net is charged the rail it conducts to" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const props = [_]env_mod.Property{
+        .{ .key = "rated-current", .value = "50mA" }, .{ .key = "dcr-max", .value = "0.5Ohm" },
+    };
+    const instances = [_]flat_netlist.FlatInstance{
+        // The bead that makes `boost/VIN_F` and `V12` one DC node.
+        ratedFerrite("boost/FB_IN", "bead", &props),
+        // Behind it, on names no rail ever spelled. The module declares no
+        // input current, so the honest answer is the whole rail's worst case.
+        ratedFerrite("boost/L1", "choke", &props),
+    };
+    const v12_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "boost/FB_IN", .pin = "1" }};
+    const vinf_pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "boost/FB_IN", .pin = "2" }, .{ .ref_des = "boost/L1", .pin = "1" } };
+    const sw_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "boost/L1", .pin = "2" }};
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "V12", .pins = &v12_pins },     .{ .name = "boost/VIN_F", .pins = &vinf_pins },
+        .{ .name = "boost/SW", .pins = &sw_pins },
+    };
+    const rails = [_]power_budget.Rail{
+        .{ .net = "V12", .load_max_a = 0.39, .any_max_load = true, .status = .ok },
+    };
+    const rail_specs = [_]env_mod.PowerRail{
+        .{ .name = "V12", .nominal = 12, .rated_voltage = .{ .min = 11.4, .max = 12.6 } },
+    };
+    var errors: std.ArrayList(Item) = .empty;
+    var warnings: std.ArrayList(Item) = .empty;
+    try appendRailRatingChecks(arena, &errors, &warnings, ratingPlacement(&instances, &nets, &rails, .{ .specs = &rail_specs }), false);
+    try std.testing.expect(hasItemRefMessage(errors.items, "component-underrated", "boost/L1", "carries up to 0.390 A"));
+    try std.testing.expect(!hasItemRef(errors.items, "component-rating-unproven", "boost/L1"));
 }
 
 // spec: fabrication-release - saved rounded outlines must exactly match authored dimensions, radius, polygon, and native arcs

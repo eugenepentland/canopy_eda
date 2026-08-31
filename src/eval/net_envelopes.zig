@@ -283,7 +283,15 @@ fn seedPorts(
 /// depth. Mirrors `net_analysis.buildFerriteBridges` exactly — pad `1`↔pad `2`
 /// first, else a by-membership bridge when the bead touches exactly two nets —
 /// but reads the flattened instance/net lists so a bead inside a module counts.
-fn ferriteBridges(
+///
+/// Public because `fab_readiness` must answer the CURRENT question over exactly
+/// the graph this module answers the VOLTAGE question over: a bead is a DC
+/// conductor, so `buck_5v75/VIN_F` is the same node as `V_12V` for both. Two
+/// topology walks would eventually disagree about which nets are one node, and
+/// then a part would be voltage-known but current-unknown for no physical
+/// reason — which is exactly the state that stranded `boost22/L16`. Read with
+/// `net_analysis.findRoot`; the returned map borrows `nets`/`instances` strings.
+pub fn ferriteBridges(
     allocator: std.mem.Allocator,
     instances: []const flat_netlist.FlatInstance,
     nets: []const flat_netlist.FlatNet,
