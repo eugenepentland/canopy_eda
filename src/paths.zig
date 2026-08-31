@@ -36,6 +36,11 @@
 //! wants anyway. A process that never bumps the epoch (the CLI) validates
 //! exactly once, matching its one-shot lifetime.
 //!
+//! That revalidation is invisible to an active release read trace, because WHEN
+//! it happens is decided by other requests rather than by the analysis asking
+//! (see `ensureSrcIndex`). The index reads no file bytes; the bytes a release
+//! consumes still reach the trace through the ordinary read path.
+//!
 //! Directory mtimes are deliberately NOT the signal, though the kernel does
 //! move them: `std.Io.Dir.statFile` on a directory here reports an mtime that
 //! does not change when an entry is created inside it, so an index gated on it
@@ -171,7 +176,7 @@ fn findStrictlyUniqueInSrc(
 
     SrcIndex.mutex.lock();
     defer SrcIndex.mutex.unlock();
-    if (!srcIndexIsFresh(src_path)) rebuildSrcIndex(src_path);
+    ensureSrcIndex(src_path);
     const hit = SrcIndex.files.get(filename) orelse return null;
     if (hit.shadowed != null) return error.AmbiguousName;
     return try allocator.dupe(u8, hit.path);
@@ -189,7 +194,7 @@ fn findUniqueInSrc(
 
     SrcIndex.mutex.lock();
     defer SrcIndex.mutex.unlock();
-    if (!srcIndexIsFresh(src_path)) rebuildSrcIndex(src_path);
+    ensureSrcIndex(src_path);
     const hit = SrcIndex.files.get(filename) orelse return null;
     // Reported per LOOKUP, not per index rebuild: `src/` legitimately holds
     // colliding basenames the caller never asks about (a handoff export tree
@@ -261,6 +266,24 @@ const SrcIndex = struct {
 /// dispatcher; a caller that never calls it (the CLI) simply validates once.
 pub fn beginRequest() void {
     _ = SrcIndex.epoch.fetchAdd(1, .monotonic);
+}
+
+/// Revalidate the index for `src_path`, rebuilding it when the tree moved.
+/// Caller holds `SrcIndex.mutex`.
+///
+/// The walk runs OUTSIDE any active read trace. WHEN this cache revalidates is
+/// decided by the request epoch, which every other request bumps — so a release
+/// analysis that resolves a sibling while some unrelated poll happens to have
+/// invalidated the index would otherwise record a `src/` probe that the same
+/// analysis over the same bytes does not record a second later. That made the
+/// consumed-input closure a function of concurrent server traffic, and the
+/// `fab_before`/`fab` tamper guard trip on an unchanged tree. Nothing is lost
+/// by hiding it: the index reads no file bytes, and every byte the release
+/// actually consumes still reaches the trace through the ordinary read path.
+fn ensureSrcIndex(src_path: []const u8) void {
+    var probe = infra_fs.beginCacheProbe();
+    defer probe.end();
+    if (!srcIndexIsFresh(src_path)) rebuildSrcIndex(src_path);
 }
 
 /// True while the cached index can be trusted for this request: same root, and
@@ -471,4 +494,53 @@ test "module sidecars cannot cross-pair with orphan src artifacts" {
 /// Force the next lookup to revalidate, as a new request would.
 fn bustSrcIndexStamps() void {
     beginRequest();
+}
+
+/// Resolve one design inside a read trace and return that trace's closure
+/// digest. `interleaved_request` stands in for an unrelated request landing
+/// mid-analysis: it bumps the epoch, so the lookup below is the one that pays
+/// the index revalidation.
+fn tracedLookupDigest(
+    allocator: std.mem.Allocator,
+    root: []const u8,
+    interleaved_request: bool,
+) ![64]u8 {
+    var trace = infra_fs.ReadTrace.init(allocator);
+    defer trace.deinit();
+    trace.begin();
+    if (interleaved_request) beginRequest();
+    const path = try designSourcePath(allocator, root, "drift");
+    defer allocator.free(path);
+    // One genuine consumed input, so the comparison is about what ELSE the
+    // lookup recorded rather than about two empty traces agreeing.
+    const bytes = try infra_fs.cwd().readFileAlloc(allocator, path, 64);
+    defer allocator.free(bytes);
+    trace.end();
+    try std.testing.expect(trace.consistent);
+    return trace.digest();
+}
+
+// spec: paths - A src index revalidation triggered by another request leaves a traced lookup's consumed-input closure unchanged
+test "another request's index revalidation stays out of a traced lookup" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "src/boards");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/boards/drift.sexp", .data = "(design-block \"D\")" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+
+    // Warm the index the way the work preceding a traced analysis does. Twice:
+    // the first lookup re-roots the process index onto this tree, the second
+    // marks it validated for the current epoch — which is exactly the state a
+    // release analysis starts from after its own pre-trace path lookups.
+    bustSrcIndexStamps();
+    for (0..2) |_| {
+        const warm = try designSourcePath(testing.allocator, root, "drift");
+        testing.allocator.free(warm);
+    }
+
+    const quiet = try tracedLookupDigest(testing.allocator, root, false);
+    const busy = try tracedLookupDigest(testing.allocator, root, true);
+    try testing.expectEqual(quiet, busy);
 }
