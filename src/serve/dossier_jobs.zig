@@ -15,14 +15,13 @@
 //!   * a composed copy is served immediately, byte-identical to the
 //!     `review/<base>.html` member of the same system's `draft.zip` — the store
 //!     retains the composer's output and never edits it;
-//!   * a copy older than `revalidate_after_ms` starts a background recompose
-//!     only when a cheap project-tree fingerprint moved; unchanged inputs just
-//!     renew the copy's validation time;
-//!   * a server restart rehydrates that disk copy only when its tool build,
-//!     project-tree fingerprint, and HTML checksum all still match;
+//!   * a copy older than `revalidate_after_ms` gets a cheap project-tree
+//!     fingerprint check. Unchanged inputs renew it; changed inputs mark the
+//!     last good document stale until a reader explicitly regenerates it;
+//!   * a server restart rehydrates a checksum-valid copy from the same tool
+//!     build, marking it stale when the project-tree fingerprint moved;
 //!   * a system-review mutation (document save, asset upload, attestation)
-//!     `invalidate`s both copies outright, because a reader who just saved must
-//!     never be handed the pre-save document;
+//!     marks the retained copy stale and retires an in-flight composition;
 //!   * exactly ONE compose per system is ever in flight. A reload during a
 //!     compose joins it rather than starting a second minute of board analysis.
 //!
@@ -62,6 +61,7 @@ const durable = std.heap.page_allocator;
 /// per keystroke while still making an ordinary revisit pick up current
 /// evidence.
 pub const revalidate_after_ms: i64 = 60 * 1000;
+const outdated_validation_ms: i64 = -1;
 
 /// How many times one compose may be attempted before its failure is reported.
 /// Only `error.InputsChanged` is retried — the composer's own guard against a
@@ -165,6 +165,7 @@ const Cached = struct {
     html: []const u8,
     composed_ms: i64,
     fingerprint: [64]u8,
+    outdated: bool,
 };
 
 fn nextLine(cursor: *[]const u8) ?[]const u8 {
@@ -202,8 +203,7 @@ fn loadCache(project_dir: []const u8, name: []const u8) ?Cached {
 
     var arena = std.heap.ArenaAllocator.init(durable);
     defer arena.deinit();
-    const current = workspaceFingerprint(arena.allocator(), project_dir) orelse return null;
-    if (!std.mem.eql(u8, &current, fingerprint_raw)) return null;
+    const current = workspaceFingerprint(arena.allocator(), project_dir);
     var fingerprint: [64]u8 = undefined;
     @memcpy(&fingerprint, fingerprint_raw);
     keep_storage = true;
@@ -212,6 +212,7 @@ fn loadCache(project_dir: []const u8, name: []const u8) ?Cached {
         .html = cursor,
         .composed_ms = composed_ms,
         .fingerprint = fingerprint,
+        .outdated = current == null or !std.mem.eql(u8, &current.?, fingerprint_raw),
     };
 }
 
@@ -293,6 +294,7 @@ const Entry = struct {
     composed_ms: i64 = 0,
     validated_ms: i64 = 0,
     fingerprint: ?[64]u8 = null,
+    outdated: bool = false,
     err: ?anyerror = null,
 };
 
@@ -309,10 +311,15 @@ pub const View = struct {
     validated_ms: i64,
     err: ?anyerror,
 
-    /// Whether what this view holds is old enough to be worth recomposing. A
-    /// slot that has never composed anything (`composed_ms == 0`) is always
-    /// stale, which is what makes the first request start the first compose.
+    /// Whether the retained document predates a known project change.
+    pub fn outdated(self: View) bool {
+        return self.validated_ms == outdated_validation_ms;
+    }
+
+    /// Whether this view needs a cheap freshness check or is already known
+    /// outdated. A slot with no result is stale so its first request composes.
     pub fn stale(self: View, now_ms: i64) bool {
+        if (self.outdated()) return true;
         if (self.validated_ms == 0) return true;
         return now_ms -| self.validated_ms >= revalidate_after_ms;
     }
@@ -408,6 +415,7 @@ pub const Store = struct {
         entry.composed_ms = clock.milliTimestamp();
         entry.validated_ms = entry.composed_ms;
         entry.fingerprint = fingerprint;
+        entry.outdated = false;
         if (self.project_dir) |project_dir| {
             if (html) |bytes| {
                 if (fingerprint) |fp| {
@@ -437,8 +445,9 @@ pub const Store = struct {
                 slot.storage = cached.storage;
                 slot.html = cached.html;
                 slot.composed_ms = cached.composed_ms;
-                slot.validated_ms = clock.milliTimestamp();
+                slot.validated_ms = if (cached.outdated) 0 else clock.milliTimestamp();
                 slot.fingerprint = cached.fingerprint;
+                slot.outdated = cached.outdated;
             };
         };
         const current = entry orelse return .{
@@ -464,47 +473,49 @@ pub const Store = struct {
             .has_document = current.html != null,
             .html = copied,
             .composed_ms = current.composed_ms,
-            .validated_ms = current.validated_ms,
+            .validated_ms = if (current.outdated) outdated_validation_ms else current.validated_ms,
             .err = if (copy_failed) error.OutOfMemory else current.err,
         };
     }
 
-    /// Renew a stale slot without composing when its complete source-tree
-    /// fingerprint is unchanged. This is the cheap path on ordinary revisits:
-    /// metadata validation in milliseconds instead of another DRC pass.
-    fn renewIfUnchanged(self: *Store, project_dir: []const u8, name: []const u8) bool {
+    /// Renew a retained slot when its complete source-tree fingerprint is
+    /// unchanged; otherwise mark its last good document explicitly outdated.
+    /// This metadata-only check takes milliseconds and never starts DRC.
+    pub fn revalidate(self: *Store, project_dir: []const u8, name: []const u8) bool {
         self.mutex.lock();
         defer self.mutex.unlock();
         const entry = self.map.getPtr(name) orelse return false;
         const recorded = entry.fingerprint orelse return false;
-        if (entry.html == null or entry.composing) return false;
+        if (entry.html == null or entry.composing or entry.outdated) return false;
         if (clock.milliTimestamp() -| entry.validated_ms < revalidate_after_ms) return true;
         var arena = std.heap.ArenaAllocator.init(durable);
         defer arena.deinit();
         const current = workspaceFingerprint(arena.allocator(), project_dir) orelse return false;
-        if (!std.mem.eql(u8, &recorded, &current)) return false;
+        if (!std.mem.eql(u8, &recorded, &current)) {
+            entry.outdated = true;
+            entry.validated_ms = 0;
+            return false;
+        }
         entry.validated_ms = clock.milliTimestamp();
         return true;
     }
 
-    /// Drop `name`'s composed document and recorded failure, and retire any
-    /// compose already in flight for it. Called by every system-review mutation
-    /// so the next dossier request composes from post-mutation inputs instead of
-    /// serving the document the reader just edited away.
+    /// Mark `name`'s last good document stale and retire any compose already in
+    /// flight. A reader may keep using those explicit old results until they
+    /// request regeneration; a slot with no document remains a cold miss.
     pub fn invalidate(self: *Store, name: []const u8) void {
         self.mutex.lock();
         defer self.mutex.unlock();
         if (self.map.getPtr(name)) |entry| {
-            if (entry.storage) |old| durable.free(old);
-            entry.storage = null;
-            entry.html = null;
             entry.err = null;
-            entry.composed_ms = 0;
             entry.validated_ms = 0;
-            entry.fingerprint = null;
+            entry.outdated = entry.html != null;
+            if (entry.html == null) {
+                entry.composed_ms = 0;
+                entry.fingerprint = null;
+            }
             entry.gen +%= 1;
         }
-        if (self.project_dir) |project_dir| deleteCache(project_dir, name);
     }
 
     /// Release every retained document and key. Safe on a default-constructed
@@ -606,24 +617,18 @@ const Task = struct {
     }
 };
 
-/// Start composing `name`'s dossier on a detached thread, unless one is already
-/// in flight for that system. Best-effort in every direction: a store with
-/// background composition off, a busy slot, a failed name copy, or a refused
-/// thread all mean no compose starts — the page then serves whatever the slot
-/// already holds and says so.
-pub fn spawn(store: *Store, project_dir: []const u8, name: []const u8) void {
-    if (!store.background) return;
-    if (store.renewIfUnchanged(project_dir, name)) return;
-    const gen = store.begin(name) orelse return;
+fn start(store: *Store, project_dir: []const u8, name: []const u8) bool {
+    if (!store.background) return false;
+    const gen = store.begin(name) orelse return false;
     // allocator-ok: process-lifetime by necessity — these outlive the request.
     const owned_dir = durable.dupe(u8, project_dir) catch {
         store.finish(name, gen, null, error.OutOfMemory);
-        return;
+        return false;
     };
     const owned_name = durable.dupe(u8, name) catch {
         durable.free(owned_dir);
         store.finish(name, gen, null, error.OutOfMemory);
-        return;
+        return false;
     };
     const task = Task{ .store = store, .project_dir = owned_dir, .name = owned_name, .gen = gen };
     const thread = std.Thread.spawn(.{}, Task.run, .{task}) catch |err| {
@@ -631,13 +636,29 @@ pub fn spawn(store: *Store, project_dir: []const u8, name: []const u8) void {
         durable.free(owned_dir);
         durable.free(owned_name);
         store.finish(name, gen, null, err);
-        return;
+        return false;
     };
     thread.detach();
+    return true;
 }
 
-// spec: system-review - a completed dossier persists atomically below out and is rehydrated after restart only for the same tool build and unchanged project tree
-test "a completed dossier survives a store restart and rejects stale or damaged disk copies" {
+/// Start composing a cold or failed slot, unless the retained document's cheap
+/// fingerprint check shows it is still current. An outdated retained document
+/// is not regenerated by opening it; only `regenerate` replaces it.
+pub fn spawn(store: *Store, project_dir: []const u8, name: []const u8) void {
+    if (store.revalidate(project_dir, name)) return;
+    _ = start(store, project_dir, name);
+}
+
+/// Explicitly replace the last composed document. Returns true only when this
+/// call claimed the per-system slot and detached a worker; false means the
+/// store is inert, a worker already owns it, or thread startup failed.
+pub fn regenerate(store: *Store, project_dir: []const u8, name: []const u8) bool {
+    return start(store, project_dir, name);
+}
+
+// spec: system-review - a completed dossier persists atomically below out and is rehydrated after restart for the same tool build, marked stale when its project tree changed and rejected when its bytes are damaged
+test "a completed dossier survives a store restart with explicit staleness" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.createDirPath(std.testing.io, "project/src/systems/demo");
@@ -673,7 +694,7 @@ test "a completed dossier survives a store restart and rejects stale or damaged 
         // Once the cheap validation window expires, unchanged inputs renew it
         // without claiming a composition slot.
         restarted.map.getPtr("demo").?.validated_ms = 0;
-        try std.testing.expect(restarted.renewIfUnchanged(project, "demo"));
+        try std.testing.expect(restarted.revalidate(project, "demo"));
         try std.testing.expect(!restarted.snapshot(null, "demo").composing);
     }
 
@@ -704,8 +725,8 @@ test "a completed dossier survives a store restart and rejects stale or damaged 
         current_build.finish("demo", gen, try durable.dupe(u8, html), null);
     }
 
-    // A source edit makes the disk copy a miss. The stale bytes are never
-    // admitted into memory, even though the cache file itself is intact.
+    // A source edit keeps the last same-build copy readable, but admits it only
+    // as explicitly outdated evidence.
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "project/src/systems/demo/system.json",
         .data = "{\"name\":\"demo\",\"revision\":2}",
@@ -713,7 +734,11 @@ test "a completed dossier survives a store restart and rejects stale or damaged 
     {
         var changed = Store{ .project_dir = project };
         defer changed.deinit();
-        try std.testing.expect(!changed.snapshot(null, "demo").has_document);
+        const stale = changed.snapshot(std.testing.allocator, "demo");
+        const stale_html = stale.html orelse return error.NothingComposed;
+        defer std.testing.allocator.free(stale_html);
+        try std.testing.expectEqualStrings(html, stale_html);
+        try std.testing.expect(stale.outdated());
     }
 
     // Re-publish against the new tree, then damage one body byte. The SHA-256
@@ -742,7 +767,7 @@ test "a completed dossier survives a store restart and rejects stale or damaged 
         try std.testing.expect(!damaged.snapshot(null, "demo").has_document);
     }
 
-    // Invalidation removes a persistent copy even when this process never
+    // Invalidation preserves a persistent copy even when this process never
     // hydrated it — exactly the mutation-before-first-read case.
     {
         var refreshed = Store{ .project_dir = project };
@@ -753,10 +778,7 @@ test "a completed dossier survives a store restart and rejects stale or damaged 
     var mutating = Store{ .project_dir = project };
     defer mutating.deinit();
     mutating.invalidate("demo");
-    try std.testing.expectError(
-        error.FileNotFound,
-        tmp.dir.access(std.testing.io, "project/out/dossier-cache/demo.cache", .{}),
-    );
+    try tmp.dir.access(std.testing.io, "project/out/dossier-cache/demo.cache", .{});
 }
 
 // spec: system-review - one dossier composition per system is ever in flight, and a reload during one joins it rather than starting a second
@@ -799,8 +821,8 @@ test "the dossier store admits one compose per system and serves the finished do
     try std.testing.expect(store.begin("demo") != null);
 }
 
-// spec: system-review - a system-review mutation drops the composed dossier and retires the compose in flight, so no reader is served the document they just edited away
-test "invalidating a dossier slot retires the compose already running for it" {
+// spec: system-review - a system-review mutation marks the retained dossier stale and retires the compose in flight, so old results stay readable without being presented as current
+test "invalidating a dossier slot preserves explicit stale results and retires the active compose" {
     var store = Store{};
     defer store.deinit();
 
@@ -811,16 +833,21 @@ test "invalidating a dossier slot retires the compose already running for it" {
     // A recompose is under way when the reader saves a document.
     const second = store.begin("demo").?;
     store.invalidate("demo");
-    const dropped = store.snapshot(null, "demo");
-    try std.testing.expect(!dropped.has_document);
-    try std.testing.expect(dropped.composed_ms == 0);
+    const retained = store.snapshot(std.testing.allocator, "demo");
+    const retained_html = retained.html orelse return error.NothingComposed;
+    defer std.testing.allocator.free(retained_html);
+    try std.testing.expectEqualStrings("<html>v1</html>", retained_html);
+    try std.testing.expect(retained.outdated());
 
     // The in-flight compose read pre-save inputs, so its result is discarded
     // rather than published over the invalidation.
     // allocator-ok: the store takes ownership of durable-allocated documents.
     store.finish("demo", second, try durable.dupe(u8, "<html>stale</html>"), null);
-    const after_stale = store.snapshot(null, "demo");
-    try std.testing.expect(!after_stale.has_document);
+    const after_stale = store.snapshot(std.testing.allocator, "demo");
+    const after_stale_html = after_stale.html orelse return error.NothingComposed;
+    defer std.testing.allocator.free(after_stale_html);
+    try std.testing.expectEqualStrings("<html>v1</html>", after_stale_html);
+    try std.testing.expect(after_stale.outdated());
     try std.testing.expect(!after_stale.composing);
 
     // The recompose that starts after the save is the one that publishes, and
@@ -832,6 +859,7 @@ test "invalidating a dossier slot retires the compose already running for it" {
     const fresh_html = fresh.html orelse return error.NothingComposed;
     defer std.testing.allocator.free(fresh_html);
     try std.testing.expectEqualStrings("<html>v2</html>", fresh_html);
+    try std.testing.expect(!fresh.outdated());
 }
 
 // spec: system-review - a dossier composition that lost its input closure to concurrent server work is composed again within a bounded number of attempts

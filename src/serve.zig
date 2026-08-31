@@ -968,6 +968,7 @@ pub fn serve(
     router.get("/api/systems/:name/assets/:asset", system_review_api.getAssetApi, .{});
     router.get("/api/systems/:name/readiness", system_review_api.readinessApi, .{});
     router.get("/api/systems/:name/dossier-status", system_review_api.dossierStatusApi, .{});
+    router.post("/api/systems/:name/dossier-regenerate", system_review_api.regenerateDossierApi, .{});
     router.get("/api/systems/:name/draft.zip", system_review_api.draftPackageApi, .{});
     router.post("/api/systems/:name/release", system_review_api.releaseApi, .{});
     router.post("/api/push/:name", api.pushApi, .{});

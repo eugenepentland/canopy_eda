@@ -3784,6 +3784,9 @@ src/serve/dossier_jobs.zig::begin | fn begin(self: *Store, name: []const u8) ?u3
 src/serve/dossier_jobs.zig::deinit | fn deinit(self: *Store) void
 src/serve/dossier_jobs.zig::finish | fn finish(self: *Store, name: []const u8, gen: u32, html: ?[]const u8, err: ?anyerror) void
 src/serve/dossier_jobs.zig::invalidate | fn invalidate(self: *Store, name: []const u8) void
+src/serve/dossier_jobs.zig::outdated | fn outdated(self: View) bool
+src/serve/dossier_jobs.zig::regenerate | fn regenerate(store: *Store, project_dir: []const u8, name: []const u8) bool
+src/serve/dossier_jobs.zig::revalidate | fn revalidate(self: *Store, project_dir: []const u8, name: []const u8) bool
 src/serve/dossier_jobs.zig::revalidate_after_ms value
 src/serve/dossier_jobs.zig::snapshot | fn snapshot(self: *Store, allocator: ?std.mem.Allocator, name: []const u8) View
 src/serve/dossier_jobs.zig::spawn | fn spawn(store: *Store, project_dir: []const u8, name: []const u8) void
@@ -4541,6 +4544,7 @@ src/serve/system_review_api.zig::getSystemApi | fn getSystemApi(ctx: *Server, re
 src/serve/system_review_api.zig::listSystemsApi | fn listSystemsApi(ctx: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::putDocumentApi | fn putDocumentApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::readinessApi | fn readinessApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/system_review_api.zig::regenerateDossierApi | fn regenerateDossierApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::releaseApi | fn releaseApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::systemPage | fn systemPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::uploadAssetApi | fn uploadAssetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void

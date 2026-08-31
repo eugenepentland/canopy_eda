@@ -5611,15 +5611,16 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - the standalone draft dossier is the archive's own HTML member composed without the archive around it
 - a dossier request over a workspace that cannot compose answers the composer's diagnostic rather than a crash or a partial page
 - the system review page offers the dossier as a page action beside the draft download, pointing at the system's own dossier path
-- a dossier request answers from the composed copy or a loader without ever composing inside the request
-- a completed dossier persists atomically below out and is rehydrated after restart only for the same tool build and unchanged project tree
+- a dossier request answers from the current or explicitly stale composed copy, or a loader when no copy exists, without ever composing inside the request
+- a completed dossier persists atomically below out and is rehydrated after restart for the same tool build, marked stale when its project tree changed and rejected when its bytes are damaged
 - one dossier composition per system is ever in flight, and a reload during one joins it rather than starting a second
-- a system-review mutation drops the composed dossier and retires the compose in flight, so no reader is served the document they just edited away
+- a system-review mutation marks the retained dossier stale and retires the compose in flight, so old results stay readable without being presented as current
 - a failed dossier composition is recorded against its system and reported rather than retried on every reload
 - a dossier composition that failed in the background reaches the next page request as the composer's diagnostic
-- a saved review document retires the system's composed dossier so the next request composes from post-save inputs
+- a saved review document makes the prior dossier load immediately with a stale notice instead of deleting it or automatically recomposing it
 - the dossier's board-free refusals are decided without starting a composition, so a broken workspace is refused on the first request
-- the dossier status endpoint reports composition state and freshness without starting or serving a composition
+- the dossier status endpoint reports composition state, staleness, and freshness without starting or serving a composition
+- a stale dossier offers authenticated writers an explicit regenerate action while continuing to serve the old results until the single background replacement finishes
 - the dossier loader waits and reloads rather than polling, so a composition in flight is not destabilised by its own progress page
 - a dossier composition that lost its input closure to concurrent server work is composed again within a bounded number of attempts
 - completeness-waiver: empty inputs (a system must name at least one board and every required active document must exist, so an empty workspace is rejected with a diagnostic)
