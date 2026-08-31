@@ -7758,6 +7758,7 @@ export never invents them.
 - phase detector polarity changes the feedback sign by 180 degrees
 - dynamically formatted validation messages are released with their evaluator
 - E24 synthesis jointly satisfies an authored divider/Kvco curve, tolerance corners, and ramp limit
+- corrected-model synthesis still clears corner phase margin and the ramp limit
 - the synthesis search is memoised on its complete input, so a design evaluated again runs it no second time and a changed value never reads the old answer
 - pinned values snap onto the E24 grid at parse, so the printed decimal text round-trips to the search's bit-identical f64s, and a non-E24 value is kept verbatim rather than moved
 - a pin whose key matches answers from its own values without consulting the search or its memo, and prints no re-pin offer
@@ -7765,8 +7766,10 @@ export never invents them.
 - each declaration publishes a typed report carrying the numbers its assertion strings print, one verdict per screen matching that assertion's pass/warn/fail
 - a pinned synthesis publishes a second population beside the fitted one, whose components, results and schedule are the pinned answer, and whose verdicts concatenate back into assertion order
 - the open-loop trace is deterministically log-spaced over the solver's own span and reads back a phase margin inside the nominal sweep it accompanies
+- charge-pump-full-scale is parsed as a positive authored current
+- an authored charge-pump full scale rescales schedule currents without changing step choices
 - completeness-waiver: empty inputs (the parser rejects a declaration without a name, complete component-role bindings, topology, PFD, charge pump, feedback divider, Kvco range, and op-amp GBW before evaluation)
-- completeness-waiver: large inputs (one declaration resolves exactly seven named parts; validation sweeps a fixed 256 R/C corners, while optional synthesis admits at most 16 operating-curve points and uses a fixed 6,000-member deterministic E24 search plus bounded coordinate refinement followed by exact tolerance verification)
+- completeness-waiver: large inputs (one declaration resolves exactly seven named parts; validation sweeps a fixed 256 R/C corners, while optional synthesis admits at most 16 operating-curve points and uses a fixed 12,000-member deterministic E24 search plus bounded coordinate refinement from each of its best eight candidates, followed by exact tolerance verification)
 - completeness-waiver: unauthorized access (an in-process calculation over an already-authorized evaluated DesignBlock with no request, file, socket, user, or write surface)
 - completeness-waiver: i/o failure (the validator performs no I/O and appends allocator-owned assertion messages; OutOfMemory is propagated)
 - completeness-waiver: concurrent access (all solver state is stack-local or owned by the calling evaluator; the one shared object is the process-lifetime synthesis memo, whose fixed entry table is read and written only under its own mutex and whose values are plain scalars)

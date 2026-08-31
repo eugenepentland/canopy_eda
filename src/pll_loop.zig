@@ -56,7 +56,7 @@ const OperatingPoint = struct { pll_n: f64, kvco_hz_per_v: f64 };
 
 /// A `(pinned "KEY" (c-cp F) …)` clause inside `(synthesize …)`: the winning
 /// corner of a search a previous build already ran, stamped with that search's
-/// own content key. A matching key answers without the 6,000-candidate search;
+/// own content key. A matching key answers without the 12,000-candidate search;
 /// a stale key is ignored (with a warning) and the search runs as if the pin
 /// were absent — so a pin can only ever skip recomputing an answer, never
 /// change one. Values hold component nominals in component order (`c-tune`
@@ -82,6 +82,10 @@ const CircuitConfig = struct {
     extra_tune_cap: ValueTolerance = .{},
     pfd_hz: f64 = 0,
     charge_pump: ValueTolerance = .{},
+    /// The I_CP full scale the 16-step schedule quantizes against, set on the
+    /// board by RSET (ADF4159 datasheet: 4.8 mA typ at 5.1 kΩ). Unauthored, it
+    /// stays at the part's nominal.
+    charge_pump_full_scale: f64 = adf4159_full_scale_a,
     feedback: Feedback = .{},
     kvco_hz_per_v: Range = .{},
     op_amp: OpAmp = .{},
@@ -135,6 +139,8 @@ fn parseChild(node: Node, out: *Spec) ParseError!void {
     } else if (eq(head, "charge-pump")) {
         out.circuit.charge_pump.value = try positiveAt(c, 1);
         if (c.len > 2) out.circuit.charge_pump.tolerance_pct = try nonNegativeAt(c, 2);
+    } else if (eq(head, "charge-pump-full-scale")) {
+        out.circuit.charge_pump_full_scale = try positiveAt(c, 1);
     } else if (eq(head, "feedback-divider")) {
         out.circuit.feedback.prescaler = try positiveAt(c, 1);
         out.circuit.feedback.pll_n = try positiveAt(c, 2);
@@ -713,7 +719,14 @@ fn rampChecks(context: *Context, spec: Spec, min_bandwidth_hz: f64) std.mem.Allo
     context.fitted.ramp_phase_error_rad = phase_error;
     if (spec.requirements.ramp.max_phase_error_rad > 0) try append(context, spec, .ramp_phase_error, phase_error <= spec.requirements.ramp.max_phase_error_rad, "{s}: linear-ramp phase-error estimate is {d:.2} rad at the narrowest loop (limit {d:.2} rad; fc/1.4 envelope model)", .{ spec.name, phase_error, spec.requirements.ramp.max_phase_error_rad });
     if (spec.circuit.op_amp.slew_rate_v_per_s > 0) {
-        const required = slope / spec.circuit.kvco_hz_per_v.min;
+        // The slowest tune slope is set by the smallest Kvco anywhere on the
+        // authored operating curve, not just the base kvco range.
+        var kvco_min = spec.circuit.kvco_hz_per_v.min;
+        for (spec.design.operating_curve.point_nodes) |node| {
+            const point = parseOperatingPoint(node) catch continue;
+            kvco_min = @min(kvco_min, point.kvco_hz_per_v);
+        }
+        const required = slope / kvco_min;
         context.fitted.vtune_slew_required_v_per_s = required;
         context.fitted.vtune_slew_available_v_per_s = spec.circuit.op_amp.slew_rate_v_per_s;
         try append(context, spec, .vtune_slew, required <= spec.circuit.op_amp.slew_rate_v_per_s, "{s}: VTUNE slew requires {d:.3} V/µs; op amp provides {d:.1} V/µs", .{ spec.name, required / 1e6, spec.circuit.op_amp.slew_rate_v_per_s / 1e6 });
@@ -727,7 +740,7 @@ fn chargePumpSuggestion(context: *Context, spec: Spec, corner: Corner, current_m
     var best_min_bw: f64 = 0;
     var best_max_bw: f64 = 0;
     for (1..17) |step| {
-        const icp = adf4159_full_scale_a * @as(f64, @floatFromInt(step)) / 16.0;
+        const icp = spec.circuit.charge_pump_full_scale * @as(f64, @floatFromInt(step)) / 16.0;
         var candidate = Sweep{};
         const kvco_mid = @sqrt(spec.circuit.kvco_hz_per_v.min * spec.circuit.kvco_hz_per_v.max);
         for ([_]f64{ spec.circuit.kvco_hz_per_v.min, kvco_mid, spec.circuit.kvco_hz_per_v.max }) |kvco|
@@ -739,8 +752,8 @@ fn chargePumpSuggestion(context: *Context, spec: Spec, corner: Corner, current_m
             best_max_bw = candidate.max_bandwidth_hz;
         }
     }
-    context.suggestion = .{ .full_scale_a = adf4159_full_scale_a, .current_a = best_current, .min_phase_margin_deg = best_min_pm, .min_bandwidth_hz = best_min_bw, .max_bandwidth_hz = best_max_bw };
-    try warning(context, .charge_pump_suggestion, "{s}: no claim is made that the current population is optimal; best ADF4159 5 mA/16 step is {d:.4} mA with nominal min PM {d:.1}° and LBW {d:.3}-{d:.3} MHz", .{ spec.name, best_current * 1e3, best_min_pm, best_min_bw / 1e6, best_max_bw / 1e6 });
+    context.suggestion = .{ .full_scale_a = spec.circuit.charge_pump_full_scale, .current_a = best_current, .min_phase_margin_deg = best_min_pm, .min_bandwidth_hz = best_min_bw, .max_bandwidth_hz = best_max_bw };
+    try warning(context, .charge_pump_suggestion, "{s}: no claim is made that the current population is optimal; best ADF4159 {d:.1} mA/16 step is {d:.4} mA with nominal min PM {d:.1}° and LBW {d:.3}-{d:.3} MHz", .{ spec.name, spec.circuit.charge_pump_full_scale * 1e3, best_current * 1e3, best_min_pm, best_min_bw / 1e6, best_max_bw / 1e6 });
 }
 
 const SynthResult = struct {
@@ -795,10 +808,10 @@ fn appendPinOffer(context: *Context, spec: Spec, circuit: Circuit, key: content_
 
 // ── Synthesis memo ────────────────────────────────────────────────────────
 //
-// `(synthesize …)` runs a 6,000-candidate deterministic inverse search plus six
-// refinement rounds, and it runs inside DESIGN EVALUATION — so every page
-// render, every `netlisp build`, every ERC run and every module resolution of a
-// design carrying one paid for it again. Measured on barracuda (ReleaseSafe,
+// `(synthesize …)` runs a 12,000-candidate deterministic inverse search plus six
+// refinement rounds from each of its best eight seeds, and it runs inside DESIGN
+// EVALUATION — so every page render, every `netlisp build`, every ERC run and
+// every module resolution of a design carrying one paid for it again. Measured on barracuda (ReleaseSafe,
 // 2026-08-28): 3.7 s of a 3.8 s `Evaluator.evalFile`, and a single cold PCB
 // page evaluates the module TWICE (the design, then the Stamp palette's module
 // resolution), a deferred-payload cycle four times.
@@ -809,7 +822,7 @@ fn appendPinOffer(context: *Context, spec: Spec, circuit: Circuit, key: content_
 
 /// Bumped whenever a change to the search makes an OLD key describe a result
 /// this build would no longer produce.
-const synth_key_version: u8 = 1;
+const synth_key_version: u8 = 2;
 
 /// Distinct synthesis declarations held at once. A design carries one or two;
 /// the corpus a single server evaluates carries a handful.
@@ -909,30 +922,34 @@ fn putValue(fp: *content_key.Fingerprint, value: Value) void {
 fn findSynthesis(spec: Spec, circuit: Circuit) SynthResult {
     const first = parseOperatingPoint(spec.design.operating_curve.point_nodes[0]) catch OperatingPoint{ .pll_n = spec.circuit.feedback.pll_n, .kvco_hz_per_v = spec.circuit.kvco_hz_per_v.min };
     const anchor_step = synthesisAnchorStep(spec, first);
-    var best_score = std.math.inf(f64);
-    var best_corner = nominalCorner(circuit);
-    for (1..6_001) |index| {
+    // Multi-start: local refinement from only the single best Halton sample
+    // strands the search in one basin; seed it from the best few instead.
+    const seed_count = 8;
+    var seed_scores: [seed_count]f64 = @splat(std.math.inf(f64));
+    var seed_corners: [seed_count]Corner = @splat(nominalCorner(circuit));
+    for (1..12_001) |index| {
         const candidate = synthesisCandidate(spec, circuit, index);
         const score = synthesisScore(spec, circuit, candidate, anchor_step);
-        if (score < best_score) {
-            best_score = score;
-            best_corner = candidate;
+        var slot: usize = seed_count;
+        while (slot > 0 and score < seed_scores[slot - 1]) slot -= 1;
+        if (slot < seed_count) {
+            var shift: usize = seed_count - 1;
+            while (shift > slot) : (shift -= 1) {
+                seed_scores[shift] = seed_scores[shift - 1];
+                seed_corners[shift] = seed_corners[shift - 1];
+            }
+            seed_scores[slot] = score;
+            seed_corners[slot] = candidate;
         }
     }
-    for (0..6) |_| {
-        var improved = false;
-        for (0..7) |component_index| {
-            for ([_]f64{ 1.0 / 1.3, 1.0 / 1.2, 1.0 / 1.1, 1.1, 1.2, 1.3 }) |ratio| {
-                const candidate = synthesisNeighbor(spec, circuit, best_corner, component_index, ratio);
-                const score = synthesisScore(spec, circuit, candidate, anchor_step);
-                if (score < best_score) {
-                    best_score = score;
-                    best_corner = candidate;
-                    improved = true;
-                }
-            }
+    var best_score = seed_scores[0];
+    var best_corner = seed_corners[0];
+    for (seed_scores, seed_corners) |seed_score, seed_corner| {
+        const refined = refineSeed(spec, circuit, anchor_step, seed_score, seed_corner);
+        if (refined.score < best_score) {
+            best_score = refined.score;
+            best_corner = refined.corner;
         }
-        if (!improved) break;
     }
 
     return .{
@@ -941,6 +958,27 @@ fn findSynthesis(spec: Spec, circuit: Circuit) SynthResult {
         .nominal = profileSweep(spec, best_corner, anchor_step, false),
         .tolerance = synthesisToleranceSweep(spec, circuit, best_corner, anchor_step),
     };
+}
+
+const Refined = struct { score: f64, corner: Corner };
+
+fn refineSeed(spec: Spec, circuit: Circuit, anchor_step: usize, seed_score: f64, seed_corner: Corner) Refined {
+    var best = Refined{ .score = seed_score, .corner = seed_corner };
+    for (0..6) |_| {
+        var improved = false;
+        for (0..7) |component_index| {
+            for ([_]f64{ 1.0 / 1.3, 1.0 / 1.2, 1.0 / 1.1, 1.1, 1.2, 1.3 }) |ratio| {
+                const candidate = synthesisNeighbor(spec, circuit, best.corner, component_index, ratio);
+                const score = synthesisScore(spec, circuit, candidate, anchor_step);
+                if (score < best.score) {
+                    best = .{ .score = score, .corner = candidate };
+                    improved = true;
+                }
+            }
+        }
+        if (!improved) break;
+    }
+    return best;
 }
 
 fn synthesisAnchorStep(spec: Spec, first: OperatingPoint) usize {
@@ -1064,17 +1102,28 @@ fn synthesisScore(spec: Spec, circuit: Circuit, corner: Corner, anchor_step: usi
     const candidate_values = [_]f64{ corner.c_cp, corner.r_in, corner.r_feedback, corner.c_feedback, corner.c_feedback_hf, corner.r_isolation, corner.c_tune - circuit.extra_tune_cap.nominal };
     const original_values = [_]f64{ circuit.c_cp.nominal, circuit.r_in.nominal, circuit.r_feedback.nominal, circuit.c_feedback.nominal, circuit.c_feedback_hf.nominal, circuit.r_isolation.nominal, circuit.c_tune.nominal };
     for (candidate_values, original_values) |candidate, original| score += 0.05 * std.math.pow(f64, @log10(candidate / original), 2);
-    if (corner.c_cp < 2e-12) score += 10 * std.math.pow(f64, 2e-12 / corner.c_cp - 1, 2);
-    if (corner.c_feedback_hf < 1e-12) score += 10 * std.math.pow(f64, 1e-12 / corner.c_feedback_hf - 1, 2);
+    // Below a few pF, purchasable NP0 tolerances are absolute (±0.1 pF
+    // class) and exceed the authored percentage tolerances the corner sweep
+    // uses, so tiny values silently understate the real spread — and board
+    // parasitics rival the part itself.
+    if (corner.c_cp < 4.7e-12) score += 100 * std.math.pow(f64, 4.7e-12 / corner.c_cp - 1, 2);
+    if (corner.c_feedback_hf < 1.5e-12) score += 100 * std.math.pow(f64, 1.5e-12 / corner.c_feedback_hf - 1, 2);
     return score;
 }
 
 fn metricPenalty(spec: Spec, metrics: Metrics) f64 {
     const phase = spec.requirements.phase;
-    const phase_low = phase.target_deg.min + 2;
-    const phase_high = phase.target_deg.max - 2;
+    // Candidates are scored at nominal values only, but acceptance is judged
+    // at exact tolerance corners, which spread phase margin by roughly ±3°
+    // for the declared R/C/I_CP tolerances.  Keep the nominal soft window
+    // deep enough inside the target that corner excursions stay inside it.
+    const phase_low = phase.target_deg.min + 3.5;
+    const phase_high = phase.target_deg.max - 2.5;
     const phase_mid = (phase.target_deg.min + phase.target_deg.max) / 2;
-    const bandwidth_low = synthesisBandwidthMin(spec) * 1.05;
+    // Corners shrink the crossover ~5% below nominal (R/C extremes plus the
+    // I_CP tolerance), so the nominal soft floor needs corner headroom or the
+    // worst-corner ramp error lands at the limit with no margin.
+    const bandwidth_low = synthesisBandwidthMin(spec) * 1.12;
     const bandwidth_high = synthesisBandwidthMax(spec) * 0.9;
     var score = std.math.pow(f64, (metrics.phase_margin_deg - phase_mid) / 3, 2);
     if (metrics.phase_margin_deg < phase_low) score += 100 * std.math.pow(f64, (phase_low - metrics.phase_margin_deg) / 2, 4);
@@ -1112,7 +1161,7 @@ fn profileSample(spec: Spec, sample_index: usize) ?OperatingPoint {
 
 fn scheduledCurrent(spec: Spec, point: OperatingPoint, anchor_step: usize) f64 {
     const first = parseOperatingPoint(spec.design.operating_curve.point_nodes[0]) catch return spec.circuit.charge_pump.value;
-    const step_a = adf4159_full_scale_a / 16.0;
+    const step_a = spec.circuit.charge_pump_full_scale / 16.0;
     const target_gain = @as(f64, @floatFromInt(anchor_step)) * step_a * first.kvco_hz_per_v / first.pll_n;
     const ideal_step = target_gain * point.pll_n / point.kvco_hz_per_v / step_a;
     return @as(f64, @floatFromInt(@max(1, @min(16, @as(usize, @intFromFloat(@round(ideal_step))))))) * step_a;
@@ -1233,7 +1282,7 @@ fn appendSchedule(context: *Context, spec: Spec, anchor_step: usize) std.mem.All
 }
 
 fn currentStep(spec: Spec, point: OperatingPoint, anchor_step: usize) usize {
-    return @intFromFloat(@round(scheduledCurrent(spec, point, anchor_step) / (adf4159_full_scale_a / 16.0)));
+    return @intFromFloat(@round(scheduledCurrent(spec, point, anchor_step) / (spec.circuit.charge_pump_full_scale / 16.0)));
 }
 
 fn rampPhaseError(spec: Spec, bandwidth_hz: f64) f64 {
@@ -1498,7 +1547,7 @@ fn profileOf(allocator: std.mem.Allocator, spec: Spec) std.mem.Allocator.Error!P
         .pfd_hz = spec.circuit.pfd_hz,
         .charge_pump_a = spec.circuit.charge_pump.value,
         .charge_pump_tolerance_pct = spec.circuit.charge_pump.tolerance_pct,
-        .charge_pump_full_scale_a = adf4159_full_scale_a,
+        .charge_pump_full_scale_a = spec.circuit.charge_pump_full_scale,
         .prescaler = spec.circuit.feedback.prescaler,
         .pll_n = spec.circuit.feedback.pll_n,
         .kvco_hz_per_v = spec.circuit.kvco_hz_per_v,
@@ -1710,7 +1759,7 @@ test "the synthesis memo answers only the identical declaration and circuit" {
     try std.testing.expect(key.eql(synthKey(fixture.spec, fixture.circuit)));
 
     // The memo is consulted, not merely written: a seeded answer comes back
-    // without the 6,000-candidate search ever running.
+    // without the 12,000-candidate search ever running.
     const seeded = SynthResult{
         .corner = .{ .c_cp = 1, .r_in = 2, .r_feedback = 3, .c_feedback = 4, .c_feedback_hf = 5, .r_isolation = 6, .c_tune = 7 },
         .anchor_step = 9,
@@ -1825,7 +1874,7 @@ test "a stale pin warns, searches, and offers a fresh pin line" {
     const key = synthKey(fixture.spec, fixture.circuit);
 
     // Seed the memo so "the search ran" is observable as this seeded answer
-    // (and the test never pays the real 6,000-candidate walk).
+    // (and the test never pays the real 12,000-candidate walk).
     synth_memo.put(key, .{
         .corner = .{ .c_cp = 1, .r_in = 1, .r_feedback = 1, .c_feedback = 1, .c_feedback_hf = 1, .r_isolation = 1, .c_tune = 1 },
         .anchor_step = 1,
@@ -2143,4 +2192,87 @@ test "the reported open-loop trace agrees with the screened phase margin" {
     const margin_deg = traceMarginDeg(response) orelse return error.NoCrossover;
     try std.testing.expect(margin_deg >= nominal.min_phase_margin_deg - 2);
     try std.testing.expect(margin_deg <= nominal.max_phase_margin_deg + 2);
+}
+
+// spec: pll-loop - charge-pump-full-scale is parsed as a positive authored current
+test "parse charge-pump full scale" {
+    const child = [_]Node{ Node.atom(ast.Span.zero, "charge-pump-full-scale"), Node.float(ast.Span.zero, 4.8e-3) };
+    var out = Spec{ .name = "t" };
+    try parseChild(Node.list(ast.Span.zero, &child), &out);
+    try std.testing.expectApproxEqAbs(@as(f64, 4.8e-3), out.circuit.charge_pump_full_scale, 1e-15);
+    const bad = [_]Node{ Node.atom(ast.Span.zero, "charge-pump-full-scale"), Node.float(ast.Span.zero, 0) };
+    try std.testing.expectError(error.InvalidForm, parseChild(Node.list(ast.Span.zero, &bad), &out));
+}
+
+// spec: pll-loop - an authored charge-pump full scale rescales schedule currents without changing step choices
+test "charge-pump full scale rescales the schedule" {
+    const p1 = [_]Node{ Node.atom(ast.Span.zero, "point"), Node.float(ast.Span.zero, 25), Node.float(ast.Span.zero, 420e6) };
+    const p2 = [_]Node{ Node.atom(ast.Span.zero, "point"), Node.float(ast.Span.zero, 29.25), Node.float(ast.Span.zero, 730e6) };
+    const p3 = [_]Node{ Node.atom(ast.Span.zero, "point"), Node.float(ast.Span.zero, 50), Node.float(ast.Span.zero, 340e6) };
+    const points = [_]Node{ Node.list(ast.Span.zero, &p1), Node.list(ast.Span.zero, &p2), Node.list(ast.Span.zero, &p3) };
+    var spec = Spec{
+        .name = "t",
+        .topology_active_inverting = true,
+        .circuit = .{
+            .pfd_hz = 100e6,
+            .charge_pump = .{ .value = 2.5e-3 },
+            .feedback = .{ .prescaler = 4, .pll_n = 25 },
+            .kvco_hz_per_v = .{ .min = 340e6, .max = 730e6 },
+            .op_amp = .{ .gbw_hz = 145e6 },
+        },
+        .design = .{ .operating_curve = .{ .point_nodes = &points } },
+    };
+    const first = try parseOperatingPoint(points[0]);
+    const last = try parseOperatingPoint(points[2]);
+    const anchor = synthesisAnchorStep(spec, first);
+    try std.testing.expectEqual(@as(usize, 5), anchor);
+    try std.testing.expectApproxEqAbs(@as(f64, 5.0 * 5e-3 / 16.0), scheduledCurrent(spec, first, anchor), 1e-12);
+    spec.circuit.charge_pump_full_scale = 4.8e-3;
+    try std.testing.expectEqual(@as(usize, 5), currentStep(spec, first, anchor));
+    try std.testing.expectEqual(@as(usize, 12), currentStep(spec, last, anchor));
+    try std.testing.expectApproxEqAbs(@as(f64, 5.0 * 4.8e-3 / 16.0), scheduledCurrent(spec, first, anchor), 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 12.0 * 4.8e-3 / 16.0), scheduledCurrent(spec, last, anchor), 1e-12);
+}
+
+// spec: pll-loop - corrected-model synthesis still clears corner phase margin and the ramp limit
+test "synthesize under the measured AD8065/RSET model" {
+    const p1 = [_]Node{ Node.atom(ast.Span.zero, "point"), Node.float(ast.Span.zero, 25), Node.float(ast.Span.zero, 420e6) };
+    const p2 = [_]Node{ Node.atom(ast.Span.zero, "point"), Node.float(ast.Span.zero, 29.25), Node.float(ast.Span.zero, 730e6) };
+    const p3 = [_]Node{ Node.atom(ast.Span.zero, "point"), Node.float(ast.Span.zero, 50), Node.float(ast.Span.zero, 300e6) };
+    const points = [_]Node{ Node.list(ast.Span.zero, &p1), Node.list(ast.Span.zero, &p2), Node.list(ast.Span.zero, &p3) };
+    const spec = Spec{
+        .name = "Barracuda corrected",
+        .topology_active_inverting = true,
+        .circuit = .{
+            .pfd_hz = 100e6,
+            .charge_pump = .{ .value = 2.5e-3, .tolerance_pct = 2.5 },
+            .charge_pump_full_scale = 4.8e-3,
+            .feedback = .{ .prescaler = 4, .pll_n = 25 },
+            .kvco_hz_per_v = .{ .min = 300e6, .max = 730e6 },
+            .op_amp = .{ .gbw_hz = 100e6, .dc_gain = 500_000 },
+            .polarity = .negative,
+        },
+        .requirements = .{
+            .phase = .{ .target_deg = .{ .min = 45, .max = 55 }, .hard_min_deg = 40 },
+            .ramp = .{ .span_hz = 1.5e9, .time_s = 35e-6, .max_phase_error_rad = 1 },
+        },
+        .design = .{ .operating_curve = .{ .point_nodes = &points }, .synthesis = .{ .enabled = true } },
+    };
+    const circuit = Circuit{
+        .c_cp = .{ .nominal = 12e-12, .tolerance_pct = 2, .ref = "C_CP" },
+        .r_in = .{ .nominal = 220, .tolerance_pct = 1, .ref = "R_IN" },
+        .r_feedback = .{ .nominal = 3000, .tolerance_pct = 1, .ref = "R_FB" },
+        .c_feedback = .{ .nominal = 82e-12, .tolerance_pct = 2, .ref = "C_FB" },
+        .c_feedback_hf = .{ .nominal = 2.7e-12, .tolerance_pct = 3.7, .tolerance_abs = 0.1e-12, .ref = "C_FB_HF" },
+        .r_isolation = .{ .nominal = 120, .tolerance_pct = 1, .ref = "R_ISO" },
+        .c_tune = .{ .nominal = 180e-12, .tolerance_pct = 5, .ref = "C_VTUNE" },
+        .extra_tune_cap = .{ .nominal = 20e-12, .tolerance_pct = 2, .ref = "extra" },
+    };
+    const result = findSynthesis(spec, circuit);
+    try std.testing.expect(result.tolerance.min_phase_margin_deg >= 45);
+    try std.testing.expect(result.tolerance.max_phase_margin_deg <= 55);
+    try std.testing.expect(result.tolerance.max_bandwidth_hz <= synthesisBandwidthMax(spec));
+    try std.testing.expect(rampPhaseError(spec, result.tolerance.min_bandwidth_hz) <= 1);
+    try std.testing.expect(result.corner.c_cp >= 4.7e-12);
+    try std.testing.expect(result.corner.c_feedback_hf >= 1.5e-12);
 }

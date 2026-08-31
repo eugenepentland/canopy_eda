@@ -829,6 +829,7 @@ pub const scope_form_docs = blk: {
             "(components (c-cp \"REF\") (r-in \"REF\") (r-feedback \"REF\") " ++
             "(c-feedback \"REF\") (c-feedback-hf \"REF\") (r-isolation \"REF\") (c-tune \"REF\")) " ++
             "[(extra-tune-cap F [TOL_PCT])] (pfd HZ) (charge-pump A [TOL_PCT]) " ++
+            "[(charge-pump-full-scale A)] " ++
             "(feedback-divider PRESCALER PLL_N) (kvco MIN_HZ_PER_V MAX_HZ_PER_V) " ++
             "[(operating-curve (point PLL_N KVCO_HZ_PER_V)…)] " ++
             "[(synthesize [(series e24)] [(resistance-range MIN MAX)] [(capacitance-range MIN MAX)] " ++
@@ -841,7 +842,8 @@ pub const scope_form_docs = blk: {
             "The continuous-time small-signal solver includes finite op-amp gain/GBW, the external prescaler in N_eff, " ++
             "Kvco and deterministic component corners, then emits ordinary build/check assertions for crossover, phase " ++
             "margin, PFD/GBW ratios, polarity, output swing, and an approximate FMCW ramp phase-error/slew screen. " ++
-            "An operating curve plus synthesize form searches E24 passive values and an ADF4159 charge-pump schedule, " ++
+            "An operating curve plus synthesize form searches E24 passive values and an ADF4159 charge-pump schedule " ++
+            "quantized to 16 steps of (charge-pump-full-scale …) — default 5 mA; author the RSET-derived value, e.g. 4.8 mA at 5.1 kΩ — " ++
             "then verifies the proposal over interpolated operating points and exact component/current corners. " ++
             "The search costs seconds and runs inside design evaluation, so every unpinned build prints a ready-to-paste " ++
             "(pinned \"KEY\" …) line carrying its winning values and the content key of everything it read; authoring that " ++
