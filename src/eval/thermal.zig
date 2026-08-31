@@ -17,6 +17,7 @@ const env_mod = @import("env.zig");
 const forms = @import("forms.zig");
 const na = @import("net_analysis.zig");
 const power_budget = @import("power_budget.zig");
+const classification = @import("../component_classification.zig");
 
 const Node = ast.Node;
 const DesignBlock = env_mod.DesignBlock;
@@ -474,10 +475,20 @@ fn collectBlock(
 }
 
 /// The first two rungs of the ladder for one instance.
+///
+/// The second rung is denied to a pass-through connector: a current annotated
+/// on a connector contact is power DELIVERED across it (a rail exported to a
+/// mating board, heating the load on the far side), not power dissipated in
+/// it — what the connector itself burns is I²R across milliohm contacts,
+/// orders of magnitude below the throughput figure. Charging the throughput
+/// as heat inflates the board's modeled load and skews first-article thermal
+/// correlation. A connector that genuinely warrants a row can still declare
+/// an explicit `(power …)` sized from its rated contact resistance.
 fn instancePower(inst: env_mod.Instance, annotated: ?f64) PartPower {
     if (inst.thermal.power) |decl| {
         if (decl.typ orelse decl.max) |watts| return .{ .watts = watts, .source = .explicit };
     }
+    if (classification.isPassThroughConnector(inst)) return .{};
     if (annotated) |watts| {
         if (watts > power_epsilon_w) return .{ .watts = watts, .source = .pin_annotations };
     }
@@ -947,6 +958,62 @@ test "pin-annotation rollup derives dissipation from rail voltage" {
     try testing.expectApproxEqAbs(@as(f64, 0.66), result.parts[0].power.watts.?, 1e-9);
     // 0.66 W into the LQFP estimate (55 °C/W) is a 36.3 °C rise over 25 °C.
     try testing.expectApproxEqAbs(@as(f64, 61.3), result.parts[0].result.tj_at_ambient.?, 1e-9);
+}
+
+// spec: eval/thermal - a pass-through connector's annotated pin currents are throughput, not dissipation, and charge it nothing
+test "a connector's exported-rail current is not charged to it as heat" {
+    const alloc = testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The barracuda shape: a board-to-board terminal exporting a regulated
+    // rail, its contact annotated with the far-side load's draw.
+    const connector = env_mod.Instance{
+        .ref_des = "J1",
+        .component = "erm6-20-01-5-l-dv-a-k-tr",
+        .value = "",
+        .footprint = "SAMTEC_ERM6",
+        .symbol = "",
+        .pinout_facts = .{ .known = true, .positional = true, .pin_count = 40 },
+    };
+    const insts = [_]env_mod.Instance{connector};
+    var block = blockOver(&insts);
+    block.nets = &.{.{ .name = "V5P0", .pins = &.{.{ .ref_des = "J1", .pin = "7", .i_typ = 0.128 }} }};
+    block.ports = &.{.{ .name = "V5P0", .net = "V5P0", .direction = "in", .nominal = 5.0 }};
+
+    var result = try analyze(arena, &block, default_ambient_c);
+    // No dissipation and no thermal declaration: the connector earns no row
+    // at all, and the 0.64 W of throughput lands in no board total.
+    try testing.expectEqual(@as(usize, 0), result.parts.len);
+
+    // An explicit (power …) — e.g. contact I²R sized from the datasheet's
+    // rated contact resistance — still outranks the exemption.
+    var declared = connector;
+    declared.thermal = .{ .power = .{ .typ = 0.002 } };
+    const declared_insts = [_]env_mod.Instance{declared};
+    block = blockOver(&declared_insts);
+    block.nets = &.{.{ .name = "V5P0", .pins = &.{.{ .ref_des = "J1", .pin = "7", .i_typ = 0.128 }} }};
+    block.ports = &.{.{ .name = "V5P0", .net = "V5P0", .direction = "in", .nominal = 5.0 }};
+    result = try analyze(arena, &block, default_ambient_c);
+    try testing.expectEqual(@as(usize, 1), result.parts.len);
+    try testing.expectEqual(PowerSource.explicit, result.parts[0].power.source);
+    try testing.expectEqual(@as(f64, 0.002), result.parts[0].power.watts.?);
+
+    // A non-connector on the same net keeps the rollup: the exemption is
+    // scoped to pass-through parts, not to every annotated pin.
+    var ic = connector;
+    ic.ref_des = "U1";
+    ic.component = "mcu";
+    ic.pinout_facts = .{ .known = true, .has_supply = true, .pin_count = 40 };
+    const ic_insts = [_]env_mod.Instance{ic};
+    block = blockOver(&ic_insts);
+    block.nets = &.{.{ .name = "V5P0", .pins = &.{.{ .ref_des = "U1", .pin = "7", .i_typ = 0.128 }} }};
+    block.ports = &.{.{ .name = "V5P0", .net = "V5P0", .direction = "in", .nominal = 5.0 }};
+    result = try analyze(arena, &block, default_ambient_c);
+    try testing.expectEqual(@as(usize, 1), result.parts.len);
+    try testing.expectEqual(PowerSource.pin_annotations, result.parts[0].power.source);
+    try testing.expectApproxEqAbs(@as(f64, 0.64), result.parts[0].power.watts.?, 1e-9);
 }
 
 // spec: eval/thermal - a part with no declared theta-ja is screened against a package estimate and the row says the figure was estimated
