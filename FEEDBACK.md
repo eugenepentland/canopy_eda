@@ -573,3 +573,8 @@ matters when the person re-recording is the author of the change.
 
 ## 2026-08-30 · codex · system-review package — report all shard overlaps together
 - **friction:** adding `system_review_pdf.test.` and `system_review.test.` filters caused two independent overlaps with the existing substring filters `pdf.test.` and `review.test.`. The shard-manifest gate reported only the first duplicate on each run, costing a second full-gate attempt after the first repair. Have the coverage test collect and print every zero-claim and multi-claim test before failing so a new module family can be assigned correctly in one pass.
+
+## 2026-08-31 · codex · scan-first system dossier
+- **friction:** Every exact browser-review pass for a dossier-only HTML/CSS change required a full two-board Barracuda analysis and archive export; the latest pass took 69 seconds, so repeated desktop/mobile/print iterations cost several minutes even though the renderer itself is deterministic and covered by focused tests.
+- **idea:** Add a checked-in representative `system_review_html.compose` fixture and browser runner that writes its self-contained HTML directly, including wide tables, diagrams, checklists, supporting documents, and waiver states. That would make intermediate responsive/print inspection sub-second while retaining one final real-system export as the integration check.
+- **status:** open
