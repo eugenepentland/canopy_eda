@@ -224,7 +224,7 @@ fn composeDossierHtml(
     draft_mode: bool,
 ) ![]const u8 {
     const bodies = try renderDocumentBodies(allocator, analysis);
-    return dossierHtmlFromBodies(allocator, analysis, bodies, draft_mode);
+    return dossierHtmlFromBodies(allocator, analysis, bodies, draft_mode, false);
 }
 
 /// The HTML member over already-rendered document bodies — `composeArchive`
@@ -234,8 +234,9 @@ fn dossierHtmlFromBodies(
     analysis: Analysis,
     bodies: DocumentBodies,
     draft_mode: bool,
+    waivers_accepted: bool,
 ) ![]const u8 {
-    const html = try renderSystemHtml(allocator, analysis, bodies, draft_mode);
+    const html = try renderSystemHtml(allocator, analysis, bodies, draft_mode, waivers_accepted);
     if (html.len > max_system_html_bytes) return error.ArchiveTooLarge;
     return html;
 }
@@ -669,7 +670,7 @@ fn analyze(
     // package fits its ceilings before any of it is written anywhere.
     const preflight_bodies = try renderDocumentBodies(allocator, result);
     const preflight_markdown = try renderSystemMarkdown(allocator, result, preflight_bodies, true);
-    const preflight_html = try renderSystemHtml(allocator, result, preflight_bodies, true);
+    const preflight_html = try renderSystemHtml(allocator, result, preflight_bodies, true, false);
     const archive_names = try preflightArchiveNames(allocator, result, preflight_mode);
     try preflightArchivePayload(
         allocator,
@@ -1375,7 +1376,8 @@ fn composeArchive(
         .draft = !is_release,
     });
     if (pdf.len > max_system_pdf_bytes) return error.ArchiveTooLarge;
-    const html = try dossierHtmlFromBodies(allocator, analysis, bodies, !is_release);
+    const waivers_accepted = if (release_bundle) |bundle| bundle.waivers_accepted else false;
+    const html = try dossierHtmlFromBodies(allocator, analysis, bodies, !is_release, waivers_accepted);
 
     var entries: std.ArrayList(zipfile.Entry) = .empty;
     const readme = try renderReadme(allocator, analysis, is_release);
@@ -1678,6 +1680,7 @@ fn renderReadme(allocator: std.mem.Allocator, analysis: Analysis, is_release: bo
 const RenderedDocument = struct {
     spec: system_review.DocumentSpec,
     markdown: []const u8,
+    checklist: system_review.ChecklistSummary,
 };
 
 /// One active document archived beside the combined members instead of inlined.
@@ -1713,6 +1716,7 @@ fn renderDocumentBodies(allocator: std.mem.Allocator, analysis: Analysis) !Docum
         try inlined.append(allocator, .{
             .spec = document.spec,
             .markdown = try review_md.renderMarkdownAlloc(allocator, &parsed),
+            .checklist = document.inspected.checklist,
         });
     }
     return .{ .inlined = inlined.items, .supporting = supporting.items };
@@ -1756,12 +1760,14 @@ fn renderSystemHtml(
     analysis: Analysis,
     bodies: DocumentBodies,
     draft_mode: bool,
+    waivers_accepted: bool,
 ) ![]const u8 {
     const sections = try allocator.alloc(review_html.Section, bodies.inlined.len);
     for (bodies.inlined, sections) |document, *section| section.* = .{
         .title = document.spec.title,
         .classification = @tagName(document.spec.classification),
         .markdown = document.markdown,
+        .checklist = document.checklist,
     };
     const supporting = try allocator.alloc(review_html.Supporting, bodies.supporting.len);
     for (bodies.supporting, supporting) |document, *entry| entry.* = .{
@@ -1785,7 +1791,12 @@ fn renderSystemHtml(
             .diagram_svg = board.snapshot.review.diagram_svg,
             .has_notes = board.snapshot.review.notes_source != null,
         },
-        .fab_blocked = board.fab.readiness.blocked,
+        .fabrication = if (board.fab.readiness.blocked)
+            .blocked
+        else if (board.fab.readiness.needs_waiver)
+            .waiver
+        else
+            .ready,
     };
     return review_html.compose(allocator, sections, .{
         .spec = &analysis.parsed.value,
@@ -1798,9 +1809,22 @@ fn renderSystemHtml(
         },
         .state = .{
             .blocked = analysis.blocked(),
-            .needs_waiver = analysis.needs_waiver,
+            .waiver = if (!analysis.needs_waiver)
+                .none
+            else if (waivers_accepted)
+                .accepted
+            else
+                .required,
             .attested = analysis.state.attested,
+            .gates = .{
+                .identity_ok = analysis.state.identity_ok,
+                .interface_ok = analysis.state.interface_ok,
+                .board_review_ok = analysis.state.board_review_ok,
+                .fab_ok = analysis.state.fab_ok,
+                .checklists_ok = analysis.state.checklists_ok,
+            },
         },
+        .checklist = aggregateChecklist(analysis),
         .boards = boards,
         .supporting = supporting,
     });
@@ -2027,15 +2051,22 @@ fn writeDrcSummary(out: *std.Io.Writer.Allocating, analysis: Analysis, limit: us
 }
 
 fn writeChecklistSummary(out: *std.Io.Writer.Allocating, analysis: Analysis) !void {
-    var total: usize = 0;
-    var complete: usize = 0;
-    var open: usize = 0;
+    const checklist = aggregateChecklist(analysis);
+    try out.writer.print("| Total | Complete | Open |\n| ---: | ---: | ---: |\n| {d} | {d} | {d} |\n\n", .{
+        checklist.total,
+        checklist.complete,
+        checklist.open,
+    });
+}
+
+fn aggregateChecklist(analysis: Analysis) system_review.ChecklistSummary {
+    var checklist: system_review.ChecklistSummary = .{};
     for (analysis.documents) |candidate| if (candidate.spec.classification == .checklist) {
-        total += candidate.inspected.checklist.total;
-        complete += candidate.inspected.checklist.complete;
-        open += candidate.inspected.checklist.open;
+        checklist.total += candidate.inspected.checklist.total;
+        checklist.complete += candidate.inspected.checklist.complete;
+        checklist.open += candidate.inspected.checklist.open;
     };
-    try out.writer.print("| Total | Complete | Open |\n| ---: | ---: | ---: |\n| {d} | {d} | {d} |\n\n", .{ total, complete, open });
+    return checklist;
 }
 
 fn writeGateRow(w: *std.Io.Writer, label: []const u8, ok: bool) !void {
@@ -3523,6 +3554,10 @@ test "system review HTML dossier is a draft and release member" {
     try std.testing.expect(std.mem.endsWith(u8, std.mem.trimEnd(u8, draft_html, "\n"), "</html>"));
     try std.testing.expect(std.mem.indexOf(u8, draft_html, "Demo System") != null);
     try std.testing.expect(std.mem.indexOf(u8, draft_html, review_html.draft_marker) != null);
+    // The package member and live face both lead with the same scan-first gate
+    // summary, while the complete evidence remains in native disclosures.
+    try std.testing.expect(std.mem.indexOf(u8, draft_html, "Executive summary") != null);
+    try std.testing.expect(std.mem.indexOf(u8, draft_html, "<details class=\"sec\"") != null);
     // One numbered section per inlined manifest document, by manifest title.
     try std.testing.expect(std.mem.indexOf(u8, draft_html, "System overview") != null);
     try std.testing.expect(std.mem.indexOf(u8, draft_html, "Bring-up &amp; acceptance") != null);

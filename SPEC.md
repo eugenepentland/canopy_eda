@@ -5535,6 +5535,8 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - the offline HTML dossier is one self-contained file with no external request and no script
 - the offline HTML dossier ships beside the combined Markdown and PDF in draft and release, carrying the draft marker only in draft
 - the HTML dossier carries the draft marker only in draft mode and numbers one section per manifest document
+- the dossier leads with a structured gate summary and keeps every long review document in a keyboard-native disclosure without repeating its title
+- the dossier leads with a structured gate summary and distinguishes waiver-required evidence from an accepted release waiver
 - the HTML dossier inlines each board's block diagram and omits the figure when the design has none
 - the HTML dossier is a pure function of its inputs and renders byte-identically on repeat
 - a generated engineering section's no-data line reaches the HTML dossier through the same single expansion the Markdown face renders

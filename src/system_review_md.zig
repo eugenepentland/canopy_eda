@@ -1035,9 +1035,9 @@ pub fn renderHtml(writer: *std.Io.Writer, document: *const Document) std.Io.Writ
             for (list.items) |item| {
                 if (item.checked) |checked| {
                     try writer.writeAll(if (checked)
-                        "<li class=\"task checked\"><input type=\"checkbox\" disabled checked> "
+                        "<li class=\"task checked\"><input type=\"checkbox\" disabled checked aria-label=\"Completed checklist item\"> "
                     else
-                        "<li class=\"task unchecked\"><input type=\"checkbox\" disabled> ");
+                        "<li class=\"task unchecked\"><input type=\"checkbox\" disabled aria-label=\"Open checklist item\"> ");
                 } else try writer.writeAll("<li>");
                 try writeHtmlInlines(writer, item.content);
                 try writer.writeAll("</li>\n");
@@ -1058,7 +1058,7 @@ pub fn renderHtml(writer: *std.Io.Writer, document: *const Document) std.Io.Writ
                 try writer.writeAll("<tr>");
                 for (row, 0..) |cell, index| {
                     try writer.writeAll("<td");
-                    try writeAlignmentClass(writer, table.alignments[index]);
+                    try writeCellClasses(writer, table.alignments[index], cell.content);
                     try writer.writeByte('>');
                     try writeHtmlInlines(writer, cell.content);
                     try writer.writeAll("</td>");
@@ -1095,6 +1095,45 @@ pub fn renderHtml(writer: *std.Io.Writer, document: *const Document) std.Io.Writ
 fn writeAlignmentClass(writer: *std.Io.Writer, alignment: Alignment) std.Io.Writer.Error!void {
     if (alignment == .none) return;
     try writer.print(" class=\"align-{s}\"", .{@tagName(alignment)});
+}
+
+fn writeCellClasses(
+    writer: *std.Io.Writer,
+    alignment: Alignment,
+    content: []const Inline,
+) std.Io.Writer.Error!void {
+    const status_class = tableStatusClass(content);
+    if (alignment == .none and status_class == null) return;
+    try writer.writeAll(" class=\"");
+    if (alignment != .none) try writer.print("align-{s}", .{@tagName(alignment)});
+    if (status_class) |class| {
+        if (alignment != .none) try writer.writeByte(' ');
+        try writer.writeAll(class);
+    }
+    try writer.writeByte('"');
+}
+
+fn tableStatusClass(content: []const Inline) ?[]const u8 {
+    if (content.len != 1) return null;
+    const raw = switch (content[0]) {
+        .text => |value| value,
+        .code => |value| value,
+        .strong => |value| value,
+        .em => |value| value,
+        else => return null,
+    };
+    const value = std.mem.trim(u8, raw, " \t");
+    if (matchesStatus(value, &.{ "pass", "ready", "complete", "attested" })) return "status-good";
+    if (matchesStatus(value, &.{ "blocked", "fail", "failed", "error", "not attested" })) return "status-bad";
+    if (matchesStatus(value, &.{ "warn", "warning", "pending", "required" })) return "status-warn";
+    return null;
+}
+
+fn matchesStatus(value: []const u8, candidates: []const []const u8) bool {
+    for (candidates) |candidate| {
+        if (std.ascii.eqlIgnoreCase(value, candidate)) return true;
+    }
+    return false;
 }
 
 fn writeHtmlInlines(writer: *std.Io.Writer, nodes: []const Inline) std.Io.Writer.Error!void {
@@ -1243,7 +1282,8 @@ test "paired asterisk emphasis renders in every face" {
     try testing.expect(std.mem.indexOf(u8, html, "<strong>A &amp; B</strong>") != null);
     try testing.expect(std.mem.indexOf(u8, html, "<em>R*SET</em>") != null);
     try testing.expect(std.mem.indexOf(u8, html, "Confirm the <strong>stackup</strong>") != null);
-    try testing.expect(std.mem.indexOf(u8, html, "<td><strong>fail</strong></td>") != null);
+    try testing.expect(std.mem.indexOf(u8, html, "aria-label=\"Open checklist item\"") != null);
+    try testing.expect(std.mem.indexOf(u8, html, "<td class=\"status-bad\"><strong>fail</strong></td>") != null);
     try testing.expect(std.mem.indexOf(u8, html, "**") == null);
 
     // Canonical Markdown is a fixed point: re-parsing and re-rendering it, and
