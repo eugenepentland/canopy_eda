@@ -12,7 +12,7 @@
 27 src/eval/env.zig|DesignBlock
 13 src/eval/env.zig|DesignRulesSpec
 9 src/eval/env.zig|ElectricalDecl
-24 src/eval/env.zig|Instance
+25 src/eval/env.zig|Instance
 13 src/eval/env.zig|NetClassSpec
 8 src/eval/env.zig|PdnIntent
 10 src/eval/env.zig|PlaceholderPart

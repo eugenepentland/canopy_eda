@@ -540,6 +540,7 @@ src/eval/env.zig::PerimeterKeepoutBlocks struct_
 src/eval/env.zig::PerimeterKeepoutSpec struct_
 src/eval/env.zig::PinGroup struct_
 src/eval/env.zig::PinRef struct_
+src/eval/env.zig::PinoutFacts struct_
 src/eval/env.zig::PlaceConstraint struct_
 src/eval/env.zig::PlaceRel enum_
 src/eval/env.zig::PlaceholderPart struct_

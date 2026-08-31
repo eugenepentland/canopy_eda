@@ -5325,6 +5325,24 @@ Public functions: build
 - Preserves a rail's rated voltage range for worst-case release checks
 - Returns empty slice when design declares no rails
 
+## component_classification
+
+Public functions: isActiveSemiconductor
+
+- isActiveSemiconductor exempts the MK mounting-hardware ref-des class
+- isActiveSemiconductor exempts a connector carrying an importer-default U ref-des
+- isActiveSemiconductor exempts LEDs crystals and tactile switches wearing a U ref-des
+- isActiveSemiconductor keeps a supply-pinned IC active when its description names an inert class
+- isActiveSemiconductor reclassifies nothing when no pinout corroborates the description
+- completeness-waiver: empty inputs (an empty ref-des yields an empty class that matches no table, an absent description contributes no vocabulary match, and a part with no pinout is left on the ref-des path unchanged)
+- completeness-waiver: large inputs (classification is one pass over a fixed vocabulary and the instance's own property slice; nothing is accumulated and nothing is allocated)
+- completeness-waiver: unauthorized access (a pure function over an already-built Instance — it opens no file, reads no environment, and grants no capability)
+- completeness-waiver: i/o failure (no I/O here; the pinout read happens once at instance-build time and its failure is already recorded as `known = false`, which this treats as "no evidence")
+- completeness-waiver: concurrent access (no shared or mutable state — the instance is taken by value and every table is comptime-constant)
+- completeness-waiver: malformed encoding (descriptions are matched byte-wise with ASCII case folding, so non-UTF-8 bytes simply fail to match rather than being decoded)
+- completeness-waiver: integer overflow (the only arithmetic is a saturating pad count made at build time and compared, never summed)
+- completeness-waiver: panic-free (every path is a bounded slice comparison over caller-owned memory with no indexing beyond a length-checked loop)
+
 ## coverage
 
 Public functions: computeInstanceCoverage, computeSectionCoverage, computeOverallCoverage
