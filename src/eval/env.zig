@@ -1133,6 +1133,12 @@ pub const NetEnvelope = struct {
     /// intervals treated independently. `0` = not derived that way (seeded,
     /// declared, or ferrite-derived), for which no correlation is claimed.
     domain: u32 = 0,
+    /// True for a derived envelope whose extent rests on DEVICE supplies — a
+    /// feasibility bound on a driven node ("nothing available to the driver
+    /// exceeds X"), not a potential conducted from an anchor. A rating check
+    /// may prove safety against such a bound, but must not report the bound
+    /// itself as an exposure the part experiences.
+    bounded: bool = false,
 };
 
 /// Board-level transient intent for one physical power domain. Unlike the DC

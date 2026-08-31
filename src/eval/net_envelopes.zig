@@ -158,13 +158,15 @@ pub fn build(
     for (nets.items) |net| {
         const root = na.findRoot(&parent, net.name);
         const span = by_root.get(root) orelse continue;
+        const derived = domains.get(root) orelse Derived{ .domain = 0, .bounded = false };
         try out.append(allocator, .{
             .net = net.name,
             .min = span.min,
             .max = span.max,
             .origin = span.origin,
             .rationale = span.rationale,
-            .domain = domains.get(root) orelse 0,
+            .domain = derived.domain,
+            .bounded = derived.bounded,
         });
     }
     std.mem.sort(NetEnvelope, out.items, {}, lessThanEnvelope);
@@ -387,6 +389,16 @@ fn isSeriesConductor(component: []const u8) bool {
         std.mem.startsWith(u8, component, "ind-");
 }
 
+/// Inductors anchor (a bias tee or filter fed FROM a known rail) but never
+/// merge two unknown nets: an inductor between two undeclared nets is the
+/// energy-storage shape — a switcher's coil — whose two ends genuinely sit at
+/// different potentials, exactly what zero-drop union may not claim. That is
+/// how a boost converter's 12 V input stays a 12 V input instead of
+/// inheriting the switch node's diode-clamped ceiling.
+fn isInductor(component: []const u8) bool {
+    return std.mem.startsWith(u8, component, "ind-");
+}
+
 /// Parts that neither conduct nor drive: their pins say nothing about a net's
 /// potential. Capacitors block DC; the rest have no electrical model at all.
 fn isInertForDomains(component: []const u8) bool {
@@ -411,12 +423,24 @@ fn seedSpanOf(by_root: *const std.StringHashMapUnmanaged(Span), root: []const u8
 /// its envelope is being assembled.
 const DomainAcc = struct {
     anchors: std.ArrayList(Span) = .empty,
+    /// The one known root all anchors must share. Two DIFFERENT known nets
+    /// conducting into one unknown domain is a divider/bridge: current between
+    /// them is guaranteed, which is exactly what zero-drop propagation may not
+    /// model, so such a domain is refused (`multi_root`).
+    anchor_root: ?[]const u8 = null,
+    multi_root: bool = false,
     device_min: f64 = 0,
     device_max: f64 = 0,
     has_device: bool = false,
     poisoned: bool = false,
     span_min: f64 = 0,
     span_max: f64 = 0,
+
+    fn noteAnchorRoot(self: *DomainAcc, root: []const u8) void {
+        if (self.anchor_root) |existing| {
+            if (!std.mem.eql(u8, existing, root)) self.multi_root = true;
+        } else self.anchor_root = root;
+    }
 
     fn boundByDevice(self: *DomainAcc, floor: f64, ceil: f64) void {
         self.device_min = if (self.has_device) @min(self.device_min, floor) else floor;
@@ -425,17 +449,14 @@ const DomainAcc = struct {
     }
 
     /// Resolve this domain's envelope, or refuse (see the section comment):
-    /// a poisoned domain, one nothing bounds, and one whose anchors cannot
-    /// agree all stay unknown.
+    /// a poisoned domain, one nothing bounds, and one anchored by more than
+    /// one distinct known net all stay unknown.
     fn compose(self: *DomainAcc) bool {
-        if (self.poisoned) return false;
+        if (self.poisoned or self.multi_root) return false;
         if (self.anchors.items.len == 0 and !self.has_device) return false;
         var lo: f64 = std.math.inf(f64);
         var hi: f64 = -std.math.inf(f64);
-        for (self.anchors.items, 0..) |a, i| {
-            for (self.anchors.items[i + 1 ..]) |b| {
-                if (a.max < b.min - 1e-9 or b.max < a.min - 1e-9) return false;
-            }
+        for (self.anchors.items) |a| {
             lo = @min(lo, a.min);
             hi = @max(hi, a.max);
         }
@@ -506,10 +527,12 @@ const DomainPass = struct {
         return .{ roots.items[0], roots.items[1] };
     }
 
-    /// Pass 1: union unknown nets joined by a series conductor.
+    /// Pass 1: union unknown nets joined by a series RESISTOR. Inductors do
+    /// not merge unknowns — see `isInductor`.
     fn unionUnknowns(self: *DomainPass) std.mem.Allocator.Error!void {
         for (self.instances) |inst| {
             const pair = self.seriesRoots(inst) orelse continue;
+            if (isInductor(inst.component)) continue;
             if (seedSpanOf(self.by_root, pair[0]) != null) continue;
             if (seedSpanOf(self.by_root, pair[1]) != null) continue;
             try unionNets(self.allocator, &self.dparent, pair[0], pair[1]);
@@ -537,11 +560,16 @@ const DomainPass = struct {
             const span_a = seedSpanOf(self.by_root, pair[0]);
             const span_b = seedSpanOf(self.by_root, pair[1]);
             if (span_a != null and span_b != null) continue;
+            // An all-unknown inductor edge is skipped entirely (see
+            // isInductor): it neither registers members nor anchors.
+            if (span_a == null and span_b == null and isInductor(inst.component)) continue;
             if (span_a == null) try self.register(pair[0]);
             if (span_b == null) try self.register(pair[1]);
             const anchor = span_a orelse span_b orelse continue;
+            const anchor_root = if (span_a == null) pair[1] else pair[0];
             const entry = try self.accFor(if (span_a == null) pair[0] else pair[1]);
             try entry.anchors.append(self.allocator, anchor);
+            entry.noteAnchorRoot(anchor_root);
         }
     }
 
@@ -576,7 +604,7 @@ const DomainPass = struct {
     /// pre-derivation state, so the release finding survives.
     fn emit(
         self: *DomainPass,
-        domains: *std.StringHashMapUnmanaged(u32),
+        domains: *std.StringHashMapUnmanaged(Derived),
     ) std.mem.Allocator.Error!void {
         var id_by_domain: std.StringHashMapUnmanaged(u32) = .empty;
         defer id_by_domain.deinit(self.allocator);
@@ -597,10 +625,18 @@ const DomainPass = struct {
                 .origin = .derived,
                 .rationale = "",
             });
-            try domains.put(self.allocator, root, idgop.value_ptr.*);
+            try domains.put(self.allocator, root, .{
+                .domain = idgop.value_ptr.*,
+                .bounded = entry.has_device,
+            });
         }
     }
 };
+
+/// What the derivation established for one root: its correlation class, and
+/// whether the span's extent rests on device supplies (a feasibility BOUND on
+/// a driven node) rather than pure series conduction from one anchor.
+const Derived = struct { domain: u32, bounded: bool };
 
 /// Derive envelopes for nets that series conductors correlate with known ones
 /// (see the section comment above). Fills `by_root` for every derived root and
@@ -611,8 +647,8 @@ fn deriveSeriesDomains(
     nets: []const flat_netlist.FlatNet,
     parent: *std.StringHashMapUnmanaged([]const u8),
     by_root: *std.StringHashMapUnmanaged(Span),
-) std.mem.Allocator.Error!std.StringHashMapUnmanaged(u32) {
-    var domains: std.StringHashMapUnmanaged(u32) = .empty;
+) std.mem.Allocator.Error!std.StringHashMapUnmanaged(Derived) {
+    var domains: std.StringHashMapUnmanaged(Derived) = .empty;
     errdefer domains.deinit(allocator);
     var pass = DomainPass{ .allocator = allocator, .instances = instances, .by_root = by_root };
     defer pass.deinit();
@@ -857,7 +893,7 @@ test "series resistor derives the RC filter node from its rail" {
     try testing.expectEqual(@as(u32, 0), rail.domain);
 }
 
-// spec: eval/net-envelopes - A divider tap between disagreeing anchors is refused rather than guessed
+// spec: eval/net-envelopes - A divider tap anchored by two different known nets is refused rather than guessed
 test "series derivation refuses a divider strung between two rails" {
     var scratch = arena();
     defer scratch.deinit();
@@ -971,4 +1007,31 @@ test "series derivation crosses a bias-tee inductor" {
     try testing.expectEqual(@as(f64, 3.135), bias.min);
     try testing.expectEqual(@as(f64, 3.465), bias.max);
     try testing.expect(bias.domain != 0);
+}
+
+// spec: eval/net-envelopes - An inductor between two unknown nets is a switching coil and merges nothing
+test "series derivation does not merge unknown nets across an inductor" {
+    var scratch = arena();
+    defer scratch.deinit();
+    const alloc = scratch.allocator();
+    // The boost-converter shape: VIN (undeclared here) — L — SW, with the
+    // rectifier diode giving SW a path to the declared 22 V output. Merging
+    // across the coil would hand the input rail the output's ceiling.
+    const instances = [_]env_mod.Instance{
+        passive("L1", "ind-0402", "4.7uH"),
+        .{ .ref_des = "D1", .component = "diode-sod323", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "U1", .component = "lm2733", .value = "", .footprint = "", .symbol = "" },
+    };
+    const nets = [_]env_mod.Net{
+        .{ .name = "VIN_UNDECLARED", .pins = &[_]env_mod.PinRef{.{ .ref_des = "L1", .pin = "1" }} },
+        .{ .name = "SW", .pins = &[_]env_mod.PinRef{ .{ .ref_des = "L1", .pin = "2" }, .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "D1", .pin = "1" } } },
+        .{ .name = "V_22V", .pins = &[_]env_mod.PinRef{ .{ .ref_des = "D1", .pin = "2" }, .{ .ref_des = "U1", .pin = "2" } } },
+    };
+    const ports = [_]env_mod.Port{.{ .name = "V_22V", .net = "V_22V", .direction = "out", .kind = "power", .rated_min = 21.5, .rated_max = 22.13 }};
+    const outer = flatBlock(&instances, &nets, &ports);
+    const result = try build(alloc, &outer, &.{});
+    // Neither coil end derives: VIN must not inherit the output's ceiling,
+    // and SW (an energy-storage node) has no series-resistor correlation.
+    try testing.expectEqual(@as(?NetEnvelope, null), envelopeFor(result, "VIN_UNDECLARED"));
+    try testing.expectEqual(@as(?NetEnvelope, null), envelopeFor(result, "SW"));
 }

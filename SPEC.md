@@ -5357,8 +5357,9 @@ Public functions: build
 - An inductor bias feed derives its bias node from the rail it taps
 - A device pin on a derived domain widens it to the device's own known supplies
 - A device with no envelope-known net anywhere poisons the domain it drives
-- A divider tap between disagreeing anchors is refused rather than guessed
+- A divider tap anchored by two different known nets is refused rather than guessed
 - A DNP series resistor is absent copper and derives nothing
+- An inductor between two unknown nets is a switching coil and merges nothing
 - completeness-waiver: empty inputs (a design with no sub-blocks, no rated ports and no declarations returns both slices empty, which is the covered no-envelopes-proven case)
 - completeness-waiver: large inputs (one flatten plus a near-linear union-find over its nets, the same pass the netlist exporter already runs on every board)
 - completeness-waiver: unauthorized access (a pure derivation over an already-evaluated block; it opens no file, reaches no network, and consults no external state)
