@@ -203,6 +203,7 @@ src/bom.zig::BomError value
 src/bom.zig::FlatInfo struct_
 src/bom.zig::applyBomUuids | fn applyBomUuids( allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, ) BomError!void
 src/bom.zig::applyExisting value
+src/bom.zig::applyResolvedSelections value
 src/bom.zig::collectFlatInstances | fn collectFlatInstances( allocator: std.mem.Allocator, block: *const DesignBlock, prefix: []const u8, list: *std.ArrayList(FlatInfo), ) std.mem.Allocator.Error!void
 src/bom.zig::entryMatchesSource value
 src/bom.zig::existingSidecarMatches value
@@ -213,6 +214,7 @@ src/bom.zig::resolveIdentities value
 src/bom_resolve.zig::ResolveError value
 src/bom_resolve.zig::SetPropertyError value
 src/bom_resolve.zig::applyExisting | fn applyExisting( allocator: std.mem.Allocator, block: *const DesignBlock, bom_path: []const u8, project_dir: []const u8, ) ResolveError!void
+src/bom_resolve.zig::applyResolvedSelections | fn applyResolvedSelections( allocator: std.mem.Allocator, block: *const DesignBlock, bom_path: []const u8, project_dir: []const u8, ) ResolveError!void
 src/bom_resolve.zig::entryMatchesSource | fn entryMatchesSource(entry: bom_mod.BomEntry, current: FlatInfo) bool
 src/bom_resolve.zig::existingSidecarMatches | fn existingSidecarMatches( allocator: std.mem.Allocator, block: *const DesignBlock, bom_path: []const u8, project_dir: []const u8, ) ResolveError!bool
 src/bom_resolve.zig::resolveIdentities | fn resolveIdentities( allocator: std.mem.Allocator, block: *const DesignBlock, bom_path: []const u8, project_dir: []const u8, ) ResolveError!void
@@ -921,6 +923,7 @@ src/fab_gate.zig::ReleaseInput struct_
 src/fab_gate.zig::Result struct_
 src/fab_gate.zig::check | fn check(arena: std.mem.Allocator, input: Input) std.mem.Allocator.Error!Result
 src/fab_gate.zig::identityMark | fn identityMark( arena: std.mem.Allocator, physical: BoardInput, result: *Result, ) std.mem.Allocator.Error!fab_identity.Mark
+src/fab_gate.zig::prepareBomEvidence | fn prepareBomEvidence( arena: std.mem.Allocator, project_dir: []const u8, name: []const u8, block: *const env.DesignBlock, ) std.mem.Allocator.Error!bool
 src/fab_identity.zig::Error value
 src/fab_identity.zig::Mark struct_
 src/fab_identity.zig::build | fn build( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, user_texts: []const font.BoardText, frame: export_fab.Frame, base_edge: ?pour.EdgeField, ) Error!Mark

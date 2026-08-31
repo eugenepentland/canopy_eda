@@ -341,6 +341,11 @@ test "selected row fingerprint rejects same-MPN rating drift and duplicate manag
     try std.testing.expect(!propertyKeysUnique(duplicated.items));
 }
 
+/// Whether a resolution pass is a real build (which may mint fresh random
+/// identity and write the sidecar) or a read-only presentation of what that
+/// build WOULD produce (release gate; deterministic, no disk writes, quiet).
+const ResolveMode = enum { build, present };
+
 /// Resolve identities and BOM data for all instances in a design block.
 pub fn resolveIdentities(
     allocator: std.mem.Allocator,
@@ -349,24 +354,7 @@ pub fn resolveIdentities(
     project_dir: []const u8,
 ) ResolveError!void {
     const old_entries = try bom_mod.loadBom(allocator, bom_path);
-    defer {
-        for (old_entries) |e| {
-            if (e.ref_des.len > 0) allocator.free(e.ref_des);
-            if (e.uuid.len > 0) allocator.free(e.uuid);
-            if (e.component.len > 0) allocator.free(e.component);
-            if (e.value.len > 0) allocator.free(e.value);
-            if (e.source_fingerprint.len > 0) allocator.free(e.source_fingerprint);
-            if (e.id.len > 0) allocator.free(e.id);
-            for (e.nets) |net| allocator.free(net);
-            if (e.nets.len > 0) allocator.free(e.nets);
-            for (e.properties) |p| {
-                allocator.free(p.key);
-                allocator.free(p.value);
-            }
-            if (e.properties.len > 0) allocator.free(e.properties);
-        }
-        allocator.free(old_entries);
-    }
+    defer freeEntries(allocator, old_entries);
 
     try stabilizeRefdes(allocator, block, old_entries);
 
@@ -379,6 +367,64 @@ pub fn resolveIdentities(
     var props_map = std.StringHashMapUnmanaged([]const Property).empty;
     defer props_map.deinit(allocator);
 
+    try resolveSelections(allocator, old_entries, project_dir, flat_list.items, .{ .uuids = &result_map, .props = &props_map }, .build);
+
+    try applyBom(allocator, block, &result_map, &props_map, "");
+    try saveBom(allocator, bom_path, flat_list.items, &result_map, &props_map);
+}
+
+/// Present the design exactly as a rebuild would, WITHOUT writing the sidecar:
+/// deterministic uuids for id-carrying instances plus the current parts-table
+/// selection donation. The manufacturing gate calls this after the read-only
+/// sidecar donation so rating/selection findings against a stale or missing
+/// `.bom` match the steady state a rebuild reaches, while
+/// `existingSidecarMatches` (checked BEFORE this call) still reports the
+/// persisted evidence itself as incomplete. An instance with no stable id
+/// keeps whatever identity the sidecar donated — a read-only report must stay
+/// deterministic, so this path never mints a random uuid.
+pub fn applyResolvedSelections(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    bom_path: []const u8,
+    project_dir: []const u8,
+) ResolveError!void {
+    const old_entries = try bom_mod.loadBom(allocator, bom_path);
+    defer freeEntries(allocator, old_entries);
+
+    try stabilizeRefdes(allocator, block, old_entries);
+
+    var flat_list: std.ArrayList(FlatInfo) = .empty;
+    defer flat_list.deinit(allocator);
+    try bom_mod.collectFlatInstances(allocator, block, "", &flat_list);
+
+    var result_map = std.StringHashMapUnmanaged([]const u8).empty;
+    defer result_map.deinit(allocator);
+    var props_map = std.StringHashMapUnmanaged([]const Property).empty;
+    defer props_map.deinit(allocator);
+
+    try resolveSelections(allocator, old_entries, project_dir, flat_list.items, .{ .uuids = &result_map, .props = &props_map }, .present);
+
+    try applyBom(allocator, block, &result_map, &props_map, "");
+}
+
+/// Output of `resolveSelections`: per-ref-des uuid and property donations,
+/// ready for `applyBom`/`saveBom`.
+const SelectionMaps = struct {
+    uuids: *std.StringHashMapUnmanaged([]const u8),
+    props: *std.StringHashMapUnmanaged([]const Property),
+};
+
+/// Shared identity + selection core of `resolveIdentities` and
+/// `applyResolvedSelections`: deterministic uuid derivation, carried-forward
+/// sidecar properties, and the parts-table (Pass 4) donation.
+fn resolveSelections(
+    allocator: std.mem.Allocator,
+    old_entries: []const bom_mod.BomEntry,
+    project_dir: []const u8,
+    flat_list: []const FlatInfo,
+    out: SelectionMaps,
+    mode: ResolveMode,
+) ResolveError!void {
     // PROTOTYPE — deterministic identity (replaces the Pass 0..3.6 matcher).
     // uuid = uuidFromId(stable id). With sub-block ids now keyed off the stable
     // module-source label, every part's id is renumber-invariant, so the uuid
@@ -401,7 +447,10 @@ pub fn resolveIdentities(
     // this catches ones a user hand-copied into the source.
     var seen_ids = std.StringHashMapUnmanaged(void).empty;
     defer seen_ids.deinit(allocator);
-    for (flat_list.items) |info| {
+    for (flat_list) |info| {
+        // Only a real build may mint a fresh random identity for an id-less
+        // instance; the read-only presentation leaves it untouched.
+        if (info.id.len == 0 and mode == .present) continue;
         const uuid = blk: {
             if (info.id.len == 0) break :blk try bom_mod.generateUuid(allocator);
             const primary = try export_kicad.uuidFromId(allocator, info.id);
@@ -421,10 +470,10 @@ pub fn resolveIdentities(
             break :blk try export_kicad.uuidFromId(allocator, combined);
         };
         try used_uuids.put(allocator, uuid, {});
-        try result_map.put(allocator, info.ref_des, uuid);
+        try out.uuids.put(allocator, info.ref_des, uuid);
         if (info.id.len > 0) {
             if (old_by_id.get(info.id)) |idx| {
-                try carryForwardProps(allocator, &props_map, info, old_entries[idx]);
+                try carryForwardProps(allocator, out.props, info, old_entries[idx]);
             }
         }
     }
@@ -433,10 +482,10 @@ pub fn resolveIdentities(
     var parts_db = parts_mod.PartsDb.init(allocator, project_dir);
     defer parts_db.deinit();
 
-    for (flat_list.items) |info| {
-        const existing_props = props_map.get(info.ref_des) orelse &.{};
+    for (flat_list) |info| {
+        const existing_props = out.props.get(info.ref_des) orelse &.{};
         if (info.footprint.len == 0) {
-            if (info.value.len > 0) {
+            if (info.value.len > 0 and mode == .build) {
                 log.warn("{s} uses unsized family '{s}' — no footprint or MPN resolution", .{ info.ref_des, info.component });
             }
             continue;
@@ -444,12 +493,9 @@ pub fn resolveIdentities(
         if (parts_db.lookup(info.component, info.value, info.attrs)) |part| {
             // Persist the complete selected row: procurement/review needs the
             // rated properties, and physical analysis needs its PDN columns.
-            try props_map.put(allocator, info.ref_des, try selectedPartProperties(allocator, existing_props, part));
+            try out.props.put(allocator, info.ref_des, try selectedPartProperties(allocator, existing_props, part));
         }
     }
-
-    try applyBom(allocator, block, &result_map, &props_map, "");
-    try saveBom(allocator, bom_path, flat_list.items, &result_map, &props_map);
 }
 
 /// Apply an already-generated BOM sidecar to a freshly evaluated block without
@@ -1066,6 +1112,82 @@ test "resolveIdentities replaces stale same-id passive selection" {
     try std.testing.expect(std.mem.indexOf(u8, rewritten, "OLD-100") == null);
     try std.testing.expect(std.mem.indexOf(u8, rewritten, "(value \"1000pF\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, rewritten, "VDD_NEW") != null);
+}
+
+// spec: bom-resolve - the read-only release presentation donates the current parts-table selection over a stale sidecar without rewriting it
+test "applyResolvedSelections presents the rebuilt selection but never writes the sidecar" {
+    const alloc = std.heap.page_allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(project_dir);
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.createDirPath(std.testing.io, "lib/parts");
+    try tmp.dir.createDirPath(std.testing.io, "src/demo");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/cap.sexp",
+        .data =
+        \\(component-family cap
+        \\  (param-type capacitance)
+        \\  (footprint "0402"))
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/parts/cap.sexp",
+        .data =
+        \\(parts "cap"
+        \\  (part "100pF" (manufacturer "Murata") (mpn "FIRST-100") (voltage "50V") preferred))
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/demo/demo.sexp",
+        .data =
+        \\(import cap)
+        \\(design-block "Demo"
+        \\  (instance "C1" (cap "100pF")
+        \\    (id e1d4ce3d)
+        \\    (pin 1 "VDD")
+        \\    (pin 2 "GND")))
+        ,
+    });
+    const design_path = try std.fmt.allocPrint(alloc, "{s}/src/demo/demo.sexp", .{project_dir});
+    defer alloc.free(design_path);
+    const bom_path = try std.fmt.allocPrint(alloc, "{s}/src/demo/demo.bom", .{project_dir});
+    defer alloc.free(bom_path);
+    {
+        var evaluator = test_evaluator.Evaluator.init(alloc, project_dir);
+        defer evaluator.deinit();
+        const evaluated = try evaluator.evalFile(design_path);
+        const block = try testDesignBlock(evaluated);
+        try resolveIdentities(alloc, block, bom_path, project_dir);
+    }
+    // A same-MPN-slot rating correction in the parts table invalidates the
+    // persisted selected-row fingerprint: the sidecar is now stale evidence.
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/parts/cap.sexp",
+        .data =
+        \\(parts "cap"
+        \\  (part "100pF" (manufacturer "Murata") (mpn "SECOND-100") (voltage "16V") preferred))
+        ,
+    });
+    const stale = try infra_fs.cwd().readFileAlloc(alloc, bom_path, 1024 * 1024);
+    defer alloc.free(stale);
+
+    var evaluator = test_evaluator.Evaluator.init(alloc, project_dir);
+    defer evaluator.deinit();
+    const evaluated = try evaluator.evalFile(design_path);
+    const block = try testDesignBlock(evaluated);
+    try std.testing.expect(!(try existingSidecarMatches(alloc, block, bom_path, project_dir)));
+    try applyExisting(alloc, block, bom_path, project_dir);
+    // Stale row donates nothing; the presentation supplies the current row.
+    try std.testing.expect(propertyValue(block.instances[0].properties, "mpn") == null);
+    try applyResolvedSelections(alloc, block, bom_path, project_dir);
+    try std.testing.expectEqualStrings("SECOND-100", propertyValue(block.instances[0].properties, "mpn").?);
+    try std.testing.expectEqualStrings("16V", propertyValue(block.instances[0].properties, "voltage").?);
+    const after = try infra_fs.cwd().readFileAlloc(alloc, bom_path, 1024 * 1024);
+    defer alloc.free(after);
+    try std.testing.expectEqualStrings(stale, after);
+    try std.testing.expect(std.mem.indexOf(u8, after, "FIRST-100") != null);
 }
 
 // spec: bom-resolve - a fixed component sidecar cannot override source-authored manufacturer/MPN, including through differently-cased duplicate keys

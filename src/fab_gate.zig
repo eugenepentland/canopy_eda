@@ -13,6 +13,7 @@ const fab_readiness = @import("fab_readiness.zig");
 const fab_release = @import("fab_release.zig");
 const fab_schematic_gate = @import("fab_schematic_gate.zig");
 const font = @import("font5x7.zig");
+const log = @import("infra/log.zig");
 const module_metadata = @import("module_metadata.zig");
 const optimizer = @import("placement/optimizer.zig");
 const infra_fs = @import("infra/fs.zig");
@@ -35,6 +36,10 @@ pub const BoardInput = struct {
 pub const ReleaseInput = struct {
     from_saved: bool,
     layout_evidence_complete: bool,
+    /// Verdict of `prepareBomEvidence`, proven BEFORE the in-memory selection
+    /// refresh polluted the block's flat properties. `check` cannot re-derive
+    /// it later: `existingSidecarMatches` fingerprints the block as-is.
+    bom_evidence_complete: bool,
     keep_dnp: bool,
     board: env.BoardSpec,
 };
@@ -276,6 +281,32 @@ fn policyEntries(arena: std.mem.Allocator, rules: drc_rules.Rules) std.mem.Alloc
     return result.toOwnedSlice(arena);
 }
 
+/// Hoisted BOM-evidence pass shared by every release surface. Proves the
+/// persisted sidecar against the evaluated source FIRST, then presents the
+/// design as a rebuild would — the current parts-table selection donated
+/// in-memory, never written to disk — so a first run against a stale or
+/// missing `.bom` reports the same rating/selection findings as the steady
+/// state a rebuild reaches. Call after read-only block resolution and BEFORE
+/// building the fab view: the placement snapshots instance properties. The
+/// returned flag feeds `ReleaseInput.bom_evidence_complete`, keeping the
+/// non-waivable staleness block intact.
+pub fn prepareBomEvidence(
+    arena: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    block: *const env.DesignBlock,
+) std.mem.Allocator.Error!bool {
+    const bom_path = paths.designSiblingPath(arena, project_dir, name, ".bom") catch return false;
+    const complete = bom.existingSidecarMatches(arena, block, bom_path, project_dir) catch false;
+    bom.applyResolvedSelections(arena, block, bom_path, project_dir) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        // Findings degrade to the sidecar-donated state; the evidence verdict
+        // above still stands, so the release stays blocked, never over-clean.
+        else => log.warn("release BOM presentation for {s} failed: {s}", .{ name, @errorName(err) }),
+    };
+    return complete;
+}
+
 /// Run full composed DRC, physical readiness, strict schematic preflight and
 /// persisted BOM freshness over one exact board snapshot.
 pub fn check(arena: std.mem.Allocator, input: Input) std.mem.Allocator.Error!Result {
@@ -340,8 +371,7 @@ pub fn check(arena: std.mem.Allocator, input: Input) std.mem.Allocator.Error!Res
     const reviewed_after = try fab_release.reviewedInputDigest(arena, input.project_dir, block);
     const reviewed_complete = reviewed_before.complete and reviewed_after.complete and
         std.mem.eql(u8, &reviewed_before.sha256, &reviewed_after.sha256);
-    const bom_path = paths.designSiblingPath(arena, input.project_dir, input.name, ".bom") catch null;
-    const bom_complete = if (bom_path) |path| bom.existingSidecarMatches(arena, block, path, input.project_dir) catch false else false;
+    const bom_complete = input.release.bom_evidence_complete;
     var release_report = strict;
     if (!input.release.layout_evidence_complete) {
         var errors: std.ArrayList(fab_readiness.Item) = .empty;
