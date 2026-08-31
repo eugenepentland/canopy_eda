@@ -1214,11 +1214,12 @@ pub fn draftPackageApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
 ///   * a composed copy is served immediately, with `x-netlisp-dossier-state`
 ///     and `x-netlisp-dossier-age` reporting how fresh it is and whether a
 ///     recompose is running behind it;
-///   * a copy past its revalidation window starts a background recompose while
-///     it is being served, so the next reload carries current evidence;
-///   * with nothing composed yet, a small loader page is served that polls
-///     `/api/systems/:name/dossier-status` and reloads when the document lands.
-///     One compose per system: reloading during one joins it.
+///   * the copy survives server restarts on disk. A copy past its revalidation
+///     window gets a cheap build/project fingerprint check; unchanged inputs
+///     renew immediately, while changed inputs start a background recompose;
+///   * with nothing composed yet, a small loader page waits and reloads once;
+///     it does not poll and disturb the input closure being composed. One
+///     compose per system: reloading during one joins it.
 ///
 /// "A reload picks up saved document edits" still holds, and more directly than
 /// stale-while-revalidate would give: every system-review mutation invalidates

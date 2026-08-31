@@ -456,8 +456,10 @@ pub const ServerState = struct {
     /// Composed system-review dossiers, one slot per system, filled by a
     /// detached compose thread (see `serve/dossier_jobs.zig`). Composition is a
     /// minute of per-board review and fabrication analysis, so the page reads
-    /// this instead of composing inside the request. A default-constructed
-    /// store has background composition off and starts no thread.
+    /// this instead of composing inside the request. Completed results persist
+    /// below the project `out/` directory across server restarts. A
+    /// default-constructed store has background composition off and starts no
+    /// thread.
     dossiers: dossier_jobs.Store = .{},
 };
 
@@ -909,7 +911,7 @@ pub fn serve(
         // Only a real server composes dossiers in the background: the detached
         // thread outlives the request that started it, which a handler test's
         // stack-owned `ServerState` could not survive.
-        .dossiers = .{ .background = true },
+        .dossiers = .{ .background = true, .project_dir = project_dir },
     }; // owned here; shared by pointer
     defer state.caches.deinit();
     // A real server may run background full-board DRC sweeps behind the
