@@ -5562,6 +5562,7 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - a dossier request over a workspace that cannot compose answers the composer's diagnostic rather than a crash or a partial page
 - the system review page offers the dossier as a page action beside the draft download, pointing at the system's own dossier path
 - a dossier request answers from the composed copy or a loader without ever composing inside the request
+- a completed dossier persists atomically below out and is rehydrated after restart only for the same tool build and unchanged project tree
 - one dossier composition per system is ever in flight, and a reload during one joins it rather than starting a second
 - a system-review mutation drops the composed dossier and retires the compose in flight, so no reader is served the document they just edited away
 - a failed dossier composition is recorded against its system and reported rather than retried on every reload

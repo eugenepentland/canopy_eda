@@ -400,13 +400,18 @@ Local dev still uses `http://localhost:7050`.
   drift). **Composition does not happen inside the request.** It costs a
   complete review snapshot plus a complete fabrication-readiness pass per board
   — measured at 50–57 s for the two-board Barracuda system — so the request
-  answers from a per-system composed copy held in server memory
-  (`src/serve/dossier_jobs.zig`) and the composition runs on a detached thread:
+  answers from a per-system composed copy held in server memory and persisted
+  atomically at `<project_dir>/out/dossier-cache/<system>.cache`
+  (`src/serve/dossier_jobs.zig`), while composition runs on a detached thread:
   - a composed copy is served immediately and verbatim.
     `X-Netlisp-Dossier-State: current|recomposing` says whether a recompose is
     running behind it and `X-Netlisp-Dossier-Age` gives its age in seconds;
-  - a copy past the 60 s revalidation window starts a background recompose while
-    it is served, so the next reload carries current evidence;
+  - after a server restart, the disk copy is rehydrated only when its tool build,
+    complete `src/` + `lib/` metadata fingerprint, Git identity, and HTML
+    checksum still match. A changed build or project tree is a cache miss;
+  - a copy past the 60 s revalidation window first checks the same cheap project
+    fingerprint. Unchanged inputs renew immediately without another DRC pass;
+    changed inputs start a background recompose while the old copy is served;
   - with nothing composed yet, a small loader page (HTTP 200,
     `X-Netlisp-Dossier-State: composing`) is served that **waits and reloads
     itself** — once, about 75 s in — rather than polling. That is a correctness
@@ -422,8 +427,8 @@ Local dev still uses `http://localhost:7050`.
   - **one composition per system is ever in flight** — reloading during one
     joins it rather than starting a second minute of board analysis;
   - every system-review mutation (document save, asset upload, attestation)
-    drops that system's composed copy, so a reader who just saved is never
-    handed the pre-save document; the next request composes afresh.
+    drops that system's memory and disk copies, so a reader who just saved is
+    never handed the pre-save document; the next request composes afresh.
   Refusals that need no board analysis — an unsafe `:name`, an absent or
   oversized manifest, a manifest that does not validate or names another system
   — are still decided synchronously and answer with the composer's own
