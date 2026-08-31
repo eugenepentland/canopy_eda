@@ -686,7 +686,11 @@ pub const scope_form_docs = blk: {
         .summary = "Declare the worst-case DC potential range a net's copper reaches, for the release " ++
             "rating checks. Most nets need no such form: a rail's envelope already follows its own " ++
             "declaration, and it carries across a ferrite bead at any hierarchy depth onto the filtered " ++
-            "node beyond it, so a module's internal supply is derived rather than authored. This form is " ++
+            "node beyond it, so a module's internal supply is derived rather than authored. A series " ++
+            "resistor likewise carries a known envelope onto the correlated node beyond it (an RC " ++
+            "filter's tap, a termination or pull-up's far side, a bias tee fed through its choke), and " ++
+            "a node joined to known nets only through series resistors and device pins is bounded by " ++
+            "the supplies those devices reach — both derived, never authored. This form is " ++
             "for the nets no topology walk can bound — an enable a 3.3 V GPIO drives, a divider tap " ++
             "sitting between two declared rails, a bus a transceiver holds. The net is named the way a " ++
             "rail is: the FLATTENED name, so a board-level declaration reaches the module-local net " ++

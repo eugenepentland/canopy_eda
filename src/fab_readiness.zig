@@ -515,9 +515,77 @@ fn railVoltage(placement: optimizer.Placement, name: []const u8) ?VoltageRange {
     return null;
 }
 
+/// The series-correlation domain `eval/net_envelopes` derived `name`'s
+/// envelope in, or 0 for a net whose envelope was seeded, declared, or never
+/// established — those claim no correlation.
+fn envelopeDomain(placement: optimizer.Placement, name: []const u8) u32 {
+    const base = net_analysis.baseNetName(name);
+    for (placement.rules.physical.rail_model.net_envelopes) |envelope| {
+        if (std.ascii.eqlIgnoreCase(base, envelope.net)) return envelope.domain;
+    }
+    return 0;
+}
+
+/// True when any net `ref` sits on carries a device-BOUNDED derived envelope
+/// (see `NetEnvelope.bounded`): its max is a feasibility ceiling, not a
+/// conducted potential.
+fn touchesBoundedEnvelope(ctx: RatingContext, ref: []const u8) bool {
+    for (ctx.placement.nets) |net| {
+        if (!ownsNet(net, ref)) continue;
+        const base = net_analysis.baseNetName(net.name);
+        for (ctx.placement.rules.physical.rail_model.net_envelopes) |envelope| {
+            if (std.ascii.eqlIgnoreCase(base, envelope.net)) {
+                if (envelope.bounded) return true;
+                break;
+            }
+        }
+    }
+    return false;
+}
+
+/// True when the two nets of the two-terminal resistor `ref` are ONE
+/// correlated DC node in the derived envelope table — the same domain, or a
+/// domain and the very anchor it was derived from (a series edge from an
+/// unknown net to a known one is BY CONSTRUCTION the anchor that derivation
+/// crossed, or the domain would have stayed underived).
+///
+/// For such a pair the voltage across the resistor is its IR drop, which in
+/// the declared-DC frame — no declared branch current means none flows, the
+/// same rule that prices every undeclared consumer at zero in the rail budget
+/// — is bounded by zero, NOT by the width of the two intervals read
+/// independently: `[3.135, 3.465]` on both sides of an RC filter's resistor
+/// is 0 V across it, not 0.33 V. Envelopes that were seeded or authored keep
+/// the independent-interval reading, so a resistor strung between two
+/// DECLARED rails is checked exactly as before.
+fn seriesCorrelated(ctx: RatingContext, ref: []const u8) bool {
+    var first: ?u32 = null;
+    var second: ?u32 = null;
+    var count: usize = 0;
+    for (ctx.placement.nets) |net| {
+        if (!ownsNet(net, ref)) continue;
+        count += 1;
+        if (count > 2) return false;
+        const domain = envelopeDomain(ctx.placement, net.name);
+        if (count == 1) first = domain else second = domain;
+    }
+    if (count != 2) return false;
+    const a = first orelse return false;
+    const b = second orelse return false;
+    if (a == 0 and b == 0) return false;
+    return a == b or a == 0 or b == 0;
+}
+
 const EndpointEvidence = struct {
     connected: usize = 0,
     known: usize = 0,
+    /// How many of `known` are proven by pre-derivation evidence — a rail, a
+    /// 0 V name, a declaration, a ferrite hop — i.e. everything the checks
+    /// could see before the series-domain pass existed. The unproven finding
+    /// and the engage-at-all decisions gate on THIS, so a derived envelope can
+    /// only ever close findings, never conscript a part that was out of the
+    /// check's scope into a new one (a DC-block capacitor whose far side is an
+    /// RF chain no declaration reaches, say).
+    seed_known: usize = 0,
     low: f64 = 0,
     high: f64 = 0,
 };
@@ -538,6 +606,7 @@ fn endpointEvidence(placement: optimizer.Placement, ref: []const u8) EndpointEvi
         result.low = @min(result.low, volts.min);
         result.high = @max(result.high, volts.max);
         result.known += 1;
+        if (envelopeDomain(placement, net.name) == 0) result.seed_known += 1;
     }
     return result;
 }
@@ -891,12 +960,25 @@ fn checkCapacitorRating(ctx: RatingContext, inst: flat_netlist.FlatInstance) std
     const endpoints = endpointEvidence(ctx.placement, inst.ref_des);
     if (endpoints.known == 0) return;
     if (endpoints.connected < 2 or endpoints.known < endpoints.connected) {
-        try appendUnproven(ctx.arena, ctx.errors, inst, "applied capacitor voltage");
+        // Only pre-derivation evidence can DEMAND proof: a part whose sole
+        // known net is series-derived was out of this check's scope before
+        // the derivation existed, and stays out (see seed_known).
+        if (endpoints.seed_known > 0) try appendUnproven(ctx.arena, ctx.errors, inst, "applied capacitor voltage");
         return;
     }
     const applied = @abs(endpoints.high - endpoints.low);
     if (!has_voltage or !(applied > 0)) return;
     const rated = parseRating(propertyValue(inst, "voltage"));
+    if (touchesBoundedEnvelope(ctx, inst.ref_des)) {
+        // A device-bounded ceiling can PROVE safety — a rating with full
+        // margin over everything the driver could reach — but it is not an
+        // exposure the part experiences, so a rating inside the bound is
+        // exactly what it was before derivation: unproven, and only where
+        // pre-derivation evidence put the part in scope (see seed_known).
+        if (rated.present and rated.value >= applied * 1.25) return;
+        if (endpoints.seed_known > 0) try appendUnproven(ctx.arena, ctx.errors, inst, "applied capacitor voltage");
+        return;
+    }
     if (rated.present and rated.value + 1e-9 < applied) {
         try ctx.errors.append(ctx.arena, .{
             .id = "component-underrated",
@@ -917,8 +999,10 @@ fn checkJumperRating(ctx: RatingContext, inst: flat_netlist.FlatInstance, has_po
     const has_max_resistance = try requirePositiveRating(ctx.arena, ctx.errors, inst, &.{ "max-resistance", "resistance-max" }, "maximum jumper resistance");
     // A signal/configuration jumper has no rail load to compare. Its intrinsic
     // selection evidence is still validated above, but absence of a power-rail
-    // model is not itself a release error.
-    if (endpointEvidence(ctx.placement, inst.ref_des).known == 0) return;
+    // model is not itself a release error. Series-derived envelopes do not
+    // engage this check either (seed_known): they prove a potential, not a
+    // rail load, and pre-derivation such a jumper was out of scope.
+    if (endpointEvidence(ctx.placement, inst.ref_des).seed_known == 0) return;
     const actual_current = railCurrentForRef(ctx, inst.ref_des) orelse
         configStrapCurrent(ctx, inst.ref_des) orelse
         {
@@ -957,18 +1041,22 @@ fn checkResistorRating(ctx: RatingContext, inst: flat_netlist.FlatInstance) std.
     const endpoints = endpointEvidence(ctx.placement, inst.ref_des);
     if (endpoints.known == 0) return;
     if (endpoints.connected < 2) {
-        try appendUnproven(ctx.arena, ctx.errors, inst, "resistor dissipation");
+        // As in the capacitor check: only pre-derivation evidence demands
+        // proof; a part known solely through a series-derived envelope keeps
+        // its pre-derivation out-of-scope silence (see seed_known).
+        if (endpoints.seed_known > 0) try appendUnproven(ctx.arena, ctx.errors, inst, "resistor dissipation");
         return;
     }
     const ohms = resistance orelse {
-        try appendUnproven(ctx.arena, ctx.errors, inst, "resistor dissipation");
+        if (endpoints.seed_known > 0) try appendUnproven(ctx.arena, ctx.errors, inst, "resistor dissipation");
         return;
     };
     if (endpoints.known != endpoints.connected) {
-        try appendUnproven(ctx.arena, ctx.errors, inst, "resistor dissipation");
+        if (endpoints.seed_known > 0) try appendUnproven(ctx.arena, ctx.errors, inst, "resistor dissipation");
         return;
     }
-    const delta = @abs(endpoints.high - endpoints.low);
+    // A series-correlated pair collapses to its IR drop — see seriesCorrelated.
+    const delta: f64 = if (seriesCorrelated(ctx, inst.ref_des)) 0 else @abs(endpoints.high - endpoints.low);
     if (has_voltage and delta > 0) {
         const voltage_rating = parseRating(propertyAny(inst, &.{ "voltage", "working-voltage", "rated-voltage" }));
         if (voltage_rating.present and voltage_rating.value + 1e-9 < delta) try ctx.errors.append(ctx.arena, .{
@@ -1000,7 +1088,7 @@ fn checkMagneticRating(ctx: RatingContext, inst: flat_netlist.FlatInstance) std.
     const has_dcr = try requirePositiveRating(ctx.arena, ctx.errors, inst, &.{ "dcr-max", "dcr" }, "maximum DCR");
     if (std.mem.startsWith(u8, inst.component, "ind-")) _ = try requireProperty(ctx.arena, ctx.errors, inst, &.{"tolerance"}, "tolerance");
     const current = railCurrentForRef(ctx, inst.ref_des) orelse {
-        if (endpointEvidence(ctx.placement, inst.ref_des).known > 0) try appendUnproven(ctx.arena, ctx.errors, inst, "inductor/ferrite current rating");
+        if (endpointEvidence(ctx.placement, inst.ref_des).seed_known > 0) try appendUnproven(ctx.arena, ctx.errors, inst, "inductor/ferrite current rating");
         return;
     };
     if (has_current) {
@@ -1181,6 +1269,118 @@ test "rail-aware passive ratings cover voltage unknown endpoints and zero-ohm cu
     try std.testing.expect(hasItemRefMessage(errors.items, "component-rating-invalid", "R0_BAD", "jumper rated current"));
     try std.testing.expect(hasItemRefMessage(errors.items, "component-rating-invalid", "R0_BAD", "maximum jumper resistance"));
     try std.testing.expect(!hasItemRef(errors.items, "component-rating-unproven", "R0_BAD"));
+}
+
+// spec: fabrication-release - a series-correlated pair is checked at its IR drop, not as two independent intervals
+test "series-correlated resistor endpoints collapse instead of flagging" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const resistor_properties = [_]env_mod.Property{
+        .{ .key = "power", .value = "63mW" }, .{ .key = "voltage", .value = "25V" }, .{ .key = "tolerance", .value = "1%" },
+    };
+    const cap_properties = [_]env_mod.Property{
+        .{ .key = "voltage", .value = "16V" }, .{ .key = "dielectric", .value = "X7R" }, .{ .key = "tolerance", .value = "10%" },
+    };
+    // R_TERM is the ethernet-termination shape that used to be unprovable: a
+    // 49.9R pull-up from the rail to a driven node whose derived envelope is
+    // [0, 3.6]. Read as independent intervals that is 0.26 W — far over the
+    // 63 mW rating — but the pair is ONE correlated node, so the voltage
+    // across the part is its (undeclared, therefore zero) IR drop.
+    // R_LINK joins two nets of the same derived domain, the RC-filter shape.
+    // C_BLOCK is a DC block from the derived NODE into an RF chain no
+    // declaration reaches: it was out of the check's scope before the
+    // derivation existed (both nets unknown) and must STAY out — a derived
+    // envelope closes findings, it never conscripts new parts into one.
+    const instances = [_]flat_netlist.FlatInstance{
+        .{ .ref_des = "R_TERM", .component = "res-0402", .value = "49.9R", .footprint = "r0402", .uuid = "term", .properties = &resistor_properties },
+        .{ .ref_des = "R_LINK", .component = "res-0402", .value = "49.9R", .footprint = "r0402", .uuid = "link", .properties = &resistor_properties },
+        .{ .ref_des = "C_NODE", .component = "cap-0402", .value = "22nF", .footprint = "c0402", .uuid = "node", .properties = &cap_properties },
+        .{ .ref_des = "C_BLOCK", .component = "cap-0402", .value = "100pF", .footprint = "c0402", .uuid = "block", .properties = &cap_properties },
+    };
+    const rail_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "R_TERM", .pin = "1" }};
+    const node_pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "R_TERM", .pin = "2" }, .{ .ref_des = "R_LINK", .pin = "1" }, .{ .ref_des = "C_NODE", .pin = "1" }, .{ .ref_des = "C_BLOCK", .pin = "1" } };
+    const far_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "R_LINK", .pin = "2" }};
+    const ground_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "C_NODE", .pin = "2" }};
+    const rf_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "C_BLOCK", .pin = "2" }};
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "V33", .pins = &rail_pins },
+        .{ .name = "NODE", .pins = &node_pins },
+        .{ .name = "FAR", .pins = &far_pins },
+        .{ .name = "GND", .pins = &ground_pins },
+        .{ .name = "RF_CHAIN", .pins = &rf_pins },
+    };
+    const rail_specs = [_]env_mod.PowerRail{.{ .name = "V33", .nominal = 3.3, .rated_voltage = .{ .min = 3.135, .max = 3.465 } }};
+    const envelopes = [_]env_mod.NetEnvelope{
+        .{ .net = "NODE", .min = 0, .max = 3.6, .domain = 1, .bounded = true },
+        .{ .net = "FAR", .min = 0, .max = 3.6, .domain = 1, .bounded = true },
+    };
+    const placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &instances,
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 1,
+        .maxy = 1,
+        .generated = false,
+        .rules = .{ .physical = .{ .rail_model = .{ .specs = &rail_specs, .net_envelopes = &envelopes } } },
+    };
+    var errors: std.ArrayList(Item) = .empty;
+    var warnings: std.ArrayList(Item) = .empty;
+    try appendRailRatingChecks(arena, &errors, &warnings, placement, false);
+    // Previously: component-rating-unproven on all three; with independent
+    // intervals instead: component-underrated on both resistors. Now: clean.
+    try std.testing.expectEqual(@as(usize, 0), errors.items.len);
+    try std.testing.expectEqual(@as(usize, 0), warnings.items.len);
+}
+
+// spec: fabrication-release - independently declared envelopes never collapse, so a genuinely underrated series resistor still fails
+test "declared-envelope pair keeps the independent-interval check" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const resistor_properties = [_]env_mod.Property{
+        .{ .key = "power", .value = "63mW" }, .{ .key = "voltage", .value = "25V" }, .{ .key = "tolerance", .value = "1%" },
+    };
+    const instances = [_]flat_netlist.FlatInstance{
+        .{ .ref_des = "R_DROP", .component = "res-0402", .value = "100R", .footprint = "r0402", .uuid = "drop", .properties = &resistor_properties },
+    };
+    const a_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "R_DROP", .pin = "1" }};
+    const b_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "R_DROP", .pin = "2" }};
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "HI", .pins = &a_pins },
+        .{ .name = "LO", .pins = &b_pins },
+    };
+    // Both envelopes are authored facts (domain 0): the design genuinely holds
+    // 10 V across 100R, which is 1 W — the finding must survive.
+    const envelopes = [_]env_mod.NetEnvelope{
+        .{ .net = "HI", .min = 10, .max = 10, .origin = .declared },
+        .{ .net = "LO", .min = 0, .max = 0, .origin = .declared },
+    };
+    const placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &instances,
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 1,
+        .maxy = 1,
+        .generated = false,
+        .rules = .{ .physical = .{ .rail_model = .{ .net_envelopes = &envelopes } } },
+    };
+    var errors: std.ArrayList(Item) = .empty;
+    var warnings: std.ArrayList(Item) = .empty;
+    try appendRailRatingChecks(arena, &errors, &warnings, placement, false);
+    try std.testing.expect(hasItemRefMessage(errors.items, "component-underrated", "R_DROP", "dissipates up to"));
 }
 
 /// A ferrite whose selected part is fully evidenced, so the only thing the

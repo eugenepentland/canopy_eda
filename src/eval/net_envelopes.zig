@@ -145,18 +145,28 @@ pub fn build(
         try put(allocator, &by_root, root, span);
     }
 
+    // Series-domain derivation runs LAST, over everything already known —
+    // seeds and authored declarations alike — and only ever fills nets that
+    // are still unknown, so nothing above can be widened or narrowed by it.
+    var domains = try deriveSeriesDomains(allocator, instances.items, nets.items, &parent, &by_root);
+    defer domains.deinit(allocator);
+
     // Emit one entry per flat net whose class carries a potential. Nets with no
     // seed anywhere in their class are simply absent — an absent envelope is
     // "not proven", which is the honest answer and the status quo.
     var out: std.ArrayList(NetEnvelope) = .empty;
     for (nets.items) |net| {
-        const span = by_root.get(na.findRoot(&parent, net.name)) orelse continue;
+        const root = na.findRoot(&parent, net.name);
+        const span = by_root.get(root) orelse continue;
+        const derived = domains.get(root) orelse Derived{ .domain = 0, .bounded = false };
         try out.append(allocator, .{
             .net = net.name,
             .min = span.min,
             .max = span.max,
             .origin = span.origin,
             .rationale = span.rationale,
+            .domain = derived.domain,
+            .bounded = derived.bounded,
         });
     }
     std.mem.sort(NetEnvelope, out.items, {}, lessThanEnvelope);
@@ -341,6 +351,315 @@ fn unionNets(
     try parent.put(allocator, rb, ra);
 }
 
+// ── Series-domain derivation ───────────────────────────────────────────
+//
+// A two-terminal series resistor or inductor makes its two nets ONE correlated
+// DC node up to its IR drop — an RC filter's tap, a termination or pull-up's
+// far side, a bias tee's feed node. The board vocabulary for those nets used
+// to be a hand-authored `(net-envelope …)` restating what the topology already
+// says ("C blocks DC, so no DC current flows in R and the node sits at the
+// near potential"). This pass derives them instead.
+//
+// The model is the same declared-DC frame the rail budget uses everywhere: a
+// branch with no declared current carries none, so the drop across a series
+// element defaults to zero and an anchor's envelope crosses it unchanged.
+// What keeps that honest rather than optimistic:
+//
+//   * Only UNKNOWN nets are ever filled. A seeded or authored envelope is
+//     never touched, so nothing already proven can be rewritten.
+//   * Non-passive pins on a domain WIDEN it: a device with a pin on the
+//     domain can drive the node anywhere its own supplies reach, so the
+//     domain takes `[min(0, …), max(…)]` over every envelope-known net that
+//     device touches. A device touching NO known net is an unbounded driver
+//     and poisons the whole domain — it stays unproven.
+//   * Two anchors that cannot agree (disjoint envelopes — a divider strung
+//     between two rails) prove the domain CARRIES current between them, which
+//     is exactly the case zero-drop propagation may not model. The whole
+//     domain is refused and stays unproven, preserving the finding.
+//
+// Each derived net carries a nonzero `NetEnvelope.domain`; nets sharing one
+// are correlated, which is what lets the rating check bound the voltage
+// ACROSS the series element by its drop instead of by two independent
+// intervals (see `fab_readiness.seriesCorrelated`).
+
+/// The two-terminal series conductors the derivation may cross. Ferrites are
+/// deliberately absent: they are already unioned into one net class above.
+fn isSeriesConductor(component: []const u8) bool {
+    return std.mem.startsWith(u8, component, "res-") or
+        std.mem.startsWith(u8, component, "ind-");
+}
+
+/// Inductors anchor (a bias tee or filter fed FROM a known rail) but never
+/// merge two unknown nets: an inductor between two undeclared nets is the
+/// energy-storage shape — a switcher's coil — whose two ends genuinely sit at
+/// different potentials, exactly what zero-drop union may not claim. That is
+/// how a boost converter's 12 V input stays a 12 V input instead of
+/// inheriting the switch node's diode-clamped ceiling.
+fn isInductor(component: []const u8) bool {
+    return std.mem.startsWith(u8, component, "ind-");
+}
+
+/// Parts that neither conduct nor drive: their pins say nothing about a net's
+/// potential. Capacitors block DC; the rest have no electrical model at all.
+fn isInertForDomains(component: []const u8) bool {
+    if (std.mem.startsWith(u8, component, "cap-")) return true;
+    if (env_mod.isTestPoint(component)) return true;
+    const mechanical = [_][]const u8{ "mounting-hole", "fiducial", "board-outline" };
+    for (mechanical) |name| {
+        if (std.mem.indexOf(u8, component, name) != null) return true;
+    }
+    return false;
+}
+
+/// What is already proven about `root` before derivation: its seeded/declared
+/// span, or the 0 V every rating surface grants ground-class names.
+fn seedSpanOf(by_root: *const std.StringHashMapUnmanaged(Span), root: []const u8) ?Span {
+    if (by_root.get(root)) |span| return span;
+    if (na.isRatingZeroVolts(root)) return .{ .min = 0, .max = 0, .origin = .derived, .rationale = "" };
+    return null;
+}
+
+/// One connected component of unknown nets joined by series conductors, while
+/// its envelope is being assembled.
+const DomainAcc = struct {
+    anchors: std.ArrayList(Span) = .empty,
+    /// The one known root all anchors must share. Two DIFFERENT known nets
+    /// conducting into one unknown domain is a divider/bridge: current between
+    /// them is guaranteed, which is exactly what zero-drop propagation may not
+    /// model, so such a domain is refused (`multi_root`).
+    anchor_root: ?[]const u8 = null,
+    multi_root: bool = false,
+    device_min: f64 = 0,
+    device_max: f64 = 0,
+    has_device: bool = false,
+    poisoned: bool = false,
+    span_min: f64 = 0,
+    span_max: f64 = 0,
+
+    fn noteAnchorRoot(self: *DomainAcc, root: []const u8) void {
+        if (self.anchor_root) |existing| {
+            if (!std.mem.eql(u8, existing, root)) self.multi_root = true;
+        } else self.anchor_root = root;
+    }
+
+    fn boundByDevice(self: *DomainAcc, floor: f64, ceil: f64) void {
+        self.device_min = if (self.has_device) @min(self.device_min, floor) else floor;
+        self.device_max = if (self.has_device) @max(self.device_max, ceil) else ceil;
+        self.has_device = true;
+    }
+
+    /// Resolve this domain's envelope, or refuse (see the section comment):
+    /// a poisoned domain, one nothing bounds, and one anchored by more than
+    /// one distinct known net all stay unknown.
+    fn compose(self: *DomainAcc) bool {
+        if (self.poisoned or self.multi_root) return false;
+        if (self.anchors.items.len == 0 and !self.has_device) return false;
+        var lo: f64 = std.math.inf(f64);
+        var hi: f64 = -std.math.inf(f64);
+        for (self.anchors.items) |a| {
+            lo = @min(lo, a.min);
+            hi = @max(hi, a.max);
+        }
+        if (self.has_device) {
+            lo = @min(lo, self.device_min);
+            hi = @max(hi, self.device_max);
+        }
+        self.span_min = lo;
+        self.span_max = hi;
+        return true;
+    }
+};
+
+/// Shared state of one derivation run over a flattened design.
+const DomainPass = struct {
+    allocator: std.mem.Allocator,
+    instances: []const flat_netlist.FlatInstance,
+    by_root: *std.StringHashMapUnmanaged(Span),
+    /// Ferrite-class roots each part touches, deduplicated, in net order.
+    roots_by_ref: std.StringHashMapUnmanaged(std.ArrayList([]const u8)) = .empty,
+    /// Union-find over the unknown roots series conductors join.
+    dparent: std.StringHashMapUnmanaged([]const u8) = .empty,
+    /// Unknown roots touched by a series conductor, in first-seen order.
+    member_list: std.ArrayList([]const u8) = .empty,
+    member_set: std.StringHashMapUnmanaged(void) = .empty,
+    acc: std.StringHashMapUnmanaged(DomainAcc) = .empty,
+
+    fn deinit(self: *DomainPass) void {
+        var lists = self.roots_by_ref.valueIterator();
+        while (lists.next()) |list| list.deinit(self.allocator);
+        self.roots_by_ref.deinit(self.allocator);
+        self.dparent.deinit(self.allocator);
+        self.member_list.deinit(self.allocator);
+        self.member_set.deinit(self.allocator);
+        var accs = self.acc.valueIterator();
+        while (accs.next()) |entry| entry.anchors.deinit(self.allocator);
+        self.acc.deinit(self.allocator);
+    }
+
+    fn indexRoots(
+        self: *DomainPass,
+        nets: []const flat_netlist.FlatNet,
+        parent: *std.StringHashMapUnmanaged([]const u8),
+    ) std.mem.Allocator.Error!void {
+        for (nets) |net| {
+            const root = na.findRoot(parent, net.name);
+            for (net.pins) |pin| {
+                const gop = try self.roots_by_ref.getOrPut(self.allocator, pin.ref_des);
+                if (!gop.found_existing) gop.value_ptr.* = .empty;
+                var seen = false;
+                for (gop.value_ptr.items) |existing| {
+                    if (std.mem.eql(u8, existing, root)) {
+                        seen = true;
+                        break;
+                    }
+                }
+                if (!seen) try gop.value_ptr.append(self.allocator, root);
+            }
+        }
+    }
+
+    /// The two roots of a populated two-terminal series conductor, or null. A
+    /// DNP part is absent copper and joins nothing.
+    fn seriesRoots(self: *const DomainPass, inst: flat_netlist.FlatInstance) ?[2][]const u8 {
+        if (inst.dnp or !isSeriesConductor(inst.component)) return null;
+        const roots = self.roots_by_ref.get(inst.ref_des) orelse return null;
+        if (roots.items.len != 2) return null;
+        return .{ roots.items[0], roots.items[1] };
+    }
+
+    /// Pass 1: union unknown nets joined by a series RESISTOR. Inductors do
+    /// not merge unknowns — see `isInductor`.
+    fn unionUnknowns(self: *DomainPass) std.mem.Allocator.Error!void {
+        for (self.instances) |inst| {
+            const pair = self.seriesRoots(inst) orelse continue;
+            if (isInductor(inst.component)) continue;
+            if (seedSpanOf(self.by_root, pair[0]) != null) continue;
+            if (seedSpanOf(self.by_root, pair[1]) != null) continue;
+            try unionNets(self.allocator, &self.dparent, pair[0], pair[1]);
+        }
+    }
+
+    fn register(self: *DomainPass, root: []const u8) std.mem.Allocator.Error!void {
+        const member = try self.member_set.getOrPut(self.allocator, root);
+        if (!member.found_existing) try self.member_list.append(self.allocator, root);
+    }
+
+    fn accFor(self: *DomainPass, root: []const u8) std.mem.Allocator.Error!*DomainAcc {
+        const gop = try self.acc.getOrPut(self.allocator, na.findRoot(&self.dparent, root));
+        if (!gop.found_existing) gop.value_ptr.* = .{};
+        return gop.value_ptr;
+    }
+
+    /// Pass 2: register members and collect each domain's anchors — the known
+    /// nets one series hop away. The drop across the hop is the declared
+    /// branch current times its resistance, and no branch here declares one,
+    /// so the anchor envelope crosses unchanged (the declared-DC frame).
+    fn collectAnchors(self: *DomainPass) std.mem.Allocator.Error!void {
+        for (self.instances) |inst| {
+            const pair = self.seriesRoots(inst) orelse continue;
+            const span_a = seedSpanOf(self.by_root, pair[0]);
+            const span_b = seedSpanOf(self.by_root, pair[1]);
+            if (span_a != null and span_b != null) continue;
+            // An all-unknown inductor edge is skipped entirely (see
+            // isInductor): it neither registers members nor anchors.
+            if (span_a == null and span_b == null and isInductor(inst.component)) continue;
+            if (span_a == null) try self.register(pair[0]);
+            if (span_b == null) try self.register(pair[1]);
+            const anchor = span_a orelse span_b orelse continue;
+            const anchor_root = if (span_a == null) pair[1] else pair[0];
+            const entry = try self.accFor(if (span_a == null) pair[0] else pair[1]);
+            try entry.anchors.append(self.allocator, anchor);
+            entry.noteAnchorRoot(anchor_root);
+        }
+    }
+
+    /// Pass 3: every other populated part with a pin on a domain bounds it by
+    /// its own known nets — or, knowing none, proves it unboundable.
+    fn boundByDevices(self: *DomainPass) std.mem.Allocator.Error!void {
+        for (self.instances) |inst| {
+            if (inst.dnp or isSeriesConductor(inst.component)) continue;
+            if (std.mem.startsWith(u8, inst.component, ferrite_prefix)) continue;
+            if (isInertForDomains(inst.component)) continue;
+            const roots = self.roots_by_ref.get(inst.ref_des) orelse continue;
+            var bound: ?struct { min: f64, max: f64 } = null;
+            for (roots.items) |root| {
+                const span = seedSpanOf(self.by_root, root) orelse continue;
+                const floor = @min(0, span.min);
+                bound = if (bound) |b|
+                    .{ .min = @min(b.min, floor), .max = @max(b.max, span.max) }
+                else
+                    .{ .min = floor, .max = span.max };
+            }
+            for (roots.items) |root| {
+                if (!self.member_set.contains(root)) continue;
+                if (seedSpanOf(self.by_root, root) != null) continue;
+                const entry = try self.accFor(root);
+                if (bound) |b| entry.boundByDevice(b.min, b.max) else entry.poisoned = true;
+            }
+        }
+    }
+
+    /// Compose each domain once, in first-member order so ids are stable, and
+    /// fill every member root. Refusals leave the member unknown — exactly the
+    /// pre-derivation state, so the release finding survives.
+    fn emit(
+        self: *DomainPass,
+        domains: *std.StringHashMapUnmanaged(Derived),
+    ) std.mem.Allocator.Error!void {
+        var id_by_domain: std.StringHashMapUnmanaged(u32) = .empty;
+        defer id_by_domain.deinit(self.allocator);
+        var next_id: u32 = 1;
+        for (self.member_list.items) |root| {
+            const droot = na.findRoot(&self.dparent, root);
+            const idgop = try id_by_domain.getOrPut(self.allocator, droot);
+            if (!idgop.found_existing) {
+                const entry = self.acc.getPtr(droot);
+                idgop.value_ptr.* = if (entry != null and entry.?.compose()) next_id else 0;
+                if (idgop.value_ptr.* != 0) next_id += 1;
+            }
+            if (idgop.value_ptr.* == 0) continue;
+            const entry = self.acc.getPtr(droot).?;
+            try self.by_root.put(self.allocator, root, .{
+                .min = entry.span_min,
+                .max = entry.span_max,
+                .origin = .derived,
+                .rationale = "",
+            });
+            try domains.put(self.allocator, root, .{
+                .domain = idgop.value_ptr.*,
+                .bounded = entry.has_device,
+            });
+        }
+    }
+};
+
+/// What the derivation established for one root: its correlation class, and
+/// whether the span's extent rests on device supplies (a feasibility BOUND on
+/// a driven node) rather than pure series conduction from one anchor.
+const Derived = struct { domain: u32, bounded: bool };
+
+/// Derive envelopes for nets that series conductors correlate with known ones
+/// (see the section comment above). Fills `by_root` for every derived root and
+/// returns root → correlation-domain id (1-based; roots absent are underived).
+fn deriveSeriesDomains(
+    allocator: std.mem.Allocator,
+    instances: []const flat_netlist.FlatInstance,
+    nets: []const flat_netlist.FlatNet,
+    parent: *std.StringHashMapUnmanaged([]const u8),
+    by_root: *std.StringHashMapUnmanaged(Span),
+) std.mem.Allocator.Error!std.StringHashMapUnmanaged(Derived) {
+    var domains: std.StringHashMapUnmanaged(Derived) = .empty;
+    errdefer domains.deinit(allocator);
+    var pass = DomainPass{ .allocator = allocator, .instances = instances, .by_root = by_root };
+    defer pass.deinit();
+    try pass.indexRoots(nets, parent);
+    try pass.unionUnknowns();
+    try pass.collectAnchors();
+    try pass.boundByDevices();
+    try pass.emit(&domains);
+    return domains;
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -519,4 +838,200 @@ test "build reports a declared envelope narrower than the derived one" {
     try testing.expectEqual(@as(usize, 0), covering.contradictions.len);
     const merged = envelopeFor(covering, "V_12V") orelse return error.TestExpectedEnvelope;
     try testing.expectEqual(@as(f64, 30.0), merged.max);
+}
+
+// ── Series-domain derivation tests ─────────────────────────────────────
+
+/// A flat design for the derivation tests: every net/port/instance slice is
+/// borrowed from the caller's frame.
+fn flatBlock(
+    instances: []const env_mod.Instance,
+    nets: []const env_mod.Net,
+    ports: []const env_mod.Port,
+) DesignBlock {
+    return .{
+        .name = "outer",
+        .instances = instances,
+        .nets = nets,
+        .ports = ports,
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+}
+
+fn passive(ref: []const u8, component: []const u8, value: []const u8) env_mod.Instance {
+    return .{ .ref_des = ref, .component = component, .value = value, .footprint = "", .symbol = "" };
+}
+
+// spec: eval/net-envelopes - A series resistor propagates a known envelope onto a capacitor-terminated node as one correlated domain
+test "series resistor derives the RC filter node from its rail" {
+    var scratch = arena();
+    defer scratch.deinit();
+    const alloc = scratch.allocator();
+    // The shape of every flagged RC filter / series termination: R1 joins the
+    // proven rail to FILT, whose only other pin is a DC-blocking capacitor.
+    const instances = [_]env_mod.Instance{
+        passive("R1", "res-0402", "49.9R"),
+        passive("C1", "cap-0402", "22nF"),
+    };
+    const nets = [_]env_mod.Net{
+        .{ .name = "V_3V3", .pins = &[_]env_mod.PinRef{.{ .ref_des = "R1", .pin = "1" }} },
+        .{ .name = "FILT", .pins = &[_]env_mod.PinRef{ .{ .ref_des = "R1", .pin = "2" }, .{ .ref_des = "C1", .pin = "1" } } },
+        .{ .name = "GND", .pins = &[_]env_mod.PinRef{.{ .ref_des = "C1", .pin = "2" }} },
+    };
+    const ports = [_]env_mod.Port{.{ .name = "V_3V3", .net = "V_3V3", .direction = "in", .kind = "power", .rated_min = 3.135, .rated_max = 3.465 }};
+    const outer = flatBlock(&instances, &nets, &ports);
+    const result = try build(alloc, &outer, &.{});
+    const filt = envelopeFor(result, "FILT") orelse return error.TestExpectedEnvelope;
+    try testing.expectEqual(@as(f64, 3.135), filt.min);
+    try testing.expectEqual(@as(f64, 3.465), filt.max);
+    try testing.expectEqual(NetEnvelope.Origin.derived, filt.origin);
+    try testing.expect(filt.domain != 0);
+    // The rail itself was seeded, not derived: it claims no correlation.
+    const rail = envelopeFor(result, "V_3V3") orelse return error.TestExpectedEnvelope;
+    try testing.expectEqual(@as(u32, 0), rail.domain);
+}
+
+// spec: eval/net-envelopes - A divider tap anchored by two different known nets is refused rather than guessed
+test "series derivation refuses a divider strung between two rails" {
+    var scratch = arena();
+    defer scratch.deinit();
+    const alloc = scratch.allocator();
+    // TAP provably carries current between V5 and ground — the one case
+    // zero-drop propagation may not model, so it must stay unknown.
+    const instances = [_]env_mod.Instance{
+        passive("R1", "res-0402", "10k"),
+        passive("R2", "res-0402", "10k"),
+    };
+    const nets = [_]env_mod.Net{
+        .{ .name = "V5", .pins = &[_]env_mod.PinRef{.{ .ref_des = "R1", .pin = "1" }} },
+        .{ .name = "TAP", .pins = &[_]env_mod.PinRef{ .{ .ref_des = "R1", .pin = "2" }, .{ .ref_des = "R2", .pin = "1" } } },
+        .{ .name = "GND", .pins = &[_]env_mod.PinRef{.{ .ref_des = "R2", .pin = "2" }} },
+    };
+    const ports = [_]env_mod.Port{.{ .name = "V5", .net = "V5", .direction = "in", .kind = "power", .rated_min = 4.75, .rated_max = 5.25 }};
+    const outer = flatBlock(&instances, &nets, &ports);
+    const result = try build(alloc, &outer, &.{});
+    try testing.expectEqual(@as(?NetEnvelope, null), envelopeFor(result, "TAP"));
+}
+
+// spec: eval/net-envelopes - A device pin on a derived domain widens it to the device's own known supplies
+test "series derivation widens a driven domain by the driver's supplies" {
+    var scratch = arena();
+    defer scratch.deinit();
+    const alloc = scratch.allocator();
+    // The active loop-filter shape: the opamp's output node reaches VTUNE
+    // through R_ISO; nothing can push either net beyond the opamp's own rail.
+    const instances = [_]env_mod.Instance{
+        .{ .ref_des = "U1", .component = "opamp-x", .value = "", .footprint = "", .symbol = "" },
+        passive("R1", "res-0402", "27R"),
+        passive("C1", "cap-0402", "56pF"),
+    };
+    const nets = [_]env_mod.Net{
+        .{ .name = "V12", .pins = &[_]env_mod.PinRef{.{ .ref_des = "U1", .pin = "5" }} },
+        .{ .name = "OUT", .pins = &[_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "R1", .pin = "1" } } },
+        .{ .name = "VTUNE", .pins = &[_]env_mod.PinRef{ .{ .ref_des = "R1", .pin = "2" }, .{ .ref_des = "C1", .pin = "1" } } },
+        .{ .name = "GND", .pins = &[_]env_mod.PinRef{.{ .ref_des = "C1", .pin = "2" }} },
+    };
+    const ports = [_]env_mod.Port{.{ .name = "V12", .net = "V12", .direction = "in", .kind = "power", .rated_min = 11.4, .rated_max = 12.6 }};
+    const outer = flatBlock(&instances, &nets, &ports);
+    const result = try build(alloc, &outer, &.{});
+    const out_net = envelopeFor(result, "OUT") orelse return error.TestExpectedEnvelope;
+    const vtune = envelopeFor(result, "VTUNE") orelse return error.TestExpectedEnvelope;
+    try testing.expectEqual(@as(f64, 0), out_net.min);
+    try testing.expectEqual(@as(f64, 12.6), out_net.max);
+    try testing.expectEqual(@as(f64, 0), vtune.min);
+    try testing.expectEqual(@as(f64, 12.6), vtune.max);
+    try testing.expect(out_net.domain != 0);
+    try testing.expectEqual(out_net.domain, vtune.domain);
+}
+
+// spec: eval/net-envelopes - A device with no envelope-known net anywhere poisons the domain it drives
+test "series derivation refuses a domain driven by an unbounded device" {
+    var scratch = arena();
+    defer scratch.deinit();
+    const alloc = scratch.allocator();
+    const instances = [_]env_mod.Instance{
+        .{ .ref_des = "U1", .component = "mystery-driver", .value = "", .footprint = "", .symbol = "" },
+        passive("R1", "res-0402", "49.9R"),
+    };
+    const nets = [_]env_mod.Net{
+        .{ .name = "V5", .pins = &[_]env_mod.PinRef{.{ .ref_des = "R1", .pin = "1" }} },
+        .{ .name = "NODE", .pins = &[_]env_mod.PinRef{ .{ .ref_des = "R1", .pin = "2" }, .{ .ref_des = "U1", .pin = "1" } } },
+    };
+    const ports = [_]env_mod.Port{.{ .name = "V5", .net = "V5", .direction = "in", .kind = "power", .rated_min = 4.75, .rated_max = 5.25 }};
+    const outer = flatBlock(&instances, &nets, &ports);
+    const result = try build(alloc, &outer, &.{});
+    try testing.expectEqual(@as(?NetEnvelope, null), envelopeFor(result, "NODE"));
+}
+
+// spec: eval/net-envelopes - A DNP series resistor is absent copper and derives nothing
+test "series derivation ignores a DNP resistor" {
+    var scratch = arena();
+    defer scratch.deinit();
+    const alloc = scratch.allocator();
+    var option = passive("R1", "res-0402", "0R");
+    option.dnp = true;
+    const instances = [_]env_mod.Instance{ option, passive("C1", "cap-0402", "1uF") };
+    const nets = [_]env_mod.Net{
+        .{ .name = "V5", .pins = &[_]env_mod.PinRef{.{ .ref_des = "R1", .pin = "1" }} },
+        .{ .name = "FILT", .pins = &[_]env_mod.PinRef{ .{ .ref_des = "R1", .pin = "2" }, .{ .ref_des = "C1", .pin = "1" } } },
+        .{ .name = "GND", .pins = &[_]env_mod.PinRef{.{ .ref_des = "C1", .pin = "2" }} },
+    };
+    const ports = [_]env_mod.Port{.{ .name = "V5", .net = "V5", .direction = "in", .kind = "power", .rated_min = 4.75, .rated_max = 5.25 }};
+    const outer = flatBlock(&instances, &nets, &ports);
+    const result = try build(alloc, &outer, &.{});
+    try testing.expectEqual(@as(?NetEnvelope, null), envelopeFor(result, "FILT"));
+}
+
+// spec: eval/net-envelopes - An inductor bias feed derives its bias node from the rail it taps
+test "series derivation crosses a bias-tee inductor" {
+    var scratch = arena();
+    defer scratch.deinit();
+    const alloc = scratch.allocator();
+    // The LMX bias-tee shape: an 18 nH choke feeds LO_BIAS from the rail; the
+    // node's other pins are its bypass capacitor and the 50R pull-ups.
+    const instances = [_]env_mod.Instance{
+        passive("L1", "ind-0402", "18nH"),
+        passive("C1", "cap-0402", "0.01uF"),
+    };
+    const nets = [_]env_mod.Net{
+        .{ .name = "V_3V3", .pins = &[_]env_mod.PinRef{.{ .ref_des = "L1", .pin = "2" }} },
+        .{ .name = "LO_BIAS", .pins = &[_]env_mod.PinRef{ .{ .ref_des = "L1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } } },
+        .{ .name = "GND", .pins = &[_]env_mod.PinRef{.{ .ref_des = "C1", .pin = "2" }} },
+    };
+    const ports = [_]env_mod.Port{.{ .name = "V_3V3", .net = "V_3V3", .direction = "in", .kind = "power", .rated_min = 3.135, .rated_max = 3.465 }};
+    const outer = flatBlock(&instances, &nets, &ports);
+    const result = try build(alloc, &outer, &.{});
+    const bias = envelopeFor(result, "LO_BIAS") orelse return error.TestExpectedEnvelope;
+    try testing.expectEqual(@as(f64, 3.135), bias.min);
+    try testing.expectEqual(@as(f64, 3.465), bias.max);
+    try testing.expect(bias.domain != 0);
+}
+
+// spec: eval/net-envelopes - An inductor between two unknown nets is a switching coil and merges nothing
+test "series derivation does not merge unknown nets across an inductor" {
+    var scratch = arena();
+    defer scratch.deinit();
+    const alloc = scratch.allocator();
+    // The boost-converter shape: VIN (undeclared here) — L — SW, with the
+    // rectifier diode giving SW a path to the declared 22 V output. Merging
+    // across the coil would hand the input rail the output's ceiling.
+    const instances = [_]env_mod.Instance{
+        passive("L1", "ind-0402", "4.7uH"),
+        .{ .ref_des = "D1", .component = "diode-sod323", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "U1", .component = "lm2733", .value = "", .footprint = "", .symbol = "" },
+    };
+    const nets = [_]env_mod.Net{
+        .{ .name = "VIN_UNDECLARED", .pins = &[_]env_mod.PinRef{.{ .ref_des = "L1", .pin = "1" }} },
+        .{ .name = "SW", .pins = &[_]env_mod.PinRef{ .{ .ref_des = "L1", .pin = "2" }, .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "D1", .pin = "1" } } },
+        .{ .name = "V_22V", .pins = &[_]env_mod.PinRef{ .{ .ref_des = "D1", .pin = "2" }, .{ .ref_des = "U1", .pin = "2" } } },
+    };
+    const ports = [_]env_mod.Port{.{ .name = "V_22V", .net = "V_22V", .direction = "out", .kind = "power", .rated_min = 21.5, .rated_max = 22.13 }};
+    const outer = flatBlock(&instances, &nets, &ports);
+    const result = try build(alloc, &outer, &.{});
+    // Neither coil end derives: VIN must not inherit the output's ceiling,
+    // and SW (an energy-storage node) has no series-resistor correlation.
+    try testing.expectEqual(@as(?NetEnvelope, null), envelopeFor(result, "VIN_UNDECLARED"));
+    try testing.expectEqual(@as(?NetEnvelope, null), envelopeFor(result, "SW"));
 }
