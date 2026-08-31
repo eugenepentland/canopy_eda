@@ -704,8 +704,11 @@ fn addBoardEvidenceBytes(
         snapshot.review.bom_csv,
         snapshot.review.diagram_svg,
         snapshot.physical.pcb_png,
+        snapshot.physical.assembly.base_png,
     };
     for (slices) |bytes| try addBoundedBytes(total, bytes.len, max_analysis_evidence_bytes);
+    for (snapshot.physical.assembly.sprites) |sprite|
+        try addBoundedBytes(total, sprite.png.len, max_analysis_evidence_bytes);
     if (snapshot.review.notes_source) |notes| {
         try addBoundedBytes(total, @sizeOf(zipfile.Entry), max_analysis_evidence_bytes);
         try addBoundedBytes(total, notes.name.len, max_analysis_evidence_bytes);
@@ -1775,29 +1778,64 @@ fn renderSystemHtml(
         .path = document.path,
     };
     const boards = try allocator.alloc(review_html.Board, analysis.boards.len);
-    for (analysis.boards, boards) |board, *entry| entry.* = .{
-        .identity = .{
-            .role = board.member.role,
-            .design = board.member.name,
-            .title = board.snapshot.identity.title,
-            .part_number = board.member.part_number,
-            .revision = board.member.revision,
-            .layout = board.snapshot.identity.layout,
-            .generated_at = board.snapshot.identity.generated_at,
-        },
-        .review = .{
-            .status = @tagName(board.snapshot.review.status),
-            .open_notes = board.snapshot.review.open_notes,
-            .diagram_svg = board.snapshot.review.diagram_svg,
-            .has_notes = board.snapshot.review.notes_source != null,
-        },
-        .fabrication = if (board.fab.readiness.blocked)
-            .blocked
-        else if (board.fab.readiness.needs_waiver)
-            .waiver
-        else
-            .ready,
-    };
+    for (analysis.boards, boards) |board, *entry| {
+        const source_assembly = board.snapshot.physical.assembly;
+        const sprites = try allocator.alloc(review_html.Board.Visual.Sprite, source_assembly.sprites.len);
+        for (source_assembly.sprites, sprites) |sprite, *dest| dest.* = .{
+            .footprint = sprite.footprint,
+            .x = sprite.x,
+            .y = sprite.y,
+            .w = sprite.w,
+            .h = sprite.h,
+            .png = sprite.png,
+        };
+        const parts = try allocator.alloc(review_html.Board.Visual.Part, source_assembly.parts.len);
+        for (source_assembly.parts, parts) |part, *dest| dest.* = .{
+            .sprite = part.sprite,
+            .x = part.x,
+            .y = part.y,
+            .rotation = part.rotation,
+            .bottom = part.bottom,
+        };
+        entry.* = .{
+            .identity = .{
+                .role = board.member.role,
+                .design = board.member.name,
+                .title = board.snapshot.identity.title,
+                .part_number = board.member.part_number,
+                .revision = board.member.revision,
+                .layout = board.snapshot.identity.layout,
+                .generated_at = board.snapshot.identity.generated_at,
+            },
+            .review = .{
+                .status = @tagName(board.snapshot.review.status),
+                .open_notes = board.snapshot.review.open_notes,
+                .diagram_svg = board.snapshot.review.diagram_svg,
+                .has_notes = board.snapshot.review.notes_source != null,
+            },
+            .fabrication = if (board.fab.readiness.blocked)
+                .blocked
+            else if (board.fab.readiness.needs_waiver)
+                .waiver
+            else
+                .ready,
+            .visual = .{
+                .layout_png = board.snapshot.physical.pcb_png,
+                .assembly = .{
+                    .base_png = source_assembly.base_png,
+                    .projection = .{
+                        .width = source_assembly.projection.width,
+                        .height = source_assembly.projection.height,
+                        .minx = source_assembly.projection.minx,
+                        .miny = source_assembly.projection.miny,
+                        .scale = source_assembly.projection.scale,
+                    },
+                    .sprites = sprites,
+                    .parts = parts,
+                },
+            },
+        };
+    }
     return review_html.compose(allocator, sections, .{
         .spec = &analysis.parsed.value,
         .draft = draft_mode,
@@ -3554,10 +3592,11 @@ test "system review HTML dossier is a draft and release member" {
     try std.testing.expect(std.mem.endsWith(u8, std.mem.trimEnd(u8, draft_html, "\n"), "</html>"));
     try std.testing.expect(std.mem.indexOf(u8, draft_html, "Demo System") != null);
     try std.testing.expect(std.mem.indexOf(u8, draft_html, review_html.draft_marker) != null);
-    // The package member and live face both lead with the same scan-first gate
-    // summary, while the complete evidence remains in native disclosures.
+    // The package member and live face carry the same indexed, linear review.
     try std.testing.expect(std.mem.indexOf(u8, draft_html, "Executive summary") != null);
-    try std.testing.expect(std.mem.indexOf(u8, draft_html, "<details class=\"sec\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, draft_html, "<aside class=\"section-index\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, draft_html, "<section class=\"sec\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, draft_html, "<details class=\"sec\"") == null);
     // One numbered section per inlined manifest document, by manifest title.
     try std.testing.expect(std.mem.indexOf(u8, draft_html, "System overview") != null);
     try std.testing.expect(std.mem.indexOf(u8, draft_html, "Bring-up &amp; acceptance") != null);

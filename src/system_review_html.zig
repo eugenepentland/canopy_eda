@@ -17,7 +17,9 @@
 //! is XML-escaped at the point of use. The only exceptions are the two
 //! tool-rendered SVG figures (the system-of-boards fragment and each board's
 //! block diagram), which this process emits itself from evaluated designs and
-//! which carry no script and no `id` that could collide with the page.
+//! which carry no script and no `id` that could collide with the page. The
+//! physical gallery is likewise tool-rendered here: PNG bytes become data URLs
+//! and cached component pictures are placed in numeric, generated SVG shells.
 //!
 //! Rendering is a pure function of its inputs: no clock, no RNG, no hash-map
 //! iteration. The timestamp shown is the package's own `generated_at`.
@@ -25,14 +27,14 @@
 const std = @import("std");
 const escape = @import("escape.zig");
 const review_md = @import("system_review_md.zig");
+const render_pcb_png = @import("render_pcb_png.zig");
 const system_review = @import("system_review.zig");
 const system_of_boards = @import("diagram/system_of_boards.zig");
 
 const Writer = std.Io.Writer;
 
-/// Ceiling for the rendered page. The screen disclosure tree and the linear
-/// print face deliberately carry the evidence twice, so this allows two full
-/// 32 MiB document sets plus escaping, figures, and page chrome.
+/// Ceiling for the rendered page: expanded documents, inline board renders,
+/// cached component-model sprites, escaping, figures, and page chrome.
 pub const max_html_bytes: usize = 128 * 1024 * 1024;
 
 /// One numbered document section: an authored manifest document whose body is
@@ -56,6 +58,7 @@ pub const Board = struct {
     identity: Identity,
     review: Review,
     fabrication: FabState,
+    visual: Visual = .{},
 
     /// Manifest and snapshot identity, as shown in the board facts row.
     pub const Identity = struct {
@@ -78,6 +81,47 @@ pub const Board = struct {
         diagram_svg: []const u8 = "",
         /// True when `boards/<role>/design-notes.md` exists in the archive.
         has_notes: bool = false,
+    };
+
+    /// Fully inline board imagery. The assembly data mirrors the interactive
+    /// Assembly page's footprint-local model-sprite transforms, but is rendered
+    /// here as static SVG so the archived dossier remains script-free.
+    pub const Visual = struct {
+        layout_png: []const u8 = "",
+        assembly: Assembly = .{},
+
+        /// Board projection plus deduplicated model pictures and their placed uses.
+        pub const Assembly = struct {
+            base_png: []const u8 = "",
+            projection: struct {
+                width: u32 = 0,
+                height: u32 = 0,
+                minx: f64 = 0,
+                miny: f64 = 0,
+                scale: f64 = 1,
+            } = .{},
+            sprites: []const Sprite = &.{},
+            parts: []const Part = &.{},
+        };
+
+        /// One reusable transparent picture of a top-down component model.
+        pub const Sprite = struct {
+            footprint: []const u8,
+            x: f64,
+            y: f64,
+            w: f64,
+            h: f64,
+            png: []const u8,
+        };
+
+        /// A placed use of one deduplicated component-model picture.
+        pub const Part = struct {
+            sprite: usize,
+            x: f64,
+            y: f64,
+            rotation: f64,
+            bottom: bool,
+        };
     };
 };
 
@@ -176,24 +220,20 @@ pub fn compose(allocator: std.mem.Allocator, sections: []const Section, opts: Op
     try w.writeAll("\n</style>\n</head>\n<body>\n");
 
     try writeMasthead(w, sections, opts);
-    try w.writeAll("<main class=\"workspace\">\n");
+    try writeBoardGallery(allocator, w, opts);
+    try w.writeAll("<div class=\"workspace\">\n");
+    try writeSectionIndex(w, sections, opts, nodes.items);
+    try w.writeAll("<main class=\"document\" id=\"review-document\">\n");
     try writeExecutiveSummary(w, sections, opts);
     try w.print("<section class=\"evidence\" id=\"review-evidence\" aria-labelledby=\"evidence-title\">\n" ++
-        "<div class=\"evidence-head\"><div><p class=\"kicker\">Evidence library</p>" ++
-        "<h2 id=\"evidence-title\">Review sections</h2><p>Open only the evidence you need; every section is included when this dossier is printed.</p>" ++
+        "<div class=\"evidence-head\"><div><p class=\"kicker\">Complete evidence record</p>" ++
+        "<h2 id=\"evidence-title\">Review sections</h2><p>One continuous engineering record, with every section indexed at left.</p>" ++
         "</div><span class=\"evidence-count\">{d} sections</span></div>\n", .{nodes.items.len});
     for (nodes.items, 0..) |node, index| {
-        try writeSection(allocator, w, sections, opts, node, index + 1);
+        try writeLinearSection(allocator, w, sections, opts, node, index + 1);
         try ensureSize(&out);
     }
-    try w.writeAll("</section>\n<section class=\"print-evidence\">\n" ++
-        "<div class=\"print-evidence-head\"><p class=\"kicker\">Complete evidence record</p>" ++
-        "<h2>Review sections</h2></div>\n");
-    for (nodes.items, 0..) |node, index| {
-        try writePrintSection(allocator, w, sections, opts, node, index + 1);
-        try ensureSize(&out);
-    }
-    try w.writeAll("</section>\n</main>\n");
+    try w.writeAll("</section>\n</main>\n</div>\n");
     try writeColophon(w, opts);
     try w.writeAll("</body>\n</html>\n");
     try ensureSize(&out);
@@ -305,6 +345,152 @@ fn passingGateCount(state: State) usize {
         passed += 1;
     };
     return passed;
+}
+
+fn writePngDataUri(allocator: std.mem.Allocator, w: *Writer, png: []const u8) Error!void {
+    const encoder = std.base64.standard.Encoder;
+    const encoded = try allocator.alloc(u8, encoder.calcSize(png.len));
+    defer allocator.free(encoded);
+    try w.writeAll("data:image/png;base64,");
+    try w.writeAll(encoder.encode(encoded, png));
+}
+
+fn assemblyPartCount(assembly: Board.Visual.Assembly, bottom: bool) usize {
+    var count: usize = 0;
+    for (assembly.parts) |part| if (part.bottom == bottom) {
+        count += 1;
+    };
+    return count;
+}
+
+fn writeAssemblyView(
+    allocator: std.mem.Allocator,
+    w: *Writer,
+    board: Board,
+    board_index: usize,
+    bottom: bool,
+) Error!void {
+    const assembly = board.visual.assembly;
+    const projection = assembly.projection;
+    const side = if (bottom) "Bottom" else "Top";
+    const count = assemblyPartCount(assembly, bottom);
+    try w.writeAll("<figure class=\"assembly-view\"><div class=\"assembly-label\"><span>");
+    try w.writeAll(side);
+    try w.writeAll(" assembly</span>");
+    try w.print("<small>{d} model bod{s}</small></div>", .{ count, if (count == 1) "y" else "ies" });
+    if (assembly.base_png.len == 0 or projection.width == 0 or projection.height == 0) {
+        try w.writeAll("<div class=\"visual-empty\">Assembly image unavailable</div></figure>\n");
+        return;
+    }
+    try w.print("<svg class=\"assembly-svg\" viewBox=\"0 0 {d} {d}\" role=\"img\" aria-label=\"", .{
+        projection.width,
+        projection.height,
+    });
+    try escape.writeXml(w, board.identity.title);
+    try w.writeByte(' ');
+    try w.writeAll(if (bottom) "bottom assembly" else "top assembly");
+    try w.writeAll("\"><defs>\n");
+    for (assembly.sprites, 0..) |sprite, sprite_index| {
+        const scale = projection.scale;
+        try w.print("<image id=\"b{d}-sp{d}\" x=\"{d}\" y=\"{d}\" width=\"{d}\" height=\"{d}\" href=\"", .{
+            board_index,
+            sprite_index,
+            sprite.x * scale,
+            sprite.y * scale,
+            sprite.w * scale,
+            sprite.h * scale,
+        });
+        try writePngDataUri(allocator, w, sprite.png);
+        try w.writeAll("\"/>\n");
+    }
+    try w.writeAll("</defs>\n");
+    if (bottom) try w.print("<g transform=\"translate({d} 0) scale(-1 1)\">", .{projection.width});
+    try w.print("<image x=\"0\" y=\"0\" width=\"{d}\" height=\"{d}\" href=\"", .{
+        projection.width,
+        projection.height,
+    });
+    try writePngDataUri(allocator, w, assembly.base_png);
+    try w.writeAll("\"/>\n");
+    for (assembly.parts) |part| {
+        if (part.bottom != bottom or part.sprite >= assembly.sprites.len) continue;
+        const px = (part.x - projection.minx + renderMarginMm()) * projection.scale;
+        const py = (part.y - projection.miny + renderMarginMm()) * projection.scale;
+        try w.print("<g transform=\"translate({d} {d}) rotate({d})", .{ px, py, part.rotation });
+        if (part.bottom) try w.writeAll(" scale(-1 1)");
+        try w.print("\"><use href=\"#b{d}-sp{d}\"/></g>\n", .{ board_index, part.sprite });
+    }
+    if (bottom) try w.writeAll("</g>");
+    try w.writeAll("</svg></figure>\n");
+}
+
+/// Kept beside the projection consumer rather than reaching into the PNG
+/// renderer's private paint context. `render_pcb_png.view_margin_mm` is public
+/// specifically because every board surface frames the same world this way.
+fn renderMarginMm() f64 {
+    return render_pcb_png.view_margin_mm;
+}
+
+fn writeBoardGallery(allocator: std.mem.Allocator, w: *Writer, opts: Options) Error!void {
+    if (opts.boards.len == 0) return;
+    try w.print("<section class=\"board-gallery\" id=\"board-views\" aria-labelledby=\"board-views-title\">" ++
+        "<header class=\"gallery-head\"><div><p class=\"kicker\">Physical overview</p>" ++
+        "<h2 id=\"board-views-title\">Board views</h2><p>Layout evidence and model-populated assembly faces for every board in the system.</p>" ++
+        "</div><span>{d} board{s}</span></header><div class=\"gallery-list\">\n", .{
+        opts.boards.len,
+        if (opts.boards.len == 1) "" else "s",
+    });
+    for (opts.boards, 0..) |board, index| {
+        try w.writeAll("<article class=\"board-visual\"><header><div><span class=\"board-role\">");
+        try escape.writeXml(w, board.identity.role);
+        try w.writeAll("</span><h3>");
+        try escape.writeXml(w, board.identity.title);
+        try w.writeAll("</h3></div><p>");
+        try escape.writeXml(w, board.identity.part_number);
+        try w.writeAll(" · Rev ");
+        try escape.writeXml(w, board.identity.revision);
+        try w.writeAll(" · ");
+        try escape.writeXml(w, board.identity.layout);
+        try w.writeAll("</p></header><div class=\"visual-grid\">\n<figure class=\"layout-view\"><div class=\"assembly-label\"><span>Layout</span><small>fabrication render</small></div><img alt=\"");
+        try escape.writeXml(w, board.identity.title);
+        try w.writeAll(" PCB layout\"");
+        if (board.visual.layout_png.len > 0) {
+            try w.writeAll(" src=\"");
+            try writePngDataUri(allocator, w, board.visual.layout_png);
+            try w.writeAll("\">");
+        } else {
+            try w.writeAll("><span class=\"visual-empty\">Layout image unavailable</span>");
+        }
+        try w.writeAll("</figure>\n<div class=\"assembly-pair\">\n");
+        try writeAssemblyView(allocator, w, board, index, false);
+        try writeAssemblyView(allocator, w, board, index, true);
+        try w.writeAll("</div></div></article>\n");
+    }
+    try w.writeAll("</div></section>\n");
+}
+
+fn writeSectionIndex(
+    w: *Writer,
+    sections: []const Section,
+    opts: Options,
+    nodes: []const Node,
+) Error!void {
+    const decision = releaseDecision(opts.state);
+    try w.print("<aside class=\"section-index\" aria-labelledby=\"section-index-title\">" ++
+        "<div class=\"index-status {s}\"><span>Release readiness</span><strong>{s}</strong>" ++
+        "<small>{d} of 6 gates clear</small></div><nav aria-labelledby=\"section-index-title\">" ++
+        "<p class=\"kicker\">On this page</p><h2 id=\"section-index-title\">Sections</h2><ol>" ++
+        "<li><a href=\"#board-views\"><span>Top</span>Board views</a></li>" ++
+        "<li><a href=\"#executive-summary\"><span>Sum</span>Executive summary</a></li>", .{
+        decisionClass(decision),
+        decisionHeadline(decision),
+        passingGateCount(opts.state),
+    });
+    for (nodes, 0..) |node, index| {
+        try w.print("<li><a href=\"#s{d}\"><span>{d:0>2}</span>", .{ index + 1, index + 1 });
+        try writeNodeTitle(w, sections, opts, node);
+        try w.writeAll("</a></li>");
+    }
+    try w.writeAll("</ol></nav></aside>\n");
 }
 
 fn interfaceContacts(spec: *const system_review.SystemSpec) usize {
@@ -466,7 +652,7 @@ fn writeBoardSummary(w: *Writer, board: Board, waiver: WaiverState, section_numb
         board.review.open_notes,
         if (board.review.open_notes == 1) "" else "s",
     });
-    try w.print("<a class=\"board-jump\" href=\"#s{d}-summary\">Jump to board evidence <span aria-hidden=\"true\">→</span></a></article>\n", .{section_number});
+    try w.print("<a class=\"board-jump\" href=\"#s{d}\">Jump to board evidence <span aria-hidden=\"true\">→</span></a></article>\n", .{section_number});
 }
 
 fn writeProvenanceFact(w: *Writer, key: []const u8, value: []const u8, hash: bool) Error!void {
@@ -489,7 +675,7 @@ fn writeNodeTitle(w: *Writer, sections: []const Section, opts: Options, node: No
     }
 }
 
-fn writeSection(
+fn writeLinearSection(
     allocator: std.mem.Allocator,
     w: *Writer,
     sections: []const Section,
@@ -497,10 +683,10 @@ fn writeSection(
     node: Node,
     number: usize,
 ) Error!void {
-    try w.print("<details class=\"sec\" id=\"s{d}\">\n<summary class=\"sec-head\" id=\"s{d}-summary\">" ++
-        "<span class=\"sec-n\">{d}</span><h3 class=\"sec-title\">", .{ number, number, number });
+    try w.print("<section class=\"sec\" id=\"s{d}\"><header class=\"sec-head\">" ++
+        "<span class=\"sec-n\">{d:0>2}</span><div><h3 class=\"sec-title\">", .{ number, number });
     try writeNodeTitle(w, sections, opts, node);
-    try w.writeAll("</h3>");
+    try w.writeAll("</h3><div class=\"sec-labels\">");
     switch (node) {
         .document => |index| {
             try w.writeAll("<span class=\"tag\">");
@@ -510,24 +696,7 @@ fn writeSection(
         .system_diagram, .board, .supporting => try w.writeAll("<span class=\"tag tag-gen\">generated</span>"),
     }
     try writeNodeMeta(allocator, w, sections, opts, node);
-    try w.writeAll("<span class=\"sec-action\" aria-hidden=\"true\"><span class=\"action-closed\">Review</span>" ++
-        "<span class=\"action-open\">Close</span><span class=\"chevron\"></span></span></summary>\n<div class=\"sec-body\">\n");
-    try writeNodeBody(allocator, w, sections, opts, node);
-    try w.writeAll("</div></details>\n");
-}
-
-fn writePrintSection(
-    allocator: std.mem.Allocator,
-    w: *Writer,
-    sections: []const Section,
-    opts: Options,
-    node: Node,
-    number: usize,
-) Error!void {
-    try w.print("<section class=\"print-section\"><header class=\"print-section-head\">" ++
-        "<span class=\"sec-n\">{d}</span><h3>", .{number});
-    try writeNodeTitle(w, sections, opts, node);
-    try w.writeAll("</h3></header><div class=\"print-section-body\">\n");
+    try w.writeAll("</div></div><a class=\"back-to-index\" href=\"#section-index-title\">Index ↑</a></header><div class=\"sec-body\">\n");
     try writeNodeBody(allocator, w, sections, opts, node);
     try w.writeAll("</div></section>\n");
 }
@@ -822,17 +991,54 @@ const stylesheet =
     \\.mh-notice.is-draft strong{color:var(--warn);}
     \\.mh-notice.is-release{background:linear-gradient(90deg,rgba(123,212,154,.12),transparent 70%);}
     \\.mh-notice.is-release strong{color:var(--good);}
-    \\.workspace{width:min(1480px,100%);margin:0 auto;padding:24px 30px 72px;display:grid;
-    \\grid-template-columns:minmax(310px,360px) minmax(0,1fr);gap:24px;align-items:start;}
-    \\.executive{position:sticky;top:18px;max-height:calc(100vh - 36px);overflow-y:auto;scrollbar-color:var(--rule-2) transparent;
-    \\background:rgba(17,24,29,.94);border:1px solid var(--rule);border-radius:14px;padding:20px;
-    \\box-shadow:0 18px 50px rgba(0,0,0,.18);scroll-margin-top:18px;}
+    \\.board-gallery{width:min(1480px,100%);margin:0 auto;padding:28px 30px 10px;scroll-margin-top:18px;}
+    \\.gallery-head{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:15px;}
+    \\.gallery-head h2{font-size:24px;letter-spacing:-.025em;margin:0;}
+    \\.gallery-head p:last-child{font-size:13px;color:var(--ink-2);margin:6px 0 0;}
+    \\.gallery-head>span{font-family:var(--mono);font-size:10px;color:var(--ink-3);border:1px solid var(--rule);border-radius:999px;padding:5px 10px;}
+    \\.gallery-list{display:grid;gap:14px;}
+    \\.board-visual{border:1px solid var(--rule);border-radius:14px;background:var(--sheet);padding:14px;box-shadow:0 18px 50px rgba(0,0,0,.14);}
+    \\.board-visual>header{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;padding:0 2px 11px;}
+    \\.board-visual h3{font-size:17px;line-height:1.25;margin:2px 0 0;}
+    \\.board-visual>header p{font-family:var(--mono);font-size:9.5px;color:var(--ink-3);margin:0;text-align:right;}
+    \\.visual-grid{display:grid;grid-template-columns:minmax(220px,.72fr) minmax(0,2fr);gap:10px;}
+    \\.layout-view,.assembly-view{min-width:0;margin:0;border:1px solid var(--rule);border-radius:10px;background:var(--panel);overflow:hidden;}
+    \\.layout-view{display:flex;flex-direction:column;}
+    \\.layout-view img{display:block;width:100%;height:100%;min-height:220px;object-fit:contain;background:var(--panel);}
+    \\.assembly-pair{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+    \\.assembly-label{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 10px;border-bottom:1px solid var(--rule);background:var(--sheet-2);}
+    \\.assembly-label span{font-size:11px;font-weight:680;}
+    \\.assembly-label small{font-family:var(--mono);font-size:8.5px;color:var(--ink-3);}
+    \\.assembly-svg{display:block;width:100%;height:auto;max-height:430px;background:var(--panel);}
+    \\.visual-empty{display:grid;place-items:center;min-height:180px;padding:20px;font-family:var(--mono);font-size:10px;color:var(--ink-3);}
+    \\.workspace{width:min(1480px,100%);margin:0 auto;padding:18px 30px 72px;display:grid;
+    \\grid-template-columns:minmax(230px,270px) minmax(0,1fr);gap:24px;align-items:start;}
+    \\.section-index{position:sticky;top:18px;max-height:calc(100vh - 36px);overflow-y:auto;scrollbar-color:var(--rule-2) transparent;
+    \\background:rgba(17,24,29,.94);border:1px solid var(--rule);border-radius:14px;padding:13px;
+    \\box-shadow:0 18px 50px rgba(0,0,0,.18);}
+    \\.index-status{border:1px solid var(--rule-2);border-radius:9px;padding:11px 12px;margin-bottom:15px;background:var(--paper);display:grid;}
+    \\.index-status>span{font-family:var(--mono);font-size:8px;letter-spacing:.13em;text-transform:uppercase;color:var(--ink-3);}
+    \\.index-status strong{font-size:15px;line-height:1.2;margin:4px 0 2px;}
+    \\.index-status small{font-family:var(--mono);font-size:9px;color:var(--ink-3);}
+    \\.index-status.is-blocked strong{color:var(--crit);}
+    \\.index-status.is-waiver strong{color:var(--warn);}
+    \\.index-status.is-ready strong{color:var(--good);}
+    \\.section-index nav h2{font-size:18px;margin:0 4px 9px;}
+    \\.section-index nav>.kicker{margin-left:4px;}
+    \\.section-index ol{list-style:none;margin:0;padding:0;display:grid;gap:2px;}
+    \\.section-index li{min-width:0;}
+    \\.section-index a{display:grid;grid-template-columns:24px minmax(0,1fr);gap:7px;align-items:start;padding:7px 8px;border-radius:7px;color:var(--ink-2);font-size:11.5px;line-height:1.35;text-decoration:none;}
+    \\.section-index a:hover{color:var(--ink);background:var(--sheet-2);}
+    \\.section-index a span{font-family:var(--mono);font-size:9px;color:var(--accent);padding-top:2px;}
+    \\.document{min-width:0;}
+    \\.executive{background:rgba(17,24,29,.94);border:1px solid var(--rule);border-radius:14px;padding:20px;
+    \\box-shadow:0 18px 50px rgba(0,0,0,.18);scroll-margin-top:18px;margin-bottom:28px;}
     \\.executive-head,.panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;}
     \\.kicker{font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin:0 0 5px;}
     \\.executive h2{font-size:20px;letter-spacing:-.02em;margin:0;white-space:nowrap;}
     \\.evidence-head h2{font-size:22px;letter-spacing:-.02em;margin:0;}
     \\.executive-lede{color:var(--ink-2);font-size:13.5px;line-height:1.5;margin:12px 0 17px;}
-    \\.metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:0 0 14px;}
+    \\.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:0 0 14px;}
     \\.metrics>div{min-width:0;background:var(--sheet-2);border:1px solid var(--rule);border-radius:9px;padding:10px 11px;}
     \\.metrics dt{font-family:var(--mono);font-size:8.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3);}
     \\.metrics dd{font-size:23px;font-weight:720;letter-spacing:-.03em;margin:2px 0 0;color:var(--ink);font-variant-numeric:tabular-nums;}
@@ -853,7 +1059,7 @@ const stylesheet =
     \\.waiver-note{margin:10px 0 0;padding:8px 10px;border-radius:7px;background:var(--warn-soft);color:var(--warn);font-size:11px;}
     \\.waiver-note span{display:inline-grid;place-items:center;width:17px;height:17px;margin-right:4px;border:1px solid currentColor;border-radius:50%;font-weight:800;}
     \\.waiver-note.is-accepted{background:var(--accent-soft);color:var(--accent);}
-    \\.board-list{display:grid;gap:7px;margin-top:10px;}
+    \\.board-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:7px;margin-top:10px;}
     \\.board-card{border:1px solid var(--rule);border-radius:8px;background:var(--sheet);padding:9px 10px;}
     \\.board-card-top{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px;}
     \\.board-role{font-family:var(--mono);font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);}
@@ -882,25 +1088,20 @@ const stylesheet =
     \\.evidence-head{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin:2px 2px 16px;padding:0 2px 15px;border-bottom:1px solid var(--rule);}
     \\.evidence-head p:last-child{font-size:13px;color:var(--ink-2);margin:7px 0 0;max-width:66ch;}
     \\.evidence-count{flex:none;border:1px solid var(--rule);border-radius:999px;padding:5px 10px;font-family:var(--mono);font-size:10px;color:var(--ink-3);}
-    \\.sec{min-width:0;margin:0 0 9px;border:1px solid var(--rule);border-radius:11px;background:var(--sheet);scroll-margin-top:18px;overflow:clip;}
+    \\.sec{min-width:0;margin:0 0 20px;border:1px solid var(--rule);border-radius:11px;background:var(--sheet);scroll-margin-top:18px;overflow:clip;}
     \\.sec:target{border-color:var(--accent);box-shadow:0 0 0 3px rgba(88,203,208,.1);}
-    \\.sec:has(>.sec-head:target){border-color:var(--accent);box-shadow:0 0 0 3px rgba(88,203,208,.1);}
-    \\.sec[open]{border-color:var(--rule-2);box-shadow:0 16px 42px rgba(0,0,0,.14);}
-    \\.sec-head{display:grid;grid-template-columns:32px minmax(220px,1.25fr) auto minmax(155px,.7fr) auto;
-    \\align-items:center;gap:11px;min-height:67px;padding:12px 15px;cursor:pointer;list-style:none;}
-    \\.sec-head:hover{background:var(--sheet-2);}
-    \\.sec-head:focus-visible,.provenance>summary:focus-visible{outline:2px solid var(--accent);outline-offset:-3px;border-radius:9px;}
+    \\.sec-head{display:grid;grid-template-columns:38px minmax(0,1fr) auto;align-items:center;gap:12px;min-height:76px;padding:14px 18px;background:var(--sheet);}
+    \\.sec-head>div{min-width:0;}
+    \\.provenance>summary:focus-visible{outline:2px solid var(--accent);outline-offset:-3px;border-radius:9px;}
     \\.sec-n{font-family:var(--mono);font-size:11px;font-weight:700;letter-spacing:.08em;color:var(--accent);font-variant-numeric:tabular-nums;}
-    \\.sec-title{font-size:15.5px;font-weight:680;letter-spacing:-.012em;line-height:1.25;text-wrap:balance;margin:0;}
+    \\.sec-title{font-size:17px;font-weight:680;letter-spacing:-.012em;line-height:1.25;text-wrap:balance;margin:0 0 5px;}
+    \\.sec-labels{display:flex;align-items:center;flex-wrap:wrap;gap:7px 10px;}
     \\.tag{font-family:var(--mono);font-size:8.5px;font-weight:700;letter-spacing:.11em;text-transform:uppercase;
     \\padding:3px 7px 2px;border-radius:999px;border:1px solid var(--rule-2);color:var(--ink-2);background:var(--sheet-2);}
     \\.tag-gen{color:var(--accent);border-color:rgba(88,203,208,.35);background:var(--accent-soft);}
     \\.sec-meta{font-family:var(--mono);font-size:9.5px;line-height:1.35;color:var(--ink-3);}
-    \\.sec-action{display:inline-flex;align-items:center;justify-content:flex-end;gap:10px;font-family:var(--mono);
-    \\font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);}
-    \\.action-open{display:none;}
-    \\.sec[open] .action-open{display:inline;}
-    \\.sec[open] .action-closed{display:none;}
+    \\.back-to-index{font-family:var(--mono);font-size:9px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-3);text-decoration:none;}
+    \\.back-to-index:hover{color:var(--accent);}
     \\.sec-body{padding:26px 28px 32px;border-top:1px solid var(--rule);background:var(--paper);min-width:0;}
     \\.lede{color:var(--ink-2);max-width:72ch;margin:10px 0 18px;}
     \\.prose{min-width:0;}
@@ -946,7 +1147,7 @@ const stylesheet =
     \\.fact dt{font-family:var(--mono);font-size:9.5px;letter-spacing:.15em;text-transform:uppercase;
     \\color:var(--ink-3);margin-bottom:4px;}
     \\.fact dd{margin:0;font-family:var(--mono);font-size:13px;color:var(--ink);overflow-wrap:anywhere;}
-    \\.sec-body>h3,.sec-body>h4,.print-section-body>h3,.print-section-body>h4{font-family:var(--mono);font-size:11px;letter-spacing:.13em;text-transform:uppercase;
+    \\.sec-body>h3,.sec-body>h4{font-family:var(--mono);font-size:11px;letter-spacing:.13em;text-transform:uppercase;
     \\color:var(--ink-3);margin:22px 0 8px;font-weight:500;}
     \\.members{list-style:none;margin:0;padding:0;display:grid;gap:1px;background:var(--rule);
     \\border:1px solid var(--rule);border-radius:8px;overflow:hidden;}
@@ -955,18 +1156,20 @@ const stylesheet =
     \\.members a{font-weight:600;text-decoration:none;}
     \\.members a:hover{text-decoration:underline;}
     \\.members span{color:var(--ink-3);}
-    \\.print-evidence{display:none;}
     \\.colophon{max-width:1480px;margin:0 auto;padding:18px 30px 40px;display:flex;flex-wrap:wrap;
     \\gap:6px 24px;border-top:1px solid var(--rule);font-family:var(--mono);font-size:10.5px;color:var(--ink-3);}
     \\@media(max-width:1080px){
-    \\.workspace{grid-template-columns:minmax(280px,320px) minmax(0,1fr);gap:18px;}
-    \\.sec-head{grid-template-columns:30px minmax(180px,1fr) auto minmax(120px,.6fr) auto;gap:9px;}
-    \\.action-closed,.action-open{display:none!important;}
+    \\.visual-grid{grid-template-columns:minmax(0,1fr);}
+    \\.layout-view img{max-height:440px;}
+    \\.workspace{grid-template-columns:minmax(210px,240px) minmax(0,1fr);gap:18px;}
+    \\.metrics{grid-template-columns:1fr 1fr;}
     \\}
     \\@media(max-width:900px){
     \\.workspace{grid-template-columns:minmax(0,1fr);padding-top:20px;}
-    \\.executive{position:static;max-height:none;overflow:visible;}
-    \\.metrics{grid-template-columns:repeat(4,1fr);}
+    \\.section-index{position:static;max-height:none;overflow:visible;}
+    \\.section-index ol{grid-template-columns:1fr 1fr;}
+    \\.index-status{grid-template-columns:minmax(0,1fr) auto;column-gap:12px;align-items:center;}
+    \\.index-status strong{grid-row:1/3;grid-column:2;}
     \\.summary-panel{display:inline-block;vertical-align:top;width:calc(50% - 6px);margin-right:7px;}
     \\.provenance{clear:both;}
     \\}
@@ -978,19 +1181,20 @@ const stylesheet =
     \\.mh-status{min-height:0;padding:14px 16px;}
     \\.mh-status strong{font-size:22px;}
     \\.mh-notice{margin:0 -18px;padding:10px 18px;}
+    \\.board-gallery{padding:22px 14px 6px;}
+    \\.gallery-head,.board-visual>header{align-items:flex-start;}
+    \\.assembly-pair{grid-template-columns:minmax(0,1fr);}
     \\.workspace{padding:16px 14px 52px;}
+    \\.section-index ol{grid-template-columns:minmax(0,1fr);}
     \\.executive{padding:17px;border-radius:12px;}
     \\.metrics{grid-template-columns:1fr 1fr;}
     \\.summary-panel{display:block;width:auto;margin-right:0;}
     \\.evidence-head{align-items:flex-start;}
     \\.evidence-count{margin-top:1px;}
-    \\.sec-head{grid-template-columns:27px minmax(0,1fr) 16px;grid-template-rows:auto auto auto;
-    \\gap:5px 9px;min-height:76px;padding:12px;}
-    \\.sec-n{grid-column:1;grid-row:1;align-self:start;padding-top:3px;}
-    \\.sec-title{grid-column:2;grid-row:1;font-size:14.5px;}
-    \\.tag{grid-column:2;grid-row:2;justify-self:start;}
-    \\.sec-meta{grid-column:2;grid-row:3;}
-    \\.sec-action{grid-column:3;grid-row:1/4;align-self:center;}
+    \\.sec-head{grid-template-columns:27px minmax(0,1fr);gap:7px 9px;min-height:76px;padding:12px;}
+    \\.sec-n{align-self:start;padding-top:3px;}
+    \\.sec-title{font-size:14.5px;}
+    \\.back-to-index{grid-column:2;justify-self:start;}
     \\.sec-body{padding:20px 16px 26px;}
     \\.scroll-hint{display:block;position:sticky;left:0;width:max-content;margin:0 0 8px;padding:4px 7px;
     \\border:1px solid var(--rule);border-radius:999px;background:var(--sheet);font-family:var(--mono);font-size:9px;color:var(--ink-3);}
@@ -1008,6 +1212,9 @@ const stylesheet =
     \\.provenance-when{display:none;}
     \\.members li{display:block;}
     \\.members span{display:block;margin-top:4px;}
+    \\.gallery-head,.board-visual>header{display:block;}
+    \\.gallery-head>span{display:inline-block;margin-top:10px;}
+    \\.board-visual>header p{text-align:left;margin-top:5px;}
     \\}
     \\@media(prefers-reduced-motion:reduce){
     \\html{scroll-behavior:auto;}
@@ -1018,22 +1225,19 @@ const stylesheet =
     \\--ink:#101617;--ink-2:#374347;--ink-3:#58676c;--rule:#c8d0d3;--rule-2:#aab6ba;--band:#fff;--panel:#0d1117;}
     \\body{background:#fff;}
     \\.masthead{background:#fff;}
+    \\.board-gallery{padding-top:18px;}
+    \\.board-visual{break-inside:avoid;box-shadow:none;}
     \\.workspace{display:block;padding-top:18px;}
-    \\.executive{position:static;max-height:none;overflow:visible;box-shadow:none;margin-bottom:20px;}
+    \\.section-index{display:none;}
+    \\.executive{box-shadow:none;margin-bottom:20px;}
     \\.summary-panel{display:inline-block;vertical-align:top;width:48%;}
-    \\.evidence{display:none;}
-    \\.print-evidence{display:block;break-before:page;}
-    \\.print-evidence-head{margin-bottom:18px;}
-    \\.print-evidence-head h2{margin:0;}
-    \\.print-section{break-before:page;}
-    \\.print-section:first-of-type{break-before:auto;}
-    \\.print-section-head{display:flex;align-items:baseline;gap:12px;border-bottom:2px solid var(--rule-2);padding-bottom:7px;margin-bottom:14px;}
-    \\.print-section-head h3{font-size:18px;margin:0;}
-    \\.print-section-body{min-width:0;}
+    \\.sec{break-before:page;}
+    \\.sec:first-of-type{break-before:auto;}
+    \\.back-to-index{display:none;}
     \\.provenance-body,.provenance:not([open])>.provenance-body{display:block!important;}
-    \\.print-evidence table{display:table!important;width:100%!important;max-width:100%!important;table-layout:fixed;overflow:visible;box-shadow:none;font-size:8px;}
-    \\.print-evidence th,.print-evidence td{position:static!important;white-space:normal!important;overflow-wrap:anywhere;padding:4px 5px;box-shadow:none!important;}
-    \\.print-evidence pre{white-space:pre-wrap;overflow-wrap:anywhere;}
+    \\.evidence table{display:table!important;width:100%!important;max-width:100%!important;table-layout:fixed;overflow:visible;box-shadow:none;font-size:8px;}
+    \\.evidence th,.evidence td{position:static!important;white-space:normal!important;overflow-wrap:anywhere;padding:4px 5px;box-shadow:none!important;}
+    \\.evidence pre{white-space:pre-wrap;overflow-wrap:anywhere;}
     \\.fig svg{min-width:0;max-width:100%;}
     \\a{color:inherit;}
     \\}
@@ -1145,8 +1349,8 @@ test "system review HTML marks draft state and numbers every section" {
     try testing.expect(std.mem.indexOf(u8, release_html, release_marker) != null);
 }
 
-// spec: system-review - the dossier leads with a structured gate summary and keeps every long review document in a keyboard-native disclosure without repeating its title
-test "system review HTML is scan-first with native evidence disclosures" {
+// spec: system-review - the dossier indexes every section in a sticky sidebar and renders the evidence once as one continuous document without repeating its title
+test "system review HTML is indexed and linear" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -1184,12 +1388,13 @@ test "system review HTML is scan-first with native evidence disclosures" {
     try testing.expect(std.mem.indexOf(u8, html, "Executive summary") != null);
     try testing.expect(std.mem.indexOf(u8, html, "3 of 6 gates clear") != null);
     try testing.expect(std.mem.indexOf(u8, html, "2 open · 0/2 checks complete") != null);
-    try testing.expect(std.mem.indexOf(u8, html, "<details class=\"sec\" id=\"s1\">") != null);
-    try testing.expect(std.mem.indexOf(u8, html, "<summary class=\"sec-head\" id=\"s1-summary\">") != null);
+    try testing.expect(std.mem.indexOf(u8, html, "<aside class=\"section-index\"") != null);
+    try testing.expect(std.mem.indexOf(u8, html, "<li><a href=\"#s1\"") != null);
+    try testing.expect(std.mem.indexOf(u8, html, "<section class=\"sec\" id=\"s1\">") != null);
+    try testing.expect(std.mem.indexOf(u8, html, "<details class=\"sec\"") == null);
     try testing.expect(std.mem.indexOf(u8, html, "<h3 class=\"sec-title\">Release checklist</h3>") != null);
     try testing.expect(std.mem.indexOf(u8, html, "<div class=\"prose\">\n<h1>Release checklist</h1>") == null);
-    try testing.expect(std.mem.indexOf(u8, html, "<section class=\"print-evidence\">") != null);
-    try testing.expect(std.mem.indexOf(u8, html, ".evidence{display:none;}") != null);
+    try testing.expect(std.mem.indexOf(u8, html, "<section class=\"print-evidence\">") == null);
 }
 
 // spec: system-review - the dossier leads with a structured gate summary and distinguishes waiver-required evidence from an accepted release waiver
@@ -1228,7 +1433,7 @@ test "system review HTML keeps waiver decisions explicit at system and board lev
     const required = try compose(allocator, &.{}, options);
     try testing.expect(std.mem.indexOf(u8, required, "WAIVER REQUIRED") != null);
     try testing.expect(std.mem.indexOf(u8, required, "Fab waiver required") != null);
-    try testing.expect(std.mem.indexOf(u8, required, "href=\"#s2-summary\"") != null);
+    try testing.expect(std.mem.indexOf(u8, required, "href=\"#s2\"") != null);
 
     options.draft = false;
     options.state.waiver = .accepted;
@@ -1236,6 +1441,80 @@ test "system review HTML keeps waiver decisions explicit at system and board lev
     try testing.expect(std.mem.indexOf(u8, accepted, "APPROVED WITH WAIVER") != null);
     try testing.expect(std.mem.indexOf(u8, accepted, "Fab waiver accepted") != null);
     try testing.expect(std.mem.indexOf(u8, accepted, "accepted waiver evidence") != null);
+}
+
+// spec: system-review - every board leads the dossier with an inline layout image and static top/bottom assembly views populated from deduplicated cached 3D-model sprites, while the sidebar contains section navigation rather than interface-contact metrics
+test "system review HTML leads with model-populated board views" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parsed = try testSpec(allocator, one_board_manifest);
+    defer parsed.deinit();
+    const png = "\x89PNG\r\n\x1a\nfixture";
+    const sprites = [_]Board.Visual.Sprite{.{
+        .footprint = "qfn-demo",
+        .x = -1,
+        .y = -1,
+        .w = 2,
+        .h = 2,
+        .png = png,
+    }};
+    const parts = [_]Board.Visual.Part{
+        .{ .sprite = 0, .x = 10, .y = 12, .rotation = 90, .bottom = false },
+        .{ .sprite = 0, .x = 20, .y = 18, .rotation = 180, .bottom = true },
+    };
+    const boards = [_]Board{.{
+        .identity = .{
+            .role = "main",
+            .design = "one",
+            .title = "One",
+            .part_number = "ONE",
+            .revision = "A",
+            .layout = "layout-a",
+            .generated_at = "2026-08-30T00:00:00Z",
+        },
+        .review = .{ .status = "pass", .open_notes = 0 },
+        .fabrication = .ready,
+        .visual = .{
+            .layout_png = png,
+            .assembly = .{
+                .base_png = png,
+                .projection = .{ .width = 100, .height = 60, .scale = 2 },
+                .sprites = &sprites,
+                .parts = &parts,
+            },
+        },
+    }};
+    const html = try compose(allocator, &.{.{
+        .title = "System overview",
+        .classification = "design",
+        .markdown = "Overview.\n",
+    }}, .{
+        .spec = &parsed.value,
+        .draft = true,
+        .provenance = .{
+            .generated_at = "2026-08-30T00:00:00Z",
+            .build_id = "test-build",
+            .content_lock = "lock",
+            .release_token = "token",
+        },
+        .state = .{ .blocked = false, .waiver = .none, .attested = true, .gates = ready_test_gates },
+        .checklist = .{},
+        .boards = &boards,
+    });
+    const gallery = std.mem.indexOf(u8, html, "<section class=\"board-gallery\"").?;
+    const workspace = std.mem.indexOf(u8, html, "<div class=\"workspace\">").?;
+    try testing.expect(gallery < workspace);
+    try testing.expect(std.mem.count(u8, html, "data:image/png;base64,") >= 5);
+    try testing.expect(std.mem.indexOf(u8, html, ">Top assembly</span>") != null);
+    try testing.expect(std.mem.indexOf(u8, html, ">Bottom assembly</span>") != null);
+    try testing.expect(std.mem.indexOf(u8, html, "<use href=\"#b0-sp0\"") != null);
+    const aside_start = std.mem.indexOf(u8, html, "<aside class=\"section-index\"").?;
+    const aside_end_rel = std.mem.indexOf(u8, html[aside_start..], "</aside>").?;
+    try testing.expect(std.mem.indexOf(u8, html[aside_start .. aside_start + aside_end_rel], "Interface contacts") == null);
+    try testing.expect(std.mem.indexOf(u8, html, "href=\"#board-views\"") != null);
+    try testing.expect(std.mem.indexOf(u8, html, "href=\"#executive-summary\"") != null);
+    try testing.expect(std.mem.indexOf(u8, html, "href=\"#s1\"") != null);
 }
 
 // spec: system-review - every identity string interpolated into the HTML dossier is escaped rather than emitted as markup
