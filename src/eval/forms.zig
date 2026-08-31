@@ -864,11 +864,15 @@ pub const scope_form_docs = blk: {
             "margin, PFD/GBW ratios, polarity, output swing, and an approximate FMCW ramp phase-error/slew screen. " ++
             "An operating curve plus synthesize form searches E24 passive values and an ADF4159 charge-pump schedule " ++
             "quantized to 16 steps of (charge-pump-full-scale …) — default 5 mA; author the RSET-derived value, e.g. 4.8 mA at 5.1 kΩ — " ++
-            "then verifies the proposal over interpolated operating points and exact component/current corners. " ++
+            "then verifies the proposal over interpolated operating points and exact component/current corners; the " ++
+            "populated values are screened under that same quantized I_CP schedule too, so their scheduled-face margins " ++
+            "print beside the deliberately pessimistic fixed-I_CP face. " ++
             "The search costs seconds and runs inside design evaluation, so every unpinned build prints a ready-to-paste " ++
-            "(pinned \"KEY\" …) line carrying its winning values and the content key of everything it read; authoring that " ++
+            "(pinned \"KEY\" …) line carrying its winning values and a content key covering everything it read plus those " ++
+            "values themselves; authoring that " ++
             "line inside synthesize makes later evaluations replay the result without searching, for identical assertions. " ++
-            "A pin whose key no longer matches — any change to the declaration or the resolved values — is ignored with a " ++
+            "A pin whose key no longer matches — any change to the declaration, the resolved values, or the pinned values " ++
+            "themselves — is ignored with a " ++
             "warning and the full search runs, so pinning can only skip recomputation, never change an answer. " ++
             "Use advisory mode while Kvco or firmware Icp is provisional; gate mode makes failed limits build-blocking. " ++
             "This is not a sampled-PFD, phase-noise, nonlinear acquisition, SPICE, or capacitive-load-stability sign-off.",

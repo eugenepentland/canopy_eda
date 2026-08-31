@@ -55,11 +55,14 @@ const OperatingCurve = struct { point_nodes: []const Node = &.{} };
 const OperatingPoint = struct { pll_n: f64, kvco_hz_per_v: f64 };
 
 /// A `(pinned "KEY" (c-cp F) …)` clause inside `(synthesize …)`: the winning
-/// corner of a search a previous build already ran, stamped with that search's
-/// own content key. A matching key answers without the 12,000-candidate search;
-/// a stale key is ignored (with a warning) and the search runs as if the pin
-/// were absent — so a pin can only ever skip recomputing an answer, never
-/// change one. Values hold component nominals in component order (`c-tune`
+/// corner of a search a previous build already ran, stamped with a content key
+/// covering both everything that search read AND the seven values the pin
+/// carries. A matching key answers without the 12,000-candidate search; a stale
+/// key is ignored (with a warning) and the search runs as if the pin were
+/// absent — so a pin can only ever skip recomputing an answer, never change
+/// one. Because the key certifies the values too, a hand-edited pin that keeps
+/// a valid key over values the search never produced mismatches and is refused
+/// the same way. Values hold component nominals in component order (`c-tune`
 /// WITHOUT the extra tune cap, exactly as authored), snapped onto the E24 grid
 /// at parse so the printed text round-trips to the search's bit-exact f64s.
 const PinnedSynthesis = struct {
@@ -405,6 +408,10 @@ pub const ComponentValue = struct {
     ref: []const u8 = "",
 };
 
+/// One operating-curve sweep's two faces: the nominal-value pass and the
+/// exhaustive R/C/I_CP tolerance-corner pass.
+pub const CurveFaces = struct { nominal: SweepSummary = .{}, tolerance: SweepSummary = .{} };
+
 /// Loop bandwidth and phase margin across one family of corners.
 pub const SweepSummary = struct {
     /// Corners that solved for a unique 0 dB crossover. 0 ⇒ nothing else is set.
@@ -429,6 +436,7 @@ pub const Screen = enum {
     gbw_preferred,
     polarity,
     operating_curve,
+    scheduled_curve,
     output_swing,
     op_amp_supply,
     ramp_phase_error,
@@ -483,8 +491,13 @@ pub const Results = struct {
     tolerance: SweepSummary = .{},
     /// Fixed-I_CP operating-curve sweeps — fitted population only, and only
     /// when `(operating-curve …)` is authored.
-    curve_nominal: SweepSummary = .{},
-    curve_tolerance: SweepSummary = .{},
+    curve: CurveFaces = .{},
+    /// The POPULATED values swept over the operating curve at the quantized
+    /// I_CP schedule `(synthesize …)` programs — fitted population only, and
+    /// only when both a curve and a synthesize clause are authored. This is
+    /// the face the loop actually flies once firmware applies the schedule;
+    /// the fixed-I_CP face above is deliberately pessimistic without it.
+    scheduled: CurveFaces = .{},
     /// FMCW ramp phase error at this population's narrowest tracking loop,
     /// rad. 0 when no `(ramp …)` is declared.
     ramp_phase_error_rad: f64 = 0,
@@ -633,7 +646,9 @@ fn screen(context: *Context, block: *const DesignBlock, spec: Spec) std.mem.Allo
     };
     context.circuit = circuit;
     context.outcome = .no_crossover;
-    try append(context, spec, .bom_values, true, "{s}: BOM values loaded — {s} {d:.0} pF ±{d:.2}%, {s} {d:.0} Ω ±{d:.2}%, {s} {d:.0} Ω ±{d:.2}% / {s} {d:.1} pF ±{d:.2}%, {s} {d:.1} pF ±{d:.2}%, {s} {d:.0} Ω ±{d:.2}% / {s} {d:.0} pF ±{d:.2}%", .{ spec.name, circuit.c_cp.ref, circuit.c_cp.nominal * 1e12, circuit.c_cp.tolerancePctAt(circuit.c_cp.nominal), circuit.r_in.ref, circuit.r_in.nominal, circuit.r_in.tolerancePctAt(circuit.r_in.nominal), circuit.r_feedback.ref, circuit.r_feedback.nominal, circuit.r_feedback.tolerancePctAt(circuit.r_feedback.nominal), circuit.c_feedback.ref, circuit.c_feedback.nominal * 1e12, circuit.c_feedback.tolerancePctAt(circuit.c_feedback.nominal), circuit.c_feedback_hf.ref, circuit.c_feedback_hf.nominal * 1e12, circuit.c_feedback_hf.tolerancePctAt(circuit.c_feedback_hf.nominal), circuit.r_isolation.ref, circuit.r_isolation.nominal, circuit.r_isolation.tolerancePctAt(circuit.r_isolation.nominal), circuit.c_tune.ref, (circuit.c_tune.nominal + circuit.extra_tune_cap.nominal) * 1e12, @max(circuit.c_tune.tolerancePctAt(circuit.c_tune.nominal), circuit.extra_tune_cap.tolerancePctAt(circuit.extra_tune_cap.nominal)) });
+    // {d:.1} everywhere: {d:.0} truncated fractional catalogue values (a
+    // 6.2 pF C_CP echoed as "6 pF", a 49.9 Ω 1% part as "50 Ω").
+    try append(context, spec, .bom_values, true, "{s}: BOM values loaded — {s} {d:.1} pF ±{d:.2}%, {s} {d:.1} Ω ±{d:.2}%, {s} {d:.1} Ω ±{d:.2}% / {s} {d:.1} pF ±{d:.2}%, {s} {d:.1} pF ±{d:.2}%, {s} {d:.1} Ω ±{d:.2}% / {s} {d:.1} pF ±{d:.2}%", .{ spec.name, circuit.c_cp.ref, circuit.c_cp.nominal * 1e12, circuit.c_cp.tolerancePctAt(circuit.c_cp.nominal), circuit.r_in.ref, circuit.r_in.nominal, circuit.r_in.tolerancePctAt(circuit.r_in.nominal), circuit.r_feedback.ref, circuit.r_feedback.nominal, circuit.r_feedback.tolerancePctAt(circuit.r_feedback.nominal), circuit.c_feedback.ref, circuit.c_feedback.nominal * 1e12, circuit.c_feedback.tolerancePctAt(circuit.c_feedback.nominal), circuit.c_feedback_hf.ref, circuit.c_feedback_hf.nominal * 1e12, circuit.c_feedback_hf.tolerancePctAt(circuit.c_feedback_hf.nominal), circuit.r_isolation.ref, circuit.r_isolation.nominal, circuit.r_isolation.tolerancePctAt(circuit.r_isolation.nominal), circuit.c_tune.ref, (circuit.c_tune.nominal + circuit.extra_tune_cap.nominal) * 1e12, @max(circuit.c_tune.tolerancePctAt(circuit.c_tune.nominal), circuit.extra_tune_cap.tolerancePctAt(circuit.extra_tune_cap.nominal)) });
 
     try append(context, spec, .capacitor_dielectric, loopCapsAreStable(block, spec.components), "{s}: every frequency-shaping capacitor is C0G/NP0", .{spec.name});
 
@@ -671,9 +686,20 @@ fn screen(context: *Context, block: *const DesignBlock, spec: Spec) std.mem.Allo
         const profile = fixedProfileSweep(spec, nominal, false);
         const profile_tolerance = fixedProfileToleranceSweep(spec, circuit);
         tracking_bandwidth_hz = profile.min_bandwidth_hz;
-        context.fitted.curve_nominal = summarize(profile);
-        context.fitted.curve_tolerance = summarize(profile_tolerance);
+        context.fitted.curve = .{ .nominal = summarize(profile), .tolerance = summarize(profile_tolerance) };
         try append(context, spec, .operating_curve, profile.min_phase_margin_deg >= spec.requirements.phase.hard_min_deg and profile_tolerance.min_phase_margin_deg >= spec.requirements.phase.hard_min_deg, "{s}: populated fixed-I_CP operating curve gives nominal LBW {d:.3}-{d:.3} MHz / PM {d:.1}-{d:.1}° and tolerance-corner LBW {d:.3}-{d:.3} MHz / PM {d:.1}-{d:.1}°", .{ spec.name, profile.min_bandwidth_hz / 1e6, profile.max_bandwidth_hz / 1e6, profile.min_phase_margin_deg, profile.max_phase_margin_deg, profile_tolerance.min_bandwidth_hz / 1e6, profile_tolerance.max_bandwidth_hz / 1e6, profile_tolerance.min_phase_margin_deg, profile_tolerance.max_phase_margin_deg });
+        if (spec.design.synthesis.enabled) {
+            // The populated values fly under the same quantized I_CP schedule
+            // the synthesis programs, so they get a scheduled-face verdict of
+            // their own: without it, a population that is neither the search
+            // winner nor a pin shows only the fixed-I_CP face, which reads
+            // far more pessimistic than the loop firmware actually runs.
+            const anchor_step = synthesisAnchorStep(spec, firstOperatingPoint(spec));
+            const scheduled = profileSweep(spec, nominal, anchor_step, false);
+            const scheduled_tolerance = synthesisToleranceSweep(spec, circuit, nominal, anchor_step);
+            context.fitted.scheduled = .{ .nominal = summarize(scheduled), .tolerance = summarize(scheduled_tolerance) };
+            try append(context, spec, .scheduled_curve, scheduled.solved > 0 and scheduled_tolerance.solved > 0 and scheduled.min_phase_margin_deg >= spec.requirements.phase.hard_min_deg and scheduled_tolerance.min_phase_margin_deg >= spec.requirements.phase.hard_min_deg, "{s}: populated scheduled-I_CP operating curve gives nominal LBW {d:.3}-{d:.3} MHz / PM {d:.1}-{d:.1}° and tolerance-corner LBW {d:.3}-{d:.3} MHz / PM {d:.1}-{d:.1}°", .{ spec.name, scheduled.min_bandwidth_hz / 1e6, scheduled.max_bandwidth_hz / 1e6, scheduled.min_phase_margin_deg, scheduled.max_phase_margin_deg, scheduled_tolerance.min_bandwidth_hz / 1e6, scheduled_tolerance.max_bandwidth_hz / 1e6, scheduled_tolerance.min_phase_margin_deg, scheduled_tolerance.max_phase_margin_deg });
+        }
     }
     try outputChecks(context, spec);
     try rampChecks(context, spec, tracking_bandwidth_hz);
@@ -768,25 +794,24 @@ const synthesis_primes = [_]usize{ 2, 3, 5, 7, 11, 13, 17 };
 
 fn synthesize(context: *Context, spec: Spec, circuit: Circuit) std.mem.Allocator.Error!void {
     context.synthesis_first_verdict = context.verdicts.items.len;
-    const key = synthKey(spec, circuit);
     if (spec.design.pinned) |pin| {
-        if (pin.key_lo == key.lo and pin.key_hi == key.hi) {
+        const expected = pinKey(spec, circuit, pin.values);
+        if (pin.key_lo == expected.lo and pin.key_hi == expected.hi) {
             try appendSynthesisResult(context, spec, circuit, pinnedResult(spec, circuit, pin));
             return;
         }
-        try warning(context, .synthesis_stale_pin, "{s}: pinned synthesis is stale — the declaration or resolved values no longer match its key, so the full search ran; replace the pin from the line below", .{spec.name});
+        try warning(context, .synthesis_stale_pin, "{s}: pinned synthesis is stale — the declaration, the resolved values, or the pinned values themselves no longer match its key, so the full search ran; replace the pin from the line below", .{spec.name});
     }
     const result = memoisedSynthesis(spec, circuit);
     try appendSynthesisResult(context, spec, circuit, result);
-    try appendPinOffer(context, spec, circuit, key, result);
+    try appendPinOffer(context, spec, circuit, result);
 }
 
 /// The `SynthResult` a current pin stands for: the pinned corner pushed
 /// through the same helpers `findSynthesis` returns through, so a pinned
 /// evaluation and the search it replaces are the same answer to the digit.
 fn pinnedResult(spec: Spec, circuit: Circuit, pin: PinnedSynthesis) SynthResult {
-    const first = parseOperatingPoint(spec.design.operating_curve.point_nodes[0]) catch OperatingPoint{ .pll_n = spec.circuit.feedback.pll_n, .kvco_hz_per_v = spec.circuit.kvco_hz_per_v.min };
-    const anchor_step = synthesisAnchorStep(spec, first);
+    const anchor_step = synthesisAnchorStep(spec, firstOperatingPoint(spec));
     const corner = Corner{ .c_cp = pin.values[0], .r_in = pin.values[1], .r_feedback = pin.values[2], .c_feedback = pin.values[3], .c_feedback_hf = pin.values[4], .r_isolation = pin.values[5], .c_tune = pin.values[6] + circuit.extra_tune_cap.nominal };
     return .{
         .corner = corner,
@@ -797,12 +822,17 @@ fn pinnedResult(spec: Spec, circuit: Circuit, pin: PinnedSynthesis) SynthResult 
 }
 
 /// The copy-paste line that makes the NEXT evaluation skip the search: the
-/// search's winning component values plus the content key of everything the
-/// search read. Printed values are snapped onto the E24 grid so they read as
-/// the catalogue numbers they are; parsing snaps again, so the round trip
-/// lands on the identical f64s either way.
-fn appendPinOffer(context: *Context, spec: Spec, circuit: Circuit, key: content_key.Key, result: SynthResult) std.mem.Allocator.Error!void {
+/// search's winning component values plus a content key covering everything the
+/// search read AND those seven values — so editing any printed value invalidates
+/// the line rather than smuggling the edit in as the "synthesized" answer.
+/// Printed values are snapped onto the E24 grid so they read as the catalogue
+/// numbers they are; parsing snaps again, so the round trip lands on the
+/// identical f64s either way — and the key is computed over those same
+/// post-snap f64s on both sides.
+fn appendPinOffer(context: *Context, spec: Spec, circuit: Circuit, result: SynthResult) std.mem.Allocator.Error!void {
     const c = result.corner;
+    const values = [pinned_component_names.len]f64{ snapE24(c.c_cp), snapE24(c.r_in), snapE24(c.r_feedback), snapE24(c.c_feedback), snapE24(c.c_feedback_hf), snapE24(c.r_isolation), snapE24(c.c_tune - circuit.extra_tune_cap.nominal) };
+    const key = pinKey(spec, circuit, values);
     try append(context, spec, .synthesis_pin_offer, true, "{s}: pin this search — (pinned \"{x:0>16}{x:0>16}\" (c-cp {d}pF) (r-in {d}R) (r-feedback {d}R) (c-feedback {d}pF) (c-feedback-hf {d}pF) (r-isolation {d}R) (c-tune {d}pF))", .{ spec.name, key.hi, key.lo, snapE24(c.c_cp * 1e12), snapE24(c.r_in), snapE24(c.r_feedback), snapE24(c.c_feedback * 1e12), snapE24(c.c_feedback_hf * 1e12), snapE24(c.r_isolation), snapE24((c.c_tune - circuit.extra_tune_cap.nominal) * 1e12) });
 }
 
@@ -821,8 +851,9 @@ fn appendPinOffer(context: *Context, spec: Spec, circuit: Circuit, key: content_
 // miss recomputes: cache loss changes latency, never an assertion.
 
 /// Bumped whenever a change to the search makes an OLD key describe a result
-/// this build would no longer produce.
-const synth_key_version: u8 = 2;
+/// this build would no longer produce. v3: a pin's key certifies the pinned
+/// values themselves, so every v2 pin (keyed on search inputs alone) is stale.
+const synth_key_version: u8 = 3;
 
 /// Distinct synthesis declarations held at once. A design carries one or two;
 /// the corpus a single server evaluates carries a handful.
@@ -870,21 +901,44 @@ fn memoisedSynthesis(spec: Spec, circuit: Circuit) SynthResult {
     return result;
 }
 
-/// The content key of one synthesis search: everything `findSynthesis` reads.
+/// The content key of one synthesis search: everything `findSynthesis` reads,
+/// and nothing else — the memo's key.
 ///
-/// The walk over `Spec` is reflective on purpose — a field added to the
-/// declaration is covered the day it is declared, and a type the fingerprint
-/// cannot reduce fails the BUILD rather than going quietly unkeyed. `design` is
-/// the one field taken apart by hand, because its operating curve holds raw
-/// AST nodes; the SEARCH reads them only through `profileSample`, so the parsed
-/// points are what is folded in, and the compile-time length check below fails
-/// the build if `DesignMode` ever grows a third field nobody keyed.
+/// The walk over `Spec` (in `synthFingerprint`) is reflective on purpose — a
+/// field added to the declaration is covered the day it is declared, and a
+/// type the fingerprint cannot reduce fails the BUILD rather than going
+/// quietly unkeyed. `design` is the one field taken apart by hand, because its
+/// operating curve holds raw AST nodes; the SEARCH reads them only through
+/// `profileSample`, so the parsed points are what is folded in, and the
+/// compile-time length check fails the build if `DesignMode` ever grows a
+/// third field nobody keyed.
 fn synthKey(spec: Spec, circuit: Circuit) content_key.Key {
+    var fp = synthFingerprint(spec, circuit);
+    return fp.final();
+}
+
+/// The key a `(pinned …)` clause must carry: the search-input fingerprint plus
+/// the seven values the pin claims that search produced. Folding the values in
+/// is what makes a pin tamper-evident — a hand-authored pin that keeps a
+/// genuine key over edited values recomputes to a different key here and is
+/// refused as stale, upholding the invariant that a pin can only skip the
+/// search, never change its answer. Not circular the way keying the `pinned`
+/// field itself would be: the values are the search's OUTPUT, folded only into
+/// the pin's own certificate and never into the memo key the search is filed
+/// under.
+fn pinKey(spec: Spec, circuit: Circuit, values: [pinned_component_names.len]f64) content_key.Key {
+    var fp = synthFingerprint(spec, circuit);
+    for (values) |value| fp.put(f64, value);
+    return fp.final();
+}
+
+fn synthFingerprint(spec: Spec, circuit: Circuit) content_key.Fingerprint {
     // Three DesignMode fields, of which `pinned` is DELIBERATELY not keyed: a
-    // pin is a memo OF this key's answer, so folding it in would be circular —
-    // authoring the pin the offer line prints would change the key and
-    // instantly un-pin it. The search never reads the pin, so the key is
-    // complete without it.
+    // pin is a memo OF this fingerprint's answer, so folding the clause in
+    // would be circular — authoring the pin the offer line prints would change
+    // the key and instantly un-pin it. The search never reads the pin, so the
+    // search fingerprint is complete without it; `pinKey` extends it with the
+    // pinned VALUES to certify them.
     comptime std.debug.assert(@typeInfo(DesignMode).@"struct".field_names.len == 3);
     var fp: content_key.Fingerprint = .{};
     fp.tag(synth_key_version);
@@ -902,7 +956,7 @@ fn synthKey(spec: Spec, circuit: Circuit) content_key.Key {
     }
     fp.put(usize, @typeInfo(Circuit).@"struct".field_names.len);
     inline for (@typeInfo(Circuit).@"struct".field_names) |name| putValue(&fp, @field(circuit, name));
-    return fp.final();
+    return fp;
 }
 
 /// Fold one resolved passive in by the numbers the search reads, and NOT by its
@@ -920,8 +974,7 @@ fn putValue(fp: *content_key.Fingerprint, value: Value) void {
 }
 
 fn findSynthesis(spec: Spec, circuit: Circuit) SynthResult {
-    const first = parseOperatingPoint(spec.design.operating_curve.point_nodes[0]) catch OperatingPoint{ .pll_n = spec.circuit.feedback.pll_n, .kvco_hz_per_v = spec.circuit.kvco_hz_per_v.min };
-    const anchor_step = synthesisAnchorStep(spec, first);
+    const anchor_step = synthesisAnchorStep(spec, firstOperatingPoint(spec));
     // Multi-start: local refinement from only the single best Halton sample
     // strands the search in one basin; seed it from the best few instead.
     const seed_count = 8;
@@ -979,6 +1032,14 @@ fn refineSeed(spec: Spec, circuit: Circuit, anchor_step: usize, seed_score: f64,
         if (!improved) break;
     }
     return best;
+}
+
+/// The knot the I_CP schedule's anchor step is set from. The fallback exists
+/// only for hand-built specs with no curve; every authored `(synthesize …)`
+/// requires ≥2 parsed points.
+fn firstOperatingPoint(spec: Spec) OperatingPoint {
+    if (spec.design.operating_curve.point_nodes.len == 0) return .{ .pll_n = spec.circuit.feedback.pll_n, .kvco_hz_per_v = spec.circuit.kvco_hz_per_v.min };
+    return parseOperatingPoint(spec.design.operating_curve.point_nodes[0]) catch .{ .pll_n = spec.circuit.feedback.pll_n, .kvco_hz_per_v = spec.circuit.kvco_hz_per_v.min };
 }
 
 fn synthesisAnchorStep(spec: Spec, first: OperatingPoint) usize {
@@ -1839,22 +1900,20 @@ fn messagesContain(list: *const std.ArrayList(env.AssertionResult), needle: []co
 test "a matching pin bypasses the search and the memo" {
     var fixture = pinFixture();
     fixture.spec.design.operating_curve = .{ .point_nodes = &fixture.points };
-    const key = synthKey(fixture.spec, fixture.circuit);
 
-    // Poison the memo under this key: if the pinned path consulted the memo
-    // (or ran the search and wrote it), these impossible values would show.
-    synth_memo.put(key, .{
+    // Poison the memo under the search's own key: if the pinned path consulted
+    // the memo (or ran the search and wrote it), these impossible values would
+    // show.
+    synth_memo.put(synthKey(fixture.spec, fixture.circuit), .{
         .corner = .{ .c_cp = 1, .r_in = 1, .r_feedback = 1, .c_feedback = 1, .c_feedback_hf = 1, .r_isolation = 1, .c_tune = 1 },
         .anchor_step = 1,
         .nominal = .{},
         .tolerance = .{},
     });
 
-    fixture.spec.design.pinned = .{
-        .key_lo = key.lo,
-        .key_hi = key.hi,
-        .values = .{ snapE24(22e-12), snapE24(75), snapE24(4300), snapE24(30e-12), snapE24(1.8e-12), snapE24(36), snapE24(75e-12) },
-    };
+    const values = [_]f64{ snapE24(22e-12), snapE24(75), snapE24(4300), snapE24(30e-12), snapE24(1.8e-12), snapE24(36), snapE24(75e-12) };
+    const key = pinKey(fixture.spec, fixture.circuit, values);
+    fixture.spec.design.pinned = .{ .key_lo = key.lo, .key_hi = key.hi, .values = values };
     var assertions: std.ArrayList(env.AssertionResult) = .empty;
     defer freeAssertions(std.testing.allocator, &assertions);
     var context = Context{ .allocator = std.testing.allocator, .assertions = &assertions };
@@ -1882,7 +1941,8 @@ test "a stale pin warns, searches, and offers a fresh pin line" {
         .tolerance = .{},
     });
 
-    fixture.spec.design.pinned = .{ .key_lo = key.lo +% 1, .key_hi = key.hi, .values = @splat(1) };
+    const stale = pinKey(fixture.spec, fixture.circuit, @splat(1));
+    fixture.spec.design.pinned = .{ .key_lo = stale.lo +% 1, .key_hi = stale.hi, .values = @splat(1) };
     var assertions: std.ArrayList(env.AssertionResult) = .empty;
     defer freeAssertions(std.testing.allocator, &assertions);
     var context = Context{ .allocator = std.testing.allocator, .assertions = &assertions };
@@ -1892,6 +1952,43 @@ test "a stale pin warns, searches, and offers a fresh pin line" {
     try std.testing.expect(messagesContain(&assertions, "pinned synthesis is stale"));
     // The memoised (seeded) search answered — its 1 Ω corner, not the pin's.
     try std.testing.expect(messagesContain(&assertions, "R_FB 3000→1"));
+    try std.testing.expect(messagesContain(&assertions, "pin this search"));
+}
+
+// spec: pll-loop - a pin whose values are not the answer its key certifies is refused as stale, so a hand-authored pin cannot pass fabricated values off as the synthesized population
+test "a pin carrying tampered values is refused" {
+    var fixture = pinFixture();
+    fixture.spec.design.operating_curve = .{ .point_nodes = &fixture.points };
+
+    // Seed the memo so "the search ran" is observable as this seeded answer
+    // (and the test never pays the real 12,000-candidate walk).
+    synth_memo.put(synthKey(fixture.spec, fixture.circuit), .{
+        .corner = .{ .c_cp = 1, .r_in = 1, .r_feedback = 1, .c_feedback = 1, .c_feedback_hf = 1, .r_isolation = 1, .c_tune = 1 },
+        .anchor_step = 1,
+        .nominal = .{},
+        .tolerance = .{},
+    });
+
+    // A GENUINE key for one set of values, authored over a different set: the
+    // shape of a fabricated pin that would have been accepted silently when
+    // the key covered search inputs alone.
+    const honest = [_]f64{ snapE24(22e-12), snapE24(75), snapE24(4300), snapE24(30e-12), snapE24(1.8e-12), snapE24(36), snapE24(75e-12) };
+    const key = pinKey(fixture.spec, fixture.circuit, honest);
+    var tampered = honest;
+    tampered[2] = snapE24(5100);
+    fixture.spec.design.pinned = .{ .key_lo = key.lo, .key_hi = key.hi, .values = tampered };
+
+    var assertions: std.ArrayList(env.AssertionResult) = .empty;
+    defer freeAssertions(std.testing.allocator, &assertions);
+    var context = Context{ .allocator = std.testing.allocator, .assertions = &assertions };
+    defer context.verdicts.deinit(std.testing.allocator);
+    try synthesize(&context, fixture.spec, fixture.circuit);
+
+    // The tampered pin is refused; the (seeded) search answers instead, and
+    // the tampered r-feedback never reaches any assertion.
+    try std.testing.expect(messagesContain(&assertions, "pinned synthesis is stale"));
+    try std.testing.expect(messagesContain(&assertions, "R_FB 3000→1"));
+    try std.testing.expect(!messagesContain(&assertions, "5100"));
     try std.testing.expect(messagesContain(&assertions, "pin this search"));
 }
 
@@ -2111,7 +2208,7 @@ test "the typed report agrees with the assertion text it accompanies" {
     try expectPrinted(report, .vtune_slew, try std.fmt.bufPrint(&buffer, "VTUNE slew requires {d:.3} V/µs; op amp provides {d:.1} V/µs", .{ results.vtune_slew_required_v_per_s / 1e6, results.vtune_slew_available_v_per_s / 1e6 }));
     try std.testing.expect(results.tolerance.corners > results.nominal.corners);
     // No operating curve is authored, so its sweeps stay unset.
-    try std.testing.expectEqual(@as(usize, 0), results.curve_nominal.corners);
+    try std.testing.expectEqual(@as(usize, 0), results.curve.nominal.corners);
 }
 
 // spec: pll-loop - a pinned synthesis publishes a second population beside the fitted one, whose components, results and schedule are the pinned answer, and whose verdicts concatenate back into assertion order
@@ -2123,8 +2220,8 @@ test "both populations round-trip through the typed report" {
     spec.design.operating_curve = .{ .point_nodes = &report_points };
     spec.design.synthesis.enabled = true;
     const circuit = resolveCircuit(&block, spec).?;
-    const key = synthKey(spec, circuit);
     const pinned = [_]f64{ snapE24(22e-12), snapE24(75), snapE24(4300), snapE24(30e-12), snapE24(1.8e-12), snapE24(36), snapE24(75e-12) };
+    const key = pinKey(spec, circuit, pinned);
     spec.design.pinned = .{ .key_lo = key.lo, .key_hi = key.hi, .values = pinned };
 
     var assertions: std.ArrayList(env.AssertionResult) = .empty;
@@ -2149,8 +2246,9 @@ test "both populations round-trip through the typed report" {
 
     // The fitted population keeps its own operating-curve sweeps; the
     // synthesized one's nominal IS that curve at its scheduled I_CP.
-    try std.testing.expect(fitted.results.curve_nominal.corners > 0);
+    try std.testing.expect(fitted.results.curve.nominal.corners > 0);
     try std.testing.expect(synthesized.results.nominal.corners > 0);
+    try std.testing.expect(fitted.results.scheduled.nominal.corners > 0);
     var buffer: [256]u8 = undefined;
     try expectPrinted(report, .synthesis_profile, try std.fmt.bufPrint(&buffer, "nominal LBW {d:.3}-{d:.3} MHz / PM {d:.1}-{d:.1}°", .{ synthesized.results.nominal.min_bandwidth_hz / 1e6, synthesized.results.nominal.max_bandwidth_hz / 1e6, synthesized.results.nominal.min_phase_margin_deg, synthesized.results.nominal.max_phase_margin_deg }));
     try expectPrinted(report, .synthesis_replacement, try std.fmt.bufPrint(&buffer, "R_FB {d:.0}→{d:.0} Ω", .{ componentOf(fitted, .r_feedback).value, componentOf(synthesized, .r_feedback).value }));
@@ -2164,6 +2262,71 @@ test "both populations round-trip through the typed report" {
     try expectVerdictsTrackAssertions(assertions.items, report.populations);
     // A matching pin answers without offering a fresh one.
     try std.testing.expectEqual(@as(?Verdict, null), verdictOf(report, .synthesis_pin_offer));
+}
+
+// spec: pll-loop - a populated set with a synthesize clause is screened under the quantized I_CP schedule too, so a population that is neither the search winner nor a pin still prints its scheduled-face margins beside the fixed-I_CP face
+test "the populated set gets a scheduled-I_CP operating-curve screen" {
+    const allocator = std.testing.allocator;
+    const block = reportBlock();
+    var spec = reportSpec();
+    spec.name = "pll-loop scheduled-face fixture";
+    spec.design.operating_curve = .{ .point_nodes = &report_points };
+    spec.design.synthesis.enabled = true;
+    const circuit = resolveCircuit(&block, spec).?;
+    // Pin values that are NOT the populated BOM, so the fitted set coincides
+    // with neither the pin nor a search winner — the case that previously got
+    // no scheduled-I_CP verdict at all.
+    const pinned = [_]f64{ snapE24(22e-12), snapE24(75), snapE24(4300), snapE24(30e-12), snapE24(1.8e-12), snapE24(36), snapE24(75e-12) };
+    const key = pinKey(spec, circuit, pinned);
+    spec.design.pinned = .{ .key_lo = key.lo, .key_hi = key.hi, .values = pinned };
+
+    var assertions: std.ArrayList(env.AssertionResult) = .empty;
+    defer freeAssertions(allocator, &assertions);
+    var reports: std.ArrayList(Report) = .empty;
+    defer freeReports(allocator, &reports);
+    try evaluate(allocator, &assertions, &reports, &block, spec);
+
+    const report = reports.items[0];
+    const fitted = report.populations[0];
+    const results = fitted.results;
+    try std.testing.expect(results.scheduled.nominal.corners > 0);
+    try std.testing.expect(results.scheduled.tolerance.corners > results.scheduled.nominal.corners);
+
+    // The scheduled face is the FITTED population's verdict, printed with the
+    // same numbers the typed report carries.
+    var found = false;
+    for (fitted.verdicts) |verdict| found = found or verdict.screen == .scheduled_curve;
+    try std.testing.expect(found);
+    var buffer: [256]u8 = undefined;
+    try expectPrinted(report, .scheduled_curve, try std.fmt.bufPrint(&buffer, "populated scheduled-I_CP operating curve gives nominal LBW {d:.3}-{d:.3} MHz / PM {d:.1}-{d:.1}° and tolerance-corner LBW {d:.3}-{d:.3} MHz / PM {d:.1}-{d:.1}°", .{ results.scheduled.nominal.min_bandwidth_hz / 1e6, results.scheduled.nominal.max_bandwidth_hz / 1e6, results.scheduled.nominal.min_phase_margin_deg, results.scheduled.nominal.max_phase_margin_deg, results.scheduled.tolerance.min_bandwidth_hz / 1e6, results.scheduled.tolerance.max_bandwidth_hz / 1e6, results.scheduled.tolerance.min_phase_margin_deg, results.scheduled.tolerance.max_phase_margin_deg }));
+    try expectVerdictsTrackAssertions(assertions.items, report.populations);
+}
+
+const fractional_instances = [_]Instance{
+    .{ .ref_des = "C31", .label = "c_cp", .component = "cap", .value = "6.2pF", .footprint = "", .symbol = "", .attrs = &report_cap_attrs },
+    .{ .ref_des = "R14", .label = "r_in", .component = "res", .value = "49.9", .footprint = "", .symbol = "", .attrs = &report_res_attrs },
+    .{ .ref_des = "R15", .label = "r_fb", .component = "res", .value = "3000", .footprint = "", .symbol = "", .attrs = &report_res_attrs },
+    .{ .ref_des = "C32", .label = "c_fb", .component = "cap", .value = "82pF", .footprint = "", .symbol = "", .attrs = &report_cap_attrs },
+    .{ .ref_des = "C33", .label = "c_fb_hf", .component = "cap", .value = "2.7pF", .footprint = "", .symbol = "", .attrs = &report_cap_attrs },
+    .{ .ref_des = "R16", .label = "r_iso", .component = "res", .value = "120", .footprint = "", .symbol = "", .attrs = &report_res_attrs },
+    .{ .ref_des = "C34", .label = "c_vtune", .component = "cap", .value = "180pF", .footprint = "", .symbol = "", .attrs = &report_cap_attrs },
+};
+
+// spec: pll-loop - the BOM echo prints fractional catalogue values to a tenth rather than truncating them to whole units
+test "the BOM echo keeps fractional catalogue values" {
+    const allocator = std.testing.allocator;
+    const block = DesignBlock{ .name = "fractional fixture", .instances = &fractional_instances, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &.{} };
+    var spec = reportSpec();
+    spec.name = "pll-loop fractional-echo fixture";
+    var assertions: std.ArrayList(env.AssertionResult) = .empty;
+    defer freeAssertions(allocator, &assertions);
+    var reports: std.ArrayList(Report) = .empty;
+    defer freeReports(allocator, &reports);
+    try evaluate(allocator, &assertions, &reports, &block, spec);
+
+    try std.testing.expect(messagesContain(&assertions, "C31 6.2 pF"));
+    try std.testing.expect(messagesContain(&assertions, "R14 49.9 Ω"));
+    try std.testing.expect(!messagesContain(&assertions, "C31 6 pF"));
 }
 
 // spec: pll-loop - the open-loop trace is deterministically log-spaced over the solver's own span and reads back a phase margin inside the nominal sweep it accompanies

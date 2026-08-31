@@ -7821,6 +7821,9 @@ export never invents them.
 - pinned values snap onto the E24 grid at parse, so the printed decimal text round-trips to the search's bit-identical f64s, and a non-E24 value is kept verbatim rather than moved
 - a pin whose key matches answers from its own values without consulting the search or its memo, and prints no re-pin offer
 - a pin whose key no longer matches is ignored with a warning and the full search runs, so a pin can only skip recomputation and never change an answer
+- a pin whose values are not the answer its key certifies is refused as stale, so a hand-authored pin cannot pass fabricated values off as the synthesized population
+- a populated set with a synthesize clause is screened under the quantized I_CP schedule too, so a population that is neither the search winner nor a pin still prints its scheduled-face margins beside the fixed-I_CP face
+- the BOM echo prints fractional catalogue values to a tenth rather than truncating them to whole units
 - each declaration publishes a typed report carrying the numbers its assertion strings print, one verdict per screen matching that assertion's pass/warn/fail
 - a pinned synthesis publishes a second population beside the fitted one, whose components, results and schedule are the pinned answer, and whose verdicts concatenate back into assertion order
 - the open-loop trace is deterministically log-spaced over the solver's own span and reads back a phase margin inside the nominal sweep it accompanies
