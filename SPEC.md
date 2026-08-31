@@ -5161,6 +5161,7 @@ Public functions: analyze, parseThermal, parsePower, packageTheta
 - (power W) and (power (typ W) (max W)) both declare an instance's dissipation in watts
 - a part's dissipation comes from its explicit (power …) ahead of any pin-current rollup
 - a part with no declared power draws its dissipation from its annotated pin currents times the resolved rail voltage
+- a pass-through connector's annotated pin currents are throughput, not dissipation, and charge it nothing
 - a regulator's dissipation falls back to its back-computed conversion loss, attributed to the module's single hub IC
 - a part with no declared theta-ja is screened against a package estimate and the row says the figure was estimated
 - a screened row carries the part's declared theta-jb untouched beside its theta-ja, whether or not the theta-ja itself had to be estimated
@@ -5329,9 +5330,11 @@ Public functions: build
 
 ## component_classification
 
-Public functions: isActiveSemiconductor
+Public functions: isActiveSemiconductor, isPassThroughConnector
 
 - isActiveSemiconductor exempts the MK mounting-hardware ref-des class
+- isPassThroughConnector identifies a connector by its authored J/P class or by a supply-free positional pinout
+- isPassThroughConnector keeps dissipating inert parts (LED, crystal) out of the connector class
 - isActiveSemiconductor exempts a connector carrying an importer-default U ref-des
 - isActiveSemiconductor exempts LEDs crystals and tactile switches wearing a U ref-des
 - isActiveSemiconductor keeps a supply-pinned IC active when its description names an inert class

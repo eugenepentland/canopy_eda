@@ -239,6 +239,7 @@ src/commands.zig::cmdRouteKicadReference | fn cmdRouteKicadReference( allocator:
 src/commands.zig::cmdSyncKicadSch | fn cmdSyncKicadSch(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/commands.zig::cmdSystemCheck | fn cmdSystemCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/component_classification.zig::isActiveSemiconductor | fn isActiveSemiconductor(inst: env.Instance) bool
+src/component_classification.zig::isPassThroughConnector | fn isPassThroughConnector(inst: env.Instance) bool
 src/config.zig::cseEmail | fn cseEmail(allocator: std.mem.Allocator) ?[]u8
 src/config.zig::cseMaxInFlight | fn cseMaxInFlight(allocator: std.mem.Allocator) u32
 src/config.zig::cseMinIntervalMs | fn cseMinIntervalMs(allocator: std.mem.Allocator) u64
