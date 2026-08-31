@@ -632,6 +632,43 @@ pub const Instance = struct {
     /// library part's declared thermal envelope plus any `(power …)` the
     /// instance itself declares. See `InstanceThermal`.
     thermal: InstanceThermal = .{},
+    /// Structural evidence read off the part's `lib/pinouts` entry when the
+    /// instance was built. See `PinoutFacts` — it is what lets semantic
+    /// classification stop guessing from the ref-des letter.
+    pinout_facts: PinoutFacts = .{},
+};
+
+/// What the shape of a part's `lib/pinouts` entry says about the KIND of part
+/// it is, summarised once at instance-build time so consumers need no
+/// evaluator, no project directory, and no second file read.
+///
+/// This exists because a ref-des letter is weak evidence: the KiCad importer
+/// defaults every part it does not recognise to the IC class `U`, so barrel
+/// jacks, SMA connectors, board-to-board sockets, LEDs, crystals, tact
+/// switches and M2 SMT spacers all arrive wearing `U`. A pinout, by contrast,
+/// is generated from the part itself and says something structural: a part
+/// with no supply pad is not an integrated circuit, and a part whose every pad
+/// is named after its own number carries no electrical function at all.
+///
+/// All-false / `known = false` is the honest "no pinout file to read" answer,
+/// and every consumer treats it as "no evidence", never as "no supply pin".
+pub const PinoutFacts = struct {
+    /// A `lib/pinouts` entry was found and parsed. False ⇒ every other field
+    /// is meaningless; callers must not read absence as evidence.
+    known: bool = false,
+    /// At least one pad's function name reads as a real supply pad
+    /// (`placement/pin_roles.isSupplyFn`) — VCC/VDD/VIN/…, straps excluded.
+    has_supply: bool = false,
+    /// At least one pad's function name reads as a ground / exposed-pad
+    /// return (`placement/pin_roles.isGroundFn`).
+    has_ground: bool = false,
+    /// Every pad's function name is a bare number: the importer had no
+    /// function names to record, which is the signature of a connector or a
+    /// mechanical part rather than of a device with pin functions.
+    positional: bool = false,
+    /// How many distinct pads the pinout declares. Saturates rather than
+    /// wraps; only ever compared, never summed.
+    pin_count: u16 = 0,
 };
 
 /// The library documentation attached to a part: the datasheet PDFs in

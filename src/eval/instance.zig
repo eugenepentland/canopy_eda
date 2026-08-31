@@ -10,6 +10,7 @@ const evaluator_mod = @import("evaluator.zig");
 const Evaluator = evaluator_mod.Evaluator;
 const EvalError = evaluator_mod.EvalError;
 const ids = @import("ids.zig");
+const pin_roles = @import("../placement/pin_roles.zig");
 const thermal = @import("thermal.zig");
 const PinNetDecl = evaluator_mod.PinNetDecl;
 
@@ -267,6 +268,7 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
     warnPinoutlessMultiPad(self, form_children[0].span, &inst, reverse_pinout, pin_nets.items);
 
     var final_inst = inst;
+    final_inst.pinout_facts = summarisePinout(reverse_pinout);
     final_inst.dnp = dnp_flag;
     final_inst.bind = binds;
     final_inst.thermal.power = power;
@@ -316,6 +318,38 @@ fn pinoutLookupName(self: *Evaluator, inst: *const Instance) []const u8 {
 fn resolveReversePinout(self: *Evaluator, inst: *const Instance) ?*const std.StringHashMapUnmanaged([]const u8) {
     const lookup = pinoutLookupName(self, inst);
     return if (lookup.len > 0) ids.getSymbolPins(self, lookup) else null;
+}
+
+/// Summarise a part's pinout into the structural facts semantic classification
+/// needs (`env.PinoutFacts`). Reads the already-loaded, already-cached pad →
+/// function map, so it costs one pass over a map the instance build resolved
+/// anyway — never a second file read.
+///
+/// A null map (no `lib/pinouts` file) yields the all-false `known = false`
+/// value, which every consumer must read as "no evidence" rather than as
+/// "no supply pin": most passives simply have no pinout to consult.
+fn summarisePinout(pinout: ?*const std.StringHashMapUnmanaged([]const u8)) env_mod.PinoutFacts {
+    const map = pinout orelse return .{};
+    var facts = env_mod.PinoutFacts{ .known = true, .positional = true };
+    var it = map.iterator();
+    while (it.next()) |entry| {
+        const fn_name = entry.value_ptr.*;
+        facts.pin_count +|= 1;
+        if (pin_roles.isSupplyFn(fn_name)) facts.has_supply = true;
+        if (pin_roles.isGroundFn(fn_name)) facts.has_ground = true;
+        if (!isAllDigits(fn_name)) facts.positional = false;
+    }
+    if (facts.pin_count == 0) return .{};
+    return facts;
+}
+
+/// True when `s` is a non-empty run of decimal digits — the importer's
+/// "I had no function name for this pad, so I wrote its number" spelling
+/// (`(pin 07 "07")`). Used only to detect that shape, never to parse a value.
+fn isAllDigits(s: []const u8) bool {
+    if (s.len == 0) return false;
+    for (s) |c| if (!std.ascii.isDigit(c)) return false;
+    return true;
 }
 
 /// Warn once when an instance wires a component that has no pinout file. With
