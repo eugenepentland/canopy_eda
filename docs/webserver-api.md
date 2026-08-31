@@ -287,7 +287,7 @@ Local dev still uses `http://localhost:7050`.
   comparative screening model, not enclosure or fan-curve CFD.
 - **Live push**: `POST /api/push/:name` — rebuild and push update. On eval failure the JSON (and the schematic page, and the CLI `build` tool) carries a structured `diagnostic` `{file,line,col,message,source_line}` rendered compiler-style with a caret (`src/serve/diag_format.zig`).
 - **Version history + diff**: `GET /api/history/:name` — stored snapshot ids (file copies under `<project>/history/<name>/<timestamp>/`, written before every mutation); `GET /api/diff/:name?from=<id>&to=<id|current>` — request-local netlist diff (instances added/removed, value/footprint changes, net membership changes; `src/serve/design_diff.zig`). Schematic header's History panel renders it. Caveat: snapshots capture the design file only, so an old revision re-evaluates against today's lib/ modules.
-- **Datasheet attach**: `POST /api/attach-datasheet` `{component,file}` — splices an uploaded PDF filename or an HTTP(S) URL into `lib/components/<name>.sexp` (idempotent and scheme/path-safe); the library page has a per-card attach control. `GET /api/datasheets` lists uploaded local candidates.
+- **Datasheet attach**: `POST /api/attach-datasheet` `{component,file}` — splices an uploaded PDF filename or an HTTP(S) URL into `lib/components/<name>.sexp` (idempotent and scheme/path-safe); the library page has a per-card attach control. `GET /api/datasheets` lists uploaded local candidates. The CLI twin is the `attach_datasheet` tool (below), which an agent pairs with `fetch_datasheet` to go from a manufacturer URL to a declared `(datasheet "…")` without a browser.
 - **Cross-probing**: `/pcb-layout/:name?focus=REF` (or `#REF`) zooms/flashes a part (leaf-matching like `?refs=`); PCB sidebar rows link "Show in schematic →" (`#comp-REF` scroll+flash), schematic component detail links "Locate on PCB →". **Two-window live sync**: with `/pcb-layout/<name>` and `/schematics/<name>` open in separate tabs/windows of the same browser (the KiCad two-monitor workflow), clicking a part on one page highlights it on the other through the `BroadcastChannel("netlisp-xprobe")` bridge in `pcb_board.js` and `schematic_viewer.js` (messages carry the design and ref; receivers ignore other designs; no server round-trip).
 - **PCB Find**: the full `/pcb-layout/:name` editor has a dock-wide Find field above its four workflow tabs (`Ctrl/Cmd+F`; arrows preview; Enter locates; F3 / Shift+F3 steps). Its client-only index covers component refs/values/footprints, collapsed nets, DRC ids/kinds/parties, sub-circuits, and board text; results reuse the normal part selection, review-focus, DRC locator, and point-focus paths. Prefixes `ref:`, `net:`, `drc:`, `sub:`, `text:`, `value:`, and `fp:` narrow a query, and `*` / `?` provide simple wildcards. Embeds omit the dock and keep native browser Find.
 - **Version polling**: `GET /api/version/:name` — returns `{"version":N}`
@@ -661,6 +661,24 @@ Tools include:
   (read-only, DigiKey / Component Search Engine lookups); `download_footprint`,
   `download_datasheet` (mutation — import an ECAD model / datasheet into `lib/`);
   `read_datasheet` (read-only, extract text from an imported datasheet).
+- **Datasheet acquisition + linking**: `fetch_datasheet` `{url,name?,overwrite?}`
+  (mutation) downloads a PDF from an explicit URL into `lib/datasheets/` — the
+  escape hatch for every part the two catalogue providers behind
+  `download_datasheet` do not carry. It is the ONLY write it can perform: the
+  filename is sanitized into that one directory, the body is content-sniffed for
+  the `%PDF` magic (a login wall or cookie interstitial answering `200
+  application/pdf` is rejected), the transfer is capped at 64 MiB / 90 s, and a
+  same-name fetch is **idempotent when the bytes match** (`status:"unchanged"`,
+  same digest) but **refused when they differ** unless `overwrite:true` — a
+  silent replacement would invalidate every `(datasheet-review …)` sha256 citing
+  the file. Returns `{ok,name,sha256,bytes,status}`; cite that `sha256` in the
+  review. `attach_datasheet` `{component,file}` (mutation) is the linking half:
+  it splices `(datasheet "file.pdf")` into `lib/components/<component>.sexp`
+  (the CLI twin of `POST /api/attach-datasheet`), verifying a local name exists
+  in `lib/datasheets/` and returning `status:"already_linked"` rather than
+  duplicating an existing link. Bytes on disk document nothing until this
+  declaration exists — it is what fills an instance's `docs.datasheets`, what
+  `describe_component` reports, and what the datasheet coverage check reads.
 - **Per-design notes**: `list_design_notes` (read-only), `add_design_note`,
   `complete_design_note`, `reopen_design_note`, `remove_design_note`
   (mutation) — TODO sidecar (`<design>.notes.md`) for next-revision follow-ups.

@@ -173,6 +173,65 @@ Bare numbers accept SI scale suffixes and an optional unit letter:
 `0.5A`, `100mV` = 0.1 (milli only with a unit letter — `mm`/`mil` stay
 dimension tokens). Unknown trailing text (`100kHz`) still parses as an atom.
 
+### Component datasheet link: `(datasheet "file.pdf")`
+
+A library part declares the datasheets that document it with one `(datasheet
+"…")` field per PDF, inside its `lib/components/<name>.sexp` definition:
+
+```lisp
+(component lm66100
+  (footprint sc70-6)
+  (datasheet "LM66100DCKR.pdf"))
+```
+
+The value is either a filename in `lib/datasheets/` or an absolute `http(s)`
+URL, for a PDF that may not be redistributed. Repeat the field for a part
+documented by several PDFs (a datasheet plus an errata or an app note).
+
+**This field is the linkage, and nothing else is.** A PDF sitting in
+`lib/datasheets/` that no component declares documents nothing: this form is
+what fills each placed instance's `docs.datasheets`, what `describe_component`
+reports under `datasheets`, what the `(datasheet-review …)` record below must
+name, and what the datasheet coverage check requires of every active IC.
+
+Three CLI tools cover the whole chain, so an agent never hand-edits the library
+for this:
+
+| Tool | Args | Does |
+| --- | --- | --- |
+| `fetch_datasheet` | `{url, name?, overwrite?}` | Download a PDF from an explicit manufacturer URL into `lib/datasheets/`. Content-sniffs `%PDF`, sanitizes the target name into that one directory, caps the transfer at 64 MiB / 90 s. Re-fetching identical bytes is a no-op (`status:"unchanged"`); a same-name fetch whose bytes DIFFER is refused unless `overwrite:true`, because a silent replacement would invalidate the `sha256` every review cites. Returns `{ok,name,sha256,bytes,status}`. |
+| `attach_datasheet` | `{component, file}` | Splice `(datasheet "file")` into `lib/components/<component>.sexp`. Verifies a local name exists in `lib/datasheets/`; already-linked returns `status:"already_linked"` instead of duplicating. |
+| `read_datasheet` | `{name, offset?, limit?}` | Extract a window of the PDF's text, and report the current `sha256` to record in the review. |
+
+`download_datasheet {part_number}` remains the catalogue path (Component Search
+Engine, then DigiKey); `fetch_datasheet` is the escape hatch for every part
+those two do not carry.
+
+### Datasheet review: `(datasheet-review …)`
+
+A part's requirement review binds to an exact PDF, by digest:
+
+```lisp
+(component lm66100
+  (datasheet "LM66100DCKR.pdf")
+  (datasheet-review
+    (datasheet "LM66100DCKR.pdf")
+    (sha256 "<64 lowercase hex characters>")
+    (status complete)
+    (reviewed-by "agent-or-human")
+    (date "YYYY-MM-DD")
+    (category supply)
+    (category-na sequencing "reason this topic is not applicable")))
+```
+
+The `(datasheet …)` inside the review must name a PDF the component itself
+declares. `read_datasheet` and `fetch_datasheet` both return the current
+`sha256`, so replacing the file automatically makes the review stale — which is
+exactly why `fetch_datasheet` refuses a same-name/different-bytes overwrite by
+default. `netlisp check --profile preflight` gates incomplete reviews; the full
+category list is in `docs/language-forms.md` under **Datasheet review
+preflight**.
+
 ### Decoupling shorthand
 
 `(decouple "VDD" 1 per-pin auto)` expands to every pin already declared on the

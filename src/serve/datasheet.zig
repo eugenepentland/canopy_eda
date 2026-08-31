@@ -1,4 +1,16 @@
-//! Datasheet text extraction for the `read_datasheet` CLI tool.
+//! Datasheet acquisition and text extraction for the `fetch_datasheet` /
+//! `read_datasheet` CLI tools.
+//!
+//! `fetch` is the URL half: an agent that has found a manufacturer PDF link
+//! points this at it and the bytes land in `lib/datasheets/<sanitized>.pdf`,
+//! ready for `read_datasheet` and for a `(datasheet "…")` declaration. It is
+//! deliberately narrow — it writes ONLY into that directory, never into a
+//! design source — and it is content-sniffed (`%PDF` magic, not a
+//! `Content-Type` header), byte- and time-bounded, and refuses to replace an
+//! existing file whose bytes DIFFER, because every `(datasheet-review …)`
+//! record cites a sha256 that a silent overwrite would invalidate. Re-fetching
+//! the same bytes is a no-op that reports the same digest, so the campaign
+//! that attaches datasheets across a board can re-run safely.
 //!
 //! ps2ascii is a `/bin/sh` wrapper around `gs`, which streams the extracted
 //! text straight to stdout. On a real (multi-hundred-KB) datasheet that output
@@ -14,6 +26,7 @@ const infra_fs = @import("../infra/fs.zig");
 const json_writer = @import("../json_writer.zig");
 const log = @import("../infra/log.zig");
 const upload_datasheet = @import("upload_datasheet.zig");
+const datasheet_ref = @import("datasheet_ref.zig");
 const subprocess = @import("subprocess.zig");
 const AllocatingWriter = @import("../allocating_writer.zig").AllocatingWriter;
 
@@ -171,6 +184,235 @@ fn writeResult(w: anytype, name: []const u8, sha256: []const u8, win: Window) !b
     return true;
 }
 
+// ── Fetch (`fetch_datasheet`) ─────────────────────────────────────
+
+/// Byte ceiling for one fetched PDF — the same 64 MiB the upload route and the
+/// CSE / DigiKey downloaders accept, so every way a datasheet can enter
+/// `lib/datasheets/` shares one size policy.
+const max_download_bytes: usize = 64 * 1024 * 1024;
+/// Hard wall-clock ceiling for one fetch, in milliseconds and in curl's own
+/// seconds spelling. Slow vendor CDNs are common; a wedged one is not waited on.
+const download_timeout_ms: u64 = 90_000;
+const download_timeout_secs = "90";
+/// curl's own size guard, so an oversized body is abandoned at the socket
+/// rather than after `runCaptured` has buffered 64 MiB of it.
+const max_filesize_arg = "67108864";
+/// Vendor download pages routinely 403 a default curl UA.
+const browser_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " ++
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
+/// Fallback stem when the URL's last path segment is empty (a directory-style
+/// link). `sanitizeFilename` appends the `.pdf`.
+const fallback_name = "datasheet";
+
+/// One transport attempt: the retrieved bytes (owned by the caller's
+/// allocator) or a stable failure message when nothing came back.
+pub const Fetched = struct {
+    bytes: []const u8 = "",
+    err: []const u8 = "",
+};
+
+/// The HTTP transport seam. Production passes `curlFetch`; tests pass a stub,
+/// so no unit test ever opens a socket.
+pub const Transport = *const fn (std.mem.Allocator, []const u8) std.mem.Allocator.Error!Fetched;
+
+/// A `fetch_datasheet` request.
+pub const FetchRequest = struct {
+    /// Absolute HTTP(S) URL of the PDF, validated by `datasheet_ref.isRemote`.
+    url: []const u8,
+    /// Target filename under `lib/datasheets/`; null derives one from the URL.
+    name: ?[]const u8 = null,
+    /// Replace an existing file whose bytes DIFFER. Off by default: a
+    /// same-name/different-content fetch is refused rather than silently
+    /// invalidating the sha256 every `(datasheet-review …)` citing it records.
+    overwrite: bool = false,
+    /// How the bytes are retrieved.
+    transport: Transport = curlFetch,
+};
+
+/// Download `req.url` into `<project_dir>/lib/datasheets/<sanitized name>` and
+/// write the JSON result to `out`. Returns true after an `{"ok":true,…}`
+/// envelope carrying `{name, sha256, bytes, status}`; false after an
+/// `{"ok":false,"error":…}` one. Never writes outside `lib/datasheets/`.
+pub fn fetch(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    req: FetchRequest,
+    out: *std.ArrayList(u8),
+) std.mem.Allocator.Error!bool {
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w: AllocatingWriter = .{ .writer = &aw.writer };
+
+    if (!datasheet_ref.isRemote(req.url)) {
+        try writeFetchError(w, "url must be an absolute http(s) URL with no spaces or control characters");
+        return false;
+    }
+    const sanitized = upload_datasheet.sanitizeFilename(allocator, req.name orelse nameFromUrl(req.url)) catch {
+        try writeFetchError(w, "invalid target filename");
+        return false;
+    };
+    defer allocator.free(sanitized);
+
+    const got = try req.transport(allocator, req.url);
+    defer if (got.bytes.len != 0) allocator.free(got.bytes);
+    if (got.err.len != 0) {
+        try writeFetchError(w, got.err);
+        return false;
+    }
+    if (!upload_datasheet.isPdfMagic(got.bytes)) {
+        try writeNotPdf(w, got.bytes.len);
+        return false;
+    }
+    return storeFetched(w, allocator, project_dir, sanitized, got.bytes, req.overwrite);
+}
+
+/// Write `bytes` to `lib/datasheets/<name>`, honouring the overwrite policy,
+/// and emit the result envelope. Split out so the whole store/idempotence/
+/// conflict policy is unit-testable without a transport.
+fn storeFetched(
+    w: AllocatingWriter,
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    bytes: []const u8,
+    overwrite: bool,
+) std.mem.Allocator.Error!bool {
+    const sha256 = hexDigest(bytes);
+    const path = try std.fmt.allocPrint(allocator, "{s}/lib/datasheets/{s}", .{ project_dir, name });
+    defer allocator.free(path);
+
+    if (try existingDigest(allocator, path)) |existing| {
+        if (std.mem.eql(u8, &existing, &sha256)) return writeFetchResult(w, name, &sha256, bytes.len, "unchanged");
+        if (!overwrite) {
+            try writeConflict(w, name, &existing, &sha256);
+            return false;
+        }
+    }
+    const stored = upload_datasheet.storeDatasheet(allocator, project_dir, name, bytes) catch |err| {
+        try w.writeAll(upload_datasheet.storeErrorBody(err) orelse return error.OutOfMemory);
+        return false;
+    };
+    defer allocator.free(stored.name);
+    return writeFetchResult(w, stored.name, &sha256, stored.size, "written");
+}
+
+/// Lowercase hex sha256 of `bytes`.
+fn hexDigest(bytes: []const u8) [64]u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    return std.fmt.bytesToHex(digest, .lower);
+}
+
+/// Hex digest of the file already at `path`, or null when there is none (or it
+/// cannot be read — an unreadable file is treated as absent and the store step
+/// reports the real write failure).
+fn existingDigest(allocator: std.mem.Allocator, path: []const u8) std.mem.Allocator.Error!?[64]u8 {
+    const old = infra_fs.cwd().readFileAlloc(allocator, path, max_pdf_bytes) catch return null;
+    defer allocator.free(old);
+    return hexDigest(old);
+}
+
+/// Derive a filename from `url`'s last path segment, dropping any query or
+/// fragment (vendor links routinely append `?ts=…`). `sanitizeFilename` then
+/// whitelists it and forces the `.pdf` suffix.
+fn nameFromUrl(url: []const u8) []const u8 {
+    const end = std.mem.indexOfAny(u8, url, "?#") orelse url.len;
+    const scheme = std.mem.indexOf(u8, url[0..end], "://") orelse return fallback_name;
+    // Search inside the authority only, so a scheme-relative host with no path
+    // (`https://ti.com`) falls back instead of naming the file after the host.
+    const authority = url[scheme + "://".len .. end];
+    const slash = std.mem.lastIndexOfAny(u8, authority, "/") orelse return fallback_name;
+    const segment = authority[slash + 1 ..];
+    return if (segment.len == 0) fallback_name else segment;
+}
+
+/// Retrieve `url` with the system curl, following redirects, bounded in bytes
+/// and wall-clock. `--` ends option parsing so a `-`-leading URL can never be
+/// reinterpreted as a flag; `fetch` has already whitelisted the URL's bytes.
+/// curl rather than `std.http.Client` because TLS, redirect chains and vendor
+/// CDNs are exactly what the system client already handles for every other
+/// off-site fetch in this tree (CSE, DigiKey), and `runCaptured` gives it the
+/// timeout + process-group kill that a wedged download needs.
+fn curlFetch(allocator: std.mem.Allocator, url: []const u8) std.mem.Allocator.Error!Fetched {
+    const res = try subprocess.runCaptured(allocator, &[_][]const u8{
+        "curl",                "-sS",
+        "-L",                  "--max-time",
+        download_timeout_secs, "--max-filesize",
+        max_filesize_arg,      "-A",
+        browser_ua,            "--",
+        url,
+    }, max_download_bytes, download_timeout_ms);
+    if (res.outcome != .ok) {
+        res.deinit(allocator);
+        return .{ .err = transportError(res.outcome) };
+    }
+    if (res.exit_code != @as(?u8, 0)) {
+        res.deinit(allocator);
+        return .{ .err = "curl could not retrieve the URL (network error, TLS failure, or HTTP error status)" };
+    }
+    return .{ .bytes = res.stdout };
+}
+
+/// Stable message for a non-`ok` subprocess outcome.
+fn transportError(outcome: subprocess.Outcome) []const u8 {
+    if (outcome == .timed_out) return "the download timed out";
+    if (outcome == .output_too_long) return "the download exceeds the 64 MiB datasheet size limit";
+    return "failed to run curl";
+}
+
+/// `{"ok":false,"error":…}` for a fetch failure.
+fn writeFetchError(w: AllocatingWriter, message: []const u8) std.mem.Allocator.Error!void {
+    try w.writeAll("{\"ok\":false,\"error\":");
+    json_writer.writeString(w, message) catch return error.OutOfMemory;
+    try w.writeAll("}");
+}
+
+/// Refusal for bytes that are not a PDF. Content sniffing, not `Content-Type`:
+/// a vendor login wall or cookie interstitial answers 200 with `text/html` or
+/// even `application/pdf`, and only the magic bytes tell them apart.
+fn writeNotPdf(w: AllocatingWriter, bytes: usize) std.mem.Allocator.Error!void {
+    try w.print(
+        "{{\"ok\":false,\"error\":\"the URL returned {d} bytes with no %PDF header" ++
+            " (an HTML interstitial or login wall, not a datasheet)\"}}",
+        .{bytes},
+    );
+}
+
+/// Refusal for a same-name fetch whose bytes differ from the stored file.
+fn writeConflict(
+    w: AllocatingWriter,
+    name: []const u8,
+    existing: []const u8,
+    fetched: []const u8,
+) std.mem.Allocator.Error!void {
+    try w.writeAll("{\"ok\":false,\"error\":\"a different file is already stored under this name;" ++
+        " pass overwrite:true to replace it, or choose another name\",\"name\":");
+    json_writer.writeString(w, name) catch return error.OutOfMemory;
+    try w.writeAll(",\"existing_sha256\":");
+    json_writer.writeString(w, existing) catch return error.OutOfMemory;
+    try w.writeAll(",\"sha256\":");
+    json_writer.writeString(w, fetched) catch return error.OutOfMemory;
+    try w.writeAll("}");
+}
+
+/// `{"ok":true,…}` for a stored (or already-identical) datasheet.
+fn writeFetchResult(
+    w: AllocatingWriter,
+    name: []const u8,
+    sha256: []const u8,
+    bytes: usize,
+    status: []const u8,
+) std.mem.Allocator.Error!bool {
+    try w.writeAll("{\"ok\":true,\"name\":");
+    json_writer.writeString(w, name) catch return error.OutOfMemory;
+    try w.writeAll(",\"sha256\":");
+    json_writer.writeString(w, sha256) catch return error.OutOfMemory;
+    try w.print(",\"bytes\":{d},\"status\":", .{bytes});
+    json_writer.writeString(w, status) catch return error.OutOfMemory;
+    try w.writeAll("}");
+    return true;
+}
+
 // ── Tests ─────────────────────────────────────────────────────────
 
 test "window clamps offset and limit and flags truncation" {
@@ -191,6 +433,138 @@ test "window clamps offset and limit and flags truncation" {
     const tail = window(text, 5, 100);
     try std.testing.expectEqualStrings("56789", tail.slice);
     try std.testing.expect(!tail.truncated);
+}
+
+/// Stub transport: a minimal but real PDF. sha256 94b8f2a1…02a0 (verified
+/// against `sha256sum` outside the tree, so the assertion is independent of
+/// `hexDigest`).
+fn stubPdf(allocator: std.mem.Allocator, url: []const u8) std.mem.Allocator.Error!Fetched {
+    _ = url;
+    return .{ .bytes = try allocator.dupe(u8, "%PDF-1.7\nstub datasheet\n") };
+}
+
+/// Stub transport: a different, equally valid PDF. sha256 f448092d…a634.
+fn stubOtherPdf(allocator: std.mem.Allocator, url: []const u8) std.mem.Allocator.Error!Fetched {
+    _ = url;
+    return .{ .bytes = try allocator.dupe(u8, "%PDF-1.7\nDIFFERENT datasheet\n") };
+}
+
+/// Stub transport: what a login wall or cookie interstitial actually serves.
+fn stubHtml(allocator: std.mem.Allocator, url: []const u8) std.mem.Allocator.Error!Fetched {
+    _ = url;
+    return .{ .bytes = try allocator.dupe(u8, "<!doctype html><title>Sign in</title>") };
+}
+
+const stub_pdf_sha = "94b8f2a1a771cb19c88ad2fa269c58f20a50a9cb6183ab05d0ea71700c7802a0";
+const stub_other_sha = "f448092d256efb8663458bd7f2422438294740216be383811f29e492492fa634";
+
+/// Run one `fetch` against a scratch project dir, returning the JSON envelope
+/// (caller owns). Keeps the tests free of the tmp-dir boilerplate.
+fn fetchInto(allocator: std.mem.Allocator, root: []const u8, req: FetchRequest) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    _ = try fetch(allocator, root, req, &out);
+    return out.toOwnedSlice(allocator);
+}
+
+// spec: serve/datasheet - fetch_datasheet stores a fetched PDF under a sanitized lib/datasheets name and reports its sha256 and byte count
+test "fetch stores a PDF under a sanitized name" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+
+    // The URL's last segment carries a query and unsafe bytes; the stored name
+    // is whitelisted and forced to .pdf, and nothing escapes lib/datasheets/.
+    const body = try fetchInto(std.testing.allocator, root, .{
+        .url = "https" ++ "://example.invalid/lit/ds/lm+66100(1).pdf?ts=17",
+        .transport = stubPdf,
+    });
+    defer std.testing.allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"ok\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"name\":\"lm_66100.pdf\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"sha256\":\"" ++ stub_pdf_sha ++ "\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"bytes\":24") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"status\":\"written\"") != null);
+
+    const stored = try tmp.dir.readFileAlloc(std.testing.io, "lib/datasheets/lm_66100.pdf", std.testing.allocator, .limited64(1024));
+    defer std.testing.allocator.free(stored);
+    try std.testing.expectEqualStrings("%PDF-1.7\nstub datasheet\n", stored);
+}
+
+// spec: serve/datasheet - fetch_datasheet re-fetching identical bytes is idempotent and reports the unchanged digest
+test "fetch is idempotent for identical bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const req: FetchRequest = .{ .url = "https" ++ "://example.invalid/lt3045.pdf", .transport = stubPdf };
+
+    const first = try fetchInto(std.testing.allocator, root, req);
+    defer std.testing.allocator.free(first);
+    try std.testing.expect(std.mem.indexOf(u8, first, "\"status\":\"written\"") != null);
+
+    const second = try fetchInto(std.testing.allocator, root, req);
+    defer std.testing.allocator.free(second);
+    try std.testing.expect(std.mem.indexOf(u8, second, "\"ok\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, second, "\"status\":\"unchanged\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, second, "\"sha256\":\"" ++ stub_pdf_sha ++ "\"") != null);
+}
+
+// spec: serve/datasheet - fetch_datasheet refuses to replace a stored datasheet whose bytes differ unless overwrite is requested
+test "fetch refuses a silent overwrite of different bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const url = "https" ++ "://example.invalid/lt3045.pdf";
+
+    const first = try fetchInto(std.testing.allocator, root, .{ .url = url, .transport = stubPdf });
+    defer std.testing.allocator.free(first);
+
+    const clash = try fetchInto(std.testing.allocator, root, .{ .url = url, .transport = stubOtherPdf });
+    defer std.testing.allocator.free(clash);
+    try std.testing.expect(std.mem.indexOf(u8, clash, "\"ok\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, clash, "\"existing_sha256\":\"" ++ stub_pdf_sha ++ "\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, clash, "\"sha256\":\"" ++ stub_other_sha ++ "\"") != null);
+    // The refusal left the stored bytes alone.
+    const kept = try tmp.dir.readFileAlloc(std.testing.io, "lib/datasheets/lt3045.pdf", std.testing.allocator, .limited64(1024));
+    defer std.testing.allocator.free(kept);
+    try std.testing.expectEqualStrings("%PDF-1.7\nstub datasheet\n", kept);
+
+    // overwrite:true is the explicit opt-in and does replace them.
+    const forced = try fetchInto(std.testing.allocator, root, .{ .url = url, .transport = stubOtherPdf, .overwrite = true });
+    defer std.testing.allocator.free(forced);
+    try std.testing.expect(std.mem.indexOf(u8, forced, "\"status\":\"written\"") != null);
+    const replaced = try tmp.dir.readFileAlloc(std.testing.io, "lib/datasheets/lt3045.pdf", std.testing.allocator, .limited64(1024));
+    defer std.testing.allocator.free(replaced);
+    try std.testing.expectEqualStrings("%PDF-1.7\nDIFFERENT datasheet\n", replaced);
+}
+
+// spec: serve/datasheet - fetch_datasheet content-sniffs the %PDF magic and rejects a non-PDF body and any non-http(s) URL without writing
+test "fetch rejects non-PDF bodies and non-http URLs" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+
+    const html = try fetchInto(std.testing.allocator, root, .{ .url = "https" ++ "://example.invalid/x.pdf", .transport = stubHtml });
+    defer std.testing.allocator.free(html);
+    try std.testing.expect(std.mem.indexOf(u8, html, "\"ok\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "%PDF header") != null);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "lib/datasheets/x.pdf", .{}));
+
+    // A non-http scheme never reaches the transport at all.
+    const scheme = try fetchInto(std.testing.allocator, root, .{ .url = "file:///etc/passwd", .transport = stubPdf });
+    defer std.testing.allocator.free(scheme);
+    try std.testing.expect(std.mem.indexOf(u8, scheme, "absolute http(s) URL") != null);
+}
+
+// spec: serve/datasheet - fetch_datasheet derives its target name from the URL path segment, dropping query and fragment
+test "nameFromUrl drops query and fragment" {
+    try std.testing.expectEqualStrings("lm66100.pdf", nameFromUrl("https" ++ "://ti.com/lit/ds/lm66100.pdf?ts=1#page=3"));
+    try std.testing.expectEqualStrings("datasheet", nameFromUrl("https" ++ "://ti.com/lit/ds/"));
+    try std.testing.expectEqualStrings("datasheet", nameFromUrl("https" ++ "://ti.com"));
 }
 
 // spec: serve/datasheet - read_datasheet result exposes the current PDF digest for datasheet-review provenance

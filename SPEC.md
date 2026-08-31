@@ -6389,10 +6389,15 @@ Public functions: runCaptured, deinit
 
 ## serve/datasheet
 
-Public functions: read
+Public functions: read, fetch
 
 - window clamps offset and limit to the text and flags truncation
 - read_datasheet result exposes the current PDF digest for datasheet-review provenance
+- fetch_datasheet stores a fetched PDF under a sanitized lib/datasheets name and reports its sha256 and byte count
+- fetch_datasheet re-fetching identical bytes is idempotent and reports the unchanged digest
+- fetch_datasheet refuses to replace a stored datasheet whose bytes differ unless overwrite is requested
+- fetch_datasheet content-sniffs the %PDF magic and rejects a non-PDF body and any non-http(s) URL without writing
+- fetch_datasheet derives its target name from the URL path segment, dropping query and fragment
 
 ## serve/mcp_checks
 
@@ -6417,6 +6422,7 @@ Public functions: read
 - CLI virtual-file mutations refuse .layouts.json sidecars and direct callers to protected PCB layout tools
 - restore_layout_snapshot restores protected PCB layout history after snapshotting the current sidecar and bumping its revision
 - stitch_ground_pads applies the autorouter's final ground-reference pass transactionally to a saved layout
+- attach_datasheet links a stored PDF into the library component, refuses a filename absent from lib/datasheets, and reports an already-linked stem instead of duplicating it
 
 Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesignSummaries, renderSceneGraph, requireString, optionalString, optionalU64, optionalBool, missingArg
 

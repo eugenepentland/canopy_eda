@@ -27,6 +27,7 @@ const ids = @import("../eval/ids.zig");
 const review_json_mod = @import("../review_json.zig");
 const req_checks = @import("../req_checks.zig");
 const component_info = @import("component_info.zig");
+const datasheet_ref = @import("datasheet_ref.zig");
 const notes = @import("notes.zig");
 const warm_sched = @import("warm_sched.zig");
 const symbol_conv = @import("../convert/symbol.zig");
@@ -230,6 +231,15 @@ const tools = [_]ToolEntry{
     // Fetch a part's datasheet PDF from Component Search Engine into
     // lib/datasheets/, where read_datasheet can then extract its text.
     .{ .name = "download_datasheet", .is_mutation = true },
+    // Fetch a datasheet PDF from an explicit manufacturer URL into
+    // lib/datasheets/ — the escape hatch for every part the two catalogue
+    // providers above do not carry. Content-sniffed, size- and time-bounded,
+    // and it refuses to silently replace a stored file whose bytes differ.
+    .{ .name = "fetch_datasheet", .is_mutation = true },
+    // Declare a stored datasheet on a library component — splices
+    // (datasheet "file.pdf") into lib/components/<name>.sexp, which is what
+    // fills Instance.docs.datasheets and satisfies the datasheet coverage check.
+    .{ .name = "attach_datasheet", .is_mutation = true },
     // Search Component Search Engine and return candidate parts (read-only).
     // Pairs with download_footprint / download_datasheet to import a chosen one.
     .{ .name = "search_components", .is_mutation = false },
@@ -979,6 +989,62 @@ fn toolRestoreVersion(allocator: std.mem.Allocator, project_dir: []const u8, arg
     return true;
 }
 
+/// `attach_datasheet` — declare a stored PDF (or an HTTP(S) URL) on a library
+/// component by splicing `(datasheet "<file>")` into
+/// `lib/components/<component>.sexp`. The CLI twin of POST
+/// `/api/attach-datasheet`, and the authoring step `fetch_datasheet` feeds:
+/// fetching only puts bytes on disk, while THIS is what makes the part
+/// documented — `(datasheet …)` is what fills `Instance.docs.datasheets`, what
+/// `describe_component` reports, and what the coverage check counts. Idempotent:
+/// an already-linked stem returns ok with `"status":"already_linked"`.
+fn toolAttachDatasheet(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    args_val: ?std.json.Value,
+    out: *std.ArrayList(u8),
+) !bool {
+    const component = requireString(args_val, "component") orelse return missingArg(out, allocator, "component");
+    const file = requireString(args_val, "file") orelse return missingArg(out, allocator, "file");
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w = &aw.writer;
+
+    if (!datasheet_ref.isValid(file)) {
+        try w.writeAll("{\"ok\":false,\"error\":\"file must be a PDF filename in lib/datasheets/ or an http(s) URL\"}");
+        return false;
+    }
+    if (datasheet_ref.isLocal(file) and !try datasheetOnDisk(allocator, project_dir, file)) {
+        try w.writeAll("{\"ok\":false,\"error\":\"no such file in lib/datasheets/ — fetch_datasheet or upload it first\"}");
+        return false;
+    }
+    const result = edit.addComponentDatasheetCore(allocator, project_dir, component, file) catch |err| {
+        if (err == error.DuplicateImport) {
+            try w.writeAll("{\"ok\":true,\"status\":\"already_linked\",\"component\":");
+            try json_writer.writeString(w, component);
+            try w.writeAll("}");
+            return true;
+        }
+        try w.writeAll("{\"ok\":false,\"error\":");
+        try json_writer.writeString(w, @errorName(err));
+        try w.writeAll("}");
+        return false;
+    };
+    try w.writeAll("{\"ok\":true,\"status\":\"linked\",\"component\":");
+    try json_writer.writeString(w, component);
+    try w.writeAll(",\"file\":");
+    try json_writer.writeString(w, file);
+    try w.print(",\"live_version\":{d}}}", .{result.version});
+    return true;
+}
+
+/// True when `file` names an existing PDF under `lib/datasheets/`.
+fn datasheetOnDisk(allocator: std.mem.Allocator, project_dir: []const u8, file: []const u8) !bool {
+    const path = try std.fmt.allocPrint(allocator, "{s}/lib/datasheets/{s}", .{ project_dir, file });
+    defer allocator.free(path);
+    infra_fs.cwd().access(path, .{}) catch return false;
+    return true;
+}
+
 /// Dispatch the virtual-filesystem tools (read_file/write_file/edit_file/
 /// list_dir/glob/delete_file/move_file) and the `build` worker. Returns
 /// `null` when `tool_name` is none of those, so the caller can keep
@@ -1003,6 +1069,8 @@ fn dispatchVfs(
     if (std.mem.eql(u8, tool_name, "regenerate_pinout")) return try toolRegeneratePinout(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     if (std.mem.eql(u8, tool_name, "download_footprint")) return try mcp_parts_tools.toolDownloadFootprint(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     if (std.mem.eql(u8, tool_name, "download_datasheet")) return try mcp_parts_tools.toolDownloadDatasheet(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
+    if (std.mem.eql(u8, tool_name, "fetch_datasheet")) return try mcp_parts_tools.toolFetchDatasheet(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
+    if (std.mem.eql(u8, tool_name, "attach_datasheet")) return try toolAttachDatasheet(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     return null;
 }
 
@@ -2866,4 +2934,45 @@ test "a failed build caches against the import search dirs and re-evaluates when
     const second = try listDesignSummaries(alloc, root);
     try testing.expectEqual(@as(usize, 1), second.len);
     try testing.expect(second[0].build_ok);
+}
+
+// spec: serve/mcp_tools - attach_datasheet links a stored PDF into the library component, refuses a filename absent from lib/datasheets, and reports an already-linked stem instead of duplicating it
+test "attach_datasheet links a stored datasheet and is idempotent" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.createDirPath(std.testing.io, "lib/datasheets");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/lm66100.sexp",
+        .data = "(component lm66100\n  (footprint sc70-6))\n",
+    });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/datasheets/lm66100.pdf", .data = "%PDF-1.7\n" });
+    const proj = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+
+    // A name that is not on disk is refused before the library file is touched.
+    const absent = try std.json.parseFromSliceLeaky(std.json.Value, alloc, "{\"component\":\"lm66100\",\"file\":\"nope.pdf\"}", .{});
+    var missing_out: std.ArrayList(u8) = .empty;
+    try std.testing.expect(!try toolAttachDatasheet(alloc, proj, absent, &missing_out));
+    try std.testing.expect(std.mem.indexOf(u8, missing_out.items, "lib/datasheets/") != null);
+    const untouched = try tmp.dir.readFileAlloc(std.testing.io, "lib/components/lm66100.sexp", alloc, .limited64(4096));
+    try std.testing.expect(std.mem.indexOf(u8, untouched, "datasheet") == null);
+
+    // The stored PDF links, and the (datasheet …) form lands inside the component.
+    const args = try std.json.parseFromSliceLeaky(std.json.Value, alloc, "{\"component\":\"lm66100\",\"file\":\"lm66100.pdf\"}", .{});
+    var out: std.ArrayList(u8) = .empty;
+    try std.testing.expect(try toolAttachDatasheet(alloc, proj, args, &out));
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"status\":\"linked\"") != null);
+    const linked = try tmp.dir.readFileAlloc(std.testing.io, "lib/components/lm66100.sexp", alloc, .limited64(4096));
+    try std.testing.expect(std.mem.indexOf(u8, linked, "(datasheet \"lm66100.pdf\")") != null);
+
+    // Re-running reports the existing link rather than adding a second one.
+    var again: std.ArrayList(u8) = .empty;
+    try std.testing.expect(try toolAttachDatasheet(alloc, proj, args, &again));
+    try std.testing.expect(std.mem.indexOf(u8, again.items, "\"status\":\"already_linked\"") != null);
+    const once = try tmp.dir.readFileAlloc(std.testing.io, "lib/components/lm66100.sexp", alloc, .limited64(4096));
+    try std.testing.expectEqualStrings(linked, once);
 }
