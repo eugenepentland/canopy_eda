@@ -195,10 +195,10 @@ pub fn compose(allocator: std.mem.Allocator, sections: []const Section, opts: Op
     try w.writeAll("\n</style>\n</head>\n<body>\n");
 
     try writeMasthead(w, sections, opts);
-    try writeBoardGallery(allocator, w, opts);
     try w.writeAll("<div class=\"workspace\">\n");
     try writeSectionIndex(w, sections, opts, nodes.items);
     try w.writeAll("<main class=\"document\" id=\"review-document\">\n");
+    try writeBoardGallery(allocator, w, opts);
     try writeExecutiveSummary(w, sections, opts);
     try w.print("<section class=\"evidence\" id=\"review-evidence\" aria-labelledby=\"evidence-title\">\n" ++
         "<div class=\"evidence-head\"><div><p class=\"kicker\">Complete evidence record</p>" ++
@@ -915,7 +915,7 @@ const stylesheet =
     \\.mh-notice.is-draft strong{color:var(--warn);}
     \\.mh-notice.is-release{background:linear-gradient(90deg,rgba(123,212,154,.12),transparent 70%);}
     \\.mh-notice.is-release strong{color:var(--good);}
-    \\.board-gallery{width:min(1480px,100%);margin:0 auto;padding:28px 30px 10px;scroll-margin-top:18px;}
+    \\.board-gallery{width:100%;margin:0 0 28px;padding:0;scroll-margin-top:18px;}
     \\.gallery-head{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:15px;}
     \\.gallery-head h2{font-size:24px;letter-spacing:-.025em;margin:0;}
     \\.gallery-head p:last-child{font-size:13px;color:var(--ink-2);margin:6px 0 0;}
@@ -1101,7 +1101,6 @@ const stylesheet =
     \\.mh-status{min-height:0;padding:14px 16px;}
     \\.mh-status strong{font-size:22px;}
     \\.mh-notice{margin:0 -18px;padding:10px 18px;}
-    \\.board-gallery{padding:22px 14px 6px;}
     \\.gallery-head,.board-visual>header{align-items:flex-start;}
     \\.assembly-toolbar{align-items:flex-start;flex-direction:column;}
     \\.assembly-toolbar>span{text-align:left;}
@@ -1272,7 +1271,7 @@ test "system review HTML marks draft state and numbers every section" {
     try testing.expect(std.mem.indexOf(u8, release_html, release_marker) != null);
 }
 
-// spec: system-review - the dossier indexes every section in a sticky sidebar and renders the evidence once as one continuous document without repeating its title
+// spec: system-review - the dossier places its sticky section index beside the leading board gallery so the sidebar remains visible throughout the interactive board views and the one continuous evidence document, without repeating section titles
 test "system review HTML is indexed and linear" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1284,6 +1283,19 @@ test "system review HTML is indexed and linear" {
         .classification = "checklist",
         .markdown = "# Release checklist\n\n```md\n- [ ] Example only\n```\n\n- [ ] Confirm identity\n+ [ ] Confirm fabrication\n",
         .checklist = .{ .total = 2, .open = 2 },
+    }};
+    const boards = [_]Board{.{
+        .identity = .{
+            .role = "main",
+            .design = "one",
+            .title = "One",
+            .part_number = "ONE",
+            .revision = "A",
+            .layout = "layout-a",
+            .generated_at = "2026-08-30T00:00:00Z",
+        },
+        .review = .{ .status = "pass", .open_notes = 0 },
+        .fabrication = .ready,
     }};
     const html = try compose(allocator, &sections, .{
         .spec = &parsed.value,
@@ -1307,11 +1319,17 @@ test "system review HTML is indexed and linear" {
             },
         },
         .checklist = .{ .total = 2, .open = 2 },
+        .boards = &boards,
     });
     try testing.expect(std.mem.indexOf(u8, html, "Executive summary") != null);
     try testing.expect(std.mem.indexOf(u8, html, "3 of 6 gates clear") != null);
     try testing.expect(std.mem.indexOf(u8, html, "2 open · 0/2 checks complete") != null);
     try testing.expect(std.mem.indexOf(u8, html, "<aside class=\"section-index\"") != null);
+    const aside = std.mem.indexOf(u8, html, "<aside class=\"section-index\"").?;
+    const document = std.mem.indexOf(u8, html, "<main class=\"document\"").?;
+    const gallery = std.mem.indexOf(u8, html, "<section class=\"board-gallery\"").?;
+    try testing.expect(aside < document and document < gallery);
+    try testing.expect(std.mem.indexOf(u8, html, ".section-index{position:sticky;top:18px") != null);
     try testing.expect(std.mem.indexOf(u8, html, "<li><a href=\"#s1\"") != null);
     try testing.expect(std.mem.indexOf(u8, html, "<section class=\"sec\" id=\"s1\">") != null);
     try testing.expect(std.mem.indexOf(u8, html, "<details class=\"sec\"") == null);
@@ -1416,9 +1434,12 @@ test "system review HTML leads with interactive physical board viewers" {
         .checklist = .{},
         .boards = &boards,
     });
-    const gallery = std.mem.indexOf(u8, html, "<section class=\"board-gallery\"").?;
     const workspace = std.mem.indexOf(u8, html, "<div class=\"workspace\">").?;
-    try testing.expect(gallery < workspace);
+    const aside = std.mem.indexOf(u8, html, "<aside class=\"section-index\"").?;
+    const document = std.mem.indexOf(u8, html, "<main class=\"document\"").?;
+    const gallery = std.mem.indexOf(u8, html, "<section class=\"board-gallery\"").?;
+    try testing.expect(workspace < aside and aside < document and document < gallery);
+    try testing.expect(std.mem.indexOf(u8, html, ".section-index{position:sticky;top:18px") != null);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, html, "data:image/png;base64,"));
     try testing.expect(std.mem.indexOf(u8, html, "class=\"assembly-frame\"") != null);
     try testing.expect(std.mem.indexOf(u8, html, "data-side=\"top\" aria-pressed=\"true\"") != null);
@@ -1428,7 +1449,7 @@ test "system review HTML leads with interactive physical board viewers" {
     try testing.expect(std.mem.indexOf(u8, html, "\\u003cscript>PCB.physical_review=true\\u003c/script>") != null);
     try testing.expect(std.mem.indexOf(u8, html, "PCB Layout</span>") == null);
     try testing.expect(std.mem.indexOf(u8, html, "class=\"layout-view\"") == null);
-    const aside_start = std.mem.indexOf(u8, html, "<aside class=\"section-index\"").?;
+    const aside_start = aside;
     const aside_end_rel = std.mem.indexOf(u8, html[aside_start..], "</aside>").?;
     try testing.expect(std.mem.indexOf(u8, html[aside_start .. aside_start + aside_end_rel], "Interface contacts") == null);
     try testing.expect(std.mem.indexOf(u8, html, "href=\"#board-views\"") != null);

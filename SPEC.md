@@ -5580,7 +5580,7 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - the offline HTML dossier is one self-contained file with no external request; its only executable content is the inlined read-only Assembly board viewer and the small shell that installs cached model sprites and drives board-side selection
 - the offline HTML dossier ships beside the combined Markdown and PDF in draft and release, carrying the draft marker only in draft
 - the HTML dossier carries the draft marker only in draft mode and numbers one section per manifest document
-- the dossier indexes every section in a sticky sidebar and renders the evidence once as one continuous document without repeating its title
+- the dossier places its sticky section index beside the leading board gallery so the sidebar remains visible throughout the interactive board views and the one continuous evidence document, without repeating section titles
 - every board leads the dossier with one Assembly physical-review viewer, defaulted to top and offering top/bottom selection plus the shared wheel/pinch zoom and drag-pan behavior; the viewer uses solder mask/exposed-copper rendering and deduplicated cached 3D-model sprites, no PCB-editor Layout figure is integrated, and the sidebar contains section navigation rather than interface-contact metrics
 - the dossier leads with a structured gate summary and distinguishes waiver-required evidence from an accepted release waiver
 - the HTML dossier inlines each board's block diagram and omits the figure when the design has none
