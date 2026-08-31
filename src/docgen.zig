@@ -289,6 +289,27 @@ fn renderDatasheetReview(writer: anytype) !void {
         \\
         \\## Datasheet review preflight
         \\
+        \\A component declares the datasheets that document it with one
+        \\`(datasheet "…")` field per PDF, directly inside its
+        \\`lib/components/<name>.sexp` definition:
+        \\
+        \\```lisp
+        \\(component lm66100
+        \\  (footprint sc70-6)
+        \\  (datasheet "LM66100DCKR.pdf"))
+        \\```
+        \\
+        \\The value is either a filename in `lib/datasheets/` or an absolute
+        \\`http(s)` URL (for a PDF that may not be redistributed). This one
+        \\field is what fills each placed instance's `docs.datasheets`, what
+        \\`describe_component` reports under `datasheets`, what a
+        \\`(datasheet-review …)` record must name, and what the datasheet
+        \\coverage check requires of every active IC — a PDF sitting in
+        \\`lib/datasheets/` that no component declares documents nothing. The
+        \\whole chain has CLI tools: `fetch_datasheet` (URL → the PDF on disk),
+        \\`attach_datasheet` (PDF → this declaration), `read_datasheet` (text +
+        \\the `sha256` to cite below).
+        \\
         \\Active-component library records may bind their requirement review
         \\to an exact PDF using `(datasheet-review …)`. `read_datasheet`
         \\returns the current PDF `sha256`; replacing that file automatically

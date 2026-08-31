@@ -485,6 +485,24 @@ fn writeOptNum(w: anytype, n: ?f64) !void {
     }
 }
 
+/// Fetch a datasheet PDF straight from a URL into `lib/datasheets/`. The
+/// escape hatch for every part the two catalogue providers behind
+/// `download_datasheet` do not carry — an agent that has the manufacturer's
+/// own PDF link points this at it. Writes only into `lib/datasheets/`.
+pub fn toolFetchDatasheet(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    args_val: ?std.json.Value,
+    out: *std.ArrayList(u8),
+) std.mem.Allocator.Error!bool {
+    const url = requireString(args_val, "url") orelse return missingArg(out, allocator, "url");
+    return datasheet.fetch(allocator, project_dir, .{
+        .url = url,
+        .name = optionalString(args_val, "name"),
+        .overwrite = mcp_tools.optionalBool(args_val, "overwrite") orelse false,
+    }, out);
+}
+
 /// Read a window of a stored datasheet's extracted text — the read-side twin
 /// of `download_datasheet`.
 pub fn toolReadDatasheet(
