@@ -1100,6 +1100,33 @@ pub const PowerRail = struct {
     enable_net: []const u8 = "",
 };
 
+/// The proven worst-case DC potential range a net's copper reaches, keyed by
+/// the FLATTENED net name (`buck_5v75/VIN_F`, `V_12V`) so a sub-block-internal
+/// node is nameable at all. Release rating checks read these exactly as they
+/// read a `PowerRail`'s rated envelope, which is what lets a part sitting two
+/// ferrites deep inside a module have its voltage and dissipation proved.
+///
+/// `origin` records how the envelope was established, because the two sources
+/// carry different authority: `.derived` is a consequence of declarations the
+/// design already made (a module port's `(rated …)`, a rail, a DC-conducting
+/// ferrite between them), while `.declared` is an author's `(net-envelope …)`
+/// assertion about something the topology cannot derive — a GPIO's drive level,
+/// a divider's output. A `.declared` envelope that fails to cover a `.derived`
+/// one for the same net is a contradiction, and reported as such.
+pub const NetEnvelope = struct {
+    /// How an envelope was established: `derived` follows from declarations the
+    /// design already makes, `declared` is an author's `(net-envelope …)`.
+    pub const Origin = enum { derived, declared };
+
+    /// Flattened (`sub-block/`-scoped, net-tie-canonicalised) net name.
+    net: []const u8,
+    min: f64,
+    max: f64,
+    origin: Origin = .derived,
+    /// Free text from a `(net-envelope … "why")`; empty when derived.
+    rationale: []const u8 = "",
+};
+
 /// Board-level transient intent for one physical power domain. Unlike the DC
 /// power budget, PDN domains are not collapsed through ferrite beads: the
 /// authored `net` names the copper node whose impedance is to be screened.
@@ -2044,6 +2071,13 @@ pub const DesignBlock = struct {
     /// `evalDesignBlock`. Empty for blocks with no regulator sub-blocks or
     /// board-edge power ports.
     rails: []const PowerRail = &.{},
+    /// Worst-case DC voltage envelopes per FLAT net name, populated by
+    /// `eval/net_envelopes.build`. Separate from `rails` on purpose: a rail is
+    /// a node in the supply tree (it gets a test point, a current budget, a PDN
+    /// screen), while an envelope is only "what potential does copper on this
+    /// net reach", which is also true of a filtered pin node and of a signal
+    /// whose driver the author declared.
+    net_envelopes: []const NetEnvelope = &.{},
     /// Explicit AC target-impedance intent. This stays separate from `rails`
     /// because those entries intentionally union ferrite-connected nets for
     /// DC budgeting while a ferrite is an AC element/domain boundary.

@@ -520,7 +520,7 @@ pub const Evaluator = struct {
                 // Collect additional args as schematic attributes
                 var attrs: std.ArrayList([]const u8) = .empty;
                 for (args[1..]) |attr_node| {
-                    const attr = attr_node.asText() orelse continue;
+                    const attr = attributeText(attr_node, env) orelse continue;
                     attrs.append(self.allocator, attr) catch continue;
                 }
                 return .{ .component_instance = .{
@@ -540,7 +540,65 @@ pub const Evaluator = struct {
     }
 };
 
+/// Resolve one trailing argument of a component-family call — `x7r` in
+/// `(cap-0402 "100nF" x7r "10%" "25V")` — to the attribute text that reaches
+/// the BOM and the schematic.
+///
+/// Two spellings must both keep working, and they are indistinguishable at the
+/// AST level because both are bare atoms:
+///
+///   * an attribute WORD from the passives vocabulary (`x7r`, `np0`, `jumper`),
+///     which is literal source text and is bound to nothing;
+///   * a defmodule PARAMETER (`(res-0402 rt rt-selector "0.063W" "50V")` in
+///     `lib/modules/tpsm84338.sexp`), whose value the CALLER chose.
+///
+/// Reading `asText()` for both — the behaviour until 2026-08-31 — froze the
+/// parameter's own spelling into the design, so every board instantiating that
+/// buck shipped a resistor whose tolerance attribute was the literal string
+/// `"rt-selector"`. It matched no parts-table row, which left the part with no
+/// resolved rating and made its release finding unclosable by authoring.
+///
+/// The environment therefore gets first refusal on a bare atom, and an atom
+/// bound to nothing (or to something that is not a string — a component, a
+/// module) falls back to its own spelling: an unbound word is a word. Quoted
+/// strings are always literal, and everything else (a list, a number) is
+/// dropped exactly as before.
+fn attributeText(node: Node, env: *Env) ?[]const u8 {
+    if (node.asString()) |literal| return literal;
+    const word = node.asAtom() orelse return null;
+    const bound = env.get(word) orelse return word;
+    return bound.asString() orelse word;
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
+
+// spec: eval/evaluator - A component-family attribute resolves a bound parameter to its value while an unbound vocabulary word stays literal
+test "component-family attributes resolve parameters and keep bare words" {
+    // page_allocator: evaluator-allocated attribute slices are never freed.
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    try eval.component_cache.put(alloc, "res-0402", .{
+        .name = "res-0402",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = true,
+        .param_type = "",
+    });
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+    // `rt-selector` is a defmodule parameter (lib/modules/tpsm84338.sexp binds
+    // it to a tolerance); `jumper` is an attribute word bound to nothing.
+    try env.put("rt-selector", .{ .string = "1%" });
+
+    const nodes = try parser_mod.parse(alloc, "(res-0402 \"0R\" rt-selector jumper \"0.063W\")");
+    const value = try eval.evalNode(nodes[0], &env);
+    const attrs = value.component_instance.attrs;
+    try std.testing.expectEqual(@as(usize, 3), attrs.len);
+    try std.testing.expectEqualStrings("1%", attrs[0]);
+    try std.testing.expectEqualStrings("jumper", attrs[1]);
+    try std.testing.expectEqualStrings("0.063W", attrs[2]);
+}
 
 // spec: eval/evaluator - last_error records the source span of an unknown form so callers can report file:line:col
 test "unknown form populates last_error with span" {

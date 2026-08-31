@@ -489,8 +489,16 @@ test "passive rating parser treats mOhm as milliohms" {
 
 const VoltageRange = struct { min: f64, max: f64 };
 
+/// The proven worst-case potential range on `name`, or null when the design
+/// declares nothing that bounds it.
+///
+/// Three sources, in order of specificity. `baseNetName` strips the `.ref.pin`
+/// suffix of a per-pin split net but NOT a `sub-block/` prefix, which is why a
+/// module-internal name never matched a rail: rails are always top-level. The
+/// envelope table is keyed by the flat name exactly as the netlist spells it,
+/// so `buck_5v75/VIN_F` matches there and nowhere else.
 fn railVoltage(placement: optimizer.Placement, name: []const u8) ?VoltageRange {
-    if (net_analysis.isGroundName(name)) return .{ .min = 0, .max = 0 };
+    if (net_analysis.isRatingZeroVolts(name)) return .{ .min = 0, .max = 0 };
     const base = net_analysis.baseNetName(name);
     for (placement.rules.physical.rail_model.specs) |rail| {
         const minimum = rail.rated_voltage.min orelse rail.nominal orelse continue;
@@ -498,6 +506,9 @@ fn railVoltage(placement: optimizer.Placement, name: []const u8) ?VoltageRange {
         const range = VoltageRange{ .min = @min(minimum, maximum), .max = @max(minimum, maximum) };
         if (std.ascii.eqlIgnoreCase(base, rail.name)) return range;
         for (rail.aliases) |alias| if (std.ascii.eqlIgnoreCase(base, alias)) return range;
+    }
+    for (placement.rules.physical.rail_model.net_envelopes) |envelope| {
+        if (std.ascii.eqlIgnoreCase(base, envelope.net)) return .{ .min = envelope.min, .max = envelope.max };
     }
     return null;
 }

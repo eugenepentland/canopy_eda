@@ -50,6 +50,11 @@ pub const RailModel = struct {
     /// these nominal voltages to evaluate authored DC-bias curves rather than
     /// applying one package-wide capacitance factor to every supply voltage.
     specs: []const env.PowerRail = &.{},
+    /// Worst-case DC potential per FLAT net name. Wider than `specs`, which
+    /// only ever names a top-level supply: these also cover the nets a supply
+    /// reaches through a module-internal ferrite and the ones an author bounded
+    /// with `(net-envelope …)`. Release rating checks read both.
+    net_envelopes: []const env.NetEnvelope = &.{},
     /// Per-module declared draw on a rail, from each sub-block's input power
     /// port `(current typ max)`. Never part of the rail budget (see
     /// `power_budget.BranchLoad`): it exists so a series element sealed inside

@@ -154,6 +154,7 @@ pub const ScopeForm = enum {
     rough,
     stackup,
     pdn,
+    net_envelope,
     fabrication_layer,
     net_class,
     pll_loop,
@@ -207,6 +208,7 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "rough", .rough },
     .{ "stackup", .stackup },
     .{ "pdn", .pdn },
+    .{ "net-envelope", .net_envelope },
     .{ "fabrication-layer", .fabrication_layer },
     .{ "net-class", .net_class },
     .{ "pll-loop", .pll_loop },
@@ -678,6 +680,20 @@ pub const scope_form_docs = blk: {
             "the screen uses the rail's declared max-minus-typical load (or maximum load) and labels " ++
             "that assumption. Ferrite-connected nets require separate pdn forms because they are one " ++
             "DC budget but distinct AC domains.",
+    } };
+    t[@backingInt(ScopeForm.net_envelope)] = .{ .scope = tl, .doc = .{
+        .syntax = "(net-envelope \"NET\" (rated LO HI) [\"why\"])",
+        .summary = "Declare the worst-case DC potential range a net's copper reaches, for the release " ++
+            "rating checks. Most nets need no such form: a rail's envelope already follows its own " ++
+            "declaration, and it carries across a ferrite bead at any hierarchy depth onto the filtered " ++
+            "node beyond it, so a module's internal supply is derived rather than authored. This form is " ++
+            "for the nets no topology walk can bound — an enable a 3.3 V GPIO drives, a divider tap " ++
+            "sitting between two declared rails, a bus a transceiver holds. The net is named the way a " ++
+            "rail is: the FLATTENED name, so a board-level declaration reaches the module-local net " ++
+            "bridged onto it and a module-internal node is nameable as \"sub-block/NET\". The optional " ++
+            "trailing string records why. A declaration that fails to COVER the envelope the design " ++
+            "already proves for that net is a failed assertion, not a silent override — declaring an " ++
+            "enable at 3.3 V on a net a 5 V rail also reaches states something untrue.",
     } };
     t[@backingInt(ScopeForm.fabrication_layer)] = .{ .scope = tl, .doc = .{
         .syntax = "(fabrication-layer \"FILE.gbr\" (side top|bottom) (material \"NAME\") (thickness MM) " ++
