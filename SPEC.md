@@ -5149,6 +5149,7 @@ Public functions: analyze
 - a standalone module page's own out power port rates the rail it exports, so a module routed as the board still has a current figure to size copper against
 - only a `(current …)` on a top-level out port creates a rail, and an explicitly signal-kinded output never becomes one
 - a parent board reads a module's rating through its sub-block port, and the highest declared capacity wins a rail whichever way it was declared
+- a sub-block input power port's declared current is reported as a branch load for series sizing and never enters the rail's summed budget
 
 ## eval/thermal
 
@@ -7282,6 +7283,8 @@ Public functions: check, writeJson, savedOutline, declaredOutline, outlineDrift
 - logical file and directory aliases retain their exact resolved target through release verification
 - relative project roots resolve to the canonical absolute path identity recorded by the exact read trace
 - rail checks use worst-case voltage, reject underrating, preserve unknown endpoints, and size zero-ohm jumpers by rail current
+- a series element is charged the branch its own rail data declares, and the whole rail's worst case only when the design declared no branch
+- a rail with no per-branch declaration still charges every series element its whole worst-case load
 - saved rounded outlines must exactly match authored dimensions, radius, polygon, and native arcs
 - synthesized footprint fallback geometry is a non-waivable release identity failure
 - 0R0 is a zero-ohm jumper that requires authored current and maximum-resistance evidence, never tolerance

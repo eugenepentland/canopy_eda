@@ -36,11 +36,27 @@ pub const Physical = struct {
     via_plating_mm: f64 = env.default_via_plating_mm,
     stack: impedance.Stack = .{},
     rails: []const power_budget.Rail = &.{},
+    /// Everything the design DECLARED about its rails — see `RailModel`.
+    rail_model: RailModel = .{},
+};
+
+/// What the design SAYS about its rails, as opposed to what `Physical.rails`
+/// measures flowing on them: each rail's resolved identity, how much each
+/// module declares it draws from one, and the authored PDN impedance targets.
+/// Grouped so the three answers to "what did the author state about this rail?"
+/// travel as one value instead of three loose slices.
+pub const RailModel = struct {
     /// Voltage-resolved physical rail identities. PDN component models use
     /// these nominal voltages to evaluate authored DC-bias curves rather than
     /// applying one package-wide capacitance factor to every supply voltage.
-    rail_specs: []const env.PowerRail = &.{},
-    pdn_intents: []const env.PdnIntent = &.{},
+    specs: []const env.PowerRail = &.{},
+    /// Per-module declared draw on a rail, from each sub-block's input power
+    /// port `(current typ max)`. Never part of the rail budget (see
+    /// `power_budget.BranchLoad`): it exists so a series element sealed inside
+    /// a module is sized against the branch it feeds, not the whole rail.
+    branch_loads: []const power_budget.BranchLoad = &.{},
+    /// Authored `(pdn …)` ripple/step targets, one per declared intent.
+    intents: []const env.PdnIntent = &.{},
 };
 
 /// The design's `(stackup …)` as the impedance model's `Stack`. An undeclared

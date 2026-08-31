@@ -40,6 +40,7 @@ const env_mod = @import("eval/env.zig");
 const power_budget = @import("eval/power_budget.zig");
 const flat_netlist = @import("flat_netlist.zig");
 const net_identity = @import("placement/net_identity.zig");
+const net_names = @import("net_name.zig");
 const req_checks = @import("req_checks.zig");
 
 /// A part is treated as off-board (staged, not on the real board) when its
@@ -491,7 +492,7 @@ const VoltageRange = struct { min: f64, max: f64 };
 fn railVoltage(placement: optimizer.Placement, name: []const u8) ?VoltageRange {
     if (net_analysis.isGroundName(name)) return .{ .min = 0, .max = 0 };
     const base = net_analysis.baseNetName(name);
-    for (placement.rules.physical.rail_specs) |rail| {
+    for (placement.rules.physical.rail_model.specs) |rail| {
         const minimum = rail.rated_voltage.min orelse rail.nominal orelse continue;
         const maximum = rail.rated_voltage.max orelse rail.nominal orelse continue;
         const range = VoltageRange{ .min = @min(minimum, maximum), .max = @max(minimum, maximum) };
@@ -571,30 +572,144 @@ fn netMatchesRailName(name: []const u8, rail_name: []const u8) bool {
     return std.ascii.eqlIgnoreCase(base, net_analysis.baseNetName(rail_name));
 }
 
+fn ownsNet(net: flat_netlist.FlatNet, ref: []const u8) bool {
+    for (net.pins) |pin| if (std.mem.eql(u8, pin.ref_des, ref)) return true;
+    return false;
+}
+
+/// True when `ref` is a part sealed inside the sub-block `path` — flattening
+/// namespaces every module part as `path/REF`.
+fn refInsideSubBlock(ref: []const u8, path: []const u8) bool {
+    if (path.len == 0 or ref.len <= path.len + 1) return false;
+    return std.mem.startsWith(u8, ref, path) and ref[path.len] == '/';
+}
+
+/// Declared maximum drawn by the consumer rows keyed on `ref` ITSELF, in amps.
+/// A `(i-max …)` annotation carried on a bead's own pin — `(load "HMC733 VCO")`
+/// on the bead that feeds it — says exactly what that part carries.
+fn declaredCurrentOfRef(rail: power_budget.Rail, ref: []const u8) ?f64 {
+    var best: ?f64 = null;
+    for (rail.consumers) |consumer| {
+        if (!std.mem.eql(u8, consumer.ref_des, ref)) continue;
+        const i_max = consumer.i_max orelse continue;
+        best = @max(best orelse i_max, i_max);
+    }
+    return best;
+}
+
+/// Declared maximum drawn by every consumer of `rail` sitting on `net`, in
+/// amps — the branch current where `net` is a downstream leg rather than the
+/// rail's trunk. Consumer rows name a module's INTERNAL net ("VDD_FILT") while
+/// the flattened netlist prefixes it ("lna/VDD_FILT"), so the join is on the
+/// leaf; several legs sharing one leaf name sum, which can only over-attribute.
+fn declaredCurrentOnNet(rail: power_budget.Rail, net: []const u8) ?f64 {
+    var sum: f64 = 0;
+    var seen = false;
+    for (rail.consumers) |consumer| {
+        if (!std.ascii.eqlIgnoreCase(net_names.leaf(net), net_names.leaf(consumer.net))) continue;
+        const i_max = consumer.i_max orelse continue;
+        sum += i_max;
+        seen = true;
+    }
+    return if (seen) sum else null;
+}
+
+/// Declared maximum drawn by every consumer of `rail` that lives inside the
+/// sub-block `path`, in amps. A module's own annotated pins outrank its
+/// boundary declaration whenever they add up to more, so a stale or optimistic
+/// `(current …)` on the port can never shrink what the module demonstrably
+/// pulls.
+fn inModuleCurrent(rail: power_budget.Rail, path: []const u8) f64 {
+    var sum: f64 = 0;
+    for (rail.consumers) |consumer| {
+        if (!refInsideSubBlock(consumer.ref_des, path)) continue;
+        sum += consumer.i_max orelse 0;
+    }
+    return sum;
+}
+
+/// The module-boundary declaration covering `ref` on `rail`, in amps: `ref`
+/// lives inside a sub-block whose input power port states how much the whole
+/// module draws, and nothing inside it can carry more than the module does.
+fn branchCurrentForRef(
+    placement: optimizer.Placement,
+    rail: power_budget.Rail,
+    ref: []const u8,
+) ?f64 {
+    var best: ?f64 = null;
+    for (placement.rules.physical.rail_model.branch_loads) |branch| {
+        if (!netMatchesRailName(rail.net, branch.rail)) continue;
+        if (!refInsideSubBlock(ref, branch.path)) continue;
+        const declared = @max(branch.i_max orelse continue, inModuleCurrent(rail, branch.path));
+        best = @max(best orelse declared, declared);
+    }
+    return best;
+}
+
+/// The declared bound on what `ref` carries out of `rail`, or null when the
+/// design declared nothing more specific than the rail total.
+///
+/// The evidence sources combine with `@max`, never `@min`: each one is a
+/// complete statement about a branch only if its annotations are complete, and
+/// where two disagree the design has not proved the smaller of them. Sharpening
+/// attribution must not become a way to talk a rating down.
+fn attributedRailCurrent(
+    placement: optimizer.Placement,
+    rail: power_budget.Rail,
+    ref: []const u8,
+) ?f64 {
+    var best: ?f64 = declaredCurrentOfRef(rail, ref);
+    for (placement.nets) |net| {
+        if (netMatchesRailName(net.name, rail.net)) continue;
+        if (!ownsNet(net, ref)) continue;
+        const branch = declaredCurrentOnNet(rail, net.name) orelse continue;
+        best = @max(best orelse branch, branch);
+    }
+    if (branchCurrentForRef(placement, rail, ref)) |declared| {
+        best = @max(best orelse declared, declared);
+    }
+    return best;
+}
+
+/// Worst-case current a series element (ferrite, inductor, zero-ohm jumper)
+/// must carry, in amps, or null when no rail it touches declares a load.
+///
+/// The whole rail's `load_max_a` is the FALLBACK, never the first answer: a
+/// bead feeding one branch of a rail does not carry the rail's other branches,
+/// and charging it the rail total reports a part underrated purely because it
+/// shares a supply. Attribution therefore prefers whatever the design declared
+/// about the branch itself — a consumer row keyed on this very part, the
+/// consumers on a downstream leg the part sits on, or the module boundary
+/// declaration of the sub-block the part is sealed inside.
+///
+/// Each of those is an independent upper bound, so the answer is their MINIMUM
+/// alongside the rail total. A design that declares nothing branch-specific
+/// keeps exactly the whole-rail answer it had before: this narrows attribution
+/// where the design earned it, and never where it did not.
 fn railCurrentForRef(placement: optimizer.Placement, ref: []const u8) ?f64 {
     var result: ?f64 = null;
-    for (placement.nets) |net| {
-        var owns = false;
-        for (net.pins) |pin| if (std.mem.eql(u8, pin.ref_des, ref)) {
-            owns = true;
-            break;
-        };
-        if (!owns) continue;
-        for (placement.rules.physical.rails) |rail| {
-            var matches = netMatchesRailName(net.name, rail.net);
-            if (!matches) for (rail.consumers) |consumer| {
-                if (netMatchesRailName(net.name, consumer.net)) {
-                    matches = true;
-                    break;
-                }
-            };
-            if (!matches) continue;
-            if (!rail.any_max_load) continue;
-            if (!(rail.load_max_a > 0)) continue;
-            result = @max(result orelse 0, rail.load_max_a);
-        }
+    for (placement.rules.physical.rails) |rail| {
+        if (!rail.any_max_load) continue;
+        if (!(rail.load_max_a > 0)) continue;
+        if (!railTouchesRef(placement, rail, ref)) continue;
+        var amps = rail.load_max_a;
+        if (attributedRailCurrent(placement, rail, ref)) |declared| amps = @min(amps, declared);
+        result = @max(result orelse amps, amps);
     }
     return result;
+}
+
+/// True when `ref` has a pin on `rail`'s trunk net or on any net one of its
+/// consumers names — the same reach test the whole-rail attribution used.
+fn railTouchesRef(placement: optimizer.Placement, rail: power_budget.Rail, ref: []const u8) bool {
+    for (placement.nets) |net| {
+        if (!ownsNet(net, ref)) continue;
+        if (netMatchesRailName(net.name, rail.net)) return true;
+        for (rail.consumers) |consumer| {
+            if (netMatchesRailName(net.name, consumer.net)) return true;
+        }
+    }
+    return false;
 }
 
 fn appendUnproven(
@@ -891,7 +1006,7 @@ test "rail-aware passive ratings cover voltage unknown endpoints and zero-ohm cu
         .maxx = 1,
         .maxy = 1,
         .generated = false,
-        .rules = .{ .physical = .{ .rails = &rails, .rail_specs = &rail_specs } },
+        .rules = .{ .physical = .{ .rails = &rails, .rail_model = .{ .specs = &rail_specs } } },
     };
     var errors: std.ArrayList(Item) = .empty;
     var warnings: std.ArrayList(Item) = .empty;
@@ -904,6 +1019,161 @@ test "rail-aware passive ratings cover voltage unknown endpoints and zero-ohm cu
     try std.testing.expect(hasItemRefMessage(errors.items, "component-rating-invalid", "R0_BAD", "jumper rated current"));
     try std.testing.expect(hasItemRefMessage(errors.items, "component-rating-invalid", "R0_BAD", "maximum jumper resistance"));
     try std.testing.expect(!hasItemRef(errors.items, "component-rating-unproven", "R0_BAD"));
+}
+
+/// A ferrite whose selected part is fully evidenced, so the only thing the
+/// magnetics check can still fault is the current attributed to it.
+fn ratedFerrite(ref: []const u8, uuid: []const u8, properties: []const env_mod.Property) flat_netlist.FlatInstance {
+    return .{
+        .ref_des = ref,
+        .component = "ferrite-0402",
+        .value = "600R",
+        .footprint = "l0402",
+        .uuid = uuid,
+        .properties = properties,
+    };
+}
+
+// spec: fabrication-release - a series element is charged the branch its own rail data declares, and the whole rail's worst case only when the design declared no branch
+test "series-element current attribution prefers a declared branch over the whole rail" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // Every bead below is rated 50 mA, far under anything on this rail, so the
+    // message it produces states the exact current attribution reached.
+    const props = [_]env_mod.Property{
+        .{ .key = "rated-current", .value = "50mA" }, .{ .key = "dcr-max", .value = "0.5Ohm" },
+    };
+    const link_props = [_]env_mod.Property{
+        .{ .key = "power", .value = "63mW" },         .{ .key = "voltage", .value = "25V" },
+        .{ .key = "rated-current", .value = "50mA" }, .{ .key = "max-resistance", .value = "50mOhm" },
+    };
+    const instances = [_]flat_netlist.FlatInstance{
+        ratedFerrite("FB_ROLLUP", "rollup", &props),
+        ratedFerrite("FB_LEG", "leg", &props),
+        ratedFerrite("lna/FB_MOD", "module", &props),
+        ratedFerrite("FB_TRUNK", "trunk", &props),
+        .{ .ref_des = "lna/R0", .component = "res-0402", .value = "0R0", .footprint = "r0402", .uuid = "modjump", .properties = &link_props },
+    };
+    const rail_pins = [_]flat_netlist.FlatPin{
+        .{ .ref_des = "FB_ROLLUP", .pin = "1" },  .{ .ref_des = "FB_LEG", .pin = "1" },
+        .{ .ref_des = "lna/FB_MOD", .pin = "1" }, .{ .ref_des = "FB_TRUNK", .pin = "1" },
+        .{ .ref_des = "lna/R0", .pin = "1" },
+    };
+    const leg_pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "FB_LEG", .pin = "2" }, .{ .ref_des = "leg/U1", .pin = "1" } };
+    const module_pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "lna/FB_MOD", .pin = "2" }, .{ .ref_des = "lna/R0", .pin = "2" } };
+    const spare_pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "FB_ROLLUP", .pin = "2" }, .{ .ref_des = "FB_TRUNK", .pin = "2" } };
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "V5", .pins = &rail_pins },
+        .{ .name = "leg/VDD_F", .pins = &leg_pins },
+        .{ .name = "lna/VDD_FILT", .pins = &module_pins },
+        .{ .name = "SPARE", .pins = &spare_pins },
+    };
+    // FB_ROLLUP carries its own annotated roll-up; leg/U1 declares the leg
+    // FB_LEG feeds; J1 is the rest of the rail, which nothing may attribute to
+    // a bead that does not feed it.
+    const consumers = [_]power_budget.RailConsumer{
+        .{ .ref_des = "FB_ROLLUP", .net = "V5", .pins = &.{}, .i_typ = 0.07, .i_max = 0.08 },
+        .{ .ref_des = "leg/U1", .net = "VDD_F", .pins = &.{}, .i_typ = 0.1, .i_max = 0.12 },
+        .{ .ref_des = "J1", .net = "V5", .pins = &.{}, .i_typ = 0.25, .i_max = 0.3 },
+    };
+    const branch_loads = [_]power_budget.BranchLoad{
+        .{ .path = "lna", .rail = "V5", .i_typ = 0.128, .i_max = 0.144 },
+    };
+    const rails = [_]power_budget.Rail{
+        .{ .net = "V5", .load_max_a = 0.5, .any_max_load = true, .status = .ok, .consumers = &consumers },
+    };
+    const rail_specs = [_]env_mod.PowerRail{
+        .{ .name = "V5", .nominal = 5, .rated_voltage = .{ .min = 4.75, .max = 5.25 } },
+    };
+    const placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &instances,
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 1,
+        .maxy = 1,
+        .generated = false,
+        .rules = .{ .physical = .{
+            .rails = &rails,
+            .rail_model = .{ .specs = &rail_specs, .branch_loads = &branch_loads },
+        } },
+    };
+    var errors: std.ArrayList(Item) = .empty;
+    var warnings: std.ArrayList(Item) = .empty;
+    try appendRailRatingChecks(arena, &errors, &warnings, placement, false);
+    // The part's own annotated roll-up, the declared leg it feeds, and the
+    // module boundary it sits behind each beat the rail total.
+    try std.testing.expect(hasItemRefMessage(errors.items, "component-underrated", "FB_ROLLUP", "carries up to 0.080 A"));
+    try std.testing.expect(hasItemRefMessage(errors.items, "component-underrated", "FB_LEG", "carries up to 0.120 A"));
+    try std.testing.expect(hasItemRefMessage(errors.items, "component-underrated", "lna/FB_MOD", "carries up to 0.144 A"));
+    // A part on the trunk with nothing declared about its branch keeps the
+    // whole rail's worst case, exactly as before.
+    try std.testing.expect(hasItemRefMessage(errors.items, "component-underrated", "FB_TRUNK", "carries up to 0.500 A"));
+    // The zero-ohm jumper path reads the same attribution, so a link sealed
+    // inside a rated module is sized by the module, not by the rail.
+    try std.testing.expect(hasItemRefMessage(errors.items, "component-underrated", "lna/R0", "carries up to 0.144 A"));
+}
+
+// spec: fabrication-release - a rail with no per-branch declaration still charges every series element its whole worst-case load
+test "a rail that declares no branch data still charges the whole rail" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const bead_props = [_]env_mod.Property{
+        .{ .key = "rated-current", .value = "50mA" }, .{ .key = "dcr-max", .value = "0.5Ohm" },
+    };
+    const jumper_props = [_]env_mod.Property{
+        .{ .key = "power", .value = "63mW" },         .{ .key = "voltage", .value = "25V" },
+        .{ .key = "rated-current", .value = "50mA" }, .{ .key = "max-resistance", .value = "50mOhm" },
+    };
+    const instances = [_]flat_netlist.FlatInstance{
+        ratedFerrite("mod/FB", "bead", &bead_props),
+        .{ .ref_des = "mod/R0", .component = "res-0402", .value = "0R0", .footprint = "r0402", .uuid = "jumper", .properties = &jumper_props },
+    };
+    const rail_pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "mod/FB", .pin = "1" }, .{ .ref_des = "mod/R0", .pin = "1" } };
+    const leg_pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "mod/FB", .pin = "2" }, .{ .ref_des = "mod/R0", .pin = "2" } };
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "V5", .pins = &rail_pins }, .{ .name = "mod/VDD_F", .pins = &leg_pins },
+    };
+    // One consumer, on the trunk, keyed on a part that is neither series
+    // element: nothing here says what either of them carries.
+    const consumers = [_]power_budget.RailConsumer{
+        .{ .ref_des = "U1", .net = "V5", .pins = &.{}, .i_typ = 0.25, .i_max = 0.3 },
+    };
+    const rails = [_]power_budget.Rail{
+        .{ .net = "V5", .load_max_a = 0.5, .any_max_load = true, .status = .ok, .consumers = &consumers },
+    };
+    // A resolvable rail voltage is what makes a zero-ohm jumper's rail-load
+    // test run at all, so the jumper and the bead are judged side by side.
+    const rail_specs = [_]env_mod.PowerRail{
+        .{ .name = "V5", .nominal = 5, .rated_voltage = .{ .min = 4.75, .max = 5.25 } },
+    };
+    const placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &instances,
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 1,
+        .maxy = 1,
+        .generated = false,
+        .rules = .{ .physical = .{ .rails = &rails, .rail_model = .{ .specs = &rail_specs } } },
+    };
+    var errors: std.ArrayList(Item) = .empty;
+    var warnings: std.ArrayList(Item) = .empty;
+    try appendRailRatingChecks(arena, &errors, &warnings, placement, false);
+    try std.testing.expect(hasItemRefMessage(errors.items, "component-underrated", "mod/FB", "carries up to 0.500 A"));
+    try std.testing.expect(hasItemRefMessage(errors.items, "component-underrated", "mod/R0", "carries up to 0.500 A"));
 }
 
 // spec: fabrication-release - saved rounded outlines must exactly match authored dimensions, radius, polygon, and native arcs
