@@ -5353,6 +5353,12 @@ Public functions: build
 - Leaves a design with no sub-blocks and no declarations unchanged
 - An authored net-envelope declaration bounds a signal net the topology cannot derive
 - Reports a declared envelope that fails to cover the envelope the design already proves
+- A series resistor propagates a known envelope onto a capacitor-terminated node as one correlated domain
+- An inductor bias feed derives its bias node from the rail it taps
+- A device pin on a derived domain widens it to the device's own known supplies
+- A device with no envelope-known net anywhere poisons the domain it drives
+- A divider tap between disagreeing anchors is refused rather than guessed
+- A DNP series resistor is absent copper and derives nothing
 - completeness-waiver: empty inputs (a design with no sub-blocks, no rated ports and no declarations returns both slices empty, which is the covered no-envelopes-proven case)
 - completeness-waiver: large inputs (one flatten plus a near-linear union-find over its nets, the same pass the netlist exporter already runs on every board)
 - completeness-waiver: unauthorized access (a pure derivation over an already-evaluated block; it opens no file, reaches no network, and consults no external state)
@@ -7326,6 +7332,8 @@ Public functions: check, writeJson, savedOutline, declaredOutline, outlineDrift
 - logical file and directory aliases retain their exact resolved target through release verification
 - relative project roots resolve to the canonical absolute path identity recorded by the exact read trace
 - rail checks use worst-case voltage, reject underrating, preserve unknown endpoints, and size zero-ohm jumpers by rail current
+- a series-correlated pair is checked at its IR drop, not as two independent intervals
+- independently declared envelopes never collapse, so a genuinely underrated series resistor still fails
 - a series element is charged the branch its own rail data declares, and the whole rail's worst case only when the design declared no branch
 - a rail with no per-branch declaration still charges every series element its whole worst-case load
 - a zero-ohm configuration strap to ground carries no rail current, while a jumper any rail reaches or a ground-to-ground link stays unproven

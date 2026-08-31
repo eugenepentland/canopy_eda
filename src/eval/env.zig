@@ -1125,6 +1125,14 @@ pub const NetEnvelope = struct {
     origin: Origin = .derived,
     /// Free text from a `(net-envelope … "why")`; empty when derived.
     rationale: []const u8 = "",
+    /// Correlation class for envelopes derived through series resistors and
+    /// inductors (`eval/net_envelopes`' series-domain pass). Nets sharing a
+    /// nonzero `domain` are ONE DC node reached through series conductors, so
+    /// their potentials move together: the voltage ACROSS the series element
+    /// joining them is bounded by its IR drop, not by the width of the two
+    /// intervals treated independently. `0` = not derived that way (seeded,
+    /// declared, or ferrite-derived), for which no correlation is claimed.
+    domain: u32 = 0,
 };
 
 /// Board-level transient intent for one physical power domain. Unlike the DC
