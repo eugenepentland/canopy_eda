@@ -526,9 +526,11 @@ src/eval/env.zig::NcOk struct_
 src/eval/env.zig::NearBind struct_
 src/eval/env.zig::Net struct_
 src/eval/env.zig::NetClassSpec struct_
+src/eval/env.zig::NetEnvelope struct_
 src/eval/env.zig::NetTie struct_
 src/eval/env.zig::Note struct_
 src/eval/env.zig::NoteRef struct_
+src/eval/env.zig::Origin enum_
 src/eval/env.zig::PadNeck value
 src/eval/env.zig::Part struct_
 src/eval/env.zig::PartPin struct_
@@ -711,6 +713,7 @@ src/eval/modules.zig::resolveImport | fn resolveImport(self: *Evaluator, name: [
 src/eval/net_analysis.zig::analog_ground value
 src/eval/net_analysis.zig::baseNetName | fn baseNetName(name: []const u8) []const u8
 src/eval/net_analysis.zig::buildFerriteBridges | fn buildFerriteBridges( allocator: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error!std.StringHashMapUnmanaged([]const u8)
+src/eval/net_analysis.zig::chassis_ground value
 src/eval/net_analysis.zig::digital_ground value
 src/eval/net_analysis.zig::findMissingDecouplingNets | fn findMissingDecouplingNets( allocator: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error![]const []const u8
 src/eval/net_analysis.zig::findRoot | fn findRoot(parent: *std.StringHashMapUnmanaged([]const u8), name: []const u8) []const u8
@@ -719,10 +722,15 @@ src/eval/net_analysis.zig::ground_fn_prefixes value
 src/eval/net_analysis.zig::ground_stem_prefixes value
 src/eval/net_analysis.zig::ground_tokens value
 src/eval/net_analysis.zig::isGroundName | fn isGroundName(name: []const u8) bool
+src/eval/net_analysis.zig::isRatingZeroVolts | fn isRatingZeroVolts(name: []const u8) bool
 src/eval/net_analysis.zig::power_ground value
 src/eval/net_analysis.zig::refDesLocalPrefix | fn refDesLocalPrefix(ref_des: []const u8) u8
 src/eval/net_analysis.zig::schematic_ground_names value
 src/eval/net_analysis.zig::subBlockNetHasCap | fn subBlockNetHasCap(block: *const DesignBlock, net_path: []const u8) bool
+src/eval/net_envelopes.zig::Contradiction struct_
+src/eval/net_envelopes.zig::Declaration struct_
+src/eval/net_envelopes.zig::Result struct_
+src/eval/net_envelopes.zig::build | fn build( allocator: std.mem.Allocator, block: *const DesignBlock, declarations: []const Declaration, ) std.mem.Allocator.Error!Result
 src/eval/pin_enrichment.zig::enrichPinFunctions | fn enrichPinFunctions( allocator: Allocator, block: *DesignBlock, project_dir: []const u8, ) Allocator.Error!void
 src/eval/power_budget.zig::BranchLoad struct_
 src/eval/power_budget.zig::Rail struct_

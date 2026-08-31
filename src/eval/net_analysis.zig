@@ -89,6 +89,41 @@ pub fn isGroundName(name: []const u8) bool {
     return false;
 }
 
+/// `CHASSIS_GND` — the chassis/shield reference: a connector's metal shell, a
+/// shield can, an enclosure stud. Deliberately ABSENT from `ground_tokens`,
+/// and that absence is the point. `ground_tokens` is what the plane stitcher,
+/// the pour and the DRC judge a board by, and on a design like `barracuda-base`
+/// the chassis node is an ISOLATION BARRIER — the RJ45's metal shell reaches
+/// system ground only through a 1 nF / 2 kV capacitor and a 1 M bleeder. Listing
+/// it as a ground token would pour it into the ground plane and stitch the
+/// barrier shut.
+pub const chassis_ground = "CHASSIS_GND";
+
+/// True when `name` is a 0 V reference *for voltage-RATING purposes*: every
+/// ground in `ground_tokens`, plus the chassis node.
+///
+/// Separate from `isGroundName` because the two questions have different right
+/// answers for exactly one name. "Does copper pour onto this net?" must say no
+/// for `CHASSIS_GND` (see above). "What DC potential does a part bridging this
+/// net see?" must say 0 V: the barrier components are specified against the
+/// system ground they bridge to, and with no potential on either side the
+/// release gate could not prove their ratings at all — `C_chassis`/`R_chassis`
+/// on `barracuda-base` were unprovable for that reason alone. The kilovolt
+/// rating on that capacitor is a surge/HiPot spec; this gate models the DC
+/// operating point, where both sides are 0 V.
+pub fn isRatingZeroVolts(name: []const u8) bool {
+    if (isGroundName(name)) return true;
+    if (!std.mem.startsWith(u8, name, chassis_ground)) return false;
+    var rest = name[chassis_ground.len..];
+    if (rest.len == 0) return true;
+    if (rest[0] == '_' or rest[0] == '-') rest = rest[1..];
+    if (rest.len == 0) return false;
+    for (rest) |c| {
+        if (!std.ascii.isDigit(c)) return false;
+    }
+    return true;
+}
+
 /// Pinout FUNCTION-name prefixes that denote a ground return. Read by
 /// `placement/pin_roles.isGroundFn`, which normalises separators/case first
 /// and then also accepts a short list of exposed-pad names. Uniquely lists
@@ -419,6 +454,21 @@ test "the ground-net vocabulary tables keep the spellings their consumers had" {
     try std.testing.expectEqualStrings("AGND", analog_ground);
     try std.testing.expectEqualStrings("DGND", digital_ground);
     try std.testing.expectEqualStrings("PGND", power_ground);
+}
+
+// spec: net_analysis - chassis ground counts as 0 V for rating but is not a ground token the pour may fill
+test "isRatingZeroVolts adds only the chassis node to the ground tokens" {
+    try std.testing.expect(isRatingZeroVolts("CHASSIS_GND"));
+    try std.testing.expect(isRatingZeroVolts("CHASSIS_GND2"));
+    try std.testing.expect(isRatingZeroVolts("GND"));
+    try std.testing.expect(isRatingZeroVolts("AGND3"));
+    // A named chassis derivative is a distinct node, not a numbered twin.
+    try std.testing.expect(!isRatingZeroVolts("CHASSIS_GND_ISO"));
+    try std.testing.expect(!isRatingZeroVolts("V_12V"));
+    // The barrier must stay open to the pour, the plane stitcher and the DRC:
+    // whatever this predicate says, `isGroundName` still says no.
+    try std.testing.expect(!isGroundName(chassis_ground));
+    for (ground_tokens) |t| try std.testing.expect(!std.mem.eql(u8, t, chassis_ground));
 }
 
 // `isGroundBase` is case-insensitive where every other ground predicate here is

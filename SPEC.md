@@ -4435,6 +4435,7 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 
 ## eval/evaluator
 
+- A component-family attribute resolves a bound parameter to its value while an unbound vocabulary word stays literal
 - Evaluates arithmetic expressions from S-expression AST
 - an error inside a module body appends the module call stack to the diagnostic
 - block with a string name evaluates as a design root
@@ -5221,6 +5222,7 @@ Public functions: analyze
 - buildPort reads a bare trailing number as the port nominal voltage with an explicit nominal form overriding it
 - kicad-pcb form captures the literal path on the design block
 - stackup form captures layer count and plane assignments on the design block
+- net-envelope form publishes an authored voltage envelope on the design block
 - pdn form captures an explicit AC-domain target and source model
 - stackup captures per-layer copper foil and core/prepreg construction details
 - stackup process entries capture stepped soldermask and per-layer trapezoidal etch geometry
@@ -5342,6 +5344,23 @@ Public functions: isActiveSemiconductor
 - completeness-waiver: malformed encoding (descriptions are matched byte-wise with ASCII case folding, so non-UTF-8 bytes simply fail to match rather than being decoded)
 - completeness-waiver: integer overflow (the only arithmetic is a saturating pad count made at build time and compared, never summed)
 - completeness-waiver: panic-free (every path is a bounded slice comparison over caller-owned memory with no indexing beyond a length-checked loop)
+## eval/net-envelopes
+
+Public functions: build
+
+- Derives a voltage envelope for a sub-block-internal net across a module-internal ferrite bead
+- An internal input port's rated range is a pin tolerance and does not widen the net it sits on
+- Leaves a design with no sub-blocks and no declarations unchanged
+- An authored net-envelope declaration bounds a signal net the topology cannot derive
+- Reports a declared envelope that fails to cover the envelope the design already proves
+- completeness-waiver: empty inputs (a design with no sub-blocks, no rated ports and no declarations returns both slices empty, which is the covered no-envelopes-proven case)
+- completeness-waiver: large inputs (one flatten plus a near-linear union-find over its nets, the same pass the netlist exporter already runs on every board)
+- completeness-waiver: unauthorized access (a pure derivation over an already-evaluated block; it opens no file, reaches no network, and consults no external state)
+- completeness-waiver: i/o failure (no I/O — the design has already been read and evaluated by the time this runs)
+- completeness-waiver: concurrent access (single-threaded inside design evaluation, reading an immutable block and writing only caller-owned slices)
+- completeness-waiver: malformed encoding (net names arrive as evaluated slices, compared bytewise; nothing here parses an external encoding)
+- completeness-waiver: integer overflow (voltages stay in f64 and the only integers are slice lengths the allocator already bounds)
+- completeness-waiver: panic-free (every lookup is an optional consulted with orelse, and an unorderable declaration is skipped rather than asserted)
 
 ## coverage
 
@@ -5620,6 +5639,7 @@ Public functions: runChecks, deinit, parseMicroFarads, parseOhms, parseMicroHenr
 
 - a top-level input power port creates decoupling demand
 - a capacitor only qualifies when it bridges the supply to ground
+- chassis ground counts as 0 V for rating but is not a ground token the pour may fill
 - completeness-waiver: empty inputs (empty port, section, instance, and net slices produce no missing-rail result)
 - completeness-waiver: large inputs (analysis is bounded by the immutable design slices and allocator failure is returned)
 - completeness-waiver: unauthorized access (pure in-memory design analysis has no authorization or external access surface)

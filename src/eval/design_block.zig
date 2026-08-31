@@ -23,6 +23,7 @@ const instance_mod = @import("instance.zig");
 const builders = @import("builders.zig");
 const special_forms = @import("special_forms.zig");
 const rails_mod = @import("rails.zig");
+const net_envelopes = @import("net_envelopes.zig");
 const test_point_mod = @import("test_point.zig");
 const micro_forms = @import("micro_forms.zig");
 const pin_enrichment = @import("pin_enrichment.zig");
@@ -137,6 +138,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     var rough_spec: env_mod.RoughSpec = .{};
     var stackup_spec: env_mod.StackupSpec = .{};
     var pdn_intents: std.ArrayList(env_mod.PdnIntent) = .empty;
+    var envelope_decls: std.ArrayList(net_envelopes.Declaration) = .empty;
     var fabrication_layers: std.ArrayList(env_mod.FabricationLayerSpec) = .empty;
     var net_class_specs: std.ArrayList(env_mod.NetClassSpec) = .empty;
     var pll_loop_specs: std.ArrayList(pll_loop.Spec) = .empty;
@@ -191,6 +193,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
         .rough_spec = &rough_spec,
         .stackup_spec = &stackup_spec,
         .pdn_intents = &pdn_intents,
+        .envelope_decls = &envelope_decls,
         .fabrication_layers = &fabrication_layers,
         .net_class_specs = &net_class_specs,
         .pll_loop_specs = &pll_loop_specs,
@@ -274,6 +277,25 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     // instead of recomputing rail identity from emergent topology.
     block.rails = rails_mod.build(self.allocator, block) catch return EvalError.OutOfMemory;
 
+    // Voltage envelopes run AFTER rails, and consume them: a rail is the seed a
+    // module-internal node inherits across its own ferrite. This is what gives
+    // the release rating checks a potential for `buck_5v75/VIN_F` and every
+    // other net the supply tree cannot name. Authored `(net-envelope …)` forms
+    // join here, and any that understates what the design already proves is
+    // recorded as a failed assertion rather than silently believed.
+    const envelopes = net_envelopes.build(self.allocator, block, build.envelope_decls.items) catch
+        return EvalError.OutOfMemory;
+    block.net_envelopes = envelopes.envelopes;
+    for (envelopes.contradictions) |bad| {
+        const msg = std.fmt.allocPrint(
+            self.allocator,
+            "(net-envelope \"{s}\" (rated {d} {d})) does not cover the {d}–{d} V this design already declares for that net",
+            .{ bad.net, bad.declared_min, bad.declared_max, bad.derived_min, bad.derived_max },
+        ) catch return EvalError.OutOfMemory;
+        self.assertions.append(self.allocator, .{ .passed = false, .message = msg }) catch
+            return EvalError.OutOfMemory;
+    }
+
     return .{ .design_block = block };
 }
 
@@ -301,6 +323,7 @@ const BlockBuildState = struct {
     rough_spec: *env_mod.RoughSpec,
     stackup_spec: *env_mod.StackupSpec,
     pdn_intents: *std.ArrayList(env_mod.PdnIntent),
+    envelope_decls: *std.ArrayList(net_envelopes.Declaration),
     fabrication_layers: *std.ArrayList(env_mod.FabricationLayerSpec),
     net_class_specs: *std.ArrayList(env_mod.NetClassSpec),
     pll_loop_specs: *std.ArrayList(pll_loop.Spec),
@@ -518,6 +541,8 @@ fn evalBlockBodyForm(
         .stackup => build.stackup_spec.* = try parseStackup(self, form_children),
         .pdn => if (parsePdnIntent(self, form_children)) |intent|
             build.pdn_intents.append(self.allocator, intent) catch return EvalError.OutOfMemory,
+        .net_envelope => if (parseNetEnvelope(self, form_children)) |decl|
+            build.envelope_decls.append(self.allocator, decl) catch return EvalError.OutOfMemory,
         .fabrication_layer => if (try parseFabricationLayer(self, form_children)) |layer|
             build.fabrication_layers.append(self.allocator, layer) catch return EvalError.OutOfMemory,
         .net_class => if (try parseNetClass(self, form_children)) |nc|
@@ -1228,6 +1253,7 @@ fn evalSection(
             .rough,
             .stackup,
             .pdn,
+            .net_envelope,
             .fabrication_layer,
             .net_class,
             .pll_loop,
@@ -2447,6 +2473,54 @@ fn parsePdnIntent(self: *Evaluator, c: []const Node) ?env_mod.PdnIntent {
         return null;
     }
     return out;
+}
+
+/// Parse `(net-envelope "NET" (rated LO HI) ["why"])` — the author's statement
+/// of the worst-case DC potential range a net's copper reaches, for the nets no
+/// topology walk can derive: a GPIO-driven enable, a divider tap between two
+/// declared rails, a bus a 3.3 V transceiver holds.
+///
+/// The net name is matched the way rail names are — against the FLATTENED,
+/// net-tie-canonicalised name — so a board-level `(net-envelope "EN_BUCK3V75" …)`
+/// covers the module-local net bridged onto it, and a sub-block-internal node is
+/// nameable as `"sub-block/NET"`.
+///
+/// A malformed form is a warning and no declaration, matching every other
+/// declaration parser here: a typo must not silently narrow a proof.
+fn parseNetEnvelope(self: *Evaluator, c: []const Node) ?net_envelopes.Declaration {
+    if (c.len < 3) {
+        self.warnFmt(c[0].span, "(net-envelope …) needs a net and (rated LO HI)", .{});
+        return null;
+    }
+    const net = c[1].asString() orelse {
+        self.warnFmt(c[1].span, "(net-envelope …) net must be a string", .{});
+        return null;
+    };
+    var out: ?net_envelopes.Declaration = null;
+    var rationale: []const u8 = "";
+    for (c[2..]) |node| {
+        if (node.asString()) |text| {
+            rationale = text;
+            continue;
+        }
+        const sc = node.asList() orelse continue;
+        const name = if (sc.len > 0) sc[0].asAtom() orelse "" else "";
+        if (std.mem.eql(u8, name, "rated") and sc.len >= 3) {
+            const lo = sc[1].asNumber();
+            const hi = sc[2].asNumber();
+            if (lo == null or hi == null or !(hi.? >= lo.?)) {
+                self.warnFmt(node.span, "(net-envelope \"{s}\" (rated LO HI)) needs two numbers with HI >= LO", .{net});
+                return null;
+            }
+            out = .{ .net = net, .min = lo.?, .max = hi.? };
+        } else self.warnFmt(node.span, "unknown (net-envelope …) sub-form ({s} …)", .{name});
+    }
+    if (out) |*decl| {
+        decl.rationale = rationale;
+        return decl.*;
+    }
+    self.warnFmt(c[1].span, "(net-envelope \"{s}\" …) needs a (rated LO HI) envelope", .{net});
+    return null;
 }
 
 /// Parse a top-level `(stackup N …)` custom construction or
@@ -3982,6 +4056,38 @@ test "stackup captures soldermask and copper etch profile" {
     try testing.expectApproxEqAbs(@as(f64, 3.8), mask.er, 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 0.03048), mask.substrate_thickness, 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 0.01524), mask.copper_thickness, 1e-12);
+}
+
+// spec: eval/design_block - net-envelope form publishes an authored voltage envelope on the design block
+test "design-block captures (net-envelope …)" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (instance "R1" fakeres (pin 1 "EN_BUCK") (pin 2 "GND"))
+        \\  (net-envelope "EN_BUCK" (rated 0.0 3.3) "driven by a 3.3 V GPIO")
+        \\  (net-envelope "EN_BUCK" (rated 3.3)))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    try eval.component_cache.put(a, "fakeres", .{
+        .name = "fakeres",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = false,
+        .param_type = "",
+    });
+    var scope = env_mod.Env.init(a, null);
+    defer scope.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &scope)).design_block;
+    // The second form is malformed — a warning and no declaration, so exactly
+    // one envelope reaches the block and the typo cannot narrow a proof.
+    try testing.expectEqual(@as(usize, 1), block.net_envelopes.len);
+    try testing.expectEqualStrings("EN_BUCK", block.net_envelopes[0].net);
+    try testing.expectEqual(@as(f64, 3.3), block.net_envelopes[0].max);
+    try testing.expectEqual(env_mod.NetEnvelope.Origin.declared, block.net_envelopes[0].origin);
+    try testing.expectEqualStrings("driven by a 3.3 V GPIO", block.net_envelopes[0].rationale);
 }
 
 // spec: eval/design_block - pdn form captures an explicit AC-domain target and source model

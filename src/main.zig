@@ -604,6 +604,7 @@ test {
     _ = @import("eval/ids.zig");
     _ = @import("refdes_stability.zig");
     _ = @import("eval/pin_enrichment.zig");
+    _ = @import("eval/net_envelopes.zig");
     _ = @import("eval/rails.zig");
     _ = @import("eval/test_point.zig");
     _ = @import("eval/micro_forms.zig");

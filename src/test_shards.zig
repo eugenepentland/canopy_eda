@@ -518,6 +518,7 @@ pub const shards: []const []const []const u8 = &.{
     &.{
         "bom.test.",
         "erc.test.",
+        "eval.net_envelopes.test.",
         "eval.rails.test.",
         "eval.suggest.test.",
         "export_kicad.test.",
