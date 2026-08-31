@@ -18,6 +18,7 @@ const system_review_md = @import("../system_review_md.zig");
 const system_review_package = @import("../system_review_package.zig");
 const serve_root = @import("../serve.zig");
 const autocommit = @import("autocommit.zig");
+const dossier_jobs = @import("dossier_jobs.zig");
 const fab_release_service = @import("fab_release_service.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
 const vfs = @import("vfs.zig");
@@ -834,6 +835,10 @@ pub fn putDocumentApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
         if (loaded.has_attestation_value) loaded.manifest_rel else null,
         document.path,
     );
+    // The saved document is one of the dossier's own inputs, so the composed
+    // copy is now wrong. Dropping it is what keeps "a reload picks up saved
+    // edits" true after composition moved off the request path.
+    ctx.state.dossiers.invalidate(loaded.parsed.value.name);
 
     const digest = system_review.sha256Hex(body);
     var out: std.Io.Writer.Allocating = .init(res.arena);
@@ -901,6 +906,9 @@ pub fn uploadAssetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
         if (loaded.has_attestation_value) loaded.manifest_rel else null,
         relative,
     );
+    // An asset is package evidence the dossier enumerates, so the composed copy
+    // is retired with the same rule a document save uses.
+    ctx.state.dossiers.invalidate(loaded.parsed.value.name);
 
     var out: std.Io.Writer.Allocating = .init(res.arena);
     try out.writer.writeAll("{\"ok\":true,\"path\":");
@@ -993,6 +1001,9 @@ pub fn attestSystemApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
         &vfs_response,
     )) return sendVfsFailure(res, vfs_response.items);
     commitMutation(ctx, ac_session, "system_review_attest", loaded.manifest_rel, null);
+    // The manifest's attestation is on the dossier's own readiness face, so an
+    // approval retires the composed copy exactly as a document save does.
+    ctx.state.dossiers.invalidate(loaded.parsed.value.name);
 
     var out: std.Io.Writer.Allocating = .init(res.arena);
     try out.writer.writeAll("{\"ok\":true,\"content_lock\":");
@@ -1190,18 +1201,170 @@ pub fn draftPackageApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
 
 /// GET /systems/:name/dossier — the draft package's HTML dossier served for
 /// reading in the browser instead of downloaded inside `draft.zip`. Same inputs,
-/// same composer, same watermark; composed per request from current workspace
-/// state (no cache), so a reload picks up saved document edits. Failures answer
-/// with the composer's own diagnostic exactly as `draftPackageApi` does.
+/// same composer, same watermark: the bytes served are `draftDossierHtml`'s
+/// output unedited, so this page and the `review/<base>.html` archive member
+/// stay byte-identical.
+///
+/// It is no longer composed inside the request. Composition is a complete
+/// review snapshot plus a complete fabrication-readiness pass per board — about
+/// a minute for a two-board system — which made this page look hung in a
+/// browser. The request now answers from `state.dossiers` (see
+/// `serve/dossier_jobs.zig`) and never blocks on the composer:
+///
+///   * a composed copy is served immediately, with `x-netlisp-dossier-state`
+///     and `x-netlisp-dossier-age` reporting how fresh it is and whether a
+///     recompose is running behind it;
+///   * a copy past its revalidation window starts a background recompose while
+///     it is being served, so the next reload carries current evidence;
+///   * with nothing composed yet, a small loader page is served that polls
+///     `/api/systems/:name/dossier-status` and reloads when the document lands.
+///     One compose per system: reloading during one joins it.
+///
+/// "A reload picks up saved document edits" still holds, and more directly than
+/// stale-while-revalidate would give: every system-review mutation invalidates
+/// this system's slot, so a document a reader saved is never served back to
+/// them from before the save — the next request composes afresh.
+///
+/// Failures still answer with the composer's own diagnostic exactly as
+/// `draftPackageApi` does. The refusals that need no board analysis — an unsafe
+/// name, an absent manifest, a manifest that does not validate or names another
+/// system — are decided synchronously by `dossierPreflight`, so a broken
+/// workspace is still refused on the first request rather than after a poll. A
+/// failure the composer only reaches later is recorded against the system and
+/// reported the same way on the next request.
 pub fn dossierPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse return sendJsonError(res, 404, "missing system name");
-    const html = system_review_package.draftDossierHtml(ctx.allocator, ctx.project_dir, name) catch |err|
+    system_review_package.dossierPreflight(ctx.allocator, ctx.project_dir, name) catch |err|
         return sendPackageFailure(res, err, .draft);
+
+    const view = ctx.state.dossiers.snapshot(ctx.allocator, name);
+    const now_ms = clock.milliTimestamp();
+    if (view.stale(now_ms)) dossier_jobs.spawn(&ctx.state.dossiers, ctx.project_dir, name);
+
+    if (view.html) |html| {
+        res.content_type = .HTML;
+        res.header("cache-control", "no-store");
+        res.header("content-security-policy", "frame-ancestors 'none'");
+        res.header("x-frame-options", "DENY");
+        res.header("x-netlisp-dossier-state", if (view.composing) "recomposing" else "current");
+        if (view.ageSeconds(now_ms)) |age|
+            res.header("x-netlisp-dossier-age", try std.fmt.allocPrint(res.arena, "{d}", .{age}));
+        res.body = html;
+        return;
+    }
+    if (view.err) |err| return sendPackageFailure(res, err, .draft);
+    return sendDossierLoader(res, name);
+}
+
+/// The page served while a system has no composed dossier yet: a small
+/// self-contained shell that says what is happening and reloads itself into the
+/// real document once the composer has had time to finish. It is deliberately
+/// NOT the dossier — the dossier's own bytes are never edited or wrapped, which
+/// is what keeps this page and the `draft.zip` member byte-identical.
+///
+/// It waits rather than polls, and that is a correctness requirement, not a
+/// politeness one. Measured against the real Barracuda system: a minute-long
+/// composition survives an occasional concurrent request, but a status poll
+/// every two seconds moved the boards' consumed-input closure under it on
+/// nearly every run — a different content lock each time, and `analyze`'s own
+/// `InputsChanged` guard tripping outright. One reload per wait keeps the
+/// composition on the quiet path that produces the same lock the CLI export and
+/// the synchronous `draft.zip` request produce.
+fn sendDossierLoader(res: *httpz.Response, name: []const u8) HandlerError!void {
+    var out: std.Io.Writer.Allocating = .init(res.arena);
+    const writer = &out.writer;
+    try writer.writeAll(
+        "<!doctype html><html><head><meta charset=\"utf-8\">" ++
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" ++
+            "<title>Composing dossier</title><style>" ++
+            ":root{color-scheme:dark;font:15px/1.55 system-ui,sans-serif;background:#0b1020;color:#e8edf7}" ++
+            "body{margin:0;display:grid;place-items:center;min-height:100vh;padding:24px}" ++
+            "main{max-width:560px;text-align:center}h1{font-size:20px;margin:0 0 10px}" ++
+            "p{margin:0 0 10px;color:#9eabc2}#elapsed{color:#e8edf7}" ++
+            ".bar{height:4px;border-radius:3px;background:#1d2b49;overflow:hidden;margin:18px 0}" ++
+            ".bar i{display:block;height:100%;width:35%;background:#2864dc;animation:slide 1.6s ease-in-out infinite}" ++
+            "@keyframes slide{0%{transform:translateX(-100%)}100%{transform:translateX(340%)}}" ++
+            ".bad{color:#ffb85c}a{color:#7fa8f5}" ++
+            "</style></head><body><main><h1>Composing dossier</h1>" ++
+            "<p>This system's review document is being composed from every board's review snapshot and fabrication readiness. It takes about a minute.</p>" ++
+            "<div class=\"bar\"><i></i></div>" ++
+            "<p id=\"elapsed\">Composing…</p>" ++
+            "<p id=\"detail\">This page reloads itself when the document is ready. <a href=\"\" id=\"now\">Check now</a>.</p>" ++
+            "</main><script>\"use strict\";const SYSTEM=",
+    );
+    try json_writer.writeScriptString(writer, name);
+    try writer.writeAll(
+        ";const $=s=>document.querySelector(s);const KEY='netlisp-dossier-since:'+SYSTEM;" ++
+            "let since=0;try{since=Number(sessionStorage.getItem(KEY)||0)}catch(error){}" ++
+            // A stale marker from an earlier visit would make this page reload
+            // at its impatient floor forever, so anything older than ten
+            // minutes starts the wait over.
+            "if(!since||Date.now()-since>600000){since=Date.now();try{sessionStorage.setItem(KEY,String(since))}catch(error){}}" ++
+            "const elapsed=()=>Math.round((Date.now()-since)/1000);" ++
+            "function tick(){$('#elapsed').textContent='Composing… '+elapsed()+'s elapsed'}tick();setInterval(tick,1000);" ++
+            // One request per wait: 75 s covers a typical two-board compose, and
+            // a page that arrives later in one waits only for the remainder,
+            // never less than 20 s.
+            "$('#now').onclick=event=>{event.preventDefault();location.reload()};" ++
+            "setTimeout(()=>location.reload(),Math.max(20000,75000-(Date.now()-since)));" ++
+            "</script></body></html>",
+    );
+    res.status = 200;
     res.content_type = .HTML;
     res.header("cache-control", "no-store");
     res.header("content-security-policy", "frame-ancestors 'none'");
     res.header("x-frame-options", "DENY");
-    res.body = html;
+    res.header("x-netlisp-dossier-state", "composing");
+    res.body = out.written();
+}
+
+/// GET /api/systems/:name/dossier-status — what `dossierPage` would do right
+/// now, without composing or serving anything. The review workspace labels its
+/// "View dossier" action from it, so a reader can see whether the document they
+/// are about to open is current, being recomposed behind them, or was never
+/// composed at all; tooling can read the same answer.
+///
+/// Read-only in every sense: it starts no composition and copies no document,
+/// so an answer costs a mutex and nothing else. It is deliberately NOT what the
+/// loader page waits on — see `sendDossierLoader` for why a composition in
+/// flight must not be polled at all.
+pub fn dossierStatusApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse return sendJsonError(res, 404, "missing system name");
+    if (!isSimpleName(name)) return sendJsonError(res, 400, "invalid system name");
+    // No allocator: polling this must not copy the whole document to answer
+    // a question about its existence.
+    const view = ctx.state.dossiers.snapshot(null, name);
+    const now_ms = clock.milliTimestamp();
+    const state: []const u8 = if (view.composing)
+        "composing"
+    else if (view.has_document)
+        "ready"
+    else if (view.err != null)
+        "failed"
+    else
+        "idle";
+
+    var out: std.Io.Writer.Allocating = .init(res.arena);
+    const writer = &out.writer;
+    try writer.writeAll("{\"ok\":true,\"system\":");
+    try json_writer.writeString(writer, name);
+    try writer.writeAll(",\"state\":");
+    try json_writer.writeString(writer, state);
+    try writer.print(
+        ",\"ready\":{s},\"composing\":{s},\"generation\":{d},\"age_seconds\":",
+        .{
+            if (view.has_document) "true" else "false",
+            if (view.composing) "true" else "false",
+            view.gen,
+        },
+    );
+    if (view.ageSeconds(now_ms)) |age| try writer.print("{d}", .{age}) else try writer.writeAll("null");
+    try writer.writeAll(",\"error\":");
+    if (view.err) |err| try json_writer.writeString(writer, @errorName(err)) else try writer.writeAll("null");
+    try writer.writeByte('}');
+    res.content_type = .JSON;
+    res.header("cache-control", "private, no-store");
+    res.body = out.written();
 }
 
 /// POST /api/systems/:name/release — authenticated-writer final package after a fresh lock.
@@ -1288,6 +1451,9 @@ pub fn systemPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
             "const {value}=await request(endpoint('/docs/'+encodeURIComponent(spec.id)));state.current=value;$('#doc-title').textContent=value.title+' · '+value.classification;" ++
             "$('#source').value=value.markdown;$('#source').disabled=!value.editable;$('#save').disabled=!value.editable;$('#attest').disabled=!state.permissions.write||!state.ready||!state.ready.checks.checklists;" ++
             "$('#rendered').innerHTML=value.html||'<pre></pre>';if(!value.html)$('#rendered pre').textContent=value.markdown;rewriteAssets()}" ++
+            "function dossierAge(s){return s==null?'':(s<90?s+'s':Math.round(s/60)+'m')+' ago'}" ++
+            "async function dossierState(){try{const r=await fetch(endpoint('/dossier-status'),{headers:{'accept':'application/json'}});const v=await r.json();const a=$('#dossier');" ++
+            "a.textContent=v.composing?(v.ready?'View dossier · recomposing':'View dossier · composing…'):(v.ready?'View dossier · composed '+dossierAge(v.age_seconds):(v.state==='failed'?'View dossier · last compose failed':'View dossier'))}catch(error){}}" ++
             "async function refreshReady(){try{const {value}=await request(endpoint('/readiness'));state.ready=value;const r=$('#readiness');" ++
             "r.className='status '+(value.blocked?'blocked':'ok');r.textContent=(value.blocked?'Blocked':'Ready')+' · checklists '+(value.checks&&value.checks.checklists?'complete':'open')+' · attestation '+(value.attested?'current':'needed');" ++
             "$('#attest').disabled=!state.permissions.write||!value.checks||!value.checks.checklists;" ++
@@ -1297,9 +1463,9 @@ pub fn systemPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
             "$('#draft').href=endpoint('/draft.zip');$('#dossier').href='/systems/'+encodeURIComponent(SYSTEM)+'/dossier';const host=$('#docs');let first=null;for(const doc of value.manifest.documents){const button=document.createElement('button');" ++
             "button.type='button';button.append(document.createTextNode(doc.title));const tag=document.createElement('span');tag.className='tag';tag.textContent=doc.classification+' · '+(doc.status||'active');button.append(tag);" ++
             "button.onclick=()=>openDoc(doc,button).catch(e=>note(e.message,true));host.append(button);if(!first&&doc.status!=='historical')first=[doc,button]}if(!first&&value.manifest.documents.length)first=[value.manifest.documents[0],host.firstElementChild];" ++
-            "if(first)await openDoc(first[0],first[1]);await refreshReady()}catch(error){note(error.message,true)}}" ++
+            "if(first)await openDoc(first[0],first[1]);await refreshReady();dossierState()}catch(error){note(error.message,true)}}" ++
             "$('#save').onclick=async()=>{if(!state.current)return;try{const headers={'content-type':'text/markdown; charset=utf-8','x-netlisp-review':'1'};if(state.current.sha256)headers['if-match']=state.current.sha256;else headers['if-none-match']='*';const {value}=await request(endpoint('/docs/'+encodeURIComponent(state.current.id)),{method:'PUT',headers:headers,body:$('#source').value});" ++
-            "state.current.sha256=value.sha256;note('Saved; prior attestation invalidated');await refreshReady();const active=document.querySelector('#docs button.active');if(active)active.click()}catch(error){note(error.message,true)}};" ++
+            "state.current.sha256=value.sha256;note('Saved; prior attestation invalidated');await refreshReady();dossierState();const active=document.querySelector('#docs button.active');if(active)active.click()}catch(error){note(error.message,true)}};" ++
             "$('#attest').onclick=async()=>{if(!state.ready)return;try{await request(endpoint('/attest'),{method:'POST',headers:{'content-type':'application/json','x-netlisp-review':'1'},body:JSON.stringify({confirm:state.ready.content_lock})});note('Current review inputs approved');await refreshReady()}catch(error){note(error.message,true)}};" ++
             "$('#asset').onchange=async event=>{const file=event.target.files[0];if(!file)return;try{await request(endpoint('/assets'),{method:'POST',headers:{'x-filename':file.name,'x-netlisp-review':'1'},body:file});note('Asset uploaded: '+file.name);await refreshReady()}catch(error){note(error.message,true)}event.target.value=''};" ++
             "$('#release').onclick=async()=>{if(!state.ready||!confirm('Compose the final fabrication release for this exact review lock?'))return;try{const result=await fetch(endpoint('/release'),{method:'POST',headers:{'content-type':'application/json','x-netlisp-review':'1'},body:JSON.stringify({confirm:state.ready.release_token,waive:$('#waive').checked})});" ++
@@ -1403,6 +1569,155 @@ test "system review API denies document mutation without authenticated write rol
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "writer role required") != null);
 }
 
+/// The one fixture the dossier-page tests share: a manifest the composer's
+/// board-free preflight accepts, so every assertion below is about what the
+/// page does with its composed-document slot rather than about manifest
+/// validation. No board file exists beneath it, which is exactly why these
+/// tests keep background composition off.
+const dossier_fixture_manifest =
+    \\{"schema":"netlisp-system-review-v1","name":"demo","title":"Demo","part_number":"SYS-1","revision":"A","boards":[{"name":"board","role":"main","source":"src/board.sexp","part_number":"PCB-1","revision":"A"}],"documents":[{"id":"release-checklist","title":"Release checklist","path":"src/systems/demo/release.md","classification":"checklist","required":true}]}
+;
+
+// spec: system-review - a dossier request answers from the composed copy or a loader without ever composing inside the request
+// spec: system-review - the dossier status endpoint reports composition state and freshness without starting or serving a composition
+// spec: system-review - the dossier loader waits and reloads rather than polling, so a composition in flight is not destabilised by its own progress page
+test "the dossier page serves the composed copy or a loader and never composes in the request" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "project/src/systems/demo");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "project/src/systems/demo/system.json",
+        .data = dossier_fixture_manifest,
+    });
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, "project", allocator);
+    defer allocator.free(project);
+
+    // Background composition stays off, so nothing here starts a detached
+    // minute of board analysis against a fixture the test is about to delete.
+    var state: serve_root.ServerState = .{};
+    defer state.dossiers.deinit();
+    var server = Server{
+        .allocator = allocator,
+        .project_dir = project,
+        .auth_dir = project,
+        .state = &state,
+    };
+
+    // Nothing composed yet: the reader gets the loader page immediately, not a
+    // composition held open inside the request.
+    var cold = httpz.testing.init(.{});
+    defer cold.deinit();
+    server.allocator = cold.res.arena;
+    cold.param("name", "demo");
+    try dossierPage(&server, cold.req, cold.res);
+    try std.testing.expectEqual(@as(u16, 200), cold.res.status);
+    try std.testing.expectEqual(httpz.ContentType.HTML, cold.res.content_type.?);
+    try std.testing.expect(std.mem.indexOf(u8, cold.res.body, "Composing dossier") != null);
+    // It waits and reloads rather than polling: a status poll every couple of
+    // seconds measurably moves the composition's own input closure underneath
+    // it, so the loader must not contain one.
+    try std.testing.expect(std.mem.indexOf(u8, cold.res.body, "location.reload()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cold.res.body, "/dossier-status") == null);
+    try std.testing.expectEqualStrings("composing", cold.res.headers.get("x-netlisp-dossier-state").?);
+
+    // The status endpoint reports that state without composing anything.
+    var idle_status = httpz.testing.init(.{});
+    defer idle_status.deinit();
+    server.allocator = idle_status.res.arena;
+    idle_status.param("name", "demo");
+    try dossierStatusApi(&server, idle_status.req, idle_status.res);
+    try std.testing.expect(std.mem.indexOf(u8, idle_status.res.body, "\"state\":\"idle\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, idle_status.res.body, "\"ready\":false") != null);
+
+    // A finished composition is served back verbatim — the page retains the
+    // composer's bytes rather than wrapping or annotating them.
+    const composed = "<!doctype html><html><body>dossier v1</body></html>";
+    const first_gen = state.dossiers.begin("demo").?;
+    state.dossiers.finish("demo", first_gen, try std.heap.page_allocator.dupe(u8, composed), null);
+
+    var warm = httpz.testing.init(.{});
+    defer warm.deinit();
+    server.allocator = warm.res.arena;
+    warm.param("name", "demo");
+    try dossierPage(&server, warm.req, warm.res);
+    try std.testing.expectEqual(@as(u16, 200), warm.res.status);
+    try std.testing.expectEqualStrings(composed, warm.res.body);
+    try std.testing.expectEqualStrings("current", warm.res.headers.get("x-netlisp-dossier-state").?);
+    try std.testing.expect(warm.res.headers.get("x-netlisp-dossier-age") != null);
+
+    var ready_status = httpz.testing.init(.{});
+    defer ready_status.deinit();
+    server.allocator = ready_status.res.arena;
+    ready_status.param("name", "demo");
+    try dossierStatusApi(&server, ready_status.req, ready_status.res);
+    try std.testing.expect(std.mem.indexOf(u8, ready_status.res.body, "\"state\":\"ready\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ready_status.res.body, "\"ready\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ready_status.res.body, "\"error\":null") != null);
+
+    // A recompose replaces the copy whole, so a later reload carries the newer
+    // document and nothing of the older one.
+    const recomposed = "<!doctype html><html><body>dossier v2</body></html>";
+    const second_gen = state.dossiers.begin("demo").?;
+    state.dossiers.finish("demo", second_gen, try std.heap.page_allocator.dupe(u8, recomposed), null);
+
+    var reloaded = httpz.testing.init(.{});
+    defer reloaded.deinit();
+    server.allocator = reloaded.res.arena;
+    reloaded.param("name", "demo");
+    try dossierPage(&server, reloaded.req, reloaded.res);
+    try std.testing.expectEqualStrings(recomposed, reloaded.res.body);
+}
+
+// spec: system-review - a dossier composition that failed in the background reaches the next page request as the composer's diagnostic
+test "a background dossier failure reaches the page as the composer's diagnostic" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "project/src/systems/demo");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "project/src/systems/demo/system.json",
+        .data = dossier_fixture_manifest,
+    });
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, "project", allocator);
+    defer allocator.free(project);
+
+    var state: serve_root.ServerState = .{};
+    defer state.dossiers.deinit();
+    var server = Server{
+        .allocator = allocator,
+        .project_dir = project,
+        .auth_dir = project,
+        .state = &state,
+    };
+
+    // The composer only reaches this refusal after a board pass, so it is the
+    // background thread that records it…
+    const gen = state.dossiers.begin("demo").?;
+    state.dossiers.finish("demo", gen, null, error.BoardNotFound);
+
+    // …and the page answers it exactly as the synchronous composer used to:
+    // the composer's own status and wording, never a blank page or a loader
+    // that would poll forever.
+    var request = httpz.testing.init(.{});
+    defer request.deinit();
+    server.allocator = request.res.arena;
+    request.param("name", "demo");
+    try dossierPage(&server, request.req, request.res);
+    try std.testing.expectEqual(@as(u16, 404), request.res.status);
+    try std.testing.expectEqual(httpz.ContentType.JSON, request.res.content_type.?);
+    try std.testing.expect(std.mem.indexOf(u8, request.res.body, "not found") != null);
+
+    var status = httpz.testing.init(.{});
+    defer status.deinit();
+    server.allocator = status.res.arena;
+    status.param("name", "demo");
+    try dossierStatusApi(&server, status.req, status.res);
+    try std.testing.expect(std.mem.indexOf(u8, status.res.body, "\"state\":\"failed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status.res.body, "\"error\":\"BoardNotFound\"") != null);
+}
+
+// spec: system-review - the dossier's board-free refusals are decided without starting a composition, so a broken workspace is refused on the first request
 // spec: system-review - a dossier request over a workspace that cannot compose answers the composer's diagnostic rather than a crash or a partial page
 test "the dossier page answers a non-composable workspace with the composer diagnostic" {
     const allocator = std.testing.allocator;
@@ -1555,4 +1870,64 @@ test "system review API creates a declared missing document with an absent-only 
     );
     defer allocator.free(created);
     try std.testing.expectEqualStrings("# Release checklist\n\n- [ ] Review board evidence\n", created);
+}
+
+// spec: system-review - a saved review document retires the system's composed dossier so the next request composes from post-save inputs
+test "saving a review document retires the system's composed dossier" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "project/src/systems/demo");
+    // Keep git from walking out of the fixture into the enclosing checkout;
+    // this test is about cache invalidation, not auto-commit integration.
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "project/.git",
+        .data = "gitdir: /nonexistent/system-review-fixture\n",
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "project/src/systems/demo/system.json",
+        .data = dossier_fixture_manifest,
+    });
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, "project", allocator);
+    defer allocator.free(project);
+
+    var state: serve_root.ServerState = .{};
+    defer state.dossiers.deinit();
+    var server = Server{
+        .allocator = allocator,
+        .project_dir = project,
+        .auth_dir = project,
+        .request_auth = .{ .username = "writer@example.com", .role = .writer },
+        .state = &state,
+    };
+
+    // A dossier composed from the pre-save workspace…
+    const gen = state.dossiers.begin("demo").?;
+    state.dossiers.finish(
+        "demo",
+        gen,
+        try std.heap.page_allocator.dupe(u8, "<html>before the save</html>"),
+        null,
+    );
+
+    var put_request = httpz.testing.init(.{});
+    defer put_request.deinit();
+    server.allocator = put_request.res.arena;
+    put_request.param("name", "demo");
+    put_request.param("doc", "release-checklist");
+    put_request.header(mutation_header_name, mutation_header_value);
+    put_request.header("if-none-match", "*");
+    put_request.body("# Release checklist\n\n- [x] Review board evidence\n");
+    try putDocumentApi(&server, put_request.req, put_request.res);
+    try std.testing.expect(std.mem.indexOf(u8, put_request.res.body, "\"ok\":true") != null);
+
+    // …is gone the moment the save lands, so the reader's next request composes
+    // afresh instead of being handed back the document they just edited away.
+    var after = httpz.testing.init(.{});
+    defer after.deinit();
+    server.allocator = after.res.arena;
+    after.param("name", "demo");
+    try dossierPage(&server, after.req, after.res);
+    try std.testing.expect(std.mem.indexOf(u8, after.res.body, "before the save") == null);
+    try std.testing.expect(std.mem.indexOf(u8, after.res.body, "Composing dossier") != null);
 }

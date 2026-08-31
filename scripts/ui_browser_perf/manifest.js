@@ -33,7 +33,7 @@ const routes = {
   "/systems/:name": { coverage: "surface", surface: "system_review" },
   "/systems/:name/dossier": {
     coverage: "uncovered",
-    reason: "The draft dossier is a script-free, server-composed document with no interactions to time: its whole cost is the system package composer's per-request analysis (every board's review snapshot and fabrication readiness), so measuring it here would time the composer through a browser rather than the UI, and doing so needs a release-ready system fixture this gate does not carry.",
+    reason: "The draft dossier is a script-free, server-composed document with no interactions to time. Since composition moved onto a background thread (src/serve/dossier_jobs.zig) the route itself is a memory read that answers with the composed copy or a loader page, so what is left to measure is the composer — every board's review snapshot and fabrication readiness — which is a Zig-side cost, not a UI one, and reaching it needs a release-ready system fixture this gate does not carry.",
   },
 };
 

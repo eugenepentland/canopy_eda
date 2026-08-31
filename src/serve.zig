@@ -93,6 +93,7 @@ const sync = @import("serve/sync.zig");
 const notes = @import("serve/notes.zig");
 const design_diff = @import("serve/design_diff.zig");
 const datasheet_attach = @import("serve/datasheet_attach.zig");
+const dossier_jobs = @import("serve/dossier_jobs.zig");
 const rate_limiter = @import("serve/rate_limiter.zig");
 const request_log = @import("serve/request_log.zig");
 const system_review_api = @import("serve/system_review_api.zig");
@@ -452,6 +453,12 @@ pub const ServerState = struct {
     /// store names no project directory and writes nothing, so a handler test
     /// logs nowhere unless it asks to; `serve()` is what turns it on.
     request_log: request_log.Store = .{},
+    /// Composed system-review dossiers, one slot per system, filled by a
+    /// detached compose thread (see `serve/dossier_jobs.zig`). Composition is a
+    /// minute of per-board review and fabrication analysis, so the page reads
+    /// this instead of composing inside the request. A default-constructed
+    /// store has background composition off and starts no thread.
+    dossiers: dossier_jobs.Store = .{},
 };
 
 // ── Server ─────────────────────────────────────────────────────────────
@@ -899,6 +906,10 @@ pub fn serve(
         // it writes into `<project_dir>/logs/`, which production keeps
         // gitignored under `/projects/`.
         .request_log = .{ .project_dir = project_dir },
+        // Only a real server composes dossiers in the background: the detached
+        // thread outlives the request that started it, which a handler test's
+        // stack-owned `ServerState` could not survive.
+        .dossiers = .{ .background = true },
     }; // owned here; shared by pointer
     defer state.caches.deinit();
     // A real server may run background full-board DRC sweeps behind the
@@ -938,7 +949,10 @@ pub fn serve(
     registerPcbRoutes(router);
     router.get("/systems/:name", system_review_api.systemPage, .{});
     // The draft package's HTML dossier as a readable page — same composition as
-    // the `draft.zip` member, without the download-and-unzip round trip.
+    // the `draft.zip` member, without the download-and-unzip round trip. The
+    // composition itself runs on a background thread (`serve/dossier_jobs.zig`),
+    // so this route answers from the composed copy or with a loader, never with
+    // a minute of board analysis held open inside the request.
     router.get("/systems/:name/dossier", system_review_api.dossierPage, .{});
     router.get("/modules", modules_page.modulesListPage, .{});
     router.get("/modules/:name", modules_page.moduleViewPage, .{});
@@ -951,6 +965,7 @@ pub fn serve(
     router.post("/api/systems/:name/assets", system_review_api.uploadAssetApi, .{});
     router.get("/api/systems/:name/assets/:asset", system_review_api.getAssetApi, .{});
     router.get("/api/systems/:name/readiness", system_review_api.readinessApi, .{});
+    router.get("/api/systems/:name/dossier-status", system_review_api.dossierStatusApi, .{});
     router.get("/api/systems/:name/draft.zip", system_review_api.draftPackageApi, .{});
     router.post("/api/systems/:name/release", system_review_api.releaseApi, .{});
     router.post("/api/push/:name", api.pushApi, .{});

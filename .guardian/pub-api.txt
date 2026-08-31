@@ -3750,6 +3750,17 @@ src/serve/digikey.zig::default_base value
 src/serve/digikey.zig::downloadDatasheet | fn downloadDatasheet( allocator: std.mem.Allocator, base: []const u8, client_id: []const u8, client_secret: []const u8, part_number: []const u8, manufacturer: ?[]const u8, ) DatasheetError!DatasheetResult
 src/serve/digikey.zig::resolveMpn | fn resolveMpn( allocator: std.mem.Allocator, base: []const u8, client_id: []const u8, client_secret: []const u8, query: []const u8, limit: usize, ) SearchError![]Product
 src/serve/digikey.zig::searchErrorMessage | fn searchErrorMessage(err: SearchError) []const u8
+src/serve/dossier_jobs.zig::Store struct_
+src/serve/dossier_jobs.zig::View struct_
+src/serve/dossier_jobs.zig::ageSeconds | fn ageSeconds(self: View, now_ms: i64) ?i64
+src/serve/dossier_jobs.zig::begin | fn begin(self: *Store, name: []const u8) ?u32
+src/serve/dossier_jobs.zig::deinit | fn deinit(self: *Store) void
+src/serve/dossier_jobs.zig::finish | fn finish(self: *Store, name: []const u8, gen: u32, html: ?[]const u8, err: ?anyerror) void
+src/serve/dossier_jobs.zig::invalidate | fn invalidate(self: *Store, name: []const u8) void
+src/serve/dossier_jobs.zig::revalidate_after_ms value
+src/serve/dossier_jobs.zig::snapshot | fn snapshot(self: *Store, allocator: ?std.mem.Allocator, name: []const u8) View
+src/serve/dossier_jobs.zig::spawn | fn spawn(store: *Store, project_dir: []const u8, name: []const u8) void
+src/serve/dossier_jobs.zig::stale | fn stale(self: View, now_ms: i64) bool
 src/serve/drc_json.zig::DrawerGroup struct_
 src/serve/drc_json.zig::Names struct_
 src/serve/drc_json.zig::drawer_groups value
@@ -4493,6 +4504,7 @@ src/serve/system_review_api.zig::SystemSummary struct_
 src/serve/system_review_api.zig::attestSystemApi | fn attestSystemApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::collectSystemSummaries | fn collectSystemSummaries( allocator: std.mem.Allocator, project_dir: []const u8, ) ListSystemsError![]const SystemSummary
 src/serve/system_review_api.zig::dossierPage | fn dossierPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/system_review_api.zig::dossierStatusApi | fn dossierStatusApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::draftPackageApi | fn draftPackageApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::getAssetApi | fn getAssetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::getDocumentApi | fn getDocumentApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
@@ -4869,6 +4881,7 @@ src/system_review_package.zig::PackageResult struct_
 src/system_review_package.zig::Readiness struct_
 src/system_review_package.zig::ReleaseOptions struct_
 src/system_review_package.zig::attest | fn attest( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, expected_content_lock: []const u8, actor: []const u8, attested_at: []const u8, ) AttestError!AttestationResult
+src/system_review_package.zig::dossierPreflight | fn dossierPreflight( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) PreflightError!void
 src/system_review_package.zig::draft | fn draft( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) DraftError!PackageResult
 src/system_review_package.zig::draftDossierHtml | fn draftDossierHtml( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) DossierHtmlError![]const u8
 src/system_review_package.zig::readiness | fn readiness( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) ReadinessError!Readiness

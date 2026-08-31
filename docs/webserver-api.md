@@ -386,6 +386,58 @@ Local dev still uses `http://localhost:7050`.
   netlist-only bundle this endpoint used to serve, byte-identical. The CLI's
   directory flow is the other way round — opt in with `--with-schematic`.
 - **Library upload**: `GET /library`, `POST /api/upload-symbol`, `POST /api/upload-footprint`
+- **System review workspace**: `GET /systems/:name` — the document editor over
+  `src/systems/<name>/system.json`, with `GET|PUT /api/systems/:name/docs/:doc`,
+  `POST /api/systems/:name/attest`, `POST /api/systems/:name/assets`,
+  `GET /api/systems/:name/readiness`, `GET /api/systems/:name/draft.zip` and
+  `POST /api/systems/:name/release` behind it. Session-gated like the rest of
+  the browser surface; every mutation needs the `X-Netlisp-Review: 1` header and
+  the writer role.
+- **System dossier**: `GET /systems/:name/dossier` — the draft package's
+  self-contained HTML dossier as a readable page, byte-identical to the
+  `review/<base>.html` member of the same system's `draft.zip` (one composer,
+  `system_review_package.composeDossierHtml`, so the page and the archive cannot
+  drift). **Composition does not happen inside the request.** It costs a
+  complete review snapshot plus a complete fabrication-readiness pass per board
+  — measured at 50–57 s for the two-board Barracuda system — so the request
+  answers from a per-system composed copy held in server memory
+  (`src/serve/dossier_jobs.zig`) and the composition runs on a detached thread:
+  - a composed copy is served immediately and verbatim.
+    `X-Netlisp-Dossier-State: current|recomposing` says whether a recompose is
+    running behind it and `X-Netlisp-Dossier-Age` gives its age in seconds;
+  - a copy past the 60 s revalidation window starts a background recompose while
+    it is served, so the next reload carries current evidence;
+  - with nothing composed yet, a small loader page (HTTP 200,
+    `X-Netlisp-Dossier-State: composing`) is served that **waits and reloads
+    itself** — once, about 75 s in — rather than polling. That is a correctness
+    requirement: measured against the real Barracuda system, a composition
+    survives an occasional concurrent request, but a status poll every two
+    seconds moved the boards' consumed-input closure underneath it on nearly
+    every run, producing a different content lock each time and tripping
+    `analyze`'s own `InputsChanged` guard. One reload per wait keeps the
+    composition on the quiet path that produces the same lock the CLI export
+    and the synchronous `draft.zip` request produce;
+  - a composition that loses its input closure anyway is composed again, up to
+    three attempts, before the failure is reported;
+  - **one composition per system is ever in flight** — reloading during one
+    joins it rather than starting a second minute of board analysis;
+  - every system-review mutation (document save, asset upload, attestation)
+    drops that system's composed copy, so a reader who just saved is never
+    handed the pre-save document; the next request composes afresh.
+  Refusals that need no board analysis — an unsafe `:name`, an absent or
+  oversized manifest, a manifest that does not validate or names another system
+  — are still decided synchronously and answer with the composer's own
+  diagnostic (400/404/422), exactly as `draft.zip` does. A failure the composer
+  only reaches after a board pass is recorded against the system and answered
+  the same way on the next request.
+- **System dossier status**: `GET /api/systems/:name/dossier-status` — what the
+  dossier page would do right now, without composing or serving anything:
+  `{ok,system,state:"idle"|"composing"|"ready"|"failed",ready,composing,
+  generation,age_seconds,error}`. Read-only and O(1) — it starts no composition
+  and copies no document. The review workspace labels its **View dossier**
+  action from it (`composed 3m ago` / `recomposing` / `composing…` / `last
+  compose failed`). Deliberately **not** what the loader page waits on: do not
+  poll it in a tight loop while a composition is in flight (see above).
 
 ### Interaction log
 
