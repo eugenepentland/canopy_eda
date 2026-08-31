@@ -130,7 +130,7 @@ fn propertyNumber(inst: anytype, key: []const u8) ?f64 {
 }
 
 fn railVoltage(p: optimizer.Placement, net: []const u8) ?f64 {
-    for (p.rules.physical.rail_specs) |rail| {
+    for (p.rules.physical.rail_model.specs) |rail| {
         if (intentMatches(net, rail.name)) return rail.nominal;
         for (rail.aliases) |alias| if (intentMatches(net, alias)) return rail.nominal;
     }
@@ -854,7 +854,7 @@ fn computedPaths(
     };
     for (p.nets) |net| {
         var relevant = optimizer.isGroundName(net_names.leaf(net.name));
-        for (p.rules.physical.pdn_intents) |intent| if (intentMatches(intent.net, net.name)) {
+        for (p.rules.physical.rail_model.intents) |intent| if (intentMatches(intent.net, net.name)) {
             relevant = true;
             break;
         };
@@ -868,7 +868,7 @@ fn computedPaths(
     }
     for (zones, 0..) |zone, i| {
         var relevant = optimizer.isGroundName(net_names.leaf(zone.net));
-        for (p.rules.physical.pdn_intents) |intent| if (intentMatches(intent.net, zone.net)) {
+        for (p.rules.physical.rail_model.intents) |intent| if (intentMatches(intent.net, zone.net)) {
             relevant = true;
             break;
         };
@@ -1206,7 +1206,7 @@ pub fn analyzeCopper(
 ) std.mem.Allocator.Error!Analysis {
     const paths = try computedPaths(alloc, scratch_alloc, p, routed, zones, base_edge);
     var rails: std.ArrayList(Rail) = .empty;
-    for (p.rules.physical.pdn_intents) |intent| try rails.append(alloc, try buildRail(alloc, p, routed, paths, intent));
+    for (p.rules.physical.rail_model.intents) |intent| try rails.append(alloc, try buildRail(alloc, p, routed, paths, intent));
     return .{ .rails = try rails.toOwnedSlice(alloc) };
 }
 
@@ -1283,7 +1283,7 @@ test "PDN rail without extracted capacitors cannot green-pass" {
         .maxx = 0,
         .maxy = 0,
         .generated = true,
-        .rules = .{ .physical = .{ .pdn_intents = &intents } },
+        .rules = .{ .physical = .{ .rail_model = .{ .intents = &intents } } },
     };
     const analysis = try analyze(arena_state.allocator(), placement, .{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 });
     try std.testing.expectEqual(@as(usize, 0), analysis.rails[0].capacitors.len);
@@ -1570,7 +1570,7 @@ test "PDN capacitor to load custom pour is live analysis copper" {
         .maxy = 10,
         .generated = true,
         .board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 10 },
-        .rules = .{ .copper_layers = 2, .physical = .{ .stack = .{ .layers = 2 }, .pdn_intents = &intents } },
+        .rules = .{ .copper_layers = 2, .physical = .{ .stack = .{ .layers = 2 }, .rail_model = .{ .intents = &intents } } },
     };
     // Only the capacitor is stitched: without the authored surface GND pour,
     // no complete via/plane/via path reaches the load ground land.

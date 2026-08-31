@@ -118,6 +118,9 @@ src/board_layers.zig::tech_row_count value
 src/board_layers.zig::unrestricted value
 src/board_layers.zig::with | fn with(self: LayerSet, sig: SignalIndex) LayerSet
 src/board_review_snapshot.zig::AmbientWindow struct_
+src/board_review_snapshot.zig::AssemblyEvidence struct_
+src/board_review_snapshot.zig::AssemblyPart struct_
+src/board_review_snapshot.zig::AssemblySprite struct_
 src/board_review_snapshot.zig::Checks struct_
 src/board_review_snapshot.zig::Connection struct_
 src/board_review_snapshot.zig::Engineering struct_
@@ -721,10 +724,12 @@ src/eval/net_analysis.zig::refDesLocalPrefix | fn refDesLocalPrefix(ref_des: []c
 src/eval/net_analysis.zig::schematic_ground_names value
 src/eval/net_analysis.zig::subBlockNetHasCap | fn subBlockNetHasCap(block: *const DesignBlock, net_path: []const u8) bool
 src/eval/pin_enrichment.zig::enrichPinFunctions | fn enrichPinFunctions( allocator: Allocator, block: *DesignBlock, project_dir: []const u8, ) Allocator.Error!void
+src/eval/power_budget.zig::BranchLoad struct_
 src/eval/power_budget.zig::Rail struct_
 src/eval/power_budget.zig::RailConsumer struct_
 src/eval/power_budget.zig::RailStatus enum_
 src/eval/power_budget.zig::analyze | fn analyze( allocator: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error![]const Rail
+src/eval/power_budget.zig::branchLoads | fn branchLoads( allocator: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error![]const BranchLoad
 src/eval/power_budget.zig::railNameForSubPath | fn railNameForSubPath(block: *const DesignBlock, path: []const u8) ?[]const u8
 src/eval/power_budget.zig::resolveRailVoltage | fn resolveRailVoltage(allocator: std.mem.Allocator, block: *const DesignBlock, rail_name: []const u8) ?f64
 src/eval/power_sequencing.zig::SequenceRow struct_
@@ -2199,6 +2204,7 @@ src/placement/impedance_field.zig::analyzeOdd | fn analyzeOdd(allocator: std.mem
 src/placement/impedance_microstrip.zig::Analysis struct_
 src/placement/impedance_microstrip.zig::analyze | fn analyze(w: f64, h: f64, t: f64, er: f64) Error!Analysis
 src/placement/impedance_rules.zig::Physical struct_
+src/placement/impedance_rules.zig::RailModel struct_
 src/placement/impedance_rules.zig::deriveWidths | fn deriveWidths( arena: std.mem.Allocator, block: *const DesignBlock, rules: []NetRule, ) std.mem.Allocator.Error!void
 src/placement/impedance_rules.zig::resolvedPairGap | fn resolvedPairGap(r: NetRule, board_clearance: f64) f64
 src/placement/impedance_rules.zig::stackOf | fn stackOf( arena: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error!impedance.Stack
@@ -4843,15 +4849,19 @@ src/system_review_assets.zig::resolveContainedPathAlloc | fn resolveContainedPat
 src/system_review_assets.zig::validContent | fn validContent(asset_kind: Kind, body: []const u8) bool
 src/system_review_assets.zig::validFilename | fn validFilename(filename: []const u8) bool
 src/system_review_assets.zig::validateAddition | fn validateAddition(existing: []const Asset, added_bytes: usize) error{ TooManyAssets, AssetsTooLarge }!void
+src/system_review_html.zig::Assembly struct_
 src/system_review_html.zig::Board struct_
 src/system_review_html.zig::Error value
 src/system_review_html.zig::Identity struct_
 src/system_review_html.zig::Options struct_
+src/system_review_html.zig::Part struct_
 src/system_review_html.zig::Provenance struct_
 src/system_review_html.zig::Review struct_
 src/system_review_html.zig::Section struct_
+src/system_review_html.zig::Sprite struct_
 src/system_review_html.zig::State struct_
 src/system_review_html.zig::Supporting struct_
+src/system_review_html.zig::Visual struct_
 src/system_review_html.zig::compose | fn compose(allocator: std.mem.Allocator, sections: []const Section, opts: Options) Error![]u8
 src/system_review_html.zig::draft_marker value
 src/system_review_html.zig::max_html_bytes value

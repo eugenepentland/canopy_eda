@@ -5149,6 +5149,7 @@ Public functions: analyze
 - a standalone module page's own out power port rates the rail it exports, so a module routed as the board still has a current figure to size copper against
 - only a `(current …)` on a top-level out port creates a rail, and an explicitly signal-kinded output never becomes one
 - a parent board reads a module's rating through its sub-block port, and the highest declared capacity wins a rail whichever way it was declared
+- a sub-block input power port's declared current is reported as a branch load for series sizing and never enters the rail's summed budget
 
 ## eval/thermal
 
@@ -5553,7 +5554,8 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - the offline HTML dossier is one self-contained file with no external request and no script
 - the offline HTML dossier ships beside the combined Markdown and PDF in draft and release, carrying the draft marker only in draft
 - the HTML dossier carries the draft marker only in draft mode and numbers one section per manifest document
-- the dossier leads with a structured gate summary and keeps every long review document in a keyboard-native disclosure without repeating its title
+- the dossier indexes every section in a sticky sidebar and renders the evidence once as one continuous document without repeating its title
+- every board leads the dossier with an inline layout image and static top/bottom assembly views populated from deduplicated cached 3D-model sprites, while the sidebar contains section navigation rather than interface-contact metrics
 - the dossier leads with a structured gate summary and distinguishes waiver-required evidence from an accepted release waiver
 - the HTML dossier inlines each board's block diagram and omits the figure when the design has none
 - the HTML dossier is a pure function of its inputs and renders byte-identically on repeat
@@ -7299,6 +7301,8 @@ Public functions: check, writeJson, savedOutline, declaredOutline, outlineDrift
 - logical file and directory aliases retain their exact resolved target through release verification
 - relative project roots resolve to the canonical absolute path identity recorded by the exact read trace
 - rail checks use worst-case voltage, reject underrating, preserve unknown endpoints, and size zero-ohm jumpers by rail current
+- a series element is charged the branch its own rail data declares, and the whole rail's worst case only when the design declared no branch
+- a rail with no per-branch declaration still charges every series element its whole worst-case load
 - saved rounded outlines must exactly match authored dimensions, radius, polygon, and native arcs
 - synthesized footprint fallback geometry is a non-waivable release identity failure
 - 0R0 is a zero-ohm jumper that requires authored current and maximum-resistance evidence, never tolerance

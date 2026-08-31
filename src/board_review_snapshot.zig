@@ -21,6 +21,8 @@ const outline_mod = @import("placement/outline.zig");
 const power_budget = @import("eval/power_budget.zig");
 const thermal = @import("eval/thermal.zig");
 const export_pdf = @import("export_pdf.zig");
+const export_kicad = @import("export_kicad.zig");
+const export_kicad_footprint = @import("export_kicad_footprint.zig");
 const fab_readiness = @import("fab_readiness.zig");
 const fab_release = @import("fab_release.zig");
 const flat_netlist = @import("flat_netlist.zig");
@@ -29,6 +31,7 @@ const net_name = @import("net_name.zig");
 const paths = @import("paths.zig");
 const pdf = @import("pdf.zig");
 const render_pcb_png = @import("render_pcb_png.zig");
+const optimizer = @import("placement/optimizer.zig");
 const req_checks = @import("req_checks.zig");
 const review = @import("review.zig");
 const review_json = @import("review_json.zig");
@@ -373,6 +376,46 @@ pub const Engineering = struct {
     bom: bom_html.BomRollup = .{},
 };
 
+/// A cached top-down component body used to populate the dossier's static
+/// assembly views. The bounds are footprint-local millimetres, matching the
+/// browser Assembly renderer's persistent model-sprite contract.
+pub const AssemblySprite = struct {
+    footprint: []const u8,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    png: []const u8,
+};
+
+/// One placed use of an `AssemblySprite`. `sprite` indexes the deduplicated
+/// slice above, so a board with hundreds of identical passives embeds their
+/// model picture only once.
+pub const AssemblyPart = struct {
+    sprite: usize,
+    x: f64,
+    y: f64,
+    rotation: f64,
+    bottom: bool,
+};
+
+/// The projection and cached model bodies needed to render both board faces as
+/// inline, script-free SVG. `base_png` is the ordinary physical board paint
+/// without its title/legend bands; model bodies are layered over it using the
+/// exact footprint transforms the interactive Assembly page applies.
+pub const AssemblyEvidence = struct {
+    base_png: []const u8 = "",
+    projection: struct {
+        width: u32 = 0,
+        height: u32 = 0,
+        minx: f64 = 0,
+        miny: f64 = 0,
+        scale: f64 = 1,
+    } = .{},
+    sprites: []const AssemblySprite = &.{},
+    parts: []const AssemblyPart = &.{},
+};
+
 /// Fully rendered, immutable evidence for one board member. Every byte slice
 /// belongs to the caller's allocator.
 pub const Snapshot = struct {
@@ -407,6 +450,7 @@ pub const Snapshot = struct {
     },
     physical: struct {
         pcb_png: []const u8,
+        assembly: AssemblyEvidence = .{},
         /// Canonical digest of every exact filesystem byte consumed while
         /// producing this snapshot, verified again before returning.
         consumed_sha256: [64]u8,
@@ -517,6 +561,15 @@ fn buildImpl(
         .user_zones = fv.zones,
         .grid = true,
     });
+    const assembly_png = try render_pcb_png.render(allocator, fv.placement, .{
+        .width = std.math.clamp(options.pcb_width, 400, 2200),
+        .routed = fv.routed,
+        .texts = fv.texts,
+        .silk_keepouts = fv.silk_keepouts,
+        .user_zones = fv.zones,
+        .bare = true,
+    });
+    const assembly = try collectAssemblyEvidence(allocator, project_dir, fv.placement, assembly_png);
 
     const source_entries = try collectSources(allocator, project_dir, root_source_path, &evaluator);
     const connections = try collectConnections(allocator, named.block, options.connectors);
@@ -558,6 +611,7 @@ fn buildImpl(
         },
         .physical = .{
             .pcb_png = pcb_png,
+            .assembly = assembly,
             .consumed_sha256 = consumed_sha256,
             .consumed_trace = read_trace,
             .fab_inputs = traced_fab_inputs,
@@ -565,6 +619,179 @@ fn buildImpl(
             .connections = connections,
         },
         .analysis = engineering,
+    };
+}
+
+const model_sprite_cache_rel = "lib/models/.sprites";
+const model_sprite_render_version = "2";
+const max_model_sprite_bytes: usize = 8 * 1024 * 1024;
+const max_model_sprite_meta_bytes: usize = 2048;
+const png_signature = "\x89PNG\r\n\x1a\n";
+
+const SpriteBounds = struct { x: f64, y: f64, w: f64, h: f64 };
+
+fn safeSpriteName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 128 or std.mem.indexOf(u8, name, "..") != null) return false;
+    for (name) |c| {
+        if (safeSpriteNameByte(c)) continue;
+        return false;
+    }
+    return true;
+}
+
+fn safeSpriteNameByte(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or switch (c) {
+        '.', '-', '_', ',', '#' => true,
+        else => false,
+    };
+}
+
+fn jsonFloat(value: std.json.Value) ?f64 {
+    return switch (value) {
+        .float => |n| n,
+        .integer => |n| @floatFromInt(n),
+        else => null,
+    };
+}
+
+fn validSpriteBounds(bounds: SpriteBounds) bool {
+    for ([_]f64{ bounds.x, bounds.y, bounds.w, bounds.h }) |value|
+        if (!std.math.isFinite(value) or @abs(value) > 10_000) return false;
+    return bounds.w > 0 and bounds.h > 0;
+}
+
+/// Recompute the persistent sprite key exactly as the Assembly endpoint does.
+/// A model/config edit may leave the old PNG on disk until Assembly next opens;
+/// the dossier omits that stale body instead of presenting it as current.
+fn currentSpriteKey(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    footprint: []const u8,
+) ?u64 {
+    const config = export_kicad.loadModelConfig(allocator, project_dir);
+    const transform = config.get(footprint);
+    const model_name = if (transform) |value|
+        if (value.model) |name| allocator.dupe(u8, name) catch return null else export_kicad_footprint.findModelFile(allocator, project_dir, footprint, footprint)
+    else
+        export_kicad_footprint.findModelFile(allocator, project_dir, footprint, footprint);
+    const resolved = model_name orelse return null;
+    const model_path = std.fmt.allocPrint(allocator, "{s}/lib/models/{s}", .{ project_dir, resolved }) catch return null;
+    const stat = infra_fs.cwd().statFile(model_path) catch return null;
+    const offset = if (transform) |value| value.offset else [3]f64{ 0, 0, 0 };
+    const rotation = if (transform) |value| value.rotation else [3]f64{ 0, 0, 0 };
+
+    var hash = std.hash.Wyhash.init(0x535052495445);
+    hash.update(model_sprite_render_version);
+    hash.update(resolved);
+    var size = stat.size;
+    var mtime = stat.mtime.nanoseconds;
+    hash.update(std.mem.asBytes(&size));
+    hash.update(std.mem.asBytes(&mtime));
+    var transform_buf: [256]u8 = undefined;
+    const transform_text = std.fmt.bufPrint(&transform_buf, "{d},{d},{d};{d},{d},{d}", .{
+        offset[0], offset[1], offset[2], rotation[0], rotation[1], rotation[2],
+    }) catch return null;
+    hash.update(transform_text);
+    return hash.final();
+}
+
+fn loadAssemblySprite(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    footprint: []const u8,
+) ?AssemblySprite {
+    if (!safeSpriteName(footprint)) return null;
+    const meta_path = std.fmt.allocPrint(
+        allocator,
+        "{s}/{s}/{s}.json",
+        .{ project_dir, model_sprite_cache_rel, footprint },
+    ) catch return null;
+    const meta = infra_fs.cwd().readFileAlloc(allocator, meta_path, max_model_sprite_meta_bytes) catch return null;
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, allocator, meta, .{}) catch return null;
+    const object = switch (parsed) {
+        .object => |value| value,
+        else => return null,
+    };
+    const key = switch (object.get("key") orelse return null) {
+        .string => |value| value,
+        else => return null,
+    };
+    if (key.len != 16) return null;
+    const source_key = currentSpriteKey(allocator, project_dir, footprint) orelse return null;
+    var key_buf: [16]u8 = undefined;
+    const expected_key = std.fmt.bufPrint(&key_buf, "{x:0>16}", .{source_key}) catch return null;
+    if (!std.mem.eql(u8, key, expected_key)) return null;
+    const bounds: SpriteBounds = .{
+        .x = jsonFloat(object.get("x") orelse return null) orelse return null,
+        .y = jsonFloat(object.get("y") orelse return null) orelse return null,
+        .w = jsonFloat(object.get("w") orelse return null) orelse return null,
+        .h = jsonFloat(object.get("h") orelse return null) orelse return null,
+    };
+    if (!validSpriteBounds(bounds)) return null;
+    const png_path = std.fmt.allocPrint(
+        allocator,
+        "{s}/{s}/{s}.png",
+        .{ project_dir, model_sprite_cache_rel, footprint },
+    ) catch return null;
+    const bytes = infra_fs.cwd().readFileAlloc(allocator, png_path, max_model_sprite_bytes) catch return null;
+    if (!std.mem.startsWith(u8, bytes, png_signature)) return null;
+    return .{
+        .footprint = allocator.dupe(u8, footprint) catch return null,
+        .x = bounds.x,
+        .y = bounds.y,
+        .w = bounds.w,
+        .h = bounds.h,
+        .png = bytes,
+    };
+}
+
+fn collectAssemblyEvidence(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    placement: optimizer.Placement,
+    base_png: []const u8,
+) !AssemblyEvidence {
+    if (base_png.len < 24 or !std.mem.startsWith(u8, base_png, png_signature)) return error.InvalidPng;
+    const width = std.mem.readInt(u32, base_png[16..20], .big);
+    const height = std.mem.readInt(u32, base_png[20..24], .big);
+    const board_width_mm = @max(placement.maxx - placement.minx, 1.0) + 2 * render_pcb_png.view_margin_mm;
+    const scale = @as(f64, @floatFromInt(width)) / board_width_mm;
+
+    var sprites: std.ArrayList(AssemblySprite) = .empty;
+    var parts: std.ArrayList(AssemblyPart) = .empty;
+    var by_footprint: std.StringHashMapUnmanaged(usize) = .empty;
+    defer by_footprint.deinit(allocator);
+
+    for (placement.parts, 0..) |part, index| {
+        if (index >= placement.instances.len) break;
+        const footprint = placement.instances[index].footprint;
+        const sprite_index = by_footprint.get(footprint) orelse blk: {
+            const sprite = loadAssemblySprite(allocator, project_dir, footprint) orelse continue;
+            const next = sprites.items.len;
+            try sprites.append(allocator, sprite);
+            try by_footprint.put(allocator, sprite.footprint, next);
+            break :blk next;
+        };
+        try parts.append(allocator, .{
+            .sprite = sprite_index,
+            .x = part.x,
+            .y = part.y,
+            .rotation = part.rot,
+            .bottom = part.side == .bottom,
+        });
+    }
+
+    return .{
+        .base_png = base_png,
+        .projection = .{
+            .width = width,
+            .height = height,
+            .minx = placement.minx,
+            .miny = placement.miny,
+            .scale = scale,
+        },
+        .sprites = try sprites.toOwnedSlice(allocator),
+        .parts = try parts.toOwnedSlice(allocator),
     };
 }
 
@@ -1144,6 +1371,33 @@ fn collectSources(
         }
     }.lessThan);
     return out.items;
+}
+
+test "dossier assembly evidence accepts only a current model sprite" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "lib/models/.sprites");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/models/demo.step", .data = "step-v1" });
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    const key = currentSpriteKey(allocator, project_dir, "demo") orelse return error.TestUnexpectedResult;
+    const metadata = try std.fmt.allocPrint(
+        allocator,
+        "{{\"key\":\"{x:0>16}\",\"x\":-1,\"y\":-2,\"w\":3,\"h\":4}}",
+        .{key},
+    );
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/models/.sprites/demo.json", .data = metadata });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/models/.sprites/demo.png", .data = png_signature ++ "pixels" });
+    const current = loadAssemblySprite(allocator, project_dir, "demo") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("demo", current.footprint);
+    try std.testing.expectApproxEqAbs(@as(f64, 4), current.h, 1e-9);
+
+    // Replacing the STEP changes the source key. Until Assembly refreshes its
+    // cache, the dossier leaves the stale body out rather than showing it.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/models/demo.step", .data = "step-version-two" });
+    try std.testing.expect(loadAssemblySprite(allocator, project_dir, "demo") == null);
 }
 
 // spec: system-review - interface evidence resolves stable sub-block connector handles through the canonical flattened netlist
