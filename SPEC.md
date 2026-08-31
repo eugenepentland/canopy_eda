@@ -6489,6 +6489,7 @@ Public functions: designSourcePath, designSourcePathUnique, designSiblingPath
 - Resolves sibling artifacts via designSiblingPath using the supplied extension
 - A release source lookup rejects duplicate design basenames instead of selecting the first directory walk result
 - Module release sidecars resolve beside the selected module source even when an orphan artifact with the same basename exists under src
+- A src index revalidation triggered by another request leaves a traced lookup's consumed-input closure unchanged
 
 ## lib_limits
 
@@ -7297,6 +7298,8 @@ Public functions: check, writeJson, savedOutline, declaredOutline, outlineDrift
 - revision, source-ID, BOM/centroid, and fallback-geometry identity failures can never be waived
 - consumed-input closure identity is independent of filesystem read order
 - exact read tracing retains child-directory identity and rejects an A/B/A byte sequence
+- a hidden cache probe is absent from the read trace while a real mid-scope edit still fails verification
+- a cache probe ended away from its owner thread fails the hidden trace closed
 - release tracing binds directory membership and absent optional inputs to the exact evaluated snapshot
 - logical file and directory aliases retain their exact resolved target through release verification
 - relative project roots resolve to the canonical absolute path identity recorded by the exact read trace

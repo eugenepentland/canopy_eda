@@ -260,10 +260,23 @@ fn persistCache(
 /// Whether a failed attempt should be composed again. Only the composer's
 /// mid-analysis consistency guard qualifies: `error.InputsChanged` says a
 /// board's consumed-input closure moved between `analyze`'s two fabrication
-/// passes, which is a property of what else the server was doing rather than a
-/// verdict about the workspace. Every other failure — an invalid manifest, a
-/// missing board, a package over its ceiling — would fail identically on the
-/// next attempt, so it is reported at once.
+/// passes.
+///
+/// It once said less than that. Until the `src/` basename index stopped
+/// probing the tree inside whichever read trace happened to be open
+/// (`paths.ensureSrcIndex`), an unrelated request landing mid-compose could
+/// move the closure over a tree nobody had touched, and this retry was the
+/// mitigation for a guard that lied. It no longer is: a minute-long compose
+/// concurrent with a steady request stream now holds one closure throughout.
+///
+/// What remains is the honest case the guard is FOR. A compose reads the
+/// workspace for a minute or more without holding a lock over it, so a save,
+/// an autolayout write or a git operation genuinely can land between the two
+/// passes. Recomposing is the right answer to that — the next attempt simply
+/// sees the post-mutation tree — and it stays bounded so a workspace being
+/// edited continuously reports instead of looping. Every other failure — an
+/// invalid manifest, a missing board, a package over its ceiling — would fail
+/// identically on the next attempt, so it is reported at once.
 fn retryable(err: anyerror, attempt: u8) bool {
     return err == error.InputsChanged and attempt < max_compose_attempts;
 }
@@ -546,15 +559,14 @@ const Task = struct {
                 self.project_dir,
                 self.name,
             ) catch |err| {
-                // `InputsChanged` is `analyze`'s mid-analysis consistency
-                // guard, not a verdict about the workspace: something the
-                // server did moved a board's consumed-input closure between the
-                // two fabrication passes that sandwich the review snapshot.
-                // Measured on the real Barracuda system, a minute-long analysis
-                // survives an occasional concurrent request but not a steady
-                // stream of them, so composing again is the sanctioned
-                // response — bounded, so a genuinely unstable tree reports
-                // instead of looping.
+                // `InputsChanged` says a board's consumed-input closure moved
+                // between the two fabrication passes that sandwich the review
+                // snapshot. A compose reads the workspace for a minute or more
+                // without a lock over it, so a save landing in that window is a
+                // real thing to survive: composing again reads the tree as it
+                // now stands. Bounded, so a workspace under continuous edit
+                // reports instead of looping. (Concurrent READS no longer reach
+                // here — see `retryable` for the closure bug this outlived.)
                 if (retryable(err, attempt)) {
                     log.warn(
                         "dossier compose: {s} lost its input closure, composing again ({d}/{d})",

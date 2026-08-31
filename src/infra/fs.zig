@@ -390,6 +390,64 @@ pub fn hasActiveReadTrace() bool {
     return active_read_trace != null;
 }
 
+/// One scope during which cache-maintenance probing is invisible to the active
+/// read trace.
+///
+/// The consumed-input closure of an analysis must be a pure function of that
+/// analysis's own inputs. A process-lifetime cache breaks that when its
+/// REVALIDATION is triggered by something other than the analysis asking a
+/// question — the `src/` basename index revalidates once per request epoch, and
+/// every other request bumps that epoch. Whether the index happened to
+/// re-measure the tree DURING a traced analysis is therefore a property of what
+/// the rest of the server was doing, and its probe of `src/` would land in
+/// whichever trace was open at that instant. Two passes over an unchanged tree
+/// then produce two different digests and the tamper guard trips on a lie.
+///
+/// A probe hidden this way must observe only cache METADATA — directory shape,
+/// stat identity — never bytes an evaluator, parser or renderer goes on to use.
+/// The bytes a release actually consumes always reach the trace through the
+/// ordinary read path, so hiding revalidation weakens no tamper check: a real
+/// mid-analysis edit still moves a traced file's digest.
+///
+/// Scoping rules mirror `ReadTrace.begin`/`end`: one probe at a time, ended on
+/// the thread that opened it. A violation marks the hidden trace inconsistent
+/// rather than silently restoring an ambient capability to the wrong scope.
+pub const CacheProbe = struct {
+    hidden: ?*ReadTrace = null,
+    owner: ?std.Thread.Id = null,
+
+    /// Restore the trace this probe hid, failing the trace closed if the scope
+    /// was violated.
+    pub fn end(self: *CacheProbe) void {
+        const owner = self.owner orelse return;
+        if (owner != std.Thread.getCurrentId()) {
+            // Leave the scope open for the thread that actually owns it, the
+            // way `ReadTrace.end` refuses to close someone else's trace.
+            if (self.hidden) |trace| trace.consistent = false;
+            return;
+        }
+        self.owner = null;
+        const hidden = self.hidden;
+        self.hidden = null;
+        // A trace opened inside a probe means an untraced scope smuggled in a
+        // capability of its own. Restore the hidden trace anyway so its owner
+        // still closes cleanly, but neither trace may certify anything.
+        if (active_read_trace) |inner| {
+            inner.consistent = false;
+            if (hidden) |trace| trace.consistent = false;
+        }
+        active_read_trace = hidden;
+    }
+};
+
+/// Hide the calling thread's read trace for the duration of one cache
+/// revalidation. See `CacheProbe` for what may and may not run inside it.
+pub fn beginCacheProbe() CacheProbe {
+    const probe = CacheProbe{ .hidden = active_read_trace, .owner = std.Thread.getCurrentId() };
+    active_read_trace = null;
+    return probe;
+}
+
 /// Return the active I/O capability. Tests use the runner-owned capability;
 /// executable roots expose the one supplied by `std.process.Init`.
 pub fn currentIo() std.Io {
@@ -1108,6 +1166,91 @@ test "read trace rejects directory and negative-dependency ABA" {
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/board.checks.sexp", .data = "(assert true)" });
     negative_aba.end();
     try std.testing.expect(!negative_aba.verify());
+}
+
+/// Open and close one directory, the shape of probe a cached index performs
+/// when it re-measures the tree it describes.
+fn probeDirectory(path: []const u8) !void {
+    var directory = try cwd().openDir(path, .{ .iterate = true });
+    directory.close();
+}
+
+// spec: fabrication-release - a hidden cache probe is absent from the read trace while a real mid-scope edit still fails verification
+test "cache probe leaves the closure alone without weakening the tamper guard" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/probe.sexp", .data = "A" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    const src_path = try std.fs.path.join(allocator, &.{ root, "src" });
+    const file_path = try std.fs.path.join(allocator, &.{ src_path, "probe.sexp" });
+
+    var plain = ReadTrace.init(allocator);
+    defer plain.deinit();
+    plain.begin();
+    _ = try cwd().readFileAlloc(allocator, file_path, 16);
+    plain.end();
+    const plain_digest = plain.digest();
+
+    var probed = ReadTrace.init(allocator);
+    defer probed.deinit();
+    probed.begin();
+    {
+        var probe = beginCacheProbe();
+        defer probe.end();
+        try probeDirectory(src_path);
+    }
+    _ = try cwd().readFileAlloc(allocator, file_path, 16);
+    probed.end();
+    try std.testing.expectEqual(plain_digest, probed.digest());
+    try std.testing.expect(probed.verify());
+
+    // The same probe left visible is exactly what made one analysis's closure a
+    // function of whichever cache happened to revalidate inside it.
+    var exposed = ReadTrace.init(allocator);
+    defer exposed.deinit();
+    exposed.begin();
+    try probeDirectory(src_path);
+    _ = try cwd().readFileAlloc(allocator, file_path, 16);
+    exposed.end();
+    const exposed_digest = exposed.digest();
+    try std.testing.expect(!std.mem.eql(u8, &plain_digest, &exposed_digest));
+
+    // A real edit that interleaves with a probed scope still fails closed.
+    var tampered = ReadTrace.init(allocator);
+    defer tampered.deinit();
+    tampered.begin();
+    _ = try cwd().readFileAlloc(allocator, file_path, 16);
+    {
+        var probe = beginCacheProbe();
+        defer probe.end();
+        try probeDirectory(src_path);
+    }
+    tampered.end();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/probe.sexp", .data = "B" });
+    try std.testing.expect(!tampered.verify());
+}
+
+fn endCacheProbeOffOwnerThread(probe: *CacheProbe) void {
+    probe.end();
+}
+
+// spec: fabrication-release - a cache probe ended away from its owner thread fails the hidden trace closed
+test "cache probe rejects an end call away from its owner thread" {
+    var trace = ReadTrace.init(std.testing.allocator);
+    defer trace.deinit();
+    trace.begin();
+    defer trace.end();
+    var probe = beginCacheProbe();
+    try std.testing.expect(active_read_trace == null);
+    const other = try std.Thread.spawn(.{}, endCacheProbeOffOwnerThread, .{&probe});
+    other.join();
+    try std.testing.expect(!trace.consistent);
+    probe.end();
+    try std.testing.expect(active_read_trace == &trace);
 }
 
 fn consumeDirectoryMembership(path: []const u8) !void {

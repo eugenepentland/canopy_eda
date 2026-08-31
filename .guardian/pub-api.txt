@@ -1129,6 +1129,7 @@ src/infra/clock.zig::timestamp | fn timestamp() i64
 src/infra/fs.zig::AccessError value
 src/infra/fs.zig::AtomicFile struct_
 src/infra/fs.zig::AtomicFileOptions struct_
+src/infra/fs.zig::CacheProbe struct_
 src/infra/fs.zig::Condition struct_
 src/infra/fs.zig::CopyFileError value
 src/infra/fs.zig::DeleteFileError value
@@ -1157,6 +1158,7 @@ src/infra/fs.zig::WriteError value
 src/infra/fs.zig::access | fn access(self: Dir, sub_path: []const u8, options: std.Io.Dir.AccessOptions) AccessError!void
 src/infra/fs.zig::atomicFile | fn atomicFile(self: Dir, sub_path: []const u8, options: AtomicFileOptions) AtomicFile.InitError!AtomicFile
 src/infra/fs.zig::begin | fn begin(self: *ReadTrace) void
+src/infra/fs.zig::beginCacheProbe | fn beginCacheProbe() CacheProbe
 src/infra/fs.zig::broadcast | fn broadcast(self: *Condition) void
 src/infra/fs.zig::canonicalPathAlloc | fn canonicalPathAlloc(allocator: std.mem.Allocator, path: []const u8) std.Io.Dir.RealPathFileAllocError![:0]u8
 src/infra/fs.zig::chmod | fn chmod(self: File, permissions: std.Io.File.Permissions) std.Io.File.SetPermissionsError!void
@@ -1175,6 +1177,7 @@ src/infra/fs.zig::deleteFile | fn deleteFile(self: Dir, sub_path: []const u8) De
 src/infra/fs.zig::deleteTree | fn deleteTree(self: Dir, sub_path: []const u8) std.Io.Dir.DeleteTreeError!void
 src/infra/fs.zig::digest | fn digest(self: *const ReadTrace) [64]u8
 src/infra/fs.zig::digestForPath | fn digestForPath(self: *const ReadTrace, path: []const u8) ?[64]u8
+src/infra/fs.zig::end | fn end(self: *CacheProbe) void
 src/infra/fs.zig::end | fn end(self: *ReadTrace) void
 src/infra/fs.zig::finish | fn finish(self: *AtomicFile) FinishError!void
 src/infra/fs.zig::finishPreserve | fn finishPreserve(self: *AtomicFile) PreserveFinishError!void
