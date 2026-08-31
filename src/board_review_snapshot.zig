@@ -388,32 +388,14 @@ pub const AssemblySprite = struct {
     png: []const u8,
 };
 
-/// One placed use of an `AssemblySprite`. `sprite` indexes the deduplicated
-/// slice above, so a board with hundreds of identical passives embeds their
-/// model picture only once.
-pub const AssemblyPart = struct {
-    sprite: usize,
-    x: f64,
-    y: f64,
-    rotation: f64,
-    bottom: bool,
-};
-
-/// The projection and cached model bodies needed to render both board faces as
-/// inline, script-free SVG. `base_png` is the ordinary physical board paint
-/// without its title/legend bands; model bodies are layered over it using the
-/// exact footprint transforms the interactive Assembly page applies.
+/// The self-contained physical-review board plus cached model bodies installed
+/// into it by the dossier shell. The board document is the same interactive
+/// semantic renderer as Assembly: green solder mask, exposed copper, face-aware
+/// silkscreen, top/bottom orientation, zoom and pan. Footprint-local sprites are
+/// deduplicated because the board document already owns every placed transform.
 pub const AssemblyEvidence = struct {
-    base_png: []const u8 = "",
-    projection: struct {
-        width: u32 = 0,
-        height: u32 = 0,
-        minx: f64 = 0,
-        miny: f64 = 0,
-        scale: f64 = 1,
-    } = .{},
+    board_html: []const u8 = "",
     sprites: []const AssemblySprite = &.{},
-    parts: []const AssemblyPart = &.{},
 };
 
 /// Fully rendered, immutable evidence for one board member. Every byte slice
@@ -561,15 +543,10 @@ fn buildImpl(
         .user_zones = fv.zones,
         .grid = true,
     });
-    const assembly_png = try render_pcb_png.render(allocator, fv.placement, .{
-        .width = std.math.clamp(options.pcb_width, 400, 2200),
-        .routed = fv.routed,
-        .texts = fv.texts,
-        .silk_keepouts = fv.silk_keepouts,
-        .user_zones = fv.zones,
-        .bare = true,
-    });
-    const assembly = try collectAssemblyEvidence(allocator, project_dir, fv.placement, assembly_png);
+    const assembly = AssemblyEvidence{
+        .board_html = try pcb.standaloneDossierReviewBoardHtml(allocator, project_dir, name, fv),
+        .sprites = try collectAssemblySprites(allocator, project_dir, fv.placement),
+    };
 
     const source_entries = try collectSources(allocator, project_dir, root_source_path, &evaluator);
     const connections = try collectConnections(allocator, named.block, options.connectors);
@@ -745,54 +722,24 @@ fn loadAssemblySprite(
     };
 }
 
-fn collectAssemblyEvidence(
+fn collectAssemblySprites(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     placement: optimizer.Placement,
-    base_png: []const u8,
-) !AssemblyEvidence {
-    if (base_png.len < 24 or !std.mem.startsWith(u8, base_png, png_signature)) return error.InvalidPng;
-    const width = std.mem.readInt(u32, base_png[16..20], .big);
-    const height = std.mem.readInt(u32, base_png[20..24], .big);
-    const board_width_mm = @max(placement.maxx - placement.minx, 1.0) + 2 * render_pcb_png.view_margin_mm;
-    const scale = @as(f64, @floatFromInt(width)) / board_width_mm;
-
+) ![]const AssemblySprite {
     var sprites: std.ArrayList(AssemblySprite) = .empty;
-    var parts: std.ArrayList(AssemblyPart) = .empty;
-    var by_footprint: std.StringHashMapUnmanaged(usize) = .empty;
+    var by_footprint: std.StringHashMapUnmanaged(void) = .empty;
     defer by_footprint.deinit(allocator);
 
-    for (placement.parts, 0..) |part, index| {
+    for (placement.parts, 0..) |_, index| {
         if (index >= placement.instances.len) break;
         const footprint = placement.instances[index].footprint;
-        const sprite_index = by_footprint.get(footprint) orelse blk: {
-            const sprite = loadAssemblySprite(allocator, project_dir, footprint) orelse continue;
-            const next = sprites.items.len;
-            try sprites.append(allocator, sprite);
-            try by_footprint.put(allocator, sprite.footprint, next);
-            break :blk next;
-        };
-        try parts.append(allocator, .{
-            .sprite = sprite_index,
-            .x = part.x,
-            .y = part.y,
-            .rotation = part.rot,
-            .bottom = part.side == .bottom,
-        });
+        if (by_footprint.contains(footprint)) continue;
+        const sprite = loadAssemblySprite(allocator, project_dir, footprint) orelse continue;
+        try sprites.append(allocator, sprite);
+        try by_footprint.put(allocator, sprite.footprint, {});
     }
-
-    return .{
-        .base_png = base_png,
-        .projection = .{
-            .width = width,
-            .height = height,
-            .minx = placement.minx,
-            .miny = placement.miny,
-            .scale = scale,
-        },
-        .sprites = try sprites.toOwnedSlice(allocator),
-        .parts = try parts.toOwnedSlice(allocator),
-    };
+    return sprites.toOwnedSlice(allocator);
 }
 
 /// The typed analysis records the evaluator publishes beside its assertion

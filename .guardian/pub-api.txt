@@ -119,7 +119,6 @@ src/board_layers.zig::unrestricted value
 src/board_layers.zig::with | fn with(self: LayerSet, sig: SignalIndex) LayerSet
 src/board_review_snapshot.zig::AmbientWindow struct_
 src/board_review_snapshot.zig::AssemblyEvidence struct_
-src/board_review_snapshot.zig::AssemblyPart struct_
 src/board_review_snapshot.zig::AssemblySprite struct_
 src/board_review_snapshot.zig::Checks struct_
 src/board_review_snapshot.zig::Connection struct_
@@ -4268,6 +4267,7 @@ src/serve/pcb_layout_page.zig::setup value
 src/serve/pcb_layout_page.zig::shownLayoutCopper | fn shownLayoutCopper( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: PngRequest, placement: optimizer.Placement, ) ShownCopper
 src/serve/pcb_layout_page.zig::sidecar_max_bytes value
 src/serve/pcb_layout_page.zig::solveForRequest | fn solveForRequest( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: PngRequest, eval: *Evaluator, module_res: *?modules_mod.ResolvedBlock, ) PngError!SolvedRequest
+src/serve/pcb_layout_page.zig::standaloneDossierReviewBoardHtml | fn standaloneDossierReviewBoardHtml(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, fv: FabView) HandlerError![]const u8
 src/serve/pcb_layout_page.zig::standaloneReleaseAssemblyHtml | fn standaloneReleaseAssemblyHtml( ctx: *Server, req: *httpz.Request, name: []const u8, block: *const env_mod.DesignBlock, fv: FabView, identity: standalone_assembly.ReleaseIdentity, ) HandlerError![]const u8
 src/serve/pcb_layout_page.zig::subBlockPoseByOriginKey | fn subBlockPoseByOriginKey( alloc: std.mem.Allocator, project_dir: []const u8, sub_block: env_mod.SubBlock, ) ?SubBlockSeeds
 src/serve/pcb_layout_page.zig::subSlug value
@@ -4469,8 +4469,8 @@ src/serve/shape_sketch_json.zig::parse | fn parse(alloc: std.mem.Allocator, v: ?
 src/serve/shape_sketch_json.zig::write | fn write(w: *std.Io.Writer, sketch: sketch_mod.Sketch) std.Io.Writer.Error!void
 src/serve/standalone_assembly.zig::ReleaseIdentity value
 src/serve/standalone_assembly.zig::RenderRequest struct_
-src/serve/standalone_assembly.zig::boardRequest | fn boardRequest(source: *httpz.Request, layout: []const u8) std.mem.Allocator.Error!httpz.Request
 src/serve/standalone_assembly.zig::render | fn render( arena: std.mem.Allocator, project_dir: []const u8, name: []const u8, block: *const env_mod.DesignBlock, request: RenderRequest, ) (fab_preview.Error || error{AssetMissing})![]const u8
+src/serve/standalone_assembly.zig::renderReviewBoardDocument | fn renderReviewBoardDocument( arena: std.mem.Allocator, page: []const u8, ) (std.mem.Allocator.Error || std.Io.Writer.Error || error{AssetMissing})![]const u8
 src/serve/static_assets.zig::HandlerError value
 src/serve/static_assets.zig::staticAsset | fn staticAsset(_: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/stuck_json.zig::net_key value
@@ -4861,12 +4861,10 @@ src/system_review_assets.zig::resolveContainedPathAlloc | fn resolveContainedPat
 src/system_review_assets.zig::validContent | fn validContent(asset_kind: Kind, body: []const u8) bool
 src/system_review_assets.zig::validFilename | fn validFilename(filename: []const u8) bool
 src/system_review_assets.zig::validateAddition | fn validateAddition(existing: []const Asset, added_bytes: usize) error{ TooManyAssets, AssetsTooLarge }!void
-src/system_review_html.zig::Assembly struct_
 src/system_review_html.zig::Board struct_
 src/system_review_html.zig::Error value
 src/system_review_html.zig::Identity struct_
 src/system_review_html.zig::Options struct_
-src/system_review_html.zig::Part struct_
 src/system_review_html.zig::Provenance struct_
 src/system_review_html.zig::Review struct_
 src/system_review_html.zig::Section struct_

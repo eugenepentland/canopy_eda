@@ -5,7 +5,6 @@
 //! then embeds it in the Assembly workspace with the release identity.
 
 const std = @import("std");
-const httpz = @import("httpz");
 const assembly_debug = @import("assembly_debug.zig");
 const env_mod = @import("../eval/env.zig");
 const fab_preview = @import("../fab_preview.zig");
@@ -19,22 +18,6 @@ pub const RenderRequest = struct {
     cam: fab_preview.Request,
     identity: ReleaseIdentity,
 };
-
-/// Clone a live request into the fixed read-only PCB-review request used by an
-/// offline release. Its query storage belongs to the source request arena.
-pub fn boardRequest(source: *httpz.Request, layout: []const u8) std.mem.Allocator.Error!httpz.Request {
-    const query = try source.arena.create(@TypeOf(source.qs.*));
-    query.* = try @TypeOf(source.qs.*).init(source.arena, 8);
-    query.add("embed", "1");
-    query.add("review", "1");
-    query.add("drc", "0");
-    if (layout.len > 0) query.add("layout", layout);
-    var request = source.*;
-    request.qs = query;
-    request.qs_read = true;
-    request.url = @TypeOf(source.url).parse("/pcb-layout/release-assembly");
-    return request;
-}
 
 fn replaceAsset(
     arena: std.mem.Allocator,
@@ -95,6 +78,19 @@ fn inlineBoardAssets(
         .{ .tag = "<script src=\"/static/pcb_board.js\"></script>", .bytes = @embedFile("assets/pcb_board.js") },
     }) |asset| html = try replaceAsset(arena, html, asset.tag, try inlineScript(arena, asset.bytes));
     return html;
+}
+
+/// Turn one already-rendered physical-review PCB page into a self-contained
+/// board document without enabling exact CAM mode. Dossiers use the Assembly
+/// page's normal semantic surface (solder mask, exposed copper, silkscreen and
+/// the selected face), while retaining the release artifact's offline
+/// guarantee. Cached component sprites are installed by the dossier shell
+/// after this document loads.
+pub fn renderReviewBoardDocument(
+    arena: std.mem.Allocator,
+    page: []const u8,
+) (std.mem.Allocator.Error || std.Io.Writer.Error || error{AssetMissing})![]const u8 {
+    return inlineBoardAssets(arena, page, "null");
 }
 
 /// Finish one immutable Assembly HTML from the exact board review and CAM

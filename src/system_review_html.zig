@@ -6,9 +6,9 @@
 //! text, so no reader can be shown a different system than another reader.
 //!
 //! The page is a single file with no external request of any kind: no webfont,
-//! no CDN, no remote image, no script. Every rule lives in one inline `<style>`
-//! block over system font stacks, so the dossier renders identically from a ZIP
-//! extracted onto an air-gapped review workstation.
+//! no CDN and no remote image. The only scripts are the inlined read-only
+//! Assembly board documents and the small shell that selects a face and installs
+//! cached model sprites, so the dossier works from an air-gapped extracted ZIP.
 //!
 //! Two kinds of markup reach the page. Document bodies go through
 //! `system_review_md.renderHtml`, which is the bounded, sanitising renderer
@@ -26,8 +26,8 @@
 
 const std = @import("std");
 const escape = @import("escape.zig");
+const json_writer = @import("json_writer.zig");
 const review_md = @import("system_review_md.zig");
-const render_pcb_png = @import("render_pcb_png.zig");
 const system_review = @import("system_review.zig");
 const system_of_boards = @import("diagram/system_of_boards.zig");
 
@@ -83,26 +83,10 @@ pub const Board = struct {
         has_notes: bool = false,
     };
 
-    /// Fully inline board imagery. The assembly data mirrors the interactive
-    /// Assembly page's footprint-local model-sprite transforms, but is rendered
-    /// here as static SVG so the archived dossier remains script-free.
+    /// Fully inline Assembly viewer document and its cached model pictures.
     pub const Visual = struct {
-        layout_png: []const u8 = "",
-        assembly: Assembly = .{},
-
-        /// Board projection plus deduplicated model pictures and their placed uses.
-        pub const Assembly = struct {
-            base_png: []const u8 = "",
-            projection: struct {
-                width: u32 = 0,
-                height: u32 = 0,
-                minx: f64 = 0,
-                miny: f64 = 0,
-                scale: f64 = 1,
-            } = .{},
-            sprites: []const Sprite = &.{},
-            parts: []const Part = &.{},
-        };
+        board_html: []const u8 = "",
+        sprites: []const Sprite = &.{},
 
         /// One reusable transparent picture of a top-down component model.
         pub const Sprite = struct {
@@ -112,15 +96,6 @@ pub const Board = struct {
             w: f64,
             h: f64,
             png: []const u8,
-        };
-
-        /// A placed use of one deduplicated component-model picture.
-        pub const Part = struct {
-            sprite: usize,
-            x: f64,
-            y: f64,
-            rotation: f64,
-            bottom: bool,
         };
     };
 };
@@ -235,6 +210,7 @@ pub fn compose(allocator: std.mem.Allocator, sections: []const Section, opts: Op
     }
     try w.writeAll("</section>\n</main>\n</div>\n");
     try writeColophon(w, opts);
+    if (hasBoardViewer(opts.boards)) try writeBoardViewerScript(w);
     try w.writeAll("</body>\n</html>\n");
     try ensureSize(&out);
     return out.toOwnedSlice();
@@ -242,6 +218,11 @@ pub fn compose(allocator: std.mem.Allocator, sections: []const Section, opts: Op
 
 fn ensureSize(out: *Writer.Allocating) Error!void {
     if (out.written().len > max_html_bytes) return error.DocumentTooLarge;
+}
+
+fn hasBoardViewer(boards: []const Board) bool {
+    for (boards) |board| if (board.visual.board_html.len > 0) return true;
+    return false;
 }
 
 const ReleaseDecision = enum { blocked, waiver_required, waiver_accepted, ready };
@@ -355,91 +336,16 @@ fn writePngDataUri(allocator: std.mem.Allocator, w: *Writer, png: []const u8) Er
     try w.writeAll(encoder.encode(encoded, png));
 }
 
-fn assemblyPartCount(assembly: Board.Visual.Assembly, bottom: bool) usize {
-    var count: usize = 0;
-    for (assembly.parts) |part| if (part.bottom == bottom) {
-        count += 1;
-    };
-    return count;
-}
-
-fn writeAssemblyView(
-    allocator: std.mem.Allocator,
-    w: *Writer,
-    board: Board,
-    board_index: usize,
-    bottom: bool,
-) Error!void {
-    const assembly = board.visual.assembly;
-    const projection = assembly.projection;
-    const side = if (bottom) "Bottom" else "Top";
-    const count = assemblyPartCount(assembly, bottom);
-    try w.writeAll("<figure class=\"assembly-view\"><div class=\"assembly-label\"><span>");
-    try w.writeAll(side);
-    try w.writeAll(" assembly</span>");
-    try w.print("<small>{d} model bod{s}</small></div>", .{ count, if (count == 1) "y" else "ies" });
-    if (assembly.base_png.len == 0 or projection.width == 0 or projection.height == 0) {
-        try w.writeAll("<div class=\"visual-empty\">Assembly image unavailable</div></figure>\n");
-        return;
-    }
-    try w.print("<svg class=\"assembly-svg\" viewBox=\"0 0 {d} {d}\" role=\"img\" aria-label=\"", .{
-        projection.width,
-        projection.height,
-    });
-    try escape.writeXml(w, board.identity.title);
-    try w.writeByte(' ');
-    try w.writeAll(if (bottom) "bottom assembly" else "top assembly");
-    try w.writeAll("\"><defs>\n");
-    for (assembly.sprites, 0..) |sprite, sprite_index| {
-        const scale = projection.scale;
-        try w.print("<image id=\"b{d}-sp{d}\" x=\"{d}\" y=\"{d}\" width=\"{d}\" height=\"{d}\" href=\"", .{
-            board_index,
-            sprite_index,
-            sprite.x * scale,
-            sprite.y * scale,
-            sprite.w * scale,
-            sprite.h * scale,
-        });
-        try writePngDataUri(allocator, w, sprite.png);
-        try w.writeAll("\"/>\n");
-    }
-    try w.writeAll("</defs>\n");
-    if (bottom) try w.print("<g transform=\"translate({d} 0) scale(-1 1)\">", .{projection.width});
-    try w.print("<image x=\"0\" y=\"0\" width=\"{d}\" height=\"{d}\" href=\"", .{
-        projection.width,
-        projection.height,
-    });
-    try writePngDataUri(allocator, w, assembly.base_png);
-    try w.writeAll("\"/>\n");
-    for (assembly.parts) |part| {
-        if (part.bottom != bottom or part.sprite >= assembly.sprites.len) continue;
-        const px = (part.x - projection.minx + renderMarginMm()) * projection.scale;
-        const py = (part.y - projection.miny + renderMarginMm()) * projection.scale;
-        try w.print("<g transform=\"translate({d} {d}) rotate({d})", .{ px, py, part.rotation });
-        if (part.bottom) try w.writeAll(" scale(-1 1)");
-        try w.print("\"><use href=\"#b{d}-sp{d}\"/></g>\n", .{ board_index, part.sprite });
-    }
-    if (bottom) try w.writeAll("</g>");
-    try w.writeAll("</svg></figure>\n");
-}
-
-/// Kept beside the projection consumer rather than reaching into the PNG
-/// renderer's private paint context. `render_pcb_png.view_margin_mm` is public
-/// specifically because every board surface frames the same world this way.
-fn renderMarginMm() f64 {
-    return render_pcb_png.view_margin_mm;
-}
-
 fn writeBoardGallery(allocator: std.mem.Allocator, w: *Writer, opts: Options) Error!void {
     if (opts.boards.len == 0) return;
     try w.print("<section class=\"board-gallery\" id=\"board-views\" aria-labelledby=\"board-views-title\">" ++
         "<header class=\"gallery-head\"><div><p class=\"kicker\">Physical overview</p>" ++
-        "<h2 id=\"board-views-title\">Board views</h2><p>Layout evidence and model-populated assembly faces for every board in the system.</p>" ++
+        "<h2 id=\"board-views-title\">Board views</h2><p>Interactive physical assembly views for every board in the system. Scroll to zoom and drag to pan.</p>" ++
         "</div><span>{d} board{s}</span></header><div class=\"gallery-list\">\n", .{
         opts.boards.len,
         if (opts.boards.len == 1) "" else "s",
     });
-    for (opts.boards, 0..) |board, index| {
+    for (opts.boards) |board| {
         try w.writeAll("<article class=\"board-visual\"><header><div><span class=\"board-role\">");
         try escape.writeXml(w, board.identity.role);
         try w.writeAll("</span><h3>");
@@ -450,22 +356,40 @@ fn writeBoardGallery(allocator: std.mem.Allocator, w: *Writer, opts: Options) Er
         try escape.writeXml(w, board.identity.revision);
         try w.writeAll(" · ");
         try escape.writeXml(w, board.identity.layout);
-        try w.writeAll("</p></header><div class=\"visual-grid\">\n<figure class=\"layout-view\"><div class=\"assembly-label\"><span>Layout</span><small>fabrication render</small></div><img alt=\"");
-        try escape.writeXml(w, board.identity.title);
-        try w.writeAll(" PCB layout\"");
-        if (board.visual.layout_png.len > 0) {
-            try w.writeAll(" src=\"");
-            try writePngDataUri(allocator, w, board.visual.layout_png);
-            try w.writeAll("\">");
+        try w.writeAll("</p></header><div class=\"assembly-viewer\" data-assembly-viewer><div class=\"assembly-toolbar\"><div class=\"side-switch\" role=\"group\" aria-label=\"Board side\">");
+        try w.writeAll("<button type=\"button\" data-side=\"top\" aria-pressed=\"true\">Top</button><button type=\"button\" data-side=\"bottom\" aria-pressed=\"false\">Bottom</button></div>");
+        try w.print("<span>{d} cached model{s} · scroll to zoom · drag to pan</span></div>", .{ board.visual.sprites.len, if (board.visual.sprites.len == 1) "" else "s" });
+        if (board.visual.board_html.len == 0) {
+            try w.writeAll("<div class=\"visual-empty\">Assembly viewer unavailable</div>");
         } else {
-            try w.writeAll("><span class=\"visual-empty\">Layout image unavailable</span>");
+            try w.writeAll("<iframe class=\"assembly-frame\" title=\"");
+            try escape.writeXml(w, board.identity.title);
+            try w.writeAll(" assembly viewer\" loading=\"eager\"></iframe><script type=\"application/json\" class=\"assembly-document\">");
+            try json_writer.writeScriptString(w, board.visual.board_html);
+            try w.writeAll("</script><template class=\"assembly-sprites\">");
+            for (board.visual.sprites) |sprite| {
+                try w.writeAll("<img alt=\"\" data-footprint=\"");
+                try escape.writeXml(w, sprite.footprint);
+                try w.print("\" data-x=\"{d}\" data-y=\"{d}\" data-w=\"{d}\" data-h=\"{d}\" src=\"", .{ sprite.x, sprite.y, sprite.w, sprite.h });
+                try writePngDataUri(allocator, w, sprite.png);
+                try w.writeAll("\">");
+            }
+            try w.writeAll("</template>");
         }
-        try w.writeAll("</figure>\n<div class=\"assembly-pair\">\n");
-        try writeAssemblyView(allocator, w, board, index, false);
-        try writeAssemblyView(allocator, w, board, index, true);
-        try w.writeAll("</div></div></article>\n");
+        try w.writeAll("</div></article>\n");
     }
     try w.writeAll("</div></section>\n");
+}
+
+fn writeBoardViewerScript(w: *Writer) Error!void {
+    try w.writeAll(
+        "<script>(function(){function side(root,value){root.querySelectorAll('[data-side]').forEach(function(b){b.setAttribute('aria-pressed',String(b.dataset.side===value));});" ++
+            "var f=root.querySelector('iframe');if(f&&f.contentWindow)f.contentWindow.postMessage({type:'netlisp-pcb-orientation',side:value,rotation:0},'*');}" ++
+            "document.querySelectorAll('[data-assembly-viewer]').forEach(function(root){var f=root.querySelector('iframe'),d=root.querySelector('.assembly-document');if(!f||!d)return;" ++
+            "f.addEventListener('load',function(){side(root,'top');var t=root.querySelector('.assembly-sprites');if(!t||!f.contentWindow.PCBSetAssemblySprite)return;" ++
+            "t.content.querySelectorAll('img').forEach(function(source){var image=new Image();image.onload=function(){if(f.contentWindow&&f.contentWindow.PCBSetAssemblySprite)f.contentWindow.PCBSetAssemblySprite(source.dataset.footprint,{image:image,x:Number(source.dataset.x),y:Number(source.dataset.y),w:Number(source.dataset.w),h:Number(source.dataset.h)});};image.src=source.getAttribute('src');});});" ++
+            "root.querySelectorAll('[data-side]').forEach(function(b){b.addEventListener('click',function(){side(root,b.dataset.side);});});f.srcdoc=JSON.parse(d.textContent||'\"\"');});})();</script>\n",
+    );
 }
 
 fn writeSectionIndex(
@@ -1001,15 +925,13 @@ const stylesheet =
     \\.board-visual>header{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;padding:0 2px 11px;}
     \\.board-visual h3{font-size:17px;line-height:1.25;margin:2px 0 0;}
     \\.board-visual>header p{font-family:var(--mono);font-size:9.5px;color:var(--ink-3);margin:0;text-align:right;}
-    \\.visual-grid{display:grid;grid-template-columns:minmax(220px,.72fr) minmax(0,2fr);gap:10px;}
-    \\.layout-view,.assembly-view{min-width:0;margin:0;border:1px solid var(--rule);border-radius:10px;background:var(--panel);overflow:hidden;}
-    \\.layout-view{display:flex;flex-direction:column;}
-    \\.layout-view img{display:block;width:100%;height:100%;min-height:220px;object-fit:contain;background:var(--panel);}
-    \\.assembly-pair{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
-    \\.assembly-label{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 10px;border-bottom:1px solid var(--rule);background:var(--sheet-2);}
-    \\.assembly-label span{font-size:11px;font-weight:680;}
-    \\.assembly-label small{font-family:var(--mono);font-size:8.5px;color:var(--ink-3);}
-    \\.assembly-svg{display:block;width:100%;height:auto;max-height:430px;background:var(--panel);}
+    \\.assembly-viewer{min-width:0;border:1px solid var(--rule);border-radius:10px;background:var(--panel);overflow:hidden;}
+    \\.assembly-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 10px;border-bottom:1px solid var(--rule);background:var(--sheet-2);}
+    \\.assembly-toolbar>span{font-family:var(--mono);font-size:8.5px;color:var(--ink-3);text-align:right;}
+    \\.side-switch{display:flex;gap:3px;padding:3px;border:1px solid var(--rule);border-radius:8px;background:var(--paper);}
+    \\.side-switch button{appearance:none;border:0;border-radius:5px;padding:5px 13px;background:transparent;color:var(--ink-2);font:650 10.5px/1 var(--sans);cursor:pointer;}
+    \\.side-switch button[aria-pressed=\"true\"]{background:var(--accent-soft);color:var(--accent);box-shadow:inset 0 0 0 1px rgba(88,214,255,.25);}
+    \\.assembly-frame{display:block;width:100%;height:clamp(420px,60vw,760px);border:0;background:#101815;}
     \\.visual-empty{display:grid;place-items:center;min-height:180px;padding:20px;font-family:var(--mono);font-size:10px;color:var(--ink-3);}
     \\.workspace{width:min(1480px,100%);margin:0 auto;padding:18px 30px 72px;display:grid;
     \\grid-template-columns:minmax(230px,270px) minmax(0,1fr);gap:24px;align-items:start;}
@@ -1159,8 +1081,6 @@ const stylesheet =
     \\.colophon{max-width:1480px;margin:0 auto;padding:18px 30px 40px;display:flex;flex-wrap:wrap;
     \\gap:6px 24px;border-top:1px solid var(--rule);font-family:var(--mono);font-size:10.5px;color:var(--ink-3);}
     \\@media(max-width:1080px){
-    \\.visual-grid{grid-template-columns:minmax(0,1fr);}
-    \\.layout-view img{max-height:440px;}
     \\.workspace{grid-template-columns:minmax(210px,240px) minmax(0,1fr);gap:18px;}
     \\.metrics{grid-template-columns:1fr 1fr;}
     \\}
@@ -1183,7 +1103,9 @@ const stylesheet =
     \\.mh-notice{margin:0 -18px;padding:10px 18px;}
     \\.board-gallery{padding:22px 14px 6px;}
     \\.gallery-head,.board-visual>header{align-items:flex-start;}
-    \\.assembly-pair{grid-template-columns:minmax(0,1fr);}
+    \\.assembly-toolbar{align-items:flex-start;flex-direction:column;}
+    \\.assembly-toolbar>span{text-align:left;}
+    \\.assembly-frame{height:440px;}
     \\.workspace{padding:16px 14px 52px;}
     \\.section-index ol{grid-template-columns:minmax(0,1fr);}
     \\.executive{padding:17px;border-radius:12px;}
@@ -1269,7 +1191,7 @@ const ready_test_gates: Gates = .{
     .checklists_ok = true,
 };
 
-// spec: system-review - the offline HTML dossier is one self-contained file with no external request and no script
+// spec: system-review - the offline HTML dossier is one self-contained file with no external request; its only executable content is the inlined read-only Assembly board viewer and the small shell that installs cached model sprites and drives board-side selection
 test "system review HTML requests nothing off the machine" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1295,7 +1217,8 @@ test "system review HTML requests nothing off the machine" {
     });
     try testing.expect(std.mem.startsWith(u8, html, "<!DOCTYPE html>"));
     try testing.expect(std.mem.indexOf(u8, html, "</html>") != null);
-    // No script, and no construct that could fetch anything. The only absolute
+    // This board-free fixture needs no viewer script, and no construct can
+    // fetch anything. The only absolute
     // URL anywhere on the page is the SVG namespace, which is an identifier and
     // is never dereferenced.
     try testing.expect(std.mem.indexOf(u8, html, "<script") == null);
@@ -1443,8 +1366,8 @@ test "system review HTML keeps waiver decisions explicit at system and board lev
     try testing.expect(std.mem.indexOf(u8, accepted, "accepted waiver evidence") != null);
 }
 
-// spec: system-review - every board leads the dossier with an inline layout image and static top/bottom assembly views populated from deduplicated cached 3D-model sprites, while the sidebar contains section navigation rather than interface-contact metrics
-test "system review HTML leads with model-populated board views" {
+// spec: system-review - every board leads the dossier with one Assembly physical-review viewer, defaulted to top and offering top/bottom selection plus the shared wheel/pinch zoom and drag-pan behavior; the viewer uses solder mask/exposed-copper rendering and deduplicated cached 3D-model sprites, no PCB-editor Layout figure is integrated, and the sidebar contains section navigation rather than interface-contact metrics
+test "system review HTML leads with interactive physical board viewers" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -1459,10 +1382,6 @@ test "system review HTML leads with model-populated board views" {
         .h = 2,
         .png = png,
     }};
-    const parts = [_]Board.Visual.Part{
-        .{ .sprite = 0, .x = 10, .y = 12, .rotation = 90, .bottom = false },
-        .{ .sprite = 0, .x = 20, .y = 18, .rotation = 180, .bottom = true },
-    };
     const boards = [_]Board{.{
         .identity = .{
             .role = "main",
@@ -1476,13 +1395,8 @@ test "system review HTML leads with model-populated board views" {
         .review = .{ .status = "pass", .open_notes = 0 },
         .fabrication = .ready,
         .visual = .{
-            .layout_png = png,
-            .assembly = .{
-                .base_png = png,
-                .projection = .{ .width = 100, .height = 60, .scale = 2 },
-                .sprites = &sprites,
-                .parts = &parts,
-            },
+            .board_html = "<!doctype html><script>PCB.physical_review=true</script>",
+            .sprites = &sprites,
         },
     }};
     const html = try compose(allocator, &.{.{
@@ -1505,10 +1419,15 @@ test "system review HTML leads with model-populated board views" {
     const gallery = std.mem.indexOf(u8, html, "<section class=\"board-gallery\"").?;
     const workspace = std.mem.indexOf(u8, html, "<div class=\"workspace\">").?;
     try testing.expect(gallery < workspace);
-    try testing.expect(std.mem.count(u8, html, "data:image/png;base64,") >= 5);
-    try testing.expect(std.mem.indexOf(u8, html, ">Top assembly</span>") != null);
-    try testing.expect(std.mem.indexOf(u8, html, ">Bottom assembly</span>") != null);
-    try testing.expect(std.mem.indexOf(u8, html, "<use href=\"#b0-sp0\"") != null);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, html, "data:image/png;base64,"));
+    try testing.expect(std.mem.indexOf(u8, html, "class=\"assembly-frame\"") != null);
+    try testing.expect(std.mem.indexOf(u8, html, "data-side=\"top\" aria-pressed=\"true\"") != null);
+    try testing.expect(std.mem.indexOf(u8, html, "data-side=\"bottom\" aria-pressed=\"false\"") != null);
+    try testing.expect(std.mem.indexOf(u8, html, "netlisp-pcb-orientation") != null);
+    try testing.expect(std.mem.indexOf(u8, html, "PCBSetAssemblySprite") != null);
+    try testing.expect(std.mem.indexOf(u8, html, "\\u003cscript>PCB.physical_review=true\\u003c/script>") != null);
+    try testing.expect(std.mem.indexOf(u8, html, "PCB Layout</span>") == null);
+    try testing.expect(std.mem.indexOf(u8, html, "class=\"layout-view\"") == null);
     const aside_start = std.mem.indexOf(u8, html, "<aside class=\"section-index\"").?;
     const aside_end_rel = std.mem.indexOf(u8, html[aside_start..], "</aside>").?;
     try testing.expect(std.mem.indexOf(u8, html[aside_start .. aside_start + aside_end_rel], "Interface contacts") == null);

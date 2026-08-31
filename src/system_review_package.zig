@@ -704,7 +704,7 @@ fn addBoardEvidenceBytes(
         snapshot.review.bom_csv,
         snapshot.review.diagram_svg,
         snapshot.physical.pcb_png,
-        snapshot.physical.assembly.base_png,
+        snapshot.physical.assembly.board_html,
     };
     for (slices) |bytes| try addBoundedBytes(total, bytes.len, max_analysis_evidence_bytes);
     for (snapshot.physical.assembly.sprites) |sprite|
@@ -1789,14 +1789,6 @@ fn renderSystemHtml(
             .h = sprite.h,
             .png = sprite.png,
         };
-        const parts = try allocator.alloc(review_html.Board.Visual.Part, source_assembly.parts.len);
-        for (source_assembly.parts, parts) |part, *dest| dest.* = .{
-            .sprite = part.sprite,
-            .x = part.x,
-            .y = part.y,
-            .rotation = part.rotation,
-            .bottom = part.bottom,
-        };
         entry.* = .{
             .identity = .{
                 .role = board.member.role,
@@ -1820,19 +1812,8 @@ fn renderSystemHtml(
             else
                 .ready,
             .visual = .{
-                .layout_png = board.snapshot.physical.pcb_png,
-                .assembly = .{
-                    .base_png = source_assembly.base_png,
-                    .projection = .{
-                        .width = source_assembly.projection.width,
-                        .height = source_assembly.projection.height,
-                        .minx = source_assembly.projection.minx,
-                        .miny = source_assembly.projection.miny,
-                        .scale = source_assembly.projection.scale,
-                    },
-                    .sprites = sprites,
-                    .parts = parts,
-                },
+                .board_html = source_assembly.board_html,
+                .sprites = sprites,
             },
         };
     }

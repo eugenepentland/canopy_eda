@@ -4834,16 +4834,35 @@ fn releaseLock(
 }
 
 fn releaseEvidenceBlocked(gate: fab_gate.Result, lock: fab_release.Lock) bool {
-    if (!gate.drc.complete) return true;
-    if (!gate.internal_complete) return true;
-    if (gate.evaluation.block == null) return true;
-    return lock.project_status != .clean;
+    return !gate.drc.complete or !gate.internal_complete or gate.evaluation.block == null or lock.project_status != .clean;
 }
 
 fn releaseNeedsWaiver(gate: fab_gate.Result) bool {
-    if (gate.report.errors.len > 0) return true;
-    if (gate.report.warnings.len > 0) return true;
-    return gate.drc.raw.len > gate.drc.effective.len;
+    return gate.report.errors.len > 0 or gate.report.warnings.len > 0 or gate.drc.raw.len > gate.drc.effective.len;
+}
+
+/// The Assembly page's physical board over one already-bound fabrication view.
+/// Request-independent callers must never resolve the design a second time.
+fn dossierReviewBoardPage(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, fv: FabView) HandlerError![]const u8 {
+    const view = View.init(fv.placement);
+    const route_params = fv.placement.rules.design.routeParams();
+    var page: std.Io.Writer.Allocating = .init(allocator);
+    const w = &page.writer;
+    try writeDocHead(w, name, true, false);
+    try w.writeAll("<div class=\"pcb-layout\"><main class=\"pcb-main\">");
+    try writeReadOnlyEmbedChrome(w, .{ .module_source = "", .params = route_params, .routed = fv.routed, .n_drc = 0, .toggles = .{ .clr = false, .drc = false }, .physical_review = true });
+    try writeStage(w, view, true);
+    try w.writeAll("</main></div>");
+    const opts: PcbDataOpts = .{ .read_only = true, .embed = true, .assembly_review = true, .sub = null, .shown_layout = fv.selection.name, .user_zones = fv.zones, .texts = fv.texts };
+    try writePcbData(w, allocator, project_dir, fv.placement, .{}, view, name, &.{}, fv.routed, route_params.clearance, &.{}, opts);
+    try writePageScripts(w, .{ .physical_review = true, .model_sprites = false, .thermal_overlay = false, .embed = true });
+    try w.writeAll("</body></html>");
+    return page.written();
+}
+
+/// Self-contained semantic Assembly board for an offline system dossier.
+pub fn standaloneDossierReviewBoardHtml(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, fv: FabView) HandlerError![]const u8 {
+    return standalone_assembly.renderReviewBoardDocument(allocator, try dossierReviewBoardPage(allocator, project_dir, name, fv));
 }
 
 /// Render the offline Assembly member for callers that compose a release from
@@ -4857,32 +4876,13 @@ pub fn standaloneReleaseAssemblyHtml(
     fv: FabView,
     identity: standalone_assembly.ReleaseIdentity,
 ) HandlerError![]const u8 {
-    var synthetic = try standalone_assembly.boardRequest(req, fv.selection.name);
-
-    var release_ctx = ctx.*;
-    release_ctx.allocator = req.arena;
-    var evaluator = Evaluator.init(req.arena, ctx.project_dir);
-    defer evaluator.deinit();
-    var module_res: ?modules_mod.ResolvedBlock = null;
-    defer if (module_res) |resolved| {
-        resolved.eval.deinit();
-        req.arena.destroy(resolved.eval);
-    };
-    var rev = StoreRevCheck{ .rendered = -1, .ctx = &release_ctx, .name = name, .sub = null };
-    const page = (try renderLayoutPage(&release_ctx, &synthetic, null, .{
-        .name = name,
-        .eval = &evaluator,
-        .module_res_out = &module_res,
-        .rev = &rev,
-    })) orelse return error.StandaloneAssemblyRenderFailed;
-
     return standalone_assembly.render(
         req.arena,
         ctx.project_dir,
         name,
         block,
         .{
-            .board_page = page,
+            .board_page = try dossierReviewBoardPage(req.arena, ctx.project_dir, name, fv),
             .cam = .{
                 .enabled = true,
                 .placement = fv.placement,
@@ -9080,6 +9080,10 @@ const PcbDataOpts = struct {
     /// SavedRoutes the shown copper was restored from (ShownView.saved) —
     /// lets writeRoutedArrays re-emit per-segment stamp group tags.
     saved_routes: ?SavedRoutes = null,
+    /// Already-lowered user copper zones for request-independent physical
+    /// review documents. Ordinary pages retain `saved_routes` as their source
+    /// so editing metadata and raw authored boundaries remain available.
+    user_zones: ?[]const pour.UserZone = null,
     /// Suppress authored board copper pours from the rendered board (a bare
     /// routing-feasibility view that shows no unrelated poured copper).
     omit_pours: bool = false,
@@ -9103,6 +9107,10 @@ const PcbDataOpts = struct {
     /// it back so the server can 409 a stale write from a second window.
     rev: i64 = 0,
 };
+
+fn payloadUserZones(alloc: std.mem.Allocator, p: optimizer.Placement, opts: PcbDataOpts) []const pour.UserZone {
+    return opts.user_zones orelse userZonesFrom(alloc, p.rules, shownZones(opts.saved_routes));
+}
 
 fn payloadLayouts(layouts: []const SavedLayout, lean_read_only: bool) []const SavedLayout {
     return if (lean_read_only) &.{} else layouts;
@@ -9356,7 +9364,7 @@ fn payloadPowerInputs(alloc: std.mem.Allocator, p: optimizer.Placement, routed: 
     return .{
         .placement = p,
         .routed = routed,
-        .zones = userZonesFrom(alloc, p.rules, shownZones(opts.saved_routes)),
+        .zones = payloadUserZones(alloc, p, opts),
         .base_edge = opts.base_edge,
         .ac = if (opts.pdn_deferred) .deferred else .included,
     };
@@ -9804,7 +9812,7 @@ fn writeBlobHead(
     try writeFabricationLayersField(w, p, opts.saved_fabrication_layers);
     try pcb_keepout_json.write(w, alloc, p);
     try w.writeAll("\"pours\":");
-    if (opts.omit_pours) try w.writeAll("[]") else try pour_json.writePours(w, alloc, p, copper, userZonesFrom(alloc, p.rules, shownZones(opts.saved_routes)), opts.base_edge);
+    if (opts.omit_pours) try w.writeAll("[]") else try pour_json.writePours(w, alloc, p, copper, payloadUserZones(alloc, p, opts), opts.base_edge);
     try pour_json.writePlaneFillsField(w, alloc, p, copper, opts.omit_pours, opts.base_edge);
     try w.writeByte(',');
     // Does this board declare any outer-face copper pour? Drives the toolbar's

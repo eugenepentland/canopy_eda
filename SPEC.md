@@ -5570,11 +5570,11 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - no open-items row carries a summary that only restates the severity column beside it
 - the system block diagram is archived as review/system-diagram.svg, referenced by the generated system-diagram section, and admitted as the one system-level SVG
 - system Markdown becomes a structurally valid searchable PDF with draft marking
-- the offline HTML dossier is one self-contained file with no external request and no script
+- the offline HTML dossier is one self-contained file with no external request; its only executable content is the inlined read-only Assembly board viewer and the small shell that installs cached model sprites and drives board-side selection
 - the offline HTML dossier ships beside the combined Markdown and PDF in draft and release, carrying the draft marker only in draft
 - the HTML dossier carries the draft marker only in draft mode and numbers one section per manifest document
 - the dossier indexes every section in a sticky sidebar and renders the evidence once as one continuous document without repeating its title
-- every board leads the dossier with an inline layout image and static top/bottom assembly views populated from deduplicated cached 3D-model sprites, while the sidebar contains section navigation rather than interface-contact metrics
+- every board leads the dossier with one Assembly physical-review viewer, defaulted to top and offering top/bottom selection plus the shared wheel/pinch zoom and drag-pan behavior; the viewer uses solder mask/exposed-copper rendering and deduplicated cached 3D-model sprites, no PCB-editor Layout figure is integrated, and the sidebar contains section navigation rather than interface-contact metrics
 - the dossier leads with a structured gate summary and distinguishes waiver-required evidence from an accepted release waiver
 - the HTML dossier inlines each board's block diagram and omits the figure when the design has none
 - the HTML dossier is a pure function of its inputs and renders byte-identically on repeat
