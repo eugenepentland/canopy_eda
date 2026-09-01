@@ -10,14 +10,42 @@ const env_mod = @import("eval/env.zig");
 const Evaluator = @import("eval/evaluator.zig").Evaluator;
 const infra_fs = @import("infra/fs.zig");
 const req_checks = @import("req_checks.zig");
+const review_profiles = @import("review_profiles.zig");
 
 const DesignBlock = env_mod.DesignBlock;
 const Instance = env_mod.Instance;
 
 /// Authoring remains backward compatible: pending manual requirements and
 /// incomplete legacy review records are warnings. Preflight upgrades those
-/// findings to errors; automated check failures are errors in both profiles.
-pub const Profile = enum { authoring, preflight };
+/// findings to errors; automated check failures are errors in every profile.
+/// Release is preflight plus the component-class profile obligations, a
+/// demand for at least one cited requirement on every active part, and the
+/// evaluator's own warnings (an unknown sub-form is an error there).
+pub const Profile = enum { authoring, preflight, release };
+
+/// True for every profile that gates (preflight and release) — the predicate
+/// callers use instead of comparing against `.preflight`, so a stricter
+/// profile can never fall back to authoring leniency by accident.
+pub fn isStrict(profile: Profile) bool {
+    return profile != .authoring;
+}
+
+/// Severity of an unmet component-class profile obligation: informational
+/// while authoring, a warning in preflight, an error at release.
+pub fn profileSeverity(profile: Profile) checks.Severity {
+    return switch (profile) {
+        .authoring => .info,
+        .preflight => .warning,
+        .release => .@"error",
+    };
+}
+
+/// Severity of an evaluator warning surfaced by the release profile: an
+/// unknown sub-form is a stale declaration and blocks; anything else is kept
+/// visible as a warning.
+pub fn evalWarningSeverity(message: []const u8) checks.Severity {
+    return if (std.mem.startsWith(u8, message, "unknown sub-form")) .@"error" else .warning;
+}
 
 /// Parse an optional CLI/CLI profile word, defaulting to backward-compatible
 /// authoring behavior. Unknown words are rejected.
@@ -27,7 +55,7 @@ pub fn parseProfile(word: ?[]const u8) ?Profile {
 }
 
 /// Validation subsystem that emitted a structured preflight finding.
-pub const FindingKind = enum { requirement, datasheet_review };
+pub const FindingKind = enum { requirement, datasheet_review, profile_incomplete, eval_warning };
 /// Normalized outcome shared by machine checks and datasheet-review checks.
 pub const FindingStatus = enum { pass, fail, pending, verified, missing, incomplete, stale };
 
@@ -66,7 +94,7 @@ pub const Finding = struct {
 /// validation severity. Machine failures remain errors in authoring mode.
 pub fn requirementSeverity(status: req_checks.Status, profile: Profile) checks.Severity {
     if (status == .fail) return .@"error";
-    if (status == .na) return if (profile == .preflight) .@"error" else .warning;
+    if (status == .na) return if (isStrict(profile)) .@"error" else .warning;
     return .info;
 }
 
@@ -106,7 +134,20 @@ pub fn run(
         for (findings.items) |finding| allocator.free(finding.message);
         findings.deinit(allocator);
     }
-    try walkBlock(allocator, block, project_dir, profile, &results, &findings);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const forms = formsOf(eval);
+    const walk = Walk{
+        .allocator = allocator,
+        .arena = arena.allocator(),
+        .project_dir = project_dir,
+        .profile = profile,
+        .forms = forms,
+        .results = &results,
+        .findings = &findings,
+    };
+    try walkBlock(walk, block);
+    if (profile == .release) try appendEvalWarnings(allocator, eval, &findings);
 
     var errors: usize = 0;
     var warnings: usize = 0;
@@ -122,26 +163,104 @@ pub fn run(
     };
 }
 
-fn walkBlock(
+/// Everything one run threads through the design walk: the owning allocator
+/// for finding messages, the scratch arena, the strictness profile, the
+/// design-level forms, the requirement outcomes and the findings sink.
+const Walk = struct {
     allocator: std.mem.Allocator,
-    block: *const DesignBlock,
+    arena: std.mem.Allocator,
     project_dir: []const u8,
     profile: Profile,
+    forms: review_profiles.Forms,
     results: *const std.StringHashMapUnmanaged([]req_checks.Result),
     findings: *std.ArrayList(Finding),
-) std.mem.Allocator.Error!void {
+};
+
+fn walkBlock(walk: Walk, block: *const DesignBlock) std.mem.Allocator.Error!void {
     for (block.instances) |inst| {
         if (inst.placeholder) continue;
         if (!inst.requirements_ignored) {
-            try appendRequirementFindings(allocator, inst, profile, results, findings);
+            try appendRequirementFindings(walk.allocator, inst, walk.profile, walk.results, walk.findings);
         }
         if (component_classification.isActiveSemiconductor(inst)) {
-            const finding = try datasheetReviewFinding(allocator, inst, project_dir, profile);
-            try appendOwnedFinding(allocator, findings, finding);
+            const finding = try datasheetReviewFinding(walk.allocator, inst, walk.project_dir, walk.profile);
+            try appendOwnedFinding(walk.allocator, walk.findings, finding);
+            try appendProfileFindings(walk, inst, block);
         }
     }
     for (block.sub_blocks) |sub| {
-        try walkBlock(allocator, sub.block, project_dir, profile, results, findings);
+        try walkBlock(walk, sub.block);
+    }
+}
+
+/// Which analysis forms the evaluated design declared, and whether every one
+/// of them gates. A single advisory loop or plan reads as "not gated".
+fn formsOf(eval: *const Evaluator) review_profiles.Forms {
+    var forms: review_profiles.Forms = .{};
+    var pll_gate = true;
+    for (eval.pll_reports.items) |report| {
+        forms.pll_any = true;
+        if (report.mode != .gate) pll_gate = false;
+    }
+    forms.pll_gate = forms.pll_any and pll_gate;
+    var plan_gate = true;
+    for (eval.frequency_plan_reports.items) |report| {
+        forms.plan_any = true;
+        if (report.mode != .gate) plan_gate = false;
+    }
+    forms.plan_gate = forms.plan_any and plan_gate;
+    return forms;
+}
+
+/// One `profile_incomplete` finding per unmet class obligation of an active
+/// part, at the profile's severity.
+fn appendProfileFindings(walk: Walk, inst: Instance, block: *const DesignBlock) std.mem.Allocator.Error!void {
+    const allocator = walk.allocator;
+    const items = try review_profiles.evaluate(allocator, walk.arena, inst, .{
+        .block = block,
+        .project_dir = walk.project_dir,
+        .forms = walk.forms,
+        .require_requirements = walk.profile == .release,
+    });
+    defer allocator.free(items);
+    var moved: usize = 0;
+    errdefer for (items[moved..]) |item| allocator.free(item.message);
+    for (items) |item| {
+        try appendOwnedFinding(allocator, walk.findings, .{
+            .kind = .profile_incomplete,
+            .status = .incomplete,
+            .severity = profileSeverity(walk.profile),
+            .ref_des = inst.ref_des,
+            .component = inst.component,
+            .message = item.message,
+        });
+        moved += 1;
+    }
+}
+
+/// The release profile surfaces every evaluator warning as a finding so a
+/// stale declaration cannot hide on stderr while the gate reads green.
+fn appendEvalWarnings(
+    allocator: std.mem.Allocator,
+    eval: *const Evaluator,
+    findings: *std.ArrayList(Finding),
+) std.mem.Allocator.Error!void {
+    for (eval.warnings.items, 0..) |warning, index| {
+        // A module instantiated N times warns N times; one finding per text.
+        var repeated = false;
+        for (eval.warnings.items[0..index]) |earlier| if (std.mem.eql(u8, earlier.message, warning.message)) {
+            repeated = true;
+        };
+        if (repeated) continue;
+        const message = try allocator.dupe(u8, warning.message);
+        try appendOwnedFinding(allocator, findings, .{
+            .kind = .eval_warning,
+            .status = .fail,
+            .severity = evalWarningSeverity(warning.message),
+            .ref_des = "",
+            .component = "",
+            .message = message,
+        });
     }
 }
 
@@ -205,7 +324,7 @@ fn datasheetReviewFinding(
     project_dir: []const u8,
     profile: Profile,
 ) std.mem.Allocator.Error!Finding {
-    const severity_if_open: checks.Severity = if (profile == .preflight) .@"error" else .warning;
+    const severity_if_open: checks.Severity = if (isStrict(profile)) .@"error" else .warning;
     const review = inst.docs.review orelse return .{
         .kind = .datasheet_review,
         .status = .missing,
@@ -357,6 +476,20 @@ test "profile controls pending requirement severity" {
     try std.testing.expectEqual(checks.Severity.warning, requirementSeverity(.na, .authoring));
     try std.testing.expectEqual(checks.Severity.@"error", requirementSeverity(.na, .preflight));
     try std.testing.expectEqual(checks.Severity.@"error", requirementSeverity(.fail, .authoring));
+}
+
+// spec: preflight - the release profile fails profile gaps and unknown sub-forms that preflight only warns about
+test "release strictness ranks above preflight" {
+    try std.testing.expect(!isStrict(.authoring));
+    try std.testing.expect(isStrict(.preflight));
+    try std.testing.expect(isStrict(.release));
+    try std.testing.expectEqual(Profile.release, parseProfile("release").?);
+    try std.testing.expectEqual(checks.Severity.@"error", requirementSeverity(.na, .release));
+    try std.testing.expectEqual(checks.Severity.info, profileSeverity(.authoring));
+    try std.testing.expectEqual(checks.Severity.warning, profileSeverity(.preflight));
+    try std.testing.expectEqual(checks.Severity.@"error", profileSeverity(.release));
+    try std.testing.expectEqual(checks.Severity.@"error", evalWarningSeverity("unknown sub-form (placement-order …) in (design-block …)"));
+    try std.testing.expectEqual(checks.Severity.warning, evalWarningSeverity("derived id collides with an existing id"));
 }
 
 // spec: preflight - complete reviews require every category or a reasoned N/A

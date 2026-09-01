@@ -185,6 +185,9 @@ const ComponentInfo = struct {
     symbol_ref: []const u8 = "",
     manufacturer: []const u8 = "",
     mpn: []const u8 = "",
+    /// Authored `(class <key>)` — the component-class review profile the
+    /// part binds to; empty when the class is inferred from its pins.
+    class: []const u8 = "",
 };
 
 fn collectComponentField(
@@ -208,6 +211,8 @@ fn collectComponentField(
         info.manufacturer = cl[1].asString() orelse cl[1].asAtom() orelse "";
     } else if (std.mem.eql(u8, tag, "mpn")) {
         info.mpn = cl[1].asString() orelse cl[1].asAtom() orelse "";
+    } else if (std.mem.eql(u8, tag, "class")) {
+        info.class = cl[1].asString() orelse cl[1].asAtom() orelse "";
     } else if (std.mem.eql(u8, tag, "datasheet")) {
         const v = cl[1].asString() orelse cl[1].asAtom() orelse return;
         try datasheets.append(allocator, v);
@@ -406,6 +411,8 @@ fn writeComponentJson(allocator: std.mem.Allocator, w: anytype, input: Component
     try json_writer.writeString(w, info.manufacturer);
     try w.writeAll(",\"mpn\":");
     try json_writer.writeString(w, info.mpn);
+    try w.writeAll(",\"class\":");
+    try json_writer.writeString(w, info.class);
 
     try w.writeAll(",\"datasheets\":[");
     for (datasheets, 0..) |d, i| {
@@ -1031,6 +1038,20 @@ test "describeComponent returns matching implementation policy and digest" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"role\":\"regulator\"") != null);
     const digest = std.mem.indexOf(u8, out.items, "\"source_sha256\":\"") orelse return error.TestExpectedDigest;
     try std.testing.expect(out.items.len >= digest + "\"source_sha256\":\"".len + 64);
+}
+
+// spec: serve/component_info - describe reports an authored class key
+test "collectComponentField reads an authored class key" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const nodes = try sexpr_parser.parse(arena.allocator(), "(component x (class ldo) (mpn \"M\"))");
+    const body = nodes[0].asList().?;
+    var info = ComponentInfo{ .name = "x", .is_family = false };
+    var datasheets: std.ArrayList([]const u8) = .empty;
+    for (body[1..]) |child| try collectComponentField(arena.allocator(), child, &info, &datasheets);
+    try std.testing.expectEqualStrings("ldo", info.class);
+    try std.testing.expectEqualStrings("M", info.mpn);
 }
 
 test "describeComponent returns the authored datasheet-review record" {

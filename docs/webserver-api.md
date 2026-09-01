@@ -605,7 +605,7 @@ Tools include:
 - **Project / introspection (read-only)**: `list_designs`, `list_library`,
   `list_history`, `list_instances`, `list_free_pins`, `get_net`,
   `describe_component`, `get_schematic`, `get_pcb_layout_image`, `get_version`,
-  `run_checks`. `get_pcb_layout_image` returns the PCB layout
+  `run_checks`, `review_audit`. `get_pcb_layout_image` returns the PCB layout
   as a PNG (same renderer as `GET /api/pcb-png/:name`) so
   an agent can visually inspect placement; args: `name`, optional `nets`/`refs`
   (arrays or comma-strings) to spotlight a subsystem, `route`, `width`, `layout`,
@@ -636,6 +636,18 @@ Tools include:
   be told different junction temperatures for the same design, ambient and
   layout. It
   resolves a design or a bare `lib/modules` module and touches nothing on disk.
+- **Release audit (read-only)**: `review_audit` `{name, layout?}` — the
+  generated Board Review Audit as Markdown (`{ok,name,layout,markdown}`): the
+  identity block with the release token and digests, the release-profile
+  check summary, one row per active part with its class profile and unmet
+  items, the completion ladder, the fabrication gate with its DRC counts by
+  kind, open notes, and a findings register with empty Disposition cells.
+  The CLI twin is `netlisp review-audit [--layout N] [--output F] <board>`;
+  the document parses under the system-review Markdown rules, so it can be
+  registered as a board-scoped review document. `run_checks` and `build`
+  accept `profile:"release"` — preflight plus the component-class profile
+  obligations (`profile_incomplete`), a cited-requirement demand on every
+  active part, and evaluator warnings as findings.
 - **Language / module authoring (read-only)**: `get_language_reference` —
   the auto-generated S-expression reference rendered live from the dispatch
   tables (same content as `docs/language-forms.md`; optional `section` arg

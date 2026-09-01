@@ -5564,6 +5564,7 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 
 ## system-review
 
+- readiness reports the waiver register drift and a board whose release layout is not frozen fails board review
 - evaluated source paths retain the buildable src/lib shape in a review package
 - interface evidence resolves stable sub-block connector handles through the canonical flattened netlist
 - per-board block diagram evidence is one standalone SVG document rendered from the same evaluated design, omitted when there is nothing to draw
@@ -5692,6 +5693,7 @@ Public functions: runChecks, deinit, parseMicroFarads, parseOhms, parseMicroHenr
 
 - an append allocation failure releases the already-owned finding message
 - authoring warns for pending requirements while strict preflight fails them
+- the release profile fails profile gaps and unknown sub-forms that preflight only warns about
 - complete reviews require every category or a reasoned N/A
 - digest identity uses canonical lowercase SHA-256 text
 - replacing a reviewed PDF makes a completed digest-bound review stale
@@ -6338,6 +6340,7 @@ Public functions: readFile, writeFile, editFile, listDir, glob, deleteFile, move
 Public functions: describeComponent, listRequirements, addRequirement, removeRequirement
 
 - kebab-cases every Check variant tag
+- describe reports an authored class key
 - findSourceComment finds the source-of-truth path
 - parsePinoutBody normalises pin ID shapes
 - describeComponent resolves the pinout via the symbol ref and reports it
@@ -7186,6 +7189,7 @@ is what makes the predicate exact rather than approximately right.
 - home design cards lazily show the same six-stage PCB completion tracker as the layout editor
 - home design cards put issue counts only in stage one and omit legacy issue/section chips
 - get_layout_progress is a registered read-only CLI tool
+- review_audit is a registered read-only CLI tool
 - route_experiment is a registered read-only CLI tool
 - preview_escape_assignment is a registered read-only CLI tool
 - preview_escape_assignment rejects a request naming fewer than two nets
@@ -7853,3 +7857,42 @@ export never invents them.
 - completeness-waiver: malformed encoding (the existing s-expression parser supplies typed nodes; malformed forms and non-finite or out-of-range numeric fields are rejected before evaluation)
 - completeness-waiver: integer overflow (loop bounds are fixed constants except the seven-element tolerance mask, whose shift count is compile-time bounded)
 - completeness-waiver: panic-free (component lookup, value parsing, and crossover failure use optional/error returns; panic-freedom is also enforced repo-wide by Guardian's panic-budget snapshot)
+
+## review-profiles
+
+- an authored (class …) wins over pin-name inference and unknown keys are rejected
+- supply pins without voltage-range and decoupling checks, currents, or control-pin thresholds are named as unmet profile items
+- a loop or mixer class demands its design-level analysis in gate mode
+- completeness-waiver: empty inputs (a part with no library pinout yields no supply or control items, and an empty design yields no findings)
+- completeness-waiver: large inputs (every walk is linear in the part's pins, requirements and declarations and propagates allocator failure)
+- completeness-waiver: unauthorized access (profiles read the already-loaded design and library under the caller's project directory; authorization lives at the CLI entry points)
+- completeness-waiver: i/o failure (an unreadable component or pinout file degrades to an empty pad list exactly as pin roles do)
+- completeness-waiver: concurrent access (evaluation owns its arena and item list while reading an immutable design snapshot)
+- completeness-waiver: malformed encoding (library parsing is upstream; a malformed pinout yields no pads and an unknown class key is rejected)
+- completeness-waiver: integer overflow (item counts are bounded by allocator-backed slices and use no input-derived integer arithmetic)
+- completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
+
+## waiver-register
+
+- register tables are read only under a heading naming the board and only when the second column is Count
+- drift lists every kind whose registered count differs from the release run's warning count, unrecognised categories included
+- completeness-waiver: empty inputs (an empty register or an empty readiness document yields no entries and no drift)
+- completeness-waiver: large inputs (parsing is a single linear pass over lines and cells with fixed-size cell buffers)
+- completeness-waiver: unauthorized access (the register arrives as an already-read document owned by the system manifest)
+- completeness-waiver: i/o failure (this module performs no I/O; the document reader upstream reports failures)
+- completeness-waiver: concurrent access (pure functions over caller-owned slices with no shared state)
+- completeness-waiver: malformed encoding (a row whose count is not an integer is skipped and an unrecognised category is reported as drift)
+- completeness-waiver: integer overflow (counts are parsed as usize and summed per kind from a bounded document)
+- completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
+
+## review-audit
+
+- the rendered audit parses as safe review Markdown with no raw HTML
+- completeness-waiver: empty inputs (a design with no active parts, no findings and no layout renders the placeholder rows)
+- completeness-waiver: large inputs (the findings register is capped and every cell is clipped on a codepoint boundary)
+- completeness-waiver: unauthorized access (the audit reads the caller's project directory through the same evaluator and gate the CLI already exposes)
+- completeness-waiver: i/o failure (an unavailable fabrication gate or ladder renders as unavailable instead of aborting the audit)
+- completeness-waiver: concurrent access (collection owns its evaluator and arena; nothing is written)
+- completeness-waiver: malformed encoding (readiness and ladder JSON that fails to parse leaves those sections unavailable)
+- completeness-waiver: integer overflow (counts are tallied from bounded slices with no input-derived arithmetic)
+- completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
