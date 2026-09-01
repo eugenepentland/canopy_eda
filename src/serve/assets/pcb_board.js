@@ -3208,6 +3208,16 @@ function pSelRow(k,id,opts,cur,locked){var o='';opts.forEach(function(op){
   o+='<option value="'+pEsc(op[0])+'"'+(String(op[0])===String(cur)?' selected':'')+'>'+pEsc(op[1])+'</option>';});
  return '<div class="prop-row"><span class="k">'+k+'</span>'+
   '<select class="pv-in" id="'+id+'"'+(locked?' disabled':'')+'>'+o+'</select></div>';}
+function pTrackWidthRow(track){return '<div class="prop-row"><span class="k">Width (mm)</span>'+
+ '<input class="pv-in" id="prop-track-width" type="number" min="0.001" step="0.001" required value="'+
+ (Math.round((+track.w||0.25)*1000)/1000)+'"></div>';}
+function pTrackNetRow(track){var cur=String(track.net||""),seen=Object.create(null),opts=[["","No net"]];
+ // Keep a legacy/current spelling selectable even if the present netlist no
+ // longer declares it; committing another choice is still constrained to the
+ // page's authoritative netnames list below.
+ if(cur){opts.push([cur,cur]);seen[cur]=1;}
+ (PCB.netnames||[]).forEach(function(net){net=String(net||"");if(!net||seen[net])return;seen[net]=1;opts.push([net,net]);});
+ return pSelRow("Net","prop-track-net",opts,cur,false);}
 function passiveFamilyRoot(name){var s=String(name||"").toLowerCase(),i=s.indexOf("-");return i<0?s:s.slice(0,i);}
 function passiveFpLabel(c){return c.name+(c.footprint?" · "+c.footprint:"");}
 function passiveFpChoices(p,comps){var root=passiveFamilyRoot(p.component),seen={},out=[];
@@ -10020,17 +10030,53 @@ function inspSetHere(hit){insp=hit;inspPopClose();
  if(hit&&hit.t=="drc"){var i=(PCB.drc||[]).indexOf(hit.o);
   if(i>=0&&i!==drcCur){drcCur=i;drcMarkCur();}}
  renderProps();paintSoon();}
+// Width/net are fields of one saved track, so editing either is one atomic
+// copper operation. Generated RF/power overlays that own the centreline are
+// retired first (baking power widths where required), exactly like a drag or
+// bulk class-width edit. The synchronous DRC gate compares the pre/post board;
+// a rejected attempt restores the few temporarily touched fields before any
+// paint, dirty mark, or undo entry can observe it.
+function trackPropertiesCommit(track,width,net){
+ if(RO||mobileInspectMode())return {ok:false,error:"Trace properties are read-only here."};
+ var tracks=PCB.tracks||[],ti=tracks.indexOf(track);if(ti<0)return {ok:false,error:"That trace is no longer on the board."};
+ width=Number(width);net=String(net||"");
+ if(!isFinite(width)||width<=0)return {ok:false,error:"Width must be greater than 0 mm."};
+ if(net!==String(track.net||"")&&net!==""&&(PCB.netnames||[]).indexOf(net)<0)
+  return {ok:false,error:"Choose a net from this board."};
+ if(Math.abs(width-(+track.w||0.25))<=1e-9&&net===String(track.net||""))return {ok:true,changed:false};
+ var snap=snapAll(),oldRf=snap.rf_paths;
+ rfDropForTracks([track]);track.w=width;track.net=net;
+ if(drcGateDiffBlocks(snap.tracks,snap.vias,tracks,PCB.vias||[],oldRf,PCB.rf_paths||[])){
+  // rfDropForTracks may bake a power overlay into several centreline widths;
+  // restore every width/net by stable array position. No tracks are added or
+  // removed by this edit, so live object identities (including `insp.o`) stay.
+  for(var i=0;i<tracks.length&&i<snap.tracks.length;i++){tracks[i].w=snap.tracks[i].w;tracks[i].net=snap.tracks[i].net;}
+  PCB.rf_paths=oldRf;cuGeomDrop();paintSoon();
+  return {ok:false,error:"That change would create a DRC error."};}
+ recordUndo(snap);PCB.drc=[];copperTouched();drawRoute();drawClr();drawDrc();scheduleDrc();
+ inspSetHere({t:"track",o:track});
+ routeStatMsg("trace updated · "+n2(width)+" mm · "+(net?nLeaf(net):"no net")+" — Save/Update to keep");
+ return {ok:true,changed:true};}
+function wireTrackProperties(body,track){var wi=body.querySelector("#prop-track-width"),ni=body.querySelector("#prop-track-net");
+ function message(result){if(result&&result.ok)return;var e=document.getElementById("prop-track-msg");if(!e)return;
+  e.classList.add("bad");e.textContent=(result&&result.error)||"Could not update this trace.";}
+ function commit(){message(trackPropertiesCommit(track,wi&&wi.value,ni&&ni.value));}
+ if(wi){wi.addEventListener("keydown",function(ev){if(ev.key==="Enter"){ev.preventDefault();commit();if(document.body.contains(wi))wi.blur();}});wi.addEventListener("change",commit);}
+ if(ni)ni.addEventListener("change",commit);}
+window.PCBTrackPropertiesCommit=trackPropertiesCommit;
 function renderInspProps(body){var o=insp.o,h="",hint='<div class="prop-lock">';
  if(insp.t=="track"){
   var tc=netClassInfo(o.net||""),dp=diffPairInfo(o.net||"");
   h='<div class="prop-head"><span class="prop-ref">Track</span>'+
    (o.net?'<span class="prop-val">'+pEsc(nLeaf(o.net))+'</span>':'')+'</div>'+
-   '<div class="prop-rows">'+pRow("Segment ID",trackIdEnsure(o))+pRow("Net",o.net||"?")+pRow("Layer",layerName(o.l||0))+
-   pRow("Source",routeSourceLabel(o.source))+pRow("Width",n2(o.w||0.25)+" mm")+(tc?pRow("Net class",tc.class)+
+   '<div class="prop-rows">'+pRow("Segment ID",trackIdEnsure(o))+pRow("Layer",layerName(o.l||0))+
+   pRow("Source",routeSourceLabel(o.source))+((!RO&&!mobileInspectMode())?pTrackWidthRow(o)+pTrackNetRow(o):
+   pRow("Width",n2(o.w||0.25)+" mm")+pRow("Net",o.net||"?"))+(tc?pRow("Net class",tc.class)+
    pRow("Class gap",n2(tc.clearance||PCB.clr||0)+" mm")+(tc.conflict?pRow("Class status","conflict — assign on board"):""):"")+
    (dp?pRow("Diff pair","partner "+nLeaf(dp.partner)+", gap "+n2(dp.gap||0)+" mm"):"")+
    pRow("From","("+n2(o.x1)+", "+n2(o.y1)+")")+pRow("To","("+n2(o.x2)+", "+n2(o.y2)+")")+
    pRow("Length",n2(Math.hypot(o.x2-o.x1,o.y2-o.y1))+" mm")+(o.g?pRow("Stamp",o.g):"")+'</div>';
+  if(!RO&&!mobileInspectMode())h+='<div class="prop-edit-note" id="prop-track-msg">Width or net changes apply to this segment and are undoable.</div>';
   h+=traceEmPanel(o,tc);
   h+=powerIntegrityPanel(o,"track");
   h+=pdnPanel(o.net||"");
@@ -10072,6 +10118,7 @@ function renderInspProps(body){var o=insp.o,h="",hint='<div class="prop-lock">';
   '<button id="insp-copy" class="btn" style="font-size:11px">Copy report</button>'+
   '<button id="insp-goto" class="btn" style="font-size:11px" title="Pan/zoom to it">\u2316 Locate</button></div>';
  body.innerHTML=h;
+ if(insp.t==="track"&&!RO&&!mobileInspectMode())wireTrackProperties(body,o);
  var cb=document.getElementById("insp-copy");
  if(cb)cb.addEventListener("click",function(){
   function done(ok){cb.textContent=ok?"copied \u2713":"copy failed";}
