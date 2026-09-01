@@ -1389,6 +1389,16 @@ fn relatedTargetIndex(
             if (std.mem.eql(u8, terminal, candidate_net)) return candidate_idx;
         }
     }
+
+    // A visible boundary net deliberately terminates the drawing walk, so it
+    // cannot reveal a relationship on the far side of that label. Placement
+    // still follows passive-only signal paths across the boundary: a
+    // differential termination between two AC-coupled inputs is one functional
+    // unit and must be ordered together before the hub is split into columns.
+    for (groups, 0..) |candidate, candidate_idx| {
+        if (candidate_idx == source_idx) continue;
+        if (try hub_mod.groupsSharePassiveSignalPath(ctx, hub_ref, source, candidate)) return candidate_idx;
+    }
     return null;
 }
 
@@ -2513,6 +2523,59 @@ test "functional pin order pairs signal returns but leaves supply pullups sequen
     try std.testing.expectEqualStrings("35", ordered[2].pin_numbers);
     try std.testing.expectEqualStrings("7", ordered[3].pin_numbers);
     try std.testing.expectEqualStrings("16", ordered[4].pin_numbers);
+}
+
+test "functional pin order pairs inputs joined beyond visible nets" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    var ctx = RenderCtx.init(allocator);
+
+    for ([_][]const u8{ "C_P", "R_TERM", "C_N" }) |ref| {
+        try ctx.spoke_set.put(allocator, ref, {});
+    }
+    try ctx.shared_rail_nets.put(allocator, "REF_P", {});
+    try ctx.shared_rail_nets.put(allocator, "REF_N", {});
+
+    var cp_adj: std.ArrayList(AdjEntry) = .empty;
+    try cp_adj.append(allocator, .{ .pin = "2", .endpoint = .{ .pin = .{ .ref_des = "U1", .pin = "1" } } });
+    try cp_adj.append(allocator, .{ .pin = "1", .endpoint = .{ .net = "REF_P" } });
+    try ctx.adjacency.put(allocator, "C_P", cp_adj);
+    var term_adj: std.ArrayList(AdjEntry) = .empty;
+    try term_adj.append(allocator, .{ .pin = "1", .endpoint = .{ .net = "REF_P" } });
+    try term_adj.append(allocator, .{ .pin = "2", .endpoint = .{ .net = "REF_N" } });
+    try ctx.adjacency.put(allocator, "R_TERM", term_adj);
+    var cn_adj: std.ArrayList(AdjEntry) = .empty;
+    try cn_adj.append(allocator, .{ .pin = "1", .endpoint = .{ .net = "REF_N" } });
+    try cn_adj.append(allocator, .{ .pin = "2", .endpoint = .{ .pin = .{ .ref_des = "U1", .pin = "4" } } });
+    try ctx.adjacency.put(allocator, "C_N", cn_adj);
+
+    var ref_p_pins: std.ArrayList(env_mod.PinRef) = .empty;
+    try ref_p_pins.appendSlice(allocator, &.{
+        .{ .ref_des = "C_P", .pin = "1" },
+        .{ .ref_des = "R_TERM", .pin = "1" },
+    });
+    try ctx.net_index.put(allocator, "REF_P", ref_p_pins);
+    var ref_n_pins: std.ArrayList(env_mod.PinRef) = .empty;
+    try ref_n_pins.appendSlice(allocator, &.{
+        .{ .ref_des = "R_TERM", .pin = "2" },
+        .{ .ref_des = "C_N", .pin = "1" },
+    });
+    try ctx.net_index.put(allocator, "REF_N", ref_n_pins);
+
+    try ctx.pin_canonical_nets.put(allocator, "U1.1", "OSC_P");
+    try ctx.pin_canonical_nets.put(allocator, "U1.2", "OTHER");
+    try ctx.pin_canonical_nets.put(allocator, "U1.4", "OSC_N");
+    const groups = [_]PinGroup{
+        .{ .display_name = "OSCINP", .pin_numbers = "1", .stub_labels = &.{"OSCINP"}, .stub_pins = &.{"1"}, .conns = &.{.{ .pin = "1", .endpoint = .{ .pin = .{ .ref_des = "C_P", .pin = "2" } } }} },
+        .{ .display_name = "OTHER", .pin_numbers = "2", .stub_labels = &.{"OTHER"}, .stub_pins = &.{"2"}, .conns = &.{.{ .pin = "2", .endpoint = .{ .net = "OTHER" } }} },
+        .{ .display_name = "OSCINM", .pin_numbers = "4", .stub_labels = &.{"OSCINM"}, .stub_pins = &.{"4"}, .conns = &.{.{ .pin = "4", .endpoint = .{ .pin = .{ .ref_des = "C_N", .pin = "2" } } }} },
+    };
+
+    const ordered = try orderFunctionalPinGroups(&ctx, "U1", &groups);
+    try std.testing.expectEqualStrings("1", ordered[0].pin_numbers);
+    try std.testing.expectEqualStrings("4", ordered[1].pin_numbers);
+    try std.testing.expectEqualStrings("2", ordered[2].pin_numbers);
 }
 
 // spec: render_html - Functional pin ordering terminates when several pins share one earlier partner

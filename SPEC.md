@@ -5048,6 +5048,7 @@ Public functions: renderSchematic
 - A feedback divider return and its output pin on the same hub side draw as one outside rail with a single net label
 - A Functional local direct return omits its redundant generated net label
 - Functional differential inputs keep their coupling parts beside the hub, turn the boundary termination vertical, and retain both port stubs
+- Functional hub pins joined by a passive-only signal path stay in the same column
 - A Functional shared-bias pull-up is drawn from its own destination pin while the outside lane carries the common bias node
 - A Functional shared RF bias rail directly joins compact P/M pull-up rows and centers its choke/bypass tree between them
 - A Functional RF pair keeps its grounded termination and externally visible signal on clear outer rows instead of crossing the centered shared-bias tree
