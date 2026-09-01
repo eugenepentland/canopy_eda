@@ -357,6 +357,74 @@ fn groupsSharePassiveAnchor(self: *const RenderCtx, a: PinGroup, b: PinGroup) bo
     return false;
 }
 
+fn groupContainsHubPin(group: PinGroup, pin_id: []const u8) bool {
+    for (group.stub_pins) |pin| {
+        if (std.mem.eql(u8, pin, pin_id)) return true;
+    }
+    for (group.conns) |conn| {
+        if (std.mem.eql(u8, conn.pin, pin_id)) return true;
+    }
+    return false;
+}
+
+/// Walk only passive parts and non-power signal nets. This is intentionally
+/// separate from the drawing chain walker: Functional rendering stops at a
+/// visible port net, but column placement still needs to see a differential
+/// termination beyond that boundary. For example, the LMX2595 path is
+/// OSCINP -> coupling C -> REF_P -> 100 R -> REF_N -> coupling C -> OSCINM.
+fn passiveSignalPathReachesGroup(
+    self: *RenderCtx,
+    hub_ref: []const u8,
+    spoke_ref: []const u8,
+    target: PinGroup,
+    visited: *std.StringHashMapUnmanaged(void),
+) RenderError!bool {
+    if (visited.contains(spoke_ref)) return false;
+    try visited.put(self.allocator, spoke_ref, {});
+
+    const adj = self.adjacency.get(spoke_ref) orelse return false;
+    for (adj.items) |entry| switch (entry.endpoint) {
+        .pin => |pin| {
+            if (std.mem.eql(u8, pin.ref_des, hub_ref)) {
+                if (groupContainsHubPin(target, pin.pin)) return true;
+            } else if (self.spoke_set.contains(pin.ref_des) and
+                try passiveSignalPathReachesGroup(self, hub_ref, pin.ref_des, target, visited))
+            {
+                return true;
+            }
+        },
+        .net => |net| {
+            const signal_net = baseNetName(net);
+            if (!functionalSignalAnchor(signal_net)) continue;
+            const pins = self.net_index.get(signal_net) orelse continue;
+            for (pins.items) |pin| {
+                if (std.mem.eql(u8, pin.ref_des, hub_ref)) {
+                    if (groupContainsHubPin(target, pin.pin)) return true;
+                } else if (self.spoke_set.contains(pin.ref_des) and
+                    try passiveSignalPathReachesGroup(self, hub_ref, pin.ref_des, target, visited))
+                {
+                    return true;
+                }
+            }
+        },
+    };
+    return false;
+}
+
+/// Whether two pin groups of one hub are joined through signal-side passives.
+pub fn groupsSharePassiveSignalPath(self: *RenderCtx, hub_ref: []const u8, source: PinGroup, target: PinGroup) RenderError!bool {
+    var visited: std.StringHashMapUnmanaged(void) = .empty;
+    for (source.conns) |conn| {
+        const spoke = switch (conn.endpoint) {
+            .pin => |pin| pin,
+            .net => continue,
+        };
+        if (!self.spoke_set.contains(spoke.ref_des)) continue;
+        if (try passiveSignalPathReachesGroup(self, hub_ref, spoke.ref_des, target, &visited)) return true;
+    }
+    return false;
+}
+
 fn groupCanonicalNet(self: *RenderCtx, hub_ref: []const u8, group: PinGroup) RenderError![]const u8 {
     for (group.conns) |conn| {
         const key = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ hub_ref, conn.pin });
@@ -379,6 +447,8 @@ fn groupReachesNet(self: *RenderCtx, hub_ref: []const u8, group: PinGroup, targe
 }
 
 fn groupsFunctionallyLinked(self: *RenderCtx, hub_ref: []const u8, a: PinGroup, b: PinGroup) RenderError!bool {
+    if (try groupsSharePassiveSignalPath(self, hub_ref, a, b) or
+        try groupsSharePassiveSignalPath(self, hub_ref, b, a)) return true;
     if (groupsSharePassiveAnchor(self, a, b)) return true;
     const a_net = try groupCanonicalNet(self, hub_ref, a);
     const b_net = try groupCanonicalNet(self, hub_ref, b);
@@ -744,6 +814,97 @@ test "functional height split keeps a passive-connected pin pair in one column" 
     try testing.expectEqual(@as(usize, 3), split.right.len);
     try testing.expectEqualStrings("2", split.right[0].pin_numbers);
     try testing.expectEqualStrings("3", split.right[1].pin_numbers);
+}
+
+// spec: render_svg - Functional hub pins joined by a passive-only signal path stay in the same column
+test "functional height split keeps a passively terminated differential pair in one column" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    var ctx = RenderCtx.init(allocator);
+    ctx.render_scratch.functional_layout = true;
+
+    for ([_][]const u8{ "C_OSCINP", "R_OSC_TERM", "C_OSCINM" }) |ref| {
+        try ctx.spoke_set.put(allocator, ref, {});
+    }
+
+    var cp_adj: std.ArrayList(AdjEntry) = .empty;
+    try cp_adj.append(allocator, .{ .pin = "2", .endpoint = .{ .pin = .{ .ref_des = "U1", .pin = "8" } } });
+    try cp_adj.append(allocator, .{ .pin = "1", .endpoint = .{ .net = "REF_P" } });
+    try ctx.adjacency.put(allocator, "C_OSCINP", cp_adj);
+
+    var term_adj: std.ArrayList(AdjEntry) = .empty;
+    try term_adj.append(allocator, .{ .pin = "1", .endpoint = .{ .net = "REF_P" } });
+    try term_adj.append(allocator, .{ .pin = "2", .endpoint = .{ .net = "REF_N" } });
+    try ctx.adjacency.put(allocator, "R_OSC_TERM", term_adj);
+
+    var cm_adj: std.ArrayList(AdjEntry) = .empty;
+    try cm_adj.append(allocator, .{ .pin = "1", .endpoint = .{ .net = "REF_N" } });
+    try cm_adj.append(allocator, .{ .pin = "2", .endpoint = .{ .pin = .{ .ref_des = "U1", .pin = "9" } } });
+    try ctx.adjacency.put(allocator, "C_OSCINM", cm_adj);
+
+    var ref_p_pins: std.ArrayList(env_mod.PinRef) = .empty;
+    try ref_p_pins.appendSlice(allocator, &.{
+        .{ .ref_des = "C_OSCINP", .pin = "1" },
+        .{ .ref_des = "R_OSC_TERM", .pin = "1" },
+    });
+    try ctx.net_index.put(allocator, "REF_P", ref_p_pins);
+    var ref_n_pins: std.ArrayList(env_mod.PinRef) = .empty;
+    try ref_n_pins.appendSlice(allocator, &.{
+        .{ .ref_des = "R_OSC_TERM", .pin = "2" },
+        .{ .ref_des = "C_OSCINM", .pin = "1" },
+    });
+    try ctx.net_index.put(allocator, "REF_N", ref_n_pins);
+
+    const groups = [_]PinGroup{
+        .{ .display_name = "CE", .pin_numbers = "7", .stub_labels = &.{"CE"}, .stub_pins = &.{"7"}, .conns = &.{} },
+        .{ .display_name = "OSCINP", .pin_numbers = "8", .stub_labels = &.{"OSCINP"}, .stub_pins = &.{"8"}, .conns = &.{.{ .pin = "8", .endpoint = .{ .pin = .{ .ref_des = "C_OSCINP", .pin = "2" } } }} },
+        .{ .display_name = "OSCINM", .pin_numbers = "9", .stub_labels = &.{"OSCINM"}, .stub_pins = &.{"9"}, .conns = &.{.{ .pin = "9", .endpoint = .{ .pin = .{ .ref_des = "C_OSCINM", .pin = "2" } } }} },
+        .{ .display_name = "VREGIN", .pin_numbers = "10", .stub_labels = &.{"VREGIN"}, .stub_pins = &.{"10"}, .conns = &.{} },
+    };
+    const split = try splitGroupsByHeight(&ctx, &groups, "U1");
+
+    try testing.expectEqual(@as(usize, 1), split.left.len);
+    try testing.expectEqual(@as(usize, 3), split.right.len);
+    try testing.expectEqualStrings("8", split.right[0].pin_numbers);
+    try testing.expectEqualStrings("9", split.right[1].pin_numbers);
+}
+
+test "functional height split does not pair signal pins through a supply rail" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    var ctx = RenderCtx.init(allocator);
+    ctx.render_scratch.functional_layout = true;
+
+    for ([_][]const u8{ "R_PULLUP_A", "R_PULLUP_B" }) |ref| {
+        try ctx.spoke_set.put(allocator, ref, {});
+    }
+    var a_adj: std.ArrayList(AdjEntry) = .empty;
+    try a_adj.append(allocator, .{ .pin = "1", .endpoint = .{ .pin = .{ .ref_des = "U1", .pin = "2" } } });
+    try a_adj.append(allocator, .{ .pin = "2", .endpoint = .{ .net = "VDD" } });
+    try ctx.adjacency.put(allocator, "R_PULLUP_A", a_adj);
+    var b_adj: std.ArrayList(AdjEntry) = .empty;
+    try b_adj.append(allocator, .{ .pin = "1", .endpoint = .{ .pin = .{ .ref_des = "U1", .pin = "3" } } });
+    try b_adj.append(allocator, .{ .pin = "2", .endpoint = .{ .net = "VDD" } });
+    try ctx.adjacency.put(allocator, "R_PULLUP_B", b_adj);
+    var supply_pins: std.ArrayList(env_mod.PinRef) = .empty;
+    try supply_pins.appendSlice(allocator, &.{
+        .{ .ref_des = "R_PULLUP_A", .pin = "2" },
+        .{ .ref_des = "R_PULLUP_B", .pin = "2" },
+    });
+    try ctx.net_index.put(allocator, "VDD", supply_pins);
+
+    const groups = [_]PinGroup{
+        .{ .display_name = "", .pin_numbers = "1", .conns = &.{} },
+        .{ .display_name = "A", .pin_numbers = "2", .stub_pins = &.{"2"}, .conns = &.{.{ .pin = "2", .endpoint = .{ .pin = .{ .ref_des = "R_PULLUP_A", .pin = "1" } } }} },
+        .{ .display_name = "B", .pin_numbers = "3", .stub_pins = &.{"3"}, .conns = &.{.{ .pin = "3", .endpoint = .{ .pin = .{ .ref_des = "R_PULLUP_B", .pin = "1" } } }} },
+        .{ .display_name = "", .pin_numbers = "4", .conns = &.{} },
+    };
+    const split = try splitGroupsByHeight(&ctx, &groups, "U1");
+
+    try testing.expectEqual(@as(usize, 2), split.left.len);
+    try testing.expectEqual(@as(usize, 2), split.right.len);
 }
 
 test "groupHeights ignores a suppressed own-net label" {
