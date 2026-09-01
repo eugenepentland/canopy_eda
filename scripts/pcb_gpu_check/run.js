@@ -28,6 +28,8 @@
 //                  contains every ring, the fan pipeline is (compare always,
 //                  INVERT, colorWrites off) and the cover is (not-equal 0,
 //                  REPLACE) at stencil reference 0 — so each area self-clears.
+//                  The shared RF-union cover also runs at zero alpha, so a
+//                  hidden layer cannot leave stencil for the next visible one.
 //   D  pass/pipe   the render pass carries a stencil8 attachment and EVERY
 //                  pipeline declares the same format. A pass/pipeline
 //                  depth-stencil mismatch is a runtime validation error, and
@@ -112,6 +114,7 @@ function fakeGpu() {
     createShaderModule(d) { cap.wgsl = d.code; return { code: d.code }; },
     createBindGroupLayout: () => ({}),
     createPipelineLayout: () => ({}),
+    createSampler: () => ({}),
     createRenderPipeline(d) {
       const name = d.vertex.entryPoint;
       cap.pipelines[name] = d;
@@ -165,7 +168,7 @@ function fakeCanvas() {
 function installGlobals(device) {
   globalThis.GPUShaderStage = { VERTEX: 1, FRAGMENT: 2 };
   globalThis.GPUBufferUsage = { UNIFORM: 1, COPY_DST: 2, VERTEX: 4 };
-  globalThis.GPUTextureUsage = { RENDER_ATTACHMENT: 16 };
+  globalThis.GPUTextureUsage = { RENDER_ATTACHMENT: 16, TEXTURE_BINDING: 32 };
   globalThis.document = { createElement: () => fakeCanvas() };
   // Node ships a read-only `navigator` accessor on globalThis — plain assignment
   // silently no-ops, so define over it.
@@ -685,6 +688,14 @@ function checkWgsl(wgsl) {
     at = wgsl.indexOf("smoothstep(", at + 1);
   }
   ok(n >= 6, "F: every SDF pass still feathers with smoothstep", "found " + n);
+  // fsCover is not merely colour: its stencil REPLACE clears the immediately
+  // preceding pour/RF shape. In particular a hidden RF layer has alpha zero but
+  // still records its union, so discarding its cover leaks that shape through
+  // the next visible layer's cover.
+  const cover = /@fragment fn fsCover[^{]*\{([\s\S]*?)\n\}/.exec(wgsl);
+  ok(!!cover && cover[1].indexOf("discard") < 0,
+    "F: a zero-alpha cover still clears stencil for the next layer",
+    cover ? norm(cover[1]) : "fsCover not found");
   // The annulus disc guard: without it, a via barrel (rInner 0) runs a
   // smoothstep straddling zero and every via centre comes out half-alpha.
   ok(/if \(v\.r\.y > 0\.0\) \{ al = al \* smoothstep/.test(wgsl),

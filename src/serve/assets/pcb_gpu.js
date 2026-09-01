@@ -231,7 +231,11 @@ var WGSL = [
 "}",
 "@fragment fn fsCover(v: CovV) -> @location(0) vec4<f32> {",
 "  let al = v.col.a * du.p.x;",
-"  if (al <= 0.0) { discard; }",
+// The cover is also the stencil clear. A hidden RF layer still records its
+// union so visibility stays on the uniform-only fast path; returning transparent
+// black lets its cover clear that union before the next visible layer paints.
+// Ending the fragment early here leaves the hidden union behind and ghosts it
+// through the next visible RF taper's cover.
 "  return premul(v.col.rgb, al);",
 "}",
 "",
