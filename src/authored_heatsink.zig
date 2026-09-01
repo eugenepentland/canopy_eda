@@ -85,10 +85,10 @@ pub fn thermalInput(
 }
 
 fn target(placement: optimizer.Placement, scope: []const u8, origin: []const u8) ?[]const u8 {
-    for (placement.parts, 0..) |part, i| {
-        if (i >= placement.instances.len or !std.mem.eql(u8, placement.instances[i].origin_key, origin)) continue;
-        const parent = net_name.parent(part.ref_des) orelse "";
-        if (std.mem.eql(u8, parent, scope)) return part.ref_des;
+    for (placement.instances) |instance| {
+        if (!std.mem.eql(u8, instance.origin_key, origin)) continue;
+        const parent = net_name.parent(instance.ref_des) orelse "";
+        if (std.mem.eql(u8, parent, scope)) return instance.ref_des;
     }
     return null;
 }
@@ -99,8 +99,8 @@ test "authored target follows source identity across ref-des renumbering" {
         .{ .ref_des = "filter/U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false },
     };
     const instances = [_]flat.FlatInstance{
-        .{ .ref_des = "synth/U42", .component = "hot", .origin_key = "U1", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
         .{ .ref_des = "filter/U1", .component = "cold", .origin_key = "U1", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
+        .{ .ref_des = "synth/U42", .component = "hot", .origin_key = "U1", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
     };
     const placement = optimizer.Placement{
         .parts = &parts,

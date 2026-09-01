@@ -6986,7 +6986,45 @@ pub fn gridPlace(
     pl.fabrication_layers = block.fabrication_layers;
     pl.diff_pairs = try diff_pairs.resolve(arena, nets, pl.rules.net);
     pl.match_groups = try match_group.resolve(arena, nets, pl.rules.net);
+    // The cheap first-open grid still represents the authored board. Without
+    // this fold it had no board_rect at all, so every board-local source
+    // feature (including a rebuildable heatsink) lost its coordinate frame.
+    if (block.board.present and block.board.w > 0 and block.board.h > 0) {
+        const r = try boardRectFromPoses(arena, parts, prep.instances, block.board, null);
+        pl.board_rect = r;
+        if (try authoredBoardShape(arena, r, block.board)) |shape| {
+            pl.board_poly = shape.poly;
+            pl.board_arcs = shape.arcs;
+        }
+        pl.minx = @min(pl.minx, r.minx);
+        pl.miny = @min(pl.miny, r.miny);
+        pl.maxx = @max(pl.maxx, r.minx + r.w);
+        pl.maxy = @max(pl.maxy, r.miny + r.h);
+    }
     return pl;
+}
+
+// Regression: the no-cache grid fallback retains the authored board outline
+// as the coordinate frame for board-local source features.
+test "gridPlace retains the authored board rectangle" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const block = DesignBlock{
+        .name = "empty-board",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .board = .{ .w = 20, .h = 10, .present = true },
+    };
+    const placement = try gridPlace(arena_state.allocator(), &block, ".", .{});
+    const rect = placement.board_rect orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(f64, -10), rect.minx);
+    try testing.expectEqual(@as(f64, -5), rect.miny);
+    try testing.expectEqual(@as(f64, 20), rect.w);
+    try testing.expectEqual(@as(f64, 10), rect.h);
 }
 
 /// Lay parts out on a uniform grid, row-major in flatten order, filling a roughly
