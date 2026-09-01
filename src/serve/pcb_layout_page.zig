@@ -86,6 +86,7 @@ const render_thermal_png = @import("../render_thermal_png.zig");
 const thermal = @import("../eval/thermal.zig");
 const thermal_scenarios = @import("../thermal_scenarios.zig");
 const thermal_api = @import("thermal_api.zig");
+const authored_heatsink = @import("../authored_heatsink.zig");
 const font5x7 = @import("../font5x7.zig");
 const png_mod = @import("../png.zig");
 const assets_css = @import("assets_css.zig");
@@ -2958,26 +2959,8 @@ pub fn thermalCopper(solved: SolvedRequest) thermal_scenarios.Copper {
 /// thermal kernel consumes. A sink on the component's own face is a package-
 /// top path; the opposite physical PCB face is the board/exposed-pad path.
 pub fn thermalHeatsink(solved: SolvedRequest, bt: thermal.BoardThermal) ?thermal_scenarios.Heatsink {
-    const saved = solved.heatsink orelse return null;
-    const target = thermal_scenarios.resolveMountedTarget(bt, solved.placement, saved.target_ref) orelse return null;
-    const physical = optimizer.Side.fromStr(saved.side);
-    return .{
-        .ref_des = target.ref_des,
-        .side = if (physical == target.side) .package_top else .board_backside,
-        .physical_face = if (physical == .top) .top else .bottom,
-        .geometry = .{
-            .width_mm = saved.w,
-            .length_mm = saved.h,
-            .base_mm = saved.base_mm,
-            .fin_height_mm = saved.fin_height_mm,
-            .fin_thickness_mm = saved.fin_thickness_mm,
-            .fin_gap_mm = saved.fin_gap_mm,
-            .fin_axis = std.meta.stringToEnum(thermal_scenarios.FinAxis, saved.fin_axis) orelse .length,
-        },
-        .material = std.meta.stringToEnum(thermal_scenarios.HeatsinkMaterial, saved.material) orelse .aluminum_6063,
-        .contact = .{ .x_mm = saved.x, .y_mm = saved.y, .w_mm = saved.w, .h_mm = saved.h },
-        .pad = .{ .thickness_mm = saved.pad_thickness_mm, .conductivity_w_mk = saved.pad_k_w_mk },
-    };
+    const resolved = authored_heatsink.resolve(solved.placement, solved.heatsink, solved.block.board.heatsink) orelse return null;
+    return authored_heatsink.thermalInput(solved.placement, bt, resolved);
 }
 
 /// Resolve `name` and apply the request's placement-selection rules: a named
@@ -3131,7 +3114,7 @@ pub fn solveForRequest(
             .silk_keepouts = silk_keepouts,
             .fabrication_layers = shownFabricationLayers(sub_doc.layouts, shown_name),
         },
-        .heatsink = shownHeatsink(sub_doc.layouts, shown_name),
+        .heatsink = authored_heatsink.resolve(placement, shownHeatsink(sub_doc.layouts, shown_name), eff_block.board.heatsink),
     };
 }
 
@@ -3233,6 +3216,7 @@ fn renderThermalPng(
         const results = try thermal_api.solveOver(alloc, &eval, project_dir, name, screen, .{
             .placement = solved.placement,
             .copper = copper,
+            .heatsink = thermalHeatsink(solved, screen),
             .layout = opts.layout,
         });
         break :blk (try thermal_scenarios.paintFrom(alloc, results, solved.placement, scenario, ambient)) orelse
@@ -6668,7 +6652,7 @@ fn resolveShownView(ctx: *Server, req: ?*httpz.Request, in: ShownInputs) ShownVi
             .base_edge = base_edge,
             .check_drc = in.check_drc,
         });
-    var view = ShownView{ .ro = ro, .routed = routed, .tally = deferred.tally, .violations = deferred.violations, .outline_drawn = outline_drawn, .base_edge = base_edge, .outline = shownOutline(in.layouts, in.shown), .fabrication_layers = fabrication_layers, .heatsink = shownHeatsink(in.layouts, in.shown), .saved = saved, .texts = texts, .dimensions = shownDimensions(in.layouts, in.shown) };
+    var view = ShownView{ .ro = ro, .routed = routed, .tally = deferred.tally, .violations = deferred.violations, .outline_drawn = outline_drawn, .base_edge = base_edge, .outline = shownOutline(in.layouts, in.shown), .fabrication_layers = fabrication_layers, .heatsink = authored_heatsink.resolve(in.placement.*, shownHeatsink(in.layouts, in.shown), in.block.board.heatsink), .saved = saved, .texts = texts, .dimensions = shownDimensions(in.layouts, in.shown) };
     deferred.reconcile(&view.routed);
     return view;
 }

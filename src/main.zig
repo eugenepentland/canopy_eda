@@ -584,6 +584,7 @@ test "one-shot CLI allocator releases process-lifetime storage in bulk" {
 
 // Pull in all test declarations
 test {
+    _ = @import("authored_heatsink.zig");
     _ = @import("sexpr/ast.zig");
     _ = @import("sexpr/tokenizer.zig");
     _ = @import("sexpr/parser.zig");

@@ -590,3 +590,8 @@ matters when the person re-recording is the author of the change.
 - **idea:** Bring `scripts/pcb_gpu_check/run.js` back to green against current `pcb_gpu.js`, split semantic-board and CAM pipeline assertions, and add checked-in synthetic/minimal PCB JSON fixtures so the documented command is reproducible without a private board blob.
 - **workaround:** Use the focused `serve.static_assets` regression plus `node --check` for scoped renderer changes, and inspect the named assertion in the standalone gate rather than treating its current aggregate exit status as attributable to the change.
 - **status:** mitigated
+
+## 2026-09-01 · codex · rebuildable board heatsink defaults
+- **finding:** `renderThermalPng` called the shared thermal cache without the mounted heatsink even though the scenario JSON path supplied it, so the heat map and reported temperatures could describe different cooling assemblies. Passing the same resolved input through both seams fixes the disagreement; emitting the scenario's mounted ref/side/face now makes it auditable.
+- **finding:** A saved heatsink combines absolute editor coordinates with a mutable flattened ref-des, neither of which is safe source truth. Rebuildable defaults need board-local coordinates plus the stable sub-block/source-origin identity, with any saved physical edit layered on top.
+- **status:** resolved

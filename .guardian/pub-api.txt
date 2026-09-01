@@ -4,6 +4,9 @@ src/allocating_writer.zig::print | fn print(self: AllocatingWriter, comptime for
 src/allocating_writer.zig::writeAll | fn writeAll(self: AllocatingWriter, bytes: []const u8) std.mem.Allocator.Error!void
 src/allocating_writer.zig::writeByte | fn writeByte(self: AllocatingWriter, byte: u8) std.mem.Allocator.Error!void
 src/asserted_fns.zig::buildMap | fn buildMap(allocator: Allocator, block: *const DesignBlock) Allocator.Error!Map
+src/authored_heatsink.zig::lower | fn lower(placement: optimizer.Placement, spec: ?env.BoardHeatsinkSpec) ?sidecar.SavedHeatsink
+src/authored_heatsink.zig::resolve | fn resolve( placement: optimizer.Placement, saved: ?sidecar.SavedHeatsink, spec: ?env.BoardHeatsinkSpec, ) ?sidecar.SavedHeatsink
+src/authored_heatsink.zig::thermalInput | fn thermalInput( placement: optimizer.Placement, bt: thermal.BoardThermal, saved: sidecar.SavedHeatsink, ) ?scenarios.Heatsink
 src/bench_layout.zig::main | fn main(init: std.process.Init) !void
 src/bench_layout.zig::process_io value
 src/bench_page.zig::BenchError value
@@ -488,6 +491,7 @@ src/eval/env.zig::AssertionResult struct_
 src/eval/env.zig::BlockDef struct_
 src/eval/env.zig::BlockOrigin enum_
 src/eval/env.zig::BlockRole enum_
+src/eval/env.zig::BoardHeatsinkSpec struct_
 src/eval/env.zig::BoardRole enum_
 src/eval/env.zig::BoardSpec struct_
 src/eval/env.zig::CalcBlock struct_

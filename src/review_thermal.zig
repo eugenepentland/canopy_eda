@@ -528,7 +528,20 @@ fn writeScenarioRow(w: anytype, row: thermal_scenarios.Row) json_writer.WriteErr
     try writeFloatOrNull(w, row.max_ambient.c);
     try w.writeAll(",\"ref\":");
     try writeStringOrNull(w, row.max_ambient.ref);
-    try w.writeAll("},\"parts\":[");
+    try w.writeAll("},\"heatsink\":");
+    if (row.heatsink.ref.len == 0) {
+        try w.writeAll("null");
+    } else {
+        try w.writeAll("{\"ref\":");
+        try json_writer.writeString(w, row.heatsink.ref);
+        try w.print(",\"side\":\"{s}\",\"face\":", .{@tagName(row.heatsink.side)});
+        if (row.heatsink.face) |face|
+            try w.print("\"{s}\"", .{@tagName(face)})
+        else
+            try w.writeAll("null");
+        try w.writeAll("}");
+    }
+    try w.writeAll(",\"parts\":[");
     for (row.parts, 0..) |part, i| {
         if (i > 0) try w.writeAll(",");
         try writeScenarioPart(w, part);

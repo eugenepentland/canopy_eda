@@ -79,6 +79,7 @@ pub const shards: []const []const []const u8 = &.{
     },
     // shard 1
     &.{
+        "authored_heatsink.test.",
         "bom_resolve.test.",
         "component_classification.test.",
         "convert.footprint.test.",

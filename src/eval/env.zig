@@ -1304,6 +1304,27 @@ pub const PerimeterFenceSpec = struct {
     net: []const u8 = "GND",
     keepout: PerimeterKeepoutSpec = .{},
 };
+
+/// One physical finned heatsink that belongs to the board design rather than
+/// to an editor sidecar. Coordinates and dimensions are board-local mm from
+/// the outline's top-left. The target is a stable source identity: sub-block
+/// name plus module-local origin,
+/// so ordinary ref-des renumbering cannot silently move the sink to a recycled
+/// reference designator.
+pub const BoardHeatsinkSpec = struct {
+    rect: struct { x: f64, y: f64, w: f64, h: f64 },
+    side: FabricationSide,
+    target: struct { scope: []const u8, origin: []const u8 },
+    material: []const u8 = "aluminum_6063",
+    geometry: struct {
+        base_mm: f64 = 2,
+        fin_height_mm: f64 = 10,
+        fin_thickness_mm: f64 = 1,
+        fin_gap_mm: f64 = 1.5,
+        fin_axis: []const u8 = "length",
+    } = .{},
+    pad: struct { thickness_mm: f64 = 0.5, conductivity_w_mk: f64 = 6 } = .{},
+};
 /// The physical board declared by a top-level `(board …)` form: the outline
 /// rectangle plus the parts that live ON it — connectors docked to a named
 /// board edge (`(left|right|top|bottom "ref" …)` lists, same item grammar as
@@ -1336,6 +1357,9 @@ pub const BoardSpec = struct {
     corners: []const PlacementItem = &.{},
     /// Optional board-edge via fence and exposed-mask band.
     perimeter_fence: PerimeterFenceSpec = .{},
+    /// Authored default heatsink. A saved layout may override this assembly;
+    /// deleting/rebuilding the sidecar falls back here.
+    heatsink: ?BoardHeatsinkSpec = null,
     role: BoardRole = .subcircuit,
     /// Subcircuit plane policy: false removes non-ground authored planes, or
     /// suppresses the dominant-supply plane in the implicit stackup model.

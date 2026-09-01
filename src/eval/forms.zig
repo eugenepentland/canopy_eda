@@ -570,6 +570,10 @@ pub const scope_form_docs = blk: {
         .syntax = "(board [(part-number \"PN\")] (size W H) [(corner-radius R)] [(outline-approved \"DIGEST\")] " ++
             "[(perimeter-fence (via DIA DRILL) (spacing PITCH) (edge-offset OFFSET) (mask-width WIDTH) [(net \"GND\")] " ++
             "[(keepout CLEARANCE [(blocks components tracks vias)] [(allow-nets \"NET\"…)])])] " ++
+            "[(heatsink (rect X Y W H) (side top|bottom) (target \"SCOPE\" \"ORIGIN\") " ++
+            "[(material aluminum_6063|aluminum_1050|copper)] [(base-mm N)] [(fin-height-mm N)] " ++
+            "[(fin-thickness-mm N)] [(fin-gap-mm N)] [(fin-axis length|width)] " ++
+            "[(pad-thickness-mm N)] [(pad-k-w-mk N)])] " ++
             "(left|right|top|bottom \"REF\"… | (rot N \"REF\")…)… [(corners \"REF\"…)])",
         .summary = "Physical board outline + edge hardware: (size W H) is the outline in mm " ++
             "(required — without it the form is inert). (corner-radius R) rounds the outline's " ++
@@ -591,7 +595,11 @@ pub const scope_form_docs = blk: {
             "(keepout CLEARANCE …) reserves a visible " ++
             "band beyond the vias' inward copper edge; (blocks …) chooses whether components, " ++
             "tracks, and/or vias are forbidden there (all three by default), while (allow-nets …) " ++
-            "admits named copper such as GND. Each (left|right|top|bottom …) list " ++
+            "admits named copper such as GND. (heatsink …) authors the board's rebuildable default thermal assembly; " ++
+            "its rectangle uses board-local millimetres from the outline's top-left, its physical construction feeds " ++
+            "the heatsink scenario, and its target is the stable sub-block/source-origin pair rather than a renumberable " ++
+            "ref-des. A saved layout can override its physical assembly; " ++
+            "removing or rebuilding the sidecar falls back to this declaration. Each (left|right|top|bottom …) list " ++
             "docks those parts flush INSIDE that board edge (the words name physical edges, " ++
             "not sides of an anchor), slid along the edge toward the pads they connect to; " ++
             "(rot N \"REF\") overrides the default pads-inward rotation. (corners …) pins " ++

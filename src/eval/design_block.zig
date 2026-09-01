@@ -2249,6 +2249,7 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
     var corner_radius: f64 = 0;
     var outline_approved: []const u8 = "";
     var perimeter_fence: env_mod.PerimeterFenceSpec = .{};
+    var heatsink: ?env_mod.BoardHeatsinkSpec = null;
     var corners: std.ArrayList(env_mod.PlacementItem) = .empty;
     for (form_children[1..]) |child| {
         const c = child.asList() orelse continue;
@@ -2279,6 +2280,10 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
             perimeter_fence = try parsePerimeterFence(self, c[1..]);
             continue;
         }
+        if (std.mem.eql(u8, head, "heatsink")) {
+            heatsink = try parseBoardHeatsink(self, child, c[1..]);
+            continue;
+        }
         if (std.mem.eql(u8, head, "corners")) {
             for (c[1..]) |item_node| {
                 const ref = item_node.asString() orelse item_node.asAtom() orelse continue;
@@ -2295,7 +2300,104 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
         .sides = board_sides,
         .corners = corners.toOwnedSlice(self.allocator) catch &.{},
         .perimeter_fence = perimeter_fence,
+        .heatsink = heatsink,
         .present = true,
+    };
+}
+
+/// Parse the board-authored default thermal assembly:
+///
+///   (heatsink
+///     (rect X Y W H) (side top|bottom) (target "SCOPE" "ORIGIN")
+///     (material aluminum_6063) (base-mm N)
+///     (fin-height-mm N) (fin-thickness-mm N) (fin-gap-mm N)
+///     (fin-axis length|width) (pad-thickness-mm N) (pad-k-w-mk N))
+///
+/// `rect` is board-local from the outline's top-left. `target` is intentionally
+/// not a mutable ref-des. SCOPE is the sub-block
+/// path (empty for a top-level part) and ORIGIN is the source-local instance
+/// name. That pair is the same identity saved placement poses already carry.
+fn parseBoardHeatsink(self: *Evaluator, form: Node, children: []const Node) EvalError!env_mod.BoardHeatsinkSpec {
+    var x: ?f64 = null;
+    var y: ?f64 = null;
+    var w: ?f64 = null;
+    var h: ?f64 = null;
+    var side: ?env_mod.FabricationSide = null;
+    var target_scope: ?[]const u8 = null;
+    var target_origin: ?[]const u8 = null;
+    var material: []const u8 = "aluminum_6063";
+    var base_mm: f64 = 2;
+    var fin_height_mm: f64 = 10;
+    var fin_thickness_mm: f64 = 1;
+    var fin_gap_mm: f64 = 1.5;
+    var fin_axis: []const u8 = "length";
+    var pad_thickness_mm: f64 = 0.5;
+    var pad_k_w_mk: f64 = 6;
+
+    for (children) |child| {
+        const c = child.asList() orelse continue;
+        if (c.len == 0) continue;
+        const head = c[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "rect") and c.len == 5) {
+            x = c[1].asNumber();
+            y = c[2].asNumber();
+            w = c[3].asNumber();
+            h = c[4].asNumber();
+        } else if (std.mem.eql(u8, head, "side") and c.len == 2) {
+            const value = c[1].asAtom() orelse c[1].asString() orelse "";
+            side = if (std.mem.eql(u8, value, "top"))
+                .top
+            else if (std.mem.eql(u8, value, "bottom"))
+                .bottom
+            else
+                null;
+        } else if (std.mem.eql(u8, head, "target") and c.len == 3) {
+            target_scope = c[1].asString() orelse c[1].asAtom();
+            target_origin = c[2].asString() orelse c[2].asAtom();
+        } else if (std.mem.eql(u8, head, "material") and c.len == 2) {
+            material = c[1].asString() orelse c[1].asAtom() orelse material;
+        } else if (std.mem.eql(u8, head, "base-mm") and c.len == 2) {
+            base_mm = c[1].asNumber() orelse -1;
+        } else if (std.mem.eql(u8, head, "fin-height-mm") and c.len == 2) {
+            fin_height_mm = c[1].asNumber() orelse -1;
+        } else if (std.mem.eql(u8, head, "fin-thickness-mm") and c.len == 2) {
+            fin_thickness_mm = c[1].asNumber() orelse -1;
+        } else if (std.mem.eql(u8, head, "fin-gap-mm") and c.len == 2) {
+            fin_gap_mm = c[1].asNumber() orelse -1;
+        } else if (std.mem.eql(u8, head, "fin-axis") and c.len == 2) {
+            fin_axis = c[1].asString() orelse c[1].asAtom() orelse "";
+        } else if (std.mem.eql(u8, head, "pad-thickness-mm") and c.len == 2) {
+            pad_thickness_mm = c[1].asNumber() orelse -1;
+        } else if (std.mem.eql(u8, head, "pad-k-w-mk") and c.len == 2) {
+            pad_k_w_mk = c[1].asNumber() orelse -1;
+        }
+    }
+
+    const complete = x != null and y != null and w != null and h != null and side != null and
+        target_scope != null and target_origin != null and target_origin.?.len > 0;
+    const dimensions_ok = complete and w.? > 0 and h.? > 0 and base_mm > 0 and
+        fin_height_mm >= 0 and fin_thickness_mm > 0 and fin_gap_mm >= 0 and
+        pad_thickness_mm >= 0 and pad_k_w_mk > 0;
+    const enums_ok = (std.mem.eql(u8, material, "aluminum_6063") or std.mem.eql(u8, material, "aluminum_1050") or
+        std.mem.eql(u8, material, "copper")) and
+        (std.mem.eql(u8, fin_axis, "length") or std.mem.eql(u8, fin_axis, "width"));
+    if (!dimensions_ok or !enums_ok) {
+        self.setError(form.span, "malformed (heatsink …): require positive (rect X Y W H), top|bottom side, stable (target \"SCOPE\" \"ORIGIN\"), supported material/fin-axis, and nonnegative physical dimensions");
+        return EvalError.InvalidForm;
+    }
+    return .{
+        .rect = .{ .x = x.?, .y = y.?, .w = w.?, .h = h.? },
+        .side = side.?,
+        .target = .{ .scope = target_scope.?, .origin = target_origin.? },
+        .material = material,
+        .geometry = .{
+            .base_mm = base_mm,
+            .fin_height_mm = fin_height_mm,
+            .fin_thickness_mm = fin_thickness_mm,
+            .fin_gap_mm = fin_gap_mm,
+            .fin_axis = fin_axis,
+        },
+        .pad = .{ .thickness_mm = pad_thickness_mm, .conductivity_w_mk = pad_k_w_mk },
     };
 }
 
@@ -5123,6 +5225,10 @@ test "design-block parses a (board ...) form" {
         \\    (perimeter-fence (via 0.4 0.2) (spacing 1.0)
         \\      (edge-offset 0.5) (mask-width 0.7) (net "GND")
         \\      (keepout 0.3 (blocks components tracks vias) (allow-nets "GND")))
+        \\    (heatsink (rect 2 3 40 30) (side bottom) (target "synth" "U1")
+        \\      (material aluminum_6063) (base-mm 2) (fin-height-mm 10)
+        \\      (fin-thickness-mm 2) (fin-gap-mm 2) (fin-axis length)
+        \\      (pad-thickness-mm 0.5) (pad-k-w-mk 6))
         \\    (left "usbc" "rj45")
         \\    (right (rot 90 "sma1"))
         \\    (corners "MK1" "MK2" "MK3" "MK4")))
@@ -5151,6 +5257,17 @@ test "design-block parses a (board ...) form" {
     try testing.expect(block.board.perimeter_fence.keepout.blocks.vias);
     try testing.expectEqual(@as(usize, 1), block.board.perimeter_fence.keepout.allow_nets.len);
     try testing.expectEqualStrings("GND", block.board.perimeter_fence.keepout.allow_nets[0]);
+    const sink = block.board.heatsink orelse return error.TestUnexpectedResult;
+    try testing.expectApproxEqAbs(@as(f64, 2), sink.rect.x, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 3), sink.rect.y, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 40), sink.rect.w, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 30), sink.rect.h, 1e-9);
+    try testing.expectEqual(env_mod.FabricationSide.bottom, sink.side);
+    try testing.expectEqualStrings("synth", sink.target.scope);
+    try testing.expectEqualStrings("U1", sink.target.origin);
+    try testing.expectEqualStrings("aluminum_6063", sink.material);
+    try testing.expectApproxEqAbs(@as(f64, 2), sink.geometry.fin_thickness_mm, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 6), sink.pad.conductivity_w_mk, 1e-9);
     try testing.expectEqual(@as(usize, 2), block.board.sides.len);
     try testing.expectEqualStrings("usbc", block.board.sides[0].items[0].ref);
     try testing.expectEqual(@as(f64, 90), block.board.sides[1].items[0].rot.?);

@@ -937,6 +937,10 @@ test "the thermal endpoint carries the cooling-scenario ladder" {
     try testing.expectEqualStrings("airflow_1ms", rows[1].object.get("scenario").?.string);
     try testing.expectEqualStrings("airflow_2ms", rows[2].object.get("scenario").?.string);
     try testing.expectEqualStrings("heatsink", rows[3].object.get("scenario").?.string);
+    try testing.expect(rows[0].object.get("heatsink").? == .null);
+    const mounted = rows[3].object.get("heatsink").?.object;
+    try testing.expectEqualStrings("U1", mounted.get("ref").?.string);
+    try testing.expectEqualStrings("board_backside", mounted.get("side").?.string);
 
     const still = rows[0].object;
     try testing.expect(still.get("converged").?.bool);
