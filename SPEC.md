@@ -4883,6 +4883,7 @@ Public functions: entryMatchesSource
 - a stable id cannot carry an old MPN across a value or canonical-net change
 - a fixed component sidecar cannot override source-authored manufacturer/MPN, including through differently-cased duplicate keys
 - a non-passive component with a parts table round-trips its exact selected row instead of being mistaken for inline-only fixed identity
+- resolving a non-passive parts-table family twice on one in-memory block keeps a stable source fingerprint and fresh BOM evidence
 - a non-passive component with a parts table cannot fall back to inline fixed identity when its authored selection has no exact row
 - manufacturing lookup refuses a value-only fallback when an authored passive specification has no exact row
 - the read-only release presentation donates the current parts-table selection over a stale sidecar without rewriting it

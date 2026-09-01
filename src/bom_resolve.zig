@@ -89,16 +89,16 @@ fn parameterizedPassive(component: []const u8) bool {
         std.mem.startsWith(u8, component, "ind-");
 }
 
-/// Hash source-authored selection inputs, excluding properties donated by the
-/// previous BOM. Fixed parts include inline manufacturer/MPN identity; parts-
-/// table passives prove those through strict lookup instead.
-fn sourceFingerprint(info: FlatInfo) [64]u8 {
+/// Hash source-authored selection inputs. `properties` is explicit because a
+/// resolver writes the selected parts-table row, not necessarily the property
+/// slice present on the block when it was first evaluated.
+fn sourceFingerprintWithProperties(info: FlatInfo, properties: []const Property) [64]u8 {
     var hash = Sha256.init(.{});
     fingerprintField(&hash, info.component);
     fingerprintField(&hash, info.value);
     fingerprintField(&hash, info.footprint);
     for (info.attrs) |attribute| fingerprintField(&hash, attribute);
-    if (!parameterizedPassive(info.component)) for (info.properties) |property| {
+    if (!parameterizedPassive(info.component)) for (properties) |property| {
         const identity = std.ascii.eqlIgnoreCase(property.key, "manufacturer") or std.ascii.eqlIgnoreCase(property.key, "mpn");
         if (!identity) continue;
         fingerprintField(&hash, if (std.ascii.eqlIgnoreCase(property.key, "mpn")) "mpn" else "manufacturer");
@@ -107,6 +107,10 @@ fn sourceFingerprint(info: FlatInfo) [64]u8 {
     var digest: [Sha256.digest_length]u8 = undefined;
     hash.final(&digest);
     return std.fmt.bytesToHex(digest, .lower);
+}
+
+fn sourceFingerprint(info: FlatInfo) [64]u8 {
+    return sourceFingerprintWithProperties(info, info.properties);
 }
 
 /// Whether one persisted BOM row still describes the exact source-authored
@@ -118,8 +122,22 @@ pub fn entryMatchesSource(entry: bom_mod.BomEntry, current: FlatInfo) bool {
     if (entry.component.len == 0 or !std.mem.eql(u8, entry.component, current.component)) return false;
     if (!std.mem.eql(u8, entry.value, current.value)) return false;
     const fingerprint = sourceFingerprint(current);
-    return std.mem.eql(u8, entry.source_fingerprint, &fingerprint) and
-        sameStringSet(entry.nets, current.nets);
+    const persisted_fingerprint = sourceFingerprintWithProperties(current, entry.properties);
+    // Accept both historical encodings: early passes fingerprinted the fresh
+    // source properties, while a second pass fingerprinted the donated row.
+    const fingerprint_matches = std.mem.eql(u8, entry.source_fingerprint, &fingerprint) or
+        std.mem.eql(u8, entry.source_fingerprint, &persisted_fingerprint);
+    if (!fingerprint_matches or !sameStringSet(entry.nets, current.nets)) return false;
+    // A persisted-row fingerprint must not mask a changed source-authored
+    // manufacturer or MPN; strict row validation handles the remaining fields.
+    for (current.properties) |property| {
+        const identity = std.ascii.eqlIgnoreCase(property.key, "manufacturer") or
+            std.ascii.eqlIgnoreCase(property.key, "mpn");
+        if (!identity) continue;
+        const persisted = propertyValue(entry.properties, property.key) orelse return false;
+        if (!std.mem.eql(u8, persisted, property.value)) return false;
+    }
+    return true;
 }
 
 fn stabilizeRefdes(
@@ -749,7 +767,11 @@ fn saveBom(
         });
         try w.print("  (id \"{s}\")\n", .{info.id});
         try w.print("  (value \"{s}\")\n", .{try kicad_format.sexprEscape(allocator, info.value)});
-        const fingerprint = sourceFingerprint(info);
+        // Fingerprint the same property row we persist. Otherwise a first
+        // resolve of a non-passive parts-table family hashes the empty source
+        // properties, while a second resolve hashes the donated MPN and makes
+        // the freshly written BOM look stale.
+        const fingerprint = sourceFingerprintWithProperties(info, props);
         try w.print("  (source-fingerprint \"{s}\")\n", .{fingerprint});
         if (info.nets.len > 0) {
             try w.writeAll("  (nets");
@@ -1312,6 +1334,62 @@ test "non-passive parts-table selection round trips exact row" {
     try std.testing.expect(!(try existingSidecarMatches(alloc, tampered_block, bom_path, project_dir)));
     try applyExisting(alloc, tampered_block, bom_path, project_dir);
     try std.testing.expectEqualStrings("1A", propertyValue(tampered_block.instances[0].properties, "rated-current").?);
+}
+
+// spec: bom-resolve - resolving a non-passive parts-table family twice on one in-memory block keeps a stable source fingerprint and fresh BOM evidence
+test "non-passive parts-table source fingerprint is stable after property donation" {
+    const alloc = std.heap.page_allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(project_dir);
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.createDirPath(std.testing.io, "lib/parts");
+    try tmp.dir.createDirPath(std.testing.io, "src/demo");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/diode-family.sexp",
+        .data =
+        \\(component diode-family
+        \\  (footprint "sod-323"))
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/parts/diode-family.sexp",
+        .data =
+        \\(parts "diode-family"
+        \\  (part "" (manufacturer "Acme") (mpn "DIODE-1") preferred))
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/demo/demo.sexp",
+        .data =
+        \\(import diode-family)
+        \\(design-block "Demo"
+        \\  (instance "D1" diode-family
+        \\    (id d10de001)
+        \\    (pin 1 "VIN")
+        \\    (pin 2 "GND")))
+        ,
+    });
+    const design_path = try std.fmt.allocPrint(alloc, "{s}/src/demo/demo.sexp", .{project_dir});
+    defer alloc.free(design_path);
+    const bom_path = try std.fmt.allocPrint(alloc, "{s}/src/demo/demo.bom", .{project_dir});
+    defer alloc.free(bom_path);
+
+    var evaluator = test_evaluator.Evaluator.init(alloc, project_dir);
+    defer evaluator.deinit();
+    const evaluated = try evaluator.evalFile(design_path);
+    const block = try testDesignBlock(evaluated);
+    try resolveIdentities(alloc, block, bom_path, project_dir);
+    const first = try infra_fs.cwd().readFileAlloc(alloc, bom_path, 1024 * 1024);
+    defer alloc.free(first);
+    try std.testing.expect(try existingSidecarMatches(alloc, block, bom_path, project_dir));
+
+    try resolveIdentities(alloc, block, bom_path, project_dir);
+    const second = try infra_fs.cwd().readFileAlloc(alloc, bom_path, 1024 * 1024);
+    defer alloc.free(second);
+    try std.testing.expectEqualStrings(first, second);
+    try std.testing.expect(try existingSidecarMatches(alloc, block, bom_path, project_dir));
 }
 
 // spec: bom-resolve - a non-passive component with a parts table cannot fall back to inline fixed identity when its authored selection has no exact row
