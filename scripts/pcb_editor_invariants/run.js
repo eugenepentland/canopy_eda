@@ -206,6 +206,10 @@ const reverts = {
     ["     saveConflicted=true;", "     saveConflicted=false;"],
     ["     showConflictBanner();", "     /* reverted: no visible conflict state */"],
   ],
+  "trace-properties": [
+    ["rfDropForTracks([track]);track.w=width;track.net=net;",
+      "rfDropForTracks([track]);/* reverted: inspector accepted but did not apply width/net */"],
+  ],
 };
 
 function applyRevert(source, id) {
@@ -321,6 +325,84 @@ async function saveAs(board, name) {
 // ── the invariants ───────────────────────────────────────────────────────────
 
 const invariants = [
+  {
+    id: "trace-properties",
+    title: "clicking a trace edits and persists its width and net",
+    revert: "trace-properties",
+    async run(env, c) {
+      const board = await openBoard(env, env.design("trace-properties"));
+      try {
+        await board.settle();
+        const page = board.page;
+        const target = await page.evaluate(() => {
+          const b = PCB.board || { x: PCB.minx, y: PCB.miny,
+            w: Math.max(8, PCB.w / PCB.scale - 2 * PCB.margin), h: Math.max(8, PCB.h / PCB.scale - 2 * PCB.margin) };
+          const net = (PCB.netnames || []).includes("GND") ? "GND" : PCB.netnames[0];
+          const t = { x1: b.x + 1.5, y1: b.y + 1.5, x2: b.x + Math.min(6, b.w - 1.5), y2: b.y + 1.5,
+            l: 0, w: 0.25, net, source: "human" };
+          window.PCBAdoptCopper([t], [], [], []);
+          const svg = document.getElementById("pcb-svg"), p = svg.createSVGPoint();
+          p.x = (((t.x1 + t.x2) / 2) - PCB.minx + PCB.margin) * PCB.scale;
+          p.y = (t.y1 - PCB.miny + PCB.margin) * PCB.scale;
+          const q = p.matrixTransform(svg.getScreenCTM());
+          return { x: q.x, y: q.y, net, other: (PCB.netnames || []).find((n) => n !== net) || "" };
+        });
+        c.ok(!!target.other, "the fixture exposes a second net for reassignment", target);
+
+        await page.mouse.click(target.x, target.y);
+        await page.waitForSelector("#prop-track-width", { timeout: 5000 }).catch(() => {});
+        const opened = await page.evaluate(() => ({
+          title: (document.querySelector("#prop-body .prop-ref") || {}).textContent || "",
+          width: (document.getElementById("prop-track-width") || {}).value,
+          net: (document.getElementById("prop-track-net") || {}).value,
+          choices: Array.from((document.getElementById("prop-track-net") || { options: [] }).options || []).map((o) => o.value),
+        }));
+        c.eq(opened.title, "Track", "a plain trace click opened the Properties inspector");
+        c.eq(opened.width, "0.25", "the inspector shows the segment width");
+        c.eq(opened.net, target.net, "the inspector shows the segment net");
+        c.ok(opened.choices.includes(target.other), "the net picker contains the board's other nets", opened.choices);
+
+        await page.fill("#prop-track-width", "0.2");
+        await page.press("#prop-track-width", "Enter");
+        await sleep(300);
+        const widened = await page.evaluate(() => ({
+          width: PCB.tracks[0] && PCB.tracks[0].w,
+          net: PCB.tracks[0] && PCB.tracks[0].net,
+          inspector: !!document.getElementById("prop-track-width"),
+          undoDisabled: document.getElementById("pcb-undo").disabled,
+        }));
+        c.eq(widened.width, 0.2, "typing a width updates the selected trace");
+        c.eq(widened.net, target.net, "the width edit leaves the net alone");
+        c.eq(widened.inspector, true, "the trace remains selected after editing");
+        c.eq(widened.undoDisabled, false, "the width edit creates an undo step");
+
+        await page.selectOption("#prop-track-net", target.other);
+        await sleep(300);
+        const renamed = await page.evaluate(() => ({ width: PCB.tracks[0] && PCB.tracks[0].w, net: PCB.tracks[0] && PCB.tracks[0].net,
+          selected: (document.getElementById("prop-track-net") || {}).value }));
+        c.eq(renamed.width, 0.2, "the net edit leaves the custom width alone");
+        c.eq(renamed.net, target.other, "choosing another net reassigns the trace");
+        c.eq(renamed.selected, target.other, "the reassigned trace stays selected in the inspector");
+
+        await saveAs(board, "trace-edit");
+        const saved = board.saves().filter((s) => s.body && s.body.name === "trace-edit").pop();
+        const st = saved && saved.body.routes && saved.body.routes.tracks && saved.body.routes.tracks[0];
+        c.eq(st && st.w, 0.2, "Save persists the edited width");
+        c.eq(st && st.net, target.other, "Save persists the edited net");
+
+        await page.keyboard.press("Control+z");
+        await sleep(250);
+        c.eq(await page.evaluate(() => PCB.tracks[0] && PCB.tracks[0].net), target.net,
+          "one undo restores the previous net");
+        await page.keyboard.press("Control+z");
+        await sleep(250);
+        c.eq(await page.evaluate(() => PCB.tracks[0] && PCB.tracks[0].w), 0.25,
+          "a second undo restores the previous width");
+        c.ok(board.errors().length === 0, "no page errors", board.errors());
+      } finally { await board.close(); }
+    },
+  },
+
   {
     id: "row-aliasing",
     title: "a saved-layout row owns its copper; Load clones out of it",
