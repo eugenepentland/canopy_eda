@@ -10677,12 +10677,16 @@ function drcGateRun(tracks,vias,parts,rfPaths){
 // base and after differ ONLY by the candidate, so the id multiset difference is
 // exactly the candidate's contribution — a board with pre-existing violations
 // keeps drawing elsewhere (those ids appear in both, so never count as new).
-// The WASM probe deliberately has no fabricated-zone/current solve. For an
-// opted-in power branch only, leave width to the debounced server DRC that has
-// those exact fills; every geometric/fabrication finding remains synchronous.
+// The WASM probe deliberately has no fabricated-zone/current solve. Leave the
+// electrical width of every adaptive rail to the debounced server DRC that has
+// those exact fills. A declared branch floor remains authoritative in the fast
+// tier; without one, the board's fabrication minimum is the only width verdict
+// WASM can prove. Every other geometric/fabrication finding stays synchronous.
 function drcGateDefersPowerWidth(d){if(!d||d.k!=="track width"||!d.a||!d.a.net)return false;
- var c=netClassInfo(d.a.net),w=c&&+c.power_branch_width;
- return !!(w>0&&+d.gap+1e-7>=w);}
+ var c=netClassInfo(d.a.net),branch=c&&+c.power_branch_width;
+ if(branch>0)return +d.gap+1e-7>=branch;
+ var adaptive=c&&+c.adaptive_power_width,fab=+((PCB.rules||{}).min_width)||0;
+ return !!(adaptive>0&&+d.gap+1e-7>=fab);}
 function drcBlockCounts(list){var c={};
  for(var i=0;i<list.length;i++){var d=list[i];
   if(!d.id||d.sev==="warn"||d.sev==="warning"||!DRC_BLOCK[d.k]||drcGateDefersPowerWidth(d))continue;

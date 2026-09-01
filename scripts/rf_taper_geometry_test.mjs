@@ -49,6 +49,33 @@ function assertBendContinuity(shaped, label) {
 }
 
 {
+  const PCB = { rules: { min_width: 0.127 } };
+  let klass = { width: 0.4, adaptive_power_width: 0.4, power_branch_width: 0 };
+  const g = load(["drcGateDefersPowerWidth"], {
+    PCB,
+    netClassInfo() { return klass; },
+  });
+  const width = (gap, net = "V_12V") => ({ k: "track width", gap, a: { net } });
+
+  assert.equal(g.drcGateDefersPowerWidth(width(0.3)), true,
+    "an adaptive rail without a branch floor must defer its electrical width to server DRC");
+  assert.equal(g.drcGateDefersPowerWidth(width(0.1)), false,
+    "an adaptive rail below the fabrication minimum must still fail in the fast tier");
+
+  klass = { width: 0.4, adaptive_power_width: 0.4, power_branch_width: 0.1524 };
+  assert.equal(g.drcGateDefersPowerWidth(width(0.1524)), true,
+    "a declared power-branch floor is legal while server DRC solves local current");
+  assert.equal(g.drcGateDefersPowerWidth(width(0.14)), false,
+    "a declared power-branch floor remains a hard fast-tier limit");
+
+  klass = { width: 0.4, adaptive_power_width: 0, power_branch_width: 0 };
+  assert.equal(g.drcGateDefersPowerWidth(width(0.3, "RF_OUT")), false,
+    "ordinary class-width violations must never be deferred");
+  assert.equal(g.drcGateDefersPowerWidth({ k: "track↔pad", gap: 0.3, a: { net: "V_12V" } }), false,
+    "adaptive status must not weaken any non-width geometry rule");
+}
+
+{
   const document = { getElementById() { return { value: "net" }; } };
   const PCB = { rules: { track_width: 0.127, min_width: 0.1 }, zones: [] };
   const g = load(["trackW", "drawPowerTarget", "drawNetGeometry"], {
