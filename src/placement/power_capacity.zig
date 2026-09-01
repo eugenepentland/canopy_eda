@@ -13,6 +13,11 @@ pub const temperature_rise_c: f64 = 10.0;
 const mm_per_mil: f64 = 0.0254;
 const outer_k: f64 = 0.048;
 const inner_k: f64 = 0.024;
+/// IPC-2221 empirical exponents of I = k · ΔT^rise · A^area. Public so the
+/// pad-entry neck bound can invert the SAME relation this screen enforces
+/// (rise implied by a width shortfall: ΔT ∝ (A_required/A_actual)^(area/rise)).
+pub const area_exponent: f64 = 0.725;
+pub const rise_exponent: f64 = 0.44;
 
 fn positiveFinite(value: f64) bool {
     return value > 0 and std.math.isFinite(value);
@@ -24,7 +29,7 @@ pub fn capacityForArea(area_mm2: f64, outer: bool, rise_c: f64) f64 {
     if (!positiveFinite(area_mm2) or !positiveFinite(rise_c)) return 0;
     const area_mil2 = area_mm2 / (mm_per_mil * mm_per_mil);
     const k = if (outer) outer_k else inner_k;
-    return k * std.math.pow(f64, rise_c, 0.44) * std.math.pow(f64, area_mil2, 0.725);
+    return k * std.math.pow(f64, rise_c, rise_exponent) * std.math.pow(f64, area_mil2, area_exponent);
 }
 
 /// Continuous-current capacity of a trace at the shared 10 C-rise target.
@@ -36,7 +41,7 @@ pub fn traceCapacityA(width_mm: f64, foil_mm: f64, outer: bool) f64 {
 pub fn requiredTraceWidthMm(amps: f64, foil_mm: f64, outer: bool) ?f64 {
     if (!positiveFinite(amps) or !positiveFinite(foil_mm)) return null;
     const k = if (outer) outer_k else inner_k;
-    const area_mil2 = std.math.pow(f64, amps / (k * std.math.pow(f64, temperature_rise_c, 0.44)), 1.0 / 0.725);
+    const area_mil2 = std.math.pow(f64, amps / (k * std.math.pow(f64, temperature_rise_c, rise_exponent)), 1.0 / area_exponent);
     return area_mil2 * mm_per_mil * mm_per_mil / foil_mm;
 }
 
@@ -52,7 +57,7 @@ pub fn viaCapacityA(drill_mm: f64, plating_mm: f64) f64 {
 pub fn requiredViaDrillMm(amps: f64, plating_mm: f64) ?f64 {
     if (!positiveFinite(amps) or !positiveFinite(plating_mm)) return null;
     const k = inner_k;
-    const area_mil2 = std.math.pow(f64, amps / (k * std.math.pow(f64, temperature_rise_c, 0.44)), 1.0 / 0.725);
+    const area_mil2 = std.math.pow(f64, amps / (k * std.math.pow(f64, temperature_rise_c, rise_exponent)), 1.0 / area_exponent);
     const area_mm2 = area_mil2 * mm_per_mil * mm_per_mil;
     return area_mm2 / (std.math.pi * plating_mm);
 }

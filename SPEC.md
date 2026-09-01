@@ -3185,6 +3185,10 @@ Public functions: check, checkTopology, checkWithZones, checkWithPreparedCopper,
 - flags a plated through-hole pad whose annular ring is under the minimum; NPTH pads exempt
 - flags a track narrower than its net-class width, else the board minimum, as an error
 - a solved local-current requirement replaces the whole-net class width for that power track, but never permits copper below its own IPC-2221 requirement
+- a short neck forced by a same-net land narrower than the solved power width is exempt when its far end reaches solved-width copper, while an overlong neck is not
+- a mid-run pinch between two solved-width runs and a neck narrower than its forcing land both keep the power-width finding
+- a bounded pad-entry neck may terminate in a same-net poured zone instead of solved-width track copper
+- the adaptive power-width warning skips a bounded neck forced by a same-net land narrower than the solved width, and returns the moment that land no longer explains the narrowing
 - flags a routed trace endpoint that reaches no same-net copper as a copper-stub error when its section still carries support connectivity
 - warns once when same-net trace capsules touch across separate explicit centreline components
 - warns once per stored trace section whose deletion preserves all pad, live-via, and pour connectivity

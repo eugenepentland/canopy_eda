@@ -18,8 +18,10 @@
 const std = @import("std");
 const flat_netlist = @import("../flat_netlist.zig");
 const pad_neck_profile = @import("../pad_neck_profile.zig");
+const copper_support = @import("copper_support.zig");
 const optimizer = @import("optimizer.zig");
 const pose_math = @import("pose_math.zig");
+const power_capacity = @import("power_capacity.zig");
 const router = @import("router.zig");
 
 const eps: f64 = 1e-9;
@@ -203,6 +205,311 @@ pub fn allowsTrack(
         }
     }
     return false;
+}
+
+/// ---- Bounded pad-entry neck exemption for the adaptive power-width rule ----
+///
+/// A power track chain narrower than its solved IPC-2221 width is accepted
+/// practice when the narrowing is FORCED by the land it terminates on (a QFN
+/// pad cannot take copper wider than itself), the neck is no narrower than
+/// that land demands, it is short, and its far end reaches copper that does
+/// satisfy the solved width (or a same-net pour). A narrow run that merely
+/// passes near a pad, pinches mid-run, or dangles keeps its finding.
+///
+/// The length bound is derived from the SAME empirical screen the rule
+/// enforces (IPC-2221, `power_capacity.zig`), extended by the standard
+/// one-dimensional fin argument for end conduction:
+///
+///   The screen says a trace of the solved width w_req carrying I sits at the
+///   rise budget dT_b (10 C). Inverting I = k*dT^0.44*A^0.725 at the neck's
+///   actual area gives the neck's standalone equilibrium rise
+///       dT_inf = dT_b * (w_req/w)^(0.725/0.44).
+///   Joule heating per length is q' = I^2*rho/A, so the loss conductance per
+///   length the screen implicitly assigns this neck is g = q'/dT_inf. With
+///   copper conduction k_cu along the neck, the excess temperature over its
+///   ends obeys k_cu*A*x'' = g*x - (q' - g*dT_b): a fin clamped at the
+///   compliant copper's own budget temperature, healing length 1/m with
+///   m = sqrt(g/(k_cu*A)). Its midpoint excess is
+///   (dT_inf - dT_b)*(1 - sech(m*L/2)), and the neck is exempt only while
+///   that excess stays within the same dT_b budget the screen grants a
+///   full-length run - AND while m*L/2 <= 1, because past one healing length
+///   the ends no longer pin the middle and the fin argument itself (the only
+///   reason to forgive the shortfall) has expired.
+///
+/// Material constants are chosen conservatively (short bound): foil
+/// conductivity 355 W/(m*K), below bulk copper's 385-401, and resistivity
+/// 2.0e-8 ohm*m, copper at ~75 C rather than the 1.72e-8 20 C value. Both
+/// push m up and the allowance down. Everything else - foil thickness,
+/// inner/outer coefficient, rise budget, solved width - comes from the model
+/// itself.
+const neck_copper_resistivity_ohm_m: f64 = 2.0e-8;
+const neck_copper_conductivity_w_mk: f64 = 355.0;
+/// A forcing pad's exit demands its own width from the neck. Assembly DFM
+/// guidance puts pad-entry copper at up to - but deliberately not exactly -
+/// the land width (a full-width entry promotes solder wicking off the land;
+/// the ubiquitous fabricator rule of thumb is "trace entering an SMD pad at
+/// no more than ~80% of the pad width"). Copper in that 80-100% band reads
+/// as "the width the pad forces"; anything narrower is a routing choice, not
+/// a pad constraint, and keeps its finding.
+const neck_span_tolerance: f64 = 0.20;
+/// A compliant neighbour must be real copper, not a zero-length crumb.
+const neck_neighbor_min_len_mm: f64 = 1e-3;
+
+/// The board slice `judgePowerNeck` walks. `required` is index-aligned with
+/// `tracks`: the effective width requirement DRC computed for each track
+/// (solved local IPC width, branch floor, or whole-rail envelope), 0 when the
+/// track has none.
+pub const PowerNeckBoard = struct {
+    placement: optimizer.Placement,
+    tracks: []const router.Track,
+    vias: []const router.Via,
+    zones: []const copper_support.Zone = &.{},
+    required: []const f64,
+};
+
+/// One `judgePowerNeck` answer: whether the walked chain is a bounded
+/// pad-entry neck, plus the chain itself so a caller can cache the verdict
+/// across every slice the walk already covered.
+pub const PowerNeckVerdict = struct {
+    exempt: bool,
+    /// Every under-required track walked into the seed's chain (seed included).
+    chain: []const usize,
+};
+
+fn neckUnderRequired(board: PowerNeckBoard, index: usize) bool {
+    const track = board.tracks[index];
+    const required = if (index < board.required.len) board.required[index] else 0;
+    return required > 0 and track.width > eps and track.width < required - eps;
+}
+
+fn neckTrackLen(track: router.Track) f64 {
+    return std.math.hypot(track.x2 - track.x1, track.y2 - track.y1);
+}
+
+/// Whether `point` lies on `track`'s centreline (interior included), within
+/// the shared attach epsilon.
+fn neckPointOnTrack(point: [2]f64, track: router.Track) bool {
+    const dx = track.x2 - track.x1;
+    const dy = track.y2 - track.y1;
+    const len2 = dx * dx + dy * dy;
+    if (len2 <= eps) return samePoint(.{ track.x1, track.y1 }, point);
+    const f = std.math.clamp(((point[0] - track.x1) * dx + (point[1] - track.y1) * dy) / len2, 0, 1);
+    const px = track.x1 + dx * f;
+    const py = track.y1 + dy * f;
+    return std.math.hypot(point[0] - px, point[1] - py) <= router.clearance_eps;
+}
+
+fn neckPointInPad(pad: Pad, point: [2]f64) bool {
+    const dx = point[0] - pad.at[0];
+    const dy = point[1] - pad.at[1];
+    const axis_y = [2]f64{ -pad.axis_x[1], pad.axis_x[0] };
+    const lx = dx * pad.axis_x[0] + dy * pad.axis_x[1];
+    const ly = dx * axis_y[0] + dy * axis_y[1];
+    return @abs(lx) <= pad.half_w + router.clearance_eps and @abs(ly) <= pad.half_h + router.clearance_eps;
+}
+
+/// Fin parameters of one under-required slice: its fin constant m and the
+/// standalone excess rise its shortfall implies (see the module comment).
+const NeckSliceThermal = struct { m_per_m: f64, excess_c: f64 };
+
+fn neckSliceThermal(placement: optimizer.Placement, track: router.Track, required_mm: f64) ?NeckSliceThermal {
+    const physical = placement.rules.signalStackIndex(track.layer);
+    const foil_mm = placement.rules.physical.stack.foilMm(physical);
+    if (!(foil_mm > 0)) return null;
+    const outer = physical == 1 or physical == placement.rules.layerStack().stackCount();
+    const amps = power_capacity.traceCapacityA(required_mm, foil_mm, outer);
+    if (!(amps > 0)) return null;
+    const rise_budget = power_capacity.temperature_rise_c;
+    const rise_inf = rise_budget * std.math.pow(
+        f64,
+        required_mm / track.width,
+        power_capacity.area_exponent / power_capacity.rise_exponent,
+    );
+    const area_m2 = (track.width / 1000.0) * (foil_mm / 1000.0);
+    const joule_w_per_m = amps * amps * neck_copper_resistivity_ohm_m / area_m2;
+    const loss_w_per_mk = joule_w_per_m / rise_inf;
+    const m_per_m = @sqrt(loss_w_per_mk / (neck_copper_conductivity_w_mk * area_m2));
+    if (!std.math.isFinite(m_per_m) or !(m_per_m > 0)) return null;
+    return .{ .m_per_m = m_per_m, .excess_c = rise_inf - rise_budget };
+}
+
+/// The walk state behind `judgePowerNeck`: the growing chain of connected
+/// under-required copper plus what its boundary has touched so far.
+const NeckWalk = struct {
+    board: PowerNeckBoard,
+    net: i32,
+    /// Indices of every same-net track with recorded width.
+    net_tracks: []const usize,
+    pads: []const Pad,
+    chain: std.ArrayList(usize) = .empty,
+    in_chain: std.AutoHashMapUnmanaged(usize, void) = .empty,
+    forcing_span: f64 = 0,
+    found_forcing_pad: bool = false,
+    found_wide_end: bool = false,
+    dangling: bool = false,
+
+    /// Copper met at a joint: an under-required track joins the chain; a
+    /// track already at its own requirement is the wide far end.
+    fn absorbNeighbor(walk: *NeckWalk, arena: std.mem.Allocator, other_index: usize) std.mem.Allocator.Error!void {
+        if (neckUnderRequired(walk.board, other_index)) {
+            if (!walk.in_chain.contains(other_index)) {
+                try walk.in_chain.put(arena, other_index, {});
+                try walk.chain.append(arena, other_index);
+            }
+            return;
+        }
+        const other = walk.board.tracks[other_index];
+        const required = if (other_index < walk.board.required.len) walk.board.required[other_index] else 0;
+        if (other.width + eps >= required and neckTrackLen(other) > neck_neighbor_min_len_mm)
+            walk.found_wide_end = true;
+    }
+
+    /// A same-net land under this endpoint: one at least as wide as the
+    /// requirement is wide copper; a narrower one forces the neck.
+    fn visitPads(walk: *NeckWalk, point: [2]f64, layer: u8, required: f64) bool {
+        var touched = false;
+        for (walk.pads) |pad| {
+            if (pad.layer != layer or !neckPointInPad(pad, point)) continue;
+            touched = true;
+            // The power shaping pass necks to the land's smaller physical
+            // dimension (`powerEndpointProfile`); judge by the same span.
+            const span = 2 * @min(pad.half_w, pad.half_h);
+            if (!(span > 0)) continue;
+            if (span + eps >= required) {
+                walk.found_wide_end = true;
+            } else {
+                walk.found_forcing_pad = true;
+                walk.forcing_span = @max(walk.forcing_span, span);
+            }
+        }
+        return touched;
+    }
+
+    /// Everything one chain-track endpoint reaches: joined tracks (endpoint
+    /// or tee), barrels, lands, pours. An endpoint reaching nothing marks the
+    /// chain dangling.
+    fn visitEndpoint(walk: *NeckWalk, arena: std.mem.Allocator, index: usize, point: [2]f64) std.mem.Allocator.Error!void {
+        const track = walk.board.tracks[index];
+        var touched = false;
+        // A same-net barrel joins every layer at this point.
+        var through_via = false;
+        for (walk.board.vias) |via| {
+            if (via.net != walk.net or !samePoint(.{ via.x, via.y }, point)) continue;
+            through_via = true;
+            touched = true;
+        }
+        for (walk.net_tracks) |other_index| {
+            if (other_index == index) continue;
+            const other = walk.board.tracks[other_index];
+            if (other.layer != track.layer and !through_via) continue;
+            // Endpoint-to-endpoint, or this endpoint riding the other track's
+            // interior - hand-drawn copper tees mid-segment.
+            if (!neckPointOnTrack(point, other)) continue;
+            touched = true;
+            try walk.absorbNeighbor(arena, other_index);
+        }
+        // A same-net pour under this endpoint is wide copper by definition.
+        const pour_mask = copper_support.pourLayers(walk.board.placement, walk.net, walk.board.zones, point[0], point[1]);
+        if (pour_mask != 0) {
+            const own_layer = track.layer < 64 and (pour_mask >> @intCast(track.layer)) & 1 == 1;
+            if (own_layer or through_via) {
+                touched = true;
+                walk.found_wide_end = true;
+            }
+        }
+        if (walk.visitPads(point, track.layer, walk.board.required[index])) touched = true;
+        if (!touched) walk.dangling = true;
+    }
+
+    /// A neck chain earns judgement only when nothing dangles, a land forces
+    /// the narrowing, and the far end reaches copper that satisfies its width.
+    fn structurallySound(walk: *const NeckWalk) bool {
+        if (walk.dangling) return false;
+        return walk.found_forcing_pad and walk.found_wide_end;
+    }
+
+    /// The mirror tee: another track's ENDPOINT joined into this slice's
+    /// interior. Same classification as an endpoint joint.
+    fn visitTees(walk: *NeckWalk, arena: std.mem.Allocator, index: usize) std.mem.Allocator.Error!void {
+        const track = walk.board.tracks[index];
+        for (walk.net_tracks) |other_index| {
+            if (other_index == index) continue;
+            const other = walk.board.tracks[other_index];
+            if (other.layer != track.layer) continue;
+            const joins = neckPointOnTrack(.{ other.x1, other.y1 }, track) or
+                neckPointOnTrack(.{ other.x2, other.y2 }, track);
+            if (joins) try walk.absorbNeighbor(arena, other_index);
+        }
+    }
+};
+
+/// The clamped-fin length verdict over a walked chain: midpoint excess (worst
+/// slice) within the rise budget, and never past the end-conduction regime
+/// (m*L/2 <= 1). Branch lengths all count toward the one bound, which only
+/// over-counts - a branch is extra copper, never extra allowance.
+fn neckChainWithinBound(board: PowerNeckBoard, chain: []const usize) bool {
+    var length_units: f64 = 0; // sum of m_j * L_j (dimensionless fin length)
+    var worst_excess_c: f64 = 0;
+    for (chain) |index| {
+        const track = board.tracks[index];
+        const thermal = neckSliceThermal(board.placement, track, board.required[index]) orelse return false;
+        length_units += thermal.m_per_m * neckTrackLen(track) / 1000.0; // mm -> m
+        worst_excess_c = @max(worst_excess_c, thermal.excess_c);
+    }
+    const rise_budget = power_capacity.temperature_rise_c;
+    var half_units_max: f64 = 1.0;
+    if (worst_excess_c > rise_budget) {
+        const clamp = std.math.acosh(worst_excess_c / (worst_excess_c - rise_budget));
+        half_units_max = @min(half_units_max, clamp);
+    }
+    return length_units <= 2 * half_units_max;
+}
+
+/// Whether the under-required track `seed` sits inside a bounded pad-entry
+/// neck (see the module comment above for the physics). The verdict covers
+/// the whole walked chain. Deliberately geometric like `allowsTrack`:
+/// generated, restored and hand-drawn copper earn (or fail) the exemption by
+/// the same profile, and an exempted neck is silent exactly the way the
+/// own-land and port-frame-taper exemptions are.
+pub fn judgePowerNeck(
+    arena: std.mem.Allocator,
+    board: PowerNeckBoard,
+    seed: usize,
+) std.mem.Allocator.Error!PowerNeckVerdict {
+    var walk = NeckWalk{
+        .board = board,
+        .net = board.tracks[seed].net,
+        .net_tracks = &.{},
+        .pads = &.{},
+    };
+    try walk.chain.append(arena, seed);
+    if (!neckUnderRequired(board, seed) or walk.net < 0)
+        return .{ .exempt = false, .chain = walk.chain.items };
+
+    // Same-net track universe once; the walk is quadratic only in its size.
+    var net_tracks: std.ArrayList(usize) = .empty;
+    for (board.tracks, 0..) |track, index| {
+        if (track.net == walk.net and track.width > eps) try net_tracks.append(arena, index);
+    }
+    walk.net_tracks = net_tracks.items;
+    walk.pads = try netPads(arena, board.placement, walk.net);
+
+    try walk.in_chain.put(arena, seed, {});
+    var cursor: usize = 0;
+    while (cursor < walk.chain.items.len) : (cursor += 1) {
+        const index = walk.chain.items[cursor];
+        const track = board.tracks[index];
+        try walk.visitEndpoint(arena, index, .{ track.x1, track.y1 });
+        try walk.visitEndpoint(arena, index, .{ track.x2, track.y2 });
+        try walk.visitTees(arena, index);
+    }
+    if (!walk.structurallySound()) return .{ .exempt = false, .chain = walk.chain.items };
+    // The pad forces the neck, but not one narrower than the pad demands.
+    for (walk.chain.items) |index| {
+        if (board.tracks[index].width + eps < walk.forcing_span * (1 - neck_span_tolerance))
+            return .{ .exempt = false, .chain = walk.chain.items };
+    }
+    return .{ .exempt = neckChainWithinBound(board, walk.chain.items), .chain = walk.chain.items };
 }
 
 const Profile = struct {
@@ -1459,4 +1766,146 @@ test "pad neck recognizes a power-capacity widened routed trunk" {
     try testing.expect(widened > rules[0].width);
     try testing.expectApproxEqAbs(widened, routedNominal(placement, 0, widened).?, eps);
     try testing.expectApproxEqAbs(rules[0].width, routedNominal(placement, 0, rules[0].width).?, eps);
+}
+
+/// Shared fixture for the bounded pad-entry neck tests: a 0.3 x 0.8 mm SMD
+/// land (span 0.3) on net 0 at the origin, uniform 35 um outer foil.
+fn powerNeckPlacement(parts: []optimizer.Part, nets: []const flat_netlist.FlatNet, rules: []const optimizer.NetRule) optimizer.Placement {
+    return .{
+        .parts = parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = nets,
+        .rules = .{
+            .net = rules,
+            .design = .{ .track_width = 0.127, .min_width = 0.127 },
+            .physical = .{ .stack = .{ .layers = 2, .foils = &power_neck_test_foils } },
+        },
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -20,
+        .miny = -20,
+        .maxx = 20,
+        .maxy = 20,
+        .generated = true,
+    };
+}
+
+const power_neck_test_foils = [_]@import("impedance.zig").Foil{
+    .{ .index = 1, .thickness_mm = 0.035 },
+    .{ .index = 2, .thickness_mm = 0.035 },
+};
+const power_neck_test_pads = [_]@import("geometry.zig").Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.3, .h = 0.8 }};
+const power_neck_test_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "U1", .pin = "1" }};
+const power_neck_test_nets = [_]flat_netlist.FlatNet{.{ .name = "VDD", .pins = &power_neck_test_pins }};
+const power_neck_test_rules = [_]optimizer.NetRule{.{}};
+
+// spec: placement/drc - a short neck forced by a same-net land narrower than the solved power width is exempt when its far end reaches solved-width copper, while an overlong neck is not
+test "bounded pad-entry power neck is exempt and an overlong one is not" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var parts = [_]optimizer.Part{.{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &power_neck_test_pads, .fallback = false }};
+    const placement = powerNeckPlacement(&parts, &power_neck_test_nets, &power_neck_test_rules);
+    const required = [_]f64{ 0.5, 0.5 };
+    // Within the fin bound (thermal allowance here is ~9 mm; see the module
+    // comment): a 1 mm neck at 0.25 into the 0.3 mm land, trunk at 0.55.
+    const short = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.25, .net = 0 },
+        .{ .x1 = 1, .y1 = 0, .x2 = 3, .y2 = 0, .layer = 0, .width = 0.55, .net = 0 },
+    };
+    const short_verdict = try judgePowerNeck(arena, .{
+        .placement = placement,
+        .tracks = &short,
+        .vias = &.{},
+        .required = &required,
+    }, 0);
+    try testing.expect(short_verdict.exempt);
+    try testing.expectEqual(@as(usize, 1), short_verdict.chain.len);
+    // The same neck stretched to 12 mm exceeds the end-conduction bound.
+    const long = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 12, .y2 = 0, .layer = 0, .width = 0.25, .net = 0 },
+        .{ .x1 = 12, .y1 = 0, .x2 = 14, .y2 = 0, .layer = 0, .width = 0.55, .net = 0 },
+    };
+    const long_verdict = try judgePowerNeck(arena, .{
+        .placement = placement,
+        .tracks = &long,
+        .vias = &.{},
+        .required = &required,
+    }, 0);
+    try testing.expect(!long_verdict.exempt);
+}
+
+// spec: placement/drc - a mid-run pinch between two solved-width runs and a neck narrower than its forcing land both keep the power-width finding
+test "mid-run pinch and narrower-than-the-pad copper stay findings" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var parts = [_]optimizer.Part{.{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &power_neck_test_pads, .fallback = false }};
+    const placement = powerNeckPlacement(&parts, &power_neck_test_nets, &power_neck_test_rules);
+    // A pinch far from any land, wide copper on BOTH sides: not a pad neck.
+    const pinch = [_]router.Track{
+        .{ .x1 = 3, .y1 = 5, .x2 = 4, .y2 = 5, .layer = 0, .width = 0.55, .net = 0 },
+        .{ .x1 = 4, .y1 = 5, .x2 = 5, .y2 = 5, .layer = 0, .width = 0.25, .net = 0 },
+        .{ .x1 = 5, .y1 = 5, .x2 = 7, .y2 = 5, .layer = 0, .width = 0.55, .net = 0 },
+    };
+    const pinch_required = [_]f64{ 0.5, 0.5, 0.5 };
+    const pinch_verdict = try judgePowerNeck(arena, .{
+        .placement = placement,
+        .tracks = &pinch,
+        .vias = &.{},
+        .required = &pinch_required,
+    }, 1);
+    try testing.expect(!pinch_verdict.exempt);
+    // Into the land, but far below the 0.3 mm the land itself supports: the
+    // narrowing is a routing choice, not the pad's constraint.
+    const skinny = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.127, .net = 0 },
+        .{ .x1 = 1, .y1 = 0, .x2 = 3, .y2 = 0, .layer = 0, .width = 0.55, .net = 0 },
+    };
+    const skinny_required = [_]f64{ 0.5, 0.5 };
+    const skinny_verdict = try judgePowerNeck(arena, .{
+        .placement = placement,
+        .tracks = &skinny,
+        .vias = &.{},
+        .required = &skinny_required,
+    }, 0);
+    try testing.expect(!skinny_verdict.exempt);
+    // A neck whose far end reaches nothing wide at all — a dangling stub —
+    // keeps its finding even though it starts on the forcing land.
+    const stub = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.25, .net = 0 },
+    };
+    const stub_required = [_]f64{0.5};
+    const stub_verdict = try judgePowerNeck(arena, .{
+        .placement = placement,
+        .tracks = &stub,
+        .vias = &.{},
+        .required = &stub_required,
+    }, 0);
+    try testing.expect(!stub_verdict.exempt);
+}
+
+// spec: placement/drc - a bounded pad-entry neck may terminate in a same-net poured zone instead of solved-width track copper
+test "pad-entry neck ending in a same-net zone is exempt" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var parts = [_]optimizer.Part{.{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &power_neck_test_pads, .fallback = false }};
+    const placement = powerNeckPlacement(&parts, &power_neck_test_nets, &power_neck_test_rules);
+    const zone_poly = [_][2]f64{ .{ 1, -1 }, .{ 3, -1 }, .{ 3, 1 }, .{ 1, 1 } };
+    const zones = [_]copper_support.Zone{.{ .net = "VDD", .layer = 0, .poly = &zone_poly }};
+    const tracks = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 1.5, .y2 = 0, .layer = 0, .width = 0.25, .net = 0 },
+    };
+    const required = [_]f64{0.5};
+    const verdict = try judgePowerNeck(arena, .{
+        .placement = placement,
+        .tracks = &tracks,
+        .vias = &.{},
+        .zones = &zones,
+        .required = &required,
+    }, 0);
+    try testing.expect(verdict.exempt);
 }
