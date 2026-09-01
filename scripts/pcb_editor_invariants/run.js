@@ -327,7 +327,7 @@ async function saveAs(board, name) {
 const invariants = [
   {
     id: "trace-properties",
-    title: "clicking a trace edits and persists its width and net",
+    title: "clicking a trace searches, edits, and persists its width and net",
     revert: "trace-properties",
     async run(env, c) {
       const board = await openBoard(env, env.design("trace-properties"));
@@ -355,12 +355,14 @@ const invariants = [
           title: (document.querySelector("#prop-body .prop-ref") || {}).textContent || "",
           width: (document.getElementById("prop-track-width") || {}).value,
           net: (document.getElementById("prop-track-net") || {}).value,
-          choices: Array.from((document.getElementById("prop-track-net") || { options: [] }).options || []).map((o) => o.value),
+          tag: (document.getElementById("prop-track-net") || {}).tagName || "",
+          role: (document.getElementById("prop-track-net") || {}).getAttribute && document.getElementById("prop-track-net").getAttribute("role"),
         }));
         c.eq(opened.title, "Track", "a plain trace click opened the Properties inspector");
         c.eq(opened.width, "0.25", "the inspector shows the segment width");
         c.eq(opened.net, target.net, "the inspector shows the segment net");
-        c.ok(opened.choices.includes(target.other), "the net picker contains the board's other nets", opened.choices);
+        c.eq(opened.tag, "INPUT", "the net property is a searchable text field, not a select menu");
+        c.eq(opened.role, "combobox", "the searchable field exposes combobox semantics");
 
         await page.fill("#prop-track-width", "0.2");
         await page.press("#prop-track-width", "Enter");
@@ -376,7 +378,23 @@ const invariants = [
         c.eq(widened.inspector, true, "the trace remains selected after editing");
         c.eq(widened.undoDisabled, false, "the width edit creates an undo step");
 
-        await page.selectOption("#prop-track-net", target.other);
+        const query = target.other.length > 2 ? target.other.slice(1, 3) : target.other;
+        await page.fill("#prop-track-net", query);
+        await sleep(100);
+        const search = await page.evaluate((q) => ({
+          open: !(document.getElementById("prop-track-net-options") || {}).hidden,
+          values: Array.from(document.querySelectorAll(".prop-net-option")).map((o) => o.getAttribute("data-net-value")),
+          labels: Array.from(document.querySelectorAll(".prop-net-option")).map((o) => o.textContent),
+          query: q,
+        }), query);
+        c.eq(search.open, true, "typing opens the filtered net results");
+        c.ok(search.values.includes(target.other), "substring search finds the intended board net", search);
+        c.ok(search.labels.every((label) => label.toLowerCase().includes(query.toLowerCase())),
+          "every visible result matches the typed substring", search);
+        await page.evaluate((net) => {
+          const option = Array.from(document.querySelectorAll(".prop-net-option")).find((o) => o.getAttribute("data-net-value") === net);
+          if (option) option.click();
+        }, target.other);
         await sleep(300);
         const renamed = await page.evaluate(() => ({ width: PCB.tracks[0] && PCB.tracks[0].w, net: PCB.tracks[0] && PCB.tracks[0].net,
           selected: (document.getElementById("prop-track-net") || {}).value }));
