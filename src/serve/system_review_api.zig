@@ -1156,12 +1156,14 @@ fn queryFlag(req: *httpz.Request, key: []const u8) bool {
     return std.mem.eql(u8, value, "1") or std.ascii.eqlIgnoreCase(value, "true");
 }
 
-const AssemblyRenderContext = struct {
+/// HTTP context borrowed by the shared offline board-assembly renderer.
+pub const AssemblyRenderContext = struct {
     ctx: *Server,
     req: *httpz.Request,
 };
 
-fn renderAssembly(
+/// Render one already-resolved board release without re-evaluating its design.
+pub fn renderAssembly(
     raw_context: *anyopaque,
     input: fab_release_service.AssemblyInput,
 ) pcb_layout_page.HandlerError![]const u8 {

@@ -67,6 +67,10 @@ pub const SchematicOptions = struct {
     path: []const u8,
     view: SchematicView = .functional,
     embed: bool = false,
+    /// Produce a read-only document that can be opened directly from an
+    /// exported archive. All drawing CSS is inlined and server-dependent
+    /// editor scripts are omitted; the inline SVG and review content remain.
+    offline: bool = false,
     board_role: env_mod.BoardRole = .subcircuit,
 };
 
@@ -148,10 +152,13 @@ pub fn renderToHtml(
     try w.writeAll("<title>");
     try writeHtmlEscaped(w, block.name);
     try w.writeAll(" — Schematic</title>");
-    try w.writeAll("<link rel=\"stylesheet\" href=\"/static/codemirror.css\">");
-    try w.writeAll("<link rel=\"stylesheet\" href=\"/static/schematic.css\">");
+    if (!options.offline) {
+        try w.writeAll("<link rel=\"stylesheet\" href=\"/static/codemirror.css\">");
+        try w.writeAll("<link rel=\"stylesheet\" href=\"/static/schematic.css\">");
+    }
     try w.writeAll("<style>");
     try w.writeAll(navbar_css);
+    if (options.offline) try w.writeAll(schematic_css);
     if (review_doc != null) try w.writeAll(review_html.body_css);
     // `sch-embed` is the one hook the stylesheet needs to strip this page down
     // to its drawing for an iframe pane (the assembly workspace hosts it under
@@ -303,8 +310,9 @@ pub fn renderToHtml(
     try w.writeAll("</div>");
     try writeSidebar(w, review_doc);
     try w.writeAll("</div>");
-    try writeScripts(w, allocator, design_name, block, &ctx, &asserted_fns, check_results, review_doc, options.path);
-    if (review_doc != null) {
+    if (!options.offline)
+        try writeScripts(w, allocator, design_name, block, &ctx, &asserted_fns, check_results, review_doc, options.path);
+    if (!options.offline and review_doc != null) {
         // review_notes.js (design-note handlers) reuses DESIGN_NAME —
         // already declared as a global by writeScripts above.
         try w.writeAll("<script src=\"/static/review_notes.js\"></script>");
@@ -2737,6 +2745,31 @@ test "the embedded schematic page marks its body for the pane stylesheet" {
     try std.testing.expect(std.mem.indexOf(u8, schematic_css, "body.sch-embed .navbar{display:none;}") != null);
     try std.testing.expect(std.mem.indexOf(u8, schematic_css, "body.sch-embed .sch-head{display:none;}") != null);
     try std.testing.expect(std.mem.indexOf(u8, schematic_css, "body.sch-embed .sch-sidebar{display:none;}") != null);
+}
+
+// spec: render_html - an exported schematic HTML document inlines its drawing CSS and carries no server-only static asset references
+test "offline schematic HTML opens without the netlisp server" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var block = emptyAttachBlock("offline-demo");
+    var checks = CheckResultMap.empty;
+    defer checks.deinit(alloc);
+    const html = try renderToHtml(
+        alloc,
+        &block,
+        "",
+        "offline-demo",
+        "",
+        .pass,
+        null,
+        &checks,
+        .{ .path = "/schematics/", .offline = true },
+    );
+    try std.testing.expect(std.mem.indexOf(u8, html, "/static/schematic.css") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "/static/schematic_viewer.js") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, ".sch-layout") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "<!DOCTYPE html>") != null);
 }
 
 test "design note update failures have an accessible diagnostic panel" {

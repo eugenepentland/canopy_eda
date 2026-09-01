@@ -73,6 +73,7 @@ const png_cache = @import("serve/png_cache.zig");
 const warmup = @import("serve/warmup.zig");
 const pcb_fence = @import("serve/pcb_fence.zig");
 const pcb_step_export = @import("serve/pcb_step_export.zig");
+const design_archive_api = @import("serve/design_archive_api.zig");
 const ground_vias = @import("serve/ground_vias.zig");
 const pcb_layout_sync = @import("serve/pcb_layout_sync.zig");
 const route_review = @import("serve/route_review.zig");
@@ -828,6 +829,7 @@ fn registerPcbRoutes(router: anytype) void {
     router.get("/api/pcb-drill/:name", pcb_layout_page.pcbDrillApi, .{});
     router.get("/api/fab-readiness/:name", pcb_layout_page.pcbFabReadinessApi, .{});
     router.get("/api/pcb-gerbers/:name", pcb_layout_page.pcbGerbersApi, .{});
+    router.post("/api/design-archive/:name", design_archive_api.designArchiveApi, .{});
     router.get("/api/pcb-matlab-rf/:name", matlab_rf_export.pcbMatlabRfApi, .{});
     router.post("/api/pcb-step/:name", pcb_step_export.pcbStepApi, .{});
     router.post("/api/pcb-layouts/:name", pcb_layout_page.saveNamedLayoutApi, .{});

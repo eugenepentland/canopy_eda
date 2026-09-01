@@ -1004,6 +1004,10 @@
     // user's relative orbit is preserved across loads.
     sync: function () { if (built) applyPoses(); },
     modelAdded: function (fp, transform) { if (fp) refreshModel(fp, transform); },
+    // Complete-design export uses the identical analytic board/component
+    // recipe as the standalone STEP button. Source model B-reps are still read
+    // by the server; preview meshes never enter the archive payload.
+    archivePayload: function () { return built ? stepPayload() : null; },
     modelProgress: modelProgress,
     cameraState: cameraState,
     onShow: function () {

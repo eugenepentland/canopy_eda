@@ -595,3 +595,9 @@ matters when the person re-recording is the author of the change.
 - **finding:** `renderThermalPng` called the shared thermal cache without the mounted heatsink even though the scenario JSON path supplied it, so the heat map and reported temperatures could describe different cooling assemblies. Passing the same resolved input through both seams fixes the disagreement; emitting the scenario's mounted ref/side/face now makes it auditable.
 - **finding:** A saved heatsink combines absolute editor coordinates with a mutable flattened ref-des, neither of which is safe source truth. Rebuildable defaults need board-local coordinates plus the stable sub-block/source-origin identity, with any saved physical edit layered on top.
 - **status:** resolved
+
+## 2026-09-01 · codex · complete design archive export
+- **friction:** Adding one release-gated export route to `serve/pcb_layout_page.zig` tripped Guardian's recover threshold because that file is already at 96% of its 10,000-line hard cap. Discovering the cap after the first integration cost one redesign and two focused gate runs.
+- **idea:** Finish extracting the fabrication-release HTTP/UI orchestration from `pcb_layout_page.zig` into its own module. New release formats could then reuse the gate without either growing the near-cap file or injecting their controls from `pcb_board.js`.
+- **workaround:** Keep the archive composer and handler in standalone modules, reuse the existing `fab_release_service`, and add the adjacent UI control from the already-gated board asset.
+- **status:** mitigated in this change

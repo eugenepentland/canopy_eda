@@ -301,6 +301,9 @@ src/decouple_key.zig::pinFromOrigin | fn pinFromOrigin(origin_key: []const u8) ?
 src/deflate.zig::Error value
 src/deflate.zig::deflateRaw | fn deflateRaw(alloc: std.mem.Allocator, data: []const u8) Error![]u8
 src/deflate.zig::gzip | fn gzip(alloc: std.mem.Allocator, data: []const u8) Error![]u8
+src/design_archive.zig::AppendError value
+src/design_archive.zig::Input struct_
+src/design_archive.zig::append | fn append( allocator: std.mem.Allocator, pkg: *export_fab.Package, input: Input, ) AppendError!void
 src/design_rule_fields.zig::Rule struct_
 src/design_rule_fields.zig::mask_relief_corner_radius value
 src/design_rule_fields.zig::mask_web value
@@ -871,6 +874,7 @@ src/export_kicad.zig::ModelConfigMap value
 src/export_kicad.zig::ModelTransform value
 src/export_kicad.zig::exportFootprints value
 src/export_kicad.zig::exportKicad | fn exportKicad( allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, output_dir: []const u8, design_name: []const u8, opts: BundleOptions, ) ExportError!void
+src/export_kicad.zig::exportKicadEntries | fn exportKicadEntries( allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, opts: BundleOptions, ) ExportError![]const zipfile.Entry
 src/export_kicad.zig::exportKicadZip | fn exportKicadZip( allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, opts: BundleOptions, ) ExportError![]const u8
 src/export_kicad.zig::exportNetlistOnly | fn exportNetlistOnly( allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, ) ExportError![]const u8
 src/export_kicad.zig::exportSectionLayout value
@@ -3757,6 +3761,8 @@ src/serve/describe_cache.zig::Store struct_
 src/serve/describe_cache.zig::deinit | fn deinit(self: *Store) void
 src/serve/describe_cache.zig::serve | fn serve(self: *Store, in: anytype, miss_version: *?u32) bool
 src/serve/describe_cache.zig::store | fn store(self: *Store, in: anytype) void
+src/serve/design_archive_api.zig::HandlerError value
+src/serve/design_archive_api.zig::designArchiveApi | fn designArchiveApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/design_diff.zig::DesignDiff struct_
 src/serve/design_diff.zig::DiffError value
 src/serve/design_diff.zig::FieldChange struct_
@@ -4331,7 +4337,9 @@ src/serve/pcb_rules_json.zig::writeGroundNames | fn writeGroundNames(w: *std.Io.
 src/serve/pcb_rules_json.zig::writeMaskRelief | fn writeMaskRelief( w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placement, routed: ?router.RouteResult, ) std.Io.Writer.Error!void
 src/serve/pcb_rules_json.zig::writeNetClasses | fn writeNetClasses(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.Error!void
 src/serve/pcb_rules_json.zig::writePlaneNets | fn writePlaneNets(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.Error!void
+src/serve/pcb_step_export.zig::ExportError value
 src/serve/pcb_step_export.zig::HandlerError value
+src/serve/pcb_step_export.zig::buildFromJson | fn buildFromJson( allocator: std.mem.Allocator, project_dir: []const u8, design_name: []const u8, body: []const u8, ) (ExportError || std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8
 src/serve/pcb_step_export.zig::pcbStepApi | fn pcbStepApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_subseeds.zig::pcbSubSeedsApi | fn pcbSubSeedsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb.HandlerError!void
 src/serve/pcb_subseeds.zig::saveSubcircuitLayoutApi | fn saveSubcircuitLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb.HandlerError!void
@@ -4541,6 +4549,7 @@ src/serve/sync_kicad_sch.zig::mcpSyncKicadSch | fn mcpSyncKicadSch( alloc: std.m
 src/serve/sync_kicad_sch.zig::runPush | fn runPush( allocator: std.mem.Allocator, arena: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: push.Options, ) PushApiError!push.Result
 src/serve/sync_kicad_sch.zig::syncKicadSchApi | fn syncKicadSchApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/sync_kicad_sch.zig::writeResultJson | fn writeResultJson( w: *std.Io.Writer, name: []const u8, result: push.Result, dry_run: bool, ) std.Io.Writer.Error!void
+src/serve/system_review_api.zig::AssemblyRenderContext struct_
 src/serve/system_review_api.zig::HandlerError value
 src/serve/system_review_api.zig::ListSystemsError value
 src/serve/system_review_api.zig::SystemSummary struct_
@@ -4557,6 +4566,7 @@ src/serve/system_review_api.zig::putDocumentApi | fn putDocumentApi(ctx: *Server
 src/serve/system_review_api.zig::readinessApi | fn readinessApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::regenerateDossierApi | fn regenerateDossierApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::releaseApi | fn releaseApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/system_review_api.zig::renderAssembly | fn renderAssembly( raw_context: *anyopaque, input: fab_release_service.AssemblyInput, ) pcb_layout_page.HandlerError![]const u8
 src/serve/system_review_api.zig::systemPage | fn systemPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::uploadAssetApi | fn uploadAssetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/templates/library.zig::Args value

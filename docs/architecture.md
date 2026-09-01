@@ -350,6 +350,7 @@ netlisp serves no login/account/authorization-server routes — those all live i
 | GET | `/api/export-netlist/:name` | KiCad netlist only. |
 | GET | `/api/export-bom/:name` | BOM as CSV. |
 | GET | `/api/export-review/:name` | Review package (.zip or .md+.csv). |
+| POST | `/api/design-archive/:name` | Release-gated complete design archive: fab ZIP, offline schematic, sources/layout, KiCad project, full-board STEP, and datasheets. |
 | GET | `/api/notes/:name` | Design notes as raw markdown. |
 | GET | `/api/notes/:name/tasks` | Structured TODO entries + scratchpad. |
 

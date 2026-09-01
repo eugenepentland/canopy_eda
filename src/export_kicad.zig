@@ -356,16 +356,16 @@ pub fn exportNetlistOnly(
     return writeNetlist(allocator, design_name, instances.items, nets.items, &fp_name_map, &fp_pad_map);
 }
 
-/// Like `exportKicad`, but returns the entire output bundle (netlist plus
-/// every `.kicad_mod` and STEP model) as an in-memory zip — useful for
-/// the web download endpoint that streams a single file to the browser.
-pub fn exportKicadZip(
+/// Like `exportKicad`, but returns the entire output bundle as in-memory ZIP
+/// entries: netlist, every `.kicad_mod` and STEP model, and optionally the
+/// complete schematic hierarchy and project sidecars.
+pub fn exportKicadEntries(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
     project_dir: []const u8,
     design_name: []const u8,
     opts: BundleOptions,
-) ExportError![]const u8 {
+) ExportError![]const zipfile.Entry {
     var instances: std.ArrayList(FlatInstance) = .empty;
     defer instances.deinit(allocator);
     var nets: std.ArrayList(FlatNet) = .empty;
@@ -462,10 +462,25 @@ pub fn exportKicadZip(
     for (sch.files) |f| try zip_files.append(allocator, .{ .name = f.name, .data = f.bytes });
     for (sch.sidecars) |f| try zip_files.append(allocator, .{ .name = f.name, .data = f.bytes });
 
-    // Build zip
+    return zip_files.toOwnedSlice(allocator);
+}
+
+/// Like `exportKicadEntries`, serialized as the standalone download archive.
+/// Keeping the entry-producing seam public lets larger engineering handoff
+/// archives place the files directly in their own tree instead of hiding a
+/// second ZIP inside the first one.
+pub fn exportKicadZip(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    project_dir: []const u8,
+    design_name: []const u8,
+    opts: BundleOptions,
+) ExportError![]const u8 {
+    const zip_files = try exportKicadEntries(allocator, block, project_dir, design_name, opts);
+    defer allocator.free(zip_files);
     var zw: std.Io.Writer.Allocating = .init(allocator);
     errdefer zw.deinit();
-    try zipfile.write(&zw.writer, zip_files.items);
+    try zipfile.write(&zw.writer, zip_files);
     return zw.toOwnedSlice();
 }
 

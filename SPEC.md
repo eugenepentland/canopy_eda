@@ -4900,6 +4900,7 @@ Public functions: parseSchematicView, renderToHtml, setupRenderCtx, renderHubSvg
 - Each sub circuit card links out to its PCB layout in a new tab rather than embedding one, so no sub circuit opens a layout from the schematic page
 - A sub circuit backed by a reusable module links to that module's own layout editor, and a path- or inline-sourced one to the design-scoped view of its slice
 - The schematic page escapes the design name everywhere it appears — document title, heading, subtitle filename — and escapes each hub card's ref-des into its data-ref attribute
+- An exported schematic HTML document inlines its drawing CSS and carries no server-only static asset references
 
 ## diagram/types
 
@@ -6625,6 +6626,7 @@ is what makes the predicate exact rather than approximately right.
 
 ## Web Server
 
+- The Full archive control runs the ordinary fab-readiness confirmation flow, posts the same analytic full-board STEP recipe as the 3D tab, and downloads the complete design archive
 - The DRC reconcile session answers only for a board whose non-copper inputs are unchanged
 - A DRC reconcile store with no allocator retains nothing and every request takes the full check
 - The DRC reconcile store keeps two designs and evicts the least recently leased

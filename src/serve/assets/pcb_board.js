@@ -12032,25 +12032,32 @@ function focusPart(want,keepPane){
 // for every manufacturing release. The echoed token locks confirmation to the
 // exact revision/report just reviewed; remaining findings add an explicit
 // waiver. A stale token cannot download a changed board.
+var fabExportKind="fabrication";
 function fabZipUrl(rep){
  var q=fabq();
  var add=function(k,v){q+=q?"&":"?";q+=k+"="+encodeURIComponent(v);};
  add("confirm",rep.release_token||"");
  if(rep.needs_waiver)add("waive","1");
- return "/api/pcb-gerbers/"+encodeURIComponent(PCB.name)+q;}
+ return (fabExportKind==="archive"?"/api/design-archive/":"/api/pcb-gerbers/")+encodeURIComponent(PCB.name)+q;}
 function fabq(){var fields=[];
  var layout=curLayout||PCB.shown_layout;if(layout)fields.push("layout="+encodeURIComponent(layout));
  return fields.length?"?"+fields.join("&"):"";}
 function fabDownload(rep){
  var go=document.getElementById("fab-go"),refreshed=false;if(go)go.disabled=true;
- fetch(fabZipUrl(rep)).then(function(r){
+ var init={};
+ if(fabExportKind==="archive"){
+  var payload=window.PCB3D&&window.PCB3D.archivePayload&&window.PCB3D.archivePayload();
+  if(!payload){alert("The full-board 3D export could not be prepared. No archive was downloaded.");if(go)go.disabled=false;return;}
+  init={method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)};
+ }
+ fetch(fabZipUrl(rep),init).then(function(r){
   if(!r.ok)return r.json().catch(function(){return null;}).then(function(fresh){
    if(fresh&&(fresh.errors||fresh.raw_drc)){refreshed=true;fabOpenModal(fresh);return null;}
    throw new Error("release export failed (HTTP "+r.status+")");});
   var media=(r.headers.get("Content-Type")||"").toLowerCase(),fabid=r.headers.get("x-pcb-fab-id")||"";
   if(media.indexOf("application/zip")<0||!fabid)throw new Error("release endpoint did not return an identified ZIP");
   var disposition=r.headers.get("Content-Disposition")||"",match=/filename="?([^";]+)"?/i.exec(disposition);
-  return r.blob().then(function(blob){return {blob:blob,name:match?match[1]:"pcb-release.zip"};});
+  return r.blob().then(function(blob){return {blob:blob,name:match?match[1]:(fabExportKind==="archive"?"design-archive.zip":"pcb-release.zip")};});
  }).then(function(file){if(!file)return;var url=URL.createObjectURL(file.blob),a=document.createElement("a");
   a.href=url;a.download=file.name;document.body.appendChild(a);a.click();a.remove();setTimeout(function(){URL.revokeObjectURL(url);},0);fabModalClose();
  }).catch(function(){alert("Fabrication release could not be exported. No package was downloaded.");})
@@ -12095,16 +12102,27 @@ function fabOpenModal(rep){
   title=document.getElementById("fab-title");
  body.innerHTML=fabRenderReport(rep);
  var hasErr=rep.errors&&rep.errors.length,hasWarn=rep.needs_waiver;
- title.textContent=hasErr?"Fabrication release — problems found":hasWarn?"Fabrication release — waiver required":"Fabrication release — ready to confirm";
- go.textContent=hasWarn?"Confirm waiver and export":"Confirm release and export";
+ var what=fabExportKind==="archive"?"Complete design archive":"Fabrication release";
+ title.textContent=hasErr?what+" — problems found":hasWarn?what+" — waiver required":what+" — ready to confirm";
+ go.textContent=hasWarn?"Confirm waiver and export":(fabExportKind==="archive"?"Confirm and export archive":"Confirm release and export");
  go.className=hasWarn?"btn fab-danger":"btn";
  go.disabled=!rep.internal_checks_complete||!rep.release_token;
  go.onclick=function(){fabDownload(rep);};
  m.hidden=false;}
+function fabEnsure3D(){
+ if(window.PCB3D)return Promise.resolve();
+ if(window.PCBArchive3DLoading)return window.PCBArchive3DLoading;
+ function load(src){return new Promise(function(resolve,reject){var s=document.createElement("script");
+  s.src=src;s.onload=resolve;s.onerror=function(){reject(new Error("load "+src));};document.head.appendChild(s);});}
+ var sequence=Promise.resolve();
+ ["/static/three.min.js","/static/OrbitControls.js","/static/pcb_3d_surface.js","/static/pcb_step_export.js","/static/pcb_3d_viewer.js"]
+  .forEach(function(src){sequence=sequence.then(function(){return load(src);});});
+ window.PCBArchive3DLoading=sequence;return sequence;}
 (function(){
  var btn=document.getElementById("pcb-fab");if(!btn)return;
  if(PCB.sub&&PCB.sub.length){btn.hidden=true;return;}
  btn.addEventListener("click",function(){
+  fabExportKind="fabrication";
   btn.disabled=true;
   fetch("/api/fab-readiness/"+encodeURIComponent(PCB.name)+fabq())
    .then(function(r){return r.json().catch(function(){return null;});})
@@ -12113,6 +12131,21 @@ function fabOpenModal(rep){
     fabOpenModal(rep);})
    .catch(function(){alert("Fabrication release checks could not complete. No package was exported.");})
    .then(function(){btn.disabled=false;});});
+ var archive=document.createElement("button");archive.className="btn";archive.id="pcb-archive";
+ archive.type="button";archive.textContent="↧ Full archive";
+ archive.title="Download the fab release plus offline schematic HTML, all evaluated source and layout files, KiCad schematic/netlist/footprints/models, full-board STEP, and used datasheets";
+ btn.parentNode.insertBefore(archive,btn.nextSibling);
+ if(PCB.sub&&PCB.sub.length)archive.hidden=true;
+ else archive.addEventListener("click",function(){
+   archive.disabled=true;fabExportKind="archive";
+   var ensure=fabEnsure3D();
+   ensure.then(function(){if(window.PCB3D)window.PCB3D.init();
+    return fetch("/api/fab-readiness/"+encodeURIComponent(PCB.name)+fabq());})
+    .then(function(r){return r.json().catch(function(){return null;});})
+    .then(function(rep){if(!rep)throw new Error("release report unavailable");fabOpenModal(rep);})
+    .catch(function(){alert("Complete design archive checks could not complete. No package was exported.");})
+    .then(function(){archive.disabled=false;});
+  });
  var fx=document.getElementById("fab-x"),fc=document.getElementById("fab-cancel"),
   fm=document.getElementById("fab-modal");
  if(fx)fx.addEventListener("click",fabModalClose);

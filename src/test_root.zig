@@ -338,6 +338,7 @@ test {
     _ = @import("render_order.zig");
     _ = @import("render_pcb_png.zig");
     _ = @import("render_schematic_png.zig");
+    _ = @import("design_archive.zig");
     _ = @import("render_svg/branch.zig");
     _ = @import("render_svg/connection.zig");
     _ = @import("render_svg/context.zig");
@@ -376,6 +377,7 @@ test {
     _ = @import("serve/datasheet.zig");
     _ = @import("serve/datasheet_attach.zig");
     _ = @import("serve/datasheet_ref.zig");
+    _ = @import("serve/design_archive_api.zig");
     _ = @import("serve/dossier_jobs.zig");
     _ = @import("serve/design_diff.zig");
     _ = @import("serve/design_rules_edit.zig");

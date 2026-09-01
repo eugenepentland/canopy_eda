@@ -111,7 +111,7 @@ const ImportedModel = struct {
     roots: []RootShape,
 };
 
-const ExportError = error{
+pub const ExportError = error{
     BadRequest,
     InvalidGeometry,
     InvalidMatrix,
@@ -1463,6 +1463,22 @@ fn build(allocator: std.mem.Allocator, project_dir: []const u8, design_name: []c
     return out.written();
 }
 
+/// Validate the browser's compact board/assembly recipe and compose the same
+/// exact AP242 bytes returned by `/api/pcb-step`. The complete-design archive
+/// uses this seam so its full-board model cannot drift from the 3D tab's STEP
+/// download.
+pub fn buildFromJson(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    design_name: []const u8,
+    body: []const u8,
+) (ExportError || std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8 {
+    if (!safeDesignName(design_name) or body.len == 0 or body.len > max_request_bytes) return error.BadRequest;
+    const request = std.json.parseFromSliceLeaky(Request, allocator, body, .{ .ignore_unknown_fields = true }) catch
+        return error.BadRequest;
+    return build(allocator, project_dir, design_name, request);
+}
+
 fn sendError(res: *httpz.Response, status: u16, message: []const u8) void {
     res.status = status;
     res.content_type = .TEXT;
@@ -1478,9 +1494,7 @@ pub fn pcbStepApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
     if (!safeDesignName(name)) return sendError(res, 400, "invalid design name");
     const body = req.body() orelse return sendError(res, 400, "missing export body");
     if (body.len > max_request_bytes) return sendError(res, 413, "STEP export request is too large");
-    const request = std.json.parseFromSliceLeaky(Request, req.arena, body, .{ .ignore_unknown_fields = true }) catch
-        return sendError(res, 400, "invalid STEP export data");
-    const output = build(req.arena, ctx.project_dir, name, request) catch |err| switch (err) {
+    const output = buildFromJson(req.arena, ctx.project_dir, name, body) catch |err| switch (err) {
         error.BadRequest, error.InvalidGeometry, error.InvalidMatrix, error.InvalidStep => return sendError(res, 400, @errorName(err)),
         error.MissingModel => return sendError(res, 404, "component STEP model not found"),
         error.ModelLimit => return sendError(res, 413, "component STEP models exceed the export limit"),
