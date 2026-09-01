@@ -164,7 +164,7 @@ fn collectValidation(
 }
 
 fn validationFailed(validation: BuildValidation) bool {
-    if (validation.profile != .preflight) return false;
+    if (!preflight.isStrict(validation.profile)) return false;
     if (validation.finding_errors > 0) return true;
     for (validation.erc) |violation| {
         if (violation.severity == .@"error") return true;

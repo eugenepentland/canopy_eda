@@ -127,6 +127,10 @@ const tools = [_]ToolEntry{
     // placement → routing → fab-ready) for a design/module's blessed layout —
     // the same `progress` block `describe_pcb_layout` embeds, standalone.
     .{ .name = "get_layout_progress", .is_mutation = false },
+    // The generated Board Review Audit: release-profile checks, per-part
+    // class-profile compliance, the ladder, the fab gate and the notes as one
+    // Markdown document a reviewer dispositions.
+    .{ .name = "review_audit", .is_mutation = false },
     .{ .name = "compare_layout_to_starred", .is_mutation = false },
     // Static routability preflight: geometrically doomed routing (pads that
     // cannot be entered along their own axis, pads with no legal escape) read
@@ -399,6 +403,7 @@ fn dispatchInfo(
     if (std.mem.eql(u8, tool_name, "get_schematic")) return try toolGetSchematic(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "describe_pcb_layout")) return try toolDescribePcbLayout(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "get_layout_progress")) return try toolGetLayoutProgress(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "review_audit")) return try @import("mcp_review_audit.zig").run(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "compare_layout_to_starred")) return try toolCompareLayoutToStarred(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "routability_preflight")) return try mcp_routability.mcpRoutabilityPreflight(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "route_experiment")) return try mcp_route_experiment.mcpRouteExperiment(allocator, project_dir, args_val, out);
@@ -1122,7 +1127,7 @@ fn toolMoveFile(allocator: std.mem.Allocator, project_dir: []const u8, args_val:
 fn toolBuild(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     const profile = @import("../preflight.zig").parseProfile(optionalString(args_val, "profile")) orelse {
-        try out.appendSlice(allocator, "error: invalid profile (expected authoring or preflight)");
+        try out.appendSlice(allocator, "error: invalid profile (expected authoring, preflight or release)");
         return false;
     };
     try mcp_build.run(allocator, project_dir, name, profile, optionalString(args_val, "severity"), out);
@@ -2759,6 +2764,12 @@ test "get_schematic_image is registered read-only" {
 test "get_layout_progress is registered read-only" {
     try std.testing.expect(isKnownTool("get_layout_progress"));
     try std.testing.expect(!isMutationTool("get_layout_progress"));
+}
+
+// spec: Web Server - review_audit is a registered read-only CLI tool
+test "review_audit is registered read-only" {
+    try std.testing.expect(isKnownTool("review_audit"));
+    try std.testing.expect(!isMutationTool("review_audit"));
 }
 
 // spec: Web Server - A sexp under src that declares no top-level design-block is judged once and the verdict reused until that file changes

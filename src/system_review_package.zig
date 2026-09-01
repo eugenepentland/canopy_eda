@@ -82,11 +82,23 @@ const DocumentEvidence = struct {
     inspected: system_review.DocumentContent,
 };
 
+/// The waiver register's verdict for one board: whether the system carries a
+/// register at all, and every category whose registered count is not the
+/// release run's count.
+const WaiverEvidence = struct {
+    register_present: bool = false,
+    drift: []const waiver_register.Drift = &.{},
+};
+
 const BoardEvidence = struct {
     member: system_review.BoardMember,
     snapshot: board_review.Snapshot,
     fab: fab_service.Result,
     identity_ok: bool,
+    /// Every part locked and every needs-layout sub-block starred on the
+    /// release layout — the ladder's placement and sub-circuit rungs done.
+    layout_frozen: bool = true,
+    waivers: WaiverEvidence = .{},
 };
 
 const GateState = struct {
@@ -96,6 +108,9 @@ const GateState = struct {
     fab_ok: bool = true,
     checklists_ok: bool = true,
     attested: bool = false,
+    /// The DRC waiver register is present when a board needs waivers, and
+    /// its counts are the release run's counts.
+    waivers_ok: bool = true,
 };
 
 const Analysis = struct {
@@ -117,7 +132,7 @@ const Analysis = struct {
         const state = self.state;
         return !state.identity_ok or !state.interface_ok or
             !state.board_review_ok or !state.fab_ok or
-            !state.checklists_ok or !state.attested;
+            !state.checklists_ok or !state.attested or !state.waivers_ok;
     }
 };
 
@@ -561,6 +576,11 @@ fn analyze(
             checklists_ok = false;
     }
 
+    var waiver_source: ?[]const u8 = null;
+    for (documents.items) |document| if (std.mem.eql(u8, document.spec.id, waiver_document_id)) {
+        waiver_source = document.source;
+    };
+    var waivers_ok = true;
     var boards: std.ArrayList(BoardEvidence) = .empty;
     var inputs: std.ArrayList(system_review.InputAttestation) = .empty;
     var seen_inputs: std.StringHashMapUnmanaged(usize) = .empty;
@@ -604,8 +624,11 @@ fn analyze(
             selectedLayoutMatches(member.layout, fab.identity.layout) and
             std.mem.eql(u8, snapshot.identity.layout, fab.identity.layout);
         identity_ok = identity_ok and exact_identity;
-        board_review_ok = board_review_ok and snapshot.review.status != .fail and snapshot.review.open_notes == 0;
+        const frozen = layoutFrozen(transient_allocator, project_dir, member);
+        board_review_ok = board_review_ok and snapshot.review.status != .fail and snapshot.review.open_notes == 0 and frozen;
         fab_ok = fab_ok and !fab.readiness.blocked;
+        const waivers = try boardWaivers(allocator, waiver_source, member.name, fab.readiness.json);
+        if (waivers.drift.len > 0 or (!waivers.register_present and fab.readiness.needs_waiver)) waivers_ok = false;
         needs_waiver = needs_waiver or fab.readiness.needs_waiver or snapshot.review.status == .warn;
         if (generated_at.len == 0) generated_at = snapshot.identity.generated_at;
         try boards.append(allocator, .{
@@ -613,6 +636,8 @@ fn analyze(
             .snapshot = snapshot,
             .fab = fab,
             .identity_ok = exact_identity,
+            .layout_frozen = frozen,
+            .waivers = waivers,
         });
         for (snapshot.physical.sources) |source|
             try appendInput(allocator, &inputs, &seen_inputs, source.name, source.data);
@@ -661,6 +686,7 @@ fn analyze(
             .fab_ok = fab_ok,
             .checklists_ok = checklists_ok,
             .attested = stored_attested,
+            .waivers_ok = waivers_ok,
         },
         .interface_diagnostic = interface_diagnostic,
     };
@@ -939,6 +965,58 @@ fn isUtcSecondTimestamp(value: []const u8) bool {
     return true;
 }
 
+const waiver_register = @import("waiver_register.zig");
+const pcb_describe = @import("serve/pcb_describe.zig");
+
+/// The manifest document id the standard reserves for the DRC waiver register.
+const waiver_document_id = "drc-waivers";
+
+/// Whether the ladder JSON says the release layout is frozen: placement and
+/// sub-circuit rungs both done.
+fn progressFrozen(allocator: std.mem.Allocator, body: []const u8) bool {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return false;
+    defer parsed.deinit();
+    if (parsed.value != .object) return false;
+    const stages = parsed.value.object.get("stages") orelse return false;
+    if (stages != .array) return false;
+    var placement_done = false;
+    var subs_done = false;
+    for (stages.array.items) |stage| {
+        if (stage != .object) continue;
+        const id = stage.object.get("id") orelse continue;
+        const status = stage.object.get("status") orelse continue;
+        if (id != .string or status != .string) continue;
+        const done = std.mem.eql(u8, status.string, "done");
+        if (std.mem.eql(u8, id.string, "placement")) placement_done = done;
+        if (std.mem.eql(u8, id.string, "sub_circuits")) subs_done = done;
+    }
+    return placement_done and subs_done;
+}
+
+/// Ask the completion ladder whether `member`'s release layout is frozen. Any
+/// failure to compute the ladder reads as not frozen — a board whose layout
+/// cannot be inspected is not one to release.
+fn layoutFrozen(transient_allocator: std.mem.Allocator, project_dir: []const u8, member: system_review.BoardMember) bool {
+    var arena = std.heap.ArenaAllocator.init(transient_allocator);
+    defer arena.deinit();
+    const body = pcb_describe.describeProgress(arena.allocator(), project_dir, member.name, .{ .layout = requestedLayout(member.layout) }, null) catch return false;
+    return progressFrozen(arena.allocator(), body);
+}
+
+/// Compare the register's rows for `board` with the readiness run.
+fn boardWaivers(
+    allocator: std.mem.Allocator,
+    register_source: ?[]const u8,
+    board: []const u8,
+    readiness_json: []const u8,
+) std.mem.Allocator.Error!WaiverEvidence {
+    const source = register_source orelse return .{};
+    const entries = try waiver_register.parseBoard(allocator, source, board);
+    defer allocator.free(entries);
+    const actual = try waiver_register.actualWarnings(allocator, readiness_json);
+    return .{ .register_present = true, .drift = try waiver_register.drift(allocator, entries, actual) };
+}
+
 fn dnpMode(policy: system_review.DnpPolicy) export_fab.DnpMode {
     return if (policy == .keep) .keep else .drop;
 }
@@ -1184,6 +1262,7 @@ fn renderReadiness(allocator: std.mem.Allocator, analysis: Analysis) ![]const u8
     try writeBoolField(w, "board_review", analysis.state.board_review_ok, true);
     try writeBoolField(w, "fabrication", analysis.state.fab_ok, true);
     try writeBoolField(w, "checklists", analysis.state.checklists_ok, true);
+    try writeBoolField(w, "waivers", analysis.state.waivers_ok, true);
     try w.writeAll("},\"boards\":[");
     for (analysis.boards, 0..) |board, index| {
         if (index > 0) try w.writeByte(',');
@@ -1203,7 +1282,17 @@ fn renderReadiness(allocator: std.mem.Allocator, analysis: Analysis) ![]const u8
             if (board.fab.readiness.needs_waiver) "true" else "false",
         });
         try json_writer.writeString(w, &board.fab.lock.release_token);
-        try w.writeByte('}');
+        try w.print(",\"layout_frozen\":{s},\"waiver_register\":{s},\"waiver_drift\":[", .{
+            if (board.layout_frozen) "true" else "false",
+            if (board.waivers.register_present) "true" else "false",
+        });
+        for (board.waivers.drift, 0..) |entry, drift_index| {
+            if (drift_index > 0) try w.writeByte(',');
+            try w.writeAll("{\"category\":");
+            try json_writer.writeString(w, entry.label);
+            try w.print(",\"register\":{d},\"actual\":{d}}}", .{ entry.register, entry.actual });
+        }
+        try w.writeAll("]}");
     }
     try w.writeAll("],\"documents\":[");
     for (analysis.documents, 0..) |document, index| {
@@ -4210,6 +4299,32 @@ fn fixtureAnalysis(
         },
         .interface_diagnostic = .{},
     };
+}
+
+// spec: system-review - readiness reports the waiver register drift and a board whose release layout is not frozen fails board review
+test "readiness carries waiver drift and the layout freeze per board" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    try std.testing.expect(progressFrozen(allocator, "{\"stages\":[{\"id\":\"placement\",\"status\":\"done\"},{\"id\":\"sub_circuits\",\"status\":\"done\"}]}"));
+    try std.testing.expect(!progressFrozen(allocator, "{\"stages\":[{\"id\":\"placement\",\"status\":\"current\"},{\"id\":\"sub_circuits\",\"status\":\"done\"}]}"));
+    try std.testing.expect(!progressFrozen(allocator, "not json"));
+    var analysis = try fixtureAnalysis(allocator, .{}, true);
+    const boards = try allocator.dupe(BoardEvidence, analysis.boards);
+    boards[0].layout_frozen = false;
+    boards[0].waivers = .{ .register_present = true, .drift = &.{.{ .label = "courtyard overlap", .register = 0, .actual = 1 }} };
+    analysis.boards = boards;
+    analysis.state.waivers_ok = false;
+    const json = try renderReadiness(allocator, analysis);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"waivers\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"blocked\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"layout_frozen\":false,\"waiver_register\":true,\"waiver_drift\":[{\"category\":\"courtyard overlap\",\"register\":0,\"actual\":1}]") != null);
+    const evidence = try boardWaivers(allocator, "### `main`\n\n| Category | Count | Nature |\n| --- | ---: | --- |\n| courtyard overlap | 2 | x |\n", "main", "{\"raw_drc\":[{\"kind\":\"courtyard\",\"severity\":\"warn\"}]}");
+    try std.testing.expect(evidence.register_present);
+    try std.testing.expectEqual(@as(usize, 1), evidence.drift.len);
+    try std.testing.expectEqual(@as(usize, 2), evidence.drift[0].register);
+    const absent = try boardWaivers(allocator, null, "main", "{}");
+    try std.testing.expect(!absent.register_present);
 }
 
 fn renderSection(allocator: std.mem.Allocator, analysis: Analysis, id: []const u8) ![]const u8 {

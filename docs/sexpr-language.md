@@ -232,6 +232,39 @@ default. `netlisp check --profile preflight` gates incomplete reviews; the full
 category list is in `docs/language-forms.md` under **Datasheet review
 preflight**.
 
+### Component class: `(class <key>)`
+
+A library component binds itself to a component-class review profile — the
+obligations a part carries because of the kind of part it is:
+
+```lisp
+(component lt3045edd#pbf
+  (class ldo)
+  …)
+```
+
+Keys: `ldo`, `switching-regulator`, `protection`, `load-switch`, `mcu`,
+`level-shifter`, `pll-loop`, `integrated-synthesizer`, `clock-jitter-cleaner`,
+`crystal-oscillator`, `rf-amplifier`, `mixer`, `rf-attenuator-switch`,
+`rf-passive`, `rf-detector`, `op-amp`, `sensor`, `connectors`,
+`power-path-passives`. Without the field the class is inferred from the pin
+function names (a `LO`/`RF`/`IF` trio is a mixer, `VCCA`+`VCCB` a level
+shifter, `SW`+`FB` a switching regulator, …); `describe_component` reports
+the authored key. The prose profiles — what a reviewer must still judge per
+class — live beside the designs in `docs/review-profiles/`.
+
+`netlisp check --profile release` (and `run_checks {profile:"release"}`)
+reports each obligation the tool can see as a `profile_incomplete` finding —
+informational while authoring, a warning in preflight, an error at release:
+supply pins with no `(check (voltage-range …))` or decoupling check, no
+`(i-typ …)`/`(i-max …)` on any supply pin of the instance, control pins
+without `(electrical …)` thresholds, a complete review missing the class's
+extra categories, a missing `(thermal …)` on a dissipating class, and a
+`pll-loop`/`mixer` class whose design carries no `(pll-loop …)` /
+`(frequency-plan …)` form in gate mode. The release profile also demands at
+least one cited `(requirement …)` on every active part and surfaces the
+evaluator's own warnings (an unknown sub-form is an error).
+
 ### Decoupling shorthand
 
 `(decouple "VDD" 1 per-pin auto)` expands to every pin already declared on the

@@ -54,7 +54,7 @@ const identity_resolution_error_fmt = "Identity resolution error: {}\n";
 const wrote_bytes_fmt = "Wrote {s} ({d} bytes)\n";
 const check_usage =
     "Usage: netlisp check [--project-dir <d>] [--severity error|warning|info] " ++
-    "[--profile authoring|preflight] <design-name>\n";
+    "[--profile authoring|preflight|release] <design-name>\n";
 const export_pdf_usage =
     "Usage: netlisp export-pdf [--project-dir <d>] <design-name> " ++
     "[--output <file.pdf>] [--theme light|dark]\n";
@@ -83,6 +83,8 @@ const system_check_usage =
     "Usage: netlisp system-check [--project-dir <d>] <system-name>\n";
 const export_system_review_usage =
     "Usage: netlisp export-system-review [--project-dir <d>] <system-name> [--output <file.zip>]\n";
+const review_audit_usage =
+    "Usage: netlisp review-audit [--project-dir <d>] [--layout <name>] [--output <file.md>] <design-name>\n";
 
 const SystemReviewArgs = struct {
     project_dir: []const u8 = ".",
@@ -203,7 +205,7 @@ fn parseCheckArgs(args: []const []const u8) CheckArgs {
         } else if (std.mem.eql(u8, args[i], "--profile") and i + 1 < args.len) {
             parsed.profile = preflight.parseProfile(args[i + 1]) orelse {
                 exit.fatal(
-                    "Invalid check profile '{s}' (expected authoring or preflight)\n",
+                    "Invalid check profile '{s}' (expected authoring, preflight or release)\n",
                     .{args[i + 1]},
                 );
             };
@@ -360,6 +362,47 @@ pub fn cmdExportSystemReview(allocator: std.mem.Allocator, args: []const []const
         exit.fatal(cannot_write_fmt, .{ output, err });
     };
     std.debug.print("Wrote {s} ({d} bytes, draft; no fabrication CAM)\n", .{ output, result.zip.len });
+}
+
+/// `netlisp review-audit <name>` — write the generated Board Review Audit:
+/// release-profile checks, per-part class-profile compliance, the completion
+/// ladder, the fabrication gate and the open notes as one Markdown document
+/// whose Disposition cells the reviewer fills.
+pub fn cmdReviewAudit(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void {
+    var project_dir: []const u8 = ".";
+    var layout: ?[]const u8 = null;
+    var output: ?[]const u8 = null;
+    var name: []const u8 = "";
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], project_dir_flag) and i + 1 < args.len) {
+            project_dir = args[i + 1];
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--layout") and i + 1 < args.len) {
+            layout = args[i + 1];
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--output") and i + 1 < args.len) {
+            output = args[i + 1];
+            i += 1;
+        } else if (std.mem.startsWith(u8, args[i], "--") or name.len != 0) {
+            exit.fatal(review_audit_usage, .{});
+        } else {
+            name = args[i];
+        }
+    }
+    if (name.len == 0) exit.fatal(review_audit_usage, .{});
+    const markdown = @import("review_audit.zig").render(allocator, project_dir, name, .{ .layout = layout }) catch |err| {
+        exit.fatal("Review audit failed: {s}\n", .{@errorName(err)});
+    };
+    defer allocator.free(markdown);
+    if (output) |path| {
+        infra_fs.cwd().writeFile(.{ .sub_path = path, .data = markdown }) catch |err| {
+            exit.fatal(cannot_write_fmt, .{ path, err });
+        };
+        std.debug.print("Wrote {s} ({d} bytes)\n", .{ path, markdown.len });
+    } else {
+        try std.Io.File.stdout().writeStreamingAll(infra_fs.currentIo(), markdown);
+    }
 }
 
 /// Parsed argument vector for `netlisp build`. Kept as a pure struct so the

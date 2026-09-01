@@ -240,6 +240,7 @@ src/commands.zig::cmdImportKicad | fn cmdImportKicad(allocator: std.mem.Allocato
 src/commands.zig::cmdImportKicadLayout | fn cmdImportKicadLayout( allocator: std.mem.Allocator, args: []const []const u8, ) InspectCommandError!void
 src/commands.zig::cmdInspectKicad | fn cmdInspectKicad( allocator: std.mem.Allocator, args: []const []const u8, ) InspectCommandError!void
 src/commands.zig::cmdMergeLayout | fn cmdMergeLayout( allocator: std.mem.Allocator, args: []const []const u8, ) InspectCommandError!void
+src/commands.zig::cmdReviewAudit | fn cmdReviewAudit(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/commands.zig::cmdRouteKicadReference | fn cmdRouteKicadReference( allocator: std.mem.Allocator, args: []const []const u8, ) InspectCommandError!void
 src/commands.zig::cmdSyncKicadSch | fn cmdSyncKicadSch(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/commands.zig::cmdSystemCheck | fn cmdSystemCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
@@ -2623,6 +2624,7 @@ src/placement/perimeter_fence.zig::outlinePoints | fn outlinePoints(alloc: std.m
 src/placement/perimeter_fence.zig::provenance value
 src/placement/perimeter_fence.zig::viaServesPad | fn viaServesPad( alloc: std.mem.Allocator, p: optimizer.Placement, net_name: []const u8, x: f64, y: f64, dia: f64, ) std.mem.Allocator.Error!bool
 src/placement/pin_roles.zig::NcRequirement enum_
+src/placement/pin_roles.zig::PadFunction struct_
 src/placement/pin_roles.zig::PadReq struct_
 src/placement/pin_roles.zig::PartRoles struct_
 src/placement/pin_roles.zig::PinClass enum_
@@ -2630,6 +2632,7 @@ src/placement/pin_roles.zig::classOf | fn classOf(self: PartRoles, pin: []const 
 src/placement/pin_roles.zig::isGroundFn | fn isGroundFn(fn_name: []const u8) bool
 src/placement/pin_roles.zig::isSupplyFn | fn isSupplyFn(fn_name: []const u8) bool
 src/placement/pin_roles.zig::load | fn load(arena: std.mem.Allocator, project_dir: []const u8, component: []const u8) PartRoles
+src/placement/pin_roles.zig::padFunctions | fn padFunctions(arena: std.mem.Allocator, project_dir: []const u8, component: []const u8) []const PadFunction
 src/placement/pin_roles.zig::padRequirements | fn padRequirements( arena: std.mem.Allocator, project_dir: []const u8, component: []const u8, ) std.StringHashMapUnmanaged(PadReq)
 src/placement/pin_roles.zig::strapPads | fn strapPads( arena: std.mem.Allocator, project_dir: []const u8, component: []const u8, ) std.StringHashMapUnmanaged([]const u8)
 src/placement/pinch_probe.zig::Ask struct_
@@ -3394,7 +3397,10 @@ src/preflight.zig::Profile enum_
 src/preflight.zig::Report struct_
 src/preflight.zig::deinit | fn deinit(self: Report, allocator: std.mem.Allocator) void
 src/preflight.zig::deinitFindings | fn deinitFindings(allocator: std.mem.Allocator, findings: []const Finding) void
+src/preflight.zig::evalWarningSeverity | fn evalWarningSeverity(message: []const u8) checks.Severity
+src/preflight.zig::isStrict | fn isStrict(profile: Profile) bool
 src/preflight.zig::parseProfile | fn parseProfile(word: ?[]const u8) ?Profile
+src/preflight.zig::profileSeverity | fn profileSeverity(profile: Profile) checks.Severity
 src/preflight.zig::required_review_categories value
 src/preflight.zig::requirementSeverity | fn requirementSeverity(status: req_checks.Status, profile: Profile) checks.Severity
 src/preflight.zig::run | fn run( allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, project_dir: []const u8, profile: Profile, ) std.mem.Allocator.Error!Report
@@ -3594,6 +3600,21 @@ src/review.zig::buildPowerTree | fn buildPowerTree( allocator: std.mem.Allocator
 src/review.zig::buildReview | fn buildReview( allocator: std.mem.Allocator, design_name: []const u8, block: *const DesignBlock, assertions: []const AssertionResult, violations: []const erc_mod.Violation, check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result), ) ReviewError!ReviewDoc
 src/review.zig::isoTimestamp | fn isoTimestamp(allocator: std.mem.Allocator, unix_s: i64) std.mem.Allocator.Error![]const u8
 src/review.zig::slugify | fn slugify(allocator: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error![]const u8
+src/review_audit.zig::Digests struct_
+src/review_audit.zig::Fab struct_
+src/review_audit.zig::FabStats struct_
+src/review_audit.zig::Facts struct_
+src/review_audit.zig::FindingRow struct_
+src/review_audit.zig::Identity struct_
+src/review_audit.zig::KindCount struct_
+src/review_audit.zig::Layout struct_
+src/review_audit.zig::Options struct_
+src/review_audit.zig::PartRow struct_
+src/review_audit.zig::RenderError value
+src/review_audit.zig::Schematic struct_
+src/review_audit.zig::StageRow struct_
+src/review_audit.zig::render | fn render( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, options: Options, ) RenderError![]u8
+src/review_audit.zig::renderFacts | fn renderFacts(allocator: std.mem.Allocator, facts: Facts) std.mem.Allocator.Error![]u8
 src/review_html.zig::RenderError value
 src/review_html.zig::body_css value
 src/review_html.zig::mutedDash value
@@ -3604,6 +3625,22 @@ src/review_html.zig::writeTestPoints | fn writeTestPoints(w: anytype, tps: []con
 src/review_json.zig::renderToJson | fn renderToJson(allocator: std.mem.Allocator, doc: review.ReviewDoc) (std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8
 src/review_md.zig::renderReadme | fn renderReadme( allocator: Allocator, design_name: []const u8, generated_at: []const u8, build_id: []const u8, source_names: []const []const u8, ) (std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8
 src/review_md.zig::renderToMarkdown | fn renderToMarkdown( allocator: Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, doc: review.ReviewDoc, /// Short build/version stamp (the netlisp git hash) — printed in the header /// so a saved report self-identifies which build produced it. build_id: []const u8, ) (std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8
+src/review_profiles.zig::Class enum_
+src/review_profiles.zig::Context struct_
+src/review_profiles.zig::FormNeed enum_
+src/review_profiles.zig::Forms struct_
+src/review_profiles.zig::Item struct_
+src/review_profiles.zig::Resolved struct_
+src/review_profiles.zig::declaredClass | fn declaredClass(inst: env.Instance) ?Class
+src/review_profiles.zig::deinitItems | fn deinitItems(allocator: std.mem.Allocator, items: []Item) void
+src/review_profiles.zig::evaluate | fn evaluate( allocator: std.mem.Allocator, arena: std.mem.Allocator, inst: env.Instance, ctx: Context, ) std.mem.Allocator.Error![]Item
+src/review_profiles.zig::extraCategories | fn extraCategories(class: Class) []const []const u8
+src/review_profiles.zig::formNeed | fn formNeed(class: Class) FormNeed
+src/review_profiles.zig::inferClass | fn inferClass(pads: []const pin_roles.PadFunction) Class
+src/review_profiles.zig::key | fn key(self: Class) []const u8
+src/review_profiles.zig::parseClass | fn parseClass(word: []const u8) ?Class
+src/review_profiles.zig::requiresThermal | fn requiresThermal(class: Class) bool
+src/review_profiles.zig::resolve | fn resolve(arena: std.mem.Allocator, project_dir: []const u8, inst: env.Instance) Resolved
 src/review_thermal.zig::Cells struct_
 src/review_thermal.zig::Lines struct_
 src/review_thermal.zig::ScenarioCells struct_
@@ -4042,6 +4079,8 @@ src/serve/mcp_parts_tools.zig::toolSearchComponents | fn toolSearchComponents( a
 src/serve/mcp_placement_sensitivity.zig::mcpPlacementSensitivity | fn mcpPlacementSensitivity( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
 src/serve/mcp_read_opts.zig::describePcbOpts | fn describePcbOpts(args_val: ?std.json.Value) pcb_layout_page.PngRequest
 src/serve/mcp_read_opts.zig::placementSelectOpts | fn placementSelectOpts(args_val: ?std.json.Value) pcb_layout_page.PngRequest
+src/serve/mcp_review_audit.zig::RunError value
+src/serve/mcp_review_audit.zig::run | fn run( allocator: std.mem.Allocator, project_dir: []const u8, args: ?std.json.Value, out: *std.ArrayList(u8), ) RunError!bool
 src/serve/mcp_routability.zig::PreflightError value
 src/serve/mcp_routability.zig::mcpRoutabilityPreflight | fn mcpRoutabilityPreflight( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) PreflightError!bool
 src/serve/mcp_route_experiment.zig::mcpRouteExperiment | fn mcpRouteExperiment( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) pcb_layout_page.HandlerError!bool
@@ -5027,6 +5066,12 @@ src/thermal_scenarios.zig::solveFields | fn solveFields( allocator: std.mem.Allo
 src/thermal_scenarios.zig::solveFieldsWithHeatsink | fn solveFieldsWithHeatsink( allocator: std.mem.Allocator, bt: thermal.BoardThermal, p: optimizer.Placement, copper: Copper, heatsink: ?Heatsink, ) std.mem.Allocator.Error![]ScenarioResult
 src/thermal_scenarios.zig::spreaderLayersOf | fn spreaderLayersOf(rules: optimizer.BoardRules) u8
 src/tool_cli.zig::run | fn run(allocator: std.mem.Allocator, args: []const []const u8) RunError!void
+src/waiver_register.zig::Drift struct_
+src/waiver_register.zig::Entry struct_
+src/waiver_register.zig::actualWarnings | fn actualWarnings( allocator: std.mem.Allocator, readiness_json: []const u8, ) std.mem.Allocator.Error!std.enums.EnumArray(drc.Kind, usize)
+src/waiver_register.zig::drift | fn drift( allocator: std.mem.Allocator, register: []const Entry, actual: std.enums.EnumArray(drc.Kind, usize), ) std.mem.Allocator.Error![]Drift
+src/waiver_register.zig::kindForLabel | fn kindForLabel(label: []const u8) ?drc.Kind
+src/waiver_register.zig::parseBoard | fn parseBoard( allocator: std.mem.Allocator, source: []const u8, board: []const u8, ) std.mem.Allocator.Error![]Entry
 src/zipfile.zig::Entry struct_
 src/zipfile.zig::encodedSize | fn encodedSize(entries: []const Entry) error{Zip32LimitExceeded}!u64
 src/zipfile.zig::write | fn write(w: *std.Io.Writer, entries: []const Entry) std.Io.Writer.Error!void

@@ -263,4 +263,17 @@ Every component requirement must cite that PDF with a 1-based page
 and a short source quote. `netlisp check --profile preflight` and CLI
 `run_checks {profile:"preflight"}` gate incomplete reviews and
 unverified manual requirements. Authoring mode reports those legacy
-gaps as warnings. Required review categories are: `supply`, `decoupling`, `pin-straps`, `sequencing`, `thermal`, `layout`. Each must use `(category KEY)` or a `(category-na KEY "rationale")`.
+gaps as warnings. `--profile release` is preflight plus the
+component-class profile obligations (`profile_incomplete` findings:
+supply pins without voltage-range and decoupling checks or current
+annotations, control pins without `(electrical …)` thresholds, class
+review categories, missing `(thermal …)`, a loop or mixer class with no
+gated analysis form), at least one cited requirement on every active
+part, and the evaluator's own warnings (an unknown sub-form is an
+error). A component binds its class with `(class <key>)` — one of
+`ldo`, `switching-regulator`, `protection`, `load-switch`, `mcu`,
+`level-shifter`, `pll-loop`, `integrated-synthesizer`,
+`clock-jitter-cleaner`, `crystal-oscillator`, `rf-amplifier`, `mixer`,
+`rf-attenuator-switch`, `rf-passive`, `rf-detector`, `op-amp`, `sensor`,
+`connectors`, `power-path-passives` — else the class is inferred from
+its pin function names. Required review categories are: `supply`, `decoupling`, `pin-straps`, `sequencing`, `thermal`, `layout`. Each must use `(category KEY)` or a `(category-na KEY "rationale")`.

@@ -103,6 +103,62 @@ pub fn load(arena: std.mem.Allocator, project_dir: []const u8, component: []cons
     return roles;
 }
 
+/// One physical pad with the function name its pinout gives it and the
+/// placement class `load` would assign. The ordered, name-carrying twin of
+/// `PartRoles` for callers that reason about WHAT a pin is, not only its class.
+pub const PadFunction = struct {
+    pad: []const u8,
+    fn_name: []const u8,
+    class: PinClass,
+};
+
+/// Every pad of `component` with its function name and class, in pinout
+/// order. Empty (never an error) when the library files are missing or
+/// malformed, exactly like `load`. Allocated in `arena`.
+pub fn padFunctions(arena: std.mem.Allocator, project_dir: []const u8, component: []const u8) []const PadFunction {
+    if (component.len == 0) return &.{};
+    var elec: std.StringHashMapUnmanaged(env.ElectricalType) = .empty;
+    var pinout_name: []const u8 = component;
+    if (loadList(arena, project_dir, "components", component)) |children| {
+        for (children) |child| {
+            const cl = child.asList() orelse continue;
+            if (cl.len < 2) continue;
+            const head = cl[0].asAtom() orelse continue;
+            if (std.mem.eql(u8, head, "pinout")) {
+                if (cl[1].asText()) |p| pinout_name = p;
+            } else if (std.mem.eql(u8, head, "electrical")) {
+                const decl = electrical.parse(cl) orelse continue;
+                const t = decl.electrical_type orelse continue;
+                elec.put(arena, decl.pin, t) catch continue;
+            }
+        }
+    }
+    const top = loadList(arena, project_dir, "pinouts", pinout_name) orelse return &.{};
+    if (top.len < 2 or !std.mem.eql(u8, top[0].asAtom() orelse "", "pinout")) return &.{};
+    var out: std.ArrayList(PadFunction) = .empty;
+    for (top[2..]) |child| {
+        const cl = child.asList() orelse continue;
+        if (cl.len < 3) continue;
+        if (!std.mem.eql(u8, cl[0].asAtom() orelse "", "pin")) continue;
+        const pad_id = nodeText(arena, cl[1]) orelse continue;
+        const fn_name = cl[2].asText() orelse continue;
+        out.append(arena, .{ .pad = pad_id, .fn_name = fn_name, .class = functionClass(elec.get(fn_name), fn_name) }) catch continue;
+    }
+    return out.toOwnedSlice(arena) catch &.{};
+}
+
+/// Like `classify`, but a pin with no `(electrical …)` declaration is still
+/// read from its NAME: a supply-named function is `.power` and a strap-named
+/// one `.strap`. The placement classifier deliberately trusts only declared
+/// types for those two; the review profiles need the honest name-based answer
+/// so an undeclared VDD pin is reported as a supply pin with no checks.
+fn functionClass(elec_type: ?env.ElectricalType, fn_name: []const u8) PinClass {
+    if (elec_type != null) return classify(elec_type, fn_name);
+    if (isSupplyFn(fn_name)) return .power;
+    if (isStrapFn(fn_name)) return .strap;
+    return classify(null, fn_name);
+}
+
 /// Read `<project_dir>/lib/<dir>/<name>.sexp`, parse it, and return the first
 /// top-level form's children. Null on any read/parse failure (caller degrades).
 fn loadList(arena: std.mem.Allocator, project_dir: []const u8, dir: []const u8, name: []const u8) ?[]const Node {

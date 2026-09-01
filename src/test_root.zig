@@ -331,6 +331,9 @@ test {
     _ = @import("placement/via_merge.zig");
     _ = @import("png.zig");
     _ = @import("preflight.zig");
+    _ = @import("review_audit.zig");
+    _ = @import("review_profiles.zig");
+    _ = @import("waiver_register.zig");
     _ = @import("raster.zig");
     _ = @import("refdes_stability.zig");
     _ = @import("render_html.zig");

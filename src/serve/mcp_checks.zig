@@ -116,7 +116,7 @@ pub fn toolRunChecks(
     const changed_since = optionalString(args_val, "changed_since");
     const profile_word = optionalString(args_val, "profile");
     const profile = preflight.parseProfile(profile_word) orelse {
-        try w.writeAll("error: invalid profile (expected authoring or preflight)");
+        try w.writeAll("error: invalid profile (expected authoring, preflight or release)");
         return false;
     };
     return runChecks(allocator, .{
@@ -417,7 +417,7 @@ pub fn writeBuildReport(w: anytype, report: edit.BuildReport, severity: ?[]const
         first = false;
         try writePreflightFindingJson(w, finding);
     }
-    const strict_failed = report.validation.profile == .preflight and !report.ok;
+    const strict_failed = preflight.isStrict(report.validation.profile) and !report.ok;
     const preflight_ok = !strict_failed and
         report.validation.finding_errors == 0 and erc_errors == 0 and assertion_errors == 0;
     try w.print("],\"preflight_ok\":{s},\"finding_errors\":{d},\"finding_warnings\":{d}", .{
