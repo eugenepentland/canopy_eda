@@ -1316,7 +1316,6 @@ var PAINT_STAGES=[
  {n:"plane_fills",gpu:"fill",rv:1,f:function(c,k,s){paintPours(c,k);}},
  {n:"keepouts",gpu:"",rv:2,f:function(c,k,s){paintKeepouts(c,k);}},
  {n:"groups",gpu:"",rv:8,sp:1,f:function(c,k,s){paintGroupBoxes(c,k,s.movG,s.only);}},
- {n:"parts",gpu:"fill",rv:7,sp:1,m2:1,f:function(c,k,s){paintParts(c,k,s.mov,s.only);}},
  {n:"ratsnest",gpu:"",rv:3,sp:1,f:function(c,k,s){
   // An exclusive replay hides saved copper: the placement guides stay, over an
   // optional faint ghost underlay that belongs to the static half alone.
@@ -1327,6 +1326,7 @@ var PAINT_STAGES=[
   if(ovExclusive())return;
   if(s.only&&!s.cop)return;   // the movers own only the copper a rigid group drags
   paintTracks(c,s.cop,s.only);}},
+ {n:"parts",gpu:"fill",rv:7,sp:1,m2:1,f:function(c,k,s){paintParts(c,k,s.mov,s.only);}},
  {n:"pad_labels",gpu:"",rv:9,q:1,f:function(c,k,s){paintPadLabels(c,k,s.mov,s.only);}},
  {n:"footprint_silk",gpu:"",rv:6,sp:1,f:function(c,k,s){paintFootprintSilk(c,k,s.mov,s.only);}},
  {n:"board_silk",gpu:"",rv:10,sp:1,f:function(c,k,s){paintBoardSilk(c,k,s.movG,s.mov,s.only);}},

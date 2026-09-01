@@ -42,12 +42,11 @@
 //!
 //! ## Residual divergences from KiCad, deliberately preserved
 //!
-//! KiCad paints pads ABOVE tracks and courtyards above copper. All three
-//! surfaces here paint tracks over pads, and draw the courtyard with the part
-//! body under the copper; the ratsnest and clearance halos likewise sit under
-//! copper. Those are agreements, not drifts, so this phase codifies them
-//! instead of changing them — moving any of them is a deliberate later change
-//! to this list, made once, for all three surfaces at the same time.
+//! KiCad paints pads ABOVE tracks, which is also the only safe physical-review
+//! order: an ordinary masked trace may begin inside a land, but its green
+//! under-mask wash must never cover the land's exposed-copper rendering. All
+//! three surfaces now agree on that order. Courtyards still sit below copper;
+//! the ratsnest and clearance halos likewise sit under copper.
 
 const std = @import("std");
 
@@ -109,12 +108,6 @@ pub const stages = [_]Stage{
         .review = 8,
     },
     .{
-        .name = "parts",
-        .what = "part bodies: courtyard, pad copper and drilled bores",
-        .gpu = .fill,
-        .review = 7,
-    },
-    .{
         .name = "ratsnest",
         .what = "airwires, decoupling loops and placement guides",
         .review = 3,
@@ -129,6 +122,12 @@ pub const stages = [_]Stage{
         .what = "routed tracks and arcs by layer (active layer last), then via barrels and their bores",
         .gpu = .fill,
         .review = 5,
+    },
+    .{
+        .name = "parts",
+        .what = "part bodies: courtyard, pad copper and drilled bores",
+        .gpu = .fill,
+        .review = 7,
     },
     .{
         .name = "pad_labels",
@@ -180,15 +179,22 @@ test "the canonical order is a named sequence with a review permutation" {
         try std.testing.expect(!seen[s.review]);
         seen[s.review] = true;
     }
-    // The two statements the review makes: copper (and the silk over it) pass
-    // under the part bodies, because the review draws opaque packages.
+    // Pads and package bodies win over routed copper everywhere. In physical
+    // review that also prevents an under-mask trace wash from visually coating
+    // the exposed land where the route begins or ends.
     const copper = stages[indexOf("copper").?];
     const silk = stages[indexOf("footprint_silk").?];
     const parts = stages[indexOf("parts").?];
+    try std.testing.expect(indexOf("copper").? < indexOf("parts").?);
     try std.testing.expect(copper.review < silk.review);
     try std.testing.expect(silk.review < parts.review);
     // …and in the canonical order silk is above copper on every surface.
     try std.testing.expect(indexOf("copper").? < indexOf("footprint_silk").?);
+}
+
+// spec: Web Server - every board renderer paints exposed pad copper above routed traces, so a normally masked trace entering a land cannot visually coat that component pad with solder mask
+test "component lands paint above masked routed copper" {
+    try std.testing.expect(indexOf("copper").? < indexOf("parts").?);
 }
 
 // spec: Web Server - the viewer's paint stages mirror the canonical order name for name

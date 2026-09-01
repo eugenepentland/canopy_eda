@@ -473,10 +473,10 @@ const board_passes = [_]Pass{
     .{ .stage = "plane_fills", .run = Ctx.stagePlaneFills },
     .{ .stage = "keepouts", .run = null }, // no keepout model in the PNG
     .{ .stage = "groups", .run = null }, // no sub-circuit boxes in the PNG
-    .{ .stage = "parts", .run = Ctx.stageParts },
     .{ .stage = "ratsnest", .run = Ctx.stageRatsnest },
     .{ .stage = "clearance", .run = null }, // no clearance halos in the PNG
     .{ .stage = "copper", .run = Ctx.stageCopper },
+    .{ .stage = "parts", .run = Ctx.stageParts },
     .{ .stage = "pad_labels", .run = Ctx.drawPinLabels },
     .{ .stage = "footprint_silk", .run = Ctx.drawFootprintSilk },
     .{ .stage = "board_silk", .run = Ctx.drawBoardSilkscreen },
@@ -2418,11 +2418,12 @@ test "viewer JS strokes footprint silk in its own pass after the copper pass" {
     // …and the silk Path2D is stroked in exactly that one place, so paintParts
     // can no longer put it under the copper.
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, js, "ctx.stroke(pp.silk)"));
-    // Canonically silk is above copper; in the assembly review it sinks between
-    // the copper and the opaque package bodies drawn over it.
+    // Pads and package bodies sit above routed copper, while fabrication silk
+    // remains above copper and below opaque package bodies in assembly review.
     const silk = order.stages[order.indexOf("footprint_silk").?];
     const copper = order.stages[order.indexOf("copper").?];
     const parts = order.stages[order.indexOf("parts").?];
+    try std.testing.expect(order.indexOf("copper").? < order.indexOf("parts").?);
     try std.testing.expect(order.indexOf("copper").? < order.indexOf("footprint_silk").?);
     try std.testing.expect(copper.review < silk.review and silk.review < parts.review);
 }
