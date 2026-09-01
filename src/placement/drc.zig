@@ -749,6 +749,7 @@ fn checkImpl(
         .tracks = tracks,
         .min_width = rules.min_width,
         .local_power_widths = local_power_widths,
+        .zones = topology_zones,
     });
     // Topology still needs the private chords as physical support (a curved or
     // flared path may touch something its compact handle does not), but finding
@@ -1876,6 +1877,9 @@ const TrackWidthInput = struct {
     /// Index-aligned IPC-2221 widths from a solved power-copper graph.
     /// Null entries retain the conservative whole-net class rule.
     local_power_widths: []const ?f64 = &.{},
+    /// Same-net pours consulted by the pad-entry neck exemption: a bounded
+    /// neck may legitimately end IN a zone rather than on wide track copper.
+    zones: []const TopologyZone = &.{},
 };
 
 fn adaptivePowerNet(placement: optimizer.Placement, net_i: usize) bool {
@@ -1900,6 +1904,11 @@ fn checkTrackWidth(arena: std.mem.Allocator, out: *Viol, in: TrackWidthInput) st
     const nrules = in.placement.rules.net;
     const power_shortfalls = try arena.alloc(?WidthShortfall, in.placement.nets.len);
     @memset(power_shortfalls, null);
+    // Effective width requirement per track, kept so the pad-entry neck walk
+    // can judge whether NEIGHBOURING copper satisfies its own requirement.
+    const requirements = try arena.alloc(f64, in.tracks.len);
+    @memset(requirements, 0);
+    var power_candidates: std.ArrayList(WidthShortfall) = .empty;
     for (in.tracks, 0..) |t, track_index| {
         if (t.width <= eps) continue; // no recorded width — not a real defect
         var want = in.min_width;
@@ -1920,6 +1929,7 @@ fn checkTrackWidth(arena: std.mem.Allocator, out: *Viol, in: TrackWidthInput) st
                 0;
             want = @max(in.min_width, @max(branch_floor, local));
         }
+        requirements[track_index] = want;
         const under_width = t.width < want - eps;
         // Fabrication width remains a hard rule. Electrical power capacity is
         // intentionally advisory: the router has already widened this route as
@@ -1939,10 +1949,7 @@ fn checkTrackWidth(arena: std.mem.Allocator, out: *Viol, in: TrackWidthInput) st
             continue;
         }
         if (adaptive_power and under_width) {
-            const ni: usize = @intCast(t.net);
-            const prior = power_shortfalls[ni];
-            if (prior == null or t.width / want < prior.?.actual / prior.?.required)
-                power_shortfalls[ni] = .{ .track_index = track_index, .actual = t.width, .required = want };
+            try power_candidates.append(arena, .{ .track_index = track_index, .actual = t.width, .required = want });
             continue;
         }
         // A solved local-current width is already the electrical exception to
@@ -1968,6 +1975,33 @@ fn checkTrackWidth(arena: std.mem.Allocator, out: *Viol, in: TrackWidthInput) st
         if (!under_width) continue;
         if (neck_ok or taper_ok) continue;
         try out.append(arena, .{ .x = (t.x1 + t.x2) / 2, .y = (t.y1 + t.y2) / 2, .gap = t.width, .clearance = want, .kind = .track_width, .who = .{ .net_a = t.net, .track_a = partyIndex(track_index) }, .layer = layerOf(t.layer) });
+    }
+    // A pad the neck serves can be narrower than the solved width: a short
+    // neck into wide copper is accepted practice, so it never becomes the
+    // rail's reported worst shortfall. Exempted silently, exactly like the
+    // own-land and port-frame-taper exemptions; everything else competes for
+    // the one worst-neck warning as before. One geometric walk covers a whole
+    // taper chain, so its verdict is cached across that chain's slices.
+    var neck_verdicts: std.AutoHashMapUnmanaged(usize, bool) = .empty;
+    const neck_board = pad_neck.PowerNeckBoard{
+        .placement = in.placement,
+        .tracks = in.tracks,
+        .vias = in.routed.vias,
+        .zones = in.zones,
+        .required = requirements,
+    };
+    for (power_candidates.items) |candidate| {
+        const exempt = neck_verdicts.get(candidate.track_index) orelse blk: {
+            const verdict = try pad_neck.judgePowerNeck(arena, neck_board, candidate.track_index);
+            for (verdict.chain) |member| try neck_verdicts.put(arena, member, verdict.exempt);
+            break :blk verdict.exempt;
+        };
+        if (exempt) continue;
+        const t = in.tracks[candidate.track_index];
+        const ni: usize = @intCast(t.net);
+        const prior = power_shortfalls[ni];
+        if (prior == null or candidate.actual / candidate.required < prior.?.actual / prior.?.required)
+            power_shortfalls[ni] = candidate;
     }
     for (power_shortfalls) |maybe_shortfall| {
         const shortfall = maybe_shortfall orelse continue;
@@ -3851,6 +3885,62 @@ test "adaptive power width shortfall is one non-blocking worst-neck finding" {
     try testing.expectEqual(Severity.warn, violations.items[0].severity);
     try testing.expectApproxEqAbs(@as(f64, 0.2), violations.items[0].gap, 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 0.8), violations.items[0].clearance, 1e-12);
+}
+
+// spec: placement/drc - the adaptive power-width warning skips a bounded neck forced by a same-net land narrower than the solved width, and returns the moment that land no longer explains the narrowing
+test "adaptive power width forgives a bounded pad-entry neck but not the same copper without its land" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const pads = [_]@import("geometry.zig").Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.3, .h = 0.8 }};
+    var parts = [_]optimizer.Part{.{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &pads, .fallback = false }};
+    const pins = [_]flat_netlist.FlatPin{.{ .ref_des = "U1", .pin = "1" }};
+    const netted = [_]FlatNet{.{ .name = "VDD", .pins = &pins }};
+    const unnetted = [_]FlatNet{.{ .name = "VDD", .pins = &.{} }};
+    const net_rules = [_]optimizer.NetRule{.{ .width = 0.2 }};
+    const foils = [_]@import("impedance.zig").Foil{
+        .{ .index = 1, .thickness_mm = 0.035 },
+        .{ .index = 2, .thickness_mm = 0.035 },
+    };
+    const rails = [_]@import("../eval/power_budget.zig").Rail{.{
+        .net = "VDD",
+        .load_max_a = 1.2,
+        .any_max_load = true,
+        .status = .no_source,
+    }};
+    // A 1 mm 0.25 neck out of the 0.3 mm land into a 0.55 solved-width trunk.
+    const tracks = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.25, .net = 0 },
+        .{ .x1 = 1, .y1 = 0, .x2 = 3, .y2 = 0, .layer = 0, .width = 0.55, .net = 0 },
+    };
+    const routed = router.RouteResult{ .tracks = &tracks, .vias = &.{}, .routed = 1, .total = 1 };
+    const local = [_]?f64{ 0.5, 0.5 };
+    for ([_]bool{ true, false }) |landed| {
+        var placement = partsOnly(&parts);
+        placement.nets = if (landed) &netted else &unnetted;
+        placement.rules = .{
+            .net = &net_rules,
+            .plane_nets = &.{},
+            .copper_layers = 2,
+            .physical = .{ .stack = .{ .layers = 2, .foils = &foils }, .rails = &rails },
+        };
+        var violations: std.ArrayList(Violation) = .empty;
+        try checkTrackWidth(arena, &violations, .{
+            .placement = placement,
+            .routed = routed,
+            .tracks = &tracks,
+            .min_width = 0.127,
+            .local_power_widths = &local,
+        });
+        if (landed) {
+            try testing.expectEqual(@as(usize, 0), violations.items.len);
+        } else {
+            try testing.expectEqual(@as(usize, 1), violations.items.len);
+            try testing.expectEqual(Kind.power_width, violations.items[0].kind);
+            try testing.expectApproxEqAbs(@as(f64, 0.25), violations.items[0].gap, 1e-12);
+            try testing.expectApproxEqAbs(@as(f64, 0.5), violations.items[0].clearance, 1e-12);
+        }
+    }
 }
 
 // spec: placement/drc - reporting DRC reuses its exact cached plane, pour, and user-zone fills when solving local power-track current

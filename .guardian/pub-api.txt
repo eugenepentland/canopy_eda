@@ -2563,7 +2563,10 @@ src/placement/pad_grid.zig::cellFor | fn cellFor(w: f64, o: f64, cell: f64, n: u
 src/placement/pad_grid.zig::near | fn near(self: *const PadGrid, px: f64, py: f64) []const u32
 src/placement/pad_grid.zig::nearSegment | fn nearSegment(idx: *const PadGrid, a: [2]f64, b: [2]f64, reach: f64, scratch: *[near_scratch_len]u32) ?[]const u32
 src/placement/pad_grid.zig::near_scratch_len value
+src/placement/pad_neck.zig::PowerNeckBoard struct_
+src/placement/pad_neck.zig::PowerNeckVerdict struct_
 src/placement/pad_neck.zig::allowsTrack | fn allowsTrack( arena: std.mem.Allocator, placement: optimizer.Placement, track: router.Track, nominal: f64, fab_min_width: f64, ) std.mem.Allocator.Error!bool
+src/placement/pad_neck.zig::judgePowerNeck | fn judgePowerNeck( arena: std.mem.Allocator, board: PowerNeckBoard, seed: usize, ) std.mem.Allocator.Error!PowerNeckVerdict
 src/placement/pad_neck.zig::passBoard | fn passBoard(board: router.CleanupBoard) std.mem.Allocator.Error!void
 src/placement/pad_neck.zig::shapeGeneratedTracks | fn shapeGeneratedTracks( arena: std.mem.Allocator, placement: optimizer.Placement, selected_nets: []const bool, vias: []const router.Via, tracks: *std.ArrayList(router.Track), ) std.mem.Allocator.Error!bool
 src/placement/pad_shape.zig::SegClosest struct_
@@ -2756,9 +2759,11 @@ src/placement/pour.zig::stampSeg | fn stampSeg(g: Grid, x1: f64, y1: f64, x2: f6
 src/placement/pour.zig::userZoneSpec | fn userZoneSpec(net_name: []const u8, side: optimizer.Side, clip: []const [2]f64) LayerSpec
 src/placement/pour.zig::viaPlaneClearance | fn viaPlaneClearance(placement: optimizer.Placement, via: router.Via, plane_net: PlaneNet, base: f64) f64
 src/placement/pour.zig::zoneLayerSpec | fn zoneLayerSpec(net_name: []const u8, side: ?optimizer.Side, track_layer: u8, clip: []const [2]f64) LayerSpec
+src/placement/power_capacity.zig::area_exponent value
 src/placement/power_capacity.zig::capacityForArea | fn capacityForArea(area_mm2: f64, outer: bool, rise_c: f64) f64
 src/placement/power_capacity.zig::requiredTraceWidthMm | fn requiredTraceWidthMm(amps: f64, foil_mm: f64, outer: bool) ?f64
 src/placement/power_capacity.zig::requiredViaDrillMm | fn requiredViaDrillMm(amps: f64, plating_mm: f64) ?f64
+src/placement/power_capacity.zig::rise_exponent value
 src/placement/power_capacity.zig::routingCurrentA | fn routingCurrentA(rails: []const power_budget.Rail, net: []const u8) ?f64
 src/placement/power_capacity.zig::temperature_rise_c value
 src/placement/power_capacity.zig::traceCapacityA | fn traceCapacityA(width_mm: f64, foil_mm: f64, outer: bool) f64
