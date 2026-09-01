@@ -1771,6 +1771,16 @@ fn svgFirstY1After(svg: []const u8, marker: []const u8) !f64 {
     return std.fmt.parseFloat(f64, svg[start..end]);
 }
 
+fn svgTextYForContent(svg: []const u8, content: []const u8) !f64 {
+    const content_at = std.mem.indexOf(u8, svg, content) orelse return error.InvalidCharacter;
+    const prefix = svg[0..content_at];
+    const text_at = std.mem.lastIndexOf(u8, prefix, "<text ") orelse return error.InvalidCharacter;
+    const y_at = std.mem.indexOfPos(u8, svg, text_at, " y=\"") orelse return error.InvalidCharacter;
+    const start = y_at + " y=\"".len;
+    const end = std.mem.indexOfScalarPos(u8, svg, start, '"') orelse return error.InvalidCharacter;
+    return std.fmt.parseFloat(f64, svg[start..end]);
+}
+
 // spec: render_svg - Identical decoupling capacitors each render as their own labeled schematic symbol
 test "SVG renders identical decoupling capacitors individually" {
     const instances = [_]env_mod.Instance{
@@ -1812,6 +1822,72 @@ test "SVG renders identical decoupling capacitors individually" {
     try std.testing.expect(std.mem.indexOf(u8, svg.written(), ">C1 0.1uF</text>") != null);
     try std.testing.expect(std.mem.indexOf(u8, svg.written(), ">C2 0.1uF</text>") != null);
     try std.testing.expect(std.mem.indexOf(u8, svg.written(), "2× 0.1uF") == null);
+}
+
+// spec: render_svg - Functional boundary signals keep their labels on a dedicated row above a local ground shunt while internal shared-bias trees stay compact, and DNP passives are crossed and labeled
+test "active loop-filter ports stay clear of ground shunts and show DNP" {
+    const hub_pins = [_]env_mod.PartPin{
+        .{ .pin = "1", .net = "LF_OUT", .pin_name = "VOUT" },
+        .{ .pin = "2", .net = "GND", .pin_name = "-VS" },
+    };
+    const hub_parts = [_]env_mod.Part{.{ .name = "A", .pins = &hub_pins }};
+    const instances = [_]env_mod.Instance{
+        .{ .ref_des = "U14", .component = "ad8065", .value = "", .footprint = "", .symbol = "", .parts = &hub_parts },
+        .{ .ref_des = "R70", .component = "res-0402", .value = "0R", .footprint = "", .symbol = "generic-res", .dnp = true },
+        .{ .ref_des = "C150", .component = "cap-0402", .value = "6.2pF", .footprint = "", .symbol = "generic-cap" },
+        .{ .ref_des = "R74", .component = "res-0402", .value = "27R", .footprint = "", .symbol = "generic-res" },
+        .{ .ref_des = "C154", .component = "cap-0402", .value = "56pF", .footprint = "", .symbol = "generic-cap" },
+    };
+    const lf_out = [_]env_mod.PinRef{
+        .{ .ref_des = "U14", .pin = "1" },
+        .{ .ref_des = "R70", .pin = "2" },
+        .{ .ref_des = "R74", .pin = "2" },
+    };
+    const cpout = [_]env_mod.PinRef{
+        .{ .ref_des = "R70", .pin = "1" },
+        .{ .ref_des = "C150", .pin = "1" },
+    };
+    const vtune = [_]env_mod.PinRef{
+        .{ .ref_des = "R74", .pin = "1" },
+        .{ .ref_des = "C154", .pin = "1" },
+    };
+    const gnd = [_]env_mod.PinRef{
+        .{ .ref_des = "U14", .pin = "2" },
+        .{ .ref_des = "C150", .pin = "2" },
+        .{ .ref_des = "C154", .pin = "2" },
+    };
+    const nets = [_]env_mod.Net{
+        .{ .name = "LF_OUT", .pins = &lf_out },
+        .{ .name = "CPOUT", .pins = &cpout },
+        .{ .name = "VTUNE", .pins = &vtune },
+        .{ .name = "GND", .pins = &gnd },
+    };
+    const ports = [_]env_mod.Port{
+        .{ .name = "CPOUT", .net = "CPOUT", .direction = "in" },
+        .{ .name = "VTUNE", .net = "VTUNE", .direction = "out" },
+        .{ .name = "GND", .net = "GND", .direction = "bidi" },
+    };
+    var block = emptyAttachBlock("active-loop-filter");
+    block.instances = &instances;
+    block.nets = &nets;
+    block.ports = &ports;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var ctx = try setupRenderCtx(allocator, &block);
+    var svg: std.Io.Writer.Allocating = .init(allocator);
+    try std.testing.expect(try renderHubSvg(&ctx, &svg.writer, allocator, &.{}, "U14"));
+
+    const cpout_label_y = try svgTextYForContent(svg.written(), ">CPOUT</text>");
+    const cpout_shunt_y = try svgFirstY1After(svg.written(), "<g data-ref=\"C150\"");
+    const vtune_label_y = try svgTextYForContent(svg.written(), ">VTUNE</text>");
+    const vtune_shunt_y = try svgFirstY1After(svg.written(), "<g data-ref=\"C154\"");
+    try std.testing.expect(cpout_shunt_y - cpout_label_y >= 30.0);
+    try std.testing.expect(vtune_shunt_y - vtune_label_y >= 30.0);
+    try std.testing.expect(vtune_label_y - cpout_shunt_y >= 30.0);
+    try std.testing.expect(std.mem.indexOf(u8, svg.written(), ">R70 0R DNP</text>") != null);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, svg.written(), "stroke=\"#ff6b6b\""));
 }
 
 // spec: render_svg - A Functional shared RF bias rail directly joins compact P/M pull-up rows and centers its choke/bypass tree between them

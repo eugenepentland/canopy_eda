@@ -2218,11 +2218,12 @@ fn drawVerticalPassive(w: anytype, inst: FlatInst, cx: f64, start_y: f64, end_y:
     try drawSymbolShape(w, cx - passive_bw / half_divisor, passive_bw, cx, cy, inst);
     try w.writeAll("</g>\n");
     try w.print(
-        \\<text x="{d:.1}" y="{d:.1}" text-anchor="{s}" font-size="9" fill="#888">
-    , .{ label_x, cy + vertical_label_baseline, anchor });
+        \\<text x="{d:.1}" y="{d:.1}" text-anchor="{s}" font-size="9" fill="{s}"{s}>
+    , .{ label_x, cy + vertical_label_baseline, anchor, if (inst.flags.dnp) "#ff6b6b" else "#888", if (inst.flags.dnp) " font-weight=\"bold\"" else "" });
     try escape.writeXml(w, shortRef(inst.ref_des));
     try w.writeAll(" ");
     try escape.writeXml(w, formatShort(inst));
+    if (inst.flags.dnp) try w.writeAll(" DNP");
     try w.writeAll("</text>\n</g>\n");
     try writeDebugPin(w, cx, start_y);
     try writeDebugPin(w, cx, end_y);

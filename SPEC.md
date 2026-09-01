@@ -5071,6 +5071,7 @@ Public functions: renderSchematic
 - The scene graph preserves one entry per identical decoupling capacitor
 - Net names are XML-escaped in the emitted SVG markup
 - Both scene-graph pinout readers take the class-owned lib_limits cap, so a pinout past the retired 256 KiB figure still carries its pin names and alternates
+- Functional boundary signals keep their labels on a dedicated row above a local ground shunt while internal shared-bias trees stay compact, and DNP passives are crossed and labeled
 
 ## decouple_key
 

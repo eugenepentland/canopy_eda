@@ -185,6 +185,18 @@ pub fn drawSymbolShape(w: anytype, bx: f64, bw: f64, cx: f64, cy: f64, inst: Fla
             \\
         , .{ bx, cy - default_sym_half_h, bw });
     }
+    if (inst.flags.dnp) {
+        const inset: f64 = 7.0;
+        const half_h: f64 = 8.0;
+        try w.print(
+            \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#ff6b6b" stroke-width="1.5"/>
+            \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#ff6b6b" stroke-width="1.5"/>
+            \\
+        , .{
+            bx + inset,      cy - half_h, bx + bw - inset, cy + half_h,
+            bx + bw - inset, cy - half_h, bx + inset,      cy + half_h,
+        });
+    }
 }
 
 /// Draw the ground symbol: vertical stub + 3 decreasing horizontal lines.

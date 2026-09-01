@@ -156,13 +156,17 @@ test "functional boundary resistor waits for vertical differential layout" {
 pub fn drawBranchTreeLeft(self: *RenderCtx, w: anytype, junction_x: f64, center_y: f64, branches: []const Branch, junction_net: []const u8) RenderError!void {
     const n = branches.len;
     const total_height = @as(f64, @floatFromInt(n -| 1)) * branch_spacing;
-    const start_y = center_y - total_height / half_divisor;
+    const owns_port_row = junctionOwnsPortRow(self, junction_net, branches);
+    const start_y = if (owns_port_row)
+        center_y + branch_spacing
+    else
+        center_y - total_height / half_divisor;
 
     const bx = junction_x - bus_gap;
     try drawNetWire(w, junction_x, center_y, bx, center_y, junction_net);
-    if (n > 1) {
+    if (n > 1 or owns_port_row) {
         const end_y = start_y + total_height;
-        try drawNetWire(w, bx, start_y, bx, end_y, junction_net);
+        try drawNetWire(w, bx, if (owns_port_row) center_y else start_y, bx, end_y, junction_net);
     }
 
     var bodies: std.ArrayList(BranchBody) = .empty;
@@ -203,13 +207,17 @@ pub fn drawBranchTreeRight(self: *RenderCtx, w: anytype, junction_x: f64, center
     const tree_center_y = shared_center_y orelse center_y;
     const n = branches.len;
     const total_height = @as(f64, @floatFromInt(n -| 1)) * branch_spacing;
-    const start_y = tree_center_y - total_height / half_divisor;
+    const owns_port_row = shared_center_y == null and junctionOwnsPortRow(self, junction_net, branches);
+    const start_y = if (owns_port_row)
+        tree_center_y + branch_spacing
+    else
+        tree_center_y - total_height / half_divisor;
 
     const bx = junction_x + bus_gap;
     if (shared_center_y == null) try drawNetWire(w, junction_x, tree_center_y, bx, tree_center_y, junction_net);
-    if (n > 1) {
+    if (n > 1 or owns_port_row) {
         const end_y = start_y + total_height;
-        try drawNetWire(w, bx, start_y, bx, end_y, junction_net);
+        try drawNetWire(w, bx, if (owns_port_row) tree_center_y else start_y, bx, end_y, junction_net);
     }
 
     var bodies: std.ArrayList(BranchBody) = .empty;
@@ -240,6 +248,17 @@ pub fn drawBranchTreeRight(self: *RenderCtx, w: anytype, junction_x: f64, center
         return;
     }
     try renderBranchTerminalsRight(self, w, bodies.items);
+}
+
+/// A boundary signal with a local ground shunt needs two visible rows: one for
+/// the off-sheet label and one for the shunt. Sharing the row paints the label
+/// across the capacitor and makes the signal look grounded.
+fn junctionOwnsPortRow(self: *const RenderCtx, junction_net: []const u8, branches: []const Branch) bool {
+    if (!self.render_scratch.functional_layout or !self.rendersWhenAlone(baseNetName(junction_net))) return false;
+    for (branches) |branch| {
+        if (isGroundNet(baseNetName(branch.terminal))) return true;
+    }
+    return false;
 }
 
 fn branchTerminalXLeft(bodies: []const BranchBody) f64 {
@@ -422,11 +441,12 @@ fn drawPassiveLeft(w: anytype, inst: FlatInst, x: f64, cy: f64) !void {
     try drawSymbolShape(w, bx, passive_bw, cx, cy, inst);
 
     try w.print(
-        \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle" font-size="9" fill="#888">
-    , .{ cx, by - passive_value_offset });
+        \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle" font-size="9" fill="{s}"{s}>
+    , .{ cx, by - passive_value_offset, if (inst.flags.dnp) "#ff6b6b" else "#888", if (inst.flags.dnp) " font-weight=\"bold\"" else "" });
     try escape.writeXml(w, shortRef(inst.ref_des));
     try w.writeAll(" ");
     try escape.writeXml(w, formatShort(inst));
+    if (inst.flags.dnp) try w.writeAll(" DNP");
     try w.writeAll(text_g_close);
 
     try writeDebugPin(w, bx, cy);
@@ -456,11 +476,12 @@ fn drawPassiveRight(w: anytype, inst: FlatInst, x: f64, cy: f64) !void {
     try drawSymbolShape(w, bx, passive_bw, cx, cy, inst);
 
     try w.print(
-        \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle" font-size="9" fill="#888">
-    , .{ cx, by - passive_value_offset });
+        \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle" font-size="9" fill="{s}"{s}>
+    , .{ cx, by - passive_value_offset, if (inst.flags.dnp) "#ff6b6b" else "#888", if (inst.flags.dnp) " font-weight=\"bold\"" else "" });
     try escape.writeXml(w, shortRef(inst.ref_des));
     try w.writeAll(" ");
     try escape.writeXml(w, formatShort(inst));
+    if (inst.flags.dnp) try w.writeAll(" DNP");
     try w.writeAll(text_g_close);
 
     try writeDebugPin(w, bx, cy);

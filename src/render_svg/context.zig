@@ -114,6 +114,12 @@ pub const FlatInst = struct {
     /// Manufacturer name from `(property "manufacturer" "...")` —
     /// also fed to the search index.
     manufacturer: []const u8 = "",
+    /// Compact schematic-only flags. DNP drives the symbol cross/label;
+    /// decouple_rail preserves the rail-level reservoir binding.
+    flags: packed struct {
+        dnp: bool = false,
+        decouple_rail: bool = false,
+    } = .{},
     /// Byte offset of the defining form in the *top-level design source*,
     /// copied off `Instance.source_offset`. Drives the sidebar's
     /// "Edit source →" jump. 0 means "no source link": sub-block children
@@ -129,7 +135,6 @@ pub const FlatInst = struct {
     /// reservoir (`(decouples rail)`) — shown once on the rail, not per pin.
     decouple_ic: []const u8 = "",
     decouple_pin: []const u8 = "",
-    decouple_rail: bool = false,
 };
 
 fn propertyValue(props: []const env_mod.Property, key: []const u8) []const u8 {
@@ -430,13 +435,13 @@ pub const RenderCtx = struct {
                 .requirements = inst.requirements,
                 .mpn = propertyValue(inst.properties, "mpn"),
                 .manufacturer = propertyValue(inst.properties, "manufacturer"),
+                .flags = .{ .dnp = inst.dnp, .decouple_rail = inst.bind.decouple.rail },
                 // Sub-block instances evaluate out of their module file, so
                 // their offsets don't map into the design source — only
                 // top-level (unprefixed) instances get a source link.
                 .src_offset = if (prefix.len == 0) inst.source_offset else 0,
                 .decouple_ic = inst.bind.decouple.ic,
                 .decouple_pin = inst.bind.decouple.pin,
-                .decouple_rail = inst.bind.decouple.rail,
             };
             try self.instances.append(self.allocator, flat);
             try self.inst_map.put(self.allocator, rd, flat);
@@ -640,7 +645,7 @@ pub const RenderCtx = struct {
         while (pending.pop()) |ref| {
             try component.append(a, ref);
             if (self.inst_map.get(ref)) |inst| {
-                has_explicit_binding = has_explicit_binding or inst.decouple_pin.len > 0 or inst.decouple_rail;
+                has_explicit_binding = has_explicit_binding or inst.decouple_pin.len > 0 or inst.flags.decouple_rail;
             }
             const nets = spoke_nets.get(ref) orelse continue;
             for (nets.items) |net| {
@@ -833,7 +838,7 @@ pub const RenderCtx = struct {
             }
             return pad_match;
         }
-        if (fi.decouple_rail) {
+        if (fi.flags.decouple_rail) {
             // Pick the hub with the most pins on this net (the main consumer),
             // and dock on its first pin.
             var best: ?PinRef = null;

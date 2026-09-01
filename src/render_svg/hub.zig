@@ -587,6 +587,32 @@ fn islandReachesOtherHubPin(
     return false;
 }
 
+fn branchSpokeCount(self: *const RenderCtx, net_pins: []const env_mod.PinRef, source_ref: []const u8) u32 {
+    var count: u32 = 0;
+    for (net_pins) |pin| {
+        if (std.mem.eql(u8, pin.ref_des, source_ref) or !self.spoke_set.contains(pin.ref_des)) continue;
+        count += 1;
+    }
+    return count;
+}
+
+fn groundedResolvedBranchSlots(self: *RenderCtx, spoke_ref: []const u8, hub_ref: []const u8, hub_pin: []const u8) ?u32 {
+    if (!self.render_scratch.functional_layout) return null;
+    var visited: std.StringHashMapUnmanaged(void) = .empty;
+    visited.put(self.allocator, spoke_ref, {}) catch return null;
+    const result = connection.findSpokeChain(
+        self,
+        spoke_ref,
+        .{ .pin = .{ .ref_des = hub_ref, .pin = hub_pin } },
+        &visited,
+    ) catch return null;
+    if (!self.rendersWhenAlone(baseNetName(result.terminal))) return null;
+    for (result.branches) |resolved_branch| {
+        if (isGroundNet(baseNetName(resolved_branch.terminal))) return @intCast(result.branches.len + 1);
+    }
+    return null;
+}
+
 /// Estimate how many vertical slots a spoke connection needs.
 pub fn estimateBranchCount(self: *RenderCtx, spoke_rd: []const u8, hub_ref: []const u8) u32 {
     const adj_list = self.adjacency.get(spoke_rd) orelse return 1;
@@ -603,6 +629,10 @@ pub fn estimateBranchCount(self: *RenderCtx, spoke_rd: []const u8, hub_ref: []co
             },
             .net => {},
         }
+    }
+
+    if (hub_pin) |pin| {
+        if (groundedResolvedBranchSlots(self, spoke_rd, hub_ref, pin)) |slots| return slots;
     }
 
     for (adj_list.items) |ae| {
@@ -633,15 +663,9 @@ pub fn estimateBranchCount(self: *RenderCtx, spoke_rd: []const u8, hub_ref: []co
                 if (self.render_scratch.functional_layout and
                     islandReachesOtherHubPin(self, net_pins.items, spoke_rd, hub_ref, hub_pin)) return 1;
 
-                var other_spokes: u32 = 0;
-                for (net_pins.items) |np| {
-                    if (std.mem.eql(u8, np.ref_des, spoke_rd)) continue;
-                    if (self.spoke_set.contains(np.ref_des)) {
-                        other_spokes += 1;
-                    }
-                }
-                if (other_spokes <= 1) return 1;
-                return other_spokes;
+                const branch_count = branchSpokeCount(self, net_pins.items, spoke_rd);
+                if (branch_count <= 1) return 1;
+                return branch_count;
             },
             .pin => {},
         }
