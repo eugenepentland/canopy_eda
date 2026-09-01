@@ -6630,6 +6630,7 @@ is what makes the predicate exact rather than approximately right.
 ## Web Server
 
 - The Full archive control runs the ordinary fab-readiness confirmation flow, posts the same analytic full-board STEP recipe as the 3D tab, and downloads the complete design archive
+- A failed Full archive download identifies the archive and displays the server's actual rejection reason
 - The DRC reconcile session answers only for a board whose non-copper inputs are unchanged
 - A DRC reconcile store with no allocator retains nothing and every request takes the full check
 - The DRC reconcile store keeps two designs and evicts the least recently leased
@@ -7346,6 +7347,7 @@ Public functions: check, writeJson, savedOutline, declaredOutline, outlineDrift
 
 ## fabrication-release
 
+- a stable release renderer may extend the exact read trace with assembly-only inputs, while any changed byte still blocks packaging
 - revision, source-ID, BOM/centroid, and fallback-geometry identity failures can never be waived
 - consumed-input closure identity is independent of filesystem read order
 - exact read tracing retains child-directory identity and rejects an A/B/A byte sequence

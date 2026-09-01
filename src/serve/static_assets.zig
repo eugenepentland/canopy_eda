@@ -1690,6 +1690,17 @@ test "PCB full archive reuses release confirmation and exact STEP data" {
     try std.testing.expect(std.mem.indexOf(u8, pcb_3d_viewer_js, "archivePayload: function () { return built ? stepPayload() : null; }") != null);
 }
 
+// spec: Web Server - a failed Full archive download identifies the archive and displays the server's actual rejection reason
+test "PCB full archive reports the server failure instead of a generic fab alert" {
+    const markers = [_][]const u8{
+        "if(!r.ok)return r.text()",
+        "throw new Error(body||",
+        "Complete design archive",
+        "err.message",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+}
+
 // spec: Web Server - the PCB 3D viewer composites each face's outer copper, soldermask, and silkscreen—including generated sub-circuit, test-point, and pin-1 artwork—into one non-overlapping visible canvas cap; the regular STEP export omits that raster artwork instead of turning it into selectable geometry, and only mechanical drills strictly larger than 1 mm are cut through the board
 // spec: Web Server - exposed RF copper on both board faces uses the same swept taper polygons in Assembly and the PCB 3D viewer
 test "PCB 3D viewer textures both manufactured faces and cuts drills" {

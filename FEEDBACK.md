@@ -601,3 +601,9 @@ matters when the person re-recording is the author of the change.
 - **idea:** Finish extracting the fabrication-release HTTP/UI orchestration from `pcb_layout_page.zig` into its own module. New release formats could then reuse the gate without either growing the near-cap file or injecting their controls from `pcb_board.js`.
 - **workaround:** Keep the archive composer and handler in standalone modules, reuse the existing `fab_release_service`, and add the adjacent UI control from the already-gated board asset.
 - **status:** mitigated in this change
+
+## 2026-09-01 · codex · complete design archive download repair
+- **friction:** Unit and static-asset contracts passed for the new archive, but its first real Barracuda requests deterministically failed after 45–49 seconds because `fab_release_service` treated a renderer's stable, expanded read closure as changed bytes. Diagnosing it required two production-log correlations and three full readiness/export replays.
+- **idea:** Add a checked-in end-to-end release fixture that runs readiness, the real offline Assembly renderer, archive composition, and ZIP validation in one command. It would catch service/renderer trace-contract mismatches before deployment without depending on the live designs corpus.
+- **workaround:** The focused trace regression now distinguishes a stable expanded closure from changed bytes, and a real headless Barracuda export produced and validated the complete 85 MiB ZIP before release.
+- **status:** mitigated in this change

@@ -59,10 +59,11 @@ fn serviceFailure(res: *httpz.Response, err: anyerror) void {
         else => 500,
     };
     res.content_type = .TEXT;
-    res.body = switch (res.status) {
-        404 => "design or saved layout not found",
-        413 => "design archive is too large",
-        428 => "design changed or release waiver is required; run readiness again",
+    res.body = switch (err) {
+        error.BoardNotFound, error.LayoutNotFound, error.NoSavedLayout => "design or saved layout not found",
+        error.BoardReleaseTooLarge => "design archive is too large",
+        error.WaiverRequired => "release waiver is required; review the readiness report and confirm again",
+        error.InputsChanged => "design inputs changed while the archive was being prepared; run readiness again",
         else => "design archive export failed",
     };
 }

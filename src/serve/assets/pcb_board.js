@@ -12051,16 +12051,18 @@ function fabDownload(rep){
   init={method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)};
  }
  fetch(fabZipUrl(rep),init).then(function(r){
-  if(!r.ok)return r.json().catch(function(){return null;}).then(function(fresh){
+  if(!r.ok)return r.text().then(function(body){var fresh=null;
+   try{fresh=JSON.parse(body);}catch(ignore){}
    if(fresh&&(fresh.errors||fresh.raw_drc)){refreshed=true;fabOpenModal(fresh);return null;}
-   throw new Error("release export failed (HTTP "+r.status+")");});
+   throw new Error(body||("release export failed (HTTP "+r.status+")"));});
   var media=(r.headers.get("Content-Type")||"").toLowerCase(),fabid=r.headers.get("x-pcb-fab-id")||"";
   if(media.indexOf("application/zip")<0||!fabid)throw new Error("release endpoint did not return an identified ZIP");
   var disposition=r.headers.get("Content-Disposition")||"",match=/filename="?([^";]+)"?/i.exec(disposition);
   return r.blob().then(function(blob){return {blob:blob,name:match?match[1]:(fabExportKind==="archive"?"design-archive.zip":"pcb-release.zip")};});
  }).then(function(file){if(!file)return;var url=URL.createObjectURL(file.blob),a=document.createElement("a");
   a.href=url;a.download=file.name;document.body.appendChild(a);a.click();a.remove();setTimeout(function(){URL.revokeObjectURL(url);},0);fabModalClose();
- }).catch(function(){alert("Fabrication release could not be exported. No package was downloaded.");})
+ }).catch(function(err){var what=fabExportKind==="archive"?"Complete design archive":"Fabrication release";
+  alert(what+" could not be exported. No package was downloaded."+(err&&err.message?"\n\n"+err.message:""));})
  .then(function(){if(go&&!refreshed)go.disabled=false;});}
 function fabModalClose(){var m=document.getElementById("fab-modal");if(m)m.hidden=true;}
 function fabRenderReport(rep){

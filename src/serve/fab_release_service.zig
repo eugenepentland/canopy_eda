@@ -324,8 +324,14 @@ fn run(input: RunInput) ReleaseError!Result {
         return err;
     };
     read_trace.end();
-    const rendered_consumed_sha256 = read_trace.digest();
-    if (!read_trace.consistent or !std.mem.eql(u8, &consumed_sha256, &rendered_consumed_sha256)) return error.InputsChanged;
+    // Assembly rendering may legitimately discover release-only inputs that
+    // the electrical/CAM gate does not consume (for example rework guides or
+    // locally present datasheets). Keep those reads in the same cumulative
+    // trace and verify their exact bytes; a larger read set is not itself a
+    // design change. `ReadTrace` still fails closed if any earlier path is
+    // reread with different bytes, and the final lock verifies the expanded
+    // set again after package composition.
+    if (!read_trace.verify()) return error.InputsChanged;
     const package = try fab_package.compose(allocator, name, .{
         .placement = view.placement,
         .routed = view.routed,
@@ -367,6 +373,37 @@ fn writePackageZip(
     try zipfile.write(&writer, entries);
     if (writer.buffered().len != output_len) return error.WriteFailed;
     return output;
+}
+
+// spec: fabrication-release - a stable release renderer may extend the exact read trace with assembly-only inputs, while any changed byte still blocks packaging
+test "release renderer may extend a stable input trace" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "gate.sexp", .data = "gate" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "assembly.md", .data = "assembly" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    const gate_path = try std.fs.path.join(allocator, &.{ root, "gate.sexp" });
+    const assembly_path = try std.fs.path.join(allocator, &.{ root, "assembly.md" });
+
+    var trace = infra_fs.ReadTrace.init(allocator);
+    defer trace.deinit();
+    trace.begin();
+    _ = try infra_fs.cwd().readFileAlloc(allocator, gate_path, 32);
+    trace.end();
+    const gate_digest = trace.digest();
+
+    trace.begin();
+    _ = try infra_fs.cwd().readFileAlloc(allocator, assembly_path, 32);
+    trace.end();
+    const expanded_digest = trace.digest();
+    try std.testing.expect(!std.mem.eql(u8, &gate_digest, &expanded_digest));
+    try std.testing.expect(trace.verify());
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "assembly.md", .data = "changed" });
+    try std.testing.expect(!trace.verify());
 }
 
 // spec: system-review - a board release reports CAM blocking and waiver conditions independently
