@@ -215,10 +215,9 @@ pub const PinGroup = struct {
 /// wiring that merely has to survive the filter, drawn like any other net.
 pub const LonePinRole = enum { boundary_port, internal };
 
-/// Result of splitting a hub's pin groups across the two columns, merge-aware
-/// (identical single-passive spokes collapse to one slot). Lives here so
-/// `RenderCtx` can memoize it — the scene-graph renderer computes it three
-/// times per hub otherwise.
+/// Result of splitting a hub's pin groups across the two columns using the
+/// height of every visible connection. Lives here so `RenderCtx` can memoize
+/// it — the scene-graph renderer computes it three times per hub otherwise.
 pub const MergeAwareSplit = struct {
     left: []const PinGroup,
     right: []const PinGroup,
@@ -273,7 +272,7 @@ pub const RenderCtx = struct {
     /// instead of being claimed by the first supply pin rendered.
     /// See `computeSpokeAnchors`.
     spoke_anchor_net: std.StringHashMapUnmanaged([]const u8),
-    /// Memoized merge-aware hub splits plus terminal bodies temporarily
+    /// Memoized visible-height hub splits plus terminal bodies temporarily
     /// collected from passive branch trees for the final hub-level connection
     /// pass. Arena-backed like the rest of the render state.
     render_scratch: RenderScratch = .{},

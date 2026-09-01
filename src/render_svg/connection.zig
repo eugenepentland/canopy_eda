@@ -35,13 +35,6 @@ const branch_mod = @import("branch.zig");
 const RenderError = draw.RenderError;
 const escape = @import("../escape.zig");
 
-fn passiveRenderCount(inst: FlatInst) u32 {
-    var digits: usize = 0;
-    while (digits < inst.value.len and std.ascii.isDigit(inst.value[digits])) : (digits += 1) {}
-    if (digits == 0 or !std.mem.startsWith(u8, inst.value[digits..], "× ")) return 1;
-    return std.fmt.parseInt(u32, inst.value[0..digits], 10) catch 1;
-}
-
 // ── Layout constants ──────────────────────────────────────────────
 const half_divisor: f64 = 2.0;
 const nc_offset: f64 = 10.0;
@@ -2214,7 +2207,7 @@ fn drawVerticalPassive(w: anytype, inst: FlatInst, cx: f64, start_y: f64, end_y:
         \\<g transform="rotate(90 {d:.1} {d:.1})">
         \\
     , .{
-        passiveRenderCount(inst),
+        1,
         hit_x,
         top - vertical_hit_pad,
         vertical_hit_width,

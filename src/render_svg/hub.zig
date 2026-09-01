@@ -20,10 +20,9 @@ const connection = @import("connection.zig");
 const branch = @import("branch.zig");
 const RenderError = draw.RenderError;
 
-/// How many stubs a group renders given `stub_count` distinct stubs. Every
-/// distinct stub is drawn in full (stem-folding in `buildStubs` already keeps
-/// busy power/ground nets compact), so this is just the count with an empty
-/// group reserving one row.
+/// How many stubs a group renders given `stub_count` distinct stubs. Every pin
+/// is drawn in full, so this is just the count with an empty group reserving
+/// one row.
 fn displayedStubCount(stub_count: usize) usize {
     return @max(stub_count, 1);
 }
@@ -79,11 +78,10 @@ fn appendPinConnections(
     }
 }
 
-/// Collapse a group's pins into render stubs. Pins are already on one net, so
-/// folding those that share a function-name stem (GND_1, GND_2, …) into a
-/// single "<stem>_(<N>)" stub is safe; uniquely-named pins — and pins with no
-/// pinout name (labelled by their id) — each get their own. Order follows
-/// first appearance.
+/// Build one render stub per physical pin in a group. Pins that share a rail
+/// remain in the same `PinGroup`, so the renderer can tie their stubs together
+/// with one bus, but none of their labels or package-pin ids are hidden behind
+/// a count summary.
 const StubLists = struct { labels: []const []const u8, pins: []const []const u8 };
 
 fn buildStubs(
@@ -91,44 +89,11 @@ fn buildStubs(
     pins: []const []const u8,
     pin_names: *const std.StringHashMapUnmanaged([]const u8),
 ) RenderError!StubLists {
-    const Slot = struct { stem: []const u8, pins: std.ArrayList([]const u8), named: bool };
-    var slots: std.ArrayList(Slot) = .empty;
-    var stem_index: std.StringHashMapUnmanaged(usize) = .empty;
-
-    for (pins) |pn| {
-        if (pin_names.get(pn)) |fname| {
-            const stem = stemOf(fname);
-            if (stem_index.get(stem)) |idx| {
-                try slots.items[idx].pins.append(self.allocator, pn);
-            } else {
-                try stem_index.put(self.allocator, stem, slots.items.len);
-                var lst: std.ArrayList([]const u8) = .empty;
-                try lst.append(self.allocator, pn);
-                try slots.append(self.allocator, .{ .stem = stem, .pins = lst, .named = true });
-            }
-        } else {
-            // No pinout name: stands alone, labelled by its pin id.
-            var lst: std.ArrayList([]const u8) = .empty;
-            try lst.append(self.allocator, pn);
-            try slots.append(self.allocator, .{ .stem = pn, .pins = lst, .named = false });
-        }
-    }
-
     var labels: std.ArrayList([]const u8) = .empty;
     var pin_lists: std.ArrayList([]const u8) = .empty;
-    for (slots.items) |slot| {
-        var pj: std.ArrayList(u8) = .empty;
-        for (slot.pins.items, 0..) |p, i| {
-            if (i > 0) try pj.append(self.allocator, ',');
-            try pj.appendSlice(self.allocator, p);
-        }
-        try pin_lists.append(self.allocator, try pj.toOwnedSlice(self.allocator));
-        if (slot.pins.items.len == 1) {
-            const lbl = if (slot.named) (pin_names.get(slot.pins.items[0]) orelse slot.pins.items[0]) else slot.pins.items[0];
-            try labels.append(self.allocator, lbl);
-        } else {
-            try labels.append(self.allocator, try std.fmt.allocPrint(self.allocator, "{s}_({d})", .{ slot.stem, slot.pins.items.len }));
-        }
+    for (pins) |pin| {
+        try labels.append(self.allocator, pin_names.get(pin) orelse pin);
+        try pin_lists.append(self.allocator, pin);
     }
     return .{ .labels = try labels.toOwnedSlice(self.allocator), .pins = try pin_lists.toOwnedSlice(self.allocator) };
 }
@@ -521,9 +486,8 @@ pub fn groupHeights(self: *RenderCtx, groups: []const PinGroup, hub_ref: []const
                 },
             }
         }
-        // Each pin in the group now draws its own stub, so the group must be
-        // tall enough for whichever is larger: its connection slots or its
-        // (capped) pin-stub count.
+        // Each pin in the group draws its own stub, so the group must be tall
+        // enough for whichever is larger: its connection slots or pin count.
         const stubs: i32 = @intCast(displayedStubCount(group.stub_labels.len));
         const rows = @max(total_slots, stubs);
         const base: f64 = 40.0;
@@ -706,11 +670,13 @@ test "groupHubPinsFunctional groups separated supply pads without sorting the ot
 
     try testing.expectEqual(@as(usize, 2), groups.len);
     try testing.expectEqualStrings("6,9,13", groups[0].pin_numbers);
-    try testing.expectEqualStrings("VDD_(3)", groups[0].stub_labels[0]);
+    try testing.expectEqualSlices([]const u8, &.{ "VDD_1", "VDD_2", "VDD_3" }, groups[0].stub_labels);
+    try testing.expectEqualSlices([]const u8, &.{ "6", "9", "13" }, groups[0].stub_pins);
     try testing.expectEqualStrings("7", groups[1].pin_numbers);
 }
 
 // spec: render_svg - Ground pads fold into one row at their first physical occurrence while ordinary signals remain in pin order
+// spec: render_svg - Ground and supply pins sharing a rail render one labeled stub and pin number per physical pad
 test "groupHubPins folds separated ground pads without sorting signal pins by net" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -731,7 +697,8 @@ test "groupHubPins folds separated ground pads without sorting signal pins by ne
     try testing.expectEqualStrings("1", groups[0].pin_numbers);
     try testing.expectEqualStrings("2,4", groups[1].pin_numbers);
     try testing.expectEqualStrings("GND_(2)", groups[1].display_name);
-    try testing.expectEqualStrings("GND_(2)", groups[1].stub_labels[0]);
+    try testing.expectEqualSlices([]const u8, &.{ "GND_1", "GND_2" }, groups[1].stub_labels);
+    try testing.expectEqualSlices([]const u8, &.{ "2", "4" }, groups[1].stub_pins);
     try testing.expectEqual(@as(usize, 1), groups[1].conns.len);
     try testing.expectEqualStrings("3", groups[2].pin_numbers);
 }

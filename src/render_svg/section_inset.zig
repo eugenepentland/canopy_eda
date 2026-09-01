@@ -1,10 +1,8 @@
-//! Renders the full-detail hub box with every pin labeled (the section-inset
-//! "all pins" view), first collapsing runs of identical single-passive spokes
-//! into one `N×` row and restoring the instance map afterward. Sits above
-//! `hub.zig`/`connection.zig` for the zoomed-in schematic view.
+//! Renders the full-detail hub box with every pin and passive labeled (the
+//! section-inset "all pins" view). Sits above `hub.zig`/`connection.zig` for
+//! the zoomed-in schematic view.
 
 const std = @import("std");
-const log = @import("../infra/log.zig");
 const env_mod = @import("../eval/env.zig");
 const rails_mod = @import("../eval/rails.zig");
 const ctx_mod = @import("context.zig");
@@ -47,11 +45,6 @@ const passive_chain_base_reach: f64 = 78.0;
 const branched_chain_base_reach: f64 = 83.0;
 const passive_chain_pitch: f64 = 60.0;
 
-/// A spoke instance whose `inst_map` entry was temporarily rewritten to add a
-/// count prefix (e.g. value `"100nF"` → `"3× 100nF"`). Restored by
-/// `restoreInstMap` after the SVG is written.
-const Saved = struct { ref: []const u8, original: FlatInst };
-
 fn functionalSignalNet(net: []const u8) bool {
     if (net.len == 0 or isGroundNet(net)) return false;
     for (rails_mod.schematic_supply_prefixes) |prefix| {
@@ -83,101 +76,6 @@ fn groupsSharePassiveIsland(ctx: *const RenderCtx, a: PinGroup, b: PinGroup) boo
 fn gapAfterGroup(ctx: *const RenderCtx, groups: []const PinGroup, index: usize, default_gap: f64) f64 {
     if (default_gap == 0 or index + 1 >= groups.len) return 0;
     return if (groupsSharePassiveIsland(ctx, groups[index], groups[index + 1])) 0 else default_gap;
-}
-
-/// Collapse runs of identical single-passive spokes before rendering.
-///
-/// For every `.pin` endpoint in a spoke group, build a merge key
-/// `(terminal | value | symbol)` — any spoke whose chain is literally one
-/// passive hanging off the hub pin and landing at the same terminal hashes to
-/// the same key. Representative instances get their `value` rewritten to
-/// `"Nx original"`; duplicates go into `rendered_spokes` so the SVG primitive
-/// skips them. The canvas viewer did the same thing via `mergeIdenticalSpokes`
-/// in `render_json.zig` — this is the same idea, just applied directly to the
-/// shared `RenderCtx` state.
-fn applyMergeAnnotations(
-    ctx: *RenderCtx,
-    hub_ref: []const u8,
-    groups: []const PinGroup,
-    saved: *std.ArrayList(Saved),
-) !void {
-    const allocator = ctx.allocator;
-
-    for (groups) |g| {
-        // For this group, bucket mergeable .pin endpoints by merge key.
-        var buckets: std.StringHashMapUnmanaged(std.ArrayList([]const u8)) = .empty;
-        defer {
-            var it = buckets.iterator();
-            while (it.next()) |kv| kv.value_ptr.deinit(allocator);
-            buckets.deinit(allocator);
-        }
-
-        for (g.conns) |c| switch (c.endpoint) {
-            .pin => |p| {
-                if (!ctx.spoke_set.contains(p.ref_des)) continue;
-                if (!isSinglePassiveToTerminal(ctx, p.ref_des, hub_ref, c.pin)) continue;
-                const inst = ctx.inst_map.get(p.ref_des) orelse continue;
-                const terminal = try connection.getConnTerminal(ctx, c.endpoint, hub_ref, c.pin);
-                const val = if (inst.value.len > 0) inst.value else inst.component;
-                const key = try std.fmt.allocPrint(allocator, "{s}|{s}|{s}", .{ terminal, val, inst.symbol });
-                const gop = try buckets.getOrPut(allocator, key);
-                if (!gop.found_existing) gop.value_ptr.* = .empty;
-                try gop.value_ptr.append(allocator, p.ref_des);
-            },
-            .net => {},
-        };
-
-        var it = buckets.iterator();
-        while (it.next()) |kv| {
-            const refs = kv.value_ptr.items;
-            if (refs.len < 2) continue;
-
-            const rep_ref = refs[0];
-            const original = ctx.inst_map.get(rep_ref) orelse continue;
-            try saved.append(allocator, .{ .ref = rep_ref, .original = original });
-
-            const base_val = if (original.value.len > 0) original.value else original.component;
-            const new_value = try std.fmt.allocPrint(allocator, "{d}× {s}", .{ refs.len, base_val });
-
-            var modified = original;
-            modified.value = new_value;
-            try ctx.inst_map.put(allocator, rep_ref, modified);
-
-            // Every non-representative duplicate is already "drawn" as far as
-            // the SVG pass is concerned — mark it rendered so any branch logic
-            // that encounters it further down the chain skips it.
-            for (refs[1..]) |dup| try ctx.rendered_spokes.put(allocator, dup, {});
-        }
-    }
-}
-
-fn restoreInstMap(ctx: *RenderCtx, saved: []const Saved) void {
-    // Called from defer — can't propagate. OOM on restore would corrupt the
-    // map, so log every failure rather than silently dropping the entry.
-    for (saved) |s| ctx.inst_map.put(ctx.allocator, s.ref, s.original) catch |e| {
-        log.warn("restoreInstMap put {s}: {s}", .{ s.ref, @errorName(e) });
-    };
-}
-
-/// A spoke counts as "single passive to terminal" when its chain from the
-/// hub pin is just that one instance and it terminates at a real net — no
-/// further hops. This is the shape that mergeable decoupling caps take.
-fn isSinglePassiveToTerminal(
-    ctx: *RenderCtx,
-    spoke_ref: []const u8,
-    hub_ref: []const u8,
-    from_pin: []const u8,
-) bool {
-    var visited: std.StringHashMapUnmanaged(void) = .empty;
-    defer visited.deinit(ctx.allocator);
-    visited.put(ctx.allocator, spoke_ref, {}) catch return false;
-    const chain = connection.findSpokeChain(
-        ctx,
-        spoke_ref,
-        .{ .pin = .{ .ref_des = hub_ref, .pin = from_pin } },
-        &visited,
-    ) catch return false;
-    return chain.chain.len == 0 and chain.branches.len == 0;
 }
 
 fn terminalLabelWidth(terminal: []const u8) f64 {
@@ -243,9 +141,8 @@ fn requiredSidePad(ctx: *RenderCtx, hub_ref: []const u8, groups: []const PinGrou
 /// drawn balanced left/right. Layout mirrors the main schematic's grouped hub
 /// box (`render_html.renderHubSvg`), sharing `hub.splitGroupsByHeight` for the
 /// column split. Returns without writing anything if `groups` is empty.
-/// Identical-spoke runs (e.g. five
-/// 100nF caps to the same VDD/GND terminal) are collapsed visually via
-/// `applyMergeAnnotations` before drawing.
+/// Parallel passives remain separate branches, including identical decoupling
+/// capacitors tied between the same supply and ground rails.
 pub fn renderHubAllPins(
     ctx: *RenderCtx,
     w: anytype,
@@ -254,13 +151,6 @@ pub fn renderHubAllPins(
     functional: bool,
 ) RenderError!void {
     if (groups.len == 0) return;
-
-    var saved: std.ArrayList(Saved) = .empty;
-    defer {
-        restoreInstMap(ctx, saved.items);
-        saved.deinit(ctx.allocator);
-    }
-    try applyMergeAnnotations(ctx, hub.ref_des, groups, &saved);
 
     const previous_functional_layout = ctx.render_scratch.functional_layout;
     ctx.render_scratch.functional_layout = functional;
@@ -412,11 +302,7 @@ fn rememberFunctionalPinRows(ctx: *RenderCtx, layout: FunctionalRowLayout) !void
 /// the label is the component's pin function name (`IN_1`, `GND_2`, …) and a
 /// small pin-number tag, mirroring the original single-stub layout. The stubs
 /// are stacked across the group's vertical band `h` (centred on `py`) and tied
-/// together with a vertical bus so it's obvious which pins share the net. Pins
-/// that share a function-name stem (GND_1, GND_2, …) collapse into one
-/// "<stem>_(<N>)" stub (see `hub.buildStubs`); every distinct stub past that is
-/// drawn in full — there's no `+N more` summary, since stem-folding already
-/// keeps busy power/ground nets compact and each remaining stub is meaningful.
+/// together with a vertical bus so it's obvious which pins share the net.
 /// The net itself is labelled out at the wire's terminal by
 /// `renderGroupedConnections`.
 fn renderPinStub(w: anytype, side: ctx_mod.Side, px: f64, py: f64, group: PinGroup, hub_ref: []const u8) !void {
@@ -438,12 +324,7 @@ fn renderPinStub(w: anytype, side: ctx_mod.Side, px: f64, py: f64, group: PinGro
     for (labels, 0..) |label, i| {
         const pins = pin_lists[i];
         const y = first_y + @as(f64, @floatFromInt(i)) * gap;
-        // A collapsed stub (multiple pins → a comma in `pins`) carries its
-        // count in the label, so leave the small pin-number tag empty; a single
-        // pin shows its id.
-        const collapsed = std.mem.indexOfScalar(u8, pins, ',') != null;
-        const num_text: []const u8 = if (collapsed) "" else pins;
-        try renderOneStub(w, side, px, stub_x, y, label, num_text, pins, hub_ref);
+        try renderOneStub(w, side, px, stub_x, y, label, pins, pins, hub_ref);
     }
 
     // Vertical bus tying every stub on this group to the same node, so it's
@@ -459,9 +340,8 @@ fn renderPinStub(w: anytype, side: ctx_mod.Side, px: f64, py: f64, group: PinGro
 }
 
 /// One pin stub: the short edge line, the function-name label inside the box,
-/// and a small pin-number tag on the stub. `num_text` is the tag (empty for a
-/// summary stub); `data_pin` is what the sidebar matches on (a single pin id,
-/// or the comma list of collapsed pins for a summary stub).
+/// and a small pin-number tag on the stub. `data_pin` is what the sidebar
+/// matches on.
 fn renderOneStub(
     w: anytype,
     side: ctx_mod.Side,

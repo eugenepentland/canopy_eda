@@ -1761,8 +1761,8 @@ fn svgFirstY1After(svg: []const u8, marker: []const u8) !f64 {
     return std.fmt.parseFloat(f64, svg[start..end]);
 }
 
-// spec: render_svg - Passive accounting in the SVG equals the physical source count even when identical spokes fold into one visual symbol
-test "SVG passive metadata preserves exact source count across folded spokes" {
+// spec: render_svg - Identical decoupling capacitors each render as their own labeled schematic symbol
+test "SVG renders identical decoupling capacitors individually" {
     const instances = [_]env_mod.Instance{
         .{ .ref_des = "U1", .component = "ic", .value = "", .footprint = "", .symbol = "" },
         .{ .ref_des = "C1", .component = "cap-0402", .value = "0.1uF", .footprint = "", .symbol = "generic-cap" },
@@ -1798,9 +1798,10 @@ test "SVG passive metadata preserves exact source count across folded spokes" {
         if (!draw.isHub(flat)) source_passives += 1;
     }
     try std.testing.expectEqual(source_passives, try svgPassiveCount(svg.written()));
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, svg.written(), "data-passive-count=\""));
-    try std.testing.expect(std.mem.indexOf(u8, svg.written(), "data-passive-count=\"2\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, svg.written(), ">C1 2× 0.1uF</text>") != null);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, svg.written(), "data-passive-count=\"1\""));
+    try std.testing.expect(std.mem.indexOf(u8, svg.written(), ">C1 0.1uF</text>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, svg.written(), ">C2 0.1uF</text>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, svg.written(), "2× 0.1uF") == null);
 }
 
 // spec: render_svg - A Functional shared RF bias rail directly joins compact P/M pull-up rows and centers its choke/bypass tree between them

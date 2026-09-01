@@ -35,13 +35,6 @@ const writeDebugPin = draw.writeDebugPin;
 const RenderError = draw.RenderError;
 const escape = @import("../escape.zig");
 
-fn passiveRenderCount(inst: FlatInst) u32 {
-    var digits: usize = 0;
-    while (digits < inst.value.len and std.ascii.isDigit(inst.value[digits])) : (digits += 1) {}
-    if (digits == 0 or !std.mem.startsWith(u8, inst.value[digits..], "× ")) return 1;
-    return std.fmt.parseInt(u32, inst.value[0..digits], 10) catch 1;
-}
-
 // ── Layout constants ──────────────────────────────────────────────
 const half_divisor: f64 = 2.0;
 const branch_bus_gap: f64 = 10.0;
@@ -419,7 +412,7 @@ fn drawPassiveLeft(w: anytype, inst: FlatInst, x: f64, cy: f64) !void {
         \\<rect x="{d:.1}" y="{d:.1}" width="{d:.1}" height="{d:.1}" fill="transparent" class="hit-area"/>
         \\
     , .{
-        passiveRenderCount(inst),
+        1,
         bx - pad,
         by - passive_label_offset_y,
         passive_bw + pad * half_divisor,
@@ -453,7 +446,7 @@ fn drawPassiveRight(w: anytype, inst: FlatInst, x: f64, cy: f64) !void {
         \\<rect x="{d:.1}" y="{d:.1}" width="{d:.1}" height="{d:.1}" fill="transparent" class="hit-area"/>
         \\
     , .{
-        passiveRenderCount(inst),
+        1,
         bx - pad,
         by - passive_label_offset_y,
         passive_bw + pad * half_divisor,

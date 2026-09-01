@@ -5033,6 +5033,7 @@ Public functions: renderSchematic
 - Docks a (decouples ...) bypass cap on the bound hub pad instead of every pin of the rail
 - A passive bias island shared by RF output pins and a busy supply rail is owned by the pin that continues to a declared output port, falling back to the lowest RF pin
 - Ground pads fold into one row at their first physical occurrence while ordinary signals remain in pin order
+- Ground and supply pins sharing a rail render one labeled stub and pin number per physical pad
 - Hub pin spacing reserves rows only for connections the scene graph actually draws
 - Pin groups classify supply and ground roles from function or net names
 - An attached sub-block folds into its host section instead of paging its module title
@@ -5061,7 +5062,8 @@ Public functions: renderSchematic
 - A Functional turned series return shares the destination rail's x-coordinate so VTUNE closes straight down without an outside detour
 - A vertical passive labels away from its hub: left of left-side parts and right of right-side parts
 - Functional pin rows put the pin's own net before a ground shunt so the shunt draws below the pin; Original remains alphabetical
-- Passive accounting in the SVG equals the physical source count even when identical spokes fold into one visual symbol
+- Identical decoupling capacitors each render as their own labeled schematic symbol
+- The scene graph preserves one entry per identical decoupling capacitor
 - Net names are XML-escaped in the emitted SVG markup
 - Both scene-graph pinout readers take the class-owned lib_limits cap, so a pinout past the retired 256 KiB figure still carries its pin names and alternates
 

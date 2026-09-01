@@ -53,7 +53,7 @@ const Allocator = std.mem.Allocator;
 /// Error set for the JSON scene-graph emitter — uses the same
 /// allocation-backed and I/O-backed `std.Io.Writer` implementations —
 /// `draw.RenderError` propagates the same union
-/// up through `mergeAwareHubHeight` → `renderSceneGraph`.
+/// up through `visibleHubHeight` → `renderSceneGraph`.
 pub const RenderError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
 // ── Layout constants ──────────────────────────────────────────────
@@ -575,33 +575,29 @@ const SceneGraph = struct {
             .decouple_pin = inst.decouple_pin,
         });
     }
-
-    fn addPassiveWithCount(self: *SceneGraph, inst: FlatInst, x: f64, y: f64, count: u32, flip: bool) !void {
-        try self.passives.append(self.allocator, .{
-            .ref = shortRef(inst.ref_des),
-            .component = inst.component,
-            .value = inst.value,
-            .symbol = inst.symbol,
-            .x = x,
-            .y = y,
-            .w = passive_bw,
-            .h = 20.0,
-            .count = count,
-            .src_offset = inst.src_offset,
-            .flip = flip,
-            .ref_full = inst.ref_des,
-            .decouple_ic = inst.decouple_ic,
-            .decouple_pin = inst.decouple_pin,
-        });
-    }
 };
 
-// ── Merge-aware height calculation ──────────────────────────────────
+// ── Visible-content height calculation ──────────────────────────────
 
-/// Compute group heights accounting for identical spoke merging.
-/// Unlike hub_mod.groupHeights which counts every spoke individually,
-/// this groups identical single-passive spokes and counts them as one slot.
-fn mergeAwareGroupHeights(ctx: *RenderCtx, allocator: Allocator, groups: []const PinGroup, hub_ref: []const u8) ![]f64 {
+fn visibleConnectionSlots(ctx: *RenderCtx, conn: AdjEntry, hub_ref: []const u8, pin_net_name: []const u8) u32 {
+    return switch (conn.endpoint) {
+        .net => |net| blk: {
+            const term = baseNetName(net);
+            if (!ctx.significant_nets.contains(term)) break :blk 0;
+            const own = std.mem.eql(u8, term, baseNetName(pin_net_name));
+            if (own and !connection.shouldShowOwnNet(ctx, term, hub_ref)) break :blk 0;
+            break :blk 1;
+        },
+        .pin => |pin| if (ctx.spoke_set.contains(pin.ref_des))
+            hub_mod.estimateBranchCount(ctx, pin.ref_des, hub_ref)
+        else
+            1,
+    };
+}
+
+/// Compute group heights from the connections the scene graph actually draws.
+/// Identical passives deliberately remain distinct slots.
+fn visibleGroupHeights(ctx: *RenderCtx, allocator: Allocator, groups: []const PinGroup, hub_ref: []const u8) ![]f64 {
     var heights = try allocator.alloc(f64, groups.len);
     for (groups, 0..) |group, i| {
         var total_slots: u32 = 0;
@@ -614,97 +610,7 @@ fn mergeAwareGroupHeights(ctx: *RenderCtx, allocator: Allocator, groups: []const
         const canon_key = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ hub_ref, first_pin_id });
         const pin_net_name = ctx.pin_canonical_nets.get(canon_key) orelse "";
 
-        // Classify connections for this group (same logic as collectGroupConnections)
-        var classified: std.ArrayList(Classified) = .empty;
-        for (group.conns) |conn| {
-            switch (conn.endpoint) {
-                .net => |net| {
-                    const term = baseNetName(net);
-                    if (!ctx.significant_nets.contains(term)) continue;
-                    const own = std.mem.eql(u8, term, baseNetName(pin_net_name));
-                    if (own and !connection.shouldShowOwnNet(ctx, term, hub_ref)) continue;
-                    try classified.append(allocator, .{ .conn = conn, .terminal = term });
-                },
-                .pin => |p| {
-                    if (ctx.spoke_set.contains(p.ref_des)) {
-                        const term = try connection.getConnTerminal(ctx, conn.endpoint, hub_ref, conn.pin);
-                        try classified.append(allocator, .{ .conn = conn, .terminal = term });
-                    } else {
-                        try classified.append(allocator, .{ .conn = conn, .terminal = "" });
-                        total_slots += 1;
-                        continue; // Non-spoke hub connections are always 1 slot, skip merge logic
-                    }
-                },
-            }
-        }
-
-        // Now count slots with merge awareness for spoke/net connections
-        if (classified.items.len > 0) {
-            // Build merge keys for single-passive spokes
-            const SpokeKey = struct { key: []const u8, is_mergeable: bool };
-            var infos = try allocator.alloc(SpokeKey, classified.items.len);
-            var consumed = try allocator.alloc(bool, classified.items.len);
-            for (consumed) |*c| c.* = false;
-
-            for (classified.items, 0..) |entry, j| {
-                switch (entry.conn.endpoint) {
-                    .pin => |p| {
-                        if (ctx.spoke_set.contains(p.ref_des)) {
-                            const inst = ctx.inst_map.get(p.ref_des) orelse {
-                                infos[j] = .{ .key = "", .is_mergeable = false };
-                                continue;
-                            };
-                            var visited: std.StringHashMapUnmanaged(void) = .empty;
-                            try visited.put(allocator, p.ref_des, {});
-                            const chain = try connection.findSpokeChain(ctx, p.ref_des, .{ .pin = .{ .ref_des = hub_ref, .pin = entry.conn.pin } }, &visited);
-                            if (chain.chain.len == 0 and chain.branches.len == 0) {
-                                const val = if (inst.value.len > 0) inst.value else inst.component;
-                                infos[j] = .{
-                                    .key = try std.fmt.allocPrint(allocator, "{s}|{s}|{s}", .{ entry.terminal, val, inst.symbol }),
-                                    .is_mergeable = true,
-                                };
-                            } else {
-                                infos[j] = .{ .key = "", .is_mergeable = false };
-                            }
-                        } else {
-                            infos[j] = .{ .key = "", .is_mergeable = false };
-                        }
-                    },
-                    .net => {
-                        infos[j] = .{ .key = "", .is_mergeable = false };
-                    },
-                }
-            }
-
-            // Count slots: merged groups count as 1 slot
-            for (classified.items, 0..) |_, j| {
-                if (consumed[j]) continue;
-                consumed[j] = true;
-
-                if (!infos[j].is_mergeable or infos[j].key.len == 0) {
-                    // Non-mergeable: count normally
-                    switch (classified.items[j].conn.endpoint) {
-                        .pin => |p| {
-                            if (ctx.spoke_set.contains(p.ref_des)) {
-                                total_slots += hub_mod.estimateBranchCount(ctx, p.ref_des, hub_ref);
-                            } else {
-                                total_slots += 1;
-                            }
-                        },
-                        .net => total_slots += 1,
-                    }
-                } else {
-                    // Mergeable: consume all identical and count as 1 slot
-                    for (j + 1..classified.items.len) |k| {
-                        if (consumed[k]) continue;
-                        if (infos[k].is_mergeable and std.mem.eql(u8, infos[k].key, infos[j].key)) {
-                            consumed[k] = true;
-                        }
-                    }
-                    total_slots += 1;
-                }
-            }
-        }
+        for (group.conns) |conn| total_slots += visibleConnectionSlots(ctx, conn, hub_ref, pin_net_name);
 
         const base: f64 = 40.0;
         heights[i] = base + @as(f64, @floatFromInt(@max(total_slots, 1) -| 1)) * per_conn_spacing;
@@ -713,7 +619,7 @@ fn mergeAwareGroupHeights(ctx: *RenderCtx, allocator: Allocator, groups: []const
 }
 
 // spec: render_svg - Hub pin spacing reserves rows only for connections the scene graph actually draws
-test "merge-aware group height ignores a suppressed own-net label" {
+test "visible group height ignores a suppressed own-net label" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const allocator = arena_state.allocator();
@@ -730,7 +636,7 @@ test "merge-aware group height ignores a suppressed own-net label" {
             .{ .pin = "1", .endpoint = .{ .net = "VISIBLE" } },
         },
     }};
-    const heights = try mergeAwareGroupHeights(&ctx, allocator, &groups, "U1");
+    const heights = try visibleGroupHeights(&ctx, allocator, &groups, "U1");
 
     // LOCAL is the pin's implicit own net and does not render. VISIBLE alone
     // occupies one row, so the group keeps the 40 px base height instead of
@@ -738,14 +644,12 @@ test "merge-aware group height ignores a suppressed own-net label" {
     try std.testing.expectEqual(@as(f64, 40.0), heights[0]);
 }
 
-/// Mirror of `hub_mod.SplitGroups` for the merge-aware path.
+/// Mirror of `hub_mod.SplitGroups` for the scene-graph path.
 const MergeAwareSplit = ctx_mod.MergeAwareSplit;
 
 /// Split ordered hub pin groups into sequential left/right ranges using their
-/// merge-aware visual heights. Identical single-passive spokes (e.g. a row of
-/// decoupling caps tied to the same rail) collapse to one slot before choosing
-/// the balanced prefix boundary.
-/// Content key for the merge-aware split memo: `hub_ref` plus each group's pin
+/// visible-content heights.
+/// Content key for the visible-height split memo: `hub_ref` plus each group's pin
 /// ids. `groupHubPins` is deterministic in (ctx, pins), so identical pin ids ⇒
 /// identical groups ⇒ identical split — a cache hit is only ever returned for
 /// byte-identical inputs. Owned by `allocator` (arena; lives for the render).
@@ -759,19 +663,19 @@ fn splitCacheKey(allocator: Allocator, all_groups: []const PinGroup, hub_ref: []
     return buf.items;
 }
 
-fn splitGroupsByMergeAwareHeight(
+fn splitGroupsByVisibleHeight(
     ctx: *RenderCtx,
     allocator: Allocator,
     all_groups: []const PinGroup,
     hub_ref: []const u8,
 ) !MergeAwareSplit {
     // Memoize: the three per-hub render passes recompute an identical split
-    // (mergeAwareGroupHeights walks findSpokeChain per connection — the
+    // (visibleGroupHeights walks branch counts per connection — the
     // expensive part). Key on exact content so the cache is result-identical.
     const cache_key = try splitCacheKey(allocator, all_groups, hub_ref);
     if (ctx.render_scratch.hub_splits.get(cache_key)) |cached| return cached;
 
-    const all_heights = try mergeAwareGroupHeights(ctx, allocator, all_groups, hub_ref);
+    const all_heights = try visibleGroupHeights(ctx, allocator, all_groups, hub_ref);
     defer allocator.free(all_heights);
 
     var total: f64 = 0;
@@ -800,8 +704,8 @@ fn splitGroupsByMergeAwareHeight(
     return result;
 }
 
-/// Compute hub height using merge-aware group heights.
-fn mergeAwareHubHeight(
+/// Compute hub height using visible scene-graph content.
+fn visibleHubHeight(
     ctx: *RenderCtx,
     allocator: Allocator,
     hub: FlatInst,
@@ -813,7 +717,7 @@ fn mergeAwareHubHeight(
     const all_pins = try collectHubPinIds(ctx, allocator, hub, pin_ctx);
 
     const all_groups = try hub_mod.groupHubPins(ctx, all_pins, adj_entries, &pn_map);
-    const split = try splitGroupsByMergeAwareHeight(ctx, allocator, all_groups, hub.ref_des);
+    const split = try splitGroupsByVisibleHeight(ctx, allocator, all_groups, hub.ref_des);
     const left_heights = split.left_heights;
     const right_heights = split.right_heights;
 
@@ -1058,14 +962,14 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
         }
     }
 
-    // Pass 1: Measure cell heights (merge-aware)
+    // Pass 1: Measure cell heights from every visible connection.
     var cell_heights = try allocator.alloc(f64, cells.items.len);
     defer allocator.free(cell_heights);
 
     for (cells.items, 0..) |cell, ci| {
         const nc_oks = explicit_nc_map.get(cell.hub_inst.ref_des) orelse &.{};
         const pin_ctx = HubPinContext{ .part = cell.part, .explicit_nc_oks = nc_oks };
-        cell_heights[ci] = try mergeAwareHubHeight(&ctx, allocator, cell.hub_inst, pin_ctx);
+        cell_heights[ci] = try visibleHubHeight(&ctx, allocator, cell.hub_inst, pin_ctx);
     }
 
     // Compute row heights
@@ -1296,7 +1200,7 @@ fn collectHubData(
     const all_pins = try collectHubPinIds(ctx, allocator, hub, pin_ctx);
 
     const all_groups = try hub_mod.groupHubPins(ctx, all_pins, adj_entries, &pn_map);
-    const split = try splitGroupsByMergeAwareHeight(ctx, allocator, all_groups, hub.ref_des);
+    const split = try splitGroupsByVisibleHeight(ctx, allocator, all_groups, hub.ref_des);
     const left_groups = split.left;
     const right_groups = split.right;
     const left_heights = split.left_heights;
@@ -1374,7 +1278,7 @@ fn collectHubData(
     return json_hub;
 }
 
-/// Strip the "_(N)" fold-count suffix a collapsed stub label carries
+/// Strip the "_(N)" group-count suffix a multi-pin scene row carries
 /// ("VSS_(9)" → "VSS") so the role heuristics see the bare function name.
 fn stripFoldCount(name: []const u8) []const u8 {
     if (name.len < 4 or name[name.len - 1] != ')') return name;
@@ -1440,12 +1344,12 @@ fn collectHubConnections(
 
     const all_groups = try hub_mod.groupHubPins(ctx, all_pins, adj_entries, &pn_map);
     // Must mirror collectHubData's split exactly. That pass balances groups
-    // left/right by merge-aware *height* and places each pin by accumulating
+    // left/right by visible-content *height* and places each pin by accumulating
     // those heights; if this pass splits differently (it used to balance by pin
     // *count*), a pin's connection wire is emitted on a different side / y than
     // the pin is drawn at — so nets visibly miss the IC pads. Share the one
     // split so every wire meets its pin.
-    const split = try splitGroupsByMergeAwareHeight(ctx, allocator, all_groups, hub.ref_des);
+    const split = try splitGroupsByVisibleHeight(ctx, allocator, all_groups, hub.ref_des);
     const left_groups = split.left;
     const right_groups = split.right;
     const left_heights = split.left_heights;
@@ -1521,13 +1425,10 @@ fn collectGroupConnections(
         }
     }.lt);
 
-    // Merge identical single-passive spokes to the same terminal (e.g. 5x 100nF decoupling caps to GND)
-    const merged = try mergeIdenticalSpokes(ctx, allocator, classified.items, hub_ref);
-
-    var slot_counts = try allocator.alloc(u32, merged.items.len);
+    var slot_counts = try allocator.alloc(u32, classified.items.len);
     var total_slots: u32 = 0;
-    for (merged.items, 0..) |entry, i| {
-        const slots: u32 = if (entry.merge_count > 1) 1 else switch (entry.classified.conn.endpoint) {
+    for (classified.items, 0..) |entry, i| {
+        const slots: u32 = switch (entry.conn.endpoint) {
             .pin => |p| blk: {
                 if (ctx.spoke_set.contains(p.ref_des)) {
                     break :blk hub_mod.estimateBranchCount(ctx, p.ref_des, hub_ref);
@@ -1540,7 +1441,7 @@ fn collectGroupConnections(
         total_slots += slots;
     }
 
-    const multi = merged.items.len > 1;
+    const multi = classified.items.len > 1;
     const bus_offset: f64 = bus_offset_px;
     const bus_x: f64 = switch (side) {
         .left => stub_x - bus_offset,
@@ -1554,7 +1455,7 @@ fn collectGroupConnections(
 
     var results: std.ArrayList(BranchResult) = .empty;
 
-    for (merged.items, 0..) |entry, i| {
+    for (classified.items, 0..) |entry, i| {
         const slots = slot_counts[i];
         const slot_center = @as(f64, @floatFromInt(consumed_slots)) + @as(f64, @floatFromInt(slots -| 1)) / half_divisor;
         const cy = py + slot_center * per_conn_spacing - total_h2 / half_divisor;
@@ -1562,44 +1463,28 @@ fn collectGroupConnections(
         if (cy < min_cy) min_cy = cy;
         if (cy > max_cy) max_cy = cy;
 
-        const internal_net: []const u8 = switch (entry.classified.conn.endpoint) {
-            .net => entry.classified.terminal,
+        const internal_net: []const u8 = switch (entry.conn.endpoint) {
+            .net => entry.terminal,
             .pin => pin_net_name,
         };
 
         const conn_stub_x = if (multi) bus_x else stub_x;
         const conn_stub_y = if (multi) cy else py;
 
-        if (entry.merge_count > 1) {
-            const end_x = try collectMergedPassive(
-                ctx,
-                scene,
-                allocator,
-                entry.classified.conn.endpoint,
-                conn_stub_x,
-                conn_stub_y,
-                cy,
-                side,
-                internal_net,
-                entry.merge_count,
-            );
-            try results.append(allocator, .{ .end_x = end_x, .cy = cy, .terminal = entry.classified.terminal });
-        } else {
-            const end_x = try collectConnBody(
-                ctx,
-                scene,
-                allocator,
-                entry.classified.conn.endpoint,
-                hub_ref,
-                entry.classified.conn.pin,
-                conn_stub_x,
-                conn_stub_y,
-                cy,
-                side,
-                internal_net,
-            );
-            try results.append(allocator, .{ .end_x = end_x, .cy = cy, .terminal = entry.classified.terminal });
-        }
+        const end_x = try collectConnBody(
+            ctx,
+            scene,
+            allocator,
+            entry.conn.endpoint,
+            hub_ref,
+            entry.conn.pin,
+            conn_stub_x,
+            conn_stub_y,
+            cy,
+            side,
+            internal_net,
+        );
+        try results.append(allocator, .{ .end_x = end_x, .cy = cy, .terminal = entry.terminal });
     }
 
     // Bus wires
@@ -1624,129 +1509,6 @@ fn collectGroupConnections(
     const term_x = default_term_x;
 
     try collectTerminals(ctx, scene, allocator, results.items, term_x, side);
-}
-
-const MergedEntry = struct {
-    classified: Classified,
-    merge_count: u32,
-};
-
-/// Find groups of identical single-passive spoke connections to the same terminal
-/// and collapse them into one entry with a count (e.g. "5x 100nF" to GND).
-fn mergeIdenticalSpokes(ctx: *RenderCtx, allocator: Allocator, classified: []const Classified, hub_ref: []const u8) !std.ArrayList(MergedEntry) {
-    var result: std.ArrayList(MergedEntry) = .empty;
-
-    // Build a key for each spoke connection: "terminal|value|symbol"
-    // Non-spoke connections get unique keys so they never merge.
-    const SpokeInfo = struct { key: []const u8, is_single_spoke: bool };
-    var infos = try allocator.alloc(SpokeInfo, classified.len);
-    var consumed = try allocator.alloc(bool, classified.len);
-    for (consumed) |*c| c.* = false;
-
-    for (classified, 0..) |entry, i| {
-        switch (entry.conn.endpoint) {
-            .pin => |p| {
-                if (ctx.spoke_set.contains(p.ref_des)) {
-                    const inst = ctx.inst_map.get(p.ref_des) orelse {
-                        infos[i] = .{ .key = "", .is_single_spoke = false };
-                        continue;
-                    };
-                    // Check it's a single passive (no chain)
-                    var visited: std.StringHashMapUnmanaged(void) = .empty;
-                    try visited.put(allocator, p.ref_des, {});
-                    const chain = try connection.findSpokeChain(ctx, p.ref_des, .{ .pin = .{ .ref_des = hub_ref, .pin = entry.conn.pin } }, &visited);
-                    if (chain.chain.len == 0 and chain.branches.len == 0) {
-                        // Single passive to terminal — mergeable
-                        const val = if (inst.value.len > 0) inst.value else inst.component;
-                        infos[i] = .{
-                            .key = try std.fmt.allocPrint(allocator, "{s}|{s}|{s}", .{ entry.terminal, val, inst.symbol }),
-                            .is_single_spoke = true,
-                        };
-                    } else {
-                        infos[i] = .{ .key = "", .is_single_spoke = false };
-                    }
-                } else {
-                    infos[i] = .{ .key = "", .is_single_spoke = false };
-                }
-            },
-            .net => {
-                infos[i] = .{ .key = "", .is_single_spoke = false };
-            },
-        }
-    }
-
-    // Group by key
-    for (classified, 0..) |entry, i| {
-        if (consumed[i]) continue;
-        if (!infos[i].is_single_spoke or infos[i].key.len == 0) {
-            try result.append(allocator, .{ .classified = entry, .merge_count = 1 });
-            consumed[i] = true;
-            continue;
-        }
-        // Count identical entries
-        var count: u32 = 1;
-        for (classified[i + 1 ..], i + 1..) |_, j| {
-            if (consumed[j]) continue;
-            if (infos[j].is_single_spoke and std.mem.eql(u8, infos[j].key, infos[i].key)) {
-                count += 1;
-                consumed[j] = true;
-                // Mark the merged spoke as rendered so SVG renderer doesn't re-draw
-                switch (classified[j].conn.endpoint) {
-                    .pin => |p2| try ctx.rendered_spokes.put(allocator, p2.ref_des, {}),
-                    .net => {},
-                }
-            }
-        }
-        try result.append(allocator, .{ .classified = entry, .merge_count = count });
-        consumed[i] = true;
-    }
-
-    return result;
-}
-
-/// Render a merged passive: one symbol with "Nx value" label. A merged passive
-/// is a run of identical single-passive spokes collapsed into one symbol; its
-/// chain end-x is fixed by the passive width alone, so — unlike the unmerged
-/// `collectConnBody` — there is no terminal to walk to here.
-fn collectMergedPassive(
-    ctx: *RenderCtx,
-    scene: *SceneGraph,
-    allocator: Allocator,
-    endpoint: Endpoint,
-    stub_x: f64,
-    stub_y: f64,
-    cy: f64,
-    side: Side,
-    net_name: []const u8,
-    count: u32,
-) !f64 {
-    switch (endpoint) {
-        .net => {
-            const end_x: f64 = switch (side) {
-                .left => stub_x - pin_offset,
-                .right => stub_x + pin_offset,
-            };
-            try scene.addWire(net_name, stub_x, stub_y, end_x, cy, false);
-            return end_x;
-        },
-        .pin => |p| {
-            const inst = ctx.inst_map.get(p.ref_des) orelse return stub_x;
-            try ctx.rendered_spokes.put(allocator, p.ref_des, {});
-
-            switch (side) {
-                .left => {
-                    try scene.addWire(net_name, stub_x, stub_y, stub_x - pin_offset, cy, false);
-                    try scene.addPassiveWithCount(inst, stub_x - pin_offset - passive_bw, cy, count, true);
-                    return stub_x - pin_offset - passive_bw;
-                },
-                .right => {
-                    try scene.addWire(net_name, stub_x, stub_y, stub_x + pin_offset, cy, false);
-                    try scene.addPassiveWithCount(inst, stub_x + pin_offset, cy, count, false);
-                    return stub_x + pin_offset + passive_bw;
-                },
-            }
-        },
-    }
 }
 
 fn collectConnBody(
@@ -2556,6 +2318,45 @@ fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
         pos = idx + needle.len;
     }
     return count;
+}
+
+// spec: render_svg - The scene graph preserves one entry per identical decoupling capacitor
+test "renderSceneGraph keeps identical decoupling capacitors separate" {
+    const insts = [_]env_mod.Instance{
+        .{ .ref_des = "U1", .component = "ic", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "C1", .component = "cap", .value = "0.1uF", .footprint = "", .symbol = "generic-cap" },
+        .{ .ref_des = "C2", .component = "cap", .value = "0.1uF", .footprint = "", .symbol = "generic-cap" },
+    };
+    const supply_pins = [_]env_mod.PinRef{
+        .{ .ref_des = "U1", .pin = "1" },
+        .{ .ref_des = "C1", .pin = "1" },
+        .{ .ref_des = "C2", .pin = "1" },
+    };
+    const ground_pins = [_]env_mod.PinRef{
+        .{ .ref_des = "C1", .pin = "2" },
+        .{ .ref_des = "C2", .pin = "2" },
+    };
+    const nets = [_]env_mod.Net{
+        .{ .name = "VCC", .pins = &supply_pins },
+        .{ .name = "GND", .pins = &ground_pins },
+    };
+    var block: DesignBlock = .{
+        .name = "separate-decoupling-test",
+        .instances = &insts,
+        .nets = &nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const json = try renderSceneGraph(arena.allocator(), &block, "");
+
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(json, "\"ref\":\"C1\""));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(json, "\"ref\":\"C2\""));
+    try std.testing.expectEqual(@as(usize, 2), countOccurrences(json, "\"value\":\"0.1uF\""));
+    try std.testing.expectEqual(@as(usize, 2), countOccurrences(json, "\"count\":1"));
 }
 
 test "renderSceneGraph emits each passive junction member once" {
