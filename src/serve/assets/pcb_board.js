@@ -3211,13 +3211,10 @@ function pSelRow(k,id,opts,cur,locked){var o='';opts.forEach(function(op){
 function pTrackWidthRow(track){return '<div class="prop-row"><span class="k">Width (mm)</span>'+
  '<input class="pv-in" id="prop-track-width" type="number" min="0.001" step="0.001" required value="'+
  (Math.round((+track.w||0.25)*1000)/1000)+'"></div>';}
-function pTrackNetRow(track){var cur=String(track.net||""),seen=Object.create(null),opts=[["","No net"]];
- // Keep a legacy/current spelling selectable even if the present netlist no
- // longer declares it; committing another choice is still constrained to the
- // page's authoritative netnames list below.
- if(cur){opts.push([cur,cur]);seen[cur]=1;}
- (PCB.netnames||[]).forEach(function(net){net=String(net||"");if(!net||seen[net])return;seen[net]=1;opts.push([net,net]);});
- return pSelRow("Net","prop-track-net",opts,cur,false);}
+function pTrackNetRow(track){var cur=String(track.net||"");
+ return '<div class="prop-row"><span class="k">Net</span><span class="prop-net-combo">'+
+  '<input class="pv-in" id="prop-track-net" type="search" autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="prop-track-net-options" placeholder="Search nets…" value="'+pEsc(cur)+'">'+
+  '<span class="prop-net-options" id="prop-track-net-options" role="listbox" hidden></span></span></div>';}
 function passiveFamilyRoot(name){var s=String(name||"").toLowerCase(),i=s.indexOf("-");return i<0?s:s.slice(0,i);}
 function passiveFpLabel(c){return c.name+(c.footprint?" · "+c.footprint:"");}
 function passiveFpChoices(p,comps){var root=passiveFamilyRoot(p.component),seen={},out=[];
@@ -10057,12 +10054,35 @@ function trackPropertiesCommit(track,width,net){
  inspSetHere({t:"track",o:track});
  routeStatMsg("trace updated · "+n2(width)+" mm · "+(net?nLeaf(net):"no net")+" — Save/Update to keep");
  return {ok:true,changed:true};}
+function wireTrackNetSearch(input,commit){var pop=document.getElementById("prop-track-net-options"),active=-1,shown=[],original=input&&input.value||"";
+ if(!input||!pop)return;
+ function close(){active=-1;pop.hidden=true;pop.textContent="";input.setAttribute("aria-expanded","false");input.removeAttribute("aria-activedescendant");}
+ function activate(next){var opts=pop.querySelectorAll(".prop-net-option");if(!opts.length){active=-1;return;}
+  active=(next+opts.length)%opts.length;opts.forEach(function(o,i){var on=i===active;o.classList.toggle("active",on);o.setAttribute("aria-selected",on?"true":"false");});
+  var cur=opts[active];input.setAttribute("aria-activedescendant",cur.id);cur.scrollIntoView({block:"nearest"});}
+ function pick(net){input.value=net;close();commit();}
+ function render(all){var q=all?"":input.value.trim().toLowerCase(),nets=[""].concat(PCB.netnames||[]),seen=Object.create(null);shown=[];
+  nets.forEach(function(raw){var net=String(raw||""),label=net||"No net",key=net||"\u0000";
+   if(seen[key]||(!all&&q&&label.toLowerCase().indexOf(q)<0))return;seen[key]=1;shown.push({net:net,label:label});});
+  shown=shown.slice(0,50);if(!shown.length){close();return;}
+  pop.innerHTML=shown.map(function(o,i){return '<button type="button" class="prop-net-option" id="prop-track-net-option-'+i+'" role="option" aria-selected="false" data-net-value="'+pEsc(o.net)+'">'+pEsc(o.label)+'</button>';}).join("");
+  pop.querySelectorAll(".prop-net-option").forEach(function(o){o.addEventListener("pointerdown",function(ev){ev.preventDefault();});
+   o.addEventListener("click",function(){pick(o.getAttribute("data-net-value")||"");});});
+  active=-1;pop.hidden=false;input.setAttribute("aria-expanded","true");}
+ input.addEventListener("focus",function(){try{input.select();}catch(e){}render(true);});
+ input.addEventListener("input",function(){render(false);});
+ input.addEventListener("keydown",function(ev){
+  if(ev.key==="Escape"){ev.preventDefault();input.value=original;close();input.blur();return;}
+  if(ev.key==="ArrowDown"||ev.key==="ArrowUp"){ev.preventDefault();if(pop.hidden)render(false);
+   activate(active<0?(ev.key==="ArrowDown"?0:shown.length-1):active+(ev.key==="ArrowDown"?1:-1));return;}
+  if(ev.key==="Enter"){ev.preventDefault();if(!pop.hidden&&active>=0&&shown[active])pick(shown[active].net);else{close();commit();}}});
+ input.addEventListener("blur",function(){setTimeout(function(){if(!document.body.contains(input))return;close();commit();},100);});}
 function wireTrackProperties(body,track){var wi=body.querySelector("#prop-track-width"),ni=body.querySelector("#prop-track-net");
  function message(result){if(result&&result.ok)return;var e=document.getElementById("prop-track-msg");if(!e)return;
   e.classList.add("bad");e.textContent=(result&&result.error)||"Could not update this trace.";}
  function commit(){message(trackPropertiesCommit(track,wi&&wi.value,ni&&ni.value));}
  if(wi){wi.addEventListener("keydown",function(ev){if(ev.key==="Enter"){ev.preventDefault();commit();if(document.body.contains(wi))wi.blur();}});wi.addEventListener("change",commit);}
- if(ni)ni.addEventListener("change",commit);}
+ wireTrackNetSearch(ni,commit);}
 window.PCBTrackPropertiesCommit=trackPropertiesCommit;
 function renderInspProps(body){var o=insp.o,h="",hint='<div class="prop-lock">';
  if(insp.t=="track"){
