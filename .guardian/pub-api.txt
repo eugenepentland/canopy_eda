@@ -3565,6 +3565,7 @@ src/req_checks.zig::deinit | fn deinit( allocator: std.mem.Allocator, m: *std.St
 src/req_checks.zig::parseMicroFarads | fn parseMicroFarads(s: []const u8) ?f64
 src/req_checks.zig::parseMicroHenries | fn parseMicroHenries(s: []const u8) ?f64
 src/req_checks.zig::parseOhms | fn parseOhms(s: []const u8) ?f64
+src/req_checks.zig::resistorIsDcEquivalent | fn resistorIsDcEquivalent(ohms: f64) bool
 src/req_checks.zig::runChecks | fn runChecks( allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, ) std.mem.Allocator.Error!std.StringHashMapUnmanaged([]Result)
 src/req_derived_checks.zig::Result struct_
 src/req_derived_checks.zig::evaluate | fn evaluate( allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, inst: Instance, check: env.Check, ) Result

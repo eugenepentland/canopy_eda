@@ -5645,6 +5645,7 @@ Public functions: runChecks, deinit, parseMicroFarads, parseOhms, parseMicroHenr
 
 - parseMicroFarads handles SI-suffixed cap values
 - parseOhms handles SI prefixes for resistor values
+- pin-voltage walk treats supply-feed resistors as DC-equivalent up to 25 ohm
 - parseMicroHenries handles SI-suffixed inductor values
 - applyVerifications matches a verifies form to an instance by stable id when target-id is set
 - applyVerifications matches a verifies form to an instance by ref-des when target-id is empty

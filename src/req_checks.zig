@@ -19,7 +19,16 @@ const DecouplingCheck = @FieldType(Check, "decoupling");
 // ── Constants ─────────────────────────────────────────────────────
 const current_tolerance_f: f64 = 1e-9;
 const value_tolerance_pf: f64 = 1e-12;
-const dc_equiv_resistor_ohms: f64 = 10.0;
+/// Series resistors at or below this value are treated as DC-transparent by
+/// the pin-voltage walk (`findVoltageForNet`). The cutoff separates supply
+/// FEED resistors — vendor application circuits routinely specify 10–25 Ω
+/// here (e.g. Mini-Circuits M3SWA2-63DRC+ Figure 1 uses 11.5 Ω) — from
+/// pull-up/pull-down/damping resistors, which start around 100 Ω and run to
+/// kΩ. At the mA-scale supply currents these feeds carry, the unmodeled drop
+/// stays in the tens-of-mV class; the walk reports the upstream port's window
+/// unchanged either way, so 25 Ω admits the vendor-specified feeds without
+/// letting genuinely droppy elements masquerade as rails.
+const dc_equiv_resistor_ohms: f64 = 25.0;
 const pin_not_found_msg = "pin '{s}' not found in pinout";
 const pin_net_unresolved_msg = "pin '{s}' could not be resolved to a net";
 
@@ -445,14 +454,14 @@ fn findVoltageForNet(
         if (!a_match and !b_match) continue;
 
         // DC-equivalence test. Ferrites and inductors are DC shorts;
-        // resistors only count if the value is small (≤10Ω) since most
-        // pull-up/down/series-damping resistors are kΩ-range and would
-        // cause significant DC drop under load.
+        // resistors only count up to the supply-feed cutoff (see
+        // `dc_equiv_resistor_ohms`) — pull-up/down/damping resistors are
+        // 100 Ω-to-kΩ and would cause significant DC drop under load.
         const is_dc_equiv = switch (prefix) {
             'F', 'L' => true,
             'R' => blk: {
                 const ohms = parseOhms(c.value) orelse break :blk false;
-                break :blk ohms <= dc_equiv_resistor_ohms;
+                break :blk resistorIsDcEquivalent(ohms);
             },
             else => false,
         };
@@ -953,6 +962,14 @@ pub fn parseMicroFarads(s: []const u8) ?f64 {
 /// are both supported so a current-sense shunt isn't misread 1000× high. An
 /// unrecognized suffix yields `null` (the value just doesn't qualify) rather
 /// than being silently taken as ohms ×1.0.
+/// Whether a series resistor of this value is DC-transparent for the
+/// pin-voltage walk. Public so tests can pin the supply-feed cutoff.
+pub fn resistorIsDcEquivalent(ohms: f64) bool {
+    return ohms <= dc_equiv_resistor_ohms;
+}
+
+/// Parse a resistor value string ("11.5R", "4.7k", "10m", "1M") to ohms,
+/// honoring SI prefixes and R-notation. Null when the string is not a value.
 pub fn parseOhms(s: []const u8) ?f64 {
     if (s.len == 0) return null;
     // R-notation: `4R7`/`0R05`/`4R` — split on the first 'R'/'r' and treat it as

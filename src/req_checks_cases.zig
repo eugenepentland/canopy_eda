@@ -31,6 +31,21 @@ test "parseMicroFarads" {
     try std.testing.expect(req.parseMicroFarads("garbage") == null);
 }
 
+// spec: req_checks - pin-voltage walk treats supply-feed resistors as DC-equivalent up to 25 ohm
+test "resistorIsDcEquivalent supply-feed cutoff" {
+    // Vendor-specified supply feeds walk through: Mini-Circuits Figure-1
+    // values (11.5 ohm) and the classic 10/22 ohm feeds.
+    try std.testing.expect(req.resistorIsDcEquivalent(1.5));
+    try std.testing.expect(req.resistorIsDcEquivalent(10.0));
+    try std.testing.expect(req.resistorIsDcEquivalent(11.5));
+    try std.testing.expect(req.resistorIsDcEquivalent(22.0));
+    try std.testing.expect(req.resistorIsDcEquivalent(25.0));
+    // Damping/termination/pull resistors do not.
+    try std.testing.expect(!req.resistorIsDcEquivalent(33.0));
+    try std.testing.expect(!req.resistorIsDcEquivalent(100.0));
+    try std.testing.expect(!req.resistorIsDcEquivalent(4700.0));
+}
+
 // spec: req_checks - parseOhms handles SI prefixes for resistor values
 test "parseOhms" {
     try expectOhms(10000, "10k");
