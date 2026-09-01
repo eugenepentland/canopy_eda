@@ -86,6 +86,10 @@ all, on either side of the wire:
    `not-equal` against reference 0, stencil op `REPLACE` (with that same 0) on
    pass. It paints the fill AND clears the stencil behind itself, so the next
    area needs no clear of its own; the attachment is cleared once per frame.
+   The fragment must run even when its resolved alpha is zero: RF unions remain
+   recorded for hidden layers so visibility changes stay on the uniform-only
+   path, and discarding a transparent cover would leave that hidden taper in
+   stencil for the next visible layer to paint.
 
 Cost: a fan is `3(n−2)` vertices for an `n`-vertex ring (barracuda: 32 areas,
 14 778 vertices total, ~118 KB — baked once per pour edit), two draws per area,

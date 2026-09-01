@@ -2042,7 +2042,7 @@ test "PCB WebGPU renderer caches its static command stream as a render bundle" {
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_gpu_js, marker) != null);
 }
 
-// spec: Web Server - Swept variable-width RF paths remain on WebGPU as exact triangulated stencil unions, while their hidden centreline tracks are omitted from the GPU copper stream
+// spec: Web Server - Swept variable-width RF paths remain on WebGPU as exact triangulated stencil unions, while their hidden centreline tracks are omitted from the GPU copper stream and a hidden copper layer cannot leak its taper through a visible layer's stencil cover
 test "PCB WebGPU renderer retains exact swept RF copper" {
     const gpu_markers = [_][]const u8{
         "ST_UNION",
@@ -2056,6 +2056,14 @@ test "PCB WebGPU renderer retains exact swept RF copper" {
         try std.testing.expect(std.mem.indexOf(u8, haystack, marker) != null);
     }
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "&&!(PCB.rf_paths||[]).length") == null);
+
+    // A cover draw both paints and clears the union stencil. At zero layer
+    // alpha it must still reach the stencil pass: fragment discard would leave
+    // the hidden layer's taper bits for the next visible layer's cover to paint.
+    const cover_start = std.mem.indexOf(u8, pcb_gpu_js, "@fragment fn fsCover").?;
+    const cover_end = std.mem.indexOfPos(u8, pcb_gpu_js, cover_start, "\"}\",").?;
+    const cover_shader = pcb_gpu_js[cover_start..cover_end];
+    try std.testing.expect(std.mem.indexOf(u8, cover_shader, "discard") == null);
 }
 
 // spec: Web Server - The deterministic PCB-editor zoom gate measures fit-to-8×-to-fit paints in both directions, covers the DPR-2 Canvas fallback, asserts an RF-heavy Barracuda workload stays on WebGPU, and is required metadata on every deployable release candidate
