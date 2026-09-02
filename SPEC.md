@@ -4416,6 +4416,12 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - (near "REF" PIN) records the adjacency target with no own pad inferred at parse time
 - (near … (own PAD)) records which of the declaring part's own legs docks against the target
 - a (near …) missing its ref or pin warns and binds nothing rather than half a target
+- an instance sub-form within two edits of a real one is an error naming the spelling meant
+- an unknown sub-form head that is not a near-miss still becomes an inline property
+- a pad token outside the part's known pad set is an error carrying the pad count
+- strap-ok, nc-ok and a (near …) own pad are held to the same pad set as (pin …)
+- a part with neither a pinout nor a footprint has an unknown pad set and every pad token passes
+- a footprint's pad ids check the pads of a part that has no pinout file
 - completeness-waiver: empty inputs (an instance with no net arguments retains the established component-only behavior)
 - completeness-waiver: large inputs (positional pad numbering is a bounded linear walk over the parsed instance children)
 - completeness-waiver: unauthorized access (pure in-process AST lowering with no request, identity, or authorization surface)
@@ -4430,6 +4436,7 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - pullup and pulldown lower to one resistor with explicit signal and rail nets
 - divider emits two resistors and records a checked expected tap voltage
 - led emits a resistor and diode and accepts an explicit anode net for migrations
+- a shorthand value that is not the family's declared kind is rejected like a family call
 - completeness-waiver: empty inputs (each shorthand diagnoses missing positional arguments and emits no partial circuit)
 - completeness-waiver: large inputs (every form emits at most two parts and scans only its own bounded child list)
 - completeness-waiver: unauthorized access (pure in-process AST lowering with no user, request, or authorization surface)
@@ -4477,16 +4484,46 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - implementation metadata is evaluable but has no runtime value
 - wrapped module roots retain defmodule provenance independently of their design-block title
 
+## eval/value-kind
+
+- every value spelling the design corpus passes to a typed family is accepted
+- a value carrying another quantity's unit or magnitude is rejected for the declared kind
+- a value the unit decoder cannot place is accepted rather than guessed at
+- completeness-waiver: empty inputs (an empty value string decodes to nothing and is accepted, like every other unplaceable spelling)
+- completeness-waiver: large inputs (the decoder reads only the first whitespace token and at most its two suffix letters)
+- completeness-waiver: unauthorized access (a pure string predicate with no user, request, or permission surface)
+- completeness-waiver: i/o failure (classification reads the value string in memory and performs no I/O)
+- completeness-waiver: concurrent access (the predicate holds no state and its inputs are caller-owned slices)
+- completeness-waiver: malformed encoding (a value the decoder cannot place — corrupt, non-UTF-8, or simply unusual — is accepted rather than rejected)
+- completeness-waiver: integer overflow (no arithmetic on the magnitude: the digits are skipped, never parsed into a number)
+- completeness-waiver: panic-free (every path is a bounds-checked slice or a switch with an else, so it cannot panic)
+
+## eval/footprint-pads
+
+- a footprint's pad ids load as a set with numeric and alphanumeric ids normalized alike
+- a missing or padless footprint yields an empty set that reads as unknown rather than as zero pads
+- a footprint is read once and served from the evaluator cache afterwards
+- completeness-waiver: empty inputs (an empty footprint name resolves to no pad record at all, and a padless file to the empty set)
+- completeness-waiver: large inputs (the loader caps the read at the shared footprint byte limit and keeps only pad ids)
+- completeness-waiver: unauthorized access (library reads inside the project directory, with no user or permission surface)
+- completeness-waiver: i/o failure (a read error yields the empty unknown set, so a missing or unreadable footprint never fails a build)
+- completeness-waiver: concurrent access (the cache belongs to one caller-owned evaluator and is shared with nothing)
+- completeness-waiver: malformed encoding (a corrupt or non-footprint file parses to the empty unknown set instead of raising)
+- completeness-waiver: integer overflow (pad ids stay text; the only counter is the hash map's own bounded size)
+- completeness-waiver: panic-free (every failure path returns the empty set, so no allocation or parse error can panic)
+
 ## eval/suggest
 
 - editDistance computes the Levenshtein distance between names
 - unbound library name yields an import hint naming the missing import
 - a near-miss name yields a did-you-mean suggestion from env and cache candidates
 - a name with no close candidate reports a plain unknown-name message
+- a fixed vocabulary yields the nearest spelling and never suggests an exact match
 
 ## eval/evaluator
 
 - A component-family attribute resolves a bound parameter to its value while an unbound vocabulary word stays literal
+- a component-family value contradicting the declared parameter kind is rejected at the call site
 - Evaluates arithmetic expressions from S-expression AST
 - an error inside a module body appends the module call stack to the diagnostic
 - block with a string name evaluates as a design root

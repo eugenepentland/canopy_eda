@@ -9,6 +9,7 @@ const env_mod = @import("env.zig");
 const evaluator_mod = @import("evaluator.zig");
 const instance_mod = @import("instance.zig");
 const ids = @import("ids.zig");
+const value_kind = @import("value_kind.zig");
 
 const Node = ast.Node;
 const Env = env_mod.Env;
@@ -207,9 +208,16 @@ fn appendPart(
         .family = spec.family,
         .value = spec.value,
     } }) orelse return EvalError.TypeError;
-    if (!self.component_cache.contains(spec.family)) {
+    const cached = self.component_cache.get(spec.family) orelse {
         self.setErrorFmt(ctx.form[0].span, "component '{s}' is not imported for this shorthand", .{spec.family});
         return EvalError.UnboundVariable;
+    };
+    // A shorthand's value is authored the same way a family call's is, so it
+    // gets the same declared-kind check — `(pullup "SDA" 100nF VDD)` is a
+    // capacitor written where the resistor value goes.
+    if (!value_kind.accepts(cached.param_type, spec.value)) {
+        self.setError(ctx.form[0].span, value_kind.mismatchMessage(self.allocator, spec.family, cached.param_type, spec.value));
+        return EvalError.TypeError;
     }
     // An authored child sidecar is an explicit migration override: it lets a
     // shorthand replace existing instances without changing their PCB UUIDs.
@@ -362,4 +370,32 @@ test "led shorthand emits its resistor and diode" {
     try testing.expectEqualStrings("PWR_A", pin_nets.items[1].net);
     try testing.expectEqualStrings("PWR_A", pin_nets.items[2].net);
     try testing.expectEqualStrings("GND", pin_nets.items[3].net);
+}
+
+// spec: eval/micro_forms - a shorthand value that is not the family's declared kind is rejected like a family call
+test "a shorthand resistor value of the wrong kind is rejected" {
+    const allocator = std.heap.page_allocator;
+    var eval = try testEvaluator(allocator);
+    defer eval.deinit();
+    // Give the resistor family its real declared kind (the shared fixture
+    // leaves it blank so the older tests exercise the untyped path).
+    try eval.component_cache.put(allocator, resistor_family, .{
+        .name = resistor_family,
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = true,
+        .param_type = "resistance",
+    });
+    var env = Env.init(allocator, null);
+    defer env.deinit();
+    var instances: std.ArrayList(Instance) = .empty;
+    var pin_nets: std.ArrayList(PinNetDecl) = .empty;
+    // Quoted, because a bare `100nF` tokenizes as the NUMBER 1e-7 and reaches
+    // the shorthand as digits with no unit left to contradict anything.
+    const nodes = try parser.parse(allocator, "(pullup \"SDA\" \"100nF\" \"V_3V3\") (pullup \"SCL\" 4.7k \"V_3V3\")");
+    try testing.expectError(EvalError.TypeError, emit(&eval, .pullup, nodes[0].asList().?, &env, &instances, &pin_nets));
+    try testing.expect(std.mem.indexOf(u8, eval.last_error.?.message, "is not a resistance value") != null);
+    // The right kind still lowers normally.
+    try emit(&eval, .pullup, nodes[1].asList().?, &env, &instances, &pin_nets);
+    try testing.expectEqual(@as(usize, 1), instances.items.len);
 }
