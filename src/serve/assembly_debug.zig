@@ -6,6 +6,8 @@
 //! `netlisp-pcb-focus` postMessage protocol.
 
 const std = @import("std");
+const escape = @import("../escape.zig");
+const json_writer = @import("../json_writer.zig");
 const datasheet_ref = @import("datasheet_ref.zig");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
@@ -679,69 +681,50 @@ fn buildIndex(
     };
 }
 
-fn writeJsonString(w: *std.Io.Writer, value: []const u8) !void {
-    try w.writeByte('"');
-    for (value) |c| switch (c) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
-        '<' => try w.writeAll("\\u003c"),
-        '>' => try w.writeAll("\\u003e"),
-        '&' => try w.writeAll("\\u0026"),
-        else => if (c < 0x20)
-            try w.print("\\u{x:0>4}", .{c})
-        else
-            try w.writeByte(c),
-    };
-    try w.writeByte('"');
-}
-
 fn writeStringArray(w: *std.Io.Writer, values: []const []const u8) !void {
     try w.writeByte('[');
     for (values, 0..) |value, i| {
         if (i > 0) try w.writeByte(',');
-        try writeJsonString(w, value);
+        try json_writer.writeScriptString(w, value);
     }
     try w.writeByte(']');
 }
 
 fn writeIndexJson(w: *std.Io.Writer, index: Index, meta: PageMeta) !void {
     try w.writeAll("{\"name\":");
-    try writeJsonString(w, meta.name);
+    try json_writer.writeScriptString(w, meta.name);
     try w.writeAll(",\"part_number\":");
-    try writeJsonString(w, meta.part_number);
+    try json_writer.writeScriptString(w, meta.part_number);
     try w.writeAll(",\"revision\":");
-    try writeJsonString(w, meta.revision);
+    try json_writer.writeScriptString(w, meta.revision);
     try w.writeAll(",\"fab_id\":");
-    try writeJsonString(w, meta.fab_id);
+    try json_writer.writeScriptString(w, meta.fab_id);
     try w.writeAll(",\"release_token\":");
-    try writeJsonString(w, meta.release_token);
+    try json_writer.writeScriptString(w, meta.release_token);
     try w.print(",\"standalone\":{s},\"parts\":[", .{if (meta.standalone) "true" else "false"});
     for (index.parts, 0..) |part, i| {
         if (i > 0) try w.writeByte(',');
         try w.writeAll("{\"uuid\":");
-        try writeJsonString(w, part.uuid);
+        try json_writer.writeScriptString(w, part.uuid);
         try w.writeAll(",\"ref\":");
-        try writeJsonString(w, part.ref);
+        try json_writer.writeScriptString(w, part.ref);
         try w.writeByte('}');
     }
     try w.writeAll("],\"bom\":[");
     for (index.bom_groups, 0..) |group, i| {
         if (i > 0) try w.writeByte(',');
         try w.writeAll("{\"key\":");
-        try writeJsonString(w, group.key);
+        try json_writer.writeScriptString(w, group.key);
         try w.writeAll(",\"mpn\":");
-        try writeJsonString(w, group.mpn);
+        try json_writer.writeScriptString(w, group.mpn);
         try w.writeAll(",\"manufacturer\":");
-        try writeJsonString(w, group.manufacturer);
+        try json_writer.writeScriptString(w, group.manufacturer);
         try w.writeAll(",\"component\":");
-        try writeJsonString(w, group.component);
+        try json_writer.writeScriptString(w, group.component);
         try w.writeAll(",\"value\":");
-        try writeJsonString(w, group.value);
+        try json_writer.writeScriptString(w, group.value);
         try w.writeAll(",\"footprint\":");
-        try writeJsonString(w, group.footprint);
+        try json_writer.writeScriptString(w, group.footprint);
         try w.print(",\"qty\":{d},\"dnp_count\":{d},\"conflict\":{s},\"refs\":", .{
             group.refs.len,
             group.dnp_count,
@@ -758,36 +741,36 @@ fn writeIndexJson(w: *std.Io.Writer, index: Index, meta: PageMeta) !void {
     for (index.entities, 0..) |entity, i| {
         if (i > 0) try w.writeByte(',');
         try w.writeAll("{\"type\":");
-        try writeJsonString(w, entity.kind);
+        try json_writer.writeScriptString(w, entity.kind);
         try w.writeAll(",\"label\":");
-        try writeJsonString(w, entity.label);
+        try json_writer.writeScriptString(w, entity.label);
         try w.writeAll(",\"detail\":");
-        try writeJsonString(w, entity.detail);
+        try json_writer.writeScriptString(w, entity.detail);
         try w.writeAll(",\"refs\":");
         try writeStringArray(w, entity.refs);
         try w.writeAll(",\"nets\":");
         try writeStringArray(w, entity.nets);
         try w.writeAll(",\"keywords\":");
-        try writeJsonString(w, entity.keywords);
+        try json_writer.writeScriptString(w, entity.keywords);
         try w.writeByte('}');
     }
     try w.writeAll("],\"nets\":[");
     for (index.nets, 0..) |net, i| {
         if (i > 0) try w.writeByte(',');
         try w.writeAll("{\"name\":");
-        try writeJsonString(w, net.name);
+        try json_writer.writeScriptString(w, net.name);
         try w.writeAll(",\"endpoints\":[");
         for (net.pins, 0..) |pin, pi| {
             if (pi > 0) try w.writeByte(',');
             const part = partForRef(index.parts, pin.ref_des);
             try w.writeAll("{\"ref\":");
-            try writeJsonString(w, pin.ref_des);
+            try json_writer.writeScriptString(w, pin.ref_des);
             try w.writeAll(",\"pin\":");
-            try writeJsonString(w, pin.pin);
+            try json_writer.writeScriptString(w, pin.pin);
             try w.writeAll(",\"component\":");
-            try writeJsonString(w, if (part) |p| p.component else "");
+            try json_writer.writeScriptString(w, if (part) |p| p.component else "");
             try w.writeAll(",\"value\":");
-            try writeJsonString(w, if (part) |p| p.value else "");
+            try json_writer.writeScriptString(w, if (part) |p| p.value else "");
             try w.writeByte('}');
         }
         try w.writeAll("]}");
@@ -796,25 +779,14 @@ fn writeIndexJson(w: *std.Io.Writer, index: Index, meta: PageMeta) !void {
     for (index.guides, 0..) |guide, i| {
         if (i > 0) try w.writeByte(',');
         try w.writeAll("{\"slug\":");
-        try writeJsonString(w, guide.slug);
+        try json_writer.writeScriptString(w, guide.slug);
         try w.writeAll(",\"title\":");
-        try writeJsonString(w, guide.title);
+        try json_writer.writeScriptString(w, guide.title);
         try w.writeAll(",\"body\":");
-        try writeJsonString(w, guide.body);
+        try json_writer.writeScriptString(w, guide.body);
         try w.writeByte('}');
     }
     try w.writeAll("]}");
-}
-
-fn writeHtmlText(w: *std.Io.Writer, text: []const u8) !void {
-    for (text) |c| switch (c) {
-        '&' => try w.writeAll("&amp;"),
-        '<' => try w.writeAll("&lt;"),
-        '>' => try w.writeAll("&gt;"),
-        '"' => try w.writeAll("&quot;"),
-        '\'' => try w.writeAll("&#39;"),
-        else => try w.writeByte(c),
-    };
 }
 
 fn renderPageWithOptions(allocator: std.mem.Allocator, name: []const u8, index: Index, opts: PageOptions) ![]const u8 {
@@ -823,7 +795,7 @@ fn renderPageWithOptions(allocator: std.mem.Allocator, name: []const u8, index: 
     try w.writeAll("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
     try w.writeAll("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\">");
     try w.writeAll("<title>");
-    try writeHtmlText(w, name);
+    try escape.writeXml(w, name);
     try w.writeAll(" — Assembly</title>");
     if (opts.meta.standalone) {
         try w.writeAll("<style>");
@@ -836,34 +808,34 @@ fn renderPageWithOptions(allocator: std.mem.Allocator, name: []const u8, index: 
     else
         try w.writeAll("<a class=\"brand\" href=\"/\">netlisp</a>");
     try w.writeAll("<strong>");
-    try writeHtmlText(w, name);
+    try escape.writeXml(w, name);
     try w.writeAll("</strong>");
     if (opts.meta.standalone) {
         try w.writeAll("<div class=\"release-identity\">");
         if (opts.meta.part_number.len > 0) {
             try w.writeAll("<span><b>PN</b> ");
-            try writeHtmlText(w, opts.meta.part_number);
+            try escape.writeXml(w, opts.meta.part_number);
             try w.writeAll("</span>");
         }
         if (opts.meta.revision.len > 0) {
             try w.writeAll("<span><b>Rev</b> ");
-            try writeHtmlText(w, opts.meta.revision);
+            try escape.writeXml(w, opts.meta.revision);
             try w.writeAll("</span>");
         }
         try w.writeAll("<span class=\"release-fab-id\"><b>ID</b> ");
-        try writeHtmlText(w, opts.meta.fab_id);
+        try escape.writeXml(w, opts.meta.fab_id);
         try w.writeAll("</span></div>");
     } else {
         try w.writeAll("<nav aria-label=\"Design views\"><a href=\"/schematics/");
-        try writeHtmlText(w, name);
+        try escape.writeXml(w, name);
         try w.writeAll("\">Schematic</a><a href=\"/pcb-layout/");
-        try writeHtmlText(w, name);
+        try escape.writeXml(w, name);
         if (opts.layout) |selected| {
             try w.writeAll("?layout=");
             try writeUrlEncoded(w, selected);
         }
         try w.writeAll("\">PCB Layout</a><a href=\"/pcb-layout/");
-        try writeHtmlText(w, name);
+        try escape.writeXml(w, name);
         try w.writeAll("?view=3d");
         if (opts.layout) |selected| {
             try w.writeAll("&amp;layout=");
@@ -944,7 +916,7 @@ fn renderPageWithOptions(allocator: std.mem.Allocator, name: []const u8, index: 
     try w.writeAll("<iframe id=\"pcb-frame\" title=\"Read-only PCB layout\"");
     if (!opts.meta.standalone) {
         try w.writeAll(" src=\"/pcb-layout/");
-        try writeHtmlText(w, name);
+        try escape.writeXml(w, name);
         try w.writeAll("?embed=1&amp;review=1&amp;drc=0");
         if (opts.layout) |selected| {
             try w.writeAll("&amp;layout=");
@@ -962,7 +934,7 @@ fn renderPageWithOptions(allocator: std.mem.Allocator, name: []const u8, index: 
         try w.writeAll("<script>");
         try w.writeAll(@embedFile("assets/assembly_debug.js"));
         try w.writeAll("</script><script id=\"assembly-board-document\" type=\"application/json\">");
-        try writeJsonString(w, opts.board_html orelse "");
+        try json_writer.writeScriptString(w, opts.board_html orelse "");
         try w.writeAll("</script><script>(function(){var f=document.getElementById('pcb-frame'),d=document.getElementById('assembly-board-document');if(f&&d)f.srcdoc=JSON.parse(d.textContent||'\"\"');})();</script>");
     } else try w.print("<script src=\"/static/assembly_debug.js?v={x}\"></script>", .{std.hash.Wyhash.hash(0, @embedFile("assets/assembly_debug.js"))});
     try w.writeAll("</body></html>");

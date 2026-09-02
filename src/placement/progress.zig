@@ -26,6 +26,7 @@
 //! for callers that don't supply a plan.
 
 const std = @import("std");
+const json_writer = @import("../json_writer.zig");
 const optimizer = @import("optimizer.zig");
 const plan_resolve = @import("plan_resolve.zig");
 const fab_readiness = @import("../fab_readiness.zig");
@@ -537,7 +538,7 @@ pub fn writeJson(w: *std.Io.Writer, report: Report) std.Io.Writer.Error!void {
     try w.writeAll("]");
     if (report.current_wave) |cw| {
         try w.writeAll(",\"current_wave\":");
-        try writeJsonStr(w, cw);
+        try json_writer.writeScriptString(w, cw);
     }
     if (report.warnings.len > 0) {
         try w.writeAll(",\"warnings\":[");
@@ -575,7 +576,7 @@ fn writeStage(w: *std.Io.Writer, st: Stage) std.Io.Writer.Error!void {
 /// One wave tally as `{"name","done","total","status"}`.
 fn writeWave(w: *std.Io.Writer, wv: WaveTally) std.Io.Writer.Error!void {
     try w.writeAll("{\"name\":");
-    try writeJsonStr(w, wv.name);
+    try json_writer.writeScriptString(w, wv.name);
     try w.print(",\"done\":{d},\"total\":{d},\"status\":\"{s}\"}}", .{ wv.done, wv.total, @tagName(wv.status) });
 }
 
@@ -583,44 +584,29 @@ fn writeWave(w: *std.Io.Writer, wv: WaveTally) std.Io.Writer.Error!void {
 /// are omitted when unset (mirroring fab_readiness's convention).
 fn writeItem(w: *std.Io.Writer, it: Item) std.Io.Writer.Error!void {
     try w.writeAll("{\"id\":");
-    try writeJsonStr(w, it.id);
+    try json_writer.writeScriptString(w, it.id);
     try w.writeAll(",\"kind\":");
-    try writeJsonStr(w, it.kind);
+    try json_writer.writeScriptString(w, it.kind);
     try w.writeAll(",\"message\":");
-    try writeJsonStr(w, it.message);
+    try json_writer.writeScriptString(w, it.message);
     if (it.ref) |r| {
         try w.writeAll(",\"ref\":");
-        try writeJsonStr(w, r);
+        try json_writer.writeScriptString(w, r);
     }
     if (it.net) |n| {
         try w.writeAll(",\"net\":");
-        try writeJsonStr(w, n);
+        try json_writer.writeScriptString(w, n);
     }
     if (it.meta.pcb_target) |target| {
         try w.writeAll(",\"pcb_target\":");
-        try writeJsonStr(w, target);
+        try json_writer.writeScriptString(w, target);
     }
     if (it.meta.wave) |wv| {
         try w.writeAll(",\"wave\":");
-        try writeJsonStr(w, wv);
+        try json_writer.writeScriptString(w, wv);
     }
     if (it.meta.count > 0) try w.print(",\"count\":{d}", .{it.meta.count});
     try w.writeAll("}");
-}
-
-/// Minimal JSON string escaper (quotes + backslash + control chars) — the kinds
-/// and messages here never carry exotic characters, but be safe.
-fn writeJsonStr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
-    try w.writeByte('"');
-    for (s) |c| switch (c) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
-        else => if (c < 0x20) try w.print("\\u{x:0>4}", .{c}) else try w.writeByte(c),
-    };
-    try w.writeByte('"');
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────

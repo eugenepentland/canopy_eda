@@ -6,6 +6,7 @@
 //! scene-graph twin is `render_json.zig`.
 
 const std = @import("std");
+const json_writer = @import("json_writer.zig");
 const env_mod = @import("eval/env.zig");
 const rails_mod = @import("eval/rails.zig");
 const parser_mod = @import("sexpr/parser.zig");
@@ -2159,7 +2160,7 @@ fn writeScripts(
     options: ScriptOptions,
 ) !void {
     try w.writeAll("<script>var DESIGN_NAME=");
-    try writeJsString(w, design_name);
+    try json_writer.writeScriptString(w, design_name);
     // "module" when this page renders a reusable module (/modules/:name),
     // "design" for a project design — drives the sidebar's "Locate on PCB"
     // link target (modules have a whole-module /pcb-layout view; designs only
@@ -2217,7 +2218,7 @@ fn writeAssertionsJson(w: anytype, review_doc: ?review.ReviewDoc) !void {
         for (doc.assertions, 0..) |a, i| {
             if (i > 0) try w.writeAll(",");
             try w.print("{{\"status\":\"{s}\",\"message\":", .{@tagName(a.status)});
-            try writeJsString(w, a.message);
+            try json_writer.writeScriptString(w, a.message);
             try w.writeAll("}");
         }
     }
@@ -2272,16 +2273,16 @@ fn writeSearchIndex(
         for (sb.block.instances) |inst| try sb_refs.append(allocator, inst.ref_des);
         const sb_counts = countsForRefs(check_results, sb_refs.items);
         try w.writeAll("{\"slug\":");
-        try writeJsString(w, slug);
+        try json_writer.writeScriptString(w, slug);
         try w.writeAll(",\"name\":");
-        try writeJsString(w, sb.name);
+        try json_writer.writeScriptString(w, sb.name);
         try w.writeAll(",\"description\":");
-        try writeJsString(w, sb.block.name);
+        try json_writer.writeScriptString(w, sb.block.name);
         // Marks this entry as a sub-block (vs. a plain section): the sidebar
         // uses it to build the per-sub-block "Locate on PCB" link
         // (/pcb-layout/:design?sub=<slug>&focus=<ref>).
         try w.writeAll(",\"sub\":true,\"category\":");
-        try writeJsString(w, @tagName(sb_cat));
+        try json_writer.writeScriptString(w, @tagName(sb_cat));
         try emitReqStatusFields(w, sb_counts);
         try w.writeAll(hubsArrayPrefix);
         try emitHubRefsForBlock(w, sb.block);
@@ -2296,9 +2297,9 @@ fn writeSearchIndex(
         for (block.instances) |inst| try flat_refs.append(allocator, inst.ref_des);
         const flat_counts = countsForRefs(check_results, flat_refs.items);
         try w.writeAll("{\"slug\":\"design\",\"name\":");
-        try writeJsString(w, block.name);
+        try json_writer.writeScriptString(w, block.name);
         try w.writeAll(",\"description\":\"\",\"category\":");
-        try writeJsString(w, @tagName(flat_cat));
+        try json_writer.writeScriptString(w, @tagName(flat_cat));
         try emitReqStatusFields(w, flat_counts);
         try w.writeAll(hubsArrayPrefix);
         try emitHubRefsForBlock(w, block);
@@ -2321,16 +2322,16 @@ fn writeSearchIndex(
         if (!first) try w.writeAll(",");
         first = false;
         try w.writeAll("{\"name\":");
-        try writeJsString(w, kv.key_ptr.*);
+        try json_writer.writeScriptString(w, kv.key_ptr.*);
         try w.writeAll(",\"members\":[");
         var first_m = true;
         for (kv.value_ptr.items) |pr| {
             if (!first_m) try w.writeAll(",");
             first_m = false;
             try w.writeAll("{\"ref\":");
-            try writeJsString(w, pr.ref_des);
+            try json_writer.writeScriptString(w, pr.ref_des);
             try w.writeAll(",\"pin\":");
-            try writeJsString(w, pr.pin);
+            try json_writer.writeScriptString(w, pr.pin);
             try w.writeAll("}");
         }
         try w.writeAll("]}");
@@ -2384,13 +2385,13 @@ fn emitSectionEntry(
     const counts = countsForRefs(check_results, refs.items);
 
     try w.writeAll("{\"slug\":");
-    try writeJsString(w, slug);
+    try json_writer.writeScriptString(w, slug);
     try w.writeAll(",\"name\":");
-    try writeJsString(w, sec.name);
+    try json_writer.writeScriptString(w, sec.name);
     try w.writeAll(",\"description\":");
-    try writeJsString(w, sec.description);
+    try json_writer.writeScriptString(w, sec.description);
     try w.writeAll(",\"category\":");
-    try writeJsString(w, @tagName(cat));
+    try json_writer.writeScriptString(w, @tagName(cat));
     try emitReqStatusFields(w, counts);
     try w.writeAll(hubsArrayPrefix);
     var first_hub = true;
@@ -2401,7 +2402,7 @@ fn emitSectionEntry(
         try seen.put(allocator, pg.ref_des, {});
         if (!first_hub) try w.writeAll(",");
         first_hub = false;
-        try writeJsString(w, pg.ref_des);
+        try json_writer.writeScriptString(w, pg.ref_des);
     }
     for (sec.instances) |inst| {
         const fi: FlatInst = .{ .ref_des = inst.ref_des, .component = inst.component, .value = inst.value, .symbol = inst.symbol, .parts = inst.parts };
@@ -2410,7 +2411,7 @@ fn emitSectionEntry(
         try seen.put(allocator, inst.ref_des, {});
         if (!first_hub) try w.writeAll(",");
         first_hub = false;
-        try writeJsString(w, inst.ref_des);
+        try json_writer.writeScriptString(w, inst.ref_des);
     }
     try w.writeAll("]}");
     for (sec.sub_sections) |sub| try emitSectionEntry(w, allocator, sub, first, check_results);
@@ -2437,7 +2438,7 @@ fn emitHubRefsForBlock(w: anytype, block: *const DesignBlock) !void {
         if (!isHub(fi)) continue;
         if (!first) try w.writeAll(",");
         first = false;
-        try writeJsString(w, inst.ref_des);
+        try json_writer.writeScriptString(w, inst.ref_des);
     }
 }
 
@@ -2454,21 +2455,21 @@ fn emitComponentEntry(
     first.* = false;
     const kind: []const u8 = if (isHub(inst)) "hub" else "passive";
     try w.writeAll("{\"ref\":");
-    try writeJsString(w, inst.ref_des);
+    try json_writer.writeScriptString(w, inst.ref_des);
     try w.writeAll(",\"component\":");
-    try writeJsString(w, inst.component);
+    try json_writer.writeScriptString(w, inst.component);
     try w.writeAll(",\"value\":");
-    try writeJsString(w, inst.value);
+    try json_writer.writeScriptString(w, inst.value);
     try w.writeAll(",\"mpn\":");
-    try writeJsString(w, inst.mpn);
+    try json_writer.writeScriptString(w, inst.mpn);
     try w.writeAll(",\"manufacturer\":");
-    try writeJsString(w, inst.manufacturer);
+    try json_writer.writeScriptString(w, inst.manufacturer);
     try w.writeAll(",\"footprint\":");
-    try writeJsString(w, inst.footprint);
+    try json_writer.writeScriptString(w, inst.footprint);
     try w.writeAll(",\"kind\":");
-    try writeJsString(w, kind);
+    try json_writer.writeScriptString(w, kind);
     try w.writeAll(",\"section\":");
-    try writeJsString(w, section_slug);
+    try json_writer.writeScriptString(w, section_slug);
     // Byte offset of the defining form in the design source — the sidebar's
     // "Edit source →" jump target. Omitted when the instance doesn't live in
     // the top-level design file (sub-block children, synthetics).
@@ -2506,36 +2507,17 @@ fn emitComponentEntry(
             if (!first_pin) try w.writeAll(",");
             first_pin = false;
             try w.writeAll("{\"id\":");
-            try writeJsString(w, ae.pin);
+            try json_writer.writeScriptString(w, ae.pin);
             try w.writeAll(",\"net\":");
-            try writeJsString(w, net_name);
+            try json_writer.writeScriptString(w, net_name);
             try w.writeAll(",\"fn\":");
-            try writeJsString(w, fn_name);
+            try json_writer.writeScriptString(w, fn_name);
             try w.writeAll(",\"alt\":");
-            try writeJsString(w, alt);
+            try json_writer.writeScriptString(w, alt);
             try w.writeAll("}");
         }
     }
     try w.writeAll("]}");
-}
-
-fn writeJsString(w: anytype, s: []const u8) !void {
-    try w.writeByte('"');
-    for (s) |c| switch (c) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '<' => try w.writeAll("\\u003c"),
-        '>' => try w.writeAll("\\u003e"),
-        '&' => try w.writeAll("\\u0026"),
-        else => if (c < 0x20) {
-            try w.print("\\u{x:0>4}", .{c});
-        } else {
-            try w.writeByte(c);
-        },
-    };
-    try w.writeByte('"');
 }
 
 /// Escape `s` for an HTML text node or a single/double-quoted attribute value.
@@ -3147,4 +3129,30 @@ test "the schematic page escapes the design name and every hub ref-des it render
     // attribute is neutralized, so that is what the assertion has to be about.
     try std.testing.expect(std.mem.indexOf(u8, hub_html, "U\" onmouseover") == null);
     try std.testing.expect(std.mem.indexOf(u8, hub_html, "data-ref=\"U&quot; onmouseover=alert(1) x=&quot;\"") != null);
+}
+
+// spec: render_html - The schematic page's inline script blob escapes the less-than sign, so a design name, section name or ref-des carrying a closing script tag cannot terminate the element
+test "the schematic page's script blob escapes a closing script tag in the design name" {
+    // The page's `<script>var DESIGN_NAME=…;var SCH_INDEX=…</script>` blob used
+    // to be written by a private `writeJsString`, one of nine hand-copies of the
+    // same loop. It now shares `json_writer.writeScriptString` with every other
+    // page blob, so this asserts the one property the shared writer exists for:
+    // `<` leaves as `\u003c`, and no raw `</script>` survives inside the blob.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const hostile = "</script><svg onload=alert(1)>";
+    var block = emptyAttachBlock("Board");
+    var checks: CheckResultMap = .empty;
+    const html = try renderToHtml(alloc, &block, "", hostile, "", .pass, null, &checks, .{ .path = "/schematics/" });
+
+    // A single raw `</script>` inside the blob would close the element early
+    // and hand the rest of the name to the HTML parser as markup.
+    const blob_start = std.mem.indexOf(u8, html, "<script>var DESIGN_NAME=").?;
+    const blob = html[blob_start..];
+    const blob_end = std.mem.indexOf(u8, blob, "</script>").?;
+    try std.testing.expect(std.mem.indexOf(u8, blob[0..blob_end], "<svg onload") == null);
+    // Present in escaped form, so the absence above is escaping, not dropping.
+    try std.testing.expect(std.mem.indexOf(u8, blob[0..blob_end], "\\u003c/script>\\u003csvg onload=alert(1)>") != null);
 }

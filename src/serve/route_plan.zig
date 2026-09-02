@@ -43,6 +43,7 @@ const target_unblock = @import("../target_unblock.zig");
 const rf_port_report = @import("../placement/rf_port_report.zig");
 const route_close = @import("../placement/route_close.zig");
 const pour = @import("../placement/pour.zig");
+const export_gerber = @import("../export_gerber.zig");
 const drc = @import("../placement/drc.zig");
 const drc_rules = @import("drc_rules.zig");
 const fab_readiness = @import("../fab_readiness.zig");
@@ -5019,7 +5020,11 @@ fn stillFailedDiagnoses(
     return out.toOwnedSlice(alloc);
 }
 
-fn trackAsExisting(track: router.Track) route_policy.ExistingTrack {
+/// The routed→retained projection of one track: the router's own copper seen
+/// as the obstacle a later pass must route around. The single spelling, so a
+/// field added to `ExistingTrack` cannot be carried by one copy and dropped by
+/// another.
+pub fn trackAsExisting(track: router.Track) route_policy.ExistingTrack {
     return .{
         .x1 = track.x1,
         .y1 = track.y1,
@@ -5031,8 +5036,73 @@ fn trackAsExisting(track: router.Track) route_policy.ExistingTrack {
     };
 }
 
-fn viaAsExisting(via: router.Via) route_policy.ExistingVia {
+/// `trackAsExisting` for a via barrel.
+pub fn viaAsExisting(via: router.Via) route_policy.ExistingVia {
     return .{ .x = via.x, .y = via.y, .dia = via.dia, .drill = via.drill, .net = via.net };
+}
+
+/// The inverse of `trackAsExisting` — retained copper seen as router geometry.
+fn existingAsTrack(track: route_policy.ExistingTrack) router.Track {
+    return .{
+        .x1 = track.x1,
+        .y1 = track.y1,
+        .x2 = track.x2,
+        .y2 = track.y2,
+        .layer = track.layer,
+        .width = track.width,
+        .net = track.net,
+    };
+}
+
+/// `existingAsTrack` for a via barrel.
+fn existingAsVia(via: route_policy.ExistingVia) router.Via {
+    return .{ .x = via.x, .y = via.y, .dia = via.dia, .drill = via.drill, .net = via.net };
+}
+
+/// The routed-copper bundle the retained copper in `options` amounts to, as the
+/// connectivity/DRC/Gerber consumers read it.
+///
+/// `zones` is a parameter and not an afterthought: the connectivity oracle joins
+/// a net's pads THROUGH a copper pour, so a bundle built without the board's
+/// user zones reports a plane-connected net as open. Every caller passes the
+/// zones it holds; there is one projection so a caller cannot silently build
+/// half a bundle. `arcs` and `rf_paths` have no retained counterpart in
+/// `route_policy.Options` — retained copper is tracks, vias and pours — so they
+/// stay at the bundle's empty defaults rather than being dropped per copy.
+pub fn retainedCopper(
+    alloc: std.mem.Allocator,
+    options: route_policy.Options,
+    zones: []const pour.UserZone,
+) std.mem.Allocator.Error!export_gerber.Copper {
+    const tracks = try alloc.alloc(router.Track, options.existing_tracks.len);
+    for (options.existing_tracks, tracks) |track, *slot| slot.* = existingAsTrack(track);
+    const vias = try alloc.alloc(router.Via, options.existing_vias.len);
+    for (options.existing_vias, vias) |via, *slot| slot.* = existingAsVia(via);
+    return .{ .tracks = tracks, .vias = vias, .zones = zones };
+}
+
+/// The pours in `options` as the bundle's `zones`, for a caller that reached
+/// its retained copper through `route_policy.Options` alone (the seed builder)
+/// rather than through a request's saved-zone list. Keepout zones are dropped —
+/// `fab_readiness` documents that `copper.zones` carries poured copper only.
+pub fn retainedZones(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    options: route_policy.Options,
+) std.mem.Allocator.Error![]const pour.UserZone {
+    var out: std.ArrayList(pour.UserZone) = .empty;
+    for (options.existing_zones) |zone| {
+        if (!zone.copper or zone.net < 0) continue;
+        const ni: usize = @intCast(zone.net);
+        if (ni >= placement.nets.len) continue;
+        try out.append(alloc, .{
+            .net = placement.nets[ni].name,
+            .layer = zone.layer,
+            .poly = zone.polygon,
+            .priority = zone.priority,
+        });
+    }
+    return out.toOwnedSlice(alloc);
 }
 
 fn sameTrack(track: router.Track, existing: route_policy.ExistingTrack) bool {
@@ -11261,4 +11331,50 @@ test "a pair channel's pinch owners reach the deepening sweep and nowhere else" 
     // A net the sweep already found is never offered twice.
     const both = [_]blocker_nomination.Candidate{ .{ .net_i = 0, .dist = 1.0 }, .{ .net_i = 2, .dist = 3.0 } };
     try testing.expectEqual(both.len, (try unblockPinchCandidates(&run, &both)).len);
+}
+
+// spec: serve/route-plan - The retained-copper bundle handed to the connectivity oracle carries the board's poured zones, so a net joined only through a pour is not reported open
+test "the retained-copper bundle carries the board's pours, not only its tracks and vias" {
+    // Two hand-copies of this projection existed. The live-route one carried
+    // `zones`; the sub-circuit seed one did not, so the seed pass asked the
+    // SAME connectivity oracle a question with the board's copper pours
+    // missing — a net joined only through a plane read as open there and as
+    // connected in describe/fabrication. One projection, whole bundle.
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var parts = twoPadParts();
+    const nets = [_]optimizer.FlatNet{.{ .name = "GND", .pins = &fixture_pins }};
+    const placement = fixturePlacement(&parts, &nets);
+    const poly = [_][2]f64{ .{ 0, 0 }, .{ 4, 0 }, .{ 4, 4 }, .{ 0, 4 } };
+    const zones = [_]route_policy.ExistingZone{
+        .{ .polygon = &poly, .layer = 0, .net = 0, .copper = true, .priority = 2 },
+        // A keepout is not poured copper; `fab_readiness` documents that the
+        // serve layer filters it out before building `copper.zones`.
+        .{ .polygon = &poly, .layer = 1, .net = -2, .copper = false },
+    };
+    const tracks = [_]route_policy.ExistingTrack{
+        .{ .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+    };
+    const vias = [_]route_policy.ExistingVia{
+        .{ .x = 1, .y = 0, .dia = 0.6, .drill = 0.3, .net = 0 },
+    };
+    const options = route_policy.Options{
+        .existing_tracks = &tracks,
+        .existing_vias = &vias,
+        .existing_zones = &zones,
+    };
+
+    const carried = try retainedZones(arena, placement, options);
+    try testing.expectEqual(@as(usize, 1), carried.len);
+    try testing.expectEqualStrings("GND", carried[0].net);
+    try testing.expectEqual(@as(i64, 2), carried[0].priority);
+
+    const bundle = try retainedCopper(arena, options, carried);
+    try testing.expectEqual(@as(usize, 1), bundle.tracks.len);
+    try testing.expectEqual(@as(usize, 1), bundle.vias.len);
+    try testing.expectEqual(@as(usize, 1), bundle.zones.len);
+    try testing.expectEqual(@as(f64, 0.2), bundle.tracks[0].width);
+    try testing.expectEqual(@as(f64, 0.3), bundle.vias[0].drill);
 }

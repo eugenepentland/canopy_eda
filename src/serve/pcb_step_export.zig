@@ -12,6 +12,7 @@ const std = @import("std");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
 const export_kicad = @import("../export_kicad.zig");
+const board_shape = @import("../board_shape.zig");
 const footprint_mod = @import("../export_kicad_footprint.zig");
 const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
@@ -178,33 +179,23 @@ const BoardArcCircle = struct {
     sweep: f64,
 };
 
+/// The board outline's own three-point arc recovery (`board_shape.arcCircle`),
+/// plus the extra rejections a B-rep needs that a 2-D outline does not: a
+/// non-finite input point, a degenerate radius, and a sweep so small or so
+/// near a full turn that no CIRCLE edge can be built from it.
 fn boardArcCircle(arc: BoardArc) ?BoardArcCircle {
     if (!finitePoint2(arc.p1)) return null;
     if (!finitePoint2(arc.pm)) return null;
     if (!finitePoint2(arc.p2)) return null;
-    const x1 = arc.p1[0];
-    const y1 = arc.p1[1];
-    const xm = arc.pm[0];
-    const ym = arc.pm[1];
-    const x2 = arc.p2[0];
-    const y2 = arc.p2[1];
-    const d = 2 * (x1 * (ym - y2) + xm * (y2 - y1) + x2 * (y1 - ym));
-    if (@abs(d) < 1e-12) return null;
-    const s1 = x1 * x1 + y1 * y1;
-    const sm = xm * xm + ym * ym;
-    const s2 = x2 * x2 + y2 * y2;
-    const cx = (s1 * (ym - y2) + sm * (y2 - y1) + s2 * (y1 - ym)) / d;
-    const cy = (s1 * (x2 - xm) + sm * (x1 - x2) + s2 * (xm - x1)) / d;
-    const radius = std.math.hypot(x1 - cx, y1 - cy);
-    if (!(radius > 1e-9) or !std.math.isFinite(radius)) return null;
-    const start = std.math.atan2(y1 - cy, x1 - cx);
-    const mid = std.math.atan2(ym - cy, xm - cx);
-    const finish = std.math.atan2(y2 - cy, x2 - cx);
-    const ccw_mid = @mod(mid - start, std.math.tau);
-    const ccw_end = @mod(finish - start, std.math.tau);
-    const sweep = if (ccw_mid <= ccw_end) ccw_end else ccw_end - std.math.tau;
-    if (@abs(sweep) < 1e-9 or @abs(sweep) >= std.math.tau - 1e-9) return null;
-    return .{ .center = .{ cx, cy }, .radius = radius, .start_angle = start, .sweep = sweep };
+    const circle = board_shape.arcCircle(.{ .p1 = arc.p1, .pm = arc.pm, .p2 = arc.p2 }) orelse return null;
+    if (!(circle.radius > 1e-9) or !std.math.isFinite(circle.radius)) return null;
+    if (@abs(circle.sweep) < 1e-9 or @abs(circle.sweep) >= std.math.tau - 1e-9) return null;
+    return .{
+        .center = .{ circle.cx, circle.cy },
+        .radius = circle.radius,
+        .start_angle = circle.start_angle,
+        .sweep = circle.sweep,
+    };
 }
 
 fn reversedBoardArc(arc: BoardArc) BoardArc {

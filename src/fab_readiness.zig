@@ -21,6 +21,7 @@
 //! coming from the optimizer cache rather than a saved snapshot.
 
 const std = @import("std");
+const json_writer = @import("json_writer.zig");
 const optimizer = @import("placement/optimizer.zig");
 const router = @import("placement/router.zig");
 const drc = @import("placement/drc.zig");
@@ -1872,35 +1873,20 @@ fn writeItems(w: *std.Io.Writer, items: []const Item) std.Io.Writer.Error!void {
     for (items, 0..) |it, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"id\":");
-        try writeJsonStr(w, it.id);
+        try json_writer.writeScriptString(w, it.id);
         try w.writeAll(",\"message\":");
-        try writeJsonStr(w, it.message);
+        try json_writer.writeScriptString(w, it.message);
         if (it.net) |n| {
             try w.writeAll(",\"net\":");
-            try writeJsonStr(w, n);
+            try json_writer.writeScriptString(w, n);
         }
         if (it.ref) |r| {
             try w.writeAll(",\"ref\":");
-            try writeJsonStr(w, r);
+            try json_writer.writeScriptString(w, r);
         }
         if (it.count > 0) try w.print(",\"count\":{d}", .{it.count});
         try w.writeAll("}");
     }
-}
-
-/// Minimal JSON string escaper (quotes + backslash + control chars) — the net
-/// names and messages here never contain exotic characters, but be safe.
-fn writeJsonStr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
-    try w.writeByte('"');
-    for (s) |c| switch (c) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
-        else => if (c < 0x20) try w.print("\\u{x:0>4}", .{c}) else try w.writeByte(c),
-    };
-    try w.writeByte('"');
 }
 
 // ── Connectivity model ──────────────────────────────────────────────────────

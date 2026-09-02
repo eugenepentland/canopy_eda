@@ -9,6 +9,7 @@
 //! by `serve/thermal_page.zig`) and its own JSON at `/api/thermal/:name`.
 
 const std = @import("std");
+const escape = @import("escape.zig");
 const review = @import("review.zig");
 const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
@@ -71,12 +72,12 @@ pub fn writePowerBudget(w: anytype, rails: []const power_budget.Rail) RenderErro
         if (disabled) try w.writeAll("·") else try w.writeAll("▸");
         try w.writeAll("</span>");
         try w.writeAll("<span class=\"rail-net\"><code>");
-        try writeHtmlEscaped(w, r.net);
+        try escape.writeXml(w, r.net);
         try w.writeAll("</code></span>");
         try w.writeAll("<span>");
         if (r.source_label.len > 0) {
             try w.writeAll("<code>");
-            try writeHtmlEscaped(w, r.source_label);
+            try escape.writeXml(w, r.source_label);
             try w.writeAll("</code>");
         } else {
             try w.writeAll(mutedDash);
@@ -106,15 +107,15 @@ pub fn writePowerBudget(w: anytype, rails: []const power_budget.Rail) RenderErro
                 // component, else the ref as a last resort.
                 const part: []const u8 = if (c.label.len > 0) c.label else if (c.component.len > 0) c.component else c.ref_des;
                 try w.writeAll(trCodeOpen);
-                try writeHtmlEscaped(w, part);
+                try escape.writeXml(w, part);
                 try w.writeAll(codeTdToCode);
-                try writeHtmlEscaped(w, c.ref_des);
+                try escape.writeXml(w, c.ref_des);
                 try w.writeAll(codeTdToCode);
-                try writeHtmlEscaped(w, c.net);
+                try escape.writeXml(w, c.net);
                 try w.writeAll(codeTdSep);
                 for (c.pins, 0..) |p, i| {
                     if (i > 0) try w.writeAll(", ");
-                    try writeHtmlEscaped(w, p);
+                    try escape.writeXml(w, p);
                 }
                 try w.writeAll(tdSep);
                 if (c.i_typ) |v| try w.print("{d:.4}", .{v}) else try w.writeAll(mutedDash);
@@ -169,13 +170,13 @@ pub fn writePowerSequence(w: anytype, rows: []const power_sequencing.SequenceRow
             else => "",
         };
         try w.print("<tr{s}><td>{d}</td><td><code>", .{ row_class, r.order + 1 });
-        try writeHtmlEscaped(w, r.rail);
+        try escape.writeXml(w, r.rail);
         try w.writeAll(codeTdToCode);
-        try writeHtmlEscaped(w, r.source);
+        try escape.writeXml(w, r.source);
         try w.writeAll(codeTdSep);
         if (r.enable.len > 0) {
             try w.writeAll("<code>");
-            try writeHtmlEscaped(w, r.enable);
+            try escape.writeXml(w, r.enable);
             try w.writeAll("</code>");
         } else {
             try w.writeAll(mutedDash);
@@ -183,11 +184,11 @@ pub fn writePowerSequence(w: anytype, rows: []const power_sequencing.SequenceRow
         try w.writeAll(tdSep);
         if (r.depends_on.len > 0) {
             try w.writeAll("<code>");
-            try writeHtmlEscaped(w, r.depends_on);
+            try escape.writeXml(w, r.depends_on);
             try w.writeAll("</code>");
             if (r.via.len > 0) {
                 try w.writeAll(" <span class=\"muted\">via <code>");
-                try writeHtmlEscaped(w, r.via);
+                try escape.writeXml(w, r.via);
                 try w.writeAll("</code></span>");
             }
         } else {
@@ -216,18 +217,18 @@ pub fn writeTestPoints(w: anytype, tps: []const review.TestPointEntry) RenderErr
     try w.writeAll("<table><thead><tr><th>Ref</th><th>Net</th><th>Purpose</th></tr></thead><tbody>");
     for (tps) |tp| {
         try w.writeAll(trCodeOpen);
-        try writeHtmlEscaped(w, tp.ref_des);
+        try escape.writeXml(w, tp.ref_des);
         try w.writeAll(codeTdSep);
         if (tp.net.len > 0) {
             try w.writeAll("<code>");
-            try writeHtmlEscaped(w, tp.net);
+            try escape.writeXml(w, tp.net);
             try w.writeAll("</code>");
         } else {
             try w.writeAll("<span class=\"muted\">unconnected</span>");
         }
         try w.writeAll(tdSep);
         if (tp.purpose.len > 0) {
-            try writeHtmlEscaped(w, tp.purpose);
+            try escape.writeXml(w, tp.purpose);
         } else {
             try w.writeAll(mutedDash);
         }
@@ -293,16 +294,16 @@ fn writeIncompleteInstances(w: anytype, instances: []const coverage.InstanceCove
     for (instances) |ic| {
         if (ic.complete) continue;
         try w.writeAll(trCodeOpen);
-        try writeHtmlEscaped(w, ic.ref_des);
+        try escape.writeXml(w, ic.ref_des);
         try w.writeAll(codeTdToCode);
-        try writeHtmlEscaped(w, ic.component);
+        try escape.writeXml(w, ic.component);
         try w.writeAll(codeTdSep);
         var first = true;
         for (ic.checks) |chk| {
             if (chk.ok) continue;
             if (!first) try w.writeAll(", ");
             first = false;
-            try writeHtmlEscaped(w, categoryLabel(chk.category));
+            try escape.writeXml(w, categoryLabel(chk.category));
         }
         try w.writeAll(tdTrClose);
     }
@@ -326,17 +327,6 @@ fn writeFloatCell(w: anytype, v: ?f64) !void {
     } else {
         try w.writeAll(mutedDash);
     }
-}
-
-fn writeHtmlEscaped(w: anytype, s: []const u8) !void {
-    for (s) |c| switch (c) {
-        '<' => try w.writeAll("&lt;"),
-        '>' => try w.writeAll("&gt;"),
-        '&' => try w.writeAll("&amp;"),
-        '"' => try w.writeAll("&quot;"),
-        '\'' => try w.writeAll("&#39;"),
-        else => try w.writeByte(c),
-    };
 }
 
 // ── Tests ─────────────────────────────────────────────────────────

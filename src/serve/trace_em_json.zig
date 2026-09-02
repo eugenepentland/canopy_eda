@@ -1,6 +1,7 @@
 //! JSON surface for the PCB viewer's click-to-inspect trace analysis.
 
 const std = @import("std");
+const json_writer = @import("../json_writer.zig");
 const optimizer = @import("../placement/optimizer.zig");
 const router = @import("../placement/router.zig");
 const trace_em = @import("../placement/trace_em.zig");
@@ -28,11 +29,11 @@ pub fn write(
         if (!first) try w.writeByte(',');
         first = false;
         try w.writeAll("{\"net\":");
-        try writeJsonStr(w, net.name);
+        try json_writer.writeScriptString(w, net.name);
         try w.writeAll(",\"class\":");
-        try writeJsonStr(w, if (net_index < placement.rules.net.len) placement.rules.net[net_index].class.name else "");
+        try json_writer.writeScriptString(w, if (net_index < placement.rules.net.len) placement.rules.net[net_index].class.name else "");
         try w.writeAll(",\"status\":");
-        try writeJsonStr(w, analysis.status.name());
+        try json_writer.writeScriptString(w, analysis.status.name());
         try w.writeAll(",\"via_model_valid_to_hz\":");
         if (analysis.via_model.valid_to_hz) |valid_to_hz|
             try w.print("{d}", .{valid_to_hz})
@@ -77,7 +78,7 @@ pub fn write(
                     "\"ground_gap_mm\":{d},\"gap_capped\":{},\"structure\":",
                 .{ section.from[0], section.from[1], section.to[0], section.to[1], section.layers.route, section.layers.physical, section.width_mm, section.length_mm, section.electrical.z0_ohms, section.electrical.er_eff, section.electrical.ground_gap_mm, section.electrical.gap_capped },
             );
-            try writeJsonStr(w, section.electrical.structure);
+            try json_writer.writeScriptString(w, section.electrical.structure);
             try w.writeByte('}');
         }
         try w.writeAll("],\"sweep\":[");
@@ -92,18 +93,4 @@ pub fn write(
         try w.writeAll("]}");
     }
     try w.writeAll("]}");
-}
-
-fn writeJsonStr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
-    try w.writeByte('"');
-    for (s) |c| switch (c) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
-        '<' => try w.writeAll("\\u003c"),
-        else => if (c < 0x20) try w.print("\\u{x:0>4}", .{c}) else try w.writeByte(c),
-    };
-    try w.writeByte('"');
 }

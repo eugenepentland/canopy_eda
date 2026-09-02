@@ -46,6 +46,7 @@
 //! button and an agent's `generate_fence` call can never diverge.
 
 const std = @import("std");
+const json_writer = @import("../json_writer.zig");
 const httpz = @import("httpz");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const modules_mod = @import("modules.zig");
@@ -499,7 +500,7 @@ pub fn errorStatus(e: FenceError) u16 {
 /// the browser toasts can never drift.
 fn writeOutcome(w: *std.Io.Writer, o: Outcome, version: u64) std.Io.Writer.Error!void {
     try w.print("{{\"ok\":true,\"live_version\":{d},\"layout\":", .{version});
-    try writeJsonStr(w, o.layout);
+    try json_writer.writeScriptString(w, o.layout);
     try w.print(
         ",\"mode\":\"{s}\",\"placed\":{d},\"culled\":{d},\"replaced\":{d},\"dry_run\":{}," ++
             "\"drc\":{d},\"drc_errors\":{d},\"drc_errors_before\":{d}," ++
@@ -510,14 +511,14 @@ fn writeOutcome(w: *std.Io.Writer, o: Outcome, version: u64) std.Io.Writer.Error
             o.tally.routed,       o.tally.total,
         },
     );
-    try writeJsonStr(w, o.ground);
+    try json_writer.writeScriptString(w, o.ground);
     try w.writeAll(",\"nets\":[");
     for (o.nets, 0..) |n, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"net\":");
-        try writeJsonStr(w, n.net);
+        try json_writer.writeScriptString(w, n.net);
         try w.writeAll(",\"stitch\":");
-        try writeJsonStr(w, n.stitch);
+        try json_writer.writeScriptString(w, n.stitch);
         try w.print(
             ",\"placed\":{d},\"candidates\":{d},\"layers\":{d},\"contours\":{d},\"guide_mm\":{d:.3}," ++
                 "\"pitch_mm\":{d:.4},\"pitch_clamped\":{}," ++
@@ -532,26 +533,11 @@ fn writeOutcome(w: *std.Io.Writer, o: Outcome, version: u64) std.Io.Writer.Error
         );
         if (n.err.len > 0) {
             try w.writeAll(",\"error\":");
-            try writeJsonStr(w, n.err);
+            try json_writer.writeScriptString(w, n.err);
         }
         try w.writeAll("}");
     }
     try w.writeAll("]}");
-}
-
-/// Minimal JSON string escaper — the serve layer's shared spelling, duplicated
-/// here rather than reaching into `pcb_layout_page`'s private writer.
-fn writeJsonStr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
-    try w.writeByte('"');
-    for (s) |c| switch (c) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
-        else => if (c < 0x20) try w.print("\\u{x:0>4}", .{c}) else try w.writeByte(c),
-    };
-    try w.writeByte('"');
 }
 
 /// `POST /api/pcb-fence/:name[?layout=<row>&mode=legal|all&dry_run=1&nets=A,B]` —
@@ -567,7 +553,7 @@ pub fn pcbFenceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
         res.content_type = .JSON;
         var bad: std.Io.Writer.Allocating = .init(req.arena);
         try bad.writer.writeAll("{\"ok\":false,\"error\":");
-        try writeJsonStr(&bad.writer, unknownModeMsg(req.arena, m));
+        try json_writer.writeScriptString(&bad.writer, unknownModeMsg(req.arena, m));
         try bad.writer.writeAll("}");
         res.body = bad.written();
         return;
@@ -584,7 +570,7 @@ pub fn pcbFenceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
         try aw.writer.writeAll("{\"ok\":false,\"error\":");
         // An unknown ?layout= names the rows that DO exist, exactly like every
         // other per-layout endpoint's dead-link body.
-        try writeJsonStr(&aw.writer, if (e == error.UnknownLayout)
+        try json_writer.writeScriptString(&aw.writer, if (e == error.UnknownLayout)
             pcb_layout_page.unknownLayoutMsg(req.arena, ctx.project_dir, name, null, layout_arg orelse "")
         else
             errorMessage(e));
@@ -625,7 +611,7 @@ pub fn mcpGenerateFence(
         via_fence.Mode.legal;
     const o = run(alloc, project_dir, name, .{
         .layout = argStr(args_val, "layout"),
-        .only = argNames(alloc, args_val, "nets"),
+        .only = pcb_layout_page.mcpArgStrList(alloc, args_val, "nets"),
         .mode = mode,
         .dry_run = argBool(args_val, "dry_run"),
     }) catch |e| return fail(out, alloc, errorMessage(e));
@@ -651,32 +637,12 @@ fn argBool(args_val: ?std.json.Value, key: []const u8) bool {
     return v == .bool and v.bool;
 }
 
-/// `args.key` as a name list — a JSON string array or a comma string.
-fn argNames(alloc: std.mem.Allocator, args_val: ?std.json.Value, key: []const u8) []const []const u8 {
-    const av = args_val orelse return &.{};
-    if (av != .object) return &.{};
-    const v = av.object.get(key) orelse return &.{};
-    var list: std.ArrayList([]const u8) = .empty;
-    if (v == .array) {
-        for (v.array.items) |it| {
-            if (it == .string and it.string.len > 0) list.append(alloc, it.string) catch break;
-        }
-    } else if (v == .string) {
-        var it = std.mem.tokenizeScalar(u8, v.string, ',');
-        while (it.next()) |tok| {
-            const t = std.mem.trim(u8, tok, " \t");
-            if (t.len > 0) list.append(alloc, t) catch break;
-        }
-    }
-    return list.toOwnedSlice(alloc) catch &.{};
-}
-
 /// Write an `{"ok":false,"error":…}` envelope and return false (the CLI layer
 /// flags the result `isError`).
 fn fail(out: *std.ArrayList(u8), alloc: std.mem.Allocator, msg: []const u8) HandlerError!bool {
     var aw: std.Io.Writer.Allocating = .init(alloc);
     try aw.writer.writeAll("{\"ok\":false,\"error\":");
-    try writeJsonStr(&aw.writer, msg);
+    try json_writer.writeScriptString(&aw.writer, msg);
     try aw.writer.writeAll("}");
     try out.appendSlice(alloc, aw.written());
     return false;

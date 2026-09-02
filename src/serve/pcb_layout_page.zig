@@ -2445,31 +2445,6 @@ fn mergeAcceptedSeeds(
     options.existing_vias = vias.items;
 }
 
-fn retainedSeedCopper(
-    alloc: std.mem.Allocator,
-    options: route_policy.Options,
-) std.mem.Allocator.Error!export_gerber.Copper {
-    const tracks = try alloc.alloc(router.Track, options.existing_tracks.len);
-    for (options.existing_tracks, 0..) |track, i| tracks[i] = .{
-        .x1 = track.x1,
-        .y1 = track.y1,
-        .x2 = track.x2,
-        .y2 = track.y2,
-        .layer = track.layer,
-        .width = track.width,
-        .net = track.net,
-    };
-    const vias = try alloc.alloc(router.Via, options.existing_vias.len);
-    for (options.existing_vias, 0..) |via, i| vias[i] = .{
-        .x = via.x,
-        .y = via.y,
-        .dia = via.dia,
-        .drill = via.drill,
-        .net = via.net,
-    };
-    return .{ .tracks = tracks, .vias = vias };
-}
-
 /// Route every sub-circuit first in a component-only view, then add compatible
 /// starred module copper only for nets the isolated router could not emit. The
 /// assembled board's rules and DRC are authoritative: disallowed layers / via
@@ -2534,7 +2509,10 @@ pub fn addSubcircuitRouteSeeds(
         @memset(global_scope, true)
     else for (global_scope, 0..) |*yes, ni|
         yes.* = ni < options.selected_nets.len and options.selected_nets[ni];
-    const connectivity = try fab_readiness.netConnectivity(alloc, placement, try retainedSeedCopper(alloc, options.*));
+    // The whole retained bundle, pours included: the same oracle describe and
+    // fabrication run, which reads a net joined through a pour as connected.
+    const retained = try route_plan.retainedCopper(alloc, options.*, try route_plan.retainedZones(alloc, placement, options.*));
+    const connectivity = try fab_readiness.netConnectivity(alloc, placement, retained);
     for (local.complete_planes, 0..) |complete, ni| {
         // The same oracle used by describe/fabrication decides whether the
         // retained local drops really joined every terminal. Complete carrier
@@ -10434,8 +10412,9 @@ fn mcpArgNumOpt(args_val: ?std.json.Value, key: []const u8) ?f64 {
 }
 
 /// `args.key` as a token list — a JSON string array or a comma-separated
-/// string (trimmed, empties dropped). Absent ⇒ empty slice.
-fn mcpArgStrList(alloc: std.mem.Allocator, args_val: ?std.json.Value, key: []const u8) []const []const u8 {
+/// string (trimmed, empties dropped). Absent ⇒ empty slice. The one spelling
+/// every MCP layout/route tool parses its name-list arguments with.
+pub fn mcpArgStrList(alloc: std.mem.Allocator, args_val: ?std.json.Value, key: []const u8) []const []const u8 {
     const av = args_val orelse return &.{};
     if (av != .object) return &.{};
     const v = av.object.get(key) orelse return &.{};

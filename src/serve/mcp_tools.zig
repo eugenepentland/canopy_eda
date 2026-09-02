@@ -838,7 +838,7 @@ fn toolDescribePcbLayout(allocator: std.mem.Allocator, project_dir: []const u8, 
     var opts = mcp_read_opts.describePcbOpts(args_val);
     // `cropnet` (array or comma-string) — the net-bbox zoom lens; describe emits
     // its resolved world bbox as `crop_bbox`, the twin of the PNG viewport.
-    opts.crop_nets = jsonStrList(allocator, args_val, "cropnet");
+    opts.crop_nets = pcb_layout_page.mcpArgStrList(allocator, args_val, "cropnet");
     const body = pcb_describe.describeDesign(allocator, project_dir, name, opts, null) catch |e| {
         try out.appendSlice(allocator, try std.fmt.allocPrint(allocator, "error describing pcb layout: {s}", .{@errorName(e)}));
         return false;
@@ -890,8 +890,8 @@ fn toolCompareLayoutToStarred(allocator: std.mem.Allocator, project_dir: []const
 fn toolGetPcbImage(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     var opts = pcb_layout_page.PngRequest{
-        .highlight_nets = jsonStrList(allocator, args_val, "nets"),
-        .highlight_refs = jsonStrList(allocator, args_val, "refs"),
+        .highlight_nets = pcb_layout_page.mcpArgStrList(allocator, args_val, "nets"),
+        .highlight_refs = pcb_layout_page.mcpArgStrList(allocator, args_val, "refs"),
         .route = optionalBool(args_val, "route") orelse false,
         .layout = optionalString(args_val, "layout"),
         .regen = optionalBool(args_val, "regen") orelse false,
@@ -901,9 +901,9 @@ fn toolGetPcbImage(allocator: std.mem.Allocator, project_dir: []const u8, args_v
         .dims = optionalBool(args_val, "dims") orelse false,
         .grid = optionalBool(args_val, "grid") orelse false,
         .compare = optionalString(args_val, "compare"),
-        .pins = jsonStrList(allocator, args_val, "pins"),
+        .pins = pcb_layout_page.mcpArgStrList(allocator, args_val, "pins"),
         .crop = optionalString(args_val, "crop"),
-        .crop_nets = jsonStrList(allocator, args_val, "cropnet"),
+        .crop_nets = pcb_layout_page.mcpArgStrList(allocator, args_val, "cropnet"),
         .sheet = optionalBool(args_val, "sheet") orelse false,
         .critique = optionalBool(args_val, "critique") orelse false,
         // rough OFF by default — see describePcbOpts: a no-arg image renders the
@@ -965,28 +965,6 @@ fn toolGetSchematicImage(allocator: std.mem.Allocator, project_dir: []const u8, 
     _ = enc.encode(b64, png_bytes);
     try out.appendSlice(allocator, b64);
     return true;
-}
-
-/// Parse a JSON arg that may be a string array or a comma-separated string into
-/// a list of trimmed, non-empty tokens (slices into the parsed JSON, valid for
-/// the request). Absent/empty → empty slice.
-fn jsonStrList(allocator: std.mem.Allocator, args_val: ?std.json.Value, key: []const u8) []const []const u8 {
-    const av = args_val orelse return &.{};
-    if (av != .object) return &.{};
-    const v = av.object.get(key) orelse return &.{};
-    var list: std.ArrayList([]const u8) = .empty;
-    if (v == .array) {
-        for (v.array.items) |item| {
-            if (item == .string and item.string.len > 0) list.append(allocator, item.string) catch break;
-        }
-    } else if (v == .string) {
-        var it = std.mem.tokenizeScalar(u8, v.string, ',');
-        while (it.next()) |tok| {
-            const t = std.mem.trim(u8, tok, " \t");
-            if (t.len > 0) list.append(allocator, t) catch break;
-        }
-    }
-    return list.toOwnedSlice(allocator) catch &.{};
 }
 
 fn toolGetVersion(args_val: ?std.json.Value, out: *std.ArrayList(u8), allocator: std.mem.Allocator) !bool {

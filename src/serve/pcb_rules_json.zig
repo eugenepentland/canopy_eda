@@ -9,6 +9,7 @@
 //! blob's rule serialization has one home instead of being buried in the page.
 
 const std = @import("std");
+const json_writer = @import("../json_writer.zig");
 const optimizer = @import("../placement/optimizer.zig");
 const net_names = @import("../net_name.zig");
 const na = @import("../eval/net_analysis.zig");
@@ -59,11 +60,11 @@ pub fn writeNetClasses(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.
         if (!first) try w.writeByte(',');
         first = false;
         try w.writeAll("{\"net\":");
-        try writeJsonStr(w, net.name);
+        try json_writer.writeScriptString(w, net.name);
         try w.writeAll(",\"class\":");
-        try writeJsonStr(w, rule.class.name);
+        try json_writer.writeScriptString(w, rule.class.name);
         try w.writeAll(",\"source\":");
-        try writeJsonStr(w, rule.class.source);
+        try json_writer.writeScriptString(w, rule.class.source);
         try w.print(
             ",\"width\":{d},\"power_branch_width\":{d},\"adaptive_power_width\":{d},\"clearance\":{d},\"via_dia\":{d},\"via_drill\":{d}," ++
                 "\"priority\":{d},\"diff_gap\":{d},\"band_start_hz\":{d},\"max_freq_hz\":{d}," ++
@@ -102,7 +103,7 @@ pub fn writeNetClasses(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.
                 if (via_fence.fenceable(rule)) via_fence.maskUntentReachMm(rule, p.rules.design) else 0,
             },
         );
-        try writeJsonStr(w, rule.rf.fence.net);
+        try json_writer.writeScriptString(w, rule.rf.fence.net);
         try w.print(",\"resolution_mm\":{d},\"escape_mm\":{d},\"min_bend_ratio\":{d}," ++
             "\"fence_declared\":{s},\"fence_pitch_mm\":{d},\"fence_rows\":{d},\"fence_mask_rows\":{d}," ++
             "\"fence_offset_mm\":{d},\"fence_via_dia_mm\":{d},\"fence_via_drill_mm\":{d},\"match_group\":", .{
@@ -117,12 +118,12 @@ pub fn writeNetClasses(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.
             rule.rf.fence.via_dia,
             rule.rf.fence.via_drill,
         });
-        try writeJsonStr(w, rule.match.group);
+        try json_writer.writeScriptString(w, rule.match.group);
         try w.print(",\"match_tolerance_mm\":{d},\"return_path_declared\":{s},\"return_path_reference\":", .{
             rule.match.tolerance_mm,
             if (rule.return_path.declared) "true" else "false",
         });
-        try writeJsonStr(w, rule.return_path.reference_net);
+        try json_writer.writeScriptString(w, rule.return_path.reference_net);
         try w.print(",\"return_path_stitch_radius_mm\":{d},\"return_path_max_loop_area_mm2\":{d},\"conflict\":{s}}}", .{
             rule.return_path.stitch_radius_mm,
             rule.return_path.max_loop_area_mm2,
@@ -147,14 +148,14 @@ pub fn writePlaneNets(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.E
     const planes = p.rules.plane_nets orelse {
         const rail = p.rules.planes.implicit_rail orelse return;
         try w.writeAll("\"implicit_rail\":");
-        try writeJsonStr(w, rail);
+        try json_writer.writeScriptString(w, rail);
         try w.writeAll(",");
         return;
     };
     try w.writeAll("\"plane_nets\":[");
     for (planes, 0..) |pn, i| {
         if (i > 0) try w.writeByte(',');
-        try writeJsonStr(w, pn);
+        try json_writer.writeScriptString(w, pn);
     }
     try w.writeAll("],");
 }
@@ -173,7 +174,7 @@ pub fn writeGroundNames(w: *std.Io.Writer) std.Io.Writer.Error!void {
     try w.writeAll("\"ground_names\":[");
     for (na.ground_tokens, 0..) |token, i| {
         if (i > 0) try w.writeByte(',');
-        try writeJsonStr(w, token);
+        try json_writer.writeScriptString(w, token);
     }
     try w.writeAll("],");
 }
@@ -259,33 +260,6 @@ fn writeMaskMerges(
         );
     }
     try w.writeByte(']');
-}
-
-/// A JSON string literal with the page blob's escaping: JSON's own escapes plus
-/// `<` and U+2028/U+2029, so the value is safe inside the `<script>` tag the
-/// blob is embedded in.
-fn writeJsonStr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
-    try w.writeByte('"');
-    var i: usize = 0;
-    while (i < s.len) : (i += 1) {
-        const c = s[i];
-        switch (c) {
-            '"' => try w.writeAll("\\\""),
-            '\\' => try w.writeAll("\\\\"),
-            '\n' => try w.writeAll("\\n"),
-            '\r' => try w.writeAll("\\r"),
-            '\t' => try w.writeAll("\\t"),
-            '<' => try w.writeAll("\\u003c"),
-            0xE2 => {
-                if (i + 2 < s.len and s[i + 1] == 0x80 and (s[i + 2] == 0xA8 or s[i + 2] == 0xA9)) {
-                    try w.writeAll(if (s[i + 2] == 0xA8) "\\u2028" else "\\u2029");
-                    i += 2;
-                } else try w.writeByte(c);
-            },
-            else => if (c < 0x20) try w.print("\\u{x:0>4}", .{c}) else try w.writeByte(c),
-        }
-    }
-    try w.writeByte('"');
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────

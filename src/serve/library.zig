@@ -381,12 +381,20 @@ pub fn cseFetchApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
 
 /// True when `name` is a safe single library basename — rejects path traversal
 /// and separators so the model/delete endpoints can't escape `lib/` via a
-/// crafted `:name`/`:kind` param. `,`, `+`, and `#` are allowed: manufacturer
-/// part numbers embed these in packaging/series suffixes (e.g.
+/// crafted `:name`/`:kind` param, and rejects `< > " ' &` so a rejected name
+/// can also never be reflected into markup. `,`, `+`, and `#` are allowed:
+/// manufacturer part numbers embed these in packaging/series suffixes (e.g.
 /// `74ahct1g125gm,132`, `yat-5a+`, and `lt3045edd#pbf`); none is a path
 /// separator nor part of a `..` traversal. Names arrive percent-decoded, so
 /// `%` is still rejected (a stray `%` is never a legitimate basename char).
-fn isSafeLibName(name: []const u8) bool {
+///
+/// This is the ONE library-basename allowlist. `library_3d`'s footprint route
+/// params share it: the library already carries `+` basenames on disk
+/// (`lib/models/yat-6a+.step`, `lib/components/yat-5a+.sexp`), so a second,
+/// stricter copy that rejected `+` was a latent 404 on a real Mini-Circuits
+/// part while buying no safety — `+` is neither a separator, nor part of
+/// `..`, nor markup.
+pub fn isSafeLibName(name: []const u8) bool {
     if (name.len == 0 or name.len > 128) return false;
     if (std.mem.indexOf(u8, name, "..") != null) return false;
     for (name) |c| {
