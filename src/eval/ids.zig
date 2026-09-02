@@ -448,6 +448,11 @@ pub fn prescanIds(self: *Evaluator, forms: []const Node) void {
         const children = form.asList() orelse continue;
         if (children.len == 0) continue;
         if (children[0].asAtom()) |head| {
+            // A sign-off's `(req (id …) …)` names a requirement it verifies; the
+            // id belongs to the requirement, which derives it again at
+            // evaluation. Registering the reference would make that derivation
+            // look like a collision with itself.
+            if (std.mem.eql(u8, head, "req")) continue;
             if (std.mem.eql(u8, head, "id")) {
                 if (children.len >= 2) {
                     if (children[1].asAtom() orelse children[1].asString()) |tok| registerId(self, tok);
@@ -821,6 +826,19 @@ test "deriveChildId unique per index" {
     try std.testing.expect(!std.mem.eql(u8, id0, id1));
     try std.testing.expect(!std.mem.eql(u8, id1, id2));
     try std.testing.expect(!std.mem.eql(u8, id0, id2));
+}
+
+// spec: eval/evaluator - prescanIds skips the requirement id a (req (id …)) sign-off reference names, so a derived requirement id never collides with its own reference
+test "prescanIds skips (req (id …)) references" {
+    const alloc = std.testing.allocator;
+    const parser_m = @import("../sexpr/parser.zig");
+    const nodes = try parser_m.parse(alloc, "(verifies (req (id abcd1234) 5051554e) \"t\") (instance \"R1\" comp (id bcde2345))");
+    defer parser_m.freeNodes(alloc, nodes);
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    prescanIds(&eval, nodes);
+    try std.testing.expect(!eval.design_ids.contains("abcd1234"));
+    try std.testing.expect(eval.design_ids.contains("bcde2345"));
 }
 
 // spec: eval/evaluator - generateId produces 8-char hex starting with letter
