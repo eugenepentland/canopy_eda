@@ -9,6 +9,7 @@
 const std = @import("std");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
+const cache_core = @import("cache_core.zig");
 const paths = @import("../paths.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const page_cache = @import("page_cache.zig");
@@ -79,41 +80,28 @@ pub const Store = struct {
         return self.use_clock;
     }
 
-    fn freeEntry(self: *Store, allocator: std.mem.Allocator, key: []const u8, entry: Entry) void {
+    /// Release one entry and un-charge its bytes. `pub` because it is the
+    /// contract `cache_core`'s shared eviction sweep and teardown call back
+    /// into; nothing outside this module has any reason to.
+    pub fn freeEntry(self: *Store, allocator: std.mem.Allocator, key: []const u8, entry: Entry) void {
         self.bytes -= entry.html.len;
         allocator.free(key);
         allocator.free(entry.html);
         entry.files.deinit();
     }
 
+    /// Evict least-recently-used until the store is back inside both budgets.
+    /// `Entry` carries no `plain` flag: `layout` is the only key this store has
+    /// a variant on, and a named board is no less worth keeping than the
+    /// default one, so the shared sweep runs in plain recency order.
     fn trim(self: *Store, allocator: std.mem.Allocator) void {
-        while (self.entries.count() > max_entries or self.bytes > max_assembly_cache_bytes) {
-            var oldest_key: ?[]const u8 = null;
-            var oldest_use: u64 = std.math.maxInt(u64);
-            var it = self.entries.iterator();
-            while (it.next()) |kv| {
-                if (kv.value_ptr.used < oldest_use) {
-                    oldest_key = kv.key_ptr.*;
-                    oldest_use = kv.value_ptr.used;
-                }
-            }
-            const key = oldest_key orelse return;
-            const removed = self.entries.fetchRemove(key) orelse return;
-            self.freeEntry(allocator, removed.key, removed.value);
-        }
+        cache_core.evictLru(self, allocator, max_entries, max_assembly_cache_bytes);
     }
 
     /// Free all retained pages when the owning server stops.
     pub fn deinit(self: *Store) void {
-        const allocator = self.allocator orelse return;
         self.mutex.lock();
-        var it = self.entries.iterator();
-        while (it.next()) |kv| {
-            allocator.free(kv.key_ptr.*);
-            allocator.free(kv.value_ptr.html);
-            kv.value_ptr.files.deinit();
-        }
-        self.entries.deinit(allocator);
+        cache_core.freeAll(self);
         self.mutex.unlock();
         self.* = .{};
     }

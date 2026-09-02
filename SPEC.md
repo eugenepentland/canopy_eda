@@ -6937,6 +6937,10 @@ is what makes the predicate exact rather than approximately right.
 - The PCB image endpoint caches only its allow-listed framing modes and bypasses fresh-route, fresh-solve and sub-scoped requests
 - The PCB image cache refuses a body whose dependency set stamps nothing
 - The PCB image cache retains nothing when its server gave it no allocator
+- A cached read endpoint frames a hit exactly as a freshly computed answer and reports a failed computation in its own error shape
+- The shared cache eviction sweep spends a keyed variant before the plain answer
+- The shared cache eviction sweep falls back to plain recency for a store whose entries carry no variant flag
+- A shared-core cache teardown frees every retained entry, and does nothing at all for a store that was never given an allocator
 - The layout-status reader reuses a parsed layouts sidecar until that file's mtime or size changes
 - The fab-readiness gate reuses caller-supplied net connectivity instead of recomputing it
 - The navigation bar routes home through the Netlisp brand and carries no separate Designs tab

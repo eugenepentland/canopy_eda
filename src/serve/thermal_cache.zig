@@ -44,6 +44,7 @@
 
 const std = @import("std");
 const infra_fs = @import("../infra/fs.zig");
+const cache_core = @import("cache_core.zig");
 const page_cache = @import("page_cache.zig");
 const paths = @import("../paths.zig");
 const thermal_scenarios = @import("../thermal_scenarios.zig");
@@ -172,40 +173,26 @@ pub const Store = struct {
         return self.use_clock;
     }
 
-    fn freeEntry(self: *Store, alloc: std.mem.Allocator, key: []const u8, entry: Entry) void {
+    /// Release one entry and un-charge its bytes. `pub` because it is the
+    /// contract `cache_core`'s shared eviction sweep and teardown call back
+    /// into; nothing outside this module has any reason to.
+    pub fn freeEntry(self: *Store, alloc: std.mem.Allocator, key: []const u8, entry: Entry) void {
         self.bytes -= entry.bytes;
         alloc.free(key);
         freeResults(alloc, entry.results);
         entry.files.deinit();
     }
 
+    /// Evict least-recently-used until the store is back inside both budgets.
+    /// `Entry` carries no `plain` flag — every board here is somebody's board —
+    /// so the shared sweep runs in plain recency order.
     fn trim(self: *Store, alloc: std.mem.Allocator) void {
-        while (self.entries.count() > max_entries or self.bytes > max_field_bytes) {
-            var oldest_key: ?[]const u8 = null;
-            var oldest_use: u64 = std.math.maxInt(u64);
-            var it = self.entries.iterator();
-            while (it.next()) |kv| {
-                if (kv.value_ptr.used < oldest_use) {
-                    oldest_key = kv.key_ptr.*;
-                    oldest_use = kv.value_ptr.used;
-                }
-            }
-            const key = oldest_key orelse return;
-            const removed = self.entries.fetchRemove(key) orelse return;
-            self.freeEntry(alloc, removed.key, removed.value);
-        }
+        cache_core.evictLru(self, alloc, max_entries, max_field_bytes);
     }
 
     /// Free every retained field when its owning server stops.
     pub fn deinit(self: *Store) void {
-        const alloc = self.allocator orelse return;
-        var it = self.entries.iterator();
-        while (it.next()) |kv| {
-            alloc.free(kv.key_ptr.*);
-            freeResults(alloc, kv.value_ptr.results);
-            kv.value_ptr.files.deinit();
-        }
-        self.entries.deinit(alloc);
+        cache_core.freeAll(self);
         self.* = .{};
     }
 

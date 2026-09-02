@@ -17,23 +17,38 @@
 //! endpoint accepts (`?layout=`, `?sub=`, `?regen=1`, `?route=1`, the tuning
 //! knobs) selects a different board or forces a fresh solve, and the home page
 //! never sends one — so an unrecognised query bypasses the cache entirely
-//! rather than risking a mismatched entry.
+//! rather than risking a mismatched entry. That is exactly `read_cache.Store`
+//! with an EMPTY keyed-parameter list: its strict allow-list admits nothing, so
+//! any query at all bypasses and the plain request's key is the design name.
+//!
+//! What stays here is that configuration, the ladder's own dependency capture
+//! (`captureDeps`, which the describe and image surfaces also read through
+//! because their answers embed this one), and the tests that pin them.
 
 const std = @import("std");
 const httpz = @import("httpz");
-const infra_fs = @import("../infra/fs.zig");
 const paths = @import("../paths.zig");
 const page_cache = @import("page_cache.zig");
+const read_cache = @import("read_cache.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 
-/// Entry cap. Each body is a few kilobytes of ladder JSON, so this is a
-/// generous ceiling for any real project's design count.
-const ladder_max_entries: usize = 64;
-/// Total byte budget of this store, and the largest single body it will admit.
-/// Deliberately its own figure — a ladder is orders of magnitude smaller than a
-/// rendered PCB page, so it is not the rendered-page cache's budget.
-const ladder_max_bytes: usize = 8 * 1024 * 1024;
-const cache_header = "X-Netlisp-Progress-Cache";
+/// `GET /api/layout-progress/:name`. No keyed parameters at all: every query
+/// this endpoint accepts either selects a different board or forces a fresh
+/// solve, so all of them bypass.
+///
+/// Each body is a few kilobytes of ladder JSON, so the entry cap is a generous
+/// ceiling for any real project's design count and the byte budget is
+/// deliberately its own figure — a ladder is orders of magnitude smaller than a
+/// rendered PCB page.
+pub const config: read_cache.Config = .{
+    .header = "X-Netlisp-Progress-Cache",
+    .max_entries = 64,
+    .max_bytes = 8 * 1024 * 1024,
+};
+
+/// One server instance's bounded ladder-JSON cache. `allocator=null`
+/// intentionally disables it for handler tests that construct `ServerState{}`.
+pub const Store = read_cache.Store(config);
 
 /// Sidecars the ladder reads that the evaluator never parses, so
 /// `page_cache.capture` cannot know about them: the saved layouts (poses +
@@ -44,197 +59,6 @@ const cache_header = "X-Netlisp-Progress-Cache";
 /// — read for each sub-circuit's ★ status — is already stamped by `capture`
 /// for every loaded `lib/modules/*.sexp`.
 const sidecar_exts = [_][]const u8{ ".layouts.json", ".autolayout.json", ".drc-rules.json" };
-
-const Entry = struct {
-    json: []const u8,
-    files: page_cache.FileSet,
-    live_version: u32,
-    used: u64,
-};
-
-/// True when the request is the plain `/api/layout-progress/:name` the home
-/// page sends — no query at all. Anything else picks a different board or
-/// forces a solve and is deliberately not cached.
-fn cacheable(req: *httpz.Request) bool {
-    const q = req.query() catch return false;
-    return q.len == 0;
-}
-
-/// One server instance's bounded ladder-JSON cache. `allocator=null`
-/// intentionally disables it for handler tests that construct `ServerState{}`.
-pub const Store = struct {
-    allocator: ?std.mem.Allocator = null,
-    mutex: infra_fs.Mutex = .{},
-    entries: std.StringHashMapUnmanaged(Entry) = .empty,
-    bytes: usize = 0,
-    use_clock: u64 = 0,
-
-    fn nextUse(self: *Store) u64 {
-        self.use_clock +%= 1;
-        return self.use_clock;
-    }
-
-    fn freeEntry(self: *Store, allocator: std.mem.Allocator, key: []const u8, entry: Entry) void {
-        self.bytes -= entry.json.len;
-        allocator.free(key);
-        allocator.free(entry.json);
-        entry.files.deinit();
-    }
-
-    fn trim(self: *Store, allocator: std.mem.Allocator) void {
-        while (self.entries.count() > ladder_max_entries or self.bytes > ladder_max_bytes) {
-            var oldest_key: ?[]const u8 = null;
-            var oldest_use: u64 = std.math.maxInt(u64);
-            var it = self.entries.iterator();
-            while (it.next()) |kv| {
-                if (kv.value_ptr.used < oldest_use) {
-                    oldest_key = kv.key_ptr.*;
-                    oldest_use = kv.value_ptr.used;
-                }
-            }
-            const key = oldest_key orelse return;
-            const removed = self.entries.fetchRemove(key) orelse return;
-            self.freeEntry(allocator, removed.key, removed.value);
-        }
-    }
-
-    /// Free every retained body when its owning server stops.
-    pub fn deinit(self: *Store) void {
-        const allocator = self.allocator orelse return;
-        var it = self.entries.iterator();
-        while (it.next()) |kv| {
-            allocator.free(kv.key_ptr.*);
-            allocator.free(kv.value_ptr.json);
-            kv.value_ptr.files.deinit();
-        }
-        self.entries.deinit(allocator);
-        self.* = .{};
-    }
-
-    /// Serve a valid cache hit and return true. `in` supplies scratch, request,
-    /// response, design name, and the live version read before the request ran.
-    /// On a miss `miss_version` receives that version so `store` can refuse to
-    /// retain a body an edit raced.
-    pub fn serve(self: *Store, in: anytype, miss_version: *?u32) bool {
-        const allocator = self.allocator orelse return false;
-        miss_version.* = null;
-        if (!cacheable(in.req)) {
-            in.res.header(cache_header, "bypass");
-            return false;
-        }
-
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        const entry = self.entries.getPtr(in.name) orelse {
-            miss_version.* = in.live_version;
-            in.res.header(cache_header, "miss");
-            return false;
-        };
-        if (entry.live_version != in.live_version or !entry.files.isValid()) {
-            const removed = self.entries.fetchRemove(in.name).?;
-            self.freeEntry(allocator, removed.key, removed.value);
-            miss_version.* = in.live_version;
-            in.res.header(cache_header, "miss");
-            return false;
-        }
-        const body = in.scratch.dupe(u8, entry.json) catch {
-            miss_version.* = in.live_version;
-            in.res.header(cache_header, "miss");
-            return false;
-        };
-        entry.used = self.nextUse();
-        in.res.header(cache_header, "hit");
-        in.res.content_type = .JSON;
-        in.res.body = body;
-        return true;
-    }
-
-    /// Retain a freshly computed ladder body. `in.files` is the read-set the
-    /// handler captured from the evaluator(s) that produced it; an EMPTY set is
-    /// refused, because a set that stamps nothing can never go stale and would
-    /// pin the first answer forever.
-    pub fn store(self: *Store, in: anytype) void {
-        const allocator = self.allocator orelse return;
-        const live_version = in.live_version orelse return;
-        const files = in.files orelse return;
-        // A body is retained only when it is a complete answer that fits the
-        // budget, keys on something that CAN go stale (a non-empty read-set),
-        // was not raced by a live edit, and came from the query-free request.
-        const admissible = blk: {
-            if (in.res.status != 200 or in.json.len > ladder_max_bytes) break :blk false;
-            if (files.stamps.len == 0 or in.current_version != live_version) break :blk false;
-            break :blk cacheable(in.req);
-        };
-        if (!admissible) {
-            files.deinit();
-            return;
-        }
-        self.retain(allocator, in.name, in.json, files, live_version);
-    }
-
-    /// Retain a ladder computed OFF-request — the startup warm-up
-    /// (`serve/warmup.zig`), which has no `httpz` request to be judged as
-    /// query-free and no response status to check. It computed the query-free
-    /// body directly, so those two admission rules are satisfied by
-    /// construction; the size and read-set rules still apply.
-    pub fn warm(
-        self: *Store,
-        name: []const u8,
-        json: []const u8,
-        files: page_cache.FileSet,
-        live_version: u32,
-    ) void {
-        const allocator = self.allocator orelse {
-            files.deinit();
-            return;
-        };
-        if (json.len > ladder_max_bytes or files.stamps.len == 0) {
-            files.deinit();
-            return;
-        }
-        self.retain(allocator, name, json, files, live_version);
-    }
-
-    /// Take ownership of `files` and a copy of `json` under `name`, evicting
-    /// any previous entry. Shared by the request path and the warm-up so both
-    /// produce byte-identical cache state.
-    fn retain(
-        self: *Store,
-        allocator: std.mem.Allocator,
-        name: []const u8,
-        json: []const u8,
-        files: page_cache.FileSet,
-        live_version: u32,
-    ) void {
-        const body = allocator.dupe(u8, json) catch {
-            files.deinit();
-            return;
-        };
-        const key = allocator.dupe(u8, name) catch {
-            files.deinit();
-            allocator.free(body);
-            return;
-        };
-
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        const gop = self.entries.getOrPut(allocator, key) catch {
-            files.deinit();
-            allocator.free(body);
-            allocator.free(key);
-            return;
-        };
-        if (gop.found_existing) {
-            allocator.free(key); // the map keeps the original key
-            self.bytes -= gop.value_ptr.json.len;
-            allocator.free(gop.value_ptr.json);
-            gop.value_ptr.files.deinit();
-        }
-        gop.value_ptr.* = .{ .json = body, .files = files, .live_version = live_version, .used = self.nextUse() };
-        self.bytes += body.len;
-        self.trim(allocator);
-    }
-};
 
 /// Capture the dependency set of a just-computed ladder: everything the
 /// evaluator(s) read, plus the sidecars above. `evals` is the design evaluator
@@ -257,31 +81,64 @@ pub fn captureDeps(
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
+const testing = std.testing;
+
+/// Look `ht` up in `store` and, on a miss, retain `body` against `files`.
+/// Returns whether the lookup HIT, which is the only thing these tests ask.
+fn roundTrip(store: *Store, ht: *httpz.testing.Testing, body: []const u8, files: ?page_cache.FileSet) bool {
+    var miss_version: ?u32 = null;
+    if (store.serve(.{
+        .scratch = ht.arena,
+        .req = ht.req,
+        .res = ht.res,
+        .name = "demo",
+        .live_version = @as(u32, 0),
+    }, &miss_version)) return true;
+    ht.res.status = 200;
+    store.store(.{
+        .scratch = ht.arena,
+        .req = ht.req,
+        .res = ht.res,
+        .name = "demo",
+        .body = body,
+        .files = files,
+        .live_version = miss_version,
+        .current_version = @as(u32, 0),
+    });
+    return false;
+}
+
 // spec: Web Server - The layout-progress ladder endpoint bypasses its cache for any query parameter
 test "progress cache admits only the query-free request" {
+    var cache: Store = .{ .allocator = testing.allocator };
+    defer cache.deinit();
+
     var plain = httpz.testing.init(.{});
     defer plain.deinit();
-    try std.testing.expect(cacheable(plain.req));
+    try testing.expect(!roundTrip(&cache, &plain, "PLAIN", try page_cache.captureOne("build.zig")));
+    var again = httpz.testing.init(.{});
+    defer again.deinit();
+    try testing.expect(roundTrip(&cache, &again, "UNUSED", null));
 
-    var named = httpz.testing.init(.{});
-    defer named.deinit();
-    named.query("layout", "RF-final");
-    try std.testing.expect(!cacheable(named.req));
-
-    var routed = httpz.testing.init(.{});
-    defer routed.deinit();
-    routed.query("route", "1");
-    try std.testing.expect(!cacheable(routed.req));
-
-    var sub = httpz.testing.init(.{});
-    defer sub.deinit();
-    sub.query("sub", "amp1");
-    try std.testing.expect(!cacheable(sub.req));
+    // Every parameter the ladder endpoint accepts selects a different board or
+    // forces a fresh solve, and the home page sends none of them — so each
+    // bypasses in BOTH directions rather than reading or writing an entry.
+    for ([_][2][]const u8{
+        .{ "layout", "RF-final" },
+        .{ "route", "1" },
+        .{ "sub", "amp1" },
+    }) |pair| {
+        var bypass = httpz.testing.init(.{});
+        defer bypass.deinit();
+        bypass.query(pair[0], pair[1]);
+        try testing.expect(!roundTrip(&cache, &bypass, "BYPASS", try page_cache.captureOne("build.zig")));
+        try testing.expectEqualStrings("bypass", bypass.res.headers.get(config.header).?);
+    }
+    try testing.expectEqual(@as(usize, 1), cache.entries.count());
 }
 
 // spec: Web Server - The layout-progress ladder endpoint reuses a dependency-validated JSON body and invalidates it when the design or its sidecars change
 test "progress cache hits then invalidates after a layout-sidecar edit" {
-    const testing = std.testing;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDir(std.testing.io, "src", .default_dir);
@@ -297,34 +154,16 @@ test "progress cache hits then invalidates after a layout-sidecar edit" {
 
     var first = httpz.testing.init(.{});
     defer first.deinit();
-    var version: ?u32 = null;
-    try testing.expect(!cache.serve(.{
-        .scratch = first.arena,
-        .req = first.req,
-        .res = first.res,
-        .name = "demo",
-        .live_version = @as(u32, 0),
-    }, &version));
-    first.res.status = 200;
-    cache.store(.{
-        .req = first.req,
-        .res = first.res,
-        .name = "demo",
-        .json = "{\"name\":\"demo\"}",
-        .files = captureDeps(first.arena, &.{&eval}, root, "demo"),
-        .live_version = version,
-        .current_version = @as(u32, 0),
-    });
+    try testing.expect(!roundTrip(
+        &cache,
+        &first,
+        "{\"name\":\"demo\"}",
+        captureDeps(first.arena, &.{&eval}, root, "demo"),
+    ));
 
     var hit = httpz.testing.init(.{});
     defer hit.deinit();
-    try testing.expect(cache.serve(.{
-        .scratch = hit.arena,
-        .req = hit.req,
-        .res = hit.res,
-        .name = "demo",
-        .live_version = @as(u32, 0),
-    }, &version));
+    try testing.expect(roundTrip(&cache, &hit, "UNUSED", null));
     try testing.expectEqualStrings("{\"name\":\"demo\"}", hit.res.body);
 
     // Starring a different layout rewrites the sidecar → the ladder's routing
@@ -338,41 +177,24 @@ test "progress cache hits then invalidates after a layout-sidecar edit" {
     });
     var stale = httpz.testing.init(.{});
     defer stale.deinit();
-    try testing.expect(!cache.serve(.{
-        .scratch = stale.arena,
-        .req = stale.req,
-        .res = stale.res,
-        .name = "demo",
-        .live_version = @as(u32, 0),
-    }, &version));
+    try testing.expect(!roundTrip(&cache, &stale, "FRESH", null));
 }
 
 // spec: Web Server - The layout-progress cache refuses a body whose dependency set stamps nothing
 test "progress cache refuses an empty dependency set" {
-    const testing = std.testing;
     var cache: Store = .{ .allocator = testing.allocator };
     defer cache.deinit();
 
-    var req = httpz.testing.init(.{});
-    defer req.deinit();
-    req.res.status = 200;
     // A read-set that stamps nothing could never go stale, so caching against
     // it would pin the first answer for the life of the process.
-    cache.store(.{
-        .req = req.req,
-        .res = req.res,
-        .name = "demo",
-        .json = "{}",
-        .files = @as(?page_cache.FileSet, null),
-        .live_version = @as(?u32, 0),
-        .current_version = @as(u32, 0),
-    });
+    var req = httpz.testing.init(.{});
+    defer req.deinit();
+    try testing.expect(!roundTrip(&cache, &req, "{}", null));
     try testing.expectEqual(@as(usize, 0), cache.entries.count());
 }
 
 // spec: Web Server - The progress store accepts a ladder computed off-request under the same size and read-set rules as a served one
 test "warm retains an off-request ladder but still refuses an empty dependency set" {
-    const testing = std.testing;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dep.sexp", .data = "(design-block \"D\")" });
@@ -383,7 +205,8 @@ test "warm retains an off-request ladder but still refuses an empty dependency s
     defer store.deinit();
 
     // A ladder the warm-up computed has no request to be judged query-free and
-    // no response status, but it must land exactly as a served one does.
+    // no response status, but it must land exactly as a served one does — under
+    // the plain identity, whose key is the design name itself.
     store.warm("warmed", "{\"stages\":[]}", try page_cache.captureOne(dep), 7);
     try testing.expect(store.entries.contains("warmed"));
 

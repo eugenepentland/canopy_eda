@@ -456,6 +456,8 @@ test {
     _ = @import("serve/pcb_layout_sync.zig");
     _ = @import("serve/pcb_page_cache.zig");
     _ = @import("serve/progress_cache.zig");
+    _ = @import("serve/cache_core.zig");
+    _ = @import("serve/page_cache_endpoint.zig");
     _ = @import("serve/describe_cache.zig");
     _ = @import("serve/read_cache.zig");
     _ = @import("serve/png_cache.zig");
