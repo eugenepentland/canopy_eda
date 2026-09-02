@@ -4549,6 +4549,7 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - completeness-waiver: concurrent access (validation runs inline on the single evaluation thread that built the block)
 
 ## eval/evaluator
+- prescanIds skips the requirement id a (req (id …)) sign-off reference names, so a derived requirement id never collides with its own reference
 
 - A component-family attribute resolves a bound parameter to its value while an unbound vocabulary word stays literal
 - a component-family value contradicting the declared parameter kind is rejected at the call site
