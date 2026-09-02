@@ -3613,6 +3613,7 @@ src/review_audit.zig::PartRow struct_
 src/review_audit.zig::RenderError value
 src/review_audit.zig::Schematic struct_
 src/review_audit.zig::StageRow struct_
+src/review_audit.zig::mergeDispositions | fn mergeDispositions( allocator: std.mem.Allocator, rendered: []const u8, previous: []const u8, ) std.mem.Allocator.Error![]u8
 src/review_audit.zig::render | fn render( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, options: Options, ) RenderError![]u8
 src/review_audit.zig::renderFacts | fn renderFacts(allocator: std.mem.Allocator, facts: Facts) std.mem.Allocator.Error![]u8
 src/review_html.zig::RenderError value
