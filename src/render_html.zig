@@ -310,8 +310,10 @@ pub fn renderToHtml(
     try w.writeAll("</div>");
     try writeSidebar(w, review_doc);
     try w.writeAll("</div>");
-    if (!options.offline)
-        try writeScripts(w, allocator, design_name, block, &ctx, &asserted_fns, check_results, review_doc, options.path);
+    try writeScripts(w, allocator, design_name, block, &ctx, &asserted_fns, check_results, review_doc, .{
+        .schematic_path = options.path,
+        .offline = options.offline,
+    });
     if (!options.offline and review_doc != null) {
         // review_notes.js (design-note handlers) reuses DESIGN_NAME —
         // already declared as a global by writeScripts above.
@@ -2126,6 +2128,11 @@ fn hasTopLevelHubs(block: *const DesignBlock) bool {
     return false;
 }
 
+const ScriptOptions = struct {
+    schematic_path: []const u8,
+    offline: bool,
+};
+
 fn writeScripts(
     w: anytype,
     allocator: Allocator,
@@ -2135,7 +2142,7 @@ fn writeScripts(
     asserted_fns: *const std.StringHashMapUnmanaged([]const u8),
     check_results: *const CheckResultMap,
     review_doc: ?review.ReviewDoc,
-    schematic_path: []const u8,
+    options: ScriptOptions,
 ) !void {
     try w.writeAll("<script>var DESIGN_NAME=");
     try writeJsString(w, design_name);
@@ -2143,7 +2150,7 @@ fn writeScripts(
     // "design" for a project design — drives the sidebar's "Locate on PCB"
     // link target (modules have a whole-module /pcb-layout view; designs only
     // have per-sub-block scoped views).
-    try w.print(";var SCH_VIEW=\"{s}\"", .{if (std.mem.eql(u8, schematic_path, "/modules/")) "module" else "design"});
+    try w.print(";var SCH_VIEW=\"{s}\"", .{if (std.mem.eql(u8, options.schematic_path, "/modules/")) "module" else "design"});
     try w.writeAll(";var SCH_INDEX=");
     try writeSearchIndex(w, allocator, block, ctx, asserted_fns, check_results);
     try w.writeAll(";var SCH_AUDIT=");
@@ -2151,6 +2158,12 @@ fn writeScripts(
     try w.writeAll(";var SCH_ASSERTIONS=");
     try writeAssertionsJson(w, review_doc);
     try w.writeAll(";</script>");
+    if (options.offline) {
+        try w.writeAll("<script>");
+        try w.writeAll(schematic_offline_js_asset);
+        try w.writeAll("</script>");
+        return;
+    }
     // CodeMirror (vendored) must load before schematic_viewer.js so the
     // global is available when the source editor initialises.
     try w.writeAll("<script src=\"/static/codemirror.bundle.js\"></script>");
@@ -2201,6 +2214,7 @@ fn writeAssertionsJson(w: anytype, review_doc: ?review.ReviewDoc) !void {
 /// reload). Served verbatim from `/static/schematic_viewer.js` — exposed pub
 /// so `static_assets.zig` can register it without a second `@embedFile`.
 pub const schematic_viewer_js_asset = @import("serve/schematic_viewer_js.zig").schematic_viewer_js_asset;
+const schematic_offline_js_asset = @embedFile("serve/assets/schematic_offline.js");
 
 /// Walk the design and emit a JSON object the sidebar JS uses for search +
 /// inspection. Shape:
@@ -2747,7 +2761,7 @@ test "the embedded schematic page marks its body for the pane stylesheet" {
     try std.testing.expect(std.mem.indexOf(u8, schematic_css, "body.sch-embed .sch-sidebar{display:none;}") != null);
 }
 
-// spec: render_html - an exported schematic HTML document inlines its drawing CSS and carries no server-only static asset references
+// spec: render_html - an exported schematic HTML document inlines its drawing CSS, search index, and read-only search/navigation runtime and carries no server-only static asset references
 test "offline schematic HTML opens without the netlisp server" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -2766,8 +2780,13 @@ test "offline schematic HTML opens without the netlisp server" {
         &checks,
         .{ .path = "/schematics/", .offline = true },
     );
+    try std.testing.expect(std.mem.indexOf(u8, html, "src=\"/static/") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "href=\"/static/") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "/static/schematic.css") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "/static/schematic_viewer.js") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "var SCH_INDEX=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "netlisp-offline-schematic-search") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "fetch(") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, ".sch-layout") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "<!DOCTYPE html>") != null);
 }

@@ -278,7 +278,8 @@ Local dev still uses `http://localhost:7050`.
   `/api/pcb-gerbers`; the request body is the exact analytic assembly recipe
   used by the 3D tab's STEP export. The resulting ZIP contains the byte-identical
   board-house release under `fabrication/`, a self-contained read-only schematic
-  webpage, all evaluated `.sexp` sources and native footprint sources, saved
+  webpage with embedded component/net/pin/section search, all evaluated `.sexp`
+  sources and native footprint sources, saved
   layout/routing/BOM/check sidecars, the linked `.kicad_pcb` when present, a
   complete KiCad project (schematic sheets, netlist, generated footprints and
   used component STEP models), the assembled full-board AP242 STEP, locally

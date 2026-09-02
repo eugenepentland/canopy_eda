@@ -607,3 +607,9 @@ matters when the person re-recording is the author of the change.
 - **idea:** Add a checked-in end-to-end release fixture that runs readiness, the real offline Assembly renderer, archive composition, and ZIP validation in one command. It would catch service/renderer trace-contract mismatches before deployment without depending on the live designs corpus.
 - **workaround:** The focused trace regression now distinguishes a stable expanded closure from changed bytes, and a real headless Barracuda export produced and validated the complete 85 MiB ZIP before release.
 - **status:** mitigated in this change
+
+## 2026-09-02 · codex · searchable offline schematic export
+- **friction:** Browser-checking one deterministic offline schematic required driving the full release UI and analytic STEP/archive path against the mutable live designs repository. Two boards could not reach that path because one had a concurrent source syntax error and the other had no discoverable saved layout, costing four browser/API retries and several minutes before the search runtime could be tested independently.
+- **idea:** Add a test-only or CLI HTML export for `renderToHtml(..., .offline = true)` plus a checked-in representative design fixture. A browser gate could then validate self-contained schematic behavior without manufacturing readiness, STEP generation, or live-library state.
+- **workaround:** Render the fixture through the focused Zig test, then exercise the embedded search asset in Chromium against a valid schematic DOM while intercepting every network request; reserve a full archive replay for final integration when a release-ready design is available.
+- **status:** open

@@ -203,6 +203,11 @@ command = ["node", "--check", "src/serve/assets/schematic_viewer.js"]
 inputs = ["src/serve/assets/schematic_viewer.js"]
 
 [[external]]
+name = "schematic-offline-js-syntax"
+command = ["node", "--check", "src/serve/assets/schematic_offline.js"]
+inputs = ["src/serve/assets/schematic_offline.js"]
+
+[[external]]
 name = "route-review-js-syntax"
 command = ["node", "--check", "src/serve/assets/route_review.js"]
 inputs = ["src/serve/assets/route_review.js"]
