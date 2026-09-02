@@ -10,6 +10,7 @@ const optimizer = @import("../placement/optimizer.zig");
 const geometry = @import("../placement/geometry.zig");
 const board_layers = @import("../board_layers.zig");
 const route_policy = @import("../placement/route_policy.zig");
+const track_segment = @import("track_segment.zig");
 const router = @import("../placement/router.zig");
 const diff_pairs = @import("../placement/diff_pairs.zig");
 const export_kicad = @import("../export_kicad.zig");
@@ -131,12 +132,12 @@ pub fn routeOptions(
     var zones: std.ArrayList(route_policy.ExistingZone) = .empty;
     for (seed.segments) |item| {
         const layer = signalLayerIndex(adapted.placement.rules, item.layer) orelse continue;
-        try tracks.append(arena, existingTrack(adapted.placement, item.start, item.end, item.width, layer, item.net));
+        try tracks.append(arena, track_segment.from(route_policy.ExistingTrack, item.start, item.end, item.width, layer, netIndex(adapted.placement, item.net)));
     }
     for (seed.arcs) |item| {
         const layer = signalLayerIndex(adapted.placement.rules, item.layer) orelse continue;
-        try tracks.append(arena, existingTrack(adapted.placement, item.start, item.mid, item.width, layer, item.net));
-        try tracks.append(arena, existingTrack(adapted.placement, item.mid, item.end, item.width, layer, item.net));
+        try tracks.append(arena, track_segment.from(route_policy.ExistingTrack, item.start, item.mid, item.width, layer, netIndex(adapted.placement, item.net)));
+        try tracks.append(arena, track_segment.from(route_policy.ExistingTrack, item.mid, item.end, item.width, layer, netIndex(adapted.placement, item.net)));
     }
     for (seed.vias) |item| {
         try vias.append(arena, .{
@@ -293,25 +294,6 @@ fn snapshotNetIndex(board: snapshot_mod.Snapshot, name: []const u8) ?usize {
 fn netIndex(placement: optimizer.Placement, name: []const u8) i32 {
     for (placement.nets, 0..) |net, i| if (std.mem.eql(u8, net.name, name)) return @intCast(i);
     return -2;
-}
-
-fn existingTrack(
-    placement: optimizer.Placement,
-    a: snapshot_mod.Point,
-    b: snapshot_mod.Point,
-    width: f64,
-    layer: u8,
-    net: []const u8,
-) route_policy.ExistingTrack {
-    return .{
-        .x1 = a.x,
-        .y1 = a.y,
-        .x2 = b.x,
-        .y2 = b.y,
-        .layer = layer,
-        .width = width,
-        .net = netIndex(placement, net),
-    };
 }
 
 fn copperLayerCount(board: snapshot_mod.Snapshot) u8 {
@@ -496,9 +478,9 @@ fn inferDiffPairRules(
 ) std.mem.Allocator.Error!void {
     for (nets, 0..) |net, pi| {
         const leaf = shortName(net.name);
-        const named = (try pairMate(arena, leaf)) orelse continue;
+        const named = (try diff_pairs.namedMate(arena, leaf)) orelse continue;
         if (named.polarity != .p) continue;
-        const dm = try dmPairMate(arena, leaf);
+        const dm = try diff_pairs.dmMate(arena, leaf);
         for (nets, 0..) |other, ni| {
             const candidate = shortName(other.name);
             const kicad_match = std.ascii.eqlIgnoreCase(candidate, named.name);
@@ -529,39 +511,6 @@ fn inferDiffPairRules(
             break;
         }
     }
-}
-
-const PairPolarity = enum { p, n };
-
-const PairMate = struct { name: []const u8, polarity: PairPolarity };
-
-/// Local adapter copy of pcbnew's BOARD::MatchDpSuffix rule. Keeping it here
-/// avoids making the placement helper public solely for an import seam.
-fn pairMate(arena: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!?PairMate {
-    if (name.len == 0) return null;
-    var i = name.len;
-    while (i > 0) {
-        i -= 1;
-        const ch = name[i];
-        if (std.ascii.isDigit(ch) or ch == '_') continue;
-        const found: struct { replacement: u8, polarity: PairPolarity } = switch (ch) {
-            'P', '+' => .{ .replacement = if (ch == 'P') 'N' else '-', .polarity = .p },
-            'N', '-' => .{ .replacement = if (ch == 'N') 'P' else '+', .polarity = .n },
-            else => return null,
-        };
-        const out = try arena.dupe(u8, name);
-        out[i] = found.replacement;
-        return .{ .name = out, .polarity = found.polarity };
-    }
-    return null;
-}
-
-/// Preserve the adapter's older `DP`/`DM` convention as an additional alias.
-fn dmPairMate(arena: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!?[]const u8 {
-    if (name.len <= 2 or !std.mem.endsWith(u8, name, "DP")) return null;
-    const out = try arena.dupe(u8, name);
-    out[out.len - 1] = 'M';
-    return out;
 }
 
 /// Apply KiCad's separate edge-to-edge via gap after generic pair resolution.

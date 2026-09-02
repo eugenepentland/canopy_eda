@@ -44,15 +44,23 @@ fn leaf(s: []const u8) []const u8 {
     return s;
 }
 
-const Polarity = enum { p, n };
+/// Which side of a differential pair a net name names.
+pub const Polarity = enum { p, n };
 
-const NamedMate = struct { name: []const u8, polarity: Polarity };
+/// The mate a net name implies: the opposite-polarity name (freshly allocated)
+/// and which side the ORIGINAL name was.
+pub const NamedMate = struct { name: []const u8, polarity: Polarity };
 
 /// KiCad-compatible differential mate recognition. Scan backward over trailing
 /// digits and underscores, then exchange the first `P`/`N` or `+`/`-` marker.
 /// Thus `USB_DP`, `CLK+`, and `LANE_P_1` all resolve exactly as pcbnew's
 /// `BOARD::MatchDpSuffix` resolves them.
-fn namedMate(
+///
+/// Public because `kicad_pcb/router_adapter` infers the same pairs from a
+/// KiCad project's net classes and must recognise them identically — two
+/// copies of pcbnew's rule could pair a net here and not there, which shows up
+/// as a pair the router couples on one path and not on the other.
+pub fn namedMate(
     arena: std.mem.Allocator,
     s: []const u8,
 ) std.mem.Allocator.Error!?NamedMate {
@@ -74,8 +82,9 @@ fn namedMate(
     return null;
 }
 
-/// The pre-existing Netlisp spelling retained alongside KiCad's rule.
-fn dmMate(arena: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error!?[]const u8 {
+/// The pre-existing Netlisp spelling retained alongside KiCad's rule. Public
+/// for the same reason as `namedMate`.
+pub fn dmMate(arena: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error!?[]const u8 {
     if (s.len <= 2 or !std.mem.endsWith(u8, s, "DP")) return null;
     const out = try arena.dupe(u8, s);
     out[out.len - 1] = 'M';

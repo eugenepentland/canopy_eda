@@ -11,6 +11,7 @@ const optimizer = @import("../placement/optimizer.zig");
 const geometry = @import("../placement/geometry.zig");
 const export_kicad = @import("../export_kicad.zig");
 const route_policy = @import("../placement/route_policy.zig");
+const track_segment = @import("track_segment.zig");
 
 const point_epsilon_mm: f64 = 1e-5;
 const terminal_attach_limit_mm: f64 = 2.0;
@@ -164,13 +165,13 @@ fn appendSoftGuides(sink: SoftGuideSink, net_i: usize, detail: Detail) std.mem.A
         for (sink.board.segments) |item| {
             if (!std.ascii.eqlIgnoreCase(item.net, name)) continue;
             const layer = signalLayerIndex(sink.placement.rules, item.layer) orelse continue;
-            try sink.tracks.append(sink.arena, guideTrack(item.start, item.end, item.width, layer, net));
+            try sink.tracks.append(sink.arena, track_segment.from(route_policy.GuideTrack, item.start, item.end, item.width, layer, net));
         }
         for (sink.board.arcs) |item| {
             if (!std.ascii.eqlIgnoreCase(item.net, name)) continue;
             const layer = signalLayerIndex(sink.placement.rules, item.layer) orelse continue;
-            try sink.tracks.append(sink.arena, guideTrack(item.start, item.mid, item.width, layer, net));
-            try sink.tracks.append(sink.arena, guideTrack(item.mid, item.end, item.width, layer, net));
+            try sink.tracks.append(sink.arena, track_segment.from(route_policy.GuideTrack, item.start, item.mid, item.width, layer, net));
+            try sink.tracks.append(sink.arena, track_segment.from(route_policy.GuideTrack, item.mid, item.end, item.width, layer, net));
         }
     }
     for (sink.board.vias) |item| {
@@ -184,24 +185,6 @@ fn appendSoftGuides(sink: SoftGuideSink, net_i: usize, detail: Detail) std.mem.A
             .drill = item.drill,
         });
     }
-}
-
-fn guideTrack(
-    a: snapshot_mod.Point,
-    b: snapshot_mod.Point,
-    width: f64,
-    layer: u8,
-    net: i32,
-) route_policy.GuideTrack {
-    return .{
-        .x1 = a.x,
-        .y1 = a.y,
-        .x2 = b.x,
-        .y2 = b.y,
-        .layer = layer,
-        .net = net,
-        .width = width,
-    };
 }
 
 fn selected(requested: []const []const u8, name: []const u8) bool {

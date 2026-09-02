@@ -7,8 +7,10 @@ const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
 const ast = @import("sexpr/ast.zig");
 const parser_mod = @import("sexpr/parser.zig");
+const paren_span = @import("sexpr/paren_span.zig");
 const geometry = @import("placement/geometry.zig");
 const numeric = @import("numeric.zig");
+const poly_scanline = @import("poly_scanline.zig");
 const board_layers = @import("board_layers.zig");
 const kicad_format = @import("kicad_pcb/format.zig");
 /// Error set for footprint emission helpers — covers the parse step on the
@@ -112,7 +114,9 @@ pub fn useSourceKicadMod(
 
     // Find existing (model ...) block to replace, or insert before final ')'
     if (std.mem.indexOf(u8, source, "(model ")) |model_start| {
-        var model_end = formEndIndex(source, model_start) orelse return error.InvalidFormat;
+        // KiCad s-expressions have no `;` line comments, so a `;` inside this
+        // form is an ordinary atom byte.
+        var model_end = paren_span.endIndex(source, model_start, .none) orelse return error.InvalidFormat;
         // Skip trailing whitespace/newline after model block
         while (model_end < source.len and (source[model_end] == '\n' or source[model_end] == '\r' or source[model_end] == ' ')) {
             model_end += 1;
@@ -130,47 +134,6 @@ pub fn useSourceKicadMod(
     }
 
     return buf.toOwnedSlice();
-}
-
-/// Byte offset one past the `)` that closes the form opening at `start`.
-/// Quoted strings (and their `\` escapes) are skipped, so a parenthesis inside
-/// a path — a vendor `.kicad_mod` whose model reads `models/Part(rev2).step` —
-/// cannot end the form early and mis-splice the file. Null when `start` does
-/// not open a form and when the form is unterminated, so a caller that guessed
-/// its start wrong gets a refusal rather than a wrong splice.
-///
-/// The caller's own SEARCH for the form is still a plain substring scan, so a
-/// `.kicad_mod` that spelled the literal text `(model ` inside a quoted string
-/// would aim this at the wrong byte. No footprint does; the parenthesised
-/// filename above is the case that actually occurs.
-fn formEndIndex(source: []const u8, start: usize) ?usize {
-    // Entering with the opening paren already counted keeps `depth` at 1 or
-    // more for every `)` below, so the decrement cannot underflow.
-    if (start >= source.len or source[start] != '(') return null;
-    var depth: u32 = 1;
-    var in_string = false;
-    var i = start + 1;
-    while (i < source.len) : (i += 1) {
-        const c = source[i];
-        if (in_string) {
-            if (c == '\\') {
-                i += 1;
-            } else if (c == '"') {
-                in_string = false;
-            }
-            continue;
-        }
-        switch (c) {
-            '"' => in_string = true,
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if (depth == 0) return i + 1;
-            },
-            else => {},
-        }
-    }
-    return null;
 }
 
 fn writeModelBlock(arena: std.mem.Allocator, w: anytype, model_name: []const u8, model_offset: ?[3]f64, model_rotation: ?[3]f64) !void {
@@ -626,7 +589,7 @@ fn customPadAnchorRect(
     const center = if (pointInCustomPad(poly, box_center[0], box_center[1]))
         box_center
     else
-        widestCustomPadSpan(poly, box_center[1]) orelse box_center;
+        poly_scanline.widestMidpoint(poly, box_center[1]) orelse box_center;
     var size = @min(max_size, @min(bounds[2] - bounds[0], bounds[3] - bounds[1]) * 0.5);
     for (0..32) |_| {
         const half = size / 2;
@@ -640,31 +603,6 @@ fn customPadAnchorRect(
         size /= 2;
     }
     return .{ .center = center, .size = size };
-}
-
-fn widestCustomPadSpan(poly: []const [2]f64, y: f64) ?[2]f64 {
-    var intersections: [512]f64 = undefined;
-    var count: usize = 0;
-    var previous = poly[poly.len - 1];
-    for (poly) |point| {
-        if ((previous[1] > y) != (point[1] > y)) {
-            if (count == intersections.len) return null;
-            intersections[count] = previous[0] + (y - previous[1]) /
-                (point[1] - previous[1]) * (point[0] - previous[0]);
-            count += 1;
-        }
-        previous = point;
-    }
-    if (count < 2) return null;
-    std.mem.sort(f64, intersections[0..count], {}, std.sort.asc(f64));
-    var best: ?[2]f64 = null;
-    var i: usize = 0;
-    while (i + 1 < count) : (i += 2) {
-        const candidate = [2]f64{ intersections[i], intersections[i + 1] };
-        if (best == null or candidate[1] - candidate[0] > best.?[1] - best.?[0]) best = candidate;
-    }
-    const span = best orelse return null;
-    return .{ (span[0] + span[1]) / 2, y };
 }
 
 fn pointInCustomPad(poly: []const [2]f64, x: f64, y: f64) bool {

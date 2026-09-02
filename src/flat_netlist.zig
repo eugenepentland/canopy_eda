@@ -19,6 +19,7 @@
 
 const std = @import("std");
 const env_mod = @import("eval/env.zig");
+const uuid = @import("uuid.zig");
 const Property = env_mod.Property;
 const DesignBlock = env_mod.DesignBlock;
 
@@ -85,37 +86,29 @@ pub const FlatPin = struct {
 
 // ── Design-hierarchy flattening ───────────────────────────────────────────
 
-// UUID v5 byte indices (RFC 4122)
-const uuid_version_byte: usize = 6;
-const uuid_variant_byte: usize = 8;
-const uuid_byte_5: usize = 5;
-const uuid_byte_7: usize = 7;
-const uuid_byte_9: usize = 9;
-const uuid_byte_10: usize = 10;
-const uuid_byte_11: usize = 11;
-const uuid_byte_12: usize = 12;
-const uuid_byte_13: usize = 13;
-const uuid_byte_14: usize = 14;
-const uuid_byte_15: usize = 15;
-
-/// Derive a full UUID (36-char) from an 8-char hex ID by hashing it.
+/// Derive a full UUID (36-char) from an 8-char hex ID by hashing it. Only the
+/// digest is this module's; the version/variant stamping and the canonical
+/// text form are `uuid.format`'s, shared with `bom.generateUuid`, so a part's
+/// identity is spelled the same however it was minted.
 pub fn uuidFromId(allocator: std.mem.Allocator, id: []const u8) std.mem.Allocator.Error![]const u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update("canopy:");
     hasher.update(id);
     const hash = hasher.finalResult();
-    // Format as UUID v5 style: xxxxxxxx-xxxx-5xxx-yxxx-xxxxxxxxxxxx
     var bytes: [16]u8 = undefined;
     @memcpy(&bytes, hash[0..16]);
-    bytes[uuid_version_byte] = (bytes[uuid_version_byte] & 0x0f) | 0x50; // version 5
-    bytes[uuid_variant_byte] = (bytes[uuid_variant_byte] & 0x3f) | 0x80; // variant 1
-    return std.fmt.allocPrint(allocator, "{x:0>2}{x:0>2}{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}" ++
-        "-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
-        bytes[0],                 bytes[1],            bytes[2],                 bytes[3],
-        bytes[4],                 bytes[uuid_byte_5],  bytes[uuid_version_byte], bytes[uuid_byte_7],
-        bytes[uuid_variant_byte], bytes[uuid_byte_9],  bytes[uuid_byte_10],      bytes[uuid_byte_11],
-        bytes[uuid_byte_12],      bytes[uuid_byte_13], bytes[uuid_byte_14],      bytes[uuid_byte_15],
-    });
+    return uuid.format(allocator, bytes, .name_v5);
+}
+
+// spec: bom - Derives a stable UUID from an instance id
+test "uuidFromId pins the identity KiCad sync keys on" {
+    const alloc = std.testing.allocator;
+    const got = try uuidFromId(alloc, "aa000001");
+    defer alloc.free(got);
+    // Frozen on purpose: this string IS the part identity carried across the
+    // .bom sidecar, the KiCad schematic and the board. Changing the digest,
+    // the "canopy:" prefix or the text form re-identifies every existing part.
+    try std.testing.expectEqualStrings("11d1e8b6-ab30-561d-9ee4-8da03a84febb", got);
 }
 
 fn prefixed(allocator: std.mem.Allocator, prefix: []const u8, name: []const u8) std.mem.Allocator.Error![]const u8 {

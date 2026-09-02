@@ -7,6 +7,7 @@ const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
 const log = @import("infra/log.zig");
 const Evaluator = @import("eval/evaluator.zig").Evaluator;
+const paren_span = @import("sexpr/paren_span.zig");
 
 /// Error set for source-file ID insertion. Combines file IO (read & write)
 /// with the allocator failures that can come out of `ArrayList`/dupe, plus
@@ -258,36 +259,11 @@ fn reportIdCollision(source: []const u8, offset: u32, id: []const u8, reason: []
     log.warn("id-insert collision ({s}): token '{s}' near line {d}", .{ reason, id, line });
 }
 
-/// Find the byte position of the closing paren matching the opening paren at `open`.
+/// Find the byte position of the closing paren matching the opening paren at
+/// `open`. Netlisp `.sexp` sources carry `;` line comments, so this dialect
+/// tells the shared scanner to skip them.
 fn findMatchingClose(source: []const u8, open: usize) ?usize {
-    if (open >= source.len or source[open] != '(') return null;
-    var depth: u32 = 0;
-    var i = open;
-    var in_string = false;
-    while (i < source.len) : (i += 1) {
-        if (in_string) {
-            if (source[i] == '\\' and i + 1 < source.len) {
-                i += 1; // skip escaped char
-            } else if (source[i] == '"') {
-                in_string = false;
-            }
-            continue;
-        }
-        switch (source[i]) {
-            '"' => in_string = true,
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if (depth == 0) return i;
-            },
-            ';' => {
-                // Skip line comment
-                while (i < source.len and source[i] != '\n') : (i += 1) {}
-            },
-            else => {},
-        }
-    }
-    return null;
+    return paren_span.matchingClose(source, open, .line_semicolon);
 }
 
 // spec: id_insert - findMatchingClose finds correct closing paren

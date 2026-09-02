@@ -41,6 +41,7 @@
 //! not "safe to move" — the reported `scope` names exactly what was re-asked.
 
 const std = @import("std");
+const mcp_arg_names = @import("mcp_arg_names.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const modules_mod = @import("modules.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
@@ -839,28 +840,7 @@ fn argFloat(args_val: ?std.json.Value, key: []const u8) ?f64 {
     };
 }
 
-/// A name-list argument, accepted as a JSON array or a comma string — the shape
-/// every other PCB tool takes for `nets`/`refs`.
-fn argNames(alloc: std.mem.Allocator, args_val: ?std.json.Value, key: []const u8) HandlerError![]const []const u8 {
-    const av = args_val orelse return &.{};
-    if (av != .object) return &.{};
-    const v = av.object.get(key) orelse return &.{};
-    var list: std.ArrayList([]const u8) = .empty;
-    switch (v) {
-        .array => |arr| for (arr.items) |it| {
-            if (it == .string and it.string.len > 0) try list.append(alloc, it.string);
-        },
-        .string => |s| {
-            var parts = std.mem.splitScalar(u8, s, ',');
-            while (parts.next()) |p| {
-                const t = std.mem.trim(u8, p, " ");
-                if (t.len > 0) try list.append(alloc, t);
-            }
-        },
-        else => {},
-    }
-    return list.items;
-}
+const argNames = mcp_arg_names.parse;
 
 fn fail(out: *std.ArrayList(u8), alloc: std.mem.Allocator, msg: []const u8) HandlerError!bool {
     try out.appendSlice(alloc, "{\"ok\":false,\"error\":");

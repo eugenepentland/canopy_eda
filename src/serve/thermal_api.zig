@@ -33,6 +33,7 @@ const page_cache = @import("page_cache.zig");
 const paths = @import("../paths.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
 const serve_root = @import("../serve.zig");
+const handler_probe = @import("handler_probe.zig");
 const thermal_scenarios = @import("../thermal_scenarios.zig");
 const urlcodec = @import("urlcodec.zig");
 const Server = serve_root.Server;
@@ -674,40 +675,17 @@ fn writeThermalFixture(dir: std.Io.Dir) !void {
     });
 }
 
-const Served = struct { status: u16, body: []const u8, content_type: ?httpz.ContentType };
-
 /// Drive the real handler for `name` and return the status plus a copy of the
 /// body on `alloc`.
-fn serve(alloc: std.mem.Allocator, project: []const u8, name: []const u8, ambient: ?[]const u8) !Served {
-    var state = serve_root.ServerState{};
-    var srv = Server{ .allocator = alloc, .project_dir = project, .auth_dir = project, .state = &state };
-    var ht = httpz.testing.init(.{});
-    defer ht.deinit();
-    ht.param("name", name);
-    if (ambient) |a| ht.query("ambient", a);
-    try thermalApi(&srv, ht.req, ht.res);
-    return .{
-        .status = ht.res.status,
-        .body = try alloc.dupe(u8, ht.res.body),
-        .content_type = ht.res.content_type,
-    };
+fn serve(alloc: std.mem.Allocator, project: []const u8, name: []const u8, ambient: ?[]const u8) !handler_probe.Served {
+    const a = ambient orelse return handler_probe.drive(alloc, project, name, &.{}, thermalApi);
+    return handler_probe.drive(alloc, project, name, &.{.{ "ambient", a }}, thermalApi);
 }
 
 /// Same, for a request that needs more than an ambient — the layout selector
 /// is a second query key, and the point of it is asking for a NAMED board.
-fn serveQuery(alloc: std.mem.Allocator, project: []const u8, name: []const u8, q: []const [2][]const u8) !Served {
-    var state = serve_root.ServerState{};
-    var srv = Server{ .allocator = alloc, .project_dir = project, .auth_dir = project, .state = &state };
-    var ht = httpz.testing.init(.{});
-    defer ht.deinit();
-    ht.param("name", name);
-    for (q) |pair| ht.query(pair[0], pair[1]);
-    try thermalApi(&srv, ht.req, ht.res);
-    return .{
-        .status = ht.res.status,
-        .body = try alloc.dupe(u8, ht.res.body),
-        .content_type = ht.res.content_type,
-    };
+fn serveQuery(alloc: std.mem.Allocator, project: []const u8, name: []const u8, q: []const [2][]const u8) !handler_probe.Served {
+    return handler_probe.drive(alloc, project, name, q, thermalApi);
 }
 
 /// Drive the handler against a SHARED server state, so successive calls see the
@@ -1094,19 +1072,8 @@ fn serveField(
     project: []const u8,
     name: []const u8,
     q: []const [2][]const u8,
-) !Served {
-    var state = serve_root.ServerState{};
-    var srv = Server{ .allocator = alloc, .project_dir = project, .auth_dir = project, .state = &state };
-    var ht = httpz.testing.init(.{});
-    defer ht.deinit();
-    ht.param("name", name);
-    for (q) |pair| ht.query(pair[0], pair[1]);
-    try thermalFieldApi(&srv, ht.req, ht.res);
-    return .{
-        .status = ht.res.status,
-        .body = try alloc.dupe(u8, ht.res.body),
-        .content_type = ht.res.content_type,
-    };
+) !handler_probe.Served {
+    return handler_probe.drive(alloc, project, name, q, thermalFieldApi);
 }
 
 // spec: serve/thermal - GET /api/thermal-field/:name answers one scenario's rise grid, its hotspot and its per-part rows as the JSON the board overlay paints from

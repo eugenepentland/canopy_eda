@@ -2,6 +2,7 @@
 //! Pair spacing is the edge-to-edge gap and the result is `2 * Zodd`.
 
 const std = @import("std");
+const elliptic = @import("elliptic_integral.zig");
 
 const Error = error{OutOfDomain};
 const eta0: f64 = 120.0 * std.math.pi;
@@ -41,22 +42,7 @@ fn singleStripZ0(w: f64, b: f64, t: f64, er: f64) Error!f64 {
         lambda * try stripWideZ0(w, b, t, er);
 }
 
-fn ellipticK(k: f64) Error!f64 {
-    if (!(k > 0 and k < 1)) return Error.OutOfDomain;
-    if (!std.math.isFinite(k)) return Error.OutOfDomain;
-    var a: f64 = 1;
-    var b = @sqrt(1.0 - k * k);
-    var i: usize = 0;
-    while (i < 32) : (i += 1) {
-        const next_a = 0.5 * (a + b);
-        const next_b = @sqrt(a * b);
-        if (next_a == a and next_b == b) break;
-        a = next_a;
-        b = next_b;
-    }
-    if (!positive(a)) return Error.OutOfDomain;
-    return std.math.pi / (2.0 * a);
-}
+const ellipticK = elliptic.completeK;
 
 const Modes = struct { even: f64, odd: f64 };
 

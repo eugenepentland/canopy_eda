@@ -37,6 +37,7 @@ const mcp_tools = @import("mcp_tools.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
 const review_thermal = @import("../review_thermal.zig");
 const serve_root = @import("../serve.zig");
+const handler_probe = @import("handler_probe.zig");
 const thermal = @import("../eval/thermal.zig");
 const thermal_api = @import("thermal_api.zig");
 const thermal_scenarios = @import("../thermal_scenarios.zig");
@@ -1127,18 +1128,9 @@ fn writeFixture(dir: std.Io.Dir) !void {
     });
 }
 
-const Served = struct { status: u16, body: []const u8 };
-
 /// Drive the real handler and return the status plus a copy of the body.
-fn serve(alloc: std.mem.Allocator, project: []const u8, name: []const u8, q: []const [2][]const u8) !Served {
-    var state = serve_root.ServerState{};
-    var srv = Server{ .allocator = alloc, .project_dir = project, .auth_dir = project, .state = &state };
-    var ht = httpz.testing.init(.{});
-    defer ht.deinit();
-    ht.param("name", name);
-    for (q) |pair| ht.query(pair[0], pair[1]);
-    try thermalPage(&srv, ht.req, ht.res);
-    return .{ .status = ht.res.status, .body = try alloc.dupe(u8, ht.res.body) };
+fn serve(alloc: std.mem.Allocator, project: []const u8, name: []const u8, q: []const [2][]const u8) !handler_probe.Served {
+    return handler_probe.drive(alloc, project, name, q, thermalPage);
 }
 
 /// True when every needle is somewhere in the haystack — the assertion a

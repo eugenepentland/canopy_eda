@@ -144,6 +144,7 @@ const microstrip = @import("impedance_microstrip.zig");
 const coupled_microstrip = @import("impedance_coupled_microstrip.zig");
 const coupled_stripline = @import("impedance_coupled_stripline.zig");
 const field = @import("impedance_field.zig");
+const elliptic = @import("elliptic_integral.zig");
 
 /// Why an impedance could not be computed. Every one of these is a refusal to
 /// extrapolate: the approximations above have published validity ranges and a
@@ -225,31 +226,13 @@ fn stripWideZ0(w_mm: f64, b_mm: f64, t_mm: f64, er: f64) Error!f64 {
     return (94.15 / @sqrt(er)) / denom;
 }
 
-/// Complete elliptic integral K(k), evaluated by the arithmetic-geometric
-/// mean. The fixed cap is defensive; f64 converges in only a few iterations.
-fn ellipticK(k: f64) Error!f64 {
-    if (!std.math.isFinite(k)) return Error.OutOfDomain;
-    if (k <= 0 or k >= 1) return Error.OutOfDomain;
-    var a: f64 = 1.0;
-    var b = @sqrt(1.0 - k * k);
-    for (0..32) |_| {
-        const next_a = 0.5 * (a + b);
-        const next_b = @sqrt(a * b);
-        if (next_a == a and next_b == b) break;
-        a = next_a;
-        b = next_b;
-    }
-    if (!positive(a)) return Error.OutOfDomain;
-    return std.math.pi / (2.0 * a);
-}
-
 /// Cohn's exact zero-thickness conformal map for a centered stripline.
 fn stripExactZ0(w_mm: f64, b_mm: f64, er: f64) Error!f64 {
     const x = std.math.pi * w_mm / (2.0 * b_mm);
     const k = 1.0 / std.math.cosh(x);
     const k_complement = std.math.tanh(x);
     const result = 30.0 * std.math.pi / @sqrt(er) *
-        try ellipticK(k_complement) / try ellipticK(k);
+        try elliptic.completeK(k_complement) / try elliptic.completeK(k);
     if (!positive(result)) return Error.OutOfDomain;
     return result;
 }

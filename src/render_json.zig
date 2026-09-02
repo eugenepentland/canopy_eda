@@ -27,6 +27,7 @@ const hub_mod = @import("render_svg/hub.zig");
 const connection = @import("render_svg/connection.zig");
 const draw = @import("render_svg/draw.zig");
 const branch_mod = @import("render_svg/branch.zig");
+const schematic_walk = @import("render_svg/schematic_walk.zig");
 const membership = @import("diagram/membership.zig");
 const rb_types = @import("render_block_types.zig");
 const pin_roles = @import("placement/pin_roles.zig");
@@ -59,7 +60,7 @@ pub const RenderError = std.mem.Allocator.Error || std.Io.Writer.Error;
 // ── Layout constants ──────────────────────────────────────────────
 const half_divisor: f64 = 2.0;
 const hub_vpad: f64 = 40.0;
-const pin_offset: f64 = 20.0;
+const pin_offset = schematic_walk.chain_gap;
 const title_line_gap: f64 = 12.0;
 const desc_line_gap: f64 = 6.0;
 const note_block_pad: f64 = 16.0;
@@ -1093,72 +1094,6 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
 const BranchResult = struct { end_x: f64, cy: f64, terminal: []const u8 };
 const Classified = struct { conn: AdjEntry, terminal: []const u8 };
 
-const PlannedSpoke = struct {
-    hub_pin: []const u8,
-    terminal: []const u8,
-    ref_des: []const u8,
-};
-
-fn plannedSpokeContains(planned: []const PlannedSpoke, hub_pin: []const u8, terminal: []const u8, ref_des: []const u8) bool {
-    for (planned) |entry| {
-        if (std.mem.eql(u8, entry.hub_pin, hub_pin) and
-            std.mem.eql(u8, entry.terminal, terminal) and
-            std.mem.eql(u8, entry.ref_des, ref_des)) return true;
-    }
-    return false;
-}
-
-fn rememberPlannedSpoke(
-    allocator: Allocator,
-    planned: *std.ArrayList(PlannedSpoke),
-    hub_pin: []const u8,
-    terminal: []const u8,
-    ref_des: []const u8,
-) !void {
-    if (plannedSpokeContains(planned.items, hub_pin, terminal, ref_des)) return;
-    try planned.append(allocator, .{ .hub_pin = hub_pin, .terminal = terminal, .ref_des = ref_des });
-}
-
-fn reserveGroupedSpoke(
-    ctx: *RenderCtx,
-    planned: *std.ArrayList(PlannedSpoke),
-    spoke_ref: []const u8,
-    hub_ref: []const u8,
-    hub_pin: []const u8,
-    terminal: []const u8,
-) !bool {
-    if (plannedSpokeContains(planned.items, hub_pin, terminal, spoke_ref)) return false;
-    try rememberPlannedSpoke(ctx.allocator, planned, hub_pin, terminal, spoke_ref);
-
-    var visited: std.StringHashMapUnmanaged(void) = .empty;
-    try visited.put(ctx.allocator, spoke_ref, {});
-    const result = try connection.findSpokeChain(ctx, spoke_ref, .{ .pin = .{ .ref_des = hub_ref, .pin = hub_pin } }, &visited);
-    for (result.chain) |inst| try rememberPlannedSpoke(ctx.allocator, planned, hub_pin, terminal, inst.ref_des);
-    for (result.branches) |branch| {
-        for (branch.chain) |inst| try rememberPlannedSpoke(ctx.allocator, planned, hub_pin, terminal, inst.ref_des);
-    }
-    return true;
-}
-
-fn deduplicateGroupedSpokes(
-    ctx: *RenderCtx,
-    allocator: Allocator,
-    classified: *std.ArrayList(Classified),
-    hub_ref: []const u8,
-) !void {
-    var retained: std.ArrayList(Classified) = .empty;
-    var planned: std.ArrayList(PlannedSpoke) = .empty;
-    for (classified.items) |entry| {
-        const keep = switch (entry.conn.endpoint) {
-            .net => true,
-            .pin => |p| !ctx.spoke_set.contains(p.ref_des) or
-                try reserveGroupedSpoke(ctx, &planned, p.ref_des, hub_ref, entry.conn.pin, entry.terminal),
-        };
-        if (keep) try retained.append(allocator, entry);
-    }
-    classified.* = retained;
-}
-
 fn markChainPassivesRendered(
     ctx: *RenderCtx,
     allocator: Allocator,
@@ -1415,7 +1350,7 @@ fn collectGroupConnections(
         }
     }
 
-    try deduplicateGroupedSpokes(ctx, allocator, &classified, hub_ref);
+    try connection.deduplicateGroupedSpokes(ctx, Classified, &classified, hub_ref);
 
     if (classified.items.len == 0) return;
 
@@ -1582,33 +1517,40 @@ fn collectConnBody(
     }
 }
 
-fn collectPassiveChainLeft(scene: *SceneGraph, _: Allocator, start_x: f64, cy: f64, spokes: []const FlatInst) !f64 {
-    if (spokes.len == 0) return start_x;
-    var x = start_x;
-    for (spokes, 0..) |inst, i| {
-        if (i > 0) {
-            try scene.addWire("", x, cy, x - pin_offset, cy, false);
-            x -= pin_offset;
-        }
-        try scene.addPassive(inst, x - passive_bw, cy, true); // left chain: hub on the right
-        x -= passive_bw;
+/// The scene-graph backend of `schematic_walk.passiveChain`. A gap between two
+/// bodies is an unnamed wire; a body is a scene passive recorded at its LEFT
+/// edge, which is the chain cursor on a right-hand chain and one body width
+/// back from it on a left-hand one.
+const SceneChain = struct {
+    scene: *SceneGraph,
+
+    /// The pin gap between two bodies. Unnamed: a chain's internal segments
+    /// belong to no net the viewer can select.
+    pub fn wire(self: SceneChain, x1: f64, y1: f64, x2: f64, y2: f64) RenderError!void {
+        try self.scene.addWire("", x1, y1, x2, y2, false);
     }
-    return x;
+
+    /// One passive body. The scene records a body by its LEFT edge, so a
+    /// left-hand chain's cursor is one body width past where it is recorded;
+    /// `flip` is the same fact, drawn (the hub is on the body's right).
+    pub fn passive(
+        self: SceneChain,
+        inst: FlatInst,
+        x: f64,
+        cy: f64,
+        dir: schematic_walk.Direction,
+    ) RenderError!void {
+        const hub_right = dir == .left;
+        try self.scene.addPassive(inst, if (hub_right) x - passive_bw else x, cy, hub_right);
+    }
+};
+
+fn collectPassiveChainLeft(scene: *SceneGraph, _: Allocator, start_x: f64, cy: f64, spokes: []const FlatInst) !f64 {
+    return schematic_walk.passiveChain(SceneChain{ .scene = scene }, .left, start_x, cy, spokes);
 }
 
-fn collectPassiveChainRight(scene: *SceneGraph, allocator: Allocator, start_x: f64, cy: f64, spokes: []const FlatInst) !f64 {
-    _ = allocator;
-    if (spokes.len == 0) return start_x;
-    var x = start_x;
-    for (spokes, 0..) |inst, i| {
-        if (i > 0) {
-            try scene.addWire("", x, cy, x + pin_offset, cy, false);
-            x += pin_offset;
-        }
-        try scene.addPassive(inst, x, cy, false); // right chain: hub on the left
-        x += passive_bw;
-    }
-    return x;
+fn collectPassiveChainRight(scene: *SceneGraph, _: Allocator, start_x: f64, cy: f64, spokes: []const FlatInst) !f64 {
+    return schematic_walk.passiveChain(SceneChain{ .scene = scene }, .right, start_x, cy, spokes);
 }
 
 fn collectBranchTreeLeft(
@@ -1698,64 +1640,42 @@ fn collectBranchTreeRight(
     }
 }
 
-fn collectTerminals(ctx: *RenderCtx, scene: *SceneGraph, _: Allocator, results: []const BranchResult, term_x: f64, side: Side) !void {
-    if (results.len == 0) return;
+/// The scene-graph backend of `schematic_walk.terminalGroups`. A branch body
+/// already carries its end x, so nothing is materialised here; wires and
+/// terminal labels go straight into the scene.
+const SceneTerminals = struct {
+    ctx: *RenderCtx,
+    scene: *SceneGraph,
 
-    const anchor: []const u8 = switch (side) {
-        .left => "end",
-        .right => "start",
-    };
-
-    var i: usize = 0;
-    while (i < results.len) {
-        const term = results[i].terminal;
-        var j = i + 1;
-        while (j < results.len) : (j += 1) {
-            if (!std.mem.eql(u8, results[j].terminal, term)) break;
-        }
-        const group_slice = results[i..j];
-
-        if (!ctx.significant_nets.contains(term)) {
-            i = j;
-            continue;
-        }
-
-        if (group_slice.len == 1) {
-            const r = group_slice[0];
-            try scene.addWire(term, r.end_x, r.cy, term_x, r.cy, false);
-            try collectTerminalLabel(ctx, scene, term_x, r.cy, term, anchor);
-        } else {
-            const nearest_x = blk: {
-                var nx: f64 = switch (side) {
-                    .left => far_x_sentinel,
-                    .right => -far_x_sentinel,
-                };
-                for (group_slice) |r| {
-                    switch (side) {
-                        .left => nx = @min(nx, r.end_x),
-                        .right => nx = @max(nx, r.end_x),
-                    }
-                }
-                break :blk nx;
-            };
-            const grp_bus_x = switch (side) {
-                .left => nearest_x - pin_offset,
-                .right => nearest_x + pin_offset,
-            };
-
-            const first_cy = group_slice[0].cy;
-            const last_cy = group_slice[group_slice.len - 1].cy;
-
-            for (group_slice) |r| {
-                try scene.addWire(term, r.end_x, r.cy, grp_bus_x, r.cy, false);
-            }
-            try scene.addWire(term, grp_bus_x, first_cy, grp_bus_x, last_cy, true);
-            try scene.addWire(term, grp_bus_x, last_cy, term_x, last_cy, false);
-            try collectTerminalLabel(ctx, scene, term_x, last_cy, term, anchor);
-        }
-
-        i = j;
+    /// Whether this terminal name is drawn at all.
+    pub fn significant(self: SceneTerminals, term: []const u8) bool {
+        return self.ctx.significant_nets.contains(term);
     }
+
+    /// A branch body already carries its end x, so nothing is materialised.
+    pub fn branchEnd(_: SceneTerminals, r: BranchResult) RenderError!f64 {
+        return r.end_x;
+    }
+
+    /// One net-tagged segment, with the group's vertical collector bus kept
+    /// distinct so the scene records it as a bus rather than as a wire.
+    pub fn wire(self: SceneTerminals, seg: schematic_walk.Segment) RenderError!void {
+        try self.scene.addWire(seg.term, seg.x1, seg.y1, seg.x2, seg.y2, seg.vertical);
+    }
+
+    /// The terminal's label or ground symbol at the end of the group.
+    pub fn terminal(self: SceneTerminals, x: f64, cy: f64, term: []const u8, anchor: []const u8) RenderError!void {
+        try collectTerminalLabel(self.ctx, self.scene, x, cy, term, anchor);
+    }
+};
+
+fn collectTerminals(ctx: *RenderCtx, scene: *SceneGraph, _: Allocator, results: []const BranchResult, term_x: f64, side: Side) !void {
+    return schematic_walk.terminalGroups(
+        SceneTerminals{ .ctx = ctx, .scene = scene },
+        results,
+        term_x,
+        side,
+    );
 }
 
 fn collectTerminalLabel(ctx: *RenderCtx, scene: *SceneGraph, end_x: f64, cy: f64, term: []const u8, anchor: []const u8) !void {

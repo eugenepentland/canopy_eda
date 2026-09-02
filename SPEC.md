@@ -43,6 +43,7 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - A parse diagnostic column locates the offending token so a caret aligns under it
 - An unterminated list is reported at the unclosed open paren
 - Fuzzing the parser tolerates arbitrary bytes without crashing or leaking
+- Paren-span matching skips quoted parens and honours the dialect's comment style
 
 ## sexpr/printer
 
@@ -3560,6 +3561,7 @@ actual/ideal ratio on their closed-form baseline.
 - width solved from a target Z0 round-trips back to that Z0
 - a stripline is narrower than a microstrip of the same impedance
 - the symmetric stripline reduces to Cohn's published formula
+- Complete elliptic integral K(k) matches published values and refuses its degenerate endpoints
 - the narrow and wide stripline branches are blended into one continuous monotonic curve
 - an offset stripline sits between its two symmetric bounds
 - geometry outside a formula's published domain is refused, not extrapolated
@@ -4372,6 +4374,7 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - a rectangular pad off a quarter turn carries its four rotated corners, so its keepout is the land and not the land's square bounding box
 - a rotated rectangular pad on a bottom-side part carries corners mirrored with the part
 - a circle carries a round collision outline while an oval conservatively keeps its bounding box
+- The widest scanline interval picks the larger copper lobe of a notched pad
 
 ## eval/builtins
 
@@ -4990,6 +4993,8 @@ Public functions: write
 ## bom
 
 - Generates deterministic UUIDs in the expected format
+- The canonical UUID text form stamps the version nibble and variant bits in one place
+- Derives a stable UUID from an instance id
 - Loads an empty BOM file without error
 - Detects net overlap between components
 
@@ -5195,6 +5200,8 @@ Public functions: renderSchematic
 - Identical decoupling capacitors each render as their own labeled schematic symbol
 - The scene graph preserves one entry per identical decoupling capacitor
 - Net names are XML-escaped in the emitted SVG markup
+- The shared passive-chain walk advances one body width and one pin gap per spoke, mirrored per side
+- The shared terminal-group walk buses a repeated terminal off its nearest branch end and skips an insignificant one
 - Both scene-graph pinout readers take the class-owned lib_limits cap, so a pinout past the retired 256 KiB figure still carries its pin names and alternates
 - Functional boundary signals keep their labels on a dedicated row above a local ground shunt while internal shared-bias trees stay compact, and DNP passives are crossed and labeled
 
@@ -6729,6 +6736,7 @@ Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesig
 - flatten merges a sub-block stitch written against a port name whose module net differs
 - finishDatasheet returns false when the store rejects the bytes
 - parse_kicad_netlist returns components, pads, and a connected-net count
+- A name-list tool argument reads the same from a JSON array and from a comma string
 - parse_kicad_netlist rejects a board_path that does not end in .kicad_pcb
 - import_kicad with dry_run reports importer counts without writing files
 
