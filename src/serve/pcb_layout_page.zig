@@ -221,7 +221,9 @@ const kind_auto = sidecar_store.kind_auto;
 /// sub-block of a parent board, which produces different counters). `origin`
 /// is the module-local source name, invariant across both, so a Load matches
 /// on it first and falls back to `ref` only for legacy entries saved before
-/// `origin` was recorded (empty string). See `rekeyPosesByOrigin`.
+/// `origin` was recorded (empty string); a stale pose whose `ref` a live part
+/// inherited through renumbering is dropped rather than applied. See
+/// `rekeyPosesByOrigin`.
 pub const PartPose = sidecar_types.PartPose;
 
 /// One driving PCB-editor dimension from a footprint origin to a straight
@@ -6108,70 +6110,14 @@ pub fn refPosesFromPartPoses(alloc: std.mem.Allocator, parts: []const PartPose) 
     return out;
 }
 
-/// The sub-block scope of a hierarchical ref-des: everything before the last
-/// `/` ("hmc733/U14" → "hmc733", "U5" → ""). Origin keys are module-LOCAL, so
-/// they only identify a part within one sub-block's scope.
-fn refPrefix(ref: []const u8) []const u8 {
-    const i = std.mem.lastIndexOfScalar(u8, ref, '/') orelse return "";
-    return ref[0..i];
-}
-
-/// One live part's identity for pose resolution: its current flatten ref-des
-/// and (possibly empty) module-local origin key.
-const LiveRef = struct { ref: []const u8, origin: []const u8 };
-
-/// A `resolvePoseIdentity` result: pose i's resolved current ref (its stored
-/// ref when nothing matched) and whether it bound to a live part at all.
-const ResolvedPoses = struct { refs: [][]const u8, bound: []bool };
-
-/// Resolve saved poses onto the current flatten's identity, in two passes: the
-/// sub-block-scoped origin key binds FIRST — it is the renumber-stable
-/// identity, while a ref-des *string* can survive a renumber naming a
-/// DIFFERENT part (the recycled-ref mis-bind that scattered black-canyon's
-/// sub-circuits after a netlist edit). Still-unresolved poses then claim their
-/// exact ref string (legacy entries saved without an origin). The origin map
-/// is scoped by the ref's sub-block prefix, because origin keys are
-/// module-local ("U1" names the main IC of EVERY sub-block; an unscoped map
-/// would let 13 sub-blocks clobber each other), and each live ref is claimed
-/// at most once, so a stale pose can never shadow a genuine one. Null only on
-/// allocation failure.
-fn resolvePoseIdentity(
-    alloc: std.mem.Allocator,
-    live: []const LiveRef,
-    parts: []const PartPose,
-) ?ResolvedPoses {
-    var by_ref = std.StringHashMapUnmanaged(usize).empty;
-    var by_origin = std.StringHashMapUnmanaged(usize).empty;
-    for (live, 0..) |lr, i| {
-        by_ref.put(alloc, lr.ref, i) catch return null;
-        if (lr.origin.len == 0) continue;
-        const key = std.fmt.allocPrint(alloc, pin_key_fmt, .{ refPrefix(lr.ref), lr.origin }) catch return null;
-        by_origin.put(alloc, key, i) catch return null;
-    }
-    const claimed = alloc.alloc(bool, live.len) catch return null;
-    @memset(claimed, false);
-    const refs = alloc.alloc([]const u8, parts.len) catch return null;
-    const bound = alloc.alloc(bool, parts.len) catch return null;
-    @memset(bound, false);
-    for (parts, 0..) |pp, i| {
-        refs[i] = pp.ref;
-        if (pp.origin.len == 0) continue;
-        const key = std.fmt.allocPrint(alloc, pin_key_fmt, .{ refPrefix(pp.ref), pp.origin }) catch return null;
-        const li = by_origin.get(key) orelse continue;
-        if (claimed[li]) continue;
-        claimed[li] = true;
-        refs[i] = live[li].ref;
-        bound[i] = true;
-    }
-    for (parts, 0..) |pp, i| {
-        if (bound[i]) continue;
-        const li = by_ref.get(pp.ref) orelse continue;
-        if (claimed[li]) continue;
-        claimed[li] = true;
-        bound[i] = true;
-    }
-    return .{ .refs = refs, .bound = bound };
-}
+/// Saved-pose identity (scoped-origin-first binding, one claim per live
+/// part, stale-pose flagging) lives in `pose_identity.zig`; these names keep
+/// the page's call sites and `saved_anchor_migration.bind` reading as before.
+const pose_identity = @import("pose_identity.zig");
+const refPrefix = pose_identity.refPrefix;
+const LiveRef = pose_identity.LiveRef;
+const ResolvedPoses = pose_identity.ResolvedPoses;
+const resolvePoseIdentity = pose_identity.resolve;
 
 /// The live-identity list of a built placement (ref + origin key per part),
 /// the input `resolvePoseIdentity` matches saved poses against. Null on
@@ -6189,8 +6135,12 @@ fn liveOfPlacement(alloc: std.mem.Allocator, p: optimizer.Placement) ?[]const Li
 
 /// Re-key a saved layout's poses onto `block`'s *current* ref-des via
 /// `resolvePoseIdentity` (origin key first, exact ref string as the legacy
-/// fallback). A pose with no match keeps its stored `ref`. Null only on a
-/// flatten/allocation failure (caller falls back to raw refs).
+/// fallback). A pose with no match keeps its stored `ref` — UNLESS that ref
+/// now names a live part bound to some other pose, in which case the stale
+/// pose is dropped (`ResolvedPoses.dropped`): after a netlist edit renumbers
+/// parts, the parked pose of a deleted part must not shadow the genuine pose
+/// of the part that inherited its ref. Null only on a flatten/allocation
+/// failure (caller falls back to raw refs).
 fn rekeyPosesByOrigin(
     alloc: std.mem.Allocator,
     block: *env_mod.DesignBlock,
@@ -6202,11 +6152,12 @@ fn rekeyPosesByOrigin(
     for (flat.items, 0..) |fi, i| live[i] = .{ .ref = fi.ref_des, .origin = fi.origin_key };
     const res = resolvePoseIdentity(alloc, live, parts) orelse return null;
     @import("saved_anchor_migration.zig").bind(LiveRef, PartPose, ResolvedPoses, live, parts, block.rough, res);
-    const out = alloc.alloc(optimizer.RefPose, parts.len) catch return null;
+    var out: std.ArrayList(optimizer.RefPose) = .empty;
     for (parts, 0..) |pp, i| {
-        out[i] = .{ .ref = res.refs[i], .x = pp.x, .y = pp.y, .rot = pp.rot, .side = pp.side, .locked = pp.locked };
+        if (res.dropped(i)) continue;
+        out.append(alloc, .{ .ref = res.refs[i], .x = pp.x, .y = pp.y, .rot = pp.rot, .side = pp.side, .locked = pp.locked }) catch return null;
     }
-    return out;
+    return out.toOwnedSlice(alloc) catch null;
 }
 
 /// The page blob's saved-layout rows, re-keyed onto the flatten the page is
@@ -6214,8 +6165,11 @@ fn rekeyPosesByOrigin(
 /// the sub-block-scoped origin bridge — lives in exactly one place
 /// (`resolvePoseIdentity`), server-side: the client's old origin map was
 /// unscoped and last-wins, which collapsed every sub-block sharing a
-/// module-local key ("U1") onto one pose on Load. Rows whose resolution fails
-/// pass through unchanged (their stored refs are still the best available).
+/// module-local key ("U1") onto one pose on Load. A stale pose whose stored
+/// ref a genuine pose now owns is dropped (`ResolvedPoses.dropped`) — the
+/// client keys `parts` by ref, so a duplicate would silently win or lose by
+/// emission order. Rows whose resolution fails pass through unchanged (their
+/// stored refs are still the best available).
 fn rekeyRowsToLive(
     alloc: std.mem.Allocator,
     layouts: []const SavedLayout,
@@ -6224,22 +6178,28 @@ fn rekeyRowsToLive(
     const out = alloc.dupe(SavedLayout, layouts) catch return layouts;
     for (out) |*L| {
         const res = resolvePoseIdentity(alloc, live, L.parts) orelse continue;
-        const np = alloc.dupe(PartPose, L.parts) catch continue;
-        for (np, 0..) |*pp, i| pp.ref = res.refs[i];
-        const nd = alloc.dupe(SavedPartEdgeDimension, L.dimensions) catch {
-            L.parts = np;
-            continue;
-        };
-        for (nd) |*dimension| {
+        var np: std.ArrayList(PartPose) = .empty;
+        for (L.parts, 0..) |pp, i| {
+            if (res.dropped(i)) continue;
+            var kept = pp;
+            kept.ref = res.refs[i];
+            np.append(alloc, kept) catch break;
+        }
+        if (np.items.len + res.droppedCount() != L.parts.len) continue;
+        // A dimension follows the KEPT pose that carries its stored ref; one
+        // anchored only on a dropped stale pose goes with it.
+        var nd: std.ArrayList(SavedPartEdgeDimension) = .empty;
+        for (L.dimensions) |dimension| {
             for (L.parts, 0..) |part, i| {
-                if (std.mem.eql(u8, dimension.ref, part.ref)) {
-                    dimension.ref = res.refs[i];
-                    break;
-                }
+                if (res.dropped(i) or !std.mem.eql(u8, dimension.ref, part.ref)) continue;
+                var moved = dimension;
+                moved.ref = res.refs[i];
+                nd.append(alloc, moved) catch break;
+                break;
             }
         }
-        L.parts = np;
-        L.dimensions = nd;
+        L.parts = np.items;
+        L.dimensions = nd.items;
     }
     return out;
 }
@@ -17552,34 +17512,82 @@ test "the blob inlines copper only for the shown layout" {
     try std.testing.expect(std.mem.indexOf(u8, js[at_poses..], "\"routes\"") == null);
 }
 
-// spec: Web Server - A saved pose binds by sub-block-scoped origin key before its ref string, each live part claimed once, so a renumber-recycled ref cannot mis-bind a pose
-test "pose identity binds scoped origin first and refuses a recycled ref" {
+/// A bare flat block of caps for the re-key tests: `refs[i]` with origin
+/// `origins[i]`, nothing else — enough for `collectInstances` to list them.
+fn tCapBlock(alloc: std.mem.Allocator, refs: []const []const u8, origins: []const []const u8) !env_mod.DesignBlock {
+    const insts = try alloc.alloc(env_mod.Instance, refs.len);
+    for (insts, refs, origins) |*inst, ref, origin| inst.* = .{
+        .ref_des = ref,
+        .origin_key = origin,
+        .id = "00000000",
+        .component = "cap",
+        .value = "100nF",
+        .footprint = "0402",
+        .symbol = "Device:C",
+    };
+    return .{ .name = "t", .instances = insts, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &.{} };
+}
+
+// spec: Web Server - A saved pose whose part was deleted is dropped when a renumbered live part inherited its ref, so the genuine pose is not shadowed by a stale one
+test "re-keying drops the stale pose of a deleted part whose ref a renumbered part inherited" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const alloc = arena_state.allocator();
-    // Two sub-blocks share the module-local origin "U1"; at top level the row's
-    // "C13" (origin C_ID) renumbered to "C14" while a DIFFERENT part recycled
-    // the string "C13".
-    const live = [_]LiveRef{
-        .{ .ref = "amp1/U7", .origin = "U1" },
-        .{ .ref = "dsa/U8", .origin = "U1" },
-        .{ .ref = "C13", .origin = "C_NEW" },
-        .{ .ref = "C14", .origin = "C_ID" },
+    // black-canyon, 2026-09-02: the layout was saved with C16 = C_SNS12 parked
+    // off-board and C20 = C_HPF1_IN placed on the board. Removing C_SNS12 (and
+    // eleven others) renumbered C_HPF1_IN to C16.
+    var block = try tCapBlock(alloc, &.{ "C16", "R7" }, &.{ "C_HPF1_IN", "R_KEPT" });
+    const saved = [_]PartPose{
+        .{ .ref = "C16", .origin = "C_SNS12", .x = 69.7, .y = 6.2, .rot = 0 },
+        .{ .ref = "C20", .origin = "C_HPF1_IN", .x = 10, .y = 12, .rot = 90 },
+        .{ .ref = "R7", .origin = "R_KEPT", .x = 3, .y = 4, .rot = 0 },
+        // A deleted part whose ref nobody inherited is not a collision; it
+        // passes through as before and the caller simply cannot place it.
+        .{ .ref = "R99", .origin = "R_GONE", .x = 70, .y = 8, .rot = 0 },
     };
-    const row = [_]PartPose{
-        .{ .ref = "amp1/U7", .origin = "U1", .x = 1, .y = 1, .rot = 0 },
-        .{ .ref = "dsa/U8", .origin = "U1", .x = 2, .y = 2, .rot = 0 },
-        .{ .ref = "C13", .origin = "C_ID", .x = 3, .y = 3, .rot = 0 },
+    const poses = rekeyPosesByOrigin(alloc, &block, &saved) orelse return error.TestRekeyFailed;
+    try std.testing.expectEqual(@as(usize, 3), poses.len);
+    // Exactly one pose answers to C16, and it is C_HPF1_IN's on-board one —
+    // the parked C_SNS12 pose did not win by emission order.
+    var c16: usize = 0;
+    for (poses) |p| {
+        if (!std.mem.eql(u8, p.ref, "C16")) continue;
+        c16 += 1;
+        try std.testing.expectEqual(@as(f64, 10), p.x);
+        try std.testing.expectEqual(@as(f64, 12), p.y);
+        try std.testing.expectEqual(@as(f64, 90), p.rot);
+    }
+    try std.testing.expectEqual(@as(usize, 1), c16);
+    try std.testing.expectEqualStrings("R7", poses[1].ref);
+    try std.testing.expectEqualStrings("R99", poses[2].ref);
+}
+
+// spec: Web Server - The page blob's re-keyed rows drop a stale shadowing pose and its dimension, so the client's ref-keyed Load cannot pick the wrong one
+test "blob rows drop the stale shadowing pose and the dimension anchored on it" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    const live = [_]LiveRef{.{ .ref = "C16", .origin = "C_HPF1_IN" }};
+    const row_parts = [_]PartPose{
+        .{ .ref = "C16", .origin = "C_SNS12", .x = 69.7, .y = 6.2, .rot = 0 },
+        .{ .ref = "C20", .origin = "C_HPF1_IN", .x = 10, .y = 12, .rot = 90 },
     };
-    const res = resolvePoseIdentity(alloc, &live, &row) orelse return error.TestResolveFailed;
-    // Scoped origin map: each sub-block's "U1" binds within its own scope —
-    // the unscoped last-wins map collapsed all of them onto one pose.
-    try std.testing.expectEqualStrings("amp1/U7", res.refs[0]);
-    try std.testing.expectEqualStrings("dsa/U8", res.refs[1]);
-    // Origin outranks the recycled ref string: the pose follows C_ID to C14
-    // instead of landing on whatever part now answers to "C13".
-    try std.testing.expectEqualStrings("C14", res.refs[2]);
-    try std.testing.expect(res.bound[0] and res.bound[1] and res.bound[2]);
+    const dimensions = [_]SavedPartEdgeDimension{
+        .{ .ref = "C16", .axis = "x", .edge_id = 7, .offset = 2 },
+        .{ .ref = "C20", .axis = "y", .edge_id = 8, .offset = 3 },
+    };
+    const rows = [_]SavedLayout{
+        .{ .name = "hand", .kind = kind_manual, .ts = 1, .score = null, .parts = &row_parts, .dimensions = &dimensions },
+    };
+    const out = rekeyRowsToLive(alloc, &rows, &live);
+    // The client keys `parts` by ref: one C16, and it is the on-board pose.
+    try std.testing.expectEqual(@as(usize, 1), out[0].parts.len);
+    try std.testing.expectEqualStrings("C16", out[0].parts[0].ref);
+    try std.testing.expectEqual(@as(f64, 10), out[0].parts[0].x);
+    // The stale C16 dimension went with its pose; C20's followed it to C16.
+    try std.testing.expectEqual(@as(usize, 1), out[0].dimensions.len);
+    try std.testing.expectEqualStrings("C16", out[0].dimensions[0].ref);
+    try std.testing.expectEqual(@as(u32, 8), @as(u32, @intCast(out[0].dimensions[0].edge_id)));
 }
 
 // spec: Web Server - The page blob's saved-layout rows are re-keyed onto the shown flatten, so a client Load applies poses by exact ref

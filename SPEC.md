@@ -217,6 +217,7 @@ candidate for deployment.
 - Ground-via seed model and endpoint tests remain claimed by the shard manifest
 - RF pad adaptation tests remain claimed by the shard manifest
 - The live sub-circuit Stamp endpoint regression remains claimed by the shard manifest
+- The saved-pose identity tests remain claimed by the shard manifest
 - Bridges every test-bearing module into the shard import graph so filters alone decide a shard's contents
 - Rejects a shard filter that no longer names a test in the tree
 - Pins every gated full-test invocation with `--seed=1` so an unchanged tree's test run is a cache hit
@@ -6978,6 +6979,8 @@ is what makes the predicate exact rather than approximately right.
 - A sole unmatched legacy hub pose migrates to a sole unmatched explicit rough anchor in the same sub-block scope
 - A partial starred layout reports style/coverage but is invalid as a physics-objective reference
 - The page blob's saved-layout rows are re-keyed onto the shown flatten, so a client Load applies poses by exact ref
+- A saved pose whose part was deleted is dropped when a renumbered live part inherited its ref, so the genuine pose is not shadowed by a stale one
+- The page blob's re-keyed rows drop a stale shadowing pose and its dimension, so the client's ref-keyed Load cannot pick the wrong one
 - Merging duplicate layout rows keeps the starred row's name, so the ★ permalink still reproduces its board
 - close_open_nets folds a redundant same-net via onto the barrel already there, and restores the board when the fold makes it worse
 - The WASM DRC session via probe refuses a via crowding an existing same-net via, matching the checker's via-spacing rule

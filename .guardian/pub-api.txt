@@ -4524,6 +4524,12 @@ src/serve/png_cache.zig::deinit | fn deinit(self: *Store) void
 src/serve/png_cache.zig::serve | fn serve(self: *Store, in: anytype, miss_version: *?u32) bool
 src/serve/png_cache.zig::serveImage | fn serveImage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void
 src/serve/png_cache.zig::store | fn store(self: *Store, in: anytype) void
+src/serve/pose_identity.zig::LiveRef struct_
+src/serve/pose_identity.zig::ResolvedPoses struct_
+src/serve/pose_identity.zig::dropped | fn dropped(self: ResolvedPoses, i: usize) bool
+src/serve/pose_identity.zig::droppedCount | fn droppedCount(self: ResolvedPoses) usize
+src/serve/pose_identity.zig::refPrefix | fn refPrefix(ref: []const u8) []const u8
+src/serve/pose_identity.zig::resolve | fn resolve( alloc: std.mem.Allocator, live: []const LiveRef, parts: []const PartPose, ) ?ResolvedPoses
 src/serve/pour_json.zig::ZoneFillReq struct_
 src/serve/pour_json.zig::writePlaneFillsField | fn writePlaneFillsField( w: *std.Io.Writer, alloc: std.mem.Allocator, placement: optimizer.Placement, copper: pour.Copper, omit: bool, base: ?pour.EdgeField, ) std.Io.Writer.Error!void
 src/serve/pour_json.zig::writePours | fn writePours( w: *std.Io.Writer, alloc: std.mem.Allocator, placement: optimizer.Placement, copper: pour.Copper, zones: []const pour.UserZone, base: ?pour.EdgeField, ) std.Io.Writer.Error!void
