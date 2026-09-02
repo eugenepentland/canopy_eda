@@ -51,10 +51,12 @@ fn writeLayerNames(w: *std.Io.Writer, placement: optimizer.Placement) std.Io.Wri
     try w.writeAll("],");
 }
 
-/// Emit `"blocks":["components","tracks","vias"]` — the physical families a
-/// typed keepout excludes, in the fixed order both keepout producers use.
-fn writeBlocks(w: *std.Io.Writer, blocks: env.PerimeterKeepoutBlocks) std.Io.Writer.Error!void {
-    try w.writeAll("\"blocks\":[");
+/// The physical families a typed keepout excludes, in the fixed order every
+/// keepout producer lists them — the comma-separated members ALONE, so a caller
+/// supplies its own surrounding key and punctuation. Both producers (the blob
+/// geometry below and the spatial-facts document in `serve/pcb_describe.zig`)
+/// write this list, and the order is what makes their two outputs comparable.
+pub fn writeBlockFamilies(w: *std.Io.Writer, blocks: env.PerimeterKeepoutBlocks) std.Io.Writer.Error!void {
     var wrote = false;
     inline for (.{ "components", "tracks", "vias" }) |family| {
         if (@field(blocks, family)) {
@@ -63,6 +65,13 @@ fn writeBlocks(w: *std.Io.Writer, blocks: env.PerimeterKeepoutBlocks) std.Io.Wri
             wrote = true;
         }
     }
+}
+
+/// Emit `"blocks":["components","tracks","vias"]` — the families above under
+/// this producer's own key.
+fn writeBlocks(w: *std.Io.Writer, blocks: env.PerimeterKeepoutBlocks) std.Io.Writer.Error!void {
+    try w.writeAll("\"blocks\":[");
+    try writeBlockFamilies(w, blocks);
     try w.writeAll("],");
 }
 

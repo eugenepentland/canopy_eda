@@ -297,6 +297,8 @@ pub const shards: []const []const []const u8 = &.{
         "serve.pcb_derived.test.",
         "serve.progress_cache.test.",
         "serve.describe_cache.test.",
+        "serve.cache_core.test.",
+        "serve.page_cache_endpoint.test.",
         "serve.read_cache.test.",
         "serve.png_cache.test.",
         "serve.route_plan.test.",

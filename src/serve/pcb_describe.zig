@@ -47,7 +47,9 @@ const plan_resolve = @import("../placement/plan_resolve.zig");
 const route_score = @import("../placement/route_score.zig");
 const progress = @import("../placement/progress.zig");
 const pcb_progress = @import("pcb_progress.zig");
+const page_cache_endpoint = @import("page_cache_endpoint.zig");
 const page_cache = @import("page_cache.zig");
+const pcb_keepout_json = @import("pcb_keepout_json.zig");
 const progress_cache = @import("progress_cache.zig");
 const fab_readiness = @import("../fab_readiness.zig");
 const export_gerber = @import("../export_gerber.zig");
@@ -68,93 +70,44 @@ const Server = serve_root.Server;
 /// same words the `(placement …)` spec uses.
 pub const Side = enum { left, right, top, bottom, center };
 
+/// The two cached facts endpoints below. They differ only in what they compute
+/// — the full spatial-facts document, or the compact completion ladder — so the
+/// hit / compute / frame / retain body they share lives once in
+/// `page_cache_endpoint.Endpoint`, alongside the image endpoint's.
+const facts_endpoint = page_cache_endpoint.Endpoint(.{
+    .compute = describeDesign,
+    .request_opts = pcb_layout_page.pngRequestFromQuery,
+    .failure = pcb_layout_page.pngFailure,
+    .version_of = serve_root.getLiveVersion,
+    .content_type = httpz.ContentType.JSON,
+    .error_body = page_cache_endpoint.ErrorBody.json,
+    .no_store = false,
+});
+
+const ladder_endpoint = page_cache_endpoint.Endpoint(.{
+    .compute = describeProgress,
+    .request_opts = pcb_layout_page.pngRequestFromQuery,
+    .failure = pcb_layout_page.pngFailure,
+    .version_of = serve_root.getLiveVersion,
+    .content_type = httpz.ContentType.JSON,
+    .error_body = page_cache_endpoint.ErrorBody.json,
+    .no_store = false,
+});
+
 /// GET /api/pcb-describe/:name — accepts the same query parameters as
 /// /api/pcb-png (layout=, regen=, sub=, placement=off, route=1, tuning knobs)
 /// so the facts match whichever board variant the caller is looking at.
 pub fn pcbDescribeApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void {
-    const arena = req.arena;
-    const name = req.param("name") orelse {
-        res.status = 404;
-        return;
-    };
-    // Read the live version BEFORE computing, so a design edit that lands
-    // mid-request is treated as a miss next time instead of being baked in.
-    const live_version = serve_root.getLiveVersion(name);
-    var miss_version: ?u32 = null;
-    if (ctx.state.caches.describe_json.serve(.{
-        .scratch = arena,
-        .req = req,
-        .res = res,
-        .name = name,
-        .live_version = live_version,
-    }, &miss_version)) return;
-
-    const opts = pcb_layout_page.pngRequestFromQuery(arena, req);
-    var deps: ?page_cache.FileSet = null;
-    const body = describeDesign(arena, ctx.project_dir, name, opts, &deps) catch |e| {
-        if (deps) |d| d.deinit();
-        const fail = pcb_layout_page.pngFailure(e);
-        res.status = fail.status;
-        res.content_type = .JSON;
-        res.body = fail.json;
-        return;
-    };
-    res.content_type = .JSON;
-    res.body = body;
-    ctx.state.caches.describe_json.store(.{
-        .scratch = arena,
-        .req = req,
-        .res = res,
-        .name = name,
-        .json = body,
-        .files = deps,
-        .live_version = miss_version,
-        .current_version = serve_root.getLiveVersion(name),
-    });
+    const name = pcb_layout_page.nameParam(req, res) orelse return;
+    facts_endpoint.answer(&ctx.state.caches.describe_json, ctx.project_dir, name, req, res);
 }
 
 /// GET /api/layout-progress/:name — the compact six-stage completion ladder
 /// used by home-page design cards. This deliberately returns only the progress
 /// report, not the much larger spatial-facts document from pcbDescribeApi.
 pub fn layoutProgressApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void {
-    const arena = req.arena;
-    const name = req.param("name") orelse {
-        res.status = 404;
-        return;
-    };
-    // Read the live version BEFORE computing, so a design edit that lands
-    // mid-request is treated as a miss next time instead of being baked in.
-    const live_version = serve_root.getLiveVersion(name);
-    var miss_version: ?u32 = null;
-    if (ctx.state.caches.progress_json.serve(.{
-        .scratch = arena,
-        .req = req,
-        .res = res,
-        .name = name,
-        .live_version = live_version,
-    }, &miss_version)) return;
-
-    const opts = pcb_layout_page.pngRequestFromQuery(arena, req);
-    var deps: ?page_cache.FileSet = null;
-    const body = describeProgress(arena, ctx.project_dir, name, opts, &deps) catch |e| {
-        if (deps) |d| d.deinit();
-        const fail = pcb_layout_page.pngFailure(e);
-        res.status = fail.status;
-        res.content_type = .JSON;
-        res.body = fail.json;
-        return;
-    };
-    res.content_type = .JSON;
-    res.body = body;
-    ctx.state.caches.progress_json.store(.{
-        .req = req,
-        .res = res,
-        .name = name,
-        .json = body,
-        .files = deps,
-        .live_version = miss_version,
-        .current_version = serve_root.getLiveVersion(name),
-    });
+    const name = pcb_layout_page.nameParam(req, res) orelse return;
+    ladder_endpoint.answer(&ctx.state.caches.progress_json, ctx.project_dir, name, req, res);
 }
 
 /// Solve (or load) the placement exactly as the PNG endpoint would and return
@@ -766,7 +719,7 @@ fn writeKeepouts(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Place
             region.rect.w,
             region.rect.h,
         });
-        try writeBlockedFamilies(w, region.spec.blocks);
+        try pcb_keepout_json.writeBlockFamilies(w, region.spec.blocks);
         try w.writeAll("],\"allow_nets\":[");
         for (region.spec.allow_nets, 0..) |net, ni| {
             if (ni > 0) try w.writeAll(",");
@@ -777,19 +730,6 @@ fn writeKeepouts(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Place
         try w.writeAll("}");
     }
     try w.writeAll("]");
-}
-
-/// The physical families a keepout excludes, in the fixed order every keepout
-/// producer lists them.
-fn writeBlockedFamilies(w: *std.Io.Writer, blocks: env.PerimeterKeepoutBlocks) DescribeError!void {
-    var wrote = false;
-    inline for (.{ "components", "tracks", "vias" }) |family| {
-        if (@field(blocks, family)) {
-            if (wrote) try w.writeAll(",");
-            try w.writeAll("\"" ++ family ++ "\"");
-            wrote = true;
-        }
-    }
 }
 
 fn writeStackup(w: *std.Io.Writer, p: optimizer.Placement) DescribeError!void {
@@ -1079,15 +1019,15 @@ fn writeOpenNetsJson(w: *std.Io.Writer, open_nets: []const fab_readiness.OpenNet
         try w.print(",\"islands\":{d},\"pads\":[", .{n.islands});
         for (n.pads, 0..) |p, pi| {
             if (pi > 0) try w.writeAll(",");
-            try writeOpenPadJson(w, p);
+            try writeOpenPadJson(w, p, .with_island);
         }
         try w.writeAll("],\"gaps\":[");
         for (n.gaps, 0..) |gp, gi| {
             if (gi > 0) try w.writeAll(",");
             try w.print("{{\"mm\":{d:.3},\"from\":", .{gp.mm});
-            try writeOpenPadJson(w, gp.from);
+            try writeOpenPadJson(w, gp.from, .with_island);
             try w.writeAll(",\"to\":");
-            try writeOpenPadJson(w, gp.to);
+            try writeOpenPadJson(w, gp.to, .with_island);
             try w.writeAll("}");
         }
         try w.writeAll("]}");
@@ -1095,19 +1035,38 @@ fn writeOpenNetsJson(w: *std.Io.Writer, open_nets: []const fab_readiness.OpenNet
     try w.writeAll("]");
 }
 
-/// One `{ref,pad,x,y,side,thru,island}` endpoint record.
-fn writeOpenPadJson(w: *std.Io.Writer, p: fab_readiness.OpenPad) std.Io.Writer.Error!void {
+/// How much of an open-net endpoint a surface reports. Both forms name the same
+/// pad in the same board frame `add_tracks` takes; the facts document adds the
+/// two DIAGNOSTIC fields — whether the pad is through-hole, and which copper
+/// island it currently sits in — that let a caller pick a layer and see which
+/// islands a hop would join. `route_experiment`'s reply is deliberately the
+/// compact form (documented in docs/webserver-api.md), so the difference is a
+/// parameter rather than a second copy of the writer.
+pub const OpenPadDetail = enum { compact, with_island };
+
+/// One open-net endpoint: `{ref,pad,x,y,side}`, plus `thru`/`island` at
+/// `.with_island`.
+pub fn writeOpenPadJson(
+    w: *std.Io.Writer,
+    p: fab_readiness.OpenPad,
+    detail: OpenPadDetail,
+) std.Io.Writer.Error!void {
     try w.writeAll("{\"ref\":");
     try pcb_layout_page.writeJsonStr(w, p.ref);
     try w.writeAll(",\"pad\":");
     try pcb_layout_page.writeJsonStr(w, p.pad);
-    try w.print(",\"x\":{d:.3},\"y\":{d:.3},\"side\":\"{s}\",\"thru\":{s},\"island\":{d}}}", .{
+    try w.print(",\"x\":{d:.3},\"y\":{d:.3},\"side\":\"{s}\"", .{
         p.x,
         p.y,
         if (p.side == .bottom) "bottom" else "top",
-        if (p.thru) "true" else "false",
-        p.island,
     });
+    if (detail == .with_island) {
+        try w.print(",\"thru\":{s},\"island\":{d}", .{
+            if (p.thru) "true" else "false",
+            p.island,
+        });
+    }
+    try w.writeByte('}');
 }
 
 /// Map each net to the single hub package edge its pads sit on; nets whose hub
@@ -1763,19 +1722,12 @@ fn writeNearBindings(
     try w.writeAll("]");
 }
 
+/// The net on `part` under the footprint-local offset (lx, ly) — the pad
+/// nearest that point, resolved through the pad->net map. Shares the renderer's
+/// nearest-pad search (`render_pcb_png.nearestPadNumber`); all that differs is
+/// that a padless part has no net here rather than an empty pad number.
 fn netAtLocal(pad_net: *std.StringHashMapUnmanaged([]const u8), part: optimizer.Part, lx: f64, ly: f64) ?[]const u8 {
-    var best: ?[]const u8 = null;
-    var best_d: f64 = std.math.floatMax(f64);
-    for (part.pads) |pad| {
-        const dx = pad.x - lx;
-        const dy = pad.y - ly;
-        const d = dx * dx + dy * dy;
-        if (d < best_d) {
-            best_d = d;
-            best = pad.number;
-        }
-    }
-    const number = best orelse return null;
+    const number = render_pcb_png.nearestPadNumber(part.pads, lx, ly) orelse return null;
     return netOf(pad_net, part.ref_des, number);
 }
 

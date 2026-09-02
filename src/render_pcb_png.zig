@@ -17,6 +17,26 @@ const board_layers = @import("board_layers.zig");
 const board_theme = @import("board_theme.zig");
 const optimizer = @import("placement/optimizer.zig");
 const geometry = @import("placement/geometry.zig");
+
+/// Number of the pad in `pads` whose centre is nearest the footprint-local
+/// offset (lx, ly), or null when the footprint has none. Both callers ask the
+/// same question of the same geometry — the renderer recovering an airwire
+/// endpoint's pad, and `serve/pcb_describe.zig` naming the net under a point —
+/// so they ask it in one place; only what they do with "no pads" differs.
+pub fn nearestPadNumber(pads: []const geometry.Pad, lx: f64, ly: f64) ?[]const u8 {
+    var best: ?[]const u8 = null;
+    var best_d: f64 = std.math.floatMax(f64);
+    for (pads) |pad| {
+        const dx = pad.x - lx;
+        const dy = pad.y - ly;
+        const d = dx * dx + dy * dy;
+        if (d < best_d) {
+            best_d = d;
+            best = pad.number;
+        }
+    }
+    return best;
+}
 const router = @import("placement/router.zig");
 const pour = @import("placement/pour.zig");
 const outline = @import("placement/outline.zig");
@@ -1238,21 +1258,10 @@ const Ctx = struct {
 
     /// Pad number on part `pi` whose centre is nearest the footprint-local
     /// offset (lx,ly) — recovers an airwire endpoint's net (links carry only
-    /// offsets, not the net name).
+    /// offsets, not the net name). A padless footprint answers `""`, which
+    /// `netOf` resolves to no net.
     fn nearestPad(self: *Ctx, pi: usize, lx: f64, ly: f64) []const u8 {
-        const part = self.p.parts[pi];
-        var best: []const u8 = "";
-        var best_d: f64 = std.math.floatMax(f64);
-        for (part.pads) |pad| {
-            const dx = pad.x - lx;
-            const dy = pad.y - ly;
-            const d = dx * dx + dy * dy;
-            if (d < best_d) {
-                best_d = d;
-                best = pad.number;
-            }
-        }
-        return best;
+        return nearestPadNumber(self.p.parts[pi].pads, lx, ly) orelse "";
     }
 
     fn drawLoops(self: *Ctx) void {

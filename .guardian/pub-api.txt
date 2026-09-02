@@ -3555,6 +3555,7 @@ src/render_pcb_png.zig::PourInputs struct_
 src/render_pcb_png.zig::SpecStatus struct_
 src/render_pcb_png.zig::cropNetBbox | fn cropNetBbox( alloc: std.mem.Allocator, p: optimizer.Placement, routed: ?router.RouteResult, nets: []const []const u8, margin: f64, ) std.mem.Allocator.Error!?[4]f64
 src/render_pcb_png.zig::cropnet_margin_mm value
+src/render_pcb_png.zig::nearestPadNumber | fn nearestPadNumber(pads: []const geometry.Pad, lx: f64, ly: f64) ?[]const u8
 src/render_pcb_png.zig::render | fn render(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options) png.Error![]u8
 src/render_pcb_png.zig::renderSheet | fn renderSheet(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options) png.Error![]u8
 src/render_pcb_png.zig::trackColor | fn trackColor(rules: optimizer.BoardRules, layer: u8) Rgb
@@ -3844,6 +3845,7 @@ src/serve/assembly_debug.zig::benchColdPage | fn benchColdPage(allocator: std.me
 src/serve/assembly_debug.zig::renderReleasePage | fn renderReleasePage( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, block: *const env_mod.DesignBlock, board_html: []const u8, identity: ReleaseIdentity, ) HandlerError![]const u8
 src/serve/assembly_page_cache.zig::Store struct_
 src/serve/assembly_page_cache.zig::deinit | fn deinit(self: *Store) void
+src/serve/assembly_page_cache.zig::freeEntry | fn freeEntry(self: *Store, allocator: std.mem.Allocator, key: []const u8, entry: Entry) void
 src/serve/assembly_page_cache.zig::serve | fn serve( self: *Store, in: ServeIn, req: *httpz.Request, res: *httpz.Response, miss_version: *?u32, ) bool
 src/serve/assembly_page_cache.zig::store | fn store(self: *Store, in: anytype) void
 src/serve/assets_css.zig::index_css value
@@ -3887,6 +3889,8 @@ src/serve/bom_html.zig::writeSchematicBomHtml | fn writeSchematicBomHtml(allocat
 src/serve/build_dependencies.zig::AppendError value
 src/serve/build_dependencies.zig::EvaluationStatus enum_
 src/serve/build_dependencies.zig::append | fn append( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, status: EvaluationStatus, base: []const u8, out: *std.ArrayList(u8), ) AppendError!void
+src/serve/cache_core.zig::evictLru | fn evictLru( store: anytype, allocator: std.mem.Allocator, max_entries: usize, max_bytes: usize, ) void
+src/serve/cache_core.zig::freeAll | fn freeAll(store: anytype) void
 src/serve/component_info.zig::DescribeError value
 src/serve/component_info.zig::ReqError value
 src/serve/component_info.zig::addRequirement | fn addRequirement( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, text: []const u8, ref_pdf: ?[]const u8, ref_page: ?u32, ref_quote: ?[]const u8, check_src: ?[]const u8, out: *std.ArrayList(u8), ) ReqError!bool
@@ -3922,10 +3926,8 @@ src/serve/datasheet_ref.zig::isLocal | fn isLocal(value: []const u8) bool
 src/serve/datasheet_ref.zig::isRemote | fn isRemote(value: []const u8) bool
 src/serve/datasheet_ref.zig::isValid | fn isValid(value: []const u8) bool
 src/serve/datasheet_review_json.zig::write | fn write(writer: anytype, root_body: []const ast.Node) !void
-src/serve/describe_cache.zig::Store struct_
-src/serve/describe_cache.zig::deinit | fn deinit(self: *Store) void
-src/serve/describe_cache.zig::serve | fn serve(self: *Store, in: anytype, miss_version: *?u32) bool
-src/serve/describe_cache.zig::store | fn store(self: *Store, in: anytype) void
+src/serve/describe_cache.zig::Store value
+src/serve/describe_cache.zig::config value
 src/serve/design_archive_api.zig::HandlerError value
 src/serve/design_archive_api.zig::designArchiveApi | fn designArchiveApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/design_diff.zig::DesignDiff struct_
@@ -4293,6 +4295,8 @@ src/serve/page_cache.zig::captureOne | fn captureOne(path: []const u8) std.mem.A
 src/serve/page_cache.zig::captureWithExtras | fn captureWithExtras( scratch: std.mem.Allocator, eval: *const Evaluator, project_dir: []const u8, name: []const u8, extra_paths: []const []const u8, ) std.mem.Allocator.Error!FileSet
 src/serve/page_cache.zig::deinit | fn deinit(self: FileSet) void
 src/serve/page_cache.zig::isValid | fn isValid(self: FileSet) bool
+src/serve/page_cache_endpoint.zig::Endpoint | fn Endpoint(comptime cfg: anytype) type
+src/serve/page_cache_endpoint.zig::ErrorBody enum_
 src/serve/pages.zig::HandlerError value
 src/serve/pages.zig::HomeData struct_
 src/serve/pages.zig::cssPage | fn cssPage(_: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void
@@ -4309,6 +4313,7 @@ src/serve/pcb_derived.zig::warmPage | fn warmPage(ctx: *Server, scratch: std.mem
 src/serve/pcb_derived.zig::warmsDeferred | fn warmsDeferred(req: *httpz.Request) bool
 src/serve/pcb_describe.zig::Analyses struct_
 src/serve/pcb_describe.zig::DescribeError value
+src/serve/pcb_describe.zig::OpenPadDetail enum_
 src/serve/pcb_describe.zig::Side enum_
 src/serve/pcb_describe.zig::aabbHalf | fn aabbHalf(part: optimizer.Part) [2]f64
 src/serve/pcb_describe.zig::anchorIndex | fn anchorIndex(parts: []const optimizer.Part, nets: []const optimizer.FlatNet) ?usize
@@ -4319,6 +4324,7 @@ src/serve/pcb_describe.zig::originOf | fn originOf(p: optimizer.Placement, pi: u
 src/serve/pcb_describe.zig::pcbDescribeApi | fn pcbDescribeApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void
 src/serve/pcb_describe.zig::sideOf | fn sideOf(dx: f64, dy: f64, a_half: [2]f64, b_half: [2]f64) Side
 src/serve/pcb_describe.zig::writeDescribeJson | fn writeDescribeJson( w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placement, spec: ?render_pcb_png.SpecStatus, routed: ?RoutedSummary, name: []const u8, title: []const u8, an: Analyses, ) DescribeError!void
+src/serve/pcb_describe.zig::writeOpenPadJson | fn writeOpenPadJson( w: *std.Io.Writer, p: fab_readiness.OpenPad, detail: OpenPadDetail, ) std.Io.Writer.Error!void
 src/serve/pcb_fence.zig::Counts struct_
 src/serve/pcb_fence.zig::DrcDelta struct_
 src/serve/pcb_fence.zig::FenceError value
@@ -4330,6 +4336,7 @@ src/serve/pcb_fence.zig::mcpGenerateFence | fn mcpGenerateFence( alloc: std.mem.
 src/serve/pcb_fence.zig::pcbFenceApi | fn pcbFenceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_fence.zig::run | fn run( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opt: Options, ) FenceError!Outcome
 src/serve/pcb_keepout_json.zig::write | fn write( w: *std.Io.Writer, alloc: std.mem.Allocator, placement: optimizer.Placement, ) (std.mem.Allocator.Error || std.Io.Writer.Error)!void
+src/serve/pcb_keepout_json.zig::writeBlockFamilies | fn writeBlockFamilies(w: *std.Io.Writer, blocks: env.PerimeterKeepoutBlocks) std.Io.Writer.Error!void
 src/serve/pcb_layout_import.zig::writeImportedStarredLayout | fn writeImportedStarredLayout( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, imported: import_layout.Imported, ) bool
 src/serve/pcb_layout_page.zig::CacheSlot value
 src/serve/pcb_layout_page.zig::DeferredJob struct_
@@ -4483,6 +4490,7 @@ src/serve/pcb_page_cache.zig::Store struct_
 src/serve/pcb_page_cache.zig::WarmKind enum_
 src/serve/pcb_page_cache.zig::deinit | fn deinit(self: *Store) void
 src/serve/pcb_page_cache.zig::finishWarm | fn finishWarm(self: *Store, scratch: std.mem.Allocator, name: []const u8, kind: WarmKind) void
+src/serve/pcb_page_cache.zig::freeEntry | fn freeEntry(self: *Store, allocator: std.mem.Allocator, key: []const u8, entry: Entry) void
 src/serve/pcb_page_cache.zig::moved | fn moved(self: StubRev) bool
 src/serve/pcb_page_cache.zig::reserveWarm | fn reserveWarm(self: *Store, scratch: std.mem.Allocator, name: []const u8, kind: WarmKind, live_version: u32) bool
 src/serve/pcb_page_cache.zig::serve | fn serve(self: *Store, in: ServeIn, req: *httpz.Request, res: *httpz.Response, miss_version: *?u32) bool
@@ -4521,12 +4529,10 @@ src/serve/plugin_tokens.zig::PluginTokenStore struct_
 src/serve/plugin_tokens.zig::Token struct_
 src/serve/plugin_tokens.zig::mint | fn mint( self: *PluginTokenStore, allocator: std.mem.Allocator, auth_dir: []const u8, label: []const u8, ) (std.mem.Allocator.Error || std.Io.RandomSecureError)![]const u8
 src/serve/plugin_tokens.zig::validate | fn validate(self: *PluginTokenStore, allocator: std.mem.Allocator, auth_dir: []const u8, raw: []const u8) bool
-src/serve/png_cache.zig::Store struct_
+src/serve/png_cache.zig::Store value
 src/serve/png_cache.zig::captureRenderDeps | fn captureRenderDeps( alloc: std.mem.Allocator, eval: *const Evaluator, module_res: ?modules_mod.ResolvedBlock, project_dir: []const u8, name: []const u8, ) ?page_cache.FileSet
-src/serve/png_cache.zig::deinit | fn deinit(self: *Store) void
-src/serve/png_cache.zig::serve | fn serve(self: *Store, in: anytype, miss_version: *?u32) bool
+src/serve/png_cache.zig::config value
 src/serve/png_cache.zig::serveImage | fn serveImage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void
-src/serve/png_cache.zig::store | fn store(self: *Store, in: anytype) void
 src/serve/pose_identity.zig::LiveRef struct_
 src/serve/pose_identity.zig::ResolvedPoses struct_
 src/serve/pose_identity.zig::dropped | fn dropped(self: ResolvedPoses, i: usize) bool
@@ -4537,12 +4543,9 @@ src/serve/pour_json.zig::ZoneFillReq struct_
 src/serve/pour_json.zig::writePlaneFillsField | fn writePlaneFillsField( w: *std.Io.Writer, alloc: std.mem.Allocator, placement: optimizer.Placement, copper: pour.Copper, omit: bool, base: ?pour.EdgeField, ) std.Io.Writer.Error!void
 src/serve/pour_json.zig::writePours | fn writePours( w: *std.Io.Writer, alloc: std.mem.Allocator, placement: optimizer.Placement, copper: pour.Copper, zones: []const pour.UserZone, base: ?pour.EdgeField, ) std.Io.Writer.Error!void
 src/serve/pour_json.zig::writeZoneFills | fn writeZoneFills( w: *std.Io.Writer, alloc: std.mem.Allocator, placement: optimizer.Placement, copper: pour.Copper, zones: []const ZoneFillReq, base: ?pour.EdgeField, ) std.Io.Writer.Error!void
-src/serve/progress_cache.zig::Store struct_
+src/serve/progress_cache.zig::Store value
 src/serve/progress_cache.zig::captureDeps | fn captureDeps( scratch: std.mem.Allocator, evals: []const *const Evaluator, project_dir: []const u8, name: []const u8, ) ?page_cache.FileSet
-src/serve/progress_cache.zig::deinit | fn deinit(self: *Store) void
-src/serve/progress_cache.zig::serve | fn serve(self: *Store, in: anytype, miss_version: *?u32) bool
-src/serve/progress_cache.zig::store | fn store(self: *Store, in: anytype) void
-src/serve/progress_cache.zig::warm | fn warm( self: *Store, name: []const u8, json: []const u8, files: page_cache.FileSet, live_version: u32, ) void
+src/serve/progress_cache.zig::config value
 src/serve/rate_limiter.zig::RateLimiter struct_
 src/serve/rate_limiter.zig::acquire | fn acquire(self: *RateLimiter) std.Io.Cancelable!void
 src/serve/rate_limiter.zig::configureFromEnv | fn configureFromEnv(allocator: std.mem.Allocator) void
@@ -4805,6 +4808,7 @@ src/serve/thermal_cache.zig::Key struct_
 src/serve/thermal_cache.zig::Store struct_
 src/serve/thermal_cache.zig::active | fn active() ?*Store
 src/serve/thermal_cache.zig::deinit | fn deinit(self: *Store) void
+src/serve/thermal_cache.zig::freeEntry | fn freeEntry(self: *Store, alloc: std.mem.Allocator, key: []const u8, entry: Entry) void
 src/serve/thermal_cache.zig::get | fn get( self: *Store, scratch: std.mem.Allocator, k: Key, ) ?[]thermal_scenarios.ScenarioResult
 src/serve/thermal_cache.zig::publish | fn publish(store: ?*Store) void
 src/serve/thermal_cache.zig::put | fn put( self: *Store, scratch: std.mem.Allocator, eval: *const Evaluator, k: Key, results: []const thermal_scenarios.ScenarioResult, ) void

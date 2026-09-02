@@ -1,7 +1,9 @@
 //! Dependency-validated response-body caches for the read-only design surfaces:
 //! the ERC facts (`GET /api/erc`), the thermal facts and page (`GET
-//! /api/thermal`, `GET /thermal`), the review PDF (`GET /api/schematic-pdf`)
-//! and the KiCad schematic archive (`GET /api/kicad-sch`).
+//! /api/thermal`, `GET /thermal`), the review PDF (`GET /api/schematic-pdf`),
+//! the KiCad schematic archive (`GET /api/kicad-sch`), the spatial-facts
+//! document (`GET /api/pcb-describe`), the completion ladder
+//! (`GET /api/layout-progress`) and the board image (`GET /api/pcb-png`).
 //!
 //! Every one of those handlers begins with a FRESH `Evaluator.evalFile` of the
 //! design, and on this project's largest board that evaluation alone is about
@@ -16,12 +18,20 @@
 //! actually skips it, exactly as `serve/pcb_page_cache.zig` does for the
 //! rendered PCB page and `serve/describe_cache.zig` for the facts document.
 //!
-//! One generic store rather than five near-identical modules: the five bodies
+//! One generic store rather than eight near-identical modules: the bodies
 //! differ only in their byte budget, their response header and which query
 //! parameters they may key on, so those are the `Config` a caller instantiates
 //! `Store` with. Everything else — the LRU bound, the strict query allow-list,
 //! the dependency validation, the refusal to retain a body that stamps no file
-//! — is one implementation, and a fix to it is a fix to all five.
+//! — is one implementation, and a fix to it is a fix to all of them.
+//!
+//! The last three arrived late. `describe_cache.zig`, `progress_cache.zig` and
+//! `png_cache.zig` were hand-written before this store existed and were then
+//! copied from each other: six functions apiece, drifted in the ways
+//! `twin-drift` names — two of the three kept a body whose read-set was refused,
+//! leaking its `FileSet` to the page allocator, and the third had never learned
+//! to spend a keyed variant before the plain answer. They are now thin
+//! configurations of this type, and each of those bugs has exactly one fix.
 //!
 //! Validity is `serve/describe_cache.zig`'s contract, unchanged: the file
 //! dependency set the handler captured from the evaluator(s) that produced the
@@ -38,6 +48,7 @@
 const std = @import("std");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
+const cache_core = @import("cache_core.zig");
 const page_cache = @import("page_cache.zig");
 
 /// What distinguishes one surface's store from another's: the header it
@@ -190,7 +201,9 @@ pub fn Store(comptime cfg: Config) type {
             return self.use_clock;
         }
 
-        fn freeEntry(self: *Self, allocator: std.mem.Allocator, key: []const u8, entry: Entry) void {
+        /// Release one entry and un-charge its bytes — the callback
+        /// `cache_core`'s shared sweep and teardown reach back through.
+        pub fn freeEntry(self: *Self, allocator: std.mem.Allocator, key: []const u8, entry: Entry) void {
             self.bytes -= entry.body.len;
             allocator.free(key);
             allocator.free(entry.body);
@@ -199,40 +212,15 @@ pub fn Store(comptime cfg: Config) type {
 
         /// Evict least-recently-used until the store is back inside both
         /// budgets, preferring variants: a `?ambient=` sweep must not displace
-        /// the plain answer every caller asks for.
+        /// the plain answer every caller asks for. `Entry.plain` is what asks
+        /// the shared sweep for that preference.
         fn trim(self: *Self, allocator: std.mem.Allocator) void {
-            while (self.entries.count() > cfg.max_entries or self.bytes > cfg.max_bytes) {
-                var oldest_key: ?[]const u8 = null;
-                var oldest_use: u64 = std.math.maxInt(u64);
-                var oldest_variant_key: ?[]const u8 = null;
-                var oldest_variant_use: u64 = std.math.maxInt(u64);
-                var it = self.entries.iterator();
-                while (it.next()) |kv| {
-                    if (kv.value_ptr.used < oldest_use) {
-                        oldest_key = kv.key_ptr.*;
-                        oldest_use = kv.value_ptr.used;
-                    }
-                    if (!kv.value_ptr.plain and kv.value_ptr.used < oldest_variant_use) {
-                        oldest_variant_key = kv.key_ptr.*;
-                        oldest_variant_use = kv.value_ptr.used;
-                    }
-                }
-                const key = oldest_variant_key orelse oldest_key orelse return;
-                const removed = self.entries.fetchRemove(key) orelse return;
-                self.freeEntry(allocator, removed.key, removed.value);
-            }
+            cache_core.evictLru(self, allocator, cfg.max_entries, cfg.max_bytes);
         }
 
         /// Free every retained body when its owning server stops.
         pub fn deinit(self: *Self) void {
-            const allocator = self.allocator orelse return;
-            var it = self.entries.iterator();
-            while (it.next()) |kv| {
-                allocator.free(kv.key_ptr.*);
-                allocator.free(kv.value_ptr.body);
-                kv.value_ptr.files.deinit();
-            }
-            self.entries.deinit(allocator);
+            cache_core.freeAll(self);
             self.* = .{};
         }
 
@@ -316,19 +304,75 @@ pub fn Store(comptime cfg: Config) type {
             });
         }
 
-        /// Take ownership of `files` and a copy of `body` under this request's
-        /// key, evicting any previous entry for it.
-        fn retain(self: *Self, allocator: std.mem.Allocator, in: Retain) void {
-            const files = in.files;
-            const scratch_key = cacheKey(in.scratch, in.name, in.ident) catch {
+        /// Retain a body computed OFF-request — the startup warm-up
+        /// (`serve/warmup.zig`), which has no `httpz` request to be judged
+        /// against the allow-list and no response status to check. It computed
+        /// the query-free body directly, so those two admission rules are
+        /// satisfied by construction and its key is the design name itself (the
+        /// plain identity keys nothing else); the size and read-set rules still
+        /// apply, and a store with no allocator still refuses and frees.
+        pub fn warm(
+            self: *Self,
+            name: []const u8,
+            body: []const u8,
+            files: page_cache.FileSet,
+            live_version: u32,
+        ) void {
+            const allocator = self.allocator orelse {
                 files.deinit();
                 return;
             };
+            if (body.len > cfg.max_bytes or files.stamps.len == 0) {
+                files.deinit();
+                return;
+            }
+            self.insert(allocator, .{
+                .key = name,
+                .body = body,
+                .files = files,
+                .live_version = live_version,
+                .plain = true,
+            });
+        }
+
+        /// Take ownership of `files` and a copy of `body` under this request's
+        /// key, evicting any previous entry for it.
+        fn retain(self: *Self, allocator: std.mem.Allocator, in: Retain) void {
+            const scratch_key = cacheKey(in.scratch, in.name, in.ident) catch {
+                in.files.deinit();
+                return;
+            };
+            self.insert(allocator, .{
+                .key = scratch_key,
+                .body = in.body,
+                .files = in.files,
+                .live_version = in.live_version,
+                .plain = isPlain(in.ident),
+            });
+        }
+
+        /// One retention resolved to the map key it lands under — the seam the
+        /// request path and the warm-up share, so both produce byte-identical
+        /// cache state.
+        const Insert = struct {
+            /// Borrowed for the call; the map keeps its own copy.
+            key: []const u8,
+            body: []const u8,
+            files: page_cache.FileSet,
+            live_version: u32,
+            plain: bool,
+        };
+
+        /// Take ownership of `in.files` and a copy of `in.body` under a copy of
+        /// `in.key`, evicting any previous entry for it. Every failure path
+        /// releases what it was handed rather than leaking it.
+        fn insert(self: *Self, allocator: std.mem.Allocator, in: Insert) void {
+            const files = in.files;
             const body = allocator.dupe(u8, in.body) catch {
                 files.deinit();
                 return;
             };
-            const key = allocator.dupe(u8, scratch_key) catch {
+            const key = allocator.dupe(u8, in.key) catch {
                 files.deinit();
                 allocator.free(body);
                 return;
@@ -353,7 +397,7 @@ pub fn Store(comptime cfg: Config) type {
                 .files = files,
                 .live_version = in.live_version,
                 .used = self.nextUse(),
-                .plain = isPlain(in.ident),
+                .plain = in.plain,
             };
             self.bytes += body.len;
             self.trim(allocator);

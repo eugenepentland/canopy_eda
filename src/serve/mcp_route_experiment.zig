@@ -44,6 +44,7 @@ const parser = @import("../sexpr/parser.zig");
 const env_mod = @import("../eval/env.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const modules_mod = @import("modules.zig");
+const pcb_describe = @import("pcb_describe.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
 const route_plan = @import("route_plan.zig");
 const route_policy = @import("../placement/route_policy.zig");
@@ -246,27 +247,14 @@ fn writeOpenNetsJson(w: *std.Io.Writer, open_nets: []const fab_readiness.OpenNet
         for (n.gaps, 0..) |gp, gi| {
             if (gi > 0) try w.writeAll(",");
             try w.print("{{\"mm\":{d:.3},\"from\":", .{gp.mm});
-            try writeOpenPadJson(w, gp.from);
+            try pcb_describe.writeOpenPadJson(w, gp.from, .compact);
             try w.writeAll(",\"to\":");
-            try writeOpenPadJson(w, gp.to);
+            try pcb_describe.writeOpenPadJson(w, gp.to, .compact);
             try w.writeAll("}");
         }
         try w.writeAll("]}");
     }
     try w.writeAll("]");
-}
-
-/// One hop endpoint: `{ref,pad,x,y,side}` in the board frame `add_tracks` takes.
-fn writeOpenPadJson(w: *std.Io.Writer, p: fab_readiness.OpenPad) std.Io.Writer.Error!void {
-    try w.writeAll("{\"ref\":");
-    try pcb_layout_page.writeJsonStr(w, p.ref);
-    try w.writeAll(",\"pad\":");
-    try pcb_layout_page.writeJsonStr(w, p.pad);
-    try w.print(",\"x\":{d:.3},\"y\":{d:.3},\"side\":\"{s}\"}}", .{
-        p.x,
-        p.y,
-        if (p.side == .bottom) "bottom" else "top",
-    });
 }
 
 /// Outcome of reading the optional `effort` argument.
