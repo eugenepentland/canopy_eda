@@ -265,6 +265,96 @@ extra categories, a missing `(thermal …)` on a dissipating class, and a
 least one cited `(requirement …)` on every active part and surfaces the
 evaluator's own warnings (an unknown sub-form is an error).
 
+### Physical requirement checks: `cap-rating`, `max-distance`, `sequence`
+
+Most of the library's `(requirement "…")` prose is reviewer-judged. Three
+`(check …)` primitives make the three biggest prose clusters — capacitor
+voltage rating, placement distance, and power sequencing — executable. Each
+reads evidence the older primitives do not: the derived DC envelope of a net,
+the saved layout's geometry, and the derived rail power-up order. The full
+grammar table is generated into `docs/language-forms.md`; below is what each
+one is for, with a real library requirement converted.
+
+**`(cap-rating (pin "A") (pin "B") [(min-ratio X)] [(min-v V)])`** — every
+capacitor bridging the nets on pins A and B must carry a voltage-rating
+attribute at least `X` times the worst-case DC potential `eval/net_envelopes`
+derives across those two nets, and at least `V` volts. Writing neither bound
+applies **1.5x**, the conventional ceramic derating floor: an X5R/X7R part
+sitting at its own marked rating has already lost most of its capacitance to DC
+bias, so a bare 1.0x rule passes parts that do not work.
+
+```lisp
+;; BQ25185DLHR: "IN (pin 10) operates from 3.2 V to 5.5 V for charging;
+;;  absolute maximum is -2 V to 18.5 V (VIN_OVP). The input cap must be
+;;  rated for the worst-case IN voltage."
+(requirement "The input cap must be rated for the worst-case IN voltage."
+  (ref "BQ25185DLHR.pdf")
+  (check (cap-rating (pin "IN") (pin "GND") (min-ratio 1.5))))
+```
+
+Three outcomes, and only one of them is green. A rated cap below the bound is
+an **error**. A cap carrying no voltage attribute is **unproven** — never a
+pass, because nothing was measured; author the rating
+(`(cap-0402 "1uF" x7r "10%" "16V")`) and it decides. A net whose envelope the
+tool cannot derive is **unproven** too, naming the net: give the rail a
+`(port … (nominal …))` upstream, or state it outright with
+`(net-envelope "VBUS" (rated 0 5.5) "USB VBUS")`.
+
+**`(max-distance (pin "P") (kind C|R|L|any) (mm D) [(min-value X)] [(max-value Y)])`**
+— the nearest matching passive on pin P's net must sit within D mm of that pad
+**in the saved layout**. The value window is in the kind's natural unit (Ω / µH
+/ µF), exactly like `series-element`.
+
+```lisp
+;; ADP7118: "Input decoupling: place a 1 uF ceramic capacitor from VIN to
+;;  GND as close to the device as possible."
+(requirement "Input decoupling: place a 1 uF ceramic capacitor from VIN to GND as close to the device as possible."
+  (ref "adp7118.pdf" (page 14))
+  (check (max-distance (pin "VIN") (kind C) (mm 3.0) (min-value 0.9))))
+```
+
+`netlisp check` has no geometry, so this rule is **layout-deferred** there: the
+finding is informational and says which lint carries the verdict. The one thing
+the netlist *can* settle it settles — a net with no qualifying passive at all
+is an **error**, because no placement could ever satisfy the rule. The
+measurement itself is the **`req-distance-far` layout lint** (a warning,
+alongside `decap-far` and `bound-far`), which reports the nearest qualifying
+passive, its gap and the budget, and appears in `/api/pcb-describe`'s `lint[]`
+and in `describe_pcb_layout`. Pin, pad and candidate list are resolved once in
+the evaluator (`req_physical_checks.resolveDistanceRules`) and shared, the same
+contract `(near …)` uses, so the checker and the lint cannot disagree about
+which pad or which parts a rule is about.
+
+**`(sequence (pin "A") before (pin "B") [(margin-ms N)])`** — the supply rail on
+pin A must come up before the rail on pin B, judged against the power-up order
+`eval/power_sequencing` derives from the design's `(enable …)` declarations and
+PG chains.
+
+```lisp
+;; BNO080/085: "VDD must reach its specified level before or at the same
+;;  time as VDDIO during power-up; reverse sequencing is not permitted"
+(requirement "VDD must reach its specified level before or at the same time as VDDIO during power-up; reverse sequencing is not permitted"
+  (ref "BNO080_085_Datasheet-3196201.pdf" (page 45))
+  (check (sequence (pin "VDD") before (pin "VDDIO"))))
+```
+
+A determined order that satisfies the rule passes; a determined order that
+reverses it is an **error**. Everything else is **unproven**, naming both rails
+and what would settle it — an `(enable "NET")` on the regulator's output port,
+or a PG chain to the upstream rail. Two rails the enable graph leaves at the
+same order count as undetermined, not as a pass: neither gates the other.
+`margin-ms` is recorded and echoed in the verdict but **not enforced** — the
+sequencing model derives a topological order, not ramp times, so there is
+nothing in it a millisecond could be compared against.
+
+Because none of the three can always reach a verdict, requirement results carry
+two outcomes beyond pass/fail/pending: `unproven` (a **warning** in every
+profile, including release — it is authoring work or an explicit
+`(verifies …)` sign-off away from closing) and `layout_deferred`
+(**informational**, since no schematic edit can clear it). Both show as their
+own pill in the review UI and as their own status in `netlisp check`; run with
+`--severity info` to see the deferred ones.
+
 ### Decoupling shorthand
 
 `(decouple "VDD" 1 per-pin auto)` expands to every pin already declared on the

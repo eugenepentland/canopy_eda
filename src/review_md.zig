@@ -635,6 +635,8 @@ fn writeRequirementEntry(allocator: Allocator, w: anytype, entry: review.Compone
             .pass => "✓ **PASS**",
             .verified => "✓ **VERIFIED**",
             .na => "⚠ **PENDING**",
+            .unproven => "⚠ **UNPROVEN**",
+            .layout_deferred => "⋯ **LAYOUT**",
             .fail => if (verification != null) "✗ **FAIL** *(overridden)*" else "✗ **FAIL**",
         };
         try w.print("- {s} — ", .{badge});
@@ -678,9 +680,11 @@ fn writeBomStub(w: anytype, design_name: []const u8, bom: []const review.BomGrou
 fn sortKey(status: req_checks.Status, has_verification: bool) u8 {
     return switch (status) {
         .fail => if (has_verification) @as(u8, 1) else @as(u8, 0),
-        .na => 2,
-        .verified => 3,
-        .pass => 4,
+        .unproven => 2,
+        .na => 3,
+        .layout_deferred => 4,
+        .verified => 5,
+        .pass => 6,
     };
 }
 

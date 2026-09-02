@@ -301,15 +301,21 @@ table.ports{margin-top:2px;}
 .hub-reqs .req-pill.pill-na{background:#1f2128;color:#8b949e;border-color:rgba(139,148,158,0.3);}
 .hub-reqs .req-pill.pill-verified{background:#0c2d6b;color:#79c0ff;border-color:rgba(121,192,255,0.4);}
 .hub-reqs .req-pill.pill-overridden{background:#3d2814;color:#e8c547;border-color:rgba(232,197,71,0.45);}
+.hub-reqs .req-pill.pill-unproven{background:#3d2814;color:#e8c547;border-color:rgba(232,197,71,0.45);}
+.hub-reqs .req-pill.pill-layout_deferred{background:#16233a;color:#8ab4f8;border-color:rgba(138,180,248,0.35);}
 .hub-reqs .req-row.status-fail{background:rgba(248,81,73,0.09);border-left-color:#f85149;}
 .hub-reqs .req-row.status-pass{background:rgba(63,185,80,0.05);border-left-color:#3fb950;}
 .hub-reqs .req-row.status-na{background:rgba(139,148,158,0.06);border-left-color:#6e7681;}
 .hub-reqs .req-row.status-verified{background:rgba(121,192,255,0.05);border-left-color:#388bfd;}
+.hub-reqs .req-row.status-unproven{background:rgba(232,197,71,0.07);border-left-color:#e8c547;}
+.hub-reqs .req-row.status-layout_deferred{background:rgba(138,180,248,0.05);border-left-color:#4c6ea8;}
 .hub-reqs .req-quote{margin:8px 0 0 0;padding:6px 12px;font-size:0.82rem;color:#e3b341;font-style:italic;line-height:1.5;background:rgba(227,179,65,0.06);border-radius:3px;border-left:3px solid #e3b341;}
 .hub-reqs .req-msg{margin:8px 0 0 0;padding:6px 10px;font-size:0.78rem;color:#8b949e;font-family:"SF Mono",monospace;line-height:1.5;background:rgba(255,255,255,0.02);border-radius:3px;border-left:2px solid #30363d;}
 .hub-reqs .req-row.status-fail .req-msg{color:#f0a6a1;border-left-color:#f85149;background:rgba(248,81,73,0.06);}
 .hub-reqs .req-row.status-pass .req-msg{color:#7ee787;border-left-color:#3fb950;background:rgba(63,185,80,0.04);}
 .hub-reqs .req-row.status-na .req-msg{border-left-color:#6e7681;}
+.hub-reqs .req-row.status-unproven .req-msg{color:#e3b341;border-left-color:#e8c547;background:rgba(232,197,71,0.05);}
+.hub-reqs .req-row.status-layout_deferred .req-msg{color:#a5c4f5;border-left-color:#4c6ea8;background:rgba(138,180,248,0.04);}
 .hub-reqs .req-verif{margin:8px 0 0 0;padding:8px 12px;font-size:0.82rem;line-height:1.55;background:rgba(121,192,255,0.06);border-radius:3px;border-left:3px solid #388bfd;color:#c9d1d9;}
 .hub-reqs .req-verif.overridden{background:rgba(232,197,71,0.07);border-left-color:#e8c547;color:#e3b341;}
 .hub-reqs .req-verif-tag{font-weight:700;font-size:0.72rem;text-transform:uppercase;letter-spacing:0.05em;color:#79c0ff;margin-right:6px;}

@@ -512,6 +512,8 @@ src/eval/env.zig::DatasheetReviewStatus enum_
 src/eval/env.zig::DecoupleBind struct_
 src/eval/env.zig::DesignBlock struct_
 src/eval/env.zig::DesignRulesSpec struct_
+src/eval/env.zig::DistanceKind enum_
+src/eval/env.zig::DistanceRule struct_
 src/eval/env.zig::Drive enum_
 src/eval/env.zig::EdgeRules struct_
 src/eval/env.zig::EdgeSide enum_
@@ -3570,17 +3572,31 @@ src/render_thermal_png.zig::Options struct_
 src/render_thermal_png.zig::View value
 src/render_thermal_png.zig::rampColor | fn rampColor(t: f64) Rgb
 src/render_thermal_png.zig::render | fn render( alloc: std.mem.Allocator, p: optimizer.Placement, view: View, opts: Options, ) png.Error![]u8
+src/req_checks.zig::PinLocation struct_
 src/req_checks.zig::Result struct_
 src/req_checks.zig::Status enum_
 src/req_checks.zig::applyVerifications | fn applyVerifications( map: *std.StringHashMapUnmanaged([]Result), block: *const DesignBlock, instances: []const Instance, ) void
 src/req_checks.zig::deinit | fn deinit( allocator: std.mem.Allocator, m: *std.StringHashMapUnmanaged([]Result), ) void
+src/req_checks.zig::fail | fn fail(allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) Result
+src/req_checks.zig::instancePinOnNet | fn instancePinOnNet(block: *const DesignBlock, inst: Instance, net_name: []const u8) bool
+src/req_checks.zig::netBase | fn netBase(name: []const u8) []const u8
+src/req_checks.zig::netForPinFn | fn netForPinFn( eval: *Evaluator, block: *const DesignBlock, inst: Instance, pin_fn: []const u8, ) ?[]const u8
+src/req_checks.zig::netsAlias | fn netsAlias(a: []const u8, b: []const u8) bool
+src/req_checks.zig::padAndNetForPin | fn padAndNetForPin( eval: *Evaluator, block: *const DesignBlock, inst: Instance, pin_fn: []const u8, ) ?PinLocation
 src/req_checks.zig::parseMicroFarads | fn parseMicroFarads(s: []const u8) ?f64
 src/req_checks.zig::parseMicroHenries | fn parseMicroHenries(s: []const u8) ?f64
 src/req_checks.zig::parseOhms | fn parseOhms(s: []const u8) ?f64
+src/req_checks.zig::parseValueFor | fn parseValueFor(kind: env_mod.SeriesKind, s: []const u8) ?f64
+src/req_checks.zig::parseVolts | fn parseVolts(s: []const u8) ?f64
+src/req_checks.zig::passMsg | fn passMsg(allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) Result
 src/req_checks.zig::resistorIsDcEquivalent | fn resistorIsDcEquivalent(ohms: f64) bool
 src/req_checks.zig::runChecks | fn runChecks( allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, ) std.mem.Allocator.Error!std.StringHashMapUnmanaged([]Result)
 src/req_derived_checks.zig::Result struct_
 src/req_derived_checks.zig::evaluate | fn evaluate( allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, inst: Instance, check: env.Check, ) Result
+src/req_physical_checks.zig::evalCapRating | fn evalCapRating( allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, inst: Instance, check: CapRatingCheck, ) Result
+src/req_physical_checks.zig::evalMaxDistance | fn evalMaxDistance( allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, inst: Instance, check: MaxDistanceCheck, ) Result
+src/req_physical_checks.zig::evalSequence | fn evalSequence( allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, inst: Instance, check: SequenceCheck, ) Result
+src/req_physical_checks.zig::resolveDistanceRules | fn resolveDistanceRules(eval: *Evaluator, block: *const DesignBlock) void
 src/review.zig::AssertionReport struct_
 src/review.zig::AssertionStatus enum_
 src/review.zig::BomEntry struct_

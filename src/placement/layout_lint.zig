@@ -26,6 +26,10 @@
 //!                                adjacency the author asked for did not survive
 //!                                placement (`near-unresolved` is its twin: the
 //!                                binding named something this board has not got).
+//!   • `req-distance-far`       — a part's `(check (max-distance …))` datasheet
+//!                                requirement: the nearest matching passive on the
+//!                                named pad's net sits further than the millimetres
+//!                                the data sheet allows.
 //!   • `impedance_mismatch`     — a net class declares BOTH `(impedance OHMS)`
 //!                                and `(width MM)`, and the authored width does
 //!                                not hit the target on this `(stackup …)`.
@@ -39,6 +43,7 @@ const optimizer = @import("optimizer.zig");
 const impedance = @import("impedance.zig");
 const mp = @import("module_policy.zig");
 const near_bind = @import("near_bind.zig");
+const env_mod = @import("../eval/env.zig");
 const pose_math = @import("pose_math.zig");
 
 const Allocator = std.mem.Allocator;
@@ -92,6 +97,7 @@ pub fn lint(alloc: Allocator, p: Placement, policy: mp.ModulePolicy) Allocator.E
     try lintFeedbackAggressor(alloc, p, policy, &out);
     try lintDecoupleUnbound(alloc, p, policy, &out);
     try lintBoundFar(alloc, p, &out);
+    try lintRequirementDistance(alloc, p, &out);
     try lintImpedanceMismatch(alloc, p, &out);
     return out.toOwnedSlice(alloc);
 }
@@ -148,6 +154,71 @@ fn lintBoundFar(alloc: Allocator, p: Placement, out: *std.ArrayList(Finding)) Al
         };
         try emit(alloc, out, "near-unresolved", .warn, refs, msg);
     }
+}
+
+/// `req-distance-far`: a library `(requirement … (check (max-distance …)))`
+/// measured on the solved board.
+///
+/// The requirement checker cannot answer this one — `netlisp check` has no
+/// geometry — so it reports the rule `layout_deferred` and names this gate.
+/// Everything the rule needs was resolved in the evaluator
+/// (`req_physical_checks.resolveDistanceRules`): the pad to measure from and
+/// the ref-des of every passive that satisfies the rule's kind/value filter on
+/// that pad's net. This gate is therefore pure geometry.
+///
+/// Measured to the NEAREST candidate, unlike `bound-far`: `(near …)` names one
+/// pad on purpose, while a datasheet distance rule says "a 1 µF cap within
+/// 3 mm" and any qualifying cap that close satisfies it. A rule whose netlist
+/// carries no candidate at all is not reported here — that is a build-time
+/// failure the requirement checker already raises, and no placement can fix it.
+fn lintRequirementDistance(alloc: Allocator, p: Placement, out: *std.ArrayList(Finding)) Allocator.Error!void {
+    for (p.instances, 0..) |inst, i| {
+        for (inst.distance_rules) |rule| {
+            if (rule.candidates.len == 0) continue;
+            const measured = nearestCandidateMm(p, i, rule) orelse continue;
+            if (measured.gap_mm <= rule.max_mm) continue;
+            const refs = try alloc.dupe([]const u8, &[_][]const u8{ p.parts[i].ref_des, measured.ref });
+            const msg = blk: {
+                errdefer alloc.free(refs);
+                break :blk try std.fmt.allocPrint(
+                    alloc,
+                    "requirement {s} on {s}: the nearest {s} to pad {s} is {s} at {d:.2} mm, " ++
+                        "past the {d:.2} mm the data sheet allows — move it onto the pad",
+                    .{ rule.req_id, p.parts[i].ref_des, rule.what, rule.pad, measured.ref, measured.gap_mm, rule.max_mm },
+                );
+            };
+            try emit(alloc, out, "req-distance-far", .warn, refs, msg);
+        }
+    }
+}
+
+/// The closest candidate pad to the rule's own pad, and which part carries it.
+const NearestCandidate = struct { ref: []const u8, gap_mm: f64 };
+
+/// Smallest world-space pad-to-pad gap between the declaring part's rule pad
+/// and any pad of any candidate. Null when the placement carries none of the
+/// candidates (a part dropped from this board), which reports nothing rather
+/// than measuring against the board origin.
+fn nearestCandidateMm(p: Placement, owner: usize, rule: env_mod.DistanceRule) ?NearestCandidate {
+    const own = optimizer.padLocal(&p.parts[owner], rule.pad);
+    const a = world(p.parts[owner], own.x, own.y);
+    var best: ?NearestCandidate = null;
+    for (rule.candidates) |ref| {
+        const idx = indexOfRef(p, ref) orelse continue;
+        for (p.parts[idx].pads) |cand_pad| {
+            const b = world(p.parts[idx], cand_pad.x, cand_pad.y);
+            const gap = std.math.hypot(a[0] - b[0], a[1] - b[1]);
+            if (best == null or gap < best.?.gap_mm) best = .{ .ref = p.parts[idx].ref_des, .gap_mm = gap };
+        }
+    }
+    return best;
+}
+
+fn indexOfRef(p: Placement, ref: []const u8) ?usize {
+    for (p.parts, 0..) |part, i| {
+        if (std.mem.eql(u8, part.ref_des, ref)) return i;
+    }
+    return null;
 }
 
 /// World-space gap between a near pair's own pad and the exact pad it named.
@@ -902,4 +973,79 @@ test "the impedance gate is silent without a stackup" {
     const findings = try lint(testing.allocator, p, policy);
     defer freeFindings(testing.allocator, findings);
     try testing.expect(mismatchFinding(findings) == null);
+}
+
+/// A one-hub / one-cap board on `VIN`, with the hub carrying the resolved
+/// `(check (max-distance …))` rule and the cap `cx` mm away. File scope so the
+/// `Part`s built from it own no pointer into a callee's frame.
+const distance_fixture_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.5, .h = 0.5 }};
+
+const distance_rules = [_]env_mod.DistanceRule{.{
+    .req_id = "ad971180",
+    .pad = "1",
+    .candidates = &[_][]const u8{"C1"},
+    .max_mm = 3.0,
+    .what = "capacitor ≥ 0.900 µF",
+}};
+
+fn distanceParts(cx: f64) [2]optimizer.Part {
+    return .{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &distance_fixture_pads, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &distance_fixture_pads, .fallback = false, .x = cx, .y = 0 },
+    };
+}
+
+fn distanceInstances(rules: []const env_mod.DistanceRule) [2]flat_netlist.FlatInstance {
+    return .{
+        .{ .ref_des = "U1", .component = "adp7118", .value = "", .footprint = "", .properties = &.{}, .uuid = "", .distance_rules = rules },
+        .{ .ref_des = "C1", .component = "cap-0402", .value = "1uF", .footprint = "", .properties = &.{}, .uuid = "" },
+    };
+}
+
+fn mkDistancePlacement(parts: []optimizer.Part, instances: []const flat_netlist.FlatInstance) Placement {
+    const S = struct {
+        const vin = [_]flat_netlist.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } };
+        const nets = [_]flat_netlist.FlatNet{.{ .name = "VIN", .pins = &vin }};
+    };
+    var p = mkPlacement(parts, &.{}, &S.nets);
+    p.instances = instances;
+    return p;
+}
+
+// spec: placement/layout_lint - measures a (check (max-distance …)) requirement against the nearest qualifying passive and clears when one is close enough
+test "lint flags a datasheet distance requirement the placement did not honour" {
+    // ADP7118: "place a 1 uF ceramic capacitor from VIN to GND as close to the
+    // device as possible" — authored as (max-distance (pin "VIN") (kind C)
+    // (mm 3.0) (min-value 0.9)) and resolved to the rule above.
+    const insts = distanceInstances(&distance_rules);
+
+    var far_parts = distanceParts(9);
+    const far = try lint(testing.allocator, mkDistancePlacement(&far_parts, &insts), near_policy);
+    defer freeFindings(testing.allocator, far);
+    try testing.expectEqual(@as(usize, 1), far.len);
+    try testing.expectEqualStrings("req-distance-far", far[0].rule);
+    try testing.expectEqual(Severity.warn, far[0].severity);
+    try testing.expectEqualStrings("U1", far[0].refs[0]);
+    try testing.expectEqualStrings("C1", far[0].refs[1]);
+    // The message names the requirement so a reader can find the datasheet rule.
+    try testing.expect(std.mem.indexOf(u8, far[0].msg, "ad971180") != null);
+
+    // 1 mm away: the data sheet is satisfied, so the gate is silent.
+    var near_parts = distanceParts(1);
+    const close = try lint(testing.allocator, mkDistancePlacement(&near_parts, &insts), near_policy);
+    defer freeFindings(testing.allocator, close);
+    try testing.expectEqual(@as(usize, 0), close.len);
+}
+
+// spec: placement/layout_lint - a distance requirement whose netlist carries no qualifying passive is left to the build-time checker rather than reported per placement
+test "lint stays silent on a distance rule with no resolved candidate" {
+    // No placement can satisfy it, so reporting it here would be noise the
+    // board cannot clear; `req_physical_checks.evalMaxDistance` fails it at
+    // build time instead.
+    const empty = [_]env_mod.DistanceRule{.{ .req_id = "ad971180", .pad = "1", .max_mm = 3.0, .what = "capacitor" }};
+    const insts = distanceInstances(&empty);
+    var parts = distanceParts(20);
+    const findings = try lint(testing.allocator, mkDistancePlacement(&parts, &insts), near_policy);
+    defer freeFindings(testing.allocator, findings);
+    try testing.expectEqual(@as(usize, 0), findings.len);
 }

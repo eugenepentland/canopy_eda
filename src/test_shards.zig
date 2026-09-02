@@ -143,6 +143,7 @@ pub const shards: []const []const []const u8 = &.{
         "render_order.test.",
         "render_svg.section_inset.test.",
         "req_checks_cases.test.",
+        "req_physical_checks_cases.test.",
         "serve.diag_format.test.",
         "serve.gzip_cache.test.",
         "serve.history.test.",

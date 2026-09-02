@@ -350,6 +350,8 @@ test {
     _ = @import("render_svg/section_inset.zig");
     _ = @import("req_checks_cases.zig");
     _ = @import("req_derived_checks.zig");
+    _ = @import("req_physical_checks.zig");
+    _ = @import("req_physical_checks_cases.zig");
     _ = @import("review.zig");
     _ = @import("review_md.zig");
     _ = @import("system_review.zig");

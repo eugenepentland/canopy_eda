@@ -12,6 +12,7 @@ const numeric = @import("../numeric.zig");
 const env = @import("env.zig");
 const Check = env.Check;
 const SeriesKind = env.SeriesKind;
+const DistanceKind = env.DistanceKind;
 
 // Arity floors for the multi-argument check bodies.
 const pullup_range_min_children: usize = 5;
@@ -20,6 +21,16 @@ const series_element_min_children: usize = 6;
 const series_element_max_index: usize = 5;
 const feedback_divider_min_children: usize = 5;
 const set_resistor_output_min_children: usize = 6;
+const cap_rating_min_children: usize = 3;
+const max_distance_min_children: usize = 4;
+const sequence_min_children: usize = 4;
+/// Ceramic derating floor applied when `(cap-rating …)` names neither bound.
+/// A 1.0x rule is wrong for the X5R/X7R parts these rules are written about:
+/// their capacitance falls steeply with applied DC bias, so a cap sitting at
+/// its own rating is well under its marked value. 1.5x is the conventional
+/// "rate at 1.5x the working voltage" ceramic guidance and is what the
+/// generated reference documents as the default.
+const default_cap_rating_ratio: f64 = 1.5;
 
 /// One row of the requirement-check grammar: the source template a human
 /// writes, a one-line description, and the parser that turns the inner
@@ -238,6 +249,87 @@ fn parseSetResistorOutput(_: std.mem.Allocator, bc: []const ast.Node) ?Check {
     } };
 }
 
+fn parseCapRating(_: std.mem.Allocator, bc: []const ast.Node) ?Check {
+    if (bc.len < cap_rating_min_children) return null;
+    const a = pinArg(bc[1]) orelse return null;
+    const b = pinArg(bc[2]) orelse return null;
+    var min_ratio: ?f64 = null;
+    var min_v: ?f64 = null;
+    for (bc[3..]) |node| {
+        if (namedNumberArg(node, "min-ratio")) |r| {
+            if (min_ratio != null or !std.math.isFinite(r) or r <= 0) return null;
+            min_ratio = r;
+        } else if (namedNumberArg(node, "min-v")) |v| {
+            if (min_v != null or !std.math.isFinite(v) or v <= 0) return null;
+            min_v = v;
+        } else return null;
+    }
+    // Neither bound written: fall back to the documented ceramic derating
+    // floor rather than the useless 1.0x "rated at least what it sees".
+    if (min_ratio == null and min_v == null) min_ratio = default_cap_rating_ratio;
+    return .{ .cap_rating = .{
+        .pin_a = a,
+        .pin_b = b,
+        .min_ratio = min_ratio orelse 0,
+        .min_v = min_v orelse 0,
+    } };
+}
+
+fn parseMaxDistance(_: std.mem.Allocator, bc: []const ast.Node) ?Check {
+    if (bc.len < max_distance_min_children) return null;
+    const p = pinArg(bc[1]) orelse return null;
+    const kind = distanceKindArg(bc[2]) orelse return null;
+    const mm = namedNumberArg(bc[3], "mm") orelse return null;
+    if (!std.math.isFinite(mm) or mm <= 0) return null;
+    var min_value: ?f64 = null;
+    var max_value: ?f64 = null;
+    for (bc[4..]) |node| {
+        if (namedNumberArg(node, "min-value")) |v| {
+            if (min_value != null or !std.math.isFinite(v) or v < 0) return null;
+            min_value = v;
+        } else if (namedNumberArg(node, "max-value")) |v| {
+            if (max_value != null or !std.math.isFinite(v) or v < 0) return null;
+            max_value = v;
+        } else return null;
+    }
+    if (min_value != null and max_value != null and max_value.? < min_value.?) return null;
+    return .{ .max_distance = .{
+        .pin = p,
+        .kind = kind,
+        .max_mm = mm,
+        .min_value = min_value,
+        .max_value = max_value,
+    } };
+}
+
+fn parseSequence(_: std.mem.Allocator, bc: []const ast.Node) ?Check {
+    if (bc.len < sequence_min_children) return null;
+    const a = pinArg(bc[1]) orelse return null;
+    // The relation word is spelled out so the form reads as the sentence the
+    // datasheet writes. Only `before` exists: `(sequence B before A)` says the
+    // reverse, so an `after` spelling would be two ways to write one rule.
+    const relation = bc[2].asAtom() orelse return null;
+    if (!std.mem.eql(u8, relation, "before")) return null;
+    const b = pinArg(bc[3]) orelse return null;
+    var margin_ms: f64 = 0;
+    if (bc.len >= 5) {
+        const parsed = namedNumberArg(bc[4], "margin-ms") orelse return null;
+        if (!std.math.isFinite(parsed) or parsed < 0) return null;
+        margin_ms = parsed;
+    }
+    return .{ .sequence = .{ .pin_a = a, .pin_b = b, .margin_ms = margin_ms } };
+}
+
+/// `(kind C|R|L|any)` — the passive class a `(max-distance …)` accepts.
+fn distanceKindArg(node: ast.Node) ?DistanceKind {
+    const c = node.asList() orelse return null;
+    if (c.len < 2) return null;
+    const h = c[0].asAtom() orelse return null;
+    if (!std.mem.eql(u8, h, "kind")) return null;
+    const word = c[1].asAtom() orelse return null;
+    return std.meta.stringToEnum(DistanceKind, word);
+}
+
 /// Doc + parse-dispatch table. The first row for each `Check` variant is
 /// indexed by the union tag; closely-related grammar aliases follow those
 /// core rows and may share a variant implementation.
@@ -308,6 +400,29 @@ pub const check_docs = blk: {
             "(output-pin \"OUT\") (current-ua I) (tolerance-pct P))",
         .summary = "Calculate VOUT=ISET*RSET and compare it with the declared or rail-named output voltage.",
         .parse = parseSetResistorOutput,
+    };
+    t[@backingInt(Tag.cap_rating)] = .{
+        .syntax = "(cap-rating (pin \"A\") (pin \"B\") [(min-ratio X)] [(min-v V)])",
+        .summary = "Every capacitor bridging pins A and B must be rated at least X times the " ++
+            "derived worst-case DC potential across those nets and at least V volts; the " ++
+            "default with neither bound is 1.5x for ceramic derating. An unrated cap or an " ++
+            "underivable envelope is reported unproven, never passed.",
+        .parse = parseCapRating,
+    };
+    t[@backingInt(Tag.max_distance)] = .{
+        .syntax = "(max-distance (pin \"P\") (kind C|R|L|any) (mm D) [(min-value X)] [(max-value Y)])",
+        .summary = "The nearest matching passive on pin P's net must sit within D mm of that " ++
+            "pad in the saved layout. Netlist-time this is layout-deferred (it fails early only " ++
+            "when no passive matches at all); the measurement is the req-distance-far layout lint.",
+        .parse = parseMaxDistance,
+    };
+    t[@backingInt(Tag.sequence)] = .{
+        .syntax = "(sequence (pin \"A\") before (pin \"B\") [(margin-ms N)])",
+        .summary = "The rail on pin A must power up before the rail on pin B, judged against " ++
+            "the derived enable-graph order. An undetermined order is unproven, not a pass. " ++
+            "margin-ms is recorded and reported but not enforced: the sequencing model carries " ++
+            "no timing yet.",
+        .parse = parseSequence,
     };
     t[N] = .{
         .syntax = "(voltage-not-above (pin \"A\") (pin \"B\") (margin M))",
@@ -513,6 +628,9 @@ test "parseCheck dispatches every documented check keyword to its variant" {
             "(reference-v 0.6) (tolerance-pct 2)))", .tag = .feedback_divider },
         .{ .src = "(check (set-resistor-output (pin \"SET\") (return-net \"GND\") " ++
             "(output-pin \"OUT\") (current-ua 100) (tolerance-pct 2)))", .tag = .set_resistor_output },
+        .{ .src = "(check (cap-rating (pin \"IN\") (pin \"GND\") (min-ratio 1.5)))", .tag = .cap_rating },
+        .{ .src = "(check (max-distance (pin \"VIN\") (kind C) (mm 3.0)))", .tag = .max_distance },
+        .{ .src = "(check (sequence (pin \"VDD\") before (pin \"VDDIO\")))", .tag = .sequence },
     };
     // One case per documented variant — keeps the table and its coverage locked.
     try std.testing.expectEqual(
@@ -524,4 +642,73 @@ test "parseCheck dispatches every documented check keyword to its variant" {
         const chk = parseCheck(alloc, nodes[0]) orelse return error.NotRecognized;
         try std.testing.expectEqual(c.tag, std.meta.activeTag(chk));
     }
+}
+
+// spec: eval/check_grammar - cap-rating defaults to the documented ceramic derating ratio when neither bound is written
+test "parseCheck cap-rating supplies the ceramic default" {
+    const alloc = std.testing.allocator;
+    const nodes = try parser_mod.parse(alloc, "(check (cap-rating (pin \"IN\") (pin \"GND\")))");
+    defer parser_mod.freeNodes(alloc, nodes);
+    const chk = parseCheck(alloc, nodes[0]).?;
+    try std.testing.expectApproxEqAbs(default_cap_rating_ratio, chk.cap_rating.min_ratio, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 0), chk.cap_rating.min_v, 1e-9);
+
+    // A written (min-v …) alone leaves the ratio arm disabled rather than
+    // silently stacking the default on top of the author's absolute floor.
+    const absolute = try parser_mod.parse(alloc, "(check (cap-rating (pin \"IN\") (pin \"GND\") (min-v 25)))");
+    defer parser_mod.freeNodes(alloc, absolute);
+    const only_v = parseCheck(alloc, absolute[0]).?;
+    try std.testing.expectApproxEqAbs(@as(f64, 0), only_v.cap_rating.min_ratio, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 25), only_v.cap_rating.min_v, 1e-9);
+}
+
+// spec: eval/check_grammar - cap-rating rejects unknown, repeated or non-positive bounds
+test "parseCheck cap-rating rejects malformed bounds" {
+    const alloc = std.testing.allocator;
+    try expectRejected(alloc, "(check (cap-rating (pin \"IN\") (pin \"GND\") (min-ratio 0)))");
+    try expectRejected(alloc, "(check (cap-rating (pin \"IN\") (pin \"GND\") (min-volts 25)))");
+    try expectRejected(alloc, "(check (cap-rating (pin \"IN\") (pin \"GND\") (min-v 6) (min-v 25)))");
+}
+
+// spec: eval/check_grammar - max-distance accepts the four passive kinds with an optional value window and rejects an inverted one
+test "parseCheck max-distance accepts kinds and a value window" {
+    const alloc = std.testing.allocator;
+    const nodes = try parser_mod.parse(
+        alloc,
+        "(check (max-distance (pin \"VIN\") (kind any) (mm 2.5) (min-value 0.09) (max-value 0.11)))",
+    );
+    defer parser_mod.freeNodes(alloc, nodes);
+    const chk = parseCheck(alloc, nodes[0]).?;
+    try std.testing.expectEqual(DistanceKind.any, chk.max_distance.kind);
+    try std.testing.expectApproxEqAbs(@as(f64, 2.5), chk.max_distance.max_mm, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.11), chk.max_distance.max_value.?, 1e-9);
+
+    try expectRejected(alloc, "(check (max-distance (pin \"VIN\") (kind Q) (mm 2.5)))");
+    try expectRejected(alloc, "(check (max-distance (pin \"VIN\") (kind C) (mm 0)))");
+    try expectRejected(alloc, "(check (max-distance (pin \"VIN\") (kind C) (mm 2) (min-value 1) (max-value 0.5)))");
+}
+
+// spec: eval/check_grammar - sequence accepts only the before relation word and a non-negative margin
+test "parseCheck sequence pins the relation word" {
+    const alloc = std.testing.allocator;
+    const nodes = try parser_mod.parse(
+        alloc,
+        "(check (sequence (pin \"VDD\") before (pin \"VDDIO\") (margin-ms 5)))",
+    );
+    defer parser_mod.freeNodes(alloc, nodes);
+    const chk = parseCheck(alloc, nodes[0]).?;
+    try std.testing.expectEqualStrings("VDD", chk.sequence.pin_a);
+    try std.testing.expectEqualStrings("VDDIO", chk.sequence.pin_b);
+    try std.testing.expectApproxEqAbs(@as(f64, 5), chk.sequence.margin_ms, 1e-9);
+
+    try expectRejected(alloc, "(check (sequence (pin \"VDD\") after (pin \"VDDIO\")))");
+    try expectRejected(alloc, "(check (sequence (pin \"VDD\") before (pin \"VDDIO\") (margin-ms -1)))");
+}
+
+/// Parse `src` and assert `parseCheck` refuses it — the shared shape of every
+/// grammar rejection case above.
+fn expectRejected(alloc: std.mem.Allocator, src: []const u8) !void {
+    const nodes = try parser_mod.parse(alloc, src);
+    defer parser_mod.freeNodes(alloc, nodes);
+    try std.testing.expect(parseCheck(alloc, nodes[0]) == null);
 }
