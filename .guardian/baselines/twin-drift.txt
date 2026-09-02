@@ -1,3 +1,1 @@
 # guardian-snapshot v3
-twin-drift|stripUpper|src/placement/module_policy.zig|normalizeIdent|src/placement/pin_roles.zig
-twin-drift|writeJsonString|src/serve/assembly_debug.zig|writeJsonString|src/serve/route_review.zig
