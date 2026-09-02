@@ -157,12 +157,17 @@ pub fn resolveImport(self: *Evaluator, name: []const u8, env: *Env) EvalError!vo
             // evaluator's complete file read-set (design + checks + every
             // imported lib file) for mtime-based cache invalidation. `path` is
             // freed when this call returns, so key on a dup owned by
-            // `self.allocator` (the request arena on the serve path).
-            if (!self.loaded_files.contains(path)) {
-                if (self.allocator.dupe(u8, path)) |key| {
-                    self.loaded_files.put(self.allocator, key, nodes) catch self.allocator.free(key);
-                } else |_| {}
-            }
+            // `self.allocator` (the request arena on the serve path). That same
+            // eval-lifetime buffer is what diagnostics raised inside this file
+            // carry as their `file`, so the read-set key and the diagnostic
+            // path can never disagree.
+            const owned_path = ownedFilePath(self, path, nodes);
+
+            // Everything this file evaluates — its component/family load, its
+            // `(defmodule …)` registration — reports against the file itself.
+            const saved_file = self.current_file;
+            self.current_file = owned_path;
+            defer self.current_file = saved_file;
 
             // Determine what kind of file this is
             if (nodes.len > 0) {
@@ -207,6 +212,21 @@ pub fn resolveImport(self: *Evaluator, name: []const u8, env: *Env) EvalError!vo
         }
     }
     return EvalError.ImportError;
+}
+
+/// The eval-lifetime copy of `path` used as this file's `loaded_files` key.
+/// Duplicates on first read and returns the stored key afterwards, so every
+/// diagnostic from the file borrows one buffer that outlives the import call.
+/// Returns "" only when the dup itself fails — diagnostics then fall back to
+/// the design path, exactly as before.
+fn ownedFilePath(self: *Evaluator, path: []const u8, nodes: []const Node) []const u8 {
+    if (self.loaded_files.getKey(path)) |key| return key;
+    const key = self.allocator.dupe(u8, path) catch return "";
+    self.loaded_files.put(self.allocator, key, nodes) catch {
+        self.allocator.free(key);
+        return "";
+    };
+    return key;
 }
 
 /// Parse a `(component …)` library file into a `ComponentData` cache entry,
@@ -518,6 +538,7 @@ pub fn evalDefmodule(self: *Evaluator, args: []const Node, env: *Env) EvalError!
         .defaults = default_slice,
         .body = args[body_start..],
         .imports = env,
+        .source_file = self.current_file,
     };
 
     try env.put(name, .{ .block_def = mod });
@@ -641,6 +662,13 @@ pub fn callModule(self: *Evaluator, mod: BlockDef, call_args: []const Node, call
     // (called at L:C)` context lines (innermost first).
     try self.module_stack.append(self.allocator, .{ .name = mod.name, .call_span = call_span });
     defer _ = self.module_stack.pop();
+
+    // The body's spans point into the module's OWN file, so diagnostics raised
+    // while it evaluates must name that file — not the design whose build
+    // happens to be running. Restored on exit so the caller's file resumes.
+    const saved_file = self.current_file;
+    if (mod.source_file.len > 0) self.current_file = mod.source_file;
+    defer self.current_file = saved_file;
 
     // Create module scope with parameter bindings. Parameters the caller
     // left unbound fall back to their declared default, evaluated inside
@@ -951,4 +979,56 @@ test "callModule too many arguments errors" {
     try testing.expectError(EvalError.ArityError, r);
     const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
     try testing.expect(std.mem.indexOf(u8, diag.message, "module 'm' expects 1 argument(s), got 2") != null);
+}
+
+// spec: eval/modules - a warning raised inside an imported module is attributed to the module's own file
+test "module warnings carry the module file, not the importing design" {
+    // page_allocator: warning messages and the loaded_files key outlive eval.
+    const alloc = std.heap.page_allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "lib/modules");
+    // `(rolle …)` is not a design-block sub-form: the builder warns and skips.
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/modules/warner.sexp",
+        .data = "(defmodule warner ()\n  (design-block \"warner\"\n    (rolle \"typo\")))\n",
+    });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+
+    var eval = Evaluator.init(alloc, root);
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    const nodes = try parser_mod.parse(alloc, "(import warner)\n(warner)\n");
+    _ = try eval.evalNodes(nodes, &env);
+    try testing.expectEqual(@as(usize, 1), eval.warnings.items.len);
+    const w = eval.warnings.items[0];
+    try testing.expect(std.mem.indexOf(u8, w.file, "lib/modules/warner.sexp") != null);
+    // Line 3 of the MODULE file — the design that called it is one line long.
+    try testing.expectEqual(@as(u32, 3), w.span.line);
+}
+
+// spec: eval/modules - an error raised inside an imported module is attributed to the module's own file
+test "module errors carry the module file, not the importing design" {
+    const alloc = std.heap.page_allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "lib/modules");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/modules/thrower.sexp",
+        .data = "(defmodule thrower ()\n  (design-block \"thrower\"\n    (note no-such-name)))\n",
+    });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+
+    var eval = Evaluator.init(alloc, root);
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    const nodes = try parser_mod.parse(alloc, "(import thrower)\n(thrower)\n");
+    try testing.expectError(EvalError.ArityError, eval.evalNodes(nodes, &env));
+    const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    try testing.expect(std.mem.indexOf(u8, diag.file, "lib/modules/thrower.sexp") != null);
+    try testing.expectEqual(@as(u32, 3), diag.span.line);
 }

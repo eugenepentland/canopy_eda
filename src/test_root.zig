@@ -86,6 +86,7 @@ test {
     _ = @import("eval/micro_forms.zig");
     _ = @import("eval/modules.zig");
     _ = @import("eval/net_analysis.zig");
+    _ = @import("eval/net_suggest.zig");
     _ = @import("eval/pin_enrichment.zig");
     _ = @import("eval/power_budget.zig");
     _ = @import("eval/power_sequencing.zig");

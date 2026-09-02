@@ -155,6 +155,17 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     ids.prescanRefDes(self, body_forms);
     ids.prescanIds(self, body_forms);
 
+    // Ref-des uniqueness is per BLOCK: two modules may each name their own
+    // "R1" (the sub-block pass renumbers them apart later), but one block
+    // declaring "R1" twice is an authoring error. Swap in this block's own
+    // namespace and give the enclosing block its map back on exit.
+    const saved_authored_refs = self.authored_refs;
+    self.authored_refs = .empty;
+    defer {
+        self.authored_refs.deinit(self.allocator);
+        self.authored_refs = saved_authored_refs;
+    }
+
     // `(hierarchical-ids)` opts this design (and the modules it sub-blocks) into
     // Option-4 sub-block identity. Inherit from any enclosing design and restore
     // on exit so the flag follows the design tree, not evaluation order.
@@ -520,7 +531,7 @@ fn evalBlockBodyForm(
     switch (sf) {
         .instance => {
             const result = try instance_mod.buildInstance(self, form_children, env);
-            ids.registerRefDes(self, result.instance.ref_des);
+            try ids.noteAuthoredRefDes(self, result.instance.ref_des, form.span);
             try build.instances.append(self.allocator, result.instance);
             for (result.pin_nets) |pn| try build.all_pin_nets.append(self.allocator, pn);
             for (result.inline_notes) |note| try build.notes.append(self.allocator, note);
@@ -576,7 +587,7 @@ fn evalBlockBodyForm(
             if (parseKicadPcbPath(form_children)) |p| build.kicad_pcb_path.* = p;
         },
         .stub => if (try parseStub(self, form_children)) |p| {
-            ids.registerRefDes(self, p.part.ref_des);
+            try ids.noteAuthoredRefDes(self, p.part.ref_des, form.span);
             try build.instances.append(self.allocator, p.instance);
             for (p.pin_nets) |pn| try build.all_pin_nets.append(self.allocator, pn);
             try build.parts.append(self.allocator, p.part);
@@ -1259,7 +1270,7 @@ fn evalSection(
             .diff_port => try builders.expandSectionDiffPort(self, sf_children, env, &sec_ports),
             .instance => {
                 const result = try instance_mod.buildInstance(self, sf_children, env);
-                ids.registerRefDes(self, result.instance.ref_des);
+                try ids.noteAuthoredRefDes(self, result.instance.ref_des, sf_children[0].span);
                 try instances.append(self.allocator, result.instance);
                 try sec_instances.append(self.allocator, result.instance);
                 for (result.pin_nets) |pn| try all_pin_nets.append(self.allocator, pn);
@@ -1452,7 +1463,7 @@ fn evalSubSection(
             .diff_port => try builders.expandSectionDiffPort(self, ssf_children, env, &sub_ports),
             .instance => {
                 const result = try instance_mod.buildInstance(self, ssf_children, env);
-                ids.registerRefDes(self, result.instance.ref_des);
+                try ids.noteAuthoredRefDes(self, result.instance.ref_des, ssf_children[0].span);
                 try instances.append(self.allocator, result.instance);
                 try sec_instances.append(self.allocator, result.instance);
                 try sub_instances.append(self.allocator, result.instance);
@@ -6673,4 +6684,117 @@ fn expectDistinctInstanceIds(instances: []const Instance) !void {
     for (instances, 0..) |a, i| {
         for (instances[i + 1 ..]) |b| try testing.expect(!std.mem.eql(u8, a.id, b.id));
     }
+}
+
+/// Evaluator seeded with the two-terminal `fakeres` part the ref-des tests
+/// instantiate. Caller owns the returned evaluator and must `deinit` it.
+fn evalWithFakeRes(a: std.mem.Allocator) !Evaluator {
+    var eval = Evaluator.init(a, "");
+    try eval.component_cache.put(a, "fakeres", .{
+        .name = "fakeres",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = false,
+        .param_type = "",
+    });
+    return eval;
+}
+
+/// Evaluate `src`'s single top-level `(design-block …)` with `eval`, returning
+/// whatever `evalDesignBlock` returns so a test can assert on the error.
+fn designBlockResult(a: std.mem.Allocator, eval: *Evaluator, src: []const u8) !EvalError!Value {
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var scope = env_mod.Env.init(a, null);
+    defer scope.deinit();
+    return evalDesignBlock(eval, form_children[1..], &scope);
+}
+
+// spec: eval/design_block - two instances authored with one ref-des are an error naming both source locations
+test "duplicate authored ref-des is diagnosed with both locations" {
+    const a = std.heap.page_allocator;
+    var eval = try evalWithFakeRes(a);
+    defer eval.deinit();
+    const src =
+        \\(design-block "test"
+        \\  (instance "R1" fakeres (pin 1 "VIN") (pin 2 "OUT"))
+        \\  (instance "R1" fakeres (pin 1 "OUT") (pin 2 "GND")))
+    ;
+    try testing.expectError(EvalError.InvalidForm, try designBlockResult(a, &eval, src));
+    const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    // The recorded span is the SECOND declaration; the message names the first.
+    try testing.expectEqual(@as(u32, 3), diag.span.line);
+    try testing.expect(std.mem.indexOf(u8, diag.message, "duplicate ref-des \"R1\"") != null);
+    try testing.expect(std.mem.indexOf(u8, diag.message, ":2:3") != null);
+}
+
+// spec: eval/design_block - a repeat body that mints one ref-des twice is a duplicate like any other
+test "repeat-generated duplicate ref-des is diagnosed" {
+    const a = std.heap.page_allocator;
+    var eval = try evalWithFakeRes(a);
+    defer eval.deinit();
+    const src =
+        \\(design-block "test"
+        \\  (repeat i 1 2
+        \\    (instance "R1" fakeres (pin 1 "VIN") (pin 2 "GND"))))
+    ;
+    try testing.expectError(EvalError.InvalidForm, try designBlockResult(a, &eval, src));
+    const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    try testing.expect(std.mem.indexOf(u8, diag.message, "duplicate ref-des \"R1\"") != null);
+}
+
+// spec: eval/design_block - shorthand-generated ref-des never collide with each other or with authored ones
+test "generated ref-des from decouple series and micro-forms are not duplicates" {
+    const a = std.heap.page_allocator;
+    var eval = try evalWithFakeRes(a);
+    defer eval.deinit();
+    try eval.component_cache.put(a, "fakecap", .{
+        .name = "fakecap",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = true,
+        .param_type = "capacitance",
+    });
+    const src =
+        \\(design-block "test"
+        \\  (instance "R1" fakeres (pin 1 "V_3V3") (pin 2 "GND"))
+        \\  (instance "R2" fakeres (pin 1 "V_3V3") (pin 2 "SIG"))
+        \\  (decouple "V_3V3" (fakecap "100nF") 3 per-pin "R1" 1)
+        \\  (series (fakecap "10nF") "SIG" "SIG_F")
+        \\  (fanout "V_3V3" (fakecap "1uF") "V_A" "V_B"))
+    ;
+    const block = (try (try designBlockResult(a, &eval, src))).design_block;
+    // Two authored + three decouple + one series + two fanout parts, all with
+    // distinct ref-des and no duplicate diagnostic.
+    try testing.expectEqual(@as(usize, 8), block.instances.len);
+    try testing.expectEqual(@as(?evaluator_mod.EvalDiagnostic, null), eval.last_error);
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(a);
+    for (block.instances) |inst| {
+        const gop = try seen.getOrPut(a, inst.ref_des);
+        try testing.expect(!gop.found_existing);
+    }
+}
+
+// spec: eval/design_block - each sub-block is its own ref-des namespace so two modules may both name R1
+test "sub-block ref-des namespaces are independent" {
+    const a = std.heap.page_allocator;
+    var eval = try evalWithFakeRes(a);
+    defer eval.deinit();
+    const src =
+        \\(defmodule leg ()
+        \\  (design-block "leg"
+        \\    (instance "R1" fakeres (pin 1 "A") (pin 2 "B"))))
+        \\(design-block "test"
+        \\  (instance "R1" fakeres (pin 1 "VIN") (pin 2 "GND"))
+        \\  (sub-block "left" (leg))
+        \\  (sub-block "right" (leg)))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    var scope = env_mod.Env.init(a, null);
+    defer scope.deinit();
+    const value = try eval.evalNodes(nodes, &scope);
+    const block = value.design_block;
+    try testing.expectEqual(@as(usize, 2), block.sub_blocks.len);
+    try testing.expectEqual(@as(?evaluator_mod.EvalDiagnostic, null), eval.last_error);
 }

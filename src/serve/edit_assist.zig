@@ -124,8 +124,19 @@ pub fn validateSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response
     }
 
     // Lint warnings the evaluator collected (silently-ignored sub-forms etc.).
-    // Re-resolve each span into the candidate buffer for the source line.
+    // Re-resolve each span into the candidate buffer for the source line —
+    // but only for warnings this buffer actually raised. One raised inside an
+    // imported module carries that module's path and a line number that means
+    // nothing here, so it is reported unlocated with the real location spelled
+    // into the message instead of painted over an unrelated line.
     for (eval.warnings.items) |wn| {
+        if (wn.file.len > 0) {
+            const msg = std.fmt.allocPrint(ctx.allocator, "{s}:{d}:{d}: {s}", .{
+                wn.file, wn.span.line, wn.span.col, wn.message,
+            }) catch continue;
+            try writeDiag(w, &first, "warning", 0, 0, msg, "");
+            continue;
+        }
         const wd = diag_format.build(ctx.allocator, name, source, "warning", .{
             .span = wn.span,
             .message = wn.message,

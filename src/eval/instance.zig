@@ -1014,7 +1014,7 @@ pub fn evalSeriesForm(
         var s_inst = instanceFromValue(self, s_comp_val, s_ref, s_comp_offset, s_id) orelse return;
         s_inst.origin_key = s_ref; // stable source name for hierarchical sub-block ids
         try mergeInstanceProperties(self, &s_inst, ta.props.items);
-        ids.registerRefDes(self, s_ref);
+        try ids.noteAuthoredRefDes(self, s_ref, form_children[0].span);
         try instances.append(self.allocator, s_inst);
         try all_pin_nets.append(self.allocator, .{ .ref_des = s_ref, .pin = "1", .net = ta.nets.items[0] });
         try all_pin_nets.append(self.allocator, .{ .ref_des = s_ref, .pin = "2", .net = ta.nets.items[1] });

@@ -13,10 +13,11 @@ const Evaluator = @import("evaluator.zig").Evaluator;
 const Env = env_mod.Env;
 
 /// Maximum edit distance for a did-you-mean candidate.
-const max_edit_distance: usize = 2;
+pub const max_edit_distance: usize = 2;
 /// Names longer than this skip the Levenshtein scan (cost cap; real
-/// component names are far shorter).
-const max_name_len: usize = 64;
+/// component names are far shorter). `editDistance` sizes its row buffers
+/// from this constant, so every caller must reject longer inputs first.
+pub const max_name_len: usize = 64;
 /// Library sub-directories searched for both the import hint and the
 /// did-you-mean stem candidates — the same paths `modules.resolveImport`
 /// walks.
@@ -173,8 +174,10 @@ fn considerCandidate(name: []const u8, candidate: []const u8, best: *?[]const u8
 }
 
 /// Classic two-row Levenshtein distance, sized for component-name-length
-/// strings (`MAX_NAME_LEN` cap enforced by the callers).
-fn editDistance(a: []const u8, b: []const u8) usize {
+/// strings (`max_name_len` cap enforced by the callers). Shared with the
+/// net-name did-you-mean in `net_suggest.zig`; both inputs must already be
+/// `max_name_len` bytes or shorter.
+pub fn editDistance(a: []const u8, b: []const u8) usize {
     var rows: [2][max_name_len + 1]usize = undefined;
     var prev = &rows[0];
     var curr = &rows[1];
