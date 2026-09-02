@@ -5155,6 +5155,7 @@ Public functions: renderSchematic
 Public functions: analyze
 
 - a sealed module's declared input-port current is one consumer on the rail it taps when the module annotates no pin there
+- a connector module's declared input-port current is the rail's delivery envelope, not a consumer, when the port's net reaches only its own contacts
 - a sibling sub-block's annotated pins load the parent rail its port ties to, so a rail whose consumers are all sealed in modules is no longer empty
 - the sub-block load walk recurses, so a module nested inside a module still credits the board rail its ports chain up to
 - only a sub-block net a port exposes credits the parent; a module's private net stays private however heavily it is annotated

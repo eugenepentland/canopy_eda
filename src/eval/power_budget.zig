@@ -651,6 +651,7 @@ fn creditPortDeclarations(
             if (!std.mem.eql(u8, port.direction, "in")) continue;
             if (port.isDeclaredNonPower() or !port.isPowerSource()) continue;
             if (port.current_typ == null and port.current_max == null) continue;
+            if (!portFeedsConsumer(sb.block, port)) continue;
             const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ sb.name, port.name });
             const root = findRailForSubPath(block, net_parent, path) orelse continue;
             if (moduleCreditedRail(tally, sb.name, root)) continue;
@@ -684,6 +685,31 @@ fn creditPortDeclarations(
             try tally.loads.put(allocator, root, load);
         }
     }
+}
+
+/// True when the port's net inside the module reaches a part that can draw
+/// current. A connector, test-point, or mounting-hardware module whose input
+/// power port lands only on its own contacts is the rail's ENTRY, and the
+/// current it declares is the delivery envelope, not a load.
+fn portFeedsConsumer(block: *const DesignBlock, port: env_mod.Port) bool {
+    for (block.nets) |net| {
+        if (!std.mem.eql(u8, net.name, port.net)) continue;
+        for (net.pins) |pin| {
+            if (!isPassThroughRef(pin.ref_des)) return true;
+        }
+    }
+    return false;
+}
+
+/// Connector (J/P/X), test-point (TP), mounting (MK/H) reference prefixes:
+/// parts that carry a rail without consuming it.
+fn isPassThroughRef(ref: []const u8) bool {
+    const prefixes = [_][]const u8{ "TP", "MK", "J", "P", "X", "H" };
+    for (prefixes) |pre| {
+        if (ref.len <= pre.len or !std.mem.startsWith(u8, ref, pre)) continue;
+        if (std.ascii.isDigit(ref[pre.len])) return true;
+    }
+    return false;
 }
 
 /// A module with an efficiency-declared output is a regulator: step 3b charges
@@ -1135,6 +1161,43 @@ test "a sealed module's port declaration is credited only when its pins are not"
         try testing.expect(!std.mem.eql(u8, c.ref_des, "sw/VIN"));
     }
     try testing.expect(found_port and found_pin);
+}
+
+// spec: eval/power_budget - a connector module's declared input-port current is the rail's delivery envelope, not a consumer, when the port's net reaches only its own contacts
+test "a connector module's port declaration is not credited as a consumer" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // `jack` imports V5 over a connector: its VIN port declares the 0.5 A the
+    // far side delivers. Only its own J1 contact sits on that net, so the
+    // rail sees no load from it.
+    const jack = try alloc.create(DesignBlock);
+    const jack_pins = try alloc.dupe(env_mod.PinRef, &.{ .{ .ref_des = "J1", .pin = "7" }, .{ .ref_des = "TP1", .pin = "1" } });
+    jack.* = .{
+        .name = "jack-mod",
+        .instances = try alloc.dupe(env_mod.Instance, &.{ namedPart("J1", "header"), namedPart("TP1", "testpoint") }),
+        .nets = try alloc.dupe(env_mod.Net, &.{.{ .name = "VIN", .pins = jack_pins }}),
+        .ports = try alloc.dupe(env_mod.Port, &.{.{ .name = "VIN", .net = "VIN", .direction = "in", .nominal = 5.0, .current_typ = 0.5, .current_max = 0.5 }}),
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    const top_pins = try alloc.dupe(env_mod.PinRef, &.{.{ .ref_des = "TP2", .pin = "1" }});
+    const block = DesignBlock{
+        .name = "board",
+        .instances = try alloc.dupe(env_mod.Instance, &.{namedPart("TP2", "testpoint")}),
+        .nets = try alloc.dupe(env_mod.Net, &.{.{ .name = "V5", .pins = top_pins }}),
+        .ports = try alloc.dupe(env_mod.Port, &.{.{ .name = "V5", .net = "V5", .direction = "in", .nominal = 5.0, .current_typ = 1.0, .current_max = 1.0 }}),
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = try alloc.dupe(env_mod.SubBlock, &.{.{ .name = "jack", .block = jack }}),
+        .net_ties = try alloc.dupe(env_mod.NetTie, &.{.{ .a = "jack/VIN", .b = "V5" }}),
+    };
+    const rails = try analyze(alloc, &block);
+    const v5 = railNamed(rails, "V5").?;
+    try testing.expect(!v5.any_typ_load);
+    try testing.expectEqual(@as(usize, 0), v5.consumers.len);
 }
 
 // spec: eval/power_budget - the sub-block load walk recurses, so a module nested inside a module still credits the board rail its ports chain up to
