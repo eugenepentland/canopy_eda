@@ -1,0 +1,4 @@
+# guardian-snapshot v3
+projection-completeness|routed-copper-gerber-alias|src/export_matlab_rf.zig|build|tracks,vias
+projection-completeness|routed-copper|src/placement/congestion.zig|measure|tracks,vias
+projection-completeness|routed-copper|src/placement/fine_accept.zig|measure|tracks,vias

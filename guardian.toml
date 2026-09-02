@@ -30,6 +30,10 @@ enabled = true
 #                       a claim keeps its key; a new dangling claim fails.
 #   duplicate-json-key— keyed <file>|<fn>|<key>; a duplicate key is never
 #                       intentional, so this may only ever shrink.
+#   projection-completeness — keyed <rule>|<file>|<fn>|<fields set>; a new
+#                       partial projection is a new omission, never a moved one.
+#   twin-drift        — keyed <nameA>|<fileA>|<nameB>|<fileB>; a new pair is a
+#                       copy that newly stopped agreeing, never a re-measurement.
 #
 # NOTE for whoever declares the next [[concept]] rule: a new rule's own rows are
 # themselves growth, and this policy refuses them ("acceptance refused because
@@ -39,7 +43,8 @@ enabled = true
 # accept concept .`, put it back, and say in the commit what the new rows are.
 # That is the intended friction, not a bug to route around.
 deny_growth = ["spec", "completeness", "concept", "divergent-const", "twin-referent", "duplicate-json-key",
-    "canonical-idiom", "shadowed-const", "import-layering", "twin-parity"]
+    "canonical-idiom", "shadowed-const", "import-layering", "twin-parity",
+    "projection-completeness", "twin-drift"]
 
 # Commit-tier test suite. Current policy keeps this and every other internal
 # Netlisp test self-hosted Debug; ReleaseSafe is built only by deployment.
@@ -1345,3 +1350,75 @@ require_in = [
 ]
 files = ["src/*.zig", "src/serve/assets/*.js"]
 reason = "the cross-probe BroadcastChannel name exists only as hand-matched JS literals; all three clients must spell it and nothing else may"
+
+# ── Projections (`[[projection]]`) ───────────────────────────────────────
+# A struct whose every field DEFAULTS can be rebuilt out of the parts a caller
+# happens to hold — `Copper{ .tracks = rr.tracks, .vias = rr.vias }` — and keeps
+# compiling unchanged when the struct grows a field; the omitted field is not
+# an error, it is a silent empty. That is how `arcs` (30c8b52c) and `rf_paths`
+# reached the connectivity oracle as empty slices from five literals that
+# nobody re-read: ten sites were repaired by hand across 60275963 and 04af9ace,
+# and the audit of 2026-09-02 found two still wrong (`placement/fine_accept.zig`
+# `measure`, `placement/congestion.zig` `measure`) — both frozen below rather
+# than fixed here, because a config commit should not carry a behaviour change.
+#
+# The rule is keyed to the QUALIFIED type path on purpose. This tree holds
+# several distinct `Copper` structs (bench_route, mask_relief, drc_match,
+# drc_diffpair — two-field types whose complete literal a bare `Copper` rule
+# reads as a partial projection), so each rule below names one spelling of the
+# one carving bundle. `export_gerber.Copper` is `routed_copper.Copper` under
+# another name (export_gerber.zig:144) and gets its own row because the match
+# is textual. Anonymous `.{ … }` matching is OFF: `tracks`/`vias` are field
+# names of half a dozen unrelated summary structs, and measured on this tree
+# the anonymous half reported 98 literals to the typed half's 4. A deliberate
+# partial projection says so in the source: `// projection-ok: <why>` on the
+# literal, the line above it, or the enclosing statement.
+[[projection]]
+name = "routed-copper"
+type = "routed_copper.Copper"
+fields = ["tracks", "vias", "arcs", "rf_paths"]
+optional = ["zones", "silk_keepouts"]
+anonymous_min_fields = 0
+reason = "the connectivity oracle carves every copper kind; a projection that drops one reports a joined net as open"
+
+[[projection]]
+name = "routed-copper-gerber-alias"
+type = "export_gerber.Copper"
+fields = ["tracks", "vias", "arcs", "rf_paths"]
+optional = ["zones", "silk_keepouts"]
+anonymous_min_fields = 0
+reason = "export_gerber.Copper IS routed_copper.Copper; the Gerber and RF exports carve the same bundle the oracle reads"
+
+[[projection]]
+name = "pour-copper"
+type = "pour.Copper"
+fields = ["tracks", "vias", "arcs", "rf_paths"]
+optional = ["zones"]
+anonymous_min_fields = 0
+reason = "a pour carves routed copper of every kind; a projection that drops arcs or RF paths leaves copper unpoured"
+
+# ── Twin drift (`[twin_drift]`) ───────────────────────────────────────────
+# Two hand-written copies of one rule that stopped agreeing — the cause behind
+# 25 of the 155 fix commits the 2026-09-02 audit read. The live case is
+# `buildNetClassOverrides`, copied from wasm_drc.zig into drc_session.zig to stay
+# under the file-size cap (its header says so); the wasm copy then gained
+# `.class`, `.power_branch_width`, `.keepout_mm` and `.keepout_escape_mm` and
+# the session copy did not, so the mid-drag DRC runs with no keepout rule.
+#
+# Pairing is by BODY (TF-IDF cosine over token shingles, `pair_similarity`),
+# then a line-level LCS decides drift (`min_similarity`); identical copies are
+# silent (debt, not drift). Measured at adoption: 126 drifted pairs in 0.49 s,
+# 70 of them under different names — 24 are one JSON/HTML escaper family under
+# nine names in ten files, where only trace_em_json.zig escapes `<`; 37 are the
+# six hand-copied serve/*_cache.zig modules. All 126 are frozen in
+# .guardian/baselines/twin-drift.txt; a NEW drifted pair blocks. The values
+# below are the defaults, spelled out so the knobs are discoverable. `ignore`
+# is deliberately empty: `serve`/`deinit`/`trim` look protocol-shaped but every
+# pair under them here is a real copy — revisit once the cache modules share one
+# implementation.
+[twin_drift]
+min_statements = 8
+pair_similarity = 0.5
+min_similarity = 0.6
+report_identical = false
+max_lines = 400
